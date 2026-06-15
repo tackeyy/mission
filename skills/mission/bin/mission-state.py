@@ -31,6 +31,7 @@ import socket
 import subprocess
 import sys
 import time
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -101,6 +102,10 @@ def _iter_state_files(root: Path, *, include_archive: bool = False):
             archive = gs / "archive"  # 退避済み履歴 (stats 用)
             if archive.is_dir():
                 yield from sorted(archive.glob("state-*.json"))
+                # Issue #7: worktree サブディレクトリ (archive/worktree-*/) も列挙する
+                for sub in sorted(archive.glob("worktree-*")):
+                    if sub.is_dir():
+                        yield from sorted(sub.glob("*.json"))
 
 
 def _default_search_roots() -> list[Path]:
@@ -369,8 +374,23 @@ def cmd_init(args):
         if agg.exists():
             try:
                 existing_agg = json.loads(agg.read_text())
-            except Exception:
+            except json.JSONDecodeError:
                 existing_agg = {}  # F-6: 壊れた aggregate は空扱いで復旧 (init を落とさない)
+        # Issue #2: 既存 sf_target が別 mission_id を持つ場合、上書き前に archive に退避する。
+        # 同一 mission_id (= resume) の場合は退避不要。
+        if sf_target.exists():
+            try:
+                existing_data = json.loads(sf_target.read_text())
+                existing_mid = existing_data.get("mission_id", "")
+                new_mid = initial.get("mission_id", "")
+                if existing_mid and new_mid and existing_mid != new_mid:
+                    archive_dir = state_dir(cwd) / "archive"
+                    archive_dir.mkdir(parents=True, exist_ok=True)
+                    old_mid8 = existing_mid[:8] if len(existing_mid) >= 8 else existing_mid
+                    archive_dest = archive_dir / f"state-{sid}-{old_mid8}.json"
+                    shutil.copy2(sf_target, archive_dest)
+            except Exception as e:
+                print(f"WARNING: 旧ミッション (id={existing_mid[:8]}) のアーカイブに失敗。履歴消失の可能性: {e}", file=sys.stderr)
         backup_state(sf_target)
         atomic_write_json(sf_target, initial)
         existing_agg.setdefault("active_sessions", [])
@@ -378,6 +398,14 @@ def cmd_init(args):
             existing_agg["active_sessions"].append(sid)
         existing_agg["updated_at"] = iso_now()
         atomic_write_json(agg, existing_agg)
+    # Issue #5: assumptions_path の実ファイルを空テンプレで作成する
+    assumptions_file = cwd / initial["assumptions_path"]
+    try:
+        assumptions_file.parent.mkdir(parents=True, exist_ok=True)
+        if not assumptions_file.exists():
+            assumptions_file.write_text("# Assumption Registry\n")
+    except OSError as e:
+        print(f"WARNING: assumptions_path ファイル作成に失敗: {e}", file=sys.stderr)
     print(json.dumps({"ok": True, "mode": "multi-session", "session_file": str(sf_target), "session_id": sid, "mission_id": initial["mission_id"]}))
 
 
@@ -556,6 +584,9 @@ def cmd_push_score(args):
         print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
         sys.exit(1)
     items = _validate_score_args(args)
+    if args.open_high < 0:
+        print("ERROR: --open-high は 0 以上で指定してください", file=sys.stderr)
+        sys.exit(2)
 
     entry = {
         "iteration": args.iteration,
@@ -566,6 +597,8 @@ def cmd_push_score(args):
     }
     if args.notes:
         entry["notes"] = args.notes
+    # Issue #3: open_high を保存 (mark-passes gate で参照)
+    entry["open_high"] = getattr(args, "open_high", 0)
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
@@ -634,6 +667,14 @@ def cmd_mark_passes(args):
             if min_item is None or min_item < MIN_ITEM_THRESHOLD:
                 print(
                     f"ERROR: min_item {min_item} < {MIN_ITEM_THRESHOLD} のため合格にできません (採点した items のいずれかが {MIN_ITEM_THRESHOLD} 未満)。Critic を起動し次イテレーションへ進んでください。",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            # Issue #3: 未解決 High が残っている場合は合格にできない (後方互換: open_high 欠如 → 0 扱い → 通過)
+            open_high = latest.get("open_high") or 0
+            if open_high > 0:
+                print(
+                    f"ERROR: 未解決 High が {open_high} 件あるため合格にできません。High 指摘を全て解消してから再採点してください。",
                     file=sys.stderr,
                 )
                 sys.exit(2)
@@ -979,6 +1020,17 @@ def _build_agent_summary(states: list[dict], classes: list[str] | None = None) -
     return by_agent
 
 
+def _build_breakdown(states: list[dict], classes: list[str], keyfn) -> dict:
+    """任意キー (project/complexity) 別に total/pass/halt/incomplete/abandoned を集計する."""
+    out: dict = {}
+    for s, cls in zip(states, classes):
+        k = keyfn(s) or "unknown"
+        b = out.setdefault(k, {"total": 0, "pass": 0, "halt": 0, "incomplete": 0, "abandoned": 0})
+        b["total"] += 1
+        b[cls] = b.get(cls, 0) + 1
+    return out
+
+
 def _aggregate(states: list[dict]) -> dict:
     n = len(states)
     if n == 0:
@@ -991,6 +1043,7 @@ def _aggregate(states: list[dict]) -> dict:
             "avg_session_duration_sec": None,
             "median_session_duration_sec": None,
             "by_agent": {},
+            "by_project": {}, "by_complexity": {}, "iteration_histogram": {},
         }
     # _classify を 1 回だけ評価 (旧実装は pass/halt/incomplete で 3N 回呼んでいた)
     classes = [_classify(s) for s in states]
@@ -1015,6 +1068,13 @@ def _aggregate(states: list[dict]) -> dict:
     durations = [d for d in (_duration_sec(s) for s in states) if d is not None and d >= 0]
     # #2 (2026-06-13): agent 別の成績内訳 (起動元ごとの PASS 率可視化)。classes を共有して再計算回避。
     by_agent = _build_agent_summary(states, classes)
+    # #6 (2026-06-15): project/complexity 別内訳と iteration ヒストグラム
+    by_project = _build_breakdown(states, classes, lambda s: os.path.basename((s.get("project_root") or "unknown").rstrip("/")) or "unknown")
+    by_complexity = _build_breakdown(states, classes, lambda s: s.get("complexity") or "Unknown")
+    iteration_histogram: dict = {}
+    for _it in iterations:
+        _k = str(_it) if isinstance(_it, int) and _it <= 3 else ("4+" if isinstance(_it, int) else "unknown")
+        iteration_histogram[_k] = iteration_histogram.get(_k, 0) + 1
     return {
         "total_sessions": n,
         "pass_count": pass_count,
@@ -1032,6 +1092,9 @@ def _aggregate(states: list[dict]) -> dict:
         # median は放置/resume 跨ぎの外れ値に頑健 (avg は max 8000min 級の忘れ session で歪む)
         "median_session_duration_sec": _median(durations),
         "by_agent": by_agent,
+        "by_project": by_project,
+        "by_complexity": by_complexity,
+        "iteration_histogram": iteration_histogram,
     }
 
 
@@ -1070,6 +1133,19 @@ def _format_text(stats: dict, since: str | None, until: str | None) -> str:
             lines.append(
                 f"  {ag:<14} {b['total']} (PASS {b['pass']} / HALT {b['halt']} / incomplete {b['incomplete']})"
             )
+    for label, key in (("by_project", "by_project"), ("by_complexity", "by_complexity")):
+        bd = stats.get(key) or {}
+        if bd:
+            lines.append(f"{label}:")
+            for k, b in sorted(bd.items()):
+                lines.append(
+                    f"  {k:<22} {b['total']} (PASS {b['pass']} / HALT {b['halt']} / incomplete {b['incomplete']} / abandoned {b['abandoned']})"
+                )
+    hist = stats.get("iteration_histogram") or {}
+    if hist:
+        lines.append("iteration_histogram:")
+        for k in sorted(hist.keys()):
+            lines.append(f"  iter {k:<6} {hist[k]}")
     return "\n".join(lines)
 
 
@@ -1129,6 +1205,8 @@ def _build_parser():
     p_score.add_argument("--notes", default=None)
     p_score.add_argument("--scoring-output", default=None,
                          help="Scorer の Markdown 出力ファイルパス。指定すると .mission-state/archive/iter-N-scoring.md にコピー保存される (案 1: ログ充実化)")
+    p_score.add_argument("--open-high", type=int, default=0, dest="open_high",
+                         help="未解決の High 指摘件数 (mark-passes の gate で使用)")
     p_score.set_defaults(func=cmd_push_score)
 
     p_halt = sub.add_parser("mark-halt", help="halt_reason を立てて停止")
