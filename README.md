@@ -1,5 +1,10 @@
 # mission
 
+<p align="center">
+  <img src="docs/assets/hero.png" alt="mission — quality-gated autonomous mission loop" width="760">
+</p>
+
+
 **English** | [Japanese](README.ja.md)
 
 `mission` is a Claude Code / Codex plugin for running mission-oriented work as a

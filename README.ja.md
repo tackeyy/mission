@@ -1,5 +1,10 @@
 # mission — 自律ミッション達成オーケストレータ
 
+<p align="center">
+  <img src="docs/assets/hero.png" alt="mission — 品質ゲート付き自律ミッションループ" width="760">
+</p>
+
+
 [English](README.md) | **日本語**
 
 `mission` は、Claude Code / Codex でミッション達成まで ReAct ループを回すためのプラグインです。
