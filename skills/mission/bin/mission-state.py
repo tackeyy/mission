@@ -375,6 +375,22 @@ def cmd_init(args):
                 existing_agg = json.loads(agg.read_text())
             except Exception:
                 existing_agg = {}  # F-6: 壊れた aggregate は空扱いで復旧 (init を落とさない)
+        # Issue #2: 既存 sf_target が別 mission_id を持つ場合、上書き前に archive に退避する。
+        # 同一 mission_id (= resume) の場合は退避不要。
+        if sf_target.exists():
+            try:
+                existing_data = json.loads(sf_target.read_text())
+                existing_mid = existing_data.get("mission_id", "")
+                new_mid = initial.get("mission_id", "")
+                if existing_mid and new_mid and existing_mid != new_mid:
+                    archive_dir = state_dir(cwd) / "archive"
+                    archive_dir.mkdir(parents=True, exist_ok=True)
+                    old_mid8 = existing_mid[:8] if len(existing_mid) >= 8 else existing_mid
+                    archive_dest = archive_dir / f"state-{sid}-{old_mid8}.json"
+                    import shutil
+                    shutil.copy2(sf_target, archive_dest)
+            except Exception:
+                pass  # 退避失敗は警告なしで継続 (init を落とさない)
         backup_state(sf_target)
         atomic_write_json(sf_target, initial)
         existing_agg.setdefault("active_sessions", [])
