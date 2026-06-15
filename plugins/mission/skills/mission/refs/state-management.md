@@ -1,0 +1,167 @@
+# refs/state-management.md — state.json 操作の完全リファレンス
+
+SKILL.md 本体から外出しした詳細リファレンス。普段の運用で参照すべきフルセット。
+本体には「最低限の 5 コマンド」だけ残し、ここに **mission-state.py の全サブコマンド** と **Phase C multi-session 関連** を集約する。
+
+参照タイミング (状況トリガー):
+- 本体の5コマンド以外のサブコマンドが必要になった → 「全サブコマンド」
+- multi-session を並列実行したくなった / session 競合が起きた → 「Phase C multi-session」
+- 旧スキーマの state.json でエラーが出た → 「migration」
+- dead-PID の active state が残った → 「cleanup-stale」
+- 合格後に PR を自動マージしてよいか迷った → 「Phase 7 自動マージ — 詳細判定ロジック」
+
+---
+
+## state.json 操作: mission-state.py 経由 (推奨)
+
+state.json の更新は **`${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py`** 経由で行うこと。inline `jq` 直接実行は schema 不整合・race condition の原因となるため禁止。
+
+```bash
+# 初期化 (起動時、mission_id 同一性チェック付き)
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py init "<ミッション記述>" --threshold 4.0 [--max-iter N]
+
+# 値の取得
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py get [--field key]
+
+# 値の更新 (複数 key=value 可、key 型は JSON 推論)
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py set iteration=1 phase='"executing"'
+
+# 採点結果を score_history に記録 (Phase 5 直後、orchestrator が必ず呼ぶ)
+# scorer は context: fork で state.json に書き込めないため orchestrator が代行する
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score \
+    --iteration <N> \
+    --composite <総合スコア> \
+    --min-item <最低項目スコア> \
+    --items '{"mission_achievement": 4.0, "accuracy": 3.5, "completeness": 4.2, "practicality": 3.8, "reviewer_consensus": 4.0}' \
+    [--notes "<任意のメモ>"]
+
+# 合格マーク (passes=true, loop_active=false)
+# 重要: mark-passes を呼ぶ前に必ず push-score で採点結果を記録すること
+# (これを怠ると「score_history が空のまま passes=true」になる既知バグを再発させる)
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py mark-passes
+
+# 中断マーク (halt_reason 設定, loop_active=false)
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py mark-halt --reason "<理由>"
+
+# R1: resume / compaction 復帰時に state.pid を現セッションの agent CLI PID に更新
+# (これを怠ると hook が state.pid != 現 PID と判定して exit 0、ループ強制が機能しない)
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py refresh-pid
+
+# 空 .mission-state/ ディレクトリの cleanup (skill 起動時に実行推奨)
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py cleanup-empty <project_root_path>
+
+# 全プロジェクト active 一覧 (C-4)
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py list   # NOTE: MISSION_SEARCH_ROOTS (未設定なら cwd) 配下のみ検索。横断したい場合は MISSION_SEARCH_ROOTS を設定
+
+# 全プロジェクト一括停止 (C-4)
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py halt --all --reason "<理由>"
+```
+
+スクリプトが自動で stamp するフィールド (A-1/A-2/B-3/C-1):
+- `project_root` (current cwd, A-1: hook の越境発火防止)
+- `pid` (agent CLI プロセス PID, A-2: orphan 自動回収)
+- `hostname`, `session_id` (uuid), `created_at_session` (B-3: owner 識別)
+- `mission_id` (mission の SHA256[:16], C-1: 別ミッション検出)
+- `schema_version` (現在 2)
+
+更新前の `.bak` 自動生成 (A-4)、`fcntl.flock` ロック (B-1)、`fsync + os.replace` atomic write (B-2) もスクリプトが内包する。
+
+### Phase C: multi-session 並列実行 (2026-06-13 デフォルト有効化)
+
+同一プロジェクトで複数の /mission を並列実行する場合、各セッションは `sessions/<sid>.json` に独立した状態を持つ。**Claude Code/Codex から起動すれば自動的に有効** (env 不要)。
+
+- **常に multi (2026-06-13 legacy 完全廃止)**: `is_multi_session`/`MISSION_MULTI_SESSION` は撤廃。全 `cmd_*` が常に `sessions/<sid>.json` を使う。既存 legacy `state.json` は読まれず無害に残る (手動 `mission-migrate.py` で sessions/ へ移行可)。
+- **session_id (`resolve_session_id`)**: `MISSION_SESSION_ID` > `cc-<CLAUDE_CODE_SESSION_ID>` > `cx-<CODEX_THREAD_ID>` > `pid-<N>`。Claude Code/Codex の ID は安定 (resume・PID 再利用に強い)。ファイル名と session_id フィールドが一致。
+- **aggregate.json**: init で `active_sessions` に追加、mark-passes/mark-halt で除去。`cmd_list`/`cleanup-stale`/`halt --all` は `sessions/*.json` も走査する。
+- **migrate**: `mission-migrate.py` は loop_active=true の進行中 state を拒否 (`--force` で override)。
+
+session_id は `MISSION_SESSION_ID` 未指定なら `cc-`/`cx-`/`pid-<N>` から自動採番される (上記 resolve_session_id 順)。状態は `.mission-state/sessions/<session_id>.json`、active 一覧は `.mission-state/aggregate.json` に保存される。
+
+**assumptions の分離 (H3, 2026-06-10)**: multi-session init は `assumptions_path` を `.mission-state/sessions/<session_id>-assumptions.md` に自動設定する。並走セッションが `.mission-state/assumptions.md` を共有して相互上書きする事故 (2026-06-10 workspace で実害確認) を防ぐため、orchestrator は **必ず state.json の `assumptions_path` を読んでそのパスに書く** こと (固定パス直書き禁止)。
+
+- Stop hook (`mission-stop-guard.sh`) は `sessions/*.json` を自動的にイテレートし、各 session に対して project_root + PID alive チェックを適用する
+- dead pid の session は hook が自動的に halt する
+
+### Phase C: 管理コマンド
+
+```bash
+# 全プロジェクトの active 一覧
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py list
+
+# 全プロジェクトを一括 halt
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py halt --all --reason "<理由>"
+
+# dead-PID の active state.json を検出 (dry-run デフォルト)
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py cleanup-stale
+
+# 実際に halt 実行 (--execute 明示が必要)
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py cleanup-stale --execute
+```
+
+⚠️ `cleanup-stale --execute` は他 Claude セッションで進行中のミッションも halt する可能性がある。事前に dry-run で `would_halt` を確認すること。
+
+### Phase C: 旧 state.json → sessions/ 移行 (任意)
+
+既存の single state.json を multi-session 構造に変換するスクリプト:
+
+```bash
+# 全プロジェクト dry-run
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-migrate.py
+
+# 特定プロジェクトのみ
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-migrate.py /path/to/project
+
+# 実行 (元 state.json は state.json.pre-migration として保管)
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-migrate.py --execute
+
+# 元 state.json も削除して完全移行
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-migrate.py --execute --remove-legacy
+```
+
+移行は **過去セッションの stats 継続性のためのみ** (新規 init は常に `sessions/<sid>.json` を使用)。legacy `state.json` は読まれず無害に残る。
+
+---
+
+## phase フィールドの自動更新セマンティクス (M4, 2026-06-10)
+
+mission-state.py が以下のタイミングで `phase` を自動設定する。orchestrator の手動 `set phase=...` は planning/executing/reviewing の中間状態を記録したい場合のみ任意で行う:
+
+| コマンド | phase |
+|---|---|
+| `init` | `planning` |
+| `push-score` | `scoring` |
+| `mark-passes` | `done` |
+| `mark-halt` / `halt --all` | `halted` |
+| `cleanup-stale --execute` (orphan halt) | **変更しない** (refresh-pid 再活性化後に直前の進捗 phase を保持するため) |
+
+R1 復帰時は phase 単独ではなく `iteration` + `score_history` と組み合わせて現在地を判定する (phase は補助情報。2026-06-10 以前のランは phase が planning のまま放置されている)。
+
+## init --complexity (M7, 2026-06-10)
+
+`init --complexity <Simple|Standard|Complex|Critical>` で Phase 1 の複雑度判定を state に記録し、`reviewer_count` を自動設定する (Simple:1 / Standard:2 / Complex:3 / Critical:3)。未指定時は `Unknown` のまま stderr に WARN が出る。Phase 1 完了時点で `Unknown` を残さないこと。
+
+## スコア項目キーの正規化 (H2) / scoring archive 命名 (H1) — 2026-06-10
+
+- push-score は items のキーを正規 5 キー (`mission_achievement` / `accuracy` / `completeness` / `usability` / `reviewer_consensus`) に正規化する。エイリアス (`usefulness`→`usability`, `practicality`→`usability`, `reviewer_agreement`→`reviewer_consensus`) は自動変換、未知キーは WARN 付きで受理 (後方互換)
+- `--scoring-output` の保存先は `.mission-state/archive/iter-<N>-<mission_id先頭8>-scoring.md`。連続ランでの上書き消失 (2026-06-10 実害確認) を防ぐため mission_id を含む
+
+## Phase 7 自動マージ — 詳細判定ロジック
+
+> SKILL.md 本体の「## Phase 7」から退避 (2026-06-10)。合格判定後に PR を自動マージしてよいか迷ったとき参照。
+
+### 自動マージ NG の判定ロジック (どれかに該当したら手動マージ待ち)
+
+- **PR template / CLAUDE.md / CONTRIBUTING.md に明示的な禁止文言**: 「自動マージ禁止」「人手のみ」「manual merge only」「approval required」「自動修正禁止」等
+  - 例: PR template に Lv (重要度) 判定があり「Lv1 のみ自動マージ可・Lv2 以上は人手 only」と明記しているリポジトリでは、Lv2 以上が選択されていたら自動マージ不可
+- **PR body の Lv 判定 / 重要度ラベルで「人手」相当が選択されている**: 当該リポジトリの慣習に従う
+- **CODEOWNERS で必須レビュアー指定**: `.github/CODEOWNERS` が存在し、変更ファイルの owner レビューが未完了
+- **branch protection の required reviewers > 0**: `gh api repos/<owner>/<repo>/branches/<base>/protection` で `required_pull_request_reviews.required_approving_review_count > 0` (エラーなら不問)
+- **PR が draft 状態** or **必須チェック未完了**: `gh pr view <N> --json isDraft,mergeStateStatus`
+- **不明な場合は保守的に「手動マージ待ち」を選ぶ** (false positive コストは低い、false negative コストは高い)
+
+### マージコマンドの選び方
+
+- 既存リポジトリの慣習を尊重: `gh pr list --state merged --limit 5 --json mergeCommit,title` で過去マージ方式 (squash / merge / rebase) を推定
+- 不明なら `--squash` をデフォルトに
+- CI pending 中なら `--auto` フラグで完了待ち
+- 推奨形: `gh pr merge <N> --repo <owner/repo> --squash --auto --delete-branch`

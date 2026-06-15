@@ -1,0 +1,65 @@
+# refs/react-loop-details.md — ReAct ループ詳細リファレンス
+
+SKILL.md 本体から外出しした Phase 2-6 ループの詳細。本体には「重要フィールド」「観点 D 運用」「終了判定ロジック」だけ残し、ここに **state.json スキーマフル** / **更新コマンド例** / **サブスキル呼び出し詳細** を集約する。
+
+参照タイミング:
+- state.json のフィールド名・型を厳密に確認したい
+- サブスキル呼び出しのフル例 (観点 D 含む) を引きたい
+
+---
+
+## state.json スキーマ全体
+
+`.mission-state/state.json` を作成・更新する。**Stop hook が参照するため、フィールド名は厳守する**。
+
+```json
+{
+  "mission": "<構造化ミッション>",
+  "subtasks": ["...", "..."],
+  "complexity": "Standard",
+  "reviewer_count": 2,
+  "max_iter": null,
+  "threshold": 4.0,
+  "iteration": 0,
+  "phase": "executing",
+  "score_history": [
+    { "iteration": 1, "composite": 3.5, "min_item": 3.0, "items": {} }
+  ],
+  "stagnation_count": 0,
+  "decisions": [],
+  "loop_active": true,
+  "passes": false,
+  "halt_reason": "",
+  "assumptions_path": ".mission-state/sessions/<sid>-assumptions.md",
+  "// 自動付与": "schema_version/project_root/pid/hostname/session_id/agent/created_at_session は stamp_metadata、mission_id は cmd_init が直接セット",
+  "started_at": "ISO8601",
+  "updated_at": "ISO8601"
+}
+```
+
+各イテレーションごとに `iteration++` と `updated_at` を更新。クラッシュ時は state.json から復旧可能。
+
+## state.json の更新
+
+更新は必ず `mission-state.py` 経由 (`init`/`set`/`push-score`/`mark-passes`/`mark-halt`)。jq・Python heredoc での直接書き換えは schema 不整合・threshold gate 迂回の温床のため禁止 (詳細 `refs/state-management.md`)。
+
+## サブスキル呼び出しのフル例 (Skill tool)
+
+```
+Skill(skill="mission-planner",  args="<構造化ミッション> + 制約 + state.json要約")
+Skill(skill="mission-executor", args="<計画ステップN>")
+# 並列レビュー (Reviewer数に応じて)
+Skill(skill="mission-reviewer", args="観点A: ミッション達成度 — <成果物要約>")
+Skill(skill="mission-reviewer", args="観点B: 正確性・論理整合性")
+Skill(skill="mission-reviewer", args="観点C: 実用性・抜け漏れ")
+# オプション: 観点D (Complex/Critical のみ推奨。採点対象外でフィードバックのみ)
+Skill(skill="mission-reviewer", args="観点D: 計画指示明瞭度 — Executor の指示明瞭度フィードバックを評価")
+Skill(skill="mission-scorer",   args="3レビュー結果統合 → 5項目採点 (観点D は採点除外)")
+# scorer の出力を受け取ったら orchestrator が必ず push-score を呼ぶ (score_history 記録)
+# Bash(command="python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score --iteration N --composite X --min-item Y --items '{...}'")
+Skill(skill="mission-critic",   args="スコア結果 + 成果物 + 観点D フィードバック → 改善案 + Planner 申し送り")
+```
+
+**並列実行 (P4 強化)**: Phase 4 のレビュー呼び出しは、Claude Code では**必ず 1 つの assistant メッセージ内に複数 Skill 呼び出しを並べる**。別メッセージに分割しても観測上は非同期並列になるが (実測 2026-06-12、gotchas §1)、挙動保証がないため単一メッセージに統一する。watchdog: 制御が戻った時点で 15 分超未返の Reviewer は待たずに再 spawn (gotchas §1)。Codex では順次実行で代替。
+
+**観点D の運用 (EPT 由来)**: 観点D は Reviewer に **採点させず**、Executor の指示明瞭度フィードバックを「次イテレーション Planner への改善案」に変換させる。Critic はこれを「Planner 申し送り」枠で受け取り、次イテレーションの planner 呼び出し args に含める。Simple/Standard では省略可（Reviewer 数増加コストと釣り合わない）。

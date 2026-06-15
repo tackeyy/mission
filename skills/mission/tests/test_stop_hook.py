@@ -1,0 +1,107 @@
+"""P3: mission-stop-guard.sh の並列 owner 照合 (session env ベース、AGENT_PID 非依存)."""
+import json
+import os
+import subprocess
+from pathlib import Path
+
+HOOK = Path(__file__).resolve().parents[3] / "scripts" / "mission-stop-guard.sh"
+
+
+def _run_hook(cwd, env_extra):
+    env = {"PATH": os.environ["PATH"], "MISSION_HOOK_CWD": str(cwd)}
+    env.update(env_extra)
+    return subprocess.run(["bash", str(HOOK)], input='{"stop_hook_active":false}',
+                          capture_output=True, text=True, env=env)
+
+
+def _write_session(cwd, sid, **kw):
+    sd = cwd / ".mission-state" / "sessions"; sd.mkdir(parents=True, exist_ok=True)
+    base = {"loop_active": True, "passes": False, "halt_reason": "", "pid": os.getpid(),
+            "project_root": str(cwd), "mission": "g", "iteration": 0, "threshold": 4.0, "score_history": []}
+    base.update(kw)
+    (sd / f"{sid}.json").write_text(json.dumps(base))
+
+
+def test_hook_blocks_own_session(tmp_path):
+    """自分の session_id (cc-mine) の未達 state は block される."""
+    _write_session(tmp_path, "cc-mine")
+    r = _run_hook(tmp_path, {"CLAUDE_CODE_SESSION_ID": "mine"})
+    assert '"decision"' in r.stdout and "block" in r.stdout
+
+
+def test_hook_ignores_other_session(tmp_path):
+    """別 session_id (cc-other) の state は自分のではないので block しない (並列分離)."""
+    _write_session(tmp_path, "cc-other")
+    r = _run_hook(tmp_path, {"CLAUDE_CODE_SESSION_ID": "mine"})
+    assert "block" not in r.stdout
+
+
+def test_hook_blocks_completed_session_no(tmp_path):
+    """自分の session でも passes=true なら block しない (完了)."""
+    _write_session(tmp_path, "cc-mine", passes=True)
+    r = _run_hook(tmp_path, {"CLAUDE_CODE_SESSION_ID": "mine"})
+    assert "block" not in r.stdout
+
+
+def test_hook_codex_session(tmp_path):
+    """Codex の CODEX_THREAD_ID でも cx- prefix で owner 照合する."""
+    _write_session(tmp_path, "cx-thread1")
+    r = _run_hook(tmp_path, {"CODEX_THREAD_ID": "thread1"})
+    assert '"decision"' in r.stdout and "block" in r.stdout
+
+
+def test_hook_sanitizes_session_id(tmp_path):
+    """MISSION_SESSION_ID に / が含まれてもサニタイズ後の sf 名 (a_b) と一致して block する."""
+    _write_session(tmp_path, "a_b")
+    r = _run_hook(tmp_path, {"MISSION_SESSION_ID": "a/b"})
+    assert '"decision"' in r.stdout and "block" in r.stdout
+
+
+def test_hook_pid_fallback(tmp_path):
+    """session env が無い環境では pid 照合 fallback で block する."""
+    _write_session(tmp_path, "legacy-x", pid=os.getpid())
+    r = _run_hook(tmp_path, {"MISSION_HOOK_AGENT_PID": str(os.getpid())})
+    assert '"decision"' in r.stdout and "block" in r.stdout
+
+
+def test_hook_blocks_own_session_even_if_pid_dead(tmp_path):
+    """sid 一致なら state の pid が dead (resume/compaction で PID 変化) でも block する (M-1)."""
+    _write_session(tmp_path, "cc-mine", pid=999999)  # dead pid
+    r = _run_hook(tmp_path, {"CLAUDE_CODE_SESSION_ID": "mine"})
+    assert '"decision"' in r.stdout and "block" in r.stdout
+
+
+def test_hook_sanitizes_leading_dot(tmp_path):
+    """#14: MISSION_SESSION_ID 先頭ドットは py _sanitize_sid 同様 strip され sf 名と一致して block."""
+    _write_session(tmp_path, "weird")           # py は ".weird" → "weird" に sanitize して書く
+    r = _run_hook(tmp_path, {"MISSION_SESSION_ID": ".weird"})
+    assert '"decision"' in r.stdout and "block" in r.stdout
+
+
+def test_hook_orphan_halt_when_envless_and_pid_dead(tmp_path):
+    """#13: env-less fallback + dead pid の orphan は halt_reason='orphan:' が書かれ block しない.
+
+    (この orphan-halt write は env-less かつ死PID時のみ発火する希少パス。対象は dead orphan で
+     競合 writer がないため unlocked でも idempotent — #13 で option(b) 維持と判断した挙動の特性テスト)
+    """
+    _write_session(tmp_path, "s-orphan", pid=999999, project_root=str(tmp_path))
+    r = _run_hook(tmp_path, {})  # session env なし = env-less pid fallback
+    assert "block" not in r.stdout
+    st = json.loads((tmp_path / ".mission-state" / "sessions" / "s-orphan.json").read_text())
+    assert st["halt_reason"].startswith("orphan:") and st["loop_active"] is False
+
+
+def test_hook_warns_on_stale_state(tmp_path):
+    """F-5: updated_at が1時間超古い state は block 理由に WARN を前置する."""
+    _write_session(tmp_path, "cc-stale", updated_at="2020-01-01T00:00:00Z")
+    r = _run_hook(tmp_path, {"CLAUDE_CODE_SESSION_ID": "stale"})
+    assert "block" in r.stdout and "WARN" in r.stdout
+
+
+def test_hook_no_warn_on_fresh_state(tmp_path):
+    """F-5 負テスト: 直近更新(2分前)の state では STALE WARN を出さない(JST誤発火回帰)."""
+    import datetime
+    fresh = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _write_session(tmp_path, "cc-fresh", updated_at=fresh)
+    r = _run_hook(tmp_path, {"CLAUDE_CODE_SESSION_ID": "fresh"})
+    assert "block" in r.stdout and "WARN" not in r.stdout, "fresh state で誤って STALE WARN が出た(tzバグ)"

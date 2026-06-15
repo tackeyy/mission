@@ -1,0 +1,19 @@
+name: Question (日本語)
+description: mission の使い方について質問する
+labels: ["question"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: 質問
+      description: 知りたいことを書いてください。
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: すでに試したことや背景があれば書いてください。
+    validations:
+      required: false

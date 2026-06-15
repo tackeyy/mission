@@ -1,0 +1,72 @@
+name: Bug Report
+description: Report a bug or unexpected behavior
+labels: ["bug", "needs-triage"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the bug
+      description: A clear description of what went wrong.
+      placeholder: "When I run /mission ..., the state file ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Include commands, skill invocation, and relevant state.
+      placeholder: |
+        1. Install the plugin with ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead? Include errors or logs when possible.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: mission version or commit
+      placeholder: "1.0.0 or commit SHA"
+    validations:
+      required: true
+
+  - type: input
+    id: agent
+    attributes:
+      label: Agent environment
+      placeholder: "Claude Code 2.1.x / Codex CLI / other"
+    validations:
+      required: false
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "macOS 15 / Ubuntu 24.04"
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Add anything else that may help.
+    validations:
+      required: false

@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# mission-stop-guard.sh — Stop hook for /mission skill (v4)
+#
+# 目的: /mission skill が context compaction やモデルの早期完了判断で停止しないよう、
+#       state.json で loop_active=true なら未達成中は decision:block を返してループ継続を強制する。
+#
+# v4 改修 (2026-05-24, Issue #4 のみ — Issue #3 は revert 済):
+#   NEW: state.updated_at と現在時刻の乖離が 1 時間超なら feedback に警告追加
+#        → 古い state による紛らわしいメッセージを防ぐ
+
+# v3 改修 (2026-05-24):
+#   NEW: state.pid が現在の agent CLI プロセス PID と異なる場合は exit 0
+#        → 同一プロジェクトで別目的セッションが起動したとき、巻き込まれない
+#
+# v2 既存:
+#   A-1: state.project_root と current CWD を照合し、不一致なら exit 0 (越境発火防止)
+#   A-2: state.pid が生きていなければ halt_reason: "orphan: pid <N> dead" を自動設定して exit 0
+#   CWD 取得: プロセスツリーを遡って agent CLI を見つけ、その cwd を採用 (最優先)
+#
+# 解除条件:
+#   - passes: true
+#   - halt_reason != ""
+#   - loop_active: false
+#   - sessions/ に自セッション (HOOK_SID 一致) の未達 state がない
+#   - stop_hook_active: true
+#   - project_root != current cwd (越境発火防止)
+#   - HOOK_SID 不一致 (別セッションの state)
+
+set -euo pipefail
+
+INPUT="$(cat)"
+
+if ! command -v jq >/dev/null 2>&1; then
+  exit 0
+fi
+
+STOP_HOOK_ACTIVE=$(printf '%s' "$INPUT" | jq -r '.stop_hook_active // false' 2>/dev/null || echo "false")
+if [ "$STOP_HOOK_ACTIVE" = "true" ]; then
+  exit 0
+fi
+
+# === Agent CLI プロセス PID と CWD を取得 (プロセスツリー遡り) ===
+# 戻り値: $AGENT_PID と $CWD をセット
+find_agent_proc() {
+  local pid="$PPID"
+  local i=0
+  AGENT_PID=""
+  CWD=""
+  while [ "$i" -lt 6 ] && [ -n "$pid" ] && [ "$pid" != "0" ] && [ "$pid" != "1" ]; do
+    local comm
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' \n' || echo "")
+    # basename 一致 (claude/codex)。判定ロジックの正しさは mission-state.py の
+    # tests/test_agent_pid.py::test_comm_is_agent で代理検証 (偽陽性 notcodex 等を除外)。
+    case "$comm" in
+      claude|claude.exe|codex|codex.exe|*/claude|*/claude.exe|*/codex|*/codex.exe)
+        AGENT_PID="$pid"
+        CWD=$(lsof -p "$pid" 2>/dev/null | awk '$4=="cwd"{print $NF; exit}')
+        return 0
+        ;;
+    esac
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' \n' || echo "")
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# === env override (テスト用) ===
+if [ -n "${MISSION_HOOK_CWD:-}" ]; then
+  CWD="${MISSION_HOOK_CWD}"
+  AGENT_PID="${MISSION_HOOK_AGENT_PID:-${MISSION_HOOK_CLAUDE_PID:-}}"
+else
+  find_agent_proc || true
+  # Fallback: hook input .cwd
+  if [ -z "${CWD:-}" ]; then
+    CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")
+  fi
+  # Last resort: $PWD
+  [ -z "${CWD:-}" ] && CWD="$PWD"
+fi
+
+SESSIONS_DIR="$CWD/.mission-state/sessions"
+
+# 自セッションの session_id を env から算出 (AGENT_PID プロセス遡及に依存しない owner 照合用)。
+# mission-state.py の resolve_session_id と同一順: MISSION_SESSION_ID > cc-CLAUDE_CODE_SESSION_ID > cx-CODEX_THREAD_ID
+# サニタイズ (mission-state.py _sanitize_sid と整合: / と \\ を _ に置換)
+_mission_sanitize_sid() {
+  # py _sanitize_sid と整合: / \ を _ に置換 → 前後空白除去 → 先頭ドット除去 → 空なら default
+  local v="${1//\//_}"; v="${v//\\/_}"
+  v="$(printf '%s' "$v" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+  while [ "${v#.}" != "$v" ]; do v="${v#.}"; done
+  [ -z "$v" ] && v="default"
+  printf '%s' "$v"
+}
+HOOK_SID=""
+if [ -n "${MISSION_SESSION_ID:-}" ]; then
+  HOOK_SID="$(_mission_sanitize_sid "${MISSION_SESSION_ID}")"
+elif [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+  HOOK_SID="cc-$(_mission_sanitize_sid "${CLAUDE_CODE_SESSION_ID}")"
+elif [ -n "${CODEX_THREAD_ID:-}" ]; then
+  HOOK_SID="cx-$(_mission_sanitize_sid "${CODEX_THREAD_ID}")"
+fi
+
+# === C-2/C-3: sessions/ ディレクトリ優先 (multi-session 対応) ===
+if [ -d "$SESSIONS_DIR" ]; then
+  HAS_ACTIVE=false
+  for sf in "$SESSIONS_DIR"/*.json; do
+    [ -f "$sf" ] || continue
+    s_loop=$(jq -r '.loop_active // false' "$sf" 2>/dev/null || echo "false")
+    [ "$s_loop" != "true" ] && continue
+    s_passes=$(jq -r '.passes // false' "$sf" 2>/dev/null || echo "false")
+    s_halt=$(jq -r '.halt_reason // empty' "$sf" 2>/dev/null || echo "")
+    [ "$s_passes" = "true" ] && continue
+    [ -n "$s_halt" ] && continue
+
+    # project_root 照合
+    s_root=$(jq -r '.project_root // empty' "$sf" 2>/dev/null || echo "")
+    if [ -n "$s_root" ]; then
+      CWD_REAL=$(cd "$CWD" 2>/dev/null && pwd -P || echo "$CWD")
+      ROOT_REAL=$(cd "$s_root" 2>/dev/null && pwd -P || echo "$s_root")
+      [ "$CWD_REAL" != "$ROOT_REAL" ] && continue
+    fi
+
+    # owner 照合: session env があれば sid (ファイル名) で照合 (AGENT_PID 遡及非依存で確実)。
+    # env が無い環境のみ従来の pid 照合に fallback。
+    sf_sid=$(basename "$sf" .json)
+    s_pid=$(jq -r '.pid // empty' "$sf" 2>/dev/null || echo "")
+    if [ -n "$HOOK_SID" ]; then
+      [ "$sf_sid" != "$HOOK_SID" ] && continue   # 自分の session でない
+    elif [ -n "$s_pid" ] && [ "$s_pid" != "null" ] && [ -n "${AGENT_PID:-}" ]; then
+      if [ "$s_pid" != "$AGENT_PID" ]; then
+        continue
+      fi
+    fi
+
+    # PID alive 照合 (env なし pid fallback 時のみ)。HOOK_SID 一致時は自セッション確定のため
+    # スキップ — resume/compaction で PID が変わっても自分の state を block できる (M-1)。
+    if [ -z "$HOOK_SID" ] && [ -n "$s_pid" ] && [ "$s_pid" != "null" ] && [ "$s_pid" -gt 0 ] 2>/dev/null; then
+      if ! kill -0 "$s_pid" 2>/dev/null; then
+        # #13: この orphan-halt write は StateLock を取らない。許容理由:
+        #   (1) env-less fallback (HOOK_SID 空) かつ死PID時のみ到達する希少パス
+        #       (modern Claude Code/Codex は session env を必ず設定するので通常運用では未到達)
+        #   (2) 対象は dead orphan = 競合する live な mark-* writer が存在しない。
+        #       唯一の競合相手 mission-state.py cleanup-stale も同じ halt を書くため idempotent
+        #   (3) macOS に flock コマンドがなく bash 移植的ロックは不可。Stop hook (ループ強制の
+        #       根幹) に python subprocess 依存を持ち込むのは benign な race を直すために
+        #       重要インフラの reliability を下げる悪いトレード → option(b) 現状維持を選択
+        tmpf=$(mktemp)
+        if jq --arg r "orphan: pid $s_pid dead" '.halt_reason=$r | .loop_active=false | .updated_at=(now|todate)' "$sf" > "$tmpf" 2>/dev/null; then
+          mv "$tmpf" "$sf"
+        else
+          rm -f "$tmpf"   # jq 失敗時に stray tmp を残さない (防御的。$sf は直前の read jq で valid JSON 確認済 → halt-jq が単独で失敗する経路は実質到達せず単体テスト対象外。C#3 判定)
+        fi
+        continue
+      fi
+    fi
+
+    HAS_ACTIVE=true
+    SESSION_FILE_TO_BLOCK="$sf"
+    break
+  done
+
+  if [ "$HAS_ACTIVE" = "true" ]; then
+    ITER=$(jq -r '.iteration // 0' "$SESSION_FILE_TO_BLOCK" 2>/dev/null || echo "0")
+    LAST_SCORE=$(jq -r '.score_history[-1].composite // "n/a"' "$SESSION_FILE_TO_BLOCK" 2>/dev/null || echo "n/a")
+    THRESHOLD=$(jq -r '.threshold // 4.0' "$SESSION_FILE_TO_BLOCK" 2>/dev/null || echo "4.0")
+    MISSION=$(jq -r '.mission // ""' "$SESSION_FILE_TO_BLOCK" 2>/dev/null | head -c 200)
+    # F-5 (v4): updated_at が1時間超古ければ stuck/放置の可能性を WARN 前置 (BSD date -j / GNU date -d 両対応。両方失敗時のみ無警告で degrade)
+    STALE=""
+    UPDATED_AT=$(jq -r '.updated_at // empty' "$SESSION_FILE_TO_BLOCK" 2>/dev/null || echo "")
+    if [ -n "$UPDATED_AT" ]; then
+      # BSD (macOS): date -j -f ... / GNU (Linux): date -u -d ... へフォールバック。-u: Z=UTC として解釈し JST 誤判定を防止
+      U_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" -u "$UPDATED_AT" +%s 2>/dev/null || date -u -d "$UPDATED_AT" +%s 2>/dev/null || echo "")
+      if [ -n "$U_EPOCH" ]; then
+        DIFF=$(( $(date +%s) - U_EPOCH ))
+        [ "$DIFF" -gt 3600 ] && STALE="[WARN: state が $(( DIFF / 60 ))分 未更新。stuck/放置の可能性 — cleanup-stale を検討] "
+      fi
+    fi
+    REASON="${STALE}/mission skill アクティブ・未達 (multi-session: iter=$ITER, last_score=$LAST_SCORE, threshold=$THRESHOLD)。 state.json の passes=true か halt_reason を立てるまでループを継続。 ミッション: $MISSION"
+    jq -n --arg r "$REASON" '{decision:"block", reason:$r}'
+    exit 0
+  fi
+fi
+
+# sessions/ に自セッションの未達 state が無ければ block しない (legacy fallback は撤廃)
+exit 0

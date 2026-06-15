@@ -1,0 +1,21 @@
+{
+  "name": "mission-marketplace",
+  "plugins": [
+    {
+      "name": "mission",
+      "source": {
+        "source": "local",
+        "path": "./plugins/mission"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Productivity",
+      "interface": {
+        "displayName": "mission",
+        "description": "Mission-oriented ReAct loop orchestrator / 自律ミッション達成オーケストレータ"
+      }
+    }
+  ]
+}

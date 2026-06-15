@@ -1,0 +1,22 @@
+{
+  "name": "mission-marketplace",
+  "description": "Mission-oriented ReAct loop orchestrator plugin for Claude Code. Includes the mission skill, five supporting skills, and a Stop hook guard.",
+  "owner": {
+    "name": "tackeyy"
+  },
+  "plugins": [
+    {
+      "name": "mission",
+      "source": "./",
+      "description": "Mission-oriented ReAct loop orchestrator / 自律ミッション達成オーケストレータ (mission + 5 subskills + Stop hook)",
+      "skills": [
+        "./skills/mission",
+        "./skills/mission-planner",
+        "./skills/mission-executor",
+        "./skills/mission-reviewer",
+        "./skills/mission-critic",
+        "./skills/mission-scorer"
+      ]
+    }
+  ]
+}

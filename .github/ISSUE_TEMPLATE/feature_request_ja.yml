@@ -1,0 +1,36 @@
+name: Feature Request (日本語)
+description: 新機能または改善を提案する
+labels: ["enhancement", "needs-discussion"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: この提案はどの問題を解決しますか。
+      placeholder: "現在 mission では ... ができない"
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: どのように動くべきかを書いてください。
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: 検討した workaround や代替案があれば書いてください。
+    validations:
+      required: false
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility notes
+      description: Claude Code、Codex、hook、state schema への影響があれば書いてください。
+    validations:
+      required: false

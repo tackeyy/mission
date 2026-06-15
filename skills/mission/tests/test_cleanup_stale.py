@@ -1,0 +1,116 @@
+"""cleanup-stale の PID 判定修正 (P3-4a, 2026-06-10 検査レポートv2).
+
+バグ: raw os.kill(pid,0) のみで判定するため、PID が agent CLI 以外のプロセスに
+再利用されると「alive」として skip し続け、orphan state が永久放置される。
+修正: _pid_is_agent() を使い「alive かつ agent CLI プロセス」のみ skip する。
+"""
+import json
+import os
+import pytest
+
+
+def _make_state(proj_dir, **overrides):
+    sd = proj_dir / ".mission-state"
+    sd.mkdir(parents=True, exist_ok=True)
+    default = {
+        "mission": "test", "mission_id": "abc",
+        "subtasks": [], "complexity": "Standard",
+        "reviewer_count": 2, "max_iter": 5, "threshold": 4.0,
+        "iteration": 1, "phase": "executing",
+        "score_history": [], "stagnation_count": 0, "decisions": [],
+        "loop_active": True, "passes": False, "halt_reason": "",
+        "assumptions_path": ".mission-state/assumptions.md",
+        "started_at": "2026-06-07T00:00:00Z",
+        "updated_at": "2026-06-07T00:00:00Z",
+        "schema_version": 2, "project_root": str(proj_dir),
+        "pid": 99999999, "hostname": "test",
+        "session_id": "test", "created_at_session": "2026-06-07T00:00:00Z",
+    }
+    default.update(overrides)
+    (sd / "state.json").write_text(json.dumps(default))
+    return sd
+
+
+def test_cleanup_stale_detects_dead_pid(tmp_path, run_cli):
+    """存在しない PID は stale (would_halt) 判定."""
+    _make_state(tmp_path / "p1", pid=99999999)
+    r = run_cli("cleanup-stale", "--root", str(tmp_path), cwd=tmp_path)
+    assert r.returncode == 0, f"stderr: {r.stderr}"
+    data = json.loads(r.stdout)
+    assert len(data["would_halt"]) == 1
+
+
+def test_cleanup_stale_detects_pid_reused_by_non_agent(tmp_path, run_cli):
+    """PID が agent CLI 以外の生存プロセスに再利用されていても stale 判定する (本修正の核心).
+
+    テスト自身の python プロセス PID は alive だが agent CLI ではない → stale であるべき。
+    旧実装は os.kill(pid,0) 成功で skip していた (バグ)。
+    """
+    _make_state(tmp_path / "p1", pid=os.getpid())
+    r = run_cli("cleanup-stale", "--root", str(tmp_path), cwd=tmp_path)
+    assert r.returncode == 0, f"stderr: {r.stderr}"
+    data = json.loads(r.stdout)
+    assert len(data["would_halt"]) == 1, f"agent CLI以外のPID再利用がskipされた: {data}"
+
+
+def test_cleanup_stale_execute_halts(tmp_path, run_cli):
+    """--execute で halt_reason 書き込み + loop_active=false."""
+    sd = _make_state(tmp_path / "p1", pid=99999999)
+    r = run_cli("cleanup-stale", "--root", str(tmp_path), "--execute", cwd=tmp_path)
+    assert r.returncode == 0
+    data = json.loads(r.stdout)
+    assert len(data["halted"]) == 1
+    s = json.loads((sd / "state.json").read_text())
+    assert s["loop_active"] is False
+    assert "orphan" in s["halt_reason"]
+
+
+def test_cleanup_stale_skips_inactive_and_passed(tmp_path, run_cli):
+    """loop_active=false / passes=true は対象外 (既存挙動維持)."""
+    _make_state(tmp_path / "p1", loop_active=False, pid=99999999)
+    _make_state(tmp_path / "p2", passes=True, pid=99999999)
+    r = run_cli("cleanup-stale", "--root", str(tmp_path), cwd=tmp_path)
+    data = json.loads(r.stdout)
+    assert data["would_halt"] == []
+    assert data["halted"] == []
+
+
+def test_cleanup_stale_default_root_unchanged(tmp_path, run_cli):
+    """--root 未指定でもエラーにならない (後方互換)."""
+    r = run_cli("cleanup-stale", cwd=tmp_path)
+    assert r.returncode == 0
+
+
+def test_cleanup_stale_execute_preserves_phase(tmp_path, run_cli):
+    """M4 設計意図: orphan halt は phase を書き換えない (refresh-pid 再活性化後に進捗 phase を保持)."""
+    import json
+    sd = tmp_path / "proj" / ".mission-state"
+    sd.mkdir(parents=True)
+    (sd / "state.json").write_text(json.dumps({
+        "mission": "orphan mission", "mission_id": "feedf00d12345678", "loop_active": True,
+        "passes": False, "halt_reason": "", "phase": "executing", "iteration": 2,
+        "score_history": [], "pid": 99999999, "hostname": "test",
+    }))
+    run_cli("cleanup-stale", "--root", str(tmp_path), "--execute", cwd=tmp_path, check=True)
+    s = json.loads((sd / "state.json").read_text())
+    assert s["loop_active"] is False
+    assert s["halt_reason"].startswith("orphan:")
+    assert s["phase"] == "executing"  # 保持される
+
+
+def test_halt_all_sets_phase_halted(tmp_path, run_cli, monkeypatch):
+    """M4: halt --all も phase=halted を設定する."""
+    import json
+    home = tmp_path / "home"
+    proj = home / "dev" / "p1" / ".mission-state"
+    proj.mkdir(parents=True)
+    (proj / "state.json").write_text(json.dumps({
+        "mission": "g", "mission_id": "aa11bb22cc33dd44", "loop_active": True,
+        "passes": False, "halt_reason": "", "phase": "executing",
+        "score_history": [], "pid": 0,
+    }))
+    monkeypatch.setenv("HOME", str(home))
+    run_cli("halt", "--all", "--reason", "test halt", cwd=tmp_path, check=True)
+    s = json.loads((proj / "state.json").read_text())
+    assert s["halt_reason"] == "test halt"
+    assert s["phase"] == "halted"

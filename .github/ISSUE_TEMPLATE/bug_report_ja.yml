@@ -1,0 +1,72 @@
+name: Bug Report (日本語)
+description: bug や想定外の挙動を報告する
+labels: ["bug", "needs-triage"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: bug の説明
+      description: 何が問題かを明確に書いてください。
+      placeholder: "/mission を実行すると state file が ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 再現手順
+      description: command、skill invocation、関連する state を含めてください。
+      placeholder: |
+        1. plugin を ... で install
+        2. ... を実行
+        3. ... を確認
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期待される挙動
+      description: 本来どう動くべきかを書いてください。
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 実際の挙動
+      description: 実際に起きたことを書いてください。可能なら error や log を含めてください。
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: mission version または commit
+      placeholder: "1.0.0 or commit SHA"
+    validations:
+      required: true
+
+  - type: input
+    id: agent
+    attributes:
+      label: Agent environment
+      placeholder: "Claude Code 2.1.x / Codex CLI / other"
+    validations:
+      required: false
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "macOS 15 / Ubuntu 24.04"
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: 補足
+      description: 調査に役立つ情報があれば書いてください。
+    validations:
+      required: false

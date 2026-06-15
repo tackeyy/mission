@@ -1,0 +1,36 @@
+name: Feature Request
+description: Suggest a new feature or enhancement
+labels: ["enhancement", "needs-discussion"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What problem would this solve?
+      placeholder: "Currently, mission cannot ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: How should the feature work?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workarounds or alternate designs have you considered?
+    validations:
+      required: false
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility notes
+      description: Mention Claude Code, Codex, hook, or state schema implications.
+    validations:
+      required: false
