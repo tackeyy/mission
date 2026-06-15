@@ -1,0 +1,81 @@
+"""Issue #3: push-score の --open-high フラグと mark-passes の High 件数 gate のテスト。"""
+import json
+
+
+def _push_score(run_cli, state_dir, iteration=1, composite=4.5, min_item=4.0,
+                open_high=0, items=None):
+    items = items or {"mission_achievement": composite, "accuracy": min_item}
+    args = [
+        "push-score",
+        "--iteration", str(iteration),
+        "--composite", str(composite),
+        "--min-item", str(min_item),
+        "--items", json.dumps(items),
+        "--open-high", str(open_high),
+    ]
+    return run_cli(*args, cwd=state_dir.parent, check=True)
+
+
+def test_push_score_saves_open_high(state_dir, run_cli):
+    """push-score --open-high N が score_history に保存される。"""
+    _push_score(run_cli, state_dir, open_high=2)
+    data = json.loads((state_dir.parent / ".mission-state" / "sessions" / "test.json").read_text())
+    latest = data["score_history"][-1]
+    assert latest["open_high"] == 2
+
+
+def test_push_score_open_high_default_zero(state_dir, run_cli):
+    """--open-high を指定しない場合は 0 で保存される (後方互換)。"""
+    items = {"mission_achievement": 4.5, "accuracy": 4.0}
+    run_cli(
+        "push-score",
+        "--iteration", "1",
+        "--composite", "4.5",
+        "--min-item", "4.0",
+        "--items", json.dumps(items),
+        cwd=state_dir.parent,
+        check=True,
+    )
+    data = json.loads((state_dir.parent / ".mission-state" / "sessions" / "test.json").read_text())
+    latest = data["score_history"][-1]
+    assert latest.get("open_high", 0) == 0
+
+
+def test_mark_passes_rejects_when_open_high_nonzero(state_dir, run_cli, read_state):
+    """open_high > 0 なら mark-passes は exit 2。"""
+    _push_score(run_cli, state_dir, open_high=2)
+    r = run_cli("mark-passes", cwd=state_dir.parent)
+    assert r.returncode == 2, f"expected exit 2, got {r.returncode}\nstderr: {r.stderr}"
+    assert "未解決 High" in r.stderr, f"stderr: {r.stderr}"
+    s = read_state(state_dir)
+    assert s["passes"] is False
+
+
+def test_mark_passes_passes_when_open_high_zero(state_dir, run_cli, read_state):
+    """open_high=0 なら mark-passes は通過する。"""
+    _push_score(run_cli, state_dir, open_high=0, composite=4.5, min_item=4.0)
+    r = run_cli("mark-passes", cwd=state_dir.parent)
+    assert r.returncode == 0, f"expected 0, got {r.returncode}\nstderr: {r.stderr}"
+    s = read_state(state_dir)
+    assert s["passes"] is True
+
+
+def test_mark_passes_backward_compat_no_open_high_field(state_dir, run_cli, read_state):
+    """score_history に open_high フィールドがない既存形式は 0 扱いで通過する。"""
+    # open_high なしで手動挿入 (旧形式のシミュレーション)
+    sf = state_dir / "sessions" / "test.json"
+    data = json.loads(sf.read_text())
+    data["score_history"].append({
+        "iteration": 1,
+        "composite": 4.5,
+        "min_item": 4.0,
+        "items": {"mission_achievement": 4.5},
+        "timestamp": "2026-01-01T00:00:00Z",
+        # open_high フィールドなし
+    })
+    sf.write_text(json.dumps(data))
+
+    r = run_cli("mark-passes", cwd=state_dir.parent)
+    assert r.returncode == 0, f"後方互換で通過すべき、got {r.returncode}\nstderr: {r.stderr}"
+    s = read_state(state_dir)
+    assert s["passes"] is True

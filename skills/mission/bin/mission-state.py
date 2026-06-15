@@ -575,6 +575,8 @@ def cmd_push_score(args):
     }
     if args.notes:
         entry["notes"] = args.notes
+    # Issue #3: open_high を保存 (mark-passes gate で参照)
+    entry["open_high"] = getattr(args, "open_high", 0)
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
@@ -643,6 +645,14 @@ def cmd_mark_passes(args):
             if min_item is None or min_item < MIN_ITEM_THRESHOLD:
                 print(
                     f"ERROR: min_item {min_item} < {MIN_ITEM_THRESHOLD} のため合格にできません (採点した items のいずれかが {MIN_ITEM_THRESHOLD} 未満)。Critic を起動し次イテレーションへ進んでください。",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            # Issue #3: 未解決 High が残っている場合は合格にできない (後方互換: open_high 欠如 → 0 扱い → 通過)
+            open_high = latest.get("open_high", 0)
+            if open_high > 0:
+                print(
+                    f"ERROR: 未解決 High が {open_high} 件あるため合格にできません。High 指摘を全て解消してから再採点してください。",
                     file=sys.stderr,
                 )
                 sys.exit(2)
@@ -1138,6 +1148,8 @@ def _build_parser():
     p_score.add_argument("--notes", default=None)
     p_score.add_argument("--scoring-output", default=None,
                          help="Scorer の Markdown 出力ファイルパス。指定すると .mission-state/archive/iter-N-scoring.md にコピー保存される (案 1: ログ充実化)")
+    p_score.add_argument("--open-high", type=int, default=0, dest="open_high",
+                         help="未解決の High 指摘件数 (mark-passes の gate で使用)")
     p_score.set_defaults(func=cmd_push_score)
 
     p_halt = sub.add_parser("mark-halt", help="halt_reason を立てて停止")
