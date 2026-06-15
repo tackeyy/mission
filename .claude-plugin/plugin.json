@@ -5,5 +5,6 @@
   "author": { "name": "tackeyy" },
   "license": "MIT",
   "repository": "https://github.com/tackeyy/mission",
+  "homepage": "https://github.com/tackeyy",
   "hooks": "./claude-hooks/hooks.json"
 }
