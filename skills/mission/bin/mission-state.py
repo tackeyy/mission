@@ -1014,6 +1014,17 @@ def _build_agent_summary(states: list[dict], classes: list[str] | None = None) -
     return by_agent
 
 
+def _build_breakdown(states: list[dict], classes: list[str], keyfn) -> dict:
+    """任意キー (project/complexity) 別に total/pass/halt/incomplete/abandoned を集計する."""
+    out: dict = {}
+    for s, cls in zip(states, classes):
+        k = keyfn(s) or "unknown"
+        b = out.setdefault(k, {"total": 0, "pass": 0, "halt": 0, "incomplete": 0, "abandoned": 0})
+        b["total"] += 1
+        b[cls] += 1
+    return out
+
+
 def _aggregate(states: list[dict]) -> dict:
     n = len(states)
     if n == 0:
@@ -1026,6 +1037,7 @@ def _aggregate(states: list[dict]) -> dict:
             "avg_session_duration_sec": None,
             "median_session_duration_sec": None,
             "by_agent": {},
+            "by_project": {}, "by_complexity": {}, "iteration_histogram": {},
         }
     # _classify を 1 回だけ評価 (旧実装は pass/halt/incomplete で 3N 回呼んでいた)
     classes = [_classify(s) for s in states]
@@ -1050,6 +1062,13 @@ def _aggregate(states: list[dict]) -> dict:
     durations = [d for d in (_duration_sec(s) for s in states) if d is not None and d >= 0]
     # #2 (2026-06-13): agent 別の成績内訳 (起動元ごとの PASS 率可視化)。classes を共有して再計算回避。
     by_agent = _build_agent_summary(states, classes)
+    # #6 (2026-06-15): project/complexity 別内訳と iteration ヒストグラム
+    by_project = _build_breakdown(states, classes, lambda s: os.path.basename((s.get("project_root") or "unknown").rstrip("/")) or "unknown")
+    by_complexity = _build_breakdown(states, classes, lambda s: s.get("complexity") or "Unknown")
+    iteration_histogram: dict = {}
+    for _it in iterations:
+        _k = str(_it) if isinstance(_it, int) and _it <= 3 else ("4+" if isinstance(_it, int) else "unknown")
+        iteration_histogram[_k] = iteration_histogram.get(_k, 0) + 1
     return {
         "total_sessions": n,
         "pass_count": pass_count,
@@ -1067,6 +1086,9 @@ def _aggregate(states: list[dict]) -> dict:
         # median は放置/resume 跨ぎの外れ値に頑健 (avg は max 8000min 級の忘れ session で歪む)
         "median_session_duration_sec": _median(durations),
         "by_agent": by_agent,
+        "by_project": by_project,
+        "by_complexity": by_complexity,
+        "iteration_histogram": iteration_histogram,
     }
 
 
@@ -1105,6 +1127,19 @@ def _format_text(stats: dict, since: str | None, until: str | None) -> str:
             lines.append(
                 f"  {ag:<14} {b['total']} (PASS {b['pass']} / HALT {b['halt']} / incomplete {b['incomplete']})"
             )
+    for label, key in (("by_project", "by_project"), ("by_complexity", "by_complexity")):
+        bd = stats.get(key) or {}
+        if bd:
+            lines.append(f"{label}:")
+            for k, b in sorted(bd.items()):
+                lines.append(
+                    f"  {k:<22} {b['total']} (PASS {b['pass']} / HALT {b['halt']} / incomplete {b['incomplete']})"
+                )
+    hist = stats.get("iteration_histogram") or {}
+    if hist:
+        lines.append("iteration_histogram:")
+        for k in sorted(hist.keys()):
+            lines.append(f"  iter {k:<6} {hist[k]}")
     return "\n".join(lines)
 
 
