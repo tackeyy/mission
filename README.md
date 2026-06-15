@@ -102,6 +102,10 @@ Install through the local plugin marketplace entry:
 /plugin install mission@mission-marketplace
 ```
 
+If you cloned to a different location, replace `~/dev/mission` with your
+`$MISSION_REPO` path. `/plugin marketplace add` takes a literal path and does
+not expand shell variables, so the path must match where you cloned.
+
 The plugin install flow reads `.claude-plugin/plugin.json`, which points to
 `claude-hooks/hooks.json`, and enables the Stop hook.
 

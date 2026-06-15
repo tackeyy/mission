@@ -91,6 +91,8 @@ git clone https://github.com/tackeyy/mission.git "$MISSION_REPO"
 /plugin install mission@mission-marketplace
 ```
 
+別の場所に clone した場合は `~/dev/mission` を `$MISSION_REPO` のパスに置き換えてください。`/plugin marketplace add` はパスをそのまま受け取り、シェル変数を展開しないため、clone 先と一致させる必要があります。
+
 `/plugin install` は `.claude-plugin/plugin.json` から `claude-hooks/hooks.json` を読み、ループ継続を強制する Stop hook も有効化します。
 
 実運用では `/plugin install` を推奨します。2026-06-14 の単回検証では、development mode の
