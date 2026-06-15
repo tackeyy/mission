@@ -101,6 +101,10 @@ def _iter_state_files(root: Path, *, include_archive: bool = False):
             archive = gs / "archive"  # 退避済み履歴 (stats 用)
             if archive.is_dir():
                 yield from sorted(archive.glob("state-*.json"))
+                # Issue #7: worktree サブディレクトリ (archive/worktree-*/) も列挙する
+                for sub in sorted(archive.glob("worktree-*")):
+                    if sub.is_dir():
+                        yield from sorted(sub.glob("*.json"))
 
 
 def _default_search_roots() -> list[Path]:
