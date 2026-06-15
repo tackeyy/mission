@@ -164,7 +164,9 @@ if [ -d "$SESSIONS_DIR" ]; then
     LAST_SCORE=$(jq -r '.score_history[-1].composite // "n/a"' "$SESSION_FILE_TO_BLOCK" 2>/dev/null || echo "n/a")
     THRESHOLD=$(jq -r '.threshold // 4.0' "$SESSION_FILE_TO_BLOCK" 2>/dev/null || echo "4.0")
     MISSION=$(jq -r '.mission // ""' "$SESSION_FILE_TO_BLOCK" 2>/dev/null | head -c 200)
-    # F-5 (v4): updated_at が1時間超古ければ stuck/放置の可能性を WARN 前置 (BSD date -j / GNU date -d 両対応。両方失敗時のみ無警告で degrade)
+    # Issue #1 / F-5 (v4): updated_at が古ければ WARN 前置 or auto-halt。
+    # MISSION_STALE_HALT_SECONDS (既定 10800=3h) 超: 自セッションを halt して exit 0 (block しない)
+    # 1h < DIFF <= halt_seconds: 従来通り WARN 前置 + block
     STALE=""
     UPDATED_AT=$(jq -r '.updated_at // empty' "$SESSION_FILE_TO_BLOCK" 2>/dev/null || echo "")
     if [ -n "$UPDATED_AT" ]; then
@@ -172,7 +174,23 @@ if [ -d "$SESSIONS_DIR" ]; then
       U_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" -u "$UPDATED_AT" +%s 2>/dev/null || date -u -d "$UPDATED_AT" +%s 2>/dev/null || echo "")
       if [ -n "$U_EPOCH" ]; then
         DIFF=$(( $(date +%s) - U_EPOCH ))
-        [ "$DIFF" -gt 3600 ] && STALE="[WARN: state が $(( DIFF / 60 ))分 未更新。stuck/放置の可能性 — cleanup-stale を検討] "
+        STALE_HALT_SEC="${MISSION_STALE_HALT_SECONDS:-10800}"
+        if [ "$DIFF" -gt "$STALE_HALT_SEC" ] 2>/dev/null; then
+          # 3h (または MISSION_STALE_HALT_SECONDS) 超: 自セッションファイルを jq で halt して exit 0
+          STALE_MINS=$(( DIFF / 60 ))
+          STALE_HALT_REASON="stale: auto-halted after ${STALE_MINS}m idle"
+          tmpf=$(mktemp)
+          if jq --arg r "$STALE_HALT_REASON" '.halt_reason=$r | .loop_active=false | .updated_at=(now|todate)' "$SESSION_FILE_TO_BLOCK" > "$tmpf" 2>/dev/null; then
+            mv "$tmpf" "$SESSION_FILE_TO_BLOCK"
+          else
+            rm -f "$tmpf"
+          fi
+          # halt 済みなので block せず通す
+          exit 0
+        elif [ "$DIFF" -gt 3600 ]; then
+          # 1h < DIFF <= halt_seconds: 従来通り WARN 前置
+          STALE="[WARN: state が $(( DIFF / 60 ))分 未更新。stuck/放置の可能性 — cleanup-stale を検討] "
+        fi
       fi
     fi
     REASON="${STALE}/mission skill アクティブ・未達 (multi-session: iter=$ITER, last_score=$LAST_SCORE, threshold=$THRESHOLD)。 state.json の passes=true か halt_reason を立てるまでループを継続。 ミッション: $MISSION"

@@ -92,10 +92,27 @@ def test_hook_orphan_halt_when_envless_and_pid_dead(tmp_path):
 
 
 def test_hook_warns_on_stale_state(tmp_path):
-    """F-5: updated_at が1時間超古い state は block 理由に WARN を前置する."""
-    _write_session(tmp_path, "cc-stale", updated_at="2020-01-01T00:00:00Z")
+    """F-5: updated_at が1h超〜3h未満の state は block 理由に WARN を前置する.
+    (3h 超は Issue #1 により auto-halt に変更されたため、このテストは2時間前のタイムスタンプを使う)
+    """
+    import datetime
+    two_hours_ago = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _write_session(tmp_path, "cc-stale", updated_at=two_hours_ago)
     r = _run_hook(tmp_path, {"CLAUDE_CODE_SESSION_ID": "stale"})
     assert "block" in r.stdout and "WARN" in r.stdout
+
+
+def test_hook_autohalts_on_very_stale_state(tmp_path):
+    """Issue #1: updated_at が3h超(2020) の state は block せず、session file を auto-halt する."""
+    _write_session(tmp_path, "cc-stale2", updated_at="2020-01-01T00:00:00Z", project_root=str(tmp_path))
+    r = _run_hook(tmp_path, {"CLAUDE_CODE_SESSION_ID": "stale2"})
+    # hook は block を返さない (decision:block が stdout にない)
+    assert "block" not in r.stdout, f"auto-halt 対象なのに block が返った: {r.stdout}"
+    # session file が halt されている
+    sf = tmp_path / ".mission-state" / "sessions" / "cc-stale2.json"
+    st = json.loads(sf.read_text())
+    assert st["loop_active"] is False, "loop_active が false になっていない"
+    assert "stale" in st["halt_reason"], f"halt_reason に 'stale' が含まれない: {st['halt_reason']}"
 
 
 def test_hook_no_warn_on_fresh_state(tmp_path):
