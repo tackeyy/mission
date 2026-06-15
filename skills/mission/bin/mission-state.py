@@ -378,6 +378,11 @@ def cmd_init(args):
             existing_agg["active_sessions"].append(sid)
         existing_agg["updated_at"] = iso_now()
         atomic_write_json(agg, existing_agg)
+    # Issue #5: assumptions_path の実ファイルを空テンプレで作成する
+    assumptions_file = cwd / initial["assumptions_path"]
+    assumptions_file.parent.mkdir(parents=True, exist_ok=True)
+    if not assumptions_file.exists():
+        assumptions_file.write_text("# Assumption Registry\n")
     print(json.dumps({"ok": True, "mode": "multi-session", "session_file": str(sf_target), "session_id": sid, "mission_id": initial["mission_id"]}))
 
 
