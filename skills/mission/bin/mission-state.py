@@ -31,6 +31,7 @@ import socket
 import subprocess
 import sys
 import time
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -373,7 +374,7 @@ def cmd_init(args):
         if agg.exists():
             try:
                 existing_agg = json.loads(agg.read_text())
-            except Exception:
+            except json.JSONDecodeError:
                 existing_agg = {}  # F-6: 壊れた aggregate は空扱いで復旧 (init を落とさない)
         # Issue #2: 既存 sf_target が別 mission_id を持つ場合、上書き前に archive に退避する。
         # 同一 mission_id (= resume) の場合は退避不要。
@@ -387,10 +388,9 @@ def cmd_init(args):
                     archive_dir.mkdir(parents=True, exist_ok=True)
                     old_mid8 = existing_mid[:8] if len(existing_mid) >= 8 else existing_mid
                     archive_dest = archive_dir / f"state-{sid}-{old_mid8}.json"
-                    import shutil
                     shutil.copy2(sf_target, archive_dest)
-            except Exception:
-                pass  # 退避失敗は警告なしで継続 (init を落とさない)
+            except Exception as e:
+                print(f"WARNING: 旧ミッション (id={existing_mid[:8]}) のアーカイブに失敗。履歴消失の可能性: {e}", file=sys.stderr)
         backup_state(sf_target)
         atomic_write_json(sf_target, initial)
         existing_agg.setdefault("active_sessions", [])
@@ -400,9 +400,12 @@ def cmd_init(args):
         atomic_write_json(agg, existing_agg)
     # Issue #5: assumptions_path の実ファイルを空テンプレで作成する
     assumptions_file = cwd / initial["assumptions_path"]
-    assumptions_file.parent.mkdir(parents=True, exist_ok=True)
-    if not assumptions_file.exists():
-        assumptions_file.write_text("# Assumption Registry\n")
+    try:
+        assumptions_file.parent.mkdir(parents=True, exist_ok=True)
+        if not assumptions_file.exists():
+            assumptions_file.write_text("# Assumption Registry\n")
+    except OSError as e:
+        print(f"WARNING: assumptions_path ファイル作成に失敗: {e}", file=sys.stderr)
     print(json.dumps({"ok": True, "mode": "multi-session", "session_file": str(sf_target), "session_id": sid, "mission_id": initial["mission_id"]}))
 
 
@@ -581,6 +584,9 @@ def cmd_push_score(args):
         print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
         sys.exit(1)
     items = _validate_score_args(args)
+    if args.open_high < 0:
+        print("ERROR: --open-high は 0 以上で指定してください", file=sys.stderr)
+        sys.exit(2)
 
     entry = {
         "iteration": args.iteration,
@@ -665,7 +671,7 @@ def cmd_mark_passes(args):
                 )
                 sys.exit(2)
             # Issue #3: 未解決 High が残っている場合は合格にできない (後方互換: open_high 欠如 → 0 扱い → 通過)
-            open_high = latest.get("open_high", 0)
+            open_high = latest.get("open_high") or 0
             if open_high > 0:
                 print(
                     f"ERROR: 未解決 High が {open_high} 件あるため合格にできません。High 指摘を全て解消してから再採点してください。",
@@ -1021,7 +1027,7 @@ def _build_breakdown(states: list[dict], classes: list[str], keyfn) -> dict:
         k = keyfn(s) or "unknown"
         b = out.setdefault(k, {"total": 0, "pass": 0, "halt": 0, "incomplete": 0, "abandoned": 0})
         b["total"] += 1
-        b[cls] += 1
+        b[cls] = b.get(cls, 0) + 1
     return out
 
 
@@ -1133,7 +1139,7 @@ def _format_text(stats: dict, since: str | None, until: str | None) -> str:
             lines.append(f"{label}:")
             for k, b in sorted(bd.items()):
                 lines.append(
-                    f"  {k:<22} {b['total']} (PASS {b['pass']} / HALT {b['halt']} / incomplete {b['incomplete']})"
+                    f"  {k:<22} {b['total']} (PASS {b['pass']} / HALT {b['halt']} / incomplete {b['incomplete']} / abandoned {b['abandoned']})"
                 )
     hist = stats.get("iteration_histogram") or {}
     if hist:

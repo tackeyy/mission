@@ -175,6 +175,8 @@ if [ -d "$SESSIONS_DIR" ]; then
       if [ -n "$U_EPOCH" ]; then
         DIFF=$(( $(date +%s) - U_EPOCH ))
         STALE_HALT_SEC="${MISSION_STALE_HALT_SECONDS:-10800}"
+        case "$STALE_HALT_SEC" in ''|*[!0-9]*) STALE_HALT_SEC=10800 ;; esac
+        [ "$STALE_HALT_SEC" -lt 300 ] && STALE_HALT_SEC=10800
         if [ "$DIFF" -gt "$STALE_HALT_SEC" ] 2>/dev/null; then
           # 3h (または MISSION_STALE_HALT_SECONDS) 超: 自セッションファイルを jq で halt して exit 0
           STALE_MINS=$(( DIFF / 60 ))
@@ -184,6 +186,9 @@ if [ -d "$SESSIONS_DIR" ]; then
             mv "$tmpf" "$SESSION_FILE_TO_BLOCK"
           else
             rm -f "$tmpf"
+            printf '{"decision":"block","reason":"stale auto-halt の書き込みに失敗。手動で cleanup-stale を実行してください"}
+'
+            exit 0
           fi
           # halt 済みなので block せず通す
           exit 0
