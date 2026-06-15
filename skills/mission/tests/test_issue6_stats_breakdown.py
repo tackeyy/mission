@@ -52,3 +52,18 @@ def test_format_text_renders_breakdowns():
     assert "by_project:" in txt and "alpha" in txt
     assert "by_complexity:" in txt and "Complex" in txt
     assert "iteration_histogram:" in txt
+
+
+def test_iteration_4plus_bucket():
+    """(e) iteration=4,5 が iteration_histogram["4+"] にカウントされる."""
+    states = [
+        _state("/Users/x/dev/alpha", "Complex", "claude-code", True, 4),
+        _state("/Users/x/dev/alpha", "Complex", "codex", True, 5),
+        _state("/Users/x/dev/beta", "Standard", "claude-code", False, 2, composite=None),
+    ]
+    agg = ms._aggregate(states)
+    assert agg["iteration_histogram"].get("4+") == 2, \
+        f"iteration=4,5 は '4+' バケットにカウントされるべき: {agg['iteration_histogram']}"
+    assert agg["iteration_histogram"].get("2") == 1
+    assert "4" not in agg["iteration_histogram"], \
+        "iteration=4 は '4+' バケットに入り '4' キーには出てはならない"

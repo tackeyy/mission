@@ -79,3 +79,29 @@ def test_mark_passes_backward_compat_no_open_high_field(state_dir, run_cli, read
     assert r.returncode == 0, f"後方互換で通過すべき、got {r.returncode}\nstderr: {r.stderr}"
     s = read_state(state_dir)
     assert s["passes"] is True
+
+
+def test_mark_passes_force_bypasses_open_high_gate(state_dir, run_cli, read_state):
+    """(c) --force バイパス: open_high=2 でも --force --reason "x" なら exit0 かつ passes=True."""
+    _push_score(run_cli, state_dir, open_high=2)
+    r = run_cli("mark-passes", "--force", "--reason", "emergency override for test",
+                cwd=state_dir.parent)
+    assert r.returncode == 0, f"--force は open_high gate を bypass すべき, got {r.returncode}\nstderr: {r.stderr}"
+    s = read_state(state_dir)
+    assert s["passes"] is True
+
+
+def test_push_score_rejects_negative_open_high(state_dir, run_cli):
+    """(d) 負値 reject: push-score --open-high -1 が exit2 で拒否される (Fix #4 対応)."""
+    items = {"mission_achievement": 4.5, "accuracy": 4.0}
+    r = run_cli(
+        "push-score",
+        "--iteration", "1",
+        "--composite", "4.5",
+        "--min-item", "4.0",
+        "--items", json.dumps(items),
+        "--open-high", "-1",
+        cwd=state_dir.parent,
+    )
+    assert r.returncode == 2, f"--open-high -1 は exit 2 で reject すべき, got {r.returncode}\nstderr: {r.stderr}"
+    assert "0 以上" in r.stderr or "open-high" in r.stderr, f"エラーメッセージ不正: {r.stderr}"

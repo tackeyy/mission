@@ -122,3 +122,46 @@ def test_hook_no_warn_on_fresh_state(tmp_path):
     _write_session(tmp_path, "cc-fresh", updated_at=fresh)
     r = _run_hook(tmp_path, {"CLAUDE_CODE_SESSION_ID": "fresh"})
     assert "block" in r.stdout and "WARN" not in r.stdout, "fresh state で誤って STALE WARN が出た(tzバグ)"
+
+
+def test_hook_does_not_contaminate_other_session_after_own_autohalt(tmp_path):
+    """(a) 他セッション非汚染: 自session stale auto-halt 後も別sid fresh stateは block を返す."""
+    import datetime
+    very_stale = "2020-01-01T00:00:00Z"
+    fresh = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # 自セッション (cc-mine) が stale (3h超) → auto-halt 対象
+    _write_session(tmp_path, "cc-mine", updated_at=very_stale, project_root=str(tmp_path))
+    # 別セッション (cc-other) が fresh かつ未達
+    _write_session(tmp_path, "cc-other", updated_at=fresh, project_root=str(tmp_path))
+
+    # 自セッション (cc-mine) の hook 呼び出し → stale なので block しない
+    r_self = _run_hook(tmp_path, {"CLAUDE_CODE_SESSION_ID": "mine"})
+    assert "block" not in r_self.stdout, f"自session stale は block すべきでない: {r_self.stdout}"
+
+    # 自セッション auto-halt 後、cc-other を持つ別エージェントが hook を呼ぶ → fresh なので block
+    r_other = _run_hook(tmp_path, {"CLAUDE_CODE_SESSION_ID": "other"})
+    assert '"decision"' in r_other.stdout and "block" in r_other.stdout, \
+        f"fresh な別session は block されるべき: {r_other.stdout}"
+
+    # cc-other の loop_active が true のまま (auto-halt で汚染されていない)
+    sf_other = tmp_path / ".mission-state" / "sessions" / "cc-other.json"
+    st_other = json.loads(sf_other.read_text())
+    assert st_other["loop_active"] is True, "別session の loop_active が変更されている (汚染)"
+
+
+def test_hook_custom_stale_halt_seconds(tmp_path):
+    """(b) MISSION_STALE_HALT_SECONDS=400: 下限(300)以上の値で500秒超の state が auto-halt される."""
+    import datetime
+    # 500秒前のタイムスタンプ (400秒の閾値を超える; 下限300以上の値が有効になる)
+    old_ts = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=500)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _write_session(tmp_path, "cc-custom", updated_at=old_ts, project_root=str(tmp_path))
+
+    env = {"CLAUDE_CODE_SESSION_ID": "custom", "MISSION_STALE_HALT_SECONDS": "400"}
+    r = _run_hook(tmp_path, env)
+    # 500秒超 > 400秒閾値 なので auto-halt → block しない
+    assert "block" not in r.stdout, f"400s threshold で auto-halt すべき: {r.stdout}"
+    sf = tmp_path / ".mission-state" / "sessions" / "cc-custom.json"
+    st = json.loads(sf.read_text())
+    assert st["loop_active"] is False, "loop_active が false になっていない"
+    assert "stale" in st["halt_reason"], f"halt_reason に 'stale' が含まれない: {st['halt_reason']}"
