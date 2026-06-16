@@ -42,7 +42,7 @@ and public competitor READMEs.
 | Product / plugin | Surface | Relationship | What overlaps | How `mission` differs |
 |---|---|---|---|---|
 | [`/goal`](https://code.claude.com/docs/en/goal) | Claude Code | Most important official direct competitor | Sets a completion condition and evaluates after each turn until the condition is met | `/goal` is a lightweight session-scoped completion condition. Its evaluator judges the evidence shown in the conversation. `mission` is a more structured mission-completion layer with supporting skills, persistent `.mission-state`, score history, review/critic loops, and threshold gates. |
-| [`ralph-loop`](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/ralph-loop) | Claude Code | Closest direct competitor on Claude Code | Stop hook powered iteration until completion | Ralph replays the same prompt until a completion promise or max iteration. `mission` decomposes work into plan, execution, peer review, scoring, critic feedback, persistent session state, and threshold-gated completion. |
+| [`ralph-loop`](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/ralph-loop) | Claude Code | Closest direct competitor on Claude Code | Stop hook powered iteration until completion | `ralph-loop` re-runs a prompt until a completion promise or max iteration is reached. `mission` decomposes work into plan, execution, peer review, scoring, critic feedback, persistent session state, and threshold-gated completion. |
 | [`Superpowers`](https://github.com/obra/superpowers) | Claude Code, Codex, and other agents | Strongest cross-agent competitor | Planning, TDD, debugging, review, and delivery workflows | Superpowers is a broad development methodology. `mission` is a focused completion loop for any mission, including docs, research, release prep, and non-feature work, with explicit scoring and state gates. |
 | [`feature-dev`](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/feature-dev) | Claude Code | Adjacent workflow competitor | Structured discovery, architecture, implementation, and quality review | Feature-dev is optimized for new feature delivery. `mission` is broader and can orchestrate arbitrary project outcomes without requiring a feature-development shape. |
 | [`code-review`](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/code-review) / `pr-review-toolkit` | Claude Code | Adjacent quality competitor | Multi-agent review, confidence scoring, test and quality review | These tools review PRs or code changes. `mission` uses review as one phase, then loops through fixes and re-scoring until the whole mission passes. |
@@ -50,7 +50,7 @@ and public competitor READMEs.
 
 The intended positioning is:
 
-- **Compared with Ralph Loop**: more structured than prompt replay.
+- **Compared with `ralph-loop`**: adds plan, execution, review, and scoring structure on top of a prompt-iteration loop.
 - **Compared with Claude `/goal`**: heavier than the official lightweight
   completion condition, but includes state, review, scoring, and improvement
   loops.
@@ -68,7 +68,7 @@ agent needs an auditable "why can I stop now?" gate.
 |---|---|
 | `mission` | You need an auditable completion gate for a multi-step outcome, especially across iterations, compaction, or mixed research/docs/code work. |
 | Claude Code `/goal` | You want a built-in Claude Code mechanism for a lightweight run-until condition inside one session. |
-| `ralph-loop` | You want a simple Claude Code loop that keeps re-feeding one prompt until a literal completion promise is emitted. |
+| `ralph-loop` | You want a Claude Code loop that re-runs one prompt until a literal completion promise is emitted. |
 | `Superpowers` | You want a broad coding-agent methodology with brainstorming, planning, TDD, debugging, review, and branch delivery practices. |
 | Review / CI / security plugins | You need a specialist check for one part of the workflow, and another orchestrator or human will decide overall completion. |
 

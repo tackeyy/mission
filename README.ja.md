@@ -36,7 +36,7 @@ repository、[Claude Code `/goal` docs](https://code.claude.com/docs/ja/goal)、
 | Product / plugin | Surface | 関係 | 重なる領域 | `mission` との差分 |
 |---|---|---|---|---|
 | [`/goal`](https://code.claude.com/docs/ja/goal) | Claude Code | 公式の最重要直接競合 | completion condition を設定し、各ターン後に評価して条件達成まで継続 | `/goal` はセッションスコープの軽量な継続条件で、評価器は会話上に示された証拠を見て達成可否を判断します。`mission` は複数サブスキル、永続 `.mission-state`、score history、review/critic loop、threshold gate を持つ、より構造化されたミッション完遂 layer です。 |
-| [`ralph-loop`](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/ralph-loop) | Claude Code | Claude Code 上の最も近い直接競合 | Stop hook で完了まで iteration を継続 | Ralph は同じ prompt を completion promise または max iteration まで再投入します。`mission` は計画、実行、ピアレビュー、スコアリング、critic feedback、永続 session state、threshold gate で完了判断します。 |
+| [`ralph-loop`](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/ralph-loop) | Claude Code | Claude Code 上の最も近い直接競合 | Stop hook で完了まで iteration を継続 | `ralph-loop` は prompt を completion promise または max iteration まで再投入します。`mission` は計画、実行、ピアレビュー、スコアリング、critic feedback、永続 session state、threshold gate で完了判断します。 |
 | [`Superpowers`](https://github.com/obra/superpowers) | Claude Code, Codex, other agents | cross-agent の最有力競合 | planning、TDD、debugging、review、delivery workflow | Superpowers は広い開発方法論です。`mission` は docs、research、release prep、feature 以外の作業も含む任意ミッションの完遂 loop に絞り、明示的な scoring と state gate を持ちます。 |
 | [`feature-dev`](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/feature-dev) | Claude Code | 隣接 workflow 競合 | discovery、architecture、implementation、quality review | feature-dev は新機能開発に最適化されています。`mission` は feature development 形状に限定せず、任意の project outcome を扱います。 |
 | [`code-review`](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/code-review) / `pr-review-toolkit` | Claude Code | 隣接 quality 競合 | multi-agent review、confidence scoring、test / quality review | これらは PR や code change のレビューが主目的です。`mission` は review を 1 phase として使い、その後の修正と再採点まで loop します。 |
@@ -44,7 +44,7 @@ repository、[Claude Code `/goal` docs](https://code.claude.com/docs/ja/goal)、
 
 意図する打ち出しは以下です。
 
-- **Ralph Loop と比べて**: prompt replay より構造化されている
+- **`ralph-loop` と比べて**: prompt 再投入ループに plan / 実行 / レビュー / 採点を加えて構造化している
 - **Claude `/goal` と比べて**: 公式の軽量 completion condition より重いが、state、レビュー、採点、改善 loop を含む
 - **Superpowers と比べて**: 完全な開発方法論より狭く軽量
 - **review / CI plugin と比べて**: review、test、release を phase として呼び出し、ミッション全体の完了可否を判断する orchestrator
@@ -57,7 +57,7 @@ repository、[Claude Code `/goal` docs](https://code.claude.com/docs/ja/goal)、
 |---|---|
 | `mission` | 複数ステップの outcome に監査可能な completion gate が必要。特に iteration、compaction、research/docs/code 混在作業をまたぐ場合。 |
 | Claude Code `/goal` | Claude Code 標準機能として、単一セッション内で検証可能な終了条件まで軽量に走らせたい場合。 |
-| `ralph-loop` | Claude Code で、同じ prompt を literal な completion promise が出るまで再投入する単純な loop がほしい場合。 |
+| `ralph-loop` | Claude Code で、prompt を literal な completion promise が出るまで再投入する loop がほしい場合。 |
 | `Superpowers` | brainstorming、planning、TDD、debugging、review、branch delivery まで含む広い coding-agent 方法論がほしい場合。 |
 | review / CI / security plugin | workflow の一部分だけを専門的に検査し、全体の完了判断は別の orchestrator または人間が行う場合。 |
 
