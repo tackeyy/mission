@@ -7,6 +7,12 @@
 フォーマットは [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に準拠し、
 バージョニングは [Semantic Versioning](https://semver.org/lang/ja/) に従います。
 
+## [1.0.1] - 2026-06-16
+
+### 修正
+- コピー配布用の Codex marketplace wrapper（`plugins/mission/`）を正典の `skills/` / `scripts/` と同期し、最新の stale auto-halt、High gate、stats、scoring rubric 修正を含めました。
+- Codex wrapper が正典実装から drift した場合に失敗する回帰テストを追加しました。
+
 ## [1.0.0] - 2026-06-15
 
 初の公開リリース。
@@ -21,4 +27,5 @@
 - 状態ルーティング・スコアゲート・hook 挙動をカバーする Python テストスイート。
 - GitHub Actions CI（`push` / `pull_request` / `workflow_dispatch`）。pytest と ShellCheck を実行。
 
+[1.0.1]: https://github.com/tackeyy/mission/releases/tag/v1.0.1
 [1.0.0]: https://github.com/tackeyy/mission/releases/tag/v1.0.0

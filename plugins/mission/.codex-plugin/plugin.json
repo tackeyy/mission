@@ -1,6 +1,6 @@
 {
   "name": "mission",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Mission-oriented ReAct loop orchestrator for Codex. Plans, executes, reviews, scores, and iterates until the configured quality gate passes.",
   "skills": "./skills/"
 }
