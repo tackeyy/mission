@@ -210,8 +210,9 @@ if [ -d "$SESSIONS_DIR" ]; then
     PHASE=$(jq -r '.phase // "unknown"' "$SESSION_FILE_TO_BLOCK" 2>/dev/null || echo "unknown")
     PLANNING_WARN_ITER="${MISSION_PLANNING_WARN_ITERATIONS:-3}"
     case "$PLANNING_WARN_ITER" in ''|*[!0-9]*) PLANNING_WARN_ITER=3 ;; esac
+    [ "$PLANNING_WARN_ITER" -lt 1 ] && PLANNING_WARN_ITER=3
     if [ "$SCORE_HISTORY_LEN" -eq 0 ] 2>/dev/null && [ "$ITER" -ge "$PLANNING_WARN_ITER" ] 2>/dev/null; then
-      PUSH_SCORE_WARN="[WARN: push-score 未実行の疑い (iter=$ITER, score_history 空, phase=$PHASE)。mission-state.py get でstate確認を] "
+      PUSH_SCORE_WARN="[WARN: push-score 未実行の疑い (iter=$ITER, score_history 空, phase=$PHASE)。mission-state.py get で state を確認し、push-score 未実行なら push-score を実行してください] "
     fi
     REASON="${STALE}${PUSH_SCORE_WARN}/mission skill アクティブ・未達 (multi-session: iter=$ITER, last_score=$LAST_SCORE, threshold=$THRESHOLD)。 state.json の passes=true か halt_reason を立てるまでループを継続。 ミッション: $MISSION"
     jq -n --arg r "$REASON" '{decision:"block", reason:$r}'

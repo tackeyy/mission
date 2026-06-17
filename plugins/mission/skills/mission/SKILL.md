@@ -58,16 +58,14 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score \
 # 合格条件を満たさなければ reject されるため、orchestrator が判定を誤っても無条件 passes=true は書き込めない
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py mark-passes
 
-# 人手 override (緊急時のみ。バリデーション skip + state.force_reason に理由保存 + stderr に WARNING)
-# 適用基準: ユーザー承認済 / Reviewer 取得不能等で score_history を残せないが完了させたい場合のみ
+# 人手 override (緊急時のみ・ユーザー承認済のみ)
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py mark-passes --force --reason "<override 理由>"
-
 # 中断マーク (halt_reason 設定, loop_active=false)
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py mark-halt --reason "<理由>"
-
-# R1: resume / compaction 復帰時に state.pid を現セッションの agent CLI PID に更新
-# (これを怠ると hook が state.pid != 現 PID と判定して exit 0、ループ強制が機能しない)
+# R1: resume 復帰時に state.pid を現 agent CLI PID に更新 (hook owner check のため必須)
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py refresh-pid
+# P2-1: project_root 不存在 state の救済 (ディレクトリ移動/rename 後。cleanup-stale が孤児扱いした場合)
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py update-project-root --path <新しい project_root のパス>
 ```
 
 **詳細リファレンス** (全サブコマンド / Phase C multi-session / 管理コマンド / migration): `refs/state-management.md` を Read で参照すること。
