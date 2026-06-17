@@ -215,3 +215,22 @@ def test_hook_no_warn_on_fresh_planning(tmp_path):
     r = _run_hook(tmp_path, env)
     assert "block" in r.stdout, f"未達なので block すべき: {r.stdout}"
     assert "push-score" not in r.stdout, f"iteration=0 では push-score 警告不要: {r.stdout}"
+
+
+def test_hook_planning_warn_iter_zero_clamped_to_default(tmp_path):
+    """stop-guard 下限ガード: MISSION_PLANNING_WARN_ITERATIONS=0 は下限 3 にクランプされ
+    iteration=0 では push-score 警告を出さない (下限ガードが無いと iter0 でも誤発火する)."""
+    import datetime
+    fresh = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _write_session(tmp_path, "cc-zerothresh",
+                   updated_at=fresh,
+                   phase="planning",
+                   iteration=0,
+                   score_history=[])
+    env = {
+        "CLAUDE_CODE_SESSION_ID": "zerothresh",
+        "MISSION_PLANNING_WARN_ITERATIONS": "0",  # 下限ガードで 3 にクランプされるべき
+    }
+    r = _run_hook(tmp_path, env)
+    assert "block" in r.stdout, f"未達なので block すべき: {r.stdout}"
+    assert "push-score" not in r.stdout, f"iter=0 で PLANNING_WARN_ITERATIONS=0 の場合、下限ガードで警告が出ないはず: {r.stdout}"
