@@ -629,7 +629,7 @@ def cmd_push_score(args):
         if len(history) >= 2:
             prev_composite = history[-2].get("composite")
             cur_composite = entry["composite"]
-            if prev_composite is not None and (cur_composite - prev_composite) < 0.1:
+            if _is_valid_composite(prev_composite) and 0 <= (cur_composite - prev_composite) < 0.1:
                 data["stagnation_count"] = data.get("stagnation_count", 0) + 1
             else:
                 data["stagnation_count"] = 0

@@ -328,3 +328,16 @@ def test_q11_exact_0_1_improvement_resets(state_dir, run_cli, read_state):
             "--items", '{"a": 3.1}', cwd=state_dir.parent, check=True)
     s = read_state(state_dir)
     assert s["stagnation_count"] == 0
+
+
+def test_q11_regression_does_not_increment_stagnation(state_dir, run_cli, read_state):
+    """後退ケース: prev=4.0, cur=3.0 → delta=-1.0 < 0 なので stagnation_count は増えない (リセット)."""
+    run_cli("push-score", "--iteration", "1", "--composite", "4.0", "--min-item", "3.5",
+            "--items", '{"a": 4.0}', cwd=state_dir.parent, check=True)
+    run_cli("push-score", "--iteration", "2", "--composite", "3.0", "--min-item", "2.5",
+            "--items", '{"a": 3.0}', cwd=state_dir.parent, check=True)
+    s = read_state(state_dir)
+    # 後退は停滞ではなく「改善なし」扱い → stagnation_count = 0 にリセット
+    assert s["stagnation_count"] == 0, (
+        f"後退時は stagnation_count をインクリメントしてはならない: {s['stagnation_count']}"
+    )
