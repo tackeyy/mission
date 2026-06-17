@@ -198,7 +198,22 @@ if [ -d "$SESSIONS_DIR" ]; then
         fi
       fi
     fi
-    REASON="${STALE}/mission skill アクティブ・未達 (multi-session: iter=$ITER, last_score=$LAST_SCORE, threshold=$THRESHOLD)。 state.json の passes=true か halt_reason を立てるまでループを継続。 ミッション: $MISSION"
+    # P1-2: planning 滞留(push-score 未実行) bd12 型の早期検出。
+    # 検出条件: loop_active=true かつ score_history 空(=push-score未実行) かつ
+    #           iteration が閾値(MISSION_PLANNING_WARN_ITERATIONS)超。
+    # haltせず警告をfeedbackに注入するのみ。偽陽性(正常なplanning初期)は閾値で制御。
+    # デフォルト閾値=3: iteration>=3 かつ score_history 空を異常とみなす根拠 —
+    # 正常run では iter1 実行後に push-score が呼ばれ score_history に1件以上入るため。
+    # テスト容易性のため環境変数 MISSION_PLANNING_WARN_ITERATIONS で override 可能。
+    PUSH_SCORE_WARN=""
+    SCORE_HISTORY_LEN=$(jq -r '.score_history | length' "$SESSION_FILE_TO_BLOCK" 2>/dev/null || echo "0")
+    PHASE=$(jq -r '.phase // "unknown"' "$SESSION_FILE_TO_BLOCK" 2>/dev/null || echo "unknown")
+    PLANNING_WARN_ITER="${MISSION_PLANNING_WARN_ITERATIONS:-3}"
+    case "$PLANNING_WARN_ITER" in ''|*[!0-9]*) PLANNING_WARN_ITER=3 ;; esac
+    if [ "$SCORE_HISTORY_LEN" -eq 0 ] 2>/dev/null && [ "$ITER" -ge "$PLANNING_WARN_ITER" ] 2>/dev/null; then
+      PUSH_SCORE_WARN="[WARN: push-score 未実行の疑い (iter=$ITER, score_history 空, phase=$PHASE)。mission-state.py get でstate確認を] "
+    fi
+    REASON="${STALE}${PUSH_SCORE_WARN}/mission skill アクティブ・未達 (multi-session: iter=$ITER, last_score=$LAST_SCORE, threshold=$THRESHOLD)。 state.json の passes=true か halt_reason を立てるまでループを継続。 ミッション: $MISSION"
     jq -n --arg r "$REASON" '{decision:"block", reason:$r}'
     exit 0
   fi
