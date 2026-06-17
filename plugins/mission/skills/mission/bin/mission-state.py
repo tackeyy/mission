@@ -348,7 +348,24 @@ def cmd_init(args):
         "assumptions_path": ".mission-state/assumptions.md",
         "started_at": iso_now(),
         "updated_at": iso_now(),
+        # S3: issue_ref (未指定 None)
+        "issue_ref": getattr(args, "issue_ref", None),
     }
+    # S3: 同プロジェクト内の active session で同一 issue_ref があれば WARN (reject しない)
+    _issue_ref = getattr(args, "issue_ref", None)
+    if _issue_ref:
+        for sf_other in _iter_state_files(cwd):
+            try:
+                other = json.loads(sf_other.read_text())
+            except Exception:
+                continue
+            if other.get("loop_active") and other.get("issue_ref") == _issue_ref:
+                print(
+                    f"WARNING [S3]: issue_ref='{_issue_ref}' を持つ active session が既に存在します"
+                    f" (session_id={other.get('session_id', '?')})。重複作業の可能性を確認してください。",
+                    file=sys.stderr,
+                )
+                break  # 1件見つかれば十分
     # M7 (2026-06-10): complexity を init 時に指定可能に。未指定は WARN (後方互換で Unknown 維持)
     if getattr(args, "complexity", None):
         initial["complexity"] = args.complexity
@@ -1270,6 +1287,8 @@ def _build_parser():
     p_init.add_argument("mission", help="ミッション記述")
     p_init.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
     p_init.add_argument("--max-iter", type=int, default=None, help=f"最大反復回数。未指定={DEFAULT_MAX_ITER} / 0=上限なし(stagnation停止)")
+    p_init.add_argument("--issue-ref", default=None, dest="issue_ref",
+                        help="関連 issue の参照 (例: github:owner/repo#42)。同一 issue_ref の active session が存在する場合 WARN")
     p_init.set_defaults(func=cmd_init)
 
     p_get = sub.add_parser("get", help="state.json の値取得")
