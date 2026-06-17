@@ -39,7 +39,7 @@ state.json の更新は **`${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-stat
 
 ```bash
 # 新規ミッション初期化
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py init "<ミッション記述>" [--threshold X] [--max-iter N] [--complexity Simple|Standard|Complex|Critical]
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py init "<ミッション記述>" [--threshold X] [--max-iter N] [--complexity Simple|Standard|Complex|Critical] [--issue-ref <ref>]
 
 # 採点結果を score_history に記録 (Phase 5 直後に orchestrator が必ず呼ぶ。scorer は fork のため書込不可)
 # --scoring-output 指定で .mission-state/archive/iter-N-<mission_id先頭8>-scoring.md に永続化 (キーはエイリアス正規化・未知キーWARN)

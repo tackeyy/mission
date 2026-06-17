@@ -256,3 +256,88 @@ def test_push_score_scoring_output_prepends_metadata(state_dir, run_cli, tmp_pat
     assert "mission_id=abc12345" in content
     assert "agent=" in content
     assert "本文ここ" in content  # 元の本文が失われない
+
+
+# ===== Q11: stagnation_count 自動計算 =====
+
+
+def test_q11_first_push_stagnation_zero(state_dir, run_cli, read_state):
+    """初回 push-score → stagnation_count=0 (前エントリなし)."""
+    run_cli(
+        "push-score",
+        "--iteration", "1",
+        "--composite", "3.0",
+        "--min-item", "2.5",
+        "--items", '{"mission_achievement": 3.0}',
+        cwd=state_dir.parent, check=True,
+    )
+    s = read_state(state_dir)
+    assert s["stagnation_count"] == 0
+
+
+def test_q11_improvement_gte_0_1_resets_to_zero(state_dir, run_cli, read_state):
+    """composite 改善幅 >= 0.1 → stagnation_count=0 にリセット."""
+    run_cli("push-score", "--iteration", "1", "--composite", "3.0", "--min-item", "2.5",
+            "--items", '{"mission_achievement": 3.0}', cwd=state_dir.parent, check=True)
+    run_cli("push-score", "--iteration", "2", "--composite", "3.1", "--min-item", "3.0",
+            "--items", '{"mission_achievement": 3.1}', cwd=state_dir.parent, check=True)
+    s = read_state(state_dir)
+    assert s["stagnation_count"] == 0
+
+
+def test_q11_improvement_lt_0_1_increments(state_dir, run_cli, read_state):
+    """composite 改善幅 < 0.1 (0.05) → stagnation_count += 1."""
+    run_cli("push-score", "--iteration", "1", "--composite", "3.0", "--min-item", "2.5",
+            "--items", '{"mission_achievement": 3.0}', cwd=state_dir.parent, check=True)
+    run_cli("push-score", "--iteration", "2", "--composite", "3.05", "--min-item", "3.0",
+            "--items", '{"mission_achievement": 3.05}', cwd=state_dir.parent, check=True)
+    s = read_state(state_dir)
+    assert s["stagnation_count"] == 1
+
+
+def test_q11_stagnation_cumulative(state_dir, run_cli, read_state):
+    """改善幅 < 0.1 が続くと stagnation_count が累積する."""
+    run_cli("push-score", "--iteration", "1", "--composite", "3.0", "--min-item", "2.5",
+            "--items", '{"a": 3.0}', cwd=state_dir.parent, check=True)
+    run_cli("push-score", "--iteration", "2", "--composite", "3.05", "--min-item", "2.5",
+            "--items", '{"a": 3.05}', cwd=state_dir.parent, check=True)
+    run_cli("push-score", "--iteration", "3", "--composite", "3.08", "--min-item", "2.5",
+            "--items", '{"a": 3.08}', cwd=state_dir.parent, check=True)
+    s = read_state(state_dir)
+    assert s["stagnation_count"] == 2
+
+
+def test_q11_reset_after_stagnation(state_dir, run_cli, read_state):
+    """stagnation 後に大きく改善したら stagnation_count がリセットされる."""
+    run_cli("push-score", "--iteration", "1", "--composite", "3.0", "--min-item", "2.5",
+            "--items", '{"a": 3.0}', cwd=state_dir.parent, check=True)
+    run_cli("push-score", "--iteration", "2", "--composite", "3.05", "--min-item", "2.5",
+            "--items", '{"a": 3.05}', cwd=state_dir.parent, check=True)
+    # stagnation_count == 1 の状態
+    run_cli("push-score", "--iteration", "3", "--composite", "3.5", "--min-item", "3.0",
+            "--items", '{"a": 3.5}', cwd=state_dir.parent, check=True)
+    s = read_state(state_dir)
+    assert s["stagnation_count"] == 0
+
+
+def test_q11_exact_0_1_improvement_resets(state_dir, run_cli, read_state):
+    """改善幅がちょうど 0.1 → stagnation_count=0 (境界値)."""
+    run_cli("push-score", "--iteration", "1", "--composite", "3.0", "--min-item", "2.5",
+            "--items", '{"a": 3.0}', cwd=state_dir.parent, check=True)
+    run_cli("push-score", "--iteration", "2", "--composite", "3.1", "--min-item", "3.0",
+            "--items", '{"a": 3.1}', cwd=state_dir.parent, check=True)
+    s = read_state(state_dir)
+    assert s["stagnation_count"] == 0
+
+
+def test_q11_regression_does_not_increment_stagnation(state_dir, run_cli, read_state):
+    """後退ケース: prev=4.0, cur=3.0 → delta=-1.0 < 0 なので stagnation_count は増えない (リセット)."""
+    run_cli("push-score", "--iteration", "1", "--composite", "4.0", "--min-item", "3.5",
+            "--items", '{"a": 4.0}', cwd=state_dir.parent, check=True)
+    run_cli("push-score", "--iteration", "2", "--composite", "3.0", "--min-item", "2.5",
+            "--items", '{"a": 3.0}', cwd=state_dir.parent, check=True)
+    s = read_state(state_dir)
+    # 後退は停滞ではなく「改善なし」扱い → stagnation_count = 0 にリセット
+    assert s["stagnation_count"] == 0, (
+        f"後退時は stagnation_count をインクリメントしてはならない: {s['stagnation_count']}"
+    )
