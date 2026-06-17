@@ -804,7 +804,7 @@ def cmd_update_project_root(args):
         else:
             print("ERROR: state.json が見つかりません。", file=sys.stderr)
             sys.exit(1)
-    new_root = str(Path(args.path).resolve()) if args.path else str(cwd)
+    new_root = str(Path(args.path).resolve())
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
         old_root = data.get("project_root", "")

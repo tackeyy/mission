@@ -189,7 +189,7 @@ def test_hook_warns_push_score_not_executed_when_planning_stale(tmp_path):
                    score_history=[])
     env = {
         "CLAUDE_CODE_SESSION_ID": "bdtest",
-        "MISSION_PLANNING_WARN_ITERATIONS": "1",  # テスト用閾値: iteration > 1 で発火
+        "MISSION_PLANNING_WARN_ITERATIONS": "1",  # テスト用閾値: iteration >= 1 で発火
     }
     r = _run_hook(tmp_path, env)
     # block は維持される(未達 state)
