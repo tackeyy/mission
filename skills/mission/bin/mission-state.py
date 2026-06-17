@@ -785,6 +785,36 @@ def cmd_refresh_pid(args):
     }))
 
 
+def cmd_update_project_root(args):
+    """P2-1: project_root を正しいパスに更新する (陳腐化救済用).
+
+    project_root が不存在になった state (ディレクトリ移動・rename 等で発生) は
+    cleanup-stale に孤児扱いされ続ける。このコマンドで正しいパスに更新することで
+    rescue できる (実例: cc-48c91727, project_root=/dev/ccbattle 不存在)。
+    state.json が存在するディレクトリの cwd で実行すること。
+    legacy state.json も sessions/<sid>.json も両方対応する。
+    """
+    cwd = Path.cwd()
+    # sessions/<sid>.json を優先、なければ legacy state.json にフォールバック
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        legacy = state_dir(cwd) / "state.json"
+        if legacy.exists():
+            sf = legacy
+        else:
+            print("ERROR: state.json が見つかりません。", file=sys.stderr)
+            sys.exit(1)
+    new_root = str(Path(args.path).resolve()) if args.path else str(cwd)
+    with StateLock(lock_file(cwd)):
+        data = json.loads(sf.read_text())
+        old_root = data.get("project_root", "")
+        data["project_root"] = new_root
+        data["updated_at"] = iso_now()
+        backup_state(sf)
+        atomic_write_json(sf, data)
+    print(json.dumps({"ok": True, "old_project_root": old_root, "new_project_root": new_root}))
+
+
 def cmd_cleanup_empty(args):
     """A-3: 空 .mission-state/ ディレクトリを rmdir."""
     target = Path(args.path).resolve() / ".mission-state"
@@ -1217,6 +1247,10 @@ def _build_parser():
     p_refresh.add_argument("--force", action="store_true", help="既存 pid が alive な agent CLI プロセスでも強制継承")
     p_refresh.add_argument("--no-reactivate", action="store_true", help="orphan halt の解除を行わない (純粋に pid だけ更新)")
     p_refresh.set_defaults(func=cmd_refresh_pid)
+
+    p_uproot = sub.add_parser("update-project-root", help="P2-1: project_root を正しいパスに更新 (ディレクトリ移動・rename 後の rescue 用)")
+    p_uproot.add_argument("--path", required=True, help="新しい project_root パス")
+    p_uproot.set_defaults(func=cmd_update_project_root)
 
     p_clean = sub.add_parser("cleanup-empty", help="空 .mission-state/ ディレクトリを rmdir")
     p_clean.add_argument("path", help="プロジェクトルートパス")
