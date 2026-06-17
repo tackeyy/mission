@@ -5,6 +5,9 @@ from pathlib import Path
 SKILL_DIR = Path(__file__).resolve().parent.parent
 SKILL_MD = SKILL_DIR / "SKILL.md"
 REFS_DIR = SKILL_DIR / "refs"
+REPO_ROOT = SKILL_DIR.parent.parent
+REVIEWER_MD = REPO_ROOT / "skills" / "mission-reviewer" / "SKILL.md"
+SCORER_MD = REPO_ROOT / "skills" / "mission-scorer" / "SKILL.md"
 
 
 def _read(p):
@@ -158,3 +161,25 @@ def test_skillmd_hallucination_discipline_has_verification():
         "Compact Instructions のハルシネーション項に照合+機械検証規律が見つからない "
         f"(照合={has_kensho}, discipline={has_discipline})"
     )
+
+
+def test_reviewer_regression_baseline_uses_merge_base():
+    """#15: worktree 退行判定は merge-base を基点にする規律を持つ."""
+    txt = _read(REVIEWER_MD)
+    assert "merge-base" in txt
+    assert "git diff $BASE" in txt
+
+
+def test_test_authenticity_rules_documented():
+    """#17: reviewer/scorer に negative case を含むテスト真正性チェックがある."""
+    reviewer = _read(REVIEWER_MD)
+    scorer = _read(SCORER_MD)
+    assert "negative case" in reviewer or "トートロジー" in reviewer
+    assert "テスト真正性" in scorer or "negative" in scorer
+
+
+def test_complexity_overestimate_cost_documented():
+    """#18: 複雑度過大見積もりコストと assumptions.md への根拠記録を明記する."""
+    txt = _read(SKILL_MD)
+    assert "過大見積もり" in txt
+    assert "assumptions.md" in txt and "判定根拠" in txt

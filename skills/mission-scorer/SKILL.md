@@ -104,6 +104,7 @@ composite_score >= 4.0 (= 合格圏内) を出す前、または全 Reviewer が
 2. 残存 Issue 件数 × ペナルティ表 (`${CLAUDE_PLUGIN_ROOT}/skills/mission/refs/scoring-rubric.md` 参照) と「実際の項目スコア」が整合するか確認
    - 例: Low 6 件残存 (=Low 4 件以上) + 全項目 5.0 → **矛盾**。各項目を 4.3 に補正 (正確な値は rubric)
 3. orchestrator が executor と reviewer を同一セッションから spawn している場合、Maker-Checker バイアスのリスクを `### バイアス注意` セクションで明示し、ユーザーに「絶対評価でも妥当か再確認」を促す
+4. Reviewer が「テスト追加・全 green」を根拠に完成度 5 を付け、テスト真正性指摘がない場合、negative case の有無を独立検算してよい
 
 自己検算で矛盾を検出したら、項目スコアを **正本 `${CLAUDE_PLUGIN_ROOT}/skills/mission/refs/scoring-rubric.md` のペナルティ表** に従って補正する (正確な件数別ペナルティは必ず rubric を読む)。
 

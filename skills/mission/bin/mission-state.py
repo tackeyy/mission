@@ -10,7 +10,7 @@
 - A-3: 空 .mission-state/ ディレクトリの cleanup
 
 ユーザビリティ:
-  python3 ${MISSION_PLUGIN_ROOT}/skills/mission/bin/mission-state.py init <mission> [--threshold X] [--max-iter N]
+  python3 ${MISSION_PLUGIN_ROOT}/skills/mission/bin/mission-state.py init <mission> [--threshold X] [--max-iter N] [--files a.py,b.py]
   python3 ${MISSION_PLUGIN_ROOT}/skills/mission/bin/mission-state.py get [--field key]
   python3 ${MISSION_PLUGIN_ROOT}/skills/mission/bin/mission-state.py set key=value [key=value ...]
   python3 ${MISSION_PLUGIN_ROOT}/skills/mission/bin/mission-state.py mark-passes
@@ -322,10 +322,40 @@ def mission_id(mission: str) -> str:
 COMPLEXITY_REVIEWER_COUNT = {"Simple": 1, "Standard": 2, "Complex": 3, "Critical": 3}
 
 
+def _parse_files_arg(files: str | None) -> list[str]:
+    """--files のカンマ区切りを project-root 相対パスのリストに正規化する."""
+    if not files:
+        return []
+    return [p.strip() for p in files.split(",") if p.strip()]
+
+
+def _warn_s3_file_overlap(cwd: Path, planned_files: list[str], cur_sid: str) -> None:
+    """同一 project 内 active session の planned_files 重複を WARN する (reject はしない)."""
+    planned = set(planned_files)
+    if not planned:
+        return
+    for sf_other in _iter_state_files(cwd):
+        try:
+            other = json.loads(sf_other.read_text())
+        except Exception:
+            continue
+        if not other.get("loop_active") or other.get("session_id") == cur_sid:
+            continue
+        overlap = planned & set(other.get("planned_files") or [])
+        if overlap:
+            print(
+                f"WARNING [S3-files]: active session {other.get('session_id', '?')} "
+                f"と対象ファイルが重複: {sorted(overlap)}。マージ衝突の可能性を確認。",
+                file=sys.stderr,
+            )
+            break
+
+
 
 def cmd_init(args):
     cwd = Path.cwd()
     state_dir(cwd).mkdir(parents=True, exist_ok=True)
+    planned_files = _parse_files_arg(getattr(args, "files", None))
 
     initial = {
         "mission": args.mission,
@@ -350,6 +380,8 @@ def cmd_init(args):
         "updated_at": iso_now(),
         # S3: issue_ref (未指定 None)
         "issue_ref": getattr(args, "issue_ref", None),
+        # S3-files: 同一 project の file-set overlap WARN 用 (未指定は空 list)
+        "planned_files": planned_files,
     }
     # S3: 同プロジェクト内の active session で同一 issue_ref があれば WARN (reject しない)
     _issue_ref = getattr(args, "issue_ref", None)
@@ -372,6 +404,7 @@ def cmd_init(args):
                     file=sys.stderr,
                 )
                 break  # 1件見つかれば十分
+    _warn_s3_file_overlap(cwd, planned_files, _cur_sid)
     # M7 (2026-06-10): complexity を init 時に指定可能に。未指定は WARN (後方互換で Unknown 維持)
     if getattr(args, "complexity", None):
         initial["complexity"] = args.complexity
@@ -1295,6 +1328,8 @@ def _build_parser():
     p_init.add_argument("--max-iter", type=int, default=None, help=f"最大反復回数。未指定={DEFAULT_MAX_ITER} / 0=上限なし(stagnation停止)")
     p_init.add_argument("--issue-ref", default=None, dest="issue_ref",
                         help="関連 issue の参照 (例: github:owner/repo#42)。同一 issue_ref の active session が存在する場合 WARN")
+    p_init.add_argument("--files", default=None,
+                        help="予定変更ファイルのカンマ区切り project-root 相対パス。同一 active session と重複する場合 WARN")
     p_init.set_defaults(func=cmd_init)
 
     p_get = sub.add_parser("get", help="state.json の値取得")
