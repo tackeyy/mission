@@ -221,7 +221,7 @@ Skill(skill="mission-reviewer", args="観点A: ミッション達成度 — ..."
 Skill(skill="mission-reviewer", args="観点B: 正確性")
 Skill(skill="mission-reviewer", args="観点C: 実用性")
 # オプション: 観点D (Complex/Critical のみ、採点除外)
-Skill(skill="mission-scorer", args="3レビュー結果統合 → 5項目採点")
+Skill(skill="mission-scorer", args="レビュー結果統合 → 採点 items 算出")
 # push-score の手順・--scoring-output 規約は §state.json 操作 参照
 Skill(skill="mission-critic", args="スコア結果 + 成果物 → 改善案")
 ```
@@ -242,8 +242,8 @@ Skill(skill="mission-critic", args="スコア結果 + 成果物 → 改善案")
 
 ```
 各イテレーション完了時:
-  composite_score = mean(5項目)
-  passes = composite_score >= threshold AND min(5項目) >= 3.5
+  composite_score = mean(採点した items)
+  passes = composite_score >= threshold AND min(採点した items) >= 3.5
 
   if passes:
     # P1: Early-Stop Sweet Spot — 合格時は基本即打ち止め (実測根拠: refs/changelog.md P1)

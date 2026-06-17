@@ -572,6 +572,20 @@ def _validate_score_args(args) -> dict:
     return items
 
 
+def _validate_consensus_policy(data: dict, items: dict) -> None:
+    """Issue #10: Simple/Reviewer 1名では reviewer_consensus を採点 items から省略する."""
+    if "reviewer_consensus" not in items:
+        return
+    if data.get("complexity") == "Simple" and data.get("reviewer_count") == 1:
+        print(
+            "ERROR: Simple 複雑度かつ Reviewer 1名では reviewer_consensus を --items から省略してください "
+            "(Issue #10: consensus は複数 Reviewer 間の合意度であり、1名では検証できません)。"
+            " composite/min_item は残り4項目で算出し、notes に consensus 省略を明記してください。",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
 def cmd_push_score(args):
     """Phase 5 scorer 完了後、orchestrator が呼ぶ score_history append.
 
@@ -583,25 +597,25 @@ def cmd_push_score(args):
     if not sf.exists():
         print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
         sys.exit(1)
-    items = _validate_score_args(args)
     if args.open_high < 0:
         print("ERROR: --open-high は 0 以上で指定してください", file=sys.stderr)
         sys.exit(2)
-
-    entry = {
-        "iteration": args.iteration,
-        "composite": args.composite,
-        "min_item": args.min_item,
-        "items": items,
-        "timestamp": iso_now(),
-    }
-    if args.notes:
-        entry["notes"] = args.notes
-    # Issue #3: open_high を保存 (mark-passes gate で参照)
-    entry["open_high"] = getattr(args, "open_high", 0)
+    items = _validate_score_args(args)
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
+        _validate_consensus_policy(data, items)
+        entry = {
+            "iteration": args.iteration,
+            "composite": args.composite,
+            "min_item": args.min_item,
+            "items": items,
+            "timestamp": iso_now(),
+        }
+        if args.notes:
+            entry["notes"] = args.notes
+        # Issue #3: open_high を保存 (mark-passes gate で参照)
+        entry["open_high"] = getattr(args, "open_high", 0)
         data.setdefault("score_history", []).append(entry)
         # 改善2: top-level iteration を同期 (orchestrator の set 取りこぼしで
         # iteration と score_history 長が不整合になる問題への対処)。
