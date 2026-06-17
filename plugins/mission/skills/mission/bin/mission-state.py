@@ -720,11 +720,12 @@ def cmd_mark_halt(args):
 def _pid_is_agent(pid: int) -> bool:
     """PID 再利用対策: pid が alive かつ comm がエージェント CLI (claude/codex) であることを確認.
 
-    テスト用: MISSION_FORCE_PROJECT_ROOT_DEAD=1 が設定されている場合は常に True を返し、
-    project_root 不存在チェックのみで孤児判定できるようにする。
+    テスト用: MISSION_FORCE_PID_IS_AGENT=1 が設定されている場合は常に True を返し、
+    project_root 不存在チェックのみを切り分けて検証できるようにする。
+    注意: この関数を呼ぶ全箇所 (cleanup-stale / refresh-pid 等) に影響するため、本番では設定しないこと。
     """
     # テスト専用バイパス: subprocess テストで _pid_is_agent=True を固定したい場合
-    if os.environ.get("MISSION_FORCE_PROJECT_ROOT_DEAD") == "1":
+    if os.environ.get("MISSION_FORCE_PID_IS_AGENT") == "1":
         return True
     try:
         os.kill(pid, 0)
