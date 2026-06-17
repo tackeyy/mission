@@ -114,3 +114,64 @@ def test_halt_all_sets_phase_halted(tmp_path, run_cli, monkeypatch):
     s = json.loads((proj / "state.json").read_text())
     assert s["halt_reason"] == "test halt"
     assert s["phase"] == "halted"
+
+
+# ===== P2-1: project_root 陳腐化追従 =====
+
+
+def test_update_project_root_updates_state(tmp_path, run_cli):
+    """P2-1(a): update-project-root --path <new> が exit0 で state.project_root を更新する.
+
+    実例 cc-48c91727: project_root=/dev/ccbattle が存在せず orphan 判定され続けた
+    → update-project-root で正しいパスに更新すれば rescue できる。
+    """
+    import json
+    sd = _make_state(tmp_path / "proj")
+    new_root = str(tmp_path / "proj_new")
+    r = run_cli("update-project-root", "--path", new_root, cwd=tmp_path / "proj")
+    assert r.returncode == 0, f"exit非0: {r.stderr}"
+    s = json.loads((sd / "state.json").read_text())
+    assert s["project_root"] == new_root, f"project_root が更新されていない: {s['project_root']}"
+
+
+def test_cleanup_stale_detects_nonexistent_project_root(tmp_path, run_cli):
+    """P2-1(b): project_root が存在しないパスの loop_active=true state を would_halt に含める.
+
+    実例 cc-48c91727: project_root=/dev/ccbattle 不存在 → pid チェックだけでは取りこぼす。
+    MISSION_FORCE_PID_IS_AGENT=1 で _pid_is_agent=True を強制固定し、
+    「alive agent であっても project_root 不存在なら孤児扱い」の実装を真に検証する。
+    (旧実装は pid=os.getpid() かつ agent CLI でないことで偶然 would_halt に入っていたが、
+     それは project_root チェックではなく pid 非agent チェックで引っかかっていただけだった)
+    """
+    import json
+    nonexistent = str(tmp_path / "does_not_exist")
+    # MISSION_FORCE_PID_IS_AGENT=1 で _pid_is_agent=True 固定
+    # → pid チェックではなく project_root 不存在チェックで would_halt に入ることを確認
+    _make_state(tmp_path / "proj", pid=os.getpid(), project_root=nonexistent)
+    r = run_cli("cleanup-stale", "--root", str(tmp_path), cwd=tmp_path,
+                env_extra={"MISSION_FORCE_PID_IS_AGENT": "1"})
+    assert r.returncode == 0, f"stderr: {r.stderr}"
+    data = json.loads(r.stdout)
+    # _pid_is_agent=True 固定・project_root 不存在 → 孤児扱いで would_halt に入るべき
+    assert len(data["would_halt"]) == 1, (
+        f"_pid_is_agent=True でも project_root不存在のstateがwould_haltに入っていない: {data}"
+    )
+
+
+def test_cleanup_stale_execute_halts_nonexistent_project_root(tmp_path, run_cli):
+    """P2-1(b) Low#1: --execute で project_root不存在の state が実際に halt される.
+
+    would_halt(dry-run)だけでなく、--execute で loop_active=False と
+    halt_reason("project_root not found") が state.json に書き込まれることを検証する。
+    """
+    import json
+    nonexistent = str(tmp_path / "does_not_exist")
+    sd = _make_state(tmp_path / "proj", pid=os.getpid(), project_root=nonexistent)
+    r = run_cli("cleanup-stale", "--root", str(tmp_path), "--execute", cwd=tmp_path,
+                env_extra={"MISSION_FORCE_PID_IS_AGENT": "1"})
+    assert r.returncode == 0, f"stderr: {r.stderr}"
+    data = json.loads(r.stdout)
+    assert len(data["halted"]) == 1, f"halted に入っていない: {data}"
+    s = json.loads((sd / "state.json").read_text())
+    assert s["loop_active"] is False
+    assert "project_root not found" in s["halt_reason"], f"halt_reason: {s['halt_reason']}"

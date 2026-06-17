@@ -165,3 +165,72 @@ def test_hook_custom_stale_halt_seconds(tmp_path):
     st = json.loads(sf.read_text())
     assert st["loop_active"] is False, "loop_active が false になっていない"
     assert "stale" in st["halt_reason"], f"halt_reason に 'stale' が含まれない: {st['halt_reason']}"
+
+
+# ===== P1-2: planning 滞留(push-score 未実行)の bd12 型捏造検出 =====
+
+
+def test_hook_warns_push_score_not_executed_when_planning_stale(tmp_path):
+    """P1-2: loop_active=true かつ score_history 空 かつ planning 滞留が閾値超で警告注入.
+
+    bd12 型 (phase=planning/iteration=0/score_history 空 のまま「実行した体」で捏造) を
+    早期検出するため、feedback に push-score 未実行の疑いを警告する。
+    MISSION_PLANNING_WARN_ITERATIONS 環境変数で閾値調整可能 (デフォルト=3, テストは1を使用)。
+    block はしない (警告注入のみ)。
+    """
+    import datetime
+    # 更新時刻は直近(1分前)なので stale auto-halt には引っかからない
+    fresh = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # phase=planning, iteration=1 (閾値1を超える), score_history 空
+    _write_session(tmp_path, "cc-bdtest",
+                   updated_at=fresh,
+                   phase="planning",
+                   iteration=1,
+                   score_history=[])
+    env = {
+        "CLAUDE_CODE_SESSION_ID": "bdtest",
+        "MISSION_PLANNING_WARN_ITERATIONS": "1",  # テスト用閾値: iteration >= 1 で発火
+    }
+    r = _run_hook(tmp_path, env)
+    # block は維持される(未達 state)
+    assert '"decision"' in r.stdout and "block" in r.stdout, f"block が返るべき: {r.stdout}"
+    # feedback に push-score 未実行の警告が含まれる
+    assert "push-score" in r.stdout, f"push-score 警告が feedback にない: {r.stdout}"
+
+
+def test_hook_no_warn_on_fresh_planning(tmp_path):
+    """P1-2 負テスト: iteration が閾値以下の正常な planning 初期では警告を出さない (偽陽性防止)."""
+    import datetime
+    fresh = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # iteration=0 は planning 開始直後 → 閾値(1)以下なので警告なし
+    _write_session(tmp_path, "cc-freshplan",
+                   updated_at=fresh,
+                   phase="planning",
+                   iteration=0,
+                   score_history=[])
+    env = {
+        "CLAUDE_CODE_SESSION_ID": "freshplan",
+        "MISSION_PLANNING_WARN_ITERATIONS": "1",
+    }
+    r = _run_hook(tmp_path, env)
+    assert "block" in r.stdout, f"未達なので block すべき: {r.stdout}"
+    assert "push-score" not in r.stdout, f"iteration=0 では push-score 警告不要: {r.stdout}"
+
+
+def test_hook_planning_warn_iter_zero_clamped_to_default(tmp_path):
+    """stop-guard 下限ガード: MISSION_PLANNING_WARN_ITERATIONS=0 は下限 3 にクランプされ
+    iteration=0 では push-score 警告を出さない (下限ガードが無いと iter0 でも誤発火する)."""
+    import datetime
+    fresh = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _write_session(tmp_path, "cc-zerothresh",
+                   updated_at=fresh,
+                   phase="planning",
+                   iteration=0,
+                   score_history=[])
+    env = {
+        "CLAUDE_CODE_SESSION_ID": "zerothresh",
+        "MISSION_PLANNING_WARN_ITERATIONS": "0",  # 下限ガードで 3 にクランプされるべき
+    }
+    r = _run_hook(tmp_path, env)
+    assert "block" in r.stdout, f"未達なので block すべき: {r.stdout}"
+    assert "push-score" not in r.stdout, f"iter=0 で PLANNING_WARN_ITERATIONS=0 の場合、下限ガードで警告が出ないはず: {r.stdout}"

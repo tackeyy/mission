@@ -28,7 +28,7 @@ context compaction 後も最優先で復元・遵守すること。
 8. **実ログ由来・逸脱多発 Top4 (compaction 後も毎 Phase でセルフチェック)**: 過去 run でルールが存在するのに守られず損失が出た 4 点。
    - **並列**: Reviewer N 名は **1 メッセージ内で複数 Skill 同時呼び出し** (別メッセージ分割禁止)。実ログで 6 ラン中 0 回しか守られず直列化し、xai-cli PR#17 で run の 17% を損失。Claude Code のみ可 (Codex はこの制約なし=順次が基本・§Claude Code/Codex 差分参照)。Phase 4 起動時に「今 1 メッセージで N 名出したか?」を自問する
    - **速度 (early-stop)**: iter1 で `composite >= 4.0` かつ残 High = 0 なら **iter2 は原則禁止・即 mark-passes**。続行は §終了判定の例外 4 条件を全て満たす時のみ、理由を assumptions.md に必須記載 (過去 iter1 合格後の続行 14 件中 7 件が不変/悪化)
-   - **ハルシネーション**: state 更新は `mission-state.py` のみ (`sessions/<sid>.json` 直書き禁止 = threshold gate 迂回 = 過去 PASS の 16% が ungated)。Reviewer の「外部事実に依拠する High/Medium」は一次情報併記がなければ採用前に orchestrator が一次確認する (一次確認なしの誤 High は executor を誤方向修正させ純損失)
+   - **ハルシネーション**: state 更新は `mission-state.py` のみ (`sessions/<sid>.json` 直書き禁止 = threshold gate 迂回 = 過去 PASS の 16% が ungated)。Reviewer の「外部事実に依拠する High/Medium」は一次情報併記がなければ採用前に orchestrator が一次確認する (一次確認なしの誤 High は executor を誤方向修正させ純損失)。**機械検証可能なアクション (push-score/mark-passes/gh pr view/git push 等) の結果は、直後に state 再取得または外部再照合 (gh/git ls-remote) で照合し、照合できるまで「完了」扱いしない** (根拠: bd12=scorer/push-score/Edit 捏造、ss-5292=PR番号/push 捏造)
    - **Claude Code/Codex**: Stop hook が効かない環境 (Codex で hook trust 未承認等) では、各 iter の Phase 6 直後に自分で state.json の `loop_active`/`passes`/`halt_reason` を読んでループ継続を自己管理する (hook 任せにしない)
 
 ## state.json 操作: mission-state.py 経由 (推奨)
@@ -58,16 +58,14 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score \
 # 合格条件を満たさなければ reject されるため、orchestrator が判定を誤っても無条件 passes=true は書き込めない
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py mark-passes
 
-# 人手 override (緊急時のみ。バリデーション skip + state.force_reason に理由保存 + stderr に WARNING)
-# 適用基準: ユーザー承認済 / Reviewer 取得不能等で score_history を残せないが完了させたい場合のみ
+# 人手 override (緊急時のみ・ユーザー承認済のみ)
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py mark-passes --force --reason "<override 理由>"
-
 # 中断マーク (halt_reason 設定, loop_active=false)
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py mark-halt --reason "<理由>"
-
-# R1: resume / compaction 復帰時に state.pid を現セッションの agent CLI PID に更新
-# (これを怠ると hook が state.pid != 現 PID と判定して exit 0、ループ強制が機能しない)
+# R1: resume 復帰時に state.pid を現 agent CLI PID に更新 (hook owner check のため必須)
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py refresh-pid
+# P2-1: project_root 不存在 state の救済 (ディレクトリ移動/rename 後。cleanup-stale が孤児扱いした場合)
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py update-project-root --path <新しい project_root のパス>
 ```
 
 **詳細リファレンス** (全サブコマンド / Phase C multi-session / 管理コマンド / migration): `refs/state-management.md` を Read で参照すること。

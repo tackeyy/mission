@@ -141,3 +141,20 @@ def test_skillmd_reads_assumptions_path_field():
     """B-M1: 復元手順が固定パスでなく assumptions_path フィールド参照を指示している."""
     txt = _read(SKILL_MD)
     assert "assumptions_path" in txt
+
+
+def test_skillmd_hallucination_discipline_has_verification():
+    """P1-1: Compact Instructions のハルシネーション項に照合・機械検証規律が存在する.
+
+    bd12 (scorer/push-score/critic/Edit 捏造) や ss-5292 (PR番号/push 捏造) を再発させないため、
+    機械検証可能なアクションの結果を外部再照合で確認する規律を ハルシネーション項に明記すること。
+    '照合' かつ ('捏造' or '機械検証' or '再取得') がCompact Instructions (## state.json 操作より前) に存在する。
+    """
+    txt = _read(SKILL_MD)
+    compact = txt.split("## state.json 操作")[0]
+    has_kensho = "照合" in compact
+    has_discipline = any(kw in compact for kw in ("捏造", "機械検証", "再取得"))
+    assert has_kensho and has_discipline, (
+        "Compact Instructions のハルシネーション項に照合+機械検証規律が見つからない "
+        f"(照合={has_kensho}, discipline={has_discipline})"
+    )
