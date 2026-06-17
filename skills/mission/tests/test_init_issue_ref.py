@@ -120,3 +120,24 @@ def test_init_dup_issue_ref_does_not_reject(tmp_path):
     assert sf_b.exists(), "session-b state file should be created"
     s = json.loads(sf_b.read_text())
     assert s["issue_ref"] == "gh:repo#55"
+
+
+def test_s3_same_session_id_no_warn_on_resume(tmp_path):
+    """S3: 同一 session_id (= resume) では自分自身の旧 state を誤検出して WARN しない."""
+    # セッション A: init して state を残す
+    r_a = _run(["init", "S3 resume test", "--issue-ref", "gh:repo#99"],
+               cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "session-resume"})
+    assert r_a.returncode == 0, r_a.stderr
+
+    # 同一 session_id で再度 init (resume 相当)
+    r_resume = _run(["init", "S3 resume test again", "--issue-ref", "gh:repo#99"],
+                    cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "session-resume"})
+    assert r_resume.returncode == 0, r_resume.stderr
+
+    # 自分自身の旧 state を誤検出した WARN が出ないこと
+    warn_lines = [ln for ln in r_resume.stderr.splitlines()
+                  if ("warn" in ln.lower() or "warning" in ln.lower())
+                  and "issue_ref" in ln.lower()]
+    assert warn_lines == [], (
+        f"同一 sid の resume では S3 WARN を出してはいけない: {r_resume.stderr}"
+    )
