@@ -353,13 +353,19 @@ def cmd_init(args):
     }
     # S3: 同プロジェクト内の active session で同一 issue_ref があれば WARN (reject しない)
     _issue_ref = getattr(args, "issue_ref", None)
+    _cur_sid = resolve_session_id()
     if _issue_ref:
         for sf_other in _iter_state_files(cwd):
             try:
                 other = json.loads(sf_other.read_text())
             except Exception:
                 continue
-            if other.get("loop_active") and other.get("issue_ref") == _issue_ref:
+            # 同一セッションの resume では自分自身の旧 state を誤検出しないよう sid 除外
+            if (
+                other.get("loop_active")
+                and other.get("issue_ref") == _issue_ref
+                and other.get("session_id") != _cur_sid
+            ):
                 print(
                     f"WARNING [S3]: issue_ref='{_issue_ref}' を持つ active session が既に存在します"
                     f" (session_id={other.get('session_id', '?')})。重複作業の可能性を確認してください。",
