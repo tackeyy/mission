@@ -718,7 +718,14 @@ def cmd_mark_halt(args):
 
 
 def _pid_is_agent(pid: int) -> bool:
-    """PID 再利用対策: pid が alive かつ comm がエージェント CLI (claude/codex) であることを確認."""
+    """PID 再利用対策: pid が alive かつ comm がエージェント CLI (claude/codex) であることを確認.
+
+    テスト用: MISSION_FORCE_PROJECT_ROOT_DEAD=1 が設定されている場合は常に True を返し、
+    project_root 不存在チェックのみで孤児判定できるようにする。
+    """
+    # テスト専用バイパス: subprocess テストで _pid_is_agent=True を固定したい場合
+    if os.environ.get("MISSION_FORCE_PROJECT_ROOT_DEAD") == "1":
+        return True
     try:
         os.kill(pid, 0)
     except (ProcessLookupError, PermissionError):
@@ -858,7 +865,31 @@ def cmd_cleanup_stale(args):
                 # 「alive」と誤判定して永久放置する (P3-4a, 2026-06-10 検査で発見)
                 try:
                     if _pid_is_agent(int(pid)):
-                        results["skipped"].append({"path": str(sf), "reason": f"pid {pid} alive (agent)"})
+                        # P2-1(b): alive agent でも project_root が恒久不在なら孤児扱い。
+                        # 「alive なので skip」の保護は一時的なマウント外れ等の保護のためだが、
+                        # project_root パスそのものが存在しない場合は「恒久不在」として扱う。
+                        # update-project-root コマンドで正しいパスに更新することで救済可能。
+                        stored_root = data.get("project_root", "")
+                        if stored_root and not Path(stored_root).exists():
+                            halt_reason = (
+                                f"orphan: project_root not found ({stored_root})"
+                                " / update-project-root で救済可能"
+                            )
+                            proj = _project_root_of(sf)
+                            if args.execute:
+                                with StateLock(lock_file(proj)):
+                                    data["halt_reason"] = halt_reason
+                                    data["loop_active"] = False
+                                    data["updated_at"] = iso_now()
+                                    backup_state(sf)
+                                    atomic_write_json(sf, data)
+                                    if sf.parent.name == "sessions":
+                                        _remove_from_aggregate(proj, sf.stem)
+                                results["halted"].append({"path": str(sf), "pid": pid})
+                            else:
+                                results["would_halt"].append({"path": str(sf), "pid": pid, "mission": (data.get("mission") or "")[:80]})
+                        else:
+                            results["skipped"].append({"path": str(sf), "reason": f"pid {pid} alive (agent)"})
                     else:
                         proj = _project_root_of(sf)
                         if args.execute:
