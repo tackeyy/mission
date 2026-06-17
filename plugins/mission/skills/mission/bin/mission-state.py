@@ -621,6 +621,20 @@ def cmd_push_score(args):
         # iteration と score_history 長が不整合になる問題への対処)。
         data["iteration"] = args.iteration
         data["phase"] = "scoring"  # M4 (2026-06-10): phase 自動更新
+        # Q11: stagnation_count 自動更新。
+        # append 後の score_history から前エントリの composite を取得し改善幅を判定。
+        # 初回 (前エントリなし) は 0 にリセット。改善幅 >= 0.1 も 0 にリセット。
+        # 改善幅 < 0.1 は +1 する (後方互換: data.get で既存 state にも対応)。
+        history = data["score_history"]
+        if len(history) >= 2:
+            prev_composite = history[-2].get("composite")
+            cur_composite = entry["composite"]
+            if prev_composite is not None and (cur_composite - prev_composite) < 0.1:
+                data["stagnation_count"] = data.get("stagnation_count", 0) + 1
+            else:
+                data["stagnation_count"] = 0
+        else:
+            data["stagnation_count"] = 0
         data["updated_at"] = iso_now()
         data = stamp_metadata(data, cwd)
         backup_state(sf)
