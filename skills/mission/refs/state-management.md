@@ -145,6 +145,16 @@ R1 復帰時は phase 単独ではなく `iteration` + `score_history` と組み
 - push-score は items のキーを正規 5 キー (`mission_achievement` / `accuracy` / `completeness` / `usability` / `reviewer_consensus`) に正規化する。エイリアス (`usefulness`→`usability`, `practicality`→`usability`, `reviewer_agreement`→`reviewer_consensus`) は自動変換、未知キーは WARN 付きで受理 (後方互換)
 - `--scoring-output` の保存先は `.mission-state/archive/iter-<N>-<mission_id先頭8>-scoring.md`。連続ランでの上書き消失 (2026-06-10 実害確認) を防ぐため mission_id を含む
 
+### GitHub Flow (issue 連携)
+
+GitHub issue に紐づくミッションは次のフローで進める:
+issue 起票 → worktree feature ブランチ → PR (本文に `Closes #N` を記載) → Phase 7 マージ → issue 自動クローズ。
+
+- `init --issue-ref <owner/repo#N>` で issue を state に記録する (S3 重複 WARN も兼ねる)。
+- PR 作成時、本文に `Closes #N` を必ず入れる (N は issue 番号)。これによりマージで issue が自動クローズされる。
+- Phase 7 のマージ前に PR 本文へ `Closes #N` が含まれることを確認し、欠けていれば `gh pr edit <PR番号> --body` で追記してからマージする。
+- これは reject しない補助規律 (issue 連携がないミッションには影響しない・後方互換)。
+
 ## Phase 7 自動マージ — 詳細判定ロジック
 
 > SKILL.md 本体の「## Phase 7」から退避 (2026-06-10)。合格判定後に PR を自動マージしてよいか迷ったとき参照。
