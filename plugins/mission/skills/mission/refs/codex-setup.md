@@ -64,6 +64,8 @@ export CLAUDE_PLUGIN_ROOT="$MISSION_PLUGIN_ROOT"
 
 Codex の plugin package は default では skills-only にしている。理由は、Codex は plugin-bundled `hooks/hooks.json` も読み込める一方で、Claude Code の `${CLAUDE_PLUGIN_ROOT}` に相当する plugin-root 変数が Codex manual では確認できないため。Claude Code 専用 hook config は `claude-hooks/hooks.json` に移し、Codex が default hook として誤読しないようにしている。
 
+`/hooks` で `failed to parse plugin hooks config ... unknown field 'description', expected 'hooks'` のようなエラーが出る場合、表示された path の plugin に Claude Code 用 hook metadata が混入している。`mission` の Codex package は CI で `hooks` manifest と `hooks/hooks.json` の混入を禁止しているため、path が `mission` 以外ならその plugin を Codex で無効化するか、Codex 互換の `{"hooks": ...}` だけの config に直す。
+
 ## Codex でのパス解決
 
 Claude Code の plugin hook / MCP config では `${CLAUDE_PLUGIN_ROOT}` が公式に document されている。一方、Codex manual では plugin root 変数は確認できない。
