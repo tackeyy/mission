@@ -219,11 +219,31 @@ def _set_phase(state_dir, phase):
     sf.write_text(json.dumps(d))
 
 
+def _set_phase_started_at(state_dir, timestamp):
+    import json
+    sf = state_dir / "sessions" / "test.json"
+    d = json.loads(sf.read_text())
+    d["phase_started_at"] = timestamp
+    d["phase_durations_sec"] = {}
+    sf.write_text(json.dumps(d))
+
+
 def test_push_score_updates_phase_to_scoring(state_dir, run_cli, read_state):
     _set_phase(state_dir, "planning")
     run_cli("push-score", "--iteration", "1", "--composite", "4.0", "--min-item", "3.5",
             "--items", '{"mission_achievement": 4.0}', cwd=state_dir.parent, check=True)
     assert read_state(state_dir)["phase"] == "scoring"
+
+
+def test_push_score_records_previous_phase_duration(state_dir, run_cli, read_state):
+    _set_phase(state_dir, "planning")
+    _set_phase_started_at(state_dir, "2026-05-25T00:00:00Z")
+    run_cli("push-score", "--iteration", "1", "--composite", "4.0", "--min-item", "3.5",
+            "--items", '{"mission_achievement": 4.0}', cwd=state_dir.parent, check=True)
+    state = read_state(state_dir)
+    assert state["phase"] == "scoring"
+    assert state["phase_started_at"] == state["updated_at"]
+    assert state["phase_durations_sec"]["planning"] >= 0
 
 
 def test_mark_passes_updates_phase_to_done(state_dir, run_cli, read_state):
@@ -233,9 +253,28 @@ def test_mark_passes_updates_phase_to_done(state_dir, run_cli, read_state):
     assert read_state(state_dir)["phase"] == "done"
 
 
+def test_mark_passes_records_scoring_duration(state_dir, run_cli, read_state):
+    run_cli("push-score", "--iteration", "1", "--composite", "4.5", "--min-item", "4.0",
+            "--items", '{"mission_achievement": 4.5}', cwd=state_dir.parent, check=True)
+    _set_phase_started_at(state_dir, "2026-05-25T00:00:00Z")
+    run_cli("mark-passes", cwd=state_dir.parent, check=True)
+    state = read_state(state_dir)
+    assert state["phase"] == "done"
+    assert state["phase_durations_sec"]["scoring"] >= 0
+
+
 def test_mark_halt_updates_phase_to_halted(state_dir, run_cli, read_state):
     run_cli("mark-halt", "--reason", "max-iter reached", cwd=state_dir.parent, check=True)
     assert read_state(state_dir)["phase"] == "halted"
+
+
+def test_mark_halt_records_current_phase_duration(state_dir, run_cli, read_state):
+    _set_phase(state_dir, "executing")
+    _set_phase_started_at(state_dir, "2026-05-25T00:00:00Z")
+    run_cli("mark-halt", "--reason", "max-iter reached", cwd=state_dir.parent, check=True)
+    state = read_state(state_dir)
+    assert state["phase"] == "halted"
+    assert state["phase_durations_sec"]["executing"] >= 0
 
 
 def test_mark_passes_min_item_error_mentions_scored_items(state_dir, run_cli):

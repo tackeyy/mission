@@ -318,6 +318,41 @@ def mission_id(mission: str) -> str:
     return hashlib.sha256(mission.encode("utf-8")).hexdigest()[:16]
 
 
+def _parse_iso_datetime(value: str | None):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _ensure_phase_timing(data: dict, now: str | None = None) -> None:
+    """phase 別所要時間の計測フィールドを後方互換で初期化する."""
+    now = now or iso_now()
+    if not isinstance(data.get("phase_durations_sec"), dict):
+        data["phase_durations_sec"] = {}
+    if not data.get("phase_started_at"):
+        data["phase_started_at"] = data.get("started_at") or now
+
+
+def _transition_phase(data: dict, new_phase: str, now: str | None = None) -> None:
+    """phase を変更し、旧 phase の経過秒数を phase_durations_sec に加算する."""
+    now = now or iso_now()
+    _ensure_phase_timing(data, now)
+    old_phase = data.get("phase")
+    if old_phase and old_phase != new_phase:
+        started = _parse_iso_datetime(data.get("phase_started_at"))
+        ended = _parse_iso_datetime(now)
+        if started and ended:
+            elapsed = (ended - started).total_seconds()
+            if elapsed >= 0:
+                durations = data.setdefault("phase_durations_sec", {})
+                durations[old_phase] = float(durations.get(old_phase, 0)) + elapsed
+        data["phase_started_at"] = now
+    data["phase"] = new_phase
+
+
 # M7 (2026-06-10): SKILL.md Phase 1 の複雑度→Reviewer 数マッピング
 COMPLEXITY_REVIEWER_COUNT = {"Simple": 1, "Standard": 2, "Complex": 3, "Critical": 3}
 
@@ -356,6 +391,7 @@ def cmd_init(args):
     cwd = Path.cwd()
     state_dir(cwd).mkdir(parents=True, exist_ok=True)
     planned_files = _parse_files_arg(getattr(args, "files", None))
+    now = iso_now()
 
     initial = {
         "mission": args.mission,
@@ -376,8 +412,10 @@ def cmd_init(args):
         "passes": False,
         "halt_reason": "",
         "assumptions_path": ".mission-state/assumptions.md",
-        "started_at": iso_now(),
-        "updated_at": iso_now(),
+        "started_at": now,
+        "updated_at": now,
+        "phase_started_at": now,
+        "phase_durations_sec": {},
         # S3: issue_ref (未指定 None)
         "issue_ref": getattr(args, "issue_ref", None),
         # S3-files: 同一 project の file-set overlap WARN 用 (未指定は空 list)
@@ -499,6 +537,7 @@ def cmd_set(args):
         sys.exit(1)
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
+        now = iso_now()
         for kv in args.kvs:
             if "=" not in kv:
                 print(f"ERROR: key=value 形式で指定してください: {kv}", file=sys.stderr)
@@ -514,9 +553,13 @@ def cmd_set(args):
                 sys.exit(2)
             # 型推論: 数値 / bool / JSON
             try:
-                data[key] = json.loads(value)
+                parsed_value = json.loads(value)
             except json.JSONDecodeError:
-                data[key] = value
+                parsed_value = value
+            if key == "phase":
+                _transition_phase(data, str(parsed_value), now)
+            else:
+                data[key] = parsed_value
         # A-M1 (2026-06-10): complexity 変更時は reviewer_count を自動同期
         # (明示指定があればそちらが優先。片方だけ更新される矛盾 state を防ぐ)
         explicit_keys = {kv.partition("=")[0] for kv in args.kvs}
@@ -527,7 +570,8 @@ def cmd_set(args):
         # F-4: set loop_active=true での手動再活性化(gotchas §2)も aggregate へ戻す
         if "loop_active" in explicit_keys and data.get("loop_active") is True:
             _add_to_aggregate(cwd, sf.stem)
-        data["updated_at"] = iso_now()
+        _ensure_phase_timing(data, now)
+        data["updated_at"] = now
         data = stamp_metadata(data, cwd)
         backup_state(sf)
         atomic_write_json(sf, data)
@@ -660,13 +704,14 @@ def cmd_push_score(args):
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
+        now = iso_now()
         _validate_consensus_policy(data, items)
         entry = {
             "iteration": args.iteration,
             "composite": args.composite,
             "min_item": args.min_item,
             "items": items,
-            "timestamp": iso_now(),
+            "timestamp": now,
         }
         if args.notes:
             entry["notes"] = args.notes
@@ -676,7 +721,7 @@ def cmd_push_score(args):
         # 改善2: top-level iteration を同期 (orchestrator の set 取りこぼしで
         # iteration と score_history 長が不整合になる問題への対処)。
         data["iteration"] = args.iteration
-        data["phase"] = "scoring"  # M4 (2026-06-10): phase 自動更新
+        _transition_phase(data, "scoring", now)  # M4 (2026-06-10): phase 自動更新
         # Q11: stagnation_count 自動更新。
         # append 後の score_history から前エントリの composite を取得し改善幅を判定。
         # 初回 (前エントリなし) は 0 にリセット。改善幅 >= 0.1 も 0 にリセット。
@@ -691,7 +736,7 @@ def cmd_push_score(args):
                 data["stagnation_count"] = 0
         else:
             data["stagnation_count"] = 0
-        data["updated_at"] = iso_now()
+        data["updated_at"] = now
         data = stamp_metadata(data, cwd)
         backup_state(sf)
         atomic_write_json(sf, data)
@@ -729,6 +774,7 @@ def cmd_mark_passes(args):
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
+        now = iso_now()
         threshold = data.get("threshold", DEFAULT_THRESHOLD)
         history = data.get("score_history", [])
 
@@ -771,8 +817,8 @@ def cmd_mark_passes(args):
         data["passes"] = True
         data["loop_active"] = False
         data["passes_forced"] = force  # 改善1: force-pass を機械可読に記録 (stats で集計)
-        data["phase"] = "done"  # M4 (2026-06-10): phase 自動更新
-        data["updated_at"] = iso_now()
+        _transition_phase(data, "done", now)  # M4 (2026-06-10): phase 自動更新
+        data["updated_at"] = now
         if force:
             data["force_reason"] = reason
         backup_state(sf)
@@ -790,10 +836,11 @@ def cmd_mark_halt(args):
         sys.exit(1)
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
+        now = iso_now()
         data["halt_reason"] = args.reason
         data["loop_active"] = False
-        data["phase"] = "halted"  # M4 (2026-06-10): phase 自動更新
-        data["updated_at"] = iso_now()
+        _transition_phase(data, "halted", now)  # M4 (2026-06-10): phase 自動更新
+        data["updated_at"] = now
         backup_state(sf)
         atomic_write_json(sf, data)
         # #11: aggregate 更新も同じ StateLock 内で行う (lock 外だと並列 halt で lost update)
@@ -1041,10 +1088,11 @@ def cmd_halt(args):
                     if data.get("loop_active") and not data.get("passes") and not data.get("halt_reason"):
                         proj = _project_root_of(sf)
                         with StateLock(lock_file(proj)):
+                            now = iso_now()
                             data["halt_reason"] = args.reason
                             data["loop_active"] = False
-                            data["phase"] = "halted"  # M4
-                            data["updated_at"] = iso_now()
+                            _transition_phase(data, "halted", now)  # M4
+                            data["updated_at"] = now
                             backup_state(sf)
                             atomic_write_json(sf, data)
                             # H-1: aggregate 更新も StateLock 内で (並列 halt/init と lost update 防止)
@@ -1111,9 +1159,11 @@ def _duration_sec(state: dict) -> float | None:
     updated = state.get("updated_at")
     if not started or not updated:
         return None
+    t1 = _parse_iso_datetime(started)
+    t2 = _parse_iso_datetime(updated)
+    if not (t1 and t2):
+        return None
     try:
-        t1 = datetime.fromisoformat(started.replace("Z", "+00:00"))
-        t2 = datetime.fromisoformat(updated.replace("Z", "+00:00"))
         return (t2 - t1).total_seconds()
     except Exception:
         return None
@@ -1131,6 +1181,35 @@ def _collect_states(root: Path) -> list[dict]:
         except Exception:
             continue
     return states
+
+
+def _state_identity(state: dict) -> tuple | None:
+    """active/archive の同一 state 二重集計を避けるための安定キー."""
+    project_root = state.get("project_root")
+    session_id = state.get("session_id")
+    mission = state.get("mission_id")
+    started_at = state.get("started_at")
+    if not (project_root and session_id and mission and started_at):
+        return None
+    return (project_root, session_id, mission, started_at)
+
+
+def _dedupe_states(states: list[dict]) -> tuple[list[dict], int]:
+    """同一 state を 1 件に正規化し、重複していた identity グループ数を返す."""
+    seen = set()
+    duplicate_groups = set()
+    deduped = []
+    for state in states:
+        key = _state_identity(state)
+        if key is None:
+            deduped.append(state)
+            continue
+        if key in seen:
+            duplicate_groups.add(key)
+            continue
+        seen.add(key)
+        deduped.append(state)
+    return deduped, len(duplicate_groups)
 
 
 def _is_valid_composite(c) -> bool:
@@ -1177,17 +1256,34 @@ def _build_breakdown(states: list[dict], classes: list[str], keyfn) -> dict:
     return out
 
 
-def _aggregate(states: list[dict]) -> dict:
+def _phase_duration_totals(states: list[dict]) -> dict:
+    totals: dict = {}
+    for state in states:
+        durations = state.get("phase_durations_sec")
+        if not isinstance(durations, dict):
+            continue
+        for phase, sec in durations.items():
+            if not isinstance(phase, str):
+                continue
+            if isinstance(sec, (int, float)) and not isinstance(sec, bool) and not math.isnan(sec) and sec >= 0:
+                totals[phase] = totals.get(phase, 0.0) + float(sec)
+    return dict(sorted(totals.items()))
+
+
+def _aggregate(states: list[dict], duplicate_state_group_count: int = 0) -> dict:
     n = len(states)
     if n == 0:
         return {
             "total_sessions": 0, "pass_count": 0, "halt_count": 0,
+            "duplicate_state_group_count": duplicate_state_group_count,
             "incomplete_count": 0, "abandoned_count": 0, "pass_rate": None,
             "forced_pass_count": 0, "forced_pass_rate": None,
             "ungated_pass_count": 0, "ungated_pass_rate": None,
             "avg_iterations": None, "avg_final_composite": None,
             "avg_session_duration_sec": None,
             "median_session_duration_sec": None,
+            "phase_duration_totals_sec": {},
+            "phase_duration_avg_sec": {},
             "by_agent": {},
             "by_project": {}, "by_complexity": {}, "iteration_histogram": {},
         }
@@ -1217,12 +1313,14 @@ def _aggregate(states: list[dict]) -> dict:
     # #6 (2026-06-15): project/complexity 別内訳と iteration ヒストグラム
     by_project = _build_breakdown(states, classes, lambda s: os.path.basename((s.get("project_root") or "unknown").rstrip("/")) or "unknown")
     by_complexity = _build_breakdown(states, classes, lambda s: s.get("complexity") or "Unknown")
+    phase_totals = _phase_duration_totals(states)
     iteration_histogram: dict = {}
     for _it in iterations:
         _k = str(_it) if isinstance(_it, int) and _it <= 3 else ("4+" if isinstance(_it, int) else "unknown")
         iteration_histogram[_k] = iteration_histogram.get(_k, 0) + 1
     return {
         "total_sessions": n,
+        "duplicate_state_group_count": duplicate_state_group_count,
         "pass_count": pass_count,
         "halt_count": halt_count,
         "incomplete_count": incomplete_count,
@@ -1237,6 +1335,8 @@ def _aggregate(states: list[dict]) -> dict:
         "avg_session_duration_sec": sum(durations) / len(durations) if durations else None,
         # median は放置/resume 跨ぎの外れ値に頑健 (avg は max 8000min 級の忘れ session で歪む)
         "median_session_duration_sec": _median(durations),
+        "phase_duration_totals_sec": phase_totals,
+        "phase_duration_avg_sec": {phase: total / n for phase, total in phase_totals.items()},
         "by_agent": by_agent,
         "by_project": by_project,
         "by_complexity": by_complexity,
@@ -1261,6 +1361,7 @@ def _format_text(stats: dict, since: str | None, until: str | None) -> str:
     lines = [
         f"=== /mission stats ({period}) ===",
         f"total_sessions:           {n}",
+        f"duplicate_state_groups:   {stats.get('duplicate_state_group_count', 0)}",
         f"  PASS:                   {stats['pass_count']} ({pr*100:.1f}%)" if pr is not None else f"  PASS: {stats['pass_count']}",
         f"    (forced:              {stats['forced_pass_count']}{_pct_detail(stats.get('forced_pass_rate'))})",
         f"    (ungated:             {stats['ungated_pass_count']}{_pct_detail(stats.get('ungated_pass_rate'))})",
@@ -1272,6 +1373,11 @@ def _format_text(stats: dict, since: str | None, until: str | None) -> str:
         f"avg_session_duration:     {sd/60:.1f} min ({sd:.0f}s)" if sd is not None else "avg_session_duration: -",
         f"median_session_duration:  {md/60:.1f} min ({md:.0f}s)" if md is not None else "median_session_duration: -",
     ]
+    phase_totals = stats.get("phase_duration_totals_sec") or {}
+    if phase_totals:
+        lines.append("phase_duration_totals:")
+        for phase, sec in sorted(phase_totals.items()):
+            lines.append(f"  {phase:<14} {sec/60:.1f} min ({sec:.0f}s)")
     by_agent = stats.get("by_agent") or {}
     if by_agent:
         lines.append("by_agent:")
@@ -1309,7 +1415,8 @@ def cmd_stats(args):
         if r.exists():
             all_states.extend(_collect_states(r))
     filtered = [s for s in all_states if _matches_period(s, since, until)]
-    stats = _aggregate(filtered)
+    deduped, duplicate_state_group_count = _dedupe_states(filtered)
+    stats = _aggregate(deduped, duplicate_state_group_count)
     if args.json:
         print(json.dumps(stats, indent=2, ensure_ascii=False))
     else:

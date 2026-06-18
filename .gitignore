@@ -5,6 +5,7 @@ __pycache__/
 .env*
 .mission-state/
 .pytest_cache/
+.serena/
 
 # mission スキルの孤立タイムスタンプ
 .orphaned_at

@@ -183,3 +183,12 @@ def test_complexity_overestimate_cost_documented():
     txt = _read(SKILL_MD)
     assert "過大見積もり" in txt
     assert "assumptions.md" in txt and "判定根拠" in txt
+
+
+def test_halt_report_cannot_sound_complete():
+    """halt_reason がある状態を達成扱いで報告しないための文言ガード."""
+    txt = _read(SKILL_MD)
+    compact = txt.split("## state.json 操作")[0]
+    assert "halt_reason" in compact
+    assert "完了報告語彙は禁止" in compact
+    assert "⏸️ 中断 / 未完了" in txt

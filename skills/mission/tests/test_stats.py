@@ -148,6 +148,35 @@ def test_stats_includes_archive_sessions(tmp_path, run_cli):
     assert data["total_sessions"] == 2  # current + archived
 
 
+def test_stats_dedupes_worktree_archive_copy(tmp_path, run_cli):
+    """worktree archive に退避した同一 state を active と二重集計しない."""
+    proj = tmp_path / "p1"
+    sd = _make_state(proj, passes=True, loop_active=False)
+    active_state = json.loads((sd / "sessions" / "test.json").read_text())
+    worktree_archive = sd / "archive" / "worktree-feature"
+    worktree_archive.mkdir(parents=True)
+    (worktree_archive / "test.json").write_text(json.dumps(active_state))
+
+    r = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
+    data = json.loads(r.stdout)
+    assert data["total_sessions"] == 1
+    assert data["duplicate_state_group_count"] == 1
+
+
+def test_stats_phase_duration_totals_and_averages(tmp_path, run_cli):
+    """phase_durations_sec を横断集計し、phase 別速度を見える化する."""
+    _make_state(tmp_path / "p1", phase_durations_sec={"planning": 30, "scoring": 90})
+    _make_state(tmp_path / "p2", phase_durations_sec={"planning": 60, "executing": 120})
+    r = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
+    data = json.loads(r.stdout)
+    assert data["phase_duration_totals_sec"] == {
+        "executing": 120.0,
+        "planning": 90.0,
+        "scoring": 90.0,
+    }
+    assert data["phase_duration_avg_sec"]["planning"] == pytest.approx(45.0)
+
+
 # ===== #2: agent 別集計 (2026-06-13 ログ調査) =====
 # Claude Code/Codex/CLI どの起動元の成績か内訳を見えるようにする
 
