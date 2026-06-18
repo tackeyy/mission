@@ -2,6 +2,7 @@
 
 同期対象:
   scripts/mission-stop-guard.sh
+  scripts/mission-audit.py
   skills/mission/bin/mission-state.py
   skills/mission/SKILL.md
   skills/mission-reviewer/SKILL.md
@@ -9,6 +10,7 @@
 
 対応する plugins 側パス:
   plugins/mission/scripts/mission-stop-guard.sh
+  plugins/mission/scripts/mission-audit.py
   plugins/mission/skills/mission/bin/mission-state.py
   plugins/mission/skills/mission/SKILL.md
   plugins/mission/skills/mission-reviewer/SKILL.md
@@ -16,6 +18,7 @@
 
 同期コマンド:
   cp scripts/mission-stop-guard.sh        plugins/mission/scripts/mission-stop-guard.sh
+  cp scripts/mission-audit.py             plugins/mission/scripts/mission-audit.py
   cp skills/mission/bin/mission-state.py  plugins/mission/skills/mission/bin/mission-state.py
   cp skills/mission/SKILL.md              plugins/mission/skills/mission/SKILL.md
   cp skills/mission-reviewer/SKILL.md     plugins/mission/skills/mission-reviewer/SKILL.md
@@ -30,6 +33,10 @@ SYNC_PAIRS = [
     (
         REPO_ROOT / "scripts" / "mission-stop-guard.sh",
         REPO_ROOT / "plugins" / "mission" / "scripts" / "mission-stop-guard.sh",
+    ),
+    (
+        REPO_ROOT / "scripts" / "mission-audit.py",
+        REPO_ROOT / "plugins" / "mission" / "scripts" / "mission-audit.py",
     ),
     (
         REPO_ROOT / "skills" / "mission" / "bin" / "mission-state.py",
@@ -69,7 +76,7 @@ def test_stop_guard_in_sync():
 
 def test_mission_state_py_in_sync():
     """skills/mission/bin/mission-state.py と plugins/mission 側が一致する."""
-    src, dst = SYNC_PAIRS[1]
+    src, dst = SYNC_PAIRS[2]
     assert src.exists(), f"正典が存在しない: {src}"
     assert dst.exists(), f"plugins 側が存在しない: {dst}"
     assert _md5(src) == _md5(dst), (
@@ -82,7 +89,7 @@ def test_mission_state_py_in_sync():
 
 def test_skill_md_in_sync():
     """skills/mission/SKILL.md と plugins/mission/skills/mission/SKILL.md が一致する."""
-    src, dst = SYNC_PAIRS[2]
+    src, dst = SYNC_PAIRS[3]
     assert src.exists(), f"正典が存在しない: {src}"
     assert dst.exists(), f"plugins 側が存在しない: {dst}"
     assert _md5(src) == _md5(dst), (
@@ -95,7 +102,7 @@ def test_skill_md_in_sync():
 
 def test_reviewer_skill_md_in_sync():
     """skills/mission-reviewer/SKILL.md と plugins/mission 側が一致する."""
-    src, dst = SYNC_PAIRS[3]
+    src, dst = SYNC_PAIRS[4]
     assert src.exists(), f"正典が存在しない: {src}"
     assert dst.exists(), f"plugins 側が存在しない: {dst}"
     assert _md5(src) == _md5(dst), (
@@ -108,11 +115,24 @@ def test_reviewer_skill_md_in_sync():
 
 def test_scorer_skill_md_in_sync():
     """skills/mission-scorer/SKILL.md と plugins/mission 側が一致する."""
-    src, dst = SYNC_PAIRS[4]
+    src, dst = SYNC_PAIRS[5]
     assert src.exists(), f"正典が存在しない: {src}"
     assert dst.exists(), f"plugins 側が存在しない: {dst}"
     assert _md5(src) == _md5(dst), (
         f"mission-scorer/SKILL.md が未同期。\n"
+        f"  正典: {src}\n"
+        f"  plugins: {dst}\n"
+        f"  同期コマンド: cp {src} {dst}"
+    )
+
+
+def test_mission_audit_py_in_sync():
+    """scripts/mission-audit.py と plugins/mission/scripts/mission-audit.py が一致する."""
+    src, dst = SYNC_PAIRS[1]
+    assert src.exists(), f"正典が存在しない: {src}"
+    assert dst.exists(), f"plugins 側が存在しない: {dst}"
+    assert _md5(src) == _md5(dst), (
+        f"mission-audit.py が未同期。\n"
         f"  正典: {src}\n"
         f"  plugins: {dst}\n"
         f"  同期コマンド: cp {src} {dst}"

@@ -22,7 +22,7 @@ context compaction 後も最優先で復元・遵守すること。
    - 合格なら `loop_active: false`, `passes: true` → 完了報告
    - 不合格なら `loop_active: true` 維持 → Critic → 次イテレーション
 5. **compaction 後の最初のアクション (R1)**: §Skill開始/復元手順の **compaction/resume 経路 (step 2)** をこの順で実行 — (a) `mission-state.py refresh-pid` (PID 更新 + orphan halt 自動解除。**cleanup より必ず先**) → (b) 起動前 cleanup (`cleanup-empty $(pwd)` → `cleanup-stale --root "$(pwd)" --execute`) → (c) `mission-state.py get` で state(`sessions/<sid>.json`)を読み `assumptions_path` の assumptions を Read (固定パス直書き禁止) → (d) `phase`/`iteration`/`score_history` から該当 Phase へ復帰
-6. **完了報告する前に**: Medium 以上の指摘を orchestrator 自身がインライン修正した場合、差分 Reviewer 1 名の再確認を経たか (M6。自己検証のみで合格禁止)？ composite_score が threshold 以上か？ 全項目が 3.5 以上か？ どちらかが No なら止まる権利はない。**さらに `mission-state.py mark-passes` が exit 0 で返ったことを確認する** (threshold gate により未達なら exit 2 で reject される)。**`mark-passes --force` は orchestrator が自律実行してはならない** — ユーザーが明示的に「`--force` で進めて」「人手 override する」と指示した場合のみ使用可能 (gate を骨抜きにする操作のため)
+6. **完了報告する前に**: Medium 以上の指摘を orchestrator 自身がインライン修正した場合、差分 Reviewer 1 名の再確認を経たか (M6。自己検証のみで合格禁止)？ composite_score が threshold 以上か？ 全項目が 3.5 以上か？ どちらかが No なら止まる権利はない。**さらに `mission-state.py mark-passes` が exit 0 で返ったことを確認する** (threshold gate により未達なら exit 2 で reject される)。`halt_reason` が空でなければ完了報告語彙は禁止し、先頭を必ず `⏸️ 中断 / 未完了` にする。**`mark-passes --force` は orchestrator が自律実行してはならない** — ユーザーが明示的に「`--force` で進めて」「人手 override する」と指示した場合のみ使用可能 (gate を骨抜きにする操作のため)
 7. **合格判定後、PR がある場合は Phase 7 (条件付き自動マージ判定)** を実行する。CI/テスト pass かつリポジトリ側で自動マージ NG ルールなしなら `gh pr merge` まで実行してから完了報告する。リポジトリ側に「人手のみ」「自動マージ禁止」「Lv4」等の明示制約があれば手動マージ待ちとして完了報告する (詳細は § Phase 7 参照)
 
 8. **実ログ由来・逸脱多発 Top4 (compaction 後も毎 Phase でセルフチェック)**: 過去 run でルールが存在するのに守られず損失が出た 4 点。
@@ -365,7 +365,7 @@ cp .mission-state/state.json "$DEST/" && cp -r .mission-state/archive "$DEST/" 2
 ### 中断時
 
 ```
-⏸️ 中断 (Iteration: N / Score: 3.X)
+⏸️ 中断 / 未完了 (Iteration: N / Score: 3.X or 未採点)
 【理由】<致命的ブロッカー / max-iter到達 / 改善見込みなし>
 【現状】<どこまで進んだか>
 【判断を仰ぎたい点】Q1. <...>, Q2. <...>
@@ -400,6 +400,7 @@ mission は Claude Code / Codex 両対応 (PID owner 判定は 2026-06-13 に co
 - `refs/gotchas.md`: 実運用の落とし穴 (新規開始→§6 / halt再開→§2 / Reviewer→§1,§3 / Edit後→§4 / 並行実行→§5 / scorer internal error→§9)
 - `refs/changelog.md`: 改修履歴と実測根拠 (P1/P2/P3系/M系/M-audit系の詳細データ)
 - `refs/codex-setup.md`: Codex CLI での導入と Stop hook 有効化手順 (PID判定の codex 対応)
+- `refs/self-improvement.md`: `scripts/mission-audit.py` を使ったログ監査と自己改善プロンプト生成手順
 
 ## 実行例
 
