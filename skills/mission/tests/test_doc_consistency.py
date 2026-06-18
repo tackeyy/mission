@@ -92,3 +92,11 @@ def test_no_jq_update_example_reference():
 def test_jq_prohibition_wording_consistent():
     sm = _r(REFS / "state-management.md")
     assert "race condition の原因となるため禁止" in sm, "state-management の jq 表記が禁止に統一されていない"
+
+
+# ---- GitHub Flow: issue 連携 → PR Closes #N → マージで自動クローズの規律 ----
+def test_state_management_has_github_flow_issue_link():
+    """GitHub Flow: issue連携ミッションは PR本文に Closes #N を入れマージで自動クローズする規律."""
+    txt = _r(REFS / "state-management.md")
+    assert "Closes #" in txt and "issue" in txt.lower(), \
+        "state-management.md に GitHub Flow(issue→PR Closes #N→マージで自動クローズ)規律がない"

@@ -190,7 +190,7 @@ state.json の `assumptions_path` が指すファイル (デフォルト `.missi
 4. **Reviewer数の決定**:
    - Simple → 1名 / Standard → 2名 / Complex → 3名 / Critical → 3名 + Critic独立追加
 5. **state へ記録 (必須, M7)**: `init --complexity <判定>` で初期化するか、判定後に `mission-state.py set complexity=<判定>` を実行。**`--complexity` / `set complexity=` は `reviewer_count` を自動セットする** (Simple:1 / Standard:2 / Complex:3 / Critical:3) ので、別途 `reviewer_count=<N>` を渡す必要はない (既定値を上書きしたい時のみ併記)。Unknown のまま進めると P3-5 (Simple インライン) と差分レビュー設計が機能しない
-6. **過大見積もりのコスト**: reviewer 1名増で iter あたり約10-20分のオーバーヘッドがあるため、`assumptions.md` に複雑度の判定根拠と Simple でない決め手を記録する。Phase 1 で触るファイルが見えたら `init --files` に project-root 相対パスを渡し、S3 file overlap WARN を効かせる
+6. **過大見積もりのコスト**: reviewer 1名増で iter あたり約10-20分のオーバーヘッドがあるため、`assumptions.md` に複雑度の判定根拠と Simple でない決め手を記録する。Phase 1 で触るファイルが見えたら `init --files` に project-root 相対パスを渡し、S3 file overlap WARN を効かせる。**issue 連携ミッションは PR 本文に `Closes #N` を入れマージで自動クローズする (GitHub Flow, 詳細 refs/state-management.md)**
 
 ## Phase 2-6: ReAct ループ
 
