@@ -10,6 +10,9 @@ should preserve the behavior of the ReAct loop and the scoring gate.
 
 ## Ways to Contribute
 
+We recognize code, documentation, tests, issue reports, ideas, reviews, and
+feedback as contributions to `mission`.
+
 - Report bugs with reproduction steps
 - Improve installation and usage documentation
 - Add or improve tests for `mission-state.py` and the Stop hook

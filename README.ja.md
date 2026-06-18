@@ -192,6 +192,16 @@ python3 -m pytest -q
 Issue や Pull Request を歓迎します。作業前に [CONTRIBUTING.ja.md](CONTRIBUTING.ja.md)、
 [docs/TESTING.ja.md](docs/TESTING.ja.md)、[SECURITY.ja.md](SECURITY.ja.md) を確認してください。
 
+コード、ドキュメント、テスト、Issue 起票、アイデア、レビュー、フィードバックを
+`mission` への貢献として扱います。
+
+### Contributors
+
+<!-- CONTRIBUTORS-START -->
+<a href="https://github.com/tackeyy"><img src="https://github.com/tackeyy.png" width="40" height="40" alt="@tackeyy"></a>
+<a href="https://github.com/shurijoc"><img src="https://github.com/shurijoc.png" width="40" height="40" alt="@shurijoc"></a>
+<!-- CONTRIBUTORS-END -->
+
 ## ライセンス
 
 MIT。詳細は [LICENSE](LICENSE) を参照してください。

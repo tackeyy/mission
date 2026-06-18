@@ -228,6 +228,16 @@ Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md),
 [docs/TESTING.md](docs/TESTING.md), and [SECURITY.md](SECURITY.md) before
 opening issues or pull requests.
 
+We recognize code, documentation, tests, issue reports, ideas, reviews, and
+feedback as contributions.
+
+### Contributors
+
+<!-- CONTRIBUTORS-START -->
+<a href="https://github.com/tackeyy"><img src="https://github.com/tackeyy.png" width="40" height="40" alt="@tackeyy"></a>
+<a href="https://github.com/shurijoc"><img src="https://github.com/shurijoc.png" width="40" height="40" alt="@shurijoc"></a>
+<!-- CONTRIBUTORS-END -->
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
