@@ -39,7 +39,7 @@ state.json の更新は **`${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-stat
 
 ```bash
 # 新規ミッション初期化
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py init "<ミッション記述>" [--threshold X] [--max-iter N] [--complexity Simple|Standard|Complex|Critical] [--issue-ref <ref>]
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py init "<ミッション記述>" [--threshold X] [--max-iter N] [--complexity Simple|Standard|Complex|Critical] [--issue-ref <ref>] [--files <file1,file2,...>]
 
 # 採点結果を score_history に記録 (Phase 5 直後に orchestrator が必ず呼ぶ。scorer は fork のため書込不可)
 # --scoring-output 指定で .mission-state/archive/iter-N-<mission_id先頭8>-scoring.md に永続化 (キーはエイリアス正規化・未知キーWARN)
@@ -190,6 +190,7 @@ state.json の `assumptions_path` が指すファイル (デフォルト `.missi
 4. **Reviewer数の決定**:
    - Simple → 1名 / Standard → 2名 / Complex → 3名 / Critical → 3名 + Critic独立追加
 5. **state へ記録 (必須, M7)**: `init --complexity <判定>` で初期化するか、判定後に `mission-state.py set complexity=<判定>` を実行。**`--complexity` / `set complexity=` は `reviewer_count` を自動セットする** (Simple:1 / Standard:2 / Complex:3 / Critical:3) ので、別途 `reviewer_count=<N>` を渡す必要はない (既定値を上書きしたい時のみ併記)。Unknown のまま進めると P3-5 (Simple インライン) と差分レビュー設計が機能しない
+6. **過大見積もりのコスト**: reviewer 1名増で iter あたり約10-20分のオーバーヘッドがあるため、`assumptions.md` に複雑度の判定根拠と Simple でない決め手を記録する。Phase 1 で触るファイルが見えたら `init --files` に project-root 相対パスを渡し、S3 file overlap WARN を効かせる
 
 ## Phase 2-6: ReAct ループ
 
