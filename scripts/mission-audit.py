@@ -139,7 +139,7 @@ def load_records(roots: list[Path]) -> list[StateRecord]:
     return records
 
 
-def dedupe_records(records: list[StateRecord]) -> tuple[list[StateRecord], list[list[StateRecord]]]:
+def dedupe_records(records: list[StateRecord]) -> tuple[list[StateRecord], list[list[StateRecord]], int]:
     groups: dict[tuple[str, str, str], list[StateRecord]] = {}
     for record in records:
         state = record.state
@@ -153,11 +153,25 @@ def dedupe_records(records: list[StateRecord]) -> tuple[list[StateRecord], list[
 
     deduped: list[StateRecord] = []
     duplicates: list[list[StateRecord]] = []
+    resolved_duplicate_count = 0
     for group in groups.values():
-        if len(group) > 1:
+        if len(group) > 1 and is_resolved_archive_duplicate(group):
+            resolved_duplicate_count += 1
+        elif len(group) > 1:
             duplicates.append(group)
         deduped.append(sorted(group, key=record_rank)[0])
-    return deduped, duplicates
+    return deduped, duplicates, resolved_duplicate_count
+
+
+def is_resolved_archive_duplicate(group: list[StateRecord]) -> bool:
+    """Return true for the expected session + archived worktree copy pattern."""
+    if len(group) < 2:
+        return False
+    ranks = {record_rank(record)[0] for record in group}
+    if 0 not in ranks or 1 not in ranks:
+        return False
+    fingerprints = {json.dumps(record.state, sort_keys=True, ensure_ascii=False) for record in group}
+    return len(fingerprints) == 1
 
 
 def record_rank(record: StateRecord) -> tuple[int, str]:
@@ -207,7 +221,71 @@ def filter_records(
     return out
 
 
-def aggregate(records: list[StateRecord], duplicates: list[list[StateRecord]], slow_threshold_sec: int) -> dict[str, Any]:
+def bucket_counts(records: list[StateRecord], bucket_fn) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for record in records:
+        bucket = bucket_fn(record)
+        counts[bucket] = counts.get(bucket, 0) + 1
+    return counts
+
+
+def halt_or_incomplete_bucket(record: StateRecord) -> str:
+    state = record.state
+    reason = str(state.get("halt_reason") or "").lower()
+    if classify(state) == "incomplete":
+        if not state.get("score_history"):
+            return "active-no-score-checkpoint"
+        return "active-in-progress"
+    if any(token in reason for token in ("orphan", "pid", "dead", "stale")):
+        return "stale-state-cleanup"
+    if "max-iter" in reason or "max iter" in reason:
+        return "max-iter"
+    if any(token in reason for token in ("user", "confirm", "captcha", "manual", "approval")):
+        return "human-blocker"
+    if any(token in reason for token in ("api", "auth", "key", "permission", "external")):
+        return "external-blocker"
+    if not state.get("score_history"):
+        return "halted-before-score"
+    latest = latest_scored_entry(state)
+    if latest and latest.get("composite", 0) < state.get("threshold", 4.0):
+        return "below-threshold"
+    return "other-halt"
+
+
+def slow_session_bucket(record: StateRecord, slow_threshold_sec: int) -> str:
+    state = record.state
+    cls = classify(state)
+    duration = duration_sec(state) or 0
+    if cls != "pass":
+        return f"{cls}-slow"
+    if duration >= slow_threshold_sec * 4:
+        return "extreme-long-pass"
+    if state.get("iteration", 0) >= 2 or state.get("complexity") in {"Complex", "Critical"}:
+        return "expected-complex-or-multi-iter"
+    latest = latest_scored_entry(state) or {}
+    if latest.get("composite", 0) >= 4.3:
+        return "healthy-long-pass"
+    return "needs-review"
+
+
+def low_score_pass_bucket(record: StateRecord) -> str:
+    state = record.state
+    latest = latest_scored_entry(state) or {}
+    if latest.get("open_high", 0):
+        return "risky-open-high"
+    if latest.get("min_item", 0) < 3.5:
+        return "risky-min-item-below-gate"
+    if latest.get("composite", 0) < state.get("threshold", 4.0):
+        return "risky-composite-below-threshold"
+    return "valid-threshold-pass"
+
+
+def aggregate(
+    records: list[StateRecord],
+    duplicates: list[list[StateRecord]],
+    resolved_duplicate_count: int,
+    slow_threshold_sec: int,
+) -> dict[str, Any]:
     classes = [classify(r.state) for r in records]
     durations = [d for r in records if (d := duration_sec(r.state)) is not None]
     composites = [
@@ -233,6 +311,10 @@ def aggregate(records: list[StateRecord], duplicates: list[list[StateRecord]], s
         r for r in pass_records
         if ((latest_scored_entry(r.state) or {}).get("composite") or 0) < 4.3
     ]
+    halt_or_incomplete = [
+        r for r, cls in zip(records, classes)
+        if cls in {"halt", "incomplete"}
+    ]
 
     by_project: dict[str, dict[str, int]] = {}
     by_agent: dict[str, dict[str, int]] = {}
@@ -252,6 +334,7 @@ def aggregate(records: list[StateRecord], duplicates: list[list[StateRecord]], s
         "forced_pass_count": len(forced),
         "ungated_pass_count": len(ungated),
         "duplicate_group_count": len(duplicates),
+        "resolved_duplicate_group_count": resolved_duplicate_count,
         "avg_final_composite": sum(composites) / len(composites) if composites else None,
         "median_session_duration_sec": statistics.median(durations) if durations else None,
         "avg_session_duration_sec": sum(durations) / len(durations) if durations else None,
@@ -261,6 +344,9 @@ def aggregate(records: list[StateRecord], duplicates: list[list[StateRecord]], s
         "forced_pass_sessions": forced,
         "ungated_pass_sessions": ungated,
         "duplicates": duplicates,
+        "halt_incomplete_breakdown": bucket_counts(halt_or_incomplete, halt_or_incomplete_bucket),
+        "slow_session_breakdown": bucket_counts(slow, lambda record: slow_session_bucket(record, slow_threshold_sec)),
+        "low_score_pass_breakdown": bucket_counts(low_score_pass, low_score_pass_bucket),
         "by_project": by_project,
         "by_agent": by_agent,
     }
@@ -352,6 +438,7 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
         f"- forced pass: {stats['forced_pass_count']}",
         f"- ungated pass: {stats['ungated_pass_count']}",
         f"- duplicate state groups: {stats['duplicate_group_count']}",
+        f"- resolved archive duplicates: {stats['resolved_duplicate_group_count']}",
         f"- avg final composite: {fmt_float(stats['avg_final_composite'])}",
         f"- median duration: {fmt_minutes(stats['median_session_duration_sec'])}",
         f"- avg duration: {fmt_minutes(stats['avg_session_duration_sec'])}",
@@ -368,9 +455,30 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
     else:
         lines.append("- none")
 
+    lines.extend(["", "## Halt / Incomplete Root-Cause Buckets", ""])
+    if stats["halt_incomplete_breakdown"]:
+        for key, count in sorted(stats["halt_incomplete_breakdown"].items()):
+            lines.append(f"- `{key}`: {count}")
+    else:
+        lines.append("- none")
+
     lines.extend(["", "## Slow Sessions", ""])
     if stats["slow_sessions"]:
         lines.extend(session_line(record) for record in stats["slow_sessions"])
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Slow Session Buckets", ""])
+    if stats["slow_session_breakdown"]:
+        for key, count in sorted(stats["slow_session_breakdown"].items()):
+            lines.append(f"- `{key}`: {count}")
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Low-Score Pass Buckets", ""])
+    if stats["low_score_pass_breakdown"]:
+        for key, count in sorted(stats["low_score_pass_breakdown"].items()):
+            lines.append(f"- `{key}`: {count}")
     else:
         lines.append("- none")
 
@@ -413,8 +521,8 @@ def main(argv: list[str] | None = None) -> int:
     after = commit_datetime(Path(args.repo).expanduser(), args.after_commit) if args.after_commit else None
     records = load_records(roots)
     filtered = filter_records(records, args.since, args.until, after)
-    deduped, duplicates = dedupe_records(filtered)
-    stats = aggregate(deduped, duplicates, args.slow_threshold_sec)
+    deduped, duplicates, resolved_duplicate_count = dedupe_records(filtered)
+    stats = aggregate(deduped, duplicates, resolved_duplicate_count, args.slow_threshold_sec)
     rows = finding_rows(stats, args.min_pass_rate)
 
     if args.self_improvement_prompt:

@@ -48,7 +48,8 @@ def test_audit_deduplicates_worktree_archive(tmp_path):
     )
     data = json.loads(result.stdout)
     assert data["total_sessions"] == 1
-    assert data["duplicate_group_count"] == 1
+    assert data["duplicate_group_count"] == 0
+    assert data["resolved_duplicate_group_count"] == 1
     assert data["pass_count"] == 1
 
 
@@ -65,6 +66,82 @@ def test_audit_does_not_dedupe_across_projects(tmp_path):
     data = json.loads(result.stdout)
     assert data["total_sessions"] == 2
     assert data["duplicate_group_count"] == 0
+    assert data["resolved_duplicate_group_count"] == 0
+
+
+def test_audit_keeps_unresolved_duplicate_groups(tmp_path):
+    sessions = tmp_path / ".mission-state" / "sessions"
+    _write_state(sessions / "sess-a.json", project_root=str(tmp_path))
+    _write_state(
+        sessions / "sess-a-copy.json",
+        project_root=str(tmp_path),
+        updated_at="2026-06-18T00:20:00Z",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--since", "2026-06-18", "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    assert data["total_sessions"] == 1
+    assert data["duplicate_group_count"] == 1
+    assert data["resolved_duplicate_group_count"] == 0
+
+
+def test_audit_reports_halt_incomplete_slow_and_low_score_buckets(tmp_path):
+    _write_state(
+        tmp_path / "halted" / ".mission-state" / "sessions" / "halted.json",
+        project_root=str(tmp_path / "halted"),
+        passes=False,
+        halt_reason="orphan: pid 123 dead",
+        score_history=[],
+        session_id="halted",
+    )
+    _write_state(
+        tmp_path / "incomplete" / ".mission-state" / "sessions" / "incomplete.json",
+        project_root=str(tmp_path / "incomplete"),
+        passes=False,
+        loop_active=True,
+        score_history=[],
+        session_id="incomplete",
+    )
+    _write_state(
+        tmp_path / "slow" / ".mission-state" / "sessions" / "slow.json",
+        project_root=str(tmp_path / "slow"),
+        started_at="2026-06-18T00:00:00Z",
+        updated_at="2026-06-18T01:00:00Z",
+        session_id="slow",
+    )
+    _write_state(
+        tmp_path / "low" / ".mission-state" / "sessions" / "low.json",
+        project_root=str(tmp_path / "low"),
+        score_history=[
+            {"iteration": 1, "composite": 4.1, "min_item": 3.8, "items": {}, "timestamp": "2026-06-18T00:05:00Z"}
+        ],
+        session_id="low",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-18",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    assert data["halt_incomplete_breakdown"]["stale-state-cleanup"] == 1
+    assert data["halt_incomplete_breakdown"]["active-no-score-checkpoint"] == 1
+    assert data["slow_session_breakdown"]["healthy-long-pass"] == 1
+    assert data["low_score_pass_breakdown"]["valid-threshold-pass"] == 1
 
 
 def test_audit_self_improvement_prompt_mentions_findings(tmp_path):
