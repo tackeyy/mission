@@ -267,8 +267,11 @@ def test_audit_slow_session_buckets_track_phase_duration_observability(tmp_path)
         check=True,
     )
     data = json.loads(result.stdout)
-    assert data["slow_session_breakdown"]["slow-without-phase-durations"] == 1
-    assert data["slow_session_breakdown"]["slow-with-phase-durations"] == 1
+    assert data["slow_session_breakdown"]["healthy-long-pass"] == 2
+    assert "slow-without-phase-durations" not in data["slow_session_breakdown"]
+    assert "slow-with-phase-durations" not in data["slow_session_breakdown"]
+    assert data["slow_phase_duration_breakdown"]["slow-without-phase-durations"] == 1
+    assert data["slow_phase_duration_breakdown"]["slow-with-phase-durations"] == 1
 
 
 def test_audit_self_improvement_prompt_mentions_findings(tmp_path):

@@ -468,8 +468,7 @@ def aggregate(
         if cls in {"halt", "incomplete"}
     ]
     slow_session_breakdown = bucket_counts(slow, lambda record: slow_session_bucket(record, slow_threshold_sec))
-    for key, count in bucket_count_keys([slow_phase_observability_bucket(record) for record in slow]).items():
-        slow_session_breakdown[key] = slow_session_breakdown.get(key, 0) + count
+    slow_phase_duration_breakdown = bucket_counts(slow, slow_phase_observability_bucket)
 
     by_project: dict[str, dict[str, int]] = {}
     by_agent: dict[str, dict[str, int]] = {}
@@ -507,6 +506,7 @@ def aggregate(
         ),
         "halt_incomplete_breakdown": bucket_counts(halt_or_incomplete, halt_or_incomplete_bucket),
         "slow_session_breakdown": slow_session_breakdown,
+        "slow_phase_duration_breakdown": slow_phase_duration_breakdown,
         "low_score_pass_breakdown": bucket_counts(low_score_pass, low_score_pass_bucket),
         "specialist_invocation_gap_count": len(specialist_invocation_gaps),
         "specialist_invocation_gap_breakdown": bucket_counts(
@@ -646,6 +646,13 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
     lines.extend(["", "## Slow Session Buckets", ""])
     if stats["slow_session_breakdown"]:
         for key, count in sorted(stats["slow_session_breakdown"].items()):
+            lines.append(f"- `{key}`: {count}")
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Slow Phase Duration Buckets", ""])
+    if stats["slow_phase_duration_breakdown"]:
+        for key, count in sorted(stats["slow_phase_duration_breakdown"].items()):
             lines.append(f"- `{key}`: {count}")
     else:
         lines.append("- none")
