@@ -167,3 +167,64 @@ def test_audit_self_improvement_prompt_mentions_findings(tmp_path):
     )
     assert "/mission scripts/mission-audit.py" in result.stdout
     assert "`halted-runs`" in result.stdout
+
+
+def test_audit_reports_selected_specialist_without_invocation(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "sess-a.json",
+        specialists_selected=[
+            {"role": "doc-writer", "skill": "dev-doc-writer", "status": "selected"},
+        ],
+        specialist_invocations=[],
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-18",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    data = json.loads(result.stdout)
+    assert data["specialist_invocation_gap_count"] == 1
+    assert data["specialist_invocation_gap_breakdown"]["dev-doc-writer"] == 1
+    assert any(f["code"] == "specialist-invocation-gap" for f in data["findings"])
+
+
+def test_audit_accepts_completed_specialist_invocation(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "sess-a.json",
+        specialists_selected=[
+            {"role": "doc-writer", "skill": "dev-doc-writer", "status": "selected"},
+        ],
+        specialist_invocations=[
+            {"skill": "dev-doc-writer", "status": "inline-applied", "mode": "codex-inline"},
+        ],
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-18",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    data = json.loads(result.stdout)
+    assert data["specialist_invocation_gap_count"] == 0
+    assert all(f["code"] != "specialist-invocation-gap" for f in data["findings"])

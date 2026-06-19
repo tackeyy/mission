@@ -280,6 +280,43 @@ def low_score_pass_bucket(record: StateRecord) -> str:
     return "valid-threshold-pass"
 
 
+TERMINAL_SPECIALIST_INVOCATION_STATUSES = {
+    "completed",
+    "inline-applied",
+    "skipped",
+    "unavailable",
+    "failed",
+}
+
+
+def selected_specialist_skills(state: dict[str, Any]) -> set[str]:
+    skills: set[str] = set()
+    for selected in state.get("specialists_selected") or []:
+        if isinstance(selected, dict) and selected.get("skill"):
+            skills.add(str(selected["skill"]))
+    return skills
+
+
+def terminal_invoked_specialist_skills(state: dict[str, Any]) -> set[str]:
+    skills: set[str] = set()
+    for invocation in state.get("specialist_invocations") or []:
+        if not isinstance(invocation, dict):
+            continue
+        skill = invocation.get("skill")
+        status = invocation.get("status")
+        if skill and status in TERMINAL_SPECIALIST_INVOCATION_STATUSES:
+            skills.add(str(skill))
+    return skills
+
+
+def specialist_invocation_gap_skills(record: StateRecord) -> list[str]:
+    selected = selected_specialist_skills(record.state)
+    if not selected:
+        return []
+    invoked = terminal_invoked_specialist_skills(record.state)
+    return sorted(selected - invoked)
+
+
 def aggregate(
     records: list[StateRecord],
     duplicates: list[list[StateRecord]],
@@ -311,6 +348,10 @@ def aggregate(
         r for r in pass_records
         if ((latest_scored_entry(r.state) or {}).get("composite") or 0) < 4.3
     ]
+    specialist_invocation_gaps = [
+        r for r in records
+        if specialist_invocation_gap_skills(r)
+    ]
     halt_or_incomplete = [
         r for r, cls in zip(records, classes)
         if cls in {"halt", "incomplete"}
@@ -341,12 +382,22 @@ def aggregate(
         "slow_sessions": slow,
         "halt_sessions": [r for r, cls in zip(records, classes) if cls == "halt"],
         "low_score_pass_sessions": low_score_pass,
+        "specialist_invocation_gap_sessions": specialist_invocation_gaps,
         "forced_pass_sessions": forced,
         "ungated_pass_sessions": ungated,
         "duplicates": duplicates,
         "halt_incomplete_breakdown": bucket_counts(halt_or_incomplete, halt_or_incomplete_bucket),
         "slow_session_breakdown": bucket_counts(slow, lambda record: slow_session_bucket(record, slow_threshold_sec)),
         "low_score_pass_breakdown": bucket_counts(low_score_pass, low_score_pass_bucket),
+        "specialist_invocation_gap_count": len(specialist_invocation_gaps),
+        "specialist_invocation_gap_breakdown": bucket_counts(
+            [
+                StateRecord(record.path, {**record.state, "_gap_skill": skill})
+                for record in specialist_invocation_gaps
+                for skill in specialist_invocation_gap_skills(record)
+            ],
+            lambda record: str(record.state.get("_gap_skill") or "unknown"),
+        ),
         "by_project": by_project,
         "by_agent": by_agent,
     }
@@ -391,8 +442,10 @@ def finding_rows(stats: dict[str, Any], min_pass_rate: float) -> list[tuple[str,
         rows.append(("P2", "slow-runs", f"{len(stats['slow_sessions'])} sessions exceeded slow threshold"))
     if stats["low_score_pass_sessions"]:
         rows.append(("P2", "low-score-pass", f"{len(stats['low_score_pass_sessions'])} pass sessions scored below 4.3"))
+    if stats["specialist_invocation_gap_sessions"]:
+        rows.append(("P2", "specialist-invocation-gap", f"{len(stats['specialist_invocation_gap_sessions'])} sessions selected specialists without terminal invocation logs"))
     if not rows:
-        rows.append(("OK", "no-critical-findings", "No forced/ungated pass, halt, duplicate, or slow-session finding"))
+        rows.append(("OK", "no-critical-findings", "No forced/ungated pass, halt, duplicate, slow-session, or specialist invocation finding"))
     return rows
 
 
@@ -482,6 +535,19 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
     else:
         lines.append("- none")
 
+    lines.extend(["", "## Specialist Invocation Gaps", ""])
+    if stats["specialist_invocation_gap_sessions"]:
+        lines.extend(session_line(record) for record in stats["specialist_invocation_gap_sessions"])
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Specialist Invocation Gap Buckets", ""])
+    if stats["specialist_invocation_gap_breakdown"]:
+        for key, count in sorted(stats["specialist_invocation_gap_breakdown"].items()):
+            lines.append(f"- `{key}`: {count}")
+    else:
+        lines.append("- none")
+
     lines.extend(["", "## Duplicate State Groups", ""])
     if stats["duplicates"]:
         for group in stats["duplicates"]:
@@ -535,6 +601,7 @@ def main(argv: list[str] | None = None) -> int:
                 "forced_pass_sessions",
                 "halt_sessions",
                 "low_score_pass_sessions",
+                "specialist_invocation_gap_sessions",
                 "slow_sessions",
                 "ungated_pass_sessions",
             }
