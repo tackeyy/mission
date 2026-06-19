@@ -1,0 +1,99 @@
+# ADR-001: Specialist Skill Auto-Selection and Interactive Fallback Policy
+
+## Status
+
+Accepted
+
+## Date
+
+2026-06-19
+
+## Context
+
+`mission` should improve output quality by using specialist skills when they are relevant to a mission. Examples include development, frontend, backend, testing, security, documentation, design, and research skills.
+
+Because `mission` is OSS, users will not share the same installed skill set. Some users may have official or bundled skills only. Others may have custom skills such as `development`, `frontend-skill`, `dev-frontend`, or project-specific reviewers. Requiring every user to pass skill names as arguments would make `mission` harder to use, especially for beginners.
+
+At the same time, silently installing or invoking arbitrary external skills is not acceptable. Skill selection and installation can affect security, privacy, cost, and execution quality. `mission` also must remain portable across Claude Code and Codex, where skill discovery and invocation capabilities differ.
+
+## Decision
+
+`mission` will default to automatic specialist selection.
+
+The orchestrator will classify the task during Phase 1, build a `task_profile`, rank available specialist candidates from project/user registries and beginner presets, and automatically select specialists when confidence is high and the skill is already available.
+
+`mission` will ask the user only in these cases:
+
+- candidate ranking is uncertain or closely tied
+- a preset or specialist is being used for the first time
+- a useful specialist is missing and installation is recommended
+- a `required: true` specialist is missing
+- the task is high-risk, security-sensitive, production-facing, or irreversible
+- the registry explicitly requires confirmation
+
+External specialists are evidence providers, not final judges. They may strengthen planning, execution, review, scoring evidence, or critic feedback, but `mission-scorer` and `mission-state.py mark-passes` remain the final completion gate.
+
+`mission` will not silently install external skills. Installation requires an explicit user approval step and trusted source metadata.
+
+The portable interactive fallback is chat-based selection, such as a numbered list. Custom graphical pickers are not required for correctness.
+
+## State and Audit Requirements
+
+Specialist selection must be auditable. `.mission-state` should record:
+
+- `task_profile`
+- `specialists_candidates`
+- `specialists_selected`
+- `specialists_unavailable`
+- `specialists_decision`
+
+The decision record should explain whether the policy was `auto`, `interactive`, `install-recommended`, `fallback`, or `halt`, and whether the user was prompted.
+
+## Consequences
+
+Positive:
+
+- beginner users get useful defaults without learning specialist configuration first
+- power users can customize behavior through project/user registries
+- optional specialists improve quality without becoming hard dependencies
+- missing specialists degrade gracefully to core `mission-*` skills
+- high-risk or install-related choices remain under user control
+- Claude Code and Codex can share the same policy through chat-based fallback
+
+Negative:
+
+- `mission` needs deterministic discovery, ranking, and policy tests
+- first-use and high-risk prompts add some interaction cost
+- install recommendations require a trust model before they can be automated
+- state schema and audit output become more complex
+
+## Alternatives Considered
+
+### Always ask the user
+
+Rejected. This would make `mission` less autonomous and would force beginners to understand specialist choices before they can get value.
+
+### Require users to pass skill names as arguments
+
+Rejected. This is useful for overrides, but it should not be the default user experience. It also does not help beginners discover useful specialists.
+
+### Fully automatic installation
+
+Rejected. Installing external code without explicit approval is unsafe for an OSS agent workflow.
+
+### No external specialist integration
+
+Rejected. It preserves simplicity, but leaves quality gains from user/project skills unused.
+
+## Implementation Notes
+
+The next implementation phase is tracked in GitHub issue #29: "Implement specialist auto-selection policy with interactive fallback".
+
+The foundation from #28 introduced the specialist registry protocol and initial state fields:
+
+- `task_profile`
+- `specialists_mode`
+- `specialists_selected`
+- `specialists_unavailable`
+
+The next phase should add discovery, candidate ranking, interactive fallback, install recommendation dry-runs, and expanded state metadata.
