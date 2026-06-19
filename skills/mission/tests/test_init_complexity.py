@@ -88,8 +88,10 @@ def test_init_specialist_metadata_defaults(run_cli, tmp_path):
     s = _read(tmp_path)
     assert s["task_profile"] == {}
     assert s["specialists_mode"] == "auto"
+    assert s["specialists_candidates"] == []
     assert s["specialists_selected"] == []
     assert s["specialists_unavailable"] == []
+    assert s["specialists_decision"] == {}
 
 
 def test_set_records_specialist_metadata_json(run_cli, tmp_path):

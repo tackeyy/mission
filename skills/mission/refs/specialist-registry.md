@@ -113,6 +113,21 @@ Specialists provide evidence; they do not own the mission loop.
 
 Core subskills remain authoritative for the standard loop: mission-planner, mission-executor, mission-reviewer, mission-scorer, and mission-critic.
 
+## Dry-Run Recommendation Command
+
+`mission-state.py specialists recommend` provides a deterministic dry-run path for Phase 1 specialist selection.
+
+Example:
+
+```bash
+python3 skills/mission/bin/mission-state.py specialists recommend \
+  --task "Implement a React UI component with accessibility tests" \
+  --installed-skills dev-frontend \
+  --json
+```
+
+The command classifies `task_profile`, discovers installed skills, ranks candidates, and returns a `specialists_decision`. It does not install external skills. Use `--record-state` only after `init` when the recommendation should be persisted to the current `.mission-state` session.
+
 ## Fallback and Missing Skills
 
 Default behavior is graceful degradation:
@@ -160,6 +175,15 @@ The orchestrator preserves enough traceability to explain specialist selection w
     "signals": ["registry docs update", "state field alignment"]
   },
   "specialists_mode": "auto",
+  "specialists_candidates": [
+    {
+      "role": "doc-writer",
+      "skill": "dev-doc-writer",
+      "score": 0.82,
+      "installed": true,
+      "reason": "documentation profile match"
+    }
+  ],
   "specialists_selected": [
     {
       "role": "doc-writer",
@@ -176,11 +200,17 @@ The orchestrator preserves enough traceability to explain specialist selection w
       "skill": "dev-security-reviewer",
       "reason": "not installed"
     }
-  ]
+  ],
+  "specialists_decision": {
+    "policy": "auto",
+    "action": "select",
+    "reason": "top candidate dev-doc-writer is installed with score 0.82",
+    "prompted_user": false
+  }
 }
 ```
 
-Use `task_profile` as an object/dict for the classification record, `specialists_mode` for automatic or manual selection mode, `specialists_selected` for selected specialist evidence, and `specialists_unavailable` for missing or unavailable specialists.
+Use `task_profile` as an object/dict for the classification record, `specialists_mode` for automatic or manual selection mode, `specialists_candidates` for ranked candidates, `specialists_selected` for selected specialist evidence, `specialists_unavailable` for missing or unavailable specialists, and `specialists_decision` for the policy outcome.
 
 ## Phased Rollout
 

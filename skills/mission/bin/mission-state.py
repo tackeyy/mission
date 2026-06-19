@@ -44,6 +44,83 @@ DEFAULT_MAX_ITER = 3        # init --max-iter 未指定時の最大反復回数 
 SCORE_MIN, SCORE_MAX = 0.0, 5.0  # composite/min_item の許容範囲
 
 
+BUILTIN_SPECIALIST_CANDIDATES = [
+    {
+        "role": "doc-writer",
+        "skill": "dev-doc-writer",
+        "task_profiles": ["documentation"],
+        "phases": ["planning", "execution", "review"],
+        "source": "preset:docs",
+        "required": False,
+    },
+    {
+        "role": "frontend",
+        "skill": "dev-frontend",
+        "task_profiles": ["frontend"],
+        "phases": ["planning", "execution"],
+        "source": "preset:frontend",
+        "required": False,
+    },
+    {
+        "role": "visual-quality",
+        "skill": "frontend-skill",
+        "task_profiles": ["frontend", "product"],
+        "phases": ["planning", "review"],
+        "source": "preset:frontend",
+        "required": False,
+    },
+    {
+        "role": "backend",
+        "skill": "dev-backend",
+        "task_profiles": ["backend", "database"],
+        "phases": ["planning", "execution"],
+        "source": "preset:backend",
+        "required": False,
+    },
+    {
+        "role": "unit-tester",
+        "skill": "dev-unit-tester",
+        "task_profiles": ["testing", "backend"],
+        "phases": ["execution", "review"],
+        "source": "preset:testing",
+        "required": False,
+    },
+    {
+        "role": "security-reviewer",
+        "skill": "dev-security-reviewer",
+        "task_profiles": ["security"],
+        "phases": ["planning", "review"],
+        "source": "preset:security",
+        "required": False,
+    },
+    {
+        "role": "infra",
+        "skill": "dev-infra",
+        "task_profiles": ["infra"],
+        "phases": ["planning", "execution", "review"],
+        "source": "preset:infra",
+        "required": False,
+    },
+]
+
+PROFILE_KEYWORDS = {
+    "documentation": ("readme", "docs", "document", "documentation", "adr", "guide", "reference", "changelog", ".md"),
+    "frontend": ("frontend", "react", "vue", "ui", "css", "component", "browser", "screenshot", "accessibility"),
+    "backend": ("backend", "api", "endpoint", "service", "worker", "validation", "business logic"),
+    "database": ("database", "schema", "migration", "query", "sql", "persistence"),
+    "security": ("security", "auth", "permission", "secret", "token", "injection", "pii", "oauth"),
+    "testing": ("test", "pytest", "jest", "e2e", "playwright", "coverage", "flaky"),
+    "infra": ("deploy", "deployment", "ci", "docker", "cloud", "observability", "terraform", "github actions"),
+    "product": ("prd", "ux", "workflow", "acceptance criteria", "product"),
+    "research": ("research", "market", "competitor", "analysis", "source"),
+}
+
+HIGH_RISK_KEYWORDS = (
+    "production", "prod", "deploy", "migration", "drop table", "delete data",
+    "irreversible", "payment", "security", "auth", "secret", "token", "pii",
+)
+
+
 def iso_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -386,6 +463,338 @@ def _warn_s3_file_overlap(cwd: Path, planned_files: list[str], cur_sid: str) -> 
             break
 
 
+def _split_csv(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [v.strip() for v in value.split(",") if v.strip()]
+
+
+def _coerce_scalar(value: str):
+    value = value.strip().strip('"').strip("'")
+    if value.lower() == "true":
+        return True
+    if value.lower() == "false":
+        return False
+    return value
+
+
+def _coerce_yaml_value(value: str):
+    value = value.strip()
+    if value.startswith("[") and value.endswith("]"):
+        inner = value[1:-1].strip()
+        return [_coerce_scalar(v) for v in inner.split(",") if v.strip()]
+    return _coerce_scalar(value)
+
+
+def _load_specialist_registry(path: str | None) -> list[dict]:
+    """Load the small registry subset used by specialist selection.
+
+    JSON is accepted directly. YAML support intentionally covers only the documented
+    `specialists: - key: value` shape to avoid adding a runtime dependency.
+    """
+    if not path:
+        return []
+    p = Path(path).expanduser()
+    if not p.exists():
+        return []
+    txt = p.read_text(encoding="utf-8")
+    try:
+        data = json.loads(txt)
+        return list(data.get("specialists") or [])
+    except json.JSONDecodeError:
+        pass
+
+    specialists: list[dict] = []
+    in_specialists = False
+    cur: dict | None = None
+    for raw in txt.splitlines():
+        line = raw.split("#", 1)[0].rstrip()
+        if not line.strip():
+            continue
+        stripped = line.strip()
+        if not raw.startswith(" ") and stripped.endswith(":"):
+            in_specialists = stripped == "specialists:"
+            continue
+        if not in_specialists:
+            continue
+        if stripped.startswith("- "):
+            if cur:
+                specialists.append(cur)
+            cur = {}
+            rest = stripped[2:].strip()
+            if rest and ":" in rest:
+                k, v = rest.split(":", 1)
+                cur[k.strip()] = _coerce_yaml_value(v)
+            continue
+        if cur is not None and ":" in stripped:
+            k, v = stripped.split(":", 1)
+            cur[k.strip()] = _coerce_yaml_value(v)
+    if cur:
+        specialists.append(cur)
+    return specialists
+
+
+def _skill_roots(args) -> list[Path]:
+    roots = [Path(p).expanduser() for p in _split_csv(getattr(args, "skills_dir", None))]
+    env = os.environ.get("MISSION_SKILL_ROOTS")
+    if env:
+        roots.extend(Path(p).expanduser() for p in env.split(os.pathsep) if p)
+    if not getattr(args, "no_default_skill_roots", False):
+        roots.extend([
+            Path.home() / ".codex" / "skills",
+            Path.home() / ".claude" / "skills",
+        ])
+    # Preserve order while deduplicating.
+    out: list[Path] = []
+    seen = set()
+    for r in roots:
+        key = str(r)
+        if key not in seen:
+            seen.add(key)
+            out.append(r)
+    return out
+
+
+def _discover_installed_skills(args) -> dict[str, dict]:
+    installed: dict[str, dict] = {}
+    for name in _split_csv(getattr(args, "installed_skills", None)):
+        installed[name] = {"skill": name, "source": "argument", "available": True, "description": ""}
+    for root in _skill_roots(args):
+        if not root.is_dir():
+            continue
+        for skill_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+            skill_md = skill_dir / "SKILL.md"
+            if not skill_md.is_file():
+                continue
+            name = skill_dir.name
+            description = ""
+            try:
+                for line in skill_md.read_text(encoding="utf-8", errors="ignore").splitlines()[:40]:
+                    if line.startswith("name:"):
+                        name = line.split(":", 1)[1].strip().strip('"').strip("'") or name
+                    elif line.startswith("description:"):
+                        description = line.split(":", 1)[1].strip().strip('"').strip("'")
+            except OSError:
+                continue
+            installed.setdefault(name, {
+                "skill": name,
+                "source": str(root),
+                "available": True,
+                "description": description,
+            })
+    return installed
+
+
+def classify_task_profile(task: str, files: list[str] | None = None) -> dict:
+    files = files or []
+    haystack = " ".join([task, *files]).lower()
+    matches: list[tuple[str, int, list[str]]] = []
+    for profile, keywords in PROFILE_KEYWORDS.items():
+        signals = [kw for kw in keywords if kw in haystack]
+        if signals:
+            matches.append((profile, len(signals), signals[:5]))
+    matches.sort(key=lambda item: (-item[1], item[0]))
+    if not matches:
+        return {
+            "primary": "general",
+            "secondary": [],
+            "confidence": 0.3,
+            "risk": "low",
+            "signals": [],
+        }
+    primary, top_count, top_signals = matches[0]
+    secondary = [p for p, _, _ in matches[1:4]]
+    risk = "high" if any(kw in haystack for kw in HIGH_RISK_KEYWORDS) else "medium"
+    confidence = min(0.95, 0.55 + (0.1 * top_count))
+    if secondary and matches[1][1] == top_count:
+        confidence = min(confidence, 0.68)
+    return {
+        "primary": primary,
+        "secondary": secondary,
+        "confidence": round(confidence, 2),
+        "risk": risk,
+        "signals": top_signals,
+    }
+
+
+def _candidate_profiles(candidate: dict) -> list[str]:
+    profiles = candidate.get("task_profiles") or candidate.get("profiles") or []
+    if isinstance(profiles, str):
+        return [profiles]
+    return list(profiles)
+
+
+def _normalize_candidate(candidate: dict, source: str) -> dict:
+    skill = candidate.get("skill") or candidate.get("name") or candidate.get("role")
+    role = candidate.get("role") or skill
+    phases = candidate.get("phases") or ["planning", "review"]
+    if isinstance(phases, str):
+        phases = [phases]
+    return {
+        "role": role,
+        "skill": skill,
+        "task_profiles": _candidate_profiles(candidate),
+        "phases": phases,
+        "required": bool(candidate.get("required", False)),
+        "source": candidate.get("source") or source,
+        "unavailable": candidate.get("unavailable", "continue"),
+        "confirm": bool(candidate.get("confirm", False)),
+    }
+
+
+def rank_specialist_candidates(task_profile: dict, registry_candidates: list[dict],
+                               installed: dict[str, dict], first_use: set[str] | None = None) -> list[dict]:
+    first_use = first_use or set()
+    profiles = [task_profile.get("primary"), *(task_profile.get("secondary") or [])]
+    ranked = []
+    for raw in [*registry_candidates, *BUILTIN_SPECIALIST_CANDIDATES]:
+        c = _normalize_candidate(raw, raw.get("source", "registry") if isinstance(raw, dict) else "registry")
+        skill = c.get("skill")
+        if not skill:
+            continue
+        overlap = [p for p in c.get("task_profiles", []) if p in profiles]
+        if not overlap:
+            continue
+        installed_info = installed.get(skill)
+        base = 0.45 + (0.25 if task_profile.get("primary") in overlap else 0.1)
+        base += min(0.2, 0.05 * len(overlap))
+        if installed_info:
+            base += 0.1
+        if c.get("required"):
+            base += 0.05
+        score = min(0.99, round(base * float(task_profile.get("confidence", 0.5)), 3))
+        ranked.append({
+            **c,
+            "score": score,
+            "installed": bool(installed_info),
+            "available": bool(installed_info),
+            "status": "available" if installed_info else "missing",
+            "first_use": skill in first_use,
+            "reason": f"{', '.join(overlap)} profile match",
+        })
+    ranked.sort(key=lambda c: (-c["score"], c["skill"]))
+    return ranked
+
+
+def decide_specialists(task_profile: dict, candidates: list[dict]) -> dict:
+    if not candidates:
+        return {
+            "policy": "fallback",
+            "action": "continue-core",
+            "reason": "no specialist candidate matched the task profile",
+            "prompted_user": False,
+        }
+    top = candidates[0]
+    second = candidates[1] if len(candidates) > 1 else None
+    if task_profile.get("risk") == "high":
+        return {
+            "policy": "confirm",
+            "action": "ask-user",
+            "reason": "high-risk task profile requires specialist plan confirmation",
+            "prompted_user": True,
+        }
+    required_missing = [c for c in candidates if c.get("required") and not c.get("installed")]
+    if required_missing:
+        return {
+            "policy": "required-missing",
+            "action": "ask-user",
+            "reason": f"required specialist is missing: {required_missing[0]['skill']}",
+            "prompted_user": True,
+        }
+    if top.get("first_use") or top.get("confirm"):
+        return {
+            "policy": "first-use",
+            "action": "ask-user",
+            "reason": f"specialist requires first-use confirmation: {top['skill']}",
+            "prompted_user": True,
+        }
+    if not top.get("installed"):
+        return {
+            "policy": "install-recommended",
+            "action": "recommend-install",
+            "reason": f"top specialist is missing: {top['skill']}",
+            "prompted_user": True,
+        }
+    if second and second.get("installed") and abs(top["score"] - second["score"]) <= 0.05:
+        return {
+            "policy": "interactive",
+            "action": "ask-user",
+            "reason": "top installed specialist candidates are closely tied",
+            "prompted_user": True,
+        }
+    if task_profile.get("confidence", 0) < 0.5 or top.get("score", 0) < 0.45:
+        return {
+            "policy": "fallback",
+            "action": "continue-core",
+            "reason": "task profile confidence is too low for automatic specialist selection",
+            "prompted_user": False,
+        }
+    return {
+        "policy": "auto",
+        "action": "select",
+        "reason": f"top candidate {top['skill']} is installed with score {top['score']}",
+        "prompted_user": False,
+    }
+
+
+def _selection_from_decision(candidates: list[dict], decision: dict) -> tuple[list[dict], list[dict]]:
+    unavailable = [c for c in candidates if not c.get("installed")]
+    if decision.get("policy") == "auto" and candidates:
+        return [{**candidates[0], "status": "selected"}], unavailable
+    return [], unavailable
+
+
+def cmd_specialists(args):
+    task = getattr(args, "task", "") or ""
+    files = _split_csv(getattr(args, "files", None))
+    installed = _discover_installed_skills(args)
+    registry_candidates = _load_specialist_registry(getattr(args, "registry", None))
+    task_profile = classify_task_profile(task, files)
+    candidates = rank_specialist_candidates(
+        task_profile,
+        registry_candidates,
+        installed,
+        set(_split_csv(getattr(args, "first_use", None))),
+    )
+    decision = decide_specialists(task_profile, candidates)
+    selected, unavailable = _selection_from_decision(candidates, decision)
+    result = {
+        "ok": True,
+        "task_profile": task_profile,
+        "installed_skills": sorted(installed.keys()),
+        "specialists_candidates": candidates,
+        "specialists_selected": selected,
+        "specialists_unavailable": unavailable,
+        "specialists_decision": decision,
+    }
+
+    if getattr(args, "record_state", False):
+        cwd = Path.cwd()
+        sf = resolve_state_file(cwd)
+        if not sf.exists():
+            print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
+            sys.exit(1)
+        with StateLock(lock_file(cwd)):
+            data = json.loads(sf.read_text())
+            data["task_profile"] = task_profile
+            data["specialists_candidates"] = candidates
+            data["specialists_selected"] = selected
+            data["specialists_unavailable"] = unavailable
+            data["specialists_decision"] = decision
+            data["specialists_mode"] = "interactive" if decision.get("prompted_user") else "auto"
+            data["updated_at"] = iso_now()
+            backup_state(sf)
+            atomic_write_json(sf, stamp_metadata(data, cwd))
+
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print(f"profile={task_profile['primary']} confidence={task_profile['confidence']} risk={task_profile['risk']}")
+        print(f"decision={decision['policy']} action={decision['action']} reason={decision['reason']}")
+        for idx, c in enumerate(candidates[:5], 1):
+            print(f"{idx}. {c['skill']} score={c['score']} installed={c['installed']} source={c['source']}")
+
+
 
 def cmd_init(args):
     cwd = Path.cwd()
@@ -401,8 +810,10 @@ def cmd_init(args):
         "reviewer_count": 2,
         "task_profile": {},
         "specialists_mode": "auto",
+        "specialists_candidates": [],
         "specialists_selected": [],
         "specialists_unavailable": [],
+        "specialists_decision": {},
         # M-audit-2 (2026-06-11): 未指定は 3 (98 セッション実測で iter>3 の ROI 低下)。
         # 0 は「上限なし (stagnation 停止モード)」として None を保持する。
         "max_iter": (DEFAULT_MAX_ITER if args.max_iter is None else (None if args.max_iter == 0 else args.max_iter)),
@@ -1507,6 +1918,21 @@ def _build_parser():
     p_stats.add_argument("--until", default=None, help="期間上限 (YYYY-MM-DD, updated_at で比較)")
     p_stats.add_argument("--json", action="store_true", help="JSON 形式で出力")
     p_stats.set_defaults(func=cmd_stats)
+
+    p_spec = sub.add_parser("specialists", help="specialist skill の discovery / recommend / state 記録")
+    spec_sub = p_spec.add_subparsers(dest="specialists_cmd", required=True)
+    p_rec = spec_sub.add_parser("recommend", help="task_profile から specialist 候補を dry-run 推薦")
+    p_rec.add_argument("--task", required=True, help="分類対象のミッション文またはタスク説明")
+    p_rec.add_argument("--files", default=None, help="関連ファイルのカンマ区切り project-root 相対パス")
+    p_rec.add_argument("--registry", default=None, help="project/user specialist registry (JSON または限定 YAML)")
+    p_rec.add_argument("--skills-dir", default=None, help="追加 skill root のカンマ区切り")
+    p_rec.add_argument("--no-default-skill-roots", action="store_true",
+                       help="~/.codex/skills と ~/.claude/skills を discovery しない (テスト/隔離用)")
+    p_rec.add_argument("--installed-skills", default=None, help="テスト/手動指定用の installed skill 名カンマ区切り")
+    p_rec.add_argument("--first-use", default=None, help="初回確認扱いにする skill 名カンマ区切り")
+    p_rec.add_argument("--record-state", action="store_true", help="現在の mission state に推薦結果を記録")
+    p_rec.add_argument("--json", action="store_true", help="JSON 形式で出力")
+    p_rec.set_defaults(func=cmd_specialists)
 
     return parser
 
