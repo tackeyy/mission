@@ -4,6 +4,7 @@
   scripts/mission-stop-guard.sh
   scripts/mission-audit.py
   skills/mission/bin/mission-state.py
+  skills/mission/refs/specialist-registry.md (存在する場合)
   skills/mission/SKILL.md
   skills/mission-reviewer/SKILL.md
   skills/mission-scorer/SKILL.md
@@ -12,6 +13,7 @@
   plugins/mission/scripts/mission-stop-guard.sh
   plugins/mission/scripts/mission-audit.py
   plugins/mission/skills/mission/bin/mission-state.py
+  plugins/mission/skills/mission/refs/specialist-registry.md (存在する場合)
   plugins/mission/skills/mission/SKILL.md
   plugins/mission/skills/mission-reviewer/SKILL.md
   plugins/mission/skills/mission-scorer/SKILL.md
@@ -20,6 +22,7 @@
   cp scripts/mission-stop-guard.sh        plugins/mission/scripts/mission-stop-guard.sh
   cp scripts/mission-audit.py             plugins/mission/scripts/mission-audit.py
   cp skills/mission/bin/mission-state.py  plugins/mission/skills/mission/bin/mission-state.py
+  cp skills/mission/refs/specialist-registry.md plugins/mission/skills/mission/refs/specialist-registry.md
   cp skills/mission/SKILL.md              plugins/mission/skills/mission/SKILL.md
   cp skills/mission-reviewer/SKILL.md     plugins/mission/skills/mission-reviewer/SKILL.md
   cp skills/mission-scorer/SKILL.md       plugins/mission/skills/mission-scorer/SKILL.md
@@ -43,6 +46,10 @@ SYNC_PAIRS = [
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "bin" / "mission-state.py",
     ),
     (
+        REPO_ROOT / "skills" / "mission" / "refs" / "specialist-registry.md",
+        REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "refs" / "specialist-registry.md",
+    ),
+    (
         REPO_ROOT / "skills" / "mission" / "SKILL.md",
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "SKILL.md",
     ),
@@ -59,6 +66,19 @@ SYNC_PAIRS = [
 
 def _md5(path: Path) -> str:
     return hashlib.md5(path.read_bytes()).hexdigest()
+
+
+def _assert_optional_pair_in_sync(src: Path, dst: Path, label: str):
+    if not src.exists() and not dst.exists():
+        return
+    assert src.exists(), f"正典が存在しない: {src}"
+    assert dst.exists(), f"plugins 側が存在しない: {dst}"
+    assert _md5(src) == _md5(dst), (
+        f"{label} が未同期。\n"
+        f"  正典: {src}\n"
+        f"  plugins: {dst}\n"
+        f"  同期コマンド: cp {src} {dst}"
+    )
 
 
 def test_stop_guard_in_sync():
@@ -89,7 +109,7 @@ def test_mission_state_py_in_sync():
 
 def test_skill_md_in_sync():
     """skills/mission/SKILL.md と plugins/mission/skills/mission/SKILL.md が一致する."""
-    src, dst = SYNC_PAIRS[3]
+    src, dst = SYNC_PAIRS[4]
     assert src.exists(), f"正典が存在しない: {src}"
     assert dst.exists(), f"plugins 側が存在しない: {dst}"
     assert _md5(src) == _md5(dst), (
@@ -102,7 +122,7 @@ def test_skill_md_in_sync():
 
 def test_reviewer_skill_md_in_sync():
     """skills/mission-reviewer/SKILL.md と plugins/mission 側が一致する."""
-    src, dst = SYNC_PAIRS[4]
+    src, dst = SYNC_PAIRS[5]
     assert src.exists(), f"正典が存在しない: {src}"
     assert dst.exists(), f"plugins 側が存在しない: {dst}"
     assert _md5(src) == _md5(dst), (
@@ -115,7 +135,7 @@ def test_reviewer_skill_md_in_sync():
 
 def test_scorer_skill_md_in_sync():
     """skills/mission-scorer/SKILL.md と plugins/mission 側が一致する."""
-    src, dst = SYNC_PAIRS[5]
+    src, dst = SYNC_PAIRS[6]
     assert src.exists(), f"正典が存在しない: {src}"
     assert dst.exists(), f"plugins 側が存在しない: {dst}"
     assert _md5(src) == _md5(dst), (
@@ -137,3 +157,9 @@ def test_mission_audit_py_in_sync():
         f"  plugins: {dst}\n"
         f"  同期コマンド: cp {src} {dst}"
     )
+
+
+def test_specialist_registry_md_in_sync_when_present():
+    """specialist-registry.md は作成済みの場合だけ plugins/mission 側との一致を確認する."""
+    src, dst = SYNC_PAIRS[3]
+    _assert_optional_pair_in_sync(src, dst, "specialist-registry.md")

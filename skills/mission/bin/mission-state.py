@@ -399,6 +399,10 @@ def cmd_init(args):
         "subtasks": [],
         "complexity": "Unknown",
         "reviewer_count": 2,
+        "task_profile": {},
+        "specialists_mode": "auto",
+        "specialists_selected": [],
+        "specialists_unavailable": [],
         # M-audit-2 (2026-06-11): 未指定は 3 (98 セッション実測で iter>3 の ROI 低下)。
         # 0 は「上限なし (stagnation 停止モード)」として None を保持する。
         "max_iter": (DEFAULT_MAX_ITER if args.max_iter is None else (None if args.max_iter == 0 else args.max_iter)),

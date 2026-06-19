@@ -24,7 +24,6 @@ context compaction 後も最優先で復元・遵守すること。
 5. **compaction 後の最初のアクション (R1)**: §Skill開始/復元手順の **compaction/resume 経路 (step 2)** をこの順で実行 — (a) `mission-state.py refresh-pid` (PID 更新 + orphan halt 自動解除。**cleanup より必ず先**) → (b) 起動前 cleanup (`cleanup-empty $(pwd)` → `cleanup-stale --root "$(pwd)" --execute`) → (c) `mission-state.py get` で state(`sessions/<sid>.json`)を読み `assumptions_path` の assumptions を Read (固定パス直書き禁止) → (d) `phase`/`iteration`/`score_history` から該当 Phase へ復帰
 6. **完了報告する前に**: Medium 以上の指摘を orchestrator 自身がインライン修正した場合、差分 Reviewer 1 名の再確認を経たか (M6。自己検証のみで合格禁止)？ composite_score が threshold 以上か？ 全項目が 3.5 以上か？ どちらかが No なら止まる権利はない。**さらに `mission-state.py mark-passes` が exit 0 で返ったことを確認する** (threshold gate により未達なら exit 2 で reject される)。`halt_reason` が空でなければ完了報告語彙は禁止し、先頭を必ず `⏸️ 中断 / 未完了` にする。**`mark-passes --force` は orchestrator が自律実行してはならない** — ユーザーが明示的に「`--force` で進めて」「人手 override する」と指示した場合のみ使用可能 (gate を骨抜きにする操作のため)
 7. **合格判定後、PR がある場合は Phase 7 (条件付き自動マージ判定)** を実行する。CI/テスト pass かつリポジトリ側で自動マージ NG ルールなしなら `gh pr merge` まで実行してから完了報告する。リポジトリ側に「人手のみ」「自動マージ禁止」「Lv4」等の明示制約があれば手動マージ待ちとして完了報告する (詳細は § Phase 7 参照)
-
 8. **実ログ由来・逸脱多発 Top4 (compaction 後も毎 Phase でセルフチェック)**: 過去 run でルールが存在するのに守られず損失が出た 4 点。
    - **並列**: Reviewer N 名は **1 メッセージ内で複数 Skill 同時呼び出し** (別メッセージ分割禁止)。実ログで 6 ラン中 0 回しか守られず直列化し、xai-cli PR#17 で run の 17% を損失。Claude Code のみ可 (Codex はこの制約なし=順次が基本・§Claude Code/Codex 差分参照)。Phase 4 起動時に「今 1 メッセージで N 名出したか?」を自問する
    - **速度 (early-stop)**: iter1 で `composite >= 4.0` かつ残 High = 0 なら **iter2 は原則禁止・即 mark-passes**。続行は §終了判定の例外 4 条件を全て満たす時のみ、理由を assumptions.md に必須記載 (過去 iter1 合格後の続行 14 件中 7 件が不変/悪化)
@@ -92,10 +91,10 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py update-project
    ├─ 例外2条件 (不可逆操作 / --require-confirm) のみ質問
    └─ Phase 1 へ
         ↓
-[Phase 1: Issue特定・複雑度判定]
+[Phase 1: Issue特定・複雑度/task_profile判定]
    ├─ 真に解くべき問いを抽出
    ├─ サブタスク分解
-   └─ 複雑度判定 (Simple/Standard/Complex/Critical)
+   └─ 複雑度 + task_profile 判定、任意 specialist 選定
         ↓
 [Phase 2: 計画立案] ── mission-planner (Skill tool)
         ↓
@@ -176,21 +175,17 @@ state.json の `assumptions_path` が指すファイル (デフォルト `.missi
 
 これら以外で「不明だから質問したい」と感じた瞬間が、Assumption Registry に書き込むタイミングである。
 
-## Phase 1: Issue特定・複雑度判定
+## Phase 1: Issue特定・複雑度/task_profile判定
 
 ユーザー応答を踏まえ、以下を確定する:
 
 1. **構造化されたミッション記述**（"真に解くべき問い"）
 2. **サブタスク分解**（依存関係を含む）
-3. **複雑度ラベル**:
-   - **Simple**: 単一ファイル、1ステップ
-   - **Standard**: 3-5ステップ、複数ファイル、テスト含む
-   - **Complex**: 設計判断含む、横断的変更
-   - **Critical**: 本番影響、セキュリティ、非可逆操作
-4. **Reviewer数の決定**:
-   - Simple → 1名 / Standard → 2名 / Complex → 3名 / Critical → 3名 + Critic独立追加
-5. **state へ記録 (必須, M7)**: `init --complexity <判定>` で初期化するか、判定後に `mission-state.py set complexity=<判定>` を実行。**`--complexity` / `set complexity=` は `reviewer_count` を自動セットする** (Simple:1 / Standard:2 / Complex:3 / Critical:3) ので、別途 `reviewer_count=<N>` を渡す必要はない (既定値を上書きしたい時のみ併記)。Unknown のまま進めると P3-5 (Simple インライン) と差分レビュー設計が機能しない
-6. **過大見積もりのコスト**: reviewer 1名増で iter あたり約10-20分のオーバーヘッドがあるため、`assumptions.md` に複雑度の判定根拠と Simple でない決め手を記録する。Phase 1 で触るファイルが見えたら `init --files` に project-root 相対パスを渡し、S3 file overlap WARN を効かせる。**issue 連携ミッションは PR 本文に `Closes #N` を入れマージで自動クローズする (GitHub Flow, 詳細 refs/state-management.md)**
+3. **複雑度ラベル**: Simple=単一ファイル/1ステップ、Standard=3-5ステップ/複数ファイル/テスト含む、Complex=設計判断含む/横断的変更、Critical=本番影響/セキュリティ/非可逆操作
+4. **task_profile + specialist 自動選定**: `documentation/frontend/backend/security/testing/infra/product/research/general` 等を分類し、`refs/specialist-registry.md` の user/project registry + beginner presets から任意 specialist を選ぶ。選定/欠落は assumptions/archive に記録し、未導入なら core subskills のみで継続
+5. **Reviewer数の決定**: Simple → 1名 / Standard → 2名 / Complex → 3名 / Critical → 3名 + Critic独立追加
+6. **state へ記録 (必須, M7)**: `init --complexity <判定>` で初期化するか、判定後に `mission-state.py set complexity=<判定>` を実行。**`--complexity` / `set complexity=` は `reviewer_count` を自動セットする** (Simple:1 / Standard:2 / Complex:3 / Critical:3) ので、別途 `reviewer_count=<N>` を渡す必要はない (既定値を上書きしたい時のみ併記)。Unknown のまま進めると P3-5 (Simple インライン) と差分レビュー設計が機能しない
+7. **過大見積もりのコスト**: reviewer 1名増で iter あたり約10-20分のオーバーヘッドがあるため、`assumptions.md` に複雑度の判定根拠と Simple でない決め手を記録する。Phase 1 で触るファイルが見えたら `init --files` に project-root 相対パスを渡し、S3 file overlap WARN を効かせる。**issue 連携ミッションは PR 本文に `Closes #N` を入れマージで自動クローズする (GitHub Flow, 詳細 refs/state-management.md)**
 
 ## Phase 2-6: ReAct ループ
 
@@ -210,6 +205,8 @@ state.json の `assumptions_path` が指すファイル (デフォルト `.missi
 ### サブスキル呼び出し (概要)
 
 1 iter の標準フロー: `mission-planner` → `mission-executor` → `mission-reviewer` × N (並列、N は `mission-state.py get reviewer_count` の値) → `mission-scorer` → **`Bash` で `mission-state.py push-score`** → `mission-critic`。
+
+Phase 1 で選定した specialist は Phase 2-6 の任意 evidence provider として、計画制約・実装補助・差分レビュー・採点根拠・Critic 改善案に使う。専門家不在や Codex で Skill 呼び出し不可の場合は、その欠落を記録して core subskills のみで進める。
 
 **Reviewer N 名は必ず単一メッセージ内の複数 Skill 呼び出しで起動する (P4)**。別メッセージ分割でも非同期並列になることは実測済みだが、挙動保証がない (実測データ: refs/gotchas.md §1)。
 
@@ -401,6 +398,7 @@ mission は Claude Code / Codex 両対応 (PID owner 判定は 2026-06-13 に co
 - `refs/changelog.md`: 改修履歴と実測根拠 (P1/P2/P3系/M系/M-audit系の詳細データ)
 - `refs/codex-setup.md`: Codex CLI での導入と Stop hook 有効化手順 (PID判定の codex 対応)
 - `refs/self-improvement.md`: `scripts/mission-audit.py` を使ったログ監査と自己改善プロンプト生成手順
+- `refs/specialist-registry.md`: task_profile 分類、任意 specialist 自動選定、fallback/audit の設計
 
 ## 実行例
 

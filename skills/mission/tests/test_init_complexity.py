@@ -81,3 +81,43 @@ def test_init_explicit_max_iter_kept(run_cli, tmp_path):
     run_cli("init", "audit explicit mission", "--max-iter", "7", cwd=tmp_path, check=True)
     s = _read(tmp_path)
     assert s["max_iter"] == 7
+
+
+def test_init_specialist_metadata_defaults(run_cli, tmp_path):
+    run_cli("init", "specialist metadata mission", cwd=tmp_path, check=True)
+    s = _read(tmp_path)
+    assert s["task_profile"] == {}
+    assert s["specialists_mode"] == "auto"
+    assert s["specialists_selected"] == []
+    assert s["specialists_unavailable"] == []
+
+
+def test_set_records_specialist_metadata_json(run_cli, tmp_path):
+    run_cli("init", "specialist metadata mission", cwd=tmp_path, check=True)
+    task_profile = {
+        "domain": "backend",
+        "evidence": ["mission-state.py owns state mutation"],
+    }
+    selected = [
+        {"id": "dev-backend", "reason": "state schema change"},
+        {"id": "dev-unit-tester", "reason": "pytest coverage"},
+    ]
+    unavailable = [
+        {"id": "dev-frontend", "reason": "no UI surface touched"},
+    ]
+
+    run_cli(
+        "set",
+        f"task_profile={json.dumps(task_profile)}",
+        "specialists_mode=manual",
+        f"specialists_selected={json.dumps(selected)}",
+        f"specialists_unavailable={json.dumps(unavailable)}",
+        cwd=tmp_path,
+        check=True,
+    )
+
+    s = _read(tmp_path)
+    assert s["task_profile"] == task_profile
+    assert s["specialists_mode"] == "manual"
+    assert s["specialists_selected"] == selected
+    assert s["specialists_unavailable"] == unavailable

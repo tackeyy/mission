@@ -21,6 +21,7 @@ still below the passing gate.
 - State management CLI for `.mission-state` sessions
 - Multi-session state isolation for Claude Code and Codex
 - Stop hook that blocks premature completion while a mission is still active
+- Optional specialist registry and beginner presets for domain evidence providers ([design](skills/mission/refs/specialist-registry.md))
 - Python test suite covering state routing, scoring gates, and hook behavior
 
 ## Competitive Positioning

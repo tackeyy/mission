@@ -17,6 +17,7 @@
 - `.mission-state` セッションを扱う state 管理 CLI
 - Claude Code / Codex の複数セッション分離
 - 未達ミッションの早期終了を防ぐ Stop hook
+- ドメイン別 evidence provider を選ぶ任意 specialist registry と beginner presets（[設計](skills/mission/refs/specialist-registry.md)）
 - state routing、scoring gate、hook 挙動を検証する Python テスト
 
 ## 競合ポジショニング
