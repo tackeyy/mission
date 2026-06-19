@@ -53,6 +53,59 @@ def test_audit_deduplicates_worktree_archive(tmp_path):
     assert data["pass_count"] == 1
 
 
+def test_audit_discovers_nested_worktree_archive_sessions(tmp_path):
+    archive_sessions = tmp_path / ".mission-state" / "archive" / "worktree-feat" / "sessions"
+    _write_state(
+        archive_sessions / "sess-a.json",
+        project_root=str(tmp_path),
+        session_id="nested-archive",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--since", "2026-06-18", "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    assert data["total_sessions"] == 1
+    assert data["pass_count"] == 1
+
+
+def test_audit_dedupe_prefers_pass_record_over_stale_halt(tmp_path):
+    sessions = tmp_path / ".mission-state" / "sessions"
+    archive = tmp_path / ".mission-state" / "archive" / "worktree-feat"
+    _write_state(
+        sessions / "sess-a.json",
+        project_root=str(tmp_path),
+        session_id="sess-a",
+        passes=False,
+        halt_reason="stale orphan pid 123 dead",
+        score_history=[],
+        updated_at="2026-06-18T00:05:00Z",
+    )
+    _write_state(
+        archive / "state.json",
+        project_root=str(tmp_path),
+        session_id="sess-a",
+        passes=True,
+        halt_reason="",
+        updated_at="2026-06-18T00:10:00Z",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--since", "2026-06-18", "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    assert data["total_sessions"] == 1
+    assert data["pass_count"] == 1
+    assert data["halt_count"] == 0
+    assert data["duplicate_group_count"] == 0
+
+
 def test_audit_does_not_dedupe_across_projects(tmp_path):
     _write_state(tmp_path / "p1" / ".mission-state" / "sessions" / "sess-a.json", project_root=str(tmp_path / "p1"))
     _write_state(tmp_path / "p2" / ".mission-state" / "sessions" / "sess-a.json", project_root=str(tmp_path / "p2"))
@@ -142,6 +195,80 @@ def test_audit_reports_halt_incomplete_slow_and_low_score_buckets(tmp_path):
     assert data["halt_incomplete_breakdown"]["active-no-score-checkpoint"] == 1
     assert data["slow_session_breakdown"]["healthy-long-pass"] == 1
     assert data["low_score_pass_breakdown"]["valid-threshold-pass"] == 1
+
+
+def test_audit_reports_missing_scoring_evidence_in_json(tmp_path):
+    _write_state(
+        tmp_path / "missing" / ".mission-state" / "sessions" / "missing.json",
+        project_root=str(tmp_path / "missing"),
+        mission_id="deadbeefcafebabe",
+        session_id="missing-evidence",
+    )
+    _write_state(
+        tmp_path / "present" / ".mission-state" / "sessions" / "present.json",
+        project_root=str(tmp_path / "present"),
+        mission_id="feedfacecafebabe",
+        session_id="has-evidence",
+    )
+    evidence = tmp_path / "present" / ".mission-state" / "archive" / "iter-1-feedface-scoring.md"
+    evidence.parent.mkdir(parents=True, exist_ok=True)
+    evidence.write_text("# scoring evidence\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-18",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    assert data["missing_scoring_evidence_count"] == 1
+    assert data["missing_scoring_evidence"][0]["session_id"] == "missing-evidence"
+    assert data["missing_scoring_evidence"][0]["missing_iterations"] == [1]
+    assert any(f["code"] == "missing-scoring-evidence" for f in data["findings"])
+
+
+def test_audit_slow_session_buckets_track_phase_duration_observability(tmp_path):
+    _write_state(
+        tmp_path / "without-phases" / ".mission-state" / "sessions" / "slow.json",
+        project_root=str(tmp_path / "without-phases"),
+        started_at="2026-06-18T00:00:00Z",
+        updated_at="2026-06-18T01:00:00Z",
+        session_id="slow-without-phases",
+    )
+    _write_state(
+        tmp_path / "with-phases" / ".mission-state" / "sessions" / "slow.json",
+        project_root=str(tmp_path / "with-phases"),
+        started_at="2026-06-18T00:00:00Z",
+        updated_at="2026-06-18T01:00:00Z",
+        session_id="slow-with-phases",
+        phase_durations_sec={"planning": 900, "execution": 2700},
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-18",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    assert data["slow_session_breakdown"]["slow-without-phase-durations"] == 1
+    assert data["slow_session_breakdown"]["slow-with-phase-durations"] == 1
 
 
 def test_audit_self_improvement_prompt_mentions_findings(tmp_path):

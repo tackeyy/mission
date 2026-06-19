@@ -119,6 +119,9 @@ def iter_state_files(root: Path):
             for worktree_dir in sorted(archive.glob("worktree-*")):
                 if worktree_dir.is_dir():
                     candidates.extend(sorted(worktree_dir.glob("*.json")))
+                    worktree_sessions = worktree_dir / "sessions"
+                    if worktree_sessions.is_dir():
+                        candidates.extend(sorted(worktree_sessions.glob("*.json")))
         seen: set[Path] = set()
         for path in candidates:
             if path in seen or path.name.endswith(".bak"):
@@ -147,7 +150,6 @@ def dedupe_records(records: list[StateRecord]) -> tuple[list[StateRecord], list[
             project_root_for(record),
             str(state.get("session_id") or record.path.stem),
             str(state.get("mission_id") or ""),
-            str(state.get("started_at") or ""),
         )
         groups.setdefault(key, []).append(record)
 
@@ -157,9 +159,11 @@ def dedupe_records(records: list[StateRecord]) -> tuple[list[StateRecord], list[
     for group in groups.values():
         if len(group) > 1 and is_resolved_archive_duplicate(group):
             resolved_duplicate_count += 1
+        elif len(group) > 1 and is_resolved_by_precedence(group):
+            resolved_duplicate_count += 1
         elif len(group) > 1:
             duplicates.append(group)
-        deduped.append(sorted(group, key=record_rank)[0])
+        deduped.append(sorted(group, key=dedupe_rank)[0])
     return deduped, duplicates, resolved_duplicate_count
 
 
@@ -183,6 +187,38 @@ def record_rank(record: StateRecord) -> tuple[int, str]:
     else:
         rank = 2
     return (rank, path_text)
+
+
+def dedupe_status_rank(record: StateRecord) -> int:
+    if classify(record.state) == "pass" or record.state.get("phase") == "done":
+        return 0
+    if classify(record.state) == "halt":
+        return 1
+    if classify(record.state) == "incomplete":
+        return 2
+    return 3
+
+
+def updated_timestamp_rank(record: StateRecord) -> float:
+    updated = parse_dt(record.state.get("updated_at"))
+    if not updated:
+        return 0
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc)
+    return updated.timestamp()
+
+
+def dedupe_rank(record: StateRecord) -> tuple[int, float, int, str]:
+    path_rank, path_text = record_rank(record)
+    return (dedupe_status_rank(record), -updated_timestamp_rank(record), path_rank, path_text)
+
+
+def is_resolved_by_precedence(group: list[StateRecord]) -> bool:
+    """Return true when a terminal success supersedes stale/incomplete copies."""
+    if len(group) < 2:
+        return False
+    ranks = {dedupe_status_rank(record) for record in group}
+    return 0 in ranks and len(ranks) > 1
 
 
 def commit_datetime(repo: Path, commit: str) -> datetime:
@@ -268,6 +304,34 @@ def slow_session_bucket(record: StateRecord, slow_threshold_sec: int) -> str:
     return "needs-review"
 
 
+def valid_phase_durations(state: dict[str, Any]) -> dict[str, float]:
+    durations = state.get("phase_durations_sec")
+    if not isinstance(durations, dict):
+        return {}
+    out: dict[str, float] = {}
+    for phase, seconds in durations.items():
+        if not isinstance(phase, str):
+            continue
+        if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) and not math.isnan(seconds) and seconds >= 0:
+            out[phase] = float(seconds)
+    return out
+
+
+def slow_phase_observability_bucket(record: StateRecord) -> str:
+    if classify(record.state) != "pass":
+        return f"{classify(record.state)}-phase-durations-untracked"
+    if valid_phase_durations(record.state):
+        return "slow-with-phase-durations"
+    return "slow-without-phase-durations"
+
+
+def bucket_count_keys(keys: list[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for key in keys:
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
 def low_score_pass_bucket(record: StateRecord) -> str:
     state = record.state
     latest = latest_scored_entry(state) or {}
@@ -317,6 +381,49 @@ def specialist_invocation_gap_skills(record: StateRecord) -> list[str]:
     return sorted(selected - invoked)
 
 
+def scoring_evidence_paths(record: StateRecord, iteration: int) -> list[Path]:
+    mission_id = str(record.state.get("mission_id") or "")
+    mission_prefix = mission_id[:8] or "unknown"
+    filename = f"iter-{iteration}-{mission_prefix}-scoring.md"
+    paths = [Path(project_root_for(record)) / ".mission-state" / "archive" / filename]
+
+    parts = record.path.parts
+    if ".mission-state" in parts:
+        idx = parts.index(".mission-state")
+        if idx + 2 < len(parts) and parts[idx + 1] == "archive" and parts[idx + 2].startswith("worktree-"):
+            worktree_archive = Path(*parts[: idx + 3]) / "archive" / filename
+            if worktree_archive not in paths:
+                paths.append(worktree_archive)
+    return paths
+
+
+def missing_scoring_evidence_iterations(record: StateRecord) -> list[int]:
+    missing: list[int] = []
+    for index, entry in enumerate(record.state.get("score_history") or [], start=1):
+        if not isinstance(entry, dict):
+            continue
+        iteration = entry.get("iteration") or index
+        if not isinstance(iteration, int) or isinstance(iteration, bool):
+            continue
+        if not any(path.exists() for path in scoring_evidence_paths(record, iteration)):
+            missing.append(iteration)
+    return missing
+
+
+def missing_scoring_evidence_item(record: StateRecord) -> dict[str, Any] | None:
+    missing_iterations = missing_scoring_evidence_iterations(record)
+    if not missing_iterations:
+        return None
+    return {
+        "project": project_name(record.state),
+        "project_root": project_root_for(record),
+        "session_id": record.state.get("session_id") or record.path.stem,
+        "mission_id": record.state.get("mission_id") or "",
+        "path": str(record.path),
+        "missing_iterations": missing_iterations,
+    }
+
+
 def aggregate(
     records: list[StateRecord],
     duplicates: list[list[StateRecord]],
@@ -352,10 +459,17 @@ def aggregate(
         r for r in records
         if specialist_invocation_gap_skills(r)
     ]
+    missing_scoring_evidence = [
+        item for r in records
+        if (item := missing_scoring_evidence_item(r)) is not None
+    ]
     halt_or_incomplete = [
         r for r, cls in zip(records, classes)
         if cls in {"halt", "incomplete"}
     ]
+    slow_session_breakdown = bucket_counts(slow, lambda record: slow_session_bucket(record, slow_threshold_sec))
+    for key, count in bucket_count_keys([slow_phase_observability_bucket(record) for record in slow]).items():
+        slow_session_breakdown[key] = slow_session_breakdown.get(key, 0) + count
 
     by_project: dict[str, dict[str, int]] = {}
     by_agent: dict[str, dict[str, int]] = {}
@@ -386,8 +500,13 @@ def aggregate(
         "forced_pass_sessions": forced,
         "ungated_pass_sessions": ungated,
         "duplicates": duplicates,
+        "missing_scoring_evidence": missing_scoring_evidence,
+        "missing_scoring_evidence_count": len(missing_scoring_evidence),
+        "missing_scoring_evidence_breakdown": bucket_count_keys(
+            [str(item.get("project") or "unknown") for item in missing_scoring_evidence]
+        ),
         "halt_incomplete_breakdown": bucket_counts(halt_or_incomplete, halt_or_incomplete_bucket),
-        "slow_session_breakdown": bucket_counts(slow, lambda record: slow_session_bucket(record, slow_threshold_sec)),
+        "slow_session_breakdown": slow_session_breakdown,
         "low_score_pass_breakdown": bucket_counts(low_score_pass, low_score_pass_bucket),
         "specialist_invocation_gap_count": len(specialist_invocation_gaps),
         "specialist_invocation_gap_breakdown": bucket_counts(
@@ -433,6 +552,8 @@ def finding_rows(stats: dict[str, Any], min_pass_rate: float) -> list[tuple[str,
         rows.append(("P1", "forced-pass", f"{stats['forced_pass_count']} sessions used force pass"))
     if stats["duplicate_group_count"]:
         rows.append(("P1", "duplicate-state", f"{stats['duplicate_group_count']} duplicate state groups found; stats may double-count"))
+    if stats["missing_scoring_evidence_count"]:
+        rows.append(("P2", "missing-scoring-evidence", f"{stats['missing_scoring_evidence_count']} sessions have score_history without archived scoring evidence"))
     pass_rate = stats["pass_rate"]
     if pass_rate is not None and pass_rate < min_pass_rate:
         rows.append(("P1", "low-pass-rate", f"pass rate {pass_rate * 100:.1f}% is below {min_pass_rate * 100:.0f}%"))
@@ -445,7 +566,7 @@ def finding_rows(stats: dict[str, Any], min_pass_rate: float) -> list[tuple[str,
     if stats["specialist_invocation_gap_sessions"]:
         rows.append(("P2", "specialist-invocation-gap", f"{len(stats['specialist_invocation_gap_sessions'])} sessions selected specialists without terminal invocation logs"))
     if not rows:
-        rows.append(("OK", "no-critical-findings", "No forced/ungated pass, halt, duplicate, slow-session, or specialist invocation finding"))
+        rows.append(("OK", "no-critical-findings", "No forced/ungated pass, halt, duplicate, scoring-evidence, slow-session, or specialist invocation finding"))
     return rows
 
 
@@ -492,6 +613,7 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
         f"- ungated pass: {stats['ungated_pass_count']}",
         f"- duplicate state groups: {stats['duplicate_group_count']}",
         f"- resolved archive duplicates: {stats['resolved_duplicate_group_count']}",
+        f"- missing scoring evidence: {stats['missing_scoring_evidence_count']}",
         f"- avg final composite: {fmt_float(stats['avg_final_composite'])}",
         f"- median duration: {fmt_minutes(stats['median_session_duration_sec'])}",
         f"- avg duration: {fmt_minutes(stats['avg_session_duration_sec'])}",
@@ -531,6 +653,23 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
     lines.extend(["", "## Low-Score Pass Buckets", ""])
     if stats["low_score_pass_breakdown"]:
         for key, count in sorted(stats["low_score_pass_breakdown"].items()):
+            lines.append(f"- `{key}`: {count}")
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Missing Scoring Evidence", ""])
+    if stats["missing_scoring_evidence"]:
+        for item in stats["missing_scoring_evidence"]:
+            iterations = ", ".join(str(i) for i in item["missing_iterations"])
+            lines.append(
+                f"- `{item['session_id']}` ({item['project']}): missing iter {iterations} evidence at `{item['path']}`"
+            )
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Missing Scoring Evidence Buckets", ""])
+    if stats["missing_scoring_evidence_breakdown"]:
+        for key, count in sorted(stats["missing_scoring_evidence_breakdown"].items()):
             lines.append(f"- `{key}`: {count}")
     else:
         lines.append("- none")
