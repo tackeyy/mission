@@ -120,6 +120,23 @@ HIGH_RISK_KEYWORDS = (
     "irreversible", "payment", "security", "auth", "secret", "token", "pii",
 )
 
+SPECIALIST_INVOCATION_STATUSES = {
+    "selected",
+    "started",
+    "completed",
+    "inline-applied",
+    "skipped",
+    "unavailable",
+    "failed",
+}
+
+SPECIALIST_INVOCATION_MODES = {
+    "skill-tool",
+    "codex-inline",
+    "natural-language",
+    "fallback-core",
+}
+
 
 def iso_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -278,6 +295,12 @@ def _sanitize_sid(sid: str) -> str:
     """session_id をファイル名安全化 (パストラバーサル防止)。区切り文字を除去。"""
     safe = re.sub(r"[/\\]", "_", sid).strip().lstrip(".")
     return safe or "default"
+
+
+def _slug_for_filename(value: str) -> str:
+    """Archive filename fragment sanitizer for skill names such as github:github."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", value or "").strip(".-")
+    return safe or "unknown"
 
 
 
@@ -795,6 +818,89 @@ def cmd_specialists(args):
             print(f"{idx}. {c['skill']} score={c['score']} installed={c['installed']} source={c['source']}")
 
 
+def _archive_specialist_evidence(cwd: Path, evidence_output: str, iteration: int,
+                                 data: dict, entry: dict) -> str | None:
+    """Specialist evidence を archive/iter-N-<mission8>-specialist-<skill>.md に保存する."""
+    src = Path(evidence_output)
+    if not (src.exists() and src.is_file()):
+        print(f"WARNING: --evidence-output のファイルが見つかりません: {src}", file=sys.stderr)
+        return None
+    archive_dir = state_dir(cwd) / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    gid = (data.get("mission_id") or "unknown")[:8]
+    skill_slug = _slug_for_filename(entry.get("skill") or "unknown")
+    dst = archive_dir / f"iter-{iteration}-{gid}-specialist-{skill_slug}.md"
+    meta = (
+        f"<!-- mission-specialist-meta: session_id={data.get('session_id')} "
+        f"agent={data.get('agent') or 'unknown'} mission_id={data.get('mission_id')} "
+        f"iteration={iteration} phase={entry.get('phase')} role={entry.get('role')} "
+        f"skill={entry.get('skill')} mode={entry.get('mode')} status={entry.get('status')} "
+        f"timestamp={entry['timestamp']} -->\n"
+    )
+    dst.write_text(meta + src.read_text(encoding="utf-8"), encoding="utf-8")
+    return str(dst)
+
+
+def _state_relative_path(cwd: Path, path_text: str) -> str:
+    path = Path(path_text)
+    try:
+        rel = path.resolve().relative_to(cwd.resolve())
+        return str(rel)
+    except ValueError:
+        return str(path)
+
+
+def cmd_log_specialist_invocation(args):
+    """specialist の実呼び出し/inline/skip/unavailable 証跡を append する."""
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
+        sys.exit(1)
+    if args.iteration < 0:
+        print("ERROR: --iteration は 0 以上で指定してください", file=sys.stderr)
+        sys.exit(2)
+
+    with StateLock(lock_file(cwd)):
+        data = json.loads(sf.read_text())
+        now = iso_now()
+        entry = {
+            "iteration": args.iteration,
+            "phase": args.phase,
+            "role": args.role,
+            "skill": args.skill,
+            "mode": args.mode,
+            "status": args.status,
+            "timestamp": now,
+        }
+        if args.started_at:
+            entry["started_at"] = args.started_at
+        if args.completed_at:
+            entry["completed_at"] = args.completed_at
+        if args.notes:
+            entry["notes"] = args.notes
+
+        data = stamp_metadata(data, cwd)
+        archived_to = None
+        if args.evidence_output:
+            archived_to = _archive_specialist_evidence(cwd, args.evidence_output, args.iteration, data, entry)
+            if archived_to:
+                entry["evidence_path"] = _state_relative_path(cwd, archived_to)
+
+        data.setdefault("specialist_invocations", []).append(entry)
+        data["updated_at"] = now
+        backup_state(sf)
+        atomic_write_json(sf, data)
+
+    result = {"ok": True, "entry": entry}
+    if archived_to:
+        result["archived_to"] = archived_to
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print(json.dumps(result, ensure_ascii=False))
+
+
 
 def cmd_init(args):
     cwd = Path.cwd()
@@ -814,6 +920,7 @@ def cmd_init(args):
         "specialists_selected": [],
         "specialists_unavailable": [],
         "specialists_decision": {},
+        "specialist_invocations": [],
         # M-audit-2 (2026-06-11): 未指定は 3 (98 セッション実測で iter>3 の ROI 低下)。
         # 0 は「上限なし (stagnation 停止モード)」として None を保持する。
         "max_iter": (DEFAULT_MAX_ITER if args.max_iter is None else (None if args.max_iter == 0 else args.max_iter)),
@@ -1933,6 +2040,22 @@ def _build_parser():
     p_rec.add_argument("--record-state", action="store_true", help="現在の mission state に推薦結果を記録")
     p_rec.add_argument("--json", action="store_true", help="JSON 形式で出力")
     p_rec.set_defaults(func=cmd_specialists)
+
+    p_log = spec_sub.add_parser("log-invocation", help="specialist skill の実呼び出し/inline/skip 証跡を記録")
+    p_log.add_argument("--iteration", type=int, required=True)
+    p_log.add_argument("--phase", required=True,
+                       choices=["planning", "execution", "review", "scoring", "critic"])
+    p_log.add_argument("--role", required=True)
+    p_log.add_argument("--skill", required=True)
+    p_log.add_argument("--mode", required=True, choices=sorted(SPECIALIST_INVOCATION_MODES))
+    p_log.add_argument("--status", required=True, choices=sorted(SPECIALIST_INVOCATION_STATUSES))
+    p_log.add_argument("--started-at", default=None, dest="started_at")
+    p_log.add_argument("--completed-at", default=None, dest="completed_at")
+    p_log.add_argument("--notes", default=None)
+    p_log.add_argument("--evidence-output", default=None,
+                       help="specialist 出力 Markdown。指定時 archive/iter-N-<mission8>-specialist-<skill>.md に保存")
+    p_log.add_argument("--json", action="store_true", help="JSON 形式で出力")
+    p_log.set_defaults(func=cmd_log_specialist_invocation)
 
     return parser
 

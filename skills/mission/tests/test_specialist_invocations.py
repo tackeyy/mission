@@ -1,0 +1,124 @@
+"""Issue #31: specialist skill invocation logging."""
+import json
+
+
+def _json_result(result):
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_init_includes_specialist_invocations(run_cli, tmp_path):
+    run_cli("init", "specialist invocation mission", "--complexity", "Standard", cwd=tmp_path, check=True)
+
+    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
+
+    assert state["specialist_invocations"] == []
+
+
+def test_log_invocation_appends_machine_readable_record(state_dir, run_cli, read_state):
+    r = run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "review",
+        "--role", "code-reviewer",
+        "--skill", "dev-code-reviewer",
+        "--mode", "skill-tool",
+        "--status", "completed",
+        "--notes", "Reviewed diff; no blocking issues",
+        "--json",
+        cwd=state_dir.parent,
+    )
+
+    data = _json_result(r)
+    state = read_state(state_dir)
+    entry = state["specialist_invocations"][0]
+    assert data["ok"] is True
+    assert data["entry"] == entry
+    assert entry["iteration"] == 1
+    assert entry["phase"] == "review"
+    assert entry["skill"] == "dev-code-reviewer"
+    assert entry["mode"] == "skill-tool"
+    assert entry["status"] == "completed"
+    assert entry["notes"] == "Reviewed diff; no blocking issues"
+    assert entry["timestamp"].endswith("Z")
+
+
+def test_log_invocation_archives_evidence_with_metadata(state_dir, run_cli, tmp_path, read_state):
+    evidence = tmp_path / "review.md"
+    evidence.write_text("# Specialist Review\n\nNo blocking issues.\n", encoding="utf-8")
+
+    run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "review",
+        "--role", "code-reviewer",
+        "--skill", "dev-code-reviewer",
+        "--mode", "skill-tool",
+        "--status", "completed",
+        "--evidence-output", str(evidence),
+        cwd=state_dir.parent,
+        check=True,
+    )
+
+    archived = state_dir / "archive" / "iter-1-abc12345-specialist-dev-code-reviewer.md"
+    content = archived.read_text(encoding="utf-8")
+    entry = read_state(state_dir)["specialist_invocations"][0]
+    assert archived.exists()
+    assert "session_id=test" in content
+    assert "mission_id=abc12345" in content
+    assert "skill=dev-code-reviewer" in content
+    assert "status=completed" in content
+    assert "No blocking issues." in content
+    assert entry["evidence_path"] == ".mission-state/archive/iter-1-abc12345-specialist-dev-code-reviewer.md"
+
+
+def test_log_invocation_records_codex_inline_usage(state_dir, run_cli, read_state):
+    run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "planning",
+        "--role", "doc-writer",
+        "--skill", "dev-doc-writer",
+        "--mode", "codex-inline",
+        "--status", "inline-applied",
+        cwd=state_dir.parent,
+        check=True,
+    )
+
+    entry = read_state(state_dir)["specialist_invocations"][0]
+    assert entry["mode"] == "codex-inline"
+    assert entry["status"] == "inline-applied"
+
+
+def test_log_invocation_records_unavailable_without_evidence(state_dir, run_cli, read_state):
+    run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "review",
+        "--role", "security-reviewer",
+        "--skill", "dev-security-reviewer",
+        "--mode", "fallback-core",
+        "--status", "unavailable",
+        "--notes", "Skill is not callable in this environment",
+        cwd=state_dir.parent,
+        check=True,
+    )
+
+    entry = read_state(state_dir)["specialist_invocations"][0]
+    assert entry["status"] == "unavailable"
+    assert "evidence_path" not in entry
+
+
+def test_log_invocation_rejects_unknown_status(state_dir, run_cli):
+    r = run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "review",
+        "--role", "code-reviewer",
+        "--skill", "dev-code-reviewer",
+        "--mode", "skill-tool",
+        "--status", "mystery",
+        cwd=state_dir.parent,
+    )
+
+    assert r.returncode != 0

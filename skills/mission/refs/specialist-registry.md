@@ -189,9 +189,8 @@ The orchestrator preserves enough traceability to explain specialist selection w
       "role": "doc-writer",
       "skill": "dev-doc-writer",
       "phases": ["planning", "execution", "review"],
-      "status": "used",
-      "source": "user",
-      "evidence_path": ".mission-state/archive/iter-1-doc-writer.md"
+      "status": "selected",
+      "source": "preset:docs"
     }
   ],
   "specialists_unavailable": [
@@ -206,11 +205,25 @@ The orchestrator preserves enough traceability to explain specialist selection w
     "action": "select",
     "reason": "top candidate dev-doc-writer is installed with score 0.82",
     "prompted_user": false
-  }
+  },
+  "specialist_invocations": [
+    {
+      "iteration": 1,
+      "phase": "review",
+      "role": "doc-writer",
+      "skill": "dev-doc-writer",
+      "mode": "codex-inline",
+      "status": "inline-applied",
+      "timestamp": "2026-06-19T08:00:00Z",
+      "evidence_path": ".mission-state/archive/iter-1-deadbeef-specialist-dev-doc-writer.md"
+    }
+  ]
 }
 ```
 
-Use `task_profile` as an object/dict for the classification record, `specialists_mode` for automatic or manual selection mode, `specialists_candidates` for ranked candidates, `specialists_selected` for selected specialist evidence, `specialists_unavailable` for missing or unavailable specialists, and `specialists_decision` for the policy outcome.
+Use `task_profile` as an object/dict for the classification record, `specialists_mode` for automatic or manual selection mode, `specialists_candidates` for ranked candidates, `specialists_selected` for selected specialist intent, `specialists_unavailable` for missing or unavailable specialists, and `specialists_decision` for the policy outcome. Use `specialist_invocations` for append-only execution evidence after selection: actual Skill tool calls, Codex inline application, natural-language role application, fallback-core usage, skips, unavailable cases, and failures.
+
+`specialists_selected` and `specialist_invocations` intentionally remain separate. Selection answers "what should be used"; invocation answers "what was actually used or skipped." This keeps ADR-001's audit requirement intact without pretending Codex inline usage is a real forked Skill tool call.
 
 ## Phased Rollout
 
