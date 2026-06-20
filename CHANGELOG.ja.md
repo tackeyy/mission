@@ -9,6 +9,15 @@
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-06-20
+
+### 追加
+- mission audit が nested worktree archive session を検出し、missing scoring evidence と specialist invocation gap を可視化するようになりました。
+- slow session report に phase duration の観測可否 breakdown を分離して追加しました。
+
+### 修正
+- 同一 logical mission run について、stale halt copy より完了済み pass/done record を優先して dedupe するようにしました。
+
 ## [1.0.1] - 2026-06-17
 
 ### 追加
@@ -34,5 +43,6 @@
 - 状態ルーティング・スコアゲート・hook 挙動をカバーする Python テストスイート。
 - GitHub Actions CI（`push` / `pull_request` / `workflow_dispatch`）。pytest と ShellCheck を実行。
 
+[1.0.2]: https://github.com/tackeyy/mission/releases/tag/v1.0.2
 [1.0.1]: https://github.com/tackeyy/mission/releases/tag/v1.0.1
 [1.0.0]: https://github.com/tackeyy/mission/releases/tag/v1.0.0

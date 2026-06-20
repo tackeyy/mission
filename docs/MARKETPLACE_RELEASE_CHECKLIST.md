@@ -9,6 +9,9 @@ Use this checklist before submitting `mission` to Claude Code or Codex marketpla
 - [ ] No secrets, tokens, private URLs, local-only state, `.mission-state/`, `.pytest_cache/`, or personal machine paths are included.
 - [ ] `LICENSE`, `README.md`, `SECURITY.md`, `CONTRIBUTING.md`, and Code of Conduct are present.
 - [ ] English and Japanese docs are updated together when user-facing install or release steps change.
+- [ ] Version numbers are bumped together in `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, `plugins/mission/.codex-plugin/plugin.json`, README install paths, and Codex setup docs.
+- [ ] `CHANGELOG.md` and `CHANGELOG.ja.md` contain the release entry and links for the new version.
+- [ ] GitHub Releases is created or updated for the new `vX.Y.Z` tag before reporting release completion.
 - [ ] `python3 -m pytest -q` passes under `skills/mission`.
 - [ ] `shellcheck scripts/mission-stop-guard.sh` passes.
 - [ ] JSON/YAML metadata parses successfully.

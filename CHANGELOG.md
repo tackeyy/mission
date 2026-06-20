@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-06-20
+
+### Added
+- Mission audit now discovers nested worktree archive sessions, surfaces missing scoring evidence, and reports specialist invocation gaps.
+- Slow-session reports now include a separate phase-duration observability breakdown.
+
+### Fixed
+- Audit deduplication now prefers completed pass/done records over stale halt copies for the same logical mission run.
+
 ## [1.0.1] - 2026-06-17
 
 ### Added
@@ -34,5 +43,6 @@ First public release.
 - Python test suite covering state routing, scoring gates, and hook behavior.
 - GitHub Actions CI (`push`, `pull_request`, `workflow_dispatch`) with pytest and ShellCheck.
 
+[1.0.2]: https://github.com/tackeyy/mission/releases/tag/v1.0.2
 [1.0.1]: https://github.com/tackeyy/mission/releases/tag/v1.0.1
 [1.0.0]: https://github.com/tackeyy/mission/releases/tag/v1.0.0
