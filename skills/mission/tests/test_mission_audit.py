@@ -302,6 +302,10 @@ def test_audit_self_improvement_prompt_mentions_findings(tmp_path):
 def test_audit_reports_selected_specialist_without_invocation(tmp_path):
     _write_state(
         tmp_path / ".mission-state" / "sessions" / "sess-a.json",
+        started_at="2026-06-20T10:10:00Z",
+        created_at_session="2026-06-20T10:10:00Z",
+        task_profile={"primary": "documentation"},
+        specialists_decision={"policy": "auto"},
         specialists_selected=[
             {"role": "doc-writer", "skill": "dev-doc-writer", "status": "selected"},
         ],
@@ -326,12 +330,17 @@ def test_audit_reports_selected_specialist_without_invocation(tmp_path):
     data = json.loads(result.stdout)
     assert data["specialist_invocation_gap_count"] == 1
     assert data["specialist_invocation_gap_breakdown"]["dev-doc-writer"] == 1
+    assert data["missing_specialist_selection_checkpoint_count"] == 0
     assert any(f["code"] == "specialist-invocation-gap" for f in data["findings"])
 
 
 def test_audit_accepts_completed_specialist_invocation(tmp_path):
     _write_state(
         tmp_path / ".mission-state" / "sessions" / "sess-a.json",
+        started_at="2026-06-20T10:10:00Z",
+        created_at_session="2026-06-20T10:10:00Z",
+        task_profile={"primary": "documentation"},
+        specialists_decision={"policy": "auto"},
         specialists_selected=[
             {"role": "doc-writer", "skill": "dev-doc-writer", "status": "selected"},
         ],
@@ -357,4 +366,71 @@ def test_audit_accepts_completed_specialist_invocation(tmp_path):
 
     data = json.loads(result.stdout)
     assert data["specialist_invocation_gap_count"] == 0
+    assert data["missing_specialist_selection_checkpoint_count"] == 0
     assert all(f["code"] != "specialist-invocation-gap" for f in data["findings"])
+
+
+def test_audit_reports_missing_specialist_selection_checkpoint_after_rollout(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "sess-a.json",
+        started_at="2026-06-20T10:10:00Z",
+        created_at_session="2026-06-20T10:10:00Z",
+        updated_at="2026-06-20T10:15:00Z",
+        task_profile={},
+        specialists_decision={},
+        specialists_selected=[],
+        specialist_invocations=[],
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-20",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    data = json.loads(result.stdout)
+    assert data["missing_specialist_selection_checkpoint_count"] == 1
+    assert data["missing_specialist_selection_checkpoints"][0]["session_id"] == "sess-a"
+    assert data["missing_specialist_selection_checkpoint_breakdown"][str(tmp_path.name)] == 1
+    assert any(f["code"] == "missing-specialist-selection-checkpoint" for f in data["findings"])
+
+
+def test_audit_does_not_report_legacy_missing_specialist_selection_checkpoint(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "sess-a.json",
+        started_at="2026-06-20T09:59:00Z",
+        created_at_session="2026-06-20T09:59:00Z",
+        updated_at="2026-06-20T10:30:00Z",
+        task_profile={},
+        specialists_decision={},
+        specialists_selected=[],
+        specialist_invocations=[],
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-20",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    data = json.loads(result.stdout)
+    assert data["missing_specialist_selection_checkpoint_count"] == 0
+    assert all(f["code"] != "missing-specialist-selection-checkpoint" for f in data["findings"])
