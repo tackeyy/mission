@@ -182,9 +182,9 @@ state.json の `assumptions_path` が指すファイル (デフォルト `.missi
 1. **構造化されたミッション記述**（"真に解くべき問い"）
 2. **サブタスク分解**（依存関係を含む）
 3. **複雑度ラベル**: Simple=単一ファイル/1ステップ、Standard=3-5ステップ/複数ファイル/テスト含む、Complex=設計判断含む/横断的変更、Critical=本番影響/セキュリティ/非可逆操作
-4. **task_profile + specialist 自動選定**: `documentation/frontend/backend/security/testing/infra/product/research/general` 等を分類し、`refs/specialist-registry.md` の user/project registry + beginner presets から任意 specialist を選ぶ。選定/欠落は assumptions/archive に記録し、未導入なら core subskills のみで継続
+4. **task_profile + specialist 自動選定**: `documentation/frontend/backend/security/testing/infra/product/research/general` 等を分類し、`refs/specialist-registry.md` の user/project registry + beginner presets から任意 specialist を選ぶ。選定は散文で済ませず、init 後の必須 checkpoint として `mission-state.py specialists recommend --record-state` で state に記録する。未導入なら core subskills のみで継続
 5. **Reviewer数の決定**: Simple → 1名 / Standard → 2名 / Complex → 3名 / Critical → 3名 + Critic独立追加
-6. **state へ記録 (必須, M7)**: `init --complexity <判定>` で初期化するか、判定後に `mission-state.py set complexity=<判定>` を実行。**`--complexity` / `set complexity=` は `reviewer_count` を自動セットする** (Simple:1 / Standard:2 / Complex:3 / Critical:3) ので、別途 `reviewer_count=<N>` を渡す必要はない (既定値を上書きしたい時のみ併記)。Unknown のまま進めると P3-5 (Simple インライン) と差分レビュー設計が機能しない
+6. **state へ記録 (必須, M7)**: `init --complexity <判定>` で初期化するか、判定後に `mission-state.py set complexity=<判定>` を実行。**`--complexity` / `set complexity=` は `reviewer_count` を自動セットする** (Simple:1 / Standard:2 / Complex:3 / Critical:3) ので、別途 `reviewer_count=<N>` を渡す必要はない (既定値を上書きしたい時のみ併記)。Unknown のまま進めると P3-5 (Simple インライン) と差分レビュー設計が機能しない。init 後、対象ファイル候補が見えた時点で `python3 "${MISSION_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py" specialists recommend --task "<structured mission>" --files "<project-relative files>" --record-state --json` を実行
 7. **過大見積もりのコスト**: reviewer 1名増で iter あたり約10-20分のオーバーヘッドがあるため、`assumptions.md` に複雑度の判定根拠と Simple でない決め手を記録する。Phase 1 で触るファイルが見えたら `init --files` に project-root 相対パスを渡し、S3 file overlap WARN を効かせる。**issue 連携ミッションは PR 本文に `Closes #N` を入れマージで自動クローズする (GitHub Flow, 詳細 refs/state-management.md)**
 
 ## Phase 2-6: ReAct ループ

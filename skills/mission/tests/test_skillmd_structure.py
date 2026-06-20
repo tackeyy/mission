@@ -115,6 +115,14 @@ def test_push_score_workflow_documented():
     assert "mark-passes" in txt
 
 
+def test_phase1_specialist_selection_checkpoint_documented():
+    """#33: Phase 1 specialist selection must be an executable state checkpoint."""
+    txt = _read(SKILL_MD)
+    assert "specialists recommend" in txt
+    assert "--record-state" in txt
+    assert "init 後" in txt
+
+
 # ===== iter2 (A-M2 + C-H1/H2 回帰防止): M5/M6 文書ルールと旧フロー復活防止 =====
 
 
