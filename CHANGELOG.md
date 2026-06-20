@@ -9,14 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Release checklist now requires reconciling `git log <previous-tag>..HEAD --oneline` with English and Japanese changelog entries before release completion.
+- Documentation consistency tests now guard the v1.0.2 release themes so future changelog edits cannot silently drop them.
+
+### Fixed
+- Corrected the v1.0.2 changelog entry to include the specialist registry, file-overlap warnings, audit CLI, GitHub Flow guidance, contributor acknowledgements, reviewer/scorer safeguards, audit diagnostics, and Codex hook-packaging validation.
+
 ## [1.0.2] - 2026-06-20
 
 ### Added
+- Optional specialist registry support now lets mission classify task profiles, select available domain specialist skills, use them as evidence providers, and record invocation evidence.
+- `mission-state.py init` now accepts `--files` and warns when another active session targets overlapping files.
+- A read-only `scripts/mission-audit.py` CLI now audits local mission state, produces self-improvement prompts, and reports forced/ungated passes, duplicate state, halt, slow-session, and low-score-pass buckets.
 - Mission audit now discovers nested worktree archive sessions, surfaces missing scoring evidence, and reports specialist invocation gaps.
 - Slow-session reports now include a separate phase-duration observability breakdown.
+- GitHub Flow guidance now documents issue-linked missions, `Closes #N` pull request bodies, and merge-driven issue closure.
+- README now recognizes contributors and contribution types.
 
 ### Fixed
+- Reviewer and scorer safeguards now use merge-base diff context and test-authenticity checks to reduce false regression reports and shallow test validation.
 - Audit deduplication now prefers completed pass/done records over stale halt copies for the same logical mission run.
+- Audit diagnostics now classify halt/incomplete root causes, slow-session buckets, and low-score pass risk buckets.
+- Release validation now guards the Codex plugin hook-packaging contract.
 
 ## [1.0.1] - 2026-06-17
 

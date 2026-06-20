@@ -11,6 +11,7 @@ Use this checklist before submitting `mission` to Claude Code or Codex marketpla
 - [ ] English and Japanese docs are updated together when user-facing install or release steps change.
 - [ ] Version numbers are bumped together in `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, `plugins/mission/.codex-plugin/plugin.json`, README install paths, and Codex setup docs.
 - [ ] `CHANGELOG.md` and `CHANGELOG.ja.md` contain the release entry and links for the new version.
+- [ ] Compare `git log <previous-tag>..HEAD --oneline` with the new changelog entry, and confirm every user-facing `feat:` / `fix:` / audit or release-process change is represented in both English and Japanese.
 - [ ] GitHub Releases is created or updated for the new `vX.Y.Z` tag before reporting release completion.
 - [ ] `python3 -m pytest -q` passes under `skills/mission`.
 - [ ] `shellcheck scripts/mission-stop-guard.sh` passes.

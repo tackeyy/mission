@@ -9,14 +9,29 @@
 
 ## [Unreleased]
 
+### 追加
+- release 完了前に `git log <previous-tag>..HEAD --oneline` と英日 changelog entry を突合する手順を release checklist に追加しました。
+- v1.0.2 の release theme が future changelog edit で欠落しないように documentation consistency test を追加しました。
+
+### 修正
+- v1.0.2 changelog entry に specialist registry、file-overlap warning、audit CLI、GitHub Flow guidance、contributors、Reviewer/Scorer safeguards、audit diagnostics、Codex hook-packaging validation を追記しました。
+
 ## [1.0.2] - 2026-06-20
 
 ### 追加
+- 任意の specialist registry を追加し、mission が task_profile を分類して利用可能な専門 skill を自動選定し、evidence provider として利用し、呼び出し証跡を記録できるようにしました。
+- `mission-state.py init` に `--files` を追加し、別の active session と対象ファイルが重複する場合に警告できるようにしました。
+- read-only な `scripts/mission-audit.py` CLI を追加し、local mission state の監査、self-improvement prompt 生成、forced/ungated pass、duplicate state、halt、slow session、low-score pass の bucket 可視化ができるようにしました。
 - mission audit が nested worktree archive session を検出し、missing scoring evidence と specialist invocation gap を可視化するようになりました。
 - slow session report に phase duration の観測可否 breakdown を分離して追加しました。
+- issue 連携 mission、PR 本文の `Closes #N`、merge による issue 自動クローズを GitHub Flow として明文化しました。
+- README に contributors と contribution type の表示を追加しました。
 
 ### 修正
+- Reviewer / Scorer の安全策を強化し、merge-base 基準の diff 確認とテスト真正性チェックで誤った退行判定や浅いテスト検証を減らしました。
 - 同一 logical mission run について、stale halt copy より完了済み pass/done record を優先して dedupe するようにしました。
+- audit diagnostics が halt/incomplete の root cause、slow session bucket、low-score pass risk bucket を分類できるようにしました。
+- Codex plugin の hook packaging contract が崩れた場合に release validation で検出できるようにしました。
 
 ## [1.0.1] - 2026-06-17
 
