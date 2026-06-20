@@ -352,6 +352,43 @@ TERMINAL_SPECIALIST_INVOCATION_STATUSES = {
     "failed",
 }
 
+SPECIALIST_SELECTION_CHECKPOINT_REQUIRED_AT = datetime(2026, 6, 20, 10, 6, 47, tzinfo=timezone.utc)
+
+
+def specialist_selection_checkpoint_expected(state: dict[str, Any]) -> bool:
+    started = parse_dt(state.get("created_at_session") or state.get("started_at"))
+    if not started:
+        return False
+    return started.astimezone(timezone.utc) >= SPECIALIST_SELECTION_CHECKPOINT_REQUIRED_AT
+
+
+def has_specialist_selection_checkpoint(state: dict[str, Any]) -> bool:
+    task_profile = state.get("task_profile")
+    decision = state.get("specialists_decision")
+    return (
+        isinstance(task_profile, dict)
+        and bool(task_profile.get("primary"))
+        and isinstance(decision, dict)
+        and bool(decision.get("policy"))
+    )
+
+
+def missing_specialist_selection_checkpoint_item(record: StateRecord) -> dict[str, Any] | None:
+    state = record.state
+    if not specialist_selection_checkpoint_expected(state):
+        return None
+    if has_specialist_selection_checkpoint(state):
+        return None
+    return {
+        "project": project_name(state),
+        "project_root": project_root_for(record),
+        "session_id": state.get("session_id") or record.path.stem,
+        "mission_id": state.get("mission_id") or "",
+        "path": str(record.path),
+        "started_at": state.get("created_at_session") or state.get("started_at") or "",
+        "updated_at": state.get("updated_at") or "",
+    }
+
 
 def selected_specialist_skills(state: dict[str, Any]) -> set[str]:
     skills: set[str] = set()
@@ -463,6 +500,10 @@ def aggregate(
         item for r in records
         if (item := missing_scoring_evidence_item(r)) is not None
     ]
+    missing_specialist_selection_checkpoints = [
+        item for r in records
+        if (item := missing_specialist_selection_checkpoint_item(r)) is not None
+    ]
     halt_or_incomplete = [
         r for r, cls in zip(records, classes)
         if cls in {"halt", "incomplete"}
@@ -503,6 +544,11 @@ def aggregate(
         "missing_scoring_evidence_count": len(missing_scoring_evidence),
         "missing_scoring_evidence_breakdown": bucket_count_keys(
             [str(item.get("project") or "unknown") for item in missing_scoring_evidence]
+        ),
+        "missing_specialist_selection_checkpoints": missing_specialist_selection_checkpoints,
+        "missing_specialist_selection_checkpoint_count": len(missing_specialist_selection_checkpoints),
+        "missing_specialist_selection_checkpoint_breakdown": bucket_count_keys(
+            [str(item.get("project") or "unknown") for item in missing_specialist_selection_checkpoints]
         ),
         "halt_incomplete_breakdown": bucket_counts(halt_or_incomplete, halt_or_incomplete_bucket),
         "slow_session_breakdown": slow_session_breakdown,
@@ -554,6 +600,8 @@ def finding_rows(stats: dict[str, Any], min_pass_rate: float) -> list[tuple[str,
         rows.append(("P1", "duplicate-state", f"{stats['duplicate_group_count']} duplicate state groups found; stats may double-count"))
     if stats["missing_scoring_evidence_count"]:
         rows.append(("P2", "missing-scoring-evidence", f"{stats['missing_scoring_evidence_count']} sessions have score_history without archived scoring evidence"))
+    if stats["missing_specialist_selection_checkpoint_count"]:
+        rows.append(("P2", "missing-specialist-selection-checkpoint", f"{stats['missing_specialist_selection_checkpoint_count']} sessions started after checkpoint rollout without selection metadata"))
     pass_rate = stats["pass_rate"]
     if pass_rate is not None and pass_rate < min_pass_rate:
         rows.append(("P1", "low-pass-rate", f"pass rate {pass_rate * 100:.1f}% is below {min_pass_rate * 100:.0f}%"))
@@ -614,6 +662,7 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
         f"- duplicate state groups: {stats['duplicate_group_count']}",
         f"- resolved archive duplicates: {stats['resolved_duplicate_group_count']}",
         f"- missing scoring evidence: {stats['missing_scoring_evidence_count']}",
+        f"- missing specialist selection checkpoints: {stats['missing_specialist_selection_checkpoint_count']}",
         f"- avg final composite: {fmt_float(stats['avg_final_composite'])}",
         f"- median duration: {fmt_minutes(stats['median_session_duration_sec'])}",
         f"- avg duration: {fmt_minutes(stats['avg_session_duration_sec'])}",
@@ -677,6 +726,22 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
     lines.extend(["", "## Missing Scoring Evidence Buckets", ""])
     if stats["missing_scoring_evidence_breakdown"]:
         for key, count in sorted(stats["missing_scoring_evidence_breakdown"].items()):
+            lines.append(f"- `{key}`: {count}")
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Missing Specialist Selection Checkpoints", ""])
+    if stats["missing_specialist_selection_checkpoints"]:
+        for item in stats["missing_specialist_selection_checkpoints"]:
+            lines.append(
+                f"- `{item['session_id']}` ({item['project']}): missing selection checkpoint at `{item['path']}`"
+            )
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Missing Specialist Selection Checkpoint Buckets", ""])
+    if stats["missing_specialist_selection_checkpoint_breakdown"]:
+        for key, count in sorted(stats["missing_specialist_selection_checkpoint_breakdown"].items()):
             lines.append(f"- `{key}`: {count}")
     else:
         lines.append("- none")

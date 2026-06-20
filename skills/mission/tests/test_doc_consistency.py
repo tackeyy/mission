@@ -3,6 +3,7 @@
 legacy 廃止(2026-06-13)後もドキュメントに残った陳腐化手順・重複を除去し、
 再混入を防ぐためのガードテスト。実コードの実態を正とする。
 """
+import json
 from pathlib import Path
 
 MISSION_DIR = Path(__file__).resolve().parent.parent          # mission/
@@ -117,6 +118,7 @@ def test_v102_changelog_mentions_specialist_registry_release_theme():
     ja = _release_section(_r(REPO_ROOT / "CHANGELOG.ja.md"), "1.0.2")
     en_tokens = (
         "specialist registry",
+        "specialist selection checkpoint",
         "task profiles",
         "invocation evidence",
         "--files",
@@ -134,6 +136,7 @@ def test_v102_changelog_mentions_specialist_registry_release_theme():
     )
     ja_tokens = (
         "specialist registry",
+        "specialist selection checkpoint",
         "task_profile",
         "自動選定",
         "呼び出し証跡",
@@ -155,6 +158,34 @@ def test_v102_changelog_mentions_specialist_registry_release_theme():
     ja_lower = ja.lower()
     for token in ja_tokens:
         assert token.lower() in ja_lower, f"CHANGELOG.ja.md v1.0.2 missing release theme: {token}"
+
+
+def test_v103_changelog_mentions_selection_checkpoint_audit():
+    """v1.0.3 の audit/checkpoint release themes を changelog から落とさない."""
+    en = _release_section(_r(REPO_ROOT / "CHANGELOG.md"), "1.0.3").lower()
+    ja = _release_section(_r(REPO_ROOT / "CHANGELOG.ja.md"), "1.0.3").lower()
+    for token in ("specialist-selection checkpoint", "specialist selection checkpoint", "git log <previous-tag>..head --oneline"):
+        assert token in en, f"CHANGELOG.md v1.0.3 missing release theme: {token}"
+    for token in ("selection metadata", "specialist selection checkpoint", "git log <previous-tag>..head --oneline"):
+        assert token in ja, f"CHANGELOG.ja.md v1.0.3 missing release theme: {token}"
+
+
+def test_release_version_paths_are_in_sync():
+    """Plugin manifests and visible install paths should point at the same release version."""
+    manifest_paths = (
+        ".claude-plugin/plugin.json",
+        ".codex-plugin/plugin.json",
+        "plugins/mission/.codex-plugin/plugin.json",
+    )
+    versions = {
+        json.loads((REPO_ROOT / path).read_text(encoding="utf-8"))["version"]
+        for path in manifest_paths
+    }
+    assert len(versions) == 1, f"manifest versions differ: {versions}"
+    version = versions.pop()
+    expected_path = f"mission-marketplace/mission/{version}"
+    for rel in ("README.md", "skills/mission/refs/codex-setup.md", "plugins/mission/skills/mission/refs/codex-setup.md"):
+        assert expected_path in _r(REPO_ROOT / rel), f"{rel} does not reference {expected_path}"
 
 
 def test_release_checklist_requires_git_log_changelog_reconciliation():

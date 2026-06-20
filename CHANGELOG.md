@@ -9,17 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-06-20
+
 ### Added
+- Mission audit now reports sessions started after the Phase 1 specialist-selection checkpoint rollout when selection metadata is missing.
 - Release checklist now requires reconciling `git log <previous-tag>..HEAD --oneline` with English and Japanese changelog entries before release completion.
 - Documentation consistency tests now guard the v1.0.2 release themes so future changelog edits cannot silently drop them.
 
 ### Fixed
-- Corrected the v1.0.2 changelog entry to include the specialist registry, file-overlap warnings, audit CLI, GitHub Flow guidance, contributor acknowledgements, reviewer/scorer safeguards, audit diagnostics, and Codex hook-packaging validation.
+- Corrected the v1.0.2 changelog entry to include the Phase 1 specialist selection checkpoint, specialist registry, file-overlap warnings, audit CLI, GitHub Flow guidance, contributor acknowledgements, reviewer/scorer safeguards, audit diagnostics, and Codex hook-packaging validation.
 
 ## [1.0.2] - 2026-06-20
 
 ### Added
 - Optional specialist registry support now lets mission classify task profiles, select available domain specialist skills, use them as evidence providers, and record invocation evidence.
+- Phase 1 now requires an executable specialist selection checkpoint after mission initialization by recording `specialists recommend --record-state --json` results in mission state.
 - `mission-state.py init` now accepts `--files` and warns when another active session targets overlapping files.
 - A read-only `scripts/mission-audit.py` CLI now audits local mission state, produces self-improvement prompts, and reports forced/ungated passes, duplicate state, halt, slow-session, and low-score-pass buckets.
 - Mission audit now discovers nested worktree archive sessions, surfaces missing scoring evidence, and reports specialist invocation gaps.
@@ -58,6 +62,7 @@ First public release.
 - Python test suite covering state routing, scoring gates, and hook behavior.
 - GitHub Actions CI (`push`, `pull_request`, `workflow_dispatch`) with pytest and ShellCheck.
 
+[1.0.3]: https://github.com/tackeyy/mission/releases/tag/v1.0.3
 [1.0.2]: https://github.com/tackeyy/mission/releases/tag/v1.0.2
 [1.0.1]: https://github.com/tackeyy/mission/releases/tag/v1.0.1
 [1.0.0]: https://github.com/tackeyy/mission/releases/tag/v1.0.0
