@@ -358,6 +358,7 @@ cp .mission-state/state.json "$DEST/" && cp -r .mission-state/archive "$DEST/" 2
 【ミッション】<構造化ミッション>
 【主な成果物】<ファイルパス1>, <ファイルパス2>, ...
 【スコア内訳】ミッション達成度 X/5, 正確性 X/5, 完成度 X/5, 実用性 X/5, レビュアー合意度 X/5
+【Specialists】selected: <skill... or none> / used: <skill mode:status...> / degraded: <skipped|unavailable|failed...> / unselected-manual: <skill... or none>
 【次のステップ提案】<...>
 ```
 
@@ -367,6 +368,7 @@ cp .mission-state/state.json "$DEST/" && cp -r .mission-state/archive "$DEST/" 2
 ⏸️ 中断 / 未完了 (Iteration: N / Score: 3.X or 未採点)
 【理由】<致命的ブロッカー / max-iter到達 / 改善見込みなし>
 【現状】<どこまで進んだか>
+【Specialists】selected: <skill... or none> / used: <skill mode:status...> / degraded: <skipped|unavailable|failed...> / unselected-manual: <skill... or none>
 【判断を仰ぎたい点】Q1. <...>, Q2. <...>
 ```
 
@@ -406,7 +408,6 @@ mission は Claude Code / Codex 両対応 (PID owner 判定は 2026-06-13 に co
 
 ```
 /mission Vercel本番デプロイでX API投稿が502になる問題を完全に直して --max-iter 10
-
 → Phase 0: ミッション明確 → 仮置きなしで Phase 1 へ
 → Phase 1: Complex 判定 → Reviewer 3名 (init --complexity Complex で記録)
 → Iter 3 で Score 4.2 達成 → 完了報告
@@ -414,7 +415,6 @@ mission は Claude Code / Codex 両対応 (PID owner 判定は 2026-06-13 に co
 
 ```
 /mission リファクタリングして
-
 → Phase 0: 質問せず「スコープ=src全体・完了条件=テスト緑+可読性」等を assumptions.md に仮置き
 → そのまま Phase 1 へ (矛盾顕在化時のみ deferred clarification)
 ```
