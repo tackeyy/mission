@@ -9,6 +9,10 @@
 
 ## [Unreleased]
 
+### 追加
+- terminal evidence はあるが Phase 1 selection metadata と対応しない specialist invocation を mission audit が可視化するようにしました。
+- mission の最終報告に selected / used / degraded / unselected-manual の短い specialist summary を追加し、`codex-inline` を実 Skill tool 呼び出しと誤表現しない文言を明確化しました。
+
 ## [1.0.3] - 2026-06-20
 
 ### 追加

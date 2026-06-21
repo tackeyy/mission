@@ -123,6 +123,18 @@ def test_phase1_specialist_selection_checkpoint_documented():
     assert "init 後" in txt
 
 
+def test_specialist_final_report_summary_documented():
+    """#34: final reports distinguish specialist selection intent from invocation evidence."""
+    txt = _read(SKILL_MD)
+    assert "【Specialists】" in txt
+    assert "selected:" in txt
+    assert "used:" in txt
+    assert "degraded:" in txt
+    assert "unselected-manual:" in txt
+    assert "codex-inline" in txt
+    assert "実呼び出し証跡" in txt
+
+
 # ===== iter2 (A-M2 + C-H1/H2 回帰防止): M5/M6 文書ルールと旧フロー復活防止 =====
 
 

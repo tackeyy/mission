@@ -418,6 +418,26 @@ def specialist_invocation_gap_skills(record: StateRecord) -> list[str]:
     return sorted(selected - invoked)
 
 
+def unselected_specialist_invocation_skills(record: StateRecord) -> list[str]:
+    selected = selected_specialist_skills(record.state)
+    invoked = terminal_invoked_specialist_skills(record.state)
+    return sorted(invoked - selected)
+
+
+def unselected_specialist_invocation_item(record: StateRecord) -> dict[str, Any] | None:
+    skills = unselected_specialist_invocation_skills(record)
+    if not skills:
+        return None
+    return {
+        "project": project_name(record.state),
+        "project_root": project_root_for(record),
+        "session_id": record.state.get("session_id") or record.path.stem,
+        "mission_id": record.state.get("mission_id") or "",
+        "path": str(record.path),
+        "skills": skills,
+    }
+
+
 def scoring_evidence_paths(record: StateRecord, iteration: int) -> list[Path]:
     mission_id = str(record.state.get("mission_id") or "")
     mission_prefix = mission_id[:8] or "unknown"
@@ -496,6 +516,10 @@ def aggregate(
         r for r in records
         if specialist_invocation_gap_skills(r)
     ]
+    unselected_specialist_invocations = [
+        item for r in records
+        if (item := unselected_specialist_invocation_item(r)) is not None
+    ]
     missing_scoring_evidence = [
         item for r in records
         if (item := missing_scoring_evidence_item(r)) is not None
@@ -549,6 +573,15 @@ def aggregate(
         "missing_specialist_selection_checkpoint_count": len(missing_specialist_selection_checkpoints),
         "missing_specialist_selection_checkpoint_breakdown": bucket_count_keys(
             [str(item.get("project") or "unknown") for item in missing_specialist_selection_checkpoints]
+        ),
+        "unselected_specialist_invocations": unselected_specialist_invocations,
+        "unselected_specialist_invocation_count": len(unselected_specialist_invocations),
+        "unselected_specialist_invocation_breakdown": bucket_count_keys(
+            [
+                str(skill)
+                for item in unselected_specialist_invocations
+                for skill in item.get("skills", [])
+            ]
         ),
         "halt_incomplete_breakdown": bucket_counts(halt_or_incomplete, halt_or_incomplete_bucket),
         "slow_session_breakdown": slow_session_breakdown,
@@ -613,6 +646,8 @@ def finding_rows(stats: dict[str, Any], min_pass_rate: float) -> list[tuple[str,
         rows.append(("P2", "low-score-pass", f"{len(stats['low_score_pass_sessions'])} pass sessions scored below 4.3"))
     if stats["specialist_invocation_gap_sessions"]:
         rows.append(("P2", "specialist-invocation-gap", f"{len(stats['specialist_invocation_gap_sessions'])} sessions selected specialists without terminal invocation logs"))
+    if stats["unselected_specialist_invocation_count"]:
+        rows.append(("P2", "unselected-specialist-invocation", f"{stats['unselected_specialist_invocation_count']} sessions invoked specialists without matching selection metadata"))
     if not rows:
         rows.append(("OK", "no-critical-findings", "No forced/ungated pass, halt, duplicate, scoring-evidence, slow-session, or specialist invocation finding"))
     return rows
@@ -663,6 +698,7 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
         f"- resolved archive duplicates: {stats['resolved_duplicate_group_count']}",
         f"- missing scoring evidence: {stats['missing_scoring_evidence_count']}",
         f"- missing specialist selection checkpoints: {stats['missing_specialist_selection_checkpoint_count']}",
+        f"- unselected specialist invocations: {stats['unselected_specialist_invocation_count']}",
         f"- avg final composite: {fmt_float(stats['avg_final_composite'])}",
         f"- median duration: {fmt_minutes(stats['median_session_duration_sec'])}",
         f"- avg duration: {fmt_minutes(stats['avg_session_duration_sec'])}",
@@ -755,6 +791,23 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
     lines.extend(["", "## Specialist Invocation Gap Buckets", ""])
     if stats["specialist_invocation_gap_breakdown"]:
         for key, count in sorted(stats["specialist_invocation_gap_breakdown"].items()):
+            lines.append(f"- `{key}`: {count}")
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Unselected Specialist Invocations", ""])
+    if stats["unselected_specialist_invocations"]:
+        for item in stats["unselected_specialist_invocations"]:
+            skills = ", ".join(f"`{skill}`" for skill in item["skills"])
+            lines.append(
+                f"- `{item['session_id']}` ({item['project']}): invoked {skills} without selection metadata at `{item['path']}`"
+            )
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Unselected Specialist Invocation Buckets", ""])
+    if stats["unselected_specialist_invocation_breakdown"]:
+        for key, count in sorted(stats["unselected_specialist_invocation_breakdown"].items()):
             lines.append(f"- `{key}`: {count}")
     else:
         lines.append("- none")

@@ -225,6 +225,8 @@ Use `task_profile` as an object/dict for the classification record, `specialists
 
 `specialists_selected` and `specialist_invocations` intentionally remain separate. Selection answers "what should be used"; invocation answers "what was actually used or skipped." This keeps ADR-001's audit requirement intact without pretending Codex inline usage is a real forked Skill tool call.
 
+If a specialist appears in `specialist_invocations` but not in `specialists_selected`, report it as `unselected-manual`: evidence was used after the Phase 1 selection checkpoint, but the selection intent was not recorded. This is an observability warning for optional specialists, not a mission failure unless a future strict-mode policy marks that specialist as required.
+
 ## Phased Rollout
 
 1. **Docs-only protocol**: document selection rules and update SKILL.md to mention optional evidence providers.

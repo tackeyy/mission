@@ -370,6 +370,42 @@ def test_audit_accepts_completed_specialist_invocation(tmp_path):
     assert all(f["code"] != "specialist-invocation-gap" for f in data["findings"])
 
 
+def test_audit_reports_unselected_specialist_invocation(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "sess-a.json",
+        started_at="2026-06-20T10:10:00Z",
+        created_at_session="2026-06-20T10:10:00Z",
+        task_profile={"primary": "documentation"},
+        specialists_decision={"policy": "auto"},
+        specialists_selected=[],
+        specialist_invocations=[
+            {"skill": "dev-doc-writer", "status": "inline-applied", "mode": "codex-inline"},
+        ],
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-18",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    data = json.loads(result.stdout)
+    assert data["unselected_specialist_invocation_count"] == 1
+    assert data["unselected_specialist_invocations"][0]["skills"] == ["dev-doc-writer"]
+    assert data["unselected_specialist_invocation_breakdown"]["dev-doc-writer"] == 1
+    assert data["specialist_invocation_gap_count"] == 0
+    assert any(f["code"] == "unselected-specialist-invocation" for f in data["findings"])
+
+
 def test_audit_reports_missing_specialist_selection_checkpoint_after_rollout(tmp_path):
     _write_state(
         tmp_path / ".mission-state" / "sessions" / "sess-a.json",
