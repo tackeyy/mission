@@ -1,7 +1,7 @@
 {
   "name": "mission",
   "description": "Mission-oriented ReAct loop orchestrator for Claude Code and Codex. ミッション達成まで計画→実行→レビュー→採点を反復するオーケストレータ。",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "author": { "name": "tackeyy" },
   "license": "MIT",
   "repository": "https://github.com/tackeyy/mission",

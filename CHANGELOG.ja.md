@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-06-22
+
 ### 追加
 - README で `mission` を loop engineering の品質ゲートとして位置づけ、launch positioning guidance へのリンクを追加しました。
 - `mission-state.py stats` が repeated `--root` を受け付け、複数 root を集約し、scan root の一覧を出力し、重複する state identity を二重計上しないようにしました。
@@ -72,6 +74,7 @@
 - 状態ルーティング・スコアゲート・hook 挙動をカバーする Python テストスイート。
 - GitHub Actions CI（`push` / `pull_request` / `workflow_dispatch`）。pytest と ShellCheck を実行。
 
+[1.0.4]: https://github.com/tackeyy/mission/releases/tag/v1.0.4
 [1.0.3]: https://github.com/tackeyy/mission/releases/tag/v1.0.3
 [1.0.2]: https://github.com/tackeyy/mission/releases/tag/v1.0.2
 [1.0.1]: https://github.com/tackeyy/mission/releases/tag/v1.0.1

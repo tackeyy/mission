@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-06-22
+
 ### Added
 - README now positions `mission` as a loop-engineering quality gate and links to launch-positioning guidance.
 - `mission-state.py stats` now accepts repeated `--root` arguments, aggregates all scanned roots, reports the scanned root list, and de-duplicates overlapping state identities.
@@ -72,6 +74,7 @@ First public release.
 - Python test suite covering state routing, scoring gates, and hook behavior.
 - GitHub Actions CI (`push`, `pull_request`, `workflow_dispatch`) with pytest and ShellCheck.
 
+[1.0.4]: https://github.com/tackeyy/mission/releases/tag/v1.0.4
 [1.0.3]: https://github.com/tackeyy/mission/releases/tag/v1.0.3
 [1.0.2]: https://github.com/tackeyy/mission/releases/tag/v1.0.2
 [1.0.1]: https://github.com/tackeyy/mission/releases/tag/v1.0.1
