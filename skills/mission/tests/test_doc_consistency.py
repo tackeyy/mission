@@ -170,6 +170,16 @@ def test_v103_changelog_mentions_selection_checkpoint_audit():
         assert token in ja, f"CHANGELOG.ja.md v1.0.3 missing release theme: {token}"
 
 
+def test_v104_changelog_mentions_provider_extension_release_theme():
+    """v1.0.4 の provider extension release themes を changelog から落とさない."""
+    en = _release_section(_r(REPO_ROOT / "CHANGELOG.md"), "1.0.4").lower()
+    ja = _release_section(_r(REPO_ROOT / "CHANGELOG.ja.md"), "1.0.4").lower()
+    for token in ("auto-discovered", "skill/plugin manifest", "kind: command", "first-use risk consent", "oracle"):
+        assert token in en, f"CHANGELOG.md v1.0.4 missing release theme: {token}"
+    for token in ("自動 discovery", "skill/plugin manifest", "kind: command", "first-use risk consent", "oracle"):
+        assert token in ja, f"CHANGELOG.ja.md v1.0.4 missing release theme: {token}"
+
+
 def test_release_version_paths_are_in_sync():
     """Plugin manifests and visible install paths should point at the same release version."""
     manifest_paths = (
