@@ -9,6 +9,9 @@
 
 ## [Unreleased]
 
+### 追加
+- 通常の merge release と意図的な distribution release を分離する versioning policy を文書化し、PR を merge するたびに plugin version を上げない運用を明確化しました。
+
 ## [1.0.4] - 2026-06-22
 
 ### 追加

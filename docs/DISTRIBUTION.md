@@ -53,6 +53,9 @@ Codex:
 
 ## Release Checklist
 
+- Follow [`VERSIONING.md`](VERSIONING.md): ordinary PR merges do not bump plugin
+  versions; only intentional distribution releases update manifests, tags, and
+  GitHub Releases.
 - Keep `skills/` shared and platform-neutral.
 - Keep Claude-only hook configuration out of the default `hooks/hooks.json`
   location so Codex does not auto-load it.

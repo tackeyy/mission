@@ -210,3 +210,27 @@ def test_release_checklist_requires_git_log_changelog_reconciliation():
         txt = _r(REPO_ROOT / rel)
         assert required in txt and "CHANGELOG" in txt.upper(), \
             f"{rel} must require git log vs changelog reconciliation"
+
+
+def test_versioning_policy_separates_merge_and_distribution_releases():
+    """通常 PR merge と配布 version bump を混同しないための方針を docs で固定する."""
+    en = _r(REPO_ROOT / "docs/VERSIONING.md").lower()
+    ja = _r(REPO_ROOT / "docs/VERSIONING.ja.md").lower()
+    assert "merge release" in en and "distribution release" in en
+    assert "do not bump versions for every merged pr" in en
+    assert "hotfix" in en and "at most weekly" in en
+    assert "merge release" in ja and "distribution release" in ja
+    assert "pr を merge するたびに version を上げません" in ja
+    assert "hotfix" in ja and "最大でも週 1 回" in ja
+
+
+def test_release_checklist_links_versioning_policy_before_version_bump():
+    """distribution release checklist は version bump 前に versioning policy 確認を求める."""
+    for rel, policy in (
+        ("docs/MARKETPLACE_RELEASE_CHECKLIST.md", "VERSIONING.md"),
+        ("docs/MARKETPLACE_RELEASE_CHECKLIST.ja.md", "VERSIONING.ja.md"),
+    ):
+        txt = _r(REPO_ROOT / rel)
+        assert policy in txt, f"{rel} must link {policy}"
+        assert "distribution release" in txt, f"{rel} must distinguish distribution release"
+        assert "[Unreleased]" in txt, f"{rel} must preserve unreleased accumulation rule"

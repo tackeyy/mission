@@ -2,8 +2,13 @@
 
 Use this checklist before submitting `mission` to Claude Code or Codex marketplaces.
 
+Before starting, confirm this is a **distribution release**, not an ordinary
+merge release. See [`VERSIONING.md`](VERSIONING.md). Do not bump versions for
+every merged PR.
+
 ## Shared
 
+- [ ] This release intentionally publishes a new plugin version; ordinary PR merges should leave versions unchanged and keep entries under `[Unreleased]`.
 - [ ] Repository visibility change is intentional. Do not make the repository public as part of routine validation.
 - [ ] `git status --short` contains only intended release changes.
 - [ ] No secrets, tokens, private URLs, local-only state, `.mission-state/`, `.pytest_cache/`, or personal machine paths are included.
