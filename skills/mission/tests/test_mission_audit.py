@@ -406,6 +406,154 @@ def test_audit_reports_unselected_specialist_invocation(tmp_path):
     assert any(f["code"] == "unselected-specialist-invocation" for f in data["findings"])
 
 
+def test_audit_reports_candidate_only_specialists(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "sess-a.json",
+        started_at="2026-06-20T10:10:00Z",
+        created_at_session="2026-06-20T10:10:00Z",
+        complexity="Critical",
+        task_profile={"primary": "security", "risk": "high"},
+        specialists_decision={"policy": "interactive"},
+        specialists_candidates=[
+            {"role": "security-reviewer", "skill": "dev-security-reviewer", "status": "available"},
+            {"role": "unit-tester", "skill": "dev-unit-tester", "status": "available"},
+        ],
+        specialists_selected=[],
+        specialist_invocations=[],
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-18",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    data = json.loads(result.stdout)
+    assert data["candidate_only_specialist_count"] == 1
+    assert data["candidate_only_specialists"][0]["session_id"] == "sess-a"
+    assert data["candidate_only_specialists"][0]["priority"] == "P1"
+    assert data["candidate_only_specialists"][0]["candidate_count"] == 2
+    assert data["candidate_only_specialists"][0]["skills"] == ["dev-security-reviewer", "dev-unit-tester"]
+    assert data["candidate_only_specialist_breakdown"][str(tmp_path.name)] == 1
+    assert data["candidate_only_specialist_skill_breakdown"]["dev-security-reviewer"] == 1
+    assert any(f["code"] == "candidate-only-specialists" and f["priority"] == "P1" for f in data["findings"])
+
+
+def test_audit_does_not_report_candidate_only_when_specialist_selected(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "sess-a.json",
+        started_at="2026-06-20T10:10:00Z",
+        created_at_session="2026-06-20T10:10:00Z",
+        task_profile={"primary": "documentation"},
+        specialists_decision={"policy": "auto"},
+        specialists_candidates=[
+            {"role": "doc-writer", "skill": "dev-doc-writer", "status": "available"},
+        ],
+        specialists_selected=[
+            {"role": "doc-writer", "skill": "dev-doc-writer", "status": "selected"},
+        ],
+        specialist_invocations=[],
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-18",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    data = json.loads(result.stdout)
+    assert data["candidate_only_specialist_count"] == 0
+    assert any(f["code"] == "specialist-invocation-gap" for f in data["findings"])
+    assert all(f["code"] != "candidate-only-specialists" for f in data["findings"])
+
+
+def test_audit_does_not_report_candidate_only_with_explicit_skip(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "sess-a.json",
+        started_at="2026-06-20T10:10:00Z",
+        created_at_session="2026-06-20T10:10:00Z",
+        task_profile={"primary": "documentation"},
+        specialists_decision={"policy": "auto"},
+        specialists_candidates=[
+            {"role": "doc-writer", "skill": "dev-doc-writer", "status": "available"},
+        ],
+        specialists_selected=[],
+        specialist_invocations=[
+            {"skill": "dev-doc-writer", "status": "skipped", "mode": "codex-inline", "reason": "not needed"},
+        ],
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-18",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    data = json.loads(result.stdout)
+    assert data["candidate_only_specialist_count"] == 0
+    assert data["unselected_specialist_invocation_count"] == 0
+    assert all(f["code"] != "candidate-only-specialists" for f in data["findings"])
+
+
+def test_audit_does_not_report_candidate_only_without_candidates(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "sess-a.json",
+        started_at="2026-06-20T10:10:00Z",
+        created_at_session="2026-06-20T10:10:00Z",
+        task_profile={"primary": "documentation"},
+        specialists_decision={"policy": "auto"},
+        specialists_candidates=[],
+        specialists_selected=[],
+        specialist_invocations=[],
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-18",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    data = json.loads(result.stdout)
+    assert data["candidate_only_specialist_count"] == 0
+    assert all(f["code"] != "candidate-only-specialists" for f in data["findings"])
+
+
 def test_audit_reports_missing_specialist_selection_checkpoint_after_rollout(tmp_path):
     _write_state(
         tmp_path / ".mission-state" / "sessions" / "sess-a.json",

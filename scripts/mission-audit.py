@@ -347,9 +347,16 @@ def low_score_pass_bucket(record: StateRecord) -> str:
 TERMINAL_SPECIALIST_INVOCATION_STATUSES = {
     "completed",
     "inline-applied",
+    "skill-tool-applied",
     "skipped",
     "unavailable",
     "failed",
+}
+
+APPLIED_SPECIALIST_INVOCATION_STATUSES = {
+    "completed",
+    "inline-applied",
+    "skill-tool-applied",
 }
 
 SPECIALIST_SELECTION_CHECKPOINT_REQUIRED_AT = datetime(2026, 6, 20, 10, 6, 47, tzinfo=timezone.utc)
@@ -410,6 +417,23 @@ def terminal_invoked_specialist_skills(state: dict[str, Any]) -> set[str]:
     return skills
 
 
+def candidate_specialist_skills(state: dict[str, Any]) -> list[str]:
+    skills: list[str] = []
+    seen: set[str] = set()
+    for candidate in state.get("specialists_candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        skill = candidate.get("skill")
+        if not skill:
+            continue
+        skill_name = str(skill)
+        if skill_name in seen:
+            continue
+        seen.add(skill_name)
+        skills.append(skill_name)
+    return skills
+
+
 def specialist_invocation_gap_skills(record: StateRecord) -> list[str]:
     selected = selected_specialist_skills(record.state)
     if not selected:
@@ -420,8 +444,15 @@ def specialist_invocation_gap_skills(record: StateRecord) -> list[str]:
 
 def unselected_specialist_invocation_skills(record: StateRecord) -> list[str]:
     selected = selected_specialist_skills(record.state)
-    invoked = terminal_invoked_specialist_skills(record.state)
-    return sorted(invoked - selected)
+    applied: set[str] = set()
+    for invocation in record.state.get("specialist_invocations") or []:
+        if not isinstance(invocation, dict):
+            continue
+        skill = invocation.get("skill")
+        status = invocation.get("status")
+        if skill and status in APPLIED_SPECIALIST_INVOCATION_STATUSES:
+            applied.add(str(skill))
+    return sorted(applied - selected)
 
 
 def unselected_specialist_invocation_item(record: StateRecord) -> dict[str, Any] | None:
@@ -435,6 +466,38 @@ def unselected_specialist_invocation_item(record: StateRecord) -> dict[str, Any]
         "mission_id": record.state.get("mission_id") or "",
         "path": str(record.path),
         "skills": skills,
+    }
+
+
+def candidate_only_specialist_item(record: StateRecord) -> dict[str, Any] | None:
+    state = record.state
+    candidates = candidate_specialist_skills(state)
+    if not candidates:
+        return None
+    if selected_specialist_skills(state):
+        return None
+    if state.get("specialist_invocations") or []:
+        return None
+
+    task_profile = state.get("task_profile") if isinstance(state.get("task_profile"), dict) else {}
+    complexity = str(state.get("complexity") or "Unknown")
+    risk = str(task_profile.get("risk") or "").lower()
+    primary = str(task_profile.get("primary") or "").lower()
+    secondary = {str(value).lower() for value in task_profile.get("secondary") or []}
+    high_risk_profile = bool({"security", "infra"} & ({primary} | secondary))
+    priority = "P1" if complexity == "Critical" or risk == "high" or high_risk_profile else "P2"
+    latest = latest_scored_entry(state) or {}
+    return {
+        "project": project_name(state),
+        "project_root": project_root_for(record),
+        "session_id": state.get("session_id") or record.path.stem,
+        "mission_id": state.get("mission_id") or "",
+        "path": str(record.path),
+        "complexity": complexity,
+        "score": latest.get("composite"),
+        "candidate_count": len(candidates),
+        "skills": candidates,
+        "priority": priority,
     }
 
 
@@ -528,6 +591,10 @@ def aggregate(
         item for r in records
         if (item := missing_specialist_selection_checkpoint_item(r)) is not None
     ]
+    candidate_only_specialists = [
+        item for r in records
+        if (item := candidate_only_specialist_item(r)) is not None
+    ]
     halt_or_incomplete = [
         r for r, cls in zip(records, classes)
         if cls in {"halt", "incomplete"}
@@ -580,6 +647,18 @@ def aggregate(
             [
                 str(skill)
                 for item in unselected_specialist_invocations
+                for skill in item.get("skills", [])
+            ]
+        ),
+        "candidate_only_specialists": candidate_only_specialists,
+        "candidate_only_specialist_count": len(candidate_only_specialists),
+        "candidate_only_specialist_breakdown": bucket_count_keys(
+            [str(item.get("project") or "unknown") for item in candidate_only_specialists]
+        ),
+        "candidate_only_specialist_skill_breakdown": bucket_count_keys(
+            [
+                str(skill)
+                for item in candidate_only_specialists
                 for skill in item.get("skills", [])
             ]
         ),
@@ -648,8 +727,11 @@ def finding_rows(stats: dict[str, Any], min_pass_rate: float) -> list[tuple[str,
         rows.append(("P2", "specialist-invocation-gap", f"{len(stats['specialist_invocation_gap_sessions'])} sessions selected specialists without terminal invocation logs"))
     if stats["unselected_specialist_invocation_count"]:
         rows.append(("P2", "unselected-specialist-invocation", f"{stats['unselected_specialist_invocation_count']} sessions invoked specialists without matching selection metadata"))
+    if stats["candidate_only_specialist_count"]:
+        priority = "P1" if any(item.get("priority") == "P1" for item in stats["candidate_only_specialists"]) else "P2"
+        rows.append((priority, "candidate-only-specialists", f"{stats['candidate_only_specialist_count']} sessions had specialist candidates but no selected, invoked, or skipped decision trail"))
     if not rows:
-        rows.append(("OK", "no-critical-findings", "No forced/ungated pass, halt, duplicate, scoring-evidence, slow-session, or specialist invocation finding"))
+        rows.append(("OK", "no-critical-findings", "No forced/ungated pass, halt, duplicate, scoring-evidence, slow-session, or specialist finding"))
     return rows
 
 
@@ -699,6 +781,7 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
         f"- missing scoring evidence: {stats['missing_scoring_evidence_count']}",
         f"- missing specialist selection checkpoints: {stats['missing_specialist_selection_checkpoint_count']}",
         f"- unselected specialist invocations: {stats['unselected_specialist_invocation_count']}",
+        f"- candidate-only specialists: {stats['candidate_only_specialist_count']}",
         f"- avg final composite: {fmt_float(stats['avg_final_composite'])}",
         f"- median duration: {fmt_minutes(stats['median_session_duration_sec'])}",
         f"- avg duration: {fmt_minutes(stats['avg_session_duration_sec'])}",
@@ -808,6 +891,31 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
     lines.extend(["", "## Unselected Specialist Invocation Buckets", ""])
     if stats["unselected_specialist_invocation_breakdown"]:
         for key, count in sorted(stats["unselected_specialist_invocation_breakdown"].items()):
+            lines.append(f"- `{key}`: {count}")
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Candidate-Only Specialist Recommendations", ""])
+    if stats["candidate_only_specialists"]:
+        for item in stats["candidate_only_specialists"]:
+            skills = ", ".join(f"`{skill}`" for skill in item["skills"])
+            lines.append(
+                f"- `{item['session_id']}` ({item['project']}, {item['complexity']}, {item['priority']}): "
+                f"{item['candidate_count']} candidates ({skills}) but no selected/invoked/skipped trail at `{item['path']}`"
+            )
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Candidate-Only Specialist Buckets", ""])
+    if stats["candidate_only_specialist_breakdown"]:
+        for key, count in sorted(stats["candidate_only_specialist_breakdown"].items()):
+            lines.append(f"- `{key}`: {count}")
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Candidate-Only Specialist Skill Buckets", ""])
+    if stats["candidate_only_specialist_skill_breakdown"]:
+        for key, count in sorted(stats["candidate_only_specialist_skill_breakdown"].items()):
             lines.append(f"- `{key}`: {count}")
     else:
         lines.append("- none")
