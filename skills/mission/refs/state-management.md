@@ -55,6 +55,9 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py list   # NOTE:
 
 # 全プロジェクト一括停止 (C-4)
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py halt --all --reason "<理由>"
+
+# 完了前の specialist/provider candidate accounting 確認 (warning-oriented)
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py specialists accounting --json
 ```
 
 スクリプトが自動で stamp するフィールド (A-1/A-2/B-3/C-1):
@@ -65,6 +68,8 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py halt --all --r
 - `schema_version` (現在 2)
 
 更新前の `.bak` 自動生成 (A-4)、`fcntl.flock` ロック (B-1)、`fsync + os.replace` atomic write (B-2) もスクリプトが内包する。
+
+`specialists accounting` は available candidate のうち selected / invoked / skipped / unavailable / failed の terminal decision trail がないものを表示する。`Critical` と high-risk は全 available candidate、`Complex` は security/testing/infra と、schema/migration/query/persistence 等の強いシグナルがある database/backend candidate を重点対象にする。これは optional provider を blanket hard gate にするものではなく、ハッカブルな plugin/provider 拡張性を保ちながら判断理由を監査可能にするための pre-completion warning である。
 
 ### Phase C: multi-session 並列実行 (2026-06-13 デフォルト有効化)
 
