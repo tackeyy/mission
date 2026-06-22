@@ -2,8 +2,11 @@
 
 Claude Code / Codex marketplace に `mission` を出す前に使うチェックリスト。
 
+開始前に、これは通常の merge release ではなく **distribution release** であることを確認します。詳細は [`VERSIONING.ja.md`](VERSIONING.ja.md) を参照してください。PR を merge するたびに version を上げません。
+
 ## 共通
 
+- [ ] この release は新しい plugin version を意図的に配布するものである。通常の PR merge では version を変えず、entry は `[Unreleased]` に残す。
 - [ ] repository visibility の変更は意図的なもの。通常検証の一部として public 化しない。
 - [ ] `git status --short` に意図した release 変更だけが残っている。
 - [ ] secret、token、private URL、local-only state、`.mission-state/`、`.pytest_cache/`、個人マシン固有の絶対パスが含まれていない。

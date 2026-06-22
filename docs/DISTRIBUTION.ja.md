@@ -38,6 +38,7 @@ Codex:
 
 ## Release checklist
 
+- [`VERSIONING.ja.md`](VERSIONING.ja.md) に従う。通常の PR merge では plugin version を上げず、意図的な distribution release の時だけ manifest、tag、GitHub Release を更新する。
 - `skills/` は shared かつ platform-neutral に保つ
 - Claude-only hook config を default `hooks/hooks.json` に置かず、Codex が自動 load しないようにする
 - Claude Code plugin install を `/plugin marketplace add` と `/plugin install` で検証する
