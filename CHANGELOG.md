@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Mission audit now reports `candidate-only-specialists` when specialist candidates exist but no selection, invocation, or skip decision trail is recorded.
 - Mission audit now reports specialist invocations that have terminal evidence but no matching Phase 1 selection metadata.
 - Mission final-report guidance now includes a concise specialist summary for selected, used, degraded, and unselected-manual skills while preserving truthful `codex-inline` wording.
+- Specialist registries are now auto-discovered from project, user, and skill/plugin manifest locations, with project-level disable overrides.
+- Specialist provider schema now supports `kind: skill` and `kind: command`, first-use risk consent, and command-provider evidence invocation without hard-coding providers such as `oracle` into mission core.
 
 ## [1.0.3] - 2026-06-20
 

@@ -37,6 +37,15 @@ External specialists are evidence providers, not final judges. They may strength
 
 The portable interactive fallback is chat-based selection, such as a numbered list. Custom graphical pickers are not required for correctness.
 
+Provider registries may describe two provider kinds:
+
+- `kind: skill`: a Claude/Codex skill selected as optional evidence.
+- `kind: command`: a local command invoked through `mission-state.py specialists invoke-command` with argv arrays, stdin/stdout capture, archived evidence, and `specialist_invocations` logging.
+
+Command providers are treated as local code execution. Project registries can disable user-level defaults with `enabled: false`, and providers with `risk.first_use_confirmation: true` require a user-scoped consent allowlist before automatic use. Provider failures or missing commands degrade to logged evidence and core reviewers unless a future strict policy explicitly makes that provider mandatory.
+
+No provider gets mission-core-specific authority. In particular, high-value reviewers such as `oracle` must be represented as external manifests or examples, not hard-coded branches in `mission` core.
+
 ## State and Audit Requirements
 
 Specialist selection must be auditable. `.mission-state` should record:
@@ -97,3 +106,5 @@ The foundation from #28 introduced the specialist registry protocol and initial 
 - `specialists_unavailable`
 
 The next phase should add discovery, candidate ranking, interactive fallback, install recommendation dry-runs, and expanded state metadata.
+
+Issue #49 extends this ADR with deterministic registry discovery, `kind: command` provider support, first-use risk consent, and command-provider invocation evidence. This remains an optional evidence-provider path; pass/fail authority stays with the core mission loop and state gates.
