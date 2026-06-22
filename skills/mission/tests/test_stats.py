@@ -38,6 +38,51 @@ def test_stats_empty_root_returns_zero(tmp_path, run_cli):
     assert r.returncode == 0, f"stderr: {r.stderr}"
     data = json.loads(r.stdout)
     assert data["total_sessions"] == 0
+    assert data["roots"] == [str(tmp_path)]
+
+
+def test_stats_default_root_uses_cwd(tmp_path, run_cli):
+    """--root 省略時は cwd を root として集計し、scope を JSON に出す."""
+    _make_state(tmp_path / "p1", passes=True, loop_active=False)
+
+    r = run_cli("stats", "--json", cwd=tmp_path)
+
+    assert r.returncode == 0, f"stderr: {r.stderr}"
+    data = json.loads(r.stdout)
+    assert data["total_sessions"] == 1
+    assert data["roots"] == [str(tmp_path)]
+
+
+def test_stats_aggregates_multiple_roots(tmp_path, run_cli):
+    """repeated --root は mission-audit.py と同じく全 root を集約する."""
+    root_a = tmp_path / "root-a"
+    root_b = tmp_path / "root-b"
+    _make_state(root_a / "p1", session_id="a", passes=True, loop_active=False)
+    _make_state(root_b / "p2", session_id="b", passes=False, loop_active=False, halt_reason="stopped")
+
+    r = run_cli("stats", "--root", str(root_a), "--root", str(root_b), "--json", cwd=tmp_path)
+
+    assert r.returncode == 0, f"stderr: {r.stderr}"
+    data = json.loads(r.stdout)
+    assert data["total_sessions"] == 2
+    assert data["pass_count"] == 1
+    assert data["halt_count"] == 1
+    assert data["roots"] == [str(root_a), str(root_b)]
+    assert data["by_project"]["p1"]["total"] == 1
+    assert data["by_project"]["p2"]["total"] == 1
+
+
+def test_stats_repeated_duplicate_roots_are_deduped(tmp_path, run_cli):
+    """同じ root を複数指定しても同一 state を二重計上しない."""
+    _make_state(tmp_path / "p1", passes=True, loop_active=False)
+
+    r = run_cli("stats", "--root", str(tmp_path), "--root", str(tmp_path), "--json", cwd=tmp_path)
+
+    assert r.returncode == 0, f"stderr: {r.stderr}"
+    data = json.loads(r.stdout)
+    assert data["total_sessions"] == 1
+    assert data["duplicate_state_group_count"] == 1
+    assert data["roots"] == [str(tmp_path), str(tmp_path)]
 
 
 def test_stats_counts_pass_and_halt_and_incomplete(tmp_path, run_cli):
@@ -114,6 +159,7 @@ def test_stats_text_output_default(tmp_path, run_cli):
     r = run_cli("stats", "--root", str(tmp_path), cwd=tmp_path)
     assert r.returncode == 0
     assert "total_sessions" in r.stdout.lower() or "1" in r.stdout
+    assert f"roots:                    {tmp_path}" in r.stdout
     assert "{" not in r.stdout[:50]  # JSON ではない
 
 

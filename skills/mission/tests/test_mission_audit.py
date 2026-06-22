@@ -522,6 +522,52 @@ def test_audit_does_not_report_candidate_only_with_explicit_skip(tmp_path):
     assert all(f["code"] != "candidate-only-specialists" for f in data["findings"])
 
 
+def test_audit_reports_unaccounted_high_risk_candidates_after_partial_skip(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "sess-a.json",
+        started_at="2026-06-20T10:10:00Z",
+        created_at_session="2026-06-20T10:10:00Z",
+        complexity="Critical",
+        task_profile={"primary": "security", "secondary": ["testing"], "risk": "high"},
+        specialists_decision={"policy": "interactive"},
+        specialists_candidates=[
+            {"role": "security-reviewer", "skill": "dev-security-reviewer", "status": "available"},
+            {"role": "unit-tester", "skill": "dev-unit-tester", "status": "available"},
+        ],
+        specialists_selected=[],
+        specialist_invocations=[
+            {
+                "skill": "dev-security-reviewer",
+                "status": "skipped",
+                "mode": "fallback-core",
+                "reason": "Core review covered the security checklist",
+            },
+        ],
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-18",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    data = json.loads(result.stdout)
+    assert data["candidate_only_specialist_count"] == 1
+    assert data["candidate_only_specialists"][0]["candidate_count"] == 1
+    assert data["candidate_only_specialists"][0]["skills"] == ["dev-unit-tester"]
+    assert data["candidate_only_specialist_skill_breakdown"]["dev-unit-tester"] == 1
+    assert "dev-security-reviewer" not in data["candidate_only_specialist_skill_breakdown"]
+
+
 def test_audit_does_not_report_candidate_only_without_candidates(tmp_path):
     _write_state(
         tmp_path / ".mission-state" / "sessions" / "sess-a.json",

@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `mission-state.py stats` now accepts repeated `--root` arguments, aggregates all scanned roots, reports the scanned root list, and de-duplicates overlapping state identities.
+- Specialist invocation logging now accepts `skill-tool-applied`, requires an explicit reason for skipped/unavailable/failed decisions, and documents high-risk candidate accounting.
 - Mission audit now reports `candidate-only-specialists` when specialist candidates exist but no selection, invocation, or skip decision trail is recorded.
 - Mission audit now reports specialist invocations that have terminal evidence but no matching Phase 1 selection metadata.
 - Mission final-report guidance now includes a concise specialist summary for selected, used, degraded, and unselected-manual skills while preserving truthful `codex-inline` wording.

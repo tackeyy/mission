@@ -434,6 +434,22 @@ def candidate_specialist_skills(state: dict[str, Any]) -> list[str]:
     return skills
 
 
+def specialist_candidate_accounting_required(state: dict[str, Any]) -> bool:
+    """Return true when available candidates must each have a decision trail."""
+    task_profile = state.get("task_profile") if isinstance(state.get("task_profile"), dict) else {}
+    complexity = str(state.get("complexity") or "Unknown")
+    risk = str(task_profile.get("risk") or "").lower()
+    primary = str(task_profile.get("primary") or "").lower()
+    secondary = {str(value).lower() for value in task_profile.get("secondary") or []}
+    high_risk_profiles = {"security", "testing", "infra"}
+    profiles = {primary} | secondary
+    return (
+        complexity == "Critical"
+        or risk == "high"
+        or (complexity == "Complex" and bool(high_risk_profiles & profiles))
+    )
+
+
 def specialist_invocation_gap_skills(record: StateRecord) -> list[str]:
     selected = selected_specialist_skills(record.state)
     if not selected:
@@ -474,9 +490,13 @@ def candidate_only_specialist_item(record: StateRecord) -> dict[str, Any] | None
     candidates = candidate_specialist_skills(state)
     if not candidates:
         return None
-    if selected_specialist_skills(state):
+
+    selected = selected_specialist_skills(state)
+    terminal = terminal_invoked_specialist_skills(state)
+    if not specialist_candidate_accounting_required(state) and (selected or terminal):
         return None
-    if state.get("specialist_invocations") or []:
+    unaccounted = [skill for skill in candidates if skill not in selected and skill not in terminal]
+    if not unaccounted:
         return None
 
     task_profile = state.get("task_profile") if isinstance(state.get("task_profile"), dict) else {}
@@ -484,7 +504,7 @@ def candidate_only_specialist_item(record: StateRecord) -> dict[str, Any] | None
     risk = str(task_profile.get("risk") or "").lower()
     primary = str(task_profile.get("primary") or "").lower()
     secondary = {str(value).lower() for value in task_profile.get("secondary") or []}
-    high_risk_profile = bool({"security", "infra"} & ({primary} | secondary))
+    high_risk_profile = bool({"security", "testing", "infra"} & ({primary} | secondary))
     priority = "P1" if complexity == "Critical" or risk == "high" or high_risk_profile else "P2"
     latest = latest_scored_entry(state) or {}
     return {
@@ -495,8 +515,8 @@ def candidate_only_specialist_item(record: StateRecord) -> dict[str, Any] | None
         "path": str(record.path),
         "complexity": complexity,
         "score": latest.get("composite"),
-        "candidate_count": len(candidates),
-        "skills": candidates,
+        "candidate_count": len(unaccounted),
+        "skills": unaccounted,
         "priority": priority,
     }
 

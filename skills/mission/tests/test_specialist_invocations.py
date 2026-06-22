@@ -106,7 +106,80 @@ def test_log_invocation_records_unavailable_without_evidence(state_dir, run_cli,
 
     entry = read_state(state_dir)["specialist_invocations"][0]
     assert entry["status"] == "unavailable"
+    assert entry["reason"] == "Skill is not callable in this environment"
     assert "evidence_path" not in entry
+
+
+def test_log_invocation_records_skipped_with_reason(state_dir, run_cli, read_state):
+    run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "planning",
+        "--role", "security-reviewer",
+        "--skill", "dev-security-reviewer",
+        "--mode", "fallback-core",
+        "--status", "skipped",
+        "--reason", "Core reviewer covered the security checklist for this low-risk docs-only change",
+        cwd=state_dir.parent,
+        check=True,
+    )
+
+    entry = read_state(state_dir)["specialist_invocations"][0]
+    assert entry["status"] == "skipped"
+    assert entry["reason"] == "Core reviewer covered the security checklist for this low-risk docs-only change"
+
+
+def test_log_invocation_rejects_skipped_without_reason(state_dir, run_cli):
+    r = run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "planning",
+        "--role", "security-reviewer",
+        "--skill", "dev-security-reviewer",
+        "--mode", "fallback-core",
+        "--status", "skipped",
+        cwd=state_dir.parent,
+    )
+
+    assert r.returncode != 0
+    assert "判断理由" in r.stderr
+
+
+def test_log_invocation_records_failed_attempt(state_dir, run_cli, read_state):
+    run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "review",
+        "--role", "unit-tester",
+        "--skill", "dev-unit-tester",
+        "--mode", "skill-tool",
+        "--status", "failed",
+        "--reason", "Skill subprocess exited before producing review evidence",
+        cwd=state_dir.parent,
+        check=True,
+    )
+
+    entry = read_state(state_dir)["specialist_invocations"][0]
+    assert entry["status"] == "failed"
+    assert entry["reason"] == "Skill subprocess exited before producing review evidence"
+
+
+def test_log_invocation_accepts_skill_tool_applied_status(state_dir, run_cli, read_state):
+    run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "review",
+        "--role", "code-reviewer",
+        "--skill", "dev-code-reviewer",
+        "--mode", "skill-tool",
+        "--status", "skill-tool-applied",
+        cwd=state_dir.parent,
+        check=True,
+    )
+
+    entry = read_state(state_dir)["specialist_invocations"][0]
+    assert entry["mode"] == "skill-tool"
+    assert entry["status"] == "skill-tool-applied"
 
 
 def test_log_invocation_rejects_unknown_status(state_dir, run_cli):

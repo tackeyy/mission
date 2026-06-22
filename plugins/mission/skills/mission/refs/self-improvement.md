@@ -9,6 +9,18 @@ mission runs and turn the findings into the next improvement mission.
 python3 scripts/mission-audit.py --root /Users/tackeyy/dev --since 2026-06-18
 ```
 
+Use `mission-state.py stats` for quick numeric health checks and
+`scripts/mission-audit.py` for improvement work. Both commands accept repeated
+`--root` arguments, but the audit script adds findings, self-improvement prompts,
+and issue-oriented diagnostics.
+
+```bash
+python3 skills/mission/bin/mission-state.py stats \
+  --root /Users/tackeyy/dev \
+  --root /Users/tackeyy/workspace \
+  --since 2026-06-18
+```
+
 Write a report:
 
 ```bash
