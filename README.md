@@ -7,12 +7,37 @@
 
 **English** | [Japanese](README.ja.md)
 
-`mission` is a Claude Code / Codex plugin for running mission-oriented work as a
-quality-gated ReAct loop.
+`mission` is an OSS loop-engineering plugin for Claude Code and Codex. It keeps
+agentic work moving until a recorded plan, review, score, and state gate say the
+mission is actually done.
 
 It plans, executes, reviews, scores, and iterates until the configured threshold
 is reached. A Stop hook keeps the loop from ending early while an active mission is
 still below the passing gate.
+
+> Prompt engineering tells an agent what to do. Loop engineering defines how the
+> agent keeps working until the job is actually done.
+
+Use `mission` when the problem is not "what prompt should I write?" but "how do I
+stop an agent from declaring success before the work passes a quality gate?"
+
+## Loop Engineering
+
+`mission` is a quality-gated loop for multi-step agent work:
+
+```text
+plan -> execute -> review -> score -> iterate
+```
+
+It is designed for the loop-engineering moment: recurring agent systems,
+workflows, skills, plugins, and sub-agents are becoming the unit of leverage, but
+a loop still needs a deterministic way to decide when it may stop. `mission`
+provides that completion gate with `.mission-state`, reviewer/scorer phases, and
+threshold-based pass/fail state.
+
+For public launch positioning, GitHub topics, and a comparison against `/goal`,
+`ralph-loop`, and Superpowers, see
+[`docs/LOOP_ENGINEERING.md`](docs/LOOP_ENGINEERING.md).
 
 ## Features
 
@@ -204,7 +229,7 @@ python3 -m pytest -q
 Current local verification:
 
 ```text
-206 passed
+327 passed
 ```
 
 Additional project-specific testing guidance is in

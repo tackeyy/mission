@@ -7,8 +7,31 @@
 
 [English](README.md) | **日本語**
 
-`mission` は、Claude Code / Codex でミッション達成まで ReAct ループを回すためのプラグインです。
+`mission` は、Claude Code / Codex 向けの OSS loop engineering プラグインです。
+計画、レビュー、採点、state gate が「本当に完了した」と判断するまで、agentic work を進め続けます。
+
 計画、実行、ピアレビュー、スコアリングを合格閾値に達するまで反復し、Stop hook が早期終了を抑止します。
+
+> Prompt engineering は「AI に何を頼むか」。
+> Loop engineering は「AI が完了まで進み続ける仕組みをどう設計するか」。
+
+`mission` が解く問いは「どんな prompt を書くか」ではなく、
+**AI が品質ゲートを通る前に成功宣言して止まるのをどう防ぐか**です。
+
+## Loop Engineering
+
+`mission` は、複数ステップの agent work を品質ゲート付きで回す loop です。
+
+```text
+plan -> execute -> review -> score -> iterate
+```
+
+recurring agent system、workflow、skills、plugins、sub-agent が実務の leverage になり始める一方で、
+loop には「いつ止まってよいか」を決める仕組みが必要です。`mission` は `.mission-state`、
+reviewer/scorer phase、threshold-based pass/fail state で、その completion gate を提供します。
+
+public launch positioning、GitHub topics、`/goal` / `ralph-loop` / Superpowers との比較は
+[`docs/LOOP_ENGINEERING.md`](docs/LOOP_ENGINEERING.md) を参照してください。
 
 ## 特徴
 
@@ -126,7 +149,7 @@ plugin 配布用に、この repo には `.codex-plugin/plugin.json` と `.agent
 `codex plugin add mission@mission-marketplace` 後は、`MISSION_PLUGIN_ROOT` を install cache path に設定し、現行 model-visible command text 互換のため `CLAUDE_PLUGIN_ROOT` も同じ値にします。
 
 ```bash
-export MISSION_PLUGIN_ROOT="${CODEX_HOME:-$HOME/.codex}/plugins/cache/mission-marketplace/mission/1.0.2"
+export MISSION_PLUGIN_ROOT="${CODEX_HOME:-$HOME/.codex}/plugins/cache/mission-marketplace/mission/1.0.3"
 export CLAUDE_PLUGIN_ROOT="$MISSION_PLUGIN_ROOT"
 ```
 
@@ -173,7 +196,7 @@ python3 -m pytest -q
 現在のローカル検証結果:
 
 ```text
-206 passed
+327 passed
 ```
 
 詳細は [`docs/TESTING.md`](docs/TESTING.md) を参照してください。

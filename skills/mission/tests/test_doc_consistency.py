@@ -184,7 +184,12 @@ def test_release_version_paths_are_in_sync():
     assert len(versions) == 1, f"manifest versions differ: {versions}"
     version = versions.pop()
     expected_path = f"mission-marketplace/mission/{version}"
-    for rel in ("README.md", "skills/mission/refs/codex-setup.md", "plugins/mission/skills/mission/refs/codex-setup.md"):
+    for rel in (
+        "README.md",
+        "README.ja.md",
+        "skills/mission/refs/codex-setup.md",
+        "plugins/mission/skills/mission/refs/codex-setup.md",
+    ):
         assert expected_path in _r(REPO_ROOT / rel), f"{rel} does not reference {expected_path}"
 
 
