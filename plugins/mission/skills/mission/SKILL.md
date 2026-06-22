@@ -208,7 +208,7 @@ state.json の `assumptions_path` が指すファイル (デフォルト `.missi
 
 Phase 1 で選定した specialist は Phase 2-6 の任意 evidence provider として、計画制約・実装補助・差分レビュー・採点根拠・Critic 改善案に使う。専門家不在や Codex で Skill 呼び出し不可の場合は、その欠落を記録して core subskills のみで進める。
 
-**Specialist 呼び出しログ (Issue #31)**: `specialists_selected` は選定意図であり、実呼び出し証跡ではない。specialist を選定・呼び出し・inline 適用・skip・unavailable・failed にした場合は、orchestrator が `mission-state.py specialists log-invocation` を呼び、`specialist_invocations` に append する。Codex で `Skill(...)` が使えず visible skill instructions を同一コンテキストで適用した場合は、`--mode codex-inline --status inline-applied` として正直に記録する。Claude Code 等で Skill tool を実呼び出しした場合は `--mode skill-tool` を使う。成果物やレビュー出力がある場合は `--evidence-output` で `.mission-state/archive/iter-N-<mission8>-specialist-<skill>.md` に永続化する。
+**Specialist 呼び出しログ (Issue #31/#42)**: `specialists_selected` は選定意図であり、実呼び出し証跡ではない。specialist を選定・呼び出し・inline 適用・skip・unavailable・failed にした場合は、orchestrator が `mission-state.py specialists log-invocation` を呼び、`specialist_invocations` に append する。Codex で `Skill(...)` が使えず visible skill instructions を同一コンテキストで適用した場合は、`--mode codex-inline --status inline-applied` として正直に記録する。Claude Code 等で Skill tool を実呼び出しした場合は `--mode skill-tool --status skill-tool-applied` を使う。成果物やレビュー出力がある場合は `--evidence-output` で `.mission-state/archive/iter-N-<mission8>-specialist-<skill>.md` に永続化する。`Critical` mission では available candidate を放置せず、各 candidate を used / skipped / unavailable / failed のいずれかで説明する。`Complex` mission でも security/testing/infra など高リスク secondary profile の candidate は `--status skipped --reason "<判断理由>"` 等で明示する。
 
 **Reviewer N 名は必ず単一メッセージ内の複数 Skill 呼び出しで起動する (P4)**。別メッセージ分割でも非同期並列になることは実測済みだが、挙動保証がない (実測データ: refs/gotchas.md §1)。
 

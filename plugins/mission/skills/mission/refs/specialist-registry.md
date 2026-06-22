@@ -161,6 +161,9 @@ The registry must therefore be interpreted as intent:
 - If a named skill is visible only as instructions, adopt its checklist manually and record that it was applied inline.
 - If neither is available, continue with the core loop and record the missing evidence source.
 - Parallel specialist review is an optimization for Claude Code, not a correctness requirement for Codex.
+- If a candidate is available but intentionally not used, record `status=skipped` with a concrete reason instead of leaving the candidate unaccounted for.
+
+For `Critical` missions, every available candidate from the Phase 1 recommendation must be accounted for as used, skipped, unavailable, or failed. For `Complex` missions, apply the same rule to security, testing, and infra candidates because those profiles can materially change the risk of the final outcome. `Standard` missions should record skips when the decision is non-obvious; `Simple` missions may rely on the core loop unless a project policy says otherwise.
 
 ## Audit and State Fields
 
@@ -216,6 +219,16 @@ The orchestrator preserves enough traceability to explain specialist selection w
       "status": "inline-applied",
       "timestamp": "2026-06-19T08:00:00Z",
       "evidence_path": ".mission-state/archive/iter-1-deadbeef-specialist-dev-doc-writer.md"
+    },
+    {
+      "iteration": 1,
+      "phase": "planning",
+      "role": "security-reviewer",
+      "skill": "dev-security-reviewer",
+      "mode": "fallback-core",
+      "status": "skipped",
+      "reason": "Core reviewer covered the security checklist for this docs-only change",
+      "timestamp": "2026-06-19T08:03:00Z"
     }
   ]
 }

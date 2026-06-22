@@ -125,6 +125,7 @@ SPECIALIST_INVOCATION_STATUSES = {
     "started",
     "completed",
     "inline-applied",
+    "skill-tool-applied",
     "skipped",
     "unavailable",
     "failed",
@@ -135,6 +136,12 @@ SPECIALIST_INVOCATION_MODES = {
     "codex-inline",
     "natural-language",
     "fallback-core",
+}
+
+SPECIALIST_INVOCATION_REASON_REQUIRED_STATUSES = {
+    "skipped",
+    "unavailable",
+    "failed",
 }
 
 
@@ -860,6 +867,14 @@ def cmd_log_specialist_invocation(args):
     if args.iteration < 0:
         print("ERROR: --iteration は 0 以上で指定してください", file=sys.stderr)
         sys.exit(2)
+    reason = (getattr(args, "reason", None) or "").strip()
+    notes = (getattr(args, "notes", None) or "").strip()
+    if args.status in SPECIALIST_INVOCATION_REASON_REQUIRED_STATUSES and not (reason or notes):
+        print(
+            f"ERROR: status={args.status} は --reason か --notes で判断理由を記録してください",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
@@ -877,8 +892,12 @@ def cmd_log_specialist_invocation(args):
             entry["started_at"] = args.started_at
         if args.completed_at:
             entry["completed_at"] = args.completed_at
-        if args.notes:
-            entry["notes"] = args.notes
+        if notes:
+            entry["notes"] = notes
+        if reason:
+            entry["reason"] = reason
+        elif args.status in SPECIALIST_INVOCATION_REASON_REQUIRED_STATUSES and notes:
+            entry["reason"] = notes
 
         data = stamp_metadata(data, cwd)
         archived_to = None
@@ -1873,15 +1892,17 @@ def _pct_detail(rate) -> str:
 
 def _format_text(stats: dict, since: str | None, until: str | None) -> str:
     period = f"{since or '(all)'} ~ {until or '(now)'}"
+    roots = ", ".join(stats.get("roots") or ["(none)"])
     n = stats["total_sessions"]
     if n == 0:
-        return f"=== /mission stats ({period}) ===\ntotal_sessions: 0\n(no sessions in this period)"
+        return f"=== /mission stats ({period}) ===\nroots: {roots}\ntotal_sessions: 0\n(no sessions in this period)"
     pr = stats["pass_rate"]
     fc = stats["avg_final_composite"]
     sd = stats["avg_session_duration_sec"]
     md = stats.get("median_session_duration_sec")
     lines = [
         f"=== /mission stats ({period}) ===",
+        f"roots:                    {roots}",
         f"total_sessions:           {n}",
         f"duplicate_state_groups:   {stats.get('duplicate_state_group_count', 0)}",
         f"  PASS:                   {stats['pass_count']} ({pr*100:.1f}%)" if pr is not None else f"  PASS: {stats['pass_count']}",
@@ -1927,9 +1948,10 @@ def cmd_stats(args):
     """全プロジェクトの /mission セッションを横断集計 (read-only)。
 
     --root 省略時は _default_search_roots() (MISSION_SEARCH_ROOTS、未設定なら cwd) のみをスキャンする。
+    --root は複数回指定でき、scripts/mission-audit.py と同じく各 root を集約する。
     Path.home() 全体の rglob (86 秒) を避ける設計 (list/cleanup と統一)。
     """
-    roots = [Path(args.root)] if args.root else _default_search_roots()
+    roots = [Path(root) for root in args.root] if args.root else _default_search_roots()
     since = _parse_date_to_iso_prefix(args.since)
     until = _parse_date_to_iso_prefix(args.until)
     all_states = []
@@ -1939,6 +1961,7 @@ def cmd_stats(args):
     filtered = [s for s in all_states if _matches_period(s, since, until)]
     deduped, duplicate_state_group_count = _dedupe_states(filtered)
     stats = _aggregate(deduped, duplicate_state_group_count)
+    stats["roots"] = [str(root) for root in roots]
     if args.json:
         print(json.dumps(stats, indent=2, ensure_ascii=False))
     else:
@@ -2020,7 +2043,7 @@ def _build_parser():
     p_halt2.set_defaults(func=cmd_halt)
 
     p_stats = sub.add_parser("stats", help="全プロジェクトの /mission セッションを横断集計 (read-only)")
-    p_stats.add_argument("--root", default=None, help="スキャン対象ルート (デフォルト: MISSION_SEARCH_ROOTS、未設定なら cwd)")
+    p_stats.add_argument("--root", action="append", default=None, help="スキャン対象ルート。複数回指定可 (デフォルト: MISSION_SEARCH_ROOTS、未設定なら cwd)")
     p_stats.add_argument("--since", default=None, help="期間下限 (YYYY-MM-DD, updated_at で比較)")
     p_stats.add_argument("--until", default=None, help="期間上限 (YYYY-MM-DD, updated_at で比較)")
     p_stats.add_argument("--json", action="store_true", help="JSON 形式で出力")
@@ -2051,6 +2074,7 @@ def _build_parser():
     p_log.add_argument("--status", required=True, choices=sorted(SPECIALIST_INVOCATION_STATUSES))
     p_log.add_argument("--started-at", default=None, dest="started_at")
     p_log.add_argument("--completed-at", default=None, dest="completed_at")
+    p_log.add_argument("--reason", default=None, help="skip/unavailable/failed 等の判断理由")
     p_log.add_argument("--notes", default=None)
     p_log.add_argument("--evidence-output", default=None,
                        help="specialist 出力 Markdown。指定時 archive/iter-N-<mission8>-specialist-<skill>.md に保存")
