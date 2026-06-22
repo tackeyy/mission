@@ -133,6 +133,7 @@ SPECIALIST_INVOCATION_STATUSES = {
 
 SPECIALIST_INVOCATION_MODES = {
     "skill-tool",
+    "command-provider",
     "codex-inline",
     "natural-language",
     "fallback-core",
@@ -537,13 +538,16 @@ def _load_specialist_registry(path: str | None) -> list[dict]:
     specialists: list[dict] = []
     in_specialists = False
     cur: dict | None = None
+    nested_key: str | None = None
     for raw in txt.splitlines():
         line = raw.split("#", 1)[0].rstrip()
         if not line.strip():
             continue
         stripped = line.strip()
+        indent = len(raw) - len(raw.lstrip(" "))
         if not raw.startswith(" ") and stripped.endswith(":"):
             in_specialists = stripped == "specialists:"
+            nested_key = None
             continue
         if not in_specialists:
             continue
@@ -551,17 +555,81 @@ def _load_specialist_registry(path: str | None) -> list[dict]:
             if cur:
                 specialists.append(cur)
             cur = {}
+            nested_key = None
             rest = stripped[2:].strip()
             if rest and ":" in rest:
                 k, v = rest.split(":", 1)
-                cur[k.strip()] = _coerce_yaml_value(v)
+                key = k.strip()
+                if v.strip():
+                    cur[key] = _coerce_yaml_value(v)
+                else:
+                    cur[key] = {}
+                    nested_key = key
             continue
         if cur is not None and ":" in stripped:
             k, v = stripped.split(":", 1)
-            cur[k.strip()] = _coerce_yaml_value(v)
+            key = k.strip()
+            if nested_key and indent >= 6:
+                nested = cur.setdefault(nested_key, {})
+                if isinstance(nested, dict):
+                    nested[key] = _coerce_yaml_value(v)
+                continue
+            if v.strip():
+                cur[key] = _coerce_yaml_value(v)
+                nested_key = None
+            else:
+                cur[key] = {}
+                nested_key = key
     if cur:
         specialists.append(cur)
     return specialists
+
+
+def _registry_arg_paths(value) -> list[Path]:
+    if not value:
+        return []
+    values = value if isinstance(value, list) else [value]
+    paths: list[Path] = []
+    for item in values:
+        paths.extend(Path(p).expanduser() for p in _split_csv(item))
+    return paths
+
+
+def _load_registry_candidates(path: Path, source: str) -> list[dict]:
+    candidates = []
+    for item in _load_specialist_registry(str(path)):
+        if not isinstance(item, dict):
+            continue
+        candidate = dict(item)
+        candidate.setdefault("source", source)
+        candidates.append(candidate)
+    return candidates
+
+
+def _discover_specialist_registry_candidates(args) -> list[dict]:
+    """Discover registry candidates in deterministic precedence order.
+
+    Explicit CLI registries have the highest precedence, then project, user, and
+    skill/plugin manifests. Built-in presets are appended later by the ranker so
+    registry-level `enabled: false` entries can suppress lower-precedence defaults.
+    """
+    candidates: list[dict] = []
+    for path in _registry_arg_paths(getattr(args, "registry", None)):
+        candidates.extend(_load_registry_candidates(path, f"registry:{path}"))
+
+    project_registry = Path.cwd() / ".mission" / "specialists.yml"
+    candidates.extend(_load_registry_candidates(project_registry, "project:.mission/specialists.yml"))
+
+    if not getattr(args, "no_default_skill_roots", False):
+        user_registry = Path.home() / ".config" / "mission" / "specialists.yml"
+        candidates.extend(_load_registry_candidates(user_registry, "user:~/.config/mission/specialists.yml"))
+
+    for root in _skill_roots(args):
+        if not root.is_dir():
+            continue
+        for manifest in sorted(root.glob("*/mission-specialist.yml")):
+            candidates.extend(_load_registry_candidates(manifest, f"skill-manifest:{manifest}"))
+    return candidates
 
 
 def _skill_roots(args) -> list[Path]:
@@ -654,44 +722,147 @@ def _candidate_profiles(candidate: dict) -> list[str]:
     return list(profiles)
 
 
+def _provider_id(candidate: dict) -> str:
+    return str(
+        candidate.get("skill")
+        or candidate.get("role")
+        or candidate.get("name")
+        or candidate.get("command")
+        or ""
+    )
+
+
+def _disable_keys(candidate: dict) -> set[str]:
+    return {str(v) for v in (
+        candidate.get("role"),
+        candidate.get("skill"),
+        candidate.get("name"),
+        candidate.get("command"),
+    ) if v}
+
+
+def _enabled_registry_candidates(registry_candidates: list[dict]) -> list[dict]:
+    disabled: set[str] = set()
+    enabled: list[dict] = []
+    for raw in [*registry_candidates, *BUILTIN_SPECIALIST_CANDIDATES]:
+        if not isinstance(raw, dict):
+            continue
+        keys = _disable_keys(raw)
+        if raw.get("enabled") is False:
+            disabled.update(keys)
+            continue
+        if keys & disabled:
+            continue
+        enabled.append(raw)
+    return enabled
+
+
+def _as_list(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(v) for v in value]
+    return [str(value)]
+
+
+def _complexity_at_least(current: str | None, minimum: str | None) -> bool:
+    if not minimum:
+        return True
+    order = {"Simple": 1, "Standard": 2, "Complex": 3, "Critical": 4}
+    if not current:
+        return False
+    return order.get(str(current), 0) >= order.get(str(minimum), 0)
+
+
+def _command_is_available(command: str | None) -> bool:
+    if not command:
+        return False
+    if os.sep in command:
+        path = Path(command).expanduser()
+        return path.is_file() and os.access(path, os.X_OK)
+    return shutil.which(command) is not None
+
+
 def _normalize_candidate(candidate: dict, source: str) -> dict:
+    kind = candidate.get("kind") or "skill"
+    command = candidate.get("command")
     skill = candidate.get("skill") or candidate.get("name") or candidate.get("role")
     role = candidate.get("role") or skill
     phases = candidate.get("phases") or ["planning", "review"]
     if isinstance(phases, str):
         phases = [phases]
+    args = _as_list(candidate.get("args"))
+    auto_use = candidate.get("auto_use") if isinstance(candidate.get("auto_use"), dict) else {}
+    risk = candidate.get("risk") if isinstance(candidate.get("risk"), dict) else {}
+    if kind == "command" and not skill:
+        skill = role or command
     return {
         "role": role,
         "skill": skill,
+        "kind": kind,
+        "command": command,
+        "args": args,
         "task_profiles": _candidate_profiles(candidate),
         "phases": phases,
         "required": bool(candidate.get("required", False)),
+        "max_calls_per_iteration": candidate.get("max_calls_per_iteration"),
         "source": candidate.get("source") or source,
         "unavailable": candidate.get("unavailable", "continue"),
         "confirm": bool(candidate.get("confirm", False)),
+        "auto_use": auto_use,
+        "risk": risk,
     }
 
 
+def _default_consent_file() -> Path:
+    return Path.home() / ".config" / "mission" / "provider-consent.json"
+
+
+def _load_provider_consent(path_text: str | None) -> set[str]:
+    path = Path(path_text).expanduser() if path_text else _default_consent_file()
+    if not path.exists():
+        return set()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    providers = data.get("providers", {})
+    if isinstance(providers, dict):
+        return {str(k) for k in providers}
+    if isinstance(providers, list):
+        return {str(v) for v in providers}
+    return set()
+
+
 def rank_specialist_candidates(task_profile: dict, registry_candidates: list[dict],
-                               installed: dict[str, dict], first_use: set[str] | None = None) -> list[dict]:
+                               installed: dict[str, dict], first_use: set[str] | None = None,
+                               complexity: str | None = None, consented: set[str] | None = None) -> list[dict]:
     first_use = first_use or set()
+    consented = consented or set()
     profiles = [task_profile.get("primary"), *(task_profile.get("secondary") or [])]
     ranked = []
-    for raw in [*registry_candidates, *BUILTIN_SPECIALIST_CANDIDATES]:
+    for raw in _enabled_registry_candidates(registry_candidates):
         c = _normalize_candidate(raw, raw.get("source", "registry") if isinstance(raw, dict) else "registry")
         skill = c.get("skill")
         if not skill:
             continue
+        if not _complexity_at_least(complexity, c.get("auto_use", {}).get("min_complexity")):
+            continue
         overlap = [p for p in c.get("task_profiles", []) if p in profiles]
         if not overlap:
             continue
-        installed_info = installed.get(skill)
+        if c.get("kind") == "command":
+            installed_info = {"available": True} if _command_is_available(c.get("command")) else None
+        else:
+            installed_info = installed.get(skill)
         base = 0.45 + (0.25 if task_profile.get("primary") in overlap else 0.1)
         base += min(0.2, 0.05 * len(overlap))
         if installed_info:
             base += 0.1
         if c.get("required"):
             base += 0.05
+        provider_id = _provider_id(c)
+        needs_first_use = bool(c.get("risk", {}).get("first_use_confirmation")) and provider_id not in consented
         score = min(0.99, round(base * float(task_profile.get("confidence", 0.5)), 3))
         ranked.append({
             **c,
@@ -699,7 +870,7 @@ def rank_specialist_candidates(task_profile: dict, registry_candidates: list[dic
             "installed": bool(installed_info),
             "available": bool(installed_info),
             "status": "available" if installed_info else "missing",
-            "first_use": skill in first_use,
+            "first_use": skill in first_use or provider_id in first_use or needs_first_use,
             "reason": f"{', '.join(overlap)} profile match",
         })
     ranked.sort(key=lambda c: (-c["score"], c["skill"]))
@@ -737,6 +908,13 @@ def decide_specialists(task_profile: dict, candidates: list[dict]) -> dict:
             "action": "ask-user",
             "reason": f"specialist requires first-use confirmation: {top['skill']}",
             "prompted_user": True,
+        }
+    if not top.get("installed") and top.get("kind") == "command":
+        return {
+            "policy": "provider-unavailable",
+            "action": "continue-core",
+            "reason": f"top command provider is unavailable: {top['skill']}",
+            "prompted_user": False,
         }
     if not top.get("installed"):
         return {
@@ -778,13 +956,15 @@ def cmd_specialists(args):
     task = getattr(args, "task", "") or ""
     files = _split_csv(getattr(args, "files", None))
     installed = _discover_installed_skills(args)
-    registry_candidates = _load_specialist_registry(getattr(args, "registry", None))
+    registry_candidates = _discover_specialist_registry_candidates(args)
     task_profile = classify_task_profile(task, files)
     candidates = rank_specialist_candidates(
         task_profile,
         registry_candidates,
         installed,
         set(_split_csv(getattr(args, "first_use", None))),
+        getattr(args, "complexity", None),
+        _load_provider_consent(getattr(args, "consent_file", None)),
     )
     decision = decide_specialists(task_profile, candidates)
     selected, unavailable = _selection_from_decision(candidates, decision)
@@ -825,6 +1005,26 @@ def cmd_specialists(args):
             print(f"{idx}. {c['skill']} score={c['score']} installed={c['installed']} source={c['source']}")
 
 
+def cmd_specialists_consent(args):
+    provider = args.provider.strip()
+    if not provider:
+        print("ERROR: --provider is required", file=sys.stderr)
+        sys.exit(2)
+    path = Path(args.consent_file).expanduser() if args.consent_file else _default_consent_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            data = {}
+    providers = data.setdefault("providers", {})
+    providers[provider] = {"granted_at": iso_now()}
+    atomic_write_json(path, data)
+    result = {"ok": True, "provider": provider, "consent_file": str(path)}
+    print(json.dumps(result, indent=2 if getattr(args, "json", False) else None, ensure_ascii=False))
+
+
 def _archive_specialist_evidence(cwd: Path, evidence_output: str, iteration: int,
                                  data: dict, entry: dict) -> str | None:
     """Specialist evidence を archive/iter-N-<mission8>-specialist-<skill>.md に保存する."""
@@ -832,6 +1032,10 @@ def _archive_specialist_evidence(cwd: Path, evidence_output: str, iteration: int
     if not (src.exists() and src.is_file()):
         print(f"WARNING: --evidence-output のファイルが見つかりません: {src}", file=sys.stderr)
         return None
+    return _archive_specialist_text(cwd, src.read_text(encoding="utf-8"), iteration, data, entry)
+
+
+def _archive_specialist_text(cwd: Path, text: str, iteration: int, data: dict, entry: dict) -> str:
     archive_dir = state_dir(cwd) / "archive"
     archive_dir.mkdir(parents=True, exist_ok=True)
     gid = (data.get("mission_id") or "unknown")[:8]
@@ -844,8 +1048,146 @@ def _archive_specialist_evidence(cwd: Path, evidence_output: str, iteration: int
         f"skill={entry.get('skill')} mode={entry.get('mode')} status={entry.get('status')} "
         f"timestamp={entry['timestamp']} -->\n"
     )
-    dst.write_text(meta + src.read_text(encoding="utf-8"), encoding="utf-8")
+    dst.write_text(meta + text, encoding="utf-8")
     return str(dst)
+
+
+def _find_provider(data: dict, provider_id: str) -> dict | None:
+    for provider in [*(data.get("specialists_selected") or []), *(data.get("specialists_candidates") or [])]:
+        if provider_id in {
+            str(provider.get("role") or ""),
+            str(provider.get("skill") or ""),
+            str(provider.get("command") or ""),
+        }:
+            return provider
+    return None
+
+
+def _redact_provider_output(text: str) -> str:
+    patterns = [
+        re.compile(r"(?i)\b(api[_-]?key|token|secret|password)\s*[:=]\s*([^\s]+)"),
+        re.compile(r"(?i)\b(bearer)\s+([A-Za-z0-9._~+/=-]+)"),
+    ]
+    redacted = text
+    for pattern in patterns:
+        redacted = pattern.sub(lambda m: f"{m.group(1)}=[REDACTED]", redacted)
+    return redacted
+
+
+def _command_provider_packet(data: dict, provider: dict, args) -> str:
+    body = ""
+    if getattr(args, "input_file", None):
+        body = Path(args.input_file).read_text(encoding="utf-8")
+    elif not sys.stdin.isatty():
+        body = sys.stdin.read()
+    packet = {
+        "mission": data.get("mission"),
+        "mission_id": data.get("mission_id"),
+        "iteration": args.iteration,
+        "phase": args.phase,
+        "provider": {
+            "role": provider.get("role"),
+            "skill": provider.get("skill"),
+            "kind": provider.get("kind"),
+            "source": provider.get("source"),
+        },
+        "input": body,
+    }
+    return json.dumps(packet, indent=2, ensure_ascii=False)
+
+
+def cmd_invoke_command_provider(args):
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
+        sys.exit(1)
+    data = json.loads(sf.read_text())
+    provider = _find_provider(data, args.provider)
+    if not provider:
+        print(f"ERROR: provider not found in mission state: {args.provider}", file=sys.stderr)
+        sys.exit(2)
+    if provider.get("kind") != "command":
+        print(f"ERROR: provider is not kind=command: {args.provider}", file=sys.stderr)
+        sys.exit(2)
+
+    now = iso_now()
+    entry = {
+        "iteration": args.iteration,
+        "phase": args.phase,
+        "role": provider.get("role"),
+        "skill": provider.get("skill") or provider.get("role"),
+        "mode": "command-provider",
+        "status": "started",
+        "timestamp": now,
+        "started_at": now,
+        "provider_kind": "command",
+        "command": provider.get("command"),
+    }
+    command = provider.get("command")
+    if not _command_is_available(command):
+        entry.update({
+            "status": "unavailable",
+            "completed_at": iso_now(),
+            "reason": f"command provider is not available: {command}",
+        })
+        with StateLock(lock_file(cwd)):
+            data = json.loads(sf.read_text())
+            data.setdefault("specialist_invocations", []).append(entry)
+            data["updated_at"] = entry["completed_at"]
+            backup_state(sf)
+            atomic_write_json(sf, stamp_metadata(data, cwd))
+        print(json.dumps({"ok": False, "entry": entry}, indent=2 if args.json else None, ensure_ascii=False))
+        return
+
+    argv = [command, *[str(a) for a in provider.get("args") or []]]
+    packet = _command_provider_packet(data, provider, args)
+    try:
+        completed = subprocess.run(
+            argv,
+            input=packet,
+            capture_output=True,
+            text=True,
+            timeout=args.timeout,
+            check=False,
+        )
+        exit_code = completed.returncode
+        stdout = _redact_provider_output(completed.stdout or "")
+        stderr = _redact_provider_output(completed.stderr or "")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        exit_code = None
+        stdout = ""
+        stderr = _redact_provider_output(str(exc))
+
+    status = "completed" if exit_code == 0 else "failed"
+    completed_at = iso_now()
+    entry.update({
+        "status": status,
+        "completed_at": completed_at,
+        "exit_code": exit_code,
+    })
+    if status == "failed":
+        entry["reason"] = f"command provider exited with status {exit_code}"
+    evidence = (
+        "# Command Provider Evidence\n\n"
+        f"- provider: {entry['skill']}\n"
+        f"- role: {entry['role']}\n"
+        f"- command: {_redact_provider_output(json.dumps(argv, ensure_ascii=False))}\n"
+        f"- exit_code: {exit_code}\n\n"
+        "## Stdout\n\n"
+        f"```text\n{stdout}\n```\n\n"
+        "## Stderr\n\n"
+        f"```text\n{stderr}\n```\n"
+    )
+    with StateLock(lock_file(cwd)):
+        data = json.loads(sf.read_text())
+        archived_to = _archive_specialist_text(cwd, evidence, args.iteration, data, entry)
+        entry["evidence_path"] = _state_relative_path(cwd, archived_to)
+        data.setdefault("specialist_invocations", []).append(entry)
+        data["updated_at"] = completed_at
+        backup_state(sf)
+        atomic_write_json(sf, stamp_metadata(data, cwd))
+    print(json.dumps({"ok": status == "completed", "entry": entry}, indent=2 if args.json else None, ensure_ascii=False))
 
 
 def _state_relative_path(cwd: Path, path_text: str) -> str:
@@ -2054,15 +2396,27 @@ def _build_parser():
     p_rec = spec_sub.add_parser("recommend", help="task_profile から specialist 候補を dry-run 推薦")
     p_rec.add_argument("--task", required=True, help="分類対象のミッション文またはタスク説明")
     p_rec.add_argument("--files", default=None, help="関連ファイルのカンマ区切り project-root 相対パス")
-    p_rec.add_argument("--registry", default=None, help="project/user specialist registry (JSON または限定 YAML)")
+    p_rec.add_argument("--registry", action="append", default=None,
+                       help="project/user specialist registry (JSON または限定 YAML)。複数指定可")
     p_rec.add_argument("--skills-dir", default=None, help="追加 skill root のカンマ区切り")
     p_rec.add_argument("--no-default-skill-roots", action="store_true",
-                       help="~/.codex/skills と ~/.claude/skills を discovery しない (テスト/隔離用)")
+                       help="~/.codex/skills、~/.claude/skills、user registry を discovery しない (テスト/隔離用)")
     p_rec.add_argument("--installed-skills", default=None, help="テスト/手動指定用の installed skill 名カンマ区切り")
     p_rec.add_argument("--first-use", default=None, help="初回確認扱いにする skill 名カンマ区切り")
+    p_rec.add_argument("--consent-file", default=None,
+                       help="first-use provider consent allowlist JSON (default: ~/.config/mission/provider-consent.json)")
+    p_rec.add_argument("--complexity", default=None, choices=["Simple", "Standard", "Complex", "Critical"],
+                       help="auto_use.min_complexity 判定用の mission complexity")
     p_rec.add_argument("--record-state", action="store_true", help="現在の mission state に推薦結果を記録")
     p_rec.add_argument("--json", action="store_true", help="JSON 形式で出力")
     p_rec.set_defaults(func=cmd_specialists)
+
+    p_consent = spec_sub.add_parser("consent", help="command/skill provider の first-use consent を記録")
+    p_consent.add_argument("--provider", required=True)
+    p_consent.add_argument("--consent-file", default=None,
+                           help="consent allowlist JSON (default: ~/.config/mission/provider-consent.json)")
+    p_consent.add_argument("--json", action="store_true", help="JSON 形式で出力")
+    p_consent.set_defaults(func=cmd_specialists_consent)
 
     p_log = spec_sub.add_parser("log-invocation", help="specialist skill の実呼び出し/inline/skip 証跡を記録")
     p_log.add_argument("--iteration", type=int, required=True)
@@ -2080,6 +2434,16 @@ def _build_parser():
                        help="specialist 出力 Markdown。指定時 archive/iter-N-<mission8>-specialist-<skill>.md に保存")
     p_log.add_argument("--json", action="store_true", help="JSON 形式で出力")
     p_log.set_defaults(func=cmd_log_specialist_invocation)
+
+    p_cmd = spec_sub.add_parser("invoke-command", help="kind=command provider を argv/stdin/stdout で実行して証跡を記録")
+    p_cmd.add_argument("--provider", required=True, help="state 内の role / skill / command")
+    p_cmd.add_argument("--iteration", type=int, required=True)
+    p_cmd.add_argument("--phase", required=True,
+                       choices=["planning", "execution", "review", "scoring", "critic"])
+    p_cmd.add_argument("--input-file", default=None, help="provider stdin packet に含める入力ファイル")
+    p_cmd.add_argument("--timeout", type=int, default=120)
+    p_cmd.add_argument("--json", action="store_true", help="JSON 形式で出力")
+    p_cmd.set_defaults(func=cmd_invoke_command_provider)
 
     return parser
 

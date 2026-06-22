@@ -1,5 +1,6 @@
 """Issue #31: specialist skill invocation logging."""
 import json
+import sys
 
 
 def _json_result(result):
@@ -195,3 +196,110 @@ def test_log_invocation_rejects_unknown_status(state_dir, run_cli):
     )
 
     assert r.returncode != 0
+
+
+def test_invoke_command_provider_archives_evidence_and_logs_invocation(run_cli, tmp_path):
+    run_cli("init", "command provider mission", "--complexity", "Complex", cwd=tmp_path, check=True)
+    helper = tmp_path / "provider.py"
+    helper.write_text(
+        "import json, sys\n"
+        "packet = json.loads(sys.stdin.read())\n"
+        "print('phase=' + packet['phase'])\n"
+        "print('body=' + packet['input'])\n",
+        encoding="utf-8",
+    )
+    registry = tmp_path / ".mission" / "specialists.yml"
+    registry.parent.mkdir()
+    registry.write_text(json.dumps({
+        "version": 1,
+        "specialists": [{
+            "role": "fake-reviewer",
+            "kind": "command",
+            "command": sys.executable,
+            "args": [str(helper)],
+            "task_profiles": ["documentation"],
+            "phases": ["review"],
+        }],
+    }))
+    context = tmp_path / "context.txt"
+    context.write_text("review this diff", encoding="utf-8")
+
+    run_cli(
+        "specialists", "recommend",
+        "--task", "Review README documentation",
+        "--complexity", "Complex",
+        "--record-state",
+        "--json",
+        cwd=tmp_path,
+        check=True,
+    )
+    r = run_cli(
+        "specialists", "invoke-command",
+        "--provider", "fake-reviewer",
+        "--iteration", "1",
+        "--phase", "review",
+        "--input-file", str(context),
+        "--json",
+        cwd=tmp_path,
+    )
+
+    data = _json_result(r)
+    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
+    entry = state["specialist_invocations"][0]
+    evidence = tmp_path / entry["evidence_path"]
+    assert data["ok"] is True
+    assert entry["mode"] == "command-provider"
+    assert entry["status"] == "completed"
+    assert entry["provider_kind"] == "command"
+    assert entry["exit_code"] == 0
+    assert evidence.exists()
+    content = evidence.read_text(encoding="utf-8")
+    assert "phase=review" in content
+    assert "body=review this diff" in content
+
+
+def test_invoke_command_provider_records_failure_without_blocking_optional_provider(run_cli, tmp_path):
+    run_cli("init", "command provider failure mission", "--complexity", "Complex", cwd=tmp_path, check=True)
+    helper = tmp_path / "provider.py"
+    helper.write_text("import sys; print('bad token=abc123'); sys.exit(7)\n", encoding="utf-8")
+    registry = tmp_path / ".mission" / "specialists.yml"
+    registry.parent.mkdir()
+    registry.write_text(json.dumps({
+        "version": 1,
+        "specialists": [{
+            "role": "failing-reviewer",
+            "kind": "command",
+            "command": sys.executable,
+            "args": [str(helper)],
+            "task_profiles": ["documentation"],
+        }],
+    }))
+    run_cli(
+        "specialists", "recommend",
+        "--task", "Review README documentation",
+        "--complexity", "Complex",
+        "--record-state",
+        "--json",
+        cwd=tmp_path,
+        check=True,
+    )
+
+    r = run_cli(
+        "specialists", "invoke-command",
+        "--provider", "failing-reviewer",
+        "--iteration", "1",
+        "--phase", "review",
+        "--json",
+        cwd=tmp_path,
+    )
+
+    data = _json_result(r)
+    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
+    entry = state["specialist_invocations"][0]
+    evidence = tmp_path / entry["evidence_path"]
+    assert r.returncode == 0
+    assert data["ok"] is False
+    assert entry["status"] == "failed"
+    assert entry["exit_code"] == 7
+    assert "status 7" in entry["reason"]
+    assert "token=[REDACTED]" in evidence.read_text(encoding="utf-8")

@@ -1,5 +1,6 @@
 """Issue #29: specialist auto-selection policy and interactive fallback."""
 import json
+import sys
 
 
 def _json_result(result):
@@ -172,3 +173,191 @@ def test_recommend_record_state_persists_selection_metadata(run_cli, tmp_path):
     assert state["specialists_unavailable"] == data["specialists_unavailable"]
     assert state["specialists_decision"] == data["specialists_decision"]
     assert state["specialists_mode"] == "auto"
+
+
+def test_recommend_discovers_project_registry_without_explicit_registry(run_cli, tmp_path):
+    project_registry = tmp_path / ".mission" / "specialists.yml"
+    project_registry.parent.mkdir()
+    project_registry.write_text(json.dumps({
+        "version": 1,
+        "specialists": [{
+            "role": "project-doc-reviewer",
+            "skill": "project-doc-skill",
+            "task_profiles": ["documentation"],
+            "phases": ["planning", "review"],
+            "required": False,
+        }],
+    }))
+
+    r = run_cli(
+        *_recommend_args(
+        "--task",
+        "Update README documentation",
+        "--installed-skills",
+        "project-doc-skill",
+        "--json",
+        ),
+        cwd=tmp_path,
+    )
+
+    data = _json_result(r)
+    assert data["specialists_decision"]["policy"] == "auto"
+    assert data["specialists_selected"][0]["skill"] == "project-doc-skill"
+    assert data["specialists_selected"][0]["source"] == "project:.mission/specialists.yml"
+
+
+def test_project_registry_can_disable_user_default_provider(run_cli, tmp_path):
+    user_registry = tmp_path / ".config" / "mission" / "specialists.yml"
+    user_registry.parent.mkdir(parents=True)
+    user_registry.write_text(json.dumps({
+        "version": 1,
+        "specialists": [{
+            "role": "user-doc-reviewer",
+            "skill": "user-doc-skill",
+            "task_profiles": ["documentation"],
+        }],
+    }))
+    project_registry = tmp_path / ".mission" / "specialists.yml"
+    project_registry.parent.mkdir()
+    project_registry.write_text(json.dumps({
+        "version": 1,
+        "specialists": [{
+            "role": "user-doc-reviewer",
+            "skill": "user-doc-skill",
+            "enabled": False,
+        }],
+    }))
+
+    r = run_cli(
+        "specialists", "recommend",
+        "--task", "Update README documentation",
+        "--installed-skills", "user-doc-skill",
+        "--json",
+        cwd=tmp_path,
+        env_extra={"HOME": str(tmp_path), "MISSION_SESSION_ID": "test"},
+    )
+
+    data = _json_result(r)
+    assert all(c["skill"] != "user-doc-skill" for c in data["specialists_candidates"])
+
+
+def test_recommend_supports_command_provider_yaml_schema(run_cli, tmp_path):
+    helper = tmp_path / "reviewer.py"
+    helper.write_text("import sys; print('reviewed', len(sys.stdin.read()))\n", encoding="utf-8")
+    project_registry = tmp_path / ".mission" / "specialists.yml"
+    project_registry.parent.mkdir()
+    project_registry.write_text("\n".join([
+        "version: 1",
+        "specialists:",
+        "  - role: oracle-reviewer",
+        "    kind: command",
+        f"    command: {sys.executable}",
+        f"    args: [{helper}]",
+        "    task_profiles: [documentation, architecture]",
+        "    phases: [planning, review, critic]",
+        "    required: false",
+        "    max_calls_per_iteration: 1",
+        "    auto_use:",
+        "      min_complexity: Complex",
+        "    risk:",
+        "      first_use_confirmation: false",
+    ]))
+
+    r = run_cli(
+        *_recommend_args(
+        "--task",
+        "Review architecture documentation",
+        "--complexity",
+        "Complex",
+        "--json",
+        ),
+        cwd=tmp_path,
+    )
+
+    data = _json_result(r)
+    selected = data["specialists_selected"][0]
+    assert selected["kind"] == "command"
+    assert selected["skill"] == "oracle-reviewer"
+    assert selected["command"] == sys.executable
+    assert selected["args"] == [str(helper)]
+    assert selected["max_calls_per_iteration"] == "1"
+
+
+def test_risk_first_use_consent_allowlist_enables_auto_selection(run_cli, tmp_path):
+    registry = tmp_path / ".mission" / "specialists.yml"
+    registry.parent.mkdir()
+    registry.write_text(json.dumps({
+        "version": 1,
+        "specialists": [{
+            "role": "paid-reviewer",
+            "kind": "command",
+            "command": sys.executable,
+            "args": ["-c", "print('ok')"],
+            "task_profiles": ["documentation"],
+            "risk": {"first_use_confirmation": True, "may_consume_paid_quota": True},
+        }],
+    }))
+    consent_file = tmp_path / "provider-consent.json"
+
+    first = run_cli(
+        *_recommend_args(
+        "--task", "Update README documentation",
+        "--complexity", "Complex",
+        "--consent-file", str(consent_file),
+        "--json",
+        ),
+        cwd=tmp_path,
+    )
+    first_data = _json_result(first)
+    assert first_data["specialists_decision"]["policy"] == "first-use"
+
+    run_cli(
+        "specialists", "consent",
+        "--provider", "paid-reviewer",
+        "--consent-file", str(consent_file),
+        cwd=tmp_path,
+        check=True,
+    )
+    second = run_cli(
+        *_recommend_args(
+        "--task", "Update README documentation",
+        "--complexity", "Complex",
+        "--consent-file", str(consent_file),
+        "--json",
+        ),
+        cwd=tmp_path,
+    )
+    second_data = _json_result(second)
+    assert second_data["specialists_decision"]["policy"] == "auto"
+    assert second_data["specialists_selected"][0]["skill"] == "paid-reviewer"
+
+
+def test_missing_command_provider_degrades_to_core_reviewers(run_cli, tmp_path):
+    registry = tmp_path / ".mission" / "specialists.yml"
+    registry.parent.mkdir()
+    registry.write_text(json.dumps({
+        "version": 1,
+        "specialists": [{
+            "role": "missing-reviewer",
+            "kind": "command",
+            "command": str(tmp_path / "missing-command"),
+            "task_profiles": ["documentation", "testing", "infra"],
+            "unavailable": "continue",
+        }],
+    }))
+
+    r = run_cli(
+        *_recommend_args(
+        "--task", "Update README documentation with pytest and CI guidance",
+        "--complexity", "Complex",
+        "--json",
+        ),
+        cwd=tmp_path,
+    )
+
+    data = _json_result(r)
+    assert data["specialists_decision"]["policy"] == "provider-unavailable"
+    assert data["specialists_decision"]["action"] == "continue-core"
+    assert data["specialists_selected"] == []
+    assert data["specialists_unavailable"][0]["kind"] == "command"
+    assert data["specialists_unavailable"][0]["skill"] == "missing-reviewer"

@@ -4,7 +4,7 @@
 
 `mission` owns the loop, state gate, and stop/continue decision. External specialist skills are optional evidence providers that can improve planning, execution checks, and review quality when a task clearly fits a domain such as frontend, backend, security, documentation, or product design.
 
-The registry avoids hard-coding a single user's local skill set into the orchestrator. It gives `/mission` a portable way to classify a mission, select available specialist skills, and degrade gracefully when a referenced skill is missing.
+The registry avoids hard-coding a single user's local skill set or preferred external reviewer into the orchestrator. It gives `/mission` a portable way to classify a mission, select available specialist skills or command providers, and degrade gracefully when a referenced provider is missing.
 
 ## Beginner Presets
 
@@ -26,12 +26,44 @@ The orchestrator may infer a preset during Phase 1, then refine it with project/
 When multiple registry sources exist, apply them in this order:
 
 1. **User instruction in the current mission**: explicit "use X" or "do not use X" wins.
-2. **Project registry**: repository-local policy, usually `skills/mission/refs/specialist-registry.md` or a future `.mission/specialists.yml`.
-3. **User registry**: personal default mappings, for example `~/.config/mission/specialists.yml`.
-4. **Beginner preset**: built-in fallback mapping from task profile to role names.
-5. **No specialist**: continue with the core mission subskills only.
+2. **Explicit CLI registry**: `mission-state.py specialists recommend --registry <path>`.
+3. **Project registry**: repository-local policy, `.mission/specialists.yml`.
+4. **User registry**: personal default mappings, `~/.config/mission/specialists.yml`.
+5. **Skill/plugin manifests**: installed skill manifests such as `~/.codex/skills/*/mission-specialist.yml` or `~/.claude/skills/*/mission-specialist.yml`.
+6. **Beginner preset**: built-in fallback mapping from task profile to role names.
+7. **No specialist**: continue with the core mission subskills only.
 
-Project entries may disable a user-level default for a repository by setting `enabled: false` for that role or skill.
+Project entries may disable a user-level default for a repository by setting `enabled: false` for that role or skill. `--no-default-skill-roots` disables user registry and default skill/plugin manifest discovery for deterministic tests or isolated runs; project registries still apply.
+
+## Provider Kinds
+
+`kind: skill` remains the default. `kind: command` lets a registry describe a local CLI provider without adding provider-specific code to mission core.
+
+```yaml
+version: 1
+specialists:
+  - role: oracle-reviewer
+    kind: command
+    command: oracle
+    args: ["review", "--stdin"]
+    task_profiles: [architecture, product, research, documentation, security]
+    phases: [planning, review, critic]
+    required: false
+    max_calls_per_iteration: 1
+    unavailable: continue
+    auto_use:
+      min_complexity: Complex
+      when: [pr_review, strategy, architecture, security, stalled_iteration]
+    risk:
+      external_service: true
+      browser_automation: true
+      may_consume_paid_quota: true
+      first_use_confirmation: true
+```
+
+This `oracle-reviewer` entry is an example manifest shape only. Mission core must not contain oracle-specific browser automation, API calls, or scoring logic. The provider produces evidence; `mission-reviewer`, `mission-scorer`, and `mission-state.py mark-passes` remain the completion gates.
+
+Command providers run through `mission-state.py specialists invoke-command`, which uses argv arrays and stdin/stdout capture rather than shell interpolation. The runner records stdout, stderr, exit status, and archived evidence under `.mission-state/archive`, then appends a `specialist_invocations` entry with `mode=command-provider`. Failed or unavailable optional command providers are logged and the mission continues with core reviewers.
 
 ## YAML Schema
 
@@ -72,11 +104,17 @@ Fields:
 | `presets.*.task_profiles` | Profiles that activate the preset. |
 | `specialists[].role` | Stable logical role name used in state/audit logs. |
 | `specialists[].skill` | Actual skill name when available in the current agent. |
+| `kind` | `skill` or `command`. Defaults to `skill`. |
+| `command` | Local executable for `kind: command`; invoked without shell interpolation. |
+| `args` | Optional argv list for `kind: command`. |
 | `task_profiles` | Profiles that make the specialist relevant. |
 | `phases` | Allowed phases: `planning`, `execution`, `review`, `scoring`, `critic`. |
 | `required` | If `true`, missing skill becomes a blocker. Default `false`. |
 | `max_calls_per_iteration` | Soft limit to prevent runaway specialist calls. |
 | `unavailable` | `continue`, `warn`, or `halt`. Default `continue`. |
+| `auto_use.min_complexity` | Minimum mission complexity for automatic selection, such as `Complex`. |
+| `risk.first_use_confirmation` | If `true`, require provider consent before automatic use. |
+| `risk.external_service`, `risk.browser_automation`, `risk.may_consume_paid_quota` | Risk flags used for audit and confirmation policy. |
 | `overrides` | Path or mission-text rules that add/remove roles. |
 
 ## `task_profile` Classification
@@ -126,16 +164,40 @@ python3 skills/mission/bin/mission-state.py specialists recommend \
   --json
 ```
 
-The command classifies `task_profile`, discovers installed skills, ranks candidates, and returns a `specialists_decision`. It does not install external skills. Use `--record-state` only after `init` when the recommendation should be persisted to the current `.mission-state` session.
+The command classifies `task_profile`, discovers installed skills and command providers, ranks candidates, and returns a `specialists_decision`. It does not install external skills or execute command providers. Use `--record-state` only after `init` when the recommendation should be persisted to the current `.mission-state` session.
+
+Command provider invocation is a separate evidence step:
+
+```bash
+python3 skills/mission/bin/mission-state.py specialists invoke-command \
+  --provider oracle-reviewer \
+  --iteration 1 \
+  --phase review \
+  --input-file /tmp/mission-review-context.md \
+  --json
+```
+
+The input file is wrapped in a JSON packet with mission, provider, iteration, and phase metadata, then sent to the configured command over stdin. The provider cannot set `passes`, cannot call `mark-passes`, and cannot alter mission state except through the invocation evidence recorded by the runner.
+
+For providers with `risk.first_use_confirmation: true`, record consent after a user approval boundary:
+
+```bash
+python3 skills/mission/bin/mission-state.py specialists consent \
+  --provider oracle-reviewer
+```
+
+Consent is stored in `~/.config/mission/provider-consent.json` by default. Tests and isolated runs can pass `--consent-file <path>`.
 
 ## Fallback and Missing Skills
 
 Default behavior is graceful degradation:
 
 - Missing optional skill: record `missing`, continue with core subskills.
+- Missing optional command provider: record `provider-unavailable`, continue with core subskills.
 - Registry file absent: use beginner presets or no specialist.
 - Invalid YAML: warn, ignore invalid registry, continue.
 - Skill exists but cannot be invoked in the current agent: record `unavailable`, continue.
+- Command exits non-zero: archive stdout/stderr/exit status, record `failed`, continue unless a future strict-mode policy makes that provider mandatory.
 - `required: true` with `unavailable: halt`: mark a blocker only if the user or project explicitly made that specialist mandatory.
 
 Never invent a specialist result. If a specialist cannot run, the audit log should say so plainly.
