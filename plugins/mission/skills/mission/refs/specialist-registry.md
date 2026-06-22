@@ -224,8 +224,9 @@ The registry must therefore be interpreted as intent:
 - If neither is available, continue with the core loop and record the missing evidence source.
 - Parallel specialist review is an optimization for Claude Code, not a correctness requirement for Codex.
 - If a candidate is available but intentionally not used, record `status=skipped` with a concrete reason instead of leaving the candidate unaccounted for.
+- Keep the system hackable: user-installed skills, command providers, and project-local plugins are optional evidence sources by default. Mission core owns the loop, state, audit, and safety boundaries, but should not hard-code provider-specific authority.
 
-For `Critical` missions, every available candidate from the Phase 1 recommendation must be accounted for as used, skipped, unavailable, or failed. For `Complex` missions, apply the same rule to security, testing, and infra candidates because those profiles can materially change the risk of the final outcome. `Standard` missions should record skips when the decision is non-obvious; `Simple` missions may rely on the core loop unless a project policy says otherwise.
+For `Critical` missions, every available candidate from the Phase 1 recommendation must be accounted for as used, skipped, unavailable, or failed. For `Complex` missions, apply the same rule to security, testing, and infra candidates because those profiles can materially change the risk of the final outcome. Apply the database/backend rule only when schema, migration, query, SQL, database, or persistence signals make database impact concrete. `Standard` missions should record skips when the decision is non-obvious; `Simple` missions may rely on the core loop unless a project policy says otherwise. Use `mission-state.py specialists accounting --json` before completion to surface required unaccounted candidates; this is a warning-oriented accounting check, not a blanket hard gate for all optional plugins.
 
 ## Audit and State Fields
 

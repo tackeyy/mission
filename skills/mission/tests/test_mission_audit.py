@@ -568,6 +568,94 @@ def test_audit_reports_unaccounted_high_risk_candidates_after_partial_skip(tmp_p
     assert "dev-security-reviewer" not in data["candidate_only_specialist_skill_breakdown"]
 
 
+def test_audit_ignores_non_risk_candidate_when_complex_risk_candidates_are_accounted(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "sess-a.json",
+        started_at="2026-06-20T10:10:00Z",
+        created_at_session="2026-06-20T10:10:00Z",
+        complexity="Complex",
+        task_profile={"primary": "documentation", "secondary": ["testing", "infra"], "risk": "medium"},
+        specialists_decision={"policy": "auto"},
+        specialists_candidates=[
+            {"role": "doc-writer", "skill": "dev-doc-writer", "task_profiles": ["documentation"], "status": "available"},
+            {"role": "backend", "skill": "dev-backend", "task_profiles": ["backend", "database"], "status": "available"},
+            {"role": "unit-tester", "skill": "dev-unit-tester", "task_profiles": ["testing", "backend"], "status": "available"},
+            {"role": "infra", "skill": "dev-infra", "task_profiles": ["infra"], "status": "available"},
+        ],
+        specialists_selected=[
+            {"role": "doc-writer", "skill": "dev-doc-writer", "status": "selected"},
+        ],
+        specialist_invocations=[
+            {"skill": "dev-doc-writer", "status": "inline-applied", "mode": "codex-inline"},
+            {"skill": "dev-unit-tester", "status": "skipped", "mode": "fallback-core", "reason": "focused pytest covers the change"},
+            {"skill": "dev-infra", "status": "skipped", "mode": "fallback-core", "reason": "no deployment or CI behavior changed"},
+        ],
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-18",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    data = json.loads(result.stdout)
+    assert data["candidate_only_specialist_count"] == 0
+    assert "dev-backend" not in data["candidate_only_specialist_skill_breakdown"]
+    assert all(f["code"] != "candidate-only-specialists" for f in data["findings"])
+
+
+def test_audit_reports_database_candidate_only_when_database_signal_is_strong(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "sess-a.json",
+        mission="Design schema migration candidate accounting",
+        started_at="2026-06-20T10:10:00Z",
+        created_at_session="2026-06-20T10:10:00Z",
+        complexity="Complex",
+        task_profile={"primary": "documentation", "secondary": ["database"], "risk": "medium"},
+        planned_files=["db/schema.sql", "skills/mission/bin/mission-state.py"],
+        specialists_decision={"policy": "auto"},
+        specialists_candidates=[
+            {"role": "doc-writer", "skill": "dev-doc-writer", "task_profiles": ["documentation"], "status": "available"},
+            {"role": "backend", "skill": "dev-backend", "task_profiles": ["backend", "database"], "status": "available"},
+        ],
+        specialists_selected=[
+            {"role": "doc-writer", "skill": "dev-doc-writer", "status": "selected"},
+        ],
+        specialist_invocations=[
+            {"skill": "dev-doc-writer", "status": "inline-applied", "mode": "codex-inline"},
+        ],
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-18",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    data = json.loads(result.stdout)
+    assert data["candidate_only_specialist_count"] == 1
+    assert data["candidate_only_specialists"][0]["priority"] == "P1"
+    assert data["candidate_only_specialists"][0]["skills"] == ["dev-backend"]
+
+
 def test_audit_does_not_report_candidate_only_without_candidates(tmp_path):
     _write_state(
         tmp_path / ".mission-state" / "sessions" / "sess-a.json",

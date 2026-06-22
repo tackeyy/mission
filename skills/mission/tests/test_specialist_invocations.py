@@ -183,6 +183,67 @@ def test_log_invocation_accepts_skill_tool_applied_status(state_dir, run_cli, re
     assert entry["status"] == "skill-tool-applied"
 
 
+def test_specialist_accounting_reports_only_required_complex_candidates(state_dir, run_cli):
+    state_path = state_dir / "sessions" / "test.json"
+    state = json.loads(state_path.read_text())
+    state.update({
+        "complexity": "Complex",
+        "task_profile": {"primary": "documentation", "secondary": ["testing", "infra"], "risk": "medium"},
+        "specialists_candidates": [
+            {"role": "doc-writer", "skill": "dev-doc-writer", "task_profiles": ["documentation"], "status": "available"},
+            {"role": "backend", "skill": "dev-backend", "task_profiles": ["backend", "database"], "status": "available"},
+            {"role": "unit-tester", "skill": "dev-unit-tester", "task_profiles": ["testing", "backend"], "status": "available"},
+            {"role": "infra", "skill": "dev-infra", "task_profiles": ["infra"], "status": "available"},
+        ],
+        "specialists_selected": [
+            {"role": "doc-writer", "skill": "dev-doc-writer", "status": "selected"},
+        ],
+        "specialist_invocations": [
+            {"skill": "dev-doc-writer", "status": "inline-applied", "mode": "codex-inline"},
+            {"skill": "dev-infra", "status": "skipped", "mode": "fallback-core", "reason": "no infra changes"},
+        ],
+    })
+    state_path.write_text(json.dumps(state))
+
+    r = run_cli("specialists", "accounting", "--json", cwd=state_dir.parent)
+
+    data = _json_result(r)
+    assert data["ok"] is True
+    assert data["priority"] == "P1"
+    assert [item["skill"] for item in data["unaccounted_candidates"]] == ["dev-unit-tester"]
+    assert [item["skill"] for item in data["required_unaccounted_candidates"]] == ["dev-unit-tester"]
+
+
+def test_specialist_accounting_accepts_explicit_skips(state_dir, run_cli):
+    state_path = state_dir / "sessions" / "test.json"
+    state = json.loads(state_path.read_text())
+    state.update({
+        "complexity": "Complex",
+        "task_profile": {"primary": "documentation", "secondary": ["testing", "infra"], "risk": "medium"},
+        "specialists_candidates": [
+            {"role": "doc-writer", "skill": "dev-doc-writer", "task_profiles": ["documentation"], "status": "available"},
+            {"role": "unit-tester", "skill": "dev-unit-tester", "task_profiles": ["testing", "backend"], "status": "available"},
+            {"role": "infra", "skill": "dev-infra", "task_profiles": ["infra"], "status": "available"},
+        ],
+        "specialists_selected": [
+            {"role": "doc-writer", "skill": "dev-doc-writer", "status": "selected"},
+        ],
+        "specialist_invocations": [
+            {"skill": "dev-doc-writer", "status": "inline-applied", "mode": "codex-inline"},
+            {"skill": "dev-unit-tester", "status": "skipped", "mode": "fallback-core", "reason": "focused tests cover this change"},
+            {"skill": "dev-infra", "status": "skipped", "mode": "fallback-core", "reason": "no infra changes"},
+        ],
+    })
+    state_path.write_text(json.dumps(state))
+
+    r = run_cli("specialists", "accounting", "--json", cwd=state_dir.parent)
+
+    data = _json_result(r)
+    assert data["priority"] is None
+    assert data["unaccounted_candidates"] == []
+    assert data["required_unaccounted_candidates"] == []
+
+
 def test_log_invocation_rejects_unknown_status(state_dir, run_cli):
     r = run_cli(
         "specialists", "log-invocation",

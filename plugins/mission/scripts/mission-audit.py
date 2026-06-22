@@ -20,6 +20,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+MISSION_LIB = REPO_ROOT / "skills" / "mission" / "lib"
+if str(MISSION_LIB) not in sys.path:
+    sys.path.insert(0, str(MISSION_LIB))
+
+from specialist_accounting import (  # noqa: E402
+    applied_specialist_invocation_skills,
+    candidate_accounting_report,
+    candidate_specialist_skills,
+    selected_specialist_skills,
+    terminal_invoked_specialist_skills,
+)
+
 
 PRUNE_DIRS = {
     ".git",
@@ -344,21 +357,6 @@ def low_score_pass_bucket(record: StateRecord) -> str:
     return "valid-threshold-pass"
 
 
-TERMINAL_SPECIALIST_INVOCATION_STATUSES = {
-    "completed",
-    "inline-applied",
-    "skill-tool-applied",
-    "skipped",
-    "unavailable",
-    "failed",
-}
-
-APPLIED_SPECIALIST_INVOCATION_STATUSES = {
-    "completed",
-    "inline-applied",
-    "skill-tool-applied",
-}
-
 SPECIALIST_SELECTION_CHECKPOINT_REQUIRED_AT = datetime(2026, 6, 20, 10, 6, 47, tzinfo=timezone.utc)
 
 
@@ -397,59 +395,6 @@ def missing_specialist_selection_checkpoint_item(record: StateRecord) -> dict[st
     }
 
 
-def selected_specialist_skills(state: dict[str, Any]) -> set[str]:
-    skills: set[str] = set()
-    for selected in state.get("specialists_selected") or []:
-        if isinstance(selected, dict) and selected.get("skill"):
-            skills.add(str(selected["skill"]))
-    return skills
-
-
-def terminal_invoked_specialist_skills(state: dict[str, Any]) -> set[str]:
-    skills: set[str] = set()
-    for invocation in state.get("specialist_invocations") or []:
-        if not isinstance(invocation, dict):
-            continue
-        skill = invocation.get("skill")
-        status = invocation.get("status")
-        if skill and status in TERMINAL_SPECIALIST_INVOCATION_STATUSES:
-            skills.add(str(skill))
-    return skills
-
-
-def candidate_specialist_skills(state: dict[str, Any]) -> list[str]:
-    skills: list[str] = []
-    seen: set[str] = set()
-    for candidate in state.get("specialists_candidates") or []:
-        if not isinstance(candidate, dict):
-            continue
-        skill = candidate.get("skill")
-        if not skill:
-            continue
-        skill_name = str(skill)
-        if skill_name in seen:
-            continue
-        seen.add(skill_name)
-        skills.append(skill_name)
-    return skills
-
-
-def specialist_candidate_accounting_required(state: dict[str, Any]) -> bool:
-    """Return true when available candidates must each have a decision trail."""
-    task_profile = state.get("task_profile") if isinstance(state.get("task_profile"), dict) else {}
-    complexity = str(state.get("complexity") or "Unknown")
-    risk = str(task_profile.get("risk") or "").lower()
-    primary = str(task_profile.get("primary") or "").lower()
-    secondary = {str(value).lower() for value in task_profile.get("secondary") or []}
-    high_risk_profiles = {"security", "testing", "infra"}
-    profiles = {primary} | secondary
-    return (
-        complexity == "Critical"
-        or risk == "high"
-        or (complexity == "Complex" and bool(high_risk_profiles & profiles))
-    )
-
-
 def specialist_invocation_gap_skills(record: StateRecord) -> list[str]:
     selected = selected_specialist_skills(record.state)
     if not selected:
@@ -460,14 +405,7 @@ def specialist_invocation_gap_skills(record: StateRecord) -> list[str]:
 
 def unselected_specialist_invocation_skills(record: StateRecord) -> list[str]:
     selected = selected_specialist_skills(record.state)
-    applied: set[str] = set()
-    for invocation in record.state.get("specialist_invocations") or []:
-        if not isinstance(invocation, dict):
-            continue
-        skill = invocation.get("skill")
-        status = invocation.get("status")
-        if skill and status in APPLIED_SPECIALIST_INVOCATION_STATUSES:
-            applied.add(str(skill))
+    applied = applied_specialist_invocation_skills(record.state)
     return sorted(applied - selected)
 
 
@@ -487,25 +425,11 @@ def unselected_specialist_invocation_item(record: StateRecord) -> dict[str, Any]
 
 def candidate_only_specialist_item(record: StateRecord) -> dict[str, Any] | None:
     state = record.state
-    candidates = candidate_specialist_skills(state)
-    if not candidates:
-        return None
-
-    selected = selected_specialist_skills(state)
-    terminal = terminal_invoked_specialist_skills(state)
-    if not specialist_candidate_accounting_required(state) and (selected or terminal):
-        return None
-    unaccounted = [skill for skill in candidates if skill not in selected and skill not in terminal]
+    report = candidate_accounting_report(state)
+    unaccounted = report["unaccounted_candidates"]
     if not unaccounted:
         return None
-
-    task_profile = state.get("task_profile") if isinstance(state.get("task_profile"), dict) else {}
     complexity = str(state.get("complexity") or "Unknown")
-    risk = str(task_profile.get("risk") or "").lower()
-    primary = str(task_profile.get("primary") or "").lower()
-    secondary = {str(value).lower() for value in task_profile.get("secondary") or []}
-    high_risk_profile = bool({"security", "testing", "infra"} & ({primary} | secondary))
-    priority = "P1" if complexity == "Critical" or risk == "high" or high_risk_profile else "P2"
     latest = latest_scored_entry(state) or {}
     return {
         "project": project_name(state),
@@ -516,8 +440,8 @@ def candidate_only_specialist_item(record: StateRecord) -> dict[str, Any] | None
         "complexity": complexity,
         "score": latest.get("composite"),
         "candidate_count": len(unaccounted),
-        "skills": unaccounted,
-        "priority": priority,
+        "skills": [item["skill"] for item in unaccounted],
+        "priority": report["priority"] or "P2",
     }
 
 

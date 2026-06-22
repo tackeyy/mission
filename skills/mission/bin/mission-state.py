@@ -35,6 +35,12 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
+LIB_DIR = Path(__file__).resolve().parents[1] / "lib"
+if str(LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(LIB_DIR))
+
+from specialist_accounting import candidate_accounting_report  # noqa: E402
+
 SCHEMA_VERSION = 2  # v1: 旧 schema (project_root/pid なし), v2: A-1/A-2/B-3 追加
 
 # Tier5: スコア/反復のマジックナンバーを単一定義 (散在防止・閾値変更を1箇所に集約)
@@ -1023,6 +1029,32 @@ def cmd_specialists_consent(args):
     atomic_write_json(path, data)
     result = {"ok": True, "provider": provider, "consent_file": str(path)}
     print(json.dumps(result, indent=2 if getattr(args, "json", False) else None, ensure_ascii=False))
+
+
+def cmd_specialists_accounting(args):
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
+        sys.exit(1)
+    data = json.loads(sf.read_text())
+    report = {
+        "ok": True,
+        "session_id": data.get("session_id") or sf.stem,
+        "mission_id": data.get("mission_id") or "",
+        **candidate_accounting_report(data),
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        return
+    if not report["unaccounted_candidates"]:
+        print("specialist accounting: complete")
+        return
+    print(f"specialist accounting: {report['priority']} unaccounted candidates")
+    for candidate in report["unaccounted_candidates"]:
+        required = "required" if candidate["requires_accounting"] else "optional"
+        print(f"- {candidate['skill']} ({required}): {candidate.get('reason') or 'no reason recorded'}")
+    print("Record an explicit used/skipped/unavailable/failed invocation before completion when required.")
 
 
 def _archive_specialist_evidence(cwd: Path, evidence_output: str, iteration: int,
@@ -2417,6 +2449,10 @@ def _build_parser():
                            help="consent allowlist JSON (default: ~/.config/mission/provider-consent.json)")
     p_consent.add_argument("--json", action="store_true", help="JSON 形式で出力")
     p_consent.set_defaults(func=cmd_specialists_consent)
+
+    p_account = spec_sub.add_parser("accounting", help="available candidate の未処理 decision trail を確認")
+    p_account.add_argument("--json", action="store_true", help="JSON 形式で出力")
+    p_account.set_defaults(func=cmd_specialists_accounting)
 
     p_log = spec_sub.add_parser("log-invocation", help="specialist skill の実呼び出し/inline/skip 証跡を記録")
     p_log.add_argument("--iteration", type=int, required=True)
