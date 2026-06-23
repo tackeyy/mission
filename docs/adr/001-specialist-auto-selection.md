@@ -12,7 +12,7 @@ Accepted
 
 `mission` should improve output quality by using specialist skills when they are relevant to a mission. Examples include development, frontend, backend, testing, security, documentation, design, and research skills.
 
-Because `mission` is OSS, users will not share the same installed skill set. Some users may have official or bundled skills only. Others may have custom skills such as `development`, `frontend-skill`, `dev-frontend`, or project-specific reviewers. Requiring every user to pass skill names as arguments would make `mission` harder to use, especially for beginners.
+Because `mission` is OSS, users will not share the same installed skill set. Some users may have official or bundled skills only. Others may have private or organization-specific skills. Requiring every user to pass skill names as arguments would make `mission` harder to use, especially for beginners.
 
 At the same time, silently installing or invoking arbitrary external skills is not acceptable. Skill selection and installation can affect security, privacy, cost, and execution quality. `mission` also must remain portable across Claude Code and Codex, where skill discovery and invocation capabilities differ.
 
@@ -45,6 +45,26 @@ Provider registries may describe two provider kinds:
 Command providers are treated as local code execution. Project registries can disable user-level defaults with `enabled: false`, and providers with `risk.first_use_confirmation: true` require a user-scoped consent allowlist before automatic use. Provider failures or missing commands degrade to logged evidence and core reviewers unless a future strict policy explicitly makes that provider mandatory.
 
 No provider gets mission-core-specific authority. In particular, high-value reviewers such as `oracle` must be represented as external manifests or examples, not hard-coded branches in `mission` core.
+
+## OSS Portability Boundary
+
+The public `mission` repository must not embed a maintainer's personal skill names, private workflow taxonomy, local file paths, or organization-specific agent teams as built-in behavior. Personal or team-specific specialists belong in user/project configuration, not in OSS defaults.
+
+Allowed in OSS:
+
+- generic provider protocols, registry schemas, scoring/audit semantics, and safety rules
+- portable beginner presets that describe broad capabilities rather than a private skill collection
+- tests that use neutral fixture provider names such as `external-code-reviewer` or `market-research-provider`
+- documentation examples that clearly mark local/private skill names as examples only
+
+Not allowed in OSS:
+
+- adding personal skills to `BUILTIN_SPECIALIST_CANDIDATES`
+- bundling private `mission-specialist.yml` manifests for one maintainer's local skills
+- assuming that any local skill path under a maintainer's home directory exists for other users
+- making pass/fail gates depend on private skills or private command providers
+
+If a maintainer wants `mission` to use personal skills, they should define those bindings outside the public repo through `~/.config/mission/specialists.yml`, a private project `.mission/specialists.yml`, or installed skill manifests. The OSS code should only make those extension points reliable and auditable.
 
 ## State and Audit Requirements
 
