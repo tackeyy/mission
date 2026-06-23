@@ -193,10 +193,10 @@ def is_resolved_archive_duplicate(group: list[StateRecord]) -> bool:
 
 def record_rank(record: StateRecord) -> tuple[int, str]:
     path_text = str(record.path)
-    if "/sessions/" in path_text:
-        rank = 0
-    elif "/archive/worktree-" in path_text:
+    if "/archive/worktree-" in path_text:
         rank = 1
+    elif "/sessions/" in path_text:
+        rank = 0
     else:
         rank = 2
     return (rank, path_text)
