@@ -53,6 +53,25 @@ def test_audit_deduplicates_worktree_archive(tmp_path):
     assert data["pass_count"] == 1
 
 
+def test_audit_deduplicates_nested_worktree_archive_sessions(tmp_path):
+    sessions = tmp_path / ".mission-state" / "sessions"
+    archive_sessions = tmp_path / ".mission-state" / "archive" / "worktree-feat" / "sessions"
+    _write_state(sessions / "sess-a.json", project_root=str(tmp_path))
+    _write_state(archive_sessions / "sess-a.json", project_root=str(tmp_path))
+
+    result = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--since", "2026-06-18", "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    assert data["total_sessions"] == 1
+    assert data["duplicate_group_count"] == 0
+    assert data["resolved_duplicate_group_count"] == 1
+    assert data["pass_count"] == 1
+
+
 def test_audit_discovers_nested_worktree_archive_sessions(tmp_path):
     archive_sessions = tmp_path / ".mission-state" / "archive" / "worktree-feat" / "sessions"
     _write_state(

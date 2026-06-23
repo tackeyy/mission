@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Refined Complex specialist accounting to require explicit terminal decisions only for risk-bearing candidates, preserving hackable user plugins as optional evidence sources by default.
 - Database/backend candidates now require strong database signals such as schema, migration, query, SQL, or persistence before they are treated as high-risk accounting candidates.
 
+### Fixed
+- Mission audit now classifies nested `archive/worktree-*/sessions/*.json` copies as resolved archive duplicates, preventing cross-root audits from reporting exact live/archive copies as P1 `duplicate-state` findings.
+
 ## [1.0.4] - 2026-06-22
 
 ### Added
