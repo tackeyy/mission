@@ -46,6 +46,10 @@ Command providers are treated as local code execution. Project registries can di
 
 No provider gets mission-core-specific authority. In particular, high-value reviewers such as `oracle` must be represented as external manifests or examples, not hard-coded branches in `mission` core.
 
+Recommendations may include an advisory `specialists_phase_plan` grouped by planning, execution, review, and synthesis. This plan sequences evidence providers but does not create a nested autonomous loop. Broad orchestrator-style specialists may only produce a bounded artifact such as a plan or review note.
+
+Command providers may publish a `result_contract` that rejects preparation-only output. A successful process exit is not enough: preparation banners, short template output, `prepared`, `awaiting-input`, `skipped`, or `failed` statuses are transparent decision evidence, but not applied result evidence. If a project marks a provider `required: true`, `mission-state.py mark-passes` must reject completion until that provider has `completed`, `inline-applied`, or `skill-tool-applied` evidence, unless the user explicitly approves `--force`.
+
 ## OSS Portability Boundary
 
 The public `mission` repository must not embed a maintainer's personal skill names, private workflow taxonomy, local file paths, or organization-specific agent teams as built-in behavior. Personal or team-specific specialists belong in user/project configuration, not in OSS defaults.

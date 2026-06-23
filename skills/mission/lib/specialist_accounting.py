@@ -7,6 +7,8 @@ from typing import Any
 
 TERMINAL_SPECIALIST_INVOCATION_STATUSES = {
     "completed",
+    "prepared",
+    "awaiting-input",
     "inline-applied",
     "skill-tool-applied",
     "skipped",
@@ -137,13 +139,25 @@ def candidate_accounting_required(state: dict[str, Any], candidate: dict[str, An
 def candidate_accounting_report(state: dict[str, Any]) -> dict[str, Any]:
     selected = selected_specialist_skills(state)
     terminal = terminal_invoked_specialist_skills(state)
+    applied = applied_specialist_invocation_skills(state)
     any_decision_trail = bool(selected or terminal)
     accounted = selected | terminal
     unaccounted: list[dict[str, Any]] = []
     required_unaccounted: list[dict[str, Any]] = []
+    result_required_unmet: list[dict[str, Any]] = []
 
     for candidate in available_specialist_candidates(state):
         skill = _candidate_skill(candidate)
+        if candidate.get("required") and skill not in applied:
+            result_required_unmet.append({
+                "role": candidate.get("role") or skill,
+                "skill": skill,
+                "kind": candidate.get("kind", "skill"),
+                "profiles": sorted(_candidate_profiles(candidate)),
+                "reason": "required provider has no applied/completed evidence",
+                "required": True,
+                "requires_result": True,
+            })
         if skill in accounted:
             continue
         requires_accounting = candidate_accounting_required(state, candidate)
@@ -161,12 +175,15 @@ def candidate_accounting_report(state: dict[str, Any]) -> dict[str, Any]:
             if requires_accounting:
                 required_unaccounted.append(item)
 
-    priority = "P1" if required_unaccounted else ("P2" if unaccounted else None)
+    priority = "P1" if (required_unaccounted or result_required_unmet) else ("P2" if unaccounted else None)
     return {
         "accounting_required": bool(required_unaccounted),
+        "result_required": bool(result_required_unmet),
         "priority": priority,
         "selected_skills": sorted(selected),
         "terminal_invocation_skills": sorted(terminal),
+        "applied_invocation_skills": sorted(applied),
         "unaccounted_candidates": unaccounted,
         "required_unaccounted_candidates": required_unaccounted,
+        "result_required_unmet_candidates": result_required_unmet,
     }

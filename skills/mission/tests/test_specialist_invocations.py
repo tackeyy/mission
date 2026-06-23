@@ -183,6 +183,25 @@ def test_log_invocation_accepts_skill_tool_applied_status(state_dir, run_cli, re
     assert entry["status"] == "skill-tool-applied"
 
 
+def test_log_invocation_accepts_prepared_with_reason(state_dir, run_cli, read_state):
+    run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "review",
+        "--role", "external-reviewer",
+        "--skill", "external-reviewer",
+        "--mode", "fallback-core",
+        "--status", "prepared",
+        "--reason", "Provider prepared the browser session but did not return findings",
+        cwd=state_dir.parent,
+        check=True,
+    )
+
+    entry = read_state(state_dir)["specialist_invocations"][0]
+    assert entry["status"] == "prepared"
+    assert entry["reason"] == "Provider prepared the browser session but did not return findings"
+
+
 def test_specialist_accounting_reports_only_required_complex_candidates(state_dir, run_cli):
     state_path = state_dir / "sessions" / "test.json"
     state = json.loads(state_path.read_text())
@@ -364,3 +383,90 @@ def test_invoke_command_provider_records_failure_without_blocking_optional_provi
     assert entry["exit_code"] == 7
     assert "status 7" in entry["reason"]
     assert "token=[REDACTED]" in evidence.read_text(encoding="utf-8")
+
+
+def test_invoke_command_provider_marks_preparation_only_output_as_not_applied(run_cli, tmp_path):
+    run_cli("init", "command provider prepared mission", "--complexity", "Complex", cwd=tmp_path, check=True)
+    helper = tmp_path / "provider.py"
+    helper.write_text("print('Oracle Browser Review Prepared')\n", encoding="utf-8")
+    registry = tmp_path / ".mission" / "specialists.yml"
+    registry.parent.mkdir()
+    registry.write_text(json.dumps({
+        "version": 1,
+        "specialists": [{
+            "role": "browser-reviewer",
+            "kind": "command",
+            "command": sys.executable,
+            "args": [str(helper)],
+            "task_profiles": ["documentation"],
+            "result_contract": {"min_non_template_chars": 20},
+        }],
+    }))
+    run_cli(
+        "specialists", "recommend",
+        "--task", "Review README documentation",
+        "--complexity", "Complex",
+        "--record-state",
+        "--json",
+        cwd=tmp_path,
+        check=True,
+    )
+
+    r = run_cli(
+        "specialists", "invoke-command",
+        "--provider", "browser-reviewer",
+        "--iteration", "1",
+        "--phase", "review",
+        "--json",
+        cwd=tmp_path,
+    )
+
+    data = _json_result(r)
+    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
+    entry = state["specialist_invocations"][0]
+    assert data["ok"] is False
+    assert entry["status"] == "prepared"
+    assert "preparation-only" in entry["reason"]
+
+
+def test_invoke_command_provider_accepts_result_contract_evidence(run_cli, tmp_path):
+    run_cli("init", "command provider evidence mission", "--complexity", "Complex", cwd=tmp_path, check=True)
+    helper = tmp_path / "provider.py"
+    helper.write_text("print('finding: implementation is sound and tests cover the changed gate behavior')\n", encoding="utf-8")
+    registry = tmp_path / ".mission" / "specialists.yml"
+    registry.parent.mkdir()
+    registry.write_text(json.dumps({
+        "version": 1,
+        "specialists": [{
+            "role": "evidence-reviewer",
+            "kind": "command",
+            "command": sys.executable,
+            "args": [str(helper)],
+            "task_profiles": ["documentation"],
+            "result_contract": {"min_non_template_chars": 40},
+        }],
+    }))
+    run_cli(
+        "specialists", "recommend",
+        "--task", "Review README documentation",
+        "--complexity", "Complex",
+        "--record-state",
+        "--json",
+        cwd=tmp_path,
+        check=True,
+    )
+
+    r = run_cli(
+        "specialists", "invoke-command",
+        "--provider", "evidence-reviewer",
+        "--iteration", "1",
+        "--phase", "review",
+        "--json",
+        cwd=tmp_path,
+    )
+
+    data = _json_result(r)
+    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
+    entry = state["specialist_invocations"][0]
+    assert data["ok"] is True
+    assert entry["status"] == "completed"
