@@ -637,12 +637,19 @@ def session_line(record: StateRecord) -> str:
     entry = latest_scored_entry(state) or {}
     duration = duration_sec(state)
     mission = " ".join(str(state.get("mission") or "").split())
+    progress = state.get("progress") if isinstance(state.get("progress"), dict) else {}
+    progress_text = ""
+    if progress:
+        progress_text = (
+            f", progress {progress.get('completed', '-')}/{progress.get('total', '-')}"
+            f" remaining {progress.get('remaining', '-')}"
+        )
     if len(mission) > 90:
         mission = mission[:87] + "..."
     return (
         f"- `{state.get('session_id') or record.path.stem}` "
         f"({project_name(state)}, {state.get('agent') or 'unknown'}, {classify(state)}, "
-        f"{fmt_minutes(duration)}, score {fmt_float(entry.get('composite'))}): {mission}"
+        f"{fmt_minutes(duration)}, score {fmt_float(entry.get('composite'))}{progress_text}): {mission}"
     )
 
 

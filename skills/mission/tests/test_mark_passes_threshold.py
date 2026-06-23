@@ -83,6 +83,66 @@ def test_mark_passes_accepts_when_both_pass(state_dir, run_cli, read_state):
     assert s["loop_active"] is False
 
 
+def test_mark_passes_rejects_required_specialist_without_applied_result(state_dir, run_cli, read_state):
+    state_path = state_dir / "sessions" / "test.json"
+    state = read_state(state_dir)
+    state.update({
+        "specialists_candidates": [{
+            "role": "external-reviewer",
+            "skill": "external-reviewer",
+            "kind": "command",
+            "task_profiles": ["documentation"],
+            "status": "available",
+            "required": True,
+        }],
+        "specialist_invocations": [{
+            "role": "external-reviewer",
+            "skill": "external-reviewer",
+            "kind": "command",
+            "mode": "command-provider",
+            "status": "prepared",
+            "reason": "provider prepared but produced no review findings",
+        }],
+    })
+    state_path.write_text(json.dumps(state, indent=2))
+    _push_score(run_cli, state_dir, iteration=1, composite=4.3, min_item=4.0)
+
+    r = run_cli("mark-passes", cwd=state_dir.parent)
+
+    assert r.returncode == 2
+    assert "required specialist result evidence missing" in r.stderr
+    assert read_state(state_dir)["passes"] is False
+
+
+def test_mark_passes_accepts_required_specialist_with_completed_result(state_dir, run_cli, read_state):
+    state_path = state_dir / "sessions" / "test.json"
+    state = read_state(state_dir)
+    state.update({
+        "specialists_candidates": [{
+            "role": "external-reviewer",
+            "skill": "external-reviewer",
+            "kind": "command",
+            "task_profiles": ["documentation"],
+            "status": "available",
+            "required": True,
+        }],
+        "specialist_invocations": [{
+            "role": "external-reviewer",
+            "skill": "external-reviewer",
+            "kind": "command",
+            "mode": "command-provider",
+            "status": "completed",
+        }],
+    })
+    state_path.write_text(json.dumps(state, indent=2))
+    _push_score(run_cli, state_dir, iteration=1, composite=4.3, min_item=4.0)
+
+    r = run_cli("mark-passes", cwd=state_dir.parent)
+
+    assert r.returncode == 0
+    assert read_state(state_dir)["passes"] is True
+
+
 # ===== --force / --reason =====
 
 

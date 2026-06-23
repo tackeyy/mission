@@ -109,6 +109,50 @@ BUILTIN_SPECIALIST_CANDIDATES = [
     },
 ]
 
+PHASE_ROLE_ORDER = {
+    "planning": [
+        "issue-framing",
+        "hypothesis-design",
+        "architecture-review",
+        "api-design",
+        "schema-review",
+        "planning",
+        "doc-writer",
+    ],
+    "execution": [
+        "implementation",
+        "backend",
+        "frontend",
+        "refactor-review",
+        "documentation",
+        "market-research",
+        "competitor-intelligence",
+        "financial-modeling",
+        "risk-review",
+        "data-analysis",
+    ],
+    "review": [
+        "unit-test",
+        "integration-test",
+        "unit-tester",
+        "code-review",
+        "security-review",
+        "security-reviewer",
+        "performance-review",
+        "infra-review",
+        "strategy-review",
+        "document-review",
+        "visual-quality",
+    ],
+    "synthesis": [
+        "quality-synthesis",
+        "risk-summary",
+        "report-synthesis",
+        "strategy-review",
+        "document-review",
+    ],
+}
+
 PROFILE_KEYWORDS = {
     "documentation": ("readme", "docs", "document", "documentation", "adr", "guide", "reference", "changelog", ".md"),
     "frontend": ("frontend", "react", "vue", "ui", "css", "component", "browser", "screenshot", "accessibility"),
@@ -118,7 +162,18 @@ PROFILE_KEYWORDS = {
     "testing": ("test", "pytest", "jest", "e2e", "playwright", "coverage", "flaky"),
     "infra": ("deploy", "deployment", "ci", "docker", "cloud", "observability", "terraform", "github actions"),
     "product": ("prd", "ux", "workflow", "acceptance criteria", "product"),
-    "research": ("research", "market", "competitor", "analysis", "source"),
+    "research": (
+        "research", "market", "competitor", "analysis", "source",
+        "市場", "市場規模", "競合", "差別化", "競争優位", "tam", "sam", "som",
+        "roi", "npv", "収益性", "投資対効果", "リスク", "規制", "感度分析",
+        "戦略", "提案", "executive summary", "recommendation", "positioning",
+    ),
+    "strategy": (
+        "strategy", "strategic", "戦略", "差別化", "競争優位", "positioning",
+        "roadmap", "kpi", "提案", "recommendation",
+    ),
+    "financial": ("roi", "npv", "financial model", "収益性", "投資対効果", "財務", "感度分析"),
+    "risk": ("risk", "リスク", "規制", "scenario", "シナリオ", "compliance"),
 }
 
 HIGH_RISK_KEYWORDS = (
@@ -130,6 +185,8 @@ SPECIALIST_INVOCATION_STATUSES = {
     "selected",
     "started",
     "completed",
+    "prepared",
+    "awaiting-input",
     "inline-applied",
     "skill-tool-applied",
     "skipped",
@@ -146,10 +203,18 @@ SPECIALIST_INVOCATION_MODES = {
 }
 
 SPECIALIST_INVOCATION_REASON_REQUIRED_STATUSES = {
+    "prepared",
+    "awaiting-input",
     "skipped",
     "unavailable",
     "failed",
 }
+
+PREPARATION_ONLY_MARKERS = (
+    "Oracle Browser Review Prepared",
+    "Browser Review Prepared",
+    "Paste the browser oracle review here",
+)
 
 
 def iso_now() -> str:
@@ -800,6 +865,7 @@ def _normalize_candidate(candidate: dict, source: str) -> dict:
     args = _as_list(candidate.get("args"))
     auto_use = candidate.get("auto_use") if isinstance(candidate.get("auto_use"), dict) else {}
     risk = candidate.get("risk") if isinstance(candidate.get("risk"), dict) else {}
+    result_contract = candidate.get("result_contract") if isinstance(candidate.get("result_contract"), dict) else {}
     if kind == "command" and not skill:
         skill = role or command
     return {
@@ -817,6 +883,7 @@ def _normalize_candidate(candidate: dict, source: str) -> dict:
         "confirm": bool(candidate.get("confirm", False)),
         "auto_use": auto_use,
         "risk": risk,
+        "result_contract": result_contract,
     }
 
 
@@ -958,6 +1025,43 @@ def _selection_from_decision(candidates: list[dict], decision: dict) -> tuple[li
     return [], unavailable
 
 
+def build_phase_plan(candidates: list[dict], complexity: str | None = None) -> list[dict]:
+    """Return a bounded advisory provider plan grouped by mission phase."""
+    if not candidates:
+        return []
+    max_per_phase = 1 if complexity in {None, "Simple", "Standard"} else 2
+    plan: list[dict] = []
+    seen_skills: set[str] = set()
+    for phase, preferred_roles in PHASE_ROLE_ORDER.items():
+        phase_candidates = [
+            c for c in candidates
+            if c.get("installed")
+            and phase in (c.get("phases") or [])
+            and str(c.get("skill") or "") not in seen_skills
+        ]
+        if not phase_candidates:
+            continue
+
+        def _phase_key(candidate: dict) -> tuple[int, float, str]:
+            role = str(candidate.get("role") or candidate.get("skill") or "")
+            try:
+                role_rank = preferred_roles.index(role)
+            except ValueError:
+                role_rank = len(preferred_roles)
+            return (role_rank, -float(candidate.get("score") or 0), str(candidate.get("skill") or ""))
+
+        selected = sorted(phase_candidates, key=_phase_key)[:max_per_phase]
+        for candidate in selected:
+            seen_skills.add(str(candidate.get("skill") or ""))
+        plan.append({
+            "phase": phase,
+            "roles": [c.get("role") or c.get("skill") for c in selected],
+            "providers": [c.get("skill") for c in selected],
+            "max_providers": max_per_phase,
+        })
+    return plan
+
+
 def cmd_specialists(args):
     task = getattr(args, "task", "") or ""
     files = _split_csv(getattr(args, "files", None))
@@ -974,6 +1078,7 @@ def cmd_specialists(args):
     )
     decision = decide_specialists(task_profile, candidates)
     selected, unavailable = _selection_from_decision(candidates, decision)
+    phase_plan = build_phase_plan(candidates, getattr(args, "complexity", None))
     result = {
         "ok": True,
         "task_profile": task_profile,
@@ -982,6 +1087,7 @@ def cmd_specialists(args):
         "specialists_selected": selected,
         "specialists_unavailable": unavailable,
         "specialists_decision": decision,
+        "specialists_phase_plan": phase_plan,
     }
 
     if getattr(args, "record_state", False):
@@ -997,6 +1103,7 @@ def cmd_specialists(args):
             data["specialists_selected"] = selected
             data["specialists_unavailable"] = unavailable
             data["specialists_decision"] = decision
+            data["specialists_phase_plan"] = phase_plan
             data["specialists_mode"] = "interactive" if decision.get("prompted_user") else "auto"
             data["updated_at"] = iso_now()
             backup_state(sf)
@@ -1106,6 +1213,34 @@ def _redact_provider_output(text: str) -> str:
     return redacted
 
 
+def _non_template_text_length(text: str, forbidden_markers: list[str]) -> int:
+    cleaned = text
+    for marker in forbidden_markers:
+        cleaned = cleaned.replace(marker, "")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return len(cleaned)
+
+
+def _classify_command_provider_result(provider: dict, exit_code: int | None,
+                                      stdout: str, stderr: str) -> tuple[str, str | None]:
+    if exit_code != 0:
+        return "failed", f"command provider exited with status {exit_code}"
+    contract = provider.get("result_contract") if isinstance(provider.get("result_contract"), dict) else {}
+    forbidden_markers = [str(v) for v in contract.get("forbidden_markers") or PREPARATION_ONLY_MARKERS]
+    combined = "\n".join([stdout or "", stderr or ""])
+    marker_hits = [marker for marker in forbidden_markers if marker and marker in combined]
+    try:
+        min_chars = int(contract.get("min_non_template_chars") or 0)
+    except (TypeError, ValueError):
+        min_chars = 0
+    non_template_len = _non_template_text_length(combined, forbidden_markers)
+    if marker_hits and (not min_chars or non_template_len < min_chars):
+        return "prepared", f"command provider returned preparation-only evidence: {', '.join(marker_hits[:3])}"
+    if min_chars and non_template_len < min_chars:
+        return "prepared", f"command provider evidence below result_contract.min_non_template_chars ({non_template_len} < {min_chars})"
+    return "completed", None
+
+
 def _command_provider_packet(data: dict, provider: dict, args) -> str:
     body = ""
     if getattr(args, "input_file", None):
@@ -1191,15 +1326,15 @@ def cmd_invoke_command_provider(args):
         stdout = ""
         stderr = _redact_provider_output(str(exc))
 
-    status = "completed" if exit_code == 0 else "failed"
+    status, reason = _classify_command_provider_result(provider, exit_code, stdout, stderr)
     completed_at = iso_now()
     entry.update({
         "status": status,
         "completed_at": completed_at,
         "exit_code": exit_code,
     })
-    if status == "failed":
-        entry["reason"] = f"command provider exited with status {exit_code}"
+    if reason:
+        entry["reason"] = reason
     evidence = (
         "# Command Provider Evidence\n\n"
         f"- provider: {entry['skill']}\n"
@@ -1229,6 +1364,94 @@ def _state_relative_path(cwd: Path, path_text: str) -> str:
         return str(rel)
     except ValueError:
         return str(path)
+
+
+def _archive_progress(cwd: Path, data: dict, progress: dict, iteration: int) -> str:
+    archive_dir = state_dir(cwd) / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    gid = (data.get("mission_id") or "unknown")[:8]
+    dst = archive_dir / f"iter-{iteration}-{gid}-progress.md"
+    lines = [
+        f"<!-- mission-progress-meta: session_id={data.get('session_id')} mission_id={data.get('mission_id')} iteration={iteration} updated_at={progress.get('updated_at')} -->",
+        "",
+        "# Mission Progress Checkpoint",
+        "",
+        f"- kind: {progress.get('kind')}",
+        f"- total: {progress.get('total')}",
+        f"- completed: {progress.get('completed')}",
+        f"- remaining: {progress.get('remaining')}",
+        f"- batch_size: {progress.get('batch_size')}",
+        f"- last_unit: {progress.get('last_unit') or ''}",
+        f"- artifact_path: {progress.get('artifact_path') or ''}",
+        "",
+    ]
+    dst.write_text("\n".join(lines), encoding="utf-8")
+    return str(dst)
+
+
+def cmd_progress_update(args):
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
+        sys.exit(1)
+    total = args.total
+    completed = args.completed
+    if total < 0 or completed < 0 or completed > total:
+        print("ERROR: --total/--completed must satisfy 0 <= completed <= total", file=sys.stderr)
+        sys.exit(2)
+    now = iso_now()
+    progress = {
+        "kind": args.kind,
+        "total": total,
+        "completed": completed,
+        "remaining": total - completed,
+        "batch_size": args.batch_size,
+        "last_unit": args.last_unit,
+        "artifact_path": args.artifact,
+        "updated_at": now,
+    }
+    with StateLock(lock_file(cwd)):
+        data = json.loads(sf.read_text())
+        iteration = int(args.iteration if args.iteration is not None else data.get("iteration", 0))
+        archived_to = _archive_progress(cwd, data, progress, iteration)
+        progress["evidence_path"] = _state_relative_path(cwd, archived_to)
+        data["progress"] = progress
+        data["updated_at"] = now
+        backup_state(sf)
+        atomic_write_json(sf, stamp_metadata(data, cwd))
+    print(json.dumps({"ok": True, "progress": progress}, indent=2 if args.json else None, ensure_ascii=False))
+
+
+def cmd_progress_get(args):
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
+        sys.exit(1)
+    data = json.loads(sf.read_text())
+    progress = data.get("progress") or {}
+    if args.json:
+        print(json.dumps({"ok": True, "progress": progress}, indent=2, ensure_ascii=False))
+    elif progress:
+        print(f"progress {progress.get('kind')}: {progress.get('completed')}/{progress.get('total')} remaining={progress.get('remaining')}")
+    else:
+        print("progress: none")
+
+
+def cmd_progress_clear(args):
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
+        sys.exit(1)
+    with StateLock(lock_file(cwd)):
+        data = json.loads(sf.read_text())
+        data.pop("progress", None)
+        data["updated_at"] = iso_now()
+        backup_state(sf)
+        atomic_write_json(sf, stamp_metadata(data, cwd))
+    print(json.dumps({"ok": True}, indent=2 if args.json else None, ensure_ascii=False))
 
 
 def cmd_log_specialist_invocation(args):
@@ -1720,6 +1943,23 @@ def cmd_mark_passes(args):
             if open_high > 0:
                 print(
                     f"ERROR: 未解決 High が {open_high} 件あるため合格にできません。High 指摘を全て解消してから再採点してください。",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            specialist_report = candidate_accounting_report(data)
+            if specialist_report.get("accounting_required"):
+                skills = ", ".join(c["skill"] for c in specialist_report.get("required_unaccounted_candidates", []))
+                print(
+                    "ERROR: specialist accounting required before pass: "
+                    f"{skills}. Record used/skipped/unavailable/failed evidence or use user-approved --force.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            if specialist_report.get("result_required"):
+                skills = ", ".join(c["skill"] for c in specialist_report.get("result_required_unmet_candidates", []))
+                print(
+                    "ERROR: required specialist result evidence missing before pass: "
+                    f"{skills}. Required providers must produce completed/inline-applied/skill-tool-applied evidence or use user-approved --force.",
                     file=sys.stderr,
                 )
                 sys.exit(2)
@@ -2422,6 +2662,25 @@ def _build_parser():
     p_stats.add_argument("--until", default=None, help="期間上限 (YYYY-MM-DD, updated_at で比較)")
     p_stats.add_argument("--json", action="store_true", help="JSON 形式で出力")
     p_stats.set_defaults(func=cmd_stats)
+
+    p_progress = sub.add_parser("progress", help="long-running mission の progress checkpoint を記録/取得")
+    progress_sub = p_progress.add_subparsers(dest="progress_cmd", required=True)
+    p_progress_update = progress_sub.add_parser("update", help="progress checkpoint を state と archive に記録")
+    p_progress_update.add_argument("--kind", default="batch", choices=["batch"], help="progress 種別")
+    p_progress_update.add_argument("--total", type=int, required=True)
+    p_progress_update.add_argument("--completed", type=int, required=True)
+    p_progress_update.add_argument("--batch-size", type=int, default=None, dest="batch_size")
+    p_progress_update.add_argument("--last-unit", default=None, dest="last_unit")
+    p_progress_update.add_argument("--artifact", default=None)
+    p_progress_update.add_argument("--iteration", type=int, default=None)
+    p_progress_update.add_argument("--json", action="store_true", help="JSON 形式で出力")
+    p_progress_update.set_defaults(func=cmd_progress_update)
+    p_progress_get = progress_sub.add_parser("get", help="progress checkpoint を表示")
+    p_progress_get.add_argument("--json", action="store_true", help="JSON 形式で出力")
+    p_progress_get.set_defaults(func=cmd_progress_get)
+    p_progress_clear = progress_sub.add_parser("clear", help="progress checkpoint を削除")
+    p_progress_clear.add_argument("--json", action="store_true", help="JSON 形式で出力")
+    p_progress_clear.set_defaults(func=cmd_progress_clear)
 
     p_spec = sub.add_parser("specialists", help="specialist skill の discovery / recommend / state 記録")
     spec_sub = p_spec.add_subparsers(dest="specialists_cmd", required=True)

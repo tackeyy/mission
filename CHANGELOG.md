@@ -14,13 +14,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added OSS portability guardrails in `AGENTS.md`, `CLAUDE.md`, and ADR-001 so personal/private specialist skills stay in user or project registries instead of public defaults.
 - Added `mission-state.py specialists accounting --json` as a pre-completion warning that reports available specialist/provider candidates without a terminal decision trail.
 - Shared candidate-accounting logic between `mission-state.py` and `scripts/mission-audit.py` so high-risk candidate findings use the same rules in live checks and retrospective audits.
+- Added a stable repository-root `scripts/mission-state.py` wrapper for the canonical state CLI.
+- Added `mission-state.py progress update/get/clear` checkpoints for long-running batches, with archived progress evidence and audit output on slow-session lines.
+- Specialist recommendations now include a bounded `specialists_phase_plan` for development and strategy-style registries without embedding maintainer-local skill names.
 
 ### Changed
 - Refined Complex specialist accounting to require explicit terminal decisions only for risk-bearing candidates, preserving hackable user plugins as optional evidence sources by default.
 - Database/backend candidates now require strong database signals such as schema, migration, query, SQL, or persistence before they are treated as high-risk accounting candidates.
+- Command providers can now classify preparation-only or too-short output as `prepared` using `result_contract`, preventing banners from being treated as completed review evidence.
 
 ### Fixed
 - Mission audit now classifies nested `archive/worktree-*/sessions/*.json` copies as resolved archive duplicates, preventing cross-root audits from reporting exact live/archive copies as P1 `duplicate-state` findings.
+- `mission-state.py mark-passes` now blocks required specialist providers that lack applied result evidence, so `prepared`, `skipped`, or `failed` evidence cannot satisfy strict required-provider gates.
 
 ## [1.0.4] - 2026-06-22
 

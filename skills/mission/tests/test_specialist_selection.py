@@ -172,6 +172,7 @@ def test_recommend_record_state_persists_selection_metadata(run_cli, tmp_path):
     assert state["specialists_selected"] == data["specialists_selected"]
     assert state["specialists_unavailable"] == data["specialists_unavailable"]
     assert state["specialists_decision"] == data["specialists_decision"]
+    assert state["specialists_phase_plan"] == data["specialists_phase_plan"]
     assert state["specialists_mode"] == "auto"
 
 
@@ -361,3 +362,85 @@ def test_missing_command_provider_degrades_to_core_reviewers(run_cli, tmp_path):
     assert data["specialists_selected"] == []
     assert data["specialists_unavailable"][0]["kind"] == "command"
     assert data["specialists_unavailable"][0]["skill"] == "missing-reviewer"
+
+
+def test_recommend_builds_phase_plan_for_development_registry(run_cli, tmp_path):
+    registry = tmp_path / ".mission" / "specialists.yml"
+    registry.parent.mkdir()
+    registry.write_text(json.dumps({
+        "version": 1,
+        "specialists": [
+            {
+                "role": "backend",
+                "skill": "backend-provider",
+                "task_profiles": ["backend"],
+                "phases": ["execution"],
+            },
+            {
+                "role": "unit-tester",
+                "skill": "unit-test-provider",
+                "task_profiles": ["testing", "backend"],
+                "phases": ["review"],
+            },
+        ],
+    }))
+
+    r = run_cli(
+        *_recommend_args(
+        "--task", "Implement backend API behavior and unit tests",
+        "--complexity", "Complex",
+        "--installed-skills", "backend-provider,unit-test-provider",
+        "--json",
+        ),
+        cwd=tmp_path,
+    )
+
+    data = _json_result(r)
+    phases = {item["phase"]: item for item in data["specialists_phase_plan"]}
+    assert phases["execution"]["providers"] == ["backend-provider"]
+    assert phases["review"]["providers"] == ["unit-test-provider"]
+
+
+def test_recommend_classifies_strategy_registry_without_private_taxonomy(run_cli, tmp_path):
+    registry = tmp_path / ".mission" / "specialists.yml"
+    registry.parent.mkdir()
+    registry.write_text(json.dumps({
+        "version": 1,
+        "specialists": [
+            {
+                "role": "market-research",
+                "skill": "market-research-provider",
+                "task_profiles": ["research", "strategy"],
+                "phases": ["planning", "execution"],
+            },
+            {
+                "role": "financial-modeling",
+                "skill": "financial-model-provider",
+                "task_profiles": ["financial", "strategy"],
+                "phases": ["execution"],
+            },
+            {
+                "role": "strategy-review",
+                "skill": "strategy-review-provider",
+                "task_profiles": ["strategy", "risk"],
+                "phases": ["review", "synthesis"],
+            },
+        ],
+    }))
+
+    r = run_cli(
+        *_recommend_args(
+        "--task", "市場規模と競合差別化を踏まえてROIとリスクを整理する戦略提案",
+        "--complexity", "Critical",
+        "--installed-skills", "market-research-provider,financial-model-provider,strategy-review-provider",
+        "--json",
+        ),
+        cwd=tmp_path,
+    )
+
+    data = _json_result(r)
+    assert data["task_profile"]["primary"] in {"research", "strategy", "financial", "risk"}
+    providers_by_phase = {item["phase"]: item["providers"] for item in data["specialists_phase_plan"]}
+    assert "market-research-provider" in providers_by_phase["planning"]
+    assert "financial-model-provider" in providers_by_phase["execution"]
+    assert "strategy-review-provider" in providers_by_phase["review"]

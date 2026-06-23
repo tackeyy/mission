@@ -132,6 +132,9 @@ Phase 1 classifies the mission into one primary `task_profile` and zero or more 
 | `infra` | deployment, CI, Docker, cloud, observability |
 | `product` | PRD, user workflow, UX, acceptance criteria |
 | `research` | market, competitor, source-backed analysis |
+| `strategy` | strategic positioning, roadmap, KPI, differentiation, recommendation |
+| `financial` | ROI, NPV, business case, revenue model, sensitivity analysis |
+| `risk` | risk, regulation, compliance, scenario analysis |
 | `general` | no strong specialist signal |
 
 Classification should be recorded as evidence, not treated as an irreversible decision. If later files or reviews reveal a better profile, update the audit note and specialist list for the next iteration.
@@ -166,6 +169,8 @@ python3 skills/mission/bin/mission-state.py specialists recommend \
 
 The command classifies `task_profile`, discovers installed skills and command providers, ranks candidates, and returns a `specialists_decision`. It does not install external skills or execute command providers. Use `--record-state` only after `init` when the recommendation should be persisted to the current `.mission-state` session.
 
+The recommendation output also includes `specialists_phase_plan`, a bounded advisory plan grouped by `planning`, `execution`, `review`, and `synthesis`. It is a scheduling hint, not a second orchestrator loop. It helps development registries place implementation providers before test/review providers, and strategy registries place market/financial evidence before strategy synthesis. The plan must remain based on generic roles from registries, not maintainer-local skill names.
+
 Command provider invocation is a separate evidence step:
 
 ```bash
@@ -178,6 +183,17 @@ python3 skills/mission/bin/mission-state.py specialists invoke-command \
 ```
 
 The input file is wrapped in a JSON packet with mission, provider, iteration, and phase metadata, then sent to the configured command over stdin. The provider cannot set `passes`, cannot call `mark-passes`, and cannot alter mission state except through the invocation evidence recorded by the runner.
+
+Command providers can define a result contract:
+
+```yaml
+result_contract:
+  min_non_template_chars: 200
+  forbidden_markers:
+    - "Browser Review Prepared"
+```
+
+If a command exits successfully but only returns a preparation banner or less than the required non-template evidence, the runner records `status: prepared` instead of `completed`. `prepared` and `awaiting-input` are terminal accounting statuses for transparency, but they are not applied result evidence. A provider marked `required: true` must produce `completed`, `inline-applied`, or `skill-tool-applied` evidence before `mission-state.py mark-passes` can succeed.
 
 For providers with `risk.first_use_confirmation: true`, record consent after a user approval boundary:
 
