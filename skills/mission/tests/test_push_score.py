@@ -1,5 +1,7 @@
 """push-score サブコマンドのテスト (T1: RED → T2: GREEN)."""
 
+import json
+
 
 def test_push_score_appends_to_empty_history(state_dir, run_cli, read_state):
     r = run_cli("push-score",
@@ -102,17 +104,21 @@ def test_push_score_scoring_output_missing_file_warns_not_fail(state_dir, run_cl
     assert len(s["score_history"]) == 1
 
 
-def test_push_score_without_scoring_output_works_as_before(state_dir, run_cli, read_state):
-    """--scoring-output を渡さない既存呼び出しが従来通り動く (後方互換)."""
+def test_push_score_without_scoring_output_generates_archive(state_dir, run_cli, read_state):
+    """--scoring-output を渡さない場合も最小 scoring evidence を archive する."""
     r = run_cli("push-score", "--iteration", "2", "--composite", "4.5", "--min-item", "4.0",
-                "--items", '{"a": 4.5}', cwd=state_dir.parent)
+                "--items", '{"a": 4.5}', "--notes", "scored inline",
+                cwd=state_dir.parent)
     assert r.returncode == 0
+    data = json.loads(r.stdout)
     s = read_state(state_dir)
     assert len(s["score_history"]) == 1
-    # archive ディレクトリは作られないか、空のままでよい
-    archive_dir = state_dir / "archive"
-    if archive_dir.exists():
-        assert not (archive_dir / "iter-2-abc12345-scoring.md").exists()
+    archive_path = state_dir / "archive" / "iter-2-abc12345-scoring.md"
+    assert data["archived_to"] == str(archive_path)
+    content = archive_path.read_text(encoding="utf-8")
+    assert "generated=true" in content
+    assert "composite: 4.5" in content
+    assert "scored inline" in content
 
 
 def test_push_score_scoring_output_overwrites_existing(state_dir, run_cli, tmp_path):

@@ -301,6 +301,11 @@ def halt_or_incomplete_bucket(record: StateRecord) -> str:
     return "other-halt"
 
 
+def is_active_no_score_checkpoint(record: StateRecord) -> bool:
+    """Return true for live mission sessions that have not reached first scoring."""
+    return classify(record.state) == "incomplete" and not record.state.get("score_history")
+
+
 def slow_session_bucket(record: StateRecord, slow_threshold_sec: int) -> str:
     state = record.state
     cls = classify(state)
@@ -495,6 +500,8 @@ def aggregate(
     slow_threshold_sec: int,
 ) -> dict[str, Any]:
     classes = [classify(r.state) for r in records]
+    active_no_score_checkpoint = [r for r in records if is_active_no_score_checkpoint(r)]
+    pass_rate_records = [r for r in records if not is_active_no_score_checkpoint(r)]
     durations = [d for r in records if (d := duration_sec(r.state)) is not None]
     composites = [
         entry["composite"]
@@ -560,7 +567,9 @@ def aggregate(
         "halt_count": classes.count("halt"),
         "incomplete_count": classes.count("incomplete"),
         "abandoned_count": classes.count("abandoned"),
-        "pass_rate": pass_count / len(records) if records else None,
+        "active_no_score_checkpoint_count": len(active_no_score_checkpoint),
+        "pass_rate_denominator": len(pass_rate_records),
+        "pass_rate": pass_count / len(pass_rate_records) if pass_rate_records else None,
         "forced_pass_count": len(forced),
         "ungated_pass_count": len(ungated),
         "duplicate_group_count": len(duplicates),
@@ -724,7 +733,8 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
         "",
         f"- total sessions: {stats['total_sessions']}",
         f"- pass / halt / incomplete / abandoned: {stats['pass_count']} / {stats['halt_count']} / {stats['incomplete_count']} / {stats['abandoned_count']}",
-        f"- pass rate: {fmt_float(stats['pass_rate'] * 100 if stats['pass_rate'] is not None else None, 1)}%",
+        f"- pass rate: {fmt_float(stats['pass_rate'] * 100 if stats['pass_rate'] is not None else None, 1)}% (denominator: {stats['pass_rate_denominator']})",
+        f"- active no-score checkpoints excluded from pass rate: {stats['active_no_score_checkpoint_count']}",
         f"- forced pass: {stats['forced_pass_count']}",
         f"- ungated pass: {stats['ungated_pass_count']}",
         f"- duplicate state groups: {stats['duplicate_group_count']}",

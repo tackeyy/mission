@@ -216,6 +216,47 @@ def test_audit_reports_halt_incomplete_slow_and_low_score_buckets(tmp_path):
     assert data["low_score_pass_breakdown"]["valid-threshold-pass"] == 1
 
 
+def test_audit_pass_rate_excludes_active_no_score_sessions(tmp_path):
+    _write_state(
+        tmp_path / "passed" / ".mission-state" / "sessions" / "passed.json",
+        project_root=str(tmp_path / "passed"),
+        session_id="passed",
+    )
+    _write_state(
+        tmp_path / "active" / ".mission-state" / "sessions" / "active.json",
+        project_root=str(tmp_path / "active"),
+        passes=False,
+        loop_active=True,
+        score_history=[],
+        halt_reason="",
+        session_id="active-no-score",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-18",
+            "--min-pass-rate",
+            "0.9",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    data = json.loads(result.stdout)
+    assert data["total_sessions"] == 2
+    assert data["active_no_score_checkpoint_count"] == 1
+    assert data["pass_rate_denominator"] == 1
+    assert data["pass_rate"] == 1.0
+    assert all(f["code"] != "low-pass-rate" for f in data["findings"])
+
+
 def test_audit_reports_missing_scoring_evidence_in_json(tmp_path):
     _write_state(
         tmp_path / "missing" / ".mission-state" / "sessions" / "missing.json",
@@ -423,6 +464,52 @@ def test_audit_reports_unselected_specialist_invocation(tmp_path):
     assert data["unselected_specialist_invocation_breakdown"]["dev-doc-writer"] == 1
     assert data["specialist_invocation_gap_count"] == 0
     assert any(f["code"] == "unselected-specialist-invocation" for f in data["findings"])
+
+
+def test_audit_accepts_explicit_specialist_selection_metadata(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "sess-a.json",
+        started_at="2026-06-20T10:10:00Z",
+        created_at_session="2026-06-20T10:10:00Z",
+        task_profile={"primary": "documentation"},
+        specialists_decision={"policy": "auto"},
+        specialists_selected=[
+            {
+                "role": "doc-writer",
+                "skill": "dev-doc-writer",
+                "status": "selected",
+                "selection_source": "user-instruction",
+            },
+        ],
+        specialist_invocations=[
+            {
+                "skill": "dev-doc-writer",
+                "status": "inline-applied",
+                "mode": "codex-inline",
+                "selection_source": "user-instruction",
+            },
+        ],
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-18",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    data = json.loads(result.stdout)
+    assert data["unselected_specialist_invocation_count"] == 0
+    assert data["specialist_invocation_gap_count"] == 0
+    assert all(f["code"] != "unselected-specialist-invocation" for f in data["findings"])
 
 
 def test_audit_reports_candidate_only_specialists(tmp_path):
