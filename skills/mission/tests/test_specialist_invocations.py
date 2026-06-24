@@ -91,6 +91,33 @@ def test_log_invocation_records_codex_inline_usage(state_dir, run_cli, read_stat
     assert entry["status"] == "inline-applied"
 
 
+def test_log_invocation_selection_source_adds_selection_metadata(state_dir, run_cli, read_state):
+    r = run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "planning",
+        "--role", "doc-writer",
+        "--skill", "dev-doc-writer",
+        "--mode", "codex-inline",
+        "--status", "inline-applied",
+        "--selection-source", "user-instruction",
+        "--notes", "User explicitly requested this specialist",
+        "--json",
+        cwd=state_dir.parent,
+    )
+
+    data = _json_result(r)
+    state = read_state(state_dir)
+    entry = state["specialist_invocations"][0]
+    selected = state["specialists_selected"][0]
+    assert entry["selection_source"] == "user-instruction"
+    assert selected["skill"] == "dev-doc-writer"
+    assert selected["status"] == "selected"
+    assert selected["selection_source"] == "user-instruction"
+    assert selected["source"] == "user-instruction:log-invocation"
+    assert data["selected_entry"] == selected
+
+
 def test_log_invocation_records_unavailable_without_evidence(state_dir, run_cli, read_state):
     run_cli(
         "specialists", "log-invocation",
