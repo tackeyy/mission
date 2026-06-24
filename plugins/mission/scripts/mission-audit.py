@@ -705,6 +705,8 @@ def self_improvement_prompt(rows: list[tuple[str, str, str]], roots: list[Path],
 制約:
 - 不可逆操作、外部送信、本番反映は行わない
 - まず P0/P1 を最大3件に絞る
+- GitHub Issue を新規作成する前に open/closed issue を検索し、重複確認の検索語・関連 issue 番号・非重複判断を issue 本文に記録する
+- GitHub Issue を新規作成する前に development/tech-lead review を行い、正確性・実装方針・テスト計画・OSS portability の確認結果を issue 本文に記録する
 - 修正する場合はテストを追加し、既存テストを通す
 - `skills/mission/` と `plugins/mission/` の同期が必要な変更は同期テストも通す
 - 完了前に `python3 scripts/mission-audit.py {root_args} {period}` を再実行して forced/ungated/duplicate/halt の改善を確認する

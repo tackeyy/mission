@@ -316,6 +316,10 @@ def test_audit_self_improvement_prompt_mentions_findings(tmp_path):
     )
     assert "/mission scripts/mission-audit.py" in result.stdout
     assert "`halted-runs`" in result.stdout
+    assert "open/closed issue" in result.stdout
+    assert "重複確認" in result.stdout
+    assert "development/tech-lead review" in result.stdout
+    assert "OSS portability" in result.stdout
 
 
 def test_audit_reports_selected_specialist_without_invocation(tmp_path):

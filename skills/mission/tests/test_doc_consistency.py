@@ -234,3 +234,12 @@ def test_release_checklist_links_versioning_policy_before_version_bump():
         assert policy in txt, f"{rel} must link {policy}"
         assert "distribution release" in txt, f"{rel} must distinguish distribution release"
         assert "[Unreleased]" in txt, f"{rel} must preserve unreleased accumulation rule"
+
+
+def test_self_improvement_issue_creation_requires_duplicate_check_and_review():
+    """Audit-driven issue creation must include duplicate-check and tech-lead review evidence."""
+    txt = _r(REFS / "self-improvement.md").lower()
+    assert "open and closed issues" in txt
+    assert "not a duplicate" in txt
+    assert "development/tech-lead review" in txt
+    assert "oss portability" in txt
