@@ -210,6 +210,11 @@ SPECIALIST_INVOCATION_REASON_REQUIRED_STATUSES = {
     "failed",
 }
 
+SPECIALIST_SELECTION_SOURCES = {
+    "user-instruction",
+    "manual",
+}
+
 PREPARATION_ONLY_MARKERS = (
     "Oracle Browser Review Prepared",
     "Browser Review Prepared",
@@ -1495,8 +1500,33 @@ def cmd_log_specialist_invocation(args):
             entry["reason"] = reason
         elif args.status in SPECIALIST_INVOCATION_REASON_REQUIRED_STATUSES and notes:
             entry["reason"] = notes
+        if getattr(args, "selection_source", None):
+            entry["selection_source"] = args.selection_source
 
         data = stamp_metadata(data, cwd)
+        selected_entry = None
+        if getattr(args, "selection_source", None):
+            selected = data.setdefault("specialists_selected", [])
+            selected_skills = {
+                str(item.get("skill"))
+                for item in selected
+                if isinstance(item, dict) and item.get("skill")
+            }
+            if args.skill not in selected_skills:
+                selected_entry = {
+                    "role": args.role,
+                    "skill": args.skill,
+                    "kind": "skill",
+                    "phases": [args.phase],
+                    "required": False,
+                    "status": "selected",
+                    "source": f"{args.selection_source}:log-invocation",
+                    "selection_source": args.selection_source,
+                    "selected_at": now,
+                }
+                if reason or notes:
+                    selected_entry["reason"] = reason or notes
+                selected.append(selected_entry)
         archived_to = None
         if args.evidence_output:
             archived_to = _archive_specialist_evidence(cwd, args.evidence_output, args.iteration, data, entry)
@@ -1509,6 +1539,8 @@ def cmd_log_specialist_invocation(args):
         atomic_write_json(sf, data)
 
     result = {"ok": True, "entry": entry}
+    if selected_entry:
+        result["selected_entry"] = selected_entry
     if archived_to:
         result["archived_to"] = archived_to
     if getattr(args, "json", False):
@@ -1753,6 +1785,24 @@ def normalize_score_items(items: dict):
     return normalized, unknown, collisions
 
 
+def _scoring_archive_path(cwd: Path, iteration: int, data: dict) -> Path:
+    archive_dir = state_dir(cwd) / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    # H1 (2026-06-10): mission_id を含めて連続ランの上書き消失を防止
+    gid = (data.get("mission_id") or "unknown")[:8]
+    return archive_dir / f"iter-{iteration}-{gid}-scoring.md"
+
+
+def _scoring_metadata_header(data: dict, entry: dict, iteration: int, *, generated: bool = False) -> str:
+    # #3 (2026-06-13): scoring md 単独で起動元を追えるようメタヘッダを前置 (HTML コメント=grep 可能)
+    generated_attr = " generated=true" if generated else ""
+    return (
+        f"<!-- mission-meta: session_id={data.get('session_id')} "
+        f"agent={data.get('agent') or 'unknown'} mission_id={data.get('mission_id')} "
+        f"iteration={iteration} timestamp={entry['timestamp']}{generated_attr} -->\n"
+    )
+
+
 def _archive_scoring_output(cwd: Path, scoring_output: str, iteration: int,
                             data: dict, entry: dict) -> str | None:
     """Scorer の md 出力を archive/iter-N-<mission8>-scoring.md に保存し起動元メタを前置する。
@@ -1763,18 +1813,32 @@ def _archive_scoring_output(cwd: Path, scoring_output: str, iteration: int,
     if not (src.exists() and src.is_file()):
         print(f"WARNING: --scoring-output のファイルが見つかりません: {src}", file=sys.stderr)
         return None
-    archive_dir = state_dir(cwd) / "archive"
-    archive_dir.mkdir(parents=True, exist_ok=True)
-    # H1 (2026-06-10): mission_id を含めて連続ランの上書き消失を防止
-    gid = (data.get("mission_id") or "unknown")[:8]
-    dst = archive_dir / f"iter-{iteration}-{gid}-scoring.md"
-    # #3 (2026-06-13): scoring md 単独で起動元を追えるようメタヘッダを前置 (HTML コメント=grep 可能)
-    meta = (
-        f"<!-- mission-meta: session_id={data.get('session_id')} "
-        f"agent={data.get('agent') or 'unknown'} mission_id={data.get('mission_id')} "
-        f"iteration={iteration} timestamp={entry['timestamp']} -->\n"
-    )
+    dst = _scoring_archive_path(cwd, iteration, data)
+    meta = _scoring_metadata_header(data, entry, iteration)
     dst.write_text(meta + src.read_text(encoding="utf-8"), encoding="utf-8")
+    return str(dst)
+
+
+def _archive_generated_scoring_output(cwd: Path, iteration: int, data: dict, entry: dict) -> str:
+    """Persist score arguments as minimal scoring evidence when no scorer md is supplied."""
+    dst = _scoring_archive_path(cwd, iteration, data)
+    items = entry.get("items") if isinstance(entry.get("items"), dict) else {}
+    item_lines = "\n".join(f"- {key}: {value}" for key, value in sorted(items.items()))
+    notes = entry.get("notes") or ""
+    body = (
+        _scoring_metadata_header(data, entry, iteration, generated=True)
+        + f"# Generated Scoring Evidence - Iteration {iteration}\n\n"
+        + "This file was generated by `mission-state.py push-score` because `--scoring-output` was not provided.\n\n"
+        + f"- composite: {entry.get('composite')}\n"
+        + f"- min_item: {entry.get('min_item')}\n"
+        + f"- open_high: {entry.get('open_high', 0)}\n"
+        + "\n## Items\n\n"
+        + (item_lines or "- none")
+        + "\n"
+    )
+    if notes:
+        body += f"\n## Notes\n\n{notes}\n"
+    dst.write_text(body, encoding="utf-8")
     return str(dst)
 
 
@@ -1879,9 +1943,10 @@ def cmd_push_score(args):
         backup_state(sf)
         atomic_write_json(sf, data)
 
-    archived_to = None
     if args.scoring_output:
         archived_to = _archive_scoring_output(cwd, args.scoring_output, args.iteration, data, entry)
+    else:
+        archived_to = _archive_generated_scoring_output(cwd, args.iteration, data, entry)
 
     result = {"ok": True, "appended": entry}
     if archived_to:
@@ -2725,6 +2790,8 @@ def _build_parser():
     p_log.add_argument("--completed-at", default=None, dest="completed_at")
     p_log.add_argument("--reason", default=None, help="skip/unavailable/failed 等の判断理由")
     p_log.add_argument("--notes", default=None)
+    p_log.add_argument("--selection-source", default=None, choices=sorted(SPECIALIST_SELECTION_SOURCES),
+                       help="明示選択された specialist の selection metadata も同時に記録する")
     p_log.add_argument("--evidence-output", default=None,
                        help="specialist 出力 Markdown。指定時 archive/iter-N-<mission8>-specialist-<skill>.md に保存")
     p_log.add_argument("--json", action="store_true", help="JSON 形式で出力")
