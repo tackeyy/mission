@@ -208,7 +208,7 @@ state.json の `assumptions_path` が指すファイル (デフォルト `.missi
 
 Phase 1 で選定した specialist は Phase 2-6 の任意 evidence provider として、計画制約・実装補助・差分レビュー・採点根拠・Critic 改善案に使う。専門家不在や Codex で Skill 呼び出し不可の場合は、その欠落を記録して core subskills のみで進める。
 
-**Specialist/provider 呼び出しログ (Issue #31/#42/#49/#53/#55/#56/#57)**: `specialists_selected` は選定意図であり、実呼び出し証跡ではない。specialist/provider を選定・呼び出し・inline 適用・skip・unavailable・failed にした場合は、orchestrator が `mission-state.py specialists log-invocation` を呼び、`specialist_invocations` に append する。Codex で `Skill(...)` が使えず visible skill instructions を同一コンテキストで適用した場合は、`--mode codex-inline --status inline-applied` として正直に記録する。Claude Code 等で Skill tool を実呼び出しした場合は `--mode skill-tool --status skill-tool-applied` を使う。`kind: command` provider は `mission-state.py specialists invoke-command --provider <role> --iteration <N> --phase <phase> --input-file <path>` で argv/stdin/stdout 経由に限定して実行し、`--mode command-provider` の evidence として記録する。成果物やレビュー出力がある場合は `--evidence-output` または command runner の archive で `.mission-state/archive/iter-N-<mission8>-specialist-<skill>.md` に永続化する。command provider が preparation banner や result_contract 未満の出力しか返さない場合は `status=prepared` として記録し、適用済み証跡には数えない。`Critical` mission では available candidate を放置せず、各 candidate を used / skipped / unavailable / failed / prepared のいずれかで説明する。`Complex` mission でも security/testing/infra など高リスク candidate は `--status skipped --reason "<判断理由>"` 等で明示する。`database` candidate は schema/migration/query/persistence 等の強いシグナルがある場合だけ高リスク accounting 対象にする。完了前に `mission-state.py specialists accounting --json` を実行し、`required_unaccounted_candidates` または `result_required_unmet_candidates` が残る場合は `mark-passes` が reject するため、required provider は completed/inline-applied/skill-tool-applied の結果証跡を残してから進む。
+**Specialist/provider 呼び出しログ (Issue #31/#42/#49/#53/#55/#56/#57)**: `specialists_selected` は選定意図であり、実呼び出し証跡ではない。specialist/provider を選定・呼び出し・inline 適用・skip・unavailable・failed にした場合は、orchestrator が `mission-state.py specialists log-invocation` を呼び、`specialist_invocations` に append する。Codex で `Skill(...)` が使えず visible skill instructions を同一コンテキストで適用した場合は、`--mode codex-inline --status inline-applied` として正直に記録する。Claude Code 等で Skill tool を実呼び出しした場合は `--mode skill-tool --status skill-tool-applied` を使う。`kind: command` provider は `mission-state.py specialists invoke-command --provider <role> --iteration <N> --phase <phase> --input-file <path>` で argv/stdin/stdout 経由に限定して実行し、`--mode command-provider` の evidence として記録する。ask-user 後に確認された candidate を適用する場合は `--selection-source confirmed-user` を付け、broad/bounded orchestrator は execution に使わず `--bounded-purpose` で plan/review 等の限定用途を残す。成果物やレビュー出力がある場合は `--evidence-output` または command runner の archive で `.mission-state/archive/iter-N-<mission8>-specialist-<skill>.md` に永続化する。command provider が preparation banner や result_contract 未満の出力しか返さない場合は `status=prepared` として記録し、適用済み証跡には数えない。`Critical` mission では available candidate を放置せず、各 candidate を used / skipped / unavailable / failed / prepared のいずれかで説明する。`Complex` mission でも security/testing/infra など高リスク candidate は `--status skipped --reason "<判断理由>"` 等で明示する。`database` candidate は schema/migration/query/persistence 等の強いシグナルがある場合だけ高リスク accounting 対象にする。完了前に `mission-state.py specialists accounting --json` と `mission-state.py specialists summary --json` を実行し、`required_unaccounted_candidates` または `result_required_unmet_candidates` が残る場合は `mark-passes` が reject するため、required provider は completed/inline-applied/skill-tool-applied の結果証跡を残してから進む。
 
 **Reviewer N 名は必ず単一メッセージ内の複数 Skill 呼び出しで起動する (P4)**。別メッセージ分割でも非同期並列になることは実測済みだが、挙動保証がない (実測データ: refs/gotchas.md §1)。
 
@@ -358,7 +358,7 @@ cp .mission-state/state.json "$DEST/" && cp -r .mission-state/archive "$DEST/" 2
 【ミッション】<構造化ミッション>
 【主な成果物】<ファイルパス1>, <ファイルパス2>, ...
 【スコア内訳】ミッション達成度 X/5, 正確性 X/5, 完成度 X/5, 実用性 X/5, レビュアー合意度 X/5
-【Specialists】selected: <skill... or none> / used: <skill mode:status...> / degraded: <skipped|unavailable|failed...> / unselected-manual: <skill... or none>
+【Specialists】selected: <skill[kind source]... or none> / used: <skill[kind source mode:status]...> / degraded: <skill[kind source status]...> / unselected-manual: <skill[kind source]... or none>
 【次のステップ提案】<...>
 ```
 
@@ -368,7 +368,7 @@ cp .mission-state/state.json "$DEST/" && cp -r .mission-state/archive "$DEST/" 2
 ⏸️ 中断 / 未完了 (Iteration: N / Score: 3.X or 未採点)
 【理由】<致命的ブロッカー / max-iter到達 / 改善見込みなし>
 【現状】<どこまで進んだか>
-【Specialists】selected: <skill... or none> / used: <skill mode:status...> / degraded: <skipped|unavailable|failed...> / unselected-manual: <skill... or none>
+【Specialists】selected: <skill[kind source]... or none> / used: <skill[kind source mode:status]...> / degraded: <skill[kind source status]...> / unselected-manual: <skill[kind source]... or none>
 【判断を仰ぎたい点】Q1. <...>, Q2. <...>
 ```
 

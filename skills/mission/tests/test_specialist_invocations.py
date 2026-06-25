@@ -118,6 +118,231 @@ def test_log_invocation_selection_source_adds_selection_metadata(state_dir, run_
     assert data["selected_entry"] == selected
 
 
+def test_log_invocation_requires_selection_source_after_ask_user_confirmation(state_dir, run_cli):
+    state_path = state_dir / "sessions" / "test.json"
+    state = json.loads(state_path.read_text())
+    state.update({
+        "specialists_decision": {"policy": "confirm", "action": "ask-user", "prompted_user": True},
+        "specialists_selected": [],
+        "specialists_candidates": [
+            {"role": "reviewer", "skill": "example-reviewer", "kind": "skill", "status": "available"},
+        ],
+    })
+    state_path.write_text(json.dumps(state))
+
+    r = run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "review",
+        "--role", "reviewer",
+        "--skill", "example-reviewer",
+        "--mode", "codex-inline",
+        "--status", "inline-applied",
+        cwd=state_dir.parent,
+    )
+
+    assert r.returncode != 0
+    assert "--selection-source confirmed-user" in r.stderr
+
+
+def test_log_invocation_confirmed_user_selection_resolves_ask_user_metadata(state_dir, run_cli, read_state):
+    state_path = state_dir / "sessions" / "test.json"
+    state = json.loads(state_path.read_text())
+    state.update({
+        "specialists_decision": {"policy": "confirm", "action": "ask-user", "prompted_user": True},
+        "specialists_selected": [],
+        "specialists_candidates": [
+            {"role": "reviewer", "skill": "example-reviewer", "kind": "skill", "status": "available"},
+        ],
+    })
+    state_path.write_text(json.dumps(state))
+
+    run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "review",
+        "--role", "reviewer",
+        "--skill", "example-reviewer",
+        "--mode", "codex-inline",
+        "--status", "inline-applied",
+        "--selection-source", "confirmed-user",
+        cwd=state_dir.parent,
+        check=True,
+    )
+
+    state = read_state(state_dir)
+    assert state["specialist_invocations"][0]["selection_source"] == "confirmed-user"
+    assert state["specialists_selected"][0]["selection_source"] == "confirmed-user"
+
+
+def test_log_invocation_rejects_bounded_orchestrator_execution(state_dir, run_cli):
+    state_path = state_dir / "sessions" / "test.json"
+    state = json.loads(state_path.read_text())
+    state.update({
+        "specialists_selected": [{
+            "role": "methodology",
+            "skill": "broad-methodology",
+            "kind": "skill",
+            "status": "selected",
+            "source": "project:.mission/specialists.yml",
+            "bounded_use": True,
+            "bounded_purpose_required": True,
+        }],
+    })
+    state_path.write_text(json.dumps(state))
+
+    r = run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "execution",
+        "--role", "methodology",
+        "--skill", "broad-methodology",
+        "--mode", "codex-inline",
+        "--status", "inline-applied",
+        "--bounded-purpose", "Produce a constrained implementation checklist only",
+        cwd=state_dir.parent,
+    )
+
+    assert r.returncode != 0
+    assert "cannot be applied in execution phase" in r.stderr
+
+
+def test_log_invocation_requires_bounded_purpose_for_broad_orchestrator(state_dir, run_cli):
+    state_path = state_dir / "sessions" / "test.json"
+    state = json.loads(state_path.read_text())
+    state.update({
+        "specialists_selected": [{
+            "role": "methodology",
+            "skill": "broad-methodology",
+            "kind": "skill",
+            "status": "selected",
+            "source": "project:.mission/specialists.yml",
+            "bounded_use": True,
+            "bounded_purpose_required": True,
+        }],
+    })
+    state_path.write_text(json.dumps(state))
+
+    r = run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "review",
+        "--role", "methodology",
+        "--skill", "broad-methodology",
+        "--mode", "codex-inline",
+        "--status", "inline-applied",
+        cwd=state_dir.parent,
+    )
+
+    assert r.returncode != 0
+    assert "--bounded-purpose" in r.stderr
+
+
+def test_log_invocation_records_bounded_orchestrator_purpose(state_dir, run_cli, read_state):
+    state_path = state_dir / "sessions" / "test.json"
+    state = json.loads(state_path.read_text())
+    state.update({
+        "specialists_selected": [{
+            "role": "methodology",
+            "skill": "broad-methodology",
+            "kind": "skill",
+            "status": "selected",
+            "source": "project:.mission/specialists.yml",
+            "bounded_use": True,
+            "bounded_purpose_required": True,
+        }],
+    })
+    state_path.write_text(json.dumps(state))
+
+    run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "review",
+        "--role", "methodology",
+        "--skill", "broad-methodology",
+        "--mode", "codex-inline",
+        "--status", "inline-applied",
+        "--bounded-purpose", "Review the implementation plan only; mission owns execution",
+        cwd=state_dir.parent,
+        check=True,
+    )
+
+    entry = read_state(state_dir)["specialist_invocations"][0]
+    assert entry["bounded_purpose"] == "Review the implementation plan only; mission owns execution"
+
+
+def test_specialists_summary_reports_kind_source_and_unselected_manual(state_dir, run_cli, read_state):
+    state_path = state_dir / "sessions" / "test.json"
+    state = json.loads(state_path.read_text())
+    state.update({
+        "specialists_selected": [{
+            "role": "reviewer",
+            "skill": "command-reviewer",
+            "kind": "command",
+            "status": "selected",
+            "source": "project:.mission/specialists.yml",
+            "selection_source": "confirmed-user",
+        }],
+        "specialists_candidates": [{
+            "role": "inline-reviewer",
+            "skill": "inline-reviewer",
+            "kind": "skill",
+            "source": "user:~/.config/mission/specialists.yml",
+        }],
+        "specialist_invocations": [
+            {
+                "iteration": 1,
+                "phase": "review",
+                "role": "reviewer",
+                "skill": "command-reviewer",
+                "mode": "command-provider",
+                "provider_kind": "command",
+                "status": "completed",
+                "selection_source": "confirmed-user",
+                "timestamp": "2026-05-25T00:00:00Z",
+                "evidence_path": ".mission-state/archive/review.md",
+            },
+            {
+                "iteration": 1,
+                "phase": "review",
+                "role": "inline-reviewer",
+                "skill": "inline-reviewer",
+                "mode": "codex-inline",
+                "status": "inline-applied",
+                "timestamp": "2026-05-25T00:00:01Z",
+            },
+            {
+                "iteration": 1,
+                "phase": "review",
+                "role": "missing-reviewer",
+                "skill": "missing-reviewer",
+                "mode": "fallback-core",
+                "status": "unavailable",
+                "reason": "Skill not callable",
+                "timestamp": "2026-05-25T00:00:02Z",
+            },
+        ],
+    })
+    state_path.write_text(json.dumps(state))
+
+    r = run_cli("specialists", "summary", "--json", cwd=state_dir.parent)
+    data = _json_result(r)
+
+    assert data["selected"][0]["kind"] == "command"
+    assert data["selected"][0]["source"] == "project:.mission/specialists.yml"
+    assert data["used"][0]["mode"] == "command-provider"
+    assert data["used"][0]["kind"] == "command"
+    assert data["used"][0]["source"] == "project:.mission/specialists.yml"
+    assert data["used"][1]["skill"] == "inline-reviewer"
+    assert data["used"][1]["kind"] == "skill"
+    assert data["used"][1]["source"] == "user:~/.config/mission/specialists.yml"
+    assert data["degraded"][0]["skill"] == "missing-reviewer"
+    assert data["unselected_manual"][0]["skill"] == "inline-reviewer"
+
+    text = run_cli("specialists", "summary", cwd=state_dir.parent, check=True)
+    assert "command-reviewer[command project:.mission/specialists.yml command-provider:completed]" in text.stdout
+
+
 def test_log_invocation_records_unavailable_without_evidence(state_dir, run_cli, read_state):
     run_cli(
         "specialists", "log-invocation",
@@ -333,6 +558,7 @@ def test_invoke_command_provider_archives_evidence_and_logs_invocation(run_cli, 
 
     run_cli(
         "specialists", "recommend",
+        "--no-default-skill-roots",
         "--task", "Review README documentation",
         "--complexity", "Complex",
         "--record-state",
@@ -383,6 +609,7 @@ def test_invoke_command_provider_records_failure_without_blocking_optional_provi
     }))
     run_cli(
         "specialists", "recommend",
+        "--no-default-skill-roots",
         "--task", "Review README documentation",
         "--complexity", "Complex",
         "--record-state",
@@ -431,6 +658,7 @@ def test_invoke_command_provider_marks_preparation_only_output_as_not_applied(ru
     }))
     run_cli(
         "specialists", "recommend",
+        "--no-default-skill-roots",
         "--task", "Review README documentation",
         "--complexity", "Complex",
         "--record-state",
@@ -456,6 +684,140 @@ def test_invoke_command_provider_marks_preparation_only_output_as_not_applied(ru
     assert "preparation-only" in entry["reason"]
 
 
+def test_invoke_command_provider_rejects_preparation_marker_even_with_long_output(run_cli, tmp_path):
+    run_cli("init", "command provider prepared long mission", "--complexity", "Complex", cwd=tmp_path, check=True)
+    helper = tmp_path / "provider.py"
+    helper.write_text(
+        "print('Oracle Browser Review Prepared')\n"
+        "print('x' * 500)\n",
+        encoding="utf-8",
+    )
+    registry = tmp_path / ".mission" / "specialists.yml"
+    registry.parent.mkdir()
+    registry.write_text(json.dumps({
+        "version": 1,
+        "specialists": [{
+            "role": "oracle-reviewer",
+            "kind": "command",
+            "command": sys.executable,
+            "args": [str(helper)],
+            "task_profiles": ["documentation"],
+            "result_contract": {"min_non_template_chars": 20},
+        }],
+    }))
+    run_cli(
+        "specialists", "recommend",
+        "--no-default-skill-roots",
+        "--task", "Review README documentation",
+        "--complexity", "Complex",
+        "--record-state",
+        "--json",
+        cwd=tmp_path,
+        check=True,
+    )
+
+    r = run_cli(
+        "specialists", "invoke-command",
+        "--provider", "oracle-reviewer",
+        "--iteration", "1",
+        "--phase", "review",
+        "--json",
+        cwd=tmp_path,
+    )
+
+    data = _json_result(r)
+    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
+    entry = state["specialist_invocations"][0]
+    assert data["ok"] is False
+    assert entry["status"] == "prepared"
+    assert "preparation-only" in entry["reason"]
+
+
+def test_invoke_command_provider_requires_confirmed_selection_after_ask_user(run_cli, tmp_path):
+    run_cli("init", "command provider ask user mission", "--complexity", "Complex", cwd=tmp_path, check=True)
+    helper = tmp_path / "provider.py"
+    helper.write_text("print('finding: review evidence is complete and actionable')\n", encoding="utf-8")
+    registry = tmp_path / ".mission" / "specialists.yml"
+    registry.parent.mkdir()
+    registry.write_text(json.dumps({
+        "version": 1,
+        "specialists": [{
+            "role": "paid-reviewer",
+            "kind": "command",
+            "command": sys.executable,
+            "args": [str(helper)],
+            "task_profiles": ["documentation"],
+        }],
+    }))
+    run_cli(
+        "specialists", "recommend",
+        "--no-default-skill-roots",
+        "--task", "Review README documentation",
+        "--complexity", "Complex",
+        "--first-use", "paid-reviewer",
+        "--record-state",
+        "--json",
+        cwd=tmp_path,
+        check=True,
+    )
+
+    r = run_cli(
+        "specialists", "invoke-command",
+        "--provider", "paid-reviewer",
+        "--iteration", "1",
+        "--phase", "review",
+        cwd=tmp_path,
+    )
+
+    assert r.returncode != 0
+    assert "--selection-source confirmed-user" in r.stderr
+
+
+def test_invoke_command_provider_persists_confirmed_selection_after_ask_user(run_cli, tmp_path):
+    run_cli("init", "command provider confirmed mission", "--complexity", "Complex", cwd=tmp_path, check=True)
+    helper = tmp_path / "provider.py"
+    helper.write_text("print('finding: review evidence is complete and actionable')\n", encoding="utf-8")
+    registry = tmp_path / ".mission" / "specialists.yml"
+    registry.parent.mkdir()
+    registry.write_text(json.dumps({
+        "version": 1,
+        "specialists": [{
+            "role": "paid-reviewer",
+            "kind": "command",
+            "command": sys.executable,
+            "args": [str(helper)],
+            "task_profiles": ["documentation"],
+        }],
+    }))
+    run_cli(
+        "specialists", "recommend",
+        "--no-default-skill-roots",
+        "--task", "Review README documentation",
+        "--complexity", "Complex",
+        "--first-use", "paid-reviewer",
+        "--record-state",
+        "--json",
+        cwd=tmp_path,
+        check=True,
+    )
+
+    r = run_cli(
+        "specialists", "invoke-command",
+        "--provider", "paid-reviewer",
+        "--iteration", "1",
+        "--phase", "review",
+        "--selection-source", "confirmed-user",
+        "--json",
+        cwd=tmp_path,
+    )
+
+    data = _json_result(r)
+    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
+    assert data["ok"] is True
+    assert state["specialist_invocations"][0]["selection_source"] == "confirmed-user"
+    assert state["specialists_selected"][0]["selection_source"] == "confirmed-user"
+
+
 def test_invoke_command_provider_accepts_result_contract_evidence(run_cli, tmp_path):
     run_cli("init", "command provider evidence mission", "--complexity", "Complex", cwd=tmp_path, check=True)
     helper = tmp_path / "provider.py"
@@ -475,6 +837,7 @@ def test_invoke_command_provider_accepts_result_contract_evidence(run_cli, tmp_p
     }))
     run_cli(
         "specialists", "recommend",
+        "--no-default-skill-roots",
         "--task", "Review README documentation",
         "--complexity", "Complex",
         "--record-state",
