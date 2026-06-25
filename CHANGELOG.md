@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Mission audit now reports unresolved `ask-user` specialist confirmations separately from unselected invocation findings.
+- Mission audit now reports slow sessions whose elapsed time is coarsely attributed to planning despite phase-duration data.
 - Mission audit self-improvement prompts now require duplicate issue checks and development/tech-lead review evidence before agents create GitHub issues.
 - `mission-state.py push-score` now writes generated scoring evidence when `--scoring-output` is omitted, so every score history entry has an auditable archive artifact.
 - `mission-state.py specialists log-invocation --selection-source` now records explicit/manual specialist selection metadata while logging inline or tool invocation evidence.
@@ -22,11 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Specialist recommendations now include a bounded `specialists_phase_plan` for development and strategy-style registries without embedding maintainer-local skill names.
 
 ### Changed
+- Mission orchestrator guidance now requires explicit `phase=executing` / `phase=reviewing` transitions and progress checkpoints for long-running work.
 - Refined Complex specialist accounting to require explicit terminal decisions only for risk-bearing candidates, preserving hackable user plugins as optional evidence sources by default.
 - Database/backend candidates now require strong database signals such as schema, migration, query, SQL, or persistence before they are treated as high-risk accounting candidates.
 - Command providers can now classify preparation-only or too-short output as `prepared` using `result_contract`, preventing banners from being treated as completed review evidence.
 
 ### Fixed
+- Mission audit no longer treats core mission subskills as unselected external specialist invocations.
+- Distribution-sync tests now guard the marketplace `mission-state.py` wrapper against dropping specialist-accounting/result-contract markers.
 - Mission audit pass-rate calculations now exclude active no-score checkpoints from the denominator while still reporting them as incomplete active sessions.
 - Mission audit now classifies nested `archive/worktree-*/sessions/*.json` copies as resolved archive duplicates, preventing cross-root audits from reporting exact live/archive copies as P1 `duplicate-state` findings.
 - `mission-state.py mark-passes` now blocks required specialist providers that lack applied result evidence, so `prepared`, `skipped`, or `failed` evidence cannot satisfy strict required-provider gates.

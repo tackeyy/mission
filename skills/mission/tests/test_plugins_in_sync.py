@@ -70,6 +70,12 @@ SYNC_PAIRS = [
     ),
 ]
 
+MISSION_STATE_DISTRIBUTION_MARKERS = [
+    "specialist accounting required before pass",
+    "PREPARATION_ONLY_MARKERS",
+    "_classify_command_provider_result",
+]
+
 
 def _md5(path: Path) -> str:
     return hashlib.md5(path.read_bytes()).hexdigest()
@@ -112,6 +118,15 @@ def test_mission_state_py_in_sync():
         f"  plugins: {dst}\n"
         f"  同期コマンド: cp {src} {dst}"
     )
+
+
+def test_mission_state_distribution_contains_specialist_accounting_guards():
+    """配布 wrapper が specialist accounting/result-contract gate を欠落させない."""
+    src, dst = SYNC_PAIRS[2]
+    for path in (src, dst):
+        text = path.read_text(encoding="utf-8")
+        missing = [marker for marker in MISSION_STATE_DISTRIBUTION_MARKERS if marker not in text]
+        assert not missing, f"{path} is missing distribution-critical markers: {missing}"
 
 
 def test_skill_md_in_sync():
