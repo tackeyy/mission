@@ -195,6 +195,8 @@ result_contract:
 
 If a command exits successfully but only returns a preparation banner or less than the required non-template evidence, the runner records `status: prepared` instead of `completed`. `prepared` and `awaiting-input` are terminal accounting statuses for transparency, but they are not applied result evidence. A provider marked `required: true` must produce `completed`, `inline-applied`, or `skill-tool-applied` evidence before `mission-state.py mark-passes` can succeed.
 
+The `oracle-reviewer` provider role gets a conservative default result contract even if a project registry omits one. Its default rejects common browser-review preparation markers such as prompt/result/packet paths and review URLs, so an exit code of 0 cannot satisfy required evidence unless the provider returns substantive findings.
+
 For providers with `risk.first_use_confirmation: true`, record consent after a user approval boundary:
 
 ```bash
@@ -203,6 +205,21 @@ python3 skills/mission/bin/mission-state.py specialists consent \
 ```
 
 Consent is stored in `~/.config/mission/provider-consent.json` by default. Tests and isolated runs can pass `--consent-file <path>`.
+
+If Phase 1 ended with `specialists_decision.action: ask-user`, an applied invocation for a not-yet-selected candidate must include `--selection-source confirmed-user` after the user confirms it:
+
+```bash
+python3 skills/mission/bin/mission-state.py specialists log-invocation \
+  --iteration 1 \
+  --phase review \
+  --role strategy-review \
+  --skill strategy-review-provider \
+  --mode codex-inline \
+  --status inline-applied \
+  --selection-source confirmed-user
+```
+
+This writes both `specialist_invocations[]` evidence and the matching `specialists_selected[]` metadata. For command providers, pass the same option to `specialists invoke-command`.
 
 ## Fallback and Missing Skills
 
@@ -227,7 +244,17 @@ Rules:
 - Do not nest a second completion loop inside `/mission` by default.
 - Prefer narrower specialists (`dev-backend`, `dev-frontend`, `dev-unit-tester`) over a broad orchestrator when both match.
 - If a broad orchestrator is selected, call it for bounded evidence such as "produce an implementation plan" or "review this design", not for autonomous end-to-end control.
+- Registry candidates marked `bounded_use: true`, `broad_orchestrator: true`, or described as a broad orchestrator are removed from execution-phase recommendations.
+- Applied evidence for a bounded orchestrator must include `--bounded-purpose "<limited artifact>"`; execution-phase application is rejected.
 - `/mission` remains responsible for state, scoring, threshold gates, and final reporting.
+
+Before the final report, run:
+
+```bash
+python3 skills/mission/bin/mission-state.py specialists summary --json
+```
+
+Use its `kind` and `source` fields in the `【Specialists】` line so command providers, actual Skill tool calls, and Codex inline application are not collapsed into one label.
 
 ## Claude Code / Codex Graceful Degradation
 

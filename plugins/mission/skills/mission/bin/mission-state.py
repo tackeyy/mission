@@ -211,8 +211,15 @@ SPECIALIST_INVOCATION_REASON_REQUIRED_STATUSES = {
 }
 
 SPECIALIST_SELECTION_SOURCES = {
+    "confirmed-user",
     "user-instruction",
     "manual",
+}
+
+APPLIED_SPECIALIST_INVOCATION_STATUSES = {
+    "completed",
+    "inline-applied",
+    "skill-tool-applied",
 }
 
 PREPARATION_ONLY_MARKERS = (
@@ -220,6 +227,22 @@ PREPARATION_ONLY_MARKERS = (
     "Browser Review Prepared",
     "Paste the browser oracle review here",
 )
+
+ORACLE_PREPARATION_MARKERS = (
+    *PREPARATION_ONLY_MARKERS,
+    "To capture the oracle review as command-provider output",
+    "Prompt file:",
+    "Result file:",
+    "Packet file:",
+    "Review URL:",
+)
+
+DEFAULT_COMMAND_RESULT_CONTRACTS = {
+    "oracle-reviewer": {
+        "min_non_template_chars": 200,
+        "forbidden_markers": list(ORACLE_PREPARATION_MARKERS),
+    },
+}
 
 
 def iso_now() -> str:
@@ -859,6 +882,33 @@ def _command_is_available(command: str | None) -> bool:
     return shutil.which(command) is not None
 
 
+def _default_result_contract_for(skill: str | None, role: str | None = None) -> dict:
+    keys = {str(skill or ""), str(role or "")} - {""}
+    for key in keys:
+        if key in DEFAULT_COMMAND_RESULT_CONTRACTS:
+            return dict(DEFAULT_COMMAND_RESULT_CONTRACTS[key])
+    return {}
+
+
+def _merge_result_contract(defaults: dict, explicit: dict) -> dict:
+    merged = dict(defaults)
+    merged.update(explicit)
+    markers = [
+        *[str(v) for v in defaults.get("forbidden_markers") or []],
+        *[str(v) for v in explicit.get("forbidden_markers") or []],
+    ]
+    if markers:
+        merged["forbidden_markers"] = list(dict.fromkeys(markers))
+    return merged
+
+
+def _is_bounded_orchestrator_candidate(candidate: dict) -> bool:
+    if any(candidate.get(key) is True for key in ("bounded", "bounded_use", "broad_orchestrator")):
+        return True
+    notes = str(candidate.get("notes") or "").lower()
+    return "broad" in notes and "orchestrator" in notes
+
+
 def _normalize_candidate(candidate: dict, source: str) -> dict:
     kind = candidate.get("kind") or "skill"
     command = candidate.get("command")
@@ -870,9 +920,13 @@ def _normalize_candidate(candidate: dict, source: str) -> dict:
     args = _as_list(candidate.get("args"))
     auto_use = candidate.get("auto_use") if isinstance(candidate.get("auto_use"), dict) else {}
     risk = candidate.get("risk") if isinstance(candidate.get("risk"), dict) else {}
-    result_contract = candidate.get("result_contract") if isinstance(candidate.get("result_contract"), dict) else {}
+    explicit_result_contract = candidate.get("result_contract") if isinstance(candidate.get("result_contract"), dict) else {}
+    result_contract = _merge_result_contract(_default_result_contract_for(skill, role), explicit_result_contract)
     if kind == "command" and not skill:
         skill = role or command
+    bounded_use = _is_bounded_orchestrator_candidate(candidate)
+    if bounded_use:
+        phases = [phase for phase in phases if phase != "execution"]
     return {
         "role": role,
         "skill": skill,
@@ -889,6 +943,8 @@ def _normalize_candidate(candidate: dict, source: str) -> dict:
         "auto_use": auto_use,
         "risk": risk,
         "result_contract": result_contract,
+        "bounded_use": bounded_use,
+        "bounded_purpose_required": bool(candidate.get("bounded_purpose_required", bounded_use)),
     }
 
 
@@ -1169,6 +1225,115 @@ def cmd_specialists_accounting(args):
     print("Record an explicit used/skipped/unavailable/failed invocation before completion when required.")
 
 
+def _specialist_kind_for(data: dict, skill: str | None, invocation: dict | None = None) -> str:
+    provider = _provider_for_skill(data, skill)
+    if provider and provider.get("kind"):
+        return str(provider.get("kind"))
+    if invocation and invocation.get("provider_kind"):
+        return str(invocation.get("provider_kind"))
+    if invocation and invocation.get("mode") == "command-provider":
+        return "command"
+    return "skill"
+
+
+def _specialist_source_for(data: dict, skill: str | None) -> str:
+    provider = _provider_for_skill(data, skill)
+    return str(provider.get("source") or "") if provider else ""
+
+
+def _summary_item(data: dict, invocation: dict) -> dict:
+    skill = str(invocation.get("skill") or "")
+    return {
+        "skill": skill,
+        "role": invocation.get("role") or "",
+        "kind": _specialist_kind_for(data, skill, invocation),
+        "source": _specialist_source_for(data, skill),
+        "mode": invocation.get("mode") or "",
+        "status": invocation.get("status") or "",
+        "selection_source": invocation.get("selection_source") or "",
+        "bounded_purpose": invocation.get("bounded_purpose") or "",
+        "evidence_path": invocation.get("evidence_path") or "",
+    }
+
+
+def specialist_usage_summary(data: dict) -> dict:
+    selected = [
+        {
+            "skill": item.get("skill") or "",
+            "role": item.get("role") or "",
+            "kind": item.get("kind") or _specialist_kind_for(data, item.get("skill")),
+            "source": item.get("source") or _specialist_source_for(data, item.get("skill")),
+            "selection_source": item.get("selection_source") or "",
+        }
+        for item in data.get("specialists_selected") or []
+        if isinstance(item, dict) and item.get("skill")
+    ]
+    selected_skills = {str(item["skill"]) for item in selected}
+    used: list[dict] = []
+    degraded: list[dict] = []
+    unselected_manual: list[dict] = []
+    for invocation in data.get("specialist_invocations") or []:
+        if not isinstance(invocation, dict) or not invocation.get("skill"):
+            continue
+        item = _summary_item(data, invocation)
+        status = str(invocation.get("status") or "")
+        if status in APPLIED_SPECIALIST_INVOCATION_STATUSES:
+            used.append(item)
+            if item["skill"] not in selected_skills:
+                unselected_manual.append(item)
+        elif status in SPECIALIST_INVOCATION_REASON_REQUIRED_STATUSES:
+            degraded.append(item)
+    return {
+        "selected": selected,
+        "used": used,
+        "degraded": degraded,
+        "unselected_manual": unselected_manual,
+    }
+
+
+def _format_summary_items(items: list[dict]) -> str:
+    if not items:
+        return "none"
+    parts = []
+    for item in items:
+        meta = [item.get("kind") or "skill"]
+        if item.get("source"):
+            meta.append(str(item["source"]))
+        detail = f"{item['skill']}[{' '.join(meta)}"
+        if item.get("mode"):
+            detail += f" {item['mode']}:{item.get('status') or ''}"
+        detail += "]"
+        parts.append(detail)
+    return ", ".join(parts)
+
+
+def cmd_specialists_summary(args):
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
+        sys.exit(1)
+    data = json.loads(sf.read_text())
+    summary = specialist_usage_summary(data)
+    result = {
+        "ok": True,
+        "session_id": data.get("session_id") or sf.stem,
+        "mission_id": data.get("mission_id") or "",
+        **summary,
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    print(
+        "selected: {selected} / used: {used} / degraded: {degraded} / unselected-manual: {unselected}".format(
+            selected=_format_summary_items(summary["selected"]),
+            used=_format_summary_items(summary["used"]),
+            degraded=_format_summary_items(summary["degraded"]),
+            unselected=_format_summary_items(summary["unselected_manual"]),
+        )
+    )
+
+
 def _archive_specialist_evidence(cwd: Path, evidence_output: str, iteration: int,
                                  data: dict, entry: dict) -> str | None:
     """Specialist evidence を archive/iter-N-<mission8>-specialist-<skill>.md に保存する."""
@@ -1230,7 +1395,11 @@ def _classify_command_provider_result(provider: dict, exit_code: int | None,
                                       stdout: str, stderr: str) -> tuple[str, str | None]:
     if exit_code != 0:
         return "failed", f"command provider exited with status {exit_code}"
-    contract = provider.get("result_contract") if isinstance(provider.get("result_contract"), dict) else {}
+    explicit_contract = provider.get("result_contract") if isinstance(provider.get("result_contract"), dict) else {}
+    contract = _merge_result_contract(
+        _default_result_contract_for(provider.get("skill"), provider.get("role")),
+        explicit_contract,
+    )
     forbidden_markers = [str(v) for v in contract.get("forbidden_markers") or PREPARATION_ONLY_MARKERS]
     combined = "\n".join([stdout or "", stderr or ""])
     marker_hits = [marker for marker in forbidden_markers if marker and marker in combined]
@@ -1239,11 +1408,82 @@ def _classify_command_provider_result(provider: dict, exit_code: int | None,
     except (TypeError, ValueError):
         min_chars = 0
     non_template_len = _non_template_text_length(combined, forbidden_markers)
-    if marker_hits and (not min_chars or non_template_len < min_chars):
+    if marker_hits:
         return "prepared", f"command provider returned preparation-only evidence: {', '.join(marker_hits[:3])}"
     if min_chars and non_template_len < min_chars:
         return "prepared", f"command provider evidence below result_contract.min_non_template_chars ({non_template_len} < {min_chars})"
     return "completed", None
+
+
+def _selected_specialist_skills(data: dict) -> set[str]:
+    return {
+        str(item.get("skill"))
+        for item in data.get("specialists_selected") or []
+        if isinstance(item, dict) and item.get("skill")
+    }
+
+
+def _confirmed_selection_required(data: dict, skill: str | None, status: str) -> bool:
+    if status not in APPLIED_SPECIALIST_INVOCATION_STATUSES or not skill:
+        return False
+    if skill in _selected_specialist_skills(data):
+        return False
+    decision = data.get("specialists_decision") if isinstance(data.get("specialists_decision"), dict) else {}
+    return decision.get("action") == "ask-user" and decision.get("prompted_user") is True
+
+
+def _provider_for_skill(data: dict, skill: str | None) -> dict | None:
+    if not skill:
+        return None
+    for provider in [*(data.get("specialists_selected") or []), *(data.get("specialists_candidates") or [])]:
+        if isinstance(provider, dict) and str(provider.get("skill") or "") == str(skill):
+            return provider
+    return None
+
+
+def _bounded_purpose_required(data: dict, skill: str | None, phase: str, status: str) -> bool:
+    if status not in APPLIED_SPECIALIST_INVOCATION_STATUSES:
+        return False
+    provider = _provider_for_skill(data, skill)
+    return bool(provider and provider.get("bounded_use") and provider.get("bounded_purpose_required"))
+
+
+def _reject_unbounded_orchestrator_execution(data: dict, skill: str | None, phase: str):
+    provider = _provider_for_skill(data, skill)
+    if provider and provider.get("bounded_use") and phase == "execution":
+        print(
+            f"ERROR: bounded orchestrator specialist cannot be applied in execution phase: {skill}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
+def _add_selected_specialist_metadata(data: dict, entry: dict, selection_source: str,
+                                      now: str, provider: dict | None = None,
+                                      reason: str | None = None) -> dict | None:
+    selected = data.setdefault("specialists_selected", [])
+    skill = str(entry.get("skill") or "")
+    if not skill or skill in _selected_specialist_skills(data):
+        return None
+    provider = provider or _provider_for_skill(data, skill) or {}
+    selected_entry = {
+        "role": entry.get("role") or provider.get("role") or skill,
+        "skill": skill,
+        "kind": provider.get("kind", "skill"),
+        "phases": [entry.get("phase")] if entry.get("phase") else provider.get("phases", []),
+        "required": bool(provider.get("required", False)),
+        "status": "selected",
+        "source": f"{selection_source}:log-invocation",
+        "selection_source": selection_source,
+        "selected_at": now,
+    }
+    for key in ("source", "bounded_use", "bounded_purpose_required", "result_contract"):
+        if key in provider and key not in selected_entry:
+            selected_entry[key] = provider[key]
+    if reason:
+        selected_entry["reason"] = reason
+    selected.append(selected_entry)
+    return selected_entry
 
 
 def _command_provider_packet(data: dict, provider: dict, args) -> str:
@@ -1282,6 +1522,14 @@ def cmd_invoke_command_provider(args):
     if provider.get("kind") != "command":
         print(f"ERROR: provider is not kind=command: {args.provider}", file=sys.stderr)
         sys.exit(2)
+    if _confirmed_selection_required(data, provider.get("skill") or provider.get("role"), "completed") and not args.selection_source:
+        print(
+            "ERROR: specialists_decision requested user confirmation; pass --selection-source confirmed-user "
+            "when invoking an applied command provider after confirmation.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    _reject_unbounded_orchestrator_execution(data, provider.get("skill") or provider.get("role"), args.phase)
 
     now = iso_now()
     entry = {
@@ -1353,13 +1601,27 @@ def cmd_invoke_command_provider(args):
     )
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
+        selected_entry = None
+        if status in APPLIED_SPECIALIST_INVOCATION_STATUSES and args.selection_source:
+            entry["selection_source"] = args.selection_source
+            selected_entry = _add_selected_specialist_metadata(
+                data,
+                entry,
+                args.selection_source,
+                completed_at,
+                provider,
+                reason,
+            )
         archived_to = _archive_specialist_text(cwd, evidence, args.iteration, data, entry)
         entry["evidence_path"] = _state_relative_path(cwd, archived_to)
         data.setdefault("specialist_invocations", []).append(entry)
         data["updated_at"] = completed_at
         backup_state(sf)
         atomic_write_json(sf, stamp_metadata(data, cwd))
-    print(json.dumps({"ok": status == "completed", "entry": entry}, indent=2 if args.json else None, ensure_ascii=False))
+    result = {"ok": status == "completed", "entry": entry}
+    if selected_entry:
+        result["selected_entry"] = selected_entry
+    print(json.dumps(result, indent=2 if args.json else None, ensure_ascii=False))
 
 
 def _state_relative_path(cwd: Path, path_text: str) -> str:
@@ -1480,6 +1742,20 @@ def cmd_log_specialist_invocation(args):
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
+        if _confirmed_selection_required(data, args.skill, args.status) and not getattr(args, "selection_source", None):
+            print(
+                "ERROR: specialists_decision requested user confirmation; pass --selection-source confirmed-user "
+                "when recording applied specialist evidence after confirmation.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        _reject_unbounded_orchestrator_execution(data, args.skill, args.phase)
+        if _bounded_purpose_required(data, args.skill, args.phase, args.status) and not getattr(args, "bounded_purpose", None):
+            print(
+                f"ERROR: bounded orchestrator specialist requires --bounded-purpose for applied evidence: {args.skill}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         now = iso_now()
         entry = {
             "iteration": args.iteration,
@@ -1502,31 +1778,19 @@ def cmd_log_specialist_invocation(args):
             entry["reason"] = notes
         if getattr(args, "selection_source", None):
             entry["selection_source"] = args.selection_source
+        if getattr(args, "bounded_purpose", None):
+            entry["bounded_purpose"] = args.bounded_purpose
 
         data = stamp_metadata(data, cwd)
         selected_entry = None
         if getattr(args, "selection_source", None):
-            selected = data.setdefault("specialists_selected", [])
-            selected_skills = {
-                str(item.get("skill"))
-                for item in selected
-                if isinstance(item, dict) and item.get("skill")
-            }
-            if args.skill not in selected_skills:
-                selected_entry = {
-                    "role": args.role,
-                    "skill": args.skill,
-                    "kind": "skill",
-                    "phases": [args.phase],
-                    "required": False,
-                    "status": "selected",
-                    "source": f"{args.selection_source}:log-invocation",
-                    "selection_source": args.selection_source,
-                    "selected_at": now,
-                }
-                if reason or notes:
-                    selected_entry["reason"] = reason or notes
-                selected.append(selected_entry)
+            selected_entry = _add_selected_specialist_metadata(
+                data,
+                entry,
+                args.selection_source,
+                now,
+                reason=reason or notes,
+            )
         archived_to = None
         if args.evidence_output:
             archived_to = _archive_specialist_evidence(cwd, args.evidence_output, args.iteration, data, entry)
@@ -2778,6 +3042,10 @@ def _build_parser():
     p_account.add_argument("--json", action="store_true", help="JSON 形式で出力")
     p_account.set_defaults(func=cmd_specialists_accounting)
 
+    p_summary = spec_sub.add_parser("summary", help="final report 用の specialist usage summary を出力")
+    p_summary.add_argument("--json", action="store_true", help="JSON 形式で出力")
+    p_summary.set_defaults(func=cmd_specialists_summary)
+
     p_log = spec_sub.add_parser("log-invocation", help="specialist skill の実呼び出し/inline/skip 証跡を記録")
     p_log.add_argument("--iteration", type=int, required=True)
     p_log.add_argument("--phase", required=True,
@@ -2792,6 +3060,8 @@ def _build_parser():
     p_log.add_argument("--notes", default=None)
     p_log.add_argument("--selection-source", default=None, choices=sorted(SPECIALIST_SELECTION_SOURCES),
                        help="明示選択された specialist の selection metadata も同時に記録する")
+    p_log.add_argument("--bounded-purpose", default=None,
+                       help="broad/bounded orchestrator specialist を限定用途で使った目的")
     p_log.add_argument("--evidence-output", default=None,
                        help="specialist 出力 Markdown。指定時 archive/iter-N-<mission8>-specialist-<skill>.md に保存")
     p_log.add_argument("--json", action="store_true", help="JSON 形式で出力")
@@ -2803,6 +3073,8 @@ def _build_parser():
     p_cmd.add_argument("--phase", required=True,
                        choices=["planning", "execution", "review", "scoring", "critic"])
     p_cmd.add_argument("--input-file", default=None, help="provider stdin packet に含める入力ファイル")
+    p_cmd.add_argument("--selection-source", default=None, choices=sorted(SPECIALIST_SELECTION_SOURCES),
+                       help="ask-user 後に command provider を適用する場合の confirmed selection metadata")
     p_cmd.add_argument("--timeout", type=int, default=120)
     p_cmd.add_argument("--json", action="store_true", help="JSON 形式で出力")
     p_cmd.set_defaults(func=cmd_invoke_command_provider)

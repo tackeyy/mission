@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Mission audit self-improvement prompts now require duplicate issue checks and development/tech-lead review evidence before agents create GitHub issues.
 - `mission-state.py push-score` now writes generated scoring evidence when `--scoring-output` is omitted, so every score history entry has an auditable archive artifact.
 - `mission-state.py specialists log-invocation --selection-source` now records explicit/manual specialist selection metadata while logging inline or tool invocation evidence.
+- `mission-state.py specialists summary` now emits final-report specialist usage grouped as selected, used, degraded, and unselected-manual with provider `kind` and registry/source metadata.
 - Documented the versioning policy that separates ordinary merge releases from intentional distribution releases, so plugin versions are not bumped for every merged PR.
 - Added OSS portability guardrails in `AGENTS.md`, `CLAUDE.md`, and ADR-001 so personal/private specialist skills stay in user or project registries instead of public defaults.
 - Added `mission-state.py specialists accounting --json` as a pre-completion warning that reports available specialist/provider candidates without a terminal decision trail.
@@ -28,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Refined Complex specialist accounting to require explicit terminal decisions only for risk-bearing candidates, preserving hackable user plugins as optional evidence sources by default.
 - Database/backend candidates now require strong database signals such as schema, migration, query, SQL, or persistence before they are treated as high-risk accounting candidates.
 - Command providers can now classify preparation-only or too-short output as `prepared` using `result_contract`, preventing banners from being treated as completed review evidence.
+- `oracle-reviewer` now has a conservative default result contract for browser-review preparation banners, and `ask-user` specialist confirmations must be persisted with `--selection-source confirmed-user` before applied evidence counts as selected.
+- Broad orchestrator specialists are now bounded to non-execution evidence use and require `--bounded-purpose` when their applied plan/review evidence is recorded.
 
 ### Fixed
 - Mission audit no longer treats core mission subskills as unselected external specialist invocations.

@@ -401,6 +401,49 @@ def test_recommend_builds_phase_plan_for_development_registry(run_cli, tmp_path)
     assert phases["review"]["providers"] == ["unit-test-provider"]
 
 
+def test_recommend_bounds_broad_orchestrator_to_non_execution_phases(run_cli, tmp_path):
+    registry = tmp_path / ".mission" / "specialists.yml"
+    registry.parent.mkdir()
+    registry.write_text(json.dumps({
+        "version": 1,
+        "specialists": [
+            {
+                "role": "backend",
+                "skill": "backend-provider",
+                "task_profiles": ["backend"],
+                "phases": ["execution"],
+            },
+            {
+                "role": "methodology",
+                "skill": "broad-methodology",
+                "task_profiles": ["backend"],
+                "phases": ["planning", "execution", "review"],
+                "notes": "Broad orchestrator for methodology; bounded evidence only.",
+            },
+        ],
+    }))
+
+    r = run_cli(
+        *_recommend_args(
+        "--task", "Implement backend API behavior and tests",
+        "--complexity", "Complex",
+        "--installed-skills", "backend-provider,broad-methodology",
+        "--json",
+        ),
+        cwd=tmp_path,
+    )
+
+    data = _json_result(r)
+    broad = next(c for c in data["specialists_candidates"] if c["skill"] == "broad-methodology")
+    phases = {item["phase"]: item["providers"] for item in data["specialists_phase_plan"]}
+    assert broad["bounded_use"] is True
+    assert broad["bounded_purpose_required"] is True
+    assert "execution" not in broad["phases"]
+    assert set(broad["phases"]) == {"planning", "review"}
+    assert "broad-methodology" not in phases["execution"]
+    assert any("broad-methodology" in providers for providers in phases.values())
+
+
 def test_recommend_classifies_strategy_registry_without_private_taxonomy(run_cli, tmp_path):
     registry = tmp_path / ".mission" / "specialists.yml"
     registry.parent.mkdir()
