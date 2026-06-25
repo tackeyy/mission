@@ -48,6 +48,16 @@ PRUNE_DIRS = {
     "venv",
 }
 
+CORE_MISSION_INVOCATION_SKILLS = {
+    "mission",
+    "mission-core",
+    "mission-planner",
+    "mission-executor",
+    "mission-reviewer",
+    "mission-scorer",
+    "mission-critic",
+}
+
 
 @dataclass(frozen=True)
 class StateRecord:
@@ -338,6 +348,8 @@ def valid_phase_durations(state: dict[str, Any]) -> dict[str, float]:
 def slow_phase_observability_bucket(record: StateRecord) -> str:
     if classify(record.state) != "pass":
         return f"{classify(record.state)}-phase-durations-untracked"
+    if coarse_phase_attribution_item(record) is not None:
+        return "slow-with-coarse-phase-attribution"
     if valid_phase_durations(record.state):
         return "slow-with-phase-durations"
     return "slow-without-phase-durations"
@@ -410,12 +422,40 @@ def specialist_invocation_gap_skills(record: StateRecord) -> list[str]:
 
 def unselected_specialist_invocation_skills(record: StateRecord) -> list[str]:
     selected = selected_specialist_skills(record.state)
-    applied = applied_specialist_invocation_skills(record.state)
+    applied = applied_specialist_invocation_skills(record.state) - CORE_MISSION_INVOCATION_SKILLS
+    unresolved_confirm = set(unresolved_confirm_specialist_selection_skills(record))
+    applied -= unresolved_confirm
     return sorted(applied - selected)
 
 
 def unselected_specialist_invocation_item(record: StateRecord) -> dict[str, Any] | None:
     skills = unselected_specialist_invocation_skills(record)
+    if not skills:
+        return None
+    return {
+        "project": project_name(record.state),
+        "project_root": project_root_for(record),
+        "session_id": record.state.get("session_id") or record.path.stem,
+        "mission_id": record.state.get("mission_id") or "",
+        "path": str(record.path),
+        "skills": skills,
+    }
+
+
+def unresolved_confirm_specialist_selection_skills(record: StateRecord) -> list[str]:
+    state = record.state
+    decision = state.get("specialists_decision")
+    if not isinstance(decision, dict):
+        return []
+    if decision.get("action") != "ask-user" or decision.get("prompted_user") is not True:
+        return []
+    selected = selected_specialist_skills(state)
+    applied = applied_specialist_invocation_skills(state) - CORE_MISSION_INVOCATION_SKILLS
+    return sorted(applied - selected)
+
+
+def unresolved_confirm_specialist_selection_item(record: StateRecord) -> dict[str, Any] | None:
+    skills = unresolved_confirm_specialist_selection_skills(record)
     if not skills:
         return None
     return {
@@ -447,6 +487,34 @@ def candidate_only_specialist_item(record: StateRecord) -> dict[str, Any] | None
         "candidate_count": len(unaccounted),
         "skills": [item["skill"] for item in unaccounted],
         "priority": report["priority"] or "P2",
+    }
+
+
+def coarse_phase_attribution_item(record: StateRecord, planning_ratio_threshold: float = 0.8) -> dict[str, Any] | None:
+    state = record.state
+    if classify(state) != "pass":
+        return None
+    durations = valid_phase_durations(state)
+    if not durations:
+        return None
+    planning = durations.get("planning", 0.0)
+    duration = duration_sec(state)
+    duration_base = duration if duration and duration > 0 else sum(durations.values())
+    if duration_base <= 0:
+        return None
+    non_planning_phases = [phase for phase, seconds in durations.items() if phase != "planning" and seconds > 0]
+    if planning < duration_base * planning_ratio_threshold or len(non_planning_phases) >= 2:
+        return None
+    return {
+        "project": project_name(state),
+        "project_root": project_root_for(record),
+        "session_id": state.get("session_id") or record.path.stem,
+        "mission_id": state.get("mission_id") or "",
+        "path": str(record.path),
+        "planning_sec": planning,
+        "duration_sec": duration_base,
+        "planning_ratio": planning / duration_base,
+        "phases": sorted(durations),
     }
 
 
@@ -534,6 +602,10 @@ def aggregate(
         item for r in records
         if (item := unselected_specialist_invocation_item(r)) is not None
     ]
+    unresolved_confirm_specialist_selections = [
+        item for r in records
+        if (item := unresolved_confirm_specialist_selection_item(r)) is not None
+    ]
     missing_scoring_evidence = [
         item for r in records
         if (item := missing_scoring_evidence_item(r)) is not None
@@ -552,6 +624,10 @@ def aggregate(
     ]
     slow_session_breakdown = bucket_counts(slow, lambda record: slow_session_bucket(record, slow_threshold_sec))
     slow_phase_duration_breakdown = bucket_counts(slow, slow_phase_observability_bucket)
+    coarse_phase_attributions = [
+        item for r in slow
+        if (item := coarse_phase_attribution_item(r)) is not None
+    ]
 
     by_project: dict[str, dict[str, int]] = {}
     by_agent: dict[str, dict[str, int]] = {}
@@ -603,6 +679,15 @@ def aggregate(
                 for skill in item.get("skills", [])
             ]
         ),
+        "unresolved_confirm_specialist_selections": unresolved_confirm_specialist_selections,
+        "unresolved_confirm_specialist_selection_count": len(unresolved_confirm_specialist_selections),
+        "unresolved_confirm_specialist_selection_breakdown": bucket_count_keys(
+            [
+                str(skill)
+                for item in unresolved_confirm_specialist_selections
+                for skill in item.get("skills", [])
+            ]
+        ),
         "candidate_only_specialists": candidate_only_specialists,
         "candidate_only_specialist_count": len(candidate_only_specialists),
         "candidate_only_specialist_breakdown": bucket_count_keys(
@@ -618,6 +703,8 @@ def aggregate(
         "halt_incomplete_breakdown": bucket_counts(halt_or_incomplete, halt_or_incomplete_bucket),
         "slow_session_breakdown": slow_session_breakdown,
         "slow_phase_duration_breakdown": slow_phase_duration_breakdown,
+        "coarse_phase_attributions": coarse_phase_attributions,
+        "coarse_phase_attribution_count": len(coarse_phase_attributions),
         "low_score_pass_breakdown": bucket_counts(low_score_pass, low_score_pass_bucket),
         "specialist_invocation_gap_count": len(specialist_invocation_gaps),
         "specialist_invocation_gap_breakdown": bucket_counts(
@@ -681,10 +768,14 @@ def finding_rows(stats: dict[str, Any], min_pass_rate: float) -> list[tuple[str,
         rows.append(("P1", "halted-runs", f"{stats['halt_count']} halted sessions need root-cause review"))
     if stats["slow_sessions"]:
         rows.append(("P2", "slow-runs", f"{len(stats['slow_sessions'])} sessions exceeded slow threshold"))
+    if stats["coarse_phase_attribution_count"]:
+        rows.append(("P2", "coarse-phase-attribution", f"{stats['coarse_phase_attribution_count']} slow sessions attribute most elapsed time to planning"))
     if stats["low_score_pass_sessions"]:
         rows.append(("P2", "low-score-pass", f"{len(stats['low_score_pass_sessions'])} pass sessions scored below 4.3"))
     if stats["specialist_invocation_gap_sessions"]:
         rows.append(("P2", "specialist-invocation-gap", f"{len(stats['specialist_invocation_gap_sessions'])} sessions selected specialists without terminal invocation logs"))
+    if stats["unresolved_confirm_specialist_selection_count"]:
+        rows.append(("P2", "unresolved-confirm-specialist-selection", f"{stats['unresolved_confirm_specialist_selection_count']} sessions applied specialists after ask-user without confirmed selection metadata"))
     if stats["unselected_specialist_invocation_count"]:
         rows.append(("P2", "unselected-specialist-invocation", f"{stats['unselected_specialist_invocation_count']} sessions invoked specialists without matching selection metadata"))
     if stats["candidate_only_specialist_count"]:
@@ -743,8 +834,10 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
         f"- resolved archive duplicates: {stats['resolved_duplicate_group_count']}",
         f"- missing scoring evidence: {stats['missing_scoring_evidence_count']}",
         f"- missing specialist selection checkpoints: {stats['missing_specialist_selection_checkpoint_count']}",
+        f"- unresolved confirm specialist selections: {stats['unresolved_confirm_specialist_selection_count']}",
         f"- unselected specialist invocations: {stats['unselected_specialist_invocation_count']}",
         f"- candidate-only specialists: {stats['candidate_only_specialist_count']}",
+        f"- coarse phase attribution: {stats['coarse_phase_attribution_count']}",
         f"- avg final composite: {fmt_float(stats['avg_final_composite'])}",
         f"- median duration: {fmt_minutes(stats['median_session_duration_sec'])}",
         f"- avg duration: {fmt_minutes(stats['avg_session_duration_sec'])}",
@@ -785,6 +878,17 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
     if stats["slow_phase_duration_breakdown"]:
         for key, count in sorted(stats["slow_phase_duration_breakdown"].items()):
             lines.append(f"- `{key}`: {count}")
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Coarse Phase Attribution", ""])
+    if stats["coarse_phase_attributions"]:
+        for item in stats["coarse_phase_attributions"]:
+            lines.append(
+                f"- `{item['session_id']}` ({item['project']}): planning "
+                f"{fmt_minutes(item['planning_sec'])} / {fmt_minutes(item['duration_sec'])} "
+                f"({item['planning_ratio'] * 100:.1f}%) at `{item['path']}`"
+            )
     else:
         lines.append("- none")
 
@@ -837,6 +941,23 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
     lines.extend(["", "## Specialist Invocation Gap Buckets", ""])
     if stats["specialist_invocation_gap_breakdown"]:
         for key, count in sorted(stats["specialist_invocation_gap_breakdown"].items()):
+            lines.append(f"- `{key}`: {count}")
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Unresolved Confirm Specialist Selections", ""])
+    if stats["unresolved_confirm_specialist_selections"]:
+        for item in stats["unresolved_confirm_specialist_selections"]:
+            skills = ", ".join(f"`{skill}`" for skill in item["skills"])
+            lines.append(
+                f"- `{item['session_id']}` ({item['project']}): applied {skills} after ask-user without confirmed selection metadata at `{item['path']}`"
+            )
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Unresolved Confirm Specialist Selection Buckets", ""])
+    if stats["unresolved_confirm_specialist_selection_breakdown"]:
+        for key, count in sorted(stats["unresolved_confirm_specialist_selection_breakdown"].items()):
             lines.append(f"- `{key}`: {count}")
     else:
         lines.append("- none")

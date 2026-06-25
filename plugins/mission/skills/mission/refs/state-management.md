@@ -139,19 +139,47 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-migrate.py --execute --
 
 ---
 
-## phase フィールドの自動更新セマンティクス (M4, 2026-06-10)
+## phase フィールドの更新セマンティクス (M4, 2026-06-10 / 2026-06-25)
 
-mission-state.py が以下のタイミングで `phase` を自動設定する。orchestrator の手動 `set phase=...` は planning/executing/reviewing の中間状態を記録したい場合のみ任意で行う:
+mission-state.py は開始・採点・終了の境界で `phase` を自動設定する。orchestrator は、実作業やレビューに入る境界を `set phase=...` で明示する。これを省略すると長時間 run が `planning` に粗く帰属し、audit の slow-session 分析で `coarse-phase-attribution` として検出される。
 
 | コマンド | phase |
 |---|---|
 | `init` | `planning` |
+| `set phase=executing` | Phase 3 実行開始前に orchestrator が明示 |
+| `set phase=reviewing` | Phase 4 レビュー開始前に orchestrator が明示 |
 | `push-score` | `scoring` |
 | `mark-passes` | `done` |
 | `mark-halt` / `halt --all` | `halted` |
 | `cleanup-stale --execute` (orphan halt) | **変更しない** (refresh-pid 再活性化後に直前の進捗 phase を保持するため) |
 
+標準的な Phase 2-6 の境界更新:
+
+```bash
+# Phase 3: 実装・調査開始
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py set phase=executing
+
+# Phase 4: review 開始
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py set phase=reviewing
+
+# Phase 5: scoring 完了時 (自動で phase=scoring)
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score ...
+```
+
 R1 復帰時は phase 単独ではなく `iteration` + `score_history` と組み合わせて現在地を判定する (phase は補助情報。2026-06-10 以前のランは phase が planning のまま放置されている)。
+
+## progress checkpoint の運用
+
+10分を超える作業、複数 batch、または compaction を挟みやすい調査では、`progress update` を観測用 checkpoint として使う。`progress` は pass/fail 判定を変更しないが、audit と resume 手順が実進捗を復元するための evidence になる。
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py progress update \
+    --total 4 \
+    --completed 2 \
+    --last-unit "targeted pytest" \
+    --artifact ".mission-state/archive/iter-1-<mission8>-progress.md" \
+    --json
+```
 
 ## init --complexity (M7, 2026-06-10)
 

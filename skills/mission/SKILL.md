@@ -199,12 +199,12 @@ state.json の `assumptions_path` が指すファイル (デフォルト `.missi
 | `passes` | true = 合格スコア到達 | Phase 5 で合格判定が出た瞬間に true |
 | `halt_reason` | 空 = 継続、文字列あり = 中断理由（max-iter / fatal / user_abort 等） | 中断条件成立時に文字列をセット |
 | `score_history[-1].composite` | 最新の総合スコア | 各イテレーションの Phase 5 で追記 |
-
+| `phase` | planning / executing / reviewing / scoring / done / halted | Phase 3 開始前、Phase 4 開始前、push-score / mark-* 時 |
 各イテレーションごとに `iteration++` と `updated_at` を更新。
 
 ### サブスキル呼び出し (概要)
 
-1 iter の標準フロー: `mission-planner` → `mission-executor` → `mission-reviewer` × N (並列、N は `mission-state.py get reviewer_count` の値) → `mission-scorer` → **`Bash` で `mission-state.py push-score`** → `mission-critic`。
+1 iter の標準フロー: `mission-planner` → `mission-executor` (`set phase=executing`) → `mission-reviewer` × N (`set phase=reviewing`) → `mission-scorer` → **`mission-state.py push-score`** → `mission-critic`。10分超または batch 作業では `progress update` も残す (詳細 refs/state-management.md)。
 
 Phase 1 で選定した specialist は Phase 2-6 の任意 evidence provider として、計画制約・実装補助・差分レビュー・採点根拠・Critic 改善案に使う。専門家不在や Codex で Skill 呼び出し不可の場合は、その欠落を記録して core subskills のみで進める。
 

@@ -332,6 +332,48 @@ def test_audit_slow_session_buckets_track_phase_duration_observability(tmp_path)
     assert "slow-with-phase-durations" not in data["slow_session_breakdown"]
     assert data["slow_phase_duration_breakdown"]["slow-without-phase-durations"] == 1
     assert data["slow_phase_duration_breakdown"]["slow-with-phase-durations"] == 1
+    assert data["coarse_phase_attribution_count"] == 0
+
+
+def test_audit_reports_coarse_phase_attribution(tmp_path):
+    _write_state(
+        tmp_path / "coarse" / ".mission-state" / "sessions" / "slow.json",
+        project_root=str(tmp_path / "coarse"),
+        started_at="2026-06-18T00:00:00Z",
+        updated_at="2026-06-18T01:00:00Z",
+        session_id="coarse-planning",
+        phase_durations_sec={"planning": 3500, "scoring": 5},
+    )
+    _write_state(
+        tmp_path / "granular" / ".mission-state" / "sessions" / "slow.json",
+        project_root=str(tmp_path / "granular"),
+        started_at="2026-06-18T00:00:00Z",
+        updated_at="2026-06-18T01:00:00Z",
+        session_id="granular",
+        phase_durations_sec={"planning": 1200, "executing": 1500, "review": 800, "scoring": 100},
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-18",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    data = json.loads(result.stdout)
+    assert data["coarse_phase_attribution_count"] == 1
+    assert data["coarse_phase_attributions"][0]["session_id"] == "coarse-planning"
+    assert data["slow_phase_duration_breakdown"]["slow-with-coarse-phase-attribution"] == 1
+    assert data["slow_phase_duration_breakdown"]["slow-with-phase-durations"] == 1
+    assert any(f["code"] == "coarse-phase-attribution" for f in data["findings"])
 
 
 def test_audit_self_improvement_prompt_mentions_findings(tmp_path):
@@ -470,6 +512,76 @@ def test_audit_reports_unselected_specialist_invocation(tmp_path):
     assert any(f["code"] == "unselected-specialist-invocation" for f in data["findings"])
 
 
+def test_audit_excludes_core_mission_invocations_from_unselected_specialists(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "sess-a.json",
+        started_at="2026-06-20T10:10:00Z",
+        created_at_session="2026-06-20T10:10:00Z",
+        task_profile={"primary": "documentation"},
+        specialists_decision={"policy": "auto"},
+        specialists_selected=[],
+        specialist_invocations=[
+            {"skill": "mission-planner", "status": "completed", "mode": "core-loop"},
+            {"skill": "mission-executor", "status": "completed", "mode": "core-loop"},
+            {"skill": "mission-reviewer", "status": "completed", "mode": "core-loop"},
+            {"skill": "mission-core", "status": "completed", "mode": "core-loop"},
+        ],
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-18",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    data = json.loads(result.stdout)
+    assert data["unselected_specialist_invocation_count"] == 0
+    assert all(f["code"] != "unselected-specialist-invocation" for f in data["findings"])
+
+
+def test_audit_reports_only_external_invocation_when_core_and_external_are_mixed(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "sess-a.json",
+        started_at="2026-06-20T10:10:00Z",
+        created_at_session="2026-06-20T10:10:00Z",
+        task_profile={"primary": "documentation"},
+        specialists_decision={"policy": "auto"},
+        specialists_selected=[],
+        specialist_invocations=[
+            {"skill": "mission-reviewer", "status": "completed", "mode": "core-loop"},
+            {"skill": "dev-doc-writer", "status": "inline-applied", "mode": "codex-inline"},
+        ],
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-18",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    data = json.loads(result.stdout)
+    assert data["unselected_specialist_invocation_count"] == 1
+    assert data["unselected_specialist_invocations"][0]["skills"] == ["dev-doc-writer"]
+
+
 def test_audit_accepts_explicit_specialist_selection_metadata(tmp_path):
     _write_state(
         tmp_path / ".mission-state" / "sessions" / "sess-a.json",
@@ -514,6 +626,93 @@ def test_audit_accepts_explicit_specialist_selection_metadata(tmp_path):
     assert data["unselected_specialist_invocation_count"] == 0
     assert data["specialist_invocation_gap_count"] == 0
     assert all(f["code"] != "unselected-specialist-invocation" for f in data["findings"])
+
+
+def test_audit_reports_unresolved_ask_user_specialist_confirmation(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "sess-a.json",
+        started_at="2026-06-20T10:10:00Z",
+        created_at_session="2026-06-20T10:10:00Z",
+        complexity="Complex",
+        task_profile={"primary": "documentation", "risk": "high"},
+        specialists_decision={"policy": "confirm", "action": "ask-user", "prompted_user": True},
+        specialists_selected=[],
+        specialist_invocations=[
+            {"skill": "example-strategy-orchestrator", "status": "inline-applied", "mode": "codex-inline"},
+            {"skill": "example-strategy-reviewer", "status": "completed", "mode": "natural-language"},
+        ],
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-18",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    data = json.loads(result.stdout)
+    assert data["unresolved_confirm_specialist_selection_count"] == 1
+    assert data["unresolved_confirm_specialist_selections"][0]["skills"] == [
+        "example-strategy-orchestrator",
+        "example-strategy-reviewer",
+    ]
+    assert data["unselected_specialist_invocation_count"] == 0
+    assert any(f["code"] == "unresolved-confirm-specialist-selection" for f in data["findings"])
+
+
+def test_audit_accepts_confirmed_ask_user_specialist_selection(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "sess-a.json",
+        started_at="2026-06-20T10:10:00Z",
+        created_at_session="2026-06-20T10:10:00Z",
+        complexity="Complex",
+        task_profile={"primary": "documentation", "risk": "high"},
+        specialists_decision={"policy": "confirm", "action": "ask-user", "prompted_user": True},
+        specialists_selected=[
+            {
+                "role": "strategy-partner",
+                "skill": "example-strategy-orchestrator",
+                "status": "selected",
+                "selection_source": "confirmed-user",
+            },
+        ],
+        specialist_invocations=[
+            {
+                "role": "strategy-partner",
+                "skill": "example-strategy-orchestrator",
+                "status": "inline-applied",
+                "mode": "codex-inline",
+                "selection_source": "confirmed-user",
+            },
+        ],
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-18",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    data = json.loads(result.stdout)
+    assert data["unresolved_confirm_specialist_selection_count"] == 0
+    assert data["unselected_specialist_invocation_count"] == 0
 
 
 def test_audit_reports_candidate_only_specialists(tmp_path):
