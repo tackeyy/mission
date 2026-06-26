@@ -74,6 +74,18 @@ def parse_dt(value: str | None) -> datetime | None:
         return None
 
 
+def parse_cutoff(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    text = value.strip()
+    if "T" not in text and len(text) == 10:
+        text = f"{text}T00:00:00+00:00"
+    parsed = parse_dt(text)
+    if parsed and parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc) if parsed else None
+
+
 def iso_date(value: str | None) -> str:
     return (value or "")[:10]
 
@@ -229,6 +241,60 @@ def updated_timestamp_rank(record: StateRecord) -> float:
     if updated.tzinfo is None:
         updated = updated.replace(tzinfo=timezone.utc)
     return updated.timestamp()
+
+
+def is_current_record(record: StateRecord, current_since: datetime | None) -> bool:
+    if current_since is None:
+        return True
+    updated = parse_dt(record.state.get("updated_at"))
+    if not updated:
+        return True
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc)
+    return updated.astimezone(timezone.utc) >= current_since
+
+
+def is_current_item(item: dict[str, Any], current_since: datetime | None) -> bool:
+    if current_since is None:
+        return True
+    updated = parse_dt(str(item.get("updated_at") or ""))
+    if not updated:
+        return True
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc)
+    return updated.astimezone(timezone.utc) >= current_since
+
+
+def split_current_historical(
+    items: list[dict[str, Any]],
+    current_since: datetime | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if current_since is None:
+        return items, []
+    current: list[dict[str, Any]] = []
+    historical: list[dict[str, Any]] = []
+    for item in items:
+        if is_current_item(item, current_since):
+            current.append(item)
+        else:
+            historical.append(item)
+    return current, historical
+
+
+def split_current_historical_records(
+    records: list[StateRecord],
+    current_since: datetime | None,
+) -> tuple[list[StateRecord], list[StateRecord]]:
+    if current_since is None:
+        return records, []
+    current: list[StateRecord] = []
+    historical: list[StateRecord] = []
+    for record in records:
+        if is_current_record(record, current_since):
+            current.append(record)
+        else:
+            historical.append(record)
+    return current, historical
 
 
 def dedupe_rank(record: StateRecord) -> tuple[int, float, int, str]:
@@ -439,6 +505,7 @@ def unselected_specialist_invocation_item(record: StateRecord) -> dict[str, Any]
         "mission_id": record.state.get("mission_id") or "",
         "path": str(record.path),
         "skills": skills,
+        "updated_at": record.state.get("updated_at") or "",
     }
 
 
@@ -465,6 +532,7 @@ def unresolved_confirm_specialist_selection_item(record: StateRecord) -> dict[st
         "mission_id": record.state.get("mission_id") or "",
         "path": str(record.path),
         "skills": skills,
+        "updated_at": record.state.get("updated_at") or "",
     }
 
 
@@ -487,6 +555,7 @@ def candidate_only_specialist_item(record: StateRecord) -> dict[str, Any] | None
         "candidate_count": len(unaccounted),
         "skills": [item["skill"] for item in unaccounted],
         "priority": report["priority"] or "P2",
+        "updated_at": state.get("updated_at") or "",
     }
 
 
@@ -560,6 +629,7 @@ def missing_scoring_evidence_item(record: StateRecord) -> dict[str, Any] | None:
         "mission_id": record.state.get("mission_id") or "",
         "path": str(record.path),
         "missing_iterations": missing_iterations,
+        "updated_at": record.state.get("updated_at") or "",
     }
 
 
@@ -584,6 +654,7 @@ def invalid_score_iteration_item(record: StateRecord) -> dict[str, Any] | None:
         "mission_id": record.state.get("mission_id") or "",
         "path": str(record.path),
         "invalid_iterations": invalid_iterations,
+        "updated_at": record.state.get("updated_at") or "",
     }
 
 
@@ -612,6 +683,7 @@ def blank_specialist_invocation_item(record: StateRecord) -> dict[str, Any] | No
         "path": str(record.path),
         "blank_entries": blank_entries,
         "blank_count": len(blank_entries),
+        "updated_at": record.state.get("updated_at") or "",
     }
 
 
@@ -620,6 +692,7 @@ def aggregate(
     duplicates: list[list[StateRecord]],
     resolved_duplicate_count: int,
     slow_threshold_sec: int,
+    current_since: datetime | None = None,
 ) -> dict[str, Any]:
     classes = [classify(r.state) for r in records]
     active_no_score_checkpoint = [r for r in records if is_active_no_score_checkpoint(r)]
@@ -680,10 +753,35 @@ def aggregate(
         item for r in records
         if (item := candidate_only_specialist_item(r)) is not None
     ]
+    current_missing_scoring_evidence, historical_missing_scoring_evidence = split_current_historical(
+        missing_scoring_evidence, current_since
+    )
+    current_invalid_score_iterations, historical_invalid_score_iterations = split_current_historical(
+        invalid_score_iterations, current_since
+    )
+    current_blank_specialist_invocations, historical_blank_specialist_invocations = split_current_historical(
+        blank_specialist_invocations, current_since
+    )
+    current_unresolved_confirm_specialist_selections, historical_unresolved_confirm_specialist_selections = split_current_historical(
+        unresolved_confirm_specialist_selections, current_since
+    )
+    current_candidate_only_specialists, historical_candidate_only_specialists = split_current_historical(
+        candidate_only_specialists, current_since
+    )
     halt_or_incomplete = [
         r for r, cls in zip(records, classes)
         if cls in {"halt", "incomplete"}
     ]
+    halt_sessions = [r for r, cls in zip(records, classes) if cls == "halt"]
+    current_halt_sessions, historical_halt_sessions = split_current_historical_records(
+        halt_sessions, current_since
+    )
+    current_slow_sessions, historical_slow_sessions = split_current_historical_records(
+        slow, current_since
+    )
+    current_low_score_pass_sessions, historical_low_score_pass_sessions = split_current_historical_records(
+        low_score_pass, current_since
+    )
     slow_session_breakdown = bucket_counts(slow, lambda record: slow_session_bucket(record, slow_threshold_sec))
     slow_phase_duration_breakdown = bucket_counts(slow, slow_phase_observability_bucket)
     coarse_phase_attributions = [
@@ -716,7 +814,7 @@ def aggregate(
         "median_session_duration_sec": statistics.median(durations) if durations else None,
         "avg_session_duration_sec": sum(durations) / len(durations) if durations else None,
         "slow_sessions": slow,
-        "halt_sessions": [r for r, cls in zip(records, classes) if cls == "halt"],
+        "halt_sessions": halt_sessions,
         "low_score_pass_sessions": low_score_pass,
         "specialist_invocation_gap_sessions": specialist_invocation_gaps,
         "forced_pass_sessions": forced,
@@ -789,6 +887,39 @@ def aggregate(
         ),
         "by_project": by_project,
         "by_agent": by_agent,
+        "current_since": current_since.isoformat() if current_since else None,
+        "current_halt_sessions": current_halt_sessions,
+        "current_halt_count": len(current_halt_sessions),
+        "historical_halt_sessions": historical_halt_sessions,
+        "historical_halt_count": len(historical_halt_sessions),
+        "current_slow_sessions": current_slow_sessions,
+        "current_slow_session_count": len(current_slow_sessions),
+        "historical_slow_sessions": historical_slow_sessions,
+        "historical_slow_session_count": len(historical_slow_sessions),
+        "current_low_score_pass_sessions": current_low_score_pass_sessions,
+        "current_low_score_pass_count": len(current_low_score_pass_sessions),
+        "historical_low_score_pass_sessions": historical_low_score_pass_sessions,
+        "historical_low_score_pass_count": len(historical_low_score_pass_sessions),
+        "current_missing_scoring_evidence": current_missing_scoring_evidence,
+        "current_missing_scoring_evidence_count": len(current_missing_scoring_evidence),
+        "historical_missing_scoring_evidence": historical_missing_scoring_evidence,
+        "historical_missing_scoring_evidence_count": len(historical_missing_scoring_evidence),
+        "current_invalid_score_iterations": current_invalid_score_iterations,
+        "current_invalid_score_iteration_count": len(current_invalid_score_iterations),
+        "historical_invalid_score_iterations": historical_invalid_score_iterations,
+        "historical_invalid_score_iteration_count": len(historical_invalid_score_iterations),
+        "current_blank_specialist_invocations": current_blank_specialist_invocations,
+        "current_blank_specialist_invocation_count": len(current_blank_specialist_invocations),
+        "historical_blank_specialist_invocations": historical_blank_specialist_invocations,
+        "historical_blank_specialist_invocation_count": len(historical_blank_specialist_invocations),
+        "current_unresolved_confirm_specialist_selections": current_unresolved_confirm_specialist_selections,
+        "current_unresolved_confirm_specialist_selection_count": len(current_unresolved_confirm_specialist_selections),
+        "historical_unresolved_confirm_specialist_selections": historical_unresolved_confirm_specialist_selections,
+        "historical_unresolved_confirm_specialist_selection_count": len(historical_unresolved_confirm_specialist_selections),
+        "current_candidate_only_specialists": current_candidate_only_specialists,
+        "current_candidate_only_specialist_count": len(current_candidate_only_specialists),
+        "historical_candidate_only_specialists": historical_candidate_only_specialists,
+        "historical_candidate_only_specialist_count": len(historical_candidate_only_specialists),
     }
 
 
@@ -823,50 +954,107 @@ def session_line(record: StateRecord) -> str:
 
 def finding_rows(stats: dict[str, Any], min_pass_rate: float) -> list[tuple[str, str, str]]:
     rows: list[tuple[str, str, str]] = []
+    current_scope = bool(stats.get("current_since"))
+    missing_scoring_count = (
+        stats["current_missing_scoring_evidence_count"]
+        if current_scope else stats["missing_scoring_evidence_count"]
+    )
+    invalid_score_count = (
+        stats["current_invalid_score_iteration_count"]
+        if current_scope else stats["invalid_score_iteration_count"]
+    )
+    blank_invocation_count = (
+        stats["current_blank_specialist_invocation_count"]
+        if current_scope else stats["blank_specialist_invocation_count"]
+    )
+    halt_count = stats["current_halt_count"] if current_scope else stats["halt_count"]
+    slow_count = stats["current_slow_session_count"] if current_scope else len(stats["slow_sessions"])
+    low_score_pass_count = (
+        stats["current_low_score_pass_count"]
+        if current_scope else len(stats["low_score_pass_sessions"])
+    )
+    unresolved_confirm_count = (
+        stats["current_unresolved_confirm_specialist_selection_count"]
+        if current_scope else stats["unresolved_confirm_specialist_selection_count"]
+    )
+    candidate_only_count = (
+        stats["current_candidate_only_specialist_count"]
+        if current_scope else stats["candidate_only_specialist_count"]
+    )
     if stats["ungated_pass_count"]:
         rows.append(("P0", "ungated-pass", f"{stats['ungated_pass_count']} pass sessions bypassed scoring gate"))
     if stats["forced_pass_count"]:
         rows.append(("P1", "forced-pass", f"{stats['forced_pass_count']} sessions used force pass"))
     if stats["duplicate_group_count"]:
         rows.append(("P1", "duplicate-state", f"{stats['duplicate_group_count']} duplicate state groups found; stats may double-count"))
-    if stats["missing_scoring_evidence_count"]:
-        rows.append(("P2", "missing-scoring-evidence", f"{stats['missing_scoring_evidence_count']} sessions have score_history without archived scoring evidence"))
-    if stats["invalid_score_iteration_count"]:
-        rows.append(("P1", "invalid-score-iteration", f"{stats['invalid_score_iteration_count']} sessions have score_history entries outside iteration >= 1"))
-    if stats["blank_specialist_invocation_count"]:
-        rows.append(("P2", "blank-specialist-invocation", f"{stats['blank_specialist_invocation_count']} sessions have blank specialist role or skill fields"))
+    if missing_scoring_count:
+        label = "current sessions" if current_scope else "sessions"
+        rows.append(("P2", "missing-scoring-evidence", f"{missing_scoring_count} {label} have score_history without archived scoring evidence"))
+    if invalid_score_count:
+        label = "current sessions" if current_scope else "sessions"
+        rows.append(("P1", "invalid-score-iteration", f"{invalid_score_count} {label} have score_history entries outside iteration >= 1"))
+    if blank_invocation_count:
+        label = "current sessions" if current_scope else "sessions"
+        rows.append(("P2", "blank-specialist-invocation", f"{blank_invocation_count} {label} have blank specialist role or skill fields"))
     if stats["missing_specialist_selection_checkpoint_count"]:
         rows.append(("P2", "missing-specialist-selection-checkpoint", f"{stats['missing_specialist_selection_checkpoint_count']} sessions started after checkpoint rollout without selection metadata"))
     pass_rate = stats["pass_rate"]
     if pass_rate is not None and pass_rate < min_pass_rate:
         rows.append(("P1", "low-pass-rate", f"pass rate {pass_rate * 100:.1f}% is below {min_pass_rate * 100:.0f}%"))
-    if stats["halt_count"]:
-        rows.append(("P1", "halted-runs", f"{stats['halt_count']} halted sessions need root-cause review"))
-    if stats["slow_sessions"]:
-        rows.append(("P2", "slow-runs", f"{len(stats['slow_sessions'])} sessions exceeded slow threshold"))
+    if halt_count:
+        label = "current halted sessions" if current_scope else "halted sessions"
+        rows.append(("P1", "halted-runs", f"{halt_count} {label} need root-cause review"))
+    if slow_count:
+        label = "current sessions" if current_scope else "sessions"
+        rows.append(("P2", "slow-runs", f"{slow_count} {label} exceeded slow threshold"))
     if stats["coarse_phase_attribution_count"]:
         rows.append(("P2", "coarse-phase-attribution", f"{stats['coarse_phase_attribution_count']} slow sessions attribute most elapsed time to planning"))
-    if stats["low_score_pass_sessions"]:
-        rows.append(("P2", "low-score-pass", f"{len(stats['low_score_pass_sessions'])} pass sessions scored below 4.3"))
+    if low_score_pass_count:
+        label = "current pass sessions" if current_scope else "pass sessions"
+        rows.append(("P2", "low-score-pass", f"{low_score_pass_count} {label} scored below 4.3"))
     if stats["specialist_invocation_gap_sessions"]:
         rows.append(("P2", "specialist-invocation-gap", f"{len(stats['specialist_invocation_gap_sessions'])} sessions selected specialists without terminal invocation logs"))
-    if stats["unresolved_confirm_specialist_selection_count"]:
-        rows.append(("P2", "unresolved-confirm-specialist-selection", f"{stats['unresolved_confirm_specialist_selection_count']} sessions applied specialists after ask-user without confirmed selection metadata"))
+    if unresolved_confirm_count:
+        label = "current sessions" if current_scope else "sessions"
+        rows.append(("P2", "unresolved-confirm-specialist-selection", f"{unresolved_confirm_count} {label} applied specialists after ask-user without confirmed selection metadata"))
     if stats["unselected_specialist_invocation_count"]:
         rows.append(("P2", "unselected-specialist-invocation", f"{stats['unselected_specialist_invocation_count']} sessions invoked specialists without matching selection metadata"))
-    if stats["candidate_only_specialist_count"]:
-        priority = "P1" if any(item.get("priority") == "P1" for item in stats["candidate_only_specialists"]) else "P2"
-        rows.append((priority, "candidate-only-specialists", f"{stats['candidate_only_specialist_count']} sessions had specialist candidates but no selected, invoked, or skipped decision trail"))
+    if candidate_only_count:
+        source = stats["current_candidate_only_specialists"] if current_scope else stats["candidate_only_specialists"]
+        priority = "P1" if any(item.get("priority") == "P1" for item in source) else "P2"
+        label = "current sessions" if current_scope else "sessions"
+        rows.append((priority, "candidate-only-specialists", f"{candidate_only_count} {label} had specialist candidates but no selected, invoked, or skipped decision trail"))
+    if current_scope:
+        historical_count = (
+            stats["historical_halt_count"]
+            + stats["historical_slow_session_count"]
+            + stats["historical_low_score_pass_count"]
+            + stats["historical_missing_scoring_evidence_count"]
+            + stats["historical_invalid_score_iteration_count"]
+            + stats["historical_blank_specialist_invocation_count"]
+            + stats["historical_unresolved_confirm_specialist_selection_count"]
+            + stats["historical_candidate_only_specialist_count"]
+        )
+        if historical_count:
+            rows.append(("INFO", "historical-fixed-debt", f"{historical_count} pre-cutoff audit items remain visible as historical debt"))
     if not rows:
         rows.append(("OK", "no-critical-findings", "No forced/ungated pass, halt, duplicate, scoring-evidence, slow-session, or specialist finding"))
     return rows
 
 
-def self_improvement_prompt(rows: list[tuple[str, str, str]], roots: list[Path], since: str | None, until: str | None) -> str:
+def self_improvement_prompt(
+    rows: list[tuple[str, str, str]],
+    roots: list[Path],
+    since: str | None,
+    until: str | None,
+    current_since: str | None = None,
+) -> str:
     root_args = " ".join(f"--root {root}" for root in roots)
     period = f"--since {since}" if since else ""
     if until:
         period += f" --until {until}"
+    if current_since:
+        period += f" --current-since {current_since}"
     finding_text = "\n".join(f"- {p} `{code}`: {summary}" for p, code, summary in rows if p != "OK")
     if not finding_text:
         finding_text = "- 現時点で P0/P1 はなし。P2 以下を ROI 順に確認する。"
@@ -901,6 +1089,7 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
         "## Summary",
         "",
         f"- total sessions: {stats['total_sessions']}",
+        f"- current finding cutoff: {stats['current_since'] or '(not set; all findings are treated as current)'}",
         f"- pass / halt / incomplete / abandoned: {stats['pass_count']} / {stats['halt_count']} / {stats['incomplete_count']} / {stats['abandoned_count']}",
         f"- pass rate: {fmt_float(stats['pass_rate'] * 100 if stats['pass_rate'] is not None else None, 1)}% (denominator: {stats['pass_rate_denominator']})",
         f"- active no-score checkpoints excluded from pass rate: {stats['active_no_score_checkpoint_count']}",
@@ -915,6 +1104,8 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
         f"- unresolved confirm specialist selections: {stats['unresolved_confirm_specialist_selection_count']}",
         f"- unselected specialist invocations: {stats['unselected_specialist_invocation_count']}",
         f"- candidate-only specialists: {stats['candidate_only_specialist_count']}",
+        f"- current audit debt: halt {stats['current_halt_count']}, slow {stats['current_slow_session_count']}, low-score {stats['current_low_score_pass_count']}, scoring {stats['current_missing_scoring_evidence_count']}, invalid score {stats['current_invalid_score_iteration_count']}, blank invocation {stats['current_blank_specialist_invocation_count']}, unresolved confirm {stats['current_unresolved_confirm_specialist_selection_count']}, candidate-only {stats['current_candidate_only_specialist_count']}",
+        f"- historical audit debt: halt {stats['historical_halt_count']}, slow {stats['historical_slow_session_count']}, low-score {stats['historical_low_score_pass_count']}, scoring {stats['historical_missing_scoring_evidence_count']}, invalid score {stats['historical_invalid_score_iteration_count']}, blank invocation {stats['historical_blank_specialist_invocation_count']}, unresolved confirm {stats['historical_unresolved_confirm_specialist_selection_count']}, candidate-only {stats['historical_candidate_only_specialist_count']}",
         f"- coarse phase attribution: {stats['coarse_phase_attribution_count']}",
         f"- avg final composite: {fmt_float(stats['avg_final_composite'])}",
         f"- median duration: {fmt_minutes(stats['median_session_duration_sec'])}",
@@ -1116,6 +1307,24 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
     else:
         lines.append("- none")
 
+    if stats["current_since"]:
+        lines.extend(["", "## Historical Audit Debt", ""])
+        historical_rows = [
+            ("halted runs", stats["historical_halt_count"]),
+            ("slow runs", stats["historical_slow_session_count"]),
+            ("low-score passes", stats["historical_low_score_pass_count"]),
+            ("missing scoring evidence", stats["historical_missing_scoring_evidence_count"]),
+            ("invalid score iterations", stats["historical_invalid_score_iteration_count"]),
+            ("blank specialist invocations", stats["historical_blank_specialist_invocation_count"]),
+            ("unresolved confirm specialist selections", stats["historical_unresolved_confirm_specialist_selection_count"]),
+            ("candidate-only specialists", stats["historical_candidate_only_specialist_count"]),
+        ]
+        if any(count for _, count in historical_rows):
+            for label, count in historical_rows:
+                lines.append(f"- {label}: {count}")
+        else:
+            lines.append("- none")
+
     lines.extend(["", "## Duplicate State Groups", ""])
     if stats["duplicates"]:
         for group in stats["duplicates"]:
@@ -1128,7 +1337,7 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
         lines.append(f"- `{key}`: total {row['total']}, pass {row['pass']}, halt {row['halt']}, incomplete {row['incomplete']}")
 
     lines.extend(["", "## Self-Improvement Prompt", "", "```text"])
-    lines.append(self_improvement_prompt(rows, roots, since, until).strip())
+    lines.append(self_improvement_prompt(rows, roots, since, until, stats["current_since"]).strip())
     lines.append("```")
     lines.append("")
     return "\n".join(lines)
@@ -1141,6 +1350,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--until", default=None, help="Updated-at upper bound, YYYY-MM-DD")
     parser.add_argument("--after-commit", default=None, help="Only include sessions updated after this commit date")
     parser.add_argument("--repo", default=".", help="Repository used for --after-commit, default cwd")
+    parser.add_argument(
+        "--current-since",
+        default=None,
+        help="Treat findings updated before this YYYY-MM-DD or ISO timestamp as historical debt, while keeping them in totals.",
+    )
     parser.add_argument("--slow-threshold-sec", type=int, default=1800, help="Slow session threshold")
     parser.add_argument("--min-pass-rate", type=float, default=0.9, help="Finding threshold for pass rate")
     parser.add_argument("--json", action="store_true", help="Print machine-readable summary")
@@ -1153,14 +1367,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     roots = [Path(p).expanduser() for p in (args.root or ["."])]
     after = commit_datetime(Path(args.repo).expanduser(), args.after_commit) if args.after_commit else None
+    current_since = parse_cutoff(args.current_since)
+    if args.current_since and current_since is None:
+        raise SystemExit(f"Invalid --current-since value: {args.current_since}")
     records = load_records(roots)
     filtered = filter_records(records, args.since, args.until, after)
     deduped, duplicates, resolved_duplicate_count = dedupe_records(filtered)
-    stats = aggregate(deduped, duplicates, resolved_duplicate_count, args.slow_threshold_sec)
+    stats = aggregate(deduped, duplicates, resolved_duplicate_count, args.slow_threshold_sec, current_since)
     rows = finding_rows(stats, args.min_pass_rate)
 
     if args.self_improvement_prompt:
-        output = self_improvement_prompt(rows, roots, args.since, args.until)
+        output = self_improvement_prompt(rows, roots, args.since, args.until, args.current_since)
     elif args.json:
         json_stats = {
             k: v for k, v in stats.items()
@@ -1168,9 +1385,15 @@ def main(argv: list[str] | None = None) -> int:
                 "duplicates",
                 "forced_pass_sessions",
                 "halt_sessions",
+                "current_halt_sessions",
+                "historical_halt_sessions",
                 "low_score_pass_sessions",
+                "current_low_score_pass_sessions",
+                "historical_low_score_pass_sessions",
                 "specialist_invocation_gap_sessions",
                 "slow_sessions",
+                "current_slow_sessions",
+                "historical_slow_sessions",
                 "ungated_pass_sessions",
             }
         }
