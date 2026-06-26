@@ -91,6 +91,92 @@ def test_audit_discovers_nested_worktree_archive_sessions(tmp_path):
     assert data["pass_count"] == 1
 
 
+def test_audit_reports_invalid_score_iteration(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "bad-iter.json",
+        project_root=str(tmp_path),
+        session_id="bad-iter",
+        score_history=[
+            {"iteration": 0, "composite": 4.5, "min_item": 4.0, "items": {}, "timestamp": "2026-06-18T00:05:00Z"}
+        ],
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--since", "2026-06-18", "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    assert data["invalid_score_iteration_count"] == 1
+    assert data["invalid_score_iterations"][0]["invalid_iterations"] == [0]
+    assert data["missing_scoring_evidence_count"] == 0
+    assert any(finding["code"] == "invalid-score-iteration" for finding in data["findings"])
+
+
+def test_audit_reports_blank_specialist_invocation(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "blank-specialist.json",
+        project_root=str(tmp_path),
+        session_id="blank-specialist",
+        specialist_invocations=[
+            {
+                "iteration": 1,
+                "phase": "review",
+                "role": "code-reviewer",
+                "skill": " ",
+                "mode": "fallback-core",
+                "status": "skipped",
+            }
+        ],
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--since", "2026-06-18", "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    assert data["blank_specialist_invocation_count"] == 1
+    assert data["blank_specialist_invocations"][0]["blank_count"] == 1
+    assert any(finding["code"] == "blank-specialist-invocation" for finding in data["findings"])
+
+
+def test_audit_reports_standard_audit_testing_candidate_only(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "standard-audit.json",
+        mission="execution-log audit and self-improvement",
+        project_root=str(tmp_path),
+        session_id="standard-audit",
+        complexity="Standard",
+        task_profile={"primary": "maintenance", "signals": ["execution-log", "改善"]},
+        specialists_candidates=[
+            {
+                "role": "testing reviewer",
+                "skill": "dev-test-strategist",
+                "kind": "skill",
+                "task_profiles": ["testing"],
+                "status": "available",
+            }
+        ],
+        specialists_selected=[],
+        specialist_invocations=[],
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--since", "2026-06-18", "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    assert data["candidate_only_specialist_count"] == 1
+    assert data["candidate_only_specialists"][0]["priority"] == "P1"
+    assert data["candidate_only_specialists"][0]["skills"] == ["dev-test-strategist"]
+    assert any(finding["code"] == "candidate-only-specialists" and finding["priority"] == "P1" for finding in data["findings"])
+
+
 def test_audit_dedupe_prefers_pass_record_over_stale_halt(tmp_path):
     sessions = tmp_path / ".mission-state" / "sessions"
     archive = tmp_path / ".mission-state" / "archive" / "worktree-feat"

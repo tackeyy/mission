@@ -61,6 +61,13 @@ def test_push_score_requires_iteration(state_dir, run_cli):
     assert r.returncode != 0
 
 
+def test_push_score_rejects_iteration_zero(state_dir, run_cli):
+    r = run_cli("push-score", "--iteration", "0", "--composite", "4.0", "--min-item", "3.5",
+                "--items", '{"a": 4.0}', cwd=state_dir.parent)
+    assert r.returncode != 0
+    assert "1 以上" in r.stderr
+
+
 def test_push_score_rejects_invalid_items_json(state_dir, run_cli):
     r = run_cli("push-score", "--iteration", "1", "--composite", "4.0", "--min-item", "3.5",
                 "--items", "not-json", cwd=state_dir.parent)

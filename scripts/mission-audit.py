@@ -539,8 +539,10 @@ def missing_scoring_evidence_iterations(record: StateRecord) -> list[int]:
     for index, entry in enumerate(record.state.get("score_history") or [], start=1):
         if not isinstance(entry, dict):
             continue
-        iteration = entry.get("iteration") or index
+        iteration = entry.get("iteration", index)
         if not isinstance(iteration, int) or isinstance(iteration, bool):
+            continue
+        if iteration < 1:
             continue
         if not any(path.exists() for path in scoring_evidence_paths(record, iteration)):
             missing.append(iteration)
@@ -558,6 +560,58 @@ def missing_scoring_evidence_item(record: StateRecord) -> dict[str, Any] | None:
         "mission_id": record.state.get("mission_id") or "",
         "path": str(record.path),
         "missing_iterations": missing_iterations,
+    }
+
+
+def invalid_score_iteration_item(record: StateRecord) -> dict[str, Any] | None:
+    invalid_iterations: list[Any] = []
+    for index, entry in enumerate(record.state.get("score_history") or [], start=1):
+        if not isinstance(entry, dict):
+            continue
+        iteration = entry.get("iteration", index)
+        if (
+            not isinstance(iteration, int)
+            or isinstance(iteration, bool)
+            or iteration < 1
+        ):
+            invalid_iterations.append(iteration)
+    if not invalid_iterations:
+        return None
+    return {
+        "project": project_name(record.state),
+        "project_root": project_root_for(record),
+        "session_id": record.state.get("session_id") or record.path.stem,
+        "mission_id": record.state.get("mission_id") or "",
+        "path": str(record.path),
+        "invalid_iterations": invalid_iterations,
+    }
+
+
+def blank_specialist_invocation_item(record: StateRecord) -> dict[str, Any] | None:
+    blank_entries: list[dict[str, Any]] = []
+    for index, invocation in enumerate(record.state.get("specialist_invocations") or [], start=1):
+        if not isinstance(invocation, dict):
+            continue
+        role = str(invocation.get("role") or "").strip()
+        skill = str(invocation.get("skill") or "").strip()
+        if not role or not skill:
+            blank_entries.append({
+                "index": index,
+                "role": role,
+                "skill": skill,
+                "status": invocation.get("status") or "",
+                "phase": invocation.get("phase") or "",
+            })
+    if not blank_entries:
+        return None
+    return {
+        "project": project_name(record.state),
+        "project_root": project_root_for(record),
+        "session_id": record.state.get("session_id") or record.path.stem,
+        "mission_id": record.state.get("mission_id") or "",
+        "path": str(record.path),
+        "blank_entries": blank_entries,
+        "blank_count": len(blank_entries),
     }
 
 
@@ -609,6 +663,14 @@ def aggregate(
     missing_scoring_evidence = [
         item for r in records
         if (item := missing_scoring_evidence_item(r)) is not None
+    ]
+    invalid_score_iterations = [
+        item for r in records
+        if (item := invalid_score_iteration_item(r)) is not None
+    ]
+    blank_specialist_invocations = [
+        item for r in records
+        if (item := blank_specialist_invocation_item(r)) is not None
     ]
     missing_specialist_selection_checkpoints = [
         item for r in records
@@ -664,6 +726,16 @@ def aggregate(
         "missing_scoring_evidence_count": len(missing_scoring_evidence),
         "missing_scoring_evidence_breakdown": bucket_count_keys(
             [str(item.get("project") or "unknown") for item in missing_scoring_evidence]
+        ),
+        "invalid_score_iterations": invalid_score_iterations,
+        "invalid_score_iteration_count": len(invalid_score_iterations),
+        "invalid_score_iteration_breakdown": bucket_count_keys(
+            [str(item.get("project") or "unknown") for item in invalid_score_iterations]
+        ),
+        "blank_specialist_invocations": blank_specialist_invocations,
+        "blank_specialist_invocation_count": len(blank_specialist_invocations),
+        "blank_specialist_invocation_breakdown": bucket_count_keys(
+            [str(item.get("project") or "unknown") for item in blank_specialist_invocations]
         ),
         "missing_specialist_selection_checkpoints": missing_specialist_selection_checkpoints,
         "missing_specialist_selection_checkpoint_count": len(missing_specialist_selection_checkpoints),
@@ -759,6 +831,10 @@ def finding_rows(stats: dict[str, Any], min_pass_rate: float) -> list[tuple[str,
         rows.append(("P1", "duplicate-state", f"{stats['duplicate_group_count']} duplicate state groups found; stats may double-count"))
     if stats["missing_scoring_evidence_count"]:
         rows.append(("P2", "missing-scoring-evidence", f"{stats['missing_scoring_evidence_count']} sessions have score_history without archived scoring evidence"))
+    if stats["invalid_score_iteration_count"]:
+        rows.append(("P1", "invalid-score-iteration", f"{stats['invalid_score_iteration_count']} sessions have score_history entries outside iteration >= 1"))
+    if stats["blank_specialist_invocation_count"]:
+        rows.append(("P2", "blank-specialist-invocation", f"{stats['blank_specialist_invocation_count']} sessions have blank specialist role or skill fields"))
     if stats["missing_specialist_selection_checkpoint_count"]:
         rows.append(("P2", "missing-specialist-selection-checkpoint", f"{stats['missing_specialist_selection_checkpoint_count']} sessions started after checkpoint rollout without selection metadata"))
     pass_rate = stats["pass_rate"]
@@ -833,6 +909,8 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
         f"- duplicate state groups: {stats['duplicate_group_count']}",
         f"- resolved archive duplicates: {stats['resolved_duplicate_group_count']}",
         f"- missing scoring evidence: {stats['missing_scoring_evidence_count']}",
+        f"- invalid score iterations: {stats['invalid_score_iteration_count']}",
+        f"- blank specialist invocations: {stats['blank_specialist_invocation_count']}",
         f"- missing specialist selection checkpoints: {stats['missing_specialist_selection_checkpoint_count']}",
         f"- unresolved confirm specialist selections: {stats['unresolved_confirm_specialist_selection_count']}",
         f"- unselected specialist invocations: {stats['unselected_specialist_invocation_count']}",
@@ -916,6 +994,23 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
     else:
         lines.append("- none")
 
+    lines.extend(["", "## Invalid Score Iterations", ""])
+    if stats["invalid_score_iterations"]:
+        for item in stats["invalid_score_iterations"]:
+            iterations = ", ".join(str(i) for i in item["invalid_iterations"])
+            lines.append(
+                f"- `{item['session_id']}` ({item['project']}): invalid iter {iterations} at `{item['path']}`"
+            )
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Invalid Score Iteration Buckets", ""])
+    if stats["invalid_score_iteration_breakdown"]:
+        for key, count in sorted(stats["invalid_score_iteration_breakdown"].items()):
+            lines.append(f"- `{key}`: {count}")
+    else:
+        lines.append("- none")
+
     lines.extend(["", "## Missing Specialist Selection Checkpoints", ""])
     if stats["missing_specialist_selection_checkpoints"]:
         for item in stats["missing_specialist_selection_checkpoints"]:
@@ -928,6 +1023,23 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
     lines.extend(["", "## Missing Specialist Selection Checkpoint Buckets", ""])
     if stats["missing_specialist_selection_checkpoint_breakdown"]:
         for key, count in sorted(stats["missing_specialist_selection_checkpoint_breakdown"].items()):
+            lines.append(f"- `{key}`: {count}")
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Blank Specialist Invocations", ""])
+    if stats["blank_specialist_invocations"]:
+        for item in stats["blank_specialist_invocations"]:
+            entries = ", ".join(f"#{entry['index']}" for entry in item["blank_entries"])
+            lines.append(
+                f"- `{item['session_id']}` ({item['project']}): blank role/skill at {entries} in `{item['path']}`"
+            )
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Blank Specialist Invocation Buckets", ""])
+    if stats["blank_specialist_invocation_breakdown"]:
+        for key, count in sorted(stats["blank_specialist_invocation_breakdown"].items()):
             lines.append(f"- `{key}`: {count}")
     else:
         lines.append("- none")
