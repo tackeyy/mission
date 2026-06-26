@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.5] - 2026-06-26
+
 ### Added
 - Mission audit now reports unresolved `ask-user` specialist confirmations separately from unselected invocation findings.
 - Mission audit now reports slow sessions whose elapsed time is coarsely attributed to planning despite phase-duration data.
@@ -36,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Standard or Complex audit/self-improvement missions now require explicit accounting for available testing, security, or risk specialist candidates.
 
 ### Fixed
+- Mission audit now flags command-provider invocations that were marked `completed` even though their archived evidence is only an Oracle/browser review preparation packet.
 - Mission audit no longer reports active `ask-user` specialist waits as candidate-only specialist debt before the user decision can be recorded.
 - Mission audit no longer treats core mission subskills as unselected external specialist invocations.
 - Distribution-sync tests now guard the marketplace `mission-state.py` wrapper against dropping specialist-accounting/result-contract markers.
@@ -111,6 +114,7 @@ First public release.
 - Python test suite covering state routing, scoring gates, and hook behavior.
 - GitHub Actions CI (`push`, `pull_request`, `workflow_dispatch`) with pytest and ShellCheck.
 
+[1.0.5]: https://github.com/tackeyy/mission/releases/tag/v1.0.5
 [1.0.4]: https://github.com/tackeyy/mission/releases/tag/v1.0.4
 [1.0.3]: https://github.com/tackeyy/mission/releases/tag/v1.0.3
 [1.0.2]: https://github.com/tackeyy/mission/releases/tag/v1.0.2
