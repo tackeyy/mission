@@ -24,6 +24,7 @@
 - 長時間 batch 向けに `mission-state.py progress update/get/clear` checkpoint を追加し、進捗証跡を archive に保存して slow-session の audit 行にも表示できるようにしました。
 - maintainer-local な skill 名を組み込まず、development / strategy 系 registry の段階的な利用順を示す `specialists_phase_plan` を recommendation に追加しました。
 - mission audit が不正な score iteration と空の specialist invocation record を明示的な finding として報告するようにしました。
+- mission audit に `--current-since` を追加し、historical audit debt を可視化したまま current regression と分離して判定できるようにしました。
 
 ### 変更
 - mission orchestrator の運用指針に、`phase=executing` / `phase=reviewing` の明示更新と長時間作業の progress checkpoint を必須化しました。

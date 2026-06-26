@@ -177,6 +177,101 @@ def test_audit_reports_standard_audit_testing_candidate_only(tmp_path):
     assert any(finding["code"] == "candidate-only-specialists" and finding["priority"] == "P1" for finding in data["findings"])
 
 
+def test_audit_current_since_splits_historical_debt(tmp_path):
+    _write_state(
+        tmp_path / "old" / ".mission-state" / "sessions" / "old.json",
+        mission="execution-log audit and self-improvement",
+        project_root=str(tmp_path / "old"),
+        session_id="old-candidate-only",
+        updated_at="2026-06-25T23:59:00Z",
+        complexity="Standard",
+        task_profile={"primary": "maintenance", "signals": ["execution-log"]},
+        specialists_candidates=[
+            {"role": "unit tester", "skill": "dev-unit-tester", "kind": "skill", "task_profiles": ["testing"], "status": "available"}
+        ],
+        specialists_selected=[],
+        specialist_invocations=[],
+    )
+    _write_state(
+        tmp_path / "new" / ".mission-state" / "sessions" / "new.json",
+        mission="execution-log audit and self-improvement",
+        project_root=str(tmp_path / "new"),
+        session_id="new-candidate-only",
+        updated_at="2026-06-26T00:01:00Z",
+        complexity="Standard",
+        task_profile={"primary": "maintenance", "signals": ["execution-log"]},
+        specialists_candidates=[
+            {"role": "unit tester", "skill": "dev-unit-tester", "kind": "skill", "task_profiles": ["testing"], "status": "available"}
+        ],
+        specialists_selected=[],
+        specialist_invocations=[],
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-25",
+            "--current-since",
+            "2026-06-26",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    assert data["candidate_only_specialist_count"] == 2
+    assert data["current_candidate_only_specialist_count"] == 1
+    assert data["historical_candidate_only_specialist_count"] == 1
+    assert data["current_candidate_only_specialists"][0]["session_id"] == "new-candidate-only"
+    assert data["historical_candidate_only_specialists"][0]["session_id"] == "old-candidate-only"
+    assert any(
+        finding["code"] == "candidate-only-specialists"
+        and "1 current sessions" in finding["summary"]
+        for finding in data["findings"]
+    )
+    assert any(finding["code"] == "historical-fixed-debt" for finding in data["findings"])
+
+
+def test_audit_current_since_keeps_historical_debt_out_of_blocking_findings(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "old.json",
+        project_root=str(tmp_path),
+        session_id="old-bad-iter",
+        updated_at="2026-06-25T23:59:00Z",
+        score_history=[
+            {"iteration": 0, "composite": 4.5, "min_item": 4.0, "items": {}, "timestamp": "2026-06-25T23:58:00Z"}
+        ],
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-25",
+            "--current-since",
+            "2026-06-26",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    assert data["invalid_score_iteration_count"] == 1
+    assert data["current_invalid_score_iteration_count"] == 0
+    assert data["historical_invalid_score_iteration_count"] == 1
+    assert all(finding["code"] != "invalid-score-iteration" for finding in data["findings"])
+    assert any(finding["code"] == "historical-fixed-debt" for finding in data["findings"])
+
+
 def test_audit_dedupe_prefers_pass_record_over_stale_halt(tmp_path):
     sessions = tmp_path / ".mission-state" / "sessions"
     archive = tmp_path / ".mission-state" / "archive" / "worktree-feat"
