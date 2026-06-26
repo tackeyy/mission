@@ -536,8 +536,21 @@ def unresolved_confirm_specialist_selection_item(record: StateRecord) -> dict[st
     }
 
 
+def is_active_ask_user_specialist_wait(state: dict[str, Any]) -> bool:
+    decision = state.get("specialists_decision")
+    return (
+        state.get("loop_active") is True
+        and not state.get("passes")
+        and isinstance(decision, dict)
+        and decision.get("action") == "ask-user"
+        and decision.get("prompted_user") is True
+    )
+
+
 def candidate_only_specialist_item(record: StateRecord) -> dict[str, Any] | None:
     state = record.state
+    if is_active_ask_user_specialist_wait(state):
+        return None
     report = candidate_accounting_report(state)
     unaccounted = report["unaccounted_candidates"]
     if not unaccounted:
