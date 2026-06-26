@@ -58,6 +58,17 @@ CORE_MISSION_INVOCATION_SKILLS = {
     "mission-critic",
 }
 
+PREPARATION_ONLY_MARKERS = (
+    "Oracle Browser Review Prepared",
+    "Browser Review Prepared",
+    "Paste the browser oracle review here",
+    "To capture the oracle review as command-provider output",
+    "Prompt file:",
+    "Result file:",
+    "Packet file:",
+    "Review URL:",
+)
+
 
 @dataclass(frozen=True)
 class StateRecord:
@@ -616,6 +627,88 @@ def scoring_evidence_paths(record: StateRecord, iteration: int) -> list[Path]:
     return paths
 
 
+def specialist_evidence_paths(record: StateRecord, invocation: dict[str, Any]) -> list[Path]:
+    paths: list[Path] = []
+    evidence_path = str(invocation.get("evidence_path") or "").strip()
+    if evidence_path:
+        raw_path = Path(evidence_path)
+        if raw_path.is_absolute():
+            paths.append(raw_path)
+        else:
+            paths.append(Path(project_root_for(record)) / raw_path)
+            parts = record.path.parts
+            if ".mission-state" in parts:
+                idx = parts.index(".mission-state")
+                mission_state_root = Path(*parts[: idx + 1])
+                if evidence_path.startswith(".mission-state/"):
+                    paths.append(mission_state_root.parent / evidence_path)
+
+    iteration = invocation.get("iteration")
+    skill = str(invocation.get("skill") or invocation.get("role") or "").strip()
+    if isinstance(iteration, int) and not isinstance(iteration, bool) and iteration >= 0 and skill:
+        mission_id = str(record.state.get("mission_id") or "")
+        mission_prefix = mission_id[:8] or "unknown"
+        filename = f"iter-{iteration}-{mission_prefix}-specialist-{skill}.md"
+        paths.append(Path(project_root_for(record)) / ".mission-state" / "archive" / filename)
+        parts = record.path.parts
+        if ".mission-state" in parts:
+            idx = parts.index(".mission-state")
+            mission_state_root = Path(*parts[: idx + 1])
+            paths.append(mission_state_root / "archive" / filename)
+            if idx + 2 < len(parts) and parts[idx + 1] == "archive" and parts[idx + 2].startswith("worktree-"):
+                paths.append(Path(*parts[: idx + 3]) / "archive" / filename)
+
+    deduped: list[Path] = []
+    for path in paths:
+        if path not in deduped:
+            deduped.append(path)
+    return deduped
+
+
+def preparation_only_completed_provider_item(record: StateRecord) -> dict[str, Any] | None:
+    bad_entries: list[dict[str, Any]] = []
+    for index, invocation in enumerate(record.state.get("specialist_invocations") or [], start=1):
+        if not isinstance(invocation, dict):
+            continue
+        if invocation.get("mode") != "command-provider" or invocation.get("status") != "completed":
+            continue
+        evidence_hits: list[dict[str, Any]] = []
+        for path in specialist_evidence_paths(record, invocation):
+            if not path.exists() or not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                continue
+            markers = [marker for marker in PREPARATION_ONLY_MARKERS if marker in text]
+            if markers:
+                evidence_hits.append({
+                    "path": str(path),
+                    "markers": markers[:3],
+                })
+        if evidence_hits:
+            bad_entries.append({
+                "index": index,
+                "role": invocation.get("role") or "",
+                "skill": invocation.get("skill") or "",
+                "phase": invocation.get("phase") or "",
+                "iteration": invocation.get("iteration"),
+                "evidence": evidence_hits,
+            })
+    if not bad_entries:
+        return None
+    return {
+        "project": project_name(record.state),
+        "project_root": project_root_for(record),
+        "session_id": record.state.get("session_id") or record.path.stem,
+        "mission_id": record.state.get("mission_id") or "",
+        "path": str(record.path),
+        "bad_entries": bad_entries,
+        "bad_count": len(bad_entries),
+        "updated_at": record.state.get("updated_at") or "",
+    }
+
+
 def missing_scoring_evidence_iterations(record: StateRecord) -> list[int]:
     missing: list[int] = []
     for index, entry in enumerate(record.state.get("score_history") or [], start=1):
@@ -758,6 +851,10 @@ def aggregate(
         item for r in records
         if (item := blank_specialist_invocation_item(r)) is not None
     ]
+    preparation_only_completed_providers = [
+        item for r in records
+        if (item := preparation_only_completed_provider_item(r)) is not None
+    ]
     missing_specialist_selection_checkpoints = [
         item for r in records
         if (item := missing_specialist_selection_checkpoint_item(r)) is not None
@@ -774,6 +871,9 @@ def aggregate(
     )
     current_blank_specialist_invocations, historical_blank_specialist_invocations = split_current_historical(
         blank_specialist_invocations, current_since
+    )
+    current_preparation_only_completed_providers, historical_preparation_only_completed_providers = split_current_historical(
+        preparation_only_completed_providers, current_since
     )
     current_unresolved_confirm_specialist_selections, historical_unresolved_confirm_specialist_selections = split_current_historical(
         unresolved_confirm_specialist_selections, current_since
@@ -847,6 +947,11 @@ def aggregate(
         "blank_specialist_invocation_count": len(blank_specialist_invocations),
         "blank_specialist_invocation_breakdown": bucket_count_keys(
             [str(item.get("project") or "unknown") for item in blank_specialist_invocations]
+        ),
+        "preparation_only_completed_providers": preparation_only_completed_providers,
+        "preparation_only_completed_provider_count": len(preparation_only_completed_providers),
+        "preparation_only_completed_provider_breakdown": bucket_count_keys(
+            [str(item.get("project") or "unknown") for item in preparation_only_completed_providers]
         ),
         "missing_specialist_selection_checkpoints": missing_specialist_selection_checkpoints,
         "missing_specialist_selection_checkpoint_count": len(missing_specialist_selection_checkpoints),
@@ -925,6 +1030,10 @@ def aggregate(
         "current_blank_specialist_invocation_count": len(current_blank_specialist_invocations),
         "historical_blank_specialist_invocations": historical_blank_specialist_invocations,
         "historical_blank_specialist_invocation_count": len(historical_blank_specialist_invocations),
+        "current_preparation_only_completed_providers": current_preparation_only_completed_providers,
+        "current_preparation_only_completed_provider_count": len(current_preparation_only_completed_providers),
+        "historical_preparation_only_completed_providers": historical_preparation_only_completed_providers,
+        "historical_preparation_only_completed_provider_count": len(historical_preparation_only_completed_providers),
         "current_unresolved_confirm_specialist_selections": current_unresolved_confirm_specialist_selections,
         "current_unresolved_confirm_specialist_selection_count": len(current_unresolved_confirm_specialist_selections),
         "historical_unresolved_confirm_specialist_selections": historical_unresolved_confirm_specialist_selections,
@@ -980,6 +1089,10 @@ def finding_rows(stats: dict[str, Any], min_pass_rate: float) -> list[tuple[str,
         stats["current_blank_specialist_invocation_count"]
         if current_scope else stats["blank_specialist_invocation_count"]
     )
+    preparation_only_completed_count = (
+        stats["current_preparation_only_completed_provider_count"]
+        if current_scope else stats["preparation_only_completed_provider_count"]
+    )
     halt_count = stats["current_halt_count"] if current_scope else stats["halt_count"]
     slow_count = stats["current_slow_session_count"] if current_scope else len(stats["slow_sessions"])
     low_score_pass_count = (
@@ -1009,6 +1122,9 @@ def finding_rows(stats: dict[str, Any], min_pass_rate: float) -> list[tuple[str,
     if blank_invocation_count:
         label = "current sessions" if current_scope else "sessions"
         rows.append(("P2", "blank-specialist-invocation", f"{blank_invocation_count} {label} have blank specialist role or skill fields"))
+    if preparation_only_completed_count:
+        label = "current sessions" if current_scope else "sessions"
+        rows.append(("P1", "preparation-only-completed-provider", f"{preparation_only_completed_count} {label} marked command-provider preparation-only evidence as completed"))
     if stats["missing_specialist_selection_checkpoint_count"]:
         rows.append(("P2", "missing-specialist-selection-checkpoint", f"{stats['missing_specialist_selection_checkpoint_count']} sessions started after checkpoint rollout without selection metadata"))
     pass_rate = stats["pass_rate"]
@@ -1045,6 +1161,7 @@ def finding_rows(stats: dict[str, Any], min_pass_rate: float) -> list[tuple[str,
             + stats["historical_missing_scoring_evidence_count"]
             + stats["historical_invalid_score_iteration_count"]
             + stats["historical_blank_specialist_invocation_count"]
+            + stats["historical_preparation_only_completed_provider_count"]
             + stats["historical_unresolved_confirm_specialist_selection_count"]
             + stats["historical_candidate_only_specialist_count"]
         )
@@ -1113,12 +1230,13 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
         f"- missing scoring evidence: {stats['missing_scoring_evidence_count']}",
         f"- invalid score iterations: {stats['invalid_score_iteration_count']}",
         f"- blank specialist invocations: {stats['blank_specialist_invocation_count']}",
+        f"- preparation-only completed command providers: {stats['preparation_only_completed_provider_count']}",
         f"- missing specialist selection checkpoints: {stats['missing_specialist_selection_checkpoint_count']}",
         f"- unresolved confirm specialist selections: {stats['unresolved_confirm_specialist_selection_count']}",
         f"- unselected specialist invocations: {stats['unselected_specialist_invocation_count']}",
         f"- candidate-only specialists: {stats['candidate_only_specialist_count']}",
-        f"- current audit debt: halt {stats['current_halt_count']}, slow {stats['current_slow_session_count']}, low-score {stats['current_low_score_pass_count']}, scoring {stats['current_missing_scoring_evidence_count']}, invalid score {stats['current_invalid_score_iteration_count']}, blank invocation {stats['current_blank_specialist_invocation_count']}, unresolved confirm {stats['current_unresolved_confirm_specialist_selection_count']}, candidate-only {stats['current_candidate_only_specialist_count']}",
-        f"- historical audit debt: halt {stats['historical_halt_count']}, slow {stats['historical_slow_session_count']}, low-score {stats['historical_low_score_pass_count']}, scoring {stats['historical_missing_scoring_evidence_count']}, invalid score {stats['historical_invalid_score_iteration_count']}, blank invocation {stats['historical_blank_specialist_invocation_count']}, unresolved confirm {stats['historical_unresolved_confirm_specialist_selection_count']}, candidate-only {stats['historical_candidate_only_specialist_count']}",
+        f"- current audit debt: halt {stats['current_halt_count']}, slow {stats['current_slow_session_count']}, low-score {stats['current_low_score_pass_count']}, scoring {stats['current_missing_scoring_evidence_count']}, invalid score {stats['current_invalid_score_iteration_count']}, blank invocation {stats['current_blank_specialist_invocation_count']}, preparation-only completed {stats['current_preparation_only_completed_provider_count']}, unresolved confirm {stats['current_unresolved_confirm_specialist_selection_count']}, candidate-only {stats['current_candidate_only_specialist_count']}",
+        f"- historical audit debt: halt {stats['historical_halt_count']}, slow {stats['historical_slow_session_count']}, low-score {stats['historical_low_score_pass_count']}, scoring {stats['historical_missing_scoring_evidence_count']}, invalid score {stats['historical_invalid_score_iteration_count']}, blank invocation {stats['historical_blank_specialist_invocation_count']}, preparation-only completed {stats['historical_preparation_only_completed_provider_count']}, unresolved confirm {stats['historical_unresolved_confirm_specialist_selection_count']}, candidate-only {stats['historical_candidate_only_specialist_count']}",
         f"- coarse phase attribution: {stats['coarse_phase_attribution_count']}",
         f"- avg final composite: {fmt_float(stats['avg_final_composite'])}",
         f"- median duration: {fmt_minutes(stats['median_session_duration_sec'])}",
@@ -1248,6 +1366,31 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
     else:
         lines.append("- none")
 
+    lines.extend(["", "## Preparation-Only Completed Command Providers", ""])
+    if stats["preparation_only_completed_providers"]:
+        for item in stats["preparation_only_completed_providers"]:
+            entries: list[str] = []
+            for entry in item["bad_entries"]:
+                evidence = entry["evidence"][0]
+                markers = ", ".join(f"`{marker}`" for marker in evidence["markers"])
+                entries.append(
+                    f"#{entry['index']} `{entry['skill'] or entry['role']}` iter {entry['iteration']} "
+                    f"at `{evidence['path']}` markers {markers}"
+                )
+            lines.append(
+                f"- `{item['session_id']}` ({item['project']}): "
+                f"{'; '.join(entries)}; state `{item['path']}`"
+            )
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Preparation-Only Completed Command Provider Buckets", ""])
+    if stats["preparation_only_completed_provider_breakdown"]:
+        for key, count in sorted(stats["preparation_only_completed_provider_breakdown"].items()):
+            lines.append(f"- `{key}`: {count}")
+    else:
+        lines.append("- none")
+
     lines.extend(["", "## Specialist Invocation Gaps", ""])
     if stats["specialist_invocation_gap_sessions"]:
         lines.extend(session_line(record) for record in stats["specialist_invocation_gap_sessions"])
@@ -1329,6 +1472,7 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
             ("missing scoring evidence", stats["historical_missing_scoring_evidence_count"]),
             ("invalid score iterations", stats["historical_invalid_score_iteration_count"]),
             ("blank specialist invocations", stats["historical_blank_specialist_invocation_count"]),
+            ("preparation-only completed command providers", stats["historical_preparation_only_completed_provider_count"]),
             ("unresolved confirm specialist selections", stats["historical_unresolved_confirm_specialist_selection_count"]),
             ("candidate-only specialists", stats["historical_candidate_only_specialist_count"]),
         ]

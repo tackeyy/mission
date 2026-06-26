@@ -143,6 +143,47 @@ def test_audit_reports_blank_specialist_invocation(tmp_path):
     assert any(finding["code"] == "blank-specialist-invocation" for finding in data["findings"])
 
 
+def test_audit_reports_completed_command_provider_with_preparation_only_evidence(tmp_path):
+    evidence = tmp_path / ".mission-state" / "archive" / "iter-1-abc12345-specialist-oracle-reviewer.md"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text(
+        "<!-- mission-specialist-meta: status=completed -->\n"
+        "# Oracle Browser Review Prepared\n\n"
+        "To capture the oracle review as command-provider output, rerun with ORACLE_MISSION_WAIT_SECONDS=900.\n",
+        encoding="utf-8",
+    )
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "prepared-completed.json",
+        project_root=str(tmp_path),
+        session_id="prepared-completed",
+        specialist_invocations=[
+            {
+                "iteration": 1,
+                "phase": "review",
+                "role": "oracle-reviewer",
+                "skill": "oracle-reviewer",
+                "mode": "command-provider",
+                "status": "completed",
+                "evidence_path": ".mission-state/archive/iter-1-abc12345-specialist-oracle-reviewer.md",
+            }
+        ],
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--since", "2026-06-18", "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    assert data["preparation_only_completed_provider_count"] == 1
+    item = data["preparation_only_completed_providers"][0]
+    assert item["session_id"] == "prepared-completed"
+    assert item["bad_entries"][0]["skill"] == "oracle-reviewer"
+    assert "Oracle Browser Review Prepared" in item["bad_entries"][0]["evidence"][0]["markers"]
+    assert any(finding["code"] == "preparation-only-completed-provider" for finding in data["findings"])
+
+
 def test_audit_reports_standard_audit_testing_candidate_only(tmp_path):
     _write_state(
         tmp_path / ".mission-state" / "sessions" / "standard-audit.json",

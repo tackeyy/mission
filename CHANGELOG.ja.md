@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+## [1.0.5] - 2026-06-26
+
 ### 追加
 - `ask-user` 後に confirmed selection metadata が残っていない specialist 適用を、unselected invocation とは別の audit finding として報告するようにしました。
 - phase duration がある一方で経過時間の大半が planning に粗く帰属している slow session を mission audit が報告するようにしました。
@@ -36,6 +38,7 @@
 - Standard / Complex の監査・自己改善 mission では、利用可能な testing / security / risk specialist candidate に explicit accounting を求めるようにしました。
 
 ### 修正
+- command provider invocation が `completed` と記録されていても、archive evidence が Oracle / browser review の準備パケットだけの場合に mission audit が検出するようにしました。
 - mission audit が、ユーザー判断待ちの active な `ask-user` specialist wait を、decision 記録前の candidate-only specialist debt として誤検出しないようにしました。
 - core mission subskill の呼び出しを external specialist の unselected invocation として誤検出しないようにしました。
 - marketplace 配布版の `mission-state.py` wrapper から specialist accounting / result-contract marker が欠落しないよう、同期テストで保護しました。
@@ -111,6 +114,7 @@
 - 状態ルーティング・スコアゲート・hook 挙動をカバーする Python テストスイート。
 - GitHub Actions CI（`push` / `pull_request` / `workflow_dispatch`）。pytest と ShellCheck を実行。
 
+[1.0.5]: https://github.com/tackeyy/mission/releases/tag/v1.0.5
 [1.0.4]: https://github.com/tackeyy/mission/releases/tag/v1.0.4
 [1.0.3]: https://github.com/tackeyy/mission/releases/tag/v1.0.3
 [1.0.2]: https://github.com/tackeyy/mission/releases/tag/v1.0.2
