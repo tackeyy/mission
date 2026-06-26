@@ -209,6 +209,22 @@ def test_stats_dedupes_worktree_archive_copy(tmp_path, run_cli):
     assert data["duplicate_state_group_count"] == 1
 
 
+def test_stats_discovers_nested_worktree_archive_sessions(tmp_path, run_cli):
+    """archive/worktree-*/sessions/*.json も stats の履歴集計対象に含める."""
+    proj = tmp_path / "p1"
+    sd = _make_state(proj, passes=True, loop_active=False)
+    active_state = json.loads((sd / "sessions" / "test.json").read_text())
+    (sd / "sessions" / "test.json").unlink()
+    nested_archive = sd / "archive" / "worktree-feature" / "sessions"
+    nested_archive.mkdir(parents=True)
+    (nested_archive / "test.json").write_text(json.dumps(active_state))
+
+    r = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
+    data = json.loads(r.stdout)
+    assert data["total_sessions"] == 1
+    assert data["pass_count"] == 1
+
+
 def test_stats_phase_duration_totals_and_averages(tmp_path, run_cli):
     """phase_durations_sec を横断集計し、phase 別速度を見える化する."""
     _make_state(tmp_path / "p1", phase_durations_sec={"planning": 30, "scoring": 90})

@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a stable repository-root `scripts/mission-state.py` wrapper for the canonical state CLI.
 - Added `mission-state.py progress update/get/clear` checkpoints for long-running batches, with archived progress evidence and audit output on slow-session lines.
 - Specialist recommendations now include a bounded `specialists_phase_plan` for development and strategy-style registries without embedding maintainer-local skill names.
+- Mission audit now reports invalid score iterations and blank specialist invocation records as explicit findings.
 
 ### Changed
 - Mission orchestrator guidance now requires explicit `phase=executing` / `phase=reviewing` transitions and progress checkpoints for long-running work.
@@ -31,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Command providers can now classify preparation-only or too-short output as `prepared` using `result_contract`, preventing banners from being treated as completed review evidence.
 - `oracle-reviewer` now has a conservative default result contract for browser-review preparation banners, and `ask-user` specialist confirmations must be persisted with `--selection-source confirmed-user` before applied evidence counts as selected.
 - Broad orchestrator specialists are now bounded to non-execution evidence use and require `--bounded-purpose` when their applied plan/review evidence is recorded.
+- Standard or Complex audit/self-improvement missions now require explicit accounting for available testing, security, or risk specialist candidates.
 
 ### Fixed
 - Mission audit no longer treats core mission subskills as unselected external specialist invocations.
@@ -38,6 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Mission audit pass-rate calculations now exclude active no-score checkpoints from the denominator while still reporting them as incomplete active sessions.
 - Mission audit now classifies nested `archive/worktree-*/sessions/*.json` copies as resolved archive duplicates, preventing cross-root audits from reporting exact live/archive copies as P1 `duplicate-state` findings.
 - `mission-state.py mark-passes` now blocks required specialist providers that lack applied result evidence, so `prepared`, `skipped`, or `failed` evidence cannot satisfy strict required-provider gates.
+- `mission-state.py push-score` now rejects iteration values below 1, preventing unauditable `score_history` entries.
+- `mission-state.py specialists log-invocation` now rejects blank `role` or `skill` fields before writing specialist evidence.
+- `mission-state.py stats` now includes nested `archive/worktree-*/sessions/*.json` files so its session counts match audit discovery.
 
 ## [1.0.4] - 2026-06-22
 

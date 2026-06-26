@@ -23,6 +23,20 @@ APPLIED_SPECIALIST_INVOCATION_STATUSES = {
 }
 
 HIGH_RISK_PROFILES = {"security", "testing", "infra"}
+AUDIT_ACCOUNTING_PROFILES = {"security", "testing", "risk"}
+AUDIT_MISSION_SIGNALS = {
+    "audit",
+    "auditing",
+    "execution-log",
+    "health-check",
+    "improvement",
+    "log review",
+    "self-improvement",
+    "selfheal",
+    "監査",
+    "改善",
+    "実行ログ",
+}
 DATABASE_STRONG_SIGNALS = {"database", "schema", "migration", "query", "sql", "persistence"}
 
 
@@ -110,6 +124,17 @@ def _database_strong_signal_present(state: dict[str, Any]) -> bool:
     return any(signal in haystack for signal in DATABASE_STRONG_SIGNALS)
 
 
+def _audit_or_improvement_signal_present(state: dict[str, Any]) -> bool:
+    task_profile = state.get("task_profile") if isinstance(state.get("task_profile"), dict) else {}
+    values: list[str] = [
+        str(state.get("mission") or ""),
+        " ".join(str(value) for value in state.get("planned_files") or []),
+        " ".join(str(value) for value in task_profile.get("signals") or []),
+    ]
+    haystack = " ".join(values).lower()
+    return any(signal in haystack for signal in AUDIT_MISSION_SIGNALS)
+
+
 def candidate_accounting_required(state: dict[str, Any], candidate: dict[str, Any] | None = None) -> bool:
     """Return true when a candidate needs an explicit terminal decision trail.
 
@@ -125,10 +150,19 @@ def candidate_accounting_required(state: dict[str, Any], candidate: dict[str, An
         return True
     if complexity == "Critical" or risk == "high":
         return True
-    if complexity != "Complex" or candidate is None:
+    if candidate is None:
         return False
 
     profiles = _candidate_profiles(candidate)
+    if (
+        complexity in {"Standard", "Complex"}
+        and _audit_or_improvement_signal_present(state)
+        and profiles & AUDIT_ACCOUNTING_PROFILES
+    ):
+        return True
+    if complexity != "Complex":
+        return False
+
     if profiles & HIGH_RISK_PROFILES:
         return True
     if "database" in profiles and _database_strong_signal_present(state):

@@ -44,6 +44,38 @@ def test_log_invocation_appends_machine_readable_record(state_dir, run_cli, read
     assert entry["timestamp"].endswith("Z")
 
 
+def test_log_invocation_rejects_blank_role(state_dir, run_cli):
+    r = run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "review",
+        "--role", " ",
+        "--skill", "dev-code-reviewer",
+        "--mode", "skill-tool",
+        "--status", "completed",
+        cwd=state_dir.parent,
+    )
+
+    assert r.returncode != 0
+    assert "--role" in r.stderr
+
+
+def test_log_invocation_rejects_blank_skill(state_dir, run_cli):
+    r = run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "review",
+        "--role", "code-reviewer",
+        "--skill", " ",
+        "--mode", "skill-tool",
+        "--status", "completed",
+        cwd=state_dir.parent,
+    )
+
+    assert r.returncode != 0
+    assert "--skill" in r.stderr
+
+
 def test_log_invocation_archives_evidence_with_metadata(state_dir, run_cli, tmp_path, read_state):
     evidence = tmp_path / "review.md"
     evidence.write_text("# Specialist Review\n\nNo blocking issues.\n", encoding="utf-8")

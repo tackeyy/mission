@@ -11,19 +11,22 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 WRAPPER_ROOT = REPO_ROOT / "plugins" / "mission"
 
 
+def _is_generated_file(path: Path) -> bool:
+    return "__pycache__" in path.parts or ".pytest_cache" in path.parts
+
+
 def _is_excluded_skill_file(path: Path) -> bool:
     rel = path.relative_to(REPO_ROOT / "skills")
     parts = rel.parts
     return (
-        "__pycache__" in parts
-        or ".pytest_cache" in parts
+        _is_generated_file(path)
         or parts[:2] == ("mission", "tests")
         or rel == Path("mission/pytest.ini")
     )
 
 
 def _is_excluded_script_file(path: Path) -> bool:
-    return path.name == "sync-codex-plugin-wrapper.sh"
+    return _is_generated_file(path) or path.name == "sync-codex-plugin-wrapper.sh"
 
 
 def _relative_files(root: Path, exclude) -> list[Path]:
@@ -39,7 +42,7 @@ def test_codex_wrapper_skills_match_canonical_tree():
     wrapper = WRAPPER_ROOT / "skills"
 
     expected = _relative_files(root, _is_excluded_skill_file)
-    actual = _relative_files(wrapper, lambda p: False)
+    actual = _relative_files(wrapper, _is_generated_file)
 
     assert actual == expected
     for rel in expected:
@@ -51,7 +54,7 @@ def test_codex_wrapper_scripts_match_canonical_tree():
     wrapper = WRAPPER_ROOT / "scripts"
 
     expected = _relative_files(root, _is_excluded_script_file)
-    actual = _relative_files(wrapper, lambda p: False)
+    actual = _relative_files(wrapper, _is_generated_file)
 
     assert actual == expected
     for rel in expected:

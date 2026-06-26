@@ -307,6 +307,9 @@ def _iter_state_files(root: Path, *, include_archive: bool = False):
                 for sub in sorted(archive.glob("worktree-*")):
                     if sub.is_dir():
                         yield from sorted(sub.glob("*.json"))
+                        worktree_sessions = sub / "sessions"
+                        if worktree_sessions.is_dir():
+                            yield from sorted(worktree_sessions.glob("*.json"))
 
 
 def _default_search_roots() -> list[Path]:
@@ -1731,6 +1734,14 @@ def cmd_log_specialist_invocation(args):
     if args.iteration < 0:
         print("ERROR: --iteration は 0 以上で指定してください", file=sys.stderr)
         sys.exit(2)
+    role = (args.role or "").strip()
+    skill = (args.skill or "").strip()
+    if not role:
+        print("ERROR: --role は空にできません", file=sys.stderr)
+        sys.exit(2)
+    if not skill:
+        print("ERROR: --skill は空にできません", file=sys.stderr)
+        sys.exit(2)
     reason = (getattr(args, "reason", None) or "").strip()
     notes = (getattr(args, "notes", None) or "").strip()
     if args.status in SPECIALIST_INVOCATION_REASON_REQUIRED_STATUSES and not (reason or notes):
@@ -1742,17 +1753,17 @@ def cmd_log_specialist_invocation(args):
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
-        if _confirmed_selection_required(data, args.skill, args.status) and not getattr(args, "selection_source", None):
+        if _confirmed_selection_required(data, skill, args.status) and not getattr(args, "selection_source", None):
             print(
                 "ERROR: specialists_decision requested user confirmation; pass --selection-source confirmed-user "
                 "when recording applied specialist evidence after confirmation.",
                 file=sys.stderr,
             )
             sys.exit(2)
-        _reject_unbounded_orchestrator_execution(data, args.skill, args.phase)
-        if _bounded_purpose_required(data, args.skill, args.phase, args.status) and not getattr(args, "bounded_purpose", None):
+        _reject_unbounded_orchestrator_execution(data, skill, args.phase)
+        if _bounded_purpose_required(data, skill, args.phase, args.status) and not getattr(args, "bounded_purpose", None):
             print(
-                f"ERROR: bounded orchestrator specialist requires --bounded-purpose for applied evidence: {args.skill}",
+                f"ERROR: bounded orchestrator specialist requires --bounded-purpose for applied evidence: {skill}",
                 file=sys.stderr,
             )
             sys.exit(2)
@@ -1760,8 +1771,8 @@ def cmd_log_specialist_invocation(args):
         entry = {
             "iteration": args.iteration,
             "phase": args.phase,
-            "role": args.role,
-            "skill": args.skill,
+            "role": role,
+            "skill": skill,
             "mode": args.mode,
             "status": args.status,
             "timestamp": now,
@@ -2165,6 +2176,9 @@ def cmd_push_score(args):
         sys.exit(1)
     if args.open_high < 0:
         print("ERROR: --open-high は 0 以上で指定してください", file=sys.stderr)
+        sys.exit(2)
+    if args.iteration < 1:
+        print("ERROR: --iteration は 1 以上で指定してください", file=sys.stderr)
         sys.exit(2)
     items = _validate_score_args(args)
 
