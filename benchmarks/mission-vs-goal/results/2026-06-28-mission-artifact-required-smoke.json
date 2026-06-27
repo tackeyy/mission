@@ -1,0 +1,24 @@
+{
+  "benchmark": "mission-artifact-required-smoke",
+  "run_id": "2026-06-28-local-cli-artifact-required",
+  "arm": "mission",
+  "scope": "local CLI smoke, not a paired /goal comparison",
+  "artifact_required": true,
+  "artifact_path": ".mission-state/artifacts/test/mission-artifact.md",
+  "artifact_completion": true,
+  "validator_pass": true,
+  "quality_score_method": "unit_test_backed_cli_smoke_not_blind_human",
+  "claims_supported": [
+    "mission-state.py can create, append, render, export, and record publish intent for local mission artifacts",
+    "mark-passes rejects an artifact-required mission until the artifact has been rendered"
+  ],
+  "claims_not_supported": [
+    "mission artifact support outperforms Claude Code /goal",
+    "mission automatically publishes a remote Claude Code Artifact URL"
+  ],
+  "verification": {
+    "test_file": "skills/mission/tests/test_artifact_cli.py",
+    "focused_command": "python3 -m pytest skills/mission/tests/test_plugins_in_sync.py skills/mission/tests/test_artifact_cli.py skills/mission/tests/test_artifact_design_docs.py skills/mission/tests/test_benchmark_package.py -q",
+    "focused_result": "25 passed"
+  }
+}

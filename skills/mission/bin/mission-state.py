@@ -13,6 +13,8 @@
   python3 ${MISSION_PLUGIN_ROOT}/skills/mission/bin/mission-state.py init <mission> [--threshold X] [--max-iter N] [--files a.py,b.py]
   python3 ${MISSION_PLUGIN_ROOT}/skills/mission/bin/mission-state.py get [--field key]
   python3 ${MISSION_PLUGIN_ROOT}/skills/mission/bin/mission-state.py set key=value [key=value ...]
+  python3 ${MISSION_PLUGIN_ROOT}/skills/mission/bin/mission-state.py artifact init --title <text> [--required-for-pass]
+  python3 ${MISSION_PLUGIN_ROOT}/skills/mission/bin/mission-state.py artifact append --section evidence --text <text>
   python3 ${MISSION_PLUGIN_ROOT}/skills/mission/bin/mission-state.py mark-passes
   python3 ${MISSION_PLUGIN_ROOT}/skills/mission/bin/mission-state.py mark-halt --reason <text>
   python3 ${MISSION_PLUGIN_ROOT}/skills/mission/bin/mission-state.py cleanup-empty <path>
@@ -48,6 +50,19 @@ DEFAULT_THRESHOLD = 4.0     # 合格 composite 閾値 (init --threshold 未指�
 MIN_ITEM_THRESHOLD = 3.5    # 各項目スコアの足切り (これ未満は mark-passes が reject)
 DEFAULT_MAX_ITER = 3        # init --max-iter 未指定時の最大反復回数 (0=上限なし)
 SCORE_MIN, SCORE_MAX = 0.0, 5.0  # composite/min_item の許容範囲
+
+ARTIFACT_SECTIONS = {
+    "mission": "Mission",
+    "plan": "Plan",
+    "execution": "Execution",
+    "evidence": "Evidence",
+    "review": "Review",
+    "score_gate": "Score Gate",
+    "assumptions": "Assumptions",
+    "follow_ups": "Follow-ups",
+}
+ARTIFACT_REDACTION_STATUSES = {"unchecked", "checked", "reviewed", "not-needed"}
+ARTIFACT_PUBLISH_PROVIDERS = {"claude-code", "local"}
 
 
 BUILTIN_SPECIALIST_CANDIDATES = [
@@ -1636,6 +1651,357 @@ def _state_relative_path(cwd: Path, path_text: str) -> str:
         return str(path)
 
 
+def _artifact_dir(cwd: Path, session_id: str) -> Path:
+    return state_dir(cwd) / "artifacts" / _sanitize_sid(session_id)
+
+
+def _artifact_path(cwd: Path, session_id: str) -> Path:
+    return _artifact_dir(cwd, session_id) / "mission-artifact.md"
+
+
+def _resolve_project_output_path(cwd: Path, path_text: str) -> Path:
+    path = Path(path_text).expanduser()
+    if not path.is_absolute():
+        path = cwd / path
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(cwd.resolve())
+    except ValueError:
+        print(f"ERROR: output path must stay inside project root: {path_text}", file=sys.stderr)
+        sys.exit(2)
+    return resolved
+
+
+def _artifact_state(data: dict) -> dict:
+    artifact = data.get("artifact")
+    return artifact if isinstance(artifact, dict) else {}
+
+
+def _artifact_blocks(artifact: dict) -> list[dict]:
+    blocks = artifact.get("blocks")
+    return blocks if isinstance(blocks, list) else []
+
+
+def _require_artifact(data: dict) -> dict:
+    artifact = _artifact_state(data)
+    if not artifact:
+        print("ERROR: artifact is not initialized. Run `mission-state.py artifact init` first.", file=sys.stderr)
+        sys.exit(2)
+    return artifact
+
+
+def _validate_artifact_section(section: str) -> str:
+    key = section.strip().lower().replace("-", "_")
+    if key not in ARTIFACT_SECTIONS:
+        print(
+            "ERROR: unknown artifact section. Use one of: "
+            + ", ".join(sorted(ARTIFACT_SECTIONS)),
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return key
+
+
+def _read_artifact_input(args) -> tuple[str, str | None]:
+    has_text = getattr(args, "text", None) is not None
+    has_file = getattr(args, "file", None) is not None
+    if has_text == has_file:
+        print("ERROR: provide exactly one of --text or --file", file=sys.stderr)
+        sys.exit(2)
+    if has_text:
+        return args.text, None
+    if args.file == "-":
+        return sys.stdin.read(), "stdin"
+    src = Path(args.file)
+    if not (src.exists() and src.is_file()):
+        print(f"ERROR: artifact input file not found: {args.file}", file=sys.stderr)
+        sys.exit(2)
+    return src.read_text(encoding="utf-8"), str(src)
+
+
+def _format_artifact_block(block: dict) -> str:
+    content = str(block.get("content") or "").rstrip()
+    source = block.get("source")
+    timestamp = block.get("timestamp")
+    lines = []
+    if timestamp or source:
+        meta = []
+        if timestamp:
+            meta.append(f"timestamp={timestamp}")
+        if source:
+            meta.append(f"source={source}")
+        lines.append(f"<!-- artifact-block: {' '.join(meta)} -->")
+    lines.append(content if content else "_No content recorded._")
+    return "\n".join(lines).rstrip()
+
+
+def _render_artifact_markdown(data: dict, artifact: dict) -> str:
+    title = artifact.get("title") or data.get("mission") or "Mission Artifact"
+    sid = data.get("session_id") or "unknown"
+    mission_id_text = data.get("mission_id") or "unknown"
+    path = artifact.get("path") or f".mission-state/artifacts/{sid}/mission-artifact.md"
+    status = artifact.get("status") or "draft"
+    redaction_status = artifact.get("redaction_status") or "unchecked"
+    blocks = _artifact_blocks(artifact)
+    by_section = {key: [] for key in ARTIFACT_SECTIONS}
+    for block in blocks:
+        section = block.get("section")
+        if section in by_section:
+            by_section[section].append(block)
+
+    lines = [
+        f"# {title}",
+        "",
+        "<!-- mission-artifact: generated-by=mission-state.py artifact render -->",
+        "",
+        "## Metadata",
+        "",
+        f"- session_id: {sid}",
+        f"- mission_id: {mission_id_text}",
+        f"- status: {status}",
+        f"- artifact_path: {path}",
+        f"- redaction_status: {redaction_status}",
+        f"- updated_at: {artifact.get('updated_at') or data.get('updated_at') or ''}",
+        "",
+    ]
+    if artifact.get("required_for_pass"):
+        lines.extend(["- required_for_pass: true", ""])
+
+    defaults = {
+        "mission": data.get("mission") or "",
+        "plan": "No plan blocks recorded yet.",
+        "execution": "No execution blocks recorded yet.",
+        "evidence": "No evidence blocks recorded yet.",
+        "review": "No review blocks recorded yet.",
+        "score_gate": _score_gate_summary(data),
+        "assumptions": f"See `{data.get('assumptions_path')}`." if data.get("assumptions_path") else "",
+        "follow_ups": "No follow-ups recorded.",
+    }
+    for section, heading in ARTIFACT_SECTIONS.items():
+        lines.extend([f"## {heading}", ""])
+        section_blocks = by_section.get(section) or []
+        if section_blocks:
+            for i, block in enumerate(section_blocks):
+                if i:
+                    lines.append("")
+                lines.append(_format_artifact_block(block))
+        else:
+            lines.append(defaults.get(section) or "_No content recorded._")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _score_gate_summary(data: dict) -> str:
+    history = data.get("score_history") or []
+    scored = [entry for entry in history if _is_valid_composite(entry.get("composite"))]
+    if not scored:
+        return "No score has been recorded yet."
+    latest = scored[-1]
+    return (
+        f"- composite: {latest.get('composite')}\n"
+        f"- min_item: {latest.get('min_item')}\n"
+        f"- threshold: {data.get('threshold', DEFAULT_THRESHOLD)}\n"
+        f"- open_high: {latest.get('open_high', 0)}"
+    )
+
+
+def _write_artifact(cwd: Path, data: dict, artifact: dict) -> Path:
+    path_text = artifact.get("path")
+    path = _resolve_project_output_path(cwd, path_text) if path_text else _artifact_path(cwd, data.get("session_id") or resolve_session_id())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_render_artifact_markdown(data, artifact), encoding="utf-8")
+    return path
+
+
+def _artifact_gate_error(data: dict, cwd: Path) -> str | None:
+    artifact = _artifact_state(data)
+    if not artifact.get("required_for_pass"):
+        return None
+    path_text = artifact.get("path")
+    if not path_text:
+        return "artifact is required but no artifact.path is recorded"
+    path = _resolve_project_output_path(cwd, path_text)
+    if not path.exists():
+        return f"artifact is required but file is missing: {path_text}"
+    if artifact.get("status") not in {"rendered", "exported", "publish-prepared", "published"}:
+        return f"artifact is required but status is {artifact.get('status')!r}; run `mission-state.py artifact render`"
+    if not artifact.get("last_rendered_at"):
+        return "artifact is required but last_rendered_at is missing; run `mission-state.py artifact render`"
+    return None
+
+
+def cmd_artifact_init(args):
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
+        sys.exit(1)
+    if args.redaction_status not in ARTIFACT_REDACTION_STATUSES:
+        print("ERROR: invalid --redaction-status", file=sys.stderr)
+        sys.exit(2)
+    now = iso_now()
+    with StateLock(lock_file(cwd)):
+        data = json.loads(sf.read_text())
+        sid = data.get("session_id") or resolve_session_id()
+        artifact_path = _artifact_path(cwd, sid)
+        artifact = {
+            "status": "draft",
+            "format": args.format,
+            "title": args.title or data.get("mission") or "Mission Artifact",
+            "path": _state_relative_path(cwd, str(artifact_path)),
+            "exports": [],
+            "publish_events": [],
+            "redaction_status": args.redaction_status,
+            "required_for_pass": bool(args.required_for_pass),
+            "blocks": [],
+            "created_at": now,
+            "updated_at": now,
+        }
+        data["artifact"] = artifact
+        data["updated_at"] = now
+        backup_state(sf)
+        atomic_write_json(sf, stamp_metadata(data, cwd))
+        _write_artifact(cwd, data, artifact)
+    print(json.dumps({"ok": True, "artifact": artifact}, indent=2 if args.json else None, ensure_ascii=False))
+
+
+def cmd_artifact_append(args):
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
+        sys.exit(1)
+    section = _validate_artifact_section(args.section)
+    content, source = _read_artifact_input(args)
+    now = iso_now()
+    with StateLock(lock_file(cwd)):
+        data = json.loads(sf.read_text())
+        artifact = _require_artifact(data)
+        block = {
+            "section": section,
+            "content": content.rstrip(),
+            "timestamp": now,
+        }
+        if source:
+            block["source"] = source
+        if args.label:
+            block["label"] = args.label
+        artifact.setdefault("blocks", []).append(block)
+        artifact["status"] = "draft"
+        artifact["updated_at"] = now
+        data["artifact"] = artifact
+        data["updated_at"] = now
+        backup_state(sf)
+        atomic_write_json(sf, stamp_metadata(data, cwd))
+    print(json.dumps({"ok": True, "section": section, "block": block}, indent=2 if args.json else None, ensure_ascii=False))
+
+
+def cmd_artifact_render(args):
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
+        sys.exit(1)
+    now = iso_now()
+    with StateLock(lock_file(cwd)):
+        data = json.loads(sf.read_text())
+        artifact = _require_artifact(data)
+        if args.redaction_status:
+            if args.redaction_status not in ARTIFACT_REDACTION_STATUSES:
+                print("ERROR: invalid --redaction-status", file=sys.stderr)
+                sys.exit(2)
+            artifact["redaction_status"] = args.redaction_status
+        artifact["status"] = "rendered"
+        artifact["last_rendered_at"] = now
+        artifact["updated_at"] = now
+        data["artifact"] = artifact
+        data["updated_at"] = now
+        path = _write_artifact(cwd, data, artifact)
+        backup_state(sf)
+        atomic_write_json(sf, stamp_metadata(data, cwd))
+    result = {"ok": True, "path": _state_relative_path(cwd, str(path)), "artifact": artifact}
+    print(json.dumps(result, indent=2 if args.json else None, ensure_ascii=False))
+
+
+def cmd_artifact_export(args):
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
+        sys.exit(1)
+    if args.redaction_status not in ARTIFACT_REDACTION_STATUSES - {"unchecked"}:
+        print("ERROR: export requires --redaction-status checked|reviewed|not-needed", file=sys.stderr)
+        sys.exit(2)
+    now = iso_now()
+    dst = _resolve_project_output_path(cwd, args.to)
+    with StateLock(lock_file(cwd)):
+        data = json.loads(sf.read_text())
+        artifact = _require_artifact(data)
+        artifact["redaction_status"] = args.redaction_status
+        artifact["status"] = "exported"
+        artifact["last_rendered_at"] = now
+        artifact["updated_at"] = now
+        src = _write_artifact(cwd, data, artifact)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        export_entry = {
+            "path": _state_relative_path(cwd, str(dst)),
+            "timestamp": now,
+            "redaction_status": args.redaction_status,
+        }
+        artifact.setdefault("exports", []).append(export_entry)
+        data["artifact"] = artifact
+        data["updated_at"] = now
+        backup_state(sf)
+        atomic_write_json(sf, stamp_metadata(data, cwd))
+    result = {"ok": True, "export": export_entry, "artifact": artifact}
+    print(json.dumps(result, indent=2 if args.json else None, ensure_ascii=False))
+
+
+def cmd_artifact_publish(args):
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
+        sys.exit(1)
+    if args.provider not in ARTIFACT_PUBLISH_PROVIDERS:
+        print("ERROR: unsupported artifact publish provider", file=sys.stderr)
+        sys.exit(2)
+    if not args.require_confirm or not args.approval_text:
+        print(
+            "ERROR: artifact publish requires --require-confirm and --approval-text. "
+            "This command records publish consent; it does not silently publish remotely.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    now = iso_now()
+    with StateLock(lock_file(cwd)):
+        data = json.loads(sf.read_text())
+        artifact = _require_artifact(data)
+        if artifact.get("redaction_status") == "unchecked":
+            print("ERROR: publish requires redaction_status other than unchecked", file=sys.stderr)
+            sys.exit(2)
+        event = {
+            "provider": args.provider,
+            "timestamp": now,
+            "approval_text": args.approval_text,
+            "status": "published" if args.destination else "publish-prepared",
+        }
+        if args.destination:
+            event["destination"] = args.destination
+        artifact.setdefault("publish_events", []).append(event)
+        artifact["status"] = event["status"]
+        artifact["updated_at"] = now
+        path = _write_artifact(cwd, data, artifact)
+        event["artifact_path"] = _state_relative_path(cwd, str(path))
+        data["artifact"] = artifact
+        data["updated_at"] = now
+        backup_state(sf)
+        atomic_write_json(sf, stamp_metadata(data, cwd))
+    result = {"ok": True, "publish_event": event, "artifact": artifact}
+    print(json.dumps(result, indent=2 if args.json else None, ensure_ascii=False))
+
+
 def _archive_progress(cwd: Path, data: dict, progress: dict, iteration: int) -> str:
     archive_dir = state_dir(cwd) / "archive"
     archive_dir.mkdir(parents=True, exist_ok=True)
@@ -2288,6 +2654,10 @@ def cmd_mark_passes(args):
                     f"ERROR: 未解決 High が {open_high} 件あるため合格にできません。High 指摘を全て解消してから再採点してください。",
                     file=sys.stderr,
                 )
+                sys.exit(2)
+            artifact_error = _artifact_gate_error(data, cwd)
+            if artifact_error:
+                print(f"ERROR: {artifact_error}", file=sys.stderr)
                 sys.exit(2)
             specialist_report = candidate_accounting_report(data)
             if specialist_report.get("accounting_required"):
@@ -3024,6 +3394,44 @@ def _build_parser():
     p_progress_clear = progress_sub.add_parser("clear", help="progress checkpoint を削除")
     p_progress_clear.add_argument("--json", action="store_true", help="JSON 形式で出力")
     p_progress_clear.set_defaults(func=cmd_progress_clear)
+
+    p_artifact = sub.add_parser("artifact", help="local mission artifact を作成・更新・export/publish 証跡化")
+    artifact_sub = p_artifact.add_subparsers(dest="artifact_cmd", required=True)
+    p_artifact_init = artifact_sub.add_parser("init", help="canonical local artifact を初期化")
+    p_artifact_init.add_argument("--format", default="markdown", choices=["markdown"])
+    p_artifact_init.add_argument("--title", default=None)
+    p_artifact_init.add_argument("--required-for-pass", action="store_true",
+                                 help="mark-passes 前に rendered artifact を必須にする")
+    p_artifact_init.add_argument("--redaction-status", default="unchecked", choices=sorted(ARTIFACT_REDACTION_STATUSES))
+    p_artifact_init.add_argument("--json", action="store_true", help="JSON 形式で出力")
+    p_artifact_init.set_defaults(func=cmd_artifact_init)
+
+    p_artifact_append = artifact_sub.add_parser("append", help="artifact section に evidence block を追記")
+    p_artifact_append.add_argument("--section", required=True)
+    p_artifact_append.add_argument("--text", default=None)
+    p_artifact_append.add_argument("--file", default=None)
+    p_artifact_append.add_argument("--label", default=None)
+    p_artifact_append.add_argument("--json", action="store_true", help="JSON 形式で出力")
+    p_artifact_append.set_defaults(func=cmd_artifact_append)
+
+    p_artifact_render = artifact_sub.add_parser("render", help="state と blocks から canonical Markdown を再生成")
+    p_artifact_render.add_argument("--redaction-status", default=None, choices=sorted(ARTIFACT_REDACTION_STATUSES))
+    p_artifact_render.add_argument("--json", action="store_true", help="JSON 形式で出力")
+    p_artifact_render.set_defaults(func=cmd_artifact_render)
+
+    p_artifact_export = artifact_sub.add_parser("export", help="reviewed artifact を project 内の durable path に export")
+    p_artifact_export.add_argument("--to", required=True)
+    p_artifact_export.add_argument("--redaction-status", required=True, choices=sorted(ARTIFACT_REDACTION_STATUSES - {"unchecked"}))
+    p_artifact_export.add_argument("--json", action="store_true", help="JSON 形式で出力")
+    p_artifact_export.set_defaults(func=cmd_artifact_export)
+
+    p_artifact_publish = artifact_sub.add_parser("publish", help="remote/local publish intent と approval evidence を記録")
+    p_artifact_publish.add_argument("--provider", required=True, choices=sorted(ARTIFACT_PUBLISH_PROVIDERS))
+    p_artifact_publish.add_argument("--destination", default=None)
+    p_artifact_publish.add_argument("--require-confirm", action="store_true")
+    p_artifact_publish.add_argument("--approval-text", default=None)
+    p_artifact_publish.add_argument("--json", action="store_true", help="JSON 形式で出力")
+    p_artifact_publish.set_defaults(func=cmd_artifact_publish)
 
     p_spec = sub.add_parser("specialists", help="specialist skill の discovery / recommend / state 記録")
     spec_sub = p_spec.add_subparsers(dest="specialists_cmd", required=True)

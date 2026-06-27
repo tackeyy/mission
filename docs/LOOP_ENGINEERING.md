@@ -101,12 +101,15 @@ size, task mix, validators, and raw result records.
 
 ## Artifact Evidence
 
-`mission` has a planned local-first artifact contract in
-[`docs/MISSION_ARTIFACTS.md`](MISSION_ARTIFACTS.md). This is not yet an
-implemented benchmark result. Use it as the design plan for making future
-mission runs leave reusable, auditable completion evidence.
+`mission` has a local-first artifact contract and CLI in
+[`docs/MISSION_ARTIFACTS.md`](MISSION_ARTIFACTS.md). Use it when a mission run
+must leave reusable, auditable completion evidence.
 
-Until artifact-required paired runs are complete, do not claim that artifact
-support makes `mission` outperform Claude Code `/goal`; the defensible claim is
-that `mission` is designing for persisted evidence while current benchmark
-records have not measured that behavior.
+The artifact-required smoke record is local CLI evidence, not a paired `/goal`
+comparison:
+[`2026-06-28-mission-artifact-required-smoke.json`](../benchmarks/mission-vs-goal/results/2026-06-28-mission-artifact-required-smoke.json).
+
+Do not claim that artifact support makes `mission` outperform Claude Code
+`/goal` unless artifact-required paired runs support that exact claim. The
+defensible claim is that `mission` can require a persisted local artifact before
+the mission is allowed to pass.

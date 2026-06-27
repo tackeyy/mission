@@ -95,6 +95,20 @@ def test_mission_vs_goal_has_japanese_benchmark_docs():
     assert (BENCHMARK_DIR / "official-goal-rerun-runbook.ja.md").exists()
 
 
+def test_mission_artifact_required_smoke_result_is_marketing_safe():
+    smoke_path = BENCHMARK_DIR / "results" / "2026-06-28-mission-artifact-required-smoke.json"
+    smoke = json.loads(smoke_path.read_text(encoding="utf-8"))
+
+    assert smoke["benchmark"] == "mission-artifact-required-smoke"
+    assert smoke["scope"] == "local CLI smoke, not a paired /goal comparison"
+    assert smoke["artifact_required"] is True
+    assert smoke["artifact_completion"] is True
+    assert smoke["validator_pass"] is True
+    assert smoke["quality_score_method"] == "unit_test_backed_cli_smoke_not_blind_human"
+    assert "mission artifact support outperforms Claude Code /goal" in smoke["claims_not_supported"]
+    assert "25 passed" in smoke["verification"]["focused_result"]
+
+
 def test_mission_vs_goal_measured_reports_are_honest_about_paired_runs():
     report = (BENCHMARK_DIR / "report.md").read_text(encoding="utf-8")
     report_ja = (BENCHMARK_DIR / "report.ja.md").read_text(encoding="utf-8")

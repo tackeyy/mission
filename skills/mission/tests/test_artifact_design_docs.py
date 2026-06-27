@@ -14,19 +14,17 @@ def test_mission_artifact_design_docs_are_linked_from_public_docs():
     assert "docs/MISSION_ARTIFACTS.md" in loop_doc
 
 
-def test_mission_artifact_design_is_explicitly_not_implemented_yet():
+def test_mission_artifact_design_is_explicit_about_implemented_local_scope():
     design = (REPO_ROOT / "docs" / "MISSION_ARTIFACTS.md").read_text(encoding="utf-8")
     design_ja = (REPO_ROOT / "docs" / "MISSION_ARTIFACTS.ja.md").read_text(encoding="utf-8")
 
-    assert "does not claim" in design
-    assert "artifact support is already implemented" in design
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     assert "Artifact support" in readme
-    assert "design plan" in readme
-    assert "すでに実装済みだとは主張しません" in design_ja
-    assert "実装済みの benchmark result ではありません" in (
-        REPO_ROOT / "README.ja.md"
-    ).read_text(encoding="utf-8")
+    assert "implemented as a local Markdown artifact" in readme
+    assert "implemented local artifact contract" in design
+    assert "remote Claude Code Artifact URL" in design
+    assert "local artifact contract は実装済み" in design_ja
+    assert "remote Claude Code Artifact URL を黙って作成するものではありません" in design_ja
 
 
 def test_mission_artifact_design_uses_claude_code_best_practices_without_lock_in():
@@ -40,8 +38,8 @@ def test_mission_artifact_design_uses_claude_code_best_practices_without_lock_in
     assert "Do not publish anything remotely without explicit user approval" in design
     assert ".mission-state/artifacts/<session_id>/mission-artifact.md" in design
     assert "redaction_status" in design
-    assert "do not" in design
-    assert "yet measure that artifact behavior" in design
+    assert "artifact init --required-for-pass" in design
+    assert "mark-passes` refuses missing or unrendered artifacts" in design
 
     assert "https://code.claude.com/docs/ja/artifacts" in design_ja
     assert "https://code.claude.com/docs/ja/goal" in design_ja
@@ -49,3 +47,20 @@ def test_mission_artifact_design_uses_claude_code_best_practices_without_lock_in
     assert "Claude Code hosting を必須依存にはしません" in design_ja
     assert "明示許可なしに remote publish しない" in design_ja
     assert ".mission-state/artifacts/<session_id>/mission-artifact.md" in design_ja
+
+
+def test_mission_artifact_design_links_smoke_evidence_without_paired_claim():
+    design = (REPO_ROOT / "docs" / "MISSION_ARTIFACTS.md").read_text(encoding="utf-8")
+    loop_doc = (REPO_ROOT / "docs" / "LOOP_ENGINEERING.md").read_text(encoding="utf-8")
+    smoke_path = (
+        REPO_ROOT
+        / "benchmarks"
+        / "mission-vs-goal"
+        / "results"
+        / "2026-06-28-mission-artifact-required-smoke.json"
+    )
+
+    assert smoke_path.exists()
+    assert "2026-06-28-mission-artifact-required-smoke.json" in design
+    assert "not a paired `/goal` comparison" in design
+    assert "not a paired `/goal`" in loop_doc

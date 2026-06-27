@@ -1,10 +1,11 @@
 # Mission Artifacts Design
 
-Status: design contract and implementation plan. This document does not claim
-that artifact support is already implemented. Artifact support is not yet
-implemented by this design document.
+Status: implemented local artifact contract. `mission-state.py artifact` can
+create, append, render, export, and record publish intent for local mission
+artifacts. The publish command records explicit consent and destination
+metadata; it does not silently create a remote Claude Code Artifact URL.
 
-`mission` should produce an inspectable mission artifact: a durable local file
+`mission` can produce an inspectable mission artifact: a durable local file
 that explains what was requested, what was done, what evidence was checked, what
 review found, how the score gate was reached, and why the mission can stop.
 
@@ -34,7 +35,7 @@ Code hosting a required dependency.
 
 ## Goals
 
-- Create one canonical artifact per mission by default.
+- Create one canonical artifact per mission when artifact support is enabled.
 - Keep artifact data tied to `.mission-state` so the stop decision and the
   evidence trail cannot drift apart.
 - Support Markdown first, then optionally rendered HTML.
@@ -52,7 +53,7 @@ Code hosting a required dependency.
 
 ## Artifact Contract
 
-The first implementation should add a local artifact under:
+The implementation creates a local artifact under:
 
 ```text
 .mission-state/artifacts/<session_id>/mission-artifact.md
@@ -88,14 +89,15 @@ The artifact should include these sections:
 
 ## CLI Plan
 
-Add artifact subcommands to `skills/mission/bin/mission-state.py`:
+`skills/mission/bin/mission-state.py` supports these artifact subcommands:
 
 ```text
-mission-state.py artifact init --format markdown --title "..."
+mission-state.py artifact init --format markdown --title "..." [--required-for-pass]
 mission-state.py artifact append --section evidence --file path/or/stdin
-mission-state.py artifact render
-mission-state.py artifact export --to docs/marketing/<slug>.md
-mission-state.py artifact publish --provider claude-code --require-confirm
+mission-state.py artifact append --section evidence --text "..."
+mission-state.py artifact render --redaction-status reviewed
+mission-state.py artifact export --to docs/marketing/<slug>.md --redaction-status reviewed
+mission-state.py artifact publish --provider claude-code --require-confirm --approval-text "..."
 ```
 
 Rules:
@@ -107,11 +109,13 @@ Rules:
   evidence blocks.
 - `artifact export` copies a reviewed version to a user-selected durable path.
 - `artifact publish` is optional and must require explicit user confirmation.
+  It records publish intent, approval text, provider, destination, and artifact
+  path in state. Remote provider APIs are not called by the current command.
 
 ## Stop-Gate Integration
 
-Artifact support should start as opt-in, then become required for mission types
-where a durable result is expected.
+Artifact support starts as opt-in. It becomes required for a mission when
+`artifact init --required-for-pass` is used.
 
 Recommended phases:
 
@@ -119,10 +123,10 @@ Recommended phases:
 |---|---|---|
 | 0 | Document the contract and plan | Doc consistency tests |
 | 1 | Add local artifact state schema and CLI commands | Unit tests for init/append/render/export |
-| 2 | Update the orchestrator skill to create and update artifacts during normal runs | Integration tests with a temporary mission state |
-| 3 | Add stop-gate checks for artifact-required missions | `mark-passes` refuses missing artifacts unless forced |
+| 2 | Update the orchestrator skill to create and update artifacts during normal runs | Skill instructions include artifact init/append/render flow |
+| 3 | Add stop-gate checks for artifact-required missions | `mark-passes` refuses missing or unrendered artifacts unless forced |
 | 4 | Add optional publisher adapters | Tests prove publishing is opt-in and records consent |
-| 5 | Re-run `/goal` vs `mission` benchmark with artifact-required mission runs | Raw paired records plus artifact paths |
+| 5 | Add artifact-required benchmark smoke evidence | Local smoke records prove artifact-required mission runs can pass only after render |
 
 ## Security And Privacy
 
@@ -142,9 +146,13 @@ For marketing-safe comparisons, artifact support changes the benchmark question
 from "which agent says done?" to "which workflow leaves a reusable, auditable
 result behind?"
 
-Until Phase 5 paired runs are completed, the only defensible public claim is:
+The local artifact-required smoke record is stored at
+[`benchmarks/mission-vs-goal/results/2026-06-28-mission-artifact-required-smoke.json`](../benchmarks/mission-vs-goal/results/2026-06-28-mission-artifact-required-smoke.json).
+It is a CLI smoke result, not a paired `/goal` comparison.
 
-> `mission` has a planned local-first artifact contract designed to make
-> completion evidence auditable. The current `/goal` comparison results do not
-> yet measure that artifact behavior, and do not yet measure that artifact
-> behavior as a benchmark outcome.
+Until artifact-required paired `/goal` vs `mission` runs are completed, the only
+defensible public claim is:
+
+> `mission` can require a rendered local artifact before a mission passes. The
+> current `/goal` comparison results do not yet prove that this artifact behavior
+> makes either workflow better.

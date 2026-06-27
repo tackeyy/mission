@@ -22,7 +22,7 @@ context compaction 後も最優先で復元・遵守すること。
    - 合格なら `loop_active: false`, `passes: true` → 完了報告
    - 不合格なら `loop_active: true` 維持 → Critic → 次イテレーション
 5. **compaction 後の最初のアクション (R1)**: §Skill開始/復元手順の **compaction/resume 経路 (step 2)** をこの順で実行 — (a) `mission-state.py refresh-pid` (PID 更新 + orphan halt 自動解除。**cleanup より必ず先**) → (b) 起動前 cleanup (`cleanup-empty $(pwd)` → `cleanup-stale --root "$(pwd)" --execute`) → (c) `mission-state.py get` で state(`sessions/<sid>.json`)を読み `assumptions_path` の assumptions を Read (固定パス直書き禁止) → (d) `phase`/`iteration`/`score_history` から該当 Phase へ復帰
-6. **完了報告する前に**: Medium 以上の指摘を orchestrator 自身がインライン修正した場合、差分 Reviewer 1 名の再確認を経たか (M6。自己検証のみで合格禁止)？ composite_score が threshold 以上か？ 全項目が 3.5 以上か？ どちらかが No なら止まる権利はない。**さらに `mission-state.py mark-passes` が exit 0 で返ったことを確認する** (threshold gate により未達なら exit 2 で reject される)。`halt_reason` が空でなければ完了報告語彙は禁止し、先頭を必ず `⏸️ 中断 / 未完了` にする。**`mark-passes --force` は orchestrator が自律実行してはならない** — ユーザーが明示的に「`--force` で進めて」「人手 override する」と指示した場合のみ使用可能 (gate を骨抜きにする操作のため)
+6. **完了報告する前に**: Medium 以上の指摘を orchestrator 自身がインライン修正した場合、差分 Reviewer 1 名の再確認を経たか (M6。自己検証のみで合格禁止)？ composite_score が threshold 以上か？ 全項目が 3.5 以上か？ artifact-required mission なら `mission-state.py artifact render` 済みか？ どれかが No なら止まる権利はない。**さらに `mission-state.py mark-passes` が exit 0 で返ったことを確認する** (threshold/artifact gate により未達なら exit 2 で reject される)。`halt_reason` が空でなければ完了報告語彙は禁止し、先頭を必ず `⏸️ 中断 / 未完了` にする。**`mark-passes --force` は orchestrator が自律実行してはならない** — ユーザーが明示的に「`--force` で進めて」「人手 override する」と指示した場合のみ使用可能 (gate を骨抜きにする操作のため)
 7. **合格判定後、PR がある場合は Phase 7 (条件付き自動マージ判定)** を実行する。CI/テスト pass かつリポジトリ側で自動マージ NG ルールなしなら `gh pr merge` まで実行してから完了報告する。リポジトリ側に「人手のみ」「自動マージ禁止」「Lv4」等の明示制約があれば手動マージ待ちとして完了報告する (詳細は § Phase 7 参照)
 8. **実ログ由来・逸脱多発 Top4 (compaction 後も毎 Phase でセルフチェック)**: 過去 run でルールが存在するのに守られず損失が出た 4 点。
    - **並列**: Reviewer N 名は **1 メッセージ内で複数 Skill 同時呼び出し** (別メッセージ分割禁止)。実ログで 6 ラン中 0 回しか守られず直列化し、xai-cli PR#17 で run の 17% を損失。Claude Code のみ可 (Codex はこの制約なし=順次が基本・§Claude Code/Codex 差分参照)。Phase 4 起動時に「今 1 メッセージで N 名出したか?」を自問する
@@ -34,15 +34,15 @@ context compaction 後も最優先で復元・遵守すること。
 
 state.json の更新は **`${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py`** 経由で行うこと。リポジトリ root では安定 wrapper の **`scripts/mission-state.py`** も同じ CLI に委譲する。inline `jq` 直接実行は schema 不整合・race condition の原因となるため非推奨。**`sessions/<sid>.json` を Python heredoc 等で手動直書きするのも禁止** — threshold gate を迂回し `ungated` バイパス (stats 検出) を招く。legacy 廃止後は multi-session でも正規コマンドが正しくルーティングする (旧 gotchas #7/#10 の直書き手順は P1 で無効)。
 
-**最低限の 5 コマンド:**
-
+**最低限の 6 コマンド:**
 ```bash
 # 新規ミッション初期化
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py init "<ミッション記述>" [--threshold X] [--max-iter N] [--complexity Simple|Standard|Complex|Critical] [--issue-ref <ref>] [--files <file1,file2,...>]
 
-# 採点結果を score_history に記録 (Phase 5 直後に orchestrator が必ず呼ぶ。scorer は fork のため書込不可)
-# --scoring-output 指定で .mission-state/archive/iter-N-<mission_id先頭8>-scoring.md に永続化 (キーはエイリアス正規化・未知キーWARN)
-# scorer 出力はまず /tmp/mission-scorer-iter-<N>.md に保存し、このフラグで渡すのが規約
+# Artifact-required mission: init → append evidence → render (render 済み artifact が mark-passes gate になる)
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py artifact init --title "<成果物名>" --required-for-pass && python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py artifact append --section evidence --text "<証拠>" && python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py artifact render --redaction-status reviewed
+
+# 採点結果を score_history に記録 (Phase 5 直後必須。--scoring-output で scorer 出力を archive)
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score \
     --iteration <N> --composite <総合> --min-item <最低> \
     --items '{"mission_achievement":4.0,"accuracy":4.0,"completeness":4.0,"usability":4.0,"reviewer_consensus":4.0}' \

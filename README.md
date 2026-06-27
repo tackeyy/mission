@@ -43,17 +43,17 @@ For a marketing-safe 10-task pilot protocol comparing `mission` with a
 goal-only baseline, see
 [`benchmarks/mission-vs-goal/README.md`](benchmarks/mission-vs-goal/README.md).
 
-For the planned local-first artifact contract, see
-[`docs/MISSION_ARTIFACTS.md`](docs/MISSION_ARTIFACTS.md). Artifact support is a
-design plan, not an implemented benchmark result.
+For the local-first artifact contract and CLI, see
+[`docs/MISSION_ARTIFACTS.md`](docs/MISSION_ARTIFACTS.md). Artifact support is
+implemented as a local Markdown artifact with explicit opt-in publish evidence.
 
 ## Features
 
 - Mission orchestration skill: `skills/mission`
 - Five supporting skills: planner, executor, reviewer, critic, and scorer
 - State management CLI for `.mission-state` sessions
-- Planned local-first mission artifact contract for auditable completion
-  evidence ([design](docs/MISSION_ARTIFACTS.md))
+- Local-first mission artifact CLI for auditable completion evidence
+  ([contract](docs/MISSION_ARTIFACTS.md))
 - Multi-session state isolation for Claude Code and Codex
 - Stop hook that blocks premature completion while a mission is still active
 - Optional specialist registry and beginner presets for domain evidence providers ([design](skills/mission/refs/specialist-registry.md))
