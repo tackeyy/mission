@@ -54,6 +54,41 @@
       "type": "string",
       "minLength": 7
     },
+    "run_status": {
+      "enum": [
+        "completed",
+        "failed",
+        "blocked"
+      ]
+    },
+    "blocked_reason": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "api_usage_limit",
+        "timeout",
+        null
+      ]
+    },
+    "failure_kind": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "api_usage_limit",
+        "timeout",
+        "validator",
+        "command_error",
+        "missing_artifact",
+        null
+      ]
+    },
+    "comparable_attempt": {
+      "type": "boolean"
+    },
     "completion": {
       "type": "boolean"
     },

@@ -28,6 +28,10 @@ RESULTS_DIR = BENCH_DIR / "results"
 ARTIFACTS_DIR = BENCH_DIR / "artifacts"
 MISSION_PLUGIN_DIR = REPO_ROOT / "plugins" / "mission"
 ARMS = ("claude_code_goal_command", "mission")
+API_USAGE_LIMIT_MARKERS = (
+    "workspace API usage limits",
+    "You have reached your specified workspace API usage limits",
+)
 
 
 def run_command(args: list[str], cwd: Path | None = None, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
@@ -124,7 +128,68 @@ def parse_claude_json(stdout: str) -> dict:
         return {"type": "raw", "result": stdout}
 
 
-def evaluate_run(worktree: Path, task: dict, arm: str, output_rel: str, returncode: int) -> dict:
+def classify_run_status(
+    stdout: str,
+    stderr: str,
+    timed_out: bool,
+    returncode: int,
+    output_exists: bool,
+    validator_pass: bool,
+) -> dict:
+    combined = f"{stdout}\n{stderr}"
+    if any(marker in combined for marker in API_USAGE_LIMIT_MARKERS):
+        return {
+            "run_status": "blocked",
+            "blocked_reason": "api_usage_limit",
+            "failure_kind": "api_usage_limit",
+            "comparable_attempt": False,
+        }
+    if timed_out:
+        return {
+            "run_status": "blocked",
+            "blocked_reason": "timeout",
+            "failure_kind": "timeout",
+            "comparable_attempt": False,
+        }
+    if validator_pass:
+        return {
+            "run_status": "completed",
+            "blocked_reason": None,
+            "failure_kind": None,
+            "comparable_attempt": True,
+        }
+    if output_exists:
+        return {
+            "run_status": "failed",
+            "blocked_reason": None,
+            "failure_kind": "validator",
+            "comparable_attempt": True,
+        }
+    if returncode != 0:
+        return {
+            "run_status": "failed",
+            "blocked_reason": None,
+            "failure_kind": "command_error",
+            "comparable_attempt": True,
+        }
+    return {
+        "run_status": "failed",
+        "blocked_reason": None,
+        "failure_kind": "missing_artifact",
+        "comparable_attempt": True,
+    }
+
+
+def evaluate_run(
+    worktree: Path,
+    task: dict,
+    arm: str,
+    output_rel: str,
+    returncode: int,
+    stdout: str,
+    stderr: str,
+    timed_out: bool,
+) -> dict:
     output_path = worktree / output_rel
     text = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
     required_headings = ["Evidence", "Assumptions"]
@@ -138,10 +203,19 @@ def evaluate_run(worktree: Path, task: dict, arm: str, output_rel: str, returnco
     validator_pass = completion and not missing_headings
     quality_score = 4.0 if validator_pass else 2.0 if completion else 1.0
     evidence_score = 4.0 if validator_pass else 2.0 if completion else 1.0
+    status = classify_run_status(
+        stdout=stdout,
+        stderr=stderr,
+        timed_out=timed_out,
+        returncode=returncode,
+        output_exists=output_path.exists(),
+        validator_pass=validator_pass,
+    )
 
     return {
         "completion": completion,
         "validator_pass": validator_pass,
+        **status,
         "human_quality_score": quality_score,
         "quality_score_method": "automated_heuristic_not_blind_human",
         "intervention_count": 0,
@@ -241,7 +315,7 @@ def run_one(
     stdout_path.write_text(stdout, encoding="utf-8")
     stderr_path.write_text(stderr, encoding="utf-8")
     claude_result = parse_claude_json(stdout)
-    evaluation = evaluate_run(worktree, task, arm, output_rel, returncode)
+    evaluation = evaluate_run(worktree, task, arm, output_rel, returncode, stdout, stderr, timed_out)
     artifacts = copy_artifacts(worktree, artifact_dir, output_rel, stdout_path, stderr_path)
 
     usage = claude_result.get("usage", {}) if isinstance(claude_result, dict) else {}
@@ -254,6 +328,8 @@ def run_one(
     ]
     if timed_out:
         notes.append(f"timed_out_after_seconds={timeout}")
+    if evaluation["run_status"] == "blocked":
+        notes.append(f"blocked_reason={evaluation['blocked_reason']}")
     if evaluation["missing_headings"]:
         notes.append(f"missing_headings={','.join(evaluation['missing_headings'])}")
     if stderr.strip():
@@ -270,6 +346,10 @@ def run_one(
         "started_at": started,
         "completed_at": completed,
         "starting_commit": starting_commit,
+        "run_status": evaluation["run_status"],
+        "blocked_reason": evaluation["blocked_reason"],
+        "failure_kind": evaluation["failure_kind"],
+        "comparable_attempt": evaluation["comparable_attempt"],
         "completion": evaluation["completion"],
         "validator_pass": evaluation["validator_pass"],
         "human_quality_score": evaluation["human_quality_score"],
@@ -300,8 +380,22 @@ def summarize(records: list[dict], tasks: list[dict], run_id: str, starting_comm
         "arms": {
             arm: {
                 "records": len(items),
+                "blocked_records": sum(1 for r in items if r.get("run_status") == "blocked"),
+                "comparable_records": sum(1 for r in items if r.get("comparable_attempt", True)),
                 "completion_rate": sum(1 for r in items if r["completion"]) / len(items) if items else None,
+                "comparable_completion_rate": (
+                    sum(1 for r in items if r.get("comparable_attempt", True) and r["completion"])
+                    / sum(1 for r in items if r.get("comparable_attempt", True))
+                    if sum(1 for r in items if r.get("comparable_attempt", True))
+                    else None
+                ),
                 "validator_pass_rate": sum(1 for r in items if r["validator_pass"]) / len(items) if items else None,
+                "comparable_validator_pass_rate": (
+                    sum(1 for r in items if r.get("comparable_attempt", True) and r["validator_pass"])
+                    / sum(1 for r in items if r.get("comparable_attempt", True))
+                    if sum(1 for r in items if r.get("comparable_attempt", True))
+                    else None
+                ),
                 "average_quality_score": round(sum(r["human_quality_score"] for r in items) / len(items), 2) if items else None,
                 "average_intervention_count": round(sum(r["intervention_count"] for r in items) / len(items), 2) if items else None,
                 "average_evidence_completeness": round(sum(r["evidence_completeness"] for r in items) / len(items), 2) if items else None,

@@ -41,6 +41,9 @@ time budget、task prompt を使います。
 
 | Metric | Definition |
 |---|---|
+| `run_status` | `completed`、`failed`、`blocked`。blocked は infrastructure/account state により comparable attempt が成立しなかった状態。 |
+| `blocked_reason` | `run_status=blocked` の理由。現在は `api_usage_limit` または `timeout`。それ以外は null。 |
+| `comparable_attempt` | fair な task-quality attempt の前に blocked された場合は false。 |
 | `completion` | 必要な artifact または code change が作られ、未解決のまま停止していない。 |
 | `validator_pass` | task 固有の validator が pass した。例: test、lint、schema check、file assertion、review checklist。 |
 | `human_quality_score` | 下記 rubric に基づく 1-5 の blind reviewer score。 |
@@ -94,6 +97,10 @@ python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
 Claude Code workspace API usage limit で停止しました。この run は blocked と扱い、
 どちらかが優れている証拠にはしません。
 
+usage limit 解消後の次回実行では `official-goal-rerun-runbook.ja.md` を使います。
+公式 runner は `run_status`、`blocked_reason`、`comparable_attempt` を記録するため、
+API/account stop を task-quality failure と誤読しないようになっています。
+
 ## Human Quality Rubric
 
 | Score | Meaning |
@@ -132,6 +139,8 @@ raw evidence がそろった後に使ってよい表現:
 | `report.md` | 英語の current measured status と package-validation results。 |
 | `report.ja.md` | 日本語の current measured status と package-validation results。 |
 | `run_claude_goal_vs_mission.py` | Claude Code 公式 `/goal` と `/mission` の smoke runner。 |
+| `official-goal-rerun-runbook.md` | 公式 `/goal` 比較の英語 rerun checklist。 |
+| `official-goal-rerun-runbook.ja.md` | 公式 `/goal` 比較の日本語 rerun checklist。 |
 | `report-template.md` | 英語の publishable report skeleton と claim guardrails。 |
 | `report-template.ja.md` | 日本語の publishable report skeleton と claim guardrails。 |
 | `complex-validation-plan.md` | 英語の complex task validation plan。 |

@@ -107,6 +107,15 @@ Unsafe interpretation:
 That would be unsupported because the failed `/mission` record is an
 infrastructure/API-limit stop, not a completed task-quality measurement.
 
+Follow-up preparation completed after this smoke:
+
+- `run_claude_goal_vs_mission.py` now records `run_status`,
+  `blocked_reason`, `failure_kind`, and `comparable_attempt` for future runs.
+- `official-goal-rerun-runbook.md` defines the 2026-07-01 09:00 JST smoke gate
+  and full paired pilot procedure.
+- Future reports must separate `completed`, `failed`, and `blocked` records
+  before making any capability claim.
+
 ## Task-Level Findings
 
 | Task | Stronger arm | Why |
@@ -142,7 +151,7 @@ python3 -m json.tool benchmarks/mission-vs-goal/tasks.json
 python3 -m json.tool benchmarks/mission-vs-goal/tasks.complex.json
 python3 -m json.tool benchmarks/mission-vs-goal/result.schema.json
 python3 -m py_compile benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py
-git diff --check -- README.md README.ja.md docs/LOOP_ENGINEERING.md benchmarks/mission-vs-goal/README.md benchmarks/mission-vs-goal/README.ja.md benchmarks/mission-vs-goal/report.md benchmarks/mission-vs-goal/report.ja.md benchmarks/mission-vs-goal/report-template.md benchmarks/mission-vs-goal/report-template.ja.md benchmarks/mission-vs-goal/complex-validation-plan.md benchmarks/mission-vs-goal/complex-validation-plan.ja.md benchmarks/mission-vs-goal/run_paired_pilot.py benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py skills/mission/tests/test_benchmark_package.py
+git diff --check -- README.md README.ja.md docs/LOOP_ENGINEERING.md benchmarks/mission-vs-goal/README.md benchmarks/mission-vs-goal/README.ja.md benchmarks/mission-vs-goal/report.md benchmarks/mission-vs-goal/report.ja.md benchmarks/mission-vs-goal/report-template.md benchmarks/mission-vs-goal/report-template.ja.md benchmarks/mission-vs-goal/complex-validation-plan.md benchmarks/mission-vs-goal/complex-validation-plan.ja.md benchmarks/mission-vs-goal/official-goal-rerun-runbook.md benchmarks/mission-vs-goal/official-goal-rerun-runbook.ja.md benchmarks/mission-vs-goal/run_paired_pilot.py benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py skills/mission/tests/test_benchmark_package.py
 ```
 
 ## Marketing Summary

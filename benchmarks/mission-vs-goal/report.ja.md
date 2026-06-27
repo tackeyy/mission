@@ -105,6 +105,15 @@ Smoke result:
 これは unsupported です。`/mission` の failed record は infrastructure/API-limit stop
 であり、完了した task-quality measurement ではありません。
 
+この smoke 後に完了した次回準備:
+
+- `run_claude_goal_vs_mission.py` は future runs で `run_status`、
+  `blocked_reason`、`failure_kind`、`comparable_attempt` を記録する。
+- `official-goal-rerun-runbook.ja.md` は 2026-07-01 09:00 JST 以降の smoke gate と
+  full paired pilot 手順を定義する。
+- future reports では、capability claim の前に `completed`、`failed`、`blocked`
+  records を分離する。
+
 ## Task-Level Findings
 
 | Task | Stronger arm | Why |
@@ -140,7 +149,7 @@ python3 -m json.tool benchmarks/mission-vs-goal/tasks.json
 python3 -m json.tool benchmarks/mission-vs-goal/tasks.complex.json
 python3 -m json.tool benchmarks/mission-vs-goal/result.schema.json
 python3 -m py_compile benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py
-git diff --check -- README.md README.ja.md docs/LOOP_ENGINEERING.md benchmarks/mission-vs-goal/README.md benchmarks/mission-vs-goal/README.ja.md benchmarks/mission-vs-goal/report.md benchmarks/mission-vs-goal/report.ja.md benchmarks/mission-vs-goal/report-template.md benchmarks/mission-vs-goal/report-template.ja.md benchmarks/mission-vs-goal/complex-validation-plan.md benchmarks/mission-vs-goal/complex-validation-plan.ja.md benchmarks/mission-vs-goal/run_paired_pilot.py benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py skills/mission/tests/test_benchmark_package.py
+git diff --check -- README.md README.ja.md docs/LOOP_ENGINEERING.md benchmarks/mission-vs-goal/README.md benchmarks/mission-vs-goal/README.ja.md benchmarks/mission-vs-goal/report.md benchmarks/mission-vs-goal/report.ja.md benchmarks/mission-vs-goal/report-template.md benchmarks/mission-vs-goal/report-template.ja.md benchmarks/mission-vs-goal/complex-validation-plan.md benchmarks/mission-vs-goal/complex-validation-plan.ja.md benchmarks/mission-vs-goal/official-goal-rerun-runbook.md benchmarks/mission-vs-goal/official-goal-rerun-runbook.ja.md benchmarks/mission-vs-goal/run_paired_pilot.py benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py skills/mission/tests/test_benchmark_package.py
 ```
 
 ## Marketing Summary

@@ -40,6 +40,9 @@ time budget, and task prompt for both arms.
 
 | Metric | Definition |
 |---|---|
+| `run_status` | `completed`, `failed`, or `blocked`. Blocked means infrastructure/account state prevented a comparable attempt. |
+| `blocked_reason` | Reason for `run_status=blocked`, currently `api_usage_limit` or `timeout`; null otherwise. |
+| `comparable_attempt` | False when an arm was blocked before a fair task-quality attempt. |
 | `completion` | The run produced the required artifact or code change and did not stop in an unresolved state. |
 | `validator_pass` | The task-specific validator passed. Examples: tests, lint, schema check, exact file assertion, or reviewer checklist. |
 | `human_quality_score` | Blind reviewer score from 1 to 5 using the rubric below. |
@@ -96,6 +99,11 @@ complex task, but the comparable `/mission` arm stopped on a Claude Code
 workspace API usage limit before writing an artifact. Treat that run as
 blocked, not as evidence that either arm is better.
 
+Use `official-goal-rerun-runbook.md` for the next attempt after the usage limit
+clears. The official runner now records `run_status`, `blocked_reason`, and
+`comparable_attempt` so API/account stops are not mistaken for task-quality
+failures.
+
 ## Human Quality Rubric
 
 | Score | Meaning |
@@ -133,9 +141,11 @@ Not allowed from this pilot:
 | `result.schema.json` | JSON Schema for one result record. |
 | `report.md` | Current measured status and package-validation results. |
 | `run_claude_goal_vs_mission.py` | Claude Code official `/goal` vs `/mission` smoke runner. |
+| `official-goal-rerun-runbook.md` | English rerun checklist for the official `/goal` comparison. |
 | `report-template.md` | Publishable report skeleton with claim guardrails. |
 | `complex-validation-plan.md` | Planned protocol for more complex tasks. |
 | `README.ja.md` | Japanese version of this benchmark protocol. |
 | `report.ja.md` | Japanese current measured status and package-validation results. |
+| `official-goal-rerun-runbook.ja.md` | Japanese rerun checklist for the official `/goal` comparison. |
 | `report-template.ja.md` | Japanese report skeleton with the same claim guardrails. |
 | `complex-validation-plan.ja.md` | Japanese planned protocol for more complex tasks. |

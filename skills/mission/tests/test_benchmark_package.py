@@ -1,9 +1,18 @@
 import json
+import importlib.util
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 BENCHMARK_DIR = REPO_ROOT / "benchmarks" / "mission-vs-goal"
+
+
+def _load_official_goal_runner():
+    path = BENCHMARK_DIR / "run_claude_goal_vs_mission.py"
+    spec = importlib.util.spec_from_file_location("run_claude_goal_vs_mission", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_mission_vs_goal_pilot_has_exactly_ten_tasks():
@@ -51,6 +60,10 @@ def test_mission_vs_goal_result_schema_matches_declared_arms():
     assert "quality_score_method" in schema["required"]
     assert "automated_heuristic_not_blind_human" in schema["properties"]["quality_score_method"]["enum"]
     assert "evidence_completeness" in schema["required"]
+    assert schema["properties"]["run_status"]["enum"] == ["completed", "failed", "blocked"]
+    assert "api_usage_limit" in schema["properties"]["blocked_reason"]["enum"]
+    assert "timeout" in schema["properties"]["blocked_reason"]["enum"]
+    assert schema["properties"]["comparable_attempt"]["type"] == "boolean"
 
 
 def test_mission_vs_goal_docs_link_benchmark_package():
@@ -79,6 +92,7 @@ def test_mission_vs_goal_has_japanese_benchmark_docs():
     assert "`mission` は `/goal` より X% 賢い" in report_ja
     assert "workspace API usage limit" in complex_plan_ja
     assert "結果ではありません" in complex_plan_ja
+    assert (BENCHMARK_DIR / "official-goal-rerun-runbook.ja.md").exists()
 
 
 def test_mission_vs_goal_measured_reports_are_honest_about_paired_runs():
@@ -163,6 +177,8 @@ def test_mission_vs_goal_protocol_controls_review_bias():
     runner = (BENCHMARK_DIR / "run_paired_pilot.py").read_text(encoding="utf-8")
     official_runner = (BENCHMARK_DIR / "run_claude_goal_vs_mission.py").read_text(encoding="utf-8")
     complex_plan = (BENCHMARK_DIR / "complex-validation-plan.md").read_text(encoding="utf-8")
+    runbook = (BENCHMARK_DIR / "official-goal-rerun-runbook.md").read_text(encoding="utf-8")
+    runner_module = _load_official_goal_runner()
 
     assert "Counter-balance run order" in protocol
     assert "Human Quality Rubric" in protocol
@@ -171,10 +187,32 @@ def test_mission_vs_goal_protocol_controls_review_bias():
     assert "--run-id" in protocol
     assert "workspace API usage limits" in complex_plan
     assert "These are hypotheses to test, not results" in complex_plan
+    assert "run_status" in protocol
+    assert "blocked_reason" in protocol
+    assert "comparable_attempt" in protocol
+    assert "official-goal-rerun-runbook.md" in protocol
+    assert "Proceed only if both arm records have" in runbook
+    assert "run_status=blocked" in runbook
+    assert "2026-07-01 09:00 JST" in runbook
     assert 'parser.add_argument("--tasks-file"' in runner
     assert 'parser.add_argument("--run-id"' in runner
     assert 'ARMS = ("claude_code_goal_command", "mission")' in official_runner
     assert 'parser.add_argument("--mission-max-iter"' in official_runner
+    assert '"run_status": evaluation["run_status"]' in official_runner
+    blocked = runner_module.classify_run_status(
+        stdout="API Error: 400 You have reached your specified workspace API usage limits.",
+        stderr="",
+        timed_out=False,
+        returncode=1,
+        output_exists=False,
+        validator_pass=False,
+    )
+    assert blocked == {
+        "run_status": "blocked",
+        "blocked_reason": "api_usage_limit",
+        "failure_kind": "api_usage_limit",
+        "comparable_attempt": False,
+    }
 
 
 def test_mission_vs_goal_report_template_rejects_unsupported_claims():
