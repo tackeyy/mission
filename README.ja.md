@@ -38,11 +38,16 @@ public launch positioning、GitHub topics、`/goal` / `ralph-loop` / Superpowers
 [`benchmarks/mission-vs-goal/README.ja.md`](benchmarks/mission-vs-goal/README.ja.md)
 を参照してください。
 
+計画中の local-first artifact contract は
+[`docs/MISSION_ARTIFACTS.ja.md`](docs/MISSION_ARTIFACTS.ja.md)
+を参照してください。artifact support は設計計画であり、実装済みの benchmark result ではありません。
+
 ## 特徴
 
 - メインオーケストレータ: `skills/mission`
 - 5 つのサブスキル: planner / executor / reviewer / critic / scorer
 - `.mission-state` セッションを扱う state 管理 CLI
+- completion evidence を監査可能にする、計画中の local-first mission artifact contract（[設計](docs/MISSION_ARTIFACTS.ja.md)）
 - Claude Code / Codex の複数セッション分離
 - 未達ミッションの早期終了を防ぐ Stop hook
 - ドメイン別 evidence provider を選ぶ任意 specialist registry と beginner presets（[設計](skills/mission/refs/specialist-registry.md)）

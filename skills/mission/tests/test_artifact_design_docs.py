@@ -1,0 +1,51 @@
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def test_mission_artifact_design_docs_are_linked_from_public_docs():
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    readme_ja = (REPO_ROOT / "README.ja.md").read_text(encoding="utf-8")
+    loop_doc = (REPO_ROOT / "docs" / "LOOP_ENGINEERING.md").read_text(encoding="utf-8")
+
+    assert "docs/MISSION_ARTIFACTS.md" in readme
+    assert "docs/MISSION_ARTIFACTS.ja.md" in readme_ja
+    assert "docs/MISSION_ARTIFACTS.md" in loop_doc
+
+
+def test_mission_artifact_design_is_explicitly_not_implemented_yet():
+    design = (REPO_ROOT / "docs" / "MISSION_ARTIFACTS.md").read_text(encoding="utf-8")
+    design_ja = (REPO_ROOT / "docs" / "MISSION_ARTIFACTS.ja.md").read_text(encoding="utf-8")
+
+    assert "does not claim" in design
+    assert "artifact support is already implemented" in design
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "Artifact support" in readme
+    assert "design plan" in readme
+    assert "すでに実装済みだとは主張しません" in design_ja
+    assert "実装済みの benchmark result ではありません" in (
+        REPO_ROOT / "README.ja.md"
+    ).read_text(encoding="utf-8")
+
+
+def test_mission_artifact_design_uses_claude_code_best_practices_without_lock_in():
+    design = (REPO_ROOT / "docs" / "MISSION_ARTIFACTS.md").read_text(encoding="utf-8")
+    design_ja = (REPO_ROOT / "docs" / "MISSION_ARTIFACTS.ja.md").read_text(encoding="utf-8")
+
+    assert "https://code.claude.com/docs/en/artifacts" in design
+    assert "https://code.claude.com/docs/en/goal" in design
+    assert "local-first" in design
+    assert "Do not make Claude Code Artifacts a hard runtime dependency" in design
+    assert "Do not publish anything remotely without explicit user approval" in design
+    assert ".mission-state/artifacts/<session_id>/mission-artifact.md" in design
+    assert "redaction_status" in design
+    assert "do not" in design
+    assert "yet measure that artifact behavior" in design
+
+    assert "https://code.claude.com/docs/ja/artifacts" in design_ja
+    assert "https://code.claude.com/docs/ja/goal" in design_ja
+    assert "local-first" in design_ja
+    assert "Claude Code hosting を必須依存にはしません" in design_ja
+    assert "明示許可なしに remote publish しない" in design_ja
+    assert ".mission-state/artifacts/<session_id>/mission-artifact.md" in design_ja

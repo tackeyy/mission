@@ -98,3 +98,15 @@ before making public performance claims against goal-only execution.
 The benchmark is deliberately framed as `mission` vs a goal-only workflow, not
 as a model intelligence benchmark. Publishable claims must include the sample
 size, task mix, validators, and raw result records.
+
+## Artifact Evidence
+
+`mission` has a planned local-first artifact contract in
+[`docs/MISSION_ARTIFACTS.md`](MISSION_ARTIFACTS.md). This is not yet an
+implemented benchmark result. Use it as the design plan for making future
+mission runs leave reusable, auditable completion evidence.
+
+Until artifact-required paired runs are complete, do not claim that artifact
+support makes `mission` outperform Claude Code `/goal`; the defensible claim is
+that `mission` is designing for persisted evidence while current benchmark
+records have not measured that behavior.
