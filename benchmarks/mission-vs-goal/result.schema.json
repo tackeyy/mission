@@ -66,11 +66,12 @@
         "string",
         "null"
       ],
-      "enum": [
-        "api_usage_limit",
-        "timeout",
-        null
-      ]
+        "enum": [
+          "api_usage_limit",
+          "max_budget_usd",
+          "timeout",
+          null
+        ]
     },
     "failure_kind": {
       "type": [
@@ -78,9 +79,10 @@
         "null"
       ],
       "enum": [
-        "api_usage_limit",
-        "timeout",
-        "validator",
+          "api_usage_limit",
+          "max_budget_usd",
+          "timeout",
+          "validator",
         "command_error",
         "missing_artifact",
         null

@@ -1,0 +1,45 @@
+{
+  "arms": {
+    "claude_code_goal_command": {
+      "average_elapsed_minutes": 3.87,
+      "average_evidence_completeness": 4.0,
+      "average_intervention_count": 0.0,
+      "average_quality_score": 4.0,
+      "blocked_records": 0,
+      "comparable_completion_rate": 1.0,
+      "comparable_records": 2,
+      "comparable_validator_pass_rate": 1.0,
+      "completion_rate": 1.0,
+      "records": 2,
+      "validator_pass_rate": 1.0
+    },
+    "mission": {
+      "average_elapsed_minutes": 7.56,
+      "average_evidence_completeness": 1.0,
+      "average_intervention_count": 0.0,
+      "average_quality_score": 1.0,
+      "blocked_records": 2,
+      "comparable_completion_rate": null,
+      "comparable_records": 0,
+      "comparable_validator_pass_rate": null,
+      "completion_rate": 0.0,
+      "records": 2,
+      "validator_pass_rate": 0.0
+    }
+  },
+  "expected_records": 4,
+  "limitations": [
+    "Claude Code print mode smoke; does not fully exercise multi-turn interactive /goal persistence.",
+    "Quality and evidence scores are automated heuristic scores, not blind human review."
+  ],
+  "records": 4,
+  "run_id": "2026-06-28-claude-goal-vs-mission-incremental-v1",
+  "selected_task_ids": [
+    "complex-failing-test-triage",
+    "complex-review-thread-resolution"
+  ],
+  "starting_commit": "d1cef1d5bd0166b5d61939c8d93ce0060c05507f",
+  "stopped_early": false,
+  "task_cohort": "official-goal-smoke",
+  "task_file": "benchmarks/mission-vs-goal/tasks.complex.json"
+}

@@ -12,9 +12,14 @@ An API-limit rerun was then executed:
   on both arms; both arms passed completion and validator checks.
 - `2026-06-28-claude-goal-vs-mission-complex-v1`: 20 records were written, but
   every record was `run_status=blocked` with `blocked_reason=api_usage_limit`.
+- `2026-06-28-claude-goal-vs-mission-incremental-v1`: two previously unmeasured
+  tasks were selected with `--task-ids` under a USD 3.00 per-invocation cap.
+  Official `/goal` completed both; `/mission` hit `blocked_reason=max_budget_usd`
+  on both.
 
 The completed evidence therefore supports only a one-task smoke result. It does
-not support a full 10-task performance claim.
+not support a full 10-task performance claim. The incremental run adds an
+operational cost/runtime caution, not a completed quality comparison.
 
 ## Objective
 
@@ -87,6 +92,31 @@ Observed rerun result:
 - `2026-06-28-claude-goal-vs-mission-complex-v1` wrote 20 records, but all 20
   were blocked by `api_usage_limit`; denominator for comparable completion and
   validator rates is therefore zero.
+
+## Step 2b: Cost-Controlled Incremental Pilot
+
+If the full run is too expensive or hits limits, continue with selected tasks
+instead of rerunning completed work:
+
+```bash
+STARTING_COMMIT=$(git rev-parse HEAD)
+python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
+  --tasks-file benchmarks/mission-vs-goal/tasks.complex.json \
+  --run-id 2026-07-01-claude-goal-vs-mission-incremental \
+  --starting-commit "$STARTING_COMMIT" \
+  --task-ids complex-failing-test-triage,complex-review-thread-resolution \
+  --stop-on-blocked \
+  --timeout 1200 \
+  --max-budget-usd 3.0 \
+  --mission-max-iter 2
+```
+
+Observed incremental result:
+
+- `2026-06-28-claude-goal-vs-mission-incremental-v1` wrote 4 records.
+- Official `/goal`: 2 completed comparable records, 2 validator passes.
+- `/mission`: 2 `max_budget_usd` blocked records under the USD 3.00 cap.
+- Total recorded cost: USD 9.39057695.
 
 ## Step 3: Validation
 

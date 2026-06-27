@@ -107,6 +107,27 @@ full attempt as blocked. The official runner records `run_status`,
 `blocked_reason`, and `comparable_attempt` so API/account stops are not mistaken
 for task-quality failures.
 
+For cost-controlled incremental runs, use `--task-ids` to avoid rerunning
+already measured tasks and `--stop-on-blocked` to stop after the first blocked
+record:
+
+```bash
+python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
+  --tasks-file benchmarks/mission-vs-goal/tasks.complex.json \
+  --run-id YYYY-MM-DD-claude-goal-vs-mission-incremental \
+  --starting-commit <commit> \
+  --task-ids complex-failing-test-triage,complex-review-thread-resolution \
+  --stop-on-blocked \
+  --timeout 1200 \
+  --max-budget-usd 3.0 \
+  --mission-max-iter 2
+```
+
+The 2026-06-28 incremental run under a USD 3.00 per-invocation cap completed
+both selected tasks on official `/goal`; both `/mission` records hit the
+configured max-budget cap. Treat this as an operational cost/runtime result,
+not a completed quality comparison for `mission`.
+
 ## Human Quality Rubric
 
 | Score | Meaning |
@@ -133,7 +154,8 @@ Not allowed from this pilot:
 - Claims that `mission` is better or worse than Claude Code official `/goal`
   from the 2026-06-28 attempts. The first smoke was API-limit blocked on
   `/mission`; the rerun smoke completed only one comparable task; the full
-  rerun was API-limit blocked on all records.
+  rerun was API-limit blocked on all records; the incremental rerun was
+  max-budget blocked on the `/mission` records.
 - Percent improvements without publishing the denominator, task mix, and scoring method.
 - Claims based on fewer than all 10 paired task runs.
 

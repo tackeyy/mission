@@ -193,6 +193,57 @@ Full attempt result:
 これは unsupported です。full-run の全 record は comparable な task-quality attempt 前に
 workspace API usage limit で blocked されています。
 
+## Cost-controlled incremental rerun
+
+Status: Claude API budget を追加した後、2026-06-28 JST に実行。
+すでに測定済みの first smoke task を再実行しないため、runner に `--task-ids` と
+`--stop-on-blocked` を追加しました。incremental run は未測定の complex task 2 件だけを対象にし、
+各 Claude invocation を `--max-budget-usd 3.0` で cap しました。
+
+これは cost cap 下の operational comparison として有用ですが、`mission` の full quality
+comparison ではありません。`/mission` record 2 件はいずれも、Claude Code が success を返す前に
+こちらで設定した per-invocation budget cap に到達しました。
+
+| Item | Value | Evidence |
+|---|---:|---|
+| Run id | `2026-06-28-claude-goal-vs-mission-incremental-v1` | `results/2026-06-28-claude-goal-vs-mission-incremental-v1.jsonl`。 |
+| Starting commit | `d1cef1d5bd0166b5d61939c8d93ce0060c05507f` | runner argument。 |
+| Task file | `tasks.complex.json` | selected tasks のみ。 |
+| Selected tasks | 2 | `complex-failing-test-triage`, `complex-review-thread-resolution`。 |
+| Expected records | 4 | 2 tasks x 2 arms。 |
+| Records written | 4 / 4 | summary JSON に 4 records。 |
+| Per-invocation cost cap | USD 3.00 | runner argument `--max-budget-usd 3.0`。 |
+| API usage-limit blocked records | 0 / 4 | `blocked_reason=api_usage_limit` の record はなし。 |
+| Max-budget blocked records | 2 / 4 | `/mission` 2 records が `blocked_reason=max_budget_usd`。 |
+| Total Claude cost recorded | USD 9.39057695 | raw Claude result JSON files。 |
+| `/goal` cost recorded | USD 3.31969425 | `/goal` raw Claude result JSON files の合計。 |
+| `/mission` cost recorded | USD 6.07088270 | `/mission` raw Claude result JSON files の合計。 |
+
+Incremental result:
+
+| Metric | claude_code_goal_command | mission | Interpretation |
+|---|---:|---:|---|
+| Records | 2 | 2 | 同じ selected tasks 2 件を試行。 |
+| Completed comparable records | 2 / 2 | 0 / 2 | `/mission` records は configured budget cap に到達したため task-quality comparison から除外。 |
+| Completion rate | 2 / 2 | 0 / 2 | USD 3.00 cap 下では `/goal` は両 task を完了、`/mission` は success を返せなかった。 |
+| Validator pass rate | 2 / 2 | 0 / 2 | `/mission` artifacts は存在するが、Claude Code が `error_max_budget_usd` を返したため complete 扱いしない。 |
+| Average elapsed minutes | 3.87 | 7.56 | `/mission` は budget cap に到達するまでより長く走った。 |
+| Average quality score | 4.00 / 5 | n/a | max-budget blocked records を除くと `/mission` の denominator は 0。 |
+
+安全な解釈:
+
+> 追加の complex task 2 件に対し、USD 3.00 per-invocation cap を置いた incremental run では、
+> 公式 `/goal` は両 task を完了し validator に pass した。`/mission` は artifacts を生成したが、
+> 両 task とも configured Claude Code max-budget cap に到達したため、completed task-quality
+> measurement ではなく budget-blocked records として扱う。
+
+危険な解釈:
+
+> `mission` の回答品質は公式 `/goal` より低い。
+
+これは unsupported です。incremental run の `/mission` 2 records は completed validator result
+ではなく、`error_max_budget_usd` で終了しています。
+
 ## Task-Level Findings
 
 | Task | Stronger arm | Why |
@@ -224,6 +275,7 @@ python3 benchmarks/mission-vs-goal/run_paired_pilot.py --starting-commit 0148f16
 python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py --tasks-file benchmarks/mission-vs-goal/tasks.complex.json --run-id 2026-06-28-claude-goal-vs-mission-smoke-v2 --starting-commit 38cc7907e5e35fcd9fa23022a1fcf03f756df99b --limit-tasks 1 --timeout 300 --max-budget-usd 1.5 --mission-max-iter 1
 python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py --tasks-file benchmarks/mission-vs-goal/tasks.complex.json --run-id 2026-06-28-claude-goal-vs-mission-smoke-v3 --starting-commit ed98b0e00169f0e0b35ce629a206ffcb7af4d0a3 --limit-tasks 1 --timeout 900 --max-budget-usd 3.0 --mission-max-iter 2
 python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py --tasks-file benchmarks/mission-vs-goal/tasks.complex.json --run-id 2026-06-28-claude-goal-vs-mission-complex-v1 --starting-commit ed98b0e00169f0e0b35ce629a206ffcb7af4d0a3 --limit-tasks 10 --timeout 1800 --max-budget-usd 3.0 --mission-max-iter 2
+python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py --tasks-file benchmarks/mission-vs-goal/tasks.complex.json --run-id 2026-06-28-claude-goal-vs-mission-incremental-v1 --starting-commit d1cef1d5bd0166b5d61939c8d93ce0060c05507f --task-ids complex-failing-test-triage,complex-review-thread-resolution --stop-on-blocked --timeout 1200 --max-budget-usd 3.0 --mission-max-iter 2
 python3 -m pytest skills/mission/tests/test_benchmark_package.py skills/mission/tests/test_doc_consistency.py -q
 python3 -m pytest skills/mission/tests -q
 python3 -m json.tool benchmarks/mission-vs-goal/tasks.json
@@ -256,6 +308,12 @@ API limit 引き上げ後の再実行について言ってよい:
 > その後の 10 task full attempt は workspace API usage limit で blocked されたため、
 > 性能主張には使えない。
 
+Cost-capped incremental rerun について言ってよい:
+
+> 追加の complex task 2 件を USD 3.00 per-invocation cap で実行したところ、公式 `/goal`
+> は両 task を完了し、`/mission` は両 task で configured max-budget cap に到達した。
+> これは cost/runtime 上の注意材料であり、`/mission` の回答品質が低いという主張ではない。
+
 言ってはいけない:
 
 > `mission` は `/goal` より賢い。
@@ -284,4 +342,7 @@ artifacts/2026-06-28-claude-goal-vs-mission-smoke-v3/
 results/2026-06-28-claude-goal-vs-mission-complex-v1.jsonl
 results/2026-06-28-claude-goal-vs-mission-complex-v1-summary.json
 artifacts/2026-06-28-claude-goal-vs-mission-complex-v1/
+results/2026-06-28-claude-goal-vs-mission-incremental-v1.jsonl
+results/2026-06-28-claude-goal-vs-mission-incremental-v1-summary.json
+artifacts/2026-06-28-claude-goal-vs-mission-incremental-v1/
 ```

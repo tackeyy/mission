@@ -32,6 +32,10 @@ API_USAGE_LIMIT_MARKERS = (
     "workspace API usage limits",
     "You have reached your specified workspace API usage limits",
 )
+MAX_BUDGET_MARKERS = (
+    "error_max_budget_usd",
+    "max_budget_usd",
+)
 
 
 def run_command(args: list[str], cwd: Path | None = None, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
@@ -52,6 +56,19 @@ def iso_now() -> str:
 
 def load_task_data(tasks_path: Path) -> dict:
     return json.loads(tasks_path.read_text(encoding="utf-8"))
+
+
+def select_tasks(task_data: dict, limit_tasks: int, task_ids: str | None = None) -> list[dict]:
+    tasks = task_data["tasks"]
+    if not task_ids:
+        return tasks[:limit_tasks]
+
+    requested = [task_id.strip() for task_id in task_ids.split(",") if task_id.strip()]
+    by_id = {task["id"]: task for task in tasks}
+    missing = [task_id for task_id in requested if task_id not in by_id]
+    if missing:
+        raise ValueError(f"unknown task id(s): {', '.join(missing)}")
+    return [by_id[task_id] for task_id in requested]
 
 
 def prepare_clone(source: Path, target: Path, starting_commit: str) -> None:
@@ -142,6 +159,13 @@ def classify_run_status(
             "run_status": "blocked",
             "blocked_reason": "api_usage_limit",
             "failure_kind": "api_usage_limit",
+            "comparable_attempt": False,
+        }
+    if any(marker in combined for marker in MAX_BUDGET_MARKERS):
+        return {
+            "run_status": "blocked",
+            "blocked_reason": "max_budget_usd",
+            "failure_kind": "max_budget_usd",
             "comparable_attempt": False,
         }
     if timed_out:
@@ -364,15 +388,24 @@ def run_one(
     }
 
 
-def summarize(records: list[dict], tasks: list[dict], run_id: str, starting_commit: str, tasks_path: Path) -> dict:
+def summarize(
+    records: list[dict],
+    tasks: list[dict],
+    run_id: str,
+    starting_commit: str,
+    tasks_path: Path,
+    stopped_early: bool = False,
+) -> dict:
     by_arm: dict[str, list[dict]] = {arm: [r for r in records if r["arm"] == arm] for arm in ARMS}
     return {
         "run_id": run_id,
         "task_file": str(tasks_path.relative_to(REPO_ROOT)),
         "task_cohort": "official-goal-smoke",
+        "selected_task_ids": [task["id"] for task in tasks],
         "starting_commit": starting_commit,
         "records": len(records),
         "expected_records": len(tasks) * len(ARMS),
+        "stopped_early": stopped_early,
         "limitations": [
             "Claude Code print mode smoke; does not fully exercise multi-turn interactive /goal persistence.",
             "Quality and evidence scores are automated heuristic scores, not blind human review.",
@@ -413,6 +446,16 @@ def main() -> int:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--limit-tasks", type=int, default=2)
+    parser.add_argument(
+        "--task-ids",
+        default=None,
+        help="Comma-separated task ids to run. Overrides --limit-tasks and avoids rerunning earlier tasks.",
+    )
+    parser.add_argument(
+        "--stop-on-blocked",
+        action="store_true",
+        help="Stop the run after the first blocked record to conserve API budget.",
+    )
     parser.add_argument("--run-root", default="/tmp/mission-vs-official-goal")
     parser.add_argument("--max-budget-usd", type=float, default=2.0)
     parser.add_argument("--mission-max-iter", type=int, default=None)
@@ -435,8 +478,9 @@ def main() -> int:
         shutil.rmtree(artifact_run_dir)
 
     task_data = load_task_data(tasks_path)
-    tasks = task_data["tasks"][: args.limit_tasks]
+    tasks = select_tasks(task_data, args.limit_tasks, args.task_ids)
     records = []
+    stopped_early = False
     for task in tasks:
         for arm in ARMS:
             print(f"running task={task['id']} arm={arm}", flush=True)
@@ -458,8 +502,18 @@ def main() -> int:
                 f"validator_pass={record['validator_pass']} elapsed_minutes={record['elapsed_minutes']}",
                 flush=True,
             )
+            if args.stop_on_blocked and record["run_status"] == "blocked":
+                stopped_early = True
+                print(
+                    f"stopping early after blocked record task={task['id']} arm={arm} "
+                    f"blocked_reason={record['blocked_reason']}",
+                    flush=True,
+                )
+                break
+        if stopped_early:
+            break
 
-    summary = summarize(records, tasks, args.run_id, args.starting_commit, tasks_path)
+    summary = summarize(records, tasks, args.run_id, args.starting_commit, tasks_path, stopped_early=stopped_early)
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
     return 0

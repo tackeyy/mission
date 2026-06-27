@@ -197,6 +197,59 @@ Unsafe interpretation:
 That would be unsupported because every full-run record was blocked by
 workspace API usage limits before a comparable task-quality attempt.
 
+## Cost-Controlled Incremental Rerun
+
+Status: executed on 2026-06-28 JST after an additional Claude API budget increase.
+To avoid rerunning the already measured first smoke task, the runner was updated
+with `--task-ids` and `--stop-on-blocked`. The incremental run targeted two
+previously unmeasured complex tasks and capped each Claude invocation with
+`--max-budget-usd 3.0`.
+
+This is a useful cost-capped operational comparison, but it is **not** a full
+quality comparison for `mission`: both `/mission` records hit the configured
+per-invocation budget cap before Claude Code returned success.
+
+| Item | Value | Evidence |
+|---|---:|---|
+| Run id | `2026-06-28-claude-goal-vs-mission-incremental-v1` | `results/2026-06-28-claude-goal-vs-mission-incremental-v1.jsonl`. |
+| Starting commit | `d1cef1d5bd0166b5d61939c8d93ce0060c05507f` | Runner argument. |
+| Task file | `tasks.complex.json` | Selected tasks only. |
+| Selected tasks | 2 | `complex-failing-test-triage`, `complex-review-thread-resolution`. |
+| Expected records | 4 | 2 tasks x 2 arms. |
+| Records written | 4 / 4 | Summary JSON has 4 records. |
+| Per-invocation cost cap | USD 3.00 | Runner argument `--max-budget-usd 3.0`. |
+| API usage-limit blocked records | 0 / 4 | No record has `blocked_reason=api_usage_limit`. |
+| Max-budget blocked records | 2 / 4 | Both `/mission` records have `blocked_reason=max_budget_usd`. |
+| Total Claude cost recorded | USD 9.39057695 | Raw Claude result JSON files. |
+| `/goal` cost recorded | USD 3.31969425 | Sum of `/goal` raw Claude result JSON files. |
+| `/mission` cost recorded | USD 6.07088270 | Sum of `/mission` raw Claude result JSON files. |
+
+Incremental result:
+
+| Metric | claude_code_goal_command | mission | Interpretation |
+|---|---:|---:|---|
+| Records | 2 | 2 | Same two selected tasks were attempted. |
+| Completed comparable records | 2 / 2 | 0 / 2 | `/mission` records are excluded from task-quality comparison because they hit the configured budget cap. |
+| Completion rate | 2 / 2 | 0 / 2 | Under the USD 3.00 cap, `/goal` completed both tasks; `/mission` did not return success. |
+| Validator pass rate | 2 / 2 | 0 / 2 | `/mission` artifacts existed, but Claude Code returned `error_max_budget_usd`, so the runner did not count them complete. |
+| Average elapsed minutes | 3.87 | 7.56 | `/mission` ran longer before hitting the budget cap. |
+| Average quality score | 4.00 / 5 | n/a | `/mission` comparable denominator is zero after excluding max-budget blocked records. |
+
+Safe interpretation:
+
+> In a cost-capped incremental run with a USD 3.00 per-invocation cap, official
+> `/goal` completed and passed both selected complex tasks. `/mission` produced
+> artifacts but hit the configured Claude Code max-budget cap on both selected
+> tasks, so those records are budget-blocked rather than completed task-quality
+> measurements.
+
+Unsafe interpretation:
+
+> `mission` produced lower-quality answers than official `/goal`.
+
+That would be unsupported because the two `/mission` incremental records ended
+with `error_max_budget_usd`, not a completed validator result.
+
 ## Task-Level Findings
 
 | Task | Stronger arm | Why |
@@ -228,6 +281,7 @@ python3 benchmarks/mission-vs-goal/run_paired_pilot.py --starting-commit 0148f16
 python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py --tasks-file benchmarks/mission-vs-goal/tasks.complex.json --run-id 2026-06-28-claude-goal-vs-mission-smoke-v2 --starting-commit 38cc7907e5e35fcd9fa23022a1fcf03f756df99b --limit-tasks 1 --timeout 300 --max-budget-usd 1.5 --mission-max-iter 1
 python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py --tasks-file benchmarks/mission-vs-goal/tasks.complex.json --run-id 2026-06-28-claude-goal-vs-mission-smoke-v3 --starting-commit ed98b0e00169f0e0b35ce629a206ffcb7af4d0a3 --limit-tasks 1 --timeout 900 --max-budget-usd 3.0 --mission-max-iter 2
 python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py --tasks-file benchmarks/mission-vs-goal/tasks.complex.json --run-id 2026-06-28-claude-goal-vs-mission-complex-v1 --starting-commit ed98b0e00169f0e0b35ce629a206ffcb7af4d0a3 --limit-tasks 10 --timeout 1800 --max-budget-usd 3.0 --mission-max-iter 2
+python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py --tasks-file benchmarks/mission-vs-goal/tasks.complex.json --run-id 2026-06-28-claude-goal-vs-mission-incremental-v1 --starting-commit d1cef1d5bd0166b5d61939c8d93ce0060c05507f --task-ids complex-failing-test-triage,complex-review-thread-resolution --stop-on-blocked --timeout 1200 --max-budget-usd 3.0 --mission-max-iter 2
 python3 -m pytest skills/mission/tests/test_benchmark_package.py skills/mission/tests/test_doc_consistency.py -q
 python3 -m pytest skills/mission/tests -q
 python3 -m json.tool benchmarks/mission-vs-goal/tasks.json
@@ -260,6 +314,13 @@ Safe to say about the API-limit rerun:
 > `/mission` took longer. The subsequent 10-task full attempt was blocked by
 > workspace API usage limits, so it cannot support a performance claim.
 
+Safe to say about the cost-capped incremental rerun:
+
+> With a USD 3.00 per-invocation cap on two additional complex tasks, official
+> `/goal` completed both tasks and `/mission` hit the configured max-budget cap
+> on both tasks. This supports an operational cost/runtime caution, not a claim
+> that `/mission` answers are lower quality.
+
 Do not say:
 
 > `mission` is smarter than `/goal`.
@@ -288,4 +349,7 @@ artifacts/2026-06-28-claude-goal-vs-mission-smoke-v3/
 results/2026-06-28-claude-goal-vs-mission-complex-v1.jsonl
 results/2026-06-28-claude-goal-vs-mission-complex-v1-summary.json
 artifacts/2026-06-28-claude-goal-vs-mission-complex-v1/
+results/2026-06-28-claude-goal-vs-mission-incremental-v1.jsonl
+results/2026-06-28-claude-goal-vs-mission-incremental-v1-summary.json
+artifacts/2026-06-28-claude-goal-vs-mission-incremental-v1/
 ```

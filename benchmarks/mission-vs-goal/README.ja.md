@@ -105,6 +105,26 @@ full attempt は blocked と扱います。公式 runner は `run_status`、`blo
 `comparable_attempt` を記録するため、API/account stop を task-quality failure と
 誤読しないようになっています。
 
+cost-controlled incremental run では、すでに測定済みの task を再実行しないよう
+`--task-ids` を使い、blocked record が出たら止めるために `--stop-on-blocked` を使います。
+
+```bash
+python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
+  --tasks-file benchmarks/mission-vs-goal/tasks.complex.json \
+  --run-id YYYY-MM-DD-claude-goal-vs-mission-incremental \
+  --starting-commit <commit> \
+  --task-ids complex-failing-test-triage,complex-review-thread-resolution \
+  --stop-on-blocked \
+  --timeout 1200 \
+  --max-budget-usd 3.0 \
+  --mission-max-iter 2
+```
+
+2026-06-28 の incremental run では、USD 3.00 per-invocation cap 下で、公式 `/goal`
+は selected tasks 2 件を完了しました。一方 `/mission` は 2 records とも configured
+max-budget cap に到達しました。これは operational cost/runtime result として扱い、
+`mission` の completed quality comparison としては扱いません。
+
 ## Human Quality Rubric
 
 | Score | Meaning |
@@ -131,7 +151,7 @@ raw evidence がそろった後に使ってよい表現:
 - 2026-06-28 の smoke から、`mission` が Claude Code 公式 `/goal` より良い /
   悪いという主張。最初の smoke は `/mission` arm が API limit で blocked、
   rerun smoke は 1 comparable task のみ、full rerun は全 record が API limit で
-  blocked されたため。
+  blocked、incremental rerun は `/mission` records が max-budget blocked されたため。
 - denominator、task mix、scoring method を出さない percent improvement。
 - 10 個すべての paired task run が完了していない状態での性能主張。
 

@@ -12,9 +12,13 @@ access は 2026-07-01 00:00 UTC、つまり 2026-07-01 09:00 JST に戻ると記
   両 arm とも completion と validator に pass。
 - `2026-06-28-claude-goal-vs-mission-complex-v1`: 20 records は保存されたが、
   全 record が `run_status=blocked`、`blocked_reason=api_usage_limit`。
+- `2026-06-28-claude-goal-vs-mission-incremental-v1`: `--task-ids` で未測定 task
+  2 件を選び、USD 3.00 per-invocation cap で実行。公式 `/goal` は両 task を完了し、
+  `/mission` は両 task で `blocked_reason=max_budget_usd`。
 
 したがって、完了した evidence は 1 task smoke result に限定されます。
-10 task full performance claim はまだ supported ではありません。
+10 task full performance claim はまだ supported ではありません。incremental run は
+operational cost/runtime の注意材料であり、completed quality comparison ではありません。
 
 ## Objective
 
@@ -87,6 +91,31 @@ Expected records: 20。
 - `2026-06-28-claude-goal-vs-mission-complex-v1` は 20 records を保存したが、
   全 20 records が `api_usage_limit` で blocked。comparable completion /
   validator rate の denominator は 0。
+
+## Step 2b: Cost-Controlled Incremental Pilot
+
+full run が高コストまたは limit に当たる場合は、完了済み task を再実行せず、
+selected tasks だけで続けます。
+
+```bash
+STARTING_COMMIT=$(git rev-parse HEAD)
+python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
+  --tasks-file benchmarks/mission-vs-goal/tasks.complex.json \
+  --run-id 2026-07-01-claude-goal-vs-mission-incremental \
+  --starting-commit "$STARTING_COMMIT" \
+  --task-ids complex-failing-test-triage,complex-review-thread-resolution \
+  --stop-on-blocked \
+  --timeout 1200 \
+  --max-budget-usd 3.0 \
+  --mission-max-iter 2
+```
+
+今回の incremental result:
+
+- `2026-06-28-claude-goal-vs-mission-incremental-v1` は 4 records を保存。
+- 公式 `/goal`: completed comparable records 2、validator pass 2。
+- `/mission`: USD 3.00 cap 下で `max_budget_usd` blocked records 2。
+- recorded cost 合計: USD 9.39057695。
 
 ## Step 3: Validation
 
