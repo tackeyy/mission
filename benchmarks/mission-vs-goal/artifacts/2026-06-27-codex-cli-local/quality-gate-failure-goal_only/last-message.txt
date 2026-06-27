@@ -1,0 +1,9 @@
+Done. Wrote the required artifact only:
+
+[quality-gate-failure-goal_only.md](/private/tmp/mission-vs-goal-pilot/quality-gate-failure-goal_only/repo/benchmarks/mission-vs-goal/run-output/2026-06-27-codex-cli-local/quality-gate-failure-goal_only.md)
+
+Evidence included:
+- Initial validator failure: `FAIL missing heading: ## Assumptions`
+- Later validator pass: `PASS required headings present`
+
+No commit, push, package install, or network access used. Goal usage: 13,278 tokens, 81 seconds.

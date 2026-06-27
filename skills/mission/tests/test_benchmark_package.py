@@ -34,6 +34,8 @@ def test_mission_vs_goal_result_schema_matches_declared_arms():
     assert schema["properties"]["benchmark"]["const"] == tasks["benchmark"]
     assert schema["properties"]["arm"]["enum"] == tasks["arms"]
     assert "human_quality_score" in schema["required"]
+    assert "quality_score_method" in schema["required"]
+    assert "automated_heuristic_not_blind_human" in schema["properties"]["quality_score_method"]["enum"]
     assert "evidence_completeness" in schema["required"]
 
 
@@ -60,18 +62,50 @@ def test_mission_vs_goal_has_japanese_benchmark_docs():
     assert "`mission` は `/goal` より X% 賢い" in report_ja
 
 
-def test_mission_vs_goal_measured_reports_are_honest_about_missing_paired_runs():
+def test_mission_vs_goal_measured_reports_are_honest_about_paired_runs():
     report = (BENCHMARK_DIR / "report.md").read_text(encoding="utf-8")
     report_ja = (BENCHMARK_DIR / "report.ja.md").read_text(encoding="utf-8")
+    results_path = BENCHMARK_DIR / "results" / "2026-06-27-codex-cli-local.jsonl"
+    summary_path = BENCHMARK_DIR / "results" / "2026-06-27-codex-cli-local-summary.json"
 
-    assert "Paired benchmark runs completed | 0 / 20" in report
+    records = [json.loads(line) for line in results_path.read_text(encoding="utf-8").splitlines()]
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    by_arm = {
+        arm: [record for record in records if record["arm"] == arm]
+        for arm in ("goal_only", "mission")
+    }
+
+    assert len(records) == 20
+    assert len(by_arm["goal_only"]) == 10
+    assert len(by_arm["mission"]) == 10
+    assert all(record["completion"] for record in records)
+    assert all(record["validator_pass"] for record in records)
+    assert {record["quality_score_method"] for record in records} == {"automated_heuristic_not_blind_human"}
+    assert summary["records"] == 20
+    assert summary["expected_records"] == 20
+    assert summary["arms"]["goal_only"]["average_quality_score"] == 4.0
+    assert summary["arms"]["mission"]["average_quality_score"] == 4.5
+    assert summary["arms"]["goal_only"]["average_evidence_completeness"] == 3.8
+    assert summary["arms"]["mission"]["average_evidence_completeness"] == 4.7
+
+    assert "Paired benchmark runs completed | 20 / 20" in report
+    assert "Goal-only runs completed | 10 / 10" in report
+    assert "Mission runs completed | 10 / 10" in report
+    assert "Quality score method | automated heuristic" in report
+    assert "Average quality score | 4.00 / 5 | 4.50 / 5" in report
+    assert "Average evidence completeness | 3.80 / 5 | 4.70 / 5" in report
     assert "Benchmark + doc consistency tests | 29 passed / 29" in report
     assert "Full mission test suite | 394 passed / 394" in report
-    assert "comparative performance results" in report
-    assert "Paired benchmark runs completed | 0 / 20" in report_ja
+    assert "not a blind human evaluation" in report
+    assert "Paired benchmark runs completed | 20 / 20" in report_ja
+    assert "Goal-only runs completed | 10 / 10" in report_ja
+    assert "Mission runs completed | 10 / 10" in report_ja
+    assert "Quality score method | automated heuristic" in report_ja
+    assert "Average quality score | 4.00 / 5 | 4.50 / 5" in report_ja
+    assert "Average evidence completeness | 3.80 / 5 | 4.70 / 5" in report_ja
     assert "Benchmark + doc consistency tests | 29 passed / 29" in report_ja
     assert "Full mission test suite | 394 passed / 394" in report_ja
-    assert "比較性能の結果はまだ未測定" in report_ja
+    assert "blind human evaluation でもありません" in report_ja
 
 
 def test_mission_vs_goal_protocol_controls_review_bias():

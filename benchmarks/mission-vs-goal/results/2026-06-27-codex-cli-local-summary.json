@@ -1,0 +1,26 @@
+{
+  "arms": {
+    "goal_only": {
+      "average_elapsed_minutes": 1.28,
+      "average_evidence_completeness": 3.8,
+      "average_intervention_count": 0.0,
+      "average_quality_score": 4.0,
+      "completion_rate": 1.0,
+      "records": 10,
+      "validator_pass_rate": 1.0
+    },
+    "mission": {
+      "average_elapsed_minutes": 2.99,
+      "average_evidence_completeness": 4.7,
+      "average_intervention_count": 0.0,
+      "average_quality_score": 4.5,
+      "completion_rate": 1.0,
+      "records": 10,
+      "validator_pass_rate": 1.0
+    }
+  },
+  "expected_records": 20,
+  "records": 20,
+  "run_id": "2026-06-27-codex-cli-local",
+  "starting_commit": "0148f16"
+}

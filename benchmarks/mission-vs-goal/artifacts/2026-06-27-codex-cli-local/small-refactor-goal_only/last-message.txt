@@ -1,0 +1,5 @@
+Created the requested benchmark artifact:
+
+[small-refactor-goal_only.md](/private/tmp/mission-vs-goal-pilot/small-refactor-goal_only/repo/benchmarks/mission-vs-goal/run-output/2026-06-27-codex-cli-local/small-refactor-goal_only.md)
+
+Only the benchmark output path is changed. I did not commit, push, install packages, or use network access. Tests were not run because no source files were modified.

@@ -1,0 +1,13 @@
+Completed the controlled local benchmark run.
+
+Created the single required artifact at:
+[quality-gate-failure-mission.md](/private/tmp/mission-vs-goal-pilot/quality-gate-failure-mission/repo/benchmarks/mission-vs-goal/run-output/2026-06-27-codex-cli-local/quality-gate-failure-mission.md)
+
+Validation/state results:
+- Initial validator run failed: `FAIL missing heading: Stop Decision`
+- Later validator run passed: `PASS all required headings present`
+- `push-score` accepted score `4.4`
+- `mark-passes` succeeded with `passes=true`, `loop_active=false`
+- No commit, push, package install, or network access used
+
+`git status` shows only the benchmark output directory as untracked; `.mission-state/` was used for the allowed mission audit state.

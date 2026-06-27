@@ -1,0 +1,9 @@
+Completed the controlled mission run.
+
+Created the required artifact at:
+
+`benchmarks/mission-vs-goal/run-output/2026-06-27-codex-cli-local/review-comment-batch-mission.md`
+
+Mission state was initialized, scored with composite `4.0`, and `mark-passes` completed successfully. Final state shows `passes: true`, `loop_active: false`, `phase: done`.
+
+No commit, push, package install, or network access was used. The only benchmark output file present is the requested artifact; `.mission-state/` was used for the allowed mission state.

@@ -1,0 +1,12 @@
+Completed the controlled mission benchmark run.
+
+Artifact written at [bug-regression-test-mission.md](/tmp/mission-vs-goal-pilot/bug-regression-test-mission/repo/benchmarks/mission-vs-goal/run-output/2026-06-27-codex-cli-local/bug-regression-test-mission.md).
+
+Verified:
+- Required headings are all present.
+- Targeted parser harness fails before the fix and passes with the corrected parser behavior.
+- `push-score` recorded `4.0`.
+- `mark-passes` returned `{"ok": true, "passes": true, "forced": false}`.
+- No commit, push, install, or network access was used.
+
+Note: per the benchmark scope rule, I did not edit source or test files; the parser fix is demonstrated in the artifact via a no-write targeted harness.

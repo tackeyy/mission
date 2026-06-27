@@ -1,0 +1,8 @@
+Created the benchmark artifact only:
+
+[release-checklist-audit-goal_only.md](/private/tmp/mission-vs-goal-pilot/release-checklist-audit-goal_only/repo/benchmarks/mission-vs-goal/run-output/2026-06-27-codex-cli-local/release-checklist-audit-goal_only.md)
+
+Verified:
+- Required headings are present: `Goal`, `Result`, `Evidence`, `Assumptions`.
+- Only the benchmark output path is untracked/changed.
+- No commit, push, package install, or network access was used.

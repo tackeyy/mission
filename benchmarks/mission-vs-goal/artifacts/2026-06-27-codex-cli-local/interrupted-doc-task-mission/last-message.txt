@@ -1,0 +1,10 @@
+Completed the mission benchmark artifact at [interrupted-doc-task-mission.md](/private/tmp/mission-vs-goal-pilot/interrupted-doc-task-mission/repo/benchmarks/mission-vs-goal/run-output/2026-06-27-codex-cli-local/interrupted-doc-task-mission.md).
+
+Validation done:
+- Only one file exists in the requested run-output directory.
+- All required headings are present.
+- Artifact records the original plan, simulated interruption, and resumed completion without re-asking settled questions.
+- `push-score` recorded `4.6`.
+- `mark-passes` succeeded; mission state is `phase: done`, `passes: true`, `loop_active: false`.
+
+I did not commit, push, install packages, or use network access. The AGENTS git-pull rule was not run because the benchmark explicitly prohibited network access.

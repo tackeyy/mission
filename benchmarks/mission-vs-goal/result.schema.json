@@ -4,6 +4,7 @@
   "type": "object",
   "required": [
     "benchmark",
+    "run_id",
     "task_id",
     "arm",
     "model",
@@ -13,6 +14,7 @@
     "completion",
     "validator_pass",
     "human_quality_score",
+    "quality_score_method",
     "intervention_count",
     "evidence_completeness",
     "elapsed_minutes",
@@ -23,6 +25,9 @@
   "properties": {
     "benchmark": {
       "const": "mission-vs-goal-pilot"
+    },
+    "run_id": {
+      "type": "string"
     },
     "task_id": {
       "type": "string"
@@ -58,6 +63,13 @@
       "type": "number",
       "minimum": 1,
       "maximum": 5
+    },
+    "quality_score_method": {
+      "enum": [
+        "blind_human",
+        "label_hidden_human",
+        "automated_heuristic_not_blind_human"
+      ]
     },
     "intervention_count": {
       "type": "integer",

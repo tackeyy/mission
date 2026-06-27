@@ -1,0 +1,7 @@
+Created the requested artifact:
+
+[bug-regression-test-goal_only.md](/private/tmp/mission-vs-goal-pilot/bug-regression-test-goal_only/repo/benchmarks/mission-vs-goal/run-output/2026-06-27-codex-cli-local/bug-regression-test-goal_only.md)
+
+I did not commit, push, install packages, or use network access. The only file under `run-output` is the requested artifact, and it includes the required `Goal`, `Result`, `Evidence`, and `Assumptions` headings.
+
+Goal completed in 106 seconds, using 78,198 tokens.

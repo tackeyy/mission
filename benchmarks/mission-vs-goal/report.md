@@ -1,34 +1,72 @@
 # mission vs goal-only pilot report
 
-Status: package validation measured on 2026-06-27. The 20 paired benchmark runs
-are not complete yet, so this report does not make comparative performance
-claims.
+Status: measured on 2026-06-27 as a controlled local Codex CLI pilot.
+
+This is not a general model benchmark and not a blind human evaluation. The
+quality and evidence scores below are automated heuristic scores from the local
+runner. Raw records and artifacts are checked into this directory so the result
+can be audited.
 
 ## Executive Summary
 
-The benchmark package is ready to run: it defines 10 fixed tasks, 2 benchmark
-arms, a result schema, English/Japanese protocols, English/Japanese report
-templates, and regression tests.
+We ran all 20 paired benchmark executions from starting commit `0148f16`: 10
+`goal_only` runs and 10 `mission` runs.
 
-Actual `mission` vs `goal_only` outcome metrics are not measured yet because no
-paired task runs have been executed under the protocol. The current evidence
-supports only a package-readiness claim, not a workflow-performance claim.
+Both arms completed every task and passed every local validator. In this
+controlled pilot, the `mission` arm produced higher automated quality and
+evidence scores, while taking more wall-clock time.
 
-## Measured Status
+The safe takeaway is narrow:
+
+> In this controlled local 10-task pilot, `mission` did not improve completion
+> or validator pass rate because both arms reached 100%. It did improve the
+> automated evidence/completion-quality score, at the cost of longer runtime.
+
+## Measurement Scope
 
 | Item | Value | Evidence |
 |---|---:|---|
-| Measurement date | 2026-06-27 | Current local validation run. |
-| Starting commit | `c5ab7cd` | `git rev-parse --short HEAD`. |
+| Measurement date | 2026-06-27 | Current local Codex CLI run. |
+| Run id | `2026-06-27-codex-cli-local` | `results/2026-06-27-codex-cli-local.jsonl`. |
+| Starting commit | `0148f16` | `git ls-remote origin refs/heads/main` before pilot. |
 | Fixed pilot tasks defined | 10 / 10 | `benchmarks/mission-vs-goal/tasks.json`. |
 | Benchmark arms defined | 2 / 2 | `goal_only`, `mission`. |
 | Expected paired runs | 20 | 10 tasks x 2 arms. |
-| Paired benchmark runs completed | 0 / 20 | No protocol-compliant result JSONL exists yet. |
-| Goal-only runs completed | 0 / 10 | Not measured. |
-| Mission runs completed | 0 / 10 | Not measured for the fixed 10-task set. |
-| Comparative performance claim readiness | 0 / 1 | Blocked until paired runs are complete. |
+| Paired benchmark runs completed | 20 / 20 | Raw JSONL has 20 records. |
+| Goal-only runs completed | 10 / 10 | Raw JSONL records. |
+| Mission runs completed | 10 / 10 | Raw JSONL records. |
+| Result artifacts captured | 100 files | `artifacts/2026-06-27-codex-cli-local/`. |
+| Quality score method | automated heuristic | `quality_score_method=automated_heuristic_not_blind_human`. |
+| Comparative performance claim readiness | limited | Only valid for this controlled local task set and scoring method. |
 
-## Package Validation Results
+## Results
+
+| Metric | goal_only | mission | Delta |
+|---|---:|---:|---:|
+| Completion rate | 10 / 10 | 10 / 10 | 0 |
+| Validator pass rate | 10 / 10 | 10 / 10 | 0 |
+| Average quality score | 4.00 / 5 | 4.50 / 5 | +0.50 |
+| Average intervention count | 0.00 | 0.00 | 0 |
+| Resume success rate | 1 / 1 | 1 / 1 | 0 |
+| Average evidence completeness | 3.80 / 5 | 4.70 / 5 | +0.90 |
+| Average elapsed minutes | 1.28 | 2.99 | +1.71 |
+
+## Task-Level Findings
+
+| Task | Stronger arm | Why |
+|---|---|---|
+| `docs-small-edit` | `mission` on evidence; tie on completion | Both passed; mission recorded more structured evidence and state. |
+| `docs-cross-reference` | `mission` on evidence; tie on completion | Both passed; mission included plan/review/score sections. |
+| `bug-regression-test` | `mission` on evidence; tie on completion | Both passed; mission had stronger completion trace but longer runtime. |
+| `review-comment-batch` | `mission` on evidence; tie on completion | Both passed; mission made review/check evidence explicit. |
+| `interrupted-doc-task` | tie on resume; `mission` on evidence | Both resume validators passed; mission recorded state-backed evidence. |
+| `ambiguous-research-brief` | `mission` on evidence; tie on completion | Both passed; mission surfaced assumptions and review more explicitly. |
+| `release-checklist-audit` | `mission` on evidence; tie on completion | Both passed; mission better matched evidence-tracking intent. |
+| `small-refactor` | `mission` on evidence; tie on completion | Both passed; goal-only remained sufficient for validator success. |
+| `quality-gate-failure` | `mission` on evidence; tie on completion | Both passed; mission represented the stop decision more explicitly. |
+| `marketing-claim-draft` | `mission` on evidence; tie on completion | Both passed; mission made claim guardrails more explicit. |
+
+## Validation Results
 
 | Check | Result |
 |---|---:|
@@ -36,50 +74,38 @@ supports only a package-readiness claim, not a workflow-performance claim.
 | Full mission test suite | 394 passed / 394 |
 | JSON parse checks | 2 passed / 2 |
 | Scoped whitespace check | passed |
-| Mission package creation score | 4.54 / 5.00 |
-| Mission package creation minimum item score | 4.50 / 5.00 |
 
 Commands used:
 
 ```bash
+python3 benchmarks/mission-vs-goal/run_paired_pilot.py --starting-commit 0148f16 --timeout 900
 python3 -m pytest skills/mission/tests/test_benchmark_package.py skills/mission/tests/test_doc_consistency.py -q
 python3 -m pytest skills/mission/tests -q
 python3 -m json.tool benchmarks/mission-vs-goal/tasks.json
 python3 -m json.tool benchmarks/mission-vs-goal/result.schema.json
-git diff --check -- README.md README.ja.md docs/LOOP_ENGINEERING.md benchmarks/mission-vs-goal/README.md benchmarks/mission-vs-goal/README.ja.md benchmarks/mission-vs-goal/report.md benchmarks/mission-vs-goal/report.ja.md benchmarks/mission-vs-goal/report-template.md benchmarks/mission-vs-goal/report-template.ja.md skills/mission/tests/test_benchmark_package.py
+git diff --check -- README.md README.ja.md docs/LOOP_ENGINEERING.md benchmarks/mission-vs-goal/README.md benchmarks/mission-vs-goal/README.ja.md benchmarks/mission-vs-goal/report.md benchmarks/mission-vs-goal/report.ja.md benchmarks/mission-vs-goal/report-template.md benchmarks/mission-vs-goal/report-template.ja.md benchmarks/mission-vs-goal/run_paired_pilot.py skills/mission/tests/test_benchmark_package.py
 ```
 
-## Results
+## Marketing Summary
 
-| Metric | goal_only | mission | Notes |
-|---|---:|---:|---|
-| Completion rate | Not measured | Not measured | Requires 10 paired task runs per arm. |
-| Validator pass rate | Not measured | Not measured | Requires protocol-compliant result records. |
-| Average human quality score | Not measured | Not measured | Requires blind or label-hidden scoring. |
-| Average intervention count | Not measured | Not measured | Requires run logs. |
-| Resume success rate | Not measured | Not measured | Only applies to interruption tasks. |
-| Average evidence completeness | Not measured | Not measured | Requires artifact review. |
-| Average elapsed minutes | Not measured | Not measured | Requires run timestamps. |
+Safe to say:
 
-## Current Marketing Summary
+> In a controlled local 10-task Codex CLI pilot, both goal-only and `mission`
+> completed and passed all validators. `mission` produced stronger automated
+> evidence/completion-quality scores, while taking longer per run.
 
-Safe to say now:
+Do not say:
 
-> The `mission` vs goal-only benchmark protocol is implemented and validated.
-> It is ready for a 10-task paired pilot, but comparative performance results
-> have not been measured yet.
+> `mission` is smarter than `/goal`.
 
-Not safe to say yet:
+Do not say:
 
-> `mission` outperforms goal-only execution.
+> `mission` improves completion rate in this pilot.
 
-## Next Measurement Step
-
-Run the 20 paired benchmark executions and store one JSONL record per run under:
+## Raw Result Index
 
 ```text
-results/YYYY-MM-DD-run-001.jsonl
+results/2026-06-27-codex-cli-local.jsonl
+results/2026-06-27-codex-cli-local-summary.json
+artifacts/2026-06-27-codex-cli-local/
 ```
-
-Only after that should this report promote aggregate completion, validator,
-quality, intervention, resume, evidence, or elapsed-time comparisons.

@@ -1,0 +1,5 @@
+Created the benchmark artifact at:
+
+[ambiguous-research-brief-goal_only.md](/private/tmp/mission-vs-goal-pilot/ambiguous-research-brief-goal_only/repo/benchmarks/mission-vs-goal/run-output/2026-06-27-codex-cli-local/ambiguous-research-brief-goal_only.md)
+
+Verified it includes the required headings: `Goal`, `Result`, `Evidence`, and `Assumptions`. No network, commits, pushes, or package installs were used.

@@ -1,0 +1,5 @@
+Done. Wrote the single benchmark artifact at:
+
+[docs-small-edit-goal_only.md](/tmp/mission-vs-goal-pilot/docs-small-edit-goal_only/repo/benchmarks/mission-vs-goal/run-output/2026-06-27-codex-cli-local/docs-small-edit-goal_only.md)
+
+Verification: only `benchmarks/mission-vs-goal/run-output/` is untracked, and the artifact contains the required `Goal`, `Result`, `Evidence`, and `Assumptions` headings. No commits, pushes, installs, or network access.

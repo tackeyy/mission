@@ -1,0 +1,5 @@
+Created the single requested artifact:
+
+[marketing-claim-draft-goal_only.md](/private/tmp/mission-vs-goal-pilot/marketing-claim-draft-goal_only/repo/benchmarks/mission-vs-goal/run-output/2026-06-27-codex-cli-local/marketing-claim-draft-goal_only.md)
+
+It includes `Goal`, `Result`, `Evidence`, and `Assumptions`, with a conservative public-facing paragraph that states the 10-task / 20-run sample plan, limits scope to the internal pilot, and avoids superiority claims because paired results are still `0 / 20`.

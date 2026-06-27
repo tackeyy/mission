@@ -1,0 +1,13 @@
+Completed the controlled mission run.
+
+Created the single benchmark artifact:
+
+[ambiguous-research-brief-mission.md](/private/tmp/mission-vs-goal-pilot/ambiguous-research-brief-mission/repo/benchmarks/mission-vs-goal/run-output/2026-06-27-codex-cli-local/ambiguous-research-brief-mission.md)
+
+Mission state was initialized, self-reviewed, scored, and marked passing:
+
+- Score: `4.5`
+- Min item: `4.3`
+- Final state: `passes: true`, `loop_active: false`, `phase: done`
+
+No packages installed, no commits/pushes made, and no network access used.
