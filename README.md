@@ -39,6 +39,10 @@ For public launch positioning, GitHub topics, and a comparison against `/goal`,
 `ralph-loop`, and Superpowers, see
 [`docs/LOOP_ENGINEERING.md`](docs/LOOP_ENGINEERING.md).
 
+For a marketing-safe 10-task pilot protocol comparing `mission` with a
+goal-only baseline, see
+[`benchmarks/mission-vs-goal/README.md`](benchmarks/mission-vs-goal/README.md).
+
 ## Features
 
 - Mission orchestration skill: `skills/mission`
@@ -97,6 +101,11 @@ agent needs an auditable "why can I stop now?" gate.
 | `ralph-loop` | You want a Claude Code loop that re-runs one prompt until a literal completion promise is emitted. |
 | `Superpowers` | You want a broad coding-agent methodology with brainstorming, planning, TDD, debugging, review, and branch delivery practices. |
 | Review / CI / security plugins | You need a specialist check for one part of the workflow, and another orchestrator or human will decide overall completion. |
+
+Benchmark claims should use the pilot protocol in
+[`benchmarks/mission-vs-goal/`](benchmarks/mission-vs-goal/) and avoid general
+"smarter than `/goal`" language unless the raw paired results support a narrower
+workflow claim.
 
 ## Repository Layout
 

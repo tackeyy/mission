@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "mission vs goal-only benchmark result",
+  "type": "object",
+  "required": [
+    "benchmark",
+    "task_id",
+    "arm",
+    "model",
+    "started_at",
+    "completed_at",
+    "starting_commit",
+    "completion",
+    "validator_pass",
+    "human_quality_score",
+    "intervention_count",
+    "evidence_completeness",
+    "elapsed_minutes",
+    "artifacts",
+    "notes"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "benchmark": {
+      "const": "mission-vs-goal-pilot"
+    },
+    "task_id": {
+      "type": "string"
+    },
+    "arm": {
+      "enum": [
+        "goal_only",
+        "mission"
+      ]
+    },
+    "model": {
+      "type": "string"
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "completed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "starting_commit": {
+      "type": "string",
+      "minLength": 7
+    },
+    "completion": {
+      "type": "boolean"
+    },
+    "validator_pass": {
+      "type": "boolean"
+    },
+    "human_quality_score": {
+      "type": "number",
+      "minimum": 1,
+      "maximum": 5
+    },
+    "intervention_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "resume_success": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "evidence_completeness": {
+      "type": "number",
+      "minimum": 1,
+      "maximum": 5
+    },
+    "elapsed_minutes": {
+      "type": "number",
+      "minimum": 0
+    },
+    "token_estimate": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "notes": {
+      "type": "string"
+    }
+  }
+}

@@ -33,6 +33,11 @@ reviewer/scorer phase、threshold-based pass/fail state で、その completion 
 public launch positioning、GitHub topics、`/goal` / `ralph-loop` / Superpowers との比較は
 [`docs/LOOP_ENGINEERING.md`](docs/LOOP_ENGINEERING.md) を参照してください。
 
+`mission` と goal-only baseline をマーケティング利用してよい粒度で比較する
+10 タスク pilot protocol は
+[`benchmarks/mission-vs-goal/README.ja.md`](benchmarks/mission-vs-goal/README.ja.md)
+を参照してください。
+
 ## 特徴
 
 - メインオーケストレータ: `skills/mission`
@@ -84,6 +89,11 @@ repository、[Claude Code `/goal` docs](https://code.claude.com/docs/ja/goal)、
 | `ralph-loop` | Claude Code で、prompt を literal な completion promise が出るまで再投入する loop がほしい場合。 |
 | `Superpowers` | brainstorming、planning、TDD、debugging、review、branch delivery まで含む広い coding-agent 方法論がほしい場合。 |
 | review / CI / security plugin | workflow の一部分だけを専門的に検査し、全体の完了判断は別の orchestrator または人間が行う場合。 |
+
+ベンチマーク由来の主張は
+[`benchmarks/mission-vs-goal/`](benchmarks/mission-vs-goal/) の pilot protocol
+に沿って、sample size、task mix、validator、raw result を明示してください。
+`/goal` より「賢い」といった一般化した表現ではなく、workflow 上の差分として記述します。
 
 ## 構成
 

@@ -89,3 +89,12 @@ Secondary CTA:
 | Comparison | `/goal` vs `ralph-loop` vs Superpowers vs `mission`. |
 | Dogfood | Use `mission` to improve `mission`, then publish the trace and score. |
 
+## Pilot Benchmark
+
+Use the 10-task pilot in
+[`benchmarks/mission-vs-goal/README.md`](../benchmarks/mission-vs-goal/README.md)
+before making public performance claims against goal-only execution.
+
+The benchmark is deliberately framed as `mission` vs a goal-only workflow, not
+as a model intelligence benchmark. Publishable claims must include the sample
+size, task mix, validators, and raw result records.

@@ -1,0 +1,101 @@
+{
+  "benchmark": "mission-vs-goal-pilot",
+  "version": 1,
+  "task_count": 10,
+  "arms": [
+    "goal_only",
+    "mission"
+  ],
+  "tasks": [
+    {
+      "id": "docs-small-edit",
+      "category": "documentation",
+      "difficulty": "single_step",
+      "prompt": "Update a README section to clarify one installation prerequisite without changing behavior.",
+      "validator": "Diff contains the requested clarification and no unrelated files.",
+      "primary_metric": "validator_pass",
+      "hypothesis": "goal_only should be sufficient because the task is small and directly checkable."
+    },
+    {
+      "id": "docs-cross-reference",
+      "category": "documentation",
+      "difficulty": "multi_file",
+      "prompt": "Add a new concept page and update all relevant README links so readers can find it.",
+      "validator": "New page exists, both English and Japanese README links are present, and link targets resolve.",
+      "primary_metric": "evidence_completeness",
+      "hypothesis": "mission should help because the task has multiple artifacts and consistency checks."
+    },
+    {
+      "id": "bug-regression-test",
+      "category": "coding",
+      "difficulty": "test_first_fix",
+      "prompt": "Reproduce a small parser bug with a failing test, fix it, and leave the test passing.",
+      "validator": "The targeted test fails before the fix and passes after the fix.",
+      "primary_metric": "validator_pass",
+      "hypothesis": "mission should help by enforcing evidence before completion."
+    },
+    {
+      "id": "review-comment-batch",
+      "category": "coding",
+      "difficulty": "multi_issue",
+      "prompt": "Address three independent review comments without touching unrelated code.",
+      "validator": "All three requested changes are present and no unrelated diff is introduced.",
+      "primary_metric": "completion",
+      "hypothesis": "mission should help because review and re-check phases reduce missed comments."
+    },
+    {
+      "id": "interrupted-doc-task",
+      "category": "resume",
+      "difficulty": "interruption",
+      "prompt": "Begin a documentation update, simulate interruption after planning, then resume and finish.",
+      "validator": "The resumed run uses the original plan and completes without re-asking settled questions.",
+      "primary_metric": "resume_success",
+      "hypothesis": "mission should help because persistent state is part of the product surface."
+    },
+    {
+      "id": "ambiguous-research-brief",
+      "category": "research",
+      "difficulty": "ambiguous",
+      "prompt": "Create a short internal research brief from available repo evidence without external browsing.",
+      "validator": "Brief separates evidence from inference and lists assumptions.",
+      "primary_metric": "human_quality_score",
+      "hypothesis": "mission should help by recording assumptions and review feedback."
+    },
+    {
+      "id": "release-checklist-audit",
+      "category": "operations",
+      "difficulty": "procedural",
+      "prompt": "Audit a release checklist against repository rules and propose minimal doc fixes.",
+      "validator": "Every proposed fix maps to a specific repository rule or existing checklist gap.",
+      "primary_metric": "evidence_completeness",
+      "hypothesis": "mission should help when completion depends on traceable evidence."
+    },
+    {
+      "id": "small-refactor",
+      "category": "coding",
+      "difficulty": "bounded_refactor",
+      "prompt": "Refactor a duplicated helper in one module while preserving behavior.",
+      "validator": "Existing tests pass and diff is limited to the helper and direct callers.",
+      "primary_metric": "validator_pass",
+      "hypothesis": "goal_only may be enough if the refactor is tightly bounded."
+    },
+    {
+      "id": "quality-gate-failure",
+      "category": "coding",
+      "difficulty": "needs_iteration",
+      "prompt": "Make a change that initially leaves one validator failing, then continue until validators pass.",
+      "validator": "The final run includes evidence of the failing validator and a later passing validator.",
+      "primary_metric": "completion",
+      "hypothesis": "mission should help because the stop condition depends on iteration after failure."
+    },
+    {
+      "id": "marketing-claim-draft",
+      "category": "marketing",
+      "difficulty": "claim_guardrails",
+      "prompt": "Draft a public-facing comparison paragraph using only benchmark-backed claims.",
+      "validator": "Draft includes sample size, scope limitation, and avoids universal superiority language.",
+      "primary_metric": "human_quality_score",
+      "hypothesis": "mission should help by making unsupported claims visible during review."
+    }
+  ]
+}
