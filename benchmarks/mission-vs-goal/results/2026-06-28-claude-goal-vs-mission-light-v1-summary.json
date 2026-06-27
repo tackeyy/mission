@@ -1,0 +1,45 @@
+{
+  "run_id": "2026-06-28-claude-goal-vs-mission-light-v1",
+  "task_file": "benchmarks/mission-vs-goal/tasks.complex.json",
+  "task_cohort": "official-goal-smoke",
+  "selected_task_ids": [
+    "complex-failing-test-triage"
+  ],
+  "mission_profile": "light",
+  "starting_commit": "d6f12d739a521046e1dc1d198e671a162a803e9c",
+  "records": 2,
+  "expected_records": 2,
+  "stopped_early": false,
+  "limitations": [
+    "Claude Code print mode smoke; does not fully exercise multi-turn interactive /goal persistence.",
+    "Quality and evidence scores are automated heuristic scores, not blind human review."
+  ],
+  "arms": {
+    "claude_code_goal_command": {
+      "records": 1,
+      "blocked_records": 0,
+      "comparable_records": 1,
+      "completion_rate": 1.0,
+      "comparable_completion_rate": 1.0,
+      "validator_pass_rate": 1.0,
+      "comparable_validator_pass_rate": 1.0,
+      "average_quality_score": 4.0,
+      "average_intervention_count": 0.0,
+      "average_evidence_completeness": 4.0,
+      "average_elapsed_minutes": 9.56
+    },
+    "mission": {
+      "records": 1,
+      "blocked_records": 0,
+      "comparable_records": 1,
+      "completion_rate": 1.0,
+      "comparable_completion_rate": 1.0,
+      "validator_pass_rate": 1.0,
+      "comparable_validator_pass_rate": 1.0,
+      "average_quality_score": 4.0,
+      "average_intervention_count": 0.0,
+      "average_evidence_completeness": 4.0,
+      "average_elapsed_minutes": 5.27
+    }
+  }
+}

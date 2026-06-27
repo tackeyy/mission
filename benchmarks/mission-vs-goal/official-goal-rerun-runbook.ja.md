@@ -15,8 +15,11 @@ access は 2026-07-01 00:00 UTC、つまり 2026-07-01 09:00 JST に戻ると記
 - `2026-06-28-claude-goal-vs-mission-incremental-v1`: `--task-ids` で未測定 task
   2 件を選び、USD 3.00 per-invocation cap で実行。公式 `/goal` は両 task を完了し、
   `/mission` は両 task で `blocked_reason=max_budget_usd`。
+- `2026-06-28-claude-goal-vs-mission-light-v1`: `--mission-profile light`、
+  `--mission-max-iter 1`、USD 5.00 cap で未測定 task 1 件を実行。両 arm とも完了し、
+  validator に pass。この 1 件では `/mission` light が速く、cost も低かった。
 
-したがって、完了した evidence は 1 task smoke result に限定されます。
+したがって、完了した evidence は normal smoke 1 件と light-profile 1 件です。
 10 task full performance claim はまだ supported ではありません。incremental run は
 operational cost/runtime の注意材料であり、completed quality comparison ではありません。
 
@@ -116,6 +119,33 @@ python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
 - 公式 `/goal`: completed comparable records 2、validator pass 2。
 - `/mission`: USD 3.00 cap 下で `max_budget_usd` blocked records 2。
 - recorded cost 合計: USD 9.39057695。
+
+## Step 2c: Lightweight Mission Profile Pilot
+
+full `/mission` profile が paired evaluation には高コストすぎる場合は、fresh selected
+tasks を light profile で実行します。
+
+```bash
+STARTING_COMMIT=$(git rev-parse HEAD)
+python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
+  --tasks-file benchmarks/mission-vs-goal/tasks.complex.json \
+  --run-id 2026-07-01-claude-goal-vs-mission-light \
+  --starting-commit "$STARTING_COMMIT" \
+  --task-ids complex-failing-test-triage \
+  --stop-on-blocked \
+  --timeout 1200 \
+  --max-budget-usd 5.0 \
+  --mission-max-iter 1 \
+  --mission-profile light
+```
+
+今回の light-profile result:
+
+- `2026-06-28-claude-goal-vs-mission-light-v1` は completed comparable records 2 件を保存。
+- 公式 `/goal`: validator pass、9.56 分、USD 3.00670750。
+- `/mission` light: validator pass、5.27 分、USD 2.00569500。
+- これは 1 task の light-profile hypothesis だけを支持します。広い cost/runtime claim に
+  使う前に fresh task 3-5 件で再実行します。
 
 ## Step 3: Validation
 

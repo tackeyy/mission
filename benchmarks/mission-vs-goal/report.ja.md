@@ -244,6 +244,56 @@ Incremental result:
 これは unsupported です。incremental run の `/mission` 2 records は completed validator result
 ではなく、`error_max_budget_usd` で終了しています。
 
+## Lightweight mission profile rerun
+
+Status: cost を抑えた比較が可能かを検証するため、2026-06-28 JST に実行。
+runner に `--mission-profile light` を追加し、`/mission` prompt を 1 回の簡潔な
+plan/write/check pass に寄せ、`--mission-max-iter 1` で実行しました。
+
+これは、公式 `/goal` と `/mission` の両方が同じ未測定 complex task を完了した
+最初の cost-controlled comparison です。ただし N=1 なので、広い性能主張ではなく
+profile-level hypothesis として扱います。
+
+| Item | Value | Evidence |
+|---|---:|---|
+| Run id | `2026-06-28-claude-goal-vs-mission-light-v1` | `results/2026-06-28-claude-goal-vs-mission-light-v1.jsonl`。 |
+| Starting commit | `d6f12d739a521046e1dc1d198e671a162a803e9c` | runner argument。 |
+| Task file | `tasks.complex.json` | selected task のみ。 |
+| Selected task | 1 | `complex-failing-test-triage`。 |
+| Mission profile | `light` | `mission_profile=light`, `--mission-max-iter 1`。 |
+| Expected records | 2 | 1 task x 2 arms。 |
+| Records written | 2 / 2 | summary JSON に 2 records。 |
+| Blocked records | 0 / 2 | 両 record が `run_status=completed`。 |
+| Total Claude cost recorded | USD 5.01240250 | raw Claude result JSON files。 |
+| `/goal` cost recorded | USD 3.00670750 | `/goal` raw Claude result JSON。 |
+| `/mission` light cost recorded | USD 2.00569500 | `/mission` raw Claude result JSON。 |
+
+Lightweight result:
+
+| Metric | claude_code_goal_command | mission light | Interpretation |
+|---|---:|---:|---|
+| Completed comparable records | 1 / 1 | 1 / 1 | 両 arm とも同じ selected task を完了。 |
+| Completion rate | 1 / 1 | 1 / 1 | この task では tie。 |
+| Validator pass rate | 1 / 1 | 1 / 1 | この task では tie。 |
+| Average quality score | 4.00 / 5 | 4.00 / 5 | automated heuristic score。blind human review ではない。 |
+| Average evidence completeness | 4.00 / 5 | 4.00 / 5 | この task では tie。 |
+| Average elapsed minutes | 9.56 | 5.27 | この task では `mission` light が 4.29 分速い。 |
+| Recorded Claude cost | USD 3.00670750 | USD 2.00569500 | この task では `mission` light が USD 1.00101250 少ない。 |
+
+安全な解釈:
+
+> 未測定の complex triage task 1 件では、lightweight `/mission` profile と公式 `/goal`
+> の両方が完了し、automated validator に pass した。この 1 件では、`mission` light は
+> 公式 `/goal` より速く、recorded cost も低かった。
+
+危険な解釈:
+
+> `mission` は公式 `/goal` より安くて速い。
+
+これは unsupported です。completed light-profile sample は 1 task だけです。
+次に defensible なのは、同じ per-invocation cost cap で、再利用 task なしの
+3-5 task light-profile pilot を実行することです。
+
 ## Task-Level Findings
 
 | Task | Stronger arm | Why |

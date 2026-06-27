@@ -56,6 +56,7 @@ def test_mission_vs_goal_result_schema_matches_declared_arms():
     assert schema["properties"]["benchmark"]["const"] == tasks["benchmark"]
     assert set(tasks["arms"]) <= set(schema["properties"]["arm"]["enum"])
     assert "claude_code_goal_command" in schema["properties"]["arm"]["enum"]
+    assert schema["properties"]["mission_profile"]["enum"] == ["full", "light", None]
     assert "human_quality_score" in schema["required"]
     assert "quality_score_method" in schema["required"]
     assert "automated_heuristic_not_blind_human" in schema["properties"]["quality_score_method"]["enum"]
@@ -129,6 +130,10 @@ def test_mission_vs_goal_measured_reports_are_honest_about_paired_runs():
     official_incremental_path = BENCHMARK_DIR / "results" / "2026-06-28-claude-goal-vs-mission-incremental-v1.jsonl"
     official_incremental_summary_path = (
         BENCHMARK_DIR / "results" / "2026-06-28-claude-goal-vs-mission-incremental-v1-summary.json"
+    )
+    official_light_path = BENCHMARK_DIR / "results" / "2026-06-28-claude-goal-vs-mission-light-v1.jsonl"
+    official_light_summary_path = (
+        BENCHMARK_DIR / "results" / "2026-06-28-claude-goal-vs-mission-light-v1-summary.json"
     )
     official_mission_raw = (
         BENCHMARK_DIR
@@ -235,6 +240,24 @@ def test_mission_vs_goal_measured_reports_are_honest_about_paired_runs():
     assert all(record["blocked_reason"] == "max_budget_usd" for record in incremental_by_arm["mission"])
     assert all(record["comparable_attempt"] is False for record in incremental_by_arm["mission"])
 
+    light_records = [json.loads(line) for line in official_light_path.read_text(encoding="utf-8").splitlines()]
+    light_summary = json.loads(official_light_summary_path.read_text(encoding="utf-8"))
+    light_by_arm = {
+        arm: [record for record in light_records if record["arm"] == arm]
+        for arm in ("claude_code_goal_command", "mission")
+    }
+    assert light_summary["selected_task_ids"] == ["complex-failing-test-triage"]
+    assert light_summary["mission_profile"] == "light"
+    assert light_summary["records"] == 2
+    assert light_summary["expected_records"] == 2
+    assert light_summary["arms"]["claude_code_goal_command"]["comparable_records"] == 1
+    assert light_summary["arms"]["mission"]["comparable_records"] == 1
+    assert all(record["run_status"] == "completed" for record in light_records)
+    assert all(record["validator_pass"] is True for record in light_records)
+    assert light_by_arm["mission"][0]["mission_profile"] == "light"
+    assert light_by_arm["claude_code_goal_command"][0]["elapsed_minutes"] == 9.56
+    assert light_by_arm["mission"][0]["elapsed_minutes"] == 5.27
+
     assert "Paired benchmark runs completed | 20 / 20" in report
     assert "Goal-only runs completed | 10 / 10" in report
     assert "Mission runs completed | 10 / 10" in report
@@ -258,6 +281,11 @@ def test_mission_vs_goal_measured_reports_are_honest_about_paired_runs():
     assert "Max-budget blocked records | 2 / 4" in report
     assert "Total Claude cost recorded | USD 9.39057695" in report
     assert "`/goal` completed both tasks; `/mission` did not return success" in report
+    assert "Lightweight Mission Profile Rerun" in report
+    assert "Run id | `2026-06-28-claude-goal-vs-mission-light-v1`" in report
+    assert "Mission profile | `light`" in report
+    assert "Average elapsed minutes | 9.56 | 5.27" in report
+    assert "Recorded Claude cost | USD 3.00670750 | USD 2.00569500" in report
     assert "Paired benchmark runs completed | 20 / 20" in report_ja
     assert "Goal-only runs completed | 10 / 10" in report_ja
     assert "Mission runs completed | 10 / 10" in report_ja
@@ -281,6 +309,11 @@ def test_mission_vs_goal_measured_reports_are_honest_about_paired_runs():
     assert "Max-budget blocked records | 2 / 4" in report_ja
     assert "Total Claude cost recorded | USD 9.39057695" in report_ja
     assert "`/goal` は両 task を完了、`/mission` は success を返せなかった" in report_ja
+    assert "Lightweight mission profile rerun" in report_ja
+    assert "Run id | `2026-06-28-claude-goal-vs-mission-light-v1`" in report_ja
+    assert "Mission profile | `light`" in report_ja
+    assert "Average elapsed minutes | 9.56 | 5.27" in report_ja
+    assert "Recorded Claude cost | USD 3.00670750 | USD 2.00569500" in report_ja
 
 
 def test_mission_vs_goal_protocol_controls_review_bias():
@@ -309,6 +342,8 @@ def test_mission_vs_goal_protocol_controls_review_bias():
     assert 'parser.add_argument("--run-id"' in runner
     assert 'ARMS = ("claude_code_goal_command", "mission")' in official_runner
     assert 'parser.add_argument("--mission-max-iter"' in official_runner
+    assert '"--mission-profile"' in official_runner
+    assert 'MISSION_PROFILES = ("full", "light")' in official_runner
     assert '"--task-ids"' in official_runner
     assert '"--stop-on-blocked"' in official_runner
     assert '"run_status": evaluation["run_status"]' in official_runner
@@ -324,6 +359,24 @@ def test_mission_vs_goal_protocol_controls_review_bias():
     ]
     limited = runner_module.select_tasks(task_data, limit_tasks=1)
     assert [task["id"] for task in limited] == ["complex-cross-file-feature"]
+    light_prompt = runner_module.build_prompt(
+        task_data["tasks"][1],
+        "mission",
+        "benchmarks/mission-vs-goal/run-output/test.md",
+        mission_profile="light",
+    )
+    assert "Mission profile: light" in light_prompt
+    assert "--max-iter 1" in light_prompt
+    assert "Lightweight benchmark profile" in light_prompt
+    light_summary = runner_module.summarize(
+        records=[],
+        tasks=selected,
+        run_id="test-light",
+        starting_commit="abcdef0",
+        tasks_path=BENCHMARK_DIR / "tasks.complex.json",
+        mission_profile="light",
+    )
+    assert light_summary["mission_profile"] == "light"
     blocked = runner_module.classify_run_status(
         stdout="API Error: 400 You have reached your specified workspace API usage limits.",
         stderr="",
@@ -351,6 +404,20 @@ def test_mission_vs_goal_protocol_controls_review_bias():
         "blocked_reason": "max_budget_usd",
         "failure_kind": "max_budget_usd",
         "comparable_attempt": False,
+    }
+    completed_with_usage_limit_text = runner_module.classify_run_status(
+        stdout="Artifact complete. Rejected hypothesis: prior API usage limit was not the current cause.",
+        stderr="",
+        timed_out=False,
+        returncode=0,
+        output_exists=True,
+        validator_pass=True,
+    )
+    assert completed_with_usage_limit_text == {
+        "run_status": "completed",
+        "blocked_reason": None,
+        "failure_kind": None,
+        "comparable_attempt": True,
     }
 
 

@@ -16,10 +16,15 @@ An API-limit rerun was then executed:
   tasks were selected with `--task-ids` under a USD 3.00 per-invocation cap.
   Official `/goal` completed both; `/mission` hit `blocked_reason=max_budget_usd`
   on both.
+- `2026-06-28-claude-goal-vs-mission-light-v1`: one previously unmeasured task
+  was selected with `--mission-profile light`, `--mission-max-iter 1`, and a
+  USD 5.00 cap. Both arms completed and passed; `/mission` light was faster and
+  lower cost on that one task.
 
-The completed evidence therefore supports only a one-task smoke result. It does
-not support a full 10-task performance claim. The incremental run adds an
-operational cost/runtime caution, not a completed quality comparison.
+The completed evidence therefore supports two one-task results: one normal
+smoke and one light-profile cost-controlled task. It does not support a full
+10-task performance claim. The incremental run adds an operational cost/runtime
+caution, not a completed quality comparison.
 
 ## Objective
 
@@ -117,6 +122,33 @@ Observed incremental result:
 - Official `/goal`: 2 completed comparable records, 2 validator passes.
 - `/mission`: 2 `max_budget_usd` blocked records under the USD 3.00 cap.
 - Total recorded cost: USD 9.39057695.
+
+## Step 2c: Lightweight Mission Profile Pilot
+
+If the full `/mission` profile is too expensive for paired evaluation, run fresh
+selected tasks with the light profile:
+
+```bash
+STARTING_COMMIT=$(git rev-parse HEAD)
+python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
+  --tasks-file benchmarks/mission-vs-goal/tasks.complex.json \
+  --run-id 2026-07-01-claude-goal-vs-mission-light \
+  --starting-commit "$STARTING_COMMIT" \
+  --task-ids complex-failing-test-triage \
+  --stop-on-blocked \
+  --timeout 1200 \
+  --max-budget-usd 5.0 \
+  --mission-max-iter 1 \
+  --mission-profile light
+```
+
+Observed light-profile result:
+
+- `2026-06-28-claude-goal-vs-mission-light-v1` wrote 2 completed comparable records.
+- Official `/goal`: validator pass, 9.56 minutes, USD 3.00670750.
+- `/mission` light: validator pass, 5.27 minutes, USD 2.00569500.
+- This supports only a one-task light-profile hypothesis. Run 3-5 fresh tasks
+  before using any broad cost or runtime claim.
 
 ## Step 3: Validation
 

@@ -250,6 +250,59 @@ Unsafe interpretation:
 That would be unsupported because the two `/mission` incremental records ended
 with `error_max_budget_usd`, not a completed validator result.
 
+## Lightweight Mission Profile Rerun
+
+Status: executed on 2026-06-28 JST to test whether `/mission` can be compared
+under a smaller cost envelope. The runner now supports `--mission-profile light`,
+which keeps the `/mission` prompt to one concise plan/write/check pass and uses
+`--mission-max-iter 1`.
+
+This is the first completed cost-controlled comparison where both official
+`/goal` and `/mission` completed the same previously unmeasured complex task.
+It is still only N=1, so it supports a profile-level hypothesis, not a broad
+performance claim.
+
+| Item | Value | Evidence |
+|---|---:|---|
+| Run id | `2026-06-28-claude-goal-vs-mission-light-v1` | `results/2026-06-28-claude-goal-vs-mission-light-v1.jsonl`. |
+| Starting commit | `d6f12d739a521046e1dc1d198e671a162a803e9c` | Runner argument. |
+| Task file | `tasks.complex.json` | Selected task only. |
+| Selected task | 1 | `complex-failing-test-triage`. |
+| Mission profile | `light` | `mission_profile=light`, `--mission-max-iter 1`. |
+| Expected records | 2 | 1 task x 2 arms. |
+| Records written | 2 / 2 | Summary JSON has 2 records. |
+| Blocked records | 0 / 2 | Both records have `run_status=completed`. |
+| Total Claude cost recorded | USD 5.01240250 | Raw Claude result JSON files. |
+| `/goal` cost recorded | USD 3.00670750 | `/goal` raw Claude result JSON. |
+| `/mission` light cost recorded | USD 2.00569500 | `/mission` raw Claude result JSON. |
+
+Lightweight result:
+
+| Metric | claude_code_goal_command | mission light | Interpretation |
+|---|---:|---:|---|
+| Completed comparable records | 1 / 1 | 1 / 1 | Both arms completed the same selected task. |
+| Completion rate | 1 / 1 | 1 / 1 | Tie on this task. |
+| Validator pass rate | 1 / 1 | 1 / 1 | Tie on this task. |
+| Average quality score | 4.00 / 5 | 4.00 / 5 | Automated heuristic score, not blind human review. |
+| Average evidence completeness | 4.00 / 5 | 4.00 / 5 | Tie on this task. |
+| Average elapsed minutes | 9.56 | 5.27 | `mission` light was 4.29 minutes faster on this task. |
+| Recorded Claude cost | USD 3.00670750 | USD 2.00569500 | `mission` light used USD 1.00101250 less on this task. |
+
+Safe interpretation:
+
+> On one previously unmeasured complex triage task, a lightweight `/mission`
+> profile and official `/goal` both completed and passed the automated
+> validator. In this single measured task, `mission` light was faster and lower
+> cost than official `/goal`.
+
+Unsafe interpretation:
+
+> `mission` is cheaper and faster than official `/goal`.
+
+That would be unsupported because the completed light-profile sample is one
+task. The defensible next step is to run a 3-5 task light-profile pilot with the
+same per-invocation cost cap and no recycled tasks.
+
 ## Task-Level Findings
 
 | Task | Stronger arm | Why |

@@ -41,8 +41,9 @@ time budget, and task prompt for both arms.
 | Metric | Definition |
 |---|---|
 | `run_status` | `completed`, `failed`, or `blocked`. Blocked means infrastructure/account state prevented a comparable attempt. |
-| `blocked_reason` | Reason for `run_status=blocked`, currently `api_usage_limit` or `timeout`; null otherwise. |
+| `blocked_reason` | Reason for `run_status=blocked`, currently `api_usage_limit`, `max_budget_usd`, or `timeout`; null otherwise. |
 | `comparable_attempt` | False when an arm was blocked before a fair task-quality attempt. |
+| `mission_profile` | `/mission` prompt profile for official-runner records. `full` is the normal workflow; `light` is a one-pass cost-controlled profile. |
 | `completion` | The run produced the required artifact or code change and did not stop in an unresolved state. |
 | `validator_pass` | The task-specific validator passed. Examples: tests, lint, schema check, exact file assertion, or reviewer checklist. |
 | `human_quality_score` | Blind reviewer score from 1 to 5 using the rubric below. |
@@ -128,6 +129,28 @@ both selected tasks on official `/goal`; both `/mission` records hit the
 configured max-budget cap. Treat this as an operational cost/runtime result,
 not a completed quality comparison for `mission`.
 
+For a lower-cost `/mission` comparison, use `--mission-profile light` and a
+single mission iteration:
+
+```bash
+python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
+  --tasks-file benchmarks/mission-vs-goal/tasks.complex.json \
+  --run-id YYYY-MM-DD-claude-goal-vs-mission-light \
+  --starting-commit <commit> \
+  --task-ids complex-failing-test-triage \
+  --stop-on-blocked \
+  --timeout 1200 \
+  --max-budget-usd 5.0 \
+  --mission-max-iter 1 \
+  --mission-profile light
+```
+
+The 2026-06-28 light-profile run completed one previously unmeasured task on
+both arms. Official `/goal` completed in 9.56 minutes at USD 3.00670750, while
+`/mission` light completed in 5.27 minutes at USD 2.00569500. Treat this as a
+promising one-task result and rerun 3-5 fresh tasks before using any broad
+cost or runtime claim.
+
 ## Human Quality Rubric
 
 | Score | Meaning |
@@ -155,7 +178,8 @@ Not allowed from this pilot:
   from the 2026-06-28 attempts. The first smoke was API-limit blocked on
   `/mission`; the rerun smoke completed only one comparable task; the full
   rerun was API-limit blocked on all records; the incremental rerun was
-  max-budget blocked on the `/mission` records.
+  max-budget blocked on the `/mission` records; the light-profile rerun
+  completed only one comparable task.
 - Percent improvements without publishing the denominator, task mix, and scoring method.
 - Claims based on fewer than all 10 paired task runs.
 

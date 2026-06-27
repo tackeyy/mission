@@ -28,6 +28,7 @@ RESULTS_DIR = BENCH_DIR / "results"
 ARTIFACTS_DIR = BENCH_DIR / "artifacts"
 MISSION_PLUGIN_DIR = REPO_ROOT / "plugins" / "mission"
 ARMS = ("claude_code_goal_command", "mission")
+MISSION_PROFILES = ("full", "light")
 API_USAGE_LIMIT_MARKERS = (
     "workspace API usage limits",
     "You have reached your specified workspace API usage limits",
@@ -83,7 +84,13 @@ def prepare_clone(source: Path, target: Path, starting_commit: str) -> None:
         raise RuntimeError(f"git checkout failed: {checkout.stderr}")
 
 
-def build_prompt(task: dict, arm: str, output_rel: str, mission_max_iter: int | None = None) -> str:
+def build_prompt(
+    task: dict,
+    arm: str,
+    output_rel: str,
+    mission_max_iter: int | None = None,
+    mission_profile: str = "full",
+) -> str:
     common = f"""You are executing one controlled local benchmark run.
 
 Rules:
@@ -114,15 +121,27 @@ The artifact must include these headings:
 """
 
     mission_complexity = task.get("mission_complexity", "Complex")
-    mission_max_iter = mission_max_iter or task.get("mission_max_iter", 2)
+    mission_max_iter = mission_max_iter or (1 if mission_profile == "light" else task.get("mission_max_iter", 2))
+    profile_guidance = ""
+    if mission_profile == "light":
+        profile_guidance = """
+Lightweight benchmark profile:
+- Optimize for completing the artifact within a small fixed budget.
+- Use a single concise plan/check/write pass; avoid broad repository scans.
+- Do not run the full test suite unless the task explicitly requires it.
+- Keep `.mission-state/` minimal and use it only if the plugin requires state.
+- Stop as soon as the required artifact headings and validator evidence are present.
+"""
     return f"""/mission Complete the controlled benchmark artifact at `{output_rel}` with auditable mission-style evidence. --max-iter {mission_max_iter}
 
 {common}
 Arm: mission
+Mission profile: {mission_profile}
 
 Use the `/mission` plugin workflow with auditable state. Initialize or maintain
 mission state if needed, review the artifact against the validator, and only
 report completion when the artifact is written.
+{profile_guidance}
 
 The artifact must include these headings:
 - Mission
@@ -154,6 +173,13 @@ def classify_run_status(
     validator_pass: bool,
 ) -> dict:
     combined = f"{stdout}\n{stderr}"
+    if validator_pass:
+        return {
+            "run_status": "completed",
+            "blocked_reason": None,
+            "failure_kind": None,
+            "comparable_attempt": True,
+        }
     if any(marker in combined for marker in API_USAGE_LIMIT_MARKERS):
         return {
             "run_status": "blocked",
@@ -174,13 +200,6 @@ def classify_run_status(
             "blocked_reason": "timeout",
             "failure_kind": "timeout",
             "comparable_attempt": False,
-        }
-    if validator_pass:
-        return {
-            "run_status": "completed",
-            "blocked_reason": None,
-            "failure_kind": None,
-            "comparable_attempt": True,
         }
     if output_exists:
         return {
@@ -287,13 +306,14 @@ def run_one(
     timeout: int,
     max_budget_usd: float,
     mission_max_iter: int | None,
+    mission_profile: str,
 ) -> dict:
     task_id = task["id"]
     run_name = f"{task_id}-{arm}"
     worktree = run_root / run_name / "repo"
     prepare_clone(REPO_ROOT, worktree, starting_commit)
     output_rel = f"benchmarks/mission-vs-goal/run-output/{run_id}/{run_name}.md"
-    prompt = build_prompt(task, arm, output_rel, mission_max_iter=mission_max_iter)
+    prompt = build_prompt(task, arm, output_rel, mission_max_iter=mission_max_iter, mission_profile=mission_profile)
     artifact_dir = ARTIFACTS_DIR / run_id / run_name
     stdout_path = artifact_dir / "claude-result.json"
     stderr_path = artifact_dir / "stderr.txt"
@@ -348,6 +368,7 @@ def run_one(
         f"claude_session_id={claude_result.get('session_id') if isinstance(claude_result, dict) else None}",
         f"claude_total_cost_usd={claude_result.get('total_cost_usd') if isinstance(claude_result, dict) else None}",
         f"quality_score_method={evaluation['quality_score_method']}",
+        f"mission_profile={mission_profile if arm == 'mission' else None}",
         "print_mode_smoke=true",
     ]
     if timed_out:
@@ -367,6 +388,7 @@ def run_one(
         "task_id": task_id,
         "arm": arm,
         "model": "claude_code_default",
+        "mission_profile": mission_profile if arm == "mission" else None,
         "started_at": started,
         "completed_at": completed,
         "starting_commit": starting_commit,
@@ -395,6 +417,7 @@ def summarize(
     starting_commit: str,
     tasks_path: Path,
     stopped_early: bool = False,
+    mission_profile: str = "full",
 ) -> dict:
     by_arm: dict[str, list[dict]] = {arm: [r for r in records if r["arm"] == arm] for arm in ARMS}
     return {
@@ -402,6 +425,7 @@ def summarize(
         "task_file": str(tasks_path.relative_to(REPO_ROOT)),
         "task_cohort": "official-goal-smoke",
         "selected_task_ids": [task["id"] for task in tasks],
+        "mission_profile": mission_profile,
         "starting_commit": starting_commit,
         "records": len(records),
         "expected_records": len(tasks) * len(ARMS),
@@ -459,6 +483,12 @@ def main() -> int:
     parser.add_argument("--run-root", default="/tmp/mission-vs-official-goal")
     parser.add_argument("--max-budget-usd", type=float, default=2.0)
     parser.add_argument("--mission-max-iter", type=int, default=None)
+    parser.add_argument(
+        "--mission-profile",
+        choices=MISSION_PROFILES,
+        default="full",
+        help="Mission prompt profile. 'light' reduces planning/review scope for cost-controlled comparisons.",
+    )
     args = parser.parse_args()
 
     tasks_path = Path(args.tasks_file)
@@ -493,6 +523,7 @@ def main() -> int:
                 args.timeout,
                 args.max_budget_usd,
                 args.mission_max_iter,
+                args.mission_profile,
             )
             records.append(record)
             with result_path.open("a", encoding="utf-8") as f:
@@ -513,7 +544,15 @@ def main() -> int:
         if stopped_early:
             break
 
-    summary = summarize(records, tasks, args.run_id, args.starting_commit, tasks_path, stopped_early=stopped_early)
+    summary = summarize(
+        records,
+        tasks,
+        args.run_id,
+        args.starting_commit,
+        tasks_path,
+        stopped_early=stopped_early,
+        mission_profile=args.mission_profile,
+    )
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
     return 0

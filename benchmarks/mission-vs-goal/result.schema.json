@@ -42,6 +42,17 @@
     "model": {
       "type": "string"
     },
+    "mission_profile": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "full",
+        "light",
+        null
+      ]
+    },
     "started_at": {
       "type": "string",
       "format": "date-time"
