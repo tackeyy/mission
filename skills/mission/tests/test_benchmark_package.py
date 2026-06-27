@@ -8,23 +8,36 @@ BENCHMARK_DIR = REPO_ROOT / "benchmarks" / "mission-vs-goal"
 
 def test_mission_vs_goal_pilot_has_exactly_ten_tasks():
     data = json.loads((BENCHMARK_DIR / "tasks.json").read_text(encoding="utf-8"))
+    complex_data = json.loads((BENCHMARK_DIR / "tasks.complex.json").read_text(encoding="utf-8"))
 
     assert data["benchmark"] == "mission-vs-goal-pilot"
     assert data["task_count"] == 10
     assert data["arms"] == ["goal_only", "mission"]
     assert len(data["tasks"]) == 10
     assert len({task["id"] for task in data["tasks"]}) == 10
+    assert complex_data["benchmark"] == "mission-vs-goal-pilot"
+    assert complex_data["cohort"] == "complex"
+    assert complex_data["task_count"] == 10
+    assert complex_data["arms"] == ["goal_only", "mission"]
+    assert len(complex_data["tasks"]) == 10
+    assert len({task["id"] for task in complex_data["tasks"]}) == 10
+    assert all(task["mission_complexity"] in {"Complex", "Critical"} for task in complex_data["tasks"])
+    assert all(task["mission_max_iter"] >= 2 for task in complex_data["tasks"])
 
 
 def test_mission_vs_goal_tasks_have_marketing_safe_hypotheses():
-    data = json.loads((BENCHMARK_DIR / "tasks.json").read_text(encoding="utf-8"))
+    task_sets = [
+        json.loads((BENCHMARK_DIR / "tasks.json").read_text(encoding="utf-8")),
+        json.loads((BENCHMARK_DIR / "tasks.complex.json").read_text(encoding="utf-8")),
+    ]
     required = {"id", "category", "difficulty", "prompt", "validator", "primary_metric", "hypothesis"}
 
-    for task in data["tasks"]:
-        assert required <= task.keys()
-        assert "smarter" not in task["hypothesis"].lower()
-        assert "always" not in task["hypothesis"].lower()
-        assert task["validator"].strip()
+    for data in task_sets:
+        for task in data["tasks"]:
+            assert required <= task.keys()
+            assert "smarter" not in task["hypothesis"].lower()
+            assert "always" not in task["hypothesis"].lower()
+            assert task["validator"].strip()
 
 
 def test_mission_vs_goal_result_schema_matches_declared_arms():
@@ -54,12 +67,16 @@ def test_mission_vs_goal_docs_link_benchmark_package():
 def test_mission_vs_goal_has_japanese_benchmark_docs():
     readme_ja = (BENCHMARK_DIR / "README.ja.md").read_text(encoding="utf-8")
     report_ja = (BENCHMARK_DIR / "report-template.ja.md").read_text(encoding="utf-8")
+    complex_plan_ja = (BENCHMARK_DIR / "complex-validation-plan.ja.md").read_text(encoding="utf-8")
 
     assert "10 タスク pilot benchmark" in readme_ja
     assert "Marketing Guardrails" in readme_ja
     assert "report-template.ja.md" in readme_ja
+    assert "tasks.complex.json" in readme_ja
     assert "general model benchmark ではない" in report_ja
     assert "`mission` は `/goal` より X% 賢い" in report_ja
+    assert "Status: planned, not measured." in complex_plan_ja
+    assert "結果ではありません" in complex_plan_ja
 
 
 def test_mission_vs_goal_measured_reports_are_honest_about_paired_runs():
@@ -110,10 +127,18 @@ def test_mission_vs_goal_measured_reports_are_honest_about_paired_runs():
 
 def test_mission_vs_goal_protocol_controls_review_bias():
     protocol = (BENCHMARK_DIR / "README.md").read_text(encoding="utf-8")
+    runner = (BENCHMARK_DIR / "run_paired_pilot.py").read_text(encoding="utf-8")
+    complex_plan = (BENCHMARK_DIR / "complex-validation-plan.md").read_text(encoding="utf-8")
 
     assert "Counter-balance run order" in protocol
     assert "Human Quality Rubric" in protocol
     assert "score blind to arm label" in protocol
+    assert "--tasks-file" in protocol
+    assert "--run-id" in protocol
+    assert "Status: planned, not measured." in complex_plan
+    assert "These are hypotheses to test, not results" in complex_plan
+    assert 'parser.add_argument("--tasks-file"' in runner
+    assert 'parser.add_argument("--run-id"' in runner
 
 
 def test_mission_vs_goal_report_template_rejects_unsupported_claims():

@@ -21,10 +21,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BENCH_DIR = REPO_ROOT / "benchmarks" / "mission-vs-goal"
-TASKS_PATH = BENCH_DIR / "tasks.json"
+DEFAULT_TASKS_PATH = BENCH_DIR / "tasks.json"
 RESULTS_DIR = BENCH_DIR / "results"
 ARTIFACTS_DIR = BENCH_DIR / "artifacts"
-RUN_ID = "2026-06-27-codex-cli-local"
+DEFAULT_RUN_ID = "2026-06-27-codex-cli-local"
 ARMS = ("goal_only", "mission")
 
 
@@ -44,8 +44,12 @@ def iso_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def load_tasks() -> list[dict]:
-    data = json.loads(TASKS_PATH.read_text(encoding="utf-8"))
+def load_task_data(tasks_path: Path) -> dict:
+    return json.loads(tasks_path.read_text(encoding="utf-8"))
+
+
+def load_tasks(tasks_path: Path) -> list[dict]:
+    data = load_task_data(tasks_path)
     return data["tasks"]
 
 
@@ -90,12 +94,14 @@ The artifact must include these headings:
 - Evidence
 - Assumptions
 """
+    mission_complexity = task.get("mission_complexity", "Simple")
+    mission_max_iter = task.get("mission_max_iter", 1)
     return common + f"""
 Arm: mission
 
 Use a mission-style completion workflow with auditable state:
 1. Initialize mission state with:
-   `MISSION_SESSION_ID={session_id} python3 skills/mission/bin/mission-state.py init "{task["id"]}: {task["prompt"]}" --complexity Simple --threshold 4.0 --max-iter 1 --files {output_rel}`
+   `MISSION_SESSION_ID={session_id} python3 skills/mission/bin/mission-state.py init "{task["id"]}: controlled benchmark artifact" --complexity {mission_complexity} --threshold 4.0 --max-iter {mission_max_iter} --files {output_rel}`
 2. Produce the task artifact.
 3. Review the artifact yourself against the validator.
 4. Record a passing score with `push-score`.
@@ -184,15 +190,15 @@ def copy_artifacts(worktree: Path, artifact_dir: Path, output_rel: str, last_mes
     return copied
 
 
-def run_one(task: dict, arm: str, starting_commit: str, run_root: Path, timeout: int) -> dict:
+def run_one(task: dict, arm: str, run_id: str, starting_commit: str, run_root: Path, timeout: int) -> dict:
     task_id = task["id"]
     run_name = f"{task_id}-{arm}"
     worktree = run_root / run_name / "repo"
     prepare_clone(REPO_ROOT, worktree, starting_commit)
-    output_rel = f"benchmarks/mission-vs-goal/run-output/{RUN_ID}/{run_name}.md"
-    session_id = f"bench-{RUN_ID}-{task_id}-{arm}".replace("_", "-")
+    output_rel = f"benchmarks/mission-vs-goal/run-output/{run_id}/{run_name}.md"
+    session_id = f"bench-{run_id}-{task_id}-{arm}".replace("_", "-")
     prompt = build_prompt(task, arm, output_rel, session_id)
-    artifact_dir = ARTIFACTS_DIR / RUN_ID / run_name
+    artifact_dir = ARTIFACTS_DIR / run_id / run_name
     last_message = artifact_dir / "last-message.txt"
     event_log = artifact_dir / "codex-events.jsonl"
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -240,7 +246,7 @@ def run_one(task: dict, arm: str, starting_commit: str, run_root: Path, timeout:
 
     return {
         "benchmark": "mission-vs-goal-pilot",
-        "run_id": RUN_ID,
+        "run_id": run_id,
         "task_id": task_id,
         "arm": arm,
         "model": "codex_cli_default",
@@ -264,37 +270,46 @@ def run_one(task: dict, arm: str, starting_commit: str, run_root: Path, timeout:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--starting-commit", required=True)
+    parser.add_argument("--tasks-file", default=str(DEFAULT_TASKS_PATH))
+    parser.add_argument("--run-id", default=DEFAULT_RUN_ID)
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--limit", type=int, default=0, help="Run only the first N records for smoke testing.")
     parser.add_argument("--run-root", default="/tmp/mission-vs-goal-pilot")
     args = parser.parse_args()
 
+    tasks_path = Path(args.tasks_file)
+    if not tasks_path.is_absolute():
+        tasks_path = REPO_ROOT / tasks_path
+
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
-    result_path = RESULTS_DIR / f"{RUN_ID}.jsonl"
-    summary_path = RESULTS_DIR / f"{RUN_ID}-summary.json"
-    artifact_run_dir = ARTIFACTS_DIR / RUN_ID
+    result_path = RESULTS_DIR / f"{args.run_id}.jsonl"
+    summary_path = RESULTS_DIR / f"{args.run_id}-summary.json"
+    artifact_run_dir = ARTIFACTS_DIR / args.run_id
     if result_path.exists():
         result_path.unlink()
     if summary_path.exists():
         summary_path.unlink()
     if artifact_run_dir.exists():
         shutil.rmtree(artifact_run_dir)
-    tasks = load_tasks()
+    task_data = load_task_data(tasks_path)
+    tasks = task_data["tasks"]
     planned = [(task, arm) for task in tasks for arm in ARMS]
     if args.limit:
         planned = planned[: args.limit]
 
     records = []
     for task, arm in planned:
-        record = run_one(task, arm, args.starting_commit, Path(args.run_root), args.timeout)
+        record = run_one(task, arm, args.run_id, args.starting_commit, Path(args.run_root), args.timeout)
         records.append(record)
         with result_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
     by_arm: dict[str, list[dict]] = {arm: [r for r in records if r["arm"] == arm] for arm in ARMS}
     summary = {
-        "run_id": RUN_ID,
+        "run_id": args.run_id,
+        "task_file": str(tasks_path.relative_to(REPO_ROOT)),
+        "task_cohort": task_data.get("cohort", "baseline"),
         "starting_commit": args.starting_commit,
         "records": len(records),
         "expected_records": len(tasks) * len(ARMS),

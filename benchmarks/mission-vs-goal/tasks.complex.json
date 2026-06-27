@@ -1,0 +1,122 @@
+{
+  "benchmark": "mission-vs-goal-pilot",
+  "version": 1,
+  "cohort": "complex",
+  "task_count": 10,
+  "arms": [
+    "goal_only",
+    "mission"
+  ],
+  "tasks": [
+    {
+      "id": "complex-cross-file-feature",
+      "category": "coding",
+      "difficulty": "multi_file_feature",
+      "mission_complexity": "Complex",
+      "mission_max_iter": 2,
+      "prompt": "Implement a small feature that touches CLI parsing, core behavior, docs, and tests, then leave a migration-free release note.",
+      "validator": "Artifact maps every changed surface to an explicit acceptance check, includes test evidence, and identifies any deferred non-goals.",
+      "primary_metric": "validator_pass",
+      "hypothesis": "mission should help when the task has multiple surfaces and a real risk of declaring done before docs and tests are aligned."
+    },
+    {
+      "id": "complex-failing-test-triage",
+      "category": "testing",
+      "difficulty": "multi_cause_debugging",
+      "mission_complexity": "Complex",
+      "mission_max_iter": 3,
+      "prompt": "Triage a failure where at least two plausible causes exist, isolate the real cause, fix the smallest surface, and document rejected hypotheses.",
+      "validator": "Artifact separates observed evidence from rejected hypotheses and includes a before/after validator narrative.",
+      "primary_metric": "evidence_completeness",
+      "hypothesis": "mission should help by preserving hypothesis discipline and preventing premature root-cause claims."
+    },
+    {
+      "id": "complex-review-thread-resolution",
+      "category": "coding",
+      "difficulty": "review_batch_with_conflicts",
+      "mission_complexity": "Complex",
+      "mission_max_iter": 2,
+      "prompt": "Resolve a batch of review comments where one request conflicts with an existing repository rule and must be negotiated in the artifact.",
+      "validator": "Artifact lists each comment, action taken, repository rule consulted, and any intentionally rejected request.",
+      "primary_metric": "completion",
+      "hypothesis": "mission should help when completion requires tracking several comments plus a justified non-change."
+    },
+    {
+      "id": "complex-release-risk-audit",
+      "category": "operations",
+      "difficulty": "release_gate_audit",
+      "mission_complexity": "Complex",
+      "mission_max_iter": 2,
+      "prompt": "Audit a hypothetical release that includes docs, tests, generated artifacts, and a remote publication step, then decide whether to stop or proceed.",
+      "validator": "Artifact includes a go/no-go decision, reversible vs irreversible action split, required evidence, and exact claims that remain unsafe.",
+      "primary_metric": "human_quality_score",
+      "hypothesis": "mission should help when the correct answer may be to stop despite partial task progress."
+    },
+    {
+      "id": "complex-resume-after-context-loss",
+      "category": "resume",
+      "difficulty": "context_compaction_resume",
+      "mission_complexity": "Complex",
+      "mission_max_iter": 2,
+      "prompt": "Start from a partial plan, simulate context loss, recover from persistent evidence, and finish without repeating settled work.",
+      "validator": "Artifact identifies the recovered state, preserved assumptions, skipped duplicate work, and final validator evidence.",
+      "primary_metric": "resume_success",
+      "hypothesis": "mission should help because persistent state is the main mechanism under test."
+    },
+    {
+      "id": "complex-ambiguous-product-spec",
+      "category": "product",
+      "difficulty": "ambiguous_multi_requirement",
+      "mission_complexity": "Complex",
+      "mission_max_iter": 2,
+      "prompt": "Turn an ambiguous product request into a scoped implementation plan while preserving tradeoffs, assumptions, and explicit non-goals.",
+      "validator": "Artifact contains a scoped plan, assumptions registry, contradiction checks, and a minimal next execution slice.",
+      "primary_metric": "human_quality_score",
+      "hypothesis": "mission should help by making assumptions and deferred clarification explicit instead of blocking early."
+    },
+    {
+      "id": "complex-security-sensitive-change",
+      "category": "security",
+      "difficulty": "high_risk_review",
+      "mission_complexity": "Critical",
+      "mission_max_iter": 2,
+      "prompt": "Evaluate a security-sensitive change that could affect authentication or secret handling, then produce a safe implementation and verification plan without touching secrets.",
+      "validator": "Artifact includes threat assumptions, forbidden actions, verification commands, rollback plan, and no secret material.",
+      "primary_metric": "evidence_completeness",
+      "hypothesis": "mission should help when safety gates and explicit stop conditions matter more than speed."
+    },
+    {
+      "id": "complex-generated-artifact-hygiene",
+      "category": "repository_hygiene",
+      "difficulty": "generated_vs_source",
+      "mission_complexity": "Complex",
+      "mission_max_iter": 2,
+      "prompt": "Separate source changes from generated artifacts, decide what should be committed, and document why excluded files remain out of scope.",
+      "validator": "Artifact lists source files, generated files, excluded files, and the evidence used to classify each group.",
+      "primary_metric": "validator_pass",
+      "hypothesis": "mission should help by enforcing scope accounting before commit-ready claims."
+    },
+    {
+      "id": "complex-cross-language-doc-sync",
+      "category": "documentation",
+      "difficulty": "bilingual_consistency",
+      "mission_complexity": "Complex",
+      "mission_max_iter": 2,
+      "prompt": "Update an English technical explanation and keep the Japanese counterpart consistent without over-translating marketing claims.",
+      "validator": "Artifact includes English/Japanese parity checks, claim guardrails, and unresolved translation choices.",
+      "primary_metric": "evidence_completeness",
+      "hypothesis": "mission should help when consistency across languages and claim safety are both required."
+    },
+    {
+      "id": "complex-measurement-report-update",
+      "category": "research",
+      "difficulty": "measurement_synthesis",
+      "mission_complexity": "Complex",
+      "mission_max_iter": 2,
+      "prompt": "Update a measurement report from raw result files while refusing to infer unmeasured metrics or unsupported causality.",
+      "validator": "Artifact cites raw inputs, separates measured values from interpretation, and includes unsafe marketing claims to avoid.",
+      "primary_metric": "human_quality_score",
+      "hypothesis": "mission should help because the task rewards disciplined evidence handling over narrative polish."
+    }
+  ]
+}

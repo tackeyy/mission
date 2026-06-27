@@ -7,6 +7,10 @@
 `mission` が意味を持つタスクタイプと、軽量な goal condition で十分なタスクタイプを
 見分けることです。
 
+最初に計測した cohort は `tasks.json` です。より複雑なタスクの検証は
+`tasks.complex.json` と `complex-validation-plan.ja.md` に分けています。
+complex-task outcomes は、別 run id の raw JSONL と artifacts がそろうまで未測定です。
+
 ## Research Question
 
 同じ agent model に同じ task objective を与えたとき、`mission` の stateful な
@@ -49,6 +53,19 @@ time budget、task prompt を使います。
 7. 可能なら arm label を隠して human reviewer が採点する。
 8. 個別例を出す場合は anonymized かつ reproducible にし、基本は aggregate results だけを要約する。
 
+次の complex-task cohort では、明示的な task file と unique run id を指定して同じ
+protocol を実行します。
+
+```bash
+python3 benchmarks/mission-vs-goal/run_paired_pilot.py \
+  --tasks-file benchmarks/mission-vs-goal/tasks.complex.json \
+  --run-id YYYY-MM-DD-codex-cli-complex-local \
+  --starting-commit <commit> \
+  --timeout 1800
+```
+
+full 20-run complex executions の前に、`--limit 2` で smoke run を実行します。
+
 ## Human Quality Rubric
 
 | Score | Meaning |
@@ -79,10 +96,13 @@ raw evidence がそろった後に使ってよい表現:
 
 | Path | Purpose |
 |---|---|
-| `tasks.json` | 固定の 10 タスク pilot set。 |
+| `tasks.json` | 計測済みの固定 10 タスク baseline pilot set。 |
+| `tasks.complex.json` | planned 10-task complex cohort。まだ未測定。 |
 | `result.schema.json` | result record 1 件分の JSON Schema。 |
 | `report.md` | 英語の current measured status と package-validation results。 |
 | `report.ja.md` | 日本語の current measured status と package-validation results。 |
 | `report-template.md` | 英語の publishable report skeleton と claim guardrails。 |
 | `report-template.ja.md` | 日本語の publishable report skeleton と claim guardrails。 |
+| `complex-validation-plan.md` | 英語の complex task validation plan。 |
+| `complex-validation-plan.ja.md` | 日本語の complex task validation plan。 |
 | `README.md` | 英語版の benchmark protocol。 |

@@ -7,6 +7,11 @@ The benchmark is intentionally small. Its purpose is to learn where `mission`
 is meaningfully stronger and where a lightweight goal condition is enough
 before publishing broader claims.
 
+The first measured cohort used `tasks.json`. More complex validation is planned
+separately in `tasks.complex.json` and `complex-validation-plan.md`; those
+complex-task outcomes are not measured until a separate run id has raw JSONL
+and artifacts.
+
 ## Research Question
 
 When the same agent model receives the same task objective, does adding
@@ -50,6 +55,20 @@ time budget, and task prompt for both arms.
 8. Summarize only aggregate results unless individual examples are anonymized
    and reproducible.
 
+For the next complex-task cohort, run the same protocol with an explicit task
+file and a unique run id:
+
+```bash
+python3 benchmarks/mission-vs-goal/run_paired_pilot.py \
+  --tasks-file benchmarks/mission-vs-goal/tasks.complex.json \
+  --run-id YYYY-MM-DD-codex-cli-complex-local \
+  --starting-commit <commit> \
+  --timeout 1800
+```
+
+Start with `--limit 2` for a smoke run before launching all 20 paired complex
+executions.
+
 ## Human Quality Rubric
 
 | Score | Meaning |
@@ -80,10 +99,13 @@ Not allowed from this pilot:
 
 | Path | Purpose |
 |---|---|
-| `tasks.json` | The fixed 10-task pilot set. |
+| `tasks.json` | The measured fixed 10-task baseline pilot set. |
+| `tasks.complex.json` | Planned 10-task complex cohort; not measured yet. |
 | `result.schema.json` | JSON Schema for one result record. |
 | `report.md` | Current measured status and package-validation results. |
 | `report-template.md` | Publishable report skeleton with claim guardrails. |
+| `complex-validation-plan.md` | Planned protocol for more complex tasks. |
 | `README.ja.md` | Japanese version of this benchmark protocol. |
 | `report.ja.md` | Japanese current measured status and package-validation results. |
 | `report-template.ja.md` | Japanese report skeleton with the same claim guardrails. |
+| `complex-validation-plan.ja.md` | Japanese planned protocol for more complex tasks. |
