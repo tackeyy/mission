@@ -116,6 +116,14 @@ def test_mission_vs_goal_measured_reports_are_honest_about_paired_runs():
     summary_path = BENCHMARK_DIR / "results" / "2026-06-27-codex-cli-local-summary.json"
     official_results_path = BENCHMARK_DIR / "results" / "2026-06-28-claude-goal-vs-mission-smoke-v2.jsonl"
     official_summary_path = BENCHMARK_DIR / "results" / "2026-06-28-claude-goal-vs-mission-smoke-v2-summary.json"
+    official_rerun_smoke_path = BENCHMARK_DIR / "results" / "2026-06-28-claude-goal-vs-mission-smoke-v3.jsonl"
+    official_rerun_smoke_summary_path = (
+        BENCHMARK_DIR / "results" / "2026-06-28-claude-goal-vs-mission-smoke-v3-summary.json"
+    )
+    official_rerun_full_path = BENCHMARK_DIR / "results" / "2026-06-28-claude-goal-vs-mission-complex-v1.jsonl"
+    official_rerun_full_summary_path = (
+        BENCHMARK_DIR / "results" / "2026-06-28-claude-goal-vs-mission-complex-v1-summary.json"
+    )
     official_mission_raw = (
         BENCHMARK_DIR
         / "artifacts"
@@ -160,30 +168,81 @@ def test_mission_vs_goal_measured_reports_are_honest_about_paired_runs():
     assert official_by_arm["mission"][0]["validator_pass"] is False
     assert "workspace API usage limits" in official_mission_raw.read_text(encoding="utf-8")
 
+    rerun_smoke_records = [
+        json.loads(line) for line in official_rerun_smoke_path.read_text(encoding="utf-8").splitlines()
+    ]
+    rerun_smoke_summary = json.loads(official_rerun_smoke_summary_path.read_text(encoding="utf-8"))
+    rerun_smoke_by_arm = {
+        arm: [record for record in rerun_smoke_records if record["arm"] == arm]
+        for arm in ("claude_code_goal_command", "mission")
+    }
+    assert len(rerun_smoke_records) == 2
+    assert rerun_smoke_summary["records"] == 2
+    assert rerun_smoke_summary["expected_records"] == 2
+    assert all(record["run_status"] == "completed" for record in rerun_smoke_records)
+    assert all(record["comparable_attempt"] is True for record in rerun_smoke_records)
+    assert all(record["completion"] is True for record in rerun_smoke_records)
+    assert all(record["validator_pass"] is True for record in rerun_smoke_records)
+    assert rerun_smoke_by_arm["claude_code_goal_command"][0]["human_quality_score"] == 4.0
+    assert rerun_smoke_by_arm["mission"][0]["human_quality_score"] == 4.0
+    assert rerun_smoke_by_arm["claude_code_goal_command"][0]["elapsed_minutes"] == 1.7
+    assert rerun_smoke_by_arm["mission"][0]["elapsed_minutes"] == 6.5
+
+    rerun_full_records = [
+        json.loads(line) for line in official_rerun_full_path.read_text(encoding="utf-8").splitlines()
+    ]
+    rerun_full_summary = json.loads(official_rerun_full_summary_path.read_text(encoding="utf-8"))
+    rerun_full_by_arm = {
+        arm: [record for record in rerun_full_records if record["arm"] == arm]
+        for arm in ("claude_code_goal_command", "mission")
+    }
+    assert len(rerun_full_records) == 20
+    assert rerun_full_summary["records"] == 20
+    assert rerun_full_summary["expected_records"] == 20
+    assert all(record["run_status"] == "blocked" for record in rerun_full_records)
+    assert all(record["blocked_reason"] == "api_usage_limit" for record in rerun_full_records)
+    assert all(record["comparable_attempt"] is False for record in rerun_full_records)
+    assert len(rerun_full_by_arm["claude_code_goal_command"]) == 10
+    assert len(rerun_full_by_arm["mission"]) == 10
+    assert rerun_full_summary["arms"]["claude_code_goal_command"]["blocked_records"] == 10
+    assert rerun_full_summary["arms"]["mission"]["blocked_records"] == 10
+
     assert "Paired benchmark runs completed | 20 / 20" in report
     assert "Goal-only runs completed | 10 / 10" in report
     assert "Mission runs completed | 10 / 10" in report
     assert "Quality score method | automated heuristic" in report
     assert "Average quality score | 4.00 / 5 | 4.50 / 5" in report
     assert "Average evidence completeness | 3.80 / 5 | 4.70 / 5" in report
-    assert "Benchmark + doc consistency tests | 29 passed / 29" in report
-    assert "Full mission test suite | 394 passed / 394" in report
+    assert "Benchmark + doc consistency tests | 30 passed / 30" in report
+    assert "Full mission test suite | 402 passed / 402" in report
     assert "not a blind human evaluation" in report
     assert "Claude Code Official `/goal` Smoke" in report
     assert "workspace API usage limit" in report
     assert "does not support a marketing claim that either arm is better" in report
+    assert "Claude Code Official `/goal` Rerun After API Limit Increase" in report
+    assert "Run id | `2026-06-28-claude-goal-vs-mission-smoke-v3`" in report
+    assert "Average elapsed minutes | 1.70 | 6.50" in report
+    assert "Run id | `2026-06-28-claude-goal-vs-mission-complex-v1`" in report
+    assert "Blocked records | 20 / 20" in report
+    assert "Denominator is zero" in report
     assert "Paired benchmark runs completed | 20 / 20" in report_ja
     assert "Goal-only runs completed | 10 / 10" in report_ja
     assert "Mission runs completed | 10 / 10" in report_ja
     assert "Quality score method | automated heuristic" in report_ja
     assert "Average quality score | 4.00 / 5 | 4.50 / 5" in report_ja
     assert "Average evidence completeness | 3.80 / 5 | 4.70 / 5" in report_ja
-    assert "Benchmark + doc consistency tests | 29 passed / 29" in report_ja
-    assert "Full mission test suite | 394 passed / 394" in report_ja
+    assert "Benchmark + doc consistency tests | 30 passed / 30" in report_ja
+    assert "Full mission test suite | 402 passed / 402" in report_ja
     assert "blind human evaluation でもありません" in report_ja
     assert "Claude Code 公式 `/goal` smoke" in report_ja
     assert "workspace API usage limit" in report_ja
     assert "どちらが優れているという marketing claim は出せない" in report_ja
+    assert "API limit 引き上げ後の Claude Code 公式 `/goal` 再実行" in report_ja
+    assert "Run id | `2026-06-28-claude-goal-vs-mission-smoke-v3`" in report_ja
+    assert "Average elapsed minutes | 1.70 | 6.50" in report_ja
+    assert "Run id | `2026-06-28-claude-goal-vs-mission-complex-v1`" in report_ja
+    assert "Blocked records | 20 / 20" in report_ja
+    assert "denominator が 0" in report_ja
 
 
 def test_mission_vs_goal_protocol_controls_review_bias():

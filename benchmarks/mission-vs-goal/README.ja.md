@@ -97,9 +97,13 @@ python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
 Claude Code workspace API usage limit で停止しました。この run は blocked と扱い、
 どちらかが優れている証拠にはしません。
 
-usage limit 解消後の次回実行では `official-goal-rerun-runbook.ja.md` を使います。
-公式 runner は `run_status`、`blocked_reason`、`comparable_attempt` を記録するため、
-API/account stop を task-quality failure と誤読しないようになっています。
+API limit 引き上げ後、`2026-06-28-claude-goal-vs-mission-smoke-v3` は
+1 comparable task を両 arm で完了しました。その後の 10 task full attempt
+`2026-06-28-claude-goal-vs-mission-complex-v1` は、全 record が workspace API
+usage limit で blocked されました。smoke は 1 task の comparable result として扱い、
+full attempt は blocked と扱います。公式 runner は `run_status`、`blocked_reason`、
+`comparable_attempt` を記録するため、API/account stop を task-quality failure と
+誤読しないようになっています。
 
 ## Human Quality Rubric
 
@@ -125,7 +129,9 @@ raw evidence がそろった後に使ってよい表現:
 - general model intelligence に関する主張。
 - `mission` が `/goal` より普遍的に優れているという主張。
 - 2026-06-28 の smoke から、`mission` が Claude Code 公式 `/goal` より良い /
-  悪いという主張。`/mission` arm が API limit で blocked されたため。
+  悪いという主張。最初の smoke は `/mission` arm が API limit で blocked、
+  rerun smoke は 1 comparable task のみ、full rerun は全 record が API limit で
+  blocked されたため。
 - denominator、task mix、scoring method を出さない percent improvement。
 - 10 個すべての paired task run が完了していない状態での性能主張。
 
@@ -134,7 +140,7 @@ raw evidence がそろった後に使ってよい表現:
 | Path | Purpose |
 |---|---|
 | `tasks.json` | 計測済みの固定 10 タスク baseline pilot set。 |
-| `tasks.complex.json` | planned 10-task complex cohort。まだ未測定。 |
+| `tasks.complex.json` | 公式 smoke/full attempt に使う 10-task complex cohort。full comparable run はまだ完了していない。 |
 | `result.schema.json` | result record 1 件分の JSON Schema。 |
 | `report.md` | 英語の current measured status と package-validation results。 |
 | `report.ja.md` | 日本語の current measured status と package-validation results。 |

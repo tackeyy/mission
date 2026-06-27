@@ -1,8 +1,8 @@
 # mission vs goal-only pilot report
 
 Status: measured on 2026-06-27 as a controlled local Codex CLI pilot.
-An additional Claude Code official `/goal` smoke was attempted on 2026-06-28
-JST and is reported separately below.
+Additional Claude Code official `/goal` attempts were run on 2026-06-28 JST
+and are reported separately below.
 
 This is not a general model benchmark and not a blind human evaluation. The
 quality and evidence scores below are automated heuristic scores from the local
@@ -116,6 +116,87 @@ Follow-up preparation completed after this smoke:
 - Future reports must separate `completed`, `failed`, and `blocked` records
   before making any capability claim.
 
+## Claude Code Official `/goal` Rerun After API Limit Increase
+
+Status: executed on 2026-06-28 JST after the Claude API limit was increased.
+This produced one completed comparable smoke task, then a 10-task full attempt
+that hit Claude Code workspace API usage limits. The full attempt is therefore
+not a completed performance comparison.
+
+### Smoke gate
+
+| Item | Value | Evidence |
+|---|---:|---|
+| Run id | `2026-06-28-claude-goal-vs-mission-smoke-v3` | `results/2026-06-28-claude-goal-vs-mission-smoke-v3.jsonl`. |
+| Starting commit | `ed98b0e00169f0e0b35ce629a206ffcb7af4d0a3` | Runner argument. |
+| Task file | `tasks.complex.json` | One smoke task: `complex-cross-file-feature`. |
+| Records completed | 2 / 2 | Summary JSON has two records. |
+| Blocked records | 0 / 2 | Both records have `run_status=completed`. |
+| Quality score method | automated heuristic | Not blind human review. |
+| Total Claude cost recorded | USD 3.78852475 | Raw Claude result JSON files. |
+| Marketing comparison readiness | smoke-only | One comparable task is too small for broad performance claims. |
+
+Smoke result:
+
+| Metric | claude_code_goal_command | mission | Interpretation |
+|---|---:|---:|---|
+| Completed comparable records | 1 / 1 | 1 / 1 | Both arms completed the same smoke task. |
+| Completion rate | 1 / 1 | 1 / 1 | Tie on the single measured task. |
+| Validator pass rate | 1 / 1 | 1 / 1 | Tie on the single measured task. |
+| Average quality score | 4.00 / 5 | 4.00 / 5 | Automated heuristic score; not blind human review. |
+| Average evidence completeness | 4.00 / 5 | 4.00 / 5 | Tie on the single measured task. |
+| Average elapsed minutes | 1.70 | 6.50 | `/mission` took 4.80 minutes longer in this smoke. |
+
+Safe interpretation:
+
+> After the API limit increase, a one-task Claude Code official `/goal` vs
+> `/mission` smoke completed on both arms. Both arms passed completion and
+> validator checks under the automated heuristic scorer; `/mission` took longer.
+
+Unsafe interpretation:
+
+> `mission` is better than official `/goal`.
+
+This remains unsupported because the completed comparable sample is one task.
+
+### Full 10-task attempt
+
+| Item | Value | Evidence |
+|---|---:|---|
+| Run id | `2026-06-28-claude-goal-vs-mission-complex-v1` | `results/2026-06-28-claude-goal-vs-mission-complex-v1.jsonl`. |
+| Starting commit | `ed98b0e00169f0e0b35ce629a206ffcb7af4d0a3` | Runner argument. |
+| Task file | `tasks.complex.json` | 10 complex tasks. |
+| Expected records | 20 | 10 tasks x 2 arms. |
+| Records written | 20 / 20 | Summary JSON has 20 records. |
+| Completed comparable records | 0 / 20 | Every record has `run_status=blocked`. |
+| Blocked records | 20 / 20 | Every record has `blocked_reason=api_usage_limit`. |
+| Total Claude cost recorded | USD 0.81484175 | Raw Claude result JSON files. |
+| Marketing comparison readiness | blocked | No comparable full-run task-quality attempt completed. |
+
+Full attempt result:
+
+| Metric | claude_code_goal_command | mission | Interpretation |
+|---|---:|---:|---|
+| Records | 10 | 10 | Full attempt wrote the expected record count. |
+| Completed comparable records | 0 / 10 | 0 / 10 | All records were API-limit blocked. |
+| Blocked records | 10 / 10 | 10 / 10 | Not a task-quality result. |
+| Comparable completion rate | n/a | n/a | Denominator is zero after excluding blocked records. |
+| Comparable validator pass rate | n/a | n/a | Denominator is zero after excluding blocked records. |
+
+Safe interpretation:
+
+> The one-task smoke became comparable after the API limit increase, but the
+> full 10-task Claude Code official `/goal` vs `/mission` run still exhausted
+> workspace API usage limits. The full run does not support a marketing claim
+> about which arm is better.
+
+Unsafe interpretation:
+
+> Both arms failed all 10 complex tasks.
+
+That would be unsupported because every full-run record was blocked by
+workspace API usage limits before a comparable task-quality attempt.
+
 ## Task-Level Findings
 
 | Task | Stronger arm | Why |
@@ -135,8 +216,8 @@ Follow-up preparation completed after this smoke:
 
 | Check | Result |
 |---|---:|
-| Benchmark + doc consistency tests | 29 passed / 29 |
-| Full mission test suite | 394 passed / 394 |
+| Benchmark + doc consistency tests | 30 passed / 30 |
+| Full mission test suite | 402 passed / 402 |
 | JSON parse checks | 2 passed / 2 |
 | Scoped whitespace check | passed |
 
@@ -145,6 +226,8 @@ Commands used:
 ```bash
 python3 benchmarks/mission-vs-goal/run_paired_pilot.py --starting-commit 0148f16 --timeout 900
 python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py --tasks-file benchmarks/mission-vs-goal/tasks.complex.json --run-id 2026-06-28-claude-goal-vs-mission-smoke-v2 --starting-commit 38cc7907e5e35fcd9fa23022a1fcf03f756df99b --limit-tasks 1 --timeout 300 --max-budget-usd 1.5 --mission-max-iter 1
+python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py --tasks-file benchmarks/mission-vs-goal/tasks.complex.json --run-id 2026-06-28-claude-goal-vs-mission-smoke-v3 --starting-commit ed98b0e00169f0e0b35ce629a206ffcb7af4d0a3 --limit-tasks 1 --timeout 900 --max-budget-usd 3.0 --mission-max-iter 2
+python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py --tasks-file benchmarks/mission-vs-goal/tasks.complex.json --run-id 2026-06-28-claude-goal-vs-mission-complex-v1 --starting-commit ed98b0e00169f0e0b35ce629a206ffcb7af4d0a3 --limit-tasks 10 --timeout 1800 --max-budget-usd 3.0 --mission-max-iter 2
 python3 -m pytest skills/mission/tests/test_benchmark_package.py skills/mission/tests/test_doc_consistency.py -q
 python3 -m pytest skills/mission/tests -q
 python3 -m json.tool benchmarks/mission-vs-goal/tasks.json
@@ -169,6 +252,14 @@ Safe to say about the official `/goal` smoke:
 > blocked by Claude Code workspace API limits. No marketing comparison should be
 > made from this smoke until the `/mission` arm can complete.
 
+Safe to say about the API-limit rerun:
+
+> After the API limit increase, a one-task official `/goal` vs `/mission` smoke
+> completed on both arms and both passed the automated validator. In that
+> one-task smoke, the automated quality/evidence scores tied at 4.00 / 5, while
+> `/mission` took longer. The subsequent 10-task full attempt was blocked by
+> workspace API usage limits, so it cannot support a performance claim.
+
 Do not say:
 
 > `mission` is smarter than `/goal`.
@@ -191,4 +282,10 @@ artifacts/2026-06-27-codex-cli-local/
 results/2026-06-28-claude-goal-vs-mission-smoke-v2.jsonl
 results/2026-06-28-claude-goal-vs-mission-smoke-v2-summary.json
 artifacts/2026-06-28-claude-goal-vs-mission-smoke-v2/
+results/2026-06-28-claude-goal-vs-mission-smoke-v3.jsonl
+results/2026-06-28-claude-goal-vs-mission-smoke-v3-summary.json
+artifacts/2026-06-28-claude-goal-vs-mission-smoke-v3/
+results/2026-06-28-claude-goal-vs-mission-complex-v1.jsonl
+results/2026-06-28-claude-goal-vs-mission-complex-v1-summary.json
+artifacts/2026-06-28-claude-goal-vs-mission-complex-v1/
 ```

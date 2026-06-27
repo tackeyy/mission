@@ -1,10 +1,20 @@
 # 公式 `/goal` vs `/mission` 再実行 Runbook
 
-Status: Claude Code workspace API usage limit の復帰前に準備済み。
+Status: Claude API limit 引き上げ後の 2026-06-28 JST に実行済み。
 
 2026-06-28 JST の smoke run は blocked であり、比較 evidence ではありません。
 `/mission` arm の raw Claude result は workspace API usage limit を報告しており、
 access は 2026-07-01 00:00 UTC、つまり 2026-07-01 09:00 JST に戻ると記録されています。
+
+その後、API-limit rerun を実行しました。
+
+- `2026-06-28-claude-goal-vs-mission-smoke-v3`: 1 comparable task を両 arm で完了し、
+  両 arm とも completion と validator に pass。
+- `2026-06-28-claude-goal-vs-mission-complex-v1`: 20 records は保存されたが、
+  全 record が `run_status=blocked`、`blocked_reason=api_usage_limit`。
+
+したがって、完了した evidence は 1 task smoke result に限定されます。
+10 task full performance claim はまだ supported ではありません。
 
 ## Objective
 
@@ -17,8 +27,8 @@ access は 2026-07-01 00:00 UTC、つまり 2026-07-01 09:00 JST に戻ると記
 
 ## Preconditions
 
-1. Claude Code usage limit が解消済みと別途確認できない限り、2026-07-01 09:00 JST
-   より前には実行しない。
+1. full run を再実行する前に、Claude Code workspace API limit が解消済みであることを確認する。
+   1 task smoke が pass しても、full run で limit に到達する場合がある。
 2. 最新の `main` branch から開始する。
 3. 両 arm で同じ starting commit を使う。
 4. unique な `--run-id` を使い、過去の raw result directory を上書きしない。
@@ -50,6 +60,10 @@ python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
 どちらかの arm が `run_status=blocked` なら停止し、report には blocked として更新します。
 blocked record を performance claim に変換してはいけません。
 
+今回の rerun result:
+
+- `2026-06-28-claude-goal-vs-mission-smoke-v3` はこの smoke gate を満たした。
+
 ## Step 2: Full Paired Pilot
 
 smoke gate が pass した後だけ、10 complex tasks を実行します。
@@ -67,6 +81,12 @@ python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
 ```
 
 Expected records: 20。
+
+今回の rerun result:
+
+- `2026-06-28-claude-goal-vs-mission-complex-v1` は 20 records を保存したが、
+  全 20 records が `api_usage_limit` で blocked。comparable completion /
+  validator rate の denominator は 0。
 
 ## Step 3: Validation
 

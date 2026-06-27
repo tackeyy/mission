@@ -99,10 +99,13 @@ complex task, but the comparable `/mission` arm stopped on a Claude Code
 workspace API usage limit before writing an artifact. Treat that run as
 blocked, not as evidence that either arm is better.
 
-Use `official-goal-rerun-runbook.md` for the next attempt after the usage limit
-clears. The official runner now records `run_status`, `blocked_reason`, and
-`comparable_attempt` so API/account stops are not mistaken for task-quality
-failures.
+After the API limit was increased, `2026-06-28-claude-goal-vs-mission-smoke-v3`
+completed one comparable task on both arms. The follow-on full 10-task attempt
+`2026-06-28-claude-goal-vs-mission-complex-v1` then hit workspace API usage
+limits on every record. Treat the smoke as a one-task comparable result and the
+full attempt as blocked. The official runner records `run_status`,
+`blocked_reason`, and `comparable_attempt` so API/account stops are not mistaken
+for task-quality failures.
 
 ## Human Quality Rubric
 
@@ -128,7 +131,9 @@ Not allowed from this pilot:
 - Claims about general model intelligence.
 - Claims that `mission` is universally better than `/goal`.
 - Claims that `mission` is better or worse than Claude Code official `/goal`
-  from the 2026-06-28 smoke, because the `/mission` arm was API-limit blocked.
+  from the 2026-06-28 attempts. The first smoke was API-limit blocked on
+  `/mission`; the rerun smoke completed only one comparable task; the full
+  rerun was API-limit blocked on all records.
 - Percent improvements without publishing the denominator, task mix, and scoring method.
 - Claims based on fewer than all 10 paired task runs.
 
@@ -137,7 +142,7 @@ Not allowed from this pilot:
 | Path | Purpose |
 |---|---|
 | `tasks.json` | The measured fixed 10-task baseline pilot set. |
-| `tasks.complex.json` | Planned 10-task complex cohort; not measured yet. |
+| `tasks.complex.json` | 10-task complex cohort used by official smoke/full attempts; no full comparable run has completed yet. |
 | `result.schema.json` | JSON Schema for one result record. |
 | `report.md` | Current measured status and package-validation results. |
 | `run_claude_goal_vs_mission.py` | Claude Code official `/goal` vs `/mission` smoke runner. |

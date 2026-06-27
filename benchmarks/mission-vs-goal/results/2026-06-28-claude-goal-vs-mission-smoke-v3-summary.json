@@ -1,0 +1,40 @@
+{
+  "arms": {
+    "claude_code_goal_command": {
+      "average_elapsed_minutes": 1.7,
+      "average_evidence_completeness": 4.0,
+      "average_intervention_count": 0.0,
+      "average_quality_score": 4.0,
+      "blocked_records": 0,
+      "comparable_completion_rate": 1.0,
+      "comparable_records": 1,
+      "comparable_validator_pass_rate": 1.0,
+      "completion_rate": 1.0,
+      "records": 1,
+      "validator_pass_rate": 1.0
+    },
+    "mission": {
+      "average_elapsed_minutes": 6.5,
+      "average_evidence_completeness": 4.0,
+      "average_intervention_count": 0.0,
+      "average_quality_score": 4.0,
+      "blocked_records": 0,
+      "comparable_completion_rate": 1.0,
+      "comparable_records": 1,
+      "comparable_validator_pass_rate": 1.0,
+      "completion_rate": 1.0,
+      "records": 1,
+      "validator_pass_rate": 1.0
+    }
+  },
+  "expected_records": 2,
+  "limitations": [
+    "Claude Code print mode smoke; does not fully exercise multi-turn interactive /goal persistence.",
+    "Quality and evidence scores are automated heuristic scores, not blind human review."
+  ],
+  "records": 2,
+  "run_id": "2026-06-28-claude-goal-vs-mission-smoke-v3",
+  "starting_commit": "ed98b0e00169f0e0b35ce629a206ffcb7af4d0a3",
+  "task_cohort": "official-goal-smoke",
+  "task_file": "benchmarks/mission-vs-goal/tasks.complex.json"
+}
