@@ -1,0 +1,375 @@
+#!/usr/bin/env python3
+"""Run a Claude Code /goal command vs /mission benchmark smoke.
+
+This runner uses Claude Code itself for both arms:
+- `claude_code_goal_command` sends the official built-in `/goal` command.
+- `mission` sends the `/mission` plugin command.
+
+The runner records raw artifacts and JSON output. It is intentionally separate
+from the Codex CLI runner so results are not mixed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+BENCH_DIR = REPO_ROOT / "benchmarks" / "mission-vs-goal"
+DEFAULT_TASKS_PATH = BENCH_DIR / "tasks.complex.json"
+RESULTS_DIR = BENCH_DIR / "results"
+ARTIFACTS_DIR = BENCH_DIR / "artifacts"
+MISSION_PLUGIN_DIR = REPO_ROOT / "plugins" / "mission"
+ARMS = ("claude_code_goal_command", "mission")
+
+
+def run_command(args: list[str], cwd: Path | None = None, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        args,
+        cwd=cwd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def iso_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def load_task_data(tasks_path: Path) -> dict:
+    return json.loads(tasks_path.read_text(encoding="utf-8"))
+
+
+def prepare_clone(source: Path, target: Path, starting_commit: str) -> None:
+    if target.exists():
+        shutil.rmtree(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    clone = run_command(["git", "clone", "--no-hardlinks", str(source), str(target)], timeout=120)
+    if clone.returncode != 0:
+        raise RuntimeError(f"git clone failed: {clone.stderr}")
+    checkout = run_command(["git", "checkout", "--detach", starting_commit], cwd=target, timeout=120)
+    if checkout.returncode != 0:
+        raise RuntimeError(f"git checkout failed: {checkout.stderr}")
+
+
+def build_prompt(task: dict, arm: str, output_rel: str, mission_max_iter: int | None = None) -> str:
+    common = f"""You are executing one controlled local benchmark run.
+
+Rules:
+- Do not commit, push, install packages, or use network access.
+- Write exactly one task artifact at `{output_rel}`.
+- Keep edits narrowly scoped to benchmark output files. For the mission arm, `.mission-state/` is also allowed.
+- Do not claim benchmark superiority. Only complete this task artifact.
+- Include concrete evidence for every claim. If something is unmeasured, say it is unmeasured.
+
+Task id: {task["id"]}
+Task category: {task["category"]}
+Task prompt: {task["prompt"]}
+Task validator: {task["validator"]}
+"""
+    if arm == "claude_code_goal_command":
+        return f"""/goal The benchmark artifact exists at `{output_rel}` and includes headings Goal, Result, Evidence, Assumptions, and Stop Condition.
+
+{common}
+Arm: claude_code_goal_command
+
+Use Claude Code's official built-in `/goal` command as the completion controller.
+The artifact must include these headings:
+- Goal
+- Result
+- Evidence
+- Assumptions
+- Stop Condition
+"""
+
+    mission_complexity = task.get("mission_complexity", "Complex")
+    mission_max_iter = mission_max_iter or task.get("mission_max_iter", 2)
+    return f"""/mission Complete the controlled benchmark artifact at `{output_rel}` with auditable mission-style evidence. --max-iter {mission_max_iter}
+
+{common}
+Arm: mission
+
+Use the `/mission` plugin workflow with auditable state. Initialize or maintain
+mission state if needed, review the artifact against the validator, and only
+report completion when the artifact is written.
+
+The artifact must include these headings:
+- Mission
+- Plan
+- Execution
+- Review
+- Score
+- Stop Decision
+- Evidence
+- Assumptions
+
+Mission complexity for this task: {mission_complexity}
+"""
+
+
+def parse_claude_json(stdout: str) -> dict:
+    try:
+        return json.loads(stdout)
+    except json.JSONDecodeError:
+        return {"type": "raw", "result": stdout}
+
+
+def evaluate_run(worktree: Path, task: dict, arm: str, output_rel: str, returncode: int) -> dict:
+    output_path = worktree / output_rel
+    text = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
+    required_headings = ["Evidence", "Assumptions"]
+    if arm == "claude_code_goal_command":
+        required_headings += ["Goal", "Result", "Stop Condition"]
+    else:
+        required_headings += ["Mission", "Plan", "Execution", "Review", "Score", "Stop Decision"]
+
+    missing_headings = [heading for heading in required_headings if heading not in text]
+    completion = returncode == 0 and output_path.exists()
+    validator_pass = completion and not missing_headings
+    quality_score = 4.0 if validator_pass else 2.0 if completion else 1.0
+    evidence_score = 4.0 if validator_pass else 2.0 if completion else 1.0
+
+    return {
+        "completion": completion,
+        "validator_pass": validator_pass,
+        "human_quality_score": quality_score,
+        "quality_score_method": "automated_heuristic_not_blind_human",
+        "intervention_count": 0,
+        "resume_success": None if "resume" not in task["id"] else validator_pass,
+        "evidence_completeness": evidence_score,
+        "missing_headings": missing_headings,
+        "artifact_bytes": output_path.stat().st_size if output_path.exists() else 0,
+    }
+
+
+def copy_artifacts(worktree: Path, artifact_dir: Path, output_rel: str, stdout_path: Path, stderr_path: Path) -> list[str]:
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    copied: list[str] = []
+    for source, name in (
+        (worktree / output_rel, "artifact.md"),
+        (stdout_path, "claude-result.json"),
+        (stderr_path, "stderr.txt"),
+    ):
+        if source.exists():
+            dest = artifact_dir / name
+            if source.resolve() != dest.resolve():
+                shutil.copy2(source, dest)
+            copied.append(str(dest.relative_to(REPO_ROOT)))
+    diff = run_command(["git", "diff", "--", output_rel, ".mission-state"], cwd=worktree, timeout=60)
+    diff_path = artifact_dir / "diff.patch"
+    diff_path.write_text(diff.stdout, encoding="utf-8")
+    copied.append(str(diff_path.relative_to(REPO_ROOT)))
+    return copied
+
+
+def as_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def run_one(
+    task: dict,
+    arm: str,
+    run_id: str,
+    starting_commit: str,
+    run_root: Path,
+    timeout: int,
+    max_budget_usd: float,
+    mission_max_iter: int | None,
+) -> dict:
+    task_id = task["id"]
+    run_name = f"{task_id}-{arm}"
+    worktree = run_root / run_name / "repo"
+    prepare_clone(REPO_ROOT, worktree, starting_commit)
+    output_rel = f"benchmarks/mission-vs-goal/run-output/{run_id}/{run_name}.md"
+    prompt = build_prompt(task, arm, output_rel, mission_max_iter=mission_max_iter)
+    artifact_dir = ARTIFACTS_DIR / run_id / run_name
+    stdout_path = artifact_dir / "claude-result.json"
+    stderr_path = artifact_dir / "stderr.txt"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    command = [
+        "claude",
+        "-p",
+        "--output-format",
+        "json",
+        "--permission-mode",
+        "acceptEdits",
+        "--max-budget-usd",
+        str(max_budget_usd),
+    ]
+    if arm == "mission":
+        command.extend(["--plugin-dir", str(MISSION_PLUGIN_DIR)])
+    command.append(prompt)
+
+    started = iso_now()
+    start_time = time.monotonic()
+    timed_out = False
+    try:
+        proc = subprocess.run(
+            command,
+            cwd=worktree,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+        )
+        stdout = proc.stdout
+        stderr = proc.stderr
+        returncode = proc.returncode
+    except subprocess.TimeoutExpired as exc:
+        timed_out = True
+        stdout = as_text(exc.stdout)
+        stderr = as_text(exc.stderr) + f"\nTIMEOUT after {timeout} seconds\n"
+        returncode = 124
+    elapsed = round((time.monotonic() - start_time) / 60, 2)
+    completed = iso_now()
+    stdout_path.write_text(stdout, encoding="utf-8")
+    stderr_path.write_text(stderr, encoding="utf-8")
+    claude_result = parse_claude_json(stdout)
+    evaluation = evaluate_run(worktree, task, arm, output_rel, returncode)
+    artifacts = copy_artifacts(worktree, artifact_dir, output_rel, stdout_path, stderr_path)
+
+    usage = claude_result.get("usage", {}) if isinstance(claude_result, dict) else {}
+    notes = [
+        f"claude_returncode={returncode}",
+        f"claude_session_id={claude_result.get('session_id') if isinstance(claude_result, dict) else None}",
+        f"claude_total_cost_usd={claude_result.get('total_cost_usd') if isinstance(claude_result, dict) else None}",
+        f"quality_score_method={evaluation['quality_score_method']}",
+        "print_mode_smoke=true",
+    ]
+    if timed_out:
+        notes.append(f"timed_out_after_seconds={timeout}")
+    if evaluation["missing_headings"]:
+        notes.append(f"missing_headings={','.join(evaluation['missing_headings'])}")
+    if stderr.strip():
+        notes.append("stderr captured in artifact")
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+
+    return {
+        "benchmark": "mission-vs-goal-pilot",
+        "run_id": run_id,
+        "task_id": task_id,
+        "arm": arm,
+        "model": "claude_code_default",
+        "started_at": started,
+        "completed_at": completed,
+        "starting_commit": starting_commit,
+        "completion": evaluation["completion"],
+        "validator_pass": evaluation["validator_pass"],
+        "human_quality_score": evaluation["human_quality_score"],
+        "quality_score_method": evaluation["quality_score_method"],
+        "intervention_count": evaluation["intervention_count"],
+        "resume_success": evaluation["resume_success"],
+        "evidence_completeness": evaluation["evidence_completeness"],
+        "elapsed_minutes": elapsed,
+        "token_estimate": input_tokens + output_tokens if isinstance(input_tokens, int) and isinstance(output_tokens, int) else None,
+        "artifacts": artifacts,
+        "notes": "; ".join(notes),
+    }
+
+
+def summarize(records: list[dict], tasks: list[dict], run_id: str, starting_commit: str, tasks_path: Path) -> dict:
+    by_arm: dict[str, list[dict]] = {arm: [r for r in records if r["arm"] == arm] for arm in ARMS}
+    return {
+        "run_id": run_id,
+        "task_file": str(tasks_path.relative_to(REPO_ROOT)),
+        "task_cohort": "official-goal-smoke",
+        "starting_commit": starting_commit,
+        "records": len(records),
+        "expected_records": len(tasks) * len(ARMS),
+        "limitations": [
+            "Claude Code print mode smoke; does not fully exercise multi-turn interactive /goal persistence.",
+            "Quality and evidence scores are automated heuristic scores, not blind human review.",
+        ],
+        "arms": {
+            arm: {
+                "records": len(items),
+                "completion_rate": sum(1 for r in items if r["completion"]) / len(items) if items else None,
+                "validator_pass_rate": sum(1 for r in items if r["validator_pass"]) / len(items) if items else None,
+                "average_quality_score": round(sum(r["human_quality_score"] for r in items) / len(items), 2) if items else None,
+                "average_intervention_count": round(sum(r["intervention_count"] for r in items) / len(items), 2) if items else None,
+                "average_evidence_completeness": round(sum(r["evidence_completeness"] for r in items) / len(items), 2) if items else None,
+                "average_elapsed_minutes": round(sum(r["elapsed_minutes"] for r in items) / len(items), 2) if items else None,
+            }
+            for arm, items in by_arm.items()
+        },
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--starting-commit", required=True)
+    parser.add_argument("--tasks-file", default=str(DEFAULT_TASKS_PATH))
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--timeout", type=int, default=1800)
+    parser.add_argument("--limit-tasks", type=int, default=2)
+    parser.add_argument("--run-root", default="/tmp/mission-vs-official-goal")
+    parser.add_argument("--max-budget-usd", type=float, default=2.0)
+    parser.add_argument("--mission-max-iter", type=int, default=None)
+    args = parser.parse_args()
+
+    tasks_path = Path(args.tasks_file)
+    if not tasks_path.is_absolute():
+        tasks_path = REPO_ROOT / tasks_path
+
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+    result_path = RESULTS_DIR / f"{args.run_id}.jsonl"
+    summary_path = RESULTS_DIR / f"{args.run_id}-summary.json"
+    artifact_run_dir = ARTIFACTS_DIR / args.run_id
+    if result_path.exists():
+        result_path.unlink()
+    if summary_path.exists():
+        summary_path.unlink()
+    if artifact_run_dir.exists():
+        shutil.rmtree(artifact_run_dir)
+
+    task_data = load_task_data(tasks_path)
+    tasks = task_data["tasks"][: args.limit_tasks]
+    records = []
+    for task in tasks:
+        for arm in ARMS:
+            print(f"running task={task['id']} arm={arm}", flush=True)
+            record = run_one(
+                task,
+                arm,
+                args.run_id,
+                args.starting_commit,
+                Path(args.run_root),
+                args.timeout,
+                args.max_budget_usd,
+                args.mission_max_iter,
+            )
+            records.append(record)
+            with result_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+            print(
+                f"finished task={task['id']} arm={arm} completion={record['completion']} "
+                f"validator_pass={record['validator_pass']} elapsed_minutes={record['elapsed_minutes']}",
+                flush=True,
+            )
+
+    summary = summarize(records, tasks, args.run_id, args.starting_commit, tasks_path)
+    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

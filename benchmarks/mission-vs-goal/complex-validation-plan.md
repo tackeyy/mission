@@ -1,6 +1,8 @@
 # Complex task validation plan
 
-Status: planned, not measured.
+Status: planned for the full cohort. A one-task Claude Code official `/goal`
+smoke was attempted on 2026-06-28 JST, but the comparable `/mission` arm was
+blocked by Claude Code workspace API usage limits before artifact completion.
 
 The first 10-task pilot showed no difference in completion or validator pass
 rate because both arms reached 100%. It did show stronger automated evidence
@@ -36,6 +38,8 @@ Use `tasks.complex.json` for the next cohort:
 - Same two arms: `goal_only` and `mission`.
 - `mission` tasks use `Complex` or `Critical` state initialization instead of the previous `Simple --max-iter 1` setup.
 - The cohort is still local and controlled. It is not a general model benchmark.
+- The official Claude Code `/goal` comparison uses arm name
+  `claude_code_goal_command`, not the earlier local `goal_only` baseline.
 
 ## Execution Protocol
 
@@ -63,6 +67,24 @@ python3 benchmarks/mission-vs-goal/run_paired_pilot.py \
 
 The smoke run should complete one task in both arms before the full 20-run
 complex cohort is launched.
+
+For the official Claude Code `/goal` comparison, use:
+
+```bash
+python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
+  --tasks-file benchmarks/mission-vs-goal/tasks.complex.json \
+  --run-id YYYY-MM-DD-claude-goal-vs-mission-smoke \
+  --starting-commit <commit> \
+  --limit-tasks 1 \
+  --timeout 300 \
+  --max-budget-usd 1.5 \
+  --mission-max-iter 1
+```
+
+The 2026-06-28 smoke should not be used for marketing comparison because the
+`/mission` arm stopped with a Claude Code workspace API usage limit error
+before it could write an artifact. Re-run after the usage limit clears, then
+publish only the measured result.
 
 ## Measurement Requirements
 
@@ -102,3 +124,6 @@ The complex validation is ready for marketing use only when all are true:
 4. English and Japanese reports are updated.
 5. Tests validate task-set shape, runner configuration, and report honesty.
 6. Unsupported claims are explicitly listed as unsafe.
+7. For official `/goal` comparison, both `claude_code_goal_command` and
+   `mission` complete comparable attempts without API-limit or infrastructure
+   stops.

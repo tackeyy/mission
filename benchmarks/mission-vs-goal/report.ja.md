@@ -1,6 +1,8 @@
 # mission vs goal-only pilot report
 
 Status: 2026-06-27 に controlled local Codex CLI pilot として計測済み。
+追加で、2026-06-28 JST に Claude Code 公式 `/goal` smoke を試行し、
+別セクションに分けて記録しています。
 
 これは general model benchmark ではなく、blind human evaluation でもありません。
 下記の quality / evidence score は local runner による automated heuristic score です。
@@ -50,6 +52,59 @@ starting commit `0148f16` から、20 件すべての paired benchmark execution
 | Average evidence completeness | 3.80 / 5 | 4.70 / 5 | +0.90 |
 | Average elapsed minutes | 1.28 | 2.99 | +1.71 |
 
+## Claude Code 公式 `/goal` smoke
+
+Status: 2026-06-28 JST に controlled Claude Code CLI print-mode smoke として試行。
+比較対象は、前回の local `goal_only` baseline ではなく、Claude Code 公式の
+built-in `/goal` command です。Claude Code の commands / skills の公式 docs は
+<https://code.claude.com/docs/en/commands> と
+<https://code.claude.com/docs/en/skills> にあります。
+
+この smoke は evidence を残しましたが、**完了した性能比較ではありません**。
+`/mission` arm は task artifact を書く前に、Claude Code の workspace API usage
+limit error 400 で停止しました。raw error には、2026-07-01 00:00 UTC に access
+が戻ると記録されています。
+原因は Claude Code workspace API usage limit であり、task-quality failure ではありません。
+
+| Item | Value | Evidence |
+|---|---:|---|
+| Measurement date | 2026-06-28 JST | raw records は 2026-06-27T16:34:57Z に完了。 |
+| Run id | `2026-06-28-claude-goal-vs-mission-smoke-v2` | `results/2026-06-28-claude-goal-vs-mission-smoke-v2.jsonl`。 |
+| Starting commit | `38cc7907e5e35fcd9fa23022a1fcf03f756df99b` | runner argument。 |
+| Task file | `tasks.complex.json` | smoke task は `complex-cross-file-feature` 1 件。 |
+| Arms | 2 | `claude_code_goal_command`, `mission`。 |
+| Records completed | 2 / 2 | summary JSON に 2 records。 |
+| `/goal` artifact completion | 1 / 1 | artifact が存在し、heuristic validator pass。 |
+| `/mission` artifact completion | 0 / 1 | artifact なし。API usage limit で停止。 |
+| `/goal` cost | USD 0.93959825 | raw Claude result JSON。 |
+| `/mission` cost before stop | USD 1.05234325 | raw Claude result JSON。 |
+| Quality score method | automated heuristic | blind human review ではない。 |
+| Marketing comparison readiness | blocked | `/mission` arm が comparable attempt を完了していない。 |
+
+Smoke result:
+
+| Metric | claude_code_goal_command | mission | Interpretation |
+|---|---:|---:|---|
+| Completion rate | 1 / 1 | 0 / 1 | `/mission` は workspace API limit による停止であり、task-quality failure と検証されたわけではない。 |
+| Validator pass rate | 1 / 1 | 0 / 1 | `/mission` は artifact がないため validator を満たせない。 |
+| Average quality score | 4.00 / 5 | 1.00 / 5 | artifact presence に基づく automated placeholder score。能力差の結論ではない。 |
+| Average evidence completeness | 4.00 / 5 | 1.00 / 5 | 上と同じ制約。 |
+| Average elapsed minutes | 1.97 | 2.06 | `/mission` は API-limit stop までの時間。 |
+
+安全な解釈:
+
+> Claude Code 公式 `/goal` smoke harness は、complex task 1 件で auditable artifact
+> を作成できた。一方、comparable な `/mission` arm は Claude Code workspace API
+> limit により artifact completion 前に blocked された。そのため、この smoke から
+> どちらが優れているという marketing claim は出せない。
+
+危険な解釈:
+
+> `mission` は公式 `/goal` に負けた。
+
+これは unsupported です。`/mission` の failed record は infrastructure/API-limit stop
+であり、完了した task-quality measurement ではありません。
+
 ## Task-Level Findings
 
 | Task | Stronger arm | Why |
@@ -78,11 +133,14 @@ starting commit `0148f16` から、20 件すべての paired benchmark execution
 
 ```bash
 python3 benchmarks/mission-vs-goal/run_paired_pilot.py --starting-commit 0148f16 --timeout 900
+python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py --tasks-file benchmarks/mission-vs-goal/tasks.complex.json --run-id 2026-06-28-claude-goal-vs-mission-smoke-v2 --starting-commit 38cc7907e5e35fcd9fa23022a1fcf03f756df99b --limit-tasks 1 --timeout 300 --max-budget-usd 1.5 --mission-max-iter 1
 python3 -m pytest skills/mission/tests/test_benchmark_package.py skills/mission/tests/test_doc_consistency.py -q
 python3 -m pytest skills/mission/tests -q
 python3 -m json.tool benchmarks/mission-vs-goal/tasks.json
+python3 -m json.tool benchmarks/mission-vs-goal/tasks.complex.json
 python3 -m json.tool benchmarks/mission-vs-goal/result.schema.json
-git diff --check -- README.md README.ja.md docs/LOOP_ENGINEERING.md benchmarks/mission-vs-goal/README.md benchmarks/mission-vs-goal/README.ja.md benchmarks/mission-vs-goal/report.md benchmarks/mission-vs-goal/report.ja.md benchmarks/mission-vs-goal/report-template.md benchmarks/mission-vs-goal/report-template.ja.md benchmarks/mission-vs-goal/run_paired_pilot.py skills/mission/tests/test_benchmark_package.py
+python3 -m py_compile benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py
+git diff --check -- README.md README.ja.md docs/LOOP_ENGINEERING.md benchmarks/mission-vs-goal/README.md benchmarks/mission-vs-goal/README.ja.md benchmarks/mission-vs-goal/report.md benchmarks/mission-vs-goal/report.ja.md benchmarks/mission-vs-goal/report-template.md benchmarks/mission-vs-goal/report-template.ja.md benchmarks/mission-vs-goal/complex-validation-plan.md benchmarks/mission-vs-goal/complex-validation-plan.ja.md benchmarks/mission-vs-goal/run_paired_pilot.py benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py skills/mission/tests/test_benchmark_package.py
 ```
 
 ## Marketing Summary
@@ -93,6 +151,13 @@ git diff --check -- README.md README.ja.md docs/LOOP_ENGINEERING.md benchmarks/m
 > どちらも全 task を完了し、全 validator に pass しました。`mission` は automated
 > evidence / completion-quality score が高く、一方で run あたりの時間は長くなりました。
 
+公式 `/goal` smoke について言ってよい:
+
+> complex task 1 件で Claude Code 公式 `/goal` smoke を試行した。`/goal` は artifact
+> を完了したが、comparable な `/mission` arm は Claude Code workspace API limit で
+> blocked された。`/mission` arm が完了するまで、この smoke から marketing comparison
+> は出せない。
+
 言ってはいけない:
 
 > `mission` は `/goal` より賢い。
@@ -101,10 +166,18 @@ git diff --check -- README.md README.ja.md docs/LOOP_ENGINEERING.md benchmarks/m
 
 > この pilot で `mission` は completion rate を改善した。
 
+言ってはいけない:
+
+> 2026-06-28 の smoke に基づいて、`mission` は Claude Code 公式 `/goal` より良い /
+> 悪い。
+
 ## Raw Result Index
 
 ```text
 results/2026-06-27-codex-cli-local.jsonl
 results/2026-06-27-codex-cli-local-summary.json
 artifacts/2026-06-27-codex-cli-local/
+results/2026-06-28-claude-goal-vs-mission-smoke-v2.jsonl
+results/2026-06-28-claude-goal-vs-mission-smoke-v2-summary.json
+artifacts/2026-06-28-claude-goal-vs-mission-smoke-v2/
 ```

@@ -45,7 +45,8 @@ def test_mission_vs_goal_result_schema_matches_declared_arms():
     schema = json.loads((BENCHMARK_DIR / "result.schema.json").read_text(encoding="utf-8"))
 
     assert schema["properties"]["benchmark"]["const"] == tasks["benchmark"]
-    assert schema["properties"]["arm"]["enum"] == tasks["arms"]
+    assert set(tasks["arms"]) <= set(schema["properties"]["arm"]["enum"])
+    assert "claude_code_goal_command" in schema["properties"]["arm"]["enum"]
     assert "human_quality_score" in schema["required"]
     assert "quality_score_method" in schema["required"]
     assert "automated_heuristic_not_blind_human" in schema["properties"]["quality_score_method"]["enum"]
@@ -73,9 +74,10 @@ def test_mission_vs_goal_has_japanese_benchmark_docs():
     assert "Marketing Guardrails" in readme_ja
     assert "report-template.ja.md" in readme_ja
     assert "tasks.complex.json" in readme_ja
+    assert "claude_code_goal_command" in readme_ja
     assert "general model benchmark ではない" in report_ja
     assert "`mission` は `/goal` より X% 賢い" in report_ja
-    assert "Status: planned, not measured." in complex_plan_ja
+    assert "workspace API usage limit" in complex_plan_ja
     assert "結果ではありません" in complex_plan_ja
 
 
@@ -84,6 +86,15 @@ def test_mission_vs_goal_measured_reports_are_honest_about_paired_runs():
     report_ja = (BENCHMARK_DIR / "report.ja.md").read_text(encoding="utf-8")
     results_path = BENCHMARK_DIR / "results" / "2026-06-27-codex-cli-local.jsonl"
     summary_path = BENCHMARK_DIR / "results" / "2026-06-27-codex-cli-local-summary.json"
+    official_results_path = BENCHMARK_DIR / "results" / "2026-06-28-claude-goal-vs-mission-smoke-v2.jsonl"
+    official_summary_path = BENCHMARK_DIR / "results" / "2026-06-28-claude-goal-vs-mission-smoke-v2-summary.json"
+    official_mission_raw = (
+        BENCHMARK_DIR
+        / "artifacts"
+        / "2026-06-28-claude-goal-vs-mission-smoke-v2"
+        / "complex-cross-file-feature-mission"
+        / "claude-result.json"
+    )
 
     records = [json.loads(line) for line in results_path.read_text(encoding="utf-8").splitlines()]
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -105,6 +116,22 @@ def test_mission_vs_goal_measured_reports_are_honest_about_paired_runs():
     assert summary["arms"]["goal_only"]["average_evidence_completeness"] == 3.8
     assert summary["arms"]["mission"]["average_evidence_completeness"] == 4.7
 
+    official_records = [json.loads(line) for line in official_results_path.read_text(encoding="utf-8").splitlines()]
+    official_summary = json.loads(official_summary_path.read_text(encoding="utf-8"))
+    official_by_arm = {
+        arm: [record for record in official_records if record["arm"] == arm]
+        for arm in ("claude_code_goal_command", "mission")
+    }
+
+    assert len(official_records) == 2
+    assert official_summary["records"] == 2
+    assert official_summary["expected_records"] == 2
+    assert official_by_arm["claude_code_goal_command"][0]["completion"] is True
+    assert official_by_arm["claude_code_goal_command"][0]["validator_pass"] is True
+    assert official_by_arm["mission"][0]["completion"] is False
+    assert official_by_arm["mission"][0]["validator_pass"] is False
+    assert "workspace API usage limits" in official_mission_raw.read_text(encoding="utf-8")
+
     assert "Paired benchmark runs completed | 20 / 20" in report
     assert "Goal-only runs completed | 10 / 10" in report
     assert "Mission runs completed | 10 / 10" in report
@@ -114,6 +141,9 @@ def test_mission_vs_goal_measured_reports_are_honest_about_paired_runs():
     assert "Benchmark + doc consistency tests | 29 passed / 29" in report
     assert "Full mission test suite | 394 passed / 394" in report
     assert "not a blind human evaluation" in report
+    assert "Claude Code Official `/goal` Smoke" in report
+    assert "workspace API usage limit" in report
+    assert "does not support a marketing claim that either arm is better" in report
     assert "Paired benchmark runs completed | 20 / 20" in report_ja
     assert "Goal-only runs completed | 10 / 10" in report_ja
     assert "Mission runs completed | 10 / 10" in report_ja
@@ -123,11 +153,15 @@ def test_mission_vs_goal_measured_reports_are_honest_about_paired_runs():
     assert "Benchmark + doc consistency tests | 29 passed / 29" in report_ja
     assert "Full mission test suite | 394 passed / 394" in report_ja
     assert "blind human evaluation でもありません" in report_ja
+    assert "Claude Code 公式 `/goal` smoke" in report_ja
+    assert "workspace API usage limit" in report_ja
+    assert "どちらが優れているという marketing claim は出せない" in report_ja
 
 
 def test_mission_vs_goal_protocol_controls_review_bias():
     protocol = (BENCHMARK_DIR / "README.md").read_text(encoding="utf-8")
     runner = (BENCHMARK_DIR / "run_paired_pilot.py").read_text(encoding="utf-8")
+    official_runner = (BENCHMARK_DIR / "run_claude_goal_vs_mission.py").read_text(encoding="utf-8")
     complex_plan = (BENCHMARK_DIR / "complex-validation-plan.md").read_text(encoding="utf-8")
 
     assert "Counter-balance run order" in protocol
@@ -135,10 +169,12 @@ def test_mission_vs_goal_protocol_controls_review_bias():
     assert "score blind to arm label" in protocol
     assert "--tasks-file" in protocol
     assert "--run-id" in protocol
-    assert "Status: planned, not measured." in complex_plan
+    assert "workspace API usage limits" in complex_plan
     assert "These are hypotheses to test, not results" in complex_plan
     assert 'parser.add_argument("--tasks-file"' in runner
     assert 'parser.add_argument("--run-id"' in runner
+    assert 'ARMS = ("claude_code_goal_command", "mission")' in official_runner
+    assert 'parser.add_argument("--mission-max-iter"' in official_runner
 
 
 def test_mission_vs_goal_report_template_rejects_unsupported_claims():

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "mission vs goal-only benchmark result",
+    "title": "mission vs goal benchmark result",
   "type": "object",
   "required": [
     "benchmark",
@@ -33,10 +33,11 @@
       "type": "string"
     },
     "arm": {
-      "enum": [
-        "goal_only",
-        "mission"
-      ]
+            "enum": [
+                "goal_only",
+                "claude_code_goal_command",
+                "mission"
+            ]
     },
     "model": {
       "type": "string"

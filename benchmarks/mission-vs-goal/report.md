@@ -1,6 +1,8 @@
 # mission vs goal-only pilot report
 
 Status: measured on 2026-06-27 as a controlled local Codex CLI pilot.
+An additional Claude Code official `/goal` smoke was attempted on 2026-06-28
+JST and is reported separately below.
 
 This is not a general model benchmark and not a blind human evaluation. The
 quality and evidence scores below are automated heuristic scores from the local
@@ -51,6 +53,60 @@ The safe takeaway is narrow:
 | Average evidence completeness | 3.80 / 5 | 4.70 / 5 | +0.90 |
 | Average elapsed minutes | 1.28 | 2.99 | +1.71 |
 
+## Claude Code Official `/goal` Smoke
+
+Status: attempted on 2026-06-28 JST as a controlled Claude Code CLI print-mode
+smoke. The comparison target is the official Claude Code built-in `/goal`
+command, not the earlier local `goal_only` baseline. Claude Code command and
+skill documentation are published at <https://code.claude.com/docs/en/commands>
+and <https://code.claude.com/docs/en/skills>.
+
+This smoke produced evidence, but it is **not** a completed performance
+comparison: the `/mission` arm stopped before writing its task artifact because
+Claude Code returned workspace API usage limit error 400. The raw error states
+that access resumes on 2026-07-01 at 00:00 UTC.
+
+| Item | Value | Evidence |
+|---|---:|---|
+| Measurement date | 2026-06-28 JST | Raw records completed at 2026-06-27T16:34:57Z. |
+| Run id | `2026-06-28-claude-goal-vs-mission-smoke-v2` | `results/2026-06-28-claude-goal-vs-mission-smoke-v2.jsonl`. |
+| Starting commit | `38cc7907e5e35fcd9fa23022a1fcf03f756df99b` | Runner argument. |
+| Task file | `tasks.complex.json` | One smoke task: `complex-cross-file-feature`. |
+| Arms | 2 | `claude_code_goal_command`, `mission`. |
+| Records completed | 2 / 2 | Summary JSON has two records. |
+| `/goal` artifact completion | 1 / 1 | Artifact exists and validator heuristic passed. |
+| `/mission` artifact completion | 0 / 1 | No artifact; API usage limit stopped the run. |
+| `/goal` cost | USD 0.93959825 | Raw Claude result JSON. |
+| `/mission` cost before stop | USD 1.05234325 | Raw Claude result JSON. |
+| Quality score method | automated heuristic | Not blind human review. |
+| Marketing comparison readiness | blocked | The `/mission` arm did not receive a full comparable attempt. |
+
+Smoke result:
+
+| Metric | claude_code_goal_command | mission | Interpretation |
+|---|---:|---:|---|
+| Completion rate | 1 / 1 | 0 / 1 | `/mission` failed due to workspace API limit, not a validated task-quality failure. |
+| Validator pass rate | 1 / 1 | 0 / 1 | The `/mission` validator could not run because no artifact was written. |
+| Average quality score | 4.00 / 5 | 1.00 / 5 | Automated placeholder score from artifact presence; not a capability conclusion. |
+| Average evidence completeness | 4.00 / 5 | 1.00 / 5 | Same limitation as above. |
+| Average elapsed minutes | 1.97 | 2.06 | `/mission` elapsed time ended at API-limit stop. |
+
+Safe interpretation:
+
+> The official Claude Code `/goal` smoke harness ran one complex task and wrote
+> an auditable artifact. The comparable `/mission` arm was blocked by Claude
+> Code workspace API limits before artifact completion, so this smoke does not
+> support a marketing claim that either arm is better.
+
+In short, this smoke does not support a marketing claim that either arm is better.
+
+Unsafe interpretation:
+
+> `mission` lost to official `/goal`.
+
+That would be unsupported because the failed `/mission` record is an
+infrastructure/API-limit stop, not a completed task-quality measurement.
+
 ## Task-Level Findings
 
 | Task | Stronger arm | Why |
@@ -79,11 +135,14 @@ Commands used:
 
 ```bash
 python3 benchmarks/mission-vs-goal/run_paired_pilot.py --starting-commit 0148f16 --timeout 900
+python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py --tasks-file benchmarks/mission-vs-goal/tasks.complex.json --run-id 2026-06-28-claude-goal-vs-mission-smoke-v2 --starting-commit 38cc7907e5e35fcd9fa23022a1fcf03f756df99b --limit-tasks 1 --timeout 300 --max-budget-usd 1.5 --mission-max-iter 1
 python3 -m pytest skills/mission/tests/test_benchmark_package.py skills/mission/tests/test_doc_consistency.py -q
 python3 -m pytest skills/mission/tests -q
 python3 -m json.tool benchmarks/mission-vs-goal/tasks.json
+python3 -m json.tool benchmarks/mission-vs-goal/tasks.complex.json
 python3 -m json.tool benchmarks/mission-vs-goal/result.schema.json
-git diff --check -- README.md README.ja.md docs/LOOP_ENGINEERING.md benchmarks/mission-vs-goal/README.md benchmarks/mission-vs-goal/README.ja.md benchmarks/mission-vs-goal/report.md benchmarks/mission-vs-goal/report.ja.md benchmarks/mission-vs-goal/report-template.md benchmarks/mission-vs-goal/report-template.ja.md benchmarks/mission-vs-goal/run_paired_pilot.py skills/mission/tests/test_benchmark_package.py
+python3 -m py_compile benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py
+git diff --check -- README.md README.ja.md docs/LOOP_ENGINEERING.md benchmarks/mission-vs-goal/README.md benchmarks/mission-vs-goal/README.ja.md benchmarks/mission-vs-goal/report.md benchmarks/mission-vs-goal/report.ja.md benchmarks/mission-vs-goal/report-template.md benchmarks/mission-vs-goal/report-template.ja.md benchmarks/mission-vs-goal/complex-validation-plan.md benchmarks/mission-vs-goal/complex-validation-plan.ja.md benchmarks/mission-vs-goal/run_paired_pilot.py benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py skills/mission/tests/test_benchmark_package.py
 ```
 
 ## Marketing Summary
@@ -94,6 +153,13 @@ Safe to say:
 > completed and passed all validators. `mission` produced stronger automated
 > evidence/completion-quality scores, while taking longer per run.
 
+Safe to say about the official `/goal` smoke:
+
+> A first Claude Code official `/goal` smoke was attempted on one complex task.
+> `/goal` completed the artifact, while the comparable `/mission` arm was
+> blocked by Claude Code workspace API limits. No marketing comparison should be
+> made from this smoke until the `/mission` arm can complete.
+
 Do not say:
 
 > `mission` is smarter than `/goal`.
@@ -102,10 +168,18 @@ Do not say:
 
 > `mission` improves completion rate in this pilot.
 
+Do not say:
+
+> `mission` is better or worse than Claude Code official `/goal` based on the
+> 2026-06-28 smoke.
+
 ## Raw Result Index
 
 ```text
 results/2026-06-27-codex-cli-local.jsonl
 results/2026-06-27-codex-cli-local-summary.json
 artifacts/2026-06-27-codex-cli-local/
+results/2026-06-28-claude-goal-vs-mission-smoke-v2.jsonl
+results/2026-06-28-claude-goal-vs-mission-smoke-v2-summary.json
+artifacts/2026-06-28-claude-goal-vs-mission-smoke-v2/
 ```

@@ -1,16 +1,23 @@
 # mission vs goal-only pilot benchmark
 
-This directory contains a 10-task pilot benchmark for comparing `mission`
-against a goal-only execution baseline in a marketing-safe way.
+This directory contains pilot benchmarks for comparing `mission` against
+goal-based execution baselines in a marketing-safe way.
 
 The benchmark is intentionally small. Its purpose is to learn where `mission`
 is meaningfully stronger and where a lightweight goal condition is enough
 before publishing broader claims.
 
-The first measured cohort used `tasks.json`. More complex validation is planned
-separately in `tasks.complex.json` and `complex-validation-plan.md`; those
-complex-task outcomes are not measured until a separate run id has raw JSONL
-and artifacts.
+The first measured cohort used `tasks.json` and the local `goal_only` baseline.
+More complex validation is defined in `tasks.complex.json` and
+`complex-validation-plan.md`.
+
+Terminology matters:
+
+- `goal_only` is the local lightweight baseline used by `run_paired_pilot.py`.
+  It is not the official Claude Code `/goal` command.
+- `claude_code_goal_command` is the official Claude Code built-in `/goal`
+  command, run through `run_claude_goal_vs_mission.py`.
+- `mission` is the `/mission` plugin workflow.
 
 ## Research Question
 
@@ -23,6 +30,7 @@ for multi-step work compared with a goal-only baseline?
 | Arm | Setup | What it tests |
 |---|---|---|
 | `goal_only` | Convert the task into a measurable goal, then run the agent normally until it decides the goal is satisfied. | A lightweight completion-condition workflow. |
+| `claude_code_goal_command` | Invoke Claude Code's built-in `/goal` command in print mode. | The official Claude Code goal command path, separate from the local baseline. |
 | `mission` | Run the same objective through `/mission` with state, review, scoring, and threshold-gated completion. | A stateful loop-engineering workflow. |
 
 Use the same model, repository state, branch starting point, tool permissions,
@@ -69,6 +77,25 @@ python3 benchmarks/mission-vs-goal/run_paired_pilot.py \
 Start with `--limit 2` for a smoke run before launching all 20 paired complex
 executions.
 
+To compare against Claude Code's official `/goal` command, use the separate
+Claude Code runner:
+
+```bash
+python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
+  --tasks-file benchmarks/mission-vs-goal/tasks.complex.json \
+  --run-id YYYY-MM-DD-claude-goal-vs-mission-smoke \
+  --starting-commit <commit> \
+  --limit-tasks 1 \
+  --timeout 300 \
+  --max-budget-usd 1.5 \
+  --mission-max-iter 1
+```
+
+The 2026-06-28 official `/goal` smoke produced a valid `/goal` artifact on one
+complex task, but the comparable `/mission` arm stopped on a Claude Code
+workspace API usage limit before writing an artifact. Treat that run as
+blocked, not as evidence that either arm is better.
+
 ## Human Quality Rubric
 
 | Score | Meaning |
@@ -92,6 +119,8 @@ Not allowed from this pilot:
 
 - Claims about general model intelligence.
 - Claims that `mission` is universally better than `/goal`.
+- Claims that `mission` is better or worse than Claude Code official `/goal`
+  from the 2026-06-28 smoke, because the `/mission` arm was API-limit blocked.
 - Percent improvements without publishing the denominator, task mix, and scoring method.
 - Claims based on fewer than all 10 paired task runs.
 
@@ -103,6 +132,7 @@ Not allowed from this pilot:
 | `tasks.complex.json` | Planned 10-task complex cohort; not measured yet. |
 | `result.schema.json` | JSON Schema for one result record. |
 | `report.md` | Current measured status and package-validation results. |
+| `run_claude_goal_vs_mission.py` | Claude Code official `/goal` vs `/mission` smoke runner. |
 | `report-template.md` | Publishable report skeleton with claim guardrails. |
 | `complex-validation-plan.md` | Planned protocol for more complex tasks. |
 | `README.ja.md` | Japanese version of this benchmark protocol. |
