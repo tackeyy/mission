@@ -17,7 +17,9 @@ every merged PR.
 - [ ] Version numbers are bumped together in `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, `plugins/mission/.codex-plugin/plugin.json`, README install paths, and Codex setup docs.
 - [ ] `CHANGELOG.md` and `CHANGELOG.ja.md` contain the release entry and links for the new version.
 - [ ] Compare `git log <previous-tag>..HEAD --oneline` with the new changelog entry, and confirm every user-facing `feat:` / `fix:` / audit or release-process change is represented in both English and Japanese.
-- [ ] GitHub Releases is created or updated for the new `vX.Y.Z` tag before reporting release completion.
+- [ ] Create and push the new `vX.Y.Z` git tag for the exact release commit.
+- [ ] Create or update the GitHub Release for the new `vX.Y.Z` tag before reporting release completion.
+- [ ] Re-verify publication with `git ls-remote --tags origin vX.Y.Z` and `gh release view vX.Y.Z --repo tackeyy/mission`; do not report a distribution release as complete until both commands confirm the new version.
 - [ ] `python3 -m pytest -q` passes under `skills/mission`.
 - [ ] `shellcheck scripts/mission-stop-guard.sh` passes.
 - [ ] JSON/YAML metadata parses successfully.

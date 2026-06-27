@@ -212,6 +212,23 @@ def test_release_checklist_requires_git_log_changelog_reconciliation():
             f"{rel} must require git log vs changelog reconciliation"
 
 
+def test_distribution_release_requires_remote_tag_and_github_release_verification():
+    """version bump 後の release 完了報告前に tag/GitHub Release の実在確認を必須化する."""
+    required_tokens = (
+        "git ls-remote --tags origin vX.Y.Z",
+        "gh release view vX.Y.Z --repo tackeyy/mission",
+        "distribution release",
+    )
+    for rel in ("docs/MARKETPLACE_RELEASE_CHECKLIST.md", "docs/MARKETPLACE_RELEASE_CHECKLIST.ja.md"):
+        txt = _r(REPO_ROOT / rel)
+        for token in required_tokens:
+            assert token in txt, f"{rel} must require release publication verification: {token}"
+    agents = _r(REPO_ROOT / "AGENTS.md")
+    assert "Distribution Release Rule" in agents
+    assert "gh release view vX.Y.Z --repo tackeyy/mission" in agents
+    assert "git ls-remote --tags origin vX.Y.Z" in agents
+
+
 def test_versioning_policy_separates_merge_and_distribution_releases():
     """通常 PR merge と配布 version bump を混同しないための方針を docs で固定する."""
     en = _r(REPO_ROOT / "docs/VERSIONING.md").lower()

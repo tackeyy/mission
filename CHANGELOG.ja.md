@@ -27,6 +27,7 @@
 - maintainer-local な skill 名を組み込まず、development / strategy 系 registry の段階的な利用順を示す `specialists_phase_plan` を recommendation に追加しました。
 - mission audit が不正な score iteration と空の specialist invocation record を明示的な finding として報告するようにしました。
 - mission audit に `--current-since` を追加し、historical audit debt を可視化したまま current regression と分離して判定できるようにしました。
+- distribution release では、対応する git tag の作成・push、GitHub Release の作成または更新、両方の再照合まで完了条件とする release guardrail を追加しました。
 
 ### 変更
 - mission orchestrator の運用指針に、`phase=executing` / `phase=reviewing` の明示更新と長時間作業の progress checkpoint を必須化しました。

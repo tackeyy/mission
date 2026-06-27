@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Specialist recommendations now include a bounded `specialists_phase_plan` for development and strategy-style registries without embedding maintainer-local skill names.
 - Mission audit now reports invalid score iterations and blank specialist invocation records as explicit findings.
 - Mission audit now accepts `--current-since` to keep historical audit debt visible while judging current regressions separately.
+- Release guardrails now require distribution releases to create and push the matching git tag, create or update the GitHub Release, and re-verify both before completion is reported.
 
 ### Changed
 - Mission orchestrator guidance now requires explicit `phase=executing` / `phase=reviewing` transitions and progress checkpoints for long-running work.

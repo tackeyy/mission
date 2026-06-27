@@ -18,3 +18,9 @@ This repository is OSS. Keep public behavior portable across users, machines, an
 - OSS code may define generic provider protocols, registry schemas, ranking logic, audit output, and safety gates.
 - External specialists are evidence providers only. `mission` owns state, scoring, pass/fail gates, and final reporting.
 - Broad orchestrator skills must be bounded to a single evidence artifact such as a plan, review, or synthesis note. Do not nest a second autonomous completion loop inside `/mission`.
+
+## Distribution Release Rule
+
+- A version bump is not a completed distribution release until the matching `vX.Y.Z` git tag exists on the remote and the GitHub Release for that tag exists.
+- Before reporting a distribution release as complete, verify both with `git ls-remote --tags origin vX.Y.Z` and `gh release view vX.Y.Z --repo tackeyy/mission`.
+- If manifests, README install paths, or changelogs are updated to a new version, the same task must carry through tag push and GitHub Release creation/update, unless the user explicitly asks to stop before publication.
