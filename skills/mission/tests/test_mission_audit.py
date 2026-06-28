@@ -228,7 +228,7 @@ def test_audit_current_since_splits_historical_debt(tmp_path):
         complexity="Standard",
         task_profile={"primary": "maintenance", "signals": ["execution-log"]},
         specialists_candidates=[
-            {"role": "unit tester", "skill": "dev-unit-tester", "kind": "skill", "task_profiles": ["testing"], "status": "available"}
+            {"role": "unit tester", "skill": "unit-test-provider", "kind": "skill", "task_profiles": ["testing"], "status": "available"}
         ],
         specialists_selected=[],
         specialist_invocations=[],
@@ -242,7 +242,7 @@ def test_audit_current_since_splits_historical_debt(tmp_path):
         complexity="Standard",
         task_profile={"primary": "maintenance", "signals": ["execution-log"]},
         specialists_candidates=[
-            {"role": "unit tester", "skill": "dev-unit-tester", "kind": "skill", "task_profiles": ["testing"], "status": "available"}
+            {"role": "unit tester", "skill": "unit-test-provider", "kind": "skill", "task_profiles": ["testing"], "status": "available"}
         ],
         specialists_selected=[],
         specialist_invocations=[],
@@ -635,7 +635,7 @@ def test_audit_reports_selected_specialist_without_invocation(tmp_path):
         task_profile={"primary": "documentation"},
         specialists_decision={"policy": "auto"},
         specialists_selected=[
-            {"role": "doc-writer", "skill": "dev-doc-writer", "status": "selected"},
+            {"role": "doc-writer", "skill": "documentation-provider", "status": "selected"},
         ],
         specialist_invocations=[],
     )
@@ -657,7 +657,7 @@ def test_audit_reports_selected_specialist_without_invocation(tmp_path):
 
     data = json.loads(result.stdout)
     assert data["specialist_invocation_gap_count"] == 1
-    assert data["specialist_invocation_gap_breakdown"]["dev-doc-writer"] == 1
+    assert data["specialist_invocation_gap_breakdown"]["documentation-provider"] == 1
     assert data["missing_specialist_selection_checkpoint_count"] == 0
     assert any(f["code"] == "specialist-invocation-gap" for f in data["findings"])
 
@@ -670,10 +670,10 @@ def test_audit_accepts_completed_specialist_invocation(tmp_path):
         task_profile={"primary": "documentation"},
         specialists_decision={"policy": "auto"},
         specialists_selected=[
-            {"role": "doc-writer", "skill": "dev-doc-writer", "status": "selected"},
+            {"role": "doc-writer", "skill": "documentation-provider", "status": "selected"},
         ],
         specialist_invocations=[
-            {"skill": "dev-doc-writer", "status": "inline-applied", "mode": "codex-inline"},
+            {"skill": "documentation-provider", "status": "inline-applied", "mode": "codex-inline"},
         ],
     )
 
@@ -707,7 +707,7 @@ def test_audit_reports_unselected_specialist_invocation(tmp_path):
         specialists_decision={"policy": "auto"},
         specialists_selected=[],
         specialist_invocations=[
-            {"skill": "dev-doc-writer", "status": "inline-applied", "mode": "codex-inline"},
+            {"skill": "documentation-provider", "status": "inline-applied", "mode": "codex-inline"},
         ],
     )
 
@@ -728,8 +728,8 @@ def test_audit_reports_unselected_specialist_invocation(tmp_path):
 
     data = json.loads(result.stdout)
     assert data["unselected_specialist_invocation_count"] == 1
-    assert data["unselected_specialist_invocations"][0]["skills"] == ["dev-doc-writer"]
-    assert data["unselected_specialist_invocation_breakdown"]["dev-doc-writer"] == 1
+    assert data["unselected_specialist_invocations"][0]["skills"] == ["documentation-provider"]
+    assert data["unselected_specialist_invocation_breakdown"]["documentation-provider"] == 1
     assert data["specialist_invocation_gap_count"] == 0
     assert any(f["code"] == "unselected-specialist-invocation" for f in data["findings"])
 
@@ -780,7 +780,7 @@ def test_audit_reports_only_external_invocation_when_core_and_external_are_mixed
         specialists_selected=[],
         specialist_invocations=[
             {"skill": "mission-reviewer", "status": "completed", "mode": "core-loop"},
-            {"skill": "dev-doc-writer", "status": "inline-applied", "mode": "codex-inline"},
+            {"skill": "documentation-provider", "status": "inline-applied", "mode": "codex-inline"},
         ],
     )
 
@@ -801,7 +801,7 @@ def test_audit_reports_only_external_invocation_when_core_and_external_are_mixed
 
     data = json.loads(result.stdout)
     assert data["unselected_specialist_invocation_count"] == 1
-    assert data["unselected_specialist_invocations"][0]["skills"] == ["dev-doc-writer"]
+    assert data["unselected_specialist_invocations"][0]["skills"] == ["documentation-provider"]
 
 
 def test_audit_accepts_explicit_specialist_selection_metadata(tmp_path):
@@ -814,14 +814,14 @@ def test_audit_accepts_explicit_specialist_selection_metadata(tmp_path):
         specialists_selected=[
             {
                 "role": "doc-writer",
-                "skill": "dev-doc-writer",
+                "skill": "documentation-provider",
                 "status": "selected",
                 "selection_source": "user-instruction",
             },
         ],
         specialist_invocations=[
             {
-                "skill": "dev-doc-writer",
+                "skill": "documentation-provider",
                 "status": "inline-applied",
                 "mode": "codex-inline",
                 "selection_source": "user-instruction",
@@ -946,8 +946,8 @@ def test_audit_reports_candidate_only_specialists(tmp_path):
         task_profile={"primary": "security", "risk": "high"},
         specialists_decision={"policy": "interactive"},
         specialists_candidates=[
-            {"role": "security-reviewer", "skill": "dev-security-reviewer", "status": "available"},
-            {"role": "unit-tester", "skill": "dev-unit-tester", "status": "available"},
+            {"role": "security-reviewer", "skill": "security-review-provider", "status": "available"},
+            {"role": "unit-tester", "skill": "unit-test-provider", "status": "available"},
         ],
         specialists_selected=[],
         specialist_invocations=[],
@@ -973,9 +973,9 @@ def test_audit_reports_candidate_only_specialists(tmp_path):
     assert data["candidate_only_specialists"][0]["session_id"] == "sess-a"
     assert data["candidate_only_specialists"][0]["priority"] == "P1"
     assert data["candidate_only_specialists"][0]["candidate_count"] == 2
-    assert data["candidate_only_specialists"][0]["skills"] == ["dev-security-reviewer", "dev-unit-tester"]
+    assert data["candidate_only_specialists"][0]["skills"] == ["security-review-provider", "unit-test-provider"]
     assert data["candidate_only_specialist_breakdown"][str(tmp_path.name)] == 1
-    assert data["candidate_only_specialist_skill_breakdown"]["dev-security-reviewer"] == 1
+    assert data["candidate_only_specialist_skill_breakdown"]["security-review-provider"] == 1
     assert any(f["code"] == "candidate-only-specialists" and f["priority"] == "P1" for f in data["findings"])
 
 
@@ -992,7 +992,7 @@ def test_audit_does_not_report_candidate_only_for_active_ask_user_wait(tmp_path)
         task_profile={"primary": "documentation"},
         specialists_decision={"policy": "interactive", "action": "ask-user", "prompted_user": True},
         specialists_candidates=[
-            {"role": "doc-writer", "skill": "dev-doc-writer", "status": "available"},
+            {"role": "doc-writer", "skill": "documentation-provider", "status": "available"},
             {"role": "document-review", "skill": "sc-document-reviewer", "status": "available"},
         ],
         specialists_selected=[],
@@ -1027,10 +1027,10 @@ def test_audit_does_not_report_candidate_only_when_specialist_selected(tmp_path)
         task_profile={"primary": "documentation"},
         specialists_decision={"policy": "auto"},
         specialists_candidates=[
-            {"role": "doc-writer", "skill": "dev-doc-writer", "status": "available"},
+            {"role": "doc-writer", "skill": "documentation-provider", "status": "available"},
         ],
         specialists_selected=[
-            {"role": "doc-writer", "skill": "dev-doc-writer", "status": "selected"},
+            {"role": "doc-writer", "skill": "documentation-provider", "status": "selected"},
         ],
         specialist_invocations=[],
     )
@@ -1064,11 +1064,11 @@ def test_audit_does_not_report_candidate_only_with_explicit_skip(tmp_path):
         task_profile={"primary": "documentation"},
         specialists_decision={"policy": "auto"},
         specialists_candidates=[
-            {"role": "doc-writer", "skill": "dev-doc-writer", "status": "available"},
+            {"role": "doc-writer", "skill": "documentation-provider", "status": "available"},
         ],
         specialists_selected=[],
         specialist_invocations=[
-            {"skill": "dev-doc-writer", "status": "skipped", "mode": "codex-inline", "reason": "not needed"},
+            {"skill": "documentation-provider", "status": "skipped", "mode": "codex-inline", "reason": "not needed"},
         ],
     )
 
@@ -1102,13 +1102,13 @@ def test_audit_reports_unaccounted_high_risk_candidates_after_partial_skip(tmp_p
         task_profile={"primary": "security", "secondary": ["testing"], "risk": "high"},
         specialists_decision={"policy": "interactive"},
         specialists_candidates=[
-            {"role": "security-reviewer", "skill": "dev-security-reviewer", "status": "available"},
-            {"role": "unit-tester", "skill": "dev-unit-tester", "status": "available"},
+            {"role": "security-reviewer", "skill": "security-review-provider", "status": "available"},
+            {"role": "unit-tester", "skill": "unit-test-provider", "status": "available"},
         ],
         specialists_selected=[],
         specialist_invocations=[
             {
-                "skill": "dev-security-reviewer",
+                "skill": "security-review-provider",
                 "status": "skipped",
                 "mode": "fallback-core",
                 "reason": "Core review covered the security checklist",
@@ -1134,9 +1134,9 @@ def test_audit_reports_unaccounted_high_risk_candidates_after_partial_skip(tmp_p
     data = json.loads(result.stdout)
     assert data["candidate_only_specialist_count"] == 1
     assert data["candidate_only_specialists"][0]["candidate_count"] == 1
-    assert data["candidate_only_specialists"][0]["skills"] == ["dev-unit-tester"]
-    assert data["candidate_only_specialist_skill_breakdown"]["dev-unit-tester"] == 1
-    assert "dev-security-reviewer" not in data["candidate_only_specialist_skill_breakdown"]
+    assert data["candidate_only_specialists"][0]["skills"] == ["unit-test-provider"]
+    assert data["candidate_only_specialist_skill_breakdown"]["unit-test-provider"] == 1
+    assert "security-review-provider" not in data["candidate_only_specialist_skill_breakdown"]
 
 
 def test_audit_ignores_non_risk_candidate_when_complex_risk_candidates_are_accounted(tmp_path):
@@ -1148,18 +1148,18 @@ def test_audit_ignores_non_risk_candidate_when_complex_risk_candidates_are_accou
         task_profile={"primary": "documentation", "secondary": ["testing", "infra"], "risk": "medium"},
         specialists_decision={"policy": "auto"},
         specialists_candidates=[
-            {"role": "doc-writer", "skill": "dev-doc-writer", "task_profiles": ["documentation"], "status": "available"},
-            {"role": "backend", "skill": "dev-backend", "task_profiles": ["backend", "database"], "status": "available"},
-            {"role": "unit-tester", "skill": "dev-unit-tester", "task_profiles": ["testing", "backend"], "status": "available"},
-            {"role": "infra", "skill": "dev-infra", "task_profiles": ["infra"], "status": "available"},
+            {"role": "doc-writer", "skill": "documentation-provider", "task_profiles": ["documentation"], "status": "available"},
+            {"role": "backend", "skill": "backend-provider", "task_profiles": ["backend", "database"], "status": "available"},
+            {"role": "unit-tester", "skill": "unit-test-provider", "task_profiles": ["testing", "backend"], "status": "available"},
+            {"role": "infra", "skill": "infra-provider", "task_profiles": ["infra"], "status": "available"},
         ],
         specialists_selected=[
-            {"role": "doc-writer", "skill": "dev-doc-writer", "status": "selected"},
+            {"role": "doc-writer", "skill": "documentation-provider", "status": "selected"},
         ],
         specialist_invocations=[
-            {"skill": "dev-doc-writer", "status": "inline-applied", "mode": "codex-inline"},
-            {"skill": "dev-unit-tester", "status": "skipped", "mode": "fallback-core", "reason": "focused pytest covers the change"},
-            {"skill": "dev-infra", "status": "skipped", "mode": "fallback-core", "reason": "no deployment or CI behavior changed"},
+            {"skill": "documentation-provider", "status": "inline-applied", "mode": "codex-inline"},
+            {"skill": "unit-test-provider", "status": "skipped", "mode": "fallback-core", "reason": "focused pytest covers the change"},
+            {"skill": "infra-provider", "status": "skipped", "mode": "fallback-core", "reason": "no deployment or CI behavior changed"},
         ],
     )
 
@@ -1180,7 +1180,7 @@ def test_audit_ignores_non_risk_candidate_when_complex_risk_candidates_are_accou
 
     data = json.loads(result.stdout)
     assert data["candidate_only_specialist_count"] == 0
-    assert "dev-backend" not in data["candidate_only_specialist_skill_breakdown"]
+    assert "backend-provider" not in data["candidate_only_specialist_skill_breakdown"]
     assert all(f["code"] != "candidate-only-specialists" for f in data["findings"])
 
 
@@ -1195,14 +1195,14 @@ def test_audit_reports_database_candidate_only_when_database_signal_is_strong(tm
         planned_files=["db/schema.sql", "skills/mission/bin/mission-state.py"],
         specialists_decision={"policy": "auto"},
         specialists_candidates=[
-            {"role": "doc-writer", "skill": "dev-doc-writer", "task_profiles": ["documentation"], "status": "available"},
-            {"role": "backend", "skill": "dev-backend", "task_profiles": ["backend", "database"], "status": "available"},
+            {"role": "doc-writer", "skill": "documentation-provider", "task_profiles": ["documentation"], "status": "available"},
+            {"role": "backend", "skill": "backend-provider", "task_profiles": ["backend", "database"], "status": "available"},
         ],
         specialists_selected=[
-            {"role": "doc-writer", "skill": "dev-doc-writer", "status": "selected"},
+            {"role": "doc-writer", "skill": "documentation-provider", "status": "selected"},
         ],
         specialist_invocations=[
-            {"skill": "dev-doc-writer", "status": "inline-applied", "mode": "codex-inline"},
+            {"skill": "documentation-provider", "status": "inline-applied", "mode": "codex-inline"},
         ],
     )
 
@@ -1224,7 +1224,7 @@ def test_audit_reports_database_candidate_only_when_database_signal_is_strong(tm
     data = json.loads(result.stdout)
     assert data["candidate_only_specialist_count"] == 1
     assert data["candidate_only_specialists"][0]["priority"] == "P1"
-    assert data["candidate_only_specialists"][0]["skills"] == ["dev-backend"]
+    assert data["candidate_only_specialists"][0]["skills"] == ["backend-provider"]
 
 
 def test_audit_does_not_report_candidate_only_without_candidates(tmp_path):

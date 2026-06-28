@@ -76,13 +76,14 @@ presets:
     task_profiles: [documentation, protocol]
     specialists:
       - role: doc-writer
-        skill: dev-doc-writer
+        skill: documentation-provider
         phases: [planning, execution, review]
         required: false
+        install_hint: false
         evidence: doc_accuracy
 specialists:
   - role: security-reviewer
-    skill: dev-security-reviewer
+    skill: security-review-provider
     task_profiles: [security, auth, payment]
     phases: [planning, review]
     required: false
@@ -110,6 +111,7 @@ Fields:
 | `task_profiles` | Profiles that make the specialist relevant. |
 | `phases` | Allowed phases: `planning`, `execution`, `review`, `scoring`, `critic`. |
 | `required` | If `true`, missing skill becomes a blocker. Default `false`. |
+| `install_hint` | If `false`, a missing optional provider degrades to core review instead of recommending installation. Built-in portable presets use `false`; explicit project/user registries default to `true`. |
 | `max_calls_per_iteration` | Soft limit to prevent runaway specialist calls. |
 | `unavailable` | `continue`, `warn`, or `halt`. Default `continue`. |
 | `auto_use.min_complexity` | Minimum mission complexity for automatic selection, such as `Complex`. |
@@ -163,7 +165,7 @@ Example:
 ```bash
 python3 skills/mission/bin/mission-state.py specialists recommend \
   --task "Implement a React UI component with accessibility tests" \
-  --installed-skills dev-frontend \
+  --installed-skills frontend-provider \
   --json
 ```
 
@@ -227,7 +229,7 @@ Default behavior is graceful degradation:
 
 - Missing optional skill: record `missing`, continue with core subskills.
 - Missing optional command provider: record `provider-unavailable`, continue with core subskills.
-- Registry file absent: use beginner presets or no specialist.
+- Registry file absent: use beginner presets when matching providers are already installed, otherwise continue with core subskills.
 - Invalid YAML: warn, ignore invalid registry, continue.
 - Skill exists but cannot be invoked in the current agent: record `unavailable`, continue.
 - Command exits non-zero: archive stdout/stderr/exit status, record `failed`, continue unless a future strict-mode policy makes that provider mandatory.
@@ -242,7 +244,7 @@ Some skills are themselves orchestrators or broad methodologies, for example `de
 Rules:
 
 - Do not nest a second completion loop inside `/mission` by default.
-- Prefer narrower specialists (`dev-backend`, `dev-frontend`, `dev-unit-tester`) over a broad orchestrator when both match.
+- Prefer narrower specialists (`backend-provider`, `frontend-provider`, `unit-test-provider`) over a broad orchestrator when both match.
 - If a broad orchestrator is selected, call it for bounded evidence such as "produce an implementation plan" or "review this design", not for autonomous end-to-end control.
 - Registry candidates marked `bounded_use: true`, `broad_orchestrator: true`, or described as a broad orchestrator are removed from execution-phase recommendations.
 - Applied evidence for a bounded orchestrator must include `--bounded-purpose "<limited artifact>"`; execution-phase application is rejected.
@@ -287,7 +289,7 @@ The orchestrator preserves enough traceability to explain specialist selection w
   "specialists_candidates": [
     {
       "role": "doc-writer",
-      "skill": "dev-doc-writer",
+      "skill": "documentation-provider",
       "score": 0.82,
       "installed": true,
       "reason": "documentation profile match"
@@ -296,7 +298,7 @@ The orchestrator preserves enough traceability to explain specialist selection w
   "specialists_selected": [
     {
       "role": "doc-writer",
-      "skill": "dev-doc-writer",
+      "skill": "documentation-provider",
       "phases": ["planning", "execution", "review"],
       "status": "selected",
       "source": "preset:docs"
@@ -305,14 +307,14 @@ The orchestrator preserves enough traceability to explain specialist selection w
   "specialists_unavailable": [
     {
       "role": "security-reviewer",
-      "skill": "dev-security-reviewer",
+      "skill": "security-review-provider",
       "reason": "not installed"
     }
   ],
   "specialists_decision": {
     "policy": "auto",
     "action": "select",
-    "reason": "top candidate dev-doc-writer is installed with score 0.82",
+    "reason": "top candidate documentation-provider is installed with score 0.82",
     "prompted_user": false
   },
   "specialist_invocations": [
@@ -320,17 +322,17 @@ The orchestrator preserves enough traceability to explain specialist selection w
       "iteration": 1,
       "phase": "review",
       "role": "doc-writer",
-      "skill": "dev-doc-writer",
+      "skill": "documentation-provider",
       "mode": "codex-inline",
       "status": "inline-applied",
       "timestamp": "2026-06-19T08:00:00Z",
-      "evidence_path": ".mission-state/archive/iter-1-deadbeef-specialist-dev-doc-writer.md"
+      "evidence_path": ".mission-state/archive/iter-1-deadbeef-specialist-documentation-provider.md"
     },
     {
       "iteration": 1,
       "phase": "planning",
       "role": "security-reviewer",
-      "skill": "dev-security-reviewer",
+      "skill": "security-review-provider",
       "mode": "fallback-core",
       "status": "skipped",
       "reason": "Core reviewer covered the security checklist for this docs-only change",

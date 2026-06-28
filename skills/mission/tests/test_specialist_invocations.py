@@ -111,7 +111,7 @@ def test_log_invocation_records_codex_inline_usage(state_dir, run_cli, read_stat
         "--iteration", "1",
         "--phase", "planning",
         "--role", "doc-writer",
-        "--skill", "dev-doc-writer",
+        "--skill", "documentation-provider",
         "--mode", "codex-inline",
         "--status", "inline-applied",
         cwd=state_dir.parent,
@@ -129,7 +129,7 @@ def test_log_invocation_selection_source_adds_selection_metadata(state_dir, run_
         "--iteration", "1",
         "--phase", "planning",
         "--role", "doc-writer",
-        "--skill", "dev-doc-writer",
+        "--skill", "documentation-provider",
         "--mode", "codex-inline",
         "--status", "inline-applied",
         "--selection-source", "user-instruction",
@@ -143,7 +143,7 @@ def test_log_invocation_selection_source_adds_selection_metadata(state_dir, run_
     entry = state["specialist_invocations"][0]
     selected = state["specialists_selected"][0]
     assert entry["selection_source"] == "user-instruction"
-    assert selected["skill"] == "dev-doc-writer"
+    assert selected["skill"] == "documentation-provider"
     assert selected["status"] == "selected"
     assert selected["selection_source"] == "user-instruction"
     assert selected["source"] == "user-instruction:log-invocation"
@@ -381,7 +381,7 @@ def test_log_invocation_records_unavailable_without_evidence(state_dir, run_cli,
         "--iteration", "1",
         "--phase", "review",
         "--role", "security-reviewer",
-        "--skill", "dev-security-reviewer",
+        "--skill", "security-review-provider",
         "--mode", "fallback-core",
         "--status", "unavailable",
         "--notes", "Skill is not callable in this environment",
@@ -401,7 +401,7 @@ def test_log_invocation_records_skipped_with_reason(state_dir, run_cli, read_sta
         "--iteration", "1",
         "--phase", "planning",
         "--role", "security-reviewer",
-        "--skill", "dev-security-reviewer",
+        "--skill", "security-review-provider",
         "--mode", "fallback-core",
         "--status", "skipped",
         "--reason", "Core reviewer covered the security checklist for this low-risk docs-only change",
@@ -420,7 +420,7 @@ def test_log_invocation_rejects_skipped_without_reason(state_dir, run_cli):
         "--iteration", "1",
         "--phase", "planning",
         "--role", "security-reviewer",
-        "--skill", "dev-security-reviewer",
+        "--skill", "security-review-provider",
         "--mode", "fallback-core",
         "--status", "skipped",
         cwd=state_dir.parent,
@@ -436,7 +436,7 @@ def test_log_invocation_records_failed_attempt(state_dir, run_cli, read_state):
         "--iteration", "1",
         "--phase", "review",
         "--role", "unit-tester",
-        "--skill", "dev-unit-tester",
+        "--skill", "unit-test-provider",
         "--mode", "skill-tool",
         "--status", "failed",
         "--reason", "Skill subprocess exited before producing review evidence",
@@ -493,17 +493,17 @@ def test_specialist_accounting_reports_only_required_complex_candidates(state_di
         "complexity": "Complex",
         "task_profile": {"primary": "documentation", "secondary": ["testing", "infra"], "risk": "medium"},
         "specialists_candidates": [
-            {"role": "doc-writer", "skill": "dev-doc-writer", "task_profiles": ["documentation"], "status": "available"},
-            {"role": "backend", "skill": "dev-backend", "task_profiles": ["backend", "database"], "status": "available"},
-            {"role": "unit-tester", "skill": "dev-unit-tester", "task_profiles": ["testing", "backend"], "status": "available"},
-            {"role": "infra", "skill": "dev-infra", "task_profiles": ["infra"], "status": "available"},
+            {"role": "doc-writer", "skill": "documentation-provider", "task_profiles": ["documentation"], "status": "available"},
+            {"role": "backend", "skill": "backend-provider", "task_profiles": ["backend", "database"], "status": "available"},
+            {"role": "unit-tester", "skill": "unit-test-provider", "task_profiles": ["testing", "backend"], "status": "available"},
+            {"role": "infra", "skill": "infra-provider", "task_profiles": ["infra"], "status": "available"},
         ],
         "specialists_selected": [
-            {"role": "doc-writer", "skill": "dev-doc-writer", "status": "selected"},
+            {"role": "doc-writer", "skill": "documentation-provider", "status": "selected"},
         ],
         "specialist_invocations": [
-            {"skill": "dev-doc-writer", "status": "inline-applied", "mode": "codex-inline"},
-            {"skill": "dev-infra", "status": "skipped", "mode": "fallback-core", "reason": "no infra changes"},
+            {"skill": "documentation-provider", "status": "inline-applied", "mode": "codex-inline"},
+            {"skill": "infra-provider", "status": "skipped", "mode": "fallback-core", "reason": "no infra changes"},
         ],
     })
     state_path.write_text(json.dumps(state))
@@ -513,8 +513,8 @@ def test_specialist_accounting_reports_only_required_complex_candidates(state_di
     data = _json_result(r)
     assert data["ok"] is True
     assert data["priority"] == "P1"
-    assert [item["skill"] for item in data["unaccounted_candidates"]] == ["dev-unit-tester"]
-    assert [item["skill"] for item in data["required_unaccounted_candidates"]] == ["dev-unit-tester"]
+    assert [item["skill"] for item in data["unaccounted_candidates"]] == ["unit-test-provider"]
+    assert [item["skill"] for item in data["required_unaccounted_candidates"]] == ["unit-test-provider"]
 
 
 def test_specialist_accounting_accepts_explicit_skips(state_dir, run_cli):
@@ -524,17 +524,17 @@ def test_specialist_accounting_accepts_explicit_skips(state_dir, run_cli):
         "complexity": "Complex",
         "task_profile": {"primary": "documentation", "secondary": ["testing", "infra"], "risk": "medium"},
         "specialists_candidates": [
-            {"role": "doc-writer", "skill": "dev-doc-writer", "task_profiles": ["documentation"], "status": "available"},
-            {"role": "unit-tester", "skill": "dev-unit-tester", "task_profiles": ["testing", "backend"], "status": "available"},
-            {"role": "infra", "skill": "dev-infra", "task_profiles": ["infra"], "status": "available"},
+            {"role": "doc-writer", "skill": "documentation-provider", "task_profiles": ["documentation"], "status": "available"},
+            {"role": "unit-tester", "skill": "unit-test-provider", "task_profiles": ["testing", "backend"], "status": "available"},
+            {"role": "infra", "skill": "infra-provider", "task_profiles": ["infra"], "status": "available"},
         ],
         "specialists_selected": [
-            {"role": "doc-writer", "skill": "dev-doc-writer", "status": "selected"},
+            {"role": "doc-writer", "skill": "documentation-provider", "status": "selected"},
         ],
         "specialist_invocations": [
-            {"skill": "dev-doc-writer", "status": "inline-applied", "mode": "codex-inline"},
-            {"skill": "dev-unit-tester", "status": "skipped", "mode": "fallback-core", "reason": "focused tests cover this change"},
-            {"skill": "dev-infra", "status": "skipped", "mode": "fallback-core", "reason": "no infra changes"},
+            {"skill": "documentation-provider", "status": "inline-applied", "mode": "codex-inline"},
+            {"skill": "unit-test-provider", "status": "skipped", "mode": "fallback-core", "reason": "focused tests cover this change"},
+            {"skill": "infra-provider", "status": "skipped", "mode": "fallback-core", "reason": "no infra changes"},
         ],
     })
     state_path.write_text(json.dumps(state))

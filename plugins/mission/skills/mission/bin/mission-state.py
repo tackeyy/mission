@@ -68,59 +68,66 @@ ARTIFACT_PUBLISH_PROVIDERS = {"claude-code", "local"}
 BUILTIN_SPECIALIST_CANDIDATES = [
     {
         "role": "doc-writer",
-        "skill": "dev-doc-writer",
+        "skill": "documentation-provider",
         "task_profiles": ["documentation"],
         "phases": ["planning", "execution", "review"],
         "source": "preset:docs",
         "required": False,
+        "install_hint": False,
     },
     {
         "role": "frontend",
-        "skill": "dev-frontend",
+        "skill": "frontend-provider",
         "task_profiles": ["frontend"],
         "phases": ["planning", "execution"],
         "source": "preset:frontend",
         "required": False,
+        "install_hint": False,
     },
     {
         "role": "visual-quality",
-        "skill": "frontend-skill",
+        "skill": "visual-quality-provider",
         "task_profiles": ["frontend", "product"],
         "phases": ["planning", "review"],
         "source": "preset:frontend",
         "required": False,
+        "install_hint": False,
     },
     {
         "role": "backend",
-        "skill": "dev-backend",
+        "skill": "backend-provider",
         "task_profiles": ["backend", "database"],
         "phases": ["planning", "execution"],
         "source": "preset:backend",
         "required": False,
+        "install_hint": False,
     },
     {
         "role": "unit-tester",
-        "skill": "dev-unit-tester",
+        "skill": "unit-test-provider",
         "task_profiles": ["testing", "backend"],
         "phases": ["execution", "review"],
         "source": "preset:testing",
         "required": False,
+        "install_hint": False,
     },
     {
         "role": "security-reviewer",
-        "skill": "dev-security-reviewer",
+        "skill": "security-review-provider",
         "task_profiles": ["security"],
         "phases": ["planning", "review"],
         "source": "preset:security",
         "required": False,
+        "install_hint": False,
     },
     {
         "role": "infra",
-        "skill": "dev-infra",
+        "skill": "infra-provider",
         "task_profiles": ["infra"],
         "phases": ["planning", "execution", "review"],
         "source": "preset:infra",
         "required": False,
+        "install_hint": False,
     },
 ]
 
@@ -860,6 +867,7 @@ def _disable_keys(candidate: dict) -> set[str]:
 
 def _enabled_registry_candidates(registry_candidates: list[dict]) -> list[dict]:
     disabled: set[str] = set()
+    enabled_keys: set[str] = set()
     enabled: list[dict] = []
     for raw in [*registry_candidates, *BUILTIN_SPECIALIST_CANDIDATES]:
         if not isinstance(raw, dict):
@@ -868,8 +876,9 @@ def _enabled_registry_candidates(registry_candidates: list[dict]) -> list[dict]:
         if raw.get("enabled") is False:
             disabled.update(keys)
             continue
-        if keys & disabled:
+        if keys & disabled or keys & enabled_keys:
             continue
+        enabled_keys.update(keys)
         enabled.append(raw)
     return enabled
 
@@ -963,7 +972,23 @@ def _normalize_candidate(candidate: dict, source: str) -> dict:
         "result_contract": result_contract,
         "bounded_use": bounded_use,
         "bounded_purpose_required": bool(candidate.get("bounded_purpose_required", bounded_use)),
+        "install_hint": bool(candidate.get("install_hint", True)),
     }
+
+
+def _candidate_source_rank(candidate: dict) -> int:
+    source = str(candidate.get("source") or "")
+    if source.startswith("registry:"):
+        return 0
+    if source.startswith("project:"):
+        return 1
+    if source.startswith("user:"):
+        return 2
+    if source.startswith("skill-manifest:"):
+        return 3
+    if source.startswith("preset:"):
+        return 4
+    return 5
 
 
 def _default_consent_file() -> Path:
@@ -1025,7 +1050,7 @@ def rank_specialist_candidates(task_profile: dict, registry_candidates: list[dic
             "first_use": skill in first_use or provider_id in first_use or needs_first_use,
             "reason": f"{', '.join(overlap)} profile match",
         })
-    ranked.sort(key=lambda c: (-c["score"], c["skill"]))
+    ranked.sort(key=lambda c: (-c["score"], _candidate_source_rank(c), c["skill"]))
     return ranked
 
 
@@ -1069,6 +1094,13 @@ def decide_specialists(task_profile: dict, candidates: list[dict]) -> dict:
             "prompted_user": False,
         }
     if not top.get("installed"):
+        if not top.get("install_hint", True):
+            return {
+                "policy": "fallback",
+                "action": "continue-core",
+                "reason": f"top preset specialist is not installed: {top['skill']}",
+                "prompted_user": False,
+            }
         return {
             "policy": "install-recommended",
             "action": "recommend-install",
