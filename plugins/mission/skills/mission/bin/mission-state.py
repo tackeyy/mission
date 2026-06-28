@@ -176,6 +176,10 @@ PHASE_ROLE_ORDER = {
 }
 
 PROFILE_KEYWORDS = {
+    "architecture": (
+        "architecture", "architect", "system design", "design review",
+        "設計", "アーキテクチャ", "構成", "構造",
+    ),
     "documentation": ("readme", "docs", "document", "documentation", "adr", "guide", "reference", "changelog", ".md"),
     "frontend": ("frontend", "react", "vue", "ui", "css", "component", "browser", "screenshot", "accessibility"),
     "backend": ("backend", "api", "endpoint", "service", "worker", "validation", "business logic"),

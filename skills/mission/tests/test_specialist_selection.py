@@ -346,6 +346,37 @@ def test_recommend_supports_command_provider_yaml_schema(run_cli, tmp_path):
     assert selected["max_calls_per_iteration"] == "1"
 
 
+def test_recommend_classifies_architecture_profile(run_cli, tmp_path):
+    project_registry = tmp_path / ".mission" / "specialists.yml"
+    project_registry.parent.mkdir()
+    project_registry.write_text(json.dumps({
+        "version": 1,
+        "specialists": [{
+            "role": "architecture-review",
+            "skill": "architecture-review-provider",
+            "task_profiles": ["architecture"],
+            "phases": ["planning", "review"],
+            "required": False,
+        }],
+    }))
+
+    r = run_cli(
+        *_recommend_args(
+        "--task",
+        "Review the state machine architecture and system design boundaries",
+        "--installed-skills",
+        "architecture-review-provider",
+        "--json",
+        ),
+        cwd=tmp_path,
+    )
+
+    data = _json_result(r)
+    assert data["task_profile"]["primary"] == "architecture"
+    assert data["specialists_decision"]["policy"] == "auto"
+    assert data["specialists_selected"][0]["skill"] == "architecture-review-provider"
+
+
 def test_risk_first_use_consent_allowlist_enables_auto_selection(run_cli, tmp_path):
     registry = tmp_path / ".mission" / "specialists.yml"
     registry.parent.mkdir()

@@ -9,6 +9,9 @@
 
 ## [Unreleased]
 
+### 修正
+- specialist の task_profile 分類が architecture / system design 系 mission を認識するようになり、architecture 専用の project / user provider が documentation fallback に隠れて選ばれない問題を修正しました。
+
 ## [1.0.5] - 2026-06-26
 
 ### 追加

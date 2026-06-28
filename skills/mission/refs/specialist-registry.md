@@ -125,6 +125,7 @@ Phase 1 classifies the mission into one primary `task_profile` and zero or more 
 
 | Profile | Signals |
 |---|---|
+| `architecture` | system design, architecture review, component boundaries, state machines |
 | `documentation` | README, docs, guide, protocol, reference, changelog |
 | `frontend` | UI, component, CSS, accessibility, browser screenshots |
 | `backend` | API, service logic, data validation, workers |

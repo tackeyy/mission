@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Specialist task-profile classification now recognizes architecture/system-design missions, so architecture-only project or user providers can be selected instead of being hidden behind documentation fallback.
+
 ## [1.0.5] - 2026-06-26
 
 ### Added
