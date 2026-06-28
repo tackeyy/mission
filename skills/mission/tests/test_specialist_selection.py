@@ -18,7 +18,7 @@ def test_recommend_auto_selects_high_confidence_installed_candidate(run_cli, tmp
         "--task",
         "Implement a React UI component with accessibility tests",
         "--installed-skills",
-        "dev-frontend",
+        "frontend-provider",
         "--json",
         ),
         cwd=tmp_path,
@@ -26,7 +26,7 @@ def test_recommend_auto_selects_high_confidence_installed_candidate(run_cli, tmp
     data = _json_result(r)
     assert data["task_profile"]["primary"] == "frontend"
     assert data["specialists_decision"]["policy"] == "auto"
-    assert data["specialists_selected"][0]["skill"] == "dev-frontend"
+    assert data["specialists_selected"][0]["skill"] == "frontend-provider"
     assert data["specialists_decision"]["prompted_user"] is False
 
 
@@ -36,7 +36,7 @@ def test_recommend_tied_installed_candidates_uses_interactive_fallback(run_cli, 
         "--task",
         "Improve React UI component visual quality",
         "--installed-skills",
-        "dev-frontend,frontend-skill",
+        "frontend-provider,visual-quality-provider",
         "--json",
         ),
         cwd=tmp_path,
@@ -47,7 +47,7 @@ def test_recommend_tied_installed_candidates_uses_interactive_fallback(run_cli, 
     assert data["specialists_selected"] == []
 
 
-def test_recommend_missing_optional_candidate_recommends_install(run_cli, tmp_path):
+def test_recommend_missing_builtin_preset_falls_back_without_install_prompt(run_cli, tmp_path):
     r = run_cli(
         *_recommend_args(
         "--task",
@@ -58,8 +58,70 @@ def test_recommend_missing_optional_candidate_recommends_install(run_cli, tmp_pa
     )
     data = _json_result(r)
     assert data["task_profile"]["primary"] == "documentation"
+    assert data["specialists_decision"]["policy"] == "fallback"
+    assert data["specialists_decision"]["action"] == "continue-core"
+    assert data["specialists_decision"]["prompted_user"] is False
+    assert data["specialists_unavailable"][0]["skill"] == "documentation-provider"
+
+
+def test_recommend_missing_registry_candidate_recommends_install(run_cli, tmp_path):
+    registry = tmp_path / "specialists.yml"
+    registry.write_text(
+        "\n".join([
+            "version: 1",
+            "specialists:",
+            "  - role: doc-reviewer",
+            "    skill: missing-doc-provider",
+            "    task_profiles: [documentation]",
+            "    phases: [planning, review]",
+        ])
+    )
+    r = run_cli(
+        *_recommend_args(
+        "--task",
+        "Write README documentation and ADR guidance",
+        "--registry",
+        str(registry),
+        "--json",
+        ),
+        cwd=tmp_path,
+    )
+    data = _json_result(r)
     assert data["specialists_decision"]["policy"] == "install-recommended"
-    assert data["specialists_unavailable"][0]["skill"] == "dev-doc-writer"
+    assert data["specialists_unavailable"][0]["skill"] == "missing-doc-provider"
+
+
+def test_recommend_prefers_registry_candidate_over_builtin_preset_duplicate(run_cli, tmp_path):
+    registry = tmp_path / "specialists.yml"
+    registry.write_text(
+        "\n".join([
+            "version: 1",
+            "specialists:",
+            "  - role: doc-writer",
+            "    skill: documentation-provider",
+            "    task_profiles: [documentation]",
+            "    phases: [review]",
+        ])
+    )
+
+    r = run_cli(
+        *_recommend_args(
+        "--task",
+        "Update README documentation",
+        "--registry",
+        str(registry),
+        "--installed-skills",
+        "documentation-provider",
+        "--json",
+        ),
+        cwd=tmp_path,
+    )
+    data = _json_result(r)
+
+    matching = [c for c in data["specialists_candidates"] if c["skill"] == "documentation-provider"]
+    assert len(matching) == 1
+    assert matching[0]["source"].startswith("registry:")
+    assert matching[0]["phases"] == ["review"]
 
 
 def test_recommend_missing_required_registry_candidate_prompts_user(run_cli, tmp_path):
@@ -123,7 +185,7 @@ def test_recommend_high_risk_installed_candidate_requires_confirmation(run_cli, 
         "--task",
         "Deploy production auth token security change",
         "--installed-skills",
-        "dev-security-reviewer",
+        "security-review-provider",
         "--json",
         ),
         cwd=tmp_path,
@@ -140,9 +202,9 @@ def test_recommend_first_use_candidate_requires_confirmation(run_cli, tmp_path):
         "--task",
         "Write README documentation",
         "--installed-skills",
-        "dev-doc-writer",
+        "documentation-provider",
         "--first-use",
-        "dev-doc-writer",
+        "documentation-provider",
         "--json",
         ),
         cwd=tmp_path,
@@ -159,7 +221,7 @@ def test_recommend_record_state_persists_selection_metadata(run_cli, tmp_path):
         "--task",
         "Implement backend API endpoint tests",
         "--installed-skills",
-        "dev-backend",
+        "backend-provider",
         "--record-state",
         "--json",
         ),

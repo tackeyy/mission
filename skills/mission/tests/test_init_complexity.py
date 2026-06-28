@@ -101,11 +101,11 @@ def test_set_records_specialist_metadata_json(run_cli, tmp_path):
         "evidence": ["mission-state.py owns state mutation"],
     }
     selected = [
-        {"id": "dev-backend", "reason": "state schema change"},
-        {"id": "dev-unit-tester", "reason": "pytest coverage"},
+        {"id": "backend-provider", "reason": "state schema change"},
+        {"id": "unit-test-provider", "reason": "pytest coverage"},
     ]
     unavailable = [
-        {"id": "dev-frontend", "reason": "no UI surface touched"},
+        {"id": "frontend-provider", "reason": "no UI surface touched"},
     ]
 
     run_cli(
