@@ -10,7 +10,8 @@
 
 最初に計測した cohort は `tasks.json` と local `goal_only` baseline です。
 より複雑なタスクの検証は `tasks.complex.json` と
-`complex-validation-plan.ja.md` に分けています。
+`complex-validation-plan.ja.md` に分けています。品質差を測る critical task は
+`tasks.quality.json` に分けています。
 
 用語を分けます。
 
@@ -44,7 +45,7 @@ time budget、task prompt を使います。
 | `run_status` | `completed`、`failed`、`blocked`。blocked は infrastructure/account state により comparable attempt が成立しなかった状態。 |
 | `blocked_reason` | `run_status=blocked` の理由。現在は `api_usage_limit`、`max_budget_usd`、`timeout`。それ以外は null。 |
 | `comparable_attempt` | fair な task-quality attempt の前に blocked された場合は false。 |
-| `mission_profile` | official runner record の `/mission` prompt profile。`full` は通常 workflow、`light` は cost-controlled one-pass profile。 |
+| `mission_profile` | official runner record の `/mission` prompt profile。`full` は通常 workflow、`light` は cost-controlled one-pass profile、`quality` は evidence map、rejected hypotheses、stop/proceed decision を重視する profile。 |
 | `completion` | 必要な artifact または code change が作られ、未解決のまま停止していない。 |
 | `validator_pass` | task 固有の validator が pass した。例: test、lint、schema check、file assertion、review checklist。 |
 | `human_quality_score` | 下記 rubric に基づく 1-5 の blind reviewer score。 |
@@ -146,6 +147,28 @@ python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
 USD 2.00569500 で完了しました。これは promising one-task result として扱い、
 広い cost/runtime claim に使う前に fresh task 3-5 件で再実行します。
 
+quality-first comparison では、fresh な `tasks.quality.json` cohort と
+`--mission-profile quality` を使います。
+
+```bash
+python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
+  --tasks-file benchmarks/mission-vs-goal/tasks.quality.json \
+  --run-id YYYY-MM-DD-claude-goal-vs-mission-quality \
+  --starting-commit <commit> \
+  --task-ids quality-critical-release-governance \
+  --stop-on-blocked \
+  --timeout 1800 \
+  --max-budget-usd 6.0 \
+  --mission-max-iter 2 \
+  --mission-profile quality
+```
+
+2026-06-28 の quality attempt
+`2026-06-28-claude-goal-vs-mission-quality-v1` は paired comparison を完了していません。
+公式 `/goal` が success 前に `api_usage_limit` に到達し、`--stop-on-blocked` で
+API budget を保全したため `/mission` は実行していません。これは blocked と扱い、
+どちらかの品質 evidence にはしません。
+
 ## Human Quality Rubric
 
 | Score | Meaning |
@@ -173,7 +196,8 @@ raw evidence がそろった後に使ってよい表現:
   悪いという主張。最初の smoke は `/mission` arm が API limit で blocked、
   rerun smoke は 1 comparable task のみ、full rerun は全 record が API limit で
   blocked、incremental rerun は `/mission` records が max-budget blocked、
-  light-profile rerun は 1 comparable task のみのため。
+  light-profile rerun は 1 comparable task のみ、quality-profile attempt は
+  `/mission` arm 実行前に API-limit blocked のため。
 - denominator、task mix、scoring method を出さない percent improvement。
 - 10 個すべての paired task run が完了していない状態での性能主張。
 
@@ -183,6 +207,7 @@ raw evidence がそろった後に使ってよい表現:
 |---|---|
 | `tasks.json` | 計測済みの固定 10 タスク baseline pilot set。 |
 | `tasks.complex.json` | 公式 smoke/full attempt に使う 10-task complex cohort。full comparable run はまだ完了していない。 |
+| `tasks.quality.json` | evidence-depth と stop/proceed decision を測る fresh quality-critical cohort。 |
 | `result.schema.json` | result record 1 件分の JSON Schema。 |
 | `report.md` | 英語の current measured status と package-validation results。 |
 | `report.ja.md` | 日本語の current measured status と package-validation results。 |

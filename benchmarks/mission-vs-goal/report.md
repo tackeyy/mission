@@ -303,6 +303,45 @@ That would be unsupported because the completed light-profile sample is one
 task. The defensible next step is to run a 3-5 task light-profile pilot with the
 same per-invocation cost cap and no recycled tasks.
 
+## Quality-Focused Critical Task Attempt
+
+Status: attempted on 2026-06-28 JST after adding a `quality` mission profile and
+a fresh `tasks.quality.json` cohort. This profile is designed to test the task
+types where `/mission` should have the best chance to show higher quality:
+evidence maps, rejected hypotheses, stop/proceed decisions, residual risks, and
+unsafe-claim control.
+
+The paired comparison did **not** complete. The official `/goal` arm hit Claude
+Code workspace API usage limits before returning success, so the `/mission` arm
+was not run. This is a blocked infrastructure/account result, not evidence that
+either arm produced higher quality.
+
+| Item | Value | Evidence |
+|---|---:|---|
+| Run id | `2026-06-28-claude-goal-vs-mission-quality-v1` | `results/2026-06-28-claude-goal-vs-mission-quality-v1.jsonl`. |
+| Starting commit | `e443bb421cdc58418085790b1fb6733dd3ef89f5` | Runner argument. |
+| Task file | `tasks.quality.json` | Fresh quality-critical cohort. |
+| Selected task | 1 | `quality-critical-release-governance`. |
+| Mission profile | `quality` | `--mission-profile quality`, `--mission-max-iter 2`. |
+| Expected records | 2 | 1 task x 2 arms. |
+| Records written | 1 / 2 | stopped early after `/goal` blocked. |
+| Blocked records | 1 / 1 | `/goal` has `blocked_reason=api_usage_limit`. |
+| `/mission` records | 0 | Not run because `--stop-on-blocked` conserved API budget. |
+| `/goal` cost before stop | USD 1.01481150 | raw Claude result JSON. |
+| Quality-marker comparison | unavailable | blocked records are excluded from comparable quality-marker aggregates. |
+
+Safe interpretation:
+
+> A quality-focused benchmark profile and fresh critical task cohort now exist,
+> but the first official `/goal` vs `/mission` quality attempt was blocked by
+> Claude Code workspace API usage limits before a comparable pair completed.
+
+Unsafe interpretation:
+
+> `mission` quality is higher than official `/goal` on the quality-critical task.
+
+That is unsupported. The task was not paired through both arms.
+
 ## Task-Level Findings
 
 | Task | Stronger arm | Why |
@@ -374,6 +413,18 @@ Safe to say about the cost-capped incremental rerun:
 > on both tasks. This supports an operational cost/runtime caution, not a claim
 > that `/mission` answers are lower quality.
 
+Safe to say about the light-profile rerun:
+
+> On one previously unmeasured complex task, official `/goal` and `/mission`
+> light both completed and passed. In that single task, `/mission` light was
+> faster and lower cost, but the sample is too small for a broad claim.
+
+Safe to say about the quality-profile attempt:
+
+> A quality-focused profile and fresh critical task cohort were added, but the
+> first paired attempt was blocked by Claude Code workspace API limits before
+> `/mission` ran. No quality comparison can be made from that attempt.
+
 Do not say:
 
 > `mission` is smarter than `/goal`.
@@ -405,4 +456,10 @@ artifacts/2026-06-28-claude-goal-vs-mission-complex-v1/
 results/2026-06-28-claude-goal-vs-mission-incremental-v1.jsonl
 results/2026-06-28-claude-goal-vs-mission-incremental-v1-summary.json
 artifacts/2026-06-28-claude-goal-vs-mission-incremental-v1/
+results/2026-06-28-claude-goal-vs-mission-light-v1.jsonl
+results/2026-06-28-claude-goal-vs-mission-light-v1-summary.json
+artifacts/2026-06-28-claude-goal-vs-mission-light-v1/
+results/2026-06-28-claude-goal-vs-mission-quality-v1.jsonl
+results/2026-06-28-claude-goal-vs-mission-quality-v1-summary.json
+artifacts/2026-06-28-claude-goal-vs-mission-quality-v1/
 ```

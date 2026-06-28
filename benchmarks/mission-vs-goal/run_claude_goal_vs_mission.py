@@ -28,7 +28,7 @@ RESULTS_DIR = BENCH_DIR / "results"
 ARTIFACTS_DIR = BENCH_DIR / "artifacts"
 MISSION_PLUGIN_DIR = REPO_ROOT / "plugins" / "mission"
 ARMS = ("claude_code_goal_command", "mission")
-MISSION_PROFILES = ("full", "light")
+MISSION_PROFILES = ("full", "light", "quality")
 API_USAGE_LIMIT_MARKERS = (
     "workspace API usage limits",
     "You have reached your specified workspace API usage limits",
@@ -72,6 +72,48 @@ def select_tasks(task_data: dict, limit_tasks: int, task_ids: str | None = None)
     return [by_id[task_id] for task_id in requested]
 
 
+def quality_marker_names(task: dict) -> list[str]:
+    markers = task.get("quality_markers", [])
+    names: list[str] = []
+    for marker in markers:
+        if isinstance(marker, dict):
+            names.append(str(marker["name"]))
+        else:
+            names.append(str(marker))
+    return names
+
+
+def quality_marker_patterns(marker: str | dict) -> list[str]:
+    if isinstance(marker, dict):
+        values = marker.get("patterns") or [marker["name"]]
+    else:
+        values = [marker]
+    return [str(value).lower() for value in values]
+
+
+def evaluate_quality_markers(text: str, task: dict) -> dict:
+    markers = task.get("quality_markers", [])
+    lowered = text.lower()
+    matched: list[str] = []
+    missing: list[str] = []
+    for marker in markers:
+        name = str(marker["name"] if isinstance(marker, dict) else marker)
+        patterns = quality_marker_patterns(marker)
+        if any(pattern in lowered for pattern in patterns):
+            matched.append(name)
+        else:
+            missing.append(name)
+
+    total = len(markers)
+    ratio = len(matched) / total if total else None
+    return {
+        "quality_markers_total": total,
+        "quality_markers_matched": matched,
+        "quality_markers_missing": missing,
+        "quality_marker_score": round(ratio, 2) if ratio is not None else None,
+    }
+
+
 def prepare_clone(source: Path, target: Path, starting_commit: str) -> None:
     if target.exists():
         shutil.rmtree(target)
@@ -105,6 +147,11 @@ Task category: {task["category"]}
 Task prompt: {task["prompt"]}
 Task validator: {task["validator"]}
 """
+    marker_names = quality_marker_names(task)
+    if marker_names:
+        common += "\nQuality scoring markers to cover explicitly when evidence supports them:\n"
+        common += "\n".join(f"- {name}" for name in marker_names)
+        common += "\n"
     if arm == "claude_code_goal_command":
         return f"""/goal The benchmark artifact exists at `{output_rel}` and includes headings Goal, Result, Evidence, Assumptions, and Stop Condition.
 
@@ -121,7 +168,8 @@ The artifact must include these headings:
 """
 
     mission_complexity = task.get("mission_complexity", "Complex")
-    mission_max_iter = mission_max_iter or (1 if mission_profile == "light" else task.get("mission_max_iter", 2))
+    default_mission_iter = 1 if mission_profile == "light" else task.get("mission_max_iter", 2)
+    mission_max_iter = mission_max_iter or default_mission_iter
     profile_guidance = ""
     if mission_profile == "light":
         profile_guidance = """
@@ -131,6 +179,16 @@ Lightweight benchmark profile:
 - Do not run the full test suite unless the task explicitly requires it.
 - Keep `.mission-state/` minimal and use it only if the plugin requires state.
 - Stop as soon as the required artifact headings and validator evidence are present.
+"""
+    elif mission_profile == "quality":
+        profile_guidance = """
+Quality benchmark profile:
+- Optimize for evidence quality, not speed.
+- Maintain at least three plausible hypotheses until evidence rejects them.
+- Include a quality-marker coverage table and name every missing marker honestly.
+- Separate observed evidence, inference, rejected hypotheses, and unmeasured claims.
+- Add a reviewer-style stop/proceed decision with residual risks.
+- Do not inflate claims: if a marker is unsupported, mark it missing instead of implying coverage.
 """
     return f"""/mission Complete the controlled benchmark artifact at `{output_rel}` with auditable mission-style evidence. --max-iter {mission_max_iter}
 
@@ -244,8 +302,16 @@ def evaluate_run(
     missing_headings = [heading for heading in required_headings if heading not in text]
     completion = returncode == 0 and output_path.exists()
     validator_pass = completion and not missing_headings
-    quality_score = 4.0 if validator_pass else 2.0 if completion else 1.0
-    evidence_score = 4.0 if validator_pass else 2.0 if completion else 1.0
+    marker_eval = evaluate_quality_markers(text, task)
+    if not validator_pass:
+        marker_eval["quality_marker_score"] = None
+    marker_ratio = marker_eval["quality_marker_score"]
+    if validator_pass and marker_ratio is not None:
+        quality_score = round(3.0 + (2.0 * marker_ratio), 2)
+        evidence_score = round(3.0 + (2.0 * marker_ratio), 2)
+    else:
+        quality_score = 4.0 if validator_pass else 2.0 if completion else 1.0
+        evidence_score = 4.0 if validator_pass else 2.0 if completion else 1.0
     status = classify_run_status(
         stdout=stdout,
         stderr=stderr,
@@ -266,6 +332,7 @@ def evaluate_run(
         "evidence_completeness": evidence_score,
         "missing_headings": missing_headings,
         "artifact_bytes": output_path.stat().st_size if output_path.exists() else 0,
+        **marker_eval,
     }
 
 
@@ -377,6 +444,10 @@ def run_one(
         notes.append(f"blocked_reason={evaluation['blocked_reason']}")
     if evaluation["missing_headings"]:
         notes.append(f"missing_headings={','.join(evaluation['missing_headings'])}")
+    if evaluation["quality_markers_total"]:
+        notes.append(f"quality_marker_score={evaluation['quality_marker_score']}")
+        notes.append(f"quality_markers_matched={','.join(evaluation['quality_markers_matched'])}")
+        notes.append(f"quality_markers_missing={','.join(evaluation['quality_markers_missing'])}")
     if stderr.strip():
         notes.append("stderr captured in artifact")
     input_tokens = usage.get("input_tokens")
@@ -400,6 +471,9 @@ def run_one(
         "validator_pass": evaluation["validator_pass"],
         "human_quality_score": evaluation["human_quality_score"],
         "quality_score_method": evaluation["quality_score_method"],
+        "quality_marker_score": evaluation["quality_marker_score"],
+        "quality_markers_matched": evaluation["quality_markers_matched"],
+        "quality_markers_missing": evaluation["quality_markers_missing"],
         "intervention_count": evaluation["intervention_count"],
         "resume_success": evaluation["resume_success"],
         "evidence_completeness": evaluation["evidence_completeness"],
@@ -420,10 +494,11 @@ def summarize(
     mission_profile: str = "full",
 ) -> dict:
     by_arm: dict[str, list[dict]] = {arm: [r for r in records if r["arm"] == arm] for arm in ARMS}
+    task_cohort = tasks_path.stem.removeprefix("tasks.")
     return {
         "run_id": run_id,
         "task_file": str(tasks_path.relative_to(REPO_ROOT)),
-        "task_cohort": "official-goal-smoke",
+        "task_cohort": task_cohort,
         "selected_task_ids": [task["id"] for task in tasks],
         "mission_profile": mission_profile,
         "starting_commit": starting_commit,
@@ -433,6 +508,7 @@ def summarize(
         "limitations": [
             "Claude Code print mode smoke; does not fully exercise multi-turn interactive /goal persistence.",
             "Quality and evidence scores are automated heuristic scores, not blind human review.",
+            "Blocked records are excluded from comparable quality-marker aggregates.",
         ],
         "arms": {
             arm: {
@@ -456,6 +532,15 @@ def summarize(
                 "average_quality_score": round(sum(r["human_quality_score"] for r in items) / len(items), 2) if items else None,
                 "average_intervention_count": round(sum(r["intervention_count"] for r in items) / len(items), 2) if items else None,
                 "average_evidence_completeness": round(sum(r["evidence_completeness"] for r in items) / len(items), 2) if items else None,
+                "average_quality_marker_score": (
+                    round(
+                        sum(r["quality_marker_score"] for r in items if r.get("quality_marker_score") is not None)
+                        / len([r for r in items if r.get("quality_marker_score") is not None]),
+                        2,
+                    )
+                    if [r for r in items if r.get("quality_marker_score") is not None]
+                    else None
+                ),
                 "average_elapsed_minutes": round(sum(r["elapsed_minutes"] for r in items) / len(items), 2) if items else None,
             }
             for arm, items in by_arm.items()

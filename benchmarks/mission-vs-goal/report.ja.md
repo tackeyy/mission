@@ -294,6 +294,44 @@ Lightweight result:
 次に defensible なのは、同じ per-invocation cost cap で、再利用 task なしの
 3-5 task light-profile pilot を実行することです。
 
+## Quality-focused critical task attempt
+
+Status: `quality` mission profile と fresh な `tasks.quality.json` cohort を追加した後、
+2026-06-28 JST に実行。これは `/mission` が品質差を出しやすい task type、つまり
+evidence map、rejected hypotheses、stop/proceed decision、residual risk、
+unsafe-claim control を測るための profile です。
+
+paired comparison は **完了していません**。公式 `/goal` arm が Claude Code workspace
+API usage limit に到達し、success を返す前に停止したため、`/mission` arm は実行して
+いません。これは infrastructure/account result であり、どちらの arm の品質が高いかを
+示す evidence ではありません。
+
+| Item | Value | Evidence |
+|---|---:|---|
+| Run id | `2026-06-28-claude-goal-vs-mission-quality-v1` | `results/2026-06-28-claude-goal-vs-mission-quality-v1.jsonl`。 |
+| Starting commit | `e443bb421cdc58418085790b1fb6733dd3ef89f5` | runner argument。 |
+| Task file | `tasks.quality.json` | fresh quality-critical cohort。 |
+| Selected task | 1 | `quality-critical-release-governance`。 |
+| Mission profile | `quality` | `--mission-profile quality`, `--mission-max-iter 2`。 |
+| Expected records | 2 | 1 task x 2 arms。 |
+| Records written | 1 / 2 | `/goal` blocked 後に stop-on-blocked で停止。 |
+| Blocked records | 1 / 1 | `/goal` が `blocked_reason=api_usage_limit`。 |
+| `/mission` records | 0 | API budget 保全のため未実行。 |
+| `/goal` cost before stop | USD 1.01481150 | raw Claude result JSON。 |
+| Quality-marker comparison | unavailable | blocked records は comparable quality-marker aggregate から除外。 |
+
+安全な解釈:
+
+> quality-focused benchmark profile と fresh critical task cohort は整備された。
+> ただし最初の公式 `/goal` vs `/mission` quality attempt は、comparable pair 完了前に
+> Claude Code workspace API usage limit で blocked された。
+
+危険な解釈:
+
+> quality-critical task では `mission` の品質が公式 `/goal` より高い。
+
+これは unsupported です。両 arm の paired run が完了していません。
+
 ## Task-Level Findings
 
 | Task | Stronger arm | Why |
@@ -364,6 +402,18 @@ Cost-capped incremental rerun について言ってよい:
 > は両 task を完了し、`/mission` は両 task で configured max-budget cap に到達した。
 > これは cost/runtime 上の注意材料であり、`/mission` の回答品質が低いという主張ではない。
 
+Light-profile rerun について言ってよい:
+
+> 未測定の complex task 1 件では、公式 `/goal` と `/mission` light の両方が完了し
+> validator に pass した。この 1 件では `/mission` light が速く、cost も低かったが、
+> broad claim には sample が小さすぎる。
+
+Quality-profile attempt について言ってよい:
+
+> quality-focused profile と fresh critical task cohort は追加された。ただし最初の paired
+> attempt は `/mission` 実行前に Claude Code workspace API limit で blocked されたため、
+> 品質比較には使えない。
+
 言ってはいけない:
 
 > `mission` は `/goal` より賢い。
@@ -395,4 +445,10 @@ artifacts/2026-06-28-claude-goal-vs-mission-complex-v1/
 results/2026-06-28-claude-goal-vs-mission-incremental-v1.jsonl
 results/2026-06-28-claude-goal-vs-mission-incremental-v1-summary.json
 artifacts/2026-06-28-claude-goal-vs-mission-incremental-v1/
+results/2026-06-28-claude-goal-vs-mission-light-v1.jsonl
+results/2026-06-28-claude-goal-vs-mission-light-v1-summary.json
+artifacts/2026-06-28-claude-goal-vs-mission-light-v1/
+results/2026-06-28-claude-goal-vs-mission-quality-v1.jsonl
+results/2026-06-28-claude-goal-vs-mission-quality-v1-summary.json
+artifacts/2026-06-28-claude-goal-vs-mission-quality-v1/
 ```

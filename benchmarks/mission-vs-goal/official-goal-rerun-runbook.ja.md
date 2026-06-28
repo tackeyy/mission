@@ -18,10 +18,14 @@ access は 2026-07-01 00:00 UTC、つまり 2026-07-01 09:00 JST に戻ると記
 - `2026-06-28-claude-goal-vs-mission-light-v1`: `--mission-profile light`、
   `--mission-max-iter 1`、USD 5.00 cap で未測定 task 1 件を実行。両 arm とも完了し、
   validator に pass。この 1 件では `/mission` light が速く、cost も低かった。
+- `2026-06-28-claude-goal-vs-mission-quality-v1`: `--mission-profile quality`、
+  `--mission-max-iter 2`、USD 6.00 cap で fresh quality-critical task 1 件を実行。
+  公式 `/goal` が success 前に `api_usage_limit` に到達したため、`/mission` は未実行。
 
 したがって、完了した evidence は normal smoke 1 件と light-profile 1 件です。
 10 task full performance claim はまだ supported ではありません。incremental run は
-operational cost/runtime の注意材料であり、completed quality comparison ではありません。
+operational cost/runtime の注意材料です。quality-profile run は blocked であり、
+completed quality comparison ではありません。
 
 ## Objective
 
@@ -146,6 +150,32 @@ python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
 - `/mission` light: validator pass、5.27 分、USD 2.00569500。
 - これは 1 task の light-profile hypothesis だけを支持します。広い cost/runtime claim に
   使う前に fresh task 3-5 件で再実行します。
+
+## Step 2d: Quality-Focused Critical Pilot
+
+`/mission` の低コストではなく高品質を検証したい場合は、`tasks.quality.json` と
+quality profile を使います。
+
+```bash
+STARTING_COMMIT=$(git rev-parse HEAD)
+python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
+  --tasks-file benchmarks/mission-vs-goal/tasks.quality.json \
+  --run-id 2026-07-01-claude-goal-vs-mission-quality \
+  --starting-commit "$STARTING_COMMIT" \
+  --task-ids quality-critical-release-governance \
+  --stop-on-blocked \
+  --timeout 1800 \
+  --max-budget-usd 6.0 \
+  --mission-max-iter 2 \
+  --mission-profile quality
+```
+
+今回の quality-profile result:
+
+- `2026-06-28-claude-goal-vs-mission-quality-v1` は expected records 2 件中 1 件だけを保存。
+- 公式 `/goal`: `blocked_reason=api_usage_limit`、2.53 分、stop 前 cost USD 1.01481150。
+- `/mission`: `/goal` block 後に `--stop-on-blocked` で停止したため 0 records。
+- これは quality result ではありません。Claude Code workspace API limit の解消確認後に再実行します。
 
 ## Step 3: Validation
 

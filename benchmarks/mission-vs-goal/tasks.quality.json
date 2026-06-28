@@ -1,0 +1,157 @@
+{
+  "benchmark": "mission-vs-goal-pilot",
+  "version": 1,
+  "cohort": "quality-critical",
+  "task_count": 5,
+  "arms": [
+    "claude_code_goal_command",
+    "mission"
+  ],
+  "tasks": [
+    {
+      "id": "quality-critical-release-governance",
+      "category": "operations",
+      "difficulty": "critical_release_governance_with_conflicting_evidence",
+      "mission_complexity": "Critical",
+      "mission_max_iter": 2,
+      "prompt": "Audit whether a hypothetical benchmark release should proceed when it includes raw Claude artifacts, marketing claims, generated files, and a remote publication step. The artifact must decide stop/proceed, separate reversible from irreversible actions, and reject at least two plausible but wrong interpretations.",
+      "validator": "Artifact must include a stop/proceed decision, evidence map, at least two rejected hypotheses, unsafe claims to avoid, and a rollback or defer plan for irreversible actions.",
+      "primary_metric": "human_quality_score",
+      "hypothesis": "mission should help when quality depends on evidence discipline, explicit stop conditions, and not over-claiming from partial benchmark data.",
+      "quality_markers": [
+        {
+          "name": "Evidence Map",
+          "patterns": [
+            "evidence map",
+            "evidence matrix"
+          ]
+        },
+        {
+          "name": "Rejected Hypotheses",
+          "patterns": [
+            "rejected hypotheses",
+            "rejected hypothesis"
+          ]
+        },
+        {
+          "name": "Stop/Proceed Decision",
+          "patterns": [
+            "stop/proceed decision",
+            "go/no-go decision",
+            "stop decision"
+          ]
+        },
+        {
+          "name": "Irreversible Action Split",
+          "patterns": [
+            "irreversible",
+            "reversible"
+          ]
+        },
+        {
+          "name": "Unsupported Claims",
+          "patterns": [
+            "unsupported claims",
+            "unsafe claims",
+            "claims to avoid"
+          ]
+        },
+        {
+          "name": "Residual Risk Register",
+          "patterns": [
+            "residual risk",
+            "risk register"
+          ]
+        },
+        {
+          "name": "Rollback or Defer Plan",
+          "patterns": [
+            "rollback",
+            "defer plan",
+            "deferred"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "quality-multi-cause-regression-triage",
+      "category": "testing",
+      "difficulty": "multi_cause_regression_with_false_leads",
+      "mission_complexity": "Critical",
+      "mission_max_iter": 2,
+      "prompt": "Triage a hypothetical regression where CI, local environment, and a recent code change are all plausible causes. The artifact must preserve the competing hypotheses until evidence separates cause from coincidence.",
+      "validator": "Artifact must include observed evidence, at least three plausible hypotheses, rejected hypotheses, before/after validator narrative, and the smallest safe fix or no-fix decision.",
+      "primary_metric": "evidence_completeness",
+      "hypothesis": "mission should help by preventing premature root-cause claims when several explanations initially fit the symptoms.",
+      "quality_markers": [
+        "Observed Evidence",
+        "Three Plausible Hypotheses",
+        "Rejected Hypotheses",
+        "Before/After Validator",
+        "Smallest Safe Fix",
+        "Unmeasured Claims",
+        "Residual Risk"
+      ]
+    },
+    {
+      "id": "quality-security-secret-handling-plan",
+      "category": "security",
+      "difficulty": "secret_handling_and_auth_boundary",
+      "mission_complexity": "Critical",
+      "mission_max_iter": 2,
+      "prompt": "Design a safe plan for a change that touches authentication state and secret handling. The artifact must avoid secret disclosure, define forbidden actions, and state how the change would be verified without live secrets.",
+      "validator": "Artifact must include threat assumptions, forbidden actions, evidence-safe verification, rollback plan, and explicit non-goals.",
+      "primary_metric": "evidence_completeness",
+      "hypothesis": "mission should help when safety gates and evidence boundaries matter more than speed.",
+      "quality_markers": [
+        "Threat Assumptions",
+        "Forbidden Actions",
+        "Evidence-Safe Verification",
+        "Rollback Plan",
+        "Explicit Non-Goals",
+        "Residual Risk",
+        "Stop/Proceed Decision"
+      ]
+    },
+    {
+      "id": "quality-bilingual-claim-consistency",
+      "category": "documentation",
+      "difficulty": "bilingual_claim_safety_with_measurement_limits",
+      "mission_complexity": "Complex",
+      "mission_max_iter": 2,
+      "prompt": "Update a hypothetical English/Japanese benchmark announcement while preserving measurement limits. The artifact must prevent the Japanese copy from becoming stronger than the English evidence supports.",
+      "validator": "Artifact must include English/Japanese parity checks, measured vs inferred claims, unsafe claims to avoid, and unresolved translation choices.",
+      "primary_metric": "human_quality_score",
+      "hypothesis": "mission should help when claim safety and bilingual consistency both need explicit review.",
+      "quality_markers": [
+        "English/Japanese Parity",
+        "Measured vs Inferred",
+        "Unsupported Claims",
+        "Unresolved Translation Choices",
+        "Evidence Map",
+        "Reviewer Gate",
+        "Residual Risk"
+      ]
+    },
+    {
+      "id": "quality-resume-and-scope-accounting",
+      "category": "resume",
+      "difficulty": "context_resume_with_generated_artifacts",
+      "mission_complexity": "Complex",
+      "mission_max_iter": 2,
+      "prompt": "Resume from a partial benchmark update where generated artifacts, raw results, and docs are mixed together. The artifact must identify what is already settled, what must not be touched, and what evidence remains missing.",
+      "validator": "Artifact must include recovered state, source/generated split, excluded files, missing evidence, and final validator evidence.",
+      "primary_metric": "resume_success",
+      "hypothesis": "mission should help when persistent state and scope accounting are the main completion risks.",
+      "quality_markers": [
+        "Recovered State",
+        "Source/Generated Split",
+        "Excluded Files",
+        "Missing Evidence",
+        "Final Validator Evidence",
+        "Assumption Registry",
+        "Stop/Proceed Decision"
+      ]
+    }
+  ]
+}

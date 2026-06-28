@@ -20,11 +20,16 @@ An API-limit rerun was then executed:
   was selected with `--mission-profile light`, `--mission-max-iter 1`, and a
   USD 5.00 cap. Both arms completed and passed; `/mission` light was faster and
   lower cost on that one task.
+- `2026-06-28-claude-goal-vs-mission-quality-v1`: one fresh quality-critical
+  task was selected with `--mission-profile quality`, `--mission-max-iter 2`,
+  and a USD 6.00 cap. Official `/goal` hit `api_usage_limit` before success, so
+  `/mission` was not run.
 
 The completed evidence therefore supports two one-task results: one normal
 smoke and one light-profile cost-controlled task. It does not support a full
 10-task performance claim. The incremental run adds an operational cost/runtime
-caution, not a completed quality comparison.
+caution. The quality-profile run is blocked and not a completed quality
+comparison.
 
 ## Objective
 
@@ -149,6 +154,33 @@ Observed light-profile result:
 - `/mission` light: validator pass, 5.27 minutes, USD 2.00569500.
 - This supports only a one-task light-profile hypothesis. Run 3-5 fresh tasks
   before using any broad cost or runtime claim.
+
+## Step 2d: Quality-Focused Critical Pilot
+
+If the goal is to test where `/mission` may produce higher quality rather than
+lower cost, use `tasks.quality.json` and the quality profile:
+
+```bash
+STARTING_COMMIT=$(git rev-parse HEAD)
+python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
+  --tasks-file benchmarks/mission-vs-goal/tasks.quality.json \
+  --run-id 2026-07-01-claude-goal-vs-mission-quality \
+  --starting-commit "$STARTING_COMMIT" \
+  --task-ids quality-critical-release-governance \
+  --stop-on-blocked \
+  --timeout 1800 \
+  --max-budget-usd 6.0 \
+  --mission-max-iter 2 \
+  --mission-profile quality
+```
+
+Observed quality-profile result:
+
+- `2026-06-28-claude-goal-vs-mission-quality-v1` wrote 1 record out of 2 expected.
+- Official `/goal`: `blocked_reason=api_usage_limit`, 2.53 minutes, USD 1.01481150 before stop.
+- `/mission`: 0 records because `--stop-on-blocked` stopped after the `/goal` block.
+- This is not a quality result. Rerun only after confirming the Claude Code
+  workspace API limit is clear.
 
 ## Step 3: Validation
 

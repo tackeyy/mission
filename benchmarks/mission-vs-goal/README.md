@@ -9,7 +9,8 @@ before publishing broader claims.
 
 The first measured cohort used `tasks.json` and the local `goal_only` baseline.
 More complex validation is defined in `tasks.complex.json` and
-`complex-validation-plan.md`.
+`complex-validation-plan.md`. Quality-critical validation is defined in
+`tasks.quality.json`.
 
 Terminology matters:
 
@@ -43,7 +44,7 @@ time budget, and task prompt for both arms.
 | `run_status` | `completed`, `failed`, or `blocked`. Blocked means infrastructure/account state prevented a comparable attempt. |
 | `blocked_reason` | Reason for `run_status=blocked`, currently `api_usage_limit`, `max_budget_usd`, or `timeout`; null otherwise. |
 | `comparable_attempt` | False when an arm was blocked before a fair task-quality attempt. |
-| `mission_profile` | `/mission` prompt profile for official-runner records. `full` is the normal workflow; `light` is a one-pass cost-controlled profile. |
+| `mission_profile` | `/mission` prompt profile for official-runner records. `full` is the normal workflow; `light` is a one-pass cost-controlled profile; `quality` emphasizes evidence maps, rejected hypotheses, and stop/proceed decisions. |
 | `completion` | The run produced the required artifact or code change and did not stop in an unresolved state. |
 | `validator_pass` | The task-specific validator passed. Examples: tests, lint, schema check, exact file assertion, or reviewer checklist. |
 | `human_quality_score` | Blind reviewer score from 1 to 5 using the rubric below. |
@@ -151,6 +152,28 @@ both arms. Official `/goal` completed in 9.56 minutes at USD 3.00670750, while
 promising one-task result and rerun 3-5 fresh tasks before using any broad
 cost or runtime claim.
 
+For quality-first comparisons, use the fresh `tasks.quality.json` cohort and
+`--mission-profile quality`:
+
+```bash
+python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
+  --tasks-file benchmarks/mission-vs-goal/tasks.quality.json \
+  --run-id YYYY-MM-DD-claude-goal-vs-mission-quality \
+  --starting-commit <commit> \
+  --task-ids quality-critical-release-governance \
+  --stop-on-blocked \
+  --timeout 1800 \
+  --max-budget-usd 6.0 \
+  --mission-max-iter 2 \
+  --mission-profile quality
+```
+
+The 2026-06-28 quality attempt
+`2026-06-28-claude-goal-vs-mission-quality-v1` did not complete a paired
+comparison. Official `/goal` hit `api_usage_limit` before success and
+`/mission` was not run because `--stop-on-blocked` conserved API budget. Treat
+this as blocked, not as evidence for either arm's quality.
+
 ## Human Quality Rubric
 
 | Score | Meaning |
@@ -179,7 +202,8 @@ Not allowed from this pilot:
   `/mission`; the rerun smoke completed only one comparable task; the full
   rerun was API-limit blocked on all records; the incremental rerun was
   max-budget blocked on the `/mission` records; the light-profile rerun
-  completed only one comparable task.
+  completed only one comparable task; the quality-profile attempt was
+  API-limit blocked before the `/mission` arm ran.
 - Percent improvements without publishing the denominator, task mix, and scoring method.
 - Claims based on fewer than all 10 paired task runs.
 
@@ -189,6 +213,7 @@ Not allowed from this pilot:
 |---|---|
 | `tasks.json` | The measured fixed 10-task baseline pilot set. |
 | `tasks.complex.json` | 10-task complex cohort used by official smoke/full attempts; no full comparable run has completed yet. |
+| `tasks.quality.json` | Fresh quality-critical cohort for evidence-depth and stop/proceed decision tasks. |
 | `result.schema.json` | JSON Schema for one result record. |
 | `report.md` | Current measured status and package-validation results. |
 | `run_claude_goal_vs_mission.py` | Claude Code official `/goal` vs `/mission` smoke runner. |

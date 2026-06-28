@@ -50,6 +50,7 @@
       "enum": [
         "full",
         "light",
+        "quality",
         null
       ]
     },
@@ -119,6 +120,26 @@
         "label_hidden_human",
         "automated_heuristic_not_blind_human"
       ]
+    },
+    "quality_marker_score": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 1
+    },
+    "quality_markers_matched": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "quality_markers_missing": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
     },
     "intervention_count": {
       "type": "integer",

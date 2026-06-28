@@ -18,6 +18,7 @@ def _load_official_goal_runner():
 def test_mission_vs_goal_pilot_has_exactly_ten_tasks():
     data = json.loads((BENCHMARK_DIR / "tasks.json").read_text(encoding="utf-8"))
     complex_data = json.loads((BENCHMARK_DIR / "tasks.complex.json").read_text(encoding="utf-8"))
+    quality_data = json.loads((BENCHMARK_DIR / "tasks.quality.json").read_text(encoding="utf-8"))
 
     assert data["benchmark"] == "mission-vs-goal-pilot"
     assert data["task_count"] == 10
@@ -32,12 +33,20 @@ def test_mission_vs_goal_pilot_has_exactly_ten_tasks():
     assert len({task["id"] for task in complex_data["tasks"]}) == 10
     assert all(task["mission_complexity"] in {"Complex", "Critical"} for task in complex_data["tasks"])
     assert all(task["mission_max_iter"] >= 2 for task in complex_data["tasks"])
+    assert quality_data["benchmark"] == "mission-vs-goal-pilot"
+    assert quality_data["cohort"] == "quality-critical"
+    assert quality_data["task_count"] == 5
+    assert quality_data["arms"] == ["claude_code_goal_command", "mission"]
+    assert len(quality_data["tasks"]) == 5
+    assert len({task["id"] for task in quality_data["tasks"]}) == 5
+    assert all(len(task["quality_markers"]) >= 7 for task in quality_data["tasks"])
 
 
 def test_mission_vs_goal_tasks_have_marketing_safe_hypotheses():
     task_sets = [
         json.loads((BENCHMARK_DIR / "tasks.json").read_text(encoding="utf-8")),
         json.loads((BENCHMARK_DIR / "tasks.complex.json").read_text(encoding="utf-8")),
+        json.loads((BENCHMARK_DIR / "tasks.quality.json").read_text(encoding="utf-8")),
     ]
     required = {"id", "category", "difficulty", "prompt", "validator", "primary_metric", "hypothesis"}
 
@@ -56,7 +65,10 @@ def test_mission_vs_goal_result_schema_matches_declared_arms():
     assert schema["properties"]["benchmark"]["const"] == tasks["benchmark"]
     assert set(tasks["arms"]) <= set(schema["properties"]["arm"]["enum"])
     assert "claude_code_goal_command" in schema["properties"]["arm"]["enum"]
-    assert schema["properties"]["mission_profile"]["enum"] == ["full", "light", None]
+    assert schema["properties"]["mission_profile"]["enum"] == ["full", "light", "quality", None]
+    assert schema["properties"]["quality_marker_score"]["maximum"] == 1
+    assert schema["properties"]["quality_markers_matched"]["type"] == "array"
+    assert schema["properties"]["quality_markers_missing"]["type"] == "array"
     assert "human_quality_score" in schema["required"]
     assert "quality_score_method" in schema["required"]
     assert "automated_heuristic_not_blind_human" in schema["properties"]["quality_score_method"]["enum"]
@@ -134,6 +146,10 @@ def test_mission_vs_goal_measured_reports_are_honest_about_paired_runs():
     official_light_path = BENCHMARK_DIR / "results" / "2026-06-28-claude-goal-vs-mission-light-v1.jsonl"
     official_light_summary_path = (
         BENCHMARK_DIR / "results" / "2026-06-28-claude-goal-vs-mission-light-v1-summary.json"
+    )
+    official_quality_path = BENCHMARK_DIR / "results" / "2026-06-28-claude-goal-vs-mission-quality-v1.jsonl"
+    official_quality_summary_path = (
+        BENCHMARK_DIR / "results" / "2026-06-28-claude-goal-vs-mission-quality-v1-summary.json"
     )
     official_mission_raw = (
         BENCHMARK_DIR
@@ -258,6 +274,23 @@ def test_mission_vs_goal_measured_reports_are_honest_about_paired_runs():
     assert light_by_arm["claude_code_goal_command"][0]["elapsed_minutes"] == 9.56
     assert light_by_arm["mission"][0]["elapsed_minutes"] == 5.27
 
+    quality_records = [json.loads(line) for line in official_quality_path.read_text(encoding="utf-8").splitlines()]
+    quality_summary = json.loads(official_quality_summary_path.read_text(encoding="utf-8"))
+    assert quality_summary["selected_task_ids"] == ["quality-critical-release-governance"]
+    assert quality_summary["mission_profile"] == "quality"
+    assert quality_summary["task_cohort"] == "quality"
+    assert quality_summary["records"] == 1
+    assert quality_summary["expected_records"] == 2
+    assert quality_summary["stopped_early"] is True
+    assert quality_summary["arms"]["claude_code_goal_command"]["blocked_records"] == 1
+    assert quality_summary["arms"]["claude_code_goal_command"]["comparable_records"] == 0
+    assert quality_summary["arms"]["claude_code_goal_command"]["average_quality_marker_score"] is None
+    assert quality_summary["arms"]["mission"]["records"] == 0
+    assert quality_records[0]["arm"] == "claude_code_goal_command"
+    assert quality_records[0]["run_status"] == "blocked"
+    assert quality_records[0]["blocked_reason"] == "api_usage_limit"
+    assert quality_records[0]["quality_marker_score"] is None
+
     assert "Paired benchmark runs completed | 20 / 20" in report
     assert "Goal-only runs completed | 10 / 10" in report
     assert "Mission runs completed | 10 / 10" in report
@@ -286,6 +319,12 @@ def test_mission_vs_goal_measured_reports_are_honest_about_paired_runs():
     assert "Mission profile | `light`" in report
     assert "Average elapsed minutes | 9.56 | 5.27" in report
     assert "Recorded Claude cost | USD 3.00670750 | USD 2.00569500" in report
+    assert "Quality-Focused Critical Task Attempt" in report
+    assert "Run id | `2026-06-28-claude-goal-vs-mission-quality-v1`" in report
+    assert "Mission profile | `quality`" in report
+    assert "Records written | 1 / 2" in report
+    assert "`/mission` records | 0" in report
+    assert "Quality-marker comparison | unavailable" in report
     assert "Paired benchmark runs completed | 20 / 20" in report_ja
     assert "Goal-only runs completed | 10 / 10" in report_ja
     assert "Mission runs completed | 10 / 10" in report_ja
@@ -314,6 +353,12 @@ def test_mission_vs_goal_measured_reports_are_honest_about_paired_runs():
     assert "Mission profile | `light`" in report_ja
     assert "Average elapsed minutes | 9.56 | 5.27" in report_ja
     assert "Recorded Claude cost | USD 3.00670750 | USD 2.00569500" in report_ja
+    assert "Quality-focused critical task attempt" in report_ja
+    assert "Run id | `2026-06-28-claude-goal-vs-mission-quality-v1`" in report_ja
+    assert "Mission profile | `quality`" in report_ja
+    assert "Records written | 1 / 2" in report_ja
+    assert "`/mission` records | 0" in report_ja
+    assert "Quality-marker comparison | unavailable" in report_ja
 
 
 def test_mission_vs_goal_protocol_controls_review_bias():
@@ -335,7 +380,10 @@ def test_mission_vs_goal_protocol_controls_review_bias():
     assert "blocked_reason" in protocol
     assert "comparable_attempt" in protocol
     assert "official-goal-rerun-runbook.md" in protocol
+    assert "tasks.quality.json" in protocol
+    assert "--mission-profile quality" in protocol
     assert "Proceed only if both arm records have" in runbook
+    assert "Step 2d: Quality-Focused Critical Pilot" in runbook
     assert "run_status=blocked" in runbook
     assert "2026-07-01 09:00 JST" in runbook
     assert 'parser.add_argument("--tasks-file"' in runner
@@ -343,7 +391,8 @@ def test_mission_vs_goal_protocol_controls_review_bias():
     assert 'ARMS = ("claude_code_goal_command", "mission")' in official_runner
     assert 'parser.add_argument("--mission-max-iter"' in official_runner
     assert '"--mission-profile"' in official_runner
-    assert 'MISSION_PROFILES = ("full", "light")' in official_runner
+    assert 'MISSION_PROFILES = ("full", "light", "quality")' in official_runner
+    assert "quality_marker_score" in official_runner
     assert '"--task-ids"' in official_runner
     assert '"--stop-on-blocked"' in official_runner
     assert '"run_status": evaluation["run_status"]' in official_runner
@@ -377,6 +426,60 @@ def test_mission_vs_goal_protocol_controls_review_bias():
         mission_profile="light",
     )
     assert light_summary["mission_profile"] == "light"
+    quality_data = json.loads((BENCHMARK_DIR / "tasks.quality.json").read_text(encoding="utf-8"))
+    quality_prompt = runner_module.build_prompt(
+        quality_data["tasks"][0],
+        "mission",
+        "benchmarks/mission-vs-goal/run-output/quality-test.md",
+        mission_profile="quality",
+    )
+    assert "Mission profile: quality" in quality_prompt
+    assert "Quality benchmark profile" in quality_prompt
+    assert "Evidence Map" in quality_prompt
+    marker_eval = runner_module.evaluate_quality_markers(
+        "Evidence Map\nRejected Hypotheses\nStop/Proceed Decision\nUnsupported Claims",
+        quality_data["tasks"][0],
+    )
+    assert marker_eval["quality_markers_total"] == 7
+    assert marker_eval["quality_marker_score"] == 0.57
+    assert marker_eval["quality_markers_matched"] == [
+        "Evidence Map",
+        "Rejected Hypotheses",
+        "Stop/Proceed Decision",
+        "Unsupported Claims",
+    ]
+    quality_summary = runner_module.summarize(
+        records=[
+            {
+                "arm": "claude_code_goal_command",
+                "completion": True,
+                "validator_pass": True,
+                "human_quality_score": 4.0,
+                "intervention_count": 0,
+                "evidence_completeness": 4.0,
+                "elapsed_minutes": 1.0,
+                "quality_marker_score": 0.57,
+            },
+            {
+                "arm": "mission",
+                "completion": True,
+                "validator_pass": True,
+                "human_quality_score": 5.0,
+                "intervention_count": 0,
+                "evidence_completeness": 5.0,
+                "elapsed_minutes": 2.0,
+                "quality_marker_score": 1.0,
+            },
+        ],
+        tasks=quality_data["tasks"][:1],
+        run_id="test-quality",
+        starting_commit="abcdef0",
+        tasks_path=BENCHMARK_DIR / "tasks.quality.json",
+        mission_profile="quality",
+    )
+    assert quality_summary["mission_profile"] == "quality"
+    assert quality_summary["arms"]["claude_code_goal_command"]["average_quality_marker_score"] == 0.57
+    assert quality_summary["arms"]["mission"]["average_quality_marker_score"] == 1.0
     blocked = runner_module.classify_run_status(
         stdout="API Error: 400 You have reached your specified workspace API usage limits.",
         stderr="",
