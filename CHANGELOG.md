@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Specialist task-profile classification now recognizes architecture/system-design missions, so architecture-only project or user providers can be selected instead of being hidden behind documentation fallback.
+- Mission audit now classifies JSON-identical archive-only worktree state copies as resolved duplicates, preventing cross-root audits from reporting expected archive/archive copies as P1 `duplicate-state` findings.
 
 ## [1.0.5] - 2026-06-26
 

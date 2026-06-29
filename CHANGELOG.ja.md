@@ -11,6 +11,7 @@
 
 ### 修正
 - specialist の task_profile 分類が architecture / system design 系 mission を認識するようになり、architecture 専用の project / user provider が documentation fallback に隠れて選ばれない問題を修正しました。
+- mission audit が JSON として完全一致する archive-only の worktree state copy を resolved duplicate として分類するようにし、cross-root audit で想定内の archive/archive copy が P1 `duplicate-state` と誤報告されないようにしました。
 
 ## [1.0.5] - 2026-06-26
 
