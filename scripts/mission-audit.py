@@ -218,10 +218,12 @@ def is_resolved_archive_duplicate(group: list[StateRecord]) -> bool:
     if len(group) < 2:
         return False
     ranks = {record_rank(record)[0] for record in group}
-    if 0 not in ranks or 1 not in ranks:
-        return False
     fingerprints = {json.dumps(record.state, sort_keys=True, ensure_ascii=False) for record in group}
-    return len(fingerprints) == 1
+    if len(fingerprints) != 1:
+        return False
+    if 0 in ranks and 1 in ranks:
+        return True
+    return all("/archive/" in str(record.path) for record in group)
 
 
 def record_rank(record: StateRecord) -> tuple[int, str]:
