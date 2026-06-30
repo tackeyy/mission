@@ -543,6 +543,38 @@ def test_audit_reports_missing_scoring_evidence_in_json(tmp_path):
     assert any(f["code"] == "missing-scoring-evidence" for f in data["findings"])
 
 
+def test_audit_accepts_worktree_iteration_archive_scoring_evidence(tmp_path):
+    project_root = tmp_path / "worktree"
+    archive_root = tmp_path / "repo" / ".mission-state" / "archive" / "worktree-neutral"
+    _write_state(
+        archive_root / "state.json",
+        project_root=str(project_root),
+        mission_id="feedfacecafebabe",
+        session_id="has-iteration-archive-evidence",
+    )
+    evidence = archive_root / "iteration-archive" / "iter-1-feedface-scoring.md"
+    evidence.parent.mkdir(parents=True, exist_ok=True)
+    evidence.write_text("# scoring evidence\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-18",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    assert data["missing_scoring_evidence_count"] == 0
+    assert all(f["code"] != "missing-scoring-evidence" for f in data["findings"])
+
+
 def test_audit_slow_session_buckets_track_phase_duration_observability(tmp_path):
     _write_state(
         tmp_path / "without-phases" / ".mission-state" / "sessions" / "slow.json",
