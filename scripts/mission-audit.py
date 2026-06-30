@@ -617,16 +617,25 @@ def scoring_evidence_paths(record: StateRecord, iteration: int) -> list[Path]:
     mission_id = str(record.state.get("mission_id") or "")
     mission_prefix = mission_id[:8] or "unknown"
     filename = f"iter-{iteration}-{mission_prefix}-scoring.md"
-    paths = [Path(project_root_for(record)) / ".mission-state" / "archive" / filename]
+    project_mission_state = Path(project_root_for(record)) / ".mission-state"
+    paths = [
+        project_mission_state / "archive" / filename,
+        project_mission_state / "iteration-archive" / filename,
+    ]
 
     parts = record.path.parts
     if ".mission-state" in parts:
         idx = parts.index(".mission-state")
         if idx + 2 < len(parts) and parts[idx + 1] == "archive" and parts[idx + 2].startswith("worktree-"):
-            worktree_archive = Path(*parts[: idx + 3]) / "archive" / filename
-            if worktree_archive not in paths:
-                paths.append(worktree_archive)
-    return paths
+            worktree_archive_root = Path(*parts[: idx + 3])
+            paths.append(worktree_archive_root / "archive" / filename)
+            paths.append(worktree_archive_root / "iteration-archive" / filename)
+
+    deduped: list[Path] = []
+    for path in paths:
+        if path not in deduped:
+            deduped.append(path)
+    return deduped
 
 
 def specialist_evidence_paths(record: StateRecord, invocation: dict[str, Any]) -> list[Path]:
