@@ -892,3 +892,127 @@ def test_invoke_command_provider_accepts_result_contract_evidence(run_cli, tmp_p
     entry = state["specialist_invocations"][0]
     assert data["ok"] is True
     assert entry["status"] == "completed"
+
+
+def test_invoke_command_provider_uses_registry_env_and_timeout(run_cli, tmp_path):
+    run_cli("init", "command provider env mission", "--complexity", "Complex", cwd=tmp_path, check=True)
+    helper = tmp_path / "provider.py"
+    helper.write_text(
+        "import os\n"
+        "print(os.environ['REVIEW_TEXT'])\n",
+        encoding="utf-8",
+    )
+    registry = tmp_path / ".mission" / "specialists.yml"
+    registry.parent.mkdir()
+    registry.write_text(json.dumps({
+        "version": 1,
+        "specialists": [{
+            "role": "env-reviewer",
+            "kind": "command",
+            "command": sys.executable,
+            "args": [str(helper)],
+            "env": {
+                "REVIEW_TEXT": "finding: registry env reached the provider with substantive review evidence",
+            },
+            "timeout": 17,
+            "task_profiles": ["documentation"],
+            "result_contract": {"min_non_template_chars": 40},
+        }],
+    }))
+    run_cli(
+        "specialists", "recommend",
+        "--no-default-skill-roots",
+        "--task", "Review README documentation",
+        "--complexity", "Complex",
+        "--record-state",
+        "--json",
+        cwd=tmp_path,
+        check=True,
+    )
+
+    r = run_cli(
+        "specialists", "invoke-command",
+        "--provider", "env-reviewer",
+        "--iteration", "1",
+        "--phase", "review",
+        "--json",
+        cwd=tmp_path,
+    )
+
+    data = _json_result(r)
+    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
+    entry = state["specialist_invocations"][0]
+    evidence = tmp_path / entry["evidence_path"]
+    assert data["ok"] is True
+    assert entry["status"] == "completed"
+    assert entry["timeout"] == 17
+    assert "registry env reached the provider" in evidence.read_text(encoding="utf-8")
+
+
+def test_confirmed_command_provider_selection_preserves_invocation_config(run_cli, tmp_path):
+    run_cli("init", "command provider selected config mission", "--complexity", "Complex", cwd=tmp_path, check=True)
+    helper = tmp_path / "provider.py"
+    helper.write_text(
+        "import os\n"
+        "print(os.environ['REVIEW_TEXT'])\n",
+        encoding="utf-8",
+    )
+    registry = tmp_path / ".mission" / "specialists.yml"
+    registry.parent.mkdir()
+    registry.write_text(json.dumps({
+        "version": 1,
+        "specialists": [{
+            "role": "paid-reviewer",
+            "kind": "command",
+            "command": sys.executable,
+            "args": [str(helper)],
+            "env": {
+                "REVIEW_TEXT": "finding: selected command provider can run again with preserved config",
+            },
+            "timeout": 19,
+            "task_profiles": ["documentation"],
+            "result_contract": {"min_non_template_chars": 40},
+        }],
+    }))
+    run_cli(
+        "specialists", "recommend",
+        "--no-default-skill-roots",
+        "--task", "Review README documentation",
+        "--complexity", "Complex",
+        "--first-use", "paid-reviewer",
+        "--record-state",
+        "--json",
+        cwd=tmp_path,
+        check=True,
+    )
+    run_cli(
+        "specialists", "invoke-command",
+        "--provider", "paid-reviewer",
+        "--iteration", "1",
+        "--phase", "review",
+        "--selection-source", "confirmed-user",
+        "--json",
+        cwd=tmp_path,
+        check=True,
+    )
+
+    r = run_cli(
+        "specialists", "invoke-command",
+        "--provider", "paid-reviewer",
+        "--iteration", "2",
+        "--phase", "review",
+        "--json",
+        cwd=tmp_path,
+    )
+
+    data = _json_result(r)
+    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
+    selected = state["specialists_selected"][0]
+    second_entry = state["specialist_invocations"][1]
+    assert data["ok"] is True
+    assert selected["command"] == sys.executable
+    assert selected["args"] == [str(helper)]
+    assert selected["env"]["REVIEW_TEXT"].startswith("finding:")
+    assert selected["timeout"] == 19
+    assert second_entry["status"] == "completed"
+    assert second_entry["timeout"] == 19
