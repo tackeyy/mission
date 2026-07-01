@@ -44,6 +44,8 @@ Provider registries may describe two provider kinds:
 
 Command providers are treated as local code execution. Project registries can disable user-level defaults with `enabled: false`, and providers with `risk.first_use_confirmation: true` require a user-scoped consent allowlist before automatic use. Provider failures or missing commands degrade to logged evidence and core reviewers unless a future strict policy explicitly makes that provider mandatory.
 
+Command provider entries may carry generic runtime configuration such as `env` string overrides and `timeout` seconds. This lets an interactive wrapper wait for externally produced review evidence and return substantive stdout in the same `invoke-command` call without giving that provider any pass/fail authority.
+
 No provider gets mission-core-specific authority. In particular, high-value reviewers such as `oracle` must be represented as external manifests or examples, not hard-coded branches in `mission` core.
 
 Recommendations may include an advisory `specialists_phase_plan` grouped by planning, execution, review, and synthesis. This plan sequences evidence providers but does not create a nested autonomous loop. Broad orchestrator-style specialists are automatically bounded to non-execution phases and may only produce a bounded artifact such as a plan or review note; applied invocation evidence must record that bounded purpose.

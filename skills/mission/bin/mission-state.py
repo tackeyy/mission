@@ -895,6 +895,12 @@ def _as_list(value) -> list[str]:
     return [str(value)]
 
 
+def _string_map(value) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(k): str(v) for k, v in value.items() if k is not None and v is not None}
+
+
 def _complexity_at_least(current: str | None, minimum: str | None) -> bool:
     if not minimum:
         return True
@@ -949,6 +955,7 @@ def _normalize_candidate(candidate: dict, source: str) -> dict:
     if isinstance(phases, str):
         phases = [phases]
     args = _as_list(candidate.get("args"))
+    env = _string_map(candidate.get("env"))
     auto_use = candidate.get("auto_use") if isinstance(candidate.get("auto_use"), dict) else {}
     risk = candidate.get("risk") if isinstance(candidate.get("risk"), dict) else {}
     explicit_result_contract = candidate.get("result_contract") if isinstance(candidate.get("result_contract"), dict) else {}
@@ -964,6 +971,8 @@ def _normalize_candidate(candidate: dict, source: str) -> dict:
         "kind": kind,
         "command": command,
         "args": args,
+        "env": env,
+        "timeout": candidate.get("timeout"),
         "task_profiles": _candidate_profiles(candidate),
         "phases": phases,
         "required": bool(candidate.get("required", False)),
@@ -1469,6 +1478,15 @@ def _classify_command_provider_result(provider: dict, exit_code: int | None,
     return "completed", None
 
 
+def _provider_timeout(provider: dict, override: int | None) -> int:
+    if override is not None:
+        return override
+    try:
+        return int(provider.get("timeout") or 120)
+    except (TypeError, ValueError):
+        return 120
+
+
 def _selected_specialist_skills(data: dict) -> set[str]:
     return {
         str(item.get("skill"))
@@ -1531,7 +1549,16 @@ def _add_selected_specialist_metadata(data: dict, entry: dict, selection_source:
         "selection_source": selection_source,
         "selected_at": now,
     }
-    for key in ("source", "bounded_use", "bounded_purpose_required", "result_contract"):
+    for key in (
+        "source",
+        "command",
+        "args",
+        "env",
+        "timeout",
+        "bounded_use",
+        "bounded_purpose_required",
+        "result_contract",
+    ):
         if key in provider and key not in selected_entry:
             selected_entry[key] = provider[key]
     if reason:
@@ -1616,14 +1643,18 @@ def cmd_invoke_command_provider(args):
 
     argv = [command, *[str(a) for a in provider.get("args") or []]]
     packet = _command_provider_packet(data, provider, args)
+    command_env = os.environ.copy()
+    command_env.update(_string_map(provider.get("env")))
+    timeout = _provider_timeout(provider, args.timeout)
     try:
         completed = subprocess.run(
             argv,
             input=packet,
             capture_output=True,
             text=True,
-            timeout=args.timeout,
+            timeout=timeout,
             check=False,
+            env=command_env,
         )
         exit_code = completed.returncode
         stdout = _redact_provider_output(completed.stdout or "")
@@ -1639,6 +1670,7 @@ def cmd_invoke_command_provider(args):
         "status": status,
         "completed_at": completed_at,
         "exit_code": exit_code,
+        "timeout": timeout,
     })
     if reason:
         entry["reason"] = reason
@@ -3533,7 +3565,8 @@ def _build_parser():
     p_cmd.add_argument("--input-file", default=None, help="provider stdin packet に含める入力ファイル")
     p_cmd.add_argument("--selection-source", default=None, choices=sorted(SPECIALIST_SELECTION_SOURCES),
                        help="ask-user 後に command provider を適用する場合の confirmed selection metadata")
-    p_cmd.add_argument("--timeout", type=int, default=120)
+    p_cmd.add_argument("--timeout", type=int, default=None,
+                       help="command timeout seconds (default: provider timeout, then 120)")
     p_cmd.add_argument("--json", action="store_true", help="JSON 形式で出力")
     p_cmd.set_defaults(func=cmd_invoke_command_provider)
 

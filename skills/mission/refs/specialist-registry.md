@@ -46,6 +46,9 @@ specialists:
     kind: command
     command: oracle
     args: ["review", "--stdin"]
+    env:
+      ORACLE_MISSION_WAIT_SECONDS: "900"
+    timeout: 960
     task_profiles: [architecture, product, research, documentation, security]
     phases: [planning, review, critic]
     required: false
@@ -108,6 +111,8 @@ Fields:
 | `kind` | `skill` or `command`. Defaults to `skill`. |
 | `command` | Local executable for `kind: command`; invoked without shell interpolation. |
 | `args` | Optional argv list for `kind: command`. |
+| `env` | Optional string key/value environment overrides for `kind: command`. Values are passed only to that provider process. |
+| `timeout` | Optional command timeout seconds for `kind: command`. CLI `--timeout` overrides this value. |
 | `task_profiles` | Profiles that make the specialist relevant. |
 | `phases` | Allowed phases: `planning`, `execution`, `review`, `scoring`, `critic`. |
 | `required` | If `true`, missing skill becomes a blocker. Default `false`. |
@@ -186,6 +191,8 @@ python3 skills/mission/bin/mission-state.py specialists invoke-command \
 ```
 
 The input file is wrapped in a JSON packet with mission, provider, iteration, and phase metadata, then sent to the configured command over stdin. The provider cannot set `passes`, cannot call `mark-passes`, and cannot alter mission state except through the invocation evidence recorded by the runner.
+
+Command provider registries may include `env` and `timeout` to make interactive wrappers complete in one `invoke-command` call. For example, an oracle browser wrapper can set `ORACLE_MISSION_WAIT_SECONDS=900` and `timeout: 960`; the provider may open the browser, wait for the reviewer to save the result, then return substantive stdout that satisfies the result contract. This remains generic provider configuration, not oracle authority inside mission core.
 
 Command providers can define a result contract:
 
