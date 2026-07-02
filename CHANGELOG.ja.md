@@ -9,6 +9,12 @@
 
 ## [Unreleased]
 
+### 追加
+- `mission-state.py push-score --scoring-json <path>` (ADR-002 Stage 1) を追加しました。scorer の構造化 JSON ファイルから items を読み、`composite`/`min_item` を CLI 側で再計算し、未知キー・範囲外値を reject し、payload を `_meta` 付きで `iter-N-<mid8>-scoring.json` として archive し、score entry に `score_source`/`scoring_evidence_path` を記録します (orchestrator のスコア転記レイヤを排除)。
+- `push-score` が「全 items スコアが 1.0 以下」の入力を 0-1 正規化スケール混入の疑いとして reject するようにしました (実ログで composite 0.96 = 4.8/5 が push された事例の回帰ガード)。
+- scoring evidence なしの `push-score` に deprecation 警告を出し、`MISSION_REQUIRE_SCORING_EVIDENCE=1` で hard reject に切り替えられるようにしました (Stage 1 のデフォルト strict 化に向けた段階導入)。
+- `mission-state.py next` (ADR-002 Stage 3) を追加しました。session state から次の 1 手 (`run-planner`/`run-reviewers`/`run-scorer`/`mark-passes`/`report-blocker` 等) を決定論的に導出し、Stop hook が使えない Codex セッションや compaction 復帰時に、散文指示に依存しないハーネス非依存の進行ガイドを提供します。
+
 ## [1.0.6] - 2026-07-02
 
 ### 修正

@@ -2419,6 +2419,116 @@ def cmd_get(args):
         print(json.dumps(data, indent=2, ensure_ascii=False))
 
 
+def _derive_next_action(data: dict) -> dict:
+    """ADR-002 Stage 3 (G-3): state から次の 1 手を決定論的に導出する。
+
+    ハーネス非依存の進行ガイド。Stop hook が使えない環境 (Codex 等) や
+    compaction 後の復元で、散文指示に依存せず「state を読めば次手が自明」にする。
+    分岐は SKILL.md の Phase 0-7 と同じ決定木を機械化したもの。
+    """
+    halt_reason = data.get("halt_reason") or ""
+    if halt_reason:
+        return {
+            "next_action": "report-blocker",
+            "summary": f"halted: {halt_reason}。blocker と次アクションをユーザーに報告する。再開する場合は refresh-pid",
+            "command_hint": "mission-state.py refresh-pid",
+        }
+    if data.get("passes") is True:
+        return {
+            "next_action": "report-complete",
+            "summary": "mission は合格済み。最終報告 (成果物パス・検証結果・specialist summary) を出して終了する",
+            "command_hint": "mission-state.py specialists summary",
+        }
+    if data.get("awaiting_user"):
+        return {
+            "next_action": "await-user",
+            "summary": "ユーザー回答待ち (awaiting_user=true)。回答を得るまで不可逆操作に進まない",
+            "command_hint": "",
+        }
+    if data.get("loop_active") is False:
+        return {
+            "next_action": "resume",
+            "summary": "loop_active=false だが未合格・halt 理由なし。refresh-pid で再活性化してループを再開する",
+            "command_hint": "mission-state.py refresh-pid",
+        }
+    phase = data.get("phase") or "planning"
+    iteration = data.get("iteration", 1) or 1
+    reviewer_count = data.get("reviewer_count", 2) or 2
+    mid8 = (data.get("mission_id") or "unknown")[:8]
+    stagnation = data.get("stagnation_count", 0) or 0
+    # 通常経路では push-score が phase=scoring へ遷移させるため stagnation>=3 と
+    # phase=reviewing は共起しないが、手動 `set stagnation_count=N` は許可された操作。
+    # 走行中のレビューを中断させないよう reviewing だけは phase 分岐を優先する。
+    if stagnation >= 3 and phase != "reviewing":
+        return {
+            "next_action": "consider-halt",
+            "summary": f"stagnation_count={stagnation} (3 連続でスコア停滞)。アプローチを変えても改善しない場合は mark-halt で停止し状況を報告する",
+            "command_hint": 'mission-state.py mark-halt --reason "<停滞理由>"',
+        }
+    if phase == "planning":
+        return {
+            "next_action": "run-planner",
+            "summary": f"iteration {iteration}: mission-planner を起動して計画を立てる (完了後 set phase=executing)",
+            "command_hint": "Skill: mission-planner → mission-state.py set phase='\"executing\"'",
+        }
+    if phase == "executing":
+        return {
+            "next_action": "run-executor",
+            "summary": f"iteration {iteration}: mission-executor で計画を実行する (完了後 set phase=reviewing。10分超は progress update)",
+            "command_hint": "Skill: mission-executor → mission-state.py set phase='\"reviewing\"'",
+        }
+    if phase == "reviewing":
+        return {
+            "next_action": "run-reviewers",
+            "summary": f"iteration {iteration}: mission-reviewer を {reviewer_count} 名、単一メッセージで並列起動する (直列起動は規律違反)",
+            "command_hint": f"Skill: mission-reviewer x{reviewer_count} (1 message)",
+            "details": {"reviewer_count": reviewer_count},
+        }
+    # phase == scoring / done / その他: 現 iteration の有効スコア有無で分岐
+    history = data.get("score_history") or []
+    scored_current = [
+        h for h in history
+        if isinstance(h, dict) and h.get("iteration") == iteration and _is_valid_composite(h.get("composite"))
+    ]
+    if scored_current:
+        return {
+            "next_action": "mark-passes",
+            "summary": f"iteration {iteration} の採点は記録済み。mark-passes で threshold gate 判定する (reject なら mission-critic → 次 iteration)",
+            "command_hint": "mission-state.py mark-passes",
+        }
+    return {
+        "next_action": "run-scorer",
+        "summary": f"iteration {iteration}: mission-scorer を起動し、構造化 JSON を push-score --scoring-json で記録する",
+        "command_hint": f"Skill: mission-scorer → mission-state.py push-score --iteration {iteration} --scoring-json /tmp/mission-scorer-iter-{iteration}-{mid8}.json",
+    }
+
+
+def cmd_next(args):
+    """ADR-002 Stage 3: 次の 1 手を JSON で返す (read-only・state 不在でも exit 0)."""
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        print(json.dumps({
+            "next_action": "init",
+            "summary": "mission state がありません。init でミッションを登録してループを開始する",
+            "command_hint": 'mission-state.py init "<ミッション記述>" --complexity <Simple|Standard|Complex|Critical>',
+        }, ensure_ascii=False))
+        return
+    with StateLock(lock_file(cwd)):
+        data = json.loads(sf.read_text())
+    out = _derive_next_action(data)
+    out.setdefault("details", {})
+    out.update({
+        "phase": data.get("phase"),
+        "iteration": data.get("iteration"),
+        "session_id": data.get("session_id"),
+        "loop_active": data.get("loop_active"),
+        "passes": data.get("passes"),
+        "stagnation_count": data.get("stagnation_count", 0) or 0,
+    })
+    print(json.dumps(out, ensure_ascii=False))
+
+
 # Issue #2: set で変更禁止のフィールド (mission_id 整合性維持のため)
 FROZEN_FIELDS = {
     "mission",  # 変更したいなら init を使う (mission_id が再計算される)
@@ -2521,12 +2631,12 @@ def normalize_score_items(items: dict):
     return normalized, unknown, collisions
 
 
-def _scoring_archive_path(cwd: Path, iteration: int, data: dict) -> Path:
+def _scoring_archive_path(cwd: Path, iteration: int, data: dict, suffix: str = ".md") -> Path:
     archive_dir = state_dir(cwd) / "archive"
     archive_dir.mkdir(parents=True, exist_ok=True)
     # H1 (2026-06-10): mission_id を含めて連続ランの上書き消失を防止
     gid = (data.get("mission_id") or "unknown")[:8]
-    return archive_dir / f"iter-{iteration}-{gid}-scoring.md"
+    return archive_dir / f"iter-{iteration}-{gid}-scoring{suffix}"
 
 
 def _scoring_metadata_header(data: dict, entry: dict, iteration: int, *, generated: bool = False) -> str:
@@ -2610,6 +2720,92 @@ def _validate_score_args(args) -> dict:
     return items
 
 
+def _numeric_item_values(items: dict) -> list:
+    return [float(v) for v in items.values() if isinstance(v, (int, float)) and not math.isnan(float(v))]
+
+
+def _reject_normalized_scale(items: dict) -> None:
+    """ADR-002 Stage 1: 0-1 正規化スケール混入の reject.
+
+    実ログ (xai-cli cx-019efece, 2026-06-25) で composite 0.96 (= 4.8/5) が 0-5 範囲内として
+    素通りした回帰。全 items が 1.0 以下なら 5 点スケールの採点ではないと判断して exit 2。
+    正当に 1 項目だけ 1.0 以下になるケース (max > 1.0) は通す。
+    """
+    numeric = _numeric_item_values(items)
+    if numeric and max(numeric) <= 1.0:
+        print(
+            "ERROR: すべての items スコアが 1.0 以下です。0-1 正規化スケールで採点した疑いがあります。"
+            f" 5 点満点 ({SCORE_MIN}-{SCORE_MAX}) で採点し直してください。",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
+def _load_scoring_json(path_str: str):
+    """ADR-002 Stage 1: --scoring-json の strict 読み込み。
+
+    返り値: (items, notes, open_high, payload)。従来 --items 経路と異なり、
+    未知キー・範囲外の item 値は WARN でなく reject する (exit 2)。
+    """
+    src = Path(path_str)
+    if not (src.exists() and src.is_file()):
+        print(f"ERROR: --scoring-json のファイルが見つかりません: {src}", file=sys.stderr)
+        sys.exit(2)
+    try:
+        payload = json.loads(src.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        print(f"ERROR: --scoring-json が不正な JSON です: {e}", file=sys.stderr)
+        sys.exit(2)
+    if not isinstance(payload, dict) or not isinstance(payload.get("items"), dict) or not payload["items"]:
+        print("ERROR: --scoring-json は {\"items\": {key->score}} を含む JSON オブジェクトで指定してください。", file=sys.stderr)
+        sys.exit(2)
+    items, unknown_keys, collisions = normalize_score_items(payload["items"])
+    for alias, ck in collisions:
+        print(
+            f"WARNING: エイリアス '{alias}' が既存キー '{ck}' と衝突したため破棄しました (明示値が優先)。",
+            file=sys.stderr,
+        )
+    if unknown_keys:
+        print(
+            f"ERROR: --scoring-json に非正規のスコア項目キー {unknown_keys} があります。"
+            f" 正規キー: {sorted(CANONICAL_SCORE_KEYS)} (エイリアス: {SCORE_KEY_ALIASES})",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    for k, v in items.items():
+        if not isinstance(v, (int, float)) or math.isnan(float(v)) or not (SCORE_MIN <= float(v) <= SCORE_MAX):
+            print(f"ERROR: --scoring-json の item '{k}'={v} は {SCORE_MIN}〜{SCORE_MAX} の数値で指定してください。", file=sys.stderr)
+            sys.exit(2)
+    notes = payload.get("notes")
+    if notes is not None and not isinstance(notes, str):
+        print("ERROR: --scoring-json の notes は文字列で指定してください。", file=sys.stderr)
+        sys.exit(2)
+    # open_high はキー欠如 (None) と明示 0 を区別する: 明示値は CLI --open-high より優先される
+    open_high = payload.get("open_high")
+    if open_high is not None and (not isinstance(open_high, int) or open_high < 0):
+        print("ERROR: --scoring-json の open_high は 0 以上の整数で指定してください。", file=sys.stderr)
+        sys.exit(2)
+    return items, notes, open_high, payload
+
+
+def _archive_scoring_json(cwd: Path, iteration: int, data: dict, entry: dict, payload: dict) -> str:
+    """--scoring-json の payload を _meta 付きで archive/iter-N-<mid8>-scoring.json に保存する."""
+    dst = _scoring_archive_path(cwd, iteration, data, suffix=".json")
+    meta = {
+        "session_id": data.get("session_id"),
+        "agent": data.get("agent") or "unknown",
+        "mission_id": data.get("mission_id"),
+        "iteration": iteration,
+        "timestamp": entry["timestamp"],
+        "computed_composite": entry["composite"],
+        "computed_min_item": entry["min_item"],
+    }
+    out = {"_meta": meta}
+    out.update(payload)
+    dst.write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return str(dst)
+
+
 def _warn_on_score_item_mismatch(args, items: dict) -> None:
     """Warn when self-reported scalar scores diverge from the supplied item scores."""
     numeric_values = [float(v) for v in items.values() if isinstance(v, (int, float)) and not math.isnan(float(v))]
@@ -2660,8 +2856,51 @@ def cmd_push_score(args):
     if args.iteration < 1:
         print("ERROR: --iteration は 1 以上で指定してください", file=sys.stderr)
         sys.exit(2)
-    items = _validate_score_args(args)
-    _warn_on_score_item_mismatch(args, items)
+    scoring_payload = None
+    if args.scoring_json:
+        # ADR-002 Stage 1 (G-1): items を scorer の JSON ファイルから読み、
+        # composite/min_item を CLI 側で再計算する (orchestrator の転記レイヤを排除)。
+        if args.items is not None or args.composite is not None or args.min_item is not None:
+            print(
+                "ERROR: --scoring-json と --items/--composite/--min-item は併用できません "
+                "(composite/min_item は items から CLI が再計算します)。",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        items, json_notes, json_open_high, scoring_payload = _load_scoring_json(args.scoring_json)
+        args.composite = round(sum(_numeric_item_values(items)) / len(items), 2)
+        args.min_item = round(min(_numeric_item_values(items)), 2)
+        # scorer の構造化出力が authoritative: JSON に open_high があれば CLI --open-high より優先
+        if json_open_high is not None:
+            args.open_high = json_open_high
+        if json_notes and not args.notes:
+            args.notes = json_notes
+    else:
+        if args.items is None or args.composite is None or args.min_item is None:
+            print(
+                "ERROR: --scoring-json を使わない場合は --items/--composite/--min-item が必須です。",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        # G-2 (段階導入): scoring evidence なしの push-score は非推奨。
+        # MISSION_REQUIRE_SCORING_EVIDENCE=1 で strict reject に切り替えられる。
+        if not args.scoring_output:
+            if os.environ.get("MISSION_REQUIRE_SCORING_EVIDENCE") == "1":
+                print(
+                    "ERROR: scoring evidence が必須です (MISSION_REQUIRE_SCORING_EVIDENCE=1)。"
+                    " --scoring-json (推奨) または --scoring-output を指定してください。",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            print(
+                "DEPRECATION: scoring evidence なしの push-score は非推奨です。"
+                " --scoring-json (推奨) または --scoring-output を指定してください。"
+                " 実ログで evidence なしの generated スコアが本文あり平均より高い採点になる傾向が確認されています。",
+                file=sys.stderr,
+            )
+        items = _validate_score_args(args)
+        _warn_on_score_item_mismatch(args, items)
+    _reject_normalized_scale(items)
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
@@ -2678,6 +2917,12 @@ def cmd_push_score(args):
             entry["notes"] = args.notes
         # Issue #3: open_high を保存 (mark-passes gate で参照)
         entry["open_high"] = getattr(args, "open_high", 0)
+        if args.scoring_json:
+            # archive を state 書き込みより先に行う (crash 時に state が実在しない
+            # scoring_evidence_path を指す dangling reference を防ぐ。他 archive 系と同順序)
+            entry["score_source"] = "scoring-json"
+            scoring_json_archived_to = _archive_scoring_json(cwd, args.iteration, data, entry, scoring_payload)
+            entry["scoring_evidence_path"] = scoring_json_archived_to
         data.setdefault("score_history", []).append(entry)
         # 改善2: top-level iteration を同期 (orchestrator の set 取りこぼしで
         # iteration と score_history 長が不整合になる問題への対処)。
@@ -2702,7 +2947,9 @@ def cmd_push_score(args):
         backup_state(sf)
         atomic_write_json(sf, data)
 
-    if args.scoring_output:
+    if args.scoring_json:
+        archived_to = scoring_json_archived_to  # StateLock 内で archive 済み (dangling path 防止)
+    elif args.scoring_output:
         archived_to = _archive_scoring_output(cwd, args.scoring_output, args.iteration, data, entry)
     else:
         archived_to = _archive_generated_scoring_output(cwd, args.iteration, data, entry)
@@ -3428,6 +3675,9 @@ def _build_parser():
                         help="予定変更ファイルのカンマ区切り project-root 相対パス。同一 active session と重複する場合 WARN")
     p_init.set_defaults(func=cmd_init)
 
+    p_next = sub.add_parser("next", help="ADR-002 Stage 3: state から次の 1 手を JSON で返す (read-only。Codex/compaction 復帰時の進行ガイド)")
+    p_next.set_defaults(func=cmd_next)
+
     p_get = sub.add_parser("get", help="state.json の値取得")
     p_get.add_argument("--field", default=None)
     p_get.set_defaults(func=cmd_get)
@@ -3445,14 +3695,19 @@ def _build_parser():
 
     p_score = sub.add_parser("push-score", help="score_history に採点結果を append (orchestrator が Phase 5 直後に呼ぶ)")
     p_score.add_argument("--iteration", type=int, required=True)
-    p_score.add_argument("--composite", type=float, required=True)
-    p_score.add_argument("--min-item", type=float, required=True, dest="min_item")
-    p_score.add_argument("--items", required=True, help=f'JSON 形式 (例: {{"mission_achievement": {DEFAULT_THRESHOLD}, "accuracy": {MIN_ITEM_THRESHOLD}, ...}})')
+    p_score.add_argument("--composite", type=float, default=None,
+                         help="自己申告 composite (従来経路)。--scoring-json 使用時は指定不可 (CLI が items から再計算する)")
+    p_score.add_argument("--min-item", type=float, default=None, dest="min_item",
+                         help="自己申告 min_item (従来経路)。--scoring-json 使用時は指定不可")
+    p_score.add_argument("--items", default=None, help=f'JSON 形式 (例: {{"mission_achievement": {DEFAULT_THRESHOLD}, "accuracy": {MIN_ITEM_THRESHOLD}, ...}})。--scoring-json 使用時は指定不可')
+    p_score.add_argument("--scoring-json", default=None, dest="scoring_json",
+                         help="Scorer の構造化 JSON 出力パス (ADR-002 Stage 1)。{\"items\": {...}, \"notes\"?, \"open_high\"?} を読み、"
+                              "composite/min_item を CLI 側で再計算し、evidence として archive に保存する。転記レイヤを排除する推奨経路")
     p_score.add_argument("--notes", default=None)
     p_score.add_argument("--scoring-output", default=None,
                          help="Scorer の Markdown 出力ファイルパス。指定すると .mission-state/archive/iter-N-scoring.md にコピー保存される (案 1: ログ充実化)")
     p_score.add_argument("--open-high", type=int, default=0, dest="open_high",
-                         help="未解決の High 指摘件数 (mark-passes の gate で使用)")
+                         help="未解決の High 指摘件数 (mark-passes の gate で使用)。--scoring-json に open_high があればそちらを優先")
     p_score.set_defaults(func=cmd_push_score)
 
     p_halt = sub.add_parser("mark-halt", help="halt_reason を立てて停止")

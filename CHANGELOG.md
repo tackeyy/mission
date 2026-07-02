@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `mission-state.py push-score --scoring-json <path>` (ADR-002 Stage 1) reads scorer items from a structured JSON file, recomputes `composite`/`min_item` server-side, rejects unknown item keys and out-of-range values, archives the payload as `iter-N-<mid8>-scoring.json` with `_meta`, and records `score_source`/`scoring_evidence_path` on the score entry — removing the orchestrator score-transcription layer.
+- `push-score` now rejects submissions where every item score is `<= 1.0` as suspected 0-1-normalized scale input (regression guard for a logged session that pushed composite 0.96 = 4.8/5).
+- Evidence-less `push-score` calls now emit a deprecation warning, and `MISSION_REQUIRE_SCORING_EVIDENCE=1` upgrades the warning to a hard reject ahead of the Stage 1 default flip.
+- `mission-state.py next` (ADR-002 Stage 3) derives the single next action from session state (`run-planner`/`run-reviewers`/`run-scorer`/`mark-passes`/`report-blocker`/...), giving Codex sessions and post-compaction resumes a harness-independent, deterministic progression guide instead of prose-only instructions.
+
 ## [1.0.6] - 2026-07-02
 
 ### Fixed
