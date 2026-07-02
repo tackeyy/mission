@@ -70,6 +70,7 @@
 
 - 全 sessions が `schema_version: 2` のまま、実際には `task_profile` / `specialists_mode` / `phase_durations_sec` / `specialist_invocations` 等の追加で**少なくとも 2 世代のフィールドセットが混在**（精読 100 件中 40 件が旧世代）。
 - 採点 items も標準 5 項目から外れた session が 13 件（14%）: `reviewer_consensus` 欠落 4 件、独自項目への全面置換（`{publication, docs_updated, ...}` 等）。`normalize_score_items` はエイリアス変換のみで、**未知キーは WARN 素通り**（audit-2026-07-02 §1.3 と同根）。監査ツールが世代とバリアントを都度吸収するため、audit.py が 1,581 行に肥大している。
+- **スケール異常の実例（深掘り確定）**: xai-cli の `cx-019efece`（Codex、`archive/worktree-codex-xai-media-extensions/`）が、iter1 で独自項目名 + **0-1 正規化スコア（composite 0.96 = 4.8/5）** を push、iter2 で項目名のみ修正（まだ 0.96）、iter3 で「5-point scale」と明記して 4.8 を push。3 回の push は 39 秒間の連続実行で、**スコア形式の修正に iteration を 3 消費**した。0.96 は 0-5 の範囲内のため `_validate_score_args` を素通り。なおミッション成果自体は xai-cli main に PR #29（`dbb9288 feat(media): support webp and mov uploads`）としてマージ済みで、実害はスコア統計の汚染に限られる。対策は ADR-002 Stage 1 の scale-anomaly reject（全 items ≤ 1.0 なら exit 2）として吸収。
 
 ### L-7. phase 計測が実態を反映していない（Med）
 
@@ -183,3 +184,4 @@ ADR-002 の issue_ref は session 単位の重複検出用で、(a) canonical pr
 | 日時 | 内容 |
 |------|------|
 | 2026-07-02 | 初版作成。実行ログ全量（426 sessions / 10 プロジェクト .mission-state）× ソース（1.0.5 + #101）突き合わせ。既存監査（audit-2026-07-02 / 6-28 ログ監査 / ontology-redesign / ADR-002）に上乗せする新規 finding L-1〜L-9 とゼロベース評価、改善バックログ G-1〜G-12 を提示 |
+| 2026-07-02 | xai-cli スコアスケール異常を深掘り確定（L-6 に追記）: `cx-019efece` が 0-1 正規化 composite 0.96 を 2 回 push、iteration 3 消費、バリデーション素通り。成果物は xai-cli main に PR #29 でマージ済みと照合。G-1/G-3/G-4 を ADR-002 の Staged Extensions として統合（別 ADR は起こさない） |
