@@ -2521,12 +2521,12 @@ def normalize_score_items(items: dict):
     return normalized, unknown, collisions
 
 
-def _scoring_archive_path(cwd: Path, iteration: int, data: dict) -> Path:
+def _scoring_archive_path(cwd: Path, iteration: int, data: dict, suffix: str = ".md") -> Path:
     archive_dir = state_dir(cwd) / "archive"
     archive_dir.mkdir(parents=True, exist_ok=True)
     # H1 (2026-06-10): mission_id を含めて連続ランの上書き消失を防止
     gid = (data.get("mission_id") or "unknown")[:8]
-    return archive_dir / f"iter-{iteration}-{gid}-scoring.md"
+    return archive_dir / f"iter-{iteration}-{gid}-scoring{suffix}"
 
 
 def _scoring_metadata_header(data: dict, entry: dict, iteration: int, *, generated: bool = False) -> str:
@@ -2610,6 +2610,91 @@ def _validate_score_args(args) -> dict:
     return items
 
 
+def _numeric_item_values(items: dict) -> list:
+    return [float(v) for v in items.values() if isinstance(v, (int, float)) and not math.isnan(float(v))]
+
+
+def _reject_normalized_scale(items: dict) -> None:
+    """ADR-002 Stage 1: 0-1 正規化スケール混入の reject.
+
+    実ログ (xai-cli cx-019efece, 2026-06-25) で composite 0.96 (= 4.8/5) が 0-5 範囲内として
+    素通りした回帰。全 items が 1.0 以下なら 5 点スケールの採点ではないと判断して exit 2。
+    正当に 1 項目だけ 1.0 以下になるケース (max > 1.0) は通す。
+    """
+    numeric = _numeric_item_values(items)
+    if numeric and max(numeric) <= 1.0:
+        print(
+            "ERROR: すべての items スコアが 1.0 以下です。0-1 正規化スケールで採点した疑いがあります。"
+            f" 5 点満点 ({SCORE_MIN}-{SCORE_MAX}) で採点し直してください。",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
+def _load_scoring_json(path_str: str):
+    """ADR-002 Stage 1: --scoring-json の strict 読み込み。
+
+    返り値: (items, notes, open_high, payload)。従来 --items 経路と異なり、
+    未知キー・範囲外の item 値は WARN でなく reject する (exit 2)。
+    """
+    src = Path(path_str)
+    if not (src.exists() and src.is_file()):
+        print(f"ERROR: --scoring-json のファイルが見つかりません: {src}", file=sys.stderr)
+        sys.exit(2)
+    try:
+        payload = json.loads(src.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        print(f"ERROR: --scoring-json が不正な JSON です: {e}", file=sys.stderr)
+        sys.exit(2)
+    if not isinstance(payload, dict) or not isinstance(payload.get("items"), dict) or not payload["items"]:
+        print("ERROR: --scoring-json は {\"items\": {key->score}} を含む JSON オブジェクトで指定してください。", file=sys.stderr)
+        sys.exit(2)
+    items, unknown_keys, collisions = normalize_score_items(payload["items"])
+    for alias, ck in collisions:
+        print(
+            f"WARNING: エイリアス '{alias}' が既存キー '{ck}' と衝突したため破棄しました (明示値が優先)。",
+            file=sys.stderr,
+        )
+    if unknown_keys:
+        print(
+            f"ERROR: --scoring-json に非正規のスコア項目キー {unknown_keys} があります。"
+            f" 正規キー: {sorted(CANONICAL_SCORE_KEYS)} (エイリアス: {SCORE_KEY_ALIASES})",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    for k, v in items.items():
+        if not isinstance(v, (int, float)) or math.isnan(float(v)) or not (SCORE_MIN <= float(v) <= SCORE_MAX):
+            print(f"ERROR: --scoring-json の item '{k}'={v} は {SCORE_MIN}〜{SCORE_MAX} の数値で指定してください。", file=sys.stderr)
+            sys.exit(2)
+    notes = payload.get("notes")
+    if notes is not None and not isinstance(notes, str):
+        print("ERROR: --scoring-json の notes は文字列で指定してください。", file=sys.stderr)
+        sys.exit(2)
+    open_high = payload.get("open_high", 0)
+    if not isinstance(open_high, int) or open_high < 0:
+        print("ERROR: --scoring-json の open_high は 0 以上の整数で指定してください。", file=sys.stderr)
+        sys.exit(2)
+    return items, notes, open_high, payload
+
+
+def _archive_scoring_json(cwd: Path, iteration: int, data: dict, entry: dict, payload: dict) -> str:
+    """--scoring-json の payload を _meta 付きで archive/iter-N-<mid8>-scoring.json に保存する."""
+    dst = _scoring_archive_path(cwd, iteration, data, suffix=".json")
+    meta = {
+        "session_id": data.get("session_id"),
+        "agent": data.get("agent") or "unknown",
+        "mission_id": data.get("mission_id"),
+        "iteration": iteration,
+        "timestamp": entry["timestamp"],
+        "computed_composite": entry["composite"],
+        "computed_min_item": entry["min_item"],
+    }
+    out = {"_meta": meta}
+    out.update(payload)
+    dst.write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return str(dst)
+
+
 def _warn_on_score_item_mismatch(args, items: dict) -> None:
     """Warn when self-reported scalar scores diverge from the supplied item scores."""
     numeric_values = [float(v) for v in items.values() if isinstance(v, (int, float)) and not math.isnan(float(v))]
@@ -2660,8 +2745,50 @@ def cmd_push_score(args):
     if args.iteration < 1:
         print("ERROR: --iteration は 1 以上で指定してください", file=sys.stderr)
         sys.exit(2)
-    items = _validate_score_args(args)
-    _warn_on_score_item_mismatch(args, items)
+    scoring_payload = None
+    if args.scoring_json:
+        # ADR-002 Stage 1 (G-1): items を scorer の JSON ファイルから読み、
+        # composite/min_item を CLI 側で再計算する (orchestrator の転記レイヤを排除)。
+        if args.items is not None or args.composite is not None or args.min_item is not None:
+            print(
+                "ERROR: --scoring-json と --items/--composite/--min-item は併用できません "
+                "(composite/min_item は items から CLI が再計算します)。",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        items, json_notes, json_open_high, scoring_payload = _load_scoring_json(args.scoring_json)
+        args.composite = round(sum(_numeric_item_values(items)) / len(items), 2)
+        args.min_item = round(min(_numeric_item_values(items)), 2)
+        if json_open_high and not args.open_high:
+            args.open_high = json_open_high
+        if json_notes and not args.notes:
+            args.notes = json_notes
+    else:
+        if args.items is None or args.composite is None or args.min_item is None:
+            print(
+                "ERROR: --scoring-json を使わない場合は --items/--composite/--min-item が必須です。",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        # G-2 (段階導入): scoring evidence なしの push-score は非推奨。
+        # MISSION_REQUIRE_SCORING_EVIDENCE=1 で strict reject に切り替えられる。
+        if not args.scoring_output:
+            if os.environ.get("MISSION_REQUIRE_SCORING_EVIDENCE") == "1":
+                print(
+                    "ERROR: scoring evidence が必須です (MISSION_REQUIRE_SCORING_EVIDENCE=1)。"
+                    " --scoring-json (推奨) または --scoring-output を指定してください。",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            print(
+                "DEPRECATION: scoring evidence なしの push-score は非推奨です。"
+                " --scoring-json (推奨) または --scoring-output を指定してください。"
+                " 実ログで evidence なしの generated スコアが本文あり平均より高い採点になる傾向が確認されています。",
+                file=sys.stderr,
+            )
+        items = _validate_score_args(args)
+        _warn_on_score_item_mismatch(args, items)
+    _reject_normalized_scale(items)
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
@@ -2678,6 +2805,9 @@ def cmd_push_score(args):
             entry["notes"] = args.notes
         # Issue #3: open_high を保存 (mark-passes gate で参照)
         entry["open_high"] = getattr(args, "open_high", 0)
+        if args.scoring_json:
+            entry["score_source"] = "scoring-json"
+            entry["scoring_evidence_path"] = str(_scoring_archive_path(cwd, args.iteration, data, suffix=".json"))
         data.setdefault("score_history", []).append(entry)
         # 改善2: top-level iteration を同期 (orchestrator の set 取りこぼしで
         # iteration と score_history 長が不整合になる問題への対処)。
@@ -2702,7 +2832,9 @@ def cmd_push_score(args):
         backup_state(sf)
         atomic_write_json(sf, data)
 
-    if args.scoring_output:
+    if args.scoring_json:
+        archived_to = _archive_scoring_json(cwd, args.iteration, data, entry, scoring_payload)
+    elif args.scoring_output:
         archived_to = _archive_scoring_output(cwd, args.scoring_output, args.iteration, data, entry)
     else:
         archived_to = _archive_generated_scoring_output(cwd, args.iteration, data, entry)
@@ -3445,14 +3577,19 @@ def _build_parser():
 
     p_score = sub.add_parser("push-score", help="score_history に採点結果を append (orchestrator が Phase 5 直後に呼ぶ)")
     p_score.add_argument("--iteration", type=int, required=True)
-    p_score.add_argument("--composite", type=float, required=True)
-    p_score.add_argument("--min-item", type=float, required=True, dest="min_item")
-    p_score.add_argument("--items", required=True, help=f'JSON 形式 (例: {{"mission_achievement": {DEFAULT_THRESHOLD}, "accuracy": {MIN_ITEM_THRESHOLD}, ...}})')
+    p_score.add_argument("--composite", type=float, default=None,
+                         help="自己申告 composite (従来経路)。--scoring-json 使用時は指定不可 (CLI が items から再計算する)")
+    p_score.add_argument("--min-item", type=float, default=None, dest="min_item",
+                         help="自己申告 min_item (従来経路)。--scoring-json 使用時は指定不可")
+    p_score.add_argument("--items", default=None, help=f'JSON 形式 (例: {{"mission_achievement": {DEFAULT_THRESHOLD}, "accuracy": {MIN_ITEM_THRESHOLD}, ...}})。--scoring-json 使用時は指定不可')
+    p_score.add_argument("--scoring-json", default=None, dest="scoring_json",
+                         help="Scorer の構造化 JSON 出力パス (ADR-002 Stage 1)。{\"items\": {...}, \"notes\"?, \"open_high\"?} を読み、"
+                              "composite/min_item を CLI 側で再計算し、evidence として archive に保存する。転記レイヤを排除する推奨経路")
     p_score.add_argument("--notes", default=None)
     p_score.add_argument("--scoring-output", default=None,
                          help="Scorer の Markdown 出力ファイルパス。指定すると .mission-state/archive/iter-N-scoring.md にコピー保存される (案 1: ログ充実化)")
     p_score.add_argument("--open-high", type=int, default=0, dest="open_high",
-                         help="未解決の High 指摘件数 (mark-passes の gate で使用)")
+                         help="未解決の High 指摘件数 (mark-passes の gate で使用)。--scoring-json に open_high があればそちらを優先")
     p_score.set_defaults(func=cmd_push_score)
 
     p_halt = sub.add_parser("mark-halt", help="halt_reason を立てて停止")
