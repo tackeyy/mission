@@ -82,6 +82,8 @@
 | 2 | サブタスクの半分以上が未完 |
 | 1 | ほぼ未着手 |
 
+エラーパス、性能劣化、セキュリティ境界、運用手順の抜け漏れも完成度で評価する。Critical/Complex の未解決 High は採点軸を増やさず、scorer が `push-score --open-high <N>` に件数を載せ、`mark-passes` gate で不合格にする。
+
 ## 4. 実用性 (Usability)
 
 「ユーザーが即座に使える状態か」
@@ -107,6 +109,8 @@
 | 1 | 評価が大きく分裂、何が正解か判断不能 |
 
 Reviewer 1名のみの場合（Simple複雑度を含む）は、`reviewer_consensus` を採点 items から**省略**する。自己一貫性チェックは品質確認として notes に記録してよいが、consensus は複数 Reviewer 間の合意度を測る指標であり、1名では検証できない。
+
+consensus 算出では、同一イテレーション内でインライン修正前に出た古い採点値を除外し、修正後成果物を読んだ Reviewer の値だけを使う。scoring-output には reviewer ごとの max-min 差分表と、除外した古い値があればその理由を記録する。
 
 ### 差分レビュー周回 (iter 2 以降・検証 1 名) の合意度 — 据置禁止 (M5, 2026-06-10)
 
@@ -163,7 +167,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score --i
 3. 各項目の最終スコア = レビュアー平均
 4. composite_score = mean(採点した items)
 5. 判定:
-   - `composite_score >= threshold` AND `min(採点した items) >= 3.5` → 合格
+   - `composite_score >= threshold` AND `min(採点した items) >= 3.5` AND `open_high == 0` → 合格
    - それ以外 → 不合格 → Critic で改善案
 
 ## 改善優先順位（Critic への入力）

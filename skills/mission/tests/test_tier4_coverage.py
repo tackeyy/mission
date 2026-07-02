@@ -150,6 +150,35 @@ def test_set_rejects_frozen_field(tmp_path, run_cli):
     assert r.returncode == 2 and "変更不可" in r.stderr
 
 
+def test_set_rejects_pass_and_score_gate_fields(tmp_path, run_cli):
+    """#90: pass/score/threshold は set で変更できず、専用 gate 経路だけが更新できる。"""
+    run_cli("init", "g", "--complexity", "Standard", cwd=tmp_path)
+    forbidden = [
+        "passes=true",
+        "passes_forced=true",
+        "force_reason=manual",
+        'score_history=[{"composite":5.0,"min_item":5.0,"open_high":0}]',
+        "threshold=0",
+    ]
+    for kv in forbidden:
+        r = run_cli("set", kv, cwd=tmp_path)
+        assert r.returncode == 2, f"{kv} should be frozen, stderr={r.stderr}"
+
+
+def test_set_still_allows_loop_active_reactivation(tmp_path, run_cli):
+    """#90: loop_active は凍結せず、既存の再活性化経路を維持する。"""
+    run_cli("init", "g", "--complexity", "Standard", cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "react"})
+    run_cli("mark-halt", "--reason", "manual stop", cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "react"}, check=True)
+
+    r = run_cli("set", "loop_active=true", "halt_reason=", cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "react"})
+
+    assert r.returncode == 0, r.stderr
+    data = json.loads((tmp_path / ".mission-state" / "sessions" / "react.json").read_text())
+    assert data["loop_active"] is True
+    agg = json.loads((tmp_path / ".mission-state" / "aggregate.json").read_text())
+    assert "react" in agg["active_sessions"]
+
+
 def test_push_score_rejects_bad_items_and_range(tmp_path, run_cli):
     """A#1: _validate_score_args の異常系 (不正JSON / 非dict / 範囲外) は exit 1."""
     run_cli("init", "g", "--complexity", "Standard", cwd=tmp_path)
@@ -177,6 +206,23 @@ def test_refresh_pid_readds_to_aggregate_on_reactivate(tmp_path, run_cli):
     run_cli("refresh-pid", cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "r1"})
     agg = json.loads((tmp_path / ".mission-state" / "aggregate.json").read_text())
     assert "r1" in agg["active_sessions"], "refresh-pid 再活性化後に aggregate へ再追加されていない"
+
+
+def test_refresh_pid_reactivates_stale_halt(tmp_path, run_cli):
+    """#97: stale auto-halt も refresh-pid で resume 可能にする。"""
+    run_cli("init", "g", "--complexity", "Standard", cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "stale1"})
+    run_cli("mark-halt", "--reason", "stale: auto-halted after 180m idle", cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "stale1"})
+
+    r = run_cli("refresh-pid", cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "stale1"})
+
+    assert r.returncode == 0, r.stderr
+    payload = json.loads(r.stdout)
+    assert payload["reactivated"] is True
+    data = json.loads((tmp_path / ".mission-state" / "sessions" / "stale1.json").read_text())
+    assert data["loop_active"] is True
+    assert data["halt_reason"] == ""
+    agg = json.loads((tmp_path / ".mission-state" / "aggregate.json").read_text())
+    assert "stale1" in agg["active_sessions"]
 
 
 def test_stats_classifies_abandoned(tmp_path, run_cli, monkeypatch):

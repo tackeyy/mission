@@ -4,6 +4,8 @@
 
 Accepted
 
+Amended 2026-07-02: tied installed optional providers no longer require user confirmation for low/medium-risk tasks.
+
 ## Date
 
 2026-06-19
@@ -24,12 +26,14 @@ The orchestrator will classify the task during Phase 1, build a `task_profile`, 
 
 `mission` will ask the user only in these cases:
 
-- candidate ranking is uncertain or closely tied
+- candidate ranking is low-confidence after deterministic ranking
 - a preset or specialist is being used for the first time
 - a useful specialist is missing and installation is recommended
 - a `required: true` specialist is missing
 - the task is high-risk, security-sensitive, production-facing, or irreversible
 - the registry explicitly requires confirmation
+
+For low/medium-risk tasks where the top two installed optional candidates are closely tied, `mission` will not stop for chat selection. A tie is `abs(top.score - second.score) <= 0.05`. The ranking order is deterministic: score descending, source precedence, then skill name ascending. The top candidate is auto-selected, the alternatives remain in `specialists_candidates`, and `specialists_decision.reason` must include `tie-break: auto-selected <top> over <alt>`. This does not auto-install or auto-invoke external code; it only chooses optional evidence-provider routing. High-risk, first-use, install recommendation, required-missing, explicit confirmation, and low-confidence cases still prompt or degrade as specified above.
 
 External specialists are evidence providers, not final judges. They may strengthen planning, execution, review, scoring evidence, or critic feedback, but `mission-scorer` and `mission-state.py mark-passes` remain the final completion gate.
 

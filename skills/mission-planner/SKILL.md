@@ -24,6 +24,7 @@ allowed-tools: Read, Grep, Glob, Bash(git log:*), Bash(git status:*), Bash(ls:*)
 3. **検証可能性**: 各ステップに「完了条件（observable）」を定義
 4. **リスク先出し**: 失敗しやすい箇所を最初にやる（fail fast）
 5. **過去の失敗を活かす**: 前回の試行で失点した観点は計画に対策を組み込む
+6. **仮置き案のみ返す**: planner は Write/Edit 権限を持たない。assumptions.md に直接書くのではなく、orchestrator が追記すべき仮置き案を出力に含める
 
 ## アウトプット形式
 

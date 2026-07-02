@@ -1120,12 +1120,19 @@ def decide_specialists(task_profile: dict, candidates: list[dict]) -> dict:
             "reason": f"top specialist is missing: {top['skill']}",
             "prompted_user": True,
         }
-    if second and second.get("installed") and abs(top["score"] - second["score"]) <= 0.05:
+    if (
+        second
+        and top.get("installed")
+        and second.get("installed")
+        and not top.get("required")
+        and not second.get("required")
+        and abs(top["score"] - second["score"]) <= 0.05
+    ):
         return {
-            "policy": "interactive",
-            "action": "ask-user",
-            "reason": "top installed specialist candidates are closely tied",
-            "prompted_user": True,
+            "policy": "auto",
+            "action": "select",
+            "reason": f"tie-break: auto-selected {top['skill']} over {second['skill']} (score delta <= 0.05)",
+            "prompted_user": False,
         }
     if task_profile.get("confidence", 0) < 0.5 or top.get("score", 0) < 0.45:
         return {
@@ -2352,6 +2359,7 @@ def cmd_init(args):
         # Issue #2: 既存 sf_target が別 mission_id を持つ場合、上書き前に archive に退避する。
         # 同一 mission_id (= resume) の場合は退避不要。
         if sf_target.exists():
+            existing_mid = ""
             try:
                 existing_data = json.loads(sf_target.read_text())
                 existing_mid = existing_data.get("mission_id", "")
@@ -2362,6 +2370,20 @@ def cmd_init(args):
                     old_mid8 = existing_mid[:8] if len(existing_mid) >= 8 else existing_mid
                     archive_dest = archive_dir / f"state-{sid}-{old_mid8}.json"
                     shutil.copy2(sf_target, archive_dest)
+            except json.JSONDecodeError as e:
+                quarantine_suffix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                quarantine = sf_target.with_name(f"{sf_target.name}.corrupt-{quarantine_suffix}")
+                try:
+                    shutil.move(str(sf_target), str(quarantine))
+                    print(
+                        f"WARNING: 破損した session JSON を退避しました: {quarantine} ({e})",
+                        file=sys.stderr,
+                    )
+                except Exception as move_error:
+                    print(
+                        f"WARNING: 破損した session JSON の退避に失敗しました。上書きで復旧します: {move_error}",
+                        file=sys.stderr,
+                    )
             except Exception as e:
                 print(f"WARNING: 旧ミッション (id={existing_mid[:8]}) のアーカイブに失敗。履歴消失の可能性: {e}", file=sys.stderr)
         backup_state(sf_target)
@@ -2401,6 +2423,11 @@ def cmd_get(args):
 FROZEN_FIELDS = {
     "mission",  # 変更したいなら init を使う (mission_id が再計算される)
     "mission_id",
+    "passes",
+    "passes_forced",
+    "force_reason",
+    "score_history",
+    "threshold",
     "schema_version",
     "project_root",
     "started_at",
@@ -2583,6 +2610,25 @@ def _validate_score_args(args) -> dict:
     return items
 
 
+def _warn_on_score_item_mismatch(args, items: dict) -> None:
+    """Warn when self-reported scalar scores diverge from the supplied item scores."""
+    numeric_values = [float(v) for v in items.values() if isinstance(v, (int, float)) and not math.isnan(float(v))]
+    if not numeric_values:
+        return
+    item_mean = sum(numeric_values) / len(numeric_values)
+    item_min = min(numeric_values)
+    warnings = []
+    if abs(args.composite - item_mean) > 0.1:
+        warnings.append(f"composite={args.composite} vs items mean={item_mean:.2f}")
+    if abs(args.min_item - item_min) > 0.1:
+        warnings.append(f"min_item={args.min_item} vs items min={item_min:.2f}")
+    if warnings:
+        print(
+            "WARNING: items-derived score mismatch: " + "; ".join(warnings),
+            file=sys.stderr,
+        )
+
+
 def _validate_consensus_policy(data: dict, items: dict) -> None:
     """Issue #10: Simple/Reviewer 1名では reviewer_consensus を採点 items から省略する."""
     if "reviewer_consensus" not in items:
@@ -2615,6 +2661,7 @@ def cmd_push_score(args):
         print("ERROR: --iteration は 1 以上で指定してください", file=sys.stderr)
         sys.exit(2)
     items = _validate_score_args(args)
+    _warn_on_score_item_mismatch(args, items)
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
@@ -2842,8 +2889,10 @@ def cmd_refresh_pid(args):
         # halt 解除 + ループ再アクティベート (resume → orphan halt フローからの復帰用)
         prev_halt = data.get("halt_reason", "")
         prev_loop = data.get("loop_active", False)
-        was_orphan_halt = isinstance(prev_halt, str) and prev_halt.startswith("orphan:")
-        if was_orphan_halt and not getattr(args, "no_reactivate", False):
+        was_reactivatable_halt = isinstance(prev_halt, str) and (
+            prev_halt.startswith("orphan:") or prev_halt.startswith("stale:")
+        )
+        if was_reactivatable_halt and not getattr(args, "no_reactivate", False):
             data["halt_reason"] = ""
             data["loop_active"] = True
             _add_to_aggregate(cwd, sf.stem)  # F-4: 再活性化分を active_sessions へ戻す
@@ -2854,7 +2903,7 @@ def cmd_refresh_pid(args):
         "ok": True,
         "old_pid": old_pid,
         "new_pid": new_pid,
-        "reactivated": was_orphan_halt and not getattr(args, "no_reactivate", False),
+        "reactivated": was_reactivatable_halt and not getattr(args, "no_reactivate", False),
         "prev_halt_reason": prev_halt,
         "prev_loop_active": prev_loop,
     }))

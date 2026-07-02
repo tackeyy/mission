@@ -1,7 +1,7 @@
 # /mission 既知のハマりポイント (session-review 由来)
 
 > SKILL.md 本体から退避した詳細リファレンス (2026-06-10, 公式 Progressive Disclosure 準拠)。
-> **いつ読むか**: 新規ミッション開始時 → §6 / halt 後の再開時 → §2 / Reviewer 起動時 → §1, §3 / サブエージェント Edit 後 → §4 / 複数セッション並行時 → §5, §7, §11 / 長時間 background ジョブ待機 → §8。
+> **いつ読むか**: 新規ミッション開始時 → §6 / halt 後の再開時 → §2 / Reviewer 起動時 → §1, §3 / サブエージェント Edit 後 → §4 / 複数セッション並行時 → §5 / 長時間 background ジョブ待機 → §8 / scorer internal error → §9。
 
 session-review skill で蓄積された /mission 実運用上の落とし穴。新規ミッション開始時・halt 復帰時・Reviewer 起動時に必ず参照。
 
@@ -63,7 +63,7 @@ state の手動直書き (Python heredoc / jq) は threshold gate 迂回・schem
 
 ### 6. 新規ミッション開始 (multi-session では init を呼ぶだけ)
 
-legacy 廃止(2026-06-13)後、`cmd_init` は `skipped` を返さない。同一 `MISSION_SESSION_ID` の再 init は本人の上書き=resume、異なる sid は `sessions/<sid>.json` に自動分離される。**旧「mv state.json で手動退避」手順は不要**(legacy 前提・現行は state.json を読まない)。前回ミッションが loop_active のまま残るのが気になる場合のみ `mark-halt` か `cleanup-stale --execute` で整理する。
+legacy 廃止(2026-06-13)後、`cmd_init` は `skipped` を返さない。同一 `MISSION_SESSION_ID` の再 init は本人の上書き=resume、異なる sid は `sessions/<sid>.json` に自動分離される。**旧「mv state.json で手動退避」手順は不要**(legacy 前提・現行は state.json を読まない)。前回ミッションが loop_active のまま残るのが気になる場合のみ `mark-halt` か `cleanup-stale --root "$(pwd)" --execute` で整理する。
 
 ### 7. ~~multi-session 並行時 legacy state.json 汚染~~ (2026-06-13 legacy 完全廃止で消滅)
 

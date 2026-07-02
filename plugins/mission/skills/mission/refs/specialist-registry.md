@@ -179,6 +179,10 @@ The command classifies `task_profile`, discovers installed skills and command pr
 
 The recommendation output also includes `specialists_phase_plan`, a bounded advisory plan grouped by `planning`, `execution`, `review`, and `synthesis`. It is a scheduling hint, not a second orchestrator loop. It helps development registries place implementation providers before test/review providers, and strategy registries place market/financial evidence before strategy synthesis. The plan must remain based on generic roles from registries, not maintainer-local skill names.
 
+### Tie Policy
+
+If the top two installed optional candidates are tied within `0.05` score points on a low/medium-risk task, `/mission` auto-selects deterministically instead of asking the user. Ordering is score descending, source precedence, then skill name ascending. The alternate candidates remain in `specialists_candidates`, and `specialists_decision.reason` records `tie-break: auto-selected <top> over <alt>`. High-risk tasks, first-use confirmation, install recommendations, missing required providers, explicit registry confirmation, and low-confidence classifications still require confirmation or fallback.
+
 Command provider invocation is a separate evidence step:
 
 ```bash

@@ -14,6 +14,19 @@ def _run_hook(cwd, env_extra):
                           capture_output=True, text=True, env=env)
 
 
+def _run_hook_with_input(cwd, env_extra, *, timeout=None):
+    env = {"PATH": os.environ["PATH"]}
+    env.update(env_extra)
+    return subprocess.run(
+        ["bash", str(HOOK)],
+        input=json.dumps({"stop_hook_active": False, "cwd": str(cwd)}),
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=timeout,
+    )
+
+
 def _write_session(cwd, sid, **kw):
     sd = cwd / ".mission-state" / "sessions"; sd.mkdir(parents=True, exist_ok=True)
     base = {"loop_active": True, "passes": False, "halt_reason": "", "pid": os.getpid(),
@@ -113,6 +126,45 @@ def test_hook_autohalts_on_very_stale_state(tmp_path):
     st = json.loads(sf.read_text())
     assert st["loop_active"] is False, "loop_active が false になっていない"
     assert "stale" in st["halt_reason"], f"halt_reason に 'stale' が含まれない: {st['halt_reason']}"
+
+
+def test_hook_does_not_autohalt_awaiting_user_state(tmp_path):
+    """#97: awaiting_user=true の人間待ち state は stale auto-halt しない。"""
+    _write_session(
+        tmp_path,
+        "cc-waiting",
+        updated_at="2020-01-01T00:00:00Z",
+        project_root=str(tmp_path),
+        awaiting_user=True,
+    )
+
+    r = _run_hook(tmp_path, {"CLAUDE_CODE_SESSION_ID": "waiting"})
+
+    assert "block" in r.stdout, r.stdout
+    st = json.loads((tmp_path / ".mission-state" / "sessions" / "cc-waiting.json").read_text())
+    assert st["loop_active"] is True
+    assert st["halt_reason"] == ""
+
+
+def test_hook_lsof_timeout_falls_back_to_input_cwd(tmp_path):
+    """#94: slow lsof で hook 全体が固まらず、input .cwd へ降下して block する。"""
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    (fake_bin / "ps").write_text("#!/usr/bin/env bash\nprintf 'codex\\n'\n")
+    (fake_bin / "readlink").write_text("#!/usr/bin/env bash\nexit 1\n")
+    (fake_bin / "lsof").write_text("#!/usr/bin/env bash\nsleep 5\n")
+    (fake_bin / "ps").chmod(0o755)
+    (fake_bin / "readlink").chmod(0o755)
+    (fake_bin / "lsof").chmod(0o755)
+    _write_session(tmp_path, "cc-slow")
+
+    r = _run_hook_with_input(
+        tmp_path,
+        {"PATH": f"{fake_bin}:{os.environ['PATH']}", "CLAUDE_CODE_SESSION_ID": "slow"},
+        timeout=4,
+    )
+
+    assert "block" in r.stdout, r.stdout
 
 
 def test_hook_no_warn_on_fresh_state(tmp_path):

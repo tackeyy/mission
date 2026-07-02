@@ -8,6 +8,7 @@ REFS_DIR = SKILL_DIR / "refs"
 REPO_ROOT = SKILL_DIR.parent.parent
 REVIEWER_MD = REPO_ROOT / "skills" / "mission-reviewer" / "SKILL.md"
 SCORER_MD = REPO_ROOT / "skills" / "mission-scorer" / "SKILL.md"
+EXECUTOR_MD = REPO_ROOT / "skills" / "mission-executor" / "SKILL.md"
 
 
 def _read(p):
@@ -113,6 +114,17 @@ def test_push_score_workflow_documented():
         txt += _read(f)
     assert "push-score" in txt
     assert "mark-passes" in txt
+
+
+def test_executor_declares_bounded_allowed_tools_without_agent_or_rm():
+    """#93: executor は許可ツールを明示し、Agent と rm 系を含めない。"""
+    txt = _read(EXECUTOR_MD)
+    header = txt.split("---", 2)[1]
+    assert "allowed-tools:" in header
+    assert "Agent" not in header
+    assert "Bash(rm" not in header
+    for tool in ["Read", "Edit", "Write", "Grep", "Glob"]:
+        assert f"  - {tool}" in header
 
 
 def test_phase1_specialist_selection_checkpoint_documented():

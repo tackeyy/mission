@@ -37,6 +37,8 @@ SKILL.md 本体から外出しした Phase 2-6 ループの詳細。本体には
 }
 ```
 
+`max_iter: null` は「上限なし」を表す state 値。CLI で `--max-iter` を省略した場合は `SKILL.md` の既定どおり 3 が保存され、`--max-iter 0` のときだけ null になる。
+
 各イテレーションごとに `iteration++` と `updated_at` を更新。クラッシュ時は state.json から復旧可能。
 
 ## state.json の更新

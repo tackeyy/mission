@@ -41,6 +41,26 @@ fi
 
 # === Agent CLI プロセス PID と CWD を取得 (プロセスツリー遡り) ===
 # 戻り値: $AGENT_PID と $CWD をセット
+_mission_pid_cwd() {
+  local pid="$1"
+  local cwd=""
+  if [ -e "/proc/$pid/cwd" ]; then
+    cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || echo "")
+    if [ -n "$cwd" ]; then
+      printf '%s' "$cwd"
+      return 0
+    fi
+  fi
+  if command -v timeout >/dev/null 2>&1; then
+    cwd=$(timeout 3 lsof -p "$pid" 2>/dev/null | awk '$4=="cwd"{print $NF; exit}' || echo "")
+  elif command -v perl >/dev/null 2>&1; then
+    cwd=$(perl -e 'alarm shift; exec @ARGV' 3 lsof -p "$pid" 2>/dev/null | awk '$4=="cwd"{print $NF; exit}' || echo "")
+  else
+    cwd=$(lsof -p "$pid" 2>/dev/null | awk '$4=="cwd"{print $NF; exit}' || echo "")
+  fi
+  [ -n "$cwd" ] && printf '%s' "$cwd"
+}
+
 find_agent_proc() {
   local pid="$PPID"
   local i=0
@@ -54,7 +74,7 @@ find_agent_proc() {
     case "$comm" in
       claude|claude.exe|codex|codex.exe|*/claude|*/claude.exe|*/codex|*/codex.exe)
         AGENT_PID="$pid"
-        CWD=$(lsof -p "$pid" 2>/dev/null | awk '$4=="cwd"{print $NF; exit}')
+        CWD=$(_mission_pid_cwd "$pid" || true)
         return 0
         ;;
     esac
@@ -103,7 +123,12 @@ fi
 # === C-2/C-3: sessions/ ディレクトリ優先 (multi-session 対応) ===
 if [ -d "$SESSIONS_DIR" ]; then
   HAS_ACTIVE=false
-  for sf in "$SESSIONS_DIR"/*.json; do
+  if [ -n "$HOOK_SID" ] && [ -f "$SESSIONS_DIR/$HOOK_SID.json" ]; then
+    set -- "$SESSIONS_DIR/$HOOK_SID.json"
+  else
+    set -- "$SESSIONS_DIR"/*.json
+  fi
+  for sf in "$@"; do
     [ -f "$sf" ] || continue
     s_loop=$(jq -r '.loop_active // false' "$sf" 2>/dev/null || echo "false")
     [ "$s_loop" != "true" ] && continue
@@ -178,6 +203,10 @@ if [ -d "$SESSIONS_DIR" ]; then
         case "$STALE_HALT_SEC" in ''|*[!0-9]*) STALE_HALT_SEC=10800 ;; esac
         [ "$STALE_HALT_SEC" -lt 300 ] && STALE_HALT_SEC=10800
         if [ "$DIFF" -gt "$STALE_HALT_SEC" ] 2>/dev/null; then
+          AWAITING_USER=$(jq -r '.awaiting_user // false' "$SESSION_FILE_TO_BLOCK" 2>/dev/null || echo "false")
+          if [ "$AWAITING_USER" = "true" ]; then
+            STALE="[WARN: state が $(( DIFF / 60 ))分 未更新だが awaiting_user=true のため stale auto-halt を保留] "
+          else
           # 3h (または MISSION_STALE_HALT_SECONDS) 超: 自セッションファイルを jq で halt して exit 0
           STALE_MINS=$(( DIFF / 60 ))
           STALE_HALT_REASON="stale: auto-halted after ${STALE_MINS}m idle"
@@ -192,6 +221,7 @@ if [ -d "$SESSIONS_DIR" ]; then
           fi
           # halt 済みなので block せず通す
           exit 0
+          fi
         elif [ "$DIFF" -gt 3600 ]; then
           # 1h < DIFF <= halt_seconds: 従来通り WARN 前置
           STALE="[WARN: state が $(( DIFF / 60 ))分 未更新。stuck/放置の可能性 — cleanup-stale を検討] "
