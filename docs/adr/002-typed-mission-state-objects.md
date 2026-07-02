@@ -22,6 +22,12 @@ Recent quality-gate fixes strengthen deterministic CLI gates first:
 
 These are Stage 0 prerequisites for introducing typed state objects without replacing the storage model.
 
+The 2026-07-02 execution-log crosscheck review (`docs/log-crosscheck-review-2026-07-02.md`) validated this direction against 426 logged sessions and identified three gaps that typed objects alone do not close:
+
+1. **Transcription layer**: the orchestrator reads scorer output as prose and re-types the numbers into `push-score` arguments. Logged evidence: score distributions collapsed into the 4.4–4.7 band (71.4% of 220 entries), evidence-free `generated=true` scoring files averaging higher (4.54) than evidence-backed ones (4.41), and a session (`cx-019efece`, xai-cli) that pushed 0–1-normalized composites (0.96 = 4.8/5) twice before re-pushing on the 5-point scale — all accepted by validation because 0.96 is within the 0–5 range.
+2. **Pass semantics**: composite-threshold-as-primary-gate lets stagnant or unreviewed iterations pass (score histories like 4.2→4.2 and 4.6→4.6 with identical notes).
+3. **Harness coupling**: 84% of sessions run on Codex, where the Stop hook — the only mechanical loop guard — does not apply.
+
 ## Decision
 
 Keep the physical storage model as a single session JSON file under `.mission-state/sessions/<sid>.json`, guarded by `StateLock` and atomic writes. Introduce typed objects incrementally inside that file rather than splitting storage into multiple files or a service.
@@ -73,12 +79,42 @@ Valid actions are `continue`, `pass`, `halt`, and `ask-user`. Decisions must lin
 
 Future commands such as `resolve-finding` should record the action lineage from `Finding -> Execution -> Review`. This lets iter2+ diff review verify that a finding was actually addressed instead of merely omitted from Markdown.
 
+## Staged Extensions (2026-07-02 revision)
+
+Three stages absorbed from the execution-log crosscheck review (G-1 / G-4 / G-3). They build on the typed object families above and close the gaps listed in Context.
+
+### Stage 1 — Structured scoring evidence, no transcription (G-1)
+
+Reviewers and the scorer write their results as structured JSON files (Finding[] and a Score document) directly under `archive/`. `push-score` gains a `--scoring-json <path>` mode that:
+
+- reads `items` from the file instead of free-form CLI arguments;
+- recomputes `composite` and `min_item` server-side from the supplied items (denominator = items present, consistent with diff-review partial scoring);
+- rejects unknown item keys after alias normalization instead of warning;
+- rejects scale anomalies: if every item value is `<= 1.0`, treat as a 0–1-normalized submission and exit 2 with a hint to use the 5-point scale (prevents the `cx-019efece` class of error);
+- retires the `generated=true` fallback — a `push-score` without scoring evidence is rejected rather than backfilled with an evidence-free archive file.
+
+The orchestrator's role shrinks to passing a file path; it no longer types score values.
+
+### Stage 2 — Pass gate redefinition (G-4)
+
+`mark-passes` promotes finding/evidence conditions to the primary gate:
+
+- primary: `open High findings == 0` AND required evidence present (scoring JSON with machine-verification output attached for code missions);
+- secondary: `composite >= threshold` and `min_item >= 3.5` as today.
+
+A high composite alone can no longer pass a session whose findings ledger is empty because reviewers never ran. This inverts today's semantics, where the score is primary and `--open-high` is an optional (and in practice unused) argument.
+
+### Stage 3 — Grounded next-step command (G-3)
+
+`mission-state.py next` reads the session state and prints the single next action (e.g. "iteration 2: run reviewers, expected artifacts: ...", "score recorded: run mark-passes", "halted: report blocker"). This gives every harness — including Codex, which runs 84% of sessions and has no Stop hook — a deterministic resumption path that does not depend on prose Compact Instructions surviving compaction. The Claude Code Stop hook remains as an additional guard, not the primary loop-enforcement mechanism.
+
 ## Migration Strategy
 
 1. Keep legacy state readable. Missing `findings` or typed `decisions` means an older session, not a corrupt one.
 2. Add append-only CLI commands for new typed records before requiring them in gates.
 3. Extend `mission-audit.py` to read both legacy Markdown evidence and typed findings during the transition.
 4. Add strict validation only after the typed paths are exercised by normal runs.
+5. Stage order: Stage 1 (`--scoring-json` + fallback retirement) ships first because it is additive and closes the largest measured gap (score inflation / transcription errors); Stage 2 flips the gate once typed findings exist; Stage 3 (`next`) can ship independently at any point.
 
 ## Out of Scope
 
@@ -99,3 +135,11 @@ Negative:
 
 - State schema grows more complex.
 - CLI and audit code must support a transition period with both legacy and typed records.
+- Stage 2 changes pass semantics; sessions relying on score-only passes need the transition window in Migration Strategy step 4.
+
+## Revision History
+
+| Date | Change |
+|------|--------|
+| 2026-07-02 | Initial proposal (#101). |
+| 2026-07-02 | Added Staged Extensions (G-1 structured scoring evidence / G-4 pass gate redefinition / G-3 grounded `next` command) and log-crosscheck evidence to Context, per `docs/log-crosscheck-review-2026-07-02.md`. |
