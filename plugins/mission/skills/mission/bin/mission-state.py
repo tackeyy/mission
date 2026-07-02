@@ -1071,7 +1071,8 @@ def rank_specialist_candidates(task_profile: dict, registry_candidates: list[dic
     return ranked
 
 
-def decide_specialists(task_profile: dict, candidates: list[dict]) -> dict:
+def decide_specialists(task_profile: dict, candidates: list[dict],
+                       user_specified: list[str] | None = None) -> dict:
     if not candidates:
         return {
             "policy": "fallback",
@@ -1079,6 +1080,25 @@ def decide_specialists(task_profile: dict, candidates: list[dict]) -> dict:
             "reason": "no specialist candidate matched the task profile",
             "prompted_user": False,
         }
+    # Issue #100: ミッション本文でユーザーが名指ししたスキルは実質 confirmed-user。
+    # high-risk task profile でも ask-user に倒さず selected として記録する。
+    # 安全弁 (名指しでもバイパスしない条件):
+    # - required specialist が未インストール → 従来フロー (required-missing はブロッカー)
+    # - 名指しに first-use consent が必要な provider が 1 つでも混在 → 全体を従来フローに倒す
+    #   (consent 完了後に recommend を再実行すれば user-specified が効く。risk consent は別次元)
+    named = [s for s in (user_specified or []) if s]
+    if named:
+        required_missing_for_named = [c for c in candidates if c.get("required") and not c.get("installed")]
+        matched = [c for c in candidates if str(c.get("skill") or "") in named and c.get("installed")]
+        if matched and not required_missing_for_named and not any(c.get("first_use") for c in matched):
+            skills = [str(c.get("skill")) for c in matched]
+            return {
+                "policy": "user-specified",
+                "action": "select",
+                "reason": f"user explicitly named specialists in the mission description: {', '.join(skills)}",
+                "prompted_user": False,
+                "user_specified": skills,
+            }
     top = candidates[0]
     second = candidates[1] if len(candidates) > 1 else None
     if task_profile.get("risk") == "high":
@@ -1155,6 +1175,14 @@ def decide_specialists(task_profile: dict, candidates: list[dict]) -> dict:
 
 def _selection_from_decision(candidates: list[dict], decision: dict) -> tuple[list[dict], list[dict]]:
     unavailable = [c for c in candidates if not c.get("installed")]
+    if decision.get("policy") == "user-specified":
+        names = set(decision.get("user_specified") or [])
+        selected = [
+            {**c, "status": "selected", "selection_source": "user-specified"}
+            for c in candidates
+            if str(c.get("skill") or "") in names and c.get("installed")
+        ]
+        return selected, unavailable
     if decision.get("policy") == "auto" and candidates:
         return [{**candidates[0], "status": "selected"}], unavailable
     return [], unavailable
@@ -1211,7 +1239,8 @@ def cmd_specialists(args):
         getattr(args, "complexity", None),
         _load_provider_consent(getattr(args, "consent_file", None)),
     )
-    decision = decide_specialists(task_profile, candidates)
+    decision = decide_specialists(task_profile, candidates,
+                                  _split_csv(getattr(args, "user_specified", None)))
     selected, unavailable = _selection_from_decision(candidates, decision)
     phase_plan = build_phase_plan(candidates, getattr(args, "complexity", None))
     result = {
@@ -3826,6 +3855,10 @@ def _build_parser():
     p_rec.add_argument("--complexity", default=None, choices=["Simple", "Standard", "Complex", "Critical"],
                        help="auto_use.min_complexity 判定用の mission complexity")
     p_rec.add_argument("--record-state", action="store_true", help="現在の mission state に推薦結果を記録")
+    p_rec.add_argument("--user-specified", default=None, dest="user_specified",
+                       help="Issue #100: ミッション本文でユーザーが名指ししたスキル (comma 区切り)。"
+                            "実質 confirmed-user として扱い、high-risk でも ask-user へ倒さず selected に記録する "
+                            "(first-use consent が必要な provider は名指しでも確認を維持)")
     p_rec.add_argument("--json", action="store_true", help="JSON 形式で出力")
     p_rec.set_defaults(func=cmd_specialists)
 
