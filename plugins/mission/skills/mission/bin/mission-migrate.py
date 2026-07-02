@@ -11,6 +11,9 @@ C-3 multi-session 構造への移行ツール。
   完全移行する場合は --remove-legacy で削除。
 """
 
+# Issue #99: Python 3.9 互換 (PEP 604 union 注釈の遅延評価)
+from __future__ import annotations
+
 import argparse
 import json
 import shutil

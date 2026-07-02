@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `mission-state.py` and `mission-migrate.py` now import `from __future__ import annotations`, so PEP 604 union annotations no longer crash module load on Python 3.9 (macOS Xcode CLT `python3`), which previously killed every command from skill startup step 1 (#99).
+
 ### Added
 - `mission-state.py push-score --scoring-json <path>` (ADR-002 Stage 1) reads scorer items from a structured JSON file, recomputes `composite`/`min_item` server-side, rejects unknown item keys and out-of-range values, archives the payload as `iter-N-<mid8>-scoring.json` with `_meta`, and records `score_source`/`scoring_evidence_path` on the score entry — removing the orchestrator score-transcription layer.
 - `push-score` now rejects submissions where every item score is `<= 1.0` as suspected 0-1-normalized scale input (regression guard for a logged session that pushed composite 0.96 = 4.8/5).
