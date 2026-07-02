@@ -30,7 +30,7 @@ def test_recommend_auto_selects_high_confidence_installed_candidate(run_cli, tmp
     assert data["specialists_decision"]["prompted_user"] is False
 
 
-def test_recommend_tied_installed_candidates_uses_interactive_fallback(run_cli, tmp_path):
+def test_recommend_tied_installed_candidates_auto_selects_deterministically(run_cli, tmp_path):
     r = run_cli(
         *_recommend_args(
         "--task",
@@ -42,9 +42,11 @@ def test_recommend_tied_installed_candidates_uses_interactive_fallback(run_cli, 
         cwd=tmp_path,
     )
     data = _json_result(r)
-    assert data["specialists_decision"]["policy"] == "interactive"
-    assert data["specialists_decision"]["prompted_user"] is True
-    assert data["specialists_selected"] == []
+    assert data["specialists_decision"]["policy"] == "auto"
+    assert data["specialists_decision"]["action"] == "select"
+    assert data["specialists_decision"]["prompted_user"] is False
+    assert data["specialists_selected"][0]["skill"] == "frontend-provider"
+    assert "tie-break: auto-selected frontend-provider over visual-quality-provider" in data["specialists_decision"]["reason"]
 
 
 def test_recommend_missing_builtin_preset_falls_back_without_install_prompt(run_cli, tmp_path):

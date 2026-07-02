@@ -1,5 +1,6 @@
 """push-score サブコマンドのテスト (T1: RED → T2: GREEN)."""
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 
 
@@ -28,6 +29,26 @@ def test_push_score_appends_multiple_in_order(state_dir, run_cli, read_state):
     s = read_state(state_dir)
     assert [e["iteration"] for e in s["score_history"]] == [1, 2]
     assert s["score_history"][1]["composite"] == 4.2
+
+
+def test_parallel_push_score_preserves_all_entries(state_dir, run_cli, read_state):
+    """#98: 同一 session への並列 push-score で score_history が欠損しない。"""
+    def push(iteration):
+        return run_cli(
+            "push-score",
+            "--iteration", str(iteration),
+            "--composite", "4.0",
+            "--min-item", "4.0",
+            "--items", '{"mission_achievement":4.0}',
+            cwd=state_dir.parent,
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(push, range(1, 5)))
+
+    assert all(r.returncode == 0 for r in results), [r.stderr for r in results]
+    entries = read_state(state_dir)["score_history"]
+    assert sorted(e["iteration"] for e in entries) == [1, 2, 3, 4]
 
 
 def test_push_score_updates_updated_at(state_dir, run_cli, read_state):
@@ -220,6 +241,36 @@ def test_push_score_canonical_keys_no_warning(state_dir, run_cli):
                 cwd=state_dir.parent)
     assert r.returncode == 0
     assert "キー" not in r.stderr and "key" not in r.stderr.lower()
+
+
+def test_push_score_warns_when_scalar_scores_disagree_with_items(state_dir, run_cli):
+    """#91: supplied items から再計算した mean/min と自己申告値が大きくずれると警告する。"""
+    r = run_cli(
+        "push-score",
+        "--iteration", "1",
+        "--composite", "4.5",
+        "--min-item", "4.0",
+        "--items", '{"mission_achievement":3.0,"accuracy":3.0,"completeness":3.0,"usability":3.0,"reviewer_consensus":3.0}',
+        cwd=state_dir.parent,
+    )
+    assert r.returncode == 0, r.stderr
+    assert "WARNING" in r.stderr
+    assert "items" in r.stderr
+    assert "mean" in r.stderr and "min" in r.stderr
+
+
+def test_push_score_accepts_matching_partial_items_without_warning(state_dir, run_cli):
+    """#91: 差分レビューの 4 items は、その items だけを分母に照合する。"""
+    r = run_cli(
+        "push-score",
+        "--iteration", "1",
+        "--composite", "4.0",
+        "--min-item", "3.5",
+        "--items", '{"mission_achievement":4.0,"accuracy":4.5,"completeness":4.0,"usability":3.5}',
+        cwd=state_dir.parent,
+    )
+    assert r.returncode == 0, r.stderr
+    assert "items-derived" not in r.stderr
 
 
 # ===== iter2: エイリアス+正規キー同時指定の衝突 (B-H1) =====

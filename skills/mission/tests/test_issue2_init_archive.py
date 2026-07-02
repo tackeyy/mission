@@ -77,3 +77,22 @@ def test_init_no_archive_on_resume_same_mission(tmp_path, run_cli):
     archives = list(archive_dir.glob("state-*-*.json")) if archive_dir.exists() else []
     # session-specific archives should not be created
     assert not archives, f"resume なのに archive が作られた: {archives}"
+
+
+def test_init_quarantines_corrupt_session_json_on_mission_change(tmp_path, run_cli):
+    """破損 session JSON があっても init は成功し、破損ファイルを退避する。"""
+    sid = "corrupt-sess"
+    r1 = run_cli("init", "first mission before corruption", cwd=tmp_path,
+                 env_extra={"MISSION_SESSION_ID": sid})
+    assert r1.returncode == 0, r1.stderr
+    sf = Path(json.loads(r1.stdout)["session_file"])
+    sf.write_text("{ broken ][")
+
+    r2 = run_cli("init", "second mission after corruption", cwd=tmp_path,
+                 env_extra={"MISSION_SESSION_ID": sid})
+
+    assert r2.returncode == 0, r2.stderr
+    assert "WARNING" in r2.stderr
+    quarantined = list(sf.parent.glob(f"{sid}.json.corrupt-*"))
+    assert quarantined, "破損 session JSON が .corrupt-* に退避されていない"
+    assert json.loads(sf.read_text())["mission"] == "second mission after corruption"

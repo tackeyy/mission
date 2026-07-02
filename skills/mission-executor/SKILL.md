@@ -3,6 +3,17 @@ name: mission-executor
 description: /mission オーケストレーターのサブスキル。立案された計画ステップを実際に実行し、成果物と実行ログを残す。
 context: fork
 user-invocable: false
+allowed-tools:
+  - Read
+  - Edit
+  - Write
+  - Grep
+  - Glob
+  - Bash(git:*)
+  - Bash(pytest:*)
+  - Bash(python3 -m pytest:*)
+  - Bash(npm:*)
+  - Bash(mkdir:*)
 ---
 
 # Mission Executor
@@ -25,7 +36,7 @@ user-invocable: false
 
 ## 並列 fan-out 指針 (P4, 2026-06-12)
 
-複数の**独立**サブタスク (記事読解バッチ・ファイル群調査・データ収集等) を Agent tool で fan-out する場合の指針 (**Agent tool 専用**。Skill tool の Reviewer 並列は /mission SKILL.md 本体と refs/gotchas.md §1 を参照):
+複数の**独立**サブタスク (記事読解バッチ・ファイル群調査・データ収集等) は、呼び出し元 orchestrator が許可した範囲でのみ fan-out する。executor 自身の `allowed-tools` には Agent tool を含めない。Skill tool の Reviewer 並列は /mission SKILL.md 本体と refs/gotchas.md §1 を参照。
 
 1. **ローリングウィンドウ投入**: ウィンドウ幅 W 体を起動し、1 体完了するたびに次の 1 体を即投入する (`run_in_background: true` + 完了通知で回す)。「W 体起動 → 全完了を待って次の W 体」という**ペアバリア方式は禁止** (実害: 2026-06-11 BMR クロールで 19 バッチを 2 体ペアバリア処理し約 2 時間 10 分。ローリング 4 並列なら半分以下だった)
 2. **ウィンドウ幅 W の決め方**: Web 検索なし・読解/集計のみの軽量タスク → **W=4-6**。Web 検索あり or 指示書 4000 字級の重タスク → **W=2-3** (根拠: 重タスクを 6 並列 + 長文指示 + Web 検索無制限の複合条件で回すと 600 秒タイムアウト(stall)を観測した。軽量タスクは 6 体並列で実測 51 秒完了・stall なし)

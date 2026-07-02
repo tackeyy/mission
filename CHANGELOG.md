@@ -10,9 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `mission-state.py init` now quarantines corrupt session JSON instead of crashing during same-session mission changes.
+- `mission-state.py set` now freezes pass, score history, and threshold fields so completion gates cannot be bypassed through raw state updates.
+- `mission-state.py push-score` now warns when supplied scalar scores diverge from the supplied item scores.
+- Stop hook CWD discovery now avoids slow `lsof` hangs, prefers Linux `/proc/<pid>/cwd`, honors direct session lookup, and skips stale auto-halt for `awaiting_user` sessions.
+- Specialist tie handling now auto-selects installed optional low/medium-risk providers deterministically and records the tie-break reason.
+- Mission executor now declares bounded allowed tools without `Agent` or `rm` access.
 - Specialist task-profile classification now recognizes architecture/system-design missions, so architecture-only project or user providers can be selected instead of being hidden behind documentation fallback.
 - Mission audit now recognizes scorer evidence stored in archived worktree `iteration-archive/` directories, preventing false `missing-scoring-evidence` findings when the scoring artifact is present.
 - Mission audit now classifies JSON-identical archive-only worktree state copies as resolved duplicates, preventing cross-root audits from reporting expected archive/archive copies as P1 `duplicate-state` findings.
+
+### Added
+- ADR-002 now defines the staged typed mission state object roadmap for Findings, Scores, Decisions, and Actions while preserving local JSON + flock storage.
 
 ## [1.0.5] - 2026-06-26
 
