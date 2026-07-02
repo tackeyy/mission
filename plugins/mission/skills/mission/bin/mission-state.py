@@ -2451,17 +2451,20 @@ def _derive_next_action(data: dict) -> dict:
             "summary": "loop_active=false だが未合格・halt 理由なし。refresh-pid で再活性化してループを再開する",
             "command_hint": "mission-state.py refresh-pid",
         }
+    phase = data.get("phase") or "planning"
+    iteration = data.get("iteration", 1) or 1
+    reviewer_count = data.get("reviewer_count", 2) or 2
+    mid8 = (data.get("mission_id") or "unknown")[:8]
     stagnation = data.get("stagnation_count", 0) or 0
-    if stagnation >= 3:
+    # 通常経路では push-score が phase=scoring へ遷移させるため stagnation>=3 と
+    # phase=reviewing は共起しないが、手動 `set stagnation_count=N` は許可された操作。
+    # 走行中のレビューを中断させないよう reviewing だけは phase 分岐を優先する。
+    if stagnation >= 3 and phase != "reviewing":
         return {
             "next_action": "consider-halt",
             "summary": f"stagnation_count={stagnation} (3 連続でスコア停滞)。アプローチを変えても改善しない場合は mark-halt で停止し状況を報告する",
             "command_hint": 'mission-state.py mark-halt --reason "<停滞理由>"',
         }
-    phase = data.get("phase") or "planning"
-    iteration = data.get("iteration", 1) or 1
-    reviewer_count = data.get("reviewer_count", 2) or 2
-    mid8 = (data.get("mission_id") or "unknown")[:8]
     if phase == "planning":
         return {
             "next_action": "run-planner",
@@ -2521,7 +2524,7 @@ def cmd_next(args):
         "session_id": data.get("session_id"),
         "loop_active": data.get("loop_active"),
         "passes": data.get("passes"),
-        "stagnation_count": data.get("stagnation_count", 0),
+        "stagnation_count": data.get("stagnation_count", 0) or 0,
     })
     print(json.dumps(out, ensure_ascii=False))
 

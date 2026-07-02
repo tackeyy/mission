@@ -118,3 +118,20 @@ def test_next_includes_state_snapshot(state_dir, run_cli):
     assert out["phase"] == "scoring"
     assert out["iteration"] == 1
     assert out["session_id"] == "test"
+
+
+def test_next_stagnation_does_not_interrupt_reviewing(state_dir, run_cli):
+    """複合状態 (手動 set 等で stagnation>=3 かつ phase=reviewing) ではレビュー完了を優先する.
+
+    通常経路では push-score が phase=scoring に遷移させるため共起しないが、
+    `set stagnation_count=N` は許可された操作なので防御的にレビュー中断を避ける。"""
+    _set_state(state_dir, phase="reviewing", stagnation_count=3)
+    out = _next(run_cli, state_dir)
+    assert out["next_action"] == "run-reviewers"
+
+
+def test_next_snapshot_coerces_null_stagnation(state_dir, run_cli):
+    """stagnation_count=null が保存されていても snapshot は内部判定と同じく 0 を返す."""
+    _set_state(state_dir, stagnation_count=None)
+    out = _next(run_cli, state_dir)
+    assert out["stagnation_count"] == 0
