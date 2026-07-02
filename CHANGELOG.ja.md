@@ -13,7 +13,7 @@
 - `mission-state.py` と `mission-migrate.py` に `from __future__ import annotations` を追加し、PEP 604 union 注釈が Python 3.9 (macOS Xcode CLT の `python3`) でモジュール読み込み時にクラッシュして全コマンドが使えなくなる問題を修正しました (#99)。
 
 ### 追加
-- `specialists recommend --user-specified <skill,skill>` を追加しました。ミッション本文でユーザーが名指ししたスキルを confirmed 扱いにし、high-risk task profile でも `selection_source: user-specified` の selected として記録するため、以後の `log-invocation` が `--selection-source confirmed-user` 要求で reject されなくなります (#100)。first-use consent が必要な provider は名指しでも確認を維持します。
+- `specialists recommend --user-specified <skill,skill>` を追加しました。ミッション本文でユーザーが名指ししたスキルを confirmed 扱いにし、high-risk task profile でも `selection_source: user-specified` の selected として記録するため、以後の `log-invocation` が `--selection-source confirmed-user` 要求で reject されなくなります (#100)。名指しの中に first-use consent が必要な provider が混在する場合、または required specialist が未インストールの場合は、全体を従来の確認フローに倒します。
 - `mission-state.py push-score --scoring-json <path>` (ADR-002 Stage 1) を追加しました。scorer の構造化 JSON ファイルから items を読み、`composite`/`min_item` を CLI 側で再計算し、未知キー・範囲外値を reject し、payload を `_meta` 付きで `iter-N-<mid8>-scoring.json` として archive し、score entry に `score_source`/`scoring_evidence_path` を記録します (orchestrator のスコア転記レイヤを排除)。
 - `push-score` が「全 items スコアが 1.0 以下」の入力を 0-1 正規化スケール混入の疑いとして reject するようにしました (実ログで composite 0.96 = 4.8/5 が push された事例の回帰ガード)。
 - scoring evidence なしの `push-score` に deprecation 警告を出し、`MISSION_REQUIRE_SCORING_EVIDENCE=1` で hard reject に切り替えられるようにしました (Stage 1 のデフォルト strict 化に向けた段階導入)。

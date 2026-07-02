@@ -66,6 +66,45 @@ def test_user_specified_first_use_provider_still_asks(run_cli, tmp_path):
     assert data["specialists_decision"]["action"] == "ask-user"
 
 
+def test_user_specified_mixed_first_use_falls_back_entirely(run_cli, tmp_path):
+    """設計明記: 名指しに first-use provider が 1 つでも混在したら全体を従来フローに倒す
+    (consent 完了後に recommend を再実行すれば user-specified が効く)."""
+    data = _json_result(_recommend(
+        run_cli, tmp_path,
+        "--user-specified", "frontend-provider,visual-quality-provider",
+        "--first-use", "visual-quality-provider",
+    ))
+    assert data["specialists_decision"]["action"] == "ask-user"
+    assert data["specialists_selected"] == []
+
+
+def test_user_specified_with_required_missing_still_blocks(run_cli, tmp_path):
+    """安全弁: required specialist が未インストールなら名指しでもバイパスせず従来フローに倒す."""
+    registry = tmp_path / "specialists.yml"
+    registry.write_text(
+        "\n".join([
+            "version: 1",
+            "specialists:",
+            "  - role: frontend-required",
+            "    skill: required-frontend-skill",
+            "    task_profiles: [frontend]",
+            "    required: true",
+        ])
+    )
+    r = run_cli(
+        "specialists", "recommend", "--no-default-skill-roots",
+        "--task", "Improve React UI component visual quality",  # low-risk
+        "--installed-skills", "frontend-provider",
+        "--registry", str(registry),
+        "--user-specified", "frontend-provider",
+        "--json",
+        cwd=tmp_path,
+    )
+    data = _json_result(r)
+    assert data["specialists_decision"]["policy"] == "required-missing"
+    assert data["specialists_decision"]["action"] == "ask-user"
+
+
 def test_user_specified_record_state_unblocks_log_invocation(state_dir, run_cli):
     """本丸: --user-specified + --record-state 後は log-invocation が --selection-source なしで通る."""
     r = run_cli(

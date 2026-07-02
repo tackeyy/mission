@@ -1082,11 +1082,15 @@ def decide_specialists(task_profile: dict, candidates: list[dict],
         }
     # Issue #100: ミッション本文でユーザーが名指ししたスキルは実質 confirmed-user。
     # high-risk task profile でも ask-user に倒さず selected として記録する。
-    # ただし first-use consent が必要な provider は名指しでも確認を維持する (risk consent は別次元)。
+    # 安全弁 (名指しでもバイパスしない条件):
+    # - required specialist が未インストール → 従来フロー (required-missing はブロッカー)
+    # - 名指しに first-use consent が必要な provider が 1 つでも混在 → 全体を従来フローに倒す
+    #   (consent 完了後に recommend を再実行すれば user-specified が効く。risk consent は別次元)
     named = [s for s in (user_specified or []) if s]
     if named:
+        required_missing_for_named = [c for c in candidates if c.get("required") and not c.get("installed")]
         matched = [c for c in candidates if str(c.get("skill") or "") in named and c.get("installed")]
-        if matched and not any(c.get("first_use") for c in matched):
+        if matched and not required_missing_for_named and not any(c.get("first_use") for c in matched):
             skills = [str(c.get("skill")) for c in matched]
             return {
                 "policy": "user-specified",
