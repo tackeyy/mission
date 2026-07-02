@@ -28,12 +28,25 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py set iteration=
 
 # 採点結果を score_history に記録 (Phase 5 直後、orchestrator が必ず呼ぶ)
 # scorer は context: fork で state.json に書き込めないため orchestrator が代行する
+# 推奨 (ADR-002 Stage 1): scorer が items を JSON ファイルに書き、orchestrator はパスを渡すだけ。
+# composite/min_item は CLI が items から再計算する (転記レイヤ排除)。
+# strict 検証: 未知キー reject / 全 items <= 1.0 (0-1 正規化疑い) reject / 範囲外 reject。
+# evidence は archive/iter-N-<mission8>-scoring.json に _meta 付きで自動保存され、
+# score_history entry に score_source="scoring-json" と scoring_evidence_path が記録される。
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score \
+    --iteration <N> \
+    --scoring-json /tmp/mission-scorer-iter-<N>-<mission_id先頭8>.json \
+    --open-high <未解決High件数>
+# JSON 形式: {"items": {"mission_achievement": 4.0, "accuracy": 3.5, "completeness": 4.2, "usability": 3.8, "reviewer_consensus": 4.0}, "notes": "<任意>", "open_high": 0}
+
+# 従来経路 (非推奨。scoring evidence なしは DEPRECATION 警告、MISSION_REQUIRE_SCORING_EVIDENCE=1 で reject):
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score \
     --iteration <N> \
     --composite <総合スコア> \
     --min-item <最低項目スコア> \
     --items '{"mission_achievement": 4.0, "accuracy": 3.5, "completeness": 4.2, "usability": 3.8, "reviewer_consensus": 4.0}' \
     --open-high <未解決High件数> \
+    --scoring-output /tmp/mission-scorer-iter-<N>-<mission_id先頭8>.md \
     [--notes "<任意のメモ>"]
 
 # 合格マーク (passes=true, loop_active=false)
@@ -194,7 +207,8 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py progress updat
 
 ## スコア項目キーの正規化 (H2) / scoring archive 命名 (H1) — 2026-06-10
 
-- push-score は items のキーを正規 5 キー (`mission_achievement` / `accuracy` / `completeness` / `usability` / `reviewer_consensus`) に正規化する。エイリアス (`usefulness`→`usability`, `practicality`→`usability`, `reviewer_agreement`→`reviewer_consensus`) は自動変換、未知キーは WARN 付きで受理 (後方互換)
+- push-score は items のキーを正規 5 キー (`mission_achievement` / `accuracy` / `completeness` / `usability` / `reviewer_consensus`) に正規化する。エイリアス (`usefulness`→`usability`, `practicality`→`usability`, `reviewer_agreement`→`reviewer_consensus`) は自動変換。未知キーは `--items` 経路では WARN 付きで受理 (後方互換) だが、`--scoring-json` 経路では reject (strict)
+- push-score は経路を問わず「全 items が 1.0 以下」を 0-1 正規化スケール混入として reject する (実ログ回帰: xai-cli cx-019efece が composite 0.96 = 4.8/5 を push した事例)
 - `--scoring-output` の保存先は `.mission-state/archive/iter-<N>-<mission_id先頭8>-scoring.md`。連続ランでの上書き消失 (2026-06-10 実害確認) を防ぐため mission_id を含む
 
 ### GitHub Flow (issue 連携)

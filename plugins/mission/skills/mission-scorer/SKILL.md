@@ -184,11 +184,24 @@ composite_score >= 4.0 (= 合格圏内) を出す前、または全 Reviewer が
 ## state.json への書き込みは orchestrator 責務
 
 このスキルは `context: fork` で動くため、呼び出し元の state.json に直接書き込めない。
-採点結果は **アウトプット形式に従って文字列で返すのみ** とし、orchestrator (/mission) が
-受け取った結果を `mission-state.py push-score` で score_history に記録する。
-
 scorer 自身が `mission-state.py` を呼ばないこと (権限上できない、また呼んだとしても
 orchestrator 側の state.json でなく自分の fork 環境の cwd を見るので意味がない)。
+
+**構造化出力 (ADR-002 Stage 1・推奨)**: 採点結果はテキスト出力に加えて、必ず
+`/tmp/mission-scorer-iter-<N>-<mission_id先頭8>.json` に以下の JSON を Write すること:
+
+```json
+{
+  "items": {"mission_achievement": 4.0, "accuracy": 3.5, "completeness": 4.2, "usability": 3.8, "reviewer_consensus": 4.0},
+  "notes": "<採点根拠の要約>",
+  "open_high": 0
+}
+```
+
+- items のキーは正規 5 キーのみ (Simple/Reviewer 1名では `reviewer_consensus` を省略)。独自キーは push-score が reject する
+- スコアは **0-5 の 5 点スケール**。0-1 正規化値 (例: 0.96) を書くと push-score が reject する
+- composite / min_item は JSON に**書かない** — orchestrator にも計算させず、`push-score --scoring-json` が items から機械算出する
+- orchestrator はこのファイルパスを `push-score --scoring-json <path>` に渡すだけで、スコア数値の転記を行わない
 
 ## 増分採点モード (P2/P3-3, 2026-06-10)
 
