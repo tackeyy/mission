@@ -2670,8 +2670,9 @@ def _load_scoring_json(path_str: str):
     if notes is not None and not isinstance(notes, str):
         print("ERROR: --scoring-json の notes は文字列で指定してください。", file=sys.stderr)
         sys.exit(2)
-    open_high = payload.get("open_high", 0)
-    if not isinstance(open_high, int) or open_high < 0:
+    # open_high はキー欠如 (None) と明示 0 を区別する: 明示値は CLI --open-high より優先される
+    open_high = payload.get("open_high")
+    if open_high is not None and (not isinstance(open_high, int) or open_high < 0):
         print("ERROR: --scoring-json の open_high は 0 以上の整数で指定してください。", file=sys.stderr)
         sys.exit(2)
     return items, notes, open_high, payload
@@ -2759,7 +2760,8 @@ def cmd_push_score(args):
         items, json_notes, json_open_high, scoring_payload = _load_scoring_json(args.scoring_json)
         args.composite = round(sum(_numeric_item_values(items)) / len(items), 2)
         args.min_item = round(min(_numeric_item_values(items)), 2)
-        if json_open_high and not args.open_high:
+        # scorer の構造化出力が authoritative: JSON に open_high があれば CLI --open-high より優先
+        if json_open_high is not None:
             args.open_high = json_open_high
         if json_notes and not args.notes:
             args.notes = json_notes
@@ -2806,8 +2808,11 @@ def cmd_push_score(args):
         # Issue #3: open_high を保存 (mark-passes gate で参照)
         entry["open_high"] = getattr(args, "open_high", 0)
         if args.scoring_json:
+            # archive を state 書き込みより先に行う (crash 時に state が実在しない
+            # scoring_evidence_path を指す dangling reference を防ぐ。他 archive 系と同順序)
             entry["score_source"] = "scoring-json"
-            entry["scoring_evidence_path"] = str(_scoring_archive_path(cwd, args.iteration, data, suffix=".json"))
+            scoring_json_archived_to = _archive_scoring_json(cwd, args.iteration, data, entry, scoring_payload)
+            entry["scoring_evidence_path"] = scoring_json_archived_to
         data.setdefault("score_history", []).append(entry)
         # 改善2: top-level iteration を同期 (orchestrator の set 取りこぼしで
         # iteration と score_history 長が不整合になる問題への対処)。
@@ -2833,7 +2838,7 @@ def cmd_push_score(args):
         atomic_write_json(sf, data)
 
     if args.scoring_json:
-        archived_to = _archive_scoring_json(cwd, args.iteration, data, entry, scoring_payload)
+        archived_to = scoring_json_archived_to  # StateLock 内で archive 済み (dangling path 防止)
     elif args.scoring_output:
         archived_to = _archive_scoring_output(cwd, args.scoring_output, args.iteration, data, entry)
     else:

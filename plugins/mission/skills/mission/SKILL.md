@@ -44,11 +44,11 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py artifact init 
 
 # 採点結果を score_history に記録 (Phase 5 直後必須)。推奨 (ADR-002 Stage 1): scorer が書いた JSON
 # ({"items": {...}, "notes", "open_high"}) を渡す。composite/min_item は CLI が items から再計算し、orchestrator は
-# スコア数値を転記しない (捏造・転記ミス・0-1 スケール混入を排除)。--composite/--items 手渡しの従来経路は非推奨 (将来 reject)
+# スコア数値を転記しない (捏造・転記ミス・0-1 スケール混入を排除)。open_high も JSON 側が優先。
+# --composite/--items 手渡しの従来経路は非推奨 (将来 reject)
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score \
     --iteration <N> \
-    --scoring-json /tmp/mission-scorer-iter-<N>-<mission_id先頭8>.json \
-    --open-high <未解決High件数>
+    --scoring-json /tmp/mission-scorer-iter-<N>-<mission_id先頭8>.json
 
 # 合格マーク (passes=true, loop_active=false)
 # threshold gate が自動でかかる:

@@ -171,6 +171,35 @@ def test_scoring_json_open_high_flows_to_gate(state_dir, run_cli, tmp_path):
     assert "High" in r.stderr
 
 
+def test_scoring_json_open_high_wins_over_cli_flag(state_dir, run_cli, read_state, tmp_path):
+    """JSON の open_high は CLI --open-high より優先 (scorer の構造化出力が authoritative)."""
+    src = _write_scoring_json(tmp_path, {"items": CANONICAL_ITEMS, "open_high": 5})
+    run_cli("push-score", "--iteration", "1", "--scoring-json", str(src),
+            "--open-high", "3", cwd=state_dir.parent, check=True)
+    entry = read_state(state_dir)["score_history"][0]
+    assert entry["open_high"] == 5
+
+
+def test_scoring_json_without_open_high_falls_back_to_cli(state_dir, run_cli, read_state, tmp_path):
+    """JSON に open_high キーがなければ CLI --open-high をフォールバックとして使う."""
+    src = _write_scoring_json(tmp_path, {"items": CANONICAL_ITEMS})
+    run_cli("push-score", "--iteration", "1", "--scoring-json", str(src),
+            "--open-high", "2", cwd=state_dir.parent, check=True)
+    entry = read_state(state_dir)["score_history"][0]
+    assert entry["open_high"] == 2
+
+
+def test_scoring_json_evidence_written_before_state_records_path(state_dir, run_cli, read_state, tmp_path):
+    """scoring_evidence_path が state に載る時点で archive ファイルが実在する
+    (crash 時の dangling reference 防止: archive 書き込みは state 書き込みと同一 lock 内で先行)."""
+    src = _write_scoring_json(tmp_path, {"items": CANONICAL_ITEMS})
+    run_cli("push-score", "--iteration", "1", "--scoring-json", str(src),
+            cwd=state_dir.parent, check=True)
+    entry = read_state(state_dir)["score_history"][0]
+    from pathlib import Path
+    assert Path(entry["scoring_evidence_path"]).exists()
+
+
 # ===== 0-1 正規化スケール reject (xai-cli cx-019efece 回帰) =====
 
 
