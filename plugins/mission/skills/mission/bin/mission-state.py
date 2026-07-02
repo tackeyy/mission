@@ -22,6 +22,10 @@
   python3 ${MISSION_PLUGIN_ROOT}/skills/mission/bin/mission-state.py halt --reason <text> [--all]
 """
 
+# Issue #99: PEP 604 union 注釈 (X | None) を Python 3.9 (macOS Xcode CLT の python3) でも
+# パース可能にする。これが無いとモジュール読み込み時点で TypeError になり全コマンドが全滅する。
+from __future__ import annotations
+
 import argparse
 import fcntl
 import hashlib
