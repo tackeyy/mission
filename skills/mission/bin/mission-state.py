@@ -2419,6 +2419,113 @@ def cmd_get(args):
         print(json.dumps(data, indent=2, ensure_ascii=False))
 
 
+def _derive_next_action(data: dict) -> dict:
+    """ADR-002 Stage 3 (G-3): state から次の 1 手を決定論的に導出する。
+
+    ハーネス非依存の進行ガイド。Stop hook が使えない環境 (Codex 等) や
+    compaction 後の復元で、散文指示に依存せず「state を読めば次手が自明」にする。
+    分岐は SKILL.md の Phase 0-7 と同じ決定木を機械化したもの。
+    """
+    halt_reason = data.get("halt_reason") or ""
+    if halt_reason:
+        return {
+            "next_action": "report-blocker",
+            "summary": f"halted: {halt_reason}。blocker と次アクションをユーザーに報告する。再開する場合は refresh-pid",
+            "command_hint": "mission-state.py refresh-pid",
+        }
+    if data.get("passes") is True:
+        return {
+            "next_action": "report-complete",
+            "summary": "mission は合格済み。最終報告 (成果物パス・検証結果・specialist summary) を出して終了する",
+            "command_hint": "mission-state.py specialists summary",
+        }
+    if data.get("awaiting_user"):
+        return {
+            "next_action": "await-user",
+            "summary": "ユーザー回答待ち (awaiting_user=true)。回答を得るまで不可逆操作に進まない",
+            "command_hint": "",
+        }
+    if data.get("loop_active") is False:
+        return {
+            "next_action": "resume",
+            "summary": "loop_active=false だが未合格・halt 理由なし。refresh-pid で再活性化してループを再開する",
+            "command_hint": "mission-state.py refresh-pid",
+        }
+    stagnation = data.get("stagnation_count", 0) or 0
+    if stagnation >= 3:
+        return {
+            "next_action": "consider-halt",
+            "summary": f"stagnation_count={stagnation} (3 連続でスコア停滞)。アプローチを変えても改善しない場合は mark-halt で停止し状況を報告する",
+            "command_hint": 'mission-state.py mark-halt --reason "<停滞理由>"',
+        }
+    phase = data.get("phase") or "planning"
+    iteration = data.get("iteration", 1) or 1
+    reviewer_count = data.get("reviewer_count", 2) or 2
+    mid8 = (data.get("mission_id") or "unknown")[:8]
+    if phase == "planning":
+        return {
+            "next_action": "run-planner",
+            "summary": f"iteration {iteration}: mission-planner を起動して計画を立てる (完了後 set phase=executing)",
+            "command_hint": "Skill: mission-planner → mission-state.py set phase='\"executing\"'",
+        }
+    if phase == "executing":
+        return {
+            "next_action": "run-executor",
+            "summary": f"iteration {iteration}: mission-executor で計画を実行する (完了後 set phase=reviewing。10分超は progress update)",
+            "command_hint": "Skill: mission-executor → mission-state.py set phase='\"reviewing\"'",
+        }
+    if phase == "reviewing":
+        return {
+            "next_action": "run-reviewers",
+            "summary": f"iteration {iteration}: mission-reviewer を {reviewer_count} 名、単一メッセージで並列起動する (直列起動は規律違反)",
+            "command_hint": f"Skill: mission-reviewer x{reviewer_count} (1 message)",
+            "details": {"reviewer_count": reviewer_count},
+        }
+    # phase == scoring / done / その他: 現 iteration の有効スコア有無で分岐
+    history = data.get("score_history") or []
+    scored_current = [
+        h for h in history
+        if isinstance(h, dict) and h.get("iteration") == iteration and _is_valid_composite(h.get("composite"))
+    ]
+    if scored_current:
+        return {
+            "next_action": "mark-passes",
+            "summary": f"iteration {iteration} の採点は記録済み。mark-passes で threshold gate 判定する (reject なら mission-critic → 次 iteration)",
+            "command_hint": "mission-state.py mark-passes",
+        }
+    return {
+        "next_action": "run-scorer",
+        "summary": f"iteration {iteration}: mission-scorer を起動し、構造化 JSON を push-score --scoring-json で記録する",
+        "command_hint": f"Skill: mission-scorer → mission-state.py push-score --iteration {iteration} --scoring-json /tmp/mission-scorer-iter-{iteration}-{mid8}.json",
+    }
+
+
+def cmd_next(args):
+    """ADR-002 Stage 3: 次の 1 手を JSON で返す (read-only・state 不在でも exit 0)."""
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        print(json.dumps({
+            "next_action": "init",
+            "summary": "mission state がありません。init でミッションを登録してループを開始する",
+            "command_hint": 'mission-state.py init "<ミッション記述>" --complexity <Simple|Standard|Complex|Critical>',
+        }, ensure_ascii=False))
+        return
+    with StateLock(lock_file(cwd)):
+        data = json.loads(sf.read_text())
+    out = _derive_next_action(data)
+    out.setdefault("details", {})
+    out.update({
+        "phase": data.get("phase"),
+        "iteration": data.get("iteration"),
+        "session_id": data.get("session_id"),
+        "loop_active": data.get("loop_active"),
+        "passes": data.get("passes"),
+        "stagnation_count": data.get("stagnation_count", 0),
+    })
+    print(json.dumps(out, ensure_ascii=False))
+
+
 # Issue #2: set で変更禁止のフィールド (mission_id 整合性維持のため)
 FROZEN_FIELDS = {
     "mission",  # 変更したいなら init を使う (mission_id が再計算される)
@@ -3564,6 +3671,9 @@ def _build_parser():
     p_init.add_argument("--files", default=None,
                         help="予定変更ファイルのカンマ区切り project-root 相対パス。同一 active session と重複する場合 WARN")
     p_init.set_defaults(func=cmd_init)
+
+    p_next = sub.add_parser("next", help="ADR-002 Stage 3: state から次の 1 手を JSON で返す (read-only。Codex/compaction 復帰時の進行ガイド)")
+    p_next.set_defaults(func=cmd_next)
 
     p_get = sub.add_parser("get", help="state.json の値取得")
     p_get.add_argument("--field", default=None)
