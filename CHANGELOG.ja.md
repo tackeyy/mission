@@ -9,10 +9,23 @@
 
 ## [Unreleased]
 
+## [1.0.6] - 2026-07-02
+
 ### 修正
+- `mission-state.py init` が破損した session JSON を隔離するようになり、同一セッションでの mission 変更時にクラッシュしないようにしました。
+- `mission-state.py set` が pass・score history・threshold 系フィールドを凍結するようになり、raw な state 更新で完了ゲートをバイパスできないようにしました。
+- `mission-state.py push-score` が、渡されたスカラースコアと items 明細のスコアが乖離している場合に警告を出すようにしました。
+- Stop hook の CWD 探索が遅い `lsof` によるハングを避け、Linux では `/proc/<pid>/cwd` を優先し、自セッションの直接参照を先に行い、`awaiting_user` セッションの stale auto-halt をスキップするようにしました。
+- specialist の同点処理が、インストール済みで optional な low/medium リスク provider を決定論的に自動選択し、tie-break 理由を記録するようにしました。
+- mission executor が `Agent` や `rm` を含まない bounded な allowed tools を宣言するようにしました。
 - specialist の task_profile 分類が architecture / system design 系 mission を認識するようになり、architecture 専用の project / user provider が documentation fallback に隠れて選ばれない問題を修正しました。
 - mission audit が archived worktree の `iteration-archive/` ディレクトリに保存された scorer evidence を認識するようになり、scoring artifact が存在する場合の `missing-scoring-evidence` 誤検出を防ぐようにしました。
 - mission audit が JSON として完全一致する archive-only の worktree state copy を resolved duplicate として分類するようにし、cross-root audit で想定内の archive/archive copy が P1 `duplicate-state` と誤報告されないようにしました。
+
+### 追加
+- ADR-002 として、local JSON + flock ストレージを維持したまま Finding / Score / Decision / Action を段階的に型付き state オブジェクト化するロードマップを定義しました。
+- local-first な mission artifact を archived evidence 付きで管理する `mission-state.py artifact` CLI を追加しました（`docs/MISSION_ARTIFACTS.ja.md` 参照）。
+- specialist registry の `kind: command` provider に `env` と `timeout` の runtime 設定を宣言できるようにしました。`env` はその provider プロセスにのみ渡され、CLI の `--timeout` は registry の値より優先されます。
 
 ## [1.0.5] - 2026-06-26
 
@@ -120,6 +133,7 @@
 - 状態ルーティング・スコアゲート・hook 挙動をカバーする Python テストスイート。
 - GitHub Actions CI（`push` / `pull_request` / `workflow_dispatch`）。pytest と ShellCheck を実行。
 
+[1.0.6]: https://github.com/tackeyy/mission/releases/tag/v1.0.6
 [1.0.5]: https://github.com/tackeyy/mission/releases/tag/v1.0.5
 [1.0.4]: https://github.com/tackeyy/mission/releases/tag/v1.0.4
 [1.0.3]: https://github.com/tackeyy/mission/releases/tag/v1.0.3

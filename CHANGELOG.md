@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.6] - 2026-07-02
+
 ### Fixed
 - `mission-state.py init` now quarantines corrupt session JSON instead of crashing during same-session mission changes.
 - `mission-state.py set` now freezes pass, score history, and threshold fields so completion gates cannot be bypassed through raw state updates.
@@ -22,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - ADR-002 now defines the staged typed mission state object roadmap for Findings, Scores, Decisions, and Actions while preserving local JSON + flock storage.
+- `mission-state.py artifact` CLI manages local-first mission artifacts with archived evidence; see `docs/MISSION_ARTIFACTS.md`.
+- Specialist registry `kind: command` providers can now declare `env` and `timeout` runtime configuration, passed only to that provider process (CLI `--timeout` still overrides).
 
 ## [1.0.5] - 2026-06-26
 
@@ -129,6 +133,7 @@ First public release.
 - Python test suite covering state routing, scoring gates, and hook behavior.
 - GitHub Actions CI (`push`, `pull_request`, `workflow_dispatch`) with pytest and ShellCheck.
 
+[1.0.6]: https://github.com/tackeyy/mission/releases/tag/v1.0.6
 [1.0.5]: https://github.com/tackeyy/mission/releases/tag/v1.0.5
 [1.0.4]: https://github.com/tackeyy/mission/releases/tag/v1.0.4
 [1.0.3]: https://github.com/tackeyy/mission/releases/tag/v1.0.3
