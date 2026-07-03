@@ -16,6 +16,9 @@ def test_explicit_session_id_routing(tmp_path, run_cli):
             "--items", _ITEMS, cwd=tmp_path, env_extra=env, check=True)
     d = json.loads(sf.read_text())
     assert len(d["score_history"]) == 1 and d["score_history"][0]["composite"] == 4.5
+    d["task_profile"] = {"primary": "test"}
+    d["specialists_decision"] = {"policy": "fallback", "action": "continue-core"}
+    sf.write_text(json.dumps(d))
     # mark-passes が通る (legacy 汚染なし = threshold gate が session の score を見る)
     r = run_cli("mark-passes", cwd=tmp_path, env_extra=env)
     assert r.returncode == 0, f"mark-passes 失敗: {r.stderr}"

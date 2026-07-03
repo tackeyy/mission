@@ -69,6 +69,9 @@ PREPARATION_ONLY_MARKERS = (
     "Review URL:",
 )
 
+DEFAULT_ACTIVE_PENDING_SECONDS = 30 * 60
+DEFAULT_STALE_ACTIVE_SECONDS = 3 * 60 * 60
+
 
 @dataclass(frozen=True)
 class StateRecord:
@@ -83,6 +86,27 @@ def parse_dt(value: str | None) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def utc_now() -> datetime:
+    override = os.environ.get("MISSION_AUDIT_NOW")
+    parsed = parse_dt(override)
+    if parsed:
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    return datetime.now(timezone.utc)
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value >= 0 else default
 
 
 def parse_cutoff(value: str | None) -> datetime | None:
@@ -107,6 +131,17 @@ def duration_sec(state: dict[str, Any]) -> float | None:
     if not started or not updated:
         return None
     seconds = (updated - started).total_seconds()
+    return seconds if seconds >= 0 else None
+
+
+def age_since_update_sec(state: dict[str, Any], *, now: datetime | None = None) -> float | None:
+    updated = parse_dt(state.get("heartbeat_at") or state.get("last_progress_at") or state.get("updated_at"))
+    if not updated:
+        return None
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc)
+    base = now or utc_now()
+    seconds = (base - updated.astimezone(timezone.utc)).total_seconds()
     return seconds if seconds >= 0 else None
 
 
@@ -372,6 +407,8 @@ def halt_or_incomplete_bucket(record: StateRecord) -> str:
     reason = str(state.get("halt_reason") or "").lower()
     if classify(state) == "incomplete":
         if not state.get("score_history"):
+            if is_stale_active_no_score(record):
+                return "stale-active-live-pid"
             return "active-no-score-checkpoint"
         return "active-in-progress"
     if any(token in reason for token in ("orphan", "pid", "dead", "stale")):
@@ -393,6 +430,28 @@ def halt_or_incomplete_bucket(record: StateRecord) -> str:
 def is_active_no_score_checkpoint(record: StateRecord) -> bool:
     """Return true for live mission sessions that have not reached first scoring."""
     return classify(record.state) == "incomplete" and not record.state.get("score_history")
+
+
+def active_pending_threshold_sec() -> int:
+    return _env_int("MISSION_AUDIT_ACTIVE_PENDING_SECONDS", DEFAULT_ACTIVE_PENDING_SECONDS)
+
+
+def stale_active_threshold_sec() -> int:
+    return _env_int("MISSION_STALE_ACTIVE_SECONDS", DEFAULT_STALE_ACTIVE_SECONDS)
+
+
+def is_active_no_score_pending(record: StateRecord, *, now: datetime | None = None) -> bool:
+    if not is_active_no_score_checkpoint(record):
+        return False
+    age = age_since_update_sec(record.state, now=now)
+    return age is not None and age < active_pending_threshold_sec()
+
+
+def is_stale_active_no_score(record: StateRecord, *, now: datetime | None = None) -> bool:
+    if not is_active_no_score_checkpoint(record):
+        return False
+    age = age_since_update_sec(record.state, now=now)
+    return age is None or age >= stale_active_threshold_sec()
 
 
 def slow_session_bucket(record: StateRecord, slow_threshold_sec: int) -> str:
@@ -454,9 +513,12 @@ def low_score_pass_bucket(record: StateRecord) -> str:
 
 
 SPECIALIST_SELECTION_CHECKPOINT_REQUIRED_AT = datetime(2026, 6, 20, 10, 6, 47, tzinfo=timezone.utc)
+SPECIALIST_SELECTION_CHECKPOINT_COMPLEXITIES = {"Standard", "Complex", "Critical"}
 
 
 def specialist_selection_checkpoint_expected(state: dict[str, Any]) -> bool:
+    if str(state.get("complexity") or "") not in SPECIALIST_SELECTION_CHECKPOINT_COMPLEXITIES:
+        return False
     started = parse_dt(state.get("created_at_session") or state.get("started_at"))
     if not started:
         return False
@@ -476,6 +538,8 @@ def has_specialist_selection_checkpoint(state: dict[str, Any]) -> bool:
 
 def missing_specialist_selection_checkpoint_item(record: StateRecord) -> dict[str, Any] | None:
     state = record.state
+    if is_active_no_score_pending(record):
+        return None
     if not specialist_selection_checkpoint_expected(state):
         return None
     if has_specialist_selection_checkpoint(state):
@@ -492,6 +556,8 @@ def missing_specialist_selection_checkpoint_item(record: StateRecord) -> dict[st
 
 
 def specialist_invocation_gap_skills(record: StateRecord) -> list[str]:
+    if is_active_no_score_pending(record):
+        return []
     selected = selected_specialist_skills(record.state)
     if not selected:
         return []
@@ -562,6 +628,8 @@ def is_active_ask_user_specialist_wait(state: dict[str, Any]) -> bool:
 
 def candidate_only_specialist_item(record: StateRecord) -> dict[str, Any] | None:
     state = record.state
+    if is_active_no_score_pending(record):
+        return None
     if is_active_ask_user_specialist_wait(state):
         return None
     report = candidate_accounting_report(state)
@@ -616,18 +684,47 @@ def coarse_phase_attribution_item(record: StateRecord, planning_ratio_threshold:
 def scoring_evidence_paths(record: StateRecord, iteration: int) -> list[Path]:
     mission_id = str(record.state.get("mission_id") or "")
     mission_prefix = mission_id[:8] or "unknown"
-    filename = f"iter-{iteration}-{mission_prefix}-scoring.md"
-    project_mission_state = Path(project_root_for(record)) / ".mission-state"
-    paths = [
-        project_mission_state / "archive" / filename,
-        project_mission_state / "iteration-archive" / filename,
+    filenames = [
+        f"iter-{iteration}-{mission_prefix}-scoring.md",
+        f"iter-{iteration}-{mission_prefix}-scoring.json",
     ]
+    project_mission_state = Path(project_root_for(record)) / ".mission-state"
+    paths: list[Path] = []
 
     parts = record.path.parts
+    mission_state_root: Path | None = None
+    worktree_archive_root: Path | None = None
     if ".mission-state" in parts:
         idx = parts.index(".mission-state")
+        mission_state_root = Path(*parts[: idx + 1])
         if idx + 2 < len(parts) and parts[idx + 1] == "archive" and parts[idx + 2].startswith("worktree-"):
             worktree_archive_root = Path(*parts[: idx + 3])
+
+    for entry in record.state.get("score_history") or []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("iteration") != iteration:
+            continue
+        evidence_path = str(entry.get("scoring_evidence_path") or "").strip()
+        if not evidence_path:
+            continue
+        raw_path = Path(evidence_path)
+        if raw_path.is_absolute():
+            paths.append(raw_path)
+        else:
+            paths.append(Path(project_root_for(record)) / evidence_path)
+            if mission_state_root:
+                paths.append(mission_state_root.parent / evidence_path)
+            if worktree_archive_root:
+                paths.append(worktree_archive_root / evidence_path)
+
+    for filename in filenames:
+        paths.append(project_mission_state / "archive" / filename)
+        paths.append(project_mission_state / "iteration-archive" / filename)
+        if mission_state_root:
+            paths.append(mission_state_root / "archive" / filename)
+            paths.append(mission_state_root / "iteration-archive" / filename)
+        if worktree_archive_root:
             paths.append(worktree_archive_root / "archive" / filename)
             paths.append(worktree_archive_root / "iteration-archive" / filename)
 
@@ -813,6 +910,8 @@ def aggregate(
 ) -> dict[str, Any]:
     classes = [classify(r.state) for r in records]
     active_no_score_checkpoint = [r for r in records if is_active_no_score_checkpoint(r)]
+    active_no_score_pending = [r for r in active_no_score_checkpoint if is_active_no_score_pending(r)]
+    stale_active_no_score = [r for r in active_no_score_checkpoint if is_stale_active_no_score(r)]
     pass_rate_records = [r for r in records if not is_active_no_score_checkpoint(r)]
     durations = [d for r in records if (d := duration_sec(r.state)) is not None]
     composites = [
@@ -928,6 +1027,10 @@ def aggregate(
         "incomplete_count": classes.count("incomplete"),
         "abandoned_count": classes.count("abandoned"),
         "active_no_score_checkpoint_count": len(active_no_score_checkpoint),
+        "active_no_score_pending_sessions": active_no_score_pending,
+        "active_no_score_pending_count": len(active_no_score_pending),
+        "stale_active_no_score_sessions": stale_active_no_score,
+        "stale_active_no_score_count": len(stale_active_no_score),
         "pass_rate_denominator": len(pass_rate_records),
         "pass_rate": pass_count / len(pass_rate_records) if pass_rate_records else None,
         "forced_pass_count": len(forced),
@@ -1144,6 +1247,8 @@ def finding_rows(stats: dict[str, Any], min_pass_rate: float) -> list[tuple[str,
     if halt_count:
         label = "current halted sessions" if current_scope else "halted sessions"
         rows.append(("P1", "halted-runs", f"{halt_count} {label} need root-cause review"))
+    if stats["stale_active_no_score_count"]:
+        rows.append(("P1", "stale-active-no-score", f"{stats['stale_active_no_score_count']} active no-score sessions exceeded stale threshold"))
     if slow_count:
         label = "current sessions" if current_scope else "sessions"
         rows.append(("P2", "slow-runs", f"{slow_count} {label} exceeded slow threshold"))
@@ -1234,6 +1339,8 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
         f"- pass / halt / incomplete / abandoned: {stats['pass_count']} / {stats['halt_count']} / {stats['incomplete_count']} / {stats['abandoned_count']}",
         f"- pass rate: {fmt_float(stats['pass_rate'] * 100 if stats['pass_rate'] is not None else None, 1)}% (denominator: {stats['pass_rate_denominator']})",
         f"- active no-score checkpoints excluded from pass rate: {stats['active_no_score_checkpoint_count']}",
+        f"- active no-score pending: {stats['active_no_score_pending_count']}",
+        f"- stale active no-score: {stats['stale_active_no_score_count']}",
         f"- forced pass: {stats['forced_pass_count']}",
         f"- ungated pass: {stats['ungated_pass_count']}",
         f"- duplicate state groups: {stats['duplicate_group_count']}",
@@ -1269,6 +1376,18 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
     if stats["halt_incomplete_breakdown"]:
         for key, count in sorted(stats["halt_incomplete_breakdown"].items()):
             lines.append(f"- `{key}`: {count}")
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Stale Active No-Score Sessions", ""])
+    if stats["stale_active_no_score_sessions"]:
+        lines.extend(session_line(record) for record in stats["stale_active_no_score_sessions"])
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Pending Active No-Score Sessions", ""])
+    if stats["active_no_score_pending_sessions"]:
+        lines.extend(session_line(record) for record in stats["active_no_score_pending_sessions"])
     else:
         lines.append("- none")
 
@@ -1562,6 +1681,8 @@ def main(argv: list[str] | None = None) -> int:
                 "slow_sessions",
                 "current_slow_sessions",
                 "historical_slow_sessions",
+                "active_no_score_pending_sessions",
+                "stale_active_no_score_sessions",
                 "ungated_pass_sessions",
             }
         }

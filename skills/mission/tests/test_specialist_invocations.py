@@ -150,6 +150,32 @@ def test_log_invocation_selection_source_adds_selection_metadata(state_dir, run_
     assert data["selected_entry"] == selected
 
 
+def test_log_invocation_task_required_selection_source_adds_selection_metadata(state_dir, run_cli, read_state):
+    r = run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "planning",
+        "--role", "source-retrieval",
+        "--skill", "source-retrieval-provider",
+        "--mode", "codex-inline",
+        "--status", "inline-applied",
+        "--selection-source", "task-required",
+        "--notes", "The task required source retrieval before answering",
+        "--json",
+        cwd=state_dir.parent,
+    )
+
+    data = _json_result(r)
+    state = read_state(state_dir)
+    entry = state["specialist_invocations"][0]
+    selected = state["specialists_selected"][0]
+    assert entry["selection_source"] == "task-required"
+    assert selected["skill"] == "source-retrieval-provider"
+    assert selected["selection_source"] == "task-required"
+    assert selected["source"] == "task-required:log-invocation"
+    assert data["selected_entry"] == selected
+
+
 def test_log_invocation_requires_selection_source_after_ask_user_confirmation(state_dir, run_cli):
     state_path = state_dir / "sessions" / "test.json"
     state = json.loads(state_path.read_text())

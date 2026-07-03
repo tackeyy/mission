@@ -9,6 +9,17 @@
 
 ## [Unreleased]
 
+### 追加
+- `mission-state.py specialists log-invocation --selection-source task-required` を追加し、タスク上必須の情報取得・証跡 provider を、private skill 名をハードコードせず selected specialist として記録できるようにしました (#115)。
+
+### 変更
+- `mark-passes` が、新規 Standard / Complex / Critical session で `task_profile` と `specialists_decision.policy` の checkpoint がない場合に完了を拒否するようにしました。fallback / degraded の明示 decision は有効な checkpoint として扱います (#112)。
+- `cleanup-stale` が、記録された agent PID が生存していても、`MISSION_STALE_ACTIVE_SECONDS` を超えた active no-score session を stale として halt できるようにしました (#113)。
+
+### 修正
+- mission audit が `score_history[].scoring_evidence_path` の明示パスと、通常または archived worktree の `.mission-state` に保存された JSON scoring evidence を認識するようにしました (#111)。
+- mission audit が、fresh な active no-score planning session を specialist accounting debt から分離し、stale な active no-score session は JSON / Markdown で明示的に報告するようにしました (#113, #114)。
+
 ## [1.0.7] - 2026-07-03
 
 ### 修正

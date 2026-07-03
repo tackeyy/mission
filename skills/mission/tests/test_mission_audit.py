@@ -1,6 +1,7 @@
 """scripts/mission-audit.py regression tests."""
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -425,6 +426,7 @@ def test_audit_reports_halt_incomplete_slow_and_low_score_buckets(tmp_path):
         passes=False,
         loop_active=True,
         score_history=[],
+        updated_at="2026-06-18T00:10:00Z",
         session_id="incomplete",
     )
     _write_state(
@@ -456,6 +458,7 @@ def test_audit_reports_halt_incomplete_slow_and_low_score_buckets(tmp_path):
         capture_output=True,
         text=True,
         check=True,
+        env={**os.environ, "MISSION_AUDIT_NOW": "2026-06-18T00:15:00Z"},
     )
     data = json.loads(result.stdout)
     assert data["halt_incomplete_breakdown"]["stale-state-cleanup"] == 1
@@ -573,6 +576,141 @@ def test_audit_accepts_worktree_iteration_archive_scoring_evidence(tmp_path):
     data = json.loads(result.stdout)
     assert data["missing_scoring_evidence_count"] == 0
     assert all(f["code"] != "missing-scoring-evidence" for f in data["findings"])
+
+
+def test_audit_accepts_explicit_scoring_evidence_json_path(tmp_path):
+    evidence = tmp_path / "evidence" / "score.json"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text('{"composite": 4.6}\n', encoding="utf-8")
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "json-evidence.json",
+        project_root=str(tmp_path),
+        mission_id="feedfacecafebabe",
+        session_id="json-evidence",
+        score_history=[
+            {
+                "iteration": 1,
+                "composite": 4.6,
+                "min_item": 4.0,
+                "items": {},
+                "timestamp": "2026-06-18T00:05:00Z",
+                "scoring_evidence_path": str(evidence),
+            }
+        ],
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--since", "2026-06-18", "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    assert data["missing_scoring_evidence_count"] == 0
+
+
+def test_audit_accepts_worktree_archive_json_scoring_evidence(tmp_path):
+    project_root = tmp_path / "worktree"
+    archive_root = tmp_path / "repo" / ".mission-state" / "archive" / "worktree-neutral"
+    _write_state(
+        archive_root / "sessions" / "archived.json",
+        project_root=str(project_root),
+        mission_id="feedfacecafebabe",
+        session_id="archived-json-evidence",
+    )
+    evidence = archive_root / "archive" / "iter-1-feedface-scoring.json"
+    evidence.parent.mkdir(parents=True, exist_ok=True)
+    evidence.write_text('{"composite": 4.5}\n', encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--since", "2026-06-18", "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    assert data["missing_scoring_evidence_count"] == 0
+
+
+def test_audit_treats_fresh_active_no_score_as_pending_not_debt(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "fresh.json",
+        project_root=str(tmp_path),
+        session_id="fresh",
+        passes=False,
+        loop_active=True,
+        score_history=[],
+        halt_reason="",
+        started_at="2026-07-03T00:00:00Z",
+        created_at_session="2026-07-03T00:00:00Z",
+        updated_at="2026-07-03T00:10:00Z",
+        task_profile={},
+        specialists_decision={},
+        specialists_candidates=[
+            {"role": "doc-writer", "skill": "documentation-provider", "status": "available", "task_profiles": ["documentation"]},
+        ],
+        specialists_selected=[
+            {"role": "doc-writer", "skill": "documentation-provider", "status": "selected"},
+        ],
+        specialist_invocations=[],
+    )
+    env = {**os.environ, "MISSION_AUDIT_NOW": "2026-07-03T00:15:00Z", "MISSION_AUDIT_ACTIVE_PENDING_SECONDS": "1800"}
+
+    result = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--since", "2026-07-03", "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=env,
+    )
+
+    data = json.loads(result.stdout)
+    assert data["active_no_score_pending_count"] == 1
+    assert data["stale_active_no_score_count"] == 0
+    assert data["missing_specialist_selection_checkpoint_count"] == 0
+    assert data["specialist_invocation_gap_count"] == 0
+    assert data["candidate_only_specialist_count"] == 0
+
+
+def test_audit_reports_stale_active_no_score_as_actionable(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "stale.json",
+        project_root=str(tmp_path),
+        session_id="stale",
+        passes=False,
+        loop_active=True,
+        score_history=[],
+        halt_reason="",
+        started_at="2026-07-03T00:00:00Z",
+        created_at_session="2026-07-03T00:00:00Z",
+        updated_at="2026-07-03T00:00:00Z",
+        task_profile={},
+        specialists_decision={},
+        specialists_candidates=[
+            {"role": "doc-writer", "skill": "documentation-provider", "status": "available", "task_profiles": ["documentation"]},
+        ],
+        specialists_selected=[
+            {"role": "doc-writer", "skill": "documentation-provider", "status": "selected"},
+        ],
+        specialist_invocations=[],
+    )
+    env = {**os.environ, "MISSION_AUDIT_NOW": "2026-07-03T05:00:00Z", "MISSION_STALE_ACTIVE_SECONDS": "3600"}
+
+    result = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--since", "2026-07-03", "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=env,
+    )
+
+    data = json.loads(result.stdout)
+    assert data["stale_active_no_score_count"] == 1
+    assert data["active_no_score_pending_count"] == 0
+    assert data["missing_specialist_selection_checkpoint_count"] == 1
+    assert data["specialist_invocation_gap_count"] == 1
+    assert data["halt_incomplete_breakdown"]["stale-active-live-pid"] == 1
+    assert any(f["code"] == "stale-active-no-score" for f in data["findings"])
 
 
 def test_audit_slow_session_buckets_track_phase_duration_observability(tmp_path):
@@ -754,6 +892,53 @@ def test_audit_accepts_completed_specialist_invocation(tmp_path):
     assert data["specialist_invocation_gap_count"] == 0
     assert data["missing_specialist_selection_checkpoint_count"] == 0
     assert all(f["code"] != "specialist-invocation-gap" for f in data["findings"])
+
+
+def test_audit_accepts_task_required_source_retrieval_provider(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "source-retrieval.json",
+        started_at="2026-07-03T00:00:00Z",
+        created_at_session="2026-07-03T00:00:00Z",
+        task_profile={"primary": "research"},
+        specialists_decision={"policy": "task-required", "reason": "source retrieval required by task"},
+        specialists_selected=[
+            {
+                "role": "source-retrieval",
+                "skill": "source-retrieval-provider",
+                "status": "selected",
+                "selection_source": "task-required",
+            },
+        ],
+        specialist_invocations=[
+            {
+                "skill": "source-retrieval-provider",
+                "role": "source-retrieval",
+                "status": "inline-applied",
+                "mode": "codex-inline",
+                "selection_source": "task-required",
+            },
+        ],
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-07-03",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    data = json.loads(result.stdout)
+    assert data["specialist_invocation_gap_count"] == 0
+    assert data["unselected_specialist_invocation_count"] == 0
+    assert data["missing_specialist_selection_checkpoint_count"] == 0
 
 
 def test_audit_reports_unselected_specialist_invocation(tmp_path):
@@ -1371,6 +1556,38 @@ def test_audit_does_not_report_legacy_missing_specialist_selection_checkpoint(tm
             str(tmp_path),
             "--since",
             "2026-06-20",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    data = json.loads(result.stdout)
+    assert data["missing_specialist_selection_checkpoint_count"] == 0
+    assert all(f["code"] != "missing-specialist-selection-checkpoint" for f in data["findings"])
+
+
+def test_audit_does_not_require_specialist_selection_checkpoint_for_simple(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "simple.json",
+        started_at="2026-07-03T00:00:00Z",
+        created_at_session="2026-07-03T00:00:00Z",
+        complexity="Simple",
+        task_profile={},
+        specialists_decision={},
+        specialists_selected=[],
+        specialist_invocations=[],
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-07-03",
             "--json",
         ],
         capture_output=True,

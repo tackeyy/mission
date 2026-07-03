@@ -175,3 +175,67 @@ def test_cleanup_stale_execute_halts_nonexistent_project_root(tmp_path, run_cli)
     s = json.loads((sd / "state.json").read_text())
     assert s["loop_active"] is False
     assert "project_root not found" in s["halt_reason"], f"halt_reason: {s['halt_reason']}"
+
+
+def test_cleanup_stale_detects_stale_active_no_score_even_with_live_agent_pid(tmp_path, run_cli):
+    _make_state(
+        tmp_path / "proj",
+        pid=os.getpid(),
+        project_root=str(tmp_path / "proj"),
+        score_history=[],
+        updated_at="2026-06-07T00:00:00Z",
+    )
+    r = run_cli(
+        "cleanup-stale",
+        "--root",
+        str(tmp_path),
+        cwd=tmp_path,
+        env_extra={"MISSION_FORCE_PID_IS_AGENT": "1", "MISSION_STALE_ACTIVE_SECONDS": "3600"},
+    )
+    data = json.loads(r.stdout)
+    assert len(data["would_halt"]) == 1
+    assert data["would_halt"][0]["reason"] == "stale-active-no-score"
+
+
+def test_cleanup_stale_skips_fresh_active_no_score_with_live_agent_pid(tmp_path, run_cli):
+    _make_state(
+        tmp_path / "proj",
+        pid=os.getpid(),
+        project_root=str(tmp_path / "proj"),
+        score_history=[],
+        updated_at="2026-06-07T00:00:00Z",
+    )
+    r = run_cli(
+        "cleanup-stale",
+        "--root",
+        str(tmp_path),
+        cwd=tmp_path,
+        env_extra={"MISSION_FORCE_PID_IS_AGENT": "1", "MISSION_STALE_ACTIVE_SECONDS": "9999999999"},
+    )
+    data = json.loads(r.stdout)
+    assert data["would_halt"] == []
+    assert data["skipped"][0]["reason"].endswith("alive (agent)")
+
+
+def test_cleanup_stale_execute_halts_stale_active_no_score_with_live_agent_pid(tmp_path, run_cli):
+    sd = _make_state(
+        tmp_path / "proj",
+        pid=os.getpid(),
+        project_root=str(tmp_path / "proj"),
+        score_history=[],
+        updated_at="2026-06-07T00:00:00Z",
+    )
+    r = run_cli(
+        "cleanup-stale",
+        "--root",
+        str(tmp_path),
+        "--execute",
+        cwd=tmp_path,
+        env_extra={"MISSION_FORCE_PID_IS_AGENT": "1", "MISSION_STALE_ACTIVE_SECONDS": "3600"},
+    )
+    data = json.loads(r.stdout)
+    assert len(data["halted"]) == 1
+    state = json.loads((sd / "state.json").read_text())
+    assert state["loop_active"] is False
+    assert state["halt_reason"].startswith("stale: active no-score checkpoint")
+    assert state["phase"] == "halted"
