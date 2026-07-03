@@ -1,0 +1,84 @@
+"""Codex startup guard diagnostics for /mission.
+
+Issue #108: Codex can return a final answer before mission state is initialized
+or before the user has opted into the Stop hook. The preflight command must make
+both conditions visible to the orchestrator.
+"""
+
+import json
+
+
+def _json(run_cli, *args, cwd):
+    r = run_cli("codex-preflight", "--json", *args, cwd=cwd)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)
+
+
+def test_codex_preflight_without_state_requires_init(tmp_path, run_cli):
+    out = _json(run_cli, "--hook-config", str(tmp_path / "hooks.json"), cwd=tmp_path)
+
+    assert out["ok"] is False
+    assert out["state_guard"]["present"] is False
+    assert out["mechanical_guard"] == "none"
+    assert out["next_action"] == "init"
+    assert any("init" in action for action in out["required_actions"])
+
+
+def test_codex_preflight_active_state_warns_when_stop_hook_missing(tmp_path, run_cli):
+    run_cli("init", "codex mission", "--complexity", "Standard", cwd=tmp_path, check=True)
+
+    out = _json(run_cli, "--hook-config", str(tmp_path / "missing-hooks.json"), cwd=tmp_path)
+
+    assert out["ok"] is True
+    assert out["state_guard"]["active"] is True
+    assert out["codex_stop_hook"]["configured"] is False
+    assert out["mechanical_guard"] == "state-next-fallback"
+    assert out["next_action"] == "run-planner"
+    assert any("Stop hook" in warning for warning in out["warnings"])
+
+
+def test_codex_preflight_detects_configured_stop_hook(tmp_path, run_cli):
+    run_cli("init", "codex mission", "--complexity", "Standard", cwd=tmp_path, check=True)
+    hook_config = tmp_path / "hooks.json"
+    hook_config.write_text(
+        json.dumps({
+            "hooks": {
+                "Stop": [
+                    {
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": 'bash "/repo/scripts/mission-stop-guard.sh"',
+                            }
+                        ]
+                    }
+                ]
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    out = _json(run_cli, "--hook-config", str(hook_config), cwd=tmp_path)
+
+    assert out["ok"] is True
+    assert out["codex_stop_hook"]["configured"] is True
+    assert out["mechanical_guard"] == "stop-hook"
+    assert out["warnings"] == []
+
+
+def test_codex_preflight_require_stop_hook_exits_nonzero_when_missing(tmp_path, run_cli):
+    run_cli("init", "codex mission", "--complexity", "Standard", cwd=tmp_path, check=True)
+
+    r = run_cli(
+        "codex-preflight",
+        "--json",
+        "--require-stop-hook",
+        "--hook-config",
+        str(tmp_path / "missing-hooks.json"),
+        cwd=tmp_path,
+    )
+
+    assert r.returncode == 2
+    out = json.loads(r.stdout)
+    assert out["ok"] is False
+    assert any("mission-stop-guard.sh" in action for action in out["required_actions"])

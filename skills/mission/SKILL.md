@@ -22,9 +22,10 @@ context compaction 後も最優先で復元・遵守すること。
    - 合格なら `loop_active: false`, `passes: true` → 完了報告
    - 不合格なら `loop_active: true` 維持 → Critic → 次イテレーション
 5. **compaction 後の最初のアクション (R1)**: §Skill開始/復元手順の **compaction/resume 経路 (step 2)** をこの順で実行 — (a) `mission-state.py refresh-pid` (PID 更新 + orphan halt 自動解除。**cleanup より必ず先**) → (b) 起動前 cleanup (`cleanup-empty $(pwd)` → `cleanup-stale --root "$(pwd)" --execute`) → (c) `mission-state.py get` で state(`sessions/<sid>.json`)を読み `assumptions_path` の assumptions を Read (固定パス直書き禁止) → (d) `phase`/`iteration`/`score_history` から該当 Phase へ復帰
-6. **完了報告する前に**: Medium 以上の指摘を orchestrator 自身がインライン修正した場合、差分 Reviewer 1 名の再確認を経たか (M6。自己検証のみで合格禁止)？ composite_score が threshold 以上か？ 全項目が 3.5 以上か？ artifact-required mission なら `mission-state.py artifact render` 済みか？ どれかが No なら止まる権利はない。**さらに `mission-state.py mark-passes` が exit 0 で返ったことを確認する** (threshold/artifact gate により未達なら exit 2 で reject される)。`halt_reason` が空でなければ完了報告語彙は禁止し、先頭を必ず `⏸️ 中断 / 未完了` にする。**`mark-passes --force` は orchestrator が自律実行してはならない** — ユーザーが明示的に「`--force` で進めて」「人手 override する」と指示した場合のみ使用可能 (gate を骨抜きにする操作のため)
-7. **合格判定後、PR がある場合は Phase 7 (明示 opt-in 自動マージ判定)** を実行する。既定は手動マージ待ち。`.mission/` 等のプロジェクト設定またはユーザー指示で自動マージが明示許可され、CI/テスト pass、`gh pr checks` 1 件以上、禁止ルールなしの全条件を満たす場合だけ `gh pr merge` を実行する (詳細は § Phase 7 参照)
-8. **実ログ由来・逸脱多発 Top4 (compaction 後も毎 Phase でセルフチェック)**: 過去 run でルールが存在するのに守られず損失が出た 4 点。
+6. **Codex start guard (Issue #108)**: Codex で新規 mission を開始したら、worktree 作成・実装・final の前に必ず `mission-state.py init ...` 済みの active state を作る。init 直後に `mission-state.py codex-preflight --json` を実行し、`state_guard.active=true` を確認する。`codex_stop_hook.configured=false` なら継続可だが、各 phase 境界・final 直前に `mission-state.py next` を呼ぶ state-driven fallback を必須にする。`state_guard.active=false` / `mechanical_guard=none` では final 禁止
+7. **完了報告する前に**: Medium 以上の指摘を orchestrator 自身がインライン修正した場合、差分 Reviewer 1 名の再確認を経たか (M6。自己検証のみで合格禁止)？ composite_score が threshold 以上か？ 全項目が 3.5 以上か？ artifact-required mission なら `mission-state.py artifact render` 済みか？ どれかが No なら止まる権利はない。**さらに `mission-state.py mark-passes` が exit 0 で返ったことを確認する** (threshold/artifact gate により未達なら exit 2 で reject される)。`halt_reason` が空でなければ完了報告語彙は禁止し、先頭を必ず `⏸️ 中断 / 未完了` にする。**`mark-passes --force` は orchestrator が自律実行してはならない** — ユーザーが明示的に「`--force` で進めて」「人手 override する」と指示した場合のみ使用可能 (gate を骨抜きにする操作のため)
+8. **合格判定後、PR がある場合は Phase 7 (明示 opt-in 自動マージ判定)** を実行する。既定は手動マージ待ち。`.mission/` 等のプロジェクト設定またはユーザー指示で自動マージが明示許可され、CI/テスト pass、`gh pr checks` 1 件以上、禁止ルールなしの全条件を満たす場合だけ `gh pr merge` を実行する (詳細は § Phase 7 参照)
+9. **実ログ由来・逸脱多発 Top4 (compaction 後も毎 Phase でセルフチェック)**: 過去 run でルールが存在するのに守られず損失が出た 4 点。
    - **並列**: Reviewer N 名は **1 メッセージ内で複数 Skill 同時呼び出し** (別メッセージ分割禁止)。実ログで 6 ラン中 0 回しか守られず直列化し、xai-cli PR#17 で run の 17% を損失。Claude Code のみ可 (Codex はこの制約なし=順次が基本・§Claude Code/Codex 差分参照)。Phase 4 起動時に「今 1 メッセージで N 名出したか?」を自問する
    - **速度 (early-stop)**: iter1 で `composite >= 4.0` かつ残 High = 0 なら **iter2 は原則禁止・即 mark-passes**。続行は §終了判定の例外 4 条件を全て満たす時のみ、理由を assumptions.md に必須記載 (過去 iter1 合格後の続行 14 件中 7 件が不変/悪化)
    - **ハルシネーション**: state 更新は `mission-state.py` のみ (`sessions/<sid>.json` 直書き禁止 = threshold gate 迂回 = 過去 PASS の 16% が ungated)。Reviewer の「外部事実に依拠する High/Medium」は一次情報併記がなければ採用前に orchestrator が一次確認する (一次確認なしの誤 High は executor を誤方向修正させ純損失)。**機械検証可能なアクション (push-score/mark-passes/gh pr view/git push 等) の結果は、直後に state 再取得または外部再照合 (gh/git ls-remote) で照合し、照合できるまで「完了」扱いしない** (根拠: bd12=scorer/push-score/Edit 捏造、ss-5292=PR番号/push 捏造)
@@ -130,7 +131,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py update-project
    1. **refresh-pid を最優先で実行 (cleanup より必ず先)**: `python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py refresh-pid` で state.pid を現 agent CLI PID に更新する。復帰直後は自 state.pid が旧 (dead) PID のため、先に `cleanup-stale --root "$(pwd)" --execute` すると自分の state を `orphan:` halt してしまう (refresh-pid 後なら alive 判定で skip される)。怠ると resume 時に hook の owner check が「別セッション」と判定し exit 0 となりループ強制が効かない (R1 対策)
    2. **起動前 cleanup**: `mission-state.py cleanup-empty $(pwd)` → `cleanup-stale --root "$(pwd)" --execute` (dead-PID の orphan state を halt。**`--root` 推奨**: 省略時は MISSION_SEARCH_ROOTS (未設定なら cwd) を rglob する。対象を確実に絞るには `--root "$(pwd)"` を明示する。「alive かつ agent CLI プロセス」のみ skip するため通常運用で他セッションの実行中 mission は halt されない)
    3. **state 復元**: `mission-state.py next` で次の 1 手を取得する (state から決定論的に導出。ADR-002 Stage 3)。補助として state.json を Read し、その `assumptions_path` の assumptions を Read。`phase`・`iteration`・`score_history` の手動解釈より `next` の出力を優先する
-3. **【state なし = 新規ミッション】**: 起動前 cleanup (`cleanup-empty $(pwd)` → `cleanup-stale --root "$(pwd)" --execute`。既存 active state が無いので refresh-pid 不要・順序自由) → Phase 0 へ進み、Phase 1 で state.json を作成（`loop_active: true` で初期化）
+3. **【state なし = 新規ミッション】**: 起動前 cleanup (`cleanup-empty $(pwd)` → `cleanup-stale --root "$(pwd)" --execute`。既存 active state が無いので refresh-pid 不要・順序自由) → Phase 0 へ進み、Phase 1 で state.json を作成（`loop_active: true` で初期化）。Codex は init 直後に `mission-state.py codex-preflight --json` で active state と guard/fallback を確認する
 4. **【`loop_active: false` = 完了済/中断済】**: ユーザーが新規ミッションを指定しているなら `mission-state.py init` を呼ぶだけ (同 sid は上書き=resume、別 sid は別ファイルに分離)。**state の archive 自動退避は無い**; 過去 state は `sessions/<sid>.json` に残り、stats が `include_archive` で参照する。手動整理は `mission-migrate.py` / `cleanup-stale`
 
 ## Phase 0: Pre-flight Check（Assumption Registry 方式）
@@ -386,7 +387,6 @@ mission は Claude Code / Codex 両対応 (PID owner 判定は 2026-06-13 に co
 **複数ミッション並列**: 同一プロジェクトでも Claude Code/Codex から起動すれば `sessions/<sid>.json` に自動分離され並列実行可 (env 不要。詳細 `refs/state-management.md` Phase C)。指示ベースのループ (モデルが `loop_active`/`passes`/`halt_reason` を監視) は Codex でも機能する。Stop hook による"強制"を Codex で効かせる手順・hooks.json 例は **`refs/codex-setup.md`** 参照。`context: fork` は Codex で無視されるだけで支障なし。
 
 **Stop hook が無効な環境 (Codex の hook trust 未承認 / Claude Code で hook 無効化時) のフォールバック**: 各 iter の Phase 6 直後に自分で state を読み、`passes != true` かつ `halt_reason` 空なら次 iter へ進み、完了/中断は必ず `mark-passes`/`mark-halt` を呼んでから報告する (hook の有無に依存せず「state を読んで自己判断」を基本動作にする)。
-
 ## 既知のハマりポイント (session-review 由来)
 
 /mission 実運用上の落とし穴 11 項目は **`refs/gotchas.md`** に退避。状況に応じて必ず参照する:
