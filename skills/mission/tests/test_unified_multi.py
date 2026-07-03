@@ -25,7 +25,11 @@ def test_sid_consistent_across_commands(tmp_path, run_cli):
     assert sf.exists()
     run_cli("push-score", "--iteration", "1", "--composite", "4.5", "--min-item", "4.0",
             "--items", _ITEMS, cwd=tmp_path, env_extra=env, check=True)
-    assert len(json.loads(sf.read_text())["score_history"]) == 1
+    state = json.loads(sf.read_text())
+    assert len(state["score_history"]) == 1
+    state["task_profile"] = {"primary": "test"}
+    state["specialists_decision"] = {"policy": "fallback", "action": "continue-core"}
+    sf.write_text(json.dumps(state))
     r = run_cli("mark-passes", cwd=tmp_path, env_extra=env)
     assert r.returncode == 0, f"stderr: {r.stderr}"
     assert json.loads(sf.read_text())["passes"] is True

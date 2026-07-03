@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `mission-state.py specialists log-invocation --selection-source task-required` records task-mandated source retrieval or evidence providers as selected specialists without hard-coding private skill names (#115).
+
+### Changed
+- `mark-passes` now rejects new Standard, Complex, and Critical sessions that lack a `task_profile` plus `specialists_decision.policy` checkpoint, while accepting explicit fallback/degraded decisions as valid checkpoints (#112).
+- `cleanup-stale` can now halt stale active no-score sessions even when their recorded agent PID is still alive, after the configurable `MISSION_STALE_ACTIVE_SECONDS` threshold (#113).
+
+### Fixed
+- Mission audit now recognizes explicit `score_history[].scoring_evidence_path` values and JSON scoring evidence stored in normal or archived worktree `.mission-state` trees (#111).
+- Mission audit now separates fresh active no-score planning sessions from actionable specialist accounting debt, while reporting stale active no-score sessions explicitly in JSON and Markdown output (#113, #114).
+
 ## [1.0.7] - 2026-07-03
 
 ### Fixed

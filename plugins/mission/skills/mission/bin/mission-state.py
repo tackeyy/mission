@@ -244,6 +244,7 @@ SPECIALIST_SELECTION_SOURCES = {
     "confirmed-user",
     "user-instruction",
     "manual",
+    "task-required",
 }
 
 APPLIED_SPECIALIST_INVOCATION_STATUSES = {
@@ -273,6 +274,10 @@ DEFAULT_COMMAND_RESULT_CONTRACTS = {
         "forbidden_markers": list(ORACLE_PREPARATION_MARKERS),
     },
 }
+
+SPECIALIST_SELECTION_CHECKPOINT_REQUIRED_AT = datetime(2026, 6, 20, 10, 6, 47, tzinfo=timezone.utc)
+SPECIALIST_SELECTION_CHECKPOINT_COMPLEXITIES = {"Standard", "Complex", "Critical"}
+DEFAULT_STALE_ACTIVE_SECONDS = 3 * 60 * 60
 
 
 def iso_now() -> str:
@@ -565,6 +570,58 @@ def _parse_iso_datetime(value: str | None):
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except Exception:
         return None
+
+
+def _mission_started_at(data: dict) -> datetime | None:
+    for key in ("created_at_session", "started_at", "created_at"):
+        started = _parse_iso_datetime(data.get(key))
+        if started:
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            return started.astimezone(timezone.utc)
+    return None
+
+
+def _specialist_selection_checkpoint_expected(data: dict) -> bool:
+    if str(data.get("complexity") or "") not in SPECIALIST_SELECTION_CHECKPOINT_COMPLEXITIES:
+        return False
+    started = _mission_started_at(data)
+    return bool(started and started >= SPECIALIST_SELECTION_CHECKPOINT_REQUIRED_AT)
+
+
+def _has_specialist_selection_checkpoint(data: dict) -> bool:
+    task_profile = data.get("task_profile")
+    decision = data.get("specialists_decision")
+    if not isinstance(task_profile, dict) or not task_profile.get("primary"):
+        return False
+    if not isinstance(decision, dict) or not decision.get("policy"):
+        return False
+    return True
+
+
+def _state_age_since_update_sec(data: dict, *, now: datetime | None = None) -> float | None:
+    updated = _parse_iso_datetime(
+        data.get("heartbeat_at") or data.get("last_progress_at") or data.get("updated_at")
+    )
+    if not updated:
+        return None
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc)
+    base = now or datetime.now(timezone.utc)
+    seconds = (base - updated.astimezone(timezone.utc)).total_seconds()
+    return seconds if seconds >= 0 else None
+
+
+def _stale_active_seconds() -> int:
+    raw = os.environ.get("MISSION_STALE_ACTIVE_SECONDS")
+    if raw:
+        try:
+            parsed = int(raw)
+            if parsed >= 0:
+                return parsed
+        except ValueError:
+            pass
+    return DEFAULT_STALE_ACTIVE_SECONDS
 
 
 def _ensure_phase_timing(data: dict, now: str | None = None) -> None:
@@ -3155,6 +3212,14 @@ def cmd_mark_passes(args):
             if artifact_error:
                 print(f"ERROR: {artifact_error}", file=sys.stderr)
                 sys.exit(2)
+            if _specialist_selection_checkpoint_expected(data) and not _has_specialist_selection_checkpoint(data):
+                print(
+                    "ERROR: specialist selection checkpoint missing before pass: "
+                    "record task_profile.primary and specialists_decision.policy, "
+                    "including fallback/degraded policy when no external specialist is used.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
             specialist_report = candidate_accounting_report(data)
             if specialist_report.get("accounting_required"):
                 skills = ", ".join(c["skill"] for c in specialist_report.get("required_unaccounted_candidates", []))
@@ -3387,7 +3452,36 @@ def cmd_cleanup_stale(args):
                             else:
                                 results["would_halt"].append({"path": str(sf), "pid": pid, "mission": (data.get("mission") or "")[:80]})
                         else:
-                            results["skipped"].append({"path": str(sf), "reason": f"pid {pid} alive (agent)"})
+                            age_sec = _state_age_since_update_sec(data)
+                            stale_threshold = _stale_active_seconds()
+                            if not data.get("score_history") and (age_sec is None or age_sec >= stale_threshold):
+                                halt_reason = (
+                                    "stale: active no-score checkpoint exceeded "
+                                    f"{stale_threshold}s with live agent pid {pid} (cleanup-stale)"
+                                )
+                                proj = _project_root_of(sf)
+                                if args.execute:
+                                    with StateLock(lock_file(proj)):
+                                        now = iso_now()
+                                        data["halt_reason"] = halt_reason
+                                        data["loop_active"] = False
+                                        _transition_phase(data, "halted", now)
+                                        data["updated_at"] = now
+                                        backup_state(sf)
+                                        atomic_write_json(sf, data)
+                                        if sf.parent.name == "sessions":
+                                            _remove_from_aggregate(proj, sf.stem)
+                                    results["halted"].append({"path": str(sf), "pid": pid, "reason": "stale-active-no-score", "age_sec": age_sec})
+                                else:
+                                    results["would_halt"].append({
+                                        "path": str(sf),
+                                        "pid": pid,
+                                        "reason": "stale-active-no-score",
+                                        "age_sec": age_sec,
+                                        "mission": (data.get("mission") or "")[:80],
+                                    })
+                            else:
+                                results["skipped"].append({"path": str(sf), "reason": f"pid {pid} alive (agent)", "age_sec": age_sec})
                     else:
                         proj = _project_root_of(sf)
                         if args.execute:

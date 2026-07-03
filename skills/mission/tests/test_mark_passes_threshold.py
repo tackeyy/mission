@@ -83,6 +83,43 @@ def test_mark_passes_accepts_when_both_pass(state_dir, run_cli, read_state):
     assert s["loop_active"] is False
 
 
+def test_mark_passes_rejects_new_standard_without_specialist_selection_checkpoint(state_dir, run_cli, read_state):
+    state_path = state_dir / "sessions" / "test.json"
+    state = read_state(state_dir)
+    state.update({
+        "created_at_session": "2026-07-03T00:00:00Z",
+        "started_at": "2026-07-03T00:00:00Z",
+        "task_profile": {},
+        "specialists_decision": {},
+    })
+    state_path.write_text(json.dumps(state, indent=2))
+    _push_score(run_cli, state_dir, iteration=1, composite=4.3, min_item=4.0)
+
+    r = run_cli("mark-passes", cwd=state_dir.parent)
+
+    assert r.returncode == 2
+    assert "specialist selection checkpoint missing" in r.stderr
+    assert read_state(state_dir)["passes"] is False
+
+
+def test_mark_passes_accepts_new_standard_with_fallback_specialist_selection_checkpoint(state_dir, run_cli, read_state):
+    state_path = state_dir / "sessions" / "test.json"
+    state = read_state(state_dir)
+    state.update({
+        "created_at_session": "2026-07-03T00:00:00Z",
+        "started_at": "2026-07-03T00:00:00Z",
+        "task_profile": {"primary": "documentation"},
+        "specialists_decision": {"policy": "fallback", "action": "continue-core"},
+    })
+    state_path.write_text(json.dumps(state, indent=2))
+    _push_score(run_cli, state_dir, iteration=1, composite=4.3, min_item=4.0)
+
+    r = run_cli("mark-passes", cwd=state_dir.parent)
+
+    assert r.returncode == 0, r.stderr
+    assert read_state(state_dir)["passes"] is True
+
+
 def test_mark_passes_rejects_required_specialist_without_applied_result(state_dir, run_cli, read_state):
     state_path = state_dir / "sessions" / "test.json"
     state = read_state(state_dir)
