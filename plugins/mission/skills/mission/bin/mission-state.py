@@ -2562,6 +2562,130 @@ def cmd_next(args):
     print(json.dumps(out, ensure_ascii=False))
 
 
+def _codex_hook_config_paths(explicit_path: str | None = None) -> list[Path]:
+    """Return candidate Codex user hook config paths in deterministic order."""
+    if explicit_path:
+        return [Path(explicit_path).expanduser()]
+    paths: list[Path] = []
+    codex_home = os.environ.get("CODEX_HOME")
+    if codex_home:
+        paths.append(Path(codex_home).expanduser() / "hooks.json")
+    paths.append(Path.home() / ".codex" / "hooks.json")
+    out: list[Path] = []
+    seen = set()
+    for path in paths:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            out.append(path)
+    return out
+
+
+def _hook_config_status(paths: list[Path]) -> dict:
+    checked = []
+    for path in paths:
+        item = {"path": str(path), "exists": path.exists(), "configured": False}
+        if not path.exists():
+            checked.append(item)
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+            json.loads(text)
+        except json.JSONDecodeError as e:
+            item["error"] = f"invalid json: {e}"
+            checked.append(item)
+            continue
+        except OSError as e:
+            item["error"] = str(e)
+            checked.append(item)
+            continue
+        item["configured"] = "mission-stop-guard.sh" in text
+        checked.append(item)
+    return {
+        "configured": any(item.get("configured") for item in checked),
+        "checked": checked,
+    }
+
+
+def cmd_codex_preflight(args):
+    """Codex /mission startup health check.
+
+    This intentionally does not auto-install hooks. Codex hook trust is a user-level
+    security boundary, so the command reports state/guard readiness and leaves setup
+    as an explicit opt-in action.
+    """
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    state_present = sf.exists()
+    state_active = False
+    state_snapshot = {}
+    next_action = "init"
+    next_summary = "mission state がありません。init を先に実行してください。"
+    if state_present:
+        with StateLock(lock_file(cwd)):
+            data = json.loads(sf.read_text())
+        state_snapshot = {
+            "session_id": data.get("session_id"),
+            "agent": data.get("agent"),
+            "loop_active": data.get("loop_active"),
+            "passes": data.get("passes"),
+            "halt_reason": data.get("halt_reason") or "",
+            "phase": data.get("phase"),
+            "iteration": data.get("iteration"),
+        }
+        state_active = (
+            data.get("loop_active") is True
+            and data.get("passes") is not True
+            and not (data.get("halt_reason") or "")
+        )
+        derived = _derive_next_action(data)
+        next_action = derived.get("next_action") or "unknown"
+        next_summary = derived.get("summary") or ""
+
+    hook_status = _hook_config_status(_codex_hook_config_paths(getattr(args, "hook_config", None)))
+    warnings: list[str] = []
+    required_actions: list[str] = []
+    if not state_present:
+        required_actions.append("Run `mission-state.py init ... --complexity <level>` before creating worktrees or doing implementation work.")
+    elif not state_active:
+        required_actions.append("Resolve the inactive, passed, or halted mission state before continuing.")
+    if not hook_status["configured"]:
+        warnings.append(
+            "Codex Stop hook is not configured or was not found. Continue only with the state-driven fallback: call `mission-state.py next` at every phase boundary and before any final report."
+        )
+        if getattr(args, "require_stop_hook", False):
+            required_actions.append("Configure and trust `mission-stop-guard.sh` in Codex hooks, or rerun without --require-stop-hook for skills-only fallback.")
+
+    fallback_available = state_active and next_action not in {"init", "report-blocker", "report-complete"}
+    result = {
+        "ok": state_active and (hook_status["configured"] or (fallback_available and not getattr(args, "require_stop_hook", False))),
+        "state_guard": {
+            "present": state_present,
+            "active": state_active,
+            "state_file": str(sf),
+            **state_snapshot,
+        },
+        "codex_stop_hook": hook_status,
+        "mechanical_guard": "stop-hook" if hook_status["configured"] else ("state-next-fallback" if fallback_available else "none"),
+        "next_action": next_action,
+        "next_summary": next_summary,
+        "warnings": warnings,
+        "required_actions": required_actions,
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print("ok=" + str(result["ok"]).lower())
+        print("mechanical_guard=" + result["mechanical_guard"])
+        print("next_action=" + result["next_action"])
+        for warning in warnings:
+            print("WARNING: " + warning, file=sys.stderr)
+        for action in required_actions:
+            print("ACTION: " + action, file=sys.stderr)
+    if required_actions:
+        sys.exit(2 if getattr(args, "strict", False) or getattr(args, "require_stop_hook", False) else 0)
+
+
 # Issue #2: set で変更禁止のフィールド (mission_id 整合性維持のため)
 FROZEN_FIELDS = {
     "mission",  # 変更したいなら init を使う (mission_id が再計算される)
@@ -3710,6 +3834,15 @@ def _build_parser():
 
     p_next = sub.add_parser("next", help="ADR-002 Stage 3: state から次の 1 手を JSON で返す (read-only。Codex/compaction 復帰時の進行ガイド)")
     p_next.set_defaults(func=cmd_next)
+
+    p_codex = sub.add_parser("codex-preflight", help="Codex /mission 起動時の state/hook guard readiness を診断")
+    p_codex.add_argument("--json", action="store_true", help="診断結果を JSON で出力")
+    p_codex.add_argument("--strict", action="store_true", help="active state が無い場合など required_actions があれば exit 2")
+    p_codex.add_argument("--require-stop-hook", action="store_true", dest="require_stop_hook",
+                         help="Codex Stop hook 未設定を required action として exit 2 にする")
+    p_codex.add_argument("--hook-config", default=None,
+                         help="Codex hooks.json の明示パス。未指定なら $CODEX_HOME/hooks.json と ~/.codex/hooks.json を確認")
+    p_codex.set_defaults(func=cmd_codex_preflight)
 
     p_get = sub.add_parser("get", help="state.json の値取得")
     p_get.add_argument("--field", default=None)

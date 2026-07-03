@@ -68,6 +68,14 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py refresh-pid
 # 用途: compaction 復帰・Codex (Stop hook なし) の各 iteration 区切りで呼び、散文の手順解釈より優先する
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py next
 
+# Codex startup health check (Issue #108):
+# - active state があるか
+# - Codex user hook に mission-stop-guard.sh が登録されているか
+# - hook 無しでも `next` fallback で進行できるか
+# を JSON で診断する。既定は skills-only fallback を許容し、--require-stop-hook で hook 未設定を exit 2 にできる。
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py codex-preflight --json
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py codex-preflight --json --require-stop-hook
+
 # 空 .mission-state/ ディレクトリの cleanup (skill 起動時に実行推奨)
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py cleanup-empty <project_root_path>
 
@@ -167,6 +175,7 @@ mission-state.py は開始・採点・終了の境界で `phase` を自動設定
 | コマンド | phase |
 |---|---|
 | `init` | `planning` |
+| `codex-preflight` | 変更なし (read-only) |
 | `set phase=executing` | Phase 3 実行開始前に orchestrator が明示 |
 | `set phase=reviewing` | Phase 4 レビュー開始前に orchestrator が明示 |
 | `push-score` | `scoring` |
