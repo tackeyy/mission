@@ -83,8 +83,14 @@ def run_cli(tmp_path):
         _sid_keys = ("MISSION_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID")
         if not (env_extra and any(k in env_extra for k in _sid_keys)):
             base_env["MISSION_SESSION_ID"] = "test"
+        if args and args[0] == "push-score" and "--scoring-json" not in args and "--scoring-output" not in args:
+            base_env["MISSION_REQUIRE_SCORING_EVIDENCE"] = "0"
         if env_extra is not None:
-            base_env.update(env_extra)
+            for key, value in env_extra.items():
+                if value is None:
+                    base_env.pop(key, None)
+                else:
+                    base_env[key] = value
         return subprocess.run(
             [sys.executable, str(MISSION_STATE_PY), *args],
             cwd=str(cwd or tmp_path),

@@ -39,7 +39,8 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score \
     --open-high <未解決High件数>
 # JSON 形式: {"items": {"mission_achievement": 4.0, "accuracy": 3.5, "completeness": 4.2, "usability": 3.8, "reviewer_consensus": 4.0}, "notes": "<任意>", "open_high": 0}
 
-# 従来経路 (非推奨。scoring evidence なしは DEPRECATION 警告、MISSION_REQUIRE_SCORING_EVIDENCE=1 で reject):
+# 従来経路 (非推奨。scoring evidence なしは default reject。
+# 移行専用の一時 escape hatch として MISSION_REQUIRE_SCORING_EVIDENCE=0 のみ許可):
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score \
     --iteration <N> \
     --composite <総合スコア> \
