@@ -216,7 +216,8 @@ def test_items_path_rejects_normalized_scale(state_dir, run_cli):
     """従来 --items 経路でも全 items <= 1.0 は reject (実ログ: composite 0.96 が素通りした)."""
     r = run_cli("push-score", "--iteration", "1", "--composite", "0.96", "--min-item", "0.93",
                 "--items", '{"mission_achievement": 0.96, "accuracy": 0.95, "completeness": 0.94}',
-                cwd=state_dir.parent)
+                cwd=state_dir.parent,
+                env_extra={"MISSION_REQUIRE_SCORING_EVIDENCE": "0"})
     assert r.returncode == 2
     assert "0-1" in r.stderr or "正規化" in r.stderr
 
@@ -225,28 +226,31 @@ def test_single_low_item_among_normal_passes(state_dir, run_cli):
     """1 項目だけ低い正当な採点 (max > 1.0) は通過する."""
     r = run_cli("push-score", "--iteration", "1", "--composite", "2.25", "--min-item", "0.5",
                 "--items", '{"mission_achievement": 0.5, "accuracy": 4.0}',
-                cwd=state_dir.parent)
+                cwd=state_dir.parent,
+                env_extra={"MISSION_REQUIRE_SCORING_EVIDENCE": "0"})
     assert r.returncode == 0, f"stderr: {r.stderr}"
 
 
-# ===== evidence なし push-score の deprecation (G-2 段階導入) =====
+# ===== evidence なし push-score の hard reject (G-2 default flip) =====
 
 
-def test_no_evidence_emits_deprecation_warning(state_dir, run_cli, read_state):
-    """従来挙動 (generated evidence) は維持しつつ DEPRECATION を stderr に出す."""
-    r = run_cli("push-score", "--iteration", "1", "--composite", "4.0", "--min-item", "3.5",
-                "--items", '{"mission_achievement": 4.0}', cwd=state_dir.parent)
-    assert r.returncode == 0, f"stderr: {r.stderr}"
-    assert "DEPRECATION" in r.stderr
-    assert len(read_state(state_dir)["score_history"]) == 1
-
-
-def test_require_evidence_env_rejects_missing_evidence(state_dir, run_cli, read_state):
+def test_no_evidence_rejects_by_default(state_dir, run_cli, read_state):
+    """scoring evidence なしの push-score は default で reject し state を汚さない."""
     r = run_cli("push-score", "--iteration", "1", "--composite", "4.0", "--min-item", "3.5",
                 "--items", '{"mission_achievement": 4.0}', cwd=state_dir.parent,
-                env_extra={"MISSION_REQUIRE_SCORING_EVIDENCE": "1"})
+                env_extra={"MISSION_REQUIRE_SCORING_EVIDENCE": None})
     assert r.returncode == 2
-    assert len(read_state(state_dir)["score_history"]) == 0  # state は書かれない
+    assert "scoring evidence" in r.stderr
+    assert len(read_state(state_dir)["score_history"]) == 0
+
+
+def test_allow_evidence_less_env_retains_temporary_escape_hatch(state_dir, run_cli, read_state):
+    r = run_cli("push-score", "--iteration", "1", "--composite", "4.0", "--min-item", "3.5",
+                "--items", '{"mission_achievement": 4.0}', cwd=state_dir.parent,
+                env_extra={"MISSION_REQUIRE_SCORING_EVIDENCE": "0"})
+    assert r.returncode == 0, f"stderr: {r.stderr}"
+    assert "TEMPORARY ESCAPE HATCH" in r.stderr
+    assert len(read_state(state_dir)["score_history"]) == 1
 
 
 def test_require_evidence_env_accepts_scoring_json(state_dir, run_cli, tmp_path):

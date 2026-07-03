@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+## [1.0.7] - 2026-07-03
+
 ### 修正
 - `mission-state.py` と `mission-migrate.py` に `from __future__ import annotations` を追加し、PEP 604 union 注釈が Python 3.9 (macOS Xcode CLT の `python3`) でモジュール読み込み時にクラッシュして全コマンドが使えなくなる問題を修正しました (#99)。
 
@@ -17,8 +19,11 @@
 - `specialists recommend --user-specified <skill,skill>` を追加しました。ミッション本文でユーザーが名指ししたスキルを confirmed 扱いにし、high-risk task profile でも `selection_source: user-specified` の selected として記録するため、以後の `log-invocation` が `--selection-source confirmed-user` 要求で reject されなくなります (#100)。名指しの中に first-use consent が必要な provider が混在する場合、または required specialist が未インストールの場合は、全体を従来の確認フローに倒します。
 - `mission-state.py push-score --scoring-json <path>` (ADR-002 Stage 1) を追加しました。scorer の構造化 JSON ファイルから items を読み、`composite`/`min_item` を CLI 側で再計算し、未知キー・範囲外値を reject し、payload を `_meta` 付きで `iter-N-<mid8>-scoring.json` として archive し、score entry に `score_source`/`scoring_evidence_path` を記録します (orchestrator のスコア転記レイヤを排除)。
 - `push-score` が「全 items スコアが 1.0 以下」の入力を 0-1 正規化スケール混入の疑いとして reject するようにしました (実ログで composite 0.96 = 4.8/5 が push された事例の回帰ガード)。
-- scoring evidence なしの `push-score` に deprecation 警告を出し、`MISSION_REQUIRE_SCORING_EVIDENCE=1` で hard reject に切り替えられるようにしました (Stage 1 のデフォルト strict 化に向けた段階導入)。
 - `mission-state.py next` (ADR-002 Stage 3) を追加しました。session state から次の 1 手 (`run-planner`/`run-reviewers`/`run-scorer`/`mark-passes`/`report-blocker` 等) を決定論的に導出し、Stop hook が使えない Codex セッションや compaction 復帰時に、散文指示に依存しないハーネス非依存の進行ガイドを提供します。
+
+### 変更
+- scoring evidence なしの `push-score` は default で hard reject するようにしました。`--scoring-json` (推奨) または `--scoring-output` を指定してください。移行専用の一時 escape hatch として `MISSION_REQUIRE_SCORING_EVIDENCE=0` は残しています (#105)。
+- evidence なし `push-score` の generated scoring evidence fallback を削除し、reviewer 本文のない `generated=true` archive file で score entry を裏付ける挙動を廃止しました (#105)。
 
 ## [1.0.6] - 2026-07-02
 
@@ -144,6 +149,7 @@
 - 状態ルーティング・スコアゲート・hook 挙動をカバーする Python テストスイート。
 - GitHub Actions CI（`push` / `pull_request` / `workflow_dispatch`）。pytest と ShellCheck を実行。
 
+[1.0.7]: https://github.com/tackeyy/mission/releases/tag/v1.0.7
 [1.0.6]: https://github.com/tackeyy/mission/releases/tag/v1.0.6
 [1.0.5]: https://github.com/tackeyy/mission/releases/tag/v1.0.5
 [1.0.4]: https://github.com/tackeyy/mission/releases/tag/v1.0.4

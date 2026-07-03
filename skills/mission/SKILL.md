@@ -46,7 +46,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py artifact init 
 # 採点結果を score_history に記録 (Phase 5 直後必須)。推奨 (ADR-002 Stage 1): scorer が書いた JSON
 # ({"items": {...}, "notes", "open_high"}) を渡す。composite/min_item は CLI が items から再計算し、orchestrator は
 # スコア数値を転記しない (捏造・転記ミス・0-1 スケール混入を排除)。open_high も JSON 側が優先。
-# --composite/--items 手渡しの従来経路は非推奨 (将来 reject)
+# --composite/--items 手渡しの従来経路は scoring evidence 必須 (`--scoring-json` 推奨 / `MISSION_REQUIRE_SCORING_EVIDENCE=0` は移行専用 escape hatch)
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score \
     --iteration <N> \
     --scoring-json /tmp/mission-scorer-iter-<N>-<mission_id先頭8>.json
