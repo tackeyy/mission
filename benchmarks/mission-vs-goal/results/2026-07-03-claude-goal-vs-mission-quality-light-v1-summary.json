@@ -1,0 +1,50 @@
+{
+  "arms": {
+    "claude_code_goal_command": {
+      "average_elapsed_minutes": 2.48,
+      "average_evidence_completeness": 5.0,
+      "average_intervention_count": 0.0,
+      "average_quality_marker_score": 1.0,
+      "average_quality_score": 5.0,
+      "blocked_records": 0,
+      "comparable_completion_rate": 1.0,
+      "comparable_records": 3,
+      "comparable_validator_pass_rate": 1.0,
+      "completion_rate": 1.0,
+      "records": 3,
+      "validator_pass_rate": 1.0
+    },
+    "mission": {
+      "average_elapsed_minutes": 3.14,
+      "average_evidence_completeness": 5.0,
+      "average_intervention_count": 0.0,
+      "average_quality_marker_score": 1.0,
+      "average_quality_score": 5.0,
+      "blocked_records": 0,
+      "comparable_completion_rate": 1.0,
+      "comparable_records": 3,
+      "comparable_validator_pass_rate": 1.0,
+      "completion_rate": 1.0,
+      "records": 3,
+      "validator_pass_rate": 1.0
+    }
+  },
+  "expected_records": 6,
+  "limitations": [
+    "Claude Code print mode smoke; does not fully exercise multi-turn interactive /goal persistence.",
+    "Quality and evidence scores are automated heuristic scores, not blind human review.",
+    "Blocked records are excluded from comparable quality-marker aggregates."
+  ],
+  "mission_profile": "light",
+  "records": 6,
+  "run_id": "2026-07-03-claude-goal-vs-mission-quality-light-v1",
+  "selected_task_ids": [
+    "quality-multi-cause-regression-triage",
+    "quality-security-secret-handling-plan",
+    "quality-bilingual-claim-consistency"
+  ],
+  "starting_commit": "1863e02b4cb49bc78399d423ad82c2176627ecdd",
+  "stopped_early": false,
+  "task_cohort": "quality",
+  "task_file": "benchmarks/mission-vs-goal/tasks.quality.json"
+}

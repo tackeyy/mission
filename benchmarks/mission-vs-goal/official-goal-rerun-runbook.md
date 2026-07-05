@@ -20,16 +20,21 @@ An API-limit rerun was then executed:
   was selected with `--mission-profile light`, `--mission-max-iter 1`, and a
   USD 5.00 cap. Both arms completed and passed; `/mission` light was faster and
   lower cost on that one task.
+- `2026-07-03-claude-goal-vs-mission-quality-light-v1`: three quality-critical
+  tasks were selected with `--mission-profile light`, `--mission-max-iter 1`,
+  and a USD 4.00 cap. Both arms completed all three tasks and passed;
+  automated quality-marker scores tied, while `/mission` light was slower and
+  higher cost in this run.
 - `2026-06-28-claude-goal-vs-mission-quality-v1`: one fresh quality-critical
   task was selected with `--mission-profile quality`, `--mission-max-iter 2`,
   and a USD 6.00 cap. Official `/goal` hit `api_usage_limit` before success, so
   `/mission` was not run.
 
-The completed evidence therefore supports two one-task results: one normal
-smoke and one light-profile cost-controlled task. It does not support a full
-10-task performance claim. The incremental run adds an operational cost/runtime
-caution. The quality-profile run is blocked and not a completed quality
-comparison.
+The completed evidence therefore supports one normal smoke, one complex
+light-profile cost-controlled task, and three additional quality-cohort
+light-profile tasks. It does not support a full 10-task performance claim. The
+incremental run adds an operational cost/runtime caution. The quality-profile
+run is blocked and not a completed quality comparison.
 
 ## Objective
 
@@ -154,6 +159,18 @@ Observed light-profile result:
 - `/mission` light: validator pass, 5.27 minutes, USD 2.00569500.
 - This supports only a one-task light-profile hypothesis. Run 3-5 fresh tasks
   before using any broad cost or runtime claim.
+
+Additional 2026-07-03 light-profile result:
+
+- `2026-07-03-claude-goal-vs-mission-quality-light-v1` wrote 6 completed
+  comparable records across 3 selected `tasks.quality.json` tasks.
+- Official `/goal`: validator pass 3 / 3, average 2.48 minutes, total
+  USD 3.11103025.
+- `/mission` light: validator pass 3 / 3, average 3.14 minutes, total
+  USD 4.40842725.
+- Automated quality-marker score tied at 1.00 for both arms. This does not
+  support a claim that `/mission` light is always higher quality; in this run it
+  was slower and higher cost.
 
 ## Step 2d: Quality-Focused Critical Pilot
 

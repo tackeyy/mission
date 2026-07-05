@@ -18,14 +18,18 @@ access は 2026-07-01 00:00 UTC、つまり 2026-07-01 09:00 JST に戻ると記
 - `2026-06-28-claude-goal-vs-mission-light-v1`: `--mission-profile light`、
   `--mission-max-iter 1`、USD 5.00 cap で未測定 task 1 件を実行。両 arm とも完了し、
   validator に pass。この 1 件では `/mission` light が速く、cost も低かった。
+- `2026-07-03-claude-goal-vs-mission-quality-light-v1`: `--mission-profile light`、
+  `--mission-max-iter 1`、USD 4.00 cap で quality-critical task 3 件を実行。
+  両 arm とも 3 task すべてを完了し、validator に pass。automated quality-marker
+  score は同点で、この run では `/mission` light が遅く、cost も高かった。
 - `2026-06-28-claude-goal-vs-mission-quality-v1`: `--mission-profile quality`、
   `--mission-max-iter 2`、USD 6.00 cap で fresh quality-critical task 1 件を実行。
   公式 `/goal` が success 前に `api_usage_limit` に到達したため、`/mission` は未実行。
 
-したがって、完了した evidence は normal smoke 1 件と light-profile 1 件です。
-10 task full performance claim はまだ supported ではありません。incremental run は
-operational cost/runtime の注意材料です。quality-profile run は blocked であり、
-completed quality comparison ではありません。
+したがって、完了した evidence は normal smoke 1 件、complex light-profile 1 件、
+quality-cohort light-profile 3 件です。10 task full performance claim はまだ
+supported ではありません。incremental run は operational cost/runtime の注意材料です。
+quality-profile run は blocked であり、completed quality comparison ではありません。
 
 ## Objective
 
@@ -150,6 +154,16 @@ python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
 - `/mission` light: validator pass、5.27 分、USD 2.00569500。
 - これは 1 task の light-profile hypothesis だけを支持します。広い cost/runtime claim に
   使う前に fresh task 3-5 件で再実行します。
+
+追加の 2026-07-03 light-profile result:
+
+- `2026-07-03-claude-goal-vs-mission-quality-light-v1` は `tasks.quality.json`
+  の selected tasks 3 件で completed comparable records 6 件を保存。
+- 公式 `/goal`: validator pass 3 / 3、平均 2.48 分、合計 USD 3.11103025。
+- `/mission` light: validator pass 3 / 3、平均 3.14 分、合計 USD 4.40842725。
+- automated quality-marker score は両 arm とも 1.00 で同点。この結果は
+  `/mission` light が常に高品質という claim は支えません。この run では
+  `/mission` light が遅く、cost も高かった。
 
 ## Step 2d: Quality-Focused Critical Pilot
 

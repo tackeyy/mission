@@ -294,6 +294,66 @@ Lightweight result:
 次に defensible なのは、同じ per-invocation cost cap で、再利用 task なしの
 3-5 task light-profile pilot を実行することです。
 
+## Quality cohort の light-profile 再実行
+
+Status: 2026-07-03 JST に実行。light-profile の evidence を N=1 から追加3件へ
+広げるため、`tasks.quality.json` の quality-critical cohort を使いつつ、
+`quality` profile ではなく `--mission-profile light` で実行しました。目的は、
+品質 marker を残したまま、公式 `/goal` と `/mission` light を bounded budget で
+比較することです。
+
+| Item | Value | Evidence |
+|---|---:|---|
+| Run id | `2026-07-03-claude-goal-vs-mission-quality-light-v1` | `results/2026-07-03-claude-goal-vs-mission-quality-light-v1.jsonl`。 |
+| Starting commit | `1863e02b4cb49bc78399d423ad82c2176627ecdd` | runner argument。 |
+| Task file | `tasks.quality.json` | quality-critical cohort を light mission profile で実行。 |
+| Selected tasks | 3 | `quality-multi-cause-regression-triage`, `quality-security-secret-handling-plan`, `quality-bilingual-claim-consistency`。 |
+| Mission profile | `light` | `--mission-profile light`, `--mission-max-iter 1`。 |
+| Expected records | 6 | 3 tasks x 2 arms。 |
+| Records written | 6 / 6 | summary JSON に 6 records。 |
+| Blocked records | 0 / 6 | `blocked_reason` 付き record はなし。 |
+| Quality score method | automated heuristic | blind human review ではない。 |
+| Total Claude cost recorded | USD 7.51945750 | raw Claude result JSON files。 |
+| `/goal` cost recorded | USD 3.11103025 | `/goal` raw Claude result JSON files の合計。 |
+| `/mission` light cost recorded | USD 4.40842725 | `/mission` raw Claude result JSON files の合計。 |
+
+Task-level result:
+
+| Task | Arm | Completion | Validator pass | Human quality score | Quality marker score | Cost | Elapsed | Blocked / failure reason |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| `quality-multi-cause-regression-triage` | `claude_code_goal_command` | true | true | 5.00 | 1.00 | USD 1.17585050 | 3.10 min | none |
+| `quality-multi-cause-regression-triage` | `mission` light | true | true | 5.00 | 1.00 | USD 1.66316525 | 3.58 min | none |
+| `quality-security-secret-handling-plan` | `claude_code_goal_command` | true | true | 5.00 | 1.00 | USD 0.74217350 | 1.98 min | none |
+| `quality-security-secret-handling-plan` | `mission` light | true | true | 5.00 | 1.00 | USD 1.35611750 | 3.06 min | none |
+| `quality-bilingual-claim-consistency` | `claude_code_goal_command` | true | true | 5.00 | 1.00 | USD 1.19300625 | 2.37 min | none |
+| `quality-bilingual-claim-consistency` | `mission` light | true | true | 5.00 | 1.00 | USD 1.38914450 | 2.78 min | none |
+
+Aggregate result:
+
+| Metric | claude_code_goal_command | mission light | Interpretation |
+|---|---:|---:|---|
+| Completed comparable records | 3 / 3 | 3 / 3 | 両 arm とも selected tasks をすべて完了。 |
+| Completion rate | 3 / 3 | 3 / 3 | completion は tie。 |
+| Validator pass rate | 3 / 3 | 3 / 3 | validator pass は tie。 |
+| Average quality score | 5.00 / 5 | 5.00 / 5 | automated heuristic scoring では tie。 |
+| Average quality marker score | 1.00 | 1.00 | tie。tracked quality markers はすべて matched。 |
+| Average elapsed minutes | 2.48 | 3.14 | `/mission` light が平均 0.66 分遅い。 |
+| Recorded Claude cost | USD 3.11103025 | USD 4.40842725 | `/mission` light が3件合計で USD 1.29739700 高い。 |
+
+安全な解釈:
+
+> light profile で追加実行した quality-critical task 3 件では、公式 `/goal` と
+> `/mission` light の両方が全 task を完了し、automated validator に pass し、
+> 設定済み quality marker もすべて満たした。この run では `/mission` light は
+> 公式 `/goal` より遅く、cost も高かった。
+
+危険な解釈:
+
+> `/mission` light は公式 `/goal` より常に高品質。
+
+これは unsupported です。今回の3件では automated quality / marker score は同点であり、
+scoring も blind human review ではなく automated heuristic です。
+
 ## Quality-focused critical task attempt
 
 Status: `quality` mission profile と fresh な `tasks.quality.json` cohort を追加した後、
@@ -364,6 +424,7 @@ python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py --tasks-file be
 python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py --tasks-file benchmarks/mission-vs-goal/tasks.complex.json --run-id 2026-06-28-claude-goal-vs-mission-smoke-v3 --starting-commit ed98b0e00169f0e0b35ce629a206ffcb7af4d0a3 --limit-tasks 1 --timeout 900 --max-budget-usd 3.0 --mission-max-iter 2
 python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py --tasks-file benchmarks/mission-vs-goal/tasks.complex.json --run-id 2026-06-28-claude-goal-vs-mission-complex-v1 --starting-commit ed98b0e00169f0e0b35ce629a206ffcb7af4d0a3 --limit-tasks 10 --timeout 1800 --max-budget-usd 3.0 --mission-max-iter 2
 python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py --tasks-file benchmarks/mission-vs-goal/tasks.complex.json --run-id 2026-06-28-claude-goal-vs-mission-incremental-v1 --starting-commit d1cef1d5bd0166b5d61939c8d93ce0060c05507f --task-ids complex-failing-test-triage,complex-review-thread-resolution --stop-on-blocked --timeout 1200 --max-budget-usd 3.0 --mission-max-iter 2
+python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py --tasks-file benchmarks/mission-vs-goal/tasks.quality.json --run-id 2026-07-03-claude-goal-vs-mission-quality-light-v1 --starting-commit 1863e02b4cb49bc78399d423ad82c2176627ecdd --task-ids quality-multi-cause-regression-triage,quality-security-secret-handling-plan,quality-bilingual-claim-consistency --stop-on-blocked --timeout 1200 --max-budget-usd 4.0 --mission-max-iter 1 --mission-profile light --run-root /private/tmp/mission-vs-official-goal-2026-07-03-light-v1
 python3 -m pytest skills/mission/tests/test_benchmark_package.py skills/mission/tests/test_doc_consistency.py -q
 python3 -m pytest skills/mission/tests -q
 python3 -m json.tool benchmarks/mission-vs-goal/tasks.json
@@ -408,6 +469,13 @@ Light-profile rerun について言ってよい:
 > validator に pass した。この 1 件では `/mission` light が速く、cost も低かったが、
 > broad claim には sample が小さすぎる。
 
+2026-07-03 の light-profile rerun について言ってよい:
+
+> `--mission-profile light` で追加実行した quality-critical task 3 件では、公式 `/goal`
+> と `/mission` light の両方が完了し、全 automated validator に pass し、
+> automated quality-marker score も同点だった。この run では `/mission` light は
+> 公式 `/goal` より遅く、cost も高かった。
+
 Quality-profile attempt について言ってよい:
 
 > quality-focused profile と fresh critical task cohort は追加された。ただし最初の paired
@@ -451,4 +519,7 @@ artifacts/2026-06-28-claude-goal-vs-mission-light-v1/
 results/2026-06-28-claude-goal-vs-mission-quality-v1.jsonl
 results/2026-06-28-claude-goal-vs-mission-quality-v1-summary.json
 artifacts/2026-06-28-claude-goal-vs-mission-quality-v1/
+results/2026-07-03-claude-goal-vs-mission-quality-light-v1.jsonl
+results/2026-07-03-claude-goal-vs-mission-quality-light-v1-summary.json
+artifacts/2026-07-03-claude-goal-vs-mission-quality-light-v1/
 ```

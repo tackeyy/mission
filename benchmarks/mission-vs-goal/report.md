@@ -303,6 +303,66 @@ That would be unsupported because the completed light-profile sample is one
 task. The defensible next step is to run a 3-5 task light-profile pilot with the
 same per-invocation cost cap and no recycled tasks.
 
+## Lightweight Mission Profile Rerun on Quality Cohort
+
+Status: executed on 2026-07-03 JST to extend the light-profile evidence from
+N=1 to three additional paired tasks. This run used the quality-critical cohort
+with `--mission-profile light`, not the heavier `quality` profile. The goal was
+to compare official `/goal` and `/mission` light under a bounded budget while
+preserving quality-marker scoring.
+
+| Item | Value | Evidence |
+|---|---:|---|
+| Run id | `2026-07-03-claude-goal-vs-mission-quality-light-v1` | `results/2026-07-03-claude-goal-vs-mission-quality-light-v1.jsonl`. |
+| Starting commit | `1863e02b4cb49bc78399d423ad82c2176627ecdd` | Runner argument. |
+| Task file | `tasks.quality.json` | Quality-critical cohort, run with light mission profile. |
+| Selected tasks | 3 | `quality-multi-cause-regression-triage`, `quality-security-secret-handling-plan`, `quality-bilingual-claim-consistency`. |
+| Mission profile | `light` | `--mission-profile light`, `--mission-max-iter 1`. |
+| Expected records | 6 | 3 tasks x 2 arms. |
+| Records written | 6 / 6 | Summary JSON has 6 records. |
+| Blocked records | 0 / 6 | No record has `blocked_reason`. |
+| Quality score method | automated heuristic | Not blind human review. |
+| Total Claude cost recorded | USD 7.51945750 | Raw Claude result JSON files. |
+| `/goal` cost recorded | USD 3.11103025 | Sum of `/goal` raw Claude result JSON files. |
+| `/mission` light cost recorded | USD 4.40842725 | Sum of `/mission` raw Claude result JSON files. |
+
+Task-level result:
+
+| Task | Arm | Completion | Validator pass | Human quality score | Quality marker score | Cost | Elapsed | Blocked / failure reason |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| `quality-multi-cause-regression-triage` | `claude_code_goal_command` | true | true | 5.00 | 1.00 | USD 1.17585050 | 3.10 min | none |
+| `quality-multi-cause-regression-triage` | `mission` light | true | true | 5.00 | 1.00 | USD 1.66316525 | 3.58 min | none |
+| `quality-security-secret-handling-plan` | `claude_code_goal_command` | true | true | 5.00 | 1.00 | USD 0.74217350 | 1.98 min | none |
+| `quality-security-secret-handling-plan` | `mission` light | true | true | 5.00 | 1.00 | USD 1.35611750 | 3.06 min | none |
+| `quality-bilingual-claim-consistency` | `claude_code_goal_command` | true | true | 5.00 | 1.00 | USD 1.19300625 | 2.37 min | none |
+| `quality-bilingual-claim-consistency` | `mission` light | true | true | 5.00 | 1.00 | USD 1.38914450 | 2.78 min | none |
+
+Aggregate result:
+
+| Metric | claude_code_goal_command | mission light | Interpretation |
+|---|---:|---:|---|
+| Completed comparable records | 3 / 3 | 3 / 3 | Both arms completed all selected tasks. |
+| Completion rate | 3 / 3 | 3 / 3 | Tie on completion. |
+| Validator pass rate | 3 / 3 | 3 / 3 | Tie on validator pass. |
+| Average quality score | 5.00 / 5 | 5.00 / 5 | Tie under automated heuristic scoring. |
+| Average quality marker score | 1.00 | 1.00 | Tie; all tracked quality markers were matched. |
+| Average elapsed minutes | 2.48 | 3.14 | `/mission` light was 0.66 minutes slower on average. |
+| Recorded Claude cost | USD 3.11103025 | USD 4.40842725 | `/mission` light cost USD 1.29739700 more across the three tasks. |
+
+Safe interpretation:
+
+> On three additional quality-critical tasks run with the light profile, official
+> `/goal` and `/mission` light both completed every task, passed every automated
+> validator, and matched all configured quality markers. In this run, `/mission`
+> light was slower and cost more than official `/goal`.
+
+Unsafe interpretation:
+
+> `/mission` light is always higher quality than official `/goal`.
+
+That is unsupported. The automated quality and marker scores tied in this
+three-task run, and the scorer is a heuristic rather than blind human review.
+
 ## Quality-Focused Critical Task Attempt
 
 Status: attempted on 2026-06-28 JST after adding a `quality` mission profile and
@@ -374,6 +434,7 @@ python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py --tasks-file be
 python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py --tasks-file benchmarks/mission-vs-goal/tasks.complex.json --run-id 2026-06-28-claude-goal-vs-mission-smoke-v3 --starting-commit ed98b0e00169f0e0b35ce629a206ffcb7af4d0a3 --limit-tasks 1 --timeout 900 --max-budget-usd 3.0 --mission-max-iter 2
 python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py --tasks-file benchmarks/mission-vs-goal/tasks.complex.json --run-id 2026-06-28-claude-goal-vs-mission-complex-v1 --starting-commit ed98b0e00169f0e0b35ce629a206ffcb7af4d0a3 --limit-tasks 10 --timeout 1800 --max-budget-usd 3.0 --mission-max-iter 2
 python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py --tasks-file benchmarks/mission-vs-goal/tasks.complex.json --run-id 2026-06-28-claude-goal-vs-mission-incremental-v1 --starting-commit d1cef1d5bd0166b5d61939c8d93ce0060c05507f --task-ids complex-failing-test-triage,complex-review-thread-resolution --stop-on-blocked --timeout 1200 --max-budget-usd 3.0 --mission-max-iter 2
+python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py --tasks-file benchmarks/mission-vs-goal/tasks.quality.json --run-id 2026-07-03-claude-goal-vs-mission-quality-light-v1 --starting-commit 1863e02b4cb49bc78399d423ad82c2176627ecdd --task-ids quality-multi-cause-regression-triage,quality-security-secret-handling-plan,quality-bilingual-claim-consistency --stop-on-blocked --timeout 1200 --max-budget-usd 4.0 --mission-max-iter 1 --mission-profile light --run-root /private/tmp/mission-vs-official-goal-2026-07-03-light-v1
 python3 -m pytest skills/mission/tests/test_benchmark_package.py skills/mission/tests/test_doc_consistency.py -q
 python3 -m pytest skills/mission/tests -q
 python3 -m json.tool benchmarks/mission-vs-goal/tasks.json
@@ -419,6 +480,13 @@ Safe to say about the light-profile rerun:
 > light both completed and passed. In that single task, `/mission` light was
 > faster and lower cost, but the sample is too small for a broad claim.
 
+Safe to say about the 2026-07-03 light-profile rerun:
+
+> On three additional quality-critical tasks run with `--mission-profile light`,
+> official `/goal` and `/mission` light both completed and passed all automated
+> validators with matching automated quality-marker scores. In this run,
+> `/mission` light was slower and cost more than official `/goal`.
+
 Safe to say about the quality-profile attempt:
 
 > A quality-focused profile and fresh critical task cohort were added, but the
@@ -462,4 +530,7 @@ artifacts/2026-06-28-claude-goal-vs-mission-light-v1/
 results/2026-06-28-claude-goal-vs-mission-quality-v1.jsonl
 results/2026-06-28-claude-goal-vs-mission-quality-v1-summary.json
 artifacts/2026-06-28-claude-goal-vs-mission-quality-v1/
+results/2026-07-03-claude-goal-vs-mission-quality-light-v1.jsonl
+results/2026-07-03-claude-goal-vs-mission-quality-light-v1-summary.json
+artifacts/2026-07-03-claude-goal-vs-mission-quality-light-v1/
 ```
