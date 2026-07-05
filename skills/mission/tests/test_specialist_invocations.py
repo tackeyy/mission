@@ -697,6 +697,105 @@ def test_invoke_command_provider_records_failure_without_blocking_optional_provi
     assert "token=[REDACTED]" in evidence.read_text(encoding="utf-8")
 
 
+def test_invoke_command_provider_marks_approval_marker_as_awaiting_input(run_cli, tmp_path):
+    run_cli("init", "command provider approval mission", "--complexity", "Complex", cwd=tmp_path, check=True)
+    helper = tmp_path / "provider.py"
+    helper.write_text(
+        "import sys\n"
+        "print('approval required: browser session material consent')\n"
+        "sys.exit(75)\n",
+        encoding="utf-8",
+    )
+    registry = tmp_path / ".mission" / "specialists.yml"
+    registry.parent.mkdir()
+    registry.write_text(json.dumps({
+        "version": 1,
+        "specialists": [{
+            "role": "approval-reviewer",
+            "kind": "command",
+            "command": sys.executable,
+            "args": [str(helper)],
+            "task_profiles": ["documentation"],
+            "result_contract": {
+                "awaiting_input_markers": ["approval required:"],
+            },
+        }],
+    }))
+    run_cli(
+        "specialists", "recommend",
+        "--no-default-skill-roots",
+        "--task", "Review README documentation",
+        "--complexity", "Complex",
+        "--record-state",
+        "--json",
+        cwd=tmp_path,
+        check=True,
+    )
+
+    r = run_cli(
+        "specialists", "invoke-command",
+        "--provider", "approval-reviewer",
+        "--iteration", "1",
+        "--phase", "review",
+        "--json",
+        cwd=tmp_path,
+    )
+
+    data = _json_result(r)
+    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
+    entry = state["specialist_invocations"][0]
+    assert data["ok"] is False
+    assert entry["status"] == "awaiting-input"
+    assert "awaiting input" in entry["reason"]
+
+
+def test_invoke_command_provider_marks_configured_exit_code_as_awaiting_input(run_cli, tmp_path):
+    run_cli("init", "command provider approval exit mission", "--complexity", "Complex", cwd=tmp_path, check=True)
+    helper = tmp_path / "provider.py"
+    helper.write_text("import sys; sys.exit(75)\n", encoding="utf-8")
+    registry = tmp_path / ".mission" / "specialists.yml"
+    registry.parent.mkdir()
+    registry.write_text(json.dumps({
+        "version": 1,
+        "specialists": [{
+            "role": "approval-reviewer",
+            "kind": "command",
+            "command": sys.executable,
+            "args": [str(helper)],
+            "task_profiles": ["documentation"],
+            "result_contract": {
+                "awaiting_input_exit_codes": [75],
+            },
+        }],
+    }))
+    run_cli(
+        "specialists", "recommend",
+        "--no-default-skill-roots",
+        "--task", "Review README documentation",
+        "--complexity", "Complex",
+        "--record-state",
+        "--json",
+        cwd=tmp_path,
+        check=True,
+    )
+
+    r = run_cli(
+        "specialists", "invoke-command",
+        "--provider", "approval-reviewer",
+        "--iteration", "1",
+        "--phase", "review",
+        "--json",
+        cwd=tmp_path,
+    )
+
+    data = _json_result(r)
+    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
+    entry = state["specialist_invocations"][0]
+    assert data["ok"] is False
+    assert entry["status"] == "awaiting-input"
+    assert "exit code 75" in entry["reason"]
+
+
 def test_invoke_command_provider_marks_preparation_only_output_as_not_applied(run_cli, tmp_path):
     run_cli("init", "command provider prepared mission", "--complexity", "Complex", cwd=tmp_path, check=True)
     helper = tmp_path / "provider.py"

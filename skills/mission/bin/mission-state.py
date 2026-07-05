@@ -1539,17 +1539,37 @@ def _non_template_text_length(text: str, forbidden_markers: list[str]) -> int:
     return len(cleaned)
 
 
+def _contract_exit_codes(contract: dict, key: str) -> set[int]:
+    codes = contract.get(key) or []
+    if isinstance(codes, (str, int)):
+        codes = [codes]
+    result: set[int] = set()
+    for value in codes:
+        try:
+            result.add(int(value))
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
 def _classify_command_provider_result(provider: dict, exit_code: int | None,
                                       stdout: str, stderr: str) -> tuple[str, str | None]:
-    if exit_code != 0:
-        return "failed", f"command provider exited with status {exit_code}"
     explicit_contract = provider.get("result_contract") if isinstance(provider.get("result_contract"), dict) else {}
     contract = _merge_result_contract(
         _default_result_contract_for(provider.get("skill"), provider.get("role")),
         explicit_contract,
     )
-    forbidden_markers = [str(v) for v in contract.get("forbidden_markers") or PREPARATION_ONLY_MARKERS]
     combined = "\n".join([stdout or "", stderr or ""])
+    awaiting_markers = [str(v) for v in contract.get("awaiting_input_markers") or []]
+    awaiting_hits = [marker for marker in awaiting_markers if marker and marker in combined]
+    if awaiting_hits:
+        return "awaiting-input", f"command provider awaiting input: {', '.join(awaiting_hits[:3])}"
+    awaiting_exit_codes = _contract_exit_codes(contract, "awaiting_input_exit_codes")
+    if exit_code in awaiting_exit_codes:
+        return "awaiting-input", f"command provider awaiting input after exit code {exit_code}"
+    if exit_code != 0:
+        return "failed", f"command provider exited with status {exit_code}"
+    forbidden_markers = [str(v) for v in contract.get("forbidden_markers") or PREPARATION_ONLY_MARKERS]
     marker_hits = [marker for marker in forbidden_markers if marker and marker in combined]
     try:
         min_chars = int(contract.get("min_non_template_chars") or 0)
