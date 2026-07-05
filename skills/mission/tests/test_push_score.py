@@ -167,6 +167,7 @@ def test_push_score_scoring_output_overwrites_existing(state_dir, run_cli, tmp_p
             cwd=state_dir.parent, check=True)
     run_legacy_push_score(run_cli, "--iteration", "1", "--composite", "4.2", "--min-item", "4.0",
             "--items", '{"a": 4.2}', "--scoring-output", str(src2),
+            "--resubmit-reason", "re-score same iteration",
             cwd=state_dir.parent, check=True)
     archive_path = state_dir / "archive" / "iter-1-abc12345-scoring.md"
     content = archive_path.read_text(encoding="utf-8")
@@ -200,6 +201,7 @@ def test_push_score_scoring_output_no_collision_across_runs(state_dir, run_cli, 
     (state_dir / "sessions" / "test.json").write_text(_json.dumps(s))
     run_legacy_push_score(run_cli, "--iteration", "1", "--composite", "4.2", "--min-item", "4.0",
             "--items", '{"mission_achievement": 4.2}', "--scoring-output", str(src2),
+            "--resubmit-reason", "different mission_id, same iteration",
             cwd=state_dir.parent, check=True)
     a = state_dir / "archive"
     assert "run-A" in (a / "iter-1-abc12345-scoring.md").read_text(encoding="utf-8")
@@ -223,7 +225,7 @@ def test_push_score_normalizes_alias_keys(state_dir, run_cli, read_state):
 
 
 def test_push_score_normalizes_usefulness_alias(state_dir, run_cli, read_state):
-    run_legacy_push_score(run_cli, "--iteration", "1", "--composite", "4.0", "--min-item", "3.5",
+    run_legacy_push_score(run_cli, "--iteration", "1", "--composite", "3.8", "--min-item", "3.5",
             "--items", '{"usefulness": 3.8}', cwd=state_dir.parent, check=True)
     items = read_state(state_dir)["score_history"][0]["items"]
     assert items["usability"] == 3.8
@@ -250,8 +252,12 @@ def test_push_score_canonical_keys_no_warning(state_dir, run_cli):
     assert "キー" not in r.stderr and "key" not in r.stderr.lower()
 
 
-def test_push_score_warns_when_scalar_scores_disagree_with_items(state_dir, run_cli):
-    """#91: supplied items から再計算した mean/min と自己申告値が大きくずれると警告する。"""
+def test_push_score_rejects_when_scalar_scores_inflate_above_items(state_dir, run_cli):
+    """#122: 自己申告 composite/min_item が items 明細より 0.1 超で上振れしたら exit 2。
+
+    以前は WARNING (#91) だったが、mark-passes gate はこの自己申告値を使うため、
+    上振れ (inflation) は合格迂回になる。過小申告は保守側なので別テストで許容を確認する。
+    """
     r = run_legacy_push_score(
         run_cli,
         "--iteration", "1",
@@ -260,10 +266,50 @@ def test_push_score_warns_when_scalar_scores_disagree_with_items(state_dir, run_
         "--items", '{"mission_achievement":3.0,"accuracy":3.0,"completeness":3.0,"usability":3.0,"reviewer_consensus":3.0}',
         cwd=state_dir.parent,
     )
+    assert r.returncode == 2, r.stderr
+    assert "上振れ" in r.stderr
+    assert "composite=4.5" in r.stderr
+    assert "min_item=4.0" in r.stderr
+
+
+def test_push_score_allows_conservative_under_report(state_dir, run_cli, read_state):
+    """#122: 過小申告 (items より低い composite/min_item) は保守側なので許容し、申告値をそのまま保存する。"""
+    r = run_legacy_push_score(
+        run_cli,
+        "--iteration", "1",
+        "--composite", "3.0",
+        "--min-item", "3.0",
+        "--items", '{"mission_achievement":4.0,"accuracy":4.0,"completeness":4.0,"usability":4.0,"reviewer_consensus":4.0}',
+        cwd=state_dir.parent,
+    )
     assert r.returncode == 0, r.stderr
-    assert "WARNING" in r.stderr
-    assert "items" in r.stderr
-    assert "mean" in r.stderr and "min" in r.stderr
+    entry = read_state(state_dir)["score_history"][-1]
+    assert entry["composite"] == 3.0 and entry["min_item"] == 3.0
+
+
+def test_push_score_rejects_duplicate_iteration_without_reason(state_dir, run_cli, read_state):
+    """#122: 同一 iteration の再 push は --resubmit-reason なしでは exit 2。旧 entry は書き換わらない。"""
+    run_legacy_push_score(run_cli, "--iteration", "1", "--composite", "3.0", "--min-item", "3.0",
+            "--items", '{"a": 3.0}', cwd=state_dir.parent, check=True)
+    r = run_legacy_push_score(run_cli, "--iteration", "1", "--composite", "4.0", "--min-item", "4.0",
+            "--items", '{"a": 4.0}', cwd=state_dir.parent)
+    assert r.returncode == 2, r.stderr
+    assert "既に採点済み" in r.stderr
+    history = read_state(state_dir)["score_history"]
+    assert len(history) == 1 and history[0]["composite"] == 3.0
+
+
+def test_push_score_allows_duplicate_iteration_with_reason(state_dir, run_cli, read_state):
+    """#122: 理由付きの再 push は許容し、resubmit_reason を entry に残す (旧 entry も保持)。"""
+    run_legacy_push_score(run_cli, "--iteration", "1", "--composite", "3.0", "--min-item", "3.0",
+            "--items", '{"a": 3.0}', cwd=state_dir.parent, check=True)
+    run_legacy_push_score(run_cli, "--iteration", "1", "--composite", "4.0", "--min-item", "4.0",
+            "--items", '{"a": 4.0}', "--resubmit-reason", "inline 修正後の再採点",
+            cwd=state_dir.parent, check=True)
+    history = read_state(state_dir)["score_history"]
+    iter1_entries = [h for h in history if h["iteration"] == 1]
+    assert len(iter1_entries) == 2
+    assert iter1_entries[-1]["resubmit_reason"] == "inline 修正後の再採点"
 
 
 def test_push_score_accepts_matching_partial_items_without_warning(state_dir, run_cli):
@@ -285,7 +331,7 @@ def test_push_score_accepts_matching_partial_items_without_warning(state_dir, ru
 
 def test_push_score_canonical_wins_over_alias_collision(state_dir, run_cli, read_state):
     """正規キーとエイリアスが同一正規キーに衝突した場合、明示された正規キーの値が勝ち WARN が出る."""
-    r = run_legacy_push_score(run_cli, "--iteration", "1", "--composite", "4.0", "--min-item", "3.5",
+    r = run_legacy_push_score(run_cli, "--iteration", "1", "--composite", "3.0", "--min-item", "3.0",
                 "--items", '{"practicality": 5.0, "usability": 3.0}', cwd=state_dir.parent)
     assert r.returncode == 0, f"stderr: {r.stderr}"
     assert "practicality" in r.stderr and ("衝突" in r.stderr or "collision" in r.stderr.lower())
@@ -295,7 +341,7 @@ def test_push_score_canonical_wins_over_alias_collision(state_dir, run_cli, read
 
 def test_push_score_canonical_wins_regardless_of_order(state_dir, run_cli, read_state):
     """逆順 (正規キーが先) でも結果が同じ = 順序非依存."""
-    run_legacy_push_score(run_cli, "--iteration", "1", "--composite", "4.0", "--min-item", "3.5",
+    run_legacy_push_score(run_cli, "--iteration", "1", "--composite", "3.0", "--min-item", "3.0",
             "--items", '{"usability": 3.0, "practicality": 5.0}', cwd=state_dir.parent, check=True)
     items = read_state(state_dir)["score_history"][0]["items"]
     assert items["usability"] == 3.0

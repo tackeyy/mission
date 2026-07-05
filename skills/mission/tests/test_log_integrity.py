@@ -279,7 +279,7 @@ def test_mark_halt_records_current_phase_duration(state_dir, run_cli, read_state
 
 def test_mark_passes_min_item_error_mentions_scored_items(state_dir, run_cli):
     """C-M1: min_item gate のエラー文言が「5項目」固定でなく採点 items 基準である."""
-    run_cli("push-score", "--iteration", "1", "--composite", "4.5", "--min-item", "3.0",
+    run_cli("push-score", "--iteration", "1", "--composite", "3.75", "--min-item", "3.0",
             "--items", '{"mission_achievement": 4.5, "accuracy": 3.0}', cwd=state_dir.parent, check=True)
     r = run_cli("mark-passes", cwd=state_dir.parent)
     assert r.returncode == 2

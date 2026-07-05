@@ -38,6 +38,23 @@ def test_scoring_json_computes_composite_and_min_item(state_dir, run_cli, read_s
     assert entry["score_source"] == "scoring-json"
 
 
+def test_scoring_json_duplicate_iteration_requires_reason(state_dir, run_cli, read_state, tmp_path):
+    """#122: 重複 iteration ガードは --scoring-json 経路にも適用される (両経路共通の StateLock 内チェック)。"""
+    src1 = _write_scoring_json(tmp_path, {"items": CANONICAL_ITEMS}, name="a.json")
+    run_cli("push-score", "--iteration", "1", "--scoring-json", str(src1),
+            cwd=state_dir.parent, check=True)
+    src2 = _write_scoring_json(tmp_path, {"items": CANONICAL_ITEMS}, name="b.json")
+    r = run_cli("push-score", "--iteration", "1", "--scoring-json", str(src2), cwd=state_dir.parent)
+    assert r.returncode == 2, r.stderr
+    assert "既に採点済み" in r.stderr
+    # 理由付きなら通り、旧 entry も保持される。
+    r2 = run_cli("push-score", "--iteration", "1", "--scoring-json", str(src2),
+                 "--resubmit-reason", "re-score after fix", cwd=state_dir.parent)
+    assert r2.returncode == 0, r2.stderr
+    history = read_state(state_dir)["score_history"]
+    assert len([h for h in history if h["iteration"] == 1]) == 2
+
+
 def test_scoring_json_notes_from_file(state_dir, run_cli, read_state, tmp_path):
     src = _write_scoring_json(tmp_path, {"items": CANONICAL_ITEMS, "notes": "iter1: verified"})
     run_cli("push-score", "--iteration", "1", "--scoring-json", str(src),

@@ -39,15 +39,20 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score \
     --open-high <未解決High件数>
 # JSON 形式: {"items": {"mission_achievement": 4.0, "accuracy": 3.5, "completeness": 4.2, "usability": 3.8, "reviewer_consensus": 4.0}, "notes": "<任意>", "open_high": 0}
 
-# 従来経路 (非推奨。scoring evidence なしは default reject。
+# 従来経路 (非推奨・DeprecationWarning あり。scoring evidence なしは default reject。
 # 移行専用の一時 escape hatch として MISSION_REQUIRE_SCORING_EVIDENCE=0 のみ許可):
+# #122 の gate 強化:
+#   - 自己申告 composite/min_item が items 明細より 0.1 超で上振れ (inflation) したら exit 2
+#     (mark-passes gate はこの自己申告値を使うため、上振れは合格迂回になる。過小申告は保守側なので許容)
+#   - 同一 iteration の再 push は --resubmit-reason "<理由>" が必須 (旧 entry は履歴として保持)
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score \
     --iteration <N> \
-    --composite <総合スコア> \
-    --min-item <最低項目スコア> \
+    --composite <総合スコア (items mean を 0.1 超で上回らないこと)> \
+    --min-item <最低項目スコア (items min を 0.1 超で上回らないこと)> \
     --items '{"mission_achievement": 4.0, "accuracy": 3.5, "completeness": 4.2, "usability": 3.8, "reviewer_consensus": 4.0}' \
     --open-high <未解決High件数> \
     --scoring-output /tmp/mission-scorer-iter-<N>-<mission_id先頭8>.md \
+    [--resubmit-reason "<同一 iteration 再 push 時のみ必須>"] \
     [--notes "<任意のメモ>"]
 
 # 合格マーク (passes=true, loop_active=false)
