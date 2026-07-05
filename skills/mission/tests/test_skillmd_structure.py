@@ -15,16 +15,10 @@ def _read(p):
     return p.read_text() if p.exists() else ""
 
 
-def test_skillmd_size_under_420_lines():
-    """SKILL.md 本体は 420 行以下.
-
-    Anthropic 公式スキル作成ガイダンス (skill-creator) は「<500 行が理想」とし、
-    500 に近づいたら Progressive Disclosure で詳細を refs/ へ退避せよと定める。
-    420 はその規律値 (公式上限 500 に余裕を持たせたライン)。
-    起動毎に全ロードされるため、状況依存の詳細は refs/gotchas.md 等へ退避済み。
-    """
+def test_skillmd_size_under_300_lines():
+    """#125: SKILL.md 本体は 300 行未満。進行 oracle は next/resume と refs に寄せる。"""
     n = len(_read(SKILL_MD).splitlines())
-    assert n <= 420, f"SKILL.md is {n} lines (target: <= 420, 公式<500に余裕を持たせた規律値)"
+    assert n < 300, f"SKILL.md is {n} lines (target: < 300)"
 
 
 def test_skillmd_contains_critical_keywords():
@@ -36,11 +30,14 @@ def test_skillmd_contains_critical_keywords():
         "score_history",     # 採点記録
         "threshold",         # 合格閾値
         "push-score",        # バグ修正の必須手順
+        "resume",            # 復帰 oracle
+        "next",              # 進行 oracle
         "Trigger 1",         # 不可逆操作確認
         "Trigger 2",         # 中断条件
         "観点D",             # 観点D 運用
         "Stop hook",         # ループ強制
         "差分レビュー",       # P2: iter2以降は検証1名 (レビューコスト40%の主因対策)
+        "Planner spawn 判定",  # #124
     ]
     missing = [kw for kw in must_have if kw not in txt]
     assert not missing, f"missing critical keywords: {missing}"
@@ -69,7 +66,7 @@ def test_refs_changelog_exists():
     f = REFS_DIR / "changelog.md"
     assert f.exists(), f"{f} not found"
     txt = _read(f)
-    for ref_id in ["P1", "P2", "P3-2", "P3-5", "M6", "M7"]:
+    for ref_id in ["P1", "P2", "P3-2", "P3-5", "M6", "M7", "R1", "H3", "EPT"]:
         assert ref_id in txt, f"changelog.md に {ref_id} の記載がない"
 
 

@@ -6,6 +6,7 @@
   skills/mission/bin/mission-state.py
   skills/mission/refs/specialist-registry.md (存在する場合)
   skills/mission/refs/self-improvement.md
+  skills/mission/refs/changelog.md
   skills/mission/SKILL.md
   skills/mission-planner/SKILL.md
   skills/mission-critic/SKILL.md
@@ -18,6 +19,7 @@
   plugins/mission/skills/mission/bin/mission-state.py
   plugins/mission/skills/mission/refs/specialist-registry.md (存在する場合)
   plugins/mission/skills/mission/refs/self-improvement.md
+  plugins/mission/skills/mission/refs/changelog.md
   plugins/mission/skills/mission/SKILL.md
   plugins/mission/skills/mission-planner/SKILL.md
   plugins/mission/skills/mission-critic/SKILL.md
@@ -30,6 +32,7 @@
   cp skills/mission/bin/mission-state.py  plugins/mission/skills/mission/bin/mission-state.py
   cp skills/mission/refs/specialist-registry.md plugins/mission/skills/mission/refs/specialist-registry.md
   cp skills/mission/refs/self-improvement.md plugins/mission/skills/mission/refs/self-improvement.md
+  cp skills/mission/refs/changelog.md plugins/mission/skills/mission/refs/changelog.md
   cp skills/mission/SKILL.md              plugins/mission/skills/mission/SKILL.md
   cp skills/mission-planner/SKILL.md      plugins/mission/skills/mission-planner/SKILL.md
   cp skills/mission-critic/SKILL.md       plugins/mission/skills/mission-critic/SKILL.md
@@ -61,6 +64,10 @@ SYNC_PAIRS = [
     (
         REPO_ROOT / "skills" / "mission" / "refs" / "self-improvement.md",
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "refs" / "self-improvement.md",
+    ),
+    (
+        REPO_ROOT / "skills" / "mission" / "refs" / "changelog.md",
+        REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "refs" / "changelog.md",
     ),
     (
         REPO_ROOT / "skills" / "mission" / "SKILL.md",
@@ -145,7 +152,7 @@ def test_mission_state_distribution_contains_specialist_accounting_guards():
 
 def test_skill_md_in_sync():
     """skills/mission/SKILL.md と plugins/mission/skills/mission/SKILL.md が一致する."""
-    src, dst = SYNC_PAIRS[5]
+    src, dst = SYNC_PAIRS[6]
     assert src.exists(), f"正典が存在しない: {src}"
     assert dst.exists(), f"plugins 側が存在しない: {dst}"
     assert _md5(src) == _md5(dst), (
@@ -158,7 +165,7 @@ def test_skill_md_in_sync():
 
 def test_planner_skill_md_in_sync():
     """skills/mission-planner/SKILL.md と plugins/mission 側が一致する."""
-    src, dst = SYNC_PAIRS[6]
+    src, dst = SYNC_PAIRS[7]
     assert src.exists(), f"正典が存在しない: {src}"
     assert dst.exists(), f"plugins 側が存在しない: {dst}"
     assert _md5(src) == _md5(dst), (
@@ -171,7 +178,7 @@ def test_planner_skill_md_in_sync():
 
 def test_critic_skill_md_in_sync():
     """skills/mission-critic/SKILL.md と plugins/mission 側が一致する."""
-    src, dst = SYNC_PAIRS[7]
+    src, dst = SYNC_PAIRS[8]
     assert src.exists(), f"正典が存在しない: {src}"
     assert dst.exists(), f"plugins 側が存在しない: {dst}"
     assert _md5(src) == _md5(dst), (
@@ -184,7 +191,7 @@ def test_critic_skill_md_in_sync():
 
 def test_reviewer_skill_md_in_sync():
     """skills/mission-reviewer/SKILL.md と plugins/mission 側が一致する."""
-    src, dst = SYNC_PAIRS[8]
+    src, dst = SYNC_PAIRS[9]
     assert src.exists(), f"正典が存在しない: {src}"
     assert dst.exists(), f"plugins 側が存在しない: {dst}"
     assert _md5(src) == _md5(dst), (
@@ -197,7 +204,7 @@ def test_reviewer_skill_md_in_sync():
 
 def test_scorer_skill_md_in_sync():
     """skills/mission-scorer/SKILL.md と plugins/mission 側が一致する."""
-    src, dst = SYNC_PAIRS[9]
+    src, dst = SYNC_PAIRS[10]
     assert src.exists(), f"正典が存在しない: {src}"
     assert dst.exists(), f"plugins 側が存在しない: {dst}"
     assert _md5(src) == _md5(dst), (
@@ -234,6 +241,19 @@ def test_self_improvement_md_in_sync():
     assert dst.exists(), f"plugins 側が存在しない: {dst}"
     assert _md5(src) == _md5(dst), (
         f"self-improvement.md が未同期。\n"
+        f"  正典: {src}\n"
+        f"  plugins: {dst}\n"
+        f"  同期コマンド: cp {src} {dst}"
+    )
+
+
+def test_changelog_md_in_sync():
+    """skills/mission/refs/changelog.md と plugins/mission 側が一致する."""
+    src, dst = SYNC_PAIRS[5]
+    assert src.exists(), f"正典が存在しない: {src}"
+    assert dst.exists(), f"plugins 側が存在しない: {dst}"
+    assert _md5(src) == _md5(dst), (
+        f"changelog.md が未同期。\n"
         f"  正典: {src}\n"
         f"  plugins: {dst}\n"
         f"  同期コマンド: cp {src} {dst}"
