@@ -63,7 +63,14 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py mark-passes
 # 中断マーク (halt_reason 設定, loop_active=false)
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py mark-halt --reason "<理由>"
 
-# R1: resume / compaction 復帰時に state.pid を現セッションの agent CLI PID に更新
+# #123 (推奨): 復帰を 1 コマンドに統合。refresh-pid → cleanup-empty → cleanup-stale → next を
+# 正しい順序 (refresh-pid が先) で原子的に実行し、next の出力に resume サマリ
+# ({"pid_refreshed","reactivated","cleaned_empty","halted_stale","dry_run"}) を添えて返す。
+# refresh-pid が cleanup-stale より先に走るため、復帰直後の旧 (dead) PID でも自 state を orphan halt しない。
+# cleanup-stale は常に cwd スコープ (MISSION_SEARCH_ROOTS は無視) で、他プロジェクトを巻き込まない。
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py resume            # [--dry-run] [--force]
+
+# R1 (個別コマンド。通常は resume を使う): state.pid を現セッションの agent CLI PID に更新
 # (これを怠ると hook が state.pid != 現 PID と判定して exit 0、ループ強制が機能しない)
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py refresh-pid
 
