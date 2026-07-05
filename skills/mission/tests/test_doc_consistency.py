@@ -195,6 +195,28 @@ def test_v104_changelog_mentions_provider_extension_release_theme():
         assert token in ja, f"CHANGELOG.ja.md v1.0.4 missing release theme: {token}"
 
 
+def test_v110_changelog_mentions_release_themes():
+    """v1.1.0 の release themes を changelog から落とさない."""
+    en = _release_section(_r(REPO_ROOT / "CHANGELOG.md"), "1.1.0").lower()
+    ja = _release_section(_r(REPO_ROOT / "CHANGELOG.ja.md"), "1.1.0").lower()
+    required_tokens = (
+        "aggregate-reviews",
+        "task-required",
+        "resume",
+        "model_id",
+        "review_agreement",
+        "findings_evidence_path",
+        "mission_common.py",
+        "oss portability",
+        "push-score --scoring-json",
+        "--resubmit-reason",
+        "open_high",
+    )
+    for token in required_tokens:
+        assert token.lower() in en, f"CHANGELOG.md v1.1.0 missing release theme: {token}"
+        assert token.lower() in ja, f"CHANGELOG.ja.md v1.1.0 missing release theme: {token}"
+
+
 def test_release_version_paths_are_in_sync():
     """Plugin manifests and visible install paths should point at the same release version."""
     manifest_paths = (
@@ -223,7 +245,7 @@ def test_readmes_describe_current_scoring_flow_and_test_count():
     en = _r(REPO_ROOT / "README.md")
     ja = _r(REPO_ROOT / "README.ja.md")
     for rel, txt in (("README.md", en), ("README.ja.md", ja)):
-        for token in ("mission-review/1", "aggregate-reviews", "push-score --scoring-json", "552 passed"):
+        for token in ("mission-review/1", "aggregate-reviews", "push-score --scoring-json", "553 passed"):
             assert token in txt, f"{rel} missing current README source-sync token: {token}"
         assert "327 passed" not in txt, f"{rel} still reports stale test count"
     assert "reviewer/scorer phases" not in en

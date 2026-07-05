@@ -166,7 +166,7 @@ plugin 配布用に、この repo には `.codex-plugin/plugin.json` と `.agent
 `codex plugin add mission@mission-marketplace` 後は、`MISSION_PLUGIN_ROOT` を install cache path に設定し、現行 model-visible command text 互換のため `CLAUDE_PLUGIN_ROOT` も同じ値にします。
 
 ```bash
-export MISSION_PLUGIN_ROOT="${CODEX_HOME:-$HOME/.codex}/plugins/cache/mission-marketplace/mission/1.0.7"
+export MISSION_PLUGIN_ROOT="${CODEX_HOME:-$HOME/.codex}/plugins/cache/mission-marketplace/mission/1.1.0"
 export CLAUDE_PLUGIN_ROOT="$MISSION_PLUGIN_ROOT"
 ```
 
@@ -213,7 +213,7 @@ python3 -m pytest -q
 現在のローカル検証結果:
 
 ```text
-552 passed
+553 passed
 ```
 
 詳細は [`docs/TESTING.md`](docs/TESTING.md) を参照してください。
