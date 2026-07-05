@@ -13,7 +13,7 @@ Beginner presets are small named bundles that map common mission shapes to speci
 | Preset | Typical trigger | Suggested roles |
 |---|---|---|
 | `docs` | README, protocol, reference, changelog | `doc-writer`, `doc-reviewer` |
-| `frontend` | React/Vue UI, layout, accessibility, visual QA | `frontend`, `designer-product`, `integration-tester` |
+| `frontend` | React/Vue UI, layout, accessibility, visual QA | `frontend`, `ui-reviewer`, `integration-tester` |
 | `backend` | API, business logic, database integration | `backend`, `api-designer`, `unit-tester` |
 | `security` | auth, permissions, secrets, high-risk input handling | `security-reviewer`, `backend` |
 | `infra` | CI/CD, deployment, Docker, cloud config | `infra`, `integration-tester` |

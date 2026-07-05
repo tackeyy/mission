@@ -6,7 +6,7 @@ mission runs and turn the findings into the next improvement mission.
 ## Manual audit
 
 ```bash
-python3 scripts/mission-audit.py --root /Users/tackeyy/dev --since 2026-06-18
+python3 scripts/mission-audit.py --root ~/projects --since 2026-06-18
 ```
 
 Use `mission-state.py stats` for quick numeric health checks and
@@ -16,8 +16,8 @@ and issue-oriented diagnostics.
 
 ```bash
 python3 skills/mission/bin/mission-state.py stats \
-  --root /Users/tackeyy/dev \
-  --root /Users/tackeyy/workspace \
+  --root ~/projects \
+  --root ~/workspace \
   --since 2026-06-18
 ```
 
@@ -25,7 +25,7 @@ Write a report:
 
 ```bash
 python3 scripts/mission-audit.py \
-  --root /Users/tackeyy/dev \
+  --root ~/projects \
   --since 2026-06-18 \
   --out docs/audit-2026-06-18.md
 ```
@@ -34,8 +34,8 @@ Limit the scope to runs updated after a known fix commit:
 
 ```bash
 python3 scripts/mission-audit.py \
-  --root /Users/tackeyy/dev \
-  --repo /Users/tackeyy/dev/mission \
+  --root ~/projects \
+  --repo ~/projects/mission \
   --after-commit 319d02d
 ```
 
@@ -45,7 +45,7 @@ Generate a prompt that can be pasted directly into Codex or Claude Code:
 
 ```bash
 python3 scripts/mission-audit.py \
-  --root /Users/tackeyy/dev \
+  --root ~/projects \
   --since 2026-06-18 \
   --self-improvement-prompt
 ```
