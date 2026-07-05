@@ -26,6 +26,7 @@ SKILL.md 本体から外出しした Phase 2-6 ループの詳細。本体には
     { "iteration": 1, "composite": 3.5, "min_item": 3.0, "items": {} }
   ],
   "stagnation_count": 0,
+  "// stagnation_count": "push-score が自動更新する (改善幅 < 0.1 で +1、>= 0.1 で 0)。手動 set 禁止",
   "decisions": [],
   "loop_active": true,
   "passes": false,
@@ -57,8 +58,9 @@ Skill(skill="mission-reviewer", args="観点C: 実用性・抜け漏れ")
 # オプション: 観点D (Complex/Critical のみ推奨。採点対象外でフィードバックのみ)
 Skill(skill="mission-reviewer", args="観点D: 計画指示明瞭度 — Executor の指示明瞭度フィードバックを評価")
 Skill(skill="mission-scorer",   args="レビュー結果統合 → 採点 items 算出 (観点D は採点除外)")
-# scorer の出力を受け取ったら orchestrator が必ず push-score を呼ぶ (score_history 記録)
-# Bash(command="python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score --iteration N --composite X --min-item Y --items '{...}'")
+# scorer の出力を受け取ったら orchestrator が必ず push-score を呼ぶ (score_history 記録)。
+# 推奨は --scoring-json 経路 (composite/min_item は items から CLI が再計算・転記レイヤ排除):
+# Bash(command="python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score --iteration N --scoring-json /tmp/mission-scorer-iter-N-<mission8>.json")
 Skill(skill="mission-critic",   args="スコア結果 + 成果物 + 観点D フィードバック → 改善案 + Planner 申し送り")
 ```
 

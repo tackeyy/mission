@@ -299,3 +299,28 @@ def test_beginner_presets_have_no_personal_skill_names():
             if name in text:
                 offenders.append(f"{f.relative_to(REPO_ROOT)} contains '{name}'")
     assert not offenders, "personal skill names leaked into distributed refs:\n" + "\n".join(offenders)
+
+
+# ---- #128: ドキュメント整合 sweep の回帰ガード ----
+
+
+def test_skillmd_terminal_condition_includes_open_high():
+    """SKILL.md の終了判定擬似コードは open_high==0 を含む (mark-passes gate と整合)."""
+    txt = _r(SKILL_MD)
+    assert "open_high == 0" in txt, \
+        "SKILL.md の終了判定に open_high==0 がない (mark-passes は open_high>0 を reject する)"
+
+
+def test_react_loop_no_deprecated_composite_pushscore_example():
+    """react-loop-details の push-score 例は非推奨 --composite 手渡しでなく --scoring-json."""
+    txt = _r(REFS / "react-loop-details.md")
+    assert "--composite X --min-item Y" not in txt, \
+        "react-loop-details に非推奨の --composite 手渡し push-score 例が残存 (--scoring-json 推奨)"
+    assert "--scoring-json" in txt, "react-loop-details に推奨 --scoring-json 例がない"
+
+
+def test_state_management_no_practicality_items_sample():
+    """state-management に practicality を items キーに使う採点サンプルがない (正規キーは usability)."""
+    txt = _r(REFS / "state-management.md")
+    assert '"practicality":' not in txt and '"practicality" :' not in txt, \
+        "state-management に旧キー practicality の items サンプルが残存 (エイリアス説明の言及は可)"
