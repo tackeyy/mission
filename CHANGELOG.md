@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Specialist registry documentation now separates external-send, browser automation, browser session material, and paid quota consent scopes, making clear that first-use consent is not blanket approval for session-cookie reuse or paid model usage (#146).
+- Added Oracle command-provider safe-default guidance so local wrappers default to manual login or `awaiting-input`, and only pass `--copy-profile` after explicit browser-session-material approval (#147).
 
 ## [1.1.0] - 2026-07-05
 
