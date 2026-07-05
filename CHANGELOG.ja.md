@@ -12,6 +12,9 @@
 ### 修正
 - command provider が `result_contract.awaiting_input_markers` または `result_contract.awaiting_input_exit_codes` に一致した場合、明示承認・人間入力待ちを generic failure ではなく `awaiting-input` として記録できるようにしました (#145)。
 
+### 変更
+- specialist registry の文書で、外部送信、browser automation、browser session material、paid quota の承認スコープを分離し、first-use consent が session cookie 再利用や paid model 利用の包括承認ではないことを明記しました (#146)。
+
 ## [1.1.0] - 2026-07-05
 
 ### 追加

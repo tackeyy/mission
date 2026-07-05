@@ -335,6 +335,19 @@ def test_beginner_presets_have_no_personal_skill_names():
     assert not offenders, "personal skill names leaked into distributed refs:\n" + "\n".join(offenders)
 
 
+def test_specialist_registry_separates_provider_consent_scopes():
+    """External-send, browser-session material, and paid quota approvals must stay distinct."""
+    txt = _r(REFS / "specialist-registry.md")
+    assert "risk.external_service" in txt
+    assert "risk.browser_automation" in txt
+    assert "risk.browser_session_material" in txt
+    assert "risk.may_consume_paid_quota" in txt
+    assert "external service does not imply approval to reuse browser session material" in txt
+    assert "neither implies paid API/model quota approval" in txt
+    assert "awaiting_input_markers" in txt
+    assert "awaiting_input_exit_codes" in txt
+
+
 # ---- #128: ドキュメント整合 sweep の回帰ガード ----
 
 

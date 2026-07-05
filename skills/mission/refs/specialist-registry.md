@@ -60,6 +60,7 @@ specialists:
     risk:
       external_service: true
       browser_automation: true
+      browser_session_material: false
       may_consume_paid_quota: true
       first_use_confirmation: true
 ```
@@ -67,6 +68,8 @@ specialists:
 This `oracle-reviewer` entry is an example manifest shape only. Mission core must not contain oracle-specific browser automation, API calls, or scoring logic. The provider produces evidence; `mission-reviewer`, `mission-scorer`, and `mission-state.py mark-passes` remain the completion gates.
 
 Command providers run through `mission-state.py specialists invoke-command`, which uses argv arrays and stdin/stdout capture rather than shell interpolation. The runner records stdout, stderr, exit status, and archived evidence under `.mission-state/archive`, then appends a `specialist_invocations` entry with `mode=command-provider`. Failed or unavailable optional command providers are logged and the mission continues with core reviewers.
+
+Provider consent scopes are separate. Approval to send selected prompt/repository context to an external service does not imply approval to reuse browser session material, and neither implies paid API/model quota approval. A browser provider should default to manual login or an explicit `awaiting-input` result unless the user has also approved `browser_session_material` use for that run.
 
 ## YAML Schema
 
@@ -121,7 +124,10 @@ Fields:
 | `unavailable` | `continue`, `warn`, or `halt`. Default `continue`. |
 | `auto_use.min_complexity` | Minimum mission complexity for automatic selection, such as `Complex`. |
 | `risk.first_use_confirmation` | If `true`, require provider consent before automatic use. |
-| `risk.external_service`, `risk.browser_automation`, `risk.may_consume_paid_quota` | Risk flags used for audit and confirmation policy. |
+| `risk.external_service` | Provider may send selected prompt, artifact, or repository context to an external service. |
+| `risk.browser_automation` | Provider may launch or drive a browser. This does not by itself authorize reuse of an existing signed-in profile. |
+| `risk.browser_session_material` | Provider may reuse browser session material such as cookies, profile copies, or existing authenticated browser state. This requires a separate approval boundary from external-send approval. |
+| `risk.may_consume_paid_quota` | Provider may consume paid API/model quota. This requires a separate approval boundary from external-send or browser-session approval. |
 | `overrides` | Path or mission-text rules that add/remove roles. |
 
 ## `task_profile` Classification
@@ -205,9 +211,12 @@ result_contract:
   min_non_template_chars: 200
   forbidden_markers:
     - "Browser Review Prepared"
+  awaiting_input_markers:
+    - "approval required:"
+  awaiting_input_exit_codes: [75]
 ```
 
-If a command exits successfully but only returns a preparation banner or less than the required non-template evidence, the runner records `status: prepared` instead of `completed`. `prepared` and `awaiting-input` are terminal accounting statuses for transparency, but they are not applied result evidence. A provider marked `required: true` must produce `completed`, `inline-applied`, or `skill-tool-applied` evidence before `mission-state.py mark-passes` can succeed.
+If a command exits successfully but only returns a preparation banner or less than the required non-template evidence, the runner records `status: prepared` instead of `completed`. If the provider output or exit code matches `awaiting_input_markers` or `awaiting_input_exit_codes`, the runner records `status: awaiting-input`. `prepared` and `awaiting-input` are terminal accounting statuses for transparency, but they are not applied result evidence. A provider marked `required: true` must produce `completed`, `inline-applied`, or `skill-tool-applied` evidence before `mission-state.py mark-passes` can succeed.
 
 The `oracle-reviewer` provider role gets a conservative default result contract even if a project registry omits one. Its default rejects common browser-review preparation markers such as prompt/result/packet paths and review URLs, so an exit code of 0 cannot satisfy required evidence unless the provider returns substantive findings.
 
@@ -219,6 +228,8 @@ python3 skills/mission/bin/mission-state.py specialists consent \
 ```
 
 Consent is stored in `~/.config/mission/provider-consent.json` by default. Tests and isolated runs can pass `--consent-file <path>`.
+
+This consent records provider first-use only. It must not be treated as blanket approval for external-send, browser-session-material reuse, or paid quota. Those scopes should be described in the mission confirmation text and, when not approved, represented as `awaiting-input` rather than hidden success or generic failure.
 
 If Phase 1 ended with `specialists_decision.action: ask-user`, an applied invocation for a not-yet-selected candidate must include `--selection-source confirmed-user` after the user confirms it:
 
