@@ -330,6 +330,40 @@ def test_review_agreement_gate_documented_separately_from_items():
     assert "composite には含めない" in rubric
 
 
+def test_critic_output_includes_executor_compatible_next_iteration_plan():
+    """#124: critic output must include a planner-compatible execution plan."""
+    critic = _r(SKILLS_ROOT / "mission-critic" / "SKILL.md")
+    required = (
+        "### 実行計画 (次 iteration)",
+        "| # | アクション | 完了条件 (observable) | 依存 | 対応finding |",
+        "|---|---|---|---|---|",
+        "`対応finding`",
+        "`new`",
+    )
+    for token in required:
+        assert token in critic, f"mission-critic/SKILL.md missing #124 output token: {token}"
+
+
+def test_orchestrator_documents_single_new_based_planner_spawn_rule():
+    """#124: iter2+ planner spawn must be mechanically decided by the critic plan's new marker."""
+    skill = _r(SKILL_MD)
+    assert "Planner spawn 判定" in skill
+    assert "全ステップの `対応finding` が finding id のみ" in skill
+    assert "planner を spawn せず executor に直接渡す" in skill
+    assert "`new` を含むステップが 1 つでもある" in skill
+    assert "iter1 は従来どおり planner 必須" in skill
+    assert "mission-planner` / `mission-executor` は周回ごとに走り続ける" not in skill
+
+
+def test_planner_scope_is_initial_plan_or_new_step_replan():
+    """#124: mission-planner is not the default iter2+ handoff when critic plan is finding-only."""
+    planner = _r(SKILLS_ROOT / "mission-planner" / "SKILL.md")
+    assert "iter1 の初期計画" in planner
+    assert "critic 計画に `new` ステップがある場合の再計画" in planner
+    assert "finding id のみ" in planner
+    assert "executor に直接渡す" in planner
+
+
 def test_react_loop_no_deprecated_composite_pushscore_example():
     """react-loop-details の push-score 例は非推奨 --composite 手渡しでなく --scoring-json."""
     txt = _r(REFS / "react-loop-details.md")

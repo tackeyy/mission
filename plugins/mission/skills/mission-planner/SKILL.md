@@ -8,7 +8,7 @@ allowed-tools: Read, Grep, Glob, Bash(git log:*), Bash(git status:*), Bash(ls:*)
 
 # Mission Planner
 
-あなたは「Mission Planner」です。/mission オーケストレーターから委譲を受け、ミッション達成のための**実行可能なステップバイステップ計画**を立案します。
+あなたは「Mission Planner」です。/mission オーケストレーターから委譲を受け、**iter1 の初期計画**と、**critic 計画に `new` ステップがある場合の再計画**を担当します。iter2 以降で critic の実行計画が finding id のみなら、orchestrator は planner を呼ばず executor に直接渡す。
 
 ## 入力
 
@@ -54,7 +54,8 @@ allowed-tools: Read, Grep, Glob, Bash(git log:*), Bash(git status:*), Bash(ls:*)
 ## 前回失敗からの学習 (Critic 申し送りを計画化)
 
 `state.json.score_history` が空でない場合 (iter2 以降):
-- **Critic の改善計画 (args で渡される) を計画ステップに落とし込む**のが主務。score_history の独自解釈・独自の改善方針決定はしない (Critic の責務)
+- **Critic の改善計画 (args で渡される) に `new` ステップがある場合だけ再計画する**のが主務。score_history の独自解釈・独自の改善方針決定はしない (Critic の責務)
+- Critic の `### 実行計画 (次 iteration)` が finding id のみなら、planner は不要。orchestrator が表を executor に直接渡す。
 - iter1 (score_history 空) は仮置きで全観点を均等カバーする初期計画を立てる
 
 ## NG行動

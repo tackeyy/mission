@@ -112,7 +112,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py update-project
 │  ├─ max-iter 到達 → 中断報告                       │
 │  ├─ 致命的ブロッカー → ユーザー質問                │
 │  ├─ 3回連続改善なし (--max-iter 0 時) → 質問      │
-│  └─ それ以外 → mission-critic で改善案 → Phase 2 へ  │
+│  └─ それ以外 → mission-critic → Planner spawn 判定     │
 └─────────────────────────────────────────────────────┘
         ↓
 [Phase 7: 条件付き自動マージ判定]
@@ -208,6 +208,8 @@ state.json の `assumptions_path` が指すファイル (デフォルト `.missi
 
 1 iter の標準フロー: `mission-planner` → `mission-executor` (`set phase=executing`) → `mission-reviewer` × N (`set phase=reviewing`) → reviewer 末尾の `mission-review/1` JSON を保存 → `mission-state.py aggregate-reviews` → **`mission-state.py push-score --scoring-json`** → `mission-critic`。標準フローで mission-scorer を spawn しない。10分超または batch 作業では `progress update` も残す (詳細 refs/state-management.md)。
 
+**Planner spawn 判定 (#124)**: iter1 は従来どおり planner 必須。iter2 以降は `mission-critic` の `### 実行計画 (次 iteration)` テーブルを機械的に読む。全ステップの `対応finding` が finding id のみなら、planner を spawn せず executor に直接渡す。`new` を含むステップが 1 つでもあるなら、新規スコープの再計画が必要なため planner を spawn する。この判定規則を他所で再定義しない。
+
 Phase 1 で選定した specialist は Phase 2-6 の任意 evidence provider として、計画制約・実装補助・差分レビュー・採点根拠・Critic 改善案に使う。専門家不在や Codex で Skill 呼び出し不可の場合は、その欠落を記録して core subskills のみで進める。
 
 **Specialist/provider 呼び出しログ (Issue #31/#42/#49/#53/#55/#56/#57)**: `specialists_selected` は選定意図であり、実呼び出し証跡ではない。specialist/provider を選定・呼び出し・inline 適用・skip・unavailable・failed にした場合は、orchestrator が `mission-state.py specialists log-invocation` を呼び、`specialist_invocations` に append する。Codex で `Skill(...)` が使えず visible skill instructions を同一コンテキストで適用した場合は、`--mode codex-inline --status inline-applied` として正直に記録する。Claude Code 等で Skill tool を実呼び出しした場合は `--mode skill-tool --status skill-tool-applied` を使う。`kind: command` provider は `mission-state.py specialists invoke-command --provider <role> --iteration <N> --phase <phase> --input-file <path>` で argv/stdin/stdout 経由に限定して実行し、`--mode command-provider` の evidence として記録する。ask-user 後に確認された candidate を適用する場合は `--selection-source confirmed-user` を付け、broad/bounded orchestrator は execution に使わず `--bounded-purpose` で plan/review 等の限定用途を残す。成果物やレビュー出力がある場合は `--evidence-output` または command runner の archive で `.mission-state/archive/iter-N-<mission8>-specialist-<skill>.md` に永続化する。command provider が preparation banner や result_contract 未満の出力しか返さない場合は `status=prepared` として記録し、適用済み証跡には数えない。`Critical` mission では available candidate を放置せず、各 candidate を used / skipped / unavailable / failed / prepared のいずれかで説明する。`Complex` mission でも security/testing/infra など高リスク candidate は `--status skipped --reason "<判断理由>"` 等で明示する。`database` candidate は schema/migration/query/persistence 等の強いシグナルがある場合だけ高リスク accounting 対象にする。完了前に `mission-state.py specialists accounting --json` と `mission-state.py specialists summary --json` を実行し、`required_unaccounted_candidates` または `result_required_unmet_candidates` が残る場合は `mark-passes` が reject するため、required provider は completed/inline-applied/skill-tool-applied の結果証跡を残してから進む。
@@ -222,17 +224,15 @@ Skill(skill="mission-executor", args="...")
 Skill(skill="mission-reviewer", args="観点A: ミッション達成度 — ...")
 Skill(skill="mission-reviewer", args="観点B: 正確性")
 Skill(skill="mission-reviewer", args="観点C: 実用性")
-# オプション: 観点D (Complex/Critical のみ、採点除外)
 # reviewer JSON 保存後: Bash(command="python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py aggregate-reviews --iteration N --input /tmp/mission-reviewer-iter-N-<mission8>-a.json --input /tmp/mission-reviewer-iter-N-<mission8>-b.json --out /tmp/mission-scorer-iter-N-<mission8>.json --json")
 # Bash(command="python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score --iteration N --scoring-json /tmp/mission-scorer-iter-N-<mission8>.json")
 Skill(skill="mission-critic", args="スコア結果 + 成果物 → 改善案")
 ```
-
-**観点 D の運用 (EPT 由来)**: 観点 D は Reviewer に **採点させず**、Executor の指示明瞭度フィードバックを「次 iter Planner への改善案」に変換させる。Critic が「Planner 申し送り」枠で受け取って次 iter の args に含める。Simple/Standard では省略可。
+**観点 D の運用 (EPT 由来)**: 観点 D は Reviewer に **採点させず**、Executor の指示明瞭度フィードバックを Critic の `### 実行計画 (次 iteration)` に統合させる。finding id のみなら次 iter の executor args に含め、`new` があれば planner args に含める。Simple/Standard では省略可。
 
 **Simple 級は executor インライン可 (P3-5)**: 複雑度 Simple (単一ファイル・1ステップ) では mission-executor を spawn せず orchestrator が直接実行してよい (実測根拠: refs/changelog.md P3-5)。Standard 以上はコンテキスト圧迫防止のため spawn 必須。なお複雑度に関わらず、サブエージェントに書込権限がないパス (dotfiles 等) への変更はインラインで行う。
 
-**iter 2 以降は差分レビュー (P2)**: フルレビュー (Reviewer N 名) は **iter 1 のみ**。**この差分縮小は Reviewer のみが対象**。`mission-planner` / `mission-executor` は周回ごとに走り続ける (Phase 6 の非合格枝は Critic → **Phase 2 (planner) へ戻る**。planner は Critic の「Planner 申し送り」を反映した軽量再計画として iter2+ でも呼び、省略しない)。iter 2 以降の「前 iter 指摘の修正」周回では Reviewer を **検証担当 1 名** に絞り、args に (a) 前 iter の High/Medium 指摘リスト + 修正コミット一覧 (b) 「指摘が解消されたか・修正による新規デグレがないかのみ検証。全 diff の再レビューは不要。**採点は絶対評価を維持 (Low 残存で 5.0 禁止)。解消の確認は加点理由にしない**」を明記する。例外: iter 2 以降で**新機能を追加**した場合はその部分だけフルレビューに戻す (実測根拠: refs/changelog.md P2)。
+**iter 2 以降は差分レビュー (P2)**: フルレビュー (Reviewer N 名) は **iter 1 のみ**。iter 2 以降の「前 iter 指摘の修正」周回では Reviewer を **検証担当 1 名** に絞り、args に (a) 前 iter の High/Medium 指摘リスト + 修正コミット一覧 (b) 「指摘が解消されたか・修正による新規デグレがないかのみ検証。全 diff の再レビューは不要。**採点は絶対評価を維持 (Low 残存で 5.0 禁止)。解消の確認は加点理由にしない**」を明記する。例外: iter 2 以降で Critic 計画に `new` が含まれる場合は、その追加スコープだけ planner を通してから該当部分をフルレビューに戻す (実測根拠: refs/changelog.md P2)。
 
 **インライン修正の Maker-Checker (M6)**: orchestrator がレビュー指摘 (Medium 以上) を自らインライン修正した場合、grep・検算等の**自己検証のみで合格にしてはならない**。差分レビュアー 1 名に修正 diff の再確認を依頼してから push-score / mark-passes に進む (Low のみの修正は自己検証で可)。
 
