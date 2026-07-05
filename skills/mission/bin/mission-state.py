@@ -2996,23 +2996,34 @@ def _archive_scoring_json(cwd: Path, iteration: int, data: dict, entry: dict, pa
     return str(dst)
 
 
-def _warn_on_score_item_mismatch(args, items: dict) -> None:
-    """Warn when self-reported scalar scores diverge from the supplied item scores."""
+def _reject_on_score_item_mismatch(args, items: dict) -> None:
+    """Reject (exit 2) when self-reported scores INFLATE above the item scores (#122).
+
+    Only the legacy --items path supplies self-reported composite/min_item; the
+    --scoring-json path recomputes both from items, so this cannot fire there.
+    The gate uses the stored self-reported values, so over-reporting is the
+    bypass to close ("全項目 3.0 でも min_item 4.0 と申告すれば合格"). It was
+    previously only a WARNING and is now a hard error. Under-reporting is left
+    permitted because it is conservative (it can only make the gate stricter).
+    """
     numeric_values = [float(v) for v in items.values() if isinstance(v, (int, float)) and not math.isnan(float(v))]
     if not numeric_values:
         return
     item_mean = sum(numeric_values) / len(numeric_values)
     item_min = min(numeric_values)
-    warnings = []
-    if abs(args.composite - item_mean) > 0.1:
-        warnings.append(f"composite={args.composite} vs items mean={item_mean:.2f}")
-    if abs(args.min_item - item_min) > 0.1:
-        warnings.append(f"min_item={args.min_item} vs items min={item_min:.2f}")
-    if warnings:
+    errors = []
+    if args.composite - item_mean > 0.1:
+        errors.append(f"composite={args.composite} > items mean={item_mean:.2f}")
+    if args.min_item - item_min > 0.1:
+        errors.append(f"min_item={args.min_item} > items min={item_min:.2f}")
+    if errors:
         print(
-            "WARNING: items-derived score mismatch: " + "; ".join(warnings),
+            "ERROR: 自己申告スコアが items 明細より上振れしています (許容 0.1 超): "
+            + "; ".join(errors)
+            + "。composite/min_item を items から算出した値に下げるか、--scoring-json を使ってください。",
             file=sys.stderr,
         )
+        sys.exit(2)
 
 
 def _validate_consensus_policy(data: dict, items: dict) -> None:
@@ -3089,14 +3100,32 @@ def cmd_push_score(args):
                     file=sys.stderr,
                 )
                 sys.exit(2)
+        print(
+            "DeprecationWarning: push-score の --items 経路は将来のマイナーリリースで削除予定です。"
+            " --scoring-json を使用してください (#122)。",
+            file=sys.stderr,
+        )
         items = _validate_score_args(args)
-        _warn_on_score_item_mismatch(args, items)
+        _reject_on_score_item_mismatch(args, items)
     _reject_normalized_scale(items)
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
         now = iso_now()
         _validate_consensus_policy(data, items)
+        # #122: 同一 iteration の再 push は gate 迂回の温床 (低スコア push 後に
+        # 高スコアで上書き)。再 push には差し替え理由を必須化する。旧 entry は履歴として残す。
+        resubmit_reason = getattr(args, "resubmit_reason", None)
+        already_scored = any(
+            h.get("iteration") == args.iteration for h in data.get("score_history", [])
+        )
+        if already_scored and not resubmit_reason:
+            print(
+                f"ERROR: iteration {args.iteration} は既に採点済みです。"
+                ' 同一 iteration を再 push する場合は --resubmit-reason "<理由>" を指定してください (#122)。',
+                file=sys.stderr,
+            )
+            sys.exit(2)
         entry = {
             "iteration": args.iteration,
             "composite": args.composite,
@@ -3104,6 +3133,8 @@ def cmd_push_score(args):
             "items": items,
             "timestamp": now,
         }
+        if resubmit_reason:
+            entry["resubmit_reason"] = resubmit_reason
         if args.notes:
             entry["notes"] = args.notes
         # Issue #3: open_high を保存 (mark-passes gate で参照)
@@ -3945,6 +3976,8 @@ def _build_parser():
                          help="Scorer の Markdown 出力ファイルパス。指定すると .mission-state/archive/iter-N-scoring.md にコピー保存される (案 1: ログ充実化)")
     p_score.add_argument("--open-high", type=int, default=0, dest="open_high",
                          help="未解決の High 指摘件数 (mark-passes の gate で使用)。--scoring-json に open_high があればそちらを優先")
+    p_score.add_argument("--resubmit-reason", default=None, dest="resubmit_reason",
+                         help="同一 iteration を再 push する際に必須 (#122)。理由を score_history entry の resubmit_reason に記録する")
     p_score.set_defaults(func=cmd_push_score)
 
     p_halt = sub.add_parser("mark-halt", help="halt_reason を立てて停止")

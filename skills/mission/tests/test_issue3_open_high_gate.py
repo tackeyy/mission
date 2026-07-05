@@ -2,9 +2,16 @@
 import json
 
 
-def _push_score(run_cli, state_dir, iteration=1, composite=4.5, min_item=4.0,
+def _push_score(run_cli, state_dir, iteration=1, composite=None, min_item=None,
                 open_high=0, items=None):
-    items = items or {"mission_achievement": composite, "accuracy": min_item}
+    # #122: composite/min_item must not inflate above the items detail. Derive them
+    # from items by default so these gate tests stay consistent with the new check.
+    items = items or {"mission_achievement": 4.5, "accuracy": 4.0}
+    numeric = [v for v in items.values() if isinstance(v, (int, float))]
+    if composite is None:
+        composite = round(sum(numeric) / len(numeric), 2)
+    if min_item is None:
+        min_item = min(numeric)
     args = [
         "push-score",
         "--iteration", str(iteration),
@@ -30,7 +37,7 @@ def test_push_score_open_high_default_zero(state_dir, run_cli):
     run_cli(
         "push-score",
         "--iteration", "1",
-        "--composite", "4.5",
+        "--composite", "4.25",
         "--min-item", "4.0",
         "--items", json.dumps(items),
         cwd=state_dir.parent,
@@ -53,7 +60,7 @@ def test_mark_passes_rejects_when_open_high_nonzero(state_dir, run_cli, read_sta
 
 def test_mark_passes_passes_when_open_high_zero(state_dir, run_cli, read_state):
     """open_high=0 なら mark-passes は通過する。"""
-    _push_score(run_cli, state_dir, open_high=0, composite=4.5, min_item=4.0)
+    _push_score(run_cli, state_dir, open_high=0, composite=4.25, min_item=4.0)
     r = run_cli("mark-passes", cwd=state_dir.parent)
     assert r.returncode == 0, f"expected 0, got {r.returncode}\nstderr: {r.stderr}"
     s = read_state(state_dir)
