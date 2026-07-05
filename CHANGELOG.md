@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Command providers can now classify explicit approval or human-input blockers as `awaiting-input` through `result_contract.awaiting_input_markers` or `result_contract.awaiting_input_exit_codes`, instead of flattening optional external-review blockers into generic failures (#145).
 
+### Changed
+- Specialist registry documentation now separates external-send, browser automation, browser session material, and paid quota consent scopes, making clear that first-use consent is not blanket approval for session-cookie reuse or paid model usage (#146).
+
 ## [1.1.0] - 2026-07-05
 
 ### Added
