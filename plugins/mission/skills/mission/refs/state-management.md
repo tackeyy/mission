@@ -67,6 +67,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py mark-halt --re
 # 正しい順序 (refresh-pid が先) で原子的に実行し、next の出力に resume サマリ
 # ({"pid_refreshed","reactivated","cleaned_empty","halted_stale","dry_run"}) を添えて返す。
 # refresh-pid が cleanup-stale より先に走るため、復帰直後の旧 (dead) PID でも自 state を orphan halt しない。
+# cleanup-stale は常に cwd スコープ (MISSION_SEARCH_ROOTS は無視) で、他プロジェクトを巻き込まない。
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py resume            # [--dry-run] [--force]
 
 # R1 (個別コマンド。通常は resume を使う): state.pid を現セッションの agent CLI PID に更新

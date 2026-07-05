@@ -3394,6 +3394,10 @@ def _capture_command_output(fn, ns) -> tuple[int, str]:
     Used by `resume` to compose existing subcommands without duplicating their
     logic. stderr is left untouched (errors surface to the user naturally). A
     SystemExit is caught so one step's exit does not abort the whole sequence.
+
+    Note: redirect_stdout mutates process-global sys.stdout, so this is not
+    thread-safe. `resume` runs the steps sequentially in a single thread, so
+    this is fine; do not call it from concurrent threads.
     """
     buf = io.StringIO()
     code = 0

@@ -1,6 +1,18 @@
 """#123: resume コマンド (refresh-pid -> cleanup-empty -> cleanup-stale -> next 統合) のテスト."""
 
+import argparse
+import importlib.util
 import json
+from pathlib import Path
+
+MISSION_STATE_PY = Path(__file__).resolve().parent.parent / "bin" / "mission-state.py"
+
+
+def _load_module():
+    spec = importlib.util.spec_from_file_location("gs_resume", MISSION_STATE_PY)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
 
 
 def _make_foreign_state(proj_dir, sid="cx-foreign", pid=99999999, **overrides):
@@ -22,12 +34,55 @@ def _make_foreign_state(proj_dir, sid="cx-foreign", pid=99999999, **overrides):
     return sd / f"{sid}.json"
 
 
+def test_resume_invokes_subcommands_in_fixed_order(tmp_path, monkeypatch):
+    """順序保証を直接検証: resume は refresh-pid → cleanup-empty → cleanup-stale → next の順で呼ぶ。
+
+    Major review 対応: 実運用の危険シナリオ (loop_active=True かつ dead pid) は
+    MISSION_FORCE_PID_IS_AGENT が全 pid に効くため subprocess では作れない。そこで
+    合成対象の cmd_* を stub に差し替え、呼び出し順そのもの (refresh-pid < cleanup-stale)
+    を機械的に検証する。これが「自 state を先に pid 更新してから cleanup する」保証の本体。
+    """
+    m = _load_module()
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    sessions = tmp_path / ".mission-state" / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "test.json").write_text(json.dumps({
+        "loop_active": True, "passes": False, "halt_reason": "",
+        "phase": "executing", "iteration": 1, "session_id": "test",
+        "project_root": str(tmp_path), "pid": 0, "score_history": [],
+    }))
+    calls = []
+
+    def _rec(name, out):
+        def stub(ns):
+            calls.append(name)
+            print(out)
+        return stub
+
+    monkeypatch.setattr(m, "cmd_refresh_pid", _rec("refresh-pid", '{"reactivated": false}'))
+    monkeypatch.setattr(m, "cmd_cleanup_empty", _rec("cleanup-empty", '{"action": "nothing"}'))
+    monkeypatch.setattr(m, "cmd_cleanup_stale", _rec("cleanup-stale", '{"halted": []}'))
+    monkeypatch.setattr(m, "cmd_next", _rec("next", '{"next_action": "run-planner"}'))
+    monkeypatch.chdir(tmp_path)
+
+    m.cmd_resume(argparse.Namespace(force=False, dry_run=False))
+
+    assert calls == ["refresh-pid", "cleanup-empty", "cleanup-stale", "next"]
+    # 核心の不変条件: refresh-pid は cleanup-stale より必ず先。
+    assert calls.index("refresh-pid") < calls.index("cleanup-stale")
+
+
 def test_resume_active_state_returns_next_action(state_dir, run_cli):
-    """active state で resume すると next_action と resume サマリを返す (rc 0)."""
-    r = run_cli("resume", "--json", cwd=state_dir.parent)
+    """active state で resume すると next_action と resume サマリを返す (rc 0)。
+
+    FORCE=1 で refresh 後 pid を agent 扱いに固定し、cleanup-stale が自 state を halt しない
+    ようにして (非 agent CI 環境での orphan halt 誤 pass を防ぐ)、真に planning 系が返ることを見る。
+    """
+    r = run_cli("resume", "--json", cwd=state_dir.parent,
+                env_extra={"MISSION_FORCE_PID_IS_AGENT": "1"})
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
-    assert out.get("next_action")  # planning 系の何か
+    assert out.get("next_action") in {"run-planner", "run-executor", "run-reviewers", "run-scorer", "resume"}
     assert "resume" in out
     assert set(out["resume"]) >= {"pid_refreshed", "reactivated", "cleaned_empty", "halted_stale", "dry_run"}
     assert out["resume"]["pid_refreshed"] is True
@@ -51,11 +106,13 @@ def test_resume_no_state_returns_init(tmp_path, run_cli):
     assert out["resume"]["pid_refreshed"] is False
 
 
-def test_resume_reactivates_orphan_halt_and_keeps_it(state_dir, run_cli):
-    """orphan halt された自 state を resume が再活性化し、後続 cleanup で再 halt されない.
+def test_resume_reactivates_orphan_halt(state_dir, run_cli):
+    """orphan halt された自 state を resume (内部 refresh-pid) が再活性化する。
 
-    MISSION_FORCE_PID_IS_AGENT=1 で refresh 後の pid を agent 扱いに固定し、
-    refresh-pid が先に走る (=cleanup-stale が自 state を skip する) 順序保証を検証する。
+    注: これは refresh-pid の再活性化機能の検証であって、順序保証そのものではない
+    (loop_active=False の state は cleanup-stale が無条件 skip するため前後で結果は同じ)。
+    順序保証は test_resume_invokes_subcommands_in_fixed_order が担う。
+    FORCE=1 は cleanup-stale が (再活性化後の) 自 state を再 halt しないための固定。
     """
     sf = state_dir / "sessions" / "test.json"
     data = json.loads(sf.read_text())
