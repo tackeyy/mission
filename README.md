@@ -8,12 +8,13 @@
 **English** | [Japanese](README.ja.md)
 
 `mission` is an OSS loop-engineering plugin for Claude Code and Codex. It keeps
-agentic work moving until a recorded plan, review, score, and state gate say the
-mission is actually done.
+agentic work moving until a recorded plan, reviewer evidence, aggregated score,
+and state gate say the mission is actually done.
 
-It plans, executes, reviews, scores, and iterates until the configured threshold
-is reached. A Stop hook keeps the loop from ending early while an active mission is
-still below the passing gate.
+It plans, executes, collects `mission-review/1` reviewer output, aggregates that
+review evidence into `push-score --scoring-json`, and iterates until the
+configured threshold is reached. A Stop hook keeps the loop from ending early
+while an active mission is still below the passing gate.
 
 > Prompt engineering tells an agent what to do. Loop engineering defines how the
 > agent keeps working until the job is actually done.
@@ -26,14 +27,14 @@ stop an agent from declaring success before the work passes a quality gate?"
 `mission` is a quality-gated loop for multi-step agent work:
 
 ```text
-plan -> execute -> review -> score -> iterate
+plan -> execute -> review -> aggregate score -> iterate
 ```
 
 It is designed for the loop-engineering moment: recurring agent systems,
 workflows, skills, plugins, and sub-agents are becoming the unit of leverage, but
 a loop still needs a deterministic way to decide when it may stop. `mission`
-provides that completion gate with `.mission-state`, reviewer/scorer phases, and
-threshold-based pass/fail state.
+provides that completion gate with `.mission-state`, reviewer JSON,
+`aggregate-reviews`, findings evidence, and threshold-based pass/fail state.
 
 For public launch positioning, GitHub topics, and a comparison against `/goal`,
 `ralph-loop`, and Superpowers, see
@@ -52,12 +53,16 @@ implemented as a local Markdown artifact with explicit opt-in publish evidence.
 - Mission orchestration skill: `skills/mission`
 - Five supporting skills: planner, executor, reviewer, critic, and scorer
 - State management CLI for `.mission-state` sessions
+- Deterministic `aggregate-reviews` scoring from reviewer JSON, with High-finding
+  evidence and review-agreement gates before `mark-passes`
 - Local-first mission artifact CLI for auditable completion evidence
   ([contract](docs/MISSION_ARTIFACTS.md))
 - Multi-session state isolation for Claude Code and Codex
+- `mission-state.py resume` for compaction/resume recovery ordering
 - Stop hook that blocks premature completion while a mission is still active
 - Optional specialist registry and beginner presets for domain evidence providers ([design](skills/mission/refs/specialist-registry.md))
-- Python test suite covering state routing, scoring gates, and hook behavior
+- Python test suite covering state routing, review aggregation, scoring gates,
+  artifact gates, and hook behavior
 
 ## Competitive Positioning
 
@@ -122,7 +127,7 @@ workflow claim.
 | `skills/mission-executor/` | Execution subskill |
 | `skills/mission-reviewer/` | Peer-review subskill |
 | `skills/mission-critic/` | Iteration-improvement subskill |
-| `skills/mission-scorer/` | Five-item scoring subskill |
+| `skills/mission-scorer/` | Fallback prose-to-JSON converter for reviewer output |
 | `scripts/mission-stop-guard.sh` | Stop hook used to keep active missions running |
 | `claude-hooks/hooks.json` | Claude Code Stop hook declaration |
 | `.claude-plugin/` | Claude Code plugin metadata and marketplace manifest |
@@ -205,9 +210,10 @@ Before marketplace submission, run through
 ```
 
 The orchestrator records assumptions, decomposes the mission, executes work,
-collects reviews, scores the result, and repeats until it passes or reaches a
-halt condition. See [`skills/mission/SKILL.md`](skills/mission/SKILL.md) for the full
-operating protocol.
+collects reviewer JSON, runs `aggregate-reviews`, records the result with
+`push-score --scoring-json`, and repeats until `mark-passes` accepts the state or
+a halt condition is reached. See [`skills/mission/SKILL.md`](skills/mission/SKILL.md)
+for the full operating protocol.
 
 ## Requirements
 
@@ -244,7 +250,7 @@ python3 -m pytest -q
 Current local verification:
 
 ```text
-327 passed
+552 passed
 ```
 
 Additional project-specific testing guidance is in
