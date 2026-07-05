@@ -135,6 +135,7 @@ def test_counterbalanced_plan_alternates_first_arm_by_task_index():
     assert (plan[2][0]["id"], plan[2][1], plan[2][2]) == ("t1", "mission", 1)
     assert (plan[3][0]["id"], plan[3][1], plan[3][2]) == ("t1", "goal_only", 2)
     assert (plan[4][0]["id"], plan[4][1], plan[4][2]) == ("t2", "goal_only", 1)
+    assert (plan[5][0]["id"], plan[5][1], plan[5][2]) == ("t2", "mission", 2)
     # Both runners expose an identical counterbalancing helper.
     other = _load_official_goal_runner()
     plan2 = other.counterbalanced_plan(tasks, ("claude_code_goal_command", "mission"))

@@ -65,8 +65,9 @@ def score_from_signals(validator_pass: bool, marker_score: float | None) -> tupl
 
     The arm identity is never consulted here; the same artifact signals produce
     the same score for any arm. Returns (quality_score, evidence_completeness).
-        quality = 1.0 + 3.0 * validator_pass + 1.0 * marker_score
-    Marker-less tasks (marker_score is None) collapse to 1.0 (fail) or 4.0 (pass).
+        quality = 1.0 + 3.0 * validator_pass + 1.0 * (marker_score or 0.0)
+    Marker-less tasks (marker_score is None -> treated as 0.0) collapse to 1.0
+    (fail) or 4.0 (pass).
     """
     base = marker_score if marker_score is not None else 0.0
     value = round(1.0 + 3.0 * (1.0 if validator_pass else 0.0) + 1.0 * base, 2)
@@ -313,6 +314,7 @@ def run_one(task: dict, arm: str, run_id: str, starting_commit: str, run_root: P
         "validator_pass": evaluation["validator_pass"],
         "human_quality_score": evaluation["human_quality_score"],
         "quality_score_method": evaluation["quality_score_method"],
+        "quality_marker_score": evaluation["quality_marker_score"],
         "intervention_count": evaluation["intervention_count"],
         "resume_success": evaluation["resume_success"],
         "evidence_completeness": evaluation["evidence_completeness"],
