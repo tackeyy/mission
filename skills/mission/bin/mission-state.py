@@ -27,8 +27,10 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import hashlib
+import io
 import json
 import math
 import os
@@ -3386,6 +3388,84 @@ def cmd_refresh_pid(args):
     }))
 
 
+def _capture_command_output(fn, ns) -> tuple[int, str]:
+    """Run a cmd_* function in-process, capturing its stdout JSON and exit code.
+
+    Used by `resume` to compose existing subcommands without duplicating their
+    logic. stderr is left untouched (errors surface to the user naturally). A
+    SystemExit is caught so one step's exit does not abort the whole sequence.
+    """
+    buf = io.StringIO()
+    code = 0
+    try:
+        with contextlib.redirect_stdout(buf):
+            fn(ns)
+    except SystemExit as e:
+        code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+    return code, buf.getvalue()
+
+
+def cmd_resume(args):
+    """#123: compaction/resume 復帰を 1 コマンドに統合する.
+
+    順序は固定 (refresh-pid → cleanup-empty → cleanup-stale → next)。refresh-pid を
+    先に実行することで、自 state の pid が現 agent CLI に更新されてから cleanup-stale が
+    走り、自分の (復帰直後は旧 dead pid の) state を誤って orphan halt しない。返り値は
+    `next` の出力に resume サマリを添えたもの。
+    """
+    cwd = Path.cwd()
+    dry_run = bool(getattr(args, "dry_run", False))
+    resume = {
+        "pid_refreshed": False,
+        "reactivated": False,
+        "cleaned_empty": False,
+        "halted_stale": 0,
+        "dry_run": dry_run,
+    }
+    sf = resolve_state_file(cwd)
+
+    # 1. refresh-pid を最優先 (cleanup-stale より必ず先)。state 不在時は skip。
+    if sf.exists():
+        code, out = _capture_command_output(
+            cmd_refresh_pid,
+            argparse.Namespace(force=bool(getattr(args, "force", False)), no_reactivate=False),
+        )
+        if code not in (0, None):
+            # foreign live owner 等 (refresh-pid が stderr に理由を出して exit 済)。
+            sys.exit(code)
+        resume["pid_refreshed"] = True
+        try:
+            resume["reactivated"] = bool(json.loads(out).get("reactivated"))
+        except (ValueError, AttributeError):
+            pass
+
+    # 2. cleanup-empty (空 .mission-state/ を rmdir)。
+    _, ce_out = _capture_command_output(cmd_cleanup_empty, argparse.Namespace(path=str(cwd)))
+    try:
+        resume["cleaned_empty"] = json.loads(ce_out).get("action") == "removed"
+    except ValueError:
+        pass
+
+    # 3. cleanup-stale --root cwd (dry-run 指定時は --execute しない)。
+    _, cs_out = _capture_command_output(
+        cmd_cleanup_stale,
+        argparse.Namespace(root=str(cwd), execute=not dry_run),
+    )
+    try:
+        resume["halted_stale"] = len(json.loads(cs_out).get("halted", []))
+    except ValueError:
+        pass
+
+    # 4. next (state から次の 1 手を決定論導出)。
+    _, next_out = _capture_command_output(cmd_next, argparse.Namespace())
+    try:
+        out_obj = json.loads(next_out)
+    except ValueError:
+        out_obj = {"next_action": "init", "summary": "state を判定できませんでした"}
+    out_obj["resume"] = resume
+    print(json.dumps(out_obj, ensure_ascii=False))
+
+
 def cmd_update_project_root(args):
     """P2-1: project_root を正しいパスに更新する (陳腐化救済用).
 
@@ -3988,6 +4068,12 @@ def _build_parser():
     p_refresh.add_argument("--force", action="store_true", help="既存 pid が alive な agent CLI プロセスでも強制継承")
     p_refresh.add_argument("--no-reactivate", action="store_true", help="orphan halt の解除を行わない (純粋に pid だけ更新)")
     p_refresh.set_defaults(func=cmd_refresh_pid)
+
+    p_resume = sub.add_parser("resume", help="#123: 復帰処理を統合実行 (refresh-pid → cleanup-empty → cleanup-stale → next)")
+    p_resume.add_argument("--force", action="store_true", help="refresh-pid に渡す: 既存 alive agent pid でも強制継承")
+    p_resume.add_argument("--dry-run", action="store_true", dest="dry_run", help="cleanup-stale を dry-run にする (halt しない)。refresh-pid/next は通常実行")
+    p_resume.add_argument("--json", action="store_true", help="出力は常に JSON (互換用の no-op フラグ)")
+    p_resume.set_defaults(func=cmd_resume)
 
     p_uproot = sub.add_parser("update-project-root", help="P2-1: project_root を正しいパスに更新 (ディレクトリ移動・rename 後の rescue 用)")
     p_uproot.add_argument("--path", required=True, help="新しい project_root パス")
