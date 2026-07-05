@@ -53,14 +53,34 @@ time budget, and task prompt for both arms.
 | `evidence_completeness` | Whether the run left enough evidence to justify "done": commands, artifacts, reviewer notes, and final state. |
 | `elapsed_minutes` | Wall-clock runtime from first agent action to final answer. |
 | `token_estimate` | Token usage when available. Otherwise leave null. |
+| `model_id` | Truthful model identifier recorded verbatim per run. Required CLI argument (`--model-id`); there is no silent `unknown` fallback. |
+| `arm_order` | `1` if this arm ran first for its task. Used to verify run-order counter-balancing. |
+
+## Automated Scoring (arm-blind)
+
+The automated evaluator never consults the arm label when assigning a score.
+Both runners use the same pure function `score_from_signals(validator_pass,
+marker_score)`:
+
+```
+quality_score = 1.0 + 3.0 * validator_pass + 1.0 * marker_score
+```
+
+Marker-less tasks (no `quality_markers`) collapse to `1.0` (fail) or `4.0`
+(pass). `evidence_completeness` uses the same signals. Identical artifact
+signals therefore produce identical scores for any arm; the earlier
+arm-hardcoded scores (mission fixed at 4.5, goal at 4.0) have been removed.
+`quality_score_method` stays `automated_heuristic_not_blind_human` — the
+automated score is a screen, not a blind human judgement.
 
 ## Protocol
 
 1. Start from a clean checkout or isolated worktree.
 2. For each task in `tasks.json`, run the `goal_only` arm and the `mission` arm
-   from the same starting commit.
-3. Counter-balance run order where practical: alternate which arm runs first by
-   task id so one arm does not always benefit from operator learning.
+   from the same starting commit. Pass `--model-id <truthful id>`.
+3. Run order is counter-balanced deterministically by task index (even index →
+   declared arm order, odd index → reversed), recorded in `arm_order`, so one arm
+   does not always benefit from operator learning.
 4. Do not let either arm see the other arm's transcript.
 5. Store one JSONL record per run using `result.schema.json`.
 6. Run task validators before assigning human quality scores.

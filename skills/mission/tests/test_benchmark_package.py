@@ -15,6 +15,14 @@ def _load_official_goal_runner():
     return module
 
 
+def _load_paired_runner():
+    path = BENCHMARK_DIR / "run_paired_pilot.py"
+    spec = importlib.util.spec_from_file_location("run_paired_pilot", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_mission_vs_goal_pilot_has_exactly_ten_tasks():
     data = json.loads((BENCHMARK_DIR / "tasks.json").read_text(encoding="utf-8"))
     complex_data = json.loads((BENCHMARK_DIR / "tasks.complex.json").read_text(encoding="utf-8"))
@@ -79,6 +87,58 @@ def test_mission_vs_goal_result_schema_matches_declared_arms():
     assert "timeout" in schema["properties"]["blocked_reason"]["enum"]
     assert "max_budget_usd" in schema["properties"]["failure_kind"]["enum"]
     assert schema["properties"]["comparable_attempt"]["type"] == "boolean"
+    # F-1: model_id is required and recorded verbatim; arm_order supports counterbalancing.
+    assert "model_id" in schema["required"]
+    assert schema["properties"]["model_id"]["type"] == "string"
+    assert schema["properties"]["arm_order"]["type"] == "integer"
+
+
+def test_score_from_signals_is_arm_blind_and_deterministic():
+    # F-1: both runners score from the same pure signals with no arm identity.
+    import inspect
+
+    for module in (_load_paired_runner(), _load_official_goal_runner()):
+        score = module.score_from_signals
+        params = list(inspect.signature(score).parameters)
+        assert "arm" not in params, f"{module.__name__}.score_from_signals must not take arm"
+        # Marker-less: pass -> 4.0, fail -> 1.0. Same output regardless of caller/arm.
+        assert score(True, None) == (4.0, 4.0)
+        assert score(False, None) == (1.0, 1.0)
+        # With markers: 1 + 3*pass + marker.
+        assert score(True, 0.5) == (4.5, 4.5)
+        assert score(True, 1.0) == (5.0, 5.0)
+        # Callers nullify marker_score on a failed validator, so (False, 0.5) does
+        # not occur in practice; the pure function stays a literal deterministic map.
+        assert score(False, 0.5) == (1.5, 1.5)
+
+
+def test_paired_runner_has_no_arm_hardcoded_scores():
+    # Regression guard against F-1: the old arm-hardcoded values must be gone.
+    source = (BENCHMARK_DIR / "run_paired_pilot.py").read_text(encoding="utf-8")
+    assert "quality_score = 4.5" not in source
+    assert "evidence_score = 4.7" not in source
+    assert "evidence_score = 3.8" not in source
+    assert 'arm == "mission" and mission_state_passes' not in source
+
+
+def test_counterbalanced_plan_alternates_first_arm_by_task_index():
+    module = _load_paired_runner()
+    tasks = [{"id": "t0"}, {"id": "t1"}, {"id": "t2"}]
+    arms = ("goal_only", "mission")
+    plan = module.counterbalanced_plan(tasks, arms)
+
+    # Two records per task, preserving arm_order 1/2.
+    assert len(plan) == 6
+    # Even index task -> declared order first; odd index -> reversed.
+    assert (plan[0][0]["id"], plan[0][1], plan[0][2]) == ("t0", "goal_only", 1)
+    assert (plan[1][0]["id"], plan[1][1], plan[1][2]) == ("t0", "mission", 2)
+    assert (plan[2][0]["id"], plan[2][1], plan[2][2]) == ("t1", "mission", 1)
+    assert (plan[3][0]["id"], plan[3][1], plan[3][2]) == ("t1", "goal_only", 2)
+    assert (plan[4][0]["id"], plan[4][1], plan[4][2]) == ("t2", "goal_only", 1)
+    # Both runners expose an identical counterbalancing helper.
+    other = _load_official_goal_runner()
+    plan2 = other.counterbalanced_plan(tasks, ("claude_code_goal_command", "mission"))
+    assert plan2[2][1] == "mission" and plan2[2][2] == 1
 
 
 def test_mission_vs_goal_docs_link_benchmark_package():
@@ -369,7 +429,8 @@ def test_mission_vs_goal_protocol_controls_review_bias():
     runbook = (BENCHMARK_DIR / "official-goal-rerun-runbook.md").read_text(encoding="utf-8")
     runner_module = _load_official_goal_runner()
 
-    assert "Counter-balance run order" in protocol
+    assert "counter-balanced deterministically by task index" in protocol
+    assert "Automated Scoring (arm-blind)" in protocol
     assert "Human Quality Rubric" in protocol
     assert "score blind to arm label" in protocol
     assert "--tasks-file" in protocol
