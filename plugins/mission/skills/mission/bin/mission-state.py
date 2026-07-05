@@ -2575,9 +2575,9 @@ def _derive_next_action(data: dict) -> dict:
             "command_hint": "mission-state.py mark-passes",
         }
     return {
-        "next_action": "run-scorer",
-        "summary": f"iteration {iteration}: mission-scorer を起動し、構造化 JSON を push-score --scoring-json で記録する",
-        "command_hint": f"Skill: mission-scorer → mission-state.py push-score --iteration {iteration} --scoring-json /tmp/mission-scorer-iter-{iteration}-{mid8}.json",
+        "next_action": "aggregate-reviews",
+        "summary": f"iteration {iteration}: reviewer の mission-review/1 JSON を aggregate-reviews で集計し、push-score --scoring-json で記録する",
+        "command_hint": f"mission-state.py aggregate-reviews --iteration {iteration} --input /tmp/mission-reviewer-iter-{iteration}-{mid8}-a.json --out /tmp/mission-scorer-iter-{iteration}-{mid8}.json && mission-state.py push-score --iteration {iteration} --scoring-json /tmp/mission-scorer-iter-{iteration}-{mid8}.json",
     }
 
 
@@ -2799,6 +2799,8 @@ def cmd_set(args):
 # H2 (2026-06-10): スコア項目キーの正規形とエイリアス。実ログで表記揺れが混在し
 # stats 横断集計・min_item 検証が壊れたため push-score 時に正規化する。
 CANONICAL_SCORE_KEYS = {"mission_achievement", "accuracy", "completeness", "usability", "reviewer_consensus"}
+REVIEW_SCORE_KEYS = ("mission_achievement", "accuracy", "completeness", "usability")
+REVIEW_SEVERITIES = {"High", "Medium", "Low"}
 SCORE_KEY_ALIASES = {
     "usefulness": "usability",
     "practicality": "usability",
@@ -2982,6 +2984,205 @@ def _archive_scoring_json(cwd: Path, iteration: int, data: dict, entry: dict, pa
     out.update(payload)
     dst.write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return str(dst)
+
+
+def _review_error(path: Path, message: str) -> None:
+    print(f"ERROR: {path}: {message}", file=sys.stderr)
+    sys.exit(2)
+
+
+def _load_review_json(path_str: str, expected_iteration: int) -> dict:
+    src = Path(path_str)
+    if not (src.exists() and src.is_file()):
+        print(f"ERROR: reviewer input not found: {src}", file=sys.stderr)
+        sys.exit(2)
+    try:
+        payload = json.loads(src.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        print(f"ERROR: reviewer input is invalid JSON: {src}: {e}", file=sys.stderr)
+        sys.exit(2)
+    if not isinstance(payload, dict):
+        _review_error(src, "review must be a JSON object")
+    if payload.get("schema") != "mission-review/1":
+        _review_error(src, "schema must be mission-review/1")
+    if payload.get("iteration") != expected_iteration:
+        _review_error(src, f"iteration must be {expected_iteration}")
+    perspective = payload.get("perspective")
+    if not isinstance(perspective, str) or not perspective.strip():
+        _review_error(src, "perspective must be a non-empty string")
+    findings = payload.get("findings")
+    if not isinstance(findings, list):
+        _review_error(src, "findings must be a list")
+    seen_ids = set()
+    for idx, finding in enumerate(findings, start=1):
+        if not isinstance(finding, dict):
+            _review_error(src, f"finding {idx} must be an object")
+        fid = finding.get("id")
+        if not isinstance(fid, str) or not fid.startswith(f"{perspective}-"):
+            _review_error(src, f"finding {idx} id must start with '{perspective}-'")
+        if fid in seen_ids:
+            _review_error(src, f"duplicate finding id: {fid}")
+        seen_ids.add(fid)
+        severity = finding.get("severity")
+        if severity not in REVIEW_SEVERITIES:
+            _review_error(src, f"finding {fid} severity must be one of {sorted(REVIEW_SEVERITIES)}")
+        axis = finding.get("axis")
+        if axis not in REVIEW_SCORE_KEYS:
+            _review_error(src, f"finding {fid} axis must be one of {list(REVIEW_SCORE_KEYS)}")
+        if severity in {"High", "Medium"} and not str(finding.get("evidence") or "").strip():
+            _review_error(src, f"finding {fid} evidence is required for {severity}")
+    if "scores" not in payload:
+        _review_error(src, "scores field is required; use null only for findings-only reviewers")
+    scores = payload.get("scores")
+    if scores is None:
+        return payload
+    if not isinstance(scores, dict) or set(scores) != set(REVIEW_SCORE_KEYS):
+        _review_error(src, f"scores must contain exactly {list(REVIEW_SCORE_KEYS)}")
+    for key, value in scores.items():
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or math.isnan(float(value)) or not (SCORE_MIN <= float(value) <= SCORE_MAX):
+            _review_error(src, f"score {key} must be a {SCORE_MIN}-{SCORE_MAX} number")
+    values = [float(scores[key]) for key in REVIEW_SCORE_KEYS]
+    if max(values) <= 1.0:
+        _review_error(src, "scores look like 0-1 normalized scale; use 0-5 scale")
+    if len(set(values)) == 1 and not str(payload.get("same_score_note") or "").strip():
+        _review_error(src, "same_score_note is required when all four scores are equal")
+    return payload
+
+
+def _cap_for_findings(findings: list[dict]) -> float | None:
+    counts = {"High": 0, "Medium": 0, "Low": 0}
+    for finding in findings:
+        counts[finding["severity"]] += 1
+    if counts["High"] >= 1:
+        return 3.0
+    if counts["Medium"] >= 3:
+        return 3.5
+    if 1 <= counts["Medium"] <= 2:
+        return 4.0
+    if counts["Low"] >= 4:
+        return 4.3
+    if 2 <= counts["Low"] <= 3:
+        return 4.5
+    if counts["Low"] == 1:
+        return 4.7
+    return None
+
+
+def _apply_reviewer_caps(review: dict) -> tuple[dict, list[dict]]:
+    scores = {key: float(review["scores"][key]) for key in REVIEW_SCORE_KEYS}
+    cap_log = []
+    for axis in REVIEW_SCORE_KEYS:
+        axis_findings = [f for f in review.get("findings", []) if f.get("axis") == axis]
+        cap = _cap_for_findings(axis_findings)
+        if cap is not None and scores[axis] > cap:
+            cap_log.append({"perspective": review["perspective"], "axis": axis, "original": scores[axis], "cap": cap})
+            scores[axis] = cap
+    return scores, cap_log
+
+
+def _consensus_score(max_delta: float) -> float:
+    if max_delta <= 0.5:
+        return 5.0
+    if max_delta <= 1.0:
+        return 4.0
+    if max_delta <= 1.5:
+        return 3.0
+    if max_delta <= 2.0:
+        return 2.0
+    return 1.0
+
+
+def cmd_aggregate_reviews(args):
+    """Aggregate mission-review/1 reviewer JSON into push-score compatible scoring JSON."""
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
+        sys.exit(1)
+    if args.iteration < 1:
+        print("ERROR: --iteration は 1 以上で指定してください", file=sys.stderr)
+        sys.exit(2)
+    reviews = [_load_review_json(path, args.iteration) for path in args.input]
+    scoring_reviews = [r for r in reviews if r.get("scores") is not None]
+    if not scoring_reviews:
+        print("ERROR: 採点対象 reviewer がありません (scores:null の検証専任のみ)", file=sys.stderr)
+        sys.exit(2)
+
+    adjusted_scores = []
+    cap_log = []
+    excluded = []
+    for review in scoring_reviews:
+        values = [float(review["scores"][key]) for key in REVIEW_SCORE_KEYS]
+        same_score_note = str(review.get("same_score_note") or "")
+        if len(set(values)) == 1 and ("全体印象" in same_score_note or "overall impression" in same_score_note.lower()):
+            excluded.append({"perspective": review["perspective"], "reason": "same-score overall-impression note"})
+            continue
+        adjusted, caps = _apply_reviewer_caps(review)
+        adjusted_scores.append({"perspective": review["perspective"], "scores": adjusted})
+        cap_log.extend(caps)
+    if not adjusted_scores:
+        print("ERROR: 全採点 reviewer が除外されました (Reviewer 独立性に疑念)", file=sys.stderr)
+        sys.exit(2)
+
+    axis_values = {
+        axis: [entry["scores"][axis] for entry in adjusted_scores]
+        for axis in REVIEW_SCORE_KEYS
+    }
+    items = {
+        axis: round(sum(values) / len(values), 2)
+        for axis, values in axis_values.items()
+    }
+    agreement_detail = {
+        axis: {
+            "min": round(min(values), 2),
+            "max": round(max(values), 2),
+            "delta": round(max(values) - min(values), 2),
+        }
+        for axis, values in axis_values.items()
+    }
+    if len(adjusted_scores) >= 2:
+        max_delta = max(detail["delta"] for detail in agreement_detail.values())
+        items["reviewer_consensus"] = _consensus_score(max_delta)
+    open_high = sum(
+        1
+        for review in scoring_reviews
+        for finding in review.get("findings", [])
+        if finding.get("severity") == "High"
+    )
+
+    with StateLock(lock_file(cwd)):
+        data = json.loads(sf.read_text())
+        mission8 = (data.get("mission_id") or "unknown")[:8]
+        evidence_path = state_dir(cwd) / "archive" / f"iter-{args.iteration}-{mission8}-reviews.json"
+        evidence_path.parent.mkdir(parents=True, exist_ok=True)
+        evidence = {
+            "schema": "mission-review-aggregate/1",
+            "iteration": args.iteration,
+            "inputs": reviews,
+            "scoring_perspectives": [entry["perspective"] for entry in adjusted_scores],
+            "excluded": excluded,
+            "cap_log": cap_log,
+            "agreement_detail": agreement_detail,
+            "open_high": open_high,
+        }
+        evidence_path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        out_path = Path(args.out) if args.out else Path("/tmp") / f"mission-scorer-iter-{args.iteration}-{mission8}.json"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "items": items,
+            "notes": f"aggregate-reviews: {len(adjusted_scores)} scoring reviewer(s), {len(reviews) - len(scoring_reviews)} findings-only reviewer(s)",
+            "open_high": open_high,
+            "findings_evidence_path": str(evidence_path),
+            "agreement_detail": agreement_detail,
+        }
+        out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    result = {"ok": True, "out": str(out_path), "findings_evidence_path": str(evidence_path), "open_high": open_high, "items": items}
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(str(out_path))
 
 
 def _reject_on_score_item_mismatch(args, items: dict) -> None:
@@ -4019,6 +4220,15 @@ def _build_parser():
     p_score.add_argument("--resubmit-reason", default=None, dest="resubmit_reason",
                          help="同一 iteration を再 push する際に必須 (#122)。理由を score_history entry の resubmit_reason に記録する")
     p_score.set_defaults(func=cmd_push_score)
+
+    p_agg = sub.add_parser("aggregate-reviews", help="#119: mission-review/1 JSON を決定論集計して push-score 互換 scoring JSON を生成")
+    p_agg.add_argument("--iteration", type=int, required=True)
+    p_agg.add_argument("--input", action="append", required=True,
+                       help="reviewer が出力した mission-review/1 JSON。複数指定可")
+    p_agg.add_argument("--out", default=None,
+                       help="出力する push-score 互換 scoring JSON パス。未指定なら /tmp/mission-scorer-iter-N-<mission8>.json")
+    p_agg.add_argument("--json", action="store_true", help="結果を JSON で出力")
+    p_agg.set_defaults(func=cmd_aggregate_reviews)
 
     p_halt = sub.add_parser("mark-halt", help="halt_reason を立てて停止")
     p_halt.add_argument("--reason", required=True)

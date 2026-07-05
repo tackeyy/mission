@@ -77,10 +77,11 @@ def test_next_reviewing_phase_suggests_parallel_reviewers(state_dir, run_cli):
     assert "並列" in out["summary"] or "parallel" in out["summary"].lower()
 
 
-def test_next_scoring_phase_without_score_suggests_scorer(state_dir, run_cli):
+def test_next_scoring_phase_without_score_suggests_aggregate_reviews(state_dir, run_cli):
     # fixture 既定: phase=scoring, iteration=1, score_history=[]
     out = _next(run_cli, state_dir)
-    assert out["next_action"] == "run-scorer"
+    assert out["next_action"] == "aggregate-reviews"
+    assert "aggregate-reviews" in out["command_hint"]
     assert "--scoring-json" in out["command_hint"]
 
 
@@ -93,14 +94,14 @@ def test_next_scoring_phase_with_current_score_suggests_mark_passes(state_dir, r
     assert out["next_action"] == "mark-passes"
 
 
-def test_next_scoring_with_stale_score_from_previous_iteration_suggests_scorer(state_dir, run_cli):
+def test_next_scoring_with_stale_score_from_previous_iteration_suggests_aggregate_reviews(state_dir, run_cli):
     """score_history が前 iteration のものしかない → 現 iteration の採点が先."""
     _set_state(state_dir, iteration=2, score_history=[
         {"iteration": 1, "composite": 3.2, "min_item": 3.0,
          "items": {"mission_achievement": 3.2}, "timestamp": "2026-07-02T00:00:00Z", "open_high": 0},
     ])
     out = _next(run_cli, state_dir)
-    assert out["next_action"] == "run-scorer"
+    assert out["next_action"] == "aggregate-reviews"
 
 
 def test_next_stagnation_warns_consider_halt(state_dir, run_cli):
