@@ -196,7 +196,7 @@ installed cache path and keep `CLAUDE_PLUGIN_ROOT` as a compatibility alias for
 the current model-visible command text:
 
 ```bash
-export MISSION_PLUGIN_ROOT="${CODEX_HOME:-$HOME/.codex}/plugins/cache/mission-marketplace/mission/1.0.7"
+export MISSION_PLUGIN_ROOT="${CODEX_HOME:-$HOME/.codex}/plugins/cache/mission-marketplace/mission/1.1.0"
 export CLAUDE_PLUGIN_ROOT="$MISSION_PLUGIN_ROOT"
 ```
 
@@ -250,7 +250,7 @@ python3 -m pytest -q
 Current local verification:
 
 ```text
-552 passed
+553 passed
 ```
 
 Additional project-specific testing guidance is in

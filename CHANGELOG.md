@@ -9,9 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-05
+
 ### Added
 - `mission-state.py aggregate-reviews` now converts strict `mission-review/1` reviewer JSON into deterministic `push-score --scoring-json` payloads, including rubric caps, reviewer consensus, open High counts, and archived findings evidence (#119).
 - `mission-state.py specialists log-invocation --selection-source task-required` records task-mandated source retrieval or evidence providers as selected specialists without hard-coding private skill names (#115).
+- `mission-state.py resume` now prints the recovery order for active sessions, including the current mission state, latest artifact, next action, progress checkpoint, and stale-session hints (#123).
+- The benchmark runner now supports arm-blind scoring, counterbalanced order, explicit `model_id` capture, and updated result/report schemas for mission-vs-goal comparisons (#129, #130).
 
 ### Changed
 - `aggregate-reviews` now keeps reviewer agreement out of score `items`, records it as independent `review_agreement` plus `agreement_detail`, and `mark-passes` gates very low agreement (`max-min > 1.5`) before passing (#126).
@@ -20,10 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `mission-state.py` and `mission-audit.py` now share mission state classification, duration, specialist checkpoint, and preparation-marker logic through `skills/mission/lib/mission_common.py`, reducing audit/state drift risk (#127).
 - `mark-passes` now rejects new Standard, Complex, and Critical sessions that lack a `task_profile` plus `specialists_decision.policy` checkpoint, while accepting explicit fallback/degraded decisions as valid checkpoints (#112).
 - `cleanup-stale` can now halt stale active no-score sessions even when their recorded agent PID is still alive, after the configurable `MISSION_STALE_ACTIVE_SECONDS` threshold (#113).
+- Public ref docs and packaged plugin mirrors were swept for OSS portability, removing maintainer-local home paths and private skill names from distributed setup examples (#118, #132).
+- README, Codex setup docs, critic/planner handoff guidance, and slimmed mission skill instructions now match the source scoring flow: `mission-review/1`, `aggregate-reviews`, `push-score --scoring-json`, independent review-agreement gating, and `open_high`/findings evidence pass checks (#128, #134, #137, #140, #141, #142).
 
 ### Fixed
 - Mission audit now recognizes explicit `score_history[].scoring_evidence_path` values and JSON scoring evidence stored in normal or archived worktree `.mission-state` trees (#111).
 - Mission audit now separates fresh active no-score planning sessions from actionable specialist accounting debt, while reporting stale active no-score sessions explicitly in JSON and Markdown output (#113, #114).
+- `push-score --scoring-json` now rejects inflated self-reported scalar scores and requires `--resubmit-reason` before replacing a score for the same iteration, preventing silent score evidence overwrite or transcription inflation (#122, #131).
+- Documentation consistency guards now cover the `open_high` gate, `findings_evidence_path`, `--scoring-json`, `--root`, README test-count freshness, and the v1.1.0 release themes (#128, #134).
 
 ## [1.0.7] - 2026-07-03
 
@@ -165,6 +173,7 @@ First public release.
 - Python test suite covering state routing, scoring gates, and hook behavior.
 - GitHub Actions CI (`push`, `pull_request`, `workflow_dispatch`) with pytest and ShellCheck.
 
+[1.1.0]: https://github.com/tackeyy/mission/releases/tag/v1.1.0
 [1.0.7]: https://github.com/tackeyy/mission/releases/tag/v1.0.7
 [1.0.6]: https://github.com/tackeyy/mission/releases/tag/v1.0.6
 [1.0.5]: https://github.com/tackeyy/mission/releases/tag/v1.0.5

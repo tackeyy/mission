@@ -9,9 +9,13 @@
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-05
+
 ### 追加
 - `mission-state.py aggregate-reviews` を追加し、strict な `mission-review/1` reviewer JSON から、rubric cap・reviewer consensus・open High 件数・findings evidence archive を含む決定論的な `push-score --scoring-json` payload を生成できるようにしました (#119)。
 - `mission-state.py specialists log-invocation --selection-source task-required` を追加し、タスク上必須の情報取得・証跡 provider を、private skill 名をハードコードせず selected specialist として記録できるようにしました (#115)。
+- `mission-state.py resume` を追加し、active session の復帰時に current mission state、latest artifact、next action、progress checkpoint、stale-session hint を含む復旧順序を表示できるようにしました (#123)。
+- benchmark runner に arm-blind scoring、counterbalanced order、明示的な `model_id` 記録、mission-vs-goal 比較用の result/report schema 更新を追加しました (#129, #130)。
 
 ### 変更
 - `aggregate-reviews` が reviewer agreement を score `items` から外し、独立した `review_agreement` と `agreement_detail` として記録するようになりました。`mark-passes` は極端に低い合意 (`max-min > 1.5`) を pass 前に拒否します (#126)。
@@ -20,10 +24,14 @@
 - `mission-state.py` と `mission-audit.py` が、mission state の分類・duration・specialist checkpoint・preparation marker ロジックを `skills/mission/lib/mission_common.py` で共有するようにし、audit と state tool の drift リスクを下げました (#127)。
 - `mark-passes` が、新規 Standard / Complex / Critical session で `task_profile` と `specialists_decision.policy` の checkpoint がない場合に完了を拒否するようにしました。fallback / degraded の明示 decision は有効な checkpoint として扱います (#112)。
 - `cleanup-stale` が、記録された agent PID が生存していても、`MISSION_STALE_ACTIVE_SECONDS` を超えた active no-score session を stale として halt できるようにしました (#113)。
+- public ref docs と packaged plugin mirror を OSS portability の観点で見直し、配布される setup 例から maintainer-local home path と private skill 名を除去しました (#118, #132)。
+- README、Codex setup docs、critic/planner handoff guidance、軽量化した mission skill instructions を現行 source の scoring flow に合わせました。`mission-review/1`、`aggregate-reviews`、`push-score --scoring-json`、独立した review-agreement gate、`open_high` / findings evidence の pass check を前提にしています (#128, #134, #137, #140, #141, #142)。
 
 ### 修正
 - mission audit が `score_history[].scoring_evidence_path` の明示パスと、通常または archived worktree の `.mission-state` に保存された JSON scoring evidence を認識するようにしました (#111)。
 - mission audit が、fresh な active no-score planning session を specialist accounting debt から分離し、stale な active no-score session は JSON / Markdown で明示的に報告するようにしました (#113, #114)。
+- `push-score --scoring-json` が inflated self-reported scalar score を拒否し、同一 iteration の score を置き換える場合は `--resubmit-reason` を必須にしました。これにより score evidence の silent overwrite と転記 inflation を防ぎます (#122, #131)。
+- documentation consistency guard が、`open_high` gate、`findings_evidence_path`、`--scoring-json`、`--root`、README test count の鮮度、v1.1.0 release theme を検査するようになりました (#128, #134)。
 
 ## [1.0.7] - 2026-07-03
 
@@ -165,6 +173,7 @@
 - 状態ルーティング・スコアゲート・hook 挙動をカバーする Python テストスイート。
 - GitHub Actions CI（`push` / `pull_request` / `workflow_dispatch`）。pytest と ShellCheck を実行。
 
+[1.1.0]: https://github.com/tackeyy/mission/releases/tag/v1.1.0
 [1.0.7]: https://github.com/tackeyy/mission/releases/tag/v1.0.7
 [1.0.6]: https://github.com/tackeyy/mission/releases/tag/v1.0.6
 [1.0.5]: https://github.com/tackeyy/mission/releases/tag/v1.0.5
