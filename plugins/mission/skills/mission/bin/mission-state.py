@@ -47,6 +47,13 @@ LIB_DIR = Path(__file__).resolve().parents[1] / "lib"
 if str(LIB_DIR) not in sys.path:
     sys.path.insert(0, str(LIB_DIR))
 
+from mission_common import (  # noqa: E402
+    PREPARATION_ONLY_MARKERS,
+    SPECIALIST_SELECTION_CHECKPOINT_REQUIRED_AT,
+    classify_state as _classify,
+    duration_sec as _duration_sec,
+    parse_iso_datetime,
+)
 from specialist_accounting import candidate_accounting_report  # noqa: E402
 
 SCHEMA_VERSION = 2  # v1: 旧 schema (project_root/pid なし), v2: A-1/A-2/B-3 追加
@@ -255,29 +262,13 @@ APPLIED_SPECIALIST_INVOCATION_STATUSES = {
     "skill-tool-applied",
 }
 
-PREPARATION_ONLY_MARKERS = (
-    "Oracle Browser Review Prepared",
-    "Browser Review Prepared",
-    "Paste the browser oracle review here",
-)
-
-ORACLE_PREPARATION_MARKERS = (
-    *PREPARATION_ONLY_MARKERS,
-    "To capture the oracle review as command-provider output",
-    "Prompt file:",
-    "Result file:",
-    "Packet file:",
-    "Review URL:",
-)
-
 DEFAULT_COMMAND_RESULT_CONTRACTS = {
     "oracle-reviewer": {
         "min_non_template_chars": 200,
-        "forbidden_markers": list(ORACLE_PREPARATION_MARKERS),
+        "forbidden_markers": list(PREPARATION_ONLY_MARKERS),
     },
 }
 
-SPECIALIST_SELECTION_CHECKPOINT_REQUIRED_AT = datetime(2026, 6, 20, 10, 6, 47, tzinfo=timezone.utc)
 SPECIALIST_SELECTION_CHECKPOINT_COMPLEXITIES = {"Standard", "Complex", "Critical"}
 DEFAULT_STALE_ACTIVE_SECONDS = 3 * 60 * 60
 
@@ -566,12 +557,7 @@ def mission_id(mission: str) -> str:
 
 
 def _parse_iso_datetime(value: str | None):
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except Exception:
-        return None
+    return parse_iso_datetime(value)
 
 
 def _mission_started_at(data: dict) -> datetime | None:
@@ -3705,21 +3691,6 @@ def _matches_period(state: dict, since: str | None, until: str | None) -> bool:
     return True
 
 
-def _classify(state: dict) -> str:
-    """PASS / HALT / abandoned / incomplete に分類.
-
-    abandoned = loop を抜けた (loop_active=false) が pass でも halt でもない
-    (set 直叩き等の異常終了)。incomplete = loop_active=true の進行中/放置。
-    """
-    if state.get("passes") is True:
-        return "pass"
-    if state.get("halt_reason"):
-        return "halt"
-    if not state.get("loop_active"):
-        return "abandoned"
-    return "incomplete"
-
-
 def _median(xs: list) -> float | None:
     """外れ値に頑健な中央値。空なら None."""
     if not xs:
@@ -3727,21 +3698,6 @@ def _median(xs: list) -> float | None:
     s = sorted(xs)
     m = len(s) // 2
     return s[m] if len(s) % 2 else (s[m - 1] + s[m]) / 2
-
-
-def _duration_sec(state: dict) -> float | None:
-    started = state.get("started_at")
-    updated = state.get("updated_at")
-    if not started or not updated:
-        return None
-    t1 = _parse_iso_datetime(started)
-    t2 = _parse_iso_datetime(updated)
-    if not (t1 and t2):
-        return None
-    try:
-        return (t2 - t1).total_seconds()
-    except Exception:
-        return None
 
 
 def _collect_states(root: Path) -> list[dict]:
