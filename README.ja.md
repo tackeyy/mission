@@ -8,9 +8,9 @@
 [English](README.md) | **日本語**
 
 `mission` は、Claude Code / Codex 向けの OSS loop engineering プラグインです。
-計画、レビュー、採点、state gate が「本当に完了した」と判断するまで、agentic work を進め続けます。
+計画、`mission-review/1` のレビュー証跡、集計済みスコア、state gate が「本当に完了した」と判断するまで、agentic work を進め続けます。
 
-計画、実行、ピアレビュー、スコアリングを合格閾値に達するまで反復し、Stop hook が早期終了を抑止します。
+計画、実行、`mission-review/1` レビュー出力の収集、`push-score --scoring-json` への集計を合格閾値に達するまで反復し、Stop hook が早期終了を抑止します。
 
 > Prompt engineering は「AI に何を頼むか」。
 > Loop engineering は「AI が完了まで進み続ける仕組みをどう設計するか」。
@@ -23,12 +23,12 @@
 `mission` は、複数ステップの agent work を品質ゲート付きで回す loop です。
 
 ```text
-plan -> execute -> review -> score -> iterate
+plan -> execute -> review -> aggregate score -> iterate
 ```
 
 recurring agent system、workflow、skills、plugins、sub-agent が実務の leverage になり始める一方で、
 loop には「いつ止まってよいか」を決める仕組みが必要です。`mission` は `.mission-state`、
-reviewer/scorer phase、threshold-based pass/fail state で、その completion gate を提供します。
+reviewer JSON、`aggregate-reviews`、findings evidence、threshold-based pass/fail state で、その完了ゲートを提供します。
 
 public launch positioning、GitHub topics、`/goal` / `ralph-loop` / Superpowers との比較は
 [`docs/LOOP_ENGINEERING.md`](docs/LOOP_ENGINEERING.md) を参照してください。
@@ -47,11 +47,13 @@ local-first artifact contract と CLI は
 - メインオーケストレータ: `skills/mission`
 - 5 つのサブスキル: planner / executor / reviewer / critic / scorer
 - `.mission-state` セッションを扱う state 管理 CLI
+- reviewer JSON から決定論的に採点 payload を作る `aggregate-reviews` と、High finding evidence / review agreement の合格ゲート
 - completion evidence を監査可能にする local-first mission artifact CLI（[契約](docs/MISSION_ARTIFACTS.ja.md)）
 - Claude Code / Codex の複数セッション分離
+- compaction/resume 復帰順序を統合する `mission-state.py resume`
 - 未達ミッションの早期終了を防ぐ Stop hook
 - ドメイン別 evidence provider を選ぶ任意 specialist registry と beginner presets（[設計](skills/mission/refs/specialist-registry.md)）
-- state routing、scoring gate、hook 挙動を検証する Python テスト
+- state routing、review aggregation、scoring gate、artifact gate、hook 挙動を検証する Python テスト
 
 ## 競合ポジショニング
 
@@ -109,7 +111,7 @@ repository、[Claude Code `/goal` docs](https://code.claude.com/docs/ja/goal)、
 | `skills/mission-executor/` | 実行サブスキル |
 | `skills/mission-reviewer/` | ピアレビューサブスキル |
 | `skills/mission-critic/` | 改善案立案サブスキル |
-| `skills/mission-scorer/` | 5 項目スコアリングサブスキル |
+| `skills/mission-scorer/` | reviewer output を JSON 化するフォールバック変換器 |
 | `scripts/mission-stop-guard.sh` | ループ継続を強制する Stop hook |
 | `claude-hooks/hooks.json` | Claude Code 用 Stop hook 宣言 |
 | `.claude-plugin/` | `plugin.json` / `marketplace.json` |
@@ -176,7 +178,7 @@ marketplace 提出前は [`docs/MARKETPLACE_RELEASE_CHECKLIST.ja.md`](docs/MARKE
 /mission <ミッション記述> [--max-iter N] [--threshold X] [--skip-preflight]
 ```
 
-orchestrator は仮置き、ミッション分解、実行、レビュー、採点を行い、合格または中断条件成立まで反復します。
+orchestrator は仮置き、ミッション分解、実行、reviewer JSON 収集、`aggregate-reviews`、`push-score --scoring-json` 記録を行い、`mark-passes` が state を受理するか中断条件が成立するまで反復します。
 詳細な運用プロトコルは [`skills/mission/SKILL.md`](skills/mission/SKILL.md) を参照してください。
 
 ## 動作環境
@@ -211,7 +213,7 @@ python3 -m pytest -q
 現在のローカル検証結果:
 
 ```text
-327 passed
+552 passed
 ```
 
 詳細は [`docs/TESTING.md`](docs/TESTING.md) を参照してください。

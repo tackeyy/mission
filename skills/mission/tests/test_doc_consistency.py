@@ -218,6 +218,18 @@ def test_release_version_paths_are_in_sync():
         assert expected_path in _r(REPO_ROOT / rel), f"{rel} does not reference {expected_path}"
 
 
+def test_readmes_describe_current_scoring_flow_and_test_count():
+    """README の主要説明が現行 source の標準 scoring flow と検証数から drift しないこと。"""
+    en = _r(REPO_ROOT / "README.md")
+    ja = _r(REPO_ROOT / "README.ja.md")
+    for rel, txt in (("README.md", en), ("README.ja.md", ja)):
+        for token in ("mission-review/1", "aggregate-reviews", "push-score --scoring-json", "552 passed"):
+            assert token in txt, f"{rel} missing current README source-sync token: {token}"
+        assert "327 passed" not in txt, f"{rel} still reports stale test count"
+    assert "reviewer/scorer phases" not in en
+    assert "reviewer/scorer phase" not in ja
+
+
 def test_release_checklist_requires_git_log_changelog_reconciliation():
     """release 時に commit subjects と changelog の突合を必須化する."""
     required = "git log <previous-tag>..HEAD --oneline"
