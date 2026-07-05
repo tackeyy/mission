@@ -321,6 +321,15 @@ def test_findings_evidence_gate_documented_for_mark_passes():
         assert "open_high" in txt, f"{name} missing open_high gate"
 
 
+def test_review_agreement_gate_documented_separately_from_items():
+    """#126: reviewer agreement は composite items から独立した gate として文書化する."""
+    skill = _r(SKILL_MD)
+    rubric = _r(REFS / "scoring-rubric.md")
+    assert "max_agreement_delta <= 1.5" in skill
+    assert "review_agreement" in rubric
+    assert "composite には含めない" in rubric
+
+
 def test_react_loop_no_deprecated_composite_pushscore_example():
     """react-loop-details の push-score 例は非推奨 --composite 手渡しでなく --scoring-json."""
     txt = _r(REFS / "react-loop-details.md")

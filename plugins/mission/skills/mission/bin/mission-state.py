@@ -2969,6 +2969,18 @@ def _load_scoring_json(path_str: str):
     if findings_evidence_path is not None and not isinstance(findings_evidence_path, str):
         print("ERROR: --scoring-json の findings_evidence_path は文字列で指定してください。", file=sys.stderr)
         sys.exit(2)
+    review_agreement = payload.get("review_agreement")
+    if review_agreement is not None and (
+        not isinstance(review_agreement, (int, float))
+        or math.isnan(float(review_agreement))
+        or not (SCORE_MIN <= float(review_agreement) <= SCORE_MAX)
+    ):
+        print("ERROR: --scoring-json の review_agreement は 0〜5 の数値または null で指定してください。", file=sys.stderr)
+        sys.exit(2)
+    agreement_detail = payload.get("agreement_detail")
+    if agreement_detail is not None and not isinstance(agreement_detail, dict):
+        print("ERROR: --scoring-json の agreement_detail はオブジェクトで指定してください。", file=sys.stderr)
+        sys.exit(2)
     return items, notes, open_high, payload
 
 
@@ -3048,6 +3060,42 @@ def _validate_findings_evidence_gate(cwd: Path, latest: dict) -> None:
             file=sys.stderr,
         )
         sys.exit(2)
+
+
+def _max_agreement_delta(latest: dict) -> tuple[str | None, float | None]:
+    detail = latest.get("agreement_detail")
+    if not isinstance(detail, dict) or not detail:
+        return None, None
+    max_axis = None
+    max_delta = None
+    for axis, value in detail.items():
+        if not isinstance(value, dict):
+            continue
+        delta = value.get("delta")
+        if not isinstance(delta, (int, float)) or math.isnan(float(delta)):
+            continue
+        delta = float(delta)
+        if max_delta is None or delta > max_delta:
+            max_axis = str(axis)
+            max_delta = delta
+    return max_axis, max_delta
+
+
+def _validate_review_agreement_gate(latest: dict) -> None:
+    axis, delta = _max_agreement_delta(latest)
+    if delta is None:
+        return
+    if delta > 1.5:
+        print(
+            f"ERROR: 低合意: 争点軸 {axis} の追加レビュー 1 名を実施して再集計してください (max-min={delta:.2f})",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if delta > 1.0:
+        print(
+            f"WARNING: reviewer agreement is low on {axis} (max-min={delta:.2f}); consider one additional review.",
+            file=sys.stderr,
+        )
 
 
 def _review_error(path: Path, message: str) -> None:
@@ -3204,9 +3252,10 @@ def cmd_aggregate_reviews(args):
         }
         for axis, values in axis_values.items()
     }
+    review_agreement = None
     if len(adjusted_scores) >= 2:
         max_delta = max(detail["delta"] for detail in agreement_detail.values())
-        items["reviewer_consensus"] = _consensus_score(max_delta)
+        review_agreement = _consensus_score(max_delta)
     open_high = sum(
         1
         for review in reviews
@@ -3238,11 +3287,19 @@ def cmd_aggregate_reviews(args):
             "notes": f"aggregate-reviews: {len(adjusted_scores)} scoring reviewer(s), {len(reviews) - len(scoring_reviews)} findings-only reviewer(s)",
             "open_high": open_high,
             "findings_evidence_path": str(evidence_path),
+            "review_agreement": review_agreement,
             "agreement_detail": agreement_detail,
         }
         out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    result = {"ok": True, "out": str(out_path), "findings_evidence_path": str(evidence_path), "open_high": open_high, "items": items}
+    result = {
+        "ok": True,
+        "out": str(out_path),
+        "findings_evidence_path": str(evidence_path),
+        "open_high": open_high,
+        "items": items,
+        "review_agreement": review_agreement,
+    }
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
@@ -3395,6 +3452,11 @@ def cmd_push_score(args):
         if args.scoring_json:
             if scoring_payload.get("findings_evidence_path") is not None:
                 entry["findings_evidence_path"] = scoring_payload["findings_evidence_path"]
+            if "review_agreement" in scoring_payload:
+                review_agreement = scoring_payload["review_agreement"]
+                entry["review_agreement"] = None if review_agreement is None else float(review_agreement)
+            if scoring_payload.get("agreement_detail") is not None:
+                entry["agreement_detail"] = scoring_payload["agreement_detail"]
             # archive を state 書き込みより先に行う (crash 時に state が実在しない
             # scoring_evidence_path を指す dangling reference を防ぐ。他 archive 系と同順序)
             entry["score_source"] = "scoring-json"
@@ -3488,6 +3550,8 @@ def cmd_mark_passes(args):
                 sys.exit(2)
             # Issue #121: scoring-json entry は aggregate-reviews が保存した findings evidence と open_high を再照合する。
             _validate_findings_evidence_gate(cwd, latest)
+            # Issue #126: reviewer agreement は composite から独立した gate として扱う。
+            _validate_review_agreement_gate(latest)
             # Issue #3: 未解決 High が残っている場合は合格にできない (後方互換: open_high 欠如 → 0 扱い → 通過)
             open_high = latest.get("open_high") or 0
             if open_high > 0:

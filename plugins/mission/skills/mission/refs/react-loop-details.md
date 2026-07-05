@@ -23,7 +23,7 @@ SKILL.md 本体から外出しした Phase 2-6 ループの詳細。本体には
   "iteration": 0,
   "phase": "executing",
   "score_history": [
-    { "iteration": 1, "composite": 3.5, "min_item": 3.0, "items": {} }
+    { "iteration": 1, "composite": 3.5, "min_item": 3.0, "items": {}, "review_agreement": 4.0, "agreement_detail": {} }
   ],
   "stagnation_count": 0,
   "// stagnation_count": "push-score が自動更新する (改善幅 < 0.1 で +1、>= 0.1 で 0)。手動 set 禁止",

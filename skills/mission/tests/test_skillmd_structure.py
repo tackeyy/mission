@@ -165,11 +165,13 @@ def test_m6_maker_checker_in_compact_instructions():
     assert "M6" in compact and "インライン修正" in compact, "M6 が compaction 耐性セクションにない"
 
 
-def test_m5_consensus_carryover_ban_in_rubric():
-    """M5: consensus 据置禁止ルールと省略時の push-score 具体例が rubric にある."""
+def test_issue126_review_agreement_gate_in_rubric():
+    """#126: review_agreement は items から独立した gate として rubric にある."""
     txt = _read(REFS_DIR / "scoring-rubric.md")
-    assert "据置" in txt and "禁止" in txt
-    assert "--min-item" in txt, "省略時の push-score 具体例がない"
+    assert "review_agreement" in txt
+    assert "composite には含めない" in txt
+    assert "max delta > 1.5" in txt
+    assert "WARN" in txt
 
 
 def test_skillmd_reads_assumptions_path_field():

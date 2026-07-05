@@ -245,7 +245,7 @@ Skill(skill="mission-critic", args="スコア結果 + 成果物 → 改善案")
 ```
 各イテレーション完了時:
   composite_score = mean(採点した items)
-  passes = findings_evidence_path exists AND evidence_high_count == open_high AND composite_score >= threshold AND min(採点した items) >= 3.5 AND open_high == 0
+  passes = findings_evidence_path exists AND evidence_high_count == open_high AND max_agreement_delta <= 1.5 AND composite_score >= threshold AND min(採点した items) >= 3.5 AND open_high == 0
 
   if passes:
     # P1: Early-Stop Sweet Spot — 合格時は基本即打ち止め (実測根拠: refs/changelog.md P1)
@@ -317,7 +317,7 @@ Skill(skill="mission-critic", args="スコア結果 + 成果物 → 改善案")
 
 ## Phase 7: 条件付き自動マージ (合格判定後の追加ステップ)
 
-合格判定 (`composite >= threshold` AND `min_item >= 3.5` AND `open_high == 0`) で PR が作成済みの場合、既定では手動マージ待ちとして完了報告にとどめる。以下の **すべて** を満たすときだけ、ユーザー承認なしで `gh pr merge` を実行してよい。**PR を作るか否かは mission-executor がミッション/リポジトリ慣習で判断** (branch を切る実装は git-workflow ルール=worktree+PR、ローカル完結のリファクタ等は PR 無し)。**PR が存在しないミッションは Phase 7 を skip** し合格判定後そのまま完了報告する。
+合格判定 (`composite >= threshold` AND `min_item >= 3.5` AND `open_high == 0` AND `max_agreement_delta <= 1.5`) で PR が作成済みの場合、既定では手動マージ待ちとして完了報告にとどめる。以下の **すべて** を満たすときだけ、ユーザー承認なしで `gh pr merge` を実行してよい。**PR を作るか否かは mission-executor がミッション/リポジトリ慣習で判断** (branch を切る実装は git-workflow ルール=worktree+PR、ローカル完結のリファクタ等は PR 無し)。**PR が存在しないミッションは Phase 7 を skip** し合格判定後そのまま完了報告する。
 
 **自動マージ条件 (すべて満たす場合のみ実行)**:
 1. **CI/テスト pass**: `gh pr checks <PR番号> --repo <owner/repo>` で全 status SUCCESS (pending があれば `--auto` で CI 完了待ちマージ可)

@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `mission-state.py specialists log-invocation --selection-source task-required` records task-mandated source retrieval or evidence providers as selected specialists without hard-coding private skill names (#115).
 
 ### Changed
+- `aggregate-reviews` now keeps reviewer agreement out of score `items`, records it as independent `review_agreement` plus `agreement_detail`, and `mark-passes` gates very low agreement (`max-min > 1.5`) before passing (#126).
 - `mark-passes` now treats machine-derived findings evidence as the primary pass gate for `score_source=scoring-json`, rejecting missing `findings_evidence_path` values or mismatched High-finding counts before applying the score threshold (#121).
 - Standard Phase 5 orchestration now uses reviewer `mission-review/1` JSON, `aggregate-reviews`, and `push-score --scoring-json` without spawning `mission-scorer`; `mission-scorer` is now documented as a fallback prose-to-JSON converter only (#120).
 - `mission-state.py` and `mission-audit.py` now share mission state classification, duration, specialist checkpoint, and preparation-marker logic through `skills/mission/lib/mission_common.py`, reducing audit/state drift risk (#127).
