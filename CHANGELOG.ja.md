@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-07-06
+
 ### 修正
 - command provider が `result_contract.awaiting_input_markers` または `result_contract.awaiting_input_exit_codes` に一致した場合、明示承認・人間入力待ちを generic failure ではなく `awaiting-input` として記録できるようにしました (#145)。
 
@@ -180,6 +182,7 @@
 - 状態ルーティング・スコアゲート・hook 挙動をカバーする Python テストスイート。
 - GitHub Actions CI（`push` / `pull_request` / `workflow_dispatch`）。pytest と ShellCheck を実行。
 
+[1.1.1]: https://github.com/tackeyy/mission/releases/tag/v1.1.1
 [1.1.0]: https://github.com/tackeyy/mission/releases/tag/v1.1.0
 [1.0.7]: https://github.com/tackeyy/mission/releases/tag/v1.0.7
 [1.0.6]: https://github.com/tackeyy/mission/releases/tag/v1.0.6
