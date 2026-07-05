@@ -28,6 +28,68 @@ DEFAULT_RUN_ID = "2026-06-27-codex-cli-local"
 ARMS = ("goal_only", "mission")
 
 
+def evaluate_quality_markers(text: str, task: dict) -> dict:
+    """Count task-defined quality markers present in the artifact text.
+
+    Baseline tasks (tasks.json) define no markers, so this returns a None score
+    and the arm-blind scorer falls back to validator_pass only.
+    """
+    markers = task.get("quality_markers", [])
+    if not markers:
+        return {
+            "quality_markers_total": 0,
+            "quality_markers_matched": 0,
+            "quality_markers_missing": [],
+            "quality_marker_score": None,
+        }
+    matched = 0
+    missing: list[str] = []
+    for marker in markers:
+        needle = marker if isinstance(marker, str) else marker.get("text", "")
+        if needle and needle in text:
+            matched += 1
+        else:
+            missing.append(needle)
+    total = len(markers)
+    ratio = matched / total if total else None
+    return {
+        "quality_markers_total": total,
+        "quality_markers_matched": matched,
+        "quality_markers_missing": missing,
+        "quality_marker_score": round(ratio, 2) if ratio is not None else None,
+    }
+
+
+def score_from_signals(validator_pass: bool, marker_score: float | None) -> tuple[float, float]:
+    """Deterministic, arm-blind scoring (F-1).
+
+    The arm identity is never consulted here; the same artifact signals produce
+    the same score for any arm. Returns (quality_score, evidence_completeness).
+        quality = 1.0 + 3.0 * validator_pass + 1.0 * (marker_score or 0.0)
+    Marker-less tasks (marker_score is None -> treated as 0.0) collapse to 1.0
+    (fail) or 4.0 (pass).
+    """
+    base = marker_score if marker_score is not None else 0.0
+    value = round(1.0 + 3.0 * (1.0 if validator_pass else 0.0) + 1.0 * base, 2)
+    return value, value
+
+
+def counterbalanced_plan(tasks: list[dict], arms) -> list[tuple[dict, str, int]]:
+    """Alternate which arm runs first by task index to cancel run-order bias (F-1).
+
+    Even task index -> arms in declared order; odd index -> reversed. Deterministic
+    (no randomness, for reproducibility). Returns (task, arm, arm_order) triples,
+    where arm_order is 1 for the arm that runs first for that task.
+    """
+    ordered_arms = tuple(arms)
+    plan: list[tuple[dict, str, int]] = []
+    for idx, task in enumerate(tasks):
+        sequence = ordered_arms if idx % 2 == 0 else tuple(reversed(ordered_arms))
+        for order, arm in enumerate(sequence, start=1):
+            plan.append((task, arm, order))
+    return plan
+
+
 def run_command(args: list[str], cwd: Path | None = None, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         args,
@@ -142,20 +204,12 @@ def evaluate_run(worktree: Path, task: dict, arm: str, output_rel: str, session_
             mission_state_passes = False
             validator_pass = False
 
-    quality_score = 1.0
-    evidence_score = 1.0
-    if completion:
-        quality_score = 3.0
-        evidence_score = 3.0
-    if validator_pass:
-        quality_score = 4.0
-        evidence_score = 4.0
-    if validator_pass and arm == "mission" and mission_state_passes:
-        quality_score = 4.5
-        evidence_score = 4.7
-    elif validator_pass and arm == "goal_only":
-        quality_score = 4.0
-        evidence_score = 3.8
+    marker_eval = evaluate_quality_markers(text, task)
+    if not validator_pass:
+        marker_eval["quality_marker_score"] = None
+    quality_score, evidence_score = score_from_signals(
+        validator_pass, marker_eval["quality_marker_score"]
+    )
 
     return {
         "completion": completion,
@@ -165,6 +219,7 @@ def evaluate_run(worktree: Path, task: dict, arm: str, output_rel: str, session_
         "intervention_count": 0,
         "resume_success": None if task["id"] != "interrupted-doc-task" else validator_pass,
         "evidence_completeness": evidence_score,
+        "quality_marker_score": marker_eval["quality_marker_score"],
         "missing_headings": missing_headings,
         "mission_state_passes": mission_state_passes,
     }
@@ -190,7 +245,7 @@ def copy_artifacts(worktree: Path, artifact_dir: Path, output_rel: str, last_mes
     return copied
 
 
-def run_one(task: dict, arm: str, run_id: str, starting_commit: str, run_root: Path, timeout: int) -> dict:
+def run_one(task: dict, arm: str, run_id: str, starting_commit: str, run_root: Path, timeout: int, arm_order: int, model_id: str) -> dict:
     task_id = task["id"]
     run_name = f"{task_id}-{arm}"
     worktree = run_root / run_name / "repo"
@@ -249,7 +304,9 @@ def run_one(task: dict, arm: str, run_id: str, starting_commit: str, run_root: P
         "run_id": run_id,
         "task_id": task_id,
         "arm": arm,
+        "arm_order": arm_order,
         "model": "codex_cli_default",
+        "model_id": model_id,
         "started_at": started,
         "completed_at": completed,
         "starting_commit": starting_commit,
@@ -257,6 +314,7 @@ def run_one(task: dict, arm: str, run_id: str, starting_commit: str, run_root: P
         "validator_pass": evaluation["validator_pass"],
         "human_quality_score": evaluation["human_quality_score"],
         "quality_score_method": evaluation["quality_score_method"],
+        "quality_marker_score": evaluation["quality_marker_score"],
         "intervention_count": evaluation["intervention_count"],
         "resume_success": evaluation["resume_success"],
         "evidence_completeness": evaluation["evidence_completeness"],
@@ -275,6 +333,12 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--limit", type=int, default=0, help="Run only the first N records for smoke testing.")
     parser.add_argument("--run-root", default="/tmp/mission-vs-goal-pilot")
+    parser.add_argument(
+        "--model-id",
+        required=True,
+        help="Truthful model identifier for this run (e.g. codex-cli-<version>). "
+        "Recorded verbatim; there is no silent 'unknown' fallback.",
+    )
     args = parser.parse_args()
 
     tasks_path = Path(args.tasks_file)
@@ -294,13 +358,13 @@ def main() -> int:
         shutil.rmtree(artifact_run_dir)
     task_data = load_task_data(tasks_path)
     tasks = task_data["tasks"]
-    planned = [(task, arm) for task in tasks for arm in ARMS]
+    planned = counterbalanced_plan(tasks, ARMS)
     if args.limit:
         planned = planned[: args.limit]
 
     records = []
-    for task, arm in planned:
-        record = run_one(task, arm, args.run_id, args.starting_commit, Path(args.run_root), args.timeout)
+    for task, arm, arm_order in planned:
+        record = run_one(task, arm, args.run_id, args.starting_commit, Path(args.run_root), args.timeout, arm_order, args.model_id)
         records.append(record)
         with result_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")

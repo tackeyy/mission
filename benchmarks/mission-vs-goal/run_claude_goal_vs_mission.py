@@ -281,6 +281,36 @@ def classify_run_status(
     }
 
 
+def score_from_signals(validator_pass: bool, marker_score: float | None) -> tuple[float, float]:
+    """Deterministic, arm-blind scoring (F-1).
+
+    The arm identity is never consulted here; the same artifact signals produce
+    the same score for any arm. Returns (quality_score, evidence_completeness).
+        quality = 1.0 + 3.0 * validator_pass + 1.0 * (marker_score or 0.0)
+    Marker-less tasks (marker_score is None -> treated as 0.0) collapse to 1.0
+    (fail) or 4.0 (pass).
+    """
+    base = marker_score if marker_score is not None else 0.0
+    value = round(1.0 + 3.0 * (1.0 if validator_pass else 0.0) + 1.0 * base, 2)
+    return value, value
+
+
+def counterbalanced_plan(tasks: list[dict], arms) -> list[tuple[dict, str, int]]:
+    """Alternate which arm runs first by task index to cancel run-order bias (F-1).
+
+    Even task index -> arms in declared order; odd index -> reversed. Deterministic
+    (no randomness, for reproducibility). Returns (task, arm, arm_order) triples,
+    where arm_order is 1 for the arm that runs first for that task.
+    """
+    ordered_arms = tuple(arms)
+    plan: list[tuple[dict, str, int]] = []
+    for idx, task in enumerate(tasks):
+        sequence = ordered_arms if idx % 2 == 0 else tuple(reversed(ordered_arms))
+        for order, arm in enumerate(sequence, start=1):
+            plan.append((task, arm, order))
+    return plan
+
+
 def evaluate_run(
     worktree: Path,
     task: dict,
@@ -306,12 +336,7 @@ def evaluate_run(
     if not validator_pass:
         marker_eval["quality_marker_score"] = None
     marker_ratio = marker_eval["quality_marker_score"]
-    if validator_pass and marker_ratio is not None:
-        quality_score = round(3.0 + (2.0 * marker_ratio), 2)
-        evidence_score = round(3.0 + (2.0 * marker_ratio), 2)
-    else:
-        quality_score = 4.0 if validator_pass else 2.0 if completion else 1.0
-        evidence_score = 4.0 if validator_pass else 2.0 if completion else 1.0
+    quality_score, evidence_score = score_from_signals(validator_pass, marker_ratio)
     status = classify_run_status(
         stdout=stdout,
         stderr=stderr,
@@ -374,6 +399,8 @@ def run_one(
     max_budget_usd: float,
     mission_max_iter: int | None,
     mission_profile: str,
+    arm_order: int,
+    model_id: str,
 ) -> dict:
     task_id = task["id"]
     run_name = f"{task_id}-{arm}"
@@ -458,7 +485,9 @@ def run_one(
         "run_id": run_id,
         "task_id": task_id,
         "arm": arm,
+        "arm_order": arm_order,
         "model": "claude_code_default",
+        "model_id": model_id,
         "mission_profile": mission_profile if arm == "mission" else None,
         "started_at": started,
         "completed_at": completed,
@@ -566,6 +595,12 @@ def main() -> int:
         help="Stop the run after the first blocked record to conserve API budget.",
     )
     parser.add_argument("--run-root", default="/tmp/mission-vs-official-goal")
+    parser.add_argument(
+        "--model-id",
+        required=True,
+        help="Truthful model identifier for this run (e.g. claude-opus-4-8). "
+        "Recorded verbatim; there is no silent 'unknown' fallback.",
+    )
     parser.add_argument("--max-budget-usd", type=float, default=2.0)
     parser.add_argument("--mission-max-iter", type=int, default=None)
     parser.add_argument(
@@ -596,37 +631,36 @@ def main() -> int:
     tasks = select_tasks(task_data, args.limit_tasks, args.task_ids)
     records = []
     stopped_early = False
-    for task in tasks:
-        for arm in ARMS:
-            print(f"running task={task['id']} arm={arm}", flush=True)
-            record = run_one(
-                task,
-                arm,
-                args.run_id,
-                args.starting_commit,
-                Path(args.run_root),
-                args.timeout,
-                args.max_budget_usd,
-                args.mission_max_iter,
-                args.mission_profile,
-            )
-            records.append(record)
-            with result_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    for task, arm, arm_order in counterbalanced_plan(tasks, ARMS):
+        print(f"running task={task['id']} arm={arm}", flush=True)
+        record = run_one(
+            task,
+            arm,
+            args.run_id,
+            args.starting_commit,
+            Path(args.run_root),
+            args.timeout,
+            args.max_budget_usd,
+            args.mission_max_iter,
+            args.mission_profile,
+            arm_order,
+            args.model_id,
+        )
+        records.append(record)
+        with result_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        print(
+            f"finished task={task['id']} arm={arm} completion={record['completion']} "
+            f"validator_pass={record['validator_pass']} elapsed_minutes={record['elapsed_minutes']}",
+            flush=True,
+        )
+        if args.stop_on_blocked and record["run_status"] == "blocked":
+            stopped_early = True
             print(
-                f"finished task={task['id']} arm={arm} completion={record['completion']} "
-                f"validator_pass={record['validator_pass']} elapsed_minutes={record['elapsed_minutes']}",
+                f"stopping early after blocked record task={task['id']} arm={arm} "
+                f"blocked_reason={record['blocked_reason']}",
                 flush=True,
             )
-            if args.stop_on_blocked and record["run_status"] == "blocked":
-                stopped_early = True
-                print(
-                    f"stopping early after blocked record task={task['id']} arm={arm} "
-                    f"blocked_reason={record['blocked_reason']}",
-                    flush=True,
-                )
-                break
-        if stopped_early:
             break
 
     summary = summarize(

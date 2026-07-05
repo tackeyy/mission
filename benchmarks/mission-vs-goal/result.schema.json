@@ -8,6 +8,7 @@
     "task_id",
     "arm",
     "model",
+    "model_id",
     "started_at",
     "completed_at",
     "starting_commit",
@@ -41,6 +42,16 @@
     },
     "model": {
       "type": "string"
+    },
+    "model_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Truthful model identifier recorded verbatim per run (no 'unknown' fallback)."
+    },
+    "arm_order": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "1 if this arm ran first for its task; used for run-order counterbalancing."
     },
     "mission_profile": {
       "type": [
