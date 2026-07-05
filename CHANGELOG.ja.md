@@ -14,6 +14,7 @@
 - `mission-state.py specialists log-invocation --selection-source task-required` を追加し、タスク上必須の情報取得・証跡 provider を、private skill 名をハードコードせず selected specialist として記録できるようにしました (#115)。
 
 ### 変更
+- `mark-passes` が、`score_source=scoring-json` の pass 判定で機械由来の findings evidence を primary gate として扱うようになりました。`findings_evidence_path` 欠落や High finding 件数の不一致は、score threshold 判定前に拒否します (#121)。
 - 標準 Phase 5 が reviewer の `mission-review/1` JSON、`aggregate-reviews`、`push-score --scoring-json` で進むようになり、`mission-scorer` を spawn しない運用にしました。`mission-scorer` は散文レビューを JSON に変換する fallback 専用として文書化しました (#120)。
 - `mission-state.py` と `mission-audit.py` が、mission state の分類・duration・specialist checkpoint・preparation marker ロジックを `skills/mission/lib/mission_common.py` で共有するようにし、audit と state tool の drift リスクを下げました (#127)。
 - `mark-passes` が、新規 Standard / Complex / Critical session で `task_profile` と `specialists_decision.policy` の checkpoint がない場合に完了を拒否するようにしました。fallback / degraded の明示 decision は有効な checkpoint として扱います (#112)。

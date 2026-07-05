@@ -120,6 +120,27 @@ def test_aggregate_reviews_uses_findings_only_reviewer_without_scores(state_dir,
     assert "1 scoring reviewer(s), 1 findings-only reviewer(s)" in payload["notes"]
 
 
+def test_aggregate_reviews_counts_high_from_findings_only_reviewer(state_dir, run_cli, tmp_path):
+    a = _review(tmp_path, "a.json", perspective="A")
+    d = _review(tmp_path, "d.json", perspective="D", scores=None, findings=[{
+        "id": "D-1",
+        "severity": "High",
+        "axis": "accuracy",
+        "summary": "Blocking finding from non-scoring reviewer",
+        "evidence": "file.py:1 `bad()`",
+        "recommendation": "Fix before pass",
+    }])
+    payload = _load(d)
+    payload["scores"] = None
+    d.write_text(json.dumps(payload), encoding="utf-8")
+    out = tmp_path / "scoring.json"
+
+    run_cli("aggregate-reviews", "--iteration", "1", "--input", str(a), "--input", str(d),
+            "--out", str(out), cwd=state_dir.parent, check=True)
+
+    assert _load(out)["open_high"] == 1
+
+
 def test_aggregate_reviews_consensus_score_boundaries(state_dir, run_cli, tmp_path):
     a = _review(tmp_path, "a.json", perspective="A", scores={
         "mission_achievement": 5.0, "accuracy": 4.8, "completeness": 4.8, "usability": 4.8,

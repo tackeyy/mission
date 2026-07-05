@@ -2965,6 +2965,10 @@ def _load_scoring_json(path_str: str):
     if open_high is not None and (not isinstance(open_high, int) or open_high < 0):
         print("ERROR: --scoring-json の open_high は 0 以上の整数で指定してください。", file=sys.stderr)
         sys.exit(2)
+    findings_evidence_path = payload.get("findings_evidence_path")
+    if findings_evidence_path is not None and not isinstance(findings_evidence_path, str):
+        print("ERROR: --scoring-json の findings_evidence_path は文字列で指定してください。", file=sys.stderr)
+        sys.exit(2)
     return items, notes, open_high, payload
 
 
@@ -2984,6 +2988,66 @@ def _archive_scoring_json(cwd: Path, iteration: int, data: dict, entry: dict, pa
     out.update(payload)
     dst.write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return str(dst)
+
+
+def _resolve_recorded_path(cwd: Path, path_text: str) -> Path:
+    path = Path(path_text).expanduser()
+    if path.is_absolute():
+        return path
+    return cwd / path
+
+
+def _count_high_findings_in_evidence(cwd: Path, path_text: str) -> int:
+    path = _resolve_recorded_path(cwd, path_text)
+    if not (path.exists() and path.is_file()):
+        print(f"ERROR: findings evidence file is missing: {path_text}", file=sys.stderr)
+        sys.exit(2)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        print(f"ERROR: findings evidence JSON is invalid: {path_text}: {e}", file=sys.stderr)
+        sys.exit(2)
+    inputs = payload.get("inputs")
+    if not isinstance(inputs, list):
+        print("ERROR: findings evidence is missing inputs list", file=sys.stderr)
+        sys.exit(2)
+    high = 0
+    for review in inputs:
+        if not isinstance(review, dict):
+            print("ERROR: findings evidence contains invalid review entry", file=sys.stderr)
+            sys.exit(2)
+        findings = review.get("findings") or []
+        if not isinstance(findings, list):
+            print("ERROR: findings evidence contains invalid findings list", file=sys.stderr)
+            sys.exit(2)
+        high += sum(1 for finding in findings if isinstance(finding, dict) and finding.get("severity") == "High")
+    return high
+
+
+def _validate_findings_evidence_gate(cwd: Path, latest: dict) -> None:
+    source = latest.get("score_source")
+    if source != "scoring-json":
+        print(
+            "WARNING: legacy score entry has no machine findings evidence; using stored open_high only.",
+            file=sys.stderr,
+        )
+        return
+    path_text = latest.get("findings_evidence_path")
+    if not path_text:
+        print(
+            "ERROR: score_source=scoring-json なのに High findings evidence の findings_evidence_path がありません。"
+            " aggregate-reviews の出力を push-score --scoring-json に渡してください。",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    evidence_high = _count_high_findings_in_evidence(cwd, path_text)
+    open_high = latest.get("open_high")
+    if open_high != evidence_high:
+        print(
+            f"ERROR: findings evidence の High 件数 ({evidence_high}) と score entry の open_high ({open_high}) が一致しません。",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
 
 def _review_error(path: Path, message: str) -> None:
@@ -3145,7 +3209,7 @@ def cmd_aggregate_reviews(args):
         items["reviewer_consensus"] = _consensus_score(max_delta)
     open_high = sum(
         1
-        for review in scoring_reviews
+        for review in reviews
         for finding in review.get("findings", [])
         if finding.get("severity") == "High"
     )
@@ -3230,10 +3294,10 @@ def _validate_consensus_policy(data: dict, items: dict) -> None:
 
 
 def cmd_push_score(args):
-    """Phase 5 scorer 完了後、orchestrator が呼ぶ score_history append.
+    """Phase 5 scoring JSON 生成後、orchestrator が呼ぶ score_history append.
 
-    scorer 自身は context: fork で state.json に書き込めないため、
-    orchestrator (mission/SKILL.md Phase 5 直後) が採点結果を渡してこのコマンドを呼ぶ。
+    標準フローでは aggregate-reviews が scoring JSON を生成し、
+    orchestrator (mission/SKILL.md Phase 5 直後) がそのパスを渡してこのコマンドを呼ぶ。
     """
     cwd = Path.cwd()
     sf = resolve_state_file(cwd)
@@ -3248,7 +3312,7 @@ def cmd_push_score(args):
         sys.exit(2)
     scoring_payload = None
     if args.scoring_json:
-        # ADR-002 Stage 1 (G-1): items を scorer の JSON ファイルから読み、
+        # ADR-002 Stage 1 (G-1): items を scoring JSON ファイルから読み、
         # composite/min_item を CLI 側で再計算する (orchestrator の転記レイヤを排除)。
         if args.items is not None or args.composite is not None or args.min_item is not None:
             print(
@@ -3260,7 +3324,7 @@ def cmd_push_score(args):
         items, json_notes, json_open_high, scoring_payload = _load_scoring_json(args.scoring_json)
         args.composite = round(sum(_numeric_item_values(items)) / len(items), 2)
         args.min_item = round(min(_numeric_item_values(items)), 2)
-        # scorer の構造化出力が authoritative: JSON に open_high があれば CLI --open-high より優先
+        # scoring JSON が authoritative: JSON に open_high があれば CLI --open-high より優先
         if json_open_high is not None:
             args.open_high = json_open_high
         if json_notes and not args.notes:
@@ -3329,6 +3393,8 @@ def cmd_push_score(args):
         # Issue #3: open_high を保存 (mark-passes gate で参照)
         entry["open_high"] = getattr(args, "open_high", 0)
         if args.scoring_json:
+            if scoring_payload.get("findings_evidence_path") is not None:
+                entry["findings_evidence_path"] = scoring_payload["findings_evidence_path"]
             # archive を state 書き込みより先に行う (crash 時に state が実在しない
             # scoring_evidence_path を指す dangling reference を防ぐ。他 archive 系と同順序)
             entry["score_source"] = "scoring-json"
@@ -3420,6 +3486,8 @@ def cmd_mark_passes(args):
                     file=sys.stderr,
                 )
                 sys.exit(2)
+            # Issue #121: scoring-json entry は aggregate-reviews が保存した findings evidence と open_high を再照合する。
+            _validate_findings_evidence_gate(cwd, latest)
             # Issue #3: 未解決 High が残っている場合は合格にできない (後方互換: open_high 欠如 → 0 扱い → 通過)
             open_high = latest.get("open_high") or 0
             if open_high > 0:
@@ -4210,11 +4278,11 @@ def _build_parser():
                          help="自己申告 min_item (従来経路)。--scoring-json 使用時は指定不可")
     p_score.add_argument("--items", default=None, help=f'JSON 形式 (例: {{"mission_achievement": {DEFAULT_THRESHOLD}, "accuracy": {MIN_ITEM_THRESHOLD}, ...}})。--scoring-json 使用時は指定不可')
     p_score.add_argument("--scoring-json", default=None, dest="scoring_json",
-                         help="Scorer の構造化 JSON 出力パス (ADR-002 Stage 1)。{\"items\": {...}, \"notes\"?, \"open_high\"?} を読み、"
+                         help="aggregate-reviews などが生成した構造化 JSON 出力パス (ADR-002 Stage 1)。{\"items\": {...}, \"notes\"?, \"open_high\"?} を読み、"
                               "composite/min_item を CLI 側で再計算し、evidence として archive に保存する。転記レイヤを排除する推奨経路")
     p_score.add_argument("--notes", default=None)
     p_score.add_argument("--scoring-output", default=None,
-                         help="Scorer の Markdown 出力ファイルパス。指定すると .mission-state/archive/iter-N-scoring.md にコピー保存される (案 1: ログ充実化)")
+                         help="legacy scorer Markdown 出力ファイルパス。指定すると .mission-state/archive/iter-N-scoring.md にコピー保存される (移行互換)")
     p_score.add_argument("--open-high", type=int, default=0, dest="open_high",
                          help="未解決の High 指摘件数 (mark-passes の gate で使用)。--scoring-json に open_high があればそちらを優先")
     p_score.add_argument("--resubmit-reason", default=None, dest="resubmit_reason",

@@ -311,6 +311,16 @@ def test_skillmd_terminal_condition_includes_open_high():
         "SKILL.md の終了判定に open_high==0 がない (mark-passes は open_high>0 を reject する)"
 
 
+def test_findings_evidence_gate_documented_for_mark_passes():
+    """#121: mark-passes の findings evidence 突合 gate を docs から落とさない."""
+    skill = _r(SKILL_MD)
+    rubric = _r(REFS / "scoring-rubric.md")
+    adr = _r(REPO_ROOT / "docs" / "adr" / "002-typed-mission-state-objects.md")
+    for txt, name in ((skill, "SKILL.md"), (rubric, "scoring-rubric.md"), (adr, "ADR-002")):
+        assert "findings_evidence_path" in txt, f"{name} missing findings_evidence_path gate"
+        assert "open_high" in txt, f"{name} missing open_high gate"
+
+
 def test_react_loop_no_deprecated_composite_pushscore_example():
     """react-loop-details の push-score 例は非推奨 --composite 手渡しでなく --scoring-json."""
     txt = _r(REFS / "react-loop-details.md")
