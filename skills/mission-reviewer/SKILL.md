@@ -125,7 +125,9 @@ Critical/Complex のコード変更では、OWASP Top 10、シークレット露
 
 ## アウトプット形式
 
-```markdown
+人間向けレビュー本文の末尾に、必ず `mission-review/1` の fenced JSON を 1 個だけ付ける。Reviewer / scorer は Write 権限を持たないため、orchestrator がこの JSON を verbatim で保存し、`mission-state.py aggregate-reviews` が strict 検証する。
+
+````markdown
 ## レビュー結果 (担当観点: <観点名>)
 
 ### 採点
@@ -156,7 +158,43 @@ Critical/Complex のコード変更では、OWASP Top 10、シークレット露
 ### 担当観点に対する総評
 
 <2-3文で総評>
+
+```json
+{
+  "schema": "mission-review/1",
+  "perspective": "A",
+  "iteration": 1,
+  "scores": {
+    "mission_achievement": 4.0,
+    "accuracy": 4.5,
+    "completeness": 4.0,
+    "usability": 4.0
+  },
+  "findings": [
+    {
+      "id": "A-1",
+      "severity": "High",
+      "axis": "accuracy",
+      "summary": "<1文>",
+      "evidence": "<path:line + verbatim 引用>",
+      "recommendation": "<修正方法>"
+    }
+  ],
+  "same_score_note": null,
+  "notes": "<総評 2-3文>"
+}
 ```
+````
+
+### JSON 契約
+
+- `schema` は必ず `mission-review/1`。
+- `perspective` は Reviewer 内の識別子 (`A` / `B` / `C` / `D` / `verify` など)。
+- `scores` は `mission_achievement` / `accuracy` / `completeness` / `usability` の 4 キー完全一致、各 0-5 の数値。観点Dや検証専任で採点しない場合だけ `null`。
+- `severity` は `High` / `Medium` / `Low`、`axis` は上記 4 軸のいずれか。
+- High / Medium finding は `evidence` 非空必須。内部事実は `path:line` と現物引用を入れる。
+- `id` は `<perspective>-<連番>` で Reviewer 内一意。
+- 4 軸が全て同値の場合は `same_score_note` に「軸差が出なかった理由」を書く。全体印象だけなら採点をやり直す。
 
 ## NG行動
 

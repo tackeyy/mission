@@ -10,6 +10,7 @@
 ## [Unreleased]
 
 ### 追加
+- `mission-state.py aggregate-reviews` を追加し、strict な `mission-review/1` reviewer JSON から、rubric cap・reviewer consensus・open High 件数・findings evidence archive を含む決定論的な `push-score --scoring-json` payload を生成できるようにしました (#119)。
 - `mission-state.py specialists log-invocation --selection-source task-required` を追加し、タスク上必須の情報取得・証跡 provider を、private skill 名をハードコードせず selected specialist として記録できるようにしました (#115)。
 
 ### 変更

@@ -82,7 +82,7 @@ def test_resume_active_state_returns_next_action(state_dir, run_cli):
                 env_extra={"MISSION_FORCE_PID_IS_AGENT": "1"})
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
-    assert out.get("next_action") in {"run-planner", "run-executor", "run-reviewers", "run-scorer", "resume"}
+    assert out.get("next_action") in {"run-planner", "run-executor", "run-reviewers", "aggregate-reviews", "resume"}
     assert "resume" in out
     assert set(out["resume"]) >= {"pid_refreshed", "reactivated", "cleaned_empty", "halted_stale", "dry_run"}
     assert out["resume"]["pid_refreshed"] is True

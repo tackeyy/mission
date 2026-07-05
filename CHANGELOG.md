@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `mission-state.py aggregate-reviews` now converts strict `mission-review/1` reviewer JSON into deterministic `push-score --scoring-json` payloads, including rubric caps, reviewer consensus, open High counts, and archived findings evidence (#119).
 - `mission-state.py specialists log-invocation --selection-source task-required` records task-mandated source retrieval or evidence providers as selected specialists without hard-coding private skill names (#115).
 
 ### Changed

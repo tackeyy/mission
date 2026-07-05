@@ -105,7 +105,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py update-project
 │      ↓                                              │
 │ [Phase 4: ピアレビュー] ── mission-reviewer × N (並列) │
 │      ↓                                              │
-│ [Phase 5: スコアリング] ── mission-scorer              │
+│ [Phase 5: スコアリング] ── aggregate-reviews → push-score │
 │      ↓                                              │
 │ [Phase 6: 判定]                                     │
 │  ├─ score >= threshold (各項目 >= 3.5) → Phase 7   │
@@ -206,7 +206,7 @@ state.json の `assumptions_path` が指すファイル (デフォルト `.missi
 
 ### サブスキル呼び出し (概要)
 
-1 iter の標準フロー: `mission-planner` → `mission-executor` (`set phase=executing`) → `mission-reviewer` × N (`set phase=reviewing`) → `mission-scorer` → **`mission-state.py push-score`** → `mission-critic`。10分超または batch 作業では `progress update` も残す (詳細 refs/state-management.md)。
+1 iter の標準フロー: `mission-planner` → `mission-executor` (`set phase=executing`) → `mission-reviewer` × N (`set phase=reviewing`) → reviewer 末尾の `mission-review/1` JSON を保存 → `mission-state.py aggregate-reviews` → **`mission-state.py push-score --scoring-json`** → `mission-critic`。10分超または batch 作業では `progress update` も残す (詳細 refs/state-management.md)。
 
 Phase 1 で選定した specialist は Phase 2-6 の任意 evidence provider として、計画制約・実装補助・差分レビュー・採点根拠・Critic 改善案に使う。専門家不在や Codex で Skill 呼び出し不可の場合は、その欠落を記録して core subskills のみで進める。
 
@@ -223,8 +223,8 @@ Skill(skill="mission-reviewer", args="観点A: ミッション達成度 — ..."
 Skill(skill="mission-reviewer", args="観点B: 正確性")
 Skill(skill="mission-reviewer", args="観点C: 実用性")
 # オプション: 観点D (Complex/Critical のみ、採点除外)
-Skill(skill="mission-scorer", args="レビュー結果統合 → 採点 items 算出")
-# push-score の手順・--scoring-output 規約は §state.json 操作 参照
+# reviewer JSON 保存後: Bash(command="python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py aggregate-reviews --iteration N --input /tmp/mission-reviewer-iter-N-<mission8>-a.json --input /tmp/mission-reviewer-iter-N-<mission8>-b.json --out /tmp/mission-scorer-iter-N-<mission8>.json --json")
+# Bash(command="python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score --iteration N --scoring-json /tmp/mission-scorer-iter-N-<mission8>.json")
 Skill(skill="mission-critic", args="スコア結果 + 成果物 → 改善案")
 ```
 
