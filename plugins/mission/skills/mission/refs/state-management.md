@@ -150,8 +150,9 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py list
 # 全プロジェクトを一括 halt
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py halt --all --reason "<理由>"
 
-# dead-PID の active state.json を検出 (dry-run デフォルト)
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py cleanup-stale
+# dead-PID の active state.json を検出 (dry-run デフォルト)。--root で対象を絞る
+# (省略時は MISSION_SEARCH_ROOTS、未設定なら cwd を rglob する)
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py cleanup-stale --root "$(pwd)"
 
 # 実際に halt 実行 (--execute 明示が必要)
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py cleanup-stale --root "$(pwd)" --execute
