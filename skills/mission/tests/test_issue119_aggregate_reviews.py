@@ -53,8 +53,8 @@ def test_aggregate_reviews_writes_scoring_json_and_evidence(state_dir, run_cli, 
         "accuracy": 4.3,
         "completeness": 4.1,
         "usability": 3.9,
-        "reviewer_consensus": 5.0,
     }
+    assert payload["review_agreement"] == 5.0
     assert payload["open_high"] == 0
     assert (state_dir.parent / payload["findings_evidence_path"]).exists()
 
@@ -117,6 +117,7 @@ def test_aggregate_reviews_uses_findings_only_reviewer_without_scores(state_dir,
     assert r.returncode == 0, r.stderr
     payload = _load(out)
     assert "reviewer_consensus" not in payload["items"]
+    assert payload["review_agreement"] is None
     assert "1 scoring reviewer(s), 1 findings-only reviewer(s)" in payload["notes"]
 
 
@@ -153,7 +154,9 @@ def test_aggregate_reviews_consensus_score_boundaries(state_dir, run_cli, tmp_pa
     run_cli("aggregate-reviews", "--iteration", "1", "--input", str(a), "--input", str(b),
             "--out", str(out), cwd=state_dir.parent, check=True)
 
-    assert _load(out)["items"]["reviewer_consensus"] == 2.0
+    payload = _load(out)
+    assert "reviewer_consensus" not in payload["items"]
+    assert payload["review_agreement"] == 2.0
 
 
 def test_aggregate_reviews_output_can_be_pushed(state_dir, run_cli, read_state, tmp_path):
@@ -167,6 +170,7 @@ def test_aggregate_reviews_output_can_be_pushed(state_dir, run_cli, read_state, 
     entry = read_state(state_dir)["score_history"][0]
     assert entry["score_source"] == "scoring-json"
     assert entry["items"]["accuracy"] == 4.4
+    assert entry["review_agreement"] is None
 
 
 @pytest.mark.parametrize(

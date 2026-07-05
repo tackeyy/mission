@@ -14,6 +14,7 @@
 - `mission-state.py specialists log-invocation --selection-source task-required` を追加し、タスク上必須の情報取得・証跡 provider を、private skill 名をハードコードせず selected specialist として記録できるようにしました (#115)。
 
 ### 変更
+- `aggregate-reviews` が reviewer agreement を score `items` から外し、独立した `review_agreement` と `agreement_detail` として記録するようになりました。`mark-passes` は極端に低い合意 (`max-min > 1.5`) を pass 前に拒否します (#126)。
 - `mark-passes` が、`score_source=scoring-json` の pass 判定で機械由来の findings evidence を primary gate として扱うようになりました。`findings_evidence_path` 欠落や High finding 件数の不一致は、score threshold 判定前に拒否します (#121)。
 - 標準 Phase 5 が reviewer の `mission-review/1` JSON、`aggregate-reviews`、`push-score --scoring-json` で進むようになり、`mission-scorer` を spawn しない運用にしました。`mission-scorer` は散文レビューを JSON に変換する fallback 専用として文書化しました (#120)。
 - `mission-state.py` と `mission-audit.py` が、mission state の分類・duration・specialist checkpoint・preparation marker ロジックを `skills/mission/lib/mission_common.py` で共有するようにし、audit と state tool の drift リスクを下げました (#127)。

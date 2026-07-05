@@ -96,67 +96,24 @@
 | 2 | 使うには大幅な追加作業が必要 |
 | 1 | 現状では使用不能 |
 
-## 5. レビュアー合意度 (Reviewer Consensus)
+## review_agreement (独立フィールド)
 
-「複数レビュアーのスコア分散がどれだけ小さいか」
+「複数レビュアーのスコア分散がどれだけ小さいか」。これは `items` ではなく score entry の独立フィールドであり、composite には含めない。
 
-| 点 | 判定 |
+| 状況 (4軸の max-min 最大値) | review_agreement |
 |---|---|
-| 5 | 全レビュアーが各項目で ±0.5 以内に収束 |
-| 4 | 大半の項目で ±1.0 以内 |
-| 3 | 一部の項目で意見が分かれる（±1.5） |
-| 2 | 多くの項目で意見が分かれる |
-| 1 | 評価が大きく分裂、何が正解か判断不能 |
+| ≤ 0.5 | 5 |
+| ≤ 1.0 | 4 |
+| ≤ 1.5 | 3 |
+| ≤ 2.0 | 2 |
+| > 2.0 | 1 |
 
-Reviewer 1名のみの場合（Simple複雑度を含む）は、`reviewer_consensus` を採点 items から**省略**する。自己一貫性チェックは品質確認として notes に記録してよいが、consensus は複数 Reviewer 間の合意度を測る指標であり、1名では検証できない。
+`aggregate-reviews` は `agreement_detail` に軸別 min/max/delta を保存し、Reviewer 1名の場合は `review_agreement: null` にする。
 
-consensus 算出では、同一イテレーション内でインライン修正前に出た古い採点値を除外し、修正後成果物を読んだ Reviewer の値だけを使う。scoring-output には reviewer ごとの max-min 差分表と、除外した古い値があればその理由を記録する。
-
-### 差分レビュー周回 (iter 2 以降・検証 1 名) の合意度 — 据置禁止 (M5, 2026-06-10)
-
-- 前 iter の consensus 値をそのままコピーする「据置」は**禁止**（絶対評価原則 P3-3 に違反。2026-06-10 のログ分析で「前iter据置」の実例を確認）
-- 検証 Reviewer 1 名の周回では items から consensus を**省略**する（composite / min_item は残り 4 項目で算出し、その旨を notes に明記）
-- 前 iter の consensus 値と同値になるような再算出・コピーは行わない
-
-### M5 consensus 規律 — 差分レビュー(検証1名)周回での高得点禁止 (Issue #4, 2026-06-15)
-
-差分レビュー周回（iter 2 以降、検証 Reviewer 1 名のみ）では、**reviewer_consensus に高得点（4.5 以上）を付けてはならない**。
-1 名固定で consensus 5.0 を付けるのは**違反**。理由: consensus は複数 Reviewer 間の合意度を測る指標であり、
-1 名では合意を検証できない。
-
-| 状況 | 正しい処置 |
-|---|---|
-| 差分レビュー 1 名 | `--items` から `reviewer_consensus` を**省略**する（composite/min_item は残り4項目で算出し notes に明記） |
-| Simple 複雑度・通常 1 名レビュー | `--items` から `reviewer_consensus` を**省略**する（自己一貫性チェックは notes に明記可） |
-| 前 iter 値のコピーペーストだけ | 禁止（据置禁止ルールに加えて、上記禁止も適用） |
-
-#### 違反例（絶対に行わない）
-
-```bash
-# NG: 差分レビュー1名で consensus=5.0 を付けている
-python3 ... push-score --iteration 2 --composite 4.76 --min-item 4.5 \
-    --items '{"mission_achievement":4.8,"accuracy":4.9,"completeness":4.7,"usability":4.6,"reviewer_consensus":5.0}' \
-    --notes "iter2 差分検証1名"
-#                                                                       ^^^^^^^^^^^^^^^^^^^^^ 違反: 1名で5.0は不正
-```
-
-#### 正例（consensus 省略）
-
-```bash
-# OK: consensus を省略し、4項目で算出する
-python3 ... push-score --iteration 2 --composite 4.75 --min-item 4.6 \
-    --items '{"mission_achievement":4.8,"accuracy":4.9,"completeness":4.7,"usability":4.6}' \
-    --notes "iter2 差分検証1名: consensus 省略・composite/min_item は4項目で算出"
-```
-
-省略時の push-score 具体例 (C-M1)。`--items` は 4 キー、`--min-item` はその 4 項目の最小値を渡す
-(mark-passes の gate は「採点した items」基準なので 4 項目でも整合する):
-
-```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score --iteration 2 --composite 4.13 --min-item 3.9 \
-    --items '{"mission_achievement":4.5,"accuracy":3.9,"completeness":4.1,"usability":4.0}' \
-    --notes "iter2 差分検証1名: consensus 省略・composite/min_item は4項目で算出"
-```
+`mark-passes` の gate:
+- max delta > 1.5: exit 2。争点軸の追加レビュー 1 名を実施して再集計する。
+- max delta > 1.0: WARN のみ。
+- 旧 `reviewer_consensus` 入り score entry は履歴として読むが、新規 `aggregate-reviews` 出力の `items` には含めない。
 
 ---
 
@@ -165,9 +122,10 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score --i
 1. 各 Reviewer が項目1-4を独立に採点し、`mission-review/1` JSON に findings を含める
 2. `aggregate-reviews` が項目5を算出（分散ベース）。Reviewer 1名のみの場合は項目5を省略
 3. 各項目の最終スコア = reviewer スコア平均（High/Medium/Low findings による rubric cap 適用後）
-4. composite_score = mean(採点した items)
+4. composite_score = mean(4軸 items: mission_achievement / accuracy / completeness / usability)
 5. 判定:
    - `findings_evidence_path` が存在し、evidence 内の High 件数が `open_high` と一致することを `mark-passes` が再照合
+   - `agreement_detail` の max delta が 1.5 以下であることを `mark-passes` が確認
    - `composite_score >= threshold` AND `min(採点した items) >= 3.5` AND `open_high == 0` → 合格
    - それ以外 → 不合格 → Critic で改善案
 
