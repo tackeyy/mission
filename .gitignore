@@ -6,6 +6,7 @@ __pycache__/
 .mission-state/
 .pytest_cache/
 .serena/
+.worktrees/
 output/
 
 # mission スキルの孤立タイムスタンプ
