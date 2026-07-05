@@ -25,6 +25,13 @@ MISSION_LIB = REPO_ROOT / "skills" / "mission" / "lib"
 if str(MISSION_LIB) not in sys.path:
     sys.path.insert(0, str(MISSION_LIB))
 
+from mission_common import (  # noqa: E402
+    PREPARATION_ONLY_MARKERS,
+    SPECIALIST_SELECTION_CHECKPOINT_REQUIRED_AT,
+    classify_state as classify,
+    duration_sec,
+    parse_iso_datetime,
+)
 from specialist_accounting import (  # noqa: E402
     applied_specialist_invocation_skills,
     candidate_accounting_report,
@@ -58,17 +65,6 @@ CORE_MISSION_INVOCATION_SKILLS = {
     "mission-critic",
 }
 
-PREPARATION_ONLY_MARKERS = (
-    "Oracle Browser Review Prepared",
-    "Browser Review Prepared",
-    "Paste the browser oracle review here",
-    "To capture the oracle review as command-provider output",
-    "Prompt file:",
-    "Result file:",
-    "Packet file:",
-    "Review URL:",
-)
-
 DEFAULT_ACTIVE_PENDING_SECONDS = 30 * 60
 DEFAULT_STALE_ACTIVE_SECONDS = 3 * 60 * 60
 
@@ -80,12 +76,7 @@ class StateRecord:
 
 
 def parse_dt(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
+    return parse_iso_datetime(value)
 
 
 def utc_now() -> datetime:
@@ -125,15 +116,6 @@ def iso_date(value: str | None) -> str:
     return (value or "")[:10]
 
 
-def duration_sec(state: dict[str, Any]) -> float | None:
-    started = parse_dt(state.get("started_at"))
-    updated = parse_dt(state.get("updated_at"))
-    if not started or not updated:
-        return None
-    seconds = (updated - started).total_seconds()
-    return seconds if seconds >= 0 else None
-
-
 def age_since_update_sec(state: dict[str, Any], *, now: datetime | None = None) -> float | None:
     updated = parse_dt(state.get("heartbeat_at") or state.get("last_progress_at") or state.get("updated_at"))
     if not updated:
@@ -151,16 +133,6 @@ def latest_scored_entry(state: dict[str, Any]) -> dict[str, Any] | None:
         if isinstance(composite, (int, float)) and not isinstance(composite, bool) and not math.isnan(composite):
             return entry
     return None
-
-
-def classify(state: dict[str, Any]) -> str:
-    if state.get("passes") is True:
-        return "pass"
-    if state.get("halt_reason"):
-        return "halt"
-    if not state.get("loop_active"):
-        return "abandoned"
-    return "incomplete"
 
 
 def project_name(state: dict[str, Any]) -> str:
@@ -512,7 +484,6 @@ def low_score_pass_bucket(record: StateRecord) -> str:
     return "valid-threshold-pass"
 
 
-SPECIALIST_SELECTION_CHECKPOINT_REQUIRED_AT = datetime(2026, 6, 20, 10, 6, 47, tzinfo=timezone.utc)
 SPECIALIST_SELECTION_CHECKPOINT_COMPLEXITIES = {"Standard", "Complex", "Critical"}
 
 
