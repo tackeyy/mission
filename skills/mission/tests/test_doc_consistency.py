@@ -348,6 +348,18 @@ def test_specialist_registry_separates_provider_consent_scopes():
     assert "awaiting_input_exit_codes" in txt
 
 
+def test_oracle_command_provider_docs_forbid_copy_profile_default():
+    """Oracle provider docs must keep browser profile copying behind explicit approval."""
+    txt = _r(REFS / "oracle-command-provider.md")
+    assert "ORACLE_MISSION_BROWSER_MANUAL_LOGIN=1" in txt
+    assert "# ORACLE_MISSION_COPY_PROFILE=" in txt
+    assert "ORACLE_MISSION_COPY_PROFILE_APPROVED=1" in txt
+    assert "approval required: browser session material consent" in txt
+    assert "awaiting_input_exit_codes: [75]" in txt
+    assert "--copy-profile" in txt
+    assert "External-send approval does not authorize browser session material reuse" in txt
+
+
 # ---- #128: ドキュメント整合 sweep の回帰ガード ----
 
 

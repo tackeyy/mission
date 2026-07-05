@@ -14,6 +14,7 @@
 
 ### 変更
 - specialist registry の文書で、外部送信、browser automation、browser session material、paid quota の承認スコープを分離し、first-use consent が session cookie 再利用や paid model 利用の包括承認ではないことを明記しました (#146)。
+- Oracle command-provider の safe default 文書を追加し、local wrapper は manual login または `awaiting-input` を既定にし、明示的な browser-session-material 承認後だけ `--copy-profile` を渡す方針を明記しました (#147)。
 
 ## [1.1.0] - 2026-07-05
 
