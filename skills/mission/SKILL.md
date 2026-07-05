@@ -245,7 +245,7 @@ Skill(skill="mission-critic", args="スコア結果 + 成果物 → 改善案")
 ```
 各イテレーション完了時:
   composite_score = mean(採点した items)
-  passes = composite_score >= threshold AND min(採点した items) >= 3.5 AND open_high == 0
+  passes = findings_evidence_path exists AND evidence_high_count == open_high AND composite_score >= threshold AND min(採点した items) >= 3.5 AND open_high == 0
 
   if passes:
     # P1: Early-Stop Sweet Spot — 合格時は基本即打ち止め (実測根拠: refs/changelog.md P1)

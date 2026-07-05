@@ -20,7 +20,7 @@
 
 「前イテレーションの指摘解消確認」は採点軸ではなく **絶対評価の補助情報**。Iter N-1 で指摘した点が解消されても、Iter N で新たな Low が見つかれば該当項目は 5 にならない。
 
-**Maker-Checker バイアス警告**: orchestrator が executor と reviewer を同一セッションから spawn する場合、reviewer は「指示された修正の確認」モードに陥りやすく、絶対評価が甘くなる。Scorer は composite >= 4.8 を出す前に「Reviewer の Issue 件数 × ペナルティ」と整合するか自己検算する義務がある。
+**Maker-Checker バイアス警告**: orchestrator が executor と reviewer を同一セッションから spawn する場合、reviewer は「指示された修正の確認」モードに陥りやすく、絶対評価が甘くなる。`aggregate-reviews` は reviewer findings 件数とスコアを突合し、ペナルティ上限を適用する。
 
 ---
 
@@ -82,7 +82,7 @@
 | 2 | サブタスクの半分以上が未完 |
 | 1 | ほぼ未着手 |
 
-エラーパス、性能劣化、セキュリティ境界、運用手順の抜け漏れも完成度で評価する。Critical/Complex の未解決 High は採点軸を増やさず、scorer が `push-score --open-high <N>` に件数を載せ、`mark-passes` gate で不合格にする。
+エラーパス、性能劣化、セキュリティ境界、運用手順の抜け漏れも完成度で評価する。Critical/Complex の未解決 High は採点軸を増やさず、`aggregate-reviews` が reviewer findings から `open_high` と `findings_evidence_path` を生成し、`mark-passes` が evidence の High 件数と `open_high` を再照合して不合格にする。
 
 ## 4. 実用性 (Usability)
 
@@ -162,11 +162,12 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score --i
 
 ## 算出フロー
 
-1. 各 Reviewer が項目1-4を独立に採点
-2. Scorer が項目5を算出（分散ベース）。Reviewer 1名のみの場合は項目5を省略
-3. 各項目の最終スコア = レビュアー平均
+1. 各 Reviewer が項目1-4を独立に採点し、`mission-review/1` JSON に findings を含める
+2. `aggregate-reviews` が項目5を算出（分散ベース）。Reviewer 1名のみの場合は項目5を省略
+3. 各項目の最終スコア = reviewer スコア平均（High/Medium/Low findings による rubric cap 適用後）
 4. composite_score = mean(採点した items)
 5. 判定:
+   - `findings_evidence_path` が存在し、evidence 内の High 件数が `open_high` と一致することを `mark-passes` が再照合
    - `composite_score >= threshold` AND `min(採点した items) >= 3.5` AND `open_high == 0` → 合格
    - それ以外 → 不合格 → Critic で改善案
 

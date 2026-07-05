@@ -99,10 +99,12 @@ The orchestrator's role shrinks to passing a file path; it no longer types score
 
 `mark-passes` promotes finding/evidence conditions to the primary gate:
 
-- primary: `open High findings == 0` AND required evidence present (scoring JSON with machine-verification output attached for code missions);
+- primary: `open High findings == 0` AND required findings evidence present. For `score_source=scoring-json`, the score entry must include `findings_evidence_path`; `mark-passes` reloads that aggregate reviewer evidence, counts High findings, and rejects if the evidence count differs from `open_high` or the file is missing.
 - secondary: `composite >= threshold` and `min_item >= 3.5` as today.
 
 A high composite alone can no longer pass a session whose findings ledger is empty because reviewers never ran. This inverts today's semantics, where the score is primary and `--open-high` is an optional (and in practice unused) argument.
+
+**Stage 2 implementation policy (2026-07-05 confirmed)**: pass is first gated by machine-derived open High findings being zero and scoring evidence existing. `open_high` is calculated from reviewer findings (`mission-review/1`) by `aggregate-reviews`; `mark-passes` validates it against `findings_evidence_path`. Self-reported `open_high` remains only for the legacy `--items` path and produces a warning before the legacy gate is applied. Threshold recalibration is deferred until Stage 2 has enough stats (`by_agent` and score distributions).
 
 ### Stage 3 — Grounded next-step command (G-3)
 
@@ -143,3 +145,4 @@ Negative:
 |------|--------|
 | 2026-07-02 | Initial proposal (#101). |
 | 2026-07-02 | Added Staged Extensions (G-1 structured scoring evidence / G-4 pass gate redefinition / G-3 grounded `next` command) and log-crosscheck evidence to Context, per `docs/log-crosscheck-review-2026-07-02.md`. |
+| 2026-07-05 | Clarified Stage 2 implementation: `aggregate-reviews` writes findings evidence, `push-score --scoring-json` records `findings_evidence_path`, and `mark-passes` rejects missing or mismatched High findings evidence (#121). |
