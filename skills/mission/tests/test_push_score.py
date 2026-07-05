@@ -272,8 +272,8 @@ def test_push_score_rejects_when_scalar_scores_inflate_above_items(state_dir, ru
     assert "min_item=4.0" in r.stderr
 
 
-def test_push_score_allows_conservative_under_report(state_dir, run_cli):
-    """#122: 過小申告 (items より低い composite/min_item) は保守側なので許容する。"""
+def test_push_score_allows_conservative_under_report(state_dir, run_cli, read_state):
+    """#122: 過小申告 (items より低い composite/min_item) は保守側なので許容し、申告値をそのまま保存する。"""
     r = run_legacy_push_score(
         run_cli,
         "--iteration", "1",
@@ -283,16 +283,20 @@ def test_push_score_allows_conservative_under_report(state_dir, run_cli):
         cwd=state_dir.parent,
     )
     assert r.returncode == 0, r.stderr
+    entry = read_state(state_dir)["score_history"][-1]
+    assert entry["composite"] == 3.0 and entry["min_item"] == 3.0
 
 
-def test_push_score_rejects_duplicate_iteration_without_reason(state_dir, run_cli):
-    """#122: 同一 iteration の再 push は --resubmit-reason なしでは exit 2。"""
+def test_push_score_rejects_duplicate_iteration_without_reason(state_dir, run_cli, read_state):
+    """#122: 同一 iteration の再 push は --resubmit-reason なしでは exit 2。旧 entry は書き換わらない。"""
     run_legacy_push_score(run_cli, "--iteration", "1", "--composite", "3.0", "--min-item", "3.0",
             "--items", '{"a": 3.0}', cwd=state_dir.parent, check=True)
     r = run_legacy_push_score(run_cli, "--iteration", "1", "--composite", "4.0", "--min-item", "4.0",
             "--items", '{"a": 4.0}', cwd=state_dir.parent)
     assert r.returncode == 2, r.stderr
     assert "既に採点済み" in r.stderr
+    history = read_state(state_dir)["score_history"]
+    assert len(history) == 1 and history[0]["composite"] == 3.0
 
 
 def test_push_score_allows_duplicate_iteration_with_reason(state_dir, run_cli, read_state):
