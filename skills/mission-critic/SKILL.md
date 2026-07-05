@@ -45,6 +45,18 @@ allowed-tools: Read, Grep, Glob, Bash(git diff:*), Bash(git log:*)
 | 2 | ... | +0.3 (実用性) | M | ドキュメント追加 |
 | 3 | ... | +0.2 (正確性) | S | エッジケース対応 |
 
+### 実行計画 (次 iteration)
+
+| # | アクション | 完了条件 (observable) | 依存 | 対応finding |
+|---|---|---|---|---|
+| 1 | <具体的アクション> | <検証可能な条件> | - | A-1, B-2 |
+| 2 | <具体的アクション> | <検証可能な条件> | 1 | new |
+
+- `対応finding` には Reviewer / aggregate-reviews の finding id を記載する。
+- id で追跡できない新規スコープのステップは `new` と記載する。
+- 全ステップが finding id のみなら orchestrator は planner を省略して、この表を executor に直接渡せる。
+- `new` を含む場合は mission-planner が再計画し、スコープ追加の妥当性と依存関係を整理する。
+
 ### Action 1 詳細
 - **目的**: 完成度を 3.33 → 4.5 に引き上げる
 - **充足する判定文言** (必須・EPT ゼロ振れ対策): `${CLAUDE_PLUGIN_ROOT}/skills/mission/refs/scoring-rubric.md` 「3. 完成度」5点 — "全サブタスクが完了。エッジケース・テスト・ドキュメントも揃う" のうち、エッジケースとテストのカバレッジ部分を満たす
@@ -91,17 +103,19 @@ allowed-tools: Read, Grep, Glob, Bash(git diff:*), Bash(git log:*)
 - **「充足する判定文言」を埋めずに Action 詳細を出す** (EPT ゼロ振れの温床になる)
 - 「期待スコア向上」を判定文言と無関係に主観で書く（軸名 ≠ 判定文言）
 
-## Planner 指示改善の取り込み (EPT 由来)
+## Planner / Executor 指示改善の取り込み (EPT 由来)
 
-Reviewer 観点D (計画指示明瞭度) からのフィードバックがあれば、改善アクションとは別枠で「次イテレーション Planner への申し送り」を追加する:
+Reviewer 観点D (計画指示明瞭度) からのフィードバックがあれば、改善アクションとは別枠で「次イテレーションの実行計画」に統合する:
 
 ```markdown
-### Planner 指示改善の申し送り (観点D 由来)
+### 実行計画 (次 iteration)
 
-- 計画 Step <N> に「<不明瞭点>」を明示するよう Planner に追加指示
-- 裁量補完が起きた「<選択>」は計画段階で決定済みにするよう Planner に追加指示
+| # | アクション | 完了条件 (observable) | 依存 | 対応finding |
+|---|---|---|---|---|
+| 1 | 計画 Step <N> に「<不明瞭点>」を明示したうえで修正する | diff とテストで確認できる | - | D-1 |
+| 2 | 裁量補完が起きた「<選択>」を決定済みにする | assumptions または実装で確認できる | 1 | new |
 
-→ 次イテレーションの Planner 呼び出しで args に含める
+→ `new` がある場合のみ次イテレーションの Planner 呼び出しで args に含める。finding id のみなら executor に直接渡す。
 ```
 
 これを書かないと、同じ不明瞭点が次イテレーションでも繰り返される（Executor の自己申告が消化されない）。
