@@ -58,12 +58,14 @@ Skill(skill="mission-reviewer", args="観点C: 実用性・抜け漏れ")
 # オプション: 観点D (Complex/Critical のみ推奨。採点対象外でフィードバックのみ)
 Skill(skill="mission-reviewer", args="観点D: 計画指示明瞭度 — Executor の指示明瞭度フィードバックを評価")
 # 各 Reviewer の末尾にある mission-review/1 JSON を orchestrator が /tmp/mission-reviewer-iter-N-<mission8>-<slot>.json に保存する。
-# 保存後、aggregate-reviews が reviewer JSON を決定論集計して push-score 互換 JSON を生成する。
+# 保存後、aggregate-reviews が reviewer JSON を決定論集計して push-score 互換 JSON を生成する。標準フローで mission-scorer は spawn しない。
 # Bash(command="python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py aggregate-reviews --iteration N --input /tmp/mission-reviewer-iter-N-<mission8>-a.json --input /tmp/mission-reviewer-iter-N-<mission8>-b.json --out /tmp/mission-scorer-iter-N-<mission8>.json --json")
 # aggregate-reviews の出力を受け取ったら orchestrator が必ず push-score を呼ぶ (score_history 記録)。
 # Bash(command="python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score --iteration N --scoring-json /tmp/mission-scorer-iter-N-<mission8>.json")
 Skill(skill="mission-critic",   args="スコア結果 + 成果物 + 観点D フィードバック → 改善案 + Planner 申し送り")
 ```
+
+fallback 条件は `skills/mission-scorer/SKILL.md` の「Fallback 発動条件」を正とする。fallback 後も平均・合意度・合否判定は必ず `aggregate-reviews` と `push-score --scoring-json` が担う。
 
 **並列実行 (P4 強化)**: Phase 4 のレビュー呼び出しは、Claude Code では**必ず 1 つの assistant メッセージ内に複数 Skill 呼び出しを並べる**。別メッセージに分割しても観測上は非同期並列になるが (実測 2026-06-12、gotchas §1)、挙動保証がないため単一メッセージに統一する。watchdog: 制御が戻った時点で 15 分超未返の Reviewer は待たずに再 spawn (gotchas §1)。Codex では順次実行で代替。
 

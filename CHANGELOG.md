@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `mission-state.py specialists log-invocation --selection-source task-required` records task-mandated source retrieval or evidence providers as selected specialists without hard-coding private skill names (#115).
 
 ### Changed
+- Standard Phase 5 orchestration now uses reviewer `mission-review/1` JSON, `aggregate-reviews`, and `push-score --scoring-json` without spawning `mission-scorer`; `mission-scorer` is now documented as a fallback prose-to-JSON converter only (#120).
 - `mission-state.py` and `mission-audit.py` now share mission state classification, duration, specialist checkpoint, and preparation-marker logic through `skills/mission/lib/mission_common.py`, reducing audit/state drift risk (#127).
 - `mark-passes` now rejects new Standard, Complex, and Critical sessions that lack a `task_profile` plus `specialists_decision.policy` checkpoint, while accepting explicit fallback/degraded decisions as valid checkpoints (#112).
 - `cleanup-stale` can now halt stale active no-score sessions even when their recorded agent PID is still alive, after the configurable `MISSION_STALE_ACTIVE_SECONDS` threshold (#113).

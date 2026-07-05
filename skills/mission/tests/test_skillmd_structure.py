@@ -210,6 +210,51 @@ def test_test_authenticity_rules_documented():
     assert "テスト真正性" in scorer or "negative" in scorer
 
 
+def test_issue120_standard_phase5_uses_aggregate_reviews_not_scorer_spawn():
+    """#120: 標準 Phase 5 は aggregate-reviews → push-score で、scorer spawn を含めない."""
+    txt = _read(SKILL_MD) + "\n" + _read(REFS_DIR / "react-loop-details.md")
+    assert "aggregate-reviews" in txt
+    assert "push-score --scoring-json" in txt
+    forbidden = [
+        'Skill(skill="mission-scorer"',
+        "scorer にはフル 5 項目再採点",
+        "scorer が書いた JSON",
+    ]
+    leaked = [token for token in forbidden if token in txt]
+    assert not leaked, f"standard flow still references scorer spawn/old role: {leaked}"
+
+
+def test_issue120_scorer_is_fallback_converter_without_write_contract():
+    """#120: mission-scorer は fallback converter で、Write 権限や Write 指示を持たない."""
+    txt = _read(SCORER_MD)
+    header = txt.split("---", 2)[1]
+    assert "allowed-tools:" in header
+    assert "Write" not in header
+    assert "fallback converter" in txt
+    assert "mission-review/1" in txt
+    assert "ファイルへ Write しません" in txt
+    assert "JSON ファイルを書き込む" in txt
+    assert "composite / min_item" in txt
+
+
+def test_issue120_fallback_condition_is_canonical_in_scorer_skill():
+    """#120: fallback 発動条件は mission-scorer/SKILL.md の 1 セクションに集約する."""
+    scorer = _read(SCORER_MD)
+    non_scorer = "\n".join([
+        _read(SKILL_MD),
+        _read(REFS_DIR / "react-loop-details.md"),
+        _read(REFS_DIR / "gotchas.md"),
+    ])
+    combined = "\n".join([
+        non_scorer,
+        scorer,
+    ])
+    assert scorer.count("## Fallback 発動条件") == 1
+    assert combined.count("## Fallback 発動条件") == 1
+    assert "reviewer に 1 回だけ再依頼" in scorer
+    assert "reviewer に 1 回だけ再依頼" not in non_scorer
+
+
 def test_complexity_overestimate_cost_documented():
     """#18: 複雑度過大見積もりコストと assumptions.md への根拠記録を明記する."""
     txt = _read(SKILL_MD)
