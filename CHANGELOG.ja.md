@@ -9,6 +9,9 @@
 
 ## [Unreleased]
 
+### 修正
+- command provider が `result_contract.awaiting_input_markers` または `result_contract.awaiting_input_exit_codes` に一致した場合、明示承認・人間入力待ちを generic failure ではなく `awaiting-input` として記録できるようにしました (#145)。
+
 ## [1.1.0] - 2026-07-05
 
 ### 追加
