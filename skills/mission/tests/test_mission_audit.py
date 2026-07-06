@@ -578,6 +578,51 @@ def test_audit_accepts_worktree_iteration_archive_scoring_evidence(tmp_path):
     assert all(f["code"] != "missing-scoring-evidence" for f in data["findings"])
 
 
+def test_audit_accepts_worktree_mission_archive_scoring_evidence(tmp_path):
+    project_root = tmp_path / "removed-worktree"
+    archive_root = tmp_path / "repo" / ".mission-state" / "archive" / "worktree-neutral"
+    _write_state(
+        archive_root / "state.json",
+        project_root=str(project_root),
+        mission_id="feedfacecafebabe",
+        session_id="has-mission-archive-evidence",
+        score_history=[
+            {
+                "iteration": 1,
+                "composite": 4.6,
+                "min_item": 4.4,
+                "items": {},
+                "timestamp": "2026-07-04T00:00:00Z",
+                "score_source": "scoring-json",
+                "scoring_evidence_path": str(
+                    project_root / ".mission-state" / "archive" / "iter-1-feedface-scoring.json"
+                ),
+            }
+        ],
+    )
+    evidence = archive_root / "mission-archive" / "iter-1-feedface-scoring.json"
+    evidence.parent.mkdir(parents=True, exist_ok=True)
+    evidence.write_text('{"composite": 4.6}\n', encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-18",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    assert data["missing_scoring_evidence_count"] == 0
+    assert all(f["code"] != "missing-scoring-evidence" for f in data["findings"])
+
+
 def test_audit_accepts_explicit_scoring_evidence_json_path(tmp_path):
     evidence = tmp_path / "evidence" / "score.json"
     evidence.parent.mkdir(parents=True)
