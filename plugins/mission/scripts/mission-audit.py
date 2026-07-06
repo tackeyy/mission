@@ -698,6 +698,7 @@ def scoring_evidence_paths(record: StateRecord, iteration: int) -> list[Path]:
         if worktree_archive_root:
             paths.append(worktree_archive_root / "archive" / filename)
             paths.append(worktree_archive_root / "iteration-archive" / filename)
+            paths.append(worktree_archive_root / "mission-archive" / filename)
 
     deduped: list[Path] = []
     for path in paths:
