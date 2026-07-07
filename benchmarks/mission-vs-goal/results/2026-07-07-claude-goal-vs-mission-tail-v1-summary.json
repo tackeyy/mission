@@ -1,0 +1,52 @@
+{
+  "arms": {
+    "claude_code_goal_command": {
+      "average_elapsed_minutes": 2.33,
+      "average_evidence_completeness": 4.97,
+      "average_intervention_count": 0.0,
+      "average_quality_marker_score": 0.97,
+      "average_quality_score": 4.97,
+      "blocked_records": 0,
+      "comparable_completion_rate": 1.0,
+      "comparable_records": 5,
+      "comparable_validator_pass_rate": 1.0,
+      "completion_rate": 1.0,
+      "records": 5,
+      "validator_pass_rate": 1.0
+    },
+    "mission": {
+      "average_elapsed_minutes": 13.47,
+      "average_evidence_completeness": 4.97,
+      "average_intervention_count": 0.0,
+      "average_quality_marker_score": 0.97,
+      "average_quality_score": 4.97,
+      "blocked_records": 0,
+      "comparable_completion_rate": 1.0,
+      "comparable_records": 5,
+      "comparable_validator_pass_rate": 1.0,
+      "completion_rate": 1.0,
+      "records": 5,
+      "validator_pass_rate": 1.0
+    }
+  },
+  "expected_records": 10,
+  "limitations": [
+    "Claude Code print mode smoke; does not fully exercise multi-turn interactive /goal persistence.",
+    "Quality and evidence scores are automated heuristic scores, not blind human review.",
+    "Blocked records are excluded from comparable quality-marker aggregates."
+  ],
+  "mission_profile": "full",
+  "records": 10,
+  "run_id": "2026-07-07-claude-goal-vs-mission-tail-v1",
+  "selected_task_ids": [
+    "tail-config-spec-drift",
+    "tail-incident-log-triage",
+    "tail-bilingual-release-drift",
+    "tail-metrics-reconciliation",
+    "tail-dependency-upgrade-impact"
+  ],
+  "starting_commit": "3591f9947cddb9028538f8d333a0eeb6545b726e",
+  "stopped_early": false,
+  "task_cohort": "tail",
+  "task_file": "benchmarks/mission-vs-goal/tasks.tail.json"
+}
