@@ -28,6 +28,39 @@ DEFAULT_RUN_ID = "2026-06-27-codex-cli-local"
 ARMS = ("goal_only", "mission")
 
 
+def strip_form(text: str) -> str:
+    """Remove structural markup before marker scoring (F-2, arm-blind).
+
+    Structure must not earn marker credit: an arm that emits more template
+    sections would otherwise match section-title markers without content.
+    Drops markdown headings, label-only lines (bold labels and bare
+    trailing-colon labels), horizontal rules, and table separator rows; keeps
+    body prose and table data rows. Kept identical in both runners.
+    """
+    kept: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            kept.append(line)
+            continue
+        if stripped.startswith("#"):
+            continue
+        compact = stripped.replace(" ", "")
+        # Horizontal rules (***, ___) and table separator rows (|---|:---|, ---).
+        if len(compact) >= 3 and len(set(compact)) == 1 and compact[0] in "*_":
+            continue
+        if set(compact) <= {"|", "-", ":"} and "-" in compact:
+            continue
+        # Bold label-only lines: **Evidence** / **Stop Decision:**.
+        if compact.startswith("**") and compact.endswith("**") and len(compact) > 4:
+            continue
+        # Bare trailing-colon labels with nothing after the colon.
+        if stripped.endswith(":") and "|" not in stripped and len(stripped.rstrip(":").split()) <= 6:
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def evaluate_quality_markers(text: str, task: dict) -> dict:
     """Count task-defined quality markers present in the artifact text.
 
@@ -204,9 +237,13 @@ def evaluate_run(worktree: Path, task: dict, arm: str, output_rel: str, session_
             mission_state_passes = False
             validator_pass = False
 
-    marker_eval = evaluate_quality_markers(text, task)
+    # F-2: markers are scored against the form-stripped body; the unstripped
+    # score is kept as quality_marker_score_raw for comparability.
+    marker_eval = evaluate_quality_markers(strip_form(text), task)
+    marker_eval_raw = evaluate_quality_markers(text, task)
     if not validator_pass:
         marker_eval["quality_marker_score"] = None
+        marker_eval_raw["quality_marker_score"] = None
     quality_score, evidence_score = score_from_signals(
         validator_pass, marker_eval["quality_marker_score"]
     )
@@ -215,11 +252,12 @@ def evaluate_run(worktree: Path, task: dict, arm: str, output_rel: str, session_
         "completion": completion,
         "validator_pass": validator_pass,
         "human_quality_score": quality_score,
-        "quality_score_method": "automated_heuristic_not_blind_human",
+        "quality_score_method": "automated_heuristic_form_stripped_not_blind_human",
         "intervention_count": 0,
         "resume_success": None if task["id"] != "interrupted-doc-task" else validator_pass,
         "evidence_completeness": evidence_score,
         "quality_marker_score": marker_eval["quality_marker_score"],
+        "quality_marker_score_raw": marker_eval_raw["quality_marker_score"],
         "missing_headings": missing_headings,
         "mission_state_passes": mission_state_passes,
     }
