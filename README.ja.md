@@ -38,6 +38,10 @@ public launch positioning、GitHub topics、`/goal` / `ralph-loop` / Superpowers
 [`benchmarks/mission-vs-goal/README.ja.md`](benchmarks/mission-vs-goal/README.ja.md)
 を参照してください。
 
+レビューゲートが実際に何を捕まえたか（そしてどこでは単なるコストか）の
+匿名化済み本番ケーススタディは
+[`docs/CASE_STUDIES.ja.md`](docs/CASE_STUDIES.ja.md) を参照してください。
+
 local-first artifact contract と CLI は
 [`docs/MISSION_ARTIFACTS.ja.md`](docs/MISSION_ARTIFACTS.ja.md)
 を参照してください。artifact support は local Markdown artifact と明示 opt-in の publish evidence として実装されています。

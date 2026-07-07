@@ -436,3 +436,23 @@ def test_state_management_no_practicality_items_sample():
     txt = _r(REFS / "state-management.md")
     assert '"practicality":' not in txt and '"practicality" :' not in txt, \
         "state-management に旧キー practicality の items サンプルが残存 (エイリアス説明の言及は可)"
+
+
+def test_case_studies_docs_are_bilingual_and_marketing_safe():
+    """#155: case studies disclose provenance/limits and never make comparative claims."""
+    en = _r(REPO_ROOT / "docs" / "CASE_STUDIES.md")
+    ja = _r(REPO_ROOT / "docs" / "CASE_STUDIES.ja.md")
+    for rel, txt in (("docs/CASE_STUDIES.md", en), ("docs/CASE_STUDIES.ja.md", ja)):
+        assert "451" in txt, f"{rel} must state the scored-mission denominator"
+        assert "95%" in txt, f"{rel} must state the first-iteration pass-through rate"
+        assert "/Users/" not in txt, f"{rel} must not leak local paths"
+    # Honest negatives stay in the doc.
+    assert "unchanged across iterations" in en
+    assert "不変" in ja
+    # Comparative capability claims are out of scope for this page.
+    assert "Not supported:" in en
+    assert "支持しないこと" in ja
+    # Linked from the loop-engineering narrative and both top READMEs.
+    assert "CASE_STUDIES.md" in _r(REPO_ROOT / "docs" / "LOOP_ENGINEERING.md")
+    assert "docs/CASE_STUDIES.md" in _r(REPO_ROOT / "README.md")
+    assert "docs/CASE_STUDIES.ja.md" in _r(REPO_ROOT / "README.ja.md")
