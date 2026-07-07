@@ -117,6 +117,13 @@ agent needs an auditable "why can I stop now?" gate.
 | `Superpowers` | You want a broad coding-agent methodology with brainstorming, planning, TDD, debugging, review, and branch delivery practices. |
 | Review / CI / security plugins | You need a specialist check for one part of the workflow, and another orchestrator or human will decide overall completion. |
 
+### What the measured evidence shows
+
+- In every completed paired run to date — including a planted-defect tail cohort scored on content recall with no structure credit (2026-07-07, N=5, same model on both arms) — official `/goal` and `mission` tied on completion, validator, and marker metrics, while `mission` cost roughly 5.8x the wall-clock time and 7.4x the API spend. Do not adopt `mission` expecting a higher-quality artifact on self-contained tasks; see [`benchmarks/mission-vs-goal/report.md`](benchmarks/mission-vs-goal/report.md).
+- Across 451 scored production missions, 95% passed the quality gate at iteration 1 unchanged. The measured value concentrated in the ~5% tail the gate forced to iterate (first-iteration factual errors, runtime UI bugs, and security-relevant gaps that green toolchains missed) and in 7 halts that stopped irreversible production actions pending approval; see [`docs/CASE_STUDIES.md`](docs/CASE_STUDIES.md).
+
+Pick `mission` for the auditable completion gate, tail insurance on open-world work, irreversible-action governance, and resumable state — not for an average quality lift.
+
 Benchmark claims should use the pilot protocol in
 [`benchmarks/mission-vs-goal/`](benchmarks/mission-vs-goal/) and avoid general
 "smarter than `/goal`" language unless the raw paired results support a narrower
