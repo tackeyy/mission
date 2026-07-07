@@ -238,9 +238,12 @@ python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
   --limit-tasks 5
 ```
 
-No tail-cohort run has completed yet. The per-task
-`first_pass_failure_design` fields are design hypotheses about where single
-passes fail, not measured results.
+One tail-cohort run completed on 2026-07-07 (`2026-07-07-claude-goal-vs-mission-tail-v1`,
+5 tasks, both arms tied on all automated content-recall metrics, `/mission` ~5.8x
+wall-clock and ~7.4x cost vs `/goal`; see the Tail Cohort Run section in `report.md`).
+N=5, one model, closed-world fixtures — no broad claim follows.
+The `first_pass_failure_design` fields remain design hypotheses: the designed
+first-pass failures did not reproduce in this run.
 
 ## Human Quality Rubric
 
@@ -282,7 +285,7 @@ Not allowed from this pilot:
 | `tasks.json` | The measured fixed 10-task baseline pilot set. |
 | `tasks.complex.json` | 10-task complex cohort used by official smoke/full attempts; no full comparable run has completed yet. |
 | `tasks.quality.json` | Fresh quality-critical cohort for evidence-depth and stop/proceed decision tasks. |
-| `tasks.tail.json` | Tail cohort with planted-defect fixtures, decoy penalties (`forbidden_markers`), and answer-key sanitization (`hidden_paths`); no run completed yet. |
+| `tasks.tail.json` | Tail cohort with planted-defect fixtures, decoy penalties (`forbidden_markers`), and answer-key sanitization (`hidden_paths`); first run completed 2026-07-07 (see `report.md`). |
 | `fixtures/tail/` | Committed fixture documents for the tail cohort. |
 | `result.schema.json` | JSON Schema for one result record. |
 | `report.md` | Current measured status and package-validation results. |
