@@ -44,6 +44,10 @@ For a marketing-safe 10-task pilot protocol comparing `mission` with a
 goal-only baseline, see
 [`benchmarks/mission-vs-goal/README.md`](benchmarks/mission-vs-goal/README.md).
 
+For anonymized production case studies of what the review gate actually
+catches (and where it is just cost), see
+[`docs/CASE_STUDIES.md`](docs/CASE_STUDIES.md).
+
 For the local-first artifact contract and CLI, see
 [`docs/MISSION_ARTIFACTS.md`](docs/MISSION_ARTIFACTS.md). Artifact support is
 implemented as a local Markdown artifact with explicit opt-in publish evidence.

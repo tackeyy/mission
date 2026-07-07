@@ -99,6 +99,10 @@ The benchmark is deliberately framed as `mission` vs a goal-only workflow, not
 as a model intelligence benchmark. Publishable claims must include the sample
 size, task mix, validators, and raw result records.
 
+For anonymized production evidence of the review gate binding on a minority
+tail of missions (with honest negatives), see
+[`docs/CASE_STUDIES.md`](CASE_STUDIES.md).
+
 ## Artifact Evidence
 
 `mission` has a local-first artifact contract and CLI in
