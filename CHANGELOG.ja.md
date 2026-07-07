@@ -9,6 +9,9 @@
 
 ## [Unreleased]
 
+### 修正
+- `mission-audit.py --since` / `--until` が日付だけでなく ISO timestamp も受け付けるようになり、automation cutoff と同じ日の後続 state が監査から黙って除外される問題を修正しました (#159)。
+
 ## [1.1.1] - 2026-07-06
 
 ### 修正

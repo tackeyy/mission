@@ -112,8 +112,17 @@ def parse_cutoff(value: str | None) -> datetime | None:
     return parsed.astimezone(timezone.utc) if parsed else None
 
 
-def iso_date(value: str | None) -> str:
-    return (value or "")[:10]
+def parse_period_cutoff(value: str | None, *, upper: bool = False) -> datetime | None:
+    if not value:
+        return None
+    text = value.strip()
+    if "T" not in text and len(text) == 10:
+        suffix = "T23:59:59.999999+00:00" if upper else "T00:00:00+00:00"
+        text = f"{text}{suffix}"
+    parsed = parse_dt(text)
+    if parsed and parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc) if parsed else None
 
 
 def age_since_update_sec(state: dict[str, Any], *, now: datetime | None = None) -> float | None:
@@ -346,20 +355,22 @@ def commit_datetime(repo: Path, commit: str) -> datetime:
 
 def filter_records(
     records: list[StateRecord],
-    since: str | None,
-    until: str | None,
+    since: datetime | None,
+    until: datetime | None,
     after: datetime | None,
 ) -> list[StateRecord]:
     out: list[StateRecord] = []
     for record in records:
-        updated_at = record.state.get("updated_at")
-        updated_date = iso_date(updated_at)
-        if since and updated_date and updated_date < since:
+        updated_dt = parse_dt(record.state.get("updated_at"))
+        if updated_dt and updated_dt.tzinfo is None:
+            updated_dt = updated_dt.replace(tzinfo=timezone.utc)
+        if updated_dt:
+            updated_dt = updated_dt.astimezone(timezone.utc)
+        if since and updated_dt and updated_dt < since:
             continue
-        if until and updated_date and updated_date > until:
+        if until and updated_dt and updated_dt > until:
             continue
         if after:
-            updated_dt = parse_dt(updated_at)
             if not updated_dt or updated_dt.astimezone(timezone.utc) <= after:
                 continue
         out.append(record)
@@ -1605,8 +1616,8 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Audit local /mission state logs")
     parser.add_argument("--root", action="append", default=None, help="Root to scan. Can be repeated. Defaults to cwd.")
-    parser.add_argument("--since", default=None, help="Updated-at lower bound, YYYY-MM-DD")
-    parser.add_argument("--until", default=None, help="Updated-at upper bound, YYYY-MM-DD")
+    parser.add_argument("--since", default=None, help="Updated-at lower bound, YYYY-MM-DD or ISO timestamp")
+    parser.add_argument("--until", default=None, help="Updated-at upper bound, YYYY-MM-DD or ISO timestamp")
     parser.add_argument("--after-commit", default=None, help="Only include sessions updated after this commit date")
     parser.add_argument("--repo", default=".", help="Repository used for --after-commit, default cwd")
     parser.add_argument(
@@ -1626,11 +1637,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     roots = [Path(p).expanduser() for p in (args.root or ["."])]
     after = commit_datetime(Path(args.repo).expanduser(), args.after_commit) if args.after_commit else None
+    since = parse_period_cutoff(args.since)
+    if args.since and since is None:
+        raise SystemExit(f"Invalid --since value: {args.since}")
+    until = parse_period_cutoff(args.until, upper=True)
+    if args.until and until is None:
+        raise SystemExit(f"Invalid --until value: {args.until}")
     current_since = parse_cutoff(args.current_since)
     if args.current_since and current_since is None:
         raise SystemExit(f"Invalid --current-since value: {args.current_since}")
     records = load_records(roots)
-    filtered = filter_records(records, args.since, args.until, after)
+    filtered = filter_records(records, since, until, after)
     deduped, duplicates, resolved_duplicate_count = dedupe_records(filtered)
     stats = aggregate(deduped, duplicates, resolved_duplicate_count, args.slow_threshold_sec, current_since)
     rows = finding_rows(stats, args.min_pass_rate)
