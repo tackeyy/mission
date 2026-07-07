@@ -101,6 +101,13 @@ repository、[Claude Code `/goal` docs](https://code.claude.com/docs/ja/goal)、
 | `Superpowers` | brainstorming、planning、TDD、debugging、review、branch delivery まで含む広い coding-agent 方法論がほしい場合。 |
 | review / CI / security plugin | workflow の一部分だけを専門的に検査し、全体の完了判断は別の orchestrator または人間が行う場合。 |
 
+### 実測エビデンスが示すこと
+
+- これまでに完了した全ての paired run — content recall のみで採点し構造に加点しない planted-defect tail cohort（2026-07-07、N=5、両 arm 同一モデル）を含む — で、公式 `/goal` と `mission` は completion / validator / marker 指標で同点となり、`mission` は wall-clock で約 5.8 倍、API 費用で約 7.4 倍かかりました。自己完結型のタスクで平均品質の向上を期待して `mission` を採用しないでください。詳細は [`benchmarks/mission-vs-goal/report.ja.md`](benchmarks/mission-vs-goal/report.ja.md)。
+- 451 件の scored 本番ミッションでは、95% が iteration 1 のまま品質ゲートを通過しました。計測された価値は、ゲートが反復を強制した約 5% のテール（初回の事実誤認・実行時 UI バグ・緑のツールチェーンが見逃したセキュリティ関連ギャップ）と、不可逆な本番操作を承認待ちで停止した 7 件の halt に集中しています。詳細は [`docs/CASE_STUDIES.ja.md`](docs/CASE_STUDIES.ja.md)。
+
+`mission` を選ぶ理由は、監査可能な completion gate、open-world な作業でのテール保険、不可逆操作のガバナンス、resume 可能な state です — 平均品質の向上ではありません。
+
 ベンチマーク由来の主張は
 [`benchmarks/mission-vs-goal/`](benchmarks/mission-vs-goal/) の pilot protocol
 に沿って、sample size、task mix、validator、raw result を明示してください。
