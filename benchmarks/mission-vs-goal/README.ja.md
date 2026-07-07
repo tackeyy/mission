@@ -169,6 +169,44 @@ python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
 API budget を保全したため `/mission` は実行していません。これは blocked と扱い、
 どちらかの品質 evidence にはしません。
 
+## Tail Cohort (tail-first-failure)
+
+これまで完了した paired run はすべて天井に張り付いています。両 arm が
+validator を 100% 通過するため、review loop が何を足すかをどの cohort でも
+測れませんでした。`tasks.tail.json`（cohort: `tail-first-failure`）は marker を
+構造ではなく内容の recall にすることで、この天井を取り除きます。
+
+- 各 task は、cross-file の矛盾・複数原因の重なり・数値誤り・記載漏れを
+  仕込んだ fixture ファイル（commit 済み）と、正しいのに疑わしく見える
+  candidate（checklist 的な指摘を罰する）を同梱します。
+- `quality_markers` は、その問題を実際に見つけない限り artifact に現れない
+  固有トークン（誤った値・識別子）です。`markers_hidden: true` により
+  両 arm の prompt には列挙されません。
+- `forbidden_markers` は false positive を減点します。正しい candidate を
+  finding と明示的に主張すると net marker score が下がります。penalty は
+  substring ベースで意図的に under-sensitive です — 言い換えた false claim は
+  すり抜けられますが、planted marker に一致せずに score を上げる方法は
+  ありません。
+- `hidden_paths` は answer key（`tasks.tail.json` 自身）を列挙し、runner が
+  どちらの arm の実行前にも clone 済み worktree から削除します。
+  `prompt_rules` は benchmark metadata 全体を両 arm の out of bounds にします。
+
+```bash
+python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
+  --tasks-file benchmarks/mission-vs-goal/tasks.tail.json \
+  --run-id YYYY-MM-DD-claude-goal-vs-mission-tail \
+  --starting-commit <commit> \
+  --model-id <model-id> \
+  --stop-on-blocked \
+  --timeout 1800 \
+  --max-budget-usd 6.0 \
+  --limit-tasks 5
+```
+
+tail cohort の run はまだ完了していません。task ごとの
+`first_pass_failure_design` は single pass がどこで失敗するかの設計仮説であり、
+計測された結果ではありません。
+
 ## Human Quality Rubric
 
 | Score | Meaning |
@@ -208,6 +246,8 @@ raw evidence がそろった後に使ってよい表現:
 | `tasks.json` | 計測済みの固定 10 タスク baseline pilot set。 |
 | `tasks.complex.json` | 公式 smoke/full attempt に使う 10-task complex cohort。full comparable run はまだ完了していない。 |
 | `tasks.quality.json` | evidence-depth と stop/proceed decision を測る fresh quality-critical cohort。 |
+| `tasks.tail.json` | planted-defect fixture・decoy penalty（`forbidden_markers`）・answer-key sanitization（`hidden_paths`）を持つ tail cohort。run はまだ完了していない。 |
+| `fixtures/tail/` | tail cohort 用の commit 済み fixture ドキュメント。 |
 | `result.schema.json` | result record 1 件分の JSON Schema。 |
 | `report.md` | 英語の current measured status と package-validation results。 |
 | `report.ja.md` | 日本語の current measured status と package-validation results。 |

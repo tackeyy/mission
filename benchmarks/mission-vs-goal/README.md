@@ -194,6 +194,44 @@ comparison. Official `/goal` hit `api_usage_limit` before success and
 `/mission` was not run because `--stop-on-blocked` conserved API budget. Treat
 this as blocked, not as evidence for either arm's quality.
 
+## Tail Cohort (tail-first-failure)
+
+Every completed paired run so far hit a ceiling: both arms passed 100% of
+validators, so no cohort could show what a review loop adds. The
+`tasks.tail.json` cohort (`tail-first-failure`) removes that ceiling by making
+markers measure content recall instead of structure:
+
+- Each task ships committed fixture files with planted cross-file
+  contradictions, multi-cause overlaps, numeric errors, or omissions, plus
+  plausible-but-correct candidates that punish checklist-style flagging.
+- `quality_markers` are defect-specific tokens (wrong values, identifiers)
+  that only appear in an artifact when the underlying issue was actually
+  found. `markers_hidden: true` keeps them out of both prompts.
+- `forbidden_markers` subtract false positives: explicitly claiming a
+  correct candidate as a finding lowers the net marker score. The penalty is
+  substring-based and deliberately under-sensitive — paraphrased false claims
+  can escape it, but no phrasing can raise the score without matching a
+  planted marker.
+- `hidden_paths` lists the answer key (`tasks.tail.json` itself); the runner
+  deletes those paths from the cloned worktree before either arm runs, and
+  `prompt_rules` place all benchmark metadata out of bounds for both arms.
+
+```bash
+python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
+  --tasks-file benchmarks/mission-vs-goal/tasks.tail.json \
+  --run-id YYYY-MM-DD-claude-goal-vs-mission-tail \
+  --starting-commit <commit> \
+  --model-id <model-id> \
+  --stop-on-blocked \
+  --timeout 1800 \
+  --max-budget-usd 6.0 \
+  --limit-tasks 5
+```
+
+No tail-cohort run has completed yet. The per-task
+`first_pass_failure_design` fields are design hypotheses about where single
+passes fail, not measured results.
+
 ## Human Quality Rubric
 
 | Score | Meaning |
@@ -234,6 +272,8 @@ Not allowed from this pilot:
 | `tasks.json` | The measured fixed 10-task baseline pilot set. |
 | `tasks.complex.json` | 10-task complex cohort used by official smoke/full attempts; no full comparable run has completed yet. |
 | `tasks.quality.json` | Fresh quality-critical cohort for evidence-depth and stop/proceed decision tasks. |
+| `tasks.tail.json` | Tail cohort with planted-defect fixtures, decoy penalties (`forbidden_markers`), and answer-key sanitization (`hidden_paths`); no run completed yet. |
+| `fixtures/tail/` | Committed fixture documents for the tail cohort. |
 | `result.schema.json` | JSON Schema for one result record. |
 | `report.md` | Current measured status and package-validation results. |
 | `run_claude_goal_vs_mission.py` | Claude Code official `/goal` vs `/mission` smoke runner. |

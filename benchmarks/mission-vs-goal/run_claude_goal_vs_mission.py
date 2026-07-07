@@ -104,13 +104,27 @@ def evaluate_quality_markers(text: str, task: dict) -> dict:
         else:
             missing.append(name)
 
+    forbidden_matched: list[str] = []
+    for marker in task.get("forbidden_markers", []):
+        name = str(marker["name"] if isinstance(marker, dict) else marker)
+        patterns = quality_marker_patterns(marker)
+        if any(pattern in lowered for pattern in patterns):
+            forbidden_matched.append(name)
+
     total = len(markers)
-    ratio = len(matched) / total if total else None
+    recall = len(matched) / total if total else None
+    # Net score subtracts false positives (decoys claimed as findings) from
+    # planted-marker recall. The penalty is deliberately under-sensitive: a
+    # paraphrased false claim can escape the substring match, but nothing an
+    # artifact writes can raise the score without matching a planted marker.
+    net = max(0.0, (len(matched) - len(forbidden_matched)) / total) if total else None
     return {
         "quality_markers_total": total,
         "quality_markers_matched": matched,
         "quality_markers_missing": missing,
-        "quality_marker_score": round(ratio, 2) if ratio is not None else None,
+        "quality_marker_recall": round(recall, 2) if recall is not None else None,
+        "forbidden_markers_matched": forbidden_matched,
+        "quality_marker_score": round(net, 2) if net is not None else None,
     }
 
 
@@ -126,13 +140,43 @@ def prepare_clone(source: Path, target: Path, starting_commit: str) -> None:
         raise RuntimeError(f"git checkout failed: {checkout.stderr}")
 
 
+def sanitize_worktree(worktree: Path, hidden_paths: list[str]) -> list[str]:
+    """Remove answer-key files from a cloned worktree before an arm runs.
+
+    Tail-cohort task files embed planted-marker answer keys, so the clone must
+    not contain them. Paths are repo-relative; anything resolving outside the
+    worktree is rejected. Returns the repo-relative paths actually removed.
+    """
+    worktree = worktree.resolve()
+    removed: list[str] = []
+    for rel in hidden_paths:
+        rel_path = Path(rel)
+        if rel_path.is_absolute() or ".." in rel_path.parts:
+            raise ValueError(f"hidden path escapes worktree: {rel}")
+        target = worktree / rel_path
+        # A symlink endpoint is unlinked itself (never followed), so no
+        # dangling link is left behind and nothing outside the clone is touched.
+        if target.is_symlink():
+            target.unlink()
+            removed.append(rel)
+        elif target.is_dir():
+            shutil.rmtree(target)
+            removed.append(rel)
+        elif target.exists():
+            target.unlink()
+            removed.append(rel)
+    return removed
+
+
 def build_prompt(
     task: dict,
     arm: str,
     output_rel: str,
     mission_max_iter: int | None = None,
     mission_profile: str = "full",
+    extra_rules: list[str] | tuple[str, ...] = (),
 ) -> str:
+    cohort_rules = "".join(f"- {rule}\n" for rule in extra_rules)
     common = f"""You are executing one controlled local benchmark run.
 
 Rules:
@@ -141,14 +185,16 @@ Rules:
 - Keep edits narrowly scoped to benchmark output files. For the mission arm, `.mission-state/` is also allowed.
 - Do not claim benchmark superiority. Only complete this task artifact.
 - Include concrete evidence for every claim. If something is unmeasured, say it is unmeasured.
-
+{cohort_rules}
 Task id: {task["id"]}
 Task category: {task["category"]}
 Task prompt: {task["prompt"]}
 Task validator: {task["validator"]}
 """
     marker_names = quality_marker_names(task)
-    if marker_names:
+    if marker_names and not task.get("markers_hidden"):
+        # Tail-cohort tasks set markers_hidden: their markers are planted-defect
+        # answer keys, so listing them here would leak the answers to both arms.
         common += "\nQuality scoring markers to cover explicitly when evidence supports them:\n"
         common += "\n".join(f"- {name}" for name in marker_names)
         common += "\n"
@@ -335,6 +381,7 @@ def evaluate_run(
     marker_eval = evaluate_quality_markers(text, task)
     if not validator_pass:
         marker_eval["quality_marker_score"] = None
+        marker_eval["quality_marker_recall"] = None
     marker_ratio = marker_eval["quality_marker_score"]
     quality_score, evidence_score = score_from_signals(validator_pass, marker_ratio)
     status = classify_run_status(
@@ -401,13 +448,23 @@ def run_one(
     mission_profile: str,
     arm_order: int,
     model_id: str,
+    hidden_paths: list[str] | None = None,
+    extra_rules: list[str] | tuple[str, ...] = (),
 ) -> dict:
     task_id = task["id"]
     run_name = f"{task_id}-{arm}"
     worktree = run_root / run_name / "repo"
     prepare_clone(REPO_ROOT, worktree, starting_commit)
+    sanitized = sanitize_worktree(worktree, hidden_paths or [])
     output_rel = f"benchmarks/mission-vs-goal/run-output/{run_id}/{run_name}.md"
-    prompt = build_prompt(task, arm, output_rel, mission_max_iter=mission_max_iter, mission_profile=mission_profile)
+    prompt = build_prompt(
+        task,
+        arm,
+        output_rel,
+        mission_max_iter=mission_max_iter,
+        mission_profile=mission_profile,
+        extra_rules=extra_rules,
+    )
     artifact_dir = ARTIFACTS_DIR / run_id / run_name
     stdout_path = artifact_dir / "claude-result.json"
     stderr_path = artifact_dir / "stderr.txt"
@@ -465,6 +522,8 @@ def run_one(
         f"mission_profile={mission_profile if arm == 'mission' else None}",
         "print_mode_smoke=true",
     ]
+    if sanitized:
+        notes.append(f"sanitized_hidden_paths={','.join(sanitized)}")
     if timed_out:
         notes.append(f"timed_out_after_seconds={timeout}")
     if evaluation["run_status"] == "blocked":
@@ -501,6 +560,8 @@ def run_one(
         "human_quality_score": evaluation["human_quality_score"],
         "quality_score_method": evaluation["quality_score_method"],
         "quality_marker_score": evaluation["quality_marker_score"],
+        "quality_marker_recall": evaluation["quality_marker_recall"],
+        "forbidden_markers_matched": evaluation["forbidden_markers_matched"],
         "quality_markers_matched": evaluation["quality_markers_matched"],
         "quality_markers_missing": evaluation["quality_markers_missing"],
         "intervention_count": evaluation["intervention_count"],
@@ -645,6 +706,8 @@ def main() -> int:
             args.mission_profile,
             arm_order,
             args.model_id,
+            hidden_paths=task_data.get("hidden_paths"),
+            extra_rules=task_data.get("prompt_rules", ()),
         )
         records.append(record)
         with result_path.open("a", encoding="utf-8") as f:

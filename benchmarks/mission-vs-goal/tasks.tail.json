@@ -1,0 +1,167 @@
+{
+  "benchmark": "mission-vs-goal-pilot",
+  "version": 1,
+  "cohort": "tail-first-failure",
+  "task_count": 5,
+  "arms": [
+    "claude_code_goal_command",
+    "mission"
+  ],
+  "hidden_paths": [
+    "benchmarks/mission-vs-goal/tasks.tail.json"
+  ],
+  "prompt_rules": [
+    "Do not open, read, grep, or list anything under `benchmarks/mission-vs-goal/` except the fixture files named in this prompt and your own output file. Benchmark metadata (task definitions, scoring configuration, answer keys) is out of bounds.",
+    "For every confirmed finding, quote the exact identifier or value from the fixture as evidence.",
+    "Explicitly separate confirmed findings from rejected candidates, and state why each rejected candidate looked suspicious but is not a real finding."
+  ],
+  "tasks": [
+    {
+      "id": "tail-config-spec-drift",
+      "category": "configuration",
+      "difficulty": "cross_file_config_drift_with_unit_conversion_candidates",
+      "mission_complexity": "Complex",
+      "mission_max_iter": 3,
+      "markers_hidden": true,
+      "fixtures": [
+        "benchmarks/mission-vs-goal/fixtures/tail/config-spec-drift/spec.md",
+        "benchmarks/mission-vs-goal/fixtures/tail/config-spec-drift/impl-alpha.md",
+        "benchmarks/mission-vs-goal/fixtures/tail/config-spec-drift/impl-beta.md",
+        "benchmarks/mission-vs-goal/fixtures/tail/config-spec-drift/runbook.md"
+      ],
+      "prompt": "Audit configuration drift against the canonical spec. Read exactly these fixtures: `benchmarks/mission-vs-goal/fixtures/tail/config-spec-drift/spec.md`, `benchmarks/mission-vs-goal/fixtures/tail/config-spec-drift/impl-alpha.md`, `benchmarks/mission-vs-goal/fixtures/tail/config-spec-drift/impl-beta.md`, `benchmarks/mission-vs-goal/fixtures/tail/config-spec-drift/runbook.md`. Find every place where an implementation or the runbook contradicts the spec, quoting key and both values. Some entries look contradictory but are consistent after unit or aggregate conversion; reject those explicitly with the conversion shown.",
+      "validator": "Artifact must include a confirmed-drift table (file, key, spec value, actual value, quoted evidence), a rejected-candidates section with the conversion or reasoning that clears each one, and an explicit statement of which spec constraints are violated.",
+      "primary_metric": "quality_marker_recall",
+      "hypothesis": "A review loop should help recall cross-file drifts that a single pass tends to miss after finding the first few obvious ones; this is a hypothesis to test, not a result.",
+      "first_pass_failure_design": "Ten spec keys spread across three downstream docs; two candidates are consistent only after unit (ticks-to-seconds) or aggregate (per-replica-to-total) conversion; one violation is a policy constraint (a flag that must stay false) rather than a numeric mismatch; single-pass audits typically stop after the obvious numeric drifts.",
+      "quality_markers": [
+        { "name": "Drift: request timeout 27000", "patterns": ["27000", "27,000"] },
+        { "name": "Drift: retry count 6 in runbook", "patterns": ["up to 6", "6 times", "6 retries", "retries: 6"] },
+        { "name": "Drift: constant-interval backoff", "patterns": ["constant-interval", "constant interval"] },
+        { "name": "Drift: queue depth 1250", "patterns": ["1250", "1,250"] },
+        { "name": "Drift: TLS floor 1.2 in runbook", "patterns": ["tls 1.2", "tls floor to 1.2", "floor to 1.2", "tls_min_version: 1.2", "1.2 vs 1.3", "1.3 vs 1.2"] },
+        { "name": "Drift: health interval 75s", "patterns": ["75 seconds", "75s", "= 75", ": 75", "75 vs 15", "15 vs 75"] },
+        { "name": "Violation: legacy auth enabled", "patterns": ["legacy"] }
+      ],
+      "forbidden_markers": [
+        { "name": "False claim: idle timeout", "patterns": ["fix idle_timeout", "fix the idle timeout", "idle_timeout must be corrected", "correct the idle_timeout", "change idle_timeout_ticks", "set idle_timeout_ticks to"] },
+        { "name": "False claim: log level", "patterns": ["fix log_level", "fix the log level", "log_level must be corrected", "correct the log_level", "change log_level"] },
+        { "name": "False claim: pool size", "patterns": ["fix db_pool", "correct the pool size", "db_pool_size_per_replica must be corrected", "change db_pool_size_per_replica", "reduce db_pool_size_per_replica"] }
+      ]
+    },
+    {
+      "id": "tail-incident-log-triage",
+      "category": "debugging",
+      "difficulty": "multi_cause_incident_with_correlated_red_herrings",
+      "mission_complexity": "Critical",
+      "mission_max_iter": 3,
+      "markers_hidden": true,
+      "fixtures": [
+        "benchmarks/mission-vs-goal/fixtures/tail/incident-log-triage/incident-log.md",
+        "benchmarks/mission-vs-goal/fixtures/tail/incident-log-triage/change-history.md",
+        "benchmarks/mission-vs-goal/fixtures/tail/incident-log-triage/oncall-notes.md"
+      ],
+      "prompt": "Triage incident 2417 using exactly these fixtures: `benchmarks/mission-vs-goal/fixtures/tail/incident-log-triage/incident-log.md`, `benchmarks/mission-vs-goal/fixtures/tail/incident-log-triage/change-history.md`, `benchmarks/mission-vs-goal/fixtures/tail/incident-log-triage/oncall-notes.md`. The failure is not single-cause. Identify every independent contributing cause with log-line evidence, propose the smallest safe remediation for each, and explicitly reject candidate explanations that the evidence does not support.",
+      "validator": "Artifact must attribute the incident to each independent cause with quoted log evidence and timestamps, give one smallest-safe remediation per cause, and include a rejected-candidates section with the reason each red herring is not causal.",
+      "primary_metric": "quality_marker_recall",
+      "hypothesis": "A review loop should help keep multiple independent causes alive instead of stopping at the first plausible one; this is a hypothesis to test, not a result.",
+      "first_pass_failure_design": "Three independent causes (certificate expiry, a concurrency rollout exhausting a fixed DB pool, and a locking maintenance job moved into peak traffic) overlap in one 45-minute window, while the loudest social signal in the notes blames an unrelated static-asset deploy; premature single-root-cause narratives are the expected first-pass failure.",
+      "quality_markers": [
+        { "name": "Cause: certificate expiry", "patterns": ["certificate has expired", "cert expir", "certificate expir", "payments-gw.internal"] },
+        { "name": "Cause: concurrency rollout", "patterns": ["worker_concurrency", "8 -> 16", "8 to 16", "concurrency"] },
+        { "name": "Cause: reindex lock contention", "patterns": ["nightly-reindex", "reindex", "lock wait"] },
+        { "name": "Fix: certificate renewal", "patterns": ["renew", "rotate", "reissue"] },
+        { "name": "Fix: concurrency revert or pool resize", "patterns": ["revert", "roll back", "rollback", "reduce concurrency", "pool size"] },
+        { "name": "Fix: reschedule or de-conflict the job", "patterns": ["reschedule", "04:00", "defer", "pause", "off-peak", "online mode", "lock-free"] }
+      ],
+      "forbidden_markers": [
+        { "name": "False cause: assets-web deploy", "patterns": ["assets-web caused", "assets-web is the root cause", "assets-web release is the root cause", "root cause: assets-web", "assets-web is a root cause", "assets-web is causal"] },
+        { "name": "False cause: clock skew", "patterns": ["clock skew caused", "clock skew is the root cause", "clock skew is a root cause", "root cause: clock skew", "fix the clock skew", "fix clock skew"] }
+      ]
+    },
+    {
+      "id": "tail-bilingual-release-drift",
+      "category": "documentation",
+      "difficulty": "bilingual_claim_drift_with_equivalent_rewordings",
+      "mission_complexity": "Complex",
+      "mission_max_iter": 2,
+      "markers_hidden": true,
+      "fixtures": [
+        "benchmarks/mission-vs-goal/fixtures/tail/bilingual-release-drift/announcement.en.md",
+        "benchmarks/mission-vs-goal/fixtures/tail/bilingual-release-drift/announcement.ja.md"
+      ],
+      "prompt": "The English draft is the source of truth. Compare `benchmarks/mission-vs-goal/fixtures/tail/bilingual-release-drift/announcement.en.md` and `benchmarks/mission-vs-goal/fixtures/tail/bilingual-release-drift/announcement.ja.md` claim by claim. Find every place where the Japanese copy is stronger than, numerically different from, or missing a safety-relevant statement of the English evidence, quoting both sides. Reworded but equivalent claims must be rejected as non-findings with reasoning.",
+      "validator": "Artifact must include a claim-by-claim parity table quoting English and Japanese, classify each divergence (overclaim, numeric drift, stage drift, omission), and include a rejected-candidates section for reworded-but-equivalent claims.",
+      "primary_metric": "quality_marker_recall",
+      "hypothesis": "A review loop should help catch omission-type drift (a missing safety sentence), which single passes tend to miss because nothing on the Japanese side draws attention to it; this is a hypothesis to test, not a result.",
+      "first_pass_failure_design": "Five drifts across strengthened qualifiers, an inflated test count, a release-stage upgrade, and one silent omission of a safety sentence; two reworded-but-equivalent claims punish checklist-style diffing without semantic comparison. Omissions have no anchor text on the target side and are the designed first-pass miss.",
+      "quality_markers": [
+        { "name": "Overclaim: 18% or more", "patterns": ["18%以上", "at least 18", "18% or more", "≥18", ">= 18"] },
+        { "name": "Overclaim: unconditional recovery", "patterns": ["必ず", "guarantee", "unconditionally"] },
+        { "name": "Numeric drift: test count 500", "patterns": ["500"] },
+        { "name": "Stage drift: 正式版 vs beta", "patterns": ["正式版", "beta"] },
+        { "name": "Omission: manual approval sentence", "patterns": ["manual approval", "手動承認", "irreversible", "不可逆"] }
+      ],
+      "forbidden_markers": [
+        { "name": "False drift: telemetry claim", "patterns": ["fix the telemetry claim", "correct the telemetry claim", "telemetry claim must be corrected", "テレメトリーの主張を修正", "テレメトリーの記述を修正"] },
+        { "name": "False drift: CLI workflow claim", "patterns": ["fix the cli workflow claim", "correct the cli workflow claim", "cli workflow claim must be corrected", "cliワークフローの主張を修正", "cliワークフローの記述を修正"] }
+      ]
+    },
+    {
+      "id": "tail-metrics-reconciliation",
+      "category": "analysis",
+      "difficulty": "numeric_claims_against_raw_table_with_correct_claims_mixed_in",
+      "mission_complexity": "Complex",
+      "mission_max_iter": 2,
+      "markers_hidden": true,
+      "fixtures": [
+        "benchmarks/mission-vs-goal/fixtures/tail/metrics-reconciliation/weekly-metrics.md",
+        "benchmarks/mission-vs-goal/fixtures/tail/metrics-reconciliation/quarterly-summary.md"
+      ],
+      "prompt": "Fact-check every numbered claim in `benchmarks/mission-vs-goal/fixtures/tail/metrics-reconciliation/quarterly-summary.md` against the raw table in `benchmarks/mission-vs-goal/fixtures/tail/metrics-reconciliation/weekly-metrics.md`. Recompute each figure from the table, mark each claim correct or incorrect, and give the corrected value with the arithmetic shown. Claims that are correct must be confirmed as correct, not flagged.",
+      "validator": "Artifact must verify all seven claims with recomputed arithmetic, state the corrected value for every incorrect claim, and confirm correct claims explicitly in a verified-claims section.",
+      "primary_metric": "quality_marker_recall",
+      "hypothesis": "A review loop should help force actual recomputation instead of plausibility checking; this is a hypothesis to test, not a result.",
+      "first_pass_failure_design": "Seven claims of which four are wrong in different ways (transposed digits in a 13-row sum, a ratio rounded up to a marketing multiple, a percentage on the wrong base, an average understated) and one hides a single-week regression behind an 'every single week' universal; three correct claims create false-positive pressure. Verifying all of them requires 13-row arithmetic that plausibility-style reading skips.",
+      "quality_markers": [
+        { "name": "Correction: signups 4,217", "patterns": ["4217", "4,217"] },
+        { "name": "Correction: latency ratio ~1.9x", "patterns": ["1.9", "1.88", "1.87"] },
+        { "name": "Catch: week-9 regression", "patterns": ["week 9", "week-9", "w9", "week nine"] },
+        { "name": "Correction: tickets -29%", "patterns": ["29%", "29 %", "29.0", "0.29"] },
+        { "name": "Correction: infra cost 1,450", "patterns": ["1450", "1,450"] }
+      ],
+      "forbidden_markers": [
+        { "name": "False flag: active users claim", "patterns": ["active users claim is wrong", "active user claim is wrong", "active users figure is incorrect", "correct the active users", "15% is incorrect", "15% is wrong", "9,430 is wrong", "9430 is wrong"] },
+        { "name": "False flag: uptime claim", "patterns": ["uptime claim is wrong", "uptime figure is incorrect", "99.95 is wrong", "99.95% is incorrect", "correct the uptime", "uptime is overstated"] }
+      ]
+    },
+    {
+      "id": "tail-dependency-upgrade-impact",
+      "category": "refactoring",
+      "difficulty": "breaking_change_mapping_with_unused_and_shimmed_candidates",
+      "mission_complexity": "Complex",
+      "mission_max_iter": 2,
+      "markers_hidden": true,
+      "fixtures": [
+        "benchmarks/mission-vs-goal/fixtures/tail/dependency-upgrade-impact/upgrade-changelog.md",
+        "benchmarks/mission-vs-goal/fixtures/tail/dependency-upgrade-impact/usage-inventory.md"
+      ],
+      "prompt": "Assess the relaykit v2-to-v3 upgrade using exactly `benchmarks/mission-vs-goal/fixtures/tail/dependency-upgrade-impact/upgrade-changelog.md` and `benchmarks/mission-vs-goal/fixtures/tail/dependency-upgrade-impact/usage-inventory.md`. Map every breaking change to the concrete call sites it affects, including any required migration-order constraint. Changelog entries that look breaking but affect no call site must be rejected with the inventory evidence.",
+      "validator": "Artifact must map each impactful breaking change to its affected call site with quoted inventory evidence, state migration steps including ordering constraints, and include a rejected-candidates section for breaking changes with no affected call sites.",
+      "primary_metric": "quality_marker_recall",
+      "hypothesis": "A review loop should help complete the cross-product of changelog entries and call sites, where single passes tend to stop after the first two or three obvious hits; this is a hypothesis to test, not a result.",
+      "first_pass_failure_design": "Ten changelog entries of which four are breaking-and-used, one carries a silent behavior change (wire-format default) plus an ordering constraint, and two look breaking but are cleared by the inventory (zero call sites; explicit timeouts everywhere). The silent default change and the ordering constraint are the designed first-pass misses.",
+      "quality_markers": [
+        { "name": "Impact: strict parseConfig vs flush_interval", "patterns": ["flush_interval"] },
+        { "name": "Impact: onRetry signature at retry-metrics", "patterns": ["retry-metrics", "onretry", "on_retry", "(context)"] },
+        { "name": "Impact: msgpack consumer vs JSON default", "patterns": ["msgpack"] },
+        { "name": "Impact: async drain at shutdown-hook", "patterns": ["drain", "shutdown-hook"] },
+        { "name": "Constraint: codec pin before first publish", "patterns": ["codec pin", "pin a codec", "before the first publish", "before first publish"] }
+      ],
+      "forbidden_markers": [
+        { "name": "False impact: warnOnce", "patterns": ["warnonce is affected", "warnonce breaks", "warnonce must be migrated", "migrate warnonce", "warnonce requires migration"] },
+        { "name": "False impact: connect timeout", "patterns": ["connect calls break", "connect() calls break", "connect timeout breaks", "must update connect(", "update every connect", "connect() requires migration"] }
+      ]
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "mission vs goal benchmark result",
+  "title": "mission vs goal benchmark result",
   "type": "object",
   "required": [
     "benchmark",
@@ -34,11 +34,11 @@
       "type": "string"
     },
     "arm": {
-            "enum": [
-                "goal_only",
-                "claude_code_goal_command",
-                "mission"
-            ]
+      "enum": [
+        "goal_only",
+        "claude_code_goal_command",
+        "mission"
+      ]
     },
     "model": {
       "type": "string"
@@ -89,12 +89,12 @@
         "string",
         "null"
       ],
-        "enum": [
-          "api_usage_limit",
-          "max_budget_usd",
-          "timeout",
-          null
-        ]
+      "enum": [
+        "api_usage_limit",
+        "max_budget_usd",
+        "timeout",
+        null
+      ]
     },
     "failure_kind": {
       "type": [
@@ -102,10 +102,10 @@
         "null"
       ],
       "enum": [
-          "api_usage_limit",
-          "max_budget_usd",
-          "timeout",
-          "validator",
+        "api_usage_limit",
+        "max_budget_usd",
+        "timeout",
+        "validator",
         "command_error",
         "missing_artifact",
         null
@@ -186,6 +186,20 @@
     },
     "notes": {
       "type": "string"
+    },
+    "quality_marker_recall": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 1
+    },
+    "forbidden_markers_matched": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
     }
   }
 }
