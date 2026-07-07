@@ -40,7 +40,7 @@
         { "name": "Drift: constant-interval backoff", "patterns": ["constant-interval", "constant interval"] },
         { "name": "Drift: queue depth 1250", "patterns": ["1250", "1,250"] },
         { "name": "Drift: TLS floor 1.2 in runbook", "patterns": ["tls 1.2", "tls floor to 1.2", "floor to 1.2", "tls_min_version: 1.2", "1.2 vs 1.3", "1.3 vs 1.2"] },
-        { "name": "Drift: health interval 75s", "patterns": ["75 seconds", "75s", "= 75", ": 75", "75 vs 15", "15 vs 75"] },
+        { "name": "Drift: health interval 75s", "patterns": ["75 seconds", "75s", "= 75", ": 75", "75 vs 15", "15 vs 75", "seconds=75", "(75", "75`"] },
         { "name": "Violation: legacy auth enabled", "patterns": ["legacy"] }
       ],
       "forbidden_markers": [
