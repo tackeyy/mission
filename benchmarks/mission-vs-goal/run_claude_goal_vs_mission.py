@@ -150,10 +150,16 @@ def sanitize_worktree(worktree: Path, hidden_paths: list[str]) -> list[str]:
     worktree = worktree.resolve()
     removed: list[str] = []
     for rel in hidden_paths:
-        target = (worktree / rel).resolve()
-        if not target.is_relative_to(worktree):
+        rel_path = Path(rel)
+        if rel_path.is_absolute() or ".." in rel_path.parts:
             raise ValueError(f"hidden path escapes worktree: {rel}")
-        if target.is_dir():
+        target = worktree / rel_path
+        # A symlink endpoint is unlinked itself (never followed), so no
+        # dangling link is left behind and nothing outside the clone is touched.
+        if target.is_symlink():
+            target.unlink()
+            removed.append(rel)
+        elif target.is_dir():
             shutil.rmtree(target)
             removed.append(rel)
         elif target.exists():

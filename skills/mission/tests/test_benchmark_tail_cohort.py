@@ -168,6 +168,22 @@ def test_sanitize_worktree_rejects_paths_escaping_the_worktree(tmp_path):
     module = _load_official_goal_runner()
     with pytest.raises(ValueError):
         module.sanitize_worktree(tmp_path, ["../outside.txt"])
+    with pytest.raises(ValueError):
+        module.sanitize_worktree(tmp_path, ["/etc/hosts"])
+
+
+def test_sanitize_worktree_unlinks_symlink_endpoint_not_its_target(tmp_path):
+    module = _load_official_goal_runner()
+    real = tmp_path / "real.json"
+    real.write_text("{}", encoding="utf-8")
+    link = tmp_path / "answer.json"
+    link.symlink_to(real)
+
+    removed = module.sanitize_worktree(tmp_path, ["answer.json"])
+
+    assert removed == ["answer.json"]
+    assert not link.exists()
+    assert real.exists()
 
 
 def test_build_prompt_injects_cohort_rules_for_both_arms():
@@ -203,9 +219,10 @@ def test_build_prompt_hides_answer_key_markers_when_markers_hidden():
 
 def test_run_one_wires_sanitize_and_prompt_rules():
     source = (BENCHMARK_DIR / "run_claude_goal_vs_mission.py").read_text(encoding="utf-8")
-    # Sanitization must happen after cloning, before the arm runs.
-    assert "sanitize_worktree(" in source
-    assert source.index("prepare_clone(") < source.index("sanitize_worktree(")
+    # Sanitization must happen inside run_one, after cloning, before the arm runs.
+    run_one_body = source[source.index("def run_one("):]
+    assert "sanitize_worktree(" in run_one_body
+    assert run_one_body.index("prepare_clone(") < run_one_body.index("sanitize_worktree(")
     assert '"hidden_paths"' in source
     assert '"prompt_rules"' in source
     # Recorded per run so results stay auditable.

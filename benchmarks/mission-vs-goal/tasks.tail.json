@@ -39,14 +39,14 @@
         { "name": "Drift: retry count 6 in runbook", "patterns": ["up to 6", "6 times", "6 retries", "retries: 6"] },
         { "name": "Drift: constant-interval backoff", "patterns": ["constant-interval", "constant interval"] },
         { "name": "Drift: queue depth 1250", "patterns": ["1250", "1,250"] },
-        { "name": "Drift: TLS floor 1.2 in runbook", "patterns": ["1.2"] },
+        { "name": "Drift: TLS floor 1.2 in runbook", "patterns": ["tls 1.2", "tls floor to 1.2", "floor to 1.2", "tls_min_version: 1.2", "1.2 vs 1.3", "1.3 vs 1.2"] },
         { "name": "Drift: health interval 75s", "patterns": ["75 seconds", "75s", "= 75", ": 75", "75 vs 15", "15 vs 75"] },
         { "name": "Violation: legacy auth enabled", "patterns": ["legacy"] }
       ],
       "forbidden_markers": [
-        { "name": "False claim: idle timeout", "patterns": ["idle_timeout does not match", "idle timeout does not match", "idle_timeout must be corrected", "fix idle_timeout", "fix the idle timeout", "5400 does not equal", "5400 ticks does not match"] },
-        { "name": "False claim: log level", "patterns": ["log_level does not match", "log level does not match", "fix log_level", "fix the log level"] },
-        { "name": "False claim: pool size", "patterns": ["pool size does not match", "db_pool_size_per_replica does not match", "fix db_pool", "64 does not match", "64 conflicts with 32"] }
+        { "name": "False claim: idle timeout", "patterns": ["fix idle_timeout", "fix the idle timeout", "idle_timeout must be corrected", "correct the idle_timeout", "change idle_timeout_ticks", "set idle_timeout_ticks to"] },
+        { "name": "False claim: log level", "patterns": ["fix log_level", "fix the log level", "log_level must be corrected", "correct the log_level", "change log_level"] },
+        { "name": "False claim: pool size", "patterns": ["fix db_pool", "correct the pool size", "db_pool_size_per_replica must be corrected", "change db_pool_size_per_replica", "reduce db_pool_size_per_replica"] }
       ]
     },
     {
@@ -75,7 +75,7 @@
         { "name": "Fix: reschedule or de-conflict the job", "patterns": ["reschedule", "04:00", "defer", "pause", "off-peak", "online mode", "lock-free"] }
       ],
       "forbidden_markers": [
-        { "name": "False cause: assets-web deploy", "patterns": ["assets-web caused", "assets-web is the root cause", "assets-web release is the root cause", "root cause: assets-web", "revert assets-web", "roll back assets-web", "rollback assets-web"] },
+        { "name": "False cause: assets-web deploy", "patterns": ["assets-web caused", "assets-web is the root cause", "assets-web release is the root cause", "root cause: assets-web", "assets-web is a root cause", "assets-web is causal"] },
         { "name": "False cause: clock skew", "patterns": ["clock skew caused", "clock skew is the root cause", "clock skew is a root cause", "root cause: clock skew", "fix the clock skew", "fix clock skew"] }
       ]
     },
@@ -103,8 +103,8 @@
         { "name": "Omission: manual approval sentence", "patterns": ["manual approval", "手動承認", "irreversible", "不可逆"] }
       ],
       "forbidden_markers": [
-        { "name": "False drift: telemetry claim", "patterns": ["telemetry claims differ", "telemetry claim differs", "テレメトリーの記述が食い違", "fix the telemetry claim", "テレメトリーの主張を修正"] },
-        { "name": "False drift: CLI workflow claim", "patterns": ["cli workflow claims differ", "cli workflow claim differs", "cliワークフローの記述が食い違", "fix the cli workflow claim"] }
+        { "name": "False drift: telemetry claim", "patterns": ["fix the telemetry claim", "correct the telemetry claim", "telemetry claim must be corrected", "テレメトリーの主張を修正", "テレメトリーの記述を修正"] },
+        { "name": "False drift: CLI workflow claim", "patterns": ["fix the cli workflow claim", "correct the cli workflow claim", "cli workflow claim must be corrected", "cliワークフローの主張を修正", "cliワークフローの記述を修正"] }
       ]
     },
     {
@@ -126,7 +126,7 @@
       "quality_markers": [
         { "name": "Correction: signups 4,217", "patterns": ["4217", "4,217"] },
         { "name": "Correction: latency ratio ~1.9x", "patterns": ["1.9", "1.88", "1.87"] },
-        { "name": "Catch: week-9 regression", "patterns": ["week 9", "week-9", "w9", "410"] },
+        { "name": "Catch: week-9 regression", "patterns": ["week 9", "week-9", "w9", "week nine"] },
         { "name": "Correction: tickets -29%", "patterns": ["29%", "29 %", "29.0", "0.29"] },
         { "name": "Correction: infra cost 1,450", "patterns": ["1450", "1,450"] }
       ],
