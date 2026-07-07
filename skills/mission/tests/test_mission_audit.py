@@ -305,6 +305,40 @@ def test_audit_current_since_splits_historical_debt(tmp_path):
     assert any(finding["code"] == "historical-fixed-debt" for finding in data["findings"])
 
 
+def test_audit_since_accepts_iso_timestamp(tmp_path):
+    _write_state(
+        tmp_path / "before" / ".mission-state" / "sessions" / "before.json",
+        project_root=str(tmp_path / "before"),
+        session_id="before-cutoff",
+        updated_at="2026-07-06T03:00:52Z",
+    )
+    _write_state(
+        tmp_path / "after" / ".mission-state" / "sessions" / "after.json",
+        project_root=str(tmp_path / "after"),
+        session_id="after-cutoff",
+        updated_at="2026-07-06T19:58:45Z",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-07-06T03:00:53.439Z",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    assert data["total_sessions"] == 1
+    assert data["by_project"]["after"]["total"] == 1
+    assert "before" not in data["by_project"]
+
+
 def test_audit_current_since_keeps_historical_debt_out_of_blocking_findings(tmp_path):
     _write_state(
         tmp_path / ".mission-state" / "sessions" / "old.json",
