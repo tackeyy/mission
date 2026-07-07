@@ -226,9 +226,13 @@ python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
   --limit-tasks 5
 ```
 
-tail cohort の run はまだ完了していません。task ごとの
-`first_pass_failure_design` は single pass がどこで失敗するかの設計仮説であり、
-計測された結果ではありません。
+tail cohort の run は 2026-07-07 に 1 件完了しました
+（`2026-07-07-claude-goal-vs-mission-tail-v1`、5 tasks、両 arm の automated
+content-recall metrics は同点、`/mission` の wall-clock は `/goal` 比で約 5.8 倍・
+cost は約 7.4 倍；詳細は `report.md` の Tail Cohort Run セクションを参照）。
+N=5、1 model、closed-world fixture であり、広範な主張は導けません。
+`first_pass_failure_design` は引き続き設計仮説です。
+この run では設計上の first-pass failure は再現しませんでした。
 
 ## Human Quality Rubric
 
@@ -269,7 +273,7 @@ raw evidence がそろった後に使ってよい表現:
 | `tasks.json` | 計測済みの固定 10 タスク baseline pilot set。 |
 | `tasks.complex.json` | 公式 smoke/full attempt に使う 10-task complex cohort。full comparable run はまだ完了していない。 |
 | `tasks.quality.json` | evidence-depth と stop/proceed decision を測る fresh quality-critical cohort。 |
-| `tasks.tail.json` | planted-defect fixture・decoy penalty（`forbidden_markers`）・answer-key sanitization（`hidden_paths`）を持つ tail cohort。run はまだ完了していない。 |
+| `tasks.tail.json` | planted-defect fixture・decoy penalty（`forbidden_markers`）・answer-key sanitization（`hidden_paths`）を持つ tail cohort。2026-07-07 に最初の run が完了（詳細は `report.md` 参照）。 |
 | `fixtures/tail/` | tail cohort 用の commit 済み fixture ドキュメント。 |
 | `result.schema.json` | result record 1 件分の JSON Schema。 |
 | `report.md` | 英語の current measured status と package-validation results。 |

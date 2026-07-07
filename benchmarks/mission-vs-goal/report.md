@@ -2,7 +2,9 @@
 
 Status: measured on 2026-06-27 as a controlled local Codex CLI pilot.
 Additional Claude Code official `/goal` attempts were run on 2026-06-28 JST
-and are reported separately below.
+and are reported separately below. A tail-cohort run
+(`2026-07-07-claude-goal-vs-mission-tail-v1`, 5 planted-defect tasks, both arms)
+completed on 2026-07-07 JST and is reported in the Tail Cohort section below.
 
 This is not a general model benchmark and not a blind human evaluation. The
 quality and evidence scores below are automated heuristic scores from the local
@@ -363,6 +365,103 @@ Unsafe interpretation:
 That is unsupported. The automated quality and marker scores tied in this
 three-task run, and the scorer is a heuristic rather than blind human review.
 
+## Tail Cohort Run (tail-first-failure)
+
+Status: executed on 2026-07-07 JST. This is the first completed run using the
+`tasks.tail.json` cohort (5 planted-defect tasks). Both arms used model
+`claude-sonnet-5` via a PATH shim that injected `--model claude-sonnet-5` into
+every `claude` invocation; `modelUsage` in each `claude-result.json` confirms
+`claude-sonnet-5` on all records.
+
+| Item | Value | Evidence |
+|---|---:|---|
+| Run id | `2026-07-07-claude-goal-vs-mission-tail-v1` | `results/2026-07-07-claude-goal-vs-mission-tail-v1.jsonl`. |
+| Starting commit | `3591f9947cddb9028538f8d333a0eeb6545b726e` | Runner argument. |
+| Task file | `tasks.tail.json` | Planted-defect tail cohort, 5 tasks. |
+| Mission profile | `full` | Default workflow; no `--mission-profile` override. |
+| Expected records | 10 | 5 tasks x 2 arms. |
+| Records written | 10 / 10 | JSONL has 10 records. |
+| Blocked records | 0 / 10 | All records have `run_status=completed`. |
+| Quality score method | `automated_heuristic_form_stripped_not_blind_human` | Automated heuristic; not blind human review. |
+| model_id | `claude-sonnet-5` | All 10 records. |
+| Total Claude cost recorded | USD 23.6366052 | Sum of both arms across 5 tasks. |
+| `/goal` cost recorded | USD 2.8077291 | Sum of 5 goal records. |
+| `/mission` cost recorded | USD 20.8288761 | Sum of 5 mission records. |
+
+Task-level result:
+
+| Task | Arm | Completion | Validator pass | Quality score | Marker score | Forbidden hits | Cost | Elapsed |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| `tail-config-spec-drift` | `claude_code_goal_command` | true | true | 4.86 | 0.86 | 0 | USD 0.49555495 | 1.88 min |
+| `tail-config-spec-drift` | `mission` | true | true | 4.86 | 0.86 | 0 | USD 2.62527390 | 8.78 min |
+| `tail-incident-log-triage` | `mission` | true | true | 5.00 | 1.00 | 0 | USD 5.53930740 | 18.87 min |
+| `tail-incident-log-triage` | `claude_code_goal_command` | true | true | 5.00 | 1.00 | 0 | USD 0.51823745 | 1.90 min |
+| `tail-bilingual-release-drift` | `claude_code_goal_command` | true | true | 5.00 | 1.00 | 0 | USD 0.56775820 | 2.22 min |
+| `tail-bilingual-release-drift` | `mission` | true | true | 5.00 | 1.00 | 0 | USD 3.66627435 | 13.70 min |
+| `tail-metrics-reconciliation` | `mission` | true | true | 5.00 | 1.00 | 0 | USD 3.63863340 | 11.58 min |
+| `tail-metrics-reconciliation` | `claude_code_goal_command` | true | true | 5.00 | 1.00 | 0 | USD 0.66852725 | 3.26 min |
+| `tail-dependency-upgrade-impact` | `claude_code_goal_command` | true | true | 5.00 | 1.00 | 0 | USD 0.55765120 | 2.37 min |
+| `tail-dependency-upgrade-impact` | `mission` | true | true | 5.00 | 1.00 | 0 | USD 5.35938705 | 14.42 min |
+
+Aggregate result:
+
+| Metric | claude_code_goal_command | mission | Interpretation |
+|---|---:|---:|---|
+| Completed comparable records | 5 / 5 | 5 / 5 | Both arms completed all 5 tasks. |
+| Completion rate | 5 / 5 | 5 / 5 | Tie on completion. |
+| Validator pass rate | 5 / 5 | 5 / 5 | Tie on validator pass. |
+| Average quality score | 4.97 / 5 | 4.97 / 5 | Tie under automated heuristic scoring. |
+| Average quality marker score | 0.97 | 0.97 | Tie; one task drove both arms below 1.0. |
+| Forbidden marker hits | 0 | 0 | No decoy false positives on either arm. |
+| Total elapsed minutes | 11.63 | 67.35 | `/mission` ran ~5.8x longer in wall-clock time. |
+| Average elapsed minutes | 2.33 | 13.47 | Per-task average. |
+| Total recorded Claude cost | USD 2.8077291 | USD 20.8288761 | `/mission` cost ~7.4x more. |
+
+The `/mission` arm ran the full review loop — plan, review, score, iteration gate — on
+all five tasks. The internal composite score produced by `mission-state.py aggregate-reviews`
+and `push-score` cleared the 4.0 pass gate at iteration 1 in all five runs:
+`tail-config-spec-drift` (4.29), `tail-incident-log-triage` (4.53),
+`tail-bilingual-release-drift` (4.54), `tail-metrics-reconciliation` (5.00), and
+`tail-dependency-upgrade-impact` (4.28). No second iteration was triggered in any run.
+
+**Marker false negative and secondary re-score (secondary analysis; primary JSONL unchanged):**
+On `tail-config-spec-drift`, both arms' artifacts correctly identified the
+`health_check_interval_s` drift (spec 15 vs beta 75). The goal artifact contains
+`` `HEALTH_CHECK_INTERVAL_SECONDS=75` `` and the mission artifact contains
+`` `75` (same unit, seconds) ``, but the six configured patterns
+(`"75 seconds"`, `"75s"`, `"= 75"`, `": 75"`, `"75 vs 15"`, `"15 vs 75"`) failed to
+substring-match either phrasing. The marker pattern has been extended in
+`tasks.tail.json` to also include `"seconds=75"`, `"(75"`, and `` "75`" ``.
+Applying the updated task definitions to the 10 saved artifact files gives:
+`tail-config-spec-drift` both arms 0.86 → **1.0** (marker now matched); all other
+eight records unchanged at 1.0. Re-scored averages: both arms 0.97 → **1.0**,
+re-scored quality scores both 4.97 → **5.00**. The primary JSONL scores remain
+as-recorded (0.86 / 4.86 for `tail-config-spec-drift`); these are the
+secondary-analysis figures.
+
+Safe interpretation:
+
+> On five planted-defect tasks designed as first-pass recall challenges, both
+> arms tied on all automated content-recall metrics under the primary scorer, with
+> zero decoy false positives on either arm. The `/mission` arm ran its full
+> plan-review-score loop, cleared its own 4.0 pass gate at iteration 1 in all
+> five runs, and cost ~5.8x more wall-clock time and ~7.4x more in recorded USD
+> than the `/goal` arm. N=5, one model, closed-world fixtures where all evidence
+> fits in a few short files; production case studies (`docs/CASE_STUDIES.md`)
+> document the open-world tail where the gate binds.
+
+Unsafe interpretation:
+
+> `mission` is worse than `/goal` because it cost more with the same score.
+
+> The review loop is useless because it did not improve the automated score.
+
+Neither is supported: N=5 on a closed-world fixture set where both arms could
+find the same short files; the designed first-pass failures did not reproduce in
+this run. The `/mission` arm demonstrably ran the full loop and passed its own
+gate — the gate is a correctness guard that can bind on open-world work even
+when it did not bind here.
+
 ## Quality-Focused Critical Task Attempt
 
 Status: attempted on 2026-06-28 JST after adding a `quality` mission profile and
@@ -493,6 +592,20 @@ Safe to say about the quality-profile attempt:
 > first paired attempt was blocked by Claude Code workspace API limits before
 > `/mission` ran. No quality comparison can be made from that attempt.
 
+Safe to say about the tail run:
+
+> On five planted-defect tasks designed as first-pass recall challenges, both
+> arms tied on all automated content-recall metrics (average quality 4.97 / 5,
+> average marker score 0.97) with zero decoy false positives. The `/mission` arm
+> ran its full review loop and cleared its own 4.0 pass gate at iteration 1 in
+> all five runs, at ~5.8x wall-clock time and ~7.4x recorded USD cost compared
+> with `/goal`. N=5, closed-world fixtures, one model; no broad quality claim
+> follows from this run.
+
+Do not say:
+
+> The tail run shows `/mission` is worse than `/goal` (equal scores, different cost profile).
+
 Do not say:
 
 > `mission` is smarter than `/goal`.
@@ -533,4 +646,7 @@ artifacts/2026-06-28-claude-goal-vs-mission-quality-v1/
 results/2026-07-03-claude-goal-vs-mission-quality-light-v1.jsonl
 results/2026-07-03-claude-goal-vs-mission-quality-light-v1-summary.json
 artifacts/2026-07-03-claude-goal-vs-mission-quality-light-v1/
+results/2026-07-07-claude-goal-vs-mission-tail-v1.jsonl
+results/2026-07-07-claude-goal-vs-mission-tail-v1-summary.json
+artifacts/2026-07-07-claude-goal-vs-mission-tail-v1/
 ```

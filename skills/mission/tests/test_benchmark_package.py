@@ -422,6 +422,78 @@ def test_mission_vs_goal_measured_reports_are_honest_about_paired_runs():
     assert "`/mission` records | 0" in report_ja
     assert "Quality-marker comparison | unavailable" in report_ja
 
+    # --- Tail cohort run (2026-07-07) ---
+    tail_results_path = BENCHMARK_DIR / "results" / "2026-07-07-claude-goal-vs-mission-tail-v1.jsonl"
+    tail_summary_path = BENCHMARK_DIR / "results" / "2026-07-07-claude-goal-vs-mission-tail-v1-summary.json"
+
+    tail_records = [json.loads(line) for line in tail_results_path.read_text(encoding="utf-8").splitlines()]
+    tail_summary = json.loads(tail_summary_path.read_text(encoding="utf-8"))
+    tail_by_arm = {
+        arm: [r for r in tail_records if r["arm"] == arm]
+        for arm in ("claude_code_goal_command", "mission")
+    }
+
+    # 10 records, all completed and comparable
+    assert len(tail_records) == 10
+    assert len(tail_by_arm["claude_code_goal_command"]) == 5
+    assert len(tail_by_arm["mission"]) == 5
+    assert all(r["run_status"] == "completed" for r in tail_records)
+    assert all(r["comparable_attempt"] is True for r in tail_records)
+    assert all(r["validator_pass"] is True for r in tail_records)
+
+    # model_id is claude-sonnet-5 on all records
+    assert all(r["model_id"] == "claude-sonnet-5" for r in tail_records)
+
+    # Both arms tied on human_quality_score average (4.97)
+    assert tail_summary["arms"]["claude_code_goal_command"]["average_quality_score"] == 4.97
+    assert tail_summary["arms"]["mission"]["average_quality_score"] == 4.97
+
+    # Zero forbidden hits on both arms
+    assert all(r["forbidden_markers_matched"] == [] for r in tail_records)
+
+    # Summary fields
+    assert tail_summary["records"] == 10
+    assert tail_summary["expected_records"] == 10
+    assert tail_summary["mission_profile"] == "full"
+    assert tail_summary["task_cohort"] == "tail"
+    assert tail_summary["arms"]["claude_code_goal_command"]["comparable_records"] == 5
+    assert tail_summary["arms"]["mission"]["comparable_records"] == 5
+    assert tail_summary["arms"]["claude_code_goal_command"]["blocked_records"] == 0
+    assert tail_summary["arms"]["mission"]["blocked_records"] == 0
+
+    # report.md pins
+    assert "Tail Cohort Run (tail-first-failure)" in report
+    assert "Run id | `2026-07-07-claude-goal-vs-mission-tail-v1`" in report
+    assert "Starting commit | `3591f9947cddb9028538f8d333a0eeb6545b726e`" in report
+    assert "Mission profile | `full`" in report
+    assert "model_id | `claude-sonnet-5`" in report
+    assert "Average quality score | 4.97 / 5 | 4.97 / 5" in report
+    assert "Forbidden marker hits | 0 | 0" in report
+    assert "Total elapsed minutes | 11.63 | 67.35" in report
+    assert "secondary analysis; primary JSONL unchanged" in report
+    assert "both arms 0.86" in report
+    assert "Safe to say about the tail run" in report
+    assert "results/2026-07-07-claude-goal-vs-mission-tail-v1.jsonl" in report
+    assert "artifacts/2026-07-07-claude-goal-vs-mission-tail-v1/" in report
+
+    # report.ja.md pins
+    assert "Tail cohort run (tail-first-failure)" in report_ja
+    assert "Run id | `2026-07-07-claude-goal-vs-mission-tail-v1`" in report_ja
+    assert "model_id | `claude-sonnet-5`" in report_ja
+    assert "Average quality score | 4.97 / 5 | 4.97 / 5" in report_ja
+    assert "Forbidden marker hits | 0 | 0" in report_ja
+    assert "secondary analysis" in report_ja
+    assert "Tail run について言ってよい" in report_ja
+    assert "results/2026-07-07-claude-goal-vs-mission-tail-v1.jsonl" in report_ja
+
+    # tasks.tail.json: new pattern present
+    tail_tasks = json.loads((BENCHMARK_DIR / "tasks.tail.json").read_text(encoding="utf-8"))
+    config_drift = next(t for t in tail_tasks["tasks"] if t["id"] == "tail-config-spec-drift")
+    health_marker = next(m for m in config_drift["quality_markers"] if m["name"] == "Drift: health interval 75s")
+    assert "seconds=75" in health_marker["patterns"]
+    assert "(75" in health_marker["patterns"]
+    assert "75`" in health_marker["patterns"]
+
 
 def test_mission_vs_goal_protocol_controls_review_bias():
     protocol = (BENCHMARK_DIR / "README.md").read_text(encoding="utf-8")

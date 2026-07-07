@@ -2,7 +2,9 @@
 
 Status: 2026-06-27 に controlled local Codex CLI pilot として計測済み。
 追加で、2026-06-28 JST に Claude Code 公式 `/goal` の試行を実施し、
-別セクションに分けて記録しています。
+別セクションに分けて記録しています。Tail cohort run
+（`2026-07-07-claude-goal-vs-mission-tail-v1`、planted-defect 5 tasks、両 arm）は
+2026-07-07 JST に完了し、以下の Tail Cohort セクションに記録されています。
 
 これは general model benchmark ではなく、blind human evaluation でもありません。
 下記の quality / evidence score は local runner による automated heuristic score です。
@@ -354,6 +356,100 @@ Aggregate result:
 これは unsupported です。今回の3件では automated quality / marker score は同点であり、
 scoring も blind human review ではなく automated heuristic です。
 
+## Tail cohort run (tail-first-failure)
+
+Status: 2026-07-07 JST に実行。`tasks.tail.json` cohort（planted-defect 5 tasks）を
+使った最初の完了 run です。両 arm とも PATH shim 経由で `--model claude-sonnet-5` を
+注入し、各 `claude-result.json` の `modelUsage` が `claude-sonnet-5` を全 10 records
+で確認しています。
+
+| Item | Value | Evidence |
+|---|---:|---|
+| Run id | `2026-07-07-claude-goal-vs-mission-tail-v1` | `results/2026-07-07-claude-goal-vs-mission-tail-v1.jsonl`。 |
+| Starting commit | `3591f9947cddb9028538f8d333a0eeb6545b726e` | runner argument。 |
+| Task file | `tasks.tail.json` | planted-defect tail cohort、5 tasks。 |
+| Mission profile | `full` | デフォルト workflow。`--mission-profile` 指定なし。 |
+| Expected records | 10 | 5 tasks x 2 arms。 |
+| Records written | 10 / 10 | JSONL に 10 records。 |
+| Blocked records | 0 / 10 | 全 records が `run_status=completed`。 |
+| Quality score method | `automated_heuristic_form_stripped_not_blind_human` | automated heuristic。blind human review ではない。 |
+| model_id | `claude-sonnet-5` | 全 10 records。 |
+| Total Claude cost recorded | USD 23.6366052 | 両 arm 5 tasks の合計。 |
+| `/goal` cost recorded | USD 2.8077291 | goal 5 records の合計。 |
+| `/mission` cost recorded | USD 20.8288761 | mission 5 records の合計。 |
+
+Task-level result:
+
+| Task | Arm | Completion | Validator pass | Quality score | Marker score | Forbidden hits | Cost | Elapsed |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| `tail-config-spec-drift` | `claude_code_goal_command` | true | true | 4.86 | 0.86 | 0 | USD 0.49555495 | 1.88 min |
+| `tail-config-spec-drift` | `mission` | true | true | 4.86 | 0.86 | 0 | USD 2.62527390 | 8.78 min |
+| `tail-incident-log-triage` | `mission` | true | true | 5.00 | 1.00 | 0 | USD 5.53930740 | 18.87 min |
+| `tail-incident-log-triage` | `claude_code_goal_command` | true | true | 5.00 | 1.00 | 0 | USD 0.51823745 | 1.90 min |
+| `tail-bilingual-release-drift` | `claude_code_goal_command` | true | true | 5.00 | 1.00 | 0 | USD 0.56775820 | 2.22 min |
+| `tail-bilingual-release-drift` | `mission` | true | true | 5.00 | 1.00 | 0 | USD 3.66627435 | 13.70 min |
+| `tail-metrics-reconciliation` | `mission` | true | true | 5.00 | 1.00 | 0 | USD 3.63863340 | 11.58 min |
+| `tail-metrics-reconciliation` | `claude_code_goal_command` | true | true | 5.00 | 1.00 | 0 | USD 0.66852725 | 3.26 min |
+| `tail-dependency-upgrade-impact` | `claude_code_goal_command` | true | true | 5.00 | 1.00 | 0 | USD 0.55765120 | 2.37 min |
+| `tail-dependency-upgrade-impact` | `mission` | true | true | 5.00 | 1.00 | 0 | USD 5.35938705 | 14.42 min |
+
+Aggregate result:
+
+| Metric | claude_code_goal_command | mission | Interpretation |
+|---|---:|---:|---|
+| Completed comparable records | 5 / 5 | 5 / 5 | 両 arm とも 5 tasks を完了。 |
+| Completion rate | 5 / 5 | 5 / 5 | completion は tie。 |
+| Validator pass rate | 5 / 5 | 5 / 5 | validator pass は tie。 |
+| Average quality score | 4.97 / 5 | 4.97 / 5 | automated heuristic scoring では tie。 |
+| Average quality marker score | 0.97 | 0.97 | tie。1 task が両 arm を 1.0 以下にした。 |
+| Forbidden marker hits | 0 | 0 | どちらの arm も decoy false positive はなし。 |
+| Total elapsed minutes | 11.63 | 67.35 | `/mission` は wall-clock で ~5.8 倍かかった。 |
+| Average elapsed minutes | 2.33 | 13.47 | per-task 平均。 |
+| Total recorded Claude cost | USD 2.8077291 | USD 20.8288761 | `/mission` は ~7.4 倍の cost。 |
+
+`/mission` arm は全 5 tasks で plan-review-score loop（full workflow）を実行しました。
+`mission-state.py aggregate-reviews` と `push-score` が算出した内部 composite score は
+全 5 runs で 4.0 の pass gate を iteration 1 でクリアしました：
+`tail-config-spec-drift`（4.29）、`tail-incident-log-triage`（4.53）、
+`tail-bilingual-release-drift`（4.54）、`tail-metrics-reconciliation`（5.00）、
+`tail-dependency-upgrade-impact`（4.28）。
+どの run でも 2 回目の iteration は発生しませんでした。
+
+**Marker false negative と secondary re-score（secondary analysis；primary JSONL は不変）：**
+`tail-config-spec-drift` では、両 arm の artifact が `health_check_interval_s` の
+drift（spec 15 vs beta 75）を正しく特定していました。goal artifact には
+`` `HEALTH_CHECK_INTERVAL_SECONDS=75` ``、mission artifact には
+`` `75` (same unit, seconds) `` という記述がありましたが、設定済みの 6 patterns
+（`"75 seconds"`、`"75s"`、`"= 75"`、`": 75"`、`"75 vs 15"`、`"15 vs 75"`）は
+どちらの表記にもマッチしませんでした。`tasks.tail.json` の marker pattern を
+`"seconds=75"`、`"(75"`、`` "75`" `` で拡張しました。
+更新後の task 定義を 10 件の保存済み artifact.md に適用した secondary re-score 結果：
+`tail-config-spec-drift` 両 arm 0.86 → **1.0**（marker 一致）、他の 8 records は
+1.0 のまま変化なし。再集計 marker 平均：両 arm 0.97 → **1.0**、
+再集計 quality score 両 arm 4.97 → **5.00**。
+primary JSONL の記録スコアは変更せず、これらは secondary analysis の数値です。
+
+安全な解釈:
+
+> first-pass recall challenge として設計した planted-defect 5 tasks では、両 arm の
+> automated content-recall metrics は primary scorer で同点（average quality 4.97 / 5、
+> average marker score 0.97）となり、どちらの arm も decoy false positive はゼロでした。
+> `/mission` arm は全 5 runs で full plan-review-score loop を実行し、iteration 1 で
+> 自身の 4.0 pass gate をクリアしました。wall-clock は `/goal` 比で約 5.8 倍、
+> 記録 cost は約 7.4 倍です。N=5、1 model、証拠が短い数ファイルに収まる
+> closed-world fixture 環境であり、本 run から広範な品質主張は導けません。
+
+危険な解釈:
+
+> tail run の結果から `/mission` は `/goal` より劣る（score 同点、cost 差がある）。
+
+> review loop は score を改善しなかったため不要。
+
+どちらも unsupported です。N=5 の closed-world fixture であり、両 arm が同じ短い
+ファイルを見ることができました。設計上の first-pass failure はこの run では再現しませんでした。
+`/mission` arm は実際に full loop を実行し、自身の gate を通過しました。
+gate は open-world 環境では有効に機能します（`docs/CASE_STUDIES.md` 参照）。
+
 ## Quality-focused critical task attempt
 
 Status: `quality` mission profile と fresh な `tasks.quality.json` cohort を追加した後、
@@ -482,6 +578,19 @@ Quality-profile attempt について言ってよい:
 > attempt は `/mission` 実行前に Claude Code workspace API limit で blocked されたため、
 > 品質比較には使えない。
 
+Tail run について言ってよい:
+
+> first-pass recall challenge として設計した planted-defect 5 tasks では、両 arm の
+> automated content-recall metrics は同点（average quality 4.97 / 5、average marker
+> score 0.97）で、どちらの arm も decoy false positive はゼロでした。`/mission` arm は
+> full review loop を実行し、全 5 runs で iteration 1 の 4.0 pass gate をクリアしました。
+> wall-clock は `/goal` 比で約 5.8 倍、記録 cost は約 7.4 倍です。N=5、
+> closed-world fixture、1 model であり、この run から広範な品質主張は導けません。
+
+言ってはいけない:
+
+> tail run の結果から `/mission` は `/goal` より劣る（score 同点、cost 差がある）。
+
 言ってはいけない:
 
 > `mission` は `/goal` より賢い。
@@ -522,4 +631,7 @@ artifacts/2026-06-28-claude-goal-vs-mission-quality-v1/
 results/2026-07-03-claude-goal-vs-mission-quality-light-v1.jsonl
 results/2026-07-03-claude-goal-vs-mission-quality-light-v1-summary.json
 artifacts/2026-07-03-claude-goal-vs-mission-quality-light-v1/
+results/2026-07-07-claude-goal-vs-mission-tail-v1.jsonl
+results/2026-07-07-claude-goal-vs-mission-tail-v1-summary.json
+artifacts/2026-07-07-claude-goal-vs-mission-tail-v1/
 ```
