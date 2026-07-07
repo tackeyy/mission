@@ -70,8 +70,18 @@ Marker-less tasks (no `quality_markers`) collapse to `1.0` (fail) or `4.0`
 (pass). `evidence_completeness` uses the same signals. Identical artifact
 signals therefore produce identical scores for any arm; the earlier
 arm-hardcoded scores (mission fixed at 4.5, goal at 4.0) have been removed.
-`quality_score_method` stays `automated_heuristic_not_blind_human` — the
-automated score is a screen, not a blind human judgement.
+
+Markers are evaluated against the **form-stripped** artifact body (F-2):
+`strip_form` removes markdown headings, label-only lines, horizontal rules,
+and table separator rows before matching, so an arm that emits more template
+sections (an empty `## Rejected Hypotheses` heading, say) earns no marker
+credit — the body must actually discuss the content. This removes the
+structure-credit circularity that favored mission-shaped artifacts in the
+2026-06-27 pilot's evidence scores. The unstripped score is still recorded as
+`quality_marker_score_raw` for comparability with earlier records.
+`quality_score_method` is now
+`automated_heuristic_form_stripped_not_blind_human` — the automated score is a
+screen, not a blind human judgement.
 
 ## Protocol
 

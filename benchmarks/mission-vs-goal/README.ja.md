@@ -55,6 +55,29 @@ time budget、task prompt を使います。
 | `elapsed_minutes` | agent の最初の action から final answer までの wall-clock runtime。 |
 | `token_estimate` | 取得できる場合の token usage。取得できない場合は null。 |
 
+## Automated Scoring (arm-blind)
+
+自動 evaluator は score 決定時に arm label を一切参照しません。両 runner は
+同じ純関数 `score_from_signals(validator_pass, marker_score)` を使います:
+
+```
+quality_score = 1.0 + 3.0 * validator_pass + 1.0 * marker_score
+```
+
+marker なしの task は `1.0`（fail）または `4.0`（pass）に収束します。
+
+marker の評価は **form-stripped** な artifact 本文に対して行います（F-2）。
+`strip_form` は markdown 見出し・ラベルだけの行・水平線・table separator 行を
+マッチ前に取り除くため、テンプレセクションを多く出す arm（中身のない
+`## Rejected Hypotheses` 見出しなど）は marker credit を得られません —
+本文がその内容を実際に扱っている必要があります。これにより、2026-06-27
+pilot の evidence score が mission 形式の artifact を優遇していた
+structure-credit の循環を除去します。strip 前の score は過去 record との
+比較用に `quality_marker_score_raw` として記録します。
+`quality_score_method` は
+`automated_heuristic_form_stripped_not_blind_human` になります — 自動 score は
+screen であり、blind human judgement ではありません。
+
 ## Protocol
 
 1. clean checkout または isolated worktree から開始する。
