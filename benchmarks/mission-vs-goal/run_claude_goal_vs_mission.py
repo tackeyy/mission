@@ -91,6 +91,39 @@ def quality_marker_patterns(marker: str | dict) -> list[str]:
     return [str(value).lower() for value in values]
 
 
+def strip_form(text: str) -> str:
+    """Remove structural markup before marker scoring (F-2, arm-blind).
+
+    Structure must not earn marker credit: an arm that emits more template
+    sections would otherwise match section-title markers without content.
+    Drops markdown headings, label-only lines (bold labels and bare
+    trailing-colon labels), horizontal rules, and table separator rows; keeps
+    body prose and table data rows. Kept identical in both runners.
+    """
+    kept: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            kept.append(line)
+            continue
+        if stripped.startswith("#"):
+            continue
+        compact = stripped.replace(" ", "")
+        # Horizontal rules (***, ___) and table separator rows (|---|:---|, ---).
+        if len(compact) >= 3 and len(set(compact)) == 1 and compact[0] in "*_":
+            continue
+        if set(compact) <= {"|", "-", ":"} and "-" in compact:
+            continue
+        # Bold label-only lines: **Evidence** / **Stop Decision:**.
+        if compact.startswith("**") and compact.endswith("**") and len(compact) > 4:
+            continue
+        # Bare trailing-colon labels with nothing after the colon.
+        if stripped.endswith(":") and "|" not in stripped and len(stripped.rstrip(":").split()) <= 6:
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def evaluate_quality_markers(text: str, task: dict) -> dict:
     markers = task.get("quality_markers", [])
     lowered = text.lower()
@@ -378,10 +411,15 @@ def evaluate_run(
     missing_headings = [heading for heading in required_headings if heading not in text]
     completion = returncode == 0 and output_path.exists()
     validator_pass = completion and not missing_headings
-    marker_eval = evaluate_quality_markers(text, task)
+    # F-2: markers are scored against the form-stripped body, so template
+    # structure earns no marker credit. The unstripped score is kept as
+    # quality_marker_score_raw for comparability with pre-F-2 records.
+    marker_eval = evaluate_quality_markers(strip_form(text), task)
+    marker_eval_raw = evaluate_quality_markers(text, task)
     if not validator_pass:
         marker_eval["quality_marker_score"] = None
         marker_eval["quality_marker_recall"] = None
+        marker_eval_raw["quality_marker_score"] = None
     marker_ratio = marker_eval["quality_marker_score"]
     quality_score, evidence_score = score_from_signals(validator_pass, marker_ratio)
     status = classify_run_status(
@@ -398,13 +436,14 @@ def evaluate_run(
         "validator_pass": validator_pass,
         **status,
         "human_quality_score": quality_score,
-        "quality_score_method": "automated_heuristic_not_blind_human",
+        "quality_score_method": "automated_heuristic_form_stripped_not_blind_human",
         "intervention_count": 0,
         "resume_success": None if "resume" not in task["id"] else validator_pass,
         "evidence_completeness": evidence_score,
         "missing_headings": missing_headings,
         "artifact_bytes": output_path.stat().st_size if output_path.exists() else 0,
         **marker_eval,
+        "quality_marker_score_raw": marker_eval_raw["quality_marker_score"],
     }
 
 
@@ -560,6 +599,7 @@ def run_one(
         "human_quality_score": evaluation["human_quality_score"],
         "quality_score_method": evaluation["quality_score_method"],
         "quality_marker_score": evaluation["quality_marker_score"],
+        "quality_marker_score_raw": evaluation["quality_marker_score_raw"],
         "quality_marker_recall": evaluation["quality_marker_recall"],
         "forbidden_markers_matched": evaluation["forbidden_markers_matched"],
         "quality_markers_matched": evaluation["quality_markers_matched"],

@@ -129,7 +129,8 @@
       "enum": [
         "blind_human",
         "label_hidden_human",
-        "automated_heuristic_not_blind_human"
+        "automated_heuristic_not_blind_human",
+        "automated_heuristic_form_stripped_not_blind_human"
       ]
     },
     "quality_marker_score": {
@@ -200,6 +201,14 @@
       "items": {
         "type": "string"
       }
+    },
+    "quality_marker_score_raw": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 1
     }
   }
 }
