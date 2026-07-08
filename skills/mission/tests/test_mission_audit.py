@@ -542,6 +542,52 @@ def test_audit_pass_rate_excludes_active_no_score_sessions(tmp_path):
     assert all(f["code"] != "low-pass-rate" for f in data["findings"])
 
 
+def test_audit_ignores_worktree_archive_aggregate_json(tmp_path):
+    _write_state(
+        tmp_path / "passed" / ".mission-state" / "sessions" / "passed.json",
+        project_root=str(tmp_path / "passed"),
+        session_id="passed",
+    )
+    aggregate = (
+        tmp_path
+        / "repo"
+        / ".mission-state"
+        / "archive"
+        / "worktree-feature"
+        / "aggregate.json"
+    )
+    aggregate.parent.mkdir(parents=True, exist_ok=True)
+    aggregate.write_text(
+        json.dumps({"active_sessions": [], "updated_at": "2026-06-18T00:10:00Z"}),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-18",
+            "--min-pass-rate",
+            "0.9",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    data = json.loads(result.stdout)
+    assert data["total_sessions"] == 1
+    assert data["pass_count"] == 1
+    assert data["abandoned_count"] == 0
+    assert data["pass_rate"] == 1.0
+    assert "unknown" not in data["by_project"]
+    assert all(f["code"] != "low-pass-rate" for f in data["findings"])
+
+
 def test_audit_reports_missing_scoring_evidence_in_json(tmp_path):
     _write_state(
         tmp_path / "missing" / ".mission-state" / "sessions" / "missing.json",

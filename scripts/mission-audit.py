@@ -200,8 +200,16 @@ def load_records(roots: list[Path]) -> list[StateRecord]:
                 state = json.loads(path.read_text(encoding="utf-8"))
             except Exception:
                 continue
+            if not is_mission_state(state):
+                continue
             records.append(StateRecord(path=path, state=state))
     return records
+
+
+def is_mission_state(state: Any) -> bool:
+    if not isinstance(state, dict):
+        return False
+    return bool(state.get("mission") and state.get("mission_id") and state.get("session_id"))
 
 
 def dedupe_records(records: list[StateRecord]) -> tuple[list[StateRecord], list[list[StateRecord]], int]:
