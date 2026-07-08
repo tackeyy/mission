@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `mission-audit.py` and `mission-state.py stats` now ignore non-session metadata JSON such as archived worktree `aggregate.json`, preventing false abandoned `unknown` sessions and low-pass-rate findings (#163).
 - `mission-audit.py --since` and `--until` now accept ISO timestamps as well as date-only values, preventing same-day records after an automation cutoff from being silently excluded (#159).
 
 ## [1.1.1] - 2026-07-06

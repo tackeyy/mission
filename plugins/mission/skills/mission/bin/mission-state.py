@@ -4061,10 +4061,19 @@ def _collect_states(root: Path) -> list[dict]:
     states = []
     for sf in _iter_state_files(root, include_archive=True):
         try:
-            states.append(json.loads(sf.read_text()))
+            state = json.loads(sf.read_text())
         except Exception:
             continue
+        if not _is_mission_state_record(state):
+            continue
+        states.append(state)
     return states
+
+
+def _is_mission_state_record(state: object) -> bool:
+    if not isinstance(state, dict):
+        return False
+    return bool(state.get("mission") and state.get("mission_id") and state.get("session_id"))
 
 
 def _state_identity(state: dict) -> tuple | None:

@@ -225,6 +225,21 @@ def test_stats_discovers_nested_worktree_archive_sessions(tmp_path, run_cli):
     assert data["pass_count"] == 1
 
 
+def test_stats_ignores_worktree_archive_aggregate_json(tmp_path, run_cli):
+    """archive/worktree-*/aggregate.json は session state ではないため集計しない."""
+    _make_state(tmp_path / "p1", passes=True, loop_active=False)
+    aggregate = tmp_path / "p1" / ".mission-state" / "archive" / "worktree-feature" / "aggregate.json"
+    aggregate.parent.mkdir(parents=True)
+    aggregate.write_text(json.dumps({"active_sessions": [], "updated_at": "2026-05-25T00:10:00Z"}))
+
+    r = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
+    data = json.loads(r.stdout)
+    assert data["total_sessions"] == 1
+    assert data["pass_count"] == 1
+    assert data["abandoned_count"] == 0
+    assert "unknown" not in data["by_project"]
+
+
 def test_stats_phase_duration_totals_and_averages(tmp_path, run_cli):
     """phase_durations_sec を横断集計し、phase 別速度を見える化する."""
     _make_state(tmp_path / "p1", phase_durations_sec={"planning": 30, "scoring": 90})

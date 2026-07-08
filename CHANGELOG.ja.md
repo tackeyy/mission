@@ -10,6 +10,7 @@
 ## [Unreleased]
 
 ### 修正
+- `mission-audit.py` と `mission-state.py stats` が archived worktree の `aggregate.json` など session ではない metadata JSON を無視するようになり、`unknown` の abandoned session や low-pass-rate finding の誤検出を防ぐようにしました (#163)。
 - `mission-audit.py --since` / `--until` が日付だけでなく ISO timestamp も受け付けるようになり、automation cutoff と同じ日の後続 state が監査から黙って除外される問題を修正しました (#159)。
 
 ## [1.1.1] - 2026-07-06
