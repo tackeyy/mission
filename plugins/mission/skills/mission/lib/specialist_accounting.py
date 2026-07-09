@@ -45,6 +45,12 @@ def selected_specialist_skills(state: dict[str, Any]) -> set[str]:
     for selected in state.get("specialists_selected") or []:
         if isinstance(selected, dict) and selected.get("skill"):
             skills.add(str(selected["skill"]))
+    for phase in state.get("specialists_phase_plan") or []:
+        if not isinstance(phase, dict):
+            continue
+        for provider in phase.get("providers") or []:
+            if provider:
+                skills.add(str(provider))
     return skills
 
 
