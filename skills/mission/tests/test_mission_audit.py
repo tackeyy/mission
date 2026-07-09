@@ -1102,6 +1102,57 @@ def test_audit_reports_unselected_specialist_invocation(tmp_path):
     assert any(f["code"] == "unselected-specialist-invocation" for f in data["findings"])
 
 
+def test_audit_treats_phase_plan_providers_as_selected(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "sess-a.json",
+        started_at="2026-06-20T10:10:00Z",
+        created_at_session="2026-06-20T10:10:00Z",
+        task_profile={"primary": "backend"},
+        specialists_decision={"policy": "auto", "action": "select"},
+        specialists_selected=[
+            {"skill": "documentation-provider", "selection_source": "auto"},
+        ],
+        specialists_phase_plan=[
+            {
+                "phase": "execution",
+                "providers": ["integration-test-provider"],
+                "roles": ["integration-test"],
+                "max_providers": 1,
+            },
+            {
+                "phase": "review",
+                "providers": ["code-review-provider"],
+                "roles": ["code-review"],
+                "max_providers": 1,
+            },
+        ],
+        specialist_invocations=[
+            {"skill": "documentation-provider", "status": "completed", "mode": "codex-inline"},
+            {"skill": "integration-test-provider", "status": "completed", "mode": "codex-inline"},
+            {"skill": "code-review-provider", "status": "completed", "mode": "codex-inline"},
+        ],
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-18",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    data = json.loads(result.stdout)
+    assert data["unselected_specialist_invocation_count"] == 0
+    assert data["specialist_invocation_gap_count"] == 0
+
+
 def test_audit_excludes_core_mission_invocations_from_unselected_specialists(tmp_path):
     _write_state(
         tmp_path / ".mission-state" / "sessions" / "sess-a.json",
