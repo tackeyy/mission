@@ -4295,6 +4295,27 @@ def _build_breakdown(states: list[dict], classes: list[str], keyfn) -> dict:
     return out
 
 
+def _build_iteration_by_key(states: list[dict], keyfn) -> dict:
+    """任意キー別に iteration ヒストグラムをネストして返す。
+
+    バケット規則は iteration_histogram と同じ:
+      iteration 0-3 → そのまま文字列、4 以上 → "4+"、非整数 → "unknown"
+    """
+    out: dict = {}
+    for s in states:
+        k = keyfn(s) or "unknown"
+        it = s.get("iteration", 0)
+        if isinstance(it, int) and it <= 3:
+            bucket = str(it)
+        elif isinstance(it, int):
+            bucket = "4+"
+        else:
+            bucket = "unknown"
+        tier_hist = out.setdefault(k, {})
+        tier_hist[bucket] = tier_hist.get(bucket, 0) + 1
+    return out
+
+
 def _phase_duration_totals(states: list[dict]) -> dict:
     totals: dict = {}
     for state in states:
@@ -4325,6 +4346,7 @@ def _aggregate(states: list[dict], duplicate_state_group_count: int = 0) -> dict
             "phase_duration_avg_sec": {},
             "by_agent": {},
             "by_project": {}, "by_complexity": {}, "iteration_histogram": {},
+            "by_review_tier": {}, "iteration_by_review_tier": {},
         }
     # _classify を 1 回だけ評価 (旧実装は pass/halt/incomplete で 3N 回呼んでいた)
     classes = [_classify(s) for s in states]
@@ -4352,6 +4374,9 @@ def _aggregate(states: list[dict], duplicate_state_group_count: int = 0) -> dict
     # #6 (2026-06-15): project/complexity 別内訳と iteration ヒストグラム
     by_project = _build_breakdown(states, classes, lambda s: os.path.basename((s.get("project_root") or "unknown").rstrip("/")) or "unknown")
     by_complexity = _build_breakdown(states, classes, lambda s: s.get("complexity") or "Unknown")
+    # #180: review_tier 別内訳 (旧 state で review_tier フィールドなし → "unknown")
+    by_review_tier = _build_breakdown(states, classes, lambda s: s.get("review_tier") or "unknown")
+    iteration_by_review_tier = _build_iteration_by_key(states, lambda s: s.get("review_tier") or "unknown")
     phase_totals = _phase_duration_totals(states)
     iteration_histogram: dict = {}
     for _it in iterations:
@@ -4380,6 +4405,8 @@ def _aggregate(states: list[dict], duplicate_state_group_count: int = 0) -> dict
         "by_project": by_project,
         "by_complexity": by_complexity,
         "iteration_histogram": iteration_histogram,
+        "by_review_tier": by_review_tier,
+        "iteration_by_review_tier": iteration_by_review_tier,
     }
 
 
@@ -4426,7 +4453,7 @@ def _format_text(stats: dict, since: str | None, until: str | None) -> str:
             lines.append(
                 f"  {ag:<14} {b['total']} (PASS {b['pass']} / HALT {b['halt']} / incomplete {b['incomplete']})"
             )
-    for label, key in (("by_project", "by_project"), ("by_complexity", "by_complexity")):
+    for label, key in (("by_project", "by_project"), ("by_complexity", "by_complexity"), ("by_review_tier", "by_review_tier")):
         bd = stats.get(key) or {}
         if bd:
             lines.append(f"{label}:")
@@ -4439,6 +4466,13 @@ def _format_text(stats: dict, since: str | None, until: str | None) -> str:
         lines.append("iteration_histogram:")
         for k in sorted(hist.keys()):
             lines.append(f"  iter {k:<6} {hist[k]}")
+    ibrt = stats.get("iteration_by_review_tier") or {}
+    if ibrt:
+        lines.append("iteration_by_review_tier:")
+        for tier in sorted(ibrt.keys()):
+            tier_hist = ibrt[tier]
+            bucket_str = "  ".join(f"iter {bk}: {bv}" for bk, bv in sorted(tier_hist.items()))
+            lines.append(f"  {tier:<14} {bucket_str}")
     return "\n".join(lines)
 
 
