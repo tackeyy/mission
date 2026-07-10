@@ -182,6 +182,36 @@ introducing new missed escalations.
   `データ削除`, `レコード削除`, `物理削除`: reversible code-level removals
   (e.g. "delete a NavBar component") were triggering escalation.
 
+### Calibration (Issue #175, 2026-07-10)
+
+The same retrospective corpus (506 deduplicated missions) was re-run to measure
+the effect of calibrating `HIGH_RISK_KEYWORDS` in `classify_task_profile` using
+the same policy applied to the escalator in Issue #174.
+
+**Before → After (506 missions):**
+
+| Metric | Before (#174 baseline) | After (#175) |
+|---|---|---|
+| risk=high 発火件数 | 72 件 (14.2%) | 53 件 (10.5%) |
+| review_tier エスカレーション (risk=high 起因) | 17 件 | 9 件 |
+| full tier % | 75.3% | 74.5% |
+| Escalation rate (Simple/Standard → full) | 28.2% | 25.9% |
+| Miss count (Simple/Standard, score < 4.0, not escalated) | 3 | 3 |
+
+The miss count is unchanged. Calibration reduced risk=high false positives by 19
+missions without introducing new missed escalations.
+
+**Keywords removed and rationale (same policy as Issue #174):**
+
+- `prod` removed: `production` already covers the intent; `prod` was the sole
+  trigger on "product" / "productivity" mission descriptions.
+- Bare `token` removed, replaced with compound phrases (`api token`, `api-token`,
+  `api_key`, `access token`, `access-token`, `bearer`): token was the largest
+  contributor (15 of 19 reduction cases) and fired on bare product-name strings
+  such as "token-battle" unrelated to credential handling.
+- Bare `auth` replaced with stems `authenticat`, `authoriz`, `oauth`:
+  eliminated 2 false-fire cases from "authority"-containing descriptions.
+
 ## Implementation Notes
 
 Implemented in `skills/mission/bin/mission-state.py` (Issue #168):
