@@ -40,11 +40,16 @@ AUDIT_MISSION_SIGNALS = {
 DATABASE_STRONG_SIGNALS = {"database", "schema", "migration", "query", "sql", "persistence"}
 
 
-def selected_specialist_skills(state: dict[str, Any]) -> set[str]:
+def explicitly_selected_specialist_skills(state: dict[str, Any]) -> set[str]:
     skills: set[str] = set()
     for selected in state.get("specialists_selected") or []:
         if isinstance(selected, dict) and selected.get("skill"):
             skills.add(str(selected["skill"]))
+    return skills
+
+
+def selected_specialist_skills(state: dict[str, Any]) -> set[str]:
+    skills = explicitly_selected_specialist_skills(state)
     for phase in state.get("specialists_phase_plan") or []:
         if not isinstance(phase, dict):
             continue
