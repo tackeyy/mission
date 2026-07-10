@@ -6,6 +6,12 @@
   - set: review_tier= の WARNING / 無効値 exit 2
   - set complexity= 変更時の auto 再導出 vs user 値維持
   - 後方互換: review_tier フィールドを持たない既存 state で set/next が動く
+
+Issue #174 キャリブレーション (2026-07-10):
+  - push / merge をエスカレータから除外 (標準 dev フロー誤発火)
+  - 単体 token / auth をエスカレータから除外、複合語・語幹に置換
+  - 単体 削除 をエスカレータから除外、複合語 (データ削除/レコード削除/物理削除) に置換
+  - 誤検知回帰テストを追加
 """
 import importlib.util
 import json
@@ -116,10 +122,13 @@ def test_derive_review_tier_task_profile_risk_not_high_no_escalation():
 
 @pytest.mark.parametrize("kw", [
     "deploy", "release", "migration", "drop", "delete",
-    "publish", "production", "push", "merge",
+    "publish", "production",
 ])
 def test_derive_review_tier_irreversible_english_keyword_escalates(kw):
-    """不可逆系英語キーワードが本文に含まれると full に昇格."""
+    """不可逆系英語キーワードが本文に含まれると full に昇格.
+
+    Issue #174: push / merge は除外 (標準 dev フロー記述への誤発火)。
+    """
     mod = _get_module()
     tier, signals = mod.derive_review_tier(f"run {kw} pipeline", "Simple")
     assert tier == "full", f"kw={kw!r} should escalate to full"
@@ -137,10 +146,14 @@ def test_derive_review_tier_irreversible_english_keyword_case_insensitive(kw):
 # --- 不可逆系日本語キーワード ---
 
 @pytest.mark.parametrize("kw", [
-    "本番", "リリース", "マイグレーション", "削除", "公開", "決済",
+    "本番", "リリース", "マイグレーション", "公開", "決済",
+    "データ削除", "レコード削除", "物理削除",
 ])
 def test_derive_review_tier_irreversible_japanese_keyword_escalates(kw):
-    """不可逆系日本語キーワードが含まれると full に昇格."""
+    """不可逆系日本語キーワードが含まれると full に昇格.
+
+    Issue #174: 単体「削除」は除外し、複合語 (データ削除/レコード削除/物理削除) を追加。
+    """
     mod = _get_module()
     tier, signals = mod.derive_review_tier(f"{kw}対応", "Simple")
     assert tier == "full", f"kw={kw!r} should escalate to full"
@@ -150,10 +163,16 @@ def test_derive_review_tier_irreversible_japanese_keyword_escalates(kw):
 # --- セキュリティ系英語キーワード ---
 
 @pytest.mark.parametrize("kw", [
-    "auth", "secret", "token", "credential", "password",
+    "secret", "credential", "password",
+    "api token", "api-token", "api_key",
+    "access token", "access-token", "bearer",
+    "authenticat", "authoriz", "oauth",
 ])
 def test_derive_review_tier_security_english_keyword_escalates(kw):
-    """セキュリティ系英語キーワードが含まれると full に昇格."""
+    """セキュリティ系英語キーワードが含まれると full に昇格.
+
+    Issue #174: 単体 token / auth を除外し、複合語・語幹 (authenticat/authoriz/oauth) に置換。
+    """
     mod = _get_module()
     tier, signals = mod.derive_review_tier(f"update {kw} system", "Standard")
     assert tier == "full", f"kw={kw!r} should escalate to full"
@@ -400,3 +419,92 @@ def test_backward_compat_state_without_review_tier_get(run_cli, state_dir):
     """review_tier を持たない既存 state で get が動く."""
     r = run_cli("get", cwd=state_dir.parent)
     assert r.returncode == 0, f"stderr={r.stderr}"
+
+
+# ============================================================
+# Issue #174: 誤検知回帰テスト (false-positive regression)
+# ============================================================
+
+
+@pytest.mark.parametrize("mission,description", [
+    (
+        "awaiting external authority",
+        "authority は auth/authoriz を含まない (authority の -ity が語幹と不一致)",
+    ),
+    (
+        "acme-token-app の LP を改善する",
+        "プロダクト名に token が含まれても複合語 (api token 等) でなければ発火しない",
+    ),
+    (
+        "AcmeTokenApp の UI を修正する",
+        "PascalCase プロダクト名への誤発火なし (単体 token は除外済み)",
+    ),
+    (
+        "実装・検証・PR/merge・push まで進める",
+        "標準 dev フロー記述 (merge/push) への誤発火なし",
+    ),
+    (
+        "NavBar削除をTDDで実装する",
+        "可逆なコード変更の「削除」への誤発火なし (単体 削除 は除外済み)",
+    ),
+])
+def test_derive_review_tier_false_positive_regression(mission, description):
+    """Issue #174: 較正後は標準 dev フロー・プロダクト名への誤発火がない.
+
+    これらのミッションはエスカレータ信号を一切発火しないことを保証する。
+    """
+    mod = _get_module()
+    tier, signals = mod.derive_review_tier(mission, "Simple")
+    assert signals == [], (
+        f"Unexpected escalation: {description}\n"
+        f"  mission={mission!r}\n"
+        f"  signals={signals!r}"
+    )
+    assert tier == "light"
+
+
+@pytest.mark.parametrize("mission,expected_kw_fragment,description", [
+    (
+        "api token をローテーションする",
+        "api token",
+        "複合語 api token は発火する",
+    ),
+    (
+        "OAuth callback の実装",
+        "oauth",
+        "oauth は security-keyword として発火する",
+    ),
+    (
+        "authentication フローを修正する",
+        "authenticat",
+        "語幹 authenticat は authentication に一致して発火する",
+    ),
+    (
+        "authorization ヘッダの検証",
+        "authoriz",
+        "語幹 authoriz は authorization に一致して発火する",
+    ),
+    (
+        "本番データ削除のロールバック手順",
+        "データ削除",
+        "複合語 データ削除 は発火する",
+    ),
+    (
+        "deploy して本番リリース",
+        "deploy",
+        "deploy/本番 はそれぞれ irreversible として発火する",
+    ),
+])
+def test_derive_review_tier_calibrated_positive_cases(mission, expected_kw_fragment, description):
+    """Issue #174: 較正後も真陽性ケースはエスカレートする."""
+    mod = _get_module()
+    tier, signals = mod.derive_review_tier(mission, "Simple")
+    assert tier == "full", (
+        f"Should escalate to full: {description}\n"
+        f"  mission={mission!r}\n"
+        f"  signals={signals!r}"
+    )
+    assert any(expected_kw_fragment in s for s in signals), (
+        f"Expected signal containing {expected_kw_fragment!r} not found\n"
+        f"  signals={signals!r}"
+    )

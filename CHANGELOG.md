@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - READMEs now carry measured-evidence positioning: on the tail-v1 run both arms scored equally while mission used ~5.8× time and ~7.4× cost, and production value concentrates in the ~5% forced-iteration tail and approval halts (#161).
 
 ### Fixed
+- `mission-audit.py` now treats `specialists_phase_plan` providers as advisory scheduling hints for `specialist-invocation-gap`, preventing planned-only providers from being reported as missing terminal invocations (#176).
 - Specialist phase-plan providers now count as selected evidence providers for shared accounting, preventing false `unselected-specialist-invocation` findings when planned execution/review/synthesis providers are invoked (#165).
 - `mission-audit.py` and `mission-state.py stats` now ignore non-session metadata JSON such as archived worktree `aggregate.json`, preventing false abandoned `unknown` sessions and low-pass-rate findings (#163).
 - `mission-audit.py --since` and `--until` now accept ISO timestamps as well as date-only values, preventing same-day records after an automation cutoff from being silently excluded (#159).
