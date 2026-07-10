@@ -36,6 +36,7 @@ from specialist_accounting import (  # noqa: E402
     applied_specialist_invocation_skills,
     candidate_accounting_report,
     candidate_specialist_skills,
+    explicitly_selected_specialist_skills,
     selected_specialist_skills,
     terminal_invoked_specialist_skills,
 )
@@ -548,7 +549,7 @@ def missing_specialist_selection_checkpoint_item(record: StateRecord) -> dict[st
 def specialist_invocation_gap_skills(record: StateRecord) -> list[str]:
     if is_active_no_score_pending(record):
         return []
-    selected = selected_specialist_skills(record.state)
+    selected = explicitly_selected_specialist_skills(record.state)
     if not selected:
         return []
     invoked = terminal_invoked_specialist_skills(record.state)
