@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - READMEs now carry measured-evidence positioning: on the tail-v1 run both arms scored equally while mission used ~5.8× time and ~7.4× cost, and production value concentrates in the ~5% forced-iteration tail and approval halts (#161).
 
 ### Fixed
+- `review_tier` escalator keywords are calibrated against a 505-mission retroactive analysis: `push`/`merge` removed (standard dev-flow false positives), bare `token`/`auth` replaced with compound/stem forms, and bare `削除` replaced with data-deletion compounds; Simple/Standard over-escalation drops from 39.1% to 32.2% with no increase in missed low-scoring missions (#174, #178).
 - `mission-audit.py` now treats `specialists_phase_plan` providers as advisory scheduling hints for `specialist-invocation-gap`, preventing planned-only providers from being reported as missing terminal invocations (#176).
 - Specialist phase-plan providers now count as selected evidence providers for shared accounting, preventing false `unselected-specialist-invocation` findings when planned execution/review/synthesis providers are invoked (#165).
 - `mission-audit.py` and `mission-state.py stats` now ignore non-session metadata JSON such as archived worktree `aggregate.json`, preventing false abandoned `unknown` sessions and low-pass-rate findings (#163).
