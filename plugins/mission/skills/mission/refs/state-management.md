@@ -269,6 +269,10 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py progress updat
 
 `init --review-tier <light|standard|full>` または `set review_tier=<値>` で上書き可能。auto 導出より低い tier を指定すると `stderr` に `WARNING` を出すが拒否しない（`review_tier_source` は `"user"` に設定）。`review_tier_source=auto` の状態で `complexity` を `set` で変更すると tier が再導出される。`review_tier_source=user` の場合は complexity 変更でも tier を維持する。
 
+### 効果測定 (Issue #180)
+
+`mission-state.py stats` の JSON 出力（`--json` フラグ）に `by_review_tier`（tier 別 total/pass/halt/incomplete/abandoned）と `iteration_by_review_tier`（tier ごとの iteration ヒストグラム）が含まれる。`light` が `full` より平均 iteration を増やしていないかを `iteration_by_review_tier` で定期確認すること。`review_tier` フィールドを持たない旧 state は `"unknown"` キーに集計される。
+
 ---
 
 ## init --complexity (M7, 2026-06-10)
