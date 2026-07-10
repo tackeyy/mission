@@ -648,14 +648,24 @@ TIER_REVIEWER_COUNT = {"light": 1, "standard": 2, "full": 3}
 REVIEW_TIER_BASE = {"Simple": "light", "Standard": "standard", "Complex": "full", "Critical": "full"}
 
 # 不可逆系キーワード (英語) — 小文字化して部分一致
+# Issue #174 で 505 mission 遡及分析に基づき較正: push / merge を除外 (標準 dev フロー誤発火)
 _IRREVERSIBLE_KEYWORDS_EN = (
     "deploy", "release", "migration", "drop", "delete",
-    "publish", "production", "push", "merge",
+    "publish", "production",
 )
 # 不可逆系キーワード (日本語) — そのまま部分一致
-_IRREVERSIBLE_KEYWORDS_JA = ("本番", "リリース", "マイグレーション", "削除", "公開", "決済")
+# Issue #174 で 505 mission 遡及分析に基づき較正: 単体「削除」を除外し複合語に置換 (可逆なコード変更への誤発火)
+_IRREVERSIBLE_KEYWORDS_JA = ("本番", "リリース", "マイグレーション", "データ削除", "レコード削除", "物理削除", "公開", "決済")
 # セキュリティ系キーワード (英語) — 小文字化して部分一致
-_SECURITY_KEYWORDS_EN = ("auth", "secret", "token", "credential", "password")
+# Issue #174 で 505 mission 遡及分析に基づき較正:
+#   token → 複合語 (api token / api-token / api_key / access token / access-token / bearer) に置換
+#   auth  → 語幹 (authenticat / authoriz / oauth) に置換 (authority 等への誤発火を排除)
+_SECURITY_KEYWORDS_EN = (
+    "secret", "credential", "password",
+    "api token", "api-token", "api_key",
+    "access token", "access-token", "bearer",
+    "authenticat", "authoriz", "oauth",
+)
 # セキュリティ系キーワード (日本語) — そのまま部分一致
 _SECURITY_KEYWORDS_JA = ("認証", "秘密", "鍵")
 
