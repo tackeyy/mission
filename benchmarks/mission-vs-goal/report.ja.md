@@ -450,6 +450,68 @@ primary JSONL の記録スコアは変更せず、これらは secondary analysi
 `/mission` arm は実際に full loop を実行し、自身の gate を通過しました。
 gate は open-world 環境では有効に機能します（`docs/CASE_STUDIES.md` 参照）。
 
+### Pattern-Fix Validation Smoke (2026-07-10)
+
+Status: 2026-07-10 JST に実行。tail-v1 run 後に `tasks.tail.json` に適用した marker
+pattern 修正（`"Drift: health interval 75s"` marker の patterns に `"seconds=75"`、
+`"(75"`、`` "75`" `` を追加）が、v1 で観測された false negative を解消するかを
+検証する single-task smoke です。v1 では両 arm の artifact が `health_check_interval_s`
+の drift を正しく特定していましたが、元の 6 patterns はどちらの artifact text にも
+マッチしませんでした。この smoke は `tail-config-spec-drift` のみを拡張後の
+pattern set で再実行します。
+
+| Item | Value | Evidence |
+|---|---:|---|
+| Run id | `2026-07-10-claude-goal-vs-mission-tail-smoke-v2` | `results/2026-07-10-claude-goal-vs-mission-tail-smoke-v2.jsonl`。 |
+| Starting commit | `4fdb222b6073cef22676206625ccc61b83c9f658` | runner argument。 |
+| Task file | `tasks.tail.json` | planted-defect tail cohort。 |
+| Task | `tail-config-spec-drift` | single task；N=1 per arm。 |
+| Mission profile | `full` | デフォルト workflow。 |
+| Expected records | 2 | 1 task x 2 arms。 |
+| Records written | 2 / 2 | JSONL に 2 records。 |
+| Blocked records | 1 / 2 | mission arm：`blocked_reason=api_usage_limit`。 |
+| Comparable records | 1 / 2 | goal arm は完了、mission arm は除外。 |
+| Quality score method | `automated_heuristic_form_stripped_not_blind_human` | automated heuristic。blind human review ではない。 |
+| model_id | `claude-sonnet-5` | 両 records。 |
+| Total Claude cost recorded | USD 4.27159565 | 両 arm の合計。 |
+
+Result:
+
+| Arm | Completion | Validator pass | Marker score | Forbidden hits | Cost | Elapsed | Comparable |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `claude_code_goal_command` | true | true | 1.00 | 0 | USD 0.57630950 | 1.76 min | yes |
+| `mission` | false | false | null（blocked） | 0 | USD 3.69528615 | 11.80 min | no |
+
+Artifact evidence（mission arm）：`/mission` の run は `run_status=blocked`
+（`api_usage_limit`）で終了しましたが、部分的に書き込まれた `artifact.md` には
+`HEALTH_CHECK_INTERVAL_SECONDS=75` が含まれており、新 pattern `"seconds=75"` に
+マッチします。marker は artifact content 内で特定されており、block は Claude Code が
+success を返す前に発生しました。
+
+v1 との比較（task: `tail-config-spec-drift`）:
+
+| Metric | v1 (2026-07-07) | smoke-v2 (2026-07-10) |
+|---|---:|---|
+| goal arm marker score | 0.86 (6 / 7) | 1.00 (7 / 7) — pattern fix 確認 |
+| mission arm marker score | 0.86 (6 / 7) | null / blocked — comparable 外 |
+
+安全な解釈:
+
+> `/goal` arm は再実行を完了し、7 つの quality marker をすべてマッチ（score 1.00）
+> しました。v1 で primary scorer が見逃した `"Drift: health interval 75s"` も含まれています。
+> pattern 修正（`"seconds=75"`、`"(75"`、`` "75`" ``）は comparable arm での false
+> negative を解消します。`/mission` arm は workspace API usage limit で success を
+> 返す前に blocked されたため、marker score は comparable 外です。artifact 検査では、
+> partial output 内に health interval drift が正しく特定されていることを確認しています。
+> N=1 task、1 model、comparable arm は 1 本です。
+
+危険な解釈:
+
+> pattern 修正により、両 arm での false negative が完全に解消された。
+
+これは unsupported です：mission arm の block により comparable な validator result が
+得られず、per arm 1 回の実行では将来の実行を保証しません。
+
 ## Quality-focused critical task attempt
 
 Status: `quality` mission profile と fresh な `tasks.quality.json` cohort を追加した後、
@@ -634,4 +696,7 @@ artifacts/2026-07-03-claude-goal-vs-mission-quality-light-v1/
 results/2026-07-07-claude-goal-vs-mission-tail-v1.jsonl
 results/2026-07-07-claude-goal-vs-mission-tail-v1-summary.json
 artifacts/2026-07-07-claude-goal-vs-mission-tail-v1/
+results/2026-07-10-claude-goal-vs-mission-tail-smoke-v2.jsonl
+results/2026-07-10-claude-goal-vs-mission-tail-smoke-v2-summary.json
+artifacts/2026-07-10-claude-goal-vs-mission-tail-smoke-v2/
 ```

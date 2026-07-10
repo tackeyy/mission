@@ -494,6 +494,65 @@ def test_mission_vs_goal_measured_reports_are_honest_about_paired_runs():
     assert "(75" in health_marker["patterns"]
     assert "75`" in health_marker["patterns"]
 
+    # --- Pattern-Fix Validation Smoke (2026-07-10) ---
+    smoke_v2_results_path = BENCHMARK_DIR / "results" / "2026-07-10-claude-goal-vs-mission-tail-smoke-v2.jsonl"
+    smoke_v2_summary_path = BENCHMARK_DIR / "results" / "2026-07-10-claude-goal-vs-mission-tail-smoke-v2-summary.json"
+
+    smoke_v2_records = [json.loads(line) for line in smoke_v2_results_path.read_text(encoding="utf-8").splitlines()]
+    smoke_v2_summary = json.loads(smoke_v2_summary_path.read_text(encoding="utf-8"))
+    smoke_v2_by_arm = {
+        arm: [r for r in smoke_v2_records if r["arm"] == arm]
+        for arm in ("claude_code_goal_command", "mission")
+    }
+
+    # 2 records: 1 task x 2 arms; run stopped early due to blocked mission arm
+    assert len(smoke_v2_records) == 2
+    assert smoke_v2_summary["records"] == 2
+    assert smoke_v2_summary["expected_records"] == 2
+    assert smoke_v2_summary["mission_profile"] == "full"
+    assert smoke_v2_summary["task_cohort"] == "tail"
+    assert smoke_v2_summary["stopped_early"] is True
+
+    # model_id is claude-sonnet-5 on all records
+    assert all(r["model_id"] == "claude-sonnet-5" for r in smoke_v2_records)
+
+    # goal arm: completed, pattern fix confirmed — marker score 1.00 (7/7 including "Drift: health interval 75s")
+    goal_record = smoke_v2_by_arm["claude_code_goal_command"][0]
+    assert goal_record["run_status"] == "completed"
+    assert goal_record["comparable_attempt"] is True
+    assert goal_record["validator_pass"] is True
+    assert goal_record["quality_marker_score"] == 1.0
+    assert "Drift: health interval 75s" in goal_record["quality_markers_matched"]
+    assert goal_record["quality_markers_missing"] == []
+    assert goal_record["forbidden_markers_matched"] == []
+
+    # mission arm: blocked by api_usage_limit, excluded from comparable aggregates
+    mission_record = smoke_v2_by_arm["mission"][0]
+    assert mission_record["run_status"] == "blocked"
+    assert mission_record["blocked_reason"] == "api_usage_limit"
+    assert mission_record["comparable_attempt"] is False
+    assert mission_record["quality_marker_score"] is None
+    assert mission_record["forbidden_markers_matched"] == []
+
+    # summary arm aggregates
+    assert smoke_v2_summary["arms"]["claude_code_goal_command"]["comparable_records"] == 1
+    assert smoke_v2_summary["arms"]["claude_code_goal_command"]["blocked_records"] == 0
+    assert smoke_v2_summary["arms"]["mission"]["blocked_records"] == 1
+    assert smoke_v2_summary["arms"]["mission"]["comparable_records"] == 0
+
+    # report.md pins for smoke-v2
+    assert "Pattern-Fix Validation Smoke (2026-07-10)" in report
+    assert "Run id | `2026-07-10-claude-goal-vs-mission-tail-smoke-v2`" in report
+    assert "Starting commit | `4fdb222b6073cef22676206625ccc61b83c9f658`" in report
+    assert "results/2026-07-10-claude-goal-vs-mission-tail-smoke-v2.jsonl" in report
+    assert "artifacts/2026-07-10-claude-goal-vs-mission-tail-smoke-v2/" in report
+
+    # report.ja.md pins for smoke-v2
+    assert "Pattern-Fix Validation Smoke (2026-07-10)" in report_ja
+    assert "Run id | `2026-07-10-claude-goal-vs-mission-tail-smoke-v2`" in report_ja
+    assert "results/2026-07-10-claude-goal-vs-mission-tail-smoke-v2.jsonl" in report_ja
+    assert "artifacts/2026-07-10-claude-goal-vs-mission-tail-smoke-v2/" in report_ja
+
 
 def test_mission_vs_goal_protocol_controls_review_bias():
     protocol = (BENCHMARK_DIR / "README.md").read_text(encoding="utf-8")
