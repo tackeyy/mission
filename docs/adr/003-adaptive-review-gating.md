@@ -60,9 +60,9 @@ downgrade path):
 | Signal | Trigger |
 |---|---|
 | `task_profile.risk=high` | `task_profile` risk field is `"high"` |
-| Irreversible keyword (EN) | `deploy`, `release`, `migration`, `drop`, `delete`, `publish`, `production`, `push`, `merge` — case-insensitive substring match in mission text |
-| Irreversible keyword (JA) | `本番`, `リリース`, `マイグレーション`, `削除`, `公開`, `決済` — substring match |
-| Security keyword (EN) | `auth`, `secret`, `token`, `credential`, `password` — case-insensitive |
+| Irreversible keyword (EN) | `deploy`, `release`, `migration`, `drop`, `delete`, `publish`, `production` — case-insensitive substring match in mission text |
+| Irreversible keyword (JA) | `本番`, `リリース`, `マイグレーション`, `データ削除`, `レコード削除`, `物理削除`, `公開`, `決済` — substring match |
+| Security keyword (EN) | `secret`, `credential`, `password`, `api token`, `api-token`, `api_key`, `access token`, `access-token`, `bearer`, `authenticat`, `authoriz`, `oauth` — case-insensitive substring match |
 | Security keyword (JA) | `認証`, `秘密`, `鍵` |
 
 Matched signals are recorded in `review_tier_signals` as
@@ -139,12 +139,48 @@ conditions regardless of `review_tier`.
   API spend or wall-clock time has not been quantified in production runs.
   Do not cite this ADR as evidence of cost reduction until production
   measurements are available.
-- **The escalator is conservative.** High-frequency operation terms —
-  including `release`, `merge`, and `push` — promote even Simple missions to
-  `full` tier. The escalator errs on the safe side; false-positive calibration
-  based on production data is deferred to a follow-up task.
-- **Keyword calibration deferred.** The keyword lists were chosen
-  conservatively at initial implementation. Refinement is a separate task.
+- **The escalator is conservative.** The escalator errs on the safe side;
+  keyword calibration is an ongoing process as retrospective data accumulates.
+- **Keyword calibration is iterative.** The initial keyword lists were chosen
+  conservatively. Issue #174 applied the first retrospective calibration
+  (see below). Further refinement should be driven by accumulated production data.
+
+### Calibration (Issue #174, 2026-07-10)
+
+A retrospective analysis of 506 deduplicated production missions was performed
+to measure escalator false-positive rates and verify that the miss count
+(Simple/Standard missions with first composite score < 4.0 that remained at
+light/standard tier) did not increase.
+
+**Before → After (506 missions):**
+
+| Metric | Before | After |
+|---|---|---|
+| full tier % | 79.1% (400/506) | 76.7% (388/506) |
+| Escalation rate (Simple/Standard → full) | 39.1% (68/174) | 32.2% (56/174) |
+| Miss count (Simple/Standard, score < 4.0, not escalated) | 3 | 3 |
+
+The miss count is unchanged; the calibration reduced false positives without
+introducing new missed escalations.
+
+**Keywords removed and rationale:**
+
+- `push`, `merge` removed from irreversible EN: retrospective confirmed that
+  all occurrences were standard development-flow descriptions (e.g.
+  "implement → verify → PR/merge/push") rather than irreversible production
+  actions. True irreversible intent is co-signalled by `deploy`, `production`,
+  or `本番` which remain in the list.
+- Bare `token` removed from security EN, replaced with compound phrases
+  (`api token`, `api-token`, `api_key`, `access token`, `access-token`,
+  `bearer`): retrospective showed that a product name containing the bare
+  keyword generated spurious escalations unrelated to credential handling.
+- Bare `auth` removed from security EN, replaced with stems `authenticat`,
+  `authoriz`, and `oauth`: retrospective confirmed false fires on
+  "awaiting external authority" — the stem `authoriz` does not appear in
+  `authority`, while still matching `authorization` and `authorized`.
+- Bare `削除` removed from irreversible JA, replaced with compound forms
+  `データ削除`, `レコード削除`, `物理削除`: reversible code-level removals
+  (e.g. "delete a NavBar component") were triggering escalation.
 
 ## Implementation Notes
 
