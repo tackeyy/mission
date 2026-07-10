@@ -462,6 +462,68 @@ this run. The `/mission` arm demonstrably ran the full loop and passed its own
 gate — the gate is a correctness guard that can bind on open-world work even
 when it did not bind here.
 
+### Pattern-Fix Validation Smoke (2026-07-10)
+
+Status: run on 2026-07-10 JST. This is a single-task smoke to validate that the marker
+pattern fix applied after the tail-v1 run (adding `"seconds=75"`, `"(75"`, and `` "75`" ``
+to the `"Drift: health interval 75s"` patterns in `tasks.tail.json`) resolves the false
+negative observed in v1. In v1, both arms correctly identified the
+`health_check_interval_s` drift but none of the six original patterns matched the artifact
+text. This smoke re-runs only `tail-config-spec-drift` against the updated pattern set.
+
+| Item | Value | Evidence |
+|---|---:|---|
+| Run id | `2026-07-10-claude-goal-vs-mission-tail-smoke-v2` | `results/2026-07-10-claude-goal-vs-mission-tail-smoke-v2.jsonl`. |
+| Starting commit | `4fdb222b6073cef22676206625ccc61b83c9f658` | Runner argument. |
+| Task file | `tasks.tail.json` | Planted-defect tail cohort. |
+| Task | `tail-config-spec-drift` | Single task; N=1 per arm. |
+| Mission profile | `full` | Default workflow. |
+| Expected records | 2 | 1 task x 2 arms. |
+| Records written | 2 / 2 | JSONL has 2 records. |
+| Blocked records | 1 / 2 | Mission arm: `blocked_reason=api_usage_limit`. |
+| Comparable records | 1 / 2 | Goal arm completed; mission arm excluded. |
+| Quality score method | `automated_heuristic_form_stripped_not_blind_human` | Automated heuristic; not blind human review. |
+| model_id | `claude-sonnet-5` | Both records. |
+| Total Claude cost recorded | USD 4.27159565 | Sum of both arms. |
+
+Result:
+
+| Arm | Completion | Validator pass | Marker score | Forbidden hits | Cost | Elapsed | Comparable |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `claude_code_goal_command` | true | true | 1.00 | 0 | USD 0.57630950 | 1.76 min | yes |
+| `mission` | false | false | null (blocked) | 0 | USD 3.69528615 | 11.80 min | no |
+
+Artifact evidence (mission arm): although the `/mission` run ended with
+`run_status=blocked` (`api_usage_limit`), the partially written `artifact.md` contains
+`HEALTH_CHECK_INTERVAL_SECONDS=75`, which matches the new pattern `"seconds=75"`.
+The marker was found in the artifact content; the block occurred before Claude Code
+returned success.
+
+v1 comparison (task: `tail-config-spec-drift`):
+
+| Metric | v1 (2026-07-07) | smoke-v2 (2026-07-10) |
+|---|---:|---|
+| Goal arm marker score | 0.86 (6 / 7) | 1.00 (7 / 7) — pattern fix confirmed |
+| Mission arm marker score | 0.86 (6 / 7) | null / blocked — not comparable |
+
+Safe interpretation:
+
+> The `/goal` arm completed the re-run and matched all 7 quality markers (score 1.00),
+> including `"Drift: health interval 75s"`, which was missed by the primary scorer in v1.
+> The pattern fix (`"seconds=75"`, `"(75"`, `` "75`" ``) resolves the false negative on
+> the comparable arm. The `/mission` arm was blocked by a workspace API usage limit before
+> returning success, so its marker score is not comparable; artifact inspection shows the
+> health-interval drift was correctly identified in the partial output. N=1 task, one model,
+> one comparable arm.
+
+Unsafe interpretation:
+
+> The pattern fix proves the false negative is fully resolved on both arms.
+
+That is unsupported for the mission arm: the block stopped the mission run before a
+comparable validator result, and a single run per arm does not guarantee the result on
+future executions.
+
 ## Quality-Focused Critical Task Attempt
 
 Status: attempted on 2026-06-28 JST after adding a `quality` mission profile and
@@ -649,4 +711,7 @@ artifacts/2026-07-03-claude-goal-vs-mission-quality-light-v1/
 results/2026-07-07-claude-goal-vs-mission-tail-v1.jsonl
 results/2026-07-07-claude-goal-vs-mission-tail-v1-summary.json
 artifacts/2026-07-07-claude-goal-vs-mission-tail-v1/
+results/2026-07-10-claude-goal-vs-mission-tail-smoke-v2.jsonl
+results/2026-07-10-claude-goal-vs-mission-tail-smoke-v2-summary.json
+artifacts/2026-07-10-claude-goal-vs-mission-tail-smoke-v2/
 ```
