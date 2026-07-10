@@ -9,10 +9,27 @@
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-10
+
+### 追加
+- `mission-state.py init` と `mission-state.py set` が session の complexity とミッション記述から `review_tier`（`light`/`standard`/`full`）を導出・保存するようになりました。risk escalator（high-risk profile・不可逆/本番/security キーワード）は昇格のみ行い、降格しません。`reviewer_count` は tier に連動し、pass gate と scoring threshold は不変です。ユーザー指定の override は記録された `source` と `signals` で監査できます (#168, #171)。
+- ADR-003 を追加しました。adaptive review gating の決定（tier 導出テーブル・escalator 意味論・ゲート不変宣言）と、tail-v1 実測および 451 mission 本番集計を context として記録しています (#169, #172)。
+- `docs/CASE_STUDIES.md` と `docs/CASE_STUDIES.ja.md` を追加しました。451 件の採点済み本番 mission から匿名化した実測エビデンスとして、pass rate 分布・24 件の強制 iteration・7 件の不可逆操作への承認ゲート halt・6 件の代表事例サマリを、出典・限定事項・比較品質主張なしで収録しています (#155, #158)。
+- benchmark runner に planted-defect タスク fixture を用いた tail-first-failure cohort を追加しました。quality marker が defect 特有のコンテンツトークンであり、`forbidden_markers` でネットスコアを減算し、`hidden_paths` により answer key（task 定義ファイル）を clone 済み worktree から両アーム実行前に削除し、`markers_hidden` により両アームの prompt に marker 名を出しません (#153, #156)。
+- tail-v1 paired run（10 タスク × 2 アーム、claude-sonnet-5、2026-07-07）のベンチマーク報告を追加しました。両アームの quality score は同点で、mission アームは goal アームの約 5.8 倍の時間・約 7.4 倍のコストを要しました。全 5 件の mission run で iteration-1 の self-gate が pass しました (#162)。
+- benchmark smoke-v2（N=1、2026-07-10）を追加し、health-interval marker pattern 修正を実証しました。goal アームのスコアは 0.86 から 1.00 に回復し、mission アームは `api_usage_limit` blocked のため品質比較から除外しています (#170, #173)。
+
+### 変更
+- benchmark runner が form-stripped scoring を marker マッチング前に適用するようになりました。`strip_form` が見出し・ラベル行・水平線・表の区切り行を除去することで、テンプレート構造が marker クレジットを得なくなります。除去前のスコアは `quality_marker_score_raw` として保存し、`quality_score_method` を `automated_heuristic_form_stripped_not_blind_human` に更新しています (#154, #157)。
+- SKILL.md に light tier 運用規律（reviewer 1 名・required のみの specialist・critic は失敗時のみ）を追記し、README に adaptive gating の要約段落を追加しました。pass gate threshold は不変です (#169, #172)。
+- README に実測エビデンスの位置づけを追記しました。tail-v1 run では両アームの quality score が同点で、mission アームは約 5.8 倍の時間・約 7.4 倍のコストを要したこと、および本番価値が約 5% の強制 iteration tail と承認ゲート halt に集中することを明記しています (#161)。
+
 ### 修正
 - specialist phase plan の provider を shared accounting 上の selected evidence provider として扱うようにし、計画済みの execution / review / synthesis provider を実行した場合に `unselected-specialist-invocation` が誤検出される問題を防ぐようにしました (#165)。
 - `mission-audit.py` と `mission-state.py stats` が archived worktree の `aggregate.json` など session ではない metadata JSON を無視するようになり、`unknown` の abandoned session や low-pass-rate finding の誤検出を防ぐようにしました (#163)。
 - `mission-audit.py --since` / `--until` が日付だけでなく ISO timestamp も受け付けるようになり、automation cutoff と同じ日の後続 state が監査から黙って除外される問題を修正しました (#159)。
+- `mission-audit.py` が `mission-archive/` worktree パスに保存された scoring evidence を認識するようになり、worktree cleanup 後に `missing-scoring-evidence` が誤検出される問題を修正しました (#151, #152)。
+- benchmark の health-interval marker pattern を拡張し、`HEALTH_CHECK_INTERVAL_SECONDS=75`、`(75`、`` 75` `` の引用形式にも一致するようにしました。既存の記録スコアは変更せず、今後の run のみに適用されます (#162)。
 
 ## [1.1.1] - 2026-07-06
 
@@ -187,6 +204,7 @@
 - 状態ルーティング・スコアゲート・hook 挙動をカバーする Python テストスイート。
 - GitHub Actions CI（`push` / `pull_request` / `workflow_dispatch`）。pytest と ShellCheck を実行。
 
+[1.2.0]: https://github.com/tackeyy/mission/releases/tag/v1.2.0
 [1.1.1]: https://github.com/tackeyy/mission/releases/tag/v1.1.1
 [1.1.0]: https://github.com/tackeyy/mission/releases/tag/v1.1.0
 [1.0.7]: https://github.com/tackeyy/mission/releases/tag/v1.0.7

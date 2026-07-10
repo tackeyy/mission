@@ -9,10 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-10
+
+### Added
+- `mission-state.py init` and `mission-state.py set` now derive and record a `review_tier` (`light`/`standard`/`full`) from session complexity and mission text, with a risk escalator (high-risk profiles, irreversible/production/security keywords) that only promotes, never demotes; `reviewer_count` is wired to the tier, pass gates and scoring thresholds are unchanged, and user-specified overrides are auditable through recorded `source` and `signals` (#168, #171).
+- ADR-003 documents the adaptive review-gating decision: tier derivation table, escalator semantics, gate-invariant declaration, and supporting context from tail-v1 results and the 451-mission production aggregate (#169, #172).
+- `docs/CASE_STUDIES.md` and `docs/CASE_STUDIES.ja.md` present anonymized evidence from 451 scored production missions, including pass-rate distribution, 24 forced iterations, 7 approval-gate halts on irreversible actions, and 6 representative case summaries with explicit provenance, limitations, and no comparative quality claims (#155, #158).
+- Benchmark runner now supports a tail-first-failure cohort with planted-defect task fixtures: quality markers are defect-specific content tokens, `forbidden_markers` subtract from the net score, `hidden_paths` sanitization deletes the answer-key task file from the cloned worktree before either arm runs, and `markers_hidden` keeps marker names out of both prompts (#153, #156).
+- Benchmark report for the tail-v1 paired run (10 tasks × 2 arms, claude-sonnet-5, 2026-07-07): arms tied on quality scores, mission arm used ~5.8× the time and ~7.4× the cost of the goal arm; iteration-1 self-gate passed on all five mission runs (#162).
+- Benchmark smoke-v2 (N=1, 2026-07-10) verifies the health-interval marker pattern fix: goal arm score recovered from 0.86 to 1.00; mission arm was `api_usage_limit`-blocked and excluded from the quality comparison (#170, #173).
+
+### Changed
+- Benchmark runners now apply form-stripped scoring before marker matching: `strip_form` removes headings, label-only lines, horizontal rules, and table separator rows so template structure earns no marker credit; the pre-strip score is preserved as `quality_marker_score_raw` and `quality_score_method` is updated to `automated_heuristic_form_stripped_not_blind_human` (#154, #157).
+- SKILL.md now documents light-tier operational discipline (one reviewer, required-only specialists, critic on failure only) and READMEs include an adaptive-gating summary paragraph; pass gate thresholds are unchanged (#169, #172).
+- READMEs now carry measured-evidence positioning: on the tail-v1 run both arms scored equally while mission used ~5.8× time and ~7.4× cost, and production value concentrates in the ~5% forced-iteration tail and approval halts (#161).
+
 ### Fixed
 - Specialist phase-plan providers now count as selected evidence providers for shared accounting, preventing false `unselected-specialist-invocation` findings when planned execution/review/synthesis providers are invoked (#165).
 - `mission-audit.py` and `mission-state.py stats` now ignore non-session metadata JSON such as archived worktree `aggregate.json`, preventing false abandoned `unknown` sessions and low-pass-rate findings (#163).
 - `mission-audit.py --since` and `--until` now accept ISO timestamps as well as date-only values, preventing same-day records after an automation cutoff from being silently excluded (#159).
+- `mission-audit.py` now recognizes scoring evidence stored in `mission-archive/` worktree paths, preventing false `missing-scoring-evidence` findings after worktree cleanup (#151, #152).
+- Benchmark health-interval marker patterns now match `HEALTH_CHECK_INTERVAL_SECONDS=75`, `(75`, and `` 75` `` quoted forms; affects future runs only, recorded scores are unchanged (#162).
 
 ## [1.1.1] - 2026-07-06
 
@@ -187,6 +204,7 @@ First public release.
 - Python test suite covering state routing, scoring gates, and hook behavior.
 - GitHub Actions CI (`push`, `pull_request`, `workflow_dispatch`) with pytest and ShellCheck.
 
+[1.2.0]: https://github.com/tackeyy/mission/releases/tag/v1.2.0
 [1.1.1]: https://github.com/tackeyy/mission/releases/tag/v1.1.1
 [1.1.0]: https://github.com/tackeyy/mission/releases/tag/v1.1.0
 [1.0.7]: https://github.com/tackeyy/mission/releases/tag/v1.0.7
