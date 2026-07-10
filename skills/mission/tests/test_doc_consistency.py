@@ -217,6 +217,21 @@ def test_v110_changelog_mentions_release_themes():
         assert token.lower() in ja, f"CHANGELOG.ja.md v1.1.0 missing release theme: {token}"
 
 
+def test_v120_changelog_mentions_release_themes():
+    """v1.2.0 の release themes を changelog から落とさない."""
+    en = _release_section(_r(REPO_ROOT / "CHANGELOG.md"), "1.2.0").lower()
+    ja = _release_section(_r(REPO_ROOT / "CHANGELOG.ja.md"), "1.2.0").lower()
+    required_tokens = (
+        "review_tier",
+        "tail-first-failure",
+        "form-stripped",
+        "strip_form",
+    )
+    for token in required_tokens:
+        assert token.lower() in en, f"CHANGELOG.md v1.2.0 missing release theme: {token}"
+        assert token.lower() in ja, f"CHANGELOG.ja.md v1.2.0 missing release theme: {token}"
+
+
 def test_release_version_paths_are_in_sync():
     """Plugin manifests and visible install paths should point at the same release version."""
     manifest_paths = (
