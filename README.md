@@ -122,6 +122,8 @@ agent needs an auditable "why can I stop now?" gate.
 - In every completed paired run to date — including a planted-defect tail cohort scored on content recall with no structure credit (2026-07-07, N=5, same model on both arms) — official `/goal` and `mission` tied on completion, validator, and marker metrics, while `mission` cost roughly 5.8x the wall-clock time and 7.4x the API spend. Do not adopt `mission` expecting a higher-quality artifact on self-contained tasks; see [`benchmarks/mission-vs-goal/report.md`](benchmarks/mission-vs-goal/report.md).
 - Across 451 scored production missions, 95% passed the quality gate at iteration 1 unchanged. The measured value concentrated in the ~5% tail the gate forced to iterate (first-iteration factual errors, runtime UI bugs, and security-relevant gaps that green toolchains missed) and in 7 halts that stopped irreversible production actions pending approval; see [`docs/CASE_STUDIES.md`](docs/CASE_STUDIES.md).
 
+To reduce review overhead for the 95% pass-through majority, `mission` derives a `review_tier` (light/standard/full) at init time from complexity and mission text. Light tier runs one reviewer instead of three and limits specialist selection to `required: true` providers. Gate semantics — threshold, open High findings, agreement delta, halt conditions — are unchanged regardless of tier. The cost reduction effect has not yet been measured in production.
+
 Pick `mission` for the auditable completion gate, tail insurance on open-world work, irreversible-action governance, and resumable state — not for an average quality lift.
 
 Benchmark claims should use the pilot protocol in

@@ -225,6 +225,52 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py progress updat
     --json
 ```
 
+## review_tier 導出と Light Tier 運用 (Issue #168, 2026-07-10)
+
+`review_tier`（`light` / `standard` / `full`）は `init` 時に complexity とミッション記述から自動導出される。導出根拠は `review_tier_source`（`"auto"` or `"user"`）と `review_tier_signals`（エスカレータ理由リスト）として state に記録する。
+
+### ベースマッピング (REVIEW_TIER_BASE)
+
+| complexity | base review_tier |
+|---|---|
+| Simple | light |
+| Standard | standard |
+| Complex | full |
+| Critical | full |
+| None / Unknown / 未知文字列 | standard（安全側フォールバック） |
+
+### エスカレータ条件（いずれか該当で `full` に昇格。降格なし）
+
+| シグナル | トリガー |
+|---|---|
+| `task_profile.risk=high` | task_profile の risk フィールドが `"high"` |
+| 不可逆系英語キーワード | `deploy` / `release` / `migration` / `drop` / `delete` / `publish` / `production` / `push` / `merge`（小文字化して部分一致） |
+| 不可逆系日本語キーワード | `本番` / `リリース` / `マイグレーション` / `削除` / `公開` / `決済`（そのまま部分一致） |
+| セキュリティ系英語キーワード | `auth` / `secret` / `token` / `credential` / `password`（小文字化して部分一致） |
+| セキュリティ系日本語キーワード | `認証` / `秘密` / `鍵` |
+
+マッチしたキーワードは `review_tier_signals` に `irreversible-keyword:<kw>` / `security-keyword:<kw>` 形式で記録される。エスカレータは conservative 設計（`release`・`merge`・`push` 等の頻出語も full 昇格する）。実運用データに基づくキャリブレーションは後続タスク。
+
+### tier と reviewer_count の対応 (TIER_REVIEWER_COUNT)
+
+| review_tier | reviewer_count |
+|---|---|
+| light | 1 |
+| standard | 2 |
+| full | 3 |
+
+**Light tier 追加制約**: `required=true` specialist のみ auto-select（optional は対象外）。critic は fail 時（High 指摘解消が必要な次 iteration）のみ spawn。
+
+### ゲート意味論は不変
+
+`review_tier` は pass/fail 判定を変更しない。threshold / open_high / findings_evidence_path / halt 条件はすべての tier で同じ。
+
+### User override
+
+`init --review-tier <light|standard|full>` または `set review_tier=<値>` で上書き可能。auto 導出より低い tier を指定すると `stderr` に `WARNING` を出すが拒否しない（`review_tier_source` は `"user"` に設定）。`review_tier_source=auto` の状態で `complexity` を `set` で変更すると tier が再導出される。`review_tier_source=user` の場合は complexity 変更でも tier を維持する。
+
+---
+
 ## init --complexity (M7, 2026-06-10)
 
 `init --complexity <Simple|Standard|Complex|Critical>` で Phase 1 の複雑度判定を state に記録し、`reviewer_count` を自動設定する (Simple:1 / Standard:2 / Complex:3 / Critical:3)。未指定時は `Unknown` のまま stderr に WARN が出る。Phase 1 完了時点で `Unknown` を残さないこと。

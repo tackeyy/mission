@@ -456,3 +456,32 @@ def test_case_studies_docs_are_bilingual_and_marketing_safe():
     assert "CASE_STUDIES.md" in _r(REPO_ROOT / "docs" / "LOOP_ENGINEERING.md")
     assert "docs/CASE_STUDIES.md" in _r(REPO_ROOT / "README.md")
     assert "docs/CASE_STUDIES.ja.md" in _r(REPO_ROOT / "README.ja.md")
+
+
+def test_adr003_adaptive_review_gating_consistency():
+    """#169: ADR-003、SKILL.md light tier 規律、README adaptive gating 記述の整合ガード."""
+    # ADR-003 が存在し不変条件文言を含む
+    adr003 = _r(REPO_ROOT / "docs" / "adr" / "003-adaptive-review-gating.md")
+    assert adr003, "docs/adr/003-adaptive-review-gating.md が存在しない"
+    assert "Gate semantics are invariant" in adr003, "ADR-003 に gate semantics 不変条件の見出しがない"
+    assert "threshold" in adr003, "ADR-003 に threshold の記述がない"
+    assert "open_high" in adr003, "ADR-003 に open_high gate の記述がない"
+    assert "review_tier_source" in adr003, "ADR-003 に review_tier_source の記述がない"
+    assert "review_tier_signals" in adr003, "ADR-003 に review_tier_signals の記述がない"
+    assert "not yet been measured" in adr003 or "not yet measured" in adr003, \
+        "ADR-003 にコスト削減効果が未計測である旨の記述がない"
+
+    # SKILL.md に light tier 運用規律がある
+    skill = _r(SKILL_MD)
+    assert "review_tier" in skill, "SKILL.md に review_tier の記述がない"
+    assert "required=true" in skill, "SKILL.md に light tier の required=true specialist 制限がない"
+    assert "fail 時のみ" in skill, "SKILL.md に light tier の critic は fail 時のみ spawn という規律がない"
+    assert "ゲート意味論は tier によらず不変" in skill, "SKILL.md に gate semantics 不変の宣言がない"
+
+    # README EN/JA に adaptive gating 記述と未計測文言がある
+    en = _r(REPO_ROOT / "README.md")
+    ja = _r(REPO_ROOT / "README.ja.md")
+    assert "review_tier" in en, "README.md に review_tier の記述がない"
+    assert "review_tier" in ja, "README.ja.md に review_tier の記述がない"
+    assert "not yet been measured" in en, "README.md にコスト削減効果の未計測文言がない"
+    assert "まだ計測されていません" in ja, "README.ja.md にコスト削減効果の未計測文言がない"
