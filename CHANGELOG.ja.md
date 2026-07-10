@@ -25,6 +25,7 @@
 - README に実測エビデンスの位置づけを追記しました。tail-v1 run では両アームの quality score が同点で、mission アームは約 5.8 倍の時間・約 7.4 倍のコストを要したこと、および本番価値が約 5% の強制 iteration tail と承認ゲート halt に集中することを明記しています (#161)。
 
 ### 修正
+- `review_tier` の escalator キーワードを 505 mission の遡及分析で較正しました。`push`/`merge` を除外（標準 dev フロー記述への誤発火）、単体 `token`/`auth` を複合語・語幹に置換、単体 `削除` をデータ削除系の複合語に置換。Simple/Standard の過剰エスカレーションは 39.1% から 32.2% に低下し、低スコアミッションの見逃しは増えていません (#174, #178)。
 - `mission-audit.py` の `specialist-invocation-gap` 判定では `specialists_phase_plan` の provider を advisory な scheduling hint として扱い、計画だけされた provider が terminal invocation 欠落として誤検出されないようにしました (#176)。
 - specialist phase plan の provider を shared accounting 上の selected evidence provider として扱うようにし、計画済みの execution / review / synthesis provider を実行した場合に `unselected-specialist-invocation` が誤検出される問題を防ぐようにしました (#165)。
 - `mission-audit.py` と `mission-state.py stats` が archived worktree の `aggregate.json` など session ではない metadata JSON を無視するようになり、`unknown` の abandoned session や low-pass-rate finding の誤検出を防ぐようにしました (#163)。
