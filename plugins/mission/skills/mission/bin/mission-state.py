@@ -216,8 +216,16 @@ PROFILE_KEYWORDS = {
 }
 
 HIGH_RISK_KEYWORDS = (
-    "production", "prod", "deploy", "migration", "drop table", "delete data",
-    "irreversible", "payment", "security", "auth", "secret", "token", "pii",
+    # Issue #175 で #174 と同一ポリシーで較正 (2026-07-10)
+    # 維持: production, deploy, migration, drop table, delete data, irreversible, payment, security, secret, pii
+    # 削除: "prod" ("production" が既にあり冗長。"product"/"productivity" への誤発火源)
+    # "auth" → 語幹 (authenticat / authoriz / oauth) に置換 (authority への誤発火を排除)
+    # "token" → 複合語 (api token / api-token / api_key / access token / access-token / bearer) に置換
+    "production", "deploy", "migration", "drop table", "delete data",
+    "irreversible", "payment", "security", "secret", "pii",
+    "api token", "api-token", "api_key",
+    "access token", "access-token", "bearer",
+    "authenticat", "authoriz", "oauth",
 )
 
 SPECIALIST_INVOCATION_STATUSES = {
