@@ -641,6 +641,79 @@ def _transition_phase(data: dict, new_phase: str, now: str | None = None) -> Non
 # M7 (2026-06-10): SKILL.md Phase 1 の複雑度→Reviewer 数マッピング
 COMPLEXITY_REVIEWER_COUNT = {"Simple": 1, "Standard": 2, "Complex": 3, "Critical": 3}
 
+# Issue #168: review_tier による適応的レビュー深度
+# tier → reviewer_count のマッピング (COMPLEXITY_REVIEWER_COUNT と同値になる設計)
+TIER_REVIEWER_COUNT = {"light": 1, "standard": 2, "full": 3}
+# complexity → review_tier のベースマッピング
+REVIEW_TIER_BASE = {"Simple": "light", "Standard": "standard", "Complex": "full", "Critical": "full"}
+
+# 不可逆系キーワード (英語) — 小文字化して部分一致
+_IRREVERSIBLE_KEYWORDS_EN = (
+    "deploy", "release", "migration", "drop", "delete",
+    "publish", "production", "push", "merge",
+)
+# 不可逆系キーワード (日本語) — そのまま部分一致
+_IRREVERSIBLE_KEYWORDS_JA = ("本番", "リリース", "マイグレーション", "削除", "公開", "決済")
+# セキュリティ系キーワード (英語) — 小文字化して部分一致
+_SECURITY_KEYWORDS_EN = ("auth", "secret", "token", "credential", "password")
+# セキュリティ系キーワード (日本語) — そのまま部分一致
+_SECURITY_KEYWORDS_JA = ("認証", "秘密", "鍵")
+
+
+def derive_review_tier(
+    mission_text: str,
+    complexity: str | None,
+    task_profile_risk: str | None = None,
+) -> tuple[str, list[str]]:
+    """review_tier と signals を導出する純関数 (Issue #168).
+
+    ベースは REVIEW_TIER_BASE から取得し、エスカレータ条件を満たす場合は "full" に昇格する。
+    降格ロジックは存在しない。
+
+    Args:
+        mission_text: ミッション記述テキスト
+        complexity: 複雑度文字列 ("Simple" | "Standard" | "Complex" | "Critical" | None | "Unknown")
+        task_profile_risk: task_profile の risk 値 (オプション)
+
+    Returns:
+        (tier, signals): tier は "light"/"standard"/"full"、signals はエスカレータ理由リスト
+    """
+    base_tier = REVIEW_TIER_BASE.get(complexity or "", "standard")
+    signals: list[str] = []
+
+    # エスカレータ: task_profile.risk=high
+    if task_profile_risk == "high":
+        signals.append("task_profile.risk=high")
+
+    # エスカレータ: 不可逆系英語キーワード (小文字化して部分一致)
+    lowered = mission_text.lower()
+    for kw in _IRREVERSIBLE_KEYWORDS_EN:
+        if kw in lowered:
+            signals.append(f"irreversible-keyword:{kw}")
+
+    # エスカレータ: 不可逆系日本語キーワード (そのまま部分一致)
+    for kw in _IRREVERSIBLE_KEYWORDS_JA:
+        if kw in mission_text:
+            signals.append(f"irreversible-keyword:{kw}")
+
+    # エスカレータ: セキュリティ系英語キーワード (小文字化して部分一致)
+    for kw in _SECURITY_KEYWORDS_EN:
+        if kw in lowered:
+            signals.append(f"security-keyword:{kw}")
+
+    # エスカレータ: セキュリティ系日本語キーワード (そのまま部分一致)
+    for kw in _SECURITY_KEYWORDS_JA:
+        if kw in mission_text:
+            signals.append(f"security-keyword:{kw}")
+
+    # エスカレータ該当 → "full" に昇格 (降格はしない)
+    if signals and base_tier != "full":
+        tier = "full"
+    else:
+        tier = base_tier
+
+    return tier, signals
+
 
 def _parse_files_arg(files: str | None) -> list[str]:
     """--files のカンマ区切りを project-root 相対パスのリストに正規化する."""
@@ -2437,6 +2510,25 @@ def cmd_init(args):
             " Phase 1 判定後に `mission-state.py set complexity=<Simple|Standard|Complex|Critical> reviewer_count=<N>` で必ず更新してください。",
             file=sys.stderr,
         )
+    # Issue #168: review_tier の導出・保存
+    _user_tier = getattr(args, "review_tier", None)
+    if _user_tier:
+        # ユーザー明示指定
+        initial["review_tier"] = _user_tier
+        initial["review_tier_source"] = "user"
+        initial["review_tier_signals"] = []
+    else:
+        # auto 導出: mission 記述と complexity、task_profile の risk を使用
+        # (init 時点では task_profile は空 dict のため risk は参照しない)
+        _auto_tier, _auto_signals = derive_review_tier(
+            args.mission,
+            initial.get("complexity"),
+        )
+        initial["review_tier"] = _auto_tier
+        initial["review_tier_source"] = "auto"
+        initial["review_tier_signals"] = _auto_signals
+    # reviewer_count は review_tier から設定 (COMPLEXITY_REVIEWER_COUNT と同値になる設計)
+    initial["reviewer_count"] = TIER_REVIEWER_COUNT[initial["review_tier"]]
     initial = stamp_metadata(initial, cwd)
 
     # multi-session 完全統一 (2026-06-13): 常に sessions/<sid>.json に書く。
@@ -2789,6 +2881,30 @@ def cmd_set(args):
                     file=sys.stderr,
                 )
                 sys.exit(2)
+            # Issue #168: review_tier の検証と source 管理
+            if key == "review_tier":
+                if value not in TIER_REVIEWER_COUNT:
+                    print(
+                        f"ERROR: review_tier の値 '{value}' は無効です。"
+                        f" 有効値: {list(TIER_REVIEWER_COUNT)}",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
+                # auto 導出値より低い tier を user 指定した場合は WARNING (拒否しない)
+                _cur_mission = data.get("mission", "")
+                _cur_cx = data.get("complexity")
+                _cur_risk = (data.get("task_profile") or {}).get("risk")
+                _derived_tier, _ = derive_review_tier(_cur_mission, _cur_cx, _cur_risk)
+                _tier_order = {"light": 0, "standard": 1, "full": 2}
+                if _tier_order.get(value, 0) < _tier_order.get(_derived_tier, 0):
+                    print(
+                        f"WARNING [#168]: review_tier='{value}' は auto 導出値 '{_derived_tier}' より低いです。"
+                        f" ゲート意味論 (threshold/open_high/findings evidence/halt) は変わりません。",
+                        file=sys.stderr,
+                    )
+                data["review_tier"] = value
+                data["review_tier_source"] = "user"
+                continue
             # 型推論: 数値 / bool / JSON
             try:
                 parsed_value = json.loads(value)
@@ -2798,13 +2914,33 @@ def cmd_set(args):
                 _transition_phase(data, str(parsed_value), now)
             else:
                 data[key] = parsed_value
-        # A-M1 (2026-06-10): complexity 変更時は reviewer_count を自動同期
-        # (明示指定があればそちらが優先。片方だけ更新される矛盾 state を防ぐ)
+        # A-M1 (2026-06-10 / Issue #168 拡張): complexity 変更時の reviewer_count と review_tier 同期
+        # - review_tier_source が "auto" (またはフィールド不在) の場合: tier を再導出して reviewer_count も同期
+        # - review_tier_source が "user" の場合: tier を維持し、reviewer_count も tier 由来を維持
+        # - reviewer_count を明示した場合はそちらが優先
         explicit_keys = {kv.partition("=")[0] for kv in args.kvs}
-        if "complexity" in explicit_keys and "reviewer_count" not in explicit_keys:
-            cx = data.get("complexity")
-            if cx in COMPLEXITY_REVIEWER_COUNT:
-                data["reviewer_count"] = COMPLEXITY_REVIEWER_COUNT[cx]
+        if "complexity" in explicit_keys:
+            tier_source = data.get("review_tier_source", "auto")
+            if tier_source == "user":
+                # user 指定の tier を維持: reviewer_count も tier 由来を維持 (complexity 変更に追随しない)
+                if "reviewer_count" not in explicit_keys and data.get("review_tier") in TIER_REVIEWER_COUNT:
+                    data["reviewer_count"] = TIER_REVIEWER_COUNT[data["review_tier"]]
+            else:
+                # auto: complexity 変更で tier を再導出
+                cx = data.get("complexity")
+                _mission = data.get("mission", "")
+                _risk = (data.get("task_profile") or {}).get("risk")
+                _new_tier, _new_signals = derive_review_tier(_mission, cx, _risk)
+                data["review_tier"] = _new_tier
+                data["review_tier_source"] = "auto"
+                data["review_tier_signals"] = _new_signals
+                if "reviewer_count" not in explicit_keys:
+                    data["reviewer_count"] = TIER_REVIEWER_COUNT[_new_tier]
+        elif "review_tier" in explicit_keys and "reviewer_count" not in explicit_keys:
+            # review_tier だけ変更された場合: reviewer_count を tier から同期
+            _tier = data.get("review_tier")
+            if _tier in TIER_REVIEWER_COUNT:
+                data["reviewer_count"] = TIER_REVIEWER_COUNT[_tier]
         # F-4: set loop_active=true での手動再活性化(gotchas §2)も aggregate へ戻す
         if "loop_active" in explicit_keys and data.get("loop_active") is True:
             _add_to_aggregate(cwd, sf.stem)
@@ -4334,6 +4470,9 @@ def _build_parser():
                         help="関連 issue の参照 (例: github:owner/repo#42)。同一 issue_ref の active session が存在する場合 WARN")
     p_init.add_argument("--files", default=None,
                         help="予定変更ファイルのカンマ区切り project-root 相対パス。同一 active session と重複する場合 WARN")
+    p_init.add_argument("--review-tier", choices=list(TIER_REVIEWER_COUNT), default=None,
+                        dest="review_tier",
+                        help="レビュー深度 (light/standard/full)。未指定は complexity・ミッション記述から auto 導出 (Issue #168)")
     p_init.set_defaults(func=cmd_init)
 
     p_next = sub.add_parser("next", help="ADR-002 Stage 3: state から次の 1 手を JSON で返す (read-only。Codex/compaction 復帰時の進行ガイド)")
