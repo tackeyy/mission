@@ -646,6 +646,40 @@ def _transition_phase(data: dict, new_phase: str, now: str | None = None) -> Non
     data["phase"] = new_phase
 
 
+# #188: set phase= の正規値と別名マップ。実運用で `phase=execution` (typo) が
+# 無検証で受理され stats の phase_duration_totals を汚染した実害への対策。
+VALID_PHASES = {"planning", "executing", "reviewing", "scoring", "done", "halted"}
+PHASE_ALIASES = {
+    "execution": "executing",
+    "review": "reviewing",
+    "plan": "planning",
+    "score": "scoring",
+}
+
+
+def _normalize_set_phase_value(value: str) -> str:
+    """set phase=<value> の値を検証・正規化する (#188)。
+
+    正規値はそのまま通す。既知の別名は正規化して WARN。それ以外は exit 2。
+    push-score の items キーエイリアス正規化 (#H2) と同じ方針。
+    """
+    if value in VALID_PHASES:
+        return value
+    if value in PHASE_ALIASES:
+        canonical = PHASE_ALIASES[value]
+        print(
+            f"WARNING [#188]: phase='{value}' は非正規値です。'{canonical}' として保存しました。",
+            file=sys.stderr,
+        )
+        return canonical
+    print(
+        f"ERROR: phase の値 '{value}' は無効です。有効値: {sorted(VALID_PHASES)}"
+        f" (既知の別名: {sorted(PHASE_ALIASES)})",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
 # M7 (2026-06-10): SKILL.md Phase 1 の複雑度→Reviewer 数マッピング
 COMPLEXITY_REVIEWER_COUNT = {"Simple": 1, "Standard": 2, "Complex": 3, "Critical": 3}
 
@@ -2929,7 +2963,8 @@ def cmd_set(args):
             except json.JSONDecodeError:
                 parsed_value = value
             if key == "phase":
-                _transition_phase(data, str(parsed_value), now)
+                normalized_phase = _normalize_set_phase_value(str(parsed_value))
+                _transition_phase(data, normalized_phase, now)
             else:
                 data[key] = parsed_value
         # A-M1 (2026-06-10 / Issue #168 拡張): complexity 変更時の reviewer_count と review_tier 同期
@@ -4453,7 +4488,9 @@ def _format_text(stats: dict, since: str | None, until: str | None) -> str:
     if phase_totals:
         lines.append("phase_duration_totals:")
         for phase, sec in sorted(phase_totals.items()):
-            lines.append(f"  {phase:<14} {sec/60:.1f} min ({sec:.0f}s)")
+            # #188: 過去の無検証 set phase= (typo 等) で混入した不正キーを明示する。
+            invalid_note = "" if phase in VALID_PHASES else " (invalid: 過去の無検証 set で混入)"
+            lines.append(f"  {phase:<14} {sec/60:.1f} min ({sec:.0f}s){invalid_note}")
     by_agent = stats.get("by_agent") or {}
     if by_agent:
         lines.append("by_agent:")
