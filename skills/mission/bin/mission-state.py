@@ -54,7 +54,11 @@ from mission_common import (  # noqa: E402
     duration_sec as _duration_sec,
     parse_iso_datetime,
 )
-from specialist_accounting import candidate_accounting_report  # noqa: E402
+from specialist_accounting import (  # noqa: E402
+    candidate_accounting_report,
+    explicitly_selected_specialist_skills as _accounting_selected_specialist_skills,
+    terminal_invoked_specialist_skills as _accounting_terminal_invoked_specialist_skills,
+)
 
 SCHEMA_VERSION = 2  # v1: 旧 schema (project_root/pid なし), v2: A-1/A-2/B-3 追加
 
@@ -2733,10 +2737,12 @@ def _derive_next_action(data: dict) -> dict:
         if isinstance(h, dict) and h.get("iteration") == iteration and _is_valid_composite(h.get("composite"))
     ]
     if scored_current:
+        unclosed = _unclosed_optional_specialist_skills(data)  # #189
         return {
             "next_action": "mark-passes",
             "summary": f"iteration {iteration} の採点は記録済み。mark-passes で threshold gate 判定する (reject なら mission-critic → 次 iteration)",
             "command_hint": "mission-state.py mark-passes",
+            "details": {"unclosed_specialists": unclosed} if unclosed else {},
         }
     return {
         "next_action": "aggregate-reviews",
@@ -3708,6 +3714,28 @@ def cmd_push_score(args):
     print(json.dumps(result, ensure_ascii=False))
 
 
+def _unclosed_optional_specialist_skills(data: dict) -> list[str]:
+    """#189: `specialists_selected` に明示選定された specialist で、invocation 終端ログ
+    (skipped/unavailable/failed/completed 等、どのステータスでもよい) が一件もないものを検出する。
+
+    `explicitly_selected_specialist_skills` (specialists_selected のみ) を使う点が重要:
+    `selected_specialist_skills` (共有関数。specialists_phase_plan の providers も含む) を
+    使うと、phase_plan にしか登場しない specialist を誤って「未クローズ」と WARN する
+    偽陽性になる (mission-audit.py の specialist_invocation_gap_skills と同じ理由で除外)。
+
+    非 --force 経路では required specialist は cmd_mark_passes の
+    accounting_required/result_required gate がこのコードに到達する前に exit 2 で止めるため、
+    ここに残るのは常に optional。ただし --force はこれらの gate を丸ごと skip するため、
+    --force 経路では required specialist も unclosed になり得る — 呼び出し側 (cmd_mark_passes)
+    は --force 時にこの WARN 自体を出さないことで「optional のため」という文言の誤りを避ける。
+    hard gate ではなく WARN (mark-passes 自体は成功させる) — optional specialist の
+    graceful degradation を維持しつつ、クローズアウト漏れを可視化する (#189)。
+    """
+    selected = _accounting_selected_specialist_skills(data)
+    terminal = _accounting_terminal_invoked_specialist_skills(data)
+    return sorted(selected - terminal)
+
+
 def cmd_mark_passes(args):
     """合格マーク。score_history の最新 entry を threshold gate で検証する.
 
@@ -3815,6 +3843,18 @@ def cmd_mark_passes(args):
         atomic_write_json(sf, data)
         # #11: aggregate 更新も同じ StateLock 内で行う (lock 外だと並列 mark で lost update)
         _remove_from_aggregate(cwd, resolve_session_id())
+        # #189: --force は accounting_required/result_required gate ごと skip するため、
+        # unclosed に required specialist が混入し得る。「optional のため」という文言が
+        # 誤りになるので --force 経路ではこの WARN 自体を出さない。
+        unclosed = [] if force else _unclosed_optional_specialist_skills(data)
+    if unclosed:
+        print(
+            "WARNING [#189]: selected specialist に invocation 終端ログがありません: "
+            f"{', '.join(unclosed)}。"
+            " `mission-state.py specialists log-invocation --status skipped --reason \"<理由>\"` 等で"
+            " クローズアウトしてください (optional specialist のため mark-passes は成功させています)。",
+            file=sys.stderr,
+        )
     print(json.dumps({"ok": True, "passes": True, "forced": force}))
 
 
