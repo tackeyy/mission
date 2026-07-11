@@ -423,7 +423,7 @@ def halt_or_incomplete_bucket(record: StateRecord) -> str:
 # fallback であり (LLM が偽の言及を書ける以上、確実な検証手段ではない)、正の証跡は
 # force_approved_by_user フラグ (state 側で --approved-by-user 必須化) が担う。
 _USER_APPROVAL_MENTION_TOKENS = (
-    "user", "ユーザー", "approved", "承認", "instructed", "指示", "confirm", "explicit", "explicitly",
+    "user", "ユーザー", "approved", "承認", "instructed", "指示", "confirm", "explicit",
 )
 
 
