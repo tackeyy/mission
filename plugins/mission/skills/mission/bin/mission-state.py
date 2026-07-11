@@ -54,7 +54,11 @@ from mission_common import (  # noqa: E402
     duration_sec as _duration_sec,
     parse_iso_datetime,
 )
-from specialist_accounting import candidate_accounting_report  # noqa: E402
+from specialist_accounting import (  # noqa: E402
+    candidate_accounting_report,
+    selected_specialist_skills as _accounting_selected_specialist_skills,
+    terminal_invoked_specialist_skills as _accounting_terminal_invoked_specialist_skills,
+)
 
 SCHEMA_VERSION = 2  # v1: 旧 schema (project_root/pid なし), v2: A-1/A-2/B-3 追加
 
@@ -2733,10 +2737,12 @@ def _derive_next_action(data: dict) -> dict:
         if isinstance(h, dict) and h.get("iteration") == iteration and _is_valid_composite(h.get("composite"))
     ]
     if scored_current:
+        unclosed = _unclosed_optional_specialist_skills(data)  # #189
         return {
             "next_action": "mark-passes",
             "summary": f"iteration {iteration} の採点は記録済み。mark-passes で threshold gate 判定する (reject なら mission-critic → 次 iteration)",
             "command_hint": "mission-state.py mark-passes",
+            "details": {"unclosed_specialists": unclosed} if unclosed else {},
         }
     return {
         "next_action": "aggregate-reviews",
@@ -3708,6 +3714,20 @@ def cmd_push_score(args):
     print(json.dumps(result, ensure_ascii=False))
 
 
+def _unclosed_optional_specialist_skills(data: dict) -> list[str]:
+    """#189: selected specialists で invocation 終端ログ (skipped/unavailable/failed/completed 等、
+    どのステータスでもよい) が一件もないものを検出する。
+
+    required specialist は cmd_mark_passes の accounting_required/result_required gate が
+    このコードに到達する前に exit 2 で止めるため、ここに残るのは常に optional。
+    hard gate ではなく WARN (mark-passes 自体は成功させる) — optional specialist の
+    graceful degradation を維持しつつ、クローズアウト漏れを可視化する (#189)。
+    """
+    selected = _accounting_selected_specialist_skills(data)
+    terminal = _accounting_terminal_invoked_specialist_skills(data)
+    return sorted(selected - terminal)
+
+
 def cmd_mark_passes(args):
     """合格マーク。score_history の最新 entry を threshold gate で検証する.
 
@@ -3815,6 +3835,15 @@ def cmd_mark_passes(args):
         atomic_write_json(sf, data)
         # #11: aggregate 更新も同じ StateLock 内で行う (lock 外だと並列 mark で lost update)
         _remove_from_aggregate(cwd, resolve_session_id())
+        unclosed = _unclosed_optional_specialist_skills(data)  # #189
+    if unclosed:
+        print(
+            "WARNING [#189]: selected specialist に invocation 終端ログがありません: "
+            f"{', '.join(unclosed)}。"
+            " `mission-state.py specialists log-invocation --status skipped --reason \"<理由>\"` 等で"
+            " クローズアウトしてください (optional specialist のため mark-passes は成功させています)。",
+            file=sys.stderr,
+        )
     print(json.dumps({"ok": True, "passes": True, "forced": force}))
 
 
