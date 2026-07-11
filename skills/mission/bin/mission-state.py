@@ -4241,6 +4241,7 @@ def cmd_cleanup_stale(args):
                             if args.execute:
                                 with StateLock(lock_file(proj)):
                                     data["halt_reason"] = halt_reason
+                                    data["halt_category"] = "stale"  # #190
                                     data["loop_active"] = False
                                     data["updated_at"] = iso_now()
                                     backup_state(sf)
@@ -4810,8 +4811,9 @@ def _build_parser():
 
     p_halt = sub.add_parser("mark-halt", help="halt_reason を立てて停止")
     p_halt.add_argument("--reason", required=True)
-    p_halt.add_argument("--category", default=None, choices=None,
-                         help=f"#190: halt の種別。有効値: {sorted(HALT_CATEGORIES)}。省略/不正値は 'other' + WARN")
+    p_halt.add_argument("--category", default=None,
+                         help=f"#190: halt の種別。有効値: {sorted(HALT_CATEGORIES)}。省略/不正値は 'other' + WARN"
+                              " (argparse choices は使わない: _normalize_halt_category が WARN+fallback で検証する)")
     p_halt.set_defaults(func=cmd_mark_halt)
 
     p_refresh = sub.add_parser("refresh-pid", help="R1: resume 後に state.pid を現 agent CLI PID に更新 + orphan halt を解除")
