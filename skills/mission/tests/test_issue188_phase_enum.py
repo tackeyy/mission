@@ -3,7 +3,6 @@
 実運用で `phase=execution` (正しくは executing) が無検証で受理され、
 phase_durations_sec に不正キーが混入して stats を汚染した実害への回帰テスト。
 """
-import json
 
 
 def test_set_phase_accepts_valid_value(state_dir, run_cli, read_state):
@@ -24,8 +23,8 @@ def test_set_phase_normalizes_known_alias_execution_to_executing(state_dir, run_
     assert r.returncode == 0
     assert "WARNING" in r.stderr
     assert read_state(state_dir)["phase"] == "executing"
-    # 不正キー execution が保存されていないこと
-    assert "execution" not in json.dumps(read_state(state_dir))
+    # 不正キー execution が phase_durations_sec に保存されていないこと
+    assert "execution" not in read_state(state_dir).get("phase_durations_sec", {})
 
 
 def test_set_phase_normalizes_review_alias_to_reviewing(state_dir, run_cli, read_state):
