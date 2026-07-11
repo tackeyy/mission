@@ -254,6 +254,21 @@ def test_stats_phase_duration_totals_and_averages(tmp_path, run_cli):
     assert data["phase_duration_avg_sec"]["planning"] == pytest.approx(45.0)
 
 
+def test_stats_text_flags_invalid_phase_key(tmp_path, run_cli):
+    """#188: 過去の無検証 set (typo等) で混入した不正 phase キーはテキスト出力で明示する."""
+    _make_state(tmp_path / "p1", session_id="s1", phase_durations_sec={"execution": 30})
+    r = run_cli("stats", "--root", str(tmp_path), cwd=tmp_path)
+    assert "execution" in r.stdout
+    assert "(invalid:" in r.stdout
+
+
+def test_stats_text_does_not_flag_valid_phase_key(tmp_path, run_cli):
+    _make_state(tmp_path / "p1", session_id="s1", phase_durations_sec={"executing": 30})
+    r = run_cli("stats", "--root", str(tmp_path), cwd=tmp_path)
+    assert "executing" in r.stdout
+    assert "(invalid:" not in r.stdout
+
+
 # ===== #2: agent 別集計 (2026-06-13 ログ調査) =====
 # Claude Code/Codex/CLI どの起動元の成績か内訳を見えるようにする
 
