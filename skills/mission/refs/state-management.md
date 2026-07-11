@@ -60,8 +60,13 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score \
 # (これを怠ると「score_history が空のまま passes=true」になる既知バグを再発させる)
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py mark-passes
 
-# 中断マーク (halt_reason 設定, loop_active=false)
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py mark-halt --reason "<理由>"
+# 中断マーク (halt_reason 設定, loop_active=false)。
+# --category (#190) は halt の種別を構造化する: blocked-external / awaiting-approval /
+# partial-done / stagnation / user-abort / stale / other。省略・不正値は 'other' + WARN
+# (halt 自体は緊急停止経路なので category 不正で halt そのものは失敗させない)。
+# stats/audit の by_halt_category / halt_incomplete_breakdown で集計され、
+# 「完了しました」等の完了風自由文と threshold 未達 halt (partial-done) を区別できる。
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py mark-halt --reason "<理由>" --category partial-done
 
 # #123 (推奨): 復帰を 1 コマンドに統合。refresh-pid → cleanup-empty → cleanup-stale → next を
 # 正しい順序 (refresh-pid が先) で原子的に実行し、next の出力に resume サマリ

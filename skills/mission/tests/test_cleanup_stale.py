@@ -175,6 +175,8 @@ def test_cleanup_stale_execute_halts_nonexistent_project_root(tmp_path, run_cli)
     s = json.loads((sd / "state.json").read_text())
     assert s["loop_active"] is False
     assert "project_root not found" in s["halt_reason"], f"halt_reason: {s['halt_reason']}"
+    # #190: この経路 (alive PID + project_root 恒久不在) も halt_category='stale' を記録する
+    assert s["halt_category"] == "stale"
 
 
 def test_cleanup_stale_detects_stale_active_no_score_even_with_live_agent_pid(tmp_path, run_cli):

@@ -26,6 +26,7 @@ if str(MISSION_LIB) not in sys.path:
     sys.path.insert(0, str(MISSION_LIB))
 
 from mission_common import (  # noqa: E402
+    HALT_CATEGORIES,
     PREPARATION_ONLY_MARKERS,
     SPECIALIST_SELECTION_CHECKPOINT_REQUIRED_AT,
     classify_state as classify,
@@ -396,6 +397,12 @@ def bucket_counts(records: list[StateRecord], bucket_fn) -> dict[str, int]:
 
 def halt_or_incomplete_bucket(record: StateRecord) -> str:
     state = record.state
+    # #190: 構造化 halt_category があればそれを正とする (自由文ヒューリスティックより信頼できる)。
+    # incomplete (未 halt) には適用しない -- halt_category は halt 発生時のみ記録される。
+    if classify(state) == "halt":
+        category = state.get("halt_category")
+        if isinstance(category, str) and category in HALT_CATEGORIES:
+            return f"structured:{category}"
     reason = str(state.get("halt_reason") or "").lower()
     if classify(state) == "incomplete":
         if not state.get("score_history"):

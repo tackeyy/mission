@@ -1893,3 +1893,54 @@ def test_audit_does_not_flag_forced_pass_with_user_mention_in_reason(tmp_path):
     )
     data = json.loads(result.stdout)
     assert data["forced_pass_autonomous_suspect_count"] == 0
+
+
+# ===== #190: halt_category による構造化 halt bucket =====
+
+
+def test_audit_prefers_structured_halt_category_over_free_text_heuristic(tmp_path):
+    """halt_category が記録されていれば、自由文ヒューリスティックより優先して bucket 分類する."""
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "structured-halt.json",
+        project_root=str(tmp_path),
+        session_id="structured-halt",
+        loop_active=False,
+        passes=False,
+        # 自由文だけ見ると completed 風だが、構造化 halt_category が正 (partial-done)
+        halt_reason="All actionable issues in this mission were completed via PR/merge/deploy",
+        halt_category="partial-done",
+        score_history=[
+            {"iteration": 1, "composite": 3.92, "min_item": 3.5, "items": {}, "timestamp": "2026-06-18T00:05:00Z"}
+        ],
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--since", "2026-06-18", "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    assert data["halt_incomplete_breakdown"] == {"structured:partial-done": 1}
+
+
+def test_audit_falls_back_to_heuristic_when_halt_category_absent(tmp_path):
+    """halt_category 未記録の historical state は従来の自由文ヒューリスティックに fallback する."""
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "legacy-halt.json",
+        project_root=str(tmp_path),
+        session_id="legacy-halt",
+        loop_active=False,
+        passes=False,
+        halt_reason="orphan: pid 12345 dead or reused (cleanup-stale)",
+        score_history=[],
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--since", "2026-06-18", "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    assert data["halt_incomplete_breakdown"] == {"stale-state-cleanup": 1}

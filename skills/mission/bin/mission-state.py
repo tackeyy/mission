@@ -48,6 +48,7 @@ if str(LIB_DIR) not in sys.path:
     sys.path.insert(0, str(LIB_DIR))
 
 from mission_common import (  # noqa: E402
+    HALT_CATEGORIES,
     PREPARATION_ONLY_MARKERS,
     SPECIALIST_SELECTION_CHECKPOINT_REQUIRED_AT,
     classify_state as _classify,
@@ -690,6 +691,32 @@ def _normalize_set_phase_value(value: str) -> str:
         file=sys.stderr,
     )
     sys.exit(2)
+
+
+# #190: HALT_CATEGORIES は skills/mission/lib/mission_common.py で定義し、
+# audit 側 (scripts/mission-audit.py) と共有する。実運用で「完了しました」という完了風の
+# 自由文 halt_reason が threshold 未達 (min_item/composite gate) と混同され、stats/audit 上は
+# 障害 halt と同じ HALT に集計されて root-cause review のたびに人が自由文を読み分けていた実害への対策。
+
+
+def _normalize_halt_category(value: str | None) -> str:
+    """mark-halt --category の検証。省略/不正値は 'other' + WARN (reject しない: halt 自体は
+    緊急停止経路であり、カテゴリ不正で halt そのものを妨げるのは本末転倒)。"""
+    if value is None:
+        print(
+            "WARNING [#190]: --category が未指定です。'other' として記録しました。"
+            f" 可能ならカテゴリを指定してください: {sorted(HALT_CATEGORIES)}",
+            file=sys.stderr,
+        )
+        return "other"
+    if value not in HALT_CATEGORIES:
+        print(
+            f"WARNING [#190]: --category '{value}' は無効です。'other' として記録しました。"
+            f" 有効値: {sorted(HALT_CATEGORIES)}",
+            file=sys.stderr,
+        )
+        return "other"
+    return value
 
 
 # M7 (2026-06-10): SKILL.md Phase 1 の複雑度→Reviewer 数マッピング
@@ -3950,10 +3977,12 @@ def cmd_mark_halt(args):
     if not sf.exists():
         print("ERROR: state file が見つかりません。先に init してください。", file=sys.stderr)
         sys.exit(1)
+    category = _normalize_halt_category(getattr(args, "category", None))
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
         now = iso_now()
         data["halt_reason"] = args.reason
+        data["halt_category"] = category  # #190
         data["loop_active"] = False
         _transition_phase(data, "halted", now)  # M4 (2026-06-10): phase 自動更新
         data["updated_at"] = now
@@ -3961,7 +3990,7 @@ def cmd_mark_halt(args):
         atomic_write_json(sf, data)
         # #11: aggregate 更新も同じ StateLock 内で行う (lock 外だと並列 halt で lost update)
         _remove_from_aggregate(cwd, resolve_session_id())
-    print(json.dumps({"ok": True, "halt_reason": args.reason}))
+    print(json.dumps({"ok": True, "halt_reason": args.reason, "halt_category": category}))
 
 
 def _pid_is_agent(pid: int) -> bool:
@@ -4212,6 +4241,7 @@ def cmd_cleanup_stale(args):
                             if args.execute:
                                 with StateLock(lock_file(proj)):
                                     data["halt_reason"] = halt_reason
+                                    data["halt_category"] = "stale"  # #190
                                     data["loop_active"] = False
                                     data["updated_at"] = iso_now()
                                     backup_state(sf)
@@ -4234,6 +4264,7 @@ def cmd_cleanup_stale(args):
                                     with StateLock(lock_file(proj)):
                                         now = iso_now()
                                         data["halt_reason"] = halt_reason
+                                        data["halt_category"] = "stale"  # #190
                                         data["loop_active"] = False
                                         _transition_phase(data, "halted", now)
                                         data["updated_at"] = now
@@ -4257,6 +4288,7 @@ def cmd_cleanup_stale(args):
                         if args.execute:
                             with StateLock(lock_file(proj)):
                                 data["halt_reason"] = f"orphan: pid {pid} dead or reused (cleanup-stale)"
+                                data["halt_category"] = "stale"  # #190
                                 data["loop_active"] = False
                                 data["updated_at"] = iso_now()
                                 backup_state(sf)
@@ -4308,6 +4340,7 @@ def cmd_halt(args):
     if args.all:
         # 候補1: --root 指定時はその root のみ走査 (テスト分離・スコープ指定)。未指定は従来通り全 root
         search_roots = [Path(args.root)] if getattr(args, "root", None) else _default_search_roots()
+        category = _normalize_halt_category(getattr(args, "category", None))
         halted = []
         for root in search_roots:
             if not root.exists():
@@ -4320,6 +4353,7 @@ def cmd_halt(args):
                         with StateLock(lock_file(proj)):
                             now = iso_now()
                             data["halt_reason"] = args.reason
+                            data["halt_category"] = category  # #190
                             data["loop_active"] = False
                             _transition_phase(data, "halted", now)  # M4
                             data["updated_at"] = now
@@ -4331,7 +4365,7 @@ def cmd_halt(args):
                         halted.append(str(proj))
                 except Exception as e:
                     print(f"WARN: skip {sf}: {e}", file=sys.stderr)
-        print(json.dumps({"ok": True, "halted": halted}))
+        print(json.dumps({"ok": True, "halted": halted, "halt_category": category}))
     else:
         if getattr(args, "root", None):
             print("WARN: --root は --all と併用時のみ有効です (無視されました)", file=sys.stderr)
@@ -4465,6 +4499,18 @@ def _build_breakdown(states: list[dict], classes: list[str], keyfn) -> dict:
     return out
 
 
+def _build_halt_category_breakdown(states: list[dict], classes: list[str]) -> dict:
+    """#190: halt したセッションを halt_category 別に集計する (completed 風の自由文 halt と
+    障害 halt を区別可能にする)。halt_category 未記録の historical state は 'unknown' に落ちる。"""
+    out: dict = {}
+    for s, cls in zip(states, classes):
+        if cls != "halt":
+            continue
+        cat = s.get("halt_category") or "unknown"
+        out[cat] = out.get(cat, 0) + 1
+    return dict(sorted(out.items()))
+
+
 def _build_iteration_by_key(states: list[dict], keyfn) -> dict:
     """任意キー別に iteration ヒストグラムをネストして返す。
 
@@ -4518,6 +4564,7 @@ def _aggregate(states: list[dict], duplicate_state_group_count: int = 0) -> dict
             "by_project": {}, "by_complexity": {}, "iteration_histogram": {},
             "by_review_tier": {}, "iteration_by_review_tier": {},
             "by_cli_version": {},
+            "by_halt_category": {},
         }
     # _classify を 1 回だけ評価 (旧実装は pass/halt/incomplete で 3N 回呼んでいた)
     classes = [_classify(s) for s in states]
@@ -4550,6 +4597,7 @@ def _aggregate(states: list[dict], duplicate_state_group_count: int = 0) -> dict
     iteration_by_review_tier = _build_iteration_by_key(states, lambda s: s.get("review_tier") or "unknown")
     # #186: cli_version 別内訳 (旧 state で cli_version フィールドなし → "unknown")
     by_cli_version = _build_breakdown(states, classes, lambda s: s.get("cli_version") or "unknown")
+    by_halt_category = _build_halt_category_breakdown(states, classes)  # #190
     phase_totals = _phase_duration_totals(states)
     iteration_histogram: dict = {}
     for _it in iterations:
@@ -4581,6 +4629,7 @@ def _aggregate(states: list[dict], duplicate_state_group_count: int = 0) -> dict
         "by_review_tier": by_review_tier,
         "iteration_by_review_tier": iteration_by_review_tier,
         "by_cli_version": by_cli_version,
+        "by_halt_category": by_halt_category,
     }
 
 
@@ -4608,6 +4657,13 @@ def _format_text(stats: dict, since: str | None, until: str | None) -> str:
         f"    (forced:              {stats['forced_pass_count']}{_pct_detail(stats.get('forced_pass_rate'))})",
         f"    (ungated:             {stats['ungated_pass_count']}{_pct_detail(stats.get('ungated_pass_rate'))})",
         f"  HALT:                   {stats['halt_count']}",
+    ]
+    by_halt_category = stats.get("by_halt_category") or {}
+    if by_halt_category:
+        lines.append("    (by category)")
+        for cat, cnt in by_halt_category.items():
+            lines.append(f"      {cat:<18} {cnt}")
+    lines += [
         f"  incomplete:             {stats['incomplete_count']}",
         f"  abandoned:              {stats['abandoned_count']}",
         f"avg_iterations:           {stats['avg_iterations']:.2f}" if stats['avg_iterations'] is not None else "avg_iterations: -",
@@ -4755,6 +4811,9 @@ def _build_parser():
 
     p_halt = sub.add_parser("mark-halt", help="halt_reason を立てて停止")
     p_halt.add_argument("--reason", required=True)
+    p_halt.add_argument("--category", default=None,
+                         help=f"#190: halt の種別。有効値: {sorted(HALT_CATEGORIES)}。省略/不正値は 'other' + WARN"
+                              " (argparse choices は使わない: _normalize_halt_category が WARN+fallback で検証する)")
     p_halt.set_defaults(func=cmd_mark_halt)
 
     p_refresh = sub.add_parser("refresh-pid", help="R1: resume 後に state.pid を現 agent CLI PID に更新 + orphan halt を解除")
@@ -4786,6 +4845,8 @@ def _build_parser():
 
     p_halt2 = sub.add_parser("halt", help="state.json を halt させる (--all で全プロジェクト)")
     p_halt2.add_argument("--reason", required=True)
+    p_halt2.add_argument("--category", default=None,
+                         help=f"#190: halt の種別。有効値: {sorted(HALT_CATEGORIES)}。省略/不正値は 'other' + WARN")
     p_halt2.add_argument("--all", action="store_true")
     p_halt2.add_argument("--root", default=None, help="--all と併用時のみ有効。指定 root 配下のみ halt (省略時は MISSION_SEARCH_ROOTS、未設定なら cwd)")
     p_halt2.set_defaults(func=cmd_halt)

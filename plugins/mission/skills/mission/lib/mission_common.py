@@ -18,6 +18,18 @@ PREPARATION_ONLY_MARKERS = (
 
 SPECIALIST_SELECTION_CHECKPOINT_REQUIRED_AT = datetime(2026, 6, 20, 10, 6, 47, tzinfo=timezone.utc)
 
+# #190: halt_reason のカテゴリ enum。state 側 (mark-halt --category) と audit 側
+# (halt_or_incomplete_bucket の構造化優先ロジック) で同一定義を共有する。
+HALT_CATEGORIES = {
+    "blocked-external",
+    "awaiting-approval",
+    "partial-done",
+    "stagnation",
+    "user-abort",
+    "stale",
+    "other",
+}
+
 
 def parse_iso_datetime(value: str | None) -> datetime | None:
     if not value:
