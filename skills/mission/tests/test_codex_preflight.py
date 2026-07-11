@@ -98,3 +98,15 @@ def test_codex_preflight_require_stop_hook_exits_nonzero_when_missing(tmp_path, 
     out = json.loads(r.stdout)
     assert out["ok"] is False
     assert any("mission-stop-guard.sh" in action for action in out["required_actions"])
+
+
+def test_codex_preflight_includes_scoring_pipeline_summary(tmp_path, run_cli):
+    """#187: preflight は aggregate-reviews 前提の scoring パイプライン要約を返し、
+    force を推奨する文言を含まない (force に触れる場合も禁止文脈のみ)."""
+    out = _json(run_cli, "--hook-config", str(tmp_path / "hooks.json"), cwd=tmp_path)
+    pipeline = out["scoring_pipeline"]
+    assert "aggregate-reviews" in pipeline
+    assert "push-score" in pipeline
+    assert "mark-passes" in pipeline
+    assert "mission-scorer" in pipeline  # Codex 向け fallback 変換器への言及
+    assert "just because" in pipeline or "Never" in pipeline  # force を安易に使わない旨の警告

@@ -2772,6 +2772,41 @@ def _derive_next_action(data: dict) -> dict:
         if isinstance(h, dict) and h.get("iteration") == iteration and _is_valid_composite(h.get("composite"))
     ]
     if scored_current:
+        latest = scored_current[-1]
+        # #187: score entry はあるが findings evidence がない (scoring-json 経路なのに
+        # findings_evidence_path 欠落) 場合、mark-passes は _validate_findings_evidence_gate で
+        # exit 2 になる。実運用で、この状態から Codex agent が --force に逃げた実害があったため、
+        # next の時点で「force ではなく aggregate-reviews をやり直す」ことを明示する。
+        missing_findings_evidence = (
+            latest.get("score_source") == "scoring-json"
+            and not latest.get("findings_evidence_path")
+        )
+        if missing_findings_evidence:
+            # review 由来のレビュー結果: #189 の unclosed specialist 情報もここで併記する
+            # (aggregate-reviews のリトライ待ちの間も next の details から欠落させない)。
+            unclosed_during_retry = _unclosed_optional_specialist_skills(data)
+            return {
+                "next_action": "aggregate-reviews",
+                "summary": (
+                    f"iteration {iteration}: 直前の push-score に findings evidence "
+                    "(findings_evidence_path) がありません。このまま mark-passes を呼んでも "
+                    "exit 2 になります。--force は使わず aggregate-reviews からやり直してください。"
+                ),
+                "command_hint": (
+                    "reviewer が mission-review/1 JSON を直接出力できない場合 (Codex で並列 Skill が"
+                    "使えない等) は mission-scorer を散文→JSON 変換の fallback として使ってから: "
+                    f"mission-state.py aggregate-reviews --iteration {iteration} "
+                    f"--input /tmp/mission-reviewer-iter-{iteration}-{mid8}-a.json "
+                    f"--out /tmp/mission-scorer-iter-{iteration}-{mid8}.json && "
+                    f"mission-state.py push-score --iteration {iteration} "
+                    f"--scoring-json /tmp/mission-scorer-iter-{iteration}-{mid8}.json "
+                    '--resubmit-reason "retry with aggregate-reviews evidence"'
+                ),
+                "details": {
+                    "missing_findings_evidence": True,
+                    **({"unclosed_specialists": unclosed_during_retry} if unclosed_during_retry else {}),
+                },
+            }
         unclosed = _unclosed_optional_specialist_skills(data)  # #189
         return {
             "next_action": "mark-passes",
@@ -2781,7 +2816,10 @@ def _derive_next_action(data: dict) -> dict:
         }
     return {
         "next_action": "aggregate-reviews",
-        "summary": f"iteration {iteration}: reviewer の mission-review/1 JSON を aggregate-reviews で集計し、push-score --scoring-json で記録する",
+        "summary": (
+            f"iteration {iteration}: reviewer の mission-review/1 JSON を aggregate-reviews で集計し、"
+            "push-score --scoring-json で記録する。--force は使わない (scoring evidence を作る経路がこれ)。"
+        ),
         "command_hint": f"mission-state.py aggregate-reviews --iteration {iteration} --input /tmp/mission-reviewer-iter-{iteration}-{mid8}-a.json --out /tmp/mission-scorer-iter-{iteration}-{mid8}.json && mission-state.py push-score --iteration {iteration} --scoring-json /tmp/mission-scorer-iter-{iteration}-{mid8}.json",
     }
 
@@ -2984,6 +3022,19 @@ def cmd_codex_preflight(args):
         "warnings": warnings,
         "required_actions": required_actions,
         "version_skew": version_skew,  # #186: None (no skew) or {"cli_version": ..., "stale_caches": {...}}
+        # #187: Codex は Skill 並列不可・reviewer JSON の同一コンテキスト自演になりがちで、
+        # aggregate-reviews が初回失敗すると --force に逃げやすい。scoring パイプラインの
+        # 正規手順を preflight 時点で明示し、`next` の command_hint と合わせて force を回避する。
+        "scoring_pipeline": (
+            "Standard scoring path: reviewers write mission-review/1 JSON -> "
+            "`aggregate-reviews --input <files> --out <path>` -> "
+            "`push-score --scoring-json <path>` -> `mark-passes`. "
+            "If reviewer JSON cannot be produced in this Codex context, use mission-scorer as a "
+            "prose-to-JSON fallback converter, then feed its output through aggregate-reviews the "
+            "same way. Never fall back to `mark-passes --force` just because aggregate-reviews "
+            "failed once; `mission-state.py next` will report a retry hint when the latest score "
+            "entry is missing findings evidence."
+        ),
     }
     if getattr(args, "json", False):
         print(json.dumps(result, indent=2, ensure_ascii=False))

@@ -164,6 +164,30 @@ python3 "$MISSION_PLUGIN_ROOT/skills/mission/bin/mission-state.py" next
 python3 "$MISSION_PLUGIN_ROOT/skills/mission/bin/mission-state.py" refresh-pid
 ```
 
+## aggregate-reviews が回らない時のトラブルシュート (#187)
+
+Codex は (a) Skill tool の単一メッセージ並列起動ができない (b) reviewer 役をロール切替で同一コンテキストに適用しがちで reviewer JSON の書き出しが自演になりやすい、という制約がある。この制約下で `aggregate-reviews` の初回試行が失敗すると、`mark-passes --force` に逃げてしまう実害が確認されている (実運用ログ監査 #185/#187 参照)。**`--force` はユーザーが明示指示した場合のみ**。aggregate-reviews が失敗しても force には進まず、以下の手順でやり直す。
+
+### 正規経路 (毎 iteration)
+
+```
+reviewer が mission-review/1 JSON を出力
+  -> mission-state.py aggregate-reviews --iteration N --input <file...> --out <path>
+  -> mission-state.py push-score --iteration N --scoring-json <path>
+  -> mission-state.py mark-passes
+```
+
+### 初回失敗時のリトライ手順
+
+1. `mission-state.py next` を呼ぶ。直前の score entry が `score_source=scoring-json` なのに `findings_evidence_path` が無い場合、`next_action=aggregate-reviews` と共に「force を使わずやり直す」旨の `command_hint` が返る。
+2. reviewer 役が Codex の同一コンテキストで `mission-review/1` 形式の JSON を直接出力できない場合は、**mission-scorer を散文→JSON 変換の fallback として使う** (reviewer の散文レビューを scorer に渡し、`mission-review/1` 形式へ整形させる)。
+3. 変換された JSON を `aggregate-reviews` に渡し直す。得られた `--out` パスを `push-score --scoring-json` へ渡す。同一 iteration への 2 回目の push なので `--resubmit-reason` が必須 (#122)。
+4. それでも `aggregate-reviews` の入力が用意できない場合は、`mark-halt --reason "<理由>" --category blocked-external` で正直に中断する。**未達を force で覆い隠さない**。
+
+### codex-preflight での事前確認
+
+`codex-preflight --json` の `scoring_pipeline` フィールドに上記の正規経路が要約されている。Codex セッション開始時に一度読んでおくと、初回失敗時に force へ逃げるリスクを減らせる。
+
 ## 修正履歴
 
 | 日時 | 内容 |
@@ -172,3 +196,4 @@ python3 "$MISSION_PLUGIN_ROOT/skills/mission/bin/mission-state.py" refresh-pid
 | 2026-06-14 | OSS plugin 化に伴い、Codex での path 解決と hook trust 注意を追記 |
 | 2026-06-15 | Codex plugin metadata (`.codex-plugin/`, `.agents/plugins/`) を追加。Codex default package は skills-only、Stop hook は user hook opt-in に整理 |
 | 2026-07-03 | `codex-preflight` を追加し、state 未初期化 / Stop hook 未設定 / `next` fallback の診断手順を明文化 |
+| 2026-07-11 | #187: aggregate-reviews が回らない時のトラブルシュート節を追加。`next` の findings evidence 欠落検出と `codex-preflight` の `scoring_pipeline` フィールドを併記し、`--force` へ逃げない手順を明記 |

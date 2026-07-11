@@ -136,3 +136,74 @@ def test_next_snapshot_coerces_null_stagnation(state_dir, run_cli):
     _set_state(state_dir, stagnation_count=None)
     out = _next(run_cli, state_dir)
     assert out["stagnation_count"] == 0
+
+
+# ===== #187: aggregate-reviews 失敗時の fallback 導線 (force に逃げない) =====
+
+
+def test_next_scoring_json_entry_without_findings_evidence_suggests_retry_not_force(state_dir, run_cli):
+    """score_source=scoring-json だが findings_evidence_path が無い (手作り scoring-json 等で
+    aggregate-reviews を経由しなかった) 場合、mark-passes ではなく aggregate-reviews への
+    リトライを提案する。force には触れても「使うな」という禁止文脈でのみで、command_hint
+    (実行すべきコマンド列) 自体には --force を一切含めない (提案しない)。"""
+    _set_state(state_dir, score_history=[
+        {"iteration": 1, "composite": 4.5, "min_item": 4.5,
+         "items": {"mission_achievement": 4.5}, "timestamp": "2026-07-11T00:00:00Z",
+         "open_high": 0, "score_source": "scoring-json"},
+    ])
+    out = _next(run_cli, state_dir)
+    assert out["next_action"] == "aggregate-reviews"
+    assert out["details"]["missing_findings_evidence"] is True
+    # command_hint は実行すべきコマンド列そのものなので --force を一切含めない (提案しない)
+    assert "--force" not in out["command_hint"]
+    # summary は「force を使うな」という禁止の文脈でのみ言及してよい
+    assert "使わず" in out["summary"] or "禁止" in out["summary"]
+
+
+def test_next_scoring_json_entry_with_findings_evidence_suggests_mark_passes(state_dir, run_cli):
+    """findings_evidence_path が揃っていれば通常どおり mark-passes を提案する (回帰確認)."""
+    _set_state(state_dir, score_history=[
+        {"iteration": 1, "composite": 4.5, "min_item": 4.5,
+         "items": {"mission_achievement": 4.5}, "timestamp": "2026-07-11T00:00:00Z",
+         "open_high": 0, "score_source": "scoring-json",
+         "findings_evidence_path": ".mission-state/archive/iter-1-abc12345-reviews.json"},
+    ])
+    out = _next(run_cli, state_dir)
+    assert out["next_action"] == "mark-passes"
+
+
+def test_next_legacy_items_entry_without_score_source_still_suggests_mark_passes(state_dir, run_cli):
+    """score_source フィールド自体がない legacy entry は findings evidence チェック対象外
+    (mark-passes 側も legacy は WARN のみで hard block しない) — 後方互換確認."""
+    _set_state(state_dir, score_history=[
+        {"iteration": 1, "composite": 4.2, "min_item": 4.0,
+         "items": {"mission_achievement": 4.2}, "timestamp": "2026-07-02T00:00:00Z", "open_high": 0},
+    ])
+    out = _next(run_cli, state_dir)
+    assert out["next_action"] == "mark-passes"
+
+
+def test_next_aggregate_reviews_default_hint_does_not_mention_force(state_dir, run_cli):
+    """score_history が空の通常経路のヒントにも --force への言及がないことを確認."""
+    out = _next(run_cli, state_dir)
+    assert out["next_action"] == "aggregate-reviews"
+    assert "force" not in out["command_hint"].lower()
+
+
+def test_next_missing_evidence_with_unclosed_specialist_still_reports_it(state_dir, run_cli):
+    """#187 review advisory: missing_findings_evidence=True の間も #189 の
+    unclosed_specialists 情報を details から欠落させない (aggregate-reviews リトライ待ちの
+    可視性を保つ)."""
+    _set_state(
+        state_dir,
+        score_history=[
+            {"iteration": 1, "composite": 4.5, "min_item": 4.5,
+             "items": {"mission_achievement": 4.5}, "timestamp": "2026-07-11T00:00:00Z",
+             "open_high": 0, "score_source": "scoring-json"},
+        ],
+        specialists_selected=[{"skill": "dev-security-reviewer", "role": "security-reviewer"}],
+    )
+    out = _next(run_cli, state_dir)
+    assert out["next_action"] == "aggregate-reviews"
+    assert out["details"]["missing_findings_evidence"] is True
+    assert out["details"]["unclosed_specialists"] == ["dev-security-reviewer"]
