@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Explicit user instructions such as "release" or "deploy to production" now count as advance approval for that matching irreversible action. Mission does not repeat the same confirmation immediately before execution unless the target, scope, rollback conditions, or required destructive operations materially change.
+
 ## [1.2.0] - 2026-07-10
 
 ### Added
