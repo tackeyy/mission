@@ -58,6 +58,13 @@ from specialist_accounting import candidate_accounting_report  # noqa: E402
 
 SCHEMA_VERSION = 2  # v1: 旧 schema (project_root/pid なし), v2: A-1/A-2/B-3 追加
 
+# #186: 実行中の mission-state.py のバージョン。.claude-plugin/plugin.json 等の manifest と
+# 一致させる (release 時に手動 bump。test_doc_consistency.py::test_release_version_paths_are_in_sync
+# が manifest 間の一致は既に保証しているため、ここでは manifest との一致のみ追加で固定する)。
+# 実行時に manifest ファイルを読みに行かない設計: plugin cache 配布・symlink 配布・単一ファイル
+# 実行のいずれでも `.claude-plugin/plugin.json` への相対パスが安定しないため。
+MISSION_CLI_VERSION = "1.2.0"
+
 # Tier5: スコア/反復のマジックナンバーを単一定義 (散在防止・閾値変更を1箇所に集約)
 DEFAULT_THRESHOLD = 4.0     # 合格 composite 閾値 (init --threshold 未指定時 / mark-passes fallback)
 MIN_ITEM_THRESHOLD = 3.5    # 各項目スコアの足切り (これ未満は mark-passes が reject)
@@ -557,6 +564,7 @@ def stamp_metadata(data: dict, cwd: Path) -> dict:
     if "agent" not in data:
         data["agent"] = resolve_agent()  # 起動元 (claude-code/codex/cli) をログ識別用に記録
     data.setdefault("created_at_session", iso_now())
+    data.setdefault("cli_version", MISSION_CLI_VERSION)  # #186
     return data
 
 
@@ -2816,6 +2824,59 @@ def _hook_config_status(paths: list[Path]) -> dict:
     }
 
 
+def _version_tuple(value: str) -> tuple:
+    """'1.2.0' -> (1, 2, 0). 非数値チャンクは 0 として比較する (壊れたディレクトリ名を無害化)."""
+    parts = []
+    for chunk in str(value).split("."):
+        try:
+            parts.append(int(chunk))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts)
+
+
+def _plugin_cache_roots() -> dict[str, Path]:
+    """#186: plugin cache のバージョンディレクトリ親を返す (テスト用に env で override 可能)。
+
+    MISSION_CLAUDE_HOME / CODEX_HOME (既存の codex hook 探索と同じ変数) を尊重する。
+    """
+    claude_home = os.environ.get("MISSION_CLAUDE_HOME")
+    claude_root = Path(claude_home).expanduser() if claude_home else Path.home() / ".claude"
+    codex_home = os.environ.get("CODEX_HOME")
+    codex_root = Path(codex_home).expanduser() if codex_home else Path.home() / ".codex"
+    return {
+        "claude-code": claude_root / "plugins" / "cache" / "mission-marketplace" / "mission",
+        "codex": codex_root / "plugins" / "cache" / "mission-marketplace" / "mission",
+    }
+
+
+def _detect_version_skew() -> dict | None:
+    """#186: インストール済み plugin cache が現在の MISSION_CLI_VERSION より古ければ警告データを返す。
+
+    cache ディレクトリが存在しない、または全て現行以上のバージョンなら None (無警告)。
+    実行中の mission-state.py が symlink/直接 checkout 経由 (plugin cache を介さない) の場合、
+    このチェックは古い cache が「使われている」ことまでは検知できない — cache の存在自体を
+    陳腐化の兆候として警告するに留まる (#186 スコープ: 検出であり自動修復ではない)。
+    """
+    current = _version_tuple(MISSION_CLI_VERSION)
+    stale: dict[str, list[str]] = {}
+    for label, cache_dir in _plugin_cache_roots().items():
+        if not cache_dir.is_dir():
+            continue
+        try:
+            older = sorted(
+                p.name for p in cache_dir.iterdir()
+                if p.is_dir() and _version_tuple(p.name) < current
+            )
+        except OSError:
+            continue
+        if older:
+            stale[label] = older
+    if not stale:
+        return None
+    return {"cli_version": MISSION_CLI_VERSION, "stale_caches": stale}
+
+
 def cmd_codex_preflight(args):
     """Codex /mission startup health check.
 
@@ -2865,6 +2926,15 @@ def cmd_codex_preflight(args):
         if getattr(args, "require_stop_hook", False):
             required_actions.append("Configure and trust `mission-stop-guard.sh` in Codex hooks, or rerun without --require-stop-hook for skills-only fallback.")
 
+    version_skew = _detect_version_skew()  # #186
+    if version_skew:
+        warnings.append(
+            "Installed plugin cache(s) are older than the running CLI version "
+            f"({version_skew['cli_version']}): {version_skew['stale_caches']}. "
+            "Old caches run stale SKILL.md instructions and gate logic; update the plugin "
+            "install or clear the stale cache directory."
+        )
+
     fallback_available = state_active and next_action not in {"init", "report-blocker", "report-complete"}
     result = {
         "ok": state_active and (hook_status["configured"] or (fallback_available and not getattr(args, "require_stop_hook", False))),
@@ -2880,6 +2950,7 @@ def cmd_codex_preflight(args):
         "next_summary": next_summary,
         "warnings": warnings,
         "required_actions": required_actions,
+        "version_skew": version_skew,  # #186: None (no skew) or {"cli_version": ..., "stale_caches": {...}}
     }
     if getattr(args, "json", False):
         print(json.dumps(result, indent=2, ensure_ascii=False))
@@ -3953,6 +4024,7 @@ def cmd_resume(args):
         "cleaned_empty": False,
         "halted_stale": 0,
         "dry_run": dry_run,
+        "version_skew": _detect_version_skew(),  # #186: None (no skew) or skew details
     }
     sf = resolve_state_file(cwd)
 
@@ -4390,6 +4462,7 @@ def _aggregate(states: list[dict], duplicate_state_group_count: int = 0) -> dict
             "by_agent": {},
             "by_project": {}, "by_complexity": {}, "iteration_histogram": {},
             "by_review_tier": {}, "iteration_by_review_tier": {},
+            "by_cli_version": {},
         }
     # _classify を 1 回だけ評価 (旧実装は pass/halt/incomplete で 3N 回呼んでいた)
     classes = [_classify(s) for s in states]
@@ -4420,6 +4493,8 @@ def _aggregate(states: list[dict], duplicate_state_group_count: int = 0) -> dict
     # #180: review_tier 別内訳 (旧 state で review_tier フィールドなし → "unknown")
     by_review_tier = _build_breakdown(states, classes, lambda s: s.get("review_tier") or "unknown")
     iteration_by_review_tier = _build_iteration_by_key(states, lambda s: s.get("review_tier") or "unknown")
+    # #186: cli_version 別内訳 (旧 state で cli_version フィールドなし → "unknown")
+    by_cli_version = _build_breakdown(states, classes, lambda s: s.get("cli_version") or "unknown")
     phase_totals = _phase_duration_totals(states)
     iteration_histogram: dict = {}
     for _it in iterations:
@@ -4450,6 +4525,7 @@ def _aggregate(states: list[dict], duplicate_state_group_count: int = 0) -> dict
         "iteration_histogram": iteration_histogram,
         "by_review_tier": by_review_tier,
         "iteration_by_review_tier": iteration_by_review_tier,
+        "by_cli_version": by_cli_version,
     }
 
 
@@ -4498,7 +4574,7 @@ def _format_text(stats: dict, since: str | None, until: str | None) -> str:
             lines.append(
                 f"  {ag:<14} {b['total']} (PASS {b['pass']} / HALT {b['halt']} / incomplete {b['incomplete']})"
             )
-    for label, key in (("by_project", "by_project"), ("by_complexity", "by_complexity"), ("by_review_tier", "by_review_tier")):
+    for label, key in (("by_project", "by_project"), ("by_complexity", "by_complexity"), ("by_review_tier", "by_review_tier"), ("by_cli_version", "by_cli_version")):
         bd = stats.get(key) or {}
         if bd:
             lines.append(f"{label}:")

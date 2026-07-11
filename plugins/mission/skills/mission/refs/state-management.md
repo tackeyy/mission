@@ -118,6 +118,9 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py progress get -
 - `hostname`, `session_id` (uuid), `created_at_session` (B-3: owner 識別)
 - `mission_id` (mission の SHA256[:16], C-1: 別ミッション検出)
 - `schema_version` (現在 2)
+- `cli_version` (実行中の mission-state.py のバージョン, #186: plugin cache 陳腐化の検出用)
+
+**#186 バージョン skew 警告**: `codex-preflight --json` と `resume` の出力 (`resume.version_skew`) は、`~/.claude/plugins/cache/mission-marketplace/mission/*` および `${CODEX_HOME:-~/.codex}/plugins/cache/mission-marketplace/mission/*` を走査し、実行中の `MISSION_CLI_VERSION` より古いバージョンディレクトリが存在すれば `version_skew` (null 以外) を返す。古い cache は Wave 1/Wave 2 の修正を反映しない古い SKILL.md・gate ロジックで動作し続けるため、`stats --json` の `by_cli_version` と合わせて陳腐化を検出できる。検出のみで自動修復はしない (plugin update / cache 削除は手動)。cache root は `MISSION_CLAUDE_HOME` (Claude Code 側。未設定なら `~/.claude`) / `CODEX_HOME` (既存の hook 探索と同じ変数。未設定なら `~/.codex`) で override できる (主にテスト隔離用)。
 
 更新前の `.bak` 自動生成 (A-4)、`fcntl.flock` ロック (B-1)、`fsync + os.replace` atomic write (B-2) もスクリプトが内包する。
 
