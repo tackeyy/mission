@@ -8,8 +8,22 @@ both conditions visible to the orchestrator.
 import json
 
 
+def _no_skew_env(tmp_path):
+    """#186: MISSION_CLAUDE_HOME / CODEX_HOME を隔離し、実行マシンの実際の plugin cache
+    (version skew warning の対象) がテスト結果に混入しないようにする。"""
+    return {
+        "MISSION_CLAUDE_HOME": str(tmp_path / "fake-claude-home"),
+        "CODEX_HOME": str(tmp_path / "fake-codex-home"),
+    }
+
+
+def _init(run_cli, tmp_path, *args):
+    run_cli("init", "codex mission", "--complexity", "Standard", cwd=tmp_path,
+            env_extra=_no_skew_env(tmp_path), check=True)
+
+
 def _json(run_cli, *args, cwd):
-    r = run_cli("codex-preflight", "--json", *args, cwd=cwd)
+    r = run_cli("codex-preflight", "--json", *args, cwd=cwd, env_extra=_no_skew_env(cwd))
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout)
 
@@ -25,7 +39,7 @@ def test_codex_preflight_without_state_requires_init(tmp_path, run_cli):
 
 
 def test_codex_preflight_active_state_warns_when_stop_hook_missing(tmp_path, run_cli):
-    run_cli("init", "codex mission", "--complexity", "Standard", cwd=tmp_path, check=True)
+    _init(run_cli, tmp_path)
 
     out = _json(run_cli, "--hook-config", str(tmp_path / "missing-hooks.json"), cwd=tmp_path)
 
@@ -38,7 +52,7 @@ def test_codex_preflight_active_state_warns_when_stop_hook_missing(tmp_path, run
 
 
 def test_codex_preflight_detects_configured_stop_hook(tmp_path, run_cli):
-    run_cli("init", "codex mission", "--complexity", "Standard", cwd=tmp_path, check=True)
+    _init(run_cli, tmp_path)
     hook_config = tmp_path / "hooks.json"
     hook_config.write_text(
         json.dumps({
@@ -64,10 +78,11 @@ def test_codex_preflight_detects_configured_stop_hook(tmp_path, run_cli):
     assert out["codex_stop_hook"]["configured"] is True
     assert out["mechanical_guard"] == "stop-hook"
     assert out["warnings"] == []
+    assert out["version_skew"] is None
 
 
 def test_codex_preflight_require_stop_hook_exits_nonzero_when_missing(tmp_path, run_cli):
-    run_cli("init", "codex mission", "--complexity", "Standard", cwd=tmp_path, check=True)
+    _init(run_cli, tmp_path)
 
     r = run_cli(
         "codex-preflight",
@@ -76,6 +91,7 @@ def test_codex_preflight_require_stop_hook_exits_nonzero_when_missing(tmp_path, 
         "--hook-config",
         str(tmp_path / "missing-hooks.json"),
         cwd=tmp_path,
+        env_extra=_no_skew_env(tmp_path),
     )
 
     assert r.returncode == 2
