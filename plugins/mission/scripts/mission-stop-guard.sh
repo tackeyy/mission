@@ -170,7 +170,7 @@ if [ -d "$SESSIONS_DIR" ]; then
         #       根幹) に python subprocess 依存を持ち込むのは benign な race を直すために
         #       重要インフラの reliability を下げる悪いトレード → option(b) 現状維持を選択
         tmpf=$(mktemp)
-        if jq --arg r "orphan: pid $s_pid dead" '.halt_reason=$r | .loop_active=false | .updated_at=(now|todate)' "$sf" > "$tmpf" 2>/dev/null; then
+        if jq --arg r "orphan: pid $s_pid dead" '.halt_reason=$r | .halt_category="stale" | .loop_active=false | .updated_at=(now|todate)' "$sf" > "$tmpf" 2>/dev/null; then
           mv "$tmpf" "$sf"
         else
           rm -f "$tmpf"   # jq 失敗時に stray tmp を残さない (防御的。$sf は直前の read jq で valid JSON 確認済 → halt-jq が単独で失敗する経路は実質到達せず単体テスト対象外。C#3 判定)
@@ -211,7 +211,7 @@ if [ -d "$SESSIONS_DIR" ]; then
           STALE_MINS=$(( DIFF / 60 ))
           STALE_HALT_REASON="stale: auto-halted after ${STALE_MINS}m idle"
           tmpf=$(mktemp)
-          if jq --arg r "$STALE_HALT_REASON" '.halt_reason=$r | .loop_active=false | .updated_at=(now|todate)' "$SESSION_FILE_TO_BLOCK" > "$tmpf" 2>/dev/null; then
+          if jq --arg r "$STALE_HALT_REASON" '.halt_reason=$r | .halt_category="stale" | .loop_active=false | .updated_at=(now|todate)' "$SESSION_FILE_TO_BLOCK" > "$tmpf" 2>/dev/null; then
             mv "$tmpf" "$SESSION_FILE_TO_BLOCK"
           else
             rm -f "$tmpf"

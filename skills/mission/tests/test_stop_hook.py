@@ -102,6 +102,8 @@ def test_hook_orphan_halt_when_envless_and_pid_dead(tmp_path):
     assert "block" not in r.stdout
     st = json.loads((tmp_path / ".mission-state" / "sessions" / "s-orphan.json").read_text())
     assert st["halt_reason"].startswith("orphan:") and st["loop_active"] is False
+    # #190: shell 側の orphan auto-halt も halt_category='stale' を記録する
+    assert st["halt_category"] == "stale"
 
 
 def test_hook_warns_on_stale_state(tmp_path):
@@ -126,6 +128,8 @@ def test_hook_autohalts_on_very_stale_state(tmp_path):
     st = json.loads(sf.read_text())
     assert st["loop_active"] is False, "loop_active が false になっていない"
     assert "stale" in st["halt_reason"], f"halt_reason に 'stale' が含まれない: {st['halt_reason']}"
+    # #190: idle-timeout auto-halt (shell 側 jq write) も halt_category='stale' を記録する
+    assert st["halt_category"] == "stale"
 
 
 def test_hook_does_not_autohalt_awaiting_user_state(tmp_path):
@@ -217,6 +221,8 @@ def test_hook_custom_stale_halt_seconds(tmp_path):
     st = json.loads(sf.read_text())
     assert st["loop_active"] is False, "loop_active が false になっていない"
     assert "stale" in st["halt_reason"], f"halt_reason に 'stale' が含まれない: {st['halt_reason']}"
+    # #190: idle-timeout auto-halt (shell 側 jq write) も halt_category='stale' を記録する
+    assert st["halt_category"] == "stale"
 
 
 # ===== P1-2: planning 滞留(push-score 未実行)の bd12 型捏造検出 =====
