@@ -91,7 +91,7 @@ def test_mark_passes_backward_compat_no_open_high_field(state_dir, run_cli, read
 def test_mark_passes_force_bypasses_open_high_gate(state_dir, run_cli, read_state):
     """(c) --force バイパス: open_high=2 でも --force --reason "x" なら exit0 かつ passes=True."""
     _push_score(run_cli, state_dir, open_high=2)
-    r = run_cli("mark-passes", "--force", "--reason", "emergency override for test",
+    r = run_cli("mark-passes", "--force", "--reason", "emergency override for test", "--approved-by-user",
                 cwd=state_dir.parent)
     assert r.returncode == 0, f"--force は open_high gate を bypass すべき, got {r.returncode}\nstderr: {r.stderr}"
     s = read_state(state_dir)

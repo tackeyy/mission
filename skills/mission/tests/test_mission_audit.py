@@ -1818,3 +1818,78 @@ def test_audit_does_not_require_specialist_selection_checkpoint_for_simple(tmp_p
     data = json.loads(result.stdout)
     assert data["missing_specialist_selection_checkpoint_count"] == 0
     assert all(f["code"] != "missing-specialist-selection-checkpoint" for f in data["findings"])
+
+
+# ===== #185: forced-pass の自律 override 疑い検出 =====
+
+
+def test_audit_flags_forced_pass_without_approval_evidence(tmp_path):
+    """force_approved_by_user が無く force_reason にもユーザー承認の言及がない forced-pass は
+    forced-pass-autonomous-suspect として検出される。"""
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "auto-force.json",
+        project_root=str(tmp_path),
+        session_id="auto-force",
+        passes=True,
+        passes_forced=True,
+        force_reason="No aggregate-reviews output is available in this Codex run.",
+        score_history=[],
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--since", "2026-06-18", "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    assert data["forced_pass_count"] == 1
+    assert data["forced_pass_autonomous_suspect_count"] == 1
+    assert any(f["code"] == "forced-pass-autonomous-suspect" for f in data["findings"])
+
+
+def test_audit_does_not_flag_forced_pass_with_approval_flag(tmp_path):
+    """force_approved_by_user=true (新形式) は自律疑いから除外される."""
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "approved-force.json",
+        project_root=str(tmp_path),
+        session_id="approved-force",
+        passes=True,
+        passes_forced=True,
+        force_reason="offline review, override approved",
+        force_approved_by_user=True,
+        score_history=[],
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--since", "2026-06-18", "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    assert data["forced_pass_count"] == 1
+    assert data["forced_pass_autonomous_suspect_count"] == 0
+    assert not any(f["code"] == "forced-pass-autonomous-suspect" for f in data["findings"])
+
+
+def test_audit_does_not_flag_forced_pass_with_user_mention_in_reason(tmp_path):
+    """旧形式 (force_approved_by_user 未記録) でも force_reason にユーザー承認の言及があれば除外."""
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "legacy-mention.json",
+        project_root=str(tmp_path),
+        session_id="legacy-mention",
+        passes=True,
+        passes_forced=True,
+        force_reason="user explicitly approved this override after reviewing",
+        score_history=[],
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--since", "2026-06-18", "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    assert data["forced_pass_autonomous_suspect_count"] == 0

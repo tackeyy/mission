@@ -54,20 +54,9 @@ from mission_common import (  # noqa: E402
     duration_sec as _duration_sec,
     parse_iso_datetime,
 )
-from specialist_accounting import (  # noqa: E402
-    candidate_accounting_report,
-    explicitly_selected_specialist_skills as _accounting_selected_specialist_skills,
-    terminal_invoked_specialist_skills as _accounting_terminal_invoked_specialist_skills,
-)
+from specialist_accounting import candidate_accounting_report  # noqa: E402
 
 SCHEMA_VERSION = 2  # v1: 旧 schema (project_root/pid なし), v2: A-1/A-2/B-3 追加
-
-# #186: 実行中の mission-state.py のバージョン。.claude-plugin/plugin.json 等の manifest と
-# 一致させる (release 時に手動 bump。test_doc_consistency.py::test_release_version_paths_are_in_sync
-# が manifest 間の一致は既に保証しているため、ここでは manifest との一致のみ追加で固定する)。
-# 実行時に manifest ファイルを読みに行かない設計: plugin cache 配布・symlink 配布・単一ファイル
-# 実行のいずれでも `.claude-plugin/plugin.json` への相対パスが安定しないため。
-MISSION_CLI_VERSION = "1.2.0"
 
 # Tier5: スコア/反復のマジックナンバーを単一定義 (散在防止・閾値変更を1箇所に集約)
 DEFAULT_THRESHOLD = 4.0     # 合格 composite 閾値 (init --threshold 未指定時 / mark-passes fallback)
@@ -568,7 +557,6 @@ def stamp_metadata(data: dict, cwd: Path) -> dict:
     if "agent" not in data:
         data["agent"] = resolve_agent()  # 起動元 (claude-code/codex/cli) をログ識別用に記録
     data.setdefault("created_at_session", iso_now())
-    data.setdefault("cli_version", MISSION_CLI_VERSION)  # #186
     return data
 
 
@@ -2745,12 +2733,10 @@ def _derive_next_action(data: dict) -> dict:
         if isinstance(h, dict) and h.get("iteration") == iteration and _is_valid_composite(h.get("composite"))
     ]
     if scored_current:
-        unclosed = _unclosed_optional_specialist_skills(data)  # #189
         return {
             "next_action": "mark-passes",
             "summary": f"iteration {iteration} の採点は記録済み。mark-passes で threshold gate 判定する (reject なら mission-critic → 次 iteration)",
             "command_hint": "mission-state.py mark-passes",
-            "details": {"unclosed_specialists": unclosed} if unclosed else {},
         }
     return {
         "next_action": "aggregate-reviews",
@@ -2830,59 +2816,6 @@ def _hook_config_status(paths: list[Path]) -> dict:
     }
 
 
-def _version_tuple(value: str) -> tuple:
-    """'1.2.0' -> (1, 2, 0). 非数値チャンクは 0 として比較する (壊れたディレクトリ名を無害化)."""
-    parts = []
-    for chunk in str(value).split("."):
-        try:
-            parts.append(int(chunk))
-        except ValueError:
-            parts.append(0)
-    return tuple(parts)
-
-
-def _plugin_cache_roots() -> dict[str, Path]:
-    """#186: plugin cache のバージョンディレクトリ親を返す (テスト用に env で override 可能)。
-
-    MISSION_CLAUDE_HOME / CODEX_HOME (既存の codex hook 探索と同じ変数) を尊重する。
-    """
-    claude_home = os.environ.get("MISSION_CLAUDE_HOME")
-    claude_root = Path(claude_home).expanduser() if claude_home else Path.home() / ".claude"
-    codex_home = os.environ.get("CODEX_HOME")
-    codex_root = Path(codex_home).expanduser() if codex_home else Path.home() / ".codex"
-    return {
-        "claude-code": claude_root / "plugins" / "cache" / "mission-marketplace" / "mission",
-        "codex": codex_root / "plugins" / "cache" / "mission-marketplace" / "mission",
-    }
-
-
-def _detect_version_skew() -> dict | None:
-    """#186: インストール済み plugin cache が現在の MISSION_CLI_VERSION より古ければ警告データを返す。
-
-    cache ディレクトリが存在しない、または全て現行以上のバージョンなら None (無警告)。
-    実行中の mission-state.py が symlink/直接 checkout 経由 (plugin cache を介さない) の場合、
-    このチェックは古い cache が「使われている」ことまでは検知できない — cache の存在自体を
-    陳腐化の兆候として警告するに留まる (#186 スコープ: 検出であり自動修復ではない)。
-    """
-    current = _version_tuple(MISSION_CLI_VERSION)
-    stale: dict[str, list[str]] = {}
-    for label, cache_dir in _plugin_cache_roots().items():
-        if not cache_dir.is_dir():
-            continue
-        try:
-            older = sorted(
-                p.name for p in cache_dir.iterdir()
-                if p.is_dir() and _version_tuple(p.name) < current
-            )
-        except OSError:
-            continue
-        if older:
-            stale[label] = older
-    if not stale:
-        return None
-    return {"cli_version": MISSION_CLI_VERSION, "stale_caches": stale}
-
-
 def cmd_codex_preflight(args):
     """Codex /mission startup health check.
 
@@ -2932,15 +2865,6 @@ def cmd_codex_preflight(args):
         if getattr(args, "require_stop_hook", False):
             required_actions.append("Configure and trust `mission-stop-guard.sh` in Codex hooks, or rerun without --require-stop-hook for skills-only fallback.")
 
-    version_skew = _detect_version_skew()  # #186
-    if version_skew:
-        warnings.append(
-            "Installed plugin cache(s) are older than the running CLI version "
-            f"({version_skew['cli_version']}): {version_skew['stale_caches']}. "
-            "Old caches run stale SKILL.md instructions and gate logic; update the plugin "
-            "install or clear the stale cache directory."
-        )
-
     fallback_available = state_active and next_action not in {"init", "report-blocker", "report-complete"}
     result = {
         "ok": state_active and (hook_status["configured"] or (fallback_available and not getattr(args, "require_stop_hook", False))),
@@ -2956,7 +2880,6 @@ def cmd_codex_preflight(args):
         "next_summary": next_summary,
         "warnings": warnings,
         "required_actions": required_actions,
-        "version_skew": version_skew,  # #186: None (no skew) or {"cli_version": ..., "stale_caches": {...}}
     }
     if getattr(args, "json", False):
         print(json.dumps(result, indent=2, ensure_ascii=False))
@@ -3785,28 +3708,6 @@ def cmd_push_score(args):
     print(json.dumps(result, ensure_ascii=False))
 
 
-def _unclosed_optional_specialist_skills(data: dict) -> list[str]:
-    """#189: `specialists_selected` に明示選定された specialist で、invocation 終端ログ
-    (skipped/unavailable/failed/completed 等、どのステータスでもよい) が一件もないものを検出する。
-
-    `explicitly_selected_specialist_skills` (specialists_selected のみ) を使う点が重要:
-    `selected_specialist_skills` (共有関数。specialists_phase_plan の providers も含む) を
-    使うと、phase_plan にしか登場しない specialist を誤って「未クローズ」と WARN する
-    偽陽性になる (mission-audit.py の specialist_invocation_gap_skills と同じ理由で除外)。
-
-    非 --force 経路では required specialist は cmd_mark_passes の
-    accounting_required/result_required gate がこのコードに到達する前に exit 2 で止めるため、
-    ここに残るのは常に optional。ただし --force はこれらの gate を丸ごと skip するため、
-    --force 経路では required specialist も unclosed になり得る — 呼び出し側 (cmd_mark_passes)
-    は --force 時にこの WARN 自体を出さないことで「optional のため」という文言の誤りを避ける。
-    hard gate ではなく WARN (mark-passes 自体は成功させる) — optional specialist の
-    graceful degradation を維持しつつ、クローズアウト漏れを可視化する (#189)。
-    """
-    selected = _accounting_selected_specialist_skills(data)
-    terminal = _accounting_terminal_invoked_specialist_skills(data)
-    return sorted(selected - terminal)
-
-
 def cmd_mark_passes(args):
     """合格マーク。score_history の最新 entry を threshold gate で検証する.
 
@@ -3814,7 +3715,8 @@ def cmd_mark_passes(args):
     - composite < threshold -> exit 2
     - min_item < MIN_ITEM_THRESHOLD (3.5) -> exit 2 (採点した items のいずれかが閾値未満)
     - すべて通過なら passes=true, loop_active=false を書き込み
-    - --force --reason "<理由>" は人手 override (バリデーション skip + force_reason 保存)
+    - --force --reason "<理由>" --approved-by-user は人手 override (バリデーション skip + force_reason 保存)
+      (#185: --approved-by-user はユーザーの明示承認宣言。orchestrator が自律的に付けてはならない)
     """
     cwd = Path.cwd()
     sf = resolve_state_file(cwd)
@@ -3823,9 +3725,19 @@ def cmd_mark_passes(args):
         sys.exit(1)
     force = bool(getattr(args, "force", False))
     reason = getattr(args, "reason", None)
+    approved_by_user = bool(getattr(args, "approved_by_user", False))
 
     if force and not reason:
         print("ERROR: --force を指定する場合は --reason \"<理由>\" が必須です。", file=sys.stderr)
+        sys.exit(2)
+    if force and not approved_by_user:
+        print(
+            "ERROR: --force を指定する場合は --approved-by-user も必須です (#185)。"
+            " これはユーザーが明示的に override を承認したことの宣言であり、"
+            " orchestrator が自律的に付けてはならないフラグです。"
+            " ユーザーから明示的な override 指示があった場合のみ指定してください。",
+            file=sys.stderr,
+        )
         sys.exit(2)
 
     with StateLock(lock_file(cwd)):
@@ -3910,23 +3822,12 @@ def cmd_mark_passes(args):
         data["updated_at"] = now
         if force:
             data["force_reason"] = reason
+            data["force_approved_by_user"] = approved_by_user  # #185
         backup_state(sf)
         atomic_write_json(sf, data)
         # #11: aggregate 更新も同じ StateLock 内で行う (lock 外だと並列 mark で lost update)
         _remove_from_aggregate(cwd, resolve_session_id())
-        # #189: --force は accounting_required/result_required gate ごと skip するため、
-        # unclosed に required specialist が混入し得る。「optional のため」という文言が
-        # 誤りになるので --force 経路ではこの WARN 自体を出さない。
-        unclosed = [] if force else _unclosed_optional_specialist_skills(data)
-    if unclosed:
-        print(
-            "WARNING [#189]: selected specialist に invocation 終端ログがありません: "
-            f"{', '.join(unclosed)}。"
-            " `mission-state.py specialists log-invocation --status skipped --reason \"<理由>\"` 等で"
-            " クローズアウトしてください (optional specialist のため mark-passes は成功させています)。",
-            file=sys.stderr,
-        )
-    print(json.dumps({"ok": True, "passes": True, "forced": force}))
+    print(json.dumps({"ok": True, "passes": True, "forced": force, "force_approved_by_user": approved_by_user}))
 
 
 def cmd_mark_halt(args):
@@ -4064,7 +3965,6 @@ def cmd_resume(args):
         "cleaned_empty": False,
         "halted_stale": 0,
         "dry_run": dry_run,
-        "version_skew": _detect_version_skew(),  # #186: None (no skew) or skew details
     }
     sf = resolve_state_file(cwd)
 
@@ -4502,7 +4402,6 @@ def _aggregate(states: list[dict], duplicate_state_group_count: int = 0) -> dict
             "by_agent": {},
             "by_project": {}, "by_complexity": {}, "iteration_histogram": {},
             "by_review_tier": {}, "iteration_by_review_tier": {},
-            "by_cli_version": {},
         }
     # _classify を 1 回だけ評価 (旧実装は pass/halt/incomplete で 3N 回呼んでいた)
     classes = [_classify(s) for s in states]
@@ -4533,8 +4432,6 @@ def _aggregate(states: list[dict], duplicate_state_group_count: int = 0) -> dict
     # #180: review_tier 別内訳 (旧 state で review_tier フィールドなし → "unknown")
     by_review_tier = _build_breakdown(states, classes, lambda s: s.get("review_tier") or "unknown")
     iteration_by_review_tier = _build_iteration_by_key(states, lambda s: s.get("review_tier") or "unknown")
-    # #186: cli_version 別内訳 (旧 state で cli_version フィールドなし → "unknown")
-    by_cli_version = _build_breakdown(states, classes, lambda s: s.get("cli_version") or "unknown")
     phase_totals = _phase_duration_totals(states)
     iteration_histogram: dict = {}
     for _it in iterations:
@@ -4565,7 +4462,6 @@ def _aggregate(states: list[dict], duplicate_state_group_count: int = 0) -> dict
         "iteration_histogram": iteration_histogram,
         "by_review_tier": by_review_tier,
         "iteration_by_review_tier": iteration_by_review_tier,
-        "by_cli_version": by_cli_version,
     }
 
 
@@ -4614,7 +4510,7 @@ def _format_text(stats: dict, since: str | None, until: str | None) -> str:
             lines.append(
                 f"  {ag:<14} {b['total']} (PASS {b['pass']} / HALT {b['halt']} / incomplete {b['incomplete']})"
             )
-    for label, key in (("by_project", "by_project"), ("by_complexity", "by_complexity"), ("by_review_tier", "by_review_tier"), ("by_cli_version", "by_cli_version")):
+    for label, key in (("by_project", "by_project"), ("by_complexity", "by_complexity"), ("by_review_tier", "by_review_tier")):
         bd = stats.get(key) or {}
         if bd:
             lines.append(f"{label}:")
@@ -4700,11 +4596,14 @@ def _build_parser():
     p_set.add_argument("kvs", nargs="+")
     p_set.set_defaults(func=cmd_set)
 
-    p_pass = sub.add_parser("mark-passes", help="threshold gate を満たすとき passes=true, loop_active=false (--force --reason で override 可)")
+    p_pass = sub.add_parser("mark-passes", help="threshold gate を満たすとき passes=true, loop_active=false (--force --reason --approved-by-user で override 可)")
     p_pass.add_argument("--force", action="store_true",
-                        help="threshold gate を skip して強制的に passes=true を書き込む (--reason 必須)")
+                        help="threshold gate を skip して強制的に passes=true を書き込む (--reason と --approved-by-user が必須)")
     p_pass.add_argument("--reason", default=None,
                         help="--force の理由 (state.force_reason に記録される)")
+    p_pass.add_argument("--approved-by-user", action="store_true", dest="approved_by_user",
+                        help="#185: --force と併用必須。ユーザーが明示的に override を承認したことの宣言 "
+                             "(orchestrator が自律的に付けてはならない — ユーザーの明示指示があった場合のみ)")
     p_pass.set_defaults(func=cmd_mark_passes)
 
     p_score = sub.add_parser("push-score", help="score_history に採点結果を append (orchestrator が Phase 5 直後に呼ぶ)")
