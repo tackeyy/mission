@@ -125,7 +125,8 @@ def test_mark_passes_force_bypasses_missing_findings_evidence(state_dir, run_cli
     scoring = _write_scoring_json(tmp_path, evidence_path=None, open_high=0)
     run_cli("push-score", "--iteration", "1", "--scoring-json", str(scoring), cwd=state_dir.parent, check=True)
 
-    r = run_cli("mark-passes", "--force", "--reason", "manual override in test", cwd=state_dir.parent)
+    r = run_cli("mark-passes", "--force", "--reason", "manual override in test", "--approved-by-user",
+                cwd=state_dir.parent)
 
     assert r.returncode == 0, r.stderr
     assert read_state(state_dir)["passes"] is True

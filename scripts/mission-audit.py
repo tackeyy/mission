@@ -419,6 +419,25 @@ def halt_or_incomplete_bucket(record: StateRecord) -> str:
     return "other-halt"
 
 
+# #185: force_reason 内でユーザー承認への言及を示すキーワード。あくまで自由文ヒューリスティックの
+# fallback であり (LLM が偽の言及を書ける以上、確実な検証手段ではない)、正の証跡は
+# force_approved_by_user フラグ (state 側で --approved-by-user 必須化) が担う。
+_USER_APPROVAL_MENTION_TOKENS = (
+    "user", "ユーザー", "approved", "承認", "instructed", "指示", "confirm", "explicit",
+)
+
+
+def is_forced_pass_autonomous_suspect(state: dict[str, Any]) -> bool:
+    """#185: force_approved_by_user が記録されておらず (旧形式)、かつ force_reason にも
+    ユーザー承認への言及がない forced-pass を「自律 force の疑いあり」として検出する。"""
+    if state.get("force_approved_by_user") is True:
+        return False
+    reason = str(state.get("force_reason") or "").lower()
+    if any(token in reason for token in _USER_APPROVAL_MENTION_TOKENS):
+        return False
+    return True
+
+
 def is_active_no_score_checkpoint(record: StateRecord) -> bool:
     """Return true for live mission sessions that have not reached first scoring."""
     return classify(record.state) == "incomplete" and not record.state.get("score_history")
@@ -914,6 +933,7 @@ def aggregate(
     pass_count = classes.count("pass")
     pass_records = [r for r, cls in zip(records, classes) if cls == "pass"]
     forced = [r for r in records if r.state.get("passes") and r.state.get("passes_forced")]
+    forced_autonomous_suspect = [r for r in forced if is_forced_pass_autonomous_suspect(r.state)]
     ungated = [
         r for r in records
         if r.state.get("passes")
@@ -1026,6 +1046,7 @@ def aggregate(
         "pass_rate_denominator": len(pass_rate_records),
         "pass_rate": pass_count / len(pass_rate_records) if pass_rate_records else None,
         "forced_pass_count": len(forced),
+        "forced_pass_autonomous_suspect_count": len(forced_autonomous_suspect),  # #185
         "ungated_pass_count": len(ungated),
         "duplicate_group_count": len(duplicates),
         "resolved_duplicate_group_count": resolved_duplicate_count,
@@ -1037,6 +1058,7 @@ def aggregate(
         "low_score_pass_sessions": low_score_pass,
         "specialist_invocation_gap_sessions": specialist_invocation_gaps,
         "forced_pass_sessions": forced,
+        "forced_pass_autonomous_suspect_sessions": forced_autonomous_suspect,  # #185
         "ungated_pass_sessions": ungated,
         "duplicates": duplicates,
         "missing_scoring_evidence": missing_scoring_evidence,
@@ -1217,6 +1239,14 @@ def finding_rows(stats: dict[str, Any], min_pass_rate: float) -> list[tuple[str,
         rows.append(("P0", "ungated-pass", f"{stats['ungated_pass_count']} pass sessions bypassed scoring gate"))
     if stats["forced_pass_count"]:
         rows.append(("P1", "forced-pass", f"{stats['forced_pass_count']} sessions used force pass"))
+    if stats["forced_pass_autonomous_suspect_count"]:  # #185
+        rows.append((
+            "P0",
+            "forced-pass-autonomous-suspect",
+            f"{stats['forced_pass_autonomous_suspect_count']} forced-pass sessions lack "
+            f"force_approved_by_user and any user-approval mention in force_reason "
+            f"-- possible autonomous --force (must be user-initiated only)",
+        ))
     if stats["duplicate_group_count"]:
         rows.append(("P1", "duplicate-state", f"{stats['duplicate_group_count']} duplicate state groups found; stats may double-count"))
     if missing_scoring_count:
@@ -1334,6 +1364,7 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
         f"- active no-score pending: {stats['active_no_score_pending_count']}",
         f"- stale active no-score: {stats['stale_active_no_score_count']}",
         f"- forced pass: {stats['forced_pass_count']}",
+        f"- forced pass (autonomous suspect, #185): {stats['forced_pass_autonomous_suspect_count']}",
         f"- ungated pass: {stats['ungated_pass_count']}",
         f"- duplicate state groups: {stats['duplicate_group_count']}",
         f"- resolved archive duplicates: {stats['resolved_duplicate_group_count']}",
@@ -1669,6 +1700,7 @@ def main(argv: list[str] | None = None) -> int:
             if k not in {
                 "duplicates",
                 "forced_pass_sessions",
+                "forced_pass_autonomous_suspect_sessions",
                 "halt_sessions",
                 "current_halt_sessions",
                 "historical_halt_sessions",

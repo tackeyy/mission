@@ -184,10 +184,10 @@ def test_mark_passes_accepts_required_specialist_with_completed_result(state_dir
 
 
 def test_mark_passes_force_with_reason_records_override(state_dir, run_cli, read_state):
-    """--force + --reason で バリデーション skip & passes=true 書き込み & force_reason 保存."""
+    """--force + --reason + --approved-by-user で バリデーション skip & passes=true 書き込み & force_reason 保存."""
     _push_score(run_cli, state_dir, iteration=1, composite=3.5, min_item=3.0)
     r = run_cli(
-        "mark-passes", "--force", "--reason", "manual approval after offline review",
+        "mark-passes", "--force", "--reason", "manual approval after offline review", "--approved-by-user",
         cwd=state_dir.parent,
     )
     assert r.returncode == 0, f"expected exit 0, got {r.returncode}\nstderr: {r.stderr}"
@@ -197,6 +197,20 @@ def test_mark_passes_force_with_reason_records_override(state_dir, run_cli, read
     assert s["passes"] is True
     assert s["loop_active"] is False
     assert s.get("force_reason") == "manual approval after offline review"
+    assert s.get("force_approved_by_user") is True
+
+
+def test_mark_passes_force_with_reason_but_without_approved_by_user_rejects(state_dir, run_cli, read_state):
+    """#185: --force --reason だけでは --approved-by-user 欠落で exit 2."""
+    _push_score(run_cli, state_dir, iteration=1, composite=3.5, min_item=3.0)
+    r = run_cli(
+        "mark-passes", "--force", "--reason", "manual approval after offline review",
+        cwd=state_dir.parent,
+    )
+    assert r.returncode == 2, f"expected exit 2, got {r.returncode}\nstderr: {r.stderr}"
+    assert "--approved-by-user" in r.stderr
+    s = read_state(state_dir)
+    assert s["passes"] is False
 
 
 def test_mark_passes_force_without_reason_rejects(state_dir, run_cli, read_state):
@@ -209,9 +223,9 @@ def test_mark_passes_force_without_reason_rejects(state_dir, run_cli, read_state
 
 
 def test_mark_passes_force_works_even_when_score_history_empty(state_dir, run_cli, read_state):
-    """--force --reason は score_history が空でも override 可能 (緊急時の最後の手段)."""
+    """--force --reason --approved-by-user は score_history が空でも override 可能 (緊急時の最後の手段)."""
     r = run_cli(
-        "mark-passes", "--force", "--reason", "emergency manual close",
+        "mark-passes", "--force", "--reason", "emergency manual close", "--approved-by-user",
         cwd=state_dir.parent,
     )
     assert r.returncode == 0, f"expected exit 0, got {r.returncode}\nstderr: {r.stderr}"

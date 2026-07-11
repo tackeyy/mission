@@ -116,18 +116,32 @@ def test_mark_passes_rejects_when_no_scored_entry(state_dir, run_cli):
 # ===== 改善1: force-pass の監査可能化 =====
 
 def test_mark_passes_force_sets_forced_flag(state_dir, run_cli, read_state):
-    """--force で合格させると passes_forced=True が記録される (監査用)."""
+    """--force --approved-by-user で合格させると passes_forced=True が記録される (監査用)."""
     sf = state_dir / "sessions" / "test.json"
     data = json.loads(sf.read_text())
     data["score_history"] = []
     sf.write_text(json.dumps(data))
-    r = run_cli("mark-passes", "--force", "--reason", "Reviewer 取得不能",
+    r = run_cli("mark-passes", "--force", "--reason", "Reviewer 取得不能", "--approved-by-user",
                 cwd=state_dir.parent)
     assert r.returncode == 0, f"stderr: {r.stderr}"
     s = read_state(state_dir)
     assert s["passes"] is True
     assert s["passes_forced"] is True
     assert s["force_reason"] == "Reviewer 取得不能"
+    assert s["force_approved_by_user"] is True
+
+
+def test_mark_passes_force_without_approved_by_user_rejected(state_dir, run_cli, read_state):
+    """#185: --force --reason だけでは exit 2 (自律 force を防ぐため --approved-by-user 必須)."""
+    sf = state_dir / "sessions" / "test.json"
+    data = json.loads(sf.read_text())
+    data["score_history"] = []
+    sf.write_text(json.dumps(data))
+    r = run_cli("mark-passes", "--force", "--reason", "Reviewer 取得不能", cwd=state_dir.parent)
+    assert r.returncode == 2
+    assert "--approved-by-user" in r.stderr
+    s = read_state(state_dir)
+    assert s.get("passes") is not True
 
 
 def test_normal_pass_does_not_set_forced_flag(state_dir, run_cli, read_state):

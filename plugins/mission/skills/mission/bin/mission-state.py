@@ -3814,7 +3814,8 @@ def cmd_mark_passes(args):
     - composite < threshold -> exit 2
     - min_item < MIN_ITEM_THRESHOLD (3.5) -> exit 2 (採点した items のいずれかが閾値未満)
     - すべて通過なら passes=true, loop_active=false を書き込み
-    - --force --reason "<理由>" は人手 override (バリデーション skip + force_reason 保存)
+    - --force --reason "<理由>" --approved-by-user は人手 override (バリデーション skip + force_reason 保存)
+      (#185: --approved-by-user はユーザーの明示承認宣言。orchestrator が自律的に付けてはならない)
     """
     cwd = Path.cwd()
     sf = resolve_state_file(cwd)
@@ -3823,9 +3824,19 @@ def cmd_mark_passes(args):
         sys.exit(1)
     force = bool(getattr(args, "force", False))
     reason = getattr(args, "reason", None)
+    approved_by_user = bool(getattr(args, "approved_by_user", False))
 
     if force and not reason:
         print("ERROR: --force を指定する場合は --reason \"<理由>\" が必須です。", file=sys.stderr)
+        sys.exit(2)
+    if force and not approved_by_user:
+        print(
+            "ERROR: --force を指定する場合は --approved-by-user も必須です (#185)。"
+            " これはユーザーが明示的に override を承認したことの宣言であり、"
+            " orchestrator が自律的に付けてはならないフラグです。"
+            " ユーザーから明示的な override 指示があった場合のみ指定してください。",
+            file=sys.stderr,
+        )
         sys.exit(2)
 
     with StateLock(lock_file(cwd)):
@@ -3910,6 +3921,7 @@ def cmd_mark_passes(args):
         data["updated_at"] = now
         if force:
             data["force_reason"] = reason
+            data["force_approved_by_user"] = approved_by_user  # #185
         backup_state(sf)
         atomic_write_json(sf, data)
         # #11: aggregate 更新も同じ StateLock 内で行う (lock 外だと並列 mark で lost update)
@@ -3926,7 +3938,10 @@ def cmd_mark_passes(args):
             " クローズアウトしてください (optional specialist のため mark-passes は成功させています)。",
             file=sys.stderr,
         )
-    print(json.dumps({"ok": True, "passes": True, "forced": force}))
+    output = {"ok": True, "passes": True, "forced": force}
+    if force:
+        output["force_approved_by_user"] = approved_by_user
+    print(json.dumps(output))
 
 
 def cmd_mark_halt(args):
@@ -4700,11 +4715,14 @@ def _build_parser():
     p_set.add_argument("kvs", nargs="+")
     p_set.set_defaults(func=cmd_set)
 
-    p_pass = sub.add_parser("mark-passes", help="threshold gate を満たすとき passes=true, loop_active=false (--force --reason で override 可)")
+    p_pass = sub.add_parser("mark-passes", help="threshold gate を満たすとき passes=true, loop_active=false (--force --reason --approved-by-user で override 可)")
     p_pass.add_argument("--force", action="store_true",
-                        help="threshold gate を skip して強制的に passes=true を書き込む (--reason 必須)")
+                        help="threshold gate を skip して強制的に passes=true を書き込む (--reason と --approved-by-user が必須)")
     p_pass.add_argument("--reason", default=None,
                         help="--force の理由 (state.force_reason に記録される)")
+    p_pass.add_argument("--approved-by-user", action="store_true", dest="approved_by_user",
+                        help="#185: --force と併用必須。ユーザーが明示的に override を承認したことの宣言 "
+                             "(orchestrator が自律的に付けてはならない — ユーザーの明示指示があった場合のみ)")
     p_pass.set_defaults(func=cmd_mark_passes)
 
     p_score = sub.add_parser("push-score", help="score_history に採点結果を append (orchestrator が Phase 5 直後に呼ぶ)")
