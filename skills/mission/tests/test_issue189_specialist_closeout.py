@@ -135,7 +135,7 @@ def test_mark_passes_force_does_not_emit_unclosed_warning(state_dir, run_cli, re
     data["score_history"] = []
     sf.write_text(json.dumps(data))
 
-    r = run_cli("mark-passes", "--force", "--reason", "no reviewer available",
+    r = run_cli("mark-passes", "--force", "--reason", "no reviewer available", "--approved-by-user",
                 cwd=state_dir.parent)
     assert r.returncode == 0, r.stderr
     assert "WARNING [#189]" not in r.stderr
