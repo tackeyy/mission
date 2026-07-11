@@ -2782,6 +2782,9 @@ def _derive_next_action(data: dict) -> dict:
             and not latest.get("findings_evidence_path")
         )
         if missing_findings_evidence:
+            # review 由来のレビュー結果: #189 の unclosed specialist 情報もここで併記する
+            # (aggregate-reviews のリトライ待ちの間も next の details から欠落させない)。
+            unclosed_during_retry = _unclosed_optional_specialist_skills(data)
             return {
                 "next_action": "aggregate-reviews",
                 "summary": (
@@ -2799,7 +2802,10 @@ def _derive_next_action(data: dict) -> dict:
                     f"--scoring-json /tmp/mission-scorer-iter-{iteration}-{mid8}.json "
                     '--resubmit-reason "retry with aggregate-reviews evidence"'
                 ),
-                "details": {"missing_findings_evidence": True},
+                "details": {
+                    "missing_findings_evidence": True,
+                    **({"unclosed_specialists": unclosed_during_retry} if unclosed_during_retry else {}),
+                },
             }
         unclosed = _unclosed_optional_specialist_skills(data)  # #189
         return {

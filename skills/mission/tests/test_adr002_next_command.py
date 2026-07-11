@@ -188,3 +188,22 @@ def test_next_aggregate_reviews_default_hint_does_not_mention_force(state_dir, r
     out = _next(run_cli, state_dir)
     assert out["next_action"] == "aggregate-reviews"
     assert "force" not in out["command_hint"].lower()
+
+
+def test_next_missing_evidence_with_unclosed_specialist_still_reports_it(state_dir, run_cli):
+    """#187 review advisory: missing_findings_evidence=True の間も #189 の
+    unclosed_specialists 情報を details から欠落させない (aggregate-reviews リトライ待ちの
+    可視性を保つ)."""
+    _set_state(
+        state_dir,
+        score_history=[
+            {"iteration": 1, "composite": 4.5, "min_item": 4.5,
+             "items": {"mission_achievement": 4.5}, "timestamp": "2026-07-11T00:00:00Z",
+             "open_high": 0, "score_source": "scoring-json"},
+        ],
+        specialists_selected=[{"skill": "dev-security-reviewer", "role": "security-reviewer"}],
+    )
+    out = _next(run_cli, state_dir)
+    assert out["next_action"] == "aggregate-reviews"
+    assert out["details"]["missing_findings_evidence"] is True
+    assert out["details"]["unclosed_specialists"] == ["dev-security-reviewer"]
