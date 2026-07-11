@@ -70,6 +70,32 @@ def test_mark_passes_no_warning_when_specialist_invocation_logged(state_dir, run
     assert "WARNING [#189]" not in r.stderr
 
 
+def test_mark_passes_no_warning_for_phase_plan_only_specialist(state_dir, run_cli, read_state):
+    """specialists_phase_plan にのみ登場する specialist (specialists_selected にはない) は
+    未クローズ扱いしない (mission-audit.py の specialist_invocation_gap_skills と同じ除外)."""
+    sf = state_dir / "sessions" / "test.json"
+    data = json.loads(sf.read_text())
+    data["specialists_selected"] = [{"skill": "code-review-provider", "role": "code-review"}]
+    data["specialist_invocations"] = [{
+        "iteration": 1, "phase": "review", "role": "code-review", "skill": "code-review-provider",
+        "mode": "skill-tool", "status": "completed", "timestamp": "2026-05-25T00:00:00Z",
+    }]
+    data["specialists_phase_plan"] = [{
+        "phase": "execution", "providers": ["integration-test-provider"],
+        "roles": ["integration-test"], "max_providers": 1,
+    }]
+    data["task_profile"] = {"primary": "documentation"}
+    data["specialists_decision"] = {"policy": "auto"}
+    sf.write_text(json.dumps(data))
+
+    _prep_pass(state_dir, run_cli)
+    r = run_cli("mark-passes", cwd=state_dir.parent)
+
+    assert r.returncode == 0
+    assert "WARNING [#189]" not in r.stderr, \
+        "phase_plan にのみ存在する integration-test-provider を偽陽性検出している"
+
+
 def test_mark_passes_no_warning_when_no_specialists_selected(state_dir, run_cli, read_state):
     _prep_pass(state_dir, run_cli)
     r = run_cli("mark-passes", cwd=state_dir.parent)
@@ -97,3 +123,20 @@ def test_next_omits_unclosed_specialists_key_when_none(state_dir, run_cli):
     out = json.loads(r.stdout)
     assert out["next_action"] == "mark-passes"
     assert "unclosed_specialists" not in out.get("details", {})
+
+
+def test_mark_passes_force_does_not_emit_unclosed_warning(state_dir, run_cli, read_state):
+    """#189 review fix: --force は accounting gate ごと skip するため unclosed に required
+    specialist が混入し得る。「optional のため」という文言が誤りになるので --force 経路では
+    このWARN自体を出さない。"""
+    sf = state_dir / "sessions" / "test.json"
+    data = json.loads(sf.read_text())
+    data["specialists_selected"] = [{"skill": "security-reviewer", "role": "security-reviewer"}]
+    data["score_history"] = []
+    sf.write_text(json.dumps(data))
+
+    r = run_cli("mark-passes", "--force", "--reason", "no reviewer available",
+                cwd=state_dir.parent)
+    assert r.returncode == 0, r.stderr
+    assert "WARNING [#189]" not in r.stderr
+    assert read_state(state_dir)["passes"] is True
