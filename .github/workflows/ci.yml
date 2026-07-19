@@ -1,44 +1,86 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
-  workflow_dispatch:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  merge_group:
 
 permissions:
   contents: read
+  pull-requests: read
+
+concurrency:
+  group: >-
+    ci-${{ github.event_name == 'pull_request'
+    && github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
 
 jobs:
-  test:
-    name: Python tests
+  quality:
+    name: Quality
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Detect changed file scopes
+        id: changes
+        uses: actions/github-script@v8
+        with:
+          script: |
+            let files = [];
+            let runAll = context.eventName !== 'pull_request';
+            try {
+              if (!runAll) {
+                const response = await github.paginate(github.rest.pulls.listFiles, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: context.payload.pull_request.number,
+                  per_page: 100,
+                });
+                files = response.map((file) => file.filename);
+              }
+            } catch (error) {
+              core.warning(`Changed-file detection failed; running all checks: ${error.message}`);
+              runAll = true;
+            }
+            if (files.length === 0) runAll = true;
+
+            const workflow = files.some((file) =>
+              file.startsWith('.github/workflows/') || file === '.github/dependabot.yml',
+            );
+            const python = runAll || workflow || files.some((file) =>
+              file.startsWith('skills/mission/') ||
+              file === 'scripts/mission-state.py' ||
+              file === 'scripts/mission-audit.py',
+            );
+            const shell = runAll || workflow || files.some((file) => file.endsWith('.sh'));
+            core.setOutput('python', python ? 'true' : 'false');
+            core.setOutput('shell', shell ? 'true' : 'false');
 
       - name: Set up Python
+        if: steps.changes.outputs.python == 'true'
         uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: .github/requirements-ci.txt
 
       - name: Install test dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install pytest
+        if: steps.changes.outputs.python == 'true'
+        run: python -m pip install -r .github/requirements-ci.txt
 
-      - name: Run pytest
+      - name: Run Python tests
+        if: steps.changes.outputs.python == 'true'
         run: python -m pytest -q skills/mission
 
-  shellcheck:
-    name: ShellCheck
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Install ShellCheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Verify runner ShellCheck
+        if: steps.changes.outputs.shell == 'true'
+        run: shellcheck --version
 
       - name: Lint shell scripts
+        if: steps.changes.outputs.shell == 'true'
         run: shellcheck scripts/mission-stop-guard.sh scripts/sync-codex-plugin-wrapper.sh

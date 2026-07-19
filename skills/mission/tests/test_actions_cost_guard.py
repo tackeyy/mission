@@ -10,7 +10,8 @@ DEPENDABOT = (ROOT / ".github/dependabot.yml").read_text(encoding="utf-8")
 
 
 def test_ci_is_one_bounded_quality_job():
-    assert len(re.findall(r"^  [a-z][a-z0-9-]+:\n", CI, re.MULTILINE)) == 1
+    jobs = CI.split("\njobs:\n", 1)[1]
+    assert len(re.findall(r"^  [a-z][a-z0-9-]+:\n", jobs, re.MULTILINE)) == 1
     assert "quality:" in CI
     assert CI.count("actions/checkout@") == 1
     assert CI.count("actions/setup-python@") == 1
