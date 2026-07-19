@@ -26,6 +26,18 @@ def test_python_and_shell_quality_gates_remain():
     assert "requirements-ci.txt" in CI
 
 
+def test_python_scope_includes_all_files_read_by_the_test_suite():
+    for required in (
+        "file.startsWith('skills/')",
+        "file.startsWith('plugins/mission/')",
+        "file.startsWith('docs/')",
+        "file.startsWith('benchmarks/mission-vs-goal/')",
+        "file === 'README.md'",
+        "file === '.github/requirements-ci.txt'",
+    ):
+        assert required in CI
+
+
 def test_stale_prs_are_cancelled_and_ready_prs_run_full_ci():
     assert "ready_for_review" in CI
     assert "concurrency:" in CI

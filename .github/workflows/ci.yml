@@ -53,9 +53,14 @@ jobs:
               file.startsWith('.github/workflows/') || file === '.github/dependabot.yml',
             );
             const python = runAll || workflow || files.some((file) =>
-              file.startsWith('skills/mission/') ||
-              file === 'scripts/mission-state.py' ||
-              file === 'scripts/mission-audit.py',
+              file.startsWith('skills/') ||
+              file.startsWith('plugins/mission/') ||
+              file.startsWith('docs/') ||
+              file.startsWith('benchmarks/mission-vs-goal/') ||
+              file === 'README.md' ||
+              file === 'README.ja.md' ||
+              file === '.github/requirements-ci.txt' ||
+              file.startsWith('scripts/'),
             );
             const shell = runAll || workflow || files.some((file) => file.endsWith('.sh'));
             core.setOutput('python', python ? 'true' : 'false');
