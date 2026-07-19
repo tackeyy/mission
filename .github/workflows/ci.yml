@@ -52,16 +52,10 @@ jobs:
             const workflow = files.some((file) =>
               file.startsWith('.github/workflows/') || file === '.github/dependabot.yml',
             );
-            const python = runAll || workflow || files.some((file) =>
-              file.startsWith('skills/') ||
-              file.startsWith('plugins/mission/') ||
-              file.startsWith('docs/') ||
-              file.startsWith('benchmarks/mission-vs-goal/') ||
-              file === 'README.md' ||
-              file === 'README.ja.md' ||
-              file === '.github/requirements-ci.txt' ||
-              file.startsWith('scripts/'),
-            );
+            // The Python suite validates repository-wide docs, plugin manifests,
+            // hooks, distribution copies, and source together. Keep it required
+            // for every PR so a newly added cross-file invariant cannot be skipped.
+            const python = true;
             const shell = runAll || workflow || files.some((file) => file.endsWith('.sh'));
             core.setOutput('python', python ? 'true' : 'false');
             core.setOutput('shell', shell ? 'true' : 'false');
