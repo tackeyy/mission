@@ -28,7 +28,7 @@ jobs:
 
       - name: Detect changed file scopes
         id: changes
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             let files = [];
