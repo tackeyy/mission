@@ -8,9 +8,38 @@ updates:
       time: "09:00"
       timezone: "Asia/Tokyo"
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+    rebase-strategy: disabled
+    groups:
+      github-actions:
+        patterns:
+          - "*"
     labels:
       - "dependencies"
       - "github-actions"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+
+  - package-ecosystem: "pip"
+    directory: "/.github"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    open-pull-requests-limit: 3
+    cooldown:
+      default-days: 7
+    rebase-strategy: disabled
+    groups:
+      ci-python:
+        patterns:
+          - "*"
+    labels:
+      - "dependencies"
+      - "python"
     commit-message:
       prefix: "chore"
       include: "scope"
