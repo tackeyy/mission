@@ -627,19 +627,52 @@ def _iter_state_candidates(
     root = root.expanduser()
     if not root.exists():
         return
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+
+    def record_walk_error(error: OSError) -> None:
+        error_path_value = getattr(error, "filename", None)
+        if not error_path_value:
+            return
+        error_path = Path(error_path_value)
+        if ".mission-state" not in error_path.parts:
+            return
+        state_index = error_path.parts.index(".mission-state")
+        state_root = Path(*error_path.parts[: state_index + 1])
+        _append_invalid_archive_root(
+            invalid_archives,
+            state_root,
+            "mission-state-root-access-error",
+        )
+
+    for dirpath, dirnames, filenames in os.walk(
+        root,
+        followlinks=False,
+        onerror=record_walk_error,
+    ):
         current_dir = Path(dirpath)
-        symlinked_state_roots = [
-            current_dir / dirname
-            for dirname in dirnames
-            if dirname == ".mission-state" and (current_dir / dirname).is_symlink()
-        ]
-        for symlinked_state_root in symlinked_state_roots:
-            _append_invalid_archive_root(
-                invalid_archives,
-                symlinked_state_root,
-                "mission-state-root-symlink",
-            )
+        excluded_state_roots: set[Path] = set()
+        for dirname in dirnames:
+            if dirname != ".mission-state":
+                continue
+            state_root = current_dir / dirname
+            try:
+                state_root_stat = state_root.lstat()
+            except OSError:
+                reason = "mission-state-root-access-error"
+            else:
+                if stat.S_ISLNK(state_root_stat.st_mode):
+                    reason = "mission-state-root-symlink"
+                elif not stat.S_ISDIR(state_root_stat.st_mode):
+                    reason = "mission-state-root-not-directory"
+                else:
+                    try:
+                        with os.scandir(state_root):
+                            pass
+                    except OSError:
+                        reason = "mission-state-root-access-error"
+                    else:
+                        continue
+            excluded_state_roots.add(state_root)
+            _append_invalid_archive_root(invalid_archives, state_root, reason)
         for filename in filenames:
             if filename != ".mission-state":
                 continue
@@ -662,7 +695,7 @@ def _iter_state_candidates(
         dirnames[:] = [
             dirname
             for dirname in dirnames
-            if dirname not in PRUNE_DIRS and current_dir / dirname not in symlinked_state_roots
+            if dirname not in PRUNE_DIRS and current_dir / dirname not in excluded_state_roots
         ]
         if os.path.basename(dirpath) != ".mission-state":
             continue
