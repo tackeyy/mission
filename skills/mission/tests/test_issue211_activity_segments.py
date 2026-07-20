@@ -1308,6 +1308,12 @@ def test_invalid_only_rollup_does_not_create_a_zero_percentile_sample(
         {"observed_total_sec": 0.0, "closed_segment_count": 1},
         {
             "observed_total_sec": 0.0,
+            "activity_duration_totals_sec": {},
+            "phase_activity_duration_totals_sec": {},
+            "wait_reason_totals_sec": {},
+        },
+        {
+            "observed_total_sec": 0.0,
             "closed_segment_count": 1,
             "activity_duration_totals_sec": [],
             "phase_activity_duration_totals_sec": [],
