@@ -988,6 +988,73 @@ def test_manual_halt_is_not_reactivated_by_orphan_like_reason(tmp_path, run_cli)
     assert state["halt_reason"] == "orphan: manually acknowledged"
 
 
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        {"phase_durations_sec": {"executing": "bad"}},
+        {"phase_started_at": "not-a-time"},
+        {"phase": ["executing"]},
+    ],
+)
+def test_automatic_stale_halt_is_fail_open_for_malformed_phase_timing(
+    tmp_path, run_cli, malformed
+):
+    path = _write_state(tmp_path, **malformed)
+
+    result = run_cli(
+        "mark-halt",
+        "--reason",
+        "stale: automatic stop",
+        "--category",
+        "stale",
+        cwd=tmp_path,
+        env_extra={"MISSION_STATE_NOW": "2026-07-21T00:10:00Z"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    state = json.loads(path.read_text())
+    assert state["loop_active"] is False
+    assert state["halt_category"] == "stale"
+    assert state["phase"] == "halted"
+    assert state["activity_anomaly_counts"]["invalid-phase-terminal"] == 1
+    if "phase_durations_sec" in malformed:
+        assert state["phase_durations_sec"] == malformed["phase_durations_sec"]
+
+
+def test_manual_terminal_closes_activity_despite_malformed_phase_timing(
+    tmp_path, run_cli
+):
+    path = _write_state(
+        tmp_path,
+        phase_durations_sec={"executing": "bad"},
+        activity_current={
+            "kind": "active",
+            "phase": "executing",
+            "reason": "work",
+            "started_at": "2026-07-21T00:00:00Z",
+        },
+    )
+
+    result = run_cli(
+        "mark-halt",
+        "--reason",
+        "manual stop",
+        "--category",
+        "other",
+        cwd=tmp_path,
+        env_extra={"MISSION_STATE_NOW": "2026-07-21T00:10:00Z"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    state = json.loads(path.read_text())
+    assert state["loop_active"] is False
+    assert state["phase"] == "halted"
+    assert state["activity_current"] is None
+    assert state["activity_rollup"]["observed_total_sec"] == 600.0
+    assert state["phase_durations_sec"] == {"executing": "bad"}
+    assert state["activity_anomaly_counts"]["invalid-phase-terminal"] == 1
+
+
 def test_same_mission_reinit_with_invalid_open_activity_fails_without_overwrite(
     tmp_path, run_cli
 ):
