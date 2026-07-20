@@ -9,6 +9,7 @@ import os
 import stat
 import subprocess
 import sys
+import shutil
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,14 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 AUDIT_PY = REPO_ROOT / "scripts" / "mission-audit.py"
 STATE_PY = REPO_ROOT / "skills" / "mission" / "bin" / "mission-state.py"
+_ARCHIVE_SPEC = importlib.util.spec_from_file_location(
+    "issue210_archive_fixture",
+    REPO_ROOT / "skills" / "mission" / "tests" / "test_issue212_worktree_archive_manifest.py",
+)
+assert _ARCHIVE_SPEC and _ARCHIVE_SPEC.loader
+archive_fixture = importlib.util.module_from_spec(_ARCHIVE_SPEC)
+sys.modules[_ARCHIVE_SPEC.name] = archive_fixture
+_ARCHIVE_SPEC.loader.exec_module(archive_fixture)
 
 
 def _write_state(root: Path, session_id: str, updated_at: str, **overrides: object) -> Path:
@@ -109,6 +118,13 @@ def test_stats_reuses_one_snapshot_for_multiple_windows(tmp_path, run_cli):
     _write_state(root / "a", "a", "2026-07-18T00:00:00Z")
     _write_state(root / "b", "b", "2026-07-20T00:00:00Z", passes=False,
                  loop_active=False, halt_reason="halted")
+    live = _write_state(root / "c", "same", "2026-07-20T12:00:00Z", passes=False,
+                        loop_active=False, halt_reason="new halt")
+    archived = root / "c" / ".mission-state" / "archive" / "state-old.json"
+    archived.parent.mkdir(parents=True)
+    old = json.loads(live.read_text(encoding="utf-8"))
+    old.update({"passes": True, "halt_reason": "", "updated_at": "2026-07-18T12:00:00Z"})
+    archived.write_text(json.dumps(old) + "\n", encoding="utf-8")
     snapshot = tmp_path / "state.snapshot.json"
     assert _snapshot(root, snapshot).returncode == 0
 
@@ -173,6 +189,59 @@ def test_snapshot_rejects_referenced_evidence_appearing_after_capture(tmp_path):
     result = _run_audit("--snapshot-in", str(snapshot), "--json", cwd=root)
     assert result.returncode != 0
     assert "snapshot" in result.stderr.lower()
+
+
+@pytest.mark.parametrize("kind", ["scoring", "findings", "specialist"])
+def test_snapshot_rejects_existing_gate_evidence_changes(tmp_path, kind):
+    root = tmp_path / "root"
+    evidence = root / ".mission-state" / "evidence" / f"{kind}.json"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text('{"ok":true}\n', encoding="utf-8")
+    overrides: dict[str, object] = {}
+    score = {"iteration": 1, "composite": 4.5, "min_item": 4.0, "items": {}}
+    if kind == "scoring":
+        score["scoring_evidence_path"] = f".mission-state/evidence/{kind}.json"
+    elif kind == "findings":
+        score["findings_evidence_path"] = f".mission-state/evidence/{kind}.json"
+    else:
+        overrides["specialist_invocations"] = [{
+            "iteration": 1, "skill": "neutral-provider", "status": "completed",
+            "evidence_path": f".mission-state/evidence/{kind}.json",
+        }]
+    overrides["score_history"] = [score]
+    _write_state(root, "one", "2026-07-21T00:00:00Z", **overrides)
+    snapshot = tmp_path / "state.snapshot.json"
+    assert _snapshot(root, snapshot).returncode == 0
+    evidence.write_text('{"ok":false}\n', encoding="utf-8")
+    assert _run_audit("--snapshot-in", str(snapshot), "--json", cwd=root).returncode != 0
+
+
+@pytest.mark.parametrize("change", ["pointer", "manifest", "evidence", "generation-add", "pointer-delete"])
+def test_snapshot_rejects_archive_generation_metadata_changes(tmp_path, run_cli, change):
+    worktree, destination = archive_fixture._make_completed_worktree(tmp_path)
+    archived = archive_fixture._archive(run_cli, worktree, destination)
+    assert archived.returncode == 0, archived.stderr
+    shutil.rmtree(worktree)
+    bundle = Path(json.loads(archived.stdout)["bundle_path"])
+    _generation, generation_root = archive_fixture._current_generation(bundle)
+    snapshot = tmp_path / "state.snapshot.json"
+    assert _snapshot(destination, snapshot).returncode == 0
+    if change == "pointer":
+        pointer = json.loads((bundle / "current.json").read_text(encoding="utf-8"))
+        (bundle / "current.json").write_text(json.dumps(pointer, indent=2) + "\n", encoding="utf-8")
+    elif change == "manifest":
+        manifest = generation_root / "manifest.json"
+        manifest.write_text(manifest.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    elif change == "evidence":
+        manifest = json.loads((generation_root / "manifest.json").read_text(encoding="utf-8"))
+        item = next(value for value in manifest["evidence"] if value["evidence_kind"] != "state")
+        path = generation_root / item["archive_path"]
+        path.write_bytes(path.read_bytes() + b"\n")
+    elif change == "generation-add":
+        (bundle / "generations" / ("f" * 64)).mkdir()
+    else:
+        (bundle / "current.json").unlink()
+    assert _run_audit("--snapshot-in", str(snapshot), "--json", cwd=destination).returncode != 0
 
 
 def test_snapshot_keeps_missing_scoring_finding_gate(tmp_path):
@@ -254,6 +323,32 @@ def test_snapshot_rejects_content_tamper_and_expired_ttl(tmp_path):
     snapshot.chmod(0o600)
     assert _run_audit("--snapshot-in", str(snapshot), "--json", cwd=root).returncode != 0
 
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("created_at", "2999-01-01T00:00:00Z"),
+        ("observed_at", "not-a-time"),
+        ("observed_at", "2026-07-21T00:00:00"),
+    ],
+)
+def test_snapshot_rejects_invalid_clock_metadata(tmp_path, field, value):
+    root = tmp_path / "root"
+    _write_state(root, "one", "2026-07-21T00:00:00Z")
+    snapshot = tmp_path / "state.snapshot.json"
+    assert _snapshot(root, snapshot).returncode == 0
+    _rewrite_snapshot(snapshot, lambda item: item.__setitem__(field, value))
+    assert _run_audit("--snapshot-in", str(snapshot), "--json", cwd=root).returncode != 0
+
+
+def test_snapshot_rejects_record_index_tamper_even_with_recomputed_digest(tmp_path):
+    root = tmp_path / "root"
+    _write_state(root, "one", "2026-07-21T00:00:00Z")
+    snapshot = tmp_path / "state.snapshot.json"
+    assert _snapshot(root, snapshot).returncode == 0
+    _rewrite_snapshot(snapshot, lambda item: item["record_index"][0].__setitem__("path", "/tmp/other"))
+    assert _run_audit("--snapshot-in", str(snapshot), "--json", cwd=root).returncode != 0
+
     assert _snapshot(root, snapshot).returncode == 0
     _rewrite_snapshot(snapshot, lambda item: item.__setitem__("created_at", "2000-01-01T00:00:00Z"))
     assert _run_audit("--snapshot-in", str(snapshot), "--json", cwd=root).returncode != 0
@@ -307,7 +402,9 @@ def test_snapshot_cli_help_is_backward_compatible(tmp_path, run_cli):
     assert "--root" in audit_help.stdout and "--root" in stats_help.stdout
 
 
-def test_snapshot_consume_skips_live_state_json_parse(tmp_path):
+def test_snapshot_consume_uses_one_metadata_rewalk_and_zero_state_reads_or_parses(
+    tmp_path, monkeypatch
+):
     root = tmp_path / "root"
     for index in range(4):
         _write_state(root / f"p{index}", f"s{index}", "2026-07-21T00:00:00Z")
@@ -320,18 +417,49 @@ def test_snapshot_consume_skips_live_state_json_parse(tmp_path):
     spec.loader.exec_module(audit)
     audit.create_state_snapshot([root], snapshot, ttl_seconds=3600)
 
-    state_parse_count = 0
-    real_loads = audit.json.loads
+    counts = {"state_read": 0, "state_parse": 0, "metadata_rewalk": 0, "snapshot_parse": 0}
+    real_rewalk = audit._root_metadata_inventory
+    snapshot_module = sys.modules["state_snapshot"]
+    real_snapshot_parse = snapshot_module.parse_snapshot_bytes
+    monkeypatch.setattr(audit, "read_state_bytes", lambda path: counts.__setitem__("state_read", counts["state_read"] + 1))
+    monkeypatch.setattr(audit, "parse_state_bytes", lambda payload: counts.__setitem__("state_parse", counts["state_parse"] + 1))
 
-    def counted_loads(value, *args, **kwargs):
-        nonlocal state_parse_count
-        parsed = real_loads(value, *args, **kwargs)
-        if isinstance(parsed, dict) and {"mission", "mission_id", "session_id"} <= parsed.keys():
-            state_parse_count += 1
-        return parsed
+    def counted_rewalk(roots):
+        counts["metadata_rewalk"] += 1
+        return real_rewalk(roots)
 
-    audit.json.loads = counted_loads
+    def counted_snapshot_parse(payload):
+        counts["snapshot_parse"] += 1
+        return real_snapshot_parse(payload)
+
+    monkeypatch.setattr(audit, "_root_metadata_inventory", counted_rewalk)
+    monkeypatch.setattr(snapshot_module, "parse_snapshot_bytes", counted_snapshot_parse)
     records, _invalid, _roots, _observed = audit.consume_state_snapshot(snapshot, None)
     assert len(records) == 4
-    assert state_parse_count == 0
+    assert counts == {"state_read": 0, "state_parse": 0, "metadata_rewalk": 1, "snapshot_parse": 1}
 
+
+def test_snapshot_capture_rejects_drift_between_metadata_checks(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    state = _write_state(root, "one", "2026-07-21T00:00:00Z")
+    snapshot = tmp_path / "state.snapshot.json"
+    spec = importlib.util.spec_from_file_location("audit_issue210_capture_drift", AUDIT_PY)
+    assert spec and spec.loader
+    audit = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = audit
+    spec.loader.exec_module(audit)
+    real_rewalk = audit._root_metadata_inventory
+    calls = 0
+
+    def drifting_rewalk(roots):
+        nonlocal calls
+        calls += 1
+        result = real_rewalk(roots)
+        if calls == 1:
+            state.write_text(state.read_text(encoding="utf-8") + " ", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(audit, "_root_metadata_inventory", drifting_rewalk)
+    with pytest.raises(audit.SnapshotError, match="changed while"):
+        audit.create_state_snapshot([root], snapshot, ttl_seconds=3600)
+    assert not snapshot.exists()

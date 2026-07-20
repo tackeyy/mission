@@ -26,6 +26,11 @@ class SnapshotError(ValueError):
     """Raised when a snapshot cannot be trusted or reused."""
 
 
+def parse_snapshot_bytes(payload: bytes) -> Any:
+    """Named seam for deterministic snapshot parse accounting."""
+    return json.loads(payload.decode("utf-8"))
+
+
 def normalize_roots(roots: list[Path]) -> list[str]:
     return [str(Path(root).expanduser().resolve(strict=False)) for root in roots]
 
@@ -145,7 +150,7 @@ def read_snapshot(
     if stat.S_IMODE(source_stat.st_mode) & 0o077:
         raise SnapshotError("snapshot permissions must not grant group/world access")
     try:
-        document = json.loads(source.read_text(encoding="utf-8"))
+        document = parse_snapshot_bytes(source.read_bytes())
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise SnapshotError(f"snapshot JSON is invalid: {error}") from error
     if not isinstance(document, dict):
@@ -187,14 +192,14 @@ def read_snapshot(
     ttl_seconds = document.get("ttl_seconds")
     if (
         created_at is None
+        or created_at.tzinfo is None
         or observed_at is None
+        or observed_at.tzinfo is None
         or isinstance(ttl_seconds, bool)
         or not isinstance(ttl_seconds, int)
         or ttl_seconds <= 0
     ):
         raise SnapshotError("snapshot time/TTL metadata is invalid")
-    if created_at.tzinfo is None:
-        created_at = created_at.replace(tzinfo=timezone.utc)
     base = now or datetime.now(timezone.utc)
     if base.tzinfo is None:
         base = base.replace(tzinfo=timezone.utc)
