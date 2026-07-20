@@ -240,6 +240,40 @@ def test_activity_resume_with_same_labels_still_closes_the_stale_segment_once(
     assert state["activity_unobserved_gap_sec"] == 3300.0
 
 
+def test_activity_resume_before_open_start_is_rejected_without_mutation(
+    tmp_path, run_cli
+):
+    path = _write_state(
+        tmp_path,
+        updated_at="2026-07-21T00:00:00Z",
+        activity_current={
+            "kind": "active",
+            "phase": "executing",
+            "reason": "implementation",
+            "started_at": "2026-07-21T00:10:00Z",
+        },
+        activity_segments=[],
+    )
+    before = path.read_bytes()
+
+    result = _run_activity(
+        run_cli,
+        tmp_path,
+        "start",
+        "--kind",
+        "active",
+        "--reason",
+        "resumed-implementation",
+        "--at",
+        "2026-07-21T00:05:00Z",
+        "--resume",
+    )
+
+    assert result.returncode == 2
+    assert "before" in result.stderr.lower()
+    assert path.read_bytes() == before
+
+
 @pytest.mark.parametrize("command", ["init", "refresh-pid"])
 def test_reinit_and_refresh_close_open_segment_once_without_losing_history(
     tmp_path, run_cli, command
@@ -268,6 +302,32 @@ def test_reinit_and_refresh_close_open_segment_once_without_losing_history(
     assert state["activity_rollup"]["observed_total_sec"] == 300.0
     assert state["activity_rollup"]["closed_segment_count"] == 1
     assert len(state["activity_segments"]) == 1
+
+
+def test_same_mission_reinit_accrues_and_preserves_the_open_phase(tmp_path, run_cli):
+    path = _write_state(
+        tmp_path,
+        phase="executing",
+        phase_started_at="2026-07-21T00:00:00Z",
+        updated_at="2026-07-21T00:05:00Z",
+        phase_durations_sec={"planning": 30.0},
+    )
+
+    result = run_cli(
+        "init",
+        TASK_TEXT,
+        cwd=tmp_path,
+        env_extra={"MISSION_STATE_NOW": "2026-07-21T01:00:00Z"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    state = json.loads(path.read_text())
+    assert state["phase"] == "executing"
+    assert state["phase_started_at"] == "2026-07-21T01:00:00Z"
+    assert state["phase_durations_sec"] == {
+        "planning": 30.0,
+        "executing": 300.0,
+    }
 
 
 def test_phase_transition_splits_open_activity_atomically_and_terminal_closes_it(
@@ -432,6 +492,38 @@ def test_stats_and_audit_share_activity_percentiles_and_reason_breakdown(
     assert sum(stats["activity_duration_totals_sec"].values()) == 600.0
 
 
+def test_coverage_includes_the_current_phase_window_and_never_exceeds_one(
+    tmp_path, run_cli
+):
+    _write_state(
+        tmp_path,
+        phase="executing",
+        phase_started_at="2026-07-21T00:00:00Z",
+        updated_at="2026-07-21T00:10:00Z",
+        phase_durations_sec={"planning": 30.0},
+        activity_segments=[
+            _closed(
+                "active",
+                "executing",
+                "work",
+                "2026-07-21T00:00:00Z",
+                "2026-07-21T00:10:00Z",
+                600,
+            )
+        ],
+        activity_current=None,
+    )
+
+    result = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    timing = json.loads(result.stdout)["activity_timing"]
+    assert timing["phase_duration_total_sec"] == 630.0
+    assert timing["coverage_ratio"] == pytest.approx(600.0 / 630.0)
+    assert timing["coverage_ratio"] <= 1.0
+    assert timing["totals_consistent"] is True
+
+
 def test_stats_text_and_audit_markdown_display_activity_timing(tmp_path, run_cli):
     _write_state(
         tmp_path,
@@ -446,6 +538,7 @@ def test_stats_text_and_audit_markdown_display_activity_timing(tmp_path, run_cli
             )
         ],
         activity_current=None,
+        activity_unobserved_gap_sec=12.0,
     )
 
     stats = run_cli("stats", "--root", str(tmp_path), cwd=tmp_path)
@@ -460,9 +553,15 @@ def test_stats_text_and_audit_markdown_display_activity_timing(tmp_path, run_cli
     assert "activity_timing:" in stats.stdout
     assert "reviewer-wait/review-response" in stats.stdout
     assert "phase reviewing" in stats.stdout
+    assert f"task {TASK_ID}" in stats.stdout
+    assert "unobserved gap:" in stats.stdout
+    assert "totals consistent:" in stats.stdout
     assert "## Activity Timing" in audit.stdout
     assert "reviewer-wait/review-response" in audit.stdout
     assert "phase `reviewing`: p50" in audit.stdout
+    assert f"task `{TASK_ID}`: p50" in audit.stdout
+    assert "unobserved gap:" in audit.stdout
+    assert "totals consistent:" in audit.stdout
 
 
 def test_activity_summary_ignores_open_negative_and_unknown_segments(
@@ -493,6 +592,52 @@ def test_activity_summary_ignores_open_negative_and_unknown_segments(
     assert timing["wait_reason_totals_sec"] == {
         "external-wait": {"unknown": 10.0}
     }
+
+
+@pytest.mark.parametrize(
+    "activity_current",
+    [
+        {
+            "kind": "future-kind",
+            "phase": "executing",
+            "reason": "work",
+            "started_at": "2026-07-21T00:00:00Z",
+        },
+        {
+            "kind": "active",
+            "phase": "executing",
+            "reason": "future-reason",
+            "started_at": "2026-07-21T00:00:00Z",
+        },
+        {
+            "kind": "active",
+            "phase": "executing",
+            "reason": "work",
+            "started_at": "not-a-time",
+        },
+        {
+            "kind": "active",
+            "phase": "executing",
+            "reason": "work",
+            "started_at": "2026-07-21T02:00:00Z",
+        },
+    ],
+)
+def test_malformed_open_activity_is_an_invalid_anomaly_not_an_open_segment(
+    tmp_path, run_cli, activity_current
+):
+    _write_state(
+        tmp_path,
+        updated_at="2026-07-21T01:00:00Z",
+        activity_current=activity_current,
+    )
+
+    result = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    timing = json.loads(result.stdout)["activity_timing"]
+    assert timing["open_segment_count"] == 0
+    assert timing["invalid_segment_count"] == 1
 
 
 def test_activity_summary_marks_legacy_time_unclassified_without_inventing_a_cause(
