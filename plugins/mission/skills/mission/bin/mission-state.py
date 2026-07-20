@@ -811,18 +811,18 @@ _REVIEW_GLOBAL_NON_OPERATION_RE = re.compile(
     r"\bno\s+actual\s+(?:operation|execution)s?\b",
     re.IGNORECASE,
 )
-_REVIEW_META_NON_OPERATION_RE = re.compile(
-    r"\b(?:review|analy[sz]e|document|describe|explain|inspect)\b"
-    r"[^。.!！?？;；\n]{0,80}\b"
-    r"(?:deploy(?:ment)?|release|migration|publish|production)\b"
-    r"[^。.!！?？;；\n]{0,40}\b(?:procedures?|instructions?|steps?|plans?)\b|"
-    r"\b(?:deploy(?:ment)?|release|migration|publish|production)\b"
-    r"[^。.!！?？;；\n]{0,40}\b(?:procedures?|instructions?|steps?|plans?)\b"
-    r"[^。.!！?？;；\n]{0,40}\b"
-    r"(?:review|analy[sz]e|document|describe|explain|inspect)\b|"
+_REVIEW_META_ONLY_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:review|analy[sz]e|document|describe|explain|inspect)\s+"
+    r"(?:the\s+)?(?:deploy(?:ment)?|release|migration|publish|production)\s+"
+    r"(?:procedures?|instructions?|settings?|logs?|text)|"
+    r"(?:deploy(?:ment)?|release|migration|publish|production)\s+"
+    r"(?:procedures?|instructions?|settings?|logs?|text)\s+"
+    r"(?:review|analysis|documentation|description|inspection)|"
     r"(?:deploy|release|publish|migration|production|本番|リリース|マイグレーション|公開)"
-    r"[^。.!！?？;；\n]{0,48}(?:手順|方法|計画)"
-    r"[^。.!！?？;；\n]{0,48}(?:調査|確認|説明|文書化|レビュー)",
+    r"[^。.!！?？;；\n]{0,48}(?:手順|設定|文言|ログ)\s*(?:を|の)?\s*"
+    r"(?:調査|確認|分析|説明|文書化|レビュー)(?:する|します)?"
+    r")\s*$",
     re.IGNORECASE,
 )
 _REVIEW_QUOTED_EXECUTION_BEFORE_RE = re.compile(
@@ -982,6 +982,7 @@ def _review_index_contains(
 def _review_text_has_ambiguous_execution(text: str) -> bool:
     """Find execution intent not explained by a directly named operation target."""
     named_targets = _review_regex_span_index(text, 0, _REVIEW_NAMED_EXECUTION_RE)
+    quote_spans = _review_quote_span_index(text, 0)
     non_operation_markers = _review_regex_span_index(
         text,
         0,
@@ -989,6 +990,7 @@ def _review_text_has_ambiguous_execution(text: str) -> bool:
     )
     return any(
         not _review_index_contains(named_targets, match.start(), match.end())
+        and not _review_index_contains(quote_spans, match.start(), match.end())
         and not _review_index_contains(
             non_operation_markers,
             match.start(),
@@ -1028,11 +1030,7 @@ def _review_context_analysis(
             "conditional": bool(_REVIEW_CONDITIONAL_RE.search(context)),
             "quote_only": bool(_REVIEW_QUOTE_ONLY_RE.search(context)),
             "quotes": quote_index,
-            "meta_non_operations": _review_regex_span_index(
-                context,
-                start,
-                _REVIEW_META_NON_OPERATION_RE,
-            ),
+            "meta_only": bool(_REVIEW_META_ONLY_RE.fullmatch(context)),
             "negation_cue_starts": [
                 match.start() for match in _REVIEW_NEGATION_CUE_RE.finditer(context)
             ],
@@ -1188,11 +1186,7 @@ def _actual_operation_signal_detail(
         decision, reason = "included", "conditional-or-uncertain-context"
     elif global_non_operation and unit_ambiguous_execution:
         decision, reason = "included", "ambiguous-execution-reference"
-    elif global_non_operation and _review_index_contains(
-        context_analysis["meta_non_operations"],
-        start,
-        end,
-    ):
+    elif global_non_operation and context_analysis["meta_only"]:
         decision, reason = "suppressed", "global-explicit-non-operation"
     elif global_non_operation:
         decision, reason = "included", "contradictory-global-operation"
