@@ -956,7 +956,7 @@ def test_stale_terminal_restores_pre_halt_phase_on_refresh_and_allows_work(
         "2026-07-21T01:01:00Z",
     )
     assert activity.returncode == 0, activity.stderr
-    next_result = run_cli("next", "--json", cwd=tmp_path)
+    next_result = run_cli("next", cwd=tmp_path)
     assert next_result.returncode == 0, next_result.stderr
     assert json.loads(next_result.stdout)["next_action"] == "run-executor"
 
@@ -1285,6 +1285,13 @@ def test_invalid_only_rollup_does_not_create_a_zero_percentile_sample(
             "activity_duration_totals_sec": [],
             "phase_activity_duration_totals_sec": [],
             "wait_reason_totals_sec": [],
+        },
+        {
+            "observed_total_sec": 0.0,
+            "closed_segment_count": 1,
+            "activity_duration_totals_sec": {},
+            "phase_activity_duration_totals_sec": {},
+            "wait_reason_totals_sec": {},
         },
     ],
 )

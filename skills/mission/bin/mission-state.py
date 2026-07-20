@@ -665,16 +665,38 @@ def _ensure_phase_timing(data: dict, now: str | None = None) -> None:
         data["phase_started_at"] = data.get("started_at") or now
 
 
-def _transition_phase(data: dict, new_phase: str, now: str | None = None) -> None:
+def _transition_phase(
+    data: dict,
+    new_phase: str,
+    now: str | None = None,
+    *,
+    terminal_trusted_boundary: bool = False,
+) -> None:
     """phase を変更し、旧 phase の経過秒数を phase_durations_sec に加算する."""
     now = now or iso_now()
     _ensure_phase_timing(data, now)
     old_phase = data.get("phase")
     if new_phase in {"done", "halted"}:
+        if terminal_trusted_boundary and old_phase not in {"done", "halted"}:
+            _resume_phase_timing(data, now)
+        if new_phase == "halted" and terminal_trusted_boundary and old_phase in {
+            "planning",
+            "executing",
+            "reviewing",
+            "scoring",
+        }:
+            data["resume_target_phase"] = old_phase
+        elif new_phase == "done" or old_phase not in {"done", "halted"}:
+            data.pop("resume_target_phase", None)
         # Terminal control must close an open activity even on a repeated
         # terminal command.  Malformed measurement is quarantined as an
         # anomaly by the shared reducer and cannot block pass/halt control.
-        transition_activity_phase(data, new_phase, now)
+        transition_activity_phase(
+            data,
+            new_phase,
+            now,
+            terminal_trusted_boundary=terminal_trusted_boundary,
+        )
     if old_phase and old_phase != new_phase:
         if new_phase not in {"done", "halted"}:
             transition_activity_phase(data, new_phase, now)
@@ -5223,7 +5245,12 @@ def cmd_mark_halt(args):
         data["halt_reason"] = args.reason
         data["halt_category"] = category  # #190
         data["loop_active"] = False
-        _transition_phase(data, "halted", now)  # M4 (2026-06-10): phase 自動更新
+        _transition_phase(
+            data,
+            "halted",
+            now,
+            terminal_trusted_boundary=category == "stale",
+        )  # M4 (2026-06-10): phase 自動更新
         data["updated_at"] = now
         backup_state(sf)
         atomic_write_json(sf, data)
@@ -5288,18 +5315,39 @@ def cmd_refresh_pid(args):
                     file=sys.stderr,
                 )
                 sys.exit(2)
-        _resume_phase_timing(data, now)
         data["pid"] = new_pid
         # halt 解除 + ループ再アクティベート (resume → orphan halt フローからの復帰用)
         prev_halt = data.get("halt_reason", "")
+        prev_category = data.get("halt_category")
         prev_loop = data.get("loop_active", False)
-        was_reactivatable_halt = isinstance(prev_halt, str) and (
+        legacy_reactivatable_halt = not prev_category and isinstance(prev_halt, str) and (
             prev_halt.startswith("orphan:") or prev_halt.startswith("stale:")
         )
-        if was_reactivatable_halt and not getattr(args, "no_reactivate", False):
+        was_reactivatable_halt = prev_category == "stale" or legacy_reactivatable_halt
+        target_phase = data.get("resume_target_phase")
+        phase_can_reactivate = data.get("phase") != "halted" or target_phase in {
+            "planning",
+            "executing",
+            "reviewing",
+            "scoring",
+        }
+        reactivated = (
+            was_reactivatable_halt
+            and not getattr(args, "no_reactivate", False)
+            and phase_can_reactivate
+        )
+        restored_phase = False
+        if reactivated:
+            if data.get("phase") == "halted":
+                data["phase"] = target_phase
+                data["phase_started_at"] = now
+                data.pop("resume_target_phase", None)
+                restored_phase = True
             data["halt_reason"] = ""
             data["loop_active"] = True
             _add_to_aggregate(cwd, sf.stem)  # F-4: 再活性化分を active_sessions へ戻す
+        if not restored_phase:
+            _resume_phase_timing(data, now)
         data["updated_at"] = now
         backup_state(sf)
         atomic_write_json(sf, data)
@@ -5307,7 +5355,7 @@ def cmd_refresh_pid(args):
         "ok": True,
         "old_pid": old_pid,
         "new_pid": new_pid,
-        "reactivated": was_reactivatable_halt and not getattr(args, "no_reactivate", False),
+        "reactivated": reactivated,
         "prev_halt_reason": prev_halt,
         "prev_loop_active": prev_loop,
     }))
@@ -5446,7 +5494,6 @@ def _terminalize_state_file(
     *,
     reason: str,
     category: str,
-    now: str,
     set_terminal_phase: bool,
     expected_pid: Any = None,
     require_missing_root: bool = False,
@@ -5478,13 +5525,29 @@ def _terminalize_state_file(
                     return False
             except (TypeError, ValueError):
                 pass
+        now = iso_now()
+        sampled = _parse_iso_datetime(now)
+        updated = _parse_iso_datetime(latest.get("updated_at"))
+        if sampled and updated and sampled < updated:
+            now = str(latest["updated_at"])
         latest["halt_reason"] = reason
         latest["halt_category"] = category
         latest["loop_active"] = False
         if set_terminal_phase:
-            _transition_phase(latest, "halted", now)
+            _transition_phase(
+                latest,
+                "halted",
+                now,
+                terminal_trusted_boundary=category == "stale",
+            )
         else:
-            close_activity_for_terminal(latest, now)
+            if category == "stale":
+                _resume_phase_timing(latest, now)
+            close_activity_for_terminal(
+                latest,
+                now,
+                trusted_boundary=category == "stale",
+            )
         latest["updated_at"] = now
         backup_state(sf)
         atomic_write_json(sf, latest)
@@ -5536,7 +5599,7 @@ def cmd_cleanup_stale(args):
                             if args.execute:
                                 halted = _terminalize_state_file(
                                     sf, proj, reason=halt_reason, category="stale",
-                                    now=iso_now(), set_terminal_phase=False,
+                                    set_terminal_phase=False,
                                     expected_pid=pid, require_missing_root=True,
                                 )
                                 if halted:
@@ -5555,7 +5618,7 @@ def cmd_cleanup_stale(args):
                                 if args.execute:
                                     halted = _terminalize_state_file(
                                         sf, proj, reason=halt_reason, category="stale",
-                                        now=iso_now(), set_terminal_phase=True,
+                                        set_terminal_phase=True,
                                         expected_pid=pid, require_stale_no_score=True,
                                     )
                                     if halted:
@@ -5576,7 +5639,7 @@ def cmd_cleanup_stale(args):
                             halted = _terminalize_state_file(
                                 sf, proj,
                                 reason=f"orphan: pid {pid} dead or reused (cleanup-stale)",
-                                category="stale", now=iso_now(), set_terminal_phase=False,
+                                category="stale", set_terminal_phase=False,
                                 expected_pid=pid, require_dead_pid=True,
                             )
                             if halted:
@@ -5636,7 +5699,7 @@ def cmd_halt(args):
                         proj = _project_root_of(sf)
                         changed = _terminalize_state_file(
                             sf, proj, reason=args.reason, category=category,
-                            now=iso_now(), set_terminal_phase=True,
+                            set_terminal_phase=True,
                         )
                         if changed:
                             halted.append(str(proj))

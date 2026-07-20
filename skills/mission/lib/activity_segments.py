@@ -238,7 +238,9 @@ def close_activity_for_resume(state: dict[str, Any], at: str) -> bool:
     return end_activity_segment(state, _resume_boundary(state, at))
 
 
-def close_activity_for_terminal(state: dict[str, Any], at: str) -> bool:
+def close_activity_for_terminal(
+    state: dict[str, Any], at: str, *, trusted_boundary: bool = False
+) -> bool:
     """Close valid measurement, but never let corrupt observability block control."""
     current = state.get("activity_current")
     if current is None:
@@ -254,7 +256,8 @@ def close_activity_for_terminal(state: dict[str, Any], at: str) -> bool:
         if not isinstance(kind, str) or not isinstance(reason, str):
             raise ActivityTimingError("activity current labels are malformed")
         validate_activity(kind, reason)
-        return end_activity_segment(state, _resume_boundary(state, at))
+        boundary = _resume_boundary(state, at) if trusted_boundary else at
+        return end_activity_segment(state, boundary)
     except ActivityTimingError:
         state["activity_current"] = None
         _record_anomaly(state, "invalid-current-terminal")
@@ -303,10 +306,20 @@ def start_activity_segment(
     return True
 
 
-def transition_activity_phase(state: dict[str, Any], new_phase: str, at: str) -> None:
+def transition_activity_phase(
+    state: dict[str, Any],
+    new_phase: str,
+    at: str,
+    *,
+    terminal_trusted_boundary: bool = False,
+) -> None:
     current = state.get("activity_current")
     if new_phase in TERMINAL_PHASES:
-        close_activity_for_terminal(state, at)
+        close_activity_for_terminal(
+            state,
+            at,
+            trusted_boundary=terminal_trusted_boundary,
+        )
         return
     if not isinstance(current, dict) or current.get("phase") == new_phase:
         return
@@ -392,7 +405,10 @@ def _state_activity(state: dict[str, Any]) -> dict[str, Any]:
     rollup = state.get("activity_rollup")
     if isinstance(rollup, dict) and "closed_segment_count" in rollup:
         raw_kinds = rollup.get("activity_duration_totals_sec")
-        if isinstance(raw_kinds, dict):
+        if not isinstance(raw_kinds, dict):
+            invalid += 1
+            totals_consistent = False
+        else:
             for kind, raw in raw_kinds.items():
                 seconds = _finite_nonnegative(raw)
                 if kind not in ACTIVITY_KINDS or seconds is None:
@@ -400,7 +416,10 @@ def _state_activity(state: dict[str, Any]) -> dict[str, Any]:
                     continue
                 kinds[kind] = seconds
         raw_phases = rollup.get("phase_activity_duration_totals_sec")
-        if isinstance(raw_phases, dict):
+        if not isinstance(raw_phases, dict):
+            invalid += 1
+            totals_consistent = False
+        else:
             for phase, raw_phase in raw_phases.items():
                 if not isinstance(phase, str) or not isinstance(raw_phase, dict):
                     invalid += 1
@@ -412,7 +431,10 @@ def _state_activity(state: dict[str, Any]) -> dict[str, Any]:
                         continue
                     phases.setdefault(phase, {})[kind] = seconds
         raw_reasons = rollup.get("wait_reason_totals_sec")
-        if isinstance(raw_reasons, dict):
+        if not isinstance(raw_reasons, dict):
+            invalid += 1
+            totals_consistent = False
+        else:
             for kind, raw_reason in raw_reasons.items():
                 if kind not in WAIT_KINDS or not isinstance(raw_reason, dict):
                     invalid += 1
@@ -434,6 +456,12 @@ def _state_activity(state: dict[str, Any]) -> dict[str, Any]:
             closed_count = 0
         else:
             closed_count = raw_closed_count
+        if closed_count > 0 and (not kinds or not phases):
+            invalid += 1
+            totals_consistent = False
+        if closed_count == 0 and (kinds or phases or reasons):
+            invalid += 1
+            totals_consistent = False
         observed_rollup = _finite_nonnegative(rollup.get("observed_total_sec"))
         kind_sum = sum(kinds.values())
         phase_sum = sum(sum(by_kind.values()) for by_kind in phases.values())
