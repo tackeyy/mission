@@ -1,0 +1,187 @@
+"""Issue #207: audit findings are partitioned into current and historical risk."""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+AUDIT = REPO_ROOT / "scripts" / "mission-audit.py"
+FINDING_LIB = REPO_ROOT / "skills" / "mission" / "lib" / "audit_findings.py"
+
+
+def _write_state(root: Path, session_id: str, updated_at: str, **overrides: object) -> None:
+    path = root / session_id / ".mission-state" / "sessions" / f"{session_id}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    state: dict[str, object] = {
+        "mission": "period finding fixture",
+        "mission_id": f"mission-{session_id}",
+        "session_id": session_id,
+        "project_root": str(root / session_id),
+        "agent": "codex",
+        "complexity": "Simple",
+        "iteration": 1,
+        "threshold": 4.0,
+        "score_history": [],
+        "loop_active": False,
+        "passes": True,
+        "halt_reason": "",
+        "started_at": updated_at,
+        "updated_at": updated_at,
+    }
+    state.update(overrides)
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+
+def _audit(root: Path, *extra: str) -> dict[str, object]:
+    result = subprocess.run(
+        [sys.executable, str(AUDIT), "--root", str(root), *extra, "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(result.stdout)
+
+
+def _load_finding_lib():
+    spec = importlib.util.spec_from_file_location("audit_findings", FINDING_LIB)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_period_classifier_handles_boundary_timezone_and_invalid_timestamps():
+    findings = _load_finding_lib()
+    cutoff = datetime(2026, 7, 20, 0, 0, tzinfo=timezone.utc)
+
+    assert findings.classify_finding_period("2026-07-19T23:59:59.999999Z", cutoff) == "historical"
+    assert findings.classify_finding_period("2026-07-20T00:00:00Z", cutoff) == "current"
+    assert findings.classify_finding_period("2026-07-20T00:00:00.000001Z", cutoff) == "current"
+    assert findings.classify_finding_period("2026-07-20T08:59:59+09:00", cutoff) == "historical"
+    assert findings.classify_finding_period("2026-07-20T09:00:00+09:00", cutoff) == "current"
+    assert findings.classify_finding_period("2026-07-20T00:00:00", cutoff) == "current"
+    assert findings.classify_finding_period("not-a-timestamp", cutoff) == "current"
+
+
+def test_forced_pass_and_specialist_provenance_share_period_partition(tmp_path: Path):
+    _write_state(
+        tmp_path,
+        "old-force",
+        "2026-07-19T23:59:59Z",
+        passes_forced=True,
+        force_reason="provider unavailable",
+    )
+    _write_state(
+        tmp_path,
+        "new-force",
+        "2026-07-20T00:00:00Z",
+        passes_forced=True,
+        force_reason="provider unavailable",
+    )
+    for session_id, updated_at in (
+        ("old-gap", "2026-07-19T15:00:00-09:00"),
+        ("new-gap", "2026-07-20T09:00:01+09:00"),
+    ):
+        _write_state(
+            tmp_path,
+            session_id,
+            updated_at,
+            passes=False,
+            halt_reason="provider result absent",
+            specialists_selected=[{"skill": "review-provider", "required": True}],
+            specialist_invocations=[],
+        )
+
+    data = _audit(tmp_path, "--current-since", "2026-07-20T00:00:00Z")
+    current = data["current_findings"]
+    historical = data["historical_findings"]
+
+    assert {item["session_id"] for item in current if item["code"] == "forced-pass"} == {"new-force"}
+    assert {item["session_id"] for item in historical if item["code"] == "forced-pass"} == {"old-force"}
+    assert {item["session_id"] for item in current if item["code"] == "specialist-invocation-gap"} == {"new-gap"}
+    assert {item["session_id"] for item in historical if item["code"] == "specialist-invocation-gap"} == {"old-gap"}
+    assert any(item["code"] == "forced-pass-autonomous-suspect" and item["priority"] == "P0" for item in current)
+    assert any(item["code"] == "forced-pass-autonomous-suspect" and item["priority"] == "P0" for item in historical)
+
+
+def test_json_period_counts_preserve_all_findings(tmp_path: Path):
+    _write_state(
+        tmp_path,
+        "old-force",
+        "2026-07-19T23:59:59Z",
+        passes_forced=True,
+        force_reason="provider unavailable",
+    )
+    _write_state(
+        tmp_path,
+        "boundary-force",
+        "2026-07-20T00:00:00Z",
+        passes_forced=True,
+        force_reason="provider unavailable",
+    )
+    data = _audit(tmp_path, "--current-since", "2026-07-20T00:00:00Z")
+
+    assert len(data["current_findings"]) + len(data["historical_findings"]) == len(data["all_findings"])
+    assert data["current_finding_counts"]["total"] + data["historical_finding_counts"]["total"] == data["all_finding_counts"]["total"]
+    for priority in ("P0", "P1", "P2"):
+        assert data["current_finding_counts"][priority] + data["historical_finding_counts"][priority] == data["all_finding_counts"][priority]
+
+
+def test_markdown_lists_current_before_historical_and_keeps_severity(tmp_path: Path):
+    _write_state(
+        tmp_path,
+        "old-force",
+        "2026-07-19T23:59:59Z",
+        passes_forced=True,
+        force_reason="provider unavailable",
+    )
+    _write_state(
+        tmp_path,
+        "new-force",
+        "2026-07-20T00:00:00Z",
+        passes_forced=True,
+        force_reason="provider unavailable",
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(AUDIT),
+            "--root",
+            str(tmp_path),
+            "--current-since",
+            "2026-07-20T00:00:00Z",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert result.stdout.index("## Current Findings") < result.stdout.index("## Historical Risk")
+    assert "- P0: 1" in result.stdout
+    assert "`new-force`" in result.stdout
+    assert "`old-force`" in result.stdout
+    assert "P0 `forced-pass-autonomous-suspect`" in result.stdout
+
+
+def test_missing_cutoff_keeps_legacy_all_current_behavior(tmp_path: Path):
+    _write_state(
+        tmp_path,
+        "legacy-force",
+        "2026-01-01T00:00:00Z",
+        passes_forced=True,
+        force_reason="provider unavailable",
+    )
+    data = _audit(tmp_path)
+
+    assert data["current_since"] is None
+    assert data["historical_findings"] == []
+    assert data["current_findings"] == data["all_findings"]
+    assert data["current_finding_counts"] == data["all_finding_counts"]
+    assert any(item["code"] == "forced-pass" for item in data["findings"])
