@@ -781,6 +781,206 @@ def test_activity_requires_explicit_reason_and_known_kind(tmp_path, run_cli):
     assert unknown.returncode == 2
 
 
+def test_activity_start_rejects_terminal_state_without_mutation(tmp_path, run_cli):
+    path = _write_state(tmp_path, phase="done", loop_active=False, passes=True)
+    before = path.read_bytes()
+
+    result = _run_activity(
+        run_cli,
+        tmp_path,
+        "start",
+        "--kind",
+        "active",
+        "--reason",
+        "work",
+        "--at",
+        "2026-07-21T00:01:00Z",
+    )
+
+    assert result.returncode == 2
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("terminal", ["mark-halt", "mark-passes"])
+def test_terminal_control_succeeds_despite_malformed_activity_and_records_anomaly(
+    tmp_path, run_cli, terminal
+):
+    path = _write_state(
+        tmp_path,
+        activity_current={
+            "kind": "future-kind",
+            "phase": "executing",
+            "reason": "future-reason",
+            "started_at": "not-a-time",
+        },
+    )
+    args = (
+        ("mark-halt", "--reason", "safe halt", "--category", "other")
+        if terminal == "mark-halt"
+        else (
+            "mark-passes",
+            "--force",
+            "--reason",
+            "test override",
+            "--approved-by-user",
+        )
+    )
+
+    result = run_cli(
+        *args,
+        cwd=tmp_path,
+        env_extra={"MISSION_STATE_NOW": "2026-07-21T00:01:00Z"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    state = json.loads(path.read_text())
+    assert state["loop_active"] is False
+    assert state["activity_current"] is None
+    assert state["activity_anomaly_counts"]["invalid-current-terminal"] == 1
+
+
+def test_repeated_terminal_command_closes_a_late_open_activity(tmp_path, run_cli):
+    path = _write_state(
+        tmp_path,
+        phase="halted",
+        loop_active=False,
+        halt_reason="already halted",
+        activity_current={
+            "kind": "idle",
+            "phase": "halted",
+            "reason": "no-runnable-work",
+            "started_at": "2026-07-21T00:00:00Z",
+        },
+    )
+
+    result = run_cli(
+        "mark-halt",
+        "--reason",
+        "still halted",
+        "--category",
+        "other",
+        cwd=tmp_path,
+        env_extra={"MISSION_STATE_NOW": "2026-07-21T00:01:00Z"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    state = json.loads(path.read_text())
+    assert state["activity_current"] is None
+    assert state["activity_rollup"]["observed_total_sec"] == 60.0
+
+
+def test_same_mission_reinit_with_invalid_open_activity_fails_without_overwrite(
+    tmp_path, run_cli
+):
+    path = _write_state(
+        tmp_path,
+        activity_current={
+            "kind": "future-kind",
+            "phase": "executing",
+            "reason": "future-reason",
+            "started_at": "not-a-time",
+        },
+    )
+    before = path.read_bytes()
+
+    result = run_cli(
+        "init",
+        TASK_TEXT,
+        cwd=tmp_path,
+        env_extra={"MISSION_STATE_NOW": "2026-07-21T01:00:00Z"},
+    )
+
+    assert result.returncode == 2
+    assert path.read_bytes() == before
+
+
+def test_activity_writer_accepts_json_integer_rollup_values(tmp_path, run_cli):
+    path = _write_state(
+        tmp_path,
+        updated_at="2026-07-21T00:00:05Z",
+        activity_current={
+            "kind": "active",
+            "phase": "executing",
+            "reason": "work",
+            "started_at": "2026-07-21T00:00:05Z",
+        },
+        activity_rollup={
+            "observed_total_sec": 5,
+            "closed_segment_count": 1,
+            "activity_duration_totals_sec": {"active": 5},
+            "phase_activity_duration_totals_sec": {"executing": {"active": 5}},
+            "wait_reason_totals_sec": {},
+        },
+    )
+
+    result = _run_activity(
+        run_cli, tmp_path, "end", "--at", "2026-07-21T00:00:15Z"
+    )
+
+    assert result.returncode == 0, result.stderr
+    state = json.loads(path.read_text())
+    assert state["activity_rollup"]["observed_total_sec"] == 15.0
+    assert state["activity_rollup"]["closed_segment_count"] == 2
+
+
+def test_zero_duration_closed_segments_remain_percentile_samples(tmp_path, run_cli):
+    _write_state(
+        tmp_path,
+        activity_segments=[
+            _closed(
+                "active",
+                "executing",
+                "work",
+                "2026-07-21T00:00:00Z",
+                "2026-07-21T00:00:00Z",
+                0,
+            )
+        ],
+        activity_current=None,
+    )
+
+    result = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
+
+    timing = json.loads(result.stdout)["activity_timing"]
+    assert timing["task_duration_percentiles_sec"][TASK_ID] == {
+        "count": 1,
+        "p50": 0.0,
+        "p90": 0.0,
+    }
+    assert timing["phase_duration_percentiles_sec"]["executing"] == {
+        "count": 1,
+        "p50": 0.0,
+        "p90": 0.0,
+    }
+
+
+def test_rollup_reason_count_and_gap_anomalies_are_counted(tmp_path, run_cli):
+    _write_state(
+        tmp_path,
+        activity_rollup={
+            "observed_total_sec": 10.0,
+            "closed_segment_count": True,
+            "activity_duration_totals_sec": {"external-wait": 10.0},
+            "phase_activity_duration_totals_sec": {
+                "executing": {"external-wait": 10.0}
+            },
+            "wait_reason_totals_sec": {
+                "external-wait": {"future-reason": 10.0}
+            },
+        },
+        activity_unobserved_gap_sec=float("nan"),
+    )
+
+    result = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
+
+    timing = json.loads(result.stdout)["activity_timing"]
+    assert timing["observed_total_sec"] == 10.0
+    assert timing["wait_reason_totals_sec"] == {}
+    assert timing["closed_segment_count"] == 0
+    assert timing["unobserved_gap_sec"] == 0.0
+    assert timing["invalid_segment_count"] >= 3
+
+
 def test_wait_reason_is_enum_and_detail_is_sanitized(tmp_path, run_cli):
     path = _write_state(tmp_path)
     invalid = _run_activity(
