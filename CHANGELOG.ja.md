@@ -15,7 +15,7 @@
 
 ### 修正
 
-- 不可逆操作の `review_tier` キーワードを、operation に anchor した clause と構造 unit の文脈で出現ごとに評価するようにしました。否定は文字 window 内の cue ではなく対象 operation への直接的な文法 anchor を必須とし、既知・未知の connector、別 operation、例外 clause、段落、list item、blockquote、heading をまたいで意図を伝播させません。境界索引と unit cache により、出現ごとの全文再走査も避けます。明示的に否定された実操作は Simple/Standard を昇格させず、条件付き・二重否定・不確実・引用・security・high-risk・Complex/Critical は安全側を維持します。既存の順序付き文字列 signals は変えず、state に出現単位の `review_tier_signal_details` provenance を追加します (#209)。
+- 不可逆操作の `review_tier` キーワードを、operation に anchor した clause と構造 unit の文脈で出現ごとに評価するようにしました。否定は文字 window 内の cue ではなく対象 operation への直接的な文法 anchor を必須とし、active な `not perform/execute` と passive な `will/should not be performed/executed` も扱います。既知・未知の connector、別 operation、例外 clause、段落、list item、blockquote、heading をまたいで意図を伝播させません。境界索引と、context flags・quote span・否定 operation span・unit flags の cache により、出現ごとの全文・dense context 再走査も避けます。明示的に否定された実操作は Simple/Standard を昇格させず、条件付き・二重否定・不確実・引用・security・high-risk・Complex/Critical は安全側を維持します。既存の順序付き文字列 signals は変えず、state に出現単位の `review_tier_signal_details` provenance を追加します (#209)。
 
 ## [2.0.0] - 2026-07-20
 

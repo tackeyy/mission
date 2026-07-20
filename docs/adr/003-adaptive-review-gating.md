@@ -72,12 +72,15 @@ operation rather than applied to every nearby keyword.
 Negation requires a direct grammatical anchor immediately before or after that
 operation; a nearby cue alone is insufficient. Unknown connectors or an
 intervening operation therefore remain conservative inclusions.
+Active `not perform/execute` and passive `will/should not be
+performed/executed` forms are treated as direct anchors for the operation phrase.
 Only an explicit, simple statement that the actual operation will not happen is
 suppressed. Conditional, double-negative, uncertain, and merely quoted contexts
 remain conservative escalations; an explicit quote-only intent may be suppressed.
 Those intents do not leak across a conjunction, exception clause, or structural
-unit. Segment boundaries are indexed once per mission so repeated keyword
-lookups do not rescan the full text. Security keywords,
+unit. Segment boundaries, context flags, quote spans, and negated-operation
+spans are indexed or cached once per mission/context so repeated keyword lookups
+do not rescan the full text or a dense unbroken context. Security keywords,
 `task_profile.risk=high`, and the Complex/Critical base tiers are never suppressed
 by this context rule.
 
