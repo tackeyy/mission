@@ -775,24 +775,22 @@ _REVIEW_CONDITIONAL_RE = re.compile(
     r"\bwithout\s+(?:approval|authorization|permission)\b",
     re.IGNORECASE,
 )
-_REVIEW_EN_PRE_NEGATION_RE = re.compile(
-    r"(?:\b(?:do|does|did|will|would|should|must|can|could)\s+not|\bnot|\bdon['’]t)\s*$",
-    re.IGNORECASE,
-)
-_REVIEW_EN_POST_NEGATION_RE = re.compile(
-    r"^(?:ment)?\s*(?:(?:is|are|was|were|will\s+be)\s+)?"
-    r"(?:not\s+(?:performed|executed|deployed|released|published)|out\s+of\s+scope)\b",
+_REVIEW_EN_NEGATED_OPERATION_RE = re.compile(
+    r"(?:\b(?:do|does|did|will|would|should|must|can|could)\s+not|\bnot|\bdon['’]t)\s+"
+    r"(?:(?:perform|execute)\s+(?:a|an|the)?\s*)?"
+    r"(?:production\s+)?(?:deploy(?:ment)?|release|migration|drop|delete|publish)"
+    r"(?:\s+(?:to|in)\s+(?:the\s+)?production)?|"
+    r"(?:production\s+)?(?:deploy(?:ment)?|release|migration|drop|delete|publish)"
+    r"(?:\s+(?:to|in)\s+(?:the\s+)?production)?\s+"
+    r"(?:(?:is|are|was|were)\s+(?:not\s+(?:performed|executed|deployed|released|published)|out\s+of\s+scope)|"
+    r"(?:will|would|should|must|can|could)\s+not\s+be\s+"
+    r"(?:performed|executed|deployed|released|published))\b",
     re.IGNORECASE,
 )
 _REVIEW_JA_POST_NEGATION_RE = re.compile(
     r"^\s*(?:は|を|では|には|へ|に|で)?\s*"
     r"(?:(?:実行|実施)\s*)?(?:しない方針|しない|しません|せず)|"
     r"^\s*(?:は|を|では|には|へ|に|で)?\s*(?:行わない|行いません|行わず|禁止|対象外)",
-)
-_REVIEW_PRODUCTION_QUALIFIER_RE = re.compile(
-    r"(?:\b(?:do|does|did|will|would|should|must|can|could)\s+not|\bnot|\bdon['’]t)\s+"
-    r"(?:deploy|release|publish)\s+(?:to|in)\s+(?:the\s+)?$",
-    re.IGNORECASE,
 )
 _REVIEW_HONBAN_QUALIFIER_RE = re.compile(
     r"^\s*(?:への|へ|で|に)?\s*(?:deploy|release|publish|リリース|公開)\s*"
@@ -862,6 +860,91 @@ def _review_segment_span(
     return start, end
 
 
+def _review_quote_span_index(
+    text: str,
+    offset: int,
+) -> tuple[list[int], list[tuple[int, int]]]:
+    """Index common quoted ranges once for constant/logarithmic match lookup."""
+    spans: list[tuple[int, int]] = []
+    paired_open: dict[str, list[int]] = {"「": [], "『": []}
+    paired_close = {"」": "「", "』": "『"}
+    symmetric_open: dict[str, int | None] = {'"': None, "`": None}
+    for position, char in enumerate(text):
+        absolute = offset + position
+        if char in paired_open:
+            paired_open[char].append(absolute)
+        elif char in paired_close:
+            opening = paired_close[char]
+            if paired_open[opening]:
+                spans.append((paired_open[opening].pop() + 1, absolute))
+        elif char in symmetric_open and (position == 0 or text[position - 1] != "\\"):
+            opening = symmetric_open[char]
+            if opening is None:
+                symmetric_open[char] = absolute
+            else:
+                spans.append((opening + 1, absolute))
+                symmetric_open[char] = None
+    absolute_end = offset + len(text)
+    for openings in paired_open.values():
+        spans.extend((opening + 1, absolute_end) for opening in openings)
+    spans.extend(
+        (opening + 1, absolute_end)
+        for opening in symmetric_open.values()
+        if opening is not None
+    )
+    spans.sort()
+    return [start for start, _ in spans], spans
+
+
+def _review_regex_span_index(
+    text: str,
+    offset: int,
+    pattern: re.Pattern,
+) -> tuple[list[int], list[tuple[int, int]]]:
+    spans = [(offset + match.start(), offset + match.end()) for match in pattern.finditer(text)]
+    return [start for start, _ in spans], spans
+
+
+def _review_index_contains(
+    index: tuple[list[int], list[tuple[int, int]]],
+    start: int,
+    end: int,
+) -> bool:
+    starts, spans = index
+    position = bisect_right(starts, start) - 1
+    while position >= 0 and spans[position][0] <= start:
+        span_start, span_end = spans[position]
+        if span_start <= start and end <= span_end:
+            return True
+        position -= 1
+    return False
+
+
+def _review_context_analysis(
+    mission_text: str,
+    context_span: tuple[int, int],
+    cache: dict[tuple[int, int], dict],
+) -> dict:
+    """Compute regex flags and span indexes once for each logical context."""
+    if context_span not in cache:
+        start, end = context_span
+        context = mission_text[start:end]
+        cache[context_span] = {
+            "text": context,
+            "double_negation": bool(_REVIEW_DOUBLE_NEGATION_RE.search(context)),
+            "conditional": bool(_REVIEW_CONDITIONAL_RE.search(context)),
+            "explicit_execution": bool(_REVIEW_EXPLICIT_EXECUTION_RE.search(context)),
+            "quote_only": bool(_REVIEW_QUOTE_ONLY_RE.search(context)),
+            "quotes": _review_quote_span_index(context, start),
+            "negated_operations": _review_regex_span_index(
+                context,
+                start,
+                _REVIEW_EN_NEGATED_OPERATION_RE,
+            ),
+        }
+    return cache[context_span]
+
+
 def _review_audit_context(text: str, start: int, end: int, *, radius: int = 80) -> str:
     """Keep persisted provenance readable and bounded for long mission descriptions."""
     left = max(0, start - radius)
@@ -871,36 +954,22 @@ def _review_audit_context(text: str, start: int, end: int, *, radius: int = 80) 
     return f"{prefix}{text[left:right].strip()}{suffix}"
 
 
-def _review_match_is_quoted(text: str, start: int) -> bool:
-    """Detect common paired quote delimiters around a keyword occurrence."""
-    for opening, closing in (("「", "」"), ("『", "』"), ("`", "`"), ('"', '"')):
-        if opening == closing:
-            if text[:start].count(opening) % 2 == 1:
-                return True
-            continue
-        if text.rfind(opening, 0, start) > text.rfind(closing, 0, start):
-            return True
-    return False
-
-
 def _review_operation_is_explicitly_negated(
     context: str,
     keyword: str,
     relative_start: int,
     relative_end: int,
+    absolute_start: int,
+    absolute_end: int,
+    negated_operations: tuple[list[int], list[tuple[int, int]]],
 ) -> bool:
     """Suppress only when negation is grammatically anchored to this operation."""
-    before = context[max(0, relative_start - 64):relative_start]
     after = context[relative_end:min(len(context), relative_end + 64)]
-    if _REVIEW_EN_PRE_NEGATION_RE.search(before):
-        return True
-    if _REVIEW_EN_POST_NEGATION_RE.search(after):
+    if _review_index_contains(negated_operations, absolute_start, absolute_end):
         return True
     if _REVIEW_JA_POST_NEGATION_RE.search(after):
         return True
-    # production / 本番 are qualifiers in the same explicitly negated operation.
-    if keyword == "production" and _REVIEW_PRODUCTION_QUALIFIER_RE.search(before):
-        return True
+    # 本番 is a qualifier preceding the directly negated operation.
     if keyword == "本番" and _REVIEW_HONBAN_QUALIFIER_RE.search(after):
         return True
     return False
@@ -913,17 +982,23 @@ def _actual_operation_signal_detail(
     signal: str,
     context_index: tuple[list[int], list[tuple[int, int]]],
     unit_index: tuple[list[int], list[tuple[int, int]]],
+    context_analysis_cache: dict[tuple[int, int], dict],
     unit_flags_cache: dict[tuple[int, int], tuple[bool, bool, bool]],
 ) -> dict:
     start, end = match.span()
     context_start, context_end = _review_segment_span(context_index, start, end)
-    logical_context = mission_text[context_start:context_end]
+    context_analysis = _review_context_analysis(
+        mission_text,
+        (context_start, context_end),
+        context_analysis_cache,
+    )
+    logical_context = context_analysis["text"]
     unit_start, unit_end = _review_segment_span(unit_index, start, end)
     relative_start = start - context_start
     relative_end = end - context_start
-    quoted = _review_match_is_quoted(logical_context, relative_start)
-    explicit_execution = bool(_REVIEW_EXPLICIT_EXECUTION_RE.search(logical_context))
-    quote_only = bool(_REVIEW_QUOTE_ONLY_RE.search(logical_context))
+    quoted = _review_index_contains(context_analysis["quotes"], start, end)
+    explicit_execution = context_analysis["explicit_execution"]
+    quote_only = context_analysis["quote_only"]
     unit_key = (unit_start, unit_end)
     if unit_key not in unit_flags_cache:
         logical_unit = mission_text[unit_start:unit_end]
@@ -940,15 +1015,18 @@ def _actual_operation_signal_detail(
         decision, reason = "suppressed", "quoted-non-operation"
     elif quoted:
         decision, reason = "included", "quoted-context-conservative"
-    elif _REVIEW_DOUBLE_NEGATION_RE.search(logical_context):
+    elif context_analysis["double_negation"]:
         decision, reason = "included", "uncertain-or-double-negation"
-    elif _REVIEW_CONDITIONAL_RE.search(logical_context):
+    elif context_analysis["conditional"]:
         decision, reason = "included", "conditional-or-uncertain-context"
     elif _review_operation_is_explicitly_negated(
         logical_context,
         keyword,
         relative_start,
         relative_end,
+        start,
+        end,
+        context_analysis["negated_operations"],
     ):
         decision, reason = "suppressed", "negated-actual-operation"
     elif global_non_operation and unit_double_negation:
@@ -1006,6 +1084,7 @@ def derive_review_tier_decision(
     signal_details: list[dict] = []
     context_index = _review_segment_index(mission_text, _REVIEW_CONTEXT_BOUNDARY_RE)
     unit_index = _review_segment_index(mission_text, _REVIEW_UNIT_BOUNDARY_RE)
+    context_analysis_cache: dict[tuple[int, int], dict] = {}
     unit_flags_cache: dict[tuple[int, int], tuple[bool, bool, bool]] = {}
 
     if task_profile_risk == "high":
@@ -1038,6 +1117,7 @@ def derive_review_tier_decision(
                     signal,
                     context_index,
                     unit_index,
+                    context_analysis_cache,
                     unit_flags_cache,
                 )
                 for match in _review_keyword_matches(mission_text, keyword, ignore_case=ignore_case)
