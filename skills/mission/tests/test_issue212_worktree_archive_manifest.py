@@ -417,6 +417,38 @@ def test_audit_rejects_symlinked_archive_ancestors_without_reading_outside_root(
     assert "no-critical-findings" not in codes
 
 
+@pytest.mark.parametrize(
+    ("symlink_ancestor", "reason"),
+    [
+        ("archive", "archive-root-symlink"),
+        ("mission-state", "mission-state-root-symlink"),
+    ],
+)
+def test_audit_rejects_symlinked_state_roots_without_reading_external_archive(
+    tmp_path, run_cli, symlink_ancestor, reason
+):
+    worktree, destination = _make_completed_worktree(tmp_path)
+    result = _archive(run_cli, worktree, destination)
+    assert result.returncode == 0, result.stderr
+    mission_state = destination / ".mission-state"
+    unsafe_path = mission_state / "archive" if symlink_ancestor == "archive" else mission_state
+    external = tmp_path / f"external-{symlink_ancestor}"
+    unsafe_path.replace(external)
+    unsafe_path.symlink_to(external, target_is_directory=True)
+
+    data = _run_audit(destination)
+
+    assert data["total_sessions"] == 0
+    assert data["invalid_worktree_archive_count"] == 1
+    assert data["invalid_worktree_archives"][0] == {
+        "bundle_path": str(unsafe_path),
+        "reason": reason,
+    }
+    codes = {finding["code"] for finding in data["findings"]}
+    assert "invalid-worktree-archive" in codes
+    assert "no-critical-findings" not in codes
+
+
 def test_audit_deduplicates_invalid_bundle_across_overlapping_roots(tmp_path, run_cli):
     worktree, destination = _make_completed_worktree(tmp_path)
     result = _archive(run_cli, worktree, destination)
