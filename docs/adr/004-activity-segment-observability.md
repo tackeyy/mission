@@ -33,13 +33,15 @@ writing state, and a terminal state rejects new activity. Terminal control is
 fail-open with respect to observability: malformed open measurement is removed
 and counted in `activity_anomaly_counts`, but never prevents pass or halt.
 
-On reinitialization, PID refresh, stale/orphan cleanup, Stop-hook halt, or any
-other terminal transition after a crash, an open segment closes at the last
-valid `updated_at` between its start and the control time. The later gap is
-reported as `activity_unobserved_gap_sec`; it is not classified as work or idle.
-A repeated resume does not add duration again. PID refresh also accrues the
-current phase only to that trusted boundary and restarts `phase_started_at` at
-resume, preventing a later phase transition from absorbing the crash gap.
+On reinitialization, PID refresh, stale/orphan cleanup, or Stop-hook automatic
+halt after a crash, an open segment closes at the last valid `updated_at`
+between its start and the control time. The later gap is reported as
+`activity_unobserved_gap_sec`; it is not classified as work or idle. Explicit
+`mark-passes`, `mark-halt`, and `halt --all` instead close at their control time
+because the caller is declaring a currently observed transition. A repeated
+resume does not add duration again. Automatic stale halts retain the pre-halt
+phase in `resume_target_phase`; PID refresh restores it and restarts
+`phase_started_at`, while an explicit halt is never reactivated automatically.
 
 The latest 32 closed segments remain in `activity_segments` for diagnosis.
 Fixed-size `activity_rollup` maps preserve all earlier totals, so state growth
@@ -64,9 +66,11 @@ used so equal session identifiers in different projects are not collapsed.
 
 Task samples use `mission_id`, falling back to `unknown`. Open segments are
 reported but excluded from duration distributions. Malformed, negative,
-non-finite, future-enum, and inconsistent rollup values are excluded and counted
-as invalid. Legacy states remain readable: their phase time is unclassified and
-no wait reason is fabricated.
+non-finite, future-enum, missing or non-map rollup aggregates, and inconsistent
+rollup values are excluded and counted as invalid. Bulk terminal writers sample
+their control time after lock acquisition and never write a timestamp before the
+latest persisted update. Legacy states remain readable: their phase time is
+unclassified and no wait reason is fabricated.
 
 Collection and grouping are linear in the number of states and segments. Exact
 R7 percentiles sort each task/phase sample group, so percentile calculation is
