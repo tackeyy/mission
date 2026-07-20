@@ -228,7 +228,8 @@ The orchestrator records assumptions, decomposes the mission, executes work,
 collects reviewer JSON, runs `aggregate-reviews`, records the result with
 `push-score --scoring-json`, and repeats until `mark-passes` accepts the state or
 a halt condition is reached. See [`skills/mission/SKILL.md`](skills/mission/SKILL.md)
-for the full operating protocol.
+for the execution protocol and [`docs/PASS_RATE_METRICS.md`](docs/PASS_RATE_METRICS.md)
+for the `stats`/audit raw and completed quality schema.
 
 ## Requirements
 

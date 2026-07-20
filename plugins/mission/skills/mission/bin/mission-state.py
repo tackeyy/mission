@@ -58,6 +58,7 @@ from mission_common import (  # noqa: E402
     parse_iso_datetime,
     state_dedupe_rank,
     state_identity,
+    summarize_pass_rate_population,
 )
 from specialist_accounting import (  # noqa: E402
     candidate_accounting_report,
@@ -76,6 +77,7 @@ from activity_segments import (  # noqa: E402
     summarize_activity_states,
     transition_activity_phase,
 )
+from worktree_archive import validate_worktree_archive_bundle  # noqa: E402
 
 SCHEMA_VERSION = 2  # v1: 旧 schema (project_root/pid なし), v2: A-1/A-2/B-3 追加
 
@@ -377,8 +379,15 @@ def _iter_state_files(root: Path, *, include_archive: bool = False):
                 # Issue #7: worktree サブディレクトリ (archive/worktree-*/) も列挙する
                 for sub in sorted(archive.glob("worktree-*")):
                     if sub.is_dir():
-                        yield from sorted(sub.glob("*.json"))
-                        worktree_sessions = sub / "sessions"
+                        validation = validate_worktree_archive_bundle(sub)
+                        if validation.status == "invalid":
+                            continue
+                        if validation.status == "valid":
+                            yield from validation.state_paths
+                            continue
+                        worktree_root = validation.root
+                        yield from sorted(worktree_root.glob("*.json"))
+                        worktree_sessions = worktree_root / "sessions"
                         if worktree_sessions.is_dir():
                             yield from sorted(worktree_sessions.glob("*.json"))
 
@@ -5971,11 +5980,22 @@ def _phase_duration_totals(states: list[dict]) -> dict:
 
 def _aggregate(states: list[dict], duplicate_state_group_count: int = 0) -> dict:
     n = len(states)
+    pass_rate_summary = summarize_pass_rate_population(
+        states,
+        stale_after_sec=_stale_active_seconds(),
+    )
     if n == 0:
         return {
             "total_sessions": 0, "pass_count": 0, "halt_count": 0,
             "duplicate_state_group_count": duplicate_state_group_count,
-            "incomplete_count": 0, "abandoned_count": 0, "pass_rate": None,
+            "incomplete_count": 0, "abandoned_count": 0,
+            "active_count": 0, "active_no_score_count": 0, "stale_count": 0,
+            "raw_pass_rate_numerator": 0, "raw_pass_rate_denominator": 0,
+            "raw_pass_rate": None,
+            "completed_pass_rate_numerator": 0, "completed_pass_rate_denominator": 0,
+            "completed_pass_rate": None,
+            # Deprecated compatibility aliases: stats historically reported raw quality.
+            "pass_rate_numerator": 0, "pass_rate_denominator": 0, "pass_rate": None,
             "forced_pass_count": 0, "forced_pass_rate": None,
             "ungated_pass_count": 0, "ungated_pass_rate": None,
             "avg_iterations": None, "avg_final_composite": None,
@@ -5993,9 +6013,9 @@ def _aggregate(states: list[dict], duplicate_state_group_count: int = 0) -> dict
     # _classify を 1 回だけ評価 (旧実装は pass/halt/incomplete で 3N 回呼んでいた)
     classes = [_classify(s) for s in states]
     pass_count = classes.count("pass")
-    halt_count = classes.count("halt")
-    incomplete_count = classes.count("incomplete")
-    abandoned_count = classes.count("abandoned")
+    halt_count = pass_rate_summary["halt_count"]
+    incomplete_count = pass_rate_summary["incomplete_count"]
+    abandoned_count = pass_rate_summary["abandoned_count"]
     # 改善1: force-pass (品質ゲート未通過の合格) を集計し可視化する
     forced_pass_count = sum(1 for s in states if s.get("passes") and s.get("passes_forced"))
     # 採点エントリ無しで合格 = 品質ゲート未通過 (set 直叩き or 旧版)。
@@ -6035,7 +6055,19 @@ def _aggregate(states: list[dict], duplicate_state_group_count: int = 0) -> dict
         "halt_count": halt_count,
         "incomplete_count": incomplete_count,
         "abandoned_count": abandoned_count,
-        "pass_rate": pass_count / n,
+        "active_count": pass_rate_summary["active_count"],
+        "active_no_score_count": pass_rate_summary["active_no_score_count"],
+        "stale_count": pass_rate_summary["stale_count"],
+        "raw_pass_rate_numerator": pass_rate_summary["raw_pass_rate_numerator"],
+        "raw_pass_rate_denominator": pass_rate_summary["raw_pass_rate_denominator"],
+        "raw_pass_rate": pass_rate_summary["raw_pass_rate"],
+        "completed_pass_rate_numerator": pass_rate_summary["completed_pass_rate_numerator"],
+        "completed_pass_rate_denominator": pass_rate_summary["completed_pass_rate_denominator"],
+        "completed_pass_rate": pass_rate_summary["completed_pass_rate"],
+        # Deprecated compatibility aliases: stats historically reported raw quality.
+        "pass_rate_numerator": pass_rate_summary["raw_pass_rate_numerator"],
+        "pass_rate_denominator": pass_rate_summary["raw_pass_rate_denominator"],
+        "pass_rate": pass_rate_summary["raw_pass_rate"],
         "forced_pass_count": forced_pass_count,
         "forced_pass_rate": forced_pass_count / pass_count if pass_count else None,
         "ungated_pass_count": ungated_pass_count,
@@ -6064,13 +6096,18 @@ def _pct_detail(rate) -> str:
     return f" / {rate*100:.0f}% of PASS" if rate is not None else ""
 
 
+def _rate_detail(stats: dict, prefix: str) -> str:
+    numerator = stats[f"{prefix}_pass_rate_numerator"]
+    denominator = stats[f"{prefix}_pass_rate_denominator"]
+    rate = stats[f"{prefix}_pass_rate"]
+    percentage = f" ({rate * 100:.1f}%)" if rate is not None else " (-)"
+    return f"{numerator}/{denominator}{percentage}"
+
+
 def _format_text(stats: dict, since: str | None, until: str | None) -> str:
     period = f"{since or '(all)'} ~ {until or '(now)'}"
     roots = ", ".join(stats.get("roots") or ["(none)"])
     n = stats["total_sessions"]
-    if n == 0:
-        return f"=== /mission stats ({period}) ===\nroots: {roots}\ntotal_sessions: 0\n(no sessions in this period)"
-    pr = stats["pass_rate"]
     fc = stats["avg_final_composite"]
     sd = stats["avg_session_duration_sec"]
     md = stats.get("median_session_duration_sec")
@@ -6079,9 +6116,14 @@ def _format_text(stats: dict, since: str | None, until: str | None) -> str:
         f"roots:                    {roots}",
         f"total_sessions:           {n}",
         f"duplicate_state_groups:   {stats.get('duplicate_state_group_count', 0)}",
-        f"  PASS:                   {stats['pass_count']} ({pr*100:.1f}%)" if pr is not None else f"  PASS: {stats['pass_count']}",
+        f"raw_pass_rate:            {_rate_detail(stats, 'raw')}",
+        f"completed_pass_rate:      {_rate_detail(stats, 'completed')}",
+        f"  PASS:                   {stats['pass_count']}",
         f"    (forced:              {stats['forced_pass_count']}{_pct_detail(stats.get('forced_pass_rate'))})",
         f"    (ungated:             {stats['ungated_pass_count']}{_pct_detail(stats.get('ungated_pass_rate'))})",
+        f"  active:                 {stats['active_count']}",
+        f"  active-no-score:        {stats['active_no_score_count']}",
+        f"  stale:                  {stats['stale_count']}",
         f"  HALT:                   {stats['halt_count']}",
     ]
     by_halt_category = stats.get("by_halt_category") or {}

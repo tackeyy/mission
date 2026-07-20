@@ -1,6 +1,7 @@
 """stats サブコマンドのテスト (T6: RED → T7: GREEN)."""
 import json
 import pytest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -39,6 +40,23 @@ def test_stats_empty_root_returns_zero(tmp_path, run_cli):
     data = json.loads(r.stdout)
     assert data["total_sessions"] == 0
     assert data["roots"] == [str(tmp_path)]
+
+
+def test_stats_empty_console_always_shows_rates_denominators_and_health(tmp_path, run_cli):
+    result = run_cli("stats", "--root", str(tmp_path), cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    for label in (
+        "raw_pass_rate:",
+        "completed_pass_rate:",
+        "active:",
+        "active-no-score:",
+        "stale:",
+        "HALT:",
+        "abandoned:",
+    ):
+        assert label in result.stdout
+    assert "0/0" in result.stdout
 
 
 def test_stats_default_root_uses_cwd(tmp_path, run_cli):
@@ -102,6 +120,84 @@ def test_stats_counts_pass_and_halt_and_incomplete(tmp_path, run_cli):
     _make_state(tmp_path / "p4", passes=False, loop_active=False, halt_reason="")
     r2 = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
     assert json.loads(r2.stdout)["abandoned_count"] == 1
+
+
+def test_stats_reports_raw_and_completed_pass_rates_with_health_counts(tmp_path, run_cli):
+    """Raw quality and completed quality keep live work visible but separate."""
+    fresh = datetime.now(timezone.utc).isoformat()
+    for index in range(6):
+        _make_state(
+            tmp_path / f"passed-{index}",
+            mission_id=f"passed-{index}",
+            session_id=f"passed-{index}",
+        )
+    for index in range(2):
+        _make_state(
+            tmp_path / f"active-{index}",
+            mission_id=f"active-{index}",
+            session_id=f"active-{index}",
+            passes=False,
+            loop_active=True,
+            halt_reason="",
+            score_history=[],
+            updated_at=fresh,
+        )
+
+    result = run_cli(
+        "stats", "--root", str(tmp_path), "--json", cwd=tmp_path,
+        env_extra={"MISSION_STALE_ACTIVE_SECONDS": "3600"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout, parse_constant=lambda value: pytest.fail(f"non-finite JSON: {value}"))
+    assert data["raw_pass_rate_numerator"] == 6
+    assert data["raw_pass_rate_denominator"] == 8
+    assert data["raw_pass_rate"] == pytest.approx(0.75)
+    assert data["completed_pass_rate_numerator"] == 6
+    assert data["completed_pass_rate_denominator"] == 6
+    assert data["completed_pass_rate"] == pytest.approx(1.0)
+    assert data["active_count"] == 0
+    assert data["active_no_score_count"] == 2
+    assert data["stale_count"] == 0
+    assert data["halt_count"] == 0
+    assert data["abandoned_count"] == 0
+    # stats legacy meaning remains the raw all-session rate.
+    assert data["pass_rate"] == data["raw_pass_rate"]
+
+
+def test_stats_counts_stale_as_completed_health_debt_and_prints_denominators(tmp_path, run_cli):
+    """A stale active run is not hidden as healthy active or omitted quality debt."""
+    _make_state(tmp_path / "passed", session_id="passed", mission_id="passed")
+    _make_state(
+        tmp_path / "stale",
+        session_id="stale",
+        mission_id="stale",
+        passes=False,
+        loop_active=True,
+        halt_reason="",
+        score_history=[],
+        updated_at=(datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+    )
+
+    json_result = run_cli(
+        "stats", "--root", str(tmp_path), "--json", cwd=tmp_path,
+        env_extra={"MISSION_STALE_ACTIVE_SECONDS": "3600"},
+    )
+    text_result = run_cli(
+        "stats", "--root", str(tmp_path), cwd=tmp_path,
+        env_extra={"MISSION_STALE_ACTIVE_SECONDS": "3600"},
+    )
+
+    data = json.loads(json_result.stdout)
+    assert data["completed_pass_rate_numerator"] == 1
+    assert data["completed_pass_rate_denominator"] == 2
+    assert data["completed_pass_rate"] == pytest.approx(0.5)
+    assert data["stale_count"] == 1
+    assert data["active_no_score_count"] == 0
+    assert "raw_pass_rate:" in text_result.stdout
+    assert "completed_pass_rate:" in text_result.stdout
+    assert "1/2" in text_result.stdout
+    assert "stale:" in text_result.stdout
 
 
 def test_stats_avg_iterations_and_composite(tmp_path, run_cli):

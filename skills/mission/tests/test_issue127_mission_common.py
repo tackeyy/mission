@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -52,3 +53,109 @@ def test_preparation_markers_use_audit_superset():
     assert state_mod.PREPARATION_ONLY_MARKERS == audit_mod.PREPARATION_ONLY_MARKERS
     assert "Prompt file:" in state_mod.PREPARATION_ONLY_MARKERS
     assert "Review URL:" in state_mod.PREPARATION_ONLY_MARKERS
+
+
+def test_shared_pass_rate_health_is_exclusive_and_fails_stale_closed():
+    state_mod = _load(MISSION_STATE_PY, "mission_state_issue208_health")
+    now = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
+    states = [
+        {"passes": True, "loop_active": False, "updated_at": "2026-07-21T11:59:00Z"},
+        {"passes": False, "loop_active": False, "halt_reason": "blocked", "updated_at": "2026-07-21T11:59:00Z"},
+        {"passes": False, "loop_active": False, "halt_reason": "", "updated_at": "2026-07-21T11:59:00Z"},
+        {
+            "passes": False,
+            "loop_active": True,
+            "halt_reason": "",
+            "score_history": [{"composite": 4.0}],
+            "updated_at": "2026-07-21T11:59:00+00:00",
+        },
+        {
+            "passes": False,
+            "loop_active": True,
+            "halt_reason": "",
+            "score_history": [{"composite": float("inf")}],
+            "updated_at": "2026-07-21T11:59:00",
+        },
+        {
+            "passes": False,
+            "loop_active": True,
+            "halt_reason": "",
+            "score_history": [],
+            "updated_at": "malformed",
+        },
+    ]
+
+    summary = state_mod.summarize_pass_rate_population(
+        states,
+        now=now,
+        stale_after_sec=3600,
+    )
+
+    assert summary["health_classes"] == [
+        "pass", "halt", "abandoned", "active", "active-no-score", "stale"
+    ]
+    assert summary["incomplete_count"] == 3
+    assert summary["raw_pass_rate_numerator"] == 1
+    assert summary["raw_pass_rate_denominator"] == 6
+    assert summary["completed_pass_rate_numerator"] == 1
+    assert summary["completed_pass_rate_denominator"] == 4
+
+
+def test_audit_aggregate_uses_one_observation_time_at_stale_boundary(monkeypatch, tmp_path):
+    audit_mod = _load(MISSION_AUDIT_PY, "mission_audit_issue208_boundary")
+    before_boundary = datetime(2026, 7, 21, 11, 59, 59, tzinfo=timezone.utc)
+    after_boundary = datetime(2026, 7, 21, 12, 0, 1, tzinfo=timezone.utc)
+    observed = iter([before_boundary, after_boundary, after_boundary, after_boundary])
+    calls = []
+
+    def advancing_now():
+        calls.append(True)
+        return next(observed)
+
+    monkeypatch.setattr(audit_mod, "utc_now", advancing_now)
+    monkeypatch.setenv("MISSION_STALE_ACTIVE_SECONDS", "3600")
+    state = {
+        "mission": "boundary",
+        "mission_id": "boundary-mission",
+        "session_id": "boundary-session",
+        "project_root": str(tmp_path),
+        "passes": False,
+        "loop_active": True,
+        "halt_reason": "",
+        "score_history": [],
+        "started_at": "2026-07-21T11:00:00Z",
+        "updated_at": "2026-07-21T11:00:00Z",
+        "iteration": 1,
+    }
+    record = audit_mod.StateRecord(tmp_path / "state.json", state)
+
+    summary = audit_mod.aggregate([record], [], 0, 1800)
+
+    assert len(calls) == 1
+    assert summary["active_no_score_count"] == 1
+    assert summary["stale_count"] == 0
+    assert summary["stale_active_no_score_count"] == 0
+    assert summary["completed_pass_rate_denominator"] == 0
+
+
+def test_shared_pass_rate_summary_observes_all_states_at_one_implicit_time(monkeypatch):
+    state_mod = _load(MISSION_STATE_PY, "mission_state_issue208_implicit_now")
+    common = sys.modules["mission_common"]
+    observed = []
+    real_classify = common.classify_pass_rate_health
+
+    def record_observation(state, *, now, stale_after_sec):
+        observed.append(now)
+        return real_classify(state, now=now, stale_after_sec=stale_after_sec)
+
+    monkeypatch.setattr(common, "classify_pass_rate_health", record_observation)
+    states = [
+        {"passes": False, "loop_active": True, "updated_at": "2026-07-21T00:00:00Z"},
+        {"passes": False, "loop_active": True, "updated_at": "2026-07-21T00:00:00Z"},
+    ]
+
+    state_mod.summarize_pass_rate_population(states, stale_after_sec=3600)
+
+    assert len(observed) == 2
+    assert observed[0] is not None
+    assert observed[0] is observed[1]

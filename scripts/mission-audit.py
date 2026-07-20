@@ -32,11 +32,14 @@ from mission_common import (  # noqa: E402
     HALT_CATEGORIES,
     PREPARATION_ONLY_MARKERS,
     SPECIALIST_SELECTION_CHECKPOINT_REQUIRED_AT,
+    classify_pass_rate_health,
     classify_state as classify,
     duration_sec,
+    has_scoring_checkpoint,
     parse_iso_datetime,
     state_dedupe_rank,
     state_identity,
+    summarize_pass_rate_population,
 )
 from specialist_accounting import (  # noqa: E402
     applied_specialist_invocation_skills,
@@ -58,6 +61,10 @@ from audit_findings import (  # noqa: E402
     partition_findings,
     serialize_findings,
     sort_findings,
+)
+from worktree_archive import (  # noqa: E402
+    WorktreeArchiveValidation,
+    validate_worktree_archive_bundle,
 )
 
 
@@ -196,6 +203,8 @@ class StateRecord:
     archive_bundle: Path | None = None
     archive_root: Path | None = None
     archive_generation: str | None = None
+    archive_validation: WorktreeArchiveValidation | None = None
+    audit_specialist_invocation_gap_skills: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -204,6 +213,7 @@ class StateCandidate:
     archive_bundle: Path | None = None
     archive_root: Path | None = None
     archive_generation: str | None = None
+    archive_validation: WorktreeArchiveValidation | None = None
     state: dict[str, Any] | None = None
 
 
@@ -214,6 +224,7 @@ class ArchiveResolution:
     root: Path
     generation: str | None = None
     reason: str | None = None
+    validation: WorktreeArchiveValidation | None = None
 
 
 def _worktree_archive_root(record: StateRecord) -> Path | None:
@@ -250,6 +261,25 @@ def _file_sha256(path: Path) -> str:
 
 
 def _resolve_worktree_archive(bundle: Path) -> ArchiveResolution:
+    shared = validate_worktree_archive_bundle(bundle)
+    if shared.status == "valid":
+        return ArchiveResolution(
+            "generation",
+            bundle,
+            shared.root,
+            generation=shared.generation,
+            validation=shared,
+        )
+    if shared.status == "invalid":
+        return ArchiveResolution(
+            "invalid",
+            bundle,
+            shared.root,
+            generation=shared.generation,
+            reason=shared.reason,
+            validation=shared,
+        )
+    # Legacy bundles have no pointer/manifest generation; retain their reader below.
     try:
         bundle_stat = bundle.lstat()
     except FileNotFoundError:
@@ -537,6 +567,24 @@ def _validate_worktree_manifest_uncached(record: StateRecord) -> tuple[str, list
 
 
 def _validated_worktree_manifest(record: StateRecord) -> tuple[str, list[dict[str, Any]]]:
+    validation = record.archive_validation
+    if validation is not None:
+        if (
+            validation.status == "valid"
+            and validation.state == record.state
+            and validation.state_paths == (record.path,)
+        ):
+            return "valid", list(validation.evidence)
+        return "invalid", []
+    bundle = _worktree_archive_root(record)
+    if bundle is not None:
+        shared = validate_worktree_archive_bundle(bundle)
+        if shared.status == "invalid":
+            return "invalid", []
+        if shared.status == "valid":
+            if shared.state == record.state and shared.state_paths == (record.path,):
+                return "valid", list(shared.evidence)
+            return "invalid", []
     cache_key = (
         str(record.path),
         str(record.archive_root or ""),
@@ -633,6 +681,26 @@ def _append_invalid_archive_root(
 def _preflight_generation_state(
     resolution: ArchiveResolution,
 ) -> tuple[StateCandidate | None, str | None]:
+    validation = resolution.validation
+    if validation is not None:
+        if (
+            validation.status != "valid"
+            or validation.state is None
+            or len(validation.state_paths) != 1
+            or not is_mission_state(validation.state)
+        ):
+            return None, validation.reason or "manifest-or-generation-integrity-invalid"
+        return (
+            StateCandidate(
+                path=validation.state_paths[0],
+                archive_bundle=resolution.bundle,
+                archive_root=validation.root,
+                archive_generation=validation.generation,
+                archive_validation=validation,
+                state=validation.state,
+            ),
+            None,
+        )
     manifest_path = resolution.root / "manifest.json"
     try:
         manifest_stat = manifest_path.lstat()
@@ -924,6 +992,7 @@ def load_records(
                     archive_bundle=candidate.archive_bundle,
                     archive_root=candidate.archive_root,
                     archive_generation=candidate.archive_generation,
+                    archive_validation=candidate.archive_validation,
                 )
             )
     return records
@@ -1137,7 +1206,9 @@ def bucket_counts(records: list[StateRecord], bucket_fn) -> dict[str, int]:
     return counts
 
 
-def halt_or_incomplete_bucket(record: StateRecord) -> str:
+def halt_or_incomplete_bucket(
+    record: StateRecord, *, now: datetime | None = None
+) -> str:
     state = record.state
     # #190: 構造化 halt_category があればそれを正とする (自由文ヒューリスティックより信頼できる)。
     # incomplete (未 halt) には適用しない -- halt_category は halt 発生時のみ記録される。
@@ -1148,7 +1219,7 @@ def halt_or_incomplete_bucket(record: StateRecord) -> str:
     reason = str(state.get("halt_reason") or "").lower()
     if classify(state) == "incomplete":
         if not state.get("score_history"):
-            if is_stale_active_no_score(record):
+            if is_stale_active_no_score(record, now=now):
                 return "stale-active-live-pid"
             return "active-no-score-checkpoint"
         return "active-in-progress"
@@ -1189,7 +1260,7 @@ def is_forced_pass_autonomous_suspect(state: dict[str, Any]) -> bool:
 
 def is_active_no_score_checkpoint(record: StateRecord) -> bool:
     """Return true for live mission sessions that have not reached first scoring."""
-    return classify(record.state) == "incomplete" and not record.state.get("score_history")
+    return classify(record.state) == "incomplete" and not has_scoring_checkpoint(record.state)
 
 
 def active_pending_threshold_sec() -> int:
@@ -1208,10 +1279,14 @@ def is_active_no_score_pending(record: StateRecord, *, now: datetime | None = No
 
 
 def is_stale_active_no_score(record: StateRecord, *, now: datetime | None = None) -> bool:
-    if not is_active_no_score_checkpoint(record):
-        return False
-    age = age_since_update_sec(record.state, now=now)
-    return age is None or age >= stale_active_threshold_sec()
+    return (
+        not has_scoring_checkpoint(record.state)
+        and classify_pass_rate_health(
+            record.state,
+            now=now or utc_now(),
+            stale_after_sec=stale_active_threshold_sec(),
+        ) == "stale"
+    )
 
 
 def slow_session_bucket(record: StateRecord, slow_threshold_sec: int) -> str:
@@ -1295,9 +1370,11 @@ def has_specialist_selection_checkpoint(state: dict[str, Any]) -> bool:
     )
 
 
-def missing_specialist_selection_checkpoint_item(record: StateRecord) -> dict[str, Any] | None:
+def missing_specialist_selection_checkpoint_item(
+    record: StateRecord, *, now: datetime | None = None
+) -> dict[str, Any] | None:
     state = record.state
-    if is_active_no_score_pending(record):
+    if is_active_no_score_pending(record, now=now):
         return None
     if not specialist_selection_checkpoint_expected(state):
         return None
@@ -1314,8 +1391,12 @@ def missing_specialist_selection_checkpoint_item(record: StateRecord) -> dict[st
     }
 
 
-def specialist_invocation_gap_skills(record: StateRecord) -> list[str]:
-    if is_active_no_score_pending(record):
+def specialist_invocation_gap_skills(
+    record: StateRecord, *, now: datetime | None = None
+) -> list[str]:
+    if record.audit_specialist_invocation_gap_skills:
+        return list(record.audit_specialist_invocation_gap_skills)
+    if is_active_no_score_pending(record, now=now):
         return []
     selected = explicitly_selected_specialist_skills(record.state)
     if not selected:
@@ -1385,9 +1466,11 @@ def is_active_ask_user_specialist_wait(state: dict[str, Any]) -> bool:
     )
 
 
-def candidate_only_specialist_item(record: StateRecord) -> dict[str, Any] | None:
+def candidate_only_specialist_item(
+    record: StateRecord, *, now: datetime | None = None
+) -> dict[str, Any] | None:
     state = record.state
-    if is_active_no_score_pending(record):
+    if is_active_no_score_pending(record, now=now):
         return None
     if is_active_ask_user_specialist_wait(state):
         return None
@@ -1704,11 +1787,28 @@ def aggregate(
     invalid_worktree_archives: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     invalid_worktree_archives = invalid_worktree_archives or []
+    observation_now = utc_now()
     classes = [classify(r.state) for r in records]
-    active_no_score_checkpoint = [r for r in records if is_active_no_score_checkpoint(r)]
-    active_no_score_pending = [r for r in active_no_score_checkpoint if is_active_no_score_pending(r)]
-    stale_active_no_score = [r for r in active_no_score_checkpoint if is_stale_active_no_score(r)]
-    pass_rate_records = [r for r in records if not is_active_no_score_checkpoint(r)]
+    pass_rate_summary = summarize_pass_rate_population(
+        [record.state for record in records],
+        now=observation_now,
+        stale_after_sec=stale_active_threshold_sec(),
+    )
+    health_classes = pass_rate_summary["health_classes"]
+    active_no_score_checkpoint = [
+        record
+        for record, health in zip(records, health_classes)
+        if health in {"active-no-score", "stale"}
+        and not has_scoring_checkpoint(record.state)
+    ]
+    active_no_score_pending = [
+        r for r in active_no_score_checkpoint
+        if is_active_no_score_pending(r, now=observation_now)
+    ]
+    stale_active_no_score = [
+        r for r in active_no_score_checkpoint
+        if is_stale_active_no_score(r, now=observation_now)
+    ]
     durations = [d for r in records if (d := duration_sec(r.state)) is not None]
     composites = [
         entry["composite"]
@@ -1734,10 +1834,16 @@ def aggregate(
         r for r in pass_records
         if ((latest_scored_entry(r.state) or {}).get("composite") or 0) < 4.3
     ]
-    specialist_invocation_gaps = [
-        r for r in records
-        if specialist_invocation_gap_skills(r)
-    ]
+    specialist_invocation_gaps = []
+    for record in records:
+        gap_skills = specialist_invocation_gap_skills(record, now=observation_now)
+        if gap_skills:
+            specialist_invocation_gaps.append(
+                replace(
+                    record,
+                    audit_specialist_invocation_gap_skills=tuple(gap_skills),
+                )
+            )
     unselected_specialist_invocations = [
         item for r in records
         if (item := unselected_specialist_invocation_item(r)) is not None
@@ -1764,11 +1870,15 @@ def aggregate(
     ]
     missing_specialist_selection_checkpoints = [
         item for r in records
-        if (item := missing_specialist_selection_checkpoint_item(r)) is not None
+        if (
+            item := missing_specialist_selection_checkpoint_item(
+                r, now=observation_now
+            )
+        ) is not None
     ]
     candidate_only_specialists = [
         item for r in records
-        if (item := candidate_only_specialist_item(r)) is not None
+        if (item := candidate_only_specialist_item(r, now=observation_now)) is not None
     ]
     current_missing_scoring_evidence, historical_missing_scoring_evidence = split_current_historical(
         missing_scoring_evidence, current_since
@@ -1824,16 +1934,27 @@ def aggregate(
         "invalid_worktree_archives": invalid_worktree_archives,
         "invalid_worktree_archive_count": len(invalid_worktree_archives),
         "pass_count": pass_count,
-        "halt_count": classes.count("halt"),
-        "incomplete_count": classes.count("incomplete"),
-        "abandoned_count": classes.count("abandoned"),
+        "halt_count": pass_rate_summary["halt_count"],
+        "incomplete_count": pass_rate_summary["incomplete_count"],
+        "abandoned_count": pass_rate_summary["abandoned_count"],
+        "active_count": pass_rate_summary["active_count"],
+        "active_no_score_count": pass_rate_summary["active_no_score_count"],
+        "stale_count": pass_rate_summary["stale_count"],
         "active_no_score_checkpoint_count": len(active_no_score_checkpoint),
         "active_no_score_pending_sessions": active_no_score_pending,
         "active_no_score_pending_count": len(active_no_score_pending),
         "stale_active_no_score_sessions": stale_active_no_score,
         "stale_active_no_score_count": len(stale_active_no_score),
-        "pass_rate_denominator": len(pass_rate_records),
-        "pass_rate": pass_count / len(pass_rate_records) if pass_rate_records else None,
+        "raw_pass_rate_numerator": pass_rate_summary["raw_pass_rate_numerator"],
+        "raw_pass_rate_denominator": pass_rate_summary["raw_pass_rate_denominator"],
+        "raw_pass_rate": pass_rate_summary["raw_pass_rate"],
+        "completed_pass_rate_numerator": pass_rate_summary["completed_pass_rate_numerator"],
+        "completed_pass_rate_denominator": pass_rate_summary["completed_pass_rate_denominator"],
+        "completed_pass_rate": pass_rate_summary["completed_pass_rate"],
+        # Deprecated compatibility aliases: audit historically reported completed quality.
+        "pass_rate_numerator": pass_rate_summary["completed_pass_rate_numerator"],
+        "pass_rate_denominator": pass_rate_summary["completed_pass_rate_denominator"],
+        "pass_rate": pass_rate_summary["completed_pass_rate"],
         "forced_pass_count": len(forced),
         "forced_pass_autonomous_suspect_count": len(forced_autonomous_suspect),  # #185
         "ungated_pass_count": len(ungated),
@@ -1905,7 +2026,10 @@ def aggregate(
                 for skill in item.get("skills", [])
             ]
         ),
-        "halt_incomplete_breakdown": bucket_counts(halt_or_incomplete, halt_or_incomplete_bucket),
+        "halt_incomplete_breakdown": bucket_counts(
+            halt_or_incomplete,
+            lambda record: halt_or_incomplete_bucket(record, now=observation_now),
+        ),
         "slow_session_breakdown": slow_session_breakdown,
         "slow_phase_duration_breakdown": slow_phase_duration_breakdown,
         "coarse_phase_attributions": coarse_phase_attributions,
@@ -2181,8 +2305,11 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
         f"- total sessions: {stats['total_sessions']}",
         f"- current finding cutoff: {stats['current_since'] or '(not set; all findings are treated as current)'}",
         f"- pass / halt / incomplete / abandoned: {stats['pass_count']} / {stats['halt_count']} / {stats['incomplete_count']} / {stats['abandoned_count']}",
-        f"- pass rate: {fmt_float(stats['pass_rate'] * 100 if stats['pass_rate'] is not None else None, 1)}% (denominator: {stats['pass_rate_denominator']})",
-        f"- active no-score checkpoints excluded from pass rate: {stats['active_no_score_checkpoint_count']}",
+        f"- raw pass rate: {fmt_float(stats['raw_pass_rate'] * 100 if stats['raw_pass_rate'] is not None else None, 1)}% ({stats['raw_pass_rate_numerator']}/{stats['raw_pass_rate_denominator']})",
+        f"- completed pass rate: {fmt_float(stats['completed_pass_rate'] * 100 if stats['completed_pass_rate'] is not None else None, 1)}% ({stats['completed_pass_rate_numerator']}/{stats['completed_pass_rate_denominator']})",
+        f"- health counts (active / active-no-score / stale / halt / abandoned): {stats['active_count']} / {stats['active_no_score_count']} / {stats['stale_count']} / {stats['halt_count']} / {stats['abandoned_count']}",
+        f"- fresh active no-score excluded from completed pass rate: {stats['active_no_score_count']}",
+        f"- stale active no-score included as completed health debt: {stats['stale_active_no_score_count']}",
         f"- active no-score pending: {stats['active_no_score_pending_count']}",
         f"- stale active no-score: {stats['stale_active_no_score_count']}",
         f"- forced pass: {stats['forced_pass_count']}",

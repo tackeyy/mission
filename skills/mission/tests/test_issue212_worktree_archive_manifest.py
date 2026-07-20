@@ -270,6 +270,142 @@ def test_archived_bundle_survives_worktree_removal_without_missing_scoring(tmp_p
     assert data["duplicate_group_count"] == 0
 
 
+def test_generation_archive_has_same_pass_rate_population_in_stats_and_audit(tmp_path, run_cli):
+    """The current immutable generation must not disappear from stats population."""
+    worktree, destination = _make_completed_worktree(tmp_path)
+    result = _archive(run_cli, worktree, destination)
+    assert result.returncode == 0, result.stderr
+    shutil.rmtree(worktree)
+
+    audit_data = _run_audit(destination)
+    stats_result = run_cli("stats", "--root", str(destination), "--json", cwd=destination)
+    assert stats_result.returncode == 0, stats_result.stderr
+    stats_data = json.loads(stats_result.stdout)
+
+    for field in (
+        "raw_pass_rate_numerator",
+        "raw_pass_rate_denominator",
+        "completed_pass_rate_numerator",
+        "completed_pass_rate_denominator",
+    ):
+        assert stats_data[field] == audit_data[field] == 1
+    assert stats_data["raw_pass_rate"] == audit_data["raw_pass_rate"] == 1.0
+    assert stats_data["completed_pass_rate"] == audit_data["completed_pass_rate"] == 1.0
+
+
+def test_stats_rejects_generation_state_that_fails_manifest_integrity(tmp_path, run_cli):
+    """Stats must not read a generation state that audit rejects before aggregation."""
+    worktree, destination = _make_completed_worktree(tmp_path)
+    result = _archive(run_cli, worktree, destination)
+    assert result.returncode == 0, result.stderr
+    shutil.rmtree(worktree)
+    generation_root = _active_bundle_root(Path(json.loads(result.stdout)["bundle_path"]))
+    manifest = json.loads((generation_root / "manifest.json").read_text(encoding="utf-8"))
+    state_item = next(item for item in manifest["evidence"] if item["evidence_kind"] == "state")
+    archived_state = generation_root / state_item["archive_path"]
+    state = json.loads(archived_state.read_text(encoding="utf-8"))
+    state["mission"] = "tampered but valid JSON"
+    archived_state.write_text(json.dumps(state) + "\n", encoding="utf-8")
+
+    audit_data = _run_audit(destination)
+    stats_result = run_cli("stats", "--root", str(destination), "--json", cwd=destination)
+    assert stats_result.returncode == 0, stats_result.stderr
+    stats_data = json.loads(stats_result.stdout)
+
+    assert audit_data["invalid_worktree_archive_count"] == 1
+    assert audit_data["total_sessions"] == 0
+    assert stats_data["total_sessions"] == 0
+    assert stats_data["raw_pass_rate_denominator"] == 0
+
+
+def test_stats_rejects_generation_with_manifest_lineage_omission(tmp_path, run_cli):
+    """A self-consistent manifest must still describe every state-referenced artifact."""
+    worktree, destination = _make_completed_worktree(tmp_path)
+    result = _archive(run_cli, worktree, destination)
+    assert result.returncode == 0, result.stderr
+    shutil.rmtree(worktree)
+    bundle = Path(json.loads(result.stdout)["bundle_path"])
+    generation_root = _active_bundle_root(bundle)
+    manifest_path = generation_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["evidence"] = [
+        item for item in manifest["evidence"] if item["evidence_kind"] != "scoring"
+    ]
+    _rewrite_manifest_digest(manifest_path, manifest)
+    rewritten_root = generation_root.with_name(manifest["content_digest"])
+    generation_root.replace(rewritten_root)
+    (bundle / "current.json").write_text(
+        json.dumps(
+            {
+                "schema": "mission-worktree-current/1",
+                "generation": manifest["content_digest"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    audit_data = _run_audit(destination)
+    stats_result = run_cli("stats", "--root", str(destination), "--json", cwd=destination)
+    assert stats_result.returncode == 0, stats_result.stderr
+    stats_data = json.loads(stats_result.stdout)
+
+    assert audit_data["invalid_worktree_archive_count"] == 1
+    assert audit_data["total_sessions"] == 0
+    assert stats_data["total_sessions"] == 0
+    assert stats_data["completed_pass_rate_denominator"] == 0
+
+
+def test_archive_evidence_is_hashed_once_per_consumer(tmp_path, run_cli, monkeypatch):
+    worktree, destination = _make_completed_worktree(tmp_path)
+    result = _archive(run_cli, worktree, destination)
+    assert result.returncode == 0, result.stderr
+    shutil.rmtree(worktree)
+    bundle = Path(json.loads(result.stdout)["bundle_path"])
+    generation_root = _active_bundle_root(bundle)
+    evidence_count = len(
+        json.loads((generation_root / "manifest.json").read_text(encoding="utf-8"))["evidence"]
+    )
+
+    audit_mod = _load_audit_module("mission_audit_issue208_hash_once")
+    shared = sys.modules["worktree_archive"]
+    shared_hash = shared._sha256
+    audit_hash = audit_mod._file_sha256
+    audit_calls = []
+
+    def counted_shared(path):
+        audit_calls.append(path)
+        return shared_hash(path)
+
+    def counted_audit(path):
+        audit_calls.append(path)
+        return audit_hash(path)
+
+    monkeypatch.setattr(shared, "_sha256", counted_shared)
+    monkeypatch.setattr(audit_mod, "_file_sha256", counted_audit)
+    discovered = []
+    records = audit_mod.load_records([destination], discovered)
+    audit_mod.collect_invalid_worktree_archives(records, discovered)
+    assert len(records) == 1
+    assert len(audit_calls) == evidence_count
+
+    state_path = REPO_ROOT / "skills" / "mission" / "bin" / "mission-state.py"
+    spec = importlib.util.spec_from_file_location("mission_state_issue208_hash_once", state_path)
+    assert spec and spec.loader
+    state_mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = state_mod
+    spec.loader.exec_module(state_mod)
+    stats_calls = []
+
+    def counted_stats(path):
+        stats_calls.append(path)
+        return shared_hash(path)
+
+    monkeypatch.setattr(shared, "_sha256", counted_stats)
+    assert len(state_mod._collect_states(destination)) == 1
+    assert len(stats_calls) == evidence_count
+
+
 def test_audit_resolves_specialist_evidence_from_generation_manifest_after_source_removal(
     tmp_path, run_cli
 ):
@@ -653,7 +789,8 @@ def test_audit_validates_manifest_hashes_once_per_record(tmp_path, run_cli, monk
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    real_hash = module._file_sha256
+    shared = sys.modules["worktree_archive"]
+    real_hash = shared._sha256
     hash_count = 0
 
     def count_hashes(path):
@@ -661,7 +798,7 @@ def test_audit_validates_manifest_hashes_once_per_record(tmp_path, run_cli, monk
         hash_count += 1
         return real_hash(path)
 
-    monkeypatch.setattr(module, "_file_sha256", count_hashes)
+    monkeypatch.setattr(shared, "_sha256", count_hashes)
     record = next(record for record in module.load_records([destination]) if record.state["session_id"] == SESSION_ID)
 
     for _ in range(3):
