@@ -650,8 +650,8 @@ def test_activity_summary_ignores_open_negative_and_unknown_segments(
     timing = json.loads(result.stdout)["activity_timing"]
 
     assert timing["observed_total_sec"] == 10.0
-    assert timing["invalid_segment_count"] == 2
-    assert timing["open_segment_count"] == 1
+    assert timing["invalid_segment_count"] == 3
+    assert timing["open_segment_count"] == 0
     assert timing["wait_reason_totals_sec"] == {
         "external-wait": {"unknown": 10.0}
     }

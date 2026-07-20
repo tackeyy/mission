@@ -114,9 +114,29 @@ def _rollup(state: dict[str, Any]) -> dict[str, Any]:
         state["activity_rollup"] = rollup
     defaults = _empty_rollup()
     for key, value in defaults.items():
-        if not isinstance(rollup.get(key), type(value)):
+        current = rollup.get(key)
+        if isinstance(value, float):
+            if _finite_nonnegative(current) is None:
+                rollup[key] = value
+        elif isinstance(value, int):
+            if isinstance(current, bool) or not isinstance(current, int) or current < 0:
+                rollup[key] = value
+        elif not isinstance(current, dict):
             rollup[key] = value
     return rollup
+
+
+def _record_anomaly(state: dict[str, Any], code: str) -> None:
+    counts = state.setdefault("activity_anomaly_counts", {})
+    if not isinstance(counts, dict):
+        counts = {}
+        state["activity_anomaly_counts"] = counts
+    current = counts.get(code)
+    counts[code] = (
+        current + 1
+        if isinstance(current, int) and not isinstance(current, bool) and current >= 0
+        else 1
+    )
 
 
 def _add_nested(mapping: dict[str, Any], key: str, nested_key: str, seconds: float) -> None:
@@ -196,6 +216,8 @@ def _resume_boundary(state: dict[str, Any], at: str) -> str:
     updated = _parse_at(updated_text)
     if not started or not resumed:
         raise ActivityTimingError("invalid resume timestamp")
+    if resumed < started:
+        raise ActivityTimingError("resume timestamp is before activity start")
     if updated and resumed < updated:
         raise ActivityTimingError("resume timestamp is before the last state update")
     boundary = updated if updated and started <= updated <= resumed else started
@@ -213,6 +235,19 @@ def close_activity_for_resume(state: dict[str, Any], at: str) -> bool:
     return end_activity_segment(state, _resume_boundary(state, at))
 
 
+def close_activity_for_terminal(state: dict[str, Any], at: str) -> bool:
+    """Close valid measurement, but never let corrupt observability block control."""
+    if not isinstance(state.get("activity_current"), dict):
+        state["activity_current"] = None
+        return False
+    try:
+        return end_activity_segment(state, at)
+    except ActivityTimingError:
+        state["activity_current"] = None
+        _record_anomaly(state, "invalid-current-terminal")
+        return True
+
+
 def start_activity_segment(
     state: dict[str, Any],
     kind: str,
@@ -224,6 +259,8 @@ def start_activity_segment(
 ) -> bool:
     validate_activity(kind, reason)
     _reject_state_clock_rollback(state, at)
+    if state.get("phase") in TERMINAL_PHASES or state.get("loop_active") is False:
+        raise ActivityTimingError("cannot start activity in a terminal state")
     current = state.get("activity_current")
     clean_detail = sanitize_activity_detail(detail)
     if isinstance(current, dict):
@@ -255,6 +292,9 @@ def start_activity_segment(
 
 def transition_activity_phase(state: dict[str, Any], new_phase: str, at: str) -> None:
     current = state.get("activity_current")
+    if new_phase in TERMINAL_PHASES:
+        close_activity_for_terminal(state, at)
+        return
     if not isinstance(current, dict) or current.get("phase") == new_phase:
         return
     preserved = dict(current)
@@ -301,11 +341,30 @@ def _valid_phase_durations(state: dict[str, Any]) -> float:
     raw = state.get("phase_durations_sec")
     if not isinstance(raw, dict):
         return 0.0
-    return sum(
+    closed = sum(
         value
         for candidate in raw.values()
         if (value := _finite_nonnegative(candidate)) is not None
     )
+    if state.get("phase") in TERMINAL_PHASES:
+        return closed
+    current = _elapsed(state.get("phase_started_at"), state.get("updated_at"))
+    return closed + (current or 0.0)
+
+
+def _valid_open_activity(state: dict[str, Any]) -> bool:
+    current = state.get("activity_current")
+    if not isinstance(current, dict):
+        return False
+    kind = current.get("kind")
+    reason = current.get("reason")
+    if kind not in ACTIVITY_KINDS or reason not in ACTIVITY_REASONS_BY_KIND[kind]:
+        return False
+    if not isinstance(current.get("phase"), str):
+        return False
+    started = _parse_at(current.get("started_at"))
+    updated = _parse_at(state.get("updated_at"))
+    return bool(started and (not updated or started <= updated))
 
 
 def _state_activity(state: dict[str, Any]) -> dict[str, Any]:
@@ -316,7 +375,7 @@ def _state_activity(state: dict[str, Any]) -> dict[str, Any]:
     totals_consistent = True
     closed_count = 0
     rollup = state.get("activity_rollup")
-    if isinstance(rollup, dict) and isinstance(rollup.get("closed_segment_count"), int):
+    if isinstance(rollup, dict) and "closed_segment_count" in rollup:
         raw_kinds = rollup.get("activity_duration_totals_sec")
         if isinstance(raw_kinds, dict):
             for kind, raw in raw_kinds.items():
@@ -345,11 +404,21 @@ def _state_activity(state: dict[str, Any]) -> dict[str, Any]:
                     continue
                 for reason, raw in raw_reason.items():
                     seconds = _finite_nonnegative(raw)
-                    if seconds is None:
+                    normalized_reason = str(reason or "unknown")
+                    if (
+                        seconds is None
+                        or normalized_reason not in ACTIVITY_REASONS_BY_KIND[kind]
+                        and normalized_reason != "unknown"
+                    ):
                         invalid += 1
                         continue
-                    reasons.setdefault(kind, {})[str(reason or "unknown")] = seconds
-        closed_count = max(0, int(rollup.get("closed_segment_count") or 0))
+                    reasons.setdefault(kind, {})[normalized_reason] = seconds
+        raw_closed_count = rollup.get("closed_segment_count")
+        if isinstance(raw_closed_count, bool) or not isinstance(raw_closed_count, int) or raw_closed_count < 0:
+            invalid += 1
+            closed_count = 0
+        else:
+            closed_count = raw_closed_count
         observed_rollup = _finite_nonnegative(rollup.get("observed_total_sec"))
         kind_sum = sum(kinds.values())
         phase_sum = sum(sum(by_kind.values()) for by_kind in phases.values())
@@ -385,16 +454,34 @@ def _state_activity(state: dict[str, Any]) -> dict[str, Any]:
                 ):
                     invalid += 1
                     continue
+                raw_reason = segment.get("reason")
+                reason = str(raw_reason or "unknown")
+                if reason not in ACTIVITY_REASONS_BY_KIND[kind] and reason != "unknown":
+                    invalid += 1
+                    continue
                 closed_count += 1
                 kinds[kind] = kinds.get(kind, 0.0) + seconds
                 phase_row = phases.setdefault(phase, {})
                 phase_row[kind] = phase_row.get(kind, 0.0) + seconds
                 if kind in WAIT_KINDS:
-                    reason = str(segment.get("reason") or "unknown")
                     reason_row = reasons.setdefault(kind, {})
                     reason_row[reason] = reason_row.get(reason, 0.0) + seconds
     observed = sum(kinds.values())
-    open_count = 1 if isinstance(state.get("activity_current"), dict) else 0
+    raw_current = state.get("activity_current")
+    open_count = 1 if _valid_open_activity(state) else 0
+    if isinstance(raw_current, dict) and not open_count:
+        invalid += 1
+    anomaly_counts = state.get("activity_anomaly_counts")
+    if isinstance(anomaly_counts, dict):
+        for count in anomaly_counts.values():
+            if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                invalid += count
+            else:
+                invalid += 1
+    raw_gap = state.get("activity_unobserved_gap_sec")
+    valid_gap = _finite_nonnegative(raw_gap)
+    if raw_gap is not None and valid_gap is None:
+        invalid += 1
     return {
         "observed": observed,
         "kinds": kinds,
@@ -404,7 +491,7 @@ def _state_activity(state: dict[str, Any]) -> dict[str, Any]:
         "open": open_count,
         "closed": closed_count,
         "phase_wall": _valid_phase_durations(state),
-        "unobserved_gap": _finite_nonnegative(state.get("activity_unobserved_gap_sec")) or 0.0,
+        "unobserved_gap": valid_gap or 0.0,
         "totals_consistent": totals_consistent,
     }
 
@@ -434,20 +521,23 @@ def summarize_activity_states(states: list[dict[str, Any]]) -> dict[str, Any]:
         unobserved_gap += item["unobserved_gap"]
         totals_consistent = totals_consistent and item["totals_consistent"]
         task_key = str(state.get("mission_id") or "unknown")
-        if item["observed"] > 0:
+        if item["closed"] > 0:
             task_samples.setdefault(task_key, []).append(item["observed"])
         for kind, seconds in item["kinds"].items():
             kind_totals[kind] = kind_totals.get(kind, 0.0) + seconds
         for phase, by_kind in item["phases"].items():
             phase_total = sum(by_kind.values())
-            if phase_total > 0:
+            if by_kind:
                 phase_samples.setdefault(phase, []).append(phase_total)
         for kind, by_reason in item["reasons"].items():
             for reason, seconds in by_reason.items():
                 row = reason_totals.setdefault(kind, {})
                 row[reason] = row.get(reason, 0.0) + seconds
     unclassified = max(0.0, phase_wall_total - observed_total)
-    coverage_ratio = observed_total / phase_wall_total if phase_wall_total > 0 else None
+    coverage_denominator = max(phase_wall_total, observed_total)
+    coverage_ratio = observed_total / coverage_denominator if coverage_denominator > 0 else None
+    if observed_total > phase_wall_total + 0.001:
+        totals_consistent = False
     return {
         "percentile_method": PERCENTILE_METHOD,
         "task_key": TASK_KEY_METHOD,
@@ -464,6 +554,7 @@ def summarize_activity_states(states: list[dict[str, Any]]) -> dict[str, Any]:
         },
         "observed_total_sec": observed_total,
         "phase_duration_total_sec": phase_wall_total,
+        "coverage_denominator_sec": coverage_denominator,
         "unclassified_sec": unclassified,
         "coverage_ratio": coverage_ratio,
         "unobserved_gap_sec": unobserved_gap,

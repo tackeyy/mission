@@ -35,6 +35,8 @@ from mission_common import (  # noqa: E402
     classify_state as classify,
     duration_sec,
     parse_iso_datetime,
+    state_dedupe_rank,
+    state_identity,
 )
 from specialist_accounting import (  # noqa: E402
     applied_specialist_invocation_skills,
@@ -893,11 +895,9 @@ def dedupe_records(records: list[StateRecord]) -> tuple[list[StateRecord], list[
     groups: dict[tuple[str, str, str], list[StateRecord]] = {}
     for record in records:
         state = record.state
-        key = (
-            project_root_for(record),
-            str(state.get("session_id") or record.path.stem),
-            str(state.get("mission_id") or ""),
-        )
+        identity_state = dict(state)
+        identity_state["project_root"] = project_root_for(record)
+        key = state_identity(identity_state, record.path.stem)
         groups.setdefault(key, []).append(record)
 
     deduped: list[StateRecord] = []
@@ -1012,8 +1012,7 @@ def split_current_historical_records(
 
 
 def dedupe_rank(record: StateRecord) -> tuple[int, float, int, str]:
-    path_rank, path_text = record_rank(record)
-    return (dedupe_status_rank(record), -updated_timestamp_rank(record), path_rank, path_text)
+    return state_dedupe_rank(record.state, str(record.path))
 
 
 def is_resolved_by_precedence(group: list[StateRecord]) -> bool:
@@ -2121,6 +2120,8 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
         f"- observed / unclassified: {fmt_minutes(activity.get('observed_total_sec'))} / "
         f"{fmt_minutes(activity.get('unclassified_sec'))}",
         f"- coverage: {coverage_text}",
+        f"- unobserved gap: {fmt_minutes(activity.get('unobserved_gap_sec'))}",
+        f"- totals consistent: {str(activity.get('totals_consistent', False)).lower()}",
         f"- segments closed / open / invalid: {activity.get('closed_segment_count', 0)} / "
         f"{activity.get('open_segment_count', 0)} / {activity.get('invalid_segment_count', 0)}",
         f"- percentile method: `{activity.get('percentile_method', 'unknown')}`",
@@ -2130,6 +2131,11 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
     for kind, reasons in sorted((activity.get("wait_reason_totals_sec") or {}).items()):
         for reason, seconds in sorted(reasons.items()):
             lines.append(f"- wait `{kind}/{reason}`: {fmt_minutes(seconds)}")
+    for task, values in sorted((activity.get("task_duration_percentiles_sec") or {}).items()):
+        lines.append(
+            f"- task `{task}`: p50 {fmt_minutes(values.get('p50'))}, "
+            f"p90 {fmt_minutes(values.get('p90'))} (n={values.get('count', 0)})"
+        )
     for phase, values in sorted((activity.get("phase_duration_percentiles_sec") or {}).items()):
         lines.append(
             f"- phase `{phase}`: p50 {fmt_minutes(values.get('p50'))}, "

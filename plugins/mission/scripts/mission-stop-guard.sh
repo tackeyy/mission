@@ -28,6 +28,9 @@
 
 set -euo pipefail
 
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+MISSION_STATE_PY="${MISSION_STATE_PY:-$SCRIPT_DIR/../skills/mission/bin/mission-state.py}"
+
 INPUT="$(cat)"
 
 if ! command -v jq >/dev/null 2>&1; then
@@ -111,6 +114,20 @@ _mission_sanitize_sid() {
   [ -z "$v" ] && v="default"
   printf '%s' "$v"
 }
+
+_mission_halt_session() {
+  local sf="$1"
+  local reason="$2"
+  local sid root
+  sid=$(basename "$sf" .json)
+  root=$(jq -r '.project_root // empty' "$sf" 2>/dev/null || echo "")
+  [ -z "$root" ] && root="$CWD"
+  (
+    cd "$root" 2>/dev/null || exit 1
+    MISSION_SESSION_ID="$sid" python3 "$MISSION_STATE_PY" mark-halt \
+      --reason "$reason" --category stale >/dev/null
+  )
+}
 HOOK_SID=""
 if [ -n "${MISSION_SESSION_ID:-}" ]; then
   HOOK_SID="$(_mission_sanitize_sid "${MISSION_SESSION_ID}")"
@@ -161,20 +178,7 @@ if [ -d "$SESSIONS_DIR" ]; then
     # スキップ — resume/compaction で PID が変わっても自分の state を block できる (M-1)。
     if [ -z "$HOOK_SID" ] && [ -n "$s_pid" ] && [ "$s_pid" != "null" ] && [ "$s_pid" -gt 0 ] 2>/dev/null; then
       if ! kill -0 "$s_pid" 2>/dev/null; then
-        # #13: この orphan-halt write は StateLock を取らない。許容理由:
-        #   (1) env-less fallback (HOOK_SID 空) かつ死PID時のみ到達する希少パス
-        #       (modern Claude Code/Codex は session env を必ず設定するので通常運用では未到達)
-        #   (2) 対象は dead orphan = 競合する live な mark-* writer が存在しない。
-        #       唯一の競合相手 mission-state.py cleanup-stale も同じ halt を書くため idempotent
-        #   (3) macOS に flock コマンドがなく bash 移植的ロックは不可。Stop hook (ループ強制の
-        #       根幹) に python subprocess 依存を持ち込むのは benign な race を直すために
-        #       重要インフラの reliability を下げる悪いトレード → option(b) 現状維持を選択
-        tmpf=$(mktemp)
-        if jq --arg r "orphan: pid $s_pid dead" '.halt_reason=$r | .halt_category="stale" | .loop_active=false | .updated_at=(now|todate)' "$sf" > "$tmpf" 2>/dev/null; then
-          mv "$tmpf" "$sf"
-        else
-          rm -f "$tmpf"   # jq 失敗時に stray tmp を残さない (防御的。$sf は直前の read jq で valid JSON 確認済 → halt-jq が単独で失敗する経路は実質到達せず単体テスト対象外。C#3 判定)
-        fi
+        _mission_halt_session "$sf" "orphan: pid $s_pid dead" || true
         continue
       fi
     fi
@@ -207,14 +211,10 @@ if [ -d "$SESSIONS_DIR" ]; then
           if [ "$AWAITING_USER" = "true" ]; then
             STALE="[WARN: state が $(( DIFF / 60 ))分 未更新だが awaiting_user=true のため stale auto-halt を保留] "
           else
-          # 3h (または MISSION_STALE_HALT_SECONDS) 超: 自セッションファイルを jq で halt して exit 0
+          # 3h (または MISSION_STALE_HALT_SECONDS) 超: state CLI の lock/terminal helper で halt
           STALE_MINS=$(( DIFF / 60 ))
           STALE_HALT_REASON="stale: auto-halted after ${STALE_MINS}m idle"
-          tmpf=$(mktemp)
-          if jq --arg r "$STALE_HALT_REASON" '.halt_reason=$r | .halt_category="stale" | .loop_active=false | .updated_at=(now|todate)' "$SESSION_FILE_TO_BLOCK" > "$tmpf" 2>/dev/null; then
-            mv "$tmpf" "$SESSION_FILE_TO_BLOCK"
-          else
-            rm -f "$tmpf"
+          if ! _mission_halt_session "$SESSION_FILE_TO_BLOCK" "$STALE_HALT_REASON"; then
             printf '{"decision":"block","reason":"stale auto-halt の書き込みに失敗。手動で cleanup-stale を実行してください"}
 '
             exit 0

@@ -56,6 +56,8 @@ from mission_common import (  # noqa: E402
     classify_state as _classify,
     duration_sec as _duration_sec,
     parse_iso_datetime,
+    state_dedupe_rank,
+    state_identity,
 )
 from specialist_accounting import (  # noqa: E402
     candidate_accounting_report,
@@ -67,6 +69,7 @@ from activity_segments import (  # noqa: E402
     ACTIVITY_REASONS_BY_KIND,
     ActivityTimingError,
     close_activity_for_resume,
+    close_activity_for_terminal,
     end_activity_segment,
     sanitize_activity_detail,
     start_activity_segment,
@@ -667,8 +670,14 @@ def _transition_phase(data: dict, new_phase: str, now: str | None = None) -> Non
     now = now or iso_now()
     _ensure_phase_timing(data, now)
     old_phase = data.get("phase")
-    if old_phase and old_phase != new_phase:
+    if new_phase in {"done", "halted"}:
+        # Terminal control must close an open activity even on a repeated
+        # terminal command.  Malformed measurement is quarantined as an
+        # anomaly by the shared reducer and cannot block pass/halt control.
         transition_activity_phase(data, new_phase, now)
+    if old_phase and old_phase != new_phase:
+        if new_phase not in {"done", "halted"}:
+            transition_activity_phase(data, new_phase, now)
         started = _parse_iso_datetime(data.get("phase_started_at"))
         ended = _parse_iso_datetime(now)
         if started and ended:
@@ -678,6 +687,30 @@ def _transition_phase(data: dict, new_phase: str, now: str | None = None) -> Non
                 durations[old_phase] = float(durations.get(old_phase, 0)) + elapsed
         data["phase_started_at"] = now
     data["phase"] = new_phase
+
+
+def _resume_phase_timing(data: dict, now: str) -> None:
+    """Accrue only the last observed pre-resume phase window, then restart it."""
+    _ensure_phase_timing(data, now)
+    phase = data.get("phase")
+    if not phase or phase in {"done", "halted"}:
+        return
+    started = _parse_iso_datetime(data.get("phase_started_at"))
+    updated = _parse_iso_datetime(data.get("updated_at"))
+    resumed = _parse_iso_datetime(now)
+    if not started or not resumed:
+        data["phase_started_at"] = now
+        return
+    boundary = updated if updated and started <= updated <= resumed else started
+    if updated and (updated < started or updated > resumed):
+        raise ActivityTimingError("phase resume boundary is inconsistent")
+    elapsed = (boundary - started).total_seconds()
+    durations = data.setdefault("phase_durations_sec", {})
+    current = durations.get(phase, 0)
+    if isinstance(current, bool) or not isinstance(current, (int, float)):
+        raise ActivityTimingError("phase duration is malformed")
+    durations[phase] = float(current) + elapsed
+    data["phase_started_at"] = now
 
 
 # #188: set phase= の正規値と別名マップ。実運用で `phase=execution` (typo) が
@@ -3737,6 +3770,7 @@ def cmd_init(args):
                     # bounded activity rollup and close an open segment only up
                     # to the last observed state update; never infer the crash gap.
                     close_activity_for_resume(existing_data, now)
+                    _resume_phase_timing(existing_data, now)
                     for key in (
                         "activity_current",
                         "activity_segments",
@@ -3744,9 +3778,14 @@ def cmd_init(args):
                         "activity_unobserved_gap_sec",
                         "activity_anomaly_counts",
                         "phase_durations_sec",
+                        "phase",
+                        "phase_started_at",
                     ):
                         if key in existing_data:
                             initial[key] = existing_data[key]
+            except ActivityTimingError as e:
+                print(f"ERROR: existing mission timing is invalid: {e}", file=sys.stderr)
+                sys.exit(2)
             except json.JSONDecodeError as e:
                 quarantine_suffix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
                 quarantine = sf_target.with_name(f"{sf_target.name}.corrupt-{quarantine_suffix}")
@@ -5400,6 +5439,59 @@ def cmd_cleanup_empty(args):
         print(json.dumps({"ok": True, "action": "skipped", "path": str(target), "contents": [c.name for c in contents]}))
 
 
+def _terminalize_state_file(
+    sf: Path,
+    proj: Path,
+    *,
+    reason: str,
+    category: str,
+    now: str,
+    set_terminal_phase: bool,
+    expected_pid: Any = None,
+    require_missing_root: bool = False,
+    require_stale_no_score: bool = False,
+    require_dead_pid: bool = False,
+) -> bool:
+    """Re-read and revalidate under lock before a bulk terminal write."""
+    with StateLock(lock_file(proj)):
+        latest = json.loads(sf.read_text())
+        if not latest.get("loop_active") or latest.get("passes") or latest.get("halt_reason"):
+            return False
+        if expected_pid is not None and latest.get("pid") != expected_pid:
+            return False
+        if require_missing_root:
+            stored_root = latest.get("project_root", "")
+            if not stored_root or Path(stored_root).exists():
+                return False
+        if require_stale_no_score:
+            age_sec = _state_age_since_update_sec(latest)
+            if (
+                latest.get("score_history")
+                or latest.get("awaiting_user")
+                or age_sec is not None and age_sec < _stale_active_seconds()
+            ):
+                return False
+        if require_dead_pid:
+            try:
+                if _pid_is_agent(int(latest.get("pid") or 0)):
+                    return False
+            except (TypeError, ValueError):
+                pass
+        latest["halt_reason"] = reason
+        latest["halt_category"] = category
+        latest["loop_active"] = False
+        if set_terminal_phase:
+            _transition_phase(latest, "halted", now)
+        else:
+            close_activity_for_terminal(latest, now)
+        latest["updated_at"] = now
+        backup_state(sf)
+        atomic_write_json(sf, latest)
+        if sf.parent.name == "sessions":
+            _remove_from_aggregate(proj, sf.stem)
+        return True
+
+
 def cmd_cleanup_stale(args):
     """C-4: dead-PID の active state.json を orphan として halt (要 --execute).
 
@@ -5441,16 +5533,13 @@ def cmd_cleanup_stale(args):
                             )
                             proj = _project_root_of(sf)
                             if args.execute:
-                                with StateLock(lock_file(proj)):
-                                    data["halt_reason"] = halt_reason
-                                    data["halt_category"] = "stale"  # #190
-                                    data["loop_active"] = False
-                                    data["updated_at"] = iso_now()
-                                    backup_state(sf)
-                                    atomic_write_json(sf, data)
-                                    if sf.parent.name == "sessions":
-                                        _remove_from_aggregate(proj, sf.stem)
-                                results["halted"].append({"path": str(sf), "pid": pid})
+                                halted = _terminalize_state_file(
+                                    sf, proj, reason=halt_reason, category="stale",
+                                    now=iso_now(), set_terminal_phase=False,
+                                    expected_pid=pid, require_missing_root=True,
+                                )
+                                if halted:
+                                    results["halted"].append({"path": str(sf), "pid": pid})
                             else:
                                 results["would_halt"].append({"path": str(sf), "pid": pid, "mission": (data.get("mission") or "")[:80]})
                         else:
@@ -5463,18 +5552,13 @@ def cmd_cleanup_stale(args):
                                 )
                                 proj = _project_root_of(sf)
                                 if args.execute:
-                                    with StateLock(lock_file(proj)):
-                                        now = iso_now()
-                                        data["halt_reason"] = halt_reason
-                                        data["halt_category"] = "stale"  # #190
-                                        data["loop_active"] = False
-                                        _transition_phase(data, "halted", now)
-                                        data["updated_at"] = now
-                                        backup_state(sf)
-                                        atomic_write_json(sf, data)
-                                        if sf.parent.name == "sessions":
-                                            _remove_from_aggregate(proj, sf.stem)
-                                    results["halted"].append({"path": str(sf), "pid": pid, "reason": "stale-active-no-score", "age_sec": age_sec})
+                                    halted = _terminalize_state_file(
+                                        sf, proj, reason=halt_reason, category="stale",
+                                        now=iso_now(), set_terminal_phase=True,
+                                        expected_pid=pid, require_stale_no_score=True,
+                                    )
+                                    if halted:
+                                        results["halted"].append({"path": str(sf), "pid": pid, "reason": "stale-active-no-score", "age_sec": age_sec})
                                 else:
                                     results["would_halt"].append({
                                         "path": str(sf),
@@ -5488,17 +5572,14 @@ def cmd_cleanup_stale(args):
                     else:
                         proj = _project_root_of(sf)
                         if args.execute:
-                            with StateLock(lock_file(proj)):
-                                data["halt_reason"] = f"orphan: pid {pid} dead or reused (cleanup-stale)"
-                                data["halt_category"] = "stale"  # #190
-                                data["loop_active"] = False
-                                data["updated_at"] = iso_now()
-                                backup_state(sf)
-                                atomic_write_json(sf, data)
-                                # H-1: aggregate 更新も StateLock 内で (並列 cleanup/init と lost update 防止)
-                                if sf.parent.name == "sessions":
-                                    _remove_from_aggregate(proj, sf.stem)
-                            results["halted"].append({"path": str(sf), "pid": pid})
+                            halted = _terminalize_state_file(
+                                sf, proj,
+                                reason=f"orphan: pid {pid} dead or reused (cleanup-stale)",
+                                category="stale", now=iso_now(), set_terminal_phase=False,
+                                expected_pid=pid, require_dead_pid=True,
+                            )
+                            if halted:
+                                results["halted"].append({"path": str(sf), "pid": pid})
                         else:
                             results["would_halt"].append({"path": str(sf), "pid": pid, "mission": (data.get("mission") or "")[:80]})
                 except Exception as e:
@@ -5552,19 +5633,12 @@ def cmd_halt(args):
                     data = json.loads(sf.read_text())
                     if data.get("loop_active") and not data.get("passes") and not data.get("halt_reason"):
                         proj = _project_root_of(sf)
-                        with StateLock(lock_file(proj)):
-                            now = iso_now()
-                            data["halt_reason"] = args.reason
-                            data["halt_category"] = category  # #190
-                            data["loop_active"] = False
-                            _transition_phase(data, "halted", now)  # M4
-                            data["updated_at"] = now
-                            backup_state(sf)
-                            atomic_write_json(sf, data)
-                            # H-1: aggregate 更新も StateLock 内で (並列 halt/init と lost update 防止)
-                            if sf.parent.name == "sessions":
-                                _remove_from_aggregate(proj, sf.stem)
-                        halted.append(str(proj))
+                        changed = _terminalize_state_file(
+                            sf, proj, reason=args.reason, category=category,
+                            now=iso_now(), set_terminal_phase=True,
+                        )
+                        if changed:
+                            halted.append(str(proj))
                 except Exception as e:
                     print(f"WARN: skip {sf}: {e}", file=sys.stderr)
         print(json.dumps({"ok": True, "halted": halted, "halt_category": category}))
@@ -5618,6 +5692,7 @@ def _collect_states(root: Path) -> list[dict]:
             continue
         if not _is_mission_state_record(state):
             continue
+        state["_mission_source_path"] = str(sf)
         states.append(state)
     return states
 
@@ -5628,33 +5703,22 @@ def _is_mission_state_record(state: object) -> bool:
     return bool(state.get("mission") and state.get("mission_id") and state.get("session_id"))
 
 
-def _state_identity(state: dict) -> tuple | None:
-    """active/archive の同一 state 二重集計を避けるための安定キー."""
-    project_root = state.get("project_root")
-    session_id = state.get("session_id")
-    mission = state.get("mission_id")
-    started_at = state.get("started_at")
-    if not (project_root and session_id and mission and started_at):
-        return None
-    return (project_root, session_id, mission, started_at)
-
-
 def _dedupe_states(states: list[dict]) -> tuple[list[dict], int]:
-    """同一 state を 1 件に正規化し、重複していた identity グループ数を返す."""
-    seen = set()
-    duplicate_groups = set()
-    deduped = []
+    """Audit と同じ identity/rank で同一 session の代表 state を選ぶ."""
+    groups: dict[tuple[str, str, str], list[dict]] = {}
     for state in states:
-        key = _state_identity(state)
-        if key is None:
-            deduped.append(state)
-            continue
-        if key in seen:
-            duplicate_groups.add(key)
-            continue
-        seen.add(key)
-        deduped.append(state)
-    return deduped, len(duplicate_groups)
+        key = state_identity(state)
+        groups.setdefault(key, []).append(state)
+    deduped = [
+        min(
+            group,
+            key=lambda state: state_dedupe_rank(
+                state, str(state.get("_mission_source_path") or "")
+            ),
+        )
+        for group in groups.values()
+    ]
+    return deduped, sum(1 for group in groups.values() if len(group) > 1)
 
 
 def _is_valid_composite(c) -> bool:
@@ -5892,6 +5956,8 @@ def _format_text(stats: dict, since: str | None, until: str | None) -> str:
             f"  observed:       {activity.get('observed_total_sec', 0.0):.0f}s",
             f"  unclassified:   {activity.get('unclassified_sec', 0.0):.0f}s",
             f"  coverage:       {coverage_text}",
+            f"  unobserved gap: {activity.get('unobserved_gap_sec', 0.0):.0f}s",
+            f"  totals consistent: {str(activity.get('totals_consistent', False)).lower()}",
             f"  segments:       closed {activity.get('closed_segment_count', 0)} / "
             f"open {activity.get('open_segment_count', 0)} / invalid {activity.get('invalid_segment_count', 0)}",
         ])
@@ -5900,6 +5966,11 @@ def _format_text(stats: dict, since: str | None, until: str | None) -> str:
         for kind, reasons in sorted((activity.get("wait_reason_totals_sec") or {}).items()):
             for reason, sec in sorted(reasons.items()):
                 lines.append(f"  wait {kind}/{reason:<18} {sec:.0f}s")
+        for task, values in sorted((activity.get("task_duration_percentiles_sec") or {}).items()):
+            lines.append(
+                f"  task {task:<16} p50 {values.get('p50')}s / p90 {values.get('p90')}s "
+                f"(n={values.get('count', 0)})"
+            )
         for phase, values in sorted((activity.get("phase_duration_percentiles_sec") or {}).items()):
             lines.append(
                 f"  phase {phase:<14} p50 {values.get('p50')}s / p90 {values.get('p90')}s "

@@ -5,6 +5,7 @@
   scripts/mission-audit.py
   skills/mission/bin/mission-state.py
   skills/mission/lib/activity_segments.py
+  skills/mission/lib/mission_common.py
   skills/mission/refs/specialist-registry.md (存在する場合)
   skills/mission/refs/self-improvement.md
   skills/mission/refs/changelog.md
@@ -20,6 +21,7 @@
   plugins/mission/scripts/mission-audit.py
   plugins/mission/skills/mission/bin/mission-state.py
   plugins/mission/skills/mission/lib/activity_segments.py
+  plugins/mission/skills/mission/lib/mission_common.py
   plugins/mission/skills/mission/refs/specialist-registry.md (存在する場合)
   plugins/mission/skills/mission/refs/self-improvement.md
   plugins/mission/skills/mission/refs/changelog.md
@@ -35,6 +37,7 @@
   cp scripts/mission-audit.py             plugins/mission/scripts/mission-audit.py
   cp skills/mission/bin/mission-state.py  plugins/mission/skills/mission/bin/mission-state.py
   cp skills/mission/lib/activity_segments.py plugins/mission/skills/mission/lib/activity_segments.py
+  cp skills/mission/lib/mission_common.py plugins/mission/skills/mission/lib/mission_common.py
   cp skills/mission/refs/specialist-registry.md plugins/mission/skills/mission/refs/specialist-registry.md
   cp skills/mission/refs/self-improvement.md plugins/mission/skills/mission/refs/self-improvement.md
   cp skills/mission/refs/changelog.md plugins/mission/skills/mission/refs/changelog.md
@@ -103,6 +106,10 @@ SYNC_PAIRS = [
         REPO_ROOT / "skills" / "mission" / "lib" / "activity_segments.py",
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "activity_segments.py",
     ),
+    (
+        REPO_ROOT / "skills" / "mission" / "lib" / "mission_common.py",
+        REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "mission_common.py",
+    ),
 ]
 
 MISSION_STATE_DISTRIBUTION_MARKERS = [
@@ -157,11 +164,24 @@ def test_mission_state_py_in_sync():
 
 def test_activity_segments_py_in_sync():
     """Shared activity timing reducer is identical in the distribution mirror."""
-    src, dst = SYNC_PAIRS[-1]
+    src, dst = SYNC_PAIRS[-2]
     assert src.exists(), f"正典が存在しない: {src}"
     assert dst.exists(), f"plugins 側が存在しない: {dst}"
     assert _md5(src) == _md5(dst), (
         f"activity_segments.py が未同期。\n"
+        f"  正典: {src}\n"
+        f"  plugins: {dst}\n"
+        f"  同期コマンド: cp {src} {dst}"
+    )
+
+
+def test_mission_common_py_in_sync():
+    """Shared state identity and dedupe rank are identical in the mirror."""
+    src, dst = SYNC_PAIRS[-1]
+    assert src.exists(), f"正典が存在しない: {src}"
+    assert dst.exists(), f"plugins 側が存在しない: {dst}"
+    assert _md5(src) == _md5(dst), (
+        f"mission_common.py が未同期。\n"
         f"  正典: {src}\n"
         f"  plugins: {dst}\n"
         f"  同期コマンド: cp {src} {dst}"

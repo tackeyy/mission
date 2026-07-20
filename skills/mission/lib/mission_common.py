@@ -60,3 +60,29 @@ def duration_sec(state: dict[str, Any]) -> float | None:
     except TypeError:
         return None
     return seconds if seconds >= 0 else None
+
+
+def state_identity(state: dict[str, Any], fallback_session: str = "") -> tuple[str, str, str]:
+    """Identity shared by live/archive audit and stats deduplication."""
+    return (
+        str(state.get("project_root") or ""),
+        str(state.get("session_id") or fallback_session),
+        str(state.get("mission_id") or ""),
+    )
+
+
+def state_dedupe_rank(state: dict[str, Any], source_path: str = "") -> tuple[int, float, int, str]:
+    """Prefer terminal success, then newest update, then live/path determinism."""
+    classification = classify_state(state)
+    status_rank = {"pass": 0, "halt": 1, "incomplete": 2}.get(classification, 3)
+    updated = parse_iso_datetime(state.get("updated_at"))
+    if updated and updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc)
+    updated_rank = updated.timestamp() if updated else 0.0
+    if "/archive/worktree-" in source_path:
+        path_rank = 1
+    elif "/sessions/" in source_path:
+        path_rank = 0
+    else:
+        path_rank = 2
+    return (status_rank, -updated_rank, path_rank, source_path)
