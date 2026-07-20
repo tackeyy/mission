@@ -385,6 +385,46 @@ def test_every_registry_spec_reaches_attach_rows_and_period_schema():
         assert item["updated_at"] == "2026-07-20T00:00:00Z" or item["code"] == "low-pass-rate"
 
 
+def test_all_registry_aggregate_summaries_preserve_specific_meaning():
+    audit = _load_audit_module()
+    context = {
+        "count": 2,
+        "sessions": "current sessions",
+        "halted_sessions": "current halted sessions",
+        "pass_sessions": "current pass sessions",
+        "pass_rate_pct": 80.0,
+        "min_pass_rate_pct": 95.0,
+    }
+    expected = {
+        "invalid-worktree-archive": "2 worktree archive bundles have an invalid pointer, generation, or manifest",
+        "ungated-pass": "2 current pass sessions bypassed scoring gate",
+        "forced-pass": "2 current sessions used force pass",
+        "forced-pass-autonomous-suspect": "2 current sessions lack force_approved_by_user and any user-approval mention in force_reason -- possible autonomous --force (must be user-initiated only)",
+        "duplicate-state": "2 duplicate state groups found; stats may double-count",
+        "missing-scoring-evidence": "2 current sessions have score_history without archived scoring evidence",
+        "invalid-score-iteration": "2 current sessions have score_history entries outside iteration >= 1",
+        "blank-specialist-invocation": "2 current sessions have blank specialist role or skill fields",
+        "preparation-only-completed-provider": "2 current sessions marked command-provider preparation-only evidence as completed",
+        "missing-specialist-selection-checkpoint": "2 current sessions started after checkpoint rollout without selection metadata",
+        "low-pass-rate": "pass rate 80.0% is below 95%",
+        "halted-runs": "2 current halted sessions need root-cause review",
+        "stale-active-no-score": "2 active no-score sessions exceeded stale threshold",
+        "slow-runs": "2 current sessions exceeded slow threshold",
+        "coarse-phase-attribution": "2 slow sessions attribute most elapsed time to planning",
+        "low-score-pass": "2 current pass sessions scored below 4.3",
+        "specialist-invocation-gap": "2 current sessions selected specialists without terminal invocation logs",
+        "unresolved-confirm-specialist-selection": "2 current sessions applied specialists after ask-user without confirmed selection metadata",
+        "unselected-specialist-invocation": "2 current sessions invoked specialists without matching selection metadata",
+        "candidate-only-specialists": "2 current sessions had specialist candidates but no selected, invoked, or skipped decision trail",
+    }
+
+    actual = {
+        code: spec.aggregate_summary.format(**context)
+        for code, spec in audit.FINDING_SPECS.items()
+    }
+    assert actual == expected
+
+
 def test_period_indexes_stay_compact_relative_to_canonical_lists(tmp_path: Path):
     for index in range(8):
         _write_state(
