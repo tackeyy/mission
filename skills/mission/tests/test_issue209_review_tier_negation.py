@@ -378,6 +378,18 @@ def test_japanese_exception_cues_keep_direct_negation_conservative(mission):
     )
 
 
+def test_separate_japanese_negations_do_not_form_a_false_reversal():
+    mission = "deployしないし、releaseもしない"
+    decision = _decision(mission)
+
+    actual = _details(decision)
+    assert decision["tier"] == "light"
+    assert decision["signals"] == []
+    assert {item["keyword"] for item in actual} == {"deploy", "release"}
+    assert {item["decision"] for item in actual} == {"suppressed"}
+    assert {item["reason"] for item in actual} == {"negated-actual-operation"}
+
+
 @pytest.mark.parametrize(
     "mission",
     [
@@ -529,6 +541,31 @@ def test_execution_directly_targeting_quoted_command_is_affirmative(mission):
         "affirmative-actual-operation",
     )
     assert mission[deploy["start"] : deploy["end"]] == deploy["match"]
+
+
+@pytest.mark.parametrize(
+    "mission",
+    [
+        'only quote "deploy", "release" will be executed',
+        'only quote "deploy", "release" must be performed',
+    ],
+)
+def test_passive_execution_targets_only_the_immediately_preceding_quote(mission):
+    decision = _decision(mission)
+
+    deploy = next(item for item in _details(decision) if item["keyword"] == "deploy")
+    release = next(item for item in _details(decision) if item["keyword"] == "release")
+    assert decision["tier"] == "full"
+    assert (deploy["decision"], deploy["reason"]) == (
+        "suppressed",
+        "quoted-non-operation",
+    )
+    assert (release["decision"], release["reason"]) == (
+        "included",
+        "affirmative-actual-operation",
+    )
+    for detail in (deploy, release):
+        assert mission[detail["start"] : detail["end"]] == detail["match"]
 
 
 @pytest.mark.parametrize(
