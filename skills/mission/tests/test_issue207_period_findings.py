@@ -49,6 +49,9 @@ def _audit(root: Path, *extra: str) -> dict[str, object]:
 
 
 def _load_finding_lib():
+    mission_lib = str(FINDING_LIB.parent)
+    if mission_lib not in sys.path:
+        sys.path.insert(0, mission_lib)
     spec = importlib.util.spec_from_file_location("audit_findings", FINDING_LIB)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -86,7 +89,7 @@ def test_forced_pass_and_specialist_provenance_share_period_partition(tmp_path: 
         force_reason="provider unavailable",
     )
     for session_id, updated_at in (
-        ("old-gap", "2026-07-19T15:00:00-09:00"),
+        ("old-gap", "2026-07-19T14:59:59-09:00"),
         ("new-gap", "2026-07-20T09:00:01+09:00"),
     ):
         _write_state(
@@ -132,6 +135,10 @@ def test_json_period_counts_preserve_all_findings(tmp_path: Path):
     assert data["current_finding_counts"]["total"] + data["historical_finding_counts"]["total"] == data["all_finding_counts"]["total"]
     for priority in ("P0", "P1", "P2"):
         assert data["current_finding_counts"][priority] + data["historical_finding_counts"][priority] == data["all_finding_counts"][priority]
+    assert set(data["current_findings_by_code"]) | set(data["historical_findings_by_code"]) == set(data["all_findings_by_code"])
+    for code, total in data["all_finding_code_counts"].items():
+        assert data["current_finding_code_counts"].get(code, 0) + data["historical_finding_code_counts"].get(code, 0) == total
+        assert len(data["all_findings_by_code"][code]) == total
 
 
 def test_markdown_lists_current_before_historical_and_keeps_severity(tmp_path: Path):
