@@ -480,6 +480,30 @@ def test_audit_reports_unreadable_archive_path_instead_of_treating_it_as_absent(
     assert "no-critical-findings" not in codes
 
 
+def test_audit_reports_unreadable_mission_state_root_instead_of_silent_walk_skip(
+    tmp_path, run_cli
+):
+    worktree, destination = _make_completed_worktree(tmp_path)
+    result = _archive(run_cli, worktree, destination)
+    assert result.returncode == 0, result.stderr
+    mission_state = destination / ".mission-state"
+    mission_state.chmod(0)
+    try:
+        data = _run_audit(destination)
+    finally:
+        mission_state.chmod(0o700)
+
+    assert data["total_sessions"] == 0
+    assert data["invalid_worktree_archive_count"] == 1
+    assert data["invalid_worktree_archives"][0] == {
+        "bundle_path": str(mission_state),
+        "reason": "mission-state-root-access-error",
+    }
+    codes = {finding["code"] for finding in data["findings"]}
+    assert "invalid-worktree-archive" in codes
+    assert "no-critical-findings" not in codes
+
+
 @pytest.mark.parametrize("root_name", ["mission-state", "archive"])
 @pytest.mark.parametrize(
     "node_kind",
