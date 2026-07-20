@@ -409,6 +409,39 @@ def test_stats_and_audit_share_activity_percentiles_and_reason_breakdown(
     assert sum(stats["activity_duration_totals_sec"].values()) == 600.0
 
 
+def test_stats_text_and_audit_markdown_display_activity_timing(tmp_path, run_cli):
+    _write_state(
+        tmp_path,
+        activity_segments=[
+            _closed(
+                "reviewer-wait",
+                "reviewing",
+                "review-response",
+                "2026-07-21T00:00:00Z",
+                "2026-07-21T00:01:00Z",
+                60,
+            )
+        ],
+        activity_current=None,
+    )
+
+    stats = run_cli("stats", "--root", str(tmp_path), cwd=tmp_path)
+    audit = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={**os.environ, "MISSION_AUDIT_NOW": "2026-07-21T01:00:00Z"},
+    )
+
+    assert "activity_timing:" in stats.stdout
+    assert "reviewer-wait/review-response" in stats.stdout
+    assert "phase reviewing" in stats.stdout
+    assert "## Activity Timing" in audit.stdout
+    assert "reviewer-wait/review-response" in audit.stdout
+    assert "phase `reviewing`: p50" in audit.stdout
+
+
 def test_activity_summary_ignores_open_negative_and_unknown_segments(
     tmp_path, run_cli
 ):
