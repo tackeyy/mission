@@ -192,6 +192,74 @@ def test_every_occurrence_is_evaluated_when_same_keyword_has_mixed_intent():
 
 
 @pytest.mark.parametrize(
+    ("mission", "included_keyword", "suppressed_keyword"),
+    [
+        ("deploy しないが deploy する", "deploy", "deploy"),
+        ("deploy しないけど deploy する", "deploy", "deploy"),
+        ("deploy する一方、データ削除はしない", "deploy", "データ削除"),
+        ("deploy and do not delete data", "deploy", "delete"),
+        ("do not deploy and then deploy", "deploy", "deploy"),
+    ],
+)
+def test_negation_is_anchored_to_its_operation_across_conjunctions(
+    mission, included_keyword, suppressed_keyword
+):
+    decision = _decision(mission)
+
+    included = [
+        item
+        for item in _details(decision)
+        if item["keyword"] == included_keyword and item["decision"] == "included"
+    ]
+    suppressed = [
+        item
+        for item in _details(decision)
+        if item["keyword"] == suppressed_keyword and item["decision"] == "suppressed"
+    ]
+    assert decision["tier"] == "full"
+    assert included
+    assert suppressed
+
+
+@pytest.mark.parametrize(
+    "mission",
+    [
+        "実操作は行わない。ただし release する",
+        "Actual operations will not be performed. However release to production",
+        "実操作は行わない\n> release する",
+        "実操作は行わない\n## Execute\nrelease する",
+    ],
+)
+def test_global_non_operation_does_not_leak_into_exception_or_structural_unit(mission):
+    decision = _decision(mission)
+
+    release = [item for item in _details(decision) if item["keyword"] == "release"]
+    assert decision["tier"] == "full"
+    assert release and {item["decision"] for item in release} == {"included"}
+
+
+@pytest.mark.parametrize(
+    "mission",
+    [
+        "「deploy」は引用するだけだが「release」は実行する",
+        "「deploy」は引用するだけ。「release」は実行する",
+        'only quote "deploy" but execute "release"',
+        'only quote "deploy" but actually execute "release"',
+    ],
+)
+def test_quote_only_and_execution_intent_are_anchored_per_match(mission):
+    decision = _decision(mission)
+
+    deploy = [item for item in _details(decision) if item["keyword"] == "deploy"]
+    release = [item for item in _details(decision) if item["keyword"] == "release"]
+    assert decision["tier"] == "full"
+    assert deploy and {item["decision"] for item in deploy} == {"suppressed"}
+    assert release and {item["decision"] for item in release} == {"included"}
+    assert {item["reason"] for item in deploy} == {"quoted-non-operation"}
+    assert {item["reason"] for item in release} == {"affirmative-actual-operation"}
+
+
+@pytest.mark.parametrize(
     "mission",
     [
         "本番へ deploy する可能性がある",
@@ -407,3 +475,18 @@ def test_adversarial_long_mission_is_evaluated_without_regex_blowup():
 
     assert decision["tier"] == "light"
     assert elapsed < 2.0
+
+
+def test_repeated_keyword_context_lookup_scales_below_quadratic():
+    def elapsed_for(count: int) -> tuple[float, dict]:
+        started = time.perf_counter()
+        decision = _decision("deploy. " * count)
+        return time.perf_counter() - started, decision
+
+    small_elapsed, _ = elapsed_for(1_000)
+    large_elapsed, large = elapsed_for(4_000)
+
+    deploy_details = [item for item in _details(large) if item["keyword"] == "deploy"]
+    assert len(deploy_details) == 4_000
+    assert large_elapsed < 2.5
+    assert large_elapsed < (small_elapsed * 8) + 0.05
