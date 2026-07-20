@@ -665,6 +665,68 @@ def _ensure_phase_timing(data: dict, now: str | None = None) -> None:
         data["phase_started_at"] = data.get("started_at") or now
 
 
+def _record_terminal_phase_anomaly(data: dict) -> None:
+    counts = data.get("activity_anomaly_counts")
+    if not isinstance(counts, dict):
+        counts = {}
+        data["activity_anomaly_counts"] = counts
+    current = counts.get("invalid-phase-terminal", 0)
+    if isinstance(current, bool) or not isinstance(current, int) or current < 0:
+        current = 0
+    counts["invalid-phase-terminal"] = current + 1
+
+
+def _accrue_phase_for_terminal_control(
+    data: dict, old_phase: object, now: str, *, trusted_boundary: bool
+) -> bool:
+    """Best-effort phase accrual that can never block terminal control."""
+    if isinstance(old_phase, str) and old_phase in {"done", "halted"}:
+        return True
+    if not isinstance(old_phase, str) or old_phase not in {
+        "planning",
+        "executing",
+        "reviewing",
+        "scoring",
+    }:
+        _record_terminal_phase_anomaly(data)
+        return False
+    durations = data.get("phase_durations_sec")
+    if durations is None:
+        durations = {}
+        data["phase_durations_sec"] = durations
+    if not isinstance(durations, dict):
+        _record_terminal_phase_anomaly(data)
+        return False
+    started_text = data.get("phase_started_at") or data.get("started_at")
+    started = _parse_iso_datetime(started_text)
+    ended = _parse_iso_datetime(now)
+    if not started or not ended or ended < started:
+        _record_terminal_phase_anomaly(data)
+        return False
+    boundary = ended
+    if trusted_boundary:
+        updated_text = data.get("updated_at")
+        updated = _parse_iso_datetime(updated_text)
+        if updated_text is not None and not updated:
+            _record_terminal_phase_anomaly(data)
+            return False
+        boundary = updated or started
+        if boundary < started or boundary > ended:
+            _record_terminal_phase_anomaly(data)
+            return False
+    current = durations.get(old_phase, 0)
+    if (
+        isinstance(current, bool)
+        or not isinstance(current, (int, float))
+        or not math.isfinite(float(current))
+        or current < 0
+    ):
+        _record_terminal_phase_anomaly(data)
+        return False
+    durations[old_phase] = float(current) + (boundary - started).total_seconds()
+    return True
+
+
 def _transition_phase(
     data: dict,
     new_phase: str,
@@ -674,20 +736,24 @@ def _transition_phase(
 ) -> None:
     """phase を変更し、旧 phase の経過秒数を phase_durations_sec に加算する."""
     now = now or iso_now()
-    _ensure_phase_timing(data, now)
     old_phase = data.get("phase")
     if new_phase in {"done", "halted"}:
-        if terminal_trusted_boundary and old_phase not in {"done", "halted"}:
-            _resume_phase_timing(data, now)
-        if new_phase == "halted" and terminal_trusted_boundary and old_phase in {
+        old_phase_is_resumable = isinstance(old_phase, str) and old_phase in {
             "planning",
             "executing",
             "reviewing",
             "scoring",
-        }:
+        }
+        if new_phase == "halted" and terminal_trusted_boundary and old_phase_is_resumable:
             data["resume_target_phase"] = old_phase
-        elif new_phase == "done" or old_phase not in {"done", "halted"}:
+        elif new_phase == "done" or old_phase_is_resumable:
             data.pop("resume_target_phase", None)
+        _accrue_phase_for_terminal_control(
+            data,
+            old_phase,
+            now,
+            trusted_boundary=terminal_trusted_boundary,
+        )
         # Terminal control must close an open activity even on a repeated
         # terminal command.  Malformed measurement is quarantined as an
         # anomaly by the shared reducer and cannot block pass/halt control.
@@ -697,6 +763,10 @@ def _transition_phase(
             now,
             terminal_trusted_boundary=terminal_trusted_boundary,
         )
+        data["phase_started_at"] = now
+        data["phase"] = new_phase
+        return
+    _ensure_phase_timing(data, now)
     if old_phase and old_phase != new_phase:
         if new_phase not in {"done", "halted"}:
             transition_activity_phase(data, new_phase, now)
@@ -5542,7 +5612,13 @@ def _terminalize_state_file(
             )
         else:
             if category == "stale":
-                _resume_phase_timing(latest, now)
+                _accrue_phase_for_terminal_control(
+                    latest,
+                    latest.get("phase"),
+                    now,
+                    trusted_boundary=True,
+                )
+                latest["phase_started_at"] = now
             close_activity_for_terminal(
                 latest,
                 now,
