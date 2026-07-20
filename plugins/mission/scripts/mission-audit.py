@@ -627,7 +627,7 @@ def _iter_state_candidates(
     root = root.expanduser()
     if not root.exists():
         return
-    for dirpath, dirnames, _filenames in os.walk(root, followlinks=False):
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         current_dir = Path(dirpath)
         symlinked_state_roots = [
             current_dir / dirname
@@ -639,6 +639,25 @@ def _iter_state_candidates(
                 invalid_archives,
                 symlinked_state_root,
                 "mission-state-root-symlink",
+            )
+        for filename in filenames:
+            if filename != ".mission-state":
+                continue
+            non_directory_state_root = current_dir / filename
+            try:
+                state_root_stat = non_directory_state_root.lstat()
+            except OSError:
+                reason = "mission-state-root-access-error"
+            else:
+                reason = (
+                    "mission-state-root-symlink"
+                    if stat.S_ISLNK(state_root_stat.st_mode)
+                    else "mission-state-root-not-directory"
+                )
+            _append_invalid_archive_root(
+                invalid_archives,
+                non_directory_state_root,
+                reason,
             )
         dirnames[:] = [
             dirname
@@ -684,6 +703,12 @@ def _iter_state_candidates(
                         archive,
                         "archive-root-access-error",
                     )
+            else:
+                _append_invalid_archive_root(
+                    invalid_archives,
+                    archive,
+                    "archive-root-not-directory",
+                )
         if archive_root is not None:
             candidates.extend(
                 StateCandidate(archive / entry.name)
