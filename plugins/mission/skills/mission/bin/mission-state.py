@@ -768,11 +768,12 @@ _REVIEW_DOUBLE_NEGATION_RE = re.compile(
     r"(?:(?:(?:予定|方針|計画)\s*)?(?:ではない|はない)|とは(?:言って|述べて)いない)|"
     r"なくはない|禁止ではない|対象外ではない|"
     r"(?:\b(?:do|does|did|will|would|should|must|can|could)\s+not\s+not|"
-    r"\b(?:don|won|can)['’]t\s+not|\bcannot\s+not)\s+"
+    r"\b[a-z]+n['’]t\s+not|\bcannot\s+not|\bnever\s+not)\s+"
     r"(?:(?:perform|execute)\s+(?:a|an|the)?\s*)?"
     r"(?:production\s+)?(?:deploy(?:ment)?|release|migration|drop|delete|publish)\b|"
-    r"\b(?:it\s+is\s+not\s+the\s+case\s+that|"
-    r"(?:i|we|they|he|she|it)\s+(?:(?:am|is|are|was|were)\s+not\s+"
+    r"\b(?:it\s+(?:(?:is|was)\s+not|[a-z]+n['’]t)\s+the\s+case\s+that|"
+    r"(?:i|we|they|he|she|it)\s+(?:(?:(?:am|is|are|was|were)\s+not|"
+    r"[a-z]+n['’]t)\s+"
     r"(?:say(?:ing)?|claim(?:ing)?|stat(?:e|ing))|"
     r"(?:cannot|can['’]t)\s+(?:say|claim|state))\s+(?:that\s+)?)"
     r"[^.!?;\n]{0,80}?"
@@ -791,12 +792,17 @@ _REVIEW_CONDITIONAL_RE = re.compile(
     r"\bonly\s+if\b|\bif\b|\bunless\b|\bmay\b|\bmight\b|\bcould\b|\bpossibly\b|\bwhether\b|"
     r"\bexcept\s+(?:(?:when|in)\s+)?(?:emergenc(?:y|ies)|authorized|approved|approval)\b|"
     r"\buntil\b|\bpending\s+(?:approval|authorization|permission)\b|"
+    r"\b(?:before|prior\s+to)\s+(?:(?:the|final)\s+)?"
+    r"(?:approval|authorization|permission)\b|"
+    r"\bwhile\s+(?:(?:the|final)\s+)?(?:approval|authorization|permission)\s+"
+    r"(?:is|remains)\s+pending\b|"
     r"\bwithout\s+(?:approval|authorization|permission)\b",
     re.IGNORECASE,
 )
 _REVIEW_EN_NEGATED_OPERATION_RE = re.compile(
     r"(?:\b(?:do|does|did|will|would|should|must|can|could)\s+not|\bnot|"
-    r"\b(?:don|won|can)['’]t|\bcannot|\b(?:am|is|are|was|were)\s+not\s+going\s+to)\s+"
+    r"\bnever|\b[a-z]+n['’]t|\bcannot|"
+    r"\b(?:am|is|are|was|were)\s+not\s+going\s+to)\s+"
     r"(?:(?:perform|execute)\s+(?:a|an|the)?\s*)?"
     r"(?:production\s+)?(?:deploy(?:ment)?|release|migration|drop|delete|publish)"
     r"(?:\s+(?:to|in)\s+(?:(?:our|the)\s+)?(?:target\s+)?production(?:\s+environment)?)?|"
@@ -864,13 +870,16 @@ _REVIEW_NEGATION_CUE_RE = re.compile(
 )
 _REVIEW_CAUSAL_ASSURANCE_AFTER_NEGATION_RE = re.compile(
     r"(?:しない|行わない|実行しない)\s*(?:ので|から|ため)\s*"
-    r"(?:問題|支障|懸念)(?:は|が)?\s*ない\s*$"
+    r"(?:問題|支障|懸念|影響)(?:は|が)?\s*ない\s*$"
 )
 _REVIEW_EXECUTION_CUE_RE = re.compile(
     r"\b(?:execute(?:d)?|run|perform(?:ed)?|carry\s+(?:(?:it|that|this)\s+)?out|"
-    r"(?:follow|apply)\s+(?:it|them|that|this|those)|released|published)\b|"
+    r"(?:follow|apply|proceed\s+with)\s+"
+    r"(?:it|them|that|this|those|the\s+(?:procedures?|instructions?|steps?))|"
+    r"released|published)\b|"
     r"(?:実行|実施|反映|適用)(?:する|します|した|する予定)?|"
-    r"(?:それ|それら|これ|これら)(?:に|を)?従う|行う|行います",
+    r"(?:それ|それら|これ|これら|その(?:手順|指示|設定))(?:に|を)?従う|"
+    r"行う|行います",
     re.IGNORECASE,
 )
 _REVIEW_NAMED_EXECUTION_RE = re.compile(
