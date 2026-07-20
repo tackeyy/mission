@@ -32,6 +32,9 @@ Repeated starts and ends are idempotent. A backwards timestamp fails without
 writing state, and a terminal state rejects new activity. Terminal control is
 fail-open with respect to observability: malformed open measurement is removed
 and counted in `activity_anomaly_counts`, but never prevents pass or halt.
+Malformed terminal phase timing is likewise counted as
+`invalid-phase-terminal`; existing duration evidence is preserved and no
+replacement duration is fabricated.
 
 On reinitialization, PID refresh, stale/orphan cleanup, or Stop-hook automatic
 halt after a crash, an open segment closes at the last valid `updated_at`
