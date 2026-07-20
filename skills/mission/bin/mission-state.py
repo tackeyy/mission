@@ -811,19 +811,26 @@ _REVIEW_GLOBAL_NON_OPERATION_RE = re.compile(
     r"\bno\s+actual\s+(?:operation|execution)s?\b",
     re.IGNORECASE,
 )
-_REVIEW_AFFIRMATIVE_OPERATION_RE = re.compile(
-    r"\b(?:will|shall|must|actually)\s+(?:deploy|release|publish)\b|"
-    r"\b(?:deploy|release|publish)\s+to\s+"
-    r"(?:(?:our|the)\s+)?(?:target\s+)?production(?:\s+environment)?\b(?!\s*の手順)|"
-    r"\b(?:perform|execute|run)\s+(?:a|an|the)?\s*(?:production\s+)?migration\b|"
-    r"(?:deploy|release|publish|migration|リリース|マイグレーション|公開)\s*"
-    r"(?:する|します|を実行する|を実施する|を行う)",
+_REVIEW_META_NON_OPERATION_RE = re.compile(
+    r"\b(?:review|analy[sz]e|document|describe|explain|inspect)\b"
+    r"[^。.!！?？;；\n]{0,80}\b"
+    r"(?:deploy(?:ment)?|release|migration|publish|production)\b"
+    r"[^。.!！?？;；\n]{0,40}\b(?:procedures?|instructions?|steps?|plans?)\b|"
+    r"\b(?:deploy(?:ment)?|release|migration|publish|production)\b"
+    r"[^。.!！?？;；\n]{0,40}\b(?:procedures?|instructions?|steps?|plans?)\b"
+    r"[^。.!！?？;；\n]{0,40}\b"
+    r"(?:review|analy[sz]e|document|describe|explain|inspect)\b|"
+    r"(?:deploy|release|publish|migration|production|本番|リリース|マイグレーション|公開)"
+    r"[^。.!！?？;；\n]{0,48}(?:手順|方法|計画)"
+    r"[^。.!！?？;；\n]{0,48}(?:調査|確認|説明|文書化|レビュー)",
     re.IGNORECASE,
 )
-_REVIEW_EXPLICIT_EXECUTION_RE = re.compile(
-    r"実際に実行する|実行する|実操作\s*(?:は|を)?\s*行う|実行に移す|"
-    r"\bexecute\b|\bactually\s+(?:deploy|release|publish)\b",
+_REVIEW_QUOTED_EXECUTION_BEFORE_RE = re.compile(
+    r"\b(?:execute|run|perform)\s+(?:(?:the\s+)?quoted\s+)?$",
     re.IGNORECASE,
+)
+_REVIEW_QUOTED_EXECUTION_AFTER_RE = re.compile(
+    r"^[」』\"`]\s*(?:を|は)\s*(?:実際に)?(?:実行|実施|行う)",
 )
 _REVIEW_QUOTE_ONLY_RE = re.compile(
     r"引用(?:する|のみ|だけ)|引用するだけ|\bquote(?:d|s|ing)?\s+only\b|\bonly\s+quot(?:e|ed|ing)\b",
@@ -926,39 +933,40 @@ def _review_regex_span_index(
     return [start for start, _ in spans], spans
 
 
-def _review_index_contains(
+def _review_index_container(
     index: tuple[list[int], list[tuple[int, int]]],
     start: int,
     end: int,
-) -> bool:
+) -> tuple[int, int] | None:
     starts, spans = index
     position = bisect_right(starts, start) - 1
     while position >= 0 and spans[position][0] <= start:
         span_start, span_end = spans[position]
         if span_start <= start and end <= span_end:
-            return True
+            return span_start, span_end
         position -= 1
-    return False
+    return None
 
 
-def _review_index_has_span_before(
+def _review_index_contains(
     index: tuple[list[int], list[tuple[int, int]]],
-    position: int,
+    start: int,
+    end: int,
 ) -> bool:
-    """Return whether an indexed span ends before the candidate position."""
-    _, spans = index
-    return bool(spans and spans[0][1] <= position)
+    return _review_index_container(index, start, end) is not None
 
 
-def _review_index_has_span_outside(
-    container_index: tuple[list[int], list[tuple[int, int]]],
-    candidate_index: tuple[list[int], list[tuple[int, int]]],
+def _review_quote_has_execution_target(
+    mission_text: str,
+    quote_span: tuple[int, int],
 ) -> bool:
-    """Return whether at least one candidate span is outside all containers."""
-    _, candidates = candidate_index
-    return any(
-        not _review_index_contains(container_index, start, end)
-        for start, end in candidates
+    """Require execution language to grammatically target the quoted command."""
+    quote_start, quote_end = quote_span
+    before = mission_text[max(0, quote_start - 80):max(0, quote_start - 1)]
+    after = mission_text[quote_end:min(len(mission_text), quote_end + 80)]
+    return bool(
+        _REVIEW_QUOTED_EXECUTION_BEFORE_RE.search(before)
+        or _REVIEW_QUOTED_EXECUTION_AFTER_RE.search(after)
     )
 
 
@@ -972,21 +980,17 @@ def _review_context_analysis(
         start, end = context_span
         context = mission_text[start:end]
         quote_index = _review_quote_span_index(context, start)
-        execution_index = _review_regex_span_index(
-            context,
-            start,
-            _REVIEW_EXPLICIT_EXECUTION_RE,
-        )
         cache[context_span] = {
             "text": context,
             "double_negation": bool(_REVIEW_DOUBLE_NEGATION_RE.search(context)),
             "conditional": bool(_REVIEW_CONDITIONAL_RE.search(context)),
-            "explicit_execution_unquoted": _review_index_has_span_outside(
-                quote_index,
-                execution_index,
-            ),
             "quote_only": bool(_REVIEW_QUOTE_ONLY_RE.search(context)),
             "quotes": quote_index,
+            "meta_non_operations": _review_regex_span_index(
+                context,
+                start,
+                _REVIEW_META_NON_OPERATION_RE,
+            ),
             "negation_cue_starts": [
                 match.start() for match in _REVIEW_NEGATION_CUE_RE.finditer(context)
             ],
@@ -1058,8 +1062,11 @@ def _actual_operation_signal_detail(
     unit_start, unit_end = _review_segment_span(unit_index, start, end)
     relative_start = start - context_start
     relative_end = end - context_start
-    quoted = _review_index_contains(context_analysis["quotes"], start, end)
-    explicit_execution_unquoted = context_analysis["explicit_execution_unquoted"]
+    quote_span = _review_index_container(context_analysis["quotes"], start, end)
+    quoted = quote_span is not None
+    quoted_execution_target = bool(
+        quote_span and _review_quote_has_execution_target(mission_text, quote_span)
+    )
     quote_only = context_analysis["quote_only"]
     unit_key = (unit_start, unit_end)
     if unit_key not in unit_flags_cache:
@@ -1070,11 +1077,6 @@ def _actual_operation_signal_detail(
                 unit_start,
                 _REVIEW_GLOBAL_NON_OPERATION_RE,
             ),
-            "affirmative_operations": _review_regex_span_index(
-                logical_unit,
-                unit_start,
-                _REVIEW_AFFIRMATIVE_OPERATION_RE,
-            ),
             "double_negation": bool(_REVIEW_DOUBLE_NEGATION_RE.search(logical_unit)),
             "conditional": bool(_REVIEW_CONDITIONAL_RE.search(logical_unit)),
         }
@@ -1084,9 +1086,9 @@ def _actual_operation_signal_detail(
     unit_double_negation = unit_flags["double_negation"]
     unit_conditional = unit_flags["conditional"]
 
-    if quoted and quote_only and not explicit_execution_unquoted:
+    if quoted and quote_only and not quoted_execution_target:
         decision, reason = "suppressed", "quoted-non-operation"
-    elif quoted and explicit_execution_unquoted:
+    elif quoted and quoted_execution_target:
         decision, reason = "included", "affirmative-actual-operation"
     elif quoted:
         decision, reason = "included", "quoted-context-conservative"
@@ -1111,13 +1113,14 @@ def _actual_operation_signal_detail(
         decision, reason = "included", "uncertain-or-double-negation"
     elif global_non_operation and unit_conditional:
         decision, reason = "included", "conditional-or-uncertain-context"
-    elif global_non_operation and (
-        _review_index_has_span_before(global_markers, start)
-        or _review_index_contains(unit_flags["affirmative_operations"], start, end)
+    elif global_non_operation and _review_index_contains(
+        context_analysis["meta_non_operations"],
+        start,
+        end,
     ):
-        decision, reason = "included", "contradictory-global-operation"
-    elif global_non_operation:
         decision, reason = "suppressed", "global-explicit-non-operation"
+    elif global_non_operation:
+        decision, reason = "included", "contradictory-global-operation"
     else:
         decision, reason = "included", "affirmative-actual-operation"
 
