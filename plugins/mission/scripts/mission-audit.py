@@ -9,6 +9,7 @@ Markdown report that can be handed back to `/mission` for self-improvement.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -69,12 +70,145 @@ CORE_MISSION_INVOCATION_SKILLS = {
 
 DEFAULT_ACTIVE_PENDING_SECONDS = 30 * 60
 DEFAULT_STALE_ACTIVE_SECONDS = 3 * 60 * 60
+WORKTREE_ARCHIVE_SCHEMA = "mission-worktree-archive/1"
 
 
 @dataclass(frozen=True)
 class StateRecord:
     path: Path
     state: dict[str, Any]
+
+
+def _worktree_archive_root(record: StateRecord) -> Path | None:
+    parts = record.path.parts
+    if ".mission-state" not in parts:
+        return None
+    index = parts.index(".mission-state")
+    if index + 2 >= len(parts):
+        return None
+    if parts[index + 1] != "archive" or not parts[index + 2].startswith("worktree-"):
+        return None
+    return Path(*parts[: index + 3])
+
+
+def _manifest_relative_path(value: Any, *, state_reference: bool = False) -> Path | None:
+    if not isinstance(value, str) or not value or "://" in value:
+        return None
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts or path.as_posix() != value:
+        return None
+    if state_reference and (not path.parts or path.parts[0] != ".mission-state"):
+        return None
+    return path
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _validated_worktree_manifest(record: StateRecord) -> tuple[str, list[dict[str, Any]]]:
+    """Return legacy/valid/invalid and integrity-checked evidence entries for one bundle."""
+    bundle = _worktree_archive_root(record)
+    if bundle is None:
+        return "legacy", []
+    manifest_path = bundle / "manifest.json"
+    if not manifest_path.exists() and not manifest_path.is_symlink():
+        return "legacy", []
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        return "invalid", []
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return "invalid", []
+    if not isinstance(manifest, dict) or manifest.get("schema") != WORKTREE_ARCHIVE_SCHEMA:
+        return "invalid", []
+    state = record.state
+    if (
+        manifest.get("session_id") != state.get("session_id")
+        or manifest.get("mission_id") != state.get("mission_id")
+        or manifest.get("iteration") != state.get("iteration")
+    ):
+        return "invalid", []
+    evidence = manifest.get("evidence")
+    if not isinstance(evidence, list) or not evidence:
+        return "invalid", []
+    core = {
+        "schema": manifest["schema"],
+        "session_id": manifest["session_id"],
+        "mission_id": manifest["mission_id"],
+        "iteration": manifest["iteration"],
+        "evidence": evidence,
+    }
+    expected_digest = hashlib.sha256(
+        json.dumps(core, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if manifest.get("content_digest") != expected_digest:
+        return "invalid", []
+
+    allowed_iterations = {state.get("iteration")}
+    allowed_iterations.update(
+        entry.get("iteration")
+        for entry in state.get("score_history") or []
+        if isinstance(entry, dict)
+    )
+    allowed_iterations.update(
+        entry.get("iteration")
+        for entry in state.get("specialist_invocations") or []
+        if isinstance(entry, dict)
+    )
+    seen_paths: set[str] = set()
+    checked: list[dict[str, Any]] = []
+    for item in evidence:
+        if not isinstance(item, dict):
+            return "invalid", []
+        if (
+            item.get("session_id") != state.get("session_id")
+            or item.get("mission_id") != state.get("mission_id")
+            or item.get("iteration") not in allowed_iterations
+            or not isinstance(item.get("evidence_kind"), str)
+        ):
+            return "invalid", []
+        source_reference = _manifest_relative_path(item.get("source_reference"), state_reference=True)
+        archive_path = _manifest_relative_path(item.get("archive_path"))
+        if source_reference is None or archive_path is None or item["archive_path"] in seen_paths:
+            return "invalid", []
+        seen_paths.add(item["archive_path"])
+        archived = bundle / archive_path
+        current = bundle
+        for part in archive_path.parts:
+            current = current / part
+            if current.is_symlink():
+                return "invalid", []
+        expected_size = item.get("size")
+        expected_hash = item.get("sha256")
+        if (
+            not archived.is_file()
+            or not isinstance(expected_size, int)
+            or isinstance(expected_size, bool)
+            or expected_size < 0
+            or not isinstance(expected_hash, str)
+            or len(expected_hash) != 64
+        ):
+            return "invalid", []
+        try:
+            if archived.stat().st_size != expected_size or _file_sha256(archived) != expected_hash:
+                return "invalid", []
+        except OSError:
+            return "invalid", []
+        checked.append({**item, "path": archived})
+
+    state_entries = [item for item in checked if item["evidence_kind"] == "state"]
+    try:
+        state_archive_path = record.path.relative_to(bundle).as_posix()
+    except ValueError:
+        return "invalid", []
+    if len(state_entries) != 1 or state_entries[0]["archive_path"] != state_archive_path:
+        return "invalid", []
+    return "valid", checked
 
 
 def parse_dt(value: str | None) -> datetime | None:
@@ -699,6 +833,16 @@ def coarse_phase_attribution_item(record: StateRecord, planning_ratio_threshold:
 
 
 def scoring_evidence_paths(record: StateRecord, iteration: int) -> list[Path]:
+    manifest_status, manifest_evidence = _validated_worktree_manifest(record)
+    if manifest_status == "invalid":
+        return []
+    if manifest_status == "valid":
+        return [
+            item["path"]
+            for item in manifest_evidence
+            if item.get("evidence_kind") == "scoring" and item.get("iteration") == iteration
+        ]
+
     mission_id = str(record.state.get("mission_id") or "")
     mission_prefix = mission_id[:8] or "unknown"
     filenames = [

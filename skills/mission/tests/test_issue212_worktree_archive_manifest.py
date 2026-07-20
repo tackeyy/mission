@@ -310,11 +310,29 @@ def test_bundle_replace_restores_previous_bundle_after_mid_replace_failure(tmp_p
     staging = tmp_path / ".worktree-neutral.tmp"
     for root, digest, marker in ((bundle, "old", "old"), (staging, "new", "new")):
         root.mkdir()
-        (root / "manifest.json").write_text(
-            json.dumps({"schema": "mission-worktree-archive/1", "content_digest": digest}),
-            encoding="utf-8",
-        )
-        (root / "marker.txt").write_text(marker, encoding="utf-8")
+        marker_path = root / "marker.txt"
+        marker_path.write_text(marker, encoding="utf-8")
+        manifest = {
+            "schema": "mission-worktree-archive/1",
+            "session_id": SESSION_ID,
+            "mission_id": MISSION_ID,
+            "iteration": 2,
+            "evidence": [
+                {
+                    "session_id": SESSION_ID,
+                    "mission_id": MISSION_ID,
+                    "iteration": 2,
+                    "evidence_kind": "state",
+                    "source_reference": ".mission-state/sessions/session-212.json",
+                    "archive_path": "marker.txt",
+                    "sha256": _sha256(marker_path),
+                    "size": marker_path.stat().st_size,
+                }
+            ],
+            "created_at": "2026-07-20T00:00:00Z",
+            "content_digest": digest,
+        }
+        _rewrite_manifest_digest(root / "manifest.json", manifest)
     real_replace = module.os.replace
     call_count = 0
 

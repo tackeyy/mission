@@ -38,6 +38,7 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import shutil
 from datetime import datetime, timezone
@@ -1986,6 +1987,374 @@ def _state_relative_path(cwd: Path, path_text: str) -> str:
         return str(rel)
     except ValueError:
         return str(path)
+
+
+WORKTREE_ARCHIVE_SCHEMA = "mission-worktree-archive/1"
+
+
+class WorktreeArchiveError(ValueError):
+    """A worktree archive cannot be created without losing evidence integrity."""
+
+
+def _archive_source_file(cwd: Path, reference: str, evidence_kind: str) -> tuple[Path, str]:
+    """Resolve one allowlisted state reference without following symlinks or escaping state."""
+    if not isinstance(reference, str) or not reference.strip():
+        raise WorktreeArchiveError(f"required evidence reference is missing: {evidence_kind}")
+    state_root = Path(os.path.abspath(str(state_dir(cwd))))
+    raw = Path(reference).expanduser()
+    candidate = raw if raw.is_absolute() else cwd / raw
+    candidate = Path(os.path.abspath(str(candidate)))
+    try:
+        relative = candidate.relative_to(state_root)
+    except ValueError as exc:
+        raise WorktreeArchiveError(
+            f"required evidence is outside .mission-state: {evidence_kind}: {reference}"
+        ) from exc
+
+    current = state_root
+    if current.is_symlink():
+        raise WorktreeArchiveError("source .mission-state must not be a symlink")
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise WorktreeArchiveError(f"required evidence must not be a symlink: {evidence_kind}: {reference}")
+    if not current.exists() or not current.is_file():
+        raise WorktreeArchiveError(f"required evidence file is missing: {evidence_kind}: {reference}")
+    try:
+        current.resolve(strict=True).relative_to(state_root.resolve(strict=True))
+    except (FileNotFoundError, ValueError) as exc:
+        raise WorktreeArchiveError(
+            f"required evidence is outside .mission-state: {evidence_kind}: {reference}"
+        ) from exc
+    return current, (Path(".mission-state") / relative).as_posix()
+
+
+def _worktree_bundle_name(cwd: Path) -> str:
+    slug = _slug_for_filename(cwd.name)[:48]
+    identity = hashlib.sha256(str(cwd.resolve()).encode("utf-8")).hexdigest()[:8]
+    return f"worktree-{slug}-{identity}"
+
+
+def _archive_history_path(kind: str, iteration: int, mission8: str, index: int, suffix: str) -> Path:
+    return Path("archive") / "history" / f"iter-{iteration}-{mission8}-{kind}-{index}{suffix}"
+
+
+def _collect_worktree_archive_specs(cwd: Path, state_file_path: Path, data: dict) -> list[dict]:
+    """Collect only current-session evidence references explicitly allowlisted by the state schema."""
+    session_id = str(data.get("session_id") or "").strip()
+    mission_id = str(data.get("mission_id") or "").strip()
+    iteration = data.get("iteration")
+    if not session_id or not mission_id:
+        raise WorktreeArchiveError("session_id and mission_id are required")
+    if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < 0:
+        raise WorktreeArchiveError("iteration must be a non-negative integer")
+    if data.get("loop_active") is True:
+        raise WorktreeArchiveError("active session cannot be archived; mark pass or halt first")
+
+    specs: list[dict] = []
+
+    def add(kind: str, reference: str, archive_path: Path, item_iteration: int | None = None) -> None:
+        source, normalized_reference = _archive_source_file(cwd, reference, kind)
+        specs.append(
+            {
+                "evidence_kind": kind,
+                "iteration": iteration if item_iteration is None else item_iteration,
+                "source": source,
+                "source_reference": normalized_reference,
+                "archive_path": archive_path,
+            }
+        )
+
+    add("state", str(state_file_path), Path("sessions") / f"{_sanitize_sid(session_id)}.json")
+
+    assumptions_path = data.get("assumptions_path")
+    if assumptions_path:
+        add("assumptions", str(assumptions_path), Path("sessions") / Path(str(assumptions_path)).name)
+
+    artifact = data.get("artifact") if isinstance(data.get("artifact"), dict) else {}
+    artifact_path = artifact.get("path")
+    if artifact.get("required_for_pass") and not artifact_path:
+        raise WorktreeArchiveError("required evidence reference is missing: artifact")
+    if artifact_path:
+        add("artifact", str(artifact_path), Path("artifacts") / _sanitize_sid(session_id) / Path(str(artifact_path)).name)
+
+    history = [entry for entry in (data.get("score_history") or []) if isinstance(entry, dict)]
+    if data.get("passes") is True and not history and not data.get("force_approved_by_user"):
+        raise WorktreeArchiveError("required evidence reference is missing: scoring")
+    last_by_iteration: dict[int, int] = {}
+    for index, entry in enumerate(history):
+        entry_iteration = entry.get("iteration")
+        if isinstance(entry_iteration, int) and not isinstance(entry_iteration, bool) and entry_iteration >= 0:
+            last_by_iteration[entry_iteration] = index
+    mission8 = mission_id[:8]
+    for index, entry in enumerate(history):
+        entry_iteration = entry.get("iteration")
+        if not isinstance(entry_iteration, int) or isinstance(entry_iteration, bool) or entry_iteration < 0:
+            raise WorktreeArchiveError("score_history iteration must be a non-negative integer")
+        scoring_reference = str(entry.get("scoring_evidence_path") or "").strip()
+        if data.get("passes") is True and not scoring_reference:
+            raise WorktreeArchiveError(f"required evidence reference is missing: scoring iteration {entry_iteration}")
+        if scoring_reference:
+            suffix = Path(scoring_reference).suffix or ".json"
+            scoring_path = (
+                Path("archive") / f"iter-{entry_iteration}-{mission8}-scoring{suffix}"
+                if last_by_iteration.get(entry_iteration) == index
+                else _archive_history_path("scoring", entry_iteration, mission8, index, suffix)
+            )
+            add("scoring", scoring_reference, scoring_path, entry_iteration)
+
+        reviews_reference = str(entry.get("findings_evidence_path") or "").strip()
+        if entry.get("score_source") == "scoring-json" and not reviews_reference:
+            raise WorktreeArchiveError(f"required evidence reference is missing: reviews iteration {entry_iteration}")
+        if reviews_reference:
+            suffix = Path(reviews_reference).suffix or ".json"
+            reviews_path = (
+                Path("archive") / f"iter-{entry_iteration}-{mission8}-reviews{suffix}"
+                if last_by_iteration.get(entry_iteration) == index
+                else _archive_history_path("reviews", entry_iteration, mission8, index, suffix)
+            )
+            add("reviews", reviews_reference, reviews_path, entry_iteration)
+
+    specialist_counts: dict[tuple[int, str], int] = {}
+    for index, invocation in enumerate(data.get("specialist_invocations") or []):
+        if not isinstance(invocation, dict):
+            continue
+        reference = str(invocation.get("evidence_path") or "").strip()
+        if not reference:
+            continue
+        item_iteration = invocation.get("iteration")
+        if not isinstance(item_iteration, int) or isinstance(item_iteration, bool) or item_iteration < 0:
+            item_iteration = iteration
+        skill = _slug_for_filename(str(invocation.get("skill") or invocation.get("role") or "unknown"))
+        key = (item_iteration, skill)
+        occurrence = specialist_counts.get(key, 0)
+        specialist_counts[key] = occurrence + 1
+        suffix = Path(reference).suffix or ".md"
+        filename = f"iter-{item_iteration}-{mission8}-specialist-{skill}"
+        if occurrence:
+            filename += f"-{occurrence}"
+        add("specialist", reference, Path("archive") / f"{filename}{suffix}", item_iteration)
+
+    progress = data.get("progress") if isinstance(data.get("progress"), dict) else {}
+    for field, kind in (("evidence_path", "progress"), ("artifact_path", "progress-artifact")):
+        reference = str(progress.get(field) or "").strip()
+        if reference:
+            suffix = Path(reference).suffix
+            add(kind, reference, Path("archive") / f"iter-{iteration}-{mission8}-{kind}{suffix}")
+
+    destinations: dict[str, Path] = {}
+    for spec in specs:
+        archive_path = spec["archive_path"].as_posix()
+        previous = destinations.get(archive_path)
+        if previous is not None and previous != spec["source"]:
+            raise WorktreeArchiveError(f"archive path collision: {archive_path}")
+        destinations[archive_path] = spec["source"]
+    return specs
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _safe_archive_relative_path(value: object, field: str, *, state_reference: bool = False) -> Path:
+    if not isinstance(value, str) or not value or "://" in value:
+        raise WorktreeArchiveError(f"invalid archive manifest {field}")
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts or path.as_posix() != value:
+        raise WorktreeArchiveError(f"invalid archive manifest {field}: {value}")
+    if state_reference and (not path.parts or path.parts[0] != ".mission-state"):
+        raise WorktreeArchiveError(f"invalid archive manifest {field}: {value}")
+    return path
+
+
+def _ensure_regular_directory_path(root: Path, relative_parts: tuple[str, ...]) -> Path:
+    current = root
+    for part in relative_parts:
+        current = current / part
+        if current.is_symlink():
+            raise WorktreeArchiveError(f"archive destination must not contain symlinks: {current}")
+        if current.exists() and not current.is_dir():
+            raise WorktreeArchiveError(f"archive destination must be a directory: {current}")
+    return current
+
+
+def _build_worktree_archive_staging(staging: Path, data: dict, specs: list[dict], created_at: str) -> dict:
+    evidence: list[dict] = []
+    for spec in specs:
+        destination = staging / spec["archive_path"]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        source_hash = _sha256_file(spec["source"])
+        shutil.copy2(spec["source"], destination)
+        archived_hash = _sha256_file(destination)
+        if archived_hash != source_hash:
+            raise WorktreeArchiveError(f"checksum mismatch after copy: {spec['source_reference']}")
+        evidence.append(
+            {
+                "session_id": data["session_id"],
+                "mission_id": data["mission_id"],
+                "iteration": spec["iteration"],
+                "evidence_kind": spec["evidence_kind"],
+                "source_reference": spec["source_reference"],
+                "archive_path": spec["archive_path"].as_posix(),
+                "sha256": archived_hash,
+                "size": destination.stat().st_size,
+            }
+        )
+    core = {
+        "schema": WORKTREE_ARCHIVE_SCHEMA,
+        "session_id": data["session_id"],
+        "mission_id": data["mission_id"],
+        "iteration": data["iteration"],
+        "evidence": evidence,
+    }
+    content_digest = hashlib.sha256(
+        json.dumps(core, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    manifest = {**core, "created_at": created_at, "content_digest": content_digest}
+    atomic_write_json(staging / "manifest.json", manifest)
+    return manifest
+
+
+def _existing_archive_manifest(bundle: Path) -> dict | None:
+    if not bundle.exists():
+        return None
+    if bundle.is_symlink() or not bundle.is_dir():
+        raise WorktreeArchiveError(f"archive destination is not a regular directory: {bundle}")
+    manifest_path = bundle / "manifest.json"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise WorktreeArchiveError(f"existing archive manifest is missing: {manifest_path}")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise WorktreeArchiveError(f"existing archive manifest is invalid: {manifest_path}") from exc
+    if manifest.get("schema") != WORKTREE_ARCHIVE_SCHEMA:
+        raise WorktreeArchiveError(f"unsupported existing archive manifest schema: {manifest.get('schema')}")
+    evidence = manifest.get("evidence")
+    if not isinstance(evidence, list) or not evidence:
+        raise WorktreeArchiveError(f"existing archive manifest has no evidence: {manifest_path}")
+    core = {
+        "schema": manifest.get("schema"),
+        "session_id": manifest.get("session_id"),
+        "mission_id": manifest.get("mission_id"),
+        "iteration": manifest.get("iteration"),
+        "evidence": evidence,
+    }
+    expected_digest = hashlib.sha256(
+        json.dumps(core, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if manifest.get("content_digest") != expected_digest:
+        raise WorktreeArchiveError(f"existing archive manifest digest mismatch: {manifest_path}")
+    seen_paths: set[str] = set()
+    for item in evidence:
+        if not isinstance(item, dict):
+            raise WorktreeArchiveError(f"existing archive manifest evidence is invalid: {manifest_path}")
+        _safe_archive_relative_path(item.get("source_reference"), "source_reference", state_reference=True)
+        relative = _safe_archive_relative_path(item.get("archive_path"), "archive_path")
+        if relative.as_posix() in seen_paths:
+            raise WorktreeArchiveError(f"duplicate archive path in existing manifest: {relative}")
+        seen_paths.add(relative.as_posix())
+        archived = bundle / relative
+        current = bundle
+        for part in relative.parts:
+            current = current / part
+            if current.is_symlink():
+                raise WorktreeArchiveError(f"existing archive evidence must not be a symlink: {relative}")
+        expected_size = item.get("size")
+        expected_hash = item.get("sha256")
+        if (
+            not archived.is_file()
+            or not isinstance(expected_size, int)
+            or isinstance(expected_size, bool)
+            or expected_size < 0
+            or not isinstance(expected_hash, str)
+            or len(expected_hash) != 64
+            or archived.stat().st_size != expected_size
+            or _sha256_file(archived) != expected_hash
+        ):
+            raise WorktreeArchiveError(f"existing archive evidence integrity mismatch: {relative}")
+    return manifest
+
+
+def _replace_archive_bundle(staging: Path, bundle: Path) -> str:
+    existing = _existing_archive_manifest(bundle)
+    staged_manifest = json.loads((staging / "manifest.json").read_text(encoding="utf-8"))
+    if existing and existing.get("content_digest") == staged_manifest.get("content_digest"):
+        shutil.rmtree(staging)
+        return "unchanged"
+    if not bundle.exists():
+        os.replace(staging, bundle)
+        return "created"
+
+    backup = bundle.with_name(f".{bundle.name}.backup-{os.getpid()}")
+    if backup.exists():
+        raise WorktreeArchiveError(f"archive replacement backup already exists: {backup}")
+    os.replace(bundle, backup)
+    try:
+        os.replace(staging, bundle)
+    except Exception:
+        os.replace(backup, bundle)
+        raise
+    shutil.rmtree(backup)
+    return "updated"
+
+
+def cmd_archive_worktree(args):
+    cwd = Path.cwd().resolve()
+    destination_root = Path(args.destination_root).expanduser().resolve()
+    if destination_root == cwd:
+        print("ERROR: destination root must differ from the source worktree", file=sys.stderr)
+        sys.exit(2)
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        _ensure_regular_directory_path(destination_root, (".mission-state", "archive"))
+        _ensure_regular_directory_path(cwd, (".mission-state",))
+    except WorktreeArchiveError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
+    archive_root = state_dir(destination_root) / "archive"
+    bundle = archive_root / _worktree_bundle_name(cwd)
+    staging: Path | None = None
+    try:
+        with StateLock(lock_file(destination_root)):
+            with StateLock(lock_file(cwd)):
+                data = json.loads(sf.read_text(encoding="utf-8"))
+                specs = _collect_worktree_archive_specs(cwd, sf, data)
+                if args.dry_run:
+                    result = {
+                        "ok": True,
+                        "action": "dry-run",
+                        "bundle_path": str(bundle),
+                        "evidence_count": len(specs),
+                    }
+                    print(json.dumps(result, indent=2 if args.json else None, ensure_ascii=False))
+                    return
+                archive_root.mkdir(parents=True, exist_ok=True)
+                staging = Path(tempfile.mkdtemp(prefix=f".{bundle.name}.tmp-", dir=str(archive_root)))
+                existing = _existing_archive_manifest(bundle)
+                created_at = str(existing.get("created_at")) if existing else iso_now()
+                manifest = _build_worktree_archive_staging(staging, data, specs, created_at)
+                action = _replace_archive_bundle(staging, bundle)
+                staging = None
+        result = {
+            "ok": True,
+            "action": action,
+            "bundle_path": str(bundle),
+            "manifest": manifest,
+        }
+        print(json.dumps(result, indent=2 if args.json else None, ensure_ascii=False))
+    except (WorktreeArchiveError, json.JSONDecodeError, OSError, TimeoutError) as exc:
+        if staging and staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
 
 
 def _artifact_dir(cwd: Path, session_id: str) -> Path:
@@ -4881,6 +5250,20 @@ def _build_parser():
     p_uproot = sub.add_parser("update-project-root", help="P2-1: project_root を正しいパスに更新 (ディレクトリ移動・rename 後の rescue 用)")
     p_uproot.add_argument("--path", required=True, help="新しい project_root パス")
     p_uproot.set_defaults(func=cmd_update_project_root)
+
+    p_archive = sub.add_parser(
+        "archive-worktree",
+        help="#212: 完了した worktree の state/evidence を main checkout 側へ整合性付きで保存",
+    )
+    p_archive.add_argument(
+        "--destination-root",
+        required=True,
+        dest="destination_root",
+        help="保存先の project root (通常は main checkout)",
+    )
+    p_archive.add_argument("--dry-run", action="store_true", help="検証のみ行い、bundle を作成しない")
+    p_archive.add_argument("--json", action="store_true", help="結果を JSON 形式で出力")
+    p_archive.set_defaults(func=cmd_archive_worktree)
 
     p_clean = sub.add_parser("cleanup-empty", help="空 .mission-state/ ディレクトリを rmdir")
     p_clean.add_argument("path", help="プロジェクトルートパス")
