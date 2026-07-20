@@ -29,9 +29,32 @@ def _write(path: Path, content: str) -> Path:
     return path
 
 
-def _make_completed_worktree(tmp_path: Path) -> tuple[Path, Path]:
-    worktree = tmp_path / "neutral-worktree"
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-c", "core.hooksPath=/dev/null", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
+def _make_neutral_git_worktree(tmp_path: Path) -> tuple[Path, Path]:
     destination = tmp_path / "neutral-main"
+    destination.mkdir()
+    _git(destination, "init", "-b", "main")
+    _git(destination, "config", "user.name", "Neutral Test")
+    _git(destination, "config", "user.email", "neutral@example.invalid")
+    _write(destination / "seed.txt", "seed\n")
+    _git(destination, "add", "seed.txt")
+    _git(destination, "commit", "-m", "seed")
+    worktree = tmp_path / "neutral-worktree"
+    _git(destination, "worktree", "add", "-b", "archive-source", str(worktree))
+    return worktree, destination
+
+
+def _make_completed_worktree(tmp_path: Path) -> tuple[Path, Path]:
+    worktree, destination = _make_neutral_git_worktree(tmp_path)
     mission_state = worktree / ".mission-state"
 
     assumptions = _write(
@@ -157,6 +180,14 @@ def _move_scoring_to_manifest_only_path(bundle: Path) -> Path:
     scoring["archive_path"] = "payload/score-proof.bin"
     _rewrite_manifest_digest(manifest_path, manifest)
     return manifest_path
+
+
+def _current_generation(bundle: Path) -> tuple[str, Path]:
+    pointer = json.loads((bundle / "current.json").read_text(encoding="utf-8"))
+    assert pointer["schema"] == "mission-worktree-current/1"
+    generation = pointer["generation"]
+    assert isinstance(generation, str) and generation
+    return generation, bundle / "generations" / generation
 
 
 def test_archive_worktree_copies_allowlisted_evidence_and_writes_manifest(tmp_path, run_cli):
@@ -300,6 +331,67 @@ def test_archive_worktree_updates_bundle_when_evidence_changes(tmp_path, run_cli
     assert archived_scoring.read_text(encoding="utf-8") == '{"items":{"accuracy":4.7}}\n'
 
 
+def test_archive_update_keeps_immutable_generations_and_auditable_atomic_pointer(tmp_path, run_cli):
+    worktree, destination = _make_completed_worktree(tmp_path)
+    first = _archive(run_cli, worktree, destination)
+    assert first.returncode == 0, first.stderr
+    bundle = Path(json.loads(first.stdout)["bundle_path"])
+    first_generation, first_root = _current_generation(bundle)
+    first_manifest_bytes = (first_root / "manifest.json").read_bytes()
+    scoring = worktree / ".mission-state" / "archive" / "noncanonical-scoring.json"
+    scoring.write_text('{"items":{"accuracy":4.7}}\n', encoding="utf-8")
+
+    second = _archive(run_cli, worktree, destination)
+
+    assert second.returncode == 0, second.stderr
+    second_generation, second_root = _current_generation(bundle)
+    assert second_generation != first_generation
+    assert first_root.is_dir() and second_root.is_dir()
+    assert (first_root / "manifest.json").read_bytes() == first_manifest_bytes
+
+    pointer_path = bundle / "current.json"
+    for generation in (first_generation, second_generation):
+        temporary = pointer_path.with_suffix(".reader.tmp")
+        temporary.write_text(
+            json.dumps({"schema": "mission-worktree-current/1", "generation": generation}) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(pointer_path)
+        data = _run_audit(destination)
+        assert data["missing_scoring_evidence_count"] == 0
+
+
+def test_generation_publish_failure_never_removes_previous_current(tmp_path, monkeypatch):
+    module_path = REPO_ROOT / "skills" / "mission" / "bin" / "mission-state.py"
+    spec = importlib.util.spec_from_file_location("mission_state_generation_issue212", module_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    bundle = tmp_path / "worktree-neutral"
+    old_generation = bundle / "generations" / "old-generation"
+    old_generation.mkdir(parents=True)
+    (old_generation / "sentinel.txt").write_text("old\n", encoding="utf-8")
+    pointer = bundle / "current.json"
+    pointer.write_text(
+        json.dumps({"schema": "mission-worktree-current/1", "generation": "old-generation"}) + "\n",
+        encoding="utf-8",
+    )
+    staging = tmp_path / ".new-generation.tmp"
+    staging.mkdir()
+    (staging / "sentinel.txt").write_text("new\n", encoding="utf-8")
+
+    def fail_pointer_swap(_bundle, _generation):
+        raise OSError("injected pointer swap failure")
+
+    monkeypatch.setattr(module, "_atomic_write_archive_pointer", fail_pointer_swap)
+
+    with pytest.raises(OSError, match="injected pointer swap failure"):
+        module._publish_archive_generation(staging, bundle, "new-generation")
+
+    assert json.loads(pointer.read_text(encoding="utf-8"))["generation"] == "old-generation"
+    assert (old_generation / "sentinel.txt").read_text(encoding="utf-8") == "old\n"
+
+
 def test_bundle_replace_restores_previous_bundle_after_mid_replace_failure(tmp_path, monkeypatch):
     module_path = REPO_ROOT / "skills" / "mission" / "bin" / "mission-state.py"
     spec = importlib.util.spec_from_file_location("mission_state_issue212", module_path)
@@ -362,6 +454,42 @@ def test_archive_worktree_fails_closed_when_required_scoring_is_missing(tmp_path
     assert "required evidence" in result.stderr
     archive_root = destination / ".mission-state" / "archive"
     assert not list(archive_root.glob("worktree-*")) if archive_root.exists() else True
+
+
+@pytest.mark.parametrize("destination_kind", ["missing", "plain-directory", "different-repository"])
+def test_archive_worktree_requires_existing_checkout_in_same_git_common_dir(
+    tmp_path, run_cli, destination_kind
+):
+    worktree, valid_destination = _make_completed_worktree(tmp_path)
+    if destination_kind == "missing":
+        invalid_destination = tmp_path / "missing-destination"
+    elif destination_kind == "plain-directory":
+        invalid_destination = tmp_path / "plain-destination"
+        invalid_destination.mkdir()
+    else:
+        invalid_destination = tmp_path / "different-repository"
+        invalid_destination.mkdir()
+        _git(invalid_destination, "init", "-b", "main")
+
+    result = _archive(run_cli, worktree, invalid_destination)
+
+    assert result.returncode == 2
+    assert "git common directory" in result.stderr
+    assert not (invalid_destination / ".mission-state").exists()
+    assert valid_destination.is_dir()
+
+
+def test_archive_worktree_rejects_duplicate_archive_paths(tmp_path, run_cli):
+    worktree, destination = _make_completed_worktree(tmp_path)
+    state_file = worktree / ".mission-state" / "sessions" / f"{SESSION_ID}.json"
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    state["assumptions_path"] = str(state_file.relative_to(worktree))
+    state_file.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+    result = _archive(run_cli, worktree, destination)
+
+    assert result.returncode == 2
+    assert "duplicate archive path" in result.stderr
 
 
 @pytest.mark.parametrize(
