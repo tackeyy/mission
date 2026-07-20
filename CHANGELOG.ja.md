@@ -9,6 +9,10 @@
 
 ## [Unreleased]
 
+### 追加
+
+- `mission-state.py archive-worktree` を追加しました。終端済み worktree session と state が参照する evidence を、同じ Git common directory に属する既存の別 checkout へコピーします。更新は content-addressed な immutable generation を publish してから `current.json` を atomic に進めるため、crash や parallel reader が旧有効世代を見失いません。`mission-worktree-archive/1` manifest は session/mission/iteration identity、evidence type、機密を含まない relative source/archive reference、SHA-256、size を記録し、重複 path、path escape、symlink、evidence 欠落、integrity 不整合を fail-closed にします。`mission-audit.py` は discovery 時の generation を固定して state のロード前に preflight し、検証済み manifest から scoring / specialist evidence を解決して、同一 record の検証を cache します。`.mission-state` は降下前に readiness を確認し、後続の walk access error も収集します。directory 以外・読取不能・symlink の `.mission-state` / archive root、bundle / generation ancestor の symlink、通常 archive root 外へ解決される bundle、archive / pointer / generation の access failure、不正・危険な pointer、archived state の欠落・不正 JSON、generation manifest の欠落・不整合は、root 外読込・archive の黙示的除外・stale file fallback をせず、重複排除した `invalid-worktree-archive` finding として明示し、pointer 不在を `lstat` で確認できた既存 bundle だけ互換性を維持します (#212)。
+
 ## [2.0.0] - 2026-07-20
 
 ### 破壊的変更

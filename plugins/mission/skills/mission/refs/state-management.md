@@ -135,6 +135,27 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py progress get -
 
 `progress update` は `.mission-state/archive/iter-<N>-<mission8>-progress.md` に checkpoint を保存し、state の `progress` に `total` / `completed` / `remaining` / `last_unit` / `artifact_path` / `evidence_path` を記録する。これは score や pass/fail を変更しない観測用データであり、長時間 batch が compaction や中断を挟んでも audit report の slow session 行から進捗を復元できるようにする。
 
+### worktree state/evidence の整合性付き保存 (#212)
+
+worktree を削除する前に、終端済みの現 session と、その state が参照する evidence を main checkout 側へ保存する。`loop_active=true` は拒否されるため、先に `mark-passes` または `mark-halt` を実行する。destination は存在する directory であり、source と同じ Git common directory に属する別 checkout の root でなければならない。未作成 path、非 Git directory、別 repository、source 自身は書き込み前に拒否する。
+
+```bash
+# worktree root で実行。書き込み前の検証だけなら --dry-run を付ける
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py archive-worktree \
+    --destination-root <main-checkout-path> \
+    --json
+```
+
+保存先は `<main-checkout>/.mission-state/archive/worktree-<slug>-<source-hash>/`。`current.json` (`mission-worktree-current/1`) が `generations/<content-digest>/` の現行世代を指す。各 immutable generation は既存監査と互換の `sessions/<session_id>.json`、`archive/iter-<N>-<mission8>-scoring.{json,md}` / `reviews` 配置を維持し、`manifest.json` に次を記録する。
+
+- schema、session ID、mission ID、iteration
+- evidence type、`.mission-state/` 起点の source reference、bundle 内の archive relative path
+- 各 evidence の SHA-256 と byte size
+
+対象は現 session の state に明示された assumptions、artifact、score history の scoring/reviews、specialist invocation、progress evidence の allowlist のみ。元 state の identity や内容は書き換えず byte copy する。必須 evidence の欠落、`.mission-state` 外への path escape、symlink、重複 archive path、manifest/checksum 不整合は exit 2 で fail-closed になり、不完全な世代を current として公開しない。同一 filesystem 内で一時世代を完成させ、content digest 名の immutable generation として publish してから `current.json` だけを atomic replace する。更新中・pointer swap 失敗時も reader は旧世代を参照でき、同じ入力の再実行は `action=unchanged` となる。旧世代は reader safety のため自動削除しない。
+
+`mission-audit.py` は discovery 時に pointer が示した generation を record snapshot として固定し、同じ audit run の途中で `current.json` が進んでも別世代を再読込しない。record をロードする前に bundle 単位で manifest と archived state の JSON・identity・path・size・checksum を preflight し、その state から導出した `(evidence type, iteration, source reference)` multiset との完全一致を検証する。valid manifest の scoring と specialist evidence は kind・iteration・source reference で generation 内の検証済み path を解決する。1 audit run では同じ record の検証結果を cache し、score history の iteration ごとに全 evidence を再 hash しない。`.mission-state` は walk の降下前に `lstat` と `scandir` で readiness を確認し、競合する access failure も walk error callback から収集する。`.mission-state` / `archive` が directory 以外の file type である場合、それらや bundle / `generations` ancestor の symlink、非symlink archive root 外へ解決される bundle、archive / pointer / generation の stat・scan・read access failure、pointer の malformed/symlink/参照先欠落、archived state の欠落/不正 JSON、または generation の manifest 欠落・不整合は `invalid-worktree-archive` finding として明示し、root 外や旧来の filename fallback に進まない。overlap する複数 root から同じ不正 bundle を発見しても canonical bundle path ごとに1件へまとめる。pointer が存在しないことを `lstat` で確認できた既存 bundle だけは #201 までの配置互換を維持する。
+
 ### Phase C: multi-session 並列実行 (2026-06-13 デフォルト有効化)
 
 同一プロジェクトで複数の /mission を並列実行する場合、各セッションは `sessions/<sid>.json` に独立した状態を持つ。**Claude Code/Codex から起動すれば自動的に有効** (env 不要)。

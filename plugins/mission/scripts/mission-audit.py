@@ -9,12 +9,15 @@ Markdown report that can be handed back to `/mission` for self-improvement.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
+import stat
 import statistics
 import subprocess
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -69,12 +72,368 @@ CORE_MISSION_INVOCATION_SKILLS = {
 
 DEFAULT_ACTIVE_PENDING_SECONDS = 30 * 60
 DEFAULT_STALE_ACTIVE_SECONDS = 3 * 60 * 60
+WORKTREE_ARCHIVE_SCHEMA = "mission-worktree-archive/1"
+WORKTREE_ARCHIVE_POINTER_SCHEMA = "mission-worktree-current/1"
+_MANIFEST_VALIDATION_CACHE: dict[tuple[str, str, str, str], tuple[str, list[dict[str, Any]]]] = {}
 
 
 @dataclass(frozen=True)
 class StateRecord:
     path: Path
     state: dict[str, Any]
+    archive_bundle: Path | None = None
+    archive_root: Path | None = None
+    archive_generation: str | None = None
+
+
+@dataclass(frozen=True)
+class StateCandidate:
+    path: Path
+    archive_bundle: Path | None = None
+    archive_root: Path | None = None
+    archive_generation: str | None = None
+    state: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class ArchiveResolution:
+    status: str
+    bundle: Path
+    root: Path
+    generation: str | None = None
+    reason: str | None = None
+
+
+def _worktree_archive_root(record: StateRecord) -> Path | None:
+    if record.archive_bundle is not None:
+        return record.archive_bundle
+    parts = record.path.parts
+    if ".mission-state" not in parts:
+        return None
+    index = parts.index(".mission-state")
+    if index + 2 >= len(parts):
+        return None
+    if parts[index + 1] != "archive" or not parts[index + 2].startswith("worktree-"):
+        return None
+    return Path(*parts[: index + 3])
+
+
+def _manifest_relative_path(value: Any, *, state_reference: bool = False) -> Path | None:
+    if not isinstance(value, str) or not value or "://" in value:
+        return None
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts or path.as_posix() != value:
+        return None
+    if state_reference and (not path.parts or path.parts[0] != ".mission-state"):
+        return None
+    return path
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _resolve_worktree_archive(bundle: Path) -> ArchiveResolution:
+    try:
+        bundle_stat = bundle.lstat()
+    except FileNotFoundError:
+        return ArchiveResolution("invalid", bundle, bundle, reason="bundle-not-regular-directory")
+    except OSError:
+        return ArchiveResolution("invalid", bundle, bundle, reason="bundle-access-error")
+    if stat.S_ISLNK(bundle_stat.st_mode) or not stat.S_ISDIR(bundle_stat.st_mode):
+        return ArchiveResolution("invalid", bundle, bundle, reason="bundle-not-regular-directory")
+    pointer_path = bundle / "current.json"
+    try:
+        pointer_stat = pointer_path.lstat()
+    except FileNotFoundError:
+        return ArchiveResolution("legacy", bundle, bundle)
+    except OSError:
+        return ArchiveResolution("invalid", bundle, bundle, reason="pointer-access-error")
+    if stat.S_ISLNK(pointer_stat.st_mode) or not stat.S_ISREG(pointer_stat.st_mode):
+        return ArchiveResolution("invalid", bundle, bundle, reason="pointer-not-regular-file")
+    try:
+        pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    except OSError:
+        return ArchiveResolution("invalid", bundle, bundle, reason="pointer-access-error")
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return ArchiveResolution("invalid", bundle, bundle, reason="pointer-invalid-json")
+    generation = pointer.get("generation") if isinstance(pointer, dict) else None
+    if (
+        not isinstance(pointer, dict)
+        or pointer.get("schema") != WORKTREE_ARCHIVE_POINTER_SCHEMA
+        or not isinstance(generation, str)
+        or not generation
+        or generation in {".", ".."}
+        or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for character in generation)
+    ):
+        return ArchiveResolution("invalid", bundle, bundle, reason="pointer-invalid-schema-or-generation")
+    generations_root = bundle / "generations"
+    try:
+        generations_stat = generations_root.lstat()
+    except FileNotFoundError:
+        return ArchiveResolution(
+            "invalid",
+            bundle,
+            generations_root,
+            generation=generation,
+            reason="generations-not-regular-directory",
+        )
+    except OSError:
+        return ArchiveResolution(
+            "invalid",
+            bundle,
+            generations_root,
+            generation=generation,
+            reason="generations-access-error",
+        )
+    if stat.S_ISLNK(generations_stat.st_mode) or not stat.S_ISDIR(generations_stat.st_mode):
+        return ArchiveResolution(
+            "invalid",
+            bundle,
+            generations_root,
+            generation=generation,
+            reason="generations-not-regular-directory",
+        )
+    generation_root = generations_root / generation
+    try:
+        generation_stat = generation_root.lstat()
+    except FileNotFoundError:
+        return ArchiveResolution(
+            "invalid",
+            bundle,
+            generation_root,
+            generation=generation,
+            reason="generation-missing-or-not-directory",
+        )
+    except OSError:
+        return ArchiveResolution(
+            "invalid",
+            bundle,
+            generation_root,
+            generation=generation,
+            reason="generation-access-error",
+        )
+    if stat.S_ISLNK(generation_stat.st_mode) or not stat.S_ISDIR(generation_stat.st_mode):
+        return ArchiveResolution(
+            "invalid",
+            bundle,
+            generation_root,
+            generation=generation,
+            reason="generation-missing-or-not-directory",
+        )
+    return ArchiveResolution("generation", bundle, generation_root, generation=generation)
+
+
+def _manifest_root_for_record(record: StateRecord, bundle: Path) -> tuple[str, Path]:
+    if record.archive_root is not None:
+        try:
+            record.path.relative_to(record.archive_root)
+        except ValueError:
+            return "invalid", record.archive_root
+        return record.archive_generation or "legacy", record.archive_root
+    resolution = _resolve_worktree_archive(bundle)
+    if resolution.status == "invalid":
+        return "invalid", resolution.root
+    try:
+        record.path.relative_to(resolution.root)
+    except ValueError:
+        return "invalid", resolution.root
+    return resolution.generation or "legacy", resolution.root
+
+
+def _normalized_state_reference(value: Any) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    path = Path(value)
+    if ".mission-state" not in path.parts:
+        return None
+    index = path.parts.index(".mission-state")
+    return Path(*path.parts[index:]).as_posix()
+
+
+def _expected_manifest_lineage(record: StateRecord) -> Counter[tuple[str, int, str]] | None:
+    state = record.state
+    iteration = state.get("iteration")
+    if not isinstance(iteration, int) or isinstance(iteration, bool):
+        return None
+    expected: Counter[tuple[str, int, str]] = Counter()
+
+    def add(kind: str, item_iteration: Any, reference: Any) -> bool:
+        normalized = _normalized_state_reference(reference)
+        if (
+            not isinstance(item_iteration, int)
+            or isinstance(item_iteration, bool)
+            or normalized is None
+        ):
+            return False
+        expected[(kind, item_iteration, normalized)] += 1
+        return True
+
+    state_reference = f".mission-state/sessions/{record.path.name}"
+    if not add("state", iteration, state_reference):
+        return None
+    if state.get("assumptions_path") and not add("assumptions", iteration, state.get("assumptions_path")):
+        return None
+    artifact = state.get("artifact") if isinstance(state.get("artifact"), dict) else {}
+    if artifact.get("path") and not add("artifact", iteration, artifact.get("path")):
+        return None
+    for entry in state.get("score_history") or []:
+        if not isinstance(entry, dict):
+            continue
+        entry_iteration = entry.get("iteration")
+        if entry.get("scoring_evidence_path") and not add(
+            "scoring", entry_iteration, entry.get("scoring_evidence_path")
+        ):
+            return None
+        if entry.get("findings_evidence_path") and not add(
+            "reviews", entry_iteration, entry.get("findings_evidence_path")
+        ):
+            return None
+    for invocation in state.get("specialist_invocations") or []:
+        if not isinstance(invocation, dict) or not invocation.get("evidence_path"):
+            continue
+        item_iteration = invocation.get("iteration")
+        if not isinstance(item_iteration, int) or isinstance(item_iteration, bool) or item_iteration < 0:
+            item_iteration = iteration
+        if not add("specialist", item_iteration, invocation.get("evidence_path")):
+            return None
+    progress = state.get("progress") if isinstance(state.get("progress"), dict) else {}
+    if progress.get("evidence_path") and not add("progress", iteration, progress.get("evidence_path")):
+        return None
+    if progress.get("artifact_path") and not add(
+        "progress-artifact", iteration, progress.get("artifact_path")
+    ):
+        return None
+    return expected
+
+
+def _validate_worktree_manifest_uncached(record: StateRecord) -> tuple[str, list[dict[str, Any]]]:
+    """Return legacy/valid/invalid and integrity-checked evidence entries for one bundle."""
+    bundle = _worktree_archive_root(record)
+    if bundle is None:
+        return "legacy", []
+    archive_style, manifest_root = _manifest_root_for_record(record, bundle)
+    if archive_style == "invalid":
+        return "invalid", []
+    manifest_path = manifest_root / "manifest.json"
+    if not manifest_path.exists() and not manifest_path.is_symlink():
+        return ("legacy", []) if archive_style == "legacy" else ("invalid", [])
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        return "invalid", []
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return "invalid", []
+    if not isinstance(manifest, dict) or manifest.get("schema") != WORKTREE_ARCHIVE_SCHEMA:
+        return "invalid", []
+    state = record.state
+    if (
+        manifest.get("session_id") != state.get("session_id")
+        or manifest.get("mission_id") != state.get("mission_id")
+        or manifest.get("iteration") != state.get("iteration")
+    ):
+        return "invalid", []
+    evidence = manifest.get("evidence")
+    if not isinstance(evidence, list) or not evidence:
+        return "invalid", []
+    core = {
+        "schema": manifest["schema"],
+        "session_id": manifest["session_id"],
+        "mission_id": manifest["mission_id"],
+        "iteration": manifest["iteration"],
+        "evidence": evidence,
+    }
+    expected_digest = hashlib.sha256(
+        json.dumps(core, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if manifest.get("content_digest") != expected_digest:
+        return "invalid", []
+    if archive_style != "legacy" and manifest.get("content_digest") != archive_style:
+        return "invalid", []
+
+    allowed_iterations = {state.get("iteration")}
+    allowed_iterations.update(
+        entry.get("iteration")
+        for entry in state.get("score_history") or []
+        if isinstance(entry, dict)
+    )
+    allowed_iterations.update(
+        entry.get("iteration")
+        for entry in state.get("specialist_invocations") or []
+        if isinstance(entry, dict)
+    )
+    seen_paths: set[str] = set()
+    checked: list[dict[str, Any]] = []
+    for item in evidence:
+        if not isinstance(item, dict):
+            return "invalid", []
+        if (
+            item.get("session_id") != state.get("session_id")
+            or item.get("mission_id") != state.get("mission_id")
+            or item.get("iteration") not in allowed_iterations
+            or not isinstance(item.get("evidence_kind"), str)
+        ):
+            return "invalid", []
+        source_reference = _manifest_relative_path(item.get("source_reference"), state_reference=True)
+        archive_path = _manifest_relative_path(item.get("archive_path"))
+        if source_reference is None or archive_path is None or item["archive_path"] in seen_paths:
+            return "invalid", []
+        seen_paths.add(item["archive_path"])
+        archived = manifest_root / archive_path
+        current = manifest_root
+        for part in archive_path.parts:
+            current = current / part
+            if current.is_symlink():
+                return "invalid", []
+        expected_size = item.get("size")
+        expected_hash = item.get("sha256")
+        if (
+            not archived.is_file()
+            or not isinstance(expected_size, int)
+            or isinstance(expected_size, bool)
+            or expected_size < 0
+            or not isinstance(expected_hash, str)
+            or len(expected_hash) != 64
+        ):
+            return "invalid", []
+        try:
+            if archived.stat().st_size != expected_size or _file_sha256(archived) != expected_hash:
+                return "invalid", []
+        except OSError:
+            return "invalid", []
+        checked.append({**item, "path": archived})
+
+    expected_lineage = _expected_manifest_lineage(record)
+    actual_lineage = Counter(
+        (item["evidence_kind"], item["iteration"], item["source_reference"])
+        for item in evidence
+    )
+    if expected_lineage is None or actual_lineage != expected_lineage:
+        return "invalid", []
+    state_entries = [item for item in checked if item["evidence_kind"] == "state"]
+    try:
+        state_archive_path = record.path.relative_to(manifest_root).as_posix()
+    except ValueError:
+        return "invalid", []
+    if len(state_entries) != 1 or state_entries[0]["archive_path"] != state_archive_path:
+        return "invalid", []
+    return "valid", checked
+
+
+def _validated_worktree_manifest(record: StateRecord) -> tuple[str, list[dict[str, Any]]]:
+    cache_key = (
+        str(record.path),
+        str(record.archive_root or ""),
+        record.archive_generation or "legacy",
+        json.dumps(record.state, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+    )
+    if cache_key not in _MANIFEST_VALIDATION_CACHE:
+        _MANIFEST_VALIDATION_CACHE[cache_key] = _validate_worktree_manifest_uncached(record)
+    return _MANIFEST_VALIDATION_CACHE[cache_key]
 
 
 def parse_dt(value: str | None) -> datetime | None:
@@ -163,49 +522,364 @@ def project_root_for(record: StateRecord) -> str:
     return str(record.path.parent)
 
 
-def iter_state_files(root: Path):
+def _invalid_archive_item(resolution: ArchiveResolution, reason: str | None = None) -> dict[str, Any]:
+    item: dict[str, Any] = {
+        "bundle_path": str(resolution.bundle),
+        "reason": reason or resolution.reason or "archive-integrity-invalid",
+    }
+    if resolution.generation:
+        item["generation"] = resolution.generation
+    return item
+
+
+def _append_invalid_archive_root(
+    invalid_archives: list[dict[str, Any]] | None,
+    path: Path,
+    reason: str,
+) -> None:
+    if invalid_archives is None:
+        return
+    resolution = ArchiveResolution("invalid", path, path, reason=reason)
+    invalid_archives.append(_invalid_archive_item(resolution))
+
+
+def _preflight_generation_state(
+    resolution: ArchiveResolution,
+) -> tuple[StateCandidate | None, str | None]:
+    manifest_path = resolution.root / "manifest.json"
+    try:
+        manifest_stat = manifest_path.lstat()
+    except FileNotFoundError:
+        return None, "manifest-missing-or-not-regular-file"
+    except OSError:
+        return None, "manifest-access-error"
+    if stat.S_ISLNK(manifest_stat.st_mode) or not stat.S_ISREG(manifest_stat.st_mode):
+        return None, "manifest-missing-or-not-regular-file"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except OSError:
+        return None, "manifest-access-error"
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None, "manifest-invalid-json"
+    evidence = manifest.get("evidence") if isinstance(manifest, dict) else None
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema") != WORKTREE_ARCHIVE_SCHEMA
+        or not isinstance(evidence, list)
+    ):
+        return None, "manifest-invalid-schema"
+    state_items = [
+        item for item in evidence
+        if isinstance(item, dict) and item.get("evidence_kind") == "state"
+    ]
+    if len(state_items) != 1:
+        return None, "manifest-state-entry-invalid"
+    state_relative = _manifest_relative_path(state_items[0].get("archive_path"))
+    if state_relative is None or not state_relative.parts:
+        return None, "manifest-state-path-invalid"
+    state_path = resolution.root / state_relative
+    current = resolution.root
+    for part in state_relative.parts:
+        current = current / part
+        try:
+            current_stat = current.lstat()
+        except FileNotFoundError:
+            return None, "manifest-state-missing"
+        except OSError:
+            return None, "manifest-state-access-error"
+        if stat.S_ISLNK(current_stat.st_mode):
+            return None, "manifest-state-path-symlink"
+    if not stat.S_ISREG(current_stat.st_mode):
+        return None, "manifest-state-missing"
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except OSError:
+        return None, "manifest-state-access-error"
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None, "manifest-state-invalid-json"
+    if not is_mission_state(state):
+        return None, "manifest-state-invalid-schema"
+    record = StateRecord(
+        path=state_path,
+        state=state,
+        archive_bundle=resolution.bundle,
+        archive_root=resolution.root,
+        archive_generation=resolution.generation,
+    )
+    status, _evidence = _validated_worktree_manifest(record)
+    if status != "valid":
+        return None, "manifest-or-generation-integrity-invalid"
+    return (
+        StateCandidate(
+            path=state_path,
+            archive_bundle=resolution.bundle,
+            archive_root=resolution.root,
+            archive_generation=resolution.generation,
+            state=state,
+        ),
+        None,
+    )
+
+
+def _iter_state_candidates(
+    root: Path, invalid_archives: list[dict[str, Any]] | None = None
+):
     root = root.expanduser()
     if not root.exists():
         return
-    for dirpath, dirnames, _filenames in os.walk(root, followlinks=False):
-        dirnames[:] = [d for d in dirnames if d not in PRUNE_DIRS]
+
+    def record_walk_error(error: OSError) -> None:
+        error_path_value = getattr(error, "filename", None)
+        if not error_path_value:
+            return
+        error_path = Path(error_path_value)
+        if ".mission-state" not in error_path.parts:
+            return
+        state_index = error_path.parts.index(".mission-state")
+        state_root = Path(*error_path.parts[: state_index + 1])
+        _append_invalid_archive_root(
+            invalid_archives,
+            state_root,
+            "mission-state-root-access-error",
+        )
+
+    for dirpath, dirnames, filenames in os.walk(
+        root,
+        followlinks=False,
+        onerror=record_walk_error,
+    ):
+        current_dir = Path(dirpath)
+        excluded_state_roots: set[Path] = set()
+        for dirname in dirnames:
+            if dirname != ".mission-state":
+                continue
+            state_root = current_dir / dirname
+            try:
+                state_root_stat = state_root.lstat()
+            except OSError:
+                reason = "mission-state-root-access-error"
+            else:
+                if stat.S_ISLNK(state_root_stat.st_mode):
+                    reason = "mission-state-root-symlink"
+                elif not stat.S_ISDIR(state_root_stat.st_mode):
+                    reason = "mission-state-root-not-directory"
+                else:
+                    try:
+                        with os.scandir(state_root):
+                            pass
+                    except OSError:
+                        reason = "mission-state-root-access-error"
+                    else:
+                        continue
+            excluded_state_roots.add(state_root)
+            _append_invalid_archive_root(invalid_archives, state_root, reason)
+        for filename in filenames:
+            if filename != ".mission-state":
+                continue
+            non_directory_state_root = current_dir / filename
+            try:
+                state_root_stat = non_directory_state_root.lstat()
+            except OSError:
+                reason = "mission-state-root-access-error"
+            else:
+                reason = (
+                    "mission-state-root-symlink"
+                    if stat.S_ISLNK(state_root_stat.st_mode)
+                    else "mission-state-root-not-directory"
+                )
+            _append_invalid_archive_root(
+                invalid_archives,
+                non_directory_state_root,
+                reason,
+            )
+        dirnames[:] = [
+            dirname
+            for dirname in dirnames
+            if dirname not in PRUNE_DIRS and current_dir / dirname not in excluded_state_roots
+        ]
         if os.path.basename(dirpath) != ".mission-state":
             continue
         dirnames[:] = []
         mission_state = Path(dirpath)
-        candidates: list[Path] = []
+        if mission_state.is_symlink():
+            _append_invalid_archive_root(
+                invalid_archives,
+                mission_state,
+                "mission-state-root-symlink",
+            )
+            continue
+        candidates: list[StateCandidate] = []
         sessions = mission_state / "sessions"
         if sessions.is_dir():
-            candidates.extend(sorted(sessions.glob("*.json")))
+            candidates.extend(StateCandidate(path) for path in sorted(sessions.glob("*.json")))
         archive = mission_state / "archive"
-        if archive.is_dir():
-            candidates.extend(sorted(archive.glob("state-*.json")))
-            for worktree_dir in sorted(archive.glob("worktree-*")):
-                if worktree_dir.is_dir():
-                    candidates.extend(sorted(worktree_dir.glob("*.json")))
-                    worktree_sessions = worktree_dir / "sessions"
-                    if worktree_sessions.is_dir():
-                        candidates.extend(sorted(worktree_sessions.glob("*.json")))
+        archive_entries: list[os.DirEntry[str]] = []
+        archive_root: Path | None = None
+        try:
+            archive_stat = archive.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            _append_invalid_archive_root(invalid_archives, archive, "archive-root-access-error")
+        else:
+            if stat.S_ISLNK(archive_stat.st_mode):
+                _append_invalid_archive_root(invalid_archives, archive, "archive-root-symlink")
+            elif stat.S_ISDIR(archive_stat.st_mode):
+                try:
+                    archive_root = archive.resolve(strict=True)
+                    with os.scandir(archive) as entries:
+                        archive_entries = list(entries)
+                except (OSError, RuntimeError):
+                    archive_root = None
+                    _append_invalid_archive_root(
+                        invalid_archives,
+                        archive,
+                        "archive-root-access-error",
+                    )
+            else:
+                _append_invalid_archive_root(
+                    invalid_archives,
+                    archive,
+                    "archive-root-not-directory",
+                )
+        if archive_root is not None:
+            candidates.extend(
+                StateCandidate(archive / entry.name)
+                for entry in sorted(archive_entries, key=lambda item: item.name)
+                if entry.name.startswith("state-") and entry.name.endswith(".json")
+            )
+            worktree_dirs = [
+                archive / entry.name
+                for entry in sorted(archive_entries, key=lambda item: item.name)
+                if entry.name.startswith("worktree-")
+            ]
+            for worktree_dir in worktree_dirs:
+                resolution = _resolve_worktree_archive(worktree_dir)
+                if resolution.status == "invalid":
+                    if invalid_archives is not None:
+                        invalid_archives.append(_invalid_archive_item(resolution))
+                    continue
+                try:
+                    bundle_root = worktree_dir.resolve(strict=True)
+                except (OSError, RuntimeError):
+                    bundle_root = None
+                if bundle_root is None or not bundle_root.is_relative_to(archive_root):
+                    _append_invalid_archive_root(
+                        invalid_archives,
+                        worktree_dir,
+                        "bundle-outside-archive-root",
+                    )
+                    continue
+                if resolution.status == "generation":
+                    candidate, reason = _preflight_generation_state(resolution)
+                    if candidate is None:
+                        if invalid_archives is not None:
+                            invalid_resolution = ArchiveResolution(
+                                "invalid",
+                                resolution.bundle,
+                                resolution.root,
+                                generation=resolution.generation,
+                                reason=reason,
+                            )
+                            invalid_archives.append(_invalid_archive_item(invalid_resolution))
+                        continue
+                    candidates.append(candidate)
+                    continue
+                active_root = resolution.root
+                snapshot = {
+                    "archive_bundle": worktree_dir,
+                    "archive_root": active_root,
+                    "archive_generation": resolution.generation,
+                }
+                candidates.extend(
+                    StateCandidate(path, **snapshot) for path in sorted(active_root.glob("*.json"))
+                )
+                worktree_sessions = active_root / "sessions"
+                if worktree_sessions.is_dir():
+                    candidates.extend(
+                        StateCandidate(path, **snapshot)
+                        for path in sorted(worktree_sessions.glob("*.json"))
+                    )
         seen: set[Path] = set()
-        for path in candidates:
+        for candidate in candidates:
+            path = candidate.path
             if path in seen or path.name.endswith(".bak"):
                 continue
             seen.add(path)
-            yield path
+            yield candidate
 
 
-def load_records(roots: list[Path]) -> list[StateRecord]:
+def iter_state_files(root: Path):
+    """Yield state paths while preserving the pre-manifest iterator contract."""
+    for candidate in _iter_state_candidates(root) or []:
+        yield candidate.path
+
+
+def load_records(
+    roots: list[Path], invalid_archives: list[dict[str, Any]] | None = None
+) -> list[StateRecord]:
     records: list[StateRecord] = []
     for root in roots:
-        for path in iter_state_files(root) or []:
-            try:
-                state = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
+        for candidate in _iter_state_candidates(root, invalid_archives) or []:
+            path = candidate.path
+            state = candidate.state
+            if state is None:
+                try:
+                    state = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
             if not is_mission_state(state):
                 continue
-            records.append(StateRecord(path=path, state=state))
+            records.append(
+                StateRecord(
+                    path=path,
+                    state=state,
+                    archive_bundle=candidate.archive_bundle,
+                    archive_root=candidate.archive_root,
+                    archive_generation=candidate.archive_generation,
+                )
+            )
     return records
+
+
+def collect_invalid_worktree_archives(
+    records: list[StateRecord], discovered: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    invalid: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def canonical_bundle_key(value: str) -> str:
+        try:
+            return str(Path(value).resolve(strict=False))
+        except (OSError, RuntimeError):
+            return str(Path(value).absolute())
+
+    for item in discovered:
+        key = canonical_bundle_key(item["bundle_path"])
+        if key in seen:
+            continue
+        invalid.append(item)
+        seen.add(key)
+    for record in records:
+        if record.archive_bundle is None:
+            continue
+        bundle_path = str(record.archive_bundle)
+        bundle_key = canonical_bundle_key(bundle_path)
+        if bundle_key in seen:
+            continue
+        status, _evidence = _validated_worktree_manifest(record)
+        if status != "invalid":
+            continue
+        resolution = ArchiveResolution(
+            "invalid",
+            record.archive_bundle,
+            record.archive_root or record.archive_bundle,
+            generation=record.archive_generation,
+            reason="manifest-or-generation-integrity-invalid",
+        )
+        invalid.append(_invalid_archive_item(resolution))
+        seen.add(bundle_key)
+    return invalid
 
 
 def is_mission_state(state: Any) -> bool:
@@ -699,6 +1373,16 @@ def coarse_phase_attribution_item(record: StateRecord, planning_ratio_threshold:
 
 
 def scoring_evidence_paths(record: StateRecord, iteration: int) -> list[Path]:
+    manifest_status, manifest_evidence = _validated_worktree_manifest(record)
+    if manifest_status == "invalid":
+        return []
+    if manifest_status == "valid":
+        return [
+            item["path"]
+            for item in manifest_evidence
+            if item.get("evidence_kind") == "scoring" and item.get("iteration") == iteration
+        ]
+
     mission_id = str(record.state.get("mission_id") or "")
     mission_prefix = mission_id[:8] or "unknown"
     filenames = [
@@ -759,6 +1443,24 @@ def scoring_evidence_paths(record: StateRecord, iteration: int) -> list[Path]:
 
 
 def specialist_evidence_paths(record: StateRecord, invocation: dict[str, Any]) -> list[Path]:
+    manifest_status, manifest_evidence = _validated_worktree_manifest(record)
+    if manifest_status == "invalid":
+        return []
+    if manifest_status == "valid":
+        source_reference = _normalized_state_reference(invocation.get("evidence_path"))
+        iteration = invocation.get("iteration")
+        if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < 0:
+            iteration = record.state.get("iteration")
+        if source_reference is None or not isinstance(iteration, int) or isinstance(iteration, bool):
+            return []
+        return [
+            item["path"]
+            for item in manifest_evidence
+            if item.get("evidence_kind") == "specialist"
+            and item.get("iteration") == iteration
+            and item.get("source_reference") == source_reference
+        ]
+
     paths: list[Path] = []
     evidence_path = str(invocation.get("evidence_path") or "").strip()
     if evidence_path:
@@ -930,7 +1632,9 @@ def aggregate(
     resolved_duplicate_count: int,
     slow_threshold_sec: int,
     current_since: datetime | None = None,
+    invalid_worktree_archives: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    invalid_worktree_archives = invalid_worktree_archives or []
     classes = [classify(r.state) for r in records]
     active_no_score_checkpoint = [r for r in records if is_active_no_score_checkpoint(r)]
     active_no_score_pending = [r for r in active_no_score_checkpoint if is_active_no_score_pending(r)]
@@ -1046,6 +1750,8 @@ def aggregate(
 
     return {
         "total_sessions": len(records),
+        "invalid_worktree_archives": invalid_worktree_archives,
+        "invalid_worktree_archive_count": len(invalid_worktree_archives),
         "pass_count": pass_count,
         "halt_count": classes.count("halt"),
         "incomplete_count": classes.count("incomplete"),
@@ -1247,6 +1953,12 @@ def finding_rows(stats: dict[str, Any], min_pass_rate: float) -> list[tuple[str,
         stats["current_candidate_only_specialist_count"]
         if current_scope else stats["candidate_only_specialist_count"]
     )
+    if stats["invalid_worktree_archive_count"]:
+        rows.append((
+            "P1",
+            "invalid-worktree-archive",
+            f"{stats['invalid_worktree_archive_count']} worktree archive bundles have an invalid pointer, generation, or manifest",
+        ))
     if stats["ungated_pass_count"]:
         rows.append(("P0", "ungated-pass", f"{stats['ungated_pass_count']} pass sessions bypassed scoring gate"))
     if stats["forced_pass_count"]:
@@ -1686,6 +2398,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _MANIFEST_VALIDATION_CACHE.clear()
     args = parse_args(argv or sys.argv[1:])
     roots = [Path(p).expanduser() for p in (args.root or ["."])]
     after = commit_datetime(Path(args.repo).expanduser(), args.after_commit) if args.after_commit else None
@@ -1698,10 +2411,22 @@ def main(argv: list[str] | None = None) -> int:
     current_since = parse_cutoff(args.current_since)
     if args.current_since and current_since is None:
         raise SystemExit(f"Invalid --current-since value: {args.current_since}")
-    records = load_records(roots)
+    discovered_invalid_archives: list[dict[str, Any]] = []
+    records = load_records(roots, discovered_invalid_archives)
+    invalid_worktree_archives = collect_invalid_worktree_archives(
+        records,
+        discovered_invalid_archives,
+    )
     filtered = filter_records(records, since, until, after)
     deduped, duplicates, resolved_duplicate_count = dedupe_records(filtered)
-    stats = aggregate(deduped, duplicates, resolved_duplicate_count, args.slow_threshold_sec, current_since)
+    stats = aggregate(
+        deduped,
+        duplicates,
+        resolved_duplicate_count,
+        args.slow_threshold_sec,
+        current_since,
+        invalid_worktree_archives,
+    )
     rows = finding_rows(stats, args.min_pass_rate)
 
     if args.self_improvement_prompt:
