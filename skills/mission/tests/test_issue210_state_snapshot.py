@@ -318,6 +318,44 @@ def test_snapshot_rejects_malformed_nested_semantic_payload(tmp_path, mutation):
     assert "traceback" not in consumed.stderr.lower()
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda document: document.__setitem__("invalid_worktree_archives", [None]),
+        lambda document: document.__setitem__("records", [None]),
+        lambda document: document.__setitem__("record_index", [None]),
+        lambda document: document.__setitem__("external_evidence_paths", [None]),
+        lambda document: document.__setitem__(
+            "external_evidence_paths", ["/tmp/invalid\x00evidence"]
+        ),
+        lambda document: document.__setitem__("roots", ["/tmp/invalid\x00root"]),
+        lambda document: document.__setitem__("archive_validations", {"bad": None}),
+        lambda document: document["records"][0].__setitem__(
+            "source_inventory", [None]
+        ),
+        lambda document: document["records"][0]["state"].__setitem__(
+            "score_history", {}
+        ),
+    ],
+)
+def test_snapshot_cli_rejects_malformed_collections_without_traceback(
+    tmp_path, run_cli, mutation
+):
+    root = tmp_path / "root"
+    _write_state(root, "one", "2026-07-21T00:00:00Z")
+    snapshot = tmp_path / "state.snapshot.json"
+    assert _snapshot(root, snapshot).returncode == 0
+    _rewrite_snapshot(snapshot, mutation)
+
+    audit = _run_audit("--snapshot-in", str(snapshot), "--json", cwd=root)
+    stats = run_cli("stats", "--snapshot", str(snapshot), "--json", cwd=root)
+    for result in (audit, stats):
+        assert result.returncode == 2
+        assert not result.stdout.strip()
+        assert "snapshot" in result.stderr.lower()
+        assert "traceback" not in result.stderr.lower()
+
+
 @pytest.mark.parametrize("field", ["size", "path", "pointer_path", "manifest_path"])
 def test_snapshot_rejects_archive_validation_metadata_inconsistency(
     tmp_path, run_cli, field

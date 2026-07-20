@@ -159,6 +159,8 @@ def record_source_inventory(path: Path, roots: list[Path]) -> list[list[Any]]:
 def record_index(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     index: list[dict[str, Any]] = []
     for item in records:
+        if not isinstance(item, dict):
+            raise SnapshotError("record payload is invalid")
         state = item.get("state")
         path = item.get("path")
         source_inventory = item.get("source_inventory")
@@ -265,6 +267,129 @@ def _is_sha256(value: Any) -> bool:
         and len(value) == 64
         and all(character in "0123456789abcdef" for character in value)
     )
+
+
+def _is_safe_path_text(value: Any, *, absolute: bool = True) -> bool:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return False
+    try:
+        path = Path(value)
+        return not absolute or path.is_absolute()
+    except (OSError, ValueError, RuntimeError, TypeError):
+        return False
+
+
+def _validate_record_shape(record: Any) -> None:
+    if not isinstance(record, dict):
+        raise SnapshotError("snapshot record payload is invalid")
+    state = record.get("state")
+    if (
+        not _is_safe_path_text(record.get("path"))
+        or not isinstance(state, dict)
+        or not all(
+            isinstance(state.get(key), str) and bool(state.get(key))
+            for key in ("mission", "mission_id", "session_id")
+        )
+        or (
+            state.get("project_root") not in (None, "")
+            and not _is_safe_path_text(state.get("project_root"), absolute=False)
+        )
+    ):
+        raise SnapshotError("snapshot record payload is invalid")
+    for key in (
+        "score_history", "specialist_invocations", "activity_segments",
+    ):
+        value = state.get(key)
+        if value is not None and (
+            not isinstance(value, list)
+            or any(not isinstance(item, dict) for item in value)
+        ):
+            raise SnapshotError(f"snapshot record {key} collection is invalid")
+    for key in (
+        "artifact", "progress", "task_profile", "specialists_decision",
+        "phase_durations_sec",
+    ):
+        value = state.get(key)
+        if value is not None and not isinstance(value, dict):
+            raise SnapshotError(f"snapshot record {key} collection is invalid")
+    source_inventory = record.get("source_inventory")
+    if (
+        not isinstance(source_inventory, list)
+        or not source_inventory
+        or any(not isinstance(item, list) for item in source_inventory)
+    ):
+        raise SnapshotError("snapshot record source inventory is invalid")
+    for key in ("archive_bundle", "archive_root"):
+        value = record.get(key)
+        if value is not None and not _is_safe_path_text(value):
+            raise SnapshotError("snapshot archive path is invalid")
+    generation = record.get("archive_generation")
+    validation_ref = record.get("archive_validation_ref")
+    if (
+        generation is not None
+        and (not isinstance(generation, str) or not generation or "\x00" in generation)
+    ) or (
+        validation_ref is not None
+        and (not isinstance(validation_ref, str) or not validation_ref or "\x00" in validation_ref)
+    ):
+        raise SnapshotError("snapshot archive reference is invalid")
+
+
+def _validate_snapshot_collections(document: dict[str, Any]) -> None:
+    records = document.get("records")
+    stored_index = document.get("record_index")
+    external_paths = document.get("external_evidence_paths")
+    invalid_archives = document.get("invalid_worktree_archives")
+    archive_validations = document.get("archive_validations")
+    roots = document.get("roots")
+    if not isinstance(records, list) or not isinstance(stored_index, list):
+        raise SnapshotError("snapshot record collection is invalid")
+    for record in records:
+        _validate_record_shape(record)
+    if any(not isinstance(item, dict) for item in stored_index):
+        raise SnapshotError("snapshot record index is invalid")
+    if (
+        not isinstance(external_paths, list)
+        or any(not _is_safe_path_text(path) for path in external_paths)
+        or len(external_paths) != len(set(external_paths))
+    ):
+        raise SnapshotError("snapshot external evidence paths are invalid")
+    if (
+        not isinstance(roots, list)
+        or not roots
+        or any(not _is_safe_path_text(root) for root in roots)
+    ):
+        raise SnapshotError("snapshot roots are invalid")
+    if not isinstance(invalid_archives, list):
+        raise SnapshotError("snapshot invalid archive collection is invalid")
+    for item in invalid_archives:
+        if (
+            not isinstance(item, dict)
+            or not _is_safe_path_text(item.get("bundle_path"))
+            or not isinstance(item.get("reason"), str)
+            or not item.get("reason")
+            or "\x00" in item["reason"]
+            or (
+                "generation" in item
+                and (
+                    not isinstance(item["generation"], str)
+                    or not item["generation"]
+                    or "\x00" in item["generation"]
+                )
+            )
+        ):
+            raise SnapshotError("snapshot invalid archive item is invalid")
+    if (
+        not isinstance(archive_validations, dict)
+        or any(
+            not isinstance(key, str)
+            or not key
+            or "\x00" in key
+            or not isinstance(value, dict)
+            for key, value in archive_validations.items()
+        )
+    ):
+        raise SnapshotError("snapshot archive validation collection is invalid")
 
 
 def _validate_archive_payload(
@@ -541,10 +666,10 @@ def read_snapshot(
     requested_roots: list[Path] | None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    source = Path(path).expanduser()
     try:
+        source = Path(path).expanduser()
         source_stat = source.lstat()
-    except OSError as error:
+    except (OSError, ValueError, RuntimeError, TypeError) as error:
         raise SnapshotError(f"snapshot is not accessible: {error}") from error
     if stat.S_ISLNK(source_stat.st_mode) or not stat.S_ISREG(source_stat.st_mode):
         raise SnapshotError("snapshot must be a regular non-symlink file")
@@ -566,37 +691,41 @@ def read_snapshot(
     for key, expected in expected_contracts.items():
         if document.get(key) != expected:
             raise SnapshotError(f"snapshot {key} is incompatible")
-    if document.get("content_digest") != canonical_digest(document):
+    if (
+        not _is_sha256(document.get("content_digest"))
+        or document.get("content_digest") != canonical_digest(document)
+    ):
         raise SnapshotError("snapshot content digest mismatch")
+    _validate_snapshot_collections(document)
     records = document.get("records")
     stored_index = document.get("record_index")
     external_evidence_paths = document.get("external_evidence_paths")
     invalid_archives = document.get("invalid_worktree_archives")
     archive_validations = document.get("archive_validations")
-    if not isinstance(records, list) or not isinstance(stored_index, list):
-        raise SnapshotError("snapshot record collection is invalid")
+    record_count = document.get("record_count")
     if (
-        not isinstance(external_evidence_paths, list)
-        or not all(isinstance(path, str) for path in external_evidence_paths)
-        or not isinstance(invalid_archives, list)
-        or not isinstance(archive_validations, dict)
+        not isinstance(record_count, int)
+        or isinstance(record_count, bool)
+        or record_count < 0
+        or record_count != len(records)
+        or stored_index != record_index(records)
     ):
-        raise SnapshotError("snapshot discovery collection is invalid")
-    if document.get("record_count") != len(records) or stored_index != record_index(records):
         raise SnapshotError("snapshot record count/index mismatch")
     if (
         not isinstance(document.get("discovery_count"), int)
         or isinstance(document.get("discovery_count"), bool)
         or document.get("discovery_count") < 0
-        or not isinstance(document.get("discovery_digest"), str)
-        or len(document.get("discovery_digest")) != 64
+        or not _is_sha256(document.get("discovery_digest"))
     ):
         raise SnapshotError("snapshot discovery count/index mismatch")
     roots = document.get("roots")
-    if not isinstance(roots, list) or not all(isinstance(root, str) for root in roots):
-        raise SnapshotError("snapshot roots are invalid")
-    if requested_roots is not None and normalize_roots(requested_roots) != roots:
-        raise SnapshotError("snapshot roots do not match the requested ordered multiset")
+    if requested_roots is not None:
+        try:
+            requested = normalize_roots(requested_roots)
+        except (OSError, ValueError, RuntimeError, TypeError) as error:
+            raise SnapshotError("requested snapshot roots are invalid") from error
+        if requested != roots:
+            raise SnapshotError("snapshot roots do not match the requested ordered multiset")
     created_at = parse_iso_datetime(document.get("created_at"))
     observed_at = parse_iso_datetime(document.get("observed_at"))
     ttl_seconds = document.get("ttl_seconds")
@@ -626,17 +755,27 @@ def consume_snapshot_document(
 ) -> tuple[dict[str, Any], list[Path], datetime]:
     """Validate one snapshot with one metadata-only rewalk."""
     document = read_snapshot(path, requested_roots=requested_roots)
-    roots = [Path(root) for root in document["roots"]]
-    evidence_paths = [Path(value) for value in document["external_evidence_paths"]]
-    root_loader = root_inventory_loader or root_metadata_inventory
-    evidence_loader = evidence_inventory_loader or external_evidence_inventory
-    index = root_loader(roots) + evidence_loader(evidence_paths)
+    try:
+        roots = [Path(root) for root in document["roots"]]
+        evidence_paths = [Path(value) for value in document["external_evidence_paths"]]
+        root_loader = root_inventory_loader or root_metadata_inventory
+        evidence_loader = evidence_inventory_loader or external_evidence_inventory
+        index = root_loader(roots) + evidence_loader(evidence_paths)
+    except SnapshotError:
+        raise
+    except (OSError, ValueError, RuntimeError, TypeError) as error:
+        raise SnapshotError(f"snapshot discovery metadata is invalid: {error}") from error
     if (
         len(index) != document["discovery_count"]
         or discovery_digest(index) != document["discovery_digest"]
     ):
         raise SnapshotError("snapshot discovery fingerprint is stale")
-    validate_snapshot_semantics(document, index)
+    try:
+        validate_snapshot_semantics(document, index)
+    except SnapshotError:
+        raise
+    except (OSError, ValueError, RuntimeError, TypeError, KeyError) as error:
+        raise SnapshotError(f"snapshot semantic payload is invalid: {error}") from error
     observed_at = parse_iso_datetime(document["observed_at"])
     if observed_at is None or observed_at.tzinfo is None:
         raise SnapshotError("snapshot observed_at is invalid")
