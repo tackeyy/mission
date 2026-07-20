@@ -9,8 +9,28 @@
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-07-20
+
+### 破壊的変更
+
+- `mark-passes --force` に `--approved-by-user` が必須になりました (未指定は exit 2)。このフラグは「ユーザーが明示的に override を指示した」という宣言であり、バリデーション回避のスイッチではありません。orchestrator が自律的に付けてはならず、ユーザーの明示指示がある場合にのみ使用します。state には従来の `force_reason` に加えて `force_approved_by_user` を記録し、`mission-audit.py` はこれを欠く forced pass を新しい P0 finding として報告します (#185, #193)。
+- `set phase=` を phase enum で検証するようになりました。未知の値は exit 2 とし、既知の 4 エイリアス (`execution` / `review` / `plan` / `score`) は警告付きで正規形へ正規化します。実運用で `phase=execution` (typo) が無検証で通り、`phase_duration_totals` を汚染した実害への対処です (#188, #191)。
+
+### 追加
+
+- `mission-state.py stats` に `by_review_tier` (`by_complexity` と同形) と `iteration_by_review_tier` を追加しました。light tier が手戻りを生んでいないかをコマンド一発で監視できます。tier 導入前の state は `unknown` に集計されます (#180, #182)。
+- state に `cli_version` を記録し、Claude Code / Codex の plugin cache を走査して実行中 CLI との version skew (古い install) を検出するようになりました (#186, #195)。
+- `mark-halt` / `halt --all` が `--category` を受け付けるようになりました (共有 enum `HALT_CATEGORIES`: `blocked-external` / `awaiting-approval` / `partial-done` / `stagnation` / `user-abort` / `stale` / `other`)。未指定・不正値は警告付きで `other` にフォールバックします — 緊急停止パスが category の不備で失敗してはならないためです。自動 halt は `stale` を記録します (#190, #192)。
+- optional specialist を選択したまま invocation を一度も記録せずに pass しようとした場合、`mark-passes` が警告と、閉じるための `specialists log-invocation --status skipped` コマンドを表示します。pass gate 自体は変更ありません (#189, #194)。
+
 ### 変更
-- 「リリースして」「本番へデプロイして」などの明示的なユーザー指示を、対象が一致する不可逆操作の事前承認として扱うようにしました。対象・scope・rollback 条件や必要な破壊的操作に実質的な差分がない限り、実行直前に同じ確認を繰り返しません。
+
+- 「リリースして」「本番へデプロイして」などの明示的なユーザー指示を、対象が一致する不可逆操作の事前承認として扱うようにしました。対象・scope・rollback 条件や必要な破壊的操作に実質的な差分がない限り、実行直前に同じ確認を繰り返しません (#197)。
+- `_derive_next_action` が「`score_source=scoring-json` なのに `findings_evidence_path` を欠く」score entry を検出し、再試行を instruction 頼みではなく state 駆動で促すようになりました。実運用の Codex run が `aggregate-reviews` の出力を得られず `--force` へ逃げた一方、同時期の別 run は自己回復していた、という実害への対処です (#187, #196)。
+
+### 修正
+
+- `task_profile.risk=high` のキーワードを #174 と同一ポリシーで較正しました。`prod` を削除 (`production` があり冗長、`product`/`productivity` への誤発火源)、`auth` を `authenticat`/`authoriz`/`oauth` へ、単独の `token` を複合語 6 種へ置換。506 mission の遡及実測で `risk=high` は 72→53 件、risk 起因のエスカレーションは 17→9 件、見逃しは 3 件のまま不変です (#175, #183)。
 - `mission-audit.py` が archived worktree bundle 内の `iter-N-<mission8>/scoring.{json,md}` に保存された scoring evidence を認識するようになり、worktree cleanup 後に historical `missing-scoring-evidence` が誤検出される問題を修正しました (#201)。
 
 ## [1.2.0] - 2026-07-10
@@ -210,6 +230,7 @@
 - 状態ルーティング・スコアゲート・hook 挙動をカバーする Python テストスイート。
 - GitHub Actions CI（`push` / `pull_request` / `workflow_dispatch`）。pytest と ShellCheck を実行。
 
+[2.0.0]: https://github.com/tackeyy/mission/releases/tag/v2.0.0
 [1.2.0]: https://github.com/tackeyy/mission/releases/tag/v1.2.0
 [1.1.1]: https://github.com/tackeyy/mission/releases/tag/v1.1.1
 [1.1.0]: https://github.com/tackeyy/mission/releases/tag/v1.1.0

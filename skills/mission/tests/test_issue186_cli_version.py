@@ -8,6 +8,14 @@ findings 欠落の主因になっていた実害への対策。
 (実行マシンの実際の ~/.claude, ~/.codex plugin cache が非決定性を持ち込むため必須)。
 """
 import json
+import re
+from pathlib import Path
+
+# リリースのたびにテストのリテラルを書き換えずに済むよう、CLI から現行 version を読む。
+_CLI_SRC = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
+CURRENT_VERSION = re.search(
+    r'^MISSION_CLI_VERSION = "([^"]+)"', _CLI_SRC.read_text(encoding="utf-8"), re.M
+).group(1)
 
 
 def _isolated_env(tmp_path, **extra):
@@ -40,7 +48,7 @@ def test_preflight_detects_stale_claude_code_cache(state_dir, run_cli, tmp_path)
     fake_home = tmp_path / "fake-claude-home"
     cache = fake_home / "plugins" / "cache" / "mission-marketplace" / "mission"
     (cache / "1.0.6").mkdir(parents=True)
-    (cache / "1.2.0").mkdir(parents=True)  # 現行と同じバージョンは stale 扱いしない
+    (cache / CURRENT_VERSION).mkdir(parents=True)  # 現行と同じバージョンは stale 扱いしない
 
     run_cli("init", "m", "--complexity", "Simple", cwd=tmp_path, env_extra=_isolated_env(tmp_path), check=True)
     r = run_cli("codex-preflight", "--json", "--hook-config", str(tmp_path / "hooks.json"),
@@ -95,7 +103,7 @@ def test_stats_reports_by_cli_version(tmp_path, run_cli):
     (sd / "v1.json").write_text(json.dumps({
         "mission": "m1", "mission_id": "a1", "session_id": "v1",
         "loop_active": False, "passes": True, "halt_reason": "",
-        "cli_version": "1.2.0", "phase": "done", "score_history": [], "iteration": 1,
+        "cli_version": CURRENT_VERSION, "phase": "done", "score_history": [], "iteration": 1,
         "started_at": "2026-05-25T00:00:00Z", "updated_at": "2026-05-25T00:10:00Z",
         "schema_version": 2, "project_root": str(tmp_path),
         "pid": 0, "hostname": "test", "created_at_session": "2026-05-25T00:00:00Z",
@@ -110,9 +118,9 @@ def test_stats_reports_by_cli_version(tmp_path, run_cli):
     }))
     r = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path, check=True)
     data = json.loads(r.stdout)
-    assert data["by_cli_version"]["1.2.0"]["total"] == 1
+    assert data["by_cli_version"][CURRENT_VERSION]["total"] == 1
     assert data["by_cli_version"]["unknown"]["total"] == 1
 
     r_text = run_cli("stats", "--root", str(tmp_path), cwd=tmp_path, check=True)
     assert "by_cli_version:" in r_text.stdout
-    assert "1.2.0" in r_text.stdout
+    assert CURRENT_VERSION in r_text.stdout
