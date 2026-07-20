@@ -1,0 +1,71 @@
+# ADR-004: Bounded Activity-Segment Observability
+
+## Status
+
+Accepted
+
+## Date
+
+2026-07-21
+
+## Context
+
+Session wall-clock and `phase_durations_sec` show where elapsed time was
+attributed, but they cannot separate work from external, approval, reviewer, or
+idle waits. This makes it difficult to improve execution speed without weakening
+the review and scoring gates. A crash can also leave an open interval whose end
+is unknowable; treating the entire restart gap as work or idle would invent a
+cause.
+
+## Decision
+
+Mission records one explicit open activity and a bounded history of closed
+segments. The activity kinds are `active`, `external-wait`, `approval-wait`,
+`reviewer-wait`, and `idle`. Every start requires a kind-specific reason enum;
+an optional detail is control-character stripped, whitespace normalized, and
+bounded to 160 characters. Unknown causes are never inferred.
+
+`mission-state.py activity start` closes the previous activity and opens the
+next one under the existing state lock. `activity end`, phase transitions,
+`mark-passes`, and `mark-halt` close the open segment under that same lock.
+Repeated starts and ends are idempotent. A backwards timestamp fails without
+writing state.
+
+On reinitialization or PID refresh after a crash, an open segment closes at the
+last valid `updated_at` between its start and the resume time. The later gap is
+reported as `activity_unobserved_gap_sec`; it is not classified as idle. A
+repeated resume does not add duration again.
+
+The latest 32 closed segments remain in `activity_segments` for diagnosis.
+Fixed-size `activity_rollup` maps preserve all earlier totals, so state growth
+and rewrite cost remain bounded. Existing `phase_durations_sec` retains its
+wall-clock semantics and is not incremented by activity commands.
+
+`mission-state.py stats` and `mission-audit.py` call the same reducer. They
+report:
+
+- task and phase p50/p90 using linear interpolation R7;
+- totals by activity kind and explicit wait reason;
+- observed, unclassified, open, invalid, and unobserved-gap measures;
+- coverage and total-consistency diagnostics.
+
+Task samples use `mission_id`, falling back to `unknown`. Open segments are
+reported but excluded from duration distributions. Malformed, negative,
+non-finite, future-enum, and inconsistent rollup values are excluded and counted
+as invalid. Legacy states remain readable: their phase time is unclassified and
+no wait reason is fabricated.
+
+## Quality and control boundary
+
+This feature is measurement only. It does not change reviewer count, thresholds,
+findings evidence, agreement checks, `open_high`, pass/fail state, automatic
+retry, or watchdog behavior. Speed improvements must be evaluated from the
+recorded distributions while the existing quality gates remain unchanged.
+
+## Consequences
+
+Operators can identify whether elapsed time concentrates in execution or a
+specific wait category and compare task/phase distributions over multiple
+sessions. Historical sessions without activity data remain comparable at the
+phase level, with their missing classification made explicit rather than
+guessed.

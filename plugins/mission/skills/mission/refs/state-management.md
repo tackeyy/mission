@@ -129,6 +129,25 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py progress get -
 
 更新前の `.bak` 自動生成 (A-4)、`fcntl.flock` ロック (B-1)、`fsync + os.replace` atomic write (B-2) もスクリプトが内包する。
 
+### Activity segment observability (#211)
+
+`phase_durations_sec` の wall-clock 意味論を維持したまま、作業と待機を明示的に区別する。`activity start` は既存 open segment を閉じて新しい segment を開き、`activity end` は閉じる。どちらも state lock 内で atomic write され、同一操作の再実行は duration を二重加算しない。phase 遷移は open segment を同じ kind/reason のまま split し、`done` / `halted` は open segment を閉じる。
+
+```bash
+mission-state.py activity start --kind active --reason <work|implementation|planning|review|scoring|resumed-implementation|other> [--detail "..."]
+mission-state.py activity start --kind external-wait --reason <external-response|external-command|other>
+mission-state.py activity start --kind approval-wait --reason <user-approval|policy-approval|other>
+mission-state.py activity start --kind reviewer-wait --reason <review-response|independent-review|other>
+mission-state.py activity start --kind idle --reason <no-runnable-work|interrupted|other>
+mission-state.py activity end
+```
+
+reason は kind ごとの enum から明示し、未知の原因を推測しない。detail は制御文字と改行を除去し、空白を正規化して160文字に制限する。crash 後の `resume` / `refresh-pid` / 同一 mission の `init` は、open segment を最後の有効な `updated_at` まで一度だけ閉じる。その後の空白時間は `activity_unobserved_gap_sec` であり、`idle` には分類しない。
+
+state は `activity_current`、直近32件の `activity_segments`、固定 map の `activity_rollup` を持つ。古い raw segment を落としても rollup が全期間の duration を保持する。`stats` と `mission-audit.py` は同じ reducer を使い、task/phase p50・p90（linear interpolation R7）、kind/reason totals、coverage、unclassified、open/invalid counts を同じ定義で返す。task key は `mission_id`、欠落時は `unknown`。open、negative、non-finite、未知 enum、不整合 rollup は percentile から除外する。activity のない旧 state は phase duration を unclassified とし、理由は補完しない。
+
+この観測は reviewer 数、threshold、findings evidence、agreement、`open_high`、pass/fail、自動 retry、watchdog を変更しない。速度改善は品質ゲートを維持したまま分布を比較して判断する。設計判断は `docs/adr/004-activity-segment-observability.md` を参照。
+
 `specialists accounting` は available candidate のうち selected / invoked / skipped / unavailable / failed 等の terminal decision trail がないものを表示する。`Critical` と high-risk は全 available candidate、`Complex` は security/testing/infra と、schema/migration/query/persistence 等の強いシグナルがある database/backend candidate を重点対象にする。これは optional provider を blanket hard gate にするものではなく、ハッカブルな plugin/provider 拡張性を保ちながら判断理由を監査可能にするための pre-completion warning である。ただし `required: true` provider は stricter gate で、`prepared` / `awaiting-input` / `skipped` / `failed` だけでは結果証跡と見なさず、`completed` / `inline-applied` / `skill-tool-applied` のいずれかが無い限り `mark-passes` が exit 2 で拒否する。
 
 **#189 (自動 WARN)**: `mark-passes` は成功時、`specialists_selected` にあるが `specialist_invocations` に一件も (skipped/unavailable/failed 等どのステータスでも) 記録のない specialist を stderr WARN で列挙する (呼び出し不要・自動発火。`specialists accounting` の手動確認とは別。判定は `specialists_phase_plan` の providers を含まない `specialists_selected` のみを対象にし、phase_plan にしか登場しない specialist を誤検知しない)。非 `--force` 経路では required specialist は accounting_required/result_required gate がここに到達する前に exit 2 で止めるため、この WARN の対象は常に optional。`--force` はこれらの gate ごと skip するため、`--force` 経路ではこの WARN 自体を出さない (required specialist が混入していた場合に「optional のため」という文言が誤りになるのを避ける)。`mission-state.py next` も `mark-passes` action の `details.unclosed_specialists` に同じ一覧を含める。hard gate ではないため mark-passes 自体は成功するが、`specialists log-invocation --status skipped --reason "<理由>"` 等でクローズアウトしておくのが望ましい。
