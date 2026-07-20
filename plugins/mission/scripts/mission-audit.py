@@ -1949,6 +1949,8 @@ def finding_line(item: dict[str, Any]) -> str:
         provenance = f" — `{session}`"
         if project:
             provenance += f" ({project})"
+        if item.get("path"):
+            provenance += f" at `{item['path']}`"
     elif item.get("path"):
         provenance = f" — `{item['path']}`"
     return f"- {item['priority']} `{item['code']}`: {item['summary']}{provenance}"
@@ -2181,7 +2183,11 @@ def self_improvement_prompt(
         period += f" --until {until}"
     if current_since:
         period += f" --current-since {current_since}"
-    finding_text = "\n".join(f"- {p} `{code}`: {summary}" for p, code, summary in rows if p != "OK")
+    finding_text = "\n".join(
+        f"- {p} `{code}`: {summary}"
+        for p, code, summary in rows
+        if p not in {"OK", "INFO"}
+    )
     if not finding_text:
         finding_text = "- 現時点で P0/P1 はなし。P2 以下を ROI 順に確認する。"
     return f"""/mission scripts/mission-audit.py の監査結果をもとに mission 自身を自己改善してください。

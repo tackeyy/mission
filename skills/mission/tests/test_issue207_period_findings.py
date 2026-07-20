@@ -192,3 +192,30 @@ def test_missing_cutoff_keeps_legacy_all_current_behavior(tmp_path: Path):
     assert data["current_findings"] == data["all_findings"]
     assert data["current_finding_counts"] == data["all_finding_counts"]
     assert any(item["code"] == "forced-pass" for item in data["findings"])
+
+
+def test_historical_risk_does_not_enter_current_improvement_prompt(tmp_path: Path):
+    _write_state(
+        tmp_path,
+        "old-force",
+        "2026-07-19T23:59:59Z",
+        passes_forced=True,
+        force_reason="provider unavailable",
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(AUDIT),
+            "--root",
+            str(tmp_path),
+            "--current-since",
+            "2026-07-20T00:00:00Z",
+            "--self-improvement-prompt",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert "forced-pass" not in result.stdout
+    assert "historical-fixed-debt" not in result.stdout
