@@ -258,7 +258,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py progress updat
 
 ## review_tier 導出と Light Tier 運用 (Issue #168, 2026-07-10)
 
-`review_tier`（`light` / `standard` / `full`）は `init` 時に complexity とミッション記述から自動導出される。導出根拠は `review_tier_source`（`"auto"` or `"user"`）と `review_tier_signals`（エスカレータ理由リスト）として state に記録する。
+`review_tier`（`light` / `standard` / `full`）は `init` 時に complexity とミッション記述から自動導出される。導出根拠は `review_tier_source`（`"auto"` or `"user"`）、後方互換な `review_tier_signals`（エスカレータ理由の文字列リスト）、各候補の判断を示す `review_tier_signal_details` として state に記録する。
 
 ### ベースマッピング (REVIEW_TIER_BASE)
 
@@ -270,17 +270,19 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py progress updat
 | Critical | full |
 | None / Unknown / 未知文字列 | standard（安全側フォールバック） |
 
-### エスカレータ条件（いずれか該当で `full` に昇格。降格なし）
+### エスカレータ条件（いずれかの候補を採用すると `full` に昇格。ベース tier の降格なし）
 
 | シグナル | トリガー |
 |---|---|
 | `task_profile.risk=high` | task_profile の risk フィールドが `"high"` |
-| 不可逆系英語キーワード | `deploy` / `release` / `migration` / `drop` / `delete` / `publish` / `production` / `push` / `merge`（小文字化して部分一致） |
-| 不可逆系日本語キーワード | `本番` / `リリース` / `マイグレーション` / `削除` / `公開` / `決済`（そのまま部分一致） |
-| セキュリティ系英語キーワード | `auth` / `secret` / `token` / `credential` / `password`（小文字化して部分一致） |
+| 不可逆系英語キーワード | `deploy` / `release` / `migration` / `drop` / `delete` / `publish` / `production`（大文字小文字を区別しない部分一致） |
+| 不可逆系日本語キーワード | `本番` / `リリース` / `マイグレーション` / `データ削除` / `レコード削除` / `物理削除` / `公開` / `決済`（部分一致） |
+| セキュリティ系英語キーワード | `secret` / `credential` / `password` / `api token` / `api-token` / `api_key` / `access token` / `access-token` / `bearer` / `authenticat` / `authoriz` / `oauth`（大文字小文字を区別しない部分一致） |
 | セキュリティ系日本語キーワード | `認証` / `秘密` / `鍵` |
 
-マッチしたキーワードは `review_tier_signals` に `irreversible-keyword:<kw>` / `security-keyword:<kw>` 形式で記録される。エスカレータは conservative 設計（`release`・`merge`・`push` 等の頻出語も full 昇格する）。実運用データに基づくキャリブレーションは後続タスク。
+不可逆系キーワードはすべての出現を段落・list item 単位の局所文脈で評価する。`deploy しない`、`do not deploy`、`対象外` など、実操作を明示的かつ単純に否定した候補だけを抑制する。否定・実行・引用だけという意図を別の段落や list item へ伝播させない。条件付き、二重否定、不確実表現、単なる引用は安全側で採用し、同じ unit で引用だけが目的だと明示された場合のみ抑制する。`task_profile.risk=high` と security キーワードは否定文脈でも常に採用する。Complex / Critical のベース tier も変えない。
+
+採用したキーワードは従来どおり `review_tier_signals` に `irreversible-keyword:<kw>` / `security-keyword:<kw>` 形式で、定数順・同一キーワード 1 件として記録する。additive な `review_tier_signal_details` は採用・抑制を問わず各出現を記録し、`match` / `context` / `decision` / `reason` / `source` / `start` / `end` から判定を追跡できる。`get` はこの field を state の一部として出力する。field を持たない旧 state の `get` / `next` / `set` は引き続き動作し、auto source で complexity を再設定した時に details が生成される。
 
 ### tier と reviewer_count の対応 (TIER_REVIEWER_COUNT)
 
@@ -298,7 +300,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py progress updat
 
 ### User override
 
-`init --review-tier <light|standard|full>` または `set review_tier=<値>` で上書き可能。auto 導出より低い tier を指定すると `stderr` に `WARNING` を出すが拒否しない（`review_tier_source` は `"user"` に設定）。`review_tier_source=auto` の状態で `complexity` を `set` で変更すると tier が再導出される。`review_tier_source=user` の場合は complexity 変更でも tier を維持する。
+`init --review-tier <light|standard|full>` または `set review_tier=<値>` で上書き可能。auto 導出より低い tier を指定すると `stderr` に `WARNING` を出すが拒否しない（`review_tier_source` は `"user"` に設定）。`review_tier_source=auto` の状態で `complexity` を `set` で変更すると tier が再導出される。`review_tier_source=user` の場合は complexity 変更でも tier を維持する。既存 state を `set review_tier=` で上書きした後も signals / details は観測された候補の provenance として保持するが、source が `user` の場合、それらは適用 tier の根拠ではない。`init --review-tier` で最初からユーザー指定した state の signals / details は空になる。
 
 ### 効果測定 (Issue #180)
 

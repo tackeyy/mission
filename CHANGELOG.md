@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `mission-state.py archive-worktree` now copies a terminal worktree session and its state-referenced evidence to an existing separate checkout in the same Git common directory. Updates publish content-addressed immutable generations before atomically advancing `current.json`, so a crash or parallel reader never loses the previous valid generation. A `mission-worktree-archive/1` manifest records session/mission/iteration identity, evidence type, private relative source/archive references, SHA-256, and size; duplicate paths, escapes, symlinks, missing evidence, and integrity failures fail closed. `mission-audit.py` snapshots and preflights the discovered generation before loading its state, resolves scoring and specialist evidence from the validated manifest, and caches validation once per record. It verifies `.mission-state` readiness before descent and records later walk access errors. Non-directory, unreadable, or symlinked `.mission-state` and archive roots, symlinked bundle or generation ancestors, bundles resolving outside the regular archive root, archive/pointer/generation access failures, malformed or unsafe pointers, missing or invalid archived state, and missing or invalid generation manifests produce one deduplicated `invalid-worktree-archive` finding rather than reading outside the root, silently omitting the archive, or falling back to stale files; legacy compatibility applies only when pointer absence is confirmed by `lstat` (#212).
 
+### Fixed
+
+- Irreversible `review_tier` keywords are now evaluated per occurrence in paragraph/list-item-local context. Explicitly negated actual operations no longer escalate a Simple/Standard mission, while conditional, double-negative, uncertain, quoted, security, high-risk, and Complex/Critical cases remain conservative. State adds per-match `review_tier_signal_details` provenance without changing the existing ordered string-list contract (#209).
+
 ## [2.0.0] - 2026-07-20
 
 ### Breaking

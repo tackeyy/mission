@@ -65,8 +65,19 @@ downgrade path):
 | Security keyword (EN) | `secret`, `credential`, `password`, `api token`, `api-token`, `api_key`, `access token`, `access-token`, `bearer`, `authenticat`, `authoriz`, `oauth` — case-insensitive substring match |
 | Security keyword (JA) | `認証`, `秘密`, `鍵` |
 
-Matched signals are recorded in `review_tier_signals` as
-`irreversible-keyword:<kw>` or `security-keyword:<kw>` entries.
+Every occurrence of an irreversible keyword is evaluated in its paragraph- or
+list-item-local context.
+Only an explicit, simple statement that the actual operation will not happen is
+suppressed. Conditional, double-negative, uncertain, and merely quoted contexts
+remain conservative escalations; an explicit quote-only intent may be suppressed.
+Negation, execution, and quote-only intent do not leak to a different logical
+unit. Security keywords,
+`task_profile.risk=high`, and the Complex/Critical base tiers are never suppressed
+by this context rule.
+
+Included signals remain recorded in the backward-compatible
+`review_tier_signals` string list as `irreversible-keyword:<kw>` or
+`security-keyword:<kw>` entries, in constant order with one entry per keyword.
 
 ### Reviewer count
 
@@ -91,6 +102,10 @@ Standard and full tiers behave as they did before this ADR.
 `"user"` (set via `--review-tier` or `set review_tier=`).
 `review_tier_signals` records the escalator reasons that triggered promotion to
 `full`, or an empty list for tiers that were not escalated.
+`review_tier_signal_details` additively records every matched occurrence with its
+matched text, bounded context, include/suppress decision, reason, source, and
+source span. This makes a suppressed negated candidate auditable through `get`
+without changing the existing string-list contract.
 
 ### User override
 
@@ -103,6 +118,11 @@ When `complexity` is later changed via `set complexity=` and
 `review_tier_source` is `"auto"`, the tier is re-derived and `reviewer_count`
 is synced. When `review_tier_source` is `"user"`, the tier and `reviewer_count`
 are preserved across complexity changes.
+
+When `set review_tier=` changes an existing auto-derived state, the existing
+signals and details remain observation provenance. With
+`review_tier_source="user"`, they are not the rationale for the applied tier.
+An `init --review-tier` state starts with empty signals and details.
 
 ### Gate semantics are invariant
 
@@ -128,7 +148,8 @@ conditions regardless of `review_tier`.
 - Review depth for Simple/Standard missions with no escalator signals narrows
   from three reviewers to one, reducing review overhead for the 95%
   pass-through majority.
-- `review_tier_source` and `review_tier_signals` make the gating decision
+- `review_tier_source`, `review_tier_signals`, and
+  `review_tier_signal_details` make the gating decision
   auditable and adjustable without removing the gate.
 - Backward-compatible: state files without `review_tier` are handled
   gracefully by `set`, `next`, and `get` commands.
@@ -217,10 +238,12 @@ missions without introducing new missed escalations.
 Implemented in `skills/mission/bin/mission-state.py` (Issue #168):
 
 - `TIER_REVIEWER_COUNT` and `REVIEW_TIER_BASE` constants define the mapping.
-- `derive_review_tier()` is a pure function with no side effects; covered by
-  `skills/mission/tests/test_issue168_review_tier.py`.
+- `derive_review_tier_decision()` is a pure function that returns per-occurrence
+  provenance; `derive_review_tier()` preserves the existing tuple API. They are
+  covered by `test_issue168_review_tier.py` and
+  `test_issue209_review_tier_negation.py`.
 - `cmd_init` stores `review_tier`, `review_tier_source`, `review_tier_signals`,
-  and `reviewer_count` in the initial state.
+  `review_tier_signal_details`, and `reviewer_count` in the initial state.
 - `cmd_set` validates the value, warns on downgrade, and syncs `reviewer_count`
   unless `reviewer_count` is also set explicitly in the same call.
 - `set complexity=` re-derives tier when `review_tier_source == "auto"`.
