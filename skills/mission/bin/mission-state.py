@@ -775,11 +775,29 @@ _REVIEW_CONDITIONAL_RE = re.compile(
     r"\bwithout\s+(?:approval|authorization|permission)\b",
     re.IGNORECASE,
 )
-_REVIEW_NEGATION_RE = re.compile(
-    r"実行しない|実施しない|行わない|行いません|しない方針|しない|しません|せず|行わず|禁止|対象外|"
-    r"\b(?:do|does|did|will|would|should|must|can|could)\s+not\b|"
-    r"\bdon['’]t\b|\bnot\s+(?:be\s+)?(?:perform(?:ed)?|execut(?:e|ed)|deploy(?:ed)?|releas(?:e|ed)|publish(?:ed)?)\b|"
-    r"\b(?:is|are|was|were)\s+out\s+of\s+scope\b|\bout\s+of\s+scope\b",
+_REVIEW_EN_PRE_NEGATION_RE = re.compile(
+    r"(?:\b(?:do|does|did|will|would|should|must|can|could)\s+not|\bnot|\bdon['’]t)\s*$",
+    re.IGNORECASE,
+)
+_REVIEW_EN_POST_NEGATION_RE = re.compile(
+    r"^(?:ment)?\s*(?:(?:is|are|was|were|will\s+be)\s+)?"
+    r"(?:not\s+(?:performed|executed|deployed|released|published)|out\s+of\s+scope)\b",
+    re.IGNORECASE,
+)
+_REVIEW_JA_POST_NEGATION_RE = re.compile(
+    r"^\s*(?:は|を|では|には|へ|に|で)?\s*"
+    r"(?:(?:実行|実施)\s*)?(?:しない方針|しない|しません|せず)|"
+    r"^\s*(?:は|を|では|には|へ|に|で)?\s*(?:行わない|行いません|行わず|禁止|対象外)",
+)
+_REVIEW_PRODUCTION_QUALIFIER_RE = re.compile(
+    r"(?:\b(?:do|does|did|will|would|should|must|can|could)\s+not|\bnot|\bdon['’]t)\s+"
+    r"(?:deploy|release|publish)\s+(?:to|in)\s+(?:the\s+)?$",
+    re.IGNORECASE,
+)
+_REVIEW_HONBAN_QUALIFIER_RE = re.compile(
+    r"^\s*(?:への|へ|で|に)?\s*(?:deploy|release|publish|リリース|公開)\s*"
+    r"(?:は|を)?\s*(?:(?:実行|実施)\s*)?"
+    r"(?:しない方針|しない|しません|せず|行わない|行いません|行わず|禁止|対象外)",
     re.IGNORECASE,
 )
 _REVIEW_GLOBAL_NON_OPERATION_RE = re.compile(
@@ -865,12 +883,26 @@ def _review_match_is_quoted(text: str, start: int) -> bool:
     return False
 
 
-def _review_negation_is_near(context: str, relative_start: int, relative_end: int) -> bool:
-    """Accept only an explicit negation close to the matched operation (Issue #209)."""
-    for negation in _REVIEW_NEGATION_RE.finditer(context):
-        gap = max(0, relative_start - negation.end(), negation.start() - relative_end)
-        if gap <= 48:
-            return True
+def _review_operation_is_explicitly_negated(
+    context: str,
+    keyword: str,
+    relative_start: int,
+    relative_end: int,
+) -> bool:
+    """Suppress only when negation is grammatically anchored to this operation."""
+    before = context[max(0, relative_start - 64):relative_start]
+    after = context[relative_end:min(len(context), relative_end + 64)]
+    if _REVIEW_EN_PRE_NEGATION_RE.search(before):
+        return True
+    if _REVIEW_EN_POST_NEGATION_RE.search(after):
+        return True
+    if _REVIEW_JA_POST_NEGATION_RE.search(after):
+        return True
+    # production / 本番 are qualifiers in the same explicitly negated operation.
+    if keyword == "production" and _REVIEW_PRODUCTION_QUALIFIER_RE.search(before):
+        return True
+    if keyword == "本番" and _REVIEW_HONBAN_QUALIFIER_RE.search(after):
+        return True
     return False
 
 
@@ -912,7 +944,12 @@ def _actual_operation_signal_detail(
         decision, reason = "included", "uncertain-or-double-negation"
     elif _REVIEW_CONDITIONAL_RE.search(logical_context):
         decision, reason = "included", "conditional-or-uncertain-context"
-    elif _review_negation_is_near(logical_context, relative_start, relative_end):
+    elif _review_operation_is_explicitly_negated(
+        logical_context,
+        keyword,
+        relative_start,
+        relative_end,
+    ):
         decision, reason = "suppressed", "negated-actual-operation"
     elif global_non_operation and unit_double_negation:
         decision, reason = "included", "uncertain-or-double-negation"
