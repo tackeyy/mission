@@ -16,6 +16,7 @@ import os
 import statistics
 import subprocess
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -71,6 +72,8 @@ CORE_MISSION_INVOCATION_SKILLS = {
 DEFAULT_ACTIVE_PENDING_SECONDS = 30 * 60
 DEFAULT_STALE_ACTIVE_SECONDS = 3 * 60 * 60
 WORKTREE_ARCHIVE_SCHEMA = "mission-worktree-archive/1"
+WORKTREE_ARCHIVE_POINTER_SCHEMA = "mission-worktree-current/1"
+_MANIFEST_VALIDATION_CACHE: dict[tuple[str, str], tuple[str, list[dict[str, Any]]]] = {}
 
 
 @dataclass(frozen=True)
@@ -110,12 +113,121 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _validated_worktree_manifest(record: StateRecord) -> tuple[str, list[dict[str, Any]]]:
+def _current_worktree_generation(bundle: Path) -> tuple[str, Path] | None:
+    pointer_path = bundle / "current.json"
+    if not pointer_path.exists() and not pointer_path.is_symlink():
+        return None
+    if pointer_path.is_symlink() or not pointer_path.is_file():
+        return ("invalid", bundle)
+    try:
+        pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return ("invalid", bundle)
+    generation = pointer.get("generation") if isinstance(pointer, dict) else None
+    if (
+        not isinstance(pointer, dict)
+        or pointer.get("schema") != WORKTREE_ARCHIVE_POINTER_SCHEMA
+        or not isinstance(generation, str)
+        or not generation
+        or generation in {".", ".."}
+        or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for character in generation)
+    ):
+        return ("invalid", bundle)
+    generation_root = bundle / "generations" / generation
+    if generation_root.is_symlink() or not generation_root.is_dir():
+        return ("invalid", generation_root)
+    return generation, generation_root
+
+
+def _manifest_root_for_record(record: StateRecord, bundle: Path) -> tuple[str, Path]:
+    current = _current_worktree_generation(bundle)
+    if current is None:
+        return "legacy", bundle
+    generation, generation_root = current
+    if generation == "invalid":
+        return "invalid", generation_root
+    try:
+        record.path.relative_to(generation_root)
+    except ValueError:
+        return "invalid", generation_root
+    return generation, generation_root
+
+
+def _normalized_state_reference(value: Any) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    path = Path(value)
+    if ".mission-state" not in path.parts:
+        return None
+    index = path.parts.index(".mission-state")
+    return Path(*path.parts[index:]).as_posix()
+
+
+def _expected_manifest_lineage(record: StateRecord) -> Counter[tuple[str, int, str]] | None:
+    state = record.state
+    iteration = state.get("iteration")
+    if not isinstance(iteration, int) or isinstance(iteration, bool):
+        return None
+    expected: Counter[tuple[str, int, str]] = Counter()
+
+    def add(kind: str, item_iteration: Any, reference: Any) -> bool:
+        normalized = _normalized_state_reference(reference)
+        if (
+            not isinstance(item_iteration, int)
+            or isinstance(item_iteration, bool)
+            or normalized is None
+        ):
+            return False
+        expected[(kind, item_iteration, normalized)] += 1
+        return True
+
+    state_reference = f".mission-state/sessions/{record.path.name}"
+    if not add("state", iteration, state_reference):
+        return None
+    if state.get("assumptions_path") and not add("assumptions", iteration, state.get("assumptions_path")):
+        return None
+    artifact = state.get("artifact") if isinstance(state.get("artifact"), dict) else {}
+    if artifact.get("path") and not add("artifact", iteration, artifact.get("path")):
+        return None
+    for entry in state.get("score_history") or []:
+        if not isinstance(entry, dict):
+            continue
+        entry_iteration = entry.get("iteration")
+        if entry.get("scoring_evidence_path") and not add(
+            "scoring", entry_iteration, entry.get("scoring_evidence_path")
+        ):
+            return None
+        if entry.get("findings_evidence_path") and not add(
+            "reviews", entry_iteration, entry.get("findings_evidence_path")
+        ):
+            return None
+    for invocation in state.get("specialist_invocations") or []:
+        if not isinstance(invocation, dict) or not invocation.get("evidence_path"):
+            continue
+        item_iteration = invocation.get("iteration")
+        if not isinstance(item_iteration, int) or isinstance(item_iteration, bool) or item_iteration < 0:
+            item_iteration = iteration
+        if not add("specialist", item_iteration, invocation.get("evidence_path")):
+            return None
+    progress = state.get("progress") if isinstance(state.get("progress"), dict) else {}
+    if progress.get("evidence_path") and not add("progress", iteration, progress.get("evidence_path")):
+        return None
+    if progress.get("artifact_path") and not add(
+        "progress-artifact", iteration, progress.get("artifact_path")
+    ):
+        return None
+    return expected
+
+
+def _validate_worktree_manifest_uncached(record: StateRecord) -> tuple[str, list[dict[str, Any]]]:
     """Return legacy/valid/invalid and integrity-checked evidence entries for one bundle."""
     bundle = _worktree_archive_root(record)
     if bundle is None:
         return "legacy", []
-    manifest_path = bundle / "manifest.json"
+    archive_style, manifest_root = _manifest_root_for_record(record, bundle)
+    if archive_style == "invalid":
+        return "invalid", []
+    manifest_path = manifest_root / "manifest.json"
     if not manifest_path.exists() and not manifest_path.is_symlink():
         return "legacy", []
     if manifest_path.is_symlink() or not manifest_path.is_file():
@@ -148,6 +260,8 @@ def _validated_worktree_manifest(record: StateRecord) -> tuple[str, list[dict[st
     ).hexdigest()
     if manifest.get("content_digest") != expected_digest:
         return "invalid", []
+    if archive_style != "legacy" and manifest.get("content_digest") != archive_style:
+        return "invalid", []
 
     allowed_iterations = {state.get("iteration")}
     allowed_iterations.update(
@@ -177,8 +291,8 @@ def _validated_worktree_manifest(record: StateRecord) -> tuple[str, list[dict[st
         if source_reference is None or archive_path is None or item["archive_path"] in seen_paths:
             return "invalid", []
         seen_paths.add(item["archive_path"])
-        archived = bundle / archive_path
-        current = bundle
+        archived = manifest_root / archive_path
+        current = manifest_root
         for part in archive_path.parts:
             current = current / part
             if current.is_symlink():
@@ -201,14 +315,31 @@ def _validated_worktree_manifest(record: StateRecord) -> tuple[str, list[dict[st
             return "invalid", []
         checked.append({**item, "path": archived})
 
+    expected_lineage = _expected_manifest_lineage(record)
+    actual_lineage = Counter(
+        (item["evidence_kind"], item["iteration"], item["source_reference"])
+        for item in evidence
+    )
+    if expected_lineage is None or actual_lineage != expected_lineage:
+        return "invalid", []
     state_entries = [item for item in checked if item["evidence_kind"] == "state"]
     try:
-        state_archive_path = record.path.relative_to(bundle).as_posix()
+        state_archive_path = record.path.relative_to(manifest_root).as_posix()
     except ValueError:
         return "invalid", []
     if len(state_entries) != 1 or state_entries[0]["archive_path"] != state_archive_path:
         return "invalid", []
     return "valid", checked
+
+
+def _validated_worktree_manifest(record: StateRecord) -> tuple[str, list[dict[str, Any]]]:
+    cache_key = (
+        str(record.path),
+        json.dumps(record.state, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+    )
+    if cache_key not in _MANIFEST_VALIDATION_CACHE:
+        _MANIFEST_VALIDATION_CACHE[cache_key] = _validate_worktree_manifest_uncached(record)
+    return _MANIFEST_VALIDATION_CACHE[cache_key]
 
 
 def parse_dt(value: str | None) -> datetime | None:
@@ -316,8 +447,15 @@ def iter_state_files(root: Path):
             candidates.extend(sorted(archive.glob("state-*.json")))
             for worktree_dir in sorted(archive.glob("worktree-*")):
                 if worktree_dir.is_dir():
-                    candidates.extend(sorted(worktree_dir.glob("*.json")))
-                    worktree_sessions = worktree_dir / "sessions"
+                    current = _current_worktree_generation(worktree_dir)
+                    if current is None:
+                        active_root = worktree_dir
+                    elif current[0] == "invalid":
+                        continue
+                    else:
+                        active_root = current[1]
+                    candidates.extend(sorted(active_root.glob("*.json")))
+                    worktree_sessions = active_root / "sessions"
                     if worktree_sessions.is_dir():
                         candidates.extend(sorted(worktree_sessions.glob("*.json")))
         seen: set[Path] = set()

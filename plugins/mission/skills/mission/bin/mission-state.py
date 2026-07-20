@@ -1990,6 +1990,7 @@ def _state_relative_path(cwd: Path, path_text: str) -> str:
 
 
 WORKTREE_ARCHIVE_SCHEMA = "mission-worktree-archive/1"
+WORKTREE_ARCHIVE_POINTER_SCHEMA = "mission-worktree-current/1"
 
 
 class WorktreeArchiveError(ValueError):
@@ -2145,9 +2146,8 @@ def _collect_worktree_archive_specs(cwd: Path, state_file_path: Path, data: dict
     destinations: dict[str, Path] = {}
     for spec in specs:
         archive_path = spec["archive_path"].as_posix()
-        previous = destinations.get(archive_path)
-        if previous is not None and previous != spec["source"]:
-            raise WorktreeArchiveError(f"archive path collision: {archive_path}")
+        if archive_path in destinations:
+            raise WorktreeArchiveError(f"duplicate archive path: {archive_path}")
         destinations[archive_path] = spec["source"]
     return specs
 
@@ -2180,6 +2180,40 @@ def _ensure_regular_directory_path(root: Path, relative_parts: tuple[str, ...]) 
         if current.exists() and not current.is_dir():
             raise WorktreeArchiveError(f"archive destination must be a directory: {current}")
     return current
+
+
+def _git_checkout_identity(path: Path) -> tuple[Path, Path]:
+    if not path.exists() or not path.is_dir():
+        raise WorktreeArchiveError(
+            f"destination must be an existing checkout in the same git common directory: {path}"
+        )
+    result = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--show-toplevel", "--git-common-dir"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if result.returncode != 0 or len(lines) != 2:
+        raise WorktreeArchiveError(
+            f"destination must be an existing checkout in the same git common directory: {path}"
+        )
+    checkout_root = Path(lines[0]).resolve()
+    if checkout_root != path.resolve():
+        raise WorktreeArchiveError(f"archive root must be a git checkout root in the same git common directory: {path}")
+    common = Path(lines[1])
+    if not common.is_absolute():
+        common = path / common
+    return checkout_root, common.resolve()
+
+
+def _validate_archive_git_boundary(source: Path, destination: Path) -> None:
+    source_root, source_common = _git_checkout_identity(source)
+    destination_root, destination_common = _git_checkout_identity(destination)
+    if source_root == destination_root or source_common != destination_common:
+        raise WorktreeArchiveError(
+            "destination must be a different checkout in the same git common directory"
+        )
 
 
 def _build_worktree_archive_staging(staging: Path, data: dict, specs: list[dict], created_at: str) -> dict:
@@ -2279,27 +2313,69 @@ def _existing_archive_manifest(bundle: Path) -> dict | None:
     return manifest
 
 
-def _replace_archive_bundle(staging: Path, bundle: Path) -> str:
-    existing = _existing_archive_manifest(bundle)
-    staged_manifest = json.loads((staging / "manifest.json").read_text(encoding="utf-8"))
-    if existing and existing.get("content_digest") == staged_manifest.get("content_digest"):
-        shutil.rmtree(staging)
-        return "unchanged"
+def _read_archive_pointer(bundle: Path) -> tuple[str, Path, dict] | None:
     if not bundle.exists():
-        os.replace(staging, bundle)
-        return "created"
-
-    backup = bundle.with_name(f".{bundle.name}.backup-{os.getpid()}")
-    if backup.exists():
-        raise WorktreeArchiveError(f"archive replacement backup already exists: {backup}")
-    os.replace(bundle, backup)
+        return None
+    if bundle.is_symlink() or not bundle.is_dir():
+        raise WorktreeArchiveError(f"archive destination is not a regular directory: {bundle}")
+    pointer_path = bundle / "current.json"
+    if not pointer_path.exists() and not pointer_path.is_symlink():
+        return None
+    if pointer_path.is_symlink() or not pointer_path.is_file():
+        raise WorktreeArchiveError(f"archive pointer is not a regular file: {pointer_path}")
     try:
-        os.replace(staging, bundle)
-    except Exception:
-        os.replace(backup, bundle)
-        raise
-    shutil.rmtree(backup)
-    return "updated"
+        pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise WorktreeArchiveError(f"archive pointer is invalid: {pointer_path}") from exc
+    generation = pointer.get("generation") if isinstance(pointer, dict) else None
+    if (
+        not isinstance(pointer, dict)
+        or pointer.get("schema") != WORKTREE_ARCHIVE_POINTER_SCHEMA
+        or not isinstance(generation, str)
+        or not re.fullmatch(r"[A-Za-z0-9._-]+", generation)
+        or generation in {".", ".."}
+    ):
+        raise WorktreeArchiveError(f"archive pointer is invalid: {pointer_path}")
+    generation_root = bundle / "generations" / generation
+    if generation_root.is_symlink() or not generation_root.is_dir():
+        raise WorktreeArchiveError(f"archive generation is missing: {generation_root}")
+    manifest = _existing_archive_manifest(generation_root)
+    if manifest.get("content_digest") != generation:
+        raise WorktreeArchiveError(f"archive generation digest mismatch: {generation_root}")
+    return generation, generation_root, manifest
+
+
+def _atomic_write_archive_pointer(bundle: Path, generation: str) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", generation) or generation in {".", ".."}:
+        raise WorktreeArchiveError(f"invalid archive generation: {generation}")
+    atomic_write_json(
+        bundle / "current.json",
+        {"schema": WORKTREE_ARCHIVE_POINTER_SCHEMA, "generation": generation},
+    )
+
+
+def _publish_archive_generation(staging: Path, bundle: Path, generation: str) -> str:
+    """Publish an immutable generation, then atomically advance the stable pointer."""
+    existing_pointer = _read_archive_pointer(bundle)
+    legacy_exists = bundle.is_dir() and (bundle / "manifest.json").is_file()
+    bundle.mkdir(parents=True, exist_ok=True)
+    generations = _ensure_regular_directory_path(bundle, ("generations",))
+    generations.mkdir(parents=True, exist_ok=True)
+    generation_root = generations / generation
+    if generation_root.exists() or generation_root.is_symlink():
+        if generation_root.is_symlink() or not generation_root.is_dir():
+            raise WorktreeArchiveError(f"archive generation is not a regular directory: {generation_root}")
+        manifest = _existing_archive_manifest(generation_root)
+        if manifest.get("content_digest") != generation:
+            raise WorktreeArchiveError(f"archive generation digest mismatch: {generation_root}")
+        shutil.rmtree(staging)
+    else:
+        os.replace(staging, generation_root)
+
+    if existing_pointer and existing_pointer[0] == generation:
+        return "unchanged"
+    _atomic_write_archive_pointer(bundle, generation)
+    return "updated" if existing_pointer or legacy_exists else "created"
 
 
 def cmd_archive_worktree(args):
@@ -2314,6 +2390,7 @@ def cmd_archive_worktree(args):
         sys.exit(1)
 
     try:
+        _validate_archive_git_boundary(cwd, destination_root)
         _ensure_regular_directory_path(destination_root, (".mission-state", "archive"))
         _ensure_regular_directory_path(cwd, (".mission-state",))
     except WorktreeArchiveError as exc:
@@ -2337,11 +2414,21 @@ def cmd_archive_worktree(args):
                     print(json.dumps(result, indent=2 if args.json else None, ensure_ascii=False))
                     return
                 archive_root.mkdir(parents=True, exist_ok=True)
-                staging = Path(tempfile.mkdtemp(prefix=f".{bundle.name}.tmp-", dir=str(archive_root)))
-                existing = _existing_archive_manifest(bundle)
+                if bundle.is_symlink() or (bundle.exists() and not bundle.is_dir()):
+                    raise WorktreeArchiveError(f"archive destination is not a regular directory: {bundle}")
+                bundle.mkdir(parents=True, exist_ok=True)
+                generations = _ensure_regular_directory_path(bundle, ("generations",))
+                generations.mkdir(parents=True, exist_ok=True)
+                staging = Path(tempfile.mkdtemp(prefix=".tmp-", dir=str(generations)))
+                current = _read_archive_pointer(bundle)
+                existing = (
+                    current[2]
+                    if current
+                    else _existing_archive_manifest(bundle) if (bundle / "manifest.json").is_file() else None
+                )
                 created_at = str(existing.get("created_at")) if existing else iso_now()
                 manifest = _build_worktree_archive_staging(staging, data, specs, created_at)
-                action = _replace_archive_bundle(staging, bundle)
+                action = _publish_archive_generation(staging, bundle, manifest["content_digest"])
                 staging = None
         result = {
             "ok": True,

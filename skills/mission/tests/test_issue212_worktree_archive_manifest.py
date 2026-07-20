@@ -170,15 +170,28 @@ def _rewrite_manifest_digest(manifest_path: Path, manifest: dict) -> None:
 
 
 def _move_scoring_to_manifest_only_path(bundle: Path) -> Path:
-    manifest_path = bundle / "manifest.json"
+    generation_root = _active_bundle_root(bundle)
+    manifest_path = generation_root / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     scoring = next(item for item in manifest["evidence"] if item["evidence_kind"] == "scoring")
-    old_path = bundle / scoring["archive_path"]
-    new_path = bundle / "payload" / "score-proof.bin"
+    old_path = generation_root / scoring["archive_path"]
+    new_path = generation_root / "payload" / "score-proof.bin"
     new_path.parent.mkdir(parents=True, exist_ok=True)
     old_path.replace(new_path)
     scoring["archive_path"] = "payload/score-proof.bin"
     _rewrite_manifest_digest(manifest_path, manifest)
+    if generation_root != bundle:
+        new_generation_root = generation_root.with_name(manifest["content_digest"])
+        generation_root.replace(new_generation_root)
+        pointer = bundle / "current.json"
+        pointer.write_text(
+            json.dumps(
+                {"schema": "mission-worktree-current/1", "generation": manifest["content_digest"]}
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        manifest_path = new_generation_root / "manifest.json"
     return manifest_path
 
 
@@ -204,7 +217,8 @@ def test_archive_worktree_copies_allowlisted_evidence_and_writes_manifest(tmp_pa
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
     bundle = Path(payload["bundle_path"])
-    manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+    generation_root = _active_bundle_root(bundle)
+    manifest = json.loads((generation_root / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["schema"] == "mission-worktree-archive/1"
     assert manifest["session_id"] == SESSION_ID
     assert manifest["mission_id"] == MISSION_ID
@@ -220,7 +234,7 @@ def test_archive_worktree_copies_allowlisted_evidence_and_writes_manifest(tmp_pa
         "progress-artifact",
     }
     for item in manifest["evidence"]:
-        archived = bundle / item["archive_path"]
+        archived = generation_root / item["archive_path"]
         assert archived.is_file()
         assert item["session_id"] == SESSION_ID
         assert item["mission_id"] == MISSION_ID
@@ -229,8 +243,8 @@ def test_archive_worktree_copies_allowlisted_evidence_and_writes_manifest(tmp_pa
         assert item["size"] == archived.stat().st_size
         assert not item["source_reference"].startswith("/")
 
-    assert (bundle / "archive" / "iter-2-feedface-scoring.json").is_file()
-    assert (bundle / "archive" / "iter-2-feedface-reviews.json").is_file()
+    assert (generation_root / "archive" / "iter-2-feedface-scoring.json").is_file()
+    assert (generation_root / "archive" / "iter-2-feedface-reviews.json").is_file()
 
 
 def test_archived_bundle_survives_worktree_removal_without_missing_scoring(tmp_path, run_cli):
@@ -254,7 +268,7 @@ def test_audit_uses_valid_manifest_for_noncanonical_scoring_path(tmp_path, run_c
     shutil.rmtree(worktree)
 
     with_manifest = _run_audit(destination)
-    (bundle / "manifest.json").unlink()
+    (_active_bundle_root(bundle) / "manifest.json").unlink()
     without_manifest = _run_audit(destination)
 
     assert with_manifest["missing_scoring_evidence_count"] == 0
@@ -280,12 +294,13 @@ def test_audit_rejects_tampered_or_malformed_manifest(tmp_path, run_cli, tamper)
     assert result.returncode == 0, result.stderr
     bundle = Path(json.loads(result.stdout)["bundle_path"])
     manifest_path = _move_scoring_to_manifest_only_path(bundle)
+    generation_root = _active_bundle_root(bundle)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     scoring = next(item for item in manifest["evidence"] if item["evidence_kind"] == "scoring")
     if tamper == "malformed":
         manifest_path.write_text("{not-json\n", encoding="utf-8")
     elif tamper == "content":
-        (bundle / scoring["archive_path"]).write_text("changed\n", encoding="utf-8")
+        (generation_root / scoring["archive_path"]).write_text("changed\n", encoding="utf-8")
     else:
         scope, field = tamper.split("-", 1)
         target = manifest if scope == "top" else scoring
@@ -359,7 +374,7 @@ def test_archive_worktree_is_idempotent(tmp_path, run_cli):
     first = _archive(run_cli, worktree, destination)
     assert first.returncode == 0, first.stderr
     first_payload = json.loads(first.stdout)
-    manifest_path = Path(first_payload["bundle_path"]) / "manifest.json"
+    manifest_path = _active_bundle_root(Path(first_payload["bundle_path"])) / "manifest.json"
     first_bytes = manifest_path.read_bytes()
 
     second = _archive(run_cli, worktree, destination)
@@ -387,7 +402,11 @@ def test_archive_worktree_updates_bundle_when_evidence_changes(tmp_path, run_cli
     second_payload = json.loads(second.stdout)
     assert second_payload["action"] == "updated"
     assert second_payload["manifest"]["content_digest"] != first_manifest["content_digest"]
-    archived_scoring = Path(second_payload["bundle_path"]) / "archive" / "iter-2-feedface-scoring.json"
+    archived_scoring = (
+        _active_bundle_root(Path(second_payload["bundle_path"]))
+        / "archive"
+        / "iter-2-feedface-scoring.json"
+    )
     assert archived_scoring.read_text(encoding="utf-8") == '{"items":{"accuracy":4.7}}\n'
 
 
@@ -430,10 +449,36 @@ def test_generation_publish_failure_never_removes_previous_current(tmp_path, mon
     bundle = tmp_path / "worktree-neutral"
     old_generation = bundle / "generations" / "old-generation"
     old_generation.mkdir(parents=True)
-    (old_generation / "sentinel.txt").write_text("old\n", encoding="utf-8")
+    old_sentinel = old_generation / "sentinel.txt"
+    old_sentinel.write_text("old\n", encoding="utf-8")
+    old_manifest = {
+        "schema": "mission-worktree-archive/1",
+        "session_id": SESSION_ID,
+        "mission_id": MISSION_ID,
+        "iteration": 2,
+        "evidence": [
+            {
+                "session_id": SESSION_ID,
+                "mission_id": MISSION_ID,
+                "iteration": 2,
+                "evidence_kind": "state",
+                "source_reference": ".mission-state/sessions/session-212.json",
+                "archive_path": "sentinel.txt",
+                "sha256": _sha256(old_sentinel),
+                "size": old_sentinel.stat().st_size,
+            }
+        ],
+        "created_at": "2026-07-20T00:00:00Z",
+        "content_digest": "pending",
+    }
+    _rewrite_manifest_digest(old_generation / "manifest.json", old_manifest)
+    old_generation_name = old_manifest["content_digest"]
+    published_old_generation = old_generation.with_name(old_generation_name)
+    old_generation.replace(published_old_generation)
+    old_generation = published_old_generation
     pointer = bundle / "current.json"
     pointer.write_text(
-        json.dumps({"schema": "mission-worktree-current/1", "generation": "old-generation"}) + "\n",
+        json.dumps({"schema": "mission-worktree-current/1", "generation": old_generation_name}) + "\n",
         encoding="utf-8",
     )
     staging = tmp_path / ".new-generation.tmp"
@@ -448,60 +493,8 @@ def test_generation_publish_failure_never_removes_previous_current(tmp_path, mon
     with pytest.raises(OSError, match="injected pointer swap failure"):
         module._publish_archive_generation(staging, bundle, "new-generation")
 
-    assert json.loads(pointer.read_text(encoding="utf-8"))["generation"] == "old-generation"
+    assert json.loads(pointer.read_text(encoding="utf-8"))["generation"] == old_generation_name
     assert (old_generation / "sentinel.txt").read_text(encoding="utf-8") == "old\n"
-
-
-def test_bundle_replace_restores_previous_bundle_after_mid_replace_failure(tmp_path, monkeypatch):
-    module_path = REPO_ROOT / "skills" / "mission" / "bin" / "mission-state.py"
-    spec = importlib.util.spec_from_file_location("mission_state_issue212", module_path)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    bundle = tmp_path / "worktree-neutral"
-    staging = tmp_path / ".worktree-neutral.tmp"
-    for root, digest, marker in ((bundle, "old", "old"), (staging, "new", "new")):
-        root.mkdir()
-        marker_path = root / "marker.txt"
-        marker_path.write_text(marker, encoding="utf-8")
-        manifest = {
-            "schema": "mission-worktree-archive/1",
-            "session_id": SESSION_ID,
-            "mission_id": MISSION_ID,
-            "iteration": 2,
-            "evidence": [
-                {
-                    "session_id": SESSION_ID,
-                    "mission_id": MISSION_ID,
-                    "iteration": 2,
-                    "evidence_kind": "state",
-                    "source_reference": ".mission-state/sessions/session-212.json",
-                    "archive_path": "marker.txt",
-                    "sha256": _sha256(marker_path),
-                    "size": marker_path.stat().st_size,
-                }
-            ],
-            "created_at": "2026-07-20T00:00:00Z",
-            "content_digest": digest,
-        }
-        _rewrite_manifest_digest(root / "manifest.json", manifest)
-    real_replace = module.os.replace
-    call_count = 0
-
-    def fail_second_replace(source, destination):
-        nonlocal call_count
-        call_count += 1
-        if call_count == 2:
-            raise OSError("injected replacement failure")
-        return real_replace(source, destination)
-
-    monkeypatch.setattr(module.os, "replace", fail_second_replace)
-
-    with pytest.raises(OSError, match="injected replacement failure"):
-        module._replace_archive_bundle(staging, bundle)
-
-    assert (bundle / "marker.txt").read_text(encoding="utf-8") == "old"
-    assert not list(tmp_path.glob(".*.backup-*"))
 
 
 def test_archive_worktree_fails_closed_when_required_scoring_is_missing(tmp_path, run_cli):
@@ -580,7 +573,8 @@ def test_manifest_references_are_private_relative_paths(tmp_path, run_cli):
     result = _archive(run_cli, worktree, destination)
 
     assert result.returncode == 0, result.stderr
-    manifest = json.loads(Path(json.loads(result.stdout)["bundle_path"]).joinpath("manifest.json").read_text())
+    bundle = Path(json.loads(result.stdout)["bundle_path"])
+    manifest = json.loads((_active_bundle_root(bundle) / "manifest.json").read_text())
     manifest_text = json.dumps(manifest, ensure_ascii=False)
     assert str(worktree) not in manifest_text
     assert str(Path.home()) not in manifest_text
