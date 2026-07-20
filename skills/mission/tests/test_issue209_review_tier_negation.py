@@ -132,6 +132,13 @@ def test_english_prefixed_negation_keeps_simple_and_affirmative_regression(
         "It isn’t the case that we do not deploy",
         "We aren't saying that we will not deploy",
         "We aren’t saying that we will not deploy",
+        "It's not true that we won't deploy",
+        "It’s not true that we shouldn’t release",
+        "There is no guarantee that we will not deploy",
+        "There isn't any guarantee that we won't publish",
+        "There isn’t any assurance that we shouldn’t release",
+        "They weren't claiming that they wouldn't deploy",
+        "They weren’t claiming that they shouldn’t publish",
     ],
 )
 def test_english_outer_negation_of_non_operation_intent_stays_conservative(mission):
@@ -150,6 +157,9 @@ def test_english_outer_negation_of_non_operation_intent_stays_conservative(missi
         "It is the case that we do not deploy",
         "We are saying that we will not deploy",
         "We can say that we will not release",
+        "It is true that we will not deploy",
+        "There is a guarantee that we will not deploy",
+        "They were claiming that they wouldn't deploy",
     ],
 )
 def test_english_positive_reporting_of_simple_negation_remains_suppressed(mission):
