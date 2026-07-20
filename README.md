@@ -230,7 +230,6 @@ collects reviewer JSON, runs `aggregate-reviews`, records the result with
 a halt condition is reached. See [`skills/mission/SKILL.md`](skills/mission/SKILL.md)
 for the execution protocol and [`docs/PASS_RATE_METRICS.md`](docs/PASS_RATE_METRICS.md)
 for the `stats`/audit raw and completed quality schema.
-for the full operating protocol.
 
 ## Requirements
 

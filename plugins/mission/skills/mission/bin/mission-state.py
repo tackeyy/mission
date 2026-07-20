@@ -77,6 +77,7 @@ from activity_segments import (  # noqa: E402
     summarize_activity_states,
     transition_activity_phase,
 )
+from worktree_archive import validate_worktree_archive_bundle  # noqa: E402
 
 SCHEMA_VERSION = 2  # v1: 旧 schema (project_root/pid なし), v2: A-1/A-2/B-3 追加
 
@@ -378,31 +379,13 @@ def _iter_state_files(root: Path, *, include_archive: bool = False):
                 # Issue #7: worktree サブディレクトリ (archive/worktree-*/) も列挙する
                 for sub in sorted(archive.glob("worktree-*")):
                     if sub.is_dir():
-                        worktree_root = sub
-                        pointer_path = sub / "current.json"
-                        if pointer_path.exists() or pointer_path.is_symlink():
-                            worktree_root = None
-                            pointer = {}
-                            if pointer_path.is_file() and not pointer_path.is_symlink():
-                                try:
-                                    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
-                                    generation = pointer.get("generation")
-                                except (OSError, json.JSONDecodeError):
-                                    generation = None
-                                if (
-                                    pointer.get("schema") == WORKTREE_ARCHIVE_POINTER_SCHEMA
-                                    and isinstance(generation, str)
-                                    and re.fullmatch(r"[0-9a-f]{64}", generation)
-                                ):
-                                    candidate = sub / "generations" / generation
-                                    if (
-                                        candidate.is_dir()
-                                        and not candidate.is_symlink()
-                                        and not (sub / "generations").is_symlink()
-                                    ):
-                                        worktree_root = candidate
-                            if worktree_root is None:
-                                continue
+                        validation = validate_worktree_archive_bundle(sub)
+                        if validation.status == "invalid":
+                            continue
+                        if validation.status == "valid":
+                            yield from validation.state_paths
+                            continue
+                        worktree_root = validation.root
                         yield from sorted(worktree_root.glob("*.json"))
                         worktree_sessions = worktree_root / "sessions"
                         if worktree_sessions.is_dir():

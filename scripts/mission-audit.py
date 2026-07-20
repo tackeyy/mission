@@ -62,6 +62,7 @@ from audit_findings import (  # noqa: E402
     serialize_findings,
     sort_findings,
 )
+from worktree_archive import validate_worktree_archive_bundle  # noqa: E402
 
 
 PRUNE_DIRS = {
@@ -253,6 +254,23 @@ def _file_sha256(path: Path) -> str:
 
 
 def _resolve_worktree_archive(bundle: Path) -> ArchiveResolution:
+    shared = validate_worktree_archive_bundle(bundle)
+    if shared.status == "valid":
+        return ArchiveResolution(
+            "generation",
+            bundle,
+            shared.root,
+            generation=shared.generation,
+        )
+    if shared.status == "invalid":
+        return ArchiveResolution(
+            "invalid",
+            bundle,
+            shared.root,
+            generation=shared.generation,
+            reason=shared.reason,
+        )
+    # Legacy bundles have no pointer/manifest generation; retain their reader below.
     try:
         bundle_stat = bundle.lstat()
     except FileNotFoundError:
@@ -1140,7 +1158,9 @@ def bucket_counts(records: list[StateRecord], bucket_fn) -> dict[str, int]:
     return counts
 
 
-def halt_or_incomplete_bucket(record: StateRecord) -> str:
+def halt_or_incomplete_bucket(
+    record: StateRecord, *, now: datetime | None = None
+) -> str:
     state = record.state
     # #190: 構造化 halt_category があればそれを正とする (自由文ヒューリスティックより信頼できる)。
     # incomplete (未 halt) には適用しない -- halt_category は halt 発生時のみ記録される。
@@ -1151,7 +1171,7 @@ def halt_or_incomplete_bucket(record: StateRecord) -> str:
     reason = str(state.get("halt_reason") or "").lower()
     if classify(state) == "incomplete":
         if not state.get("score_history"):
-            if is_stale_active_no_score(record):
+            if is_stale_active_no_score(record, now=now):
                 return "stale-active-live-pid"
             return "active-no-score-checkpoint"
         return "active-in-progress"
@@ -1192,12 +1212,7 @@ def is_forced_pass_autonomous_suspect(state: dict[str, Any]) -> bool:
 
 def is_active_no_score_checkpoint(record: StateRecord) -> bool:
     """Return true for live mission sessions that have not reached first scoring."""
-    health = classify_pass_rate_health(
-        record.state,
-        now=utc_now(),
-        stale_after_sec=stale_active_threshold_sec(),
-    )
-    return health in {"active-no-score", "stale"} and not has_scoring_checkpoint(record.state)
+    return classify(record.state) == "incomplete" and not has_scoring_checkpoint(record.state)
 
 
 def active_pending_threshold_sec() -> int:
@@ -1307,9 +1322,11 @@ def has_specialist_selection_checkpoint(state: dict[str, Any]) -> bool:
     )
 
 
-def missing_specialist_selection_checkpoint_item(record: StateRecord) -> dict[str, Any] | None:
+def missing_specialist_selection_checkpoint_item(
+    record: StateRecord, *, now: datetime | None = None
+) -> dict[str, Any] | None:
     state = record.state
-    if is_active_no_score_pending(record):
+    if is_active_no_score_pending(record, now=now):
         return None
     if not specialist_selection_checkpoint_expected(state):
         return None
@@ -1326,8 +1343,13 @@ def missing_specialist_selection_checkpoint_item(record: StateRecord) -> dict[st
     }
 
 
-def specialist_invocation_gap_skills(record: StateRecord) -> list[str]:
-    if is_active_no_score_pending(record):
+def specialist_invocation_gap_skills(
+    record: StateRecord, *, now: datetime | None = None
+) -> list[str]:
+    cached = record.state.get("_audit_specialist_invocation_gap_skills")
+    if isinstance(cached, list) and all(isinstance(skill, str) for skill in cached):
+        return cached
+    if is_active_no_score_pending(record, now=now):
         return []
     selected = explicitly_selected_specialist_skills(record.state)
     if not selected:
@@ -1397,9 +1419,11 @@ def is_active_ask_user_specialist_wait(state: dict[str, Any]) -> bool:
     )
 
 
-def candidate_only_specialist_item(record: StateRecord) -> dict[str, Any] | None:
+def candidate_only_specialist_item(
+    record: StateRecord, *, now: datetime | None = None
+) -> dict[str, Any] | None:
     state = record.state
-    if is_active_no_score_pending(record):
+    if is_active_no_score_pending(record, now=now):
         return None
     if is_active_ask_user_specialist_wait(state):
         return None
@@ -1716,10 +1740,11 @@ def aggregate(
     invalid_worktree_archives: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     invalid_worktree_archives = invalid_worktree_archives or []
+    observation_now = utc_now()
     classes = [classify(r.state) for r in records]
     pass_rate_summary = summarize_pass_rate_population(
         [record.state for record in records],
-        now=utc_now(),
+        now=observation_now,
         stale_after_sec=stale_active_threshold_sec(),
     )
     health_classes = pass_rate_summary["health_classes"]
@@ -1729,8 +1754,14 @@ def aggregate(
         if health in {"active-no-score", "stale"}
         and not has_scoring_checkpoint(record.state)
     ]
-    active_no_score_pending = [r for r in active_no_score_checkpoint if is_active_no_score_pending(r)]
-    stale_active_no_score = [r for r in active_no_score_checkpoint if is_stale_active_no_score(r)]
+    active_no_score_pending = [
+        r for r in active_no_score_checkpoint
+        if is_active_no_score_pending(r, now=observation_now)
+    ]
+    stale_active_no_score = [
+        r for r in active_no_score_checkpoint
+        if is_stale_active_no_score(r, now=observation_now)
+    ]
     durations = [d for r in records if (d := duration_sec(r.state)) is not None]
     composites = [
         entry["composite"]
@@ -1756,10 +1787,19 @@ def aggregate(
         r for r in pass_records
         if ((latest_scored_entry(r.state) or {}).get("composite") or 0) < 4.3
     ]
-    specialist_invocation_gaps = [
-        r for r in records
-        if specialist_invocation_gap_skills(r)
-    ]
+    specialist_invocation_gaps = []
+    for record in records:
+        gap_skills = specialist_invocation_gap_skills(record, now=observation_now)
+        if gap_skills:
+            specialist_invocation_gaps.append(
+                replace(
+                    record,
+                    state={
+                        **record.state,
+                        "_audit_specialist_invocation_gap_skills": gap_skills,
+                    },
+                )
+            )
     unselected_specialist_invocations = [
         item for r in records
         if (item := unselected_specialist_invocation_item(r)) is not None
@@ -1786,11 +1826,15 @@ def aggregate(
     ]
     missing_specialist_selection_checkpoints = [
         item for r in records
-        if (item := missing_specialist_selection_checkpoint_item(r)) is not None
+        if (
+            item := missing_specialist_selection_checkpoint_item(
+                r, now=observation_now
+            )
+        ) is not None
     ]
     candidate_only_specialists = [
         item for r in records
-        if (item := candidate_only_specialist_item(r)) is not None
+        if (item := candidate_only_specialist_item(r, now=observation_now)) is not None
     ]
     current_missing_scoring_evidence, historical_missing_scoring_evidence = split_current_historical(
         missing_scoring_evidence, current_since
@@ -1938,7 +1982,10 @@ def aggregate(
                 for skill in item.get("skills", [])
             ]
         ),
-        "halt_incomplete_breakdown": bucket_counts(halt_or_incomplete, halt_or_incomplete_bucket),
+        "halt_incomplete_breakdown": bucket_counts(
+            halt_or_incomplete,
+            lambda record: halt_or_incomplete_bucket(record, now=observation_now),
+        ),
         "slow_session_breakdown": slow_session_breakdown,
         "slow_phase_duration_breakdown": slow_phase_duration_breakdown,
         "coarse_phase_attributions": coarse_phase_attributions,
@@ -2217,7 +2264,8 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
         f"- raw pass rate: {fmt_float(stats['raw_pass_rate'] * 100 if stats['raw_pass_rate'] is not None else None, 1)}% ({stats['raw_pass_rate_numerator']}/{stats['raw_pass_rate_denominator']})",
         f"- completed pass rate: {fmt_float(stats['completed_pass_rate'] * 100 if stats['completed_pass_rate'] is not None else None, 1)}% ({stats['completed_pass_rate_numerator']}/{stats['completed_pass_rate_denominator']})",
         f"- health counts (active / active-no-score / stale / halt / abandoned): {stats['active_count']} / {stats['active_no_score_count']} / {stats['stale_count']} / {stats['halt_count']} / {stats['abandoned_count']}",
-        f"- active no-score checkpoints excluded from pass rate: {stats['active_no_score_checkpoint_count']}",
+        f"- fresh active no-score excluded from completed pass rate: {stats['active_no_score_count']}",
+        f"- stale active no-score included as completed health debt: {stats['stale_active_no_score_count']}",
         f"- active no-score pending: {stats['active_no_score_pending_count']}",
         f"- stale active no-score: {stats['stale_active_no_score_count']}",
         f"- forced pass: {stats['forced_pass_count']}",
