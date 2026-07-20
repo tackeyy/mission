@@ -76,15 +76,21 @@ Active `not perform/execute`, contractions and `cannot`, passive
 `will/should not be performed/executed`, and equivalent Japanese qualifier forms
 are treated as direct anchors for the operation phrase. Only an explicit, simple
 statement that the actual operation will not happen is suppressed. Conditions
-and exceptions (`unless`, approval exclusions, and equivalent Japanese forms),
-negated non-operation intent, multiple negation cues, double negatives, and
-uncertainty remain conservative escalations. A global non-operation marker does
+and exceptions (`unless`, approval exclusions, principles, emergency cases, and
+equivalent Japanese forms), negated non-operation intent, double negatives, and
+uncertainty remain conservative escalations. Multiple negation cues count as a
+reversal only before the next operation, so separate simple negations do not
+combine. A global non-operation marker does
 not suppress by position alone: it suppresses a candidate only when that
 candidate's context proves a meta/non-operation intent such as reviewing,
 analyzing, or documenting a procedure. Ambiguous, imperative, and affirmative
-candidates remain conservative. Explicit quote-only intent suppresses a quoted
+candidates remain conservative. Any execution cue in the same logical unit that
+is not directly anchored to another named operation may refer to a meta candidate
+and vetoes suppression with `ambiguous-execution-reference`. Explicit quote-only intent suppresses a quoted
 candidate unless execution language immediately around that quote directly
-targets the quoted command; execution of another operation cannot override it.
+targets the quoted command, including a passive modal immediately after the
+quote; execution of another named operation cannot override it. Ambiguous
+pronoun or targetless execution remains conservative.
 Segment boundaries, context flags, quote spans, meta/non-operation spans,
 negated-operation spans, negation-cue positions, and global-marker spans are
 indexed or cached once per mission/context so repeated
