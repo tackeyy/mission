@@ -843,6 +843,7 @@ def test_activity_summary_quarantines_cross_state_aggregate_overflow(
             project,
             mission_id=f"mission-{name}",
             session_id=name,
+            phase_durations_sec={"executing": huge},
             activity_rollup={
                 "observed_total_sec": huge,
                 "closed_segment_count": 1,
