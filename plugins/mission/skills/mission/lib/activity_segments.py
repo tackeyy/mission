@@ -403,7 +403,7 @@ def _state_activity(state: dict[str, Any]) -> dict[str, Any]:
     totals_consistent = True
     closed_count = 0
     rollup = state.get("activity_rollup")
-    if isinstance(rollup, dict) and "closed_segment_count" in rollup:
+    if isinstance(rollup, dict):
         raw_kinds = rollup.get("activity_duration_totals_sec")
         if not isinstance(raw_kinds, dict):
             invalid += 1
