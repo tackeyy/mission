@@ -144,7 +144,11 @@ mission-state.py activity end
 
 reason は kind ごとの enum から明示し、未知の原因を推測しない。detail は制御文字と改行を除去し、空白を正規化して160文字に制限する。crash 後の `resume` / `refresh-pid` / 同一 mission の `init` は、open segment を最後の有効な `updated_at` まで一度だけ閉じる。その後の空白時間は `activity_unobserved_gap_sec` であり、`idle` には分類しない。
 
-state は `activity_current`、直近32件の `activity_segments`、固定 map の `activity_rollup` を持つ。古い raw segment を落としても rollup が全期間の duration を保持する。`stats` と `mission-audit.py` は同じ reducer を使い、task/phase p50・p90（linear interpolation R7）、kind/reason totals、coverage、unclassified、open/invalid counts を同じ定義で返す。task key は `mission_id`、欠落時は `unknown`。open、negative、non-finite、未知 enum、不整合 rollup は percentile から除外する。activity のない旧 state は phase duration を unclassified とし、理由は補完しない。
+state は `activity_current`、直近32件の `activity_segments`、固定 map の `activity_rollup` を持つ。古い raw segment を落としても rollup が全期間の duration を保持する。`stats` と `mission-audit.py` は同じ reducer を使い、task/phase p50・p90（linear interpolation R7）、kind/reason totals、coverage、unclassified、open/invalid counts を同じ定義で返す。非terminal current phase は `phase_started_at` から persisted `updated_at` までを coverage denominator に含め、未遷移だけを理由に100%を超えない。live/archive duplicate は `(project_root, session_id, mission_id)` と status/newest/path の共通 precedence で1件へ正規化する。task key は `mission_id`、欠落時は `unknown`。open、negative、non-finite、未知 enum、不整合 rollup は percentile から除外する。activity のない旧 state は phase duration を unclassified とし、理由は補完しない。
+
+terminal state は新しい activity start を拒否する。pass/halt/cleanup/Stop hook の terminal writer は lock 内で state を再読・再検証し、open segment を閉じる。activity_current が壊れていても terminal control は失敗させず、current を除去して `activity_anomaly_counts.invalid-current-terminal` に記録する。同一 mission の init/resume は逆に不正な open measurement を検出したら no-write で拒否し、履歴をfresh stateで上書きしない。
+
+収集とgroup化は state/segment件数に線形、exact R7 percentile は最大sample groupのsortにより `O(N log N)`。recent rawは32件、rollupは固定mapのため、session単位の読込サイズはbounded。
 
 この観測は reviewer 数、threshold、findings evidence、agreement、`open_high`、pass/fail、自動 retry、watchdog を変更しない。速度改善は品質ゲートを維持したまま分布を比較して判断する。設計判断は `docs/adr/004-activity-segment-observability.md` を参照。
 

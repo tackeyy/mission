@@ -29,7 +29,9 @@ bounded to 160 characters. Unknown causes are never inferred.
 next one under the existing state lock. `activity end`, phase transitions,
 `mark-passes`, and `mark-halt` close the open segment under that same lock.
 Repeated starts and ends are idempotent. A backwards timestamp fails without
-writing state.
+writing state, and a terminal state rejects new activity. Terminal control is
+fail-open with respect to observability: malformed open measurement is removed
+and counted in `activity_anomaly_counts`, but never prevents pass or halt.
 
 On reinitialization or PID refresh after a crash, an open segment closes at the
 last valid `updated_at` between its start and the resume time. The later gap is
@@ -49,11 +51,22 @@ report:
 - observed, unclassified, open, invalid, and unobserved-gap measures;
 - coverage and total-consistency diagnostics.
 
+Coverage includes the persisted-as-of window from `phase_started_at` through
+`updated_at` for a nonterminal current phase, so observed activity cannot produce
+a percentage above 100% merely because that phase has not transitioned yet.
+Live and archived copies use the same `(project_root, session_id, mission_id)`
+identity and the same status/newest/path precedence before aggregation.
+
 Task samples use `mission_id`, falling back to `unknown`. Open segments are
 reported but excluded from duration distributions. Malformed, negative,
 non-finite, future-enum, and inconsistent rollup values are excluded and counted
 as invalid. Legacy states remain readable: their phase time is unclassified and
 no wait reason is fabricated.
+
+Collection and grouping are linear in the number of states and segments. Exact
+R7 percentiles sort each task/phase sample group, so percentile calculation is
+`O(N log N)` in the largest group; bounded state keeps per-session ingestion
+constant-size.
 
 ## Quality and control boundary
 
