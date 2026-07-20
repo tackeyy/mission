@@ -380,6 +380,14 @@ def test_snapshot_write_is_atomic_private_and_leaves_no_temp(tmp_path):
     assert not list(tmp_path.glob(f".{snapshot.name}.*.tmp"))
 
 
+def test_snapshot_output_must_be_outside_scanned_roots(tmp_path):
+    root = tmp_path / "root"
+    _write_state(root, "one", "2026-07-21T00:00:00Z")
+    result = _snapshot(root, root / "snapshot.json")
+    assert result.returncode != 0
+    assert "outside" in result.stderr
+
+
 def test_invalid_snapshot_never_silently_falls_back_to_live_scan(tmp_path, run_cli):
     root = tmp_path / "root"
     _write_state(root, "one", "2026-07-21T00:00:00Z")

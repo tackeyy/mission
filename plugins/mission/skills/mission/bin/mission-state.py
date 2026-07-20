@@ -31,6 +31,7 @@ from bisect import bisect_left, bisect_right
 import contextlib
 import fcntl
 import hashlib
+import importlib.util
 import io
 import json
 import math
@@ -78,6 +79,7 @@ from activity_segments import (  # noqa: E402
     transition_activity_phase,
 )
 from worktree_archive import validate_worktree_archive_bundle  # noqa: E402
+from state_snapshot import SnapshotError  # noqa: E402
 
 SCHEMA_VERSION = 2  # v1: 旧 schema (project_root/pid なし), v2: A-1/A-2/B-3 追加
 
@@ -5978,10 +5980,14 @@ def _phase_duration_totals(states: list[dict]) -> dict:
     return dict(sorted(totals.items()))
 
 
-def _aggregate(states: list[dict], duplicate_state_group_count: int = 0) -> dict:
+def _aggregate(
+    states: list[dict], duplicate_state_group_count: int = 0,
+    *, observation_now: datetime | None = None,
+) -> dict:
     n = len(states)
     pass_rate_summary = summarize_pass_rate_population(
         states,
+        now=observation_now,
         stale_after_sec=_stale_active_seconds(),
     )
     if n == 0:
@@ -6212,16 +6218,40 @@ def cmd_stats(args):
     --root は複数回指定でき、scripts/mission-audit.py と同じく各 root を集約する。
     Path.home() 全体の rglob (86 秒) を避ける設計 (list/cleanup と統一)。
     """
-    roots = [Path(root) for root in args.root] if args.root else _default_search_roots()
+    requested_roots = [Path(root) for root in args.root] if args.root else None
+    roots = requested_roots or _default_search_roots()
     since = _parse_date_to_iso_prefix(args.since)
     until = _parse_date_to_iso_prefix(args.until)
     all_states = []
-    for r in roots:
-        if r.exists():
-            all_states.extend(_collect_states(r))
+    observation_now = None
+    if args.snapshot:
+        audit_path = Path(__file__).resolve().parents[3] / "scripts" / "mission-audit.py"
+        spec = importlib.util.spec_from_file_location("mission_audit_snapshot_consumer", audit_path)
+        if spec is None or spec.loader is None:
+            raise SnapshotError("audit snapshot consumer is unavailable")
+        audit_module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = audit_module
+        spec.loader.exec_module(audit_module)
+        try:
+            records, _invalid, roots, observation_now = audit_module.consume_state_snapshot(
+                Path(args.snapshot), requested_roots
+            )
+        except SnapshotError as error:
+            print(f"ERROR: invalid state snapshot: {error}", file=sys.stderr)
+            raise SystemExit(2)
+        for record in records:
+            state = dict(record.state)
+            state["_mission_source_path"] = str(record.path)
+            all_states.append(state)
+    else:
+        for r in roots:
+            if r.exists():
+                all_states.extend(_collect_states(r))
     filtered = [s for s in all_states if _matches_period(s, since, until)]
     deduped, duplicate_state_group_count = _dedupe_states(filtered)
-    stats = _aggregate(deduped, duplicate_state_group_count)
+    stats = _aggregate(
+        deduped, duplicate_state_group_count, observation_now=observation_now
+    )
     stats["roots"] = [str(root) for root in roots]
     if args.json:
         print(json.dumps(stats, indent=2, ensure_ascii=False))
@@ -6367,6 +6397,7 @@ def _build_parser():
     p_stats.add_argument("--since", default=None, help="期間下限 (YYYY-MM-DD, updated_at で比較)")
     p_stats.add_argument("--until", default=None, help="期間上限 (YYYY-MM-DD, updated_at で比較)")
     p_stats.add_argument("--json", action="store_true", help="JSON 形式で出力")
+    p_stats.add_argument("--snapshot", default=None, help="audit --snapshot-out で明示作成したsnapshotを利用 (invalid時はfail closed)")
     p_stats.set_defaults(func=cmd_stats)
 
     p_activity = sub.add_parser("activity", help="#211: phase 内の active/wait/idle segment を記録")

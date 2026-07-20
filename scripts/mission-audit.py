@@ -1201,6 +1201,13 @@ def create_state_snapshot(
     observed_at: datetime | None = None,
 ) -> tuple[list[StateRecord], list[dict[str, Any]], datetime]:
     normalized = [Path(root) for root in normalize_roots(roots)]
+    target = Path(path).expanduser().resolve(strict=False)
+    for root in normalized:
+        try:
+            target.relative_to(root)
+        except ValueError:
+            continue
+        raise SnapshotError("snapshot output must be outside every scanned root")
     observed = observed_at or utc_now()
     root_before = _root_metadata_inventory(normalized)
     discovered_invalid: list[dict[str, Any]] = []
