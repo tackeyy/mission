@@ -13,6 +13,13 @@ This repository is OSS. Keep public behavior portable across users, machines, an
 - Tests for extension behavior must use neutral fixture names, not a maintainer's private skill set.
 - Documentation may mention private skills only as clearly labeled examples, never as required or bundled OSS capabilities.
 
+## Neutral Vocabulary
+
+- Describe the design with general concept vocabulary: ontology, object, property, link, action, function, lineage, provenance, grounding, branch, scenario, finding, score, decision, audit.
+- Do not introduce a specific vendor's product names or coined terms into code, comments, documentation, file names, commit messages, or issue/PR text. Name the general design pattern instead (DDD, CQRS, capability-based security, hexagonal architecture, event sourcing, data lineage, FSM, data quality expectations).
+- This is enforced automatically by `skills/mission/tests/test_vendor_fingerprint.py`, which scans every tracked file on each PR. The blocked terms are stored as hashes rather than plain text, because the list itself would disclose what it withholds. That test's docstring explains how to add a term.
+- One-time cleanup is not enough: derived artifacts such as audit logs, benchmark outputs, and captured execution logs have re-introduced these terms after a manual purge. The automated scan is the control.
+
 ## Specialist Policy
 
 - OSS code may define generic provider protocols, registry schemas, ranking logic, audit output, and safety gates.
