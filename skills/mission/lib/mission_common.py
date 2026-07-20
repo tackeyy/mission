@@ -130,7 +130,9 @@ def summarize_pass_rate_population(
         classify_pass_rate_health(state, now=now, stale_after_sec=stale_after_sec)
         for state in states
     ]
-    counts = {name: health_classes.count(name) for name in PASS_RATE_HEALTH_CLASSES}
+    counts = {name: 0 for name in PASS_RATE_HEALTH_CLASSES}
+    for classification in health_classes:
+        counts[classification] += 1
     raw_denominator = len(states)
     completed_denominator = sum(
         counts[name] for name in ("pass", "halt", "abandoned", "stale")

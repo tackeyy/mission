@@ -1722,7 +1722,13 @@ def aggregate(
         now=utc_now(),
         stale_after_sec=stale_active_threshold_sec(),
     )
-    active_no_score_checkpoint = [r for r in records if is_active_no_score_checkpoint(r)]
+    health_classes = pass_rate_summary["health_classes"]
+    active_no_score_checkpoint = [
+        record
+        for record, health in zip(records, health_classes)
+        if health in {"active-no-score", "stale"}
+        and not has_scoring_checkpoint(record.state)
+    ]
     active_no_score_pending = [r for r in active_no_score_checkpoint if is_active_no_score_pending(r)]
     stale_active_no_score = [r for r in active_no_score_checkpoint if is_stale_active_no_score(r)]
     durations = [d for r in records if (d := duration_sec(r.state)) is not None]
