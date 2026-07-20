@@ -390,6 +390,38 @@ def test_global_non_operation_still_suppresses_prior_meta_candidate():
 @pytest.mark.parametrize(
     "mission",
     [
+        "Deploy now. Actual operations will not be performed.",
+        "Perform the release. Actual operations will not be performed.",
+        "deployしてください。実操作は行わない",
+        "deployを行います。実操作は行わない",
+        "releaseせよ。実操作は行わない",
+    ],
+)
+def test_global_non_operation_does_not_suppress_prior_non_meta_operation(mission):
+    decision = _decision(mission)
+
+    actual = _details(decision)
+    assert decision["tier"] == "full"
+    assert actual and {item["decision"] for item in actual} == {"included"}
+
+
+def test_global_non_operation_suppresses_meta_candidate_on_either_side():
+    for mission in (
+        "deploy 手順を調査する。実操作は行わない",
+        "実操作は行わない。deploy 手順を調査する",
+        "No actual operations. Review the deploy procedure.",
+    ):
+        decision = _decision(mission)
+        assert decision["tier"] == "light"
+        assert decision["signals"] == []
+        assert {item["reason"] for item in _details(decision)} == {
+            "global-explicit-non-operation"
+        }
+
+
+@pytest.mark.parametrize(
+    "mission",
+    [
         "「deploy」は引用するだけだが「release」は実行する",
         "「deploy」は引用するだけ。「release」は実行する",
         'only quote "deploy" but execute "release"',
@@ -416,6 +448,49 @@ def test_execution_word_inside_quote_does_not_override_quote_only_intent():
     migration = [item for item in _details(decision) if item["keyword"] == "migration"]
     assert migration and {item["decision"] for item in migration} == {"suppressed"}
     assert {item["reason"] for item in migration} == {"quoted-non-operation"}
+
+
+@pytest.mark.parametrize(
+    ("mission", "quoted_keyword", "executed_keyword"),
+    [
+        ('only quote "deploy", execute release', "deploy", "release"),
+        ("引用するだけ: 「deploy」、releaseを実行する", "deploy", "release"),
+    ],
+)
+def test_unrelated_execution_does_not_override_quoted_non_operation(
+    mission, quoted_keyword, executed_keyword
+):
+    decision = _decision(mission)
+
+    quoted = next(item for item in _details(decision) if item["keyword"] == quoted_keyword)
+    executed = next(item for item in _details(decision) if item["keyword"] == executed_keyword)
+    assert decision["tier"] == "full"
+    assert (quoted["decision"], quoted["reason"]) == (
+        "suppressed",
+        "quoted-non-operation",
+    )
+    assert executed["decision"] == "included"
+    for detail in (quoted, executed):
+        assert mission[detail["start"] : detail["end"]] == detail["match"]
+
+
+@pytest.mark.parametrize(
+    "mission",
+    [
+        "手順書の「本番へ deploy する」を実際に実行する",
+        'execute the quoted "deploy" command',
+    ],
+)
+def test_execution_directly_targeting_quoted_command_is_affirmative(mission):
+    decision = _decision(mission)
+
+    deploy = next(item for item in _details(decision) if item["keyword"] == "deploy")
+    assert decision["tier"] == "full"
+    assert (deploy["decision"], deploy["reason"]) == (
+        "included",
+        "affirmative-actual-operation",
+    )
+    assert mission[deploy["start"] : deploy["end"]] == deploy["match"]
 
 
 @pytest.mark.parametrize(
