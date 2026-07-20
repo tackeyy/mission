@@ -316,6 +316,78 @@ def test_audit_reports_invalid_current_pointer_instead_of_silently_omitting_arch
     assert "no-critical-findings" not in codes
 
 
+@pytest.mark.parametrize("state_failure", ["missing", "invalid-json"])
+def test_audit_preflights_generation_state_before_loading_records(
+    tmp_path, run_cli, state_failure
+):
+    worktree, destination = _make_completed_worktree(tmp_path)
+    result = _archive(run_cli, worktree, destination)
+    assert result.returncode == 0, result.stderr
+    bundle = Path(json.loads(result.stdout)["bundle_path"])
+    generation, generation_root = _current_generation(bundle)
+    manifest_path = generation_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    state_item = next(item for item in manifest["evidence"] if item["evidence_kind"] == "state")
+    archived_state = generation_root / state_item["archive_path"]
+    if state_failure == "missing":
+        archived_state.unlink()
+    else:
+        archived_state.write_text("{not-json\n", encoding="utf-8")
+        state_item["sha256"] = _sha256(archived_state)
+        state_item["size"] = archived_state.stat().st_size
+        _rewrite_manifest_digest(manifest_path, manifest)
+        replacement = generation_root.with_name(manifest["content_digest"])
+        generation_root.replace(replacement)
+        (bundle / "current.json").write_text(
+            json.dumps(
+                {
+                    "schema": "mission-worktree-current/1",
+                    "generation": manifest["content_digest"],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        assert manifest["content_digest"] != generation
+
+    data = _run_audit(destination)
+
+    assert data["total_sessions"] == 0
+    assert data["invalid_worktree_archive_count"] == 1
+    assert data["invalid_worktree_archives"][0]["bundle_path"] == str(bundle)
+    codes = {finding["code"] for finding in data["findings"]}
+    assert "invalid-worktree-archive" in codes
+    assert "no-critical-findings" not in codes
+
+
+@pytest.mark.parametrize("symlink_ancestor", ["bundle", "generations"])
+def test_audit_rejects_symlinked_archive_ancestors_without_reading_outside_root(
+    tmp_path, run_cli, symlink_ancestor
+):
+    worktree, destination = _make_completed_worktree(tmp_path)
+    result = _archive(run_cli, worktree, destination)
+    assert result.returncode == 0, result.stderr
+    bundle = Path(json.loads(result.stdout)["bundle_path"])
+    if symlink_ancestor == "bundle":
+        external = tmp_path / "external-bundle"
+        bundle.replace(external)
+        bundle.symlink_to(external, target_is_directory=True)
+    else:
+        generations = bundle / "generations"
+        external = tmp_path / "external-generations"
+        generations.replace(external)
+        generations.symlink_to(external, target_is_directory=True)
+
+    data = _run_audit(destination)
+
+    assert data["total_sessions"] == 0
+    assert data["invalid_worktree_archive_count"] == 1
+    assert data["invalid_worktree_archives"][0]["bundle_path"] == str(bundle)
+    codes = {finding["code"] for finding in data["findings"]}
+    assert "invalid-worktree-archive" in codes
+    assert "no-critical-findings" not in codes
+
+
 @pytest.mark.parametrize(
     "tamper",
     [
