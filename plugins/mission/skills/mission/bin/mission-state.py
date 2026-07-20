@@ -837,7 +837,7 @@ _REVIEW_QUOTED_EXECUTION_AFTER_RE = re.compile(
     re.IGNORECASE,
 )
 _REVIEW_QUOTE_ONLY_RE = re.compile(
-    r"引用(?:する|のみ|だけ)|引用するだけ|\bquote(?:d|s|ing)?\s+only\b|\bonly\s+quot(?:e|ed|ing)\b",
+    r"引用するだけ|引用(?:する|のみ|だけ)|\bquote(?:d|s|ing)?\s+only\b|\bonly\s+quot(?:e|ed|ing)\b",
     re.IGNORECASE,
 )
 _REVIEW_NEGATION_CUE_RE = re.compile(
@@ -852,7 +852,7 @@ _REVIEW_EXECUTION_CUE_RE = re.compile(
     re.IGNORECASE,
 )
 _REVIEW_NAMED_EXECUTION_RE = re.compile(
-    r"\b(?:execute|run|perform|carry\s+out)\s+"
+    r"\b(?:actually\s+)?(?:execute|run|perform|carry\s+out)\s+"
     r"(?:(?:the|a|an)\s+)?[\"`]?"
     r"(?:deploy(?:ment)?|release|migration|publish|production)\b|"
     r"[\"`]?(?:deploy(?:ment)?|release|migration|publish|production)[\"`]?\s+"
@@ -862,6 +862,13 @@ _REVIEW_NAMED_EXECUTION_RE = re.compile(
     r"[」』\"`]?\s*(?:を|は|が|も)?\s*"
     r"(?:(?:実行|実施|反映)(?:する|します|した|する予定)?|"
     r"行う|行います)",
+    re.IGNORECASE,
+)
+_REVIEW_QUOTE_RESIDUAL_NOISE_RE = re.compile(
+    r"[\s,.;:!?、。；：！？\"`「」『』\-*+>]+|"
+    r"\b(?:and|but|then|however)\b|"
+    r"(?:という文言を手順書に|という文言を|手順書に|"
+    r"だが|けど|けれど|ただし|しかし|その後|は|を|が|も)",
     re.IGNORECASE,
 )
 
@@ -998,6 +1005,22 @@ def _review_text_has_ambiguous_execution(text: str) -> bool:
         )
         for match in _REVIEW_EXECUTION_CUE_RE.finditer(text)
     )
+
+
+def _review_text_has_quote_only_unknown_residual(text: str) -> bool:
+    """Require quote-only intent plus known named actions to explain the whole unit."""
+    quote_spans = _review_quote_span_index(text, 0)[1]
+    removable_spans = [
+        *quote_spans,
+        *[(match.start(), match.end()) for match in _REVIEW_QUOTE_ONLY_RE.finditer(text)],
+        *[(match.start(), match.end()) for match in _REVIEW_NAMED_EXECUTION_RE.finditer(text)],
+        *[(match.start(), match.end()) for match in _REVIEW_GLOBAL_NON_OPERATION_RE.finditer(text)],
+    ]
+    masked = list(text)
+    for start, end in removable_spans:
+        masked[start:end] = " " * (end - start)
+    residual = _REVIEW_QUOTE_RESIDUAL_NOISE_RE.sub("", "".join(masked))
+    return bool(residual)
 
 
 def _review_quote_has_execution_target(
@@ -1145,6 +1168,9 @@ def _actual_operation_signal_detail(
             "ambiguous_execution": bool(
                 _review_text_has_ambiguous_execution(logical_unit)
             ),
+            "quote_only_unknown_residual": (
+                _review_text_has_quote_only_unknown_residual(logical_unit)
+            ),
         }
     unit_flags = unit_flags_cache[unit_key]
     global_markers = unit_flags["global_markers"]
@@ -1152,9 +1178,12 @@ def _actual_operation_signal_detail(
     unit_double_negation = unit_flags["double_negation"]
     unit_conditional = unit_flags["conditional"]
     unit_ambiguous_execution = unit_flags["ambiguous_execution"]
+    quote_only_unknown_residual = unit_flags["quote_only_unknown_residual"]
 
     if quoted and quoted_execution_target:
         decision, reason = "included", "affirmative-actual-operation"
+    elif quoted and quote_only and quote_only_unknown_residual:
+        decision, reason = "included", "ambiguous-execution-reference"
     elif quoted and unit_ambiguous_execution:
         decision, reason = "included", "ambiguous-execution-reference"
     elif quoted and quote_only:
