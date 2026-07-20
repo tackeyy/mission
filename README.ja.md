@@ -194,7 +194,7 @@ marketplace 提出前は [`docs/MARKETPLACE_RELEASE_CHECKLIST.ja.md`](docs/MARKE
 ```
 
 orchestrator は仮置き、ミッション分解、実行、reviewer JSON 収集、`aggregate-reviews`、`push-score --scoring-json` 記録を行い、`mark-passes` が state を受理するか中断条件が成立するまで反復します。
-詳細な運用プロトコルは [`skills/mission/SKILL.md`](skills/mission/SKILL.md) を参照してください。
+詳細な運用プロトコルは [`skills/mission/SKILL.md`](skills/mission/SKILL.md)、`stats` / audit の raw・completed 品質 schema は [`docs/PASS_RATE_METRICS.ja.md`](docs/PASS_RATE_METRICS.ja.md) を参照してください。
 
 ## 動作環境
 
