@@ -343,6 +343,44 @@ def test_negated_non_operation_intent_stays_conservative(mission):
 @pytest.mark.parametrize(
     "mission",
     [
+        "deployしないこともない",
+        "deployしないでもない",
+        "deployしないとも言えない",
+        "deployしないとは断言できない",
+    ],
+)
+def test_additional_japanese_negation_reversals_stay_conservative(mission):
+    decision = _decision(mission)
+
+    assert decision["tier"] == "full"
+    assert any(
+        item["reason"] == "uncertain-or-double-negation"
+        for item in _details(decision)
+    )
+
+
+@pytest.mark.parametrize(
+    "mission",
+    [
+        "原則 deployしない",
+        "deployしないことがある",
+        "緊急時を除き deployしない",
+        "例外として deployしない",
+    ],
+)
+def test_japanese_exception_cues_keep_direct_negation_conservative(mission):
+    decision = _decision(mission)
+
+    assert decision["tier"] == "full"
+    assert any(
+        item["reason"] == "conditional-or-uncertain-context"
+        for item in _details(decision)
+    )
+
+
+@pytest.mark.parametrize(
+    "mission",
+    [
         "実操作は行わない。ただし release する",
         "Actual operations will not be performed. However release to production",
         "実操作は行わない\n> release する",
