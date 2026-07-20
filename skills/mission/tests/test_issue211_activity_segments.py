@@ -701,6 +701,7 @@ def test_malformed_open_activity_is_an_invalid_anomaly_not_an_open_segment(
     timing = json.loads(result.stdout)["activity_timing"]
     assert timing["open_segment_count"] == 0
     assert timing["invalid_segment_count"] == 1
+    assert timing["totals_consistent"] is False
 
 
 def test_activity_summary_marks_legacy_time_unclassified_without_inventing_a_cause(
@@ -869,6 +870,36 @@ def test_repeated_terminal_command_closes_a_late_open_activity(tmp_path, run_cli
     assert state["activity_rollup"]["observed_total_sec"] == 60.0
 
 
+def test_terminal_closes_only_to_last_trusted_update_and_marks_crash_gap_unobserved(
+    tmp_path, run_cli
+):
+    path = _write_state(
+        tmp_path,
+        updated_at="2026-07-21T00:05:00Z",
+        activity_current={
+            "kind": "active",
+            "phase": "executing",
+            "reason": "work",
+            "started_at": "2026-07-21T00:00:00Z",
+        },
+    )
+
+    result = run_cli(
+        "mark-halt",
+        "--reason",
+        "stale terminal",
+        "--category",
+        "stale",
+        cwd=tmp_path,
+        env_extra={"MISSION_STATE_NOW": "2026-07-21T01:00:00Z"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    state = json.loads(path.read_text())
+    assert state["activity_rollup"]["observed_total_sec"] == 300.0
+    assert state["activity_unobserved_gap_sec"] == 3300.0
+
+
 def test_same_mission_reinit_with_invalid_open_activity_fails_without_overwrite(
     tmp_path, run_cli
 ):
@@ -979,6 +1010,208 @@ def test_rollup_reason_count_and_gap_anomalies_are_counted(tmp_path, run_cli):
     assert timing["closed_segment_count"] == 0
     assert timing["unobserved_gap_sec"] == 0.0
     assert timing["invalid_segment_count"] >= 3
+
+
+def test_refresh_pid_closes_and_restarts_phase_at_the_observed_resume_boundary(
+    tmp_path, run_cli
+):
+    path = _write_state(
+        tmp_path,
+        phase="executing",
+        phase_started_at="2026-07-21T00:00:00Z",
+        updated_at="2026-07-21T00:05:00Z",
+        phase_durations_sec={"planning": 30.0},
+        pid=0,
+    )
+
+    refreshed = run_cli(
+        "refresh-pid",
+        cwd=tmp_path,
+        env_extra={"MISSION_STATE_NOW": "2026-07-21T01:00:00Z"},
+    )
+    transitioned = run_cli(
+        "set",
+        "phase=reviewing",
+        cwd=tmp_path,
+        env_extra={"MISSION_STATE_NOW": "2026-07-21T01:10:00Z"},
+    )
+
+    assert refreshed.returncode == transitioned.returncode == 0
+    state = json.loads(path.read_text())
+    assert state["phase_durations_sec"] == {
+        "planning": 30.0,
+        "executing": 900.0,
+    }
+
+
+def test_stats_and_audit_keep_missing_project_roots_separate_by_state_path(
+    tmp_path, run_cli
+):
+    for name, duration in (("one", 60), ("two", 120)):
+        state = _base_state(
+            tmp_path,
+            project_root=None,
+            session_id="same-session",
+            activity_segments=[
+                _closed(
+                    "active",
+                    "executing",
+                    "work",
+                    "2026-07-21T00:00:00Z",
+                    f"2026-07-21T00:0{duration // 60}:00Z",
+                    duration,
+                )
+            ],
+            activity_current=None,
+        )
+        path = tmp_path / name / ".mission-state" / "sessions" / "same-session.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(state))
+
+    stats = json.loads(
+        run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path, check=True).stdout
+    )["activity_timing"]
+    audit = json.loads(
+        subprocess.run(
+            [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--json"],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={**os.environ, "MISSION_AUDIT_NOW": "2026-07-21T01:00:00Z"},
+        ).stdout
+    )["activity_timing"]
+
+    assert stats == audit
+    assert stats["observed_total_sec"] == 180.0
+
+
+def test_stats_and_audit_normalize_trailing_slash_in_project_identity(
+    tmp_path, run_cli
+):
+    canonical = str(tmp_path / "canonical")
+    for name, project_root, duration, updated in (
+        ("old", canonical + "/", 60, "2026-07-21T00:01:00Z"),
+        ("new", canonical, 120, "2026-07-21T00:02:00Z"),
+    ):
+        state = _base_state(
+            tmp_path,
+            project_root=project_root,
+            session_id="same-session",
+            updated_at=updated,
+            activity_segments=[
+                _closed(
+                    "active",
+                    "executing",
+                    "work",
+                    "2026-07-21T00:00:00Z",
+                    f"2026-07-21T00:0{duration // 60}:00Z",
+                    duration,
+                )
+            ],
+            activity_current=None,
+        )
+        path = tmp_path / name / ".mission-state" / "sessions" / "same-session.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(state))
+
+    stats = json.loads(
+        run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path, check=True).stdout
+    )["activity_timing"]
+    audit = json.loads(
+        subprocess.run(
+            [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--json"],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={**os.environ, "MISSION_AUDIT_NOW": "2026-07-21T01:00:00Z"},
+        ).stdout
+    )["activity_timing"]
+
+    assert stats == audit
+    assert stats["observed_total_sec"] == 120.0
+
+
+@pytest.mark.parametrize(
+    "activity_current",
+    [
+        {
+            "kind": ["active"],
+            "phase": "executing",
+            "reason": "work",
+            "started_at": "2026-07-21T00:00:00Z",
+        },
+        {
+            "kind": "active",
+            "phase": "executing",
+            "reason": ["work"],
+            "started_at": "2026-07-21T00:00:00Z",
+        },
+        "malformed-scalar",
+    ],
+)
+def test_unhashable_or_scalar_current_activity_is_counted_not_crashed(
+    tmp_path, run_cli, activity_current
+):
+    _write_state(tmp_path, activity_current=activity_current)
+
+    result = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    timing = json.loads(result.stdout)["activity_timing"]
+    assert timing["open_segment_count"] == 0
+    assert timing["invalid_segment_count"] == 1
+    assert timing["totals_consistent"] is False
+
+
+def test_unhashable_raw_segment_is_invalid_not_a_stats_crash(tmp_path, run_cli):
+    _write_state(
+        tmp_path,
+        activity_segments=[
+            {
+                "kind": ["active"],
+                "phase": "executing",
+                "reason": "work",
+                "started_at": "2026-07-21T00:00:00Z",
+                "ended_at": "2026-07-21T00:00:10Z",
+                "duration_sec": 10.0,
+            }
+        ],
+        activity_current=None,
+    )
+
+    result = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    timing = json.loads(result.stdout)["activity_timing"]
+    assert timing["observed_total_sec"] == 0.0
+    assert timing["invalid_segment_count"] == 1
+    assert timing["totals_consistent"] is False
+
+
+def test_invalid_only_rollup_does_not_create_a_zero_percentile_sample(
+    tmp_path, run_cli
+):
+    _write_state(
+        tmp_path,
+        activity_rollup={
+            "observed_total_sec": 0.0,
+            "closed_segment_count": 1,
+            "activity_duration_totals_sec": {"future-kind": 0.0},
+            "phase_activity_duration_totals_sec": {
+                "executing": {"future-kind": 0.0}
+            },
+            "wait_reason_totals_sec": {},
+        },
+    )
+
+    result = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    timing = json.loads(result.stdout)["activity_timing"]
+    assert timing["task_duration_percentiles_sec"] == {}
+    assert timing["phase_duration_percentiles_sec"] == {}
+    assert timing["invalid_segment_count"] >= 1
+    assert timing["totals_consistent"] is False
 
 
 def test_wait_reason_is_enum_and_detail_is_sanitized(tmp_path, run_cli):

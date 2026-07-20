@@ -130,7 +130,7 @@ def test_hook_autohalts_on_very_stale_state(tmp_path):
             "kind": "idle",
             "phase": "executing",
             "reason": "no-runnable-work",
-            "started_at": "2020-01-01T00:00:00Z",
+            "started_at": "2019-12-31T23:55:00Z",
         },
     )
     r = _run_hook(tmp_path, {"CLAUDE_CODE_SESSION_ID": "stale2"})
@@ -144,7 +144,8 @@ def test_hook_autohalts_on_very_stale_state(tmp_path):
     # #190: idle-timeout auto-halt (shell 側 jq write) も halt_category='stale' を記録する
     assert st["halt_category"] == "stale"
     assert st["activity_current"] is None
-    assert st["activity_rollup"]["activity_duration_totals_sec"]["idle"] > 0
+    assert st["activity_rollup"]["activity_duration_totals_sec"]["idle"] == 300.0
+    assert st["activity_unobserved_gap_sec"] > 0
 
 
 def test_hook_does_not_autohalt_awaiting_user_state(tmp_path):
