@@ -76,16 +76,17 @@ Active `not perform/execute`, contractions and `cannot`, passive
 `will/should not be performed/executed`, and equivalent Japanese qualifier forms
 are treated as direct anchors for the operation phrase. Only an explicit, simple
 statement that the actual operation will not happen is suppressed. Conditions
-and exceptions (`unless`, `except when`, `until`, pending approval, approval
+and exceptions (`unless`, `except when`, `until`, pending approval,
+`before/prior to approval`, `while approval is pending`, approval
 exclusions, principles, emergency cases, and equivalent Japanese forms), negated
-non-operation intent, modal/contraction `not not`, outer negation such as
+non-operation intent, modal/contraction/`never` + `not`, outer negation such as
 `not the case that` / `not saying that` / `cannot say that`, and uncertainty
 remain conservative escalations. Multiple negation cues count as a
 reversal only before the next operation, so separate simple negations do not
 combine. Japanese phrases that explicitly eliminate exceptions (`例外なく`,
 `緊急時にも`, and `原則ではなく絶対に`) remain simple negations,
 as do causal assurances that the negated operation leaves no problem, obstacle,
-or concern. A global non-operation marker does
+concern, or impact. A global non-operation marker does
 not suppress by position alone: it suppresses a candidate only when the entire
 candidate context matches a strict meta-only grammar for reviewing, analyzing,
 documenting, or inspecting procedures, settings, logs, or text. Unknown trailing
@@ -93,7 +94,8 @@ content invalidates that proof. Ambiguous, imperative, and affirmative
 candidates remain conservative. Any execution cue in the same logical unit that
 is not directly anchored to another named operation may refer to a meta candidate
 and vetoes suppression with `ambiguous-execution-reference`. This includes
-cross-sentence `follow/apply + pronoun` and Japanese `適用` / `従う`
+cross-sentence `follow/apply/proceed with` references to a pronoun or named
+procedure and Japanese `適用` / `従う`
 references; execution cues
 inside quote spans are excluded from that veto. Explicit quote-only intent suppresses a quoted
 candidate unless execution language immediately around that quote directly

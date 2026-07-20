@@ -19,6 +19,7 @@
   meta/non-operation の証明は候補 context 全体が strict meta-only 文法へ一致することを要求し、未知の後段句があれば抑制しません。quote span 内の execution cue は曖昧照応 veto の対象外です。quote-only も marker・無害終端・別 named operation への明示 action を除いた外側残余が空の場合だけ抑制します。
   modal / contraction で始まる `not not` と、`not the case that` / `not saying that` / `cannot say that` などの外側否定を二重否定として扱います。`except when` / `until` / approval 待ち / passive な緊急時例外は条件付きのままです。文をまたぐ `follow/apply + pronoun` と日本語の `適用` / `従う` は曖昧な実行照応として global meta-only 抑制を veto します。
   `例外なく` / `緊急時にも` / `原則ではなく絶対に` という強い無条件否定は、広い例外 marker を発火しないようにしました。単純な operation 否定の後に続く因果的な安心表明は、独立した述語否定を誤って二重否定にしません。
+  短縮 auxiliary と `never` を operation scope 付きの単純/二重否定で共通化し、外側の報告否定の短縮形も扱います。approval gate は `before` / `prior to` / `while ... is pending` を追加し、曖昧実行照応は pronoun または named procedure に対する `follow` / `apply` / `proceed with` まで認識します。日本語の因果的な安心表明に影響表現を追加しました。
 
 ## [2.0.0] - 2026-07-20
 
