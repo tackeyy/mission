@@ -245,6 +245,27 @@ def test_negation_requires_direct_operation_anchor_even_with_unknown_connector(m
 @pytest.mark.parametrize(
     "mission",
     [
+        "we will not perform a production migration",
+        "we will not execute a production migration",
+        "production migration will not be performed",
+        "publish will not be executed",
+        "migration should not be performed",
+        "we do not perform migration",
+    ],
+)
+def test_english_perform_execute_and_passive_negation_are_explicit(mission):
+    decision = _decision(mission)
+
+    actual = _details(decision)
+    assert decision["tier"] == "light"
+    assert decision["signals"] == []
+    assert actual and {item["decision"] for item in actual} == {"suppressed"}
+    assert {item["reason"] for item in actual} == {"negated-actual-operation"}
+
+
+@pytest.mark.parametrize(
+    "mission",
+    [
         "実操作は行わない。ただし release する",
         "Actual operations will not be performed. However release to production",
         "実操作は行わない\n> release する",
@@ -502,6 +523,21 @@ def test_repeated_keyword_context_lookup_scales_below_quadratic():
     def elapsed_for(count: int) -> tuple[float, dict]:
         started = time.perf_counter()
         decision = _decision("deploy. " * count)
+        return time.perf_counter() - started, decision
+
+    small_elapsed, _ = elapsed_for(1_000)
+    large_elapsed, large = elapsed_for(4_000)
+
+    deploy_details = [item for item in _details(large) if item["keyword"] == "deploy"]
+    assert len(deploy_details) == 4_000
+    assert large_elapsed < 2.5
+    assert large_elapsed < (small_elapsed * 8) + 0.05
+
+
+def test_dense_no_boundary_context_analysis_scales_below_quadratic():
+    def elapsed_for(count: int) -> tuple[float, dict]:
+        started = time.perf_counter()
+        decision = _decision("deploy " * count)
         return time.perf_counter() - started, decision
 
     small_elapsed, _ = elapsed_for(1_000)
