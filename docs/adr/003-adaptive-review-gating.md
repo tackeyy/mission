@@ -69,6 +69,9 @@ Every occurrence of an irreversible keyword is evaluated in sentence/contrast
 clauses within paragraph, list-item, blockquote, and heading-delimited logical
 units. Negation, execution, and quote-only intent are anchored to the matching
 operation rather than applied to every nearby keyword.
+Negation requires a direct grammatical anchor immediately before or after that
+operation; a nearby cue alone is insufficient. Unknown connectors or an
+intervening operation therefore remain conservative inclusions.
 Only an explicit, simple statement that the actual operation will not happen is
 suppressed. Conditional, double-negative, uncertain, and merely quoted contexts
 remain conservative escalations; an explicit quote-only intent may be suppressed.
