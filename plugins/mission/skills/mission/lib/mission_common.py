@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 PREPARATION_ONLY_MARKERS = (
@@ -60,3 +61,48 @@ def duration_sec(state: dict[str, Any]) -> float | None:
     except TypeError:
         return None
     return seconds if seconds >= 0 else None
+
+
+def _project_identity(project_root: Any, source_path: str) -> str:
+    if isinstance(project_root, str) and project_root.strip():
+        try:
+            return str(Path(project_root).expanduser().resolve(strict=False))
+        except (OSError, RuntimeError):
+            return str(Path(project_root))
+    if source_path:
+        source = Path(source_path)
+        for parent in source.parents:
+            if parent.name == ".mission-state":
+                try:
+                    return str(parent.parent.resolve(strict=False))
+                except (OSError, RuntimeError):
+                    return str(parent.parent)
+    return ""
+
+
+def state_identity(
+    state: dict[str, Any], fallback_session: str = "", source_path: str = ""
+) -> tuple[str, str, str]:
+    """Identity shared by live/archive audit and stats deduplication."""
+    return (
+        _project_identity(state.get("project_root"), source_path),
+        str(state.get("session_id") or fallback_session),
+        str(state.get("mission_id") or ""),
+    )
+
+
+def state_dedupe_rank(state: dict[str, Any], source_path: str = "") -> tuple[int, float, int, str]:
+    """Prefer terminal success, then newest update, then live/path determinism."""
+    classification = classify_state(state)
+    status_rank = {"pass": 0, "halt": 1, "incomplete": 2}.get(classification, 3)
+    updated = parse_iso_datetime(state.get("updated_at"))
+    if updated and updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc)
+    updated_rank = updated.timestamp() if updated else 0.0
+    if "/archive/worktree-" in source_path:
+        path_rank = 1
+    elif "/sessions/" in source_path:
+        path_rank = 0
+    else:
+        path_rank = 2
+    return (status_rank, -updated_rank, path_rank, source_path)

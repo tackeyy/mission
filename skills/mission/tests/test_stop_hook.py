@@ -119,7 +119,20 @@ def test_hook_warns_on_stale_state(tmp_path):
 
 def test_hook_autohalts_on_very_stale_state(tmp_path):
     """Issue #1: updated_at が3h超(2020) の state は block せず、session file を auto-halt する."""
-    _write_session(tmp_path, "cc-stale2", updated_at="2020-01-01T00:00:00Z", project_root=str(tmp_path))
+    _write_session(
+        tmp_path,
+        "cc-stale2",
+        updated_at="2020-01-01T00:00:00Z",
+        project_root=str(tmp_path),
+        phase="executing",
+        phase_started_at="2020-01-01T00:00:00Z",
+        activity_current={
+            "kind": "idle",
+            "phase": "executing",
+            "reason": "no-runnable-work",
+            "started_at": "2019-12-31T23:55:00Z",
+        },
+    )
     r = _run_hook(tmp_path, {"CLAUDE_CODE_SESSION_ID": "stale2"})
     # hook は block を返さない (decision:block が stdout にない)
     assert "block" not in r.stdout, f"auto-halt 対象なのに block が返った: {r.stdout}"
@@ -130,6 +143,10 @@ def test_hook_autohalts_on_very_stale_state(tmp_path):
     assert "stale" in st["halt_reason"], f"halt_reason に 'stale' が含まれない: {st['halt_reason']}"
     # #190: idle-timeout auto-halt (shell 側 jq write) も halt_category='stale' を記録する
     assert st["halt_category"] == "stale"
+    assert st["activity_current"] is None
+    assert st["activity_rollup"]["activity_duration_totals_sec"]["idle"] == 300.0
+    assert st["activity_unobserved_gap_sec"] > 0
+    assert st["resume_target_phase"] == "executing"
 
 
 def test_hook_does_not_autohalt_awaiting_user_state(tmp_path):

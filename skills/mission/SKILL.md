@@ -21,6 +21,7 @@ argument-hint: <ミッション記述> [--max-iter N] [--skip-preflight] [--thre
 8. M6: Medium 以上の指摘を orchestrator がインライン修正したら、自己検証だけで合格にしない。差分 Reviewer 1 名の再確認を経てから scoring / pass 判定へ進む。
 9. 質問は溜めて仮置きする。即時質問は Trigger 1 の不可逆操作と、Trigger 2 の中断条件だけ。
 10. PR がある場合は pass 後に Phase 7 を実行する。自動 merge は明示 opt-in、CI/テスト pass、`gh pr checks` 1 件以上、禁止ルールなしの全条件を満たす時だけ。
+11. `init` 後は `activity start --kind active --reason planning` を開始し、実作業・外部応答・承認・reviewer・実行可能作業なしの境界で明示的に切り替える。原因不明の時間を推測分類しない。終端 phase は open segment を自動で閉じる。
 
 ## state.json 操作
 
@@ -30,6 +31,12 @@ argument-hint: <ミッション記述> [--max-iter N] [--skip-preflight] [--thre
 mission-state.py init "<mission>" --complexity Simple|Standard|Complex|Critical --issue-ref <ref> --files <csv>
 mission-state.py resume
 mission-state.py next
+mission-state.py activity start --kind active --reason planning
+mission-state.py activity start --kind external-wait --reason external-response
+mission-state.py activity start --kind approval-wait --reason user-approval
+mission-state.py activity start --kind reviewer-wait --reason review-response
+mission-state.py activity start --kind idle --reason no-runnable-work
+mission-state.py activity end
 mission-state.py aggregate-reviews --iteration N --input a.json --input b.json --out /tmp/mission-scorer-N.json --json
 mission-state.py push-score --iteration N --scoring-json /tmp/mission-scorer-N.json
 mission-state.py mark-passes
@@ -72,6 +79,8 @@ init 後、対象ファイル候補が見えた時点で `specialists recommend 
 ## Phase 2-6
 
 1 iter の標準フローは planner → executor → reviewer → `aggregate-reviews` → `push-score --scoring-json` → critic。Codex では Skill tool が無い場合、該当 skill 指示を同一コンテキストで適用し、`specialist_invocations` には `codex-inline` として実呼び出し証跡を記録する。
+
+activity segment は観測専用で、reviewer 数・threshold・findings evidence・agreement・`open_high`・pass/fail gate を変更しない。外部応答、承認、reviewer の待機を開始する直前に対応する wait kind へ切り替え、応答後は `active` へ戻す。`idle` は「実行可能な作業がない」と明示できる場合だけ使う。crash/resume 間の不明時間は自動分類せず unobserved gap として保持する。reason enum と集計定義は `refs/state-management.md` の「Activity segment observability」を参照。
 
 Reviewer 数は Simple=1、Standard=2、Complex/Critical=3。Claude Code では Reviewer N 名を単一メッセージ内で並列起動する。Codex は順次でよい。観点Dは採点させず、計画指示明瞭度の改善を Critic の実行計画に反映する。
 
