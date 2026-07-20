@@ -80,7 +80,8 @@ and exceptions (`unless`, `except when`, `until`, pending approval,
 `before/prior to approval`, `while approval is pending`, approval
 exclusions, principles, emergency cases, and equivalent Japanese forms), negated
 non-operation intent, modal/contraction/`never` + `not`, outer negation such as
-`not the case that` / `not saying that` / `cannot say that`, and uncertainty
+`not the case that` / `not true that` / `not saying that` / `cannot say that` /
+`no guarantee/assurance/certainty that`, and uncertainty
 remain conservative escalations. Multiple negation cues count as a
 reversal only before the next operation, so separate simple negations do not
 combine. Japanese phrases that explicitly eliminate exceptions (`例外なく`,

@@ -285,6 +285,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py progress updat
 `例外なく` / `緊急時にも` / `原則ではなく絶対に` は例外の存在を示さない強い単純否定として扱う。また、`実操作しないので問題/支障/懸念なし` のような因果的な安心表明は、対象 operation の否定を反転しない。
 
 英語の否定 auxiliary は短縮形全体を同じ operation scope 文法で扱い、`never not` と be 短縮形の外側報告否定も二重否定に含める。approval gate は `before/prior to approval` と `while approval is pending` も条件付きとする。曖昧実行照応は `follow` / `apply` / `proceed with` が pronoun または named procedure を受ける場合を含む。因果的な安心表明の述語には `影響はない` も含む。
+外側の不確実表現は `not true that` と `no guarantee/assurance/certainty that` も含み、内側 operation の modal 否定が短縮形でも二重否定として採用する。外側の reporting negation と内側の modal negation はどちらも auxiliary 短縮形を共通に扱う。
 
 meta/non-operation の証明は context 全体が `review/analyze/document/inspect + procedure/settings/log/text` または `手順/設定/文言/ログ + 調査/確認/分析/説明/文書化` の strict meta-only 文法に一致することを要求する。meta span の外に未知の後段句が残る場合は抑制しない。`ambiguous-execution-reference` の判定では quote span 内の execution cue を除外し、引用外の cue だけを veto 対象にする。quote-only の抑制も quote span・quote-only 語句・無害な終端・別 named operation への明示 action を除いた外側残余が空であることを要求し、未知句や代名詞参照が残る場合は安全側で採用する。
 

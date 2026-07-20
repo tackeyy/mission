@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Modal/contraction `not not` and outer negations such as `not the case that`, `not saying that`, and `cannot say that` are now treated as double negation. `except when`, `until`, pending-approval, and passive emergency exceptions remain conditional. Cross-sentence `follow/apply + pronoun` and Japanese `適用` / `従う` references now veto global meta-only suppression as ambiguous execution.
   Strong Japanese unconditional forms (`例外なく`, `緊急時にも`, and `原則ではなく絶対に`) no longer trigger broad exception markers. A causal assurance after a simple operation negation no longer turns its independent predicate negation into a false double negation.
   Contracted auxiliaries and `never` now share the same operation-scoped simple/double-negation grammar, including contracted outer reporting negation. Approval gating also recognizes `before`, `prior to`, and `while ... is pending`; ambiguous execution references recognize `follow`, `apply`, and `proceed with` against pronouns or named procedures. Japanese causal assurances include impact statements.
+  Outer uncertainty now includes `not true that` and `no guarantee/assurance/certainty that`; contracted modal negation in the inner operation clause is handled by the same grammar as expanded auxiliaries.
 
 ## [2.0.0] - 2026-07-20
 
