@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_right
 import contextlib
 import fcntl
 import hashlib
@@ -753,11 +754,14 @@ _SECURITY_KEYWORDS_JA = ("認証", "秘密", "鍵")
 
 
 _REVIEW_CONTEXT_BOUNDARY_RE = re.compile(
-    r"[。.!！?？;；\n]+|が[、,]\s*|\bbut\b|\bhowever\b",
+    r"[。.!！?？;；\n]+|(?:だが|けど|けれど|が|ただし|しかし|一方(?:で)?)[、,]?\s*|"
+    r"\band(?:\s+then)?\b\s*|\bbut\b\s*|\bhowever\b[\s,]*",
     re.IGNORECASE,
 )
 _REVIEW_UNIT_BOUNDARY_RE = re.compile(
-    r"\n[ \t]*\n+|\n(?=[ \t]*(?:[-*+]|\d+[.)])\s+)",
+    r"\n[ \t]*\n+|\n(?=[ \t]*(?:[-*+>]|#{1,6}\s|\d+[.)])\s*)|"
+    r"(?:ただし|しかし|一方(?:で)?)[、,]?\s*|\bhowever\b[\s,]*",
+    re.IGNORECASE,
 )
 _REVIEW_DOUBLE_NEGATION_RE = re.compile(
     r"(?:し|行わ|実行し)ないわけではない|(?:し|行わ|実行し)ないとは限らない|"
@@ -785,8 +789,8 @@ _REVIEW_GLOBAL_NON_OPERATION_RE = re.compile(
     re.IGNORECASE,
 )
 _REVIEW_EXPLICIT_EXECUTION_RE = re.compile(
-    r"実際に実行する|実操作\s*(?:は|を)?\s*行う|実行に移す|"
-    r"\bactually\s+(?:execute|deploy|release|publish)\b",
+    r"実際に実行する|実行する|実操作\s*(?:は|を)?\s*行う|実行に移す|"
+    r"\bexecute\b|\bactually\s+(?:deploy|release|publish)\b",
     re.IGNORECASE,
 )
 _REVIEW_QUOTE_ONLY_RE = re.compile(
@@ -801,32 +805,43 @@ def _review_keyword_matches(text: str, keyword: str, *, ignore_case: bool) -> li
     return list(re.finditer(re.escape(keyword), text, flags))
 
 
-def _review_logical_context(text: str, start: int, end: int) -> tuple[int, int, str]:
-    """Bound context to one sentence/contrast clause so distant negation cannot leak."""
-    context_start = 0
-    context_end = len(text)
-    for boundary in _REVIEW_CONTEXT_BOUNDARY_RE.finditer(text):
-        if boundary.end() <= start:
-            context_start = boundary.end()
-            continue
-        if boundary.start() >= end:
-            context_end = boundary.start()
-            break
-    return context_start, context_end, text[context_start:context_end].strip()
+def _review_segment_index(text: str, boundary_re: re.Pattern) -> tuple[list[int], list[tuple[int, int]]]:
+    """Precompute trimmed text segments once for O(log n) per-match lookup."""
+    spans: list[tuple[int, int]] = []
+    cursor = 0
+    for boundary in boundary_re.finditer(text):
+        start, end = cursor, boundary.start()
+        while start < end and text[start].isspace():
+            start += 1
+        while end > start and text[end - 1].isspace():
+            end -= 1
+        if start < end:
+            spans.append((start, end))
+        cursor = boundary.end()
+    start, end = cursor, len(text)
+    while start < end and text[start].isspace():
+        start += 1
+    while end > start and text[end - 1].isspace():
+        end -= 1
+    if start < end:
+        spans.append((start, end))
+    if not spans:
+        spans.append((0, len(text)))
+    return [start for start, _ in spans], spans
 
 
-def _review_logical_unit(text: str, start: int, end: int) -> tuple[int, int, str]:
-    """Return the containing paragraph/list item for unit-scoped intent flags."""
-    unit_start = 0
-    unit_end = len(text)
-    for boundary in _REVIEW_UNIT_BOUNDARY_RE.finditer(text):
-        if boundary.end() <= start:
-            unit_start = boundary.end()
-            continue
-        if boundary.start() >= end:
-            unit_end = boundary.start()
-            break
-    return unit_start, unit_end, text[unit_start:unit_end].strip()
+def _review_segment_span(
+    index: tuple[list[int], list[tuple[int, int]]],
+    start: int,
+    end: int,
+) -> tuple[int, int]:
+    """Find the precomputed segment containing a source span."""
+    starts, spans = index
+    position = max(0, bisect_right(starts, start) - 1)
+    segment_start, segment_end = spans[position]
+    if segment_start <= start and end <= segment_end:
+        return segment_start, segment_end
+    return start, end
 
 
 def _review_audit_context(text: str, start: int, end: int, *, radius: int = 80) -> str:
@@ -864,16 +879,28 @@ def _actual_operation_signal_detail(
     keyword: str,
     match: re.Match,
     signal: str,
+    context_index: tuple[list[int], list[tuple[int, int]]],
+    unit_index: tuple[list[int], list[tuple[int, int]]],
+    unit_flags_cache: dict[tuple[int, int], tuple[bool, bool, bool]],
 ) -> dict:
     start, end = match.span()
-    context_start, _, logical_context = _review_logical_context(mission_text, start, end)
-    _, _, logical_unit = _review_logical_unit(mission_text, start, end)
+    context_start, context_end = _review_segment_span(context_index, start, end)
+    logical_context = mission_text[context_start:context_end]
+    unit_start, unit_end = _review_segment_span(unit_index, start, end)
     relative_start = start - context_start
     relative_end = end - context_start
-    quoted = _review_match_is_quoted(mission_text, start)
-    global_non_operation = bool(_REVIEW_GLOBAL_NON_OPERATION_RE.search(logical_unit))
-    explicit_execution = bool(_REVIEW_EXPLICIT_EXECUTION_RE.search(logical_unit))
-    quote_only = bool(_REVIEW_QUOTE_ONLY_RE.search(logical_unit))
+    quoted = _review_match_is_quoted(logical_context, relative_start)
+    explicit_execution = bool(_REVIEW_EXPLICIT_EXECUTION_RE.search(logical_context))
+    quote_only = bool(_REVIEW_QUOTE_ONLY_RE.search(logical_context))
+    unit_key = (unit_start, unit_end)
+    if unit_key not in unit_flags_cache:
+        logical_unit = mission_text[unit_start:unit_end]
+        unit_flags_cache[unit_key] = (
+            bool(_REVIEW_GLOBAL_NON_OPERATION_RE.search(logical_unit)),
+            bool(_REVIEW_DOUBLE_NEGATION_RE.search(logical_unit)),
+            bool(_REVIEW_CONDITIONAL_RE.search(logical_unit)),
+        )
+    global_non_operation, unit_double_negation, unit_conditional = unit_flags_cache[unit_key]
 
     if quoted and explicit_execution:
         decision, reason = "included", "affirmative-actual-operation"
@@ -887,9 +914,9 @@ def _actual_operation_signal_detail(
         decision, reason = "included", "conditional-or-uncertain-context"
     elif _review_negation_is_near(logical_context, relative_start, relative_end):
         decision, reason = "suppressed", "negated-actual-operation"
-    elif global_non_operation and _REVIEW_DOUBLE_NEGATION_RE.search(logical_unit):
+    elif global_non_operation and unit_double_negation:
         decision, reason = "included", "uncertain-or-double-negation"
-    elif global_non_operation and _REVIEW_CONDITIONAL_RE.search(logical_unit):
+    elif global_non_operation and unit_conditional:
         decision, reason = "included", "conditional-or-uncertain-context"
     elif global_non_operation:
         decision, reason = "suppressed", "global-explicit-non-operation"
@@ -940,6 +967,9 @@ def derive_review_tier_decision(
     base_tier = REVIEW_TIER_BASE.get(complexity or "", "standard")
     signals: list[str] = []
     signal_details: list[dict] = []
+    context_index = _review_segment_index(mission_text, _REVIEW_CONTEXT_BOUNDARY_RE)
+    unit_index = _review_segment_index(mission_text, _REVIEW_UNIT_BOUNDARY_RE)
+    unit_flags_cache: dict[tuple[int, int], tuple[bool, bool, bool]] = {}
 
     if task_profile_risk == "high":
         signal = "task_profile.risk=high"
@@ -969,6 +999,9 @@ def derive_review_tier_decision(
                     keyword,
                     match,
                     signal,
+                    context_index,
+                    unit_index,
+                    unit_flags_cache,
                 )
                 for match in _review_keyword_matches(mission_text, keyword, ignore_case=ignore_case)
             ]
