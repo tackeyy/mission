@@ -785,7 +785,9 @@ _REVIEW_DOUBLE_NEGATION_RE = re.compile(
 )
 _REVIEW_CONDITIONAL_RE = re.compile(
     r"必要なら|必要な場合|場合|可能なら|可能性|かもしれ|未確定|検討中|するか|し得|あり得|"
-    r"限り|以外|除く|除き|原則|ことがある|例外|緊急時|"
+    r"限り|以外|除く|除き|"
+    r"原則(?!\s*ではなく(?:[、,]\s*)?絶対に)|ことがある|"
+    r"例外(?!\s*なく)|緊急時(?!\s*に?も)|"
     r"\bonly\s+if\b|\bif\b|\bunless\b|\bmay\b|\bmight\b|\bcould\b|\bpossibly\b|\bwhether\b|"
     r"\bexcept\s+(?:(?:when|in)\s+)?(?:emergenc(?:y|ies)|authorized|approved|approval)\b|"
     r"\buntil\b|\bpending\s+(?:approval|authorization|permission)\b|"
@@ -859,6 +861,10 @@ _REVIEW_NEGATION_CUE_RE = re.compile(
     r"しない|行わない|実行しない|ではない|はない|言っていない|述べていない|ない|"
     r"\bnot\b|\bnever\b|\bcannot\b|\b(?:don|won|can)['’]t\b",
     re.IGNORECASE,
+)
+_REVIEW_CAUSAL_ASSURANCE_AFTER_NEGATION_RE = re.compile(
+    r"(?:しない|行わない|実行しない)\s*(?:ので|から|ため)\s*"
+    r"(?:問題|支障|懸念)(?:は|が)?\s*ない\s*$"
 )
 _REVIEW_EXECUTION_CUE_RE = re.compile(
     r"\b(?:execute(?:d)?|run|perform(?:ed)?|carry\s+(?:(?:it|that|this)\s+)?out|"
@@ -1126,6 +1132,7 @@ def _review_operation_is_explicitly_negated(
 
 
 def _review_operation_has_negation_reversal(
+    context: str,
     cue_starts: list[int],
     operation_starts: list[int],
     relative_start: int,
@@ -1140,7 +1147,15 @@ def _review_operation_has_negation_reversal(
     )
     first_cue = bisect_left(cue_starts, relative_end)
     final_cue = bisect_left(cue_starts, limit) if limit is not None else len(cue_starts)
-    return final_cue - first_cue >= 2
+    cue_count = final_cue - first_cue
+    if cue_count < 2:
+        return False
+    cue_end = limit if limit is not None else len(context)
+    if cue_count == 2 and _REVIEW_CAUSAL_ASSURANCE_AFTER_NEGATION_RE.fullmatch(
+        context[cue_starts[first_cue]:cue_end]
+    ):
+        return False
+    return True
 
 
 def _actual_operation_signal_detail(
@@ -1207,6 +1222,7 @@ def _actual_operation_signal_detail(
     elif quoted:
         decision, reason = "included", "quoted-context-conservative"
     elif context_analysis["double_negation"] or _review_operation_has_negation_reversal(
+        logical_context,
         context_analysis["negation_cue_starts"],
         context_analysis["actual_operation_starts"],
         relative_start,
