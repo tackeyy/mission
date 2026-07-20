@@ -665,6 +665,16 @@ def _ensure_phase_timing(data: dict, now: str | None = None) -> None:
         data["phase_started_at"] = data.get("started_at") or now
 
 
+def _finite_nonnegative_phase_seconds(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
+
+
 def _record_terminal_phase_anomaly(data: dict) -> None:
     counts = data.get("activity_anomaly_counts")
     if not isinstance(counts, dict):
@@ -714,16 +724,11 @@ def _accrue_phase_for_terminal_control(
         if boundary < started or boundary > ended:
             _record_terminal_phase_anomaly(data)
             return False
-    current = durations.get(old_phase, 0)
-    if (
-        isinstance(current, bool)
-        or not isinstance(current, (int, float))
-        or not math.isfinite(float(current))
-        or current < 0
-    ):
+    current = _finite_nonnegative_phase_seconds(durations.get(old_phase, 0))
+    if current is None:
         _record_terminal_phase_anomaly(data)
         return False
-    durations[old_phase] = float(current) + (boundary - started).total_seconds()
+    durations[old_phase] = current + (boundary - started).total_seconds()
     return True
 
 
@@ -746,7 +751,7 @@ def _transition_phase(
         }
         if new_phase == "halted" and terminal_trusted_boundary and old_phase_is_resumable:
             data["resume_target_phase"] = old_phase
-        elif new_phase == "done" or old_phase_is_resumable:
+        else:
             data.pop("resume_target_phase", None)
         _accrue_phase_for_terminal_control(
             data,
@@ -776,7 +781,12 @@ def _transition_phase(
             elapsed = (ended - started).total_seconds()
             if elapsed >= 0:
                 durations = data.setdefault("phase_durations_sec", {})
-                durations[old_phase] = float(durations.get(old_phase, 0)) + elapsed
+                if not isinstance(durations, dict):
+                    raise ActivityTimingError("phase durations are malformed")
+                current = _finite_nonnegative_phase_seconds(durations.get(old_phase, 0))
+                if current is None:
+                    raise ActivityTimingError("phase duration is malformed")
+                durations[old_phase] = current + elapsed
         data["phase_started_at"] = now
     data["phase"] = new_phase
 
@@ -798,10 +808,10 @@ def _resume_phase_timing(data: dict, now: str) -> None:
         raise ActivityTimingError("phase resume boundary is inconsistent")
     elapsed = (boundary - started).total_seconds()
     durations = data.setdefault("phase_durations_sec", {})
-    current = durations.get(phase, 0)
-    if isinstance(current, bool) or not isinstance(current, (int, float)):
+    current = _finite_nonnegative_phase_seconds(durations.get(phase, 0))
+    if current is None:
         raise ActivityTimingError("phase duration is malformed")
-    durations[phase] = float(current) + elapsed
+    durations[phase] = current + elapsed
     data["phase_started_at"] = now
 
 

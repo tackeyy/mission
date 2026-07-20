@@ -76,7 +76,10 @@ def _reject_state_clock_rollback(state: dict[str, Any], at: str) -> None:
 def _finite_nonnegative(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
     return number if math.isfinite(number) and number >= 0 else None
 
 
