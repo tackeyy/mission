@@ -70,7 +70,7 @@ def test_strict_preflight_allows_initialized_skills_only_start(tmp_path, run_cli
     assert payload["next_action"] == "run-planner"
 
 
-def test_codex_contract_requires_strict_preflight_before_setup_and_final():
+def test_codex_contract_requires_strict_preflight_before_setup_and_terminal_gate_before_final():
     skill = (REPO_ROOT / "skills/mission/SKILL.md").read_text(encoding="utf-8")
     setup = (REPO_ROOT / "skills/mission/refs/codex-setup.md").read_text(encoding="utf-8")
 
@@ -84,4 +84,6 @@ def test_codex_contract_requires_strict_preflight_before_setup_and_final():
     assert "exit 0" in start
     assert "worktree" in start
     assert "final" in start
-    assert "mission-state.py next" in start
+    assert "mission-state.py next" in setup
+    assert "report-complete" in setup
+    assert "report-blocker" in setup
