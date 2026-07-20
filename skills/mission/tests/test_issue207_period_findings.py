@@ -60,6 +60,15 @@ def _load_finding_lib():
     return module
 
 
+def _load_audit_module():
+    spec = importlib.util.spec_from_file_location("mission_audit_issue207", AUDIT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_period_classifier_handles_boundary_timezone_and_invalid_timestamps():
     findings = _load_finding_lib()
     cutoff = datetime(2026, 7, 20, 0, 0, tzinfo=timezone.utc)
@@ -71,6 +80,18 @@ def test_period_classifier_handles_boundary_timezone_and_invalid_timestamps():
     assert findings.classify_finding_period("2026-07-20T09:00:00+09:00", cutoff) == "current"
     assert findings.classify_finding_period("2026-07-20T00:00:00", cutoff) == "current"
     assert findings.classify_finding_period("not-a-timestamp", cutoff) == "current"
+
+
+def test_shared_cutoff_parser_handles_date_offset_boundary_and_upper_bound():
+    findings = _load_finding_lib()
+
+    assert findings.parse_audit_cutoff("2026-07-20").isoformat() == "2026-07-20T00:00:00+00:00"
+    assert findings.parse_audit_cutoff("2026-07-20", upper=True).isoformat() == "2026-07-20T23:59:59.999999+00:00"
+    assert findings.parse_audit_cutoff("2026-07-20T09:00:00+09:00").isoformat() == "2026-07-20T00:00:00+00:00"
+    cutoff = findings.parse_audit_cutoff("2026-07-20T00:00:00Z")
+    assert findings.classify_finding_period("2026-07-19T23:59:59.999999Z", cutoff) == "historical"
+    assert findings.classify_finding_period("2026-07-20T00:00:00Z", cutoff) == "current"
+    assert findings.classify_finding_period("2026-07-20T00:00:00.000001Z", cutoff) == "current"
 
 
 def test_forced_pass_and_specialist_provenance_share_period_partition(tmp_path: Path):
@@ -138,7 +159,9 @@ def test_json_period_counts_preserve_all_findings(tmp_path: Path):
     assert set(data["current_findings_by_code"]) | set(data["historical_findings_by_code"]) == set(data["all_findings_by_code"])
     for code, total in data["all_finding_code_counts"].items():
         assert data["current_finding_code_counts"].get(code, 0) + data["historical_finding_code_counts"].get(code, 0) == total
-        assert len(data["all_findings_by_code"][code]) == total
+        index = data["all_findings_by_code"][code]
+        assert index["count"] == total
+        assert len(index["indexes"]) == total
 
 
 def test_markdown_lists_current_before_historical_and_keeps_severity(tmp_path: Path):
@@ -219,3 +242,130 @@ def test_historical_risk_does_not_enter_current_improvement_prompt(tmp_path: Pat
 
     assert "forced-pass" not in result.stdout
     assert "historical-fixed-debt" not in result.stdout
+
+
+def test_markdown_historical_summary_is_derived_from_generic_findings(tmp_path: Path):
+    _write_state(
+        tmp_path,
+        "old-force",
+        "2026-07-19T23:59:59Z",
+        passes_forced=True,
+        force_reason="provider unavailable",
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(AUDIT),
+            "--root",
+            str(tmp_path),
+            "--current-since",
+            "2026-07-20T00:00:00Z",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    historical = result.stdout[result.stdout.index("## Historical Risks"):]
+    assert "- P0: 1" in historical
+    assert "- P1: 1" in historical
+    assert "`forced-pass` (P1): 1" in historical
+    assert "`forced-pass-autonomous-suspect` (P0): 1" in historical
+    assert "## Historical Audit Debt" not in result.stdout
+
+
+def test_checkpoint_and_unselected_provenance_use_updated_at_cutoff(tmp_path: Path):
+    for session_id, updated_at in (
+        ("before", "2026-07-19T23:59:59.999999Z"),
+        ("equal", "2026-07-20T00:00:00Z"),
+        ("after", "2026-07-20T00:00:00.000001Z"),
+    ):
+        _write_state(
+            tmp_path,
+            session_id,
+            updated_at,
+            complexity="Standard",
+            created_at_session="2026-07-01T00:00:00Z",
+            passes_forced=True,
+            force_reason="user approved",
+            force_approved_by_user=True,
+            specialists_selected=[],
+            specialist_invocations=[
+                {
+                    "role": "review",
+                    "skill": "review-provider",
+                    "status": "inline-applied",
+                    "mode": "codex-inline",
+                    "iteration": 1,
+                }
+            ],
+        )
+
+    data = _audit(tmp_path, "--current-since", "2026-07-20T00:00:00Z")
+    for code in ("missing-specialist-selection-checkpoint", "unselected-specialist-invocation"):
+        assert {item["session_id"] for item in data["current_findings"] if item["code"] == code} == {"equal", "after"}
+        assert {item["session_id"] for item in data["historical_findings"] if item["code"] == code} == {"before"}
+
+
+def test_all_finding_specs_are_registry_wired_and_priority_sorted(tmp_path: Path):
+    audit = _load_audit_module()
+
+    assert len(audit.FINDING_SPECS) == 20
+    assert all(spec.source_key for spec in audit.FINDING_SPECS.values())
+    assert all(spec.source_kind for spec in audit.FINDING_SPECS.values())
+    assert all(spec.item_summary for spec in audit.FINDING_SPECS.values())
+    assert all(spec.aggregate_summary for spec in audit.FINDING_SPECS.values())
+
+    _write_state(
+        tmp_path,
+        "force",
+        "2026-07-20T00:00:00Z",
+        passes_forced=True,
+        force_reason="provider unavailable",
+    )
+    data = _audit(tmp_path, "--current-since", "2026-07-20T00:00:00Z")
+    rank = {"P0": 0, "P1": 1, "P2": 2}
+    priorities = [rank[item["priority"]] for item in data["current_findings"]]
+    assert priorities == sorted(priorities)
+    row_priorities = [rank[item["priority"]] for item in data["findings"] if item["priority"] in rank]
+    assert row_priorities == sorted(row_priorities)
+
+
+def test_period_indexes_stay_compact_relative_to_canonical_lists(tmp_path: Path):
+    for index in range(8):
+        _write_state(
+            tmp_path,
+            f"force-{index}",
+            f"2026-07-20T00:00:{index:02d}Z",
+            passes_forced=True,
+            force_reason="provider unavailable " + ("x" * 200),
+        )
+    result = subprocess.run(
+        [sys.executable, str(AUDIT), "--root", str(tmp_path), "--current-since", "2026-07-20", "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    baseline = {
+        key: value
+        for key, value in data.items()
+        if key not in {
+            "all_findings",
+            "current_findings",
+            "historical_findings",
+            "all_finding_counts",
+            "current_finding_counts",
+            "historical_finding_counts",
+            "all_finding_code_counts",
+            "current_finding_code_counts",
+            "historical_finding_code_counts",
+            "all_findings_by_code",
+            "current_findings_by_code",
+            "historical_findings_by_code",
+        }
+    }
+    compact_size = len(json.dumps(data, ensure_ascii=False))
+    baseline_size = len(json.dumps(baseline, ensure_ascii=False))
+    assert compact_size < baseline_size * 2.5
+    assert len(json.dumps(data["all_findings_by_code"])) < len(json.dumps(data["all_findings"]))
