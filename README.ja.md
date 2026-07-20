@@ -108,6 +108,8 @@ repository、[Claude Code `/goal` docs](https://code.claude.com/docs/ja/goal)、
 
 95% のパススルー多数のレビューオーバーヘッドを削減するため、`mission` は init 時に complexity とミッション記述から `review_tier`（light/standard/full）を導出します。light tier は reviewer を 3 名から 1 名に絞り、specialist の auto-select を `required: true` のみに限定します。ゲート意味論（threshold・open High findings・agreement delta・halt 条件）は tier によらず不変です。コスト削減効果は本番環境ではまだ計測されていません。
 
+実行後の監査では、`scripts/mission-audit.py --current-since <日付またはISO timestamp>` が検出済みriskを stateの `updated_at` で分類します。cutoffはUTCへ正規化した上で同値をcurrentとし、timestamp欠落・不正は安全側のcurrentに残します。JSON/Markdownはforced passとspecialist provenanceを含むcurrent P0/P1/P2をhistorical riskより先に表示し、両方を保持します。cutoff未指定時は全findingをcurrentとする従来の全期間表示です。このreport scopeはseverity、force approval gate、required specialist result gateを変更しません。
+
 `mission` を選ぶ理由は、監査可能な completion gate、open-world な作業でのテール保険、不可逆操作のガバナンス、resume 可能な state です — 平均品質の向上ではありません。
 
 ベンチマーク由来の主張は
