@@ -128,6 +128,59 @@ def test_global_non_operation_suppresses_all_candidates_in_the_logical_unit():
     assert {item["decision"] for item in _details(decision)} == {"suppressed"}
 
 
+def test_global_non_operation_does_not_leak_across_paragraph_or_list_item():
+    decision = _decision(
+        "deploy 手順を調査する。実操作は行わない\n\n- production へ deploy する"
+    )
+
+    deploy_details = [item for item in _details(decision) if item["keyword"] == "deploy"]
+    production = [item for item in _details(decision) if item["keyword"] == "production"]
+    assert decision["tier"] == "full"
+    assert [item["decision"] for item in deploy_details] == ["suppressed", "included"]
+    assert production and {item["decision"] for item in production} == {"included"}
+
+
+def test_quote_and_actual_execution_flags_are_independent_across_units():
+    decision = _decision(
+        "「deploy する」という文言を引用する\n\n- production へ deploy を実際に実行する"
+    )
+
+    deploy_details = [item for item in _details(decision) if item["keyword"] == "deploy"]
+    assert decision["tier"] == "full"
+    assert [item["decision"] for item in deploy_details] == ["suppressed", "included"]
+    assert [item["reason"] for item in deploy_details] == [
+        "quoted-non-operation",
+        "affirmative-actual-operation",
+    ]
+
+
+def test_quote_only_marker_does_not_leak_to_a_different_unit():
+    decision = _decision(
+        "手順書には「deploy する」と書かれている\n\n- 「release する」は引用するだけ"
+    )
+
+    deploy = [item for item in _details(decision) if item["keyword"] == "deploy"]
+    release = [item for item in _details(decision) if item["keyword"] == "release"]
+    assert deploy and deploy[0]["reason"] == "quoted-context-conservative"
+    assert release and release[0]["reason"] == "quoted-non-operation"
+
+
+def test_global_non_operation_double_negation_stays_conservative():
+    decision = _decision("deploy 手順を調査する。実操作は行わないわけではない")
+
+    assert decision["tier"] == "full"
+    assert "irreversible-keyword:deploy" in decision["signals"]
+    assert {item["decision"] for item in _details(decision)} == {"included"}
+
+
+def test_negated_exclusion_marker_stays_conservative():
+    decision = _decision("deploy は禁止ではない")
+
+    assert decision["tier"] == "full"
+    assert "irreversible-keyword:deploy" in decision["signals"]
+    assert any(item["reason"] == "uncertain-or-double-negation" for item in _details(decision))
+
+
 def test_every_occurrence_is_evaluated_when_same_keyword_has_mixed_intent():
     decision = _decision("deploy しないが、deploy する")
 
