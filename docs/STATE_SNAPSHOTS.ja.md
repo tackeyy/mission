@@ -67,3 +67,17 @@ snapshot は使用しないでください。
 archive semantic validation の重複です。freshness のためmetadata rewalk 1回は残します。
 filter-before-dedupeが正確性要件なので、期間filterとgroup構築もconsumerごとに残します。
 性能効果は代表fixtureのbenchmark結果だけで判断し、filesystem traversal全廃とは表現しません。
+
+最終 local benchmark は、80 project、660 state variant、640 evidence file、3,200 unrelated
+file の synthetic fixture を warm APFS 上で使用しました。2回 warmup 後、14回の AB/BA
+counterbalance run で、direct audit + direct stats 3期間と、snapshot-out audit + snapshot
+stats 3期間を比較しました。全 run で4つの JSON output は一致しました。direct median は
+0.4515秒（MAD 0.0028秒）、snapshot median は0.7039秒（MAD 0.0050秒）で、snapshot は
+1.56倍遅い結果でした。snapshot size は1,223,615 bytes、discovery entry は3,081件です。
+
+したがって、この release では end-to-end の速度改善を主張しません。実測上の価値は、live
+drift を拒否した再現可能な複数期間分析です。一方、regression counter により consumer が
+candidate load、state/evidence content の read/hash/parse、archive semantic validation を
+省略することは確認済みです。この benchmark は synthetic かつ warm-cache のため、cold disk や
+他 filesystem の挙動までは示しません。将来の速度改善候補は、freshness contract を弱めず、
+1回だけ validate して全 requested window を出力する single-process batch command です。

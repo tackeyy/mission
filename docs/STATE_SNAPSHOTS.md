@@ -76,3 +76,21 @@ metadata rewalk remains mandatory for freshness. Period filtering and group
 construction also remain per consumer because filter-before-dedupe is a
 correctness requirement. Performance claims must be based on a representative
 benchmark; the feature does not claim to eliminate filesystem traversal.
+
+The final local benchmark for this implementation used a synthetic fixture of
+80 projects, 660 state variants, 640 evidence files, and 3,200 unrelated files
+on a warm APFS filesystem. After two warmups, 14 counterbalanced AB/BA runs
+compared direct audit plus three direct stats windows with snapshot-out audit
+plus three snapshot stats windows. All four JSON outputs matched in every run.
+The direct median was 0.4515 s (MAD 0.0028 s); the snapshot median was 0.7039 s
+(MAD 0.0050 s), or 1.56x slower. The snapshot was 1,223,615 bytes and represented
+3,081 discovery entries.
+
+Therefore this release does not claim an end-to-end speed improvement. Its
+measured benefit is reproducible multi-window analysis with live-drift rejection,
+while regression counters confirm that consumers skip candidate loading, state
+and evidence content reads/hashes/parses, and archive semantic validation. The
+benchmark is synthetic and warm-cache, so it does not establish cold-disk or
+other-filesystem behavior. A future speed-oriented design should evaluate a
+single-process batch command that validates once and emits all requested windows,
+without weakening the freshness contract.
