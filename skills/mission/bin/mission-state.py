@@ -752,6 +752,236 @@ _SECURITY_KEYWORDS_EN = (
 _SECURITY_KEYWORDS_JA = ("認証", "秘密", "鍵")
 
 
+_REVIEW_CONTEXT_BOUNDARY_RE = re.compile(
+    r"[。.!！?？;；\n]+|が[、,]\s*|\bbut\b|\bhowever\b",
+    re.IGNORECASE,
+)
+_REVIEW_DOUBLE_NEGATION_RE = re.compile(
+    r"しないわけではない|しないとは限らない|なくはない|"
+    r"\bnot\s+impossible\b|\bnot\s+never\b|\bcannot\s+rule\s+out\b",
+    re.IGNORECASE,
+)
+_REVIEW_CONDITIONAL_RE = re.compile(
+    r"必要なら|必要な場合|場合|可能なら|可能性|かもしれ|未確定|検討中|するか|し得|あり得|"
+    r"\bonly\s+if\b|\bif\b|\bmay\b|\bmight\b|\bcould\b|\bpossibly\b|\bwhether\b|"
+    r"\bwithout\s+(?:approval|authorization|permission)\b",
+    re.IGNORECASE,
+)
+_REVIEW_NEGATION_RE = re.compile(
+    r"実行しない|実施しない|行わない|行いません|しない方針|しない|しません|せず|行わず|禁止|対象外|"
+    r"\b(?:do|does|did|will|would|should|must|can|could)\s+not\b|"
+    r"\bdon['’]t\b|\bnot\s+(?:be\s+)?(?:perform(?:ed)?|execut(?:e|ed)|deploy(?:ed)?|releas(?:e|ed)|publish(?:ed)?)\b|"
+    r"\b(?:is|are|was|were)\s+out\s+of\s+scope\b|\bout\s+of\s+scope\b",
+    re.IGNORECASE,
+)
+_REVIEW_GLOBAL_NON_OPERATION_RE = re.compile(
+    r"実操作\s*(?:は|を)?\s*(?:行わない|実行しない|しない)|"
+    r"\bactual\s+(?:operation|execution)s?\s+(?:will\s+)?not\s+(?:be\s+)?(?:performed|executed)\b|"
+    r"\bno\s+actual\s+(?:operation|execution)s?\b",
+    re.IGNORECASE,
+)
+_REVIEW_EXPLICIT_EXECUTION_RE = re.compile(
+    r"実際に実行する|実操作\s*(?:は|を)?\s*行う|実行に移す|"
+    r"\bactually\s+(?:execute|deploy|release|publish)\b",
+    re.IGNORECASE,
+)
+_REVIEW_QUOTE_ONLY_RE = re.compile(
+    r"引用(?:する|のみ|だけ)|引用するだけ|\bquote(?:d|s|ing)?\s+only\b|\bonly\s+quot(?:e|ed|ing)\b",
+    re.IGNORECASE,
+)
+
+
+def _review_keyword_matches(text: str, keyword: str, *, ignore_case: bool) -> list[re.Match]:
+    """Return every literal keyword occurrence in source order."""
+    flags = re.IGNORECASE if ignore_case else 0
+    return list(re.finditer(re.escape(keyword), text, flags))
+
+
+def _review_logical_context(text: str, start: int, end: int) -> tuple[int, int, str]:
+    """Bound context to one sentence/contrast clause so distant negation cannot leak."""
+    context_start = 0
+    context_end = len(text)
+    for boundary in _REVIEW_CONTEXT_BOUNDARY_RE.finditer(text):
+        if boundary.end() <= start:
+            context_start = boundary.end()
+            continue
+        if boundary.start() >= end:
+            context_end = boundary.start()
+            break
+    return context_start, context_end, text[context_start:context_end].strip()
+
+
+def _review_audit_context(text: str, start: int, end: int, *, radius: int = 80) -> str:
+    """Keep persisted provenance readable and bounded for long mission descriptions."""
+    left = max(0, start - radius)
+    right = min(len(text), end + radius)
+    prefix = "…" if left else ""
+    suffix = "…" if right < len(text) else ""
+    return f"{prefix}{text[left:right].strip()}{suffix}"
+
+
+def _review_match_is_quoted(text: str, start: int) -> bool:
+    """Detect common paired quote delimiters around a keyword occurrence."""
+    for opening, closing in (("「", "」"), ("『", "』"), ("`", "`"), ('"', '"')):
+        if opening == closing:
+            if text[:start].count(opening) % 2 == 1:
+                return True
+            continue
+        if text.rfind(opening, 0, start) > text.rfind(closing, 0, start):
+            return True
+    return False
+
+
+def _review_negation_is_near(context: str, relative_start: int, relative_end: int) -> bool:
+    """Accept only an explicit negation close to the matched operation (Issue #209)."""
+    for negation in _REVIEW_NEGATION_RE.finditer(context):
+        gap = max(0, relative_start - negation.end(), negation.start() - relative_end)
+        if gap <= 48:
+            return True
+    return False
+
+
+def _actual_operation_signal_detail(
+    mission_text: str,
+    keyword: str,
+    match: re.Match,
+    signal: str,
+    *,
+    global_non_operation: bool,
+    explicit_execution: bool,
+) -> dict:
+    start, end = match.span()
+    context_start, _, logical_context = _review_logical_context(mission_text, start, end)
+    relative_start = start - context_start
+    relative_end = end - context_start
+    quoted = _review_match_is_quoted(mission_text, start)
+
+    if quoted and explicit_execution:
+        decision, reason = "included", "affirmative-actual-operation"
+    elif quoted and _REVIEW_QUOTE_ONLY_RE.search(mission_text):
+        decision, reason = "suppressed", "quoted-non-operation"
+    elif quoted:
+        decision, reason = "included", "quoted-context-conservative"
+    elif _REVIEW_DOUBLE_NEGATION_RE.search(logical_context):
+        decision, reason = "included", "uncertain-or-double-negation"
+    elif _REVIEW_CONDITIONAL_RE.search(logical_context):
+        decision, reason = "included", "conditional-or-uncertain-context"
+    elif _review_negation_is_near(logical_context, relative_start, relative_end):
+        decision, reason = "suppressed", "negated-actual-operation"
+    elif global_non_operation:
+        decision, reason = "suppressed", "global-explicit-non-operation"
+    else:
+        decision, reason = "included", "affirmative-actual-operation"
+
+    return {
+        "signal": signal,
+        "category": "actual-operation",
+        "keyword": keyword,
+        "match": match.group(0),
+        "context": _review_audit_context(mission_text, start, end),
+        "decision": decision,
+        "reason": reason,
+        "source": "mission_text",
+        "start": start,
+        "end": end,
+    }
+
+
+def _conservative_signal_detail(
+    mission_text: str,
+    keyword: str,
+    match: re.Match,
+    signal: str,
+) -> dict:
+    start, end = match.span()
+    return {
+        "signal": signal,
+        "category": "security",
+        "keyword": keyword,
+        "match": match.group(0),
+        "context": _review_audit_context(mission_text, start, end),
+        "decision": "included",
+        "reason": "security-context-conservative",
+        "source": "mission_text",
+        "start": start,
+        "end": end,
+    }
+
+
+def derive_review_tier_decision(
+    mission_text: str,
+    complexity: str | None,
+    task_profile_risk: str | None = None,
+) -> dict:
+    """Derive tier plus additive per-occurrence decision provenance (Issue #209)."""
+    base_tier = REVIEW_TIER_BASE.get(complexity or "", "standard")
+    signals: list[str] = []
+    signal_details: list[dict] = []
+
+    if task_profile_risk == "high":
+        signal = "task_profile.risk=high"
+        signals.append(signal)
+        signal_details.append({
+            "signal": signal,
+            "category": "task-profile-risk",
+            "keyword": "high",
+            "match": "high",
+            "context": "task_profile.risk=high",
+            "decision": "included",
+            "reason": "task-profile-high-risk",
+            "source": "task_profile.risk",
+            "start": None,
+            "end": None,
+        })
+
+    global_non_operation = bool(_REVIEW_GLOBAL_NON_OPERATION_RE.search(mission_text))
+    explicit_execution = bool(_REVIEW_EXPLICIT_EXECUTION_RE.search(mission_text))
+
+    for keywords, ignore_case in (
+        (_IRREVERSIBLE_KEYWORDS_EN, True),
+        (_IRREVERSIBLE_KEYWORDS_JA, False),
+    ):
+        for keyword in keywords:
+            signal = f"irreversible-keyword:{keyword}"
+            details = [
+                _actual_operation_signal_detail(
+                    mission_text,
+                    keyword,
+                    match,
+                    signal,
+                    global_non_operation=global_non_operation,
+                    explicit_execution=explicit_execution,
+                )
+                for match in _review_keyword_matches(mission_text, keyword, ignore_case=ignore_case)
+            ]
+            signal_details.extend(details)
+            if any(item["decision"] == "included" for item in details):
+                signals.append(signal)
+
+    for keywords, ignore_case in (
+        (_SECURITY_KEYWORDS_EN, True),
+        (_SECURITY_KEYWORDS_JA, False),
+    ):
+        for keyword in keywords:
+            signal = f"security-keyword:{keyword}"
+            matches = _review_keyword_matches(mission_text, keyword, ignore_case=ignore_case)
+            signal_details.extend(
+                _conservative_signal_detail(mission_text, keyword, match, signal)
+                for match in matches
+            )
+            if matches:
+                signals.append(signal)
+
+    tier = "full" if signals and base_tier != "full" else base_tier
+    return {
+        "mission_text": mission_text,
+        "base_tier": base_tier,
+        "tier": tier,
+        "signals": signals,
+        "signal_details": signal_details,
+    }
+
+
 def derive_review_tier(
     mission_text: str,
     complexity: str | None,
@@ -770,41 +1000,8 @@ def derive_review_tier(
     Returns:
         (tier, signals): tier は "light"/"standard"/"full"、signals はエスカレータ理由リスト
     """
-    base_tier = REVIEW_TIER_BASE.get(complexity or "", "standard")
-    signals: list[str] = []
-
-    # エスカレータ: task_profile.risk=high
-    if task_profile_risk == "high":
-        signals.append("task_profile.risk=high")
-
-    # エスカレータ: 不可逆系英語キーワード (小文字化して部分一致)
-    lowered = mission_text.lower()
-    for kw in _IRREVERSIBLE_KEYWORDS_EN:
-        if kw in lowered:
-            signals.append(f"irreversible-keyword:{kw}")
-
-    # エスカレータ: 不可逆系日本語キーワード (そのまま部分一致)
-    for kw in _IRREVERSIBLE_KEYWORDS_JA:
-        if kw in mission_text:
-            signals.append(f"irreversible-keyword:{kw}")
-
-    # エスカレータ: セキュリティ系英語キーワード (小文字化して部分一致)
-    for kw in _SECURITY_KEYWORDS_EN:
-        if kw in lowered:
-            signals.append(f"security-keyword:{kw}")
-
-    # エスカレータ: セキュリティ系日本語キーワード (そのまま部分一致)
-    for kw in _SECURITY_KEYWORDS_JA:
-        if kw in mission_text:
-            signals.append(f"security-keyword:{kw}")
-
-    # エスカレータ該当 → "full" に昇格 (降格はしない)
-    if signals and base_tier != "full":
-        tier = "full"
-    else:
-        tier = base_tier
-
-    return tier, signals
+    decision = derive_review_tier_decision(mission_text, complexity, task_profile_risk)
+    return decision["tier"], decision["signals"]
 
 
 def _parse_files_arg(files: str | None) -> list[str]:
@@ -3064,16 +3261,18 @@ def cmd_init(args):
         initial["review_tier"] = _user_tier
         initial["review_tier_source"] = "user"
         initial["review_tier_signals"] = []
+        initial["review_tier_signal_details"] = []
     else:
         # auto 導出: mission 記述と complexity、task_profile の risk を使用
         # (init 時点では task_profile は空 dict のため risk は参照しない)
-        _auto_tier, _auto_signals = derive_review_tier(
+        _auto_decision = derive_review_tier_decision(
             args.mission,
             initial.get("complexity"),
         )
-        initial["review_tier"] = _auto_tier
+        initial["review_tier"] = _auto_decision["tier"]
         initial["review_tier_source"] = "auto"
-        initial["review_tier_signals"] = _auto_signals
+        initial["review_tier_signals"] = _auto_decision["signals"]
+        initial["review_tier_signal_details"] = _auto_decision["signal_details"]
     # reviewer_count は review_tier から設定 (COMPLEXITY_REVIEWER_COUNT と同値になる設計)
     initial["reviewer_count"] = TIER_REVIEWER_COUNT[initial["review_tier"]]
     initial = stamp_metadata(initial, cwd)
@@ -3594,10 +3793,12 @@ def cmd_set(args):
                 cx = data.get("complexity")
                 _mission = data.get("mission", "")
                 _risk = (data.get("task_profile") or {}).get("risk")
-                _new_tier, _new_signals = derive_review_tier(_mission, cx, _risk)
+                _new_decision = derive_review_tier_decision(_mission, cx, _risk)
+                _new_tier = _new_decision["tier"]
                 data["review_tier"] = _new_tier
                 data["review_tier_source"] = "auto"
-                data["review_tier_signals"] = _new_signals
+                data["review_tier_signals"] = _new_decision["signals"]
+                data["review_tier_signal_details"] = _new_decision["signal_details"]
                 if "reviewer_count" not in explicit_keys:
                     data["reviewer_count"] = TIER_REVIEWER_COUNT[_new_tier]
         elif "review_tier" in explicit_keys and "reviewer_count" not in explicit_keys:
