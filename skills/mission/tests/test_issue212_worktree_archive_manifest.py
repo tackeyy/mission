@@ -269,6 +269,34 @@ def test_archived_bundle_survives_worktree_removal_without_missing_scoring(tmp_p
     assert data["duplicate_group_count"] == 0
 
 
+def test_audit_resolves_specialist_evidence_from_generation_manifest_after_source_removal(
+    tmp_path, run_cli
+):
+    worktree, destination = _make_completed_worktree(tmp_path)
+    state_path = worktree / ".mission-state" / "sessions" / f"{SESSION_ID}.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["specialist_invocations"][0]["mode"] = "command-provider"
+    state_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    specialist_path = worktree / state["specialist_invocations"][0]["evidence_path"]
+    specialist_path.write_text(
+        "# Oracle Browser Review Prepared\n\n"
+        "To capture the review as command-provider output, rerun the provider.\n",
+        encoding="utf-8",
+    )
+    result = _archive(run_cli, worktree, destination)
+    assert result.returncode == 0, result.stderr
+    shutil.rmtree(worktree)
+
+    data = _run_audit(destination)
+
+    assert data["invalid_worktree_archive_count"] == 0
+    assert data["preparation_only_completed_provider_count"] == 1
+    item = data["preparation_only_completed_providers"][0]
+    assert item["session_id"] == SESSION_ID
+    assert item["bad_entries"][0]["skill"] == "neutral-specialist"
+    assert "Oracle Browser Review Prepared" in item["bad_entries"][0]["evidence"][0]["markers"]
+
+
 def test_audit_uses_valid_manifest_for_noncanonical_scoring_path(tmp_path, run_cli):
     worktree, destination = _make_completed_worktree(tmp_path)
     result = _archive(run_cli, worktree, destination)
@@ -386,6 +414,35 @@ def test_audit_rejects_symlinked_archive_ancestors_without_reading_outside_root(
     codes = {finding["code"] for finding in data["findings"]}
     assert "invalid-worktree-archive" in codes
     assert "no-critical-findings" not in codes
+
+
+def test_audit_deduplicates_invalid_bundle_across_overlapping_roots(tmp_path, run_cli):
+    worktree, destination = _make_completed_worktree(tmp_path)
+    result = _archive(run_cli, worktree, destination)
+    assert result.returncode == 0, result.stderr
+    bundle = Path(json.loads(result.stdout)["bundle_path"])
+    (bundle / "current.json").write_text("{not-json\n", encoding="utf-8")
+
+    audit = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(destination),
+            "--root",
+            str(destination / ".mission-state"),
+            "--since",
+            "2026-07-20",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(audit.stdout)
+
+    assert data["invalid_worktree_archive_count"] == 1
+    assert data["invalid_worktree_archives"][0]["bundle_path"] == str(bundle)
 
 
 @pytest.mark.parametrize(
