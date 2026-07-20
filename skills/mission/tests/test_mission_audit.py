@@ -533,6 +533,7 @@ def test_audit_pass_rate_excludes_active_no_score_sessions(tmp_path):
         capture_output=True,
         text=True,
         check=True,
+        env={**os.environ, "MISSION_AUDIT_NOW": "2026-06-18T00:15:00Z"},
     )
 
     data = json.loads(result.stdout)

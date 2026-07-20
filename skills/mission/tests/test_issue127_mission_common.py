@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -52,3 +53,49 @@ def test_preparation_markers_use_audit_superset():
     assert state_mod.PREPARATION_ONLY_MARKERS == audit_mod.PREPARATION_ONLY_MARKERS
     assert "Prompt file:" in state_mod.PREPARATION_ONLY_MARKERS
     assert "Review URL:" in state_mod.PREPARATION_ONLY_MARKERS
+
+
+def test_shared_pass_rate_health_is_exclusive_and_fails_stale_closed():
+    state_mod = _load(MISSION_STATE_PY, "mission_state_issue208_health")
+    now = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
+    states = [
+        {"passes": True, "loop_active": False, "updated_at": "2026-07-21T11:59:00Z"},
+        {"passes": False, "loop_active": False, "halt_reason": "blocked", "updated_at": "2026-07-21T11:59:00Z"},
+        {"passes": False, "loop_active": False, "halt_reason": "", "updated_at": "2026-07-21T11:59:00Z"},
+        {
+            "passes": False,
+            "loop_active": True,
+            "halt_reason": "",
+            "score_history": [{"composite": 4.0}],
+            "updated_at": "2026-07-21T11:59:00+00:00",
+        },
+        {
+            "passes": False,
+            "loop_active": True,
+            "halt_reason": "",
+            "score_history": [{"composite": float("inf")}],
+            "updated_at": "2026-07-21T11:59:00",
+        },
+        {
+            "passes": False,
+            "loop_active": True,
+            "halt_reason": "",
+            "score_history": [],
+            "updated_at": "malformed",
+        },
+    ]
+
+    summary = state_mod.summarize_pass_rate_population(
+        states,
+        now=now,
+        stale_after_sec=3600,
+    )
+
+    assert summary["health_classes"] == [
+        "pass", "halt", "abandoned", "active", "active-no-score", "stale"
+    ]
+    assert summary["incomplete_count"] == 3
+    assert summary["raw_pass_rate_numerator"] == 1
+    assert summary["raw_pass_rate_denominator"] == 6
+    assert summary["completed_pass_rate_numerator"] == 1
+    assert summary["completed_pass_rate_denominator"] == 4

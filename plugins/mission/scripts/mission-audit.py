@@ -32,11 +32,14 @@ from mission_common import (  # noqa: E402
     HALT_CATEGORIES,
     PREPARATION_ONLY_MARKERS,
     SPECIALIST_SELECTION_CHECKPOINT_REQUIRED_AT,
+    classify_pass_rate_health,
     classify_state as classify,
     duration_sec,
+    has_scoring_checkpoint,
     parse_iso_datetime,
     state_dedupe_rank,
     state_identity,
+    summarize_pass_rate_population,
 )
 from specialist_accounting import (  # noqa: E402
     applied_specialist_invocation_skills,
@@ -1189,7 +1192,12 @@ def is_forced_pass_autonomous_suspect(state: dict[str, Any]) -> bool:
 
 def is_active_no_score_checkpoint(record: StateRecord) -> bool:
     """Return true for live mission sessions that have not reached first scoring."""
-    return classify(record.state) == "incomplete" and not record.state.get("score_history")
+    health = classify_pass_rate_health(
+        record.state,
+        now=utc_now(),
+        stale_after_sec=stale_active_threshold_sec(),
+    )
+    return health in {"active-no-score", "stale"} and not has_scoring_checkpoint(record.state)
 
 
 def active_pending_threshold_sec() -> int:
@@ -1208,10 +1216,14 @@ def is_active_no_score_pending(record: StateRecord, *, now: datetime | None = No
 
 
 def is_stale_active_no_score(record: StateRecord, *, now: datetime | None = None) -> bool:
-    if not is_active_no_score_checkpoint(record):
-        return False
-    age = age_since_update_sec(record.state, now=now)
-    return age is None or age >= stale_active_threshold_sec()
+    return (
+        not has_scoring_checkpoint(record.state)
+        and classify_pass_rate_health(
+            record.state,
+            now=now or utc_now(),
+            stale_after_sec=stale_active_threshold_sec(),
+        ) == "stale"
+    )
 
 
 def slow_session_bucket(record: StateRecord, slow_threshold_sec: int) -> str:
@@ -1705,10 +1717,14 @@ def aggregate(
 ) -> dict[str, Any]:
     invalid_worktree_archives = invalid_worktree_archives or []
     classes = [classify(r.state) for r in records]
+    pass_rate_summary = summarize_pass_rate_population(
+        [record.state for record in records],
+        now=utc_now(),
+        stale_after_sec=stale_active_threshold_sec(),
+    )
     active_no_score_checkpoint = [r for r in records if is_active_no_score_checkpoint(r)]
     active_no_score_pending = [r for r in active_no_score_checkpoint if is_active_no_score_pending(r)]
     stale_active_no_score = [r for r in active_no_score_checkpoint if is_stale_active_no_score(r)]
-    pass_rate_records = [r for r in records if not is_active_no_score_checkpoint(r)]
     durations = [d for r in records if (d := duration_sec(r.state)) is not None]
     composites = [
         entry["composite"]
@@ -1824,16 +1840,27 @@ def aggregate(
         "invalid_worktree_archives": invalid_worktree_archives,
         "invalid_worktree_archive_count": len(invalid_worktree_archives),
         "pass_count": pass_count,
-        "halt_count": classes.count("halt"),
-        "incomplete_count": classes.count("incomplete"),
-        "abandoned_count": classes.count("abandoned"),
+        "halt_count": pass_rate_summary["halt_count"],
+        "incomplete_count": pass_rate_summary["incomplete_count"],
+        "abandoned_count": pass_rate_summary["abandoned_count"],
+        "active_count": pass_rate_summary["active_count"],
+        "active_no_score_count": pass_rate_summary["active_no_score_count"],
+        "stale_count": pass_rate_summary["stale_count"],
         "active_no_score_checkpoint_count": len(active_no_score_checkpoint),
         "active_no_score_pending_sessions": active_no_score_pending,
         "active_no_score_pending_count": len(active_no_score_pending),
         "stale_active_no_score_sessions": stale_active_no_score,
         "stale_active_no_score_count": len(stale_active_no_score),
-        "pass_rate_denominator": len(pass_rate_records),
-        "pass_rate": pass_count / len(pass_rate_records) if pass_rate_records else None,
+        "raw_pass_rate_numerator": pass_rate_summary["raw_pass_rate_numerator"],
+        "raw_pass_rate_denominator": pass_rate_summary["raw_pass_rate_denominator"],
+        "raw_pass_rate": pass_rate_summary["raw_pass_rate"],
+        "completed_pass_rate_numerator": pass_rate_summary["completed_pass_rate_numerator"],
+        "completed_pass_rate_denominator": pass_rate_summary["completed_pass_rate_denominator"],
+        "completed_pass_rate": pass_rate_summary["completed_pass_rate"],
+        # Deprecated compatibility aliases: audit historically reported completed quality.
+        "pass_rate_numerator": pass_rate_summary["completed_pass_rate_numerator"],
+        "pass_rate_denominator": pass_rate_summary["completed_pass_rate_denominator"],
+        "pass_rate": pass_rate_summary["completed_pass_rate"],
         "forced_pass_count": len(forced),
         "forced_pass_autonomous_suspect_count": len(forced_autonomous_suspect),  # #185
         "ungated_pass_count": len(ungated),
@@ -2181,7 +2208,9 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
         f"- total sessions: {stats['total_sessions']}",
         f"- current finding cutoff: {stats['current_since'] or '(not set; all findings are treated as current)'}",
         f"- pass / halt / incomplete / abandoned: {stats['pass_count']} / {stats['halt_count']} / {stats['incomplete_count']} / {stats['abandoned_count']}",
-        f"- pass rate: {fmt_float(stats['pass_rate'] * 100 if stats['pass_rate'] is not None else None, 1)}% (denominator: {stats['pass_rate_denominator']})",
+        f"- raw pass rate: {fmt_float(stats['raw_pass_rate'] * 100 if stats['raw_pass_rate'] is not None else None, 1)}% ({stats['raw_pass_rate_numerator']}/{stats['raw_pass_rate_denominator']})",
+        f"- completed pass rate: {fmt_float(stats['completed_pass_rate'] * 100 if stats['completed_pass_rate'] is not None else None, 1)}% ({stats['completed_pass_rate_numerator']}/{stats['completed_pass_rate_denominator']})",
+        f"- health counts (active / active-no-score / stale / halt / abandoned): {stats['active_count']} / {stats['active_no_score_count']} / {stats['stale_count']} / {stats['halt_count']} / {stats['abandoned_count']}",
         f"- active no-score checkpoints excluded from pass rate: {stats['active_no_score_checkpoint_count']}",
         f"- active no-score pending: {stats['active_no_score_pending_count']}",
         f"- stale active no-score: {stats['stale_active_no_score_count']}",

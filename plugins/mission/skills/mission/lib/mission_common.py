@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,107 @@ def classify_state(state: dict[str, Any]) -> str:
     if not state.get("loop_active"):
         return "abandoned"
     return "incomplete"
+
+
+PASS_RATE_HEALTH_CLASSES = (
+    "pass",
+    "halt",
+    "abandoned",
+    "active",
+    "active-no-score",
+    "stale",
+)
+
+
+def state_age_since_update_sec(
+    state: dict[str, Any], *, now: datetime | None = None
+) -> float | None:
+    """Return non-negative age from the best progress timestamp, normalized to UTC."""
+    updated = parse_iso_datetime(
+        state.get("heartbeat_at") or state.get("last_progress_at") or state.get("updated_at")
+    )
+    if updated is None:
+        return None
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc)
+    base = now or datetime.now(timezone.utc)
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=timezone.utc)
+    seconds = (base.astimezone(timezone.utc) - updated.astimezone(timezone.utc)).total_seconds()
+    return seconds if math.isfinite(seconds) and seconds >= 0 else None
+
+
+def has_scoring_checkpoint(state: dict[str, Any]) -> bool:
+    """Return true only when score history contains a finite numeric composite."""
+    history = state.get("score_history")
+    if not isinstance(history, list):
+        return False
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        composite = entry.get("composite")
+        if (
+            isinstance(composite, (int, float))
+            and not isinstance(composite, bool)
+            and math.isfinite(float(composite))
+        ):
+            return True
+    return False
+
+
+def classify_pass_rate_health(
+    state: dict[str, Any],
+    *,
+    now: datetime | None = None,
+    stale_after_sec: int,
+) -> str:
+    """Classify one session into an exclusive pass-rate/health population.
+
+    Fresh active sessions are not completed. A stale active session is actionable
+    completed health debt so it cannot disappear from the quality denominator.
+    Missing, malformed, or future progress timestamps fail closed as stale.
+    """
+    terminal = classify_state(state)
+    if terminal != "incomplete":
+        return terminal
+    age = state_age_since_update_sec(state, now=now)
+    if age is None or age >= max(0, stale_after_sec):
+        return "stale"
+    return "active" if has_scoring_checkpoint(state) else "active-no-score"
+
+
+def summarize_pass_rate_population(
+    states: list[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+    stale_after_sec: int,
+) -> dict[str, Any]:
+    """Return shared raw/completed rates and exclusive session health counts."""
+    health_classes = [
+        classify_pass_rate_health(state, now=now, stale_after_sec=stale_after_sec)
+        for state in states
+    ]
+    counts = {name: health_classes.count(name) for name in PASS_RATE_HEALTH_CLASSES}
+    raw_denominator = len(states)
+    completed_denominator = sum(
+        counts[name] for name in ("pass", "halt", "abandoned", "stale")
+    )
+    pass_count = counts["pass"]
+    return {
+        "health_classes": health_classes,
+        "raw_pass_rate_numerator": pass_count,
+        "raw_pass_rate_denominator": raw_denominator,
+        "raw_pass_rate": pass_count / raw_denominator if raw_denominator else None,
+        "completed_pass_rate_numerator": pass_count,
+        "completed_pass_rate_denominator": completed_denominator,
+        "completed_pass_rate": pass_count / completed_denominator if completed_denominator else None,
+        "active_count": counts["active"],
+        "active_no_score_count": counts["active-no-score"],
+        "stale_count": counts["stale"],
+        "halt_count": counts["halt"],
+        "abandoned_count": counts["abandoned"],
+        "incomplete_count": counts["active"] + counts["active-no-score"] + counts["stale"],
+    }
 
 
 def duration_sec(state: dict[str, Any]) -> float | None:
