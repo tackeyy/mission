@@ -44,6 +44,7 @@ from specialist_accounting import (  # noqa: E402
     selected_specialist_skills,
     terminal_invoked_specialist_skills,
 )
+from activity_segments import summarize_activity_states  # noqa: E402
 
 
 PRUNE_DIRS = {
@@ -1748,6 +1749,8 @@ def aggregate(
             row["total"] += 1
             row[cls] += 1
 
+    activity_timing = summarize_activity_states([record.state for record in records])
+
     return {
         "total_sessions": len(records),
         "invalid_worktree_archives": invalid_worktree_archives,
@@ -1851,6 +1854,7 @@ def aggregate(
         ),
         "by_project": by_project,
         "by_agent": by_agent,
+        "activity_timing": activity_timing,
         "current_since": current_since.isoformat() if current_since else None,
         "current_halt_sessions": current_halt_sessions,
         "current_halt_count": len(current_halt_sessions),
@@ -2106,10 +2110,32 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
         f"- avg final composite: {fmt_float(stats['avg_final_composite'])}",
         f"- median duration: {fmt_minutes(stats['median_session_duration_sec'])}",
         f"- avg duration: {fmt_minutes(stats['avg_session_duration_sec'])}",
-        "",
-        "## Findings",
-        "",
     ]
+    activity = stats.get("activity_timing") or {}
+    coverage = activity.get("coverage_ratio")
+    coverage_text = f"{coverage * 100:.1f}%" if coverage is not None else "-"
+    lines.extend([
+        "",
+        "## Activity Timing",
+        "",
+        f"- observed / unclassified: {fmt_minutes(activity.get('observed_total_sec'))} / "
+        f"{fmt_minutes(activity.get('unclassified_sec'))}",
+        f"- coverage: {coverage_text}",
+        f"- segments closed / open / invalid: {activity.get('closed_segment_count', 0)} / "
+        f"{activity.get('open_segment_count', 0)} / {activity.get('invalid_segment_count', 0)}",
+        f"- percentile method: `{activity.get('percentile_method', 'unknown')}`",
+    ])
+    for kind, seconds in sorted((activity.get("activity_duration_totals_sec") or {}).items()):
+        lines.append(f"- `{kind}`: {fmt_minutes(seconds)}")
+    for kind, reasons in sorted((activity.get("wait_reason_totals_sec") or {}).items()):
+        for reason, seconds in sorted(reasons.items()):
+            lines.append(f"- wait `{kind}/{reason}`: {fmt_minutes(seconds)}")
+    for phase, values in sorted((activity.get("phase_duration_percentiles_sec") or {}).items()):
+        lines.append(
+            f"- phase `{phase}`: p50 {fmt_minutes(values.get('p50'))}, "
+            f"p90 {fmt_minutes(values.get('p90'))} (n={values.get('count', 0)})"
+        )
+    lines.extend(["", "## Findings", ""])
     for priority, code, summary in rows:
         lines.append(f"- **{priority} `{code}`**: {summary}")
 

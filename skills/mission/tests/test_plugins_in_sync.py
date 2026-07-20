@@ -4,6 +4,7 @@
   scripts/mission-stop-guard.sh
   scripts/mission-audit.py
   skills/mission/bin/mission-state.py
+  skills/mission/lib/activity_segments.py
   skills/mission/refs/specialist-registry.md (存在する場合)
   skills/mission/refs/self-improvement.md
   skills/mission/refs/changelog.md
@@ -18,6 +19,7 @@
   plugins/mission/scripts/mission-stop-guard.sh
   plugins/mission/scripts/mission-audit.py
   plugins/mission/skills/mission/bin/mission-state.py
+  plugins/mission/skills/mission/lib/activity_segments.py
   plugins/mission/skills/mission/refs/specialist-registry.md (存在する場合)
   plugins/mission/skills/mission/refs/self-improvement.md
   plugins/mission/skills/mission/refs/changelog.md
@@ -32,6 +34,7 @@
   cp scripts/mission-stop-guard.sh        plugins/mission/scripts/mission-stop-guard.sh
   cp scripts/mission-audit.py             plugins/mission/scripts/mission-audit.py
   cp skills/mission/bin/mission-state.py  plugins/mission/skills/mission/bin/mission-state.py
+  cp skills/mission/lib/activity_segments.py plugins/mission/skills/mission/lib/activity_segments.py
   cp skills/mission/refs/specialist-registry.md plugins/mission/skills/mission/refs/specialist-registry.md
   cp skills/mission/refs/self-improvement.md plugins/mission/skills/mission/refs/self-improvement.md
   cp skills/mission/refs/changelog.md plugins/mission/skills/mission/refs/changelog.md
@@ -96,6 +99,10 @@ SYNC_PAIRS = [
         REPO_ROOT / "skills" / "mission" / "refs" / "state-management.md",
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "refs" / "state-management.md",
     ),
+    (
+        REPO_ROOT / "skills" / "mission" / "lib" / "activity_segments.py",
+        REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "activity_segments.py",
+    ),
 ]
 
 MISSION_STATE_DISTRIBUTION_MARKERS = [
@@ -148,6 +155,19 @@ def test_mission_state_py_in_sync():
     )
 
 
+def test_activity_segments_py_in_sync():
+    """Shared activity timing reducer is identical in the distribution mirror."""
+    src, dst = SYNC_PAIRS[-1]
+    assert src.exists(), f"正典が存在しない: {src}"
+    assert dst.exists(), f"plugins 側が存在しない: {dst}"
+    assert _md5(src) == _md5(dst), (
+        f"activity_segments.py が未同期。\n"
+        f"  正典: {src}\n"
+        f"  plugins: {dst}\n"
+        f"  同期コマンド: cp {src} {dst}"
+    )
+
+
 def test_mission_state_distribution_contains_specialist_accounting_guards():
     """配布 wrapper が specialist accounting/result-contract gate を欠落させない."""
     src, dst = SYNC_PAIRS[2]
@@ -159,7 +179,7 @@ def test_mission_state_distribution_contains_specialist_accounting_guards():
 
 def test_state_management_reference_in_sync():
     """worktree archive を含む state management reference が配布 wrapper と一致する."""
-    src, dst = SYNC_PAIRS[-1]
+    src, dst = SYNC_PAIRS[11]
     _assert_optional_pair_in_sync(src, dst, "state-management.md")
 
 

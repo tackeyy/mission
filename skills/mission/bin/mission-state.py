@@ -62,6 +62,17 @@ from specialist_accounting import (  # noqa: E402
     explicitly_selected_specialist_skills as _accounting_selected_specialist_skills,
     terminal_invoked_specialist_skills as _accounting_terminal_invoked_specialist_skills,
 )
+from activity_segments import (  # noqa: E402
+    ACTIVITY_KINDS,
+    ACTIVITY_REASONS_BY_KIND,
+    ActivityTimingError,
+    close_activity_for_resume,
+    end_activity_segment,
+    sanitize_activity_detail,
+    start_activity_segment,
+    summarize_activity_states,
+    transition_activity_phase,
+)
 
 SCHEMA_VERSION = 2  # v1: 旧 schema (project_root/pid なし), v2: A-1/A-2/B-3 追加
 
@@ -296,6 +307,13 @@ DEFAULT_STALE_ACTIVE_SECONDS = 3 * 60 * 60
 
 
 def iso_now() -> str:
+    override = os.environ.get("MISSION_STATE_NOW")
+    if override:
+        parsed = parse_iso_datetime(override)
+        if parsed:
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -650,6 +668,7 @@ def _transition_phase(data: dict, new_phase: str, now: str | None = None) -> Non
     _ensure_phase_timing(data, now)
     old_phase = data.get("phase")
     if old_phase and old_phase != new_phase:
+        transition_activity_phase(data, new_phase, now)
         started = _parse_iso_datetime(data.get("phase_started_at"))
         ended = _parse_iso_datetime(now)
         if started and ended:
@@ -3614,6 +3633,16 @@ def cmd_init(args):
         "updated_at": now,
         "phase_started_at": now,
         "phase_durations_sec": {},
+        "activity_current": None,
+        "activity_segments": [],
+        "activity_rollup": {
+            "observed_total_sec": 0.0,
+            "closed_segment_count": 0,
+            "activity_duration_totals_sec": {},
+            "phase_activity_duration_totals_sec": {},
+            "wait_reason_totals_sec": {},
+        },
+        "activity_unobserved_gap_sec": 0.0,
         # S3: issue_ref (未指定 None)
         "issue_ref": getattr(args, "issue_ref", None),
         # S3-files: 同一 project の file-set overlap WARN 用 (未指定は空 list)
@@ -3703,6 +3732,21 @@ def cmd_init(args):
                     old_mid8 = existing_mid[:8] if len(existing_mid) >= 8 else existing_mid
                     archive_dest = archive_dir / f"state-{sid}-{old_mid8}.json"
                     shutil.copy2(sf_target, archive_dest)
+                elif existing_mid and existing_mid == new_mid:
+                    # #211: same-mission init is a resume boundary. Preserve the
+                    # bounded activity rollup and close an open segment only up
+                    # to the last observed state update; never infer the crash gap.
+                    close_activity_for_resume(existing_data, now)
+                    for key in (
+                        "activity_current",
+                        "activity_segments",
+                        "activity_rollup",
+                        "activity_unobserved_gap_sec",
+                        "activity_anomaly_counts",
+                        "phase_durations_sec",
+                    ):
+                        if key in existing_data:
+                            initial[key] = existing_data[key]
             except json.JSONDecodeError as e:
                 quarantine_suffix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
                 quarantine = sf_target.with_name(f"{sf_target.name}.corrupt-{quarantine_suffix}")
@@ -3750,6 +3794,57 @@ def cmd_get(args):
         print(json.dumps(data.get(args.field)))
     else:
         print(json.dumps(data, indent=2, ensure_ascii=False))
+
+
+def _activity_state_file(cwd: Path) -> Path:
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        print("ERROR: state.json が見つかりません。先に init してください。", file=sys.stderr)
+        sys.exit(1)
+    return sf
+
+
+def cmd_activity_start(args):
+    cwd = Path.cwd()
+    sf = _activity_state_file(cwd)
+    at = args.at or iso_now()
+    try:
+        with StateLock(lock_file(cwd)):
+            data = json.loads(sf.read_text())
+            changed = start_activity_segment(
+                data,
+                args.kind,
+                args.reason,
+                at,
+                detail=args.detail,
+                resume=args.resume,
+            )
+            if changed:
+                data["updated_at"] = at
+                backup_state(sf)
+                atomic_write_json(sf, stamp_metadata(data, cwd))
+    except ActivityTimingError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+    print(json.dumps({"ok": True, "changed": changed, "activity_current": data.get("activity_current")}, ensure_ascii=False))
+
+
+def cmd_activity_end(args):
+    cwd = Path.cwd()
+    sf = _activity_state_file(cwd)
+    at = args.at or iso_now()
+    try:
+        with StateLock(lock_file(cwd)):
+            data = json.loads(sf.read_text())
+            changed = end_activity_segment(data, at)
+            if changed:
+                data["updated_at"] = at
+                backup_state(sf)
+                atomic_write_json(sf, stamp_metadata(data, cwd))
+    except ActivityTimingError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+    print(json.dumps({"ok": True, "changed": changed, "activity_current": data.get("activity_current")}, ensure_ascii=False))
 
 
 def _derive_next_action(data: dict) -> dict:
@@ -5141,6 +5236,8 @@ def cmd_refresh_pid(args):
     new_pid = find_agent_pid()
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
+        now = iso_now()
+        close_activity_for_resume(data, now)
         old_pid = data.get("pid")
         if old_pid and isinstance(old_pid, int) and old_pid != new_pid:
             # PID 再利用対策: comm が agent CLI でなければ別プロセス → 安全に継承可
@@ -5163,7 +5260,7 @@ def cmd_refresh_pid(args):
             data["halt_reason"] = ""
             data["loop_active"] = True
             _add_to_aggregate(cwd, sf.stem)  # F-4: 再活性化分を active_sessions へ戻す
-        data["updated_at"] = iso_now()
+        data["updated_at"] = now
         backup_state(sf)
         atomic_write_json(sf, data)
     print(json.dumps({
@@ -5670,6 +5767,7 @@ def _aggregate(states: list[dict], duplicate_state_group_count: int = 0) -> dict
             "by_review_tier": {}, "iteration_by_review_tier": {},
             "by_cli_version": {},
             "by_halt_category": {},
+            "activity_timing": summarize_activity_states([]),
         }
     # _classify を 1 回だけ評価 (旧実装は pass/halt/incomplete で 3N 回呼んでいた)
     classes = [_classify(s) for s in states]
@@ -5704,6 +5802,7 @@ def _aggregate(states: list[dict], duplicate_state_group_count: int = 0) -> dict
     by_cli_version = _build_breakdown(states, classes, lambda s: s.get("cli_version") or "unknown")
     by_halt_category = _build_halt_category_breakdown(states, classes)  # #190
     phase_totals = _phase_duration_totals(states)
+    activity_timing = summarize_activity_states(states)
     iteration_histogram: dict = {}
     for _it in iterations:
         _k = str(_it) if isinstance(_it, int) and _it <= 3 else ("4+" if isinstance(_it, int) else "unknown")
@@ -5735,6 +5834,7 @@ def _aggregate(states: list[dict], duplicate_state_group_count: int = 0) -> dict
         "iteration_by_review_tier": iteration_by_review_tier,
         "by_cli_version": by_cli_version,
         "by_halt_category": by_halt_category,
+        "activity_timing": activity_timing,
     }
 
 
@@ -5783,6 +5883,28 @@ def _format_text(stats: dict, since: str | None, until: str | None) -> str:
             # #188: 過去の無検証 set phase= (typo 等) で混入した不正キーを明示する。
             invalid_note = "" if phase in VALID_PHASES else " (invalid: 過去の無検証 set で混入)"
             lines.append(f"  {phase:<14} {sec/60:.1f} min ({sec:.0f}s){invalid_note}")
+    activity = stats.get("activity_timing") or {}
+    if activity:
+        coverage = activity.get("coverage_ratio")
+        coverage_text = f"{coverage * 100:.1f}%" if coverage is not None else "-"
+        lines.extend([
+            "activity_timing:",
+            f"  observed:       {activity.get('observed_total_sec', 0.0):.0f}s",
+            f"  unclassified:   {activity.get('unclassified_sec', 0.0):.0f}s",
+            f"  coverage:       {coverage_text}",
+            f"  segments:       closed {activity.get('closed_segment_count', 0)} / "
+            f"open {activity.get('open_segment_count', 0)} / invalid {activity.get('invalid_segment_count', 0)}",
+        ])
+        for kind, sec in sorted((activity.get("activity_duration_totals_sec") or {}).items()):
+            lines.append(f"  kind {kind:<18} {sec:.0f}s")
+        for kind, reasons in sorted((activity.get("wait_reason_totals_sec") or {}).items()):
+            for reason, sec in sorted(reasons.items()):
+                lines.append(f"  wait {kind}/{reason:<18} {sec:.0f}s")
+        for phase, values in sorted((activity.get("phase_duration_percentiles_sec") or {}).items()):
+            lines.append(
+                f"  phase {phase:<14} p50 {values.get('p50')}s / p90 {values.get('p90')}s "
+                f"(n={values.get('count', 0)})"
+            )
     by_agent = stats.get("by_agent") or {}
     if by_agent:
         lines.append("by_agent:")
@@ -5976,6 +6098,24 @@ def _build_parser():
     p_stats.add_argument("--until", default=None, help="期間上限 (YYYY-MM-DD, updated_at で比較)")
     p_stats.add_argument("--json", action="store_true", help="JSON 形式で出力")
     p_stats.set_defaults(func=cmd_stats)
+
+    p_activity = sub.add_parser("activity", help="#211: phase 内の active/wait/idle segment を記録")
+    activity_sub = p_activity.add_subparsers(dest="activity_cmd", required=True)
+    p_activity_start = activity_sub.add_parser("start", help="activity segment を開始し、開いている前 segment を閉じる")
+    p_activity_start.add_argument("--kind", required=True, choices=sorted(ACTIVITY_KINDS))
+    p_activity_start.add_argument("--reason", required=True,
+                                  help="kind ごとの明示 reason enum")
+    p_activity_start.add_argument("--detail", default=None,
+                                  help="任意の補足。control 文字除去・160文字へ正規化")
+    p_activity_start.add_argument("--at", default=None,
+                                  help="ISO timestamp。省略時は現在 UTC")
+    p_activity_start.add_argument("--resume", action="store_true",
+                                  help="crash/resume: 旧 open は最終観測 updated_at までだけ確定")
+    p_activity_start.set_defaults(func=cmd_activity_start)
+    p_activity_end = activity_sub.add_parser("end", help="現在の activity segment を閉じる")
+    p_activity_end.add_argument("--at", default=None,
+                                help="ISO timestamp。省略時は現在 UTC")
+    p_activity_end.set_defaults(func=cmd_activity_end)
 
     p_progress = sub.add_parser("progress", help="long-running mission の progress checkpoint を記録/取得")
     progress_sub = p_progress.add_subparsers(dest="progress_cmd", required=True)

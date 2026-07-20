@@ -181,6 +181,42 @@ def test_activity_resume_closes_only_observed_time_and_does_not_double_count(
     assert state["activity_unobserved_gap_sec"] == 3300.0
 
 
+def test_activity_resume_with_same_labels_still_closes_the_stale_segment_once(
+    tmp_path, run_cli
+):
+    path = _write_state(
+        tmp_path,
+        updated_at="2026-07-21T00:05:00Z",
+        activity_current={
+            "kind": "active",
+            "phase": "executing",
+            "reason": "implementation",
+            "started_at": "2026-07-21T00:00:00Z",
+        },
+        activity_segments=[],
+    )
+    start = (
+        "start",
+        "--kind",
+        "active",
+        "--reason",
+        "implementation",
+        "--at",
+        "2026-07-21T01:00:00Z",
+        "--resume",
+    )
+
+    assert _run_activity(run_cli, tmp_path, *start).returncode == 0
+    assert _run_activity(run_cli, tmp_path, *start).returncode == 0
+
+    state = json.loads(path.read_text())
+    assert [segment["duration_sec"] for segment in state["activity_segments"]] == [
+        300.0
+    ]
+    assert state["activity_current"]["started_at"] == "2026-07-21T01:00:00Z"
+    assert state["activity_unobserved_gap_sec"] == 3300.0
+
+
 @pytest.mark.parametrize("command", ["init", "refresh-pid"])
 def test_reinit_and_refresh_close_open_segment_once_without_losing_history(
     tmp_path, run_cli, command
@@ -401,6 +437,58 @@ def test_activity_summary_ignores_open_negative_and_unknown_segments(
     assert timing["wait_reason_totals_sec"] == {
         "external-wait": {"unknown": 10.0}
     }
+
+
+def test_activity_summary_marks_legacy_time_unclassified_without_inventing_a_cause(
+    tmp_path, run_cli
+):
+    _write_state(
+        tmp_path,
+        phase_durations_sec={"planning": 40.0, "executing": 60.0},
+    )
+
+    result = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    timing = json.loads(result.stdout)["activity_timing"]
+    assert timing["observed_total_sec"] == 0.0
+    assert timing["unclassified_sec"] == 100.0
+    assert timing["coverage_ratio"] == 0.0
+    assert timing["wait_reason_totals_sec"] == {}
+    assert timing["states_without_activity_count"] == 1
+
+
+def test_activity_summary_rejects_malformed_rollup_values_and_reports_inconsistency(
+    tmp_path, run_cli
+):
+    _write_state(
+        tmp_path,
+        phase_durations_sec={"executing": 30.0},
+        activity_rollup={
+            "observed_total_sec": 999.0,
+            "closed_segment_count": 3,
+            "activity_duration_totals_sec": {
+                "active": 10.0,
+                "future-kind": 20.0,
+                "idle": float("nan"),
+            },
+            "phase_activity_duration_totals_sec": {
+                "executing": {"active": 9.0},
+            },
+            "wait_reason_totals_sec": {
+                "external-wait": {"external-response": -1.0},
+            },
+        },
+    )
+
+    result = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    timing = json.loads(result.stdout)["activity_timing"]
+    assert timing["observed_total_sec"] == 10.0
+    assert timing["activity_duration_totals_sec"] == {"active": 10.0}
+    assert timing["invalid_segment_count"] >= 4
+    assert timing["totals_consistent"] is False
 
 
 def test_activity_requires_explicit_reason_and_known_kind(tmp_path, run_cli):
