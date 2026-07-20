@@ -1021,6 +1021,41 @@ def test_automatic_stale_halt_is_fail_open_for_malformed_phase_timing(
         assert state["phase_durations_sec"] == malformed["phase_durations_sec"]
 
 
+def test_automatic_stale_halt_clears_stale_resume_target_for_invalid_phase(
+    tmp_path, run_cli
+):
+    path = _write_state(
+        tmp_path,
+        phase=["executing"],
+        resume_target_phase="reviewing",
+    )
+
+    halted = run_cli(
+        "mark-halt",
+        "--reason",
+        "stale: automatic stop",
+        "--category",
+        "stale",
+        cwd=tmp_path,
+        env_extra={"MISSION_STATE_NOW": "2026-07-21T00:10:00Z"},
+    )
+    assert halted.returncode == 0, halted.stderr
+    state = json.loads(path.read_text())
+    assert state["phase"] == "halted"
+    assert "resume_target_phase" not in state
+
+    refreshed = run_cli(
+        "refresh-pid",
+        cwd=tmp_path,
+        env_extra={"MISSION_STATE_NOW": "2026-07-21T00:11:00Z"},
+    )
+    assert refreshed.returncode == 0, refreshed.stderr
+    assert json.loads(refreshed.stdout)["reactivated"] is False
+    resumed = json.loads(path.read_text())
+    assert resumed["phase"] == "halted"
+    assert resumed["loop_active"] is False
+
+
 def test_manual_terminal_closes_activity_despite_malformed_phase_timing(
     tmp_path, run_cli
 ):
