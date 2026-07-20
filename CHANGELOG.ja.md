@@ -15,7 +15,7 @@
 
 ### 修正
 
-- 不可逆操作の `review_tier` キーワードを、operation に anchor した clause と構造 unit の文脈で出現ごとに評価するようにしました。否定は文字 window 内の cue ではなく対象 operation への直接的な文法 anchor を必須とし、短縮形・`cannot`・active な `not perform/execute`・passive な `will/should not be performed/executed`・日本語の qualifier 付き否定も扱います。明示的に否定された実操作は Simple/Standard を昇格させず、条件例外、非実行 intent 自体の否定、複数否定 cue、不確実表現、global 非実行 marker の後続または直接肯定と矛盾する operation、引用外から実行を指示された引用 command は安全側で採用します。引用内に execution wording があるだけでは quote-only intent を上書きしません。segment・quote・否定 operation・否定 cue・global marker の索引を cache し、全文・dense context の反復走査を避けます。既存の順序付き文字列 signals は変えず、state に出現単位の `review_tier_signal_details` provenance を追加し、security・high-risk・Complex/Critical の挙動も維持します (#209)。
+- 不可逆操作の `review_tier` キーワードを、operation に anchor した clause と構造 unit の文脈で出現ごとに評価するようにしました。否定は文字 window 内の cue ではなく対象 operation への直接的な文法 anchor を必須とし、短縮形・`cannot`・active な `not perform/execute`・passive な `will/should not be performed/executed`・日本語の qualifier 付き否定も扱います。明示的に否定された実操作は Simple/Standard を昇格させず、条件例外、非実行 intent 自体の否定、複数否定 cue、不確実表現は安全側で採用します。global 非実行 marker は、候補自身の context が meta/non-operation intent と証明できる場合だけ抑制し、marker の位置にかかわらず曖昧・命令・肯定候補を採用します。quote-only intent は、その引用符の直前・直後から command の実行を直接指示した場合だけ上書きし、引用内や別 operation の execution wording では上書きしません。segment・quote・meta/non-operation・否定 operation・否定 cue・global marker の索引を cache し、全文・dense context の反復走査を避けます。既存の順序付き文字列 signals は変えず、state に出現単位の `review_tier_signal_details` provenance を追加し、security・high-risk・Complex/Critical の挙動も維持します (#209)。
 
 ## [2.0.0] - 2026-07-20
 
