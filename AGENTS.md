@@ -12,6 +12,8 @@ This repository is OSS. Keep public behavior portable across users, machines, an
   - installed `mission-specialist.yml` files for skill-provided metadata
 - Tests for extension behavior must use neutral fixture names, not a maintainer's private skill set.
 - Documentation may mention private skills only as clearly labeled examples, never as required or bundled OSS capabilities.
+- Generated artifacts are covered by the same rule. Benchmark outputs, audit reports, and captured execution logs must not carry a real home path (`/Users/<user>/` is the anonymized form) or the contents of a personal memory store. Committing a raw agent transcript publishes whatever that agent happened to read.
+- This is enforced by `skills/mission/tests/test_artifact_hygiene.py`, which scans every tracked file on each PR.
 
 ## Neutral Vocabulary
 
