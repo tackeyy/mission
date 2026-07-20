@@ -478,6 +478,42 @@ def test_japanese_exception_cues_keep_direct_negation_conservative(mission):
     )
 
 
+@pytest.mark.parametrize(
+    "mission",
+    [
+        "例外なく deployしない",
+        "緊急時にもdeployしない",
+        "原則ではなく絶対にdeployしない",
+    ],
+)
+def test_japanese_unconditional_negation_is_not_a_false_exception(mission):
+    decision = _decision(mission)
+
+    assert decision["tier"] == "light"
+    assert decision["signals"] == []
+    assert {item["reason"] for item in _details(decision)} == {
+        "negated-actual-operation"
+    }
+
+
+@pytest.mark.parametrize(
+    "mission",
+    [
+        "deployしないので問題ない",
+        "releaseしないから支障はない",
+        "publishしないため懸念はない",
+    ],
+)
+def test_causal_assurance_after_simple_negation_is_not_a_reversal(mission):
+    decision = _decision(mission)
+
+    assert decision["tier"] == "light"
+    assert decision["signals"] == []
+    assert {item["reason"] for item in _details(decision)} == {
+        "negated-actual-operation"
+    }
+
+
 def test_separate_japanese_negations_do_not_form_a_false_reversal():
     mission = "deployしないし、releaseもしない"
     decision = _decision(mission)
