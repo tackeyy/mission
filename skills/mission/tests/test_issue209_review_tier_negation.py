@@ -66,6 +66,49 @@ def test_double_negation_stays_conservative():
     assert any(item["reason"] == "uncertain-or-double-negation" for item in _details(decision))
 
 
+@pytest.mark.parametrize(
+    "mission",
+    [
+        "we will not not deploy",
+        "we should not not release",
+        "we do not not publish",
+        "we won't not deploy",
+        "we won’t not deploy",
+        "we don't not release",
+        "we don’t not publish",
+        "we can't not deploy",
+        "we cannot not deploy",
+    ],
+)
+def test_english_prefixed_double_negation_stays_conservative(mission):
+    decision = _decision(mission)
+
+    assert decision["tier"] == "full"
+    assert any(
+        item["reason"] == "uncertain-or-double-negation"
+        for item in _details(decision)
+    )
+
+
+@pytest.mark.parametrize(
+    ("mission", "expected_tier", "expected_reason"),
+    [
+        ("we will not deploy", "light", "negated-actual-operation"),
+        ("we won't deploy", "light", "negated-actual-operation"),
+        ("we won’t deploy", "light", "negated-actual-operation"),
+        ("we cannot deploy", "light", "negated-actual-operation"),
+        ("we will deploy", "full", "affirmative-actual-operation"),
+    ],
+)
+def test_english_prefixed_negation_keeps_simple_and_affirmative_regression(
+    mission, expected_tier, expected_reason
+):
+    decision = _decision(mission)
+
+    assert decision["tier"] == expected_tier
+    assert expected_reason in {item["reason"] for item in _details(decision)}
+
+
 def test_conditional_actual_operation_stays_conservative():
     decision = _decision("必要なら本番へ deploy する")
 
