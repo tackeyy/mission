@@ -5288,6 +5288,7 @@ def cmd_refresh_pid(args):
                     file=sys.stderr,
                 )
                 sys.exit(2)
+        _resume_phase_timing(data, now)
         data["pid"] = new_pid
         # halt 解除 + ループ再アクティベート (resume → orphan halt フローからの復帰用)
         prev_halt = data.get("halt_reason", "")
@@ -5707,7 +5708,10 @@ def _dedupe_states(states: list[dict]) -> tuple[list[dict], int]:
     """Audit と同じ identity/rank で同一 session の代表 state を選ぶ."""
     groups: dict[tuple[str, str, str], list[dict]] = {}
     for state in states:
-        key = state_identity(state)
+        key = state_identity(
+            state,
+            source_path=str(state.get("_mission_source_path") or ""),
+        )
         groups.setdefault(key, []).append(state)
     deduped = [
         min(

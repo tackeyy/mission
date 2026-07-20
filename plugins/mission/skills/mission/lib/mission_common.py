@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 PREPARATION_ONLY_MARKERS = (
@@ -62,10 +63,29 @@ def duration_sec(state: dict[str, Any]) -> float | None:
     return seconds if seconds >= 0 else None
 
 
-def state_identity(state: dict[str, Any], fallback_session: str = "") -> tuple[str, str, str]:
+def _project_identity(project_root: Any, source_path: str) -> str:
+    if isinstance(project_root, str) and project_root.strip():
+        try:
+            return str(Path(project_root).expanduser().resolve(strict=False))
+        except (OSError, RuntimeError):
+            return str(Path(project_root))
+    if source_path:
+        source = Path(source_path)
+        for parent in source.parents:
+            if parent.name == ".mission-state":
+                try:
+                    return str(parent.parent.resolve(strict=False))
+                except (OSError, RuntimeError):
+                    return str(parent.parent)
+    return ""
+
+
+def state_identity(
+    state: dict[str, Any], fallback_session: str = "", source_path: str = ""
+) -> tuple[str, str, str]:
     """Identity shared by live/archive audit and stats deduplication."""
     return (
-        str(state.get("project_root") or ""),
+        _project_identity(state.get("project_root"), source_path),
         str(state.get("session_id") or fallback_session),
         str(state.get("mission_id") or ""),
     )

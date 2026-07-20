@@ -895,9 +895,7 @@ def dedupe_records(records: list[StateRecord]) -> tuple[list[StateRecord], list[
     groups: dict[tuple[str, str, str], list[StateRecord]] = {}
     for record in records:
         state = record.state
-        identity_state = dict(state)
-        identity_state["project_root"] = project_root_for(record)
-        key = state_identity(identity_state, record.path.stem)
+        key = state_identity(state, record.path.stem, str(record.path))
         groups.setdefault(key, []).append(record)
 
     deduped: list[StateRecord] = []

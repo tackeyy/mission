@@ -229,19 +229,32 @@ def _resume_boundary(state: dict[str, Any], at: str) -> str:
 
 
 def close_activity_for_resume(state: dict[str, Any], at: str) -> bool:
-    if not isinstance(state.get("activity_current"), dict):
+    current = state.get("activity_current")
+    if current is None:
         state["activity_current"] = None
         return False
+    if not isinstance(current, dict):
+        raise ActivityTimingError("activity current is malformed")
     return end_activity_segment(state, _resume_boundary(state, at))
 
 
 def close_activity_for_terminal(state: dict[str, Any], at: str) -> bool:
     """Close valid measurement, but never let corrupt observability block control."""
-    if not isinstance(state.get("activity_current"), dict):
+    current = state.get("activity_current")
+    if current is None:
         state["activity_current"] = None
         return False
+    if not isinstance(current, dict):
+        state["activity_current"] = None
+        _record_anomaly(state, "invalid-current-terminal")
+        return True
     try:
-        return end_activity_segment(state, at)
+        kind = current.get("kind")
+        reason = current.get("reason")
+        if not isinstance(kind, str) or not isinstance(reason, str):
+            raise ActivityTimingError("activity current labels are malformed")
+        validate_activity(kind, reason)
+        return end_activity_segment(state, _resume_boundary(state, at))
     except ActivityTimingError:
         state["activity_current"] = None
         _record_anomaly(state, "invalid-current-terminal")
@@ -358,7 +371,9 @@ def _valid_open_activity(state: dict[str, Any]) -> bool:
         return False
     kind = current.get("kind")
     reason = current.get("reason")
-    if kind not in ACTIVITY_KINDS or reason not in ACTIVITY_REASONS_BY_KIND[kind]:
+    if not isinstance(kind, str) or kind not in ACTIVITY_KINDS:
+        return False
+    if not isinstance(reason, str) or reason not in ACTIVITY_REASONS_BY_KIND[kind]:
         return False
     if not isinstance(current.get("phase"), str):
         return False
@@ -446,7 +461,8 @@ def _state_activity(state: dict[str, Any]) -> dict[str, Any]:
                 seconds = _finite_nonnegative(segment.get("duration_sec"))
                 calculated = _elapsed(segment.get("started_at"), segment.get("ended_at"))
                 if (
-                    kind not in ACTIVITY_KINDS
+                    not isinstance(kind, str)
+                    or kind not in ACTIVITY_KINDS
                     or not isinstance(phase, str)
                     or seconds is None
                     or calculated is None
@@ -469,7 +485,7 @@ def _state_activity(state: dict[str, Any]) -> dict[str, Any]:
     observed = sum(kinds.values())
     raw_current = state.get("activity_current")
     open_count = 1 if _valid_open_activity(state) else 0
-    if isinstance(raw_current, dict) and not open_count:
+    if raw_current is not None and not open_count:
         invalid += 1
     anomaly_counts = state.get("activity_anomaly_counts")
     if isinstance(anomaly_counts, dict):
@@ -490,6 +506,7 @@ def _state_activity(state: dict[str, Any]) -> dict[str, Any]:
         "invalid": invalid,
         "open": open_count,
         "closed": closed_count,
+        "valid_closed_sample": bool(closed_count > 0 and kinds and phases),
         "phase_wall": _valid_phase_durations(state),
         "unobserved_gap": valid_gap or 0.0,
         "totals_consistent": totals_consistent,
@@ -521,7 +538,7 @@ def summarize_activity_states(states: list[dict[str, Any]]) -> dict[str, Any]:
         unobserved_gap += item["unobserved_gap"]
         totals_consistent = totals_consistent and item["totals_consistent"]
         task_key = str(state.get("mission_id") or "unknown")
-        if item["closed"] > 0:
+        if item["valid_closed_sample"]:
             task_samples.setdefault(task_key, []).append(item["observed"])
         for kind, seconds in item["kinds"].items():
             kind_totals[kind] = kind_totals.get(kind, 0.0) + seconds
@@ -537,6 +554,8 @@ def summarize_activity_states(states: list[dict[str, Any]]) -> dict[str, Any]:
     coverage_denominator = max(phase_wall_total, observed_total)
     coverage_ratio = observed_total / coverage_denominator if coverage_denominator > 0 else None
     if observed_total > phase_wall_total + 0.001:
+        totals_consistent = False
+    if invalid_count > 0:
         totals_consistent = False
     return {
         "percentile_method": PERCENTILE_METHOD,

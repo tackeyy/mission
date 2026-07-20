@@ -387,8 +387,9 @@ def test_phase_transition_splits_open_activity_atomically_and_terminal_closes_it
     assert final["activity_current"] is None
     assert [segment["duration_sec"] for segment in final["activity_segments"]] == [
         600.0,
-        600.0,
+        0.0,
     ]
+    assert final["activity_unobserved_gap_sec"] == 600.0
     assert final["phase_durations_sec"]["reviewing"] == 600.0
 
 
@@ -867,7 +868,8 @@ def test_repeated_terminal_command_closes_a_late_open_activity(tmp_path, run_cli
     assert result.returncode == 0, result.stderr
     state = json.loads(path.read_text())
     assert state["activity_current"] is None
-    assert state["activity_rollup"]["observed_total_sec"] == 60.0
+    assert state["activity_rollup"]["observed_total_sec"] == 0.0
+    assert state["activity_unobserved_gap_sec"] == 60.0
 
 
 def test_terminal_closes_only_to_last_trusted_update_and_marks_crash_gap_unobserved(
@@ -1326,4 +1328,5 @@ def test_bulk_terminal_writers_reread_under_lock_and_close_concurrent_activity(
     state = json.loads(state_path.read_text())
     assert state["concurrent_sentinel"] == "preserve-me"
     assert state["activity_current"] is None
-    assert state["activity_rollup"]["observed_total_sec"] == 60.0
+    assert state["activity_rollup"]["observed_total_sec"] == 0.0
+    assert state["activity_unobserved_gap_sec"] == 60.0
