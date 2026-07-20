@@ -27,7 +27,7 @@
 from __future__ import annotations
 
 import argparse
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 import contextlib
 import fcntl
 import hashlib
@@ -754,54 +754,70 @@ _SECURITY_KEYWORDS_JA = ("認証", "秘密", "鍵")
 
 
 _REVIEW_CONTEXT_BOUNDARY_RE = re.compile(
-    r"[。.!！?？;；\n]+|(?:だが|けど|けれど|が|ただし|しかし|一方(?:で)?)[、,]?\s*|"
+    r"[。.!！?？;；\n]+|(?:だが|けど|けれど|ただし|しかし|一方(?:で)?)[、,]?\s*|"
     r"\band(?:\s+then)?\b\s*|\bbut\b\s*|\bhowever\b[\s,]*",
     re.IGNORECASE,
 )
 _REVIEW_UNIT_BOUNDARY_RE = re.compile(
-    r"\n[ \t]*\n+|\n(?=[ \t]*(?:[-*+>]|#{1,6}\s|\d+[.)])\s*)|"
-    r"(?:ただし|しかし|一方(?:で)?)[、,]?\s*|\bhowever\b[\s,]*",
+    r"\n[ \t]*\n+|\n(?=[ \t]*(?:[-*+>]|#{1,6}\s|\d+[.)])\s*)",
     re.IGNORECASE,
 )
 _REVIEW_DOUBLE_NEGATION_RE = re.compile(
     r"(?:し|行わ|実行し)ないわけではない|(?:し|行わ|実行し)ないとは限らない|"
+    r"(?:しない|行わない|実行しない)\s*"
+    r"(?:(?:(?:予定|方針|計画)\s*)?(?:ではない|はない)|とは(?:言って|述べて)いない)|"
     r"なくはない|禁止ではない|対象外ではない|"
     r"\bnot\s+impossible\b|\bnot\s+never\b|\bcannot\s+rule\s+out\b",
     re.IGNORECASE,
 )
 _REVIEW_CONDITIONAL_RE = re.compile(
     r"必要なら|必要な場合|場合|可能なら|可能性|かもしれ|未確定|検討中|するか|し得|あり得|"
-    r"\bonly\s+if\b|\bif\b|\bmay\b|\bmight\b|\bcould\b|\bpossibly\b|\bwhether\b|"
+    r"限り|以外|除く|"
+    r"\bonly\s+if\b|\bif\b|\bunless\b|\bmay\b|\bmight\b|\bcould\b|\bpossibly\b|\bwhether\b|"
     r"\bwithout\s+(?:approval|authorization|permission)\b",
     re.IGNORECASE,
 )
 _REVIEW_EN_NEGATED_OPERATION_RE = re.compile(
-    r"(?:\b(?:do|does|did|will|would|should|must|can|could)\s+not|\bnot|\bdon['’]t)\s+"
+    r"(?:\b(?:do|does|did|will|would|should|must|can|could)\s+not|\bnot|"
+    r"\b(?:don|won|can)['’]t|\bcannot|\b(?:am|is|are|was|were)\s+not\s+going\s+to)\s+"
     r"(?:(?:perform|execute)\s+(?:a|an|the)?\s*)?"
     r"(?:production\s+)?(?:deploy(?:ment)?|release|migration|drop|delete|publish)"
-    r"(?:\s+(?:to|in)\s+(?:the\s+)?production)?|"
+    r"(?:\s+(?:to|in)\s+(?:(?:our|the)\s+)?(?:target\s+)?production(?:\s+environment)?)?|"
     r"(?:production\s+)?(?:deploy(?:ment)?|release|migration|drop|delete|publish)"
-    r"(?:\s+(?:to|in)\s+(?:the\s+)?production)?\s+"
-    r"(?:(?:is|are|was|were)\s+(?:not\s+(?:performed|executed|deployed|released|published)|out\s+of\s+scope)|"
+    r"(?:\s+(?:to|in)\s+(?:(?:our|the)\s+)?(?:target\s+)?production(?:\s+environment)?)?\s+"
+    r"(?:(?:is|are|was|were)\s+"
+    r"(?:not\s+(?:performed|executed|deployed|released|published|planned)|out\s+of\s+scope)|"
     r"(?:will|would|should|must|can|could)\s+not\s+be\s+"
     r"(?:performed|executed|deployed|released|published))\b",
     re.IGNORECASE,
 )
 _REVIEW_JA_POST_NEGATION_RE = re.compile(
-    r"^\s*(?:は|を|では|には|へ|に|で)?\s*"
+    r"^\s*(?:は|を|が|では|には|へ|に|で)?\s*"
     r"(?:(?:実行|実施)\s*)?(?:しない方針|しない|しません|せず)|"
-    r"^\s*(?:は|を|では|には|へ|に|で)?\s*(?:行わない|行いません|行わず|禁止|対象外)",
+    r"^\s*(?:は|を|が|では|には|へ|に|で)?\s*"
+    r"(?:行わない|行われない|行いません|行わず|禁止|対象外)|"
+    r"^\s*する予定はない",
 )
 _REVIEW_HONBAN_QUALIFIER_RE = re.compile(
-    r"^\s*(?:への|へ|で|に)?\s*(?:deploy|release|publish|リリース|公開)\s*"
+    r"^\s*(?:環境)?(?:への|へ|で|に|の)?\s*(?:deploy|release|publish|リリース|公開)\s*"
     r"(?:は|を)?\s*(?:(?:実行|実施)\s*)?"
-    r"(?:しない方針|しない|しません|せず|行わない|行いません|行わず|禁止|対象外)",
+    r"(?:しない方針|しない|しません|せず|行わない|行われない|行いません|行わず|"
+    r"禁止|対象外|する予定はない)",
     re.IGNORECASE,
 )
 _REVIEW_GLOBAL_NON_OPERATION_RE = re.compile(
     r"実操作\s*(?:は|を)?\s*(?:行わない|実行しない|しない)|"
     r"\bactual\s+(?:operation|execution)s?\s+(?:will\s+)?not\s+(?:be\s+)?(?:performed|executed)\b|"
     r"\bno\s+actual\s+(?:operation|execution)s?\b",
+    re.IGNORECASE,
+)
+_REVIEW_AFFIRMATIVE_OPERATION_RE = re.compile(
+    r"\b(?:will|shall|must|actually)\s+(?:deploy|release|publish)\b|"
+    r"\b(?:deploy|release|publish)\s+to\s+"
+    r"(?:(?:our|the)\s+)?(?:target\s+)?production(?:\s+environment)?\b(?!\s*の手順)|"
+    r"\b(?:perform|execute|run)\s+(?:a|an|the)?\s*(?:production\s+)?migration\b|"
+    r"(?:deploy|release|publish|migration|リリース|マイグレーション|公開)\s*"
+    r"(?:する|します|を実行する|を実施する|を行う)",
     re.IGNORECASE,
 )
 _REVIEW_EXPLICIT_EXECUTION_RE = re.compile(
@@ -811,6 +827,11 @@ _REVIEW_EXPLICIT_EXECUTION_RE = re.compile(
 )
 _REVIEW_QUOTE_ONLY_RE = re.compile(
     r"引用(?:する|のみ|だけ)|引用するだけ|\bquote(?:d|s|ing)?\s+only\b|\bonly\s+quot(?:e|ed|ing)\b",
+    re.IGNORECASE,
+)
+_REVIEW_NEGATION_CUE_RE = re.compile(
+    r"しない|行わない|実行しない|ではない|はない|言っていない|述べていない|"
+    r"\bnot\b|\bnever\b|\bcannot\b|\b(?:don|won|can)['’]t\b",
     re.IGNORECASE,
 )
 
@@ -920,6 +941,27 @@ def _review_index_contains(
     return False
 
 
+def _review_index_has_span_before(
+    index: tuple[list[int], list[tuple[int, int]]],
+    position: int,
+) -> bool:
+    """Return whether an indexed span ends before the candidate position."""
+    _, spans = index
+    return bool(spans and spans[0][1] <= position)
+
+
+def _review_index_has_span_outside(
+    container_index: tuple[list[int], list[tuple[int, int]]],
+    candidate_index: tuple[list[int], list[tuple[int, int]]],
+) -> bool:
+    """Return whether at least one candidate span is outside all containers."""
+    _, candidates = candidate_index
+    return any(
+        not _review_index_contains(container_index, start, end)
+        for start, end in candidates
+    )
+
+
 def _review_context_analysis(
     mission_text: str,
     context_span: tuple[int, int],
@@ -929,13 +971,25 @@ def _review_context_analysis(
     if context_span not in cache:
         start, end = context_span
         context = mission_text[start:end]
+        quote_index = _review_quote_span_index(context, start)
+        execution_index = _review_regex_span_index(
+            context,
+            start,
+            _REVIEW_EXPLICIT_EXECUTION_RE,
+        )
         cache[context_span] = {
             "text": context,
             "double_negation": bool(_REVIEW_DOUBLE_NEGATION_RE.search(context)),
             "conditional": bool(_REVIEW_CONDITIONAL_RE.search(context)),
-            "explicit_execution": bool(_REVIEW_EXPLICIT_EXECUTION_RE.search(context)),
+            "explicit_execution_unquoted": _review_index_has_span_outside(
+                quote_index,
+                execution_index,
+            ),
             "quote_only": bool(_REVIEW_QUOTE_ONLY_RE.search(context)),
-            "quotes": _review_quote_span_index(context, start),
+            "quotes": quote_index,
+            "negation_cue_starts": [
+                match.start() for match in _REVIEW_NEGATION_CUE_RE.finditer(context)
+            ],
             "negated_operations": _review_regex_span_index(
                 context,
                 start,
@@ -975,6 +1029,14 @@ def _review_operation_is_explicitly_negated(
     return False
 
 
+def _review_operation_has_negation_reversal(
+    cue_starts: list[int],
+    relative_end: int,
+) -> bool:
+    """Treat multiple post-operation negation cues as ambiguous, never suppressible."""
+    return len(cue_starts) - bisect_left(cue_starts, relative_end) >= 2
+
+
 def _actual_operation_signal_detail(
     mission_text: str,
     keyword: str,
@@ -983,7 +1045,7 @@ def _actual_operation_signal_detail(
     context_index: tuple[list[int], list[tuple[int, int]]],
     unit_index: tuple[list[int], list[tuple[int, int]]],
     context_analysis_cache: dict[tuple[int, int], dict],
-    unit_flags_cache: dict[tuple[int, int], tuple[bool, bool, bool]],
+    unit_flags_cache: dict[tuple[int, int], dict],
 ) -> dict:
     start, end = match.span()
     context_start, context_end = _review_segment_span(context_index, start, end)
@@ -997,27 +1059,43 @@ def _actual_operation_signal_detail(
     relative_start = start - context_start
     relative_end = end - context_start
     quoted = _review_index_contains(context_analysis["quotes"], start, end)
-    explicit_execution = context_analysis["explicit_execution"]
+    explicit_execution_unquoted = context_analysis["explicit_execution_unquoted"]
     quote_only = context_analysis["quote_only"]
     unit_key = (unit_start, unit_end)
     if unit_key not in unit_flags_cache:
         logical_unit = mission_text[unit_start:unit_end]
-        unit_flags_cache[unit_key] = (
-            bool(_REVIEW_GLOBAL_NON_OPERATION_RE.search(logical_unit)),
-            bool(_REVIEW_DOUBLE_NEGATION_RE.search(logical_unit)),
-            bool(_REVIEW_CONDITIONAL_RE.search(logical_unit)),
-        )
-    global_non_operation, unit_double_negation, unit_conditional = unit_flags_cache[unit_key]
+        unit_flags_cache[unit_key] = {
+            "global_markers": _review_regex_span_index(
+                logical_unit,
+                unit_start,
+                _REVIEW_GLOBAL_NON_OPERATION_RE,
+            ),
+            "affirmative_operations": _review_regex_span_index(
+                logical_unit,
+                unit_start,
+                _REVIEW_AFFIRMATIVE_OPERATION_RE,
+            ),
+            "double_negation": bool(_REVIEW_DOUBLE_NEGATION_RE.search(logical_unit)),
+            "conditional": bool(_REVIEW_CONDITIONAL_RE.search(logical_unit)),
+        }
+    unit_flags = unit_flags_cache[unit_key]
+    global_markers = unit_flags["global_markers"]
+    global_non_operation = bool(global_markers[1])
+    unit_double_negation = unit_flags["double_negation"]
+    unit_conditional = unit_flags["conditional"]
 
-    if quoted and explicit_execution:
-        decision, reason = "included", "affirmative-actual-operation"
-    elif quoted and quote_only:
+    if quoted and quote_only and not explicit_execution_unquoted:
         decision, reason = "suppressed", "quoted-non-operation"
+    elif quoted and explicit_execution_unquoted:
+        decision, reason = "included", "affirmative-actual-operation"
     elif quoted:
         decision, reason = "included", "quoted-context-conservative"
-    elif context_analysis["double_negation"]:
+    elif context_analysis["double_negation"] or _review_operation_has_negation_reversal(
+        context_analysis["negation_cue_starts"],
+        relative_end,
+    ):
         decision, reason = "included", "uncertain-or-double-negation"
-    elif context_analysis["conditional"]:
+    elif context_analysis["conditional"] or unit_conditional:
         decision, reason = "included", "conditional-or-uncertain-context"
     elif _review_operation_is_explicitly_negated(
         logical_context,
@@ -1033,6 +1111,11 @@ def _actual_operation_signal_detail(
         decision, reason = "included", "uncertain-or-double-negation"
     elif global_non_operation and unit_conditional:
         decision, reason = "included", "conditional-or-uncertain-context"
+    elif global_non_operation and (
+        _review_index_has_span_before(global_markers, start)
+        or _review_index_contains(unit_flags["affirmative_operations"], start, end)
+    ):
+        decision, reason = "included", "contradictory-global-operation"
     elif global_non_operation:
         decision, reason = "suppressed", "global-explicit-non-operation"
     else:
@@ -1085,7 +1168,7 @@ def derive_review_tier_decision(
     context_index = _review_segment_index(mission_text, _REVIEW_CONTEXT_BOUNDARY_RE)
     unit_index = _review_segment_index(mission_text, _REVIEW_UNIT_BOUNDARY_RE)
     context_analysis_cache: dict[tuple[int, int], dict] = {}
-    unit_flags_cache: dict[tuple[int, int], tuple[bool, bool, bool]] = {}
+    unit_flags_cache: dict[tuple[int, int], dict] = {}
 
     if task_profile_risk == "high":
         signal = "task_profile.risk=high"
