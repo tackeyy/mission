@@ -109,6 +109,43 @@ def test_english_prefixed_negation_keeps_simple_and_affirmative_regression(
     assert expected_reason in {item["reason"] for item in _details(decision)}
 
 
+@pytest.mark.parametrize(
+    "mission",
+    [
+        "It is not the case that we do not deploy",
+        "We are not saying that we will not deploy",
+        "We cannot say that we will not release",
+        "We can't say that we won't publish",
+        "We can’t say that we won’t publish",
+    ],
+)
+def test_english_outer_negation_of_non_operation_intent_stays_conservative(mission):
+    decision = _decision(mission)
+
+    assert decision["tier"] == "full"
+    assert any(
+        item["reason"] == "uncertain-or-double-negation"
+        for item in _details(decision)
+    )
+
+
+@pytest.mark.parametrize(
+    "mission",
+    [
+        "It is the case that we do not deploy",
+        "We are saying that we will not deploy",
+        "We can say that we will not release",
+    ],
+)
+def test_english_positive_reporting_of_simple_negation_remains_suppressed(mission):
+    decision = _decision(mission)
+
+    assert decision["tier"] == "light"
+    assert {item["reason"] for item in _details(decision)} == {
+        "negated-actual-operation"
+    }
+
+
 def test_conditional_actual_operation_stays_conservative():
     decision = _decision("必要なら本番へ deploy する")
 
@@ -354,6 +391,26 @@ def test_conditional_exception_to_direct_negation_stays_conservative(mission):
     ],
 )
 def test_direct_negation_with_exception_scope_stays_conservative(mission):
+    decision = _decision(mission)
+
+    assert decision["tier"] == "full"
+    assert any(
+        item["reason"] == "conditional-or-uncertain-context"
+        for item in _details(decision)
+    )
+
+
+@pytest.mark.parametrize(
+    "mission",
+    [
+        "we won't deploy except when approval is granted",
+        "we will not deploy until approval is granted",
+        "we will not release pending approval",
+        "deployment will not be performed except in emergencies",
+        "release should not be executed except when authorized",
+    ],
+)
+def test_additional_exception_scope_keeps_direct_negation_conservative(mission):
     decision = _decision(mission)
 
     assert decision["tier"] == "full"
@@ -656,6 +713,26 @@ def test_later_ambiguous_execution_vetoes_global_meta_suppression(mission):
     assert "ambiguous-execution-reference" in {item["reason"] for item in actual}
     for detail in actual:
         assert mission[detail["start"] : detail["end"]] == detail["match"]
+
+
+@pytest.mark.parametrize(
+    "mission",
+    [
+        "Review the deploy procedure. Follow it. "
+        "Actual operations will not be performed.",
+        "Review the deploy procedure. Apply them. "
+        "Actual operations will not be performed.",
+        "deploy手順を調査する。それに従う。実操作は行わない。",
+        "deploy手順を確認する。それらを適用する。実操作は行わない。",
+    ],
+)
+def test_cross_sentence_pronoun_action_vetoes_global_meta_suppression(mission):
+    decision = _decision(mission)
+
+    actual = _details(decision)
+    assert decision["tier"] == "full"
+    assert actual and {item["decision"] for item in actual} == {"included"}
+    assert "ambiguous-execution-reference" in {item["reason"] for item in actual}
 
 
 @pytest.mark.parametrize(
