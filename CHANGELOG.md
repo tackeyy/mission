@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `mission-state.py archive-worktree` now copies a terminal worktree session and its state-referenced evidence into an atomic, idempotent bundle under the destination checkout. A `mission-worktree-archive/1` manifest records session/mission/iteration identity, evidence type, private relative source/archive references, SHA-256, and size; path escapes, symlinks, missing evidence, and integrity failures fail closed. `mission-audit.py` validates the manifest before accepting noncanonical evidence paths while retaining legacy bundle compatibility when no manifest exists (#212).
+- `mission-state.py archive-worktree` now copies a terminal worktree session and its state-referenced evidence to an existing separate checkout in the same Git common directory. Updates publish content-addressed immutable generations before atomically advancing `current.json`, so a crash or parallel reader never loses the previous valid generation. A `mission-worktree-archive/1` manifest records session/mission/iteration identity, evidence type, private relative source/archive references, SHA-256, and size; duplicate paths, escapes, symlinks, missing evidence, and integrity failures fail closed. `mission-audit.py` validates manifest lineage against the state and caches validation once per record while retaining legacy bundle compatibility when no pointer/manifest exists (#212).
 
 ## [2.0.0] - 2026-07-20
 
