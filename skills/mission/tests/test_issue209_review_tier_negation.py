@@ -78,6 +78,12 @@ def test_double_negation_stays_conservative():
         "we don’t not publish",
         "we can't not deploy",
         "we cannot not deploy",
+        "we shouldn't not release",
+        "we shouldn’t not release",
+        "we mustn't not deploy",
+        "we wouldn't not publish",
+        "we couldn’t not deploy",
+        "never not deploy",
     ],
 )
 def test_english_prefixed_double_negation_stays_conservative(mission):
@@ -97,6 +103,11 @@ def test_english_prefixed_double_negation_stays_conservative(mission):
         ("we won't deploy", "light", "negated-actual-operation"),
         ("we won’t deploy", "light", "negated-actual-operation"),
         ("we cannot deploy", "light", "negated-actual-operation"),
+        ("we shouldn't deploy", "light", "negated-actual-operation"),
+        ("we mustn’t release", "light", "negated-actual-operation"),
+        ("we wouldn't publish", "light", "negated-actual-operation"),
+        ("we couldn’t deploy", "light", "negated-actual-operation"),
+        ("never deploy", "light", "negated-actual-operation"),
         ("we will deploy", "full", "affirmative-actual-operation"),
     ],
 )
@@ -117,6 +128,10 @@ def test_english_prefixed_negation_keeps_simple_and_affirmative_regression(
         "We cannot say that we will not release",
         "We can't say that we won't publish",
         "We can’t say that we won’t publish",
+        "It isn't the case that we do not deploy",
+        "It isn’t the case that we do not deploy",
+        "We aren't saying that we will not deploy",
+        "We aren’t saying that we will not deploy",
     ],
 )
 def test_english_outer_negation_of_non_operation_intent_stays_conservative(mission):
@@ -406,6 +421,9 @@ def test_direct_negation_with_exception_scope_stays_conservative(mission):
         "we won't deploy except when approval is granted",
         "we will not deploy until approval is granted",
         "we will not release pending approval",
+        "do not deploy before approval",
+        "do not deploy prior to approval",
+        "do not deploy while approval is pending",
         "deployment will not be performed except in emergencies",
         "release should not be executed except when authorized",
     ],
@@ -502,6 +520,7 @@ def test_japanese_unconditional_negation_is_not_a_false_exception(mission):
         "deployしないので問題ない",
         "releaseしないから支障はない",
         "publishしないため懸念はない",
+        "deployしないため影響はない",
     ],
 )
 def test_causal_assurance_after_simple_negation_is_not_a_reversal(mission):
@@ -760,6 +779,11 @@ def test_later_ambiguous_execution_vetoes_global_meta_suppression(mission):
         "Actual operations will not be performed.",
         "deploy手順を調査する。それに従う。実操作は行わない。",
         "deploy手順を確認する。それらを適用する。実操作は行わない。",
+        "deploy 手順を確認する。その手順に従う。実操作は行わない。",
+        "Review the deploy procedure. Follow the instructions. "
+        "Actual operations will not be performed.",
+        "Review the deploy procedure. Proceed with them. "
+        "Actual operations will not be performed.",
     ],
 )
 def test_cross_sentence_pronoun_action_vetoes_global_meta_suppression(mission):
