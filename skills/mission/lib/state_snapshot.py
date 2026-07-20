@@ -272,6 +272,7 @@ def _validate_archive_payload(
     record: dict[str, Any],
     validation_ref: str,
     payload: Any,
+    inventory_by_path: dict[str, list[list[Any]]],
 ) -> None:
     if not isinstance(payload, dict):
         raise SnapshotError("snapshot archive validation payload is invalid")
@@ -314,6 +315,17 @@ def _validate_archive_payload(
         or not _is_sha256(payload.get("manifest_sha256"))
     ):
         raise SnapshotError("snapshot archive validation relationship is invalid")
+    for expected_path, expected_kind in (
+        (bundle, "directory"),
+        (root, "directory"),
+        (bundle / "current.json", "file"),
+        (root / "manifest.json", "file"),
+    ):
+        if not any(
+            len(entry) > 3 and entry[3] == expected_kind
+            for entry in inventory_by_path.get(str(expected_path), [])
+        ):
+            raise SnapshotError("snapshot archive metadata relationship is invalid")
     evidence = payload.get("evidence")
     if not isinstance(evidence, list) or not evidence:
         raise SnapshotError("snapshot archive validation evidence is invalid")
@@ -355,6 +367,12 @@ def _validate_archive_payload(
             or item.get("path") != str(root / archive_path)
         ):
             raise SnapshotError("snapshot archive validation evidence path is invalid")
+        current_entries = inventory_by_path.get(str(root / archive_path), [])
+        if not any(
+            len(entry) > 7 and entry[3] == "file" and entry[7] == size
+            for entry in current_entries
+        ):
+            raise SnapshotError("snapshot archive validation evidence metadata is invalid")
         seen_archive_paths.add(archive_path_value)
         actual_lineage[(kind, iteration, source_reference)] += 1
         if kind == "state":
@@ -374,7 +392,21 @@ def validate_snapshot_semantics(
     document: dict[str, Any], current_inventory: list[list[Any]]
 ) -> None:
     """Validate record provenance and archived semantic relationships."""
-    inventory = {json.dumps(item, separators=(",", ":")) for item in current_inventory}
+    inventory_by_path: dict[str, list[list[Any]]] = {}
+    roots = [Path(value) for value in document["roots"]]
+    for item in current_inventory:
+        if (
+            not isinstance(item, list)
+            or len(item) < 4
+            or item[0] != "root"
+            or not isinstance(item[1], int)
+            or isinstance(item[1], bool)
+            or not 0 <= item[1] < len(roots)
+            or not isinstance(item[2], str)
+        ):
+            continue
+        absolute = roots[item[1]] / Path(item[2])
+        inventory_by_path.setdefault(str(absolute), []).append(item)
     validations = document["archive_validations"]
     referenced: set[str] = set()
     for record in document["records"]:
@@ -389,11 +421,7 @@ def validate_snapshot_semantics(
             or not isinstance(state, dict)
             or not isinstance(source_inventory, list)
             or not source_inventory
-            or any(
-                not isinstance(item, list)
-                or json.dumps(item, separators=(",", ":")) not in inventory
-                for item in source_inventory
-            )
+            or source_inventory != inventory_by_path.get(path, [])
         ):
             raise SnapshotError("snapshot record provenance is invalid")
         ref = record.get("archive_validation_ref")
@@ -414,7 +442,10 @@ def validate_snapshot_semantics(
         if not isinstance(ref, str) or ref not in validations:
             raise SnapshotError("snapshot archive validation reference is invalid")
         _validate_archive_payload(
-            record=record, validation_ref=ref, payload=validations[ref]
+            record=record,
+            validation_ref=ref,
+            payload=validations[ref],
+            inventory_by_path=inventory_by_path,
         )
         referenced.add(ref)
     if referenced != set(validations):

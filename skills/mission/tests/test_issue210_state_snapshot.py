@@ -318,6 +318,33 @@ def test_snapshot_rejects_malformed_nested_semantic_payload(tmp_path, mutation):
     assert "traceback" not in consumed.stderr.lower()
 
 
+@pytest.mark.parametrize("field", ["size", "path", "pointer_path", "manifest_path"])
+def test_snapshot_rejects_archive_validation_metadata_inconsistency(
+    tmp_path, run_cli, field
+):
+    worktree, destination = archive_fixture._make_completed_worktree(tmp_path)
+    archived = archive_fixture._archive(run_cli, worktree, destination)
+    assert archived.returncode == 0, archived.stderr
+    shutil.rmtree(worktree)
+    snapshot = tmp_path / "state.snapshot.json"
+    assert _snapshot(destination, snapshot).returncode == 0
+
+    def mutate(document):
+        validation = next(iter(document["archive_validations"].values()))
+        if field == "size":
+            validation["evidence"][0]["size"] += 1
+        elif field == "path":
+            validation["evidence"][0]["path"] = validation["manifest_path"]
+        else:
+            validation[field] = str(tmp_path / f"other-{field}.json")
+
+    _rewrite_snapshot(snapshot, mutate)
+    consumed = _run_audit("--snapshot-in", str(snapshot), "--json", cwd=destination)
+    assert consumed.returncode != 0
+    assert not consumed.stdout.strip()
+    assert "traceback" not in consumed.stderr.lower()
+
+
 def test_snapshot_supports_legacy_archive_state(tmp_path):
     root = tmp_path / "root"
     live = _write_state(root, "legacy", "2026-07-21T00:00:00Z")
