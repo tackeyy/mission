@@ -124,6 +124,8 @@ agent needs an auditable "why can I stop now?" gate.
 
 To reduce review overhead for the 95% pass-through majority, `mission` derives a `review_tier` (light/standard/full) at init time from complexity and mission text. Light tier runs one reviewer instead of three and limits specialist selection to `required: true` providers. Gate semantics — threshold, open High findings, agreement delta, halt conditions — are unchanged regardless of tier. The cost reduction effect has not yet been measured in production.
 
+For retrospective audits, `scripts/mission-audit.py --current-since <date-or-ISO-timestamp>` classifies every detected risk by the state's `updated_at`. One shared parser handles date and ISO bounds for `--since`, `--until`, and `--current-since`; the current cutoff is inclusive and normalized to UTC, while missing or invalid timestamps remain current as a safe default. JSON and Markdown report current P0/P1/P2 findings before historical risks while retaining both, including force-pass and specialist-provenance findings. JSON keeps canonical period evidence lists and compact count/index views by code. With no cutoff, all findings remain current for backward-compatible all-period reporting. This reporting scope does not change pass severity, force approval, or required-specialist result gates.
+
 Pick `mission` for the auditable completion gate, tail insurance on open-world work, irreversible-action governance, and resumable state — not for an average quality lift.
 
 Benchmark claims should use the pilot protocol in

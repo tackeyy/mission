@@ -5,6 +5,7 @@
   scripts/mission-audit.py
   skills/mission/bin/mission-state.py
   skills/mission/lib/activity_segments.py
+  skills/mission/lib/audit_findings.py
   skills/mission/lib/mission_common.py
   skills/mission/refs/specialist-registry.md (存在する場合)
   skills/mission/refs/self-improvement.md
@@ -21,6 +22,7 @@
   plugins/mission/scripts/mission-audit.py
   plugins/mission/skills/mission/bin/mission-state.py
   plugins/mission/skills/mission/lib/activity_segments.py
+  plugins/mission/skills/mission/lib/audit_findings.py
   plugins/mission/skills/mission/lib/mission_common.py
   plugins/mission/skills/mission/refs/specialist-registry.md (存在する場合)
   plugins/mission/skills/mission/refs/self-improvement.md
@@ -37,6 +39,7 @@
   cp scripts/mission-audit.py             plugins/mission/scripts/mission-audit.py
   cp skills/mission/bin/mission-state.py  plugins/mission/skills/mission/bin/mission-state.py
   cp skills/mission/lib/activity_segments.py plugins/mission/skills/mission/lib/activity_segments.py
+  cp skills/mission/lib/audit_findings.py plugins/mission/skills/mission/lib/audit_findings.py
   cp skills/mission/lib/mission_common.py plugins/mission/skills/mission/lib/mission_common.py
   cp skills/mission/refs/specialist-registry.md plugins/mission/skills/mission/refs/specialist-registry.md
   cp skills/mission/refs/self-improvement.md plugins/mission/skills/mission/refs/self-improvement.md
@@ -107,6 +110,10 @@ SYNC_PAIRS = [
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "activity_segments.py",
     ),
     (
+        REPO_ROOT / "skills" / "mission" / "lib" / "audit_findings.py",
+        REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "audit_findings.py",
+    ),
+    (
         REPO_ROOT / "skills" / "mission" / "lib" / "mission_common.py",
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "mission_common.py",
     ),
@@ -164,11 +171,24 @@ def test_mission_state_py_in_sync():
 
 def test_activity_segments_py_in_sync():
     """Shared activity timing reducer is identical in the distribution mirror."""
-    src, dst = SYNC_PAIRS[-2]
+    src, dst = SYNC_PAIRS[-3]
     assert src.exists(), f"正典が存在しない: {src}"
     assert dst.exists(), f"plugins 側が存在しない: {dst}"
     assert _md5(src) == _md5(dst), (
         f"activity_segments.py が未同期。\n"
+        f"  正典: {src}\n"
+        f"  plugins: {dst}\n"
+        f"  同期コマンド: cp {src} {dst}"
+    )
+
+
+def test_audit_findings_py_in_sync():
+    """Shared finding period classifier is identical in the distribution mirror."""
+    src, dst = SYNC_PAIRS[-2]
+    assert src.exists(), f"正典が存在しない: {src}"
+    assert dst.exists(), f"plugins 側が存在しない: {dst}"
+    assert _md5(src) == _md5(dst), (
+        f"audit_findings.py が未同期。\n"
         f"  正典: {src}\n"
         f"  plugins: {dst}\n"
         f"  同期コマンド: cp {src} {dst}"
