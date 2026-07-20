@@ -190,6 +190,12 @@ def _current_generation(bundle: Path) -> tuple[str, Path]:
     return generation, bundle / "generations" / generation
 
 
+def _active_bundle_root(bundle: Path) -> Path:
+    if (bundle / "current.json").is_file():
+        return _current_generation(bundle)[1]
+    return bundle
+
+
 def test_archive_worktree_copies_allowlisted_evidence_and_writes_manifest(tmp_path, run_cli):
     worktree, destination = _make_completed_worktree(tmp_path)
 
@@ -292,6 +298,60 @@ def test_audit_rejects_tampered_or_malformed_manifest(tmp_path, run_cli, tamper)
     data = _run_audit(destination)
 
     assert data["missing_scoring_evidence_count"] == 1
+
+
+@pytest.mark.parametrize("tamper", ["relabel-reviews", "source-mismatch"])
+def test_audit_rejects_manifest_lineage_that_disagrees_with_state(tmp_path, run_cli, tamper):
+    worktree, destination = _make_completed_worktree(tmp_path)
+    result = _archive(run_cli, worktree, destination)
+    assert result.returncode == 0, result.stderr
+    bundle = Path(json.loads(result.stdout)["bundle_path"])
+    generation_root = _active_bundle_root(bundle)
+    manifest_path = generation_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    scoring = next(item for item in manifest["evidence"] if item["evidence_kind"] == "scoring")
+    reviews = next(item for item in manifest["evidence"] if item["evidence_kind"] == "reviews")
+    if tamper == "relabel-reviews":
+        (generation_root / scoring["archive_path"]).unlink()
+        manifest["evidence"].remove(scoring)
+        reviews["evidence_kind"] = "scoring"
+    else:
+        scoring["source_reference"] = reviews["source_reference"]
+    _rewrite_manifest_digest(manifest_path, manifest)
+    shutil.rmtree(worktree)
+
+    data = _run_audit(destination)
+
+    assert data["missing_scoring_evidence_count"] == 1
+
+
+def test_audit_validates_manifest_hashes_once_per_record(tmp_path, run_cli, monkeypatch):
+    worktree, destination = _make_completed_worktree(tmp_path)
+    result = _archive(run_cli, worktree, destination)
+    assert result.returncode == 0, result.stderr
+    bundle = Path(json.loads(result.stdout)["bundle_path"])
+    manifest = json.loads((_active_bundle_root(bundle) / "manifest.json").read_text(encoding="utf-8"))
+    module_path = REPO_ROOT / "scripts" / "mission-audit.py"
+    spec = importlib.util.spec_from_file_location("mission_audit_cache_issue212", module_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    record = next(record for record in module.load_records([destination]) if record.state["session_id"] == SESSION_ID)
+    real_hash = module._file_sha256
+    hash_count = 0
+
+    def count_hashes(path):
+        nonlocal hash_count
+        hash_count += 1
+        return real_hash(path)
+
+    monkeypatch.setattr(module, "_file_sha256", count_hashes)
+
+    for _ in range(3):
+        assert module.scoring_evidence_paths(record, 2)
+
+    assert hash_count == len(manifest["evidence"])
 
 
 def test_archive_worktree_is_idempotent(tmp_path, run_cli):
