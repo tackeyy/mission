@@ -81,16 +81,21 @@ equivalent Japanese forms), negated non-operation intent, double negatives, and
 uncertainty remain conservative escalations. Multiple negation cues count as a
 reversal only before the next operation, so separate simple negations do not
 combine. A global non-operation marker does
-not suppress by position alone: it suppresses a candidate only when that
-candidate's context proves a meta/non-operation intent such as reviewing,
-analyzing, or documenting a procedure. Ambiguous, imperative, and affirmative
+not suppress by position alone: it suppresses a candidate only when the entire
+candidate context matches a strict meta-only grammar for reviewing, analyzing,
+documenting, or inspecting procedures, settings, logs, or text. Unknown trailing
+content invalidates that proof. Ambiguous, imperative, and affirmative
 candidates remain conservative. Any execution cue in the same logical unit that
 is not directly anchored to another named operation may refer to a meta candidate
-and vetoes suppression with `ambiguous-execution-reference`. Explicit quote-only intent suppresses a quoted
+and vetoes suppression with `ambiguous-execution-reference`; execution cues
+inside quote spans are excluded from that veto. Explicit quote-only intent suppresses a quoted
 candidate unless execution language immediately around that quote directly
 targets the quoted command, including a passive modal immediately after the
 quote; execution of another named operation cannot override it. Ambiguous
-pronoun or targetless execution remains conservative.
+pronoun or targetless execution remains conservative. Quote-only suppression
+also requires no unknown residual outside quote spans after removing the
+quote-only marker, harmless terminators, and actions explicitly anchored to a
+different named operation.
 Segment boundaries, context flags, quote spans, meta/non-operation spans,
 negated-operation spans, negation-cue positions, and global-marker spans are
 indexed or cached once per mission/context so repeated
