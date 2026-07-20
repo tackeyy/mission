@@ -209,6 +209,16 @@ def _active_bundle_root(bundle: Path) -> Path:
     return bundle
 
 
+def _load_audit_module(name: str):
+    module_path = REPO_ROOT / "scripts" / "mission-audit.py"
+    spec = importlib.util.spec_from_file_location(name, module_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_archive_worktree_copies_allowlisted_evidence_and_writes_manifest(tmp_path, run_cli):
     worktree, destination = _make_completed_worktree(tmp_path)
 
@@ -273,6 +283,37 @@ def test_audit_uses_valid_manifest_for_noncanonical_scoring_path(tmp_path, run_c
 
     assert with_manifest["missing_scoring_evidence_count"] == 0
     assert without_manifest["missing_scoring_evidence_count"] == 1
+
+
+@pytest.mark.parametrize("pointer_failure", ["malformed", "symlink", "missing-generation"])
+def test_audit_reports_invalid_current_pointer_instead_of_silently_omitting_archive(
+    tmp_path, run_cli, pointer_failure
+):
+    worktree, destination = _make_completed_worktree(tmp_path)
+    result = _archive(run_cli, worktree, destination)
+    assert result.returncode == 0, result.stderr
+    bundle = Path(json.loads(result.stdout)["bundle_path"])
+    pointer = bundle / "current.json"
+    if pointer_failure == "malformed":
+        pointer.write_text("{not-json\n", encoding="utf-8")
+    elif pointer_failure == "symlink":
+        external = tmp_path / "external-pointer.json"
+        external.write_text(pointer.read_text(encoding="utf-8"), encoding="utf-8")
+        pointer.unlink()
+        pointer.symlink_to(external)
+    else:
+        pointer.write_text(
+            json.dumps({"schema": "mission-worktree-current/1", "generation": "f" * 64}) + "\n",
+            encoding="utf-8",
+        )
+
+    data = _run_audit(destination)
+
+    assert data["invalid_worktree_archive_count"] == 1
+    assert data["invalid_worktree_archives"][0]["bundle_path"] == str(bundle)
+    codes = {finding["code"] for finding in data["findings"]}
+    assert "invalid-worktree-archive" in codes
+    assert "no-critical-findings" not in codes
 
 
 @pytest.mark.parametrize(
@@ -367,6 +408,58 @@ def test_audit_validates_manifest_hashes_once_per_record(tmp_path, run_cli, monk
         assert module.scoring_evidence_paths(record, 2)
 
     assert hash_count == len(manifest["evidence"])
+
+
+def test_audit_record_keeps_discovery_generation_snapshot_when_pointer_advances(tmp_path, run_cli):
+    worktree, destination = _make_completed_worktree(tmp_path)
+    first = _archive(run_cli, worktree, destination)
+    assert first.returncode == 0, first.stderr
+    bundle = Path(json.loads(first.stdout)["bundle_path"])
+    first_generation, first_root = _current_generation(bundle)
+    scoring = worktree / ".mission-state" / "archive" / "noncanonical-scoring.json"
+    scoring.write_text('{"items":{"accuracy":4.7}}\n', encoding="utf-8")
+    second = _archive(run_cli, worktree, destination)
+    assert second.returncode == 0, second.stderr
+    second_generation, _second_root = _current_generation(bundle)
+    pointer = bundle / "current.json"
+    pointer.write_text(
+        json.dumps({"schema": "mission-worktree-current/1", "generation": first_generation}) + "\n",
+        encoding="utf-8",
+    )
+    module = _load_audit_module("mission_audit_snapshot_issue212")
+    record = next(record for record in module.load_records([destination]) if record.state["session_id"] == SESSION_ID)
+
+    pointer.write_text(
+        json.dumps({"schema": "mission-worktree-current/1", "generation": second_generation}) + "\n",
+        encoding="utf-8",
+    )
+
+    assert record.archive_generation == first_generation
+    assert record.archive_root == first_root
+    evidence = module.scoring_evidence_paths(record, 2)
+    assert evidence
+    assert all(path.is_relative_to(first_root) for path in evidence)
+    assert module.missing_scoring_evidence_iterations(record) == []
+
+
+def test_generation_missing_manifest_is_invalid_and_cannot_use_legacy_root_fallback(tmp_path, run_cli):
+    worktree, destination = _make_completed_worktree(tmp_path)
+    result = _archive(run_cli, worktree, destination)
+    assert result.returncode == 0, result.stderr
+    bundle = Path(json.loads(result.stdout)["bundle_path"])
+    _generation, generation_root = _current_generation(bundle)
+    stale_scoring = bundle / "archive" / "iter-2-feedface-scoring.json"
+    stale_scoring.parent.mkdir(parents=True)
+    shutil.copy2(generation_root / "archive" / "iter-2-feedface-scoring.json", stale_scoring)
+    (generation_root / "manifest.json").unlink()
+    shutil.rmtree(worktree)
+
+    data = _run_audit(destination)
+
+    assert data["total_sessions"] == 1
+    assert data["invalid_worktree_archive_count"] == 1
+    assert data["missing_scoring_evidence_count"] == 1
+    assert any(finding["code"] == "invalid-worktree-archive" for finding in data["findings"])
 
 
 def test_archive_worktree_is_idempotent(tmp_path, run_cli):
