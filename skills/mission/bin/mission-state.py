@@ -31,7 +31,6 @@ from bisect import bisect_left, bisect_right
 import contextlib
 import fcntl
 import hashlib
-import importlib.util
 import io
 import json
 import math
@@ -79,7 +78,7 @@ from activity_segments import (  # noqa: E402
     transition_activity_phase,
 )
 from worktree_archive import validate_worktree_archive_bundle  # noqa: E402
-from state_snapshot import SnapshotError  # noqa: E402
+from state_snapshot import SnapshotError, consume_snapshot_document  # noqa: E402
 
 SCHEMA_VERSION = 2  # v1: 旧 schema (project_root/pid なし), v2: A-1/A-2/B-3 追加
 
@@ -6225,23 +6224,16 @@ def cmd_stats(args):
     all_states = []
     observation_now = None
     if args.snapshot:
-        audit_path = Path(__file__).resolve().parents[3] / "scripts" / "mission-audit.py"
-        spec = importlib.util.spec_from_file_location("mission_audit_snapshot_consumer", audit_path)
-        if spec is None or spec.loader is None:
-            raise SnapshotError("audit snapshot consumer is unavailable")
-        audit_module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = audit_module
-        spec.loader.exec_module(audit_module)
         try:
-            records, _invalid, roots, observation_now = audit_module.consume_state_snapshot(
-                Path(args.snapshot), requested_roots
+            document, roots, observation_now = consume_snapshot_document(
+                Path(args.snapshot), requested_roots=requested_roots
             )
         except SnapshotError as error:
             print(f"ERROR: invalid state snapshot: {error}", file=sys.stderr)
             raise SystemExit(2)
-        for record in records:
-            state = dict(record.state)
-            state["_mission_source_path"] = str(record.path)
+        for item in document["records"]:
+            state = dict(item["state"])
+            state["_mission_source_path"] = str(item["path"])
             all_states.append(state)
     else:
         for r in roots:

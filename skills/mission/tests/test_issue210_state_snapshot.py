@@ -258,6 +258,66 @@ def test_snapshot_keeps_missing_scoring_finding_gate(tmp_path):
     assert any(item["code"] == "missing-scoring-evidence" for item in _json(reused)["findings"])
 
 
+def test_snapshot_rejects_forged_archive_validation_on_ordinary_record(tmp_path):
+    root = tmp_path / "root"
+    decoy = root / ".mission-state" / "evidence" / "decoy.json"
+    decoy.parent.mkdir(parents=True)
+    decoy.write_text('{"unrelated":true}\n', encoding="utf-8")
+    _write_state(root, "one", "2026-07-21T00:00:00Z", score_history=[{
+        "iteration": 1, "composite": 4.5, "min_item": 4.0, "items": {},
+        "scoring_evidence_path": ".mission-state/missing-score.json",
+    }])
+    snapshot = tmp_path / "state.snapshot.json"
+    built = _snapshot(root, snapshot)
+    assert _json(built)["missing_scoring_evidence_count"] == 1
+
+    def forge(document):
+        record = document["records"][0]
+        record["archive_validation_ref"] = "forged"
+        document["archive_validations"]["forged"] = {
+            "root": str(root),
+            "generation": "a" * 64,
+            "state_paths": [record["path"]],
+            "evidence": [{
+                "path": str(decoy),
+                "evidence_kind": "scoring",
+                "iteration": 1,
+            }],
+        }
+
+    _rewrite_snapshot(snapshot, forge)
+    consumed = _run_audit("--snapshot-in", str(snapshot), "--json", cwd=root)
+    assert consumed.returncode != 0
+    assert not consumed.stdout.strip()
+    assert "snapshot" in consumed.stderr.lower()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda document: document["records"][0].__setitem__(
+            "source_inventory", [{}]
+        ),
+        lambda document: document["archive_validations"].__setitem__(
+            "unused", {"evidence": [{}]}
+        ),
+        lambda document: document["records"][0].__setitem__(
+            "archive_validation_ref", "missing"
+        ),
+    ],
+)
+def test_snapshot_rejects_malformed_nested_semantic_payload(tmp_path, mutation):
+    root = tmp_path / "root"
+    _write_state(root, "one", "2026-07-21T00:00:00Z")
+    snapshot = tmp_path / "state.snapshot.json"
+    assert _snapshot(root, snapshot).returncode == 0
+    _rewrite_snapshot(snapshot, mutation)
+    consumed = _run_audit("--snapshot-in", str(snapshot), "--json", cwd=root)
+    assert consumed.returncode != 0
+    assert not consumed.stdout.strip()
+    assert "traceback" not in consumed.stderr.lower()
+
+
 def test_snapshot_supports_legacy_archive_state(tmp_path):
     root = tmp_path / "root"
     live = _write_state(root, "legacy", "2026-07-21T00:00:00Z")
@@ -410,12 +470,16 @@ def test_snapshot_cli_help_is_backward_compatible(tmp_path, run_cli):
     assert "--root" in audit_help.stdout and "--root" in stats_help.stdout
 
 
-def test_snapshot_consume_uses_one_metadata_rewalk_and_zero_state_reads_or_parses(
-    tmp_path, monkeypatch
+def test_snapshot_consume_uses_metadata_only_and_skips_all_candidate_content_work(
+    tmp_path, monkeypatch, run_cli
 ):
     root = tmp_path / "root"
     for index in range(4):
         _write_state(root / f"p{index}", f"s{index}", "2026-07-21T00:00:00Z")
+    worktree, destination = archive_fixture._make_completed_worktree(tmp_path)
+    archived = archive_fixture._archive(run_cli, worktree, destination)
+    assert archived.returncode == 0, archived.stderr
+    shutil.rmtree(worktree)
     snapshot = tmp_path / "state.snapshot.json"
 
     spec = importlib.util.spec_from_file_location("audit_issue210_parse_count", AUDIT_PY)
@@ -423,14 +487,23 @@ def test_snapshot_consume_uses_one_metadata_rewalk_and_zero_state_reads_or_parse
     audit = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = audit
     spec.loader.exec_module(audit)
-    audit.create_state_snapshot([root], snapshot, ttl_seconds=3600)
+    audit.create_state_snapshot([root, destination], snapshot, ttl_seconds=3600)
 
-    counts = {"state_read": 0, "state_parse": 0, "metadata_rewalk": 0, "snapshot_parse": 0}
+    counts = {
+        "state_read": 0, "state_parse": 0, "candidate_load": 0,
+        "file_hash": 0, "archive_validate": 0, "archive_hash": 0,
+        "metadata_rewalk": 0, "snapshot_parse": 0,
+    }
     real_rewalk = audit._root_metadata_inventory
     snapshot_module = sys.modules["state_snapshot"]
     real_snapshot_parse = snapshot_module.parse_snapshot_bytes
     monkeypatch.setattr(audit, "read_state_bytes", lambda path: counts.__setitem__("state_read", counts["state_read"] + 1))
     monkeypatch.setattr(audit, "parse_state_bytes", lambda payload: counts.__setitem__("state_parse", counts["state_parse"] + 1))
+    monkeypatch.setattr(audit, "_iter_state_candidates", lambda *args, **kwargs: counts.__setitem__("candidate_load", counts["candidate_load"] + 1))
+    monkeypatch.setattr(audit, "_file_sha256", lambda path: counts.__setitem__("file_hash", counts["file_hash"] + 1))
+    monkeypatch.setattr(audit, "validate_worktree_archive_bundle", lambda path: counts.__setitem__("archive_validate", counts["archive_validate"] + 1))
+    worktree_archive = sys.modules["worktree_archive"]
+    monkeypatch.setattr(worktree_archive, "_sha256", lambda path: counts.__setitem__("archive_hash", counts["archive_hash"] + 1))
 
     def counted_rewalk(roots):
         counts["metadata_rewalk"] += 1
@@ -443,8 +516,12 @@ def test_snapshot_consume_uses_one_metadata_rewalk_and_zero_state_reads_or_parse
     monkeypatch.setattr(audit, "_root_metadata_inventory", counted_rewalk)
     monkeypatch.setattr(snapshot_module, "parse_snapshot_bytes", counted_snapshot_parse)
     records, _invalid, _roots, _observed = audit.consume_state_snapshot(snapshot, None)
-    assert len(records) == 4
-    assert counts == {"state_read": 0, "state_parse": 0, "metadata_rewalk": 1, "snapshot_parse": 1}
+    assert len(records) == 5
+    assert counts == {
+        "state_read": 0, "state_parse": 0, "candidate_load": 0,
+        "file_hash": 0, "archive_validate": 0, "archive_hash": 0,
+        "metadata_rewalk": 1, "snapshot_parse": 1,
+    }
 
 
 def test_snapshot_capture_rejects_drift_between_metadata_checks(tmp_path, monkeypatch):

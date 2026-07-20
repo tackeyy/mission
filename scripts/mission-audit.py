@@ -70,9 +70,13 @@ from state_snapshot import (  # noqa: E402
     DEFAULT_TTL_SECONDS,
     SnapshotError,
     build_snapshot_document,
+    consume_snapshot_document,
     discovery_digest,
+    external_evidence_inventory as snapshot_external_evidence_inventory,
     normalize_roots,
-    read_snapshot,
+    record_source_inventory,
+    root_metadata_inventory as snapshot_root_metadata_inventory,
+    value_digest,
     write_snapshot,
 )
 
@@ -1049,51 +1053,8 @@ def _metadata_entry(source_path: Path, **identity: Any) -> dict[str, Any]:
 
 
 def _root_metadata_inventory(roots: list[Path]) -> list[dict[str, Any]]:
-    """Rewalk roots without reading file contents or parsing JSON."""
-    inventory: list[dict[str, Any]] = []
-    for root_index, root_value in enumerate(roots):
-        root = Path(root_value).expanduser().resolve(strict=False)
-        if not root.exists():
-            inventory.append(_metadata_entry(
-                root, scope="root", root_index=root_index, relative_path="."
-            ))
-            continue
-        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-            directory = Path(dirpath)
-            relative = directory.relative_to(root)
-            inside_state = ".mission-state" in relative.parts
-            if not inside_state:
-                dirnames[:] = sorted(name for name in dirnames if name not in PRUNE_DIRS)
-            else:
-                dirnames[:] = sorted(dirnames)
-            inventory.append(_metadata_entry(
-                directory,
-                scope="root",
-                root_index=root_index,
-                relative_path=relative.as_posix(),
-            ))
-            retained_dirs: list[str] = []
-            for name in dirnames:
-                child = directory / name
-                if child.is_symlink():
-                    inventory.append(_metadata_entry(
-                        child,
-                        scope="root",
-                        root_index=root_index,
-                        relative_path=(relative / name).as_posix(),
-                    ))
-                else:
-                    retained_dirs.append(name)
-            dirnames[:] = retained_dirs
-            if inside_state:
-                for name in sorted(filenames):
-                    inventory.append(_metadata_entry(
-                        directory / name,
-                        scope="root",
-                        root_index=root_index,
-                        relative_path=(relative / name).as_posix(),
-                    ))
-    return inventory
+    """Named seam around the shared metadata-only rewalk."""
+    return snapshot_root_metadata_inventory(roots)
 
 
 def _record_evidence_paths(record: StateRecord) -> list[Path]:
@@ -1124,10 +1085,7 @@ def _record_evidence_paths(record: StateRecord) -> list[Path]:
 
 
 def _external_evidence_inventory(paths: list[Path]) -> list[dict[str, Any]]:
-    return [
-        _metadata_entry(path, scope="evidence", path=str(path.expanduser().absolute()))
-        for path in paths
-    ]
+    return snapshot_external_evidence_inventory(paths)
 
 
 def _serialize_archive_validation(record: StateRecord) -> dict[str, Any] | None:
@@ -1137,10 +1095,16 @@ def _serialize_archive_validation(record: StateRecord) -> dict[str, Any] | None:
     if status != "valid":
         return None
     validation = record.archive_validation
+    archive_root = (record.archive_root or record.archive_bundle).absolute()
+    archive_bundle = record.archive_bundle.absolute()
     return {
-        "root": str((record.archive_root or record.archive_bundle).absolute()),
+        "bundle": str(archive_bundle),
+        "root": str(archive_root),
         "generation": record.archive_generation,
         "state_paths": [str(record.path.absolute())],
+        "state_sha256": value_digest(record.state),
+        "pointer_path": str(archive_bundle / "current.json"),
+        "manifest_path": str(archive_root / "manifest.json"),
         "evidence": [
             {
                 **{key: value for key, value in item.items() if key != "path"},
@@ -1153,22 +1117,47 @@ def _serialize_archive_validation(record: StateRecord) -> dict[str, Any] | None:
     }
 
 
-def _serialize_record(record: StateRecord) -> dict[str, Any]:
+def _serialize_record(
+    record: StateRecord, roots: list[Path], validation_ref: str | None = None
+) -> dict[str, Any]:
     return {
         "path": str(record.path.absolute()),
         "state": record.state,
         "archive_bundle": str(record.archive_bundle.absolute()) if record.archive_bundle else None,
         "archive_root": str(record.archive_root.absolute()) if record.archive_root else None,
         "archive_generation": record.archive_generation,
-        "archive_validation": _serialize_archive_validation(record),
+        "archive_validation_ref": validation_ref,
+        "source_inventory": record_source_inventory(record.path, roots),
     }
 
 
-def _record_from_payload(item: dict[str, Any]) -> StateRecord:
+def _serialize_records(
+    records: list[StateRecord], roots: list[Path],
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    payloads: list[dict[str, Any]] = []
+    validations: dict[str, dict[str, Any]] = {}
+    for record in records:
+        validation_payload = _serialize_archive_validation(record)
+        validation_ref = None
+        if validation_payload is not None:
+            validation_ref = "|".join((
+                str(record.archive_bundle or ""),
+                str(record.archive_generation or "legacy"),
+                str(record.archive_root or ""),
+            ))
+            validations.setdefault(validation_ref, validation_payload)
+        payloads.append(_serialize_record(record, roots, validation_ref))
+    return payloads, validations
+
+
+def _record_from_payload(
+    item: dict[str, Any], validations: dict[str, dict[str, Any]] | None = None
+) -> StateRecord:
     if not isinstance(item, dict) or not isinstance(item.get("state"), dict):
         raise SnapshotError("snapshot record payload is invalid")
     path = Path(str(item.get("path") or ""))
-    validation_payload = item.get("archive_validation")
+    validation_ref = item.get("archive_validation_ref")
+    validation_payload = (validations or {}).get(validation_ref) if validation_ref else None
     validation = None
     if validation_payload is not None:
         if not isinstance(validation_payload, dict):
@@ -1223,9 +1212,11 @@ def create_state_snapshot(
                 seen_external.add(key)
     evidence_before = _external_evidence_inventory(external_paths)
     index = root_before + evidence_before
+    record_payloads, archive_validations = _serialize_records(records, normalized)
     document = build_snapshot_document(
         roots=normalized,
-        records=[_serialize_record(record) for record in records],
+        records=record_payloads,
+        archive_validations=archive_validations,
         invalid_worktree_archives=invalid,
         discovery_index=index,
         observed_at=observed,
@@ -1241,24 +1232,18 @@ def create_state_snapshot(
 def consume_state_snapshot(
     path: Path, requested_roots: list[Path] | None,
 ) -> tuple[list[StateRecord], list[dict[str, Any]], list[Path], datetime]:
-    document = read_snapshot(path, requested_roots=requested_roots)
-    roots = [Path(root) for root in document["roots"]]
-    evidence_paths = [
-        Path(item["path"])
-        for item in document["discovery_index"]
-        if item.get("scope") == "evidence" and isinstance(item.get("path"), str)
+    document, roots, observed = consume_snapshot_document(
+        path,
+        requested_roots=requested_roots,
+        root_inventory_loader=_root_metadata_inventory,
+        evidence_inventory_loader=_external_evidence_inventory,
+    )
+    records = [
+        _record_from_payload(item, document["archive_validations"])
+        for item in document["records"]
     ]
-    index = _root_metadata_inventory(roots) + _external_evidence_inventory(evidence_paths)
-    if discovery_digest(index) != document["discovery_digest"] or index != document["discovery_index"]:
-        raise SnapshotError("snapshot discovery fingerprint is stale")
-    records = [_record_from_payload(item) for item in document["records"]]
     invalid = document["invalid_worktree_archives"]
-    observed = parse_dt(document["observed_at"])
-    if observed is None:
-        raise SnapshotError("snapshot observed_at is invalid")
-    if observed.tzinfo is None:
-        observed = observed.replace(tzinfo=timezone.utc)
-    return records, invalid, roots, observed.astimezone(timezone.utc)
+    return records, invalid, roots, observed
 
 
 def collect_invalid_worktree_archives(
