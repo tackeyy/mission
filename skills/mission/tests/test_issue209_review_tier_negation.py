@@ -496,6 +496,45 @@ def test_execution_directly_targeting_quoted_command_is_affirmative(mission):
 @pytest.mark.parametrize(
     "mission",
     [
+        'only quote "deploy", then execute it',
+        'only quote "deploy" and execute it',
+        "引用するだけ: 「deploy」。その後それを実行する",
+    ],
+)
+def test_ambiguous_pronoun_execution_keeps_quoted_candidate_conservative(mission):
+    decision = _decision(mission)
+
+    deploy = next(item for item in _details(decision) if item["keyword"] == "deploy")
+    assert decision["tier"] == "full"
+    assert (deploy["decision"], deploy["reason"]) == (
+        "included",
+        "ambiguous-execution-reference",
+    )
+    assert mission[deploy["start"] : deploy["end"]] == deploy["match"]
+
+
+@pytest.mark.parametrize(
+    "mission",
+    [
+        "Review the deploy procedure, then execute it. "
+        "Actual operations will not be performed.",
+        "deploy手順を調査してから実行する。実操作は行わない",
+    ],
+)
+def test_later_ambiguous_execution_vetoes_global_meta_suppression(mission):
+    decision = _decision(mission)
+
+    actual = _details(decision)
+    assert decision["tier"] == "full"
+    assert actual and {item["decision"] for item in actual} == {"included"}
+    assert "ambiguous-execution-reference" in {item["reason"] for item in actual}
+    for detail in actual:
+        assert mission[detail["start"] : detail["end"]] == detail["match"]
+
+
+@pytest.mark.parametrize(
+    "mission",
+    [
         "本番へ deploy する可能性がある",
         "本番へ deploy するかもしれない",
         "本番へ deploy するかは未確定",
