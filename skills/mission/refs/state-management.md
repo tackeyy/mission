@@ -154,7 +154,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py archive-worktr
 
 対象は現 session の state に明示された assumptions、artifact、score history の scoring/reviews、specialist invocation、progress evidence の allowlist のみ。元 state の identity や内容は書き換えず byte copy する。必須 evidence の欠落、`.mission-state` 外への path escape、symlink、重複 archive path、manifest/checksum 不整合は exit 2 で fail-closed になり、不完全な世代を current として公開しない。同一 filesystem 内で一時世代を完成させ、content digest 名の immutable generation として publish してから `current.json` だけを atomic replace する。更新中・pointer swap 失敗時も reader は旧世代を参照でき、同じ入力の再実行は `action=unchanged` となる。旧世代は reader safety のため自動削除しない。
 
-`mission-audit.py` は pointer が示す generation の `mission-worktree-archive/1` manifest について、identity・path・size・checksum に加え、state から導出した `(evidence type, iteration, source reference)` multiset との完全一致を検証する。1 audit run では同じ record の検証結果を cache し、score history の iteration ごとに全 evidence を再 hash しない。不正 manifest がある場合は旧来の filename fallback に戻さず missing evidence として扱う。pointer/manifest のない既存 bundle は #201 までの配置互換を維持する。
+`mission-audit.py` は discovery 時に pointer が示した generation を record snapshot として固定し、同じ audit run の途中で `current.json` が進んでも別世代を再読込しない。その generation の `mission-worktree-archive/1` manifest について、identity・path・size・checksum に加え、state から導出した `(evidence type, iteration, source reference)` multiset との完全一致を検証する。1 audit run では同じ record の検証結果を cache し、score history の iteration ごとに全 evidence を再 hash しない。pointer の malformed/symlink/参照先欠落、または generation の manifest 欠落・不整合は `invalid-worktree-archive` finding として明示し、旧来の filename fallback に戻さない。pointer が存在しない既存 bundle だけは #201 までの配置互換を維持する。
 
 ### Phase C: multi-session 並列実行 (2026-06-13 デフォルト有効化)
 
