@@ -66,6 +66,15 @@ from worktree_archive import (  # noqa: E402
     WorktreeArchiveValidation,
     validate_worktree_archive_bundle,
 )
+from state_snapshot import (  # noqa: E402
+    DEFAULT_TTL_SECONDS,
+    SnapshotError,
+    build_snapshot_document,
+    discovery_digest,
+    normalize_roots,
+    read_snapshot,
+    write_snapshot,
+)
 
 
 PRUNE_DIRS = {
@@ -998,6 +1007,217 @@ def load_records(
     return records
 
 
+def _path_inventory(path: Path, *, known_sha256: str | None = None,
+                    known_size: int | None = None) -> dict[str, Any]:
+    absolute = Path(path).expanduser().absolute()
+    item: dict[str, Any] = {"path": str(absolute)}
+    try:
+        path_stat = absolute.lstat()
+    except FileNotFoundError:
+        return {**item, "kind": "missing"}
+    except OSError as error:
+        return {**item, "kind": "error", "errno": error.errno}
+    if stat.S_ISLNK(path_stat.st_mode):
+        try:
+            target = os.readlink(absolute)
+        except OSError:
+            target = ""
+        return {**item, "kind": "symlink", "target": target}
+    if not stat.S_ISREG(path_stat.st_mode):
+        return {**item, "kind": "other", "mode": stat.S_IFMT(path_stat.st_mode)}
+    digest = known_sha256 or _file_sha256(absolute)
+    size = known_size if known_size is not None else path_stat.st_size
+    return {**item, "kind": "file", "size": size, "sha256": digest}
+
+
+def _candidate_inventory(candidate: StateCandidate) -> dict[str, Any]:
+    validation = candidate.archive_validation
+    known_hash = None
+    known_size = None
+    if validation is not None and validation.status == "valid":
+        for evidence in validation.evidence:
+            if evidence.get("path") == candidate.path:
+                known_hash = evidence.get("sha256")
+                known_size = evidence.get("size")
+                break
+    item = {
+        "candidate": _path_inventory(
+            candidate.path, known_sha256=known_hash, known_size=known_size
+        ),
+        "archive_bundle": str(candidate.archive_bundle.absolute()) if candidate.archive_bundle else None,
+        "archive_generation": candidate.archive_generation,
+    }
+    if validation is not None and validation.status == "valid":
+        item["archive_pointer_sha256"] = validation.pointer_sha256
+        item["archive_manifest_sha256"] = validation.manifest_sha256
+        item["archive_evidence"] = [
+            {
+                "path": str(evidence["path"].absolute()),
+                "size": evidence["size"],
+                "sha256": evidence["sha256"],
+                "kind": evidence["evidence_kind"],
+                "iteration": evidence["iteration"],
+            }
+            for evidence in validation.evidence
+        ]
+    return item
+
+
+def _record_evidence_inventory(record: StateRecord) -> list[dict[str, Any]]:
+    if record.archive_validation is not None and record.archive_validation.status == "valid":
+        return []
+    paths: list[Path] = []
+    for entry in record.state.get("score_history") or []:
+        if not isinstance(entry, dict):
+            continue
+        iteration = entry.get("iteration")
+        if isinstance(iteration, int) and not isinstance(iteration, bool):
+            paths.extend(scoring_evidence_paths(record, iteration))
+        findings_path = entry.get("findings_evidence_path")
+        if isinstance(findings_path, str) and findings_path.strip():
+            raw = Path(findings_path).expanduser()
+            paths.append(raw if raw.is_absolute() else Path(project_root_for(record)) / raw)
+    for invocation in record.state.get("specialist_invocations") or []:
+        if isinstance(invocation, dict):
+            paths.extend(specialist_evidence_paths(record, invocation))
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for path in paths:
+        key = str(path.expanduser().absolute())
+        if key not in seen:
+            unique.append(path)
+            seen.add(key)
+    return [_path_inventory(path) for path in sorted(unique, key=lambda value: str(value))]
+
+
+def _serialize_record(record: StateRecord) -> dict[str, Any]:
+    return {
+        "path": str(record.path.absolute()),
+        "state": record.state,
+        "archive_bundle": str(record.archive_bundle.absolute()) if record.archive_bundle else None,
+        "archive_root": str(record.archive_root.absolute()) if record.archive_root else None,
+        "archive_generation": record.archive_generation,
+    }
+
+
+def _record_from_payload(item: dict[str, Any], candidate: StateCandidate | None = None) -> StateRecord:
+    if not isinstance(item, dict) or not isinstance(item.get("state"), dict):
+        raise SnapshotError("snapshot record payload is invalid")
+    path = Path(str(item.get("path") or ""))
+    return StateRecord(
+        path=path,
+        state=item["state"],
+        archive_bundle=candidate.archive_bundle if candidate else (
+            Path(item["archive_bundle"]) if item.get("archive_bundle") else None
+        ),
+        archive_root=candidate.archive_root if candidate else (
+            Path(item["archive_root"]) if item.get("archive_root") else None
+        ),
+        archive_generation=candidate.archive_generation if candidate else item.get("archive_generation"),
+        archive_validation=candidate.archive_validation if candidate else None,
+    )
+
+
+def _discover_snapshot_inputs(
+    roots: list[Path], *, parse_records: bool,
+    snapshot_records: list[StateRecord] | None = None,
+) -> tuple[list[StateRecord], list[dict[str, Any]], list[dict[str, Any]], list[StateCandidate]]:
+    discovered_invalid: list[dict[str, Any]] = []
+    records: list[StateRecord] = []
+    candidates: list[StateCandidate] = []
+    discovery_index: list[dict[str, Any]] = []
+    for root in roots:
+        for candidate in _iter_state_candidates(root, discovered_invalid) or []:
+            candidates.append(candidate)
+            discovery_index.append(_candidate_inventory(candidate))
+            if not parse_records:
+                continue
+            state = candidate.state
+            if state is None:
+                try:
+                    state = json.loads(candidate.path.read_bytes().decode("utf-8"))
+                except Exception:
+                    continue
+            if not is_mission_state(state):
+                continue
+            records.append(
+                StateRecord(
+                    candidate.path,
+                    state,
+                    candidate.archive_bundle,
+                    candidate.archive_root,
+                    candidate.archive_generation,
+                    candidate.archive_validation,
+                )
+            )
+    if not parse_records:
+        payload_records = snapshot_records or []
+        queues: dict[str, list[StateCandidate]] = {}
+        for candidate in candidates:
+            queues.setdefault(str(candidate.path.absolute()), []).append(candidate)
+        records = []
+        for record in payload_records:
+            queue = queues.get(str(record.path.absolute())) or []
+            candidate = queue.pop(0) if queue else None
+            records.append(_record_from_payload(_serialize_record(record), candidate))
+    invalid = collect_invalid_worktree_archives(records, discovered_invalid)
+    for record in records:
+        discovery_index.append({
+            "record_path": str(record.path.absolute()),
+            "gate_evidence": _record_evidence_inventory(record),
+        })
+    return records, invalid, discovery_index, candidates
+
+
+def create_state_snapshot(
+    roots: list[Path], path: Path, *, ttl_seconds: int = DEFAULT_TTL_SECONDS,
+    observed_at: datetime | None = None,
+) -> tuple[list[StateRecord], list[dict[str, Any]], datetime]:
+    normalized = [Path(root) for root in normalize_roots(roots)]
+    observed = observed_at or utc_now()
+    records, invalid, index, _candidates = _discover_snapshot_inputs(
+        normalized, parse_records=True
+    )
+    document = build_snapshot_document(
+        roots=normalized,
+        records=[_serialize_record(record) for record in records],
+        invalid_worktree_archives=invalid,
+        discovery_index=index,
+        observed_at=observed,
+        ttl_seconds=ttl_seconds,
+    )
+    _fresh_records, fresh_invalid, fresh_index, _fresh_candidates = _discover_snapshot_inputs(
+        normalized, parse_records=False, snapshot_records=records
+    )
+    if fresh_invalid != invalid or discovery_digest(fresh_index) != document["discovery_digest"]:
+        raise SnapshotError("filesystem changed while the snapshot was being captured")
+    write_snapshot(path, document)
+    return records, invalid, observed
+
+
+def consume_state_snapshot(
+    path: Path, requested_roots: list[Path] | None,
+) -> tuple[list[StateRecord], list[dict[str, Any]], list[Path], datetime]:
+    document = read_snapshot(path, requested_roots=requested_roots)
+    roots = [Path(root) for root in document["roots"]]
+    payload_records = [_record_from_payload(item) for item in document["records"]]
+    records, invalid, index, _candidates = _discover_snapshot_inputs(
+        roots, parse_records=False, snapshot_records=payload_records
+    )
+    if (
+        invalid != document["invalid_worktree_archives"]
+        or discovery_digest(index) != document["discovery_digest"]
+        or index != document["discovery_index"]
+    ):
+        raise SnapshotError("snapshot discovery fingerprint is stale")
+    observed = parse_dt(document["observed_at"])
+    if observed is None:
+        raise SnapshotError("snapshot observed_at is invalid")
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+    return records, invalid, roots, observed.astimezone(timezone.utc)
+
+
 def collect_invalid_worktree_archives(
     records: list[StateRecord], discovered: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
@@ -1785,9 +2005,10 @@ def aggregate(
     slow_threshold_sec: int,
     current_since: datetime | None = None,
     invalid_worktree_archives: list[dict[str, Any]] | None = None,
+    observation_now: datetime | None = None,
 ) -> dict[str, Any]:
     invalid_worktree_archives = invalid_worktree_archives or []
-    observation_now = utc_now()
+    observation_now = observation_now or utc_now()
     classes = [classify(r.state) for r in records]
     pass_rate_summary = summarize_pass_rate_population(
         [record.state for record in records],
@@ -2665,13 +2886,21 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--json", action="store_true", help="Print machine-readable summary")
     parser.add_argument("--out", default=None, help="Write report to path")
     parser.add_argument("--self-improvement-prompt", action="store_true", help="Print only the prompt for /mission")
+    snapshot_group = parser.add_mutually_exclusive_group()
+    snapshot_group.add_argument("--snapshot-out", default=None, help="Explicitly write a reusable read-only state snapshot")
+    snapshot_group.add_argument("--snapshot-in", default=None, help="Consume a reusable state snapshot; invalid input fails closed")
+    parser.add_argument(
+        "--snapshot-ttl-sec", type=int, default=DEFAULT_TTL_SECONDS,
+        help=f"Snapshot TTL for --snapshot-out (default: {DEFAULT_TTL_SECONDS})",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     _MANIFEST_VALIDATION_CACHE.clear()
     args = parse_args(argv or sys.argv[1:])
-    roots = [Path(p).expanduser() for p in (args.root or ["."])]
+    requested_roots = [Path(p).expanduser() for p in args.root] if args.root else None
+    roots = requested_roots or [Path(".")]
     after = commit_datetime(Path(args.repo).expanduser(), args.after_commit) if args.after_commit else None
     since = parse_audit_cutoff(args.since)
     if args.since and since is None:
@@ -2682,12 +2911,30 @@ def main(argv: list[str] | None = None) -> int:
     current_since = parse_audit_cutoff(args.current_since)
     if args.current_since and current_since is None:
         raise SystemExit(f"Invalid --current-since value: {args.current_since}")
-    discovered_invalid_archives: list[dict[str, Any]] = []
-    records = load_records(roots, discovered_invalid_archives)
-    invalid_worktree_archives = collect_invalid_worktree_archives(
-        records,
-        discovered_invalid_archives,
-    )
+    observation_now: datetime | None = None
+    try:
+        if args.snapshot_in:
+            records, invalid_worktree_archives, roots, observation_now = consume_state_snapshot(
+                Path(args.snapshot_in), requested_roots
+            )
+        elif args.snapshot_out:
+            records, invalid_worktree_archives, observation_now = create_state_snapshot(
+                roots,
+                Path(args.snapshot_out),
+                ttl_seconds=args.snapshot_ttl_sec,
+                observed_at=utc_now(),
+            )
+            roots = [Path(root) for root in normalize_roots(roots)]
+        else:
+            discovered_invalid_archives: list[dict[str, Any]] = []
+            records = load_records(roots, discovered_invalid_archives)
+            invalid_worktree_archives = collect_invalid_worktree_archives(
+                records,
+                discovered_invalid_archives,
+            )
+    except SnapshotError as error:
+        print(f"ERROR: invalid state snapshot: {error}", file=sys.stderr)
+        return 2
     filtered = filter_records(records, since, until, after)
     deduped, duplicates, resolved_duplicate_count = dedupe_records(filtered)
     stats = aggregate(
@@ -2697,6 +2944,7 @@ def main(argv: list[str] | None = None) -> int:
         args.slow_threshold_sec,
         current_since,
         invalid_worktree_archives,
+        observation_now,
     )
     attach_finding_model(stats, args.min_pass_rate, current_since)
     rows = finding_rows(stats, args.min_pass_rate)
