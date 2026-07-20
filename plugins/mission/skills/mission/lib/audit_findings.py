@@ -19,6 +19,10 @@ class FindingSpec:
 
     code: str
     priority: str
+    source_key: str = ""
+    source_kind: str = "item"
+    item_summary: str = ""
+    aggregate_summary: str = ""
 
 
 @dataclass(frozen=True)
@@ -67,6 +71,18 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def parse_audit_cutoff(value: str | None, *, upper: bool = False) -> datetime | None:
+    """Parse date/ISO audit bounds once for since, until, and current-since."""
+    if not value:
+        return None
+    text = value.strip()
+    if "T" not in text and len(text) == 10:
+        suffix = "T23:59:59.999999+00:00" if upper else "T00:00:00+00:00"
+        text = f"{text}{suffix}"
+    parsed = parse_iso_datetime(text)
+    return _as_utc(parsed) if parsed else None
+
+
 def classify_finding_period(
     updated_at: str | None,
     current_since: datetime | None,
@@ -95,15 +111,26 @@ def finding_counts(findings: Iterable[AuditFinding]) -> dict[str, int]:
     return counts
 
 
-def findings_by_code(findings: Iterable[AuditFinding]) -> dict[str, list[dict[str, Any]]]:
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for finding in findings:
-        grouped.setdefault(finding.spec.code, []).append(finding.to_dict())
+def findings_by_code(findings: Iterable[AuditFinding]) -> dict[str, dict[str, Any]]:
+    """Return compact indexes into the canonical period list, not evidence copies."""
+    grouped: dict[str, dict[str, Any]] = {}
+    for index, finding in enumerate(findings):
+        bucket = grouped.setdefault(finding.spec.code, {"count": 0, "indexes": []})
+        bucket["count"] += 1
+        bucket["indexes"].append(index)
     return grouped
 
 
 def finding_code_counts(findings: Iterable[AuditFinding]) -> dict[str, int]:
-    return {code: len(items) for code, items in findings_by_code(findings).items()}
+    counts: dict[str, int] = {}
+    for finding in findings:
+        counts[finding.spec.code] = counts.get(finding.spec.code, 0) + 1
+    return counts
+
+
+def sort_findings(findings: Iterable[AuditFinding]) -> list[AuditFinding]:
+    priority_rank = {priority: index for index, priority in enumerate(FINDING_PRIORITIES)}
+    return sorted(findings, key=lambda finding: priority_rank.get(finding.spec.priority, len(priority_rank)))
 
 
 def partition_findings(

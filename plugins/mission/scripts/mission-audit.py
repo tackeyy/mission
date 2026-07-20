@@ -18,7 +18,7 @@ import statistics
 import subprocess
 import sys
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -54,8 +54,10 @@ from audit_findings import (  # noqa: E402
     finding_code_counts,
     finding_counts,
     findings_by_code,
+    parse_audit_cutoff,
     partition_findings,
     serialize_findings,
+    sort_findings,
 )
 
 
@@ -90,26 +92,100 @@ WORKTREE_ARCHIVE_POINTER_SCHEMA = "mission-worktree-current/1"
 _MANIFEST_VALIDATION_CACHE: dict[tuple[str, str, str, str], tuple[str, list[dict[str, Any]]]] = {}
 
 FINDING_SPECS = {
-    "invalid-worktree-archive": FindingSpec("invalid-worktree-archive", "P1"),
-    "ungated-pass": FindingSpec("ungated-pass", "P0"),
-    "forced-pass": FindingSpec("forced-pass", "P1"),
-    "forced-pass-autonomous-suspect": FindingSpec("forced-pass-autonomous-suspect", "P0"),
-    "duplicate-state": FindingSpec("duplicate-state", "P1"),
-    "missing-scoring-evidence": FindingSpec("missing-scoring-evidence", "P2"),
-    "invalid-score-iteration": FindingSpec("invalid-score-iteration", "P1"),
-    "blank-specialist-invocation": FindingSpec("blank-specialist-invocation", "P2"),
-    "preparation-only-completed-provider": FindingSpec("preparation-only-completed-provider", "P1"),
-    "missing-specialist-selection-checkpoint": FindingSpec("missing-specialist-selection-checkpoint", "P2"),
-    "low-pass-rate": FindingSpec("low-pass-rate", "P1"),
-    "halted-runs": FindingSpec("halted-runs", "P1"),
-    "stale-active-no-score": FindingSpec("stale-active-no-score", "P1"),
-    "slow-runs": FindingSpec("slow-runs", "P2"),
-    "coarse-phase-attribution": FindingSpec("coarse-phase-attribution", "P2"),
-    "low-score-pass": FindingSpec("low-score-pass", "P2"),
-    "specialist-invocation-gap": FindingSpec("specialist-invocation-gap", "P2"),
-    "unresolved-confirm-specialist-selection": FindingSpec("unresolved-confirm-specialist-selection", "P2"),
-    "unselected-specialist-invocation": FindingSpec("unselected-specialist-invocation", "P2"),
-    "candidate-only-specialists": FindingSpec("candidate-only-specialists", "P2"),
+    "invalid-worktree-archive": FindingSpec(
+        "invalid-worktree-archive", "P1", "invalid_worktree_archives", "item",
+        "invalid worktree archive pointer, generation, or manifest",
+        "{count} worktree archive bundles have an invalid pointer, generation, or manifest",
+    ),
+    "ungated-pass": FindingSpec(
+        "ungated-pass", "P0", "ungated_pass_sessions", "record",
+        "pass session bypassed scoring gate", "{count} {sessions} bypassed scoring gate",
+    ),
+    "forced-pass": FindingSpec(
+        "forced-pass", "P1", "forced_pass_sessions", "record",
+        "session used force pass", "{count} {sessions} used force pass",
+    ),
+    "forced-pass-autonomous-suspect": FindingSpec(
+        "forced-pass-autonomous-suspect", "P0", "forced_pass_autonomous_suspect_sessions", "record",
+        "forced pass lacks user approval evidence",
+        "{count} {sessions} lack force_approved_by_user and any user-approval mention in force_reason -- possible autonomous --force (must be user-initiated only)",
+    ),
+    "duplicate-state": FindingSpec(
+        "duplicate-state", "P1", "duplicates", "duplicate",
+        "duplicate state group may be double-counted",
+        "{count} duplicate state groups found; stats may double-count",
+    ),
+    "missing-scoring-evidence": FindingSpec(
+        "missing-scoring-evidence", "P2", "missing_scoring_evidence", "item",
+        "score history lacks archived scoring evidence",
+        "{count} {sessions} have score_history without archived scoring evidence",
+    ),
+    "invalid-score-iteration": FindingSpec(
+        "invalid-score-iteration", "P1", "invalid_score_iterations", "item",
+        "score history has an iteration outside iteration >= 1",
+        "{count} {sessions} have score_history entries outside iteration >= 1",
+    ),
+    "blank-specialist-invocation": FindingSpec(
+        "blank-specialist-invocation", "P2", "blank_specialist_invocations", "item",
+        "specialist invocation has a blank role or skill",
+        "{count} {sessions} have blank specialist role or skill fields",
+    ),
+    "preparation-only-completed-provider": FindingSpec(
+        "preparation-only-completed-provider", "P1", "preparation_only_completed_providers", "item",
+        "command provider preparation-only evidence was marked completed",
+        "{count} {sessions} marked command-provider preparation-only evidence as completed",
+    ),
+    "missing-specialist-selection-checkpoint": FindingSpec(
+        "missing-specialist-selection-checkpoint", "P2", "missing_specialist_selection_checkpoints", "item",
+        "session started after checkpoint rollout without selection metadata",
+        "{count} {sessions} started after checkpoint rollout without selection metadata",
+    ),
+    "low-pass-rate": FindingSpec(
+        "low-pass-rate", "P1", "pass_rate", "low-pass-rate",
+        "pass rate is below the configured minimum",
+        "pass rate {pass_rate_pct:.1f}% is below {min_pass_rate_pct:.0f}%",
+    ),
+    "halted-runs": FindingSpec(
+        "halted-runs", "P1", "halt_sessions", "record",
+        "halted session needs root-cause review", "{count} {halted_sessions} need root-cause review",
+    ),
+    "stale-active-no-score": FindingSpec(
+        "stale-active-no-score", "P1", "stale_active_no_score_sessions", "record",
+        "active no-score session exceeded stale threshold", "{count} {sessions} exceeded stale threshold",
+    ),
+    "slow-runs": FindingSpec(
+        "slow-runs", "P2", "slow_sessions", "record",
+        "session exceeded slow threshold", "{count} {sessions} exceeded slow threshold",
+    ),
+    "coarse-phase-attribution": FindingSpec(
+        "coarse-phase-attribution", "P2", "coarse_phase_attributions", "item",
+        "slow session attributes most elapsed time to planning",
+        "{count} slow sessions attribute most elapsed time to planning",
+    ),
+    "low-score-pass": FindingSpec(
+        "low-score-pass", "P2", "low_score_pass_sessions", "record",
+        "pass session scored below 4.3", "{count} {pass_sessions} scored below 4.3",
+    ),
+    "specialist-invocation-gap": FindingSpec(
+        "specialist-invocation-gap", "P2", "specialist_invocation_gap_sessions", "gap-record",
+        "selected specialist lacks a terminal invocation log",
+        "{count} {sessions} selected specialists without terminal invocation logs",
+    ),
+    "unresolved-confirm-specialist-selection": FindingSpec(
+        "unresolved-confirm-specialist-selection", "P2", "unresolved_confirm_specialist_selections", "item",
+        "specialist was applied after ask-user without confirmed selection metadata",
+        "{count} {sessions} applied specialists after ask-user without confirmed selection metadata",
+    ),
+    "unselected-specialist-invocation": FindingSpec(
+        "unselected-specialist-invocation", "P2", "unselected_specialist_invocations", "item",
+        "specialist was invoked without matching selection metadata",
+        "{count} {sessions} invoked specialists without matching selection metadata",
+    ),
+    "candidate-only-specialists": FindingSpec(
+        "candidate-only-specialists", "P2", "candidate_only_specialists", "dynamic-item",
+        "specialist candidates lack a selected, invoked, or skipped decision trail",
+        "{count} {sessions} had specialist candidates but no selected, invoked, or skipped decision trail",
+    ),
 }
 
 
@@ -495,31 +571,6 @@ def _env_int(name: str, default: int) -> int:
     except ValueError:
         return default
     return value if value >= 0 else default
-
-
-def parse_cutoff(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    text = value.strip()
-    if "T" not in text and len(text) == 10:
-        text = f"{text}T00:00:00+00:00"
-    parsed = parse_dt(text)
-    if parsed and parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc) if parsed else None
-
-
-def parse_period_cutoff(value: str | None, *, upper: bool = False) -> datetime | None:
-    if not value:
-        return None
-    text = value.strip()
-    if "T" not in text and len(text) == 10:
-        suffix = "T23:59:59.999999+00:00" if upper else "T00:00:00+00:00"
-        text = f"{text}{suffix}"
-    parsed = parse_dt(text)
-    if parsed and parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc) if parsed else None
 
 
 def age_since_update_sec(state: dict[str, Any], *, now: datetime | None = None) -> float | None:
@@ -1976,103 +2027,55 @@ def attach_finding_model(
 ) -> None:
     """Build one period-aware model after detection without changing any gate."""
     findings: list[AuditFinding] = []
+    for spec in FINDING_SPECS.values():
+        if spec.source_kind == "low-pass-rate":
+            pass_rate = stats.get(spec.source_key)
+            source: list[Any] = (
+                [{"updated_at": ""}]
+                if pass_rate is not None and pass_rate < min_pass_rate
+                else []
+            )
+        else:
+            raw_source = stats.get(spec.source_key) or []
+            source = list(raw_source)
 
-    def add(
-        code: str,
-        summary: str,
-        evidence: dict[str, Any],
-        *,
-        priority: str | None = None,
-    ) -> None:
-        spec = FINDING_SPECS[code]
-        if priority and priority != spec.priority:
-            spec = FindingSpec(code, priority)
-        findings.append(AuditFinding.from_evidence(spec, summary, evidence, current_since))
+        for value in source:
+            finding_spec = spec
+            if spec.source_kind in {"item", "dynamic-item", "low-pass-rate"}:
+                evidence = dict(value)
+            elif spec.source_kind in {"record", "gap-record"}:
+                extra = (
+                    {"skills": specialist_invocation_gap_skills(value)}
+                    if spec.source_kind == "gap-record"
+                    else {}
+                )
+                evidence = finding_record_evidence(value, **extra)
+            elif spec.source_kind == "duplicate":
+                records = sorted(value, key=dedupe_rank)
+                if not records:
+                    continue
+                representative = max(records, key=updated_timestamp_rank)
+                evidence = finding_record_evidence(
+                    representative,
+                    paths=[str(record.path) for record in records],
+                )
+            else:
+                raise ValueError(f"Unknown finding source kind: {spec.source_kind}")
 
-    for item in stats["invalid_worktree_archives"]:
-        add("invalid-worktree-archive", "invalid worktree archive pointer, generation, or manifest", item)
-    for record in stats["ungated_pass_sessions"]:
-        add("ungated-pass", "pass session bypassed scoring gate", finding_record_evidence(record))
-    for record in stats["forced_pass_sessions"]:
-        add("forced-pass", "session used force pass", finding_record_evidence(record))
-    for record in stats["forced_pass_autonomous_suspect_sessions"]:
-        add(
-            "forced-pass-autonomous-suspect",
-            "forced pass lacks user approval evidence",
-            finding_record_evidence(record),
-        )
-    for group in stats["duplicates"]:
-        records = sorted(group, key=dedupe_rank)
-        representative = max(records, key=updated_timestamp_rank)
-        add(
-            "duplicate-state",
-            "duplicate state group may be double-counted",
-            finding_record_evidence(
-                representative,
-                paths=[str(record.path) for record in records],
-            ),
-        )
-    for item in stats["missing_scoring_evidence"]:
-        add("missing-scoring-evidence", "score history lacks archived scoring evidence", item)
-    for item in stats["invalid_score_iterations"]:
-        add("invalid-score-iteration", "score history has an iteration outside iteration >= 1", item)
-    for item in stats["blank_specialist_invocations"]:
-        add("blank-specialist-invocation", "specialist invocation has a blank role or skill", item)
-    for item in stats["preparation_only_completed_providers"]:
-        add(
-            "preparation-only-completed-provider",
-            "command provider preparation-only evidence was marked completed",
-            item,
-        )
-    for item in stats["missing_specialist_selection_checkpoints"]:
-        add(
-            "missing-specialist-selection-checkpoint",
-            "session started after checkpoint rollout without selection metadata",
-            item,
-        )
-    pass_rate = stats["pass_rate"]
-    if pass_rate is not None and pass_rate < min_pass_rate:
-        add(
-            "low-pass-rate",
-            f"pass rate {pass_rate * 100:.1f}% is below {min_pass_rate * 100:.0f}%",
-            {"updated_at": ""},
-        )
-    for record in stats["halt_sessions"]:
-        add("halted-runs", "halted session needs root-cause review", finding_record_evidence(record))
-    for record in stats["stale_active_no_score_sessions"]:
-        add("stale-active-no-score", "active no-score session exceeded stale threshold", finding_record_evidence(record))
-    for record in stats["slow_sessions"]:
-        add("slow-runs", "session exceeded slow threshold", finding_record_evidence(record))
-    for item in stats["coarse_phase_attributions"]:
-        add("coarse-phase-attribution", "slow session attributes most elapsed time to planning", item)
-    for record in stats["low_score_pass_sessions"]:
-        add("low-score-pass", "pass session scored below 4.3", finding_record_evidence(record))
-    for record in stats["specialist_invocation_gap_sessions"]:
-        add(
-            "specialist-invocation-gap",
-            "selected specialist lacks a terminal invocation log",
-            finding_record_evidence(record, skills=specialist_invocation_gap_skills(record)),
-        )
-    for item in stats["unresolved_confirm_specialist_selections"]:
-        add(
-            "unresolved-confirm-specialist-selection",
-            "specialist was applied after ask-user without confirmed selection metadata",
-            item,
-        )
-    for item in stats["unselected_specialist_invocations"]:
-        add(
-            "unselected-specialist-invocation",
-            "specialist was invoked without matching selection metadata",
-            item,
-        )
-    for item in stats["candidate_only_specialists"]:
-        add(
-            "candidate-only-specialists",
-            "specialist candidates lack a selected, invoked, or skipped decision trail",
-            item,
-            priority=str(item.get("priority") or "P2"),
-        )
+            if spec.source_kind == "dynamic-item":
+                priority = str(evidence.get("priority") or spec.priority)
+                if priority != spec.priority:
+                    finding_spec = replace(spec, priority=priority)
+            findings.append(
+                AuditFinding.from_evidence(
+                    finding_spec,
+                    spec.item_summary,
+                    evidence,
+                    current_since,
+                )
+            )
 
+    findings = sort_findings(findings)
     current, historical = partition_findings(findings)
     stats["all_findings"] = serialize_findings(findings)
     stats["current_findings"] = serialize_findings(current)
@@ -2101,66 +2104,21 @@ def finding_rows(stats: dict[str, Any], min_pass_rate: float) -> list[tuple[str,
         priority = str(item.get("priority") or "P2")
         if code not in priorities or priority_rank.get(priority, 9) < priority_rank.get(priorities[code], 9):
             priorities[code] = priority
-    if counts["invalid-worktree-archive"]:
-        rows.append((
-            "P1",
-            "invalid-worktree-archive",
-            f"{counts['invalid-worktree-archive']} worktree archive bundles have an invalid pointer, generation, or manifest",
-        ))
-    if counts["ungated-pass"]:
-        rows.append(("P0", "ungated-pass", f"{counts['ungated-pass']} pass sessions bypassed scoring gate"))
-    if counts["forced-pass"]:
-        rows.append(("P1", "forced-pass", f"{counts['forced-pass']} sessions used force pass"))
-    if counts["forced-pass-autonomous-suspect"]:
-        rows.append((
-            "P0",
-            "forced-pass-autonomous-suspect",
-            f"{counts['forced-pass-autonomous-suspect']} forced-pass sessions lack "
-            f"force_approved_by_user and any user-approval mention in force_reason "
-            f"-- possible autonomous --force (must be user-initiated only)",
-        ))
-    if counts["duplicate-state"]:
-        rows.append(("P1", "duplicate-state", f"{counts['duplicate-state']} duplicate state groups found; stats may double-count"))
-    if counts["missing-scoring-evidence"]:
-        label = "current sessions" if current_scope else "sessions"
-        rows.append(("P2", "missing-scoring-evidence", f"{counts['missing-scoring-evidence']} {label} have score_history without archived scoring evidence"))
-    if counts["invalid-score-iteration"]:
-        label = "current sessions" if current_scope else "sessions"
-        rows.append(("P1", "invalid-score-iteration", f"{counts['invalid-score-iteration']} {label} have score_history entries outside iteration >= 1"))
-    if counts["blank-specialist-invocation"]:
-        label = "current sessions" if current_scope else "sessions"
-        rows.append(("P2", "blank-specialist-invocation", f"{counts['blank-specialist-invocation']} {label} have blank specialist role or skill fields"))
-    if counts["preparation-only-completed-provider"]:
-        label = "current sessions" if current_scope else "sessions"
-        rows.append(("P1", "preparation-only-completed-provider", f"{counts['preparation-only-completed-provider']} {label} marked command-provider preparation-only evidence as completed"))
-    if counts["missing-specialist-selection-checkpoint"]:
-        rows.append(("P2", "missing-specialist-selection-checkpoint", f"{counts['missing-specialist-selection-checkpoint']} sessions started after checkpoint rollout without selection metadata"))
-    if counts["low-pass-rate"]:
-        pass_rate = stats["pass_rate"]
-        rows.append(("P1", "low-pass-rate", f"pass rate {pass_rate * 100:.1f}% is below {min_pass_rate * 100:.0f}%"))
-    if counts["halted-runs"]:
-        label = "current halted sessions" if current_scope else "halted sessions"
-        rows.append(("P1", "halted-runs", f"{counts['halted-runs']} {label} need root-cause review"))
-    if counts["stale-active-no-score"]:
-        rows.append(("P1", "stale-active-no-score", f"{counts['stale-active-no-score']} active no-score sessions exceeded stale threshold"))
-    if counts["slow-runs"]:
-        label = "current sessions" if current_scope else "sessions"
-        rows.append(("P2", "slow-runs", f"{counts['slow-runs']} {label} exceeded slow threshold"))
-    if counts["coarse-phase-attribution"]:
-        rows.append(("P2", "coarse-phase-attribution", f"{counts['coarse-phase-attribution']} slow sessions attribute most elapsed time to planning"))
-    if counts["low-score-pass"]:
-        label = "current pass sessions" if current_scope else "pass sessions"
-        rows.append(("P2", "low-score-pass", f"{counts['low-score-pass']} {label} scored below 4.3"))
-    if counts["specialist-invocation-gap"]:
-        rows.append(("P2", "specialist-invocation-gap", f"{counts['specialist-invocation-gap']} sessions selected specialists without terminal invocation logs"))
-    if counts["unresolved-confirm-specialist-selection"]:
-        label = "current sessions" if current_scope else "sessions"
-        rows.append(("P2", "unresolved-confirm-specialist-selection", f"{counts['unresolved-confirm-specialist-selection']} {label} applied specialists after ask-user without confirmed selection metadata"))
-    if counts["unselected-specialist-invocation"]:
-        rows.append(("P2", "unselected-specialist-invocation", f"{counts['unselected-specialist-invocation']} sessions invoked specialists without matching selection metadata"))
-    if counts["candidate-only-specialists"]:
-        label = "current sessions" if current_scope else "sessions"
-        rows.append((priorities["candidate-only-specialists"], "candidate-only-specialists", f"{counts['candidate-only-specialists']} {label} had specialist candidates but no selected, invoked, or skipped decision trail"))
+    context = {
+        "sessions": "current sessions" if current_scope else "sessions",
+        "halted_sessions": "current halted sessions" if current_scope else "halted sessions",
+        "pass_sessions": "current pass sessions" if current_scope else "pass sessions",
+        "pass_rate_pct": (stats.get("pass_rate") or 0) * 100,
+        "min_pass_rate_pct": min_pass_rate * 100,
+    }
+    for spec in FINDING_SPECS.values():
+        count = counts[spec.code]
+        if not count:
+            continue
+        priority = priorities.get(spec.code, spec.priority)
+        summary = spec.aggregate_summary.format(count=count, **context)
+        rows.append((priority, spec.code, summary))
+    rows.sort(key=lambda row: priority_rank.get(row[0], len(priority_rank)))
     if current_scope:
         historical_count = stats["historical_finding_counts"]["total"]
         if historical_count:
@@ -2240,8 +2198,8 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
         f"- unresolved confirm specialist selections: {stats['unresolved_confirm_specialist_selection_count']}",
         f"- unselected specialist invocations: {stats['unselected_specialist_invocation_count']}",
         f"- candidate-only specialists: {stats['candidate_only_specialist_count']}",
-        f"- current audit debt: halt {stats['current_halt_count']}, slow {stats['current_slow_session_count']}, low-score {stats['current_low_score_pass_count']}, scoring {stats['current_missing_scoring_evidence_count']}, invalid score {stats['current_invalid_score_iteration_count']}, blank invocation {stats['current_blank_specialist_invocation_count']}, preparation-only completed {stats['current_preparation_only_completed_provider_count']}, unresolved confirm {stats['current_unresolved_confirm_specialist_selection_count']}, candidate-only {stats['current_candidate_only_specialist_count']}",
-        f"- historical audit debt: halt {stats['historical_halt_count']}, slow {stats['historical_slow_session_count']}, low-score {stats['historical_low_score_pass_count']}, scoring {stats['historical_missing_scoring_evidence_count']}, invalid score {stats['historical_invalid_score_iteration_count']}, blank invocation {stats['historical_blank_specialist_invocation_count']}, preparation-only completed {stats['historical_preparation_only_completed_provider_count']}, unresolved confirm {stats['historical_unresolved_confirm_specialist_selection_count']}, candidate-only {stats['historical_candidate_only_specialist_count']}",
+        f"- current findings: P0 {stats['current_finding_counts']['P0']}, P1 {stats['current_finding_counts']['P1']}, P2 {stats['current_finding_counts']['P2']}, total {stats['current_finding_counts']['total']}",
+        f"- historical risks: P0 {stats['historical_finding_counts']['P0']}, P1 {stats['historical_finding_counts']['P1']}, P2 {stats['historical_finding_counts']['P2']}, total {stats['historical_finding_counts']['total']}",
         f"- coarse phase attribution: {stats['coarse_phase_attribution_count']}",
         f"- avg final composite: {fmt_float(stats['avg_final_composite'])}",
         f"- median duration: {fmt_minutes(stats['median_session_duration_sec'])}",
@@ -2283,6 +2241,12 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
     for priority in ("P0", "P1", "P2"):
         lines.append(f"- {priority}: {current_counts[priority]}")
     lines.append(f"- total: {current_counts['total']}")
+    current_priorities = {
+        str(item["code"]): str(item["priority"])
+        for item in reversed(stats["current_findings"])
+    }
+    for code, count in stats["current_finding_code_counts"].items():
+        lines.append(f"- `{code}` ({current_priorities[code]}): {count}")
     lines.extend(["", "### Current Finding List", ""])
     if stats["current_findings"]:
         lines.extend(finding_line(item) for item in stats["current_findings"])
@@ -2294,6 +2258,12 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
     for priority in ("P0", "P1", "P2"):
         lines.append(f"- {priority}: {historical_counts[priority]}")
     lines.append(f"- total: {historical_counts['total']}")
+    historical_priorities = {
+        str(item["code"]): str(item["priority"])
+        for item in reversed(stats["historical_findings"])
+    }
+    for code, count in stats["historical_finding_code_counts"].items():
+        lines.append(f"- `{code}` ({historical_priorities[code]}): {count}")
     if not stats["current_since"]:
         lines.append("- cutoff not set: backward-compatible all-period findings are classified as current")
     lines.extend(["", "### Historical Risk List", ""])
@@ -2533,25 +2503,6 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
     else:
         lines.append("- none")
 
-    if stats["current_since"]:
-        lines.extend(["", "## Historical Audit Debt", ""])
-        historical_rows = [
-            ("halted runs", stats["historical_halt_count"]),
-            ("slow runs", stats["historical_slow_session_count"]),
-            ("low-score passes", stats["historical_low_score_pass_count"]),
-            ("missing scoring evidence", stats["historical_missing_scoring_evidence_count"]),
-            ("invalid score iterations", stats["historical_invalid_score_iteration_count"]),
-            ("blank specialist invocations", stats["historical_blank_specialist_invocation_count"]),
-            ("preparation-only completed command providers", stats["historical_preparation_only_completed_provider_count"]),
-            ("unresolved confirm specialist selections", stats["historical_unresolved_confirm_specialist_selection_count"]),
-            ("candidate-only specialists", stats["historical_candidate_only_specialist_count"]),
-        ]
-        if any(count for _, count in historical_rows):
-            for label, count in historical_rows:
-                lines.append(f"- {label}: {count}")
-        else:
-            lines.append("- none")
-
     lines.extend(["", "## Duplicate State Groups", ""])
     if stats["duplicates"]:
         for group in stats["duplicates"]:
@@ -2595,13 +2546,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     roots = [Path(p).expanduser() for p in (args.root or ["."])]
     after = commit_datetime(Path(args.repo).expanduser(), args.after_commit) if args.after_commit else None
-    since = parse_period_cutoff(args.since)
+    since = parse_audit_cutoff(args.since)
     if args.since and since is None:
         raise SystemExit(f"Invalid --since value: {args.since}")
-    until = parse_period_cutoff(args.until, upper=True)
+    until = parse_audit_cutoff(args.until, upper=True)
     if args.until and until is None:
         raise SystemExit(f"Invalid --until value: {args.until}")
-    current_since = parse_cutoff(args.current_since)
+    current_since = parse_audit_cutoff(args.current_since)
     if args.current_since and current_since is None:
         raise SystemExit(f"Invalid --current-since value: {args.current_since}")
     discovered_invalid_archives: list[dict[str, Any]] = []

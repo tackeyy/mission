@@ -331,6 +331,60 @@ def test_all_finding_specs_are_registry_wired_and_priority_sorted(tmp_path: Path
     assert row_priorities == sorted(row_priorities)
 
 
+def test_every_registry_spec_reaches_attach_rows_and_period_schema():
+    audit = _load_audit_module()
+    state = {
+        "mission": "registry coverage",
+        "mission_id": "registry-mission",
+        "session_id": "registry-session",
+        "project_root": "/tmp/mission-fixture",
+        "agent": "codex",
+        "updated_at": "2026-07-20T00:00:00Z",
+        "specialists_selected": [{"skill": "review-provider"}],
+        "specialist_invocations": [],
+    }
+    record = audit.StateRecord(Path("/tmp/mission-fixture/.mission-state/sessions/registry.json"), state)
+    duplicate = audit.StateRecord(
+        Path("/tmp/mission-fixture/.mission-state/archive/registry.json"),
+        dict(state),
+    )
+    stats: dict[str, object] = {
+        "pass_rate": 0.0,
+        "current_since": "2026-07-20T00:00:00+00:00",
+    }
+    for spec in audit.FINDING_SPECS.values():
+        if spec.source_kind == "low-pass-rate":
+            continue
+        if spec.source_kind in {"record", "gap-record"}:
+            stats[spec.source_key] = [record]
+        elif spec.source_kind == "duplicate":
+            stats[spec.source_key] = [[record, duplicate]]
+        else:
+            item = {
+                "session_id": "registry-session",
+                "project": "mission-fixture",
+                "path": "/tmp/mission-fixture/.mission-state/sessions/registry.json",
+                "updated_at": "2026-07-20T00:00:00Z",
+            }
+            if spec.source_kind == "dynamic-item":
+                item["priority"] = "P1"
+            stats[spec.source_key] = [item]
+
+    cutoff = datetime(2026, 7, 20, tzinfo=timezone.utc)
+    audit.attach_finding_model(stats, 0.95, cutoff)
+    rows = audit.finding_rows(stats, 0.95)
+
+    expected = set(audit.FINDING_SPECS)
+    assert {item["code"] for item in stats["all_findings"]} == expected
+    assert {item["code"] for item in stats["current_findings"]} == expected
+    assert stats["historical_findings"] == []
+    assert {code for priority, code, summary in rows if priority in {"P0", "P1", "P2"}} == expected
+    for item in stats["all_findings"]:
+        assert item["period"] == "current"
+        assert item["priority"] in {"P0", "P1", "P2"}
+        assert item["updated_at"] == "2026-07-20T00:00:00Z" or item["code"] == "low-pass-rate"
+
+
 def test_period_indexes_stay_compact_relative_to_canonical_lists(tmp_path: Path):
     for index in range(8):
         _write_state(
@@ -347,25 +401,14 @@ def test_period_indexes_stay_compact_relative_to_canonical_lists(tmp_path: Path)
         check=True,
     )
     data = json.loads(result.stdout)
-    baseline = {
-        key: value
-        for key, value in data.items()
-        if key not in {
-            "all_findings",
-            "current_findings",
-            "historical_findings",
-            "all_finding_counts",
-            "current_finding_counts",
-            "historical_finding_counts",
-            "all_finding_code_counts",
-            "current_finding_code_counts",
-            "historical_finding_code_counts",
-            "all_findings_by_code",
-            "current_findings_by_code",
-            "historical_findings_by_code",
-        }
-    }
     compact_size = len(json.dumps(data, ensure_ascii=False))
-    baseline_size = len(json.dumps(baseline, ensure_ascii=False))
-    assert compact_size < baseline_size * 2.5
+    naive = dict(data)
+    for period in ("all", "current", "historical"):
+        canonical = data[f"{period}_findings"]
+        naive[f"{period}_findings_by_code"] = {
+            code: [canonical[index] for index in entry["indexes"]]
+            for code, entry in data[f"{period}_findings_by_code"].items()
+        }
+    naive_size = len(json.dumps(naive, ensure_ascii=False))
+    assert compact_size < naive_size * 0.7
     assert len(json.dumps(data["all_findings_by_code"])) < len(json.dumps(data["all_findings"]))
