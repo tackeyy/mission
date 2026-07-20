@@ -143,6 +143,29 @@ def test_activity_rejects_negative_segment_without_mutating_state(tmp_path, run_
     assert path.read_bytes() == before
 
 
+def test_activity_rejects_state_clock_rollback_without_mutating_state(
+    tmp_path, run_cli
+):
+    path = _write_state(tmp_path, updated_at="2026-07-21T00:10:00Z")
+    before = path.read_bytes()
+
+    result = _run_activity(
+        run_cli,
+        tmp_path,
+        "start",
+        "--kind",
+        "active",
+        "--reason",
+        "work",
+        "--at",
+        "2026-07-21T00:09:59Z",
+    )
+
+    assert result.returncode == 2
+    assert "before" in result.stderr.lower()
+    assert path.read_bytes() == before
+
+
 def test_activity_resume_closes_only_observed_time_and_does_not_double_count(
     tmp_path, run_cli
 ):

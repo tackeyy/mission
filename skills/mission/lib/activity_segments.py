@@ -64,6 +64,15 @@ def _elapsed(start: str | None, end: str | None) -> float | None:
     return float(seconds)
 
 
+def _reject_state_clock_rollback(state: dict[str, Any], at: str) -> None:
+    event = _parse_at(at)
+    updated = _parse_at(state.get("updated_at"))
+    if not event:
+        raise ActivityTimingError("invalid activity timestamp")
+    if updated and event < updated:
+        raise ActivityTimingError("activity timestamp is before the last state update")
+
+
 def _finite_nonnegative(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
@@ -154,6 +163,7 @@ def end_activity_segment(state: dict[str, Any], at: str) -> bool:
     if not isinstance(current, dict):
         state["activity_current"] = None
         return False
+    _reject_state_clock_rollback(state, at)
     seconds = _elapsed(current.get("started_at"), at)
     if seconds is None:
         raise ActivityTimingError("activity end is before start or has an invalid timestamp")
@@ -186,6 +196,8 @@ def _resume_boundary(state: dict[str, Any], at: str) -> str:
     updated = _parse_at(updated_text)
     if not started or not resumed:
         raise ActivityTimingError("invalid resume timestamp")
+    if updated and resumed < updated:
+        raise ActivityTimingError("resume timestamp is before the last state update")
     boundary = updated if updated and started <= updated <= resumed else started
     gap = (resumed - boundary).total_seconds()
     if gap > 0:
@@ -211,8 +223,7 @@ def start_activity_segment(
     resume: bool = False,
 ) -> bool:
     validate_activity(kind, reason)
-    if not _parse_at(at):
-        raise ActivityTimingError("invalid activity start timestamp")
+    _reject_state_clock_rollback(state, at)
     current = state.get("activity_current")
     clean_detail = sanitize_activity_detail(detail)
     if isinstance(current, dict):
