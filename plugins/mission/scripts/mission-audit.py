@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import os
+import stat
 import statistics
 import subprocess
 import sys
@@ -137,16 +138,28 @@ def _file_sha256(path: Path) -> str:
 
 
 def _resolve_worktree_archive(bundle: Path) -> ArchiveResolution:
-    if bundle.is_symlink() or not bundle.is_dir():
+    try:
+        bundle_stat = bundle.lstat()
+    except FileNotFoundError:
+        return ArchiveResolution("invalid", bundle, bundle, reason="bundle-not-regular-directory")
+    except OSError:
+        return ArchiveResolution("invalid", bundle, bundle, reason="bundle-access-error")
+    if stat.S_ISLNK(bundle_stat.st_mode) or not stat.S_ISDIR(bundle_stat.st_mode):
         return ArchiveResolution("invalid", bundle, bundle, reason="bundle-not-regular-directory")
     pointer_path = bundle / "current.json"
-    if not pointer_path.exists() and not pointer_path.is_symlink():
+    try:
+        pointer_stat = pointer_path.lstat()
+    except FileNotFoundError:
         return ArchiveResolution("legacy", bundle, bundle)
-    if pointer_path.is_symlink() or not pointer_path.is_file():
+    except OSError:
+        return ArchiveResolution("invalid", bundle, bundle, reason="pointer-access-error")
+    if stat.S_ISLNK(pointer_stat.st_mode) or not stat.S_ISREG(pointer_stat.st_mode):
         return ArchiveResolution("invalid", bundle, bundle, reason="pointer-not-regular-file")
     try:
         pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    except OSError:
+        return ArchiveResolution("invalid", bundle, bundle, reason="pointer-access-error")
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return ArchiveResolution("invalid", bundle, bundle, reason="pointer-invalid-json")
     generation = pointer.get("generation") if isinstance(pointer, dict) else None
     if (
@@ -159,7 +172,25 @@ def _resolve_worktree_archive(bundle: Path) -> ArchiveResolution:
     ):
         return ArchiveResolution("invalid", bundle, bundle, reason="pointer-invalid-schema-or-generation")
     generations_root = bundle / "generations"
-    if generations_root.is_symlink() or not generations_root.is_dir():
+    try:
+        generations_stat = generations_root.lstat()
+    except FileNotFoundError:
+        return ArchiveResolution(
+            "invalid",
+            bundle,
+            generations_root,
+            generation=generation,
+            reason="generations-not-regular-directory",
+        )
+    except OSError:
+        return ArchiveResolution(
+            "invalid",
+            bundle,
+            generations_root,
+            generation=generation,
+            reason="generations-access-error",
+        )
+    if stat.S_ISLNK(generations_stat.st_mode) or not stat.S_ISDIR(generations_stat.st_mode):
         return ArchiveResolution(
             "invalid",
             bundle,
@@ -168,7 +199,25 @@ def _resolve_worktree_archive(bundle: Path) -> ArchiveResolution:
             reason="generations-not-regular-directory",
         )
     generation_root = generations_root / generation
-    if generation_root.is_symlink() or not generation_root.is_dir():
+    try:
+        generation_stat = generation_root.lstat()
+    except FileNotFoundError:
+        return ArchiveResolution(
+            "invalid",
+            bundle,
+            generation_root,
+            generation=generation,
+            reason="generation-missing-or-not-directory",
+        )
+    except OSError:
+        return ArchiveResolution(
+            "invalid",
+            bundle,
+            generation_root,
+            generation=generation,
+            reason="generation-access-error",
+        )
+    if stat.S_ISLNK(generation_stat.st_mode) or not stat.S_ISDIR(generation_stat.st_mode):
         return ArchiveResolution(
             "invalid",
             bundle,
@@ -483,15 +532,34 @@ def _invalid_archive_item(resolution: ArchiveResolution, reason: str | None = No
     return item
 
 
+def _append_invalid_archive_root(
+    invalid_archives: list[dict[str, Any]] | None,
+    path: Path,
+    reason: str,
+) -> None:
+    if invalid_archives is None:
+        return
+    resolution = ArchiveResolution("invalid", path, path, reason=reason)
+    invalid_archives.append(_invalid_archive_item(resolution))
+
+
 def _preflight_generation_state(
     resolution: ArchiveResolution,
 ) -> tuple[StateCandidate | None, str | None]:
     manifest_path = resolution.root / "manifest.json"
-    if manifest_path.is_symlink() or not manifest_path.is_file():
+    try:
+        manifest_stat = manifest_path.lstat()
+    except FileNotFoundError:
+        return None, "manifest-missing-or-not-regular-file"
+    except OSError:
+        return None, "manifest-access-error"
+    if stat.S_ISLNK(manifest_stat.st_mode) or not stat.S_ISREG(manifest_stat.st_mode):
         return None, "manifest-missing-or-not-regular-file"
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    except OSError:
+        return None, "manifest-access-error"
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return None, "manifest-invalid-json"
     evidence = manifest.get("evidence") if isinstance(manifest, dict) else None
     if (
@@ -507,19 +575,27 @@ def _preflight_generation_state(
     if len(state_items) != 1:
         return None, "manifest-state-entry-invalid"
     state_relative = _manifest_relative_path(state_items[0].get("archive_path"))
-    if state_relative is None:
+    if state_relative is None or not state_relative.parts:
         return None, "manifest-state-path-invalid"
     state_path = resolution.root / state_relative
     current = resolution.root
     for part in state_relative.parts:
         current = current / part
-        if current.is_symlink():
+        try:
+            current_stat = current.lstat()
+        except FileNotFoundError:
+            return None, "manifest-state-missing"
+        except OSError:
+            return None, "manifest-state-access-error"
+        if stat.S_ISLNK(current_stat.st_mode):
             return None, "manifest-state-path-symlink"
-    if not state_path.is_file():
+    if not stat.S_ISREG(current_stat.st_mode):
         return None, "manifest-state-missing"
     try:
         state = json.loads(state_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    except OSError:
+        return None, "manifest-state-access-error"
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return None, "manifest-state-invalid-json"
     if not is_mission_state(state):
         return None, "manifest-state-invalid-schema"
@@ -552,23 +628,89 @@ def _iter_state_candidates(
     if not root.exists():
         return
     for dirpath, dirnames, _filenames in os.walk(root, followlinks=False):
-        dirnames[:] = [d for d in dirnames if d not in PRUNE_DIRS]
+        current_dir = Path(dirpath)
+        symlinked_state_roots = [
+            current_dir / dirname
+            for dirname in dirnames
+            if dirname == ".mission-state" and (current_dir / dirname).is_symlink()
+        ]
+        for symlinked_state_root in symlinked_state_roots:
+            _append_invalid_archive_root(
+                invalid_archives,
+                symlinked_state_root,
+                "mission-state-root-symlink",
+            )
+        dirnames[:] = [
+            dirname
+            for dirname in dirnames
+            if dirname not in PRUNE_DIRS and current_dir / dirname not in symlinked_state_roots
+        ]
         if os.path.basename(dirpath) != ".mission-state":
             continue
         dirnames[:] = []
         mission_state = Path(dirpath)
+        if mission_state.is_symlink():
+            _append_invalid_archive_root(
+                invalid_archives,
+                mission_state,
+                "mission-state-root-symlink",
+            )
+            continue
         candidates: list[StateCandidate] = []
         sessions = mission_state / "sessions"
         if sessions.is_dir():
             candidates.extend(StateCandidate(path) for path in sorted(sessions.glob("*.json")))
         archive = mission_state / "archive"
-        if archive.is_dir():
-            candidates.extend(StateCandidate(path) for path in sorted(archive.glob("state-*.json")))
-            for worktree_dir in sorted(archive.glob("worktree-*")):
+        archive_entries: list[os.DirEntry[str]] = []
+        archive_root: Path | None = None
+        try:
+            archive_stat = archive.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            _append_invalid_archive_root(invalid_archives, archive, "archive-root-access-error")
+        else:
+            if stat.S_ISLNK(archive_stat.st_mode):
+                _append_invalid_archive_root(invalid_archives, archive, "archive-root-symlink")
+            elif stat.S_ISDIR(archive_stat.st_mode):
+                try:
+                    archive_root = archive.resolve(strict=True)
+                    with os.scandir(archive) as entries:
+                        archive_entries = list(entries)
+                except (OSError, RuntimeError):
+                    archive_root = None
+                    _append_invalid_archive_root(
+                        invalid_archives,
+                        archive,
+                        "archive-root-access-error",
+                    )
+        if archive_root is not None:
+            candidates.extend(
+                StateCandidate(archive / entry.name)
+                for entry in sorted(archive_entries, key=lambda item: item.name)
+                if entry.name.startswith("state-") and entry.name.endswith(".json")
+            )
+            worktree_dirs = [
+                archive / entry.name
+                for entry in sorted(archive_entries, key=lambda item: item.name)
+                if entry.name.startswith("worktree-")
+            ]
+            for worktree_dir in worktree_dirs:
                 resolution = _resolve_worktree_archive(worktree_dir)
                 if resolution.status == "invalid":
                     if invalid_archives is not None:
                         invalid_archives.append(_invalid_archive_item(resolution))
+                    continue
+                try:
+                    bundle_root = worktree_dir.resolve(strict=True)
+                except (OSError, RuntimeError):
+                    bundle_root = None
+                if bundle_root is None or not bundle_root.is_relative_to(archive_root):
+                    _append_invalid_archive_root(
+                        invalid_archives,
+                        worktree_dir,
+                        "bundle-outside-archive-root",
+                    )
                     continue
                 if resolution.status == "generation":
                     candidate, reason = _preflight_generation_state(resolution)
