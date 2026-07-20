@@ -33,10 +33,13 @@ writing state, and a terminal state rejects new activity. Terminal control is
 fail-open with respect to observability: malformed open measurement is removed
 and counted in `activity_anomaly_counts`, but never prevents pass or halt.
 
-On reinitialization or PID refresh after a crash, an open segment closes at the
-last valid `updated_at` between its start and the resume time. The later gap is
-reported as `activity_unobserved_gap_sec`; it is not classified as idle. A
-repeated resume does not add duration again.
+On reinitialization, PID refresh, stale/orphan cleanup, Stop-hook halt, or any
+other terminal transition after a crash, an open segment closes at the last
+valid `updated_at` between its start and the control time. The later gap is
+reported as `activity_unobserved_gap_sec`; it is not classified as work or idle.
+A repeated resume does not add duration again. PID refresh also accrues the
+current phase only to that trusted boundary and restarts `phase_started_at` at
+resume, preventing a later phase transition from absorbing the crash gap.
 
 The latest 32 closed segments remain in `activity_segments` for diagnosis.
 Fixed-size `activity_rollup` maps preserve all earlier totals, so state growth
@@ -55,7 +58,9 @@ Coverage includes the persisted-as-of window from `phase_started_at` through
 `updated_at` for a nonterminal current phase, so observed activity cannot produce
 a percentage above 100% merely because that phase has not transitioned yet.
 Live and archived copies use the same `(project_root, session_id, mission_id)`
-identity and the same status/newest/path precedence before aggregation.
+identity and the same status/newest/path precedence before aggregation. Project
+roots are path-normalized; when absent, the state file's owning project path is
+used so equal session identifiers in different projects are not collapsed.
 
 Task samples use `mission_id`, falling back to `unknown`. Open segments are
 reported but excluded from duration distributions. Malformed, negative,
