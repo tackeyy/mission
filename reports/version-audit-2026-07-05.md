@@ -5,7 +5,7 @@ Date: 2026-07-05
 ## Conclusion
 
 - The latest published distribution version is `v1.0.7`: the local tag exists at `4678f5274f9c0b01b490ecb89baf3d5804dfff32`, the remote tag exists at the same SHA, and the GitHub Release exists.
-- The installed marketplace cache at `/Users/tackeyy/.codex/plugins/cache/mission-marketplace/mission/1.0.7` is not the exact `v1.0.7` tag package. It matches local `HEAD` (`0897604 fix mission audit specialist state gates (#116)`) plus `__pycache__`, which is one commit after the `v1.0.7` tag.
+- The installed marketplace cache at `/Users/<user>/.codex/plugins/cache/mission-marketplace/mission/1.0.7` is not the exact `v1.0.7` tag package. It matches local `HEAD` (`0897604 fix mission audit specialist state gates (#116)`) plus `__pycache__`, which is one commit after the `v1.0.7` tag.
 - The installed cache is not current with source `origin/main`. `origin/main` is `4bffdd0fb6b74d338ca5f0867d5df96b5230c207`, 12 commits ahead of local `HEAD` and 13 commits ahead of `v1.0.7`.
 - Manifest versions are still `1.0.7` in `origin/main`, `plugins/mission/.codex-plugin/plugin.json`, the `v1.0.7` tag, and the installed cache. This means `1.0.7` is the latest declared release version, but not the latest source code state.
 - `CHANGELOG.md` and `CHANGELOG.ja.md` include substantial `Unreleased` entries for the post-`v1.0.7` changes, but they do not fully cover the `v1.0.7..origin/main` code range.
@@ -38,11 +38,11 @@ All checked manifests declare `1.0.7`:
 - `origin/main:.codex-plugin/plugin.json`
 - `origin/main:plugins/mission/.codex-plugin/plugin.json`
 - `v1.0.7:.codex-plugin/plugin.json`
-- `/Users/tackeyy/.codex/plugins/cache/mission-marketplace/mission/1.0.7/.codex-plugin/plugin.json`
+- `/Users/<user>/.codex/plugins/cache/mission-marketplace/mission/1.0.7/.codex-plugin/plugin.json`
 
 ### Installed Cache Comparison
 
-Comparison target: installed cache `/Users/tackeyy/.codex/plugins/cache/mission-marketplace/mission/1.0.7`.
+Comparison target: installed cache `/Users/<user>/.codex/plugins/cache/mission-marketplace/mission/1.0.7`.
 
 - Compared to `v1.0.7:plugins/mission`, the installed cache differs in:
   - `scripts/mission-audit.py`
@@ -99,8 +99,8 @@ Missing or under-covered in `Unreleased`:
 - `git log --oneline v1.0.7..origin/main`
 - `git ls-remote --tags origin v1.0.7`
 - `gh release view v1.0.7 --repo tackeyy/mission --json tagName,name,targetCommitish,isDraft,isPrerelease,publishedAt,url`
-- `diff -qr <git archive v1.0.7 plugins/mission> /Users/tackeyy/.codex/plugins/cache/mission-marketplace/mission/1.0.7`
-- `diff -qr <git archive HEAD plugins/mission> /Users/tackeyy/.codex/plugins/cache/mission-marketplace/mission/1.0.7`
-- `diff -qr <git archive origin/main plugins/mission> /Users/tackeyy/.codex/plugins/cache/mission-marketplace/mission/1.0.7`
+- `diff -qr <git archive v1.0.7 plugins/mission> /Users/<user>/.codex/plugins/cache/mission-marketplace/mission/1.0.7`
+- `diff -qr <git archive HEAD plugins/mission> /Users/<user>/.codex/plugins/cache/mission-marketplace/mission/1.0.7`
+- `diff -qr <git archive origin/main plugins/mission> /Users/<user>/.codex/plugins/cache/mission-marketplace/mission/1.0.7`
 - `python3 -m pytest skills/mission/tests/test_doc_consistency.py -q` in a temporary `origin/main` archive: `31 passed in 0.05s`
 

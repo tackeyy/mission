@@ -16,9 +16,9 @@ Implement and release the ADR-002 Stage 1 default flip:
 
 Source checked:
 
-- `/Users/tackeyy/.codex/worktrees`
-- `/Users/tackeyy/dev/mission`
-- `/Users/tackeyy/dev/mission/.mission-state/archive`
+- `/Users/<user>/.codex/worktrees`
+- `/Users/<user>/dev/mission`
+- `/Users/<user>/dev/mission/.mission-state/archive`
 
 Observed `score_source == "scoring-json"` usage:
 

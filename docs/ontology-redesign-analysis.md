@@ -1,7 +1,7 @@
 # mission skill をオントロジー駆動アーキテクチャ思想でゼロベース再設計する場合の設計変更とメリット — 検査レポート
 
 - 作成: 2026-06-16（iter1）/ 改訂: 2026-06-17（iter2: ゼロベース理想形章 + 接地エージェント前面化 / iter3: 一般概念語化）
-- 対象: `/Users/tackeyy/dev/mission/`（/mission 自律オーケストレーター）一式
+- 対象: `/Users/<user>/dev/mission/`（/mission 自律オーケストレーター）一式
 - 目的: 「設計をゼロベースで見直し、オントロジー駆動アーキテクチャの思想で再設計するとどんな設計になり、どんなメリット/コストがあるか」を**検査・提案**する（実装はしない）
 - スタンス: ここで用いる設計概念（オントロジー / Object・Property・Link / Action Type / Function / lineage / 接地 grounding 等）は、ドメイン駆動設計（DDD）・CQRS・capability-based security・イベントソーシング・データ系譜管理といった**一般的に確立した設計パターン**に基づく（付録 B）。特定製品の内部実装には依拠しない
 - 一次根拠: 現状の記述はすべて実コード（`skills/mission/bin/mission-state.py` 全 1255 行、各 SKILL.md、`claude-hooks/hooks.json`）を read して確認済み

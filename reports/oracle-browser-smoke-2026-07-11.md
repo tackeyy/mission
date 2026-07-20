@@ -88,7 +88,7 @@ root_has_error_key=false
 
 ## 永続設定のMission wrapperテスト
 
-2026-07-11 22:10–22:16 JSTに、`/Users/tackeyy/bin/oracle-mission-review` を実Browserで検証した。
+2026-07-11 22:10–22:16 JSTに、`/Users/<user>/bin/oracle-mission-review` を実Browserで検証した。
 
 1. Chrome profile未固定の永続設定では、`Local State.profile.last_used=Profile 3`が選ばれ、session `mission-oracle-review-4` はLoginボタン検出で失敗した。
 2. wrapperへ `ORACLE_MISSION_BROWSER_CHROME_PROFILE` 対応を追加し、ローカル設定を `Profile 4` に固定した。

@@ -69,7 +69,7 @@ not be checked under the no-network scope.
 | E5 | Repo policy forbids benchmark-superiority claims | `CLAUDE.md` (project): "Do not claim benchmark superiority." / task rules restate it | Verified |
 | E6 | Remote publication is gated by a hard rule needing GitHub-side verification | `AGENTS.md:22-26` Distribution Release Rule: a version bump "is not a completed distribution release until the matching `vX.Y.Z` git tag exists on the remote and the GitHub Release for that tag exists"; verify with `git ls-remote --tags origin` and `gh release view` | Verified (rule text) |
 | E7 | Local tags exist but do **not** prove publication | `git tag` → `v1.0.0 … v1.0.5` present locally | Verified |
-| E8 | The configured remote is **not** GitHub in this checkout | `git remote -v` → `origin /Users/tackeyy/dev/mission` (a local filesystem path, not `github.com/tackeyy/mission`) | Verified |
+| E8 | The configured remote is **not** GitHub in this checkout | `git remote -v` → `origin /Users/<user>/dev/mission` (a local filesystem path, not `github.com/tackeyy/mission`) | Verified |
 | E9 | GitHub remote tag + Release state (the actual release precondition) | Would require `git ls-remote --tags origin vX.Y.Z` and `gh release view` against GitHub | **Unmeasured** (network disallowed) |
 | E10 | Whether raw artifacts actually contain secrets/PII beyond usage/error fields | Full content scan of all 30 JSON files not performed in this run | **Unmeasured** |
 
@@ -83,7 +83,7 @@ not be checked under the no-network scope.
   failure mode the rule exists to prevent.
 - **H2 — "`origin` is configured, so `git push origin` will publish the release
   safely."** *Rejected.* `git remote -v` shows `origin` points to a **local
-  path** `/Users/tackeyy/dev/mission` (E8), not GitHub. Pushing there creates **no
+  path** `/Users/<user>/dev/mission` (E8), not GitHub. Pushing there creates **no
   GitHub Release** and would produce a false "published" signal while the actual
   public release state (E9) stays unverified. The publication target itself is
   mis-wired relative to the rule's verification commands.
@@ -183,7 +183,7 @@ Concrete, checkable evidence from this checkout (all gathered without network):
 - **Remote-publication gate (E6):** `AGENTS.md:22-26` (Distribution Release Rule),
   including the two verification commands.
 - **Local tags (E7):** `git tag` → `v1.0.0`…`v1.0.5`.
-- **Remote wiring (E8):** `git remote -v` → `origin /Users/tackeyy/dev/mission`
+- **Remote wiring (E8):** `git remote -v` → `origin /Users/<user>/dev/mission`
   (local path, not GitHub).
 - **Heading check:** the five required headings (Goal, Result, Evidence,
   Assumptions, Stop Condition) are all present.
