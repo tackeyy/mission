@@ -82,7 +82,10 @@ non-operation intent, modal/contraction `not not`, outer negation such as
 `not the case that` / `not saying that` / `cannot say that`, and uncertainty
 remain conservative escalations. Multiple negation cues count as a
 reversal only before the next operation, so separate simple negations do not
-combine. A global non-operation marker does
+combine. Japanese phrases that explicitly eliminate exceptions (`例外なく`,
+`緊急時にも`, and `原則ではなく絶対に`) remain simple negations,
+as do causal assurances that the negated operation leaves no problem, obstacle,
+or concern. A global non-operation marker does
 not suppress by position alone: it suppresses a candidate only when the entire
 candidate context matches a strict meta-only grammar for reviewing, analyzing,
 documenting, or inspecting procedures, settings, logs, or text. Unknown trailing
