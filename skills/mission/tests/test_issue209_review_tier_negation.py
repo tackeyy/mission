@@ -302,6 +302,47 @@ def test_conditional_exception_to_direct_negation_stays_conservative(mission):
 @pytest.mark.parametrize(
     "mission",
     [
+        "do not deploy unless approved",
+        "deployment will not be performed unless approved",
+        "should not release unless approval is granted",
+        "承認されない限り deployしない",
+        "承認時以外は deployしない",
+        "deployしない。ただし承認時を除く",
+    ],
+)
+def test_direct_negation_with_exception_scope_stays_conservative(mission):
+    decision = _decision(mission)
+
+    assert decision["tier"] == "full"
+    assert any(
+        item["reason"] == "conditional-or-uncertain-context"
+        for item in _details(decision)
+    )
+
+
+@pytest.mark.parametrize(
+    "mission",
+    [
+        "deploy しない予定ではない",
+        "deploy しない予定はない",
+        "deploy しない方針ではない",
+        "deploy を行わない計画ではない",
+        "deploy しないとは言っていない",
+    ],
+)
+def test_negated_non_operation_intent_stays_conservative(mission):
+    decision = _decision(mission)
+
+    assert decision["tier"] == "full"
+    assert any(
+        item["reason"] == "uncertain-or-double-negation"
+        for item in _details(decision)
+    )
+
+
+@pytest.mark.parametrize(
+    "mission",
+    [
         "実操作は行わない。ただし release する",
         "Actual operations will not be performed. However release to production",
         "実操作は行わない\n> release する",
@@ -623,3 +664,18 @@ def test_dense_no_boundary_context_analysis_scales_below_quadratic():
     assert len(deploy_details) == 4_000
     assert large_elapsed < 2.5
     assert large_elapsed < (small_elapsed * 8) + 0.05
+
+
+def test_dense_global_markers_and_prior_candidates_scale_below_quadratic():
+    mission = ("deploy " * 4_000) + (
+        "Actual operations will not be performed. " * 4_000
+    )
+
+    started = time.perf_counter()
+    decision = _decision(mission)
+    elapsed = time.perf_counter() - started
+
+    deploy_details = [item for item in _details(decision) if item["keyword"] == "deploy"]
+    assert decision["tier"] == "light"
+    assert len(deploy_details) == 4_000
+    assert elapsed < 2.5
