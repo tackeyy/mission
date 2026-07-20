@@ -789,7 +789,8 @@ def test_audit_validates_manifest_hashes_once_per_record(tmp_path, run_cli, monk
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    real_hash = module._file_sha256
+    shared = sys.modules["worktree_archive"]
+    real_hash = shared._sha256
     hash_count = 0
 
     def count_hashes(path):
@@ -797,7 +798,7 @@ def test_audit_validates_manifest_hashes_once_per_record(tmp_path, run_cli, monk
         hash_count += 1
         return real_hash(path)
 
-    monkeypatch.setattr(module, "_file_sha256", count_hashes)
+    monkeypatch.setattr(shared, "_sha256", count_hashes)
     record = next(record for record in module.load_records([destination]) if record.state["session_id"] == SESSION_ID)
 
     for _ in range(3):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import stat
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,8 @@ class WorktreeArchiveValidation:
     generation: str | None = None
     reason: str | None = None
     state_paths: tuple[Path, ...] = ()
+    state: dict[str, Any] | None = None
+    evidence: tuple[dict[str, Any], ...] = ()
 
 
 def _invalid(bundle: Path, root: Path, reason: str, generation: str | None = None):
@@ -43,6 +46,74 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _normalized_state_reference(value: Any) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    path = Path(value)
+    if ".mission-state" not in path.parts:
+        return None
+    index = path.parts.index(".mission-state")
+    return Path(*path.parts[index:]).as_posix()
+
+
+def _expected_lineage(state: dict[str, Any], state_path: Path):
+    iteration = state.get("iteration")
+    if not isinstance(iteration, int) or isinstance(iteration, bool):
+        return None
+    expected: Counter[tuple[str, int, str]] = Counter()
+
+    def add(kind: str, item_iteration: Any, reference: Any) -> bool:
+        normalized = _normalized_state_reference(reference)
+        if (
+            not isinstance(item_iteration, int)
+            or isinstance(item_iteration, bool)
+            or normalized is None
+        ):
+            return False
+        expected[(kind, item_iteration, normalized)] += 1
+        return True
+
+    if not add("state", iteration, f".mission-state/sessions/{state_path.name}"):
+        return None
+    if state.get("assumptions_path") and not add(
+        "assumptions", iteration, state.get("assumptions_path")
+    ):
+        return None
+    artifact = state.get("artifact") if isinstance(state.get("artifact"), dict) else {}
+    if artifact.get("path") and not add("artifact", iteration, artifact.get("path")):
+        return None
+    for entry in state.get("score_history") or []:
+        if not isinstance(entry, dict):
+            continue
+        item_iteration = entry.get("iteration")
+        if entry.get("scoring_evidence_path") and not add(
+            "scoring", item_iteration, entry.get("scoring_evidence_path")
+        ):
+            return None
+        if entry.get("findings_evidence_path") and not add(
+            "reviews", item_iteration, entry.get("findings_evidence_path")
+        ):
+            return None
+    for invocation in state.get("specialist_invocations") or []:
+        if not isinstance(invocation, dict) or not invocation.get("evidence_path"):
+            continue
+        item_iteration = invocation.get("iteration")
+        if not isinstance(item_iteration, int) or isinstance(item_iteration, bool) or item_iteration < 0:
+            item_iteration = iteration
+        if not add("specialist", item_iteration, invocation.get("evidence_path")):
+            return None
+    progress = state.get("progress") if isinstance(state.get("progress"), dict) else {}
+    if progress.get("evidence_path") and not add(
+        "progress", iteration, progress.get("evidence_path")
+    ):
+        return None
+    if progress.get("artifact_path") and not add(
+        "progress-artifact", iteration, progress.get("artifact_path")
+    ):
+        return None
+    return expected
 
 
 def validate_worktree_archive_bundle(bundle: Path) -> WorktreeArchiveValidation:
@@ -132,6 +203,7 @@ def validate_worktree_archive_bundle(bundle: Path) -> WorktreeArchiveValidation:
 
     seen_paths: set[str] = set()
     state_paths: list[Path] = []
+    checked: list[dict[str, Any]] = []
     for item in evidence:
         if not isinstance(item, dict):
             return _invalid(bundle, generation_root, "manifest-invalid-evidence", generation)
@@ -172,6 +244,7 @@ def validate_worktree_archive_bundle(bundle: Path) -> WorktreeArchiveValidation:
             return _invalid(bundle, generation_root, "manifest-evidence-access-error", generation)
         if item["evidence_kind"] == "state":
             state_paths.append(archived)
+        checked.append({**item, "path": archived})
 
     if len(state_paths) != 1:
         return _invalid(bundle, generation_root, "manifest-state-count-invalid", generation)
@@ -186,6 +259,22 @@ def validate_worktree_archive_bundle(bundle: Path) -> WorktreeArchiveValidation:
         or state.get("iteration") != manifest.get("iteration")
     ):
         return _invalid(bundle, generation_root, "manifest-state-identity-mismatch", generation)
+    expected_lineage = _expected_lineage(state, state_paths[0])
+    actual_lineage = Counter(
+        (item["evidence_kind"], item["iteration"], item["source_reference"])
+        for item in evidence
+    )
+    if expected_lineage is None or actual_lineage != expected_lineage:
+        return _invalid(bundle, generation_root, "manifest-state-lineage-mismatch", generation)
+    state_entries = [item for item in checked if item["evidence_kind"] == "state"]
+    state_archive_path = state_paths[0].relative_to(generation_root).as_posix()
+    if len(state_entries) != 1 or state_entries[0]["archive_path"] != state_archive_path:
+        return _invalid(bundle, generation_root, "manifest-state-path-mismatch", generation)
     return WorktreeArchiveValidation(
-        "valid", generation_root, generation=generation, state_paths=tuple(state_paths)
+        "valid",
+        generation_root,
+        generation=generation,
+        state_paths=tuple(state_paths),
+        state=state,
+        evidence=tuple(checked),
     )

@@ -62,7 +62,10 @@ from audit_findings import (  # noqa: E402
     serialize_findings,
     sort_findings,
 )
-from worktree_archive import validate_worktree_archive_bundle  # noqa: E402
+from worktree_archive import (  # noqa: E402
+    WorktreeArchiveValidation,
+    validate_worktree_archive_bundle,
+)
 
 
 PRUNE_DIRS = {
@@ -200,6 +203,8 @@ class StateRecord:
     archive_bundle: Path | None = None
     archive_root: Path | None = None
     archive_generation: str | None = None
+    archive_validation: WorktreeArchiveValidation | None = None
+    audit_specialist_invocation_gap_skills: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -208,6 +213,7 @@ class StateCandidate:
     archive_bundle: Path | None = None
     archive_root: Path | None = None
     archive_generation: str | None = None
+    archive_validation: WorktreeArchiveValidation | None = None
     state: dict[str, Any] | None = None
 
 
@@ -218,6 +224,7 @@ class ArchiveResolution:
     root: Path
     generation: str | None = None
     reason: str | None = None
+    validation: WorktreeArchiveValidation | None = None
 
 
 def _worktree_archive_root(record: StateRecord) -> Path | None:
@@ -261,6 +268,7 @@ def _resolve_worktree_archive(bundle: Path) -> ArchiveResolution:
             bundle,
             shared.root,
             generation=shared.generation,
+            validation=shared,
         )
     if shared.status == "invalid":
         return ArchiveResolution(
@@ -269,6 +277,7 @@ def _resolve_worktree_archive(bundle: Path) -> ArchiveResolution:
             shared.root,
             generation=shared.generation,
             reason=shared.reason,
+            validation=shared,
         )
     # Legacy bundles have no pointer/manifest generation; retain their reader below.
     try:
@@ -558,6 +567,24 @@ def _validate_worktree_manifest_uncached(record: StateRecord) -> tuple[str, list
 
 
 def _validated_worktree_manifest(record: StateRecord) -> tuple[str, list[dict[str, Any]]]:
+    validation = record.archive_validation
+    if validation is not None:
+        if (
+            validation.status == "valid"
+            and validation.state == record.state
+            and validation.state_paths == (record.path,)
+        ):
+            return "valid", list(validation.evidence)
+        return "invalid", []
+    bundle = _worktree_archive_root(record)
+    if bundle is not None:
+        shared = validate_worktree_archive_bundle(bundle)
+        if shared.status == "invalid":
+            return "invalid", []
+        if shared.status == "valid":
+            if shared.state == record.state and shared.state_paths == (record.path,):
+                return "valid", list(shared.evidence)
+            return "invalid", []
     cache_key = (
         str(record.path),
         str(record.archive_root or ""),
@@ -654,6 +681,26 @@ def _append_invalid_archive_root(
 def _preflight_generation_state(
     resolution: ArchiveResolution,
 ) -> tuple[StateCandidate | None, str | None]:
+    validation = resolution.validation
+    if validation is not None:
+        if (
+            validation.status != "valid"
+            or validation.state is None
+            or len(validation.state_paths) != 1
+            or not is_mission_state(validation.state)
+        ):
+            return None, validation.reason or "manifest-or-generation-integrity-invalid"
+        return (
+            StateCandidate(
+                path=validation.state_paths[0],
+                archive_bundle=resolution.bundle,
+                archive_root=validation.root,
+                archive_generation=validation.generation,
+                archive_validation=validation,
+                state=validation.state,
+            ),
+            None,
+        )
     manifest_path = resolution.root / "manifest.json"
     try:
         manifest_stat = manifest_path.lstat()
@@ -945,6 +992,7 @@ def load_records(
                     archive_bundle=candidate.archive_bundle,
                     archive_root=candidate.archive_root,
                     archive_generation=candidate.archive_generation,
+                    archive_validation=candidate.archive_validation,
                 )
             )
     return records
@@ -1346,9 +1394,8 @@ def missing_specialist_selection_checkpoint_item(
 def specialist_invocation_gap_skills(
     record: StateRecord, *, now: datetime | None = None
 ) -> list[str]:
-    cached = record.state.get("_audit_specialist_invocation_gap_skills")
-    if isinstance(cached, list) and all(isinstance(skill, str) for skill in cached):
-        return cached
+    if record.audit_specialist_invocation_gap_skills:
+        return list(record.audit_specialist_invocation_gap_skills)
     if is_active_no_score_pending(record, now=now):
         return []
     selected = explicitly_selected_specialist_skills(record.state)
@@ -1794,10 +1841,7 @@ def aggregate(
             specialist_invocation_gaps.append(
                 replace(
                     record,
-                    state={
-                        **record.state,
-                        "_audit_specialist_invocation_gap_skills": gap_skills,
-                    },
+                    audit_specialist_invocation_gap_skills=tuple(gap_skills),
                 )
             )
     unselected_specialist_invocations = [
