@@ -9,8 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-07-20
+
+### Breaking
+
+- `mark-passes --force` now also requires `--approved-by-user` and exits 2 without it. The new flag is an explicit user-approval declaration, not a validation bypass on its own: orchestrators must not set it autonomously, and it is only used when the user explicitly instructs an override. State records `force_approved_by_user` alongside the existing `force_reason`, and `mission-audit.py` reports a new P0 finding for forced passes that lack it (#185, #193).
+- `set phase=` is now validated against a phase enum. Unknown values exit 2; the four known aliases (`execution`, `review`, `plan`, `score`) normalize to their canonical form with a warning. A real run previously set `phase=execution` unchecked and polluted `phase_duration_totals` (#188, #191).
+
+### Added
+
+- `mission-state.py stats` now reports `by_review_tier` (same shape as `by_complexity`) and `iteration_by_review_tier`, so light-tier rework can be monitored with a single command. States written before the tier existed aggregate under `unknown` (#180, #182).
+- State now records `cli_version`, and a version-skew detector scans the Claude Code and Codex plugin caches to surface a stale install against the running CLI (#186, #195).
+- `mark-halt` and `halt --all` accept `--category`, backed by a shared `HALT_CATEGORIES` enum (`blocked-external` / `awaiting-approval` / `partial-done` / `stagnation` / `user-abort` / `stale` / `other`). Missing or invalid values fall back to `other` with a warning, because an emergency stop must never fail on a bad category. Automatic halts now record `stale` (#190, #192).
+- `mark-passes` prints a warning when optional specialists were selected but never closed out with any invocation status, along with the `specialists log-invocation --status skipped` command that closes them. The pass gate itself is unchanged (#189, #194).
+
 ### Changed
-- Explicit user instructions such as "release" or "deploy to production" now count as advance approval for that matching irreversible action. Mission does not repeat the same confirmation immediately before execution unless the target, scope, rollback conditions, or required destructive operations materially change.
+
+- Explicit user instructions such as "release" or "deploy to production" now count as advance approval for that matching irreversible action. Mission does not repeat the same confirmation immediately before execution unless the target, scope, rollback conditions, or required destructive operations materially change (#197).
+- `_derive_next_action` now detects a score entry that is `score_source=scoring-json` but missing `findings_evidence_path`, and drives the retry through state instead of instructions alone. A real Codex run had escaped to `--force` when its `aggregate-reviews` output was unavailable, while other runs in the same period self-recovered (#187, #196).
+
+### Fixed
+
+- `task_profile.risk=high` keywords are calibrated with the same policy as #174: `prod` removed (redundant with `production`, and a false-positive source for `product`/`productivity`), `auth` replaced with `authenticat`/`authoriz`/`oauth`, and bare `token` replaced with six compound forms. Retroactive analysis over 506 missions: `risk=high` drops from 72 to 53, risk-driven escalation from 17 to 9, with missed cases unchanged at 3 (#175, #183).
 - `mission-audit.py` now recognizes scoring evidence stored as `iter-N-<mission8>/scoring.{json,md}` inside archived worktree bundles, preventing false historical `missing-scoring-evidence` findings after worktree cleanup (#201).
 
 ## [1.2.0] - 2026-07-10
@@ -210,6 +230,7 @@ First public release.
 - Python test suite covering state routing, scoring gates, and hook behavior.
 - GitHub Actions CI (`push`, `pull_request`, `workflow_dispatch`) with pytest and ShellCheck.
 
+[2.0.0]: https://github.com/tackeyy/mission/releases/tag/v2.0.0
 [1.2.0]: https://github.com/tackeyy/mission/releases/tag/v1.2.0
 [1.1.1]: https://github.com/tackeyy/mission/releases/tag/v1.1.1
 [1.1.0]: https://github.com/tackeyy/mission/releases/tag/v1.1.0
