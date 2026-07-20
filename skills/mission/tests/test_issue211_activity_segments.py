@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import hashlib
+import argparse
+import importlib.util
 import os
 from pathlib import Path
 import subprocess
@@ -16,6 +18,14 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 MISSION_AUDIT_PY = REPO_ROOT / "scripts" / "mission-audit.py"
 TASK_TEXT = "activity timing task"
 TASK_ID = hashlib.sha256(TASK_TEXT.encode("utf-8")).hexdigest()[:16]
+MISSION_STATE_PY = REPO_ROOT / "skills" / "mission" / "bin" / "mission-state.py"
+
+
+def _load_mission_state_module():
+    spec = importlib.util.spec_from_file_location("mission_state_issue211", MISSION_STATE_PY)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _state_path(project: Path) -> Path:
@@ -492,6 +502,59 @@ def test_stats_and_audit_share_activity_percentiles_and_reason_breakdown(
     assert sum(stats["activity_duration_totals_sec"].values()) == 600.0
 
 
+def test_stats_and_audit_dedupe_same_session_with_shared_newest_precedence(
+    tmp_path, run_cli
+):
+    project_root = str(tmp_path / "canonical-project")
+    old = _base_state(
+        tmp_path,
+        project_root=project_root,
+        session_id="duplicate",
+        started_at="2026-07-20T00:00:00Z",
+        updated_at="2026-07-21T00:01:00Z",
+        activity_segments=[
+            _closed("active", "executing", "work", "2026-07-21T00:00:00Z", "2026-07-21T00:01:00Z", 60)
+        ],
+        activity_current=None,
+    )
+    newest = _base_state(
+        tmp_path,
+        project_root=project_root,
+        session_id="duplicate",
+        started_at="2026-07-21T00:00:00Z",
+        updated_at="2026-07-21T00:03:00Z",
+        phase="done",
+        loop_active=False,
+        passes=True,
+        activity_segments=[
+            _closed("active", "executing", "work", "2026-07-21T00:00:00Z", "2026-07-21T00:03:00Z", 180)
+        ],
+        activity_current=None,
+    )
+    old_path = tmp_path / "a-old" / ".mission-state" / "sessions" / "duplicate.json"
+    new_path = tmp_path / "z-new" / ".mission-state" / "sessions" / "duplicate.json"
+    old_path.parent.mkdir(parents=True)
+    new_path.parent.mkdir(parents=True)
+    old_path.write_text(json.dumps(old))
+    new_path.write_text(json.dumps(newest))
+
+    stats = json.loads(
+        run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path, check=True).stdout
+    )["activity_timing"]
+    audit = json.loads(
+        subprocess.run(
+            [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--json"],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={**os.environ, "MISSION_AUDIT_NOW": "2026-07-21T01:00:00Z"},
+        ).stdout
+    )["activity_timing"]
+
+    assert stats == audit
+    assert stats["observed_total_sec"] == 180.0
+
+
 def test_coverage_includes_the_current_phase_window_and_never_exceeds_one(
     tmp_path, run_cli
 ):
@@ -776,3 +839,58 @@ def test_activity_observability_does_not_change_review_quality_gate(tmp_path, ru
     assert state["min_item_threshold"] == 3.5
     assert state["reviewer_count"] == 3
     assert state["review_tier"] == "full"
+
+
+@pytest.mark.parametrize("command", ["cleanup-stale", "halt-all"])
+def test_bulk_terminal_writers_reread_under_lock_and_close_concurrent_activity(
+    tmp_path, monkeypatch, capsys, command
+):
+    module = _load_mission_state_module()
+    project = tmp_path / "project"
+    state_path = _write_state(project, pid=99999999)
+    original_lock = module.StateLock
+
+    class InjectingLock:
+        def __init__(self, path):
+            self.delegate = original_lock(path)
+
+        def __enter__(self):
+            value = self.delegate.__enter__()
+            latest = json.loads(state_path.read_text())
+            latest["concurrent_sentinel"] = "preserve-me"
+            latest["activity_current"] = {
+                "kind": "active",
+                "phase": "executing",
+                "reason": "work",
+                "started_at": "2026-07-21T00:00:00Z",
+            }
+            latest["updated_at"] = "2026-07-21T00:00:00Z"
+            state_path.write_text(json.dumps(latest))
+            return value
+
+        def __exit__(self, exc_type, exc, tb):
+            return self.delegate.__exit__(exc_type, exc, tb)
+
+    monkeypatch.setattr(module, "StateLock", InjectingLock)
+    monkeypatch.setattr(module, "iso_now", lambda: "2026-07-21T00:01:00Z")
+    monkeypatch.setattr(module, "_iter_state_files", lambda root, **kwargs: [state_path])
+    monkeypatch.setattr(module, "_default_search_roots", lambda: [project])
+    monkeypatch.setattr(module, "_pid_is_agent", lambda pid: False)
+
+    if command == "cleanup-stale":
+        module.cmd_cleanup_stale(argparse.Namespace(root=str(project), execute=True))
+    else:
+        module.cmd_halt(
+            argparse.Namespace(
+                all=True,
+                root=str(project),
+                reason="bulk halt",
+                category="other",
+            )
+        )
+    capsys.readouterr()
+
+    state = json.loads(state_path.read_text())
+    assert state["concurrent_sentinel"] == "preserve-me"
+    assert state["activity_current"] is None
+    assert state["activity_rollup"]["observed_total_sec"] == 60.0
