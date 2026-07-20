@@ -126,8 +126,13 @@ def summarize_pass_rate_population(
     stale_after_sec: int,
 ) -> dict[str, Any]:
     """Return shared raw/completed rates and exclusive session health counts."""
+    observation_now = now or datetime.now(timezone.utc)
     health_classes = [
-        classify_pass_rate_health(state, now=now, stale_after_sec=stale_after_sec)
+        classify_pass_rate_health(
+            state,
+            now=observation_now,
+            stale_after_sec=stale_after_sec,
+        )
         for state in states
     ]
     counts = {name: 0 for name in PASS_RATE_HEALTH_CLASSES}
