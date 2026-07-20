@@ -136,3 +136,26 @@ def test_audit_aggregate_uses_one_observation_time_at_stale_boundary(monkeypatch
     assert summary["stale_count"] == 0
     assert summary["stale_active_no_score_count"] == 0
     assert summary["completed_pass_rate_denominator"] == 0
+
+
+def test_shared_pass_rate_summary_observes_all_states_at_one_implicit_time(monkeypatch):
+    state_mod = _load(MISSION_STATE_PY, "mission_state_issue208_implicit_now")
+    common = sys.modules["mission_common"]
+    observed = []
+    real_classify = common.classify_pass_rate_health
+
+    def record_observation(state, *, now, stale_after_sec):
+        observed.append(now)
+        return real_classify(state, now=now, stale_after_sec=stale_after_sec)
+
+    monkeypatch.setattr(common, "classify_pass_rate_health", record_observation)
+    states = [
+        {"passes": False, "loop_active": True, "updated_at": "2026-07-21T00:00:00Z"},
+        {"passes": False, "loop_active": True, "updated_at": "2026-07-21T00:00:00Z"},
+    ]
+
+    state_mod.summarize_pass_rate_population(states, stale_after_sec=3600)
+
+    assert len(observed) == 2
+    assert observed[0] is not None
+    assert observed[0] is observed[1]
