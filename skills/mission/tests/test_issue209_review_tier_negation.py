@@ -614,6 +614,47 @@ def test_later_ambiguous_execution_vetoes_global_meta_suppression(mission):
 @pytest.mark.parametrize(
     "mission",
     [
+        "Review the deploy procedure, then proceed with it. "
+        "Actual operations will not be performed.",
+        "Review the deploy procedure, then apply it. "
+        "Actual operations will not be performed.",
+        "deploy手順を調査して適用する。実操作は行わない",
+        "deploy手順を調査し、そのまま進める。実操作は行わない",
+    ],
+)
+def test_unknown_trailing_action_prevents_global_meta_only_suppression(mission):
+    decision = _decision(mission)
+
+    actual = _details(decision)
+    assert decision["tier"] == "full"
+    assert actual and {item["decision"] for item in actual} == {"included"}
+    for detail in actual:
+        assert mission[detail["start"] : detail["end"]] == detail["match"]
+
+
+@pytest.mark.parametrize(
+    "mission",
+    [
+        'only quote "deploy, then execute it"',
+        "引用するだけ:「deployして実行する」",
+    ],
+)
+def test_execution_cue_inside_quote_does_not_veto_quote_only_suppression(mission):
+    decision = _decision(mission)
+
+    deploy = next(item for item in _details(decision) if item["keyword"] == "deploy")
+    assert decision["tier"] == "light"
+    assert decision["signals"] == []
+    assert (deploy["decision"], deploy["reason"]) == (
+        "suppressed",
+        "quoted-non-operation",
+    )
+    assert mission[deploy["start"] : deploy["end"]] == deploy["match"]
+
+
+@pytest.mark.parametrize(
+    "mission",
+    [
         "本番へ deploy する可能性がある",
         "本番へ deploy するかもしれない",
         "本番へ deploy するかは未確定",
