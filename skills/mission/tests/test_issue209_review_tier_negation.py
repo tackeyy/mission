@@ -742,7 +742,7 @@ def test_dense_no_boundary_context_analysis_scales_below_quadratic():
 
 
 def test_dense_global_markers_and_prior_candidates_scale_below_quadratic():
-    mission = ("deploy " * 4_000) + (
+    mission = ("review deploy procedure. " * 4_000) + (
         "Actual operations will not be performed. " * 4_000
     )
 
