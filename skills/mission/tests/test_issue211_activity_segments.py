@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -13,6 +14,8 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MISSION_AUDIT_PY = REPO_ROOT / "scripts" / "mission-audit.py"
+TASK_TEXT = "activity timing task"
+TASK_ID = hashlib.sha256(TASK_TEXT.encode("utf-8")).hexdigest()[:16]
 
 
 def _state_path(project: Path) -> Path:
@@ -23,8 +26,8 @@ def _state_path(project: Path) -> Path:
 
 def _base_state(project: Path, **overrides) -> dict:
     state = {
-        "mission": "activity timing task",
-        "mission_id": "activity-task",
+        "mission": TASK_TEXT,
+        "mission_id": TASK_ID,
         "complexity": "Standard",
         "reviewer_count": 2,
         "iteration": 1,
@@ -61,7 +64,7 @@ def test_activity_cli_records_all_kinds_and_preserves_legacy_phase_durations(
     path = _write_state(tmp_path)
     schedule = [
         ("active", "implementation", "2026-07-21T00:00:00Z"),
-        ("external-wait", "remote-response", "2026-07-21T00:10:00Z"),
+        ("external-wait", "external-response", "2026-07-21T00:10:00Z"),
         ("approval-wait", "user-approval", "2026-07-21T00:20:00Z"),
         ("reviewer-wait", "review-response", "2026-07-21T00:30:00Z"),
         ("idle", "no-runnable-work", "2026-07-21T00:40:00Z"),
@@ -194,7 +197,7 @@ def test_reinit_and_refresh_close_open_segment_once_without_losing_history(
         activity_segments=[],
         activity_rollup={"observed_total_sec": 0.0},
     )
-    args = ("init", "activity timing task") if command == "init" else ("refresh-pid",)
+    args = ("init", TASK_TEXT) if command == "init" else ("refresh-pid",)
     env = {"MISSION_STATE_NOW": "2026-07-21T01:00:00Z"}
 
     first = run_cli(*args, cwd=tmp_path, env_extra=env)
@@ -281,6 +284,11 @@ def test_activity_history_is_bounded_while_rollup_keeps_all_duration(tmp_path, r
     assert len(state["activity_segments"]) <= 32
     assert state["activity_rollup"]["closed_segment_count"] == 40
     assert state["activity_rollup"]["observed_total_sec"] == 1200.0
+    stats = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
+    assert stats.returncode == 0, stats.stderr
+    timing = json.loads(stats.stdout)["activity_timing"]
+    assert timing["observed_total_sec"] == 1200.0
+    assert timing["activity_duration_totals_sec"] == {"active": 1200.0}
 
 
 def _closed(kind: str, phase: str, reason: str, start: str, end: str, duration: float):
@@ -298,14 +306,14 @@ def test_stats_and_audit_share_activity_percentiles_and_reason_breakdown(
     tmp_path, run_cli
 ):
     state_a = [
-        _closed("active", "planning", "planning-work", "2026-07-21T00:00:00Z", "2026-07-21T00:00:30Z", 30),
+        _closed("active", "planning", "work", "2026-07-21T00:00:00Z", "2026-07-21T00:00:30Z", 30),
         _closed("approval-wait", "planning", "user-approval", "2026-07-21T00:00:30Z", "2026-07-21T00:01:40Z", 70),
-        _closed("external-wait", "executing", "remote-response", "2026-07-21T00:01:40Z", "2026-07-21T00:03:20Z", 100),
+        _closed("external-wait", "executing", "external-response", "2026-07-21T00:01:40Z", "2026-07-21T00:03:20Z", 100),
     ]
     state_b = [
-        _closed("active", "planning", "planning-work", "2026-07-21T00:00:00Z", "2026-07-21T00:01:10Z", 70),
+        _closed("active", "planning", "work", "2026-07-21T00:00:00Z", "2026-07-21T00:01:10Z", 70),
         _closed("approval-wait", "planning", "user-approval", "2026-07-21T00:01:10Z", "2026-07-21T00:01:40Z", 30),
-        _closed("external-wait", "executing", "remote-response", "2026-07-21T00:01:40Z", "2026-07-21T00:06:40Z", 300),
+        _closed("external-wait", "executing", "external-response", "2026-07-21T00:01:40Z", "2026-07-21T00:06:40Z", 300),
     ]
     _write_state(
         tmp_path / "a",
@@ -335,7 +343,9 @@ def test_stats_and_audit_share_activity_percentiles_and_reason_breakdown(
     audit = json.loads(audit_result.stdout)["activity_timing"]
 
     assert audit == stats
-    assert stats["task_duration_percentiles_sec"]["activity-task"] == {
+    assert stats["percentile_method"] == "linear-interpolation-r7"
+    assert stats["task_key"] == "mission_id-or-unknown"
+    assert stats["task_duration_percentiles_sec"][TASK_ID] == {
         "count": 2,
         "p50": 300.0,
         "p90": 380.0,
@@ -357,7 +367,7 @@ def test_stats_and_audit_share_activity_percentiles_and_reason_breakdown(
     }
     assert stats["wait_reason_totals_sec"] == {
         "approval-wait": {"user-approval": 100.0},
-        "external-wait": {"remote-response": 400.0},
+        "external-wait": {"external-response": 400.0},
     }
     assert stats["observed_total_sec"] == 600.0
     assert sum(stats["activity_duration_totals_sec"].values()) == 600.0
