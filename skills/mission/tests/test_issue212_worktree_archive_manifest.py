@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -474,6 +475,44 @@ def test_audit_reports_unreadable_archive_path_instead_of_treating_it_as_absent(
     assert data["invalid_worktree_archive_count"] == 1
     assert data["invalid_worktree_archives"][0]["bundle_path"] == str(unreadable)
     assert data["invalid_worktree_archives"][0]["reason"] == reason
+    codes = {finding["code"] for finding in data["findings"]}
+    assert "invalid-worktree-archive" in codes
+    assert "no-critical-findings" not in codes
+
+
+@pytest.mark.parametrize("root_name", ["mission-state", "archive"])
+@pytest.mark.parametrize(
+    "node_kind",
+    [
+        "regular-file",
+        pytest.param(
+            "fifo",
+            marks=pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO is not supported"),
+        ),
+    ],
+)
+def test_audit_reports_non_directory_state_roots_as_invalid(
+    tmp_path, run_cli, root_name, node_kind
+):
+    worktree, destination = _make_completed_worktree(tmp_path)
+    result = _archive(run_cli, worktree, destination)
+    assert result.returncode == 0, result.stderr
+    mission_state = destination / ".mission-state"
+    invalid_root = mission_state if root_name == "mission-state" else mission_state / "archive"
+    shutil.rmtree(invalid_root)
+    if node_kind == "regular-file":
+        invalid_root.write_text("not a directory\n", encoding="utf-8")
+    else:
+        os.mkfifo(invalid_root)
+
+    data = _run_audit(destination)
+
+    assert data["total_sessions"] == 0
+    assert data["invalid_worktree_archive_count"] == 1
+    assert data["invalid_worktree_archives"][0] == {
+        "bundle_path": str(invalid_root),
+        "reason": f"{root_name}-root-not-directory",
+    }
     codes = {finding["code"] for finding in data["findings"]}
     assert "invalid-worktree-archive" in codes
     assert "no-critical-findings" not in codes
