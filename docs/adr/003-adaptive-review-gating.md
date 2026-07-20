@@ -76,9 +76,11 @@ Active `not perform/execute`, contractions and `cannot`, passive
 `will/should not be performed/executed`, and equivalent Japanese qualifier forms
 are treated as direct anchors for the operation phrase. Only an explicit, simple
 statement that the actual operation will not happen is suppressed. Conditions
-and exceptions (`unless`, approval exclusions, principles, emergency cases, and
-equivalent Japanese forms), negated non-operation intent, double negatives, and
-uncertainty remain conservative escalations. Multiple negation cues count as a
+and exceptions (`unless`, `except when`, `until`, pending approval, approval
+exclusions, principles, emergency cases, and equivalent Japanese forms), negated
+non-operation intent, modal/contraction `not not`, outer negation such as
+`not the case that` / `not saying that` / `cannot say that`, and uncertainty
+remain conservative escalations. Multiple negation cues count as a
 reversal only before the next operation, so separate simple negations do not
 combine. A global non-operation marker does
 not suppress by position alone: it suppresses a candidate only when the entire
@@ -87,7 +89,9 @@ documenting, or inspecting procedures, settings, logs, or text. Unknown trailing
 content invalidates that proof. Ambiguous, imperative, and affirmative
 candidates remain conservative. Any execution cue in the same logical unit that
 is not directly anchored to another named operation may refer to a meta candidate
-and vetoes suppression with `ambiguous-execution-reference`; execution cues
+and vetoes suppression with `ambiguous-execution-reference`. This includes
+cross-sentence `follow/apply + pronoun` and Japanese `適用` / `従う`
+references; execution cues
 inside quote spans are excluded from that veto. Explicit quote-only intent suppresses a quoted
 candidate unless execution language immediately around that quote directly
 targets the quoted command, including a passive modal immediately after the
