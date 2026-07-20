@@ -782,6 +782,88 @@ def test_activity_summary_rejects_overflowing_json_numbers_without_crashing(
     assert timing["totals_consistent"] is False
 
 
+def test_activity_summary_quarantines_finite_values_whose_rollup_sums_overflow(
+    tmp_path, run_cli
+):
+    huge = 1e308
+    _write_state(
+        tmp_path,
+        activity_rollup={
+            "observed_total_sec": huge,
+            "closed_segment_count": 2,
+            "activity_duration_totals_sec": {
+                "active": huge,
+                "external-wait": huge,
+            },
+            "phase_activity_duration_totals_sec": {
+                "executing": {"active": huge, "external-wait": huge}
+            },
+            "wait_reason_totals_sec": {
+                "external-wait": {
+                    "external-response": huge,
+                    "external-command": huge,
+                }
+            },
+        },
+    )
+
+    result = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "Infinity" not in result.stdout
+    assert "NaN" not in result.stdout
+    timing = json.loads(result.stdout)["activity_timing"]
+    assert timing["invalid_segment_count"] >= 1
+    assert timing["totals_consistent"] is False
+
+
+def test_activity_summary_quarantines_legacy_phase_sum_overflow(tmp_path, run_cli):
+    _write_state(
+        tmp_path,
+        phase_durations_sec={"planning": 1e308, "executing": 1e308},
+    )
+
+    result = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "Infinity" not in result.stdout
+    assert "NaN" not in result.stdout
+    timing = json.loads(result.stdout)["activity_timing"]
+    assert timing["invalid_segment_count"] >= 1
+    assert timing["totals_consistent"] is False
+
+
+def test_activity_summary_quarantines_cross_state_aggregate_overflow(
+    tmp_path, run_cli
+):
+    huge = 1e308
+    for name in ("one", "two"):
+        project = tmp_path / name
+        _write_state(
+            project,
+            mission_id=f"mission-{name}",
+            session_id=name,
+            activity_rollup={
+                "observed_total_sec": huge,
+                "closed_segment_count": 1,
+                "activity_duration_totals_sec": {"active": huge},
+                "phase_activity_duration_totals_sec": {
+                    "executing": {"active": huge}
+                },
+                "wait_reason_totals_sec": {},
+            },
+        )
+
+    result = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "Infinity" not in result.stdout
+    assert "NaN" not in result.stdout
+    timing = json.loads(result.stdout)["activity_timing"]
+    assert timing["invalid_segment_count"] >= 1
+    assert timing["totals_consistent"] is False
+
+
 def test_activity_requires_explicit_reason_and_known_kind(tmp_path, run_cli):
     _write_state(tmp_path)
     missing = _run_activity(
