@@ -270,6 +270,29 @@ def test_archived_bundle_survives_worktree_removal_without_missing_scoring(tmp_p
     assert data["duplicate_group_count"] == 0
 
 
+def test_generation_archive_has_same_pass_rate_population_in_stats_and_audit(tmp_path, run_cli):
+    """The current immutable generation must not disappear from stats population."""
+    worktree, destination = _make_completed_worktree(tmp_path)
+    result = _archive(run_cli, worktree, destination)
+    assert result.returncode == 0, result.stderr
+    shutil.rmtree(worktree)
+
+    audit_data = _run_audit(destination)
+    stats_result = run_cli("stats", "--root", str(destination), "--json", cwd=destination)
+    assert stats_result.returncode == 0, stats_result.stderr
+    stats_data = json.loads(stats_result.stdout)
+
+    for field in (
+        "raw_pass_rate_numerator",
+        "raw_pass_rate_denominator",
+        "completed_pass_rate_numerator",
+        "completed_pass_rate_denominator",
+    ):
+        assert stats_data[field] == audit_data[field] == 1
+    assert stats_data["raw_pass_rate"] == audit_data["raw_pass_rate"] == 1.0
+    assert stats_data["completed_pass_rate"] == audit_data["completed_pass_rate"] == 1.0
+
+
 def test_audit_resolves_specialist_evidence_from_generation_manifest_after_source_removal(
     tmp_path, run_cli
 ):

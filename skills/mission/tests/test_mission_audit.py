@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -540,6 +541,88 @@ def test_audit_pass_rate_excludes_active_no_score_sessions(tmp_path):
     assert data["pass_rate_denominator"] == 1
     assert data["pass_rate"] == 1.0
     assert all(f["code"] != "low-pass-rate" for f in data["findings"])
+
+
+def test_audit_raw_completed_rates_match_stats_classification(tmp_path):
+    """Audit exposes the same raw/completed population and exclusive health counts."""
+    fresh = datetime.now(timezone.utc).isoformat()
+    for index in range(6):
+        _write_state(
+            tmp_path / f"passed-{index}" / ".mission-state" / "sessions" / f"passed-{index}.json",
+            project_root=str(tmp_path / f"passed-{index}"),
+            mission_id=f"passed-{index}",
+            session_id=f"passed-{index}",
+        )
+    for index in range(2):
+        _write_state(
+            tmp_path / f"active-{index}" / ".mission-state" / "sessions" / f"active-{index}.json",
+            project_root=str(tmp_path / f"active-{index}"),
+            mission_id=f"active-{index}",
+            session_id=f"active-{index}",
+            passes=False,
+            loop_active=True,
+            score_history=[],
+            halt_reason="",
+            updated_at=fresh,
+        )
+
+    result = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={**os.environ, "MISSION_STALE_ACTIVE_SECONDS": "3600"},
+    )
+
+    data = json.loads(result.stdout)
+    assert data["raw_pass_rate_numerator"] == 6
+    assert data["raw_pass_rate_denominator"] == 8
+    assert data["raw_pass_rate"] == 0.75
+    assert data["completed_pass_rate_numerator"] == 6
+    assert data["completed_pass_rate_denominator"] == 6
+    assert data["completed_pass_rate"] == 1.0
+    assert data["active_count"] == 0
+    assert data["active_no_score_count"] == 2
+    assert data["stale_count"] == 0
+    # audit legacy meaning remains the completed-session rate.
+    assert data["pass_rate"] == data["completed_pass_rate"]
+    assert data["pass_rate_denominator"] == data["completed_pass_rate_denominator"]
+
+
+def test_audit_includes_stale_in_completed_health_denominator(tmp_path):
+    _write_state(
+        tmp_path / "passed" / ".mission-state" / "sessions" / "passed.json",
+        project_root=str(tmp_path / "passed"),
+        mission_id="passed",
+        session_id="passed",
+    )
+    _write_state(
+        tmp_path / "stale" / ".mission-state" / "sessions" / "stale.json",
+        project_root=str(tmp_path / "stale"),
+        mission_id="stale",
+        session_id="stale",
+        passes=False,
+        loop_active=True,
+        halt_reason="",
+        score_history=[],
+        updated_at=(datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={**os.environ, "MISSION_STALE_ACTIVE_SECONDS": "3600"},
+    )
+
+    data = json.loads(result.stdout)
+    assert data["completed_pass_rate_numerator"] == 1
+    assert data["completed_pass_rate_denominator"] == 2
+    assert data["completed_pass_rate"] == 0.5
+    assert data["stale_count"] == 1
+    assert data["active_no_score_count"] == 0
+    assert any(finding["code"] == "stale-active-no-score" for finding in data["findings"])
 
 
 def test_audit_ignores_worktree_archive_aggregate_json(tmp_path):
