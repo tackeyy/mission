@@ -756,6 +756,32 @@ def test_activity_summary_rejects_malformed_rollup_values_and_reports_inconsiste
     assert timing["totals_consistent"] is False
 
 
+def test_activity_summary_rejects_overflowing_json_numbers_without_crashing(
+    tmp_path, run_cli
+):
+    huge = 10**400
+    _write_state(
+        tmp_path,
+        activity_rollup={
+            "observed_total_sec": huge,
+            "closed_segment_count": 1,
+            "activity_duration_totals_sec": {"active": huge},
+            "phase_activity_duration_totals_sec": {
+                "executing": {"active": huge}
+            },
+            "wait_reason_totals_sec": {},
+        },
+    )
+
+    result = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    timing = json.loads(result.stdout)["activity_timing"]
+    assert timing["observed_total_sec"] == 0.0
+    assert timing["invalid_segment_count"] >= 1
+    assert timing["totals_consistent"] is False
+
+
 def test_activity_requires_explicit_reason_and_known_kind(tmp_path, run_cli):
     _write_state(tmp_path)
     missing = _run_activity(
@@ -992,6 +1018,7 @@ def test_manual_halt_is_not_reactivated_by_orphan_like_reason(tmp_path, run_cli)
     "malformed",
     [
         {"phase_durations_sec": {"executing": "bad"}},
+        {"phase_durations_sec": {"executing": 10**400}},
         {"phase_started_at": "not-a-time"},
         {"phase": ["executing"]},
     ],
