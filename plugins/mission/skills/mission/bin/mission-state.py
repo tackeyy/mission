@@ -772,7 +772,7 @@ _REVIEW_DOUBLE_NEGATION_RE = re.compile(
 )
 _REVIEW_CONDITIONAL_RE = re.compile(
     r"必要なら|必要な場合|場合|可能なら|可能性|かもしれ|未確定|検討中|するか|し得|あり得|"
-    r"限り|以外|除く|"
+    r"限り|以外|除く|除き|原則|ことがある|例外|緊急時|"
     r"\bonly\s+if\b|\bif\b|\bunless\b|\bmay\b|\bmight\b|\bcould\b|\bpossibly\b|\bwhether\b|"
     r"\bwithout\s+(?:approval|authorization|permission)\b",
     re.IGNORECASE,
@@ -792,9 +792,9 @@ _REVIEW_EN_NEGATED_OPERATION_RE = re.compile(
     re.IGNORECASE,
 )
 _REVIEW_JA_POST_NEGATION_RE = re.compile(
-    r"^\s*(?:は|を|が|では|には|へ|に|で)?\s*"
+    r"^\s*(?:は|を|も|が|では|には|へ|に|で)?\s*"
     r"(?:(?:実行|実施)\s*)?(?:しない方針|しない|しません|せず)|"
-    r"^\s*(?:は|を|が|では|には|へ|に|で)?\s*"
+    r"^\s*(?:は|を|も|が|では|には|へ|に|で)?\s*"
     r"(?:行わない|行われない|行いません|行わず|禁止|対象外)|"
     r"^\s*する予定はない",
 )
@@ -830,15 +830,27 @@ _REVIEW_QUOTED_EXECUTION_BEFORE_RE = re.compile(
     re.IGNORECASE,
 )
 _REVIEW_QUOTED_EXECUTION_AFTER_RE = re.compile(
-    r"^[」』\"`]\s*(?:を|は)\s*(?:実際に)?(?:実行|実施|行う)",
+    r"^[」』\"`]\s*(?:"
+    r"(?:を|は)\s*(?:実際に)?(?:実行|実施|行う)|"
+    r"(?:will|must|should)\s+be\s+(?:executed|performed|released|published)\b"
+    r")",
+    re.IGNORECASE,
 )
 _REVIEW_QUOTE_ONLY_RE = re.compile(
     r"引用(?:する|のみ|だけ)|引用するだけ|\bquote(?:d|s|ing)?\s+only\b|\bonly\s+quot(?:e|ed|ing)\b",
     re.IGNORECASE,
 )
 _REVIEW_NEGATION_CUE_RE = re.compile(
-    r"しない|行わない|実行しない|ではない|はない|言っていない|述べていない|"
+    r"しない|行わない|実行しない|ではない|はない|言っていない|述べていない|ない|"
     r"\bnot\b|\bnever\b|\bcannot\b|\b(?:don|won|can)['’]t\b",
+    re.IGNORECASE,
+)
+_REVIEW_AMBIGUOUS_EXECUTION_RE = re.compile(
+    r"\b(?:execute|run|perform)\s+(?:it|that|this|them)\b|"
+    r"\b(?:then|and|afterwards|later)\s+(?:execute|run|perform)\b"
+    r"(?!\s+(?:(?:the|a|an)\s+)?(?:deploy(?:ment)?|release|migration|publish|production)\b)|"
+    r"(?:それ|これ|その(?:手順|内容))\s*を\s*(?:実行|実施|行う)|"
+    r"(?:その後|してから|した後)\s*(?:に)?\s*(?:実行|実施|行う)",
     re.IGNORECASE,
 )
 
@@ -994,6 +1006,19 @@ def _review_context_analysis(
             "negation_cue_starts": [
                 match.start() for match in _REVIEW_NEGATION_CUE_RE.finditer(context)
             ],
+            "actual_operation_starts": sorted({
+                match.start()
+                for keywords, ignore_case in (
+                    (_IRREVERSIBLE_KEYWORDS_EN, True),
+                    (_IRREVERSIBLE_KEYWORDS_JA, False),
+                )
+                for keyword in keywords
+                for match in _review_keyword_matches(
+                    context,
+                    keyword,
+                    ignore_case=ignore_case,
+                )
+            }),
             "negated_operations": _review_regex_span_index(
                 context,
                 start,
@@ -1035,10 +1060,20 @@ def _review_operation_is_explicitly_negated(
 
 def _review_operation_has_negation_reversal(
     cue_starts: list[int],
+    operation_starts: list[int],
+    relative_start: int,
     relative_end: int,
 ) -> bool:
     """Treat multiple post-operation negation cues as ambiguous, never suppressible."""
-    return len(cue_starts) - bisect_left(cue_starts, relative_end) >= 2
+    next_operation_index = bisect_right(operation_starts, relative_start)
+    limit = (
+        operation_starts[next_operation_index]
+        if next_operation_index < len(operation_starts)
+        else None
+    )
+    first_cue = bisect_left(cue_starts, relative_end)
+    final_cue = bisect_left(cue_starts, limit) if limit is not None else len(cue_starts)
+    return final_cue - first_cue >= 2
 
 
 def _actual_operation_signal_detail(
@@ -1079,21 +1114,29 @@ def _actual_operation_signal_detail(
             ),
             "double_negation": bool(_REVIEW_DOUBLE_NEGATION_RE.search(logical_unit)),
             "conditional": bool(_REVIEW_CONDITIONAL_RE.search(logical_unit)),
+            "ambiguous_execution": bool(
+                _REVIEW_AMBIGUOUS_EXECUTION_RE.search(logical_unit)
+            ),
         }
     unit_flags = unit_flags_cache[unit_key]
     global_markers = unit_flags["global_markers"]
     global_non_operation = bool(global_markers[1])
     unit_double_negation = unit_flags["double_negation"]
     unit_conditional = unit_flags["conditional"]
+    unit_ambiguous_execution = unit_flags["ambiguous_execution"]
 
-    if quoted and quote_only and not quoted_execution_target:
-        decision, reason = "suppressed", "quoted-non-operation"
-    elif quoted and quoted_execution_target:
+    if quoted and quoted_execution_target:
         decision, reason = "included", "affirmative-actual-operation"
+    elif quoted and unit_ambiguous_execution:
+        decision, reason = "included", "ambiguous-execution-reference"
+    elif quoted and quote_only:
+        decision, reason = "suppressed", "quoted-non-operation"
     elif quoted:
         decision, reason = "included", "quoted-context-conservative"
     elif context_analysis["double_negation"] or _review_operation_has_negation_reversal(
         context_analysis["negation_cue_starts"],
+        context_analysis["actual_operation_starts"],
+        relative_start,
         relative_end,
     ):
         decision, reason = "included", "uncertain-or-double-negation"
@@ -1113,6 +1156,8 @@ def _actual_operation_signal_detail(
         decision, reason = "included", "uncertain-or-double-negation"
     elif global_non_operation and unit_conditional:
         decision, reason = "included", "conditional-or-uncertain-context"
+    elif global_non_operation and unit_ambiguous_execution:
+        decision, reason = "included", "ambiguous-execution-reference"
     elif global_non_operation and _review_index_contains(
         context_analysis["meta_non_operations"],
         start,
