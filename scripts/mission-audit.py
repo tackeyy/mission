@@ -91,6 +91,7 @@ class StateCandidate:
     archive_bundle: Path | None = None
     archive_root: Path | None = None
     archive_generation: str | None = None
+    state: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -136,6 +137,8 @@ def _file_sha256(path: Path) -> str:
 
 
 def _resolve_worktree_archive(bundle: Path) -> ArchiveResolution:
+    if bundle.is_symlink() or not bundle.is_dir():
+        return ArchiveResolution("invalid", bundle, bundle, reason="bundle-not-regular-directory")
     pointer_path = bundle / "current.json"
     if not pointer_path.exists() and not pointer_path.is_symlink():
         return ArchiveResolution("legacy", bundle, bundle)
@@ -155,7 +158,16 @@ def _resolve_worktree_archive(bundle: Path) -> ArchiveResolution:
         or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for character in generation)
     ):
         return ArchiveResolution("invalid", bundle, bundle, reason="pointer-invalid-schema-or-generation")
-    generation_root = bundle / "generations" / generation
+    generations_root = bundle / "generations"
+    if generations_root.is_symlink() or not generations_root.is_dir():
+        return ArchiveResolution(
+            "invalid",
+            bundle,
+            generations_root,
+            generation=generation,
+            reason="generations-not-regular-directory",
+        )
+    generation_root = generations_root / generation
     if generation_root.is_symlink() or not generation_root.is_dir():
         return ArchiveResolution(
             "invalid",
@@ -471,6 +483,68 @@ def _invalid_archive_item(resolution: ArchiveResolution, reason: str | None = No
     return item
 
 
+def _preflight_generation_state(
+    resolution: ArchiveResolution,
+) -> tuple[StateCandidate | None, str | None]:
+    manifest_path = resolution.root / "manifest.json"
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        return None, "manifest-missing-or-not-regular-file"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None, "manifest-invalid-json"
+    evidence = manifest.get("evidence") if isinstance(manifest, dict) else None
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema") != WORKTREE_ARCHIVE_SCHEMA
+        or not isinstance(evidence, list)
+    ):
+        return None, "manifest-invalid-schema"
+    state_items = [
+        item for item in evidence
+        if isinstance(item, dict) and item.get("evidence_kind") == "state"
+    ]
+    if len(state_items) != 1:
+        return None, "manifest-state-entry-invalid"
+    state_relative = _manifest_relative_path(state_items[0].get("archive_path"))
+    if state_relative is None:
+        return None, "manifest-state-path-invalid"
+    state_path = resolution.root / state_relative
+    current = resolution.root
+    for part in state_relative.parts:
+        current = current / part
+        if current.is_symlink():
+            return None, "manifest-state-path-symlink"
+    if not state_path.is_file():
+        return None, "manifest-state-missing"
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None, "manifest-state-invalid-json"
+    if not is_mission_state(state):
+        return None, "manifest-state-invalid-schema"
+    record = StateRecord(
+        path=state_path,
+        state=state,
+        archive_bundle=resolution.bundle,
+        archive_root=resolution.root,
+        archive_generation=resolution.generation,
+    )
+    status, _evidence = _validated_worktree_manifest(record)
+    if status != "valid":
+        return None, "manifest-or-generation-integrity-invalid"
+    return (
+        StateCandidate(
+            path=state_path,
+            archive_bundle=resolution.bundle,
+            archive_root=resolution.root,
+            archive_generation=resolution.generation,
+            state=state,
+        ),
+        None,
+    )
+
+
 def _iter_state_candidates(
     root: Path, invalid_archives: list[dict[str, Any]] | None = None
 ):
@@ -491,27 +565,41 @@ def _iter_state_candidates(
         if archive.is_dir():
             candidates.extend(StateCandidate(path) for path in sorted(archive.glob("state-*.json")))
             for worktree_dir in sorted(archive.glob("worktree-*")):
-                if worktree_dir.is_dir():
-                    resolution = _resolve_worktree_archive(worktree_dir)
-                    if resolution.status == "invalid":
+                resolution = _resolve_worktree_archive(worktree_dir)
+                if resolution.status == "invalid":
+                    if invalid_archives is not None:
+                        invalid_archives.append(_invalid_archive_item(resolution))
+                    continue
+                if resolution.status == "generation":
+                    candidate, reason = _preflight_generation_state(resolution)
+                    if candidate is None:
                         if invalid_archives is not None:
-                            invalid_archives.append(_invalid_archive_item(resolution))
+                            invalid_resolution = ArchiveResolution(
+                                "invalid",
+                                resolution.bundle,
+                                resolution.root,
+                                generation=resolution.generation,
+                                reason=reason,
+                            )
+                            invalid_archives.append(_invalid_archive_item(invalid_resolution))
                         continue
-                    active_root = resolution.root
-                    snapshot = {
-                        "archive_bundle": worktree_dir,
-                        "archive_root": active_root,
-                        "archive_generation": resolution.generation,
-                    }
+                    candidates.append(candidate)
+                    continue
+                active_root = resolution.root
+                snapshot = {
+                    "archive_bundle": worktree_dir,
+                    "archive_root": active_root,
+                    "archive_generation": resolution.generation,
+                }
+                candidates.extend(
+                    StateCandidate(path, **snapshot) for path in sorted(active_root.glob("*.json"))
+                )
+                worktree_sessions = active_root / "sessions"
+                if worktree_sessions.is_dir():
                     candidates.extend(
-                        StateCandidate(path, **snapshot) for path in sorted(active_root.glob("*.json"))
+                        StateCandidate(path, **snapshot)
+                        for path in sorted(worktree_sessions.glob("*.json"))
                     )
-                    worktree_sessions = active_root / "sessions"
-                    if worktree_sessions.is_dir():
-                        candidates.extend(
-                            StateCandidate(path, **snapshot)
-                            for path in sorted(worktree_sessions.glob("*.json"))
-                        )
         seen: set[Path] = set()
         for candidate in candidates:
             path = candidate.path
@@ -534,10 +622,12 @@ def load_records(
     for root in roots:
         for candidate in _iter_state_candidates(root, invalid_archives) or []:
             path = candidate.path
-            try:
-                state = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
+            state = candidate.state
+            if state is None:
+                try:
+                    state = json.loads(path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
             if not is_mission_state(state):
                 continue
             records.append(
@@ -555,13 +645,27 @@ def load_records(
 def collect_invalid_worktree_archives(
     records: list[StateRecord], discovered: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    invalid = list(discovered)
-    seen = {item["bundle_path"] for item in invalid}
+    invalid: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def canonical_bundle_key(value: str) -> str:
+        try:
+            return str(Path(value).resolve(strict=False))
+        except (OSError, RuntimeError):
+            return str(Path(value).absolute())
+
+    for item in discovered:
+        key = canonical_bundle_key(item["bundle_path"])
+        if key in seen:
+            continue
+        invalid.append(item)
+        seen.add(key)
     for record in records:
         if record.archive_bundle is None:
             continue
         bundle_path = str(record.archive_bundle)
-        if bundle_path in seen:
+        bundle_key = canonical_bundle_key(bundle_path)
+        if bundle_key in seen:
             continue
         status, _evidence = _validated_worktree_manifest(record)
         if status != "invalid":
@@ -574,7 +678,7 @@ def collect_invalid_worktree_archives(
             reason="manifest-or-generation-integrity-invalid",
         )
         invalid.append(_invalid_archive_item(resolution))
-        seen.add(bundle_path)
+        seen.add(bundle_key)
     return invalid
 
 
@@ -1139,6 +1243,24 @@ def scoring_evidence_paths(record: StateRecord, iteration: int) -> list[Path]:
 
 
 def specialist_evidence_paths(record: StateRecord, invocation: dict[str, Any]) -> list[Path]:
+    manifest_status, manifest_evidence = _validated_worktree_manifest(record)
+    if manifest_status == "invalid":
+        return []
+    if manifest_status == "valid":
+        source_reference = _normalized_state_reference(invocation.get("evidence_path"))
+        iteration = invocation.get("iteration")
+        if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < 0:
+            iteration = record.state.get("iteration")
+        if source_reference is None or not isinstance(iteration, int) or isinstance(iteration, bool):
+            return []
+        return [
+            item["path"]
+            for item in manifest_evidence
+            if item.get("evidence_kind") == "specialist"
+            and item.get("iteration") == iteration
+            and item.get("source_reference") == source_reference
+        ]
+
     paths: list[Path] = []
     evidence_path = str(invocation.get("evidence_path") or "").strip()
     if evidence_path:

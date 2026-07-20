@@ -310,7 +310,8 @@ def test_audit_uses_valid_manifest_for_noncanonical_scoring_path(tmp_path, run_c
     without_manifest = _run_audit(destination)
 
     assert with_manifest["missing_scoring_evidence_count"] == 0
-    assert without_manifest["missing_scoring_evidence_count"] == 1
+    assert without_manifest["total_sessions"] == 0
+    assert without_manifest["invalid_worktree_archive_count"] == 1
 
 
 @pytest.mark.parametrize("pointer_failure", ["malformed", "symlink", "missing-generation"])
@@ -456,6 +457,7 @@ def test_audit_deduplicates_invalid_bundle_across_overlapping_roots(tmp_path, ru
         "item-iteration",
         "content",
         "malformed",
+        "non-object",
     ],
 )
 def test_audit_rejects_tampered_or_malformed_manifest(tmp_path, run_cli, tamper):
@@ -469,6 +471,8 @@ def test_audit_rejects_tampered_or_malformed_manifest(tmp_path, run_cli, tamper)
     scoring = next(item for item in manifest["evidence"] if item["evidence_kind"] == "scoring")
     if tamper == "malformed":
         manifest_path.write_text("{not-json\n", encoding="utf-8")
+    elif tamper == "non-object":
+        manifest_path.write_text("[]\n", encoding="utf-8")
     elif tamper == "content":
         (generation_root / scoring["archive_path"]).write_text("changed\n", encoding="utf-8")
     else:
@@ -482,7 +486,8 @@ def test_audit_rejects_tampered_or_malformed_manifest(tmp_path, run_cli, tamper)
 
     data = _run_audit(destination)
 
-    assert data["missing_scoring_evidence_count"] == 1
+    assert data["total_sessions"] == 0
+    assert data["invalid_worktree_archive_count"] == 1
 
 
 @pytest.mark.parametrize("tamper", ["relabel-reviews", "source-mismatch"])
@@ -507,7 +512,8 @@ def test_audit_rejects_manifest_lineage_that_disagrees_with_state(tmp_path, run_
 
     data = _run_audit(destination)
 
-    assert data["missing_scoring_evidence_count"] == 1
+    assert data["total_sessions"] == 0
+    assert data["invalid_worktree_archive_count"] == 1
 
 
 def test_audit_validates_manifest_hashes_once_per_record(tmp_path, run_cli, monkeypatch):
@@ -522,7 +528,6 @@ def test_audit_validates_manifest_hashes_once_per_record(tmp_path, run_cli, monk
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    record = next(record for record in module.load_records([destination]) if record.state["session_id"] == SESSION_ID)
     real_hash = module._file_sha256
     hash_count = 0
 
@@ -532,6 +537,7 @@ def test_audit_validates_manifest_hashes_once_per_record(tmp_path, run_cli, monk
         return real_hash(path)
 
     monkeypatch.setattr(module, "_file_sha256", count_hashes)
+    record = next(record for record in module.load_records([destination]) if record.state["session_id"] == SESSION_ID)
 
     for _ in range(3):
         assert module.scoring_evidence_paths(record, 2)
@@ -585,9 +591,9 @@ def test_generation_missing_manifest_is_invalid_and_cannot_use_legacy_root_fallb
 
     data = _run_audit(destination)
 
-    assert data["total_sessions"] == 1
+    assert data["total_sessions"] == 0
     assert data["invalid_worktree_archive_count"] == 1
-    assert data["missing_scoring_evidence_count"] == 1
+    assert data["missing_scoring_evidence_count"] == 0
     assert any(finding["code"] == "invalid-worktree-archive" for finding in data["findings"])
 
 
