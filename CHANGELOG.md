@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Irreversible `review_tier` keywords are now evaluated per occurrence in paragraph/list-item-local context. Explicitly negated actual operations no longer escalate a Simple/Standard mission, while conditional, double-negative, uncertain, quoted, security, high-risk, and Complex/Critical cases remain conservative. State adds per-match `review_tier_signal_details` provenance without changing the existing ordered string-list contract (#209).
+- Irreversible `review_tier` keywords are now evaluated per occurrence with operation-anchored clause and structural-unit context. Negation, execution, and quote-only intent no longer leak across conjunctions, exception clauses, paragraphs, list items, blockquotes, or headings. Segment indexes and unit caches avoid repeated full-text scans. Explicitly negated actual operations no longer escalate a Simple/Standard mission, while conditional, double-negative, uncertain, quoted, security, high-risk, and Complex/Critical cases remain conservative. State adds per-match `review_tier_signal_details` provenance without changing the existing ordered string-list contract (#209).
 
 ## [2.0.0] - 2026-07-20
 

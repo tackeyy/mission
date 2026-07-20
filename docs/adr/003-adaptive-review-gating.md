@@ -65,13 +65,16 @@ downgrade path):
 | Security keyword (EN) | `secret`, `credential`, `password`, `api token`, `api-token`, `api_key`, `access token`, `access-token`, `bearer`, `authenticat`, `authoriz`, `oauth` — case-insensitive substring match |
 | Security keyword (JA) | `認証`, `秘密`, `鍵` |
 
-Every occurrence of an irreversible keyword is evaluated in its paragraph- or
-list-item-local context.
+Every occurrence of an irreversible keyword is evaluated in sentence/contrast
+clauses within paragraph, list-item, blockquote, and heading-delimited logical
+units. Negation, execution, and quote-only intent are anchored to the matching
+operation rather than applied to every nearby keyword.
 Only an explicit, simple statement that the actual operation will not happen is
 suppressed. Conditional, double-negative, uncertain, and merely quoted contexts
 remain conservative escalations; an explicit quote-only intent may be suppressed.
-Negation, execution, and quote-only intent do not leak to a different logical
-unit. Security keywords,
+Those intents do not leak across a conjunction, exception clause, or structural
+unit. Segment boundaries are indexed once per mission so repeated keyword
+lookups do not rescan the full text. Security keywords,
 `task_profile.risk=high`, and the Complex/Critical base tiers are never suppressed
 by this context rule.
 

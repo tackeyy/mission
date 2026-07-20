@@ -280,7 +280,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py progress updat
 | セキュリティ系英語キーワード | `secret` / `credential` / `password` / `api token` / `api-token` / `api_key` / `access token` / `access-token` / `bearer` / `authenticat` / `authoriz` / `oauth`（大文字小文字を区別しない部分一致） |
 | セキュリティ系日本語キーワード | `認証` / `秘密` / `鍵` |
 
-不可逆系キーワードはすべての出現を段落・list item 単位の局所文脈で評価する。`deploy しない`、`do not deploy`、`対象外` など、実操作を明示的かつ単純に否定した候補だけを抑制する。否定・実行・引用だけという意図を別の段落や list item へ伝播させない。条件付き、二重否定、不確実表現、単なる引用は安全側で採用し、同じ unit で引用だけが目的だと明示された場合のみ抑制する。`task_profile.risk=high` と security キーワードは否定文脈でも常に採用する。Complex / Critical のベース tier も変えない。
+不可逆系キーワードはすべての出現を、文・対比接続詞で区切った clause と、段落・list item・blockquote・heading で区切った logical unit の文脈で評価する。`deploy しない`、`do not deploy`、`対象外` など、実操作を明示的かつ単純に否定した候補だけを抑制する。否定・実行・引用だけという意図は各 operation に anchor し、接続詞の先や例外 clause、別の構造 unit へ伝播させない。条件付き、二重否定、不確実表現、単なる引用は安全側で採用し、同じ clause で引用だけが目的だと明示された場合のみ抑制する。境界は mission ごとに一度だけ索引化し、出現ごとの判定で全文を再走査しない。`task_profile.risk=high` と security キーワードは否定文脈でも常に採用する。Complex / Critical のベース tier も変えない。
 
 採用したキーワードは従来どおり `review_tier_signals` に `irreversible-keyword:<kw>` / `security-keyword:<kw>` 形式で、定数順・同一キーワード 1 件として記録する。additive な `review_tier_signal_details` は採用・抑制を問わず各出現を記録し、`match` / `context` / `decision` / `reason` / `source` / `start` / `end` から判定を追跡できる。`get` はこの field を state の一部として出力する。field を持たない旧 state の `get` / `next` / `set` は引き続き動作し、auto source で complexity を再設定した時に details が生成される。
 
