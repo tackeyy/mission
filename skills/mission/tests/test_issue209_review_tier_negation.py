@@ -119,6 +119,15 @@ def test_global_explicit_non_operation_statement_suppresses_prior_candidate():
     assert {item["reason"] for item in _details(decision)} == {"global-explicit-non-operation"}
 
 
+def test_global_non_operation_suppresses_all_candidates_in_the_logical_unit():
+    decision = _decision("deploy to production の手順を調査する。実操作は行わない")
+
+    assert decision["tier"] == "light"
+    assert decision["signals"] == []
+    assert {item["keyword"] for item in _details(decision)} == {"deploy", "production"}
+    assert {item["decision"] for item in _details(decision)} == {"suppressed"}
+
+
 def test_every_occurrence_is_evaluated_when_same_keyword_has_mixed_intent():
     decision = _decision("deploy しないが、deploy する")
 
@@ -149,7 +158,9 @@ def test_uncertain_context_stays_conservative(mission):
     ("mission", "expected_tier", "expected_reason"),
     [
         ("do not deploy to production", "light", "negated-actual-operation"),
+        ("do not deploy without approval", "full", "conditional-or-uncertain-context"),
         ("deployment is not impossible", "full", "uncertain-or-double-negation"),
+        ("deployment is out of scope", "light", "negated-actual-operation"),
         ("deploy only if approval is granted", "full", "conditional-or-uncertain-context"),
         ('the guide says "deploy to production"', "full", "quoted-context-conservative"),
     ],
@@ -163,7 +174,10 @@ def test_english_negation_uncertainty_condition_and_quote(
     assert expected_reason in {item["reason"] for item in _details(decision)}
 
 
-@pytest.mark.parametrize("mission", ["deploy せず調査だけ行う", "deploy を禁止する", "deploy は対象外とする"])
+@pytest.mark.parametrize(
+    "mission",
+    ["deploy せず調査だけ行う", "deploy しません", "deploy を禁止する", "deploy は対象外とする"],
+)
 def test_japanese_explicit_non_operation_variants_are_suppressed(mission):
     decision = _decision(mission)
 
