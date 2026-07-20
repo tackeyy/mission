@@ -449,23 +449,31 @@ def test_audit_rejects_symlinked_state_roots_without_reading_external_archive(
     assert "no-critical-findings" not in codes
 
 
-def test_audit_reports_unreadable_bundle_instead_of_treating_pointer_as_absent(
-    tmp_path, run_cli
+@pytest.mark.parametrize(
+    ("access_target", "reason"),
+    [
+        ("bundle", "pointer-access-error"),
+        ("archive", "archive-root-access-error"),
+    ],
+)
+def test_audit_reports_unreadable_archive_path_instead_of_treating_it_as_absent(
+    tmp_path, run_cli, access_target, reason
 ):
     worktree, destination = _make_completed_worktree(tmp_path)
     result = _archive(run_cli, worktree, destination)
     assert result.returncode == 0, result.stderr
     bundle = Path(json.loads(result.stdout)["bundle_path"])
-    bundle.chmod(0)
+    unreadable = bundle if access_target == "bundle" else destination / ".mission-state" / "archive"
+    unreadable.chmod(0)
     try:
         data = _run_audit(destination)
     finally:
-        bundle.chmod(0o700)
+        unreadable.chmod(0o700)
 
     assert data["total_sessions"] == 0
     assert data["invalid_worktree_archive_count"] == 1
-    assert data["invalid_worktree_archives"][0]["bundle_path"] == str(bundle)
-    assert data["invalid_worktree_archives"][0]["reason"] == "pointer-access-error"
+    assert data["invalid_worktree_archives"][0]["bundle_path"] == str(unreadable)
+    assert data["invalid_worktree_archives"][0]["reason"] == reason
     codes = {finding["code"] for finding in data["findings"]}
     assert "invalid-worktree-archive" in codes
     assert "no-critical-findings" not in codes
