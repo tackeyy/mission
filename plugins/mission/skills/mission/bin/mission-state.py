@@ -845,12 +845,23 @@ _REVIEW_NEGATION_CUE_RE = re.compile(
     r"\bnot\b|\bnever\b|\bcannot\b|\b(?:don|won|can)['’]t\b",
     re.IGNORECASE,
 )
-_REVIEW_AMBIGUOUS_EXECUTION_RE = re.compile(
-    r"\b(?:execute|run|perform)\s+(?:it|that|this|them)\b|"
-    r"\b(?:then|and|afterwards|later)\s+(?:execute|run|perform)\b"
-    r"(?!\s+(?:(?:the|a|an)\s+)?(?:deploy(?:ment)?|release|migration|publish|production)\b)|"
-    r"(?:それ|これ|その(?:手順|内容))\s*を\s*(?:実行|実施|行う)|"
-    r"(?:その後|してから|した後)\s*(?:に)?\s*(?:実行|実施|行う)",
+_REVIEW_EXECUTION_CUE_RE = re.compile(
+    r"\b(?:execute(?:d)?|run|perform(?:ed)?|carry\s+(?:(?:it|that|this)\s+)?out|"
+    r"released|published)\b|"
+    r"(?:実行|実施|反映)(?:する|します|した|する予定)?|行う|行います",
+    re.IGNORECASE,
+)
+_REVIEW_NAMED_EXECUTION_RE = re.compile(
+    r"\b(?:execute|run|perform|carry\s+out)\s+"
+    r"(?:(?:the|a|an)\s+)?[\"`]?"
+    r"(?:deploy(?:ment)?|release|migration|publish|production)\b|"
+    r"[\"`]?(?:deploy(?:ment)?|release|migration|publish|production)[\"`]?\s+"
+    r"(?:(?:will|must|should)\s+be|(?:is|are|was|were))\s+"
+    r"(?:executed|performed|released|published)\b|"
+    r"(?:deploy|release|publish|migration|production|本番|リリース|マイグレーション|公開)"
+    r"[」』\"`]?\s*(?:を|は|が|も)?\s*"
+    r"(?:(?:実行|実施|反映)(?:する|します|した|する予定)?|"
+    r"行う|行います)",
     re.IGNORECASE,
 )
 
@@ -966,6 +977,25 @@ def _review_index_contains(
     end: int,
 ) -> bool:
     return _review_index_container(index, start, end) is not None
+
+
+def _review_text_has_ambiguous_execution(text: str) -> bool:
+    """Find execution intent not explained by a directly named operation target."""
+    named_targets = _review_regex_span_index(text, 0, _REVIEW_NAMED_EXECUTION_RE)
+    non_operation_markers = _review_regex_span_index(
+        text,
+        0,
+        _REVIEW_GLOBAL_NON_OPERATION_RE,
+    )
+    return any(
+        not _review_index_contains(named_targets, match.start(), match.end())
+        and not _review_index_contains(
+            non_operation_markers,
+            match.start(),
+            match.end(),
+        )
+        for match in _REVIEW_EXECUTION_CUE_RE.finditer(text)
+    )
 
 
 def _review_quote_has_execution_target(
@@ -1115,7 +1145,7 @@ def _actual_operation_signal_detail(
             "double_negation": bool(_REVIEW_DOUBLE_NEGATION_RE.search(logical_unit)),
             "conditional": bool(_REVIEW_CONDITIONAL_RE.search(logical_unit)),
             "ambiguous_execution": bool(
-                _REVIEW_AMBIGUOUS_EXECUTION_RE.search(logical_unit)
+                _review_text_has_ambiguous_execution(logical_unit)
             ),
         }
     unit_flags = unit_flags_cache[unit_key]
