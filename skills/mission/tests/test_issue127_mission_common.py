@@ -99,3 +99,40 @@ def test_shared_pass_rate_health_is_exclusive_and_fails_stale_closed():
     assert summary["raw_pass_rate_denominator"] == 6
     assert summary["completed_pass_rate_numerator"] == 1
     assert summary["completed_pass_rate_denominator"] == 4
+
+
+def test_audit_aggregate_uses_one_observation_time_at_stale_boundary(monkeypatch, tmp_path):
+    audit_mod = _load(MISSION_AUDIT_PY, "mission_audit_issue208_boundary")
+    before_boundary = datetime(2026, 7, 21, 11, 59, 59, tzinfo=timezone.utc)
+    after_boundary = datetime(2026, 7, 21, 12, 0, 1, tzinfo=timezone.utc)
+    observed = iter([before_boundary, after_boundary, after_boundary, after_boundary])
+    calls = []
+
+    def advancing_now():
+        calls.append(True)
+        return next(observed)
+
+    monkeypatch.setattr(audit_mod, "utc_now", advancing_now)
+    monkeypatch.setenv("MISSION_STALE_ACTIVE_SECONDS", "3600")
+    state = {
+        "mission": "boundary",
+        "mission_id": "boundary-mission",
+        "session_id": "boundary-session",
+        "project_root": str(tmp_path),
+        "passes": False,
+        "loop_active": True,
+        "halt_reason": "",
+        "score_history": [],
+        "started_at": "2026-07-21T11:00:00Z",
+        "updated_at": "2026-07-21T11:00:00Z",
+        "iteration": 1,
+    }
+    record = audit_mod.StateRecord(tmp_path / "state.json", state)
+
+    summary = audit_mod.aggregate([record], [], 0, 1800)
+
+    assert len(calls) == 1
+    assert summary["active_no_score_count"] == 1
+    assert summary["stale_count"] == 0
+    assert summary["stale_active_no_score_count"] == 0
+    assert summary["completed_pass_rate_denominator"] == 0

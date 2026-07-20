@@ -293,6 +293,31 @@ def test_generation_archive_has_same_pass_rate_population_in_stats_and_audit(tmp
     assert stats_data["completed_pass_rate"] == audit_data["completed_pass_rate"] == 1.0
 
 
+def test_stats_rejects_generation_state_that_fails_manifest_integrity(tmp_path, run_cli):
+    """Stats must not read a generation state that audit rejects before aggregation."""
+    worktree, destination = _make_completed_worktree(tmp_path)
+    result = _archive(run_cli, worktree, destination)
+    assert result.returncode == 0, result.stderr
+    shutil.rmtree(worktree)
+    generation_root = _active_bundle_root(Path(json.loads(result.stdout)["bundle_path"]))
+    manifest = json.loads((generation_root / "manifest.json").read_text(encoding="utf-8"))
+    state_item = next(item for item in manifest["evidence"] if item["evidence_kind"] == "state")
+    archived_state = generation_root / state_item["archive_path"]
+    state = json.loads(archived_state.read_text(encoding="utf-8"))
+    state["mission"] = "tampered but valid JSON"
+    archived_state.write_text(json.dumps(state) + "\n", encoding="utf-8")
+
+    audit_data = _run_audit(destination)
+    stats_result = run_cli("stats", "--root", str(destination), "--json", cwd=destination)
+    assert stats_result.returncode == 0, stats_result.stderr
+    stats_data = json.loads(stats_result.stdout)
+
+    assert audit_data["invalid_worktree_archive_count"] == 1
+    assert audit_data["total_sessions"] == 0
+    assert stats_data["total_sessions"] == 0
+    assert stats_data["raw_pass_rate_denominator"] == 0
+
+
 def test_audit_resolves_specialist_evidence_from_generation_manifest_after_source_removal(
     tmp_path, run_cli
 ):
