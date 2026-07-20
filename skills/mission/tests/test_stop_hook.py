@@ -146,6 +146,7 @@ def test_hook_autohalts_on_very_stale_state(tmp_path):
     assert st["activity_current"] is None
     assert st["activity_rollup"]["activity_duration_totals_sec"]["idle"] == 300.0
     assert st["activity_unobserved_gap_sec"] > 0
+    assert st["resume_target_phase"] == "executing"
 
 
 def test_hook_does_not_autohalt_awaiting_user_state(tmp_path):

@@ -387,9 +387,8 @@ def test_phase_transition_splits_open_activity_atomically_and_terminal_closes_it
     assert final["activity_current"] is None
     assert [segment["duration_sec"] for segment in final["activity_segments"]] == [
         600.0,
-        0.0,
+        600.0,
     ]
-    assert final["activity_unobserved_gap_sec"] == 600.0
     assert final["phase_durations_sec"]["reviewing"] == 600.0
 
 
@@ -868,8 +867,7 @@ def test_repeated_terminal_command_closes_a_late_open_activity(tmp_path, run_cli
     assert result.returncode == 0, result.stderr
     state = json.loads(path.read_text())
     assert state["activity_current"] is None
-    assert state["activity_rollup"]["observed_total_sec"] == 0.0
-    assert state["activity_unobserved_gap_sec"] == 60.0
+    assert state["activity_rollup"]["observed_total_sec"] == 60.0
 
 
 def test_terminal_closes_only_to_last_trusted_update_and_marks_crash_gap_unobserved(
@@ -900,6 +898,67 @@ def test_terminal_closes_only_to_last_trusted_update_and_marks_crash_gap_unobser
     state = json.loads(path.read_text())
     assert state["activity_rollup"]["observed_total_sec"] == 300.0
     assert state["activity_unobserved_gap_sec"] == 3300.0
+
+
+def test_stale_terminal_restores_pre_halt_phase_on_refresh_and_allows_work(
+    tmp_path, run_cli
+):
+    path = _write_state(
+        tmp_path,
+        phase="executing",
+        phase_started_at="2026-07-21T00:00:00Z",
+        updated_at="2026-07-21T00:05:00Z",
+        activity_current={
+            "kind": "active",
+            "phase": "executing",
+            "reason": "work",
+            "started_at": "2026-07-21T00:00:00Z",
+        },
+    )
+
+    halted = run_cli(
+        "mark-halt",
+        "--reason",
+        "stale: automatic stop",
+        "--category",
+        "stale",
+        cwd=tmp_path,
+        env_extra={"MISSION_STATE_NOW": "2026-07-21T01:00:00Z"},
+    )
+    assert halted.returncode == 0, halted.stderr
+    stopped = json.loads(path.read_text())
+    assert stopped["phase"] == "halted"
+    assert stopped["resume_target_phase"] == "executing"
+    assert stopped["phase_durations_sec"]["executing"] == 300.0
+
+    refreshed = run_cli(
+        "refresh-pid",
+        cwd=tmp_path,
+        env_extra={"MISSION_STATE_NOW": "2026-07-21T01:01:00Z"},
+    )
+    assert refreshed.returncode == 0, refreshed.stderr
+    resumed = json.loads(path.read_text())
+    assert resumed["loop_active"] is True
+    assert resumed["halt_reason"] == ""
+    assert resumed["phase"] == "executing"
+    assert resumed["phase_started_at"] == "2026-07-21T01:01:00Z"
+    assert "resume_target_phase" not in resumed
+
+    activity = _run_activity(
+        run_cli,
+        tmp_path,
+        "start",
+        "--kind",
+        "active",
+        "--reason",
+        "work",
+        "--at",
+        "2026-07-21T01:01:00Z",
+    )
+    assert activity.returncode == 0, activity.stderr
+    next_result = run_cli("next", "--json", cwd=tmp_path)
+    assert next_result.returncode == 0, next_result.stderr
+    assert json.loads(next_result.stdout)["next_action"] == "run-executor"
 
 
 def test_same_mission_reinit_with_invalid_open_activity_fails_without_overwrite(
@@ -1216,6 +1275,34 @@ def test_invalid_only_rollup_does_not_create_a_zero_percentile_sample(
     assert timing["totals_consistent"] is False
 
 
+@pytest.mark.parametrize(
+    "rollup",
+    [
+        {"observed_total_sec": 0.0, "closed_segment_count": 1},
+        {
+            "observed_total_sec": 0.0,
+            "closed_segment_count": 1,
+            "activity_duration_totals_sec": [],
+            "phase_activity_duration_totals_sec": [],
+            "wait_reason_totals_sec": [],
+        },
+    ],
+)
+def test_rollup_requires_all_aggregate_maps_for_a_valid_sample(
+    tmp_path, run_cli, rollup
+):
+    _write_state(tmp_path, activity_rollup=rollup)
+
+    result = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    timing = json.loads(result.stdout)["activity_timing"]
+    assert timing["task_duration_percentiles_sec"] == {}
+    assert timing["phase_duration_percentiles_sec"] == {}
+    assert timing["invalid_segment_count"] >= 1
+    assert timing["totals_consistent"] is False
+
+
 def test_wait_reason_is_enum_and_detail_is_sanitized(tmp_path, run_cli):
     path = _write_state(tmp_path)
     invalid = _run_activity(
@@ -1328,5 +1415,52 @@ def test_bulk_terminal_writers_reread_under_lock_and_close_concurrent_activity(
     state = json.loads(state_path.read_text())
     assert state["concurrent_sentinel"] == "preserve-me"
     assert state["activity_current"] is None
-    assert state["activity_rollup"]["observed_total_sec"] == 0.0
-    assert state["activity_unobserved_gap_sec"] == 60.0
+    if command == "cleanup-stale":
+        assert state["activity_rollup"]["observed_total_sec"] == 0.0
+        assert state["activity_unobserved_gap_sec"] == 60.0
+    else:
+        assert state["activity_rollup"]["observed_total_sec"] == 60.0
+        assert "activity_unobserved_gap_sec" not in state
+
+
+def test_bulk_terminal_control_time_is_sampled_after_lock_and_never_precedes_update(
+    tmp_path, monkeypatch, capsys
+):
+    module = _load_mission_state_module()
+    project = tmp_path / "project"
+    state_path = _write_state(project, pid=99999999)
+    original_lock = module.StateLock
+
+    class InjectingLock:
+        def __init__(self, path):
+            self.delegate = original_lock(path)
+
+        def __enter__(self):
+            value = self.delegate.__enter__()
+            latest = json.loads(state_path.read_text())
+            latest["activity_current"] = {
+                "kind": "active",
+                "phase": "executing",
+                "reason": "work",
+                "started_at": "2026-07-21T00:00:00Z",
+            }
+            latest["updated_at"] = "2026-07-21T00:02:00Z"
+            state_path.write_text(json.dumps(latest))
+            return value
+
+        def __exit__(self, exc_type, exc, tb):
+            return self.delegate.__exit__(exc_type, exc, tb)
+
+    monkeypatch.setattr(module, "StateLock", InjectingLock)
+    monkeypatch.setattr(module, "iso_now", lambda: "2026-07-21T00:01:00Z")
+    monkeypatch.setattr(module, "_iter_state_files", lambda root, **kwargs: [state_path])
+    monkeypatch.setattr(module, "_pid_is_agent", lambda pid: False)
+
+    module.cmd_cleanup_stale(argparse.Namespace(root=str(project), execute=True))
+    capsys.readouterr()
+
+    state = json.loads(state_path.read_text())
+    assert state["updated_at"] == "2026-07-21T00:02:00Z"
+    assert state["activity_current"] is None
+    assert state["activity_rollup"]["observed_total_sec"] == 120.0
+    assert state.get("activity_anomaly_counts", {}) == {}
