@@ -42,7 +42,8 @@ capture は audit の堅牢な archive discovery と manifest semantic validatio
 走査した各 directory と全 `.mission-state` fileについて、path/type/device/inode/mode/
 size/mtime/ctime metadata を記録します。root 外の scoring / specialist evidence 候補は、
 まだ存在しない path も含めて別に記録します。atomic write 前に metadata inventory を再計算し、
-capture 中の drift を拒否します。
+capture 中の drift を拒否します。snapshot には完全な inventory を重複保存せず、inventory の
+count / digest、再現に必要な root 外候補 path、各 record の source entry を保存します。
 
 consume は metadata-only rewalk 1回と root 外 evidence の `lstat` だけを行います。
 state/evidence content の再read・再hash・再parseは行いません。metadata が完全一致した後だけ、
@@ -54,10 +55,15 @@ directory `fsync` で保存します。consumer は symlink、非regular file、
 期限切れ・未来時刻、root/version/count/index/digest不一致、stale discoveryを拒否します。
 invalid snapshotからlive scanへのsilent fallbackはありません。
 
+snapshot は owner が管理する local trusted artifact であり、認証済み交換形式ではありません。
+mode `0600`、content digest、semantic self-consistency、live metadata freshness は、事故または
+一部 field の改変を検出します。認証鍵がないため、悪意ある owner が関連 field をすべて書き換え、
+digest を再計算する攻撃までは防げません。信頼できない利用者や transport から受け取った
+snapshot は使用しないでください。
+
 ## 性能の範囲
 
 削減対象は、snapshot consumer における state/evidence byte read、content hash、JSON parse、
 archive semantic validation の重複です。freshness のためmetadata rewalk 1回は残します。
 filter-before-dedupeが正確性要件なので、期間filterとgroup構築もconsumerごとに残します。
 性能効果は代表fixtureのbenchmark結果だけで判断し、filesystem traversal全廃とは表現しません。
-

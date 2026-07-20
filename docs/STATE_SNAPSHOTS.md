@@ -45,7 +45,9 @@ validation. It inventories each traversed directory and every `.mission-state`
 file with path/type/device/inode/mode/size/mtime/ctime metadata. Scoring and
 specialist evidence candidates outside the roots are inventoried separately,
 including paths that do not yet exist. Capture repeats this metadata inventory
-before the atomic write and rejects concurrent drift.
+before the atomic write and rejects concurrent drift. The snapshot stores the
+inventory count and digest, the external candidate paths needed to reproduce
+it, and each record's source entry instead of duplicating the complete inventory.
 
 Consumption performs one metadata-only rewalk plus `lstat` checks for external
 evidence. It does not reread, rehash, or reparse state/evidence content. Only
@@ -59,6 +61,13 @@ symlinks, non-regular files, group/world-readable files, expired/future
 snapshots, root/version/count/index/digest mismatches, and stale discovery. An
 invalid snapshot never falls back to a live scan.
 
+A snapshot is a local, owner-controlled trusted artifact, not an authenticated
+exchange format. Mode `0600`, content digest checks, semantic self-consistency,
+and live metadata freshness detect accidental or partial modification. Without
+an authentication key they cannot protect against a malicious owner who rewrites
+every related field and recomputes the digest. Do not accept snapshots from an
+untrusted user or transport.
+
 ## Performance scope
 
 The optimization removes repeated state/evidence byte reads, content hashing,
@@ -67,4 +76,3 @@ metadata rewalk remains mandatory for freshness. Period filtering and group
 construction also remain per consumer because filter-before-dedupe is a
 correctness requirement. Performance claims must be based on a representative
 benchmark; the feature does not claim to eliminate filesystem traversal.
-
