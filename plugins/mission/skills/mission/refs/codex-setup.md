@@ -34,14 +34,14 @@ strict preflight の exit 0 を確認するまで、fetch / pull / switch / work
 
 preflight は次を検出する。
 
-- `state_guard.active=false`: `init` が未実行、または mission が inactive / passed / halted。作業開始・final 報告は禁止。
+- `state_guard.active=false`: `init` 未実行または非terminalのinactive stateでは、task setup・実装・final報告を禁止する。passed / halted は terminal stateのため、strict preflightではなく後述の`next`でfinal可否を判定する。
 - `codex_stop_hook.configured=false`: Codex Stop hook が未設定。skills-only fallback として継続できるが、各 phase 境界と final 直前に `mission-state.py next` を呼ぶ。
 - `mechanical_guard=none`: state も hook も効かない。`init` または hook 設定を先に直す。
 
-Stop hook を必須運用にしたい環境では strict にする。
+Stop hook自体も必須運用にしたい環境では、開始時の`--strict`に加えて`--require-stop-hook`を指定する。
 
 ```bash
-python3 "$MISSION_PLUGIN_ROOT/skills/mission/bin/mission-state.py" codex-preflight --json --require-stop-hook
+python3 "$MISSION_PLUGIN_ROOT/skills/mission/bin/mission-state.py" codex-preflight --json --strict --require-stop-hook
 ```
 
 ## Local authoring: symlink install

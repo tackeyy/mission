@@ -73,6 +73,7 @@ def test_strict_preflight_allows_initialized_skills_only_start(tmp_path, run_cli
 def test_codex_contract_requires_strict_preflight_before_setup_and_terminal_gate_before_final():
     skill = (REPO_ROOT / "skills/mission/SKILL.md").read_text(encoding="utf-8")
     setup = (REPO_ROOT / "skills/mission/refs/codex-setup.md").read_text(encoding="utf-8")
+    state_management = (REPO_ROOT / "skills/mission/refs/state-management.md").read_text(encoding="utf-8")
 
     compact = skill.split("## Compact Instructions", 1)[1].split("## state.json 操作", 1)[0]
     assert "codex-preflight --json --strict" in compact
@@ -87,3 +88,12 @@ def test_codex_contract_requires_strict_preflight_before_setup_and_terminal_gate
     assert "mission-state.py next" in setup
     assert "report-complete" in setup
     assert "report-blocker" in setup
+    assert "passed / halted は terminal state" in setup
+    assert "inactive / passed / halted。作業開始・final 報告は禁止" not in setup
+
+    startup = state_management.split("# Codex startup health check", 1)[1].split(
+        "# 空 .mission-state/", 1
+    )[0]
+    assert "codex-preflight --json --strict" in startup
+    assert "診断専用" in startup
+    assert "--require-stop-hook" in startup
