@@ -106,6 +106,10 @@ SYNC_PAIRS = [
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "refs" / "state-management.md",
     ),
     (
+        REPO_ROOT / "skills" / "mission" / "lib" / "state_snapshot.py",
+        REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "state_snapshot.py",
+    ),
+    (
         REPO_ROOT / "skills" / "mission" / "lib" / "worktree_archive.py",
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "worktree_archive.py",
     ),
@@ -193,6 +197,19 @@ def test_worktree_archive_py_in_sync():
     assert dst.exists(), f"plugins 側が存在しない: {dst}"
     assert _md5(src) == _md5(dst), (
         f"worktree_archive.py が未同期。\n"
+        f"  正典: {src}\n"
+        f"  plugins: {dst}\n"
+        f"  同期コマンド: cp {src} {dst}"
+    )
+
+
+def test_state_snapshot_py_in_sync():
+    """Explicit state snapshot contract is identical in the distribution mirror."""
+    src, dst = SYNC_PAIRS[-5]
+    assert src.exists(), f"正典が存在しない: {src}"
+    assert dst.exists(), f"plugins 側が存在しない: {dst}"
+    assert _md5(src) == _md5(dst), (
+        f"state_snapshot.py が未同期。\n"
         f"  正典: {src}\n"
         f"  plugins: {dst}\n"
         f"  同期コマンド: cp {src} {dst}"

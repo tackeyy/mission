@@ -23,6 +23,8 @@ class WorktreeArchiveValidation:
     state_paths: tuple[Path, ...] = ()
     state: dict[str, Any] | None = None
     evidence: tuple[dict[str, Any], ...] = ()
+    pointer_sha256: str | None = None
+    manifest_sha256: str | None = None
 
 
 def _invalid(bundle: Path, root: Path, reason: str, generation: str | None = None):
@@ -137,7 +139,8 @@ def validate_worktree_archive_bundle(bundle: Path) -> WorktreeArchiveValidation:
     if stat.S_ISLNK(pointer_stat.st_mode) or not stat.S_ISREG(pointer_stat.st_mode):
         return _invalid(bundle, bundle, "pointer-not-regular-file")
     try:
-        pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+        pointer_bytes = pointer_path.read_bytes()
+        pointer = json.loads(pointer_bytes.decode("utf-8"))
     except OSError:
         return _invalid(bundle, bundle, "pointer-access-error")
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -180,7 +183,8 @@ def validate_worktree_archive_bundle(bundle: Path) -> WorktreeArchiveValidation:
     if manifest_path.is_symlink() or not manifest_path.is_file():
         return _invalid(bundle, generation_root, "manifest-not-regular-file", generation)
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_bytes = manifest_path.read_bytes()
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return _invalid(bundle, generation_root, "manifest-invalid-json", generation)
     if not isinstance(manifest, dict) or manifest.get("schema") != WORKTREE_ARCHIVE_SCHEMA:
@@ -277,4 +281,6 @@ def validate_worktree_archive_bundle(bundle: Path) -> WorktreeArchiveValidation:
         state_paths=tuple(state_paths),
         state=state,
         evidence=tuple(checked),
+        pointer_sha256=hashlib.sha256(pointer_bytes).hexdigest(),
+        manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
     )
