@@ -756,8 +756,12 @@ _REVIEW_CONTEXT_BOUNDARY_RE = re.compile(
     r"[。.!！?？;；\n]+|が[、,]\s*|\bbut\b|\bhowever\b",
     re.IGNORECASE,
 )
+_REVIEW_UNIT_BOUNDARY_RE = re.compile(
+    r"\n[ \t]*\n+|\n(?=[ \t]*(?:[-*+]|\d+[.)])\s+)",
+)
 _REVIEW_DOUBLE_NEGATION_RE = re.compile(
-    r"しないわけではない|しないとは限らない|なくはない|"
+    r"(?:し|行わ|実行し)ないわけではない|(?:し|行わ|実行し)ないとは限らない|"
+    r"なくはない|禁止ではない|対象外ではない|"
     r"\bnot\s+impossible\b|\bnot\s+never\b|\bcannot\s+rule\s+out\b",
     re.IGNORECASE,
 )
@@ -811,6 +815,20 @@ def _review_logical_context(text: str, start: int, end: int) -> tuple[int, int, 
     return context_start, context_end, text[context_start:context_end].strip()
 
 
+def _review_logical_unit(text: str, start: int, end: int) -> tuple[int, int, str]:
+    """Return the containing paragraph/list item for unit-scoped intent flags."""
+    unit_start = 0
+    unit_end = len(text)
+    for boundary in _REVIEW_UNIT_BOUNDARY_RE.finditer(text):
+        if boundary.end() <= start:
+            unit_start = boundary.end()
+            continue
+        if boundary.start() >= end:
+            unit_end = boundary.start()
+            break
+    return unit_start, unit_end, text[unit_start:unit_end].strip()
+
+
 def _review_audit_context(text: str, start: int, end: int, *, radius: int = 80) -> str:
     """Keep persisted provenance readable and bounded for long mission descriptions."""
     left = max(0, start - radius)
@@ -846,19 +864,20 @@ def _actual_operation_signal_detail(
     keyword: str,
     match: re.Match,
     signal: str,
-    *,
-    global_non_operation: bool,
-    explicit_execution: bool,
 ) -> dict:
     start, end = match.span()
     context_start, _, logical_context = _review_logical_context(mission_text, start, end)
+    _, _, logical_unit = _review_logical_unit(mission_text, start, end)
     relative_start = start - context_start
     relative_end = end - context_start
     quoted = _review_match_is_quoted(mission_text, start)
+    global_non_operation = bool(_REVIEW_GLOBAL_NON_OPERATION_RE.search(logical_unit))
+    explicit_execution = bool(_REVIEW_EXPLICIT_EXECUTION_RE.search(logical_unit))
+    quote_only = bool(_REVIEW_QUOTE_ONLY_RE.search(logical_unit))
 
     if quoted and explicit_execution:
         decision, reason = "included", "affirmative-actual-operation"
-    elif quoted and _REVIEW_QUOTE_ONLY_RE.search(mission_text):
+    elif quoted and quote_only:
         decision, reason = "suppressed", "quoted-non-operation"
     elif quoted:
         decision, reason = "included", "quoted-context-conservative"
@@ -868,6 +887,10 @@ def _actual_operation_signal_detail(
         decision, reason = "included", "conditional-or-uncertain-context"
     elif _review_negation_is_near(logical_context, relative_start, relative_end):
         decision, reason = "suppressed", "negated-actual-operation"
+    elif global_non_operation and _REVIEW_DOUBLE_NEGATION_RE.search(logical_unit):
+        decision, reason = "included", "uncertain-or-double-negation"
+    elif global_non_operation and _REVIEW_CONDITIONAL_RE.search(logical_unit):
+        decision, reason = "included", "conditional-or-uncertain-context"
     elif global_non_operation:
         decision, reason = "suppressed", "global-explicit-non-operation"
     else:
@@ -934,9 +957,6 @@ def derive_review_tier_decision(
             "end": None,
         })
 
-    global_non_operation = bool(_REVIEW_GLOBAL_NON_OPERATION_RE.search(mission_text))
-    explicit_execution = bool(_REVIEW_EXPLICIT_EXECUTION_RE.search(mission_text))
-
     for keywords, ignore_case in (
         (_IRREVERSIBLE_KEYWORDS_EN, True),
         (_IRREVERSIBLE_KEYWORDS_JA, False),
@@ -949,8 +969,6 @@ def derive_review_tier_decision(
                     keyword,
                     match,
                     signal,
-                    global_non_operation=global_non_operation,
-                    explicit_execution=explicit_execution,
                 )
                 for match in _review_keyword_matches(mission_text, keyword, ignore_case=ignore_case)
             ]
