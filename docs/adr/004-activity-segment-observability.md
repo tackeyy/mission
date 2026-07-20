@@ -72,7 +72,9 @@ reported but excluded from duration distributions. Malformed, negative,
 non-finite, future-enum, missing or non-map rollup aggregates, and inconsistent
 rollup values are excluded and counted as invalid. Bulk terminal writers sample
 their control time after lock acquisition and never write a timestamp before the
-latest persisted update. Legacy states remain readable: their phase time is
+latest persisted update. Finite inputs whose sum would overflow are quarantined
+before aggregation, percentile, and coverage calculation, so JSON output never
+depends on non-standard `Infinity` or `NaN` literals. Legacy states remain readable: their phase time is
 unclassified and no wait reason is fabricated.
 
 Collection and grouping are linear in the number of states and segments. Exact
