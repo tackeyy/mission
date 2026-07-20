@@ -7,6 +7,7 @@
   skills/mission/refs/specialist-registry.md (存在する場合)
   skills/mission/refs/self-improvement.md
   skills/mission/refs/changelog.md
+  skills/mission/refs/state-management.md
   skills/mission/SKILL.md
   skills/mission-planner/SKILL.md
   skills/mission-critic/SKILL.md
@@ -20,6 +21,7 @@
   plugins/mission/skills/mission/refs/specialist-registry.md (存在する場合)
   plugins/mission/skills/mission/refs/self-improvement.md
   plugins/mission/skills/mission/refs/changelog.md
+  plugins/mission/skills/mission/refs/state-management.md
   plugins/mission/skills/mission/SKILL.md
   plugins/mission/skills/mission-planner/SKILL.md
   plugins/mission/skills/mission-critic/SKILL.md
@@ -33,6 +35,7 @@
   cp skills/mission/refs/specialist-registry.md plugins/mission/skills/mission/refs/specialist-registry.md
   cp skills/mission/refs/self-improvement.md plugins/mission/skills/mission/refs/self-improvement.md
   cp skills/mission/refs/changelog.md plugins/mission/skills/mission/refs/changelog.md
+  cp skills/mission/refs/state-management.md plugins/mission/skills/mission/refs/state-management.md
   cp skills/mission/SKILL.md              plugins/mission/skills/mission/SKILL.md
   cp skills/mission-planner/SKILL.md      plugins/mission/skills/mission-planner/SKILL.md
   cp skills/mission-critic/SKILL.md       plugins/mission/skills/mission-critic/SKILL.md
@@ -88,6 +91,10 @@ SYNC_PAIRS = [
     (
         REPO_ROOT / "skills" / "mission-scorer" / "SKILL.md",
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission-scorer" / "SKILL.md",
+    ),
+    (
+        REPO_ROOT / "skills" / "mission" / "refs" / "state-management.md",
+        REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "refs" / "state-management.md",
     ),
 ]
 
@@ -148,6 +155,12 @@ def test_mission_state_distribution_contains_specialist_accounting_guards():
         text = path.read_text(encoding="utf-8")
         missing = [marker for marker in MISSION_STATE_DISTRIBUTION_MARKERS if marker not in text]
         assert not missing, f"{path} is missing distribution-critical markers: {missing}"
+
+
+def test_state_management_reference_in_sync():
+    """worktree archive を含む state management reference が配布 wrapper と一致する."""
+    src, dst = SYNC_PAIRS[-1]
+    _assert_optional_pair_in_sync(src, dst, "state-management.md")
 
 
 def test_skill_md_in_sync():

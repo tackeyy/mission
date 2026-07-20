@@ -135,6 +135,27 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py progress get -
 
 `progress update` は `.mission-state/archive/iter-<N>-<mission8>-progress.md` に checkpoint を保存し、state の `progress` に `total` / `completed` / `remaining` / `last_unit` / `artifact_path` / `evidence_path` を記録する。これは score や pass/fail を変更しない観測用データであり、長時間 batch が compaction や中断を挟んでも audit report の slow session 行から進捗を復元できるようにする。
 
+### worktree state/evidence の整合性付き保存 (#212)
+
+worktree を削除する前に、終端済みの現 session と、その state が参照する evidence を main checkout 側へ保存する。`loop_active=true` は拒否されるため、先に `mark-passes` または `mark-halt` を実行する。
+
+```bash
+# worktree root で実行。書き込み前の検証だけなら --dry-run を付ける
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py archive-worktree \
+    --destination-root <main-checkout-path> \
+    --json
+```
+
+保存先は `<main-checkout>/.mission-state/archive/worktree-<slug>-<source-hash>/`。bundle は既存監査と互換の `sessions/<session_id>.json`、`archive/iter-<N>-<mission8>-scoring.{json,md}` / `reviews` 配置を維持し、`manifest.json` に次を記録する。
+
+- schema、session ID、mission ID、iteration
+- evidence type、`.mission-state/` 起点の source reference、bundle 内の archive relative path
+- 各 evidence の SHA-256 と byte size
+
+対象は現 session の state に明示された assumptions、artifact、score history の scoring/reviews、specialist invocation、progress evidence の allowlist のみ。元 state の identity や内容は書き換えず byte copy する。必須 evidence の欠落、`.mission-state` 外への path escape、symlink、manifest/checksum 不整合は exit 2 で fail-closed になり、不完全な bundle を公開しない。書き込みは同一 archive filesystem 内の一時 bundle を完成させてから atomic replace し、同じ入力の再実行は `action=unchanged` となる。
+
+`mission-audit.py` は `mission-worktree-archive/1` manifest がある bundle では、identity・path・size・checksum を検証した evidence だけを採用する。不正 manifest がある場合は旧来の filename fallback に戻さず missing evidence として扱う。manifest のない既存 bundle は #201 までの配置互換を維持する。
+
 ### Phase C: multi-session 並列実行 (2026-06-13 デフォルト有効化)
 
 同一プロジェクトで複数の /mission を並列実行する場合、各セッションは `sessions/<sid>.json` に独立した状態を持つ。**Claude Code/Codex から起動すれば自動的に有効** (env 不要)。

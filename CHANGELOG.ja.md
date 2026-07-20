@@ -9,6 +9,10 @@
 
 ## [Unreleased]
 
+### 追加
+
+- `mission-state.py archive-worktree` を追加しました。終端済み worktree session と state が参照する evidence を、保存先 checkout 配下の atomic・idempotent な bundle へコピーします。`mission-worktree-archive/1` manifest は session/mission/iteration identity、evidence type、機密を含まない relative source/archive reference、SHA-256、size を記録します。path escape、symlink、evidence 欠落、integrity 不整合は fail-closed です。`mission-audit.py` は非標準 evidence path を採用する前に manifest を検証し、manifest のない既存 bundle との互換性も維持します (#212)。
+
 ## [2.0.0] - 2026-07-20
 
 ### 破壊的変更
