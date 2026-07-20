@@ -767,6 +767,19 @@ _REVIEW_DOUBLE_NEGATION_RE = re.compile(
     r"(?:しない|行わない|実行しない)\s*"
     r"(?:(?:(?:予定|方針|計画)\s*)?(?:ではない|はない)|とは(?:言って|述べて)いない)|"
     r"なくはない|禁止ではない|対象外ではない|"
+    r"(?:\b(?:do|does|did|will|would|should|must|can|could)\s+not\s+not|"
+    r"\b(?:don|won|can)['’]t\s+not|\bcannot\s+not)\s+"
+    r"(?:(?:perform|execute)\s+(?:a|an|the)?\s*)?"
+    r"(?:production\s+)?(?:deploy(?:ment)?|release|migration|drop|delete|publish)\b|"
+    r"\b(?:it\s+is\s+not\s+the\s+case\s+that|"
+    r"(?:i|we|they|he|she|it)\s+(?:(?:am|is|are|was|were)\s+not\s+"
+    r"(?:say(?:ing)?|claim(?:ing)?|stat(?:e|ing))|"
+    r"(?:cannot|can['’]t)\s+(?:say|claim|state))\s+(?:that\s+)?)"
+    r"[^.!?;\n]{0,80}?"
+    r"(?:\b(?:do|does|did|will|would|should|must|can|could)\s+not|"
+    r"\b(?:don|won|can)['’]t|\bcannot)\s+"
+    r"(?:(?:perform|execute)\s+(?:a|an|the)?\s*)?"
+    r"(?:production\s+)?(?:deploy(?:ment)?|release|migration|drop|delete|publish)\b|"
     r"\bnot\s+impossible\b|\bnot\s+never\b|\bcannot\s+rule\s+out\b",
     re.IGNORECASE,
 )
@@ -774,6 +787,8 @@ _REVIEW_CONDITIONAL_RE = re.compile(
     r"必要なら|必要な場合|場合|可能なら|可能性|かもしれ|未確定|検討中|するか|し得|あり得|"
     r"限り|以外|除く|除き|原則|ことがある|例外|緊急時|"
     r"\bonly\s+if\b|\bif\b|\bunless\b|\bmay\b|\bmight\b|\bcould\b|\bpossibly\b|\bwhether\b|"
+    r"\bexcept\s+(?:(?:when|in)\s+)?(?:emergenc(?:y|ies)|authorized|approved|approval)\b|"
+    r"\buntil\b|\bpending\s+(?:approval|authorization|permission)\b|"
     r"\bwithout\s+(?:approval|authorization|permission)\b",
     re.IGNORECASE,
 )
@@ -847,8 +862,9 @@ _REVIEW_NEGATION_CUE_RE = re.compile(
 )
 _REVIEW_EXECUTION_CUE_RE = re.compile(
     r"\b(?:execute(?:d)?|run|perform(?:ed)?|carry\s+(?:(?:it|that|this)\s+)?out|"
-    r"released|published)\b|"
-    r"(?:実行|実施|反映)(?:する|します|した|する予定)?|行う|行います",
+    r"(?:follow|apply)\s+(?:it|them|that|this|those)|released|published)\b|"
+    r"(?:実行|実施|反映|適用)(?:する|します|した|する予定)?|"
+    r"(?:それ|それら|これ|これら)(?:に|を)?従う|行う|行います",
     re.IGNORECASE,
 )
 _REVIEW_NAMED_EXECUTION_RE = re.compile(
