@@ -266,6 +266,42 @@ def test_english_perform_execute_and_passive_negation_are_explicit(mission):
 @pytest.mark.parametrize(
     "mission",
     [
+        "本番環境に deploy しない",
+        "本番へ deploy する予定はない",
+        "we will not deploy to our target production environment",
+        "we will not deploy to the target production environment",
+        "本番の release はしない",
+        "deploy が行われない",
+        "we won’t deploy",
+        "we are not going to deploy",
+        "deployment is not planned",
+        "we cannot deploy",
+    ],
+)
+def test_additional_direct_negation_forms_are_suppressed(mission):
+    decision = _decision(mission)
+
+    actual = _details(decision)
+    assert decision["tier"] == "light"
+    assert decision["signals"] == []
+    assert actual and {item["decision"] for item in actual} == {"suppressed"}
+
+
+@pytest.mark.parametrize(
+    "mission",
+    ["we won't deploy unless approval is granted", "we won't deploy without approval"],
+)
+def test_conditional_exception_to_direct_negation_stays_conservative(mission):
+    decision = _decision(mission)
+
+    assert decision["tier"] == "full"
+    assert "irreversible-keyword:deploy" in decision["signals"]
+    assert any(item["reason"] == "conditional-or-uncertain-context" for item in _details(decision))
+
+
+@pytest.mark.parametrize(
+    "mission",
+    [
         "実操作は行わない。ただし release する",
         "Actual operations will not be performed. However release to production",
         "実操作は行わない\n> release する",
@@ -278,6 +314,36 @@ def test_global_non_operation_does_not_leak_into_exception_or_structural_unit(mi
     release = [item for item in _details(decision) if item["keyword"] == "release"]
     assert decision["tier"] == "full"
     assert release and {item["decision"] for item in release} == {"included"}
+
+
+@pytest.mark.parametrize(
+    "mission",
+    [
+        "Actual operations will not be performed. Release to production.",
+        "Actual operations will not be performed; release to production",
+        "Actual operations will not be performed, except we will deploy",
+        "Actual operations will not be performed\nRelease to production",
+        "Actual operations will not be performed, but we will deploy",
+        "実操作は行わない。release する",
+        "実操作は行わない。だが release する",
+        "実操作は行わない。例外として release する",
+        "実操作は行わないが release する",
+    ],
+)
+def test_global_non_operation_keeps_later_contradictory_operation_conservative(mission):
+    decision = _decision(mission)
+
+    actual = _details(decision)
+    assert decision["tier"] == "full"
+    assert actual and any(item["decision"] == "included" for item in actual)
+
+
+def test_global_non_operation_still_suppresses_prior_meta_candidate():
+    decision = _decision("deploy 手順を調査する。実操作は行わない")
+
+    assert decision["tier"] == "light"
+    assert decision["signals"] == []
+    assert {item["decision"] for item in _details(decision)} == {"suppressed"}
 
 
 @pytest.mark.parametrize(
@@ -299,6 +365,16 @@ def test_quote_only_and_execution_intent_are_anchored_per_match(mission):
     assert release and {item["decision"] for item in release} == {"included"}
     assert {item["reason"] for item in deploy} == {"quoted-non-operation"}
     assert {item["reason"] for item in release} == {"affirmative-actual-operation"}
+
+
+def test_execution_word_inside_quote_does_not_override_quote_only_intent():
+    decision = _decision('only quote "do not execute migration"')
+
+    assert decision["tier"] == "light"
+    assert decision["signals"] == []
+    migration = [item for item in _details(decision) if item["keyword"] == "migration"]
+    assert migration and {item["decision"] for item in migration} == {"suppressed"}
+    assert {item["reason"] for item in migration} == {"quoted-non-operation"}
 
 
 @pytest.mark.parametrize(
