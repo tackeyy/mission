@@ -99,7 +99,7 @@ FINDING_SPECS = {
     ),
     "ungated-pass": FindingSpec(
         "ungated-pass", "P0", "ungated_pass_sessions", "record",
-        "pass session bypassed scoring gate", "{count} {sessions} bypassed scoring gate",
+        "pass session bypassed scoring gate", "{count} {pass_sessions} bypassed scoring gate",
     ),
     "forced-pass": FindingSpec(
         "forced-pass", "P1", "forced_pass_sessions", "record",
@@ -151,7 +151,7 @@ FINDING_SPECS = {
     ),
     "stale-active-no-score": FindingSpec(
         "stale-active-no-score", "P1", "stale_active_no_score_sessions", "record",
-        "active no-score session exceeded stale threshold", "{count} {sessions} exceeded stale threshold",
+        "active no-score session exceeded stale threshold", "{count} active no-score sessions exceeded stale threshold",
     ),
     "slow-runs": FindingSpec(
         "slow-runs", "P2", "slow_sessions", "record",
