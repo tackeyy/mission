@@ -961,6 +961,33 @@ def test_stale_terminal_restores_pre_halt_phase_on_refresh_and_allows_work(
     assert json.loads(next_result.stdout)["next_action"] == "run-executor"
 
 
+def test_manual_halt_is_not_reactivated_by_orphan_like_reason(tmp_path, run_cli):
+    path = _write_state(tmp_path, phase="executing")
+    halted = run_cli(
+        "mark-halt",
+        "--reason",
+        "orphan: manually acknowledged",
+        "--category",
+        "other",
+        cwd=tmp_path,
+        env_extra={"MISSION_STATE_NOW": "2026-07-21T00:01:00Z"},
+    )
+    assert halted.returncode == 0, halted.stderr
+
+    refreshed = run_cli(
+        "refresh-pid",
+        cwd=tmp_path,
+        env_extra={"MISSION_STATE_NOW": "2026-07-21T00:02:00Z"},
+    )
+
+    assert refreshed.returncode == 0, refreshed.stderr
+    assert json.loads(refreshed.stdout)["reactivated"] is False
+    state = json.loads(path.read_text())
+    assert state["phase"] == "halted"
+    assert state["loop_active"] is False
+    assert state["halt_reason"] == "orphan: manually acknowledged"
+
+
 def test_same_mission_reinit_with_invalid_open_activity_fails_without_overwrite(
     tmp_path, run_cli
 ):

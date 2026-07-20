@@ -80,7 +80,14 @@ def test_list_reports_session(tmp_path, monkeypatch, capsys):
 # ===== cmd_refresh_pid =====
 def test_refresh_pid_reactivates_orphan_halt(tmp_path, run_cli):
     run_cli("init", "g", "--complexity", "Standard", cwd=tmp_path)
-    run_cli("mark-halt", "--reason", "orphan: pid 999999 dead", cwd=tmp_path)
+    run_cli(
+        "mark-halt",
+        "--reason",
+        "orphan: pid 999999 dead",
+        "--category",
+        "stale",
+        cwd=tmp_path,
+    )
     r = run_cli("refresh-pid", cwd=tmp_path)
     assert r.returncode == 0 and json.loads(r.stdout)["reactivated"] is True
     st = json.loads(run_cli("get", cwd=tmp_path).stdout)
@@ -200,7 +207,15 @@ def test_init_survives_corrupt_aggregate(tmp_path, run_cli):
 def test_refresh_pid_readds_to_aggregate_on_reactivate(tmp_path, run_cli):
     """F-4: orphan halt で aggregate から除去後、refresh-pid 再活性化で再追加される."""
     run_cli("init", "g", "--complexity", "Standard", cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "r1"})
-    run_cli("mark-halt", "--reason", "orphan: dead", cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "r1"})
+    run_cli(
+        "mark-halt",
+        "--reason",
+        "orphan: dead",
+        "--category",
+        "stale",
+        cwd=tmp_path,
+        env_extra={"MISSION_SESSION_ID": "r1"},
+    )
     agg_after_halt = json.loads((tmp_path / ".mission-state" / "aggregate.json").read_text())
     assert "r1" not in agg_after_halt["active_sessions"]
     run_cli("refresh-pid", cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "r1"})
@@ -211,7 +226,15 @@ def test_refresh_pid_readds_to_aggregate_on_reactivate(tmp_path, run_cli):
 def test_refresh_pid_reactivates_stale_halt(tmp_path, run_cli):
     """#97: stale auto-halt も refresh-pid で resume 可能にする。"""
     run_cli("init", "g", "--complexity", "Standard", cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "stale1"})
-    run_cli("mark-halt", "--reason", "stale: auto-halted after 180m idle", cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "stale1"})
+    run_cli(
+        "mark-halt",
+        "--reason",
+        "stale: auto-halted after 180m idle",
+        "--category",
+        "stale",
+        cwd=tmp_path,
+        env_extra={"MISSION_SESSION_ID": "stale1"},
+    )
 
     r = run_cli("refresh-pid", cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "stale1"})
 
