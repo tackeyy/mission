@@ -258,7 +258,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py progress updat
 
 ## review_tier 導出と Light Tier 運用 (Issue #168, 2026-07-10)
 
-`review_tier`（`light` / `standard` / `full`）は `init` 時に complexity とミッション記述から自動導出される。導出根拠は `review_tier_source`（`"auto"` or `"user"`）と `review_tier_signals`（エスカレータ理由リスト）として state に記録する。
+`review_tier`（`light` / `standard` / `full`）は `init` 時に complexity とミッション記述から自動導出される。導出根拠は `review_tier_source`（`"auto"` or `"user"`）、後方互換な `review_tier_signals`（エスカレータ理由の文字列リスト）、各候補の判断を示す `review_tier_signal_details` として state に記録する。
 
 ### ベースマッピング (REVIEW_TIER_BASE)
 
@@ -270,17 +270,26 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py progress updat
 | Critical | full |
 | None / Unknown / 未知文字列 | standard（安全側フォールバック） |
 
-### エスカレータ条件（いずれか該当で `full` に昇格。降格なし）
+### エスカレータ条件（いずれかの候補を採用すると `full` に昇格。ベース tier の降格なし）
 
 | シグナル | トリガー |
 |---|---|
 | `task_profile.risk=high` | task_profile の risk フィールドが `"high"` |
-| 不可逆系英語キーワード | `deploy` / `release` / `migration` / `drop` / `delete` / `publish` / `production` / `push` / `merge`（小文字化して部分一致） |
-| 不可逆系日本語キーワード | `本番` / `リリース` / `マイグレーション` / `削除` / `公開` / `決済`（そのまま部分一致） |
-| セキュリティ系英語キーワード | `auth` / `secret` / `token` / `credential` / `password`（小文字化して部分一致） |
+| 不可逆系英語キーワード | `deploy` / `release` / `migration` / `drop` / `delete` / `publish` / `production`（大文字小文字を区別しない部分一致） |
+| 不可逆系日本語キーワード | `本番` / `リリース` / `マイグレーション` / `データ削除` / `レコード削除` / `物理削除` / `公開` / `決済`（部分一致） |
+| セキュリティ系英語キーワード | `secret` / `credential` / `password` / `api token` / `api-token` / `api_key` / `access token` / `access-token` / `bearer` / `authenticat` / `authoriz` / `oauth`（大文字小文字を区別しない部分一致） |
 | セキュリティ系日本語キーワード | `認証` / `秘密` / `鍵` |
 
-マッチしたキーワードは `review_tier_signals` に `irreversible-keyword:<kw>` / `security-keyword:<kw>` 形式で記録される。エスカレータは conservative 設計（`release`・`merge`・`push` 等の頻出語も full 昇格する）。実運用データに基づくキャリブレーションは後続タスク。
+不可逆系キーワードはすべての出現を、文・対比接続詞で区切った clause と、段落・list item・blockquote・heading で区切った logical unit の文脈で評価する。`deploy しない`、`do not deploy`、`will not perform a production migration`、`対象外` など、実操作を明示的かつ単純に否定した候補だけを抑制する。否定は 48 文字以内に cue があるだけでは成立せず、キーワード直前の `do not` / `not` / `won't` / `cannot`、active な `not perform/execute`、passive な `will/should not be performed/executed`、直後の `しない` / `する予定はない` / `行われない` / `禁止` / `対象外` など、対象 operation への文法的な結び付きを確認する。未知の connector や別 operation をまたぐ場合は安全側で採用する。`unless` / `without approval` / `except when` / `until` / `pending approval` / `限り` / `以外` / `除き` / `原則` / `例外` / `緊急時` / `ことがある` の例外条件、否定方針そのものの否定、modal / contraction から始まる `not not`、`not the case that` / `not saying that` / `cannot say that` など外側から単純否定を反転する二重否定、不確実表現も安全側で採用する。同じ context の複数否定 cue は次の operation より前にあるものだけを反転否定として数え、別 operation の単純否定同士は結合しない。logical unit 内の「実操作は行わない」という global marker は位置だけでは候補を抑制せず、候補 context が手順の調査・確認・説明・文書化などの明確な meta/non-operation intent と証明できる場合だけ抑制する。同じ logical unit に `execute` / `run` / `perform` / `carry out` / `follow/apply + pronoun` / `実行` / `実施` / `行う` / `反映` / `適用` / `従う` などの execution cue があり、別の named operation への直接的な係り先を証明できない場合は `ambiguous-execution-reference` として安全側で採用する。引用だけが目的だと明示された場合のみ引用内の候補を抑制し、別 operation の `execute` や引用内の `execute` は実行 intent とみなさない。引用符の直前・直後から当該 command の実行を直接指示した場合、または引用直後の passive modal が実行を示す場合だけ採用する。境界、context flags、operation start、quote span、meta/non-operation span、否定 operation span、否定 cue position、global marker span は mission / context ごとに一度だけ索引化・cache し、出現ごとの判定で全文や同一 dense context を再走査しない。`task_profile.risk=high` と security キーワードは否定文脈でも常に採用する。Complex / Critical のベース tier も変えない。
+
+`例外なく` / `緊急時にも` / `原則ではなく絶対に` は例外の存在を示さない強い単純否定として扱う。また、`実操作しないので問題/支障/懸念なし` のような因果的な安心表明は、対象 operation の否定を反転しない。
+
+英語の否定 auxiliary は短縮形全体を同じ operation scope 文法で扱い、`never not` と be 短縮形の外側報告否定も二重否定に含める。approval gate は `before/prior to approval` と `while approval is pending` も条件付きとする。曖昧実行照応は `follow` / `apply` / `proceed with` が pronoun または named procedure を受ける場合を含む。因果的な安心表明の述語には `影響はない` も含む。
+外側の不確実表現は `not true that` と `no guarantee/assurance/certainty that` も含み、内側 operation の modal 否定が短縮形でも二重否定として採用する。外側の reporting negation と内側の modal negation はどちらも auxiliary 短縮形を共通に扱う。
+
+meta/non-operation の証明は context 全体が `review/analyze/document/inspect + procedure/settings/log/text` または `手順/設定/文言/ログ + 調査/確認/分析/説明/文書化` の strict meta-only 文法に一致することを要求する。meta span の外に未知の後段句が残る場合は抑制しない。`ambiguous-execution-reference` の判定では quote span 内の execution cue を除外し、引用外の cue だけを veto 対象にする。quote-only の抑制も quote span・quote-only 語句・無害な終端・別 named operation への明示 action を除いた外側残余が空であることを要求し、未知句や代名詞参照が残る場合は安全側で採用する。
+
+採用したキーワードは従来どおり `review_tier_signals` に `irreversible-keyword:<kw>` / `security-keyword:<kw>` 形式で、定数順・同一キーワード 1 件として記録する。additive な `review_tier_signal_details` は採用・抑制を問わず各出現を記録し、`match` / `context` / `decision` / `reason` / `source` / `start` / `end` から判定を追跡できる。`get` はこの field を state の一部として出力する。field を持たない旧 state の `get` / `next` / `set` は引き続き動作し、auto source で complexity を再設定した時に details が生成される。
 
 ### tier と reviewer_count の対応 (TIER_REVIEWER_COUNT)
 
@@ -298,7 +307,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py progress updat
 
 ### User override
 
-`init --review-tier <light|standard|full>` または `set review_tier=<値>` で上書き可能。auto 導出より低い tier を指定すると `stderr` に `WARNING` を出すが拒否しない（`review_tier_source` は `"user"` に設定）。`review_tier_source=auto` の状態で `complexity` を `set` で変更すると tier が再導出される。`review_tier_source=user` の場合は complexity 変更でも tier を維持する。
+`init --review-tier <light|standard|full>` または `set review_tier=<値>` で上書き可能。auto 導出より低い tier を指定すると `stderr` に `WARNING` を出すが拒否しない（`review_tier_source` は `"user"` に設定）。`review_tier_source=auto` の状態で `complexity` を `set` で変更すると tier が再導出される。`review_tier_source=user` の場合は complexity 変更でも tier を維持する。既存 state を `set review_tier=` で上書きした後も signals / details は観測された候補の provenance として保持するが、source が `user` の場合、それらは適用 tier の根拠ではない。`init --review-tier` で最初からユーザー指定した state の signals / details は空になる。
 
 ### 効果測定 (Issue #180)
 

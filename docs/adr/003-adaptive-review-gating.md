@@ -65,8 +65,57 @@ downgrade path):
 | Security keyword (EN) | `secret`, `credential`, `password`, `api token`, `api-token`, `api_key`, `access token`, `access-token`, `bearer`, `authenticat`, `authoriz`, `oauth` — case-insensitive substring match |
 | Security keyword (JA) | `認証`, `秘密`, `鍵` |
 
-Matched signals are recorded in `review_tier_signals` as
-`irreversible-keyword:<kw>` or `security-keyword:<kw>` entries.
+Every occurrence of an irreversible keyword is evaluated in sentence/contrast
+clauses within paragraph, list-item, blockquote, and heading-delimited logical
+units. Negation, execution, and quote-only intent are anchored to the matching
+operation rather than applied to every nearby keyword.
+Negation requires a direct grammatical anchor immediately before or after that
+operation; a nearby cue alone is insufficient. Unknown connectors or an
+intervening operation therefore remain conservative inclusions.
+Active `not perform/execute`, contractions and `cannot`, passive
+`will/should not be performed/executed`, and equivalent Japanese qualifier forms
+are treated as direct anchors for the operation phrase. Only an explicit, simple
+statement that the actual operation will not happen is suppressed. Conditions
+and exceptions (`unless`, `except when`, `until`, pending approval,
+`before/prior to approval`, `while approval is pending`, approval
+exclusions, principles, emergency cases, and equivalent Japanese forms), negated
+non-operation intent, modal/contraction/`never` + `not`, outer negation such as
+`not the case that` / `not true that` / `not saying that` / `cannot say that` /
+`no guarantee/assurance/certainty that`, and uncertainty
+remain conservative escalations. Multiple negation cues count as a
+reversal only before the next operation, so separate simple negations do not
+combine. Japanese phrases that explicitly eliminate exceptions (`例外なく`,
+`緊急時にも`, and `原則ではなく絶対に`) remain simple negations,
+as do causal assurances that the negated operation leaves no problem, obstacle,
+concern, or impact. A global non-operation marker does
+not suppress by position alone: it suppresses a candidate only when the entire
+candidate context matches a strict meta-only grammar for reviewing, analyzing,
+documenting, or inspecting procedures, settings, logs, or text. Unknown trailing
+content invalidates that proof. Ambiguous, imperative, and affirmative
+candidates remain conservative. Any execution cue in the same logical unit that
+is not directly anchored to another named operation may refer to a meta candidate
+and vetoes suppression with `ambiguous-execution-reference`. This includes
+cross-sentence `follow/apply/proceed with` references to a pronoun or named
+procedure and Japanese `適用` / `従う`
+references; execution cues
+inside quote spans are excluded from that veto. Explicit quote-only intent suppresses a quoted
+candidate unless execution language immediately around that quote directly
+targets the quoted command, including a passive modal immediately after the
+quote; execution of another named operation cannot override it. Ambiguous
+pronoun or targetless execution remains conservative. Quote-only suppression
+also requires no unknown residual outside quote spans after removing the
+quote-only marker, harmless terminators, and actions explicitly anchored to a
+different named operation.
+Segment boundaries, context flags, quote spans, meta/non-operation spans,
+negated-operation spans, negation-cue positions, and global-marker spans are
+indexed or cached once per mission/context so repeated
+keyword lookups do not rescan the full text or a dense unbroken context. Security keywords,
+`task_profile.risk=high`, and the Complex/Critical base tiers are never suppressed
+by this context rule.
+
+Included signals remain recorded in the backward-compatible
+`review_tier_signals` string list as `irreversible-keyword:<kw>` or
+`security-keyword:<kw>` entries, in constant order with one entry per keyword.
 
 ### Reviewer count
 
@@ -91,6 +140,10 @@ Standard and full tiers behave as they did before this ADR.
 `"user"` (set via `--review-tier` or `set review_tier=`).
 `review_tier_signals` records the escalator reasons that triggered promotion to
 `full`, or an empty list for tiers that were not escalated.
+`review_tier_signal_details` additively records every matched occurrence with its
+matched text, bounded context, include/suppress decision, reason, source, and
+source span. This makes a suppressed negated candidate auditable through `get`
+without changing the existing string-list contract.
 
 ### User override
 
@@ -103,6 +156,11 @@ When `complexity` is later changed via `set complexity=` and
 `review_tier_source` is `"auto"`, the tier is re-derived and `reviewer_count`
 is synced. When `review_tier_source` is `"user"`, the tier and `reviewer_count`
 are preserved across complexity changes.
+
+When `set review_tier=` changes an existing auto-derived state, the existing
+signals and details remain observation provenance. With
+`review_tier_source="user"`, they are not the rationale for the applied tier.
+An `init --review-tier` state starts with empty signals and details.
 
 ### Gate semantics are invariant
 
@@ -128,7 +186,8 @@ conditions regardless of `review_tier`.
 - Review depth for Simple/Standard missions with no escalator signals narrows
   from three reviewers to one, reducing review overhead for the 95%
   pass-through majority.
-- `review_tier_source` and `review_tier_signals` make the gating decision
+- `review_tier_source`, `review_tier_signals`, and
+  `review_tier_signal_details` make the gating decision
   auditable and adjustable without removing the gate.
 - Backward-compatible: state files without `review_tier` are handled
   gracefully by `set`, `next`, and `get` commands.
@@ -217,10 +276,12 @@ missions without introducing new missed escalations.
 Implemented in `skills/mission/bin/mission-state.py` (Issue #168):
 
 - `TIER_REVIEWER_COUNT` and `REVIEW_TIER_BASE` constants define the mapping.
-- `derive_review_tier()` is a pure function with no side effects; covered by
-  `skills/mission/tests/test_issue168_review_tier.py`.
+- `derive_review_tier_decision()` is a pure function that returns per-occurrence
+  provenance; `derive_review_tier()` preserves the existing tuple API. They are
+  covered by `test_issue168_review_tier.py` and
+  `test_issue209_review_tier_negation.py`.
 - `cmd_init` stores `review_tier`, `review_tier_source`, `review_tier_signals`,
-  and `reviewer_count` in the initial state.
+  `review_tier_signal_details`, and `reviewer_count` in the initial state.
 - `cmd_set` validates the value, warns on downgrade, and syncs `reviewer_count`
   unless `reviewer_count` is also set explicitly in the same call.
 - `set complexity=` re-derives tier when `review_tier_source == "auto"`.

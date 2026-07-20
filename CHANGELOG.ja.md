@@ -13,6 +13,15 @@
 
 - `mission-state.py archive-worktree` を追加しました。終端済み worktree session と state が参照する evidence を、同じ Git common directory に属する既存の別 checkout へコピーします。更新は content-addressed な immutable generation を publish してから `current.json` を atomic に進めるため、crash や parallel reader が旧有効世代を見失いません。`mission-worktree-archive/1` manifest は session/mission/iteration identity、evidence type、機密を含まない relative source/archive reference、SHA-256、size を記録し、重複 path、path escape、symlink、evidence 欠落、integrity 不整合を fail-closed にします。`mission-audit.py` は discovery 時の generation を固定して state のロード前に preflight し、検証済み manifest から scoring / specialist evidence を解決して、同一 record の検証を cache します。`.mission-state` は降下前に readiness を確認し、後続の walk access error も収集します。directory 以外・読取不能・symlink の `.mission-state` / archive root、bundle / generation ancestor の symlink、通常 archive root 外へ解決される bundle、archive / pointer / generation の access failure、不正・危険な pointer、archived state の欠落・不正 JSON、generation manifest の欠落・不整合は、root 外読込・archive の黙示的除外・stale file fallback をせず、重複排除した `invalid-worktree-archive` finding として明示し、pointer 不在を `lstat` で確認できた既存 bundle だけ互換性を維持します (#212)。
 
+### 修正
+
+- 不可逆操作の `review_tier` キーワードを、operation に anchor した clause と構造 unit の文脈で出現ごとに評価するようにしました。否定は文字 window 内の cue ではなく対象 operation への直接的な文法 anchor を必須とし、短縮形・`cannot`・active な `not perform/execute`・passive な `will/should not be performed/executed`・日本語の qualifier 付き否定も扱います。明示的に否定された実操作は Simple/Standard を昇格させず、条件例外、非実行 intent 自体の否定、不確実表現は安全側で採用し、複数否定 cue は次の operation より前にある場合だけ反転否定として扱います。global 非実行 marker は、候補自身の context が meta/non-operation intent と証明できる場合だけ抑制し、同じ logical unit の execution cue が別の named operation に直接係ると証明できない場合は曖昧照応として採用します。quote-only intent は、引用符直前・直後の直接実行または引用直後の passive modal だけが上書きし、引用内や別の明示 operation の execution wording では上書きしません。segment・operation start・quote・meta/non-operation・否定 operation・否定 cue・global marker の索引を cache し、全文・dense context の反復走査を避けます。既存の順序付き文字列 signals は変えず、state に出現単位の `review_tier_signal_details` provenance を追加し、security・high-risk・Complex/Critical の挙動も維持します (#209)。
+  meta/non-operation の証明は候補 context 全体が strict meta-only 文法へ一致することを要求し、未知の後段句があれば抑制しません。quote span 内の execution cue は曖昧照応 veto の対象外です。quote-only も marker・無害終端・別 named operation への明示 action を除いた外側残余が空の場合だけ抑制します。
+  modal / contraction で始まる `not not` と、`not the case that` / `not saying that` / `cannot say that` などの外側否定を二重否定として扱います。`except when` / `until` / approval 待ち / passive な緊急時例外は条件付きのままです。文をまたぐ `follow/apply + pronoun` と日本語の `適用` / `従う` は曖昧な実行照応として global meta-only 抑制を veto します。
+  `例外なく` / `緊急時にも` / `原則ではなく絶対に` という強い無条件否定は、広い例外 marker を発火しないようにしました。単純な operation 否定の後に続く因果的な安心表明は、独立した述語否定を誤って二重否定にしません。
+  短縮 auxiliary と `never` を operation scope 付きの単純/二重否定で共通化し、外側の報告否定の短縮形も扱います。approval gate は `before` / `prior to` / `while ... is pending` を追加し、曖昧実行照応は pronoun または named procedure に対する `follow` / `apply` / `proceed with` まで認識します。日本語の因果的な安心表明に影響表現を追加しました。
+  外側の不確実表現に `not true that` と `no guarantee/assurance/certainty that` を追加し、内側 operation clause の modal 否定が短縮形でも展開形と同じ文法で扱います。
+
 ## [2.0.0] - 2026-07-20
 
 ### 破壊的変更

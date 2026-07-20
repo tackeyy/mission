@@ -500,3 +500,24 @@ def test_adr003_adaptive_review_gating_consistency():
     assert "review_tier" in ja, "README.ja.md に review_tier の記述がない"
     assert "not yet been measured" in en, "README.md にコスト削減効果の未計測文言がない"
     assert "まだ計測されていません" in ja, "README.ja.md にコスト削減効果の未計測文言がない"
+
+
+def test_review_tier_docs_match_issue174_calibrated_keyword_policy():
+    """#209: state-management に較正前の広すぎる keyword 一覧を再混入させない."""
+    doc = _r(REFS / "state-management.md")
+    section = doc.split("### エスカレータ条件", 1)[1].split("### tier と reviewer_count", 1)[0]
+
+    assert "`push`" not in section and "`merge`" not in section
+    assert " / `削除` / " not in section
+    assert "`auth` /" not in section and " / `token` /" not in section
+    for calibrated in (
+        "`データ削除`",
+        "`レコード削除`",
+        "`物理削除`",
+        "`api token`",
+        "`access token`",
+        "`authenticat`",
+        "`authoriz`",
+        "`oauth`",
+    ):
+        assert calibrated in section
