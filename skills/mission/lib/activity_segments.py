@@ -83,6 +83,20 @@ def _finite_nonnegative(value: Any) -> float | None:
     return number if math.isfinite(number) and number >= 0 else None
 
 
+def _finite_sum(values: Any) -> float | None:
+    total = 0.0
+    for value in values:
+        total += value
+        if not math.isfinite(total):
+            return None
+    return total
+
+
+def _finite_add(left: float, right: float) -> float | None:
+    result = left + right
+    return result if math.isfinite(result) else None
+
+
 def sanitize_activity_detail(value: str | None) -> str | None:
     if not value:
         return None
@@ -148,7 +162,10 @@ def _add_nested(mapping: dict[str, Any], key: str, nested_key: str, seconds: flo
         nested = {}
         mapping[key] = nested
     current = _finite_nonnegative(nested.get(nested_key)) or 0.0
-    nested[nested_key] = current + seconds
+    updated = _finite_add(current, seconds)
+    if updated is None:
+        raise ActivityTimingError("activity rollup total overflow")
+    nested[nested_key] = updated
 
 
 def _record_closed_segment(state: dict[str, Any], segment: dict[str, Any]) -> None:
@@ -157,15 +174,22 @@ def _record_closed_segment(state: dict[str, Any], segment: dict[str, Any]) -> No
     phase = segment["phase"]
     reason = segment["reason"]
     rollup = _rollup(state)
-    rollup["observed_total_sec"] = (
-        (_finite_nonnegative(rollup.get("observed_total_sec")) or 0.0) + seconds
+    observed = _finite_add(
+        _finite_nonnegative(rollup.get("observed_total_sec")) or 0.0,
+        seconds,
     )
+    if observed is None:
+        raise ActivityTimingError("activity rollup total overflow")
+    rollup["observed_total_sec"] = observed
     count = rollup.get("closed_segment_count")
     rollup["closed_segment_count"] = (
         count + 1 if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else 1
     )
     totals = rollup.setdefault("activity_duration_totals_sec", {})
-    totals[kind] = (_finite_nonnegative(totals.get(kind)) or 0.0) + seconds
+    kind_total = _finite_add(_finite_nonnegative(totals.get(kind)) or 0.0, seconds)
+    if kind_total is None:
+        raise ActivityTimingError("activity rollup kind total overflow")
+    totals[kind] = kind_total
     phase_totals = rollup.setdefault("phase_activity_duration_totals_sec", {})
     _add_nested(phase_totals, phase, kind, seconds)
     if kind in WAIT_KINDS:
@@ -227,7 +251,10 @@ def _resume_boundary(state: dict[str, Any], at: str) -> str:
     gap = (resumed - boundary).total_seconds()
     if gap > 0:
         previous = _finite_nonnegative(state.get("activity_unobserved_gap_sec")) or 0.0
-        state["activity_unobserved_gap_sec"] = previous + gap
+        updated_gap = _finite_add(previous, gap)
+        if updated_gap is None:
+            raise ActivityTimingError("activity unobserved gap overflow")
+        state["activity_unobserved_gap_sec"] = updated_gap
     return boundary.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -348,17 +375,23 @@ def _percentile(values: list[float], probability: float) -> float | None:
         return None
     ordered = sorted(values)
     if len(ordered) == 1:
-        return float(ordered[0])
+        return _finite_nonnegative(ordered[0])
     rank = (len(ordered) - 1) * probability
     lower = math.floor(rank)
     upper = math.ceil(rank)
     if lower == upper:
-        return float(ordered[lower])
+        return _finite_nonnegative(ordered[lower])
     weight = rank - lower
-    return float(ordered[lower] + (ordered[upper] - ordered[lower]) * weight)
+    result = ordered[lower] + (ordered[upper] - ordered[lower]) * weight
+    return _finite_nonnegative(result)
 
 
 def _percentiles(samples: list[float]) -> dict[str, Any]:
+    samples = [
+        value
+        for sample in samples
+        if (value := _finite_nonnegative(sample)) is not None
+    ]
     return {
         "count": len(samples),
         "p50": _percentile(samples, 0.5),
@@ -366,19 +399,23 @@ def _percentiles(samples: list[float]) -> dict[str, Any]:
     }
 
 
-def _valid_phase_durations(state: dict[str, Any]) -> float:
+def _valid_phase_durations(state: dict[str, Any]) -> tuple[float, bool]:
     raw = state.get("phase_durations_sec")
     if not isinstance(raw, dict):
-        return 0.0
-    closed = sum(
+        return 0.0, False
+    values = [
         value
         for candidate in raw.values()
         if (value := _finite_nonnegative(candidate)) is not None
-    )
+    ]
+    closed = _finite_sum(values)
+    if closed is None:
+        return 0.0, True
     if state.get("phase") in TERMINAL_PHASES:
-        return closed
+        return closed, False
     current = _elapsed(state.get("phase_started_at"), state.get("updated_at"))
-    return closed + (current or 0.0)
+    total = _finite_add(closed, current or 0.0)
+    return (total, False) if total is not None else (0.0, True)
 
 
 def _valid_open_activity(state: dict[str, Any]) -> bool:
@@ -404,6 +441,7 @@ def _state_activity(state: dict[str, Any]) -> dict[str, Any]:
     reasons: dict[str, dict[str, float]] = {}
     invalid = 0
     totals_consistent = True
+    overflowed = False
     closed_count = 0
     rollup = state.get("activity_rollup")
     if isinstance(rollup, dict):
@@ -466,19 +504,34 @@ def _state_activity(state: dict[str, Any]) -> dict[str, Any]:
             invalid += 1
             totals_consistent = False
         observed_rollup = _finite_nonnegative(rollup.get("observed_total_sec"))
-        kind_sum = sum(kinds.values())
-        phase_sum = sum(sum(by_kind.values()) for by_kind in phases.values())
+        kind_sum = _finite_sum(kinds.values())
+        phase_rows = [_finite_sum(by_kind.values()) for by_kind in phases.values()]
+        phase_sum = (
+            _finite_sum(value for value in phase_rows if value is not None)
+            if all(value is not None for value in phase_rows)
+            else None
+        )
+        if kind_sum is None or phase_sum is None:
+            invalid += 1
+            totals_consistent = False
+            overflowed = True
+        safe_kind_sum = kind_sum or 0.0
+        safe_phase_sum = phase_sum or 0.0
         for candidate in (observed_rollup,):
-            if candidate is None or abs(candidate - kind_sum) > 0.001:
+            if candidate is None or abs(candidate - safe_kind_sum) > 0.001:
                 invalid += 1
                 totals_consistent = False
-        if abs(phase_sum - kind_sum) > 0.001:
+        if abs(safe_phase_sum - safe_kind_sum) > 0.001:
             invalid += 1
             totals_consistent = False
         for kind in WAIT_KINDS:
-            reason_sum = sum(reasons.get(kind, {}).values())
+            reason_sum = _finite_sum(reasons.get(kind, {}).values())
             kind_total = kinds.get(kind, 0.0)
-            if abs(reason_sum - kind_total) > 0.001:
+            if reason_sum is None:
+                invalid += 1
+                totals_consistent = False
+                overflowed = True
+            elif abs(reason_sum - kind_total) > 0.001:
                 invalid += 1
                 totals_consistent = False
     else:
@@ -507,13 +560,33 @@ def _state_activity(state: dict[str, Any]) -> dict[str, Any]:
                     invalid += 1
                     continue
                 closed_count += 1
-                kinds[kind] = kinds.get(kind, 0.0) + seconds
+                kind_total = _finite_add(kinds.get(kind, 0.0), seconds)
+                if kind_total is None:
+                    invalid += 1
+                    overflowed = True
+                    continue
+                kinds[kind] = kind_total
                 phase_row = phases.setdefault(phase, {})
-                phase_row[kind] = phase_row.get(kind, 0.0) + seconds
+                phase_total = _finite_add(phase_row.get(kind, 0.0), seconds)
+                if phase_total is None:
+                    invalid += 1
+                    overflowed = True
+                    continue
+                phase_row[kind] = phase_total
                 if kind in WAIT_KINDS:
                     reason_row = reasons.setdefault(kind, {})
-                    reason_row[reason] = reason_row.get(reason, 0.0) + seconds
-    observed = sum(kinds.values())
+                    reason_total = _finite_add(reason_row.get(reason, 0.0), seconds)
+                    if reason_total is None:
+                        invalid += 1
+                        overflowed = True
+                        continue
+                    reason_row[reason] = reason_total
+    observed = _finite_sum(kinds.values())
+    if observed is None:
+        invalid += 1
+        totals_consistent = False
+        overflowed = True
+        observed = 0.0
     raw_current = state.get("activity_current")
     open_count = 1 if _valid_open_activity(state) else 0
     if raw_current is not None and not open_count:
@@ -529,6 +602,18 @@ def _state_activity(state: dict[str, Any]) -> dict[str, Any]:
     valid_gap = _finite_nonnegative(raw_gap)
     if raw_gap is not None and valid_gap is None:
         invalid += 1
+    phase_wall, phase_overflowed = _valid_phase_durations(state)
+    if phase_overflowed:
+        invalid += 1
+        totals_consistent = False
+        overflowed = True
+    if overflowed:
+        kinds = {}
+        phases = {}
+        reasons = {}
+        observed = 0.0
+        phase_wall = 0.0
+        valid_gap = 0.0
     return {
         "observed": observed,
         "kinds": kinds,
@@ -538,7 +623,7 @@ def _state_activity(state: dict[str, Any]) -> dict[str, Any]:
         "open": open_count,
         "closed": closed_count,
         "valid_closed_sample": bool(closed_count > 0 and kinds and phases),
-        "phase_wall": _valid_phase_durations(state),
+        "phase_wall": phase_wall,
         "unobserved_gap": valid_gap or 0.0,
         "totals_consistent": totals_consistent,
     }
@@ -561,26 +646,52 @@ def summarize_activity_states(states: list[dict[str, Any]]) -> dict[str, Any]:
         item = _state_activity(state)
         if item["observed"] or item["open"] or item["closed"]:
             states_with += 1
-        observed_total += item["observed"]
-        phase_wall_total += item["phase_wall"]
+        aggregate_overflow = any(
+            _finite_add(left, right) is None
+            for left, right in (
+                (observed_total, item["observed"]),
+                (phase_wall_total, item["phase_wall"]),
+                (unobserved_gap, item["unobserved_gap"]),
+            )
+        )
+        aggregate_overflow = aggregate_overflow or any(
+            _finite_add(kind_totals.get(kind, 0.0), seconds) is None
+            for kind, seconds in item["kinds"].items()
+        )
+        aggregate_overflow = aggregate_overflow or any(
+            _finite_add(reason_totals.get(kind, {}).get(reason, 0.0), seconds)
+            is None
+            for kind, by_reason in item["reasons"].items()
+            for reason, seconds in by_reason.items()
+        )
         invalid_count += item["invalid"]
         open_count += item["open"]
         closed_count += item["closed"]
-        unobserved_gap += item["unobserved_gap"]
         totals_consistent = totals_consistent and item["totals_consistent"]
+        if aggregate_overflow:
+            invalid_count += 1
+            totals_consistent = False
+            continue
+        observed_total = _finite_add(observed_total, item["observed"]) or 0.0
+        phase_wall_total = _finite_add(phase_wall_total, item["phase_wall"]) or 0.0
+        unobserved_gap = _finite_add(unobserved_gap, item["unobserved_gap"]) or 0.0
         task_key = str(state.get("mission_id") or "unknown")
         if item["valid_closed_sample"]:
             task_samples.setdefault(task_key, []).append(item["observed"])
         for kind, seconds in item["kinds"].items():
-            kind_totals[kind] = kind_totals.get(kind, 0.0) + seconds
+            updated = _finite_add(kind_totals.get(kind, 0.0), seconds)
+            if updated is not None:
+                kind_totals[kind] = updated
         for phase, by_kind in item["phases"].items():
-            phase_total = sum(by_kind.values())
-            if by_kind:
+            phase_total = _finite_sum(by_kind.values())
+            if by_kind and phase_total is not None:
                 phase_samples.setdefault(phase, []).append(phase_total)
         for kind, by_reason in item["reasons"].items():
             for reason, seconds in by_reason.items():
                 row = reason_totals.setdefault(kind, {})
-                row[reason] = row.get(reason, 0.0) + seconds
+                updated = _finite_add(row.get(reason, 0.0), seconds)
+                if updated is not None:
+                    row[reason] = updated
     unclassified = max(0.0, phase_wall_total - observed_total)
     coverage_denominator = max(phase_wall_total, observed_total)
     coverage_ratio = observed_total / coverage_denominator if coverage_denominator > 0 else None

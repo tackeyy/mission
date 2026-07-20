@@ -5960,8 +5960,12 @@ def _phase_duration_totals(states: list[dict]) -> dict:
         for phase, sec in durations.items():
             if not isinstance(phase, str):
                 continue
-            if isinstance(sec, (int, float)) and not isinstance(sec, bool) and not math.isnan(sec) and sec >= 0:
-                totals[phase] = totals.get(phase, 0.0) + float(sec)
+            value = _finite_nonnegative_phase_seconds(sec)
+            if value is None:
+                continue
+            updated = _finite_nonnegative_phase_seconds(totals.get(phase, 0.0) + value)
+            if updated is not None:
+                totals[phase] = updated
     return dict(sorted(totals.items()))
 
 
