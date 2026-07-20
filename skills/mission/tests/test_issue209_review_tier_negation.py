@@ -593,7 +593,11 @@ def test_ambiguous_pronoun_execution_keeps_quoted_candidate_conservative(mission
     [
         "Review the deploy procedure, then execute it. "
         "Actual operations will not be performed.",
+        "Review the deploy procedure, then carry it out. "
+        "Actual operations will not be performed.",
         "deploy手順を調査してから実行する。実操作は行わない",
+        "deploy手順を調査して実行する。実操作は行わない",
+        "deploy手順を調査後に実行する。実操作は行わない",
     ],
 )
 def test_later_ambiguous_execution_vetoes_global_meta_suppression(mission):
