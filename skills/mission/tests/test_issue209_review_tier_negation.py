@@ -224,6 +224,27 @@ def test_negation_is_anchored_to_its_operation_across_conjunctions(
 @pytest.mark.parametrize(
     "mission",
     [
+        "deploy はしない、release する",
+        "deploy しないものの release する",
+        "deploy しない代わりに release する",
+        "do not deploy, release instead",
+        "do not deploy then release",
+        "do not deploy while release proceeds",
+    ],
+)
+def test_negation_requires_direct_operation_anchor_even_with_unknown_connector(mission):
+    decision = _decision(mission)
+
+    deploy = [item for item in _details(decision) if item["keyword"] == "deploy"]
+    release = [item for item in _details(decision) if item["keyword"] == "release"]
+    assert decision["tier"] == "full"
+    assert deploy and {item["decision"] for item in deploy} == {"suppressed"}
+    assert release and {item["decision"] for item in release} == {"included"}
+
+
+@pytest.mark.parametrize(
+    "mission",
+    [
         "実操作は行わない。ただし release する",
         "Actual operations will not be performed. However release to production",
         "実操作は行わない\n> release する",
