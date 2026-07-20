@@ -573,7 +573,11 @@ def test_passive_execution_targets_only_the_immediately_preceding_quote(mission)
     [
         'only quote "deploy", then execute it',
         'only quote "deploy" and execute it',
+        'only quote "deploy", then apply it',
+        'only quote "deploy", then proceed with it',
         "引用するだけ: 「deploy」。その後それを実行する",
+        "引用するだけ:「deploy」、その後適用する",
+        "引用するだけ:「deploy」、その後進める",
     ],
 )
 def test_ambiguous_pronoun_execution_keeps_quoted_candidate_conservative(mission):
