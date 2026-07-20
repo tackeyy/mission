@@ -11,6 +11,7 @@
 
 ### 変更
 - 「リリースして」「本番へデプロイして」などの明示的なユーザー指示を、対象が一致する不可逆操作の事前承認として扱うようにしました。対象・scope・rollback 条件や必要な破壊的操作に実質的な差分がない限り、実行直前に同じ確認を繰り返しません。
+- `mission-audit.py` が archived worktree bundle 内の `iter-N-<mission8>/scoring.{json,md}` に保存された scoring evidence を認識するようになり、worktree cleanup 後に historical `missing-scoring-evidence` が誤検出される問題を修正しました (#201)。
 
 ## [1.2.0] - 2026-07-10
 

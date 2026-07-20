@@ -757,6 +757,29 @@ def test_audit_accepts_worktree_archive_json_scoring_evidence(tmp_path):
     assert data["missing_scoring_evidence_count"] == 0
 
 
+def test_audit_accepts_archived_worktree_scoring_directory_evidence(tmp_path):
+    project_root = tmp_path / "worktree"
+    archive_root = tmp_path / "repo" / ".mission-state" / "archive" / "worktree-neutral"
+    _write_state(
+        archive_root / "sessions" / "archived.json",
+        project_root=str(project_root),
+        mission_id="feedfacecafebabe",
+        session_id="archived-scoring-directory-evidence",
+    )
+    evidence = archive_root / "iter-1-feedface" / "scoring.json"
+    evidence.parent.mkdir(parents=True, exist_ok=True)
+    evidence.write_text('{"composite": 4.5}\n', encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--since", "2026-06-18", "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    assert data["missing_scoring_evidence_count"] == 0
+
+
 def test_audit_treats_fresh_active_no_score_as_pending_not_debt(tmp_path):
     _write_state(
         tmp_path / ".mission-state" / "sessions" / "fresh.json",

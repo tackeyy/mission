@@ -746,6 +746,11 @@ def scoring_evidence_paths(record: StateRecord, iteration: int) -> list[Path]:
             paths.append(worktree_archive_root / "iteration-archive" / filename)
             paths.append(worktree_archive_root / "mission-archive" / filename)
 
+    if worktree_archive_root:
+        worktree_iteration_dir = worktree_archive_root / f"iter-{iteration}-{mission_prefix}"
+        paths.append(worktree_iteration_dir / "scoring.json")
+        paths.append(worktree_iteration_dir / "scoring.md")
+
     deduped: list[Path] = []
     for path in paths:
         if path not in deduped:
