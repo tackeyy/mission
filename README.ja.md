@@ -233,10 +233,10 @@ cd skills/mission
 python3 -m pytest -q
 ```
 
-現在のローカル検証結果:
+ローカル検証スナップショット:
 
 ```text
-553 passed
+2026-07-21: 1197 passed
 ```
 
 詳細は [`docs/TESTING.md`](docs/TESTING.md) を参照してください。

@@ -255,14 +255,19 @@ def test_release_version_paths_are_in_sync():
         assert expected_path in _r(REPO_ROOT / rel), f"{rel} does not reference {expected_path}"
 
 
-def test_readmes_describe_current_scoring_flow_and_test_count():
-    """README の主要説明が現行 source の標準 scoring flow と検証数から drift しないこと。"""
+def test_readmes_describe_current_scoring_flow_and_test_snapshot():
+    """README の主要説明と日付付き検証 snapshot が日英で drift しないこと。"""
     en = _r(REPO_ROOT / "README.md")
     ja = _r(REPO_ROOT / "README.ja.md")
     for rel, txt in (("README.md", en), ("README.ja.md", ja)):
-        for token in ("mission-review/1", "aggregate-reviews", "push-score --scoring-json", "553 passed"):
+        for token in (
+            "mission-review/1",
+            "aggregate-reviews",
+            "push-score --scoring-json",
+            "2026-07-21: 1197 passed",
+        ):
             assert token in txt, f"{rel} missing current README source-sync token: {token}"
-        assert "327 passed" not in txt, f"{rel} still reports stale test count"
+        assert "553 passed" not in txt, f"{rel} still reports stale test count"
     assert "reviewer/scorer phases" not in en
     assert "reviewer/scorer phase" not in ja
 

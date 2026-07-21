@@ -273,10 +273,10 @@ cd skills/mission
 python3 -m pytest -q
 ```
 
-Current local verification:
+Local verification snapshot:
 
 ```text
-553 passed
+2026-07-21: 1197 passed
 ```
 
 Additional project-specific testing guidance is in
