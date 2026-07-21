@@ -36,3 +36,5 @@
 - 初回全体検証: registry fixture の旧 `pass_rate` 直書きにより 1 failed / 1207 passed。fixture を registry の source key 参照へ修正。
 - 修正後全体検証: 1208 passed。pytest の一時ディレクトリ cleanup warning のみで失敗なし。
 - Checker 初回: `partial-done` の過剰除外と、自由文の substring 誤分類を High 2 件として検出。委譲証跡を必須化し、P1 を抑制する自由文は文全体の限定 allowlist 一致へ変更。否定・失敗・曖昧表現を actionable に倒す攻撃ケースを追加。
+- 再 Checker: High 0 / Medium 0 / Low 0。攻撃ケース、mirror、artifact hygiene、vendor fingerprint、doc consistency を確認。
+- 最終全体検証: 1208 passed（pytest cleanup warning のみ）。
