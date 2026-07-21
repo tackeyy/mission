@@ -267,6 +267,24 @@ def test_readmes_describe_current_scoring_flow_and_test_count():
     assert "reviewer/scorer phase" not in ja
 
 
+def test_local_authoring_latest_main_contract_is_consistent():
+    """Public EN/JA docs retain the fail-closed origin/main bootstrap contract."""
+    docs = {
+        rel: _r(REPO_ROOT / rel)
+        for rel in ("README.md", "README.ja.md", "CHANGELOG.md", "CHANGELOG.ja.md")
+    }
+    for rel, text in docs.items():
+        assert "origin/main" in text, f"{rel} must name the fixed source branch"
+        assert "SKILL.md" in text, f"{rel} must require rereading the updated skill"
+        assert "fallback" in text, f"{rel} must prohibit stale fallback"
+
+    setup = _r(REPO_ROOT / "skills/mission/refs/codex-setup.md")
+    bootstrap = setup.index("Local authoring source bootstrap")
+    init = setup.index("mission-state.py\" init")
+    target_setup = setup.index("対象 repository の task setup")
+    assert bootstrap < init < target_setup
+
+
 def test_release_checklist_requires_git_log_changelog_reconciliation():
     """release 時に commit subjects と changelog の突合を必須化する."""
     required = "git log <previous-tag>..HEAD --oneline"

@@ -22,10 +22,10 @@ cd skills/mission
 python3 -m pytest -q tests/test_mark_passes_threshold.py
 ```
 
-Run Stop hook shell linting:
+Run shell linting:
 
 ```bash
-shellcheck scripts/mission-stop-guard.sh
+shellcheck scripts/mission-stop-guard.sh scripts/sync-codex-plugin-wrapper.sh scripts/mission-local-authoring-sync.sh
 ```
 
 ## Test Layout
@@ -38,6 +38,7 @@ shellcheck scripts/mission-stop-guard.sh
 | `skills/mission/tests/test_session_lifecycle.py` | State lifecycle transitions |
 | `skills/mission/tests/test_stop_hook.py` | Stop hook blocking behavior |
 | `skills/mission/tests/test_cleanup_stale.py` | Stale and orphan state cleanup |
+| `skills/mission/tests/test_local_authoring_sync.py` | Latest-remote-main local authoring bootstrap and fail-closed checkout protection |
 | `skills/mission/tests/test_doc_consistency.py` | Documentation and command consistency |
 
 ## What to Test

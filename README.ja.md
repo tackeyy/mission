@@ -127,6 +127,7 @@ repository、[Claude Code `/goal` docs](https://code.claude.com/docs/ja/goal)、
 | `skills/mission-reviewer/` | ピアレビューサブスキル |
 | `skills/mission-critic/` | 改善案立案サブスキル |
 | `skills/mission-scorer/` | reviewer output を JSON 化するフォールバック変換器 |
+| `scripts/mission-local-authoring-sync.sh` | Git-backed local authoring を最新 mainへ揃える fail-closed bootstrap |
 | `scripts/mission-stop-guard.sh` | ループ継続を強制する Stop hook |
 | `claude-hooks/hooks.json` | Claude Code 用 Stop hook 宣言 |
 | `.claude-plugin/` | `plugin.json` / `marketplace.json` |
@@ -174,6 +175,13 @@ done
 export MISSION_PLUGIN_ROOT="$MISSION_REPO"
 export CLAUDE_PLUGIN_ROOT="$MISSION_REPO"  # 現行 skill command text との互換用
 ```
+
+local authoring の各実行では、mission state の初期化前に
+`scripts/mission-local-authoring-sync.sh` を実行します。この guard は
+`origin/main` を取得し、clean な `main` だけを fast-forward で更新して
+`HEAD == origin/main` を検証した後、更新済み `SKILL.md` の読み直しを要求します。
+dirty、`main` 以外、detached、ahead/diverged、remote branch 欠落、offline の場合は、
+古い checkout への fallback や local work の書き換えを行わず停止します。
 
 plugin 配布用に、この repo には `.codex-plugin/plugin.json` と `.agents/plugins/marketplace.json` も含めています。Codex marketplace install は、Codex が marketplace entry の `source.path` として `plugins/` 配下の plugin folder を期待するため、`plugins/mission/` wrapper を使います。Codex plugin package は default では skills-only です。Stop hook は Codex の hook trust と path resolution が Claude Code と異なるため、opt-in 手順に分離しています。詳細は
 [`skills/mission/refs/codex-setup.md`](skills/mission/refs/codex-setup.md) と [`docs/DISTRIBUTION.ja.md`](docs/DISTRIBUTION.ja.md) を参照してください。
