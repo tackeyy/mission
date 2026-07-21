@@ -2078,3 +2078,246 @@ def test_audit_falls_back_to_heuristic_when_halt_category_absent(tmp_path):
     )
     data = json.loads(result.stdout)
     assert data["halt_incomplete_breakdown"] == {"stale-state-cleanup": 1}
+
+
+# ===== #221: halted-run の actionable 分類 =====
+
+
+def test_audit_preserves_raw_halts_but_only_flags_actionable_halts(tmp_path):
+    """意図的・外部待ち・解消済み halt を raw 観測に残しつつ P1 から除外する."""
+    _write_state(
+        tmp_path / "passed" / ".mission-state" / "sessions" / "passed.json",
+        project_root=str(tmp_path / "passed"),
+        mission_id="passed",
+        session_id="passed",
+    )
+    halt_cases = [
+        ("delegated", "partial-done", "checker returned evidence to its owner", {}),
+        ("partial-threshold", "partial-done", "threshold gate remains unmet", {}),
+        ("approval", "awaiting-approval", "waiting for owner approval", {}),
+        ("approval-denied", "awaiting-approval", "owner approval was denied", {}),
+        ("aborted", "user-abort", "user stopped before restart", {}),
+        ("stale", "stale", "orphan state requires cleanup", {}),
+        ("stagnation", "stagnation", "iteration made no progress", {}),
+        ("other", "other", "unclassified terminal failure", {}),
+        (
+            "credentials",
+            "blocked-external",
+            "waiting for credentials from the external owner",
+            {},
+        ),
+        (
+            "conflicting-gate",
+            "blocked-external",
+            "repository gate conflicts with the required validation",
+            {},
+        ),
+        (
+            "superseded",
+            "stale",
+            "older setup state",
+            {"resolution_status": "superseded"},
+        ),
+        (
+            "legacy-resolved",
+            None,
+            "superseded by a replacement run",
+            {},
+        ),
+        (
+            "unknown",
+            "future-category",
+            "unrecognized terminal condition",
+            {},
+        ),
+        (
+            "negative-superseded",
+            None,
+            "not superseded by a replacement because the replacement failed",
+            {},
+        ),
+        (
+            "negative-cleanup",
+            None,
+            "not merged and cleaned up because CI failed",
+            {},
+        ),
+        (
+            "unexpected-owner-close",
+            None,
+            "owner item closed unexpectedly; recovery is required",
+            {},
+        ),
+        (
+            "failed-rate-limit",
+            "blocked-external",
+            "rate limit handling failed during validation",
+            {},
+        ),
+        (
+            "failed-quota-reset",
+            "blocked-external",
+            "quota reset parser failed before external work",
+            {},
+        ),
+        (
+            "tentative-superseded",
+            None,
+            "may be superseded by a replacement, verification pending",
+            {},
+        ),
+        (
+            "failing-replacement",
+            None,
+            "superseded by a replacement that is still failing validation",
+            {},
+        ),
+        (
+            "supposed-owner-resolution",
+            None,
+            "owner item resolved: supposedly, but needs investigation",
+            {},
+        ),
+        (
+            "rejected-prior-approval",
+            "awaiting-approval",
+            "waiting for approval after the prior approval was rejected",
+            {},
+        ),
+        (
+            "blocked-access",
+            "blocked-external",
+            "waiting for access although the account remains blocked",
+            {},
+        ),
+    ]
+    for name, category, reason, extra in halt_cases:
+        overrides = {
+            "project_root": str(tmp_path / name),
+            "mission_id": name,
+            "session_id": name,
+            "passes": False,
+            "loop_active": False,
+            "halt_reason": reason,
+            **extra,
+        }
+        if category is not None:
+            overrides["halt_category"] = category
+        _write_state(
+            tmp_path / name / ".mission-state" / "sessions" / f"{name}.json",
+            **overrides,
+        )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-18",
+            "--min-pass-rate",
+            "0.9",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+
+    assert data["halt_count"] == 23
+    assert data["actionable_halt_count"] == 17
+    assert data["non_actionable_halt_count"] == 6
+    assert data["halt_disposition_breakdown"] == {
+        "actionable": 17,
+        "awaiting-external": 2,
+        "delegated": 1,
+        "superseded-resolved": 2,
+        "user-aborted": 1,
+    }
+    assert data["completed_pass_rate"] == 1 / 24
+    assert data["actionable_pass_rate_numerator"] == 1
+    assert data["actionable_pass_rate_denominator"] == 18
+    assert data["actionable_pass_rate"] == 1 / 18
+    assert data["pass_rate"] == data["completed_pass_rate"]
+    assert data["all_finding_code_counts"]["halted-runs"] == 17
+    assert data["all_finding_code_counts"]["low-pass-rate"] == 1
+    assert "actionable_halt_sessions" not in data
+    assert "non_actionable_halt_sessions" not in data
+
+
+def test_audit_actionable_halts_keep_current_historical_periods(tmp_path):
+    """P1 の current / historical 区分は actionable halt のみを対象に維持する."""
+    cases = [
+        ("current-action", "stale", "2026-06-19T00:00:00Z", {}),
+        ("historical-action", "stagnation", "2026-06-17T00:00:00Z", {}),
+        (
+            "current-delegated",
+            "partial-done",
+            "2026-06-19T00:00:00Z",
+            {"delegated_to_parent": True},
+        ),
+    ]
+    for name, category, updated_at, extra in cases:
+        _write_state(
+            tmp_path / name / ".mission-state" / "sessions" / f"{name}.json",
+            project_root=str(tmp_path / name),
+            mission_id=name,
+            session_id=name,
+            passes=False,
+            loop_active=False,
+            halt_reason=f"{name} terminal reason",
+            halt_category=category,
+            updated_at=updated_at,
+            **extra,
+        )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-17",
+            "--current-since",
+            "2026-06-18",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+
+    assert data["current_actionable_halt_count"] == 1
+    assert data["historical_actionable_halt_count"] == 1
+    assert data["current_finding_code_counts"]["halted-runs"] == 1
+    assert data["historical_finding_code_counts"]["halted-runs"] == 1
+
+
+def test_audit_markdown_distinguishes_raw_and_actionable_halts(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "delegated.json",
+        project_root=str(tmp_path),
+        mission_id="delegated",
+        session_id="delegated",
+        passes=False,
+        loop_active=False,
+        halt_reason="delegated checker evidence",
+        halt_category="partial-done",
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--since", "2026-06-18"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert "- raw halt sessions: 1" in result.stdout
+    assert "- actionable halt sessions: 0" in result.stdout
+    assert "- actionable pass rate: -% (0/0)" in result.stdout
+    assert "## Halt Dispositions" in result.stdout
+    assert "`delegated`: 1" in result.stdout

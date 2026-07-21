@@ -236,7 +236,7 @@ python3 -m pytest -q
 ローカル検証スナップショット:
 
 ```text
-2026-07-21: 1205 passed
+2026-07-21: 1208 passed
 ```
 
 詳細は [`docs/TESTING.md`](docs/TESTING.md) を参照してください。
