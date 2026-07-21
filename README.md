@@ -276,7 +276,7 @@ python3 -m pytest -q
 Local verification snapshot:
 
 ```text
-2026-07-21: 1197 passed
+2026-07-21: 1205 passed
 ```
 
 Additional project-specific testing guidance is in
