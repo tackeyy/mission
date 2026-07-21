@@ -541,6 +541,113 @@ def atomic_write_json(path: Path, data: dict) -> None:
     os.replace(tmp, path)
 
 
+def _probe_directory_write(directory: Path) -> None:
+    """Write, fsync, and remove a probe in a mission state directory."""
+    probe_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            prefix=".mission-permission-probe-",
+            dir=directory,
+            delete=False,
+        ) as probe:
+            probe_path = Path(probe.name)
+            probe.write("permission-preflight\n")
+            probe.flush()
+            os.fsync(probe.fileno())
+    finally:
+        if probe_path is not None:
+            probe_path.unlink(missing_ok=True)
+
+
+def _probe_file_write(path: Path) -> None:
+    """Perform a content-preserving write and fsync on an evidence file."""
+    with path.open("r+b") as target:
+        first_byte = target.read(1)
+        if first_byte:
+            target.seek(0)
+            target.write(first_byte)
+        else:
+            target.write(b"\n")
+            target.truncate(0)
+        target.flush()
+        os.fsync(target.fileno())
+
+
+def _validated_assumptions_probe_path(cwd: Path, raw_path: str) -> Path:
+    """Resolve an existing regular assumptions file inside .mission-state."""
+    candidate = Path(raw_path)
+    if candidate.is_absolute():
+        raise ValueError("absolute evidence path")
+    state_root = state_dir(cwd).absolute()
+    candidate = (cwd / candidate).absolute()
+    candidate.relative_to(state_root)
+    if candidate.is_symlink():
+        raise ValueError("symlink evidence path")
+    resolved_root = state_root.resolve(strict=True)
+    resolved_candidate = candidate.resolve(strict=True)
+    resolved_candidate.relative_to(resolved_root)
+    if not resolved_candidate.is_file():
+        raise ValueError("evidence path is not a regular file")
+    return candidate
+
+
+def _record_permission_preflight_halt(cwd: Path, sf: Path, reason: str) -> bool:
+    """Best-effort persisted halt; structured stdout remains the final fallback."""
+    try:
+        with StateLock(lock_file(cwd)):
+            data = json.loads(sf.read_text(encoding="utf-8"))
+            now = iso_now()
+            data["halt_reason"] = reason
+            data["halt_category"] = "blocked-external"
+            data["loop_active"] = False
+            _transition_phase(data, "halted", now)
+            data["updated_at"] = now
+            backup_state(sf)
+            atomic_write_json(sf, data)
+            try:
+                _remove_from_aggregate(cwd, resolve_session_id())
+            except OSError:
+                pass
+        return True
+    except OSError:
+        return False
+
+
+def _exit_init_write_failure(cwd: Path, sf: Path | None = None) -> None:
+    """Emit the non-interactive fallback when init cannot persist state."""
+    reason = (
+        "Phase 0 permission preflight failed before task execution: "
+        "state write unavailable"
+    )
+    halt_recorded = bool(
+        sf is not None
+        and sf.exists()
+        and _record_permission_preflight_halt(cwd, sf, reason)
+    )
+    print(json.dumps({
+        "ok": False,
+        "halt_recorded": halt_recorded,
+        "halt_category": "blocked-external",
+        "halt_reason": reason,
+        "probes": [
+            {"target": "state", "ok": False, "error": "write-unavailable"}
+        ],
+    }))
+    raise SystemExit(2)
+
+
+@contextlib.contextmanager
+def _guarded_init_state_lock(cwd: Path, sf: Path):
+    """Convert every init persistence OSError into structured fallback evidence."""
+    try:
+        with StateLock(lock_file(cwd)):
+            yield
+    except OSError:
+        _exit_init_write_failure(cwd, sf)
+
+
 def backup_state(path: Path) -> None:
     """A-4: 更新前に .bak をコピー生成."""
     if path.exists():
@@ -3744,7 +3851,10 @@ def cmd_log_specialist_invocation(args):
 
 def cmd_init(args):
     cwd = Path.cwd()
-    state_dir(cwd).mkdir(parents=True, exist_ok=True)
+    try:
+        state_dir(cwd).mkdir(parents=True, exist_ok=True)
+    except OSError:
+        _exit_init_write_failure(cwd)
     planned_files = _parse_files_arg(getattr(args, "files", None))
     now = iso_now()
 
@@ -3853,10 +3963,13 @@ def cmd_init(args):
     sid = initial["session_id"]
     initial["assumptions_path"] = f".mission-state/sessions/{sid}-assumptions.md"
     sdir = session_dir(cwd)
-    sdir.mkdir(parents=True, exist_ok=True)
     sf_target = session_file(cwd, sid)
+    try:
+        sdir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        _exit_init_write_failure(cwd, sf_target)
     agg = aggregate_file(cwd)
-    with StateLock(lock_file(cwd)):
+    with _guarded_init_state_lock(cwd, sf_target):
         existing_agg = {}
         if agg.exists():
             try:
@@ -3929,7 +4042,18 @@ def cmd_init(args):
             assumptions_file.write_text("# Assumption Registry\n")
     except OSError as e:
         print(f"WARNING: assumptions_path ファイル作成に失敗: {e}", file=sys.stderr)
-    print(json.dumps({"ok": True, "mode": "multi-session", "session_file": str(sf_target), "session_id": sid, "mission_id": initial["mission_id"]}))
+    permission_preflight = _permission_preflight(cwd)
+    if not permission_preflight["ok"]:
+        print(json.dumps(permission_preflight, ensure_ascii=False))
+        sys.exit(2)
+    print(json.dumps({
+        "ok": True,
+        "mode": "multi-session",
+        "session_file": str(sf_target),
+        "session_id": sid,
+        "mission_id": initial["mission_id"],
+        "permission_preflight": "passed",
+    }))
 
 
 
@@ -4362,6 +4486,113 @@ def cmd_codex_preflight(args):
             print("ACTION: " + action, file=sys.stderr)
     if required_actions:
         sys.exit(2 if getattr(args, "strict", False) or getattr(args, "require_stop_hook", False) else 0)
+
+
+def _permission_preflight(cwd: Path) -> dict:
+    """Return the Phase 0 write-probe result without interacting with stdout."""
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        return {
+            "ok": False,
+            "halt_recorded": False,
+            "halt_category": "blocked-external",
+            "error": "state-not-found",
+            "probes": [],
+        }
+    try:
+        with StateLock(lock_file(cwd)):
+            data = json.loads(sf.read_text(encoding="utf-8"))
+    except OSError:
+        reason = (
+            "Phase 0 permission preflight failed before task execution: "
+            "state write unavailable"
+        )
+        return {
+            "ok": False,
+            "halt_recorded": False,
+            "halt_category": "blocked-external",
+            "halt_reason": reason,
+            "probes": [
+                {"target": "state", "ok": False, "error": "write-unavailable"}
+            ],
+        }
+    assumptions_path = data.get("assumptions_path")
+    if not assumptions_path:
+        reason = (
+            "Phase 0 permission preflight failed before task execution: "
+            "assumptions path missing"
+        )
+        return {
+            "ok": False,
+            "halt_recorded": _record_permission_preflight_halt(cwd, sf, reason),
+            "halt_category": "blocked-external",
+            "halt_reason": reason,
+            "error": "assumptions-path-missing",
+            "probes": [],
+        }
+
+    try:
+        assumptions_file = _validated_assumptions_probe_path(
+            cwd, str(assumptions_path)
+        )
+    except (OSError, ValueError):
+        reason = (
+            "Phase 0 permission preflight failed before task execution: "
+            "assumptions evidence path is invalid"
+        )
+        return {
+            "ok": False,
+            "halt_recorded": _record_permission_preflight_halt(cwd, sf, reason),
+            "halt_category": "blocked-external",
+            "halt_reason": reason,
+            "probes": [
+                {
+                    "target": "assumptions",
+                    "ok": False,
+                    "error": "invalid-evidence-path",
+                }
+            ],
+        }
+
+    probes = []
+    checks = (
+        ("state", lambda: _probe_directory_write(sf.parent)),
+        ("assumptions", lambda: _probe_file_write(assumptions_file)),
+    )
+    for target, probe in checks:
+        try:
+            probe()
+        except OSError:
+            probes.append(
+                {"target": target, "ok": False, "error": "write-unavailable"}
+            )
+            reason = (
+                "Phase 0 permission preflight failed before task execution: "
+                f"{target} write unavailable"
+            )
+            halt_recorded = _record_permission_preflight_halt(cwd, sf, reason)
+            return {
+                "ok": False,
+                "halt_recorded": halt_recorded,
+                "halt_category": "blocked-external",
+                "halt_reason": reason,
+                "probes": probes,
+            }
+        probes.append({"target": target, "ok": True})
+
+    return {
+        "ok": True,
+        "halt_recorded": False,
+        "probes": probes,
+    }
+
+
+def cmd_permission_preflight(args):
+    """Verify that Phase 0 can persist state and assumptions evidence."""
+    result = _permission_preflight(Path.cwd())
+    print(json.dumps(result, indent=2 if getattr(args, "json", False) else None))
+    if not result["ok"]:
+        sys.exit(2)
 
 
 # Issue #2: set で変更禁止のフィールド (mission_id 整合性維持のため)
@@ -6344,6 +6575,13 @@ def _build_parser():
     p_codex.add_argument("--hook-config", default=None,
                          help="Codex hooks.json の明示パス。未指定なら $CODEX_HOME/hooks.json と ~/.codex/hooks.json を確認")
     p_codex.set_defaults(func=cmd_codex_preflight)
+
+    p_permission = sub.add_parser(
+        "permission-preflight",
+        help="Phase 0 の state/assumptions 書き込み可否を実書き込みで検証",
+    )
+    p_permission.add_argument("--json", action="store_true", help="診断結果を JSON で出力")
+    p_permission.set_defaults(func=cmd_permission_preflight)
 
     p_get = sub.add_parser("get", help="state.json の値取得")
     p_get.add_argument("--field", default=None)
