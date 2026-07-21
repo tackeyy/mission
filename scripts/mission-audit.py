@@ -1496,44 +1496,54 @@ def halt_or_incomplete_bucket(
 
 
 _RESOLVED_HALT_STATUSES = {"resolved", "superseded", "closed"}
-_RESOLVED_HALT_REASON_MARKERS = (
-    "superseded by ",
-    "owner item resolved",
-    "owner item closed",
-    "merged and cleaned up",
-)
-_EXTERNAL_WAIT_REASON_MARKERS = (
+_RESOLVED_HALT_REASONS = {
+    "superseded by a replacement run",
+    "superseded by replacement run",
+}
+_DELEGATED_HALT_REASONS = {
+    "delegated checker evidence",
+    "checker returned evidence to its owner",
+    "parent mission owns aggregation",
+}
+_EXTERNAL_WAIT_REASONS = {
     "waiting for approval",
+    "waiting for owner approval",
     "awaiting approval",
-    "waiting for credential",
-    "awaiting credential",
+    "awaiting owner approval",
+    "waiting for credentials",
+    "waiting for credentials from the external owner",
+    "awaiting credentials",
     "waiting for access",
     "awaiting access",
-    "rate limit",
-    "quota reset",
-)
+    "rate limit exceeded; waiting for reset",
+    "quota exhausted; waiting for reset",
+}
 
 
 def halt_audit_disposition(record: StateRecord) -> str:
     """Classify a terminal halt by audit actionability, failing closed."""
     state = record.state
-    reason = str(state.get("halt_reason") or "").lower()
+    reason = str(state.get("halt_reason") or "").strip().lower().removesuffix(".")
     resolution_status = str(state.get("resolution_status") or "").strip().lower()
     if (
         resolution_status in _RESOLVED_HALT_STATUSES
-        or any(marker in reason for marker in _RESOLVED_HALT_REASON_MARKERS)
+        or reason in _RESOLVED_HALT_REASONS
     ):
         return "superseded-resolved"
 
     category = state.get("halt_category")
-    if category == "partial-done":
+    if category == "partial-done" and (
+        state.get("delegated_to_parent") is True
+        or reason in _DELEGATED_HALT_REASONS
+    ):
         return "delegated"
-    if category == "awaiting-approval":
+    if category == "awaiting-approval" and reason in _EXTERNAL_WAIT_REASONS:
         return "awaiting-external"
     if category == "user-abort":
         return "user-aborted"
-    if category == "blocked-external" and any(
-        marker in reason for marker in _EXTERNAL_WAIT_REASON_MARKERS
+    if (
+        category == "blocked-external"
+        and reason in _EXTERNAL_WAIT_REASONS
     ):
         return "awaiting-external"
     return "actionable"
