@@ -4299,6 +4299,18 @@ def cmd_codex_preflight(args):
         if getattr(args, "require_stop_hook", False):
             required_actions.append("Configure and trust `mission-stop-guard.sh` in Codex hooks, or rerun without --require-stop-hook for skills-only fallback.")
 
+    # #226 (A-4): MISSION_REQUIRE_SCORING_EVIDENCE=0 is a deprecated escape hatch that
+    # bypasses the scoring-evidence gate (findings recomputation) via the legacy --items
+    # push-score path. It must never be active for real work; --strict preflight rejects it
+    # and reports the run as not ok.
+    scoring_evidence_escape_hatch = os.environ.get("MISSION_REQUIRE_SCORING_EVIDENCE") == "0"
+    if scoring_evidence_escape_hatch:
+        required_actions.append(
+            "Unset MISSION_REQUIRE_SCORING_EVIDENCE=0: this deprecated escape hatch bypasses "
+            "the scoring-evidence gate and will be removed in the next minor release. "
+            "Use `push-score --scoring-json` (aggregate-reviews output) instead."
+        )
+
     version_skew = _detect_version_skew()  # #186
     if version_skew:
         warnings.append(
@@ -4310,7 +4322,7 @@ def cmd_codex_preflight(args):
 
     fallback_available = state_active and next_action not in {"init", "report-blocker", "report-complete"}
     result = {
-        "ok": state_active and (hook_status["configured"] or (fallback_available and not getattr(args, "require_stop_hook", False))),
+        "ok": state_active and (hook_status["configured"] or (fallback_available and not getattr(args, "require_stop_hook", False))) and not (scoring_evidence_escape_hatch and getattr(args, "strict", False)),
         "state_guard": {
             "present": state_present,
             "active": state_active,
@@ -5107,12 +5119,14 @@ def cmd_push_score(args):
             )
             sys.exit(2)
         # G-2: scoring evidence なしの push-score は default reject。
-        # MISSION_REQUIRE_SCORING_EVIDENCE=0 は移行期の一時 escape hatch として残す。
+        # DEPRECATED (#226/A-4): MISSION_REQUIRE_SCORING_EVIDENCE=0 は scoring-evidence gate を
+        # バイパスする移行期 escape hatch。次のマイナーリリースで削除予定。codex-preflight --strict は
+        # この env を検出して exit 2 にする。新規利用は禁止。
         if not args.scoring_output:
             if os.environ.get("MISSION_REQUIRE_SCORING_EVIDENCE") == "0":
                 print(
-                    "TEMPORARY ESCAPE HATCH: scoring evidence なしの push-score を許可しました "
-                    "(MISSION_REQUIRE_SCORING_EVIDENCE=0)。"
+                    "DEPRECATED ESCAPE HATCH: scoring evidence なしの push-score を許可しました "
+                    "(MISSION_REQUIRE_SCORING_EVIDENCE=0)。この env は次のマイナーリリースで削除予定です。"
                     " --scoring-json (推奨) または --scoring-output へ移行してください。",
                     file=sys.stderr,
                 )

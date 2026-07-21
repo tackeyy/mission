@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- `codex-preflight --strict` now rejects the deprecated `MISSION_REQUIRE_SCORING_EVIDENCE=0` escape hatch (exit 2) and reports the run as not ok. This environment variable bypasses the scoring-evidence gate via the legacy `push-score --items` path, so an active hatch must never proceed to real work. The hatch itself still functions for the moment but is now labelled `DEPRECATED ESCAPE HATCH` and is scheduled for removal in the next minor release (#226).
+
 ### Added
 
 - `mission-state.py stats` and `mission-audit.py` now share an exclusive pass-rate health classification and expose finite `raw_pass_rate` and `completed_pass_rate` values with explicit numerators and denominators. Fresh active work remains visible but outside the completed population; stale active work remains actionable and enters that population as non-passing health debt. Separate active, active-no-score, stale, halt, and abandoned counts are always present in JSON and console output. The deprecated `pass_rate` alias preserves each command's historical meaning, and stats now reads the current immutable worktree archive generation used by audit (#208).
