@@ -9,17 +9,17 @@
 | 監査分類 | 代表的な構造化カテゴリ・証跡 | P1 / 品質率への扱い |
 | --- | --- | --- |
 | `actionable` | `stagnation`、`stale`、未知・曖昧な halt、解消証跡のない `blocked-external` | 含める |
-| `awaiting-external` | `awaiting-approval`、承認・資格情報・rate limit の明示的な外部待ち | 除外する |
-| `delegated` | `partial-done` | 除外する |
+| `awaiting-external` | `awaiting-approval` / `blocked-external` かつ文全体が限定した肯定的な外部待ち allowlist に一致 | 除外する |
+| `delegated` | `partial-done` かつ `delegated_to_parent=true` または文全体が限定した委譲 allowlist に一致 | 除外する |
 | `superseded-resolved` | `resolution_status` が `resolved` / `superseded` / `closed` | 除外する |
 | `user-aborted` | `user-abort` | 除外する |
 
-未知の状態は誤って隠さないよう `actionable` に倒す。解消・置換は構造化された `resolution_status`、または `superseded by` など対象を限定した履歴互換 marker のみを根拠にし、曖昧な完了表現では除外しない。
+未知の状態は誤って隠さないよう `actionable` に倒す。解消・置換は構造化された `resolution_status`、または文全体が限定した履歴互換 allowlist に一致する場合のみを根拠にし、曖昧な完了表現では除外しない。
 
 ## テスト一覧
 
 1. 生の halt 数は全分類を保持する。
-2. `partial-done`、`awaiting-approval`、`user-abort` は P1 と actionable 品質率の分母から除外する。
+2. 委譲証跡付き `partial-done`、矛盾のない `awaiting-approval`、`user-abort` は P1 と actionable 品質率の分母から除外する。
 3. `stale`、`stagnation`、`other`、未知カテゴリは actionable に残す。
 4. `blocked-external` は明示的な承認・資格情報・rate limit 待ちだけを除外し、競合ゲートや未知理由は actionable に残す。
 5. `resolution_status` による解消・置換証跡は non-actionable とし、自由文だけの完了主張は actionable に残す。
@@ -35,3 +35,4 @@
 - Green: `test_mission_audit.py` は 61 passed、finding registry を含む対象テストは 62 passed。
 - 初回全体検証: registry fixture の旧 `pass_rate` 直書きにより 1 failed / 1207 passed。fixture を registry の source key 参照へ修正。
 - 修正後全体検証: 1208 passed。pytest の一時ディレクトリ cleanup warning のみで失敗なし。
+- Checker 初回: `partial-done` の過剰除外と、自由文の substring 誤分類を High 2 件として検出。委譲証跡を必須化し、P1 を抑制する自由文は文全体の限定 allowlist 一致へ変更。否定・失敗・曖昧表現を actionable に倒す攻撃ケースを追加。
