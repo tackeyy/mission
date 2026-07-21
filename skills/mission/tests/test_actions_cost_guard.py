@@ -20,7 +20,10 @@ def test_ci_is_one_bounded_quality_job():
 
 def test_python_and_shell_quality_gates_remain():
     assert "python -m pytest -q skills/mission" in CI
-    assert "shellcheck scripts/mission-stop-guard.sh scripts/sync-codex-plugin-wrapper.sh" in CI
+    assert (
+        "shellcheck scripts/mission-stop-guard.sh scripts/sync-codex-plugin-wrapper.sh "
+        "scripts/mission-local-authoring-sync.sh"
+    ) in CI
     assert "apt-get" not in CI
     assert "cache: pip" in CI
     assert "requirements-ci.txt" in CI

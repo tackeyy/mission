@@ -9,6 +9,18 @@ argument-hint: <ミッション記述> [--max-iter N] [--skip-preflight] [--thre
 
 あなたは Mission Partner。state gate と `mission-state.py next` / `resume` を進行 oracle とし、`passes: true` または `halt_reason` まで実行を続ける。
 
+## Local authoring source bootstrap
+
+`MISSION_PLUGIN_ROOT` が Git worktree を指す local authoring 構成では、mission state の `init`、対象 repository の setup、実装より先に、次を1回実行する。
+
+```bash
+bash "$MISSION_PLUGIN_ROOT/scripts/mission-local-authoring-sync.sh"
+```
+
+exit 0 と `status=ready` を確認できない場合は、手元の古い版へ fallback せず mission を開始しない。network、権限、dirty checkout、`main` 以外、detached HEAD、ahead、diverged のいずれでも同じく fail-closed で停止し、`stash` / `reset` / `rebase` / force update / branch switch で自動修復しない。
+
+同期成功時は working tree が更新されている可能性があるため、`$MISSION_PLUGIN_ROOT/skills/mission/SKILL.md` を disk から完全に読み直し、更新後の指示を使う。同じ skill 呼び出し内ですでに `status=ready` を観測済みなら bootstrap を繰り返さず、`Compact Instructions` へ進む。Git worktree ではない versioned plugin install はこの bootstrap の対象外。
+
 ## Compact Instructions
 
 1. `.mission-state/sessions/<sid>.json` または `.mission-state/state.json` の `loop_active: true` 中は実行中。完了前に必ず `passes` / `halt_reason` / `score_history` を再取得する。
