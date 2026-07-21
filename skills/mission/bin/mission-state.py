@@ -4285,7 +4285,11 @@ def cmd_codex_preflight(args):
     warnings: list[str] = []
     required_actions: list[str] = []
     if not state_present:
-        required_actions.append("Run `mission-state.py init ... --complexity <level>` before creating worktrees or doing implementation work.")
+        required_actions.append(
+            "Run `mission-state.py init ... --complexity <level>` and then "
+            "`mission-state.py codex-preflight --json --strict` before any task setup, "
+            "including worktree creation or implementation work, and before any final report."
+        )
     elif not state_active:
         required_actions.append("Resolve the inactive, passed, or halted mission state before continuing.")
     if not hook_status["configured"]:
