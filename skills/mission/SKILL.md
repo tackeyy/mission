@@ -3,6 +3,16 @@ name: mission
 description: ミッション達成までReActループで自律的に稼働。計画→実行→レビュー→スコア4.0達成まで自己修正。曖昧な要件は仮置きで進み、不可逆操作のみ事前確認する。複数ステップの作業を品質ゲート付きで完遂させたい時や「達成するまでやって」系の依頼で使用。
 user-invocable: true
 argument-hint: <ミッション記述> [--max-iter N] [--skip-preflight] [--threshold X]
+allowed-tools:
+  - Read
+  - Grep
+  - Glob
+  - Edit
+  - Write
+  - Bash(scripts/mission-state.py init:*)
+  - Bash(scripts/mission-state.py permission-preflight:*)
+  - Bash(${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py init:*)
+  - Bash(${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py permission-preflight:*)
 ---
 
 # /mission — 自律ミッション達成オーケストレーター
@@ -25,7 +35,7 @@ exit 0 と `status=ready` を確認できない場合は、手元の古い版へ
 
 1. `.mission-state/sessions/<sid>.json` または `.mission-state/state.json` の `loop_active: true` 中は実行中。完了前に必ず `passes` / `halt_reason` / `score_history` を再取得する。
 2. compaction 後の最初の操作は `mission-state.py resume`。返る `next_action` / `command_hint` に従い、state の `assumptions_path` を読む。固定 `.mission-state/assumptions.md` 決め打ちは禁止。
-3. 新規開始時は、read-only の repository 確認を除く task setup（fetch / pull / switch / worktree 作成）・実装より先に `init` で active state を作る。Codex は直後に `codex-preflight --json --strict` を実行し、exit 0 を確認するまで setup を進めない。各 phase 境界は `next` で Stop hook なし環境を補完する。
+3. 新規開始時は、read-only の repository 確認を除く task setup（fetch / pull / switch / worktree 作成）・実装より先に `init` で active state を作る。`init` は `permission-preflight --json` 相当の state / assumptions 実書き込み検査を内蔵する。exit 2 なら実作業へ進まず、`blocked-external` の halt / stdout 証跡をそのまま報告し、権限承認を質問しない。Codex は続けて `codex-preflight --json --strict` を実行し、exit 0 を確認するまで setup を進めない。各 phase 境界は `next` で Stop hook なし環境を補完する。
 4. state 更新は `mission-state.py` のみ。`sessions/<sid>.json` 直書き、inline `jq`、手計算の pass 判定は禁止。機械検証可能な action (`push-score` / `mark-passes` / `gh pr view` / `git push`) は直後に state 再取得または外部再照合し、捏造・転記ミスを潰す。
 5. Phase 5 は reviewer の `mission-review/1` JSON を `aggregate-reviews` で集計し、直後に `push-score --scoring-json` へ渡す。標準フローで `mission-scorer` を spawn しない。
 6. 完了報告前に `mark-passes` が exit 0 で返ったことを確認し、最後に `next` を呼ぶ。`next_action=report-complete`（`passes=true`）または `report-blocker`（`halt_reason` あり）以外では final を返さない。`findings_evidence_path` / `open_high` / `max_agreement_delta <= 1.5` / `threshold` / min item gate が未達なら継続。
@@ -41,6 +51,7 @@ exit 0 と `status=ready` を確認できない場合は、手元の古い版へ
 
 ```bash
 mission-state.py init "<mission>" --complexity Simple|Standard|Complex|Critical --issue-ref <ref> --files <csv>
+mission-state.py permission-preflight --json
 mission-state.py resume
 mission-state.py next
 mission-state.py activity start --kind active --reason planning
