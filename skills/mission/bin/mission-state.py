@@ -4377,6 +4377,51 @@ def cmd_set(args):
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
         now = iso_now()
+        explicit_keys = {kv.partition("=")[0] for kv in args.kvs}
+        # Issue #222 (A-2/A-3): gate 判定に影響する state フィールドの条件付き set ガード。
+        # 単純 FROZEN_FIELDS 追加では正規ワークフロー (tier と同時の reviewer_count 明示、
+        # F-4 手動再活性化での halt_reason 空化) を壊すため、条件付きで reject する。
+        if "reviewer_count" in explicit_keys and not ({"complexity", "review_tier"} & explicit_keys):
+            # A-2: reviewer_count 単独 set は tier 由来値より小さくして agreement gate を
+            # 無効化しうる (reviewer 1 名なら delta=0 が確定)。complexity/review_tier と
+            # 同時指定の運用上書きだけ許す。
+            print(
+                "ERROR: `reviewer_count` は単独 set 不可。"
+                " 変更する場合は `complexity` または `review_tier` と同時に指定してください "
+                "(A-2: agreement gate 無効化の防止)。",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if "halt_category" in explicit_keys:
+            # A-3: halt_category の変更は mark-halt/refresh-pid/resume 専用。
+            # set での書き換え (例: blocked-external -> stale) は無承認 reactivate を招く。
+            print(
+                "ERROR: `halt_category` は set で変更不可。"
+                " 変更は mark-halt / refresh-pid / resume 経由でのみ行ってください "
+                "(A-3: 無承認 reactivate の防止)。",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if "halt_reason" in explicit_keys:
+            # A-3: halt_reason の変更は _derive_next_action の halt 分岐回避になりうる。
+            # loop_active=true と同時の空化だけを F-4 手動再活性化 (gotchas §2) として許可する。
+            # loop_active 未指定 / loop_active=false 同時は「halt 証跡のない静かな終端」を作れるため reject。
+            _la_raw = next(
+                (v for k, _, v in (kv.partition("=") for kv in args.kvs) if k == "loop_active"),
+                None,
+            )
+            try:
+                _la_val = json.loads(_la_raw) if _la_raw is not None else None
+            except json.JSONDecodeError:
+                _la_val = _la_raw
+            if _la_val is not True:
+                print(
+                    "ERROR: `halt_reason` は単独 set 不可。"
+                    " クリアする場合は `loop_active=true` と同時に指定してください "
+                    "(A-3: halt 分岐回避の防止、F-4 手動再活性化のみ許可)。",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
         for kv in args.kvs:
             if "=" not in kv:
                 print(f"ERROR: key=value 形式で指定してください: {kv}", file=sys.stderr)
@@ -4428,7 +4473,7 @@ def cmd_set(args):
         # - review_tier_source が "auto" (またはフィールド不在) の場合: tier を再導出して reviewer_count も同期
         # - review_tier_source が "user" の場合: tier を維持し、reviewer_count も tier 由来を維持
         # - reviewer_count を明示した場合はそちらが優先
-        explicit_keys = {kv.partition("=")[0] for kv in args.kvs}
+        # (explicit_keys は関数冒頭で計算済み)
         if "complexity" in explicit_keys:
             tier_source = data.get("review_tier_source", "auto")
             if tier_source == "user":
