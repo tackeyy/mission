@@ -9,6 +9,7 @@ allowed-tools:
   - Glob
   - Edit
   - Write
+  - Bash(bash "$MISSION_PLUGIN_ROOT/scripts/mission-local-authoring-sync.sh")
   - Bash(scripts/mission-state.py init:*)
   - Bash(scripts/mission-state.py permission-preflight:*)
   - Bash(${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py init:*)

@@ -227,7 +227,7 @@ def test_skill_bootstraps_local_source_before_init_and_rereads_itself():
 
     bootstrap = skill.index("## Local authoring source bootstrap")
     compact = skill.index("## Compact Instructions")
-    init = skill.index("mission-state.py init")
+    init = skill.index("mission-state.py init", compact)
 
     assert bootstrap < compact < init
     assert "mission-local-authoring-sync.sh" in skill[bootstrap:compact]

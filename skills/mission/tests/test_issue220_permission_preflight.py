@@ -163,6 +163,7 @@ def test_skill_allows_only_state_cli_and_forbids_questions_on_preflight_failure(
             if line.strip().startswith("- Bash(")
         }
         assert bash_rules == {
+            'Bash(bash "$MISSION_PLUGIN_ROOT/scripts/mission-local-authoring-sync.sh")',
             "Bash(scripts/mission-state.py init:*)",
             "Bash(scripts/mission-state.py permission-preflight:*)",
             "Bash(${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py init:*)",
@@ -171,6 +172,11 @@ def test_skill_allows_only_state_cli_and_forbids_questions_on_preflight_failure(
         assert "Bash(python3:*)" not in frontmatter
         assert "Bash(*:*)" not in frontmatter
         assert "Bash(scripts/mission-state.py:*)" not in frontmatter
+        assert "Bash(bash:*)" not in frontmatter
+        assert (
+            'Bash(bash "$MISSION_PLUGIN_ROOT/scripts/mission-local-authoring-sync.sh":*)'
+            not in frontmatter
+        )
         assert "specialists invoke-command" not in frontmatter
 
         compact = text.split("## Compact Instructions", 1)[1].split(
