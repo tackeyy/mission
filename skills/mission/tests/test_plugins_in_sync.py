@@ -2,6 +2,7 @@
 
 同期対象:
   scripts/mission-stop-guard.sh
+  scripts/mission-local-authoring-sync.sh
   scripts/mission-audit.py
   skills/mission/bin/mission-state.py
   skills/mission/lib/activity_segments.py
@@ -11,6 +12,7 @@
   skills/mission/refs/self-improvement.md
   skills/mission/refs/changelog.md
   skills/mission/refs/state-management.md
+  skills/mission/refs/codex-setup.md
   skills/mission/SKILL.md
   skills/mission-planner/SKILL.md
   skills/mission-critic/SKILL.md
@@ -19,6 +21,7 @@
 
 対応する plugins 側パス:
   plugins/mission/scripts/mission-stop-guard.sh
+  plugins/mission/scripts/mission-local-authoring-sync.sh
   plugins/mission/scripts/mission-audit.py
   plugins/mission/skills/mission/bin/mission-state.py
   plugins/mission/skills/mission/lib/activity_segments.py
@@ -28,6 +31,7 @@
   plugins/mission/skills/mission/refs/self-improvement.md
   plugins/mission/skills/mission/refs/changelog.md
   plugins/mission/skills/mission/refs/state-management.md
+  plugins/mission/skills/mission/refs/codex-setup.md
   plugins/mission/skills/mission/SKILL.md
   plugins/mission/skills/mission-planner/SKILL.md
   plugins/mission/skills/mission-critic/SKILL.md
@@ -162,6 +166,29 @@ def test_stop_guard_in_sync():
         f"  plugins: {dst}\n"
         f"  同期コマンド: cp {src} {dst}"
     )
+
+
+def test_local_authoring_bootstrap_files_in_sync():
+    """Local authoring bootstrap script and setup reference match the plugin mirror."""
+    pairs = (
+        (
+            REPO_ROOT / "scripts" / "mission-local-authoring-sync.sh",
+            REPO_ROOT / "plugins" / "mission" / "scripts" / "mission-local-authoring-sync.sh",
+        ),
+        (
+            REPO_ROOT / "skills" / "mission" / "refs" / "codex-setup.md",
+            REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "refs" / "codex-setup.md",
+        ),
+    )
+    for src, dst in pairs:
+        assert src.exists(), f"canonical file does not exist: {src}"
+        assert dst.exists(), f"plugin mirror does not exist: {dst}"
+        assert _md5(src) == _md5(dst), (
+            f"local authoring bootstrap file is not synchronized:\n"
+            f"  canonical: {src}\n"
+            f"  plugin: {dst}\n"
+            f"  sync command: bash scripts/sync-codex-plugin-wrapper.sh"
+        )
 
 
 def test_mission_state_py_in_sync():

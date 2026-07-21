@@ -20,10 +20,10 @@ cd skills/mission
 python3 -m pytest -q tests/test_mark_passes_threshold.py
 ```
 
-Stop hook の shell lint:
+shell lint:
 
 ```bash
-shellcheck scripts/mission-stop-guard.sh
+shellcheck scripts/mission-stop-guard.sh scripts/sync-codex-plugin-wrapper.sh scripts/mission-local-authoring-sync.sh
 ```
 
 ## テスト構成
@@ -36,6 +36,7 @@ shellcheck scripts/mission-stop-guard.sh
 | `skills/mission/tests/test_session_lifecycle.py` | state lifecycle transition |
 | `skills/mission/tests/test_stop_hook.py` | Stop hook blocking behavior |
 | `skills/mission/tests/test_cleanup_stale.py` | stale / orphan state cleanup |
+| `skills/mission/tests/test_local_authoring_sync.py` | local authoring の最新 remote main bootstrap と fail-closed checkout 保護 |
 | `skills/mission/tests/test_doc_consistency.py` | ドキュメントと command の整合性 |
 
 ## テストを追加すべき変更

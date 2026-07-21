@@ -143,6 +143,7 @@ workflow claim.
 | `skills/mission-reviewer/` | Peer-review subskill |
 | `skills/mission-critic/` | Iteration-improvement subskill |
 | `skills/mission-scorer/` | Fallback prose-to-JSON converter for reviewer output |
+| `scripts/mission-local-authoring-sync.sh` | Fail-closed latest-main bootstrap for Git-backed local authoring |
 | `scripts/mission-stop-guard.sh` | Stop hook used to keep active missions running |
 | `claude-hooks/hooks.json` | Claude Code Stop hook declaration |
 | `.claude-plugin/` | Claude Code plugin metadata and marketplace manifest |
@@ -196,6 +197,13 @@ done
 export MISSION_PLUGIN_ROOT="$MISSION_REPO"
 export CLAUDE_PLUGIN_ROOT="$MISSION_REPO"  # Compatibility with current skill command text
 ```
+
+Each local-authoring invocation runs `scripts/mission-local-authoring-sync.sh`
+before mission state initialization. The guard fetches `origin/main`, updates only
+a clean `main` checkout by fast-forward, verifies `HEAD == origin/main`, and then
+requires the agent to reread the updated `SKILL.md`. Dirty, non-main, detached,
+ahead/diverged, missing-remote, and offline states stop without stale fallback or
+rewriting local work.
 
 For plugin distribution, this repository also includes `.codex-plugin/plugin.json`
 and `.agents/plugins/marketplace.json`. Codex marketplace installs use the
@@ -265,10 +273,10 @@ cd skills/mission
 python3 -m pytest -q
 ```
 
-Current local verification:
+Local verification snapshot:
 
 ```text
-553 passed
+2026-07-21: 1205 passed
 ```
 
 Additional project-specific testing guidance is in
