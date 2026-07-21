@@ -9,6 +9,10 @@
 
 ## [Unreleased]
 
+### セキュリティ
+
+- `codex-preflight --strict` が deprecated な `MISSION_REQUIRE_SCORING_EVIDENCE=0` escape hatch を検出して reject する (exit 2)。あわせて実行結果を not ok として報告する。この環境変数は legacy な `push-score --items` 経路で scoring-evidence gate をバイパスするため、有効なまま実作業へ進んではならない。escape hatch 自体は当面機能を維持するが、文言を `DEPRECATED ESCAPE HATCH` に変更し、次のマイナーリリースで削除予定とした (#226)。
+
 ### 追加
 
 - `mission-state.py stats` と `mission-audit.py` が排他的な pass-rate health 分類を共有し、finite な `raw_pass_rate` / `completed_pass_rate` と明示的な分子・分母を出力するようになりました。fresh active は可視化したまま completed population から外し、stale active は actionable な未合格 health debt として completed population に含めます。active、active-no-score、stale、halt、abandoned の件数は JSON と console に常に表示します。deprecated な `pass_rate` alias は各 command の従来の意味を維持し、stats は audit と同じ current immutable worktree archive generation を読み込みます (#208)。

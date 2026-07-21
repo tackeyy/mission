@@ -261,12 +261,13 @@ def test_no_evidence_rejects_by_default(state_dir, run_cli, read_state):
     assert len(read_state(state_dir)["score_history"]) == 0
 
 
-def test_allow_evidence_less_env_retains_temporary_escape_hatch(state_dir, run_cli, read_state):
+def test_allow_evidence_less_env_retains_deprecated_escape_hatch(state_dir, run_cli, read_state):
+    # #226 (A-4): escape hatch は削除まで機能を維持するが、文言は DEPRECATED を明示する。
     r = run_cli("push-score", "--iteration", "1", "--composite", "4.0", "--min-item", "3.5",
                 "--items", '{"mission_achievement": 4.0}', cwd=state_dir.parent,
                 env_extra={"MISSION_REQUIRE_SCORING_EVIDENCE": "0"})
     assert r.returncode == 0, f"stderr: {r.stderr}"
-    assert "TEMPORARY ESCAPE HATCH" in r.stderr
+    assert "DEPRECATED ESCAPE HATCH" in r.stderr
     assert len(read_state(state_dir)["score_history"]) == 1
 
 
