@@ -349,7 +349,7 @@ def test_every_registry_spec_reaches_attach_rows_and_period_schema():
         dict(state),
     )
     stats: dict[str, object] = {
-        "pass_rate": 0.0,
+        audit.FINDING_SPECS["low-pass-rate"].source_key: 0.0,
         "current_since": "2026-07-20T00:00:00+00:00",
     }
     for spec in audit.FINDING_SPECS.values():
