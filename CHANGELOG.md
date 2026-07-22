@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `mission-state.py advance --phase <phase> --activity <kind>:<reason>` performs the phase transition and the activity switch in one lock and one atomic write, so a state where the phase advanced but the activity stayed empty can no longer be produced (a structural cause of the 9.96% activity coverage measured in the 2026-07-22 execution-speed audit). Validation (phase normalization, kind/reason enum) happens before the lock and rejects without writing; transitions to `done`/`halted` stay exclusive to `mark-passes`/`mark-halt` so `advance` cannot bypass the pass gate. Calling `advance` with the current phase switches only the activity segment (#237).
+
 ### Security
 
 - `codex-preflight --strict` now rejects the deprecated `MISSION_REQUIRE_SCORING_EVIDENCE=0` escape hatch (exit 2) and reports the run as not ok. This environment variable bypasses the scoring-evidence gate via the legacy `push-score --items` path, so an active hatch must never proceed to real work. The hatch itself still functions for the moment but is now labelled `DEPRECATED ESCAPE HATCH` and is scheduled for removal in the next minor release (#226).

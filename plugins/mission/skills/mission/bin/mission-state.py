@@ -76,6 +76,7 @@ from activity_segments import (  # noqa: E402
     start_activity_segment,
     summarize_activity_states,
     transition_activity_phase,
+    validate_activity,
 )
 from worktree_archive import validate_worktree_archive_bundle  # noqa: E402
 from state_snapshot import SnapshotError, consume_snapshot_document  # noqa: E402
@@ -4122,6 +4123,65 @@ def cmd_activity_end(args):
     print(json.dumps({"ok": True, "changed": changed, "activity_current": data.get("activity_current")}, ensure_ascii=False))
 
 
+def cmd_advance(args):
+    """#237 (F2): phase 遷移と activity 切替を 1 lock で atomic に行う。
+
+    `set phase=` と `activity start` が別コマンドだと「phase だけ進んで activity が
+    空」の state を作れてしまい、activity coverage の欠損 (strict cohort 9.96%) を
+    生む。advance は両方を単一 write で行い、片方だけ進んだ state を機械的に排除する。
+
+    - terminal phase (done/halted) への遷移は mark-passes / mark-halt 専用 (gate 迂回の防止)。
+    - --activity は <kind>:<reason>。検証は lock 取得前に行い、不正入力では一切 write しない。
+    """
+    cwd = Path.cwd()
+    sf = _activity_state_file(cwd)
+    raw = args.activity or ""
+    kind, sep, reason = raw.partition(":")
+    if not sep or not kind or not reason:
+        print(
+            f"ERROR: --activity は <kind>:<reason> 形式で指定してください (例: active:implementation)。"
+            f" 受領値: '{raw}'",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    try:
+        validate_activity(kind, reason)
+    except ActivityTimingError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+    new_phase = _normalize_set_phase_value(args.phase)
+    if new_phase in {"done", "halted"}:
+        print(
+            "ERROR: advance で terminal phase へは遷移できません。"
+            " 合格は mark-passes、中断は mark-halt を使ってください。",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    at = args.at or iso_now()
+    try:
+        with StateLock(lock_file(cwd)):
+            data = json.loads(sf.read_text())
+            # 現 segment を先に閉じる。_transition_phase の split (旧 kind/reason の
+            # キャリーフォワード) が「旧 reason + 新 phase・0秒」の phantom segment を
+            # 作るのを防ぐ。advance は直後に新 segment を開くため carry-forward 不要。
+            if isinstance(data.get("activity_current"), dict):
+                end_activity_segment(data, at)
+            _transition_phase(data, new_phase, at)
+            start_activity_segment(data, kind, reason, at, detail=args.detail)
+            data["updated_at"] = at
+            backup_state(sf)
+            atomic_write_json(sf, stamp_metadata(data, cwd))
+    except ActivityTimingError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+    print(
+        json.dumps(
+            {"ok": True, "phase": data.get("phase"), "activity_current": data.get("activity_current")},
+            ensure_ascii=False,
+        )
+    )
+
+
 def _derive_next_action(data: dict) -> dict:
     """ADR-002 Stage 3 (G-3): state から次の 1 手を決定論的に導出する。
 
@@ -6692,6 +6752,20 @@ def _build_parser():
     p_stats.add_argument("--json", action="store_true", help="JSON 形式で出力")
     p_stats.add_argument("--snapshot", default=None, help="audit --snapshot-out で明示作成したsnapshotを利用 (invalid時はfail closed)")
     p_stats.set_defaults(func=cmd_stats)
+
+    p_advance = sub.add_parser(
+        "advance",
+        help="#237: phase 遷移と activity 切替を 1 lock で atomic に行う (phase だけ進んで activity が空の state を作らない)",
+    )
+    p_advance.add_argument("--phase", required=True,
+                           help=f"遷移先 phase。terminal (done/halted) は mark-passes / mark-halt 専用。有効値: {sorted(VALID_PHASES - {'done', 'halted'})}")
+    p_advance.add_argument("--activity", required=True,
+                           help="<kind>:<reason> (例: active:implementation, reviewer-wait:review-response)")
+    p_advance.add_argument("--detail", default=None,
+                           help="任意の補足。control 文字除去・160文字へ正規化")
+    p_advance.add_argument("--at", default=None,
+                           help="ISO timestamp。省略時は現在 UTC")
+    p_advance.set_defaults(func=cmd_advance)
 
     p_activity = sub.add_parser("activity", help="#211: phase 内の active/wait/idle segment を記録")
     activity_sub = p_activity.add_subparsers(dest="activity_cmd", required=True)

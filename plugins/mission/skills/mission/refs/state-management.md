@@ -143,7 +143,10 @@ mission-state.py activity start --kind approval-wait --reason <user-approval|pol
 mission-state.py activity start --kind reviewer-wait --reason <review-response|independent-review|other>
 mission-state.py activity start --kind idle --reason <no-runnable-work|interrupted|other>
 mission-state.py activity end
+mission-state.py advance --phase <planning|executing|reviewing|scoring> --activity <kind>:<reason> [--detail "..."] [--at ISO]
 ```
+
+**atomic `advance` (#237)**: phase 遷移と activity 切替を単一 lock・単一 write で行う。`set phase=` + `activity start` の 2 コマンド運用では「phase だけ進んで activity が空」の state を作れてしまい、activity coverage 欠損 (strict cohort 実測 9.96%) の構造要因になる。phase 境界では advance を優先する。検証 (phase 正規化 #188 / kind:reason enum) は lock 取得前に行い、不正入力では一切 write しない。terminal phase (`done`/`halted`) への遷移は `mark-passes` / `mark-halt` 専用であり advance は reject する (gate 迂回の防止)。同一 phase を指定した場合は activity 切替のみ行う (旧 segment を閉じて記録)。
 
 reason は kind ごとの enum から明示し、未知の原因を推測しない。detail は制御文字と改行を除去し、空白を正規化して160文字に制限する。crash 後の `resume` / `refresh-pid` / 同一 mission の `init` と、自動stale/orphan cleanup・Stop hookは、open segment を最後の有効な `updated_at` まで一度だけ閉じる。その後の空白時間は `activity_unobserved_gap_sec` であり、work/idleには分類しない。明示的な `mark-passes` / `mark-halt` / `halt --all` は、現在観測中の遷移を宣言するため制御時刻まで閉じる。自動stale haltは停止前phaseを `resume_target_phase` に保存し、`refresh-pid` がそのphaseを復元してresume時刻から再開する。明示haltは自動復帰しない。
 

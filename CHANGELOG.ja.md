@@ -9,6 +9,10 @@
 
 ## [Unreleased]
 
+### 追加
+
+- `mission-state.py advance --phase <phase> --activity <kind>:<reason>` が phase 遷移と activity 切替を単一 lock・単一 atomic write で行い、「phase だけ進んで activity が空」の state を作れなくした (2026-07-22 実行速度監査で実測された activity coverage 9.96% の構造要因への対策)。検証 (phase 正規化・kind/reason enum) は lock 取得前に行い、不正入力では一切 write しない。`done`/`halted` への遷移は従来どおり `mark-passes`/`mark-halt` 専用であり、advance を pass gate の迂回路にはできない。現在と同じ phase を指定した場合は activity 切替のみ行う (#237)。
+
 ### セキュリティ
 
 - `codex-preflight --strict` が deprecated な `MISSION_REQUIRE_SCORING_EVIDENCE=0` escape hatch を検出して reject する (exit 2)。あわせて実行結果を not ok として報告する。この環境変数は legacy な `push-score --items` 経路で scoring-evidence gate をバイパスするため、有効なまま実作業へ進んではならない。escape hatch 自体は当面機能を維持するが、文言を `DEPRECATED ESCAPE HATCH` に変更し、次のマイナーリリースで削除予定とした (#226)。
