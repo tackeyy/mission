@@ -11,6 +11,9 @@
 
 ### 追加
 
+- mission-vs-goal ベンチマーク runner が、mission ループを初期化しなかった mission arm record を無効化するようになった。mission arm 実行後に `.mission-state` が不在の場合、record を `run_status=failed` / `failure_kind=mission_loop_not_initialized` / `comparable_attempt=false` に再分類する（外的要因の blocked は元の分類を保持し、破損 state はループ開始の証拠があるため無効化しない）。アーム別 summary に comparable record のみで計算する `comparable_average_quality_score` / `comparable_average_elapsed_minutes` / `comparable_cost_usd_mean` を追加し、無効 record による速度・コスト比較の希釈を構造的に防ぐ。既存フィールドは全 records の歴史的意味を維持する (#261)。
+
+
 - mission orchestrator（`skills/mission/SKILL.md`）に #240/#241 の state 契約をプロンプト層へ配線した。Planner spawn 判定が `critic_has_new_scope` も記録し（critic の全計画ステップが既存 finding id のみなら false、`new` を含むなら true）、差分レビュー節は `next` の `details.reviewer_count`（state-driven の独立 2 名。矛盾していた「検証 1 名」記述を置換）に従い `aggregate-reviews` へ `--min-reviewers` を必ず付ける。新設の bounded context 節は `details.context_mode == "bounded"` のとき context manifest を生成して reviewer へ渡し、生成失敗時は full context へ fail-safe fallback する。`mission-reviewer` には context manifest 入力（manifest + 指定 diff を一次スコープ、採点基準と Step 0 テスト実行義務は不変）を明文化した (#258)。
 
 - `mission-state.py context-manifest --iteration N --out <path>` で bounded context manifest JSON（`mission-context-manifest/1` スキーマ）を生成できるようにした。mission goal、iteration、`score_history` から抽出した prior findings を含む。`_derive_next_action` の reviewing ブロックが details に `context_mode` を返すようになり、`iteration >= 2` かつ `critic_has_new_scope is False` の場合は `"bounded"`、それ以外は `"full"` を返す。reviewer fork がフル parent history ではなく evidence manifest のみを受け取れるようにし、diff レビューでのコンテキスト浪費を削減する (#241)。

@@ -675,6 +675,13 @@ def run_one(
             },
             None,
         )
+    # #261: mission ループ未初期化の record を無効化 (aggregate 希釈防止)
+    guarded = apply_mission_adherence_guard(
+        {k: evaluation[k] for k in ("run_status", "blocked_reason", "failure_kind", "comparable_attempt")},
+        arm=arm,
+        mission_state_note=mission_state_note,
+    )
+    evaluation.update(guarded)
     artifacts = copy_artifacts(worktree, artifact_dir, output_rel, stdout_path, stderr_path)
 
     usage = claude_result.get("usage", {}) if isinstance(claude_result, dict) else {}
@@ -750,6 +757,26 @@ def run_one(
     }
 
 
+def apply_mission_adherence_guard(status: dict, arm: str, mission_state_note: str | None) -> dict:
+    """#261: mission ループ未初期化の mission record を無効化する.
+
+    openworld-v1 で `.mission-state` を作らず素で回答した mission record が
+    aggregate を希釈した実害への対策。state 破損 (unreadable) はループ開始の
+    証拠があるため対象外。blocked は外的要因の分類を優先して保持する。
+    """
+    if arm != "mission":
+        return status
+    if mission_state_note != "mission_state_missing":
+        return status
+    if status.get("run_status") == "blocked":
+        return status
+    status = dict(status)
+    status["run_status"] = "failed"
+    status["failure_kind"] = "mission_loop_not_initialized"
+    status["comparable_attempt"] = False
+    return status
+
+
 def summarize(
     records: list[dict],
     tasks: list[dict],
@@ -772,6 +799,10 @@ def summarize(
 
     def _cost_values(items: list[dict]) -> list[float]:
         return [r["total_cost_usd"] for r in items if isinstance(r.get("total_cost_usd"), (int, float))]
+
+    def _comp(items: list[dict]) -> list[dict]:
+        # #261: comparable_attempt=False (無効 record) を除いた集計対象
+        return [r for r in items if r.get("comparable_attempt", True)]
 
     return {
         "run_id": run_id,
@@ -821,6 +852,21 @@ def summarize(
                     else None
                 ),
                 "average_elapsed_minutes": round(sum(r["elapsed_minutes"] for r in items) / len(items), 2) if items else None,
+                # #261: comparable record のみの品質・速度・コスト。無効 record
+                # (mission_loop_not_initialized 等) による希釈を防ぐ。既存フィールドは
+                # 全 records の歴史的意味 (全損コスト込み) を維持する。
+                "comparable_average_quality_score": (
+                    round(sum(r["human_quality_score"] for r in _comp(items)) / len(_comp(items)), 2)
+                    if _comp(items) else None
+                ),
+                "comparable_average_elapsed_minutes": (
+                    round(sum(r["elapsed_minutes"] for r in _comp(items)) / len(_comp(items)), 2)
+                    if _comp(items) else None
+                ),
+                "comparable_cost_usd_mean": (
+                    round(sum(_cost_values(_comp(items))) / len(_cost_values(_comp(items))), 4)
+                    if _cost_values(_comp(items)) else None
+                ),
                 # #249: 反復時の分散とコスト集計 (blocked/failed の全損コストも含む)。
                 "marker_score_variance": _marker_variance(items),
                 "cost_usd_total": round(sum(_cost_values(items)), 4) if _cost_values(items) else None,
