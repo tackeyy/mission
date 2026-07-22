@@ -253,6 +253,41 @@ N=5, one model, closed-world fixtures — no broad claim follows.
 The `first_pass_failure_design` fields remain design hypotheses: the designed
 first-pass failures did not reproduce in this run.
 
+## Openworld Cohort (openworld-discovery)
+
+The tail cohort tests recall of planted defects in closed-world fixtures where
+the answer set is predetermined. The `tasks.openworld.json` cohort
+(`openworld-discovery`) tests open-world discovery: the solver must
+independently identify findings (divergences, contradictions, root causes)
+without being told what to look for.
+
+Three task designs:
+
+1. **constant-hunt** — cross-service timeout configuration audit against
+   canonical defaults. The solver must independently discover which constants
+   diverge without a pre-enumerated checklist.
+2. **contradiction-chain** — multi-document claim consistency check where one
+   real contradiction coexists with a decoy that looks contradictory but is
+   actually consistent after careful reading.
+3. **incremental-reveal** — chronological incident log where the obvious
+   initial hypothesis (a recent deploy) is ruled out by later evidence. The
+   solver must follow the full evidence chain to reach the actual root cause.
+
+Scoring uses the same `quality_markers` / `forbidden_markers` / `hidden_paths`
+infrastructure as the tail cohort.
+
+```bash
+python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
+  --tasks-file benchmarks/mission-vs-goal/tasks.openworld.json \
+  --run-id YYYY-MM-DD-claude-goal-vs-mission-openworld \
+  --starting-commit <commit> \
+  --model-id <model-id> \
+  --stop-on-blocked \
+  --timeout 1800 \
+  --max-budget-usd 6.0 \
+  --limit-tasks 3
+```
+
 ## Human Quality Rubric
 
 | Score | Meaning |
@@ -295,6 +330,8 @@ Not allowed from this pilot:
 | `tasks.quality.json` | Fresh quality-critical cohort for evidence-depth and stop/proceed decision tasks. |
 | `tasks.tail.json` | Tail cohort with planted-defect fixtures, decoy penalties (`forbidden_markers`), and answer-key sanitization (`hidden_paths`); first run completed 2026-07-07 (see `report.md`). |
 | `fixtures/tail/` | Committed fixture documents for the tail cohort. |
+| `tasks.openworld.json` | Open-world discovery cohort with 3 tasks testing independent finding identification. |
+| `fixtures/openworld/` | Committed fixture documents for the openworld cohort (constant-hunt, contradiction-chain, incremental-reveal). |
 | `result.schema.json` | JSON Schema for one result record. |
 | `report.md` | Current measured status and package-validation results. |
 | `run_claude_goal_vs_mission.py` | Claude Code official `/goal` vs `/mission` smoke runner. |

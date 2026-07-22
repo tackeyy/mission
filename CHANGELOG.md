@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The mission-vs-goal benchmark adds an `openworld-discovery` cohort (`tasks.openworld.json`) with 3 tasks that test open-world finding discovery — the solver must independently identify divergences, contradictions, or root causes without a pre-enumerated checklist. Task designs: constant-hunt (cross-service timeout audit against canonical defaults), contradiction-chain (real contradiction + decoy that is actually consistent), incremental-reveal (chronological incident log where the obvious hypothesis is wrong). Scoring uses the same `quality_markers` / `forbidden_markers` / `hidden_paths` infrastructure as the tail cohort (#251).
+
 ### Changed
 
 - The mission-vs-goal benchmark runner now supports `--repeats N` to run every (task, arm) cell N times with `run_index` recorded per record, and the summary reports per-arm marker-score variance plus total/mean `total_cost_usd` (including wasted spend on blocked runs), so flakiness and noise can be separated from real quality differences (#249). Mission-arm records additionally capture `mission_review_tier`, `mission_iterations`, `mission_complexity`, `mission_passes`, and `mission_halt_category` extracted fail-open from the run's mission state, making tier-level cost/quality attribution possible (#250).

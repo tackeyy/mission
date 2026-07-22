@@ -56,6 +56,7 @@ def test_mission_vs_goal_tasks_have_marketing_safe_hypotheses():
         json.loads((BENCHMARK_DIR / "tasks.complex.json").read_text(encoding="utf-8")),
         json.loads((BENCHMARK_DIR / "tasks.quality.json").read_text(encoding="utf-8")),
         json.loads((BENCHMARK_DIR / "tasks.tail.json").read_text(encoding="utf-8")),
+        json.loads((BENCHMARK_DIR / "tasks.openworld.json").read_text(encoding="utf-8")),
     ]
     required = {"id", "category", "difficulty", "prompt", "validator", "primary_metric", "hypothesis"}
 

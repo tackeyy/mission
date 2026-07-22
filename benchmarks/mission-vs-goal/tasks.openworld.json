@@ -1,0 +1,97 @@
+{
+  "benchmark": "mission-vs-goal-pilot",
+  "version": 1,
+  "cohort": "openworld-discovery",
+  "task_count": 3,
+  "arms": [
+    "claude_code_goal_command",
+    "mission"
+  ],
+  "hidden_paths": [
+    "benchmarks/mission-vs-goal/tasks.openworld.json"
+  ],
+  "prompt_rules": [
+    "Do not open, read, grep, or list anything under `benchmarks/mission-vs-goal/` except the fixture files named in this prompt and your own output file. Benchmark metadata (task definitions, scoring configuration, answer keys) is out of bounds.",
+    "For every confirmed finding, quote the exact identifier or value from the fixture as evidence.",
+    "Explicitly separate confirmed findings from rejected candidates, and state why each rejected candidate looked suspicious but is not a real finding."
+  ],
+  "tasks": [
+    {
+      "id": "openworld-constant-hunt",
+      "category": "configuration",
+      "difficulty": "open_world_constant_divergence_across_service_boundaries",
+      "mission_complexity": "Complex",
+      "mission_max_iter": 3,
+      "markers_hidden": true,
+      "fixtures": [
+        "benchmarks/mission-vs-goal/fixtures/openworld/constant-hunt/gateway/timeouts.md",
+        "benchmarks/mission-vs-goal/fixtures/openworld/constant-hunt/worker/timeouts.md",
+        "benchmarks/mission-vs-goal/fixtures/openworld/constant-hunt/shared/network-defaults.md"
+      ],
+      "prompt": "Audit timeout configuration consistency across services. Read exactly these fixtures: `benchmarks/mission-vs-goal/fixtures/openworld/constant-hunt/gateway/timeouts.md`, `benchmarks/mission-vs-goal/fixtures/openworld/constant-hunt/worker/timeouts.md`, `benchmarks/mission-vs-goal/fixtures/openworld/constant-hunt/shared/network-defaults.md`. The shared defaults document defines canonical values. Find every place where a service diverges from the canonical default without documenting a justification. Quote the exact constant name, canonical value, and actual value. If a service documents a deliberate override with reasoning, reject it as a non-finding and explain why.",
+      "validator": "Artifact must include a divergence table (service, constant, canonical value, actual value, quoted evidence), a rejected-candidates section for any justified overrides, and an explicit statement of which services are fully compliant.",
+      "primary_metric": "quality_marker_recall",
+      "hypothesis": "Open-world discovery — no closed list of expected findings is given to the solver; it must independently identify which constants diverge. A review loop should help by cross-referencing each service against the canonical defaults systematically; this is a hypothesis to test, not a result.",
+      "first_pass_failure_design": "Three files define timeout constants for two services and a shared canonical. The worker's CONNECT_TIMEOUT_MS is 6500 vs the canonical 4000, which is the real divergence. READ_TIMEOUT_MS matches across all three (9000). A single-pass reader who only spot-checks one constant or one service may miss the divergence, especially when both files look superficially similar.",
+      "quality_markers": [
+        { "name": "Divergence: worker CONNECT_TIMEOUT_MS 6500 vs 4000", "patterns": ["6500", "6,500"] },
+        { "name": "Canonical reference: CONNECT_TIMEOUT_MS 4000", "patterns": ["4000", "4,000"] },
+        { "name": "Compliant: gateway matches canonical", "patterns": ["gateway"] }
+      ],
+      "forbidden_markers": [
+        { "name": "False divergence: READ_TIMEOUT_MS", "patterns": ["read_timeout_ms diverge", "read_timeout_ms differs", "read_timeout_ms is wrong", "read_timeout_ms mismatch", "fix read_timeout", "correct read_timeout"] }
+      ]
+    },
+    {
+      "id": "openworld-contradiction-chain",
+      "category": "analysis",
+      "difficulty": "multi_document_contradiction_with_decoy_ambiguity",
+      "mission_complexity": "Complex",
+      "mission_max_iter": 3,
+      "markers_hidden": true,
+      "fixtures": [
+        "benchmarks/mission-vs-goal/fixtures/openworld/contradiction-chain/doc-a-product-spec.md",
+        "benchmarks/mission-vs-goal/fixtures/openworld/contradiction-chain/doc-b-impl-guide.md",
+        "benchmarks/mission-vs-goal/fixtures/openworld/contradiction-chain/doc-c-runbook.md"
+      ],
+      "prompt": "The product spec (doc-a) is the source of truth. Compare all three documents: `benchmarks/mission-vs-goal/fixtures/openworld/contradiction-chain/doc-a-product-spec.md`, `benchmarks/mission-vs-goal/fixtures/openworld/contradiction-chain/doc-b-impl-guide.md`, `benchmarks/mission-vs-goal/fixtures/openworld/contradiction-chain/doc-c-runbook.md`. Find every claim in the implementation guide or runbook that contradicts the product spec. Quote the exact values from each document. Claims that look contradictory but are actually consistent after careful reading must be rejected as non-findings with reasoning.",
+      "validator": "Artifact must include a contradiction table quoting the spec value and the contradicting value with document names, classify each contradiction, and include a rejected-candidates section for claims that are consistent after careful reading.",
+      "primary_metric": "quality_marker_recall",
+      "hypothesis": "Open-world discovery — the solver must identify contradictions without a pre-enumerated list. The decoy '6 tries' in the runbook tests whether the solver reads carefully enough to see it is actually consistent (6 tries = 1 initial + 5 retries = spec's retry limit of 5). A review loop should help by forcing re-examination of each claim against the source of truth; this is a hypothesis to test, not a result.",
+      "first_pass_failure_design": "Three documents define checkout service parameters. The real contradiction is latency SLO: spec says 200ms but impl guide says 250ms. The runbook says '6 tries' which looks like a contradiction with the spec's 'retry limit: 5', but the runbook explains this includes the initial attempt (6 tries = 1 initial + 5 retries). A hasty reader who pattern-matches numbers will flag the decoy; a careful reader sees it is consistent.",
+      "quality_markers": [
+        { "name": "Contradiction: latency SLO 250ms vs 200ms", "patterns": ["250", "250 ms"] },
+        { "name": "Source of truth: spec says 200ms", "patterns": ["200 ms", "200ms"] },
+        { "name": "Contradicting document: impl guide", "patterns": ["impl", "implementation guide"] }
+      ],
+      "forbidden_markers": [
+        { "name": "False contradiction: 6 tries vs retry limit 5", "patterns": ["6 tries contradicts", "6 tries is wrong", "retry limit is 6", "change 6 to 5", "fix the retry", "correct the retry count", "runbook contradicts the spec on retries", "runbook retry count is wrong"] }
+      ]
+    },
+    {
+      "id": "openworld-incremental-reveal",
+      "category": "debugging",
+      "difficulty": "staged_evidence_with_misleading_initial_hypothesis",
+      "mission_complexity": "Complex",
+      "mission_max_iter": 3,
+      "markers_hidden": true,
+      "fixtures": [
+        "benchmarks/mission-vs-goal/fixtures/openworld/incremental-reveal/incident-log.md"
+      ],
+      "prompt": "Determine the root cause of the checkout failure incident. Read `benchmarks/mission-vs-goal/fixtures/openworld/incremental-reveal/incident-log.md` from start to finish. The log is chronological and later entries may overturn earlier hypotheses. Identify the actual root cause with quoted evidence from the log. If an early hypothesis was ruled out by later evidence, explicitly state what ruled it out and why.",
+      "validator": "Artifact must identify the actual root cause with quoted log evidence, explain why the initial hypothesis (serializer deploy) was wrong with the evidence that ruled it out, and include a timeline showing how the investigation evolved.",
+      "primary_metric": "quality_marker_recall",
+      "hypothesis": "Open-world root cause analysis — the solver must follow the evidence chain without knowing the answer in advance. The log is designed so the first plausible cause (serializer deploy) is wrong; a review loop should help by forcing re-evaluation after all evidence is read; this is a hypothesis to test, not a result.",
+      "first_pass_failure_design": "A chronological incident log where the serializer deploy at 01:05 is the obvious suspect (it touched the failing request path), but rolling it back at 01:31 does not help. Connection pool saturation started at 01:02 (before the deploy). The definitive evidence at 02:45 shows a runaway migration job holding an exclusive lock is the real root cause. A single-pass reader who stops at the first plausible cause misses the later evidence.",
+      "quality_markers": [
+        { "name": "Root cause: migration job", "patterns": ["migration job", "migration"] },
+        { "name": "Evidence: exclusive lock on orders table", "patterns": ["exclusive lock", "orders table", "orders"] },
+        { "name": "Evidence: pool saturation before deploy", "patterns": ["01:02", "before the deploy", "before any code", "before the 01:05"] },
+        { "name": "Ruled out: serializer rollback did not help", "patterns": ["rollback", "did not help", "not the cause", "not the root cause"] }
+      ],
+      "forbidden_markers": [
+        { "name": "False root cause: serializer deploy", "patterns": ["serializer is the root cause", "serializer caused", "root cause is the serializer", "root cause: serializer", "the serializer deploy caused"] }
+      ]
+    }
+  ]
+}
