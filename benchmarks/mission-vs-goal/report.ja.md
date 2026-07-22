@@ -550,6 +550,86 @@ API usage limit に到達し、success を返す前に停止したため、`/mis
 
 これは unsupported です。両 arm の paired run が完了していません。
 
+## Discriminating cohort adoption run (discriminating-v1)
+
+Status: 2026-07-23 JST に実行。#262 の採用判定 run。smoke (`disc-config-sprawl`
+paired、run id `2026-07-23-discriminating-smoke`) → 本 run (5 tasks x 2 arms、
+run id `2026-07-23-discriminating-v1`) の 2 段階。starting commit は #261 遵守
+ガード + #262 cohort マージ後の `bbd7602`。両 arm とも PATH shim で
+`--model claude-sonnet-5` を注入し、`--max-budget-usd 10` /
+`--mission-budget-minutes 30` / timeout 2400s を両 arm 同一条件で適用した。
+
+### Smoke gate 結果
+
+| Gate | 結果 |
+|---|---|
+| mission_iterations >= 2 | **達成** (iter=2 発生。fail-first 設計が機能) |
+| critic_has_new_scope 記録 | **達成** (False が記録。#258 配線 / #240-#241 経路の実運用初観測) |
+| mission-loop 遵守 | 達成 (未初期化 record 0) |
+| marker < 1.0 の存在 | 未達 (両 arm marker 1.0) |
+
+smoke の mission は iter2 で 30.45 min / USD 9.43 (goal 7.9 min / USD 2.63)。
+iter2 発火時の mission は goal の約 3.9x 遅いという新実測を得た。
+
+### 本 run task-level result
+
+| Task | Arm | Status | Mission iter / passes | Marker | Cost | Elapsed |
+|---|---|---|---|---:|---:|---:|
+| `disc-config-sprawl` | goal | completed | — | 1.00 | USD 2.98 | 10.70 min |
+| `disc-config-sprawl` | mission | completed | 1 / true | 1.00 | USD 8.37 | 13.53 min |
+| `disc-release-ledger` | goal | **blocked (max_budget_usd)** | — | — | USD 10.05 | 24.89 min |
+| `disc-release-ledger` | mission | completed | 1 / false (budget graceful halt) | 1.00 | USD 9.35 | 21.08 min |
+| `disc-contract-drift` | goal | **blocked (max_budget_usd)** | — | — | USD 10.10 | 26.49 min |
+| `disc-contract-drift` | mission | completed | 1 / true | 1.00 | USD 5.54 | 17.77 min |
+| `disc-metrics-reconcile` | goal | completed | — | 1.00 | USD 1.69 | 5.28 min |
+| `disc-metrics-reconcile` | mission | completed | 1 / true | 1.00 | USD 9.20 | 17.06 min |
+| `disc-policy-exceptions` | goal | completed | — | 1.00 | USD 8.01 | 21.15 min |
+| `disc-policy-exceptions` | mission | completed | 1 / false (scoring 未完) | 1.00 | USD 5.78 | 9.28 min |
+
+### Aggregate (summary より)
+
+| Metric | goal | mission | 解釈 |
+|---|---:|---:|---|
+| Completion rate | 3 / 5 | **5 / 5** | 同一予算 USD 10 で goal は 2 tasks を完走できず予算全損 (USD 20.15)。mission は全完走 |
+| Comparable records | 3 | 5 | blocked は比較集計から除外 |
+| Comparable avg quality / marker | 5.0 / 1.0 | 5.0 / 1.0 | 完走同士は品質同点 (marker 天井継続、forbidden hit 0) |
+| Comparable avg elapsed | 12.38 min | 15.74 min | 有効 3 ペアの合計時間比は mission 1.07x (config 1.26x / metrics 3.23x / policy 0.44x) |
+| Comparable cost mean | USD 4.22 | USD 7.65 | 完走同士では mission が高コスト |
+| Cost total (全損込み) | USD 32.82 | USD 38.25 | goal の全損 USD 20.15 を含めると総額差は縮小 |
+
+### 採用判定 (runbook Step 3 ゲート)
+
+1. **測定妥当性: 達成** — `mission_loop_not_initialized` 0 件
+2. **判別力 (marker 分散 != 0): 未達** — 完走 record は全て marker 1.0。ただし
+   cohort は「予算制約下の完走率」という別軸で初めて arm 差を生んだ
+   (goal 3/5 vs mission 5/5)
+3. **iter>=2 の実運用観測: smoke で達成** — 本 run は全 mission iter1
+   (レビュー結果のばらつきにより fail-first は確率的)
+4. **品質判定: marker recall では同点確定** — 「品質>goal」は本 cohort でも
+   実証されず。一方、同一予算での完走信頼性は mission 5/5 vs goal 3/5
+5. **速度判定: 達成** — comparable 3 ペア合計 1.07x (事前宣言の 1.5x 帯内)
+
+### 確定した位置づけ (2026-07-23)
+
+- **速度≈goal**: 達成 (iter1 完結時)。iter2 発火時は約 3.9x に劣化する
+- **品質>goal**: marker recall では非実証 (sonnet-5 では両 arm とも天井)
+- **新規優位軸**: 予算制約下の完走信頼性。goal は網羅要求の強い task で予算を
+  使い切り全損する一方、mission は budget guard (#238) で成果物を確定して
+  graceful halt する。「量が多く網羅要求が強い task ほど mission が有利」
+
+危険な解釈:
+
+> `/mission` は `/goal` より高品質。
+
+これは unsupported です。完走同士の品質は同点であり、優位は completion
+reliability (N=5、予算 USD 10 設定に依存) に限られます。
+
+> goal の予算切れは goal が劣っている証拠。
+
+これは部分的にしか supported されません。`/goal` は budget pressure シグナルを
+持たないため予算内で成果物を確定する機構がなく、この差は「構造の有無」に
+起因します。予算を USD 20 に上げれば goal も完走する可能性があります。
+
 ## Openworld cohort calibration run (openworld-v1)
 
 Status: 2026-07-22 JST に実行。`tasks.openworld.json` cohort（open-world finding 発見
@@ -764,4 +844,10 @@ results/2026-07-22-fable5-tail-full-summary.json
 results/2026-07-22-claude-goal-vs-mission-openworld-v1.jsonl
 results/2026-07-22-claude-goal-vs-mission-openworld-v1-summary.json
 artifacts/2026-07-22-claude-goal-vs-mission-openworld-v1/
+results/2026-07-23-discriminating-smoke.jsonl
+results/2026-07-23-discriminating-smoke-summary.json
+artifacts/2026-07-23-discriminating-smoke/
+results/2026-07-23-discriminating-v1.jsonl
+results/2026-07-23-discriminating-v1-summary.json
+artifacts/2026-07-23-discriminating-v1/
 ```
