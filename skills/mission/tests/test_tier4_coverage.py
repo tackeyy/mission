@@ -172,12 +172,21 @@ def test_set_rejects_pass_and_score_gate_fields(tmp_path, run_cli):
         assert r.returncode == 2, f"{kv} should be frozen, stderr={r.stderr}"
 
 
-def test_set_still_allows_loop_active_reactivation(tmp_path, run_cli):
-    """#90: loop_active は凍結せず、既存の再活性化経路を維持する。"""
+def test_reactivate_readds_session_to_aggregate(tmp_path, run_cli):
+    """承認監査付き再活性化で active_sessions へ戻す。"""
     run_cli("init", "g", "--complexity", "Standard", cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "react"})
     run_cli("mark-halt", "--reason", "manual stop", cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "react"}, check=True)
 
-    r = run_cli("set", "loop_active=true", "halt_reason=", cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "react"})
+    r = run_cli(
+        "reactivate",
+        "--approved-by-user",
+        "--reason",
+        "user approved mission reactivation",
+        "--expected-category",
+        "other",
+        cwd=tmp_path,
+        env_extra={"MISSION_SESSION_ID": "react"},
+    )
 
     assert r.returncode == 0, r.stderr
     data = json.loads((tmp_path / ".mission-state" / "sessions" / "react.json").read_text())
@@ -244,6 +253,7 @@ def test_refresh_pid_reactivates_stale_halt(tmp_path, run_cli):
     data = json.loads((tmp_path / ".mission-state" / "sessions" / "stale1.json").read_text())
     assert data["loop_active"] is True
     assert data["halt_reason"] == ""
+    assert "halt_category" not in data
     agg = json.loads((tmp_path / ".mission-state" / "aggregate.json").read_text())
     assert "stale1" in agg["active_sessions"]
 
@@ -260,10 +270,11 @@ def test_stats_classifies_abandoned(tmp_path, run_cli, monkeypatch):
     assert mod._classify(json.loads((sd / "ab.json").read_text())) == "abandoned"
 
 
-def test_set_loop_active_true_readds_to_aggregate(tmp_path, run_cli):
-    """F-4: set loop_active=true での再活性化も aggregate へ再追加される(gotchas §2 手順)."""
+def test_set_cannot_readd_halted_session_without_reactivation_audit(tmp_path, run_cli):
+    """汎用setによる停止解除はrejectされ、aggregateもinactiveのまま。"""
     run_cli("init", "g", "--complexity", "Standard", cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "s4"})
     run_cli("mark-halt", "--reason", "x", cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "s4"})
-    run_cli("set", "loop_active=true", "halt_reason=", cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "s4"})
+    result = run_cli("set", "loop_active=true", "halt_reason=", cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "s4"})
+    assert result.returncode == 2
     agg = json.loads((tmp_path / ".mission-state" / "aggregate.json").read_text())
-    assert "s4" in agg["active_sessions"], "set loop_active=true で aggregate へ再追加されていない"
+    assert "s4" not in agg["active_sessions"]

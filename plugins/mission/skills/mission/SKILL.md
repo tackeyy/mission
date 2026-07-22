@@ -35,7 +35,7 @@ exit 0 と `status=ready` を確認できない場合は、手元の古い版へ
 ## Compact Instructions
 
 1. `.mission-state/sessions/<sid>.json` または `.mission-state/state.json` の `loop_active: true` 中は実行中。完了前に必ず `passes` / `halt_reason` / `score_history` を再取得する。
-2. compaction 後の最初の操作は `mission-state.py resume`。返る `next_action` / `command_hint` に従い、state の `assumptions_path` を読む。固定 `.mission-state/assumptions.md` 決め打ちは禁止。
+2. compaction 後の最初の操作は `mission-state.py resume`。返る `next_action` / `command_hint` に従い、state の `assumptions_path` を読む。`stale` / `orphan` halt は `resume`、`awaiting-approval` 等の手動 halt はユーザーが対象操作と state 再活性化を明示承認した後に `reactivate --approved-by-user --expected-category <現在値> --reason "<承認理由>"` を使う。固定 `.mission-state/assumptions.md` 決め打ちは禁止。
 3. 新規開始時は、read-only の repository 確認を除く task setup（fetch / pull / switch / worktree 作成）・実装より先に `init` で active state を作る。`init` は `permission-preflight --json` 相当の state / assumptions 実書き込み検査を内蔵する。exit 2 なら実作業へ進まず、`blocked-external` の halt / stdout 証跡をそのまま報告し、権限承認を質問しない。Codex は続けて `codex-preflight --json --strict` を実行し、exit 0 を確認するまで setup を進めない。各 phase 境界は `next` で Stop hook なし環境を補完する。
 4. state 更新は `mission-state.py` のみ。`sessions/<sid>.json` 直書き、inline `jq`、手計算の pass 判定は禁止。機械検証可能な action (`push-score` / `mark-passes` / `gh pr view` / `git push`) は直後に state 再取得または外部再照合し、捏造・転記ミスを潰す。
 5. Phase 5 は reviewer の `mission-review/1` JSON を `aggregate-reviews` で集計し、直後に `push-score --scoring-json` へ渡す。標準フローで `mission-scorer` を spawn しない。
@@ -66,6 +66,7 @@ mission-state.py aggregate-reviews --iteration N --input a.json --input b.json -
 mission-state.py push-score --iteration N --scoring-json /tmp/mission-scorer-N.json
 mission-state.py mark-passes
 mission-state.py mark-halt --reason "<reason>"
+mission-state.py reactivate --approved-by-user --expected-category awaiting-approval --reason "<user-approved reason>"
 ```
 
 Artifact-required mission は `artifact init --required-for-pass` → `artifact append` → `artifact render --redaction-status reviewed` を使う。specialist は `specialists recommend --record-state`、完了前は `specialists accounting --json` と `specialists summary --json` で未処理候補を確認する。詳細は `refs/state-management.md`。

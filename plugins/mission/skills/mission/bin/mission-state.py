@@ -17,6 +17,7 @@
   python3 ${MISSION_PLUGIN_ROOT}/skills/mission/bin/mission-state.py artifact append --section evidence --text <text>
   python3 ${MISSION_PLUGIN_ROOT}/skills/mission/bin/mission-state.py mark-passes
   python3 ${MISSION_PLUGIN_ROOT}/skills/mission/bin/mission-state.py mark-halt --reason <text>
+  python3 ${MISSION_PLUGIN_ROOT}/skills/mission/bin/mission-state.py reactivate --approved-by-user --expected-category <category> --reason <text>
   python3 ${MISSION_PLUGIN_ROOT}/skills/mission/bin/mission-state.py cleanup-empty <path>
   python3 ${MISSION_PLUGIN_ROOT}/skills/mission/bin/mission-state.py list   # 全プロジェクト active 一覧 (C-4)
   python3 ${MISSION_PLUGIN_ROOT}/skills/mission/bin/mission-state.py halt --reason <text> [--all]
@@ -991,6 +992,23 @@ def _normalize_halt_category(value: str | None) -> str:
         )
         return "other"
     return value
+
+
+def _halt_category_for_confirmation(value) -> str:
+    """Normalize a persisted category for approval matching without mutating audit data."""
+    if isinstance(value, str) and value in HALT_CATEGORIES:
+        return value
+    return "unknown"
+
+
+def _is_legacy_stale_halt(category, reason) -> bool:
+    """Recognize pre-category stale/orphan state consistently across all recovery paths."""
+    category_is_legacy = category is None or category == "" or category == "unknown"
+    return (
+        category_is_legacy
+        and isinstance(reason, str)
+        and reason.startswith(("orphan:", "stale:"))
+    )
 
 
 # M7 (2026-06-10): SKILL.md Phase 1 の複雑度→Reviewer 数マッピング
@@ -4257,10 +4275,23 @@ def _derive_next_action(data: dict) -> dict:
     """
     halt_reason = data.get("halt_reason") or ""
     if halt_reason:
+        halt_category = data.get("halt_category")
+        legacy_stale = _is_legacy_stale_halt(halt_category, halt_reason)
+        if halt_category == "stale" or legacy_stale:
+            recovery_summary = "stale/orphan halt は resume で安全に再開する"
+            recovery_hint = "mission-state.py resume"
+        else:
+            expected_category = _halt_category_for_confirmation(halt_category)
+            recovery_summary = "手動 halt は対象操作と state 再活性化の明示承認後に reactivate する"
+            recovery_hint = (
+                "mission-state.py reactivate --approved-by-user "
+                f"--expected-category {expected_category} "
+                '--reason "<ユーザーが承認した再開理由>"'
+            )
         return {
             "next_action": "report-blocker",
-            "summary": f"halted: {halt_reason}。blocker と次アクションをユーザーに報告する。再開する場合は refresh-pid",
-            "command_hint": "mission-state.py refresh-pid",
+            "summary": f"halted: {halt_reason}。blocker と次アクションをユーザーに報告する。{recovery_summary}",
+            "command_hint": recovery_hint,
         }
     if data.get("passes") is True:
         return {
@@ -4756,6 +4787,7 @@ FROZEN_FIELDS = {
     "project_root",
     "started_at",
     "created_at_session",
+    "reactivation_history",  # 承認監査は reactivate の append-only 記録
 }
 
 
@@ -4770,8 +4802,8 @@ def cmd_set(args):
         now = iso_now()
         explicit_keys = {kv.partition("=")[0] for kv in args.kvs}
         # Issue #222 (A-2/A-3): gate 判定に影響する state フィールドの条件付き set ガード。
-        # 単純 FROZEN_FIELDS 追加では正規ワークフロー (tier と同時の reviewer_count 明示、
-        # F-4 手動再活性化での halt_reason 空化) を壊すため、条件付きで reject する。
+        # reviewer_count は tier と同時の運用上書きだけを許し、halt の解除は承認監査付きの
+        # dedicated reactivate command に限定する。
         if "reviewer_count" in explicit_keys and not ({"complexity", "review_tier"} & explicit_keys):
             # A-2: reviewer_count 単独 set は tier 由来値より小さくして agreement gate を
             # 無効化しうる (reviewer 1 名なら delta=0 が確定)。complexity/review_tier と
@@ -4794,22 +4826,28 @@ def cmd_set(args):
             )
             sys.exit(2)
         if "halt_reason" in explicit_keys:
-            # A-3: halt_reason の変更は _derive_next_action の halt 分岐回避になりうる。
-            # loop_active=true と同時の空化だけを F-4 手動再活性化 (gotchas §2) として許可する。
-            # loop_active 未指定 / loop_active=false 同時は「halt 証跡のない静かな終端」を作れるため reject。
-            _la_raw = next(
-                (v for k, _, v in (kv.partition("=") for kv in args.kvs) if k == "loop_active"),
+            # Approval-bearing halt transitions must retain their prior reason/category
+            # in reactivation_history. Generic set cannot provide that audit contract.
+            print(
+                "ERROR: `halt_reason` は set で変更不可。"
+                " 明示 halt の解除は `reactivate --approved-by-user` を使用してください "
+                "(A-3: 承認監査を伴わない再活性化の防止)。",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if "loop_active" in explicit_keys and data.get("halt_reason"):
+            loop_active_raw = next(
+                (value for key, _, value in (kv.partition("=") for kv in args.kvs) if key == "loop_active"),
                 None,
             )
             try:
-                _la_val = json.loads(_la_raw) if _la_raw is not None else None
+                requested_loop_active = json.loads(loop_active_raw) if loop_active_raw is not None else None
             except json.JSONDecodeError:
-                _la_val = _la_raw
-            if _la_val is not True:
+                requested_loop_active = loop_active_raw
+            if requested_loop_active is True:
                 print(
-                    "ERROR: `halt_reason` は単独 set 不可。"
-                    " クリアする場合は `loop_active=true` と同時に指定してください "
-                    "(A-3: halt 分岐回避の防止、F-4 手動再活性化のみ許可)。",
+                    "ERROR: halt中の `loop_active=true` は set で変更不可。"
+                    " `reactivate --approved-by-user` を使用してください。",
                     file=sys.stderr,
                 )
                 sys.exit(2)
@@ -4889,7 +4927,8 @@ def cmd_set(args):
             _tier = data.get("review_tier")
             if _tier in TIER_REVIEWER_COUNT:
                 data["reviewer_count"] = TIER_REVIEWER_COUNT[_tier]
-        # F-4: set loop_active=true での手動再活性化(gotchas §2)も aggregate へ戻す
+        # halt 理由がない中断 state の loop 再開時は aggregate へ戻す。
+        # halt 済み state は上のガードで拒否し、reactivate / refresh-pid に限定する。
         if "loop_active" in explicit_keys and data.get("loop_active") is True:
             _add_to_aggregate(cwd, sf.stem)
         _ensure_phase_timing(data, now)
@@ -5791,6 +5830,91 @@ def cmd_mark_halt(args):
     print(json.dumps({"ok": True, "halt_reason": args.reason, "halt_category": category}))
 
 
+def cmd_reactivate(args):
+    """Reactivate a manually halted mission only with explicit user approval."""
+    if not args.approved_by_user:
+        print(
+            "ERROR: reactivate には --approved-by-user が必須です。",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    approved_reason = sanitize_activity_detail(args.reason)
+    if not approved_reason:
+        print("ERROR: reactivate の --reason は空にできません。", file=sys.stderr)
+        sys.exit(2)
+
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        print("ERROR: state file が見つかりません。先に init してください。", file=sys.stderr)
+        sys.exit(1)
+
+    with StateLock(lock_file(cwd)):
+        data = json.loads(sf.read_text())
+        previous_halt_reason = data.get("halt_reason") or ""
+        raw_halt_category = data.get("halt_category")
+        previous_halt_category = raw_halt_category if raw_halt_category not in (None, "") else "unknown"
+        expected_halt_category = _halt_category_for_confirmation(raw_halt_category)
+        previous_phase = data.get("phase") or "unknown"
+        if data.get("passes") is True:
+            print("ERROR: 合格済み mission は reactivate できません。", file=sys.stderr)
+            sys.exit(2)
+        if data.get("loop_active") is not False or not previous_halt_reason:
+            print("ERROR: reactivate 対象の停止中 mission ではありません。", file=sys.stderr)
+            sys.exit(2)
+        legacy_stale = _is_legacy_stale_halt(raw_halt_category, previous_halt_reason)
+        if expected_halt_category == "stale" or legacy_stale:
+            print(
+                "ERROR: stale/orphan halt は reactivate ではなく resume を使用してください。",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if args.expected_category != expected_halt_category:
+            print(
+                "ERROR: --expected-category が現在の halt_category と一致しません: "
+                f"expected={args.expected_category!r} actual={previous_halt_category!r} "
+                f"normalized={expected_halt_category!r}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+        now = iso_now()
+        audit_entry = {
+            "timestamp": now,
+            "previous_halt_reason": previous_halt_reason,
+            "previous_halt_category": previous_halt_category,
+            "previous_phase": previous_phase,
+            "approved_reason": approved_reason,
+            "approved_by_user": True,
+            "target_phase": args.phase,
+        }
+        history = data.get("reactivation_history")
+        if history is not None and not isinstance(history, list):
+            print("ERROR: reactivation_history が不正なため再活性化できません。", file=sys.stderr)
+            sys.exit(2)
+        close_activity_for_terminal(data, now, trusted_boundary=True)
+        data["halt_reason"] = ""
+        data.pop("halt_category", None)
+        data.pop("resume_target_phase", None)
+        data["loop_active"] = True
+        data["phase"] = args.phase
+        data["phase_started_at"] = now
+        start_activity_segment(
+            data,
+            "active",
+            "resumed-implementation",
+            now,
+            detail=approved_reason,
+            resume=True,
+        )
+        data.setdefault("reactivation_history", []).append(audit_entry)
+        data["updated_at"] = now
+        backup_state(sf)
+        atomic_write_json(sf, stamp_metadata(data, cwd))
+        _add_to_aggregate(cwd, sf.stem)
+    print(json.dumps({"ok": True, "reactivated": True, "audit": audit_entry}, ensure_ascii=False))
+
+
 def _pid_is_agent(pid: int) -> bool:
     """PID 再利用対策: pid が alive かつ comm がエージェント CLI (claude/codex) であることを確認.
 
@@ -5852,9 +5976,7 @@ def cmd_refresh_pid(args):
         prev_halt = data.get("halt_reason", "")
         prev_category = data.get("halt_category")
         prev_loop = data.get("loop_active", False)
-        legacy_reactivatable_halt = not prev_category and isinstance(prev_halt, str) and (
-            prev_halt.startswith("orphan:") or prev_halt.startswith("stale:")
-        )
+        legacy_reactivatable_halt = _is_legacy_stale_halt(prev_category, prev_halt)
         was_reactivatable_halt = prev_category == "stale" or legacy_reactivatable_halt
         target_phase = data.get("resume_target_phase")
         phase_can_reactivate = data.get("phase") != "halted" or target_phase in {
@@ -5876,6 +5998,7 @@ def cmd_refresh_pid(args):
                 data.pop("resume_target_phase", None)
                 restored_phase = True
             data["halt_reason"] = ""
+            data.pop("halt_category", None)
             data["loop_active"] = True
             _add_to_aggregate(cwd, sf.stem)  # F-4: 再活性化分を active_sessions へ戻す
         if not restored_phase:
@@ -6785,6 +6908,20 @@ def _build_parser():
                          help=f"#190: halt の種別。有効値: {sorted(HALT_CATEGORIES)}。省略/不正値は 'other' + WARN"
                               " (argparse choices は使わない: _normalize_halt_category が WARN+fallback で検証する)")
     p_halt.set_defaults(func=cmd_mark_halt)
+
+    p_reactivate = sub.add_parser(
+        "reactivate",
+        help="明示的なユーザー承認を監査記録して手動 halt を再活性化",
+    )
+    p_reactivate.add_argument("--approved-by-user", action="store_true")
+    p_reactivate.add_argument("--reason", required=True)
+    p_reactivate.add_argument("--expected-category", required=True)
+    p_reactivate.add_argument(
+        "--phase",
+        choices=sorted(VALID_PHASES - {"done", "halted"}),
+        default="planning",
+    )
+    p_reactivate.set_defaults(func=cmd_reactivate)
 
     p_refresh = sub.add_parser("refresh-pid", help="R1: resume 後に state.pid を現 agent CLI PID に更新 + orphan halt を解除")
     p_refresh.add_argument("--force", action="store_true", help="既存 pid が alive な agent CLI プロセスでも強制継承")

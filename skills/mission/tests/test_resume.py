@@ -129,8 +129,36 @@ def test_resume_reactivates_orphan_halt(state_dir, run_cli):
     after = json.loads(sf.read_text())
     assert after["loop_active"] is True   # 再活性化された
     assert after["halt_reason"] == ""     # halt 解除
+    assert "halt_category" not in after   # 停止カテゴリは current state から除去
     # 自 state は halt されていない (refresh-pid が cleanup-stale より先に走った証跡)
     assert after["passes"] is False
+
+
+def test_next_resume_reactivates_legacy_unknown_orphan_halt(state_dir, run_cli):
+    """next が resume を案内する legacy unknown category を実際に復旧できる。"""
+    sf = state_dir / "sessions" / "test.json"
+    data = json.loads(sf.read_text())
+    data["loop_active"] = False
+    data["halt_reason"] = "orphan: legacy owner disappeared"
+    data["halt_category"] = "unknown"
+    sf.write_text(json.dumps(data))
+
+    next_result = run_cli("next", cwd=state_dir.parent, check=True)
+    assert json.loads(next_result.stdout)["command_hint"] == "mission-state.py resume"
+
+    resumed = run_cli(
+        "resume",
+        "--json",
+        cwd=state_dir.parent,
+        env_extra={"MISSION_FORCE_PID_IS_AGENT": "1"},
+        check=True,
+    )
+
+    assert json.loads(resumed.stdout)["resume"]["reactivated"] is True
+    after = json.loads(sf.read_text())
+    assert after["loop_active"] is True
+    assert after["halt_reason"] == ""
+    assert "halt_category" not in after
 
 
 def test_resume_halts_foreign_dead_pid_state(state_dir, run_cli):

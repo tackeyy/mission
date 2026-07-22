@@ -55,10 +55,13 @@ def test_no_jq_direct_state_write():
     assert "jq '." not in txt, "jq で state.json を直接書き換える禁止手順が残存"
 
 
-# ---- Tier1-2: halt 後再開が正規コマンド(set)で案内されている ----
-def test_reactivate_uses_set_command():
+# ---- Tier1-2: halt 後再開が承認監査付き専用コマンドで案内されている ----
+def test_reactivate_uses_audited_command():
     txt = _r(REFS / "gotchas.md")
-    assert "set loop_active=true" in txt, "halt 後再開の正規手順 (mission-state.py set loop_active=true) が gotchas.md にない"
+    assert "mission-state.py reactivate" in txt
+    assert "--approved-by-user" in txt
+    assert "--expected-category" in txt
+    assert "set loop_active=true" not in txt
 
 
 # ---- Tier1-4: gotchas.md の歴史的記録残骸が圧縮されている ----
