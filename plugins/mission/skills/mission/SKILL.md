@@ -44,7 +44,7 @@ exit 0 と `status=ready` を確認できない場合は、手元の古い版へ
 8. M6: Medium 以上の指摘を orchestrator がインライン修正したら、自己検証だけで合格にしない。差分 Reviewer 1 名の再確認を経てから scoring / pass 判定へ進む。
 9. 質問は溜めて仮置きする。即時質問は Trigger 1 の不可逆操作と、Trigger 2 の中断条件だけ。
 10. PR がある場合は pass 後に Phase 7 を実行する。自動 merge は明示 opt-in、CI/テスト pass、`gh pr checks` 1 件以上、禁止ルールなしの全条件を満たす時だけ。
-11. `init` 後は `activity start --kind active --reason planning` を開始し、実作業・外部応答・承認・reviewer・実行可能作業なしの境界で明示的に切り替える。原因不明の時間を推測分類しない。終端 phase は open segment を自動で閉じる。
+11. `init` 後は `activity start --kind active --reason planning` を開始し、実作業・外部応答・承認・reviewer・実行可能作業なしの境界で明示的に切り替える。phase 境界では `set phase=` + `activity start` の 2 コマンドではなく atomic な `advance --phase <phase> --activity <kind>:<reason>` を優先する (#237: phase だけ進んで activity が空の state を作らない)。原因不明の時間を推測分類しない。終端 phase は open segment を自動で閉じる。
 
 ## state.json 操作
 
@@ -55,6 +55,7 @@ mission-state.py init "<mission>" --complexity Simple|Standard|Complex|Critical 
 mission-state.py permission-preflight --json
 mission-state.py resume
 mission-state.py next
+mission-state.py advance --phase executing --activity active:implementation
 mission-state.py activity start --kind active --reason planning
 mission-state.py activity start --kind external-wait --reason external-response
 mission-state.py activity start --kind approval-wait --reason user-approval
