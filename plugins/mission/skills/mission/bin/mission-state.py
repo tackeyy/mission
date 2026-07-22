@@ -4353,11 +4353,14 @@ def _derive_next_action(data: dict) -> dict:
             "command_hint": "Skill: mission-executor → mission-state.py set phase='\"reviewing\"'",
         }
     if phase == "reviewing":
+        # #241: bounded context — iteration >= 2 かつ新規 scope なしなら bounded mode
+        use_bounded = iteration >= 2 and data.get("critic_has_new_scope") is False
+        context_mode = "bounded" if use_bounded else "full"
         return {
             "next_action": "run-reviewers",
             "summary": f"iteration {iteration}: mission-reviewer を {effective_reviewer_count} 名、単一メッセージで並列起動する (直列起動は規律違反)",
             "command_hint": f"Skill: mission-reviewer x{effective_reviewer_count} (1 message)",
-            "details": {"reviewer_count": effective_reviewer_count},
+            "details": {"reviewer_count": effective_reviewer_count, "context_mode": context_mode},
         }
     # phase == scoring / done / その他: 現 iteration の有効スコア有無で分岐
     history = data.get("score_history") or []
@@ -5517,6 +5520,41 @@ def _validate_consensus_policy(data: dict, items: dict) -> None:
             file=sys.stderr,
         )
         sys.exit(2)
+
+
+def cmd_context_manifest(args):
+    """#241: bounded context manifest を生成する.
+
+    reviewer fork に渡す evidence manifest: mission goal, iteration,
+    prior findings を state から抽出し JSON で出力する。
+    """
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        print("ERROR: state.json が見つかりません。", file=sys.stderr)
+        sys.exit(1)
+    data = json.loads(sf.read_text())
+    iteration = args.iteration if args.iteration is not None else data.get("iteration", 1)
+    history = data.get("score_history") or []
+    prior_findings = []
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        for f in entry.get("findings_summary", []):
+            if isinstance(f, dict):
+                prior_findings.append(f)
+    manifest = {
+        "schema": "mission-context-manifest/1",
+        "iteration": iteration,
+        "mission_goal": data.get("mission", ""),
+        "mission_id": data.get("mission_id", ""),
+        "assumptions_path": data.get("assumptions_path", ""),
+        "prior_findings": prior_findings,
+    }
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
+    print(json.dumps({"ok": True, "path": str(out), "findings_count": len(prior_findings)}, ensure_ascii=False))
 
 
 def cmd_push_score(args):
@@ -6959,6 +6997,14 @@ def _build_parser():
     p_agg.add_argument("--min-reviewers", type=int, default=None, dest="min_reviewers",
                        help="#240: 最低 reviewer 数。不足なら exit 2 (合意偽装防止)")
     p_agg.set_defaults(func=cmd_aggregate_reviews)
+
+    p_manifest = sub.add_parser("context-manifest",
+                                help="#241: bounded context manifest を生成 (reviewer fork 向け)")
+    p_manifest.add_argument("--iteration", type=int, default=None,
+                            help="対象 iteration (省略時: state の現在 iteration)")
+    p_manifest.add_argument("--out", required=True,
+                            help="出力 manifest JSON パス")
+    p_manifest.set_defaults(func=cmd_context_manifest)
 
     p_halt = sub.add_parser("mark-halt", help="halt_reason を立てて停止")
     p_halt.add_argument("--reason", required=True)
