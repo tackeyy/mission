@@ -44,7 +44,7 @@ SKILL.md 本体から外出しした Phase 2-6 ループの詳細。本体には
 
 ## state.json の更新
 
-更新は必ず `mission-state.py` 経由 (`init`/`set`/`push-score`/`mark-passes`/`mark-halt`)。jq・Python heredoc での直接書き換えは schema 不整合・threshold gate 迂回の温床のため禁止 (詳細 `refs/state-management.md`)。
+更新は必ず `mission-state.py` 経由 (`init`/`set`/`push-score`/`mark-passes`/`mark-halt`/`reactivate`)。jq・Python heredoc での直接書き換えは schema 不整合・threshold gate 迂回の温床のため禁止 (詳細 `refs/state-management.md`)。
 
 ## サブスキル呼び出しのフル例 (Skill tool)
 

@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Manually halted missions now require the dedicated `reactivate --approved-by-user --expected-category ... --reason ...` transition. It atomically verifies the halt category, preserves the prior reason/category and approval reason in append-only `reactivation_history`, clears current halt fields, and resumes activity tracking. Generic `set` can no longer clear a halt or rewrite the approval audit. Automatic stale/orphan recovery remains on `resume` / `refresh-pid` and now also clears the current `halt_category`.
 - `codex-preflight --strict` now rejects the deprecated `MISSION_REQUIRE_SCORING_EVIDENCE=0` escape hatch (exit 2) and reports the run as not ok. This environment variable bypasses the scoring-evidence gate via the legacy `push-score --items` path, so an active hatch must never proceed to real work. The hatch itself still functions for the moment but is now labelled `DEPRECATED ESCAPE HATCH` and is scheduled for removal in the next minor release (#226).
 
 ### Added

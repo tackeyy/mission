@@ -66,16 +66,38 @@ def test_set_halt_reason_alone_rejected(run_cli, tmp_path):
     assert _read(tmp_path)["halt_reason"] == "blocked"
 
 
-def test_set_halt_reason_with_loop_active_allowed(run_cli, tmp_path):
-    """loop_active=true と同時の halt_reason 空化は F-4 手動再活性化として許可."""
+def test_set_halt_reason_with_loop_active_rejected_in_favor_of_reactivate(run_cli, tmp_path):
+    """汎用 set は承認監査を迂回するため、halt再活性化を専用コマンドへ限定."""
     run_cli("init", "gate test", cwd=tmp_path, check=True)
     run_cli("mark-halt", "--reason", "blocked", "--category", "blocked-external",
             cwd=tmp_path, check=True)
     r = run_cli("set", "loop_active=true", "halt_reason=", cwd=tmp_path)
-    assert r.returncode == 0, f"stderr: {r.stderr}"
+    assert r.returncode == 2
+    assert "reactivate" in r.stderr
     s = _read(tmp_path)
-    assert s["loop_active"] is True
-    assert s["halt_reason"] == ""
+    assert s["loop_active"] is False
+    assert s["halt_reason"] == "blocked"
+
+
+def test_set_loop_active_true_alone_cannot_create_active_halted_state(run_cli, tmp_path):
+    run_cli("init", "gate test", cwd=tmp_path, check=True)
+    run_cli(
+        "mark-halt",
+        "--reason",
+        "waiting for approval",
+        "--category",
+        "awaiting-approval",
+        cwd=tmp_path,
+        check=True,
+    )
+
+    result = run_cli("set", "loop_active=true", cwd=tmp_path)
+
+    assert result.returncode == 2
+    assert "reactivate" in result.stderr
+    state = _read(tmp_path)
+    assert state["loop_active"] is False
+    assert state["halt_reason"] == "waiting for approval"
 
 
 def test_set_halt_reason_with_loop_active_false_rejected(run_cli, tmp_path):
