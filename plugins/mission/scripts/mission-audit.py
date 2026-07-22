@@ -1505,6 +1505,20 @@ _DELEGATED_HALT_REASONS = {
     "checker returned evidence to its owner",
     "parent mission owns aggregation",
 }
+_DELEGATED_HALT_REASON_TOKENS = (
+    "bounded live binding probe complete",
+    "diff re-review accepted",
+    "re-review accepted",
+    "review complete:",
+    "独立read-only reviewは完了",
+    "root missionへ引き渡し",
+    "rootへ引き渡し",
+    "rootへ移管",
+    "ownershipをrootへ移管",
+    "parent mission owns",
+    "parent issue mission exclusively owns",
+    "parent mission exclusively owns",
+)
 _EXTERNAL_WAIT_REASONS = {
     "waiting for approval",
     "waiting for owner approval",
@@ -1518,6 +1532,13 @@ _EXTERNAL_WAIT_REASONS = {
     "rate limit exceeded; waiting for reset",
     "quota exhausted; waiting for reset",
 }
+_APPROVAL_WAIT_REASON_TOKENS = (
+    "明示的なmerge承認が必要",
+    "明示的な merge 承認が必要",
+    "明示的な承認が必要",
+    "explicit merge approval",
+    "explicit owner approval",
+)
 
 
 def halt_audit_disposition(record: StateRecord) -> str:
@@ -1532,12 +1553,17 @@ def halt_audit_disposition(record: StateRecord) -> str:
         return "superseded-resolved"
 
     category = state.get("halt_category")
-    if category == "partial-done" and (
+    has_delegated_reason = (
         state.get("delegated_to_parent") is True
         or reason in _DELEGATED_HALT_REASONS
-    ):
+        or any(token in reason for token in _DELEGATED_HALT_REASON_TOKENS)
+    )
+    if category in {"partial-done", "other"} and has_delegated_reason:
         return "delegated"
-    if category == "awaiting-approval" and reason in _EXTERNAL_WAIT_REASONS:
+    if category == "awaiting-approval" and (
+        reason in _EXTERNAL_WAIT_REASONS
+        or any(token in reason for token in _APPROVAL_WAIT_REASON_TOKENS)
+    ):
         return "awaiting-external"
     if category == "user-abort":
         return "user-aborted"
