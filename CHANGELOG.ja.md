@@ -9,6 +9,10 @@
 
 ## [Unreleased]
 
+### 変更
+
+- mission-vs-goal ベンチマークの scorer が、完走した markered record を全て 5.0 天井に張り付かせる問題を解消した。markered task は `1.0 + 1.0 × validator_fraction + 3.0 × marker_score`（gradient v2）となり内容 recall が支配項になる。marker なし task は legacy 二値 1.0/4.0 の歴史的意味を維持する。新 record は `quality_score_method`（`..._gradient_v2_...`）で機械的に区別でき、既存 JSONL は不変 (#247)。validator gate はアーム対称化し、両アーム共通見出し（Evidence/Assumptions）のみが `validator_pass` を決める。アーム固有見出し（goal 3 個 / mission 6 個）の欠落は `missing_arm_specific_headings` として記録するが gate しない — 見出し数の非対称による完走難易度差と「冗長に書くほど有利」の歪みを除去した (#248)。両 runner の `score_from_signals` は同一意味論をテストで強制している。
+
 ### 追加
 
 - `mission-state.py init --budget-minutes <N>` で時間予算 (wall-clock) を宣言できるようにし、read-only の `next` が `started_at` から導出する `budget_pressure` シグナルを返すようにした。80% で `warn` (optional specialist / critic の新規 spawn を控える advisory)、100% 超で `exceeded` となり、spawn 系の next action (`run-planner`/`run-executor`/`run-reviewers`) を「成果物を確定して `mark-halt --category partial-done` で終了する」`consider-halt` 案内へ差し替える。安価なローカル完結手 (`aggregate-reviews`・`mark-passes`)・terminal 報告・`await-user` は差し替えず、ゲート意味論は不変。2026-07-22 に実測された「USD 予算を使い切って成果物ゼロで kill される全損」の再発を防ぐ。ベンチマーク runner には `--mission-budget-minutes` を追加して `/mission` プロンプトへ予算を渡せるようにし、`total_cost_usd` を第一級フィールドとして記録して blocked/failed run の全損コストを集計可能にした (#238)。

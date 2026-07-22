@@ -93,17 +93,26 @@ def evaluate_quality_markers(text: str, task: dict) -> dict:
     }
 
 
-def score_from_signals(validator_pass: bool, marker_score: float | None) -> tuple[float, float]:
-    """Deterministic, arm-blind scoring (F-1).
+def score_from_signals(
+    validator_pass: bool,
+    marker_score: float | None,
+    validator_fraction: float | None = None,
+    has_markers: bool = True,
+) -> tuple[float, float]:
+    """Deterministic, arm-blind scoring (F-1; gradient v2 per #247).
 
-    The arm identity is never consulted here; the same artifact signals produce
-    the same score for any arm. Returns (quality_score, evidence_completeness).
-        quality = 1.0 + 3.0 * validator_pass + 1.0 * (marker_score or 0.0)
-    Marker-less tasks (marker_score is None -> treated as 0.0) collapse to 1.0
-    (fail) or 4.0 (pass).
+    Kept byte-for-byte semantics-identical with run_claude_goal_vs_mission.py
+    (enforced by test_score_from_signals_is_arm_blind_and_deterministic).
+
+    Markered tasks: quality = 1.0 + 1.0 * validator_fraction + 3.0 * marker.
+    Marker-less tasks keep the legacy binary mapping (1.0 fail / 4.0 pass).
     """
+    if not has_markers:
+        value = round(1.0 + 3.0 * (1.0 if validator_pass else 0.0), 2)
+        return value, value
+    fraction = validator_fraction if validator_fraction is not None else (1.0 if validator_pass else 0.0)
     base = marker_score if marker_score is not None else 0.0
-    value = round(1.0 + 3.0 * (1.0 if validator_pass else 0.0) + 1.0 * base, 2)
+    value = round(1.0 + 1.0 * fraction + 3.0 * base, 2)
     return value, value
 
 
@@ -217,15 +226,24 @@ The artifact must include these headings:
 def evaluate_run(worktree: Path, task: dict, arm: str, output_rel: str, session_id: str, returncode: int) -> dict:
     output_path = worktree / output_rel
     text = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
-    required_headings = ["Evidence", "Assumptions"]
+    # #248 (B4): gate は両アーム共通見出しのみ (official runner と同一の対称化)。
+    # アーム固有見出しは情報として記録するが gate しない。
+    common_headings = ["Evidence", "Assumptions"]
     if arm == "goal_only":
-        required_headings += ["Goal", "Result"]
+        arm_headings = ["Goal", "Result"]
     else:
-        required_headings += ["Mission", "Plan", "Execution", "Review", "Score", "Stop Decision"]
+        arm_headings = ["Mission", "Plan", "Execution", "Review", "Score", "Stop Decision"]
 
-    missing_headings = [heading for heading in required_headings if heading not in text]
+    missing_headings = [heading for heading in common_headings if heading not in text]
+    missing_arm_specific = [heading for heading in arm_headings if heading not in text]
     completion = returncode == 0 and output_path.exists()
     validator_pass = completion and not missing_headings
+    # #247 (B1): 共通見出しの充足率 (official runner と同一定義)。
+    validator_fraction = (
+        (len(common_headings) - len(missing_headings)) / len(common_headings)
+        if completion
+        else 0.0
+    )
     mission_state_passes = None
     if arm == "mission":
         state_path = worktree / ".mission-state" / "sessions" / f"{session_id}.json"
@@ -244,21 +262,31 @@ def evaluate_run(worktree: Path, task: dict, arm: str, output_rel: str, session_
     if not validator_pass:
         marker_eval["quality_marker_score"] = None
         marker_eval_raw["quality_marker_score"] = None
+    has_markers = bool(task.get("quality_markers"))
     quality_score, evidence_score = score_from_signals(
-        validator_pass, marker_eval["quality_marker_score"]
+        validator_pass,
+        marker_eval["quality_marker_score"],
+        validator_fraction=validator_fraction,
+        has_markers=has_markers,
     )
 
     return {
         "completion": completion,
         "validator_pass": validator_pass,
         "human_quality_score": quality_score,
-        "quality_score_method": "automated_heuristic_form_stripped_not_blind_human",
+        "quality_score_method": (
+            "automated_heuristic_form_stripped_gradient_v2_not_blind_human"
+            if has_markers
+            else "automated_heuristic_form_stripped_not_blind_human"
+        ),
         "intervention_count": 0,
         "resume_success": None if task["id"] != "interrupted-doc-task" else validator_pass,
         "evidence_completeness": evidence_score,
         "quality_marker_score": marker_eval["quality_marker_score"],
         "quality_marker_score_raw": marker_eval_raw["quality_marker_score"],
         "missing_headings": missing_headings,
+        "missing_arm_specific_headings": missing_arm_specific,
+        "validator_fraction": round(validator_fraction, 2),
         "mission_state_passes": mission_state_passes,
     }
 

@@ -102,15 +102,18 @@ def test_score_from_signals_is_arm_blind_and_deterministic():
         score = module.score_from_signals
         params = list(inspect.signature(score).parameters)
         assert "arm" not in params, f"{module.__name__}.score_from_signals must not take arm"
-        # Marker-less: pass -> 4.0, fail -> 1.0. Same output regardless of caller/arm.
-        assert score(True, None) == (4.0, 4.0)
-        assert score(False, None) == (1.0, 1.0)
-        # With markers: 1 + 3*pass + marker.
-        assert score(True, 0.5) == (4.5, 4.5)
+        # Marker-less (#247 v2 でも legacy 二値の意味を維持): pass -> 4.0, fail -> 1.0.
+        assert score(True, None, has_markers=False) == (4.0, 4.0)
+        assert score(False, None, has_markers=False) == (1.0, 1.0)
+        # Markered (#247 gradient v2): 1 + 1*validator_fraction + 3*marker.
+        # 内容 recall が支配項になり、構造だけでは天井に届かない。
+        assert score(True, 0.5) == (3.5, 3.5)
         assert score(True, 1.0) == (5.0, 5.0)
+        assert score(True, None) == (2.0, 2.0)  # marker 全滅 (nullified) の pass は 2.0
+        assert score(False, None, validator_fraction=0.5) == (1.5, 1.5)
         # Callers nullify marker_score on a failed validator, so (False, 0.5) does
         # not occur in practice; the pure function stays a literal deterministic map.
-        assert score(False, 0.5) == (1.5, 1.5)
+        assert score(False, 0.5) == (2.5, 2.5)
 
 
 def test_paired_runner_has_no_arm_hardcoded_scores():

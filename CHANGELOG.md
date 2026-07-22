@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The mission-vs-goal benchmark scorer no longer pins every completed markered record to the 5.0 ceiling. Markered tasks now score `1.0 + 1.0 × validator_fraction + 3.0 × marker_score` (gradient v2) so content recall dominates, while marker-less tasks keep the legacy binary 1.0/4.0 meaning; new records are machine-distinguishable via `quality_score_method` (`..._gradient_v2_...`) and old JSONL results are untouched (#247). The validator gate is now symmetric across arms: only the headings required from both arms (Evidence/Assumptions) gate `validator_pass`, and missing arm-specific headings (3 for goal, 6 for mission) are recorded as `missing_arm_specific_headings` without gating, removing the completion-difficulty asymmetry and the verbosity reward (#248). Both runners share identical `score_from_signals` semantics, enforced by tests.
+
 ### Added
 
 - `mission-state.py init --budget-minutes <N>` declares a wall-clock time budget, and the read-only `next` command now returns a `budget_pressure` signal derived from `started_at`: `warn` at 80% (advisory to stop spawning optional specialists/critics) and `exceeded` at 100%, where spawn-heavy next actions (`run-planner`/`run-executor`/`run-reviewers`) are replaced with `consider-halt` guidance to finalize the current artifact and end with `mark-halt --category partial-done`. Cheap local finishing moves (`aggregate-reviews`, `mark-passes`), terminal reports, and `await-user` are never overridden, and gate semantics are unchanged. This prevents the total-loss failure observed on 2026-07-22 where a mission burned its full USD budget and was killed with no artifact. The benchmark runner gains `--mission-budget-minutes` to pass the budget into the `/mission` prompt and now records `total_cost_usd` as a first-class result field so wasted spend on blocked/failed runs is aggregatable (#238).
