@@ -11,6 +11,8 @@
 
 ### 追加
 
+- mission orchestrator（`skills/mission/SKILL.md`）に #240/#241 の state 契約をプロンプト層へ配線した。Planner spawn 判定が `critic_has_new_scope` も記録し（critic の全計画ステップが既存 finding id のみなら false、`new` を含むなら true）、差分レビュー節は `next` の `details.reviewer_count`（state-driven の独立 2 名。矛盾していた「検証 1 名」記述を置換）に従い `aggregate-reviews` へ `--min-reviewers` を必ず付ける。新設の bounded context 節は `details.context_mode == "bounded"` のとき context manifest を生成して reviewer へ渡し、生成失敗時は full context へ fail-safe fallback する。`mission-reviewer` には context manifest 入力（manifest + 指定 diff を一次スコープ、採点基準と Step 0 テスト実行義務は不変）を明文化した (#258)。
+
 - `mission-state.py context-manifest --iteration N --out <path>` で bounded context manifest JSON（`mission-context-manifest/1` スキーマ）を生成できるようにした。mission goal、iteration、`score_history` から抽出した prior findings を含む。`_derive_next_action` の reviewing ブロックが details に `context_mode` を返すようになり、`iteration >= 2` かつ `critic_has_new_scope is False` の場合は `"bounded"`、それ以外は `"full"` を返す。reviewer fork がフル parent history ではなく evidence manifest のみを受け取れるようにし、diff レビューでのコンテキスト浪費を削減する (#241)。
 
 - mission-vs-goal ベンチマークに `openworld-discovery` cohort（`tasks.openworld.json`）を追加した。open-world の finding 発見をテストする 3 タスクで構成され、solver は事前列挙なしで divergence・contradiction・root cause を独立に発見する必要がある。タスク設計: constant-hunt（canonical default に対するサービス横断 timeout 監査）、contradiction-chain（real contradiction + 注意深く読むと整合する decoy）、incremental-reveal（最初の仮説が誤りである時系列 incident log）。scoring は tail cohort と同じ `quality_markers` / `forbidden_markers` / `hidden_paths` infrastructure を使う (#251)。
