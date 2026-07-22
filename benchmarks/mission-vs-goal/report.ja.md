@@ -550,6 +550,30 @@ API usage limit に到達し、success を返す前に停止したため、`/mis
 
 これは unsupported です。両 arm の paired run が完了していません。
 
+## 測定妥当性警告: permission-mode 汚染 (2026-07-23 監査で検出)
+
+2026-07-21 以降の全 run (`tail-v2` / `tail-v2-retry` / fable5 系 / `openworld-v1` /
+`discriminating-smoke` / `discriminating-v1`) は、CC セッションの Bash から runner を
+起動したことにより `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` が子 `claude -p` に伝播し、
+runner 指定の `--permission-mode acceptEdits` が **default に強制降格** された状態で
+実行されている (各 record の stderr に警告あり)。`tail-v1` (2026-07-07) は正常モード。
+
+影響の整理:
+
+- **アーム内比較 (同一 run 内の goal vs mission) は有効** — 降格は両 arm に一様に
+  適用された対称条件
+- **run 間比較は交絡** — 「mission オーバーヘッド 5.8x (tail-v1) → 2.9x (tail-v2)
+  → 1.07x (discriminating-v1)」の改善傾向は permission mode の環境変化と分離できず、
+  mission 改善の効果と断定してはならない
+- **discriminating-v1 の goal 予算全損 2 件の機序は未確定** — blocked goal は 76 turns・
+  cache read 12.6M tokens で成果物ファイルを一度も作成していない。permission 摩擦が
+  発散を助長した可能性を排除できず、task 難度に起因すると断定してはならない
+- 検出ガードと再発防止は #268 (runner が `permission_mode_degraded` を record に記録、
+  runner 起動時に `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0` を明示)
+
+クリーンな permission mode での再 run が完了するまで、下記 discriminating-v1 節の
+completion-rate finding は preliminary として扱うこと。
+
 ## Discriminating cohort adoption run (discriminating-v1)
 
 Status: 2026-07-23 JST に実行。#262 の採用判定 run。smoke (`disc-config-sprawl`

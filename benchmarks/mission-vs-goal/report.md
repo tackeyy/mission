@@ -563,6 +563,37 @@ Unsafe interpretation:
 
 That is unsupported. The task was not paired through both arms.
 
+## Measurement validity warning: permission-mode contamination (found by the 2026-07-23 audit)
+
+Every run from 2026-07-21 onward (`tail-v2` / `tail-v2-retry` / the fable5
+runs / `openworld-v1` / `discriminating-smoke` / `discriminating-v1`) executed
+with the runner's `--permission-mode acceptEdits` **forcibly downgraded to
+default**: launching the runner from a Claude Code session propagated
+`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` into the child `claude -p` processes (the
+warning appears in every record's stderr). `tail-v1` (2026-07-07) ran in the
+intended mode.
+
+Impact:
+
+- **Within-run arm comparisons remain valid** — the downgrade applied
+  symmetrically to both arms.
+- **Cross-run comparisons are confounded** — the apparent overhead
+  improvement (5.8x at tail-v1 → 2.9x at tail-v2 → 1.07x at
+  discriminating-v1) cannot be separated from the permission-mode change and
+  must not be attributed to mission improvements.
+- **The mechanism behind the two goal budget exhaustions in
+  discriminating-v1 is unresolved** — the blocked goal runs spent 76 turns
+  and 12.6M cache-read tokens without ever creating the output file;
+  permission friction may have amplified the divergence, so the failures
+  must not be attributed to task difficulty alone.
+- Detection guard and prevention are tracked in #268 (record-level
+  `permission_mode_degraded`, and `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0` at
+  runner launch).
+
+Until a re-run under a clean permission mode completes, treat the
+completion-rate finding in the discriminating-v1 section below as
+preliminary.
+
 ## Discriminating cohort adoption run (discriminating-v1)
 
 Status: executed 2026-07-23 JST as the #262 adoption run, in two stages: smoke
