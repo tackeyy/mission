@@ -9,6 +9,10 @@
 
 ## [Unreleased]
 
+### 追加
+
+- mission-vs-goal ベンチマークに `openworld-discovery` cohort（`tasks.openworld.json`）を追加した。open-world の finding 発見をテストする 3 タスクで構成され、solver は事前列挙なしで divergence・contradiction・root cause を独立に発見する必要がある。タスク設計: constant-hunt（canonical default に対するサービス横断 timeout 監査）、contradiction-chain（real contradiction + 注意深く読むと整合する decoy）、incremental-reveal（最初の仮説が誤りである時系列 incident log）。scoring は tail cohort と同じ `quality_markers` / `forbidden_markers` / `hidden_paths` infrastructure を使う (#251)。
+
 ### 変更
 
 - mission-vs-goal ベンチマークの runner に `--repeats N` を追加し、各 (task, arm) セルを N 回反復して record に `run_index` を記録できるようにした。summary にはアーム別の marker スコア分散と `total_cost_usd` の合計/平均 (blocked run の全損コストを含む) を追加し、flaky・ノイズと実力差を分離できるようにした (#249)。mission arm の record には、実行後の mission state から fail-open で抽出した `mission_review_tier` / `mission_iterations` / `mission_complexity` / `mission_passes` / `mission_halt_category` を記録し、tier 別のコスト・品質帰属を可能にした (#250)。
