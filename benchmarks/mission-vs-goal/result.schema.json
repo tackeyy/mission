@@ -186,6 +186,32 @@
       "type": "number",
       "minimum": 0
     },
+    "run_index": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "#249: --repeats N の何回目か (1..N)。反復なしは 1。"
+    },
+    "mission_review_tier": {
+      "type": ["string", "null"],
+      "description": "#250: mission arm の実行後 state から抽出した review_tier。goal arm / 抽出不能は null。"
+    },
+    "mission_iterations": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "#250: mission arm の iteration 数。goal arm / 抽出不能は null。"
+    },
+    "mission_complexity": {
+      "type": ["string", "null"],
+      "description": "#250: mission arm の complexity。goal arm / 抽出不能は null。"
+    },
+    "mission_passes": {
+      "type": ["boolean", "null"],
+      "description": "#250: mission arm の passes。goal arm / 抽出不能は null。"
+    },
+    "mission_halt_category": {
+      "type": ["string", "null"],
+      "description": "#250: mission arm の halt_category。goal arm / halt なし / 抽出不能は null。"
+    },
     "total_cost_usd": {
       "type": [
         "number",

@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The mission-vs-goal benchmark runner now supports `--repeats N` to run every (task, arm) cell N times with `run_index` recorded per record, and the summary reports per-arm marker-score variance plus total/mean `total_cost_usd` (including wasted spend on blocked runs), so flakiness and noise can be separated from real quality differences (#249). Mission-arm records additionally capture `mission_review_tier`, `mission_iterations`, `mission_complexity`, `mission_passes`, and `mission_halt_category` extracted fail-open from the run's mission state, making tier-level cost/quality attribution possible (#250).
+
 - The mission-vs-goal benchmark scorer no longer pins every completed markered record to the 5.0 ceiling. Markered tasks now score `1.0 + 1.0 × validator_fraction + 3.0 × marker_score` (gradient v2) so content recall dominates, while marker-less tasks keep the legacy binary 1.0/4.0 meaning; new records are machine-distinguishable via `quality_score_method` (`..._gradient_v2_...`) and old JSONL results are untouched (#247). The validator gate is now symmetric across arms: only the headings required from both arms (Evidence/Assumptions) gate `validator_pass`, and missing arm-specific headings (3 for goal, 6 for mission) are recorded as `missing_arm_specific_headings` without gating, removing the completion-difficulty asymmetry and the verbosity reward (#248). Both runners share identical `score_from_signals` semantics, enforced by tests.
 
 ### Added

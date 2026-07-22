@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import statistics
 import subprocess
 import sys
 import time
@@ -410,6 +411,67 @@ def counterbalanced_plan(tasks: list[dict], arms) -> list[tuple[dict, str, int]]
     return plan
 
 
+def expanded_plan(tasks: list[dict], arms, repeats: int) -> list[tuple[dict, str, int, int]]:
+    """#249: counterbalanced plan を repeats 回展開し run_index (1..N) を付与する。
+
+    counterbalance は反復内で維持される。repeats=1 は legacy plan と同一順序。
+    """
+    plan: list[tuple[dict, str, int, int]] = []
+    for run_index in range(1, max(1, repeats) + 1):
+        for task, arm, arm_order in counterbalanced_plan(tasks, arms):
+            plan.append((task, arm, arm_order, run_index))
+    return plan
+
+
+def run_name_for(task_id: str, arm: str, run_index: int, repeats: int) -> str:
+    """#249: 反復時のみ -repN suffix を付け、artifacts/run-output の衝突を防ぐ。
+
+    repeats=1 は legacy 命名を維持し、既存 run のパス互換を保つ。
+    """
+    if repeats > 1:
+        return f"{task_id}-{arm}-rep{run_index}"
+    return f"{task_id}-{arm}"
+
+
+def extract_mission_state_fields(worktree: Path) -> tuple[dict, str | None]:
+    """#250: mission arm 実行後の state から tier/iteration 等を fail-open で抽出する。
+
+    state が無い・壊れている場合は全フィールド None + note を返し、run 自体は
+    失敗させない (計装は record の成立を妨げない)。
+    """
+    fields = {
+        "mission_review_tier": None,
+        "mission_iterations": None,
+        "mission_complexity": None,
+        "mission_passes": None,
+        "mission_halt_category": None,
+    }
+    sessions = worktree / ".mission-state" / "sessions"
+    candidates = sorted(sessions.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True) if sessions.is_dir() else []
+    legacy = worktree / ".mission-state" / "state.json"
+    if not candidates and legacy.exists():
+        candidates = [legacy]
+    if not candidates:
+        return fields, "mission_state_missing"
+    try:
+        state = json.loads(candidates[0].read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return fields, f"mission_state_unreadable:{type(exc).__name__}"
+    if not isinstance(state, dict):
+        return fields, "mission_state_not_object"
+    tier = state.get("review_tier")
+    fields["mission_review_tier"] = tier if isinstance(tier, str) else None
+    iteration = state.get("iteration")
+    fields["mission_iterations"] = iteration if isinstance(iteration, int) and not isinstance(iteration, bool) else None
+    complexity = state.get("complexity")
+    fields["mission_complexity"] = complexity if isinstance(complexity, str) else None
+    passes = state.get("passes")
+    fields["mission_passes"] = passes if isinstance(passes, bool) else None
+    halt_category = state.get("halt_category")
+    fields["mission_halt_category"] = halt_category if isinstance(halt_category, str) else None
+    return fields, None
+
+
 def evaluate_run(
     worktree: Path,
     task: dict,
@@ -535,9 +597,11 @@ def run_one(
     mission_budget_minutes: float | None = None,
     hidden_paths: list[str] | None = None,
     extra_rules: list[str] | tuple[str, ...] = (),
+    run_index: int = 1,
+    repeats: int = 1,
 ) -> dict:
     task_id = task["id"]
-    run_name = f"{task_id}-{arm}"
+    run_name = run_name_for(task_id, arm, run_index, repeats)
     worktree = run_root / run_name / "repo"
     prepare_clone(REPO_ROOT, worktree, starting_commit)
     sanitized = sanitize_worktree(worktree, hidden_paths or [])
@@ -597,6 +661,20 @@ def run_one(
     stderr_path.write_text(stderr, encoding="utf-8")
     claude_result = parse_claude_json(stdout)
     evaluation = evaluate_run(worktree, task, arm, output_rel, returncode, stdout, stderr, timed_out)
+    # #250: mission arm の tier/iteration 帰属 (fail-open)。goal arm は全 None。
+    if arm == "mission":
+        mission_state_fields, mission_state_note = extract_mission_state_fields(worktree)
+    else:
+        mission_state_fields, mission_state_note = (
+            {
+                "mission_review_tier": None,
+                "mission_iterations": None,
+                "mission_complexity": None,
+                "mission_passes": None,
+                "mission_halt_category": None,
+            },
+            None,
+        )
     artifacts = copy_artifacts(worktree, artifact_dir, output_rel, stdout_path, stderr_path)
 
     usage = claude_result.get("usage", {}) if isinstance(claude_result, dict) else {}
@@ -610,6 +688,8 @@ def run_one(
     ]
     if sanitized:
         notes.append(f"sanitized_hidden_paths={','.join(sanitized)}")
+    if mission_state_note:
+        notes.append(f"mission_state_note={mission_state_note}")
     if timed_out:
         notes.append(f"timed_out_after_seconds={timeout}")
     if evaluation["run_status"] == "blocked":
@@ -661,6 +741,8 @@ def run_one(
         "evidence_completeness": evaluation["evidence_completeness"],
         "validator_fraction": evaluation["validator_fraction"],
         "missing_arm_specific_headings": evaluation["missing_arm_specific_headings"],
+        "run_index": run_index,
+        **mission_state_fields,
         "elapsed_minutes": elapsed,
         "token_estimate": input_tokens + output_tokens if isinstance(input_tokens, int) and isinstance(output_tokens, int) else None,
         "artifacts": artifacts,
@@ -676,9 +758,21 @@ def summarize(
     tasks_path: Path,
     stopped_early: bool = False,
     mission_profile: str = "full",
+    repeats: int = 1,
 ) -> dict:
     by_arm: dict[str, list[dict]] = {arm: [r for r in records if r["arm"] == arm] for arm in ARMS}
     task_cohort = tasks_path.stem.removeprefix("tasks.")
+
+    def _marker_variance(items: list[dict]) -> float | None:
+        # #249: 母分散 (pvariance)。n<2 は分散なし (None)。
+        values = [r["quality_marker_score"] for r in items if r.get("quality_marker_score") is not None]
+        if len(values) < 2:
+            return None
+        return round(statistics.pvariance(values), 6)
+
+    def _cost_values(items: list[dict]) -> list[float]:
+        return [r["total_cost_usd"] for r in items if isinstance(r.get("total_cost_usd"), (int, float))]
+
     return {
         "run_id": run_id,
         "task_file": str(tasks_path.relative_to(REPO_ROOT)),
@@ -687,7 +781,8 @@ def summarize(
         "mission_profile": mission_profile,
         "starting_commit": starting_commit,
         "records": len(records),
-        "expected_records": len(tasks) * len(ARMS),
+        "repeats": repeats,
+        "expected_records": len(tasks) * len(ARMS) * max(1, repeats),
         "stopped_early": stopped_early,
         "limitations": [
             "Claude Code print mode smoke; does not fully exercise multi-turn interactive /goal persistence.",
@@ -726,6 +821,14 @@ def summarize(
                     else None
                 ),
                 "average_elapsed_minutes": round(sum(r["elapsed_minutes"] for r in items) / len(items), 2) if items else None,
+                # #249: 反復時の分散とコスト集計 (blocked/failed の全損コストも含む)。
+                "marker_score_variance": _marker_variance(items),
+                "cost_usd_total": round(sum(_cost_values(items)), 4) if _cost_values(items) else None,
+                "cost_usd_mean": (
+                    round(sum(_cost_values(items)) / len(_cost_values(items)), 4)
+                    if _cost_values(items)
+                    else None
+                ),
             }
             for arm, items in by_arm.items()
         },
@@ -751,6 +854,12 @@ def main() -> int:
     )
     parser.add_argument("--run-root", default="/tmp/mission-vs-official-goal")
     parser.add_argument(
+        "--repeats",
+        type=int,
+        default=1,
+        help="#249: 各 (task, arm) セルを N 回反復する。run_index を record に記録し、summary に分散を出す。",
+    )
+    parser.add_argument(
         "--model-id",
         required=True,
         help="Truthful model identifier for this run (e.g. claude-opus-4-8). "
@@ -772,6 +881,8 @@ def main() -> int:
         help="Mission prompt profile. 'light' reduces planning/review scope for cost-controlled comparisons.",
     )
     args = parser.parse_args()
+    if args.repeats < 1:
+        parser.error("--repeats must be at least 1")
 
     tasks_path = Path(args.tasks_file)
     if not tasks_path.is_absolute():
@@ -793,8 +904,8 @@ def main() -> int:
     tasks = select_tasks(task_data, args.limit_tasks, args.task_ids)
     records = []
     stopped_early = False
-    for task, arm, arm_order in counterbalanced_plan(tasks, ARMS):
-        print(f"running task={task['id']} arm={arm}", flush=True)
+    for task, arm, arm_order, run_index in expanded_plan(tasks, ARMS, args.repeats):
+        print(f"running task={task['id']} arm={arm} rep={run_index}", flush=True)
         record = run_one(
             task,
             arm,
@@ -810,12 +921,14 @@ def main() -> int:
             mission_budget_minutes=args.mission_budget_minutes,
             hidden_paths=task_data.get("hidden_paths"),
             extra_rules=task_data.get("prompt_rules", ()),
+            run_index=run_index,
+            repeats=args.repeats,
         )
         records.append(record)
         with result_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
         print(
-            f"finished task={task['id']} arm={arm} completion={record['completion']} "
+            f"finished task={task['id']} arm={arm} rep={run_index} completion={record['completion']} "
             f"validator_pass={record['validator_pass']} elapsed_minutes={record['elapsed_minutes']}",
             flush=True,
         )
@@ -836,6 +949,7 @@ def main() -> int:
         tasks_path,
         stopped_early=stopped_early,
         mission_profile=args.mission_profile,
+        repeats=args.repeats,
     )
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
