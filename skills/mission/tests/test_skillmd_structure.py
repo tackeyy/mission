@@ -36,8 +36,11 @@ def test_skillmd_contains_critical_keywords():
         "Trigger 2",         # 中断条件
         "観点D",             # 観点D 運用
         "Stop hook",         # ループ強制
-        "差分レビュー",       # P2: iter2以降は検証1名 (レビューコスト40%の主因対策)
+        "差分レビュー",       # #240: iter2以降は state-driven で独立2名 (レビューコスト対策)
         "Planner spawn 判定",  # #124
+        "critic_has_new_scope",  # #258: #240/#241 の scope 判定を state へ配線
+        "bounded context",       # #258: #241 context_mode 消費と fail-safe fallback
+        "--min-reviewers",       # #258: #240 合意偽装防止フラグの利用強制
     ]
     missing = [kw for kw in must_have if kw not in txt]
     assert not missing, f"missing critical keywords: {missing}"
