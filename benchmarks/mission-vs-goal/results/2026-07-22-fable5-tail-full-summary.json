@@ -1,0 +1,48 @@
+{
+  "arms": {
+    "claude_code_goal_command": {
+      "average_elapsed_minutes": 4.1,
+      "average_evidence_completeness": 5.0,
+      "average_intervention_count": 0.0,
+      "average_quality_marker_score": 1.0,
+      "average_quality_score": 5.0,
+      "blocked_records": 0,
+      "comparable_completion_rate": 1.0,
+      "comparable_records": 1,
+      "comparable_validator_pass_rate": 1.0,
+      "completion_rate": 1.0,
+      "records": 1,
+      "validator_pass_rate": 1.0
+    },
+    "mission": {
+      "average_elapsed_minutes": 17.07,
+      "average_evidence_completeness": 1.0,
+      "average_intervention_count": 0.0,
+      "average_quality_marker_score": null,
+      "average_quality_score": 1.0,
+      "blocked_records": 1,
+      "comparable_completion_rate": null,
+      "comparable_records": 0,
+      "comparable_validator_pass_rate": null,
+      "completion_rate": 0.0,
+      "records": 1,
+      "validator_pass_rate": 0.0
+    }
+  },
+  "expected_records": 2,
+  "limitations": [
+    "Claude Code print mode smoke; does not fully exercise multi-turn interactive /goal persistence.",
+    "Quality and evidence scores are automated heuristic scores, not blind human review.",
+    "Blocked records are excluded from comparable quality-marker aggregates."
+  ],
+  "mission_profile": "full",
+  "records": 2,
+  "run_id": "2026-07-22-fable5-tail-full",
+  "selected_task_ids": [
+    "tail-config-spec-drift"
+  ],
+  "starting_commit": "790d85d",
+  "stopped_early": false,
+  "task_cohort": "tail",
+  "task_file": "benchmarks/mission-vs-goal/tasks.tail.json"
+}
