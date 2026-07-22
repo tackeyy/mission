@@ -24,8 +24,8 @@ def test_set_reviewer_count_alone_rejected(run_cli, tmp_path):
     run_cli("init", "gate test", "--complexity", "Complex", cwd=tmp_path, check=True)
     r = run_cli("set", "reviewer_count=1", cwd=tmp_path)
     assert r.returncode == 2, f"expected exit 2, got {r.returncode}: {r.stderr}"
-    # state は書き換わっていない
-    assert _read(tmp_path)["reviewer_count"] == 3
+    # state は書き換わっていない (#266: Complex 初期値は 2)
+    assert _read(tmp_path)["reviewer_count"] == 2
 
 
 def test_set_reviewer_count_with_complexity_allowed(run_cli, tmp_path):
@@ -117,7 +117,7 @@ def test_set_reviewer_count_with_halt_reason_still_rejected(run_cli, tmp_path):
     run_cli("init", "gate test", "--complexity", "Complex", cwd=tmp_path, check=True)
     r = run_cli("set", "reviewer_count=1", "loop_active=true", "halt_reason=", cwd=tmp_path)
     assert r.returncode == 2, f"expected exit 2, got {r.returncode}: {r.stderr}"
-    assert _read(tmp_path)["reviewer_count"] == 3
+    assert _read(tmp_path)["reviewer_count"] == 2  # #266: Complex 初期値
 
 
 def test_gate_frozen_set_halt_category_blocks_reactivation(run_cli, tmp_path):

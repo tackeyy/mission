@@ -1024,13 +1024,16 @@ def _is_legacy_stale_halt(category, reason) -> bool:
 
 
 # M7 (2026-06-10): SKILL.md Phase 1 の複雑度→Reviewer 数マッピング
-COMPLEXITY_REVIEWER_COUNT = {"Simple": 1, "Standard": 2, "Complex": 3, "Critical": 3}
+# #266 (2026-07-23): Complex 3→2。discriminating-v1 で reviewer-wait が壁時計の 62% を
+# 占め、3人目の限界検出価値がゼロだった実測に基づく。不可逆・security シグナルの
+# エスカレータは full (3名) を維持するため、リスクありの Complex は従来どおり 3名。
+COMPLEXITY_REVIEWER_COUNT = {"Simple": 1, "Standard": 2, "Complex": 2, "Critical": 3}
 
 # Issue #168: review_tier による適応的レビュー深度
 # tier → reviewer_count のマッピング (COMPLEXITY_REVIEWER_COUNT と同値になる設計)
 TIER_REVIEWER_COUNT = {"light": 1, "standard": 2, "full": 3}
-# complexity → review_tier のベースマッピング
-REVIEW_TIER_BASE = {"Simple": "light", "Standard": "standard", "Complex": "full", "Critical": "full"}
+# complexity → review_tier のベースマッピング (#266: Complex は standard 起点、エスカレータで full へ)
+REVIEW_TIER_BASE = {"Simple": "light", "Standard": "standard", "Complex": "standard", "Critical": "full"}
 
 # 不可逆系キーワード (英語) — 小文字化して部分一致
 # Issue #174 で 505 mission 遡及分析に基づき較正: push / merge を除外 (標準 dev フロー誤発火)
