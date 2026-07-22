@@ -563,6 +563,66 @@ Unsafe interpretation:
 
 That is unsupported. The task was not paired through both arms.
 
+## Openworld cohort calibration run (openworld-v1)
+
+Status: executed 2026-07-22 JST. First paired calibration run of the
+`tasks.openworld.json` cohort (3 open-world finding-discovery tasks, #251).
+Starting commit `7f3118d` includes the merged #239/#240/#241 improvements and the
+#258 orchestration wiring. Both arms pinned `--model claude-sonnet-5` via a PATH
+shim (primary model confirmed in each artifact's `modelUsage`; the goal arm also
+recorded auxiliary haiku-4.5 usage and the mission arm recorded sonnet-4.6 fork
+usage), with `--max-budget-usd 8` / `--mission-budget-minutes 25` (#238).
+
+| Item | Value | Evidence |
+|---|---:|---|
+| Run id | `2026-07-22-claude-goal-vs-mission-openworld-v1` | `results/2026-07-22-claude-goal-vs-mission-openworld-v1.jsonl` |
+| Starting commit | `7f3118d` | main after the #258 wiring merge |
+| Expected / written records | 6 / 6 | 3 tasks x 2 arms, 0 blocked |
+| model_id | `claude-sonnet-5` | all 6 records (shim-injected, modelUsage-verified) |
+| Total notional cost | USD 22.41 | goal 9.16 / mission 13.25 |
+
+Task-level result:
+
+| Task | Arm | Mission loop | Iter | Passes | Quality | Marker | Cost | Elapsed |
+|---|---|---|---:|---|---:|---:|---:|---:|
+| `openworld-constant-hunt` | goal | — | — | — | 5.00 | 1.00 | USD 2.95 | 11.80 min |
+| `openworld-constant-hunt` | mission | **never initialized (invalid)** | — | — | 5.00 | 1.00 | USD 0.80 | 2.47 min |
+| `openworld-contradiction-chain` | goal | — | — | — | 5.00 | 1.00 | USD 4.95 | 17.53 min |
+| `openworld-contradiction-chain` | mission | full tier | 1 | false (agreement halt) | 5.00 | 1.00 | USD 7.37 | 13.01 min |
+| `openworld-incremental-reveal` | goal | — | — | — | 5.00 | 1.00 | USD 1.26 | 4.84 min |
+| `openworld-incremental-reveal` | mission | full tier | 1 | true | 5.00 | 1.00 | USD 5.08 | 16.51 min |
+
+Calibration observations (N=3; adoption decisions require N>=10):
+
+1. **Zero total loss**: 0 / 6 blocked. The #238 budget guard never had to fire, and
+   the graceful agreement-gate halt on contradiction-chain still delivered the
+   artifact and passed the validator. The fable-5 "budget burned, zero artifact"
+   failure mode did not reproduce in this calibration.
+2. **Quality saturated at the ceiling in both arms**: every record scored quality
+   5.0 / marker 1.0 with zero variance. The openworld cohort as designed does not
+   discriminate at sonnet-5 capability; proving "quality > goal" requires a harder
+   discriminating cohort.
+3. **One mission-arm prompt-adherence failure detected**: the constant-hunt mission
+   record has no `.mission-state` at all — the run answered directly without ever
+   initializing the mission loop (2.47 min / USD 0.80). That record must be
+   excluded from mission-arm speed/cost aggregates (the 10.66-min mission average
+   is diluted by this invalid record).
+4. **Only two valid pairs**: contradiction-chain ran mission at 0.74x time / 1.49x
+   cost (mission faster); incremental-reveal ran mission at 3.41x time / 4.03x
+   cost. This is a milder overhead profile than tail-v1's uniform 3-6x, but N=2
+   supports no adoption claim.
+5. **The #240/#241 diff-review path never fired**: every mission run ended at
+   iteration 1, so `critic_has_new_scope`, bounded context, and the reviewer
+   reduction have zero runtime observations. Exercising them needs fail-first
+   tasks that force iteration >= 2.
+
+Unsafe interpretation:
+
+> `/mission` now matches `/goal` on speed and quality.
+
+That is unsupported. The aggregate speed parity is dilution by an invalid record,
+and the quality tie is ceiling saturation of the cohort.
+
 ## Task-Level Findings
 
 | Task | Stronger arm | Why |
@@ -714,4 +774,15 @@ artifacts/2026-07-07-claude-goal-vs-mission-tail-v1/
 results/2026-07-10-claude-goal-vs-mission-tail-smoke-v2.jsonl
 results/2026-07-10-claude-goal-vs-mission-tail-smoke-v2-summary.json
 artifacts/2026-07-10-claude-goal-vs-mission-tail-smoke-v2/
+results/2026-07-21-claude-goal-vs-mission-tail-v2.jsonl
+results/2026-07-21-claude-goal-vs-mission-tail-v2-summary.json
+results/2026-07-21-claude-goal-vs-mission-tail-v2-retry.jsonl
+results/2026-07-21-claude-goal-vs-mission-tail-v2-retry-summary.json
+results/2026-07-22-fable5-tail-smoke.jsonl
+results/2026-07-22-fable5-tail-smoke-summary.json
+results/2026-07-22-fable5-tail-full.jsonl
+results/2026-07-22-fable5-tail-full-summary.json
+results/2026-07-22-claude-goal-vs-mission-openworld-v1.jsonl
+results/2026-07-22-claude-goal-vs-mission-openworld-v1-summary.json
+artifacts/2026-07-22-claude-goal-vs-mission-openworld-v1/
 ```
