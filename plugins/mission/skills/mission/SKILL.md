@@ -2,7 +2,7 @@
 name: mission
 description: ミッション達成までReActループで自律的に稼働。計画→実行→レビュー→スコア4.0達成まで自己修正。曖昧な要件は仮置きで進み、不可逆操作のみ事前確認する。複数ステップの作業を品質ゲート付きで完遂させたい時や「達成するまでやって」系の依頼で使用。
 user-invocable: true
-argument-hint: <ミッション記述> [--max-iter N] [--skip-preflight] [--threshold X]
+argument-hint: <ミッション記述> [--max-iter N] [--skip-preflight] [--threshold X] [--budget-minutes N]
 allowed-tools:
   - Read
   - Grep
@@ -72,13 +72,14 @@ Artifact-required mission は `artifact init --required-for-pass` → `artifact 
 
 ## 引数
 
-`/mission <ミッション記述> [--max-iter N] [--skip-preflight] [--threshold X]`
+`/mission <ミッション記述> [--max-iter N] [--skip-preflight] [--threshold X] [--budget-minutes N]`
 
 | フラグ | 意味 | デフォルト |
 |---|---|---|
 | `--max-iter N` | 最大反復回数。`0` は上限なしだが 3 回停滞で halt | `3` |
 | `--skip-preflight` | Phase 0 を短縮 | off |
 | `--threshold X` | pass threshold | `4.0` |
+| `--budget-minutes N` | 時間予算 (#238)。`init --budget-minutes N` に渡す。`next` の `budget_pressure` が 80% で warn (optional spawn 抑制)、100% 超で spawn 系を `consider-halt` へ差し替え。超過時は成果物を確定し `mark-halt --category partial-done` で終了する | なし |
 
 ## 全体フロー
 

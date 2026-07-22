@@ -172,6 +172,14 @@
       "type": "number",
       "minimum": 0
     },
+    "total_cost_usd": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "#238: claude CLI が報告した総コスト (USD)。blocked/failed でも消費額を第一級フィールドで残し、全損コストを集計可能にする。"
+    },
     "token_estimate": {
       "type": [
         "integer",

@@ -3875,6 +3875,9 @@ def cmd_init(args):
         # M-audit-2 (2026-06-11): 未指定は 3 (98 セッション実測で iter>3 の ROI 低下)。
         # 0 は「上限なし (stagnation 停止モード)」として None を保持する。
         "max_iter": (DEFAULT_MAX_ITER if args.max_iter is None else (None if args.max_iter == 0 else args.max_iter)),
+        # #238 (S6): 時間予算 (分)。mission-state.py が自力計測できる唯一の予算軸。
+        # None = 予算宣言なし。next が budget_pressure を導出する。
+        "budget_minutes": _validated_budget_minutes(getattr(args, "budget_minutes", None)),
         "threshold": args.threshold,
         "iteration": 0,
         "phase": "planning",
@@ -4123,6 +4126,69 @@ def cmd_activity_end(args):
     print(json.dumps({"ok": True, "changed": changed, "activity_current": data.get("activity_current")}, ensure_ascii=False))
 
 
+def _validated_budget_minutes(raw) -> float | None:
+    """#238 (S6): init --budget-minutes の検証。None は「予算宣言なし」。
+
+    有限かつ正の数のみ受理する。不正値は exit 2 (state を作らない)。
+    """
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = math.nan
+    if not math.isfinite(value) or value <= 0:
+        print(
+            f"ERROR: --budget-minutes は正の有限な分数で指定してください。受領値: '{raw}'",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return value
+
+
+# #238 (S6): budget pressure の閾値。80% で warn (optional spawn 抑制の advisory)、
+# 100% で spawn 系 next_action を consider-halt へ override する。
+BUDGET_PRESSURE_WARN_PCT = 80.0
+BUDGET_SPAWN_ACTIONS = {"run-planner", "run-executor", "run-reviewers"}
+
+
+def _budget_pressure(data: dict, now_iso: str) -> dict | None:
+    """時間予算に対する消費率を導出する (read-only・ゲート意味論に影響しない)。
+
+    budget_minutes 未宣言・timestamp 不正のときは None (シグナルなし)。
+    """
+    budget = data.get("budget_minutes")
+    if not isinstance(budget, (int, float)) or isinstance(budget, bool):
+        return None
+    if not math.isfinite(budget) or budget <= 0:
+        return None
+    started = _parse_iso_datetime(data.get("started_at"))
+    now = _parse_iso_datetime(now_iso)
+    if not started or not now:
+        return None
+    # naive/aware 混在の TypeError を防ぐ (_mission_started_at と同じ正規化)。
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    if now < started:
+        return None
+    elapsed_minutes = (now - started).total_seconds() / 60.0
+    pressure_pct = round(elapsed_minutes / budget * 100.0, 1)
+    if pressure_pct >= 100.0:
+        level = "exceeded"
+    elif pressure_pct >= BUDGET_PRESSURE_WARN_PCT:
+        level = "warn"
+    else:
+        level = "ok"
+    return {
+        "budget_minutes": budget,
+        "elapsed_minutes": round(elapsed_minutes, 1),
+        "pressure_pct": pressure_pct,
+        "level": level,
+    }
+
+
 def cmd_advance(args):
     """#237 (F2): phase 遷移と activity 切替を 1 lock で atomic に行う。
 
@@ -4320,6 +4386,28 @@ def cmd_next(args):
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
     out = _derive_next_action(data)
+    # #238 (S6): 時間予算の消費率を advisory として常に添付する。
+    # exceeded 時のみ、spawn 系の高コスト手を consider-halt へ差し替え、
+    # 成果物確定 + partial-done halt を促す (予算切れ全損の防止)。
+    # aggregate-reviews / mark-passes 等の安価なローカル完結手・terminal・
+    # await-user は override しない (誠実な終端を優先)。
+    pressure = _budget_pressure(data, iso_now())
+    out["budget_pressure"] = pressure
+    if pressure and pressure["level"] == "exceeded" and out.get("next_action") in BUDGET_SPAWN_ACTIONS:
+        out["budget_overridden_action"] = out["next_action"]
+        out["next_action"] = "consider-halt"
+        out["summary"] = (
+            f"時間予算 {pressure['budget_minutes']} 分を超過 ({pressure['elapsed_minutes']} 分経過)。"
+            " 新規 spawn を止め、現時点の成果物を確定して partial-done で終了する。"
+        )
+        out["command_hint"] = (
+            'mission-state.py mark-halt --reason "時間予算超過: 完了分と未完了作業を明記" --category partial-done'
+        )
+    elif pressure and pressure["level"] == "warn":
+        out["budget_warning"] = (
+            f"時間予算の {pressure['pressure_pct']}% を消費。optional specialist / critic の"
+            " 新規 spawn を控え、成果物の確定を優先する。"
+        )
     out.setdefault("details", {})
     out.update({
         "phase": data.get("phase"),
@@ -6615,6 +6703,8 @@ def _build_parser():
     p_init.add_argument("mission", help="ミッション記述")
     p_init.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
     p_init.add_argument("--max-iter", type=int, default=None, help=f"最大反復回数。未指定={DEFAULT_MAX_ITER} / 0=上限なし(stagnation停止)")
+    p_init.add_argument("--budget-minutes", default=None,
+                        help="#238: 時間予算 (分・正の有限数)。next が budget_pressure を返し、80%%で warn、100%%超で spawn 系を consider-halt へ差し替える")
     p_init.add_argument("--issue-ref", default=None, dest="issue_ref",
                         help="関連 issue の参照 (例: github:owner/repo#42)。同一 issue_ref の active session が存在する場合 WARN")
     p_init.add_argument("--files", default=None,
