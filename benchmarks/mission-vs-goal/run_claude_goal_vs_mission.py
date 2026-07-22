@@ -207,6 +207,7 @@ def build_prompt(
     output_rel: str,
     mission_max_iter: int | None = None,
     mission_profile: str = "full",
+    mission_budget_minutes: float | None = None,
     extra_rules: list[str] | tuple[str, ...] = (),
 ) -> str:
     cohort_rules = "".join(f"- {rule}\n" for rule in extra_rules)
@@ -269,7 +270,11 @@ Quality benchmark profile:
 - Add a reviewer-style stop/proceed decision with residual risks.
 - Do not inflate claims: if a marker is unsupported, mark it missing instead of implying coverage.
 """
-    return f"""/mission Complete the controlled benchmark artifact at `{output_rel}` with auditable mission-style evidence. --max-iter {mission_max_iter}
+    # is not None: 0.0 を silent drop せず /mission 側の検証 (正の有限数のみ) に届ける
+    budget_flag = (
+        f" --budget-minutes {mission_budget_minutes}" if mission_budget_minutes is not None else ""
+    )
+    return f"""/mission Complete the controlled benchmark artifact at `{output_rel}` with auditable mission-style evidence. --max-iter {mission_max_iter}{budget_flag}
 
 {common}
 Arm: mission
@@ -487,6 +492,7 @@ def run_one(
     mission_profile: str,
     arm_order: int,
     model_id: str,
+    mission_budget_minutes: float | None = None,
     hidden_paths: list[str] | None = None,
     extra_rules: list[str] | tuple[str, ...] = (),
 ) -> dict:
@@ -502,6 +508,7 @@ def run_one(
         output_rel,
         mission_max_iter=mission_max_iter,
         mission_profile=mission_profile,
+        mission_budget_minutes=mission_budget_minutes,
         extra_rules=extra_rules,
     )
     artifact_dir = ARTIFACTS_DIR / run_id / run_name
@@ -586,6 +593,11 @@ def run_one(
         "arm_order": arm_order,
         "model": "claude_code_default",
         "model_id": model_id,
+        # #238 (S6): 失敗 run の課金 (全損コスト) を集計可能にするため、notes 文字列
+        # ではなく第一級フィールドとして記録する。blocked/failed でも消費額が残る。
+        "total_cost_usd": (
+            claude_result.get("total_cost_usd") if isinstance(claude_result, dict) else None
+        ),
         "mission_profile": mission_profile if arm == "mission" else None,
         "started_at": started,
         "completed_at": completed,
@@ -705,6 +717,13 @@ def main() -> int:
     parser.add_argument("--max-budget-usd", type=float, default=2.0)
     parser.add_argument("--mission-max-iter", type=int, default=None)
     parser.add_argument(
+        "--mission-budget-minutes",
+        type=float,
+        default=None,
+        help="#238: /mission へ --budget-minutes として渡す時間予算 (分)。"
+        " budget pressure による graceful partial-done halt を有効化する。",
+    )
+    parser.add_argument(
         "--mission-profile",
         choices=MISSION_PROFILES,
         default="full",
@@ -746,6 +765,7 @@ def main() -> int:
             args.mission_profile,
             arm_order,
             args.model_id,
+            mission_budget_minutes=args.mission_budget_minutes,
             hidden_paths=task_data.get("hidden_paths"),
             extra_rules=task_data.get("prompt_rules", ()),
         )

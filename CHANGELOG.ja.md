@@ -11,6 +11,8 @@
 
 ### 追加
 
+- `mission-state.py init --budget-minutes <N>` で時間予算 (wall-clock) を宣言できるようにし、read-only の `next` が `started_at` から導出する `budget_pressure` シグナルを返すようにした。80% で `warn` (optional specialist / critic の新規 spawn を控える advisory)、100% 超で `exceeded` となり、spawn 系の next action (`run-planner`/`run-executor`/`run-reviewers`) を「成果物を確定して `mark-halt --category partial-done` で終了する」`consider-halt` 案内へ差し替える。安価なローカル完結手 (`aggregate-reviews`・`mark-passes`)・terminal 報告・`await-user` は差し替えず、ゲート意味論は不変。2026-07-22 に実測された「USD 予算を使い切って成果物ゼロで kill される全損」の再発を防ぐ。ベンチマーク runner には `--mission-budget-minutes` を追加して `/mission` プロンプトへ予算を渡せるようにし、`total_cost_usd` を第一級フィールドとして記録して blocked/failed run の全損コストを集計可能にした (#238)。
+
 - `mission-state.py advance --phase <phase> --activity <kind>:<reason>` が phase 遷移と activity 切替を単一 lock・単一 atomic write で行い、「phase だけ進んで activity が空」の state を作れなくした (2026-07-22 実行速度監査で実測された activity coverage 9.96% の構造要因への対策)。検証 (phase 正規化・kind/reason enum) は lock 取得前に行い、不正入力では一切 write しない。`done`/`halted` への遷移は従来どおり `mark-passes`/`mark-halt` 専用であり、advance を pass gate の迂回路にはできない。現在と同じ phase を指定した場合は activity 切替のみ行う (#237)。
 
 ### セキュリティ

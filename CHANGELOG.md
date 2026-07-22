@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `mission-state.py init --budget-minutes <N>` declares a wall-clock time budget, and the read-only `next` command now returns a `budget_pressure` signal derived from `started_at`: `warn` at 80% (advisory to stop spawning optional specialists/critics) and `exceeded` at 100%, where spawn-heavy next actions (`run-planner`/`run-executor`/`run-reviewers`) are replaced with `consider-halt` guidance to finalize the current artifact and end with `mark-halt --category partial-done`. Cheap local finishing moves (`aggregate-reviews`, `mark-passes`), terminal reports, and `await-user` are never overridden, and gate semantics are unchanged. This prevents the total-loss failure observed on 2026-07-22 where a mission burned its full USD budget and was killed with no artifact. The benchmark runner gains `--mission-budget-minutes` to pass the budget into the `/mission` prompt and now records `total_cost_usd` as a first-class result field so wasted spend on blocked/failed runs is aggregatable (#238).
+
 - `mission-state.py advance --phase <phase> --activity <kind>:<reason>` performs the phase transition and the activity switch in one lock and one atomic write, so a state where the phase advanced but the activity stayed empty can no longer be produced (a structural cause of the 9.96% activity coverage measured in the 2026-07-22 execution-speed audit). Validation (phase normalization, kind/reason enum) happens before the lock and rejects without writing; transitions to `done`/`halted` stay exclusive to `mark-passes`/`mark-halt` so `advance` cannot bypass the pass gate. Calling `advance` with the current phase switches only the activity segment (#237).
 
 ### Security
