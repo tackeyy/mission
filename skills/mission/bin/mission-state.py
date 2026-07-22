@@ -674,13 +674,22 @@ def _comm_is_agent(comm: str) -> bool:
     return False
 
 
+_LAST_PID_WAS_FALLBACK: bool = False
+
+
+def _last_pid_was_fallback() -> bool:
+    return _LAST_PID_WAS_FALLBACK
+
+
 def find_agent_pid() -> int:
     """親プロセスツリーを遡って claude / codex (エージェント CLI) プロセスを見つける。
 
     Bash 経由で実行された場合、os.getppid() は bash を返してしまうため、
     プロセスツリーを最大 8 階層遡って agent CLI プロセスを特定する。
     見つからなければ os.getppid() (= 直接の親) を fallback で返す。
+    #239: fallback した場合は _LAST_PID_WAS_FALLBACK = True を設定する。
     """
+    global _LAST_PID_WAS_FALLBACK
     pid = os.getppid()
     for _ in range(8):
         if pid <= 1:
@@ -689,11 +698,13 @@ def find_agent_pid() -> int:
             r = subprocess.run(["ps", "-o", "comm=", "-p", str(pid)], capture_output=True, text=True, timeout=2)
             comm = r.stdout.strip()
             if _comm_is_agent(comm):
+                _LAST_PID_WAS_FALLBACK = False
                 return pid
             r2 = subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], capture_output=True, text=True, timeout=2)
             pid = int(r2.stdout.strip() or 0)
         except Exception:
             break
+    _LAST_PID_WAS_FALLBACK = True
     return os.getppid()  # fallback
 
 
@@ -705,6 +716,7 @@ def stamp_metadata(data: dict, cwd: Path) -> dict:
     # が走り StateLock を最大 8x2s 占有して lock timeout を誘発する。存在チェックで遅延させる。
     if "pid" not in data:
         data["pid"] = find_agent_pid()  # agent CLI プロセスの PID (プロセスツリー遡及で正確に取得)
+        data["pid_source"] = "fallback" if _last_pid_was_fallback() else "agent"
     data.setdefault("hostname", socket.gethostname())
     if "session_id" not in data:
         data["session_id"] = resolve_session_id()
@@ -6295,18 +6307,48 @@ def cmd_cleanup_stale(args):
                             else:
                                 results["skipped"].append({"path": str(sf), "reason": f"pid {pid} alive (agent)", "age_sec": age_sec})
                     else:
-                        proj = _project_root_of(sf)
-                        if args.execute:
-                            halted = _terminalize_state_file(
-                                sf, proj,
-                                reason=f"orphan: pid {pid} dead or reused (cleanup-stale)",
-                                category="stale", set_terminal_phase=False,
-                                expected_pid=pid, require_dead_pid=True,
-                            )
-                            if halted:
-                                results["halted"].append({"path": str(sf), "pid": pid})
+                        # #239: pid_source=fallback の場合は PID 消滅を即 orphan 扱いにせず
+                        # age + heartbeat/updated_at の複合条件で判定 (false stale 止血)
+                        pid_source = data.get("pid_source", "agent")
+                        if pid_source == "fallback":
+                            age_sec = _state_age_since_update_sec(data)
+                            stale_threshold = _stale_active_seconds()
+                            if age_sec is not None and age_sec < stale_threshold:
+                                results["skipped"].append({
+                                    "path": str(sf),
+                                    "reason": "fallback-pid-unobserved",
+                                    "pid": pid,
+                                    "age_sec": age_sec,
+                                })
+                            else:
+                                proj = _project_root_of(sf)
+                                halt_reason = (
+                                    f"stale: fallback pid {pid} dead, age {age_sec}s >= "
+                                    f"{stale_threshold}s threshold (cleanup-stale)"
+                                )
+                                if args.execute:
+                                    halted = _terminalize_state_file(
+                                        sf, proj, reason=halt_reason,
+                                        category="stale", set_terminal_phase=True,
+                                        expected_pid=pid,
+                                    )
+                                    if halted:
+                                        results["halted"].append({"path": str(sf), "pid": pid, "reason": "fallback-stale"})
+                                else:
+                                    results["would_halt"].append({"path": str(sf), "pid": pid, "reason": "fallback-stale", "mission": (data.get("mission") or "")[:80]})
                         else:
-                            results["would_halt"].append({"path": str(sf), "pid": pid, "mission": (data.get("mission") or "")[:80]})
+                            proj = _project_root_of(sf)
+                            if args.execute:
+                                halted = _terminalize_state_file(
+                                    sf, proj,
+                                    reason=f"orphan: pid {pid} dead or reused (cleanup-stale)",
+                                    category="stale", set_terminal_phase=False,
+                                    expected_pid=pid, require_dead_pid=True,
+                                )
+                                if halted:
+                                    results["halted"].append({"path": str(sf), "pid": pid, "reason": "orphan-dead-or-reused"})
+                            else:
+                                results["would_halt"].append({"path": str(sf), "pid": pid, "mission": (data.get("mission") or "")[:80]})
                 except Exception as e:
                     results["errors"].append({"path": str(sf), "error": str(e)})
             except Exception as e:
