@@ -255,16 +255,39 @@ def test_release_version_paths_are_in_sync():
         assert expected_path in _r(REPO_ROOT / rel), f"{rel} does not reference {expected_path}"
 
 
-def test_readmes_describe_current_scoring_flow_and_test_count():
-    """README の主要説明が現行 source の標準 scoring flow と検証数から drift しないこと。"""
+def test_readmes_describe_current_scoring_flow_and_test_snapshot():
+    """README の主要説明と日付付き検証 snapshot が日英で drift しないこと。"""
     en = _r(REPO_ROOT / "README.md")
     ja = _r(REPO_ROOT / "README.ja.md")
     for rel, txt in (("README.md", en), ("README.ja.md", ja)):
-        for token in ("mission-review/1", "aggregate-reviews", "push-score --scoring-json", "553 passed"):
+        for token in (
+            "mission-review/1",
+            "aggregate-reviews",
+            "push-score --scoring-json",
+            "2026-07-21: 1208 passed",
+        ):
             assert token in txt, f"{rel} missing current README source-sync token: {token}"
-        assert "327 passed" not in txt, f"{rel} still reports stale test count"
+        assert "553 passed" not in txt, f"{rel} still reports stale test count"
     assert "reviewer/scorer phases" not in en
     assert "reviewer/scorer phase" not in ja
+
+
+def test_local_authoring_latest_main_contract_is_consistent():
+    """Public EN/JA docs retain the fail-closed origin/main bootstrap contract."""
+    docs = {
+        rel: _r(REPO_ROOT / rel)
+        for rel in ("README.md", "README.ja.md", "CHANGELOG.md", "CHANGELOG.ja.md")
+    }
+    for rel, text in docs.items():
+        assert "origin/main" in text, f"{rel} must name the fixed source branch"
+        assert "SKILL.md" in text, f"{rel} must require rereading the updated skill"
+        assert "fallback" in text, f"{rel} must prohibit stale fallback"
+
+    setup = _r(REPO_ROOT / "skills/mission/refs/codex-setup.md")
+    bootstrap = setup.index("Local authoring source bootstrap")
+    init = setup.index("mission-state.py\" init")
+    target_setup = setup.index("対象 repository の task setup")
+    assert bootstrap < init < target_setup
 
 
 def test_release_checklist_requires_git_log_changelog_reconciliation():

@@ -161,12 +161,12 @@ FINDING_SPECS = {
         "{count} {sessions} started after checkpoint rollout without selection metadata",
     ),
     "low-pass-rate": FindingSpec(
-        "low-pass-rate", "P1", "pass_rate", "low-pass-rate",
+        "low-pass-rate", "P1", "actionable_pass_rate", "low-pass-rate",
         "pass rate is below the configured minimum",
         "pass rate {pass_rate_pct:.1f}% is below {min_pass_rate_pct:.0f}%",
     ),
     "halted-runs": FindingSpec(
-        "halted-runs", "P1", "halt_sessions", "record",
+        "halted-runs", "P1", "actionable_halt_sessions", "record",
         "halted session needs root-cause review", "{count} {halted_sessions} need root-cause review",
     ),
     "stale-active-no-score": FindingSpec(
@@ -1495,6 +1495,86 @@ def halt_or_incomplete_bucket(
     return "other-halt"
 
 
+_RESOLVED_HALT_STATUSES = {"resolved", "superseded", "closed"}
+_RESOLVED_HALT_REASONS = {
+    "superseded by a replacement run",
+    "superseded by replacement run",
+}
+_DELEGATED_HALT_REASONS = {
+    "delegated checker evidence",
+    "checker returned evidence to its owner",
+    "parent mission owns aggregation",
+}
+_DELEGATED_HALT_REASON_TOKENS = (
+    "bounded live binding probe complete",
+    "diff re-review accepted",
+    "re-review accepted",
+    "review complete:",
+    "独立read-only reviewは完了",
+    "root missionへ引き渡し",
+    "rootへ引き渡し",
+    "rootへ移管",
+    "ownershipをrootへ移管",
+    "parent mission owns",
+    "parent issue mission exclusively owns",
+    "parent mission exclusively owns",
+)
+_EXTERNAL_WAIT_REASONS = {
+    "waiting for approval",
+    "waiting for owner approval",
+    "awaiting approval",
+    "awaiting owner approval",
+    "waiting for credentials",
+    "waiting for credentials from the external owner",
+    "awaiting credentials",
+    "waiting for access",
+    "awaiting access",
+    "rate limit exceeded; waiting for reset",
+    "quota exhausted; waiting for reset",
+}
+_APPROVAL_WAIT_REASON_TOKENS = (
+    "明示的なmerge承認が必要",
+    "明示的な merge 承認が必要",
+    "明示的な承認が必要",
+    "explicit merge approval",
+    "explicit owner approval",
+)
+
+
+def halt_audit_disposition(record: StateRecord) -> str:
+    """Classify a terminal halt by audit actionability, failing closed."""
+    state = record.state
+    reason = str(state.get("halt_reason") or "").strip().lower().removesuffix(".")
+    resolution_status = str(state.get("resolution_status") or "").strip().lower()
+    if (
+        resolution_status in _RESOLVED_HALT_STATUSES
+        or reason in _RESOLVED_HALT_REASONS
+    ):
+        return "superseded-resolved"
+
+    category = state.get("halt_category")
+    has_delegated_reason = (
+        state.get("delegated_to_parent") is True
+        or reason in _DELEGATED_HALT_REASONS
+        or any(token in reason for token in _DELEGATED_HALT_REASON_TOKENS)
+    )
+    if category in {"partial-done", "other"} and has_delegated_reason:
+        return "delegated"
+    if category == "awaiting-approval" and (
+        reason in _EXTERNAL_WAIT_REASONS
+        or any(token in reason for token in _APPROVAL_WAIT_REASON_TOKENS)
+    ):
+        return "awaiting-external"
+    if category == "user-abort":
+        return "user-aborted"
+    if (
+        category == "blocked-external"
+        and reason in _EXTERNAL_WAIT_REASONS
+    ):
+        return "awaiting-external"
+    return "actionable"
+
+
 # #185: force_reason 内でユーザー承認への言及を示すキーワード。あくまで自由文ヒューリスティックの
 # fallback であり (LLM が偽の言及を書ける以上、確実な検証手段ではない)、正の証跡は
 # force_approved_by_user フラグ (state 側で --approved-by-user 必須化) が担う。
@@ -2160,8 +2240,30 @@ def aggregate(
         if cls in {"halt", "incomplete"}
     ]
     halt_sessions = [r for r, cls in zip(records, classes) if cls == "halt"]
+    actionable_halt_sessions = [
+        record
+        for record in halt_sessions
+        if halt_audit_disposition(record) == "actionable"
+    ]
+    non_actionable_halt_sessions = [
+        record
+        for record in halt_sessions
+        if halt_audit_disposition(record) != "actionable"
+    ]
     current_halt_sessions, historical_halt_sessions = split_current_historical_records(
         halt_sessions, current_since
+    )
+    current_actionable_halt_sessions, historical_actionable_halt_sessions = (
+        split_current_historical_records(actionable_halt_sessions, current_since)
+    )
+    actionable_pass_rate_denominator = (
+        pass_rate_summary["completed_pass_rate_denominator"]
+        - len(non_actionable_halt_sessions)
+    )
+    actionable_pass_rate = (
+        pass_count / actionable_pass_rate_denominator
+        if actionable_pass_rate_denominator
+        else None
     )
     current_slow_sessions, historical_slow_sessions = split_current_historical_records(
         slow, current_since
@@ -2208,6 +2310,9 @@ def aggregate(
         "completed_pass_rate_numerator": pass_rate_summary["completed_pass_rate_numerator"],
         "completed_pass_rate_denominator": pass_rate_summary["completed_pass_rate_denominator"],
         "completed_pass_rate": pass_rate_summary["completed_pass_rate"],
+        "actionable_pass_rate_numerator": pass_count,
+        "actionable_pass_rate_denominator": actionable_pass_rate_denominator,
+        "actionable_pass_rate": actionable_pass_rate,
         # Deprecated compatibility aliases: audit historically reported completed quality.
         "pass_rate_numerator": pass_rate_summary["completed_pass_rate_numerator"],
         "pass_rate_denominator": pass_rate_summary["completed_pass_rate_denominator"],
@@ -2222,6 +2327,13 @@ def aggregate(
         "avg_session_duration_sec": sum(durations) / len(durations) if durations else None,
         "slow_sessions": slow,
         "halt_sessions": halt_sessions,
+        "actionable_halt_sessions": actionable_halt_sessions,
+        "actionable_halt_count": len(actionable_halt_sessions),
+        "non_actionable_halt_sessions": non_actionable_halt_sessions,
+        "non_actionable_halt_count": len(non_actionable_halt_sessions),
+        "halt_disposition_breakdown": bucket_counts(
+            halt_sessions, halt_audit_disposition
+        ),
         "low_score_pass_sessions": low_score_pass,
         "specialist_invocation_gap_sessions": specialist_invocation_gaps,
         "forced_pass_sessions": forced,
@@ -2309,6 +2421,10 @@ def aggregate(
         "current_halt_count": len(current_halt_sessions),
         "historical_halt_sessions": historical_halt_sessions,
         "historical_halt_count": len(historical_halt_sessions),
+        "current_actionable_halt_sessions": current_actionable_halt_sessions,
+        "current_actionable_halt_count": len(current_actionable_halt_sessions),
+        "historical_actionable_halt_sessions": historical_actionable_halt_sessions,
+        "historical_actionable_halt_count": len(historical_actionable_halt_sessions),
         "current_slow_sessions": current_slow_sessions,
         "current_slow_session_count": len(current_slow_sessions),
         "historical_slow_sessions": historical_slow_sessions,
@@ -2489,7 +2605,7 @@ def finding_rows(stats: dict[str, Any], min_pass_rate: float) -> list[tuple[str,
         "sessions": "current sessions" if current_scope else "sessions",
         "halted_sessions": "current halted sessions" if current_scope else "halted sessions",
         "pass_sessions": "current pass sessions" if current_scope else "pass sessions",
-        "pass_rate_pct": (stats.get("pass_rate") or 0) * 100,
+        "pass_rate_pct": (stats.get("actionable_pass_rate") or 0) * 100,
         "min_pass_rate_pct": min_pass_rate * 100,
     }
     for spec in FINDING_SPECS.values():
@@ -2564,6 +2680,10 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
         f"- pass / halt / incomplete / abandoned: {stats['pass_count']} / {stats['halt_count']} / {stats['incomplete_count']} / {stats['abandoned_count']}",
         f"- raw pass rate: {fmt_float(stats['raw_pass_rate'] * 100 if stats['raw_pass_rate'] is not None else None, 1)}% ({stats['raw_pass_rate_numerator']}/{stats['raw_pass_rate_denominator']})",
         f"- completed pass rate: {fmt_float(stats['completed_pass_rate'] * 100 if stats['completed_pass_rate'] is not None else None, 1)}% ({stats['completed_pass_rate_numerator']}/{stats['completed_pass_rate_denominator']})",
+        f"- actionable pass rate: {fmt_float(stats['actionable_pass_rate'] * 100 if stats['actionable_pass_rate'] is not None else None, 1)}% ({stats['actionable_pass_rate_numerator']}/{stats['actionable_pass_rate_denominator']})",
+        f"- raw halt sessions: {stats['halt_count']}",
+        f"- actionable halt sessions: {stats['actionable_halt_count']}",
+        f"- non-actionable halt sessions: {stats['non_actionable_halt_count']}",
         f"- health counts (active / active-no-score / stale / halt / abandoned): {stats['active_count']} / {stats['active_no_score_count']} / {stats['stale_count']} / {stats['halt_count']} / {stats['abandoned_count']}",
         f"- fresh active no-score excluded from completed pass rate: {stats['active_no_score_count']}",
         f"- stale active no-score included as completed health debt: {stats['stale_active_no_score_count']}",
@@ -2663,6 +2783,13 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
     lines.extend(["", "## Halt Sessions", ""])
     if stats["halt_sessions"]:
         lines.extend(session_line(record) for record in stats["halt_sessions"])
+    else:
+        lines.append("- none")
+
+    lines.extend(["", "## Halt Dispositions", ""])
+    if stats["halt_disposition_breakdown"]:
+        for key, count in sorted(stats["halt_disposition_breakdown"].items()):
+            lines.append(f"- `{key}`: {count}")
     else:
         lines.append("- none")
 
@@ -2995,8 +3122,12 @@ def main(argv: list[str] | None = None) -> int:
                 "forced_pass_sessions",
                 "forced_pass_autonomous_suspect_sessions",
                 "halt_sessions",
+                "actionable_halt_sessions",
+                "non_actionable_halt_sessions",
                 "current_halt_sessions",
                 "historical_halt_sessions",
+                "current_actionable_halt_sessions",
+                "historical_actionable_halt_sessions",
                 "low_score_pass_sessions",
                 "current_low_score_pass_sessions",
                 "historical_low_score_pass_sessions",

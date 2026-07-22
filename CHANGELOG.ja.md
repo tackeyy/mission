@@ -11,6 +11,15 @@
 
 ### 追加
 
+- `mission-state.py advance --phase <phase> --activity <kind>:<reason>` が phase 遷移と activity 切替を単一 lock・単一 atomic write で行い、「phase だけ進んで activity が空」の state を作れなくした (2026-07-22 実行速度監査で実測された activity coverage 9.96% の構造要因への対策)。検証 (phase 正規化・kind/reason enum) は lock 取得前に行い、不正入力では一切 write しない。`done`/`halted` への遷移は従来どおり `mark-passes`/`mark-halt` 専用であり、advance を pass gate の迂回路にはできない。現在と同じ phase を指定した場合は activity 切替のみ行う (#237)。
+
+### セキュリティ
+
+- `codex-preflight --strict` が deprecated な `MISSION_REQUIRE_SCORING_EVIDENCE=0` escape hatch を検出して reject する (exit 2)。あわせて実行結果を not ok として報告する。この環境変数は legacy な `push-score --items` 経路で scoring-evidence gate をバイパスするため、有効なまま実作業へ進んではならない。escape hatch 自体は当面機能を維持するが、文言を `DEPRECATED ESCAPE HATCH` に変更し、次のマイナーリリースで削除予定とした (#226)。
+
+### 追加
+
+- local authoring が mission state 初期化前に fail-closed な source bootstrap を実行するようになりました。`origin/main` を取得し、clean な `main` だけを fast-forward で更新して local と remote-tracking commit の一致を検証し、更新済み `SKILL.md` の読み直しを要求します。dirty、`main` 以外、detached、ahead/diverged、remote branch 欠落、network failure では、古い版への fallback や history 書き換えを行わず停止します (#229)。
 - `mission-state.py stats` と `mission-audit.py` が排他的な pass-rate health 分類を共有し、finite な `raw_pass_rate` / `completed_pass_rate` と明示的な分子・分母を出力するようになりました。fresh active は可視化したまま completed population から外し、stale active は actionable な未合格 health debt として completed population に含めます。active、active-no-score、stale、halt、abandoned の件数は JSON と console に常に表示します。deprecated な `pass_rate` alias は各 command の従来の意味を維持し、stats は audit と同じ current immutable worktree archive generation を読み込みます (#208)。
 - `mission-audit.py --current-since` が検出済みrecord/itemをregistry駆動の共通finding modelへ変換し、forced pass、halt/slow/scoring、specialist provenanceのriskを同じUTC inclusive cutoffで分類するようになりました。`--since` / `--until` / `--current-since`の日付・ISO boundは一つのparserで扱います。JSONはall/current/historicalの基準evidence一覧、severity・code別の保存則count、code別のcompactなcount/indexを、Markdownはcurrent P0/P1/P2をhistorical riskより先に表示します。historical evidenceは元severity/provenanceを保持しますが現行改善promptには渡しません。timestamp欠落・不正はcurrentに残し、cutoff未指定は従来の全期間表示を維持します。pass severity、required specialist result gate、force approval gateは変更しません (#207)。
 - mission state に active work・external wait・approval wait・reviewer wait・idle を明示する bounded activity segment を追加しました。`mission-state.py stats` と `mission-audit.py` は同じ reducer で task/phase の R7 p50/p90、kind/reason totals、coverage、unclassified time、anomaly count を集計します。crash/resume gap は分類せず、既存 phase duration と review/pass gate を維持します (#211)。
@@ -18,6 +27,9 @@
 
 ### 修正
 
+- `mission-audit.py` が実ログ由来の委譲 handoff と明示的な merge 承認待ちの halt reason を認識し、P1 `halted-runs` の actionable 判定に反映するようになりました。raw halt 件数は維持し、stale/orphan は引き続き安全側で actionable に残します。日本語の root 引き渡し・承認待ち文言で actionable pass rate が過度に下がる問題を修正しました (#233)。
+- `mission-audit.py` が raw halt 件数を保持したまま、原因調査が必要な終端状態だけから P1 `halted-runs` と別指標 `actionable_pass_rate` を導出するようになりました。構造化された承認待ち、委譲済み partial completion、ユーザー中断、明示的な解消・置換証跡、限定的に認識した外部待ちは内訳に残しつつ actionable 品質を押し下げません。stale、stagnation、競合 gate、未知・曖昧な halt は安全側で actionable に残します。deprecated な `pass_rate` alias は completed-session rate のまま維持します (#221)。
+- 非対話の mission 起動時に、orchestrator が必要とする配布版・リポジトリ内の state CLI コマンドだけを許可するようにしました。`mission-state.py init` は実作業前に session state ディレクトリと assumptions 証跡へ内容保持・fsync 付きの実書き込み probe を行います。probe 失敗時は exit 2 と構造化された `blocked-external` halt を返し、state 自体も保存不能な場合は同じ構造化証跡を stdout に残して承認質問を行いません。明示診断用に同じ検査を行う `permission-preflight --json` も追加しました (#220)。
 - 不可逆操作の `review_tier` キーワードを、operation に anchor した clause と構造 unit の文脈で出現ごとに評価するようにしました。否定は文字 window 内の cue ではなく対象 operation への直接的な文法 anchor を必須とし、短縮形・`cannot`・active な `not perform/execute`・passive な `will/should not be performed/executed`・日本語の qualifier 付き否定も扱います。明示的に否定された実操作は Simple/Standard を昇格させず、条件例外、非実行 intent 自体の否定、不確実表現は安全側で採用し、複数否定 cue は次の operation より前にある場合だけ反転否定として扱います。global 非実行 marker は、候補自身の context が meta/non-operation intent と証明できる場合だけ抑制し、同じ logical unit の execution cue が別の named operation に直接係ると証明できない場合は曖昧照応として採用します。quote-only intent は、引用符直前・直後の直接実行または引用直後の passive modal だけが上書きし、引用内や別の明示 operation の execution wording では上書きしません。segment・operation start・quote・meta/non-operation・否定 operation・否定 cue・global marker の索引を cache し、全文・dense context の反復走査を避けます。既存の順序付き文字列 signals は変えず、state に出現単位の `review_tier_signal_details` provenance を追加し、security・high-risk・Complex/Critical の挙動も維持します (#209)。
   meta/non-operation の証明は候補 context 全体が strict meta-only 文法へ一致することを要求し、未知の後段句があれば抑制しません。quote span 内の execution cue は曖昧照応 veto の対象外です。quote-only も marker・無害終端・別 named operation への明示 action を除いた外側残余が空の場合だけ抑制します。
   modal / contraction で始まる `not not` と、`not the case that` / `not saying that` / `cannot say that` などの外側否定を二重否定として扱います。`except when` / `until` / approval 待ち / passive な緊急時例外は条件付きのままです。文をまたぐ `follow/apply + pronoun` と日本語の `適用` / `従う` は曖昧な実行照応として global meta-only 抑制を veto します。

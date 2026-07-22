@@ -76,6 +76,7 @@ from activity_segments import (  # noqa: E402
     start_activity_segment,
     summarize_activity_states,
     transition_activity_phase,
+    validate_activity,
 )
 from worktree_archive import validate_worktree_archive_bundle  # noqa: E402
 from state_snapshot import SnapshotError, consume_snapshot_document  # noqa: E402
@@ -539,6 +540,113 @@ def atomic_write_json(path: Path, data: dict) -> None:
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
+
+
+def _probe_directory_write(directory: Path) -> None:
+    """Write, fsync, and remove a probe in a mission state directory."""
+    probe_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            prefix=".mission-permission-probe-",
+            dir=directory,
+            delete=False,
+        ) as probe:
+            probe_path = Path(probe.name)
+            probe.write("permission-preflight\n")
+            probe.flush()
+            os.fsync(probe.fileno())
+    finally:
+        if probe_path is not None:
+            probe_path.unlink(missing_ok=True)
+
+
+def _probe_file_write(path: Path) -> None:
+    """Perform a content-preserving write and fsync on an evidence file."""
+    with path.open("r+b") as target:
+        first_byte = target.read(1)
+        if first_byte:
+            target.seek(0)
+            target.write(first_byte)
+        else:
+            target.write(b"\n")
+            target.truncate(0)
+        target.flush()
+        os.fsync(target.fileno())
+
+
+def _validated_assumptions_probe_path(cwd: Path, raw_path: str) -> Path:
+    """Resolve an existing regular assumptions file inside .mission-state."""
+    candidate = Path(raw_path)
+    if candidate.is_absolute():
+        raise ValueError("absolute evidence path")
+    state_root = state_dir(cwd).absolute()
+    candidate = (cwd / candidate).absolute()
+    candidate.relative_to(state_root)
+    if candidate.is_symlink():
+        raise ValueError("symlink evidence path")
+    resolved_root = state_root.resolve(strict=True)
+    resolved_candidate = candidate.resolve(strict=True)
+    resolved_candidate.relative_to(resolved_root)
+    if not resolved_candidate.is_file():
+        raise ValueError("evidence path is not a regular file")
+    return candidate
+
+
+def _record_permission_preflight_halt(cwd: Path, sf: Path, reason: str) -> bool:
+    """Best-effort persisted halt; structured stdout remains the final fallback."""
+    try:
+        with StateLock(lock_file(cwd)):
+            data = json.loads(sf.read_text(encoding="utf-8"))
+            now = iso_now()
+            data["halt_reason"] = reason
+            data["halt_category"] = "blocked-external"
+            data["loop_active"] = False
+            _transition_phase(data, "halted", now)
+            data["updated_at"] = now
+            backup_state(sf)
+            atomic_write_json(sf, data)
+            try:
+                _remove_from_aggregate(cwd, resolve_session_id())
+            except OSError:
+                pass
+        return True
+    except OSError:
+        return False
+
+
+def _exit_init_write_failure(cwd: Path, sf: Path | None = None) -> None:
+    """Emit the non-interactive fallback when init cannot persist state."""
+    reason = (
+        "Phase 0 permission preflight failed before task execution: "
+        "state write unavailable"
+    )
+    halt_recorded = bool(
+        sf is not None
+        and sf.exists()
+        and _record_permission_preflight_halt(cwd, sf, reason)
+    )
+    print(json.dumps({
+        "ok": False,
+        "halt_recorded": halt_recorded,
+        "halt_category": "blocked-external",
+        "halt_reason": reason,
+        "probes": [
+            {"target": "state", "ok": False, "error": "write-unavailable"}
+        ],
+    }))
+    raise SystemExit(2)
+
+
+@contextlib.contextmanager
+def _guarded_init_state_lock(cwd: Path, sf: Path):
+    """Convert every init persistence OSError into structured fallback evidence."""
+    try:
+        with StateLock(lock_file(cwd)):
+            yield
+    except OSError:
+        _exit_init_write_failure(cwd, sf)
 
 
 def backup_state(path: Path) -> None:
@@ -3744,7 +3852,10 @@ def cmd_log_specialist_invocation(args):
 
 def cmd_init(args):
     cwd = Path.cwd()
-    state_dir(cwd).mkdir(parents=True, exist_ok=True)
+    try:
+        state_dir(cwd).mkdir(parents=True, exist_ok=True)
+    except OSError:
+        _exit_init_write_failure(cwd)
     planned_files = _parse_files_arg(getattr(args, "files", None))
     now = iso_now()
 
@@ -3853,10 +3964,13 @@ def cmd_init(args):
     sid = initial["session_id"]
     initial["assumptions_path"] = f".mission-state/sessions/{sid}-assumptions.md"
     sdir = session_dir(cwd)
-    sdir.mkdir(parents=True, exist_ok=True)
     sf_target = session_file(cwd, sid)
+    try:
+        sdir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        _exit_init_write_failure(cwd, sf_target)
     agg = aggregate_file(cwd)
-    with StateLock(lock_file(cwd)):
+    with _guarded_init_state_lock(cwd, sf_target):
         existing_agg = {}
         if agg.exists():
             try:
@@ -3929,7 +4043,18 @@ def cmd_init(args):
             assumptions_file.write_text("# Assumption Registry\n")
     except OSError as e:
         print(f"WARNING: assumptions_path ファイル作成に失敗: {e}", file=sys.stderr)
-    print(json.dumps({"ok": True, "mode": "multi-session", "session_file": str(sf_target), "session_id": sid, "mission_id": initial["mission_id"]}))
+    permission_preflight = _permission_preflight(cwd)
+    if not permission_preflight["ok"]:
+        print(json.dumps(permission_preflight, ensure_ascii=False))
+        sys.exit(2)
+    print(json.dumps({
+        "ok": True,
+        "mode": "multi-session",
+        "session_file": str(sf_target),
+        "session_id": sid,
+        "mission_id": initial["mission_id"],
+        "permission_preflight": "passed",
+    }))
 
 
 
@@ -3996,6 +4121,65 @@ def cmd_activity_end(args):
         print(f"ERROR: {error}", file=sys.stderr)
         sys.exit(2)
     print(json.dumps({"ok": True, "changed": changed, "activity_current": data.get("activity_current")}, ensure_ascii=False))
+
+
+def cmd_advance(args):
+    """#237 (F2): phase 遷移と activity 切替を 1 lock で atomic に行う。
+
+    `set phase=` と `activity start` が別コマンドだと「phase だけ進んで activity が
+    空」の state を作れてしまい、activity coverage の欠損 (strict cohort 9.96%) を
+    生む。advance は両方を単一 write で行い、片方だけ進んだ state を機械的に排除する。
+
+    - terminal phase (done/halted) への遷移は mark-passes / mark-halt 専用 (gate 迂回の防止)。
+    - --activity は <kind>:<reason>。検証は lock 取得前に行い、不正入力では一切 write しない。
+    """
+    cwd = Path.cwd()
+    sf = _activity_state_file(cwd)
+    raw = args.activity or ""
+    kind, sep, reason = raw.partition(":")
+    if not sep or not kind or not reason:
+        print(
+            f"ERROR: --activity は <kind>:<reason> 形式で指定してください (例: active:implementation)。"
+            f" 受領値: '{raw}'",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    try:
+        validate_activity(kind, reason)
+    except ActivityTimingError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+    new_phase = _normalize_set_phase_value(args.phase)
+    if new_phase in {"done", "halted"}:
+        print(
+            "ERROR: advance で terminal phase へは遷移できません。"
+            " 合格は mark-passes、中断は mark-halt を使ってください。",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    at = args.at or iso_now()
+    try:
+        with StateLock(lock_file(cwd)):
+            data = json.loads(sf.read_text())
+            # 現 segment を先に閉じる。_transition_phase の split (旧 kind/reason の
+            # キャリーフォワード) が「旧 reason + 新 phase・0秒」の phantom segment を
+            # 作るのを防ぐ。advance は直後に新 segment を開くため carry-forward 不要。
+            if isinstance(data.get("activity_current"), dict):
+                end_activity_segment(data, at)
+            _transition_phase(data, new_phase, at)
+            start_activity_segment(data, kind, reason, at, detail=args.detail)
+            data["updated_at"] = at
+            backup_state(sf)
+            atomic_write_json(sf, stamp_metadata(data, cwd))
+    except ActivityTimingError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+    print(
+        json.dumps(
+            {"ok": True, "phase": data.get("phase"), "activity_current": data.get("activity_current")},
+            ensure_ascii=False,
+        )
+    )
 
 
 def _derive_next_action(data: dict) -> dict:
@@ -4299,6 +4483,18 @@ def cmd_codex_preflight(args):
         if getattr(args, "require_stop_hook", False):
             required_actions.append("Configure and trust `mission-stop-guard.sh` in Codex hooks, or rerun without --require-stop-hook for skills-only fallback.")
 
+    # #226 (A-4): MISSION_REQUIRE_SCORING_EVIDENCE=0 is a deprecated escape hatch that
+    # bypasses the scoring-evidence gate (findings recomputation) via the legacy --items
+    # push-score path. It must never be active for real work; --strict preflight rejects it
+    # and reports the run as not ok.
+    scoring_evidence_escape_hatch = os.environ.get("MISSION_REQUIRE_SCORING_EVIDENCE") == "0"
+    if scoring_evidence_escape_hatch:
+        required_actions.append(
+            "Unset MISSION_REQUIRE_SCORING_EVIDENCE=0: this deprecated escape hatch bypasses "
+            "the scoring-evidence gate and will be removed in the next minor release. "
+            "Use `push-score --scoring-json` (aggregate-reviews output) instead."
+        )
+
     version_skew = _detect_version_skew()  # #186
     if version_skew:
         warnings.append(
@@ -4310,7 +4506,7 @@ def cmd_codex_preflight(args):
 
     fallback_available = state_active and next_action not in {"init", "report-blocker", "report-complete"}
     result = {
-        "ok": state_active and (hook_status["configured"] or (fallback_available and not getattr(args, "require_stop_hook", False))),
+        "ok": state_active and (hook_status["configured"] or (fallback_available and not getattr(args, "require_stop_hook", False))) and not (scoring_evidence_escape_hatch and getattr(args, "strict", False)),
         "state_guard": {
             "present": state_present,
             "active": state_active,
@@ -4352,6 +4548,113 @@ def cmd_codex_preflight(args):
         sys.exit(2 if getattr(args, "strict", False) or getattr(args, "require_stop_hook", False) else 0)
 
 
+def _permission_preflight(cwd: Path) -> dict:
+    """Return the Phase 0 write-probe result without interacting with stdout."""
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        return {
+            "ok": False,
+            "halt_recorded": False,
+            "halt_category": "blocked-external",
+            "error": "state-not-found",
+            "probes": [],
+        }
+    try:
+        with StateLock(lock_file(cwd)):
+            data = json.loads(sf.read_text(encoding="utf-8"))
+    except OSError:
+        reason = (
+            "Phase 0 permission preflight failed before task execution: "
+            "state write unavailable"
+        )
+        return {
+            "ok": False,
+            "halt_recorded": False,
+            "halt_category": "blocked-external",
+            "halt_reason": reason,
+            "probes": [
+                {"target": "state", "ok": False, "error": "write-unavailable"}
+            ],
+        }
+    assumptions_path = data.get("assumptions_path")
+    if not assumptions_path:
+        reason = (
+            "Phase 0 permission preflight failed before task execution: "
+            "assumptions path missing"
+        )
+        return {
+            "ok": False,
+            "halt_recorded": _record_permission_preflight_halt(cwd, sf, reason),
+            "halt_category": "blocked-external",
+            "halt_reason": reason,
+            "error": "assumptions-path-missing",
+            "probes": [],
+        }
+
+    try:
+        assumptions_file = _validated_assumptions_probe_path(
+            cwd, str(assumptions_path)
+        )
+    except (OSError, ValueError):
+        reason = (
+            "Phase 0 permission preflight failed before task execution: "
+            "assumptions evidence path is invalid"
+        )
+        return {
+            "ok": False,
+            "halt_recorded": _record_permission_preflight_halt(cwd, sf, reason),
+            "halt_category": "blocked-external",
+            "halt_reason": reason,
+            "probes": [
+                {
+                    "target": "assumptions",
+                    "ok": False,
+                    "error": "invalid-evidence-path",
+                }
+            ],
+        }
+
+    probes = []
+    checks = (
+        ("state", lambda: _probe_directory_write(sf.parent)),
+        ("assumptions", lambda: _probe_file_write(assumptions_file)),
+    )
+    for target, probe in checks:
+        try:
+            probe()
+        except OSError:
+            probes.append(
+                {"target": target, "ok": False, "error": "write-unavailable"}
+            )
+            reason = (
+                "Phase 0 permission preflight failed before task execution: "
+                f"{target} write unavailable"
+            )
+            halt_recorded = _record_permission_preflight_halt(cwd, sf, reason)
+            return {
+                "ok": False,
+                "halt_recorded": halt_recorded,
+                "halt_category": "blocked-external",
+                "halt_reason": reason,
+                "probes": probes,
+            }
+        probes.append({"target": target, "ok": True})
+
+    return {
+        "ok": True,
+        "halt_recorded": False,
+        "probes": probes,
+    }
+
+
+def cmd_permission_preflight(args):
+    """Verify that Phase 0 can persist state and assumptions evidence."""
+    result = _permission_preflight(Path.cwd())
+    print(json.dumps(result, indent=2 if getattr(args, "json", False) else None))
+    if not result["ok"]:
+        sys.exit(2)
+
+
 # Issue #2: set で変更禁止のフィールド (mission_id 整合性維持のため)
 FROZEN_FIELDS = {
     "mission",  # 変更したいなら init を使う (mission_id が再計算される)
@@ -4377,6 +4680,51 @@ def cmd_set(args):
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
         now = iso_now()
+        explicit_keys = {kv.partition("=")[0] for kv in args.kvs}
+        # Issue #222 (A-2/A-3): gate 判定に影響する state フィールドの条件付き set ガード。
+        # 単純 FROZEN_FIELDS 追加では正規ワークフロー (tier と同時の reviewer_count 明示、
+        # F-4 手動再活性化での halt_reason 空化) を壊すため、条件付きで reject する。
+        if "reviewer_count" in explicit_keys and not ({"complexity", "review_tier"} & explicit_keys):
+            # A-2: reviewer_count 単独 set は tier 由来値より小さくして agreement gate を
+            # 無効化しうる (reviewer 1 名なら delta=0 が確定)。complexity/review_tier と
+            # 同時指定の運用上書きだけ許す。
+            print(
+                "ERROR: `reviewer_count` は単独 set 不可。"
+                " 変更する場合は `complexity` または `review_tier` と同時に指定してください "
+                "(A-2: agreement gate 無効化の防止)。",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if "halt_category" in explicit_keys:
+            # A-3: halt_category の変更は mark-halt/refresh-pid/resume 専用。
+            # set での書き換え (例: blocked-external -> stale) は無承認 reactivate を招く。
+            print(
+                "ERROR: `halt_category` は set で変更不可。"
+                " 変更は mark-halt / refresh-pid / resume 経由でのみ行ってください "
+                "(A-3: 無承認 reactivate の防止)。",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if "halt_reason" in explicit_keys:
+            # A-3: halt_reason の変更は _derive_next_action の halt 分岐回避になりうる。
+            # loop_active=true と同時の空化だけを F-4 手動再活性化 (gotchas §2) として許可する。
+            # loop_active 未指定 / loop_active=false 同時は「halt 証跡のない静かな終端」を作れるため reject。
+            _la_raw = next(
+                (v for k, _, v in (kv.partition("=") for kv in args.kvs) if k == "loop_active"),
+                None,
+            )
+            try:
+                _la_val = json.loads(_la_raw) if _la_raw is not None else None
+            except json.JSONDecodeError:
+                _la_val = _la_raw
+            if _la_val is not True:
+                print(
+                    "ERROR: `halt_reason` は単独 set 不可。"
+                    " クリアする場合は `loop_active=true` と同時に指定してください "
+                    "(A-3: halt 分岐回避の防止、F-4 手動再活性化のみ許可)。",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
         for kv in args.kvs:
             if "=" not in kv:
                 print(f"ERROR: key=value 形式で指定してください: {kv}", file=sys.stderr)
@@ -4428,7 +4776,7 @@ def cmd_set(args):
         # - review_tier_source が "auto" (またはフィールド不在) の場合: tier を再導出して reviewer_count も同期
         # - review_tier_source が "user" の場合: tier を維持し、reviewer_count も tier 由来を維持
         # - reviewer_count を明示した場合はそちらが優先
-        explicit_keys = {kv.partition("=")[0] for kv in args.kvs}
+        # (explicit_keys は関数冒頭で計算済み)
         if "complexity" in explicit_keys:
             tier_source = data.get("review_tier_source", "auto")
             if tier_source == "user":
@@ -5062,12 +5410,14 @@ def cmd_push_score(args):
             )
             sys.exit(2)
         # G-2: scoring evidence なしの push-score は default reject。
-        # MISSION_REQUIRE_SCORING_EVIDENCE=0 は移行期の一時 escape hatch として残す。
+        # DEPRECATED (#226/A-4): MISSION_REQUIRE_SCORING_EVIDENCE=0 は scoring-evidence gate を
+        # バイパスする移行期 escape hatch。次のマイナーリリースで削除予定。codex-preflight --strict は
+        # この env を検出して exit 2 にする。新規利用は禁止。
         if not args.scoring_output:
             if os.environ.get("MISSION_REQUIRE_SCORING_EVIDENCE") == "0":
                 print(
-                    "TEMPORARY ESCAPE HATCH: scoring evidence なしの push-score を許可しました "
-                    "(MISSION_REQUIRE_SCORING_EVIDENCE=0)。"
+                    "DEPRECATED ESCAPE HATCH: scoring evidence なしの push-score を許可しました "
+                    "(MISSION_REQUIRE_SCORING_EVIDENCE=0)。この env は次のマイナーリリースで削除予定です。"
                     " --scoring-json (推奨) または --scoring-output へ移行してください。",
                     file=sys.stderr,
                 )
@@ -6286,6 +6636,13 @@ def _build_parser():
                          help="Codex hooks.json の明示パス。未指定なら $CODEX_HOME/hooks.json と ~/.codex/hooks.json を確認")
     p_codex.set_defaults(func=cmd_codex_preflight)
 
+    p_permission = sub.add_parser(
+        "permission-preflight",
+        help="Phase 0 の state/assumptions 書き込み可否を実書き込みで検証",
+    )
+    p_permission.add_argument("--json", action="store_true", help="診断結果を JSON で出力")
+    p_permission.set_defaults(func=cmd_permission_preflight)
+
     p_get = sub.add_parser("get", help="state.json の値取得")
     p_get.add_argument("--field", default=None)
     p_get.set_defaults(func=cmd_get)
@@ -6395,6 +6752,20 @@ def _build_parser():
     p_stats.add_argument("--json", action="store_true", help="JSON 形式で出力")
     p_stats.add_argument("--snapshot", default=None, help="audit --snapshot-out で明示作成したsnapshotを利用 (invalid時はfail closed)")
     p_stats.set_defaults(func=cmd_stats)
+
+    p_advance = sub.add_parser(
+        "advance",
+        help="#237: phase 遷移と activity 切替を 1 lock で atomic に行う (phase だけ進んで activity が空の state を作らない)",
+    )
+    p_advance.add_argument("--phase", required=True,
+                           help=f"遷移先 phase。terminal (done/halted) は mark-passes / mark-halt 専用。有効値: {sorted(VALID_PHASES - {'done', 'halted'})}")
+    p_advance.add_argument("--activity", required=True,
+                           help="<kind>:<reason> (例: active:implementation, reviewer-wait:review-response)")
+    p_advance.add_argument("--detail", default=None,
+                           help="任意の補足。control 文字除去・160文字へ正規化")
+    p_advance.add_argument("--at", default=None,
+                           help="ISO timestamp。省略時は現在 UTC")
+    p_advance.set_defaults(func=cmd_advance)
 
     p_activity = sub.add_parser("activity", help="#211: phase 内の active/wait/idle segment を記録")
     activity_sub = p_activity.add_subparsers(dest="activity_cmd", required=True)

@@ -3,17 +3,40 @@ name: mission
 description: ミッション達成までReActループで自律的に稼働。計画→実行→レビュー→スコア4.0達成まで自己修正。曖昧な要件は仮置きで進み、不可逆操作のみ事前確認する。複数ステップの作業を品質ゲート付きで完遂させたい時や「達成するまでやって」系の依頼で使用。
 user-invocable: true
 argument-hint: <ミッション記述> [--max-iter N] [--skip-preflight] [--threshold X]
+allowed-tools:
+  - Read
+  - Grep
+  - Glob
+  - Edit
+  - Write
+  - Bash(bash "$MISSION_PLUGIN_ROOT/scripts/mission-local-authoring-sync.sh")
+  - Bash(scripts/mission-state.py init:*)
+  - Bash(scripts/mission-state.py permission-preflight:*)
+  - Bash(${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py init:*)
+  - Bash(${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py permission-preflight:*)
 ---
 
 # /mission — 自律ミッション達成オーケストレーター
 
 あなたは Mission Partner。state gate と `mission-state.py next` / `resume` を進行 oracle とし、`passes: true` または `halt_reason` まで実行を続ける。
 
+## Local authoring source bootstrap
+
+`MISSION_PLUGIN_ROOT` が Git worktree を指す local authoring 構成では、mission state の `init`、対象 repository の setup、実装より先に、次を1回実行する。
+
+```bash
+bash "$MISSION_PLUGIN_ROOT/scripts/mission-local-authoring-sync.sh"
+```
+
+exit 0 と `status=ready` を確認できない場合は、手元の古い版へ fallback せず mission を開始しない。network、権限、dirty checkout、`main` 以外、detached HEAD、ahead、diverged のいずれでも同じく fail-closed で停止し、`stash` / `reset` / `rebase` / force update / branch switch で自動修復しない。
+
+同期成功時は working tree が更新されている可能性があるため、`$MISSION_PLUGIN_ROOT/skills/mission/SKILL.md` を disk から完全に読み直し、更新後の指示を使う。同じ skill 呼び出し内ですでに `status=ready` を観測済みなら bootstrap を繰り返さず、`Compact Instructions` へ進む。Git worktree ではない versioned plugin install はこの bootstrap の対象外。
+
 ## Compact Instructions
 
 1. `.mission-state/sessions/<sid>.json` または `.mission-state/state.json` の `loop_active: true` 中は実行中。完了前に必ず `passes` / `halt_reason` / `score_history` を再取得する。
 2. compaction 後の最初の操作は `mission-state.py resume`。返る `next_action` / `command_hint` に従い、state の `assumptions_path` を読む。固定 `.mission-state/assumptions.md` 決め打ちは禁止。
-3. 新規開始時は、read-only の repository 確認を除く task setup（fetch / pull / switch / worktree 作成）・実装より先に `init` で active state を作る。Codex は直後に `codex-preflight --json --strict` を実行し、exit 0 を確認するまで setup を進めない。各 phase 境界は `next` で Stop hook なし環境を補完する。
+3. 新規開始時は、read-only の repository 確認を除く task setup（fetch / pull / switch / worktree 作成）・実装より先に `init` で active state を作る。`init` は `permission-preflight --json` 相当の state / assumptions 実書き込み検査を内蔵する。exit 2 なら実作業へ進まず、`blocked-external` の halt / stdout 証跡をそのまま報告し、権限承認を質問しない。Codex は続けて `codex-preflight --json --strict` を実行し、exit 0 を確認するまで setup を進めない。各 phase 境界は `next` で Stop hook なし環境を補完する。
 4. state 更新は `mission-state.py` のみ。`sessions/<sid>.json` 直書き、inline `jq`、手計算の pass 判定は禁止。機械検証可能な action (`push-score` / `mark-passes` / `gh pr view` / `git push`) は直後に state 再取得または外部再照合し、捏造・転記ミスを潰す。
 5. Phase 5 は reviewer の `mission-review/1` JSON を `aggregate-reviews` で集計し、直後に `push-score --scoring-json` へ渡す。標準フローで `mission-scorer` を spawn しない。
 6. 完了報告前に `mark-passes` が exit 0 で返ったことを確認し、最後に `next` を呼ぶ。`next_action=report-complete`（`passes=true`）または `report-blocker`（`halt_reason` あり）以外では final を返さない。`findings_evidence_path` / `open_high` / `max_agreement_delta <= 1.5` / `threshold` / min item gate が未達なら継続。
@@ -21,7 +44,7 @@ argument-hint: <ミッション記述> [--max-iter N] [--skip-preflight] [--thre
 8. M6: Medium 以上の指摘を orchestrator がインライン修正したら、自己検証だけで合格にしない。差分 Reviewer 1 名の再確認を経てから scoring / pass 判定へ進む。
 9. 質問は溜めて仮置きする。即時質問は Trigger 1 の不可逆操作と、Trigger 2 の中断条件だけ。
 10. PR がある場合は pass 後に Phase 7 を実行する。自動 merge は明示 opt-in、CI/テスト pass、`gh pr checks` 1 件以上、禁止ルールなしの全条件を満たす時だけ。
-11. `init` 後は `activity start --kind active --reason planning` を開始し、実作業・外部応答・承認・reviewer・実行可能作業なしの境界で明示的に切り替える。原因不明の時間を推測分類しない。終端 phase は open segment を自動で閉じる。
+11. `init` 後は `activity start --kind active --reason planning` を開始し、実作業・外部応答・承認・reviewer・実行可能作業なしの境界で明示的に切り替える。phase 境界では `set phase=` + `activity start` の 2 コマンドではなく atomic な `advance --phase <phase> --activity <kind>:<reason>` を優先する (#237: phase だけ進んで activity が空の state を作らない)。原因不明の時間を推測分類しない。終端 phase は open segment を自動で閉じる。
 
 ## state.json 操作
 
@@ -29,8 +52,10 @@ argument-hint: <ミッション記述> [--max-iter N] [--skip-preflight] [--thre
 
 ```bash
 mission-state.py init "<mission>" --complexity Simple|Standard|Complex|Critical --issue-ref <ref> --files <csv>
+mission-state.py permission-preflight --json
 mission-state.py resume
 mission-state.py next
+mission-state.py advance --phase executing --activity active:implementation
 mission-state.py activity start --kind active --reason planning
 mission-state.py activity start --kind external-wait --reason external-response
 mission-state.py activity start --kind approval-wait --reason user-approval

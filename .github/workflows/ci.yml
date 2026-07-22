@@ -82,4 +82,4 @@ jobs:
 
       - name: Lint shell scripts
         if: steps.changes.outputs.shell == 'true'
-        run: shellcheck scripts/mission-stop-guard.sh scripts/sync-codex-plugin-wrapper.sh
+        run: shellcheck scripts/mission-stop-guard.sh scripts/sync-codex-plugin-wrapper.sh scripts/mission-local-authoring-sync.sh

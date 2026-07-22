@@ -110,3 +110,49 @@ def test_codex_preflight_includes_scoring_pipeline_summary(tmp_path, run_cli):
     assert "mark-passes" in pipeline
     assert "mission-scorer" in pipeline  # Codex 向け fallback 変換器への言及
     assert "just because" in pipeline or "Never" in pipeline  # force を安易に使わない旨の警告
+
+
+def test_codex_preflight_strict_rejects_scoring_evidence_escape_hatch(tmp_path, run_cli):
+    """#226 (A-4): MISSION_REQUIRE_SCORING_EVIDENCE=0 は scoring evidence gate を
+    バイパスする deprecated escape hatch。preflight --strict は検出して exit 2 にする."""
+    _init(run_cli, tmp_path)
+    env = _no_skew_env(tmp_path)
+    env["MISSION_REQUIRE_SCORING_EVIDENCE"] = "0"
+    r = run_cli("codex-preflight", "--json", "--strict",
+                "--hook-config", str(tmp_path / "hooks.json"),
+                cwd=tmp_path, env_extra=env)
+    assert r.returncode == 2, f"expected exit 2, got {r.returncode}: {r.stderr}"
+    out = json.loads(r.stdout)
+    assert out["ok"] is False
+    assert any("MISSION_REQUIRE_SCORING_EVIDENCE" in action for action in out["required_actions"])
+
+
+def test_codex_preflight_without_escape_hatch_stays_clean(tmp_path, run_cli):
+    """escape hatch env が無ければ preflight は従来どおり通る (active state)."""
+    _init(run_cli, tmp_path)
+    hooks = tmp_path / "hooks.json"
+    hooks.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [{"command": "mission-stop-guard.sh"}]}]}}))
+    env = _no_skew_env(tmp_path)
+    r = run_cli("codex-preflight", "--json", "--strict",
+                "--hook-config", str(hooks), cwd=tmp_path, env_extra=env)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["ok"] is True, out
+    assert not any("MISSION_REQUIRE_SCORING_EVIDENCE" in a for a in out["required_actions"]), out["required_actions"]
+
+
+def test_codex_preflight_non_strict_does_not_block_on_escape_hatch(tmp_path, run_cli):
+    """#226 (A-4, case A): --strict なしでは escape hatch があっても exit 0 で通し、
+    ok を False にしない (移行期の後方互換: 非対話 gate は --strict でのみ止める)。
+    required_actions には可視化のため残す."""
+    _init(run_cli, tmp_path)
+    hooks = tmp_path / "hooks.json"
+    hooks.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [{"command": "mission-stop-guard.sh"}]}]}}))
+    env = _no_skew_env(tmp_path)
+    env["MISSION_REQUIRE_SCORING_EVIDENCE"] = "0"
+    r = run_cli("codex-preflight", "--json",
+                "--hook-config", str(hooks), cwd=tmp_path, env_extra=env)
+    assert r.returncode == 0, f"expected exit 0, got {r.returncode}: {r.stderr}"
+    out = json.loads(r.stdout)
+    assert out["ok"] is True, out
+    assert any("MISSION_REQUIRE_SCORING_EVIDENCE" in a for a in out["required_actions"])
