@@ -4326,6 +4326,9 @@ def _derive_next_action(data: dict) -> dict:
     phase = data.get("phase") or "planning"
     iteration = data.get("iteration", 1) or 1
     reviewer_count = data.get("reviewer_count", 2) or 2
+    effective_reviewer_count = reviewer_count
+    if iteration >= 2 and data.get("critic_has_new_scope") is False:
+        effective_reviewer_count = min(reviewer_count, 2)
     mid8 = (data.get("mission_id") or "unknown")[:8]
     stagnation = data.get("stagnation_count", 0) or 0
     # 通常経路では push-score が phase=scoring へ遷移させるため stagnation>=3 と
@@ -4352,9 +4355,9 @@ def _derive_next_action(data: dict) -> dict:
     if phase == "reviewing":
         return {
             "next_action": "run-reviewers",
-            "summary": f"iteration {iteration}: mission-reviewer を {reviewer_count} 名、単一メッセージで並列起動する (直列起動は規律違反)",
-            "command_hint": f"Skill: mission-reviewer x{reviewer_count} (1 message)",
-            "details": {"reviewer_count": reviewer_count},
+            "summary": f"iteration {iteration}: mission-reviewer を {effective_reviewer_count} 名、単一メッセージで並列起動する (直列起動は規律違反)",
+            "command_hint": f"Skill: mission-reviewer x{effective_reviewer_count} (1 message)",
+            "details": {"reviewer_count": effective_reviewer_count},
         }
     # phase == scoring / done / その他: 現 iteration の有効スコア有無で分岐
     history = data.get("score_history") or []
@@ -4405,13 +4408,14 @@ def _derive_next_action(data: dict) -> dict:
             "command_hint": "mission-state.py mark-passes",
             "details": {"unclosed_specialists": unclosed} if unclosed else {},
         }
+    min_rev_flag = f" --min-reviewers {effective_reviewer_count}" if effective_reviewer_count >= 2 else ""
     return {
         "next_action": "aggregate-reviews",
         "summary": (
             f"iteration {iteration}: reviewer の mission-review/1 JSON を aggregate-reviews で集計し、"
             "push-score --scoring-json で記録する。--force は使わない (scoring evidence を作る経路がこれ)。"
         ),
-        "command_hint": f"mission-state.py aggregate-reviews --iteration {iteration} --input /tmp/mission-reviewer-iter-{iteration}-{mid8}-a.json --out /tmp/mission-scorer-iter-{iteration}-{mid8}.json && mission-state.py push-score --iteration {iteration} --scoring-json /tmp/mission-scorer-iter-{iteration}-{mid8}.json",
+        "command_hint": f"mission-state.py aggregate-reviews --iteration {iteration} --input /tmp/mission-reviewer-iter-{iteration}-{mid8}-a.json{min_rev_flag} --out /tmp/mission-scorer-iter-{iteration}-{mid8}.json && mission-state.py push-score --iteration {iteration} --scoring-json /tmp/mission-scorer-iter-{iteration}-{mid8}.json",
     }
 
 
@@ -5370,6 +5374,16 @@ def cmd_aggregate_reviews(args):
         print("ERROR: --iteration は 1 以上で指定してください", file=sys.stderr)
         sys.exit(2)
     reviews = [_load_review_json(path, args.iteration) for path in args.input]
+
+    min_reviewers = getattr(args, "min_reviewers", None)
+    if min_reviewers is not None and len(reviews) < min_reviewers:
+        print(
+            f"ERROR: reviewer 数不足 (期待 {min_reviewers} 名, 実際 {len(reviews)} 名)。"
+            " reviewer を追加してやり直してください。",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
     scoring_reviews = [r for r in reviews if r.get("scores") is not None]
     if not scoring_reviews:
         print("ERROR: 採点対象 reviewer がありません (scores:null の検証専任のみ)", file=sys.stderr)
@@ -6942,6 +6956,8 @@ def _build_parser():
     p_agg.add_argument("--out", default=None,
                        help="出力する push-score 互換 scoring JSON パス。未指定なら /tmp/mission-scorer-iter-N-<mission8>.json")
     p_agg.add_argument("--json", action="store_true", help="結果を JSON で出力")
+    p_agg.add_argument("--min-reviewers", type=int, default=None, dest="min_reviewers",
+                       help="#240: 最低 reviewer 数。不足なら exit 2 (合意偽装防止)")
     p_agg.set_defaults(func=cmd_aggregate_reviews)
 
     p_halt = sub.add_parser("mark-halt", help="halt_reason を立てて停止")
