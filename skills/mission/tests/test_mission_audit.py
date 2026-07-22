@@ -2247,6 +2247,87 @@ def test_audit_preserves_raw_halts_but_only_flags_actionable_halts(tmp_path):
     assert "non_actionable_halt_sessions" not in data
 
 
+def test_audit_halt_disposition_matches_real_handoff_and_approval_reasons(tmp_path):
+    """#233: 実ログの日本語 handoff / approval reason を P1 actionable から外す."""
+    _write_state(
+        tmp_path / "passed" / ".mission-state" / "sessions" / "passed.json",
+        project_root=str(tmp_path / "passed"),
+        mission_id="passed",
+        session_id="passed",
+    )
+    cases = [
+        (
+            "handoff-root",
+            "partial-done",
+            "read-only監査証跡をroot missionへ引き渡し済み。統合判定と継続実行のownershipをrootへ移管",
+        ),
+        (
+            "handoff-root-other",
+            "other",
+            "read-only監査証跡をroot missionへ引き渡し済み。統合判定と継続実行のownershipをrootへ移管したためsubagent sessionをterminal化",
+        ),
+        (
+            "handoff-parent",
+            "partial-done",
+            "Final Checker evidence is complete and delivered; parent Issue mission exclusively owns iteration-2 aggregation",
+        ),
+        (
+            "bounded-review",
+            "partial-done",
+            "diff re-review accepted at local HEAD; final exact-head acceptance remains with parent final checker",
+        ),
+        (
+            "approval-merge",
+            "awaiting-approval",
+            "PR #123はlatest headでCI greenかつmerge可能。実環境へのactivationには明示的なmerge承認が必要。",
+        ),
+        (
+            "stale-orphan",
+            "stale",
+            "orphan: pid 4084 dead or reused (cleanup-stale)",
+        ),
+    ]
+    for name, category, reason in cases:
+        _write_state(
+            tmp_path / name / ".mission-state" / "sessions" / f"{name}.json",
+            project_root=str(tmp_path / name),
+            mission_id=name,
+            session_id=name,
+            passes=False,
+            loop_active=False,
+            halt_category=category,
+            halt_reason=reason,
+        )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-18",
+            "--min-pass-rate",
+            "0.9",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+
+    assert data["halt_count"] == 6
+    assert data["actionable_halt_count"] == 1
+    assert data["non_actionable_halt_count"] == 5
+    assert data["halt_disposition_breakdown"] == {
+        "actionable": 1,
+        "awaiting-external": 1,
+        "delegated": 4,
+    }
+    assert data["all_finding_code_counts"]["halted-runs"] == 1
+
+
 def test_audit_actionable_halts_keep_current_historical_periods(tmp_path):
     """P1 の current / historical 区分は actionable halt のみを対象に維持する."""
     cases = [
