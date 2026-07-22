@@ -11,6 +11,10 @@
 - Pro プラン利用上限が回復していること (較正 run は名目 $22 消費。本 run は下記見積)
 - model 固定は PATH shim で `--model claude-sonnet-5` を注入し、artifact の
   `modelUsage` で確認する (ANTHROPIC_MODEL 環境変数は効かない)
+- **permission-mode 汚染防止 (#268)**: CC セッションの Bash から起動する場合、shim で
+  `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0` を明示しないと `acceptEdits` が default に
+  強制降格される。run 後に各 record の stderr に `Permission mode forced` 警告が
+  ないことを必ず確認する
 
 ## Step 1: 較正 smoke (1 task, fail-first 検証)
 
