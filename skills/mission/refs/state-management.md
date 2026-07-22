@@ -68,7 +68,18 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py mark-passes
 # 「完了しました」等の完了風自由文と threshold 未達 halt (partial-done) を区別できる。
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py mark-halt --reason "<理由>" --category partial-done
 
-# #123 (推奨): 復帰を 1 コマンドに統合。refresh-pid → cleanup-empty → cleanup-stale → next を
+# 明示 halt の再活性化。対象操作と state 再活性化の両方についてユーザー承認を得た後だけ使う。
+# --expected-category は現在の有効な halt_category と一致が必須。不正・欠落した旧値は unknown で確認し、
+# raw値は監査へ保持する。成功時は halt_reason / halt_category を current state から消し、
+# 旧停止理由・旧カテゴリ・承認理由・遷移先phaseを append-only の reactivation_history へ保存する。
+# stale/orphan halt には使用せず、下記 resume を使う。
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py reactivate \
+    --approved-by-user \
+    --expected-category awaiting-approval \
+    --reason "<ユーザーが承認した再開理由>" \
+    [--phase planning|executing|reviewing|scoring]
+
+# #123 (stale/orphan復帰の推奨): 復帰を 1 コマンドに統合。refresh-pid → cleanup-empty → cleanup-stale → next を
 # 正しい順序 (refresh-pid が先) で原子的に実行し、next の出力に resume サマリ
 # ({"pid_refreshed","reactivated","cleaned_empty","halted_stale","dry_run"}) を添えて返す。
 # refresh-pid が cleanup-stale より先に走るため、復帰直後の旧 (dead) PID でも自 state を orphan halt しない。
@@ -148,7 +159,7 @@ mission-state.py advance --phase <planning|executing|reviewing|scoring> --activi
 
 **atomic `advance` (#237)**: phase 遷移と activity 切替を単一 lock・単一 write で行う。`set phase=` + `activity start` の 2 コマンド運用では「phase だけ進んで activity が空」の state を作れてしまい、activity coverage 欠損 (strict cohort 実測 9.96%) の構造要因になる。phase 境界では advance を優先する。検証 (phase 正規化 #188 / kind:reason enum) は lock 取得前に行い、不正入力では一切 write しない。terminal phase (`done`/`halted`) への遷移は `mark-passes` / `mark-halt` 専用であり advance は reject する (gate 迂回の防止)。同一 phase を指定した場合は activity 切替のみ行う (旧 segment を閉じて記録)。
 
-reason は kind ごとの enum から明示し、未知の原因を推測しない。detail は制御文字と改行を除去し、空白を正規化して160文字に制限する。crash 後の `resume` / `refresh-pid` / 同一 mission の `init` と、自動stale/orphan cleanup・Stop hookは、open segment を最後の有効な `updated_at` まで一度だけ閉じる。その後の空白時間は `activity_unobserved_gap_sec` であり、work/idleには分類しない。明示的な `mark-passes` / `mark-halt` / `halt --all` は、現在観測中の遷移を宣言するため制御時刻まで閉じる。自動stale haltは停止前phaseを `resume_target_phase` に保存し、`refresh-pid` がそのphaseを復元してresume時刻から再開する。明示haltは自動復帰しない。
+reason は kind ごとの enum から明示し、未知の原因を推測しない。detail は制御文字と改行を除去し、空白を正規化して160文字に制限する。crash 後の `resume` / `refresh-pid` / 同一 mission の `init` と、自動stale/orphan cleanup・Stop hookは、open segment を最後の有効な `updated_at` まで一度だけ閉じる。その後の空白時間は `activity_unobserved_gap_sec` であり、work/idleには分類しない。明示的な `mark-passes` / `mark-halt` / `halt --all` は、現在観測中の遷移を宣言するため制御時刻まで閉じる。自動stale haltは停止前phaseを `resume_target_phase` に保存し、`refresh-pid` がそのphaseを復元してresume時刻から再開する。明示haltは自動復帰せず、対象操作とstate再活性化のユーザー承認後に`reactivate`を使う。`reactivate`は`resumed-implementation`のactive segmentを同じlock内で開始する。
 
 state は `activity_current`、直近32件の `activity_segments`、固定 map の `activity_rollup` を持つ。古い raw segment を落としても rollup が全期間の duration を保持する。`stats` と `mission-audit.py` は同じ reducer を使い、task/phase p50・p90（linear interpolation R7）、kind/reason totals、coverage、unclassified、open/invalid counts を同じ定義で返す。非terminal current phase は `phase_started_at` から persisted `updated_at` までを coverage denominator に含め、未遷移だけを理由に100%を超えない。live/archive duplicate は正規化した `(project_root, session_id, mission_id)` と status/newest/path の共通 precedence で1件へ正規化する。project_root欠落時はstate fileを所有するproject pathを補完し、別projectの同一sid/midを潰さない。task key は `mission_id`、欠落時は `unknown`。open、negative、non-finite、未知 enum、必須map欠落、不整合 rollup、有限値同士の加算overflowは percentile/coverage/aggregate から除外する。JSON出力は非標準の `Infinity` / `NaN` に依存しない。activity のない旧 state は phase duration を unclassified とし、理由は補完しない。
 

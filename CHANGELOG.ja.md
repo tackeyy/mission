@@ -17,6 +17,7 @@
 
 ### セキュリティ
 
+- 手動 halt した mission の再開を、専用の `reactivate --approved-by-user --expected-category ... --reason ...` 遷移に限定しました。停止カテゴリを検証し、旧停止理由・カテゴリ・承認理由を append-only の `reactivation_history` に残したうえで、current の停止フィールドをクリアし、activity 計測を同一 lock 内で再開します。汎用 `set` では halt の解除や承認監査の書き換えができません。自動 stale/orphan 復旧は引き続き `resume` / `refresh-pid` を使い、復旧時に current の `halt_category` もクリアします。
 - `codex-preflight --strict` が deprecated な `MISSION_REQUIRE_SCORING_EVIDENCE=0` escape hatch を検出して reject する (exit 2)。あわせて実行結果を not ok として報告する。この環境変数は legacy な `push-score --items` 経路で scoring-evidence gate をバイパスするため、有効なまま実作業へ進んではならない。escape hatch 自体は当面機能を維持するが、文言を `DEPRECATED ESCAPE HATCH` に変更し、次のマイナーリリースで削除予定とした (#226)。
 
 ### 追加
