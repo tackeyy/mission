@@ -12,6 +12,7 @@
 ### 追加
 
 - mission-vs-goal ベンチマークに `openworld-discovery` cohort（`tasks.openworld.json`）を追加した。open-world の finding 発見をテストする 3 タスクで構成され、solver は事前列挙なしで divergence・contradiction・root cause を独立に発見する必要がある。タスク設計: constant-hunt（canonical default に対するサービス横断 timeout 監査）、contradiction-chain（real contradiction + 注意深く読むと整合する decoy）、incremental-reveal（最初の仮説が誤りである時系列 incident log）。scoring は tail cohort と同じ `quality_markers` / `forbidden_markers` / `hidden_paths` infrastructure を使う (#251)。
+- `_derive_next_action` が `iteration >= 2` かつ `critic_has_new_scope=false` のとき `reviewer_count: 2` を返すようになり、diff-only review のオーバーヘッドを最大 1/3 削減する。`critic_has_new_scope` フィールドは `set` で設定可能、未設定時は full count（安全側）。`aggregate-reviews` に `--min-reviewers N` を追加し、N 未満の reviewer JSON 入力を exit 2 で reject する（合意偽装防止）。`next` の command_hint は effective reviewer count >= 2 のとき自動的に `--min-reviewers` を含む (#240)。
 
 ### 修正
 

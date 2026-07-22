@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - The mission-vs-goal benchmark adds an `openworld-discovery` cohort (`tasks.openworld.json`) with 3 tasks that test open-world finding discovery — the solver must independently identify divergences, contradictions, or root causes without a pre-enumerated checklist. Task designs: constant-hunt (cross-service timeout audit against canonical defaults), contradiction-chain (real contradiction + decoy that is actually consistent), incremental-reveal (chronological incident log where the obvious hypothesis is wrong). Scoring uses the same `quality_markers` / `forbidden_markers` / `hidden_paths` infrastructure as the tail cohort (#251).
+- `_derive_next_action` returns `reviewer_count: 2` (instead of full count) when `iteration >= 2` and `critic_has_new_scope` is `false`, reducing diff-only review overhead by up to 1/3 of reviewer model work. The `critic_has_new_scope` field is settable via `set` and defaults to absent (safe: full count). `aggregate-reviews` gains `--min-reviewers N` which rejects inputs with fewer than N reviewer JSONs (exit 2), preventing agreement forgery. The `next` command_hint automatically includes `--min-reviewers` when the effective reviewer count is >= 2 (#240).
 
 ### Fixed
 
