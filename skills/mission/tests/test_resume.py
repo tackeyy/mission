@@ -129,6 +129,7 @@ def test_resume_reactivates_orphan_halt(state_dir, run_cli):
     after = json.loads(sf.read_text())
     assert after["loop_active"] is True   # 再活性化された
     assert after["halt_reason"] == ""     # halt 解除
+    assert "halt_category" not in after   # 停止カテゴリは current state から除去
     # 自 state は halt されていない (refresh-pid が cleanup-stale より先に走った証跡)
     assert after["passes"] is False
 

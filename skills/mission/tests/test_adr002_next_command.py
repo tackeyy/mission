@@ -36,6 +36,40 @@ def test_next_when_halted_reports_blocker(state_dir, run_cli):
     assert "waiting for API key" in out["summary"]
 
 
+def test_next_manual_halt_suggests_audited_reactivate(state_dir, run_cli):
+    _set_state(
+        state_dir,
+        loop_active=False,
+        phase="halted",
+        halt_reason="waiting for explicit approval",
+        halt_category="awaiting-approval",
+    )
+
+    out = _next(run_cli, state_dir)
+
+    assert out["next_action"] == "report-blocker"
+    assert "reactivate" in out["command_hint"]
+    assert "--approved-by-user" in out["command_hint"]
+    assert "--expected-category awaiting-approval" in out["command_hint"]
+    assert "refresh-pid" not in out["command_hint"]
+
+
+def test_next_stale_halt_suggests_resume_not_manual_reactivate(state_dir, run_cli):
+    _set_state(
+        state_dir,
+        loop_active=False,
+        phase="halted",
+        halt_reason="orphan: previous agent exited",
+        halt_category="stale",
+    )
+
+    out = _next(run_cli, state_dir)
+
+    assert out["next_action"] == "report-blocker"
+    assert out["command_hint"] == "mission-state.py resume"
+    assert "reactivate" not in out["command_hint"]
+
+
 def test_next_when_passed_reports_complete(state_dir, run_cli):
     _set_state(state_dir, passes=True, loop_active=False, phase="done")
     out = _next(run_cli, state_dir)

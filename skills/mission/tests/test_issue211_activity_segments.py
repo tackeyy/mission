@@ -1049,6 +1049,7 @@ def test_stale_terminal_restores_pre_halt_phase_on_refresh_and_allows_work(
     resumed = json.loads(path.read_text())
     assert resumed["loop_active"] is True
     assert resumed["halt_reason"] == ""
+    assert "halt_category" not in resumed
     assert resumed["phase"] == "executing"
     assert resumed["phase_started_at"] == "2026-07-21T01:01:00Z"
     assert "resume_target_phase" not in resumed
