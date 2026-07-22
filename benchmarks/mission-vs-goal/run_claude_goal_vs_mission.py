@@ -365,17 +365,32 @@ def classify_run_status(
     }
 
 
-def score_from_signals(validator_pass: bool, marker_score: float | None) -> tuple[float, float]:
-    """Deterministic, arm-blind scoring (F-1).
+def score_from_signals(
+    validator_pass: bool,
+    marker_score: float | None,
+    validator_fraction: float | None = None,
+    has_markers: bool = True,
+) -> tuple[float, float]:
+    """Deterministic, arm-blind scoring (F-1; gradient v2 per #247).
 
     The arm identity is never consulted here; the same artifact signals produce
     the same score for any arm. Returns (quality_score, evidence_completeness).
-        quality = 1.0 + 3.0 * validator_pass + 1.0 * (marker_score or 0.0)
-    Marker-less tasks (marker_score is None -> treated as 0.0) collapse to 1.0
-    (fail) or 4.0 (pass).
+
+    Markered tasks (#247 gradient v2):
+        quality = 1.0 + 1.0 * validator_fraction + 3.0 * (marker_score or 0.0)
+    Content recall dominates, so validator-pass + full-marker no longer pins every
+    completed record to the 5.0 ceiling by structure alone; partial marker recall
+    produces a graded score.
+
+    Marker-less tasks keep the legacy binary mapping (1.0 fail / 4.0 pass) so the
+    historical meaning of the baseline cohorts is unchanged.
     """
+    if not has_markers:
+        value = round(1.0 + 3.0 * (1.0 if validator_pass else 0.0), 2)
+        return value, value
+    fraction = validator_fraction if validator_fraction is not None else (1.0 if validator_pass else 0.0)
     base = marker_score if marker_score is not None else 0.0
-    value = round(1.0 + 3.0 * (1.0 if validator_pass else 0.0) + 1.0 * base, 2)
+    value = round(1.0 + 1.0 * fraction + 3.0 * base, 2)
     return value, value
 
 
@@ -407,15 +422,26 @@ def evaluate_run(
 ) -> dict:
     output_path = worktree / output_rel
     text = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
-    required_headings = ["Evidence", "Assumptions"]
+    # #248 (B4): validator gate は両アーム共通の見出しのみ。goal 5 見出し vs
+    # mission 8 見出しの非対称は完走判定の難易度差と「冗長に書くほど有利」の
+    # 歪みを生むため、アーム固有見出しは情報として記録するが gate しない。
+    common_headings = ["Evidence", "Assumptions"]
     if arm == "claude_code_goal_command":
-        required_headings += ["Goal", "Result", "Stop Condition"]
+        arm_headings = ["Goal", "Result", "Stop Condition"]
     else:
-        required_headings += ["Mission", "Plan", "Execution", "Review", "Score", "Stop Decision"]
+        arm_headings = ["Mission", "Plan", "Execution", "Review", "Score", "Stop Decision"]
 
-    missing_headings = [heading for heading in required_headings if heading not in text]
+    missing_headings = [heading for heading in common_headings if heading not in text]
+    missing_arm_specific = [heading for heading in arm_headings if heading not in text]
     completion = returncode == 0 and output_path.exists()
     validator_pass = completion and not missing_headings
+    # #247 (B1): 共通見出しの充足率 (0..1)。arm 固有を混ぜると非対称が再燃するため
+    # 共通見出しのみで計算する。
+    validator_fraction = (
+        (len(common_headings) - len(missing_headings)) / len(common_headings)
+        if completion
+        else 0.0
+    )
     # F-2: markers are scored against the form-stripped body, so template
     # structure earns no marker credit. The unstripped score is kept as
     # quality_marker_score_raw for comparability with pre-F-2 records.
@@ -426,7 +452,13 @@ def evaluate_run(
         marker_eval["quality_marker_recall"] = None
         marker_eval_raw["quality_marker_score"] = None
     marker_ratio = marker_eval["quality_marker_score"]
-    quality_score, evidence_score = score_from_signals(validator_pass, marker_ratio)
+    has_markers = bool(task.get("quality_markers"))
+    quality_score, evidence_score = score_from_signals(
+        validator_pass,
+        marker_ratio,
+        validator_fraction=validator_fraction,
+        has_markers=has_markers,
+    )
     status = classify_run_status(
         stdout=stdout,
         stderr=stderr,
@@ -441,11 +473,19 @@ def evaluate_run(
         "validator_pass": validator_pass,
         **status,
         "human_quality_score": quality_score,
-        "quality_score_method": "automated_heuristic_form_stripped_not_blind_human",
+        # #247: markered task は gradient v2、marker-less は legacy 二値の意味を保つ。
+        # method 文字列で新旧 record を機械的に区別できる。
+        "quality_score_method": (
+            "automated_heuristic_form_stripped_gradient_v2_not_blind_human"
+            if has_markers
+            else "automated_heuristic_form_stripped_not_blind_human"
+        ),
         "intervention_count": 0,
         "resume_success": None if "resume" not in task["id"] else validator_pass,
         "evidence_completeness": evidence_score,
         "missing_headings": missing_headings,
+        "missing_arm_specific_headings": missing_arm_specific,
+        "validator_fraction": round(validator_fraction, 2),
         "artifact_bytes": output_path.stat().st_size if output_path.exists() else 0,
         **marker_eval,
         "quality_marker_score_raw": marker_eval_raw["quality_marker_score"],
@@ -619,6 +659,8 @@ def run_one(
         "intervention_count": evaluation["intervention_count"],
         "resume_success": evaluation["resume_success"],
         "evidence_completeness": evaluation["evidence_completeness"],
+        "validator_fraction": evaluation["validator_fraction"],
+        "missing_arm_specific_headings": evaluation["missing_arm_specific_headings"],
         "elapsed_minutes": elapsed,
         "token_estimate": input_tokens + output_tokens if isinstance(input_tokens, int) and isinstance(output_tokens, int) else None,
         "artifacts": artifacts,

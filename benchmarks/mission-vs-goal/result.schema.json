@@ -130,8 +130,22 @@
         "blind_human",
         "label_hidden_human",
         "automated_heuristic_not_blind_human",
-        "automated_heuristic_form_stripped_not_blind_human"
+        "automated_heuristic_form_stripped_not_blind_human",
+        "automated_heuristic_form_stripped_gradient_v2_not_blind_human"
       ]
+    },
+    "validator_fraction": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "#247: 両アーム共通の必須見出しの充足率 (0..1)。gradient v2 スコアの部分点項。"
+    },
+    "missing_arm_specific_headings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "#248: アーム固有見出しの欠落 (情報のみ、validator gate には使わない)。"
     },
     "quality_marker_score": {
       "type": [

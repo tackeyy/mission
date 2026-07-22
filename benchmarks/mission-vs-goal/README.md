@@ -63,11 +63,19 @@ Both runners use the same pure function `score_from_signals(validator_pass,
 marker_score)`:
 
 ```
-quality_score = 1.0 + 3.0 * validator_pass + 1.0 * marker_score
+quality_score = 1.0 + 1.0 * validator_fraction + 3.0 * marker_score   # markered tasks (gradient v2, #247)
+quality_score = 1.0 + 3.0 * validator_pass                            # marker-less tasks (legacy binary)
 ```
 
 Marker-less tasks (no `quality_markers`) collapse to `1.0` (fail) or `4.0`
-(pass). `evidence_completeness` uses the same signals. Identical artifact
+(pass).
+For markered tasks, `validator_fraction` is the coverage of the headings
+required from **both** arms (Evidence / Assumptions) per #248. Missing
+arm-specific headings (3 for goal, 6 for mission) are recorded in
+`missing_arm_specific_headings` but never gate the validator or the score —
+the heading-count asymmetry skewed completion difficulty and rewarded
+verbosity. New records are machine-distinguishable via
+`quality_score_method` (`..._gradient_v2_...`). `evidence_completeness` uses the same signals. Identical artifact
 signals therefore produce identical scores for any arm; the earlier
 arm-hardcoded scores (mission fixed at 4.5, goal at 4.0) have been removed.
 

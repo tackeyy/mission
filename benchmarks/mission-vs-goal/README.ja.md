@@ -61,10 +61,12 @@ time budget、task prompt を使います。
 同じ純関数 `score_from_signals(validator_pass, marker_score)` を使います:
 
 ```
-quality_score = 1.0 + 3.0 * validator_pass + 1.0 * marker_score
+quality_score = 1.0 + 1.0 * validator_fraction + 3.0 * marker_score   # markered task (gradient v2, #247)
+quality_score = 1.0 + 3.0 * validator_pass                            # marker なし task (legacy 二値)
 ```
 
 marker なしの task は `1.0`（fail）または `4.0`（pass）に収束します。
+markered task の `validator_fraction` は**両アーム共通の必須見出し**（Evidence / Assumptions）の充足率です（#248）。アーム固有見出し（goal 3 個 / mission 6 個）の欠落は `missing_arm_specific_headings` に記録されますが、validator gate・スコアには使いません — 見出し数の非対称が完走判定の難易度差と「冗長に書くほど有利」の歪みを生んでいたためです。新旧 record は `quality_score_method`（`..._gradient_v2_...`）で機械的に区別できます。
 
 marker の評価は **form-stripped** な artifact 本文に対して行います（F-2）。
 `strip_form` は markdown 見出し・ラベルだけの行・水平線・table separator 行を

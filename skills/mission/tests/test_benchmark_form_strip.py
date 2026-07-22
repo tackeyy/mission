@@ -113,9 +113,11 @@ def test_evaluate_run_scores_markers_on_stripped_body(tmp_path):
     assert heading_only["validator_pass"] is True
     assert heading_only["quality_marker_score"] == 0.0
     assert heading_only["quality_marker_score_raw"] == 1.0
-    assert heading_only["human_quality_score"] == 4.0
+    # #247 gradient v2: markered task で marker 0 の pass は 2.0 (旧 4.0)。
+    # 構造だけでは中位スコアに届かない。
+    assert heading_only["human_quality_score"] == 2.0
     assert heading_only["quality_score_method"] == (
-        "automated_heuristic_form_stripped_not_blind_human"
+        "automated_heuristic_form_stripped_gradient_v2_not_blind_human"
     )
 
     # Body coverage: the phrase appears in prose and earns the marker.
