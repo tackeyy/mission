@@ -994,6 +994,23 @@ def _normalize_halt_category(value: str | None) -> str:
     return value
 
 
+def _halt_category_for_confirmation(value) -> str:
+    """Normalize a persisted category for approval matching without mutating audit data."""
+    if isinstance(value, str) and value in HALT_CATEGORIES:
+        return value
+    return "unknown"
+
+
+def _is_legacy_stale_halt(category, reason) -> bool:
+    """Recognize pre-category stale/orphan state consistently across all recovery paths."""
+    category_is_legacy = category is None or category == "" or category == "unknown"
+    return (
+        category_is_legacy
+        and isinstance(reason, str)
+        and reason.startswith(("orphan:", "stale:"))
+    )
+
+
 # M7 (2026-06-10): SKILL.md Phase 1 の複雑度→Reviewer 数マッピング
 COMPLEXITY_REVIEWER_COUNT = {"Simple": 1, "Standard": 2, "Complex": 3, "Critical": 3}
 
@@ -4259,14 +4276,12 @@ def _derive_next_action(data: dict) -> dict:
     halt_reason = data.get("halt_reason") or ""
     if halt_reason:
         halt_category = data.get("halt_category")
-        legacy_stale = halt_category in (None, "", "unknown") and halt_reason.startswith(
-            ("orphan:", "stale:")
-        )
+        legacy_stale = _is_legacy_stale_halt(halt_category, halt_reason)
         if halt_category == "stale" or legacy_stale:
             recovery_summary = "stale/orphan halt は resume で安全に再開する"
             recovery_hint = "mission-state.py resume"
         else:
-            expected_category = halt_category if halt_category in HALT_CATEGORIES else "unknown"
+            expected_category = _halt_category_for_confirmation(halt_category)
             recovery_summary = "手動 halt は対象操作と state 再活性化の明示承認後に reactivate する"
             recovery_hint = (
                 "mission-state.py reactivate --approved-by-user "
@@ -5839,11 +5854,7 @@ def cmd_reactivate(args):
         previous_halt_reason = data.get("halt_reason") or ""
         raw_halt_category = data.get("halt_category")
         previous_halt_category = raw_halt_category if raw_halt_category not in (None, "") else "unknown"
-        expected_halt_category = (
-            raw_halt_category
-            if isinstance(raw_halt_category, str) and raw_halt_category in HALT_CATEGORIES
-            else "unknown"
-        )
+        expected_halt_category = _halt_category_for_confirmation(raw_halt_category)
         previous_phase = data.get("phase") or "unknown"
         if data.get("passes") is True:
             print("ERROR: 合格済み mission は reactivate できません。", file=sys.stderr)
@@ -5851,9 +5862,7 @@ def cmd_reactivate(args):
         if data.get("loop_active") is not False or not previous_halt_reason:
             print("ERROR: reactivate 対象の停止中 mission ではありません。", file=sys.stderr)
             sys.exit(2)
-        legacy_stale = raw_halt_category in (None, "", "unknown") and previous_halt_reason.startswith(
-            ("orphan:", "stale:")
-        )
+        legacy_stale = _is_legacy_stale_halt(raw_halt_category, previous_halt_reason)
         if expected_halt_category == "stale" or legacy_stale:
             print(
                 "ERROR: stale/orphan halt は reactivate ではなく resume を使用してください。",
@@ -5967,9 +5976,7 @@ def cmd_refresh_pid(args):
         prev_halt = data.get("halt_reason", "")
         prev_category = data.get("halt_category")
         prev_loop = data.get("loop_active", False)
-        legacy_reactivatable_halt = not prev_category and isinstance(prev_halt, str) and (
-            prev_halt.startswith("orphan:") or prev_halt.startswith("stale:")
-        )
+        legacy_reactivatable_halt = _is_legacy_stale_halt(prev_category, prev_halt)
         was_reactivatable_halt = prev_category == "stale" or legacy_reactivatable_halt
         target_phase = data.get("resume_target_phase")
         phase_can_reactivate = data.get("phase") != "halted" or target_phase in {

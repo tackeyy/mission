@@ -166,6 +166,34 @@ def test_malformed_category_uses_unknown_confirmation_but_preserves_raw_audit(
     assert audit["previous_halt_category"] == "legacy-bogus"
 
 
+def test_structured_malformed_category_does_not_crash_next_and_preserves_raw_audit(
+    state_dir, run_cli, read_state
+):
+    _halt(run_cli, state_dir)
+    path = state_dir / "sessions" / "test.json"
+    state = read_state(state_dir)
+    state["halt_category"] = {"legacy": "bogus"}
+    path.write_text(json.dumps(state))
+
+    next_result = run_cli("next", cwd=state_dir.parent)
+    assert next_result.returncode == 0, next_result.stderr
+    assert "--expected-category unknown" in json.loads(next_result.stdout)["command_hint"]
+
+    result = run_cli(
+        "reactivate",
+        "--approved-by-user",
+        "--reason",
+        "user approved structured legacy state recovery",
+        "--expected-category",
+        "unknown",
+        cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 0, result.stderr
+    audit = read_state(state_dir)["reactivation_history"][-1]
+    assert audit["previous_halt_category"] == {"legacy": "bogus"}
+
+
 def test_reactivate_closes_legacy_current_activity_before_starting_new_segment(
     state_dir, run_cli, read_state
 ):
