@@ -11,6 +11,9 @@
 
 ### 追加
 
+- mission-vs-goal ベンチマークに `discriminating` cohort（`tasks.discriminating.json`、5 tasks）を追加した。openworld-v1 で確認した品質天井の解消を目的に、各 task 7-9 個の quality markers を 3-5 fixture に分散させ、documented-override / permitted-difference / valid-but-suspicious の decoy を forbidden markers で採点する。`fail_first` 2 tasks（36 セル構成監査・5 文書台帳照合）は単一パスの網羅が review で fail する設計で `iteration >= 2` を強制し、#240/#241 の diff-review 経路に初の実運用観測を与える。構造・marker 密度・fail-first の存在・fixture 実在・marker の fixture 発見可能性はテストで強制する。N>=10 採用判定 runbook（`discriminating-cohort-runbook.ja.md` / `.md`）に smoke gate・本 run コマンド・機械的な採用ゲートを定義した (#262)。
+
+
 - mission-vs-goal ベンチマーク runner が、mission ループを初期化しなかった mission arm record を無効化するようになった。mission arm 実行後に `.mission-state` が不在の場合、record を `run_status=failed` / `failure_kind=mission_loop_not_initialized` / `comparable_attempt=false` に再分類する（外的要因の blocked は元の分類を保持し、破損 state はループ開始の証拠があるため無効化しない）。アーム別 summary に comparable record のみで計算する `comparable_average_quality_score` / `comparable_average_elapsed_minutes` / `comparable_cost_usd_mean` を追加し、無効 record による速度・コスト比較の希釈を構造的に防ぐ。既存フィールドは全 records の歴史的意味を維持する (#261)。
 
 

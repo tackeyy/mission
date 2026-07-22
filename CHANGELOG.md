@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The mission-vs-goal benchmark gains a `discriminating` cohort (`tasks.discriminating.json`, 5 tasks) designed to remove the quality ceiling observed in openworld-v1: 7-9 quality markers per task spread across 3-5 fixture files, documented-override / permitted-difference / valid-but-suspicious decoys scored via forbidden markers, and two `fail_first` tasks (36-cell config audit, five-document ledger reconciliation) built to make single-pass coverage fail review and force `iteration >= 2`, giving the #240/#241 diff-review path its first runtime observations. Structure, marker density, fail-first presence, fixture existence, and marker-discoverability-in-fixtures are all enforced by tests. An N>=10 adoption runbook (`discriminating-cohort-runbook.ja.md` / `.md`) defines the smoke gate, the main-run command, and mechanical adoption gates (#262).
+
+
 - The mission-vs-goal benchmark runner now invalidates mission-arm records whose run never initialized the mission loop: when `.mission-state` is absent after a mission-arm run, the record is reclassified as `run_status=failed` / `failure_kind=mission_loop_not_initialized` / `comparable_attempt=false` (externally blocked records keep their original classification, and corrupted-but-present state is not invalidated because the loop demonstrably started). Per-arm summaries gain `comparable_average_quality_score`, `comparable_average_elapsed_minutes`, and `comparable_cost_usd_mean` computed over comparable records only, so an invalid record can no longer dilute headline speed/cost comparisons; existing aggregate fields keep their historical all-records meaning (#261).
 
 
