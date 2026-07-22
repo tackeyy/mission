@@ -18,7 +18,7 @@ def test_init_with_complexity_sets_field(run_cli, tmp_path):
 
 
 def test_init_complexity_sets_reviewer_count_mapping(run_cli, tmp_path):
-    """Simple→1 / Complex→3 のマッピングが state に反映される."""
+    """Simple→1 / Complex→2 (#266) のマッピングが state に反映される."""
     run_cli("init", "M7 simple mission", "--complexity", "Simple", cwd=tmp_path, check=True)
     s = _read(tmp_path)
     assert s["complexity"] == "Simple"
@@ -47,7 +47,7 @@ def test_set_complexity_syncs_reviewer_count(run_cli, tmp_path):
     run_cli("set", "complexity=Complex", cwd=tmp_path, check=True)
     s = _read(tmp_path)
     assert s["complexity"] == "Complex"
-    assert s["reviewer_count"] == 3
+    assert s["reviewer_count"] == 2  # #266
 
 
 def test_set_complexity_explicit_reviewer_count_wins(run_cli, tmp_path):

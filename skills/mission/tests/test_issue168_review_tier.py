@@ -62,12 +62,20 @@ def test_derive_review_tier_standard_gives_standard():
     assert signals == []
 
 
-def test_derive_review_tier_complex_gives_full():
-    """Complex complexity → full."""
+def test_derive_review_tier_complex_gives_standard():
+    """#266: シグナルなし Complex → standard (2名。discriminating-v1 でレビュー待ち 62% を実測)."""
     mod = _get_module()
     tier, signals = mod.derive_review_tier("some mission", "Complex")
-    assert tier == "full"
+    assert tier == "standard"
     assert signals == []
+
+
+def test_derive_review_tier_complex_with_irreversible_escalates_full():
+    """#266: 不可逆キーワードありの Complex は従来どおり full へエスカレート."""
+    mod = _get_module()
+    tier, signals = mod.derive_review_tier("deploy the new billing pipeline to production", "Complex")
+    assert tier == "full"
+    assert signals
 
 
 def test_derive_review_tier_critical_gives_full():
@@ -235,11 +243,20 @@ def test_init_auto_review_tier_simple(run_cli, tmp_path):
 
 
 def test_init_auto_review_tier_complex(run_cli, tmp_path):
-    """Complex complexity → auto で full."""
+    """#266: シグナルなし Complex → auto で standard (reviewer 2名)."""
     run_cli("init", "complex refactor", "--complexity", "Complex", cwd=tmp_path, check=True)
     s = _read(tmp_path)
-    assert s["review_tier"] == "full"
+    assert s["review_tier"] == "standard"
     assert s["review_tier_source"] == "auto"
+    assert s["reviewer_count"] == 2
+
+
+def test_init_auto_review_tier_critical_stays_full(run_cli, tmp_path):
+    """#266: Critical は full (3名) を維持."""
+    run_cli("init", "critical incident response", "--complexity", "Critical", cwd=tmp_path, check=True)
+    s = _read(tmp_path)
+    assert s["review_tier"] == "full"
+    assert s["reviewer_count"] == 3
 
 
 def test_init_user_specified_review_tier_light(run_cli, tmp_path):
@@ -366,9 +383,10 @@ def test_set_complexity_auto_source_rederives_review_tier(run_cli, tmp_path):
 
     run_cli("set", "complexity=Complex", cwd=tmp_path, check=True)
     s = _read(tmp_path)
-    assert s["review_tier"] == "full"
+    # #266: シグナルなし Complex は standard (2名)
+    assert s["review_tier"] == "standard"
     assert s["review_tier_source"] == "auto"
-    assert s["reviewer_count"] == 3
+    assert s["reviewer_count"] == 2
 
 
 def test_set_complexity_user_source_preserves_review_tier(run_cli, tmp_path):
@@ -394,8 +412,8 @@ def test_set_complexity_source_field_absent_treated_as_auto(run_cli, tmp_path, s
     r = run_cli("set", "complexity=Complex", cwd=state_dir.parent)
     assert r.returncode == 0
     s = json.loads((state_dir / "sessions" / "test.json").read_text())
-    # 再導出で full になる
-    assert s.get("review_tier") == "full"
+    # 再導出で standard になる (#266: シグナルなし Complex)
+    assert s.get("review_tier") == "standard"
 
 
 # ============================================================

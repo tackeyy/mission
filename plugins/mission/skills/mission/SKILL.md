@@ -109,7 +109,7 @@ init 後、対象ファイル候補が見えた時点で `specialists recommend 
 
 activity segment は観測専用で、reviewer 数・threshold・findings evidence・agreement・`open_high`・pass/fail gate を変更しない。外部応答、承認、reviewer の待機を開始する直前に対応する wait kind へ切り替え、応答後は `active` へ戻す。`idle` は「実行可能な作業がない」と明示できる場合だけ使う。crash/resume 間の不明時間は自動分類せず unobserved gap として保持する。reason enum と集計定義は `refs/state-management.md` の「Activity segment observability」を参照。
 
-Reviewer 数は Simple=1、Standard=2、Complex/Critical=3。Claude Code では Reviewer N 名を単一メッセージ内で並列起動する。Codex は順次でよい。観点Dは採点させず、計画指示明瞭度の改善を Critic の実行計画に反映する。
+Reviewer 数は Simple=1、Standard=2、Complex=2、Critical=3 (#266: シグナルなし Complex は独立2名で agreement 成立。不可逆・security シグナルで full=3 へエスカレート)。Claude Code では Reviewer N 名を単一メッセージ内で並列起動する。Codex は順次でよい。観点Dは採点させず、計画指示明瞭度の改善を Critic の実行計画に反映する。
 
 **review_tier (#168, #209)**: `init` が complexity とミッション記述から `review_tier`（light/standard/full）を auto 導出し state に記録する（`review_tier_source` / `review_tier_signals` / `review_tier_signal_details` で監査可能）。不可逆系キーワードは各出現の文脈を評価し、明示的に実操作を否定した候補だけを抑制する。条件付き・二重否定・不確実・単なる引用は安全側で full を維持し、security / high-risk シグナルは否定で抑制しない。light: reviewer 1名・`required=true` specialist のみ・critic は fail 時のみ spawn。standard/full: 従来どおり。**ゲート意味論は tier によらず不変**（threshold / open_high / findings evidence / halt）。詳細（導出テーブル・エスカレータ一覧・override 規律）は `refs/state-management.md` の「review_tier 導出と Light Tier 運用」節を参照。
 
