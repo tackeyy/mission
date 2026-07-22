@@ -1,0 +1,61 @@
+{
+  "arms": {
+    "claude_code_goal_command": {
+      "average_elapsed_minutes": 7.9,
+      "average_evidence_completeness": 5.0,
+      "average_intervention_count": 0.0,
+      "average_quality_marker_score": 1.0,
+      "average_quality_score": 5.0,
+      "blocked_records": 0,
+      "comparable_average_elapsed_minutes": 7.9,
+      "comparable_average_quality_score": 5.0,
+      "comparable_completion_rate": 1.0,
+      "comparable_cost_usd_mean": 2.6346,
+      "comparable_records": 1,
+      "comparable_validator_pass_rate": 1.0,
+      "completion_rate": 1.0,
+      "cost_usd_mean": 2.6346,
+      "cost_usd_total": 2.6346,
+      "marker_score_variance": null,
+      "records": 1,
+      "validator_pass_rate": 1.0
+    },
+    "mission": {
+      "average_elapsed_minutes": 30.45,
+      "average_evidence_completeness": 5.0,
+      "average_intervention_count": 0.0,
+      "average_quality_marker_score": 1.0,
+      "average_quality_score": 5.0,
+      "blocked_records": 0,
+      "comparable_average_elapsed_minutes": 30.45,
+      "comparable_average_quality_score": 5.0,
+      "comparable_completion_rate": 1.0,
+      "comparable_cost_usd_mean": 9.4308,
+      "comparable_records": 1,
+      "comparable_validator_pass_rate": 1.0,
+      "completion_rate": 1.0,
+      "cost_usd_mean": 9.4308,
+      "cost_usd_total": 9.4308,
+      "marker_score_variance": null,
+      "records": 1,
+      "validator_pass_rate": 1.0
+    }
+  },
+  "expected_records": 2,
+  "limitations": [
+    "Claude Code print mode smoke; does not fully exercise multi-turn interactive /goal persistence.",
+    "Quality and evidence scores are automated heuristic scores, not blind human review.",
+    "Blocked records are excluded from comparable quality-marker aggregates."
+  ],
+  "mission_profile": "full",
+  "records": 2,
+  "repeats": 1,
+  "run_id": "2026-07-23-discriminating-smoke",
+  "selected_task_ids": [
+    "disc-config-sprawl"
+  ],
+  "starting_commit": "bbd7602",
+  "stopped_early": false,
+  "task_cohort": "discriminating",
+  "task_file": "benchmarks/mission-vs-goal/tasks.discriminating.json"
+}

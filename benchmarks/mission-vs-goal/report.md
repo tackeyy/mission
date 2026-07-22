@@ -563,6 +563,64 @@ Unsafe interpretation:
 
 That is unsupported. The task was not paired through both arms.
 
+## Discriminating cohort adoption run (discriminating-v1)
+
+Status: executed 2026-07-23 JST as the #262 adoption run, in two stages: smoke
+(`disc-config-sprawl` paired, run id `2026-07-23-discriminating-smoke`) then
+the main run (5 tasks x 2 arms, run id `2026-07-23-discriminating-v1`).
+Starting commit `bbd7602` includes the #261 adherence guard and the #262
+cohort. Both arms pinned `--model claude-sonnet-5` via the PATH shim under
+identical constraints: `--max-budget-usd 10`, `--mission-budget-minutes 30`,
+timeout 2400s.
+
+### Smoke gates
+
+iter=2 occurred (fail-first worked), `critic_has_new_scope` was recorded —
+the first runtime observation of the #258 wiring / #240-#241 path — and no
+mission-loop adherence failures occurred. The ceiling gate did not clear
+(both arms marker 1.0). With iter2 firing, mission took 30.45 min / USD 9.43
+vs goal 7.9 min / USD 2.63 (~3.9x).
+
+### Main run aggregate
+
+| Metric | goal | mission | Interpretation |
+|---|---:|---:|---|
+| Completion rate | 3 / 5 | **5 / 5** | Under the identical USD 10 budget, goal failed to finish 2 tasks, burning USD 20.15 with no artifact; mission completed all 5 |
+| Comparable avg quality / marker | 5.0 / 1.0 | 5.0 / 1.0 | Quality tied at ceiling among completers; zero forbidden hits |
+| Comparable avg elapsed | 12.38 min | 15.74 min | Total-time ratio across the 3 valid pairs: mission 1.07x (1.26x / 3.23x / 0.44x per pair) |
+| Comparable cost mean | USD 4.22 | USD 7.65 | Mission costs more among completers |
+| Cost total incl. waste | USD 32.82 | USD 38.25 | Goal's USD 20.15 total-loss narrows the overall gap |
+
+The release-ledger mission run demonstrated the #238 budget guard in
+production: it halted gracefully at ~USD 9.1/10 with the artifact finalized
+(marker 1.0) instead of losing everything.
+
+### Adoption verdict (runbook Step 3)
+
+1. Measurement validity: pass (0 uninitialized mission records).
+2. Discrimination via marker variance: **not achieved** (all completers at
+   1.0) — but the cohort discriminated on a new axis: completion reliability
+   under a fixed budget (goal 3/5 vs mission 5/5).
+3. iter>=2 runtime observation: achieved in the smoke (probabilistic in the
+   main run; all main-run missions passed at iter1).
+4. Quality: **"quality > goal" remains undemonstrated** on marker recall.
+   Completion reliability under budget parity favors mission 5/5 vs 3/5.
+5. Speed: **achieved** — 1.07x total across comparable pairs, within the
+   pre-declared 1.5x parity band (degrades to ~3.9x when iter2 fires).
+
+Unsafe interpretations:
+
+> `/mission` produces higher quality than `/goal`.
+
+Unsupported: completers tie on quality; the advantage is completion
+reliability (N=5, dependent on the USD 10 budget setting).
+
+> Goal's budget exhaustion proves goal is worse.
+
+Only partially supported: `/goal` has no budget-pressure signal and no
+mechanism to finalize an artifact within budget, so the difference is
+structural. A USD 20 budget might let goal complete both tasks.
+
 ## Openworld cohort calibration run (openworld-v1)
 
 Status: executed 2026-07-22 JST. First paired calibration run of the
@@ -785,4 +843,10 @@ results/2026-07-22-fable5-tail-full-summary.json
 results/2026-07-22-claude-goal-vs-mission-openworld-v1.jsonl
 results/2026-07-22-claude-goal-vs-mission-openworld-v1-summary.json
 artifacts/2026-07-22-claude-goal-vs-mission-openworld-v1/
+results/2026-07-23-discriminating-smoke.jsonl
+results/2026-07-23-discriminating-smoke-summary.json
+artifacts/2026-07-23-discriminating-smoke/
+results/2026-07-23-discriminating-v1.jsonl
+results/2026-07-23-discriminating-v1-summary.json
+artifacts/2026-07-23-discriminating-v1/
 ```

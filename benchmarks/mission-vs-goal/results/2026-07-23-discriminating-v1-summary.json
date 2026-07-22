@@ -1,0 +1,65 @@
+{
+  "arms": {
+    "claude_code_goal_command": {
+      "average_elapsed_minutes": 17.7,
+      "average_evidence_completeness": 3.4,
+      "average_intervention_count": 0.0,
+      "average_quality_marker_score": 1.0,
+      "average_quality_score": 3.4,
+      "blocked_records": 2,
+      "comparable_average_elapsed_minutes": 12.38,
+      "comparable_average_quality_score": 5.0,
+      "comparable_completion_rate": 1.0,
+      "comparable_cost_usd_mean": 4.2248,
+      "comparable_records": 3,
+      "comparable_validator_pass_rate": 1.0,
+      "completion_rate": 0.6,
+      "cost_usd_mean": 6.5631,
+      "cost_usd_total": 32.8155,
+      "marker_score_variance": 0.0,
+      "records": 5,
+      "validator_pass_rate": 0.6
+    },
+    "mission": {
+      "average_elapsed_minutes": 15.74,
+      "average_evidence_completeness": 5.0,
+      "average_intervention_count": 0.0,
+      "average_quality_marker_score": 1.0,
+      "average_quality_score": 5.0,
+      "blocked_records": 0,
+      "comparable_average_elapsed_minutes": 15.74,
+      "comparable_average_quality_score": 5.0,
+      "comparable_completion_rate": 1.0,
+      "comparable_cost_usd_mean": 7.6496,
+      "comparable_records": 5,
+      "comparable_validator_pass_rate": 1.0,
+      "completion_rate": 1.0,
+      "cost_usd_mean": 7.6496,
+      "cost_usd_total": 38.2481,
+      "marker_score_variance": 0.0,
+      "records": 5,
+      "validator_pass_rate": 1.0
+    }
+  },
+  "expected_records": 10,
+  "limitations": [
+    "Claude Code print mode smoke; does not fully exercise multi-turn interactive /goal persistence.",
+    "Quality and evidence scores are automated heuristic scores, not blind human review.",
+    "Blocked records are excluded from comparable quality-marker aggregates."
+  ],
+  "mission_profile": "full",
+  "records": 10,
+  "repeats": 1,
+  "run_id": "2026-07-23-discriminating-v1",
+  "selected_task_ids": [
+    "disc-config-sprawl",
+    "disc-release-ledger",
+    "disc-contract-drift",
+    "disc-metrics-reconcile",
+    "disc-policy-exceptions"
+  ],
+  "starting_commit": "bbd7602",
+  "stopped_early": false,
+  "task_cohort": "discriminating",
+  "task_file": "benchmarks/mission-vs-goal/tasks.discriminating.json"
+}
