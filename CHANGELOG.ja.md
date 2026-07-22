@@ -11,6 +11,8 @@
 
 ### 変更
 
+- mission-vs-goal ベンチマークの runner に `--repeats N` を追加し、各 (task, arm) セルを N 回反復して record に `run_index` を記録できるようにした。summary にはアーム別の marker スコア分散と `total_cost_usd` の合計/平均 (blocked run の全損コストを含む) を追加し、flaky・ノイズと実力差を分離できるようにした (#249)。mission arm の record には、実行後の mission state から fail-open で抽出した `mission_review_tier` / `mission_iterations` / `mission_complexity` / `mission_passes` / `mission_halt_category` を記録し、tier 別のコスト・品質帰属を可能にした (#250)。
+
 - mission-vs-goal ベンチマークの scorer が、完走した markered record を全て 5.0 天井に張り付かせる問題を解消した。markered task は `1.0 + 1.0 × validator_fraction + 3.0 × marker_score`（gradient v2）となり内容 recall が支配項になる。marker なし task は legacy 二値 1.0/4.0 の歴史的意味を維持する。新 record は `quality_score_method`（`..._gradient_v2_...`）で機械的に区別でき、既存 JSONL は不変 (#247)。validator gate はアーム対称化し、両アーム共通見出し（Evidence/Assumptions）のみが `validator_pass` を決める。アーム固有見出し（goal 3 個 / mission 6 個）の欠落は `missing_arm_specific_headings` として記録するが gate しない — 見出し数の非対称による完走難易度差と「冗長に書くほど有利」の歪みを除去した (#248)。両 runner の `score_from_signals` は同一意味論をテストで強制している。
 
 ### 追加
