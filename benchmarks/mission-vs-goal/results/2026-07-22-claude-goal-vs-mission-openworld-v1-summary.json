@@ -1,0 +1,57 @@
+{
+  "arms": {
+    "claude_code_goal_command": {
+      "average_elapsed_minutes": 11.39,
+      "average_evidence_completeness": 5.0,
+      "average_intervention_count": 0.0,
+      "average_quality_marker_score": 1.0,
+      "average_quality_score": 5.0,
+      "blocked_records": 0,
+      "comparable_completion_rate": 1.0,
+      "comparable_records": 3,
+      "comparable_validator_pass_rate": 1.0,
+      "completion_rate": 1.0,
+      "cost_usd_mean": 3.0538,
+      "cost_usd_total": 9.1614,
+      "marker_score_variance": 0.0,
+      "records": 3,
+      "validator_pass_rate": 1.0
+    },
+    "mission": {
+      "average_elapsed_minutes": 10.66,
+      "average_evidence_completeness": 5.0,
+      "average_intervention_count": 0.0,
+      "average_quality_marker_score": 1.0,
+      "average_quality_score": 5.0,
+      "blocked_records": 0,
+      "comparable_completion_rate": 1.0,
+      "comparable_records": 3,
+      "comparable_validator_pass_rate": 1.0,
+      "completion_rate": 1.0,
+      "cost_usd_mean": 4.4169,
+      "cost_usd_total": 13.2507,
+      "marker_score_variance": 0.0,
+      "records": 3,
+      "validator_pass_rate": 1.0
+    }
+  },
+  "expected_records": 6,
+  "limitations": [
+    "Claude Code print mode smoke; does not fully exercise multi-turn interactive /goal persistence.",
+    "Quality and evidence scores are automated heuristic scores, not blind human review.",
+    "Blocked records are excluded from comparable quality-marker aggregates."
+  ],
+  "mission_profile": "full",
+  "records": 6,
+  "repeats": 1,
+  "run_id": "2026-07-22-claude-goal-vs-mission-openworld-v1",
+  "selected_task_ids": [
+    "openworld-constant-hunt",
+    "openworld-contradiction-chain",
+    "openworld-incremental-reveal"
+  ],
+  "starting_commit": "7f3118d",
+  "stopped_early": false,
+  "task_cohort": "openworld",
+  "task_file": "benchmarks/mission-vs-goal/tasks.openworld.json"
+}

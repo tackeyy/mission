@@ -550,6 +550,60 @@ API usage limit に到達し、success を返す前に停止したため、`/mis
 
 これは unsupported です。両 arm の paired run が完了していません。
 
+## Openworld cohort calibration run (openworld-v1)
+
+Status: 2026-07-22 JST に実行。`tasks.openworld.json` cohort（open-world finding 発見
+3 tasks、#251）の初回 paired 較正 run。starting commit は #239/#240/#241 + #258 配線
+マージ後の `7f3118d`。両 arm とも PATH shim で `--model claude-sonnet-5` を注入し
+（各 artifact の `modelUsage` で主モデル sonnet-5 を確認。goal arm は CLI 補助モデル
+haiku-4.5、mission arm は fork 先 sonnet-4.6 の併用を記録）、`--max-budget-usd 8` /
+`--mission-budget-minutes 25`（#238）を適用した。
+
+| Item | Value | Evidence |
+|---|---:|---|
+| Run id | `2026-07-22-claude-goal-vs-mission-openworld-v1` | `results/2026-07-22-claude-goal-vs-mission-openworld-v1.jsonl` |
+| Starting commit | `7f3118d` | #258 配線マージ後の main |
+| Expected / written records | 6 / 6 | 3 tasks x 2 arms、blocked 0 |
+| model_id | `claude-sonnet-5` | 全 6 records（shim 注入 + modelUsage 確認） |
+| Total cost (名目) | USD 22.41 | goal 9.16 / mission 13.25 |
+
+Task-level result:
+
+| Task | Arm | Mission loop | Iter | Passes | Quality | Marker | Cost | Elapsed |
+|---|---|---|---:|---|---:|---:|---:|---:|
+| `openworld-constant-hunt` | goal | — | — | — | 5.00 | 1.00 | USD 2.95 | 11.80 min |
+| `openworld-constant-hunt` | mission | **未初期化 (無効)** | — | — | 5.00 | 1.00 | USD 0.80 | 2.47 min |
+| `openworld-contradiction-chain` | goal | — | — | — | 5.00 | 1.00 | USD 4.95 | 17.53 min |
+| `openworld-contradiction-chain` | mission | full tier | 1 | false (agreement halt) | 5.00 | 1.00 | USD 7.37 | 13.01 min |
+| `openworld-incremental-reveal` | goal | — | — | — | 5.00 | 1.00 | USD 1.26 | 4.84 min |
+| `openworld-incremental-reveal` | mission | full tier | 1 | true | 5.00 | 1.00 | USD 5.08 | 16.51 min |
+
+較正 run としての観測 (N=3、採用判定には N≥10 が必要):
+
+1. **全損ゼロ**: blocked 0 / 6。#238 の budget guard は発動条件に達しず、graceful halt
+   (contradiction-chain の agreement gate halt) でも成果物と validator pass を維持した。
+   fable-5 で観測した「予算切れ・成果物ゼロ」構造は本較正では再現していない。
+2. **品質は両 arm とも天井飽和**: 全 records が quality 5.0 / marker 1.0 / 分散 0。
+   openworld cohort は sonnet-5 に対して判別力を失っており、「品質>goal」の実証には
+   より難度の高い discriminating cohort が必要。
+3. **mission-arm の prompt 遵守失敗を 1 件検出**: constant-hunt の mission record は
+   `.mission-state` が存在せず、mission ループを初期化しないまま素で回答していた
+   (2.47 min / USD 0.80)。この record は mission arm の速度・コスト集計に含めては
+   ならない (aggregate の mission 平均 10.66 min はこの無効 record で希釈されている)。
+4. **有効な paired 比較は 2 組のみ**: contradiction-chain は mission 0.74x time /
+   1.49x cost (mission が速い)、incremental-reveal は mission 3.41x time / 4.03x cost。
+   tail-v1 の一様な 3-6x 劣位から改善傾向はあるが、N=2 で断定不可。
+5. **#240/#241 の diff-review 経路は未発火**: 全 mission run が iter1 で終了したため、
+   `critic_has_new_scope` / bounded context / reviewer 削減の実運用観測はゼロ。
+   iter≥2 を強制する fail-first task 設計が別途必要。
+
+危険な解釈:
+
+> `/mission` は `/goal` と同速度・同品質になった。
+
+これは unsupported です。aggregate 平均の速度同等は無効 record による希釈であり、
+品質同点は cohort 飽和による天井解釈です。
+
 ## Task-Level Findings
 
 | Task | Stronger arm | Why |
@@ -699,4 +753,15 @@ artifacts/2026-07-07-claude-goal-vs-mission-tail-v1/
 results/2026-07-10-claude-goal-vs-mission-tail-smoke-v2.jsonl
 results/2026-07-10-claude-goal-vs-mission-tail-smoke-v2-summary.json
 artifacts/2026-07-10-claude-goal-vs-mission-tail-smoke-v2/
+results/2026-07-21-claude-goal-vs-mission-tail-v2.jsonl
+results/2026-07-21-claude-goal-vs-mission-tail-v2-summary.json
+results/2026-07-21-claude-goal-vs-mission-tail-v2-retry.jsonl
+results/2026-07-21-claude-goal-vs-mission-tail-v2-retry-summary.json
+results/2026-07-22-fable5-tail-smoke.jsonl
+results/2026-07-22-fable5-tail-smoke-summary.json
+results/2026-07-22-fable5-tail-full.jsonl
+results/2026-07-22-fable5-tail-full-summary.json
+results/2026-07-22-claude-goal-vs-mission-openworld-v1.jsonl
+results/2026-07-22-claude-goal-vs-mission-openworld-v1-summary.json
+artifacts/2026-07-22-claude-goal-vs-mission-openworld-v1/
 ```
