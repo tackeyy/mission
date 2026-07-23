@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import statistics
 import subprocess
@@ -647,6 +648,7 @@ def run_one(
             stderr=subprocess.PIPE,
             timeout=timeout,
             check=False,
+            env=child_env(dict(os.environ)),  # #268: permission-mode 降格防止
         )
         stdout = proc.stdout
         stderr = proc.stderr
@@ -749,6 +751,7 @@ def run_one(
         "evidence_completeness": evaluation["evidence_completeness"],
         "validator_fraction": evaluation["validator_fraction"],
         "missing_arm_specific_headings": evaluation["missing_arm_specific_headings"],
+        "permission_mode_degraded": detect_permission_degradation(stderr),
         "run_index": run_index,
         **mission_state_fields,
         "elapsed_minutes": elapsed,
@@ -756,6 +759,28 @@ def run_one(
         "artifacts": artifacts,
         "notes": "; ".join(notes),
     }
+
+
+PERMISSION_DEGRADATION_MARKER = "Permission mode forced"
+
+
+def detect_permission_degradation(stderr: str) -> bool:
+    """#268: 子 claude の stderr から permission-mode 降格警告を検出する.
+
+    CC セッションの Bash から起動すると CLAUDE_CODE_SUBPROCESS_ENV_SCRUB が伝播し、
+    --permission-mode acceptEdits が default に強制降格される (2026-07-23 監査)。
+    """
+    return PERMISSION_DEGRADATION_MARKER in (stderr or "")
+
+
+def child_env(base_env: dict) -> dict:
+    """#268: 子 claude プロセスの env。scrub を明示無効化して降格を防止する.
+
+    使い捨て clone 内への書込のみのため opt-out が適切。
+    """
+    env = dict(base_env)
+    env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] = "0"
+    return env
 
 
 def apply_mission_adherence_guard(status: dict, arm: str, mission_state_note: str | None) -> dict:
@@ -865,11 +890,15 @@ def summarize(
             "Claude Code print mode smoke; does not fully exercise multi-turn interactive /goal persistence.",
             "Quality and evidence scores are automated heuristic scores, not blind human review.",
             "Blocked records are excluded from comparable quality-marker aggregates.",
-        ],
+        ] + ([
+            "WARNING: permission-mode degradation detected in one or more records; "
+            "acceptEdits was forced to default (see #268). Cross-run comparability is affected.",
+        ] if any(r.get("permission_mode_degraded") for r in records) else []),
         "arms": {
             arm: {
                 "records": len(items),
                 "blocked_records": sum(1 for r in items if r.get("run_status") == "blocked"),
+                "permission_degraded_records": sum(1 for r in items if r.get("permission_mode_degraded")),
                 "comparable_records": sum(1 for r in items if r.get("comparable_attempt", True)),
                 "completion_rate": sum(1 for r in items if r["completion"]) / len(items) if items else None,
                 "comparable_completion_rate": (
