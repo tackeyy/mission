@@ -594,6 +594,57 @@ Until a re-run under a clean permission mode completes, treat the
 completion-rate finding in the discriminating-v1 section below as
 preliminary.
 
+## Discriminating cohort clean re-run (discriminating-v2) — correcting the v1 findings
+
+Status: executed 2026-07-23 JST under clean permission conditions (the #268
+contamination eliminated). Starting commit `3643943` includes #266
+(Complex=standard, 2 reviewers), the #268 guard, and #270 parallel execution.
+`--parallel 3`, identical constraints for both arms (USD 10 budget / 30-min
+budget-minutes / 2400s timeout). **All 10 records mechanically verified
+`permission_mode_degraded=false`** (first production use of the #268 guard).
+Wall clock ~33 minutes at 3 workers.
+
+Aggregate: goal completed 5/5 at 1.18-3.12 min / USD 0.68-0.95 per task;
+mission completed 5/5 at 7.50-13.72 min / USD 2.17-5.27. All 10 records
+scored marker 1.00 / forbidden 0 / quality 5.0.
+
+### Corrections to the v1 findings
+
+1. **"Goal tends to exhaust its budget" — retracted.** The two v1-blocked
+   tasks completed easily under clean conditions (release-ledger: 3.12 min /
+   USD 0.95; contract-drift: 2.38 min / USD 0.84). The v1 exhaustions were
+   artifacts of the permission-mode contamination.
+2. **"Speed ≈ goal (1.07x)" — retracted.** Clean comparable averages: goal
+   1.96 min vs mission 10.53 min = **5.4x**. The v1 parity was an illusion
+   created by contamination inflating goal runtimes 3-10x.
+3. **"Within-run arm comparisons remain valid under symmetric contamination"
+   — corrected.** Exposure was symmetric but the effect was asymmetric
+   (goal inflated 3-10x, mission ~1.5x), so v1's within-run arm conclusions
+   are also invalid. No arm-level conclusion from the 7/21-7/22 runs
+   (tail-v2 / openworld-v1 / discriminating-v1) should be used.
+4. **Quality tie stands**: no arm difference under clean conditions either.
+5. **First observation of #266**: 3 of 5 missions ran at standard tier
+   (2 reviewers); mission runtimes dropped vs v1 (7.5-13.7 min vs
+   9.3-21.1 min), though goal sped up far more.
+
+### Confirmed conclusions (clean conditions, consistent with tail-v1)
+
+Quality (marker recall): tied. Speed/cost: mission **5.4x time / 4.9x
+notional cost** (a slight improvement over tail-v1's 5.8x/7.4x; includes the
+#266 contribution, not separable at N=5). Completion reliability: no
+difference (both 5/5). Mission's value remains completion gating, tail
+insurance, irreversible-operation governance, the budget guard, and resume —
+not average quality or speed.
+
+Unsafe interpretation:
+
+> Mission has no value even under clean conditions.
+
+Unsupported: this cohort measures single-shot closed-world tasks and does not
+exercise mission's value domain (multi-iteration tail recovery, irreversible
+gates, cross-session resume). The 451-mission production tail record is not
+contradicted by this run.
+
 ## Discriminating cohort adoption run (discriminating-v1)
 
 Status: executed 2026-07-23 JST as the #262 adoption run, in two stages: smoke
@@ -880,4 +931,7 @@ artifacts/2026-07-23-discriminating-smoke/
 results/2026-07-23-discriminating-v1.jsonl
 results/2026-07-23-discriminating-v1-summary.json
 artifacts/2026-07-23-discriminating-v1/
+results/2026-07-23-discriminating-v2.jsonl
+results/2026-07-23-discriminating-v2-summary.json
+artifacts/2026-07-23-discriminating-v2/
 ```
