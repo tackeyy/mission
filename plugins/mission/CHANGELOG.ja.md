@@ -13,6 +13,8 @@
 
 - mission-vs-goal ベンチマーク runner に `--parallel N` (default 1、完全後方互換) を追加した。record は per-record clone で隔離済みのため worker pool で並列実行でき、10 records の run が約 2.8 時間 → 3 workers で約 1 時間に短縮される。JSONL append と進捗出力は lock で直列化し、worker 例外は伝播、`--stop-on-blocked` は blocked 検出後の新規起動を止め実行中 entry は完走させる (#270)。
 
+- ベンチマーク runner が permission-mode 汚染を検出・防止するようになった (#268)。子 `claude` プロセスを `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0` で起動し、CC セッションからの実行でも `--permission-mode acceptEdits` が default へ暗黙降格しないようにした。各 record は stderr から検出した `permission_mode_degraded` フラグを第一級で持ち、アーム別 summary が degraded 数を集計、1 件でもあれば limitations に run 間比較可能性の警告を追加する。
+
 - mission-vs-goal ベンチマークに `discriminating` cohort（`tasks.discriminating.json`、5 tasks）を追加した。openworld-v1 で確認した品質天井の解消を目的に、各 task 7-9 個の quality markers を 3-5 fixture に分散させ、documented-override / permitted-difference / valid-but-suspicious の decoy を forbidden markers で採点する。`fail_first` 2 tasks（36 セル構成監査・5 文書台帳照合）は単一パスの網羅が review で fail する設計で `iteration >= 2` を強制し、#240/#241 の diff-review 経路に初の実運用観測を与える。構造・marker 密度・fail-first の存在・fixture 実在・marker の fixture 発見可能性はテストで強制する。N>=10 採用判定 runbook（`discriminating-cohort-runbook.ja.md` / `.md`）に smoke gate・本 run コマンド・機械的な採用ゲートを定義した (#262)。
 
 
