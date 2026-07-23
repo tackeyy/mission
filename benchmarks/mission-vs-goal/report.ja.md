@@ -574,6 +574,65 @@ runner 指定の `--permission-mode acceptEdits` が **default に強制降格**
 クリーンな permission mode での再 run が完了するまで、下記 discriminating-v1 節の
 completion-rate finding は preliminary として扱うこと。
 
+## Discriminating cohort clean re-run (discriminating-v2) — v1 findings の訂正
+
+Status: 2026-07-23 JST に実行。permission-mode 汚染 (#268) を排除したクリーン
+条件での再測定。starting commit `3643943` (#266 Complex=standard 2名 + #268 ガード
++ #270 並列 込み)。`--parallel 3`、両 arm 同一条件 ($10 予算 / 30分 budget-minutes /
+timeout 2400s)。**全 10 records で `permission_mode_degraded=false` を機械確認**
+(#268 ガードの初運用)。壁時計は並列 3 で約 33 分。
+
+### Task-level result
+
+| Task | Arm | Status | Tier / iter | Marker | Cost | Elapsed |
+|---|---|---|---|---:|---:|---:|
+| `disc-config-sprawl` | goal | completed | — | 1.00 | USD 0.76 | 1.48 min |
+| `disc-config-sprawl` | mission | completed | standard / 1 | 1.00 | USD 3.63 | 7.50 min |
+| `disc-release-ledger` | goal | completed | — | 1.00 | USD 0.95 | 3.12 min |
+| `disc-release-ledger` | mission | completed | (tier 未観測) / 1 | 1.00 | USD 2.17 | 7.68 min |
+| `disc-contract-drift` | goal | completed | — | 1.00 | USD 0.84 | 2.38 min |
+| `disc-contract-drift` | mission | completed | standard / 1 | 1.00 | USD 4.28 | 12.64 min |
+| `disc-metrics-reconcile` | goal | completed | — | 1.00 | USD 0.68 | 1.18 min |
+| `disc-metrics-reconcile` | mission | completed | standard / 1 | 1.00 | USD 4.03 | 11.09 min |
+| `disc-policy-exceptions` | goal | completed | — | 1.00 | USD 0.73 | 1.63 min |
+| `disc-policy-exceptions` | mission | completed | full (Critical) / 1 | 1.00 | USD 5.27 | 13.72 min |
+
+### v1 findings の訂正 (クリーン条件で覆った結論)
+
+1. **「goal は予算全損しやすい」→ 撤回**: v1 で blocked した release-ledger /
+   contract-drift は、クリーン条件では goal がそれぞれ 3.12 min / USD 0.95、
+   2.38 min / USD 0.84 で完走・validator pass。v1 の予算全損 (24.9 min / USD 10.05、
+   26.5 min / USD 10.10) は permission-mode 汚染の人工物だった
+2. **「速度≈goal (1.07x)」→ 撤回**: クリーン条件の comparable 平均は goal 1.96 min
+   vs mission 10.53 min = **5.4x**。v1 の 1.07x は汚染による goal 側の実行時間膨張
+   (クリーン比で 3-10x) が生んだ見かけの同速だった
+3. **「アーム内比較は対称汚染のため有効」→ 訂正**: 汚染への曝露は対称でも影響は
+   非対称だった (goal は 3-10x 膨張、mission は約 1.5x 膨張)。v1 のアーム内比較も
+   無効。7/21-7/22 の全 run (tail-v2 / openworld-v1 / discriminating-v1) の
+   アーム間結論は採用しない
+4. **品質同点は維持**: 全 10 records が marker 1.0 / forbidden 0 / quality 5.0。
+   品質のアーム差はクリーン条件でも存在しない
+5. **#266 (Complex=standard 2名) の効果を初観測**: 5 mission 中 3 tasks が
+   standard tier (2名) で走行し、v1 比で mission 実行時間は短縮
+   (7.5-13.7 min vs v1 9.3-21.1 min)。ただし goal の高速化幅の方が大きい
+
+### 確定した結論 (クリーン条件、tail-v1 と整合)
+
+- 品質 (marker recall): **同点** — sonnet-5 では全 cohort・全条件で一貫
+- 速度・コスト: mission は **5.4x 時間 / 4.9x コスト** (tail-v1 の 5.8x/7.4x から
+  微改善。#266 の寄与を含むが N=5 で寄与分離は不可)
+- 完走信頼性: クリーン条件では **差なし** (両 arm 5/5)
+- mission の価値は従来結論どおり「completion gate + テール保険 + 不可逆
+  ガバナンス + budget guard + resume」であり、平均品質・速度では goal に勝てない
+
+危険な解釈:
+
+> クリーン条件でも mission に価値がない。
+
+これは unsupported です。本 cohort は単発完結の閉世界タスクであり、mission の
+価値領域 (multi-iter テール改善・不可逆操作ゲート・セッション跨ぎ) を測定して
+いません。実運用 451 mission のテール実績は本 run と矛盾しません。
+
 ## Discriminating cohort adoption run (discriminating-v1)
 
 Status: 2026-07-23 JST に実行。#262 の採用判定 run。smoke (`disc-config-sprawl`
@@ -874,4 +933,7 @@ artifacts/2026-07-23-discriminating-smoke/
 results/2026-07-23-discriminating-v1.jsonl
 results/2026-07-23-discriminating-v1-summary.json
 artifacts/2026-07-23-discriminating-v1/
+results/2026-07-23-discriminating-v2.jsonl
+results/2026-07-23-discriminating-v2-summary.json
+artifacts/2026-07-23-discriminating-v2/
 ```
