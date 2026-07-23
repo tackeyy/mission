@@ -17,6 +17,7 @@ import shutil
 import statistics
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -777,6 +778,51 @@ def apply_mission_adherence_guard(status: dict, arm: str, mission_state_note: st
     return status
 
 
+def execute_plan(entries, worker, parallel: int = 1, on_record=None, stop_on_blocked: bool = False):
+    """#270: plan entries を worker pool で実行する。
+
+    - parallel=1 は従来の逐次実行と同一順序・同一挙動 (後方互換)
+    - record は完了順に返す (record 自身が task/arm/run_index を持つため順序は監査に影響しない)
+    - on_record(entry, record) は record ごとに 1 回、lock 下で直列に呼ぶ (JSONL append 安全)
+    - stop_on_blocked=True: blocked record 検出後、未開始 entry を起動しない
+      (実行中の entry は完走させ record も記録する)
+    """
+    import concurrent.futures
+
+    records: list[dict] = []
+    stopped = False
+    emit_lock = threading.Lock()
+    stop_event = threading.Event()
+
+    def _run_entry(entry):
+        record = worker(entry)
+        with emit_lock:
+            records.append(record)
+            if on_record is not None:
+                on_record(entry, record)
+        if stop_on_blocked and record.get("run_status") == "blocked":
+            stop_event.set()
+        return record
+
+    if parallel <= 1:
+        for entry in entries:
+            if stop_event.is_set():
+                break
+            _run_entry(entry)
+        # 従来互換: blocked による早期停止経路に入ったら stopped_early=True
+        return records, stop_event.is_set()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as pool:
+        futures = []
+        for entry in entries:
+            if stop_event.is_set():
+                break
+            futures.append(pool.submit(_run_entry, entry))
+        for f in concurrent.futures.as_completed(futures):
+            f.result()  # worker 例外を伝播させる
+    return records, stop_event.is_set()
+
+
 def summarize(
     records: list[dict],
     tasks: list[dict],
@@ -912,6 +958,13 @@ def main() -> int:
         "Recorded verbatim; there is no silent 'unknown' fallback.",
     )
     parser.add_argument("--max-budget-usd", type=float, default=2.0)
+    parser.add_argument(
+        "--parallel",
+        type=int,
+        default=1,
+        help="#270: 同時実行 worker 数。record は独立 clone で隔離済みのため並列可。"
+        " rate limit 配慮で 2-3 推奨。default 1 は従来の逐次実行と同一挙動。",
+    )
     parser.add_argument("--mission-max-iter", type=int, default=None)
     parser.add_argument(
         "--mission-budget-minutes",
@@ -929,6 +982,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.repeats < 1:
         parser.error("--repeats must be at least 1")
+    if args.parallel < 1:
+        parser.error("--parallel must be at least 1")
 
     tasks_path = Path(args.tasks_file)
     if not tasks_path.is_absolute():
@@ -948,11 +1003,11 @@ def main() -> int:
 
     task_data = load_task_data(tasks_path)
     tasks = select_tasks(task_data, args.limit_tasks, args.task_ids)
-    records = []
-    stopped_early = False
-    for task, arm, arm_order, run_index in expanded_plan(tasks, ARMS, args.repeats):
+
+    def _worker(entry):
+        task, arm, arm_order, run_index = entry
         print(f"running task={task['id']} arm={arm} rep={run_index}", flush=True)
-        record = run_one(
+        return run_one(
             task,
             arm,
             args.run_id,
@@ -970,7 +1025,9 @@ def main() -> int:
             run_index=run_index,
             repeats=args.repeats,
         )
-        records.append(record)
+
+    def _on_record(entry, record):
+        task, arm, _arm_order, run_index = entry
         with result_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
         print(
@@ -979,13 +1036,20 @@ def main() -> int:
             flush=True,
         )
         if args.stop_on_blocked and record["run_status"] == "blocked":
-            stopped_early = True
             print(
                 f"stopping early after blocked record task={task['id']} arm={arm} "
                 f"blocked_reason={record['blocked_reason']}",
                 flush=True,
             )
-            break
+
+    # #270: 独立 record を worker pool で実行 (default 1 = 従来の逐次と同一挙動)
+    records, stopped_early = execute_plan(
+        expanded_plan(tasks, ARMS, args.repeats),
+        _worker,
+        parallel=args.parallel,
+        on_record=_on_record,
+        stop_on_blocked=args.stop_on_blocked,
+    )
 
     summary = summarize(
         records,

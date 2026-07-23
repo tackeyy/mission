@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The mission-vs-goal benchmark runner gains `--parallel N` (default 1, fully backward compatible): independent records — already isolated in per-record clones — execute on a worker pool, cutting a 10-record run from ~2.8 hours to ~1 hour at 3 workers. JSONL appends and progress lines are serialized under a lock, worker exceptions propagate, and `--stop-on-blocked` stops launching new entries after a blocked record while letting in-flight entries finish (#270).
+
 - The mission-vs-goal benchmark gains a `discriminating` cohort (`tasks.discriminating.json`, 5 tasks) designed to remove the quality ceiling observed in openworld-v1: 7-9 quality markers per task spread across 3-5 fixture files, documented-override / permitted-difference / valid-but-suspicious decoys scored via forbidden markers, and two `fail_first` tasks (36-cell config audit, five-document ledger reconciliation) built to make single-pass coverage fail review and force `iteration >= 2`, giving the #240/#241 diff-review path its first runtime observations. Structure, marker density, fail-first presence, fixture existence, and marker-discoverability-in-fixtures are all enforced by tests. An N>=10 adoption runbook (`discriminating-cohort-runbook.ja.md` / `.md`) defines the smoke gate, the main-run command, and mechanical adoption gates (#262).
 
 

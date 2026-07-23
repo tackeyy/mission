@@ -51,12 +51,12 @@ PATH="<shim-dir>:$PATH" python3 run_claude_goal_vs_mission.py \
   --tasks-file benchmarks/mission-vs-goal/tasks.discriminating.json \
   --run-id <date>-discriminating-v1 \
   --model-id claude-sonnet-5 \
-  --limit-tasks 5 --repeats 1 \
+  --limit-tasks 5 --repeats 1 --parallel 3 \
   --max-budget-usd 10 --mission-budget-minutes 30 --timeout 2400
 ```
 
 見積: 較正実測 (goal $1.3-5.0 / mission $5.1-7.4 名目) から、repeats 1 で
-名目 $35-60、壁時計 2-3 時間。repeats 2 はその 2 倍。
+名目 $35-60。壁時計は `--parallel 3` で約 1 時間 (逐次なら 2-3 時間)。repeats 2 は名目 2 倍。
 
 ## Step 3: 採用判定ゲート
 
