@@ -951,6 +951,7 @@ def test_init_persists_additive_signal_details_for_audit(run_cli, tmp_path):
         "本番への deploy は実行しない",
         "--complexity",
         "Simple",
+        "--force-mission",
         cwd=tmp_path,
     )
     assert result.returncode == 0, result.stderr
@@ -985,6 +986,7 @@ def test_complexity_rederive_refreshes_additive_signal_details(run_cli, tmp_path
         "本番への deploy は実行しない",
         "--complexity",
         "Simple",
+        "--force-mission",
         cwd=tmp_path,
         check=True,
     )
@@ -1007,6 +1009,7 @@ def test_get_exposes_additive_signal_details_as_public_audit_output(run_cli, tmp
         "本番への deploy は実行しない",
         "--complexity",
         "Simple",
+        "--force-mission",
         cwd=tmp_path,
         check=True,
     )
@@ -1020,7 +1023,7 @@ def test_get_exposes_additive_signal_details_as_public_audit_output(run_cli, tmp
 
 def test_user_override_preserves_auto_signal_audit_meaning(run_cli, tmp_path):
     run_cli(
-        "init", "deploy to production", "--complexity", "Simple", cwd=tmp_path, check=True
+        "init", "deploy to production", "--complexity", "Simple", "--force-mission", cwd=tmp_path, check=True
     )
     before = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
 

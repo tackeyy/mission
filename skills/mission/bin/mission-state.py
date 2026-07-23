@@ -3993,6 +3993,32 @@ def cmd_init(args):
         initial["review_tier_signal_details"] = _auto_decision["signal_details"]
     # reviewer_count は review_tier から設定 (COMPLEXITY_REVIEWER_COUNT と同値になる設計)
     initial["reviewer_count"] = TIER_REVIEWER_COUNT[initial["review_tier"]]
+
+    # #276: adaptive routing — Simple + リスクシグナルなし + 強制なしは goal へ。
+    # discriminating-v2 (品質同点・mission 5.4x 時間/4.9x コスト) と実運用 95% の
+    # iter1 素通しに基づく。session state を作らないため pass-rate 統計を汚さず、
+    # mission の pass も主張しない。シグナル付き Simple は安全側で mission 維持。
+    if (
+        initial.get("complexity") == "Simple"
+        and not getattr(args, "force_mission", False)
+        and not _user_tier
+        and not initial.get("review_tier_signals")
+    ):
+        print(json.dumps({
+            "route": "goal",
+            "complexity": "Simple",
+            "mission_id": initial["mission_id"],
+            "reason": "Simple complexity with no irreversible/security signals (#276)",
+            "guidance": (
+                "mission ループを起動しない。goal 契約の 5 見出し "
+                "(Goal / Result / Evidence / Assumptions / Stop Condition) で"
+                "タスクを直接完遂し、最終報告に goal へルーティングした旨を明記する。"
+                "mission の pass は主張しない。mission 機構が必要なら "
+                "--force-mission で再 init する。"
+            ),
+        }, ensure_ascii=False, indent=2))
+        return
+
     initial = stamp_metadata(initial, cwd)
 
     # multi-session 完全統一 (2026-06-13): 常に sessions/<sid>.json に書く。
@@ -6929,6 +6955,8 @@ def _build_parser():
                         help="関連 issue の参照 (例: github:owner/repo#42)。同一 issue_ref の active session が存在する場合 WARN")
     p_init.add_argument("--files", default=None,
                         help="予定変更ファイルのカンマ区切り project-root 相対パス。同一 active session と重複する場合 WARN")
+    p_init.add_argument("--force-mission", action="store_true", dest="force_mission",
+                        help="#276: Simple タスクでも goal へルーティングせず mission ループを強制する")
     p_init.add_argument("--review-tier", choices=list(TIER_REVIEWER_COUNT), default=None,
                         dest="review_tier",
                         help="レビュー深度 (light/standard/full)。未指定は complexity・ミッション記述から auto 導出 (Issue #168)")

@@ -236,7 +236,7 @@ def test_init_without_review_tier_auto_derives(run_cli, tmp_path):
 
 def test_init_auto_review_tier_simple(run_cli, tmp_path):
     """Simple complexity → auto で light."""
-    run_cli("init", "simple cleanup", "--complexity", "Simple", cwd=tmp_path, check=True)
+    run_cli("init", "simple cleanup", "--complexity", "Simple", "--force-mission", cwd=tmp_path, check=True)
     s = _read(tmp_path)
     assert s["review_tier"] == "light"
     assert s["review_tier_source"] == "auto"
@@ -271,7 +271,7 @@ def test_init_user_specified_review_tier_light(run_cli, tmp_path):
 
 def test_init_user_specified_review_tier_full(run_cli, tmp_path):
     """--review-tier full を明示すると source=user で保存."""
-    run_cli("init", "critical fix", "--complexity", "Simple", "--review-tier", "full",
+    run_cli("init", "critical fix", "--complexity", "Simple", "--force-mission", "--review-tier", "full",
             cwd=tmp_path, check=True)
     s = _read(tmp_path)
     assert s["review_tier"] == "full"
@@ -287,7 +287,7 @@ def test_init_review_tier_sets_reviewer_count(run_cli, tmp_path):
 
 def test_init_review_tier_light_reviewer_count_1(run_cli, tmp_path):
     """light → reviewer_count=1."""
-    run_cli("init", "simple task", "--complexity", "Simple", cwd=tmp_path, check=True)
+    run_cli("init", "simple task", "--complexity", "Simple", "--force-mission", cwd=tmp_path, check=True)
     s = _read(tmp_path)
     assert s["reviewer_count"] == 1
 
@@ -301,7 +301,7 @@ def test_init_review_tier_full_reviewer_count_3(run_cli, tmp_path):
 
 def test_init_mission_with_deploy_keyword_escalates_to_full(run_cli, tmp_path):
     """ミッション記述に deploy キーワードがある場合 Simple でも full に昇格."""
-    run_cli("init", "deploy to production environment", "--complexity", "Simple",
+    run_cli("init", "deploy to production environment", "--complexity", "Simple", "--force-mission",
             cwd=tmp_path, check=True)
     s = _read(tmp_path)
     assert s["review_tier"] == "full"
@@ -325,7 +325,7 @@ def test_init_unknown_complexity_auto_derives_standard(run_cli, tmp_path):
 
 def test_set_review_tier_user_overrides(run_cli, tmp_path):
     """set review_tier=standard で source=user に更新される."""
-    run_cli("init", "some mission", "--complexity", "Simple", cwd=tmp_path, check=True)
+    run_cli("init", "some mission", "--complexity", "Simple", "--force-mission", cwd=tmp_path, check=True)
     run_cli("set", "review_tier=standard", cwd=tmp_path, check=True)
     s = _read(tmp_path)
     assert s["review_tier"] == "standard"
@@ -334,7 +334,7 @@ def test_set_review_tier_user_overrides(run_cli, tmp_path):
 
 def test_set_review_tier_syncs_reviewer_count(run_cli, tmp_path):
     """set review_tier= 時に reviewer_count が TIER_REVIEWER_COUNT で同期される."""
-    run_cli("init", "some mission", "--complexity", "Simple", cwd=tmp_path, check=True)
+    run_cli("init", "some mission", "--complexity", "Simple", "--force-mission", cwd=tmp_path, check=True)
     run_cli("set", "review_tier=full", cwd=tmp_path, check=True)
     s = _read(tmp_path)
     assert s["reviewer_count"] == 3
@@ -367,7 +367,7 @@ def test_set_review_tier_warning_when_below_derived(run_cli, tmp_path):
 
 def test_set_review_tier_no_warning_when_at_or_above_derived(run_cli, tmp_path):
     """auto 導出以上の tier を指定しても WARNING は出ない."""
-    run_cli("init", "simple task", "--complexity", "Simple", cwd=tmp_path, check=True)
+    run_cli("init", "simple task", "--complexity", "Simple", "--force-mission", cwd=tmp_path, check=True)
     # Simple → light、full は light より上なので WARNING なし
     r = run_cli("set", "review_tier=full", cwd=tmp_path)
     assert r.returncode == 0
@@ -376,7 +376,7 @@ def test_set_review_tier_no_warning_when_at_or_above_derived(run_cli, tmp_path):
 
 def test_set_complexity_auto_source_rederives_review_tier(run_cli, tmp_path):
     """review_tier_source=auto 時に complexity 変更で tier が再導出される."""
-    run_cli("init", "some mission", "--complexity", "Simple", cwd=tmp_path, check=True)
+    run_cli("init", "some mission", "--complexity", "Simple", "--force-mission", cwd=tmp_path, check=True)
     s = _read(tmp_path)
     assert s["review_tier"] == "light"
     assert s["review_tier_source"] == "auto"
@@ -391,7 +391,7 @@ def test_set_complexity_auto_source_rederives_review_tier(run_cli, tmp_path):
 
 def test_set_complexity_user_source_preserves_review_tier(run_cli, tmp_path):
     """review_tier_source=user 時は complexity 変更で tier を再導出しない."""
-    run_cli("init", "some mission", "--complexity", "Simple", "--review-tier", "full",
+    run_cli("init", "some mission", "--complexity", "Simple", "--force-mission", "--review-tier", "full",
             cwd=tmp_path, check=True)
     s = _read(tmp_path)
     assert s["review_tier"] == "full"

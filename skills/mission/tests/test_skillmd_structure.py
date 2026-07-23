@@ -41,6 +41,8 @@ def test_skillmd_contains_critical_keywords():
         "critic_has_new_scope",  # #258: #240/#241 の scope 判定を state へ配線
         "bounded context",       # #258: #241 context_mode 消費と fail-safe fallback
         "--min-reviewers",       # #258: #240 合意偽装防止フラグの利用強制
+        "adaptive routing",      # #276: Simple→goal ルーティングの配線
+        "--force-mission",       # #276: routing の明示エスケープ
     ]
     missing = [kw for kw in must_have if kw not in txt]
     assert not missing, f"missing critical keywords: {missing}"

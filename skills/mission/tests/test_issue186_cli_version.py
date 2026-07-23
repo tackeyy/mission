@@ -28,7 +28,7 @@ def _isolated_env(tmp_path, **extra):
 
 
 def test_init_records_cli_version(state_dir, run_cli, read_state, tmp_path):
-    run_cli("init", "cli version mission", "--complexity", "Simple", cwd=tmp_path,
+    run_cli("init", "cli version mission", "--complexity", "Simple", "--force-mission", cwd=tmp_path,
             env_extra=_isolated_env(tmp_path), check=True)
     state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
     assert state["cli_version"], "cli_version が記録されていない"
@@ -36,7 +36,7 @@ def test_init_records_cli_version(state_dir, run_cli, read_state, tmp_path):
 
 
 def test_preflight_no_skew_when_caches_absent(state_dir, run_cli, tmp_path):
-    run_cli("init", "m", "--complexity", "Simple", cwd=tmp_path, env_extra=_isolated_env(tmp_path), check=True)
+    run_cli("init", "m", "--complexity", "Simple", "--force-mission", cwd=tmp_path, env_extra=_isolated_env(tmp_path), check=True)
     r = run_cli("codex-preflight", "--json", "--hook-config", str(tmp_path / "hooks.json"),
                 cwd=tmp_path, env_extra=_isolated_env(tmp_path), check=True)
     out = json.loads(r.stdout)
@@ -50,7 +50,7 @@ def test_preflight_detects_stale_claude_code_cache(state_dir, run_cli, tmp_path)
     (cache / "1.0.6").mkdir(parents=True)
     (cache / CURRENT_VERSION).mkdir(parents=True)  # 現行と同じバージョンは stale 扱いしない
 
-    run_cli("init", "m", "--complexity", "Simple", cwd=tmp_path, env_extra=_isolated_env(tmp_path), check=True)
+    run_cli("init", "m", "--complexity", "Simple", "--force-mission", cwd=tmp_path, env_extra=_isolated_env(tmp_path), check=True)
     r = run_cli("codex-preflight", "--json", "--hook-config", str(tmp_path / "hooks.json"),
                 cwd=tmp_path, env_extra=_isolated_env(tmp_path), check=True)
     out = json.loads(r.stdout)
@@ -65,7 +65,7 @@ def test_preflight_detects_stale_codex_cache(state_dir, run_cli, tmp_path):
     cache = fake_codex / "plugins" / "cache" / "mission-marketplace" / "mission"
     (cache / "1.1.1").mkdir(parents=True)
 
-    run_cli("init", "m", "--complexity", "Simple", cwd=tmp_path, env_extra=_isolated_env(tmp_path), check=True)
+    run_cli("init", "m", "--complexity", "Simple", "--force-mission", cwd=tmp_path, env_extra=_isolated_env(tmp_path), check=True)
     r = run_cli("codex-preflight", "--json", "--hook-config", str(tmp_path / "hooks.json"),
                 cwd=tmp_path, env_extra=_isolated_env(tmp_path), check=True)
     out = json.loads(r.stdout)
@@ -79,7 +79,7 @@ def test_preflight_does_not_flag_newer_or_equal_cache_version(state_dir, run_cli
     cache = fake_home / "plugins" / "cache" / "mission-marketplace" / "mission"
     (cache / "9.9.9").mkdir(parents=True)
 
-    run_cli("init", "m", "--complexity", "Simple", cwd=tmp_path, env_extra=_isolated_env(tmp_path), check=True)
+    run_cli("init", "m", "--complexity", "Simple", "--force-mission", cwd=tmp_path, env_extra=_isolated_env(tmp_path), check=True)
     r = run_cli("codex-preflight", "--json", "--hook-config", str(tmp_path / "hooks.json"),
                 cwd=tmp_path, env_extra=_isolated_env(tmp_path), check=True)
     out = json.loads(r.stdout)
@@ -91,7 +91,7 @@ def test_resume_output_includes_version_skew(state_dir, run_cli, tmp_path):
     cache = fake_home / "plugins" / "cache" / "mission-marketplace" / "mission"
     (cache / "1.0.6").mkdir(parents=True)
 
-    run_cli("init", "m", "--complexity", "Simple", cwd=tmp_path, env_extra=_isolated_env(tmp_path), check=True)
+    run_cli("init", "m", "--complexity", "Simple", "--force-mission", cwd=tmp_path, env_extra=_isolated_env(tmp_path), check=True)
     r = run_cli("resume", cwd=tmp_path, env_extra=_isolated_env(tmp_path), check=True)
     out = json.loads(r.stdout)
     assert out["resume"]["version_skew"]["stale_caches"] == {"claude-code": ["1.0.6"]}
