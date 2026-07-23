@@ -19,7 +19,7 @@ def test_init_with_complexity_sets_field(run_cli, tmp_path):
 
 def test_init_complexity_sets_reviewer_count_mapping(run_cli, tmp_path):
     """Simple→1 / Complex→2 (#266) のマッピングが state に反映される."""
-    run_cli("init", "M7 simple mission", "--complexity", "Simple", cwd=tmp_path, check=True)
+    run_cli("init", "M7 simple mission", "--complexity", "Simple", "--force-mission", cwd=tmp_path, check=True)
     s = _read(tmp_path)
     assert s["complexity"] == "Simple"
     assert s["reviewer_count"] == 1

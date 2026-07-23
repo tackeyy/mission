@@ -60,7 +60,7 @@ def test_progress_get_and_clear_roundtrip(state_dir, run_cli, read_state):
 
 def test_stable_wrapper_delegates_to_canonical_mission_state_cli(tmp_path):
     result = subprocess.run(
-        [sys.executable, str(WRAPPER), "init", "wrapper smoke", "--complexity", "Simple"],
+        [sys.executable, str(WRAPPER), "init", "wrapper smoke", "--complexity", "Simple", "--force-mission"],
         cwd=tmp_path,
         capture_output=True,
         text=True,

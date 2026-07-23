@@ -11,6 +11,8 @@
 
 ### 追加
 
+- `mission-state.py init` に adaptive routing を追加した (#276)。リスクシグナル (不可逆・security) のない Simple complexity の mission は `route: \"goal\"` を返して session state を作らず、orchestrator は mission ループを完全にスキップして goal 契約 (Goal / Result / Evidence / Assumptions / Stop Condition) でタスクを直接完遂する。最終報告にルーティングした旨を明記し、mission の pass は主張しない。クリーン測定 discriminating-v2 (品質同点・mission 5.4x 時間/4.9x コスト) と実運用の約 95% が iteration 1 で素通しする観測に基づく。シグナル付き Simple は mission ループを維持 (安全側)、`--review-tier` 明示はユーザー意思としてループ維持、`--force-mission` で無条件にループを強制できる。canonical skills 共有により Claude Code / Codex で同一に動作する (#276)。
+
 - mission-vs-goal ベンチマーク runner に `--parallel N` (default 1、完全後方互換) を追加した。record は per-record clone で隔離済みのため worker pool で並列実行でき、10 records の run が約 2.8 時間 → 3 workers で約 1 時間に短縮される。JSONL append と進捗出力は lock で直列化し、worker 例外は伝播、`--stop-on-blocked` は blocked 検出後の新規起動を止め実行中 entry は完走させる (#270)。
 
 - ベンチマーク runner が permission-mode 汚染を検出・防止するようになった (#268)。子 `claude` プロセスを `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0` で起動し、CC セッションからの実行でも `--permission-mode acceptEdits` が default へ暗黙降格しないようにした。各 record は stderr から検出した `permission_mode_degraded` フラグを第一級で持ち、アーム別 summary が degraded 数を集計、1 件でもあれば limitations に run 間比較可能性の警告を追加する。
