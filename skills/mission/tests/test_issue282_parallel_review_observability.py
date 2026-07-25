@@ -156,3 +156,20 @@ def test_window_for_unknown_perspective_rejected(state_dir, run_cli, tmp_path):
 
     assert r.returncode == 2
     assert "Z" in r.stderr
+
+
+def test_mixed_naive_and_aware_timestamps_do_not_crash(state_dir, run_cli, tmp_path):
+    """naive (TZ なし) と aware (Z 付き) の混在で TypeError にならず、naive は UTC 扱い."""
+    a, b = _two_reviews(tmp_path)
+    out = tmp_path / "scoring.json"
+
+    r = run_cli(
+        "aggregate-reviews", "--iteration", "1", "--input", str(a), "--input", str(b),
+        "--out", str(out),
+        "--reviewer-window", "A=2026-07-25T10:00:00Z..2026-07-25T10:05:00Z",
+        "--reviewer-window", "B=2026-07-25T10:00:30..2026-07-25T10:04:00",
+        "--json", cwd=state_dir.parent,
+    )
+
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["parallel_execution"] is True
