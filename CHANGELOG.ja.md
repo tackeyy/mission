@@ -11,6 +11,12 @@
 
 ### 追加
 
+- `mission-state.py review-finalize` が aggregate-reviews → push-score を 1 コマンドで transactional に実行し (集計失敗時は score を push しない)、`closeout` が mark-passes → next を順に実行して結合 JSON を返す (gate 未達は mark-passes の exit code を維持し、next 相当の guidance を出力、state 不変)。既存 validator (min-reviewers / strict review 検証 / findings gate / 再 push 保護 / threshold / agreement / specialist accounting) を複製せず再利用し、標準フローの orchestration turn を iteration あたり 2 turn 削減する。分割実行も後方互換で維持 (#283)。
+
+- `aggregate-reviews` に `--reviewer-window <perspective>=<start>..<end>` (複数指定可・optional) を追加。orchestrator が各 reviewer の実行時間帯を申告し、`parallel_execution: true|false|"unknown"` と申告 window を aggregate evidence と結果 JSON に記録する。時間帯が重ならない場合は WARN (直列実行検出) を出すが exit 0 のまま — 観測のみでゲート不変、review JSON の verbatim 契約も不変。形式不正・未知 perspective・重複・end<start は strict に拒否し、naive な時刻は UTC に正規化する (#282)。
+
+- discriminating-v2 実測 (実行時間 ≒ 総生成トークン量) に基づく出力・turn 規律 3 件を prompt 層に追加: 最終報告と artifact は evidence テーブル + tool-computed ゲート値 + archive 参照パスに限定 (レビュアー出力の逐語再掲禁止、#280)、mission-reviewer の出力は採点/Issues テンプレート + `mission-review/1` JSON に限定し再導出は内部化 (#281)、相互依存のない tool 呼び出しは単一メッセージで並列発行 (依存操作は順次、#284)。
+
 - `mission-state.py init` に adaptive routing を追加した (#276)。リスクシグナル (不可逆・security) のない Simple complexity の mission は `route: \"goal\"` を返して session state を作らず、orchestrator は mission ループを完全にスキップして goal 契約 (Goal / Result / Evidence / Assumptions / Stop Condition) でタスクを直接完遂する。最終報告にルーティングした旨を明記し、mission の pass は主張しない。クリーン測定 discriminating-v2 (品質同点・mission 5.4x 時間/4.9x コスト) と実運用の約 95% が iteration 1 で素通しする観測に基づく。シグナル付き Simple は mission ループを維持 (安全側)、`--review-tier` 明示はユーザー意思としてループ維持、`--force-mission` で無条件にループを強制できる。canonical skills 共有により Claude Code / Codex で同一に動作する (#276)。
 
 - mission-vs-goal ベンチマーク runner に `--parallel N` (default 1、完全後方互換) を追加した。record は per-record clone で隔離済みのため worker pool で並列実行でき、10 records の run が約 2.8 時間 → 3 workers で約 1 時間に短縮される。JSONL append と進捗出力は lock で直列化し、worker 例外は伝播、`--stop-on-blocked` は blocked 検出後の新規起動を止め実行中 entry は完走させる (#270)。
@@ -35,6 +41,8 @@
 - `cleanup-stale` が `getppid()` fallback で記録された PID の mission を即座に orphan halt しなくなった（agent CLI がプロセスツリーで発見できない場合）。`find_agent_pid()` が state に `pid_source` を `"fallback"` または `"agent"` として記録し、`cleanup-stale` は fallback 由来の PID が最近消滅した場合（age < stale threshold）はスキップする。真に放置された fallback セッション（age >= threshold）は従来どおり halt する。`pid_source` なしの旧 state は既存の即時 halt 動作を維持する (#239)。
 
 ### 変更
+
+- `skills/mission/SKILL.md` を 217 → 約 202 行に圧縮し、260 行未満の regression guard を追加。あわせて per-turn context 規律を追加: state 全文 echo 禁止 (`get --field` / `next` の JSON のみ)、reviewer JSON はパス受け渡しのみで再読しない、refs は lazy-load (#285)。
 
 - 不可逆・security シグナルのない Complex mission の `review_tier` 導出を `full` (3名) から `standard` (独立2名) に再調整した。Critical とシグナルでエスカレートした Complex は従来どおり `full` (3名) を維持し、pass gate の意味論 (threshold / open_high / findings evidence / agreement) は不変。discriminating-v1 の実測で品質同点タスクの壁時計の 62% が reviewer-wait であり 3 人目の限界検出価値がゼロだったこと、#240 の「独立 2 名 = agreement 成立の最小構成」の先例に基づく (#266)。
 
