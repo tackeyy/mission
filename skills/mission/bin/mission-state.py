@@ -787,6 +787,35 @@ def _stale_active_seconds() -> int:
     return DEFAULT_STALE_ACTIVE_SECONDS
 
 
+def _normalize_issue_ref(value):
+    """issue_ref を比較用の正規化キーへ変換する (#295).
+
+    同一 Issue を指す異なる形式 (裸番号 `42` / `#42` / `host:owner/repo#42` /
+    `https://.../issues/42`) を同一キーへ畳み込み、形式差による重複見逃しを防ぐ。
+    `.mission-state` は project (cwd) 単位のため、比較キーは Issue 番号を基準にする。
+    数値を抽出できない参照は小文字化した生値をキーとする (後方互換)。
+    """
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    # URL 形式: .../issues/<n>
+    m = re.search(r"/issues/(\d+)", raw)
+    if m:
+        return m.group(1)
+    # 末尾 #<n> (例 host:owner/repo#42, gh:repo#99)
+    m = re.search(r"#(\d+)\s*$", raw)
+    if m:
+        return m.group(1)
+    # 裸番号 (先頭 # 任意)
+    m = re.fullmatch(r"#?(\d+)", raw)
+    if m:
+        return m.group(1)
+    # 数値を抽出できない参照は生値 (大文字小文字非依存) で比較
+    return raw.lower()
+
+
 def _ensure_phase_timing(data: dict, now: str | None = None) -> None:
     """phase 別所要時間の計測フィールドを後方互換で初期化する."""
     now = now or iso_now()
@@ -3935,24 +3964,29 @@ def cmd_init(args):
             "wait_reason_totals_sec": {},
         },
         "activity_unobserved_gap_sec": 0.0,
-        # S3: issue_ref (未指定 None)
+        # S3: issue_ref (未指定 None)。issue_ref_key は #295 の比較用正規化キー。
         "issue_ref": getattr(args, "issue_ref", None),
+        "issue_ref_key": _normalize_issue_ref(getattr(args, "issue_ref", None)),
         # S3-files: 同一 project の file-set overlap WARN 用 (未指定は空 list)
         "planned_files": planned_files,
     }
     # S3: 同プロジェクト内の active session で同一 issue_ref があれば WARN (reject しない)
+    # #295: 形式差 (裸番号 / #番号 / host:owner/repo#番号 / URL) を正規化キーで同一視する
     _issue_ref = getattr(args, "issue_ref", None)
+    _issue_ref_key = _normalize_issue_ref(_issue_ref)
     _cur_sid = resolve_session_id()
-    if _issue_ref:
+    if _issue_ref_key:
         for sf_other in _iter_state_files(cwd):
             try:
                 other = json.loads(sf_other.read_text())
             except Exception:
                 continue
+            # 旧 state に issue_ref_key が無い場合は生値から正規化 (後方互換)
+            _other_key = other.get("issue_ref_key") or _normalize_issue_ref(other.get("issue_ref"))
             # 同一セッションの resume では自分自身の旧 state を誤検出しないよう sid 除外
             if (
                 other.get("loop_active")
-                and other.get("issue_ref") == _issue_ref
+                and _other_key == _issue_ref_key
                 and other.get("session_id") != _cur_sid
             ):
                 print(
@@ -6952,7 +6986,9 @@ def _build_parser():
     p_init.add_argument("--budget-minutes", default=None,
                         help="#238: 時間予算 (分・正の有限数)。next が budget_pressure を返し、80%%で warn、100%%超で spawn 系を consider-halt へ差し替える")
     p_init.add_argument("--issue-ref", default=None, dest="issue_ref",
-                        help="関連 issue の参照 (例: github:owner/repo#42)。同一 issue_ref の active session が存在する場合 WARN")
+                        help="関連 issue の参照。裸番号 `42` / `#42` / `host:owner/repo#42` / `https://.../issues/42` を受理し、"
+                             "#295 で Issue 番号へ正規化して比較する (形式差でも同一 Issue の active session があれば WARN)。"
+                             "下流の受理形式に合わせる場合は裸番号 `42` を推奨")
     p_init.add_argument("--files", default=None,
                         help="予定変更ファイルのカンマ区切り project-root 相対パス。同一 active session と重複する場合 WARN")
     p_init.add_argument("--force-mission", action="store_true", dest="force_mission",
