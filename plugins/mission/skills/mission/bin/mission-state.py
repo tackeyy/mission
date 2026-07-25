@@ -5876,9 +5876,9 @@ def cmd_closeout(args):
             cmd_mark_passes(mp_args)
     except SystemExit as exc:
         code = exc.code if isinstance(exc.code, int) else 1
-        if code == 0:
-            pass  # 正常終了扱いで下の成功経路へ
-        else:
+        # 防衛的分岐: 現在 cmd_mark_passes は sys.exit(0) を発しない (成功時は return) ため
+        # code == 0 には通常到達しない。到達した場合のみ成功経路へ継続する。
+        if code != 0:
             next_stdout = io.StringIO()
             with contextlib.redirect_stdout(next_stdout):
                 cmd_next(argparse.Namespace())
