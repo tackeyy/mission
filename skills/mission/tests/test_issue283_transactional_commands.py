@@ -161,3 +161,18 @@ def test_closeout_rejects_force_flag(state_dir, run_cli, tmp_path):
     r = run_cli("closeout", "--force", cwd=state_dir.parent)
 
     assert r.returncode == 2
+
+
+def test_review_finalize_push_failure_after_aggregate_keeps_history(state_dir, run_cli, read_state, tmp_path):
+    """aggregate 成功 → push-score 失敗 (同一 iteration 再 push を --resubmit-reason なし) でも
+    score_history は増えない (#122 の再 push 保護が review-finalize 経由でも効く)."""
+    a, b = _two_reviews(tmp_path)
+    run_cli("review-finalize", "--iteration", "1", "--input", str(a), "--input", str(b),
+            cwd=state_dir.parent, check=True)
+
+    r = run_cli("review-finalize", "--iteration", "1", "--input", str(a), "--input", str(b),
+                cwd=state_dir.parent)
+
+    assert r.returncode == 2
+    assert "resubmit-reason" in r.stderr
+    assert len(read_state(state_dir)["score_history"]) == 1
