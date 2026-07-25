@@ -166,6 +166,25 @@ def test_init_issue_ref_different_numbers_no_warn(tmp_path):
     assert _issue_ref_warn_lines(stderr) == [], f"別番号で誤 WARN: {stderr!r}"
 
 
+def test_init_issue_ref_legacy_state_without_key_warns(tmp_path):
+    """旧 state (issue_ref_key 無し) でも生値から正規化してフォールバック WARN する (#295 後方互換)."""
+    sessions = tmp_path / ".mission-state" / "sessions"
+    sessions.mkdir(parents=True)
+    # issue_ref_key を持たない旧形式の active state を手動作成
+    (sessions / "session-old.json").write_text(json.dumps({
+        "session_id": "session-old",
+        "issue_ref": "42",  # ← issue_ref_key なし (旧 state)
+        "loop_active": True,
+    }))
+    # 新 init で別形式 (URL) の同一 Issue 42 を指定 → フォールバック正規化で WARN すべき
+    r = _run(["init", "mission new", "--issue-ref", "https://github.com/owner/repo/issues/42"],
+             cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "session-new"})
+    assert r.returncode == 0, r.stderr
+    assert _issue_ref_warn_lines(r.stderr), (
+        f"旧 state (key 無し) に対しフォールバック正規化で WARN すべき: {r.stderr!r}"
+    )
+
+
 def test_init_issue_ref_key_stored(tmp_path):
     """--issue-ref は保存時に正規化キー issue_ref_key を持つ (#295)."""
     r = _run(["init", "mission", "--issue-ref", "https://github.com/owner/repo/issues/42"],
