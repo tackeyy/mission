@@ -3981,20 +3981,32 @@ def cmd_init(args):
                 other = json.loads(sf_other.read_text())
             except Exception:
                 continue
+            # 同一セッションの resume では自分自身の旧 state を誤検出しないよう sid 除外
+            if other.get("session_id") == _cur_sid:
+                continue
             # 旧 state に issue_ref_key が無い場合は生値から正規化 (後方互換)
             _other_key = other.get("issue_ref_key") or _normalize_issue_ref(other.get("issue_ref"))
-            # 同一セッションの resume では自分自身の旧 state を誤検出しないよう sid 除外
-            if (
-                other.get("loop_active")
-                and _other_key == _issue_ref_key
-                and other.get("session_id") != _cur_sid
-            ):
-                print(
-                    f"WARNING [S3]: issue_ref='{_issue_ref}' を持つ active session が既に存在します"
-                    f" (session_id={other.get('session_id', '?')})。重複作業の可能性を確認してください。",
-                    file=sys.stderr,
-                )
-                break  # 1件見つかれば十分
+            if _other_key != _issue_ref_key:
+                continue
+            # #296: 正常完了 (passes=True) は重複リスクなし。active に限らず halt 中の
+            # 未完了 session も対象にする (near-miss は halt 中の session を見逃して発生した)。
+            if other.get("passes") is True:
+                continue
+            if other.get("loop_active"):
+                _state_label = "active"
+            else:
+                # halt / 非稼働。stale 閾値超は引き継ぎ可能な放棄 claim として注記する。
+                _age = _state_age_since_update_sec(other)
+                _stale = _age is not None and _age >= _stale_active_seconds()
+                _state_label = "halted/stale" if _stale else "halted"
+            _hint = " stale の場合は claim を引き継げます。" if "stale" in _state_label else ""
+            print(
+                f"WARNING [S3]: issue_ref='{_issue_ref}' を持つ未完了 session が既に存在します"
+                f" (session_id={other.get('session_id', '?')}, 状態={_state_label})。"
+                f"重複作業の可能性を確認してください。{_hint}",
+                file=sys.stderr,
+            )
+            break  # 1件見つかれば十分
     _warn_s3_file_overlap(cwd, planned_files, _cur_sid)
     # M7 (2026-06-10): complexity を init 時に指定可能に。未指定は WARN (後方互換で Unknown 維持)
     if getattr(args, "complexity", None):

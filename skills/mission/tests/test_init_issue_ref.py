@@ -74,27 +74,73 @@ def test_init_dup_issue_ref_warns(tmp_path):
     )
 
 
-def test_init_dup_issue_ref_inactive_no_warn(tmp_path):
-    """同 issue_ref でも loop_active=False の state は WARN しない."""
-    # セッション A: init して loop_active=false にする
+def test_init_dup_issue_ref_passed_no_warn(tmp_path):
+    """同 issue_ref でも passes=True (正常完了) の state は WARN しない (#296)."""
     r_a = _run(["init", "S3 done mission", "--issue-ref", "gh:repo#77"],
                cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "session-a"})
     assert r_a.returncode == 0
-    # loop_active を False に書き換え
+    # 正常完了: loop_active=False かつ passes=True
     sf = tmp_path / ".mission-state" / "sessions" / "session-a.json"
     data = json.loads(sf.read_text())
     data["loop_active"] = False
+    data["passes"] = True
     sf.write_text(json.dumps(data))
 
-    # セッション B: 同一 issue_ref → WARN しない
     r_b = _run(["init", "S3 second mission", "--issue-ref", "gh:repo#77"],
                cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "session-b"})
     assert r_b.returncode == 0
-    # issue_ref の重複 WARN が出ないこと
     warn_lines = [ln for ln in r_b.stderr.splitlines()
                   if ("warn" in ln.lower() or "warning" in ln.lower())
                   and "issue_ref" in ln.lower()]
-    assert warn_lines == [], f"unexpected issue_ref WARN: {r_b.stderr}"
+    assert warn_lines == [], f"完了 session に WARN すべきでない: {r_b.stderr}"
+
+
+def test_init_dup_issue_ref_halted_incomplete_warns(tmp_path):
+    """halt 中 (loop_active=False かつ passes でない) で未完了の session は WARN する (#296)."""
+    r_a = _run(["init", "S3 halted mission", "--issue-ref", "gh:repo#77"],
+               cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "session-a"})
+    assert r_a.returncode == 0
+    # halt 相当: loop_active=False, passes=False (未完了)
+    sf = tmp_path / ".mission-state" / "sessions" / "session-a.json"
+    data = json.loads(sf.read_text())
+    data["loop_active"] = False
+    data["passes"] = False
+    data["halt_reason"] = "permission block"
+    sf.write_text(json.dumps(data))
+
+    r_b = _run(["init", "S3 second mission", "--issue-ref", "gh:repo#77"],
+               cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "session-b"})
+    assert r_b.returncode == 0
+    lines = _issue_ref_warn_lines(r_b.stderr)
+    assert lines, f"halt 中の未完了 session に WARN すべき: {r_b.stderr}"
+    # 状態が halted と注記される (near-miss の引き継ぎ判断のため)
+    assert any("halt" in ln.lower() for ln in lines), (
+        f"WARN に halted 状態の注記が必要: {r_b.stderr}"
+    )
+
+
+def test_init_dup_issue_ref_halted_stale_warns_annotated(tmp_path):
+    """stale 閾値超の halt session も WARN し stale と注記する (#296)."""
+    r_a = _run(["init", "S3 stale mission", "--issue-ref", "gh:repo#77"],
+               cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "session-a"})
+    assert r_a.returncode == 0
+    sf = tmp_path / ".mission-state" / "sessions" / "session-a.json"
+    data = json.loads(sf.read_text())
+    data["loop_active"] = False
+    data["passes"] = False
+    # 十分に古い updated_at (stale 閾値 3h を超過)
+    data["updated_at"] = "2020-01-01T00:00:00Z"
+    data["phase_started_at"] = "2020-01-01T00:00:00Z"
+    sf.write_text(json.dumps(data))
+
+    r_b = _run(["init", "S3 second mission", "--issue-ref", "gh:repo#77"],
+               cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "session-b"})
+    assert r_b.returncode == 0
+    lines = _issue_ref_warn_lines(r_b.stderr)
+    assert lines, f"stale な halt session も WARN すべき: {r_b.stderr}"
+    assert any("stale" in ln.lower() for ln in lines), (
+        f"WARN に stale 注記が必要: {r_b.stderr}"
+    )
 
 
 def test_init_no_issue_ref_no_dup_warn(tmp_path):
