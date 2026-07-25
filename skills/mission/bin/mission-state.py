@@ -5814,6 +5814,86 @@ def cmd_push_score(args):
     print(json.dumps(result, ensure_ascii=False))
 
 
+def cmd_review_finalize(args):
+    """#283: aggregate-reviews → push-score を 1 コマンドで実行する (Phase 5 transactional).
+
+    既存の cmd_aggregate_reviews / cmd_push_score をそのまま内部呼び出しし、
+    validator (min-reviewers / strict review 検証 / findings gate / #122 再 push 保護) を複製しない。
+    集計が exit 非0 なら push-score には到達せず、score_history は不変 (atomic)。
+    """
+    agg_args = argparse.Namespace(
+        iteration=args.iteration,
+        input=args.input,
+        out=args.out,
+        json=True,
+        min_reviewers=args.min_reviewers,
+        reviewer_windows=args.reviewer_windows,
+    )
+    agg_stdout = io.StringIO()
+    with contextlib.redirect_stdout(agg_stdout):
+        cmd_aggregate_reviews(agg_args)  # 失敗時は sys.exit がそのまま伝播する
+    agg_result = json.loads(agg_stdout.getvalue())
+
+    push_args = argparse.Namespace(
+        iteration=args.iteration,
+        composite=None,
+        min_item=None,
+        items=None,
+        scoring_json=agg_result["out"],
+        notes=args.notes,
+        scoring_output=None,
+        open_high=0,
+        resubmit_reason=args.resubmit_reason,
+    )
+    push_stdout = io.StringIO()
+    with contextlib.redirect_stdout(push_stdout):
+        cmd_push_score(push_args)
+    push_result = json.loads(push_stdout.getvalue())
+
+    print(json.dumps({
+        "ok": True,
+        "aggregate": agg_result,
+        "push": push_result,
+    }, ensure_ascii=False, indent=2))
+
+
+def cmd_closeout(args):
+    """#283: mark-passes → next を 1 コマンドで実行する (Phase 6 transactional).
+
+    標準経路専用で --force は受け付けない (override は mark-passes を直接使う)。
+    gate 未達なら mark-passes の exit code を保ち、next 相当の guidance を
+    JSON で返す。state は mark-passes が exit 前に書き込まないため不変。
+    """
+    mp_args = argparse.Namespace(force=False, reason=None, approved_by_user=False)
+    mp_stdout = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(mp_stdout):
+            cmd_mark_passes(mp_args)
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else 1
+        if code == 0:
+            pass  # 正常終了扱いで下の成功経路へ
+        else:
+            next_stdout = io.StringIO()
+            with contextlib.redirect_stdout(next_stdout):
+                cmd_next(argparse.Namespace())
+            print(json.dumps({
+                "ok": False,
+                "closeout": "mark-passes-gate-failed",
+                "next": json.loads(next_stdout.getvalue()),
+            }, ensure_ascii=False, indent=2))
+            sys.exit(code)
+
+    next_stdout = io.StringIO()
+    with contextlib.redirect_stdout(next_stdout):
+        cmd_next(argparse.Namespace())
+    print(json.dumps({
+        "ok": True,
+        "mark_passes": json.loads(mp_stdout.getvalue()),
+        "next": json.loads(next_stdout.getvalue()),
+    }, ensure_ascii=False, indent=2))
+
+
 def _unclosed_optional_specialist_skills(data: dict) -> list[str]:
     """#189: `specialists_selected` に明示選定された specialist で、invocation 終端ログ
     (skipped/unavailable/failed/completed 等、どのステータスでもよい) が一件もないものを検出する。
@@ -7108,6 +7188,27 @@ def _build_parser():
                        help="#282: reviewer 実行時間帯 '<perspective>=<start>..<end>' (ISO 8601)。"
                             "複数指定で並列実行の重なりを観測し evidence に記録 (ゲート不変)")
     p_agg.set_defaults(func=cmd_aggregate_reviews)
+
+    p_rf = sub.add_parser("review-finalize",
+                          help="#283: aggregate-reviews → push-score を 1 コマンドで実行 (Phase 5 transactional)")
+    p_rf.add_argument("--iteration", type=int, required=True)
+    p_rf.add_argument("--input", action="append", required=True,
+                      help="reviewer が出力した mission-review/1 JSON。複数指定可")
+    p_rf.add_argument("--out", default=None,
+                      help="scoring JSON の出力パス。未指定なら /tmp/mission-scorer-iter-N-<mission8>.json")
+    p_rf.add_argument("--min-reviewers", type=int, default=None, dest="min_reviewers",
+                      help="#240: 最低 reviewer 数。不足なら exit 2 (score は push されない)")
+    p_rf.add_argument("--reviewer-window", action="append", default=[], dest="reviewer_windows",
+                      help="#282: reviewer 実行時間帯 '<perspective>=<start>..<end>' (観測のみ)")
+    p_rf.add_argument("--notes", default=None)
+    p_rf.add_argument("--resubmit-reason", default=None, dest="resubmit_reason",
+                      help="#122: 同一 iteration の再 push 理由")
+    p_rf.set_defaults(func=cmd_review_finalize)
+
+    p_closeout = sub.add_parser("closeout",
+                                help="#283: mark-passes → next を 1 コマンドで実行 (Phase 6 transactional)。"
+                                     "gate 未達なら exit 2 + next guidance。--force 非対応 (override は mark-passes 直接)")
+    p_closeout.set_defaults(func=cmd_closeout)
 
     p_manifest = sub.add_parser("context-manifest",
                                 help="#241: bounded context manifest を生成 (reviewer fork 向け)")

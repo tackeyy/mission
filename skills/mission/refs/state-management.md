@@ -33,6 +33,18 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py set iteration=
 # strict 検証: 未知キー reject / 全 items <= 1.0 (0-1 正規化疑い) reject / 範囲外 reject。
 # evidence は archive/iter-N-<mission8>-scoring.json に _meta 付きで自動保存され、
 # score_history entry に score_source="scoring-json" と scoring_evidence_path が記録される。
+# Phase 5 transactional (#283, 推奨): aggregate-reviews → push-score を 1 コマンドで実行。
+# validator は分割実行と同一 (min-reviewers / strict review 検証 / findings gate / #122 再 push 保護)。
+# 集計が exit 非0 なら score は push されない (atomic)。--reviewer-window は #282 の並列観測。
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py review-finalize \
+    --iteration <N> --input a.json --input b.json --min-reviewers <N> \
+    --reviewer-window "A=<start_iso>..<end_iso>" --reviewer-window "B=<start_iso>..<end_iso>"
+
+# Phase 6 transactional (#283, 推奨): mark-passes → next を 1 コマンドで実行。
+# gate 未達なら mark-passes の exit code を保ち、next guidance を JSON で返す (state 不変)。
+# --force は非対応。override はユーザー明示承認の上で mark-passes --force を直接使う。
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py closeout
+
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score \
     --iteration <N> \
     --scoring-json /tmp/mission-scorer-iter-<N>-<mission_id先頭8>.json \
