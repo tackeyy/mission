@@ -22,15 +22,7 @@ allowed-tools:
 
 ## Local authoring source bootstrap
 
-`MISSION_PLUGIN_ROOT` が Git worktree を指す local authoring 構成では、mission state の `init`、対象 repository の setup、実装より先に、次を1回実行する。
-
-```bash
-bash "$MISSION_PLUGIN_ROOT/scripts/mission-local-authoring-sync.sh"
-```
-
-exit 0 と `status=ready` を確認できない場合は、手元の古い版へ fallback せず mission を開始しない。network、権限、dirty checkout、`main` 以外、detached HEAD、ahead、diverged のいずれでも同じく fail-closed で停止し、`stash` / `reset` / `rebase` / force update / branch switch で自動修復しない。
-
-同期成功時は working tree が更新されている可能性があるため、`$MISSION_PLUGIN_ROOT/skills/mission/SKILL.md` を disk から完全に読み直し、更新後の指示を使う。同じ skill 呼び出し内ですでに `status=ready` を観測済みなら bootstrap を繰り返さず、`Compact Instructions` へ進む。Git worktree ではない versioned plugin install はこの bootstrap の対象外。
+`MISSION_PLUGIN_ROOT` が Git worktree を指す local authoring 構成では、`init`・repository setup・実装より先に `bash "$MISSION_PLUGIN_ROOT/scripts/mission-local-authoring-sync.sh"` を1回実行する。exit 0 かつ `status=ready` 以外 (network、権限、dirty checkout、`main` 以外、detached HEAD、ahead、diverged を含む) は fail-closed で停止し、古い版への fallback や `stash`/`reset`/`rebase`/force update/branch switch での自動修復をしない。同期成功時は `$MISSION_PLUGIN_ROOT/skills/mission/SKILL.md` を disk から読み直して更新後の指示を使う。同じ呼び出し内で `status=ready` 観測済みなら繰り返さない。versioned plugin install は対象外。
 
 ## Compact Instructions
 
@@ -46,6 +38,7 @@ exit 0 と `status=ready` を確認できない場合は、手元の古い版へ
 10. PR がある場合は pass 後に Phase 7 を実行する。自動 merge は明示 opt-in、CI/テスト pass、`gh pr checks` 1 件以上、禁止ルールなしの全条件を満たす時だけ。
 11. `init` 後は `activity start --kind active --reason planning` を開始し、実作業・外部応答・承認・reviewer・実行可能作業なしの境界で明示的に切り替える。phase 境界では `set phase=` + `activity start` の 2 コマンドではなく atomic な `advance --phase <phase> --activity <kind>:<reason>` を優先する (#237: phase だけ進んで activity が空の state を作らない)。原因不明の時間を推測分類しない。終端 phase は open segment を自動で閉じる。
 12. 相互依存のない tool 呼び出し (複数ファイルの Read、独立した照合の Bash、Reviewer N 名の spawn) は単一メッセージで並列発行し、逐次実行で turn を積み増さない (#284)。依存関係がある操作 (state 書き込み → 再取得、review JSON 保存 → review-finalize) は従来どおり順次。
+13. context 規律 (#285): state 全文を cat/echo せず、値は `get --field` と `next`/`resume` の JSON だけを読む。reviewer の mission-review/1 JSON は保存とパス受け渡しのみで orchestrator が全文を再読・転記しない (検証は `review-finalize` が行う)。refs/*.md は必要時のみ Read し、読み終えた大型ファイルの再読を避ける。
 
 ## state.json 操作
 
@@ -207,11 +200,3 @@ worktree 実行時は `mark-passes` / `mark-halt` の後、worktree cleanup の�
 - `refs/codex-setup.md`: Codex での導入と Stop hook
 - `refs/self-improvement.md`: audit と改善 prompt
 - `refs/specialist-registry.md`: task_profile と specialist/provider 選定
-
-## 実行例
-
-```
-/mission リファクタリングして
-→ init、仮置き、specialists recommend、next に従って進行
-→ review-finalize (aggregate-reviews / push-score --scoring-json) / closeout (mark-passes / next)
-```
