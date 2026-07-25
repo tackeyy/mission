@@ -122,6 +122,62 @@ def test_init_dup_issue_ref_does_not_reject(tmp_path):
     assert s["issue_ref"] == "gh:repo#55"
 
 
+# ===== #295: issue_ref 正規化 (形式差の重複見逃しを塞ぐ) =====
+
+
+def _issue_ref_warn_lines(stderr):
+    return [ln for ln in stderr.splitlines()
+            if ("warn" in ln.lower() or "warning" in ln.lower())
+            and "issue_ref" in ln.lower()]
+
+
+def _init_pair(tmp_path, ref_a, ref_b):
+    """A(session-a) を active で作り、B(session-b) を init して B の stderr を返す."""
+    r_a = _run(["init", "mission A", "--issue-ref", ref_a],
+               cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "session-a"})
+    assert r_a.returncode == 0, r_a.stderr
+    r_b = _run(["init", "mission B", "--issue-ref", ref_b],
+               cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "session-b"})
+    assert r_b.returncode == 0, r_b.stderr
+    return r_b.stderr
+
+
+def test_init_issue_ref_normalized_forms_warn(tmp_path):
+    """同一 Issue 番号を指す異なる形式同士でも重複 WARN が出る (#295)."""
+    # A は URL 形式、B は裸番号 → 同一 Issue 42 として WARN すべき
+    forms = [
+        ("https://github.com/owner/repo/issues/42", "42"),
+        ("42", "#42"),
+        ("#42", "github:owner/repo#42"),
+        ("github:owner/repo#42", "https://github.com/owner/repo/issues/42"),
+    ]
+    for ref_a, ref_b in forms:
+        sub = tmp_path / f"proj_{abs(hash((ref_a, ref_b)))}"
+        sub.mkdir()
+        stderr = _init_pair(sub, ref_a, ref_b)
+        assert _issue_ref_warn_lines(stderr), (
+            f"形式差 {ref_a!r} vs {ref_b!r} で重複 WARN が出るべき: {stderr!r}"
+        )
+
+
+def test_init_issue_ref_different_numbers_no_warn(tmp_path):
+    """異なる Issue 番号は正規化後も別物として WARN しない (過剰正規化の防止)."""
+    stderr = _init_pair(tmp_path, "#42", "#43")
+    assert _issue_ref_warn_lines(stderr) == [], f"別番号で誤 WARN: {stderr!r}"
+
+
+def test_init_issue_ref_key_stored(tmp_path):
+    """--issue-ref は保存時に正規化キー issue_ref_key を持つ (#295)."""
+    r = _run(["init", "mission", "--issue-ref", "https://github.com/owner/repo/issues/42"],
+             cwd=tmp_path)
+    assert r.returncode == 0, r.stderr
+    s = _read(tmp_path)
+    # 生の値は保持
+    assert s.get("issue_ref") == "https://github.com/owner/repo/issues/42"
+    # 正規化キーは番号
+    assert s.get("issue_ref_key") == "42"
+
+
 def test_s3_same_session_id_no_warn_on_resume(tmp_path):
     """S3: 同一 session_id (= resume) では自分自身の旧 state を誤検出して WARN しない."""
     # セッション A: init して state を残す
