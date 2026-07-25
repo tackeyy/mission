@@ -5414,6 +5414,11 @@ def _parse_reviewer_windows(specs: list[str], valid_perspectives: set[str]) -> l
         except ValueError:
             print(f"ERROR: --reviewer-window の時刻が ISO 8601 として解釈できません: {spec!r}", file=sys.stderr)
             sys.exit(2)
+        # naive/aware 混在は比較で TypeError になるため、naive は UTC とみなして正規化する
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
         if end < start:
             print(f"ERROR: --reviewer-window の end が start より前です: {spec!r}", file=sys.stderr)
             sys.exit(2)
