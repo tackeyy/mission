@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The irreversible-keyword escalator now suppresses noun references to "release" — a match immediately followed by a number, version, `brief`, `notes`, or `mission` (e.g. "Release 6", "Release brief") no longer escalates a Standard mission to full tier, recorded as `noun-reference-non-operation` in the audit trail. The 2026-08-01 production audit measured a 36% false-positive rate from document/version names; verb usage ("release the hotfix") still escalates (#313).
+
 - Sessions carry a `session_role` (`implementer`/`checker`/`planning`/`analyze`/`release`, set via `init --role`, default `implementer`), a new `evidence-submitted` halt category marks the normal checker exit, and `summarize_pass_rate_population` adds additive `role_counts` plus an implementer-only pass rate — the 2026-08-01 production audit found 75% of sessions are checker-family roles whose by-design iter-0 exits were polluting the pass-rate statistics. Existing fields keep their all-role meaning; old states without the field count as implementer (#311).
 
 - `mission-state.py resolve-archive` attaches auditable resolution metadata (`resolved`/`superseded`/`closed`, owner issue, evidence URL, note) to terminal halted records under `.mission-state` without altering `halt_reason`, with fail-closed validation of target paths and record states (#301).
