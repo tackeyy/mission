@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The mission-vs-goal benchmark adds a `portfolio` cohort (`tasks.portfolio.json`, 8 tasks: 3 Simple / 3 Standard / 2 Complex) measuring the routing-inclusive effective overhead of the mission entrance: Simple tasks exercise adaptive routing (#276) to the goal contract, Standard tasks reuse focused subsets of the discriminating fixtures, and Complex tasks reuse the fail-first audits. Both its own answer key and the reused discriminating answer key are hidden from run clones. Structure, complexity mix, answer-key hiding, fixture existence, and marker discoverability are test-enforced.
+
 - The irreversible-keyword escalator now suppresses noun references to "release" — a match immediately followed by a number, version, `brief`, `notes`, or `mission` (e.g. "Release 6", "Release brief") no longer escalates a Standard mission to full tier, recorded as `noun-reference-non-operation` in the audit trail. The 2026-08-01 production audit measured a 36% false-positive rate from document/version names; verb usage ("release the hotfix") still escalates (#313).
 
 - Sessions carry a `session_role` (`implementer`/`checker`/`planning`/`analyze`/`release`, set via `init --role`, default `implementer`), a new `evidence-submitted` halt category marks the normal checker exit, and `summarize_pass_rate_population` adds additive `role_counts` plus an implementer-only pass rate — the 2026-08-01 production audit found 75% of sessions are checker-family roles whose by-design iter-0 exits were polluting the pass-rate statistics. Existing fields keep their all-role meaning; old states without the field count as implementer (#311).

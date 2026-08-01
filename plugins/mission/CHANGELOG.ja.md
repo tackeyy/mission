@@ -19,6 +19,8 @@
 
 ### 追加
 
+- mission-vs-goal ベンチマークに `portfolio` cohort (`tasks.portfolio.json`、8 tasks: Simple 3 / Standard 3 / Complex 2) を追加した。mission 入口の routing 込み実効オーバーヘッドを測定する: Simple は adaptive routing (#276) の goal 契約直行を発火させ、Standard は discriminating fixture の focused サブセットを、Complex は fail-first 監査をそのまま再利用する。自身の answer key と再利用元 (tasks.discriminating.json) の answer key の両方を run clone から隠蔽する。構造・complexity 構成・隠蔽・fixture 実在・marker 発見可能性はテストで強制する。
+
 - 不可逆キーワードエスカレータが "release" の名詞参照を suppress するようになった。直後が数字・版番号・`brief`・`notes`・`mission` のマッチ (例: "Release 6"、"Release brief") は Standard を full tier へ誤昇格させず、`noun-reference-non-operation` として監査記録される。2026-08-01 の実運用監査で文書名・版名由来の FP 36% を実測したための対策。動詞用法 ("release the hotfix") は従来どおりエスカレートする (#313)。
 
 - session に `session_role` (`implementer`/`checker`/`planning`/`analyze`/`release`、`init --role` で指定、既定 `implementer`) を追加し、Checker の正規出口を示す halt カテゴリ `evidence-submitted` と、`summarize_pass_rate_population` の additive な `role_counts` + implementer 限定 pass rate を導入した。2026-08-01 の実運用監査で sessions の 75% が Checker 系役割であり、設計どおりの iter=0 終了が pass-rate 統計を汚染していたための対策。既存フィールドは全 role 対象の意味を維持し、フィールドを持たない旧 state は implementer 扱い (#311)。
