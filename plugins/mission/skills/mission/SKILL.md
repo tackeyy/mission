@@ -38,8 +38,8 @@ exit 0 と `status=ready` を確認できない場合は、手元の古い版へ
 2. compaction 後の最初の操作は `mission-state.py resume`。返る `next_action` / `command_hint` に従い、state の `assumptions_path` を読む。`stale` / `orphan` halt は `resume`、`awaiting-approval` 等の手動 halt はユーザーが対象操作と state 再活性化を明示承認した後に `reactivate --approved-by-user --expected-category <現在値> --reason "<承認理由>"` を使う。固定 `.mission-state/assumptions.md` 決め打ちは禁止。
 3. 新規開始時は、read-only の repository 確認を除く task setup（fetch / pull / switch / worktree 作成）・実装より先に `init` で active state を作る。`init` は `permission-preflight --json` 相当の state / assumptions 実書き込み検査を内蔵する。exit 2 なら実作業へ進まず、`blocked-external` の halt / stdout 証跡をそのまま報告し、権限承認を質問しない。Codex は続けて `codex-preflight --json --strict` を実行し、exit 0 を確認するまで setup を進めない。各 phase 境界は `next` で Stop hook なし環境を補完する。
 4. state 更新は `mission-state.py` のみ。`sessions/<sid>.json` 直書き、inline `jq`、手計算の pass 判定は禁止。機械検証可能な action (`push-score` / `mark-passes` / `gh pr view` / `git push`) は直後に state 再取得または外部再照合し、捏造・転記ミスを潰す。
-5. Phase 5 は reviewer の `mission-review/1` JSON を `aggregate-reviews` で集計し、直後に `push-score --scoring-json` へ渡す。標準フローで `mission-scorer` を spawn しない。
-6. 完了報告前に `mark-passes` が exit 0 で返ったことを確認し、最後に `next` を呼ぶ。`next_action=report-complete`（`passes=true`）または `report-blocker`（`halt_reason` あり）以外では final を返さない。`findings_evidence_path` / `open_high` / `max_agreement_delta <= 1.5` / `threshold` / min item gate が未達なら継続。
+5. Phase 5 は reviewer の `mission-review/1` JSON を `review-finalize` 1 コマンドで集計・記録する (#283: 内部は `aggregate-reviews` → `push-score --scoring-json` と同一 validator。分割実行も後方互換で可)。標準フローで `mission-scorer` を spawn しない。
+6. 完了報告前に `closeout` 1 コマンド (#283: `mark-passes` → `next` を同順で実行。gate 未達は exit 2 + guidance) が exit 0 で返ったことを確認する。`next_action=report-complete`（`passes=true`）または `report-blocker`（`halt_reason` あり）以外では final を返さない。`findings_evidence_path` / `open_high` / `max_agreement_delta <= 1.5` / `threshold` / min item gate が未達なら継続。
 7. `halt_reason` が空でなければ完了報告語彙は禁止し、先頭を `⏸️ 中断 / 未完了` にする。`mark-passes --force --approved-by-user` はユーザーが明示的に override を指示した場合のみ (#185: `--approved-by-user` は自律実行禁止のフラグであり、orchestrator が自己判断で付けてはならない)。
 8. M6: Medium 以上の指摘を orchestrator がインライン修正したら、自己検証だけで合格にしない。差分 Reviewer 1 名の再確認を経てから scoring / pass 判定へ進む。
 9. 質問は溜めて仮置きする。即時質問は Trigger 1 の不可逆操作と、Trigger 2 の中断条件だけ。
@@ -62,8 +62,10 @@ mission-state.py activity start --kind approval-wait --reason user-approval
 mission-state.py activity start --kind reviewer-wait --reason review-response
 mission-state.py activity start --kind idle --reason no-runnable-work
 mission-state.py activity end
+mission-state.py review-finalize --iteration N --input a.json --input b.json --min-reviewers N --reviewer-window "A=<start>..<end>"
 mission-state.py aggregate-reviews --iteration N --input a.json --input b.json --out /tmp/mission-scorer-N.json --json
 mission-state.py push-score --iteration N --scoring-json /tmp/mission-scorer-N.json
+mission-state.py closeout
 mission-state.py mark-passes
 mission-state.py mark-halt --reason "<reason>"
 mission-state.py reactivate --approved-by-user --expected-category awaiting-approval --reason "<user-approved reason>"
@@ -90,8 +92,8 @@ Phase 1: Issue 特定、複雑度、task_profile、specialist recommend
 Phase 2: iter1 planner。iter2+ は Planner spawn 判定
 Phase 3: executor 実行
 Phase 4: reviewer N 名。iter2+ は差分レビュー
-Phase 5: aggregate-reviews -> push-score --scoring-json
-Phase 6: next / mark-passes / mark-halt / critic
+Phase 5: review-finalize (= aggregate-reviews -> push-score --scoring-json)
+Phase 6: closeout (= mark-passes -> next) / mark-halt / critic
 Phase 7: pass 後の PR merge 判定
 ```
 
@@ -107,17 +109,17 @@ init 後 (route されなかった場合)、対象ファイル候補が見えた
 
 ## Phase 2-6
 
-1 iter の標準フローは planner → executor → reviewer → `aggregate-reviews` → `push-score --scoring-json` → critic。Codex では Skill tool が無い場合、該当 skill 指示を同一コンテキストで適用し、`specialist_invocations` には `codex-inline` として実呼び出し証跡を記録する。
+1 iter の標準フローは planner → executor → reviewer → `review-finalize` (= `aggregate-reviews` → `push-score --scoring-json`) → critic。Codex では Skill tool が無い場合、該当 skill 指示を同一コンテキストで適用し、`specialist_invocations` には `codex-inline` として実呼び出し証跡を記録する。
 
 activity segment は観測専用で、reviewer 数・threshold・findings evidence・agreement・`open_high`・pass/fail gate を変更しない。外部応答、承認、reviewer の待機を開始する直前に対応する wait kind へ切り替え、応答後は `active` へ戻す。`idle` は「実行可能な作業がない」と明示できる場合だけ使う。crash/resume 間の不明時間は自動分類せず unobserved gap として保持する。reason enum と集計定義は `refs/state-management.md` の「Activity segment observability」を参照。
 
-Reviewer 数は Simple=1、Standard=2、Complex=2、Critical=3 (#266: シグナルなし Complex は独立2名で agreement 成立。不可逆・security シグナルで full=3 へエスカレート)。Claude Code では Reviewer N 名を単一メッセージ内で並列起動する。Codex は順次でよい。観点Dは採点させず、計画指示明瞭度の改善を Critic の実行計画に反映する。
+Reviewer 数は Simple=1、Standard=2、Complex=2、Critical=3 (#266: シグナルなし Complex は独立2名で agreement 成立。不可逆・security シグナルで full=3 へエスカレート)。Claude Code では Reviewer N 名を単一メッセージ内で並列起動する。Codex は順次でよい。観点Dは採点させず、計画指示明瞭度の改善を Critic の実行計画に反映する。**並列観測 (#282)**: reviewer spawn 直前と全返却後の時刻 (ISO 8601) を控え、`aggregate-reviews` に `--reviewer-window <perspective>=<start>..<end>` を各 reviewer 分渡す。`parallel_execution: false` の WARN が出たら、次 iteration は必ず単一メッセージ並列起動に戻す (観測のみ・gate 不変)。
 
 **review_tier (#168, #209)**: `init` が complexity とミッション記述から `review_tier`（light/standard/full）を auto 導出し state に記録する（`review_tier_source` / `review_tier_signals` / `review_tier_signal_details` で監査可能）。不可逆系キーワードは各出現の文脈を評価し、明示的に実操作を否定した候補だけを抑制する。条件付き・二重否定・不確実・単なる引用は安全側で full を維持し、security / high-risk シグナルは否定で抑制しない。light: reviewer 1名・`required=true` specialist のみ・critic は fail 時のみ spawn。standard/full: 従来どおり。**ゲート意味論は tier によらず不変**（threshold / open_high / findings evidence / halt）。詳細（導出テーブル・エスカレータ一覧・override 規律）は `refs/state-management.md` の「review_tier 導出と Light Tier 運用」節を参照。
 
 **Planner spawn 判定 (#124)**: iter1 は従来どおり planner 必須。iter2 以降は `mission-critic` の `### 実行計画 (次 iteration)` テーブルを見る。全ステップの `対応finding` が finding id のみなら、planner を spawn せず executor に直接渡す。`new` を含むステップが 1 つでもあるなら planner を spawn する。このテーブル読み取り時に scope 判定を state へ記録する (#258): 全ステップが finding id のみなら `mission-state.py set critic_has_new_scope=false`、`new` を含むなら `critic_has_new_scope=true`。この値が次 iter の reviewer 数 (#240) と context mode (#241) を決める。**#309 で機械的ゲート化済み**: iter≥2 で未記録のまま `next` を呼ぶと `record-critic-scope` が返り、記録するまで run-reviewers guidance は出ない。
 
-**差分レビュー (#240)**: iter2+ の前 iter 指摘修正では、`next` の `details.reviewer_count` に従う (`critic_has_new_scope=false` なら state が独立 2 名へ削減する。1 名化は agreement 検証が失われるため禁止)。args に High/Medium 指摘、修正コミット、全 diff 再レビュー不要、採点は絶対評価、Low 残存で 5.0 禁止を明記する。`aggregate-reviews` は `next` の command_hint が示す `--min-reviewers N` を必ず付け、reviewer 数不足の集計を exit 2 で拒否させる。`new` がある追加スコープ (`critic_has_new_scope=true`) は planner 後にフルレビューへ戻る。
+**差分レビュー (#240)**: iter2+ の前 iter 指摘修正では、`next` の `details.reviewer_count` に従う (`critic_has_new_scope=false` なら state が独立 2 名へ削減する。1 名化は agreement 検証が失われるため禁止)。args に High/Medium 指摘、修正コミット、全 diff 再レビュー不要、採点は絶対評価、Low 残存で 5.0 禁止を明記する。`review-finalize` (または `aggregate-reviews`) は `next` の command_hint が示す `--min-reviewers N` を必ず付け、reviewer 数不足の集計を exit 2 で拒否させる。`new` がある追加スコープ (`critic_has_new_scope=true`) は planner 後にフルレビューへ戻る。
 
 **bounded context (#241)**: `next` の `details.context_mode` が `"bounded"` のとき、`mission-state.py context-manifest --iteration <N> --out .mission-state/context-manifest-iter<N>.json` を生成し、reviewer args に manifest パス・対象 diff (修正コミット範囲)・High/Medium 指摘を渡す。reviewer は manifest + diff を一次スコープとしてレビューし、full history 走査を省く。manifest 生成が失敗した場合 (exit 非0 / ファイル不在) は full context に fallback して従来どおり進める (fail-safe)。`context_mode == "full"` では何もしない。
 
@@ -212,5 +214,5 @@ worktree 実行時は `mark-passes` / `mark-halt` の後、worktree cleanup の�
 ```
 /mission リファクタリングして
 → init、仮置き、specialists recommend、next に従って進行
-→ aggregate-reviews / push-score --scoring-json / mark-passes
+→ review-finalize (aggregate-reviews / push-score --scoring-json) / closeout (mark-passes / next)
 ```
