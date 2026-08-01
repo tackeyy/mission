@@ -9,6 +9,10 @@
 
 ## [Unreleased]
 
+### 修正
+
+- `cleanup-stale` が checker 系 role (`session_role != implementer`) に live-PID no-score stale 判定を適用しないようになった。設計上 score を書かない Checker session が親プロセスの PID 共有下で一括 stale 化されていた実害 (7/25-27 に 7 件) への対策で、dead-PID の orphan 回収は従来どおり機能する。また同一 PID を複数 active session が共有する場合に `duplicate-pid` warning を出力し、親管理の並列 mission を可観測にした (#314)。
+
 ## [2.1.0] - 2026-08-02
 
 ### 追加

@@ -6681,7 +6681,8 @@ def cmd_cleanup_stale(args):
         search_roots = [Path(args.root)]
     else:
         search_roots = _default_search_roots()
-    results = {"halted": [], "would_halt": [], "skipped": [], "errors": [], "dry_run": not args.execute}
+    results = {"halted": [], "would_halt": [], "skipped": [], "errors": [], "warnings": [], "dry_run": not args.execute}
+    _pid_sessions: dict[int, list[str]] = {}  # #314: 重複 PID 検出
     for root in search_roots:
         if not root.exists():
             continue
@@ -6696,6 +6697,10 @@ def cmd_cleanup_stale(args):
                 if not pid:
                     results["skipped"].append({"path": str(sf), "reason": "no pid"})
                     continue
+                try:
+                    _pid_sessions.setdefault(int(pid), []).append(sf.stem)  # #314
+                except (TypeError, ValueError):
+                    pass
                 # alive check: PID が生きていて かつ agent CLI プロセスである場合のみ skip。
                 # raw os.kill(pid,0) だけだと PID が別プロセスに再利用された orphan を
                 # 「alive」と誤判定して永久放置する (P3-4a, 2026-06-10 検査で発見)
@@ -6725,7 +6730,19 @@ def cmd_cleanup_stale(args):
                         else:
                             age_sec = _state_age_since_update_sec(data)
                             stale_threshold = _stale_active_seconds()
-                            if not data.get("score_history") and (age_sec is None or age_sec >= stale_threshold):
+                            # #314: checker 系 role は設計上 score を書かないため、
+                            # live-pid no-score 判定から除外する (shared-PID false-stale の主因)。
+                            # dead PID になれば従来どおり orphan 経路で回収される。
+                            _role = data.get("session_role") or "implementer"
+                            if _role != "implementer" and not data.get("score_history"):
+                                results["skipped"].append({
+                                    "path": str(sf),
+                                    "reason": "checker-role-no-score-by-design",
+                                    "pid": pid,
+                                    "session_role": _role,
+                                    "age_sec": age_sec,
+                                })
+                            elif not data.get("score_history") and (age_sec is None or age_sec >= stale_threshold):
                                 halt_reason = (
                                     "stale: active no-score checkpoint exceeded "
                                     f"{stale_threshold}s with live agent pid {pid} (cleanup-stale)"
@@ -6796,6 +6813,16 @@ def cmd_cleanup_stale(args):
                     results["errors"].append({"path": str(sf), "error": str(e)})
             except Exception as e:
                 results["errors"].append({"path": str(sf), "error": str(e)})
+    # #314: 同一 PID を複数 active session が共有している場合の可観測性 warning
+    for _pid, _sids in sorted(_pid_sessions.items()):
+        if len(_sids) > 1:
+            results["warnings"].append({
+                "kind": "duplicate-pid",
+                "pid": _pid,
+                "sessions": _sids,
+                "note": "複数 session が同一 PID を共有 (親プロセス管理下の並列 mission)。"
+                        " stale 判定は last_activity_at ベースで行われる (#310/#314)",
+            })
     print(json.dumps(results, indent=2, ensure_ascii=False))
 
 
