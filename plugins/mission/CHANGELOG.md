@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `cleanup-stale` no longer applies the live-PID no-score stale judgment to checker-family roles (`session_role != implementer`), whose by-design scoreless sessions were batch-staled when sharing a parent process PID (7 production cases on 7/25-27); dead-PID orphan collection still applies. The command also emits a `duplicate-pid` warning when multiple active sessions share one PID, making parent-managed parallel missions observable (#314).
+
 ## [2.1.0] - 2026-08-02
 
 ### Added
