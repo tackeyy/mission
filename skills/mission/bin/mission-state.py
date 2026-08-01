@@ -5533,6 +5533,67 @@ def _apply_reviewer_caps(review: dict) -> tuple[dict, list[dict]]:
     return scores, cap_log
 
 
+def _parse_reviewer_windows(specs: list[str], valid_perspectives: set[str]) -> list[dict]:
+    """#282: '--reviewer-window P=<start>..<end>' 申告を検証して構造化する.
+
+    観測専用の self-report (orchestrator が spawn/return 時刻を申告する)。
+    review JSON の verbatim 契約には触れない。形式不正・未知 perspective・
+    重複・end<start は strict に exit 2 で拒否する。
+    """
+    windows = []
+    seen = set()
+    for spec in specs:
+        head, sep, times = spec.partition("=")
+        start_raw, tsep, end_raw = times.partition("..")
+        if not sep or not tsep or not head.strip() or not start_raw.strip() or not end_raw.strip():
+            print(f"ERROR: --reviewer-window の形式が不正です: {spec!r} "
+                  "(期待: '<perspective>=<start_iso>..<end_iso>')", file=sys.stderr)
+            sys.exit(2)
+        perspective, start_raw, end_raw = head.strip(), start_raw.strip(), end_raw.strip()
+        if perspective not in valid_perspectives:
+            print(f"ERROR: --reviewer-window の perspective {perspective!r} が "
+                  f"--input の reviewer に存在しません", file=sys.stderr)
+            sys.exit(2)
+        if perspective in seen:
+            print(f"ERROR: --reviewer-window の perspective {perspective!r} が重複しています", file=sys.stderr)
+            sys.exit(2)
+        seen.add(perspective)
+        try:
+            start = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
+            end = datetime.fromisoformat(end_raw.replace("Z", "+00:00"))
+        except ValueError:
+            print(f"ERROR: --reviewer-window の時刻が ISO 8601 として解釈できません: {spec!r}", file=sys.stderr)
+            sys.exit(2)
+        # naive/aware 混在は比較で TypeError になるため、naive は UTC とみなして正規化する
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        if end < start:
+            print(f"ERROR: --reviewer-window の end が start より前です: {spec!r}", file=sys.stderr)
+            sys.exit(2)
+        windows.append({
+            "perspective": perspective,
+            "started_at": start_raw,
+            "ended_at": end_raw,
+            "_start": start,
+            "_end": end,
+        })
+    return windows
+
+
+def _observe_parallel_execution(windows: list[dict]):
+    """#282: 全ペアの時間帯が重なれば True、1 ペアでも disjoint なら False、判定不能は 'unknown'."""
+    if len(windows) < 2:
+        return "unknown"
+    for i in range(len(windows)):
+        for j in range(i + 1, len(windows)):
+            a, b = windows[i], windows[j]
+            if not (a["_start"] < b["_end"] and b["_start"] < a["_end"]):
+                return False
+    return True
+
+
 def _consensus_score(max_delta: float) -> float:
     if max_delta <= 0.5:
         return 5.0
@@ -5614,6 +5675,24 @@ def cmd_aggregate_reviews(args):
         if finding.get("severity") == "High"
     )
 
+    # #282: reviewer 並列実行の観測 (ゲート不変・self-report ベース)
+    valid_perspectives = {review["perspective"] for review in reviews}
+    reviewer_windows = _parse_reviewer_windows(
+        getattr(args, "reviewer_windows", []) or [], valid_perspectives
+    )
+    parallel_execution = _observe_parallel_execution(reviewer_windows)
+    reviewer_windows_public = [
+        {k: v for k, v in window.items() if not k.startswith("_")}
+        for window in reviewer_windows
+    ]
+    if parallel_execution is False:
+        print(
+            "WARN: reviewer が直列実行されています (実行時間帯の重なりなし)。"
+            "Claude Code では Reviewer を単一メッセージで並列起動してください (#282)。"
+            "この warn は観測のみで集計・gate には影響しません。",
+            file=sys.stderr,
+        )
+
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
         mission8 = (data.get("mission_id") or "unknown")[:8]
@@ -5628,6 +5707,8 @@ def cmd_aggregate_reviews(args):
             "cap_log": cap_log,
             "agreement_detail": agreement_detail,
             "open_high": open_high,
+            "reviewer_windows": reviewer_windows_public,
+            "parallel_execution": parallel_execution,
         }
         evidence_path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -5650,6 +5731,7 @@ def cmd_aggregate_reviews(args):
         "open_high": open_high,
         "items": items,
         "review_agreement": review_agreement,
+        "parallel_execution": parallel_execution,
     }
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -7179,6 +7261,9 @@ def _build_parser():
     p_agg.add_argument("--json", action="store_true", help="結果を JSON で出力")
     p_agg.add_argument("--min-reviewers", type=int, default=None, dest="min_reviewers",
                        help="#240: 最低 reviewer 数。不足なら exit 2 (合意偽装防止)")
+    p_agg.add_argument("--reviewer-window", action="append", default=[], dest="reviewer_windows",
+                       help="#282: reviewer 実行時間帯 '<perspective>=<start>..<end>' (ISO 8601)。"
+                            "複数指定で並列実行の重なりを観測し evidence に記録 (ゲート不変)")
     p_agg.set_defaults(func=cmd_aggregate_reviews)
 
     p_manifest = sub.add_parser("context-manifest",
