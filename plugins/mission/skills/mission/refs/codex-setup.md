@@ -87,7 +87,7 @@ Codex marketplace install は `codex plugin marketplace add /path/to/mission` �
 Install 後、Codex には Claude Code の `${CLAUDE_PLUGIN_ROOT}` 相当の plugin-root env がないため、shell rc で root を明示する。
 
 ```bash
-export MISSION_PLUGIN_ROOT="${CODEX_HOME:-$HOME/.codex}/plugins/cache/mission-marketplace/mission/2.0.0"
+export MISSION_PLUGIN_ROOT="${CODEX_HOME:-$HOME/.codex}/plugins/cache/mission-marketplace/mission/2.1.0"
 export CLAUDE_PLUGIN_ROOT="$MISSION_PLUGIN_ROOT"
 ```
 
