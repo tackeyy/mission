@@ -533,14 +533,52 @@ class StateLock:
                 self.fd.close()
 
 
+def _atomic_write(path: Path, writer) -> None:
+    """同一 directory の排他的な一時ファイルを fsync 後に publish する."""
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            fd = -1
+            writer(f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        tmp.unlink(missing_ok=True)
+
+
 def atomic_write_json(path: Path, data: dict) -> None:
     """Phase B-2: fsync + os.replace で完全な前 or 後状態を保証."""
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    _atomic_write(path, lambda f: json.dump(data, f, indent=2, ensure_ascii=False))
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    """Text evidence を fsync + replace で atomic に更新する."""
+    _atomic_write(path, lambda f: f.write(content))
+
+
+def atomic_write_bytes(path: Path, content: bytes) -> None:
+    """Binary evidence を symlink 非追跡の一時ファイルから atomic publish する."""
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            fd = -1
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        tmp.unlink(missing_ok=True)
 
 
 def _probe_directory_write(directory: Path) -> None:
@@ -617,6 +655,24 @@ def _record_permission_preflight_halt(cwd: Path, sf: Path, reason: str) -> bool:
         return False
 
 
+def _exit_init_evidence_write_failure(target: str) -> None:
+    """新 state publish 前の evidence 作成失敗を正しい target で返す."""
+    reason = (
+        "Phase 0 permission preflight failed before task execution: "
+        f"{target} write unavailable"
+    )
+    print(json.dumps({
+        "ok": False,
+        "halt_recorded": False,
+        "halt_category": "blocked-external",
+        "halt_reason": reason,
+        "probes": [
+            {"target": target, "ok": False, "error": "write-unavailable"}
+        ],
+    }))
+    raise SystemExit(2)
+
+
 def _exit_init_write_failure(cwd: Path, sf: Path | None = None) -> None:
     """Emit the non-interactive fallback when init cannot persist state."""
     reason = (
@@ -654,7 +710,7 @@ def backup_state(path: Path) -> None:
     """A-4: 更新前に .bak をコピー生成."""
     if path.exists():
         bak = path.with_suffix(path.suffix + ".bak")
-        bak.write_bytes(path.read_bytes())
+        atomic_write_bytes(bak, path.read_bytes())
 
 
 def _comm_is_agent(comm: str) -> bool:
@@ -785,6 +841,35 @@ def _stale_active_seconds() -> int:
         except ValueError:
             pass
     return DEFAULT_STALE_ACTIVE_SECONDS
+
+
+def _normalize_issue_ref(value):
+    """issue_ref を比較用の正規化キーへ変換する (#295).
+
+    同一 Issue を指す異なる形式 (裸番号 `42` / `#42` / `host:owner/repo#42` /
+    `https://.../issues/42`) を同一キーへ畳み込み、形式差による重複見逃しを防ぐ。
+    `.mission-state` は project (cwd) 単位のため、比較キーは Issue 番号を基準にする。
+    数値を抽出できない参照は小文字化した生値をキーとする (後方互換)。
+    """
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    # URL 形式: .../issues/<n>
+    m = re.search(r"/issues/(\d+)", raw)
+    if m:
+        return m.group(1)
+    # 末尾 #<n> (例 host:owner/repo#42, gh:repo#99)
+    m = re.search(r"#(\d+)\s*$", raw)
+    if m:
+        return m.group(1)
+    # 裸番号 (先頭 # 任意)
+    m = re.fullmatch(r"#?(\d+)", raw)
+    if m:
+        return m.group(1)
+    # 数値を抽出できない参照は生値 (大文字小文字非依存) で比較
+    return raw.lower()
 
 
 def _ensure_phase_timing(data: dict, now: str | None = None) -> None:
@@ -3886,8 +3971,9 @@ def cmd_log_specialist_invocation(args):
 def cmd_init(args):
     cwd = Path.cwd()
     try:
-        state_dir(cwd).mkdir(parents=True, exist_ok=True)
-    except OSError:
+        mission_state_root = _ensure_regular_directory_path(cwd, (".mission-state",))
+        mission_state_root.mkdir(parents=True, exist_ok=True)
+    except (OSError, WorktreeArchiveError):
         _exit_init_write_failure(cwd)
     planned_files = _parse_files_arg(getattr(args, "files", None))
     now = iso_now()
@@ -3935,32 +4021,49 @@ def cmd_init(args):
             "wait_reason_totals_sec": {},
         },
         "activity_unobserved_gap_sec": 0.0,
-        # S3: issue_ref (未指定 None)
+        # S3: issue_ref (未指定 None)。issue_ref_key は #295 の比較用正規化キー。
         "issue_ref": getattr(args, "issue_ref", None),
+        "issue_ref_key": _normalize_issue_ref(getattr(args, "issue_ref", None)),
         # S3-files: 同一 project の file-set overlap WARN 用 (未指定は空 list)
         "planned_files": planned_files,
     }
     # S3: 同プロジェクト内の active session で同一 issue_ref があれば WARN (reject しない)
+    # #295: 形式差 (裸番号 / #番号 / host:owner/repo#番号 / URL) を正規化キーで同一視する
     _issue_ref = getattr(args, "issue_ref", None)
+    _issue_ref_key = _normalize_issue_ref(_issue_ref)
     _cur_sid = resolve_session_id()
-    if _issue_ref:
+    if _issue_ref_key:
         for sf_other in _iter_state_files(cwd):
             try:
                 other = json.loads(sf_other.read_text())
             except Exception:
                 continue
             # 同一セッションの resume では自分自身の旧 state を誤検出しないよう sid 除外
-            if (
-                other.get("loop_active")
-                and other.get("issue_ref") == _issue_ref
-                and other.get("session_id") != _cur_sid
-            ):
-                print(
-                    f"WARNING [S3]: issue_ref='{_issue_ref}' を持つ active session が既に存在します"
-                    f" (session_id={other.get('session_id', '?')})。重複作業の可能性を確認してください。",
-                    file=sys.stderr,
-                )
-                break  # 1件見つかれば十分
+            if other.get("session_id") == _cur_sid:
+                continue
+            # 旧 state に issue_ref_key が無い場合は生値から正規化 (後方互換)
+            _other_key = other.get("issue_ref_key") or _normalize_issue_ref(other.get("issue_ref"))
+            if _other_key != _issue_ref_key:
+                continue
+            # #296: 正常完了 (passes=True) は重複リスクなし。active に限らず halt 中の
+            # 未完了 session も対象にする (near-miss は halt 中の session を見逃して発生した)。
+            if other.get("passes") is True:
+                continue
+            if other.get("loop_active"):
+                _state_label = "active"
+            else:
+                # halt / 非稼働。stale 閾値超は引き継ぎ可能な放棄 claim として注記する。
+                _age = _state_age_since_update_sec(other)
+                _stale = _age is not None and _age >= _stale_active_seconds()
+                _state_label = "halted/stale" if _stale else "halted"
+            _hint = " stale の場合は claim を引き継げます。" if "stale" in _state_label else ""
+            print(
+                f"WARNING [S3]: issue_ref='{_issue_ref}' を持つ未完了 session が既に存在します"
+                f" (session_id={other.get('session_id', '?')}, 状態={_state_label})。"
+                f"重複作業の可能性を確認してください。{_hint}",
+                file=sys.stderr,
+            )
+            break  # 1件見つかれば十分
     _warn_s3_file_overlap(cwd, planned_files, _cur_sid)
     # M7 (2026-06-10): complexity を init 時に指定可能に。未指定は WARN (後方互換で Unknown 維持)
     if getattr(args, "complexity", None):
@@ -4028,8 +4131,9 @@ def cmd_init(args):
     sdir = session_dir(cwd)
     sf_target = session_file(cwd, sid)
     try:
+        _ensure_regular_directory_path(cwd, (".mission-state", "sessions"))
         sdir.mkdir(parents=True, exist_ok=True)
-    except OSError:
+    except (OSError, WorktreeArchiveError):
         _exit_init_write_failure(cwd, sf_target)
     agg = aggregate_file(cwd)
     with _guarded_init_state_lock(cwd, sf_target):
@@ -4048,12 +4152,52 @@ def cmd_init(args):
                 existing_mid = existing_data.get("mission_id", "")
                 new_mid = initial.get("mission_id", "")
                 if existing_mid and new_mid and existing_mid != new_mid:
-                    archive_dir = state_dir(cwd) / "archive"
-                    archive_dir.mkdir(parents=True, exist_ok=True)
+                    try:
+                        archive_dir = _ensure_regular_directory_path(
+                            cwd, (".mission-state", "archive")
+                        )
+                        archive_dir.mkdir(parents=True, exist_ok=True)
+                    except (OSError, WorktreeArchiveError) as e:
+                        print(f"ERROR: archive destination is unsafe: {e}", file=sys.stderr)
+                        sys.exit(2)
                     old_mid8 = existing_mid[:8] if len(existing_mid) >= 8 else existing_mid
                     archive_dest = archive_dir / f"state-{sid}-{old_mid8}.json"
-                    shutil.copy2(sf_target, archive_dest)
+                    try:
+                        atomic_write_bytes(archive_dest, sf_target.read_bytes())
+                    except OSError:
+                        _exit_init_evidence_write_failure("archive")
+                    old_assumptions_path = existing_data.get("assumptions_path")
+                    if old_assumptions_path:
+                        try:
+                            old_assumptions = _validated_assumptions_probe_path(
+                                cwd, str(old_assumptions_path)
+                            )
+                        except FileNotFoundError:
+                            old_assumptions = None
+                        except (OSError, ValueError) as e:
+                            print(
+                                f"ERROR: 旧ミッション assumptions の退避対象が不正です: {e}",
+                                file=sys.stderr,
+                            )
+                            sys.exit(2)
+                        if old_assumptions is not None:
+                            assumptions_archive = archive_dir / (
+                                f"state-{sid}-{old_mid8}-assumptions.md"
+                            )
+                            try:
+                                atomic_write_bytes(
+                                    assumptions_archive, old_assumptions.read_bytes()
+                                )
+                            except OSError:
+                                _exit_init_evidence_write_failure("archive")
+                    initial["assumptions_path"] = (
+                        f".mission-state/sessions/{sid}-{new_mid[:8]}-"
+                        f"{time.time_ns()}-assumptions.md"
+                    )
                 elif existing_mid and existing_mid == new_mid:
+                    existing_assumptions_path = existing_data.get("assumptions_path")
+                    if existing_assumptions_path:
+                        initial["assumptions_path"] = existing_assumptions_path
                     # #211: same-mission init is a resume boundary. Preserve the
                     # bounded activity rollup and close an open segment only up
                     # to the last observed state update; never infer the crash gap.
@@ -4090,6 +4234,16 @@ def cmd_init(args):
                     )
             except Exception as e:
                 print(f"WARNING: 旧ミッション (id={existing_mid[:8]}) のアーカイブに失敗。履歴消失の可能性: {e}", file=sys.stderr)
+        assumptions_file = cwd / initial["assumptions_path"]
+        try:
+            if assumptions_file.exists():
+                _validated_assumptions_probe_path(
+                    cwd, str(initial["assumptions_path"])
+                )
+            else:
+                atomic_write_text(assumptions_file, "# Assumption Registry\n")
+        except (OSError, ValueError):
+            _exit_init_evidence_write_failure("assumptions")
         backup_state(sf_target)
         atomic_write_json(sf_target, initial)
         existing_agg.setdefault("active_sessions", [])
@@ -4097,14 +4251,6 @@ def cmd_init(args):
             existing_agg["active_sessions"].append(sid)
         existing_agg["updated_at"] = iso_now()
         atomic_write_json(agg, existing_agg)
-    # Issue #5: assumptions_path の実ファイルを空テンプレで作成する
-    assumptions_file = cwd / initial["assumptions_path"]
-    try:
-        assumptions_file.parent.mkdir(parents=True, exist_ok=True)
-        if not assumptions_file.exists():
-            assumptions_file.write_text("# Assumption Registry\n")
-    except OSError as e:
-        print(f"WARNING: assumptions_path ファイル作成に失敗: {e}", file=sys.stderr)
     permission_preflight = _permission_preflight(cwd)
     if not permission_preflight["ok"]:
         print(json.dumps(permission_preflight, ensure_ascii=False))
@@ -6952,7 +7098,9 @@ def _build_parser():
     p_init.add_argument("--budget-minutes", default=None,
                         help="#238: 時間予算 (分・正の有限数)。next が budget_pressure を返し、80%%で warn、100%%超で spawn 系を consider-halt へ差し替える")
     p_init.add_argument("--issue-ref", default=None, dest="issue_ref",
-                        help="関連 issue の参照 (例: github:owner/repo#42)。同一 issue_ref の active session が存在する場合 WARN")
+                        help="関連 issue の参照。裸番号 `42` / `#42` / `host:owner/repo#42` / `https://.../issues/42` を受理し、"
+                             "#295 で Issue 番号へ正規化して比較する (形式差でも同一 Issue の active session があれば WARN)。"
+                             "下流の受理形式に合わせる場合は裸番号 `42` を推奨")
     p_init.add_argument("--files", default=None,
                         help="予定変更ファイルのカンマ区切り project-root 相対パス。同一 active session と重複する場合 WARN")
     p_init.add_argument("--force-mission", action="store_true", dest="force_mission",
