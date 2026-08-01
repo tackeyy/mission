@@ -11,6 +11,8 @@
 
 ### 修正
 
+- activity segment のカバレッジが実行エージェントに依存しないようにした (#312)。`next` の command hint が phase 遷移を atomic な `advance --phase --activity` で案内するようになり (従来は segment 非記録の `set phase=` 経路を案内しており、2026-08-01 監査の CC 13% vs Codex 86% の乖離の原因)、さらに `set phase=<非終端>` は open segment が無い場合に phase 相応の segment を fallback で開く — set 時点から開始し過去を塗らず、既存 open segment を置き換えない。
+
 - `cleanup-stale` が checker 系 role (`session_role != implementer`) に live-PID no-score stale 判定を適用しないようになった。設計上 score を書かない Checker session が親プロセスの PID 共有下で一括 stale 化されていた実害 (7/25-27 に 7 件) への対策で、dead-PID の orphan 回収は従来どおり機能する。また同一 PID を複数 active session が共有する場合に `duplicate-pid` warning を出力し、親管理の並列 mission を可観測にした (#314)。
 
 ## [2.1.0] - 2026-08-02

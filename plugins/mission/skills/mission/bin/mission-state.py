@@ -4558,13 +4558,13 @@ def _derive_next_action(data: dict) -> dict:
         return {
             "next_action": "run-planner",
             "summary": f"iteration {iteration}: mission-planner を起動して計画を立てる (完了後 set phase=executing)",
-            "command_hint": "Skill: mission-planner → mission-state.py set phase='\"executing\"'",
+            "command_hint": "Skill: mission-planner → mission-state.py advance --phase executing --activity active:implementation",
         }
     if phase == "executing":
         return {
             "next_action": "run-executor",
             "summary": f"iteration {iteration}: mission-executor で計画を実行する (完了後 set phase=reviewing。10分超は progress update)",
-            "command_hint": "Skill: mission-executor → mission-state.py set phase='\"reviewing\"'",
+            "command_hint": "Skill: mission-executor → mission-state.py advance --phase reviewing --activity reviewer-wait:review-response",
         }
     if phase == "reviewing":
         # #309 (F4): iter>=2 で critic_has_new_scope 未設定なら run-reviewers を返さない。
@@ -5144,6 +5144,24 @@ def cmd_set(args):
             if key == "phase":
                 normalized_phase = _normalize_set_phase_value(str(parsed_value))
                 _transition_phase(data, normalized_phase, now)
+                # #312: CC が set phase 経路を使っても segment が欠落しないよう、
+                # open segment が無ければ phase に応じた segment を fallback で開く。
+                # set 時点から開始し過去は塗らない (#237 精度契約)。既に open が
+                # あれば推測で切り替えない。終端 phase は対象外。
+                _fallback_activity = {
+                    "planning": ("active", "planning"),
+                    "executing": ("active", "implementation"),
+                    "reviewing": ("reviewer-wait", "review-response"),
+                    "scoring": ("active", "scoring"),
+                }.get(normalized_phase)
+                if _fallback_activity and not data.get("activity_current"):
+                    try:
+                        start_activity_segment(
+                            data, _fallback_activity[0], _fallback_activity[1], now,
+                            detail="auto-opened by set phase (#312)",
+                        )
+                    except ActivityTimingError:
+                        pass  # fail-open: fallback が set 本体を壊さない
             else:
                 data[key] = parsed_value
         # A-M1 (2026-06-10 / Issue #168 拡張): complexity 変更時の reviewer_count と review_tier 同期
