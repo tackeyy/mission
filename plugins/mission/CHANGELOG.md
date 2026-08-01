@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Activity-segment coverage no longer depends on which agent runs the mission (#312): `next` command hints now guide phase transitions through the atomic `advance --phase --activity` (they previously suggested the non-recording `set phase=` path, explaining the 13% Claude Code vs 86% Codex coverage measured in the 2026-08-01 audit), and `set phase=<non-terminal>` opens a phase-appropriate activity segment as a fallback when none is open — starting at the set time, never repainting the past, and never replacing an already-open segment.
+
 - `cleanup-stale` no longer applies the live-PID no-score stale judgment to checker-family roles (`session_role != implementer`), whose by-design scoreless sessions were batch-staled when sharing a parent process PID (7 production cases on 7/25-27); dead-PID orphan collection still applies. The command also emits a `duplicate-pid` warning when multiple active sessions share one PID, making parent-managed parallel missions observable (#314).
 
 ## [2.1.0] - 2026-08-02
