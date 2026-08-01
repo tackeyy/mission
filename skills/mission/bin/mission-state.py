@@ -7487,7 +7487,8 @@ def cmd_resolve_archive(args):
         if args.note is not None:
             data["resolution_note"] = args.note
 
-        atomic_write_json(target, data)
+        # #310: resolution 付与は管理系 janitor 書き込みのため last_activity_at を刻まない
+        atomic_write_json(target, data, administrative=True)
 
     result: dict = {
         "ok": True,
