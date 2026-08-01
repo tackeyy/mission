@@ -4532,6 +4532,21 @@ def _derive_next_action(data: dict) -> dict:
             "command_hint": "Skill: mission-executor → mission-state.py set phase='\"reviewing\"'",
         }
     if phase == "reviewing":
+        # #309 (F4): iter>=2 で critic_has_new_scope 未設定なら run-reviewers を返さない。
+        # 実運用監査 (2026-08-01) で設定 0/115 件 — prose (SKILL.md #258) では実行されない
+        # ため、guidance 層で機械的に強制する。安全側デフォルト (未設定=full) は維持しつつ、
+        # 未設定のまま review へ進む経路を塞ぎ #240/#241 を発火可能にする。
+        if iteration >= 2 and data.get("critic_has_new_scope") is None:
+            return {
+                "next_action": "record-critic-scope",
+                "summary": (
+                    f"iteration {iteration}: reviewer 起動前に critic の実行計画テーブルから "
+                    "scope 判定を state へ記録する。全ステップの対応 finding が既存 finding id "
+                    "のみなら false、new を含むなら true (#309)"
+                ),
+                "command_hint": "mission-state.py set critic_has_new_scope='false'  # または 'true'",
+                "details": {"iteration": iteration},
+            }
         # #241: bounded context — iteration >= 2 かつ新規 scope なしなら bounded mode
         use_bounded = iteration >= 2 and data.get("critic_has_new_scope") is False
         context_mode = "bounded" if use_bounded else "full"

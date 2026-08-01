@@ -144,10 +144,10 @@ def test_next_reviewing_new_scope_full_context(tmp_path):
     assert result["details"].get("context_mode") == "full"
 
 
-def test_next_reviewing_missing_scope_field_full_context(tmp_path):
-    """critic_has_new_scope 未設定 → context_mode=full (安全側)."""
+def test_next_reviewing_missing_scope_field_requires_recording(tmp_path):
+    """#309: critic_has_new_scope 未設定 → record-critic-scope (review へ進ませない)."""
     _make_state(tmp_path, iteration=2, phase="reviewing")
     data = json.loads(
         (tmp_path / ".mission-state" / "sessions" / f"{TEST_SID}.json").read_text())
     result = MS._derive_next_action(data)
-    assert result["details"].get("context_mode") == "full"
+    assert result["next_action"] == "record-critic-scope"
