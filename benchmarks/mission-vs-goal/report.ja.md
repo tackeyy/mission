@@ -634,6 +634,28 @@ mission の構造床 (複数パス) を上回ったため。「単発タスク�
 アーキテクチャ上不可能であり、勝負軸は routing の完全化 (#325: 負けをなくす) と
 ゲートが要る場面での完遂品質に確定した。
 
+### portfolio-v2 (#325/#326 マージ後の V1 再測、2026-08-02)
+
+commit `17cedf1` (#325 next 駆動 routing gate + #326 scope hard gate 込み) で再測。
+16 records 全完走・degraded 0・品質は全 record marker 1.0 同点。
+
+**V1 再判定: 未達 (7.6x 時間 / 4.4x コスト、v1 の 6.0x から実質横ばい — N=1/cell の
+run 間分散内)。** state 実測で routing 発火は **1/3 のみ**: simple-typo は inline 完遂
+(1.46 min = goal 0.63 + 約 0.8 分の入口オーバーヘッド、ただし halt カテゴリを
+evidence-submitted と誤用)、simple-lookup / simple-diff は `next` を planning で
+呼ばずに planner を spawn しフルループが走った。guidance 層の強制は #309/#326 と
+同じ「next 未消費」類型で bypass される。発火した 1 件は routing が効けば Simple
+mission ≈ goal + 0.8 分に収まることを実証しており、コマンド層での hard 化
+(`set complexity=Simple` が routing verdict を直接実行) を #330 で追跡する。
+
+危険な解釈:
+
+> #325 は無効だった。
+
+これは unsupported です。gate 自体は正しく動作する (単体テストで検証済み)。
+未発火の原因は orchestrator の next 消費規律であり、コマンド層 hard 化 (#330) で
+閉じられる見込み。発火例 1.46 min が到達可能性の証拠。
+
 ## Discriminating cohort clean re-run (discriminating-v2) — v1 findings の訂正
 
 Status: 2026-07-23 JST に実行。permission-mode 汚染 (#268) を排除したクリーン
@@ -1002,4 +1024,7 @@ artifacts/2026-08-02-portfolio-v1/
 results/2026-08-02-discriminating-v3.jsonl
 results/2026-08-02-discriminating-v3-summary.json
 artifacts/2026-08-02-discriminating-v3/
+results/2026-08-02-portfolio-v2.jsonl
+results/2026-08-02-portfolio-v2-summary.json
+artifacts/2026-08-02-portfolio-v2/
 ```
