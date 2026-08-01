@@ -11,6 +11,8 @@
 
 ### 修正
 
+- adaptive routing をコマンド層で強制するようにした (#330)。条件充足時は `set complexity=Simple` 自身が routing verdict を実行し、state を `routed-goal` で atomic に halt して goal 契約の guidance を出力する — orchestrator の `next` 消費 (portfolio-v2 実測で発火 1/3) に依存しない。除外条件 (シグナル・`--issue-ref`・`--force-mission`・checker 系 role・user 指定 tier・採点済み) は不変で、#325 の next 層 gate は defense-in-depth として残る。
+
 - adaptive routing が init 後の complexity 確定経路もカバーするようになった (#325)。portfolio-v1 で #276 を素通りしていた「init → `set complexity=Simple`」フローに対し、planning の `next` が `route-to-goal` を返す — 新設の `routed-goal` halt カテゴリ (completed / implementer pass-rate 分母から除外し `routed_count` として別計上) で state を閉じ、goal 契約で直接完遂する。シグナル・`--issue-ref`・`--force-mission` (state に記録)・checker 系 role・user 指定 tier・採点済み mission はループを維持する。
 
 - activity segment のカバレッジが実行エージェントに依存しないようにした (#312)。`next` の command hint が phase 遷移を atomic な `advance --phase --activity` で案内するようになり (従来は segment 非記録の `set phase=` 経路を案内しており、2026-08-01 監査の CC 13% vs Codex 86% の乖離の原因)、さらに `set phase=<非終端>` は open segment が無い場合に phase 相応の segment を fallback で開く — set 時点から開始し過去を塗らず、既存 open segment を置き換えない。

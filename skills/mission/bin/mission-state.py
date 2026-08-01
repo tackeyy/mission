@@ -5222,12 +5222,48 @@ def cmd_set(args):
         # halt 済み state は上のガードで拒否し、reactivate / refresh-pid に限定する。
         if "loop_active" in explicit_keys and data.get("loop_active") is True:
             _add_to_aggregate(cwd, sf.stem)
+        # #330: routing のコマンド層 hard 化。set complexity=Simple が routing 条件を
+        # 満たす場合、コマンド自身が verdict を実行する (state を routed-goal で halt)。
+        # #325 の next 駆動 gate は orchestrator が next を呼ばない経路に 1/3 しか
+        # 効かなかった実測 (portfolio-v2) に基づく。init 経路 (#276/#304) と挙動統一。
+        _routed_verdict = None
+        if (
+            "complexity" in explicit_keys
+            and data.get("complexity") == "Simple"
+            and data.get("loop_active") is True
+            and not data.get("halt_reason")
+            and (data.get("phase") or "planning") == "planning"
+            and (data.get("iteration") or 1) <= 1
+            and not data.get("review_tier_signals")
+            and data.get("review_tier_source") != "user"
+            and not data.get("issue_ref")
+            and not data.get("force_mission")
+            and (data.get("session_role") or "implementer") == "implementer"
+            and not (data.get("score_history") or [])
+        ):
+            data["loop_active"] = False
+            data["halt_reason"] = "routed-to-goal (#330: Simple + リスクシグナルなし)"
+            data["halt_category"] = "routed-goal"
+            _transition_phase(data, "halted", now)
+            _remove_from_aggregate(cwd, sf.stem)
+            _routed_verdict = {
+                "ok": True,
+                "route": "goal",
+                "complexity": "Simple",
+                "reason": "Simple complexity with no irreversible/security signals (#330)",
+                "guidance": (
+                    "state は routed-goal で halt 済み (mark-halt 不要)。mission ループを"
+                    "続けず、goal 契約の 5 見出し (Goal / Result / Evidence / Assumptions / "
+                    "Stop Condition) でタスクを直接完遂し、最終報告に routing を明記する。"
+                    "mission の pass は主張しない。mission 機構が必要なら --force-mission で再 init する。"
+                ),
+            }
         _ensure_phase_timing(data, now)
         data["updated_at"] = now
         data = stamp_metadata(data, cwd)
         backup_state(sf)
-        atomic_write_json(sf, data)
-    print(json.dumps({"ok": True}))
+        atomic_write_json(sf, data, administrative=bool(_routed_verdict))
+    print(json.dumps(_routed_verdict or {"ok": True}, ensure_ascii=False, indent=2 if _routed_verdict else None))
 
 
 # H2 (2026-06-10): スコア項目キーの正規形とエイリアス。実ログで表記揺れが混在し
