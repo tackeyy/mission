@@ -25,9 +25,17 @@ the canonical version). Summary:
 Record results in `report.md` / `report.ja.md` with the standard unsafe-
 interpretation guard, then close #262 with the verdict.
 
+Environment notes (2026-07-25, #292): on CC 2.1.219+ the
+`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0` opt-out no longer prevents permission-mode
+degradation; the runner now declares `--allowedTools` explicitly for both arms.
+Verify `permission_degraded_records` is 0 in the summary. Also launch the runner
+with `env -u ANTHROPIC_API_KEY`: an invalid key inherited from the CC session
+env takes precedence over the claude.ai login and 401s every child.
+
 ---
 
 ## Revision History
 | Date | Change |
 |------|--------|
 | 2026-07-22 | Initial version (#262) |
+| 2026-07-25 | CC 2.1.219 hardening: explicit --allowedTools + ANTHROPIC_API_KEY unset (#292) |

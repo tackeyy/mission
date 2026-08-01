@@ -90,12 +90,12 @@ def test_next_iter1_ignores_new_scope_flag(tmp_path):
 
 # --- 4. next: iter >= 2, no critic_has_new_scope field → full ---
 
-def test_next_iter2_missing_field_returns_full_reviewers(tmp_path):
-    """critic_has_new_scope フィールドなし → full reviewer_count (安全側)."""
+def test_next_iter2_missing_field_requires_scope_recording(tmp_path):
+    """#309: critic_has_new_scope 未設定 → run-reviewers でなく record-critic-scope."""
     _make_state(tmp_path, iteration=2, phase="reviewing", reviewer_count=3)
     result = MS._derive_next_action(json.loads(
         (tmp_path / ".mission-state" / "sessions" / f"{TEST_SID}.json").read_text()))
-    assert result["details"]["reviewer_count"] == 3
+    assert result["next_action"] == "record-critic-scope"
 
 
 # --- 5. aggregate-reviews: reviewer count mismatch → exit 2 ---

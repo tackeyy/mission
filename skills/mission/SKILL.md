@@ -97,7 +97,7 @@ Phase 7: pass 後の PR merge 判定
 
 Phase 1 ではミッションを構造化し、触る/触らない範囲、完了条件、複雑度を決める。複雑度は Simple=単一ファイル/1ステップ、Standard=3-5ステップ、Complex=設計判断/横断、Critical=本番/セキュリティ/非可逆。過大見積もりは reviewer コストを増やすため、Simple でない判定根拠を assumptions.md に残す。
 
-**adaptive routing (#276)**: Simple + リスクシグナルなしの場合、`init` は `route: "goal"` を返し mission state を作らない。この場合は mission の全 Phase をスキップし、guidance に従って goal 契約の 5 見出し (Goal / Result / Evidence / Assumptions / Stop Condition) でタスクを直接完遂する。最終報告に「Simple のため goal へルーティングした」旨を 1 行明記し、mission の pass は主張しない。CC でも Codex でも同じ inline 契約で動く。mission 機構が必要なとき (ユーザー明示・検証目的等) は `--force-mission` で再 init する。routing された場合、`next` / `mark-passes` / Stop hook 継続は呼ばない (state が存在しない)。
+**adaptive routing (#276)**: Simple + リスクシグナルなし + `--issue-ref` なしの場合、`init` は `route: "goal"` を返し mission state を作らない。この場合は mission の全 Phase をスキップし、guidance に従って goal 契約の 5 見出し (Goal / Result / Evidence / Assumptions / Stop Condition) でタスクを直接完遂する。最終報告に「Simple のため goal へルーティングした」旨を 1 行明記し、mission の pass は主張しない。CC でも Codex でも同じ inline 契約で動く。mission 機構が必要なとき (ユーザー明示・検証目的等) は `--force-mission` で再 init する。`--issue-ref` 付き (Issue-bound = 統治要求。wrapper の strict preflight が active state を要求) は Simple でも routing せず mission ループを維持する (#304)。routing された場合、`next` / `mark-passes` / Stop hook 継続は呼ばない (state が存在しない)。
 
 init 後 (route されなかった場合)、対象ファイル候補が見えた時点で `specialists recommend --task "<mission>" --files "<project-relative files>" --record-state --json` を実行する。ユーザーが skill を名指しした場合は `--user-specified` を付ける。Issue 連携 PR は本文に `Closes #N` を入れる。
 
@@ -111,7 +111,7 @@ Reviewer 数は Simple=1、Standard=2、Complex=2、Critical=3 (#266: シグナ�
 
 **review_tier (#168, #209)**: `init` が complexity とミッション記述から `review_tier`（light/standard/full）を auto 導出し state に記録する（`review_tier_source` / `review_tier_signals` / `review_tier_signal_details` で監査可能）。不可逆系キーワードは各出現の文脈を評価し、明示的に実操作を否定した候補だけを抑制する。条件付き・二重否定・不確実・単なる引用は安全側で full を維持し、security / high-risk シグナルは否定で抑制しない。light: reviewer 1名・`required=true` specialist のみ・critic は fail 時のみ spawn。standard/full: 従来どおり。**ゲート意味論は tier によらず不変**（threshold / open_high / findings evidence / halt）。詳細（導出テーブル・エスカレータ一覧・override 規律）は `refs/state-management.md` の「review_tier 導出と Light Tier 運用」節を参照。
 
-**Planner spawn 判定 (#124)**: iter1 は従来どおり planner 必須。iter2 以降は `mission-critic` の `### 実行計画 (次 iteration)` テーブルを見る。全ステップの `対応finding` が finding id のみなら、planner を spawn せず executor に直接渡す。`new` を含むステップが 1 つでもあるなら planner を spawn する。このテーブル読み取り時に scope 判定を state へ記録する (#258): 全ステップが finding id のみなら `mission-state.py set critic_has_new_scope=false`、`new` を含むなら `critic_has_new_scope=true`。この値が次 iter の reviewer 数 (#240) と context mode (#241) を決める。
+**Planner spawn 判定 (#124)**: iter1 は従来どおり planner 必須。iter2 以降は `mission-critic` の `### 実行計画 (次 iteration)` テーブルを見る。全ステップの `対応finding` が finding id のみなら、planner を spawn せず executor に直接渡す。`new` を含むステップが 1 つでもあるなら planner を spawn する。このテーブル読み取り時に scope 判定を state へ記録する (#258): 全ステップが finding id のみなら `mission-state.py set critic_has_new_scope=false`、`new` を含むなら `critic_has_new_scope=true`。この値が次 iter の reviewer 数 (#240) と context mode (#241) を決める。**#309 で機械的ゲート化済み**: iter≥2 で未記録のまま `next` を呼ぶと `record-critic-scope` が返り、記録するまで run-reviewers guidance は出ない。
 
 **差分レビュー (#240)**: iter2+ の前 iter 指摘修正では、`next` の `details.reviewer_count` に従う (`critic_has_new_scope=false` なら state が独立 2 名へ削減する。1 名化は agreement 検証が失われるため禁止)。args に High/Medium 指摘、修正コミット、全 diff 再レビュー不要、採点は絶対評価、Low 残存で 5.0 禁止を明記する。`review-finalize` (または `aggregate-reviews`) は `next` の command_hint が示す `--min-reviewers N` を必ず付け、reviewer 数不足の集計を exit 2 で拒否させる。`new` がある追加スコープ (`critic_has_new_scope=true`) は planner 後にフルレビューへ戻る。
 
@@ -155,6 +155,8 @@ Pass 後に PR がある場合だけ実行する。自動 merge 条件は、CI/�
 通常 PR merge は distribution release ではない。version bump を伴う distribution release は `docs/VERSIONING.md` と release checklist に従い、remote tag と GitHub Release を確認する。
 
 ## 報告フォーマット
+
+**出力圧縮規律 (#280)**: 最終報告と artifact は「evidence テーブル + tool-computed ゲート値 + `.mission-state/archive/` の参照パス」に限定する。レビュアー出力の逐語再掲、Plan/Execution 散文の再掲は禁止 (レビュー生データ・scoring JSON は archive に全量保存済みであり、転記は二重出力)。削ってよいのは転記・散文であって証跡ではない。
 
 達成時:
 
