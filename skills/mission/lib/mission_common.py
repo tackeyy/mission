@@ -27,6 +27,7 @@ HALT_CATEGORIES = {
     "awaiting-approval",
     "partial-done",
     "evidence-submitted",  # #311: Checker 系 role の正規出口 (証拠提出完了)
+    "routed-goal",  # #325: adaptive routing による goal 契約直行 (pass-rate 対象外)
     "stagnation",
     "user-abort",
     "stale",
@@ -151,9 +152,15 @@ def summarize_pass_rate_population(
     for classification in health_classes:
         counts[classification] += 1
     raw_denominator = len(states)
+    # #325: routed-goal halt は「mission が仕事を辞退した」記録であり品質債務ではない。
+    # completed 分母から除外し routed_count として別計上する。
+    routed = sum(
+        1 for state, cls in zip(states, health_classes)
+        if cls == "halt" and state.get("halt_category") == "routed-goal"
+    )
     completed_denominator = sum(
         counts[name] for name in ("pass", "halt", "abandoned", "stale")
-    )
+    ) - routed
     pass_count = counts["pass"]
     # #311: role 別 additive 集計。既存フィールドは全 role 対象の歴史的意味を維持する
     role_counts: dict[str, int] = {name: 0 for name in SESSION_ROLES}
@@ -163,11 +170,14 @@ def summarize_pass_rate_population(
         role = session_role(state)
         role_counts[role] += 1
         if role == "implementer" and classification in ("pass", "halt", "abandoned", "stale"):
+            if classification == "halt" and state.get("halt_category") == "routed-goal":
+                continue  # #325: routed は implementer 分母からも除外
             impl_completed += 1
             if classification == "pass":
                 impl_pass += 1
     return {
         "health_classes": health_classes,
+        "routed_count": routed,
         "role_counts": role_counts,
         "implementer_pass_rate_numerator": impl_pass,
         "implementer_pass_rate_denominator": impl_completed,

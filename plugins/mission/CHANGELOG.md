@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Adaptive routing now also covers the post-init classification path (#325): when complexity is settled to Simple after `init` (the `set complexity=Simple` flow that portfolio-v1 showed bypassing #276 entirely), `next` at planning returns `route-to-goal` — close the state with the new `routed-goal` halt category (excluded from completed/implementer pass-rate denominators as `routed_count`) and complete under the goal contract. Signals, `--issue-ref`, `--force-mission` (now recorded in state), checker roles, user-pinned tiers, and scored missions all keep the loop.
+
 - Activity-segment coverage no longer depends on which agent runs the mission (#312): `next` command hints now guide phase transitions through the atomic `advance --phase --activity` (they previously suggested the non-recording `set phase=` path, explaining the 13% Claude Code vs 86% Codex coverage measured in the 2026-08-01 audit), and `set phase=<non-terminal>` opens a phase-appropriate activity segment as a fallback when none is open — starting at the set time, never repainting the past, and never replacing an already-open segment.
 
 - `cleanup-stale` no longer applies the live-PID no-score stale judgment to checker-family roles (`session_role != implementer`), whose by-design scoreless sessions were batch-staled when sharing a parent process PID (7 production cases on 7/25-27); dead-PID orphan collection still applies. The command also emits a `duplicate-pid` warning when multiple active sessions share one PID, making parent-managed parallel missions observable (#314).

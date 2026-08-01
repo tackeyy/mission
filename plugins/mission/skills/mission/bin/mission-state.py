@@ -4016,6 +4016,7 @@ def cmd_init(args):
         "mission": args.mission,
         "mission_id": mission_id(args.mission),
         "session_role": getattr(args, "session_role", None) or "implementer",  # #311
+        **({"force_mission": True} if getattr(args, "force_mission", False) else {}),  # #325
         "subtasks": [],
         "complexity": "Unknown",
         "reviewer_count": 2,
@@ -4553,6 +4554,30 @@ def _derive_next_action(data: dict) -> dict:
             "next_action": "consider-halt",
             "summary": f"stagnation_count={stagnation} (3 連続でスコア停滞)。アプローチを変えても改善しない場合は mark-halt で停止し状況を報告する",
             "command_hint": 'mission-state.py mark-halt --reason "<停滞理由>"',
+        }
+    # #325: adaptive routing の next 駆動ゲート。init 引数経路 (#276) を通らず
+    # 「init → set complexity=Simple」で確定したケースを補足する。portfolio-v1 で
+    # Simple 3 tasks 全てが routing を素通りしてフルループが走った実測に基づく。
+    if (
+        phase == "planning"
+        and iteration <= 1
+        and data.get("complexity") == "Simple"
+        and not data.get("review_tier_signals")
+        and data.get("review_tier_source") != "user"
+        and not data.get("issue_ref")
+        and not data.get("force_mission")
+        and (data.get("session_role") or "implementer") == "implementer"
+        and not (data.get("score_history") or [])
+    ):
+        return {
+            "next_action": "route-to-goal",
+            "summary": (
+                "Simple + リスクシグナルなし: mission ループを続けず goal 契約で直接完遂する。"
+                "state を routed-goal で閉じ (pass-rate 対象外)、最終報告に routing を明記する。"
+                "mission 機構が必要なら --force-mission で再 init (#325)"
+            ),
+            "command_hint": "mission-state.py mark-halt --reason 'routed-to-goal (#325)' --category routed-goal → goal 契約 (Goal/Result/Evidence/Assumptions/Stop Condition) で完遂",
+            "details": {"complexity": "Simple", "route": "goal"},
         }
     if phase == "planning":
         return {
