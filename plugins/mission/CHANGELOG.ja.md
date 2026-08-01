@@ -13,6 +13,8 @@
 
 ### 追加
 
+- session に `session_role` (`implementer`/`checker`/`planning`/`analyze`/`release`、`init --role` で指定、既定 `implementer`) を追加し、Checker の正規出口を示す halt カテゴリ `evidence-submitted` と、`summarize_pass_rate_population` の additive な `role_counts` + implementer 限定 pass rate を導入した。2026-08-01 の実運用監査で sessions の 75% が Checker 系役割であり、設計どおりの iter=0 終了が pass-rate 統計を汚染していたための対策。既存フィールドは全 role 対象の意味を維持し、フィールドを持たない旧 state は implementer 扱い (#311)。
+
 - `mission-state.py resolve-archive` で `.mission-state` 配下の terminal halted record に監査可能な resolution metadata (`resolved`/`superseded`/`closed`、owner issue、evidence URL、note) を `halt_reason` を変更せず付与できるようにした。対象パスと record 状態は fail-closed に検証する (#301)。
 
 - `issue_ref` を保存時に正規化し、形式差による重複着手検出のすり抜けを塞いだ (#295)。S3 の重複 WARN は halt 中の未完了 session も対象になり stale 注記が付く (#296)。

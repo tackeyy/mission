@@ -26,11 +26,22 @@ HALT_CATEGORIES = {
     "blocked-external",
     "awaiting-approval",
     "partial-done",
+    "evidence-submitted",  # #311: Checker 系 role の正規出口 (証拠提出完了)
     "stagnation",
     "user-abort",
     "stale",
     "other",
 }
+
+# #311: session の役割。checker 系は iter=0 で証拠提出して終わるのが設計どおりのため、
+# pass-rate は implementer 限定の指標を別途出す (既存指標は全 role 対象のまま不変)
+SESSION_ROLES = ("implementer", "checker", "planning", "analyze", "release")
+
+
+def session_role(state: dict) -> str:
+    """#311: state の役割。旧 state (フィールドなし) は implementer 扱い (後方互換)."""
+    role = state.get("session_role")
+    return role if role in SESSION_ROLES else "implementer"
 
 
 def parse_iso_datetime(value: str | None) -> datetime | None:
@@ -144,8 +155,23 @@ def summarize_pass_rate_population(
         counts[name] for name in ("pass", "halt", "abandoned", "stale")
     )
     pass_count = counts["pass"]
+    # #311: role 別 additive 集計。既存フィールドは全 role 対象の歴史的意味を維持する
+    role_counts: dict[str, int] = {name: 0 for name in SESSION_ROLES}
+    impl_pass = 0
+    impl_completed = 0
+    for state, classification in zip(states, health_classes):
+        role = session_role(state)
+        role_counts[role] += 1
+        if role == "implementer" and classification in ("pass", "halt", "abandoned", "stale"):
+            impl_completed += 1
+            if classification == "pass":
+                impl_pass += 1
     return {
         "health_classes": health_classes,
+        "role_counts": role_counts,
+        "implementer_pass_rate_numerator": impl_pass,
+        "implementer_pass_rate_denominator": impl_completed,
+        "implementer_pass_rate": impl_pass / impl_completed if impl_completed else None,
         "raw_pass_rate_numerator": pass_count,
         "raw_pass_rate_denominator": raw_denominator,
         "raw_pass_rate": pass_count / raw_denominator if raw_denominator else None,
