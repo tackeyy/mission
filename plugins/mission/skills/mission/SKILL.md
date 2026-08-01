@@ -104,7 +104,7 @@ Phase 7: pass 後の PR merge 判定
 
 Phase 1 ではミッションを構造化し、触る/触らない範囲、完了条件、複雑度を決める。複雑度は Simple=単一ファイル/1ステップ、Standard=3-5ステップ、Complex=設計判断/横断、Critical=本番/セキュリティ/非可逆。過大見積もりは reviewer コストを増やすため、Simple でない判定根拠を assumptions.md に残す。
 
-**adaptive routing (#276)**: Simple + リスクシグナルなしの場合、`init` は `route: "goal"` を返し mission state を作らない。この場合は mission の全 Phase をスキップし、guidance に従って goal 契約の 5 見出し (Goal / Result / Evidence / Assumptions / Stop Condition) でタスクを直接完遂する。最終報告に「Simple のため goal へルーティングした」旨を 1 行明記し、mission の pass は主張しない。CC でも Codex でも同じ inline 契約で動く。mission 機構が必要なとき (ユーザー明示・検証目的等) は `--force-mission` で再 init する。routing された場合、`next` / `mark-passes` / Stop hook 継続は呼ばない (state が存在しない)。
+**adaptive routing (#276)**: Simple + リスクシグナルなし + `--issue-ref` なしの場合、`init` は `route: "goal"` を返し mission state を作らない。この場合は mission の全 Phase をスキップし、guidance に従って goal 契約の 5 見出し (Goal / Result / Evidence / Assumptions / Stop Condition) でタスクを直接完遂する。最終報告に「Simple のため goal へルーティングした」旨を 1 行明記し、mission の pass は主張しない。CC でも Codex でも同じ inline 契約で動く。mission 機構が必要なとき (ユーザー明示・検証目的等) は `--force-mission` で再 init する。`--issue-ref` 付き (Issue-bound = 統治要求。wrapper の strict preflight が active state を要求) は Simple でも routing せず mission ループを維持する (#304)。routing された場合、`next` / `mark-passes` / Stop hook 継続は呼ばない (state が存在しない)。
 
 init 後 (route されなかった場合)、対象ファイル候補が見えた時点で `specialists recommend --task "<mission>" --files "<project-relative files>" --record-state --json` を実行する。ユーザーが skill を名指しした場合は `--user-specified` を付ける。Issue 連携 PR は本文に `Closes #N` を入れる。
 
@@ -162,6 +162,8 @@ Pass 後に PR がある場合だけ実行する。自動 merge 条件は、CI/�
 通常 PR merge は distribution release ではない。version bump を伴う distribution release は `docs/VERSIONING.md` と release checklist に従い、remote tag と GitHub Release を確認する。
 
 ## 報告フォーマット
+
+**出力圧縮規律 (#280)**: 最終報告と artifact は「evidence テーブル + tool-computed ゲート値 + `.mission-state/archive/` の参照パス」に限定する。レビュアー出力の逐語再掲、Plan/Execution 散文の再掲は禁止 (レビュー生データ・scoring JSON は archive に全量保存済みであり、転記は二重出力)。削ってよいのは転記・散文であって証跡ではない。
 
 達成時:
 
