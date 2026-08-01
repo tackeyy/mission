@@ -67,7 +67,8 @@ def state_age_since_update_sec(
 ) -> float | None:
     """Return non-negative age from the best progress timestamp, normalized to UTC."""
     updated = parse_iso_datetime(
-        state.get("heartbeat_at") or state.get("last_progress_at") or state.get("updated_at")
+        state.get("heartbeat_at") or state.get("last_progress_at")
+        or state.get("last_activity_at") or state.get("updated_at")  # #310
     )
     if updated is None:
         return None
@@ -162,7 +163,9 @@ def summarize_pass_rate_population(
 
 def duration_sec(state: dict[str, Any]) -> float | None:
     started = parse_iso_datetime(state.get("started_at"))
-    updated = parse_iso_datetime(state.get("updated_at"))
+    # #310: 管理系書き込み (resolution batch 等) が updated_at を汚染するため、
+    # エージェント活動の実時刻 last_activity_at を優先する (壁時計 500x 膨張の実害対策)
+    updated = parse_iso_datetime(state.get("last_activity_at") or state.get("updated_at"))
     if not started or not updated:
         return None
     try:

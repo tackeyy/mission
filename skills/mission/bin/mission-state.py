@@ -552,8 +552,22 @@ def _atomic_write(path: Path, writer) -> None:
         tmp.unlink(missing_ok=True)
 
 
-def atomic_write_json(path: Path, data: dict) -> None:
-    """Phase B-2: fsync + os.replace で完全な前 or 後状態を保証."""
+def _is_session_state_shape(data: dict) -> bool:
+    """#310: session state 形状の判定 (aggregate / manifest / scoring 等を除外)."""
+    return isinstance(data, dict) and "mission_id" in data and "loop_active" in data
+
+
+def atomic_write_json(path: Path, data: dict, *, administrative: bool = False) -> None:
+    """Phase B-2: fsync + os.replace で完全な前 or 後状態を保証.
+
+    #310: session state 形状の書き込みは既定で `last_activity_at` を刻む (エージェント
+    活動の実時刻)。cleanup-stale / resolve-archive / halt --all 等の管理系 janitor は
+    `administrative=True` で opt-out し、活動時刻を汚染しない。duration / stale 判定は
+    last_activity_at を updated_at より優先する (updated_at は resolution batch 書き込みで
+    上書きされ壁時計が最大 500 倍膨張した実害があるため)。
+    """
+    if not administrative and _is_session_state_shape(data):
+        data["last_activity_at"] = iso_now()
     _atomic_write(path, lambda f: json.dump(data, f, indent=2, ensure_ascii=False))
 
 
@@ -820,7 +834,8 @@ def _has_specialist_selection_checkpoint(data: dict) -> bool:
 
 def _state_age_since_update_sec(data: dict, *, now: datetime | None = None) -> float | None:
     updated = _parse_iso_datetime(
-        data.get("heartbeat_at") or data.get("last_progress_at") or data.get("updated_at")
+        data.get("heartbeat_at") or data.get("last_progress_at")
+        or data.get("last_activity_at") or data.get("updated_at")  # #310
     )
     if not updated:
         return None
@@ -6631,7 +6646,7 @@ def _terminalize_state_file(
             )
         latest["updated_at"] = now
         backup_state(sf)
-        atomic_write_json(sf, latest)
+        atomic_write_json(sf, latest, administrative=True)  # #310: janitor 書き込み
         if sf.parent.name == "sessions":
             _remove_from_aggregate(proj, sf.stem)
         return True

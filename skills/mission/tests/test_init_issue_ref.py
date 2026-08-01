@@ -128,8 +128,10 @@ def test_init_dup_issue_ref_halted_stale_warns_annotated(tmp_path):
     data = json.loads(sf.read_text())
     data["loop_active"] = False
     data["passes"] = False
-    # 十分に古い updated_at (stale 閾値 3h を超過)
+    # 十分に古い updated_at / last_activity_at (stale 閾値 3h を超過。#310 で
+    # age 連鎖が last_activity_at を優先するため両方を過去化する)
     data["updated_at"] = "2020-01-01T00:00:00Z"
+    data["last_activity_at"] = "2020-01-01T00:00:00Z"
     data["phase_started_at"] = "2020-01-01T00:00:00Z"
     sf.write_text(json.dumps(data))
 
