@@ -622,19 +622,7 @@ def run_one(
     stderr_path = artifact_dir / "stderr.txt"
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
-    command = [
-        "claude",
-        "-p",
-        "--output-format",
-        "json",
-        "--permission-mode",
-        "acceptEdits",
-        "--max-budget-usd",
-        str(max_budget_usd),
-    ]
-    if arm == "mission":
-        command.extend(["--plugin-dir", str(MISSION_PLUGIN_DIR)])
-    command.append(prompt)
+    command = build_child_command(arm, prompt, max_budget_usd)
 
     started = iso_now()
     start_time = time.monotonic()
@@ -771,6 +759,32 @@ def detect_permission_degradation(stderr: str) -> bool:
     --permission-mode acceptEdits が default に強制降格される (2026-07-23 監査)。
     """
     return PERMISSION_DEGRADATION_MARKER in (stderr or "")
+
+
+# #292: CC 2.1.219 の allowed_non_write_users hardening は SCRUB=0 opt-out を無視して
+# --permission-mode acceptEdits を default に強制降格する。警告文が案内する正規回避は
+# allowedTools の明示。両 arm に同一リストを渡し、arm 間比較の妥当性を保つ。
+CHILD_ALLOWED_TOOLS = "Read,Write,Edit,Grep,Glob,Bash,Agent,Skill,TodoWrite"
+
+
+def build_child_command(arm: str, prompt: str, max_budget_usd: float) -> list:
+    """#292: 子 claude の argv を構築する (テスト可能な単一定義)."""
+    command = [
+        "claude",
+        "-p",
+        "--output-format",
+        "json",
+        "--permission-mode",
+        "acceptEdits",
+        "--allowedTools",
+        CHILD_ALLOWED_TOOLS,
+        "--max-budget-usd",
+        str(max_budget_usd),
+    ]
+    if arm == "mission":
+        command.extend(["--plugin-dir", str(MISSION_PLUGIN_DIR)])
+    command.append(prompt)
+    return command
 
 
 def child_env(base_env: dict) -> dict:
