@@ -594,6 +594,50 @@ Until a re-run under a clean permission mode completes, treat the
 completion-rate finding in the discriminating-v1 section below as
 preliminary.
 
+## Portfolio + discriminating v3 run (post-v2.1.0, 2026-08-02)
+
+Two clean runs (all records `permission_mode_degraded=false`, `--parallel 3`,
+identical $10/30min constraints, CLI 2.1.220) at commit `73abd72`, which
+includes v2.1.0 (adaptive routing #276/#304, critic-scope enforcement #309,
+2-reviewer tier #266, audit findings F1-F6).
+
+**portfolio-v1** (16 records, all completed, quality tied at marker 1.0):
+goal total 7.23 min / $4.34 vs mission 43.54 min / $16.41 = **6.0x time /
+3.8x cost — V1 (≤1.3x) failed.** Root cause verified in state: adaptive
+routing never fired on the Simple tasks — routing is evaluated only from
+`init`'s complexity argument, and the orchestrator path that classifies
+after init (`set complexity=Simple`) bypasses it (#325).
+
+**discriminating-v3** (10 records, all completed, quality tied at 1.0 —
+V2 failed): goal avg 1.45 min / $0.61 vs mission 11.06 min / $3.12 =
+**7.6x / 5.1x — V3 (≤2.5x) failed.** Goal itself got ~1.4x faster under
+CLI 2.1.220 clean conditions, widening the relative gap.
+
+Two notable facts: (1) a real quality-gate save — release-ledger mission
+scored composite 3.58 at iter1 (below threshold), remediated, and passed at
+4.25 on iter2, catching internal-quality defects the markers cannot see
+(at 23.95 min / $6.13 vs goal 1.83 min / $0.66); (2) the #309 guidance-layer
+enforcement was bypassed on that same run (`critic_has_new_scope` stayed
+None at iter2 — the orchestrator did not consult `next` before reviewing),
+so a hard gate is tracked in #326.
+
+Verdict: V1 / V2 / V3 all failed at this time. The quality ceiling of
+sonnet-5 has now survived three independently designed cohorts; single-shot
+speed parity is architecturally unreachable while independent review exists.
+Mission's proven value remains the completion gate (see the 3.58→4.25 save),
+tail insurance, governance, budget guard, and resume. The winning axes are
+completing the routing (#325 — eliminating losses rather than winning) and
+gated completion quality.
+
+Unsafe interpretation:
+
+> The improvements were pointless.
+
+Unsupported: absolute mission times improved substantially (Complex 13-21
+min in the contaminated era → 5-8 min now); the relative gap widened because
+goal's single-pass architecture sped up faster than mission's multi-pass
+floor can shrink.
+
 ## Discriminating cohort clean re-run (discriminating-v2) — correcting the v1 findings
 
 Status: executed 2026-07-23 JST under clean permission conditions (the #268
@@ -934,4 +978,10 @@ artifacts/2026-07-23-discriminating-v1/
 results/2026-07-23-discriminating-v2.jsonl
 results/2026-07-23-discriminating-v2-summary.json
 artifacts/2026-07-23-discriminating-v2/
+results/2026-08-02-portfolio-v1.jsonl
+results/2026-08-02-portfolio-v1-summary.json
+artifacts/2026-08-02-portfolio-v1/
+results/2026-08-02-discriminating-v3.jsonl
+results/2026-08-02-discriminating-v3-summary.json
+artifacts/2026-08-02-discriminating-v3/
 ```
