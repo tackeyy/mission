@@ -9,7 +9,21 @@
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-08-02
+
 ### 追加
+
+- `mission-state.py resolve-archive` で `.mission-state` 配下の terminal halted record に監査可能な resolution metadata (`resolved`/`superseded`/`closed`、owner issue、evidence URL、note) を `halt_reason` を変更せず付与できるようにした。対象パスと record 状態は fail-closed に検証する (#301)。
+
+- `issue_ref` を保存時に正規化し、形式差による重複着手検出のすり抜けを塞いだ (#295)。S3 の重複 WARN は halt 中の未完了 session も対象になり stale 注記が付く (#296)。
+
+- `resolve-archive` に `--frozen-snapshot` フラグを追加した (#318)。archive/ 配下の frozen snapshot（loop_active=true または halt_reason 空のまま保存された mid-flight record）に対して、対応する live session（sessions/<session_id>.json）が存在しないか terminal（loop_active=false）であることを検証したうえで resolution を付与できる。live session が loop_active=true の場合は opt-in フラグがあっても拒否（fail-closed）。sessions/ 配下への適用は引き続き拒否。`_validate_resolve_archive_record` の project_root チェックを緩和し、record の project_root が cwd と一致するか cwd の配下パス（worktree 等）に解決される場合も許可する（文字列 prefix 比較ではなく `Path.relative_to` による安全なパス比較）。`is_stale_active_no_score` に resolution_status 除外を追加し、resolved/superseded/closed の archive record を stale-active-no-score の集計から除外する (#318)。
+
+- `mission-state.py review-finalize` が aggregate-reviews → push-score を 1 コマンドで transactional に実行し (集計失敗時は score を push しない)、`closeout` が mark-passes → next を順に実行して結合 JSON を返す (gate 未達は mark-passes の exit code を維持し、next 相当の guidance を出力、state 不変)。既存 validator (min-reviewers / strict review 検証 / findings gate / 再 push 保護 / threshold / agreement / specialist accounting) を複製せず再利用し、標準フローの orchestration turn を iteration あたり 2 turn 削減する。分割実行も後方互換で維持 (#283)。
+
+- `aggregate-reviews` に `--reviewer-window <perspective>=<start>..<end>` (複数指定可・optional) を追加。orchestrator が各 reviewer の実行時間帯を申告し、`parallel_execution: true|false|"unknown"` と申告 window を aggregate evidence と結果 JSON に記録する。時間帯が重ならない場合は WARN (直列実行検出) を出すが exit 0 のまま — 観測のみでゲート不変、review JSON の verbatim 契約も不変。形式不正・未知 perspective・重複・end<start は strict に拒否し、naive な時刻は UTC に正規化する (#282)。
+
+- discriminating-v2 実測 (実行時間 ≒ 総生成トークン量) に基づく出力・turn 規律 3 件を prompt 層に追加: 最終報告と artifact は evidence テーブル + tool-computed ゲート値 + archive 参照パスに限定 (レビュアー出力の逐語再掲禁止、#280)、mission-reviewer の出力は採点/Issues テンプレート + `mission-review/1` JSON に限定し再導出は内部化 (#281)、相互依存のない tool 呼び出しは単一メッセージで並列発行 (依存操作は順次、#284)。
 
 - session state に `last_activity_at` を追加した (#310)。エージェント活動による session 書き込みでは `atomic_write_json` が自動で刻み、`cleanup-stale` / `halt --all` の terminalize 等の janitor 書き込みは `administrative=True` で明示的に刻まない。`duration_sec` と両方の age 連鎖は `last_activity_at` を `updated_at` より優先し、resolution/batch 書き込みが `updated_at` を上書きすることで生じていた壁時計膨張 (company-os #583 で最大 500 倍) を止める。フィールドを持たない旧 state は従来動作を維持する。
 
@@ -25,22 +39,33 @@
 
 - mission-vs-goal ベンチマークに `discriminating` cohort（`tasks.discriminating.json`、5 tasks）を追加した。openworld-v1 で確認した品質天井の解消を目的に、各 task 7-9 個の quality markers を 3-5 fixture に分散させ、documented-override / permitted-difference / valid-but-suspicious の decoy を forbidden markers で採点する。`fail_first` 2 tasks（36 セル構成監査・5 文書台帳照合）は単一パスの網羅が review で fail する設計で `iteration >= 2` を強制し、#240/#241 の diff-review 経路に初の実運用観測を与える。構造・marker 密度・fail-first の存在・fixture 実在・marker の fixture 発見可能性はテストで強制する。N>=10 採用判定 runbook（`discriminating-cohort-runbook.ja.md` / `.md`）に smoke gate・本 run コマンド・機械的な採用ゲートを定義した (#262)。
 
-
 - mission-vs-goal ベンチマーク runner が、mission ループを初期化しなかった mission arm record を無効化するようになった。mission arm 実行後に `.mission-state` が不在の場合、record を `run_status=failed` / `failure_kind=mission_loop_not_initialized` / `comparable_attempt=false` に再分類する（外的要因の blocked は元の分類を保持し、破損 state はループ開始の証拠があるため無効化しない）。アーム別 summary に comparable record のみで計算する `comparable_average_quality_score` / `comparable_average_elapsed_minutes` / `comparable_cost_usd_mean` を追加し、無効 record による速度・コスト比較の希釈を構造的に防ぐ。既存フィールドは全 records の歴史的意味を維持する (#261)。
-
 
 - mission orchestrator（`skills/mission/SKILL.md`）に #240/#241 の state 契約をプロンプト層へ配線した。Planner spawn 判定が `critic_has_new_scope` も記録し（critic の全計画ステップが既存 finding id のみなら false、`new` を含むなら true）、差分レビュー節は `next` の `details.reviewer_count`（state-driven の独立 2 名。矛盾していた「検証 1 名」記述を置換）に従い `aggregate-reviews` へ `--min-reviewers` を必ず付ける。新設の bounded context 節は `details.context_mode == "bounded"` のとき context manifest を生成して reviewer へ渡し、生成失敗時は full context へ fail-safe fallback する。`mission-reviewer` には context manifest 入力（manifest + 指定 diff を一次スコープ、採点基準と Step 0 テスト実行義務は不変）を明文化した (#258)。
 
 - `mission-state.py context-manifest --iteration N --out <path>` で bounded context manifest JSON（`mission-context-manifest/1` スキーマ）を生成できるようにした。mission goal、iteration、`score_history` から抽出した prior findings を含む。`_derive_next_action` の reviewing ブロックが details に `context_mode` を返すようになり、`iteration >= 2` かつ `critic_has_new_scope is False` の場合は `"bounded"`、それ以外は `"full"` を返す。reviewer fork がフル parent history ではなく evidence manifest のみを受け取れるようにし、diff レビューでのコンテキスト浪費を削減する (#241)。
 
 - mission-vs-goal ベンチマークに `openworld-discovery` cohort（`tasks.openworld.json`）を追加した。open-world の finding 発見をテストする 3 タスクで構成され、solver は事前列挙なしで divergence・contradiction・root cause を独立に発見する必要がある。タスク設計: constant-hunt（canonical default に対するサービス横断 timeout 監査）、contradiction-chain（real contradiction + 注意深く読むと整合する decoy）、incremental-reveal（最初の仮説が誤りである時系列 incident log）。scoring は tail cohort と同じ `quality_markers` / `forbidden_markers` / `hidden_paths` infrastructure を使う (#251)。
+
 - `_derive_next_action` が `iteration >= 2` かつ `critic_has_new_scope=false` のとき `reviewer_count: 2` を返すようになり、diff-only review のオーバーヘッドを最大 1/3 削減する。`critic_has_new_scope` フィールドは `set` で設定可能、未設定時は full count（安全側）。`aggregate-reviews` に `--min-reviewers N` を追加し、N 未満の reviewer JSON 入力を exit 2 で reject する（合意偽装防止）。`next` の command_hint は effective reviewer count >= 2 のとき自動的に `--min-reviewers` を含む (#240)。
 
-### 修正
+- `mission-state.py init --budget-minutes <N>` で時間予算 (wall-clock) を宣言できるようにし、read-only の `next` が `started_at` から導出する `budget_pressure` シグナルを返すようにした。80% で `warn` (optional specialist / critic の新規 spawn を控える advisory)、100% 超で `exceeded` となり、spawn 系の next action (`run-planner`/`run-executor`/`run-reviewers`) を「成果物を確定して `mark-halt --category partial-done` で終了する」`consider-halt` 案内へ差し替える。安価なローカル完結手 (`aggregate-reviews`・`mark-passes`)・terminal 報告・`await-user` は差し替えず、ゲート意味論は不変。2026-07-22 に実測された「USD 予算を使い切って成果物ゼロで kill される全損」の再発を防ぐ。ベンチマーク runner には `--mission-budget-minutes` を追加して `/mission` プロンプトへ予算を渡せるようにし、`total_cost_usd` を第一級フィールドとして記録して blocked/failed run の全損コストを集計可能にした (#238)。
 
-- `cleanup-stale` が `getppid()` fallback で記録された PID の mission を即座に orphan halt しなくなった（agent CLI がプロセスツリーで発見できない場合）。`find_agent_pid()` が state に `pid_source` を `"fallback"` または `"agent"` として記録し、`cleanup-stale` は fallback 由来の PID が最近消滅した場合（age < stale threshold）はスキップする。真に放置された fallback セッション（age >= threshold）は従来どおり halt する。`pid_source` なしの旧 state は既存の即時 halt 動作を維持する (#239)。
+- `mission-state.py advance --phase <phase> --activity <kind>:<reason>` が phase 遷移と activity 切替を単一 lock・単一 atomic write で行い、「phase だけ進んで activity が空」の state を作れなくした (2026-07-22 実行速度監査で実測された activity coverage 9.96% の構造要因への対策)。検証 (phase 正規化・kind/reason enum) は lock 取得前に行い、不正入力では一切 write しない。`done`/`halted` への遷移は従来どおり `mark-passes`/`mark-halt` 専用であり、advance を pass gate の迂回路にはできない。現在と同じ phase を指定した場合は activity 切替のみ行う (#237)。
+
+- local authoring が mission state 初期化前に fail-closed な source bootstrap を実行するようになりました。`origin/main` を取得し、clean な `main` だけを fast-forward で更新して local と remote-tracking commit の一致を検証し、更新済み `SKILL.md` の読み直しを要求します。dirty、`main` 以外、detached、ahead/diverged、remote branch 欠落、network failure では、古い版への fallback や history 書き換えを行わず停止します (#229)。
+
+- `mission-state.py stats` と `mission-audit.py` が排他的な pass-rate health 分類を共有し、finite な `raw_pass_rate` / `completed_pass_rate` と明示的な分子・分母を出力するようになりました。fresh active は可視化したまま completed population から外し、stale active は actionable な未合格 health debt として completed population に含めます。active、active-no-score、stale、halt、abandoned の件数は JSON と console に常に表示します。deprecated な `pass_rate` alias は各 command の従来の意味を維持し、stats は audit と同じ current immutable worktree archive generation を読み込みます (#208)。
+
+- `mission-audit.py --current-since` が検出済みrecord/itemをregistry駆動の共通finding modelへ変換し、forced pass、halt/slow/scoring、specialist provenanceのriskを同じUTC inclusive cutoffで分類するようになりました。`--since` / `--until` / `--current-since`の日付・ISO boundは一つのparserで扱います。JSONはall/current/historicalの基準evidence一覧、severity・code別の保存則count、code別のcompactなcount/indexを、Markdownはcurrent P0/P1/P2をhistorical riskより先に表示します。historical evidenceは元severity/provenanceを保持しますが現行改善promptには渡しません。timestamp欠落・不正はcurrentに残し、cutoff未指定は従来の全期間表示を維持します。pass severity、required specialist result gate、force approval gateは変更しません (#207)。
+
+- mission state に active work・external wait・approval wait・reviewer wait・idle を明示する bounded activity segment を追加しました。`mission-state.py stats` と `mission-audit.py` は同じ reducer で task/phase の R7 p50/p90、kind/reason totals、coverage、unclassified time、anomaly count を集計します。crash/resume gap は分類せず、既存 phase duration と review/pass gate を維持します (#211)。
+
+- `mission-state.py archive-worktree` を追加しました。終端済み worktree session と state が参照する evidence を、同じ Git common directory に属する既存の別 checkout へコピーします。更新は content-addressed な immutable generation を publish してから `current.json` を atomic に進めるため、crash や parallel reader が旧有効世代を見失いません。`mission-worktree-archive/1` manifest は session/mission/iteration identity、evidence type、機密を含まない relative source/archive reference、SHA-256、size を記録し、重複 path、path escape、symlink、evidence 欠落、integrity 不整合を fail-closed にします。`mission-audit.py` は discovery 時の generation を固定して state のロード前に preflight し、検証済み manifest から scoring / specialist evidence を解決して、同一 record の検証を cache します。`.mission-state` は降下前に readiness を確認し、後続の walk access error も収集します。directory 以外・読取不能・symlink の `.mission-state` / archive root、bundle / generation ancestor の symlink、通常 archive root 外へ解決される bundle、archive / pointer / generation の access failure、不正・危険な pointer、archived state の欠落・不正 JSON、generation manifest の欠落・不整合は、root 外読込・archive の黙示的除外・stale file fallback をせず、重複排除した `invalid-worktree-archive` finding として明示し、pointer 不在を `lstat` で確認できた既存 bundle だけ互換性を維持します (#212)。
 
 ### 変更
+
+- `skills/mission/SKILL.md` を 217 → 約 202 行に圧縮し、260 行未満の regression guard を追加。あわせて per-turn context 規律を追加: state 全文 echo 禁止 (`get --field` / `next` の JSON のみ)、reviewer JSON はパス受け渡しのみで再読しない、refs は lazy-load (#285)。
 
 - 不可逆・security シグナルのない Complex mission の `review_tier` 導出を `full` (3名) から `standard` (独立2名) に再調整した。Critical とシグナルでエスカレートした Complex は従来どおり `full` (3名) を維持し、pass gate の意味論 (threshold / open_high / findings evidence / agreement) は不変。discriminating-v1 の実測で品質同点タスクの壁時計の 62% が reviewer-wait であり 3 人目の限界検出価値がゼロだったこと、#240 の「独立 2 名 = agreement 成立の最小構成」の先例に基づく (#266)。
 
@@ -48,36 +73,32 @@
 
 - mission-vs-goal ベンチマークの scorer が、完走した markered record を全て 5.0 天井に張り付かせる問題を解消した。markered task は `1.0 + 1.0 × validator_fraction + 3.0 × marker_score`（gradient v2）となり内容 recall が支配項になる。marker なし task は legacy 二値 1.0/4.0 の歴史的意味を維持する。新 record は `quality_score_method`（`..._gradient_v2_...`）で機械的に区別でき、既存 JSONL は不変 (#247)。validator gate はアーム対称化し、両アーム共通見出し（Evidence/Assumptions）のみが `validator_pass` を決める。アーム固有見出し（goal 3 個 / mission 6 個）の欠落は `missing_arm_specific_headings` として記録するが gate しない — 見出し数の非対称による完走難易度差と「冗長に書くほど有利」の歪みを除去した (#248)。両 runner の `score_from_signals` は同一意味論をテストで強制している。
 
-### 追加
-
-- `mission-state.py init --budget-minutes <N>` で時間予算 (wall-clock) を宣言できるようにし、read-only の `next` が `started_at` から導出する `budget_pressure` シグナルを返すようにした。80% で `warn` (optional specialist / critic の新規 spawn を控える advisory)、100% 超で `exceeded` となり、spawn 系の next action (`run-planner`/`run-executor`/`run-reviewers`) を「成果物を確定して `mark-halt --category partial-done` で終了する」`consider-halt` 案内へ差し替える。安価なローカル完結手 (`aggregate-reviews`・`mark-passes`)・terminal 報告・`await-user` は差し替えず、ゲート意味論は不変。2026-07-22 に実測された「USD 予算を使い切って成果物ゼロで kill される全損」の再発を防ぐ。ベンチマーク runner には `--mission-budget-minutes` を追加して `/mission` プロンプトへ予算を渡せるようにし、`total_cost_usd` を第一級フィールドとして記録して blocked/failed run の全損コストを集計可能にした (#238)。
-
-- `mission-state.py advance --phase <phase> --activity <kind>:<reason>` が phase 遷移と activity 切替を単一 lock・単一 atomic write で行い、「phase だけ進んで activity が空」の state を作れなくした (2026-07-22 実行速度監査で実測された activity coverage 9.96% の構造要因への対策)。検証 (phase 正規化・kind/reason enum) は lock 取得前に行い、不正入力では一切 write しない。`done`/`halted` への遷移は従来どおり `mark-passes`/`mark-halt` 専用であり、advance を pass gate の迂回路にはできない。現在と同じ phase を指定した場合は activity 切替のみ行う (#237)。
-
-### セキュリティ
-
-- 手動 halt した mission の再開を、専用の `reactivate --approved-by-user --expected-category ... --reason ...` 遷移に限定しました。停止カテゴリを検証し、旧停止理由・カテゴリ・承認理由を append-only の `reactivation_history` に残したうえで、current の停止フィールドをクリアし、activity 計測を同一 lock 内で再開します。汎用 `set` では halt の解除や承認監査の書き換えができません。自動 stale/orphan 復旧は引き続き `resume` / `refresh-pid` を使い、復旧時に current の `halt_category` もクリアします。
-- `codex-preflight --strict` が deprecated な `MISSION_REQUIRE_SCORING_EVIDENCE=0` escape hatch を検出して reject する (exit 2)。あわせて実行結果を not ok として報告する。この環境変数は legacy な `push-score --items` 経路で scoring-evidence gate をバイパスするため、有効なまま実作業へ進んではならない。escape hatch 自体は当面機能を維持するが、文言を `DEPRECATED ESCAPE HATCH` に変更し、次のマイナーリリースで削除予定とした (#226)。
-
-### 追加
-
-- local authoring が mission state 初期化前に fail-closed な source bootstrap を実行するようになりました。`origin/main` を取得し、clean な `main` だけを fast-forward で更新して local と remote-tracking commit の一致を検証し、更新済み `SKILL.md` の読み直しを要求します。dirty、`main` 以外、detached、ahead/diverged、remote branch 欠落、network failure では、古い版への fallback や history 書き換えを行わず停止します (#229)。
-- `mission-state.py stats` と `mission-audit.py` が排他的な pass-rate health 分類を共有し、finite な `raw_pass_rate` / `completed_pass_rate` と明示的な分子・分母を出力するようになりました。fresh active は可視化したまま completed population から外し、stale active は actionable な未合格 health debt として completed population に含めます。active、active-no-score、stale、halt、abandoned の件数は JSON と console に常に表示します。deprecated な `pass_rate` alias は各 command の従来の意味を維持し、stats は audit と同じ current immutable worktree archive generation を読み込みます (#208)。
-- `mission-audit.py --current-since` が検出済みrecord/itemをregistry駆動の共通finding modelへ変換し、forced pass、halt/slow/scoring、specialist provenanceのriskを同じUTC inclusive cutoffで分類するようになりました。`--since` / `--until` / `--current-since`の日付・ISO boundは一つのparserで扱います。JSONはall/current/historicalの基準evidence一覧、severity・code別の保存則count、code別のcompactなcount/indexを、Markdownはcurrent P0/P1/P2をhistorical riskより先に表示します。historical evidenceは元severity/provenanceを保持しますが現行改善promptには渡しません。timestamp欠落・不正はcurrentに残し、cutoff未指定は従来の全期間表示を維持します。pass severity、required specialist result gate、force approval gateは変更しません (#207)。
-- mission state に active work・external wait・approval wait・reviewer wait・idle を明示する bounded activity segment を追加しました。`mission-state.py stats` と `mission-audit.py` は同じ reducer で task/phase の R7 p50/p90、kind/reason totals、coverage、unclassified time、anomaly count を集計します。crash/resume gap は分類せず、既存 phase duration と review/pass gate を維持します (#211)。
-- `mission-state.py archive-worktree` を追加しました。終端済み worktree session と state が参照する evidence を、同じ Git common directory に属する既存の別 checkout へコピーします。更新は content-addressed な immutable generation を publish してから `current.json` を atomic に進めるため、crash や parallel reader が旧有効世代を見失いません。`mission-worktree-archive/1` manifest は session/mission/iteration identity、evidence type、機密を含まない relative source/archive reference、SHA-256、size を記録し、重複 path、path escape、symlink、evidence 欠落、integrity 不整合を fail-closed にします。`mission-audit.py` は discovery 時の generation を固定して state のロード前に preflight し、検証済み manifest から scoring / specialist evidence を解決して、同一 record の検証を cache します。`.mission-state` は降下前に readiness を確認し、後続の walk access error も収集します。directory 以外・読取不能・symlink の `.mission-state` / archive root、bundle / generation ancestor の symlink、通常 archive root 外へ解決される bundle、archive / pointer / generation の access failure、不正・危険な pointer、archived state の欠落・不正 JSON、generation manifest の欠落・不整合は、root 外読込・archive の黙示的除外・stale file fallback をせず、重複排除した `invalid-worktree-archive` finding として明示し、pointer 不在を `lstat` で確認できた既存 bundle だけ互換性を維持します (#212)。
-
 ### 修正
 
+- ベンチマーク runner が child `claude` に `--allowedTools` を明示するようにした。Claude Code 2.1.219 の hardening で `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0` の opt-out が無効化されたための対応 (#292)。
+
+- 同一 session 内で Mission を切り替えた際に旧 assumptions を再利用せず、世代分離して安全に archive するようにした (#302)。
+
+- `cleanup-stale` が `getppid()` fallback で記録された PID の mission を即座に orphan halt しなくなった（agent CLI がプロセスツリーで発見できない場合）。`find_agent_pid()` が state に `pid_source` を `"fallback"` または `"agent"` として記録し、`cleanup-stale` は fallback 由来の PID が最近消滅した場合（age < stale threshold）はスキップする。真に放置された fallback セッション（age >= threshold）は従来どおり halt する。`pid_source` なしの旧 state は既存の即時 halt 動作を維持する (#239)。
+
 - `mission-audit.py` が実ログ由来の委譲 handoff と明示的な merge 承認待ちの halt reason を認識し、P1 `halted-runs` の actionable 判定に反映するようになりました。raw halt 件数は維持し、stale/orphan は引き続き安全側で actionable に残します。日本語の root 引き渡し・承認待ち文言で actionable pass rate が過度に下がる問題を修正しました (#233)。
+
 - `mission-audit.py` が raw halt 件数を保持したまま、原因調査が必要な終端状態だけから P1 `halted-runs` と別指標 `actionable_pass_rate` を導出するようになりました。構造化された承認待ち、委譲済み partial completion、ユーザー中断、明示的な解消・置換証跡、限定的に認識した外部待ちは内訳に残しつつ actionable 品質を押し下げません。stale、stagnation、競合 gate、未知・曖昧な halt は安全側で actionable に残します。deprecated な `pass_rate` alias は completed-session rate のまま維持します (#221)。
+
 - 非対話の mission 起動時に、orchestrator が必要とする配布版・リポジトリ内の state CLI コマンドだけを許可するようにしました。`mission-state.py init` は実作業前に session state ディレクトリと assumptions 証跡へ内容保持・fsync 付きの実書き込み probe を行います。probe 失敗時は exit 2 と構造化された `blocked-external` halt を返し、state 自体も保存不能な場合は同じ構造化証跡を stdout に残して承認質問を行いません。明示診断用に同じ検査を行う `permission-preflight --json` も追加しました (#220)。
+
 - 不可逆操作の `review_tier` キーワードを、operation に anchor した clause と構造 unit の文脈で出現ごとに評価するようにしました。否定は文字 window 内の cue ではなく対象 operation への直接的な文法 anchor を必須とし、短縮形・`cannot`・active な `not perform/execute`・passive な `will/should not be performed/executed`・日本語の qualifier 付き否定も扱います。明示的に否定された実操作は Simple/Standard を昇格させず、条件例外、非実行 intent 自体の否定、不確実表現は安全側で採用し、複数否定 cue は次の operation より前にある場合だけ反転否定として扱います。global 非実行 marker は、候補自身の context が meta/non-operation intent と証明できる場合だけ抑制し、同じ logical unit の execution cue が別の named operation に直接係ると証明できない場合は曖昧照応として採用します。quote-only intent は、引用符直前・直後の直接実行または引用直後の passive modal だけが上書きし、引用内や別の明示 operation の execution wording では上書きしません。segment・operation start・quote・meta/non-operation・否定 operation・否定 cue・global marker の索引を cache し、全文・dense context の反復走査を避けます。既存の順序付き文字列 signals は変えず、state に出現単位の `review_tier_signal_details` provenance を追加し、security・high-risk・Complex/Critical の挙動も維持します (#209)。
   meta/non-operation の証明は候補 context 全体が strict meta-only 文法へ一致することを要求し、未知の後段句があれば抑制しません。quote span 内の execution cue は曖昧照応 veto の対象外です。quote-only も marker・無害終端・別 named operation への明示 action を除いた外側残余が空の場合だけ抑制します。
   modal / contraction で始まる `not not` と、`not the case that` / `not saying that` / `cannot say that` などの外側否定を二重否定として扱います。`except when` / `until` / approval 待ち / passive な緊急時例外は条件付きのままです。文をまたぐ `follow/apply + pronoun` と日本語の `適用` / `従う` は曖昧な実行照応として global meta-only 抑制を veto します。
   `例外なく` / `緊急時にも` / `原則ではなく絶対に` という強い無条件否定は、広い例外 marker を発火しないようにしました。単純な operation 否定の後に続く因果的な安心表明は、独立した述語否定を誤って二重否定にしません。
   短縮 auxiliary と `never` を operation scope 付きの単純/二重否定で共通化し、外側の報告否定の短縮形も扱います。approval gate は `before` / `prior to` / `while ... is pending` を追加し、曖昧実行照応は pronoun または named procedure に対する `follow` / `apply` / `proceed with` まで認識します。日本語の因果的な安心表明に影響表現を追加しました。
   外側の不確実表現に `not true that` と `no guarantee/assurance/certainty that` を追加し、内側 operation clause の modal 否定が短縮形でも展開形と同じ文法で扱います。
+
+### セキュリティ
+
+- 手動 halt した mission の再開を、専用の `reactivate --approved-by-user --expected-category ... --reason ...` 遷移に限定しました。停止カテゴリを検証し、旧停止理由・カテゴリ・承認理由を append-only の `reactivation_history` に残したうえで、current の停止フィールドをクリアし、activity 計測を同一 lock 内で再開します。汎用 `set` では halt の解除や承認監査の書き換えができません。自動 stale/orphan 復旧は引き続き `resume` / `refresh-pid` を使い、復旧時に current の `halt_category` もクリアします。
+
+- `codex-preflight --strict` が deprecated な `MISSION_REQUIRE_SCORING_EVIDENCE=0` escape hatch を検出して reject する (exit 2)。あわせて実行結果を not ok として報告する。この環境変数は legacy な `push-score --items` 経路で scoring-evidence gate をバイパスするため、有効なまま実作業へ進んではならない。escape hatch 自体は当面機能を維持するが、文言を `DEPRECATED ESCAPE HATCH` に変更し、次のマイナーリリースで削除予定とした (#226)。
 
 ## [2.0.0] - 2026-07-20
 
