@@ -574,6 +574,66 @@ runner 指定の `--permission-mode acceptEdits` が **default に強制降格**
 クリーンな permission mode での再 run が完了するまで、下記 discriminating-v1 節の
 completion-rate finding は preliminary として扱うこと。
 
+## Portfolio + discriminating v3 run (v2.1.0 改善後、2026-08-02)
+
+Status: v2.1.0 (adaptive routing #276/#304、critic scope 強制 #309、tier 2名化 #266、
+実運用監査 findings F1-F6 全対応) を含む commit `73abd72` で、クリーン条件
+(#268 ガード全 record `permission_mode_degraded=false`、`--parallel 3`、両 arm
+同一条件 $10/30min) の 2 run を実行した。CLI は 2.1.220。
+
+### portfolio-v1 (V1 判定: routing 込み実効オーバーヘッド)
+
+8 tasks (Simple 3 / Standard 3 / Complex 2) x 2 arms = 16 records、全完走・品質は
+全 record marker 1.0 で同点。
+
+| 層 | goal 平均 | mission 平均 | 比 |
+|---|---:|---:|---:|
+| Simple (3) | 0.54 min | 3.03 min | 5.6x |
+| Standard (3) | 0.84 min | 7.65 min | 9.1x |
+| Complex (2) | 1.54 min | 5.75 min | 3.7x |
+| **合計** | **7.23 min / $4.34** | **43.54 min / $16.41** | **6.0x 時間 / 3.8x コスト** |
+
+**V1 (≤1.3x): 未達。** 根本原因を state で確認: Simple 3 tasks の mission arm は
+**adaptive routing が発火せず** light tier のフルループ (iter1・passes) が走った。
+routing は `init` の complexity 引数でのみ判定され、orchestrator が「init → 分類 →
+`set complexity=Simple`」の順で動く経路では routing を通らない (#325)。
+
+### discriminating-v3 (V2/V3 判定)
+
+5 tasks x 2 arms = 10 records、全完走。品質は全 record marker 1.0 で同点 (V2 未達)。
+goal 平均 1.45 min / $0.61 vs mission 平均 11.06 min / $3.12 = **7.6x 時間 / 5.1x コスト**
+(V3 ≤2.5x 未達)。goal 側が CLI 2.1.220 + クリーン条件で大幅高速化しており
+(v2 比 ~1.4x 高速)、mission の床は比例して下がらないため相対差は拡大した。
+
+注目すべき 2 事実:
+
+1. **品質ゲートの実働例**: release-ledger mission は iter1 composite 3.58 (threshold
+   未達) → 修正 → iter2 4.25 で pass。marker では両 arm 1.0 同点だが、ゲートは
+   marker が測らない内部品質の欠陥を検出・改善させた (代償: 23.95 min / $6.13 vs
+   goal 1.83 min / $0.66)
+2. **#309 の guidance 強制は bypass された**: 上記 iter2 で `critic_has_new_scope`
+   は None のまま — orchestrator が review 前に `next` を呼ばない経路があり、
+   guidance 層の強制は不完全。hard gate 化を #326 で追跡
+
+### 判定 (2026-08-02 時点の確定)
+
+- **V1 routing 込み ≤1.3x: 未達** (6.0x)。#325 修正後に再測が必要
+- **V2 品質 marker 差 > 0: 未達** — 全 cohort・全条件で同点。sonnet-5 の天井は
+  cohort 設計で解消できないと 3 回の独立設計で確定
+- **V3 非 Simple ≤2.5x: 未達** (7.6x)。goal の高速化により相対差はむしろ拡大
+- mission の実証済み価値は不変: completion gate (iter1 3.58 → iter2 4.25 の実働例) +
+  テール保険 + ガバナンス + budget guard + resume
+
+危険な解釈:
+
+> 改善は無意味だった。
+
+これは unsupported です。v2.1.0 の改善は絶対値では効いている (mission Complex が
+v1 汚染時代の 13-21 min → 5-8 min)。相対差の拡大は goal (単発 CLI) 側の高速化が
+mission の構造床 (複数パス) を上回ったため。「単発タスクの速度で goal に勝つ」は
+アーキテクチャ上不可能であり、勝負軸は routing の完全化 (#325: 負けをなくす) と
+ゲートが要る場面での完遂品質に確定した。
+
 ## Discriminating cohort clean re-run (discriminating-v2) — v1 findings の訂正
 
 Status: 2026-07-23 JST に実行。permission-mode 汚染 (#268) を排除したクリーン
@@ -936,4 +996,10 @@ artifacts/2026-07-23-discriminating-v1/
 results/2026-07-23-discriminating-v2.jsonl
 results/2026-07-23-discriminating-v2-summary.json
 artifacts/2026-07-23-discriminating-v2/
+results/2026-08-02-portfolio-v1.jsonl
+results/2026-08-02-portfolio-v1-summary.json
+artifacts/2026-08-02-portfolio-v1/
+results/2026-08-02-discriminating-v3.jsonl
+results/2026-08-02-discriminating-v3-summary.json
+artifacts/2026-08-02-discriminating-v3/
 ```
