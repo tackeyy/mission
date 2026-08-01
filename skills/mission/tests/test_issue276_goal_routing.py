@@ -70,3 +70,16 @@ def test_routed_output_contains_goal_contract_guidance(run_cli, tmp_path):
     out = json.loads(r.stdout)
     assert "Stop Condition" in out["guidance"]
     assert "goal" in out["guidance"]
+
+def test_issue_ref_disables_routing(run_cli, tmp_path):
+    """#304: --issue-ref 付き (Issue-bound = 統治要求) は Simple でも mission 維持.
+
+    company-os wrapper は init 直後の strict preflight で active state を要求するため、
+    routed (state 不生成) だと mandatory halt の事故経路になる。
+    """
+    r = run_cli("init", "typo を1箇所直す", "--complexity", "Simple",
+                "--issue-ref", "418", cwd=tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert len(_sessions(tmp_path)) == 1, "--issue-ref 付きは routing してはならない"
+    state = json.loads(_sessions(tmp_path)[0].read_text())
+    assert state["issue_ref"] == "418"
