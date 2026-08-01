@@ -11,6 +11,11 @@
 
 ### 追加
 
+- `mission-state.py review-finalize` が aggregate-reviews → push-score を 1 コマンドで transactional に実行し (集計失敗時は score を push しない)、`closeout` が mark-passes → next を順に実行して結合 JSON を返す (gate 未達は mark-passes の exit code を維持し、next 相当の guidance を出力、state 不変)。既存 validator (min-reviewers / strict review 検証 / findings gate / 再 push 保護 / threshold / agreement / specialist accounting) を複製せず再利用し、標準フローの orchestration turn を iteration あたり 2 turn 削減する。分割実行も後方互換で維持 (#283)。
+
+- `aggregate-reviews` に `--reviewer-window <perspective>=<start>..<end>` (複数指定可・optional) を追加。orchestrator が各 reviewer の実行時間帯を申告し、`parallel_execution: true|false|"unknown"` と申告 window を aggregate evidence と結果 JSON に記録する。時間帯が重ならない場合は WARN (直列実行検出) を出すが exit 0 のまま — 観測のみでゲート不変、review JSON の verbatim 契約も不変。形式不正・未知 perspective・重複・end<start は strict に拒否し、naive な時刻は UTC に正規化する (#282)。
+
+- discriminating-v2 実測 (実行時間 ≒ 総生成トークン量) に基づく出力・turn 規律 3 件を prompt 層に追加: 最終報告と artifact は evidence テーブル + tool-computed ゲート値 + archive 参照パスに限定 (レビュアー出力の逐語再掲禁止、#280)、mission-reviewer の出力は採点/Issues テンプレート + `mission-review/1` JSON に限定し再導出は内部化 (#281)、相互依存のない tool 呼び出しは単一メッセージで並列発行 (依存操作は順次、#284)。
 - session state に `last_activity_at` を追加した (#310)。エージェント活動による session 書き込みでは `atomic_write_json` が自動で刻み、`cleanup-stale` / `halt --all` の terminalize 等の janitor 書き込みは `administrative=True` で明示的に刻まない。`duration_sec` と両方の age 連鎖は `last_activity_at` を `updated_at` より優先し、resolution/batch 書き込みが `updated_at` を上書きすることで生じていた壁時計膨張 (company-os #583 で最大 500 倍) を止める。フィールドを持たない旧 state は従来動作を維持する。
 
 - `next` が #258 の critic scope 記録を機械的に強制するようになった (#309)。`phase=reviewing` かつ `iteration >= 2` で `critic_has_new_scope` 未設定のとき、`run-reviewers` ではなく判定基準付きの `record-critic-scope` を返し、prose 指示をエージェントが実行しない経路を塞ぐ (2026-08-01 の実運用監査で 115 sessions 中設定 0 件、#240/#241 の diff-review 最適化が永久休眠状態だった)。記録後は #240 の reviewer 削減と #241 の context mode 付きで run-reviewers guidance が再開する。iteration 1 と pass gate 意味論は不変。
@@ -41,6 +46,8 @@
 - `cleanup-stale` が `getppid()` fallback で記録された PID の mission を即座に orphan halt しなくなった（agent CLI がプロセスツリーで発見できない場合）。`find_agent_pid()` が state に `pid_source` を `"fallback"` または `"agent"` として記録し、`cleanup-stale` は fallback 由来の PID が最近消滅した場合（age < stale threshold）はスキップする。真に放置された fallback セッション（age >= threshold）は従来どおり halt する。`pid_source` なしの旧 state は既存の即時 halt 動作を維持する (#239)。
 
 ### 変更
+
+- `skills/mission/SKILL.md` を 217 → 約 202 行に圧縮し、260 行未満の regression guard を追加。あわせて per-turn context 規律を追加: state 全文 echo 禁止 (`get --field` / `next` の JSON のみ)、reviewer JSON はパス受け渡しのみで再読しない、refs は lazy-load (#285)。
 
 - 不可逆・security シグナルのない Complex mission の `review_tier` 導出を `full` (3名) から `standard` (独立2名) に再調整した。Critical とシグナルでエスカレートした Complex は従来どおり `full` (3名) を維持し、pass gate の意味論 (threshold / open_high / findings evidence / agreement) は不変。discriminating-v1 の実測で品質同点タスクの壁時計の 62% が reviewer-wait であり 3 人目の限界検出価値がゼロだったこと、#240 の「独立 2 名 = agreement 成立の最小構成」の先例に基づく (#266)。
 
