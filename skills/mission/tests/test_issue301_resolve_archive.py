@@ -333,9 +333,10 @@ def test_resolve_archive_rejects_immutable_generation_record(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_resolve_archive_rejects_different_project_record(tmp_path):
-    """project_root が cwd と異なる record は拒否される."""
+    """project_root が cwd またはその配下でない record は拒否される (#318: cwd 配下 worktree は許容)."""
     sf = tmp_path / ".mission-state" / "sessions" / "foreign.json"
-    other_project = tmp_path / "other_project"
+    # Use a sibling directory (parent of tmp_path) — truly unrelated, not a worktree of cwd
+    other_project = tmp_path.parent / "other_project"
     _write_halted(sf, project_root=str(other_project), session_id="foreign")
 
     r = _resolve(tmp_path, ".mission-state/sessions/foreign.json", status="resolved")

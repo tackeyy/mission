@@ -7357,16 +7357,21 @@ def _validate_resolve_archive_path(raw_path: str, cwd: Path) -> Path:
     return candidate
 
 
-def _validate_resolve_archive_record(data: dict, cwd: Path) -> None:
+def _validate_resolve_archive_record(
+    data: dict,
+    cwd: Path,
+    *,
+    allow_active_snapshot: bool = False,
+) -> None:
     """resolve-archive の対象 record を検証する。問題があれば sys.exit(2)。
 
     拒否条件:
     - valid mission state record でない
-    - loop_active=true (active session)
+    - loop_active=true (active session) — allow_active_snapshot=True のとき archive/ 配下のみ skip
     - passes=true (completed session)
     - halt_reason が空 (non-halt terminal)
     - PID が生存中 (belt-and-suspenders active check)
-    - project_root が cwd と不一致 (別 project)
+    - project_root が cwd または cwd の配下パスと不一致 (別 project / #318)
     """
     if not _is_mission_state_record(data):
         print(
@@ -7376,7 +7381,7 @@ def _validate_resolve_archive_record(data: dict, cwd: Path) -> None:
         )
         sys.exit(2)
 
-    if data.get("loop_active") is True:
+    if data.get("loop_active") is True and not allow_active_snapshot:
         print(
             "ERROR: target record is active (loop_active=true); "
             "cannot annotate an active session with resolve-archive",
@@ -7393,7 +7398,9 @@ def _validate_resolve_archive_record(data: dict, cwd: Path) -> None:
         sys.exit(2)
 
     halt_reason = str(data.get("halt_reason") or "").strip()
-    if not halt_reason:
+    # #318: allow_active_snapshot=True は archive/ 配下の frozen snapshot 用 opt-in。
+    # mid-flight snapshot は halt_reason が空のまま保存されるため、このチェックも緩和する。
+    if not halt_reason and not allow_active_snapshot:
         print(
             "ERROR: target record has no halt_reason; "
             "it is not a terminal halted record",
@@ -7417,13 +7424,22 @@ def _validate_resolve_archive_record(data: dict, cwd: Path) -> None:
         except PermissionError:
             pass  # 別プロセス (OS がアクセス拒否) = not our session
 
-    # project_root 一致チェック (記録されている場合のみ)
+    # project_root チェック: cwd と一致、または cwd 配下のパス (#318: worktree 由来 record 対応)
     record_root_raw = str(data.get("project_root") or "").strip()
     if record_root_raw:
         try:
             resolved_record_root = Path(record_root_raw).resolve()
             resolved_cwd = cwd.resolve()
-            if resolved_record_root != resolved_cwd:
+            # Path.is_relative_to は Python 3.9+。文字列 prefix 比較ではなく Path API を使う
+            # (文字列比較では /foo/bar-baz が /foo/bar の配下と誤判定する)
+            is_same = resolved_record_root == resolved_cwd
+            is_subdir = False
+            try:
+                resolved_record_root.relative_to(resolved_cwd)
+                is_subdir = True
+            except ValueError:
+                pass
+            if not (is_same or is_subdir):
                 print(
                     f"ERROR: target record belongs to project {record_root_raw!r}, "
                     f"not the current directory {cwd!r}; "
@@ -7456,11 +7472,48 @@ def cmd_resolve_archive(args):
     target_state_root = Path(*target_parts[: mission_state_idx + 1])
     lock = target_state_root / ".state.lock"
 
+    # #318: --frozen-snapshot フラグの事前検証 (lock 外で行う)
+    frozen_snapshot = getattr(args, "frozen_snapshot", False)
+    if frozen_snapshot:
+        # archive/ 配下のみ有効（sessions/ は従来の active 拒否を維持）
+        archive_root = target_state_root / "archive"
+        try:
+            target.relative_to(archive_root)
+        except ValueError:
+            print(
+                "ERROR: --frozen-snapshot は archive/ 配下のファイルにのみ適用できます; "
+                f"sessions/ 配下の active record は従来どおり拒否されます: {target}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
     with StateLock(lock):
         data = json.loads(target.read_text(encoding="utf-8"))
 
+        # #318: --frozen-snapshot フラグが指定された場合、live session の terminal 性を確認する
+        if frozen_snapshot:
+            session_id = str(data.get("session_id") or "").strip()
+            if session_id:
+                live_path = target_state_root / "sessions" / f"{session_id}.json"
+                if live_path.exists():
+                    try:
+                        live_data = json.loads(live_path.read_text(encoding="utf-8"))
+                        if live_data.get("loop_active") is True:
+                            print(
+                                f"ERROR: live session {session_id!r} は loop_active=true のまま稼働中です; "
+                                "--frozen-snapshot であっても active な live session がある間は resolution を付与できません",
+                                file=sys.stderr,
+                            )
+                            sys.exit(2)
+                    except (OSError, json.JSONDecodeError) as exc:
+                        print(
+                            f"ERROR: live session ファイルの読み取りに失敗しました: {exc}",
+                            file=sys.stderr,
+                        )
+                        sys.exit(2)
+
         # record の検証
-        _validate_resolve_archive_record(data, cwd)
+        _validate_resolve_archive_record(data, cwd, allow_active_snapshot=frozen_snapshot)
 
         now = iso_now()
 
@@ -7890,6 +7943,19 @@ def _build_parser():
     p_resolve.add_argument("--note", default=None,
                            help="自由記述の解消メモ")
     p_resolve.add_argument("--json", action="store_true", help="JSON 形式で出力")
+    p_resolve.add_argument(
+        "--frozen-snapshot",
+        action="store_true",
+        dest="frozen_snapshot",
+        default=False,
+        help=(
+            "#318: archive/ 配下の frozen snapshot（loop_active=true のまま保存された mid-flight record）に "
+            "対して resolution を付与できる opt-in フラグ。"
+            "対応する live session（sessions/<session_id>.json）が存在しないか terminal であることを検証したうえで許可する。"
+            "live session が loop_active=true の場合は拒否（保守側）。"
+            "sessions/ 配下への適用は引き続き拒否。"
+        ),
+    )
     p_resolve.set_defaults(func=cmd_resolve_archive)
 
     return parser
