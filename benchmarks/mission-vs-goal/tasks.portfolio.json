@@ -1,0 +1,221 @@
+{
+  "benchmark": "mission-vs-goal-pilot",
+  "version": 1,
+  "cohort": "portfolio",
+  "task_count": 8,
+  "arms": ["claude_code_goal_command", "mission"],
+  "hidden_paths": [
+    "benchmarks/mission-vs-goal/tasks.portfolio.json",
+    "benchmarks/mission-vs-goal/tasks.discriminating.json"
+  ],
+  "prompt_rules": [
+    "Do not open, read, grep, or list anything under `benchmarks/mission-vs-goal/` except the fixture files named in this prompt and your own output file. Benchmark metadata (task definitions, scoring configuration, answer keys) is out of bounds.",
+    "For every confirmed finding, quote the exact identifier or value from the fixture as evidence.",
+    "Explicitly separate confirmed findings from rejected candidates when the task involves candidates to reject."
+  ],
+  "tasks": [
+    {
+      "id": "portfolio-simple-typo",
+      "category": "docs",
+      "difficulty": "simple_single_fixture_typo_detection",
+      "mission_complexity": "Simple",
+      "mission_max_iter": 1,
+      "markers_hidden": true,
+      "fixtures": ["benchmarks/mission-vs-goal/fixtures/portfolio/retry-config.md"],
+      "prompt": "Read exactly this fixture: `benchmarks/mission-vs-goal/fixtures/portfolio/retry-config.md`. The usage note references a setting name that does not match the table. Identify the misspelled reference, quote it exactly, and state the correct setting name from the table.",
+      "validator": "Artifact must quote the misspelled reference and the correct setting name.",
+      "primary_metric": "quality_marker_recall",
+      "hypothesis": "Simple single-fixture task; the mission arm should route to the goal contract (#276) and match goal wall-clock. To test, not assert.",
+      "first_pass_failure_design": "None — designed to be completable in one pass by both arms.",
+      "quality_markers": [
+        {"name": "Misspelled reference retry_polcy", "patterns": ["retry_polcy"]},
+        {"name": "Correct name retry_policy", "patterns": ["retry_policy"]}
+      ],
+      "forbidden_markers": []
+    },
+    {
+      "id": "portfolio-simple-lookup",
+      "category": "configuration",
+      "difficulty": "simple_single_fixture_value_lookup",
+      "mission_complexity": "Simple",
+      "mission_max_iter": 1,
+      "markers_hidden": true,
+      "fixtures": ["benchmarks/mission-vs-goal/fixtures/portfolio/service-timeouts.md"],
+      "prompt": "Read exactly this fixture: `benchmarks/mission-vs-goal/fixtures/portfolio/service-timeouts.md`. Report the TIMEOUT_MS value for the search-api service, and name which service has the largest timeout.",
+      "validator": "Artifact must state the search-api timeout value and the largest-timeout service.",
+      "primary_metric": "quality_marker_recall",
+      "hypothesis": "Simple lookup; mission should route to the goal contract (#276). To test, not assert.",
+      "first_pass_failure_design": "None.",
+      "quality_markers": [
+        {"name": "search-api timeout 8500", "patterns": ["8500", "8,500"]},
+        {"name": "billing has the largest timeout", "patterns": ["billing"]}
+      ],
+      "forbidden_markers": []
+    },
+    {
+      "id": "portfolio-simple-diff",
+      "category": "reconciliation",
+      "difficulty": "simple_two_list_difference",
+      "mission_complexity": "Simple",
+      "mission_max_iter": 1,
+      "markers_hidden": true,
+      "fixtures": ["benchmarks/mission-vs-goal/fixtures/portfolio/exporter-lists.md"],
+      "prompt": "Read exactly this fixture: `benchmarks/mission-vs-goal/fixtures/portfolio/exporter-lists.md`. Identify every exporter present in List A (deployed) but missing from List B (documented).",
+      "validator": "Artifact must name the undocumented exporter(s).",
+      "primary_metric": "quality_marker_recall",
+      "hypothesis": "Simple diff; mission should route to the goal contract (#276). To test, not assert.",
+      "first_pass_failure_design": "None.",
+      "quality_markers": [
+        {"name": "gamma-exporter is undocumented", "patterns": ["gamma-exporter"]}
+      ],
+      "forbidden_markers": []
+    },
+    {
+      "id": "portfolio-std-contract",
+      "category": "api-contract",
+      "difficulty": "standard_spec_vs_one_client",
+      "mission_complexity": "Standard",
+      "mission_max_iter": 2,
+      "markers_hidden": true,
+      "fixtures": [
+        "benchmarks/mission-vs-goal/fixtures/discriminating/contract-drift/api-spec.md",
+        "benchmarks/mission-vs-goal/fixtures/discriminating/contract-drift/client-py.md"
+      ],
+      "prompt": "Audit one client implementation against the API specification. Read exactly these fixtures: `benchmarks/mission-vs-goal/fixtures/discriminating/contract-drift/api-spec.md`, `benchmarks/mission-vs-goal/fixtures/discriminating/contract-drift/client-py.md`. The spec is the source of truth. Find every breaking drift in client-py, and reject spec-permitted differences as non-findings citing the permitting clause. Quote exact header names, field names, and enum values.",
+      "validator": "Artifact must include a drift table, a breaking-drift section with quoted evidence, and a rejected-candidates section.",
+      "primary_metric": "quality_marker_recall",
+      "hypothesis": "Standard-depth audit over two documents. To test, not assert.",
+      "first_pass_failure_design": "Two breaking drifts of different kinds plus one permitted-decoy header.",
+      "quality_markers": [
+        {"name": "enum spelling canceled vs cancelled", "patterns": ["canceled"]},
+        {"name": "missing required Idempotency-Key", "patterns": ["idempotency-key"]},
+        {"name": "Rejected: X-Trace-Id permitted", "patterns": ["x-trace-id"]}
+      ],
+      "forbidden_markers": [
+        {"name": "False drift: X-Trace-Id flagged as breaking", "patterns": ["x-trace-id is a breaking", "x-trace-id violates", "remove x-trace-id", "x-trace-id is not allowed"]}
+      ]
+    },
+    {
+      "id": "portfolio-std-metrics",
+      "category": "analytics",
+      "difficulty": "standard_two_report_reconciliation",
+      "mission_complexity": "Standard",
+      "mission_max_iter": 2,
+      "markers_hidden": true,
+      "fixtures": [
+        "benchmarks/mission-vs-goal/fixtures/discriminating/metrics-reconcile/data-ledger.md",
+        "benchmarks/mission-vs-goal/fixtures/discriminating/metrics-reconcile/finance-report.md"
+      ],
+      "prompt": "Reconcile the June revenue between two documents. Read exactly these fixtures: `benchmarks/mission-vs-goal/fixtures/discriminating/metrics-reconcile/data-ledger.md`, `benchmarks/mission-vs-goal/fixtures/discriminating/metrics-reconcile/finance-report.md`. The data ledger is the source of truth. Identify the numeric discrepancy, quote both values, and state the mechanical cause using the derivation notes.",
+      "validator": "Artifact must quote both revenue values and state the mechanical cause of the discrepancy.",
+      "primary_metric": "quality_marker_recall",
+      "hypothesis": "Standard-depth numeric reconciliation. To test, not assert.",
+      "first_pass_failure_design": "The cause (unfiltered refund flag) is stated in derivation notes, not in the numbers.",
+      "quality_markers": [
+        {"name": "finance revenue 48,210", "patterns": ["48,210", "48210"]},
+        {"name": "ledger revenue 45,930", "patterns": ["45,930", "45930"]},
+        {"name": "cause: refunds not filtered", "patterns": ["refund"]}
+      ],
+      "forbidden_markers": []
+    },
+    {
+      "id": "portfolio-std-policy",
+      "category": "governance",
+      "difficulty": "standard_three_request_audit",
+      "mission_complexity": "Standard",
+      "mission_max_iter": 2,
+      "markers_hidden": true,
+      "fixtures": [
+        "benchmarks/mission-vs-goal/fixtures/discriminating/policy-exceptions/access-policy.md",
+        "benchmarks/mission-vs-goal/fixtures/discriminating/policy-exceptions/approver-roster.md",
+        "benchmarks/mission-vs-goal/fixtures/discriminating/policy-exceptions/exception-requests.md"
+      ],
+      "prompt": "Audit exception requests REQ-01, REQ-02, and REQ-03 against the access policy. Read exactly these fixtures: `benchmarks/mission-vs-goal/fixtures/discriminating/policy-exceptions/access-policy.md`, `benchmarks/mission-vs-goal/fixtures/discriminating/policy-exceptions/approver-roster.md`, `benchmarks/mission-vs-goal/fixtures/discriminating/policy-exceptions/exception-requests.md`. Deliver a verdict for each of the three requests with the exact policy section and roster evidence. Requests permitted by an explicit clause must be marked compliant with the clause cited.",
+      "validator": "Artifact must include verdicts for REQ-01, REQ-02, and REQ-03 with policy/roster evidence.",
+      "primary_metric": "quality_marker_recall",
+      "hypothesis": "Standard-depth verdict audit joining three documents. To test, not assert.",
+      "first_pass_failure_design": "REQ-02's violation is only visible by joining the roster validity date.",
+      "quality_markers": [
+        {"name": "Verdict REQ-01 (emergency clause compliant)", "patterns": ["req-01"]},
+        {"name": "Violation REQ-02 approver role expired", "patterns": ["req-02"]},
+        {"name": "roster evidence 2026-05-31", "patterns": ["2026-05-31"]},
+        {"name": "Verdict REQ-03", "patterns": ["req-03"]}
+      ],
+      "forbidden_markers": [
+        {"name": "False violation: REQ-01 emergency clause missed", "patterns": ["req-01: violation", "req-01 is a violation", "req-01 violates", "req-01 non-compliant"]},
+        {"name": "False violation: REQ-03 flagged", "patterns": ["req-03: violation", "req-03 is a violation", "req-03 violates", "req-03 non-compliant"]}
+      ]
+    },
+    {
+      "id": "portfolio-cx-config",
+      "category": "configuration",
+      "difficulty": "complex_config_audit_36_cells",
+      "mission_complexity": "Complex",
+      "mission_max_iter": 3,
+      "markers_hidden": true,
+      "fail_first": true,
+      "fixtures": [
+        "benchmarks/mission-vs-goal/fixtures/discriminating/config-sprawl/platform/platform-defaults.md",
+        "benchmarks/mission-vs-goal/fixtures/discriminating/config-sprawl/auth/config.md",
+        "benchmarks/mission-vs-goal/fixtures/discriminating/config-sprawl/billing/config.md",
+        "benchmarks/mission-vs-goal/fixtures/discriminating/config-sprawl/search/config.md",
+        "benchmarks/mission-vs-goal/fixtures/discriminating/config-sprawl/notify/config.md"
+      ],
+      "prompt": "Audit configuration compliance for four services against the platform canonical defaults. Read exactly these fixtures: `benchmarks/mission-vs-goal/fixtures/discriminating/config-sprawl/platform/platform-defaults.md`, `benchmarks/mission-vs-goal/fixtures/discriminating/config-sprawl/auth/config.md`, `benchmarks/mission-vs-goal/fixtures/discriminating/config-sprawl/billing/config.md`, `benchmarks/mission-vs-goal/fixtures/discriminating/config-sprawl/search/config.md`, `benchmarks/mission-vs-goal/fixtures/discriminating/config-sprawl/notify/config.md`. Produce a complete audit: for every constant in every service, state whether it is compliant, an undocumented divergence (violation), or a documented override (must cite the approval reference and be rejected as a non-finding). Quote the exact constant name, canonical value, and actual value for every divergence. Missing rows count as audit failures.",
+      "validator": "Artifact must include a full per-service compliance table covering every canonical constant, a violations section with quoted evidence, and a rejected-candidates section citing each documented override's approval reference.",
+      "primary_metric": "quality_marker_recall",
+      "hypothesis": "Complex exhaustive-coverage audit; review structure should catch missing rows. To test, not assert.",
+      "first_pass_failure_design": "36 constant-service cells; six violations spread so no two services share a violated constant; three documented-override decoys.",
+      "quality_markers": [
+        {"name": "Violation: auth SESSION_TTL_SEC 7200 vs 3600", "patterns": ["7200", "7,200"]},
+        {"name": "Violation: auth TLS_MIN_VERSION TLSv1.1 vs TLSv1.2", "patterns": ["tlsv1.1", "tls 1.1", "tls_min_version 1.1"]},
+        {"name": "Violation: billing IDEMPOTENCY_WINDOW_SEC 86400 vs 600", "patterns": ["86400", "86,400"]},
+        {"name": "Violation: search DB_POOL_SIZE 128 vs 64", "patterns": ["128"]},
+        {"name": "Violation: search LOG_RETENTION_DAYS 45 vs 30", "patterns": ["45 day", "retention_days: 45", "retention_days 45", "retention_days = 45", "| 45"]},
+        {"name": "Violation: notify BATCH_WINDOW_MS 250 vs 500", "patterns": ["250"]},
+        {"name": "Rejected override: billing CONNECT_TIMEOUT_MS 12000 (PLAT-482)", "patterns": ["plat-482"]},
+        {"name": "Rejected override: search CACHE_TTL_SEC 30 (PLAT-511)", "patterns": ["plat-511"]},
+        {"name": "Rejected override: notify REQUEST_RETRY_MAX 2 (PLAT-390)", "patterns": ["plat-390"]}
+      ],
+      "forbidden_markers": [
+        {"name": "False violation: documented billing timeout override", "patterns": ["connect_timeout_ms is a violation", "connect_timeout_ms violates", "billing timeout is an undocumented", "fix connect_timeout_ms"]},
+        {"name": "False violation: documented search cache override", "patterns": ["cache_ttl_sec is a violation", "cache_ttl_sec violates", "cache_ttl is an undocumented", "fix cache_ttl_sec"]},
+        {"name": "False violation: documented notify retry override", "patterns": ["request_retry_max is a violation", "request_retry_max violates", "notify retry is an undocumented", "fix request_retry_max"]}
+      ]
+    },
+    {
+      "id": "portfolio-cx-ledger",
+      "category": "reconciliation",
+      "difficulty": "complex_five_document_ledger_reconciliation",
+      "mission_complexity": "Complex",
+      "mission_max_iter": 3,
+      "markers_hidden": true,
+      "fail_first": true,
+      "fixtures": [
+        "benchmarks/mission-vs-goal/fixtures/discriminating/release-ledger/changelog.md",
+        "benchmarks/mission-vs-goal/fixtures/discriminating/release-ledger/release-notes.md",
+        "benchmarks/mission-vs-goal/fixtures/discriminating/release-ledger/ops-log.md",
+        "benchmarks/mission-vs-goal/fixtures/discriminating/release-ledger/migration-index.md",
+        "benchmarks/mission-vs-goal/fixtures/discriminating/release-ledger/support-tickets.md"
+      ],
+      "prompt": "Reconcile the release ledger across five documents. Read exactly these fixtures: `benchmarks/mission-vs-goal/fixtures/discriminating/release-ledger/changelog.md`, `benchmarks/mission-vs-goal/fixtures/discriminating/release-ledger/release-notes.md`, `benchmarks/mission-vs-goal/fixtures/discriminating/release-ledger/ops-log.md`, `benchmarks/mission-vs-goal/fixtures/discriminating/release-ledger/migration-index.md`, `benchmarks/mission-vs-goal/fixtures/discriminating/release-ledger/support-tickets.md`. Find every cross-document inconsistency: entries recorded in one document but missing or contradicted in another. Quote the exact identifiers from both sides of every inconsistency. Apparent inconsistencies that are explained inside the documents must be rejected as non-findings with the explanation cited.",
+      "validator": "Artifact must include a reconciliation table, a confirmed-inconsistencies section with quoted evidence from both sides, and a rejected-candidates section citing the in-document explanation.",
+      "primary_metric": "quality_marker_recall",
+      "hypothesis": "Complex cross-document join; each finding requires joining two documents on an identifier. To test, not assert.",
+      "first_pass_failure_design": "Seven inconsistencies spread over five documents; a renumbering decoy (RFC-77) explains the apparent 2.30.x gap.",
+      "quality_markers": [
+        {"name": "MIG-2207 applied but missing from index", "patterns": ["mig-2207"]},
+        {"name": "Hotfix 2.31.4 known only from SUP-1189", "patterns": ["sup-1189"]},
+        {"name": "Zero-downtime claim contradicted by OUT-88", "patterns": ["out-88"]},
+        {"name": "CVE-2026-4417 fixed but manifest pins 1.8.3", "patterns": ["cve-2026-4417"]},
+        {"name": "Vulnerable pin evidence fastcsv 1.8.3", "patterns": ["1.8.3"]},
+        {"name": "2.32.1 rolled back but still listed GA", "patterns": ["2.32.1"]},
+        {"name": "SUP-1204 license change not in notices", "patterns": ["sup-1204"]},
+        {"name": "Rejected: 2.30.x gap explained by RFC-77", "patterns": ["rfc-77"]}
+      ],
+      "forbidden_markers": [
+        {"name": "False finding: 2.30.x gap flagged as missing release", "patterns": ["2.30 is missing", "missing release 2.30", "2.30.x was skipped in error", "unexplained gap 2.30"]}
+      ]
+    }
+  ]
+}
