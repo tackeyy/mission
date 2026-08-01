@@ -7085,6 +7085,230 @@ def cmd_stats(args):
         print(_format_text(stats, since, until))
 
 
+# ---------------------------------------------------------------------------
+# Issue #301: resolve-archive
+# ---------------------------------------------------------------------------
+
+_VALID_RESOLUTION_STATUSES = frozenset({"resolved", "superseded", "closed"})
+
+
+def _validate_resolve_archive_path(raw_path: str, cwd: Path) -> Path:
+    """resolve-archive の対象ファイルパスを検証して解決した絶対パスを返す。
+
+    拒否条件:
+    - .mission-state/ の外 (project root 境界違反 / path escape)
+    - パス上の symlink
+    - archive/worktree-*/generations/ 以下 (immutable bundle)
+    - 通常ファイルでない
+    """
+    # 絶対パスに解決 (.. を正規化するが symlink はまだ展開しない)
+    raw = Path(raw_path)
+    candidate = (cwd / raw) if not raw.is_absolute() else raw
+    candidate = Path(os.path.normpath(str(candidate)))
+
+    # cwd/.mission-state/ 内であることを確認 (normpath で .. を除去済み)
+    state_root = cwd / ".mission-state"
+    try:
+        candidate.relative_to(state_root)
+    except ValueError:
+        print(
+            f"ERROR: target path must be within <project-root>/.mission-state/; "
+            f"got: {candidate}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    # パス上の各コンポーネントで symlink を検出
+    try:
+        check = cwd
+        for part in candidate.relative_to(cwd).parts:
+            check = check / part
+            if check.is_symlink():
+                print(
+                    f"ERROR: symlink detected in path component: {check}; "
+                    "resolve-archive does not follow symlinks",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+    except (OSError, ValueError) as exc:
+        print(f"ERROR: path validation failed: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+    if not candidate.is_file():
+        print(f"ERROR: target is not a regular file: {candidate}", file=sys.stderr)
+        sys.exit(2)
+
+    # archive/worktree-*/generations/ 以下は immutable bundle — 変更禁止
+    try:
+        archive_root = state_root / "archive"
+        rel_to_archive = candidate.relative_to(archive_root)
+        parts = rel_to_archive.parts
+        if (
+            len(parts) >= 3
+            and parts[0].startswith("worktree-")
+            and parts[1] == "generations"
+        ):
+            print(
+                "ERROR: target is inside an immutable worktree archive generation "
+                f"({parts[0]}/generations/{parts[2]}/...); "
+                "resolve-archive cannot modify generation-frozen records",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+    except ValueError:
+        pass  # not under archive/ — acceptable
+
+    return candidate
+
+
+def _validate_resolve_archive_record(data: dict, cwd: Path) -> None:
+    """resolve-archive の対象 record を検証する。問題があれば sys.exit(2)。
+
+    拒否条件:
+    - valid mission state record でない
+    - loop_active=true (active session)
+    - passes=true (completed session)
+    - halt_reason が空 (non-halt terminal)
+    - PID が生存中 (belt-and-suspenders active check)
+    - project_root が cwd と不一致 (別 project)
+    """
+    if not _is_mission_state_record(data):
+        print(
+            "ERROR: target is not a valid mission state record "
+            "(missing mission / mission_id / session_id)",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    if data.get("loop_active") is True:
+        print(
+            "ERROR: target record is active (loop_active=true); "
+            "cannot annotate an active session with resolve-archive",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    if data.get("passes") is True:
+        print(
+            "ERROR: target record has passes=true; "
+            "resolve-archive only operates on terminal halted records (passes=false)",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    halt_reason = str(data.get("halt_reason") or "").strip()
+    if not halt_reason:
+        print(
+            "ERROR: target record has no halt_reason; "
+            "it is not a terminal halted record",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    # Belt-and-suspenders: PID 生存チェック
+    pid = data.get("pid")
+    if isinstance(pid, int) and pid > 0:
+        try:
+            os.kill(pid, 0)
+            print(
+                f"ERROR: PID {pid} is still alive; "
+                "target record may still be active",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        except ProcessLookupError:
+            pass  # プロセス不存在 = OK
+        except PermissionError:
+            pass  # 別プロセス (OS がアクセス拒否) = not our session
+
+    # project_root 一致チェック (記録されている場合のみ)
+    record_root_raw = str(data.get("project_root") or "").strip()
+    if record_root_raw:
+        try:
+            resolved_record_root = Path(record_root_raw).resolve()
+            resolved_cwd = cwd.resolve()
+            if resolved_record_root != resolved_cwd:
+                print(
+                    f"ERROR: target record belongs to project {record_root_raw!r}, "
+                    f"not the current directory {cwd!r}; "
+                    "resolve-archive must be run from the record's project root",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+        except (OSError, ValueError) as exc:
+            print(
+                f"ERROR: could not validate project_root: {exc}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+
+def cmd_resolve_archive(args):
+    """#301: terminal halted record に resolution metadata を atomic に追記する。"""
+    cwd = Path.cwd().resolve()
+
+    # パスの検証と解決
+    target = _validate_resolve_archive_path(args.path, cwd)
+
+    # lock ファイルは対象の .mission-state/ 直下
+    # (state_root = 対象ファイルから .mission-state を探す)
+    target_parts = target.parts
+    if ".mission-state" not in target_parts:
+        print("ERROR: cannot locate .mission-state in target path", file=sys.stderr)
+        sys.exit(2)
+    mission_state_idx = target_parts.index(".mission-state")
+    target_state_root = Path(*target_parts[: mission_state_idx + 1])
+    lock = target_state_root / ".state.lock"
+
+    with StateLock(lock):
+        data = json.loads(target.read_text(encoding="utf-8"))
+
+        # record の検証
+        _validate_resolve_archive_record(data, cwd)
+
+        now = iso_now()
+
+        # 既存の resolution を history へ append (audit trail 保持)
+        if data.get("resolution_status"):
+            prev = {"resolution_status": data["resolution_status"]}
+            if data.get("resolution_decided_at"):
+                prev["resolution_decided_at"] = data["resolution_decided_at"]
+            if data.get("resolution_owner_issue"):
+                prev["resolution_owner_issue"] = data["resolution_owner_issue"]
+            if data.get("resolution_evidence_url"):
+                prev["resolution_evidence_url"] = data["resolution_evidence_url"]
+            if data.get("resolution_note"):
+                prev["resolution_note"] = data["resolution_note"]
+            data.setdefault("resolution_history", []).append(prev)
+
+        # resolution metadata を設定 (不変フィールドには一切触れない)
+        data["resolution_status"] = args.status
+        data["resolution_decided_at"] = now
+        if args.owner_issue is not None:
+            data["resolution_owner_issue"] = args.owner_issue
+        if args.evidence_url is not None:
+            data["resolution_evidence_url"] = args.evidence_url
+        if args.note is not None:
+            data["resolution_note"] = args.note
+
+        atomic_write_json(target, data)
+
+    result: dict = {
+        "ok": True,
+        "path": str(target),
+        "resolution_status": args.status,
+        "resolution_decided_at": now,
+    }
+    if args.owner_issue is not None:
+        result["resolution_owner_issue"] = args.owner_issue
+    if args.evidence_url is not None:
+        result["resolution_evidence_url"] = args.evidence_url
+    if args.note is not None:
+        result["resolution_note"] = args.note
+
+    print(json.dumps(result, indent=2 if args.json else None, ensure_ascii=False))
+
+
 def _build_parser():
     parser = argparse.ArgumentParser(description="/mission skill state manager")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -7424,6 +7648,28 @@ def _build_parser():
                        help="command timeout seconds (default: provider timeout, then 120)")
     p_cmd.add_argument("--json", action="store_true", help="JSON 形式で出力")
     p_cmd.set_defaults(func=cmd_invoke_command_provider)
+
+    p_resolve = sub.add_parser(
+        "resolve-archive",
+        help="#301: terminal halted record に監査可能な resolution metadata を追記する",
+    )
+    p_resolve.add_argument(
+        "--path", required=True,
+        help="対象 state ファイルのパス (.mission-state/ 以下の相対パスまたは絶対パス)",
+    )
+    p_resolve.add_argument(
+        "--status", required=True,
+        choices=sorted(_VALID_RESOLUTION_STATUSES),
+        help="解消区分: resolved / superseded / closed",
+    )
+    p_resolve.add_argument("--owner-issue", default=None, dest="owner_issue",
+                           help="起票元 Issue 参照 (例: 301)")
+    p_resolve.add_argument("--evidence-url", default=None, dest="evidence_url",
+                           help="解消証跡 URL (PR / commit / コメント等)")
+    p_resolve.add_argument("--note", default=None,
+                           help="自由記述の解消メモ")
+    p_resolve.add_argument("--json", action="store_true", help="JSON 形式で出力")
+    p_resolve.set_defaults(func=cmd_resolve_archive)
 
     return parser
 
