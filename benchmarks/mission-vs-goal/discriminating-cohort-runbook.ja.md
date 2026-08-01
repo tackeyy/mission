@@ -16,6 +16,13 @@
   強制降格される。run 後に各 record の stderr に `Permission mode forced` 警告が
   ないことを必ず確認する
 
+- **CC 2.1.219 以降の hardening (#292)**: `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0` の
+  opt-out は無効化された。runner は `--allowedTools` を両 arm へ明示する (#292 で実装済み)。
+  run 後に summary の `permission_degraded_records` が 0 であることを確認する
+- **無効な ANTHROPIC_API_KEY の伝播対策**: CC セッション env の `ANTHROPIC_API_KEY` は
+  claude.ai ログインより優先され、無効値だと子が 401 で全滅する。起動時に
+  `env -u ANTHROPIC_API_KEY` を付ける
+
 ## Step 1: 較正 smoke (1 task, fail-first 検証)
 
 fail-first 設計が実際に iteration >= 2 を発生させるかを、本 run 前に 1 task で検証する。
@@ -85,3 +92,4 @@ PATH="<shim-dir>:$PATH" python3 run_claude_goal_vs_mission.py \
 | 日時 | 内容 |
 |------|------|
 | 2026-07-22 | 初版作成 (#262) |
+| 2026-07-25 | CC 2.1.219 hardening 対応 (--allowedTools 明示・ANTHROPIC_API_KEY unset) を追記 (#292) |
