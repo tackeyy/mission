@@ -5709,6 +5709,23 @@ def cmd_aggregate_reviews(args):
     if args.iteration < 1:
         print("ERROR: --iteration は 1 以上で指定してください", file=sys.stderr)
         sys.exit(2)
+    # #326: critic scope 記録の hard gate。#309 の guidance 層は next を呼ばない
+    # orchestrator に bypass される実測 (disc-v3) があるため、集計側で fail-closed に
+    # 強制する。escape hatch は作らない (#240 の合意偽装防止と同思想)。
+    if args.iteration >= 2:
+        try:
+            _gate_state = json.loads(sf.read_text())
+        except (OSError, json.JSONDecodeError):
+            _gate_state = {}
+        if _gate_state.get("critic_has_new_scope") is None:
+            print(
+                "ERROR: iteration >= 2 の集計には critic_has_new_scope の記録が必要です (#326)。"
+                " critic の実行計画テーブルから判定し、"
+                "`mission-state.py set critic_has_new_scope='false'` (全ステップが既存 finding id のみ)"
+                " または `'true'` (new を含む) を実行してから再集計してください。",
+                file=sys.stderr,
+            )
+            sys.exit(2)
     reviews = [_load_review_json(path, args.iteration) for path in args.input]
 
     min_reviewers = getattr(args, "min_reviewers", None)

@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Critic-scope recording is now a hard gate (#326): `aggregate-reviews` (and `review-finalize`, which inherits it) exits 2 at `iteration >= 2` when the session state has no `critic_has_new_scope`, with the decision rule and `set` command in the error. The #309 guidance-layer enforcement was observed bypassed by an orchestrator that skipped `next` before reviewing (disc-v3); the aggregation-side gate is fail-closed with no escape hatch, and iteration 1 is unchanged.
+
 - The mission-vs-goal benchmark adds a `portfolio` cohort (`tasks.portfolio.json`, 8 tasks: 3 Simple / 3 Standard / 2 Complex) measuring the routing-inclusive effective overhead of the mission entrance: Simple tasks exercise adaptive routing (#276) to the goal contract, Standard tasks reuse focused subsets of the discriminating fixtures, and Complex tasks reuse the fail-first audits. Both its own answer key and the reused discriminating answer key are hidden from run clones. Structure, complexity mix, answer-key hiding, fixture existence, and marker discoverability are test-enforced.
 
 - The irreversible-keyword escalator now suppresses noun references to "release" — a match immediately followed by a number, version, `brief`, `notes`, or `mission` (e.g. "Release 6", "Release brief") no longer escalates a Standard mission to full tier, recorded as `noun-reference-non-operation` in the audit trail. The 2026-08-01 production audit measured a 36% false-positive rate from document/version names; verb usage ("release the hotfix") still escalates (#313).
