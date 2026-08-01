@@ -21,6 +21,8 @@
 
 ### 追加
 
+- critic scope 記録を hard gate 化した (#326)。`aggregate-reviews` (内部呼び出しの `review-finalize` も継承) は `iteration >= 2` で state に `critic_has_new_scope` が無い場合 exit 2 とし、判定基準と `set` コマンドをエラーで案内する。disc-v3 で #309 の guidance 層が `next` を呼ばない orchestrator に bypass された実測への対策で、集計側 gate は fail-closed・escape hatch なし。iteration 1 は不変。
+
 - mission-vs-goal ベンチマークに `portfolio` cohort (`tasks.portfolio.json`、8 tasks: Simple 3 / Standard 3 / Complex 2) を追加した。mission 入口の routing 込み実効オーバーヘッドを測定する: Simple は adaptive routing (#276) の goal 契約直行を発火させ、Standard は discriminating fixture の focused サブセットを、Complex は fail-first 監査をそのまま再利用する。自身の answer key と再利用元 (tasks.discriminating.json) の answer key の両方を run clone から隠蔽する。構造・complexity 構成・隠蔽・fixture 実在・marker 発見可能性はテストで強制する。
 
 - 不可逆キーワードエスカレータが "release" の名詞参照を suppress するようになった。直後が数字・版番号・`brief`・`notes`・`mission` のマッチ (例: "Release 6"、"Release brief") は Standard を full tier へ誤昇格させず、`noun-reference-non-operation` として監査記録される。2026-08-01 の実運用監査で文書名・版名由来の FP 36% を実測したための対策。動詞用法 ("release the hotfix") は従来どおりエスカレートする (#313)。
