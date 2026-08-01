@@ -99,6 +99,8 @@ Phase 1 ではミッションを構造化し、触る/触らない範囲、完�
 
 **adaptive routing (#276)**: Simple + リスクシグナルなし + `--issue-ref` なしの場合、`init` は `route: "goal"` を返し mission state を作らない。この場合は mission の全 Phase をスキップし、guidance に従って goal 契約の 5 見出し (Goal / Result / Evidence / Assumptions / Stop Condition) でタスクを直接完遂する。最終報告に「Simple のため goal へルーティングした」旨を 1 行明記し、mission の pass は主張しない。CC でも Codex でも同じ inline 契約で動く。mission 機構が必要なとき (ユーザー明示・検証目的等) は `--force-mission` で再 init する。`--issue-ref` 付き (Issue-bound = 統治要求。wrapper の strict preflight が active state を要求) は Simple でも routing せず mission ループを維持する (#304)。routing された場合、`next` / `mark-passes` / Stop hook 継続は呼ばない (state が存在しない)。
 
+Checker / 監査等の従属役割で起動する場合は `init --role <checker|planning|analyze|release>` を指定する (#311)。証拠提出で終わる正規出口は `mark-halt --category evidence-submitted` を使い、pass-rate 統計を汚さない (implementer 限定指標が別計上される)。
+
 init 後 (route されなかった場合)、対象ファイル候補が見えた時点で `specialists recommend --task "<mission>" --files "<project-relative files>" --record-state --json` を実行する。ユーザーが skill を名指しした場合は `--user-specified` を付ける。Issue 連携 PR は本文に `Closes #N` を入れる。
 
 ## Phase 2-6

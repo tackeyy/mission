@@ -3996,6 +3996,7 @@ def cmd_init(args):
     initial = {
         "mission": args.mission,
         "mission_id": mission_id(args.mission),
+        "session_role": getattr(args, "session_role", None) or "implementer",  # #311
         "subtasks": [],
         "complexity": "Unknown",
         "reviewer_count": 2,
@@ -7577,6 +7578,10 @@ def _build_parser():
                              "下流の受理形式に合わせる場合は裸番号 `42` を推奨")
     p_init.add_argument("--files", default=None,
                         help="予定変更ファイルのカンマ区切り project-root 相対パス。同一 active session と重複する場合 WARN")
+    p_init.add_argument("--role", choices=["implementer", "checker", "planning", "analyze", "release"],
+                        default="implementer", dest="session_role",
+                        help="#311: session の役割。checker 系は iter=0 での証拠提出が正規出口となり、"
+                             "pass-rate は implementer 限定指標で別計上される")
     p_init.add_argument("--force-mission", action="store_true", dest="force_mission",
                         help="#276: Simple タスクでも goal へルーティングせず mission ループを強制する")
     p_init.add_argument("--review-tier", choices=list(TIER_REVIEWER_COUNT), default=None,
