@@ -45,6 +45,7 @@ exit 0 と `status=ready` を確認できない場合は、手元の古い版へ
 9. 質問は溜めて仮置きする。即時質問は Trigger 1 の不可逆操作と、Trigger 2 の中断条件だけ。
 10. PR がある場合は pass 後に Phase 7 を実行する。自動 merge は明示 opt-in、CI/テスト pass、`gh pr checks` 1 件以上、禁止ルールなしの全条件を満たす時だけ。
 11. `init` 後は `activity start --kind active --reason planning` を開始し、実作業・外部応答・承認・reviewer・実行可能作業なしの境界で明示的に切り替える。phase 境界では `set phase=` + `activity start` の 2 コマンドではなく atomic な `advance --phase <phase> --activity <kind>:<reason>` を優先する (#237: phase だけ進んで activity が空の state を作らない)。原因不明の時間を推測分類しない。終端 phase は open segment を自動で閉じる。
+12. 相互依存のない tool 呼び出し (複数ファイルの Read、独立した照合の Bash、Reviewer N 名の spawn) は単一メッセージで並列発行し、逐次実行で turn を積み増さない (#284)。依存関係がある操作 (state 書き込み → 再取得、review JSON 保存 → review-finalize) は従来どおり順次。
 
 ## state.json 操作
 
