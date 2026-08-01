@@ -552,8 +552,22 @@ def _atomic_write(path: Path, writer) -> None:
         tmp.unlink(missing_ok=True)
 
 
-def atomic_write_json(path: Path, data: dict) -> None:
-    """Phase B-2: fsync + os.replace で完全な前 or 後状態を保証."""
+def _is_session_state_shape(data: dict) -> bool:
+    """#310: session state 形状の判定 (aggregate / manifest / scoring 等を除外)."""
+    return isinstance(data, dict) and "mission_id" in data and "loop_active" in data
+
+
+def atomic_write_json(path: Path, data: dict, *, administrative: bool = False) -> None:
+    """Phase B-2: fsync + os.replace で完全な前 or 後状態を保証.
+
+    #310: session state 形状の書き込みは既定で `last_activity_at` を刻む (エージェント
+    活動の実時刻)。cleanup-stale / resolve-archive / halt --all 等の管理系 janitor は
+    `administrative=True` で opt-out し、活動時刻を汚染しない。duration / stale 判定は
+    last_activity_at を updated_at より優先する (updated_at は resolution batch 書き込みで
+    上書きされ壁時計が最大 500 倍膨張した実害があるため)。
+    """
+    if not administrative and _is_session_state_shape(data):
+        data["last_activity_at"] = iso_now()
     _atomic_write(path, lambda f: json.dump(data, f, indent=2, ensure_ascii=False))
 
 
@@ -820,7 +834,8 @@ def _has_specialist_selection_checkpoint(data: dict) -> bool:
 
 def _state_age_since_update_sec(data: dict, *, now: datetime | None = None) -> float | None:
     updated = _parse_iso_datetime(
-        data.get("heartbeat_at") or data.get("last_progress_at") or data.get("updated_at")
+        data.get("heartbeat_at") or data.get("last_progress_at")
+        or data.get("last_activity_at") or data.get("updated_at")  # #310
     )
     if not updated:
         return None
@@ -4099,13 +4114,17 @@ def cmd_init(args):
 
     # #276: adaptive routing — Simple + リスクシグナルなし + 強制なしは goal へ。
     # discriminating-v2 (品質同点・mission 5.4x 時間/4.9x コスト) と実運用 95% の
-    # iter1 素通しに基づく。session state を作らないため pass-rate 統計を汚さず、
+    # iter1 素通しに基づく。session state を作らないため pass-score 統計を汚さず、
     # mission の pass も主張しない。シグナル付き Simple は安全側で mission 維持。
+    # #304: --issue-ref 付き (Issue-bound = 統治要求) は routing 対象外。company-os 等の
+    # wrapper は init 直後の strict preflight で active state を要求するため、
+    # routed (state 不生成) だと mandatory halt の事故経路になる。
     if (
         initial.get("complexity") == "Simple"
         and not getattr(args, "force_mission", False)
         and not _user_tier
         and not initial.get("review_tier_signals")
+        and not getattr(args, "issue_ref", None)
     ):
         print(json.dumps({
             "route": "goal",
@@ -4528,6 +4547,21 @@ def _derive_next_action(data: dict) -> dict:
             "command_hint": "Skill: mission-executor → mission-state.py set phase='\"reviewing\"'",
         }
     if phase == "reviewing":
+        # #309 (F4): iter>=2 で critic_has_new_scope 未設定なら run-reviewers を返さない。
+        # 実運用監査 (2026-08-01) で設定 0/115 件 — prose (SKILL.md #258) では実行されない
+        # ため、guidance 層で機械的に強制する。安全側デフォルト (未設定=full) は維持しつつ、
+        # 未設定のまま review へ進む経路を塞ぎ #240/#241 を発火可能にする。
+        if iteration >= 2 and data.get("critic_has_new_scope") is None:
+            return {
+                "next_action": "record-critic-scope",
+                "summary": (
+                    f"iteration {iteration}: reviewer 起動前に critic の実行計画テーブルから "
+                    "scope 判定を state へ記録する。全ステップの対応 finding が既存 finding id "
+                    "のみなら false、new を含むなら true (#309)"
+                ),
+                "command_hint": "mission-state.py set critic_has_new_scope='false'  # または 'true'",
+                "details": {"iteration": iteration},
+            }
         # #241: bounded context — iteration >= 2 かつ新規 scope なしなら bounded mode
         use_bounded = iteration >= 2 and data.get("critic_has_new_scope") is False
         context_mode = "bounded" if use_bounded else "full"
@@ -5529,6 +5563,67 @@ def _apply_reviewer_caps(review: dict) -> tuple[dict, list[dict]]:
     return scores, cap_log
 
 
+def _parse_reviewer_windows(specs: list[str], valid_perspectives: set[str]) -> list[dict]:
+    """#282: '--reviewer-window P=<start>..<end>' 申告を検証して構造化する.
+
+    観測専用の self-report (orchestrator が spawn/return 時刻を申告する)。
+    review JSON の verbatim 契約には触れない。形式不正・未知 perspective・
+    重複・end<start は strict に exit 2 で拒否する。
+    """
+    windows = []
+    seen = set()
+    for spec in specs:
+        head, sep, times = spec.partition("=")
+        start_raw, tsep, end_raw = times.partition("..")
+        if not sep or not tsep or not head.strip() or not start_raw.strip() or not end_raw.strip():
+            print(f"ERROR: --reviewer-window の形式が不正です: {spec!r} "
+                  "(期待: '<perspective>=<start_iso>..<end_iso>')", file=sys.stderr)
+            sys.exit(2)
+        perspective, start_raw, end_raw = head.strip(), start_raw.strip(), end_raw.strip()
+        if perspective not in valid_perspectives:
+            print(f"ERROR: --reviewer-window の perspective {perspective!r} が "
+                  f"--input の reviewer に存在しません", file=sys.stderr)
+            sys.exit(2)
+        if perspective in seen:
+            print(f"ERROR: --reviewer-window の perspective {perspective!r} が重複しています", file=sys.stderr)
+            sys.exit(2)
+        seen.add(perspective)
+        try:
+            start = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
+            end = datetime.fromisoformat(end_raw.replace("Z", "+00:00"))
+        except ValueError:
+            print(f"ERROR: --reviewer-window の時刻が ISO 8601 として解釈できません: {spec!r}", file=sys.stderr)
+            sys.exit(2)
+        # naive/aware 混在は比較で TypeError になるため、naive は UTC とみなして正規化する
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        if end < start:
+            print(f"ERROR: --reviewer-window の end が start より前です: {spec!r}", file=sys.stderr)
+            sys.exit(2)
+        windows.append({
+            "perspective": perspective,
+            "started_at": start_raw,
+            "ended_at": end_raw,
+            "_start": start,
+            "_end": end,
+        })
+    return windows
+
+
+def _observe_parallel_execution(windows: list[dict]):
+    """#282: 全ペアの時間帯が重なれば True、1 ペアでも disjoint なら False、判定不能は 'unknown'."""
+    if len(windows) < 2:
+        return "unknown"
+    for i in range(len(windows)):
+        for j in range(i + 1, len(windows)):
+            a, b = windows[i], windows[j]
+            if not (a["_start"] < b["_end"] and b["_start"] < a["_end"]):
+                return False
+    return True
+
+
 def _consensus_score(max_delta: float) -> float:
     if max_delta <= 0.5:
         return 5.0
@@ -5610,6 +5705,24 @@ def cmd_aggregate_reviews(args):
         if finding.get("severity") == "High"
     )
 
+    # #282: reviewer 並列実行の観測 (ゲート不変・self-report ベース)
+    valid_perspectives = {review["perspective"] for review in reviews}
+    reviewer_windows = _parse_reviewer_windows(
+        getattr(args, "reviewer_windows", []) or [], valid_perspectives
+    )
+    parallel_execution = _observe_parallel_execution(reviewer_windows)
+    reviewer_windows_public = [
+        {k: v for k, v in window.items() if not k.startswith("_")}
+        for window in reviewer_windows
+    ]
+    if parallel_execution is False:
+        print(
+            "WARN: reviewer が直列実行されています (実行時間帯の重なりなし)。"
+            "Claude Code では Reviewer を単一メッセージで並列起動してください (#282)。"
+            "この warn は観測のみで集計・gate には影響しません。",
+            file=sys.stderr,
+        )
+
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
         mission8 = (data.get("mission_id") or "unknown")[:8]
@@ -5624,6 +5737,8 @@ def cmd_aggregate_reviews(args):
             "cap_log": cap_log,
             "agreement_detail": agreement_detail,
             "open_high": open_high,
+            "reviewer_windows": reviewer_windows_public,
+            "parallel_execution": parallel_execution,
         }
         evidence_path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -5646,6 +5761,7 @@ def cmd_aggregate_reviews(args):
         "open_high": open_high,
         "items": items,
         "review_agreement": review_agreement,
+        "parallel_execution": parallel_execution,
     }
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -5881,6 +5997,86 @@ def cmd_push_score(args):
     if archived_to:
         result["archived_to"] = archived_to
     print(json.dumps(result, ensure_ascii=False))
+
+
+def cmd_review_finalize(args):
+    """#283: aggregate-reviews → push-score を 1 コマンドで実行する (Phase 5 transactional).
+
+    既存の cmd_aggregate_reviews / cmd_push_score をそのまま内部呼び出しし、
+    validator (min-reviewers / strict review 検証 / findings gate / #122 再 push 保護) を複製しない。
+    集計が exit 非0 なら push-score には到達せず、score_history は不変 (atomic)。
+    """
+    agg_args = argparse.Namespace(
+        iteration=args.iteration,
+        input=args.input,
+        out=args.out,
+        json=True,
+        min_reviewers=args.min_reviewers,
+        reviewer_windows=args.reviewer_windows,
+    )
+    agg_stdout = io.StringIO()
+    with contextlib.redirect_stdout(agg_stdout):
+        cmd_aggregate_reviews(agg_args)  # 失敗時は sys.exit がそのまま伝播する
+    agg_result = json.loads(agg_stdout.getvalue())
+
+    push_args = argparse.Namespace(
+        iteration=args.iteration,
+        composite=None,
+        min_item=None,
+        items=None,
+        scoring_json=agg_result["out"],
+        notes=args.notes,
+        scoring_output=None,
+        open_high=0,
+        resubmit_reason=args.resubmit_reason,
+    )
+    push_stdout = io.StringIO()
+    with contextlib.redirect_stdout(push_stdout):
+        cmd_push_score(push_args)
+    push_result = json.loads(push_stdout.getvalue())
+
+    print(json.dumps({
+        "ok": True,
+        "aggregate": agg_result,
+        "push": push_result,
+    }, ensure_ascii=False, indent=2))
+
+
+def cmd_closeout(args):
+    """#283: mark-passes → next を 1 コマンドで実行する (Phase 6 transactional).
+
+    標準経路専用で --force は受け付けない (override は mark-passes を直接使う)。
+    gate 未達なら mark-passes の exit code を保ち、next 相当の guidance を
+    JSON で返す。state は mark-passes が exit 前に書き込まないため不変。
+    """
+    mp_args = argparse.Namespace(force=False, reason=None, approved_by_user=False)
+    mp_stdout = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(mp_stdout):
+            cmd_mark_passes(mp_args)
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else 1
+        # 防衛的分岐: 現在 cmd_mark_passes は sys.exit(0) を発しない (成功時は return) ため
+        # code == 0 には通常到達しない。到達した場合のみ成功経路へ継続する。
+        if code != 0:
+            next_stdout = io.StringIO()
+            with contextlib.redirect_stdout(next_stdout):
+                cmd_next(argparse.Namespace())
+            print(json.dumps({
+                "ok": False,
+                "closeout": "mark-passes-gate-failed",
+                "next": json.loads(next_stdout.getvalue()),
+            }, ensure_ascii=False, indent=2))
+            sys.exit(code)
+
+    next_stdout = io.StringIO()
+    with contextlib.redirect_stdout(next_stdout):
+        cmd_next(argparse.Namespace())
+    print(json.dumps({
+        "ok": True,
+        "mark_passes": json.loads(mp_stdout.getvalue()),
+        "next": json.loads(next_stdout.getvalue()),
+    }, ensure_ascii=False, indent=2))
 
 
 def _unclosed_optional_specialist_skills(data: dict) -> list[str]:
@@ -6450,7 +6646,7 @@ def _terminalize_state_file(
             )
         latest["updated_at"] = now
         backup_state(sf)
-        atomic_write_json(sf, latest)
+        atomic_write_json(sf, latest, administrative=True)  # #310: janitor 書き込み
         if sf.parent.name == "sessions":
             _remove_from_aggregate(proj, sf.stem)
         return True
@@ -7399,7 +7595,31 @@ def _build_parser():
     p_agg.add_argument("--json", action="store_true", help="結果を JSON で出力")
     p_agg.add_argument("--min-reviewers", type=int, default=None, dest="min_reviewers",
                        help="#240: 最低 reviewer 数。不足なら exit 2 (合意偽装防止)")
+    p_agg.add_argument("--reviewer-window", action="append", default=[], dest="reviewer_windows",
+                       help="#282: reviewer 実行時間帯 '<perspective>=<start>..<end>' (ISO 8601)。"
+                            "複数指定で並列実行の重なりを観測し evidence に記録 (ゲート不変)")
     p_agg.set_defaults(func=cmd_aggregate_reviews)
+
+    p_rf = sub.add_parser("review-finalize",
+                          help="#283: aggregate-reviews → push-score を 1 コマンドで実行 (Phase 5 transactional)")
+    p_rf.add_argument("--iteration", type=int, required=True)
+    p_rf.add_argument("--input", action="append", required=True,
+                      help="reviewer が出力した mission-review/1 JSON。複数指定可")
+    p_rf.add_argument("--out", default=None,
+                      help="scoring JSON の出力パス。未指定なら /tmp/mission-scorer-iter-N-<mission8>.json")
+    p_rf.add_argument("--min-reviewers", type=int, default=None, dest="min_reviewers",
+                      help="#240: 最低 reviewer 数。不足なら exit 2 (score は push されない)")
+    p_rf.add_argument("--reviewer-window", action="append", default=[], dest="reviewer_windows",
+                      help="#282: reviewer 実行時間帯 '<perspective>=<start>..<end>' (観測のみ)")
+    p_rf.add_argument("--notes", default=None)
+    p_rf.add_argument("--resubmit-reason", default=None, dest="resubmit_reason",
+                      help="#122: 同一 iteration の再 push 理由")
+    p_rf.set_defaults(func=cmd_review_finalize)
+
+    p_closeout = sub.add_parser("closeout",
+                                help="#283: mark-passes → next を 1 コマンドで実行 (Phase 6 transactional)。"
+                                     "gate 未達なら exit 2 + next guidance。--force 非対応 (override は mark-passes 直接)")
+    p_closeout.set_defaults(func=cmd_closeout)
 
     p_manifest = sub.add_parser("context-manifest",
                                 help="#241: bounded context manifest を生成 (reviewer fork 向け)")

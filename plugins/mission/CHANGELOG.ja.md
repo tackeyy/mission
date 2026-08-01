@@ -11,6 +11,12 @@
 
 ### 追加
 
+- session state に `last_activity_at` を追加した (#310)。エージェント活動による session 書き込みでは `atomic_write_json` が自動で刻み、`cleanup-stale` / `halt --all` の terminalize 等の janitor 書き込みは `administrative=True` で明示的に刻まない。`duration_sec` と両方の age 連鎖は `last_activity_at` を `updated_at` より優先し、resolution/batch 書き込みが `updated_at` を上書きすることで生じていた壁時計膨張 (company-os #583 で最大 500 倍) を止める。フィールドを持たない旧 state は従来動作を維持する。
+
+- `next` が #258 の critic scope 記録を機械的に強制するようになった (#309)。`phase=reviewing` かつ `iteration >= 2` で `critic_has_new_scope` 未設定のとき、`run-reviewers` ではなく判定基準付きの `record-critic-scope` を返し、prose 指示をエージェントが実行しない経路を塞ぐ (2026-08-01 の実運用監査で 115 sessions 中設定 0 件、#240/#241 の diff-review 最適化が永久休眠状態だった)。記録後は #240 の reviewer 削減と #241 の context mode 付きで run-reviewers guidance が再開する。iteration 1 と pass gate 意味論は不変。
+
+- adaptive routing (#276) を `--issue-ref` 付き `init` で無効化した (#304)。Issue-bound な作業は統治 wrapper の契約 (company-os の `mission-company-os` は init 直後の strict preflight で active state を要求) を意味するため、Simple 判定でも goal 契約へルーティングせず mission ループを維持する。routing の発火条件は「issue-ref なし・Simple・シグナルなし・強制なし」に限定される。
+
 - `mission-state.py init` に adaptive routing を追加した (#276)。リスクシグナル (不可逆・security) のない Simple complexity の mission は `route: \"goal\"` を返して session state を作らず、orchestrator は mission ループを完全にスキップして goal 契約 (Goal / Result / Evidence / Assumptions / Stop Condition) でタスクを直接完遂する。最終報告にルーティングした旨を明記し、mission の pass は主張しない。クリーン測定 discriminating-v2 (品質同点・mission 5.4x 時間/4.9x コスト) と実運用の約 95% が iteration 1 で素通しする観測に基づく。シグナル付き Simple は mission ループを維持 (安全側)、`--review-tier` 明示はユーザー意思としてループ維持、`--force-mission` で無条件にループを強制できる。canonical skills 共有により Claude Code / Codex で同一に動作する (#276)。
 
 - mission-vs-goal ベンチマーク runner に `--parallel N` (default 1、完全後方互換) を追加した。record は per-record clone で隔離済みのため worker pool で並列実行でき、10 records の run が約 2.8 時間 → 3 workers で約 1 時間に短縮される。JSONL append と進捗出力は lock で直列化し、worker 例外は伝播、`--stop-on-blocked` は blocked 検出後の新規起動を止め実行中 entry は完走させる (#270)。

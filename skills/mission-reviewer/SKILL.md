@@ -128,6 +128,10 @@ Critical/Complex のコード変更では、OWASP Top 10、シークレット露
 
 人間向けレビュー本文の末尾に、必ず `mission-review/1` の fenced JSON を 1 個だけ付ける。Reviewer / scorer は Write 権限を持たないため、orchestrator がこの JSON を verbatim で保存し、`mission-state.py aggregate-reviews` が strict 検証する。
 
+### 出力境界 (#281)
+
+返却は下記テンプレート (採点テーブル + 強み + Issues テーブル + 総評 + fenced JSON) に**限定**する。検証・再導出は内部で行い、その全過程・全対象の網羅的な散文レポート (対象の全項目を列挙し直す再導出結果表など) は出力しない。出力するのは判定と、判定に必要な evidence (現物 verbatim 引用) だけ。強みは最大 3 項目・各 1 行、総評は 2-3 文。この境界は出力フォーマットのみの制約であり、検証の深さ・独立性・採点規律は不変。
+
 ````markdown
 ## レビュー結果 (担当観点: <観点名>)
 
