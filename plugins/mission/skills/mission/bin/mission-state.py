@@ -4099,13 +4099,17 @@ def cmd_init(args):
 
     # #276: adaptive routing — Simple + リスクシグナルなし + 強制なしは goal へ。
     # discriminating-v2 (品質同点・mission 5.4x 時間/4.9x コスト) と実運用 95% の
-    # iter1 素通しに基づく。session state を作らないため pass-rate 統計を汚さず、
+    # iter1 素通しに基づく。session state を作らないため pass-score 統計を汚さず、
     # mission の pass も主張しない。シグナル付き Simple は安全側で mission 維持。
+    # #304: --issue-ref 付き (Issue-bound = 統治要求) は routing 対象外。company-os 等の
+    # wrapper は init 直後の strict preflight で active state を要求するため、
+    # routed (state 不生成) だと mandatory halt の事故経路になる。
     if (
         initial.get("complexity") == "Simple"
         and not getattr(args, "force_mission", False)
         and not _user_tier
         and not initial.get("review_tier_signals")
+        and not getattr(args, "issue_ref", None)
     ):
         print(json.dumps({
             "route": "goal",
