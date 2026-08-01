@@ -1615,6 +1615,10 @@ def is_active_no_score_pending(record: StateRecord, *, now: datetime | None = No
 
 
 def is_stale_active_no_score(record: StateRecord, *, now: datetime | None = None) -> bool:
+    # #318: resolution 済みの archive record（frozen snapshot 等）は stale-active-no-score から除外する
+    resolution_status = str(record.state.get("resolution_status") or "").strip().lower()
+    if resolution_status in _RESOLVED_HALT_STATUSES:
+        return False
     return (
         not has_scoring_checkpoint(record.state)
         and classify_pass_rate_health(

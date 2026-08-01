@@ -11,6 +11,8 @@
 
 ### 追加
 
+- `resolve-archive` に `--frozen-snapshot` フラグを追加した (#318)。archive/ 配下の frozen snapshot（loop_active=true または halt_reason 空のまま保存された mid-flight record）に対して、対応する live session（sessions/<session_id>.json）が存在しないか terminal（loop_active=false）であることを検証したうえで resolution を付与できる。live session が loop_active=true の場合は opt-in フラグがあっても拒否（fail-closed）。sessions/ 配下への適用は引き続き拒否。`_validate_resolve_archive_record` の project_root チェックを緩和し、record の project_root が cwd と一致するか cwd の配下パス（worktree 等）に解決される場合も許可する（文字列 prefix 比較ではなく `Path.relative_to` による安全なパス比較）。`is_stale_active_no_score` に resolution_status 除外を追加し、resolved/superseded/closed の archive record を stale-active-no-score の集計から除外する (#318)。
+
 - `mission-state.py review-finalize` が aggregate-reviews → push-score を 1 コマンドで transactional に実行し (集計失敗時は score を push しない)、`closeout` が mark-passes → next を順に実行して結合 JSON を返す (gate 未達は mark-passes の exit code を維持し、next 相当の guidance を出力、state 不変)。既存 validator (min-reviewers / strict review 検証 / findings gate / 再 push 保護 / threshold / agreement / specialist accounting) を複製せず再利用し、標準フローの orchestration turn を iteration あたり 2 turn 削減する。分割実行も後方互換で維持 (#283)。
 
 - `aggregate-reviews` に `--reviewer-window <perspective>=<start>..<end>` (複数指定可・optional) を追加。orchestrator が各 reviewer の実行時間帯を申告し、`parallel_execution: true|false|"unknown"` と申告 window を aggregate evidence と結果 JSON に記録する。時間帯が重ならない場合は WARN (直列実行検出) を出すが exit 0 のまま — 観測のみでゲート不変、review JSON の verbatim 契約も不変。形式不正・未知 perspective・重複・end<start は strict に拒否し、naive な時刻は UTC に正規化する (#282)。
