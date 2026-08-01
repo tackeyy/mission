@@ -638,6 +638,31 @@ min in the contaminated era → 5-8 min now); the relative gap widened because
 goal's single-pass architecture sped up faster than mission's multi-pass
 floor can shrink.
 
+### portfolio-v2 (V1 re-measurement after #325/#326, 2026-08-02)
+
+Re-measured at commit `17cedf1` (with the #325 next-driven routing gate and
+#326 scope hard gate). 16 records, all completed, 0 degraded, quality tied
+at marker 1.0 everywhere.
+
+**V1 re-verdict: failed (7.6x time / 4.4x cost — statistically flat vs the
+6.0x of v1 at N=1/cell).** State ground truth: routing fired on only **1 of
+3** Simple tasks — simple-typo completed inline (1.46 min = goal 0.63 +
+~0.8 min entrance overhead, though it misused the `evidence-submitted` halt
+category), while simple-lookup and simple-diff spawned the planner without
+consulting `next` and ran the full loop. The guidance layer is bypassed by
+the same "next not consulted" pattern as #309/#326. The one firing shows
+routing can bring Simple missions to goal + ~0.8 min; command-level
+hardening (`set complexity=Simple` executing the routing verdict directly)
+is tracked in #330.
+
+Unsafe interpretation:
+
+> #325 was ineffective.
+
+Unsupported: the gate itself works (unit-verified); non-firing stems from
+orchestrator next-consumption discipline, closable at the command layer
+(#330). The 1.46-min firing is evidence of reachability.
+
 ## Discriminating cohort clean re-run (discriminating-v2) — correcting the v1 findings
 
 Status: executed 2026-07-23 JST under clean permission conditions (the #268
@@ -984,4 +1009,7 @@ artifacts/2026-08-02-portfolio-v1/
 results/2026-08-02-discriminating-v3.jsonl
 results/2026-08-02-discriminating-v3-summary.json
 artifacts/2026-08-02-discriminating-v3/
+results/2026-08-02-portfolio-v2.jsonl
+results/2026-08-02-portfolio-v2-summary.json
+artifacts/2026-08-02-portfolio-v2/
 ```
