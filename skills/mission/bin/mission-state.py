@@ -1137,6 +1137,22 @@ REVIEW_TIER_BASE = {"Simple": "light", "Standard": "standard", "Complex": "stand
 
 # 不可逆系キーワード (英語) — 小文字化して部分一致
 # Issue #174 で 505 mission 遡及分析に基づき較正: push / merge を除外 (標準 dev フロー誤発火)
+_RELEASE_NOUN_FOLLOWERS_RE = re.compile(
+    r"\A\s+(?:\d|v\d|brief\b|notes\b|mission\b)", re.IGNORECASE
+)
+
+
+def _release_noun_reference(mission_text: str, start: int, end: int) -> bool:
+    """#313: "release" の名詞参照 (版名・文書名) 判定。
+
+    実運用監査 (2026-08-01) で FP 36% の実測: "Release 6" / "Release brief" /
+    "release notes" / "Release Mission #582" が Standard→full へ誤昇格していた。
+    直後が数字・版番号・brief/notes/mission の場合のみ名詞参照として suppress する
+    (保守的ホワイトリスト。"release the hotfix" 等の動詞用法は対象外)。
+    """
+    return bool(_RELEASE_NOUN_FOLLOWERS_RE.match(mission_text[end:]))
+
+
 _IRREVERSIBLE_KEYWORDS_EN = (
     "deploy", "release", "migration", "drop", "delete",
     "publish", "production",
@@ -1629,7 +1645,10 @@ def _actual_operation_signal_detail(
     unit_ambiguous_execution = unit_flags["ambiguous_execution"]
     quote_only_unknown_residual = unit_flags["quote_only_unknown_residual"]
 
-    if quoted and quoted_execution_target:
+    if keyword == "release" and _release_noun_reference(mission_text, start, end):
+        # #313: 版名・文書名への substring マッチはエスカレート対象外 (監査 FP 36%)
+        decision, reason = "suppressed", "noun-reference-non-operation"
+    elif quoted and quoted_execution_target:
         decision, reason = "included", "affirmative-actual-operation"
     elif quoted and quote_only and quote_only_unknown_residual:
         decision, reason = "included", "ambiguous-execution-reference"
