@@ -41,7 +41,7 @@ def test_init_assumptions_file_not_overwritten_on_resume(tmp_path, run_cli):
 
     # 2回目 init (resume)
     r2 = run_cli(
-        "init", "resumed mission",
+        "init", "first mission",
         cwd=tmp_path,
         env_extra={"MISSION_SESSION_ID": "resume-sess"},
     )
