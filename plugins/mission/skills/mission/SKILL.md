@@ -160,6 +160,8 @@ Pass 後に PR がある場合だけ実行する。自動 merge 条件は、CI/�
 
 ## 報告フォーマット
 
+**出力圧縮規律 (#280)**: 最終報告と artifact は「evidence テーブル + tool-computed ゲート値 + `.mission-state/archive/` の参照パス」に限定する。レビュアー出力の逐語再掲、Plan/Execution 散文の再掲は禁止 (レビュー生データ・scoring JSON は archive に全量保存済みであり、転記は二重出力)。削ってよいのは転記・散文であって証跡ではない。
+
 達成時:
 
 ```
