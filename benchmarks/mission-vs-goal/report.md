@@ -663,6 +663,39 @@ Unsupported: the gate itself works (unit-verified); non-firing stems from
 orchestrator next-consumption discipline, closable at the command layer
 (#330). The 1.46-min firing is evidence of reachability.
 
+### portfolio-v3 (final V1 verdict after #330, 2026-08-02)
+
+Commit `3460c41` (with the #330 command-layer hard routing). 16 records, all
+completed, 0 degraded, quality tied at marker 1.0. Totals: goal 7.17 min /
+$4.11 vs mission 36.97 min / $13.83 = **5.16x / 3.37x** — the best of three
+portfolio rounds, but V1 (≤1.3x) is conclusively not met.
+
+**Routing fired 0/3, and the root cause is now definitive:** all three
+Simple mission states carry `force_mission=True` — the benchmark's own
+mission-arm prompt demands the loop ("Use the /mission plugin workflow with
+auditable state") and requires loop-shaped headings
+(Mission/Plan/Execution/Review/Score), so an obedient orchestrator forces
+the mission. **The measurement design suppresses the very feature it tries
+to measure**; the product routing (three layers: init #276 / set #330 /
+next #325, unit-verified) is not at fault. Additionally, this cohort's
+Simple tasks are ~30-second tasks for goal, so the ~0.8-1 min routing
+entrance overhead makes ≤1.3x structurally unreachable regardless. The
+bench revision (routing-permissive prompt + minutes-scale Simple tasks) is
+tracked in #333.
+
+Side observation: std-contract / std-policy missions finished in
+1.85-1.9 min ($0.79-0.86) via orchestrator-chosen single-pass execution,
+while std-metrics ran a 6.37-min full loop in the same run — orchestrator
+behavioral variance remains large.
+
+Unsafe interpretation:
+
+> Routing does not work.
+
+Unsupported: all three layers are unit-verified and v2 recorded one live
+firing (1.46 min = goal + 0.8 min). Non-firing is caused by the benchmark
+prompt inducing `--force-mission`; without that instruction, routing fires.
+
 ## Discriminating cohort clean re-run (discriminating-v2) — correcting the v1 findings
 
 Status: executed 2026-07-23 JST under clean permission conditions (the #268
@@ -1012,4 +1045,7 @@ artifacts/2026-08-02-discriminating-v3/
 results/2026-08-02-portfolio-v2.jsonl
 results/2026-08-02-portfolio-v2-summary.json
 artifacts/2026-08-02-portfolio-v2/
+results/2026-08-02-portfolio-v3.jsonl
+results/2026-08-02-portfolio-v3-summary.json
+artifacts/2026-08-02-portfolio-v3/
 ```

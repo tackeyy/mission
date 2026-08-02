@@ -656,6 +656,38 @@ mission ≈ goal + 0.8 分に収まることを実証しており、コマンド
 未発火の原因は orchestrator の next 消費規律であり、コマンド層 hard 化 (#330) で
 閉じられる見込み。発火例 1.46 min が到達可能性の証拠。
 
+### portfolio-v3 (#330 マージ後の V1 最終判定、2026-08-02)
+
+commit `3460c41` (#330 コマンド層 hard routing 込み)。16 records 全完走・degraded 0・
+品質は全 record marker 1.0 同点。合計 goal 7.17 min/$4.11 vs mission 36.97 min/$13.83
+= **5.16x / 3.37x** — 3 回のポートフォリオ測定で最良だが V1 (≤1.3x) は未達で確定。
+
+**routing 発火は 0/3、そして根本原因が確定した。** state 実測で Simple 3 件すべて
+`force_mission=True` — **ベンチの mission arm プロンプト自身**が「Use the /mission
+plugin workflow with auditable state」と loop 機構を明示要求し、必須見出し
+(Mission/Plan/Execution/Review/Score) が loop 形成果物を強制しているため、
+orchestrator は指示に忠実に `--force-mission` していた。**測定設計が測定対象を
+抑制する自己矛盾**であり、製品側 routing (init #276 / set #330 / next #325 の 3 層、
+単体検証済み) の欠陥ではない。加えて本 cohort の Simple は goal 30 秒級のため、
+routing の入口オーバーヘッド (~0.8-1 分) がある限り ≤1.3x は構造的に到達不能。
+ベンチ改訂 (routing 許容プロンプト + 分単位 Simple) は #333 で追跡。
+
+副次観測: std-contract / std-policy の mission が 1.85-1.9 min ($0.79-0.86) で完走
+(orchestrator が benchmark-controlled single-pass を自律選択)。同一 run 内で
+std-metrics は 6.37 min のフルループ — orchestrator 挙動の run 間分散は依然大きい。
+
+**V1 の最終判定: この cohort・このプロンプト設計では未達で確定。** 製品の routing は
+実運用 (force 指示のない通常利用) で機能する設計・実装・検証済み。ベンチでの実証は
+#333 の改訂後に持ち越す。
+
+危険な解釈:
+
+> routing は機能しない。
+
+これは unsupported です。3 層すべて単体検証済みで、v2 では 1 件の実発火 (1.46 min =
+goal + 0.8 分) も観測されている。未発火はベンチプロンプトの `--force-mission` 誘導に
+よるもので、指示なし環境では発火する。
+
 ## Discriminating cohort clean re-run (discriminating-v2) — v1 findings の訂正
 
 Status: 2026-07-23 JST に実行。permission-mode 汚染 (#268) を排除したクリーン
@@ -1027,4 +1059,7 @@ artifacts/2026-08-02-discriminating-v3/
 results/2026-08-02-portfolio-v2.jsonl
 results/2026-08-02-portfolio-v2-summary.json
 artifacts/2026-08-02-portfolio-v2/
+results/2026-08-02-portfolio-v3.jsonl
+results/2026-08-02-portfolio-v3-summary.json
+artifacts/2026-08-02-portfolio-v3/
 ```
