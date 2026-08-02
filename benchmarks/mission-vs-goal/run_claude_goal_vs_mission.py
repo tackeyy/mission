@@ -283,9 +283,15 @@ Quality benchmark profile:
 Arm: mission
 Mission profile: {mission_profile}
 
-Use the `/mission` plugin workflow with auditable state. Initialize or maintain
-mission state if needed, review the artifact against the validator, and only
-report completion when the artifact is written.
+Use the `/mission` plugin workflow. If the mission state CLI routes this task
+to the goal contract (a `route: "goal"` verdict or a `routed-goal` halt),
+follow the routing: complete the artifact under the goal-contract headings
+(Goal / Result / Evidence / Assumptions / Stop Condition), note the routing in
+Evidence, and skip the mission-specific headings below. Do not force the
+mission loop when the CLI routes. When not routed, maintain auditable
+mission state, review
+the artifact against the validator, and only report completion when the
+artifact is written.
 {profile_guidance}
 
 The artifact must include these headings:
@@ -447,6 +453,7 @@ def extract_mission_state_fields(worktree: Path) -> tuple[dict, str | None]:
         "mission_complexity": None,
         "mission_passes": None,
         "mission_halt_category": None,
+        "mission_routed": None,  # #333: routed-goal halt = true / state あり非 routed = false
     }
     sessions = worktree / ".mission-state" / "sessions"
     candidates = sorted(sessions.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True) if sessions.is_dir() else []
@@ -471,6 +478,7 @@ def extract_mission_state_fields(worktree: Path) -> tuple[dict, str | None]:
     fields["mission_passes"] = passes if isinstance(passes, bool) else None
     halt_category = state.get("halt_category")
     fields["mission_halt_category"] = halt_category if isinstance(halt_category, str) else None
+    fields["mission_routed"] = halt_category == "routed-goal"  # #333
     return fields, None
 
 
@@ -663,6 +671,7 @@ def run_one(
                 "mission_complexity": None,
                 "mission_passes": None,
                 "mission_halt_category": None,
+                "mission_routed": None,
             },
             None,
         )
@@ -671,8 +680,17 @@ def run_one(
         {k: evaluation[k] for k in ("run_status", "blocked_reason", "failure_kind", "comparable_attempt")},
         arm=arm,
         mission_state_note=mission_state_note,
+        task_complexity=task.get("mission_complexity"),
     )
     evaluation.update(guarded)
+    # #333: init 経路 routing (Simple + state 不在 + 完走) を routed として記録
+    if (
+        arm == "mission"
+        and mission_state_note == "mission_state_missing"
+        and task.get("mission_complexity") == "Simple"
+        and evaluation.get("run_status") == "completed"
+    ):
+        mission_state_fields["mission_routed"] = True
     artifacts = copy_artifacts(worktree, artifact_dir, output_rel, stdout_path, stderr_path)
 
     usage = claude_result.get("usage", {}) if isinstance(claude_result, dict) else {}
@@ -797,7 +815,10 @@ def child_env(base_env: dict) -> dict:
     return env
 
 
-def apply_mission_adherence_guard(status: dict, arm: str, mission_state_note: str | None) -> dict:
+def apply_mission_adherence_guard(
+    status: dict, arm: str, mission_state_note: str | None,
+    task_complexity: str | None = None,
+) -> dict:
     """#261: mission ループ未初期化の mission record を無効化する.
 
     openworld-v1 で `.mission-state` を作らず素で回答した mission record が
@@ -809,6 +830,10 @@ def apply_mission_adherence_guard(status: dict, arm: str, mission_state_note: st
     if mission_state_note != "mission_state_missing":
         return status
     if status.get("run_status") == "blocked":
+        return status
+    # #333: Simple タスクの state 不在は init 経路 routing (#276) の正規挙動。
+    # invalid 化せず routed として扱う (mission_routed は呼び出し側で設定)。
+    if task_complexity == "Simple":
         return status
     status = dict(status)
     status["run_status"] = "failed"
@@ -913,6 +938,7 @@ def summarize(
                 "records": len(items),
                 "blocked_records": sum(1 for r in items if r.get("run_status") == "blocked"),
                 "permission_degraded_records": sum(1 for r in items if r.get("permission_mode_degraded")),
+                "routed_records": sum(1 for r in items if r.get("mission_routed")),
                 "comparable_records": sum(1 for r in items if r.get("comparable_attempt", True)),
                 "completion_rate": sum(1 for r in items if r["completion"]) / len(items) if items else None,
                 "comparable_completion_rate": (
