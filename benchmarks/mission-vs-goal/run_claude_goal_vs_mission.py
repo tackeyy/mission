@@ -288,10 +288,13 @@ to the goal contract (a `route: "goal"` verdict or a `routed-goal` halt),
 follow the routing: complete the artifact under the goal-contract headings
 (Goal / Result / Evidence / Assumptions / Stop Condition), note the routing in
 Evidence, and skip the mission-specific headings below. Do not force the
-mission loop when the CLI routes. When not routed, maintain auditable
-mission state, review
-the artifact against the validator, and only report completion when the
-artifact is written.
+mission loop when the CLI routes. When not routed, run the loop as the
+implementer role (the default): maintain auditable mission state, complete at
+least one scored review iteration (aggregate-reviews, push-score, mark-passes)
+before stopping — this benchmark measures the gated loop, and submitting
+evidence without a scored review does not complete it — review the artifact
+against the validator, and only report completion when the artifact is
+written.
 {profile_guidance}
 
 The artifact must include these headings:
@@ -454,6 +457,7 @@ def extract_mission_state_fields(worktree: Path) -> tuple[dict, str | None]:
         "mission_passes": None,
         "mission_halt_category": None,
         "mission_routed": None,  # #333: routed-goal halt = true / state あり非 routed = false
+        "mission_evidence_only": None,  # #341: evidence-submitted halt = true (gated loop 未実行)
     }
     sessions = worktree / ".mission-state" / "sessions"
     candidates = sorted(sessions.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True) if sessions.is_dir() else []
@@ -479,6 +483,7 @@ def extract_mission_state_fields(worktree: Path) -> tuple[dict, str | None]:
     halt_category = state.get("halt_category")
     fields["mission_halt_category"] = halt_category if isinstance(halt_category, str) else None
     fields["mission_routed"] = halt_category == "routed-goal"  # #333
+    fields["mission_evidence_only"] = halt_category == "evidence-submitted"  # #341
     return fields, None
 
 
@@ -932,13 +937,18 @@ def summarize(
         ] + ([
             "WARNING: permission-mode degradation detected in one or more records; "
             "acceptEdits was forced to default (see #268). Cross-run comparability is affected.",
-        ] if any(r.get("permission_mode_degraded") for r in records) else []),
+        ] if any(r.get("permission_mode_degraded") for r in records) else []) + ([
+            "WARNING: one or more mission-arm records halted by submitting evidence "
+            "without a scored review loop (#341); their wall-clock understates the "
+            "gated loop and is not comparable to full-loop records.",
+        ] if any(r.get("mission_evidence_only") for r in records) else []),
         "arms": {
             arm: {
                 "records": len(items),
                 "blocked_records": sum(1 for r in items if r.get("run_status") == "blocked"),
                 "permission_degraded_records": sum(1 for r in items if r.get("permission_mode_degraded")),
                 "routed_records": sum(1 for r in items if r.get("mission_routed")),
+                "evidence_only_records": sum(1 for r in items if r.get("mission_evidence_only")),
                 "comparable_records": sum(1 for r in items if r.get("comparable_attempt", True)),
                 "completion_rate": sum(1 for r in items if r["completion"]) / len(items) if items else None,
                 "comparable_completion_rate": (

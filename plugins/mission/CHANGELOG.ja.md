@@ -9,6 +9,10 @@
 
 ## [Unreleased]
 
+### 修正
+
+- ベンチの mission アームが implementer 契約を固定するようになった (#341): プロンプトが停止前に最低 1 回の scored review iteration 完了を要求する (portfolio-v4 の cx-ledger record は checker 挙動の evidence 提出で halt し、ゲート付きループを測っていなかった)。record は halt category から抽出した第一級の `mission_evidence_only` を持ち、アーム別 summary は `evidence_only_records` を集計、該当 record があれば limitations に比較可能性警告を追記する。
+
 ## [2.2.0] - 2026-08-02
 
 ### 追加
