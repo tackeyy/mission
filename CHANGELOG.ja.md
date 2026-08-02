@@ -9,6 +9,10 @@
 
 ## [Unreleased]
 
+### 変更
+
+- ベンチマークが adaptive routing を抑制せず観測できるようになった (#333)。mission arm プロンプトは routing verdict への追従 (goal 契約成果物 + Evidence に routed 明記) を許容しループを強制せず、record に第一級の `mission_routed` (routed-goal halt、および init 経路 routing による Simple + state 不在完走 — 後者は #261 ガードの invalid 対象から除外) を記録、アーム別 summary に `routed_records` を追加。portfolio cohort の Simple 3 tasks は分単位版 (120 定数参照監査 / 90 SKU 照合 / 43 予約重複検出) に差し替え、routing の入口オーバーヘッドが V1 パリティ帯に収まる現実的なサイズにした。
+
 ### 修正
 
 - adaptive routing をコマンド層で強制するようにした (#330)。条件充足時は `set complexity=Simple` 自身が routing verdict を実行し、state を `routed-goal` で atomic に halt して goal 契約の guidance を出力する — orchestrator の `next` 消費 (portfolio-v2 実測で発火 1/3) に依存しない。除外条件 (シグナル・`--issue-ref`・`--force-mission`・checker 系 role・user 指定 tier・採点済み) は不変で、#325 の next 層 gate は defense-in-depth として残る。

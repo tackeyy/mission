@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The benchmark now observes adaptive routing instead of suppressing it (#333): the mission-arm prompt permits following a routing verdict (goal-contract artifact with the routing noted in Evidence) and no longer forces the loop, records carry a first-class `mission_routed` flag (routed-goal halts, and Simple tasks completing without state via init-path routing — the latter no longer invalidated by the #261 guard), per-arm summaries count `routed_records`, and the portfolio cohort's three Simple tasks are replaced with minutes-scale versions (120-constant reference audit, 90-SKU reconciliation, 43-booking overlap scan) so the routing entrance overhead can fit within the V1 parity band.
+
 ### Fixed
 
 - Adaptive routing is now enforced at the command layer (#330): `set complexity=Simple` itself executes the routing verdict when conditions hold — the state is atomically halted as `routed-goal` and the command prints the goal-contract guidance, no longer depending on the orchestrator consulting `next` (which portfolio-v2 measured firing only 1 of 3 times). Exclusions (signals, `--issue-ref`, `--force-mission`, checker roles, user-pinned tiers, scored missions) are unchanged, and the #325 next-layer gate remains as defense in depth.
