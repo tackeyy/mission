@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The benchmark mission arm now pins the implementer contract (#341): the prompt requires completing at least one scored review iteration before stopping (portfolio-v4's cx-ledger record halted checker-style with evidence submitted and no scored review, so its wall-clock measured no gated loop), records carry a first-class `mission_evidence_only` flag extracted from the halt category, per-arm summaries count `evidence_only_records`, and any such record appends a comparability warning to the summary limitations.
+
 ## [2.2.0] - 2026-08-02
 
 ### Added
