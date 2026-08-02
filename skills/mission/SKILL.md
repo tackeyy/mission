@@ -83,7 +83,7 @@ Artifact-required mission は `artifact init --required-for-pass` → `artifact 
 ```
 Phase 0: 仮置きと質問 2 条件の確認
 Phase 1: Issue 特定、複雑度、task_profile、specialist recommend
-Phase 2: iter1 planner。iter2+ は Planner spawn 判定
+Phase 2: iter1 planner (Standard は inline #339)。iter2+ は Planner spawn 判定
 Phase 3: executor 実行
 Phase 4: reviewer N 名。iter2+ は差分レビュー
 Phase 5: review-finalize (= aggregate-reviews -> push-score --scoring-json)
@@ -113,7 +113,9 @@ Reviewer 数は Simple=1、Standard=2、Complex=2、Critical=3 (#266: シグナ�
 
 **review_tier (#168, #209)**: `init` が complexity とミッション記述から `review_tier`（light/standard/full）を auto 導出し state に記録する（`review_tier_source` / `review_tier_signals` / `review_tier_signal_details` で監査可能）。不可逆系キーワードは各出現の文脈を評価し、明示的に実操作を否定した候補だけを抑制する。条件付き・二重否定・不確実・単なる引用は安全側で full を維持し、security / high-risk シグナルは否定で抑制しない。light: reviewer 1名・`required=true` specialist のみ・critic は fail 時のみ spawn。standard/full: 従来どおり。**ゲート意味論は tier によらず不変**（threshold / open_high / findings evidence / halt）。詳細（導出テーブル・エスカレータ一覧・override 規律）は `refs/state-management.md` の「review_tier 導出と Light Tier 運用」節を参照。
 
-**Planner spawn 判定 (#124)**: iter1 は従来どおり planner 必須。iter2 以降は `mission-critic` の `### 実行計画 (次 iteration)` テーブルを見る。全ステップの `対応finding` が finding id のみなら、planner を spawn せず executor に直接渡す。`new` を含むステップが 1 つでもあるなら planner を spawn する。このテーブル読み取り時に scope 判定を state へ記録する (#258): 全ステップが finding id のみなら `mission-state.py set critic_has_new_scope=false`、`new` を含むなら `critic_has_new_scope=true`。この値が次 iter の reviewer 数 (#240) と context mode (#241) を決める。**#309 で機械的ゲート化済み**: iter≥2 で未記録のまま `next` を呼ぶと `record-critic-scope` が返り、記録するまで run-reviewers guidance は出ない。
+**ターン圧縮 (#339)**: `next` の `command_sequence` は現 phase から closeout までの happy-path コマンド列。ゲート失敗 (exit 2) が出ない限り、この列を `next` の再呼び出しなしで連続実行してよい (毎ターンの context 再処理が実行時間の主因: portfolio-v4 で mission 19-31 turns vs goal 5 を実測)。ゲート失敗時のみ `next` を再参照する。**Standard の inline 計画 (#339)**: iteration 1 かつ complexity=Standard (full tier 除く) では `next` が `plan-inline` を返す — mission-planner subagent を起動せず、orchestrator 自身の turn 内で bounded plan (steps + 依存関係 + 完了条件) を artifact に書き、`advance --phase executing` で進む。計画の成果物要件は subagent 経路と同一。Complex / full tier / iteration>=2 は従来どおり。
+
+**Planner spawn 判定 (#124)**: iter1 は従来どおり planner 必須 (Standard iter1 の inline 化 #339 を除く)。iter2 以降は `mission-critic` の `### 実行計画 (次 iteration)` テーブルを見る。全ステップの `対応finding` が finding id のみなら、planner を spawn せず executor に直接渡す。`new` を含むステップが 1 つでもあるなら planner を spawn する。このテーブル読み取り時に scope 判定を state へ記録する (#258): 全ステップが finding id のみなら `mission-state.py set critic_has_new_scope=false`、`new` を含むなら `critic_has_new_scope=true`。この値が次 iter の reviewer 数 (#240) と context mode (#241) を決める。**#309 で機械的ゲート化済み**: iter≥2 で未記録のまま `next` を呼ぶと `record-critic-scope` が返り、記録するまで run-reviewers guidance は出ない。
 
 **差分レビュー (#240)**: iter2+ の前 iter 指摘修正では、`next` の `details.reviewer_count` に従う (`critic_has_new_scope=false` なら state が独立 2 名へ削減する。1 名化は agreement 検証が失われるため禁止)。args に High/Medium 指摘、修正コミット、全 diff 再レビュー不要、採点は絶対評価、Low 残存で 5.0 禁止を明記する。`review-finalize` (または `aggregate-reviews`) は `next` の command_hint が示す `--min-reviewers N` を必ず付け、reviewer 数不足の集計を exit 2 で拒否させる。`new` がある追加スコープ (`critic_has_new_scope=true`) は planner 後にフルレビューへ戻る。
 

@@ -67,7 +67,7 @@ def test_strict_preflight_allows_initialized_skills_only_start(tmp_path, run_cli
     assert payload["ok"] is True
     assert payload["state_guard"]["active"] is True
     assert payload["mechanical_guard"] == "state-next-fallback"
-    assert payload["next_action"] == "run-planner"
+    assert payload["next_action"] == "plan-inline"  # #339: Standard iter1 は inline 計画
 
 
 def test_codex_contract_requires_strict_preflight_before_setup_and_terminal_gate_before_final():

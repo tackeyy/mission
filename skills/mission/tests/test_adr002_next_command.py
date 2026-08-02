@@ -91,7 +91,8 @@ def test_next_when_awaiting_user(state_dir, run_cli):
 
 
 def test_next_planning_phase_suggests_planner(state_dir, run_cli):
-    _set_state(state_dir, phase="planning")
+    # #339: Standard iter1 は plan-inline になるため、planner 経路は Complex で検証する
+    _set_state(state_dir, phase="planning", complexity="Complex")
     out = _next(run_cli, state_dir)
     assert out["next_action"] == "run-planner"
 
