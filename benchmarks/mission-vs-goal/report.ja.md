@@ -718,6 +718,48 @@ commit `623d4d7` (#333: routing 許容プロンプト + mission_routed 第一級
 ゲート付きループを回す層は従来どおり 2.7-9.5x かかる。またオーケストレータの
 挙動分散は大きく (同層内で 2.99-10.16 min)、N=1/cell の単発測定である。
 
+
+### portfolio-v5-speed (#338/#339/#341 適用後の Standard+Complex 再測、2026-08-02)
+
+commit `5c6a1d4` (#338 並列検証可能化 + #339 ターン圧縮/plan-inline + #341 bench
+role 固定のマージ後)。routing 検証済みの Simple 3 tasks を除く Standard 3 +
+Complex 2 の paired 10 records。全完走・degraded 0・品質は全 record marker 1.0 同点。
+
+| task | goal | mission | 比 | 備考 |
+|---|---:|---:|---:|---|
+| std-contract | 0.72 min | 18.27 min | 25.4x | **iter=2 (ゲート再作業発火)** — 速度比較対象外 |
+| std-metrics | 0.49 min | 6.02 min | 12.3x | iter=1・直列 |
+| std-policy | 0.92 min | **4.84 min** | 5.3x | iter=1・**唯一の並列発火 (api 354s > wall 288s)** |
+| cx-config | 1.09 min | 8.33 min | 7.6x | iter=1・直列 |
+| cx-ledger | 1.61 min | 14.38 min | 8.9x | iter=1・**初の真正フルループ実測 (#341 効果)** |
+
+観測事実:
+
+1. **#341 は完全発火** (`evidence_only_records: 0`)。v4 で checker 挙動により
+   2.99 min (1.53x) と過小測定されていた cx-ledger が、初めて full-tier ループとして
+   実測された (14.38 min / 8.9x)。**Complex 層の正味フルループは 7.6-8.9x** であり、
+   v4 の「2.7x」は無効測定を含む過小値だった。
+2. **#338 (並列) の発火は 1/5**。発火した std-policy は 4.84 min と Standard 最速
+   (v4 同 task 10.16 min の約 1/2)。残り 4 record は API 時間 ≒ wall 時間の直列のまま。
+3. **#339 (ターン圧縮/plan-inline) は発火せず**。turns 26-53 で v4 (16-39) から
+   削減なし。orchestrator が `next` を参照しない既知経路 (portfolio-v2 と同型)。
+4. std-contract は iter=2 でゲート再作業が走り 18.27 min。速度比較からは外れるが、
+   ゲートの実働 (閾値未達→修正→pass) がベンチ内で再現された。
+
+危険な解釈:
+
+> #338/#339 は効果がなかった。
+
+これは unsupported です。正しくは「**guidance 層の指示は発火率が低い**」の 4 回目の
+実測確認 (disc-v3 / portfolio-v1 / v2 に続く)。発火した唯一の record は約 2 倍高速で
+あり機構自体は有効。ただし spawn の並列性やターン構造はコマンド層 (CLI) から強制
+できず、ハーネス側の制約が上限になる。iter=1 同条件の 2 task (metrics/policy) 合算は
+14.99→10.86 min (9.8x→7.7x) だが、オーケストレータ分散 (N=1) の範囲内。
+
+一次データ: `results/2026-08-02-portfolio-v5-speed.jsonl` /
+`results/2026-08-02-portfolio-v5-speed-summary.json` /
+`artifacts/2026-08-02-portfolio-v5-speed/`
+
 ## Discriminating cohort clean re-run (discriminating-v2) — v1 findings の訂正
 
 Status: 2026-07-23 JST に実行。permission-mode 汚染 (#268) を排除したクリーン
