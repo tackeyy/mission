@@ -696,6 +696,32 @@ Unsupported: all three layers are unit-verified and v2 recorded one live
 firing (1.46 min = goal + 0.8 min). Non-firing is caused by the benchmark
 prompt inducing `--force-mission`; without that instruction, routing fires.
 
+### portfolio-v4 (legitimate V1 re-measurement after #333, 2026-08-02) — routing parity achieved
+
+Commit `623d4d7` (#333: routing-permissive prompt + first-class
+`mission_routed` + minutes-scale Simple tasks). 16 records, all completed,
+0 degraded, quality tied at marker 1.0 everywhere.
+
+**Routing fired 3/3 (first complete firing), and the Simple layer hit the
+pre-declared parity band: goal 2.90 min vs mission 3.42 min = 1.18x**
+(cost $0.52-0.57 vs $0.60-0.70, near parity). Routed missions cost only
+0.1-0.3 min of entrance overhead over goal — the first measured arm-parity
+result in this program: using mission on Simple tasks no longer loses to
+goal.
+
+Whole-portfolio V1 (≤1.3x) remains unmet (4.22x / 2.83x), but the residual
+is the intended cost of the gated loop on Standard/Complex tasks — the
+deliberate quality-gate trade (see the 3.58→4.25 gate save), not a defect.
+The "eliminate losses" strategy is now measured and validated.
+
+Unsafe interpretation:
+
+> Mission now beats goal on speed.
+
+Unsupported: what was achieved is parity (1.18x) on the routed Simple
+layer; gated-loop layers still cost 2.7-9.5x, orchestrator variance remains
+large (2.99-10.16 min within one layer), and this is N=1/cell.
+
 ## Discriminating cohort clean re-run (discriminating-v2) — correcting the v1 findings
 
 Status: executed 2026-07-23 JST under clean permission conditions (the #268
@@ -1048,4 +1074,7 @@ artifacts/2026-08-02-portfolio-v2/
 results/2026-08-02-portfolio-v3.jsonl
 results/2026-08-02-portfolio-v3-summary.json
 artifacts/2026-08-02-portfolio-v3/
+results/2026-08-02-portfolio-v4.jsonl
+results/2026-08-02-portfolio-v4-summary.json
+artifacts/2026-08-02-portfolio-v4/
 ```
