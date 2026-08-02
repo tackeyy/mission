@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `next` now returns a `command_sequence` — the happy-path commands from the current phase through `closeout` — which the orchestrator may execute without re-consulting `next` unless a gate fails (exit 2), and Standard-complexity iteration-1 missions plan inline (`plan-inline`) instead of spawning the mission-planner subagent, with the same plan artifact requirements (#339). Grounded in portfolio-v4: mission used 19-31 turns vs goal's 5, and the time ratio (6.9-14.5x) exceeding the token ratio (4.0-4.7x) is per-turn context reprocessing. Complex, full-tier, and iteration>=2 planning keep the subagent path; gate semantics unchanged.
+
 ### Fixed
 
 - Reviewer parallel execution is now verifiable and tracked (#338): `aggregate-reviews` warns when reviewer windows are unreported for 2+ reviewers (portfolio-v4 measured all three Standard runs serial, API time ~= wall time), the parallel/serial/unknown observation is persisted to the session state as `last_parallel_execution`, `stats` aggregates `parallel_review_counts`, `next` marks run-reviewers with `parallel_spawn_required`, and the SKILL contract makes single-message parallel spawn mandatory for Claude Code with the measured cost of serial spawning. Gate semantics unchanged.
