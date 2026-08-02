@@ -9,6 +9,10 @@
 
 ## [Unreleased]
 
+### 変更
+
+- `next` が `command_sequence` (現 phase から `closeout` までの happy-path コマンド列) を返すようになり、ゲート失敗 (exit 2) がない限り orchestrator は `next` を再参照せず連続実行してよい。また Standard 複雑度の iteration 1 は mission-planner subagent を起動せず inline 計画 (`plan-inline`) になる (成果物要件は同一) (#339)。根拠は portfolio-v4 実測: mission 19-31 turns vs goal 5、時間比 (6.9-14.5x) > トークン比 (4.0-4.7x) の差分は毎ターンの context 再処理。Complex / full tier / iteration>=2 は従来どおり。ゲート意味論は不変。
+
 ### 修正
 
 - レビュアー並列実行が検証・追跡可能になった (#338): `aggregate-reviews` は 2 名以上で実行時間帯が未申告なら WARN (portfolio-v4 で Standard 3 run すべて直列・API 時間 ≒ wall 時間を実測)、観測結果 (true/false/unknown) を state の `last_parallel_execution` へ永続化、`stats` が `parallel_review_counts` を集計、`next` は run-reviewers に `parallel_spawn_required` を付与、SKILL 契約は Claude Code での単一メッセージ並列 spawn を必須化 (直列の実測コスト付き)。ゲート意味論は不変。

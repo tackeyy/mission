@@ -83,7 +83,7 @@ def test_user_tier_keeps_loop():
 
 def test_standard_keeps_loop():
     r = MS._derive_next_action(_data(complexity="Standard", review_tier="standard"))
-    assert r["next_action"] == "run-planner"
+    assert r["next_action"] == "plan-inline"  # #339: 非 routed のままループ継続 (inline 計画)
 
 
 def test_score_history_keeps_loop():

@@ -4493,6 +4493,32 @@ def cmd_advance(args):
     )
 
 
+def _happy_path_sequence(phase: str, reviewer_count: int, *, plan_mode: str = "subagent") -> list[str]:
+    """#339: 現 phase から closeout までの happy-path コマンド列.
+
+    ゲート失敗 (exit 2) がない限り、orchestrator はこの列を `next` の再呼び出し
+    なしで連続実行してよい (ターン圧縮)。ゲート失敗時のみ next を再参照する。
+    portfolio-v4 実測: mission 19-31 turns vs goal 5 — 毎ターンの context 再処理が
+    時間比とトークン比の乖離 (10-15x vs 4x) の主因。
+    """
+    plan_step = (
+        "plan を artifact に記載 (inline #339)"
+        if plan_mode == "inline"
+        else "Skill: mission-planner"
+    )
+    steps = [
+        plan_step,
+        "mission-state.py advance --phase executing --activity active:implementation",
+        "Skill: mission-executor",
+        "mission-state.py advance --phase reviewing --activity reviewer-wait:review-response",
+        f"Skill: mission-reviewer x{reviewer_count} (1 message, parallel)",
+        "mission-state.py review-finalize --iteration <i> --scoring-json <out> (aggregate+push を transactional に)",
+        "mission-state.py closeout",
+    ]
+    start = {"planning": 0, "executing": 2, "reviewing": 4}[phase]
+    return steps[start:]
+
+
 def _derive_next_action(data: dict) -> dict:
     """ADR-002 Stage 3 (G-3): state から次の 1 手を決定論的に導出する。
 
@@ -4580,16 +4606,38 @@ def _derive_next_action(data: dict) -> dict:
             "details": {"complexity": "Simple", "route": "goal"},
         }
     if phase == "planning":
+        # #339: Standard iteration 1 は planner subagent を省略し orchestrator inline 計画。
+        # portfolio-v4 実測: 時間比 (6.9-14.5x) > トークン比 (4.0-4.7x) の差分はターン数
+        # (mission 19-31 turns vs goal 5) — subagent spin-up 1 回の削減がそのまま効く。
+        # Complex / full tier / iteration>=2 は従来どおり mission-planner を使う。
+        if (
+            data.get("complexity") == "Standard"
+            and iteration <= 1
+            and (data.get("review_tier") or "standard") != "full"
+        ):
+            return {
+                "next_action": "plan-inline",
+                "summary": (
+                    f"iteration {iteration} (Standard): mission-planner を起動せず、この turn 内で "
+                    "bounded plan (steps + 依存関係 + 完了条件) を artifact に書く (#339)。"
+                    "計画の成果物要件は subagent 経路と同一"
+                ),
+                "command_hint": "plan を artifact に記載 → mission-state.py advance --phase executing --activity active:implementation",
+                "details": {"plan_mode": "inline"},
+                "command_sequence": _happy_path_sequence("planning", effective_reviewer_count, plan_mode="inline"),
+            }
         return {
             "next_action": "run-planner",
             "summary": f"iteration {iteration}: mission-planner を起動して計画を立てる (完了後 set phase=executing)",
             "command_hint": "Skill: mission-planner → mission-state.py advance --phase executing --activity active:implementation",
+            "command_sequence": _happy_path_sequence("planning", effective_reviewer_count, plan_mode="subagent"),
         }
     if phase == "executing":
         return {
             "next_action": "run-executor",
             "summary": f"iteration {iteration}: mission-executor で計画を実行する (完了後 set phase=reviewing。10分超は progress update)",
             "command_hint": "Skill: mission-executor → mission-state.py advance --phase reviewing --activity reviewer-wait:review-response",
+            "command_sequence": _happy_path_sequence("executing", effective_reviewer_count),
         }
     if phase == "reviewing":
         # #309 (F4): iter>=2 で critic_has_new_scope 未設定なら run-reviewers を返さない。
@@ -4615,6 +4663,7 @@ def _derive_next_action(data: dict) -> dict:
             "summary": f"iteration {iteration}: mission-reviewer を {effective_reviewer_count} 名、単一メッセージで並列起動する (直列起動は規律違反。直列は Standard で約 2-3 分の無駄を実測 #338)",
             "command_hint": f"Skill: mission-reviewer x{effective_reviewer_count} (1 message)",
             "details": {"reviewer_count": effective_reviewer_count, "context_mode": context_mode, "parallel_spawn_required": True},
+            "command_sequence": _happy_path_sequence("reviewing", effective_reviewer_count),
         }
     # phase == scoring / done / その他: 現 iteration の有効スコア有無で分岐
     history = data.get("score_history") or []

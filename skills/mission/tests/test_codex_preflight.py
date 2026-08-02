@@ -47,7 +47,7 @@ def test_codex_preflight_active_state_warns_when_stop_hook_missing(tmp_path, run
     assert out["state_guard"]["active"] is True
     assert out["codex_stop_hook"]["configured"] is False
     assert out["mechanical_guard"] == "state-next-fallback"
-    assert out["next_action"] == "run-planner"
+    assert out["next_action"] == "plan-inline"  # #339: Standard iter1 は inline 計画
     assert any("Stop hook" in warning for warning in out["warnings"])
 
 
