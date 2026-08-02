@@ -1,0 +1,71 @@
+{
+  "arms": {
+    "claude_code_goal_command": {
+      "average_elapsed_minutes": 0.97,
+      "average_evidence_completeness": 5.0,
+      "average_intervention_count": 0.0,
+      "average_quality_marker_score": 1.0,
+      "average_quality_score": 5.0,
+      "blocked_records": 0,
+      "comparable_average_elapsed_minutes": 0.97,
+      "comparable_average_quality_score": 5.0,
+      "comparable_completion_rate": 1.0,
+      "comparable_cost_usd_mean": 0.5632,
+      "comparable_records": 5,
+      "comparable_validator_pass_rate": 1.0,
+      "completion_rate": 1.0,
+      "cost_usd_mean": 0.5632,
+      "cost_usd_total": 2.816,
+      "evidence_only_records": 0,
+      "marker_score_variance": 0.0,
+      "permission_degraded_records": 0,
+      "records": 5,
+      "routed_records": 0,
+      "validator_pass_rate": 1.0
+    },
+    "mission": {
+      "average_elapsed_minutes": 10.37,
+      "average_evidence_completeness": 5.0,
+      "average_intervention_count": 0.0,
+      "average_quality_marker_score": 1.0,
+      "average_quality_score": 5.0,
+      "blocked_records": 0,
+      "comparable_average_elapsed_minutes": 10.37,
+      "comparable_average_quality_score": 5.0,
+      "comparable_completion_rate": 1.0,
+      "comparable_cost_usd_mean": 3.0691,
+      "comparable_records": 5,
+      "comparable_validator_pass_rate": 1.0,
+      "completion_rate": 1.0,
+      "cost_usd_mean": 3.0691,
+      "cost_usd_total": 15.3454,
+      "evidence_only_records": 0,
+      "marker_score_variance": 0.0,
+      "permission_degraded_records": 0,
+      "records": 5,
+      "routed_records": 0,
+      "validator_pass_rate": 1.0
+    }
+  },
+  "expected_records": 10,
+  "limitations": [
+    "Claude Code print mode smoke; does not fully exercise multi-turn interactive /goal persistence.",
+    "Quality and evidence scores are automated heuristic scores, not blind human review.",
+    "Blocked records are excluded from comparable quality-marker aggregates."
+  ],
+  "mission_profile": "full",
+  "records": 10,
+  "repeats": 1,
+  "run_id": "2026-08-02-portfolio-v5-speed",
+  "selected_task_ids": [
+    "portfolio-std-contract",
+    "portfolio-std-metrics",
+    "portfolio-std-policy",
+    "portfolio-cx-config",
+    "portfolio-cx-ledger"
+  ],
+  "starting_commit": "5c6a1d4",
+  "stopped_early": false,
+  "task_cohort": "portfolio",
+  "task_file": "benchmarks/mission-vs-goal/tasks.portfolio.json"
+}

@@ -722,6 +722,34 @@ Unsupported: what was achieved is parity (1.18x) on the routed Simple
 layer; gated-loop layers still cost 2.7-9.5x, orchestrator variance remains
 large (2.99-10.16 min within one layer), and this is N=1/cell.
 
+
+### portfolio-v5-speed (Standard+Complex re-measurement after #338/#339/#341, 2026-08-02)
+
+Commit `5c6a1d4` (after merging #338 parallel verifiability, #339 turn
+compression / plan-inline, and #341 bench role pinning). Paired 10 records over
+Standard 3 + Complex 2 (Simple excluded — routing already verified). All
+completed, degraded 0, marker 1.0 tied on every record.
+
+Key observations: (1) #341 fired completely (`evidence_only_records: 0`) — the
+cx-ledger mission arm ran a true full-tier loop for the first time (14.38 min /
+8.9x), revealing v4's 2.99 min (1.53x) as an under-measurement by a
+checker-style run; the honest Complex full-loop band is 7.6-8.9x. (2) #338
+parallel spawn fired on 1 of 5 records; the one parallel record (std-policy,
+API 354s > wall 288s) was the fastest Standard run at 4.84 min (~half of v4's
+10.16 min for the same task). (3) #339 did not fire — 26-53 turns, no
+reduction; the orchestrator skipped `next`, the same bypass measured in
+portfolio-v2. (4) std-contract went to iteration 2 (gate rework, 18.27 min) —
+excluded from speed comparison but reproducing the gate's working value inside
+the benchmark. Interpretation guard: this is the fourth measured confirmation
+that guidance-layer instructions fire unreliably — the mechanisms work when
+adopted (the one parallel record was ~2x faster), but spawn parallelism and
+turn structure cannot be forced from the command layer, so the harness is the
+binding constraint.
+
+Primary data: `results/2026-08-02-portfolio-v5-speed.jsonl` /
+`results/2026-08-02-portfolio-v5-speed-summary.json` /
+`artifacts/2026-08-02-portfolio-v5-speed/`
+
 ## Discriminating cohort clean re-run (discriminating-v2) — correcting the v1 findings
 
 Status: executed 2026-07-23 JST under clean permission conditions (the #268
