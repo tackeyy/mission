@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reviewer parallel execution is now verifiable and tracked (#338): `aggregate-reviews` warns when reviewer windows are unreported for 2+ reviewers (portfolio-v4 measured all three Standard runs serial, API time ~= wall time), the parallel/serial/unknown observation is persisted to the session state as `last_parallel_execution`, `stats` aggregates `parallel_review_counts`, `next` marks run-reviewers with `parallel_spawn_required`, and the SKILL contract makes single-message parallel spawn mandatory for Claude Code with the measured cost of serial spawning. Gate semantics unchanged.
+
 - The benchmark mission arm now pins the implementer contract (#341): the prompt requires completing at least one scored review iteration before stopping (portfolio-v4's cx-ledger record halted checker-style with evidence submitted and no scored review, so its wall-clock measured no gated loop), records carry a first-class `mission_evidence_only` flag extracted from the halt category, per-arm summaries count `evidence_only_records`, and any such record appends a comparability warning to the summary limitations.
 
 ## [2.2.0] - 2026-08-02

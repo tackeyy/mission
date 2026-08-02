@@ -4660,9 +4660,9 @@ def _derive_next_action(data: dict) -> dict:
         context_mode = "bounded" if use_bounded else "full"
         return {
             "next_action": "run-reviewers",
-            "summary": f"iteration {iteration}: mission-reviewer を {effective_reviewer_count} 名、単一メッセージで並列起動する (直列起動は規律違反)",
+            "summary": f"iteration {iteration}: mission-reviewer を {effective_reviewer_count} 名、単一メッセージで並列起動する (直列起動は規律違反。直列は Standard で約 2-3 分の無駄を実測 #338)",
             "command_hint": f"Skill: mission-reviewer x{effective_reviewer_count} (1 message)",
-            "details": {"reviewer_count": effective_reviewer_count, "context_mode": context_mode},
+            "details": {"reviewer_count": effective_reviewer_count, "context_mode": context_mode, "parallel_spawn_required": True},
             "command_sequence": _happy_path_sequence("reviewing", effective_reviewer_count),
         }
     # phase == scoring / done / その他: 現 iteration の有効スコア有無で分岐
@@ -5887,9 +5887,21 @@ def cmd_aggregate_reviews(args):
             "この warn は観測のみで集計・gate には影響しません。",
             file=sys.stderr,
         )
+    elif parallel_execution == "unknown" and len(reviews) >= 2:
+        # #338: 未申告だと並列実行を検証できない (portfolio-v4 で直列 3/3 を実測)。
+        print(
+            "WARN: reviewer 実行時間帯が未申告のため並列実行を検証できません (#338)。"
+            "spawn 直前と全返却後の時刻を控え、"
+            "--reviewer-window <perspective>=<start>..<end> を各 reviewer 分渡してください。"
+            "この warn は観測のみで集計・gate には影響しません。",
+            file=sys.stderr,
+        )
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
+        # #338: 観測結果を state へ永続化し stats で横断集計可能にする (gate 不変)
+        data["last_parallel_execution"] = parallel_execution
+        atomic_write_json(sf, data)
         mission8 = (data.get("mission_id") or "unknown")[:8]
         evidence_path = state_dir(cwd) / "archive" / f"iter-{args.iteration}-{mission8}-reviews.json"
         evidence_path.parent.mkdir(parents=True, exist_ok=True)
@@ -7235,6 +7247,7 @@ def _aggregate(
             "by_review_tier": {}, "iteration_by_review_tier": {},
             "by_cli_version": {},
             "by_halt_category": {},
+            "parallel_review_counts": {"true": 0, "false": 0, "unknown": 0},
             "activity_timing": summarize_activity_states([]),
         }
     # _classify を 1 回だけ評価 (旧実装は pass/halt/incomplete で 3N 回呼んでいた)
@@ -7254,6 +7267,16 @@ def _aggregate(
         and not s.get("passes_forced")
         and not s.get("force_reason")  # 旧版 force-pass (passes_forced 未記録) も除外
     )
+    # #338: reviewer 並列実行の観測集計 (last_parallel_execution 記録済み session のみ)
+    parallel_review_counts = {"true": 0, "false": 0, "unknown": 0}
+    for s in states:
+        lpe = s.get("last_parallel_execution")
+        if lpe is True:
+            parallel_review_counts["true"] += 1
+        elif lpe is False:
+            parallel_review_counts["false"] += 1
+        elif lpe == "unknown":
+            parallel_review_counts["unknown"] += 1
     iterations = [s.get("iteration", 0) for s in states]
     # 改善3b: composite を持つ直近エントリを final とする (末尾の進捗ノート混入に耐える)
     finals = [c for c in (_latest_composite(s.get("score_history", [])) for s in states) if c is not None]
@@ -7296,6 +7319,7 @@ def _aggregate(
         "pass_rate_denominator": pass_rate_summary["raw_pass_rate_denominator"],
         "pass_rate": pass_rate_summary["raw_pass_rate"],
         "forced_pass_count": forced_pass_count,
+        "parallel_review_counts": parallel_review_counts,
         "forced_pass_rate": forced_pass_count / pass_count if pass_count else None,
         "ungated_pass_count": ungated_pass_count,
         "ungated_pass_rate": ungated_pass_count / pass_count if pass_count else None,

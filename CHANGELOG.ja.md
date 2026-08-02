@@ -11,6 +11,8 @@
 
 ### 修正
 
+- レビュアー並列実行が検証・追跡可能になった (#338): `aggregate-reviews` は 2 名以上で実行時間帯が未申告なら WARN (portfolio-v4 で Standard 3 run すべて直列・API 時間 ≒ wall 時間を実測)、観測結果 (true/false/unknown) を state の `last_parallel_execution` へ永続化、`stats` が `parallel_review_counts` を集計、`next` は run-reviewers に `parallel_spawn_required` を付与、SKILL 契約は Claude Code での単一メッセージ並列 spawn を必須化 (直列の実測コスト付き)。ゲート意味論は不変。
+
 - ベンチの mission アームが implementer 契約を固定するようになった (#341): プロンプトが停止前に最低 1 回の scored review iteration 完了を要求する (portfolio-v4 の cx-ledger record は checker 挙動の evidence 提出で halt し、ゲート付きループを測っていなかった)。record は halt category から抽出した第一級の `mission_evidence_only` を持ち、アーム別 summary は `evidence_only_records` を集計、該当 record があれば limitations に比較可能性警告を追記する。
 
 ## [2.2.0] - 2026-08-02
