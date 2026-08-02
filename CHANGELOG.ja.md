@@ -9,16 +9,6 @@
 
 ## [Unreleased]
 
-### 変更
-
-- `next` が `command_sequence` (現 phase から `closeout` までの happy-path コマンド列) を返すようになり、ゲート失敗 (exit 2) がない限り orchestrator は `next` を再参照せず連続実行してよい。また Standard 複雑度の iteration 1 は mission-planner subagent を起動せず inline 計画 (`plan-inline`) になる (成果物要件は同一) (#339)。根拠は portfolio-v4 実測: mission 19-31 turns vs goal 5、時間比 (6.9-14.5x) > トークン比 (4.0-4.7x) の差分は毎ターンの context 再処理。Complex / full tier / iteration>=2 は従来どおり。ゲート意味論は不変。
-
-### 修正
-
-- レビュアー並列実行が検証・追跡可能になった (#338): `aggregate-reviews` は 2 名以上で実行時間帯が未申告なら WARN (portfolio-v4 で Standard 3 run すべて直列・API 時間 ≒ wall 時間を実測)、観測結果 (true/false/unknown) を state の `last_parallel_execution` へ永続化、`stats` が `parallel_review_counts` を集計、`next` は run-reviewers に `parallel_spawn_required` を付与、SKILL 契約は Claude Code での単一メッセージ並列 spawn を必須化 (直列の実測コスト付き)。ゲート意味論は不変。
-
-- ベンチの mission アームが implementer 契約を固定するようになった (#341): プロンプトが停止前に最低 1 回の scored review iteration 完了を要求する (portfolio-v4 の cx-ledger record は checker 挙動の evidence 提出で halt し、ゲート付きループを測っていなかった)。record は halt category から抽出した第一級の `mission_evidence_only` を持ち、アーム別 summary は `evidence_only_records` を集計、該当 record があれば limitations に比較可能性警告を追記する。
-
 ## [2.2.0] - 2026-08-02
 
 ### 追加
@@ -33,9 +23,15 @@
 
 ### 変更
 
+- `next` が `command_sequence` (現 phase から `closeout` までの happy-path コマンド列) を返すようになり、ゲート失敗 (exit 2) がない限り orchestrator は `next` を再参照せず連続実行してよい。また Standard 複雑度の iteration 1 は mission-planner subagent を起動せず inline 計画 (`plan-inline`) になる (成果物要件は同一) (#339)。根拠は portfolio-v4 実測: mission 19-31 turns vs goal 5、時間比 (6.9-14.5x) > トークン比 (4.0-4.7x) の差分は毎ターンの context 再処理。Complex / full tier / iteration>=2 は従来どおり。ゲート意味論は不変。
+
 - ベンチマークが adaptive routing を抑制せず観測できるようになった (#333)。mission arm プロンプトは routing verdict への追従 (goal 契約成果物 + Evidence に routed 明記) を許容しループを強制せず、record に第一級の `mission_routed` (routed-goal halt、および init 経路 routing による Simple + state 不在完走 — 後者は #261 ガードの invalid 対象から除外) を記録、アーム別 summary に `routed_records` を追加。portfolio cohort の Simple 3 tasks は分単位版 (120 定数参照監査 / 90 SKU 照合 / 43 予約重複検出) に差し替え、routing の入口オーバーヘッドが V1 パリティ帯に収まる現実的なサイズにした。
 
 ### 修正
+
+- レビュアー並列実行が検証・追跡可能になった (#338): `aggregate-reviews` は 2 名以上で実行時間帯が未申告なら WARN (portfolio-v4 で Standard 3 run すべて直列・API 時間 ≒ wall 時間を実測)、観測結果 (true/false/unknown) を state の `last_parallel_execution` へ永続化、`stats` が `parallel_review_counts` を集計、`next` は run-reviewers に `parallel_spawn_required` を付与、SKILL 契約は Claude Code での単一メッセージ並列 spawn を必須化 (直列の実測コスト付き)。ゲート意味論は不変。
+
+- ベンチの mission アームが implementer 契約を固定するようになった (#341): プロンプトが停止前に最低 1 回の scored review iteration 完了を要求する (portfolio-v4 の cx-ledger record は checker 挙動の evidence 提出で halt し、ゲート付きループを測っていなかった)。record は halt category から抽出した第一級の `mission_evidence_only` を持ち、アーム別 summary は `evidence_only_records` を集計、該当 record があれば limitations に比較可能性警告を追記する。
 
 - adaptive routing をコマンド層で強制するようにした (#330)。条件充足時は `set complexity=Simple` 自身が routing verdict を実行し、state を `routed-goal` で atomic に halt して goal 契約の guidance を出力する — orchestrator の `next` 消費 (portfolio-v2 実測で発火 1/3) に依存しない。除外条件 (シグナル・`--issue-ref`・`--force-mission`・checker 系 role・user 指定 tier・採点済み) は不変で、#325 の next 層 gate は defense-in-depth として残る。
 

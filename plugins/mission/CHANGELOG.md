@@ -9,16 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- `next` now returns a `command_sequence` — the happy-path commands from the current phase through `closeout` — which the orchestrator may execute without re-consulting `next` unless a gate fails (exit 2), and Standard-complexity iteration-1 missions plan inline (`plan-inline`) instead of spawning the mission-planner subagent, with the same plan artifact requirements (#339). Grounded in portfolio-v4: mission used 19-31 turns vs goal's 5, and the time ratio (6.9-14.5x) exceeding the token ratio (4.0-4.7x) is per-turn context reprocessing. Complex, full-tier, and iteration>=2 planning keep the subagent path; gate semantics unchanged.
-
-### Fixed
-
-- Reviewer parallel execution is now verifiable and tracked (#338): `aggregate-reviews` warns when reviewer windows are unreported for 2+ reviewers (portfolio-v4 measured all three Standard runs serial, API time ~= wall time), the parallel/serial/unknown observation is persisted to the session state as `last_parallel_execution`, `stats` aggregates `parallel_review_counts`, `next` marks run-reviewers with `parallel_spawn_required`, and the SKILL contract makes single-message parallel spawn mandatory for Claude Code with the measured cost of serial spawning. Gate semantics unchanged.
-
-- The benchmark mission arm now pins the implementer contract (#341): the prompt requires completing at least one scored review iteration before stopping (portfolio-v4's cx-ledger record halted checker-style with evidence submitted and no scored review, so its wall-clock measured no gated loop), records carry a first-class `mission_evidence_only` flag extracted from the halt category, per-arm summaries count `evidence_only_records`, and any such record appends a comparability warning to the summary limitations.
-
 ## [2.2.0] - 2026-08-02
 
 ### Added
@@ -33,9 +23,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `next` now returns a `command_sequence` — the happy-path commands from the current phase through `closeout` — which the orchestrator may execute without re-consulting `next` unless a gate fails (exit 2), and Standard-complexity iteration-1 missions plan inline (`plan-inline`) instead of spawning the mission-planner subagent, with the same plan artifact requirements (#339). Grounded in portfolio-v4: mission used 19-31 turns vs goal's 5, and the time ratio (6.9-14.5x) exceeding the token ratio (4.0-4.7x) is per-turn context reprocessing. Complex, full-tier, and iteration>=2 planning keep the subagent path; gate semantics unchanged.
+
 - The benchmark now observes adaptive routing instead of suppressing it (#333): the mission-arm prompt permits following a routing verdict (goal-contract artifact with the routing noted in Evidence) and no longer forces the loop, records carry a first-class `mission_routed` flag (routed-goal halts, and Simple tasks completing without state via init-path routing — the latter no longer invalidated by the #261 guard), per-arm summaries count `routed_records`, and the portfolio cohort's three Simple tasks are replaced with minutes-scale versions (120-constant reference audit, 90-SKU reconciliation, 43-booking overlap scan) so the routing entrance overhead can fit within the V1 parity band.
 
 ### Fixed
+
+- Reviewer parallel execution is now verifiable and tracked (#338): `aggregate-reviews` warns when reviewer windows are unreported for 2+ reviewers (portfolio-v4 measured all three Standard runs serial, API time ~= wall time), the parallel/serial/unknown observation is persisted to the session state as `last_parallel_execution`, `stats` aggregates `parallel_review_counts`, `next` marks run-reviewers with `parallel_spawn_required`, and the SKILL contract makes single-message parallel spawn mandatory for Claude Code with the measured cost of serial spawning. Gate semantics unchanged.
+
+- The benchmark mission arm now pins the implementer contract (#341): the prompt requires completing at least one scored review iteration before stopping (portfolio-v4's cx-ledger record halted checker-style with evidence submitted and no scored review, so its wall-clock measured no gated loop), records carry a first-class `mission_evidence_only` flag extracted from the halt category, per-arm summaries count `evidence_only_records`, and any such record appends a comparability warning to the summary limitations.
 
 - Adaptive routing is now enforced at the command layer (#330): `set complexity=Simple` itself executes the routing verdict when conditions hold — the state is atomically halted as `routed-goal` and the command prints the goal-contract guidance, no longer depending on the orchestrator consulting `next` (which portfolio-v2 measured firing only 1 of 3 times). Exclusions (signals, `--issue-ref`, `--force-mission`, checker roles, user-pinned tiers, scored missions) are unchanged, and the #325 next-layer gate remains as defense in depth.
 
