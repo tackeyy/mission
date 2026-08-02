@@ -688,6 +688,36 @@ std-metrics は 6.37 min のフルループ — orchestrator 挙動の run 間�
 goal + 0.8 分) も観測されている。未発火はベンチプロンプトの `--force-mission` 誘導に
 よるもので、指示なし環境では発火する。
 
+### portfolio-v4 (#333 測定改訂後の V1 正当再測、2026-08-02) — routing パリティ達成
+
+commit `623d4d7` (#333: routing 許容プロンプト + mission_routed 第一級記録 +
+分単位 Simple)。16 records 全完走・degraded 0・品質は全 record marker 1.0 同点。
+
+**routing 発火 3/3 (初の完全発火)、Simple 層は goal 2.90 min vs mission 3.42 min =
+1.18x で事前宣言のパリティ帯 (≤1.3x) を達成。** コストも $0.52-0.57 vs $0.60-0.70 で
+ほぼ同等。routed mission の内訳は goal + 0.1-0.3 分の入口オーバーヘッドのみで、
+「Simple で mission を常用しても goal に負けない」が本プログラムで初めて実測成立した。
+
+| 層 | goal | mission | 比 |
+|---|---:|---:|---:|
+| **Simple (routed 3/3)** | 2.90 min / $1.61 | **3.42 min / $1.93** | **1.18x / 1.20x** |
+| Standard (full loop) | 2.55 min | 24.26 min | 9.5x |
+| Complex (full loop) | 3.04 min | 8.19 min | 2.7x |
+| 合計 | 8.49 min / $4.33 | 35.87 min / $12.25 | 4.22x / 2.83x |
+
+ポートフォリオ全体の V1 (≤1.3x) は未達 (4.22x) だが、その残差は Standard/Complex が
+**意図どおり品質ゲート付きループを回すコスト**であり、routed 層のパリティ達成により
+「負けをなくす」戦略の実測検証は完了した。非 routed 層のオーバーヘッドは
+ゲート価値 (iter1 3.58→4.25 の実働例) との交換で、これが mission の製品定義。
+
+危険な解釈:
+
+> mission は goal に速度で勝てるようになった。
+
+これは unsupported です。達成したのは routed Simple 層の「同等」(1.18x) であり、
+ゲート付きループを回す層は従来どおり 2.7-9.5x かかる。またオーケストレータの
+挙動分散は大きく (同層内で 2.99-10.16 min)、N=1/cell の単発測定である。
+
 ## Discriminating cohort clean re-run (discriminating-v2) — v1 findings の訂正
 
 Status: 2026-07-23 JST に実行。permission-mode 汚染 (#268) を排除したクリーン
@@ -1062,4 +1092,7 @@ artifacts/2026-08-02-portfolio-v2/
 results/2026-08-02-portfolio-v3.jsonl
 results/2026-08-02-portfolio-v3-summary.json
 artifacts/2026-08-02-portfolio-v3/
+results/2026-08-02-portfolio-v4.jsonl
+results/2026-08-02-portfolio-v4-summary.json
+artifacts/2026-08-02-portfolio-v4/
 ```
