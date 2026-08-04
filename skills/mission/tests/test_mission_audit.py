@@ -2328,6 +2328,66 @@ def test_audit_halt_disposition_matches_real_handoff_and_approval_reasons(tmp_pa
     assert data["all_finding_code_counts"]["halted-runs"] == 1
 
 
+def test_audit_halt_disposition_matches_intentional_freeze_switch_reasons(tmp_path):
+    """#347: owner freeze / replacement switch reasons are raw halts, not P1 actionable."""
+    _write_state(
+        tmp_path / "passed" / ".mission-state" / "sessions" / "passed.json",
+        project_root=str(tmp_path / "passed"),
+        mission_id="passed",
+        session_id="passed",
+    )
+    cases = [
+        (
+            "owner-freeze-switch",
+            "other",
+            "Issue #377 は owner が Epic #112 凍結として意図的に close した投資。解凍条件=実測ボトルネックの判定未了のため claim/worktree 前に halt。Step 1 は #694 単独へ切替。",
+        ),
+        (
+            "negative-freeze-failed",
+            "other",
+            "Issue was not intentionally frozen; replacement switch failed and needs recovery.",
+        ),
+    ]
+    for name, category, reason in cases:
+        _write_state(
+            tmp_path / name / ".mission-state" / "sessions" / f"{name}.json",
+            project_root=str(tmp_path / name),
+            mission_id=name,
+            session_id=name,
+            passes=False,
+            loop_active=False,
+            halt_category=category,
+            halt_reason=reason,
+        )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--since",
+            "2026-06-18",
+            "--min-pass-rate",
+            "0.9",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+
+    assert data["halt_count"] == 2
+    assert data["actionable_halt_count"] == 1
+    assert data["non_actionable_halt_count"] == 1
+    assert data["halt_disposition_breakdown"] == {
+        "actionable": 1,
+        "intentional-freeze-switch": 1,
+    }
+    assert data["all_finding_code_counts"]["halted-runs"] == 1
+
+
 def test_audit_actionable_halts_keep_current_historical_periods(tmp_path):
     """P1 の current / historical 区分は actionable halt のみを対象に維持する."""
     cases = [
