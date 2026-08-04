@@ -9,6 +9,10 @@
 
 ## [Unreleased]
 
+### 修正
+
+- mission audit が owner による明示的な凍結・意図的 close・replacement issue への切替を示す halt reason を非 actionable の `intentional-freeze-switch` として分類するようにした。raw halt count は保持しつつ、運用 state debt 監査での P1 `halted-runs` false positive を減らす (#347)。
+
 ## [2.2.0] - 2026-08-02
 
 ### 追加

@@ -1539,6 +1539,29 @@ _APPROVAL_WAIT_REASON_TOKENS = (
     "explicit merge approval",
     "explicit owner approval",
 )
+_INTENTIONAL_FREEZE_SWITCH_REASON_TOKEN_GROUPS = (
+    ("凍結", "意図的", "close", "切替"),
+    ("凍結", "意図的", "close", "切り替え"),
+    ("intentionally frozen", "replacement switch"),
+    ("intentionally closed", "replacement switch"),
+)
+_INTENTIONAL_FREEZE_SWITCH_NEGATION_TOKENS = (
+    "not intentionally",
+    "failed",
+    "needs recovery",
+    "検証未了",
+    "失敗",
+    "復旧",
+)
+
+
+def _matches_intentional_freeze_switch(reason: str) -> bool:
+    if any(token in reason for token in _INTENTIONAL_FREEZE_SWITCH_NEGATION_TOKENS):
+        return False
+    return any(
+        all(token in reason for token in token_group)
+        for token_group in _INTENTIONAL_FREEZE_SWITCH_REASON_TOKEN_GROUPS
+    )
 
 
 def halt_audit_disposition(record: StateRecord) -> str:
@@ -1560,6 +1583,8 @@ def halt_audit_disposition(record: StateRecord) -> str:
     )
     if category in {"partial-done", "other"} and has_delegated_reason:
         return "delegated"
+    if category in {"partial-done", "other"} and _matches_intentional_freeze_switch(reason):
+        return "intentional-freeze-switch"
     if category == "awaiting-approval" and (
         reason in _EXTERNAL_WAIT_REASONS
         or any(token in reason for token in _APPROVAL_WAIT_REASON_TOKENS)
