@@ -195,6 +195,16 @@ def test_next_route_to_goal_reports_effective_dispatch(run_cli, tmp_path):
     assert verdict["details"]["goal_dispatch_effective"] == "host-native"
     assert "/goal" in verdict["summary"]
 
+    run_cli(
+        "mark-halt", "--reason", "routed-to-goal (#325)", "--category", "routed-goal",
+        cwd=tmp_path,
+        env_extra={**base_env, "CLAUDE_CODE_SESSION_ID": "cc-test"}, check=True,
+    )
+    halted = _state(tmp_path)
+    assert halted["goal_dispatch_effective"] == "host-native"
+    assert halted["goal_dispatch_host"] == "claude-code"
+    assert "goal_dispatch_fallback_reason" not in halted
+
 
 def test_force_mission_remains_authoritative_with_host_native(run_cli, tmp_path):
     _write_config(tmp_path, "host-native")
