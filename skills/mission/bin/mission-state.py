@@ -577,13 +577,40 @@ def load_routing_config() -> dict:
     return {"goal_dispatch": _routing_config_decision()["mode"]}
 
 
-def _resolve_goal_dispatch(mission: str, cli_mode: str | None, cwd: Path) -> dict:
-    explicit = re.search(
-        r"(?im)^ {0,3}goal[_ -]dispatch\s*[:=]\s*([a-z][a-z0-9-]*)[ \t]*(?:;|$)",
-        mission or "",
+def _mission_goal_dispatch_values(mission: str) -> list[str]:
+    """Collect standalone directives outside quoted Markdown blocks."""
+    directive_re = re.compile(
+        r"(?i)^ {0,3}goal[_ -]dispatch\s*[:=]\s*([a-z][a-z0-9-]*)[ \t]*(?:;|$)"
     )
-    if explicit:
-        mode = explicit.group(1).lower()
+    fence_re = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+    fence_char: str | None = None
+    fence_length = 0
+    values = []
+    for line in (mission or "").splitlines():
+        fence_match = fence_re.match(line)
+        if fence_match:
+            marker = fence_match.group(1)
+            suffix = fence_match.group(2)
+            if fence_char is None:
+                if marker[0] != "`" or "`" not in suffix:
+                    fence_char = marker[0]
+                    fence_length = len(marker)
+            elif marker[0] == fence_char and len(marker) >= fence_length and not suffix.strip():
+                fence_char = None
+                fence_length = 0
+            continue
+        if fence_char is not None:
+            continue
+        directive = directive_re.match(line)
+        if directive:
+            values.append(directive.group(1).lower())
+    return values
+
+
+def _resolve_goal_dispatch(mission: str, cli_mode: str | None, cwd: Path) -> dict:
+    explicit_values = _mission_goal_dispatch_values(mission)
+    if explicit_values:
+        mode = explicit_values[0]
         if mode not in GOAL_DISPATCH_MODES:
             reason = f"invalid goal_dispatch '{mode}' in mission user instruction"
             print(f"WARN #355: {reason}; using inline", file=sys.stderr)
