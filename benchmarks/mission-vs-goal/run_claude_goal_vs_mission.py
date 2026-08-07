@@ -41,6 +41,13 @@ API_SPEND_LIMIT_MARKERS = (
     "rate limit",
     "usage limit",
 )
+API_SPEND_LIMIT_ERROR_PHRASES = (
+    "api error: 429",
+    "too many requests",
+    "spend limit reached",
+    "rate limit reached",
+    "usage limit reached",
+)
 MAX_BUDGET_MARKERS = (
     "error_max_budget_usd",
     "max_budget_usd",
@@ -323,17 +330,30 @@ def parse_claude_json(stdout: str) -> dict:
         return {"type": "raw", "result": stdout}
 
 
-def detect_spend_limit(result_json: dict, stderr_text: str) -> bool:
+def detect_spend_limit(result_json: dict, stderr_text: str, returncode: int | None = None) -> bool:
     """Detect an external API spend/rate/usage limit in a child result.
 
-    `api_error_status` is the strongest signal. Text matching covers providers
-    that return the limit only in the result body or stderr.
+    Structured error fields are preferred. Text-only fallback requires either
+    an error state or a definitive provider error phrase so successful prose
+    discussing limit handling is not classified as externally blocked.
     """
-    if isinstance(result_json, dict) and result_json.get("api_error_status") == 429:
+    result = result_json if isinstance(result_json, dict) else {}
+    if result.get("api_error_status") == 429:
         return True
-    result_text = result_json.get("result", "") if isinstance(result_json, dict) else ""
+    result_text = result.get("result", "")
     combined = f"{result_text if isinstance(result_text, str) else ''}\n{stderr_text or ''}".lower()
-    return any(marker in combined for marker in API_SPEND_LIMIT_MARKERS)
+    has_limit_marker = any(marker in combined for marker in API_SPEND_LIMIT_MARKERS)
+    terminal_reason = result.get("terminal_reason")
+    has_error_state = (
+        result.get("is_error") is True
+        or terminal_reason in {"api_error", "error", "rate_limit", "spend_limit", "usage_limit"}
+        or (returncode is not None and returncode != 0)
+    )
+    has_provider_error_phrase = any(phrase in combined for phrase in API_SPEND_LIMIT_ERROR_PHRASES) or (
+        has_limit_marker
+        and any(phrase in combined for phrase in ("you've hit", "you have hit", "you have reached"))
+    )
+    return has_limit_marker and (has_error_state or has_provider_error_phrase)
 
 
 def classify_run_status(
@@ -346,7 +366,7 @@ def classify_run_status(
 ) -> dict:
     combined = f"{stdout}\n{stderr}"
     result_json = parse_claude_json(stdout)
-    if detect_spend_limit(result_json, stderr):
+    if detect_spend_limit(result_json, stderr, returncode):
         return {
             "run_status": "blocked",
             "blocked_reason": "api_spend_limit",
