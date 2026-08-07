@@ -257,6 +257,8 @@ def test_standalone_dispatch_on_later_line_overrides_cli_flag(run_cli, tmp_path)
     "goal_dispatch: host-native にしないで typo を直す",
     "goal_dispatch: host-native ではなく inline にする",
     '"goal_dispatch: host-native" は設定例です',
+    "> goal_dispatch: host-native",
+    "```text\ngoal_dispatch: host-native\n```\ntypo を直す",
 ])
 def test_mission_mentions_do_not_override_cli_dispatch(run_cli, tmp_path, mission):
     result = run_cli(
