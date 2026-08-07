@@ -9,8 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Adaptive Simple-task routing now supports a configurable goal dispatch provider (#355): portable `inline` remains the default, while explicit mission guidance, `--goal-dispatch`, project `.mission/routing.yml`, or user configuration can select `host-native`. Init, set, and next verdicts record the effective dispatch; unknown hosts and invalid configuration warn and fail safe to inline without changing routing gates or `--force-mission` behavior.
+
 ### Fixed
 
+- Reviewer output bounds are now observable without becoming a quality gate (#353): `aggregate-reviews` measures each input's `mission-review/1` JSON bytes and template-external prose bytes/ratio, records the evidence and cross-session p50/p90 stats, and emits an exit-0 warning above provisional 20 KB / 0.7 thresholds. Scoring, findings, and agreement results are unchanged.
 - Session ownership now uses a 15-minute fenced lease CAS (`owner_session_id`, random `lease_id`, monotonic `fencing_epoch`, and `lease_expires_at`) instead of PID as the source of truth. Mutating commands renew the lease; read-only commands do not. Unexpired foreign writers and stale tokens exit 2, expired takeover increments the epoch and appends `lease_history`, `resume` performs the takeover, and lease-free legacy states acquire epoch 1 without rejection. `cleanup-stale` now prioritizes expired lease plus missing post-expiry activity heartbeat, while legacy states retain the prior PID rules (#354).
   Lease-bearing states require the explicit `MISSION_LEASE_ID` even when the session ID or PID fallback matches; Stop hook and `resume` no longer let diagnostic PID liveness override lease ownership, and renewal never shortens expiry during clock rollback. A token-free legacy acquisition now emits a machine-readable `MISSION_LEASE_CARRIER` only after atomic publish so an independent next process can explicitly carry the issued token without reading it from state. Stop-hook cleanup of an expired idle lease now reuses the `cleanup-stale --execute` janitor CAS, which revalidates expiry and heartbeat under lock and refuses a concurrent renewal or takeover without impersonating the owner token.
 

@@ -9,8 +9,13 @@
 
 ## [Unreleased]
 
+### 追加
+
+- Simple task の adaptive routing に設定可能な goal dispatch provider を追加した (#355)。portable な `inline` を既定に保ち、mission 内の明示指示、`--goal-dispatch`、project `.mission/routing.yml`、user 設定から `host-native` を選べる。init / set / next verdict は実効 dispatch を記録し、host 不明・設定不正時は WARN して inline へ fail-safe する。routing gate と `--force-mission` の挙動は変更しない。
+
 ### 修正
 
+- reviewer 出力境界を品質 gate にせず観測可能にした (#353)。`aggregate-reviews` は入力ごとの `mission-review/1` JSON byte 数とテンプレ外散文の byte 数・比率を計測し、evidence と session 横断 p50/p90 stats に記録する。暫定閾値 20 KB / 0.7 超過は exit 0 の WARN に留め、score・finding・agreement の集計結果は変更しない。
 - session ownership の管理元を PID から既定 15 分の fenced lease CAS (`owner_session_id`、random `lease_id`、単調増加 `fencing_epoch`、`lease_expires_at`) へ移した。mutating command は renew し、read-only command は renew しない。期限内 foreign writer と stale token は exit 2、期限切れ takeover は epoch を増加して `lease_history` を追記し、`resume` が takeover を実行する。lease のない legacy state は拒否せず epoch 1 を取得する。`cleanup-stale` は lease 付き state で「期限切れ、かつ期限後の activity heartbeat なし」を優先し、legacy state は従来の PID 規則を維持する (#354)。
   lease 付き state は session ID や PID fallback が一致しても `MISSION_LEASE_ID` の明示を必須とする。Stop hook と `resume` は診断用 PID の生死を lease ownership より優先せず、clock rollback 時の renew も expiry を短縮しない。token なしの legacy 初回取得は atomic publish 成功後にのみ machine-readable な `MISSION_LEASE_CARRIER` を出力し、次の独立 process が state を読まず発行 token を明示的に引き回せるようにした。expired idle lease の Stop hook cleanup は `cleanup-stale --execute` の janitor CAS を再利用し、lock 内で expiry と heartbeat を再検証して、並行 renew/takeover 済みなら owner token を偽装せず halt を拒否する。
 
