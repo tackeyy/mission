@@ -787,6 +787,38 @@ limit 到達前に完走した mission 6 records からの救済観測:
 `results/2026-08-07-portfolio-v6-repeats3-summary.json` /
 `artifacts/2026-08-07-portfolio-v6-repeats3/`
 
+### portfolio-v7 (repeats=3 分散確定、2026-08-07) — #357/#358 適用 runner
+
+commit `1e8bdc3` (#357 spend-limit 自動停止 + #358 arm 別予算 + #362 適用後)。v5-speed と
+同一タスクを 2 分割で再測: v7a = Standard 3 tasks x repeats 3 (18 records、完走)、
+v7b = Complex 2 tasks x repeats 3 (12 中 10 records、spend limit で自動停止)、
+v7c = 補完走の試行 (枠未回復のため record 1/4 で自動停止・消費 $0)。予算は
+goal $3 / mission $10 (#358 較正値)。全完走 record で marker 1.0 品質同点。
+
+Standard (v7a、mission n=9): 平均 9.98 min / 中央値 10.58 / 範囲 6.26-14.08。
+iter=2 発火は 9 中 2 回 (いずれも std-metrics)。goal 平均 1.11 min → 約 9.0x。
+v5-speed の各値 (metrics 6.02 / policy 4.84 / contract 18.27 iter=2) はいずれも
+この分布内にあり、単発値の差は反復分散で説明できる。
+
+Complex (v7b、mission comparable n=4): cx-config 11.04 / 12.99 min (standard tier)、
+cx-ledger 17.41 / 17.58 min (full tier)。v5/v6 の 8.33-18.27 / 13.62-14.38 と整合し、
+**full-tier フルループ 13.6-17.6 min は再現性のある実コスト**。goal 平均 1.59 min。
+
+運用上の実測:
+
+1. **#357 は 2 回実戦発火**した。v7b は record 10/12 で 429 を blocked-external 分類し
+   未起動 record を停止、v7c は record 1/4 で即停止 (消費 $0)。v6 型の 12 連続無駄打ちは
+   再発していない。
+2. **#358 の $10 較正は必須だった**。mission の record 単価は $4.71-9.31 で、旧上限
+   $6 なら v7a の 9 中 6 records が blocked になっていた。budget_blocked_records は 0。
+3. cx タスクの n=3 化は枠回復待ちが必要なため見送り、n=2 (範囲 0.2-2.0 min) を
+   確定データとする。
+
+一次データ: `results/2026-08-07-portfolio-v7a-std-repeats3.jsonl` /
+`results/2026-08-07-portfolio-v7b-cx-repeats3.jsonl` /
+`results/2026-08-07-portfolio-v7c-cx-fill.jsonl` (各 -summary.json 併置)
+
+
 
 ## Discriminating cohort clean re-run (discriminating-v2) — v1 findings の訂正
 

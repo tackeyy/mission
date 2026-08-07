@@ -780,6 +780,40 @@ Primary data: `results/2026-08-07-portfolio-v6-repeats3.jsonl` /
 `results/2026-08-07-portfolio-v6-repeats3-summary.json` /
 `artifacts/2026-08-07-portfolio-v6-repeats3/`
 
+### portfolio-v7 (repeats=3 variance determination, 2026-08-07) — runner with #357/#358
+
+Commit `1e8bdc3` (after #357 spend-limit auto-stop + #358 per-arm budgets + #362).
+Same tasks as v5-speed, re-measured in two parts: v7a = 3 Standard tasks x
+repeats 3 (18 records, full completion), v7b = 2 Complex tasks x repeats 3 (10 of
+12 records, auto-stopped at the spend limit), v7c = a fill attempt (window not yet
+recovered; auto-stopped at record 1/4, $0 spent). Budgets: goal $3 / mission $10
+(#358 calibration). Quality tied at marker 1.0 on every completed record.
+
+Standard (v7a, mission n=9): mean 9.98 min / median 10.58 / range 6.26-14.08.
+iter=2 fired 2 of 9 (both std-metrics). Goal mean 1.11 min → ~9.0x. Every
+v5-speed value (metrics 6.02 / policy 4.84 / contract 18.27 at iter=2) lies inside
+this distribution; single-run differences are explained by repeat variance.
+
+Complex (v7b, mission comparable n=4): cx-config 11.04 / 12.99 min (standard
+tier), cx-ledger 17.41 / 17.58 min (full tier) — consistent with v5/v6, so the
+**13.6-17.6 min full-tier loop is a reproducible real cost**. Goal mean 1.59 min.
+
+Operational observations:
+
+1. **#357 fired twice in production**: v7b classified the 429 as blocked-external
+   at record 10/12 and stopped launching; v7c stopped at record 1/4 with $0 spent.
+   The v6-style 12-record waste did not recur.
+2. **The #358 $10 calibration was essential**: mission per-record cost ranged
+   $4.71-9.31, so the old $6 cap would have blocked 6 of v7a's 9 records.
+   budget_blocked_records is 0.
+3. Filling the Complex cells to n=3 would require waiting out the usage window;
+   n=2 (spread 0.2-2.0 min) is accepted as final.
+
+Primary data: `results/2026-08-07-portfolio-v7a-std-repeats3.jsonl` /
+`results/2026-08-07-portfolio-v7b-cx-repeats3.jsonl` /
+`results/2026-08-07-portfolio-v7c-cx-fill.jsonl` (with adjacent -summary.json)
+
+
 
 ## Discriminating cohort clean re-run (discriminating-v2) — correcting the v1 findings
 

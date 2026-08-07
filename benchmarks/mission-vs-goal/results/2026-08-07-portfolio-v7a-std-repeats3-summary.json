@@ -1,0 +1,73 @@
+{
+  "arms": {
+    "claude_code_goal_command": {
+      "api_spend_limit_records": 0,
+      "average_elapsed_minutes": 1.11,
+      "average_evidence_completeness": 5.0,
+      "average_intervention_count": 0.0,
+      "average_quality_marker_score": 1.0,
+      "average_quality_score": 5.0,
+      "blocked_records": 0,
+      "budget_blocked_records": 0,
+      "comparable_average_elapsed_minutes": 1.11,
+      "comparable_average_quality_score": 5.0,
+      "comparable_completion_rate": 1.0,
+      "comparable_cost_usd_mean": 1.6703,
+      "comparable_records": 9,
+      "comparable_validator_pass_rate": 1.0,
+      "completion_rate": 1.0,
+      "cost_usd_mean": 1.6703,
+      "cost_usd_total": 15.0326,
+      "evidence_only_records": 0,
+      "marker_score_variance": 0.0,
+      "permission_degraded_records": 0,
+      "records": 9,
+      "routed_records": 0,
+      "validator_pass_rate": 1.0
+    },
+    "mission": {
+      "api_spend_limit_records": 0,
+      "average_elapsed_minutes": 9.98,
+      "average_evidence_completeness": 5.0,
+      "average_intervention_count": 0.0,
+      "average_quality_marker_score": 1.0,
+      "average_quality_score": 5.0,
+      "blocked_records": 0,
+      "budget_blocked_records": 0,
+      "comparable_average_elapsed_minutes": 9.98,
+      "comparable_average_quality_score": 5.0,
+      "comparable_completion_rate": 1.0,
+      "comparable_cost_usd_mean": 7.2477,
+      "comparable_records": 9,
+      "comparable_validator_pass_rate": 1.0,
+      "completion_rate": 1.0,
+      "cost_usd_mean": 7.2477,
+      "cost_usd_total": 65.2294,
+      "evidence_only_records": 0,
+      "marker_score_variance": 0.0,
+      "permission_degraded_records": 0,
+      "records": 9,
+      "routed_records": 0,
+      "validator_pass_rate": 1.0
+    }
+  },
+  "expected_records": 18,
+  "limitations": [
+    "Claude Code print mode smoke; does not fully exercise multi-turn interactive /goal persistence.",
+    "Quality and evidence scores are automated heuristic scores, not blind human review.",
+    "Blocked records are excluded from comparable quality-marker aggregates."
+  ],
+  "mission_profile": "full",
+  "records": 18,
+  "repeats": 3,
+  "run_id": "2026-08-07-portfolio-v7a-std-repeats3",
+  "selected_task_ids": [
+    "portfolio-std-contract",
+    "portfolio-std-metrics",
+    "portfolio-std-policy"
+  ],
+  "starting_commit": "1e8bdc3",
+  "stopped_early": false,
+  "task_cohort": "portfolio",
+  "task_file": "benchmarks/mission-vs-goal/tasks.portfolio.json"
+}
