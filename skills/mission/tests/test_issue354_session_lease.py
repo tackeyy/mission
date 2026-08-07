@@ -60,6 +60,22 @@ def _raw_cli(cwd: Path, *args: str, lease_id: str | None = None):
     )
 
 
+@pytest.mark.parametrize("relative_state_path", [
+    Path(".mission-state/sessions/session-a.json"),
+    Path(".mission-state/state.json"),
+])
+def test_project_root_uses_nearest_state_structure_when_ancestor_has_same_name(
+    tmp_path, relative_state_path,
+):
+    project = tmp_path / ".mission-state" / "outer" / "project"
+    state_path = project / relative_state_path
+
+    derived = MISSION_STATE._project_root_of(state_path)
+
+    assert derived == project
+    assert MISSION_STATE.lock_file(derived) == project / ".mission-state" / ".state.lock"
+
+
 def test_legacy_state_acquires_epoch_one_lease(monkeypatch):
     monkeypatch.setenv("MISSION_STATE_NOW", "2026-08-07T12:00:00Z")
     monkeypatch.setenv("MISSION_LEASE_ID", "new-lease")
