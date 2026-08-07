@@ -2,6 +2,7 @@
 import json
 import os
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HOOK = Path(__file__).resolve().parents[3] / "scripts" / "mission-stop-guard.sh"
@@ -77,6 +78,121 @@ def test_hook_pid_fallback(tmp_path):
     assert '"decision"' in r.stdout and "block" in r.stdout
 
 
+def _lease_fields(owner_session_id, *, expired=False):
+    expires_at = datetime.now(timezone.utc) + (
+        -timedelta(minutes=10) if expired else timedelta(minutes=10)
+    )
+    return {
+        "owner_session_id": owner_session_id,
+        "lease_id": f"lease-{owner_session_id}",
+        "fencing_epoch": 1,
+        "lease_expires_at": expires_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "updated_at": (
+            "2020-01-01T00:00:00Z" if expired
+            else datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        ),
+    }
+
+
+def test_envless_hook_selects_pid_owner_after_foreign_unexpired_lease(tmp_path):
+    """#354: an earlier foreign lease cannot capture an envless PID session hook."""
+    _write_session(
+        tmp_path, "aaa-foreign", mission="foreign",
+        **_lease_fields("aaa-foreign"),
+    )
+    _write_session(
+        tmp_path, "pid-4242", mission="own",
+        **_lease_fields("pid-4242"),
+    )
+
+    result = _run_hook(tmp_path, {"MISSION_HOOK_AGENT_PID": "4242"})
+
+    assert "block" in result.stdout
+    assert "own" in result.stdout
+    assert "foreign" not in result.stdout
+
+
+def test_envless_hook_does_not_bypass_own_after_foreign_expired_lease(tmp_path):
+    """#354: foreign expired cleanup ordering cannot bypass the active PID owner."""
+    _write_session(
+        tmp_path, "aaa-expired", mission="foreign-expired",
+        phase="executing", phase_started_at="2020-01-01T00:00:00Z",
+        last_activity_at="2020-01-01T00:00:00Z",
+        **_lease_fields("aaa-expired", expired=True),
+    )
+    _write_session(
+        tmp_path, "pid-4242", mission="own-active",
+        **_lease_fields("pid-4242"),
+    )
+
+    result = _run_hook(tmp_path, {"MISSION_HOOK_AGENT_PID": "4242"})
+
+    assert "block" in result.stdout
+    assert "own-active" in result.stdout
+    own = json.loads(
+        (tmp_path / ".mission-state" / "sessions" / "pid-4242.json").read_text()
+    )
+    assert own["loop_active"] is True
+    assert own["halt_reason"] == ""
+
+
+def test_envless_hook_rejects_pid_filename_with_foreign_lease_owner(tmp_path):
+    """#354: both the state filename SID and fenced owner must match."""
+    _write_session(
+        tmp_path, "pid-4242", mission="forged-owner",
+        **_lease_fields("pid-9999"),
+    )
+
+    result = _run_hook(tmp_path, {"MISSION_HOOK_AGENT_PID": "4242"})
+
+    assert "block" not in result.stdout
+
+
+def test_envless_hook_falls_back_to_legacy_after_exact_owner_mismatch(tmp_path):
+    """#354: an invalid exact fenced state must not hide the same-PID legacy state."""
+    _write_session(
+        tmp_path, "pid-4242", mission="invalid-exact",
+        **_lease_fields("pid-9999"),
+    )
+    _write_session(tmp_path, "legacy-own", mission="legacy-own", pid=4242)
+
+    result = _run_hook(tmp_path, {"MISSION_HOOK_AGENT_PID": "4242"})
+
+    assert "block" in result.stdout
+    assert "legacy-own" in result.stdout
+    assert "invalid-exact" not in result.stdout
+
+
+def test_envless_hook_falls_back_to_legacy_after_terminal_exact_state(tmp_path):
+    """#354: a terminal exact state must not hide the same-PID legacy state."""
+    _write_session(
+        tmp_path, "pid-4242", mission="terminal-exact", passes=True,
+        **_lease_fields("pid-4242"),
+    )
+    _write_session(tmp_path, "legacy-own", mission="legacy-own", pid=4242)
+
+    result = _run_hook(tmp_path, {"MISSION_HOOK_AGENT_PID": "4242"})
+
+    assert "block" in result.stdout
+    assert "legacy-own" in result.stdout
+    assert "terminal-exact" not in result.stdout
+
+
+def test_envless_hook_prefers_valid_exact_fenced_state_over_legacy(tmp_path):
+    """#354: the compatibility fallback cannot outrank a valid fenced state."""
+    _write_session(
+        tmp_path, "pid-4242", mission="valid-exact",
+        **_lease_fields("pid-4242"),
+    )
+    _write_session(tmp_path, "aaa-legacy", mission="legacy-own", pid=4242)
+
+    result = _run_hook(tmp_path, {"MISSION_HOOK_AGENT_PID": "4242"})
+
+    assert "block" in result.stdout
+    assert "valid-exact" in result.stdout
+    assert "legacy-own" not in result.stdout
+
+
 def test_hook_blocks_own_session_even_if_pid_dead(tmp_path):
     """sid 一致なら state の pid が dead (resume/compaction で PID 変化) でも block する (M-1)."""
     _write_session(tmp_path, "cc-mine", pid=999999)  # dead pid
@@ -104,6 +220,88 @@ def test_hook_orphan_halt_when_envless_and_pid_dead(tmp_path):
     assert st["halt_reason"].startswith("orphan:") and st["loop_active"] is False
     # #190: shell 側の orphan auto-halt も halt_category='stale' を記録する
     assert st["halt_category"] == "stale"
+
+
+def test_hook_does_not_halt_unexpired_lease_when_diagnostic_pid_is_dead(tmp_path):
+    """#354: lease ownership is primary; a dead diagnostic PID cannot orphan an active lease."""
+    import datetime
+
+    expires = (
+        datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=10)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _write_session(
+        tmp_path,
+        "leased",
+        pid=999999,
+        owner_session_id="leased",
+        lease_id="lease-token",
+        fencing_epoch=2,
+        lease_expires_at=expires,
+        updated_at=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+
+    result = _run_hook(tmp_path, {})
+
+    state = json.loads((tmp_path / ".mission-state" / "sessions" / "leased.json").read_text())
+    assert "block" in result.stdout
+    assert state["loop_active"] is True
+    assert state["halt_reason"] == ""
+
+
+def test_hook_does_not_idle_autohalt_unexpired_lease(tmp_path):
+    """#354: even a stale updated_at cannot override an unexpired lease."""
+    import datetime
+
+    expires = (
+        datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=10)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _write_session(
+        tmp_path,
+        "cc-leased-stale",
+        pid=999999,
+        owner_session_id="cc-leased-stale",
+        lease_id="lease-token",
+        fencing_epoch=2,
+        lease_expires_at=expires,
+        updated_at="2020-01-01T00:00:00Z",
+    )
+
+    result = _run_hook(tmp_path, {"CLAUDE_CODE_SESSION_ID": "leased-stale"})
+
+    state = json.loads(
+        (tmp_path / ".mission-state" / "sessions" / "cc-leased-stale.json").read_text()
+    )
+    assert "block" in result.stdout
+    assert state["loop_active"] is True
+    assert state["halt_reason"] == ""
+
+
+def test_hook_autohalts_expired_idle_lease_without_writer_token(tmp_path):
+    """#354: expired idle lease is terminalized by the CAS janitor, not a forged writer."""
+    _write_session(
+        tmp_path,
+        "cc-expired-idle",
+        mission_id="expired-idle-mission",
+        pid=999999,
+        owner_session_id="cc-expired-idle",
+        lease_id="expired-token",
+        fencing_epoch=4,
+        lease_expires_at="2020-01-01T00:15:00Z",
+        updated_at="2020-01-01T00:00:00Z",
+        last_activity_at="2020-01-01T00:00:00Z",
+        phase="executing",
+        phase_started_at="2020-01-01T00:00:00Z",
+    )
+
+    result = _run_hook(tmp_path, {"CLAUDE_CODE_SESSION_ID": "expired-idle"})
+
+    state = json.loads(
+        (tmp_path / ".mission-state" / "sessions" / "cc-expired-idle.json").read_text()
+    )
+    assert "block" not in result.stdout, result.stdout
+    assert state["loop_active"] is False
+    assert state["halt_category"] == "stale"
+    assert "session lease expired" in state["halt_reason"]
 
 
 def test_hook_warns_on_stale_state(tmp_path):

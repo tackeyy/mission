@@ -8,6 +8,14 @@ from pathlib import Path
 import pytest
 
 MISSION_STATE_PY = Path(__file__).resolve().parent.parent / "bin" / "mission-state.py"
+LEASE_FIELDS = ("owner_session_id", "lease_id", "fencing_epoch", "lease_expires_at")
+
+
+def _make_legacy_state(path):
+    data = json.loads(path.read_text())
+    for key in LEASE_FIELDS:
+        data.pop(key, None)
+    path.write_text(json.dumps(data))
 
 
 def _load():
@@ -74,6 +82,7 @@ def test_cleanup_stale_removes_orphan_from_aggregate(tmp_path, run_cli):
     """dead-pid orphan を cleanup-stale --execute すると aggregate から除去される (lock内更新)."""
     run_cli("init", "g", "--complexity", "Standard", cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "orphanX"})
     run_cli("set", "pid=999999", "pid_source=agent", cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "orphanX"})  # dead pid 擬制
+    _make_legacy_state(tmp_path / ".mission-state" / "sessions" / "orphanX.json")
     agg0 = json.loads((tmp_path / ".mission-state" / "aggregate.json").read_text())
     assert "orphanX" in agg0["active_sessions"]
     run_cli("cleanup-stale", "--root", str(tmp_path), "--execute", cwd=tmp_path)
@@ -88,6 +97,8 @@ def test_halt_all_removes_from_aggregate(tmp_path, run_cli, monkeypatch):
     """
     run_cli("init", "g", "--complexity", "Standard", cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "hA"})
     run_cli("init", "g2", "--complexity", "Standard", cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "hB"})
+    _make_legacy_state(tmp_path / ".mission-state" / "sessions" / "hA.json")
+    _make_legacy_state(tmp_path / ".mission-state" / "sessions" / "hB.json")
     mod = _load()
     monkeypatch.setattr(mod, "_default_search_roots", lambda: [tmp_path])
     mod.cmd_halt(argparse.Namespace(all=True, reason="all stop"))
@@ -101,6 +112,7 @@ def test_halt_all_root_scopes_and_spares_outside(tmp_path, run_cli):
     a.mkdir(); b.mkdir()
     run_cli("init", "g", "--complexity", "Standard", cwd=a, env_extra={"MISSION_SESSION_ID": "ina"})
     run_cli("init", "g", "--complexity", "Standard", cwd=b, env_extra={"MISSION_SESSION_ID": "inb"})
+    _make_legacy_state(a / ".mission-state" / "sessions" / "ina.json")
     r = run_cli("halt", "--all", "--root", str(a), "--reason", "scoped", cwd=a)
     assert r.returncode == 0, r.stderr
     sta = json.loads((a / ".mission-state" / "sessions" / "ina.json").read_text())

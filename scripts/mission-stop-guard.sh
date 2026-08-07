@@ -128,25 +128,55 @@ _mission_halt_session() {
       --reason "$reason" --category stale >/dev/null
   )
 }
+
+_mission_cleanup_expired_lease() {
+  local sf="$1"
+  local root output
+  root=$(jq -r '.project_root // empty' "$sf" 2>/dev/null || echo "")
+  [ -z "$root" ] && root="$CWD"
+  output=$(
+    cd "$root" 2>/dev/null || exit 1
+    python3 "$MISSION_STATE_PY" cleanup-stale --root "$root" --execute
+  ) || return 1
+  printf '%s' "$output" | jq -e --arg target "$sf" \
+    'any(.halted[]?; .path == $target)' >/dev/null 2>&1
+}
 HOOK_SID=""
+HOOK_SID_FROM_PID=false
 if [ -n "${MISSION_SESSION_ID:-}" ]; then
   HOOK_SID="$(_mission_sanitize_sid "${MISSION_SESSION_ID}")"
 elif [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
   HOOK_SID="cc-$(_mission_sanitize_sid "${CLAUDE_CODE_SESSION_ID}")"
 elif [ -n "${CODEX_THREAD_ID:-}" ]; then
   HOOK_SID="cx-$(_mission_sanitize_sid "${CODEX_THREAD_ID}")"
+elif [ -n "${AGENT_PID:-}" ]; then
+  # mission-state.py resolve_session_id() の env-less fallback と同じ owner SID。
+  HOOK_SID="pid-$(_mission_sanitize_sid "${AGENT_PID}")"
+  HOOK_SID_FROM_PID=true
 fi
 
 # === C-2/C-3: sessions/ ディレクトリ優先 (multi-session 対応) ===
 if [ -d "$SESSIONS_DIR" ]; then
   HAS_ACTIVE=false
+  EXACT_SESSION_FILE=""
+  EXACT_SESSION_SEEN=false
   if [ -n "$HOOK_SID" ] && [ -f "$SESSIONS_DIR/$HOOK_SID.json" ]; then
-    set -- "$SESSIONS_DIR/$HOOK_SID.json"
+    EXACT_SESSION_FILE="$SESSIONS_DIR/$HOOK_SID.json"
+    if [ "$HOOK_SID_FROM_PID" = "true" ]; then
+      # exact fenced state を最優先し、不適格/terminal の場合だけ legacy PID stateへ降下。
+      set -- "$EXACT_SESSION_FILE" "$SESSIONS_DIR"/*.json
+    else
+      set -- "$EXACT_SESSION_FILE"
+    fi
   else
     set -- "$SESSIONS_DIR"/*.json
   fi
   for sf in "$@"; do
     [ -f "$sf" ] || continue
+    if [ -n "$EXACT_SESSION_FILE" ] && [ "$sf" = "$EXACT_SESSION_FILE" ]; then
+      [ "$EXACT_SESSION_SEEN" = "true" ] && continue
+      EXACT_SESSION_SEEN=true
+    fi
     s_loop=$(jq -r '.loop_active // false' "$sf" 2>/dev/null || echo "false")
     [ "$s_loop" != "true" ] && continue
     s_passes=$(jq -r '.passes // false' "$sf" 2>/dev/null || echo "false")
@@ -166,17 +196,36 @@ if [ -d "$SESSIONS_DIR" ]; then
     # env が無い環境のみ従来の pid 照合に fallback。
     sf_sid=$(basename "$sf" .json)
     s_pid=$(jq -r '.pid // empty' "$sf" 2>/dev/null || echo "")
+    s_lease_owner=$(jq -r '.owner_session_id // empty' "$sf" 2>/dev/null || echo "")
+    s_lease_id=$(jq -r '.lease_id // empty' "$sf" 2>/dev/null || echo "")
+    s_lease_epoch=$(jq -r '.fencing_epoch // empty' "$sf" 2>/dev/null || echo "")
+    s_lease_expires=$(jq -r '.lease_expires_at // empty' "$sf" 2>/dev/null || echo "")
+    LEASE_PRESENT=false
+    LEASE_UNEXPIRED=false
+    if [ -n "$s_lease_owner" ] && [ -n "$s_lease_id" ] && [ -n "$s_lease_epoch" ] && [ -n "$s_lease_expires" ]; then
+      LEASE_PRESENT=true
+      LEASE_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" -u "$s_lease_expires" +%s 2>/dev/null || date -u -d "$s_lease_expires" +%s 2>/dev/null || echo "")
+      if [ -n "$LEASE_EPOCH" ] && [ "$LEASE_EPOCH" -gt "$(date +%s)" ] 2>/dev/null; then
+        LEASE_UNEXPIRED=true
+      fi
+    fi
     if [ -n "$HOOK_SID" ]; then
-      [ "$sf_sid" != "$HOOK_SID" ] && continue   # 自分の session でない
-    elif [ -n "$s_pid" ] && [ "$s_pid" != "null" ] && [ -n "${AGENT_PID:-}" ]; then
-      if [ "$s_pid" != "$AGENT_PID" ]; then
+      if [ "$sf_sid" = "$HOOK_SID" ]; then
+        # fenced state はファイル名だけでなく、記録された owner も一致必須。
+        [ "$LEASE_PRESENT" = "true" ] && [ "$s_lease_owner" != "$HOOK_SID" ] && continue
+      elif [ "$HOOK_SID_FROM_PID" = "true" ] && [ "$LEASE_PRESENT" != "true" ]; then
+        # lease 導入前の任意名 state は従来どおり diagnostic PID で照合する。
+        [ -z "$s_pid" ] && continue
+        [ "$s_pid" = "null" ] && continue
+        [ "$s_pid" != "$AGENT_PID" ] && continue
+      else
         continue
       fi
     fi
 
     # PID alive 照合 (env なし pid fallback 時のみ)。HOOK_SID 一致時は自セッション確定のため
     # スキップ — resume/compaction で PID が変わっても自分の state を block できる (M-1)。
-    if [ -z "$HOOK_SID" ] && [ -n "$s_pid" ] && [ "$s_pid" != "null" ] && [ "$s_pid" -gt 0 ] 2>/dev/null; then
+    if [ "$LEASE_PRESENT" != "true" ] && [ -z "$HOOK_SID" ] && [ -n "$s_pid" ] && [ "$s_pid" != "null" ] && [ "$s_pid" -gt 0 ] 2>/dev/null; then
       if ! kill -0 "$s_pid" 2>/dev/null; then
         _mission_halt_session "$sf" "orphan: pid $s_pid dead" || true
         continue
@@ -185,6 +234,8 @@ if [ -d "$SESSIONS_DIR" ]; then
 
     HAS_ACTIVE=true
     SESSION_FILE_TO_BLOCK="$sf"
+    SESSION_LEASE_PRESENT="$LEASE_PRESENT"
+    SESSION_LEASE_UNEXPIRED="$LEASE_UNEXPIRED"
     break
   done
 
@@ -208,13 +259,28 @@ if [ -d "$SESSIONS_DIR" ]; then
         [ "$STALE_HALT_SEC" -lt 300 ] && STALE_HALT_SEC=10800
         if [ "$DIFF" -gt "$STALE_HALT_SEC" ] 2>/dev/null; then
           AWAITING_USER=$(jq -r '.awaiting_user // false' "$SESSION_FILE_TO_BLOCK" 2>/dev/null || echo "false")
-          if [ "$AWAITING_USER" = "true" ]; then
+          if [ "${SESSION_LEASE_UNEXPIRED:-false}" = "true" ]; then
+            STALE="[WARN: state が $(( DIFF / 60 ))分 未更新だが session lease は有効なため stale auto-halt を保留] "
+          elif [ "$AWAITING_USER" = "true" ]; then
             STALE="[WARN: state が $(( DIFF / 60 ))分 未更新だが awaiting_user=true のため stale auto-halt を保留] "
           else
           # 3h (または MISSION_STALE_HALT_SECONDS) 超: state CLI の lock/terminal helper で halt
           STALE_MINS=$(( DIFF / 60 ))
           STALE_HALT_REASON="stale: auto-halted after ${STALE_MINS}m idle"
-          if ! _mission_halt_session "$SESSION_FILE_TO_BLOCK" "$STALE_HALT_REASON"; then
+          if [ "${SESSION_LEASE_PRESENT:-false}" = "true" ]; then
+            if _mission_cleanup_expired_lease "$SESSION_FILE_TO_BLOCK"; then
+              HALT_OK=0
+            else
+              HALT_OK=$?
+            fi
+          else
+            if _mission_halt_session "$SESSION_FILE_TO_BLOCK" "$STALE_HALT_REASON"; then
+              HALT_OK=0
+            else
+              HALT_OK=$?
+            fi
+          fi
+          if [ "$HALT_OK" -ne 0 ]; then
             printf '{"decision":"block","reason":"stale auto-halt の書き込みに失敗。手動で cleanup-stale を実行してください"}
 '
             exit 0

@@ -140,13 +140,18 @@ def test_e2e_pushscore_markpasses_hook_unblocks(tmp_path, run_cli):
 def test_refresh_pid_force_overrides_alive_owner(tmp_path, monkeypatch, run_cli):
     """C#1: --force なら alive agent CLI owner でも拒否せず継承する (line 690 の force ブランチ)."""
     run_cli("init", "g", "--complexity", "Standard", cwd=tmp_path)
+    state_path = tmp_path / ".mission-state" / "sessions" / "test.json"
+    legacy_state = json.loads(state_path.read_text())
+    for key in ("owner_session_id", "lease_id", "fencing_epoch", "lease_expires_at", "lease_history"):
+        legacy_state.pop(key, None)
+    state_path.write_text(json.dumps(legacy_state))
     mod = _load()
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("MISSION_SESSION_ID", "test")
     monkeypatch.setattr(mod, "_pid_is_agent", lambda p: True)
     monkeypatch.setattr(mod, "find_agent_pid", lambda: 99999)
     mod.cmd_refresh_pid(argparse.Namespace(force=True, no_reactivate=False))  # exit しない
-    st = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
+    st = json.loads(state_path.read_text())
     assert st["pid"] == 99999
 
 

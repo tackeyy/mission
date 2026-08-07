@@ -44,6 +44,9 @@ def test_push_score_appends_multiple_in_order(state_dir, run_cli, read_state):
 
 def test_parallel_push_score_preserves_all_entries(state_dir, run_cli, read_state):
     """#98: 同一 session への並列 push-score で score_history が欠損しない。"""
+    # Parallel writers must share the fencing token acquired before fan-out.
+    run_cli("set", "iteration=0", cwd=state_dir.parent, check=True)
+
     def push(iteration):
         return run_legacy_push_score(
             run_cli,
@@ -249,7 +252,11 @@ def test_push_score_canonical_keys_no_warning(state_dir, run_cli):
                 "--items", '{"mission_achievement": 4.0, "accuracy": 4.0, "completeness": 4.0, "usability": 4.0, "reviewer_consensus": 4.0}',
                 cwd=state_dir.parent)
     assert r.returncode == 0
-    assert "キー" not in r.stderr and "key" not in r.stderr.lower()
+    diagnostics = "\n".join(
+        line for line in r.stderr.splitlines()
+        if not line.startswith("MISSION_LEASE_CARRIER=")
+    )
+    assert "キー" not in diagnostics and "key" not in diagnostics.lower()
 
 
 def test_push_score_rejects_when_scalar_scores_inflate_above_items(state_dir, run_cli):
