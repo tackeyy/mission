@@ -818,6 +818,40 @@ cx-ledger 17.41 / 17.58 min (full tier)。v5/v6 の 8.33-18.27 / 13.62-14.38 と
 `results/2026-08-07-portfolio-v7b-cx-repeats3.jsonl` /
 `results/2026-08-07-portfolio-v7c-cx-fill.jsonl` (各 -summary.json 併置)
 
+### portfolio-v8a (Standard 再測、2026-08-07) — #350-#355 適用後の gate リグレッション確認
+
+commit `05d08c5` (#350 reviewer-window 必須化 + #351 artifact lint + #352 bounded context
+観測 + #353 reviewer 出力観測 + #354 session lease + #355 goal dispatch の全マージ後)。
+v7a と同一の Standard 3 tasks x repeats 3 (18 records)、予算 goal $3 / mission $10。
+mission は 7/9 完走、残り 2 records (std-metrics rep3 / std-policy rep3) は
+api_spend_limit で #357 が自動停止 (blocked、非比較対象)。全完走 record で marker 1.0
+品質同点。
+
+Standard (mission comparable n=7): 平均 9.26 min / 中央値 8.46 / 範囲 6.78-13.28。
+v7a (平均 9.98 / 中央値 10.58 / 範囲 6.26-14.08) と同水準で、**#350-#353 の
+検証・観測ゲート追加による速度リグレッションはない**。iter=2 発火は 7 中 0 回
+(v7a は 9 中 2 回。iter 分布の揺らぎの範囲内)。goal 平均 1.11 min → 約 8.4x。
+mission record 単価 $5.25-9.31 で #358 の $10 較正内に収まる。
+
+観測ゲートの発火実測 (state 検分、n=7):
+
+0. **#350 reviewer-window 必須化の並列発火率は 7/7 = 100%** (last_parallel_execution
+   全 true、unknown 0%。v5-speed 時点の機械観測 1/5 から gate 化で完全収束)。
+1. **#353 reviewer 出力観測は全 run で記録された** (reviewer_output_records 2 件/run)。
+   WARN 発火 (20KB/0.7 閾値超過) は 0 件。
+2. **#354 session lease は全 run で付与された** (lease_id / fencing_epoch / 期限)。
+   競合・fencing 拒否は 0 件。
+3. **#351 artifact lint は全 run で `skipped`**。bench の mission session は state に
+   `artifact_path` を記録しないため、lint は一度も走っていない (発火率 0 の意味は
+   「違反なし」ではなく「観測機会なし」)。gate 化判断には artifact_path 記録の普及が
+   前提になる。
+4. **#352 bounded context は全 run で対象外**。完走 run が全て iter=1 で終了し、
+   発火条件 (iter>=2 かつ critic 新規スコープなし) に到達しなかった。
+5. **#357 は本 run でも 2 回実戦発火**し、無駄打ちなく停止した。
+
+一次データ: `results/2026-08-07-portfolio-v8a-std-post-gates.jsonl`
+(-summary.json 併置) / `artifacts/2026-08-07-portfolio-v8a-std-post-gates/`
+
 
 
 ## Discriminating cohort clean re-run (discriminating-v2) — v1 findings の訂正
