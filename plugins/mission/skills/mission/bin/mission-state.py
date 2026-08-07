@@ -494,14 +494,31 @@ def detect_host() -> str:
     return "unknown"
 
 
-def _read_routing_config(path: Path, source: str) -> dict | None:
+def _read_routing_config(path: Path, source: str, allowed_root: Path | None = None) -> dict | None:
     """Read the version-1 minimal routing config without a YAML dependency."""
+    if allowed_root is not None and path.is_symlink():
+        reason = f"routing config symlink rejected at {source}"
+        print(f"WARN #355: {reason}; using inline", file=sys.stderr)
+        return {"mode": "inline", "source": source, "fallback_reason": reason}
+    if allowed_root is not None:
+        try:
+            resolved_path = path.resolve(strict=False)
+            resolved_root = allowed_root.resolve(strict=True)
+            resolved_path.relative_to(resolved_root)
+        except ValueError:
+            reason = f"routing config escapes project root at {source}"
+            print(f"WARN #355: {reason}; using inline", file=sys.stderr)
+            return {"mode": "inline", "source": source, "fallback_reason": reason}
+        except (OSError, RuntimeError) as exc:
+            reason = f"routing config path unreadable at {source}: {exc.__class__.__name__}"
+            print(f"WARN #355: {reason}; using inline", file=sys.stderr)
+            return {"mode": "inline", "source": source, "fallback_reason": reason}
     if not path.is_file():
         return None
     values: dict[str, str] = {}
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         reason = f"routing config unreadable at {source}: {exc.__class__.__name__}"
         print(f"WARN #355: {reason}; using inline", file=sys.stderr)
         return {"mode": "inline", "source": source, "fallback_reason": reason}
@@ -520,6 +537,10 @@ def _read_routing_config(path: Path, source: str) -> dict | None:
             reason = f"unknown routing config key '{key}' at {source}"
             print(f"WARN #355: {reason}; using inline", file=sys.stderr)
             return {"mode": "inline", "source": source, "fallback_reason": reason}
+        if key in values:
+            reason = f"duplicate routing config key '{key}' at {source}"
+            print(f"WARN #355: {reason}; using inline", file=sys.stderr)
+            return {"mode": "inline", "source": source, "fallback_reason": reason}
         values[key] = value
     if values.get("version") != "1":
         reason = f"unsupported routing config version '{values.get('version')}' at {source}"
@@ -535,7 +556,11 @@ def _read_routing_config(path: Path, source: str) -> dict | None:
 
 def _routing_config_decision(cwd: Path | None = None) -> dict:
     root = cwd or Path.cwd()
-    project = _read_routing_config(root / ".mission" / "routing.yml", "project:.mission/routing.yml")
+    project = _read_routing_config(
+        root / ".mission" / "routing.yml",
+        "project:.mission/routing.yml",
+        allowed_root=root,
+    )
     if project is not None:
         return project
     user = _read_routing_config(
@@ -553,7 +578,10 @@ def load_routing_config() -> dict:
 
 
 def _resolve_goal_dispatch(mission: str, cli_mode: str | None, cwd: Path) -> dict:
-    explicit = re.search(r"(?i)(?:^|[;\s])goal[_ -]dispatch\s*[:=]\s*([a-z][a-z0-9-]*)", mission or "")
+    explicit = re.match(
+        r"(?i)\A[ \t]*goal[_ -]dispatch\s*[:=]\s*([a-z][a-z0-9-]*)[ \t]*(?:;|\r?\n|\Z)",
+        mission or "",
+    )
     if explicit:
         mode = explicit.group(1).lower()
         if mode not in GOAL_DISPATCH_MODES:
