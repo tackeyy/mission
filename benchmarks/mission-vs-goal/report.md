@@ -813,6 +813,39 @@ Primary data: `results/2026-08-07-portfolio-v7a-std-repeats3.jsonl` /
 `results/2026-08-07-portfolio-v7b-cx-repeats3.jsonl` /
 `results/2026-08-07-portfolio-v7c-cx-fill.jsonl` (with adjacent -summary.json)
 
+### portfolio-v8a (Standard re-measurement, 2026-08-07) — gate-regression check after #350-#355
+
+Commit `05d08c5` (after merging #350 reviewer-window enforcement, #351 artifact lint,
+#352 bounded-context observability, #353 reviewer-output observability, #354 session
+lease, and #355 goal dispatch). Same Standard 3 tasks x repeats 3 as v7a (18 records),
+budgets goal $3 / mission $10. Mission completed 7/9; the remaining 2 records
+(std-metrics rep3 / std-policy rep3) were auto-stopped by #357 on api_spend_limit
+(blocked, non-comparable). All completed records tie at marker 1.0 quality.
+
+Standard (mission comparable n=7): mean 9.26 min / median 8.46 / range 6.78-13.28.
+On par with v7a (mean 9.98 / median 10.58 / range 6.26-14.08) — **the verification
+and observability gates added by #350-#353 introduce no speed regression**. iter=2
+fired 0/7 (v7a: 2/9; within iteration-distribution noise). Goal mean 1.11 min →
+about 8.4x. Mission per-record cost $5.25-9.31, inside the #358 $10 calibration.
+
+Observed gate activity (state inspection, n=7):
+
+1. **#353 reviewer-output observation recorded in every run** (2
+   reviewer_output_records per run). Zero WARNs (20KB/0.7 thresholds never exceeded).
+2. **#354 session lease granted in every run** (lease_id / fencing_epoch / expiry).
+   Zero contention or fencing rejections.
+3. **#351 artifact lint was `skipped` in every run.** Bench mission sessions never
+   record `artifact_path` in state, so the lint never executed (a zero firing rate
+   means "no observation opportunity", not "no violations"). Gate promotion requires
+   artifact_path adoption first.
+4. **#352 bounded context never became applicable.** All completed runs finished at
+   iter=1, below the trigger condition (iter>=2 with no new critic scope).
+5. **#357 fired twice in live conditions** during this run as well, stopping cleanly
+   with no wasted records.
+
+Primary data: `results/2026-08-07-portfolio-v8a-std-post-gates.jsonl`
+(with adjacent -summary.json) / `artifacts/2026-08-07-portfolio-v8a-std-post-gates/`
+
 
 
 ## Discriminating cohort clean re-run (discriminating-v2) — correcting the v1 findings
