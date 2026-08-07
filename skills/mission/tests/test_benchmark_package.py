@@ -203,6 +203,220 @@ def test_discriminating_runbooks_document_arm_budgets_with_measured_evidence():
         assert "2026-08-02-portfolio-v5-speed" in runbook
         assert "portfolio-std-contract-mission" in runbook
 
+def _spend_limit_fixture() -> dict:
+    path = Path(__file__).parent / "fixtures" / "benchmark-api-spend-limit.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _benchmark_record(arm: str, failure_kind: str | None = None) -> dict:
+    blocked = failure_kind is not None
+    return {
+        "arm": arm,
+        "run_status": "blocked" if blocked else "completed",
+        "blocked_reason": failure_kind,
+        "failure_kind": failure_kind,
+        "comparable_attempt": not blocked,
+        "completion": not blocked,
+        "validator_pass": not blocked,
+        "human_quality_score": 1.0 if blocked else 4.0,
+        "intervention_count": 0,
+        "evidence_completeness": 1.0 if blocked else 4.0,
+        "elapsed_minutes": 0.05,
+        "quality_marker_score": None,
+        "total_cost_usd": 0,
+    }
+
+
+def test_detect_spend_limit_accepts_429_fixture_and_limit_messages():
+    runner = _load_official_goal_runner()
+
+    assert runner.detect_spend_limit(_spend_limit_fixture(), "") is True
+    assert runner.detect_spend_limit({"result": "Rate Limit reached"}, "") is True
+    assert runner.detect_spend_limit({"result": "USAGE LIMIT reached"}, "") is True
+    assert runner.detect_spend_limit({}, "monthly SPEND LIMIT reached") is True
+
+
+def test_detect_spend_limit_rejects_unrelated_failures():
+    runner = _load_official_goal_runner()
+
+    assert runner.detect_spend_limit({"api_error_status": 500, "result": "server error"}, "") is False
+
+
+def test_detect_spend_limit_rejects_successful_rate_limit_discussion():
+    runner = _load_official_goal_runner()
+
+    assert runner.detect_spend_limit(
+        {"result": "The rate limit handler now passes all tests."},
+        "",
+    ) is False
+
+
+def test_detect_spend_limit_rejects_negated_usage_limit_diagnosis():
+    runner = _load_official_goal_runner()
+
+    assert runner.detect_spend_limit(
+        {"result": "Rejected hypothesis: prior API usage limit was not the current cause."},
+        "",
+    ) is False
+
+
+def test_spend_limit_classification_is_identical_for_both_arms():
+    runner = _load_official_goal_runner()
+    fixture_stdout = json.dumps(_spend_limit_fixture())
+
+    status = runner.classify_run_status(
+        stdout=fixture_stdout,
+        stderr="",
+        timed_out=False,
+        returncode=1,
+        output_exists=False,
+        validator_pass=False,
+    )
+
+    assert status == {
+        "run_status": "blocked",
+        "blocked_reason": "api_spend_limit",
+        "failure_kind": "api_spend_limit",
+        "comparable_attempt": False,
+    }
+    assert runner.apply_mission_adherence_guard(
+        status,
+        arm="mission",
+        mission_state_note="mission_state_missing",
+        task_complexity="Complex",
+    ) == status
+
+
+def test_spend_limit_overrides_completed_artifact_and_validator():
+    runner = _load_official_goal_runner()
+
+    status = runner.classify_run_status(
+        stdout=json.dumps(_spend_limit_fixture()),
+        stderr="",
+        timed_out=False,
+        returncode=1,
+        output_exists=True,
+        validator_pass=True,
+    )
+
+    assert status["failure_kind"] == "api_spend_limit"
+
+
+def test_text_only_limit_markers_override_valid_artifact_and_validator():
+    runner = _load_official_goal_runner()
+
+    for message in (
+        "You've hit your org's monthly spend limit",
+        "Rate limit reached",
+        "Usage limit reached",
+    ):
+        status = runner.classify_run_status(
+            stdout=json.dumps({"result": message}),
+            stderr="",
+            timed_out=False,
+            returncode=1,
+            output_exists=True,
+            validator_pass=True,
+        )
+
+        assert status == {
+            "run_status": "blocked",
+            "blocked_reason": "api_spend_limit",
+            "failure_kind": "api_spend_limit",
+            "comparable_attempt": False,
+        }
+
+
+def test_benchmark_readmes_list_api_spend_limit_reason():
+    for name in ("README.md", "README.ja.md"):
+        readme = (BENCHMARK_DIR / name).read_text(encoding="utf-8")
+
+        assert "`api_spend_limit`" in readme
+
+
+def test_non_429_command_failure_keeps_legacy_classification():
+    runner = _load_official_goal_runner()
+
+    status = runner.classify_run_status(
+        stdout=json.dumps({"api_error_status": 500, "result": "server error"}),
+        stderr="",
+        timed_out=False,
+        returncode=1,
+        output_exists=False,
+        validator_pass=False,
+    )
+
+    assert status == {
+        "run_status": "failed",
+        "blocked_reason": None,
+        "failure_kind": "command_error",
+        "comparable_attempt": True,
+    }
+
+
+def test_execute_plan_stops_automatically_after_spend_limit():
+    runner = _load_official_goal_runner()
+    started = []
+
+    def worker(entry):
+        started.append(entry)
+        return _benchmark_record(
+            "claude_code_goal_command",
+            "api_spend_limit" if entry == 2 else None,
+        )
+
+    records, stopped_early = runner.execute_plan([1, 2, 3], worker)
+
+    assert [record["failure_kind"] for record in records] == [None, "api_spend_limit"]
+    assert started == [1, 2]
+    assert stopped_early is True
+
+
+def test_parallel_execute_plan_finishes_in_flight_workers_without_starting_more():
+    runner = _load_official_goal_runner()
+    second_started = runner.threading.Event()
+    release_second = runner.threading.Event()
+    started = []
+
+    def worker(entry):
+        started.append(entry)
+        if entry == 1:
+            assert second_started.wait(timeout=1)
+            release_second.set()
+            return _benchmark_record("claude_code_goal_command", "api_spend_limit")
+        if entry == 2:
+            second_started.set()
+            assert release_second.wait(timeout=1)
+        return _benchmark_record("mission")
+
+    records, stopped_early = runner.execute_plan([1, 2, 3, 4], worker, parallel=2)
+
+    assert sorted(started) == [1, 2]
+    assert len(records) == 2
+    assert stopped_early is True
+
+
+def test_summary_counts_spend_limits_per_arm_and_warns_about_early_stop():
+    runner = _load_official_goal_runner()
+    records = [
+        _benchmark_record("claude_code_goal_command", "api_spend_limit"),
+        _benchmark_record("mission", "api_spend_limit"),
+    ]
+
+    summary = runner.summarize(
+        records=records,
+        tasks=[{"id": "fixture-task"}],
+        run_id="spend-limit-fixture",
+        starting_commit="abcdef0",
+        tasks_path=BENCHMARK_DIR / "tasks.complex.json",
+        stopped_early=True,
+    )
+
+    assert summary["arms"]["claude_code_goal_command"]["api_spend_limit_records"] == 1
+    assert summary["arms"]["mission"]["api_spend_limit_records"] == 1
+    assert "run stopped early: api_spend_limit at record 1/2" in summary["limitations"]
+    assert any("comparability" in limitation.lower() for limitation in summary["limitations"])
+
 
 def test_mission_vs_goal_pilot_has_exactly_ten_tasks():
     data = json.loads((BENCHMARK_DIR / "tasks.json").read_text(encoding="utf-8"))
@@ -266,9 +480,11 @@ def test_mission_vs_goal_result_schema_matches_declared_arms():
     assert "evidence_completeness" in schema["required"]
     assert schema["properties"]["run_status"]["enum"] == ["completed", "failed", "blocked"]
     assert "api_usage_limit" in schema["properties"]["blocked_reason"]["enum"]
+    assert "api_spend_limit" in schema["properties"]["blocked_reason"]["enum"]
     assert "max_budget_usd" in schema["properties"]["blocked_reason"]["enum"]
     assert "timeout" in schema["properties"]["blocked_reason"]["enum"]
     assert "max_budget_usd" in schema["properties"]["failure_kind"]["enum"]
+    assert "api_spend_limit" in schema["properties"]["failure_kind"]["enum"]
     assert schema["properties"]["comparable_attempt"]["type"] == "boolean"
     assert schema["properties"]["max_budget_usd_effective"]["minimum"] == 0
     assert schema["properties"]["burn_rate_usd_per_min"]["minimum"] == 0
@@ -873,8 +1089,8 @@ def test_mission_vs_goal_protocol_controls_review_bias():
     )
     assert blocked == {
         "run_status": "blocked",
-        "blocked_reason": "api_usage_limit",
-        "failure_kind": "api_usage_limit",
+        "blocked_reason": "api_spend_limit",
+        "failure_kind": "api_spend_limit",
         "comparable_attempt": False,
     }
     max_budget = runner_module.classify_run_status(
@@ -891,15 +1107,15 @@ def test_mission_vs_goal_protocol_controls_review_bias():
         "failure_kind": "max_budget_usd",
         "comparable_attempt": False,
     }
-    completed_with_usage_limit_text = runner_module.classify_run_status(
-        stdout="Artifact complete. Rejected hypothesis: prior API usage limit was not the current cause.",
+    completed_without_limit_text = runner_module.classify_run_status(
+        stdout="Artifact complete. Rejected hypothesis: a prior quota issue was not the current cause.",
         stderr="",
         timed_out=False,
         returncode=0,
         output_exists=True,
         validator_pass=True,
     )
-    assert completed_with_usage_limit_text == {
+    assert completed_without_limit_text == {
         "run_status": "completed",
         "blocked_reason": None,
         "failure_kind": None,
