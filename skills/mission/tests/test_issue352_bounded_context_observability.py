@@ -1,0 +1,173 @@
+"""#352: bounded context manifest generation and fallback observability."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _update_state(state_dir: Path, **updates) -> dict:
+    path = state_dir / "sessions" / "test.json"
+    state = json.loads(path.read_text(encoding="utf-8"))
+    state.update(updates)
+    path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    return state
+
+
+def _review(tmp_path: Path, iteration: int) -> Path:
+    path = tmp_path / f"review-{iteration}.json"
+    path.write_text(json.dumps({
+        "schema": "mission-review/1",
+        "perspective": "A",
+        "iteration": iteration,
+        "scores": {
+            "mission_achievement": 4.5,
+            "accuracy": 4.5,
+            "completeness": 4.5,
+            "usability": 4.5,
+        },
+        "findings": [],
+        "same_score_note": "all axes independently verified",
+        "notes": "bounded context observation fixture",
+    }, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def _aggregate(run_cli, state_dir: Path, tmp_path: Path, iteration: int):
+    out = tmp_path / f"score-{iteration}.json"
+    result = run_cli(
+        "aggregate-reviews",
+        "--iteration", str(iteration),
+        "--input", str(_review(tmp_path, iteration)),
+        "--out", str(out),
+        "--json",
+        cwd=state_dir.parent,
+    )
+    return result, out
+
+
+def test_generated_manifest_is_recorded_and_aggregate_observes_bounded(
+    state_dir, run_cli, tmp_path,
+):
+    _update_state(
+        state_dir,
+        iteration=2,
+        phase="reviewing",
+        critic_has_new_scope=False,
+    )
+    manifest_path = state_dir / "context-manifest-iter2.json"
+
+    generated = run_cli(
+        "context-manifest",
+        "--iteration", "2",
+        "--out", str(manifest_path),
+        cwd=state_dir.parent,
+    )
+
+    assert generated.returncode == 0, generated.stderr
+    state = json.loads((state_dir / "sessions" / "test.json").read_text(encoding="utf-8"))
+    observation = state["context_manifests"]["2"]
+    expected_digest = "sha256:" + hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    assert observation["path"] == str(manifest_path)
+    assert observation["digest"] == expected_digest
+    assert observation["generated_at"].endswith("Z")
+
+    aggregated, _ = _aggregate(run_cli, state_dir, tmp_path, 2)
+
+    assert aggregated.returncode == 0, aggregated.stderr
+    result = json.loads(aggregated.stdout)
+    evidence = json.loads(Path(result["findings_evidence_path"]).read_text(encoding="utf-8"))
+    assert evidence["context_mode_expected"] == "bounded"
+    assert evidence["context_manifest_generated"] is True
+
+
+def test_missing_expected_manifest_warns_without_changing_aggregate_gate(
+    state_dir, run_cli, tmp_path,
+):
+    _update_state(
+        state_dir,
+        iteration=2,
+        phase="reviewing",
+        critic_has_new_scope=False,
+    )
+
+    aggregated, out = _aggregate(run_cli, state_dir, tmp_path, 2)
+
+    assert aggregated.returncode == 0, aggregated.stderr
+    assert "WARN #352: bounded context expected but no manifest generated" in aggregated.stderr
+    assert out.exists()
+    result = json.loads(aggregated.stdout)
+    evidence = json.loads(Path(result["findings_evidence_path"]).read_text(encoding="utf-8"))
+    assert evidence["context_mode_expected"] == "bounded"
+    assert evidence["context_manifest_generated"] is False
+
+
+def test_iteration_one_records_full_expectation_without_warning(
+    state_dir, run_cli, tmp_path,
+):
+    _update_state(state_dir, iteration=1, phase="reviewing")
+
+    aggregated, _ = _aggregate(run_cli, state_dir, tmp_path, 1)
+
+    assert aggregated.returncode == 0, aggregated.stderr
+    assert "WARN #352" not in aggregated.stderr
+    result = json.loads(aggregated.stdout)
+    evidence = json.loads(Path(result["findings_evidence_path"]).read_text(encoding="utf-8"))
+    assert evidence["context_mode_expected"] == "full"
+    assert evidence["context_manifest_generated"] is False
+
+
+def test_stats_json_counts_bounded_generation_and_full_fallback(run_cli, tmp_path):
+    states = [
+        ("generated", 2, False, {"2": {"path": "manifest.json", "digest": "sha256:x", "generated_at": "2026-08-07T00:00:00Z"}}),
+        ("fallback", 2, False, {}),
+        ("full", 1, None, {}),
+    ]
+    for name, iteration, critic_scope, manifests in states:
+        project = tmp_path / name
+        session_dir = project / ".mission-state" / "sessions"
+        session_dir.mkdir(parents=True)
+        state = {
+            "mission": f"mission {name}",
+            "mission_id": f"mission-{name}",
+            "session_id": f"session-{name}",
+            "project_root": str(project),
+            "loop_active": True,
+            "passes": False,
+            "halt_reason": "",
+            "iteration": iteration,
+            "score_history": [],
+            "context_manifests": manifests,
+        }
+        if critic_scope is not None:
+            state["critic_has_new_scope"] = critic_scope
+        (session_dir / f"{name}.json").write_text(
+            json.dumps(state, ensure_ascii=False), encoding="utf-8"
+        )
+
+    result = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    stats = json.loads(result.stdout)
+    assert stats["bounded_context_counts"] == {
+        "expected_bounded": 2,
+        "manifest_generated": 1,
+        "fallback_full": 1,
+    }
+
+
+def test_reviewer_and_changelogs_document_bounded_context_observation_contract():
+    reviewer = (REPO_ROOT / "skills" / "mission-reviewer" / "SKILL.md").read_text(encoding="utf-8")
+    assert "context: bounded" in reviewer
+
+    for relative in (
+        "CHANGELOG.md",
+        "CHANGELOG.ja.md",
+        "plugins/mission/CHANGELOG.md",
+        "plugins/mission/CHANGELOG.ja.md",
+    ):
+        assert "#352" in (REPO_ROOT / relative).read_text(encoding="utf-8")
