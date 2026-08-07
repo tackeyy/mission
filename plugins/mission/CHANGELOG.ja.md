@@ -9,6 +9,10 @@
 
 ## [Unreleased]
 
+### 追加
+
+- Simple task の adaptive routing に設定可能な goal dispatch provider を追加した (#355)。portable な `inline` を既定に保ち、mission 内の明示指示、`--goal-dispatch`、project `.mission/routing.yml`、user 設定から `host-native` を選べる。init / set / next verdict は実効 dispatch を記録し、host 不明・設定不正時は WARN して inline へ fail-safe する。routing gate と `--force-mission` の挙動は変更しない。
+
 ### 修正
 
 - mission audit が owner による明示的な凍結・意図的 close・replacement issue への切替を示す halt reason を非 actionable の `intentional-freeze-switch` として分類するようにした。raw halt count は保持しつつ、運用 state debt 監査での P1 `halted-runs` false positive を減らす (#347)。

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Adaptive Simple-task routing now supports a configurable goal dispatch provider (#355): portable `inline` remains the default, while explicit mission guidance, `--goal-dispatch`, project `.mission/routing.yml`, or user configuration can select `host-native`. Init, set, and next verdicts record the effective dispatch; unknown hosts and invalid configuration warn and fail safe to inline without changing routing gates or `--force-mission` behavior.
+
 ### Fixed
 
 - Mission audit now classifies explicit owner freeze / intentional close / replacement-switch halt reasons as non-actionable `intentional-freeze-switch` while preserving raw halt counts, reducing false-positive P1 `halted-runs` in operational state-debt audits (#347).
