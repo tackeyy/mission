@@ -494,8 +494,12 @@ def detect_host() -> str:
     return "unknown"
 
 
-def _read_routing_config(path: Path, source: str) -> dict | None:
+def _read_routing_config(path: Path, source: str, allowed_root: Path | None = None) -> dict | None:
     """Read the version-1 minimal routing config without a YAML dependency."""
+    if allowed_root is not None and path.is_symlink():
+        reason = f"routing config symlink rejected at {source}"
+        print(f"WARN #355: {reason}; using inline", file=sys.stderr)
+        return {"mode": "inline", "source": source, "fallback_reason": reason}
     if not path.is_file():
         return None
     values: dict[str, str] = {}
@@ -535,7 +539,11 @@ def _read_routing_config(path: Path, source: str) -> dict | None:
 
 def _routing_config_decision(cwd: Path | None = None) -> dict:
     root = cwd or Path.cwd()
-    project = _read_routing_config(root / ".mission" / "routing.yml", "project:.mission/routing.yml")
+    project = _read_routing_config(
+        root / ".mission" / "routing.yml",
+        "project:.mission/routing.yml",
+        allowed_root=root,
+    )
     if project is not None:
         return project
     user = _read_routing_config(
