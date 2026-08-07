@@ -363,6 +363,53 @@ def test_cleanup_janitor_rejects_renew_or_takeover_race(
     assert current["fencing_epoch"] == expected_epoch
 
 
+def test_cleanup_janitor_revalidation_holds_writer_lock_with_same_named_ancestor(
+    tmp_path, monkeypatch, capsys,
+):
+    project = tmp_path / ".mission-state" / "outer" / "project"
+    sessions = project / ".mission-state" / "sessions"
+    sessions.mkdir(parents=True)
+    path = sessions / "owner-a.json"
+    path.write_text(json.dumps(_lease_state(
+        project_root=str(project),
+        lease_expires_at="2026-08-07T11:59:00Z",
+        last_activity_at="2026-08-07T11:58:00Z",
+        phase="executing",
+        passes=False,
+        halt_reason="",
+        score_history=[],
+    )))
+    monkeypatch.setenv("MISSION_STATE_NOW", "2026-08-07T12:00:00Z")
+    original_check = MISSION_STATE._expired_lease_without_heartbeat
+    checks = 0
+    writer_blocked_during_cas = False
+
+    def probe_writer_lock(data):
+        nonlocal checks, writer_blocked_during_cas
+        checks += 1
+        if checks == 2:
+            with pytest.raises(TimeoutError):
+                with MISSION_STATE.StateLock(
+                    MISSION_STATE.lock_file(project), timeout=0.05,
+                ):
+                    pass
+            writer_blocked_during_cas = True
+        return original_check(data)
+
+    monkeypatch.setattr(
+        MISSION_STATE, "_expired_lease_without_heartbeat", probe_writer_lock,
+    )
+
+    MISSION_STATE.cmd_cleanup_stale(
+        type("Args", (), {"root": str(project), "execute": True})()
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    assert writer_blocked_during_cas is True
+    assert output["halted"][0]["path"] == str(path)
+    assert json.loads(path.read_text())["loop_active"] is False
+
+
 def test_refresh_pid_then_resume_does_not_false_stale(tmp_path, run_cli):
     env = {
         "MISSION_SESSION_ID": "session-a",
