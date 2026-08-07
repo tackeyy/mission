@@ -104,6 +104,26 @@ def test_spend_limit_overrides_completed_artifact_and_validator():
     assert status["failure_kind"] == "api_spend_limit"
 
 
+def test_text_only_spend_limit_overrides_valid_artifact_and_validator():
+    runner = _load_official_goal_runner()
+
+    status = runner.classify_run_status(
+        stdout=json.dumps({"result": "You've hit your org's monthly spend limit"}),
+        stderr="",
+        timed_out=False,
+        returncode=1,
+        output_exists=True,
+        validator_pass=True,
+    )
+
+    assert status == {
+        "run_status": "blocked",
+        "blocked_reason": "api_spend_limit",
+        "failure_kind": "api_spend_limit",
+        "comparable_attempt": False,
+    }
+
+
 def test_non_429_command_failure_keeps_legacy_classification():
     runner = _load_official_goal_runner()
 
