@@ -43,7 +43,7 @@ time budget、task prompt を使います。
 | Metric | Definition |
 |---|---|
 | `run_status` | `completed`、`failed`、`blocked`。blocked は infrastructure/account state により comparable attempt が成立しなかった状態。 |
-| `blocked_reason` | `run_status=blocked` の理由。現在は `api_usage_limit`、`max_budget_usd`、`timeout`。それ以外は null。 |
+| `blocked_reason` | `run_status=blocked` の理由。現在は `api_usage_limit`、`api_spend_limit`、`max_budget_usd`、`timeout`。それ以外は null。 |
 | `comparable_attempt` | fair な task-quality attempt の前に blocked された場合は false。 |
 | `mission_profile` | official runner record の `/mission` prompt profile。`full` は通常 workflow、`light` は cost-controlled one-pass profile、`quality` は evidence map、rejected hypotheses、stop/proceed decision を重視する profile。 |
 | `completion` | 必要な artifact または code change が作られ、未解決のまま停止していない。 |

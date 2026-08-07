@@ -35,7 +35,8 @@ PATH="<shim-dir>:$PATH" python3 run_claude_goal_vs_mission.py \
   --run-id <date>-discriminating-smoke \
   --model-id claude-sonnet-5 \
   --task-ids disc-config-sprawl \
-  --max-budget-usd 10 --mission-budget-minutes 30 --timeout 2400
+  --max-budget-usd-goal 3 --max-budget-usd-mission 10 \
+  --mission-budget-minutes 30 --timeout 2400
 ```
 
 smoke gate (すべて満たしたら Step 2 へ):
@@ -59,11 +60,23 @@ PATH="<shim-dir>:$PATH" python3 run_claude_goal_vs_mission.py \
   --run-id <date>-discriminating-v1 \
   --model-id claude-sonnet-5 \
   --limit-tasks 5 --repeats 1 --parallel 3 \
-  --max-budget-usd 10 --mission-budget-minutes 30 --timeout 2400
+  --max-budget-usd-goal 3 --max-budget-usd-mission 10 \
+  --mission-budget-minutes 30 --timeout 2400
 ```
 
 見積: 較正実測 (goal $1.3-5.0 / mission $5.1-7.4 名目) から、repeats 1 で
 名目 $35-60。壁時計は `--parallel 3` で約 1 時間 (逐次なら 2-3 時間)。repeats 2 は名目 2 倍。
+
+### 実測に基づく予算上限の推奨値
+
+以下は支出目標ではなく上限値。cohort、model、mission profile を変更した場合は
+再較正する。
+
+| arm / cohort | 推奨上限 | 実測根拠 |
+|---|---:|---|
+| goal（portfolio 全 task） | USD 3.0 | `2026-08-07-portfolio-v6-repeats3` の `portfolio-std-contract` goal rep 1 が USD 2.6253。 |
+| mission Standard | USD 8.0 | `2026-08-07-portfolio-v6-repeats3` の `portfolio-std-contract` mission rep 1 が USD 5.9400 で完走。Standard の USD 6.0085 / 6.0259 capped record から USD 6 では不足。 |
+| mission full profile（Standard + Complex） | USD 10.0 | `2026-08-02-portfolio-v5-speed` の `portfolio-std-contract-mission` が iteration 2、USD 4.8770。v6 完走最大 USD 5.9400 と併せ、iteration 2 の余裕を確保。 |
 
 ## Step 3: 採用判定ゲート
 
@@ -93,3 +106,4 @@ PATH="<shim-dir>:$PATH" python3 run_claude_goal_vs_mission.py \
 |------|------|
 | 2026-07-22 | 初版作成 (#262) |
 | 2026-07-25 | CC 2.1.219 hardening 対応 (--allowedTools 明示・ANTHROPIC_API_KEY unset) を追記 (#292) |
+| 2026-08-07 | arm 別予算 flag と実測に基づく推奨上限を追記 (#358) |
