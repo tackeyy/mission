@@ -39,6 +39,11 @@ Precedence, highest first:
 4. User `~/.config/mission/routing.yml`.
 5. Default `inline`.
 
+A directive may appear on any standalone, non-quoted mission line. Mentions in
+blockquotes, fenced code, examples, or negated prose do not count as directives.
+Repeated directives with the same value are accepted; conflicting values warn
+and fail safe to `inline`.
+
 The resolved request and source are stored in session state so the later
 `set complexity=Simple` and `next` routing paths use the same selection. A routed
 halt additionally records `goal_dispatch_effective` and, when applicable,
