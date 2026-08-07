@@ -328,6 +328,13 @@ def classify_run_status(
     validator_pass: bool,
 ) -> dict:
     combined = f"{stdout}\n{stderr}"
+    if any(marker in combined for marker in MAX_BUDGET_MARKERS):
+        return {
+            "run_status": "blocked",
+            "blocked_reason": "max_budget_usd",
+            "failure_kind": "max_budget_usd",
+            "comparable_attempt": False,
+        }
     if validator_pass:
         return {
             "run_status": "completed",
@@ -340,13 +347,6 @@ def classify_run_status(
             "run_status": "blocked",
             "blocked_reason": "api_usage_limit",
             "failure_kind": "api_usage_limit",
-            "comparable_attempt": False,
-        }
-    if any(marker in combined for marker in MAX_BUDGET_MARKERS):
-        return {
-            "run_status": "blocked",
-            "blocked_reason": "max_budget_usd",
-            "failure_kind": "max_budget_usd",
             "comparable_attempt": False,
         }
     if timed_out:
@@ -1009,7 +1009,10 @@ def summarize(
             "WARNING: one or more mission-arm records halted by submitting evidence "
             "without a scored review loop (#341); their wall-clock understates the "
             "gated loop and is not comparable to full-loop records.",
-        ] if any(r.get("mission_evidence_only") for r in records) else []),
+        ] if any(r.get("mission_evidence_only") for r in records) else []) + ([
+            "WARNING: one or more records were blocked by max_budget_usd; "
+            "review per-arm burn rate before interpreting cost or completion results.",
+        ] if any(r.get("failure_kind") == "max_budget_usd" for r in records) else []),
         "arms": {
             arm: {
                 "records": len(items),
@@ -1132,6 +1135,13 @@ def main() -> int:
         help="Mission prompt profile. 'light' reduces planning/review scope for cost-controlled comparisons.",
     )
     args = parser.parse_args()
+    for flag, value in (
+        ("--max-budget-usd", args.max_budget_usd),
+        ("--max-budget-usd-goal", args.max_budget_usd_goal),
+        ("--max-budget-usd-mission", args.max_budget_usd_mission),
+    ):
+        if value is not None and (not math.isfinite(value) or value <= 0):
+            parser.error(f"{flag} must be a positive finite number")
     if args.repeats < 1:
         parser.error("--repeats must be at least 1")
     if args.parallel < 1:
