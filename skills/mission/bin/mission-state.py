@@ -4554,16 +4554,16 @@ def _context_manifest_generated(data: dict, iteration: int) -> bool:
     ):
         return False
 
-    manifest_path = Path(raw_path)
-    if not manifest_path.is_absolute():
-        project_root = data.get("project_root")
-        if not isinstance(project_root, str) or not project_root:
-            return False
-        manifest_path = Path(project_root) / manifest_path
     try:
+        manifest_path = Path(raw_path)
+        if not manifest_path.is_absolute():
+            project_root = data.get("project_root")
+            if not isinstance(project_root, str) or not project_root:
+                return False
+            manifest_path = Path(project_root) / manifest_path
         raw = manifest_path.read_bytes()
         payload = json.loads(raw)
-    except (OSError, UnicodeError, json.JSONDecodeError):
+    except (OSError, UnicodeError, ValueError, TypeError, RuntimeError):
         return False
     if hashlib.sha256(raw).hexdigest() != digest.removeprefix("sha256:"):
         return False

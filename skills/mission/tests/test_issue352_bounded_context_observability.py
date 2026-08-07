@@ -283,6 +283,34 @@ def test_aggregate_rejects_manifest_without_timezone_aware_generation_time(
     assert evidence["context_manifest_generated"] is False
 
 
+def test_aggregate_tampered_nul_path_warns_without_partial_state_corruption(
+    state_dir, run_cli, tmp_path,
+):
+    manifest_path = tmp_path / "manifest-before-path-tamper.json"
+    record = _manifest_record(manifest_path, 2)
+    record["path"] = "manifest\x00tampered.json"
+    _update_state(
+        state_dir,
+        iteration=2,
+        phase="reviewing",
+        critic_has_new_scope=False,
+        context_manifests={"2": record},
+    )
+
+    aggregated, _ = _aggregate(run_cli, state_dir, tmp_path, 2)
+
+    assert aggregated.returncode == 0, aggregated.stderr
+    assert "WARN #352: bounded context expected but no manifest generated" in aggregated.stderr
+    result = json.loads(aggregated.stdout)
+    evidence = json.loads(Path(result["findings_evidence_path"]).read_text(encoding="utf-8"))
+    assert evidence["context_manifest_generated"] is False
+    persisted = json.loads(
+        (state_dir / "sessions" / "test.json").read_text(encoding="utf-8")
+    )
+    assert persisted["context_manifests"]["2"] == record
+    assert persisted["last_parallel_execution"] == "unknown"
+
+
 def test_iteration_one_records_full_expectation_without_warning(
     state_dir, run_cli, tmp_path,
 ):
@@ -376,6 +404,39 @@ def test_stats_rejects_noncanonical_expected_and_payload_iterations(run_cli, tmp
         "expected_bounded": 0,
         "manifest_generated": 0,
         "fallback_full": 0,
+    }
+
+
+def test_stats_continues_when_manifest_path_contains_nul(run_cli, tmp_path):
+    project = tmp_path / "tampered-path"
+    session_dir = project / ".mission-state" / "sessions"
+    session_dir.mkdir(parents=True)
+    record = _manifest_record(project / "manifest.json", 2)
+    record["path"] = "manifest\x00tampered.json"
+    state = {
+        "mission": "tampered manifest path",
+        "mission_id": "mission-tampered-path",
+        "session_id": "session-tampered-path",
+        "project_root": str(project),
+        "loop_active": True,
+        "passes": False,
+        "halt_reason": "",
+        "iteration": 2,
+        "score_history": [],
+        "critic_has_new_scope": False,
+        "context_manifests": {"2": record},
+    }
+    (session_dir / "tampered-path.json").write_text(
+        json.dumps(state, ensure_ascii=False), encoding="utf-8"
+    )
+
+    result = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["bounded_context_counts"] == {
+        "expected_bounded": 1,
+        "manifest_generated": 0,
+        "fallback_full": 1,
     }
 
 
