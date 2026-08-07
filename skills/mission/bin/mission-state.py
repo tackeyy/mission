@@ -4528,6 +4528,42 @@ def _expected_context_mode(data: dict, iteration: int) -> str:
     )
 
 
+def _context_manifest_generated(data: dict, iteration: int) -> bool:
+    """Return whether the recorded manifest is complete and still verifiable."""
+    manifests = data.get("context_manifests")
+    record = manifests.get(str(iteration)) if isinstance(manifests, dict) else None
+    if not isinstance(record, dict):
+        return False
+    raw_path = record.get("path")
+    digest = record.get("digest")
+    generated_at = record.get("generated_at")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return False
+    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        return False
+    if not isinstance(generated_at, str) or parse_iso_datetime(generated_at) is None:
+        return False
+
+    manifest_path = Path(raw_path)
+    if not manifest_path.is_absolute():
+        project_root = data.get("project_root")
+        if not isinstance(project_root, str) or not project_root:
+            return False
+        manifest_path = Path(project_root) / manifest_path
+    try:
+        raw = manifest_path.read_bytes()
+        payload = json.loads(raw)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    if hashlib.sha256(raw).hexdigest() != digest.removeprefix("sha256:"):
+        return False
+    return (
+        isinstance(payload, dict)
+        and payload.get("schema") == "mission-context-manifest/1"
+        and payload.get("iteration") == iteration
+    )
+
+
 def _derive_next_action(data: dict) -> dict:
     """ADR-002 Stage 3 (G-3): state から次の 1 手を決定論的に導出する。
 
@@ -5911,11 +5947,7 @@ def cmd_aggregate_reviews(args):
         data["last_parallel_execution"] = parallel_execution
         atomic_write_json(sf, data)
         context_mode_expected = _expected_context_mode(data, args.iteration)
-        context_manifests = data.get("context_manifests")
-        context_manifest_generated = (
-            isinstance(context_manifests, dict)
-            and isinstance(context_manifests.get(str(args.iteration)), dict)
-        )
+        context_manifest_generated = _context_manifest_generated(data, args.iteration)
         if context_mode_expected == "bounded" and not context_manifest_generated:
             print(
                 "WARN #352: bounded context expected but no manifest generated",
@@ -6024,6 +6056,9 @@ def cmd_context_manifest(args):
         sys.exit(1)
     data = json.loads(sf.read_text())
     iteration = args.iteration if args.iteration is not None else data.get("iteration", 1)
+    if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < 1:
+        print("ERROR: --iteration は 1 以上で指定してください", file=sys.stderr)
+        sys.exit(2)
     history = data.get("score_history") or []
     prior_findings = []
     for entry in history:
@@ -7333,11 +7368,7 @@ def _aggregate(
             isinstance(iteration, int)
             and _expected_context_mode(state, iteration) == "bounded"
         )
-        manifests = state.get("context_manifests")
-        generated = (
-            isinstance(manifests, dict)
-            and isinstance(manifests.get(str(iteration)), dict)
-        )
+        generated = _context_manifest_generated(state, iteration)
         if expected_bounded:
             bounded_context_counts["expected_bounded"] += 1
         if generated:

@@ -6,6 +6,8 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -35,6 +37,31 @@ def _review(tmp_path: Path, iteration: int) -> Path:
         "notes": "bounded context observation fixture",
     }, ensure_ascii=False), encoding="utf-8")
     return path
+
+
+def _manifest_record(
+    path: Path,
+    iteration: int,
+    *,
+    schema: str = "mission-context-manifest/1",
+    raw: bytes | None = None,
+) -> dict:
+    if raw is None:
+        raw = json.dumps({
+            "schema": schema,
+            "iteration": iteration,
+            "mission_goal": "bounded test",
+            "mission_id": "mission-test",
+            "assumptions_path": ".mission-state/assumptions.md",
+            "prior_findings": [],
+        }, ensure_ascii=False).encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+    return {
+        "path": str(path),
+        "digest": "sha256:" + hashlib.sha256(raw).hexdigest(),
+        "generated_at": "2026-08-07T00:00:00Z",
+    }
 
 
 def _aggregate(run_cli, state_dir: Path, tmp_path: Path, iteration: int):
@@ -93,6 +120,30 @@ def test_generated_manifest_is_recorded_and_aggregate_observes_bounded(
     assert evidence["context_manifest_generated"] is True
 
 
+@pytest.mark.parametrize("iteration", [0, -1])
+def test_context_manifest_rejects_invalid_iteration_without_changing_state(
+    state_dir, run_cli, tmp_path, iteration,
+):
+    before = json.loads(
+        (state_dir / "sessions" / "test.json").read_text(encoding="utf-8")
+    )
+
+    result = run_cli(
+        "context-manifest",
+        "--iteration", str(iteration),
+        "--out", str(tmp_path / "invalid-manifest.json"),
+        cwd=state_dir.parent,
+    )
+
+    after = json.loads(
+        (state_dir / "sessions" / "test.json").read_text(encoding="utf-8")
+    )
+    assert result.returncode == 2
+    assert "--iteration は 1 以上" in result.stderr
+    assert after == before
+    assert not (tmp_path / "invalid-manifest.json").exists()
+
+
 def test_missing_expected_manifest_warns_without_changing_aggregate_gate(
     state_dir, run_cli, tmp_path,
 ):
@@ -114,6 +165,69 @@ def test_missing_expected_manifest_warns_without_changing_aggregate_gate(
     assert evidence["context_manifest_generated"] is False
 
 
+def test_malformed_manifest_record_is_treated_as_missing(
+    state_dir, run_cli, tmp_path,
+):
+    _update_state(
+        state_dir,
+        iteration=2,
+        phase="reviewing",
+        critic_has_new_scope=False,
+        context_manifests={"2": {}},
+    )
+
+    aggregated, _ = _aggregate(run_cli, state_dir, tmp_path, 2)
+
+    assert aggregated.returncode == 0, aggregated.stderr
+    assert "WARN #352: bounded context expected but no manifest generated" in aggregated.stderr
+    result = json.loads(aggregated.stdout)
+    evidence = json.loads(Path(result["findings_evidence_path"]).read_text(encoding="utf-8"))
+    assert evidence["context_manifest_generated"] is False
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["missing-file", "bad-digest", "bad-time", "invalid-json", "bad-schema", "wrong-iteration"],
+)
+def test_unverifiable_manifest_is_treated_as_missing(
+    state_dir, run_cli, tmp_path, failure,
+):
+    manifest_path = tmp_path / f"manifest-{failure}.json"
+    if failure == "missing-file":
+        record = {
+            "path": str(manifest_path),
+            "digest": "sha256:" + "0" * 64,
+            "generated_at": "2026-08-07T00:00:00Z",
+        }
+    elif failure == "invalid-json":
+        record = _manifest_record(manifest_path, 2, raw=b"not-json")
+    elif failure == "bad-schema":
+        record = _manifest_record(manifest_path, 2, schema="wrong/1")
+    elif failure == "wrong-iteration":
+        record = _manifest_record(manifest_path, 3)
+    else:
+        record = _manifest_record(manifest_path, 2)
+        if failure == "bad-digest":
+            record["digest"] = "sha256:" + "0" * 64
+        else:
+            record["generated_at"] = "not-an-iso-timestamp"
+    _update_state(
+        state_dir,
+        iteration=2,
+        phase="reviewing",
+        critic_has_new_scope=False,
+        context_manifests={"2": record},
+    )
+
+    aggregated, _ = _aggregate(run_cli, state_dir, tmp_path, 2)
+
+    assert aggregated.returncode == 0, aggregated.stderr
+    assert "WARN #352: bounded context expected but no manifest generated" in aggregated.stderr
+    result = json.loads(aggregated.stdout)
+    evidence = json.loads(Path(result["findings_evidence_path"]).read_text(encoding="utf-8"))
+    assert evidence["context_manifest_generated"] is False
+
+
 def test_iteration_one_records_full_expectation_without_warning(
     state_dir, run_cli, tmp_path,
 ):
@@ -131,14 +245,23 @@ def test_iteration_one_records_full_expectation_without_warning(
 
 def test_stats_json_counts_bounded_generation_and_full_fallback(run_cli, tmp_path):
     states = [
-        ("generated", 2, False, {"2": {"path": "manifest.json", "digest": "sha256:x", "generated_at": "2026-08-07T00:00:00Z"}}),
-        ("fallback", 2, False, {}),
-        ("full", 1, None, {}),
+        ("generated", 2, False, True),
+        ("fallback", 2, False, False),
+        ("malformed", 2, False, False),
+        ("full", 1, None, False),
     ]
-    for name, iteration, critic_scope, manifests in states:
+    for name, iteration, critic_scope, has_manifest in states:
         project = tmp_path / name
         session_dir = project / ".mission-state" / "sessions"
         session_dir.mkdir(parents=True)
+        manifests = {}
+        if has_manifest:
+            manifests[str(iteration)] = _manifest_record(
+                project / "manifest.json", iteration,
+            )
+            manifests[str(iteration)]["path"] = "manifest.json"
+        elif name == "malformed":
+            manifests[str(iteration)] = {}
         state = {
             "mission": f"mission {name}",
             "mission_id": f"mission-{name}",
@@ -162,9 +285,9 @@ def test_stats_json_counts_bounded_generation_and_full_fallback(run_cli, tmp_pat
     assert result.returncode == 0, result.stderr
     stats = json.loads(result.stdout)
     assert stats["bounded_context_counts"] == {
-        "expected_bounded": 2,
+        "expected_bounded": 3,
         "manifest_generated": 1,
-        "fallback_full": 1,
+        "fallback_full": 2,
     }
 
 
