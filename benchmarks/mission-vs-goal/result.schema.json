@@ -220,6 +220,19 @@
       "minimum": 0,
       "description": "#238: claude CLI が報告した総コスト (USD)。blocked/failed でも消費額を第一級フィールドで残し、全損コストを集計可能にする。"
     },
+    "max_budget_usd_effective": {
+      "type": "number",
+      "minimum": 0,
+      "description": "The resolved per-record budget after arm-specific, common, and default precedence."
+    },
+    "burn_rate_usd_per_min": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Blocked-run spend rate (total_cost_usd / elapsed_minutes); null otherwise."
+    },
     "token_estimate": {
       "type": [
         "integer",
