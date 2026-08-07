@@ -500,6 +500,19 @@ def _read_routing_config(path: Path, source: str, allowed_root: Path | None = No
         reason = f"routing config symlink rejected at {source}"
         print(f"WARN #355: {reason}; using inline", file=sys.stderr)
         return {"mode": "inline", "source": source, "fallback_reason": reason}
+    if allowed_root is not None:
+        try:
+            resolved_path = path.resolve(strict=False)
+            resolved_root = allowed_root.resolve(strict=True)
+            resolved_path.relative_to(resolved_root)
+        except ValueError:
+            reason = f"routing config escapes project root at {source}"
+            print(f"WARN #355: {reason}; using inline", file=sys.stderr)
+            return {"mode": "inline", "source": source, "fallback_reason": reason}
+        except (OSError, RuntimeError) as exc:
+            reason = f"routing config path unreadable at {source}: {exc.__class__.__name__}"
+            print(f"WARN #355: {reason}; using inline", file=sys.stderr)
+            return {"mode": "inline", "source": source, "fallback_reason": reason}
     if not path.is_file():
         return None
     values: dict[str, str] = {}
