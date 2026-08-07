@@ -3,7 +3,6 @@ import json
 import os
 import subprocess
 import sys
-import re
 from pathlib import Path
 
 import pytest
@@ -75,21 +74,6 @@ def run_cli(tmp_path):
     継承環境から除去し、env_extra による明示注入のみ許す。外部セッションの
     MISSION_* 汚染でテスト結果が変わる非決定性を遮断する。
     """
-    lease_tokens = {}
-
-    def _resolved_test_sid(env):
-        if env.get("MISSION_SESSION_ID"):
-            raw = env["MISSION_SESSION_ID"]
-            safe = re.sub(r"[/\\]", "_", raw).strip().lstrip(".") or "default"
-            return safe
-        if env.get("CLAUDE_CODE_SESSION_ID"):
-            raw = re.sub(r"[/\\]", "_", env["CLAUDE_CODE_SESSION_ID"]).strip().lstrip(".") or "default"
-            return f"cc-{raw}"
-        if env.get("CODEX_THREAD_ID"):
-            raw = re.sub(r"[/\\]", "_", env["CODEX_THREAD_ID"]).strip().lstrip(".") or "default"
-            return f"cx-{raw}"
-        return None
-
     def _run(*args, cwd=None, check=False, env_extra=None):
         # MISSION_* prefix 一括遮断 (将来 mission-state.py が新しい MISSION_* を読んでも自動でマスク)
         base_env = {k: v for k, v in os.environ.items()
@@ -99,6 +83,9 @@ def run_cli(tmp_path):
         _sid_keys = ("MISSION_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID")
         if not (env_extra and any(k in env_extra for k in _sid_keys)):
             base_env["MISSION_SESSION_ID"] = "test"
+        # Model a real caller that pre-issues and carries its fencing token. This
+        # fixed token is never learned from state; explicit None tests missing-token paths.
+        base_env["MISSION_LEASE_ID"] = "test-lease"
         if args and args[0] == "push-score" and "--scoring-json" not in args and "--scoring-output" not in args:
             base_env["MISSION_REQUIRE_SCORING_EVIDENCE"] = "0"
         if env_extra is not None:
@@ -108,39 +95,12 @@ def run_cli(tmp_path):
                 else:
                     base_env[key] = value
         command_cwd = Path(cwd or tmp_path).resolve()
-        sid = _resolved_test_sid(base_env)
-        explicit_lease = env_extra is not None and "MISSION_LEASE_ID" in env_extra
-        if not explicit_lease and sid and (str(command_cwd), sid) in lease_tokens:
-            base_env["MISSION_LEASE_ID"] = lease_tokens[(str(command_cwd), sid)]
-        result = subprocess.run(
+        return subprocess.run(
             [sys.executable, str(MISSION_STATE_PY), *args],
             cwd=str(command_cwd),
             capture_output=True,
             text=True,
-            check=False,
+            check=check,
             env=base_env,
         )
-        if args and args[0] == "init" and result.returncode == 0:
-            try:
-                contract = json.loads(result.stdout)
-                if contract.get("lease_id") and contract.get("session_id"):
-                    lease_tokens[(str(command_cwd), contract["session_id"])] = contract["lease_id"]
-            except (ValueError, AttributeError):
-                pass
-        if result.returncode == 0 and sid:
-            state_path = command_cwd / ".mission-state" / "sessions" / f"{sid}.json"
-            try:
-                current_state = json.loads(state_path.read_text())
-                if current_state.get("lease_id"):
-                    lease_tokens[(str(command_cwd), sid)] = current_state["lease_id"]
-            except (OSError, ValueError, AttributeError):
-                pass
-        if check and result.returncode != 0:
-            raise subprocess.CalledProcessError(
-                result.returncode,
-                result.args,
-                output=result.stdout,
-                stderr=result.stderr,
-            )
-        return result
     return _run

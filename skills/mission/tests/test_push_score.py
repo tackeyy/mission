@@ -252,7 +252,11 @@ def test_push_score_canonical_keys_no_warning(state_dir, run_cli):
                 "--items", '{"mission_achievement": 4.0, "accuracy": 4.0, "completeness": 4.0, "usability": 4.0, "reviewer_consensus": 4.0}',
                 cwd=state_dir.parent)
     assert r.returncode == 0
-    assert "キー" not in r.stderr and "key" not in r.stderr.lower()
+    diagnostics = "\n".join(
+        line for line in r.stderr.splitlines()
+        if not line.startswith("MISSION_LEASE_CARRIER=")
+    )
+    assert "キー" not in diagnostics and "key" not in diagnostics.lower()
 
 
 def test_push_score_rejects_when_scalar_scores_inflate_above_items(state_dir, run_cli):

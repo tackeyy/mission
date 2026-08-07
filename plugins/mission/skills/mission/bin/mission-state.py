@@ -314,6 +314,7 @@ DEFAULT_COMMAND_RESULT_CONTRACTS = {
 SPECIALIST_SELECTION_CHECKPOINT_COMPLEXITIES = {"Standard", "Complex", "Critical"}
 DEFAULT_STALE_ACTIVE_SECONDS = 3 * 60 * 60
 DEFAULT_LEASE_TTL_SECONDS = 15 * 60
+LEASE_CARRIER_PREFIX = "MISSION_LEASE_CARRIER="
 LEASE_STATE_FIELDS = (
     "owner_session_id",
     "lease_id",
@@ -733,10 +734,10 @@ def _lease_write_reason(reason: str | None):
         _LEASE_WRITE_REASON = previous
 
 
-def _enforce_session_lease_for_write(path: Path, data: dict) -> None:
+def _enforce_session_lease_for_write(path: Path, data: dict) -> LeaseDecision | None:
     """CAS the lease against the latest state immediately before publish."""
     if not (_is_session_state_path(path) and _is_session_state_shape(data)):
-        return
+        return None
     latest = None
     if path.exists():
         try:
@@ -762,6 +763,25 @@ def _enforce_session_lease_for_write(path: Path, data: dict) -> None:
     for key in _LEASE_KEYS:
         if key in lease_state:
             data[key] = lease_state[key]
+    return decision
+
+
+def _emit_lease_carrier(data: dict, decision: LeaseDecision | None) -> None:
+    """Expose a newly issued token only after its state publish succeeds."""
+    if decision is None or decision.action not in {"acquired", "taken-over"}:
+        return
+    carrier = {
+        "schema": "mission-lease-carrier/1",
+        "action": decision.action,
+        "session_id": str(data.get("session_id") or resolve_session_id()),
+        "lease_id": decision.lease_id,
+        "fencing_epoch": decision.fencing_epoch,
+        "lease_expires_at": data.get("lease_expires_at"),
+    }
+    print(
+        LEASE_CARRIER_PREFIX + json.dumps(carrier, ensure_ascii=False, separators=(",", ":")),
+        file=sys.stderr,
+    )
 
 
 def atomic_write_json(path: Path, data: dict, *, administrative: bool = False) -> None:
@@ -773,10 +793,11 @@ def atomic_write_json(path: Path, data: dict, *, administrative: bool = False) -
     last_activity_at を updated_at より優先する (updated_at は resolution batch 書き込みで
     上書きされ壁時計が最大 500 倍膨張した実害があるため)。
     """
-    _enforce_session_lease_for_write(path, data)
+    lease_decision = _enforce_session_lease_for_write(path, data)
     if not administrative and _is_session_state_shape(data):
         data["last_activity_at"] = iso_now()
     _atomic_write(path, lambda f: json.dump(data, f, indent=2, ensure_ascii=False))
+    _emit_lease_carrier(data, lease_decision)
 
 
 def atomic_write_text(path: Path, content: str) -> None:

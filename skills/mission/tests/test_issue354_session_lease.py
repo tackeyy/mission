@@ -2,6 +2,9 @@
 
 import importlib.util
 import json
+import os
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -13,6 +16,7 @@ SPEC = importlib.util.spec_from_file_location("mission_state_issue354", MISSION_
 MISSION_STATE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(MISSION_STATE)
+LEASE_CARRIER_PREFIX = "MISSION_LEASE_CARRIER="
 
 
 def _lease_state(**overrides):
@@ -31,6 +35,31 @@ def _lease_state(**overrides):
     return state
 
 
+def _lease_carrier(stderr: str) -> dict:
+    records = [
+        json.loads(line.removeprefix(LEASE_CARRIER_PREFIX))
+        for line in stderr.splitlines()
+        if line.startswith(LEASE_CARRIER_PREFIX)
+    ]
+    assert len(records) == 1, stderr
+    return records[0]
+
+
+def _raw_cli(cwd: Path, *args: str, lease_id: str | None = None):
+    env = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith("MISSION_")
+        and key not in {"CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"}
+    }
+    env["MISSION_SESSION_ID"] = "test"
+    if lease_id is not None:
+        env["MISSION_LEASE_ID"] = lease_id
+    return subprocess.run(
+        [sys.executable, str(MISSION_STATE_PY), *args],
+        cwd=str(cwd), capture_output=True, text=True, env=env,
+    )
+
+
 def test_legacy_state_acquires_epoch_one_lease(monkeypatch):
     monkeypatch.setenv("MISSION_STATE_NOW", "2026-08-07T12:00:00Z")
     monkeypatch.setenv("MISSION_LEASE_ID", "new-lease")
@@ -43,6 +72,23 @@ def test_legacy_state_acquires_epoch_one_lease(monkeypatch):
     assert state["owner_session_id"] == "owner-a"
     assert state["lease_id"] == "new-lease"
     assert state["lease_expires_at"] == "2026-08-07T12:15:00Z"
+
+
+def test_legacy_mutation_emits_carrier_for_next_independent_process(state_dir):
+    first = _raw_cli(state_dir.parent, "set", "iteration=2")
+
+    assert first.returncode == 0, first.stderr
+    carrier = _lease_carrier(first.stderr)
+    assert carrier["schema"] == "mission-lease-carrier/1"
+    assert carrier["action"] == "acquired"
+    assert carrier["session_id"] == "test"
+    assert carrier["fencing_epoch"] == 1
+
+    second = _raw_cli(
+        state_dir.parent, "set", "iteration=3",
+        lease_id=carrier["lease_id"],
+    )
+    assert second.returncode == 0, second.stderr
 
 
 def test_partial_lease_is_rejected_instead_of_downgraded_to_legacy(monkeypatch):
