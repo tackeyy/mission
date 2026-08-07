@@ -97,7 +97,7 @@ Phase 7: pass 後の PR merge 判定
 
 Phase 1 ではミッションを構造化し、触る/触らない範囲、完了条件、複雑度を決める。複雑度は Simple=単一ファイル/1ステップ、Standard=3-5ステップ、Complex=設計判断/横断、Critical=本番/セキュリティ/非可逆。過大見積もりは reviewer コストを増やすため、Simple でない判定根拠を assumptions.md に残す。
 
-**adaptive routing (#276)**: Simple + リスクシグナルなし + `--issue-ref` なしの場合、`init` は `route: "goal"` を返し mission state を作らない。この場合は mission の全 Phase をスキップし、guidance に従って goal 契約の 5 見出し (Goal / Result / Evidence / Assumptions / Stop Condition) でタスクを直接完遂する。最終報告に「Simple のため goal へルーティングした」旨を 1 行明記し、mission の pass は主張しない。CC でも Codex でも同じ inline 契約で動く。mission 機構が必要なとき (ユーザー明示・検証目的等) は `--force-mission` で再 init する。`--issue-ref` 付き (Issue-bound = 統治要求。wrapper の strict preflight が active state を要求) は Simple でも routing せず mission ループを維持する (#304)。routing された場合、`next` / `mark-passes` / Stop hook 継続は呼ばない (state が存在しない)。init 後に complexity を Simple へ確定した場合は `set complexity=Simple` 自身が routing verdict を実行する (#330): state は routed-goal で自動 halt され (mark-halt 不要・pass-rate 対象外)、出力の guidance に従い goal 契約で直接完遂する。`next` の route-to-goal (#325) は defense-in-depth として残る。
+**adaptive routing (#276)**: Simple + リスクシグナルなし + `--issue-ref` なしの場合、`init` は `route: "goal"` を返し mission state を作らない。この場合は mission の全 Phase をスキップし、guidance に従って goal 契約の 5 見出し (Goal / Result / Evidence / Assumptions / Stop Condition) でタスクを直接完遂する。最終報告に「Simple のため goal へルーティングした」旨を 1 行明記し、mission の pass は主張しない。goal dispatch は既定 `inline`。`goal_dispatch: <inline|host-native>` のユーザー明示、`init --goal-dispatch`、project `.mission/routing.yml`、user `~/.config/mission/routing.yml` の順で上書きできる (#355)。`host-native` は現在ホストの native goal guidance を返し、host 不明時は理由付きで inline へ fail-safe する。詳細は `refs/goal-dispatch-provider.md`。mission 機構が必要なとき (ユーザー明示・検証目的等) は `--force-mission` で再 init する。`--issue-ref` 付き (Issue-bound = 統治要求。wrapper の strict preflight が active state を要求) は Simple でも routing せず mission ループを維持する (#304)。routing された場合、`next` / `mark-passes` / Stop hook 継続は呼ばない (state が存在しない)。init 後に complexity を Simple へ確定した場合は `set complexity=Simple` 自身が routing verdict を実行する (#330): state は routed-goal で自動 halt され (mark-halt 不要・pass-rate 対象外)、出力の guidance に従い goal 契約で直接完遂する。`next` の route-to-goal (#325) は defense-in-depth として残る。
 
 Checker / 監査等の従属役割で起動する場合は `init --role <checker|planning|analyze|release>` を指定する (#311)。証拠提出で終わる正規出口は `mark-halt --category evidence-submitted` を使い、pass-rate 統計を汚さない (implementer 限定指標が別計上される)。
 
@@ -206,3 +206,4 @@ worktree 実行時は `mark-passes` / `mark-halt` の後、worktree cleanup の�
 - `refs/codex-setup.md`: Codex での導入と Stop hook
 - `refs/self-improvement.md`: audit と改善 prompt
 - `refs/specialist-registry.md`: task_profile と specialist/provider 選定
+- `refs/goal-dispatch-provider.md`: adaptive routing 後の inline / host-native goal dispatch 設定と fail-safe
