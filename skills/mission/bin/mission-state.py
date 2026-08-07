@@ -610,7 +610,15 @@ def _mission_goal_dispatch_values(mission: str) -> list[str]:
 def _resolve_goal_dispatch(mission: str, cli_mode: str | None, cwd: Path) -> dict:
     explicit_values = _mission_goal_dispatch_values(mission)
     if explicit_values:
-        mode = explicit_values[0]
+        unique_values = list(dict.fromkeys(explicit_values))
+        if len(unique_values) > 1:
+            reason = (
+                "conflicting goal_dispatch directives in mission user instruction: "
+                + ", ".join(unique_values)
+            )
+            print(f"WARN #355: {reason}; using inline", file=sys.stderr)
+            return {"mode": "inline", "source": "mission:user-explicit", "fallback_reason": reason}
+        mode = unique_values[0]
         if mode not in GOAL_DISPATCH_MODES:
             reason = f"invalid goal_dispatch '{mode}' in mission user instruction"
             print(f"WARN #355: {reason}; using inline", file=sys.stderr)
