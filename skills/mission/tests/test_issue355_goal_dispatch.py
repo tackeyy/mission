@@ -252,6 +252,22 @@ def test_standalone_dispatch_on_later_line_overrides_cli_flag(run_cli, tmp_path)
     assert verdict["goal_dispatch_effective"] == "host-native"
 
 
+def test_conflicting_standalone_dispatch_directives_warn_and_fail_safe_inline(run_cli, tmp_path):
+    result = run_cli(
+        "init", "goal_dispatch: host-native\ntypo を直す\ngoal_dispatch: inline",
+        "--complexity", "Simple", "--goal-dispatch", "host-native",
+        cwd=tmp_path,
+        env_extra=_isolated_env(tmp_path, CODEX_THREAD_ID="codex-test"),
+        check=True,
+    )
+
+    verdict = json.loads(result.stdout)
+    assert verdict["goal_dispatch_source"] == "mission:user-explicit"
+    assert verdict["goal_dispatch_effective"] == "inline"
+    assert "conflicting goal_dispatch directives" in result.stderr
+    assert "host-native, inline" in verdict["goal_dispatch_fallback_reason"]
+
+
 @pytest.mark.parametrize("mission", [
     "例: goal_dispatch: host-native を指定できます",
     "goal_dispatch: host-native にしないで typo を直す",
