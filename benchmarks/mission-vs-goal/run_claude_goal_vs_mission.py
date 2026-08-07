@@ -36,6 +36,11 @@ API_USAGE_LIMIT_MARKERS = (
     "workspace API usage limits",
     "You have reached your specified workspace API usage limits",
 )
+API_SPEND_LIMIT_MARKERS = (
+    "spend limit",
+    "rate limit",
+    "usage limit",
+)
 MAX_BUDGET_MARKERS = (
     "error_max_budget_usd",
     "max_budget_usd",
@@ -318,6 +323,19 @@ def parse_claude_json(stdout: str) -> dict:
         return {"type": "raw", "result": stdout}
 
 
+def detect_spend_limit(result_json: dict, stderr_text: str) -> bool:
+    """Detect an external API spend/rate/usage limit in a child result.
+
+    `api_error_status` is the strongest signal. Text matching covers providers
+    that return the limit only in the result body or stderr.
+    """
+    if isinstance(result_json, dict) and result_json.get("api_error_status") == 429:
+        return True
+    result_text = result_json.get("result", "") if isinstance(result_json, dict) else ""
+    combined = f"{result_text if isinstance(result_text, str) else ''}\n{stderr_text or ''}".lower()
+    return any(marker in combined for marker in API_SPEND_LIMIT_MARKERS)
+
+
 def classify_run_status(
     stdout: str,
     stderr: str,
@@ -327,12 +345,27 @@ def classify_run_status(
     validator_pass: bool,
 ) -> dict:
     combined = f"{stdout}\n{stderr}"
+    result_json = parse_claude_json(stdout)
+    if isinstance(result_json, dict) and result_json.get("api_error_status") == 429:
+        return {
+            "run_status": "blocked",
+            "blocked_reason": "api_spend_limit",
+            "failure_kind": "api_spend_limit",
+            "comparable_attempt": False,
+        }
     if validator_pass:
         return {
             "run_status": "completed",
             "blocked_reason": None,
             "failure_kind": None,
             "comparable_attempt": True,
+        }
+    if detect_spend_limit(result_json, stderr):
+        return {
+            "run_status": "blocked",
+            "blocked_reason": "api_spend_limit",
+            "failure_kind": "api_spend_limit",
+            "comparable_attempt": False,
         }
     if any(marker in combined for marker in API_USAGE_LIMIT_MARKERS):
         return {
@@ -853,15 +886,20 @@ def execute_plan(entries, worker, parallel: int = 1, on_record=None, stop_on_blo
     - parallel=1 は従来の逐次実行と同一順序・同一挙動 (後方互換)
     - record は完了順に返す (record 自身が task/arm/run_index を持つため順序は監査に影響しない)
     - on_record(entry, record) は record ごとに 1 回、lock 下で直列に呼ぶ (JSONL append 安全)
-    - stop_on_blocked=True: blocked record 検出後、未開始 entry を起動しない
+    - api_spend_limit は常に、その他は stop_on_blocked=True のとき、
+      blocked record 検出後に未開始 entry を起動しない
       (実行中の entry は完走させ record も記録する)
     """
     import concurrent.futures
 
     records: list[dict] = []
-    stopped = False
     emit_lock = threading.Lock()
     stop_event = threading.Event()
+
+    def _must_stop(record):
+        if record.get("failure_kind") == "api_spend_limit":
+            return True
+        return stop_on_blocked and record.get("run_status") == "blocked"
 
     def _run_entry(entry):
         record = worker(entry)
@@ -869,8 +907,8 @@ def execute_plan(entries, worker, parallel: int = 1, on_record=None, stop_on_blo
             records.append(record)
             if on_record is not None:
                 on_record(entry, record)
-        if stop_on_blocked and record.get("run_status") == "blocked":
-            stop_event.set()
+            if _must_stop(record):
+                stop_event.set()
         return record
 
     if parallel <= 1:
@@ -881,14 +919,25 @@ def execute_plan(entries, worker, parallel: int = 1, on_record=None, stop_on_blo
         # 従来互換: blocked による早期停止経路に入ったら stopped_early=True
         return records, stop_event.is_set()
 
+    entry_iter = iter(entries)
     with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as pool:
-        futures = []
-        for entry in entries:
-            if stop_event.is_set():
-                break
-            futures.append(pool.submit(_run_entry, entry))
-        for f in concurrent.futures.as_completed(futures):
-            f.result()  # worker 例外を伝播させる
+        pending = {
+            pool.submit(_run_entry, entry)
+            for entry in (next(entry_iter, None) for _ in range(parallel))
+            if entry is not None
+        }
+        while pending:
+            done, pending = concurrent.futures.wait(
+                pending,
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            for future in done:
+                future.result()  # worker 例外を伝播させる
+            while not stop_event.is_set() and len(pending) < parallel:
+                entry = next(entry_iter, None)
+                if entry is None:
+                    break
+                pending.add(pool.submit(_run_entry, entry))
     return records, stop_event.is_set()
 
 
@@ -919,6 +968,37 @@ def summarize(
         # #261: comparable_attempt=False (無効 record) を除いた集計対象
         return [r for r in items if r.get("comparable_attempt", True)]
 
+    expected_records = len(tasks) * len(ARMS) * max(1, repeats)
+    spend_limit_record = next(
+        (index for index, record in enumerate(records, start=1) if record.get("failure_kind") == "api_spend_limit"),
+        None,
+    )
+    limitations = [
+        "Claude Code print mode smoke; does not fully exercise multi-turn interactive /goal persistence.",
+        "Quality and evidence scores are automated heuristic scores, not blind human review.",
+        "Blocked records are excluded from comparable quality-marker aggregates.",
+    ]
+    if any(r.get("permission_mode_degraded") for r in records):
+        limitations.append(
+            "WARNING: permission-mode degradation detected in one or more records; "
+            "acceptEdits was forced to default (see #268). Cross-run comparability is affected."
+        )
+    if any(r.get("mission_evidence_only") for r in records):
+        limitations.append(
+            "WARNING: one or more mission-arm records halted by submitting evidence "
+            "without a scored review loop (#341); their wall-clock understates the "
+            "gated loop and is not comparable to full-loop records."
+        )
+    if spend_limit_record is not None:
+        limitations.append(
+            "WARNING: API spend limit affected one or more records; affected records are "
+            "excluded from comparable aggregates and cross-run comparability is affected."
+        )
+        if stopped_early:
+            limitations.append(
+                f"run stopped early: api_spend_limit at record {spend_limit_record}/{expected_records}"
+            )
+
     return {
         "run_id": run_id,
         "task_file": str(tasks_path.relative_to(REPO_ROOT)),
@@ -928,24 +1008,16 @@ def summarize(
         "starting_commit": starting_commit,
         "records": len(records),
         "repeats": repeats,
-        "expected_records": len(tasks) * len(ARMS) * max(1, repeats),
+        "expected_records": expected_records,
         "stopped_early": stopped_early,
-        "limitations": [
-            "Claude Code print mode smoke; does not fully exercise multi-turn interactive /goal persistence.",
-            "Quality and evidence scores are automated heuristic scores, not blind human review.",
-            "Blocked records are excluded from comparable quality-marker aggregates.",
-        ] + ([
-            "WARNING: permission-mode degradation detected in one or more records; "
-            "acceptEdits was forced to default (see #268). Cross-run comparability is affected.",
-        ] if any(r.get("permission_mode_degraded") for r in records) else []) + ([
-            "WARNING: one or more mission-arm records halted by submitting evidence "
-            "without a scored review loop (#341); their wall-clock understates the "
-            "gated loop and is not comparable to full-loop records.",
-        ] if any(r.get("mission_evidence_only") for r in records) else []),
+        "limitations": limitations,
         "arms": {
             arm: {
                 "records": len(items),
                 "blocked_records": sum(1 for r in items if r.get("run_status") == "blocked"),
+                "api_spend_limit_records": sum(
+                    1 for r in items if r.get("failure_kind") == "api_spend_limit"
+                ),
                 "permission_degraded_records": sum(1 for r in items if r.get("permission_mode_degraded")),
                 "routed_records": sum(1 for r in items if r.get("mission_routed")),
                 "evidence_only_records": sum(1 for r in items if r.get("mission_evidence_only")),
@@ -1114,7 +1186,12 @@ def main() -> int:
             f"validator_pass={record['validator_pass']} elapsed_minutes={record['elapsed_minutes']}",
             flush=True,
         )
-        if args.stop_on_blocked and record["run_status"] == "blocked":
+        if record.get("failure_kind") == "api_spend_limit":
+            print(
+                f"stopping early after API spend limit task={task['id']} arm={arm}",
+                flush=True,
+            )
+        elif args.stop_on_blocked and record["run_status"] == "blocked":
             print(
                 f"stopping early after blocked record task={task['id']} arm={arm} "
                 f"blocked_reason={record['blocked_reason']}",

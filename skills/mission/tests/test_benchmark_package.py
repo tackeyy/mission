@@ -53,6 +53,7 @@ def test_detect_spend_limit_accepts_429_fixture_and_limit_messages():
     assert runner.detect_spend_limit(_spend_limit_fixture(), "") is True
     assert runner.detect_spend_limit({"result": "Rate Limit reached"}, "") is True
     assert runner.detect_spend_limit({"result": "USAGE LIMIT reached"}, "") is True
+    assert runner.detect_spend_limit({}, "monthly SPEND LIMIT reached") is True
 
 
 def test_detect_spend_limit_rejects_unrelated_failures():
@@ -141,6 +142,30 @@ def test_execute_plan_stops_automatically_after_spend_limit():
     assert stopped_early is True
 
 
+def test_parallel_execute_plan_finishes_in_flight_workers_without_starting_more():
+    runner = _load_official_goal_runner()
+    second_started = runner.threading.Event()
+    release_second = runner.threading.Event()
+    started = []
+
+    def worker(entry):
+        started.append(entry)
+        if entry == 1:
+            assert second_started.wait(timeout=1)
+            release_second.set()
+            return _benchmark_record("claude_code_goal_command", "api_spend_limit")
+        if entry == 2:
+            second_started.set()
+            assert release_second.wait(timeout=1)
+        return _benchmark_record("mission")
+
+    records, stopped_early = runner.execute_plan([1, 2, 3, 4], worker, parallel=2)
+
+    assert sorted(started) == [1, 2]
+    assert len(records) == 2
+    assert stopped_early is True
+
+
 def test_summary_counts_spend_limits_per_arm_and_warns_about_early_stop():
     runner = _load_official_goal_runner()
     records = [
@@ -225,9 +250,11 @@ def test_mission_vs_goal_result_schema_matches_declared_arms():
     assert "evidence_completeness" in schema["required"]
     assert schema["properties"]["run_status"]["enum"] == ["completed", "failed", "blocked"]
     assert "api_usage_limit" in schema["properties"]["blocked_reason"]["enum"]
+    assert "api_spend_limit" in schema["properties"]["blocked_reason"]["enum"]
     assert "max_budget_usd" in schema["properties"]["blocked_reason"]["enum"]
     assert "timeout" in schema["properties"]["blocked_reason"]["enum"]
     assert "max_budget_usd" in schema["properties"]["failure_kind"]["enum"]
+    assert "api_spend_limit" in schema["properties"]["failure_kind"]["enum"]
     assert schema["properties"]["comparable_attempt"]["type"] == "boolean"
     # F-1: model_id is required and recorded verbatim; arm_order supports counterbalancing.
     assert "model_id" in schema["required"]
@@ -828,8 +855,8 @@ def test_mission_vs_goal_protocol_controls_review_bias():
     )
     assert blocked == {
         "run_status": "blocked",
-        "blocked_reason": "api_usage_limit",
-        "failure_kind": "api_usage_limit",
+        "blocked_reason": "api_spend_limit",
+        "failure_kind": "api_spend_limit",
         "comparable_attempt": False,
     }
     max_budget = runner_module.classify_run_status(
