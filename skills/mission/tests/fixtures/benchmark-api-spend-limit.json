@@ -1,0 +1,7 @@
+{
+  "api_error_status": 429,
+  "is_error": true,
+  "result": "You've hit your org's monthly spend limit",
+  "terminal_reason": "api_error",
+  "type": "result"
+}

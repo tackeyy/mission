@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
 import statistics
@@ -36,9 +37,33 @@ API_USAGE_LIMIT_MARKERS = (
     "workspace API usage limits",
     "You have reached your specified workspace API usage limits",
 )
+API_SPEND_LIMIT_MARKERS = (
+    "spend limit",
+    "rate limit",
+    "usage limit",
+)
+API_SPEND_LIMIT_ERROR_PHRASES = (
+    "api error: 429",
+    "too many requests",
+    "spend limit reached",
+    "rate limit reached",
+    "usage limit reached",
+)
 MAX_BUDGET_MARKERS = (
-    "error_max_budget_usd",
     "max_budget_usd",
+    "max budget",
+    "maximum budget",
+    "budget limit",
+)
+MAX_BUDGET_ERROR_PHRASES = (
+    "max_budget_usd reached",
+    "max_budget_usd exceeded",
+    "max budget reached",
+    "max budget exceeded",
+    "maximum budget reached",
+    "maximum budget exceeded",
+    "budget limit reached",
+    "budget limit exceeded",
 )
 
 
@@ -318,6 +343,50 @@ def parse_claude_json(stdout: str) -> dict:
         return {"type": "raw", "result": stdout}
 
 
+def detect_spend_limit(result_json: dict, stderr_text: str, returncode: int | None = None) -> bool:
+    """Detect an external API spend/rate/usage limit in a child result.
+
+    Structured error fields are preferred. Text-only fallback requires either
+    an error state or a definitive provider error phrase so successful prose
+    discussing limit handling is not classified as externally blocked.
+    """
+    result = result_json if isinstance(result_json, dict) else {}
+    if result.get("api_error_status") == 429:
+        return True
+    result_text = result.get("result", "")
+    combined = f"{result_text if isinstance(result_text, str) else ''}\n{stderr_text or ''}".lower()
+    has_limit_marker = any(marker in combined for marker in API_SPEND_LIMIT_MARKERS)
+    terminal_reason = result.get("terminal_reason")
+    has_error_state = (
+        result.get("is_error") is True
+        or terminal_reason in {"api_error", "error", "rate_limit", "spend_limit", "usage_limit"}
+        or (returncode is not None and returncode != 0)
+    )
+    has_provider_error_phrase = any(phrase in combined for phrase in API_SPEND_LIMIT_ERROR_PHRASES) or (
+        has_limit_marker
+        and any(phrase in combined for phrase in ("you've hit", "you have hit", "you have reached"))
+    )
+    return has_limit_marker and (has_error_state or has_provider_error_phrase)
+
+
+def detect_max_budget_limit(result_json: dict, stderr_text: str, returncode: int | None = None) -> bool:
+    """Detect a budget stop without matching successful implementation prose."""
+    result = result_json if isinstance(result_json, dict) else {}
+    if result.get("subtype") == "error_max_budget_usd":
+        return True
+    result_text = result.get("result", "")
+    combined = f"{result_text if isinstance(result_text, str) else ''}\n{stderr_text or ''}".lower()
+    has_budget_marker = any(marker in combined for marker in MAX_BUDGET_MARKERS)
+    terminal_reason = result.get("terminal_reason")
+    has_error_state = (
+        result.get("is_error") is True
+        or terminal_reason in {"api_error", "error", "max_budget_usd", "budget_exceeded"}
+        or (returncode is not None and returncode != 0)
+    )
+    has_provider_error_phrase = any(phrase in combined for phrase in MAX_BUDGET_ERROR_PHRASES)
+    return has_provider_error_phrase or (has_budget_marker and has_error_state)
+
+
 def classify_run_status(
     stdout: str,
     stderr: str,
@@ -327,6 +396,21 @@ def classify_run_status(
     validator_pass: bool,
 ) -> dict:
     combined = f"{stdout}\n{stderr}"
+    result_json = parse_claude_json(stdout)
+    if detect_spend_limit(result_json, stderr, returncode):
+        return {
+            "run_status": "blocked",
+            "blocked_reason": "api_spend_limit",
+            "failure_kind": "api_spend_limit",
+            "comparable_attempt": False,
+        }
+    if detect_max_budget_limit(result_json, stderr, returncode):
+        return {
+            "run_status": "blocked",
+            "blocked_reason": "max_budget_usd",
+            "failure_kind": "max_budget_usd",
+            "comparable_attempt": False,
+        }
     if validator_pass:
         return {
             "run_status": "completed",
@@ -339,13 +423,6 @@ def classify_run_status(
             "run_status": "blocked",
             "blocked_reason": "api_usage_limit",
             "failure_kind": "api_usage_limit",
-            "comparable_attempt": False,
-        }
-    if any(marker in combined for marker in MAX_BUDGET_MARKERS):
-        return {
-            "run_status": "blocked",
-            "blocked_reason": "max_budget_usd",
-            "failure_kind": "max_budget_usd",
             "comparable_attempt": False,
         }
     if timed_out:
@@ -604,7 +681,7 @@ def run_one(
     starting_commit: str,
     run_root: Path,
     timeout: int,
-    max_budget_usd: float,
+    max_budget_usd: float | None,
     mission_max_iter: int | None,
     mission_profile: str,
     arm_order: int,
@@ -614,6 +691,8 @@ def run_one(
     extra_rules: list[str] | tuple[str, ...] = (),
     run_index: int = 1,
     repeats: int = 1,
+    max_budget_usd_goal: float | None = None,
+    max_budget_usd_mission: float | None = None,
 ) -> dict:
     task_id = task["id"]
     run_name = run_name_for(task_id, arm, run_index, repeats)
@@ -635,7 +714,19 @@ def run_one(
     stderr_path = artifact_dir / "stderr.txt"
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
-    command = build_child_command(arm, prompt, max_budget_usd)
+    effective_max_budget_usd = resolve_max_budget_usd(
+        arm,
+        max_budget_usd=max_budget_usd,
+        max_budget_usd_goal=max_budget_usd_goal,
+        max_budget_usd_mission=max_budget_usd_mission,
+    )
+    command = build_child_command(
+        arm,
+        prompt,
+        max_budget_usd=max_budget_usd,
+        max_budget_usd_goal=max_budget_usd_goal,
+        max_budget_usd_mission=max_budget_usd_mission,
+    )
 
     started = iso_now()
     start_time = time.monotonic()
@@ -725,6 +816,14 @@ def run_one(
         notes.append("stderr captured in artifact")
     input_tokens = usage.get("input_tokens")
     output_tokens = usage.get("output_tokens")
+    total_cost_usd = (
+        claude_result.get("total_cost_usd") if isinstance(claude_result, dict) else None
+    )
+    burn_rate_usd_per_min = calculate_burn_rate_usd_per_min(
+        evaluation["run_status"],
+        total_cost_usd,
+        elapsed,
+    )
 
     return {
         "benchmark": "mission-vs-goal-pilot",
@@ -736,9 +835,9 @@ def run_one(
         "model_id": model_id,
         # #238 (S6): 失敗 run の課金 (全損コスト) を集計可能にするため、notes 文字列
         # ではなく第一級フィールドとして記録する。blocked/failed でも消費額が残る。
-        "total_cost_usd": (
-            claude_result.get("total_cost_usd") if isinstance(claude_result, dict) else None
-        ),
+        "total_cost_usd": total_cost_usd,
+        "max_budget_usd_effective": effective_max_budget_usd,
+        "burn_rate_usd_per_min": burn_rate_usd_per_min,
         "mission_profile": mission_profile if arm == "mission" else None,
         "started_at": started,
         "completed_at": completed,
@@ -790,8 +889,53 @@ def detect_permission_degradation(stderr: str) -> bool:
 CHILD_ALLOWED_TOOLS = "Read,Write,Edit,Grep,Glob,Bash,Agent,Skill,TodoWrite"
 
 
-def build_child_command(arm: str, prompt: str, max_budget_usd: float) -> list:
+def resolve_max_budget_usd(
+    arm: str,
+    max_budget_usd: float | None = None,
+    max_budget_usd_goal: float | None = None,
+    max_budget_usd_mission: float | None = None,
+) -> float:
+    """Resolve the arm budget with specific -> common -> legacy-default precedence."""
+    arm_budget = max_budget_usd_mission if arm == "mission" else max_budget_usd_goal
+    if arm_budget is not None:
+        return arm_budget
+    if max_budget_usd is not None:
+        return max_budget_usd
+    return 2.0
+
+
+def calculate_burn_rate_usd_per_min(
+    run_status: str,
+    total_cost_usd: float | None,
+    elapsed_minutes: float,
+) -> float | None:
+    """Return a finite blocked-run burn rate when cost and duration are usable."""
+    values = (total_cost_usd, elapsed_minutes)
+    if run_status != "blocked":
+        return None
+    if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in values):
+        return None
+    if not all(math.isfinite(value) for value in values):
+        return None
+    if total_cost_usd < 0 or elapsed_minutes <= 0:
+        return None
+    return round(total_cost_usd / elapsed_minutes, 4)
+
+
+def build_child_command(
+    arm: str,
+    prompt: str,
+    max_budget_usd: float | None = None,
+    max_budget_usd_goal: float | None = None,
+    max_budget_usd_mission: float | None = None,
+) -> list:
     """#292: 子 claude の argv を構築する (テスト可能な単一定義)."""
+    effective_max_budget_usd = resolve_max_budget_usd(
+        arm,
+        max_budget_usd=max_budget_usd,
+        max_budget_usd_goal=max_budget_usd_goal,
+        max_budget_usd_mission=max_budget_usd_mission,
+    )
     command = [
         "claude",
         "-p",
@@ -802,7 +946,7 @@ def build_child_command(arm: str, prompt: str, max_budget_usd: float) -> list:
         "--allowedTools",
         CHILD_ALLOWED_TOOLS,
         "--max-budget-usd",
-        str(max_budget_usd),
+        str(effective_max_budget_usd),
     ]
     if arm == "mission":
         command.extend(["--plugin-dir", str(MISSION_PLUGIN_DIR)])
@@ -853,15 +997,20 @@ def execute_plan(entries, worker, parallel: int = 1, on_record=None, stop_on_blo
     - parallel=1 は従来の逐次実行と同一順序・同一挙動 (後方互換)
     - record は完了順に返す (record 自身が task/arm/run_index を持つため順序は監査に影響しない)
     - on_record(entry, record) は record ごとに 1 回、lock 下で直列に呼ぶ (JSONL append 安全)
-    - stop_on_blocked=True: blocked record 検出後、未開始 entry を起動しない
+    - api_spend_limit は常に、その他は stop_on_blocked=True のとき、
+      blocked record 検出後に未開始 entry を起動しない
       (実行中の entry は完走させ record も記録する)
     """
     import concurrent.futures
 
     records: list[dict] = []
-    stopped = False
     emit_lock = threading.Lock()
     stop_event = threading.Event()
+
+    def _must_stop(record):
+        if record.get("failure_kind") == "api_spend_limit":
+            return True
+        return stop_on_blocked and record.get("run_status") == "blocked"
 
     def _run_entry(entry):
         record = worker(entry)
@@ -869,8 +1018,8 @@ def execute_plan(entries, worker, parallel: int = 1, on_record=None, stop_on_blo
             records.append(record)
             if on_record is not None:
                 on_record(entry, record)
-        if stop_on_blocked and record.get("run_status") == "blocked":
-            stop_event.set()
+            if _must_stop(record):
+                stop_event.set()
         return record
 
     if parallel <= 1:
@@ -881,14 +1030,25 @@ def execute_plan(entries, worker, parallel: int = 1, on_record=None, stop_on_blo
         # 従来互換: blocked による早期停止経路に入ったら stopped_early=True
         return records, stop_event.is_set()
 
+    entry_iter = iter(entries)
     with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as pool:
-        futures = []
-        for entry in entries:
-            if stop_event.is_set():
-                break
-            futures.append(pool.submit(_run_entry, entry))
-        for f in concurrent.futures.as_completed(futures):
-            f.result()  # worker 例外を伝播させる
+        pending = {
+            pool.submit(_run_entry, entry)
+            for entry in (next(entry_iter, None) for _ in range(parallel))
+            if entry is not None
+        }
+        while pending:
+            done, pending = concurrent.futures.wait(
+                pending,
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            for future in done:
+                future.result()  # worker 例外を伝播させる
+            while not stop_event.is_set() and len(pending) < parallel:
+                entry = next(entry_iter, None)
+                if entry is None:
+                    break
+                pending.add(pool.submit(_run_entry, entry))
     return records, stop_event.is_set()
 
 
@@ -919,6 +1079,42 @@ def summarize(
         # #261: comparable_attempt=False (無効 record) を除いた集計対象
         return [r for r in items if r.get("comparable_attempt", True)]
 
+    expected_records = len(tasks) * len(ARMS) * max(1, repeats)
+    spend_limit_record = next(
+        (index for index, record in enumerate(records, start=1) if record.get("failure_kind") == "api_spend_limit"),
+        None,
+    )
+    limitations = [
+        "Claude Code print mode smoke; does not fully exercise multi-turn interactive /goal persistence.",
+        "Quality and evidence scores are automated heuristic scores, not blind human review.",
+        "Blocked records are excluded from comparable quality-marker aggregates.",
+    ]
+    if any(r.get("permission_mode_degraded") for r in records):
+        limitations.append(
+            "WARNING: permission-mode degradation detected in one or more records; "
+            "acceptEdits was forced to default (see #268). Cross-run comparability is affected."
+        )
+    if any(r.get("mission_evidence_only") for r in records):
+        limitations.append(
+            "WARNING: one or more mission-arm records halted by submitting evidence "
+            "without a scored review loop (#341); their wall-clock understates the "
+            "gated loop and is not comparable to full-loop records."
+        )
+    if any(r.get("failure_kind") == "max_budget_usd" for r in records):
+        limitations.append(
+            "WARNING: one or more records were blocked by max_budget_usd; "
+            "review per-arm burn rate before interpreting cost or completion results."
+        )
+    if spend_limit_record is not None:
+        limitations.append(
+            "WARNING: API spend limit affected one or more records; affected records are "
+            "excluded from comparable aggregates and cross-run comparability is affected."
+        )
+        if stopped_early:
+            limitations.append(
+                f"run stopped early: api_spend_limit at record {spend_limit_record}/{expected_records}"
+            )
+
     return {
         "run_id": run_id,
         "task_file": str(tasks_path.relative_to(REPO_ROOT)),
@@ -928,24 +1124,19 @@ def summarize(
         "starting_commit": starting_commit,
         "records": len(records),
         "repeats": repeats,
-        "expected_records": len(tasks) * len(ARMS) * max(1, repeats),
+        "expected_records": expected_records,
         "stopped_early": stopped_early,
-        "limitations": [
-            "Claude Code print mode smoke; does not fully exercise multi-turn interactive /goal persistence.",
-            "Quality and evidence scores are automated heuristic scores, not blind human review.",
-            "Blocked records are excluded from comparable quality-marker aggregates.",
-        ] + ([
-            "WARNING: permission-mode degradation detected in one or more records; "
-            "acceptEdits was forced to default (see #268). Cross-run comparability is affected.",
-        ] if any(r.get("permission_mode_degraded") for r in records) else []) + ([
-            "WARNING: one or more mission-arm records halted by submitting evidence "
-            "without a scored review loop (#341); their wall-clock understates the "
-            "gated loop and is not comparable to full-loop records.",
-        ] if any(r.get("mission_evidence_only") for r in records) else []),
+        "limitations": limitations,
         "arms": {
             arm: {
                 "records": len(items),
                 "blocked_records": sum(1 for r in items if r.get("run_status") == "blocked"),
+                "budget_blocked_records": sum(
+                    1 for r in items if r.get("failure_kind") == "max_budget_usd"
+                ),
+                "api_spend_limit_records": sum(
+                    1 for r in items if r.get("failure_kind") == "api_spend_limit"
+                ),
                 "permission_degraded_records": sum(1 for r in items if r.get("permission_mode_degraded")),
                 "routed_records": sum(1 for r in items if r.get("mission_routed")),
                 "evidence_only_records": sum(1 for r in items if r.get("mission_evidence_only")),
@@ -1036,7 +1227,9 @@ def main() -> int:
         help="Truthful model identifier for this run (e.g. claude-opus-4-8). "
         "Recorded verbatim; there is no silent 'unknown' fallback.",
     )
-    parser.add_argument("--max-budget-usd", type=float, default=2.0)
+    parser.add_argument("--max-budget-usd", type=float, default=None)
+    parser.add_argument("--max-budget-usd-goal", type=float, default=None)
+    parser.add_argument("--max-budget-usd-mission", type=float, default=None)
     parser.add_argument(
         "--parallel",
         type=int,
@@ -1059,6 +1252,13 @@ def main() -> int:
         help="Mission prompt profile. 'light' reduces planning/review scope for cost-controlled comparisons.",
     )
     args = parser.parse_args()
+    for flag, value in (
+        ("--max-budget-usd", args.max_budget_usd),
+        ("--max-budget-usd-goal", args.max_budget_usd_goal),
+        ("--max-budget-usd-mission", args.max_budget_usd_mission),
+    ):
+        if value is not None and (not math.isfinite(value) or value <= 0):
+            parser.error(f"{flag} must be a positive finite number")
     if args.repeats < 1:
         parser.error("--repeats must be at least 1")
     if args.parallel < 1:
@@ -1103,6 +1303,8 @@ def main() -> int:
             extra_rules=task_data.get("prompt_rules", ()),
             run_index=run_index,
             repeats=args.repeats,
+            max_budget_usd_goal=args.max_budget_usd_goal,
+            max_budget_usd_mission=args.max_budget_usd_mission,
         )
 
     def _on_record(entry, record):
@@ -1114,7 +1316,12 @@ def main() -> int:
             f"validator_pass={record['validator_pass']} elapsed_minutes={record['elapsed_minutes']}",
             flush=True,
         )
-        if args.stop_on_blocked and record["run_status"] == "blocked":
+        if record.get("failure_kind") == "api_spend_limit":
+            print(
+                f"stopping early after API spend limit task={task['id']} arm={arm}",
+                flush=True,
+            )
+        elif args.stop_on_blocked and record["run_status"] == "blocked":
             print(
                 f"stopping early after blocked record task={task['id']} arm={arm} "
                 f"blocked_reason={record['blocked_reason']}",
