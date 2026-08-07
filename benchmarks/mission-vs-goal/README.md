@@ -42,7 +42,7 @@ time budget, and task prompt for both arms.
 | Metric | Definition |
 |---|---|
 | `run_status` | `completed`, `failed`, or `blocked`. Blocked means infrastructure/account state prevented a comparable attempt. |
-| `blocked_reason` | Reason for `run_status=blocked`, currently `api_usage_limit`, `max_budget_usd`, or `timeout`; null otherwise. |
+| `blocked_reason` | Reason for `run_status=blocked`, currently `api_usage_limit`, `api_spend_limit`, `max_budget_usd`, or `timeout`; null otherwise. |
 | `comparable_attempt` | False when an arm was blocked before a fair task-quality attempt. |
 | `mission_profile` | `/mission` prompt profile for official-runner records. `full` is the normal workflow; `light` is a one-pass cost-controlled profile; `quality` emphasizes evidence maps, rejected hypotheses, and stop/proceed decisions. |
 | `completion` | The run produced the required artifact or code change and did not stop in an unresolved state. |
