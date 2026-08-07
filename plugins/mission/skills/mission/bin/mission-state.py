@@ -6571,6 +6571,14 @@ def cmd_mark_halt(args):
         data["halt_reason"] = args.reason
         data["halt_category"] = category  # #190
         data["loop_active"] = False
+        if category == "routed-goal":
+            dispatch_fields = _goal_dispatch_route_fields(data)
+            data["goal_dispatch_effective"] = dispatch_fields["goal_dispatch_effective"]
+            data["goal_dispatch_host"] = dispatch_fields["goal_dispatch_host"]
+            if dispatch_fields.get("goal_dispatch_fallback_reason"):
+                data["goal_dispatch_fallback_reason"] = dispatch_fields["goal_dispatch_fallback_reason"]
+            else:
+                data.pop("goal_dispatch_fallback_reason", None)
         _transition_phase(
             data,
             "halted",
