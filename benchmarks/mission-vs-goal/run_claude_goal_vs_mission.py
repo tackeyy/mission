@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
 import statistics
@@ -373,6 +374,13 @@ def classify_run_status(
             "failure_kind": "api_spend_limit",
             "comparable_attempt": False,
         }
+    if any(marker in combined for marker in MAX_BUDGET_MARKERS):
+        return {
+            "run_status": "blocked",
+            "blocked_reason": "max_budget_usd",
+            "failure_kind": "max_budget_usd",
+            "comparable_attempt": False,
+        }
     if validator_pass:
         return {
             "run_status": "completed",
@@ -385,13 +393,6 @@ def classify_run_status(
             "run_status": "blocked",
             "blocked_reason": "api_usage_limit",
             "failure_kind": "api_usage_limit",
-            "comparable_attempt": False,
-        }
-    if any(marker in combined for marker in MAX_BUDGET_MARKERS):
-        return {
-            "run_status": "blocked",
-            "blocked_reason": "max_budget_usd",
-            "failure_kind": "max_budget_usd",
             "comparable_attempt": False,
         }
     if timed_out:
@@ -650,7 +651,7 @@ def run_one(
     starting_commit: str,
     run_root: Path,
     timeout: int,
-    max_budget_usd: float,
+    max_budget_usd: float | None,
     mission_max_iter: int | None,
     mission_profile: str,
     arm_order: int,
@@ -660,6 +661,8 @@ def run_one(
     extra_rules: list[str] | tuple[str, ...] = (),
     run_index: int = 1,
     repeats: int = 1,
+    max_budget_usd_goal: float | None = None,
+    max_budget_usd_mission: float | None = None,
 ) -> dict:
     task_id = task["id"]
     run_name = run_name_for(task_id, arm, run_index, repeats)
@@ -681,7 +684,19 @@ def run_one(
     stderr_path = artifact_dir / "stderr.txt"
     artifact_dir.mkdir(parents=True, exist_ok=True)
 
-    command = build_child_command(arm, prompt, max_budget_usd)
+    effective_max_budget_usd = resolve_max_budget_usd(
+        arm,
+        max_budget_usd=max_budget_usd,
+        max_budget_usd_goal=max_budget_usd_goal,
+        max_budget_usd_mission=max_budget_usd_mission,
+    )
+    command = build_child_command(
+        arm,
+        prompt,
+        max_budget_usd=max_budget_usd,
+        max_budget_usd_goal=max_budget_usd_goal,
+        max_budget_usd_mission=max_budget_usd_mission,
+    )
 
     started = iso_now()
     start_time = time.monotonic()
@@ -771,6 +786,14 @@ def run_one(
         notes.append("stderr captured in artifact")
     input_tokens = usage.get("input_tokens")
     output_tokens = usage.get("output_tokens")
+    total_cost_usd = (
+        claude_result.get("total_cost_usd") if isinstance(claude_result, dict) else None
+    )
+    burn_rate_usd_per_min = calculate_burn_rate_usd_per_min(
+        evaluation["run_status"],
+        total_cost_usd,
+        elapsed,
+    )
 
     return {
         "benchmark": "mission-vs-goal-pilot",
@@ -782,9 +805,9 @@ def run_one(
         "model_id": model_id,
         # #238 (S6): 失敗 run の課金 (全損コスト) を集計可能にするため、notes 文字列
         # ではなく第一級フィールドとして記録する。blocked/failed でも消費額が残る。
-        "total_cost_usd": (
-            claude_result.get("total_cost_usd") if isinstance(claude_result, dict) else None
-        ),
+        "total_cost_usd": total_cost_usd,
+        "max_budget_usd_effective": effective_max_budget_usd,
+        "burn_rate_usd_per_min": burn_rate_usd_per_min,
         "mission_profile": mission_profile if arm == "mission" else None,
         "started_at": started,
         "completed_at": completed,
@@ -836,8 +859,53 @@ def detect_permission_degradation(stderr: str) -> bool:
 CHILD_ALLOWED_TOOLS = "Read,Write,Edit,Grep,Glob,Bash,Agent,Skill,TodoWrite"
 
 
-def build_child_command(arm: str, prompt: str, max_budget_usd: float) -> list:
+def resolve_max_budget_usd(
+    arm: str,
+    max_budget_usd: float | None = None,
+    max_budget_usd_goal: float | None = None,
+    max_budget_usd_mission: float | None = None,
+) -> float:
+    """Resolve the arm budget with specific -> common -> legacy-default precedence."""
+    arm_budget = max_budget_usd_mission if arm == "mission" else max_budget_usd_goal
+    if arm_budget is not None:
+        return arm_budget
+    if max_budget_usd is not None:
+        return max_budget_usd
+    return 2.0
+
+
+def calculate_burn_rate_usd_per_min(
+    run_status: str,
+    total_cost_usd: float | None,
+    elapsed_minutes: float,
+) -> float | None:
+    """Return a finite blocked-run burn rate when cost and duration are usable."""
+    values = (total_cost_usd, elapsed_minutes)
+    if run_status != "blocked":
+        return None
+    if any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in values):
+        return None
+    if not all(math.isfinite(value) for value in values):
+        return None
+    if total_cost_usd < 0 or elapsed_minutes <= 0:
+        return None
+    return round(total_cost_usd / elapsed_minutes, 4)
+
+
+def build_child_command(
+    arm: str,
+    prompt: str,
+    max_budget_usd: float | None = None,
+    max_budget_usd_goal: float | None = None,
+    max_budget_usd_mission: float | None = None,
+) -> list:
     """#292: 子 claude の argv を構築する (テスト可能な単一定義)."""
+    effective_max_budget_usd = resolve_max_budget_usd(
+        arm,
+        max_budget_usd=max_budget_usd,
+        max_budget_usd_goal=max_budget_usd_goal,
+        max_budget_usd_mission=max_budget_usd_mission,
+    )
     command = [
         "claude",
         "-p",
@@ -848,7 +916,7 @@ def build_child_command(arm: str, prompt: str, max_budget_usd: float) -> list:
         "--allowedTools",
         CHILD_ALLOWED_TOOLS,
         "--max-budget-usd",
-        str(max_budget_usd),
+        str(effective_max_budget_usd),
     ]
     if arm == "mission":
         command.extend(["--plugin-dir", str(MISSION_PLUGIN_DIR)])
@@ -1002,6 +1070,11 @@ def summarize(
             "without a scored review loop (#341); their wall-clock understates the "
             "gated loop and is not comparable to full-loop records."
         )
+    if any(r.get("failure_kind") == "max_budget_usd" for r in records):
+        limitations.append(
+            "WARNING: one or more records were blocked by max_budget_usd; "
+            "review per-arm burn rate before interpreting cost or completion results."
+        )
     if spend_limit_record is not None:
         limitations.append(
             "WARNING: API spend limit affected one or more records; affected records are "
@@ -1028,6 +1101,9 @@ def summarize(
             arm: {
                 "records": len(items),
                 "blocked_records": sum(1 for r in items if r.get("run_status") == "blocked"),
+                "budget_blocked_records": sum(
+                    1 for r in items if r.get("failure_kind") == "max_budget_usd"
+                ),
                 "api_spend_limit_records": sum(
                     1 for r in items if r.get("failure_kind") == "api_spend_limit"
                 ),
@@ -1121,7 +1197,9 @@ def main() -> int:
         help="Truthful model identifier for this run (e.g. claude-opus-4-8). "
         "Recorded verbatim; there is no silent 'unknown' fallback.",
     )
-    parser.add_argument("--max-budget-usd", type=float, default=2.0)
+    parser.add_argument("--max-budget-usd", type=float, default=None)
+    parser.add_argument("--max-budget-usd-goal", type=float, default=None)
+    parser.add_argument("--max-budget-usd-mission", type=float, default=None)
     parser.add_argument(
         "--parallel",
         type=int,
@@ -1144,6 +1222,13 @@ def main() -> int:
         help="Mission prompt profile. 'light' reduces planning/review scope for cost-controlled comparisons.",
     )
     args = parser.parse_args()
+    for flag, value in (
+        ("--max-budget-usd", args.max_budget_usd),
+        ("--max-budget-usd-goal", args.max_budget_usd_goal),
+        ("--max-budget-usd-mission", args.max_budget_usd_mission),
+    ):
+        if value is not None and (not math.isfinite(value) or value <= 0):
+            parser.error(f"{flag} must be a positive finite number")
     if args.repeats < 1:
         parser.error("--repeats must be at least 1")
     if args.parallel < 1:
@@ -1188,6 +1273,8 @@ def main() -> int:
             extra_rules=task_data.get("prompt_rules", ()),
             run_index=run_index,
             repeats=args.repeats,
+            max_budget_usd_goal=args.max_budget_usd_goal,
+            max_budget_usd_mission=args.max_budget_usd_mission,
         )
 
     def _on_record(entry, record):
