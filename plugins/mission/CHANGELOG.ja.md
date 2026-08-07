@@ -12,7 +12,7 @@
 ### 修正
 
 - session ownership の管理元を PID から既定 15 分の fenced lease CAS (`owner_session_id`、random `lease_id`、単調増加 `fencing_epoch`、`lease_expires_at`) へ移した。mutating command は renew し、read-only command は renew しない。期限内 foreign writer と stale token は exit 2、期限切れ takeover は epoch を増加して `lease_history` を追記し、`resume` が takeover を実行する。lease のない legacy state は拒否せず epoch 1 を取得する。`cleanup-stale` は lease 付き state で「期限切れ、かつ期限後の activity heartbeat なし」を優先し、legacy state は従来の PID 規則を維持する (#354)。
-  lease 付き state は session ID や PID fallback が一致しても `MISSION_LEASE_ID` の明示を必須とする。Stop hook と `resume` は診断用 PID の生死を lease ownership より優先せず、clock rollback 時の renew も expiry を短縮しない。
+  lease 付き state は session ID や PID fallback が一致しても `MISSION_LEASE_ID` の明示を必須とする。Stop hook と `resume` は診断用 PID の生死を lease ownership より優先せず、clock rollback 時の renew も expiry を短縮しない。token なしの legacy 初回取得は atomic publish 成功後にのみ machine-readable な `MISSION_LEASE_CARRIER` を出力し、次の独立 process が state を読まず発行 token を明示的に引き回せるようにした。
 
 - mission audit が owner による明示的な凍結・意図的 close・replacement issue への切替を示す halt reason を非 actionable の `intentional-freeze-switch` として分類するようにした。raw halt count は保持しつつ、運用 state debt 監査での P1 `halted-runs` false positive を減らす (#347)。
 
