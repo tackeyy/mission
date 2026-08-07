@@ -146,6 +146,29 @@ def test_symlinked_project_config_warns_and_fails_safe_inline(run_cli, tmp_path)
     assert "symlink" in verdict["goal_dispatch_fallback_reason"]
 
 
+def test_project_config_escaping_project_root_warns_and_fails_safe_inline(run_cli, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "routing.yml").write_text(
+        "version: 1\ngoal_dispatch: host-native\n", encoding="utf-8",
+    )
+    (project / ".mission").symlink_to(outside, target_is_directory=True)
+
+    result = run_cli(
+        "init", "typo を直す", "--complexity", "Simple",
+        cwd=project,
+        env_extra=_isolated_env(tmp_path, CODEX_THREAD_ID="codex-test"),
+        check=True,
+    )
+
+    verdict = json.loads(result.stdout)
+    assert verdict["goal_dispatch_effective"] == "inline"
+    assert "escapes project root" in result.stderr
+    assert "escapes project root" in verdict["goal_dispatch_fallback_reason"]
+
+
 def test_project_config_overrides_user_config(run_cli, tmp_path):
     _write_config(tmp_path, "host-native")
     user_config = tmp_path / "home" / ".config" / "mission" / "routing.yml"
