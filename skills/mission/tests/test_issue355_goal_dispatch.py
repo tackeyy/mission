@@ -126,6 +126,26 @@ def test_invalid_utf8_project_config_warns_and_fails_safe_inline(run_cli, tmp_pa
     assert "UnicodeDecodeError" in verdict["goal_dispatch_fallback_reason"]
 
 
+def test_symlinked_project_config_warns_and_fails_safe_inline(run_cli, tmp_path):
+    outside = tmp_path / "outside-routing.yml"
+    outside.write_text("version: 1\ngoal_dispatch: host-native\n", encoding="utf-8")
+    path = tmp_path / ".mission" / "routing.yml"
+    path.parent.mkdir(parents=True)
+    path.symlink_to(outside)
+
+    result = run_cli(
+        "init", "typo を直す", "--complexity", "Simple",
+        cwd=tmp_path,
+        env_extra=_isolated_env(tmp_path, CODEX_THREAD_ID="codex-test"),
+        check=True,
+    )
+
+    verdict = json.loads(result.stdout)
+    assert verdict["goal_dispatch_effective"] == "inline"
+    assert "symlink" in result.stderr
+    assert "symlink" in verdict["goal_dispatch_fallback_reason"]
+
+
 def test_project_config_overrides_user_config(run_cli, tmp_path):
     _write_config(tmp_path, "host-native")
     user_config = tmp_path / "home" / ".config" / "mission" / "routing.yml"
