@@ -45,9 +45,18 @@ def _write_output(path: Path, perspective: str, prose: str = "") -> Path:
 
 def _aggregate(run_cli, state_dir, tmp_path, *inputs: Path):
     out = tmp_path / "scoring.json"
+    window_args = []
+    if len(inputs) >= 2:
+        # #350: 複数 reviewer 時は --reviewer-window 申告が必須
+        for perspective in ("A", "B"):
+            window_args += [
+                "--reviewer-window",
+                f"{perspective}=2026-08-07T10:00:00Z..2026-08-07T10:05:00Z",
+            ]
     result = run_cli(
         "aggregate-reviews", "--iteration", "1",
         *(arg for path in inputs for arg in ("--input", str(path))),
+        *window_args,
         "--out", str(out), "--json", cwd=state_dir.parent,
     )
     return result, out
