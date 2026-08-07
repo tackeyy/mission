@@ -19,6 +19,7 @@ allowed-tools: Read, Grep, Glob, Bash(git diff:*), Bash(git log:*), Bash(git sta
 - Executor の「指示明瞭度フィードバック」(不明瞭点 / 裁量補完 / 再試行) ※観点D 評価用
 - 過去スコア履歴（自己一貫性チェック用）
 - context manifest パス (#241、diff レビュー時のみ): args に `mission-context-manifest/1` JSON のパスが渡された場合、manifest (mission goal / prior findings) と指定 diff を一次スコープとしてレビューし、リポジトリ全体の走査を省く。manifest が読めない・スキーマ不一致の場合は通常どおり全成果物をレビューする (fail-safe)。スコープ縮小は探索範囲のみで、採点基準・Step 0 のテスト実行義務は不変
+  - manifest を正常に受領して bounded review を実行した場合、review JSON の `notes` 自由記述に `context: bounded` を明記する (#352)
 
 ## 行動指針
 
@@ -131,6 +132,8 @@ Critical/Complex のコード変更では、OWASP Top 10、シークレット露
 ### 出力境界 (#281)
 
 返却は下記テンプレート (採点テーブル + 強み + Issues テーブル + 総評 + fenced JSON) に**限定**する。検証・再導出は内部で行い、その全過程・全対象の網羅的な散文レポート (対象の全項目を列挙し直す再導出結果表など) は出力しない。出力するのは判定と、判定に必要な evidence (現物 verbatim 引用) だけ。強みは最大 3 項目・各 1 行、総評は 2-3 文。この境界は出力フォーマットのみの制約であり、検証の深さ・独立性・採点規律は不変。
+
+scoring/issues テンプレ + mission-review/1 JSON 以外の散文を出力しない。再導出・思考過程は内部に留める (#281)。目安: テンプレ外散文 0。
 
 ````markdown
 ## レビュー結果 (担当観点: <観点名>)

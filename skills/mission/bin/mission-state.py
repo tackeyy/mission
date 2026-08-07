@@ -84,6 +84,7 @@ from worktree_archive import validate_worktree_archive_bundle  # noqa: E402
 from state_snapshot import SnapshotError, consume_snapshot_document  # noqa: E402
 
 SCHEMA_VERSION = 2  # v1: 旧 schema (project_root/pid なし), v2: A-1/A-2/B-3 追加
+GOAL_DISPATCH_MODES = {"inline", "host-native"}
 
 # #186: 実行中の mission-state.py のバージョン。.claude-plugin/plugin.json 等の manifest と
 # 一致させる (release 時に手動 bump。test_doc_consistency.py::test_release_version_paths_are_in_sync
@@ -483,6 +484,192 @@ def resolve_agent() -> str:
     if os.environ.get("CODEX_THREAD_ID"):
         return "codex"
     return "cli"
+
+
+def detect_host() -> str:
+    """Return the native agent host used by goal dispatch guidance."""
+    if os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_CODE_SESSION_ID"):
+        return "claude-code"
+    if os.environ.get("CODEX_THREAD_ID"):
+        return "codex"
+    return "unknown"
+
+
+def _read_routing_config(path: Path, source: str, allowed_root: Path | None = None) -> dict | None:
+    """Read the version-1 minimal routing config without a YAML dependency."""
+    if allowed_root is not None and path.is_symlink():
+        reason = f"routing config symlink rejected at {source}"
+        print(f"WARN #355: {reason}; using inline", file=sys.stderr)
+        return {"mode": "inline", "source": source, "fallback_reason": reason}
+    if allowed_root is not None:
+        try:
+            resolved_path = path.resolve(strict=False)
+            resolved_root = allowed_root.resolve(strict=True)
+            resolved_path.relative_to(resolved_root)
+        except ValueError:
+            reason = f"routing config escapes project root at {source}"
+            print(f"WARN #355: {reason}; using inline", file=sys.stderr)
+            return {"mode": "inline", "source": source, "fallback_reason": reason}
+        except (OSError, RuntimeError) as exc:
+            reason = f"routing config path unreadable at {source}: {exc.__class__.__name__}"
+            print(f"WARN #355: {reason}; using inline", file=sys.stderr)
+            return {"mode": "inline", "source": source, "fallback_reason": reason}
+    if not path.is_file():
+        return None
+    values: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        reason = f"routing config unreadable at {source}: {exc.__class__.__name__}"
+        print(f"WARN #355: {reason}; using inline", file=sys.stderr)
+        return {"mode": "inline", "source": source, "fallback_reason": reason}
+    for raw_line in lines:
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if ":" not in line:
+            reason = f"invalid routing config syntax at {source}"
+            print(f"WARN #355: {reason}; using inline", file=sys.stderr)
+            return {"mode": "inline", "source": source, "fallback_reason": reason}
+        key, raw_value = line.split(":", 1)
+        key = key.strip()
+        value = raw_value.strip().strip("'\"")
+        if key not in {"version", "goal_dispatch"}:
+            reason = f"unknown routing config key '{key}' at {source}"
+            print(f"WARN #355: {reason}; using inline", file=sys.stderr)
+            return {"mode": "inline", "source": source, "fallback_reason": reason}
+        if key in values:
+            reason = f"duplicate routing config key '{key}' at {source}"
+            print(f"WARN #355: {reason}; using inline", file=sys.stderr)
+            return {"mode": "inline", "source": source, "fallback_reason": reason}
+        values[key] = value
+    if values.get("version") != "1":
+        reason = f"unsupported routing config version '{values.get('version')}' at {source}"
+        print(f"WARN #355: {reason}; using inline", file=sys.stderr)
+        return {"mode": "inline", "source": source, "fallback_reason": reason}
+    mode = values.get("goal_dispatch")
+    if mode not in GOAL_DISPATCH_MODES:
+        reason = f"invalid goal_dispatch '{mode}' at {source}"
+        print(f"WARN #355: {reason}; using inline", file=sys.stderr)
+        return {"mode": "inline", "source": source, "fallback_reason": reason}
+    return {"mode": mode, "source": source, "fallback_reason": None}
+
+
+def _routing_config_decision(cwd: Path | None = None) -> dict:
+    root = cwd or Path.cwd()
+    project = _read_routing_config(
+        root / ".mission" / "routing.yml",
+        "project:.mission/routing.yml",
+        allowed_root=root,
+    )
+    if project is not None:
+        return project
+    user = _read_routing_config(
+        Path.home() / ".config" / "mission" / "routing.yml",
+        "user:~/.config/mission/routing.yml",
+    )
+    if user is not None:
+        return user
+    return {"mode": "inline", "source": "default:inline", "fallback_reason": None}
+
+
+def load_routing_config() -> dict:
+    """Load the effective minimal routing config (project > user > inline)."""
+    return {"goal_dispatch": _routing_config_decision()["mode"]}
+
+
+def _mission_goal_dispatch_values(mission: str) -> list[str]:
+    """Collect standalone directives outside quoted Markdown blocks."""
+    directive_re = re.compile(
+        r"(?i)^ {0,3}goal[_ -]dispatch\s*[:=]\s*([a-z][a-z0-9-]*)[ \t]*(?:;|$)"
+    )
+    fence_re = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+    fence_char: str | None = None
+    fence_length = 0
+    values = []
+    for line in (mission or "").splitlines():
+        fence_match = fence_re.match(line)
+        if fence_match:
+            marker = fence_match.group(1)
+            suffix = fence_match.group(2)
+            if fence_char is None:
+                if marker[0] != "`" or "`" not in suffix:
+                    fence_char = marker[0]
+                    fence_length = len(marker)
+            elif marker[0] == fence_char and len(marker) >= fence_length and not suffix.strip():
+                fence_char = None
+                fence_length = 0
+            continue
+        if fence_char is not None:
+            continue
+        directive = directive_re.match(line)
+        if directive:
+            values.append(directive.group(1).lower())
+    return values
+
+
+def _resolve_goal_dispatch(mission: str, cli_mode: str | None, cwd: Path) -> dict:
+    explicit_values = _mission_goal_dispatch_values(mission)
+    if explicit_values:
+        unique_values = list(dict.fromkeys(explicit_values))
+        if len(unique_values) > 1:
+            reason = (
+                "conflicting goal_dispatch directives in mission user instruction: "
+                + ", ".join(unique_values)
+            )
+            print(f"WARN #355: {reason}; using inline", file=sys.stderr)
+            return {"mode": "inline", "source": "mission:user-explicit", "fallback_reason": reason}
+        mode = unique_values[0]
+        if mode not in GOAL_DISPATCH_MODES:
+            reason = f"invalid goal_dispatch '{mode}' in mission user instruction"
+            print(f"WARN #355: {reason}; using inline", file=sys.stderr)
+            return {"mode": "inline", "source": "mission:user-explicit", "fallback_reason": reason}
+        return {"mode": mode, "source": "mission:user-explicit", "fallback_reason": None}
+    if cli_mode is not None:
+        return {"mode": cli_mode, "source": "cli:--goal-dispatch", "fallback_reason": None}
+    return _routing_config_decision(cwd)
+
+
+def _goal_dispatch_route_fields(data: dict) -> dict:
+    requested = data.get("goal_dispatch_requested") or "inline"
+    source = data.get("goal_dispatch_source") or "default:inline"
+    fallback_reason = data.get("goal_dispatch_resolution_fallback_reason")
+    host = detect_host()
+    effective = requested
+    if requested == "host-native" and host == "unknown":
+        effective = "inline"
+        fallback_reason = "host-native unavailable: host detection returned unknown"
+    fields = {
+        "goal_dispatch_requested": requested,
+        "goal_dispatch_effective": effective,
+        "goal_dispatch_source": source,
+        "goal_dispatch_host": host,
+    }
+    if fallback_reason:
+        fields["goal_dispatch_fallback_reason"] = fallback_reason
+    return fields
+
+
+def _inline_goal_guidance(prefix: str = "") -> str:
+    return (
+        f"{prefix}goal 契約の 5 見出し (Goal / Result / Evidence / Assumptions / "
+        "Stop Condition) でタスクを直接完遂し、最終報告に goal へルーティングした旨を明記する。"
+        "mission の pass は主張しない。mission 機構が必要なら --force-mission で再 init する。"
+    )
+
+
+def _goal_dispatch_guidance(fields: dict, inline_prefix: str = "") -> str:
+    if fields["goal_dispatch_effective"] == "host-native":
+        if fields["goal_dispatch_host"] == "claude-code":
+            return (
+                "mission ループを続けず、実行ホストの /goal <目標文> へ目標を委譲して完遂する。"
+                "最終報告に goal へルーティングした旨を明記し、mission の pass は主張しない。"
+            )
+        return (
+            "mission ループを続けず、実行ホストの goal mode に目標を登録して完遂する。"
+            "最終報告に goal へルーティングした旨を明記し、mission の pass は主張しない。"
+        )
+    return _inline_goal_guidance(inline_prefix)
 
 
 def _sanitize_sid(sid: str) -> str:
@@ -4005,6 +4192,11 @@ def cmd_log_specialist_invocation(args):
 
 def cmd_init(args):
     cwd = Path.cwd()
+    goal_dispatch = _resolve_goal_dispatch(
+        args.mission,
+        getattr(args, "goal_dispatch", None),
+        cwd,
+    )
     try:
         mission_state_root = _ensure_regular_directory_path(cwd, (".mission-state",))
         mission_state_root.mkdir(parents=True, exist_ok=True)
@@ -4016,6 +4208,13 @@ def cmd_init(args):
     initial = {
         "mission": args.mission,
         "mission_id": mission_id(args.mission),
+        "goal_dispatch_requested": goal_dispatch["mode"],
+        "goal_dispatch_source": goal_dispatch["source"],
+        **(
+            {"goal_dispatch_resolution_fallback_reason": goal_dispatch["fallback_reason"]}
+            if goal_dispatch.get("fallback_reason")
+            else {}
+        ),
         "session_role": getattr(args, "session_role", None) or "implementer",  # #311
         **({"force_mission": True} if getattr(args, "force_mission", False) else {}),  # #325
         "subtasks": [],
@@ -4148,18 +4347,14 @@ def cmd_init(args):
         and not initial.get("review_tier_signals")
         and not getattr(args, "issue_ref", None)
     ):
+        dispatch_fields = _goal_dispatch_route_fields(initial)
         print(json.dumps({
             "route": "goal",
             "complexity": "Simple",
             "mission_id": initial["mission_id"],
             "reason": "Simple complexity with no irreversible/security signals (#276)",
-            "guidance": (
-                "mission ループを起動しない。goal 契約の 5 見出し "
-                "(Goal / Result / Evidence / Assumptions / Stop Condition) で"
-                "タスクを直接完遂し、最終報告に goal へルーティングした旨を明記する。"
-                "mission の pass は主張しない。mission 機構が必要なら "
-                "--force-mission で再 init する。"
-            ),
+            "guidance": _goal_dispatch_guidance(dispatch_fields, "mission ループを起動しない。"),
+            **dispatch_fields,
         }, ensure_ascii=False, indent=2))
         return
 
@@ -4520,6 +4715,65 @@ def _happy_path_sequence(phase: str, reviewer_count: int, *, plan_mode: str = "s
     return steps[start:]
 
 
+def _expected_context_mode(data: dict, iteration: int) -> str:
+    """#352: mirror the #241 bounded-context condition without changing it."""
+    return (
+        "bounded"
+        if iteration >= 2 and data.get("critic_has_new_scope") is False
+        else "full"
+    )
+
+
+def _context_manifest_generated(data: dict, iteration: int) -> bool:
+    """Return whether the recorded manifest is complete and still verifiable."""
+    if type(iteration) is not int or iteration < 1:
+        return False
+    manifests = data.get("context_manifests")
+    record = manifests.get(str(iteration)) if isinstance(manifests, dict) else None
+    if not isinstance(record, dict):
+        return False
+    raw_path = record.get("path")
+    digest = record.get("digest")
+    generated_at = record.get("generated_at")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return False
+    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        return False
+    parsed_generated_at = (
+        parse_iso_datetime(generated_at) if isinstance(generated_at, str) else None
+    )
+    if (
+        parsed_generated_at is None
+        or "T" not in generated_at
+        or parsed_generated_at.tzinfo is None
+        or parsed_generated_at.utcoffset() is None
+    ):
+        return False
+
+    try:
+        manifest_path = Path(raw_path)
+        if not manifest_path.is_absolute():
+            project_root = data.get("project_root")
+            if not isinstance(project_root, str) or not project_root:
+                return False
+            manifest_path = Path(project_root) / manifest_path
+        raw = manifest_path.read_bytes()
+        payload = json.loads(raw)
+    except (OSError, UnicodeError, ValueError, TypeError, RuntimeError):
+        return False
+    if hashlib.sha256(raw).hexdigest() != digest.removeprefix("sha256:"):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    payload_iteration = payload.get("iteration")
+    return (
+        payload.get("schema") == "mission-context-manifest/1"
+        and type(payload_iteration) is int
+        and payload_iteration >= 1
+        and payload_iteration == iteration
+    )
+
+
 def _derive_next_action(data: dict) -> dict:
     """ADR-002 Stage 3 (G-3): state から次の 1 手を決定論的に導出する。
 
@@ -4596,15 +4850,20 @@ def _derive_next_action(data: dict) -> dict:
         and (data.get("session_role") or "implementer") == "implementer"
         and not (data.get("score_history") or [])
     ):
+        dispatch_fields = _goal_dispatch_route_fields(data)
+        dispatch_guidance = _goal_dispatch_guidance(dispatch_fields)
         return {
             "next_action": "route-to-goal",
             "summary": (
-                "Simple + リスクシグナルなし: mission ループを続けず goal 契約で直接完遂する。"
+                f"Simple + リスクシグナルなし: {dispatch_guidance}"
                 "state を routed-goal で閉じ (pass-rate 対象外)、最終報告に routing を明記する。"
                 "mission 機構が必要なら --force-mission で再 init (#325)"
             ),
-            "command_hint": "mission-state.py mark-halt --reason 'routed-to-goal (#325)' --category routed-goal → goal 契約 (Goal/Result/Evidence/Assumptions/Stop Condition) で完遂",
-            "details": {"complexity": "Simple", "route": "goal"},
+            "command_hint": (
+                "mission-state.py mark-halt --reason 'routed-to-goal (#325)' "
+                f"--category routed-goal → {dispatch_guidance}"
+            ),
+            "details": {"complexity": "Simple", "route": "goal", **dispatch_fields},
         }
     if phase == "planning":
         # #339: Standard iteration 1 は planner subagent を省略し orchestrator inline 計画。
@@ -4657,8 +4916,7 @@ def _derive_next_action(data: dict) -> dict:
                 "details": {"iteration": iteration},
             }
         # #241: bounded context — iteration >= 2 かつ新規 scope なしなら bounded mode
-        use_bounded = iteration >= 2 and data.get("critic_has_new_scope") is False
-        context_mode = "bounded" if use_bounded else "full"
+        context_mode = _expected_context_mode(data, iteration)
         return {
             "next_action": "run-reviewers",
             "summary": f"iteration {iteration}: mission-reviewer を {effective_reviewer_count} 名、単一メッセージで並列起動する (直列起動は規律違反。直列は Standard で約 2-3 分の無駄を実測 #338)",
@@ -5291,6 +5549,13 @@ def cmd_set(args):
             and (data.get("session_role") or "implementer") == "implementer"
             and not (data.get("score_history") or [])
         ):
+            dispatch_fields = _goal_dispatch_route_fields(data)
+            data["goal_dispatch_effective"] = dispatch_fields["goal_dispatch_effective"]
+            data["goal_dispatch_host"] = dispatch_fields["goal_dispatch_host"]
+            if dispatch_fields.get("goal_dispatch_fallback_reason"):
+                data["goal_dispatch_fallback_reason"] = dispatch_fields["goal_dispatch_fallback_reason"]
+            else:
+                data.pop("goal_dispatch_fallback_reason", None)
             data["loop_active"] = False
             data["halt_reason"] = "routed-to-goal (#330: Simple + リスクシグナルなし)"
             data["halt_category"] = "routed-goal"
@@ -5301,12 +5566,11 @@ def cmd_set(args):
                 "route": "goal",
                 "complexity": "Simple",
                 "reason": "Simple complexity with no irreversible/security signals (#330)",
-                "guidance": (
-                    "state は routed-goal で halt 済み (mark-halt 不要)。mission ループを"
-                    "続けず、goal 契約の 5 見出し (Goal / Result / Evidence / Assumptions / "
-                    "Stop Condition) でタスクを直接完遂し、最終報告に routing を明記する。"
-                    "mission の pass は主張しない。mission 機構が必要なら --force-mission で再 init する。"
+                "guidance": _goal_dispatch_guidance(
+                    dispatch_fields,
+                    "state は routed-goal で halt 済み (mark-halt 不要)。mission ループを続けず、",
                 ),
+                **dispatch_fields,
             }
         _ensure_phase_timing(data, now)
         data["updated_at"] = now
@@ -5321,6 +5585,21 @@ def cmd_set(args):
 CANONICAL_SCORE_KEYS = {"mission_achievement", "accuracy", "completeness", "usability", "reviewer_consensus"}
 REVIEW_SCORE_KEYS = ("mission_achievement", "accuracy", "completeness", "usability")
 REVIEW_SEVERITIES = {"High", "Medium", "Low"}
+# #353: provisional observation thresholds. Calibrate from reviewer_output_stats
+# distributions before treating these values as stable guidance; this is WARN-only.
+REVIEW_PROSE_BYTES_WARN = 20_000
+REVIEW_PROSE_RATIO_WARN = 0.7
+REVIEW_TEMPLATE_HEADING_RE = re.compile(
+    r"^\s*#{2,3}\s+(?:"
+    r"レビュー結果(?:\s*\(担当観点:.*\))?|"
+    r"採点|強み\s*\(Good\)|改善点\s*\(Issues\)|"
+    r"重大ブロッカー\s*\(あれば\)|担当観点に対する総評"
+    r")\s*$"
+)
+REVIEW_JSON_FENCE_RE = re.compile(
+    r"^```json[ \t]*\r?\n(?P<body>.*?)\r?\n```[ \t]*$",
+    re.MULTILINE | re.DOTALL,
+)
 SCORE_KEY_ALIASES = {
     "usefulness": "usability",
     "practicality": "usability",
@@ -5623,16 +5902,65 @@ def _review_error(path: Path, message: str) -> None:
     sys.exit(2)
 
 
-def _load_review_json(path_str: str, expected_iteration: int) -> dict:
+def _review_prose_bytes(text: str) -> int:
+    """Count non-template prose lines outside the structured review JSON."""
+    prose_lines = [
+        line for line in text.splitlines()
+        if line.strip() and not REVIEW_TEMPLATE_HEADING_RE.fullmatch(line)
+    ]
+    return len("\n".join(prose_lines).encode("utf-8"))
+
+
+def _extract_review_payload(src: Path) -> tuple[dict, dict]:
+    """Extract one mission-review/1 payload and measure its external prose."""
+    try:
+        text = src.read_text(encoding="utf-8")
+    except UnicodeDecodeError as error:
+        print(f"ERROR: reviewer input is invalid UTF-8: {src}: {error}", file=sys.stderr)
+        sys.exit(2)
+
+    stripped = text.strip()
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        candidates = []
+        for match in REVIEW_JSON_FENCE_RE.finditer(text):
+            json_text = match.group("body").strip()
+            try:
+                candidate = json.loads(json_text)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict) and candidate.get("schema") == "mission-review/1":
+                candidates.append((candidate, json_text, match.span()))
+        if len(candidates) != 1:
+            print(
+                f"ERROR: reviewer input must contain exactly one mission-review/1 JSON: {src}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        payload, json_text, (start, end) = candidates[0]
+        prose_text = text[:start] + text[end:]
+    else:
+        json_text = stripped
+        prose_text = ""
+
+    json_bytes = len(json_text.encode("utf-8"))
+    prose_bytes = _review_prose_bytes(prose_text)
+    denominator = json_bytes + prose_bytes
+    metric = {
+        "json_bytes": json_bytes,
+        "prose_bytes": prose_bytes,
+        "prose_ratio": round(prose_bytes / denominator, 6) if denominator else 0,
+    }
+    return payload, metric
+
+
+def _load_review_json(path_str: str, expected_iteration: int) -> tuple[dict, dict]:
     src = Path(path_str)
     if not (src.exists() and src.is_file()):
         print(f"ERROR: reviewer input not found: {src}", file=sys.stderr)
         sys.exit(2)
-    try:
-        payload = json.loads(src.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        print(f"ERROR: reviewer input is invalid JSON: {src}: {e}", file=sys.stderr)
-        sys.exit(2)
+    payload, metric = _extract_review_payload(src)
     if not isinstance(payload, dict):
         _review_error(src, "review must be a JSON object")
     if payload.get("schema") != "mission-review/1":
@@ -5667,7 +5995,7 @@ def _load_review_json(path_str: str, expected_iteration: int) -> dict:
         _review_error(src, "scores field is required; use null only for findings-only reviewers")
     scores = payload.get("scores")
     if scores is None:
-        return payload
+        return payload, metric
     if not isinstance(scores, dict) or set(scores) != set(REVIEW_SCORE_KEYS):
         _review_error(src, f"scores must contain exactly {list(REVIEW_SCORE_KEYS)}")
     for key, value in scores.items():
@@ -5678,7 +6006,7 @@ def _load_review_json(path_str: str, expected_iteration: int) -> dict:
         _review_error(src, "scores look like 0-1 normalized scale; use 0-5 scale")
     if len(set(values)) == 1 and not str(payload.get("same_score_note") or "").strip():
         _review_error(src, "same_score_note is required when all four scores are equal")
-    return payload
+    return payload, metric
 
 
 def _cap_for_findings(findings: list[dict]) -> float | None:
@@ -5947,7 +6275,24 @@ def cmd_aggregate_reviews(args):
                 file=sys.stderr,
             )
             sys.exit(2)
-    reviews = [_load_review_json(path, args.iteration) for path in args.input]
+    loaded_reviews = [_load_review_json(path, args.iteration) for path in args.input]
+    reviews = [review for review, _metric in loaded_reviews]
+    reviewer_output_metrics = [
+        {"perspective": review["perspective"], **metric}
+        for review, metric in loaded_reviews
+    ]
+    for metric in reviewer_output_metrics:
+        if (
+            metric["prose_bytes"] > REVIEW_PROSE_BYTES_WARN
+            or metric["prose_ratio"] > REVIEW_PROSE_RATIO_WARN
+        ):
+            print(
+                "WARN #353: reviewer output exceeds bounded template guidance "
+                f"(perspective={metric['perspective']}, "
+                f"prose_bytes={metric['prose_bytes']}, "
+                f"prose_ratio={metric['prose_ratio']:.3f})",
+                file=sys.stderr,
+            )
 
     min_reviewers = getattr(args, "min_reviewers", None)
     if min_reviewers is not None and len(reviews) < min_reviewers:
@@ -6006,11 +6351,24 @@ def cmd_aggregate_reviews(args):
         if finding.get("severity") == "High"
     )
 
-    # #282: reviewer 並列実行の観測 (ゲート不変・self-report ベース)
+    # #282/#350: reviewer 並列実行の観測。2 名以上では全 reviewer の
+    # self-report を fail-closed で要求し、実行形態そのものは gate しない。
     valid_perspectives = {review["perspective"] for review in reviews}
     reviewer_windows = _parse_reviewer_windows(
         getattr(args, "reviewer_windows", []) or [], valid_perspectives
     )
+    if len(reviews) >= 2:
+        reported_perspectives = {window["perspective"] for window in reviewer_windows}
+        missing_perspectives = sorted(valid_perspectives - reported_perspectives)
+        if missing_perspectives:
+            print(
+                "ERROR: reviewer window の報告が不足しています。"
+                f"不足 perspective: {', '.join(missing_perspectives)}。"
+                "報告書式: --reviewer-window <perspective>=<start>..<end>。"
+                "#350: 並列実行の検証可能性のため必須",
+                file=sys.stderr,
+            )
+            sys.exit(2)
     parallel_execution = _observe_parallel_execution(reviewer_windows)
     reviewer_windows_public = [
         {k: v for k, v in window.items() if not k.startswith("_")}
@@ -6020,15 +6378,6 @@ def cmd_aggregate_reviews(args):
         print(
             "WARN: reviewer が直列実行されています (実行時間帯の重なりなし)。"
             "Claude Code では Reviewer を単一メッセージで並列起動してください (#282)。"
-            "この warn は観測のみで集計・gate には影響しません。",
-            file=sys.stderr,
-        )
-    elif parallel_execution == "unknown" and len(reviews) >= 2:
-        # #338: 未申告だと並列実行を検証できない (portfolio-v4 で直列 3/3 を実測)。
-        print(
-            "WARN: reviewer 実行時間帯が未申告のため並列実行を検証できません (#338)。"
-            "spawn 直前と全返却後の時刻を控え、"
-            "--reviewer-window <perspective>=<start>..<end> を各 reviewer 分渡してください。"
             "この warn は観測のみで集計・gate には影響しません。",
             file=sys.stderr,
         )
@@ -6049,7 +6398,22 @@ def cmd_aggregate_reviews(args):
             )
         # #338: 観測結果を state へ永続化し stats で横断集計可能にする (gate 不変)
         data["last_parallel_execution"] = parallel_execution
+        prior_metrics = [
+            record for record in data.get("reviewer_output_records", [])
+            if isinstance(record, dict) and record.get("iteration") != args.iteration
+        ]
+        data["reviewer_output_records"] = prior_metrics + [
+            {"iteration": args.iteration, **metric}
+            for metric in reviewer_output_metrics
+        ]
         atomic_write_json(sf, data)
+        context_mode_expected = _expected_context_mode(data, args.iteration)
+        context_manifest_generated = _context_manifest_generated(data, args.iteration)
+        if context_mode_expected == "bounded" and not context_manifest_generated:
+            print(
+                "WARN #352: bounded context expected but no manifest generated",
+                file=sys.stderr,
+            )
         mission8 = (data.get("mission_id") or "unknown")[:8]
         evidence_path = state_dir(cwd) / "archive" / f"iter-{args.iteration}-{mission8}-reviews.json"
         evidence_path.parent.mkdir(parents=True, exist_ok=True)
@@ -6066,6 +6430,9 @@ def cmd_aggregate_reviews(args):
             "parallel_execution": parallel_execution,
             "artifact_lint": artifact_lint,
             "artifact_lint_status": artifact_lint_status,
+            "context_mode_expected": context_mode_expected,
+            "context_manifest_generated": context_manifest_generated,
+            "reviewer_output_metrics": reviewer_output_metrics,
         }
         evidence_path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -6155,6 +6522,9 @@ def cmd_context_manifest(args):
         sys.exit(1)
     data = json.loads(sf.read_text())
     iteration = args.iteration if args.iteration is not None else data.get("iteration", 1)
+    if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < 1:
+        print("ERROR: --iteration は 1 以上で指定してください", file=sys.stderr)
+        sys.exit(2)
     history = data.get("score_history") or []
     prior_findings = []
     for entry in history:
@@ -6174,7 +6544,26 @@ def cmd_context_manifest(args):
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
-    print(json.dumps({"ok": True, "path": str(out), "findings_count": len(prior_findings)}, ensure_ascii=False))
+    digest = "sha256:" + hashlib.sha256(out.read_bytes()).hexdigest()
+    generated_at = iso_now()
+    with StateLock(lock_file(cwd)):
+        current = json.loads(sf.read_text())
+        context_manifests = current.get("context_manifests")
+        if not isinstance(context_manifests, dict):
+            context_manifests = {}
+        context_manifests[str(iteration)] = {
+            "path": str(out),
+            "digest": digest,
+            "generated_at": generated_at,
+        }
+        current["context_manifests"] = context_manifests
+        atomic_write_json(sf, current)
+    print(json.dumps({
+        "ok": True,
+        "path": str(out),
+        "digest": digest,
+        "findings_count": len(prior_findings),
+    }, ensure_ascii=False))
 
 
 def cmd_push_score(args):
@@ -6580,6 +6969,14 @@ def cmd_mark_halt(args):
         data["halt_reason"] = args.reason
         data["halt_category"] = category  # #190
         data["loop_active"] = False
+        if category == "routed-goal":
+            dispatch_fields = _goal_dispatch_route_fields(data)
+            data["goal_dispatch_effective"] = dispatch_fields["goal_dispatch_effective"]
+            data["goal_dispatch_host"] = dispatch_fields["goal_dispatch_host"]
+            if dispatch_fields.get("goal_dispatch_fallback_reason"):
+                data["goal_dispatch_fallback_reason"] = dispatch_fields["goal_dispatch_fallback_reason"]
+            else:
+                data.pop("goal_dispatch_fallback_reason", None)
         _transition_phase(
             data,
             "halted",
@@ -7225,6 +7622,49 @@ def _median(xs: list) -> float | None:
     return s[m] if len(s) % 2 else (s[m - 1] + s[m]) / 2
 
 
+def _nearest_rank_percentile(values: list[int], percentile: float) -> int | None:
+    """Return an observed integer using the nearest-rank percentile method."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    rank = max(1, math.ceil(percentile * len(ordered)))
+    return ordered[rank - 1]
+
+
+def _reviewer_output_stats(states: list[dict]) -> dict:
+    """Aggregate valid per-reviewer output observations across session states."""
+    records = []
+    for state in states:
+        state_records = state.get("reviewer_output_records", [])
+        if not isinstance(state_records, list):
+            continue
+        for record in state_records:
+            if not isinstance(record, dict):
+                continue
+            prose_bytes = record.get("prose_bytes")
+            prose_ratio = record.get("prose_ratio")
+            if (
+                not isinstance(prose_bytes, int)
+                or isinstance(prose_bytes, bool)
+                or prose_bytes < 0
+                or not isinstance(prose_ratio, (int, float))
+                or isinstance(prose_ratio, bool)
+                or not 0 <= float(prose_ratio) <= 1
+            ):
+                continue
+            records.append((prose_bytes, float(prose_ratio)))
+    prose_values = [prose_bytes for prose_bytes, _ratio in records]
+    return {
+        "records": len(records),
+        "oversize_warns": sum(
+            1 for prose_bytes, prose_ratio in records
+            if prose_bytes > REVIEW_PROSE_BYTES_WARN or prose_ratio > REVIEW_PROSE_RATIO_WARN
+        ),
+        "prose_bytes_p50": _nearest_rank_percentile(prose_values, 0.5),
+        "prose_bytes_p90": _nearest_rank_percentile(prose_values, 0.9),
+    }
+
+
 def _collect_states(root: Path) -> list[dict]:
     """root 配下を再帰的にスキャンして state を収集 (現役 + archive、stats 用)。
 
@@ -7424,6 +7864,12 @@ def _aggregate(
             "by_halt_category": {},
             "parallel_review_counts": {"true": 0, "false": 0, "unknown": 0},
             "artifact_lint_counts": _artifact_lint_counts([]),
+            "bounded_context_counts": {
+                "expected_bounded": 0,
+                "manifest_generated": 0,
+                "fallback_full": 0,
+            },
+            "reviewer_output_stats": _reviewer_output_stats([]),
             "activity_timing": summarize_activity_states([]),
         }
     # _classify を 1 回だけ評価 (旧実装は pass/halt/incomplete で 3N 回呼んでいた)
@@ -7453,6 +7899,24 @@ def _aggregate(
             parallel_review_counts["false"] += 1
         elif lpe == "unknown":
             parallel_review_counts["unknown"] += 1
+    bounded_context_counts = {
+        "expected_bounded": 0,
+        "manifest_generated": 0,
+        "fallback_full": 0,
+    }
+    for state in states:
+        iteration = state.get("iteration", 1)
+        expected_bounded = (
+            isinstance(iteration, int)
+            and _expected_context_mode(state, iteration) == "bounded"
+        )
+        generated = _context_manifest_generated(state, iteration)
+        if expected_bounded:
+            bounded_context_counts["expected_bounded"] += 1
+        if generated:
+            bounded_context_counts["manifest_generated"] += 1
+        if expected_bounded and not generated:
+            bounded_context_counts["fallback_full"] += 1
     iterations = [s.get("iteration", 0) for s in states]
     # 改善3b: composite を持つ直近エントリを final とする (末尾の進捗ノート混入に耐える)
     finals = [c for c in (_latest_composite(s.get("score_history", [])) for s in states) if c is not None]
@@ -7497,6 +7961,8 @@ def _aggregate(
         "forced_pass_count": forced_pass_count,
         "parallel_review_counts": parallel_review_counts,
         "artifact_lint_counts": _artifact_lint_counts(states),
+        "bounded_context_counts": bounded_context_counts,
+        "reviewer_output_stats": _reviewer_output_stats(states),
         "forced_pass_rate": forced_pass_count / pass_count if pass_count else None,
         "ungated_pass_count": ungated_pass_count,
         "ungated_pass_rate": ungated_pass_count / pass_count if pass_count else None,
@@ -7976,6 +8442,9 @@ def _build_parser():
                              "pass-rate は implementer 限定指標で別計上される")
     p_init.add_argument("--force-mission", action="store_true", dest="force_mission",
                         help="#276: Simple タスクでも goal へルーティングせず mission ループを強制する")
+    p_init.add_argument("--goal-dispatch", choices=sorted(GOAL_DISPATCH_MODES), default=None,
+                        dest="goal_dispatch",
+                        help="#355: Simple routing 後の完遂手段。inline または実行ホストの host-native goal 機構")
     p_init.add_argument("--review-tier", choices=list(TIER_REVIEWER_COUNT), default=None,
                         dest="review_tier",
                         help="レビュー深度 (light/standard/full)。未指定は complexity・ミッション記述から auto 導出 (Issue #168)")
@@ -8048,7 +8517,8 @@ def _build_parser():
                        help="#240: 最低 reviewer 数。不足なら exit 2 (合意偽装防止)")
     p_agg.add_argument("--reviewer-window", action="append", default=[], dest="reviewer_windows",
                        help="#282: reviewer 実行時間帯 '<perspective>=<start>..<end>' (ISO 8601)。"
-                            "複数指定で並列実行の重なりを観測し evidence に記録 (ゲート不変)")
+                            "reviewer 2 名以上では全 perspective 分が必須 (不足は exit 2)。"
+                            "実行時間帯の重なりは evidence に記録 (#350)")
     p_agg.set_defaults(func=cmd_aggregate_reviews)
 
     p_rf = sub.add_parser("review-finalize",
@@ -8061,7 +8531,8 @@ def _build_parser():
     p_rf.add_argument("--min-reviewers", type=int, default=None, dest="min_reviewers",
                       help="#240: 最低 reviewer 数。不足なら exit 2 (score は push されない)")
     p_rf.add_argument("--reviewer-window", action="append", default=[], dest="reviewer_windows",
-                      help="#282: reviewer 実行時間帯 '<perspective>=<start>..<end>' (観測のみ)")
+                      help="#282: reviewer 実行時間帯 '<perspective>=<start>..<end>'。"
+                           "reviewer 2 名以上では全 perspective 分が必須 (不足は exit 2、score は push されない) (#350)")
     p_rf.add_argument("--notes", default=None)
     p_rf.add_argument("--resubmit-reason", default=None, dest="resubmit_reason",
                       help="#122: 同一 iteration の再 push 理由")

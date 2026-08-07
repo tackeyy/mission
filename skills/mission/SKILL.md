@@ -97,7 +97,7 @@ Phase 7: pass 後の PR merge 判定
 
 Phase 1 ではミッションを構造化し、触る/触らない範囲、完了条件、複雑度を決める。複雑度は Simple=単一ファイル/1ステップ、Standard=3-5ステップ、Complex=設計判断/横断、Critical=本番/セキュリティ/非可逆。過大見積もりは reviewer コストを増やすため、Simple でない判定根拠を assumptions.md に残す。
 
-**adaptive routing (#276)**: Simple + リスクシグナルなし + `--issue-ref` なしの場合、`init` は `route: "goal"` を返し mission state を作らない。この場合は mission の全 Phase をスキップし、guidance に従って goal 契約の 5 見出し (Goal / Result / Evidence / Assumptions / Stop Condition) でタスクを直接完遂する。最終報告に「Simple のため goal へルーティングした」旨を 1 行明記し、mission の pass は主張しない。CC でも Codex でも同じ inline 契約で動く。mission 機構が必要なとき (ユーザー明示・検証目的等) は `--force-mission` で再 init する。`--issue-ref` 付き (Issue-bound = 統治要求。wrapper の strict preflight が active state を要求) は Simple でも routing せず mission ループを維持する (#304)。routing された場合、`next` / `mark-passes` / Stop hook 継続は呼ばない (state が存在しない)。init 後に complexity を Simple へ確定した場合は `set complexity=Simple` 自身が routing verdict を実行する (#330): state は routed-goal で自動 halt され (mark-halt 不要・pass-rate 対象外)、出力の guidance に従い goal 契約で直接完遂する。`next` の route-to-goal (#325) は defense-in-depth として残る。
+**adaptive routing (#276)**: Simple + リスクシグナルなし + `--issue-ref` なしの場合、`init` は `route: "goal"` を返し mission state を作らない。この場合は mission の全 Phase をスキップし、guidance に従って goal 契約の 5 見出し (Goal / Result / Evidence / Assumptions / Stop Condition) でタスクを直接完遂する。最終報告に「Simple のため goal へルーティングした」旨を 1 行明記し、mission の pass は主張しない。goal dispatch は既定 `inline`。`goal_dispatch: <inline|host-native>` のユーザー明示、`init --goal-dispatch`、project `.mission/routing.yml`、user `~/.config/mission/routing.yml` の順で上書きできる (#355)。`host-native` は現在ホストの native goal guidance を返し、host 不明時は理由付きで inline へ fail-safe する。詳細は `refs/goal-dispatch-provider.md`。mission 機構が必要なとき (ユーザー明示・検証目的等) は `--force-mission` で再 init する。`--issue-ref` 付き (Issue-bound = 統治要求。wrapper の strict preflight が active state を要求) は Simple でも routing せず mission ループを維持する (#304)。routing された場合、`next` / `mark-passes` / Stop hook 継続は呼ばない (state が存在しない)。init 後に complexity を Simple へ確定した場合は `set complexity=Simple` 自身が routing verdict を実行する (#330): state は routed-goal で自動 halt され (mark-halt 不要・pass-rate 対象外)、出力の guidance に従い goal 契約で直接完遂する。`next` の route-to-goal (#325) は defense-in-depth として残る。
 
 Checker / 監査等の従属役割で起動する場合は `init --role <checker|planning|analyze|release>` を指定する (#311)。証拠提出で終わる正規出口は `mark-halt --category evidence-submitted` を使い、pass-rate 統計を汚さない (implementer 限定指標が別計上される)。
 
@@ -110,6 +110,8 @@ init 後 (route されなかった場合)、対象ファイル候補が見えた
 activity segment は観測専用で、reviewer 数・threshold・findings evidence・agreement・`open_high`・pass/fail gate を変更しない。外部応答、承認、reviewer の待機を開始する直前に対応する wait kind へ切り替え、応答後は `active` へ戻す。`idle` は「実行可能な作業がない」と明示できる場合だけ使う。crash/resume 間の不明時間は自動分類せず unobserved gap として保持する。reason enum と集計定義は `refs/state-management.md` の「Activity segment observability」を参照。
 
 Reviewer 数は Simple=1、Standard=2、Complex=2、Critical=3 (#266: シグナルなし Complex は独立2名で agreement 成立。不可逆・security シグナルで full=3 へエスカレート)。Claude Code では Reviewer N 名を**必ず単一メッセージ内で並列起動する** (portfolio-v4 実測: 直列起動は Standard 1 iteration あたり約 2-3 分を浪費し、3/3 run で直列だった #338)。直列起動は規律違反として扱う。Codex は順次でよい。観点Dは採点させず、計画指示明瞭度の改善を Critic の実行計画に反映する。**並列観測 (#282)**: reviewer spawn 直前と全返却後の時刻 (ISO 8601) を控え、`aggregate-reviews` に `--reviewer-window <perspective>=<start>..<end>` を各 reviewer 分渡す。`parallel_execution: false` の WARN が出たら、次 iteration は必ず単一メッセージ並列起動に戻す (観測のみ・gate 不変)。
+
+Reviewer が 2 名以上の場合、`aggregate-reviews` (`review-finalize` 経由を含む) は全 perspective の `--reviewer-window` 報告を必須とし、不足時は exit 2 とする (#350)。
 
 **review_tier (#168, #209)**: `init` が complexity とミッション記述から `review_tier`（light/standard/full）を auto 導出し state に記録する（`review_tier_source` / `review_tier_signals` / `review_tier_signal_details` で監査可能）。不可逆系キーワードは各出現の文脈を評価し、明示的に実操作を否定した候補だけを抑制する。条件付き・二重否定・不確実・単なる引用は安全側で full を維持し、security / high-risk シグナルは否定で抑制しない。light: reviewer 1名・`required=true` specialist のみ・critic は fail 時のみ spawn。standard/full: 従来どおり。**ゲート意味論は tier によらず不変**（threshold / open_high / findings evidence / halt）。詳細（導出テーブル・エスカレータ一覧・override 規律）は `refs/state-management.md` の「review_tier 導出と Light Tier 運用」節を参照。
 
@@ -206,3 +208,4 @@ worktree 実行時は `mark-passes` / `mark-halt` の後、worktree cleanup の�
 - `refs/codex-setup.md`: Codex での導入と Stop hook
 - `refs/self-improvement.md`: audit と改善 prompt
 - `refs/specialist-registry.md`: task_profile と specialist/provider 選定
+- `refs/goal-dispatch-provider.md`: adaptive routing 後の inline / host-native goal dispatch 設定と fail-safe

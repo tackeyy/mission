@@ -9,9 +9,16 @@
 
 ## [Unreleased]
 
+### 追加
+
+- bounded context の発火条件・fallback・review gate を変えず観測可能にした。`context-manifest` は iteration ごとの path・SHA-256 digest・生成時刻を session state へ記録し、`aggregate-reviews` は期待 context mode と manifest 生成有無を evidence archive へ保存、bounded 期待時の未生成を exit 0 の WARN にする。`stats --json` は期待・生成・full fallback 件数を集計し、bounded review の mission-reviewer は notes に `context: bounded` を明記する。aggregate / stats が manifest 観測を有効と数えるには、iteration が bool・float を除く正の整数で、生成時刻が timezone 付き ISO 形式であることを必須とする。embedded NUL 改ざんを含む不正・読取不能 path は未生成扱いにし、aggregate / stats を中断しない (#352)。
+- Simple task の adaptive routing に設定可能な goal dispatch provider を追加した (#355)。portable な `inline` を既定に保ち、mission 内の明示指示、`--goal-dispatch`、project `.mission/routing.yml`、user 設定から `host-native` を選べる。init / set / next verdict は実効 dispatch を記録し、host 不明・設定不正時は WARN して inline へ fail-safe する。routing gate と `--force-mission` の挙動は変更しない。
+
 ### 修正
 
 - state に `artifact_path` がある場合、`aggregate-reviews` が WARN-only の構造 lint を実行するようにした。H1〜H3 の空節と英日 forward-reference のみの stub を検出し、reviewer finding・score・exit status は変更しない。結果は review aggregate evidence と state に記録し、`stats --json` が empty-section / stub-forward-reference / clean の件数を返す。embedded NUL 改ざんや非 regular file を含む path の resolve・relative 判定・read 失敗は `artifact_lint_status=skipped` として fail-open し、過去の lint 観測を削除して stale stats を防ぐ。成功した `clean` 観測とも区別する。空の ATX 見出し、閉じ hash 列、backtick を含む無効な backtick fence info は Markdown 構文に従って解釈する (#351)。
+- `aggregate-reviews` は reviewer が 2 名以上の場合、全 perspective の `--reviewer-window` 報告を必須化し、不足 perspective と報告書式を示して exit 2 とするようにした。`review-finalize` もこの fail-closed gate を継承し、集計失敗後に score を push しない。単一 reviewer は対象外のまま、報告済みの直列実行も従来どおり WARN のみ (#350)。
+- reviewer 出力境界を品質 gate にせず観測可能にした (#353)。`aggregate-reviews` は入力ごとの `mission-review/1` JSON byte 数とテンプレ外散文の byte 数・比率を計測し、evidence と session 横断 p50/p90 stats に記録する。暫定閾値 20 KB / 0.7 超過は exit 0 の WARN に留め、score・finding・agreement の集計結果は変更しない。
 
 - mission audit が owner による明示的な凍結・意図的 close・replacement issue への切替を示す halt reason を非 actionable の `intentional-freeze-switch` として分類するようにした。raw halt count は保持しつつ、運用 state debt 監査での P1 `halted-runs` false positive を減らす (#347)。
 

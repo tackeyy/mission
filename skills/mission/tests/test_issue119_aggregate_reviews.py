@@ -31,6 +31,16 @@ def _load(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _reviewer_windows(*perspectives):
+    args = []
+    for perspective in perspectives:
+        args.extend((
+            "--reviewer-window",
+            f"{perspective}=2026-08-02T10:00:00Z..2026-08-02T10:05:00Z",
+        ))
+    return args
+
+
 def test_aggregate_reviews_writes_scoring_json_and_evidence(state_dir, run_cli, tmp_path):
     a = _review(tmp_path, "a.json", perspective="A")
     b = _review(tmp_path, "b.json", perspective="B", scores={
@@ -42,7 +52,7 @@ def test_aggregate_reviews_writes_scoring_json_and_evidence(state_dir, run_cli, 
     out = tmp_path / "scoring.json"
 
     r = run_cli("aggregate-reviews", "--iteration", "1", "--input", str(a), "--input", str(b),
-                "--out", str(out), "--json", cwd=state_dir.parent)
+                "--out", str(out), "--json", *_reviewer_windows("A", "B"), cwd=state_dir.parent)
 
     assert r.returncode == 0, r.stderr
     result = json.loads(r.stdout)
@@ -112,7 +122,7 @@ def test_aggregate_reviews_uses_findings_only_reviewer_without_scores(state_dir,
     out = tmp_path / "scoring.json"
 
     r = run_cli("aggregate-reviews", "--iteration", "1", "--input", str(a), "--input", str(d),
-                "--out", str(out), cwd=state_dir.parent)
+                "--out", str(out), *_reviewer_windows("A", "D"), cwd=state_dir.parent)
 
     assert r.returncode == 0, r.stderr
     payload = _load(out)
@@ -137,7 +147,7 @@ def test_aggregate_reviews_counts_high_from_findings_only_reviewer(state_dir, ru
     out = tmp_path / "scoring.json"
 
     run_cli("aggregate-reviews", "--iteration", "1", "--input", str(a), "--input", str(d),
-            "--out", str(out), cwd=state_dir.parent, check=True)
+            "--out", str(out), *_reviewer_windows("A", "D"), cwd=state_dir.parent, check=True)
 
     assert _load(out)["open_high"] == 1
 
@@ -152,7 +162,7 @@ def test_aggregate_reviews_consensus_score_boundaries(state_dir, run_cli, tmp_pa
     out = tmp_path / "scoring.json"
 
     run_cli("aggregate-reviews", "--iteration", "1", "--input", str(a), "--input", str(b),
-            "--out", str(out), cwd=state_dir.parent, check=True)
+            "--out", str(out), *_reviewer_windows("A", "B"), cwd=state_dir.parent, check=True)
 
     payload = _load(out)
     assert "reviewer_consensus" not in payload["items"]
