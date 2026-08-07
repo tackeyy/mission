@@ -50,8 +50,20 @@ API_SPEND_LIMIT_ERROR_PHRASES = (
     "usage limit reached",
 )
 MAX_BUDGET_MARKERS = (
-    "error_max_budget_usd",
     "max_budget_usd",
+    "max budget",
+    "maximum budget",
+    "budget limit",
+)
+MAX_BUDGET_ERROR_PHRASES = (
+    "max_budget_usd reached",
+    "max_budget_usd exceeded",
+    "max budget reached",
+    "max budget exceeded",
+    "maximum budget reached",
+    "maximum budget exceeded",
+    "budget limit reached",
+    "budget limit exceeded",
 )
 
 
@@ -357,6 +369,24 @@ def detect_spend_limit(result_json: dict, stderr_text: str, returncode: int | No
     return has_limit_marker and (has_error_state or has_provider_error_phrase)
 
 
+def detect_max_budget_limit(result_json: dict, stderr_text: str, returncode: int | None = None) -> bool:
+    """Detect a budget stop without matching successful implementation prose."""
+    result = result_json if isinstance(result_json, dict) else {}
+    if result.get("subtype") == "error_max_budget_usd":
+        return True
+    result_text = result.get("result", "")
+    combined = f"{result_text if isinstance(result_text, str) else ''}\n{stderr_text or ''}".lower()
+    has_budget_marker = any(marker in combined for marker in MAX_BUDGET_MARKERS)
+    terminal_reason = result.get("terminal_reason")
+    has_error_state = (
+        result.get("is_error") is True
+        or terminal_reason in {"api_error", "error", "max_budget_usd", "budget_exceeded"}
+        or (returncode is not None and returncode != 0)
+    )
+    has_provider_error_phrase = any(phrase in combined for phrase in MAX_BUDGET_ERROR_PHRASES)
+    return has_provider_error_phrase or (has_budget_marker and has_error_state)
+
+
 def classify_run_status(
     stdout: str,
     stderr: str,
@@ -374,7 +404,7 @@ def classify_run_status(
             "failure_kind": "api_spend_limit",
             "comparable_attempt": False,
         }
-    if any(marker in combined for marker in MAX_BUDGET_MARKERS):
+    if detect_max_budget_limit(result_json, stderr, returncode):
         return {
             "run_status": "blocked",
             "blocked_reason": "max_budget_usd",
