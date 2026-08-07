@@ -12,8 +12,11 @@
 ### 追加
 
 - bounded context の発火条件・fallback・review gate を変えず観測可能にした。`context-manifest` は iteration ごとの path・SHA-256 digest・生成時刻を session state へ記録し、`aggregate-reviews` は期待 context mode と manifest 生成有無を evidence archive へ保存、bounded 期待時の未生成を exit 0 の WARN にする。`stats --json` は期待・生成・full fallback 件数を集計し、bounded review の mission-reviewer は notes に `context: bounded` を明記する。aggregate / stats が manifest 観測を有効と数えるには、iteration が bool・float を除く正の整数で、生成時刻が timezone 付き ISO 形式であることを必須とする。embedded NUL 改ざんを含む不正・読取不能 path は未生成扱いにし、aggregate / stats を中断しない (#352)。
+- Simple task の adaptive routing に設定可能な goal dispatch provider を追加した (#355)。portable な `inline` を既定に保ち、mission 内の明示指示、`--goal-dispatch`、project `.mission/routing.yml`、user 設定から `host-native` を選べる。init / set / next verdict は実効 dispatch を記録し、host 不明・設定不正時は WARN して inline へ fail-safe する。routing gate と `--force-mission` の挙動は変更しない。
 
 ### 修正
+
+- reviewer 出力境界を品質 gate にせず観測可能にした (#353)。`aggregate-reviews` は入力ごとの `mission-review/1` JSON byte 数とテンプレ外散文の byte 数・比率を計測し、evidence と session 横断 p50/p90 stats に記録する。暫定閾値 20 KB / 0.7 超過は exit 0 の WARN に留め、score・finding・agreement の集計結果は変更しない。
 
 - mission audit が owner による明示的な凍結・意図的 close・replacement issue への切替を示す halt reason を非 actionable の `intentional-freeze-switch` として分類するようにした。raw halt count は保持しつつ、運用 state debt 監査での P1 `halted-runs` false positive を減らす (#347)。
 
