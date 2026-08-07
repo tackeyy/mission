@@ -158,13 +158,25 @@ fi
 # === C-2/C-3: sessions/ ディレクトリ優先 (multi-session 対応) ===
 if [ -d "$SESSIONS_DIR" ]; then
   HAS_ACTIVE=false
+  EXACT_SESSION_FILE=""
+  EXACT_SESSION_SEEN=false
   if [ -n "$HOOK_SID" ] && [ -f "$SESSIONS_DIR/$HOOK_SID.json" ]; then
-    set -- "$SESSIONS_DIR/$HOOK_SID.json"
+    EXACT_SESSION_FILE="$SESSIONS_DIR/$HOOK_SID.json"
+    if [ "$HOOK_SID_FROM_PID" = "true" ]; then
+      # exact fenced state を最優先し、不適格/terminal の場合だけ legacy PID stateへ降下。
+      set -- "$EXACT_SESSION_FILE" "$SESSIONS_DIR"/*.json
+    else
+      set -- "$EXACT_SESSION_FILE"
+    fi
   else
     set -- "$SESSIONS_DIR"/*.json
   fi
   for sf in "$@"; do
     [ -f "$sf" ] || continue
+    if [ -n "$EXACT_SESSION_FILE" ] && [ "$sf" = "$EXACT_SESSION_FILE" ]; then
+      [ "$EXACT_SESSION_SEEN" = "true" ] && continue
+      EXACT_SESSION_SEEN=true
+    fi
     s_loop=$(jq -r '.loop_active // false' "$sf" 2>/dev/null || echo "false")
     [ "$s_loop" != "true" ] && continue
     s_passes=$(jq -r '.passes // false' "$sf" 2>/dev/null || echo "false")
@@ -213,7 +225,7 @@ if [ -d "$SESSIONS_DIR" ]; then
 
     # PID alive 照合 (env なし pid fallback 時のみ)。HOOK_SID 一致時は自セッション確定のため
     # スキップ — resume/compaction で PID が変わっても自分の state を block できる (M-1)。
-    if [ "$LEASE_PRESENT" != "true" ] && { [ -z "$HOOK_SID" ] || [ "$HOOK_SID_FROM_PID" = "true" ]; } && [ -n "$s_pid" ] && [ "$s_pid" != "null" ] && [ "$s_pid" -gt 0 ] 2>/dev/null; then
+    if [ "$LEASE_PRESENT" != "true" ] && [ -z "$HOOK_SID" ] && [ -n "$s_pid" ] && [ "$s_pid" != "null" ] && [ "$s_pid" -gt 0 ] 2>/dev/null; then
       if ! kill -0 "$s_pid" 2>/dev/null; then
         _mission_halt_session "$sf" "orphan: pid $s_pid dead" || true
         continue
