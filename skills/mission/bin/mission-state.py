@@ -578,8 +578,8 @@ def load_routing_config() -> dict:
 
 
 def _resolve_goal_dispatch(mission: str, cli_mode: str | None, cwd: Path) -> dict:
-    explicit = re.match(
-        r"(?i)\A[ \t]*goal[_ -]dispatch\s*[:=]\s*([a-z][a-z0-9-]*)[ \t]*(?:;|\r?\n|\Z)",
+    explicit = re.search(
+        r"(?im)^ {0,3}goal[_ -]dispatch\s*[:=]\s*([a-z][a-z0-9-]*)[ \t]*(?:;|$)",
         mission or "",
     )
     if explicit:
