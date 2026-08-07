@@ -174,6 +174,55 @@ def test_completed_negated_budget_diagnosis_is_not_blocked():
     }
 
 
+@pytest.mark.parametrize(
+    "result_text",
+    (
+        "The 'maximum budget reached' error was not observed; all tests passed.",
+        "The maximum budget reached message was not the cause of the failure.",
+    ),
+)
+def test_completed_quoted_or_negated_provider_budget_phrase_is_not_blocked(
+    result_text,
+):
+    runner = _load_official_goal_runner()
+
+    status = runner.classify_run_status(
+        stdout=json.dumps({"result": result_text}),
+        stderr="",
+        timed_out=False,
+        returncode=0,
+        output_exists=True,
+        validator_pass=True,
+    )
+
+    assert status == {
+        "run_status": "completed",
+        "blocked_reason": None,
+        "failure_kind": None,
+        "comparable_attempt": True,
+    }
+
+
+def test_exact_provider_budget_phrase_with_zero_exit_is_blocked():
+    runner = _load_official_goal_runner()
+
+    status = runner.classify_run_status(
+        stdout=json.dumps({"result": "Maximum budget reached"}),
+        stderr="",
+        timed_out=False,
+        returncode=0,
+        output_exists=False,
+        validator_pass=False,
+    )
+
+    assert status == {
+        "run_status": "blocked",
+        "blocked_reason": "max_budget_usd",
+        "failure_kind": "max_budget_usd",
+        "comparable_attempt": False,
+    }
+
+
 def test_detect_max_budget_accepts_structured_and_definitive_error_evidence():
     runner = _load_official_goal_runner()
 

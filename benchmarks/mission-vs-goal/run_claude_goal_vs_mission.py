@@ -383,7 +383,15 @@ def detect_max_budget_limit(result_json: dict, stderr_text: str, returncode: int
         or terminal_reason in {"api_error", "error", "max_budget_usd", "budget_exceeded"}
         or (returncode is not None and returncode != 0)
     )
-    has_provider_error_phrase = any(phrase in combined for phrase in MAX_BUDGET_ERROR_PHRASES)
+    provider_lines = {
+        " ".join(line.casefold().split())
+        for text in (result_text if isinstance(result_text, str) else "", stderr_text or "")
+        for line in text.splitlines()
+        if line.strip()
+    }
+    has_provider_error_phrase = any(
+        phrase in provider_lines for phrase in MAX_BUDGET_ERROR_PHRASES
+    )
     return has_provider_error_phrase or (has_budget_marker and has_error_state)
 
 
