@@ -238,6 +238,20 @@ def test_mission_explicit_dispatch_overrides_cli_flag(run_cli, tmp_path):
     assert verdict["goal_dispatch_effective"] == "host-native"
 
 
+def test_standalone_dispatch_on_later_line_overrides_cli_flag(run_cli, tmp_path):
+    result = run_cli(
+        "init", "typo を直す\n\ngoal_dispatch: host-native\n受入テストを実行する",
+        "--complexity", "Simple", "--goal-dispatch", "inline",
+        cwd=tmp_path,
+        env_extra=_isolated_env(tmp_path, CODEX_THREAD_ID="codex-test"),
+        check=True,
+    )
+
+    verdict = json.loads(result.stdout)
+    assert verdict["goal_dispatch_source"] == "mission:user-explicit"
+    assert verdict["goal_dispatch_effective"] == "host-native"
+
+
 @pytest.mark.parametrize("mission", [
     "例: goal_dispatch: host-native を指定できます",
     "goal_dispatch: host-native にしないで typo を直す",
