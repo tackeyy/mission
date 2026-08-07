@@ -19,6 +19,7 @@ allowed-tools: Read, Grep, Glob, Bash(git diff:*), Bash(git log:*), Bash(git sta
 - Executor の「指示明瞭度フィードバック」(不明瞭点 / 裁量補完 / 再試行) ※観点D 評価用
 - 過去スコア履歴（自己一貫性チェック用）
 - context manifest パス (#241、diff レビュー時のみ): args に `mission-context-manifest/1` JSON のパスが渡された場合、manifest (mission goal / prior findings) と指定 diff を一次スコープとしてレビューし、リポジトリ全体の走査を省く。manifest が読めない・スキーマ不一致の場合は通常どおり全成果物をレビューする (fail-safe)。スコープ縮小は探索範囲のみで、採点基準・Step 0 のテスト実行義務は不変
+  - manifest を正常に受領して bounded review を実行した場合、review JSON の `notes` 自由記述に `context: bounded` を明記する (#352)
 
 ## 行動指針
 

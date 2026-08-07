@@ -58,6 +58,13 @@ def test_generated_manifest_is_recorded_and_aggregate_observes_bounded(
         iteration=2,
         phase="reviewing",
         critic_has_new_scope=False,
+        context_manifests={
+            "1": {
+                "path": "previous.json",
+                "digest": "sha256:previous",
+                "generated_at": "2026-08-06T00:00:00Z",
+            }
+        },
     )
     manifest_path = state_dir / "context-manifest-iter2.json"
 
@@ -75,6 +82,7 @@ def test_generated_manifest_is_recorded_and_aggregate_observes_bounded(
     assert observation["path"] == str(manifest_path)
     assert observation["digest"] == expected_digest
     assert observation["generated_at"].endswith("Z")
+    assert state["context_manifests"]["1"]["path"] == "previous.json"
 
     aggregated, _ = _aggregate(run_cli, state_dir, tmp_path, 2)
 

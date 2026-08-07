@@ -4519,6 +4519,15 @@ def _happy_path_sequence(phase: str, reviewer_count: int, *, plan_mode: str = "s
     return steps[start:]
 
 
+def _expected_context_mode(data: dict, iteration: int) -> str:
+    """#352: mirror the #241 bounded-context condition without changing it."""
+    return (
+        "bounded"
+        if iteration >= 2 and data.get("critic_has_new_scope") is False
+        else "full"
+    )
+
+
 def _derive_next_action(data: dict) -> dict:
     """ADR-002 Stage 3 (G-3): state から次の 1 手を決定論的に導出する。
 
@@ -4656,8 +4665,7 @@ def _derive_next_action(data: dict) -> dict:
                 "details": {"iteration": iteration},
             }
         # #241: bounded context — iteration >= 2 かつ新規 scope なしなら bounded mode
-        use_bounded = iteration >= 2 and data.get("critic_has_new_scope") is False
-        context_mode = "bounded" if use_bounded else "full"
+        context_mode = _expected_context_mode(data, iteration)
         return {
             "next_action": "run-reviewers",
             "summary": f"iteration {iteration}: mission-reviewer を {effective_reviewer_count} 名、単一メッセージで並列起動する (直列起動は規律違反。直列は Standard で約 2-3 分の無駄を実測 #338)",
@@ -5902,6 +5910,17 @@ def cmd_aggregate_reviews(args):
         # #338: 観測結果を state へ永続化し stats で横断集計可能にする (gate 不変)
         data["last_parallel_execution"] = parallel_execution
         atomic_write_json(sf, data)
+        context_mode_expected = _expected_context_mode(data, args.iteration)
+        context_manifests = data.get("context_manifests")
+        context_manifest_generated = (
+            isinstance(context_manifests, dict)
+            and isinstance(context_manifests.get(str(args.iteration)), dict)
+        )
+        if context_mode_expected == "bounded" and not context_manifest_generated:
+            print(
+                "WARN #352: bounded context expected but no manifest generated",
+                file=sys.stderr,
+            )
         mission8 = (data.get("mission_id") or "unknown")[:8]
         evidence_path = state_dir(cwd) / "archive" / f"iter-{args.iteration}-{mission8}-reviews.json"
         evidence_path.parent.mkdir(parents=True, exist_ok=True)
@@ -5916,6 +5935,8 @@ def cmd_aggregate_reviews(args):
             "open_high": open_high,
             "reviewer_windows": reviewer_windows_public,
             "parallel_execution": parallel_execution,
+            "context_mode_expected": context_mode_expected,
+            "context_manifest_generated": context_manifest_generated,
         }
         evidence_path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -6022,7 +6043,26 @@ def cmd_context_manifest(args):
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
-    print(json.dumps({"ok": True, "path": str(out), "findings_count": len(prior_findings)}, ensure_ascii=False))
+    digest = "sha256:" + hashlib.sha256(out.read_bytes()).hexdigest()
+    generated_at = iso_now()
+    with StateLock(lock_file(cwd)):
+        current = json.loads(sf.read_text())
+        context_manifests = current.get("context_manifests")
+        if not isinstance(context_manifests, dict):
+            context_manifests = {}
+        context_manifests[str(iteration)] = {
+            "path": str(out),
+            "digest": digest,
+            "generated_at": generated_at,
+        }
+        current["context_manifests"] = context_manifests
+        atomic_write_json(sf, current)
+    print(json.dumps({
+        "ok": True,
+        "path": str(out),
+        "digest": digest,
+        "findings_count": len(prior_findings),
+    }, ensure_ascii=False))
 
 
 def cmd_push_score(args):
@@ -7248,6 +7288,11 @@ def _aggregate(
             "by_cli_version": {},
             "by_halt_category": {},
             "parallel_review_counts": {"true": 0, "false": 0, "unknown": 0},
+            "bounded_context_counts": {
+                "expected_bounded": 0,
+                "manifest_generated": 0,
+                "fallback_full": 0,
+            },
             "activity_timing": summarize_activity_states([]),
         }
     # _classify を 1 回だけ評価 (旧実装は pass/halt/incomplete で 3N 回呼んでいた)
@@ -7277,6 +7322,28 @@ def _aggregate(
             parallel_review_counts["false"] += 1
         elif lpe == "unknown":
             parallel_review_counts["unknown"] += 1
+    bounded_context_counts = {
+        "expected_bounded": 0,
+        "manifest_generated": 0,
+        "fallback_full": 0,
+    }
+    for state in states:
+        iteration = state.get("iteration", 1)
+        expected_bounded = (
+            isinstance(iteration, int)
+            and _expected_context_mode(state, iteration) == "bounded"
+        )
+        manifests = state.get("context_manifests")
+        generated = (
+            isinstance(manifests, dict)
+            and isinstance(manifests.get(str(iteration)), dict)
+        )
+        if expected_bounded:
+            bounded_context_counts["expected_bounded"] += 1
+        if generated:
+            bounded_context_counts["manifest_generated"] += 1
+        if expected_bounded and not generated:
+            bounded_context_counts["fallback_full"] += 1
     iterations = [s.get("iteration", 0) for s in states]
     # 改善3b: composite を持つ直近エントリを final とする (末尾の進捗ノート混入に耐える)
     finals = [c for c in (_latest_composite(s.get("score_history", [])) for s in states) if c is not None]
@@ -7320,6 +7387,7 @@ def _aggregate(
         "pass_rate": pass_rate_summary["raw_pass_rate"],
         "forced_pass_count": forced_pass_count,
         "parallel_review_counts": parallel_review_counts,
+        "bounded_context_counts": bounded_context_counts,
         "forced_pass_rate": forced_pass_count / pass_count if pass_count else None,
         "ungated_pass_count": ungated_pass_count,
         "ungated_pass_rate": ungated_pass_count / pass_count if pass_count else None,

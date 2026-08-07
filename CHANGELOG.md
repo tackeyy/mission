@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Bounded-context execution is now observable without changing its trigger, fallback, or review gates: `context-manifest` records each iteration's path, SHA-256 digest, and generation time in session state; `aggregate-reviews` archives expected/effective manifest evidence and emits an exit-0 warning when bounded context was expected but not generated; `stats --json` reports expected, generated, and full-fallback counts; and bounded mission-reviewer output identifies `context: bounded` in its notes (#352).
+
 ### Fixed
 
 - Mission audit now classifies explicit owner freeze / intentional close / replacement-switch halt reasons as non-actionable `intentional-freeze-switch` while preserving raw halt counts, reducing false-positive P1 `halted-runs` in operational state-debt audits (#347).

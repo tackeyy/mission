@@ -9,6 +9,10 @@
 
 ## [Unreleased]
 
+### 追加
+
+- bounded context の発火条件・fallback・review gate を変えず観測可能にした。`context-manifest` は iteration ごとの path・SHA-256 digest・生成時刻を session state へ記録し、`aggregate-reviews` は期待 context mode と manifest 生成有無を evidence archive へ保存、bounded 期待時の未生成を exit 0 の WARN にする。`stats --json` は期待・生成・full fallback 件数を集計し、bounded review の mission-reviewer は notes に `context: bounded` を明記する (#352)。
+
 ### 修正
 
 - mission audit が owner による明示的な凍結・意図的 close・replacement issue への切替を示す halt reason を非 actionable の `intentional-freeze-switch` として分類するようにした。raw halt count は保持しつつ、運用 state debt 監査での P1 `halted-runs` false positive を減らす (#347)。
