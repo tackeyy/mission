@@ -2,11 +2,11 @@
 
 portfolio-v4 (2026-08-02) で Standard 3 run すべて API 時間 ≒ wall 時間 —
 reviewer は直列実行されていた。guidance 文言 (#282) だけでは実行様式を変えられ
-なかったため、(1) windows 未申告への WARN、(2) 観測結果の state 永続化、
+なかったため、(1) windows 未申告への gate、(2) 観測結果の state 永続化、
 (3) stats 集計、(4) next details のフラグ化で検証可能性を上げる。
 
 Contract under test:
-1. aggregate-reviews: reviewer >= 2 で windows 未申告 → WARN (#338)、exit 0
+1. aggregate-reviews: reviewer >= 2 で windows 未申告 → exit 2 (#350)
 2. 観測結果 (true/false/unknown) を state の last_parallel_execution へ永続化
 3. stats に parallel_review_counts (true/false/unknown) を集計
 4. next (phase=reviewing) の details に parallel_spawn_required: true
@@ -26,6 +26,7 @@ def _make_state(tmp_path, *, phase="reviewing", iteration=1):
         "mission": "m", "mission_id": "pl1", "pid": 12345,
         "loop_active": True, "passes": False, "halt_reason": "",
         "phase": phase, "iteration": iteration, "reviewer_count": 2,
+        "score_history": [],
         "project_root": str(tmp_path),
     }
     (sessions / f"{TEST_SID}.json").write_text(json.dumps(d))
@@ -56,14 +57,27 @@ def _aggregate(run_cli, tmp_path, *windows):
     return run_cli(*args, cwd=tmp_path, env_extra={"MISSION_SESSION_ID": TEST_SID})
 
 
-# ===== 1. windows 未申告 WARN =====
+# ===== 1. windows 報告 gate =====
 
-def test_unreported_windows_warns(run_cli, tmp_path):
+def test_unreported_windows_rejects_with_all_missing_perspectives(run_cli, tmp_path):
     _make_state(tmp_path)
     result = _aggregate(run_cli, tmp_path)
-    assert result.returncode == 0
-    assert "#338" in result.stderr
-    assert "--reviewer-window" in result.stderr
+    assert result.returncode == 2
+    assert "A" in result.stderr
+    assert "B" in result.stderr
+    assert "--reviewer-window <perspective>=<start>..<end>" in result.stderr
+    assert "#350: 並列実行の検証可能性のため必須" in result.stderr
+
+
+def test_partially_reported_windows_rejects_with_only_missing_perspective(run_cli, tmp_path):
+    _make_state(tmp_path)
+    result = _aggregate(
+        run_cli, tmp_path,
+        "A=2026-08-02T10:00:00Z..2026-08-02T10:05:00Z",
+    )
+    assert result.returncode == 2
+    assert "不足 perspective: B" in result.stderr
+    assert "不足 perspective: A" not in result.stderr
 
 
 def test_reported_windows_no_338_warn(run_cli, tmp_path):
@@ -105,11 +119,29 @@ def test_serial_windows_persist_false(run_cli, tmp_path):
     assert _read_state(sf)["last_parallel_execution"] is False
 
 
-def test_unreported_windows_persist_unknown(run_cli, tmp_path):
+def test_single_reviewer_without_window_is_allowed(run_cli, tmp_path):
     sf = _make_state(tmp_path)
-    result = _aggregate(run_cli, tmp_path)
+    review = _write_review(tmp_path / "r1.json", "A")
+    result = run_cli(
+        "aggregate-reviews", "--iteration", "1",
+        "--input", str(review), "--out", str(tmp_path / "out.json"), "--json",
+        cwd=tmp_path, env_extra={"MISSION_SESSION_ID": TEST_SID},
+    )
     assert result.returncode == 0
     assert _read_state(sf)["last_parallel_execution"] == "unknown"
+
+
+def test_review_finalize_rejects_missing_windows_without_pushing_score(run_cli, tmp_path):
+    sf = _make_state(tmp_path)
+    r1 = _write_review(tmp_path / "r1.json", "A")
+    r2 = _write_review(tmp_path / "r2.json", "B")
+    result = run_cli(
+        "review-finalize", "--iteration", "1",
+        "--input", str(r1), "--input", str(r2),
+        cwd=tmp_path, env_extra={"MISSION_SESSION_ID": TEST_SID},
+    )
+    assert result.returncode == 2
+    assert _read_state(sf)["score_history"] == []
 
 
 # ===== 3. stats 集計 =====

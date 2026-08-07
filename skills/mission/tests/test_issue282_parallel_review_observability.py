@@ -90,7 +90,7 @@ def test_disjoint_windows_warn_but_exit_zero_and_keep_gates(state_dir, run_cli, 
     assert payload["open_high"] == 0
 
 
-def test_no_windows_is_unknown_and_backward_compatible(state_dir, run_cli, tmp_path):
+def test_no_windows_is_rejected_for_multiple_reviewers(state_dir, run_cli, tmp_path):
     a, b = _two_reviews(tmp_path)
     out = tmp_path / "scoring.json"
 
@@ -99,15 +99,11 @@ def test_no_windows_is_unknown_and_backward_compatible(state_dir, run_cli, tmp_p
         "--out", str(out), "--json", cwd=state_dir.parent,
     )
 
-    assert r.returncode == 0, r.stderr
-    result = json.loads(r.stdout)
-    assert result["parallel_execution"] == "unknown"
-    evidence = _load(state_dir.parent / result["findings_evidence_path"])
-    assert evidence["parallel_execution"] == "unknown"
-    assert evidence["reviewer_windows"] == []
+    assert r.returncode == 2
+    assert "不足 perspective: A, B" in r.stderr
 
 
-def test_single_window_is_unknown(state_dir, run_cli, tmp_path):
+def test_single_window_is_rejected_for_multiple_reviewers(state_dir, run_cli, tmp_path):
     a, b = _two_reviews(tmp_path)
     out = tmp_path / "scoring.json"
 
@@ -118,8 +114,8 @@ def test_single_window_is_unknown(state_dir, run_cli, tmp_path):
         "--json", cwd=state_dir.parent,
     )
 
-    assert r.returncode == 0, r.stderr
-    assert json.loads(r.stdout)["parallel_execution"] == "unknown"
+    assert r.returncode == 2
+    assert "不足 perspective: B" in r.stderr
 
 
 def test_malformed_window_rejected(state_dir, run_cli, tmp_path):

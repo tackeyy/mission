@@ -52,6 +52,8 @@ def _run_aggregate(run_cli, tmp_path, iteration):
         "aggregate-reviews", "--iteration", str(iteration),
         "--input", str(r1), "--input", str(r2),
         "--out", str(tmp_path / "out.json"), "--json",
+        "--reviewer-window", "A=2026-08-02T10:00:00Z..2026-08-02T10:05:00Z",
+        "--reviewer-window", "B=2026-08-02T10:00:30Z..2026-08-02T10:04:00Z",
         cwd=tmp_path, env_extra={"MISSION_SESSION_ID": TEST_SID},
     )
 

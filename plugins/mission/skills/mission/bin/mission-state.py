@@ -39,6 +39,7 @@ import os
 import re
 import secrets
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -4943,6 +4944,65 @@ def _happy_path_sequence(phase: str, reviewer_count: int, *, plan_mode: str = "s
     return steps[start:]
 
 
+def _expected_context_mode(data: dict, iteration: int) -> str:
+    """#352: mirror the #241 bounded-context condition without changing it."""
+    return (
+        "bounded"
+        if iteration >= 2 and data.get("critic_has_new_scope") is False
+        else "full"
+    )
+
+
+def _context_manifest_generated(data: dict, iteration: int) -> bool:
+    """Return whether the recorded manifest is complete and still verifiable."""
+    if type(iteration) is not int or iteration < 1:
+        return False
+    manifests = data.get("context_manifests")
+    record = manifests.get(str(iteration)) if isinstance(manifests, dict) else None
+    if not isinstance(record, dict):
+        return False
+    raw_path = record.get("path")
+    digest = record.get("digest")
+    generated_at = record.get("generated_at")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return False
+    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        return False
+    parsed_generated_at = (
+        parse_iso_datetime(generated_at) if isinstance(generated_at, str) else None
+    )
+    if (
+        parsed_generated_at is None
+        or "T" not in generated_at
+        or parsed_generated_at.tzinfo is None
+        or parsed_generated_at.utcoffset() is None
+    ):
+        return False
+
+    try:
+        manifest_path = Path(raw_path)
+        if not manifest_path.is_absolute():
+            project_root = data.get("project_root")
+            if not isinstance(project_root, str) or not project_root:
+                return False
+            manifest_path = Path(project_root) / manifest_path
+        raw = manifest_path.read_bytes()
+        payload = json.loads(raw)
+    except (OSError, UnicodeError, ValueError, TypeError, RuntimeError):
+        return False
+    if hashlib.sha256(raw).hexdigest() != digest.removeprefix("sha256:"):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    payload_iteration = payload.get("iteration")
+    return (
+        payload.get("schema") == "mission-context-manifest/1"
+        and type(payload_iteration) is int
+        and payload_iteration >= 1
+        and payload_iteration == iteration
+    )
+
+
 def _derive_next_action(data: dict) -> dict:
     """ADR-002 Stage 3 (G-3): state から次の 1 手を決定論的に導出する。
 
@@ -5085,8 +5145,7 @@ def _derive_next_action(data: dict) -> dict:
                 "details": {"iteration": iteration},
             }
         # #241: bounded context — iteration >= 2 かつ新規 scope なしなら bounded mode
-        use_bounded = iteration >= 2 and data.get("critic_has_new_scope") is False
-        context_mode = "bounded" if use_bounded else "full"
+        context_mode = _expected_context_mode(data, iteration)
         return {
             "next_action": "run-reviewers",
             "summary": f"iteration {iteration}: mission-reviewer を {effective_reviewer_count} 名、単一メッセージで並列起動する (直列起動は規律違反。直列は Standard で約 2-3 分の無駄を実測 #338)",
@@ -6283,6 +6342,141 @@ def _consensus_score(max_delta: float) -> float:
     return 1.0
 
 
+_ARTIFACT_HEADING_RE = re.compile(r"^ {0,3}(#{1,3})(?:[ \t]+(.*?))?[ \t]*$")
+_ARTIFACT_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+_ARTIFACT_STUB_RE = re.compile(
+    r"(?:"
+    r"recorded below(?:\s+once\s+.+\s+completes)?|"
+    r"once\s+.+\s+completes|"
+    r"will be (?:recorded|populated|filled)|"
+    r"to be (?:recorded|determined)|"
+    r"TBD|"
+    r"後で記録|"
+    r"完了後に記録|"
+    r"review-finalize\s*(?:後|完了後)(?:に記録)?"
+    r")[.!。]?[ \t]*",
+    re.IGNORECASE,
+)
+_ARTIFACT_LINT_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _read_regular_artifact_utf8(path: Path) -> str:
+    """Read a bounded regular file from one descriptor without blocking on FIFOs."""
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise OSError(f"artifact path is not a regular file: {path}")
+        chunks = []
+        remaining = _ARTIFACT_LINT_MAX_BYTES + 1
+        while remaining:
+            chunk = os.read(fd, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        if len(payload) > _ARTIFACT_LINT_MAX_BYTES:
+            raise OSError(
+                "artifact exceeds lint size limit "
+                f"({_ARTIFACT_LINT_MAX_BYTES} bytes): {path}"
+            )
+        return payload.decode("utf-8")
+    finally:
+        os.close(fd)
+
+
+def lint_artifact_completeness(artifact_text: str) -> list[dict]:
+    """Detect empty H1-H3 sections and forward-reference-only stubs."""
+    sections: list[tuple[str, list[str]]] = []
+    current: tuple[str, list[str]] | None = None
+    fence_char: str | None = None
+    fence_length = 0
+    for line in artifact_text.splitlines():
+        fence_match = _ARTIFACT_FENCE_RE.match(line)
+        if fence_match:
+            marker = fence_match.group(1)
+            suffix = fence_match.group(2)
+            if fence_char is None:
+                # CommonMark: a backtick fence info string containing a backtick
+                # is not a valid opener. Tilde-fence info has no such restriction.
+                if marker[0] != "`" or "`" not in suffix:
+                    fence_char = marker[0]
+                    fence_length = len(marker)
+            elif (
+                marker[0] == fence_char
+                and len(marker) >= fence_length
+                and not suffix.strip()
+            ):
+                fence_char = None
+                fence_length = 0
+        heading_match = None if fence_char is not None else _ARTIFACT_HEADING_RE.match(line)
+        if heading_match:
+            raw_heading = (heading_match.group(2) or "").strip()
+            # An optional ATX closing sequence is recognized only when separated
+            # from the title by whitespace. Thus `Score###` remains literal text.
+            heading = (
+                ""
+                if re.fullmatch(r"#+", raw_heading)
+                else re.sub(r"[ \t]+#+[ \t]*$", "", raw_heading).strip()
+            )
+            current = (heading, [])
+            sections.append(current)
+        elif current is not None:
+            current[1].append(line)
+
+    findings = []
+    for heading, body_lines in sections:
+        content_lines = [line.strip() for line in body_lines if line.strip()]
+        if not content_lines:
+            findings.append({
+                "heading": heading,
+                "kind": "empty-section",
+                "excerpt": "",
+            })
+            continue
+        if all(_ARTIFACT_STUB_RE.fullmatch(line) for line in content_lines):
+            findings.append({
+                "heading": heading,
+                "kind": "stub-forward-reference",
+                "excerpt": "\n".join(content_lines),
+            })
+    return findings
+
+
+def _lint_state_artifact(cwd: Path, data: dict) -> tuple[list[dict], str]:
+    """Lint an explicitly configured top-level artifact_path, or skip it."""
+    artifact_path = str(data.get("artifact_path") or "").strip()
+    if not artifact_path:
+        return [], "skipped"
+    try:
+        path = Path(artifact_path).expanduser()
+        if not path.is_absolute():
+            path = cwd / path
+        path = path.resolve()
+        try:
+            path.relative_to(cwd.resolve())
+        except UnicodeError:
+            raise
+        except ValueError:
+            print(
+                "WARN #351: artifact lint skipped: "
+                f"path outside project root: {artifact_path}",
+                file=sys.stderr,
+            )
+            return [], "skipped"
+        artifact_text = _read_regular_artifact_utf8(path)
+    except (OSError, UnicodeError, ValueError, TypeError, RuntimeError) as exc:
+        print(f"WARN #351: artifact lint skipped: {exc}", file=sys.stderr)
+        return [], "skipped"
+    findings = lint_artifact_completeness(artifact_text)
+    return findings, "findings" if findings else "clean"
+
+
 def cmd_aggregate_reviews(args):
     """Aggregate mission-review/1 reviewer JSON into push-score compatible scoring JSON."""
     cwd = Path.cwd()
@@ -6386,11 +6580,24 @@ def cmd_aggregate_reviews(args):
         if finding.get("severity") == "High"
     )
 
-    # #282: reviewer 並列実行の観測 (ゲート不変・self-report ベース)
+    # #282/#350: reviewer 並列実行の観測。2 名以上では全 reviewer の
+    # self-report を fail-closed で要求し、実行形態そのものは gate しない。
     valid_perspectives = {review["perspective"] for review in reviews}
     reviewer_windows = _parse_reviewer_windows(
         getattr(args, "reviewer_windows", []) or [], valid_perspectives
     )
+    if len(reviews) >= 2:
+        reported_perspectives = {window["perspective"] for window in reviewer_windows}
+        missing_perspectives = sorted(valid_perspectives - reported_perspectives)
+        if missing_perspectives:
+            print(
+                "ERROR: reviewer window の報告が不足しています。"
+                f"不足 perspective: {', '.join(missing_perspectives)}。"
+                "報告書式: --reviewer-window <perspective>=<start>..<end>。"
+                "#350: 並列実行の検証可能性のため必須",
+                file=sys.stderr,
+            )
+            sys.exit(2)
     parallel_execution = _observe_parallel_execution(reviewer_windows)
     reviewer_windows_public = [
         {k: v for k, v in window.items() if not k.startswith("_")}
@@ -6403,18 +6610,21 @@ def cmd_aggregate_reviews(args):
             "この warn は観測のみで集計・gate には影響しません。",
             file=sys.stderr,
         )
-    elif parallel_execution == "unknown" and len(reviews) >= 2:
-        # #338: 未申告だと並列実行を検証できない (portfolio-v4 で直列 3/3 を実測)。
-        print(
-            "WARN: reviewer 実行時間帯が未申告のため並列実行を検証できません (#338)。"
-            "spawn 直前と全返却後の時刻を控え、"
-            "--reviewer-window <perspective>=<start>..<end> を各 reviewer 分渡してください。"
-            "この warn は観測のみで集計・gate には影響しません。",
-            file=sys.stderr,
-        )
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
+        artifact_lint, artifact_lint_status = _lint_state_artifact(cwd, data)
+        if artifact_lint_status == "skipped":
+            data.pop("artifact_lint", None)
+        else:
+            data["artifact_lint"] = artifact_lint
+        data["artifact_lint_status"] = artifact_lint_status
+        for finding in artifact_lint:
+            print(
+                "WARN #351: artifact lint: "
+                f"{finding['kind']} at {finding['heading']}",
+                file=sys.stderr,
+            )
         # #338: 観測結果を state へ永続化し stats で横断集計可能にする (gate 不変)
         data["last_parallel_execution"] = parallel_execution
         prior_metrics = [
@@ -6426,6 +6636,13 @@ def cmd_aggregate_reviews(args):
             for metric in reviewer_output_metrics
         ]
         atomic_write_json(sf, data)
+        context_mode_expected = _expected_context_mode(data, args.iteration)
+        context_manifest_generated = _context_manifest_generated(data, args.iteration)
+        if context_mode_expected == "bounded" and not context_manifest_generated:
+            print(
+                "WARN #352: bounded context expected but no manifest generated",
+                file=sys.stderr,
+            )
         mission8 = (data.get("mission_id") or "unknown")[:8]
         evidence_path = state_dir(cwd) / "archive" / f"iter-{args.iteration}-{mission8}-reviews.json"
         evidence_path.parent.mkdir(parents=True, exist_ok=True)
@@ -6440,6 +6657,10 @@ def cmd_aggregate_reviews(args):
             "open_high": open_high,
             "reviewer_windows": reviewer_windows_public,
             "parallel_execution": parallel_execution,
+            "artifact_lint": artifact_lint,
+            "artifact_lint_status": artifact_lint_status,
+            "context_mode_expected": context_mode_expected,
+            "context_manifest_generated": context_manifest_generated,
             "reviewer_output_metrics": reviewer_output_metrics,
         }
         evidence_path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -6464,6 +6685,8 @@ def cmd_aggregate_reviews(args):
         "items": items,
         "review_agreement": review_agreement,
         "parallel_execution": parallel_execution,
+        "artifact_lint": artifact_lint,
+        "artifact_lint_status": artifact_lint_status,
     }
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -6528,6 +6751,9 @@ def cmd_context_manifest(args):
         sys.exit(1)
     data = json.loads(sf.read_text())
     iteration = args.iteration if args.iteration is not None else data.get("iteration", 1)
+    if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < 1:
+        print("ERROR: --iteration は 1 以上で指定してください", file=sys.stderr)
+        sys.exit(2)
     history = data.get("score_history") or []
     prior_findings = []
     for entry in history:
@@ -6547,7 +6773,26 @@ def cmd_context_manifest(args):
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
-    print(json.dumps({"ok": True, "path": str(out), "findings_count": len(prior_findings)}, ensure_ascii=False))
+    digest = "sha256:" + hashlib.sha256(out.read_bytes()).hexdigest()
+    generated_at = iso_now()
+    with StateLock(lock_file(cwd)):
+        current = json.loads(sf.read_text())
+        context_manifests = current.get("context_manifests")
+        if not isinstance(context_manifests, dict):
+            context_manifests = {}
+        context_manifests[str(iteration)] = {
+            "path": str(out),
+            "digest": digest,
+            "generated_at": generated_at,
+        }
+        current["context_manifests"] = context_manifests
+        atomic_write_json(sf, current)
+    print(json.dumps({
+        "ok": True,
+        "path": str(out),
+        "digest": digest,
+        "findings_count": len(prior_findings),
+    }, ensure_ascii=False))
 
 
 def cmd_push_score(args):
@@ -7868,6 +8113,29 @@ def _phase_duration_totals(states: list[dict]) -> dict:
     return dict(sorted(totals.items()))
 
 
+def _artifact_lint_counts(states: list[dict]) -> dict:
+    counts = {
+        "empty_section": 0,
+        "stub_forward_reference": 0,
+        "clean": 0,
+    }
+    for state in states:
+        lint = state.get("artifact_lint")
+        if not isinstance(lint, list):
+            continue
+        if not lint:
+            counts["clean"] += 1
+            continue
+        for finding in lint:
+            if not isinstance(finding, dict):
+                continue
+            if finding.get("kind") == "empty-section":
+                counts["empty_section"] += 1
+            elif finding.get("kind") == "stub-forward-reference":
+                counts["stub_forward_reference"] += 1
+    return counts
+
+
 def _aggregate(
     states: list[dict], duplicate_state_group_count: int = 0,
     *, observation_now: datetime | None = None,
@@ -7903,6 +8171,12 @@ def _aggregate(
             "by_cli_version": {},
             "by_halt_category": {},
             "parallel_review_counts": {"true": 0, "false": 0, "unknown": 0},
+            "artifact_lint_counts": _artifact_lint_counts([]),
+            "bounded_context_counts": {
+                "expected_bounded": 0,
+                "manifest_generated": 0,
+                "fallback_full": 0,
+            },
             "reviewer_output_stats": _reviewer_output_stats([]),
             "activity_timing": summarize_activity_states([]),
         }
@@ -7933,6 +8207,24 @@ def _aggregate(
             parallel_review_counts["false"] += 1
         elif lpe == "unknown":
             parallel_review_counts["unknown"] += 1
+    bounded_context_counts = {
+        "expected_bounded": 0,
+        "manifest_generated": 0,
+        "fallback_full": 0,
+    }
+    for state in states:
+        iteration = state.get("iteration", 1)
+        expected_bounded = (
+            isinstance(iteration, int)
+            and _expected_context_mode(state, iteration) == "bounded"
+        )
+        generated = _context_manifest_generated(state, iteration)
+        if expected_bounded:
+            bounded_context_counts["expected_bounded"] += 1
+        if generated:
+            bounded_context_counts["manifest_generated"] += 1
+        if expected_bounded and not generated:
+            bounded_context_counts["fallback_full"] += 1
     iterations = [s.get("iteration", 0) for s in states]
     # 改善3b: composite を持つ直近エントリを final とする (末尾の進捗ノート混入に耐える)
     finals = [c for c in (_latest_composite(s.get("score_history", [])) for s in states) if c is not None]
@@ -7976,6 +8268,8 @@ def _aggregate(
         "pass_rate": pass_rate_summary["raw_pass_rate"],
         "forced_pass_count": forced_pass_count,
         "parallel_review_counts": parallel_review_counts,
+        "artifact_lint_counts": _artifact_lint_counts(states),
+        "bounded_context_counts": bounded_context_counts,
         "reviewer_output_stats": _reviewer_output_stats(states),
         "forced_pass_rate": forced_pass_count / pass_count if pass_count else None,
         "ungated_pass_count": ungated_pass_count,
@@ -8531,7 +8825,8 @@ def _build_parser():
                        help="#240: 最低 reviewer 数。不足なら exit 2 (合意偽装防止)")
     p_agg.add_argument("--reviewer-window", action="append", default=[], dest="reviewer_windows",
                        help="#282: reviewer 実行時間帯 '<perspective>=<start>..<end>' (ISO 8601)。"
-                            "複数指定で並列実行の重なりを観測し evidence に記録 (ゲート不変)")
+                            "reviewer 2 名以上では全 perspective 分が必須 (不足は exit 2)。"
+                            "実行時間帯の重なりは evidence に記録 (#350)")
     p_agg.set_defaults(func=cmd_aggregate_reviews)
 
     p_rf = sub.add_parser("review-finalize",
@@ -8544,7 +8839,8 @@ def _build_parser():
     p_rf.add_argument("--min-reviewers", type=int, default=None, dest="min_reviewers",
                       help="#240: 最低 reviewer 数。不足なら exit 2 (score は push されない)")
     p_rf.add_argument("--reviewer-window", action="append", default=[], dest="reviewer_windows",
-                      help="#282: reviewer 実行時間帯 '<perspective>=<start>..<end>' (観測のみ)")
+                      help="#282: reviewer 実行時間帯 '<perspective>=<start>..<end>'。"
+                           "reviewer 2 名以上では全 perspective 分が必須 (不足は exit 2、score は push されない) (#350)")
     p_rf.add_argument("--notes", default=None)
     p_rf.add_argument("--resubmit-reason", default=None, dest="resubmit_reason",
                       help="#122: 同一 iteration の再 push 理由")
