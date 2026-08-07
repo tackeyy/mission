@@ -107,6 +107,23 @@ def test_invalid_project_value_warns_and_fails_safe_inline(run_cli, tmp_path):
     assert "invalid goal_dispatch 'chatgpt'" in verdict["goal_dispatch_fallback_reason"]
 
 
+def test_invalid_utf8_project_config_warns_and_fails_safe_inline(run_cli, tmp_path):
+    path = tmp_path / ".mission" / "routing.yml"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"version: 1\ngoal_dispatch: \xff\n")
+
+    result = run_cli(
+        "init", "typo を直す", "--complexity", "Simple",
+        cwd=tmp_path, env_extra=_isolated_env(tmp_path),
+    )
+
+    assert result.returncode == 0
+    verdict = json.loads(result.stdout)
+    assert verdict["goal_dispatch_effective"] == "inline"
+    assert "routing config unreadable" in result.stderr
+    assert "UnicodeDecodeError" in verdict["goal_dispatch_fallback_reason"]
+
+
 def test_project_config_overrides_user_config(run_cli, tmp_path):
     _write_config(tmp_path, "host-native")
     user_config = tmp_path / "home" / ".config" / "mission" / "routing.yml"
