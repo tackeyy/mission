@@ -225,7 +225,7 @@ session_id は `MISSION_SESSION_ID` 未指定なら `cc-`/`cx-`/`pid-<N>` から
 **assumptions の分離 (H3, 2026-06-10)**: multi-session init は `assumptions_path` を `.mission-state/sessions/<session_id>-assumptions.md` に自動設定する。並走セッションが `.mission-state/assumptions.md` を共有して相互上書きする事故 (2026-06-10 workspace で実害確認) を防ぐため、orchestrator は **必ず state.json の `assumptions_path` を読んでそのパスに書く** こと (固定パス直書き禁止)。
 
 - Stop hook (`mission-stop-guard.sh`) は `sessions/*.json` を自動的にイテレートし、session ID で自 state を選ぶ。PID は lease のない legacy state の診断・fallback に限る。
-- `cleanup-stale` は lease 付き state では「lease 期限切れ、かつ期限後の activity heartbeat なし」を一次条件にする。lease のない legacy state だけが従来の PID 判定を使う。
+- `cleanup-stale` は lease 付き state では「lease 期限切れ、かつ期限後の activity heartbeat なし」を一次条件にする。`--execute` と Stop hook の auto-halt は StateLock 内で同条件を再検証する janitor CAS を共有し、renew/takeover 済みなら halt を拒否する。janitor は state の token を通常 writer として再利用しない。lease のない legacy state だけが従来の PID 判定を使う。
 
 ### Phase C: 管理コマンド
 

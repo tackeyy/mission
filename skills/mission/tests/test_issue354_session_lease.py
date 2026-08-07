@@ -295,6 +295,58 @@ def test_cleanup_stale_skips_expired_lease_with_newer_activity_heartbeat(tmp_pat
     assert output["skipped"][0]["reason"] == "lease-expired-activity-heartbeat-present"
 
 
+@pytest.mark.parametrize(
+    ("replacement", "expected_owner", "expected_epoch"),
+    [
+        ({"lease_expires_at": "2026-08-07T12:15:00Z"}, "owner-a", 3),
+        ({
+            "owner_session_id": "owner-b",
+            "lease_id": "lease-b",
+            "fencing_epoch": 4,
+            "lease_expires_at": "2026-08-07T12:15:00Z",
+        }, "owner-b", 4),
+    ],
+)
+def test_cleanup_janitor_rejects_renew_or_takeover_race(
+    tmp_path, monkeypatch, capsys, replacement, expected_owner, expected_epoch,
+):
+    """Observation-to-lock race cannot halt a lease renewed/taken over before CAS."""
+    sessions = tmp_path / ".mission-state" / "sessions"
+    sessions.mkdir(parents=True)
+    path = sessions / "owner-a.json"
+    state = _lease_state(
+        project_root=str(tmp_path),
+        lease_expires_at="2026-08-07T11:59:00Z",
+        last_activity_at="2026-08-07T11:58:00Z",
+        phase="executing",
+        passes=False,
+        halt_reason="",
+        score_history=[],
+    )
+    path.write_text(json.dumps(state))
+    monkeypatch.setenv("MISSION_STATE_NOW", "2026-08-07T12:00:00Z")
+    original_terminalize = MISSION_STATE._terminalize_state_file
+
+    def race_before_lock(*args, **kwargs):
+        current = json.loads(path.read_text())
+        current.update(replacement)
+        path.write_text(json.dumps(current))
+        return original_terminalize(*args, **kwargs)
+
+    monkeypatch.setattr(MISSION_STATE, "_terminalize_state_file", race_before_lock)
+
+    MISSION_STATE.cmd_cleanup_stale(
+        type("Args", (), {"root": str(tmp_path), "execute": True})()
+    )
+
+    output = json.loads(capsys.readouterr().out)
+    current = json.loads(path.read_text())
+    assert output["halted"] == []
+    assert current["loop_active"] is True
+    assert current["owner_session_id"] == expected_owner
+    assert current["fencing_epoch"] == expected_epoch
+
+
 def test_refresh_pid_then_resume_does_not_false_stale(tmp_path, run_cli):
     env = {
         "MISSION_SESSION_ID": "session-a",

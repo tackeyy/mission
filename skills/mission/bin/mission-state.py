@@ -792,6 +792,7 @@ def atomic_write_json(path: Path, data: dict, *, administrative: bool = False) -
     `administrative=True` で opt-out し、活動時刻を汚染しない。duration / stale 判定は
     last_activity_at を updated_at より優先する (updated_at は resolution batch 書き込みで
     上書きされ壁時計が最大 500 倍膨張した実害があるため)。
+
     """
     lease_decision = _enforce_session_lease_for_write(path, data)
     if not administrative and _is_session_state_shape(data):
@@ -7068,7 +7069,15 @@ def _terminalize_state_file(
             )
         latest["updated_at"] = now
         backup_state(sf)
-        atomic_write_json(sf, latest, administrative=True)  # #310: janitor 書き込み
+        if require_expired_lease:
+            # Expiry/no-heartbeat was re-read above while holding this same lock.
+            # Publish the janitor CAS directly: this is not a normal writer and must
+            # neither impersonate the owner token nor expose a generic lease bypass.
+            _atomic_write(
+                sf, lambda f: json.dump(latest, f, indent=2, ensure_ascii=False)
+            )
+        else:
+            atomic_write_json(sf, latest, administrative=True)  # #310: janitor 書き込み
         if sf.parent.name == "sessions":
             _remove_from_aggregate(proj, sf.stem)
         return True

@@ -128,6 +128,19 @@ _mission_halt_session() {
       --reason "$reason" --category stale >/dev/null
   )
 }
+
+_mission_cleanup_expired_lease() {
+  local sf="$1"
+  local root output
+  root=$(jq -r '.project_root // empty' "$sf" 2>/dev/null || echo "")
+  [ -z "$root" ] && root="$CWD"
+  output=$(
+    cd "$root" 2>/dev/null || exit 1
+    python3 "$MISSION_STATE_PY" cleanup-stale --root "$root" --execute
+  ) || return 1
+  printf '%s' "$output" | jq -e --arg target "$sf" \
+    'any(.halted[]?; .path == $target)' >/dev/null 2>&1
+}
 HOOK_SID=""
 if [ -n "${MISSION_SESSION_ID:-}" ]; then
   HOOK_SID="$(_mission_sanitize_sid "${MISSION_SESSION_ID}")"
@@ -198,6 +211,7 @@ if [ -d "$SESSIONS_DIR" ]; then
 
     HAS_ACTIVE=true
     SESSION_FILE_TO_BLOCK="$sf"
+    SESSION_LEASE_PRESENT="$LEASE_PRESENT"
     SESSION_LEASE_UNEXPIRED="$LEASE_UNEXPIRED"
     break
   done
@@ -230,7 +244,20 @@ if [ -d "$SESSIONS_DIR" ]; then
           # 3h (または MISSION_STALE_HALT_SECONDS) 超: state CLI の lock/terminal helper で halt
           STALE_MINS=$(( DIFF / 60 ))
           STALE_HALT_REASON="stale: auto-halted after ${STALE_MINS}m idle"
-          if ! _mission_halt_session "$SESSION_FILE_TO_BLOCK" "$STALE_HALT_REASON"; then
+          if [ "${SESSION_LEASE_PRESENT:-false}" = "true" ]; then
+            if _mission_cleanup_expired_lease "$SESSION_FILE_TO_BLOCK"; then
+              HALT_OK=0
+            else
+              HALT_OK=$?
+            fi
+          else
+            if _mission_halt_session "$SESSION_FILE_TO_BLOCK" "$STALE_HALT_REASON"; then
+              HALT_OK=0
+            else
+              HALT_OK=$?
+            fi
+          fi
+          if [ "$HALT_OK" -ne 0 ]; then
             printf '{"decision":"block","reason":"stale auto-halt の書き込みに失敗。手動で cleanup-stale を実行してください"}
 '
             exit 0

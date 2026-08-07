@@ -160,6 +160,34 @@ def test_hook_does_not_idle_autohalt_unexpired_lease(tmp_path):
     assert state["halt_reason"] == ""
 
 
+def test_hook_autohalts_expired_idle_lease_without_writer_token(tmp_path):
+    """#354: expired idle lease is terminalized by the CAS janitor, not a forged writer."""
+    _write_session(
+        tmp_path,
+        "cc-expired-idle",
+        mission_id="expired-idle-mission",
+        pid=999999,
+        owner_session_id="cc-expired-idle",
+        lease_id="expired-token",
+        fencing_epoch=4,
+        lease_expires_at="2020-01-01T00:15:00Z",
+        updated_at="2020-01-01T00:00:00Z",
+        last_activity_at="2020-01-01T00:00:00Z",
+        phase="executing",
+        phase_started_at="2020-01-01T00:00:00Z",
+    )
+
+    result = _run_hook(tmp_path, {"CLAUDE_CODE_SESSION_ID": "expired-idle"})
+
+    state = json.loads(
+        (tmp_path / ".mission-state" / "sessions" / "cc-expired-idle.json").read_text()
+    )
+    assert "block" not in result.stdout, result.stdout
+    assert state["loop_active"] is False
+    assert state["halt_category"] == "stale"
+    assert "session lease expired" in state["halt_reason"]
+
+
 def test_hook_warns_on_stale_state(tmp_path):
     """F-5: updated_at が1h超〜3h未満の state は block 理由に WARN を前置する.
     (3h 超は Issue #1 により auto-halt に変更されたため、このテストは2時間前のタイムスタンプを使う)
