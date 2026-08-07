@@ -228,6 +228,61 @@ def test_unverifiable_manifest_is_treated_as_missing(
     assert evidence["context_manifest_generated"] is False
 
 
+@pytest.mark.parametrize(
+    "payload_iteration",
+    [0, True, 2.0, -1],
+    ids=["zero", "bool", "float", "negative"],
+)
+def test_aggregate_rejects_noncanonical_manifest_iteration(
+    state_dir, run_cli, tmp_path, payload_iteration,
+):
+    manifest_path = tmp_path / "manifest-invalid-iteration.json"
+    record = _manifest_record(manifest_path, payload_iteration)
+    _update_state(
+        state_dir,
+        iteration=2,
+        phase="reviewing",
+        critic_has_new_scope=False,
+        context_manifests={"2": record},
+    )
+
+    aggregated, _ = _aggregate(run_cli, state_dir, tmp_path, 2)
+
+    assert aggregated.returncode == 0, aggregated.stderr
+    assert "WARN #352: bounded context expected but no manifest generated" in aggregated.stderr
+    result = json.loads(aggregated.stdout)
+    evidence = json.loads(Path(result["findings_evidence_path"]).read_text(encoding="utf-8"))
+    assert evidence["context_manifest_generated"] is False
+
+
+@pytest.mark.parametrize(
+    "generated_at",
+    ["2026-08-07", "2026-08-07T00:00:00"],
+    ids=["date-only", "timezone-naive"],
+)
+def test_aggregate_rejects_manifest_without_timezone_aware_generation_time(
+    state_dir, run_cli, tmp_path, generated_at,
+):
+    manifest_path = tmp_path / "manifest-invalid-time.json"
+    record = _manifest_record(manifest_path, 2)
+    record["generated_at"] = generated_at
+    _update_state(
+        state_dir,
+        iteration=2,
+        phase="reviewing",
+        critic_has_new_scope=False,
+        context_manifests={"2": record},
+    )
+
+    aggregated, _ = _aggregate(run_cli, state_dir, tmp_path, 2)
+
+    assert aggregated.returncode == 0, aggregated.stderr
+    assert "WARN #352: bounded context expected but no manifest generated" in aggregated.stderr
+    result = json.loads(aggregated.stdout)
+    evidence = json.loads(Path(result["findings_evidence_path"]).read_text(encoding="utf-8"))
+    assert evidence["context_manifest_generated"] is False
+
+
 def test_iteration_one_records_full_expectation_without_warning(
     state_dir, run_cli, tmp_path,
 ):
@@ -288,6 +343,39 @@ def test_stats_json_counts_bounded_generation_and_full_fallback(run_cli, tmp_pat
         "expected_bounded": 3,
         "manifest_generated": 1,
         "fallback_full": 2,
+    }
+
+
+def test_stats_rejects_noncanonical_expected_and_payload_iterations(run_cli, tmp_path):
+    for index, iteration in enumerate((0, True, 2.0, -1)):
+        project = tmp_path / f"invalid-{index}"
+        session_dir = project / ".mission-state" / "sessions"
+        session_dir.mkdir(parents=True)
+        record = _manifest_record(project / "manifest.json", iteration)
+        state = {
+            "mission": f"invalid iteration {iteration!r}",
+            "mission_id": f"mission-invalid-{index}",
+            "session_id": f"session-invalid-{index}",
+            "project_root": str(project),
+            "loop_active": True,
+            "passes": False,
+            "halt_reason": "",
+            "iteration": iteration,
+            "score_history": [],
+            "critic_has_new_scope": False,
+            "context_manifests": {str(iteration): record},
+        }
+        (session_dir / f"invalid-{index}.json").write_text(
+            json.dumps(state, ensure_ascii=False), encoding="utf-8"
+        )
+
+    result = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["bounded_context_counts"] == {
+        "expected_bounded": 0,
+        "manifest_generated": 0,
+        "fallback_full": 0,
     }
 
 

@@ -4530,6 +4530,8 @@ def _expected_context_mode(data: dict, iteration: int) -> str:
 
 def _context_manifest_generated(data: dict, iteration: int) -> bool:
     """Return whether the recorded manifest is complete and still verifiable."""
+    if type(iteration) is not int or iteration < 1:
+        return False
     manifests = data.get("context_manifests")
     record = manifests.get(str(iteration)) if isinstance(manifests, dict) else None
     if not isinstance(record, dict):
@@ -4541,7 +4543,15 @@ def _context_manifest_generated(data: dict, iteration: int) -> bool:
         return False
     if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
         return False
-    if not isinstance(generated_at, str) or parse_iso_datetime(generated_at) is None:
+    parsed_generated_at = (
+        parse_iso_datetime(generated_at) if isinstance(generated_at, str) else None
+    )
+    if (
+        parsed_generated_at is None
+        or "T" not in generated_at
+        or parsed_generated_at.tzinfo is None
+        or parsed_generated_at.utcoffset() is None
+    ):
         return False
 
     manifest_path = Path(raw_path)
@@ -4557,10 +4567,14 @@ def _context_manifest_generated(data: dict, iteration: int) -> bool:
         return False
     if hashlib.sha256(raw).hexdigest() != digest.removeprefix("sha256:"):
         return False
+    if not isinstance(payload, dict):
+        return False
+    payload_iteration = payload.get("iteration")
     return (
-        isinstance(payload, dict)
-        and payload.get("schema") == "mission-context-manifest/1"
-        and payload.get("iteration") == iteration
+        payload.get("schema") == "mission-context-manifest/1"
+        and type(payload_iteration) is int
+        and payload_iteration >= 1
+        and payload_iteration == iteration
     )
 
 
