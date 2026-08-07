@@ -750,6 +750,37 @@ Primary data: `results/2026-08-02-portfolio-v5-speed.jsonl` /
 `results/2026-08-02-portfolio-v5-speed-summary.json` /
 `artifacts/2026-08-02-portfolio-v5-speed/`
 
+### portfolio-v6-repeats3 (repeats=3 re-measurement attempt, 2026-08-07) — partially invalidated by spend limit
+
+Commit `5ac06b3`. Same 5 tasks as v5-speed (3 Standard + 2 Complex) x 2 arms x
+repeats=3 = 30 records. **The org's monthly API spend limit (HTTP 429) killed 12
+records instantly** (elapsed 0.04-0.08 min), 3 mission records were blocked at the
+`--max-budget-usd 6.0` cap, and 1 record failed the validator. The summary's arm
+aggregates (e.g. goal completion 0.53) include 429 contamination and **must not be
+used for arm comparison**. Runner-side fixes are filed as #357 (classify 429 as
+blocked-external + auto-stop) and #358 (per-arm budget caps).
+
+Salvageable observations from the 6 mission records that completed before the limit:
+
+| task | v6 (iter) | v5-speed (iter) | reading |
+|---|---|---|---|
+| std-contract | 6.29 min (1) | 18.27 min (2) | **confirms v5's 18.27 was an iter-2 outlier**; at iter=1 it is faster than v4 (9.27) |
+| std-metrics | 6.55 min (1) | 6.02 min (1) | reproduced (low variance) |
+| std-policy | 5.08 min (1) | 4.84 min (1) | reproduced (low variance) |
+| cx-ledger | 13.62 min (1, full) | 14.38 min (1, full) | **full-tier loop cost is reproducible (13.6-14.4 min)** |
+
+- Zero iter=2 among the 6 comparable mission records; marker 1.0 held on every
+  completed record.
+- Mission full-profile per-record cost reached $5-6 (v5 mean $3.07 -> v6 $4.71);
+  the $6 cap censored 3 records. Budget calibration is #358.
+- The repeats=3 variance determination will be re-run after the spend limit resets,
+  on a runner with #357/#358 applied.
+
+Primary data: `results/2026-08-07-portfolio-v6-repeats3.jsonl` /
+`results/2026-08-07-portfolio-v6-repeats3-summary.json` /
+`artifacts/2026-08-07-portfolio-v6-repeats3/`
+
+
 ## Discriminating cohort clean re-run (discriminating-v2) — correcting the v1 findings
 
 Status: executed 2026-07-23 JST under clean permission conditions (the #268
