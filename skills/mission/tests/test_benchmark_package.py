@@ -23,6 +23,105 @@ def _load_paired_runner():
     return module
 
 
+def test_arm_specific_budget_flags_override_common_budget_in_child_command():
+    runner = _load_official_goal_runner()
+
+    goal_command = runner.build_child_command(
+        "claude_code_goal_command",
+        "prompt",
+        max_budget_usd=4.0,
+        max_budget_usd_goal=3.0,
+        max_budget_usd_mission=10.0,
+    )
+    mission_command = runner.build_child_command(
+        "mission",
+        "prompt",
+        max_budget_usd=4.0,
+        max_budget_usd_goal=3.0,
+        max_budget_usd_mission=10.0,
+    )
+
+    assert goal_command[goal_command.index("--max-budget-usd") + 1] == "3.0"
+    assert mission_command[mission_command.index("--max-budget-usd") + 1] == "10.0"
+
+
+def test_budget_fallback_chain_is_arm_specific_then_common_then_two_dollars():
+    runner = _load_official_goal_runner()
+
+    assert runner.resolve_max_budget_usd(
+        "mission",
+        max_budget_usd=6.0,
+        max_budget_usd_mission=8.0,
+    ) == 8.0
+    assert runner.resolve_max_budget_usd("mission", max_budget_usd=6.0) == 6.0
+    assert runner.resolve_max_budget_usd("mission") == 2.0
+
+
+def test_default_child_budget_preserves_two_dollar_legacy_behavior():
+    runner = _load_official_goal_runner()
+
+    command = runner.build_child_command("claude_code_goal_command", "prompt")
+
+    assert command[command.index("--max-budget-usd") + 1] == "2.0"
+
+
+def test_blocked_burn_rate_is_recorded_only_for_valid_blocked_measurements():
+    runner = _load_official_goal_runner()
+
+    assert runner.calculate_burn_rate_usd_per_min("blocked", 6.0, 3.0) == 2.0
+    assert runner.calculate_burn_rate_usd_per_min("completed", 6.0, 3.0) is None
+    assert runner.calculate_burn_rate_usd_per_min("blocked", 6.0, 0.0) is None
+
+
+def test_summary_counts_budget_blocked_records_per_arm():
+    runner = _load_official_goal_runner()
+
+    def record(arm, failure_kind):
+        return {
+            "arm": arm,
+            "run_status": "blocked" if failure_kind else "completed",
+            "failure_kind": failure_kind,
+            "comparable_attempt": failure_kind is None,
+            "completion": failure_kind is None,
+            "validator_pass": failure_kind is None,
+            "human_quality_score": 1.0,
+            "intervention_count": 0,
+            "evidence_completeness": 1.0,
+            "elapsed_minutes": 1.0,
+            "quality_marker_score": None,
+            "total_cost_usd": 1.0,
+        }
+
+    summary = runner.summarize(
+        records=[
+            record("claude_code_goal_command", None),
+            record("mission", "max_budget_usd"),
+        ],
+        tasks=[{"id": "fixture-task"}],
+        run_id="budget-fixture",
+        starting_commit="abcdef0",
+        tasks_path=BENCHMARK_DIR / "tasks.complex.json",
+    )
+
+    assert summary["arms"]["claude_code_goal_command"]["budget_blocked_records"] == 0
+    assert summary["arms"]["mission"]["budget_blocked_records"] == 1
+
+
+def test_discriminating_runbooks_document_arm_budgets_with_measured_evidence():
+    runbooks = [
+        (BENCHMARK_DIR / "discriminating-cohort-runbook.md").read_text(encoding="utf-8"),
+        (BENCHMARK_DIR / "discriminating-cohort-runbook.ja.md").read_text(encoding="utf-8"),
+    ]
+
+    for runbook in runbooks:
+        assert "--max-budget-usd-goal 3" in runbook
+        assert "--max-budget-usd-mission 10" in runbook
+        assert "2026-08-07-portfolio-v6-repeats3" in runbook
+        assert "portfolio-std-contract" in runbook
+        assert "2026-08-02-portfolio-v5-speed" in runbook
+        assert "portfolio-std-contract-mission" in runbook
+
+
 def test_mission_vs_goal_pilot_has_exactly_ten_tasks():
     data = json.loads((BENCHMARK_DIR / "tasks.json").read_text(encoding="utf-8"))
     complex_data = json.loads((BENCHMARK_DIR / "tasks.complex.json").read_text(encoding="utf-8"))
@@ -89,6 +188,8 @@ def test_mission_vs_goal_result_schema_matches_declared_arms():
     assert "timeout" in schema["properties"]["blocked_reason"]["enum"]
     assert "max_budget_usd" in schema["properties"]["failure_kind"]["enum"]
     assert schema["properties"]["comparable_attempt"]["type"] == "boolean"
+    assert schema["properties"]["max_budget_usd_effective"]["minimum"] == 0
+    assert schema["properties"]["burn_rate_usd_per_min"]["minimum"] == 0
     # F-1: model_id is required and recorded verbatim; arm_order supports counterbalancing.
     assert "model_id" in schema["required"]
     assert schema["properties"]["model_id"]["type"] == "string"
@@ -593,6 +694,8 @@ def test_mission_vs_goal_protocol_controls_review_bias():
     assert "quality_marker_score" in official_runner
     assert '"--task-ids"' in official_runner
     assert '"--stop-on-blocked"' in official_runner
+    assert '"--max-budget-usd-goal"' in official_runner
+    assert '"--max-budget-usd-mission"' in official_runner
     assert '"run_status": evaluation["run_status"]' in official_runner
     task_data = json.loads((BENCHMARK_DIR / "tasks.complex.json").read_text(encoding="utf-8"))
     selected = runner_module.select_tasks(
