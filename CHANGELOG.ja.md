@@ -11,6 +11,8 @@
 
 ### 修正
 
+- session ownership の管理元を PID から既定 15 分の fenced lease CAS (`owner_session_id`、random `lease_id`、単調増加 `fencing_epoch`、`lease_expires_at`) へ移した。mutating command は renew し、read-only command は renew しない。期限内 foreign writer と stale token は exit 2、期限切れ takeover は epoch を増加して `lease_history` を追記し、`resume` が takeover を実行する。lease のない legacy state は拒否せず epoch 1 を取得する。`cleanup-stale` は lease 付き state で「期限切れ、かつ期限後の activity heartbeat なし」を優先し、legacy state は従来の PID 規則を維持する (#354)。
+
 - mission audit が owner による明示的な凍結・意図的 close・replacement issue への切替を示す halt reason を非 actionable の `intentional-freeze-switch` として分類するようにした。raw halt count は保持しつつ、運用 state debt 監査での P1 `halted-runs` false positive を減らす (#347)。
 
 ## [2.2.0] - 2026-08-02

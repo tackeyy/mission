@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Session ownership now uses a 15-minute fenced lease CAS (`owner_session_id`, random `lease_id`, monotonic `fencing_epoch`, and `lease_expires_at`) instead of PID as the source of truth. Mutating commands renew the lease; read-only commands do not. Unexpired foreign writers and stale tokens exit 2, expired takeover increments the epoch and appends `lease_history`, `resume` performs the takeover, and lease-free legacy states acquire epoch 1 without rejection. `cleanup-stale` now prioritizes expired lease plus missing post-expiry activity heartbeat, while legacy states retain the prior PID rules (#354).
+
 - Mission audit now classifies explicit owner freeze / intentional close / replacement-switch halt reasons as non-actionable `intentional-freeze-switch` while preserving raw halt counts, reducing false-positive P1 `halted-runs` in operational state-debt audits (#347).
 
 ## [2.2.0] - 2026-08-02
