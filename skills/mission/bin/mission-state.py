@@ -501,7 +501,7 @@ def _read_routing_config(path: Path, source: str) -> dict | None:
     values: dict[str, str] = {}
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         reason = f"routing config unreadable at {source}: {exc.__class__.__name__}"
         print(f"WARN #355: {reason}; using inline", file=sys.stderr)
         return {"mode": "inline", "source": source, "fallback_reason": reason}
