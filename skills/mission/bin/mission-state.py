@@ -537,6 +537,10 @@ def _read_routing_config(path: Path, source: str, allowed_root: Path | None = No
             reason = f"unknown routing config key '{key}' at {source}"
             print(f"WARN #355: {reason}; using inline", file=sys.stderr)
             return {"mode": "inline", "source": source, "fallback_reason": reason}
+        if key in values:
+            reason = f"duplicate routing config key '{key}' at {source}"
+            print(f"WARN #355: {reason}; using inline", file=sys.stderr)
+            return {"mode": "inline", "source": source, "fallback_reason": reason}
         values[key] = value
     if values.get("version") != "1":
         reason = f"unsupported routing config version '{values.get('version')}' at {source}"
