@@ -553,7 +553,10 @@ def load_routing_config() -> dict:
 
 
 def _resolve_goal_dispatch(mission: str, cli_mode: str | None, cwd: Path) -> dict:
-    explicit = re.search(r"(?i)(?:^|[;\s])goal[_ -]dispatch\s*[:=]\s*([a-z][a-z0-9-]*)", mission or "")
+    explicit = re.match(
+        r"(?i)\A[ \t]*goal[_ -]dispatch\s*[:=]\s*([a-z][a-z0-9-]*)[ \t]*(?:;|\r?\n|\Z)",
+        mission or "",
+    )
     if explicit:
         mode = explicit.group(1).lower()
         if mode not in GOAL_DISPATCH_MODES:
