@@ -11,6 +11,8 @@
 
 ### 修正
 
+- state に `artifact_path` がある場合、`aggregate-reviews` が WARN-only の構造 lint を実行するようにした。H1〜H3 の空節と英日 forward-reference のみの stub を検出し、reviewer finding・score・exit status は変更しない。結果は review aggregate evidence と state に記録し、`stats --json` が empty-section / stub-forward-reference / clean の件数を返す。将来の gate 化判断前に発生率を観測できる (#351)。
+
 - mission audit が owner による明示的な凍結・意図的 close・replacement issue への切替を示す halt reason を非 actionable の `intentional-freeze-switch` として分類するようにした。raw halt count は保持しつつ、運用 state debt 監査での P1 `halted-runs` false positive を減らす (#347)。
 
 ## [2.2.0] - 2026-08-02

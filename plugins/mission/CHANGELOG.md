@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `aggregate-reviews` now runs a WARN-only structural lint when state declares `artifact_path`, detecting empty H1-H3 sections and English/Japanese forward-reference-only stubs without changing reviewer findings, scores, or exit status. Results are recorded in review aggregate evidence and state, while `stats --json` reports empty-section, stub-forward-reference, and clean counts for measuring incidence before any future gate decision (#351).
+
 - Mission audit now classifies explicit owner freeze / intentional close / replacement-switch halt reasons as non-actionable `intentional-freeze-switch` while preserving raw halt counts, reducing false-positive P1 `halted-runs` in operational state-debt audits (#347).
 
 ## [2.2.0] - 2026-08-02
