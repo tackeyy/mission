@@ -432,14 +432,12 @@ def _default_search_roots() -> list[Path]:
 
 
 def _project_root_of(sf: Path) -> Path:
-    """state ファイルパスからプロジェクトルートを導く (legacy/sessions 両対応)。
-    sessions/<sid>.json は sf.parent.parent が .mission-state になり狂うため .mission-state を基準にする。"""
-    parts = sf.parts
-    if ".mission-state" in parts:
-        i = parts.index(".mission-state")
-        if i > 0:
-            return Path(*parts[:i])
-    return sf.parent.parent
+    """Derive a project root from the state file's nearest valid structure."""
+    if sf.parent.name == "sessions" and sf.parent.parent.name == ".mission-state":
+        return sf.parent.parent.parent
+    if sf.name == "state.json" and sf.parent.name == ".mission-state":
+        return sf.parent.parent
+    raise ValueError(f"unsupported mission state path: {sf}")
 
 
 def _add_to_aggregate(cwd: Path, sid: str) -> None:
