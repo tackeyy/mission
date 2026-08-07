@@ -11,6 +11,8 @@
 
 ### 修正
 
+- reviewer 出力境界を品質 gate にせず観測可能にした (#353)。`aggregate-reviews` は入力ごとの `mission-review/1` JSON byte 数とテンプレ外散文の byte 数・比率を計測し、evidence と session 横断 p50/p90 stats に記録する。暫定閾値 20 KB / 0.7 超過は exit 0 の WARN に留め、score・finding・agreement の集計結果は変更しない。
+
 - mission audit が owner による明示的な凍結・意図的 close・replacement issue への切替を示す halt reason を非 actionable の `intentional-freeze-switch` として分類するようにした。raw halt count は保持しつつ、運用 state debt 監査での P1 `halted-runs` false positive を減らす (#347)。
 
 ## [2.2.0] - 2026-08-02
