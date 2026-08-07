@@ -11,6 +11,8 @@
 
 ### 修正
 
+- `aggregate-reviews` は reviewer が 2 名以上の場合、全 perspective の `--reviewer-window` 報告を必須化し、不足 perspective と報告書式を示して exit 2 とするようにした。`review-finalize` もこの fail-closed gate を継承し、集計失敗後に score を push しない。単一 reviewer は対象外のまま、報告済みの直列実行も従来どおり WARN のみ (#350)。
+
 - mission audit が owner による明示的な凍結・意図的 close・replacement issue への切替を示す halt reason を非 actionable の `intentional-freeze-switch` として分類するようにした。raw halt count は保持しつつ、運用 state debt 監査での P1 `halted-runs` false positive を減らす (#347)。
 
 ## [2.2.0] - 2026-08-02

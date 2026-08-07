@@ -5870,11 +5870,24 @@ def cmd_aggregate_reviews(args):
         if finding.get("severity") == "High"
     )
 
-    # #282: reviewer 並列実行の観測 (ゲート不変・self-report ベース)
+    # #282/#350: reviewer 並列実行の観測。2 名以上では全 reviewer の
+    # self-report を fail-closed で要求し、実行形態そのものは gate しない。
     valid_perspectives = {review["perspective"] for review in reviews}
     reviewer_windows = _parse_reviewer_windows(
         getattr(args, "reviewer_windows", []) or [], valid_perspectives
     )
+    if len(reviews) >= 2:
+        reported_perspectives = {window["perspective"] for window in reviewer_windows}
+        missing_perspectives = sorted(valid_perspectives - reported_perspectives)
+        if missing_perspectives:
+            print(
+                "ERROR: reviewer window の報告が不足しています。"
+                f"不足 perspective: {', '.join(missing_perspectives)}。"
+                "報告書式: --reviewer-window <perspective>=<start>..<end>。"
+                "#350: 並列実行の検証可能性のため必須",
+                file=sys.stderr,
+            )
+            sys.exit(2)
     parallel_execution = _observe_parallel_execution(reviewer_windows)
     reviewer_windows_public = [
         {k: v for k, v in window.items() if not k.startswith("_")}
@@ -5887,19 +5900,10 @@ def cmd_aggregate_reviews(args):
             "この warn は観測のみで集計・gate には影響しません。",
             file=sys.stderr,
         )
-    elif parallel_execution == "unknown" and len(reviews) >= 2:
-        # #338: 未申告だと並列実行を検証できない (portfolio-v4 で直列 3/3 を実測)。
-        print(
-            "WARN: reviewer 実行時間帯が未申告のため並列実行を検証できません (#338)。"
-            "spawn 直前と全返却後の時刻を控え、"
-            "--reviewer-window <perspective>=<start>..<end> を各 reviewer 分渡してください。"
-            "この warn は観測のみで集計・gate には影響しません。",
-            file=sys.stderr,
-        )
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
-        # #338: 観測結果を state へ永続化し stats で横断集計可能にする (gate 不変)
+        # #338: 観測結果を state へ永続化し stats で横断集計可能にする。
         data["last_parallel_execution"] = parallel_execution
         atomic_write_json(sf, data)
         mission8 = (data.get("mission_id") or "unknown")[:8]
@@ -7871,7 +7875,8 @@ def _build_parser():
                        help="#240: 最低 reviewer 数。不足なら exit 2 (合意偽装防止)")
     p_agg.add_argument("--reviewer-window", action="append", default=[], dest="reviewer_windows",
                        help="#282: reviewer 実行時間帯 '<perspective>=<start>..<end>' (ISO 8601)。"
-                            "複数指定で並列実行の重なりを観測し evidence に記録 (ゲート不変)")
+                            "reviewer 2 名以上では全 perspective 分が必須 (不足は exit 2)。"
+                            "実行時間帯の重なりは evidence に記録 (#350)")
     p_agg.set_defaults(func=cmd_aggregate_reviews)
 
     p_rf = sub.add_parser("review-finalize",
@@ -7884,7 +7889,8 @@ def _build_parser():
     p_rf.add_argument("--min-reviewers", type=int, default=None, dest="min_reviewers",
                       help="#240: 最低 reviewer 数。不足なら exit 2 (score は push されない)")
     p_rf.add_argument("--reviewer-window", action="append", default=[], dest="reviewer_windows",
-                      help="#282: reviewer 実行時間帯 '<perspective>=<start>..<end>' (観測のみ)")
+                      help="#282: reviewer 実行時間帯 '<perspective>=<start>..<end>'。"
+                           "reviewer 2 名以上では全 perspective 分が必須 (不足は exit 2、score は push されない) (#350)")
     p_rf.add_argument("--notes", default=None)
     p_rf.add_argument("--resubmit-reason", default=None, dest="resubmit_reason",
                       help="#122: 同一 iteration の再 push 理由")

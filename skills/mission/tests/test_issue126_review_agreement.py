@@ -58,7 +58,10 @@ def test_aggregate_reviews_outputs_four_axis_items_and_independent_agreement(sta
     out = tmp_path / "out.json"
 
     run_cli("aggregate-reviews", "--iteration", "1", "--input", str(a), "--input", str(b),
-            "--out", str(out), cwd=state_dir.parent, check=True)
+            "--out", str(out),
+            "--reviewer-window", "A=2026-08-02T10:00:00Z..2026-08-02T10:05:00Z",
+            "--reviewer-window", "B=2026-08-02T10:00:30Z..2026-08-02T10:04:00Z",
+            cwd=state_dir.parent, check=True)
 
     payload = json.loads(out.read_text())
     assert set(payload["items"]) == {"mission_achievement", "accuracy", "completeness", "usability"}
