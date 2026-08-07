@@ -852,6 +852,31 @@ mission record 単価 $5.25-9.31 で #358 の $10 較正内に収まる。
 一次データ: `results/2026-08-07-portfolio-v8a-std-post-gates.jsonl`
 (-summary.json 併置) / `artifacts/2026-08-07-portfolio-v8a-std-post-gates/`
 
+### portfolio-v8b2 (Complex 再測、2026-08-07) — Issue #371 完結
+
+commit `05d08c5`。上記 v8a (Standard) の続きとして Complex 2 tasks x repeats 3 を
+実施 (12/12 記録、spend limit なし、budget blocked 1)。予算は goal $3 / mission $10。
+
+| task | v7 (適用前) | v8b2 (適用後) | 判定 |
+|---|---|---|---|
+| cx-config (standard tier) | 11.04 / 12.99 | 11.14 / 12.46 / 12.63 | パリティ |
+| cx-ledger (full tier) | 17.41 / 17.58 | 18.93 / 26.24 (+1 budget blocked 15.31 min/$10.12) | 裾拡大 (n 小、要観測) |
+
+観測事実:
+
+1. 並列観測は v8a と同様 unknown ゼロ (#350 gate)。完走 record の成果物に
+   `parallel_execution: true` 明記、false / serial の記載なし
+2. 品質は全完走 record marker 1.0 同点、iter=2 発火ゼロ
+3. cx-ledger full-tier の単価は $8.6-10.1 に上昇し、$10 上限が 1 record を censoring
+   (burn 0.66 USD/min)。full-tier の上限較正は #358 runbook のフォローアップ対象
+4. **Issue #371 の総合判定**: Standard 中央値 -20% (v8a) + Complex パリティで、
+   #350-#354 の gate 化は速度面で無害〜改善。cx-ledger の裾 (26.24 min) の要因分解は
+   #352/#353 の stats 蓄積後に #372 と合わせて判断する
+
+一次データ: `results/2026-08-07-portfolio-v8b2-cx-post-gates.jsonl` (-summary.json 併置) /
+`artifacts/2026-08-07-portfolio-v8b2-cx-post-gates/`
+
+
 
 
 ## Discriminating cohort clean re-run (discriminating-v2) — v1 findings の訂正
