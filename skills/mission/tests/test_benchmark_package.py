@@ -174,6 +174,22 @@ def test_completed_negated_budget_diagnosis_is_not_blocked():
     }
 
 
+def test_detect_max_budget_accepts_structured_and_definitive_error_evidence():
+    runner = _load_official_goal_runner()
+
+    assert runner.detect_max_budget_limit({"subtype": "error_max_budget_usd"}, "", 0) is True
+    assert runner.detect_max_budget_limit(
+        {"is_error": True, "result": "max_budget_usd"}, "", 0,
+    ) is True
+    assert runner.detect_max_budget_limit(
+        {"terminal_reason": "max_budget_usd", "result": "max budget"}, "", 0,
+    ) is True
+    assert runner.detect_max_budget_limit({"result": "max_budget_usd"}, "", 1) is True
+    assert runner.detect_max_budget_limit(
+        {"result": "Maximum budget reached"}, "", 0,
+    ) is True
+
+
 @pytest.mark.parametrize(
     "flag",
     ("--max-budget-usd", "--max-budget-usd-goal", "--max-budget-usd-mission"),
