@@ -4,8 +4,10 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -355,7 +357,7 @@ def test_aggregate_fifo_artifact_skips_without_blocking_and_clears_stale_lint(
     assert persisted["artifact_lint_status"] == "skipped"
 
 
-@pytest.mark.parametrize("stage", ["resolve", "relative_to", "read_text"])
+@pytest.mark.parametrize("stage", ["resolve", "relative_to"])
 @pytest.mark.parametrize("error_type", [OSError, UnicodeError, RuntimeError])
 def test_artifact_path_operations_fail_open_with_warning(
     tmp_path, monkeypatch, capsys, stage, error_type,
@@ -378,6 +380,61 @@ def test_artifact_path_operations_fail_open_with_warning(
     assert findings == []
     assert status == "skipped"
     assert "WARN #351: artifact lint skipped" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("error_type", [OSError, UnicodeError, RuntimeError])
+def test_artifact_open_errors_fail_open_with_warning(
+    tmp_path, monkeypatch, capsys, error_type,
+):
+    artifact = tmp_path / "artifact.md"
+    artifact.write_text("## Score\n")
+
+    def fail_open(path, flags):
+        raise error_type("open")
+
+    monkeypatch.setattr(os, "open", fail_open)
+
+    findings, status = MISSION_STATE._lint_state_artifact(
+        tmp_path, {"artifact_path": str(artifact)}
+    )
+
+    assert findings == []
+    assert status == "skipped"
+    assert "WARN #351: artifact lint skipped" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("special_mode", [stat.S_IFSOCK, stat.S_IFCHR])
+def test_socket_and_device_modes_are_rejected_after_open(
+    tmp_path, monkeypatch, capsys, special_mode,
+):
+    artifact = tmp_path / "artifact-special"
+    artifact.write_text("## Score\n")
+    monkeypatch.setattr(
+        MISSION_STATE.os,
+        "fstat",
+        lambda _fd: SimpleNamespace(st_mode=special_mode),
+    )
+
+    findings, status = MISSION_STATE._lint_state_artifact(
+        tmp_path, {"artifact_path": str(artifact)}
+    )
+
+    assert findings == []
+    assert status == "skipped"
+    assert "not a regular file" in capsys.readouterr().err
+
+
+def test_oversized_regular_artifact_is_bounded_and_skipped(tmp_path, capsys):
+    artifact = tmp_path / "artifact.md"
+    artifact.write_bytes(b"x" * (MISSION_STATE._ARTIFACT_LINT_MAX_BYTES + 1))
+
+    findings, status = MISSION_STATE._lint_state_artifact(
+        tmp_path, {"artifact_path": str(artifact)}
+    )
+
+    assert findings == []
+    assert status == "skipped"
+    assert "exceeds lint size limit" in capsys.readouterr().err
 
 
 def test_stats_counts_lint_findings_and_clean_artifacts(tmp_path, run_cli):

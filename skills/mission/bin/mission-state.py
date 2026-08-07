@@ -38,6 +38,7 @@ import math
 import os
 import re
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -5799,6 +5800,37 @@ _ARTIFACT_STUB_RE = re.compile(
     r")[.!。]?[ \t]*",
     re.IGNORECASE,
 )
+_ARTIFACT_LINT_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _read_regular_artifact_utf8(path: Path) -> str:
+    """Read a bounded regular file from one descriptor without blocking on FIFOs."""
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise OSError(f"artifact path is not a regular file: {path}")
+        chunks = []
+        remaining = _ARTIFACT_LINT_MAX_BYTES + 1
+        while remaining:
+            chunk = os.read(fd, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        if len(payload) > _ARTIFACT_LINT_MAX_BYTES:
+            raise OSError(
+                "artifact exceeds lint size limit "
+                f"({_ARTIFACT_LINT_MAX_BYTES} bytes): {path}"
+            )
+        return payload.decode("utf-8")
+    finally:
+        os.close(fd)
 
 
 def lint_artifact_completeness(artifact_text: str) -> list[dict]:
@@ -5880,7 +5912,7 @@ def _lint_state_artifact(cwd: Path, data: dict) -> tuple[list[dict], str]:
                 file=sys.stderr,
             )
             return [], "skipped"
-        artifact_text = path.read_text(encoding="utf-8")
+        artifact_text = _read_regular_artifact_utf8(path)
     except (OSError, UnicodeError, RuntimeError) as exc:
         print(f"WARN #351: artifact lint skipped: {exc}", file=sys.stderr)
         return [], "skipped"
