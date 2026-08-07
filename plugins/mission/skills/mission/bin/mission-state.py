@@ -4714,6 +4714,65 @@ def _happy_path_sequence(phase: str, reviewer_count: int, *, plan_mode: str = "s
     return steps[start:]
 
 
+def _expected_context_mode(data: dict, iteration: int) -> str:
+    """#352: mirror the #241 bounded-context condition without changing it."""
+    return (
+        "bounded"
+        if iteration >= 2 and data.get("critic_has_new_scope") is False
+        else "full"
+    )
+
+
+def _context_manifest_generated(data: dict, iteration: int) -> bool:
+    """Return whether the recorded manifest is complete and still verifiable."""
+    if type(iteration) is not int or iteration < 1:
+        return False
+    manifests = data.get("context_manifests")
+    record = manifests.get(str(iteration)) if isinstance(manifests, dict) else None
+    if not isinstance(record, dict):
+        return False
+    raw_path = record.get("path")
+    digest = record.get("digest")
+    generated_at = record.get("generated_at")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return False
+    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        return False
+    parsed_generated_at = (
+        parse_iso_datetime(generated_at) if isinstance(generated_at, str) else None
+    )
+    if (
+        parsed_generated_at is None
+        or "T" not in generated_at
+        or parsed_generated_at.tzinfo is None
+        or parsed_generated_at.utcoffset() is None
+    ):
+        return False
+
+    try:
+        manifest_path = Path(raw_path)
+        if not manifest_path.is_absolute():
+            project_root = data.get("project_root")
+            if not isinstance(project_root, str) or not project_root:
+                return False
+            manifest_path = Path(project_root) / manifest_path
+        raw = manifest_path.read_bytes()
+        payload = json.loads(raw)
+    except (OSError, UnicodeError, ValueError, TypeError, RuntimeError):
+        return False
+    if hashlib.sha256(raw).hexdigest() != digest.removeprefix("sha256:"):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    payload_iteration = payload.get("iteration")
+    return (
+        payload.get("schema") == "mission-context-manifest/1"
+        and type(payload_iteration) is int
+        and payload_iteration >= 1
+        and payload_iteration == iteration
+    )
+
+
 def _derive_next_action(data: dict) -> dict:
     """ADR-002 Stage 3 (G-3): state から次の 1 手を決定論的に導出する。
 
@@ -4856,8 +4915,7 @@ def _derive_next_action(data: dict) -> dict:
                 "details": {"iteration": iteration},
             }
         # #241: bounded context — iteration >= 2 かつ新規 scope なしなら bounded mode
-        use_bounded = iteration >= 2 and data.get("critic_has_new_scope") is False
-        context_mode = "bounded" if use_bounded else "full"
+        context_mode = _expected_context_mode(data, iteration)
         return {
             "next_action": "run-reviewers",
             "summary": f"iteration {iteration}: mission-reviewer を {effective_reviewer_count} 名、単一メッセージで並列起動する (直列起動は規律違反。直列は Standard で約 2-3 分の無駄を実測 #338)",
@@ -6197,6 +6255,13 @@ def cmd_aggregate_reviews(args):
             for metric in reviewer_output_metrics
         ]
         atomic_write_json(sf, data)
+        context_mode_expected = _expected_context_mode(data, args.iteration)
+        context_manifest_generated = _context_manifest_generated(data, args.iteration)
+        if context_mode_expected == "bounded" and not context_manifest_generated:
+            print(
+                "WARN #352: bounded context expected but no manifest generated",
+                file=sys.stderr,
+            )
         mission8 = (data.get("mission_id") or "unknown")[:8]
         evidence_path = state_dir(cwd) / "archive" / f"iter-{args.iteration}-{mission8}-reviews.json"
         evidence_path.parent.mkdir(parents=True, exist_ok=True)
@@ -6211,6 +6276,8 @@ def cmd_aggregate_reviews(args):
             "open_high": open_high,
             "reviewer_windows": reviewer_windows_public,
             "parallel_execution": parallel_execution,
+            "context_mode_expected": context_mode_expected,
+            "context_manifest_generated": context_manifest_generated,
             "reviewer_output_metrics": reviewer_output_metrics,
         }
         evidence_path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -6299,6 +6366,9 @@ def cmd_context_manifest(args):
         sys.exit(1)
     data = json.loads(sf.read_text())
     iteration = args.iteration if args.iteration is not None else data.get("iteration", 1)
+    if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < 1:
+        print("ERROR: --iteration は 1 以上で指定してください", file=sys.stderr)
+        sys.exit(2)
     history = data.get("score_history") or []
     prior_findings = []
     for entry in history:
@@ -6318,7 +6388,26 @@ def cmd_context_manifest(args):
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
-    print(json.dumps({"ok": True, "path": str(out), "findings_count": len(prior_findings)}, ensure_ascii=False))
+    digest = "sha256:" + hashlib.sha256(out.read_bytes()).hexdigest()
+    generated_at = iso_now()
+    with StateLock(lock_file(cwd)):
+        current = json.loads(sf.read_text())
+        context_manifests = current.get("context_manifests")
+        if not isinstance(context_manifests, dict):
+            context_manifests = {}
+        context_manifests[str(iteration)] = {
+            "path": str(out),
+            "digest": digest,
+            "generated_at": generated_at,
+        }
+        current["context_manifests"] = context_manifests
+        atomic_write_json(sf, current)
+    print(json.dumps({
+        "ok": True,
+        "path": str(out),
+        "digest": digest,
+        "findings_count": len(prior_findings),
+    }, ensure_ascii=False))
 
 
 def cmd_push_score(args):
@@ -7595,6 +7684,11 @@ def _aggregate(
             "by_cli_version": {},
             "by_halt_category": {},
             "parallel_review_counts": {"true": 0, "false": 0, "unknown": 0},
+            "bounded_context_counts": {
+                "expected_bounded": 0,
+                "manifest_generated": 0,
+                "fallback_full": 0,
+            },
             "reviewer_output_stats": _reviewer_output_stats([]),
             "activity_timing": summarize_activity_states([]),
         }
@@ -7625,6 +7719,24 @@ def _aggregate(
             parallel_review_counts["false"] += 1
         elif lpe == "unknown":
             parallel_review_counts["unknown"] += 1
+    bounded_context_counts = {
+        "expected_bounded": 0,
+        "manifest_generated": 0,
+        "fallback_full": 0,
+    }
+    for state in states:
+        iteration = state.get("iteration", 1)
+        expected_bounded = (
+            isinstance(iteration, int)
+            and _expected_context_mode(state, iteration) == "bounded"
+        )
+        generated = _context_manifest_generated(state, iteration)
+        if expected_bounded:
+            bounded_context_counts["expected_bounded"] += 1
+        if generated:
+            bounded_context_counts["manifest_generated"] += 1
+        if expected_bounded and not generated:
+            bounded_context_counts["fallback_full"] += 1
     iterations = [s.get("iteration", 0) for s in states]
     # 改善3b: composite を持つ直近エントリを final とする (末尾の進捗ノート混入に耐える)
     finals = [c for c in (_latest_composite(s.get("score_history", [])) for s in states) if c is not None]
@@ -7668,6 +7780,7 @@ def _aggregate(
         "pass_rate": pass_rate_summary["raw_pass_rate"],
         "forced_pass_count": forced_pass_count,
         "parallel_review_counts": parallel_review_counts,
+        "bounded_context_counts": bounded_context_counts,
         "reviewer_output_stats": _reviewer_output_stats(states),
         "forced_pass_rate": forced_pass_count / pass_count if pass_count else None,
         "ungated_pass_count": ungated_pass_count,

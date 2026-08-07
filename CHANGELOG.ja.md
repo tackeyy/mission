@@ -11,6 +11,7 @@
 
 ### 追加
 
+- bounded context の発火条件・fallback・review gate を変えず観測可能にした。`context-manifest` は iteration ごとの path・SHA-256 digest・生成時刻を session state へ記録し、`aggregate-reviews` は期待 context mode と manifest 生成有無を evidence archive へ保存、bounded 期待時の未生成を exit 0 の WARN にする。`stats --json` は期待・生成・full fallback 件数を集計し、bounded review の mission-reviewer は notes に `context: bounded` を明記する。aggregate / stats が manifest 観測を有効と数えるには、iteration が bool・float を除く正の整数で、生成時刻が timezone 付き ISO 形式であることを必須とする。embedded NUL 改ざんを含む不正・読取不能 path は未生成扱いにし、aggregate / stats を中断しない (#352)。
 - Simple task の adaptive routing に設定可能な goal dispatch provider を追加した (#355)。portable な `inline` を既定に保ち、mission 内の明示指示、`--goal-dispatch`、project `.mission/routing.yml`、user 設定から `host-native` を選べる。init / set / next verdict は実効 dispatch を記録し、host 不明・設定不正時は WARN して inline へ fail-safe する。routing gate と `--force-mission` の挙動は変更しない。
 
 ### 修正

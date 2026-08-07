@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Bounded-context execution is now observable without changing its trigger, fallback, or review gates: `context-manifest` records each iteration's path, SHA-256 digest, and generation time in session state; `aggregate-reviews` archives expected/effective manifest evidence and emits an exit-0 warning when bounded context was expected but not generated; `stats --json` reports expected, generated, and full-fallback counts; and bounded mission-reviewer output identifies `context: bounded` in its notes. Manifest observations require strict positive-integer iterations (excluding booleans and floats) and a timezone-aware ISO generation timestamp before aggregate or stats count them. Malformed or unreadable paths, including embedded-NUL tampering, are treated as ungenerated without aborting aggregation or stats (#352).
 - Adaptive Simple-task routing now supports a configurable goal dispatch provider (#355): portable `inline` remains the default, while explicit mission guidance, `--goal-dispatch`, project `.mission/routing.yml`, or user configuration can select `host-native`. Init, set, and next verdicts record the effective dispatch; unknown hosts and invalid configuration warn and fail safe to inline without changing routing gates or `--force-mission` behavior.
 
 ### Fixed
