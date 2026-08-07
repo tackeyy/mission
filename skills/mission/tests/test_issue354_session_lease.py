@@ -1,0 +1,270 @@
+"""Issue #354: fenced session lease ownership and stale cleanup."""
+
+import importlib.util
+import json
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import pytest
+
+
+MISSION_STATE_PY = Path(__file__).resolve().parent.parent / "bin" / "mission-state.py"
+SPEC = importlib.util.spec_from_file_location("mission_state_issue354", MISSION_STATE_PY)
+MISSION_STATE = importlib.util.module_from_spec(SPEC)
+assert SPEC.loader is not None
+SPEC.loader.exec_module(MISSION_STATE)
+
+
+def _lease_state(**overrides):
+    state = {
+        "mission_id": "abc",
+        "loop_active": True,
+        "session_id": "owner-a",
+        "owner_session_id": "owner-a",
+        "lease_id": "lease-a",
+        "fencing_epoch": 3,
+        "lease_expires_at": "2026-08-07T12:15:00Z",
+        "updated_at": "2026-08-07T12:00:00Z",
+        "last_activity_at": "2026-08-07T12:00:00Z",
+    }
+    state.update(overrides)
+    return state
+
+
+def test_legacy_state_acquires_epoch_one_lease(monkeypatch):
+    monkeypatch.setenv("MISSION_STATE_NOW", "2026-08-07T12:00:00Z")
+    monkeypatch.setenv("MISSION_LEASE_ID", "new-lease")
+    state = {"mission_id": "abc", "loop_active": True}
+
+    decision = MISSION_STATE.acquire_or_verify_lease(state, "owner-a")
+
+    assert decision.action == "acquired"
+    assert state["fencing_epoch"] == 1
+    assert state["owner_session_id"] == "owner-a"
+    assert state["lease_id"] == "new-lease"
+    assert state["lease_expires_at"] == "2026-08-07T12:15:00Z"
+
+
+def test_partial_lease_is_rejected_instead_of_downgraded_to_legacy(monkeypatch):
+    monkeypatch.setenv("MISSION_STATE_NOW", "2026-08-07T12:00:00Z")
+    state = {"mission_id": "abc", "loop_active": True, "fencing_epoch": 9}
+
+    with pytest.raises(MISSION_STATE.LeaseRejectedError, match="malformed partial"):
+        MISSION_STATE.acquire_or_verify_lease(state, "owner-a")
+
+    assert state["fencing_epoch"] == 9
+
+
+def test_self_lease_renews_without_changing_epoch(monkeypatch):
+    monkeypatch.setenv("MISSION_STATE_NOW", "2026-08-07T12:10:00Z")
+    monkeypatch.setenv("MISSION_LEASE_ID", "lease-a")
+    state = _lease_state()
+
+    decision = MISSION_STATE.acquire_or_verify_lease(state, "owner-a")
+
+    assert decision.action == "renewed"
+    assert state["fencing_epoch"] == 3
+    assert state["lease_expires_at"] == "2026-08-07T12:25:00Z"
+
+
+def test_pid_reuse_cannot_write_foreign_unexpired_lease(monkeypatch):
+    monkeypatch.setenv("MISSION_STATE_NOW", "2026-08-07T12:05:00Z")
+    monkeypatch.setenv("MISSION_LEASE_ID", "lease-b")
+    state = _lease_state(pid=4242)
+
+    with pytest.raises(MISSION_STATE.LeaseRejectedError, match="lease held by owner-a until"):
+        MISSION_STATE.acquire_or_verify_lease(state, "owner-b")
+
+
+def test_expired_foreign_takeover_increments_epoch_and_records_history(monkeypatch):
+    monkeypatch.setenv("MISSION_STATE_NOW", "2026-08-07T12:20:00Z")
+    monkeypatch.setenv("MISSION_LEASE_ID", "lease-b")
+    state = _lease_state()
+
+    decision = MISSION_STATE.acquire_or_verify_lease(state, "owner-b", reason="resume")
+
+    assert decision.action == "taken-over"
+    assert state["owner_session_id"] == "owner-b"
+    assert state["lease_id"] == "lease-b"
+    assert state["fencing_epoch"] == 4
+    assert state["lease_history"][-1] == {
+        "owner_session_id": "owner-a",
+        "lease_id": "lease-a",
+        "fencing_epoch": 3,
+        "reason": "resume",
+        "at": "2026-08-07T12:20:00Z",
+    }
+
+
+def test_clock_rollback_old_owner_is_rejected_after_takeover(monkeypatch):
+    state = _lease_state(lease_expires_at="2026-08-07T11:59:00Z")
+    monkeypatch.setenv("MISSION_STATE_NOW", "2026-08-07T12:00:00Z")
+    monkeypatch.setenv("MISSION_LEASE_ID", "lease-b")
+    MISSION_STATE.acquire_or_verify_lease(state, "owner-b", reason="expired")
+
+    monkeypatch.setenv("MISSION_STATE_NOW", "2026-08-07T11:55:00Z")
+    monkeypatch.setenv("MISSION_LEASE_ID", "lease-a")
+    with pytest.raises(MISSION_STATE.LeaseRejectedError):
+        MISSION_STATE.acquire_or_verify_lease(state, "owner-a")
+
+
+def test_old_owner_cannot_return_after_takeover(monkeypatch):
+    state = _lease_state(lease_expires_at="2026-08-07T11:59:00Z")
+    monkeypatch.setenv("MISSION_STATE_NOW", "2026-08-07T12:00:00Z")
+    monkeypatch.setenv("MISSION_LEASE_ID", "lease-b")
+    MISSION_STATE.acquire_or_verify_lease(state, "owner-b")
+
+    monkeypatch.setenv("MISSION_STATE_NOW", "2026-08-07T12:16:00Z")
+    monkeypatch.setenv("MISSION_LEASE_ID", "lease-a")
+    with pytest.raises(MISSION_STATE.LeaseRejectedError):
+        MISSION_STATE.acquire_or_verify_lease(state, "owner-a")
+
+
+def test_init_returns_lease_contract_and_mutation_accepts_token(tmp_path, run_cli):
+    env = {"MISSION_SESSION_ID": "session-a", "MISSION_LEASE_ID": "lease-a"}
+    initialized = run_cli(
+        "init", "lease test", "--complexity", "Standard", cwd=tmp_path,
+        env_extra=env, check=True,
+    )
+    contract = json.loads(initialized.stdout)
+
+    assert contract["lease_id"] == "lease-a"
+    assert contract["fencing_epoch"] == 1
+    changed = run_cli("set", "iteration=1", cwd=tmp_path, env_extra=env)
+    assert changed.returncode == 0, changed.stderr
+
+
+def test_explicit_stale_token_is_rejected_by_cli(tmp_path, run_cli):
+    owner = {"MISSION_SESSION_ID": "session-a", "MISSION_LEASE_ID": "lease-a"}
+    run_cli("init", "lease test", "--complexity", "Standard", cwd=tmp_path,
+            env_extra=owner, check=True)
+
+    stale = run_cli(
+        "set", "iteration=1", cwd=tmp_path,
+        env_extra={"MISSION_SESSION_ID": "session-a", "MISSION_LEASE_ID": "stale-lease"},
+    )
+
+    assert stale.returncode == 2
+    assert "lease held by session-a until" in stale.stderr
+
+
+def test_cleanup_stale_uses_expired_lease_not_dead_pid(tmp_path, run_cli):
+    project = tmp_path / "project"
+    sessions = project / ".mission-state" / "sessions"
+    sessions.mkdir(parents=True)
+    state = _lease_state(
+        session_id="session-a",
+        owner_session_id="session-a",
+        pid=99999999,
+        project_root=str(project),
+        lease_expires_at="2026-08-07T11:59:00Z",
+        last_activity_at="2026-08-07T11:58:00Z",
+    )
+    (sessions / "session-a.json").write_text(json.dumps(state))
+
+    result = run_cli(
+        "cleanup-stale", "--root", str(tmp_path), cwd=tmp_path,
+        env_extra={"MISSION_STATE_NOW": "2026-08-07T12:00:00Z"},
+    )
+
+    output = json.loads(result.stdout)
+    assert output["would_halt"][0]["reason"] == "expired-session-lease"
+
+
+def test_cleanup_stale_skips_expired_lease_with_newer_activity_heartbeat(tmp_path, run_cli):
+    project = tmp_path / "project"
+    sessions = project / ".mission-state" / "sessions"
+    sessions.mkdir(parents=True)
+    state = _lease_state(
+        session_id="session-a",
+        owner_session_id="session-a",
+        pid=99999999,
+        project_root=str(project),
+        lease_expires_at="2026-08-07T11:59:00Z",
+        last_activity_at="2026-08-07T11:59:30Z",
+    )
+    (sessions / "session-a.json").write_text(json.dumps(state))
+
+    result = run_cli(
+        "cleanup-stale", "--root", str(tmp_path), cwd=tmp_path,
+        env_extra={"MISSION_STATE_NOW": "2026-08-07T12:00:00Z"},
+    )
+
+    output = json.loads(result.stdout)
+    assert output["would_halt"] == []
+    assert output["skipped"][0]["reason"] == "lease-expired-activity-heartbeat-present"
+
+
+def test_refresh_pid_then_resume_does_not_false_stale(tmp_path, run_cli):
+    env = {
+        "MISSION_SESSION_ID": "session-a",
+        "MISSION_LEASE_ID": "lease-a",
+        "MISSION_STATE_NOW": "2026-08-07T12:00:00Z",
+    }
+    run_cli("init", "lease test", "--complexity", "Standard", cwd=tmp_path,
+            env_extra=env, check=True)
+    run_cli("refresh-pid", "--force", cwd=tmp_path, env_extra=env, check=True)
+
+    resumed = run_cli("resume", "--force", cwd=tmp_path, env_extra=env)
+
+    assert resumed.returncode == 0, resumed.stderr
+    assert json.loads(resumed.stdout)["resume"]["halted_stale"] == 0
+    state = json.loads(
+        (tmp_path / ".mission-state" / "sessions" / "session-a.json").read_text()
+    )
+    assert state["loop_active"] is True
+
+
+def test_resume_takes_over_expired_foreign_lease_and_records_reason(tmp_path, run_cli):
+    project = tmp_path
+    sessions = project / ".mission-state" / "sessions"
+    sessions.mkdir(parents=True)
+    state = _lease_state(
+        session_id="session-a",
+        owner_session_id="old-runner",
+        lease_id="old-lease",
+        fencing_epoch=8,
+        lease_expires_at="2026-08-07T11:59:00Z",
+        pid=99999999,
+        project_root=str(project),
+        phase="executing",
+        passes=False,
+        halt_reason="",
+        score_history=[],
+    )
+    (sessions / "session-a.json").write_text(json.dumps(state))
+
+    resumed = run_cli(
+        "resume", "--force", cwd=project,
+        env_extra={
+            "MISSION_SESSION_ID": "session-a",
+            "MISSION_LEASE_ID": "new-lease",
+            "MISSION_STATE_NOW": "2026-08-07T12:00:00Z",
+        },
+    )
+
+    assert resumed.returncode == 0, resumed.stderr
+    updated = json.loads((sessions / "session-a.json").read_text())
+    assert updated["fencing_epoch"] == 9
+    assert updated["owner_session_id"] == "session-a"
+    assert updated["lease_history"][-1]["reason"] == "resume"
+
+
+def test_concurrent_renew_is_serialized_and_keeps_single_owner(tmp_path, run_cli):
+    env = {"MISSION_SESSION_ID": "session-a", "MISSION_LEASE_ID": "lease-a"}
+    run_cli("init", "lease test", "--complexity", "Standard", cwd=tmp_path,
+            env_extra=env, check=True)
+
+    def renew(iteration):
+        return run_cli("set", f"iteration={iteration}", cwd=tmp_path, env_extra=env)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(renew, (1, 2)))
+
+    assert all(result.returncode == 0 for result in results)
+    state = json.loads(
+        (tmp_path / ".mission-state" / "sessions" / "session-a.json").read_text()
+    )
+    assert state["owner_session_id"] == "session-a"
+    assert state["lease_id"] == "lease-a"
+    assert state["fencing_epoch"] == 1

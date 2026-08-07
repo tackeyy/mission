@@ -37,13 +37,14 @@ import json
 import math
 import os
 import re
+import secrets
 import socket
 import subprocess
 import sys
 import tempfile
 import time
 import shutil
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 LIB_DIR = Path(__file__).resolve().parents[1] / "lib"
@@ -312,6 +313,26 @@ DEFAULT_COMMAND_RESULT_CONTRACTS = {
 
 SPECIALIST_SELECTION_CHECKPOINT_COMPLEXITIES = {"Standard", "Complex", "Critical"}
 DEFAULT_STALE_ACTIVE_SECONDS = 3 * 60 * 60
+DEFAULT_LEASE_TTL_SECONDS = 15 * 60
+LEASE_STATE_FIELDS = (
+    "owner_session_id",
+    "lease_id",
+    "fencing_epoch",
+    "lease_expires_at",
+)
+
+
+class LeaseRejectedError(RuntimeError):
+    """A writer does not own the current fenced session lease."""
+
+
+class LeaseDecision:
+    """Result of acquiring, renewing, or taking over a session lease."""
+
+    def __init__(self, action: str, lease_id: str, fencing_epoch: int):
+        self.action = action
+        self.lease_id = lease_id
+        self.fencing_epoch = fencing_epoch
 
 
 def iso_now() -> str:
@@ -474,6 +495,122 @@ def resolve_session_id() -> str:
     return f"pid-{find_agent_pid()}"  # fallback (env なし環境)
 
 
+def _lease_ttl_seconds() -> int:
+    raw = os.environ.get("MISSION_LEASE_TTL_SECONDS", "")
+    try:
+        value = int(raw) if raw else DEFAULT_LEASE_TTL_SECONDS
+    except ValueError:
+        value = DEFAULT_LEASE_TTL_SECONDS
+    return value if value > 0 else DEFAULT_LEASE_TTL_SECONDS
+
+
+def _new_lease_id() -> str:
+    return secrets.token_hex(16)
+
+
+def _lease_expiry(now: datetime) -> str:
+    expires = now + timedelta(seconds=_lease_ttl_seconds())
+    return expires.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _lease_fields_present(state: dict) -> bool:
+    return all(
+        state.get(key) not in (None, "")
+        for key in LEASE_STATE_FIELDS
+    )
+
+
+def _lease_now() -> datetime:
+    parsed = parse_iso_datetime(iso_now())
+    if parsed is None:
+        return datetime.now(timezone.utc)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def acquire_or_verify_lease(
+    state: dict,
+    session_id: str,
+    *,
+    reason: str = "mutating-command",
+) -> LeaseDecision:
+    """Acquire or verify the fenced lease while the caller holds StateLock.
+
+    `MISSION_LEASE_ID` is the explicit fencing token contract. Existing callers
+    that predate leases may omit it; only the current owner session may then
+    inherit its token. A foreign writer must wait for expiry and receives a new
+    token with an incremented epoch.
+    """
+    now = _lease_now()
+    presented_lease_id = os.environ.get("MISSION_LEASE_ID")
+
+    lease_field_count = sum(state.get(key) not in (None, "") for key in LEASE_STATE_FIELDS)
+    if 0 < lease_field_count < len(LEASE_STATE_FIELDS):
+        raise LeaseRejectedError("malformed partial session lease")
+    if not _lease_fields_present(state):
+        lease_id = presented_lease_id or _new_lease_id()
+        state["owner_session_id"] = session_id
+        state["lease_id"] = lease_id
+        state["fencing_epoch"] = 1
+        state["lease_expires_at"] = _lease_expiry(now)
+        return LeaseDecision("acquired", lease_id, 1)
+
+    owner = str(state["owner_session_id"])
+    current_lease_id = str(state["lease_id"])
+    try:
+        epoch = int(state["fencing_epoch"])
+    except (TypeError, ValueError):
+        raise LeaseRejectedError(
+            f"lease held by {owner} until {state.get('lease_expires_at')} (invalid fencing epoch)"
+        )
+
+    same_owner = owner == session_id
+    token_matches = presented_lease_id in (None, current_lease_id) if same_owner else False
+    if same_owner and token_matches:
+        state["lease_expires_at"] = _lease_expiry(now)
+        return LeaseDecision("renewed", current_lease_id, epoch)
+    if same_owner:
+        raise LeaseRejectedError(
+            f"lease held by {owner} until {state.get('lease_expires_at')}"
+        )
+
+    expires = parse_iso_datetime(str(state.get("lease_expires_at") or ""))
+    if expires is not None and expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    expired = expires is not None and now >= expires.astimezone(timezone.utc)
+    if not expired:
+        raise LeaseRejectedError(
+            f"lease held by {owner} until {state.get('lease_expires_at')}"
+        )
+
+    retired_lease_ids = {
+        str(item.get("lease_id"))
+        for item in state.get("lease_history", [])
+        if isinstance(item, dict) and item.get("lease_id")
+    }
+    if presented_lease_id and (
+        presented_lease_id == current_lease_id
+        or presented_lease_id in retired_lease_ids
+    ):
+        raise LeaseRejectedError(
+            f"lease held by {owner} until {state.get('lease_expires_at')} (stale fencing token)"
+        )
+    new_lease_id = presented_lease_id or _new_lease_id()
+    state.setdefault("lease_history", []).append({
+        "owner_session_id": owner,
+        "lease_id": current_lease_id,
+        "fencing_epoch": epoch,
+        "reason": reason,
+        "at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    })
+    state["owner_session_id"] = session_id
+    state["lease_id"] = new_lease_id
+    state["fencing_epoch"] = epoch + 1
+    state["lease_expires_at"] = _lease_expiry(now)
+    return LeaseDecision("taken-over", new_lease_id, epoch + 1)
+
+
 def resolve_agent() -> str:
     """state を起動したエージェント種別を判定 (ログでの起動元識別用)。
     session_id とは独立に起動元 env を見るため、MISSION_SESSION_ID 明示時も正しく記録される。"""
@@ -557,6 +694,58 @@ def _is_session_state_shape(data: dict) -> bool:
     return isinstance(data, dict) and "mission_id" in data and "loop_active" in data
 
 
+def _is_session_state_path(path: Path) -> bool:
+    return (
+        path.suffix == ".json"
+        and (
+            path.parent.name == "sessions"
+            or path.name == "state.json" and path.parent.name == ".mission-state"
+        )
+    )
+
+
+_LEASE_KEYS = (*LEASE_STATE_FIELDS, "lease_history")
+_LEASE_WRITE_REASON: str | None = None
+
+
+@contextlib.contextmanager
+def _lease_write_reason(reason: str | None):
+    global _LEASE_WRITE_REASON
+    previous = _LEASE_WRITE_REASON
+    _LEASE_WRITE_REASON = reason
+    try:
+        yield
+    finally:
+        _LEASE_WRITE_REASON = previous
+
+
+def _enforce_session_lease_for_write(path: Path, data: dict) -> None:
+    """CAS the lease against the latest state immediately before publish."""
+    if not (_is_session_state_path(path) and _is_session_state_shape(data)):
+        return
+    latest = None
+    if path.exists():
+        try:
+            candidate = json.loads(path.read_text(encoding="utf-8"))
+            if _is_session_state_shape(candidate):
+                latest = candidate
+        except (OSError, json.JSONDecodeError):
+            latest = None
+    lease_state = latest if latest is not None else data
+    try:
+        acquire_or_verify_lease(
+            lease_state,
+            resolve_session_id(),
+            reason=_LEASE_WRITE_REASON or "mutating-command",
+        )
+    except LeaseRejectedError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+    for key in _LEASE_KEYS:
+        if key in lease_state:
+            data[key] = lease_state[key]
+
+
 def atomic_write_json(path: Path, data: dict, *, administrative: bool = False) -> None:
     """Phase B-2: fsync + os.replace で完全な前 or 後状態を保証.
 
@@ -566,6 +755,7 @@ def atomic_write_json(path: Path, data: dict, *, administrative: bool = False) -
     last_activity_at を updated_at より優先する (updated_at は resolution batch 書き込みで
     上書きされ壁時計が最大 500 倍膨張した実害があるため)。
     """
+    _enforce_session_lease_for_write(path, data)
     if not administrative and _is_session_state_shape(data):
         data["last_activity_at"] = iso_now()
     _atomic_write(path, lambda f: json.dump(data, f, indent=2, ensure_ascii=False))
@@ -4301,6 +4491,9 @@ def cmd_init(args):
         "session_file": str(sf_target),
         "session_id": sid,
         "mission_id": initial["mission_id"],
+        "lease_id": initial["lease_id"],
+        "fencing_epoch": initial["fencing_epoch"],
+        "lease_expires_at": initial["lease_expires_at"],
         "permission_preflight": "passed",
     }))
 
@@ -6617,7 +6810,8 @@ def cmd_refresh_pid(args):
             _resume_phase_timing(data, now)
         data["updated_at"] = now
         backup_state(sf)
-        atomic_write_json(sf, data)
+        with _lease_write_reason(getattr(args, "lease_reason", None)):
+            atomic_write_json(sf, data)
     print(json.dumps({
         "ok": True,
         "old_pid": old_pid,
@@ -6673,7 +6867,11 @@ def cmd_resume(args):
     if sf.exists():
         code, out = _capture_command_output(
             cmd_refresh_pid,
-            argparse.Namespace(force=bool(getattr(args, "force", False)), no_reactivate=False),
+            argparse.Namespace(
+                force=bool(getattr(args, "force", False)),
+                no_reactivate=False,
+                lease_reason="resume",
+            ),
         )
         if code not in (0, None):
             # foreign live owner 等 (refresh-pid が stderr に理由を出して exit 済)。
@@ -6766,6 +6964,7 @@ def _terminalize_state_file(
     require_missing_root: bool = False,
     require_stale_no_score: bool = False,
     require_dead_pid: bool = False,
+    require_expired_lease: bool = False,
 ) -> bool:
     """Re-read and revalidate under lock before a bulk terminal write."""
     with StateLock(lock_file(proj)):
@@ -6792,6 +6991,8 @@ def _terminalize_state_file(
                     return False
             except (TypeError, ValueError):
                 pass
+        if require_expired_lease and not _expired_lease_without_heartbeat(latest)[0]:
+            return False
         now = iso_now()
         sampled = _parse_iso_datetime(now)
         updated = _parse_iso_datetime(latest.get("updated_at"))
@@ -6829,6 +7030,29 @@ def _terminalize_state_file(
         return True
 
 
+def _expired_lease_without_heartbeat(data: dict) -> tuple[bool, str]:
+    """Return eligibility and reason for lease-based stale cleanup."""
+    expires = parse_iso_datetime(str(data.get("lease_expires_at") or ""))
+    if expires is None:
+        return False, "lease-expiry-invalid"
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    expires = expires.astimezone(timezone.utc)
+    if _lease_now() < expires:
+        return False, "lease-unexpired"
+    heartbeat = parse_iso_datetime(
+        data.get("last_activity_at") or data.get("updated_at")
+    )
+    if heartbeat is not None:
+        if heartbeat.tzinfo is None:
+            heartbeat = heartbeat.replace(tzinfo=timezone.utc)
+        heartbeat = heartbeat.astimezone(timezone.utc)
+        heartbeat_age = (_lease_now() - heartbeat).total_seconds()
+        if heartbeat > expires and heartbeat_age < _lease_ttl_seconds():
+            return False, "lease-expired-activity-heartbeat-present"
+    return True, "expired-session-lease"
+
+
 def cmd_cleanup_stale(args):
     """C-4: dead-PID の active state.json を orphan として halt (要 --execute).
 
@@ -6849,6 +7073,43 @@ def cmd_cleanup_stale(args):
                 if not data.get("loop_active"):
                     continue
                 if data.get("passes") or data.get("halt_reason"):
+                    continue
+                if _lease_fields_present(data):
+                    lease_stale, lease_reason = _expired_lease_without_heartbeat(data)
+                    if not lease_stale:
+                        results["skipped"].append({
+                            "path": str(sf),
+                            "reason": lease_reason,
+                            "owner_session_id": data.get("owner_session_id"),
+                            "lease_expires_at": data.get("lease_expires_at"),
+                        })
+                        continue
+                    proj = _project_root_of(sf)
+                    if args.execute:
+                        halted = _terminalize_state_file(
+                            sf,
+                            proj,
+                            reason=(
+                                "stale: session lease expired without activity heartbeat "
+                                "(cleanup-stale)"
+                            ),
+                            category="stale",
+                            set_terminal_phase=True,
+                            require_expired_lease=True,
+                        )
+                        if halted:
+                            results["halted"].append({
+                                "path": str(sf),
+                                "reason": lease_reason,
+                                "owner_session_id": data.get("owner_session_id"),
+                            })
+                    else:
+                        results["would_halt"].append({
+                            "path": str(sf),
+                            "reason": lease_reason,
+                            "owner_session_id": data.get("owner_session_id"),
+                            "mission": (data.get("mission") or "")[:80],
+                        })
                     continue
                 pid = data.get("pid")
                 if not pid:

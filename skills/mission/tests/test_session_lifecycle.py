@@ -37,7 +37,12 @@ def test_cleanup_stale_halts_dead_session(tmp_path, run_cli):
     env = {"MISSION_SESSION_ID": "dead-sess"}
     run_cli("init", "g", "--complexity", "Standard", cwd=tmp_path, env_extra=env, check=True)
     sf = tmp_path / ".mission-state" / "sessions" / "dead-sess.json"
-    d = json.loads(sf.read_text()); d["pid"] = 999999; d["pid_source"] = "agent"; sf.write_text(json.dumps(d))
+    d = json.loads(sf.read_text()); d["pid"] = 999999; d["pid_source"] = "agent"
+    # Issue #354: lease 付き state は PID で stale 化しない。この test は legacy
+    # state の従来 dead-PID 挙動を固定するため lease fields を明示的に除去する。
+    for key in ("owner_session_id", "lease_id", "fencing_epoch", "lease_expires_at"):
+        d.pop(key, None)
+    sf.write_text(json.dumps(d))
     r = run_cli("cleanup-stale", "--root", str(tmp_path), "--execute", cwd=tmp_path)
     assert r.returncode == 0
     d2 = json.loads(sf.read_text())
