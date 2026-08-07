@@ -4,6 +4,8 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
+
 
 MISSION_STATE_PATH = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
 
@@ -170,6 +172,25 @@ def test_mission_explicit_dispatch_overrides_cli_flag(run_cli, tmp_path):
     verdict = json.loads(result.stdout)
     assert verdict["goal_dispatch_source"] == "mission:user-explicit"
     assert verdict["goal_dispatch_effective"] == "host-native"
+
+
+@pytest.mark.parametrize("mission", [
+    "例: goal_dispatch: host-native を指定できます",
+    "goal_dispatch: host-native にしないで typo を直す",
+    "goal_dispatch: host-native ではなく inline にする",
+    '"goal_dispatch: host-native" は設定例です',
+])
+def test_mission_mentions_do_not_override_cli_dispatch(run_cli, tmp_path, mission):
+    result = run_cli(
+        "init", mission, "--complexity", "Simple", "--goal-dispatch", "inline",
+        cwd=tmp_path,
+        env_extra=_isolated_env(tmp_path, CODEX_THREAD_ID="codex-test"),
+        check=True,
+    )
+
+    verdict = json.loads(result.stdout)
+    assert verdict["goal_dispatch_source"] == "cli:--goal-dispatch"
+    assert verdict["goal_dispatch_effective"] == "inline"
 
 
 def test_set_simple_records_effective_dispatch_in_routed_halt(run_cli, tmp_path):
