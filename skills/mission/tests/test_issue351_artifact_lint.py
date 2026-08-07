@@ -311,6 +311,48 @@ def test_aggregate_unreadable_artifact_warns_skips_and_exits_zero(
     assert persisted["artifact_lint_status"] == "skipped"
 
 
+def test_aggregate_nul_artifact_path_warns_skips_and_preserves_scores(
+    state_dir, run_cli, tmp_path,
+):
+    state_path = state_dir / "sessions" / "test.json"
+    state = json.loads(state_path.read_text())
+    prior_scores = [{"iteration": 0, "composite": 3.1}]
+    state["artifact_path"] = "artifact\x00tampered.md"
+    state["artifact_lint"] = [
+        {"heading": "Old", "kind": "empty-section", "excerpt": ""}
+    ]
+    state["artifact_lint_status"] = "findings"
+    state["score_history"] = prior_scores
+    state_path.write_text(json.dumps(state))
+    review = _review(tmp_path / "review.json")
+    out = tmp_path / "scoring.json"
+
+    result = run_cli(
+        "aggregate-reviews", "--iteration", "1", "--input", str(review),
+        "--out", str(out), "--json", cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "WARN #351: artifact lint skipped" in result.stderr
+    observation = json.loads(result.stdout)
+    assert observation["artifact_lint"] == []
+    assert observation["artifact_lint_status"] == "skipped"
+    scoring = json.loads(out.read_text())
+    assert scoring["items"] == {
+        "mission_achievement": 4.5,
+        "accuracy": 4.4,
+        "completeness": 4.3,
+        "usability": 4.2,
+    }
+    evidence = json.loads(Path(scoring["findings_evidence_path"]).read_text())
+    assert evidence["artifact_lint"] == []
+    assert evidence["artifact_lint_status"] == "skipped"
+    persisted = json.loads(state_path.read_text())
+    assert "artifact_lint" not in persisted
+    assert persisted["artifact_lint_status"] == "skipped"
+    assert persisted["score_history"] == prior_scores
+
+
 def test_aggregate_fifo_artifact_skips_without_blocking_and_clears_stale_lint(
     state_dir, tmp_path,
 ):
@@ -358,7 +400,9 @@ def test_aggregate_fifo_artifact_skips_without_blocking_and_clears_stale_lint(
 
 
 @pytest.mark.parametrize("stage", ["resolve", "relative_to"])
-@pytest.mark.parametrize("error_type", [OSError, UnicodeError, RuntimeError])
+@pytest.mark.parametrize(
+    "error_type", [OSError, UnicodeError, ValueError, TypeError, RuntimeError]
+)
 def test_artifact_path_operations_fail_open_with_warning(
     tmp_path, monkeypatch, capsys, stage, error_type,
 ):
@@ -382,7 +426,9 @@ def test_artifact_path_operations_fail_open_with_warning(
     assert "WARN #351: artifact lint skipped" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("error_type", [OSError, UnicodeError, RuntimeError])
+@pytest.mark.parametrize(
+    "error_type", [OSError, UnicodeError, ValueError, TypeError, RuntimeError]
+)
 def test_artifact_open_errors_fail_open_with_warning(
     tmp_path, monkeypatch, capsys, error_type,
 ):

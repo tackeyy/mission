@@ -5913,7 +5913,7 @@ def _lint_state_artifact(cwd: Path, data: dict) -> tuple[list[dict], str]:
             )
             return [], "skipped"
         artifact_text = _read_regular_artifact_utf8(path)
-    except (OSError, UnicodeError, RuntimeError) as exc:
+    except (OSError, UnicodeError, ValueError, TypeError, RuntimeError) as exc:
         print(f"WARN #351: artifact lint skipped: {exc}", file=sys.stderr)
         return [], "skipped"
     findings = lint_artifact_completeness(artifact_text)
