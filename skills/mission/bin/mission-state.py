@@ -5784,7 +5784,7 @@ def _consensus_score(max_delta: float) -> float:
     return 1.0
 
 
-_ARTIFACT_HEADING_RE = re.compile(r"^ {0,3}(#{1,3})[ \t]+(.+?)[ \t]*#*[ \t]*$")
+_ARTIFACT_HEADING_RE = re.compile(r"^ {0,3}(#{1,3})(?:[ \t]+(.*?))?[ \t]*$")
 _ARTIFACT_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 _ARTIFACT_STUB_RE = re.compile(
     r"(?:"
@@ -5813,8 +5813,11 @@ def lint_artifact_completeness(artifact_text: str) -> list[dict]:
             marker = fence_match.group(1)
             suffix = fence_match.group(2)
             if fence_char is None:
-                fence_char = marker[0]
-                fence_length = len(marker)
+                # CommonMark: a backtick fence info string containing a backtick
+                # is not a valid opener. Tilde-fence info has no such restriction.
+                if marker[0] != "`" or "`" not in suffix:
+                    fence_char = marker[0]
+                    fence_length = len(marker)
             elif (
                 marker[0] == fence_char
                 and len(marker) >= fence_length
@@ -5824,7 +5827,15 @@ def lint_artifact_completeness(artifact_text: str) -> list[dict]:
                 fence_length = 0
         heading_match = None if fence_char is not None else _ARTIFACT_HEADING_RE.match(line)
         if heading_match:
-            current = (heading_match.group(2).strip(), [])
+            raw_heading = (heading_match.group(2) or "").strip()
+            # An optional ATX closing sequence is recognized only when separated
+            # from the title by whitespace. Thus `Score###` remains literal text.
+            heading = (
+                ""
+                if re.fullmatch(r"#+", raw_heading)
+                else re.sub(r"[ \t]+#+[ \t]*$", "", raw_heading).strip()
+            )
+            current = (heading, [])
             sections.append(current)
         elif current is not None:
             current[1].append(line)
@@ -5848,29 +5859,33 @@ def lint_artifact_completeness(artifact_text: str) -> list[dict]:
     return findings
 
 
-def _lint_state_artifact(cwd: Path, data: dict) -> tuple[list[dict], bool]:
+def _lint_state_artifact(cwd: Path, data: dict) -> tuple[list[dict], str]:
     """Lint an explicitly configured top-level artifact_path, or skip it."""
     artifact_path = str(data.get("artifact_path") or "").strip()
     if not artifact_path:
-        return [], False
-    path = Path(artifact_path).expanduser()
-    if not path.is_absolute():
-        path = cwd / path
-    path = path.resolve()
+        return [], "skipped"
     try:
-        path.relative_to(cwd.resolve())
-    except ValueError:
-        print(
-            f"WARN #351: artifact lint skipped: path outside project root: {artifact_path}",
-            file=sys.stderr,
-        )
-        return [], False
-    try:
+        path = Path(artifact_path).expanduser()
+        if not path.is_absolute():
+            path = cwd / path
+        path = path.resolve()
+        try:
+            path.relative_to(cwd.resolve())
+        except UnicodeError:
+            raise
+        except ValueError:
+            print(
+                "WARN #351: artifact lint skipped: "
+                f"path outside project root: {artifact_path}",
+                file=sys.stderr,
+            )
+            return [], "skipped"
         artifact_text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
+    except (OSError, UnicodeError, RuntimeError) as exc:
         print(f"WARN #351: artifact lint skipped: {exc}", file=sys.stderr)
-        return [], False
-    return lint_artifact_completeness(artifact_text), True
+        return [], "skipped"
+    findings = lint_artifact_completeness(artifact_text)
+    return findings, "findings" if findings else "clean"
 
 
 def cmd_aggregate_reviews(args):
@@ -5988,9 +6003,12 @@ def cmd_aggregate_reviews(args):
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
-        artifact_lint, artifact_lint_ran = _lint_state_artifact(cwd, data)
-        if artifact_lint_ran:
+        artifact_lint, artifact_lint_status = _lint_state_artifact(cwd, data)
+        if artifact_lint_status == "skipped":
+            data.pop("artifact_lint", None)
+        else:
             data["artifact_lint"] = artifact_lint
+        data["artifact_lint_status"] = artifact_lint_status
         for finding in artifact_lint:
             print(
                 "WARN #351: artifact lint: "
@@ -6015,6 +6033,7 @@ def cmd_aggregate_reviews(args):
             "reviewer_windows": reviewer_windows_public,
             "parallel_execution": parallel_execution,
             "artifact_lint": artifact_lint,
+            "artifact_lint_status": artifact_lint_status,
         }
         evidence_path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -6039,6 +6058,7 @@ def cmd_aggregate_reviews(args):
         "review_agreement": review_agreement,
         "parallel_execution": parallel_execution,
         "artifact_lint": artifact_lint,
+        "artifact_lint_status": artifact_lint_status,
     }
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))

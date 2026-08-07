@@ -40,6 +40,10 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py review-finaliz
     --iteration <N> --input a.json --input b.json --min-reviewers <N> \
     --reviewer-window "A=<start_iso>..<end_iso>" --reviewer-window "B=<start_iso>..<end_iso>"
 
+# artifact_path 指定時の WARN-only lint は state・evidence・JSON 結果に
+# artifact_lint_status=findings|clean|skipped を記録する。skipped は未観測であり
+# clean ではない。skip 時は過去の artifact_lint を削除し stale stats を防ぐ。
+
 # Phase 6 transactional (#283, 推奨): mark-passes → next を 1 コマンドで実行。
 # gate 未達なら mark-passes の exit code を保ち、next guidance を JSON で返す (state 不変)。
 # --force は非対応。override はユーザー明示承認の上で mark-passes --force を直接使う。

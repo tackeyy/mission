@@ -4,6 +4,8 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
+
 
 MISSION_STATE_PY = Path(__file__).resolve().parent.parent / "bin" / "mission-state.py"
 SPEC = importlib.util.spec_from_file_location("mission_state_issue351", MISSION_STATE_PY)
@@ -51,6 +53,26 @@ def test_atx_headings_with_up_to_three_leading_spaces_are_detected():
         ("Plan", "empty-section"),
         ("Step 3", "empty-section"),
     ]
+
+
+def test_empty_atx_title_and_trailing_closing_hashes_are_normalized():
+    artifact = "##\n\n## ###\n\n## Score ###\n"
+
+    findings = MISSION_STATE.lint_artifact_completeness(artifact)
+
+    assert findings == [
+        {"heading": "", "kind": "empty-section", "excerpt": ""},
+        {"heading": "", "kind": "empty-section", "excerpt": ""},
+        {"heading": "Score", "kind": "empty-section", "excerpt": ""},
+    ]
+
+
+def test_hashes_without_whitespace_are_part_of_atx_title():
+    artifact = "## Score###\n"
+
+    findings = MISSION_STATE.lint_artifact_completeness(artifact)
+
+    assert findings[0]["heading"] == "Score###"
 
 
 def test_four_space_indented_fence_marker_does_not_hide_following_heading():
@@ -109,6 +131,18 @@ def test_headings_inside_a_well_formed_fence_are_ignored():
     )
 
     assert MISSION_STATE.lint_artifact_completeness(artifact) == []
+
+
+def test_backtick_in_backtick_fence_info_invalidates_the_opener():
+    artifact = "```lang`bad\n## Score\n"
+
+    findings = MISSION_STATE.lint_artifact_completeness(artifact)
+
+    assert findings == [{
+        "heading": "Score",
+        "kind": "empty-section",
+        "excerpt": "",
+    }]
 
 
 def test_combined_english_forward_reference_stub_is_detected():
@@ -185,13 +219,46 @@ def test_aggregate_warns_and_records_lint_without_changing_scores(
     }
     evidence = json.loads(Path(scoring["findings_evidence_path"]).read_text())
     assert evidence["artifact_lint"][0]["heading"] == "Score"
+    assert evidence["artifact_lint_status"] == "findings"
     persisted = json.loads(state_path.read_text())
     assert persisted["artifact_lint"] == evidence["artifact_lint"]
+    assert persisted["artifact_lint_status"] == "findings"
+
+
+def test_aggregate_records_clean_observation_separately_from_skip(
+    state_dir, run_cli, tmp_path,
+):
+    artifact = tmp_path / "artifact.md"
+    artifact.write_text("## Score\n4.3 from two reviewers.\n")
+    state_path = state_dir / "sessions" / "test.json"
+    state = json.loads(state_path.read_text())
+    state["artifact_path"] = str(artifact)
+    state_path.write_text(json.dumps(state))
+    review = _review(tmp_path / "review.json")
+
+    result = run_cli(
+        "aggregate-reviews", "--iteration", "1", "--input", str(review),
+        "--json", cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 0
+    observation = json.loads(result.stdout)
+    assert observation["artifact_lint"] == []
+    assert observation["artifact_lint_status"] == "clean"
+    persisted = json.loads(state_path.read_text())
+    assert persisted["artifact_lint"] == []
+    assert persisted["artifact_lint_status"] == "clean"
 
 
 def test_aggregate_without_artifact_path_skips_lint_and_exits_zero(
     state_dir, run_cli, tmp_path,
 ):
+    state_path = state_dir / "sessions" / "test.json"
+    state = json.loads(state_path.read_text())
+    state["artifact_lint"] = [
+        {"heading": "Old", "kind": "empty-section", "excerpt": ""}
+    ]
+    state_path.write_text(json.dumps(state))
     review = _review(tmp_path / "review.json")
     out = tmp_path / "scoring.json"
 
@@ -205,6 +272,63 @@ def test_aggregate_without_artifact_path_skips_lint_and_exits_zero(
     scoring = json.loads(out.read_text())
     evidence = json.loads(Path(scoring["findings_evidence_path"]).read_text())
     assert evidence["artifact_lint"] == []
+    assert evidence["artifact_lint_status"] == "skipped"
+    persisted = json.loads(state_path.read_text())
+    assert "artifact_lint" not in persisted
+    assert persisted["artifact_lint_status"] == "skipped"
+    stats = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
+    assert json.loads(stats.stdout)["artifact_lint_counts"]["clean"] == 0
+
+
+def test_aggregate_unreadable_artifact_warns_skips_and_exits_zero(
+    state_dir, run_cli, tmp_path,
+):
+    state_path = state_dir / "sessions" / "test.json"
+    state = json.loads(state_path.read_text())
+    state["artifact_path"] = str(tmp_path)
+    state["artifact_lint"] = [
+        {"heading": "Old", "kind": "empty-section", "excerpt": ""}
+    ]
+    state_path.write_text(json.dumps(state))
+    review = _review(tmp_path / "review.json")
+
+    result = run_cli(
+        "aggregate-reviews", "--iteration", "1", "--input", str(review),
+        "--json", cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 0
+    assert "WARN #351: artifact lint skipped" in result.stderr
+    observation = json.loads(result.stdout)
+    assert observation["artifact_lint_status"] == "skipped"
+    persisted = json.loads(state_path.read_text())
+    assert "artifact_lint" not in persisted
+    assert persisted["artifact_lint_status"] == "skipped"
+
+
+@pytest.mark.parametrize("stage", ["resolve", "relative_to", "read_text"])
+@pytest.mark.parametrize("error_type", [OSError, UnicodeError, RuntimeError])
+def test_artifact_path_operations_fail_open_with_warning(
+    tmp_path, monkeypatch, capsys, stage, error_type,
+):
+    artifact = tmp_path / "artifact.md"
+    artifact.write_text("## Score\n")
+    original = getattr(Path, stage)
+
+    def fail_artifact_operation(path, *args, **kwargs):
+        if path == artifact:
+            raise error_type(stage)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, stage, fail_artifact_operation)
+
+    findings, status = MISSION_STATE._lint_state_artifact(
+        tmp_path, {"artifact_path": str(artifact)}
+    )
+
+    assert findings == []
+    assert status == "skipped"
+    assert "WARN #351: artifact lint skipped" in capsys.readouterr().err
 
 
 def test_stats_counts_lint_findings_and_clean_artifacts(tmp_path, run_cli):
