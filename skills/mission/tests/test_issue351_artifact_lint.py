@@ -2,7 +2,10 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -295,6 +298,52 @@ def test_aggregate_unreadable_artifact_warns_skips_and_exits_zero(
     result = run_cli(
         "aggregate-reviews", "--iteration", "1", "--input", str(review),
         "--json", cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 0
+    assert "WARN #351: artifact lint skipped" in result.stderr
+    observation = json.loads(result.stdout)
+    assert observation["artifact_lint_status"] == "skipped"
+    persisted = json.loads(state_path.read_text())
+    assert "artifact_lint" not in persisted
+    assert persisted["artifact_lint_status"] == "skipped"
+
+
+def test_aggregate_fifo_artifact_skips_without_blocking_and_clears_stale_lint(
+    state_dir, tmp_path,
+):
+    artifact = tmp_path / "artifact.fifo"
+    os.mkfifo(artifact)
+    state_path = state_dir / "sessions" / "test.json"
+    state = json.loads(state_path.read_text())
+    state["artifact_path"] = str(artifact)
+    state["artifact_lint"] = [
+        {"heading": "Old", "kind": "empty-section", "excerpt": ""}
+    ]
+    state_path.write_text(json.dumps(state))
+    review = _review(tmp_path / "review.json")
+    env = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith("MISSION_")
+    }
+    env["MISSION_SESSION_ID"] = "test"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_STATE_PY),
+            "aggregate-reviews",
+            "--iteration",
+            "1",
+            "--input",
+            str(review),
+            "--json",
+        ],
+        cwd=state_dir.parent,
+        capture_output=True,
+        text=True,
+        timeout=1,
+        env=env,
     )
 
     assert result.returncode == 0
