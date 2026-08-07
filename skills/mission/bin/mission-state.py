@@ -582,16 +582,14 @@ def acquire_or_verify_lease(
             str(state["lease_expires_at"]), now
         )
         return LeaseDecision("renewed", current_lease_id, epoch)
-    if same_owner:
-        raise LeaseRejectedError(
-            f"lease held by {owner} until {state.get('lease_expires_at')}"
-        )
 
     expires = parse_iso_datetime(str(state.get("lease_expires_at") or ""))
     if expires is not None and expires.tzinfo is None:
         expires = expires.replace(tzinfo=timezone.utc)
     expired = expires is not None and now >= expires.astimezone(timezone.utc)
     if not expired:
+        # Same-owner writers without the matching token wait like any foreign
+        # writer: after expiry they recover through the fenced takeover below.
         raise LeaseRejectedError(
             f"lease held by {owner} until {state.get('lease_expires_at')}"
         )
@@ -7067,15 +7065,13 @@ def _terminalize_state_file(
             )
         latest["updated_at"] = now
         backup_state(sf)
-        if require_expired_lease:
-            # Expiry/no-heartbeat was re-read above while holding this same lock.
-            # Publish the janitor CAS directly: this is not a normal writer and must
-            # neither impersonate the owner token nor expose a generic lease bypass.
-            _atomic_write(
-                sf, lambda f: json.dump(latest, f, indent=2, ensure_ascii=False)
-            )
-        else:
-            atomic_write_json(sf, latest, administrative=True)  # #310: janitor 書き込み
+        # Publish the janitor CAS directly on every terminalize path: the janitor
+        # is not a normal writer and must neither impersonate the owner token nor
+        # acquire a fresh lease onto a legacy state it is halting (which would
+        # also emit a misleading lease carrier for the dead session).
+        _atomic_write(
+            sf, lambda f: json.dump(latest, f, indent=2, ensure_ascii=False)
+        )
         if sf.parent.name == "sessions":
             _remove_from_aggregate(proj, sf.stem)
         return True

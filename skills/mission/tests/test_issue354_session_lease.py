@@ -518,3 +518,64 @@ def test_concurrent_renew_is_serialized_and_keeps_single_owner(tmp_path, run_cli
     assert state["owner_session_id"] == "session-a"
     assert state["lease_id"] == "lease-a"
     assert state["fencing_epoch"] == 1
+
+
+def test_same_owner_expired_lease_without_token_takes_over(monkeypatch):
+    """Checker finding 2: a crashed session that lost its token can self-recover
+    once its own lease has expired, through the normal fenced takeover path."""
+    monkeypatch.setenv("MISSION_STATE_NOW", "2026-08-07T12:20:00Z")
+    monkeypatch.delenv("MISSION_LEASE_ID", raising=False)
+    state = _lease_state()
+
+    decision = MISSION_STATE.acquire_or_verify_lease(state, "owner-a", reason="self-recover")
+
+    assert decision.action == "taken-over"
+    assert state["owner_session_id"] == "owner-a"
+    assert state["fencing_epoch"] == 4
+    assert state["lease_id"] != "lease-a"
+    assert state["lease_history"][-1]["lease_id"] == "lease-a"
+    assert state["lease_history"][-1]["fencing_epoch"] == 3
+
+
+def test_same_owner_expired_lease_with_current_token_still_renews(monkeypatch):
+    """The live owner holding the valid token renews across a quiet period even
+    after nominal expiry: no takeover happened, so renewal under lock is safe."""
+    monkeypatch.setenv("MISSION_STATE_NOW", "2026-08-07T12:20:00Z")
+    monkeypatch.setenv("MISSION_LEASE_ID", "lease-a")
+    state = _lease_state()
+
+    decision = MISSION_STATE.acquire_or_verify_lease(state, "owner-a")
+
+    assert decision.action == "renewed"
+    assert state["fencing_epoch"] == 3
+    assert state["lease_expires_at"] == "2026-08-07T12:35:00Z"
+
+
+def test_legacy_dead_pid_cleanup_does_not_acquire_lease_or_emit_carrier(tmp_path, run_cli):
+    """Checker finding 1: the janitor halting a legacy (lease-free) dead-PID state
+    must not stamp its own lease onto the halted state nor emit a lease carrier."""
+    project = tmp_path / "project"
+    sessions = project / ".mission-state" / "sessions"
+    sessions.mkdir(parents=True)
+    state = {
+        "mission_id": "abc",
+        "loop_active": True,
+        "session_id": "session-dead",
+        "pid": 99999999,
+        "project_root": str(project),
+        "phase": "executing",
+        "updated_at": "2026-08-07T00:00:00Z",
+        "last_activity_at": "2026-08-07T00:00:00Z",
+    }
+    (sessions / "session-dead.json").write_text(json.dumps(state))
+
+    result = run_cli(
+        "cleanup-stale", "--root", str(tmp_path), "--execute", cwd=tmp_path,
+        env_extra={"MISSION_STATE_NOW": "2026-08-07T12:00:00Z"},
+    )
+
+    assert LEASE_CARRIER_PREFIX not in (result.stderr or "")
+    halted = json.loads((sessions / "session-dead.json").read_text())
+    assert halted["loop_active"] is False
+    for field in ("owner_session_id", "lease_id", "fencing_epoch", "lease_expires_at"):
+        assert field not in halted, field
