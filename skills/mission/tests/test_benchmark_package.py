@@ -2,6 +2,8 @@ import json
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 BENCHMARK_DIR = REPO_ROOT / "benchmarks" / "mission-vs-goal"
@@ -105,6 +107,86 @@ def test_summary_counts_budget_blocked_records_per_arm():
 
     assert summary["arms"]["claude_code_goal_command"]["budget_blocked_records"] == 0
     assert summary["arms"]["mission"]["budget_blocked_records"] == 1
+    assert any(
+        "WARNING: one or more records were blocked by max_budget_usd" in limitation
+        for limitation in summary["limitations"]
+    )
+
+
+def test_budget_marker_overrides_validator_pass_and_preserves_blocked_metrics():
+    runner = _load_official_goal_runner()
+
+    status = runner.classify_run_status(
+        stdout='{"subtype":"error_max_budget_usd"}',
+        stderr="",
+        timed_out=False,
+        returncode=1,
+        output_exists=True,
+        validator_pass=True,
+    )
+
+    assert status == {
+        "run_status": "blocked",
+        "blocked_reason": "max_budget_usd",
+        "failure_kind": "max_budget_usd",
+        "comparable_attempt": False,
+    }
+    assert runner.calculate_burn_rate_usd_per_min(status["run_status"], 6.0, 3.0) == 2.0
+
+
+@pytest.mark.parametrize(
+    "flag",
+    ("--max-budget-usd", "--max-budget-usd-goal", "--max-budget-usd-mission"),
+)
+@pytest.mark.parametrize("value", ("0", "-1", "nan", "inf"))
+def test_invalid_budget_flags_fail_before_output_cleanup_or_clone(tmp_path, monkeypatch, flag, value):
+    runner = _load_official_goal_runner()
+    run_id = "invalid-budget-fixture"
+    results_dir = tmp_path / "results"
+    artifacts_dir = tmp_path / "artifacts"
+    results_dir.mkdir()
+    artifact_run_dir = artifacts_dir / run_id
+    artifact_run_dir.mkdir(parents=True)
+    result_path = results_dir / f"{run_id}.jsonl"
+    summary_path = results_dir / f"{run_id}-summary.json"
+    result_path.write_text("preserve-result\n", encoding="utf-8")
+    summary_path.write_text("preserve-summary\n", encoding="utf-8")
+    sentinel = artifact_run_dir / "preserve.txt"
+    sentinel.write_text("preserve-artifact\n", encoding="utf-8")
+    clone_called = False
+
+    def track_clone(*_args, **_kwargs):
+        nonlocal clone_called
+        clone_called = True
+
+    monkeypatch.setattr(runner, "RESULTS_DIR", results_dir)
+    monkeypatch.setattr(runner, "ARTIFACTS_DIR", artifacts_dir)
+    monkeypatch.setattr(runner, "prepare_clone", track_clone)
+    monkeypatch.setattr(
+        runner.sys,
+        "argv",
+        [
+            "run_claude_goal_vs_mission.py",
+            "--starting-commit",
+            "abcdef0",
+            "--run-id",
+            run_id,
+            "--model-id",
+            "fixture-model",
+            flag,
+            value,
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        runner.main()
+
+    assert (
+        result_path.read_text(encoding="utf-8"),
+        summary_path.read_text(encoding="utf-8"),
+        sentinel.read_text(encoding="utf-8"),
+        clone_called,
+    ) == ("preserve-result\n", "preserve-summary\n", "preserve-artifact\n", False)
 
 
 def test_discriminating_runbooks_document_arm_budgets_with_measured_evidence():
