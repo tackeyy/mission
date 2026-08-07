@@ -760,6 +760,34 @@ Complex 2 の paired 10 records。全完走・degraded 0・品質は全 record m
 `results/2026-08-02-portfolio-v5-speed-summary.json` /
 `artifacts/2026-08-02-portfolio-v5-speed/`
 
+### portfolio-v6-repeats3 (repeats=3 再測の試行、2026-08-07) — spend limit により部分無効
+
+commit `5ac06b3`。v5-speed と同一 5 タスク (Standard 3 + Complex 2) x 2 arms x repeats=3
+= 30 records。**組織の月間 API spend limit 到達 (HTTP 429) により 12 records が即死**
+(elapsed 0.04-0.08 min)、mission 3 records が `--max-budget-usd 6.0` の上限で blocked、
+1 record が validator fail。summary の arm 集計 (goal completion 0.53 等) は 429 汚染を
+含むため **arm 間比較には使用しない**。runner 側の対応を #357 (429 の blocked-external
+分類 + 自動停止) / #358 (arm 別予算上限) として起票済み。
+
+limit 到達前に完走した mission 6 records からの救済観測:
+
+| task | v6 実測 (iter) | v5-speed (iter) | 解釈 |
+|---|---|---|---|
+| std-contract | 6.29 min (1) | 18.27 min (2) | **v5 の 18.27 は iter=2 外れ値と確認**。iter=1 なら v4 (9.27) より速い |
+| std-metrics | 6.55 min (1) | 6.02 min (1) | 再現 (分散小) |
+| std-policy | 5.08 min (1) | 4.84 min (1) | 再現 (分散小) |
+| cx-ledger | 13.62 min (1, full) | 14.38 min (1, full) | **full-tier フルループのコストは再現性あり (13.6-14.4 min)** |
+
+- v6 の 6 comparable mission records に iter=2 は 0 件。marker 1.0 は完走全 record で維持
+- mission full-profile の record 単価は $5-6 に達し (v5 平均 $3.07 → v6 $4.71)、$6 上限が
+  3 records を欠測させた。予算上限の較正は #358
+- repeats=3 の分散確定は spend limit 解除後に #357/#358 適用済み runner で再走する
+
+一次データ: `results/2026-08-07-portfolio-v6-repeats3.jsonl` /
+`results/2026-08-07-portfolio-v6-repeats3-summary.json` /
+`artifacts/2026-08-07-portfolio-v6-repeats3/`
+
+
 ## Discriminating cohort clean re-run (discriminating-v2) — v1 findings の訂正
 
 Status: 2026-07-23 JST に実行。permission-mode 汚染 (#268) を排除したクリーン
