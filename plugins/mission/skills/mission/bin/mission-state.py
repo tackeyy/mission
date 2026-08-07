@@ -5784,7 +5784,8 @@ def _consensus_score(max_delta: float) -> float:
     return 1.0
 
 
-_ARTIFACT_HEADING_RE = re.compile(r"^(#{1,3})[ \t]+(.+?)[ \t]*#*[ \t]*$")
+_ARTIFACT_HEADING_RE = re.compile(r"^ {0,3}(#{1,3})[ \t]+(.+?)[ \t]*#*[ \t]*$")
+_ARTIFACT_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 _ARTIFACT_STUB_RE = re.compile(
     r"(?:"
     r"recorded below(?:\s+once\s+.+\s+completes)?|"
@@ -5804,11 +5805,24 @@ def lint_artifact_completeness(artifact_text: str) -> list[dict]:
     """Detect empty H1-H3 sections and forward-reference-only stubs."""
     sections: list[tuple[str, list[str]]] = []
     current: tuple[str, list[str]] | None = None
-    in_fence = False
+    fence_char: str | None = None
+    fence_length = 0
     for line in artifact_text.splitlines():
-        if re.match(r"^[ \t]*(```|~~~)", line):
-            in_fence = not in_fence
-        heading_match = None if in_fence else _ARTIFACT_HEADING_RE.match(line)
+        fence_match = _ARTIFACT_FENCE_RE.match(line)
+        if fence_match:
+            marker = fence_match.group(1)
+            suffix = fence_match.group(2)
+            if fence_char is None:
+                fence_char = marker[0]
+                fence_length = len(marker)
+            elif (
+                marker[0] == fence_char
+                and len(marker) >= fence_length
+                and not suffix.strip()
+            ):
+                fence_char = None
+                fence_length = 0
+        heading_match = None if fence_char is not None else _ARTIFACT_HEADING_RE.match(line)
         if heading_match:
             current = (heading_match.group(2).strip(), [])
             sections.append(current)

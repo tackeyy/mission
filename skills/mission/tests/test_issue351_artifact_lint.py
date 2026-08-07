@@ -41,6 +41,76 @@ def test_empty_sections_at_supported_heading_levels_are_detected():
     ]
 
 
+def test_atx_headings_with_up_to_three_leading_spaces_are_detected():
+    artifact = " # Mission\n\n  ## Plan\n\n   ### Step 3\n"
+
+    findings = MISSION_STATE.lint_artifact_completeness(artifact)
+
+    assert [(item["heading"], item["kind"]) for item in findings] == [
+        ("Mission", "empty-section"),
+        ("Plan", "empty-section"),
+        ("Step 3", "empty-section"),
+    ]
+
+
+def test_four_space_indented_fence_marker_does_not_hide_following_heading():
+    artifact = "# Mission\nDone.\n    ```\n## Score\n"
+
+    findings = MISSION_STATE.lint_artifact_completeness(artifact)
+
+    assert findings == [{
+        "heading": "Score",
+        "kind": "empty-section",
+        "excerpt": "",
+    }]
+
+
+def test_fence_closes_only_with_the_same_marker_character():
+    artifact = "```text\n~~~\n## Inside fence\n```\n## Score\n"
+
+    findings = MISSION_STATE.lint_artifact_completeness(artifact)
+
+    assert findings == [{
+        "heading": "Score",
+        "kind": "empty-section",
+        "excerpt": "",
+    }]
+
+
+def test_fence_closer_must_be_at_least_as_long_as_the_opener():
+    artifact = "````text\n```\n## Inside fence\n````\n## Score\n"
+
+    findings = MISSION_STATE.lint_artifact_completeness(artifact)
+
+    assert findings == [{
+        "heading": "Score",
+        "kind": "empty-section",
+        "excerpt": "",
+    }]
+
+
+def test_fence_closer_rejects_non_whitespace_suffix():
+    artifact = "```text\n```not-a-closer\n## Inside fence\n```\n## Score\n"
+
+    findings = MISSION_STATE.lint_artifact_completeness(artifact)
+
+    assert findings == [{
+        "heading": "Score",
+        "kind": "empty-section",
+        "excerpt": "",
+    }]
+
+
+def test_headings_inside_a_well_formed_fence_are_ignored():
+    artifact = (
+        "# Mission\nDone.\n"
+        "```markdown\n## Example empty heading\n```\n"
+        "## Score\n4.3 from two reviewers.\n"
+    )
+
+    assert MISSION_STATE.lint_artifact_completeness(artifact) == []
+
+
 def test_combined_english_forward_reference_stub_is_detected():
     artifact = "## Score\nRecorded below once review-finalize completes.\n"
 
