@@ -42,6 +42,13 @@ def _two_reviews(tmp_path):
     return a, b
 
 
+def _reviewer_windows():
+    return (
+        "--reviewer-window", "A=2026-07-25T10:00:00Z..2026-07-25T10:05:00Z",
+        "--reviewer-window", "B=2026-07-25T10:00:30Z..2026-07-25T10:04:00Z",
+    )
+
+
 # ===== review-finalize =====
 
 
@@ -50,7 +57,7 @@ def test_review_finalize_aggregates_and_pushes_in_one_command(state_dir, run_cli
     out = tmp_path / "scoring.json"
 
     r = run_cli("review-finalize", "--iteration", "1", "--input", str(a), "--input", str(b),
-                "--out", str(out), "--min-reviewers", "2", cwd=state_dir.parent)
+                "--out", str(out), "--min-reviewers", "2", *_reviewer_windows(), cwd=state_dir.parent)
 
     assert r.returncode == 0, r.stderr
     result = json.loads(r.stdout)
@@ -93,7 +100,7 @@ def test_review_finalize_gate_values_match_split_commands(state_dir, run_cli, re
     out = tmp_path / "scoring.json"
 
     run_cli("review-finalize", "--iteration", "1", "--input", str(a), "--input", str(b),
-            "--out", str(out), cwd=state_dir.parent, check=True)
+            "--out", str(out), *_reviewer_windows(), cwd=state_dir.parent, check=True)
     entry = read_state(state_dir)["score_history"][0]
 
     assert entry["composite"] == 4.2
@@ -109,7 +116,7 @@ def test_review_finalize_gate_values_match_split_commands(state_dir, run_cli, re
 def _push_passing_score(run_cli, state_dir, tmp_path):
     a, b = _two_reviews(tmp_path)
     run_cli("review-finalize", "--iteration", "1", "--input", str(a), "--input", str(b),
-            cwd=state_dir.parent, check=True)
+            *_reviewer_windows(), cwd=state_dir.parent, check=True)
 
 
 def test_closeout_marks_passes_and_returns_next(state_dir, run_cli, read_state, tmp_path):
@@ -168,10 +175,10 @@ def test_review_finalize_push_failure_after_aggregate_keeps_history(state_dir, r
     score_history は増えない (#122 の再 push 保護が review-finalize 経由でも効く)."""
     a, b = _two_reviews(tmp_path)
     run_cli("review-finalize", "--iteration", "1", "--input", str(a), "--input", str(b),
-            cwd=state_dir.parent, check=True)
+            *_reviewer_windows(), cwd=state_dir.parent, check=True)
 
     r = run_cli("review-finalize", "--iteration", "1", "--input", str(a), "--input", str(b),
-                cwd=state_dir.parent)
+                *_reviewer_windows(), cwd=state_dir.parent)
 
     assert r.returncode == 2
     assert "resubmit-reason" in r.stderr

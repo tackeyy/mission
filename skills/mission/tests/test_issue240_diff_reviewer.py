@@ -150,6 +150,10 @@ def test_aggregate_reviews_accepts_matching_min_reviewers(tmp_path, monkeypatch)
         "out": str(tmp_path / "out.json"),
         "json": True,
         "min_reviewers": 2,
+        "reviewer_windows": [
+            "A=2026-08-02T10:00:00Z..2026-08-02T10:05:00Z",
+            "B=2026-08-02T10:00:30Z..2026-08-02T10:04:00Z",
+        ],
     })()
     monkeypatch.chdir(tmp_path)
     MS.cmd_aggregate_reviews(args)

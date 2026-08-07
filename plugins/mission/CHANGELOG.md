@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `aggregate-reviews` now requires `--reviewer-window` for every perspective when two or more reviewers are supplied, exiting 2 with the missing perspectives and required format; `review-finalize` inherits the fail-closed gate and never pushes a score after this aggregation failure. Single-reviewer runs remain exempt, while reported serial execution remains WARN-only (#350).
 - Reviewer output bounds are now observable without becoming a quality gate (#353): `aggregate-reviews` measures each input's `mission-review/1` JSON bytes and template-external prose bytes/ratio, records the evidence and cross-session p50/p90 stats, and emits an exit-0 warning above provisional 20 KB / 0.7 thresholds. Scoring, findings, and agreement results are unchanged.
 
 - Mission audit now classifies explicit owner freeze / intentional close / replacement-switch halt reasons as non-actionable `intentional-freeze-switch` while preserving raw halt counts, reducing false-positive P1 `halted-runs` in operational state-debt audits (#347).
