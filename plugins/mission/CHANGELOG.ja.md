@@ -16,6 +16,7 @@
 
 ### 修正
 
+- state に `artifact_path` がある場合、`aggregate-reviews` が WARN-only の構造 lint を実行するようにした。H1〜H3 の空節と英日 forward-reference のみの stub を検出し、reviewer finding・score・exit status は変更しない。結果は review aggregate evidence と state に記録し、`stats --json` が empty-section / stub-forward-reference / clean の件数を返す。embedded NUL 改ざんや非 regular file を含む path の resolve・relative 判定・read 失敗は `artifact_lint_status=skipped` として fail-open し、過去の lint 観測を削除して stale stats を防ぐ。成功した `clean` 観測とも区別する。空の ATX 見出し、閉じ hash 列、backtick を含む無効な backtick fence info は Markdown 構文に従って解釈する (#351)。
 - `aggregate-reviews` は reviewer が 2 名以上の場合、全 perspective の `--reviewer-window` 報告を必須化し、不足 perspective と報告書式を示して exit 2 とするようにした。`review-finalize` もこの fail-closed gate を継承し、集計失敗後に score を push しない。単一 reviewer は対象外のまま、報告済みの直列実行も従来どおり WARN のみ (#350)。
 - reviewer 出力境界を品質 gate にせず観測可能にした (#353)。`aggregate-reviews` は入力ごとの `mission-review/1` JSON byte 数とテンプレ外散文の byte 数・比率を計測し、evidence と session 横断 p50/p90 stats に記録する。暫定閾値 20 KB / 0.7 超過は exit 0 の WARN に留め、score・finding・agreement の集計結果は変更しない。
 

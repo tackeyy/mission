@@ -38,6 +38,7 @@ import math
 import os
 import re
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -6112,6 +6113,141 @@ def _consensus_score(max_delta: float) -> float:
     return 1.0
 
 
+_ARTIFACT_HEADING_RE = re.compile(r"^ {0,3}(#{1,3})(?:[ \t]+(.*?))?[ \t]*$")
+_ARTIFACT_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+_ARTIFACT_STUB_RE = re.compile(
+    r"(?:"
+    r"recorded below(?:\s+once\s+.+\s+completes)?|"
+    r"once\s+.+\s+completes|"
+    r"will be (?:recorded|populated|filled)|"
+    r"to be (?:recorded|determined)|"
+    r"TBD|"
+    r"後で記録|"
+    r"完了後に記録|"
+    r"review-finalize\s*(?:後|完了後)(?:に記録)?"
+    r")[.!。]?[ \t]*",
+    re.IGNORECASE,
+)
+_ARTIFACT_LINT_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _read_regular_artifact_utf8(path: Path) -> str:
+    """Read a bounded regular file from one descriptor without blocking on FIFOs."""
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise OSError(f"artifact path is not a regular file: {path}")
+        chunks = []
+        remaining = _ARTIFACT_LINT_MAX_BYTES + 1
+        while remaining:
+            chunk = os.read(fd, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        if len(payload) > _ARTIFACT_LINT_MAX_BYTES:
+            raise OSError(
+                "artifact exceeds lint size limit "
+                f"({_ARTIFACT_LINT_MAX_BYTES} bytes): {path}"
+            )
+        return payload.decode("utf-8")
+    finally:
+        os.close(fd)
+
+
+def lint_artifact_completeness(artifact_text: str) -> list[dict]:
+    """Detect empty H1-H3 sections and forward-reference-only stubs."""
+    sections: list[tuple[str, list[str]]] = []
+    current: tuple[str, list[str]] | None = None
+    fence_char: str | None = None
+    fence_length = 0
+    for line in artifact_text.splitlines():
+        fence_match = _ARTIFACT_FENCE_RE.match(line)
+        if fence_match:
+            marker = fence_match.group(1)
+            suffix = fence_match.group(2)
+            if fence_char is None:
+                # CommonMark: a backtick fence info string containing a backtick
+                # is not a valid opener. Tilde-fence info has no such restriction.
+                if marker[0] != "`" or "`" not in suffix:
+                    fence_char = marker[0]
+                    fence_length = len(marker)
+            elif (
+                marker[0] == fence_char
+                and len(marker) >= fence_length
+                and not suffix.strip()
+            ):
+                fence_char = None
+                fence_length = 0
+        heading_match = None if fence_char is not None else _ARTIFACT_HEADING_RE.match(line)
+        if heading_match:
+            raw_heading = (heading_match.group(2) or "").strip()
+            # An optional ATX closing sequence is recognized only when separated
+            # from the title by whitespace. Thus `Score###` remains literal text.
+            heading = (
+                ""
+                if re.fullmatch(r"#+", raw_heading)
+                else re.sub(r"[ \t]+#+[ \t]*$", "", raw_heading).strip()
+            )
+            current = (heading, [])
+            sections.append(current)
+        elif current is not None:
+            current[1].append(line)
+
+    findings = []
+    for heading, body_lines in sections:
+        content_lines = [line.strip() for line in body_lines if line.strip()]
+        if not content_lines:
+            findings.append({
+                "heading": heading,
+                "kind": "empty-section",
+                "excerpt": "",
+            })
+            continue
+        if all(_ARTIFACT_STUB_RE.fullmatch(line) for line in content_lines):
+            findings.append({
+                "heading": heading,
+                "kind": "stub-forward-reference",
+                "excerpt": "\n".join(content_lines),
+            })
+    return findings
+
+
+def _lint_state_artifact(cwd: Path, data: dict) -> tuple[list[dict], str]:
+    """Lint an explicitly configured top-level artifact_path, or skip it."""
+    artifact_path = str(data.get("artifact_path") or "").strip()
+    if not artifact_path:
+        return [], "skipped"
+    try:
+        path = Path(artifact_path).expanduser()
+        if not path.is_absolute():
+            path = cwd / path
+        path = path.resolve()
+        try:
+            path.relative_to(cwd.resolve())
+        except UnicodeError:
+            raise
+        except ValueError:
+            print(
+                "WARN #351: artifact lint skipped: "
+                f"path outside project root: {artifact_path}",
+                file=sys.stderr,
+            )
+            return [], "skipped"
+        artifact_text = _read_regular_artifact_utf8(path)
+    except (OSError, UnicodeError, ValueError, TypeError, RuntimeError) as exc:
+        print(f"WARN #351: artifact lint skipped: {exc}", file=sys.stderr)
+        return [], "skipped"
+    findings = lint_artifact_completeness(artifact_text)
+    return findings, "findings" if findings else "clean"
+
+
 def cmd_aggregate_reviews(args):
     """Aggregate mission-review/1 reviewer JSON into push-score compatible scoring JSON."""
     cwd = Path.cwd()
@@ -6248,7 +6384,19 @@ def cmd_aggregate_reviews(args):
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
-        # #338: 観測結果を state へ永続化し stats で横断集計可能にする。
+        artifact_lint, artifact_lint_status = _lint_state_artifact(cwd, data)
+        if artifact_lint_status == "skipped":
+            data.pop("artifact_lint", None)
+        else:
+            data["artifact_lint"] = artifact_lint
+        data["artifact_lint_status"] = artifact_lint_status
+        for finding in artifact_lint:
+            print(
+                "WARN #351: artifact lint: "
+                f"{finding['kind']} at {finding['heading']}",
+                file=sys.stderr,
+            )
+        # #338: 観測結果を state へ永続化し stats で横断集計可能にする (gate 不変)
         data["last_parallel_execution"] = parallel_execution
         prior_metrics = [
             record for record in data.get("reviewer_output_records", [])
@@ -6280,6 +6428,8 @@ def cmd_aggregate_reviews(args):
             "open_high": open_high,
             "reviewer_windows": reviewer_windows_public,
             "parallel_execution": parallel_execution,
+            "artifact_lint": artifact_lint,
+            "artifact_lint_status": artifact_lint_status,
             "context_mode_expected": context_mode_expected,
             "context_manifest_generated": context_manifest_generated,
             "reviewer_output_metrics": reviewer_output_metrics,
@@ -6306,6 +6456,8 @@ def cmd_aggregate_reviews(args):
         "items": items,
         "review_agreement": review_agreement,
         "parallel_execution": parallel_execution,
+        "artifact_lint": artifact_lint,
+        "artifact_lint_status": artifact_lint_status,
     }
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -7653,6 +7805,29 @@ def _phase_duration_totals(states: list[dict]) -> dict:
     return dict(sorted(totals.items()))
 
 
+def _artifact_lint_counts(states: list[dict]) -> dict:
+    counts = {
+        "empty_section": 0,
+        "stub_forward_reference": 0,
+        "clean": 0,
+    }
+    for state in states:
+        lint = state.get("artifact_lint")
+        if not isinstance(lint, list):
+            continue
+        if not lint:
+            counts["clean"] += 1
+            continue
+        for finding in lint:
+            if not isinstance(finding, dict):
+                continue
+            if finding.get("kind") == "empty-section":
+                counts["empty_section"] += 1
+            elif finding.get("kind") == "stub-forward-reference":
+                counts["stub_forward_reference"] += 1
+    return counts
+
+
 def _aggregate(
     states: list[dict], duplicate_state_group_count: int = 0,
     *, observation_now: datetime | None = None,
@@ -7688,6 +7863,7 @@ def _aggregate(
             "by_cli_version": {},
             "by_halt_category": {},
             "parallel_review_counts": {"true": 0, "false": 0, "unknown": 0},
+            "artifact_lint_counts": _artifact_lint_counts([]),
             "bounded_context_counts": {
                 "expected_bounded": 0,
                 "manifest_generated": 0,
@@ -7784,6 +7960,7 @@ def _aggregate(
         "pass_rate": pass_rate_summary["raw_pass_rate"],
         "forced_pass_count": forced_pass_count,
         "parallel_review_counts": parallel_review_counts,
+        "artifact_lint_counts": _artifact_lint_counts(states),
         "bounded_context_counts": bounded_context_counts,
         "reviewer_output_stats": _reviewer_output_stats(states),
         "forced_pass_rate": forced_pass_count / pass_count if pass_count else None,
