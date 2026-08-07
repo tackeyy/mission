@@ -166,9 +166,22 @@ if [ -d "$SESSIONS_DIR" ]; then
     # env が無い環境のみ従来の pid 照合に fallback。
     sf_sid=$(basename "$sf" .json)
     s_pid=$(jq -r '.pid // empty' "$sf" 2>/dev/null || echo "")
+    s_lease_owner=$(jq -r '.owner_session_id // empty' "$sf" 2>/dev/null || echo "")
+    s_lease_id=$(jq -r '.lease_id // empty' "$sf" 2>/dev/null || echo "")
+    s_lease_epoch=$(jq -r '.fencing_epoch // empty' "$sf" 2>/dev/null || echo "")
+    s_lease_expires=$(jq -r '.lease_expires_at // empty' "$sf" 2>/dev/null || echo "")
+    LEASE_PRESENT=false
+    LEASE_UNEXPIRED=false
+    if [ -n "$s_lease_owner" ] && [ -n "$s_lease_id" ] && [ -n "$s_lease_epoch" ] && [ -n "$s_lease_expires" ]; then
+      LEASE_PRESENT=true
+      LEASE_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" -u "$s_lease_expires" +%s 2>/dev/null || date -u -d "$s_lease_expires" +%s 2>/dev/null || echo "")
+      if [ -n "$LEASE_EPOCH" ] && [ "$LEASE_EPOCH" -gt "$(date +%s)" ] 2>/dev/null; then
+        LEASE_UNEXPIRED=true
+      fi
+    fi
     if [ -n "$HOOK_SID" ]; then
       [ "$sf_sid" != "$HOOK_SID" ] && continue   # 自分の session でない
-    elif [ -n "$s_pid" ] && [ "$s_pid" != "null" ] && [ -n "${AGENT_PID:-}" ]; then
+    elif [ "$LEASE_PRESENT" != "true" ] && [ -n "$s_pid" ] && [ "$s_pid" != "null" ] && [ -n "${AGENT_PID:-}" ]; then
       if [ "$s_pid" != "$AGENT_PID" ]; then
         continue
       fi
@@ -176,7 +189,7 @@ if [ -d "$SESSIONS_DIR" ]; then
 
     # PID alive 照合 (env なし pid fallback 時のみ)。HOOK_SID 一致時は自セッション確定のため
     # スキップ — resume/compaction で PID が変わっても自分の state を block できる (M-1)。
-    if [ -z "$HOOK_SID" ] && [ -n "$s_pid" ] && [ "$s_pid" != "null" ] && [ "$s_pid" -gt 0 ] 2>/dev/null; then
+    if [ "$LEASE_PRESENT" != "true" ] && [ -z "$HOOK_SID" ] && [ -n "$s_pid" ] && [ "$s_pid" != "null" ] && [ "$s_pid" -gt 0 ] 2>/dev/null; then
       if ! kill -0 "$s_pid" 2>/dev/null; then
         _mission_halt_session "$sf" "orphan: pid $s_pid dead" || true
         continue
@@ -185,6 +198,7 @@ if [ -d "$SESSIONS_DIR" ]; then
 
     HAS_ACTIVE=true
     SESSION_FILE_TO_BLOCK="$sf"
+    SESSION_LEASE_UNEXPIRED="$LEASE_UNEXPIRED"
     break
   done
 
@@ -208,7 +222,9 @@ if [ -d "$SESSIONS_DIR" ]; then
         [ "$STALE_HALT_SEC" -lt 300 ] && STALE_HALT_SEC=10800
         if [ "$DIFF" -gt "$STALE_HALT_SEC" ] 2>/dev/null; then
           AWAITING_USER=$(jq -r '.awaiting_user // false' "$SESSION_FILE_TO_BLOCK" 2>/dev/null || echo "false")
-          if [ "$AWAITING_USER" = "true" ]; then
+          if [ "${SESSION_LEASE_UNEXPIRED:-false}" = "true" ]; then
+            STALE="[WARN: state が $(( DIFF / 60 ))分 未更新だが session lease は有効なため stale auto-halt を保留] "
+          elif [ "$AWAITING_USER" = "true" ]; then
             STALE="[WARN: state が $(( DIFF / 60 ))分 未更新だが awaiting_user=true のため stale auto-halt を保留] "
           else
           # 3h (または MISSION_STALE_HALT_SECONDS) 超: state CLI の lock/terminal helper で halt

@@ -73,7 +73,15 @@ def _resolve(cwd, path, status="resolved", extra=None):
     args = ["resolve-archive", "--path", str(path), "--status", status, "--json"]
     if extra:
         args += list(extra)
-    return _run(args, cwd=cwd)
+    env_extra = None
+    state_path = Path(path)
+    if not state_path.is_absolute():
+        state_path = Path(cwd) / state_path
+    if state_path.exists():
+        lease_id = json.loads(state_path.read_text(encoding="utf-8")).get("lease_id")
+        if lease_id:
+            env_extra = {"MISSION_LEASE_ID": lease_id}
+    return _run(args, cwd=cwd, env_extra=env_extra)
 
 
 # ---------------------------------------------------------------------------

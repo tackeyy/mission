@@ -67,6 +67,25 @@ def test_self_lease_renews_without_changing_epoch(monkeypatch):
     assert state["lease_expires_at"] == "2026-08-07T12:25:00Z"
 
 
+def test_same_owner_without_fencing_token_cannot_renew(monkeypatch):
+    monkeypatch.setenv("MISSION_STATE_NOW", "2026-08-07T12:10:00Z")
+    monkeypatch.delenv("MISSION_LEASE_ID", raising=False)
+    state = _lease_state()
+
+    with pytest.raises(MISSION_STATE.LeaseRejectedError, match="lease held by owner-a until"):
+        MISSION_STATE.acquire_or_verify_lease(state, "owner-a")
+
+
+def test_clock_rollback_renew_does_not_shorten_expiry(monkeypatch):
+    monkeypatch.setenv("MISSION_STATE_NOW", "2026-08-07T11:00:00Z")
+    monkeypatch.setenv("MISSION_LEASE_ID", "lease-a")
+    state = _lease_state(lease_expires_at="2026-08-07T12:15:00Z")
+
+    MISSION_STATE.acquire_or_verify_lease(state, "owner-a")
+
+    assert state["lease_expires_at"] == "2026-08-07T12:15:00Z"
+
+
 def test_pid_reuse_cannot_write_foreign_unexpired_lease(monkeypatch):
     monkeypatch.setenv("MISSION_STATE_NOW", "2026-08-07T12:05:00Z")
     monkeypatch.setenv("MISSION_LEASE_ID", "lease-b")
@@ -146,6 +165,41 @@ def test_explicit_stale_token_is_rejected_by_cli(tmp_path, run_cli):
 
     assert stale.returncode == 2
     assert "lease held by session-a until" in stale.stderr
+
+
+def test_same_session_cli_without_token_is_rejected(tmp_path, run_cli):
+    owner = {"MISSION_SESSION_ID": "session-a", "MISSION_LEASE_ID": "lease-a"}
+    run_cli("init", "lease test", "--complexity", "Standard", cwd=tmp_path,
+            env_extra=owner, check=True)
+
+    missing = run_cli(
+        "set", "iteration=1", cwd=tmp_path,
+        env_extra={"MISSION_SESSION_ID": "session-a", "MISSION_LEASE_ID": None},
+    )
+
+    assert missing.returncode == 2
+    assert "lease held by session-a until" in missing.stderr
+
+
+def test_same_pid_fallback_session_without_token_is_rejected(tmp_path, run_cli):
+    sessionless = {
+        "MISSION_SESSION_ID": None,
+        "CLAUDE_CODE_SESSION_ID": None,
+        "CODEX_THREAD_ID": None,
+    }
+    initialized = run_cli(
+        "init", "fallback lease", "--complexity", "Standard", cwd=tmp_path,
+        env_extra={**sessionless, "MISSION_LEASE_ID": "fallback-lease"}, check=True,
+    )
+    assert json.loads(initialized.stdout)["session_id"].startswith("pid-")
+
+    missing = run_cli(
+        "set", "iteration=1", cwd=tmp_path,
+        env_extra={**sessionless, "MISSION_LEASE_ID": None},
+    )
+
+    assert missing.returncode == 2
+    assert "lease held by pid-" in missing.stderr
 
 
 def test_cleanup_stale_uses_expired_lease_not_dead_pid(tmp_path, run_cli):
@@ -248,6 +302,41 @@ def test_resume_takes_over_expired_foreign_lease_and_records_reason(tmp_path, ru
     assert updated["fencing_epoch"] == 9
     assert updated["owner_session_id"] == "session-a"
     assert updated["lease_history"][-1]["reason"] == "resume"
+
+
+def test_resume_expired_foreign_lease_ignores_live_legacy_pid_without_force(
+    tmp_path, run_cli,
+):
+    sessions = tmp_path / ".mission-state" / "sessions"
+    sessions.mkdir(parents=True)
+    state = _lease_state(
+        session_id="session-a",
+        owner_session_id="old-runner",
+        lease_id="old-lease",
+        lease_expires_at="2026-08-07T11:59:00Z",
+        pid=4242,
+        project_root=str(tmp_path),
+        phase="executing",
+        passes=False,
+        halt_reason="",
+        score_history=[],
+    )
+    (sessions / "session-a.json").write_text(json.dumps(state))
+
+    resumed = run_cli(
+        "resume", cwd=tmp_path,
+        env_extra={
+            "MISSION_SESSION_ID": "session-a",
+            "MISSION_LEASE_ID": "new-lease",
+            "MISSION_STATE_NOW": "2026-08-07T12:00:00Z",
+            "MISSION_FORCE_PID_IS_AGENT": "1",
+        },
+    )
+
+    assert resumed.returncode == 0, resumed.stderr
+    updated = json.loads((sessions / "session-a.json").read_text())
+    assert updated["owner_session_id"] == "session-a"
+    assert updated["fencing_epoch"] == 4
 
 
 def test_concurrent_renew_is_serialized_and_keeps_single_owner(tmp_path, run_cli):

@@ -513,6 +513,17 @@ def _lease_expiry(now: datetime) -> str:
     return expires.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _renewed_lease_expiry(existing_expiry: str, now: datetime) -> str:
+    """Renew without moving the fencing deadline backwards on clock rollback."""
+    candidate = now + timedelta(seconds=_lease_ttl_seconds())
+    existing = parse_iso_datetime(existing_expiry)
+    if existing is not None:
+        if existing.tzinfo is None:
+            existing = existing.replace(tzinfo=timezone.utc)
+        candidate = max(candidate, existing.astimezone(timezone.utc))
+    return candidate.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _lease_fields_present(state: dict) -> bool:
     return all(
         state.get(key) not in (None, "")
@@ -534,16 +545,16 @@ def acquire_or_verify_lease(
     session_id: str,
     *,
     reason: str = "mutating-command",
+    lease_id: str | None = None,
 ) -> LeaseDecision:
     """Acquire or verify the fenced lease while the caller holds StateLock.
 
-    `MISSION_LEASE_ID` is the explicit fencing token contract. Existing callers
-    that predate leases may omit it; only the current owner session may then
-    inherit its token. A foreign writer must wait for expiry and receives a new
-    token with an incremented epoch.
+    `MISSION_LEASE_ID` is the explicit fencing token contract. Only lease-free
+    legacy state may acquire without one. A foreign writer must wait for expiry
+    and receives a new token with an incremented epoch.
     """
     now = _lease_now()
-    presented_lease_id = os.environ.get("MISSION_LEASE_ID")
+    presented_lease_id = lease_id if lease_id is not None else os.environ.get("MISSION_LEASE_ID")
 
     lease_field_count = sum(state.get(key) not in (None, "") for key in LEASE_STATE_FIELDS)
     if 0 < lease_field_count < len(LEASE_STATE_FIELDS):
@@ -566,9 +577,11 @@ def acquire_or_verify_lease(
         )
 
     same_owner = owner == session_id
-    token_matches = presented_lease_id in (None, current_lease_id) if same_owner else False
+    token_matches = presented_lease_id == current_lease_id if same_owner else False
     if same_owner and token_matches:
-        state["lease_expires_at"] = _lease_expiry(now)
+        state["lease_expires_at"] = _renewed_lease_expiry(
+            str(state["lease_expires_at"]), now
+        )
         return LeaseDecision("renewed", current_lease_id, epoch)
     if same_owner:
         raise LeaseRejectedError(
@@ -706,6 +719,7 @@ def _is_session_state_path(path: Path) -> bool:
 
 _LEASE_KEYS = (*LEASE_STATE_FIELDS, "lease_history")
 _LEASE_WRITE_REASON: str | None = None
+_PROCESS_LEASE_IDS: dict[str, str] = {}
 
 
 @contextlib.contextmanager
@@ -732,15 +746,19 @@ def _enforce_session_lease_for_write(path: Path, data: dict) -> None:
         except (OSError, json.JSONDecodeError):
             latest = None
     lease_state = latest if latest is not None else data
+    path_key = str(path.resolve())
+    presented_lease_id = os.environ.get("MISSION_LEASE_ID") or _PROCESS_LEASE_IDS.get(path_key)
     try:
-        acquire_or_verify_lease(
+        decision = acquire_or_verify_lease(
             lease_state,
             resolve_session_id(),
             reason=_LEASE_WRITE_REASON or "mutating-command",
+            lease_id=presented_lease_id,
         )
     except LeaseRejectedError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         raise SystemExit(2)
+    _PROCESS_LEASE_IDS[path_key] = decision.lease_id
     for key in _LEASE_KEYS:
         if key in lease_state:
             data[key] = lease_state[key]
@@ -6766,7 +6784,12 @@ def cmd_refresh_pid(args):
         now = iso_now()
         close_activity_for_resume(data, now)
         old_pid = data.get("pid")
-        if old_pid and isinstance(old_pid, int) and old_pid != new_pid:
+        if (
+            not _lease_fields_present(data)
+            and old_pid
+            and isinstance(old_pid, int)
+            and old_pid != new_pid
+        ):
             # PID 再利用対策: comm が agent CLI でなければ別プロセス → 安全に継承可
             if _pid_is_agent(old_pid) and not args.force:
                 print(

@@ -106,6 +106,60 @@ def test_hook_orphan_halt_when_envless_and_pid_dead(tmp_path):
     assert st["halt_category"] == "stale"
 
 
+def test_hook_does_not_halt_unexpired_lease_when_diagnostic_pid_is_dead(tmp_path):
+    """#354: lease ownership is primary; a dead diagnostic PID cannot orphan an active lease."""
+    import datetime
+
+    expires = (
+        datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=10)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _write_session(
+        tmp_path,
+        "leased",
+        pid=999999,
+        owner_session_id="leased",
+        lease_id="lease-token",
+        fencing_epoch=2,
+        lease_expires_at=expires,
+        updated_at=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+
+    result = _run_hook(tmp_path, {})
+
+    state = json.loads((tmp_path / ".mission-state" / "sessions" / "leased.json").read_text())
+    assert "block" in result.stdout
+    assert state["loop_active"] is True
+    assert state["halt_reason"] == ""
+
+
+def test_hook_does_not_idle_autohalt_unexpired_lease(tmp_path):
+    """#354: even a stale updated_at cannot override an unexpired lease."""
+    import datetime
+
+    expires = (
+        datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=10)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _write_session(
+        tmp_path,
+        "cc-leased-stale",
+        pid=999999,
+        owner_session_id="cc-leased-stale",
+        lease_id="lease-token",
+        fencing_epoch=2,
+        lease_expires_at=expires,
+        updated_at="2020-01-01T00:00:00Z",
+    )
+
+    result = _run_hook(tmp_path, {"CLAUDE_CODE_SESSION_ID": "leased-stale"})
+
+    state = json.loads(
+        (tmp_path / ".mission-state" / "sessions" / "cc-leased-stale.json").read_text()
+    )
+    assert "block" in result.stdout
+    assert state["loop_active"] is True
+    assert state["halt_reason"] == ""
+
+
 def test_hook_warns_on_stale_state(tmp_path):
     """F-5: updated_at が1h超〜3h未満の state は block 理由に WARN を前置する.
     (3h 超は Issue #1 により auto-halt に変更されたため、このテストは2時間前のタイムスタンプを使う)

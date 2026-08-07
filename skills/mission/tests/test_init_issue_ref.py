@@ -251,10 +251,14 @@ def test_s3_same_session_id_no_warn_on_resume(tmp_path):
     r_a = _run(["init", "S3 resume test", "--issue-ref", "gh:repo#99"],
                cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "session-resume"})
     assert r_a.returncode == 0, r_a.stderr
+    lease_id = json.loads(r_a.stdout)["lease_id"]
 
     # 同一 session_id で再度 init (resume 相当)
     r_resume = _run(["init", "S3 resume test again", "--issue-ref", "gh:repo#99"],
-                    cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "session-resume"})
+                    cwd=tmp_path, env_extra={
+                        "MISSION_SESSION_ID": "session-resume",
+                        "MISSION_LEASE_ID": lease_id,
+                    })
     assert r_resume.returncode == 0, r_resume.stderr
 
     # 自分自身の旧 state を誤検出した WARN が出ないこと

@@ -44,6 +44,9 @@ def test_push_score_appends_multiple_in_order(state_dir, run_cli, read_state):
 
 def test_parallel_push_score_preserves_all_entries(state_dir, run_cli, read_state):
     """#98: 同一 session への並列 push-score で score_history が欠損しない。"""
+    # Parallel writers must share the fencing token acquired before fan-out.
+    run_cli("set", "iteration=0", cwd=state_dir.parent, check=True)
+
     def push(iteration):
         return run_legacy_push_score(
             run_cli,
