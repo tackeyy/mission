@@ -62,6 +62,24 @@ def test_detect_spend_limit_rejects_unrelated_failures():
     assert runner.detect_spend_limit({"api_error_status": 500, "result": "server error"}, "") is False
 
 
+def test_detect_spend_limit_rejects_successful_rate_limit_discussion():
+    runner = _load_official_goal_runner()
+
+    assert runner.detect_spend_limit(
+        {"result": "The rate limit handler now passes all tests."},
+        "",
+    ) is False
+
+
+def test_detect_spend_limit_rejects_negated_usage_limit_diagnosis():
+    runner = _load_official_goal_runner()
+
+    assert runner.detect_spend_limit(
+        {"result": "Rejected hypothesis: prior API usage limit was not the current cause."},
+        "",
+    ) is False
+
+
 def test_spend_limit_classification_is_identical_for_both_arms():
     runner = _load_official_goal_runner()
     fixture_stdout = json.dumps(_spend_limit_fixture())
