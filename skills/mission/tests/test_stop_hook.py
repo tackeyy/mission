@@ -148,6 +148,51 @@ def test_envless_hook_rejects_pid_filename_with_foreign_lease_owner(tmp_path):
     assert "block" not in result.stdout
 
 
+def test_envless_hook_falls_back_to_legacy_after_exact_owner_mismatch(tmp_path):
+    """#354: an invalid exact fenced state must not hide the same-PID legacy state."""
+    _write_session(
+        tmp_path, "pid-4242", mission="invalid-exact",
+        **_lease_fields("pid-9999"),
+    )
+    _write_session(tmp_path, "legacy-own", mission="legacy-own", pid=4242)
+
+    result = _run_hook(tmp_path, {"MISSION_HOOK_AGENT_PID": "4242"})
+
+    assert "block" in result.stdout
+    assert "legacy-own" in result.stdout
+    assert "invalid-exact" not in result.stdout
+
+
+def test_envless_hook_falls_back_to_legacy_after_terminal_exact_state(tmp_path):
+    """#354: a terminal exact state must not hide the same-PID legacy state."""
+    _write_session(
+        tmp_path, "pid-4242", mission="terminal-exact", passes=True,
+        **_lease_fields("pid-4242"),
+    )
+    _write_session(tmp_path, "legacy-own", mission="legacy-own", pid=4242)
+
+    result = _run_hook(tmp_path, {"MISSION_HOOK_AGENT_PID": "4242"})
+
+    assert "block" in result.stdout
+    assert "legacy-own" in result.stdout
+    assert "terminal-exact" not in result.stdout
+
+
+def test_envless_hook_prefers_valid_exact_fenced_state_over_legacy(tmp_path):
+    """#354: the compatibility fallback cannot outrank a valid fenced state."""
+    _write_session(
+        tmp_path, "pid-4242", mission="valid-exact",
+        **_lease_fields("pid-4242"),
+    )
+    _write_session(tmp_path, "aaa-legacy", mission="legacy-own", pid=4242)
+
+    result = _run_hook(tmp_path, {"MISSION_HOOK_AGENT_PID": "4242"})
+
+    assert "block" in result.stdout
+    assert "valid-exact" in result.stdout
+    assert "legacy-own" not in result.stdout
+
+
 def test_hook_blocks_own_session_even_if_pid_dead(tmp_path):
     """sid 一致なら state の pid が dead (resume/compaction で PID 変化) でも block する (M-1)."""
     _write_session(tmp_path, "cc-mine", pid=999999)  # dead pid
