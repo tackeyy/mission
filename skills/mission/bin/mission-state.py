@@ -83,6 +83,7 @@ from worktree_archive import validate_worktree_archive_bundle  # noqa: E402
 from state_snapshot import SnapshotError, consume_snapshot_document  # noqa: E402
 
 SCHEMA_VERSION = 2  # v1: 旧 schema (project_root/pid なし), v2: A-1/A-2/B-3 追加
+GOAL_DISPATCH_MODES = {"inline", "host-native"}
 
 # #186: 実行中の mission-state.py のバージョン。.claude-plugin/plugin.json 等の manifest と
 # 一致させる (release 時に手動 bump。test_doc_consistency.py::test_release_version_paths_are_in_sync
@@ -482,6 +483,129 @@ def resolve_agent() -> str:
     if os.environ.get("CODEX_THREAD_ID"):
         return "codex"
     return "cli"
+
+
+def detect_host() -> str:
+    """Return the native agent host used by goal dispatch guidance."""
+    if os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_CODE_SESSION_ID"):
+        return "claude-code"
+    if os.environ.get("CODEX_THREAD_ID"):
+        return "codex"
+    return "unknown"
+
+
+def _read_routing_config(path: Path, source: str) -> dict | None:
+    """Read the version-1 minimal routing config without a YAML dependency."""
+    if not path.is_file():
+        return None
+    values: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        reason = f"routing config unreadable at {source}: {exc.__class__.__name__}"
+        print(f"WARN #355: {reason}; using inline", file=sys.stderr)
+        return {"mode": "inline", "source": source, "fallback_reason": reason}
+    for raw_line in lines:
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if ":" not in line:
+            reason = f"invalid routing config syntax at {source}"
+            print(f"WARN #355: {reason}; using inline", file=sys.stderr)
+            return {"mode": "inline", "source": source, "fallback_reason": reason}
+        key, raw_value = line.split(":", 1)
+        key = key.strip()
+        value = raw_value.strip().strip("'\"")
+        if key not in {"version", "goal_dispatch"}:
+            reason = f"unknown routing config key '{key}' at {source}"
+            print(f"WARN #355: {reason}; using inline", file=sys.stderr)
+            return {"mode": "inline", "source": source, "fallback_reason": reason}
+        values[key] = value
+    if values.get("version") != "1":
+        reason = f"unsupported routing config version '{values.get('version')}' at {source}"
+        print(f"WARN #355: {reason}; using inline", file=sys.stderr)
+        return {"mode": "inline", "source": source, "fallback_reason": reason}
+    mode = values.get("goal_dispatch")
+    if mode not in GOAL_DISPATCH_MODES:
+        reason = f"invalid goal_dispatch '{mode}' at {source}"
+        print(f"WARN #355: {reason}; using inline", file=sys.stderr)
+        return {"mode": "inline", "source": source, "fallback_reason": reason}
+    return {"mode": mode, "source": source, "fallback_reason": None}
+
+
+def _routing_config_decision(cwd: Path | None = None) -> dict:
+    root = cwd or Path.cwd()
+    project = _read_routing_config(root / ".mission" / "routing.yml", "project:.mission/routing.yml")
+    if project is not None:
+        return project
+    user = _read_routing_config(
+        Path.home() / ".config" / "mission" / "routing.yml",
+        "user:~/.config/mission/routing.yml",
+    )
+    if user is not None:
+        return user
+    return {"mode": "inline", "source": "default:inline", "fallback_reason": None}
+
+
+def load_routing_config() -> dict:
+    """Load the effective minimal routing config (project > user > inline)."""
+    return {"goal_dispatch": _routing_config_decision()["mode"]}
+
+
+def _resolve_goal_dispatch(mission: str, cli_mode: str | None, cwd: Path) -> dict:
+    explicit = re.search(r"(?i)(?:^|[;\s])goal[_ -]dispatch\s*[:=]\s*([a-z][a-z0-9-]*)", mission or "")
+    if explicit:
+        mode = explicit.group(1).lower()
+        if mode not in GOAL_DISPATCH_MODES:
+            reason = f"invalid goal_dispatch '{mode}' in mission user instruction"
+            print(f"WARN #355: {reason}; using inline", file=sys.stderr)
+            return {"mode": "inline", "source": "mission:user-explicit", "fallback_reason": reason}
+        return {"mode": mode, "source": "mission:user-explicit", "fallback_reason": None}
+    if cli_mode is not None:
+        return {"mode": cli_mode, "source": "cli:--goal-dispatch", "fallback_reason": None}
+    return _routing_config_decision(cwd)
+
+
+def _goal_dispatch_route_fields(data: dict) -> dict:
+    requested = data.get("goal_dispatch_requested") or "inline"
+    source = data.get("goal_dispatch_source") or "default:inline"
+    fallback_reason = data.get("goal_dispatch_resolution_fallback_reason")
+    host = detect_host()
+    effective = requested
+    if requested == "host-native" and host == "unknown":
+        effective = "inline"
+        fallback_reason = "host-native unavailable: host detection returned unknown"
+    fields = {
+        "goal_dispatch_requested": requested,
+        "goal_dispatch_effective": effective,
+        "goal_dispatch_source": source,
+        "goal_dispatch_host": host,
+    }
+    if fallback_reason:
+        fields["goal_dispatch_fallback_reason"] = fallback_reason
+    return fields
+
+
+def _inline_goal_guidance(prefix: str = "") -> str:
+    return (
+        f"{prefix}goal 契約の 5 見出し (Goal / Result / Evidence / Assumptions / "
+        "Stop Condition) でタスクを直接完遂し、最終報告に goal へルーティングした旨を明記する。"
+        "mission の pass は主張しない。mission 機構が必要なら --force-mission で再 init する。"
+    )
+
+
+def _goal_dispatch_guidance(fields: dict, inline_prefix: str = "") -> str:
+    if fields["goal_dispatch_effective"] == "host-native":
+        if fields["goal_dispatch_host"] == "claude-code":
+            return (
+                "mission ループを続けず、実行ホストの /goal <目標文> へ目標を委譲して完遂する。"
+                "最終報告に goal へルーティングした旨を明記し、mission の pass は主張しない。"
+            )
+        return (
+            "mission ループを続けず、実行ホストの goal mode に目標を登録して完遂する。"
+            "最終報告に goal へルーティングした旨を明記し、mission の pass は主張しない。"
+        )
+    return _inline_goal_guidance(inline_prefix)
 
 
 def _sanitize_sid(sid: str) -> str:
@@ -4004,6 +4128,11 @@ def cmd_log_specialist_invocation(args):
 
 def cmd_init(args):
     cwd = Path.cwd()
+    goal_dispatch = _resolve_goal_dispatch(
+        args.mission,
+        getattr(args, "goal_dispatch", None),
+        cwd,
+    )
     try:
         mission_state_root = _ensure_regular_directory_path(cwd, (".mission-state",))
         mission_state_root.mkdir(parents=True, exist_ok=True)
@@ -4015,6 +4144,13 @@ def cmd_init(args):
     initial = {
         "mission": args.mission,
         "mission_id": mission_id(args.mission),
+        "goal_dispatch_requested": goal_dispatch["mode"],
+        "goal_dispatch_source": goal_dispatch["source"],
+        **(
+            {"goal_dispatch_resolution_fallback_reason": goal_dispatch["fallback_reason"]}
+            if goal_dispatch.get("fallback_reason")
+            else {}
+        ),
         "session_role": getattr(args, "session_role", None) or "implementer",  # #311
         **({"force_mission": True} if getattr(args, "force_mission", False) else {}),  # #325
         "subtasks": [],
@@ -4147,18 +4283,14 @@ def cmd_init(args):
         and not initial.get("review_tier_signals")
         and not getattr(args, "issue_ref", None)
     ):
+        dispatch_fields = _goal_dispatch_route_fields(initial)
         print(json.dumps({
             "route": "goal",
             "complexity": "Simple",
             "mission_id": initial["mission_id"],
             "reason": "Simple complexity with no irreversible/security signals (#276)",
-            "guidance": (
-                "mission ループを起動しない。goal 契約の 5 見出し "
-                "(Goal / Result / Evidence / Assumptions / Stop Condition) で"
-                "タスクを直接完遂し、最終報告に goal へルーティングした旨を明記する。"
-                "mission の pass は主張しない。mission 機構が必要なら "
-                "--force-mission で再 init する。"
-            ),
+            "guidance": _goal_dispatch_guidance(dispatch_fields, "mission ループを起動しない。"),
+            **dispatch_fields,
         }, ensure_ascii=False, indent=2))
         return
 
@@ -4595,15 +4727,20 @@ def _derive_next_action(data: dict) -> dict:
         and (data.get("session_role") or "implementer") == "implementer"
         and not (data.get("score_history") or [])
     ):
+        dispatch_fields = _goal_dispatch_route_fields(data)
+        dispatch_guidance = _goal_dispatch_guidance(dispatch_fields)
         return {
             "next_action": "route-to-goal",
             "summary": (
-                "Simple + リスクシグナルなし: mission ループを続けず goal 契約で直接完遂する。"
+                f"Simple + リスクシグナルなし: {dispatch_guidance}"
                 "state を routed-goal で閉じ (pass-rate 対象外)、最終報告に routing を明記する。"
                 "mission 機構が必要なら --force-mission で再 init (#325)"
             ),
-            "command_hint": "mission-state.py mark-halt --reason 'routed-to-goal (#325)' --category routed-goal → goal 契約 (Goal/Result/Evidence/Assumptions/Stop Condition) で完遂",
-            "details": {"complexity": "Simple", "route": "goal"},
+            "command_hint": (
+                "mission-state.py mark-halt --reason 'routed-to-goal (#325)' "
+                f"--category routed-goal → {dispatch_guidance}"
+            ),
+            "details": {"complexity": "Simple", "route": "goal", **dispatch_fields},
         }
     if phase == "planning":
         # #339: Standard iteration 1 は planner subagent を省略し orchestrator inline 計画。
@@ -5290,6 +5427,13 @@ def cmd_set(args):
             and (data.get("session_role") or "implementer") == "implementer"
             and not (data.get("score_history") or [])
         ):
+            dispatch_fields = _goal_dispatch_route_fields(data)
+            data["goal_dispatch_effective"] = dispatch_fields["goal_dispatch_effective"]
+            data["goal_dispatch_host"] = dispatch_fields["goal_dispatch_host"]
+            if dispatch_fields.get("goal_dispatch_fallback_reason"):
+                data["goal_dispatch_fallback_reason"] = dispatch_fields["goal_dispatch_fallback_reason"]
+            else:
+                data.pop("goal_dispatch_fallback_reason", None)
             data["loop_active"] = False
             data["halt_reason"] = "routed-to-goal (#330: Simple + リスクシグナルなし)"
             data["halt_category"] = "routed-goal"
@@ -5300,12 +5444,11 @@ def cmd_set(args):
                 "route": "goal",
                 "complexity": "Simple",
                 "reason": "Simple complexity with no irreversible/security signals (#330)",
-                "guidance": (
-                    "state は routed-goal で halt 済み (mark-halt 不要)。mission ループを"
-                    "続けず、goal 契約の 5 見出し (Goal / Result / Evidence / Assumptions / "
-                    "Stop Condition) でタスクを直接完遂し、最終報告に routing を明記する。"
-                    "mission の pass は主張しない。mission 機構が必要なら --force-mission で再 init する。"
+                "guidance": _goal_dispatch_guidance(
+                    dispatch_fields,
+                    "state は routed-goal で halt 済み (mark-halt 不要)。mission ループを続けず、",
                 ),
+                **dispatch_fields,
             }
         _ensure_phase_timing(data, now)
         data["updated_at"] = now
@@ -7799,6 +7942,9 @@ def _build_parser():
                              "pass-rate は implementer 限定指標で別計上される")
     p_init.add_argument("--force-mission", action="store_true", dest="force_mission",
                         help="#276: Simple タスクでも goal へルーティングせず mission ループを強制する")
+    p_init.add_argument("--goal-dispatch", choices=sorted(GOAL_DISPATCH_MODES), default=None,
+                        dest="goal_dispatch",
+                        help="#355: Simple routing 後の完遂手段。inline または実行ホストの host-native goal 機構")
     p_init.add_argument("--review-tier", choices=list(TIER_REVIEWER_COUNT), default=None,
                         dest="review_tier",
                         help="レビュー深度 (light/standard/full)。未指定は complexity・ミッション記述から auto 導出 (Issue #168)")
