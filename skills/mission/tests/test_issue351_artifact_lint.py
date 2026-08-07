@@ -1,0 +1,173 @@
+"""Issue #351: preventive artifact completeness lint."""
+
+import importlib.util
+import json
+from pathlib import Path
+
+
+MISSION_STATE_PY = Path(__file__).resolve().parent.parent / "bin" / "mission-state.py"
+SPEC = importlib.util.spec_from_file_location("mission_state_issue351", MISSION_STATE_PY)
+MISSION_STATE = importlib.util.module_from_spec(SPEC)
+assert SPEC.loader is not None
+SPEC.loader.exec_module(MISSION_STATE)
+
+
+def _review(path: Path) -> Path:
+    path.write_text(json.dumps({
+        "schema": "mission-review/1",
+        "perspective": "A",
+        "iteration": 1,
+        "scores": {
+            "mission_achievement": 4.5,
+            "accuracy": 4.4,
+            "completeness": 4.3,
+            "usability": 4.2,
+        },
+        "findings": [],
+        "notes": "review",
+    }))
+    return path
+
+
+def test_empty_sections_at_supported_heading_levels_are_detected():
+    artifact = "# Mission\n\n## Plan\n\n### Step 3\n"
+
+    findings = MISSION_STATE.lint_artifact_completeness(artifact)
+
+    assert [(item["heading"], item["kind"]) for item in findings] == [
+        ("Mission", "empty-section"),
+        ("Plan", "empty-section"),
+        ("Step 3", "empty-section"),
+    ]
+
+
+def test_combined_english_forward_reference_stub_is_detected():
+    artifact = "## Score\nRecorded below once review-finalize completes.\n"
+
+    findings = MISSION_STATE.lint_artifact_completeness(artifact)
+
+    assert findings == [{
+        "heading": "Score",
+        "kind": "stub-forward-reference",
+        "excerpt": "Recorded below once review-finalize completes.",
+    }]
+
+
+def test_japanese_forward_reference_stub_is_detected():
+    artifact = "## Stop Decision\nreview-finalize 完了後に記録\n"
+
+    findings = MISSION_STATE.lint_artifact_completeness(artifact)
+
+    assert findings[0]["kind"] == "stub-forward-reference"
+
+
+def test_japanese_later_stub_is_detected():
+    artifact = "## Score\n後で記録\n"
+
+    findings = MISSION_STATE.lint_artifact_completeness(artifact)
+
+    assert findings[0]["kind"] == "stub-forward-reference"
+
+
+def test_complete_artifact_has_no_findings():
+    artifact = "# Mission\n契約監査を完了した。\n## Score\n4.3。根拠は reviewer 2名の集計。\n"
+
+    assert MISSION_STATE.lint_artifact_completeness(artifact) == []
+
+
+def test_tbd_inside_substantive_sentence_is_not_a_stub():
+    artifact = "## Source value\nTBD is a literal status value in the imported fixture.\n"
+
+    assert MISSION_STATE.lint_artifact_completeness(artifact) == []
+
+
+def test_forward_phrase_with_actual_value_and_basis_is_not_a_stub():
+    artifact = "## Result\nThe measured value will be recorded as 42 ms (three-run median).\n"
+
+    assert MISSION_STATE.lint_artifact_completeness(artifact) == []
+
+
+def test_aggregate_warns_and_records_lint_without_changing_scores(
+    state_dir, run_cli, tmp_path,
+):
+    artifact = tmp_path / "artifact.md"
+    artifact.write_text("# Mission\nDone.\n## Score\nRecorded below once review-finalize completes.\n")
+    state_path = state_dir / "sessions" / "test.json"
+    state = json.loads(state_path.read_text())
+    state["artifact_path"] = str(artifact)
+    state_path.write_text(json.dumps(state))
+    review = _review(tmp_path / "review.json")
+    out = tmp_path / "scoring.json"
+
+    result = run_cli(
+        "aggregate-reviews", "--iteration", "1", "--input", str(review),
+        "--out", str(out), "--json", cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 0
+    assert "WARN #351: artifact lint: stub-forward-reference at Score" in result.stderr
+    scoring = json.loads(out.read_text())
+    assert scoring["items"] == {
+        "mission_achievement": 4.5,
+        "accuracy": 4.4,
+        "completeness": 4.3,
+        "usability": 4.2,
+    }
+    evidence = json.loads(Path(scoring["findings_evidence_path"]).read_text())
+    assert evidence["artifact_lint"][0]["heading"] == "Score"
+    persisted = json.loads(state_path.read_text())
+    assert persisted["artifact_lint"] == evidence["artifact_lint"]
+
+
+def test_aggregate_without_artifact_path_skips_lint_and_exits_zero(
+    state_dir, run_cli, tmp_path,
+):
+    review = _review(tmp_path / "review.json")
+    out = tmp_path / "scoring.json"
+
+    result = run_cli(
+        "aggregate-reviews", "--iteration", "1", "--input", str(review),
+        "--out", str(out), cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 0
+    assert "WARN #351" not in result.stderr
+    scoring = json.loads(out.read_text())
+    evidence = json.loads(Path(scoring["findings_evidence_path"]).read_text())
+    assert evidence["artifact_lint"] == []
+
+
+def test_stats_counts_lint_findings_and_clean_artifacts(tmp_path, run_cli):
+    for name, lint in (
+        ("bad", [
+            {"heading": "A", "kind": "empty-section", "excerpt": ""},
+            {"heading": "B", "kind": "stub-forward-reference", "excerpt": "TBD"},
+        ]),
+        ("clean", []),
+        ("skipped", None),
+    ):
+        sessions = tmp_path / name / ".mission-state" / "sessions"
+        sessions.mkdir(parents=True)
+        state = {
+            "mission": name,
+            "mission_id": name,
+            "session_id": name,
+            "loop_active": False,
+            "passes": True,
+            "halt_reason": "",
+            "score_history": [],
+            "iteration": 1,
+            "project_root": str(tmp_path / name),
+        }
+        if lint is not None:
+            state["artifact_lint"] = lint
+        (sessions / f"{name}.json").write_text(json.dumps(state))
+
+    result = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["artifact_lint_counts"] == {
+        "empty_section": 1,
+        "stub_forward_reference": 1,
+        "clean": 1,
+    }

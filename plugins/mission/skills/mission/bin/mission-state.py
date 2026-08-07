@@ -5784,6 +5784,81 @@ def _consensus_score(max_delta: float) -> float:
     return 1.0
 
 
+_ARTIFACT_HEADING_RE = re.compile(r"^(#{1,3})[ \t]+(.+?)[ \t]*#*[ \t]*$")
+_ARTIFACT_STUB_RE = re.compile(
+    r"(?:"
+    r"recorded below(?:\s+once\s+.+\s+completes)?|"
+    r"once\s+.+\s+completes|"
+    r"will be (?:recorded|populated|filled)|"
+    r"to be (?:recorded|determined)|"
+    r"TBD|"
+    r"後で記録|"
+    r"完了後に記録|"
+    r"review-finalize\s*(?:後|完了後)(?:に記録)?"
+    r")[.!。]?[ \t]*",
+    re.IGNORECASE,
+)
+
+
+def lint_artifact_completeness(artifact_text: str) -> list[dict]:
+    """Detect empty H1-H3 sections and forward-reference-only stubs."""
+    sections: list[tuple[str, list[str]]] = []
+    current: tuple[str, list[str]] | None = None
+    in_fence = False
+    for line in artifact_text.splitlines():
+        if re.match(r"^[ \t]*(```|~~~)", line):
+            in_fence = not in_fence
+        heading_match = None if in_fence else _ARTIFACT_HEADING_RE.match(line)
+        if heading_match:
+            current = (heading_match.group(2).strip(), [])
+            sections.append(current)
+        elif current is not None:
+            current[1].append(line)
+
+    findings = []
+    for heading, body_lines in sections:
+        content_lines = [line.strip() for line in body_lines if line.strip()]
+        if not content_lines:
+            findings.append({
+                "heading": heading,
+                "kind": "empty-section",
+                "excerpt": "",
+            })
+            continue
+        if all(_ARTIFACT_STUB_RE.fullmatch(line) for line in content_lines):
+            findings.append({
+                "heading": heading,
+                "kind": "stub-forward-reference",
+                "excerpt": "\n".join(content_lines),
+            })
+    return findings
+
+
+def _lint_state_artifact(cwd: Path, data: dict) -> tuple[list[dict], bool]:
+    """Lint an explicitly configured top-level artifact_path, or skip it."""
+    artifact_path = str(data.get("artifact_path") or "").strip()
+    if not artifact_path:
+        return [], False
+    path = Path(artifact_path).expanduser()
+    if not path.is_absolute():
+        path = cwd / path
+    path = path.resolve()
+    try:
+        path.relative_to(cwd.resolve())
+    except ValueError:
+        print(
+            f"WARN #351: artifact lint skipped: path outside project root: {artifact_path}",
+            file=sys.stderr,
+        )
+        return [], False
+    try:
+        artifact_text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        print(f"WARN #351: artifact lint skipped: {exc}", file=sys.stderr)
+        return [], False
+    return lint_artifact_completeness(artifact_text), True
+
+
 def cmd_aggregate_reviews(args):
     """Aggregate mission-review/1 reviewer JSON into push-score compatible scoring JSON."""
     cwd = Path.cwd()
@@ -5899,6 +5974,15 @@ def cmd_aggregate_reviews(args):
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
+        artifact_lint, artifact_lint_ran = _lint_state_artifact(cwd, data)
+        if artifact_lint_ran:
+            data["artifact_lint"] = artifact_lint
+        for finding in artifact_lint:
+            print(
+                "WARN #351: artifact lint: "
+                f"{finding['kind']} at {finding['heading']}",
+                file=sys.stderr,
+            )
         # #338: 観測結果を state へ永続化し stats で横断集計可能にする (gate 不変)
         data["last_parallel_execution"] = parallel_execution
         atomic_write_json(sf, data)
@@ -5916,6 +6000,7 @@ def cmd_aggregate_reviews(args):
             "open_high": open_high,
             "reviewer_windows": reviewer_windows_public,
             "parallel_execution": parallel_execution,
+            "artifact_lint": artifact_lint,
         }
         evidence_path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -5939,6 +6024,7 @@ def cmd_aggregate_reviews(args):
         "items": items,
         "review_agreement": review_agreement,
         "parallel_execution": parallel_execution,
+        "artifact_lint": artifact_lint,
     }
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -7213,6 +7299,29 @@ def _phase_duration_totals(states: list[dict]) -> dict:
     return dict(sorted(totals.items()))
 
 
+def _artifact_lint_counts(states: list[dict]) -> dict:
+    counts = {
+        "empty_section": 0,
+        "stub_forward_reference": 0,
+        "clean": 0,
+    }
+    for state in states:
+        lint = state.get("artifact_lint")
+        if not isinstance(lint, list):
+            continue
+        if not lint:
+            counts["clean"] += 1
+            continue
+        for finding in lint:
+            if not isinstance(finding, dict):
+                continue
+            if finding.get("kind") == "empty-section":
+                counts["empty_section"] += 1
+            elif finding.get("kind") == "stub-forward-reference":
+                counts["stub_forward_reference"] += 1
+    return counts
+
+
 def _aggregate(
     states: list[dict], duplicate_state_group_count: int = 0,
     *, observation_now: datetime | None = None,
@@ -7248,6 +7357,7 @@ def _aggregate(
             "by_cli_version": {},
             "by_halt_category": {},
             "parallel_review_counts": {"true": 0, "false": 0, "unknown": 0},
+            "artifact_lint_counts": _artifact_lint_counts([]),
             "activity_timing": summarize_activity_states([]),
         }
     # _classify を 1 回だけ評価 (旧実装は pass/halt/incomplete で 3N 回呼んでいた)
@@ -7320,6 +7430,7 @@ def _aggregate(
         "pass_rate": pass_rate_summary["raw_pass_rate"],
         "forced_pass_count": forced_pass_count,
         "parallel_review_counts": parallel_review_counts,
+        "artifact_lint_counts": _artifact_lint_counts(states),
         "forced_pass_rate": forced_pass_count / pass_count if pass_count else None,
         "ungated_pass_count": ungated_pass_count,
         "ungated_pass_rate": ungated_pass_count / pass_count if pass_count else None,
