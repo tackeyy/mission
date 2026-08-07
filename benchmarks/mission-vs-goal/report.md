@@ -830,6 +830,9 @@ about 8.4x. Mission per-record cost $5.25-9.31, inside the #358 $10 calibration.
 
 Observed gate activity (state inspection, n=7):
 
+0. **#350 reviewer-window enforcement: parallel firing rate 7/7 = 100%**
+   (last_parallel_execution true everywhere, unknown 0%; fully converged from the
+   1/5 machine-observed rate at v5-speed).
 1. **#353 reviewer-output observation recorded in every run** (2
    reviewer_output_records per run). Zero WARNs (20KB/0.7 thresholds never exceeded).
 2. **#354 session lease granted in every run** (lease_id / fencing_epoch / expiry).

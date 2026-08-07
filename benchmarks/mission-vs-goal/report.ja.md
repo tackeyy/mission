@@ -835,6 +835,8 @@ mission record 単価 $5.25-9.31 で #358 の $10 較正内に収まる。
 
 観測ゲートの発火実測 (state 検分、n=7):
 
+0. **#350 reviewer-window 必須化の並列発火率は 7/7 = 100%** (last_parallel_execution
+   全 true、unknown 0%。v5-speed 時点の機械観測 1/5 から gate 化で完全収束)。
 1. **#353 reviewer 出力観測は全 run で記録された** (reviewer_output_records 2 件/run)。
    WARN 発火 (20KB/0.7 閾値超過) は 0 件。
 2. **#354 session lease は全 run で付与された** (lease_id / fencing_epoch / 期限)。
