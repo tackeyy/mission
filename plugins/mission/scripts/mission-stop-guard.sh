@@ -142,12 +142,17 @@ _mission_cleanup_expired_lease() {
     'any(.halted[]?; .path == $target)' >/dev/null 2>&1
 }
 HOOK_SID=""
+HOOK_SID_FROM_PID=false
 if [ -n "${MISSION_SESSION_ID:-}" ]; then
   HOOK_SID="$(_mission_sanitize_sid "${MISSION_SESSION_ID}")"
 elif [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
   HOOK_SID="cc-$(_mission_sanitize_sid "${CLAUDE_CODE_SESSION_ID}")"
 elif [ -n "${CODEX_THREAD_ID:-}" ]; then
   HOOK_SID="cx-$(_mission_sanitize_sid "${CODEX_THREAD_ID}")"
+elif [ -n "${AGENT_PID:-}" ]; then
+  # mission-state.py resolve_session_id() の env-less fallback と同じ owner SID。
+  HOOK_SID="pid-$(_mission_sanitize_sid "${AGENT_PID}")"
+  HOOK_SID_FROM_PID=true
 fi
 
 # === C-2/C-3: sessions/ ディレクトリ優先 (multi-session 対応) ===
@@ -193,16 +198,22 @@ if [ -d "$SESSIONS_DIR" ]; then
       fi
     fi
     if [ -n "$HOOK_SID" ]; then
-      [ "$sf_sid" != "$HOOK_SID" ] && continue   # 自分の session でない
-    elif [ "$LEASE_PRESENT" != "true" ] && [ -n "$s_pid" ] && [ "$s_pid" != "null" ] && [ -n "${AGENT_PID:-}" ]; then
-      if [ "$s_pid" != "$AGENT_PID" ]; then
+      if [ "$sf_sid" = "$HOOK_SID" ]; then
+        # fenced state はファイル名だけでなく、記録された owner も一致必須。
+        [ "$LEASE_PRESENT" = "true" ] && [ "$s_lease_owner" != "$HOOK_SID" ] && continue
+      elif [ "$HOOK_SID_FROM_PID" = "true" ] && [ "$LEASE_PRESENT" != "true" ]; then
+        # lease 導入前の任意名 state は従来どおり diagnostic PID で照合する。
+        [ -z "$s_pid" ] && continue
+        [ "$s_pid" = "null" ] && continue
+        [ "$s_pid" != "$AGENT_PID" ] && continue
+      else
         continue
       fi
     fi
 
     # PID alive 照合 (env なし pid fallback 時のみ)。HOOK_SID 一致時は自セッション確定のため
     # スキップ — resume/compaction で PID が変わっても自分の state を block できる (M-1)。
-    if [ "$LEASE_PRESENT" != "true" ] && [ -z "$HOOK_SID" ] && [ -n "$s_pid" ] && [ "$s_pid" != "null" ] && [ "$s_pid" -gt 0 ] 2>/dev/null; then
+    if [ "$LEASE_PRESENT" != "true" ] && { [ -z "$HOOK_SID" ] || [ "$HOOK_SID_FROM_PID" = "true" ]; } && [ -n "$s_pid" ] && [ "$s_pid" != "null" ] && [ "$s_pid" -gt 0 ] 2>/dev/null; then
       if ! kill -0 "$s_pid" 2>/dev/null; then
         _mission_halt_session "$sf" "orphan: pid $s_pid dead" || true
         continue
