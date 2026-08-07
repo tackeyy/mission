@@ -104,24 +104,36 @@ def test_spend_limit_overrides_completed_artifact_and_validator():
     assert status["failure_kind"] == "api_spend_limit"
 
 
-def test_text_only_spend_limit_overrides_valid_artifact_and_validator():
+def test_text_only_limit_markers_override_valid_artifact_and_validator():
     runner = _load_official_goal_runner()
 
-    status = runner.classify_run_status(
-        stdout=json.dumps({"result": "You've hit your org's monthly spend limit"}),
-        stderr="",
-        timed_out=False,
-        returncode=1,
-        output_exists=True,
-        validator_pass=True,
-    )
+    for message in (
+        "You've hit your org's monthly spend limit",
+        "Rate limit reached",
+        "Usage limit reached",
+    ):
+        status = runner.classify_run_status(
+            stdout=json.dumps({"result": message}),
+            stderr="",
+            timed_out=False,
+            returncode=1,
+            output_exists=True,
+            validator_pass=True,
+        )
 
-    assert status == {
-        "run_status": "blocked",
-        "blocked_reason": "api_spend_limit",
-        "failure_kind": "api_spend_limit",
-        "comparable_attempt": False,
-    }
+        assert status == {
+            "run_status": "blocked",
+            "blocked_reason": "api_spend_limit",
+            "failure_kind": "api_spend_limit",
+            "comparable_attempt": False,
+        }
+
+
+def test_benchmark_readmes_list_api_spend_limit_reason():
+    for name in ("README.md", "README.ja.md"):
+        readme = (BENCHMARK_DIR / name).read_text(encoding="utf-8")
+
+        assert "`api_spend_limit`" in readme
 
 
 def test_non_429_command_failure_keeps_legacy_classification():
@@ -893,15 +905,15 @@ def test_mission_vs_goal_protocol_controls_review_bias():
         "failure_kind": "max_budget_usd",
         "comparable_attempt": False,
     }
-    completed_with_usage_limit_text = runner_module.classify_run_status(
-        stdout="Artifact complete. Rejected hypothesis: prior API usage limit was not the current cause.",
+    completed_without_limit_text = runner_module.classify_run_status(
+        stdout="Artifact complete. Rejected hypothesis: a prior quota issue was not the current cause.",
         stderr="",
         timed_out=False,
         returncode=0,
         output_exists=True,
         validator_pass=True,
     )
-    assert completed_with_usage_limit_text == {
+    assert completed_without_limit_text == {
         "run_status": "completed",
         "blocked_reason": None,
         "failure_kind": None,

@@ -346,7 +346,7 @@ def classify_run_status(
 ) -> dict:
     combined = f"{stdout}\n{stderr}"
     result_json = parse_claude_json(stdout)
-    if isinstance(result_json, dict) and result_json.get("api_error_status") == 429:
+    if detect_spend_limit(result_json, stderr):
         return {
             "run_status": "blocked",
             "blocked_reason": "api_spend_limit",
@@ -359,13 +359,6 @@ def classify_run_status(
             "blocked_reason": None,
             "failure_kind": None,
             "comparable_attempt": True,
-        }
-    if detect_spend_limit(result_json, stderr):
-        return {
-            "run_status": "blocked",
-            "blocked_reason": "api_spend_limit",
-            "failure_kind": "api_spend_limit",
-            "comparable_attempt": False,
         }
     if any(marker in combined for marker in API_USAGE_LIMIT_MARKERS):
         return {
