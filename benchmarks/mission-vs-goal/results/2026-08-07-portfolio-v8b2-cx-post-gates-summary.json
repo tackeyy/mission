@@ -1,0 +1,73 @@
+{
+  "arms": {
+    "claude_code_goal_command": {
+      "api_spend_limit_records": 0,
+      "average_elapsed_minutes": 1.65,
+      "average_evidence_completeness": 5.0,
+      "average_intervention_count": 0.0,
+      "average_quality_marker_score": 1.0,
+      "average_quality_score": 5.0,
+      "blocked_records": 0,
+      "budget_blocked_records": 0,
+      "comparable_average_elapsed_minutes": 1.65,
+      "comparable_average_quality_score": 5.0,
+      "comparable_completion_rate": 1.0,
+      "comparable_cost_usd_mean": 2.1246,
+      "comparable_records": 6,
+      "comparable_validator_pass_rate": 1.0,
+      "completion_rate": 1.0,
+      "cost_usd_mean": 2.1246,
+      "cost_usd_total": 12.7477,
+      "evidence_only_records": 0,
+      "marker_score_variance": 0.0,
+      "permission_degraded_records": 0,
+      "records": 6,
+      "routed_records": 0,
+      "validator_pass_rate": 1.0
+    },
+    "mission": {
+      "api_spend_limit_records": 0,
+      "average_elapsed_minutes": 16.12,
+      "average_evidence_completeness": 4.33,
+      "average_intervention_count": 0.0,
+      "average_quality_marker_score": 1.0,
+      "average_quality_score": 4.33,
+      "blocked_records": 1,
+      "budget_blocked_records": 1,
+      "comparable_average_elapsed_minutes": 16.28,
+      "comparable_average_quality_score": 5.0,
+      "comparable_completion_rate": 1.0,
+      "comparable_cost_usd_mean": 7.3696,
+      "comparable_records": 5,
+      "comparable_validator_pass_rate": 1.0,
+      "completion_rate": 0.8333333333333334,
+      "cost_usd_mean": 7.8275,
+      "cost_usd_total": 46.9648,
+      "evidence_only_records": 0,
+      "marker_score_variance": 0.0,
+      "permission_degraded_records": 0,
+      "records": 6,
+      "routed_records": 0,
+      "validator_pass_rate": 0.8333333333333334
+    }
+  },
+  "expected_records": 12,
+  "limitations": [
+    "Claude Code print mode smoke; does not fully exercise multi-turn interactive /goal persistence.",
+    "Quality and evidence scores are automated heuristic scores, not blind human review.",
+    "Blocked records are excluded from comparable quality-marker aggregates.",
+    "WARNING: one or more records were blocked by max_budget_usd; review per-arm burn rate before interpreting cost or completion results."
+  ],
+  "mission_profile": "full",
+  "records": 12,
+  "repeats": 3,
+  "run_id": "2026-08-07-portfolio-v8b2-cx-post-gates",
+  "selected_task_ids": [
+    "portfolio-cx-config",
+    "portfolio-cx-ledger"
+  ],
+  "starting_commit": "05d08c5",
+  "stopped_early": false,
+  "task_cohort": "portfolio",
+  "task_file": "benchmarks/mission-vs-goal/tasks.portfolio.json"
+}

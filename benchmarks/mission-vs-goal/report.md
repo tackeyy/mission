@@ -849,6 +849,32 @@ Observed gate activity (state inspection, n=7):
 Primary data: `results/2026-08-07-portfolio-v8a-std-post-gates.jsonl`
 (with adjacent -summary.json) / `artifacts/2026-08-07-portfolio-v8a-std-post-gates/`
 
+### portfolio-v8b2 (Complex re-measurement, 2026-08-07) — closes out Issue #371
+
+Commit `05d08c5`. Continues v8a (Standard) above with 2 Complex tasks x repeats 3
+(12/12 recorded, no spend limit, 1 budget blocked). Budgets: goal $3 / mission $10.
+
+| task | v7 (before) | v8b2 (after) | verdict |
+|---|---|---|---|
+| cx-config (standard tier) | 11.04 / 12.99 | 11.14 / 12.46 / 12.63 | parity |
+| cx-ledger (full tier) | 17.41 / 17.58 | 18.93 / 26.24 (+1 budget blocked at 15.31 min/$10.12) | wider tail (small n, keep observing) |
+
+Observations:
+
+1. Parallel observation matches v8a: zero unknown (#350 gate); completed records
+   state `parallel_execution: true` with no false/serial mentions.
+2. Quality tied at marker 1.0 on every completed record; zero iter=2 firings.
+3. cx-ledger full-tier per-record cost rose to $8.6-10.1 and the $10 cap censored
+   one record (burn 0.66 USD/min); full-tier cap calibration is a #358 runbook
+   follow-up.
+4. **Overall Issue #371 verdict**: Standard median -20% (v8a) plus Complex parity
+   means the #350-#354 gates are speed-neutral to speed-positive. Decomposing the
+   cx-ledger tail (26.24 min) waits for #352/#353 stats alongside #372.
+
+Primary data: `results/2026-08-07-portfolio-v8b2-cx-post-gates.jsonl` (with
+-summary.json) / `artifacts/2026-08-07-portfolio-v8b2-cx-post-gates/`
+
+
 
 
 ## Discriminating cohort clean re-run (discriminating-v2) — correcting the v1 findings
