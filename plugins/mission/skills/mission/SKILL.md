@@ -125,6 +125,8 @@ Reviewer が 2 名以上の場合、`aggregate-reviews` (`review-finalize` 経�
 
 **Simple インライン**: Simple は executor を spawn せず orchestrator が直接実行してよい。Medium 以上の指摘修正は M6 に従う。
 
+**実装委譲 (optional)**: registry に execution phase の implementation provider（headless coding agent CLI）が登録済みなら、実装ステップの diff 生成を `specialists invoke-command` で委譲してよい。検証・レビュー・pass 判定は core が保持し、provider 未登録・未導入なら従来どおり executor が実装する。brief 契約・fix-up round・失敗時の扱いは `refs/implementation-delegation.md`。
+
 ## 終了判定
 
 ```
@@ -208,4 +210,5 @@ worktree 実行時は `mark-passes` / `mark-halt` の後、worktree cleanup の�
 - `refs/codex-setup.md`: Codex での導入と Stop hook
 - `refs/self-improvement.md`: audit と改善 prompt
 - `refs/specialist-registry.md`: task_profile と specialist/provider 選定
+- `refs/implementation-delegation.md`: 実装ステップの headless coding agent への委譲
 - `refs/goal-dispatch-provider.md`: adaptive routing 後の inline / host-native goal dispatch 設定と fail-safe
