@@ -37,7 +37,7 @@ Project entries may disable a user-level default for a repository by setting `en
 
 ## Provider Kinds
 
-`kind: skill` remains the default. `kind: command` lets a registry describe a local CLI provider without adding provider-specific code to mission core.
+`kind: skill` remains the default. `kind: command` lets a registry describe a local CLI provider without adding provider-specific code to mission core. For delegating an implementation step's diff generation to a headless coding agent CLI, see `refs/implementation-delegation.md`.
 
 ```yaml
 version: 1
