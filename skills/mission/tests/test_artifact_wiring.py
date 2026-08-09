@@ -291,17 +291,15 @@ def test_mark_passes_rejects_artifact_identity_substitution(
 
 
 def test_generic_set_cannot_downgrade_mutated_producing_artifact(
-    state_dir, run_cli, read_state
+    state_dir, run_cli, read_state, push_provenance_score
 ):
     root = state_dir.parent
     assert run_cli("artifact", "init", "--json", cwd=root).returncode == 0
     assert run_cli("artifact", "render", "--json", cwd=root).returncode == 0
     state_path = state_dir / "sessions" / "test.json"
     state = read_state(state_dir)
-    state["score_history"] = [
-        {"iteration": 1, "composite": 4.5, "min_item": 4.0, "open_high": 0}
-    ]
-    state_path.write_text(json.dumps(state), encoding="utf-8")
+    push_provenance_score(root)
+    state = read_state(state_dir)
     (root / state["artifact"]["path"]).write_text(
         "# changed after clean observation\n", encoding="utf-8"
     )
@@ -598,14 +596,13 @@ def test_mark_passes_warns_for_missing_identity_before_profile_reaches_threshold
 
 
 def test_mark_passes_rejects_pending_artifact_contract_defense_in_depth(
-    state_dir, run_cli, read_state
+    state_dir, run_cli, read_state, push_provenance_score
 ):
     state_path = state_dir / "sessions" / "test.json"
     state = read_state(state_dir)
+    push_provenance_score(state_dir.parent)
+    state = read_state(state_dir)
     state["artifact_applicability"] = "pending"
-    state["score_history"] = [
-        {"iteration": 1, "composite": 4.5, "min_item": 4.0, "open_high": 0}
-    ]
     state_path.write_text(json.dumps(state), encoding="utf-8")
 
     result = run_cli("mark-passes", cwd=state_dir.parent)
@@ -616,16 +613,15 @@ def test_mark_passes_rejects_pending_artifact_contract_defense_in_depth(
 
 
 def test_mark_passes_gates_missing_identity_after_profile_reaches_threshold(
-    state_dir, run_cli, read_state
+    state_dir, run_cli, read_state, push_provenance_score
 ):
     state_path = state_dir / "sessions" / "test.json"
     state = read_state(state_dir)
     state["task_profile"] = {"primary": "portable-analysis"}
     state["artifact_applicability"] = "producing"
-    state["score_history"] = [
-        {"iteration": 1, "composite": 4.5, "min_item": 4.0, "open_high": 0}
-    ]
     state_path.write_text(json.dumps(state), encoding="utf-8")
+    push_provenance_score(state_dir.parent)
+    state = read_state(state_dir)
     historical = {
         **state,
         "session_id": "observed-history",
@@ -762,17 +758,16 @@ def test_aggregate_rejects_not_applicable_with_canonical_identity(
 
 
 def test_mark_passes_rejects_pending_with_canonical_identity(
-    state_dir, run_cli, read_state
+    state_dir, run_cli, read_state, push_provenance_score
 ):
     root = state_dir.parent
     assert run_cli("artifact", "init", "--json", cwd=root).returncode == 0
     assert run_cli("artifact", "render", "--json", cwd=root).returncode == 0
     state_path = state_dir / "sessions" / "test.json"
     state = read_state(state_dir)
+    push_provenance_score(root)
+    state = read_state(state_dir)
     state["artifact_applicability"] = "pending"
-    state["score_history"] = [
-        {"iteration": 1, "composite": 4.5, "min_item": 4.0, "open_high": 0}
-    ]
     state_path.write_text(json.dumps(state), encoding="utf-8")
 
     result = run_cli("mark-passes", cwd=root)
@@ -907,7 +902,7 @@ def test_canonical_identity_with_invalid_utf8_is_invalid_not_skipped(
 
 
 def test_invalid_utf8_recapture_requires_a_new_identity_bound_lint_observation(
-    state_dir, run_cli, read_state
+    state_dir, run_cli, read_state, push_provenance_score
 ):
     root = state_dir.parent
     state_path = state_dir / "sessions" / "test.json"
@@ -1005,10 +1000,7 @@ def test_invalid_utf8_recapture_requires_a_new_identity_bound_lint_observation(
     assert recovered_handoff.returncode == 0, recovered_handoff.stderr
     recovered = read_state(state_dir)
     assert "artifact_lint_status" not in recovered
-    recovered["score_history"] = [
-        {"iteration": 1, "composite": 4.5, "min_item": 4.0, "open_high": 0}
-    ]
-    state_path.write_text(json.dumps(recovered), encoding="utf-8")
+    push_provenance_score(root)
 
     blocked = run_cli("mark-passes", cwd=root)
     assert blocked.returncode == 2
@@ -1033,7 +1025,7 @@ def test_invalid_utf8_recapture_requires_a_new_identity_bound_lint_observation(
 
 
 def test_active_profile_gate_requires_current_lint_observation(
-    state_dir, run_cli, read_state
+    state_dir, run_cli, read_state, push_provenance_score
 ):
     root = state_dir.parent
     assert run_cli("artifact", "init", "--json", cwd=root).returncode == 0
@@ -1041,10 +1033,9 @@ def test_active_profile_gate_requires_current_lint_observation(
     state_path = state_dir / "sessions" / "test.json"
     state = read_state(state_dir)
     state["task_profile"] = {"primary": "portable-analysis"}
-    state["score_history"] = [
-        {"iteration": 1, "composite": 4.5, "min_item": 4.0, "open_high": 0}
-    ]
     state_path.write_text(json.dumps(state), encoding="utf-8")
+    push_provenance_score(root)
+    state = read_state(state_dir)
     historical = {
         **state,
         "session_id": "observed-history",
@@ -1072,7 +1063,7 @@ def test_active_profile_gate_requires_current_lint_observation(
 
 
 def test_active_gate_rejects_lint_observation_from_before_official_rehandoff(
-    state_dir, run_cli, read_state
+    state_dir, run_cli, read_state, push_provenance_score
 ):
     root = state_dir.parent
     assert run_cli("artifact", "init", "--json", cwd=root).returncode == 0
@@ -1125,10 +1116,8 @@ def test_active_gate_rejects_lint_observation_from_before_official_rehandoff(
     assert handoff.returncode == 0, handoff.stderr
     current = read_state(state_dir)
     current["task_profile"] = {"primary": "portable-analysis"}
-    current["score_history"] = [
-        {"iteration": 1, "composite": 4.5, "min_item": 4.0, "open_high": 0}
-    ]
     state_path.write_text(json.dumps(current), encoding="utf-8")
+    push_provenance_score(root)
 
     result = run_cli("mark-passes", cwd=root)
 
@@ -1148,6 +1137,7 @@ def test_contradiction_remains_in_history_denominator_at_coverage_gate_boundary(
     state_dir,
     run_cli,
     read_state,
+    push_provenance_score,
 ):
     root = state_dir.parent
     assert run_cli("artifact", "init", "--json", cwd=root).returncode == 0
@@ -1155,10 +1145,9 @@ def test_contradiction_remains_in_history_denominator_at_coverage_gate_boundary(
     state_path = state_dir / "sessions" / "test.json"
     current = read_state(state_dir)
     current["task_profile"] = {"primary": "portable-analysis"}
-    current["score_history"] = [
-        {"iteration": 1, "composite": 4.5, "min_item": 4.0, "open_high": 0}
-    ]
     state_path.write_text(json.dumps(current), encoding="utf-8")
+    push_provenance_score(root)
+    current = read_state(state_dir)
 
     terminal_common = {
         **current,
