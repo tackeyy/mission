@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import re
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 
@@ -41,6 +42,8 @@ KNOWN_TASK_PROFILES = {
 JSON_NUMBER_PATTERN = re.compile(
     r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?\Z"
 )
+MAX_REGISTRY_NUMBER_TOKEN = 128
+MAX_SAFE_INTEGER = 9_007_199_254_740_991
 
 
 class RegistryContractError(ValueError):
@@ -61,7 +64,52 @@ def _reject_duplicate_key(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def _reject_json_constant(value: str) -> None:
-    raise RegistryContractError("invalid-json-number", f"invalid JSON number: {value}")
+    raise RegistryContractError("invalid-registry-number")
+
+
+def _check_number_token(token: str) -> None:
+    if len(token) > MAX_REGISTRY_NUMBER_TOKEN:
+        raise RegistryContractError("number-limit")
+
+
+def _parse_registry_int(token: str) -> int:
+    _check_number_token(token)
+    if token.startswith("-") and token.lstrip("-").strip("0") == "":
+        raise RegistryContractError("invalid-registry-number")
+    try:
+        value = int(token)
+    except ValueError as error:
+        raise RegistryContractError("invalid-registry-number") from error
+    if abs(value) > MAX_SAFE_INTEGER:
+        raise RegistryContractError("number-limit")
+    return value
+
+
+def _parse_registry_float(token: str) -> float:
+    _check_number_token(token)
+    try:
+        decimal_value = Decimal(token)
+    except InvalidOperation as error:
+        raise RegistryContractError("invalid-registry-number") from error
+    if not decimal_value.is_finite() or (decimal_value.is_zero() and decimal_value.is_signed()):
+        raise RegistryContractError("invalid-registry-number")
+    value = float(decimal_value)
+    if not math.isfinite(value) or (value == 0.0 and not decimal_value.is_zero()):
+        raise RegistryContractError("number-limit")
+    if Decimal.from_float(value) != decimal_value:
+        raise RegistryContractError("number-limit")
+    return value
+
+
+def _strict_json_loads(text: str, *, object_pairs_hook=None) -> Any:
+    kwargs = {
+        "parse_int": _parse_registry_int,
+        "parse_float": _parse_registry_float,
+        "parse_constant": _reject_json_constant,
+    }
+    if object_pairs_hook is not None:
+        kwargs["object_pairs_hook"] = object_pairs_hook
+    return json.loads(text, **kwargs)
 
 
 def _validate_v2_document(document: Any) -> list[dict[str, Any]]:
@@ -143,16 +191,11 @@ def _validate_v2_candidate_types(candidate: dict[str, Any]) -> None:
         _invalid_candidate_type("env")
     if "timeout" in candidate:
         timeout = candidate["timeout"]
-        if (
-            isinstance(timeout, bool)
-            or not isinstance(timeout, (int, float))
-            or not math.isfinite(timeout)
-            or timeout < 0
-        ):
+        if type(timeout) is not int or not 1 <= timeout <= 86400:
             _invalid_candidate_type("timeout")
     if "max_calls_per_iteration" in candidate:
         calls = candidate["max_calls_per_iteration"]
-        if type(calls) is not int or calls < 1:
+        if type(calls) is not int or not 1 <= calls <= 1000:
             _invalid_candidate_type("max_calls_per_iteration")
     if "activation" in candidate:
         activation = candidate["activation"]
@@ -231,7 +274,7 @@ def _yaml_scalar(value: str) -> Any:
         return [_yaml_scalar(item) for item in _split_yaml_flow_items(inner)]
     if value.startswith('"'):
         try:
-            parsed = json.loads(value)
+            parsed = _strict_json_loads(value)
         except json.JSONDecodeError as error:
             raise RegistryContractError("invalid-registry-contract", str(error)) from error
         if not isinstance(parsed, str):
@@ -248,7 +291,7 @@ def _yaml_scalar(value: str) -> Any:
     if value.lower() == "null":
         return None
     if JSON_NUMBER_PATTERN.fullmatch(value):
-        return json.loads(value, parse_constant=_reject_json_constant)
+        return _strict_json_loads(value)
     return value
 
 
@@ -319,10 +362,8 @@ def _parse_v2_registry_yaml(text: str) -> dict[str, Any]:
 def parse_v2_registry(text: str) -> list[dict[str, Any]]:
     if text.lstrip().startswith(("{", "[")):
         try:
-            document = json.loads(
-                text,
-                object_pairs_hook=_reject_duplicate_key,
-                parse_constant=_reject_json_constant,
+            document = _strict_json_loads(
+                text, object_pairs_hook=_reject_duplicate_key
             )
         except RegistryContractError:
             raise
@@ -352,10 +393,8 @@ def detect_registry_version(text: str) -> int:
     stripped = text.lstrip()
     if stripped.startswith(("{", "[")):
         try:
-            document = json.loads(
-                text,
-                object_pairs_hook=_reject_duplicate_key,
-                parse_constant=_reject_json_constant,
+            document = _strict_json_loads(
+                text, object_pairs_hook=_reject_duplicate_key
             )
         except RegistryContractError:
             raise
@@ -395,9 +434,16 @@ def _context_digest(context: dict[str, Any]) -> str:
 
 
 def value_digest(value: Any) -> str:
-    payload = json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
+    try:
+        payload = json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise RegistryContractError("invalid-registry-number") from error
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 

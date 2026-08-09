@@ -89,12 +89,17 @@ from worktree_archive import validate_worktree_archive_bundle  # noqa: E402
 from state_snapshot import SnapshotError, consume_snapshot_document  # noqa: E402
 from provider_eligibility import (  # noqa: E402
     RegistryContractError,
+    _strict_json_loads,
     detect_registry_version,
     evaluate_provider_eligibility,
     normalize_selection_source,
     parse_v2_registry_json,
     registry_entry_digest,
     value_digest as provider_value_digest,
+)
+from provider_public_contract import (  # noqa: E402
+    SpecialistPublicContractError,
+    validate_specialist_public_state as _validate_specialist_public_state,
 )
 from artifact_contract import (  # noqa: E402
     ArtifactContractError,
@@ -1165,6 +1170,9 @@ def _guarded_init_state_lock(cwd: Path, sf: Path):
 def backup_state(path: Path) -> None:
     """A-4: 更新前に .bak をコピー生成."""
     if path.exists():
+        _validate_specialist_public_state(
+            json.loads(path.read_text(encoding="utf-8"))
+        )
         bak = path.with_suffix(path.suffix + ".bak")
         atomic_write_bytes(bak, path.read_bytes())
 
@@ -2333,7 +2341,7 @@ def _coerce_yaml_value(value: str):
 def _parse_specialist_registry_text(txt: str) -> list[dict]:
     """Parse the documented version 1 JSON/limited-YAML registry shape."""
     try:
-        data = json.loads(txt)
+        data = _strict_json_loads(txt)
         return list(data.get("specialists") or [])
     except json.JSONDecodeError:
         pass
@@ -2607,7 +2615,7 @@ def _resolve_registry_precedence(
         decided.add(identity)
         if group_key in conflicted:
             diagnostics.append({
-                "provider_id": identity,
+                "provider_id": _safe_provider_reference(identity),
                 "source": item.get("source"),
                 "reason_code": "same-tier-identity-conflict",
                 "registry_entry_digest": item.get("registry_entry_digest"),
@@ -2621,7 +2629,7 @@ def _resolve_registry_precedence(
                 else "disabled"
             )
             diagnostics.append({
-                "provider_id": identity,
+                "provider_id": _safe_provider_reference(identity),
                 "source": item.get("source"),
                 "reason_code": "provider-disabled",
                 "registry_entry_digest": item.get("registry_entry_digest"),
@@ -2693,7 +2701,14 @@ def _discover_specialist_registry_candidates(args) -> tuple[list[dict], list[dic
         elif raw is not None and version == 2:
             loaded, invalid = _load_v2_registry_candidates(raw, source)
         elif raw is not None:
-            loaded, invalid = _load_registry_candidates(raw, source), []
+            try:
+                loaded, invalid = _load_registry_candidates(raw, source), []
+            except RegistryContractError as error:
+                loaded, invalid = [], [{
+                    "provider_id": "<registry>",
+                    "source": source,
+                    "reason_code": error.code,
+                }]
         else:
             loaded, invalid = [], []
         if invalid:
@@ -2860,7 +2875,7 @@ def _discover_specialist_registry_candidates(args) -> tuple[list[dict], list[dic
         })
     effective = [
         {
-            "provider_id": _safe_provider_reference(candidate),
+            "provider_id": _safe_provider_reference(_provider_id(candidate)),
             "source": candidate.get("source"),
             "registry_version": candidate.get("registry_version"),
             "registry_entry_digest": candidate.get("registry_entry_digest"),
@@ -3076,46 +3091,191 @@ def _portable_provider_identifier(value: object) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", text))
 
 
-def _portable_process_argument(value: object) -> bool:
-    text = str(value)
-    if not text or len(text) > 256 or any(ord(char) < 32 or ord(char) == 127 for char in text):
-        return False
-    if text.startswith(("~", "@")) or "://" in text:
-        return False
-    if "/" in text or "\\" in text or re.match(r"^[A-Za-z]:", text):
-        return False
-    return True
-
-
 def _classify_non_portable_execution_config(candidate: dict) -> str | None:
-    if candidate.get("kind") != "command":
-        return None
-    if "$EXTERNAL/sha256:" in str(candidate.get("source") or ""):
-        return "external-registry-resupply"
     if any(
         not _portable_provider_identifier(candidate.get(field))
         for field in ("provider_id", "role", "skill")
     ):
         return "provider-identity"
+    if candidate.get("kind") != "command":
+        return None
+    if "$EXTERNAL/sha256:" in str(candidate.get("source") or ""):
+        return "external-registry-resupply"
     command = candidate.get("command")
     if not command or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", str(command)):
         return "command-locator"
     args = candidate.get("args") or []
-    if len(args) > 32:
-        return "argument-count"
-    if any(not _portable_process_argument(value) for value in args):
+    if args:
         return "argument-locator"
     if candidate.get("env"):
         return "environment-values"
+    if candidate.get("_explicit_result_contract_present") is True:
+        return "result-contract-resupply"
     return None
 
 
-def _safe_provider_reference(candidate: dict) -> str:
-    provider_id = str(candidate.get("provider_id") or "")
-    if _portable_provider_identifier(provider_id):
-        return provider_id
-    digest = hashlib.sha256(provider_id.encode("utf-8")).hexdigest()
+def _safe_provider_reference(identity: object) -> str:
+    canonical_identity = str(identity or "")
+    if re.fullmatch(r"provider:sha256:[0-9a-f]{64}", canonical_identity):
+        return canonical_identity
+    if _portable_provider_identifier(canonical_identity):
+        return canonical_identity
+    digest = hashlib.sha256(canonical_identity.encode("utf-8")).hexdigest()
     return f"provider:sha256:{digest}"
+
+
+def _public_specialist_record(record: dict) -> dict:
+    """Project one internal provider record onto the portable public contract."""
+    identity = _provider_id(record)
+    public: dict = {"provider_id": _safe_provider_reference(identity)}
+    for field in ("role", "skill"):
+        value = record.get(field)
+        if value:
+            public[field] = (
+                str(value)
+                if _portable_provider_identifier(value)
+                else _safe_provider_reference(value)
+            )
+    kind = record.get("kind")
+    if kind in {"skill", "command"}:
+        public["kind"] = kind
+    command = record.get("command")
+    if command and _portable_provider_identifier(command):
+        public["command"] = str(command)
+        public["args"] = []
+    timeout = record.get("timeout")
+    if type(timeout) is int and 1 <= timeout <= 86400:
+        public["timeout"] = timeout
+    for field in ("task_profiles", "phases", "matched_conditions"):
+        values = record.get(field)
+        if isinstance(values, list):
+            public[field] = [
+                str(value)
+                for value in values
+                if isinstance(value, str)
+                and len(value) <= 128
+                and not any(ord(char) < 32 or ord(char) == 127 for char in value)
+                and "/" not in value
+                and "\\" not in value
+            ]
+    for field in (
+        "required",
+        "bounded_use",
+        "bounded_purpose_required",
+        "installed",
+        "available",
+        "first_use",
+    ):
+        if type(record.get(field)) is bool:
+            public[field] = record[field]
+    for field in (
+        "source",
+        "registry_entry_digest",
+        "registry_projection_digest",
+        "context_digest",
+        "activation_digest",
+        "status",
+        "eligibility_reason",
+        "selection_source",
+        "selection_source_raw",
+        "eligibility_selection_source",
+    ):
+        value = record.get(field)
+        if isinstance(value, str):
+            public[field] = value
+    if type(record.get("registry_version")) is int:
+        public["registry_version"] = record["registry_version"]
+    score = record.get("score")
+    if type(score) in {int, float} and math.isfinite(score):
+        public["score"] = score
+    normalized = record.get("normalized_activation")
+    if isinstance(normalized, dict):
+        public["normalized_activation"] = {
+            key: normalized[key]
+            for key in (
+                "min_complexity",
+                "auto_select_if",
+                "explicit_below_min",
+                "when_any",
+            )
+            if key in normalized
+        }
+    risk = record.get("risk")
+    if isinstance(risk, dict):
+        public["risk_confirmation_required"] = bool(
+            risk.get("first_use_confirmation")
+        )
+    result_contract = record.get("result_contract")
+    if isinstance(result_contract, dict) and result_contract:
+        public["result_contract_digest"] = provider_value_digest(result_contract)
+    return public
+
+
+def _public_specialist_records(records: list[dict]) -> list[dict]:
+    return [
+        _public_specialist_record(record)
+        for record in records
+        if isinstance(record, dict)
+    ]
+
+
+def _public_registry_input_record(record: dict) -> dict:
+    return {
+        field: record[field]
+        for field in (
+            "kind",
+            "source",
+            "canonical_identity",
+            "version",
+            "precedence_tier",
+            "order",
+            "status",
+            "content_digest",
+            "resolution_mode",
+        )
+        if field in record
+    }
+
+
+def _public_specialist_diagnostic(record: dict) -> dict:
+    identity = str(record.get("provider_id") or "<registry>")
+    public = {
+        "provider_id": (
+            "<registry>"
+            if identity == "<registry>"
+            else _safe_provider_reference(identity)
+        )
+    }
+    for field in (
+        "source",
+        "reason_code",
+        "field_code",
+        "blocked_config_class",
+        "registry_entry_digest",
+        "registry_projection_digest",
+        "context_digest",
+        "activation_digest",
+        "selection_source",
+        "selection_source_raw",
+        "requested_phase",
+        "current_complexity",
+        "minimum_complexity",
+    ):
+        value = record.get(field)
+        if isinstance(value, str) or value is None:
+            public[field] = value
+    registry_input = record.get("registry_input")
+    if isinstance(registry_input, dict):
+        public["registry_input"] = _public_registry_input_record(registry_input)
+    return public
+
+
+def _public_specialist_diagnostics(records: list[dict]) -> list[dict]:
+    return [
+        _public_specialist_diagnostic(record)
+        for record in records
+        if isinstance(record, dict)
+    ]
 
 
 def _default_result_contract_for(skill: str | None, role: str | None = None) -> dict:
@@ -3197,6 +3357,7 @@ def _normalize_candidate(candidate: dict, source: str) -> dict:
         "registry_projection_digest": candidate.get("registry_projection_digest"),
         "_registry_error": candidate.get("_registry_error"),
         "_v2_auto_use_present": candidate.get("_v2_auto_use_present"),
+        "_explicit_result_contract_present": "result_contract" in candidate,
     }
 
 
@@ -3274,7 +3435,7 @@ def rank_specialist_candidates(task_profile: dict, registry_candidates: list[dic
                 selection_source=raw_source,
             )
             ineligible.append({
-                "provider_id": _safe_provider_reference(c),
+                "provider_id": _safe_provider_reference(_provider_id(c)),
                 "source": c["source"],
                 "registry_entry_digest": c["registry_entry_digest"],
                 "selection_source": canonical_source,
@@ -3580,6 +3741,7 @@ def cmd_specialists(args):
         state_path = resolve_state_file(Path.cwd())
         if state_path.exists():
             state_context = json.loads(state_path.read_text(encoding="utf-8"))
+            _validate_specialist_public_state(state_context)
     except (OSError, UnicodeError, json.JSONDecodeError, RuntimeError):
         state_context = None
     state_iteration_snapshot = (
@@ -3606,6 +3768,29 @@ def cmd_specialists(args):
     iteration = state_context.get("iteration", 1) if isinstance(state_context, dict) else 1
     installed = _discover_installed_skills(args)
     registry_candidates, registry_ineligible, registry_projection = _discover_specialist_registry_candidates(args)
+    numeric_diagnostics = [
+        item
+        for item in registry_ineligible
+        if item.get("reason_code") in {"invalid-registry-number", "number-limit"}
+    ]
+    if numeric_diagnostics:
+        result = {
+            "ok": False,
+            "reason_code": "registry-number-invalid",
+            "specialists_candidates": [],
+            "specialists_selected": [],
+            "specialists_unavailable": [],
+            "specialists_ineligible": _public_specialist_diagnostics(
+                numeric_diagnostics
+            ),
+            "specialist_registry_projection": registry_projection,
+            "specialists_phase_plan": [],
+        }
+        if getattr(args, "json", False):
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+        else:
+            print("ERROR: specialist registry contains an invalid number", file=sys.stderr)
+        raise SystemExit(2)
     task_profile = classify_task_profile(task, files)
     mission_context = {
         "complexity": effective_complexity,
@@ -3631,14 +3816,22 @@ def cmd_specialists(args):
                                   _split_csv(getattr(args, "user_specified", None)))
     selected, unavailable = _selection_from_decision(candidates, decision)
     phase_plan = build_phase_plan(candidates, effective_complexity, mission_context)
+    public_candidates = _public_specialist_records(candidates)
+    public_selected = _public_specialist_records(selected)
+    public_unavailable = _public_specialist_records(unavailable)
+    public_ineligible = _public_specialist_diagnostics(
+        [*registry_ineligible, *eligibility_ineligible]
+    )
     result = {
         "ok": True,
         "task_profile": task_profile,
-        "installed_skills": sorted(installed.keys()),
-        "specialists_candidates": candidates,
-        "specialists_selected": selected,
-        "specialists_unavailable": unavailable,
-        "specialists_ineligible": [*registry_ineligible, *eligibility_ineligible],
+        "installed_skills": sorted(
+            {_safe_provider_reference(identity) for identity in installed}
+        ),
+        "specialists_candidates": public_candidates,
+        "specialists_selected": public_selected,
+        "specialists_unavailable": public_unavailable,
+        "specialists_ineligible": public_ineligible,
         "specialist_registry_projection": registry_projection,
         "specialists_decision": decision,
         "specialists_phase_plan": phase_plan,
@@ -3652,6 +3845,7 @@ def cmd_specialists(args):
             sys.exit(1)
         with StateLock(lock_file(cwd)):
             data = json.loads(sf.read_text())
+            _validate_specialist_public_state(data)
             if (
                 data.get("complexity") != effective_complexity
                 or data.get("iteration") != state_iteration_snapshot
@@ -3664,10 +3858,10 @@ def cmd_specialists(args):
                     observed_iteration=state_iteration_snapshot,
                 )
             data["task_profile"] = task_profile
-            data["specialists_candidates"] = candidates
-            data["specialists_selected"] = selected
-            data["specialists_unavailable"] = unavailable
-            data["specialists_ineligible"] = [*registry_ineligible, *eligibility_ineligible]
+            data["specialists_candidates"] = public_candidates
+            data["specialists_selected"] = public_selected
+            data["specialists_unavailable"] = public_unavailable
+            data["specialists_ineligible"] = public_ineligible
             data["specialist_registry_projection"] = registry_projection
             data["specialists_decision"] = decision
             data["specialists_phase_plan"] = phase_plan
@@ -3712,6 +3906,7 @@ def cmd_specialists_accounting(args):
         print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
         sys.exit(1)
     data = json.loads(sf.read_text())
+    _validate_specialist_public_state(data)
     report = {
         "ok": True,
         "session_id": data.get("session_id") or sf.stem,
@@ -3820,6 +4015,7 @@ def cmd_specialists_summary(args):
         print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
         sys.exit(1)
     data = json.loads(sf.read_text())
+    _validate_specialist_public_state(data)
     summary = specialist_usage_summary(data)
     result = {
         "ok": True,
@@ -3886,6 +4082,11 @@ def _redact_provider_output(text: str) -> str:
     redacted = text
     for pattern in patterns:
         redacted = pattern.sub(lambda m: f"{m.group(1)}=[REDACTED]", redacted)
+    redacted = re.sub(
+        r"(?<![A-Za-z0-9])(?:/(?:Users|private|tmp|var/folders)/[^\s'\"`]+|~/[^\s'\"`]+|[A-Za-z]:[\\/][^\s'\"`]+)",
+        "[REDACTED_PATH]",
+        redacted,
+    )
     return redacted
 
 
@@ -4026,8 +4227,9 @@ def _add_selected_specialist_metadata(data: dict, entry: dict, selection_source:
             selected_entry[key] = provider[key]
     if reason:
         selected_entry["reason"] = reason
-    selected.append(selected_entry)
-    return selected_entry
+    public_entry = _public_specialist_record(selected_entry)
+    selected.append(public_entry)
+    return public_entry
 
 
 def _command_provider_packet(data: dict, provider: dict, args) -> str:
@@ -4059,6 +4261,7 @@ def cmd_invoke_command_provider(args):
         print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
         sys.exit(1)
     data = json.loads(sf.read_text())
+    _validate_specialist_public_state(data)
     provider = _find_provider(data, args.provider)
     if not provider:
         print(f"ERROR: provider not found in mission state: {args.provider}", file=sys.stderr)
@@ -4086,7 +4289,6 @@ def cmd_invoke_command_provider(args):
         "timestamp": now,
         "started_at": now,
         "provider_kind": "command",
-        "command": provider.get("command"),
     }
     command = provider.get("command")
     if not _command_is_available(command):
@@ -4097,6 +4299,7 @@ def cmd_invoke_command_provider(args):
         })
         with StateLock(lock_file(cwd)):
             data = json.loads(sf.read_text())
+            _validate_specialist_public_state(data)
             data.setdefault("specialist_invocations", []).append(entry)
             data["updated_at"] = entry["completed_at"]
             backup_state(sf)
@@ -4150,6 +4353,7 @@ def cmd_invoke_command_provider(args):
     )
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
+        _validate_specialist_public_state(data)
         selected_entry = None
         if status in APPLIED_SPECIALIST_INVOCATION_STATUSES and args.selection_source:
             entry["selection_source"] = args.selection_source
@@ -4596,6 +4800,7 @@ def cmd_archive_worktree(args):
         with StateLock(lock_file(destination_root)):
             with StateLock(lock_file(cwd)):
                 data = json.loads(sf.read_text(encoding="utf-8"))
+                _validate_specialist_public_state(data)
                 specs = _collect_worktree_archive_specs(cwd, sf, data)
                 if args.dry_run:
                     result = {
@@ -5412,6 +5617,7 @@ def cmd_init(args):
             existing_mid = ""
             try:
                 existing_data = json.loads(sf_target.read_text())
+                _validate_specialist_public_state(existing_data)
                 existing_mid = existing_data.get("mission_id", "")
                 new_mid = initial.get("mission_id", "")
                 if existing_mid and new_mid and existing_mid != new_mid:
@@ -5481,6 +5687,8 @@ def cmd_init(args):
             except ActivityTimingError as e:
                 print(f"ERROR: existing mission timing is invalid: {e}", file=sys.stderr)
                 sys.exit(2)
+            except SpecialistPublicContractError:
+                raise
             except json.JSONDecodeError as e:
                 quarantine_suffix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
                 quarantine = sf_target.with_name(f"{sf_target.name}.corrupt-{quarantine_suffix}")
@@ -5540,6 +5748,7 @@ def cmd_get(args):
         sys.exit(1)
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
+        _validate_specialist_public_state(data)
     if args.field:
         print(json.dumps(data.get(args.field)))
     else:
@@ -10179,7 +10388,15 @@ def _build_parser():
 
 def main():
     args = _build_parser().parse_args()
-    args.func(args)
+    try:
+        args.func(args)
+    except SpecialistPublicContractError as error:
+        print(json.dumps({
+            "ok": False,
+            "reason_code": "unsafe-legacy-specialist-record",
+            "field_path": error.field_path,
+        }, ensure_ascii=False))
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":

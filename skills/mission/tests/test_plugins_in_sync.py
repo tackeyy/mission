@@ -9,6 +9,7 @@
   skills/mission/lib/audit_findings.py
   skills/mission/lib/mission_common.py
   skills/mission/lib/provider_eligibility.py
+  skills/mission/lib/provider_public_contract.py
   skills/mission/refs/specialist-registry.md (存在する場合)
   skills/mission/refs/self-improvement.md
   skills/mission/refs/changelog.md
@@ -29,6 +30,7 @@
   plugins/mission/skills/mission/lib/audit_findings.py
   plugins/mission/skills/mission/lib/mission_common.py
   plugins/mission/skills/mission/lib/provider_eligibility.py
+  plugins/mission/skills/mission/lib/provider_public_contract.py
   plugins/mission/skills/mission/refs/specialist-registry.md (存在する場合)
   plugins/mission/skills/mission/refs/self-improvement.md
   plugins/mission/skills/mission/refs/changelog.md
@@ -48,6 +50,7 @@
   cp skills/mission/lib/audit_findings.py plugins/mission/skills/mission/lib/audit_findings.py
   cp skills/mission/lib/mission_common.py plugins/mission/skills/mission/lib/mission_common.py
   cp skills/mission/lib/provider_eligibility.py plugins/mission/skills/mission/lib/provider_eligibility.py
+  cp skills/mission/lib/provider_public_contract.py plugins/mission/skills/mission/lib/provider_public_contract.py
   cp skills/mission/refs/specialist-registry.md plugins/mission/skills/mission/refs/specialist-registry.md
   cp skills/mission/refs/self-improvement.md plugins/mission/skills/mission/refs/self-improvement.md
   cp skills/mission/refs/changelog.md plugins/mission/skills/mission/refs/changelog.md
@@ -119,6 +122,10 @@ SYNC_PAIRS = [
     (
         REPO_ROOT / "skills" / "mission" / "lib" / "provider_eligibility.py",
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "provider_eligibility.py",
+    ),
+    (
+        REPO_ROOT / "skills" / "mission" / "lib" / "provider_public_contract.py",
+        REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "provider_public_contract.py",
     ),
     (
         REPO_ROOT / "skills" / "mission" / "lib" / "artifact_contract.py",
@@ -290,6 +297,21 @@ def test_provider_eligibility_py_in_sync_and_importable():
     spec.loader.exec_module(module)
     result = module.normalize_selection_source("auto")
     assert result["selection_source"] == "automatic"
+
+
+def test_provider_public_contract_py_in_sync_and_importable():
+    """Public provider-state hygiene ships with every CLI and audit consumer."""
+    src, dst = _sync_pair_for("skills/mission/lib/provider_public_contract.py")
+    assert src.exists(), f"canonical file does not exist: {src}"
+    assert dst.exists(), f"plugin mirror does not exist: {dst}"
+    assert _md5(src) == _md5(dst), (
+        "provider_public_contract.py is not synchronized; run the plugin sync script"
+    )
+    spec = importlib.util.spec_from_file_location("plugin_provider_public_contract", dst)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    module.validate_specialist_public_state({"specialists_candidates": []})
 
 
 def test_plugin_mirror_specialist_recommend_cli_smoke(tmp_path):

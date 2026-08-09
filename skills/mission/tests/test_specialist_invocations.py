@@ -1,11 +1,26 @@
 """Issue #31: specialist skill invocation logging."""
 import json
+import os
+import re
+import shlex
 import sys
 
 
 def _json_result(result):
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
+
+
+def _assert_unsafe_legacy_specialist_record(result, field):
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    data = json.loads(result.stdout)
+    assert data["ok"] is False
+    assert data["reason_code"] == "unsafe-legacy-specialist-record"
+    assert data["field_path"].startswith("/specialists_candidates/0/")
+    assert data["field_path"].rsplit("/", 1)[-1] in {
+        "command", "args", "env", "result_contract"
+    }
 
 
 def _seed_legacy_command_provider_state(tmp_path, provider, *, ask_user=False):
@@ -20,6 +35,23 @@ def _seed_legacy_command_provider_state(tmp_path, provider, *, ask_user=False):
         "installed": True,
         "available": True,
     }
+    if not provider.get("env") and not provider.get("result_contract"):
+        command_dir = tmp_path / ".mission-test-bin"
+        command_dir.mkdir(exist_ok=True)
+        command_name = re.sub(
+            r"[^A-Za-z0-9._+-]", "-", str(candidate["provider_id"])
+        )
+        wrapper = command_dir / command_name
+        argv = [provider.get("command"), *(provider.get("args") or [])]
+        wrapper.write_text(
+            "#!/bin/sh\nexec " + " ".join(shlex.quote(str(value)) for value in argv) + "\n",
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o700)
+        os.environ["PATH"] = f"{command_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+        candidate["command"] = command_name
+        candidate["args"] = []
+        candidate["env"] = {}
     state["specialists_candidates"] = [candidate]
     state["specialists_selected"] = []
     state["specialists_decision"] = (
@@ -776,12 +808,7 @@ def test_invoke_command_provider_marks_approval_marker_as_awaiting_input(run_cli
         cwd=tmp_path,
     )
 
-    data = _json_result(r)
-    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
-    entry = state["specialist_invocations"][0]
-    assert data["ok"] is False
-    assert entry["status"] == "awaiting-input"
-    assert "awaiting input" in entry["reason"]
+    _assert_unsafe_legacy_specialist_record(r, "result_contract")
 
 
 def test_invoke_command_provider_marks_configured_exit_code_as_awaiting_input(run_cli, tmp_path):
@@ -826,12 +853,7 @@ def test_invoke_command_provider_marks_configured_exit_code_as_awaiting_input(ru
         cwd=tmp_path,
     )
 
-    data = _json_result(r)
-    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
-    entry = state["specialist_invocations"][0]
-    assert data["ok"] is False
-    assert entry["status"] == "awaiting-input"
-    assert "exit code 75" in entry["reason"]
+    _assert_unsafe_legacy_specialist_record(r, "result_contract")
 
 
 def test_invoke_command_provider_marks_preparation_only_output_as_not_applied(run_cli, tmp_path):
@@ -874,12 +896,7 @@ def test_invoke_command_provider_marks_preparation_only_output_as_not_applied(ru
         cwd=tmp_path,
     )
 
-    data = _json_result(r)
-    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
-    entry = state["specialist_invocations"][0]
-    assert data["ok"] is False
-    assert entry["status"] == "prepared"
-    assert "preparation-only" in entry["reason"]
+    _assert_unsafe_legacy_specialist_record(r, "result_contract")
 
 
 def test_invoke_command_provider_rejects_preparation_marker_even_with_long_output(run_cli, tmp_path):
@@ -926,12 +943,7 @@ def test_invoke_command_provider_rejects_preparation_marker_even_with_long_outpu
         cwd=tmp_path,
     )
 
-    data = _json_result(r)
-    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
-    entry = state["specialist_invocations"][0]
-    assert data["ok"] is False
-    assert entry["status"] == "prepared"
-    assert "preparation-only" in entry["reason"]
+    _assert_unsafe_legacy_specialist_record(r, "result_contract")
 
 
 def test_invoke_command_provider_requires_confirmed_selection_after_ask_user(run_cli, tmp_path):
@@ -1069,11 +1081,7 @@ def test_invoke_command_provider_accepts_result_contract_evidence(run_cli, tmp_p
         cwd=tmp_path,
     )
 
-    data = _json_result(r)
-    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
-    entry = state["specialist_invocations"][0]
-    assert data["ok"] is True
-    assert entry["status"] == "completed"
+    _assert_unsafe_legacy_specialist_record(r, "result_contract")
 
 
 def test_invoke_command_provider_uses_registry_env_and_timeout(run_cli, tmp_path):
@@ -1124,14 +1132,7 @@ def test_invoke_command_provider_uses_registry_env_and_timeout(run_cli, tmp_path
         cwd=tmp_path,
     )
 
-    data = _json_result(r)
-    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
-    entry = state["specialist_invocations"][0]
-    evidence = tmp_path / entry["evidence_path"]
-    assert data["ok"] is True
-    assert entry["status"] == "completed"
-    assert entry["timeout"] == 17
-    assert "registry env reached the provider" in evidence.read_text(encoding="utf-8")
+    _assert_unsafe_legacy_specialist_record(r, "env")
 
 
 def test_confirmed_command_provider_selection_preserves_invocation_config(run_cli, tmp_path):
@@ -1175,7 +1176,7 @@ def test_confirmed_command_provider_selection_preserves_invocation_config(run_cl
         json.loads(registry.read_text())["specialists"][0],
         ask_user=True,
     )
-    run_cli(
+    r = run_cli(
         "specialists", "invoke-command",
         "--provider", "paid-reviewer",
         "--iteration", "1",
@@ -1183,26 +1184,5 @@ def test_confirmed_command_provider_selection_preserves_invocation_config(run_cl
         "--selection-source", "confirmed-user",
         "--json",
         cwd=tmp_path,
-        check=True,
     )
-
-    r = run_cli(
-        "specialists", "invoke-command",
-        "--provider", "paid-reviewer",
-        "--iteration", "2",
-        "--phase", "review",
-        "--json",
-        cwd=tmp_path,
-    )
-
-    data = _json_result(r)
-    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
-    selected = state["specialists_selected"][0]
-    second_entry = state["specialist_invocations"][1]
-    assert data["ok"] is True
-    assert selected["command"] == sys.executable
-    assert selected["args"] == [str(helper)]
-    assert selected["env"]["REVIEW_TEXT"].startswith("finding:")
-    assert selected["timeout"] == 19
-    assert second_entry["status"] == "completed"
-    assert second_entry["timeout"] == 19
+    _assert_unsafe_legacy_specialist_record(r, "env")

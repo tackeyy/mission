@@ -64,7 +64,7 @@ specialists_v2:
       explicit_below_min: deny
 ```
 
-The portable YAML subset permits candidate fields plus one nested mapping. Quoted `#`, commas, and escaped quotes retain their scalar meaning. JSON-compatible finite integers, fractions, and exponent forms normalize to the same Python value and registry entry digest in JSON and YAML. Boolean or non-finite `timeout` values are rejected. Version 2 validates exact field types, including string identities, string-list profiles/phases, boolean flags, and the activation mapping; violations return `invalid-v2-candidate-type`. Non-finite JSON constants return `invalid-json-number`. Missing schema, an unknown major, duplicate keys, a deeper mapping, or mixed version roots produce an ineligible diagnostic and zero candidates from that input. The official version 2 project, user, and installed-manifest paths are always parsed as version 2 and cannot downgrade based on their contents.
+The portable YAML subset permits candidate fields plus one nested mapping. Quoted `#`, commas, and escaped quotes retain their scalar meaning. JSON-compatible finite numbers normalize to the same Python value and registry entry digest in JSON and YAML only when the token is at most 128 characters, integers stay within the portable safe range, and a decimal can be represented without overflow, underflow, negative zero, or precision loss. `timeout` is stricter: it must be an exact integer from 1 through 86400; booleans, fractions, zero, and non-finite values are rejected. Invalid numeric tokens return `invalid-registry-number` or `number-limit` without a traceback. Version 2 validates exact field types, including string identities, string-list profiles/phases, boolean flags, and the activation mapping; violations return `invalid-v2-candidate-type`. Missing schema, an unknown major, duplicate keys, a deeper mapping, or mixed version roots produce an ineligible diagnostic and zero candidates from that input. The official version 2 project, user, and installed-manifest paths are always parsed as version 2 and cannot downgrade based on their contents.
 
 ### Activation semantics
 
@@ -91,9 +91,9 @@ Phase-plan construction reuses the same eligibility evaluator for every requeste
 
 ### Temporary command-provider portability gate
 
-Issue #394 produces selection evidence but does not implement the runtime registry resolver planned in #395. During this interval, recommendation accepts a command provider only when its command is one bare PATH token, its argument list is bounded and contains no path, URL, drive, control-character, response-file, or home locator, and `env` is empty. The restriction applies to version 1 and version 2 across explicit, project, user, and installed-manifest inputs. A nonportable entry yields `non-portable-execution-config`, zero candidates/selections/unavailable entries/phase-plan providers, and an allowlisted `blocked_config_class`; raw command, argument, path, environment key, and environment value are not copied into output or state.
+Issue #394 produces selection evidence but does not implement the runtime registry resolver planned in #395. During this interval, recommendation accepts a command provider only when its command is one bare PATH token, `args` is exactly empty, `env` is empty, the registry locator is reversible, and no explicit result contract must be persisted. The restriction applies to version 1 and version 2 across explicit, project, user, and installed-manifest inputs. A nonportable entry yields `non-portable-execution-config`, zero candidates/selections/unavailable entries/phase-plan providers, and an allowlisted `blocked_config_class`; raw command, argument, path, environment key/value, and nested configuration are not copied into output or state.
 
-Skill providers are unaffected. Portable command entries remain stored and invokable by the existing runtime. An already-active legacy state that contains command configuration also keeps its current invocation behavior; automatic sanitation or re-selection of those states belongs to #395. Nonempty environment configuration and filesystem-backed commands remain valid registry concepts, but new selection of them is temporarily fail-closed until #395 can re-resolve and revalidate current registry bytes immediately before invocation.
+Skill providers remain eligible when their canonical identity is portable. Portable command entries remain stored and invokable by the existing runtime. Newly generated public provider records use one allowlist and retain only portable identity/provenance, bounded flags, normalized eligibility metadata, and digests for private nested contracts; raw environment, risk, result-contract, activation, parser detail, and registry values are excluded. Existing state is validated before stdout, backup, archive, audit snapshot, summary/accounting, or invocation evidence can expose or copy it. Unsafe legacy records fail closed with `unsafe-legacy-specialist-record` plus a field pointer and are never silently sanitized. Nonempty arguments, environment configuration, filesystem-backed commands, irreversible external command registries, and explicit result contracts remain valid registry concepts, but new selection of them is temporarily fail-closed until #395 can re-resolve and revalidate current registry bytes immediately before invocation.
 
 ## Provider Kinds
 
@@ -105,7 +105,7 @@ specialists:
   - role: oracle-reviewer
     kind: command
     command: oracle
-    args: ["review", "--stdin"]
+    args: []
     env:
       ORACLE_MISSION_WAIT_SECONDS: "900"
     timeout: 960

@@ -315,7 +315,7 @@ def test_recommend_supports_command_provider_yaml_schema(run_cli, tmp_path):
         "  - role: oracle-reviewer",
         "    kind: command",
         "    command: printf",
-        "    args: [review, --stdin]",
+        "    args: []",
         "    task_profiles: [documentation, architecture]",
         "    phases: [planning, review, critic]",
         "    required: false",
@@ -342,8 +342,8 @@ def test_recommend_supports_command_provider_yaml_schema(run_cli, tmp_path):
     assert selected["kind"] == "command"
     assert selected["skill"] == "oracle-reviewer"
     assert selected["command"] == "printf"
-    assert selected["args"] == ["review", "--stdin"]
-    assert selected["max_calls_per_iteration"] == "1"
+    assert selected["args"] == []
+    assert "max_calls_per_iteration" not in selected
 
 
 def test_recommend_classifies_architecture_profile(run_cli, tmp_path):
@@ -386,7 +386,7 @@ def test_risk_first_use_consent_allowlist_enables_auto_selection(run_cli, tmp_pa
             "role": "paid-reviewer",
             "kind": "command",
             "command": "true",
-            "args": ["review", "--stdin"],
+            "args": [],
             "task_profiles": ["documentation"],
             "risk": {"first_use_confirmation": True, "may_consume_paid_quota": True},
         }],

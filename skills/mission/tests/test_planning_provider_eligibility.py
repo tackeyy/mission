@@ -546,9 +546,9 @@ def test_v2_json_and_yaml_normalize_to_the_same_registry_entry(run_cli, tmp_path
 
 @pytest.mark.parametrize(
     ("timeout", "yaml_literal"),
-    [(1.5, "1.5"), (150.0, "1.5e2"), (0.001, "1e-3")],
+    [(1, "1"), (960, "960"), (86400, "86400")],
 )
-def test_v2_yaml_finite_timeout_matches_json_object_and_entry_digest(
+def test_v2_yaml_integer_timeout_matches_json_object_and_entry_digest(
     timeout, yaml_literal, run_cli, tmp_path
 ):
     document = {
@@ -612,9 +612,17 @@ def test_v2_yaml_finite_timeout_matches_json_object_and_entry_digest(
 
 @pytest.mark.parametrize(
     ("json_literal", "yaml_literal"),
-    [("true", "true"), ("NaN", ".nan"), ("Infinity", ".inf")],
+    [
+        ("true", "true"),
+        ("NaN", ".nan"),
+        ("Infinity", ".inf"),
+        ("1.5", "1.5"),
+        ("0.001", "0.001"),
+        ("-0", "-0"),
+        ("0", "0"),
+    ],
 )
-def test_v2_json_and_yaml_reject_non_numeric_or_non_finite_timeout(
+def test_v2_json_and_yaml_reject_non_integer_or_out_of_range_timeout(
     json_literal, yaml_literal
 ):
     prefix = (
@@ -634,6 +642,80 @@ def test_v2_json_and_yaml_reject_non_numeric_or_non_finite_timeout(
     for content in (json_text, yaml_text):
         with pytest.raises(RegistryContractError):
             parse_v2_registry(content)
+
+
+@pytest.mark.parametrize(
+    ("suffix", "content"),
+    [
+        (
+            "json",
+            lambda token: (
+                '{"schema":"mission-specialist-registry/2",'
+                '"specialists_v2":[{"provider_id":"numeric-provider",'
+                f'"timeout":{token}}}]}}'
+            ),
+        ),
+        (
+            "yml",
+            lambda token: "\n".join(
+                [
+                    "schema: mission-specialist-registry/2",
+                    "specialists_v2:",
+                    "  - provider_id: numeric-provider",
+                    f"    timeout: {token}",
+                ]
+            ),
+        ),
+    ],
+)
+@pytest.mark.parametrize("token", ["9" * 4300, "9" * 4301, "1e9999"])
+def test_oversized_or_unrepresentable_registry_number_fails_with_structured_diagnostic(
+    suffix, content, token, run_cli, tmp_path
+):
+    registry = tmp_path / f"oversized-number.{suffix}"
+    registry.write_text(content(token), encoding="utf-8")
+
+    result = run_cli(
+        "specialists", "recommend", "--no-default-skill-roots",
+        "--task", "Review a multi-step architecture", "--registry", str(registry),
+        "--complexity", "Complex", "--json", cwd=tmp_path,
+    )
+
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    assert "Infinity" not in result.stdout
+    data = json.loads(result.stdout)
+    assert data["ok"] is False
+    assert data["reason_code"] == "registry-number-invalid"
+    assert data["specialists_candidates"] == []
+    assert data["specialists_selected"] == []
+    assert data["specialists_unavailable"] == []
+    assert data["specialists_phase_plan"] == []
+    assert data["specialists_ineligible"][0]["reason_code"] == "number-limit"
+
+
+def test_nested_json_and_yaml_numbers_use_the_same_strict_numeric_parser():
+    documents = [
+        (
+            '{"schema":"mission-specialist-registry/2",'
+            '"specialists_v2":[{"provider_id":"numeric-provider",'
+            '"risk":{"weight":1e309}}]}'
+        ),
+        "\n".join(
+            [
+                "schema: mission-specialist-registry/2",
+                "specialists_v2:",
+                "  - provider_id: numeric-provider",
+                "    risk:",
+                "      weight: 1e309",
+            ]
+        ),
+    ]
+
+    for document in documents:
+        with pytest.raises(RegistryContractError) as caught:
+            parse_v2_registry(document)
+        assert caught.value.code == "number-limit"
 
 
 @pytest.mark.parametrize(
@@ -1069,6 +1151,106 @@ def test_same_file_duplicate_identity_is_a_conflict(run_cli, tmp_path):
     assert conflict["reason_code"] == "same-tier-identity-conflict"
 
 
+@pytest.mark.parametrize(
+    ("mode", "reason_code"),
+    [
+        ("disabled", "provider-disabled"),
+        ("conflict", "same-tier-identity-conflict"),
+    ],
+)
+def test_disabled_and_conflict_diagnostics_redact_nonportable_provider_identity(
+    mode, reason_code, run_cli, tmp_path
+):
+    private_provider_id = f"private/providers/{mode}-provider"
+    entry = {
+        "provider_id": private_provider_id,
+        "role": "deep-planning",
+        "skill": "deep-planning-provider",
+        "kind": "skill",
+        "task_profiles": ["architecture"],
+        "phases": ["planning"],
+        "activation": {
+            "min_complexity": "Complex",
+            "auto_select_if": ["complexity"],
+        },
+    }
+    entries = [{**entry, "disabled": True}] if mode == "disabled" else [entry, entry]
+    registry = tmp_path / f"{mode}-private-identity.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "schema": "mission-specialist-registry/2",
+                "specialists_v2": entries,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        "specialists", "recommend", "--no-default-skill-roots",
+        "--task", "Review a multi-step architecture", "--registry", str(registry),
+        "--complexity", "Complex", "--json", cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    diagnostic = next(
+        item for item in data["specialists_ineligible"]
+        if item["reason_code"] == reason_code
+    )
+    assert diagnostic["provider_id"].startswith("provider:sha256:")
+    assert private_provider_id not in json.dumps(data, sort_keys=True)
+
+
+def test_provider_id_omission_uses_distinct_canonical_identity_references(
+    run_cli, tmp_path
+):
+    private_skills = [
+        "private/providers/first-planner",
+        "private/providers/second-planner",
+    ]
+    registry = tmp_path / "omitted-provider-ids.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "schema": "mission-specialist-registry/2",
+                "specialists_v2": [
+                    {
+                        "skill": skill,
+                        "kind": "skill",
+                        "disabled": True,
+                    }
+                    for skill in private_skills
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        "specialists", "recommend", "--no-default-skill-roots",
+        "--task", "Review a multi-step architecture", "--registry", str(registry),
+        "--complexity", "Complex", "--json", cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    disabled_ids = {
+        item["provider_id"]
+        for item in data["specialists_ineligible"]
+        if item["reason_code"] == "provider-disabled"
+    }
+    projection_ids = {
+        item["provider_id"]
+        for item in data["specialist_registry_projection"]["effective_entries"]
+        if item["projection_state"] == "tombstone"
+    }
+    assert len(disabled_ids) == 2
+    assert projection_ids == disabled_ids
+    assert all(identity.startswith("provider:sha256:") for identity in disabled_ids)
+    assert not any(skill in json.dumps(data, sort_keys=True) for skill in private_skills)
+
+
 def test_multiple_explicit_v2_paths_use_argument_order(run_cli, tmp_path):
     paths = [tmp_path / "first.json", tmp_path / "second.json"]
     for path, phases in zip(paths, (["planning"], ["review"])):
@@ -1359,7 +1541,8 @@ def test_registry_docs_define_v2_activation_and_selection_provenance():
         "state-context-mismatch",
         "duplicate-registry-input",
         "invalid-v2-candidate-type",
-        "invalid-json-number",
+        "invalid-registry-number",
+        "number-limit",
         "$PROJECT",
         "$HOME",
         "projection_state",
@@ -1576,11 +1759,12 @@ def test_v2_json_nan_is_rejected_before_candidate_selection(run_cli, tmp_path):
         "--json", cwd=tmp_path,
     )
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 2, result.stderr
     data = json.loads(result.stdout)
+    assert data["ok"] is False
     assert data["specialists_candidates"] == []
     assert any(
-        item["reason_code"] == "invalid-json-number"
+        item["reason_code"] == "invalid-registry-number"
         for item in data["specialists_ineligible"]
     )
 
@@ -1829,6 +2013,71 @@ def test_relative_path_command_config_fails_closed_without_raw_diagnostic(
     assert "private/prompts/plan.json" not in json.dumps(blocked, sort_keys=True)
 
 
+def test_every_nonempty_command_argument_fails_closed_without_raw_diagnostic(
+    run_cli, tmp_path
+):
+    unsafe_arguments = [
+        ".",
+        "..",
+        "secrets.env",
+        "review",
+        "https://example.invalid/input",
+        "urn:example:input",
+        "@input-file",
+        "private/input.json",
+        "two words",
+    ]
+    for index, unsafe_argument in enumerate(unsafe_arguments):
+        registry = tmp_path / f"nonempty-argument-{index}.json"
+        registry.write_text(
+            json.dumps(
+                {
+                    "schema": "mission-specialist-registry/2",
+                    "specialists_v2": [
+                        {
+                            "provider_id": "portable-command-provider",
+                            "role": "deep-planning",
+                            "skill": "deep-planning-provider",
+                            "kind": "command",
+                            "command": "true",
+                            "args": [unsafe_argument],
+                            "env": {},
+                            "task_profiles": ["architecture"],
+                            "phases": ["planning"],
+                            "activation": {
+                                "min_complexity": "Complex",
+                                "auto_select_if": ["complexity"],
+                            },
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = run_cli(
+            "specialists", "recommend", "--no-default-skill-roots",
+            "--task", "Review a multi-step architecture", "--registry", str(registry),
+            "--complexity", "Complex", "--json", cwd=tmp_path,
+        )
+
+        assert result.returncode == 0, result.stderr
+        data = json.loads(result.stdout)
+        assert data["specialists_candidates"] == []
+        assert data["specialists_selected"] == []
+        assert data["specialists_unavailable"] == []
+        assert data["specialists_phase_plan"] == []
+        blocked = next(
+            item
+            for item in data["specialists_ineligible"]
+            if item["reason_code"] == "non-portable-execution-config"
+        )
+        assert blocked["blocked_config_class"] == "argument-locator"
+        assert not {
+            "command", "args", "env", "risk", "result_contract"
+        } & set(blocked)
+
+
 def test_nonportable_provider_identity_is_redacted_from_public_diagnostic(
     run_cli, tmp_path
 ):
@@ -1880,6 +2129,248 @@ def test_nonportable_provider_identity_is_redacted_from_public_diagnostic(
     assert private_provider_id not in json.dumps(data, sort_keys=True)
 
 
+def test_nonportable_skill_provider_identity_is_fail_closed_on_every_public_surface(
+    run_cli, tmp_path
+):
+    private_skill = "private/providers/deep-planning"
+    registry = tmp_path / "private-skill-id.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "schema": "mission-specialist-registry/2",
+                "specialists_v2": [
+                    {
+                        "role": "deep-planning",
+                        "skill": private_skill,
+                        "kind": "skill",
+                        "task_profiles": ["architecture"],
+                        "phases": ["planning"],
+                        "activation": {
+                            "min_complexity": "Complex",
+                            "auto_select_if": ["complexity"],
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        "specialists", "recommend", "--no-default-skill-roots",
+        "--task", "Review a multi-step architecture", "--registry", str(registry),
+        "--complexity", "Complex", "--installed-skills", private_skill,
+        "--json", cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["specialists_candidates"] == []
+    assert data["specialists_selected"] == []
+    assert data["specialists_unavailable"] == []
+    assert data["specialists_phase_plan"] == []
+    blocked = next(
+        item
+        for item in data["specialists_ineligible"]
+        if item["reason_code"] == "non-portable-execution-config"
+    )
+    assert blocked["blocked_config_class"] == "provider-identity"
+    assert blocked["provider_id"].startswith("provider:sha256:")
+    assert private_skill not in json.dumps(data, sort_keys=True)
+
+
+def test_public_specialist_records_drop_raw_nested_provider_config_from_stdout_state_and_backup(
+    run_cli, state_dir, read_state
+):
+    root = state_dir.parent
+    state_path = state_dir / "sessions" / "test.json"
+    state = read_state(state_dir)
+    state["complexity"] = "Complex"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    private_marker = str(root / "private-temp" / "provider-secret")
+    registry = root / "nested-config-provider.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "schema": "mission-specialist-registry/2",
+                "specialists_v2": [
+                    {
+                        "provider_id": "portable-skill-provider",
+                        "role": "deep-planning",
+                        "skill": "portable-skill-provider",
+                        "kind": "skill",
+                        "task_profiles": ["architecture"],
+                        "phases": ["planning"],
+                        "risk": {"private_marker": private_marker},
+                        "result_contract": {
+                            "forbidden_markers": [private_marker],
+                        },
+                        "activation": {
+                            "min_complexity": "Complex",
+                            "auto_select_if": ["complexity"],
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    command = (
+        "specialists", "recommend", "--no-default-skill-roots",
+        "--task", "Review a multi-step architecture", "--registry", str(registry),
+        "--complexity", "Complex", "--installed-skills", "portable-skill-provider",
+        "--record-state", "--json",
+    )
+
+    first = run_cli(*command, cwd=root)
+    second = run_cli(*command, cwd=root)
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    backup_path = state_path.with_suffix(".json.bak")
+    assert backup_path.exists()
+    get_result = run_cli("get", cwd=root)
+    assert get_result.returncode == 0, get_result.stderr
+    for serialized in (
+        first.stdout,
+        second.stdout,
+        state_path.read_text(encoding="utf-8"),
+        backup_path.read_text(encoding="utf-8"),
+        get_result.stdout,
+    ):
+        assert private_marker not in serialized
+        payload = json.loads(serialized)
+        for surface in (
+            "specialists_candidates",
+            "specialists_selected",
+            "specialists_unavailable",
+        ):
+            for record in payload.get(surface) or []:
+                assert "env" not in record
+                assert "risk" not in record
+                assert "result_contract" not in record
+                assert "activation" not in record
+                assert "auto_use" not in record
+
+
+def test_parser_diagnostic_drops_duplicate_key_detail_and_private_value(
+    run_cli, tmp_path
+):
+    private_marker = str(tmp_path / "private-temp" / "duplicate-key")
+    registry = tmp_path / "duplicate-private-key.json"
+    registry.write_text(
+        (
+            '{"schema":"mission-specialist-registry/2",'
+            '"specialists_v2":[],'
+            f'{json.dumps(private_marker)}:1,'
+            f'{json.dumps(private_marker)}:2}}'
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        "specialists", "recommend", "--no-default-skill-roots",
+        "--task", "Review a multi-step architecture", "--registry", str(registry),
+        "--complexity", "Complex", "--json", cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    diagnostic = next(
+        item for item in data["specialists_ineligible"]
+        if item["reason_code"] == "duplicate-registry-key"
+    )
+    assert "detail" not in diagnostic
+    assert private_marker not in json.dumps(data, sort_keys=True)
+
+
+def test_unsafe_legacy_specialist_state_fails_closed_before_read_write_or_invoke(
+    run_cli, state_dir, read_state
+):
+    root = state_dir.parent
+    state_path = state_dir / "sessions" / "test.json"
+    private_marker = str(root / "private-temp" / "legacy-provider")
+    state = read_state(state_dir)
+    state["specialists_candidates"] = [
+        {
+            "provider_id": "legacy-command-provider",
+            "role": "deep-planning",
+            "skill": "legacy-command-provider",
+            "kind": "command",
+            "command": private_marker,
+            "args": [private_marker],
+            "env": {"PRIVATE_PROVIDER_VALUE": private_marker},
+            "risk": {"private_marker": private_marker},
+            "result_contract": {"forbidden_markers": [private_marker]},
+        }
+    ]
+    state["specialists_selected"] = []
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    backup_path = state_path.with_suffix(".json.bak")
+    backup_path.unlink(missing_ok=True)
+    commands = [
+        ("get",),
+        ("specialists", "accounting", "--json"),
+        ("specialists", "summary", "--json"),
+        (
+            "specialists", "invoke-command",
+            "--provider", "legacy-command-provider",
+            "--iteration", "1", "--phase", "planning", "--json",
+        ),
+        ("set", "phase=planning"),
+    ]
+
+    for command in commands:
+        result = run_cli(*command, cwd=root)
+        assert result.returncode == 2
+        assert "Traceback" not in result.stderr
+        assert private_marker not in result.stdout
+        assert private_marker not in result.stderr
+        data = json.loads(result.stdout)
+        assert data["ok"] is False
+        assert data["reason_code"] == "unsafe-legacy-specialist-record"
+        assert data["field_path"].startswith("/specialists_candidates/0/")
+        assert not backup_path.exists()
+
+    assert json.loads(state_path.read_text(encoding="utf-8"))["phase"] == "scoring"
+
+
+def test_init_refuses_to_archive_unsafe_legacy_specialist_state(
+    run_cli, state_dir, read_state
+):
+    root = state_dir.parent
+    state_path = state_dir / "sessions" / "test.json"
+    private_marker = str(root / "private-temp" / "legacy-init-provider")
+    state = read_state(state_dir)
+    state["specialists_candidates"] = [
+        {
+            "provider_id": "legacy-command-provider",
+            "role": "deep-planning",
+            "skill": "legacy-command-provider",
+            "kind": "command",
+            "command": private_marker,
+            "args": [],
+            "env": {},
+        }
+    ]
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    result = run_cli(
+        "init", "replacement mission", "--complexity", "Complex",
+        cwd=root, env_extra={"MISSION_SESSION_ID": "test"},
+    )
+
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    assert private_marker not in result.stdout
+    assert private_marker not in result.stderr
+    data = json.loads(result.stdout)
+    assert data["reason_code"] == "unsafe-legacy-specialist-record"
+    assert data["field_path"] == "/specialists_candidates/0/command"
+    assert not list((state_dir / "archive").glob("state-test-*.json"))
+    assert json.loads(state_path.read_text(encoding="utf-8"))["mission_id"] == "abc12345"
+
+
 @pytest.mark.parametrize("version", [1, 2], ids=["v1", "v2"])
 @pytest.mark.parametrize(
     "source_kind",
@@ -1899,7 +2390,7 @@ def test_nonempty_command_env_fails_closed_for_every_registry_source(
         "skill": "portable-command-provider",
         "kind": "command",
         "command": "true",
-        "args": ["review", "--stdin"],
+        "args": [],
         "env": {"PROVIDER_SECRET": secret_value},
         "task_profiles": ["architecture"],
         "phases": ["planning"],
@@ -1983,7 +2474,7 @@ def test_portable_path_command_remains_invokable_and_accounted(
         "skill": "portable-command-provider",
         "kind": "command",
         "command": "portable-provider",
-        "args": ["review", "--stdin"],
+        "args": [],
         "env": {},
         "task_profiles": ["architecture"],
         "phases": ["planning"],
@@ -2011,8 +2502,8 @@ def test_portable_path_command_remains_invokable_and_accounted(
     assert recommendation.returncode == 0, recommendation.stderr
     selected = json.loads(recommendation.stdout)["specialists_selected"][0]
     assert selected["command"] == "portable-provider"
-    assert selected["args"] == ["review", "--stdin"]
-    assert selected["env"] == {}
+    assert selected["args"] == []
+    assert "env" not in selected
 
     invoked = run_cli(
         "specialists", "invoke-command", "--provider", "portable-command-provider",
@@ -2029,6 +2520,73 @@ def test_portable_path_command_remains_invokable_and_accounted(
         )
     )
     assert state["specialist_invocations"][-1]["status"] == "completed"
+
+
+def test_command_provider_evidence_redacts_process_local_paths(
+    run_cli, tmp_path
+):
+    command_dir = tmp_path / "commands"
+    command_dir.mkdir()
+    private_marker = str(tmp_path / "private-temp" / "provider-output")
+    command = command_dir / "portable-path-reporter"
+    command.write_text(
+        "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' "
+        + json.dumps(f"finding: private path {private_marker}")
+        + "\n",
+        encoding="utf-8",
+    )
+    command.chmod(0o700)
+    env = {"PATH": f"{command_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
+    run_cli(
+        "init", "provider evidence path hygiene", "--complexity", "Complex",
+        cwd=tmp_path, check=True, env_extra=env,
+    )
+    registry = tmp_path / "path-reporter.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "schema": "mission-specialist-registry/2",
+                "specialists_v2": [
+                    {
+                        "provider_id": "portable-path-reporter",
+                        "role": "deep-planning",
+                        "skill": "portable-path-reporter",
+                        "kind": "command",
+                        "command": "portable-path-reporter",
+                        "args": [],
+                        "env": {},
+                        "task_profiles": ["architecture"],
+                        "phases": ["planning"],
+                        "activation": {
+                            "min_complexity": "Complex",
+                            "auto_select_if": ["complexity"],
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    run_cli(
+        "specialists", "recommend", "--no-default-skill-roots",
+        "--task", "Review the architecture", "--registry", str(registry),
+        "--complexity", "Complex", "--record-state", "--json",
+        cwd=tmp_path, check=True, env_extra=env,
+    )
+
+    result = run_cli(
+        "specialists", "invoke-command",
+        "--provider", "portable-path-reporter",
+        "--iteration", "1", "--phase", "planning", "--json",
+        cwd=tmp_path, env_extra=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    evidence = tmp_path / data["entry"]["evidence_path"]
+    serialized = evidence.read_text(encoding="utf-8")
+    assert private_marker not in serialized
+    assert "[REDACTED_PATH]" in serialized
 
 
 def test_external_registry_projection_requires_explicit_resupply(run_cli, tmp_path):
