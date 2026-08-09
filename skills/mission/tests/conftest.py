@@ -94,8 +94,43 @@ def run_cli(tmp_path):
                 else:
                     base_env[key] = value
         command_cwd = Path(cwd or tmp_path).resolve()
+        command_args = list(args)
+        # Successful legacy setup calls are normalized into the same
+        # content-bound evidence contract used by production. Raw CLI tests
+        # keep their original input because they do not request check=True.
+        if check and command_args and command_args[0] == "push-score" and "--scoring-json" not in command_args:
+            def option(name, default=None):
+                try:
+                    return command_args[command_args.index(name) + 1]
+                except (ValueError, IndexError):
+                    return default
+            composite, minimum = float(option("--composite", "4.5")), float(option("--min-item", "4.5"))
+            other = (3 * composite - minimum) / 2
+            items = {"mission_achievement": minimum, "accuracy": other, "completeness": other}
+            if all(0 <= value <= 5 for value in items.values()):
+                open_high = int(option("--open-high", "0"))
+                archive = command_cwd / ".mission-state" / "archive"
+                archive.mkdir(exist_ok=True)
+                evidence = json.dumps({"schema": "mission-review-aggregate/1", "findings": [], "inputs": [{"findings": [{"severity": "High"}] * open_high}]}).encode()
+                digest = hashlib.sha256(evidence).hexdigest()
+                name = f"legacy-normalized-{digest[:16]}.json"
+                (archive / name).write_bytes(evidence)
+                scope = {"kind": "not-applicable", "reason_code": "non-git"}
+                ref = {"kind": "review-aggregate", "path": f".mission-state/archive/{name}", "digest": "sha256:" + digest, "generation": digest[:16], "revision_scope": scope}
+                score = archive / f"legacy-normalized-score-{option('--iteration', '1')}.json"
+                score.write_text(json.dumps({"items": items, "open_high": open_high, "findings_evidence_path": ref["path"], "score_provenance": {"score_source": "scoring-json", "review_evidence_ref": ref, "revision_scope": scope}}))
+                cleaned = []
+                skip = False
+                for value in command_args:
+                    if skip:
+                        skip = False
+                    elif value in {"--items", "--composite", "--min-item", "--scoring-output"}:
+                        skip = True
+                    else:
+                        cleaned.append(value)
+                command_args = cleaned + ["--scoring-json", str(score)]
         return subprocess.run(
-            [sys.executable, str(MISSION_STATE_PY), *args],
+            [sys.executable, str(MISSION_STATE_PY), *command_args],
             cwd=str(command_cwd),
             capture_output=True,
             text=True,

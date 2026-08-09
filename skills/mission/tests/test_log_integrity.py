@@ -61,7 +61,7 @@ def test_push_score_rejects_out_of_range_composite(state_dir, run_cli):
     r = run_cli("push-score", "--iteration", "1", "--composite", "9.0", "--min-item", "4.0",
                 "--items", '{"a": 4.0}', cwd=state_dir.parent)
     assert r.returncode != 0
-    assert "composite" in r.stderr.lower()
+    assert "scoring evidence" in r.stderr.lower()
 
 
 def test_push_score_rejects_negative_composite(state_dir, run_cli):
@@ -78,11 +78,11 @@ def test_push_score_rejects_nan_composite(state_dir, run_cli):
     assert r.returncode != 0
 
 
-def test_push_score_accepts_boundary_values(state_dir, run_cli, read_state):
-    """境界値 0 と 5 は許容."""
+def test_push_score_rejects_evidence_less_boundary_claim(state_dir, run_cli, read_state):
+    """Raw boundary scalar claims cannot bypass the evidence boundary."""
     r = run_cli("push-score", "--iteration", "1", "--composite", "5.0", "--min-item", "0.0",
                 "--items", '{"a": 5.0}', cwd=state_dir.parent)
-    assert r.returncode == 0, f"stderr: {r.stderr}"
+    assert r.returncode == 2, f"stderr: {r.stderr}"
 
 
 # ===== 改善3b: mark-passes が composite 欠損エントリを読み飛ばす =====
@@ -123,12 +123,10 @@ def test_mark_passes_force_sets_forced_flag(state_dir, run_cli, read_state):
     sf.write_text(json.dumps(data))
     r = run_cli("mark-passes", "--force", "--reason", "Reviewer 取得不能", "--approved-by-user",
                 cwd=state_dir.parent)
-    assert r.returncode == 0, f"stderr: {r.stderr}"
+    assert r.returncode == 2, f"stderr: {r.stderr}"
     s = read_state(state_dir)
-    assert s["passes"] is True
-    assert s["passes_forced"] is True
-    assert s["force_reason"] == "Reviewer 取得不能"
-    assert s["force_approved_by_user"] is True
+    assert s["passes"] is False
+    assert s.get("passes_forced") is not True
 
 
 def test_mark_passes_force_without_approved_by_user_rejected(state_dir, run_cli, read_state):
