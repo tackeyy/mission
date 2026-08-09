@@ -222,7 +222,7 @@ def test_aggregate_warns_and_records_lint_without_changing_scores(
         "completeness": 4.3,
         "usability": 4.2,
     }
-    evidence = json.loads(Path(scoring["findings_evidence_path"]).read_text())
+    evidence = json.loads((state_dir.parent / scoring["findings_evidence_path"]).read_text())
     assert evidence["artifact_lint"][0]["heading"] == "Score"
     assert evidence["artifact_lint_status"] == "findings"
     persisted = json.loads(state_path.read_text())
@@ -275,7 +275,7 @@ def test_aggregate_without_artifact_path_skips_lint_and_exits_zero(
     assert result.returncode == 0
     assert "WARN #351" not in result.stderr
     scoring = json.loads(out.read_text())
-    evidence = json.loads(Path(scoring["findings_evidence_path"]).read_text())
+    evidence = json.loads((state_dir.parent / scoring["findings_evidence_path"]).read_text())
     assert evidence["artifact_lint"] == []
     assert evidence["artifact_lint_status"] == "skipped"
     persisted = json.loads(state_path.read_text())
@@ -344,7 +344,7 @@ def test_aggregate_nul_artifact_path_warns_skips_and_preserves_scores(
         "completeness": 4.3,
         "usability": 4.2,
     }
-    evidence = json.loads(Path(scoring["findings_evidence_path"]).read_text())
+    evidence = json.loads((state_dir.parent / scoring["findings_evidence_path"]).read_text())
     assert evidence["artifact_lint"] == []
     assert evidence["artifact_lint_status"] == "skipped"
     persisted = json.loads(state_path.read_text())

@@ -123,15 +123,14 @@ def test_refresh_pid_rejects_alive_agent_owner(tmp_path, monkeypatch, run_cli):
 
 
 # ===== e2e: push-score → mark-passes → stop hook unblock =====
-def test_e2e_pushscore_markpasses_hook_unblocks(tmp_path, run_cli):
+def test_e2e_pushscore_markpasses_hook_unblocks(tmp_path, run_cli, push_provenance_score):
     sid = {"MISSION_SESSION_ID": "e2e"}
     run_cli("init", "g", "--complexity", "Simple", "--force-mission", "--threshold", "4.0",
             "--artifact-applicability", "not-applicable",
             cwd=tmp_path, env_extra=sid)
     before = _run_hook(tmp_path, sid)
     assert "block" in before.stdout, "未達 state は hook が block すべき"
-    run_cli("push-score", "--iteration", "1", "--composite", "4.5", "--min-item", "4.0",
-            "--items", '{"a":4.5}', cwd=tmp_path, env_extra=sid)
+    push_provenance_score(tmp_path, env_extra=sid)
     mp = run_cli("mark-passes", cwd=tmp_path, env_extra=sid)
     assert mp.returncode == 0, mp.stderr
     after = _run_hook(tmp_path, sid)

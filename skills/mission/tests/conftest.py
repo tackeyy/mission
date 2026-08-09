@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -104,3 +105,26 @@ def run_cli(tmp_path):
             env=base_env,
         )
     return _run
+
+
+@pytest.fixture
+def push_provenance_score(run_cli):
+    """Create the v4 typed scoring/evidence contract for tests that need a pass."""
+    def _push(cwd, *, env_extra=None, iteration=1, items=None):
+        root = Path(cwd)
+        sid = (env_extra or {}).get("MISSION_SESSION_ID", "test")
+        if "CLAUDE_CODE_SESSION_ID" in (env_extra or {}) and "MISSION_SESSION_ID" not in (env_extra or {}):
+            sid = "cc-" + env_extra["CLAUDE_CODE_SESSION_ID"]
+        state = json.loads((root / ".mission-state" / "sessions" / f"{sid}.json").read_text())
+        values = items or {"mission_achievement": 4.5, "accuracy": 4.5, "completeness": 4.5, "usability": 4.5}
+        archive = root / ".mission-state" / "archive"
+        archive.mkdir(exist_ok=True)
+        evidence = json.dumps({"schema": "mission-review-aggregate/1", "findings": [], "inputs": []}).encode()
+        digest = hashlib.sha256(evidence).hexdigest()
+        name = f"fixture-{sid}-{digest[:16]}.json"
+        (archive / name).write_bytes(evidence)
+        ref = {"kind": "review-aggregate", "path": f".mission-state/archive/{name}", "digest": "sha256:" + digest, "generation": digest[:16], "revision_scope": {"kind": "not-applicable", "reason_code": "non-git"}}
+        scoring = archive / f"fixture-score-{sid}.json"
+        scoring.write_text(json.dumps({"items": values, "open_high": 0, "findings_evidence_path": ref["path"], "score_provenance": {"score_source": "scoring-json", "review_evidence_ref": ref, "revision_scope": ref["revision_scope"]}}))
+        return run_cli("push-score", "--iteration", str(iteration), "--scoring-json", str(scoring), cwd=root, env_extra=env_extra, check=True)
+    return _push
