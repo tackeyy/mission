@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 
@@ -38,6 +39,13 @@ def _write_scoring(tmp_path, evidence_path, *, delta, review_agreement=3.0):
             "usability": {"min": 4.0, "max": 4.0, "delta": 0.0},
         },
     }
+    evidence = evidence_path.read_bytes()
+    digest = hashlib.sha256(evidence).hexdigest()
+    ref = {"kind": "review-aggregate", "path": str(evidence_path.relative_to(tmp_path)),
+           "digest": "sha256:" + digest, "generation": digest[:16],
+           "revision_scope": {"kind": "not-applicable", "reason_code": "non-git"}}
+    payload["score_provenance"] = {"score_source": "scoring-json", "review_evidence_ref": ref,
+                                   "revision_scope": ref["revision_scope"]}
     path = tmp_path / "scoring.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path

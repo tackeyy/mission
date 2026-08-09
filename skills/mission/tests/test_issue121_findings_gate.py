@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 
@@ -52,6 +53,15 @@ def _write_scoring_json(tmp_path, evidence_path=None, *, open_high=0):
     }
     if evidence_path is not None:
         payload["findings_evidence_path"] = str(evidence_path)
+    if evidence_path is None:
+        evidence_path = _write_evidence(tmp_path / ".mission-state", high_count=0)
+    evidence = evidence_path.read_bytes()
+    digest = hashlib.sha256(evidence).hexdigest()
+    ref = {"kind": "review-aggregate", "path": str(evidence_path.relative_to(tmp_path)),
+           "digest": "sha256:" + digest, "generation": digest[:16],
+           "revision_scope": {"kind": "not-applicable", "reason_code": "non-git"}}
+    payload["score_provenance"] = {"score_source": "scoring-json", "review_evidence_ref": ref,
+                                   "revision_scope": ref["revision_scope"]}
     path = tmp_path / "scoring.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
@@ -102,17 +112,11 @@ def test_mark_passes_passes_when_findings_evidence_matches_open_high_zero(state_
 
 
 def test_mark_passes_legacy_entry_warns_and_uses_stored_open_high(state_dir, run_cli, read_state):
-    items = json.dumps({"mission_achievement": 4.5, "accuracy": 4.0})
-    run_cli(
-        "push-score",
-        "--iteration", "1",
-        "--composite", "4.25",
-        "--min-item", "4.0",
-        "--items", items,
-        "--open-high", "0",
-        cwd=state_dir.parent,
-        check=True,
-    )
+    session = state_dir / "sessions" / "test.json"
+    document = json.loads(session.read_text())
+    document["score_history"] = [{"iteration": 1, "composite": 4.25, "min_item": 4.0,
+                                  "items": {"mission_achievement": 4.5, "accuracy": 4.0}, "open_high": 0}]
+    session.write_text(json.dumps(document))
 
     r = run_cli("mark-passes", cwd=state_dir.parent)
 
@@ -128,5 +132,6 @@ def test_mark_passes_force_bypasses_missing_findings_evidence(state_dir, run_cli
     r = run_cli("mark-passes", "--force", "--reason", "manual override in test", "--approved-by-user",
                 cwd=state_dir.parent)
 
-    assert r.returncode == 0, r.stderr
-    assert read_state(state_dir)["passes"] is True
+    assert r.returncode == 2
+    assert "approval-evidence-ref" in r.stderr
+    assert read_state(state_dir)["passes"] is False
