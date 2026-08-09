@@ -148,3 +148,109 @@ def test_coverage_never_treats_unresolved_pending_as_a_clean_observation():
         "skipped": 0,
     }
     assert coverage["counts_conserved"] is True
+
+
+def test_coverage_counts_not_applicable_with_canonical_identity_as_invalid():
+    identity = {
+        "path": "reports/result.md",
+        "digest": "a" * 64,
+        "size": 12,
+        "producer_run_id": "portable-run",
+    }
+    state = {
+        "phase": "done",
+        "passes": True,
+        "loop_active": False,
+        "terminal_outcome": "completed_pass",
+        "artifact_applicability": "not-applicable",
+        "artifact": identity,
+    }
+
+    coverage = summarize_artifact_coverage([state])
+
+    assert coverage["counts"] == {
+        "eligible": 1,
+        "observed": 0,
+        "missing": 0,
+        "invalid": 1,
+        "clean": 0,
+        "findings": 0,
+        "skipped": 0,
+    }
+    assert coverage["counts_conserved"] is True
+
+
+@pytest.mark.parametrize(
+    "artifact,lint_identity",
+    [
+        ({"path": ["malformed"]}, None),
+        (
+            {
+                "path": "reports/result.md",
+                "digest": "b" * 64,
+                "size": 12,
+                "producer_run_id": "portable-run-2",
+            },
+            {
+                "path": "reports/result.md",
+                "digest": "a" * 64,
+                "size": 12,
+                "producer_run_id": "portable-run-1",
+            },
+        ),
+    ],
+)
+def test_coverage_keeps_all_not_applicable_canonical_contradictions_in_denominator(
+    artifact, lint_identity
+):
+    state = {
+        "phase": "done",
+        "passes": True,
+        "loop_active": False,
+        "terminal_outcome": "failed",
+        "artifact_applicability": "not-applicable",
+        "artifact": artifact,
+        "artifact_lint_status": "clean",
+    }
+    if lint_identity is not None:
+        state["artifact_lint_identity"] = lint_identity
+
+    coverage = summarize_artifact_coverage([state])
+
+    assert coverage["counts"]["eligible"] == 1
+    assert coverage["counts"]["invalid"] == 1
+    assert coverage["counts"]["skipped"] == 0
+    assert coverage["counts_conserved"] is True
+    assert coverage["by_profile"]["unclassified"]["counts"] == coverage["counts"]
+    assert coverage["by_terminal_outcome"]["failed"]["counts"] == coverage["counts"]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {},
+        {"artifact_path": "legacy/result.md"},
+    ],
+)
+def test_coverage_keeps_true_not_applicable_and_legacy_fallback_skipped(extra):
+    state = {
+        "phase": "done",
+        "passes": True,
+        "loop_active": False,
+        "terminal_outcome": "completed_pass",
+        "artifact_applicability": "not-applicable",
+        **extra,
+    }
+
+    coverage = summarize_artifact_coverage([state])
+
+    assert coverage["counts"] == {
+        "eligible": 0,
+        "observed": 0,
+        "missing": 0,
+        "invalid": 0,
+        "clean": 0,
+        "findings": 0,
+        "skipped": 1,
+    }
+    assert coverage["counts_conserved"] is True

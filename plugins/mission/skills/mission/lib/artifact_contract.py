@@ -293,20 +293,23 @@ def summarize_artifact_coverage(
             outcome_counts.setdefault(outcome, _empty_coverage_counts()),
         ]
         applicability = state.get("artifact_applicability", "pending")
-        if applicability == "not-applicable":
+        canonical_identity = canonical_artifact_identity_present(state)
+        if applicability == "not-applicable" and not canonical_identity:
             for target in targets:
                 target["skipped"] += 1
             continue
         for target in targets:
             target["eligible"] += 1
         status = state.get("artifact_lint_status")
-        if applicability == "pending":
-            bucket = "invalid" if canonical_artifact_identity_present(state) else "missing"
+        if applicability == "not-applicable":
+            bucket = "invalid"
+        elif applicability == "pending":
+            bucket = "invalid" if canonical_identity else "missing"
         elif applicability != "producing" or status in {"invalid", "skipped"}:
             bucket = "invalid"
         elif (
             status in {"clean", "findings"}
-            and canonical_artifact_identity_present(state)
+            and canonical_identity
             and not artifact_lint_observation_matches(state)
         ):
             bucket = "invalid"

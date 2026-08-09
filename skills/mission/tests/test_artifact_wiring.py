@@ -494,6 +494,71 @@ def test_stats_text_labels_not_applicable_as_skipped_not_clean(run_cli, tmp_path
     assert "clean 0 / findings 0 / skipped 1" in result.stdout
 
 
+def test_stats_json_and_text_keep_not_applicable_identity_contradiction_invalid(
+    run_cli, tmp_path
+):
+    sessions = tmp_path / ".mission-state" / "sessions"
+    sessions.mkdir(parents=True)
+    base = {
+        "mission": "portable coverage fixture",
+        "project_root": str(tmp_path),
+        "schema_version": 3,
+        "started_at": "2026-08-01T00:00:00Z",
+        "updated_at": "2026-08-01T00:01:00Z",
+        "phase": "done",
+        "passes": False,
+        "loop_active": False,
+        "terminal_outcome": "failed",
+        "task_profile": {"primary": "portable-analysis"},
+        "artifact_applicability": "not-applicable",
+    }
+    contradiction = {
+        **base,
+        "mission_id": "contradiction",
+        "session_id": "contradiction",
+        "artifact": {"path": ["malformed"]},
+        "artifact_lint_status": "clean",
+        "artifact_lint_identity": {
+            "path": "reports/stale.md",
+            "digest": "a" * 64,
+            "size": 12,
+            "producer_run_id": "stale-run",
+        },
+    }
+    skipped = {
+        **base,
+        "mission_id": "skipped",
+        "session_id": "skipped",
+    }
+    sessions.joinpath("contradiction.json").write_text(
+        json.dumps(contradiction), encoding="utf-8"
+    )
+    sessions.joinpath("skipped.json").write_text(
+        json.dumps(skipped), encoding="utf-8"
+    )
+
+    json_result = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
+    text_result = run_cli("stats", "--root", str(tmp_path), cwd=tmp_path)
+
+    assert json_result.returncode == 0, json_result.stderr
+    assert text_result.returncode == 0, text_result.stderr
+    coverage = json.loads(json_result.stdout)["artifact_coverage"]
+    assert coverage["counts"] == {
+        "eligible": 1,
+        "observed": 0,
+        "missing": 0,
+        "invalid": 1,
+        "clean": 0,
+        "findings": 0,
+        "skipped": 1,
+    }
+    assert coverage["counts_conserved"] is True
+    assert coverage["by_profile"]["portable-analysis"]["counts"] == coverage["counts"]
+    assert coverage["by_terminal_outcome"]["failed"]["counts"] == coverage["counts"]
+    assert "eligible 1 / observed 0 / missing 0 / invalid 1" in text_result.stdout
+    assert "clean 0 / findings 0 / skipped 1" in text_result.stdout
+
+
 def test_mark_passes_warns_for_missing_identity_before_profile_reaches_threshold(
     state_dir, run_cli, read_state
 ):
@@ -1039,3 +1104,83 @@ def test_active_gate_rejects_lint_observation_from_before_official_rehandoff(
     assert result.returncode == 2
     assert "artifact lint observation" in result.stderr
     assert read_state(state_dir)["passes"] is False
+
+
+@pytest.mark.parametrize(
+    ("observed_count", "expected_gate_active", "expected_mark_returncode"),
+    [(18, False, 0), (19, True, 2)],
+)
+def test_contradiction_remains_in_history_denominator_at_coverage_gate_boundary(
+    observed_count,
+    expected_gate_active,
+    expected_mark_returncode,
+    state_dir,
+    run_cli,
+    read_state,
+):
+    root = state_dir.parent
+    assert run_cli("artifact", "init", "--json", cwd=root).returncode == 0
+    assert run_cli("artifact", "render", "--json", cwd=root).returncode == 0
+    state_path = state_dir / "sessions" / "test.json"
+    current = read_state(state_dir)
+    current["task_profile"] = {"primary": "portable-analysis"}
+    current["score_history"] = [
+        {"iteration": 1, "composite": 4.5, "min_item": 4.0, "open_high": 0}
+    ]
+    state_path.write_text(json.dumps(current), encoding="utf-8")
+
+    terminal_common = {
+        **current,
+        "phase": "done",
+        "passes": True,
+        "loop_active": False,
+        "terminal_outcome": "completed_pass",
+        "artifact_applicability": "producing",
+    }
+    for index in range(observed_count):
+        identity = {
+            "path": f"reports/history-{index}.md",
+            "digest": f"{index:064x}",
+            "size": index,
+            "producer_run_id": f"portable-history-{index}",
+        }
+        history = {
+            **terminal_common,
+            "session_id": f"history-{index}",
+            "mission_id": f"history-{index}",
+            "artifact": identity,
+            "artifact_lint_status": "clean",
+            "artifact_lint": [],
+            "artifact_lint_identity": identity,
+        }
+        state_path.with_name(f"history-{index}.json").write_text(
+            json.dumps(history), encoding="utf-8"
+        )
+    contradiction = {
+        **terminal_common,
+        "session_id": "contradiction",
+        "mission_id": "contradiction",
+        "passes": False,
+        "terminal_outcome": "failed",
+        "artifact_applicability": "not-applicable",
+        "artifact": {"path": ["malformed"]},
+        "artifact_lint_status": "clean",
+    }
+    state_path.with_name("contradiction.json").write_text(
+        json.dumps(contradiction), encoding="utf-8"
+    )
+
+    stats_result = run_cli("stats", "--root", str(root), "--json", cwd=root)
+    coverage = json.loads(stats_result.stdout)["artifact_coverage"]["by_profile"][
+        "portable-analysis"
+    ]
+    result = run_cli("mark-passes", cwd=root)
+
+    assert coverage["counts"]["eligible"] == observed_count + 1
+    assert coverage["counts"]["observed"] == observed_count
+    assert coverage["counts"]["invalid"] == 1
+    assert coverage["coverage"] == pytest.approx(observed_count / (observed_count + 1))
+    assert coverage["gate_active"] is expected_gate_active
+    assert coverage["counts_conserved"] is True
+    assert result.returncode == expected_mark_returncode, result.stderr
+    assert read_state(state_dir)["passes"] is (not expected_gate_active)

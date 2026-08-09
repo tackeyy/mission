@@ -97,6 +97,69 @@ def test_audit_reports_conserved_artifact_coverage(tmp_path):
     assert coverage["counts_conserved"] is True
 
 
+def test_audit_json_and_markdown_keep_not_applicable_identity_contradiction_invalid(
+    tmp_path,
+):
+    sessions = tmp_path / ".mission-state" / "sessions"
+    common = {
+        "schema_version": 3,
+        "terminal_outcome": "failed",
+        "task_profile": {"primary": "portable-analysis"},
+        "artifact_applicability": "not-applicable",
+        "passes": False,
+    }
+    _write_state(
+        sessions / "contradiction.json",
+        **common,
+        session_id="contradiction",
+        mission_id="contradiction",
+        artifact={"path": ["malformed"]},
+        artifact_lint_status="clean",
+        artifact_lint_identity={
+            "path": "reports/stale.md",
+            "digest": "a" * 64,
+            "size": 12,
+            "producer_run_id": "stale-run",
+        },
+    )
+    _write_state(
+        sessions / "skipped.json",
+        **common,
+        session_id="skipped",
+        mission_id="skipped",
+    )
+
+    json_result = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    markdown_result = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    coverage = json.loads(json_result.stdout)["artifact_coverage"]
+    assert coverage["counts"] == {
+        "eligible": 1,
+        "observed": 0,
+        "missing": 0,
+        "invalid": 1,
+        "clean": 0,
+        "findings": 0,
+        "skipped": 1,
+    }
+    assert coverage["counts_conserved"] is True
+    assert coverage["by_profile"]["portable-analysis"]["counts"] == coverage["counts"]
+    assert coverage["by_terminal_outcome"]["failed"]["counts"] == coverage["counts"]
+    assert "eligible / observed / missing / invalid: 1 / 0 / 0 / 1" in markdown_result.stdout
+    assert "clean / findings / skipped: 0 / 0 / 1" in markdown_result.stdout
+    assert "counts conserved: true" in markdown_result.stdout
+
+
 def test_audit_deduplicates_nested_worktree_archive_sessions(tmp_path):
     sessions = tmp_path / ".mission-state" / "sessions"
     archive_sessions = tmp_path / ".mission-state" / "archive" / "worktree-feat" / "sessions"
