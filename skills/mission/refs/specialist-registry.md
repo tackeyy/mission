@@ -46,7 +46,7 @@ Complexity-triggered planning providers use the versioned registry contract. Kee
 | User | `~/.config/mission/specialists-v2.yml` | `~/.config/mission/specialists.yml` |
 | Installed manifest | `mission-specialist-v2.yml` | `mission-specialist.yml` |
 
-The machine precedence is `explicit v2 > explicit v1 > project v2 > project v1 > user v2 > user v1 > installed v2 > installed v1`. Multiple explicit files within one version preserve CLI argument order. Duplicate provider identities in one file, or in an unordered installed tier, fail closed. A higher invalid entry blocks fallback to the same lower identity. Version 2 uses `disabled: true` as a tombstone; version 1 retains `enabled: false`.
+The machine precedence is `explicit v2 > explicit v1 > project v2 > project v1 > user v2 > user v1 > installed v2 > installed v1`. Multiple explicit files within one version preserve CLI argument order. Duplicate provider identities in one file, or in an unordered installed tier, fail closed. A higher invalid entry blocks fallback to the same lower identity. A document that cannot be parsed strictly creates an input-level precedence barrier: only an already valid, higher-priority explicit input may remain; same-tier and lower-priority inputs and built-in candidates produce no candidate, selection, or phase-plan entry. Version 2 uses `disabled: true` as a tombstone; version 1 retains `enabled: false`.
 
 Version 2 requires this root and does not permit a version 1 `specialists:` root in the same document:
 
@@ -79,7 +79,9 @@ The portable YAML subset permits candidate fields plus one nested mapping. JSON 
 
 Persisted selection sources use `automatic`, `confirmed-user`, `user-instruction`, `manual`, or `task-required`. Legacy `auto` maps to `automatic`; legacy `user-specified` maps to `user-instruction`. `selection_source_raw` preserves the received literal. A provider cannot claim `automatic` through `log-invocation` or `invoke-command`; only the recommendation producer may create it.
 
-Recommendation output records `provider_id`, registry source, registry entry digest, normalized activation digest, mission context digest, and `mission-specialist-registry-projection/1`. The projection contains ordered discovery inputs with canonical identities and content digests, plus `effective_projection_digest`. A later application guard can re-resolve the same inputs and detect a newly added higher-priority registry or other precedence drift. This issue defines producer evidence only; it does not authorize or execute a provider.
+Recommendation output records `provider_id`, registry source, registry entry digest, normalized activation digest, mission context digest, and `mission-specialist-registry-projection/1`. The projection contains ordered discovery inputs with canonical identities and content digests, any `precedence_barriers`, plus `effective_projection_digest`. A later application guard can re-resolve the same inputs and detect a newly added higher-priority registry or other precedence drift. This issue defines producer evidence only; it does not authorize or execute a provider.
+
+`specialists recommend --record-state` treats the current state's complexity and iteration as authoritative. A supplied complexity that disagrees with state, or complexity/iteration drift detected again inside the write lock, returns exit 2 with `state-context-mismatch`, emits zero output selections, and leaves every persisted selection field unchanged. Without `--record-state`, `--complexity` remains a dry-run-only virtual context and does not mutate mission state.
 
 ## Provider Kinds
 

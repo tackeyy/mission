@@ -191,6 +191,42 @@ def parse_v2_registry_json(text: str) -> list[dict[str, Any]]:
         raise
 
 
+def detect_registry_version(text: str) -> int:
+    """Classify an explicit registry from its document root only.
+
+    This intentionally does not search raw text: nested keys and scalar documentation
+    must not turn a version 1 document into version 2. Malformed JSON is sent through
+    the strict version 2 parser so it fails closed instead of reaching the legacy
+    permissive loader.
+    """
+    stripped = text.lstrip()
+    if stripped.startswith(("{", "[")):
+        try:
+            document = json.loads(text)
+        except json.JSONDecodeError:
+            return 2
+        if not isinstance(document, dict):
+            return 2
+        root_keys = set(document)
+        schema = document.get("schema")
+    else:
+        root_keys: set[str] = set()
+        schema = None
+        for raw in text.splitlines():
+            line = raw.split("#", 1)[0].rstrip()
+            if not line.strip() or line.startswith((" ", "\t")) or ":" not in line:
+                continue
+            key, raw_value = (part.strip() for part in line.split(":", 1))
+            root_keys.add(key)
+            if key == "schema":
+                schema = _yaml_scalar(raw_value)
+    if "specialists_v2" in root_keys:
+        return 2
+    if isinstance(schema, str) and schema.startswith("mission-specialist-registry/"):
+        return 2
+    return 1
+
+
 def _context_digest(context: dict[str, Any]) -> str:
     payload = json.dumps(
         context, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -226,6 +262,17 @@ def normalize_selection_source(raw: Any) -> dict[str, str]:
 def _normalize_activation(candidate: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
     raw_activation = candidate.get("activation")
     raw_legacy = candidate.get("auto_use")
+    if (
+        candidate.get("registry_version") == 2
+        and (
+            candidate.get("_v2_auto_use_present") is True
+            or (
+                "_v2_auto_use_present" not in candidate
+                and "auto_use" in candidate
+            )
+        )
+    ):
+        return {}, "conflicting-activation-config"
     if raw_activation is not None and raw_legacy:
         return {}, "conflicting-activation-config"
     if raw_activation is not None and not isinstance(raw_activation, dict):
