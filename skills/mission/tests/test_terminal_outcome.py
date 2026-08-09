@@ -461,7 +461,11 @@ def test_role_mixture_and_31_evidence_records_preserve_implementer_rate_and_cons
 def test_init_schema_and_primary_terminal_writers_persist_explicit_outcomes(run_cli, tmp_path):
     pass_root = tmp_path / "pass"
     pass_root.mkdir()
-    run_cli("init", "implement change", "--complexity", "Standard", cwd=pass_root, check=True)
+    run_cli(
+        "init", "implement change", "--complexity", "Standard",
+        "--artifact-applicability", "not-applicable",
+        cwd=pass_root, check=True,
+    )
     initial = json.loads(_state_file(pass_root).read_text(encoding="utf-8"))
     run_cli(
         "mark-passes",

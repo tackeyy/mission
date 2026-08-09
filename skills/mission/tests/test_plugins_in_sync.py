@@ -121,6 +121,18 @@ SYNC_PAIRS = [
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "provider_eligibility.py",
     ),
     (
+        REPO_ROOT / "skills" / "mission" / "lib" / "artifact_contract.py",
+        REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "artifact_contract.py",
+    ),
+    (
+        REPO_ROOT / "skills" / "mission-executor" / "SKILL.md",
+        REPO_ROOT / "plugins" / "mission" / "skills" / "mission-executor" / "SKILL.md",
+    ),
+    (
+        REPO_ROOT / "skills" / "mission-executor" / "refs" / "artifact-handoff.md",
+        REPO_ROOT / "plugins" / "mission" / "skills" / "mission-executor" / "refs" / "artifact-handoff.md",
+    ),
+    (
         REPO_ROOT / "skills" / "mission" / "lib" / "state_snapshot.py",
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "state_snapshot.py",
     ),
@@ -151,6 +163,16 @@ MISSION_STATE_DISTRIBUTION_MARKERS = [
 
 def _md5(path: Path) -> str:
     return hashlib.md5(path.read_bytes()).hexdigest()
+
+
+def _sync_pair_for(canonical_relative_path: str) -> tuple[Path, Path]:
+    canonical = REPO_ROOT / canonical_relative_path
+    matches = [pair for pair in SYNC_PAIRS if pair[0] == canonical]
+    assert len(matches) == 1, (
+        f"expected one sync inventory entry for {canonical_relative_path}, "
+        f"found {len(matches)}"
+    )
+    return matches[0]
 
 
 def _assert_optional_pair_in_sync(src: Path, dst: Path, label: str):
@@ -256,7 +278,7 @@ def test_state_snapshot_py_in_sync():
 
 def test_provider_eligibility_py_in_sync_and_importable():
     """Planning eligibility contract is inventoried and importable from the plugin."""
-    src, dst = SYNC_PAIRS[12]
+    src, dst = _sync_pair_for("skills/mission/lib/provider_eligibility.py")
     assert src.exists(), f"canonical file does not exist: {src}"
     assert dst.exists(), f"plugin mirror does not exist: {dst}"
     assert _md5(src) == _md5(dst), (
@@ -337,6 +359,20 @@ def test_state_management_reference_in_sync():
     """worktree archive を含む state management reference が配布 wrapper と一致する."""
     src, dst = SYNC_PAIRS[11]
     _assert_optional_pair_in_sync(src, dst, "state-management.md")
+
+
+def test_artifact_contract_distribution_files_in_sync():
+    """Artifact validator and executor handoff contract are shipped together."""
+    for relative_path, label in (
+        ("skills/mission/lib/artifact_contract.py", "artifact_contract.py"),
+        ("skills/mission-executor/SKILL.md", "mission-executor/SKILL.md"),
+        (
+            "skills/mission-executor/refs/artifact-handoff.md",
+            "mission-executor/refs/artifact-handoff.md",
+        ),
+    ):
+        src, dst = _sync_pair_for(relative_path)
+        _assert_optional_pair_in_sync(src, dst, label)
 
 
 def test_skill_md_in_sync():

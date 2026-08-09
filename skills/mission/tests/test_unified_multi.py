@@ -20,7 +20,11 @@ def test_init_ignores_legacy_state_json(tmp_path, run_cli):
 def test_sid_consistent_across_commands(tmp_path, run_cli):
     """同一 MISSION_SESSION_ID で init→push-score→mark-passes が同一 sessions/<sid>.json を通る (sid一致保証)."""
     env = {"MISSION_SESSION_ID": "consistent"}
-    run_cli("init", "g", "--complexity", "Standard", cwd=tmp_path, env_extra=env, check=True)
+    run_cli(
+        "init", "g", "--complexity", "Standard",
+        "--artifact-applicability", "not-applicable",
+        cwd=tmp_path, env_extra=env, check=True,
+    )
     sf = tmp_path / ".mission-state" / "sessions" / "consistent.json"
     assert sf.exists()
     run_cli("push-score", "--iteration", "1", "--composite", "4.5", "--min-item", "4.0",
