@@ -7,6 +7,7 @@ import os
 import re
 import stat
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 SHA256_REF_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -137,3 +138,26 @@ def read_state_local_bytes(root: object, path_text: object, *, limit: int = 4 * 
         raise ValueError("approval receipt path is invalid") from exc
     finally:
         os.close(fd)
+
+
+def validate_receipt_binding(root: object, envelope: object) -> None:
+    """Validate the immutable receipt payload against its canonical request."""
+    validated = validate_recorded_envelope(envelope, require_fresh=False)
+    receipt = validated["receipt_ref"]
+    content = read_state_local_bytes(root, receipt["path"])
+    if "sha256:" + hashlib.sha256(content).hexdigest() != receipt["digest"]:
+        raise ValueError("approval receipt digest mismatch")
+    try:
+        document = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise ValueError("approval receipt is invalid") from exc
+    request = validated["request"]
+    expected = {
+        "schema": "mission-force-approval-receipt/1",
+        "session_id": request["session_id"], "mission_id": request["mission_id"],
+        "revision_scope": request["revision_scope"],
+        "terminal_object_digest": request["terminal_object_digest"],
+        "event_nonce": request["event_nonce"], "request_digest": request["request_digest"],
+    }
+    if document != expected:
+        raise ValueError("approval receipt binding is invalid")

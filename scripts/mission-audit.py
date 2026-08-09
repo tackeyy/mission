@@ -81,7 +81,7 @@ from state_snapshot import (  # noqa: E402
     value_digest,
     write_snapshot,
 )
-from scoring_provenance import read_state_local_bytes, validate_recorded_envelope  # noqa: E402
+from scoring_provenance import validate_receipt_binding, validate_recorded_envelope  # noqa: E402
 
 
 PRUNE_DIRS = {
@@ -1633,21 +1633,9 @@ def is_forced_pass_autonomous_suspect(state: dict[str, Any], *, root: Path | Non
             envelope = validate_recorded_envelope(approval, require_fresh=False)
             if root is None:
                 return True
-            receipt = envelope["receipt_ref"]
-            content = read_state_local_bytes(root, receipt["path"])
-            if "sha256:" + hashlib.sha256(content).hexdigest() != receipt["digest"]:
-                return True
-            # A receipt is a canonical binding object, not an opaque blob.
-            document = json.loads(content)
+            validate_receipt_binding(root, envelope)
             request = envelope["request"]
-            if not isinstance(document, dict) or document != {
-                "schema": "mission-force-approval-receipt/1",
-                "session_id": request["session_id"], "mission_id": request["mission_id"],
-                "revision_scope": request["revision_scope"],
-                "terminal_object_digest": request["terminal_object_digest"],
-                "event_nonce": request["event_nonce"], "request_digest": request["request_digest"],
-            }:
-                return True
+            receipt = envelope["receipt_ref"]
             key = (request["request_digest"], receipt["digest"])
             if consumed is not None and key in consumed:
                 return True

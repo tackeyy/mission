@@ -107,6 +107,7 @@ from scoring_provenance import (  # noqa: E402
     VERIFIER_ID_RE as _APPROVAL_VERIFIER_NAME_RE,
     build_request as build_approval_request,
     digest as provenance_digest,
+    validate_receipt_binding,
     validate_recorded_envelope,
 )
 
@@ -7688,9 +7689,7 @@ def cmd_mark_passes(args):
                 verification = verify_force_approval(request, approval_verifier)
                 if _force_envelope_replayed(cwd, verification):
                     raise ValueError("approval request or receipt was already consumed")
-                receipt_bytes = _read_bounded_review_evidence(cwd, verification["receipt_ref"]["path"])
-                if "sha256:" + hashlib.sha256(receipt_bytes).hexdigest() != verification["receipt_ref"]["digest"]:
-                    raise ValueError("approval receipt digest mismatch")
+                validate_receipt_binding(cwd, verification)
                 if data.get("force_approval"):
                     raise ValueError("approval envelope was already consumed")
             except ValueError as exc:
