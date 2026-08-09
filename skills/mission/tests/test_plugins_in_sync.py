@@ -110,6 +110,18 @@ SYNC_PAIRS = [
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "refs" / "state-management.md",
     ),
     (
+        REPO_ROOT / "skills" / "mission" / "lib" / "artifact_contract.py",
+        REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "artifact_contract.py",
+    ),
+    (
+        REPO_ROOT / "skills" / "mission-executor" / "SKILL.md",
+        REPO_ROOT / "plugins" / "mission" / "skills" / "mission-executor" / "SKILL.md",
+    ),
+    (
+        REPO_ROOT / "skills" / "mission-executor" / "refs" / "artifact-handoff.md",
+        REPO_ROOT / "plugins" / "mission" / "skills" / "mission-executor" / "refs" / "artifact-handoff.md",
+    ),
+    (
         REPO_ROOT / "skills" / "mission" / "lib" / "state_snapshot.py",
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "state_snapshot.py",
     ),
@@ -282,6 +294,17 @@ def test_state_management_reference_in_sync():
     """worktree archive を含む state management reference が配布 wrapper と一致する."""
     src, dst = SYNC_PAIRS[11]
     _assert_optional_pair_in_sync(src, dst, "state-management.md")
+
+
+def test_artifact_contract_distribution_files_in_sync():
+    """Artifact validator and executor handoff contract are shipped together."""
+    for index, label in (
+        (12, "artifact_contract.py"),
+        (13, "mission-executor/SKILL.md"),
+        (14, "mission-executor/refs/artifact-handoff.md"),
+    ):
+        src, dst = SYNC_PAIRS[index]
+        _assert_optional_pair_in_sync(src, dst, label)
 
 
 def test_skill_md_in_sync():

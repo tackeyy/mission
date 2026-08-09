@@ -51,6 +51,7 @@ from specialist_accounting import (  # noqa: E402
     terminal_invoked_specialist_skills,
 )
 from activity_segments import summarize_activity_states  # noqa: E402
+from artifact_contract import summarize_artifact_coverage  # noqa: E402
 from audit_findings import (  # noqa: E402
     AuditFinding,
     FindingSpec,
@@ -2335,6 +2336,9 @@ def aggregate(
         "completed_pass_rate_denominator": pass_rate_summary["completed_pass_rate_denominator"],
         "completed_pass_rate": pass_rate_summary["completed_pass_rate"],
         "terminal_outcome_counts": pass_rate_summary["terminal_outcome_counts"],
+        "artifact_coverage": summarize_artifact_coverage(
+            [record.state for record in records]
+        ),
         "terminal_count": pass_rate_summary["terminal_count"],
         "non_terminal_count": pass_rate_summary["non_terminal_count"],
         "role_counts": pass_rate_summary["role_counts"],
@@ -2757,6 +2761,19 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
             for outcome, count in stats["terminal_outcome_counts"].items()
         ],
         f"- non-terminal active records: {stats['non_terminal_count']}",
+        "",
+        "## Artifact Coverage",
+        "",
+        f"- eligible / observed / missing / invalid: "
+        f"{stats['artifact_coverage']['counts']['eligible']} / "
+        f"{stats['artifact_coverage']['counts']['observed']} / "
+        f"{stats['artifact_coverage']['counts']['missing']} / "
+        f"{stats['artifact_coverage']['counts']['invalid']}",
+        f"- clean / findings / skipped: "
+        f"{stats['artifact_coverage']['counts']['clean']} / "
+        f"{stats['artifact_coverage']['counts']['findings']} / "
+        f"{stats['artifact_coverage']['counts']['skipped']}",
+        f"- counts conserved: {str(stats['artifact_coverage']['counts_conserved']).lower()}",
         "",
         "## Activity Timing",
         "",

@@ -63,16 +63,27 @@ The state file should record:
 
 ```json
 {
+  "artifact_applicability": "producing",
   "artifact": {
     "status": "draft",
     "format": "markdown",
     "path": ".mission-state/artifacts/<session_id>/mission-artifact.md",
+    "digest": "<sha256>",
+    "size": 1234,
+    "producer_run_id": "<executor-run-id>",
     "exports": [],
     "publish_events": [],
     "redaction_status": "unchecked"
   }
 }
 ```
+
+`artifact_applicability` is `pending` at init because the execution profile may
+not yet be known. It must become `producing` or `not-applicable` after the
+execution contract is known, and no later than the atomic executing-to-reviewing
+transition. New producers use nested `artifact.path`; top-level `artifact_path`
+is a read-only legacy fallback. Canonical paths are repository-relative and the
+identity is captured from one bounded regular non-symlink descriptor.
 
 The artifact should include these sections:
 
@@ -111,11 +122,22 @@ Rules:
 - `artifact publish` is optional and must require explicit user confirmation.
   It records publish intent, approval text, provider, destination, and artifact
   path in state. Remote provider APIs are not called by the current command.
+- An external executor hands off a producing artifact with `advance --phase
+  reviewing --artifact-applicability producing --artifact-path <path>
+  --producer-run-id <id>`, or explicitly declares `not-applicable`. Review
+  aggregation and pass marking reject an identity mismatch.
 
 ## Stop-Gate Integration
 
 Artifact support starts as opt-in. It becomes required for a mission when
 `artifact init --required-for-pass` is used.
+
+Operational coverage uses terminal outcomes as its population and reports the
+invariants `eligible = observed + missing + invalid` and `observed = clean +
+findings`. Explicit `not-applicable` records are `skipped` outside `eligible`;
+they are never reported as clean. Coverage remains warning-only below 95% for a
+profile and activates the current-observation pass gate after that profile
+reaches 95%.
 
 Recommended phases:
 
