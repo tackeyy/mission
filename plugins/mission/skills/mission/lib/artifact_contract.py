@@ -16,10 +16,60 @@ from pathlib import Path, PurePosixPath
 ARTIFACT_MAX_BYTES = 4 * 1024 * 1024
 ARTIFACT_APPLICABILITIES = frozenset({"producing", "not-applicable", "pending"})
 DEFAULT_COVERAGE_THRESHOLD = 0.95
+ARTIFACT_IDENTITY_FIELDS = ("path", "digest", "size", "producer_run_id")
 
 
 class ArtifactContractError(ValueError):
     """The artifact path, bytes, or recorded identity is invalid."""
+
+
+def canonical_artifact_identity_snapshot(state: dict) -> dict | None:
+    """Return the complete canonical identity used to bind an observation."""
+    artifact = state.get("artifact")
+    if not isinstance(artifact, dict) or not all(
+        field in artifact for field in ARTIFACT_IDENTITY_FIELDS
+    ):
+        return None
+    snapshot = {field: artifact[field] for field in ARTIFACT_IDENTITY_FIELDS}
+    path = snapshot["path"]
+    digest = snapshot["digest"]
+    size = snapshot["size"]
+    producer_run_id = snapshot["producer_run_id"]
+    if not isinstance(path, str) or not path:
+        return None
+    if (
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or any(char not in "0123456789abcdef" for char in digest)
+    ):
+        return None
+    if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+        return None
+    if not isinstance(producer_run_id, str) or not producer_run_id:
+        return None
+    return snapshot
+
+
+def canonical_artifact_identity_present(state: dict) -> bool:
+    """Whether state declares any canonical identity field, including malformed input."""
+    artifact = state.get("artifact")
+    return isinstance(artifact, dict) and any(
+        field in artifact for field in ARTIFACT_IDENTITY_FIELDS
+    )
+
+
+def artifact_lint_observation_matches(state: dict) -> bool:
+    """Whether the persisted lint observation describes the current identity."""
+    current = canonical_artifact_identity_snapshot(state)
+    observed = state.get("artifact_lint_identity")
+    return current is not None and isinstance(observed, dict) and observed == current
+
+
+def invalidate_artifact_lint_observation(state: dict) -> None:
+    """Atomically remove lint data when a canonical producer changes identity."""
+    state.pop("artifact_lint", None)
+    state.pop("artifact_lint_status", None)
+    state.pop("artifact_lint_identity", None)
 
 
 def validate_artifact_state_consistency(
@@ -31,10 +81,7 @@ def validate_artifact_state_consistency(
         return None  # Legacy state: observe without physical migration.
     if applicability not in ARTIFACT_APPLICABILITIES:
         raise ArtifactContractError("artifact applicability is invalid")
-    artifact = state.get("artifact")
-    canonical_identity = isinstance(artifact, dict) and any(
-        key in artifact for key in ("path", "digest", "size", "producer_run_id")
-    )
+    canonical_identity = canonical_artifact_identity_present(state)
     if applicability == "pending":
         if canonical_identity:
             raise ArtifactContractError(
@@ -253,7 +300,15 @@ def summarize_artifact_coverage(
         for target in targets:
             target["eligible"] += 1
         status = state.get("artifact_lint_status")
-        if applicability not in {"producing", "pending"} or status in {"invalid", "skipped"}:
+        if applicability == "pending":
+            bucket = "invalid" if canonical_artifact_identity_present(state) else "missing"
+        elif applicability != "producing" or status in {"invalid", "skipped"}:
+            bucket = "invalid"
+        elif (
+            status in {"clean", "findings"}
+            and canonical_artifact_identity_present(state)
+            and not artifact_lint_observation_matches(state)
+        ):
             bucket = "invalid"
         elif status in {"clean", "findings"}:
             bucket = status

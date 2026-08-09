@@ -88,8 +88,11 @@ from worktree_archive import validate_worktree_archive_bundle  # noqa: E402
 from state_snapshot import SnapshotError, consume_snapshot_document  # noqa: E402
 from artifact_contract import (  # noqa: E402
     ArtifactContractError,
+    artifact_lint_observation_matches,
     artifact_path_from_state,
+    canonical_artifact_identity_snapshot,
     capture_artifact_identity,
+    invalidate_artifact_lint_observation,
     summarize_artifact_coverage,
     validate_artifact_identity,
     validate_artifact_state_consistency,
@@ -4069,6 +4072,7 @@ def _refresh_artifact_identity(cwd: Path, data: dict, artifact: dict, path: Path
         _state_relative_path(cwd, str(path)),
         str(data.get("session_id") or resolve_session_id()),
     )
+    invalidate_artifact_lint_observation(data)
     artifact.update(identity)
     data["artifact_applicability"] = "producing"
 
@@ -4173,6 +4177,7 @@ def cmd_artifact_append(args):
         artifact.pop("digest", None)
         artifact.pop("size", None)
         artifact["updated_at"] = now
+        invalidate_artifact_lint_observation(data)
         data["artifact"] = artifact
         data["updated_at"] = now
         backup_state(sf)
@@ -4979,6 +4984,7 @@ def cmd_advance(args):
                     sys.exit(2)
                 data["artifact"] = identity
                 data["artifact_applicability"] = "producing"
+                invalidate_artifact_lint_observation(data)
             elif requested_applicability == "not-applicable":
                 if artifact_path or producer_run_id:
                     print(
@@ -5717,6 +5723,7 @@ FROZEN_FIELDS = {
     "artifact",
     "artifact_path",
     "artifact_lint",
+    "artifact_lint_identity",
     "artifact_lint_status",
     "project_root",
     "started_at",
@@ -6779,7 +6786,7 @@ def cmd_aggregate_reviews(args):
             validate_artifact_state_consistency(data, require_resolved=True)
             artifact_lint, artifact_lint_status = _lint_state_artifact(cwd, data)
         except ArtifactContractError as exc:
-            data.pop("artifact_lint", None)
+            invalidate_artifact_lint_observation(data)
             data["artifact_lint_status"] = "invalid"
             data["updated_at"] = iso_now()
             backup_state(sf)
@@ -6791,6 +6798,11 @@ def cmd_aggregate_reviews(args):
         else:
             data["artifact_lint"] = artifact_lint
         data["artifact_lint_status"] = artifact_lint_status
+        identity_snapshot = canonical_artifact_identity_snapshot(data)
+        if artifact_lint_status in {"clean", "findings"} and identity_snapshot:
+            data["artifact_lint_identity"] = identity_snapshot
+        else:
+            data.pop("artifact_lint_identity", None)
         for finding in artifact_lint:
             print(
                 "WARN #351: artifact lint: "
@@ -7346,7 +7358,10 @@ def cmd_mark_passes(args):
                     sys.exit(2)
                 if (
                     coverage.get("gate_active")
-                    and data.get("artifact_lint_status") not in {"clean", "findings"}
+                    and (
+                        data.get("artifact_lint_status") not in {"clean", "findings"}
+                        or not artifact_lint_observation_matches(data)
+                    )
                 ):
                     print(
                         "ERROR: artifact lint observation is missing for a profile with an active coverage gate",

@@ -18,6 +18,7 @@ SPEC.loader.exec_module(MISSION_STATE)
 from artifact_contract import (  # noqa: E402
     ArtifactContractError,
     capture_artifact_identity,
+    summarize_artifact_coverage,
 )
 
 
@@ -85,3 +86,65 @@ def test_advance_artifact_handoff_state_is_atomic_on_write_failure(
         MISSION_STATE.cmd_advance(args)
 
     assert state_path.read_bytes() == before
+
+
+def test_coverage_treats_lint_observation_for_another_identity_as_invalid():
+    current_identity = {
+        "path": "reports/result.md",
+        "digest": "b" * 64,
+        "size": 12,
+        "producer_run_id": "portable-run-2",
+    }
+    state = {
+        "phase": "done",
+        "passes": True,
+        "loop_active": False,
+        "terminal_outcome": "completed_pass",
+        "artifact_applicability": "producing",
+        "artifact": current_identity,
+        "artifact_lint_status": "clean",
+        "artifact_lint": [],
+        "artifact_lint_identity": {
+            **current_identity,
+            "digest": "a" * 64,
+            "producer_run_id": "portable-run-1",
+        },
+    }
+
+    coverage = summarize_artifact_coverage([state])
+
+    assert coverage["counts"] == {
+        "eligible": 1,
+        "observed": 0,
+        "missing": 0,
+        "invalid": 1,
+        "clean": 0,
+        "findings": 0,
+        "skipped": 0,
+    }
+    assert coverage["counts_conserved"] is True
+
+
+def test_coverage_never_treats_unresolved_pending_as_a_clean_observation():
+    state = {
+        "phase": "done",
+        "passes": True,
+        "loop_active": False,
+        "terminal_outcome": "completed_pass",
+        "artifact_applicability": "pending",
+        "artifact_lint_status": "clean",
+        "artifact_lint": [],
+    }
+
+    coverage = summarize_artifact_coverage([state])
+
+    assert coverage["counts"] == {
+        "eligible": 1,
+        "observed": 0,
+        "missing": 1,
+        "invalid": 0,
+        "clean": 0,
+        "findings": 0,
+        "skipped": 0,
+    }
+    assert coverage["counts_conserved"] is True

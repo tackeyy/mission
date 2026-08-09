@@ -117,6 +117,130 @@ def test_artifact_render_persists_canonical_identity(state_dir, run_cli, read_st
     assert read_state(state_dir)["artifact_applicability"] == "producing"
 
 
+def test_artifact_render_atomically_invalidates_prior_lint_observation(
+    state_dir, run_cli, read_state
+):
+    root = state_dir.parent
+    assert run_cli("artifact", "init", "--json", cwd=root).returncode == 0
+    assert run_cli("artifact", "render", "--json", cwd=root).returncode == 0
+    observed = run_cli(
+        "aggregate-reviews",
+        "--iteration",
+        "1",
+        "--input",
+        str(_write_review(root / "review.json")),
+        "--json",
+        cwd=root,
+    )
+    assert observed.returncode == 0, observed.stderr
+    assert read_state(state_dir)["artifact_lint_status"] == "clean"
+    assert "artifact_lint_identity" in read_state(state_dir)
+
+    regenerated = run_cli("artifact", "render", "--json", cwd=root)
+
+    assert regenerated.returncode == 0, regenerated.stderr
+    state = read_state(state_dir)
+    assert "artifact_lint_status" not in state
+    assert "artifact_lint" not in state
+    assert "artifact_lint_identity" not in state
+
+
+def test_artifact_append_invalidates_prior_lint_observation_before_rerender(
+    state_dir, run_cli, read_state
+):
+    root = state_dir.parent
+    assert run_cli("artifact", "init", "--json", cwd=root).returncode == 0
+    assert run_cli("artifact", "render", "--json", cwd=root).returncode == 0
+    observed = run_cli(
+        "aggregate-reviews",
+        "--iteration",
+        "1",
+        "--input",
+        str(_write_review(root / "review.json")),
+        "--json",
+        cwd=root,
+    )
+    assert observed.returncode == 0, observed.stderr
+
+    appended = run_cli(
+        "artifact",
+        "append",
+        "--section",
+        "evidence",
+        "--text",
+        "new producer evidence",
+        "--json",
+        cwd=root,
+    )
+
+    assert appended.returncode == 0, appended.stderr
+    state = read_state(state_dir)
+    assert "artifact_lint_status" not in state
+    assert "artifact_lint" not in state
+    assert "artifact_lint_identity" not in state
+
+
+@pytest.mark.parametrize(
+    "producer_args",
+    [
+        ("artifact", "init", "--json"),
+        (
+            "artifact",
+            "export",
+            "--to",
+            "reports/exported-result.md",
+            "--redaction-status",
+            "reviewed",
+            "--json",
+        ),
+        (
+            "artifact",
+            "publish",
+            "--provider",
+            "local",
+            "--require-confirm",
+            "--approval-text",
+            "portable approval evidence",
+            "--json",
+        ),
+    ],
+)
+def test_artifact_producers_invalidate_observation_bound_to_prior_identity(
+    producer_args, state_dir, run_cli, read_state
+):
+    root = state_dir.parent
+    assert run_cli("artifact", "init", "--json", cwd=root).returncode == 0
+    assert (
+        run_cli(
+            "artifact",
+            "render",
+            "--redaction-status",
+            "reviewed",
+            "--json",
+            cwd=root,
+        ).returncode
+        == 0
+    )
+    observed = run_cli(
+        "aggregate-reviews",
+        "--iteration",
+        "1",
+        "--input",
+        str(_write_review(root / "review.json")),
+        "--json",
+        cwd=root,
+    )
+    assert observed.returncode == 0, observed.stderr
+
+    produced = run_cli(*producer_args, cwd=root)
+
+    assert produced.returncode == 0, produced.stderr
+    state = read_state(state_dir)
+    assert "artifact_lint_status" not in state
+    assert "artifact_lint" not in state
+    assert "artifact_lint_identity" not in state
+
+
 def test_aggregate_rejects_artifact_mutated_after_identity_capture(
     state_dir, run_cli, read_state
 ):
@@ -686,6 +810,132 @@ def test_canonical_identity_with_invalid_utf8_is_invalid_not_skipped(
     assert read_state(state_dir)["artifact_lint_status"] == "invalid"
 
 
+def test_invalid_utf8_recapture_requires_a_new_identity_bound_lint_observation(
+    state_dir, run_cli, read_state
+):
+    root = state_dir.parent
+    state_path = state_dir / "sessions" / "test.json"
+    state = read_state(state_dir)
+    state["phase"] = "executing"
+    state["artifact_applicability"] = "pending"
+    state["task_profile"] = {"primary": "portable-analysis"}
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    artifact_path = root / "result.md"
+    artifact_path.write_text("# Result\nverified output\n", encoding="utf-8")
+    first_handoff = run_cli(
+        "advance",
+        "--phase",
+        "reviewing",
+        "--activity",
+        "reviewer-wait:review-response",
+        "--artifact-applicability",
+        "producing",
+        "--artifact-path",
+        "result.md",
+        "--producer-run-id",
+        "portable-run-1",
+        cwd=root,
+    )
+    assert first_handoff.returncode == 0, first_handoff.stderr
+    review = _write_review(root / "review.json")
+    first_observation = run_cli(
+        "aggregate-reviews",
+        "--iteration",
+        "1",
+        "--input",
+        str(review),
+        "--json",
+        cwd=root,
+    )
+    assert first_observation.returncode == 0, first_observation.stderr
+    historical = read_state(state_dir)
+    historical.update(
+        {
+            "session_id": "observed-history",
+            "mission_id": "observed-history",
+            "phase": "done",
+            "passes": True,
+            "loop_active": False,
+            "terminal_outcome": "completed_pass",
+        }
+    )
+    state_path.with_name("observed-history.json").write_text(
+        json.dumps(historical), encoding="utf-8"
+    )
+
+    artifact_path.write_bytes(b"\xff\xfe")
+    invalid_handoff = run_cli(
+        "advance",
+        "--phase",
+        "reviewing",
+        "--activity",
+        "reviewer-wait:review-response",
+        "--artifact-applicability",
+        "producing",
+        "--artifact-path",
+        "result.md",
+        "--producer-run-id",
+        "portable-run-invalid",
+        cwd=root,
+    )
+    assert invalid_handoff.returncode == 0, invalid_handoff.stderr
+    invalid_observation = run_cli(
+        "aggregate-reviews",
+        "--iteration",
+        "1",
+        "--input",
+        str(review),
+        "--json",
+        cwd=root,
+    )
+    assert invalid_observation.returncode == 2
+    assert read_state(state_dir)["artifact_lint_status"] == "invalid"
+
+    artifact_path.write_text("# Result\nrecovered output\n", encoding="utf-8")
+    recovered_handoff = run_cli(
+        "advance",
+        "--phase",
+        "reviewing",
+        "--activity",
+        "reviewer-wait:review-response",
+        "--artifact-applicability",
+        "producing",
+        "--artifact-path",
+        "result.md",
+        "--producer-run-id",
+        "portable-run-recovered",
+        cwd=root,
+    )
+    assert recovered_handoff.returncode == 0, recovered_handoff.stderr
+    recovered = read_state(state_dir)
+    assert "artifact_lint_status" not in recovered
+    recovered["score_history"] = [
+        {"iteration": 1, "composite": 4.5, "min_item": 4.0, "open_high": 0}
+    ]
+    state_path.write_text(json.dumps(recovered), encoding="utf-8")
+
+    blocked = run_cli("mark-passes", cwd=root)
+    assert blocked.returncode == 2
+    assert "artifact lint observation" in blocked.stderr
+
+    fresh_observation = run_cli(
+        "aggregate-reviews",
+        "--iteration",
+        "1",
+        "--input",
+        str(review),
+        "--json",
+        cwd=root,
+    )
+    assert fresh_observation.returncode == 0, fresh_observation.stderr
+    observed_state = read_state(state_dir)
+    assert observed_state["artifact_lint_identity"] == observed_state["artifact"]
+
+    passed = run_cli("mark-passes", cwd=root)
+    assert passed.returncode == 0, passed.stderr
+    assert read_state(state_dir)["passes"] is True
+
+
 def test_active_profile_gate_requires_current_lint_observation(
     state_dir, run_cli, read_state
 ):
@@ -709,6 +959,10 @@ def test_active_profile_gate_requires_current_lint_observation(
         "terminal_outcome": "completed_pass",
         "artifact_lint_status": "clean",
         "artifact_lint": [],
+        "artifact_lint_identity": {
+            key: state["artifact"][key]
+            for key in ("path", "digest", "size", "producer_run_id")
+        },
     }
     state_path.with_name("observed-history.json").write_text(
         json.dumps(historical), encoding="utf-8"
@@ -718,4 +972,70 @@ def test_active_profile_gate_requires_current_lint_observation(
 
     assert result.returncode == 2
     assert "artifact lint observation is missing" in result.stderr
+    assert read_state(state_dir)["passes"] is False
+
+
+def test_active_gate_rejects_lint_observation_from_before_official_rehandoff(
+    state_dir, run_cli, read_state
+):
+    root = state_dir.parent
+    assert run_cli("artifact", "init", "--json", cwd=root).returncode == 0
+    assert run_cli("artifact", "render", "--json", cwd=root).returncode == 0
+    review = _write_review(root / "review.json")
+    observed = run_cli(
+        "aggregate-reviews",
+        "--iteration",
+        "1",
+        "--input",
+        str(review),
+        "--json",
+        cwd=root,
+    )
+    assert observed.returncode == 0, observed.stderr
+
+    state_path = state_dir / "sessions" / "test.json"
+    historical = read_state(state_dir)
+    historical.update(
+        {
+            "session_id": "observed-history",
+            "mission_id": "observed-history",
+            "phase": "done",
+            "passes": True,
+            "loop_active": False,
+            "terminal_outcome": "completed_pass",
+            "task_profile": {"primary": "portable-analysis"},
+        }
+    )
+    state_path.with_name("observed-history.json").write_text(
+        json.dumps(historical), encoding="utf-8"
+    )
+
+    artifact_path = root / historical["artifact"]["path"]
+    artifact_path.write_text("# Replacement\nverified output\n", encoding="utf-8")
+    handoff = run_cli(
+        "advance",
+        "--phase",
+        "reviewing",
+        "--activity",
+        "reviewer-wait:review-response",
+        "--artifact-applicability",
+        "producing",
+        "--artifact-path",
+        historical["artifact"]["path"],
+        "--producer-run-id",
+        "executor-run-2",
+        cwd=root,
+    )
+    assert handoff.returncode == 0, handoff.stderr
+    current = read_state(state_dir)
+    current["task_profile"] = {"primary": "portable-analysis"}
+    current["score_history"] = [
+        {"iteration": 1, "composite": 4.5, "min_item": 4.0, "open_high": 0}
+    ]
+    state_path.write_text(json.dumps(current), encoding="utf-8")
+
+    result = run_cli("mark-passes", cwd=root)
+
+    assert result.returncode == 2
+    assert "artifact lint observation" in result.stderr
     assert read_state(state_dir)["passes"] is False
