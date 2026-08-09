@@ -87,14 +87,14 @@ def test_push_score_rejects_evidence_less_boundary_claim(state_dir, run_cli, rea
 
 # ===== 改善3b: mark-passes が composite 欠損エントリを読み飛ばす =====
 
-def test_mark_passes_uses_latest_scored_entry(state_dir, run_cli, read_state):
+def test_mark_passes_uses_latest_scored_entry(state_dir, run_cli, read_state, push_provenance_score):
     """末尾に composite 欠損の進捗ノートが混入していても、直近の採点エントリで gate 判定する."""
+    push_provenance_score(state_dir.parent)
     sf = state_dir / "sessions" / "test.json"
     data = json.loads(sf.read_text())
-    data["score_history"] = [
-        {"iteration": 1, "composite": 4.5, "min_item": 4.0, "items": {"a": 4.5}, "timestamp": "2026-05-25T00:00:00Z"},
-        {"phase": "phase_1", "iter": 1, "passed": True, "commit": "abc123", "note": "実機確認"},  # composite 欠損
-    ]
+    data["score_history"].append(
+        {"phase": "phase_1", "iter": 1, "passed": True, "commit": "abc123", "note": "実機確認"}
+    )
     sf.write_text(json.dumps(data))
     r = run_cli("mark-passes", cwd=state_dir.parent)
     assert r.returncode == 0, f"stderr: {r.stderr}"

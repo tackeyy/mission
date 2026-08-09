@@ -47,9 +47,8 @@ def test_mark_passes_passes_when_open_high_zero(state_dir, run_cli, read_state, 
     assert s["passes"] is True
 
 
-def test_mark_passes_backward_compat_no_open_high_field(state_dir, run_cli, read_state):
-    """score_history に open_high フィールドがない既存形式は 0 扱いで通過する。"""
-    # open_high なしで手動挿入 (旧形式のシミュレーション)
+def test_mark_passes_rejects_active_legacy_score_without_open_high(state_dir, run_cli):
+    """Active legacy score は open_high の既定値で provenance gate を迂回できない。"""
     sf = state_dir / "sessions" / "test.json"
     data = json.loads(sf.read_text())
     data["score_history"].append({
@@ -61,11 +60,41 @@ def test_mark_passes_backward_compat_no_open_high_field(state_dir, run_cli, read
         # open_high フィールドなし
     })
     sf.write_text(json.dumps(data))
+    before = sf.read_bytes()
 
     r = run_cli("mark-passes", cwd=state_dir.parent)
-    assert r.returncode == 0, f"後方互換で通過すべき、got {r.returncode}\nstderr: {r.stderr}"
-    s = read_state(state_dir)
-    assert s["passes"] is True
+    assert r.returncode == 2, f"stderr: {r.stderr}"
+    assert "provenance" in r.stderr
+    assert sf.read_bytes() == before
+
+
+def test_stats_reads_terminal_legacy_score_without_open_high(state_dir, run_cli):
+    """Read-only stats keeps already-terminal legacy score records inspectable."""
+    current = json.loads((state_dir / "sessions" / "test.json").read_text())
+    historical = {
+        **current,
+        "session_id": "terminal-legacy",
+        "mission_id": "terminal-legacy",
+        "phase": "done",
+        "passes": True,
+        "loop_active": False,
+        "terminal_outcome": "completed_pass",
+        "score_history": [{
+            "iteration": 1,
+            "composite": 4.5,
+            "min_item": 4.0,
+            "items": {"mission_achievement": 4.5},
+            "timestamp": "2026-01-01T00:00:00Z",
+        }],
+    }
+    legacy_path = state_dir / "sessions" / "terminal-legacy.json"
+    legacy_path.write_text(json.dumps(historical))
+    before = legacy_path.read_bytes()
+
+    result = run_cli("stats", "--root", str(state_dir.parent), "--json", cwd=state_dir.parent)
+
+    assert result.returncode == 0, result.stderr
+    assert legacy_path.read_bytes() == before
 
 
 def test_mark_passes_force_bypasses_open_high_gate(state_dir, run_cli, read_state, push_provenance_score):
