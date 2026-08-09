@@ -259,6 +259,11 @@ def test_public_invocation_schema_accepts_safe_legacy_bare_command():
         r"finding path=\\.\PhysicalDrive0",
         r"finding path=\Device\HarddiskVolume1\private.txt",
         "finding path=//server/share/private.txt",
+        r"finding path=C:relative\private.txt",
+        "finding path=D:relative/private.txt",
+        "finding metadata='E:relative/private.txt'",
+        "finding path=~portable-user/private.txt",
+        r"finding metadata=~portable-user\private.txt",
     ],
 )
 @pytest.mark.parametrize(
@@ -291,6 +296,37 @@ def test_public_text_fields_reject_embedded_private_locators_after_any_separator
 
     assert caught.value.field_path == expected_path
     assert private_locator not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "portable_text",
+    [
+        "finding status:portable-token",
+        "finding urn:portable:value",
+        "finding https://example.test/docs/path",
+        "finding http://example.test/docs/path",
+        "finding C:",
+    ],
+)
+def test_public_text_and_redactor_preserve_safe_colon_tokens_and_urls(portable_text):
+    state = {
+        "specialist_invocations": [
+            {
+                "iteration": 1,
+                "phase": "planning",
+                "role": "planner",
+                "skill": "portable-provider",
+                "mode": "skill-tool",
+                "status": "completed",
+                "timestamp": "2026-08-10T00:00:00Z",
+                "notes": portable_text,
+            }
+        ]
+    }
+
+    validate_specialist_public_state(state)
+    module = _load_mission_state_module("mission_state_issue394_safe_colon")
+    assert module._redact_provider_output(portable_text) == portable_text
 
 
 @pytest.mark.parametrize(
@@ -3035,6 +3071,8 @@ def test_portable_path_command_remains_invokable_and_accounted(
     [
         "local", "linux-home", "linux-root", "windows", "windows-unc",
         "windows-extended", "windows-device", "windows-rooted",
+        "windows-drive-relative-backslash", "windows-drive-relative-slash",
+        "named-home-slash", "named-home-backslash",
     ],
 )
 def test_command_provider_evidence_redacts_process_local_paths(
@@ -3051,6 +3089,10 @@ def test_command_provider_evidence_redacts_process_local_paths(
         "windows-extended": r"\\?\C:\private\provider-output.txt",
         "windows-device": r"\\.\PhysicalDrive0",
         "windows-rooted": r"\Device\HarddiskVolume1\private-provider-output.txt",
+        "windows-drive-relative-backslash": r"C:relative\private-provider-output.txt",
+        "windows-drive-relative-slash": "D:relative/private-provider-output.txt",
+        "named-home-slash": "~portable-user/private-provider-output.txt",
+        "named-home-backslash": r"~portable-user\private-provider-output.txt",
     }[path_kind]
     command = command_dir / "portable-path-reporter"
     command.write_text(

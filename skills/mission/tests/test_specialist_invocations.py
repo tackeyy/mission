@@ -252,6 +252,10 @@ def test_log_invocation_preflights_pending_entry_before_archive_or_state_side_ef
         r"finding path=\\.\PhysicalDrive0",
         r"finding path=\Device\HarddiskVolume1\private.txt",
         "finding path=//server/share/private.txt",
+        r"finding path=C:relative\private.txt",
+        "finding path=D:relative/private.txt",
+        "finding path=~portable-user/private.txt",
+        r"finding path=~portable-user\private.txt",
     ],
 )
 def test_log_invocation_cli_rejects_embedded_private_locator_without_disclosure(
@@ -292,6 +296,10 @@ def test_log_invocation_cli_rejects_embedded_private_locator_without_disclosure(
         r"path=\\.\PhysicalDrive0",
         r"path=\Device\HarddiskVolume1\private.txt",
         "path=//server/share/private.txt",
+        r"path=C:relative\private.txt",
+        "path=D:relative/private.txt",
+        "path=~portable-user/private.txt",
+        r"path=~portable-user\private.txt",
     ],
 )
 def test_provider_output_redactor_covers_every_private_locator_separator(private_text):
@@ -356,6 +364,10 @@ def test_log_invocation_redacts_local_locators_from_evidence_body(
         r"\\.\PhysicalDrive0",
         r"\Device\HarddiskVolume1\private.txt",
         "~/private.txt",
+        r"C:relative\private.txt",
+        "D:relative/private.txt",
+        "~portable-user/private.txt",
+        r"~portable-user\private.txt",
     ]
     evidence = tmp_path / "private-locator-review.md"
     evidence.write_text(
