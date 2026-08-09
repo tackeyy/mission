@@ -16,6 +16,11 @@ TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+:-]{0,127}\Z")
 HTTP_URL = re.compile(r"(?<![A-Za-z0-9+.-])https?://[^\s'\"`]+", re.IGNORECASE)
 DNS_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
 HEX_ESCAPE = re.compile(r"[0-9A-Fa-f]{2}\Z")
+RFC3986_PCHAR = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~!$&'()*+,;=:@%"
+)
+RFC3986_PATH_CHAR = RFC3986_PCHAR | frozenset("/")
+RFC3986_QUERY_FRAGMENT_CHAR = RFC3986_PATH_CHAR | frozenset("?")
 LOCAL_LOCATOR = re.compile(
     r"(?:"
     r"(?<![A-Za-z0-9+.-])file:[^\s'\"`]*|"
@@ -186,6 +191,12 @@ def _is_strict_http_url(candidate: str) -> bool:
         return False
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
         return False
+    if not (
+        _is_strict_uri_component(parsed.path, RFC3986_PATH_CHAR)
+        and _is_strict_uri_component(parsed.query, RFC3986_QUERY_FRAGMENT_CHAR)
+        and _is_strict_uri_component(parsed.fragment, RFC3986_QUERY_FRAGMENT_CHAR)
+    ):
+        return False
     authority = candidate.split("://", 1)[1].split("/", 1)[0]
     authority = authority.split("?", 1)[0].split("#", 1)[0]
     if (
@@ -246,6 +257,10 @@ def _is_strict_dns_or_ipv4(host: str) -> bool:
     return bool(dns_host) and all(
         DNS_LABEL.fullmatch(label) is not None for label in dns_host.split(".")
     )
+
+
+def _is_strict_uri_component(value: str, allowed_ascii: frozenset[str]) -> bool:
+    return all(ord(char) >= 128 or char in allowed_ascii for char in value)
 
 
 def _safe_score(value: object) -> bool:

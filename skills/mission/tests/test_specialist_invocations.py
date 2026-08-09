@@ -260,6 +260,9 @@ def test_log_invocation_preflights_pending_entry_before_archive_or_state_side_ef
         "finding link=https://exa%mple/C:private.txt",
         "finding link=https://example.test,local=/home/portable-user/secret.txt",
         "finding link=https://example.test:bad/home/portable-user/secret.txt",
+        r"finding link=https://example.test/path\home\portable-user\private.txt",
+        "finding link=https://example.test/path?locator=|C:private.txt",
+        "finding link=https://example.test/path#locator={C:private.txt}",
         "finding file=file:relative/private.txt",
         "finding file=file://server/share/private.txt",
         "finding home=~",
@@ -316,6 +319,9 @@ def test_log_invocation_cli_rejects_embedded_private_locator_without_disclosure(
         "link=https://exa%mple/C:private.txt",
         "link=https://example.test,local=/home/portable-user/secret.txt",
         "link=https://example.test:bad/home/portable-user/secret.txt",
+        r"link=https://example.test/path\home\portable-user\private.txt",
+        "link=https://example.test/path?locator=|C:private.txt",
+        "link=https://example.test/path#locator={C:private.txt}",
         "file=file:relative/private.txt",
         "file=file://server/share/private.txt",
         "home=~",
@@ -396,6 +402,9 @@ def test_log_invocation_redacts_local_locators_from_evidence_body(
         "https://exa%mple/C:private.txt",
         "https://example.test,local=/home/portable-user/secret.txt",
         "https://example.test:bad/home/portable-user/secret.txt",
+        r"https://example.test/path\home\portable-user\private.txt",
+        "https://example.test/path?locator=|C:private.txt",
+        "https://example.test/path#locator={C:private.txt}",
         "file:relative/private.txt",
         "file://server/share/private.txt",
         "~",
@@ -433,6 +442,16 @@ def test_log_invocation_redacts_local_locators_from_evidence_body(
         assert locator not in archived_text
         assert locator not in result.stdout
         assert locator not in result.stderr
+
+
+def test_provider_output_redactor_rejects_control_in_http_candidate():
+    module = _load_mission_state_module("mission_state_issue394_url_control")
+    unsafe = "https://example.test/path\x7fC:private.txt"
+
+    redacted = module._redact_provider_output(f"finding link={unsafe}")
+
+    assert unsafe not in redacted
+    assert "[REDACTED_PATH]" in redacted
 
 
 @pytest.mark.parametrize(
