@@ -8,6 +8,32 @@ def _json_result(result):
     return json.loads(result.stdout)
 
 
+def _seed_legacy_command_provider_state(tmp_path, provider, *, ask_user=False):
+    """Preserve the pre-#395 runtime consumer contract for an already-active state."""
+    state_path = tmp_path / ".mission-state" / "sessions" / "test.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    candidate = {
+        **provider,
+        "skill": provider.get("skill") or provider.get("role"),
+        "provider_id": provider.get("provider_id") or provider.get("skill") or provider.get("role"),
+        "status": "available",
+        "installed": True,
+        "available": True,
+    }
+    state["specialists_candidates"] = [candidate]
+    state["specialists_selected"] = []
+    state["specialists_decision"] = (
+        {
+            "policy": "first-use",
+            "action": "ask-user",
+            "prompted_user": True,
+        }
+        if ask_user
+        else {"policy": "auto", "action": "select", "prompted_user": False}
+    )
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+
 def test_init_includes_specialist_invocations(run_cli, tmp_path):
     run_cli("init", "specialist invocation mission", "--complexity", "Standard", cwd=tmp_path, check=True)
 
@@ -624,6 +650,9 @@ def test_invoke_command_provider_archives_evidence_and_logs_invocation(run_cli, 
         cwd=tmp_path,
         check=True,
     )
+    _seed_legacy_command_provider_state(
+        tmp_path, json.loads(registry.read_text())["specialists"][0]
+    )
     r = run_cli(
         "specialists", "invoke-command",
         "--provider", "fake-reviewer",
@@ -674,6 +703,9 @@ def test_invoke_command_provider_records_failure_without_blocking_optional_provi
         "--json",
         cwd=tmp_path,
         check=True,
+    )
+    _seed_legacy_command_provider_state(
+        tmp_path, json.loads(registry.read_text())["specialists"][0]
     )
 
     r = run_cli(
@@ -731,6 +763,9 @@ def test_invoke_command_provider_marks_approval_marker_as_awaiting_input(run_cli
         cwd=tmp_path,
         check=True,
     )
+    _seed_legacy_command_provider_state(
+        tmp_path, json.loads(registry.read_text())["specialists"][0]
+    )
 
     r = run_cli(
         "specialists", "invoke-command",
@@ -778,6 +813,9 @@ def test_invoke_command_provider_marks_configured_exit_code_as_awaiting_input(ru
         cwd=tmp_path,
         check=True,
     )
+    _seed_legacy_command_provider_state(
+        tmp_path, json.loads(registry.read_text())["specialists"][0]
+    )
 
     r = run_cli(
         "specialists", "invoke-command",
@@ -822,6 +860,9 @@ def test_invoke_command_provider_marks_preparation_only_output_as_not_applied(ru
         "--json",
         cwd=tmp_path,
         check=True,
+    )
+    _seed_legacy_command_provider_state(
+        tmp_path, json.loads(registry.read_text())["specialists"][0]
     )
 
     r = run_cli(
@@ -872,6 +913,9 @@ def test_invoke_command_provider_rejects_preparation_marker_even_with_long_outpu
         cwd=tmp_path,
         check=True,
     )
+    _seed_legacy_command_provider_state(
+        tmp_path, json.loads(registry.read_text())["specialists"][0]
+    )
 
     r = run_cli(
         "specialists", "invoke-command",
@@ -917,6 +961,11 @@ def test_invoke_command_provider_requires_confirmed_selection_after_ask_user(run
         cwd=tmp_path,
         check=True,
     )
+    _seed_legacy_command_provider_state(
+        tmp_path,
+        json.loads(registry.read_text())["specialists"][0],
+        ask_user=True,
+    )
 
     r = run_cli(
         "specialists", "invoke-command",
@@ -956,6 +1005,11 @@ def test_invoke_command_provider_persists_confirmed_selection_after_ask_user(run
         "--json",
         cwd=tmp_path,
         check=True,
+    )
+    _seed_legacy_command_provider_state(
+        tmp_path,
+        json.loads(registry.read_text())["specialists"][0],
+        ask_user=True,
     )
 
     r = run_cli(
@@ -1001,6 +1055,9 @@ def test_invoke_command_provider_accepts_result_contract_evidence(run_cli, tmp_p
         "--json",
         cwd=tmp_path,
         check=True,
+    )
+    _seed_legacy_command_provider_state(
+        tmp_path, json.loads(registry.read_text())["specialists"][0]
     )
 
     r = run_cli(
@@ -1053,6 +1110,9 @@ def test_invoke_command_provider_uses_registry_env_and_timeout(run_cli, tmp_path
         "--json",
         cwd=tmp_path,
         check=True,
+    )
+    _seed_legacy_command_provider_state(
+        tmp_path, json.loads(registry.read_text())["specialists"][0]
     )
 
     r = run_cli(
@@ -1109,6 +1169,11 @@ def test_confirmed_command_provider_selection_preserves_invocation_config(run_cl
         "--json",
         cwd=tmp_path,
         check=True,
+    )
+    _seed_legacy_command_provider_state(
+        tmp_path,
+        json.loads(registry.read_text())["specialists"][0],
+        ask_user=True,
     )
     run_cli(
         "specialists", "invoke-command",

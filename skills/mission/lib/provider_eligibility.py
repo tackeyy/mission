@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from typing import Any
 
 
@@ -37,6 +38,9 @@ KNOWN_TASK_PROFILES = {
     "risk",
     "general",
 }
+JSON_NUMBER_PATTERN = re.compile(
+    r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?\Z"
+)
 
 
 class RegistryContractError(ValueError):
@@ -109,6 +113,8 @@ def _is_string_list(value: Any) -> bool:
 
 
 def _validate_v2_candidate_types(candidate: dict[str, Any]) -> None:
+    if "enabled" in candidate:
+        _invalid_candidate_type("enabled")
     for field in ("provider_id", "role", "skill", "name", "kind", "command", "unavailable", "notes"):
         if field in candidate and not isinstance(candidate[field], str):
             _invalid_candidate_type(field)
@@ -241,8 +247,8 @@ def _yaml_scalar(value: str) -> Any:
         return False
     if value.lower() == "null":
         return None
-    if value.isdigit():
-        return int(value)
+    if JSON_NUMBER_PATTERN.fullmatch(value):
+        return json.loads(value, parse_constant=_reject_json_constant)
     return value
 
 

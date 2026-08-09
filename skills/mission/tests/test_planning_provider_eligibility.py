@@ -2,6 +2,7 @@
 
 import json
 import importlib.util
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -541,6 +542,98 @@ def test_v2_json_and_yaml_normalize_to_the_same_registry_entry(run_cli, tmp_path
 
     assert len(set(digests)) == 1
     assert activations[0] == activations[1]
+
+
+@pytest.mark.parametrize(
+    ("timeout", "yaml_literal"),
+    [(1.5, "1.5"), (150.0, "1.5e2"), (0.001, "1e-3")],
+)
+def test_v2_yaml_finite_timeout_matches_json_object_and_entry_digest(
+    timeout, yaml_literal, run_cli, tmp_path
+):
+    document = {
+        "schema": "mission-specialist-registry/2",
+        "specialists_v2": [
+            {
+                "role": "deep-planning",
+                "skill": "deep-planning-provider",
+                "task_profiles": ["architecture"],
+                "phases": ["planning"],
+                "timeout": timeout,
+                "activation": {
+                    "min_complexity": "Complex",
+                    "auto_select_if": ["complexity"],
+                },
+            }
+        ],
+    }
+    yaml_text = "\n".join(
+        [
+            "schema: mission-specialist-registry/2",
+            "specialists_v2:",
+            "  - role: deep-planning",
+            "    skill: deep-planning-provider",
+            "    task_profiles: [architecture]",
+            "    phases: [planning]",
+            f"    timeout: {yaml_literal}",
+            "    activation:",
+            "      min_complexity: Complex",
+            "      auto_select_if: [complexity]",
+        ]
+    )
+    assert parse_v2_registry(yaml_text) == parse_v2_registry(json.dumps(document))
+
+    digests = []
+    for name, content in (("registry.json", json.dumps(document)), ("registry.yml", yaml_text)):
+        registry = tmp_path / name
+        registry.write_text(content, encoding="utf-8")
+        result = run_cli(
+            "specialists",
+            "recommend",
+            "--no-default-skill-roots",
+            "--task",
+            "Review a multi-step architecture",
+            "--registry",
+            str(registry),
+            "--complexity",
+            "Complex",
+            "--installed-skills",
+            "deep-planning-provider",
+            "--json",
+            cwd=tmp_path,
+        )
+        assert result.returncode == 0, result.stderr
+        candidate = json.loads(result.stdout)["specialists_candidates"][0]
+        assert candidate["timeout"] == timeout
+        digests.append(candidate["registry_entry_digest"])
+
+    assert digests[0] == digests[1]
+
+
+@pytest.mark.parametrize(
+    ("json_literal", "yaml_literal"),
+    [("true", "true"), ("NaN", ".nan"), ("Infinity", ".inf")],
+)
+def test_v2_json_and_yaml_reject_non_numeric_or_non_finite_timeout(
+    json_literal, yaml_literal
+):
+    prefix = (
+        '{"schema":"mission-specialist-registry/2","specialists_v2":['
+        '{"provider_id":"deep-planning-provider","timeout":'
+    )
+    json_text = f"{prefix}{json_literal}}}]}}"
+    yaml_text = "\n".join(
+        [
+            "schema: mission-specialist-registry/2",
+            "specialists_v2:",
+            "  - provider_id: deep-planning-provider",
+            f"    timeout: {yaml_literal}",
+        ]
+    )
+
+    for content in (json_text, yaml_text):
+        with pytest.raises(RegistryContractError):
+            parse_v2_registry(content)
 
 
 @pytest.mark.parametrize(
@@ -1405,6 +1498,7 @@ def test_official_user_and_manifest_v2_paths_cannot_downgrade_to_v1(
         {"task_profiles": "architecture"},
         {"phases": "planning"},
         {"disabled": 1},
+        {"enabled": False},
         {"activation": []},
         {"activation": {"min_complexity": 3, "auto_select_if": ["complexity"]}},
     ],
@@ -1414,6 +1508,7 @@ def test_official_user_and_manifest_v2_paths_cannot_downgrade_to_v1(
         "profiles",
         "phases",
         "disabled-bool",
+        "legacy-enabled",
         "activation-map",
         "activation-member",
     ],
@@ -1598,6 +1693,402 @@ def test_generated_selection_and_projection_do_not_persist_home_paths(
     assert str(fake_home) not in state
 
 
+def test_recommendation_and_state_do_not_expose_process_local_provider_config(
+    run_cli, state_dir, read_state
+):
+    root = state_dir.parent
+    state_path = state_dir / "sessions" / "test.json"
+    state = read_state(state_dir)
+    state["complexity"] = "Complex"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    command = root / "private-home" / "bin" / "provider-command"
+    command.parent.mkdir(parents=True)
+    command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    command.chmod(0o700)
+    private_arg = root / "private-temp" / "provider-input.json"
+    private_env_value = "private-provider-env-value"
+    registry = root / "command-provider.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "schema": "mission-specialist-registry/2",
+                "specialists_v2": [
+                    {
+                        "provider_id": "portable-command-provider",
+                        "role": "deep-planning",
+                        "skill": "portable-command-provider",
+                        "kind": "command",
+                        "command": str(command),
+                        "args": ["--input", str(private_arg)],
+                        "env": {"PROVIDER_SECRET_PATH": private_env_value},
+                        "task_profiles": ["architecture"],
+                        "phases": ["planning"],
+                        "activation": {
+                            "min_complexity": "Complex",
+                            "auto_select_if": ["complexity"],
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        "specialists", "recommend", "--no-default-skill-roots",
+        "--task", "Review a multi-step architecture", "--registry", str(registry),
+        "--complexity", "Complex", "--record-state", "--json", cwd=root,
+    )
+
+    assert result.returncode == 0, result.stderr
+    output = json.loads(result.stdout)
+    assert output["specialists_candidates"] == []
+    assert output["specialists_selected"] == []
+    assert output["specialists_phase_plan"] == []
+    assert any(
+        item["provider_id"] == "portable-command-provider"
+        and item["reason_code"] == "non-portable-execution-config"
+        for item in output["specialists_ineligible"]
+    )
+    persisted = read_state(state_dir)
+    for payload in (output, persisted):
+        surface = {
+            key: payload.get(key)
+            for key in (
+                "specialists_candidates",
+                "specialists_selected",
+                "specialists_unavailable",
+                "specialists_ineligible",
+                "specialist_registry_projection",
+                "specialists_phase_plan",
+            )
+        }
+        serialized = json.dumps(surface, sort_keys=True)
+        assert str(command) not in serialized
+        assert str(private_arg) not in serialized
+        assert private_env_value not in serialized
+        for provider in [
+            *(surface["specialists_candidates"] or []),
+            *(surface["specialists_selected"] or []),
+            *(surface["specialists_unavailable"] or []),
+        ]:
+            assert "command" not in provider
+            assert "args" not in provider
+            assert "env" not in provider
+
+
+def test_relative_path_command_config_fails_closed_without_raw_diagnostic(
+    run_cli, tmp_path
+):
+    registry = tmp_path / "relative-command.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "schema": "mission-specialist-registry/2",
+                "specialists_v2": [
+                    {
+                        "provider_id": "portable-command-provider",
+                        "role": "deep-planning",
+                        "skill": "portable-command-provider",
+                        "kind": "command",
+                        "command": "true",
+                        "args": ["--input", "private/prompts/plan.json"],
+                        "env": {},
+                        "task_profiles": ["architecture"],
+                        "phases": ["planning"],
+                        "activation": {
+                            "min_complexity": "Complex",
+                            "auto_select_if": ["complexity"],
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        "specialists", "recommend", "--no-default-skill-roots",
+        "--task", "Review a multi-step architecture", "--registry", str(registry),
+        "--complexity", "Complex", "--json", cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["specialists_candidates"] == []
+    assert data["specialists_selected"] == []
+    assert data["specialists_unavailable"] == []
+    assert data["specialists_phase_plan"] == []
+    blocked = next(
+        item
+        for item in data["specialists_ineligible"]
+        if item["reason_code"] == "non-portable-execution-config"
+    )
+    assert blocked["blocked_config_class"] == "argument-locator"
+    assert "private/prompts/plan.json" not in json.dumps(blocked, sort_keys=True)
+
+
+def test_nonportable_provider_identity_is_redacted_from_public_diagnostic(
+    run_cli, tmp_path
+):
+    private_provider_id = "private/providers/deep-planning"
+    registry = tmp_path / "private-provider-id.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "schema": "mission-specialist-registry/2",
+                "specialists_v2": [
+                    {
+                        "provider_id": private_provider_id,
+                        "role": "deep-planning",
+                        "skill": "deep-planning-provider",
+                        "kind": "command",
+                        "command": "true",
+                        "args": [],
+                        "env": {},
+                        "task_profiles": ["architecture"],
+                        "phases": ["planning"],
+                        "activation": {
+                            "min_complexity": "Complex",
+                            "auto_select_if": ["complexity"],
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        "specialists", "recommend", "--no-default-skill-roots",
+        "--task", "Review a multi-step architecture", "--registry", str(registry),
+        "--complexity", "Complex", "--json", cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["specialists_candidates"] == []
+    assert data["specialists_selected"] == []
+    blocked = next(
+        item
+        for item in data["specialists_ineligible"]
+        if item["reason_code"] == "non-portable-execution-config"
+    )
+    assert blocked["blocked_config_class"] == "provider-identity"
+    assert blocked["provider_id"].startswith("provider:sha256:")
+    assert private_provider_id not in json.dumps(data, sort_keys=True)
+
+
+@pytest.mark.parametrize("version", [1, 2], ids=["v1", "v2"])
+@pytest.mark.parametrize(
+    "source_kind",
+    ["explicit", "project", "user", "installed"],
+)
+def test_nonempty_command_env_fails_closed_for_every_registry_source(
+    version, source_kind, run_cli, tmp_path
+):
+    project = tmp_path / "project"
+    fake_home = tmp_path / "home"
+    project.mkdir()
+    fake_home.mkdir()
+    secret_value = "raw-private-provider-value"
+    candidate = {
+        "provider_id": "portable-command-provider",
+        "role": "deep-planning",
+        "skill": "portable-command-provider",
+        "kind": "command",
+        "command": "true",
+        "args": ["review", "--stdin"],
+        "env": {"PROVIDER_SECRET": secret_value},
+        "task_profiles": ["architecture"],
+        "phases": ["planning"],
+    }
+    if version == 2:
+        candidate["activation"] = {
+            "min_complexity": "Complex",
+            "auto_select_if": ["complexity"],
+        }
+        document = {
+            "schema": "mission-specialist-registry/2",
+            "specialists_v2": [candidate],
+        }
+    else:
+        document = {"version": 1, "specialists": [candidate]}
+
+    args = [
+        "specialists", "recommend", "--task", "Review the architecture",
+        "--complexity", "Complex", "--json",
+    ]
+    suffix = "v2.yml" if version == 2 else "v1.yml"
+    if source_kind == "explicit":
+        registry = project / f"explicit-{suffix}"
+        args.extend(["--no-default-skill-roots", "--registry", str(registry)])
+    elif source_kind == "project":
+        registry = project / ".mission" / (
+            "specialists-v2.yml" if version == 2 else "specialists.yml"
+        )
+        args.append("--no-default-skill-roots")
+    elif source_kind == "user":
+        registry = fake_home / ".config" / "mission" / (
+            "specialists-v2.yml" if version == 2 else "specialists.yml"
+        )
+    else:
+        skill_root = project / "skills"
+        registry = skill_root / "portable-command-provider" / (
+            "mission-specialist-v2.yml" if version == 2 else "mission-specialist.yml"
+        )
+        args.extend(["--no-default-skill-roots", "--skills-dir", str(skill_root)])
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text(json.dumps(document), encoding="utf-8")
+
+    result = run_cli(*args, cwd=project, env_extra={"HOME": str(fake_home)})
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["specialists_candidates"] == []
+    assert data["specialists_selected"] == []
+    assert data["specialists_unavailable"] == []
+    assert data["specialists_phase_plan"] == []
+    blocked = [
+        item
+        for item in data["specialists_ineligible"]
+        if item["reason_code"] == "non-portable-execution-config"
+    ]
+    assert len(blocked) == 1
+    assert blocked[0]["blocked_config_class"] == "environment-values"
+    assert secret_value not in json.dumps(data, sort_keys=True)
+
+
+@pytest.mark.parametrize("version", [1, 2], ids=["v1", "v2"])
+def test_portable_path_command_remains_invokable_and_accounted(
+    version, run_cli, tmp_path
+):
+    command_dir = tmp_path / "commands"
+    command_dir.mkdir()
+    command = command_dir / "portable-provider"
+    command.write_text(
+        "#!/bin/sh\ncat >/dev/null\nprintf 'portable substantive planning evidence\\n'\n",
+        encoding="utf-8",
+    )
+    command.chmod(0o700)
+    env = {"PATH": f"{command_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
+    run_cli(
+        "init", "portable command provider mission", "--complexity", "Complex",
+        cwd=tmp_path, check=True, env_extra=env,
+    )
+    candidate = {
+        "provider_id": "portable-command-provider",
+        "role": "deep-planning",
+        "skill": "portable-command-provider",
+        "kind": "command",
+        "command": "portable-provider",
+        "args": ["review", "--stdin"],
+        "env": {},
+        "task_profiles": ["architecture"],
+        "phases": ["planning"],
+    }
+    if version == 2:
+        candidate["activation"] = {
+            "min_complexity": "Complex",
+            "auto_select_if": ["complexity"],
+        }
+        document = {
+            "schema": "mission-specialist-registry/2",
+            "specialists_v2": [candidate],
+        }
+    else:
+        document = {"version": 1, "specialists": [candidate]}
+    registry = tmp_path / f"portable-command-v{version}.json"
+    registry.write_text(json.dumps(document), encoding="utf-8")
+
+    recommendation = run_cli(
+        "specialists", "recommend", "--no-default-skill-roots",
+        "--task", "Review the architecture", "--registry", str(registry),
+        "--complexity", "Complex", "--record-state", "--json", cwd=tmp_path,
+        env_extra=env,
+    )
+    assert recommendation.returncode == 0, recommendation.stderr
+    selected = json.loads(recommendation.stdout)["specialists_selected"][0]
+    assert selected["command"] == "portable-provider"
+    assert selected["args"] == ["review", "--stdin"]
+    assert selected["env"] == {}
+
+    invoked = run_cli(
+        "specialists", "invoke-command", "--provider", "portable-command-provider",
+        "--iteration", "1", "--phase", "planning", "--json", cwd=tmp_path,
+        env_extra=env,
+    )
+
+    assert invoked.returncode == 0, invoked.stderr
+    output = json.loads(invoked.stdout)
+    assert output["ok"] is True
+    state = json.loads(
+        (tmp_path / ".mission-state" / "sessions" / "test.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert state["specialist_invocations"][-1]["status"] == "completed"
+
+
+def test_external_registry_projection_requires_explicit_resupply(run_cli, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    registry = tmp_path / "external-provider.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "schema": "mission-specialist-registry/2",
+                "specialists_v2": [
+                    {
+                        "provider_id": "deep-planning-provider",
+                        "role": "deep-planning",
+                        "skill": "deep-planning-provider",
+                        "kind": "command",
+                        "command": "true",
+                        "args": ["review", "--stdin"],
+                        "env": {},
+                        "task_profiles": ["architecture"],
+                        "phases": ["planning"],
+                        "activation": {
+                            "min_complexity": "Complex",
+                            "auto_select_if": ["complexity"],
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        "specialists", "recommend", "--no-default-skill-roots",
+        "--task", "Review a multi-step architecture", "--registry", str(registry),
+        "--complexity", "Complex", "--installed-skills", "deep-planning-provider",
+        "--json", cwd=project,
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    projection = data["specialist_registry_projection"]
+    external = next(
+        item
+        for item in projection["ordered_inputs"]
+        if str(item["canonical_identity"]).startswith("$EXTERNAL/sha256:")
+    )
+    assert external["resolution_mode"] == "explicit-resupply-required"
+    assert str(registry) not in json.dumps(projection, sort_keys=True)
+    assert data["specialists_candidates"] == []
+    assert data["specialists_selected"] == []
+    assert data["specialists_phase_plan"] == []
+    blocked = next(
+        item
+        for item in data["specialists_ineligible"]
+        if item["reason_code"] == "non-portable-execution-config"
+    )
+    assert blocked["blocked_config_class"] == "external-registry-resupply"
+
+
 def test_registry_discovery_reads_each_input_once(monkeypatch, tmp_path):
     registry = tmp_path / "single-read-v2.json"
     registry.write_text(
@@ -1610,24 +2101,16 @@ def test_registry_discovery_reads_each_input_once(monkeypatch, tmp_path):
         encoding="utf-8",
     )
     module = _load_mission_state_module("mission_state_issue394_single_read")
-    original_read_bytes = Path.read_bytes
-    original_read_text = Path.read_text
-    reads = 0
+    original_open = module.os.open
+    opens = 0
 
-    def counted_read_bytes(path):
-        nonlocal reads
-        if path == registry:
-            reads += 1
-        return original_read_bytes(path)
+    def counted_open(path, flags, *args, **kwargs):
+        nonlocal opens
+        if Path(path) == registry:
+            opens += 1
+        return original_open(path, flags, *args, **kwargs)
 
-    def counted_read_text(path, *args, **kwargs):
-        nonlocal reads
-        if path == registry:
-            reads += 1
-        return original_read_text(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
-    monkeypatch.setattr(Path, "read_text", counted_read_text)
+    monkeypatch.setattr(module.os, "open", counted_open)
     monkeypatch.chdir(tmp_path)
     args = SimpleNamespace(
         registry=[str(registry)],
@@ -1637,7 +2120,182 @@ def test_registry_discovery_reads_each_input_once(monkeypatch, tmp_path):
 
     module._discover_specialist_registry_candidates(args)
 
-    assert reads == 1
+    assert opens == 1
+
+
+def test_registry_fd_snapshot_remains_bound_when_symlink_target_swaps(
+    monkeypatch, tmp_path
+):
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    alias = tmp_path / "registry.json"
+    first.write_text(
+        '{"schema":"mission-specialist-registry/2","specialists_v2":[]}',
+        encoding="utf-8",
+    )
+    second.write_text(
+        '{"schema":"mission-specialist-registry/2","specialists_v2":['
+        '{"provider_id":"replacement"}]}',
+        encoding="utf-8",
+    )
+    alias.symlink_to(first)
+    module = _load_mission_state_module("mission_state_issue394_symlink_swap")
+    original_open = module.os.open
+    swapped = False
+
+    def swapping_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        fd = original_open(path, flags, *args, **kwargs)
+        if Path(path) == alias and not swapped:
+            alias.unlink()
+            alias.symlink_to(second)
+            swapped = True
+        return fd
+
+    monkeypatch.setattr(module.os, "open", swapping_open)
+    monkeypatch.chdir(tmp_path)
+
+    record, raw, physical_identity, error = module._read_registry_input(
+        alias,
+        "registry:$PROJECT/registry.json",
+        "explicit",
+        2,
+        0,
+        0,
+    )
+
+    first_stat = first.stat()
+    assert record["status"] == "present"
+    assert record["canonical_identity"] == "$PROJECT/registry.json"
+    assert raw == first.read_bytes()
+    assert physical_identity == (first_stat.st_dev, first_stat.st_ino)
+    assert error is None
+
+
+def test_registry_fd_snapshot_rejects_non_regular_inputs(monkeypatch, tmp_path):
+    directory = tmp_path / "registry-directory"
+    fifo = tmp_path / "registry-fifo"
+    directory.mkdir()
+    os.mkfifo(fifo)
+    module = _load_mission_state_module("mission_state_issue394_non_regular")
+    monkeypatch.chdir(tmp_path)
+
+    inputs = [directory, fifo]
+    device = Path("/dev/null")
+    if device.exists():
+        inputs.append(device)
+    for order, path in enumerate(inputs):
+        record, raw, _physical_identity, error = module._read_registry_input(
+            path,
+            f"registry:$PROJECT/non-regular-{order}",
+            "explicit",
+            2,
+            0,
+            order,
+        )
+        assert record["status"] == "invalid"
+        assert raw is None
+        assert error is not None
+        assert error.code == "registry-input-not-regular"
+
+
+def test_registry_fd_snapshot_rejects_oversize_input(monkeypatch, tmp_path):
+    registry = tmp_path / "oversize.json"
+    registry.write_bytes(b"x" * (1024 * 1024 + 1))
+    module = _load_mission_state_module("mission_state_issue394_oversize")
+    monkeypatch.chdir(tmp_path)
+
+    record, raw, _physical_identity, error = module._read_registry_input(
+        registry,
+        "registry:$PROJECT/oversize.json",
+        "explicit",
+        2,
+        0,
+        0,
+    )
+
+    assert record["status"] == "invalid"
+    assert raw is None
+    assert error is not None
+    assert error.code == "registry-input-too-large"
+
+
+def test_registry_fd_snapshot_rejects_in_place_mutation(monkeypatch, tmp_path):
+    registry = tmp_path / "mutating.json"
+    registry.write_bytes(b"a" * 1024)
+    module = _load_mission_state_module("mission_state_issue394_mutation")
+    original_read = module.os.read
+    mutated = False
+
+    def mutating_read(fd, size):
+        nonlocal mutated
+        chunk = original_read(fd, size)
+        if chunk and not mutated:
+            with registry.open("r+b") as stream:
+                stream.seek(0)
+                stream.write(b"b" * 1024)
+                stream.flush()
+                os.fsync(stream.fileno())
+            mutated = True
+        return chunk
+
+    monkeypatch.setattr(module.os, "read", mutating_read)
+    monkeypatch.chdir(tmp_path)
+    record, raw, _physical_identity, error = module._read_registry_input(
+        registry,
+        "registry:$PROJECT/mutating.json",
+        "explicit",
+        2,
+        0,
+        0,
+    )
+
+    assert record["status"] == "invalid"
+    assert raw is None
+    assert error is not None
+    assert error.code == "registry-input-changed"
+
+
+def test_byte_identical_distinct_registry_inodes_are_not_duplicate(run_cli, tmp_path):
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    content = json.dumps(
+        {
+            "schema": "mission-specialist-registry/2",
+            "specialists_v2": [
+                {
+                    "provider_id": "deep-planning-provider",
+                    "role": "deep-planning",
+                    "skill": "deep-planning-provider",
+                    "task_profiles": ["architecture"],
+                    "phases": ["planning"],
+                    "activation": {
+                        "min_complexity": "Complex",
+                        "auto_select_if": ["complexity"],
+                    },
+                }
+            ],
+        }
+    )
+    first.write_text(content, encoding="utf-8")
+    second.write_text(content, encoding="utf-8")
+    assert first.stat().st_ino != second.stat().st_ino
+
+    result = run_cli(
+        "specialists", "recommend", "--no-default-skill-roots",
+        "--task", "Review the architecture", "--registry", str(first),
+        "--registry", str(second), "--complexity", "Complex",
+        "--installed-skills", "deep-planning-provider", "--json", cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["specialists_candidates"][0]["provider_id"] == "deep-planning-provider"
+    assert data["specialists_selected"][0]["provider_id"] == "deep-planning-provider"
+    assert not any(
+        item["reason_code"] == "duplicate-registry-input"
+        for item in data["specialists_ineligible"]
+    )
 
 
 def test_projection_digest_binds_ordered_discovery_inputs(run_cli, tmp_path):
@@ -1804,6 +2462,138 @@ def test_duplicate_explicit_registry_symlink_alias_fails_closed(run_cli, tmp_pat
         item["reason_code"] == "duplicate-registry-input"
         for item in data["specialists_ineligible"]
     )
+
+
+def test_duplicate_explicit_registry_hardlink_alias_fails_closed(run_cli, tmp_path):
+    registry = tmp_path / "planning-v2.json"
+    alias = tmp_path / "planning-hardlink.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "schema": "mission-specialist-registry/2",
+                "specialists_v2": [
+                    {
+                        "role": "deep-planning",
+                        "skill": "deep-planning-provider",
+                        "task_profiles": ["architecture"],
+                        "phases": ["planning"],
+                        "activation": {
+                            "min_complexity": "Complex",
+                            "auto_select_if": ["complexity"],
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    os.link(registry, alias)
+
+    result = run_cli(
+        "specialists", "recommend", "--no-default-skill-roots",
+        "--task", "Review the architecture", "--registry", str(registry),
+        "--registry", str(alias), "--complexity", "Complex",
+        "--installed-skills", "deep-planning-provider", "--json", cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["specialists_candidates"] == []
+    assert data["specialists_selected"] == []
+    assert data["specialists_phase_plan"] == []
+    assert sum(
+        item["reason_code"] == "duplicate-registry-input"
+        for item in data["specialists_ineligible"]
+    ) == 2
+
+
+def test_v2_provider_id_only_tombstone_suppresses_builtin_provider(run_cli, tmp_path):
+    registry = tmp_path / "disable-builtin.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "schema": "mission-specialist-registry/2",
+                "specialists_v2": [
+                    {
+                        "provider_id": "documentation-provider",
+                        "disabled": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        "specialists", "recommend", "--no-default-skill-roots",
+        "--task", "Update README documentation", "--registry", str(registry),
+        "--complexity", "Complex", "--installed-skills", "documentation-provider",
+        "--json", cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["specialists_candidates"] == []
+    assert data["specialists_selected"] == []
+    assert data["specialists_phase_plan"] == []
+    assert data["specialist_registry_projection"]["effective_entries"][0] == {
+        **data["specialist_registry_projection"]["effective_entries"][0],
+        "provider_id": "documentation-provider",
+        "projection_state": "tombstone",
+    }
+
+
+def test_v2_tombstone_does_not_disable_different_provider_with_shared_skill_alias(
+    run_cli, tmp_path
+):
+    tombstone = tmp_path / "tombstone-v2.json"
+    fallback = tmp_path / "fallback-v1.json"
+    tombstone.write_text(
+        json.dumps(
+            {
+                "schema": "mission-specialist-registry/2",
+                "specialists_v2": [
+                    {
+                        "provider_id": "retired-provider",
+                        "skill": "shared-planning-skill",
+                        "disabled": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    fallback.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "specialists": [
+                    {
+                        "provider_id": "active-provider",
+                        "role": "active-planning",
+                        "skill": "shared-planning-skill",
+                        "task_profiles": ["architecture"],
+                        "phases": ["planning"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        "specialists", "recommend", "--no-default-skill-roots",
+        "--task", "Review the architecture", "--registry", str(tombstone),
+        "--registry", str(fallback), "--complexity", "Complex",
+        "--installed-skills", "shared-planning-skill", "--json", cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert [item["provider_id"] for item in data["specialists_candidates"]] == [
+        "active-provider"
+    ]
+    assert data["specialists_selected"][0]["provider_id"] == "active-provider"
 
 
 def test_build_phase_plan_rejects_below_floor_candidate_directly():

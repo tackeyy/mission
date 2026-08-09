@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 from bisect import bisect_left, bisect_right
 import contextlib
+import errno
 import fcntl
 import hashlib
 import io
@@ -135,6 +136,7 @@ ARTIFACT_SECTIONS = {
 }
 ARTIFACT_REDACTION_STATUSES = {"unchecked", "checked", "reviewed", "not-needed"}
 ARTIFACT_PUBLISH_PROVIDERS = {"claude-code", "local"}
+MAX_REGISTRY_BYTES = 1024 * 1024
 
 
 BUILTIN_SPECIALIST_CANDIDATES = [
@@ -2449,7 +2451,7 @@ def _load_v2_registry_candidates(raw: bytes, source: str) -> tuple[list[dict], l
 
 
 def _portable_registry_identity(path: Path) -> str:
-    resolved = path.expanduser().resolve(strict=False)
+    resolved = Path(os.path.abspath(os.fspath(path.expanduser())))
     for anchor, label in (
         (Path.cwd().resolve(strict=False), "$PROJECT"),
         (Path.home().resolve(strict=False), "$HOME"),
@@ -2477,7 +2479,12 @@ def _registry_source(path: Path, kind: str) -> str:
 
 def _read_registry_input(
     path: Path, source: str, kind: str, version: int, tier: int, order: int
-) -> tuple[dict, bytes | None]:
+) -> tuple[
+    dict,
+    bytes | None,
+    tuple[int, int] | None,
+    RegistryContractError | None,
+]:
     record = {
         "kind": kind,
         "source": source,
@@ -2488,13 +2495,81 @@ def _read_registry_input(
         "status": "missing",
         "content_digest": None,
     }
+    if record["canonical_identity"].startswith("$EXTERNAL/sha256:"):
+        record["resolution_mode"] = "explicit-resupply-required"
     try:
-        raw = path.read_bytes()
-    except OSError:
-        return record, None
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+        fd = os.open(path, flags)
+    except OSError as error:
+        if error.errno not in {errno.ENOENT, errno.ENOTDIR}:
+            record["status"] = "invalid"
+            return (
+                record,
+                None,
+                None,
+                RegistryContractError("registry-input-unreadable"),
+            )
+        return record, None, None, None
+    try:
+        before = os.fstat(fd)
+        physical_identity = (before.st_dev, before.st_ino)
+        if not stat.S_ISREG(before.st_mode):
+            record["status"] = "invalid"
+            return (
+                record,
+                None,
+                physical_identity,
+                RegistryContractError("registry-input-not-regular"),
+            )
+        chunks: list[bytes] = []
+        remaining = MAX_REGISTRY_BYTES + 1
+        while remaining:
+            chunk = os.read(fd, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        after = os.fstat(fd)
+        if len(raw) > MAX_REGISTRY_BYTES:
+            record["status"] = "invalid"
+            return (
+                record,
+                None,
+                physical_identity,
+                RegistryContractError("registry-input-too-large"),
+            )
+        if (
+            (
+                after.st_dev,
+                after.st_ino,
+                after.st_mode,
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
+            )
+            != (
+                before.st_dev,
+                before.st_ino,
+                before.st_mode,
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_ctime_ns,
+            )
+            or len(raw) != after.st_size
+        ):
+            record["status"] = "invalid"
+            return (
+                record,
+                None,
+                physical_identity,
+                RegistryContractError("registry-input-changed"),
+            )
+    finally:
+        os.close(fd)
     record["status"] = "present"
     record["content_digest"] = "sha256:" + hashlib.sha256(raw).hexdigest()
-    return record, raw
+    return record, raw, physical_identity, None
 
 
 def _resolve_registry_precedence(
@@ -2581,9 +2656,14 @@ def _discover_specialist_registry_candidates(args) -> tuple[list[dict], list[dic
         tier: int,
         order: int,
         detection_error: RegistryContractError | None = None,
-        snapshot: tuple[dict, bytes | None] | None = None,
+        snapshot: tuple[
+            dict,
+            bytes | None,
+            tuple[int, int] | None,
+            RegistryContractError | None,
+        ] | None = None,
     ):
-        record, raw = snapshot or _read_registry_input(
+        record, raw, _physical_identity, snapshot_error = snapshot or _read_registry_input(
             path, source, kind, version, tier, order
         )
         record.update({
@@ -2594,19 +2674,28 @@ def _discover_specialist_registry_candidates(args) -> tuple[list[dict], list[dic
             "order": order,
         })
         inputs.append(record)
-        if record["status"] != "present" or raw is None:
+        if record["status"] == "missing":
             return record
-        if detection_error is not None:
+        if snapshot_error is not None:
+            loaded, invalid = [], [{
+                "provider_id": "<registry>",
+                "source": source,
+                "reason_code": snapshot_error.code,
+                "detail": str(snapshot_error),
+            }]
+        elif detection_error is not None:
             loaded, invalid = [], [{
                 "provider_id": "<registry>",
                 "source": source,
                 "reason_code": detection_error.code,
                 "detail": str(detection_error),
             }]
-        elif version == 2:
+        elif raw is not None and version == 2:
             loaded, invalid = _load_v2_registry_candidates(raw, source)
-        else:
+        elif raw is not None:
             loaded, invalid = _load_registry_candidates(raw, source), []
+        else:
+            loaded, invalid = [], []
         if invalid:
             record["status"] = "invalid"
             barrier = {
@@ -2633,29 +2722,38 @@ def _discover_specialist_registry_candidates(args) -> tuple[list[dict], list[dic
             int,
             int,
             RegistryContractError | None,
-            tuple[dict, bytes | None],
-            str,
+            tuple[
+                dict,
+                bytes | None,
+                tuple[int, int] | None,
+                RegistryContractError | None,
+            ],
+            tuple[int, int] | None,
         ]
     ] = []
     for order, path in enumerate(_registry_arg_paths(getattr(args, "registry", None))):
         source = _registry_source(path, "explicit")
         snapshot = _read_registry_input(path, source, "explicit", 0, 99, order)
         raw_bytes = snapshot[1]
-        try:
-            raw = raw_bytes.decode("utf-8") if raw_bytes is not None else ""
-            version = detect_registry_version(raw)
-            detection_error = None
-        except UnicodeError as error:
+        if snapshot[3] is not None:
             version = 2
-            detection_error = RegistryContractError("invalid-registry-contract", str(error))
-        except RegistryContractError as error:
-            version = 2
-            detection_error = error
-        physical_identity = str(path.expanduser().resolve(strict=False))
+            detection_error = snapshot[3]
+        else:
+            try:
+                raw = raw_bytes.decode("utf-8") if raw_bytes is not None else ""
+                version = detect_registry_version(raw)
+                detection_error = None
+            except UnicodeError as error:
+                version = 2
+                detection_error = RegistryContractError("invalid-registry-contract", str(error))
+            except RegistryContractError as error:
+                version = 2
+                detection_error = error
+        physical_identity = snapshot[2]
         explicit.append((path, version, order, detection_error, snapshot, physical_identity))
     duplicate_explicit = {
         identity
-        for identity in {item[5] for item in explicit}
+        for identity in {item[5] for item in explicit if item[5] is not None}
         if sum(item[5] == identity for item in explicit) > 1
     }
     for path, version, order, detection_error, snapshot, physical_identity in sorted(
@@ -2665,7 +2763,7 @@ def _discover_specialist_registry_candidates(args) -> tuple[list[dict], list[dic
             detection_error = RegistryContractError("duplicate-registry-input")
         register(
             path,
-            _registry_source(path, "explicit"),
+            snapshot[0]["source"],
             "explicit",
             version,
             0 if version == 2 else 1,
@@ -2762,7 +2860,7 @@ def _discover_specialist_registry_candidates(args) -> tuple[list[dict], list[dic
         })
     effective = [
         {
-            "provider_id": _provider_id(candidate),
+            "provider_id": _safe_provider_reference(candidate),
             "source": candidate.get("source"),
             "registry_version": candidate.get("registry_version"),
             "registry_entry_digest": candidate.get("registry_entry_digest"),
@@ -2911,7 +3009,11 @@ def _provider_id(candidate: dict) -> str:
 
 
 def _disable_keys(candidate: dict) -> set[str]:
+    if candidate.get("registry_version") == 2:
+        provider_id = _provider_id(candidate)
+        return {provider_id} if provider_id else set()
     return {str(v) for v in (
+        candidate.get("provider_id"),
         candidate.get("role"),
         candidate.get("skill"),
         candidate.get("name"),
@@ -2967,6 +3069,53 @@ def _command_is_available(command: str | None) -> bool:
         path = Path(command).expanduser()
         return path.is_file() and os.access(path, os.X_OK)
     return shutil.which(command) is not None
+
+
+def _portable_provider_identifier(value: object) -> bool:
+    text = str(value or "")
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", text))
+
+
+def _portable_process_argument(value: object) -> bool:
+    text = str(value)
+    if not text or len(text) > 256 or any(ord(char) < 32 or ord(char) == 127 for char in text):
+        return False
+    if text.startswith(("~", "@")) or "://" in text:
+        return False
+    if "/" in text or "\\" in text or re.match(r"^[A-Za-z]:", text):
+        return False
+    return True
+
+
+def _classify_non_portable_execution_config(candidate: dict) -> str | None:
+    if candidate.get("kind") != "command":
+        return None
+    if "$EXTERNAL/sha256:" in str(candidate.get("source") or ""):
+        return "external-registry-resupply"
+    if any(
+        not _portable_provider_identifier(candidate.get(field))
+        for field in ("provider_id", "role", "skill")
+    ):
+        return "provider-identity"
+    command = candidate.get("command")
+    if not command or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", str(command)):
+        return "command-locator"
+    args = candidate.get("args") or []
+    if len(args) > 32:
+        return "argument-count"
+    if any(not _portable_process_argument(value) for value in args):
+        return "argument-locator"
+    if candidate.get("env"):
+        return "environment-values"
+    return None
+
+
+def _safe_provider_reference(candidate: dict) -> str:
+    provider_id = str(candidate.get("provider_id") or "")
+    if _portable_provider_identifier(provider_id):
+        return provider_id
+    digest = hashlib.sha256(provider_id.encode("utf-8")).hexdigest()
+    return f"provider:sha256:{digest}"
 
 
 def _default_result_contract_for(skill: str | None, role: str | None = None) -> dict:
@@ -3109,11 +3258,6 @@ def rank_specialist_candidates(task_profile: dict, registry_candidates: list[dic
         if not skill:
             continue
         overlap = [p for p in c.get("task_profiles", []) if p in profiles]
-        if c.get("kind") == "command":
-            installed_info = {"available": True} if _command_is_available(c.get("command")) else None
-        else:
-            installed_info = installed.get(skill)
-        c["available"] = bool(installed_info)
         raw_source = "user-specified" if skill in named else "automatic"
         canonical_source = normalize_selection_source(raw_source)["selection_source"]
         requested_phase = (
@@ -3121,6 +3265,35 @@ def rank_specialist_candidates(task_profile: dict, registry_candidates: list[dic
             if "complexity" in ((c.get("activation") or {}).get("auto_select_if") or [])
             else None
         )
+        blocked_config_class = _classify_non_portable_execution_config(c)
+        if blocked_config_class is not None:
+            eligibility = evaluate_provider_eligibility(
+                c,
+                mission_context,
+                requested_phase=requested_phase,
+                selection_source=raw_source,
+            )
+            ineligible.append({
+                "provider_id": _safe_provider_reference(c),
+                "source": c["source"],
+                "registry_entry_digest": c["registry_entry_digest"],
+                "selection_source": canonical_source,
+                "selection_source_raw": raw_source,
+                "requested_phase": requested_phase,
+                "current_complexity": complexity,
+                "minimum_complexity": eligibility["normalized_activation"].get("min_complexity"),
+                "reason_code": "non-portable-execution-config",
+                "blocked_config_class": blocked_config_class,
+                "context_digest": eligibility["context_digest"],
+                "activation_digest": eligibility["activation_digest"],
+                "registry_projection_digest": c.get("registry_projection_digest"),
+            })
+            continue
+        if c.get("kind") == "command":
+            installed_info = {"available": True} if _command_is_available(c.get("command")) else None
+        else:
+            installed_info = installed.get(skill)
+        c["available"] = bool(installed_info)
         eligibility = evaluate_provider_eligibility(
             c,
             mission_context,
