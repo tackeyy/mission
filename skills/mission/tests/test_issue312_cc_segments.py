@@ -80,7 +80,11 @@ def test_set_phase_keeps_existing_open_segment(run_cli, tmp_path):
 
 
 def test_set_reviewing_opens_reviewer_wait(run_cli, tmp_path):
-    run_cli("init", "m", "--complexity", "Standard", cwd=tmp_path, check=True)
+    run_cli(
+        "init", "m", "--complexity", "Standard",
+        "--artifact-applicability", "not-applicable",
+        cwd=tmp_path, check=True,
+    )
     run_cli("set", "phase=executing", cwd=tmp_path, check=True)
     # executing の fallback segment を閉じて、open なしの状態で reviewing へ
     run_cli("activity", "end", cwd=tmp_path, check=True)

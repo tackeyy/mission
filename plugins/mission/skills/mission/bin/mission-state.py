@@ -86,6 +86,17 @@ from activity_segments import (  # noqa: E402
 )
 from worktree_archive import validate_worktree_archive_bundle  # noqa: E402
 from state_snapshot import SnapshotError, consume_snapshot_document  # noqa: E402
+from artifact_contract import (  # noqa: E402
+    ArtifactContractError,
+    artifact_lint_observation_matches,
+    artifact_path_from_state,
+    canonical_artifact_identity_snapshot,
+    capture_artifact_identity,
+    invalidate_artifact_lint_observation,
+    summarize_artifact_coverage,
+    validate_artifact_identity,
+    validate_artifact_state_consistency,
+)
 
 SCHEMA_VERSION = 3  # v3: role-aware terminal_outcome を terminal writer が明示記録
 GOAL_DISPATCH_MODES = {"inline", "host-native"}
@@ -1391,6 +1402,8 @@ def _transition_phase(
     terminal_trusted_boundary: bool = False,
 ) -> None:
     """phase を変更し、旧 phase の経過秒数を phase_durations_sec に加算する."""
+    if new_phase == "reviewing":
+        validate_artifact_state_consistency(data, require_resolved=True)
     now = now or iso_now()
     old_phase = data.get("phase")
     if new_phase in {"done", "halted"}:
@@ -4053,6 +4066,17 @@ def _write_artifact(cwd: Path, data: dict, artifact: dict) -> Path:
     return path
 
 
+def _refresh_artifact_identity(cwd: Path, data: dict, artifact: dict, path: Path) -> None:
+    identity, _ = capture_artifact_identity(
+        cwd,
+        _state_relative_path(cwd, str(path)),
+        str(data.get("session_id") or resolve_session_id()),
+    )
+    invalidate_artifact_lint_observation(data)
+    artifact.update(identity)
+    data["artifact_applicability"] = "producing"
+
+
 def _artifact_gate_error(data: dict, cwd: Path) -> str | None:
     artifact = _artifact_state(data)
     if not artifact.get("required_for_pass"):
@@ -4068,6 +4092,26 @@ def _artifact_gate_error(data: dict, cwd: Path) -> str | None:
     if not artifact.get("last_rendered_at"):
         return "artifact is required but last_rendered_at is missing; run `mission-state.py artifact render`"
     return None
+
+
+def _artifact_profile_coverage(cwd: Path, data: dict) -> dict:
+    states = []
+    for path in _iter_state_files(cwd, include_archive=True):
+        try:
+            candidate = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError, TypeError):
+            continue
+        if isinstance(candidate, dict):
+            states.append(candidate)
+    summary = summarize_artifact_coverage(states)
+    profile = data.get("task_profile")
+    primary = profile.get("primary") if isinstance(profile, dict) else None
+    name = primary.strip() if isinstance(primary, str) and primary.strip() else "unclassified"
+    return (summary.get("by_profile") or {}).get(name) or {
+        "coverage": None,
+        "threshold": summary.get("threshold", 0.95),
+        "gate_active": False,
+    }
 
 
 def cmd_artifact_init(args):
@@ -4098,10 +4142,12 @@ def cmd_artifact_init(args):
             "updated_at": now,
         }
         data["artifact"] = artifact
+        data["artifact_applicability"] = "producing"
         data["updated_at"] = now
+        path = _write_artifact(cwd, data, artifact)
+        _refresh_artifact_identity(cwd, data, artifact, path)
         backup_state(sf)
         atomic_write_json(sf, stamp_metadata(data, cwd))
-        _write_artifact(cwd, data, artifact)
     print(json.dumps({"ok": True, "artifact": artifact}, indent=2 if args.json else None, ensure_ascii=False))
 
 
@@ -4128,7 +4174,10 @@ def cmd_artifact_append(args):
             block["label"] = args.label
         artifact.setdefault("blocks", []).append(block)
         artifact["status"] = "draft"
+        artifact.pop("digest", None)
+        artifact.pop("size", None)
         artifact["updated_at"] = now
+        invalidate_artifact_lint_observation(data)
         data["artifact"] = artifact
         data["updated_at"] = now
         backup_state(sf)
@@ -4157,6 +4206,7 @@ def cmd_artifact_render(args):
         data["artifact"] = artifact
         data["updated_at"] = now
         path = _write_artifact(cwd, data, artifact)
+        _refresh_artifact_identity(cwd, data, artifact, path)
         backup_state(sf)
         atomic_write_json(sf, stamp_metadata(data, cwd))
     result = {"ok": True, "path": _state_relative_path(cwd, str(path)), "artifact": artifact}
@@ -4182,6 +4232,7 @@ def cmd_artifact_export(args):
         artifact["last_rendered_at"] = now
         artifact["updated_at"] = now
         src = _write_artifact(cwd, data, artifact)
+        _refresh_artifact_identity(cwd, data, artifact, src)
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
         export_entry = {
@@ -4233,6 +4284,7 @@ def cmd_artifact_publish(args):
         artifact["status"] = event["status"]
         artifact["updated_at"] = now
         path = _write_artifact(cwd, data, artifact)
+        _refresh_artifact_identity(cwd, data, artifact, path)
         event["artifact_path"] = _state_relative_path(cwd, str(path))
         data["artifact"] = artifact
         data["updated_at"] = now
@@ -4462,6 +4514,7 @@ def cmd_init(args):
         "complexity": "Unknown",
         "reviewer_count": 2,
         "task_profile": {},
+        "artifact_applicability": getattr(args, "artifact_applicability", "pending"),
         "specialists_mode": "auto",
         "specialists_candidates": [],
         "specialists_selected": [],
@@ -4912,6 +4965,56 @@ def cmd_advance(args):
     try:
         with StateLock(lock_file(cwd)):
             data = json.loads(sf.read_text())
+            requested_applicability = getattr(args, "artifact_applicability", None)
+            artifact_path = getattr(args, "artifact_path", None)
+            producer_run_id = getattr(args, "producer_run_id", None)
+            if requested_applicability == "producing":
+                if not artifact_path or not producer_run_id:
+                    print(
+                        "ERROR: producing artifact handoff requires --artifact-path and --producer-run-id",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
+                try:
+                    identity, _ = capture_artifact_identity(
+                        cwd, artifact_path, producer_run_id, canonical=True
+                    )
+                except ArtifactContractError as exc:
+                    print(f"ERROR: {exc}", file=sys.stderr)
+                    sys.exit(2)
+                data["artifact"] = identity
+                data["artifact_applicability"] = "producing"
+                invalidate_artifact_lint_observation(data)
+            elif requested_applicability == "not-applicable":
+                if artifact_path or producer_run_id:
+                    print(
+                        "ERROR: not-applicable artifact handoff cannot include artifact identity",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
+                if data.get("artifact_applicability") == "producing":
+                    print(
+                        "ERROR: cannot downgrade producing artifact applicability to not-applicable",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
+                data["artifact_applicability"] = "not-applicable"
+            elif artifact_path or producer_run_id:
+                print(
+                    "ERROR: artifact identity requires --artifact-applicability producing",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            if (
+                data.get("phase") == "executing"
+                and new_phase == "reviewing"
+                and data.get("artifact_applicability") == "pending"
+            ):
+                print(
+                    "ERROR: artifact applicability is pending; resolve it to producing or not-applicable before review",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
             # 現 segment を先に閉じる。_transition_phase の split (旧 kind/reason の
             # キャリーフォワード) が「旧 reason + 新 phase・0秒」の phantom segment を
             # 作るのを防ぐ。advance は直後に新 segment を開くため carry-forward 不要。
@@ -4922,7 +5025,7 @@ def cmd_advance(args):
             data["updated_at"] = at
             backup_state(sf)
             atomic_write_json(sf, stamp_metadata(data, cwd))
-    except ActivityTimingError as error:
+    except (ActivityTimingError, ArtifactContractError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         sys.exit(2)
     print(
@@ -5616,6 +5719,12 @@ FROZEN_FIELDS = {
     "schema_version",
     "session_role",
     "terminal_outcome",
+    "artifact_applicability",
+    "artifact",
+    "artifact_path",
+    "artifact_lint",
+    "artifact_lint_identity",
+    "artifact_lint_status",
     "project_root",
     "started_at",
     "created_at_session",
@@ -5727,7 +5836,11 @@ def cmd_set(args):
                 parsed_value = value
             if key == "phase":
                 normalized_phase = _normalize_set_phase_value(str(parsed_value))
-                _transition_phase(data, normalized_phase, now)
+                try:
+                    _transition_phase(data, normalized_phase, now)
+                except ArtifactContractError as exc:
+                    print(f"ERROR: {exc}", file=sys.stderr)
+                    sys.exit(2)
                 # #312: CC が set phase 経路を使っても segment が欠落しないよう、
                 # open segment が無ければ phase に応じた segment を fallback で開く。
                 # set 時点から開始し過去は塗らない (#237 精度契約)。既に open が
@@ -6472,27 +6585,60 @@ def lint_artifact_completeness(artifact_text: str) -> list[dict]:
 
 
 def _lint_state_artifact(cwd: Path, data: dict) -> tuple[list[dict], str]:
-    """Lint an explicitly configured top-level artifact_path, or skip it."""
-    artifact_path = str(data.get("artifact_path") or "").strip()
-    if not artifact_path:
+    """Lint the canonical artifact identity, with a read-only legacy fallback."""
+    if data.get("artifact_applicability") == "not-applicable":
         return [], "skipped"
-    try:
-        path = Path(artifact_path).expanduser()
-        if not path.is_absolute():
-            path = cwd / path
-        path = path.resolve()
+    artifact_path, canonical = artifact_path_from_state(data)
+    if not artifact_path:
+        return (
+            ([], "missing")
+            if data.get("artifact_applicability") in {"producing", "pending"}
+            else ([], "skipped")
+        )
+    if not canonical:
         try:
-            path.relative_to(cwd.resolve())
-        except UnicodeError:
-            raise
-        except ValueError:
-            print(
-                "WARN #351: artifact lint skipped: "
-                f"path outside project root: {artifact_path}",
-                file=sys.stderr,
-            )
+            path = Path(artifact_path).expanduser()
+            if not path.is_absolute():
+                path = cwd / path
+            path = path.resolve()
+            try:
+                path.relative_to(cwd.resolve())
+            except UnicodeError:
+                raise
+            except ValueError:
+                print(
+                    "WARN #351: artifact lint skipped: "
+                    f"path outside project root: {artifact_path}",
+                    file=sys.stderr,
+                )
+                return [], "skipped"
+            artifact_text = _read_regular_artifact_utf8(path)
+        except (OSError, UnicodeError, ValueError, TypeError, RuntimeError) as exc:
+            print(f"WARN #351: artifact lint skipped: {exc}", file=sys.stderr)
             return [], "skipped"
-        artifact_text = _read_regular_artifact_utf8(path)
+        findings = lint_artifact_completeness(artifact_text)
+        return findings, "findings" if findings else "clean"
+    try:
+        if data.get("artifact_applicability") == "producing":
+            _, payload = validate_artifact_identity(data, cwd)
+        else:
+            _, payload = capture_artifact_identity(
+                cwd,
+                artifact_path,
+                str(data.get("session_id") or "legacy"),
+                canonical=canonical,
+            )
+        try:
+            artifact_text = payload.decode("utf-8")
+        except UnicodeError as exc:
+            if data.get("artifact_applicability") == "producing":
+                raise ArtifactContractError("artifact is not valid UTF-8") from exc
+            raise
+    except ArtifactContractError:
+        if data.get("artifact_applicability") == "producing":
+            raise
+        print("WARN #351: artifact lint skipped: invalid artifact contract", file=sys.stderr)
+        return [], "skipped"
     except (OSError, UnicodeError, ValueError, TypeError, RuntimeError) as exc:
         print(f"WARN #351: artifact lint skipped: {exc}", file=sys.stderr)
         return [], "skipped"
@@ -6636,12 +6782,27 @@ def cmd_aggregate_reviews(args):
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
-        artifact_lint, artifact_lint_status = _lint_state_artifact(cwd, data)
-        if artifact_lint_status == "skipped":
+        try:
+            validate_artifact_state_consistency(data, require_resolved=True)
+            artifact_lint, artifact_lint_status = _lint_state_artifact(cwd, data)
+        except ArtifactContractError as exc:
+            invalidate_artifact_lint_observation(data)
+            data["artifact_lint_status"] = "invalid"
+            data["updated_at"] = iso_now()
+            backup_state(sf)
+            atomic_write_json(sf, stamp_metadata(data, cwd))
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(2)
+        if artifact_lint_status not in {"clean", "findings"}:
             data.pop("artifact_lint", None)
         else:
             data["artifact_lint"] = artifact_lint
         data["artifact_lint_status"] = artifact_lint_status
+        identity_snapshot = canonical_artifact_identity_snapshot(data)
+        if artifact_lint_status in {"clean", "findings"} and identity_snapshot:
+            data["artifact_lint_identity"] = identity_snapshot
+        else:
+            data.pop("artifact_lint_identity", None)
         for finding in artifact_lint:
             print(
                 "WARN #351: artifact lint: "
@@ -7105,6 +7266,11 @@ def cmd_mark_passes(args):
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
+        try:
+            validate_artifact_state_consistency(data, require_resolved=True)
+        except ArtifactContractError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(2)
         now = iso_now()
         threshold = data.get("threshold", DEFAULT_THRESHOLD)
         history = data.get("score_history", [])
@@ -7177,6 +7343,40 @@ def cmd_mark_passes(args):
                 f"WARNING: --force によりバリデーションを skip して passes=true を書き込みます。reason={reason!r}",
                 file=sys.stderr,
             )
+
+        if data.get("artifact_applicability") == "producing":
+            artifact = _artifact_state(data)
+            identity_present = any(
+                key in artifact for key in ("path", "digest", "size", "producer_run_id")
+            )
+            coverage = _artifact_profile_coverage(cwd, data)
+            if identity_present:
+                try:
+                    validate_artifact_identity(data, cwd)
+                except ArtifactContractError as exc:
+                    print(f"ERROR: {exc}", file=sys.stderr)
+                    sys.exit(2)
+                if (
+                    coverage.get("gate_active")
+                    and (
+                        data.get("artifact_lint_status") not in {"clean", "findings"}
+                        or not artifact_lint_observation_matches(data)
+                    )
+                ):
+                    print(
+                        "ERROR: artifact lint observation is missing for a profile with an active coverage gate",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
+            elif coverage.get("gate_active"):
+                print("ERROR: artifact path is missing", file=sys.stderr)
+                sys.exit(2)
+            else:
+                print(
+                    "WARN: artifact coverage gate is not active for this profile; "
+                    "recording a terminal missing observation",
+                    file=sys.stderr,
+                )
 
         data["passes"] = True
         data["loop_active"] = False
@@ -8219,6 +8419,7 @@ def _aggregate(
             "by_halt_category": {},
             "parallel_review_counts": {"true": 0, "false": 0, "unknown": 0},
             "artifact_lint_counts": _artifact_lint_counts([]),
+            "artifact_coverage": summarize_artifact_coverage([]),
             "bounded_context_counts": {
                 "expected_bounded": 0,
                 "manifest_generated": 0,
@@ -8326,6 +8527,7 @@ def _aggregate(
         "forced_pass_count": forced_pass_count,
         "parallel_review_counts": parallel_review_counts,
         "artifact_lint_counts": _artifact_lint_counts(states),
+        "artifact_coverage": summarize_artifact_coverage(states),
         "bounded_context_counts": bounded_context_counts,
         "reviewer_output_stats": _reviewer_output_stats(states),
         "forced_pass_rate": forced_pass_count / pass_count if pass_count else None,
@@ -8400,6 +8602,19 @@ def _format_text(stats: dict, since: str | None, until: str | None) -> str:
     for outcome, count in (stats.get("terminal_outcome_counts") or {}).items():
         lines.append(f"  {outcome:<20} {count}")
     lines.append(f"  {'non_terminal':<20} {stats.get('non_terminal_count', 0)}")
+    artifact_coverage = stats.get("artifact_coverage") or {}
+    artifact_counts = artifact_coverage.get("counts") or {}
+    coverage_value = artifact_coverage.get("coverage")
+    coverage_text = f"{coverage_value * 100:.1f}%" if coverage_value is not None else "-"
+    lines.extend([
+        "artifact_coverage:",
+        f"  eligible {artifact_counts.get('eligible', 0)} / observed {artifact_counts.get('observed', 0)} / "
+        f"missing {artifact_counts.get('missing', 0)} / invalid {artifact_counts.get('invalid', 0)}",
+        f"  clean {artifact_counts.get('clean', 0)} / findings {artifact_counts.get('findings', 0)} / "
+        f"skipped {artifact_counts.get('skipped', 0)}",
+        f"  coverage {coverage_text} / gate_active {str(artifact_coverage.get('gate_active', False)).lower()} / "
+        f"counts_conserved {str(artifact_coverage.get('counts_conserved', False)).lower()}",
+    ])
     lines += [
         f"  incomplete:             {stats['incomplete_count']}",
         f"  abandoned:              {stats['abandoned_count']}",
@@ -8814,6 +9029,12 @@ def _build_parser():
                              "下流の受理形式に合わせる場合は裸番号 `42` を推奨")
     p_init.add_argument("--files", default=None,
                         help="予定変更ファイルのカンマ区切り project-root 相対パス。同一 active session と重複する場合 WARN")
+    p_init.add_argument(
+        "--artifact-applicability",
+        choices=["producing", "not-applicable", "pending"],
+        default="pending",
+        help="成果物契約。profile 未確定時は pending、成果物を生成する実行は producing、対象外は not-applicable",
+    )
     p_init.add_argument("--role", choices=["implementer", "checker", "planning", "analyze", "release"],
                         default="implementer", dest="session_role",
                         help="#311: session の役割。checker 系は iter=0 での証拠提出が正規出口となり、"
@@ -9019,6 +9240,22 @@ def _build_parser():
                            help="任意の補足。control 文字除去・160文字へ正規化")
     p_advance.add_argument("--at", default=None,
                            help="ISO timestamp。省略時は現在 UTC")
+    p_advance.add_argument(
+        "--artifact-applicability",
+        choices=["producing", "not-applicable"],
+        default=None,
+        help="executing で確定した portable artifact contract",
+    )
+    p_advance.add_argument(
+        "--artifact-path",
+        default=None,
+        help="producing 時の repository-relative artifact path",
+    )
+    p_advance.add_argument(
+        "--producer-run-id",
+        default=None,
+        help="artifact bytes を生成した executor run identifier",
+    )
     p_advance.set_defaults(func=cmd_advance)
 
     p_activity = sub.add_parser("activity", help="#211: phase 内の active/wait/idle segment を記録")

@@ -50,6 +50,7 @@ mission-state.py permission-preflight --json
 mission-state.py resume
 mission-state.py next
 mission-state.py advance --phase executing --activity active:implementation
+mission-state.py advance --phase reviewing --activity reviewer-wait:review-response --artifact-applicability producing --artifact-path <repo-relative-path> --producer-run-id <run-id>
 mission-state.py activity start --kind active --reason planning
 mission-state.py activity start --kind external-wait --reason external-response
 mission-state.py activity start --kind approval-wait --reason user-approval
@@ -65,7 +66,7 @@ mission-state.py mark-halt --reason "<reason>"
 mission-state.py reactivate --approved-by-user --expected-category awaiting-approval --reason "<user-approved reason>"
 ```
 
-Artifact-required mission は `artifact init --required-for-pass` → `artifact append` → `artifact render --redaction-status reviewed` を使う。specialist は `specialists recommend --record-state`、完了前は `specialists accounting --json` と `specialists summary --json` で未処理候補を確認する。詳細は `refs/state-management.md`。
+`init` は artifact contract を `pending` で開始する。executor の実行契約確定後、遅くとも executing → reviewing の atomic `advance` で、生成ありなら repository-relative path と producer run id を `producing` として渡し、生成対象外なら `--artifact-applicability not-applicable` を渡す。`pending` のまま review へ進めない。local artifact を管理する mission は `artifact init --required-for-pass` → `artifact append` → `artifact render --redaction-status reviewed` を使う。specialist は `specialists recommend --record-state`、完了前は `specialists accounting --json` と `specialists summary --json` で未処理候補を確認する。詳細は `refs/state-management.md`。
 
 ## 引数
 

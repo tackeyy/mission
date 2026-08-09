@@ -33,6 +33,7 @@ allowed-tools:
 3. **完了条件を実測で確認**: テスト/ログ/grep等で「動いた」を証明
 4. **副作用最小**: 計画外のファイルを触らない
 5. **不可逆操作の承認を確認**: 削除・本番デプロイ・force push 等は呼び出し元に承認状態を返す。現在のユーザー依頼が対象操作を明示していれば事前承認として扱う
+6. **artifact handoff を確定**: 実行契約が生成対象かを確定し、生成する場合は bounded regular file と producer run id、対象外なら明示的な not-applicable を返す。`pending` のまま reviewer へ渡さない
 
 ## 並列 fan-out 指針 (P4, 2026-06-12)
 
@@ -54,6 +55,7 @@ allowed-tools:
 4. ログ記録: state.json.decisions に追記
    { "step": N, "action": "...", "result": "ok|partial|failed", "evidence": "..." }
 5. 指示明瞭度の自己観察: Planner 指示で詰まった点・裁量補完した点があればメモ。最終レポートでまとめて報告
+6. review handoff: `refs/artifact-handoff.md` に従い、orchestrator が executing → reviewing を atomic に記録できる引数を返す
 ```
 
 ### 指示明瞭度の自己観察ルール (EPT 由来)
@@ -113,6 +115,8 @@ allowed-tools:
 - decisions: +N entry
 - phase: "executing" → "reviewing"
 ```
+
+artifact handoff は state の直書きではなく、呼び出し元が `mission-state.py advance` に渡せる `artifact_applicability`、repository-relative `artifact_path`、`producer_run_id` を同じ実行結果へ含める。詳細は `refs/artifact-handoff.md`。
 
 ## NG行動
 

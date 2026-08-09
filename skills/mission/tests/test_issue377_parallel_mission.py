@@ -151,11 +151,13 @@ def test_parallel_mark_passes_only_finishes_own_session(tmp_path):
     sid_b = f"{base}-m825"
 
     r_a = _run_state(
-        ["init", "Issue #824", "--issue-ref", "824", "--complexity", "Standard"],
+        ["init", "Issue #824", "--issue-ref", "824", "--complexity", "Standard",
+         "--artifact-applicability", "not-applicable"],
         tmp_path, session_id=sid_a,
     )
     r_b = _run_state(
-        ["init", "Issue #825", "--issue-ref", "825", "--complexity", "Standard"],
+        ["init", "Issue #825", "--issue-ref", "825", "--complexity", "Standard",
+         "--artifact-applicability", "not-applicable"],
         tmp_path, session_id=sid_b,
     )
     assert r_a.returncode == 0
