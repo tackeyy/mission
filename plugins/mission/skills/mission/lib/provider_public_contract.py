@@ -11,11 +11,19 @@ PORTABLE_PROVIDER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}\Z")
 OPAQUE_PROVIDER_ID = re.compile(r"provider:sha256:[0-9a-f]{64}\Z")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+:-]{0,127}\Z")
-PRIVATE_PATH = re.compile(
-    r"(?:file:/|(?<![A-Za-z0-9/])/(?!/)|(?<![A-Za-z0-9])~[\\/]|"
-    r"(?<![A-Za-z0-9])[A-Za-z]:[\\/])",
+LOCAL_LOCATOR = re.compile(
+    r"(?:"
+    r"file:/{1,3}[^\s'\"`]*|"
+    r"(?<![A-Za-z0-9:])//[^\s'\"`]+|"
+    r"(?<![A-Za-z0-9\\])\\\\[^\s'\"`]+|"
+    r"(?<![A-Za-z0-9\\])\\(?!\\)[^\s'\"`]+|"
+    r"(?<![A-Za-z0-9])~[\\/][^\s'\"`]*|"
+    r"(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s'\"`]*|"
+    r"(?<![A-Za-z0-9/])/(?!/)[^\s'\"`]*"
+    r")",
     re.IGNORECASE,
 )
+PRIVATE_PATH = LOCAL_LOCATOR
 VALID_PHASES = {"planning", "execution", "review", "scoring", "critic", "synthesis"}
 VALID_COMPLEXITIES = {"Simple", "Standard", "Complex", "Critical"}
 VALID_SELECTION_SOURCES = {
@@ -124,7 +132,15 @@ def _safe_plain_text(value: object, *, maximum: int = 2048) -> bool:
 
 
 def _safe_text(value: object, *, maximum: int = 2048) -> bool:
-    return _safe_plain_text(value, maximum=maximum) and PRIVATE_PATH.search(value) is None
+    return _safe_plain_text(value, maximum=maximum) and not contains_local_locator(value)
+
+
+def contains_local_locator(value: object) -> bool:
+    return isinstance(value, str) and LOCAL_LOCATOR.search(value) is not None
+
+
+def redact_local_locators(text: str, replacement: str = "[REDACTED_PATH]") -> str:
+    return LOCAL_LOCATOR.sub(replacement, text)
 
 
 def _safe_score(value: object) -> bool:

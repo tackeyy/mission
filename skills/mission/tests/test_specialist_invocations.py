@@ -247,6 +247,11 @@ def test_log_invocation_preflights_pending_entry_before_archive_or_state_side_ef
         "finding path=/tmp/private.txt",
         r"finding path=C:\\Users\\portable-user\\private.txt",
         "finding path=~/private.txt",
+        r"finding path=\\server\share\private.txt",
+        r"finding path=\\?\C:\private\file.txt",
+        r"finding path=\\.\PhysicalDrive0",
+        r"finding path=\Device\HarddiskVolume1\private.txt",
+        "finding path=//server/share/private.txt",
     ],
 )
 def test_log_invocation_cli_rejects_embedded_private_locator_without_disclosure(
@@ -282,6 +287,11 @@ def test_log_invocation_cli_rejects_embedded_private_locator_without_disclosure(
         "path=/tmp/private.txt",
         r"path=C:\\Users\\portable-user\\private.txt",
         "path=~/private.txt",
+        r"path=\\server\share\private.txt",
+        r"path=\\?\C:\private\file.txt",
+        r"path=\\.\PhysicalDrive0",
+        r"path=\Device\HarddiskVolume1\private.txt",
+        "path=//server/share/private.txt",
     ],
 )
 def test_provider_output_redactor_covers_every_private_locator_separator(private_text):
@@ -331,6 +341,164 @@ def test_log_invocation_rolls_back_staged_archive_when_state_publish_fails(
     assert state_path.read_bytes() == state_before
     artifacts_after = set(archive_dir.glob("*")) if archive_dir.exists() else set()
     assert artifacts_after == artifacts_before
+
+
+def test_log_invocation_redacts_local_locators_from_evidence_body(
+    state_dir, run_cli, tmp_path
+):
+    private_locators = [
+        "/home/portable-user/private.txt",
+        "/root/private.txt",
+        "/tmp/private.txt",
+        r"C:\\Users\\portable-user\\private.txt",
+        r"\\server\share\private.txt",
+        r"\\?\C:\private\file.txt",
+        r"\\.\PhysicalDrive0",
+        r"\Device\HarddiskVolume1\private.txt",
+        "~/private.txt",
+    ]
+    evidence = tmp_path / "private-locator-review.md"
+    evidence.write_text(
+        "\n".join(f"finding path={value}" for value in private_locators),
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "review",
+        "--role", "reviewer",
+        "--skill", "portable-provider",
+        "--mode", "skill-tool",
+        "--status", "completed",
+        "--evidence-output", str(evidence),
+        "--json",
+        cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 0, result.stderr
+    entry = json.loads(result.stdout)["entry"]
+    archived = state_dir.parent / entry["evidence_path"]
+    archived_text = archived.read_text(encoding="utf-8")
+    assert "[REDACTED_PATH]" in archived_text
+    for locator in private_locators:
+        assert locator not in archived_text
+        assert locator not in result.stdout
+        assert locator not in result.stderr
+
+
+@pytest.mark.parametrize(
+    "input_kind", ["symlink", "oversize", "non-regular", "invalid-encoding"]
+)
+def test_log_invocation_rejects_unsafe_evidence_snapshot_without_side_effects(
+    input_kind, state_dir, run_cli, tmp_path
+):
+    state_path = state_dir / "sessions" / "test.json"
+    state_before = state_path.read_bytes()
+    archive_dir = state_dir / "archive"
+    artifacts_before = set(archive_dir.glob("*")) if archive_dir.exists() else set()
+    if input_kind == "symlink":
+        target = tmp_path / "evidence-target.md"
+        target.write_text("portable evidence", encoding="utf-8")
+        evidence = tmp_path / "evidence-link.md"
+        evidence.symlink_to(target)
+    else:
+        evidence = tmp_path / f"{input_kind}-evidence.md"
+        if input_kind == "oversize":
+            evidence.write_bytes(b"x" * (1024 * 1024 + 1))
+        elif input_kind == "non-regular":
+            evidence.mkdir()
+        else:
+            evidence.write_bytes(b"\xff\xfe")
+
+    result = run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "review",
+        "--role", "reviewer",
+        "--skill", "portable-provider",
+        "--mode", "skill-tool",
+        "--status", "completed",
+        "--evidence-output", str(evidence),
+        "--json",
+        cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    assert str(evidence) not in result.stdout
+    assert str(evidence) not in result.stderr
+    assert state_path.read_bytes() == state_before
+    artifacts_after = set(archive_dir.glob("*")) if archive_dir.exists() else set()
+    assert artifacts_after == artifacts_before
+
+
+def test_evidence_snapshot_detects_in_place_mutation_from_one_open_fd(
+    tmp_path, monkeypatch
+):
+    module = _load_mission_state_module("mission_state_issue394_evidence_snapshot")
+    evidence = tmp_path / "mutable-evidence.md"
+    evidence.write_bytes(b"portable evidence")
+    original_read = module.os.read
+    mutated = False
+
+    def mutating_read(fd, size):
+        nonlocal mutated
+        chunk = original_read(fd, size)
+        if not mutated:
+            mutated = True
+            evidence.write_bytes(b"changed evidence!")
+        return chunk
+
+    monkeypatch.setattr(module.os, "read", mutating_read)
+
+    with pytest.raises(module.SpecialistEvidenceInputError) as caught:
+        module._read_specialist_evidence_input(evidence)
+
+    assert caught.value.reason_code == "specialist-evidence-changed"
+
+
+@pytest.mark.parametrize("failing_operation", ["read", "second-fstat"])
+def test_evidence_snapshot_io_error_is_structured_and_closes_once(
+    failing_operation, tmp_path, monkeypatch
+):
+    module = _load_mission_state_module(
+        f"mission_state_issue394_evidence_io_{failing_operation}"
+    )
+    evidence = tmp_path / "evidence.md"
+    evidence.write_text("portable evidence", encoding="utf-8")
+    original_read = module.os.read
+    original_fstat = module.os.fstat
+    original_close = module.os.close
+    close_count = 0
+    fstat_count = 0
+
+    def close_spy(fd):
+        nonlocal close_count
+        close_count += 1
+        return original_close(fd)
+
+    def fstat_spy(fd):
+        nonlocal fstat_count
+        fstat_count += 1
+        if failing_operation == "second-fstat" and fstat_count == 2:
+            raise OSError("metadata changed")
+        return original_fstat(fd)
+
+    monkeypatch.setattr(module.os, "close", close_spy)
+    monkeypatch.setattr(module.os, "fstat", fstat_spy)
+    if failing_operation == "read":
+        monkeypatch.setattr(
+            module.os, "read", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("read failed"))
+        )
+    else:
+        monkeypatch.setattr(module.os, "read", original_read)
+
+    with pytest.raises(module.SpecialistEvidenceInputError) as caught:
+        module._read_specialist_evidence_input(evidence)
+
+    assert caught.value.reason_code == "specialist-evidence-unreadable"
+    assert close_count == 1
 
 
 def test_log_invocation_records_codex_inline_usage(state_dir, run_cli, read_state):

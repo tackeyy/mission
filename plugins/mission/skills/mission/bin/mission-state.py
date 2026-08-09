@@ -104,6 +104,8 @@ from provider_eligibility import (  # noqa: E402
 )
 from provider_public_contract import (  # noqa: E402
     SpecialistPublicContractError,
+    contains_local_locator,
+    redact_local_locators,
     validate_specialist_public_state as _validate_specialist_public_state,
 )
 from artifact_contract import (  # noqa: E402
@@ -4044,6 +4046,87 @@ def cmd_specialists_summary(args):
     )
 
 
+MAX_SPECIALIST_EVIDENCE_BYTES = 1024 * 1024
+
+
+class SpecialistEvidenceInputError(ValueError):
+    """An evidence input cannot be snapshotted without a disclosure or race."""
+
+    def __init__(self, reason_code: str):
+        self.reason_code = reason_code
+        self.field_path = "/specialist_invocations/pending/evidence_output"
+        super().__init__(reason_code)
+
+
+def _evidence_error(reason_code: str) -> None:
+    raise SpecialistEvidenceInputError(reason_code)
+
+
+def _read_specialist_evidence_input(path: Path) -> str:
+    """Read one bounded, non-symlink regular-file snapshot from a single FD."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            _evidence_error("specialist-evidence-symlink")
+        _evidence_error("specialist-evidence-unreadable")
+    try:
+        try:
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode):
+                _evidence_error("specialist-evidence-non-regular")
+            if before.st_size < 0 or before.st_size > MAX_SPECIALIST_EVIDENCE_BYTES:
+                _evidence_error("specialist-evidence-too-large")
+            chunks = []
+            remaining = MAX_SPECIALIST_EVIDENCE_BYTES + 1
+            while remaining:
+                chunk = os.read(fd, min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            raw = b"".join(chunks)
+            after = os.fstat(fd)
+        except SpecialistEvidenceInputError:
+            raise
+        except OSError:
+            _evidence_error("specialist-evidence-unreadable")
+    finally:
+        os.close(fd)
+    before_identity = (
+        before.st_dev,
+        before.st_ino,
+        before.st_mode,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    )
+    after_identity = (
+        after.st_dev,
+        after.st_ino,
+        after.st_mode,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    )
+    if (
+        len(raw) > MAX_SPECIALIST_EVIDENCE_BYTES
+        or len(raw) != after.st_size
+        or before_identity != after_identity
+    ):
+        _evidence_error("specialist-evidence-changed")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        _evidence_error("specialist-evidence-invalid-encoding")
+    redacted = _redact_provider_output(text)
+    if contains_local_locator(redacted):
+        _evidence_error("specialist-evidence-unsafe-content")
+    return redacted
+
+
 def _planned_specialist_archive_path(
     cwd: Path, iteration: int, data: dict, entry: dict
 ) -> Path:
@@ -4162,13 +4245,7 @@ def _redact_provider_output(text: str) -> str:
     redacted = text
     for pattern in patterns:
         redacted = pattern.sub(lambda m: f"{m.group(1)}=[REDACTED]", redacted)
-    redacted = re.sub(
-        r"(?i)(?:file:/{1,3}|(?<![A-Za-z0-9/])/(?!/)|"
-        r"(?<![A-Za-z0-9])~[\\/]|(?<![A-Za-z0-9])[A-Za-z]:[\\/])[^\s'\"`]*",
-        "[REDACTED_PATH]",
-        redacted,
-    )
-    return redacted
+    return redact_local_locators(redacted)
 
 
 def _non_template_text_length(text: str, forbidden_markers: list[str]) -> int:
@@ -5556,9 +5633,7 @@ def cmd_log_specialist_invocation(args):
             entry["bounded_purpose"] = args.bounded_purpose
 
         evidence_src = Path(args.evidence_output) if args.evidence_output else None
-        evidence_planned = bool(
-            evidence_src is not None and evidence_src.exists() and evidence_src.is_file()
-        )
+        evidence_planned = evidence_src is not None
         data = stamp_metadata(data, cwd)
         data["updated_at"] = now
         data, entry, selected_entry = _prepare_specialist_invocation_state(
@@ -5572,9 +5647,7 @@ def cmd_log_specialist_invocation(args):
         )
         evidence_text = None
         if evidence_planned and evidence_src is not None:
-            evidence_text = evidence_src.read_text(encoding="utf-8")
-        elif evidence_src is not None:
-            print("WARNING: --evidence-output file is unavailable", file=sys.stderr)
+            evidence_text = _read_specialist_evidence_input(evidence_src)
         archived_to = _commit_specialist_state_with_archive(
             sf, cwd, data, entry, args.iteration, evidence_text
         )
@@ -10608,6 +10681,13 @@ def main():
         print(json.dumps({
             "ok": False,
             "reason_code": "unsafe-legacy-specialist-record",
+            "field_path": error.field_path,
+        }, ensure_ascii=False))
+        raise SystemExit(2)
+    except SpecialistEvidenceInputError as error:
+        print(json.dumps({
+            "ok": False,
+            "reason_code": error.reason_code,
             "field_path": error.field_path,
         }, ensure_ascii=False))
         raise SystemExit(2)

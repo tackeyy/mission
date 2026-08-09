@@ -254,6 +254,11 @@ def test_public_invocation_schema_accepts_safe_legacy_bare_command():
         "finding path=/tmp/private.txt",
         r"finding path=C:\\Users\\portable-user\\private.txt",
         "finding path=~/private.txt",
+        r"finding path=\\server\share\private.txt",
+        r"finding path=\\?\C:\private\file.txt",
+        r"finding path=\\.\PhysicalDrive0",
+        r"finding path=\Device\HarddiskVolume1\private.txt",
+        "finding path=//server/share/private.txt",
     ],
 )
 @pytest.mark.parametrize(
@@ -3025,7 +3030,13 @@ def test_portable_path_command_remains_invokable_and_accounted(
     assert state["specialist_invocations"][-1]["status"] == "completed"
 
 
-@pytest.mark.parametrize("path_kind", ["local", "linux-home", "linux-root", "windows"])
+@pytest.mark.parametrize(
+    "path_kind",
+    [
+        "local", "linux-home", "linux-root", "windows", "windows-unc",
+        "windows-extended", "windows-device", "windows-rooted",
+    ],
+)
 def test_command_provider_evidence_redacts_process_local_paths(
     path_kind, run_cli, tmp_path
 ):
@@ -3036,6 +3047,10 @@ def test_command_provider_evidence_redacts_process_local_paths(
         "linux-home": "/home/neutral-user/private-provider-output.txt",
         "linux-root": "/root/private-provider-output.txt",
         "windows": r"C:\Users\neutral-user\private-provider-output.txt",
+        "windows-unc": r"\\server\share\private-provider-output.txt",
+        "windows-extended": r"\\?\C:\private\provider-output.txt",
+        "windows-device": r"\\.\PhysicalDrive0",
+        "windows-rooted": r"\Device\HarddiskVolume1\private-provider-output.txt",
     }[path_kind]
     command = command_dir / "portable-path-reporter"
     command.write_text(
