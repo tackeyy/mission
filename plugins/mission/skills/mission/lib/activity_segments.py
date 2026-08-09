@@ -334,6 +334,7 @@ def start_activity_segment(
     *,
     detail: str | None = None,
     resume: bool = False,
+    origin: str | None = None,
 ) -> bool:
     validate_activity(kind, reason)
     _reject_state_clock_rollback(state, at)
@@ -347,6 +348,7 @@ def start_activity_segment(
             and current.get("reason") == reason
             and current.get("phase") == (state.get("phase") or "unknown")
             and sanitize_activity_detail(current.get("detail")) == clean_detail
+            and (origin is None or current.get("origin") == origin)
         )
         # A normal duplicate start is idempotent.  On resume, however, equal
         # labels can still describe a stale pre-crash segment.  Close that
@@ -362,6 +364,8 @@ def start_activity_segment(
     }
     if clean_detail:
         entry["detail"] = clean_detail
+    if origin:
+        entry["origin"] = origin
     state["activity_current"] = entry
     state.setdefault("activity_segments", [])
     _rollup(state)
@@ -375,7 +379,18 @@ def start_phase_default_activity(state: dict[str, Any], at: str) -> bool:
     if default is None:
         return False
     kind, reason = default
-    return start_activity_segment(state, kind, reason, at)
+    return start_activity_segment(state, kind, reason, at, origin="phase-default")
+
+
+def is_manual_phase_override(current: Any, phase: str | None) -> bool:
+    """Return whether an operator explicitly retained the phase default activity."""
+    default = PHASE_ACTIVITY_DEFAULTS.get(phase)
+    return bool(
+        isinstance(current, dict)
+        and default is not None
+        and current.get("origin") == "manual"
+        and (current.get("kind"), current.get("reason")) == default
+    )
 
 
 def record_activity_event(state: dict[str, Any], event: str, at: str) -> bool:
@@ -419,6 +434,7 @@ def transition_activity_phase(
             "reason": preserved.get("reason"),
             "started_at": at,
             "detail": sanitize_activity_detail(preserved.get("detail")),
+            "origin": preserved.get("origin"),
         }.items()
         if value is not None
     }

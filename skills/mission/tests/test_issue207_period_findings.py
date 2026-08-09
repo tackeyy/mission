@@ -310,7 +310,7 @@ def test_checkpoint_and_unselected_provenance_use_updated_at_cutoff(tmp_path: Pa
 def test_all_finding_specs_are_registry_wired_and_priority_sorted(tmp_path: Path):
     audit = _load_audit_module()
 
-    assert len(audit.FINDING_SPECS) == 20
+    assert len(audit.FINDING_SPECS) == 21
     assert all(spec.source_key for spec in audit.FINDING_SPECS.values())
     assert all(spec.source_kind for spec in audit.FINDING_SPECS.values())
     assert all(spec.item_summary for spec in audit.FINDING_SPECS.values())
@@ -370,15 +370,26 @@ def test_every_registry_spec_reaches_attach_rows_and_period_schema():
                 item["priority"] = "P1"
             stats[spec.source_key] = [item]
 
+    expected = set(audit.FINDING_SPECS)
     cutoff = datetime(2026, 7, 20, tzinfo=timezone.utc)
+    # First prove the instrumentation finding itself is wired.  Slow-run and
+    # phase-attribution diagnosis intentionally waits for usable activity
+    # coverage, so use a coverage-sufficient copy for the all-spec contract.
+    audit.attach_finding_model(stats, 0.95, cutoff)
+    instrumented_codes = {item["code"] for item in stats["all_findings"]}
+    assert instrumented_codes == expected - {
+        "slow-runs", "coarse-phase-attribution"
+    }
+    stats["instrumentation_gaps"] = []
     audit.attach_finding_model(stats, 0.95, cutoff)
     rows = audit.finding_rows(stats, 0.95)
 
-    expected = set(audit.FINDING_SPECS)
-    assert {item["code"] for item in stats["all_findings"]} == expected
-    assert {item["code"] for item in stats["current_findings"]} == expected
+    coverage_sufficient_codes = {item["code"] for item in stats["all_findings"]}
+    assert coverage_sufficient_codes == expected - {"instrumentation-gap"}
+    assert instrumented_codes | coverage_sufficient_codes == expected
+    assert {item["code"] for item in stats["current_findings"]} == coverage_sufficient_codes
     assert stats["historical_findings"] == []
-    assert {code for priority, code, summary in rows if priority in {"P0", "P1", "P2"}} == expected
+    assert {code for priority, code, summary in rows if priority in {"P0", "P1", "P2"}} == coverage_sufficient_codes
     for item in stats["all_findings"]:
         assert item["period"] == "current"
         assert item["priority"] in {"P0", "P1", "P2"}
@@ -410,6 +421,7 @@ def test_all_registry_aggregate_summaries_preserve_specific_meaning():
         "halted-runs": "2 current halted sessions need root-cause review",
         "stale-active-no-score": "2 active no-score sessions exceeded stale threshold",
         "slow-runs": "2 current sessions exceeded slow threshold",
+        "instrumentation-gap": "2 activity coverage gap requires instrumentation before speed diagnosis",
         "coarse-phase-attribution": "2 slow sessions attribute most elapsed time to planning",
         "low-score-pass": "2 current pass sessions scored below 4.3",
         "specialist-invocation-gap": "2 current sessions selected specialists without terminal invocation logs",

@@ -18,6 +18,7 @@ def test_init_opens_the_planning_activity_by_default(run_cli, tmp_path):
     current = _read(tmp_path)["activity_current"]
     assert current == {
         "kind": "active",
+        "origin": "phase-default",
         "phase": "planning",
         "reason": "planning",
         "started_at": current["started_at"],

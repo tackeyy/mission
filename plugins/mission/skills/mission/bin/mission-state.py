@@ -79,6 +79,7 @@ from activity_segments import (  # noqa: E402
     close_activity_for_resume,
     close_activity_for_terminal,
     end_activity_segment,
+    is_manual_phase_override,
     record_activity_event,
     sanitize_activity_detail,
     start_activity_segment,
@@ -4855,6 +4856,7 @@ def cmd_activity_start(args):
                 at,
                 detail=args.detail,
                 resume=args.resume,
+                origin="manual",
             )
             if changed:
                 data["updated_at"] = at
@@ -5059,7 +5061,14 @@ def cmd_advance(args):
             ):
                 end_activity_segment(data, at)
             _transition_phase(data, new_phase, at)
-            start_activity_segment(data, kind, reason, at, detail=args.detail)
+            start_activity_segment(
+                data,
+                kind,
+                reason,
+                at,
+                detail=args.detail,
+                origin="phase-default" if raw is None else None,
+            )
             data["updated_at"] = at
             backup_state(sf)
             atomic_write_json(sf, stamp_metadata(data, cwd))
@@ -5875,17 +5884,19 @@ def cmd_set(args):
             if key == "phase":
                 normalized_phase = _normalize_set_phase_value(str(parsed_value))
                 try:
+                    old_phase = data.get("phase")
+                    current = data.get("activity_current")
                     if (
                         normalized_phase not in {"done", "halted"}
-                        and data.get("phase") != normalized_phase
-                        and isinstance(data.get("activity_current"), dict)
+                        and old_phase != normalized_phase
+                        and not is_manual_phase_override(current, old_phase)
                     ):
                         end_activity_segment(data, now)
                     _transition_phase(data, normalized_phase, now)
                 except ArtifactContractError as exc:
                     print(f"ERROR: {exc}", file=sys.stderr)
                     sys.exit(2)
-                if normalized_phase not in {"done", "halted"}:
+                if normalized_phase not in {"done", "halted"} and not data.get("activity_current"):
                     try:
                         start_phase_default_activity(data, now)
                     except ActivityTimingError:

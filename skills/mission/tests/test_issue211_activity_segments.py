@@ -370,6 +370,7 @@ def test_phase_transition_splits_open_activity_atomically_and_terminal_closes_it
     assert middle["activity_segments"][0]["duration_sec"] == 600.0
     assert middle["activity_current"] == {
         "kind": "reviewer-wait",
+        "origin": "phase-default",
         "phase": "reviewing",
         "reason": "review-response",
         "started_at": "2026-07-21T00:10:00Z",
