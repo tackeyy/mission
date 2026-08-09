@@ -72,6 +72,42 @@ def test_same_mission_reinit_opens_missing_default_once_without_zero_length_dupl
     assert len(repeated["activity_segments"]) == closed_count
 
 
+def test_same_mission_reinit_drops_unobserved_open_boundary_without_zero_segment(
+    run_cli, tmp_path
+):
+    """A resume gap beginning at the open boundary is unobserved, not a zero sample."""
+    started_at = "2027-08-10T00:00:00Z"
+    resumed_at = "2027-08-10T00:10:00Z"
+    run_cli(
+        "init", "automatic activity", cwd=tmp_path, check=True,
+        env_extra={"MISSION_STATE_NOW": started_at},
+    )
+
+    run_cli(
+        "init", "automatic activity", cwd=tmp_path, check=True,
+        env_extra={"MISSION_STATE_NOW": resumed_at},
+    )
+    resumed = _read(tmp_path)
+    assert all(segment["duration_sec"] > 0 for segment in resumed["activity_segments"])
+    assert resumed["activity_unobserved_gap_sec"] == 600.0
+    assert resumed["activity_current"] == {
+        "kind": "active",
+        "origin": "phase-default",
+        "phase": "planning",
+        "reason": "planning",
+        "started_at": resumed_at,
+    }
+    history_count = len(resumed["activity_segments"])
+
+    run_cli(
+        "init", "automatic activity", cwd=tmp_path, check=True,
+        env_extra={"MISSION_STATE_NOW": resumed_at},
+    )
+    repeated = _read(tmp_path)
+    assert repeated["activity_current"] == resumed["activity_current"]
+    assert len(repeated["activity_segments"]) == history_count
+
+
 def test_aggregate_reviews_transitions_reviewing_to_scoring_activity(run_cli, tmp_path):
     run_cli("init", "automatic activity", cwd=tmp_path, check=True)
     run_cli(

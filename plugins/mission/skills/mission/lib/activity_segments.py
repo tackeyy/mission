@@ -297,7 +297,14 @@ def close_activity_for_resume(state: dict[str, Any], at: str) -> bool:
         return False
     if not isinstance(current, dict):
         raise ActivityTimingError("activity current is malformed")
-    return end_activity_segment(state, _resume_boundary(state, at))
+    boundary = _resume_boundary(state, at)
+    # A resume boundary equal to the open start means all elapsed time is an
+    # explicitly recorded unobserved gap.  Do not turn that gap into a
+    # zero-duration sample; a caller may safely open the phase default next.
+    if _parse_at(boundary) == _parse_at(current.get("started_at")):
+        state["activity_current"] = None
+        return True
+    return end_activity_segment(state, boundary)
 
 
 def close_activity_for_terminal(
