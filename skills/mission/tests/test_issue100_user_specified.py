@@ -39,7 +39,8 @@ def test_user_specified_skips_ask_user_on_high_risk(run_cli, tmp_path):
     assert d["prompted_user"] is False
     selected = data["specialists_selected"]
     assert [s["skill"] for s in selected] == ["frontend-provider"]
-    assert selected[0]["selection_source"] == "user-specified"
+    assert selected[0]["selection_source"] == "user-instruction"
+    assert selected[0]["selection_source_raw"] == "user-specified"
 
 
 def test_user_specified_multiple_all_selected(run_cli, tmp_path):
@@ -47,7 +48,8 @@ def test_user_specified_multiple_all_selected(run_cli, tmp_path):
         run_cli, tmp_path, "--user-specified", "frontend-provider,visual-quality-provider"))
     skills = sorted(s["skill"] for s in data["specialists_selected"])
     assert skills == ["frontend-provider", "visual-quality-provider"]
-    assert all(s["selection_source"] == "user-specified" for s in data["specialists_selected"])
+    assert all(s["selection_source"] == "user-instruction" for s in data["specialists_selected"])
+    assert all(s["selection_source_raw"] == "user-specified" for s in data["specialists_selected"])
 
 
 def test_user_specified_unknown_skill_falls_back_to_ask_user(run_cli, tmp_path):
@@ -129,5 +131,6 @@ def test_user_specified_record_state_unblocks_log_invocation(state_dir, run_cli)
     )
     assert r2.returncode == 0, f"stderr: {r2.stderr}"
     state = json.loads((state_dir / "sessions" / "test.json").read_text())
-    assert state["specialists_selected"][0]["selection_source"] == "user-specified"
+    assert state["specialists_selected"][0]["selection_source"] == "user-instruction"
+    assert state["specialists_selected"][0]["selection_source_raw"] == "user-specified"
     assert state["specialist_invocations"][0]["skill"] == "frontend-provider"

@@ -86,6 +86,14 @@ from activity_segments import (  # noqa: E402
 )
 from worktree_archive import validate_worktree_archive_bundle  # noqa: E402
 from state_snapshot import SnapshotError, consume_snapshot_document  # noqa: E402
+from provider_eligibility import (  # noqa: E402
+    RegistryContractError,
+    evaluate_provider_eligibility,
+    normalize_selection_source,
+    parse_v2_registry_json,
+    registry_entry_digest,
+    value_digest as provider_value_digest,
+)
 
 SCHEMA_VERSION = 3  # v3: role-aware terminal_outcome を terminal writer が明示記録
 GOAL_DISPATCH_MODES = {"inline", "host-native"}
@@ -2391,11 +2399,115 @@ def _load_registry_candidates(path: Path, source: str) -> list[dict]:
             continue
         candidate = dict(item)
         candidate.setdefault("source", source)
+        candidate["registry_version"] = 1
+        if "activation" in candidate or "disabled" in candidate:
+            candidate["_registry_error"] = "mixed-registry-version"
+        candidate["registry_entry_digest"] = registry_entry_digest(candidate)
         candidates.append(candidate)
     return candidates
 
 
-def _discover_specialist_registry_candidates(args) -> list[dict]:
+def _load_v2_registry_candidates(path: Path, source: str) -> tuple[list[dict], list[dict]]:
+    if not path.exists():
+        return [], []
+    try:
+        items = parse_v2_registry_json(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, RegistryContractError) as error:
+        return [], [{
+            "provider_id": "<registry>",
+            "source": source,
+            "reason_code": getattr(error, "code", "invalid-registry-contract"),
+            "detail": str(error),
+        }]
+    candidates = []
+    for item in items:
+        candidate = dict(item)
+        candidate["source"] = source
+        candidate["registry_version"] = 2
+        candidate["registry_entry_digest"] = registry_entry_digest(candidate)
+        candidates.append(candidate)
+    return candidates, []
+
+
+def _registry_input_record(
+    path: Path, source: str, kind: str, version: int, tier: int, order: int
+) -> dict:
+    canonical = str(path.expanduser().resolve(strict=False))
+    record = {
+        "kind": kind,
+        "source": source,
+        "canonical_identity": canonical,
+        "version": version,
+        "precedence_tier": tier,
+        "order": order,
+        "status": "missing",
+        "content_digest": None,
+    }
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return record
+    record["status"] = "present"
+    record["content_digest"] = "sha256:" + hashlib.sha256(raw).hexdigest()
+    return record
+
+
+def _resolve_registry_precedence(
+    candidates: list[dict], diagnostics: list[dict]
+) -> tuple[list[dict], list[dict]]:
+    ordered = sorted(
+        candidates,
+        key=lambda item: (
+            int(item.get("_precedence_tier", 99)),
+            int(item.get("_input_order", 0)),
+            str(item.get("_input_identity") or ""),
+            int(item.get("_candidate_order", 0)),
+        ),
+    )
+    conflict_groups: dict[tuple, list[dict]] = {}
+    for item in ordered:
+        identity = _provider_id(item)
+        tier = int(item.get("_precedence_tier", 99))
+        explicit_subrank = int(item.get("_input_order", 0)) if tier in {0, 1} else 0
+        conflict_groups.setdefault((tier, explicit_subrank, identity), []).append(item)
+
+    conflicted = {
+        key for key, items in conflict_groups.items()
+        if key[2] and len(items) > 1
+    }
+    resolved: list[dict] = []
+    decided: set[str] = set()
+    for item in ordered:
+        identity = _provider_id(item)
+        if not identity or identity in decided:
+            continue
+        tier = int(item.get("_precedence_tier", 99))
+        explicit_subrank = int(item.get("_input_order", 0)) if tier in {0, 1} else 0
+        group_key = (tier, explicit_subrank, identity)
+        decided.add(identity)
+        if group_key in conflicted:
+            diagnostics.append({
+                "provider_id": identity,
+                "source": item.get("source"),
+                "reason_code": "same-tier-identity-conflict",
+                "registry_entry_digest": item.get("registry_entry_digest"),
+            })
+            resolved.append({**item, "enabled": False, "_projection_state": "conflict"})
+            continue
+        if item.get("disabled") is True or item.get("enabled") is False:
+            diagnostics.append({
+                "provider_id": identity,
+                "source": item.get("source"),
+                "reason_code": "provider-disabled",
+                "registry_entry_digest": item.get("registry_entry_digest"),
+            })
+            resolved.append({**item, "enabled": False, "_projection_state": "disabled"})
+            continue
+        resolved.append(item)
+    return resolved, diagnostics
+
+
+def _discover_specialist_registry_candidates(args) -> tuple[list[dict], list[dict], dict]:
     """Discover registry candidates in deterministic precedence order.
 
     Explicit CLI registries have the highest precedence, then project, user, and
@@ -2403,22 +2515,105 @@ def _discover_specialist_registry_candidates(args) -> list[dict]:
     registry-level `enabled: false` entries can suppress lower-precedence defaults.
     """
     candidates: list[dict] = []
-    for path in _registry_arg_paths(getattr(args, "registry", None)):
-        candidates.extend(_load_registry_candidates(path, f"registry:{path}"))
+    diagnostics: list[dict] = []
+    inputs: list[dict] = []
+
+    def register(path: Path, source: str, kind: str, version: int, tier: int, order: int):
+        record = _registry_input_record(path, source, kind, version, tier, order)
+        inputs.append(record)
+        if record["status"] != "present":
+            return
+        if version == 2:
+            loaded, invalid = _load_v2_registry_candidates(path, source)
+        else:
+            loaded, invalid = _load_registry_candidates(path, source), []
+        if invalid:
+            record["status"] = "invalid"
+            diagnostics.extend(invalid)
+        for candidate_order, candidate in enumerate(loaded):
+            candidate["_precedence_tier"] = tier
+            candidate["_input_order"] = order
+            candidate["_input_identity"] = record["canonical_identity"]
+            candidate["_candidate_order"] = candidate_order
+            candidates.append(candidate)
+
+    explicit: list[tuple[Path, int, int]] = []
+    for order, path in enumerate(_registry_arg_paths(getattr(args, "registry", None))):
+        try:
+            raw = path.read_text(encoding="utf-8") if path.exists() else ""
+        except (OSError, UnicodeError):
+            raw = ""
+        version = 2 if "mission-specialist-registry/" in raw or "specialists_v2" in raw else 1
+        explicit.append((path, version, order))
+    for path, version, order in sorted(explicit, key=lambda item: (-item[1], item[2])):
+        register(path, f"registry:{path}", "explicit", version, 0 if version == 2 else 1, order)
+
+    project_v2 = Path.cwd() / ".mission" / "specialists-v2.yml"
+    register(project_v2, "project:.mission/specialists-v2.yml", "project", 2, 2, 0)
 
     project_registry = Path.cwd() / ".mission" / "specialists.yml"
-    candidates.extend(_load_registry_candidates(project_registry, "project:.mission/specialists.yml"))
+    register(project_registry, "project:.mission/specialists.yml", "project", 1, 3, 0)
 
     if not getattr(args, "no_default_skill_roots", False):
+        user_v2 = Path.home() / ".config" / "mission" / "specialists-v2.yml"
+        register(user_v2, "user:~/.config/mission/specialists-v2.yml", "user", 2, 4, 0)
         user_registry = Path.home() / ".config" / "mission" / "specialists.yml"
-        candidates.extend(_load_registry_candidates(user_registry, "user:~/.config/mission/specialists.yml"))
+        register(user_registry, "user:~/.config/mission/specialists.yml", "user", 1, 5, 0)
 
-    for root in _skill_roots(args):
+    for root_order, root in enumerate(_skill_roots(args)):
         if not root.is_dir():
             continue
-        for manifest in sorted(root.glob("*/mission-specialist.yml")):
-            candidates.extend(_load_registry_candidates(manifest, f"skill-manifest:{manifest}"))
-    return candidates
+        v2_manifests = sorted(root.glob("*/mission-specialist-v2.yml"))
+        v1_manifests = sorted(root.glob("*/mission-specialist.yml"))
+        inventory = [
+            {
+                "identity": str(path.resolve(strict=False)),
+                "digest": _registry_input_record(path, str(path), "manifest", version, tier, index)["content_digest"],
+            }
+            for version, tier, paths in ((2, 6, v2_manifests), (1, 7, v1_manifests))
+            for index, path in enumerate(paths)
+        ]
+        inputs.append({
+            "kind": "skill-root",
+            "source": f"skill-root:{root}",
+            "canonical_identity": str(root.resolve(strict=False)),
+            "version": 0,
+            "precedence_tier": 6,
+            "order": root_order,
+            "status": "present",
+            "content_digest": provider_value_digest(inventory),
+        })
+        for manifest_order, manifest in enumerate(v2_manifests):
+            register(manifest, f"skill-manifest:{manifest}", "installed", 2, 6, manifest_order)
+        for manifest_order, manifest in enumerate(v1_manifests):
+            register(manifest, f"skill-manifest:{manifest}", "installed", 1, 7, manifest_order)
+
+    resolved, diagnostics = _resolve_registry_precedence(candidates, diagnostics)
+    effective = [
+        {
+            "provider_id": _provider_id(candidate),
+            "source": candidate.get("source"),
+            "registry_version": candidate.get("registry_version"),
+            "registry_entry_digest": candidate.get("registry_entry_digest"),
+        }
+        for candidate in resolved
+    ]
+    projection = {
+        "schema": "mission-specialist-registry-projection/1",
+        "ordered_inputs": sorted(
+            inputs,
+            key=lambda item: (
+                int(item.get("precedence_tier", 99)),
+                int(item.get("order", 0)),
+                str(item.get("canonical_identity") or ""),
+            ),
+        ),
+        "effective_entries": effective,
+        "effective_projection_digest": provider_value_digest(effective),
+    }
+    for candidate in resolved:
+        candidate["registry_projection_digest"] = projection["effective_projection_digest"]
+    return resolved, diagnostics, projection
 
 
 def _skill_roots(args) -> list[Path]:
@@ -2562,15 +2757,6 @@ def _string_map(value) -> dict[str, str]:
     return {str(k): str(v) for k, v in value.items() if k is not None and v is not None}
 
 
-def _complexity_at_least(current: str | None, minimum: str | None) -> bool:
-    if not minimum:
-        return True
-    order = {"Simple": 1, "Standard": 2, "Complex": 3, "Critical": 4}
-    if not current:
-        return False
-    return order.get(str(current), 0) >= order.get(str(minimum), 0)
-
-
 def _command_is_available(command: str | None) -> bool:
     if not command:
         return False
@@ -2612,7 +2798,12 @@ def _normalize_candidate(candidate: dict, source: str) -> dict:
     command = candidate.get("command")
     skill = candidate.get("skill") or candidate.get("name") or candidate.get("role")
     role = candidate.get("role") or skill
-    phases = candidate.get("phases") or ["planning", "review"]
+    raw_phases = candidate.get("phases")
+    phases = (
+        ([] if candidate.get("registry_version") == 2 else ["planning", "review"])
+        if raw_phases is None
+        else raw_phases
+    )
     if isinstance(phases, str):
         phases = [phases]
     args = _as_list(candidate.get("args"))
@@ -2642,11 +2833,17 @@ def _normalize_candidate(candidate: dict, source: str) -> dict:
         "unavailable": candidate.get("unavailable", "continue"),
         "confirm": bool(candidate.get("confirm", False)),
         "auto_use": auto_use,
+        "activation": candidate.get("activation"),
         "risk": risk,
         "result_contract": result_contract,
         "bounded_use": bounded_use,
         "bounded_purpose_required": bool(candidate.get("bounded_purpose_required", bounded_use)),
         "install_hint": bool(candidate.get("install_hint", True)),
+        "provider_id": _provider_id(candidate),
+        "registry_version": candidate.get("registry_version", 1),
+        "registry_entry_digest": candidate.get("registry_entry_digest") or registry_entry_digest(candidate),
+        "registry_projection_digest": candidate.get("registry_projection_digest"),
+        "_registry_error": candidate.get("_registry_error"),
     }
 
 
@@ -2687,25 +2884,67 @@ def _load_provider_consent(path_text: str | None) -> set[str]:
 
 def rank_specialist_candidates(task_profile: dict, registry_candidates: list[dict],
                                installed: dict[str, dict], first_use: set[str] | None = None,
-                               complexity: str | None = None, consented: set[str] | None = None) -> list[dict]:
+                               complexity: str | None = None, consented: set[str] | None = None,
+                               user_specified: list[str] | None = None,
+                               mission_context: dict | None = None) -> tuple[list[dict], list[dict]]:
     first_use = first_use or set()
     consented = consented or set()
     profiles = [task_profile.get("primary"), *(task_profile.get("secondary") or [])]
     ranked = []
+    ineligible = []
+    named = set(user_specified or [])
+    mission_context = mission_context or {
+        "complexity": complexity,
+        "task_profile": task_profile,
+        "iteration": 1,
+        "previous_iteration_passed": None,
+    }
     for raw in _enabled_registry_candidates(registry_candidates):
         c = _normalize_candidate(raw, raw.get("source", "registry") if isinstance(raw, dict) else "registry")
         skill = c.get("skill")
         if not skill:
             continue
-        if not _complexity_at_least(complexity, c.get("auto_use", {}).get("min_complexity")):
-            continue
         overlap = [p for p in c.get("task_profiles", []) if p in profiles]
-        if not overlap:
-            continue
         if c.get("kind") == "command":
             installed_info = {"available": True} if _command_is_available(c.get("command")) else None
         else:
             installed_info = installed.get(skill)
+        c["available"] = bool(installed_info)
+        raw_source = "user-specified" if skill in named else "automatic"
+        requested_phase = (
+            "planning"
+            if "complexity" in ((c.get("activation") or {}).get("auto_select_if") or [])
+            else None
+        )
+        eligibility = evaluate_provider_eligibility(
+            c,
+            mission_context,
+            requested_phase=requested_phase,
+            selection_source=raw_source,
+        )
+        c.update({
+            "eligibility_reason": eligibility["reason_code"],
+            "matched_conditions": eligibility["matched_conditions"],
+            "context_digest": eligibility["context_digest"],
+            "activation_digest": eligibility["activation_digest"],
+            "normalized_activation": eligibility["normalized_activation"],
+        })
+        if not eligibility["eligible"] and eligibility["reason_code"] != "provider-unavailable":
+            ineligible.append({
+                "provider_id": c["provider_id"],
+                "source": c["source"],
+                "registry_entry_digest": c["registry_entry_digest"],
+                "selection_source": normalize_selection_source(raw_source)["selection_source"],
+                "selection_source_raw": raw_source,
+                "requested_phase": requested_phase,
+                "current_complexity": complexity,
+                "minimum_complexity": eligibility["normalized_activation"].get("min_complexity"),
+                "reason_code": eligibility["reason_code"],
+                "context_digest": eligibility["context_digest"],
+                "activation_digest": eligibility["activation_digest"],
+                "registry_projection_digest": c.get("registry_projection_digest"),
+            })
+            continue
         base = 0.45 + (0.25 if task_profile.get("primary") in overlap else 0.1)
         base += min(0.2, 0.05 * len(overlap))
         if installed_info:
@@ -2722,10 +2961,14 @@ def rank_specialist_candidates(task_profile: dict, registry_candidates: list[dic
             "available": bool(installed_info),
             "status": "available" if installed_info else "missing",
             "first_use": skill in first_use or provider_id in first_use or needs_first_use,
-            "reason": f"{', '.join(overlap)} profile match",
+            "reason": (
+                "complexity activation match"
+                if "complexity" in eligibility["matched_conditions"]
+                else f"{', '.join(overlap)} profile match"
+            ),
         })
     ranked.sort(key=lambda c: (-c["score"], _candidate_source_rank(c), c["skill"]))
-    return ranked
+    return ranked, ineligible
 
 
 def decide_specialists(task_profile: dict, candidates: list[dict],
@@ -2815,7 +3058,10 @@ def decide_specialists(task_profile: dict, candidates: list[dict],
             "reason": f"tie-break: auto-selected {top['skill']} over {second['skill']} (score delta <= 0.05)",
             "prompted_user": False,
         }
-    if task_profile.get("confidence", 0) < 0.5 or top.get("score", 0) < 0.45:
+    if (
+        "complexity" not in (top.get("matched_conditions") or [])
+        and (task_profile.get("confidence", 0) < 0.5 or top.get("score", 0) < 0.45)
+    ):
         return {
             "policy": "fallback",
             "action": "continue-core",
@@ -2835,13 +3081,21 @@ def _selection_from_decision(candidates: list[dict], decision: dict) -> tuple[li
     if decision.get("policy") == "user-specified":
         names = set(decision.get("user_specified") or [])
         selected = [
-            {**c, "status": "selected", "selection_source": "user-specified"}
+            {
+                **c,
+                "status": "selected",
+                **normalize_selection_source("user-specified"),
+            }
             for c in candidates
             if str(c.get("skill") or "") in names and c.get("installed")
         ]
         return selected, unavailable
     if decision.get("policy") == "auto" and candidates:
-        return [{**candidates[0], "status": "selected"}], unavailable
+        return [{
+            **candidates[0],
+            "status": "selected",
+            **normalize_selection_source("automatic"),
+        }], unavailable
     return [], unavailable
 
 
@@ -2886,20 +3140,43 @@ def cmd_specialists(args):
     task = getattr(args, "task", "") or ""
     files = _split_csv(getattr(args, "files", None))
     installed = _discover_installed_skills(args)
-    registry_candidates = _discover_specialist_registry_candidates(args)
+    registry_candidates, registry_ineligible, registry_projection = _discover_specialist_registry_candidates(args)
     task_profile = classify_task_profile(task, files)
-    candidates = rank_specialist_candidates(
+    state_context = None
+    try:
+        state_path = resolve_state_file(Path.cwd())
+        if state_path.exists():
+            state_context = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, RuntimeError):
+        state_context = None
+    effective_complexity = getattr(args, "complexity", None)
+    if effective_complexity is None and isinstance(state_context, dict):
+        effective_complexity = state_context.get("complexity")
+    iteration = state_context.get("iteration", 1) if isinstance(state_context, dict) else 1
+    mission_context = {
+        "complexity": effective_complexity,
+        "task_profile": task_profile,
+        "iteration": iteration if type(iteration) is int and iteration >= 1 else 1,
+        "previous_iteration_passed": (
+            bool(state_context.get("passes"))
+            if isinstance(state_context, dict) and type(iteration) is int and iteration >= 2
+            else None
+        ),
+    }
+    candidates, eligibility_ineligible = rank_specialist_candidates(
         task_profile,
         registry_candidates,
         installed,
         set(_split_csv(getattr(args, "first_use", None))),
-        getattr(args, "complexity", None),
+        effective_complexity,
         _load_provider_consent(getattr(args, "consent_file", None)),
+        _split_csv(getattr(args, "user_specified", None)),
+        mission_context,
     )
     decision = decide_specialists(task_profile, candidates,
                                   _split_csv(getattr(args, "user_specified", None)))
     selected, unavailable = _selection_from_decision(candidates, decision)
-    phase_plan = build_phase_plan(candidates, getattr(args, "complexity", None))
+    phase_plan = build_phase_plan(candidates, effective_complexity)
     result = {
         "ok": True,
         "task_profile": task_profile,
@@ -2907,6 +3184,8 @@ def cmd_specialists(args):
         "specialists_candidates": candidates,
         "specialists_selected": selected,
         "specialists_unavailable": unavailable,
+        "specialists_ineligible": [*registry_ineligible, *eligibility_ineligible],
+        "specialist_registry_projection": registry_projection,
         "specialists_decision": decision,
         "specialists_phase_plan": phase_plan,
     }
@@ -2923,6 +3202,8 @@ def cmd_specialists(args):
             data["specialists_candidates"] = candidates
             data["specialists_selected"] = selected
             data["specialists_unavailable"] = unavailable
+            data["specialists_ineligible"] = [*registry_ineligible, *eligibility_ineligible]
+            data["specialist_registry_projection"] = registry_projection
             data["specialists_decision"] = decision
             data["specialists_phase_plan"] = phase_plan
             data["specialists_mode"] = "interactive" if decision.get("prompted_user") else "auto"
@@ -9110,7 +9391,7 @@ def _build_parser():
     p_rec.add_argument("--first-use", default=None, help="初回確認扱いにする skill 名カンマ区切り")
     p_rec.add_argument("--consent-file", default=None,
                        help="first-use provider consent allowlist JSON (default: ~/.config/mission/provider-consent.json)")
-    p_rec.add_argument("--complexity", default=None, choices=["Simple", "Standard", "Complex", "Critical"],
+    p_rec.add_argument("--complexity", default=None, choices=["Simple", "Standard", "Complex", "Critical", "Unknown"],
                        help="auto_use.min_complexity 判定用の mission complexity")
     p_rec.add_argument("--record-state", action="store_true", help="現在の mission state に推薦結果を記録")
     p_rec.add_argument("--user-specified", default=None, dest="user_specified",
