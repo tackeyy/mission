@@ -308,10 +308,39 @@ def test_reinit_and_refresh_close_open_segment_once_without_losing_history(
 
     assert first.returncode == second.returncode == 0
     state = json.loads(path.read_text())
-    assert state["activity_current"] is None
+    if command == "refresh-pid":
+        assert state["activity_current"]["reason"] == "implementation"
+    else:
+        assert state["activity_current"]["reason"] == "implementation"
+        assert state["activity_current"]["origin"] == "phase-default"
     assert state["activity_rollup"]["observed_total_sec"] == 300.0
     assert state["activity_rollup"]["closed_segment_count"] == 1
     assert len(state["activity_segments"]) == 1
+
+
+@pytest.mark.parametrize("command", ["init", "refresh-pid"])
+@pytest.mark.parametrize(
+    "current",
+    [
+        {"phase": "executing", "reason": "work", "started_at": "2026-07-21T00:00:00Z"},
+        {"kind": "unknown", "phase": "executing", "reason": "work", "started_at": "2026-07-21T00:00:00Z"},
+        {"kind": "active", "phase": "executing", "started_at": "2026-07-21T00:00:00Z"},
+        {"kind": "active", "phase": "executing", "reason": "user-approval", "started_at": "2026-07-21T00:00:00Z"},
+    ],
+)
+def test_resume_rejects_malformed_zero_boundary_without_mutating_state(
+    tmp_path, run_cli, command, current
+):
+    path = _write_state(tmp_path, activity_current=current, activity_segments=[])
+    before = path.read_bytes()
+    args = ("init", TASK_TEXT) if command == "init" else ("refresh-pid",)
+
+    result = run_cli(
+        *args, cwd=tmp_path, env_extra={"MISSION_STATE_NOW": "2026-07-21T00:10:00Z"}
+    )
+
+    assert result.returncode != 0
+    assert path.read_bytes() == before
 
 
 def test_same_mission_reinit_accrues_and_preserves_the_open_phase(tmp_path, run_cli):
@@ -367,6 +396,7 @@ def test_phase_transition_splits_open_activity_atomically_and_terminal_closes_it
     assert middle["activity_segments"][0]["duration_sec"] == 600.0
     assert middle["activity_current"] == {
         "kind": "active",
+        "origin": "manual",
         "phase": "reviewing",
         "reason": "work",
         "started_at": "2026-07-21T00:10:00Z",
