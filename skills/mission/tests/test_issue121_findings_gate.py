@@ -111,7 +111,7 @@ def test_mark_passes_passes_when_findings_evidence_matches_open_high_zero(state_
     assert read_state(state_dir)["passes"] is True
 
 
-def test_mark_passes_legacy_entry_warns_and_uses_stored_open_high(state_dir, run_cli, read_state):
+def test_active_legacy_entry_without_provenance_cannot_mark_passes(state_dir, run_cli, read_state):
     session = state_dir / "sessions" / "test.json"
     document = json.loads(session.read_text())
     document["score_history"] = [{"iteration": 1, "composite": 4.25, "min_item": 4.0,
@@ -120,9 +120,9 @@ def test_mark_passes_legacy_entry_warns_and_uses_stored_open_high(state_dir, run
 
     r = run_cli("mark-passes", cwd=state_dir.parent)
 
-    assert r.returncode == 0, r.stderr
-    assert "legacy score entry" in r.stderr
-    assert read_state(state_dir)["passes"] is True
+    assert r.returncode == 2
+    assert "provenance" in r.stderr
+    assert read_state(state_dir)["passes"] is False
 
 
 def test_mark_passes_force_bypasses_missing_findings_evidence(state_dir, run_cli, read_state, tmp_path):

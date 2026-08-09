@@ -81,6 +81,35 @@ def test_mark_passes_rejects_tampered_review_evidence(state_dir, run_cli, read_s
     assert "digest mismatch" in result.stderr
 
 
+def test_mark_passes_rejects_score_values_that_disagree_with_aggregate_derivation(state_dir, run_cli, read_state, tmp_path):
+    """A content-addressed aggregate must bind the values the gate consumes."""
+    state = json.loads((state_dir / "sessions" / "test.json").read_text())
+    state["schema_version"] = 4
+    (state_dir / "sessions" / "test.json").write_text(json.dumps(state))
+    review = _review(tmp_path / "review.json")
+    out = tmp_path / "score.json"
+    assert run_cli("aggregate-reviews", "--iteration", "1", "--input", str(review), "--out", str(out), cwd=state_dir.parent).returncode == 0
+    payload = json.loads(out.read_text())
+    payload["items"] = {key: 5.0 for key in payload["items"]}
+    out.write_text(json.dumps(payload))
+    assert run_cli("push-score", "--iteration", "1", "--scoring-json", str(out), cwd=state_dir.parent).returncode == 2
+
+
+def test_active_legacy_state_cannot_mark_passes_with_unprovenanced_score(state_dir, run_cli):
+    """Schema version never relaxes the active pass gate."""
+    state_path = state_dir / "sessions" / "test.json"
+    state = json.loads(state_path.read_text())
+    state["schema_version"] = 2
+    state["score_history"] = [{"iteration": 1, "composite": 5.0, "min_item": 5.0,
+                               "items": ITEMS, "open_high": 0}]
+    before = json.dumps(state, sort_keys=True).encode()
+    state_path.write_text(json.dumps(state))
+    result = run_cli("mark-passes", cwd=state_dir.parent)
+    assert result.returncode == 2
+    assert "provenance" in result.stderr
+    assert json.dumps(json.loads(state_path.read_text()), sort_keys=True).encode() == before
+
+
 def test_git_revision_scope_requires_exact_pair(state_dir, run_cli, tmp_path):
     review = _review(tmp_path / "review.json")
     result = run_cli("aggregate-reviews", "--iteration", "1", "--input", str(review),
@@ -89,7 +118,7 @@ def test_git_revision_scope_requires_exact_pair(state_dir, run_cli, tmp_path):
     assert "exact" in result.stderr
 
 
-def test_resubmit_preserves_prior_content_addressed_archive(state_dir, run_cli, read_state, tmp_path):
+def test_resubmit_rejects_score_change_without_a_new_aggregate(state_dir, run_cli, read_state, tmp_path):
     first = tmp_path / "first.json"
     second = tmp_path / "second.json"
     review = _review(tmp_path / "review.json")
@@ -101,11 +130,11 @@ def test_resubmit_preserves_prior_content_addressed_archive(state_dir, run_cli, 
     old_path = read_state(state_dir)["score_history"][0]["scoring_evidence_path"]
     old_bytes = (state_dir.parent / old_path).read_bytes()
     assert run_cli("push-score", "--iteration", "1", "--scoring-json", str(second),
-                   "--resubmit-reason", "neutral correction", cwd=state_dir.parent).returncode == 0
+                   "--resubmit-reason", "neutral correction", cwd=state_dir.parent).returncode == 2
     assert (state_dir.parent / old_path).read_bytes() == old_bytes
 
 
-def test_manual_import_source_is_preserved_with_typed_evidence_ref(state_dir, run_cli, read_state, tmp_path):
+def test_manual_import_cannot_relabel_a_review_aggregate(state_dir, run_cli, read_state, tmp_path):
     state = json.loads((state_dir / "sessions" / "test.json").read_text())
     state["schema_version"] = 4
     (state_dir / "sessions" / "test.json").write_text(json.dumps(state))
@@ -116,8 +145,8 @@ def test_manual_import_source_is_preserved_with_typed_evidence_ref(state_dir, ru
     payload["score_provenance"]["score_source"] = "manual-import"
     out.write_text(json.dumps(payload))
     result = run_cli("push-score", "--iteration", "1", "--scoring-json", str(out), cwd=state_dir.parent)
-    assert result.returncode == 0, result.stderr
-    assert read_state(state_dir)["score_history"][0]["score_source"] == "manual-import"
+    assert result.returncode == 2
+    assert "manual-import" in result.stderr
 
 
 @pytest.mark.parametrize("attack", ["absolute", "traversal", "nul", "symlink", "fifo", "oversize", "utf8", "same-size", "swap"])
