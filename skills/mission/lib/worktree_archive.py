@@ -98,6 +98,10 @@ def _expected_lineage(state: dict[str, Any], state_path: Path):
             "reviews", item_iteration, entry.get("findings_evidence_path")
         ):
             return None
+    approval = state.get("force_approval") if isinstance(state.get("force_approval"), dict) else {}
+    receipt = approval.get("receipt_ref") if isinstance(approval.get("receipt_ref"), dict) else {}
+    if receipt.get("path") and not add("approval-receipt", iteration, receipt.get("path")):
+        return None
     for invocation in state.get("specialist_invocations") or []:
         if not isinstance(invocation, dict) or not invocation.get("evidence_path"):
             continue
