@@ -1008,6 +1008,8 @@ def atomic_write_json(path: Path, data: dict, *, administrative: bool = False) -
     上書きされ壁時計が最大 500 倍膨張した実害があるため)。
 
     """
+    if _is_session_state_shape(data):
+        _validate_specialist_public_state(data)
     lease_decision = _enforce_session_lease_for_write(path, data)
     if not administrative and _is_session_state_shape(data):
         data["last_activity_at"] = iso_now()
@@ -2428,7 +2430,7 @@ def _load_registry_candidates(raw: bytes, source: str) -> list[dict]:
         if not isinstance(item, dict):
             continue
         candidate = dict(item)
-        candidate.setdefault("source", source)
+        candidate["source"] = source
         candidate["registry_version"] = 1
         if "activation" in candidate or "disabled" in candidate:
             candidate["_registry_error"] = "mixed-registry-version"
@@ -2518,6 +2520,7 @@ def _read_registry_input(
                 RegistryContractError("registry-input-unreadable"),
             )
         return record, None, None, None
+    physical_identity: tuple[int, int] | None = None
     try:
         before = os.fstat(fd)
         physical_identity = (before.st_dev, before.st_ino)
@@ -2573,6 +2576,14 @@ def _read_registry_input(
                 physical_identity,
                 RegistryContractError("registry-input-changed"),
             )
+    except OSError:
+        record["status"] = "invalid"
+        return (
+            record,
+            None,
+            physical_identity,
+            RegistryContractError("registry-input-unreadable"),
+        )
     finally:
         os.close(fd)
     record["status"] = "present"
@@ -3262,7 +3273,7 @@ def _public_specialist_diagnostic(record: dict) -> dict:
         "minimum_complexity",
     ):
         value = record.get(field)
-        if isinstance(value, str) or value is None:
+        if isinstance(value, str):
             public[field] = value
     registry_input = record.get("registry_input")
     if isinstance(registry_input, dict):
@@ -3276,6 +3287,19 @@ def _public_specialist_diagnostics(records: list[dict]) -> list[dict]:
         for record in records
         if isinstance(record, dict)
     ]
+
+
+def _public_eligibility_context_fields(eligibility: dict, complexity: object) -> dict:
+    """Expose only contract enums; bind rejected raw policy through digests."""
+    fields: dict = {}
+    if complexity in {"Simple", "Standard", "Complex", "Critical"}:
+        fields["current_complexity"] = complexity
+    minimum = (eligibility.get("normalized_activation") or {}).get("min_complexity")
+    if minimum in {"Simple", "Standard", "Complex", "Critical"}:
+        fields["minimum_complexity"] = minimum
+    elif minimum is not None:
+        fields["field_code"] = "activation.min_complexity"
+    return fields
 
 
 def _default_result_contract_for(skill: str | None, role: str | None = None) -> dict:
@@ -3441,13 +3465,12 @@ def rank_specialist_candidates(task_profile: dict, registry_candidates: list[dic
                 "selection_source": canonical_source,
                 "selection_source_raw": raw_source,
                 "requested_phase": requested_phase,
-                "current_complexity": complexity,
-                "minimum_complexity": eligibility["normalized_activation"].get("min_complexity"),
                 "reason_code": "non-portable-execution-config",
                 "blocked_config_class": blocked_config_class,
                 "context_digest": eligibility["context_digest"],
                 "activation_digest": eligibility["activation_digest"],
                 "registry_projection_digest": c.get("registry_projection_digest"),
+                **_public_eligibility_context_fields(eligibility, complexity),
             })
             continue
         if c.get("kind") == "command":
@@ -3477,12 +3500,11 @@ def rank_specialist_candidates(task_profile: dict, registry_candidates: list[dic
                 "selection_source": canonical_source,
                 "selection_source_raw": raw_source,
                 "requested_phase": requested_phase,
-                "current_complexity": complexity,
-                "minimum_complexity": eligibility["normalized_activation"].get("min_complexity"),
                 "reason_code": eligibility["reason_code"],
                 "context_digest": eligibility["context_digest"],
                 "activation_digest": eligibility["activation_digest"],
                 "registry_projection_digest": c.get("registry_projection_digest"),
+                **_public_eligibility_context_fields(eligibility, complexity),
             })
             continue
         base = 0.45 + (0.25 if task_profile.get("primary") in overlap else 0.1)
@@ -3768,29 +3790,6 @@ def cmd_specialists(args):
     iteration = state_context.get("iteration", 1) if isinstance(state_context, dict) else 1
     installed = _discover_installed_skills(args)
     registry_candidates, registry_ineligible, registry_projection = _discover_specialist_registry_candidates(args)
-    numeric_diagnostics = [
-        item
-        for item in registry_ineligible
-        if item.get("reason_code") in {"invalid-registry-number", "number-limit"}
-    ]
-    if numeric_diagnostics:
-        result = {
-            "ok": False,
-            "reason_code": "registry-number-invalid",
-            "specialists_candidates": [],
-            "specialists_selected": [],
-            "specialists_unavailable": [],
-            "specialists_ineligible": _public_specialist_diagnostics(
-                numeric_diagnostics
-            ),
-            "specialist_registry_projection": registry_projection,
-            "specialists_phase_plan": [],
-        }
-        if getattr(args, "json", False):
-            print(json.dumps(result, indent=2, ensure_ascii=False))
-        else:
-            print("ERROR: specialist registry contains an invalid number", file=sys.stderr)
-        raise SystemExit(2)
     task_profile = classify_task_profile(task, files)
     mission_context = {
         "complexity": effective_complexity,
@@ -3836,6 +3835,7 @@ def cmd_specialists(args):
         "specialists_decision": decision,
         "specialists_phase_plan": phase_plan,
     }
+    _validate_specialist_public_state(result)
 
     if record_state:
         cwd = Path.cwd()
@@ -4083,7 +4083,7 @@ def _redact_provider_output(text: str) -> str:
     for pattern in patterns:
         redacted = pattern.sub(lambda m: f"{m.group(1)}=[REDACTED]", redacted)
     redacted = re.sub(
-        r"(?<![A-Za-z0-9])(?:/(?:Users|private|tmp|var/folders)/[^\s'\"`]+|~/[^\s'\"`]+|[A-Za-z]:[\\/][^\s'\"`]+)",
+        r"(?<![A-Za-z0-9:/])(?:/(?!/)[^\s'\"`]+|~/[^\s'\"`]+|[A-Za-z]:[\\/][^\s'\"`]+)",
         "[REDACTED_PATH]",
         redacted,
     )
@@ -8783,6 +8783,7 @@ def _terminalize_state_file(
             )
         _write_terminal_outcome(latest)
         latest["updated_at"] = now
+        _validate_specialist_public_state(latest)
         backup_state(sf)
         # Publish the janitor CAS directly on every terminalize path: the janitor
         # is not a normal writer and must neither impersonate the owner token nor

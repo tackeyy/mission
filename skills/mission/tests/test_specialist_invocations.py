@@ -74,6 +74,33 @@ def test_init_includes_specialist_invocations(run_cli, tmp_path):
     assert state["specialist_invocations"] == []
 
 
+def test_get_accepts_safe_legacy_invocation_with_bare_command(
+    state_dir, run_cli, read_state
+):
+    state_path = state_dir / "sessions" / "test.json"
+    state = read_state(state_dir)
+    state["specialist_invocations"] = [
+        {
+            "iteration": 1,
+            "phase": "review",
+            "role": "reviewer",
+            "skill": "portable-provider",
+            "mode": "command-provider",
+            "status": "completed",
+            "timestamp": "2026-08-10T00:00:00Z",
+            "command": "portable-reviewer",
+        }
+    ]
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    result = run_cli("get", cwd=state_dir.parent)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["specialist_invocations"][0]["command"] == (
+        "portable-reviewer"
+    )
+
+
 def test_log_invocation_appends_machine_readable_record(state_dir, run_cli, read_state):
     r = run_cli(
         "specialists", "log-invocation",

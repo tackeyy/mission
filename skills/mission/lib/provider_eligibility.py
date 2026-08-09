@@ -269,6 +269,8 @@ def _yaml_scalar(value: str) -> Any:
     value = value.strip()
     if not value:
         return None
+    if value.startswith("{") and value.endswith("}"):
+        raise RegistryContractError("unsupported-registry-depth")
     if value.startswith("[") and value.endswith("]"):
         inner = value[1:-1].strip()
         return [_yaml_scalar(item) for item in _split_yaml_flow_items(inner)]

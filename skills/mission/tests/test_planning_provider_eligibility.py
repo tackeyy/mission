@@ -1,5 +1,6 @@
 """Issue #394: complexity-aware planning provider eligibility."""
 
+import copy
 import json
 import importlib.util
 import os
@@ -19,6 +20,10 @@ from provider_eligibility import (  # noqa: E402
     normalize_selection_source,
     parse_v2_registry,
 )
+from provider_public_contract import (  # noqa: E402
+    SpecialistPublicContractError,
+    validate_specialist_public_state,
+)
 
 
 def _load_mission_state_module(name: str):
@@ -32,6 +37,213 @@ def _load_mission_state_module(name: str):
 
 def _project_identity(path: Path, project: Path) -> str:
     return f"$PROJECT/{path.resolve().relative_to(project.resolve()).as_posix()}"
+
+
+def test_public_candidate_schema_rejects_unknown_key_without_value_disclosure():
+    marker = "opaque-unknown-value"
+    state = {
+        "specialists_candidates": [
+            {
+                "provider_id": "portable-provider",
+                "kind": "skill",
+                "unknown_config": marker,
+            }
+        ]
+    }
+
+    with pytest.raises(SpecialistPublicContractError) as caught:
+        validate_specialist_public_state(state)
+
+    assert caught.value.field_path == "/specialists_candidates/0/unknown_config"
+    assert marker not in str(caught.value)
+
+
+def test_atomic_session_writer_validates_public_specialist_schema_before_publish(
+    monkeypatch, tmp_path
+):
+    module = _load_mission_state_module("mission_state_issue394_atomic_public_gate")
+    published = False
+
+    def publish_spy(path, writer):
+        nonlocal published
+        published = True
+
+    monkeypatch.setattr(module, "_enforce_session_lease_for_write", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, "_atomic_write", publish_spy)
+    state = {
+        "mission_id": "portable-mission-id",
+        "loop_active": False,
+        "specialists_candidates": [
+            {
+                "provider_id": "portable-provider",
+                "kind": "skill",
+                "unknown_config": "opaque-value",
+            }
+        ],
+    }
+
+    with pytest.raises(module.SpecialistPublicContractError) as caught:
+        module.atomic_write_json(tmp_path / "state.json", state, administrative=True)
+
+    assert caught.value.field_path == "/specialists_candidates/0/unknown_config"
+    assert published is False
+
+
+def _valid_public_projection():
+    digest = "sha256:" + "a" * 64
+    registry_input = {
+        "kind": "explicit",
+        "source": "registry:$PROJECT/registry.json",
+        "canonical_identity": "$PROJECT/registry.json",
+        "version": 2,
+        "precedence_tier": 0,
+        "order": 0,
+        "status": "present",
+        "content_digest": digest,
+    }
+    return {
+        "schema": "mission-specialist-registry-projection/1",
+        "ordered_inputs": [registry_input],
+        "precedence_barriers": [
+            {
+                key: value
+                for key, value in registry_input.items()
+                if key not in {"version", "status"}
+            }
+        ],
+        "effective_entries": [
+            {
+                "provider_id": "portable-provider",
+                "source": "registry:$PROJECT/registry.json",
+                "registry_version": 2,
+                "registry_entry_digest": digest,
+                "projection_state": "eligible",
+            }
+        ],
+        "effective_projection_digest": digest,
+    }
+
+
+def test_public_allowlist_rejects_unknown_keys_at_every_nested_surface():
+    candidate = {"provider_id": "portable-provider", "kind": "skill"}
+    diagnostic = {
+        "provider_id": "portable-provider",
+        "reason_code": "unknown-complexity",
+    }
+    decision = {
+        "policy": "fallback",
+        "action": "continue-core",
+        "prompted_user": False,
+    }
+    phase_plan = {
+        "phase": "planning",
+        "roles": ["deep-planning"],
+        "providers": ["portable-provider"],
+        "max_providers": 1,
+    }
+    invocation = {
+        "iteration": 1,
+        "phase": "review",
+        "role": "reviewer",
+        "skill": "portable-provider",
+        "mode": "command-provider",
+        "status": "completed",
+        "timestamp": "2026-08-10T00:00:00Z",
+    }
+    cases = []
+    for surface in (
+        "specialists_candidates",
+        "specialists_selected",
+        "specialists_unavailable",
+    ):
+        cases.append(
+            ({surface: [{**candidate, "unknown": "opaque"}]}, f"/{surface}/0/unknown")
+        )
+    cases.extend(
+        [
+            (
+                {"specialists_ineligible": [{**diagnostic, "unknown": "opaque"}]},
+                "/specialists_ineligible/0/unknown",
+            ),
+            (
+                {"specialists_decision": {**decision, "unknown": "opaque"}},
+                "/specialists_decision/unknown",
+            ),
+            (
+                {"specialists_phase_plan": [{**phase_plan, "unknown": "opaque"}]},
+                "/specialists_phase_plan/0/unknown",
+            ),
+            (
+                {"specialist_invocations": [{**invocation, "unknown": "opaque"}]},
+                "/specialist_invocations/0/unknown",
+            ),
+        ]
+    )
+    projection_paths = (
+        ((), "/specialist_registry_projection/unknown"),
+        (("ordered_inputs", 0), "/specialist_registry_projection/ordered_inputs/0/unknown"),
+        (("precedence_barriers", 0), "/specialist_registry_projection/precedence_barriers/0/unknown"),
+        (("effective_entries", 0), "/specialist_registry_projection/effective_entries/0/unknown"),
+    )
+    for location, expected in projection_paths:
+        projection = _valid_public_projection()
+        target = projection
+        for key in location:
+            target = target[key]
+        target["unknown"] = "opaque"
+        cases.append(({"specialist_registry_projection": projection}, expected))
+
+    for state, expected_path in cases:
+        with pytest.raises(SpecialistPublicContractError) as caught:
+            validate_specialist_public_state(copy.deepcopy(state))
+        assert caught.value.field_path == expected_path
+        assert "opaque" not in str(caught.value)
+
+
+def test_public_allowlist_rejects_invalid_types_enums_sources_and_digests():
+    digest = "sha256:" + "a" * 64
+    cases = [
+        ({"specialists_candidates": [{"provider_id": "portable", "kind": "other"}]}, "/specialists_candidates/0/kind"),
+        ({"specialists_candidates": [{"provider_id": "portable", "kind": "skill", "source": "/home/private/provider"}]}, "/specialists_candidates/0/source"),
+        ({"specialists_candidates": [{"provider_id": "portable", "kind": "skill", "source": "unknown:provider"}]}, "/specialists_candidates/0/source"),
+        ({"specialists_candidates": [{"provider_id": "portable", "kind": "skill", "role": "x" * 129}]}, "/specialists_candidates/0/role"),
+        ({"specialists_candidates": [{"provider_id": "portable", "kind": "skill", "context_digest": "invalid"}]}, "/specialists_candidates/0/context_digest"),
+        ({"specialists_candidates": [{"provider_id": "portable", "kind": "skill", "normalized_activation": {"unknown": True}}]}, "/specialists_candidates/0/normalized_activation/unknown"),
+        ({"installed_skills": [{"provider_id": "portable"}]}, "/installed_skills"),
+        ({"specialists_decision": {"policy": "fallback", "action": "invalid", "prompted_user": False}}, "/specialists_decision/action"),
+        ({"specialists_phase_plan": [{"phase": "invalid", "roles": [], "providers": [], "max_providers": 1}]}, "/specialists_phase_plan/0/phase"),
+        ({"specialist_invocations": [{"command": "/root/private-provider"}]}, "/specialist_invocations/0/command"),
+    ]
+    projection = _valid_public_projection()
+    projection["effective_projection_digest"] = "invalid"
+    cases.append(({"specialist_registry_projection": projection}, "/specialist_registry_projection/effective_projection_digest"))
+    projection = _valid_public_projection()
+    projection["effective_entries"][0]["projection_state"] = "invalid"
+    cases.append(({"specialist_registry_projection": projection}, "/specialist_registry_projection/effective_entries/0/projection_state"))
+
+    for state, expected_path in cases:
+        with pytest.raises(SpecialistPublicContractError) as caught:
+            validate_specialist_public_state(state)
+        assert caught.value.field_path == expected_path
+
+
+def test_public_invocation_schema_accepts_safe_legacy_bare_command():
+    state = {
+        "specialist_invocations": [
+            {
+                "iteration": 1,
+                "phase": "review",
+                "role": "reviewer",
+                "skill": "portable-provider",
+                "mode": "command-provider",
+                "status": "completed",
+                "timestamp": "2026-08-10T00:00:00Z",
+                "command": "portable-reviewer",
+            }
+        ]
+    }
+
+    validate_specialist_public_state(state)
 
 
 def test_complexity_trigger_is_eligible_without_profile_match():
@@ -349,9 +561,9 @@ def test_record_state_rejects_cli_complexity_that_disagrees_with_authoritative_s
         "specialists_selected": [{"skill": "existing-selection"}],
         "specialists_unavailable": [{"skill": "existing-unavailable"}],
         "specialists_ineligible": [{"provider_id": "existing-ineligible"}],
-        "specialist_registry_projection": {"schema": "existing-projection"},
-        "specialists_decision": {"policy": "existing-decision"},
-        "specialists_phase_plan": [{"phase": "existing-phase"}],
+        "specialist_registry_projection": None,
+        "specialists_decision": {},
+        "specialists_phase_plan": [],
         "specialists_mode": "existing-mode",
     }
     state.update({"complexity": "Simple", "iteration": 1, **preserved})
@@ -407,7 +619,7 @@ def test_record_state_rechecks_complexity_and_iteration_inside_write_lock(
             "complexity": "Complex",
             "iteration": 1,
             "specialists_selected": [{"skill": "existing-selection"}],
-            "specialists_phase_plan": [{"phase": "existing-phase"}],
+            "specialists_phase_plan": [],
         }
     )
     state_path.write_text(json.dumps(state), encoding="utf-8")
@@ -474,7 +686,7 @@ def test_record_state_rechecks_complexity_and_iteration_inside_write_lock(
     after = json.loads(state_path.read_text(encoding="utf-8"))
     assert after["iteration"] == 2
     assert after["specialists_selected"] == [{"skill": "existing-selection"}]
-    assert after["specialists_phase_plan"] == [{"phase": "existing-phase"}]
+    assert after["specialists_phase_plan"] == []
 
 
 def test_v2_json_and_yaml_normalize_to_the_same_registry_entry(run_cli, tmp_path):
@@ -681,17 +893,186 @@ def test_oversized_or_unrepresentable_registry_number_fails_with_structured_diag
         "--complexity", "Complex", "--json", cwd=tmp_path,
     )
 
-    assert result.returncode == 2
+    assert result.returncode == 0
     assert "Traceback" not in result.stderr
     assert "Infinity" not in result.stdout
     data = json.loads(result.stdout)
-    assert data["ok"] is False
-    assert data["reason_code"] == "registry-number-invalid"
+    assert data["ok"] is True
     assert data["specialists_candidates"] == []
     assert data["specialists_selected"] == []
     assert data["specialists_unavailable"] == []
     assert data["specialists_phase_plan"] == []
     assert data["specialists_ineligible"][0]["reason_code"] == "number-limit"
+
+
+def test_low_priority_numeric_barrier_preserves_valid_explicit_candidate(
+    run_cli, tmp_path
+):
+    explicit = tmp_path / "explicit-v2.json"
+    explicit.write_text(
+        json.dumps(
+            {
+                "schema": "mission-specialist-registry/2",
+                "specialists_v2": [
+                    {
+                        "provider_id": "explicit-planning-provider",
+                        "role": "deep-planning",
+                        "skill": "explicit-planning-provider",
+                        "task_profiles": ["architecture"],
+                        "phases": ["planning"],
+                        "activation": {
+                            "min_complexity": "Complex",
+                            "auto_select_if": ["complexity"],
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    installed = (
+        tmp_path
+        / "skills"
+        / "low-priority-provider"
+        / "mission-specialist-v2.yml"
+    )
+    installed.parent.mkdir(parents=True)
+    installed.write_text(
+        "\n".join(
+            [
+                "schema: mission-specialist-registry/2",
+                "specialists_v2:",
+                "  - provider_id: low-priority-provider",
+                f"    timeout: {'9' * 4300}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        "specialists",
+        "recommend",
+        "--no-default-skill-roots",
+        "--skills-dir",
+        str(tmp_path / "skills"),
+        "--registry",
+        str(explicit),
+        "--task",
+        "Review a multi-step architecture",
+        "--complexity",
+        "Complex",
+        "--installed-skills",
+        "explicit-planning-provider",
+        "--json",
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert [item["provider_id"] for item in data["specialists_selected"]] == [
+        "explicit-planning-provider"
+    ]
+    assert any(
+        item["reason_code"] == "number-limit"
+        for item in data["specialists_ineligible"]
+    )
+    assert data["specialist_registry_projection"]["precedence_barriers"]
+
+
+def test_v1_candidate_cannot_override_discovery_owned_source(run_cli, tmp_path):
+    registry = tmp_path / "source-injection-v1.json"
+    private_marker = str(tmp_path / "private-source-marker")
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "specialists": [
+                    {
+                        "provider_id": "portable-planning-provider",
+                        "role": "deep-planning",
+                        "skill": "portable-planning-provider",
+                        "source": private_marker,
+                        "task_profiles": ["architecture"],
+                        "phases": ["planning"],
+                        "auto_use": {"min_complexity": "Complex"},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        "specialists",
+        "recommend",
+        "--no-default-skill-roots",
+        "--registry",
+        str(registry),
+        "--task",
+        "Review a multi-step architecture",
+        "--complexity",
+        "Complex",
+        "--installed-skills",
+        "portable-planning-provider",
+        "--json",
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert private_marker not in result.stdout
+    assert data["specialists_selected"][0]["source"] == (
+        f"registry:{_project_identity(registry, tmp_path)}"
+    )
+
+
+def test_v1_invalid_activation_enum_is_not_copied_to_public_diagnostic(
+    run_cli, tmp_path
+):
+    registry = tmp_path / "invalid-activation-v1.json"
+    private_marker = str(tmp_path / "private-complexity-marker")
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "specialists": [
+                    {
+                        "provider_id": "portable-planning-provider",
+                        "role": "deep-planning",
+                        "skill": "portable-planning-provider",
+                        "task_profiles": ["architecture"],
+                        "phases": ["planning"],
+                        "auto_use": {"min_complexity": private_marker},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        "specialists",
+        "recommend",
+        "--no-default-skill-roots",
+        "--registry",
+        str(registry),
+        "--task",
+        "Review a multi-step architecture",
+        "--complexity",
+        "Complex",
+        "--installed-skills",
+        "portable-planning-provider",
+        "--json",
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert private_marker not in result.stdout
+    diagnostic = data["specialists_ineligible"][0]
+    assert diagnostic["reason_code"] == "unknown-complexity"
+    assert diagnostic["field_code"] == "activation.min_complexity"
+    assert "minimum_complexity" not in diagnostic
 
 
 def test_nested_json_and_yaml_numbers_use_the_same_strict_numeric_parser():
@@ -716,6 +1097,39 @@ def test_nested_json_and_yaml_numbers_use_the_same_strict_numeric_parser():
         with pytest.raises(RegistryContractError) as caught:
             parse_v2_registry(document)
         assert caught.value.code == "number-limit"
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        (
+            '{"schema":"mission-specialist-registry/2",'
+            '"specialists_v2":[{"provider_id":"nested-provider",'
+            '"task_profiles":[{"name":"architecture"}]}]}'
+        ),
+        "\n".join(
+            [
+                "schema: mission-specialist-registry/2",
+                "specialists_v2:",
+                "  - provider_id: nested-provider",
+                '    task_profiles: [{"name":"architecture"}]',
+            ]
+        ),
+        "\n".join(
+            [
+                "schema: mission-specialist-registry/2",
+                "specialists_v2:",
+                "  - provider_id: nested-provider",
+                "    task_profiles: [[architecture]]",
+            ]
+        ),
+    ],
+)
+def test_nested_flow_collections_fail_with_json_yaml_depth_parity(document):
+    with pytest.raises(RegistryContractError) as caught:
+        parse_v2_registry(document)
+
+    assert caught.value.code == "unsupported-registry-depth"
 
 
 @pytest.mark.parametrize(
@@ -1759,9 +2173,9 @@ def test_v2_json_nan_is_rejected_before_candidate_selection(run_cli, tmp_path):
         "--json", cwd=tmp_path,
     )
 
-    assert result.returncode == 2, result.stderr
+    assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout)
-    assert data["ok"] is False
+    assert data["ok"] is True
     assert data["specialists_candidates"] == []
     assert any(
         item["reason_code"] == "invalid-registry-number"
@@ -2522,12 +2936,18 @@ def test_portable_path_command_remains_invokable_and_accounted(
     assert state["specialist_invocations"][-1]["status"] == "completed"
 
 
+@pytest.mark.parametrize("path_kind", ["local", "linux-home", "linux-root", "windows"])
 def test_command_provider_evidence_redacts_process_local_paths(
-    run_cli, tmp_path
+    path_kind, run_cli, tmp_path
 ):
     command_dir = tmp_path / "commands"
     command_dir.mkdir()
-    private_marker = str(tmp_path / "private-temp" / "provider-output")
+    private_marker = {
+        "local": str(tmp_path / "private-temp" / "provider-output"),
+        "linux-home": "/home/neutral-user/private-provider-output.txt",
+        "linux-root": "/root/private-provider-output.txt",
+        "windows": r"C:\Users\neutral-user\private-provider-output.txt",
+    }[path_kind]
     command = command_dir / "portable-path-reporter"
     command.write_text(
         "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' "
@@ -2812,6 +3232,60 @@ def test_registry_fd_snapshot_rejects_in_place_mutation(monkeypatch, tmp_path):
     assert raw is None
     assert error is not None
     assert error.code == "registry-input-changed"
+
+
+@pytest.mark.parametrize("failure_stage", ["read", "post-fstat"])
+def test_registry_fd_io_error_is_structured_and_closes_once(
+    failure_stage, monkeypatch, tmp_path
+):
+    registry = tmp_path / "io-error.json"
+    registry.write_text(
+        '{"schema":"mission-specialist-registry/2","specialists_v2":[]}',
+        encoding="utf-8",
+    )
+    module = _load_mission_state_module(f"mission_state_issue394_{failure_stage}")
+    original_read = module.os.read
+    original_fstat = module.os.fstat
+    original_close = module.os.close
+    fstat_calls = 0
+    close_calls = 0
+
+    def failing_read(fd, size):
+        if failure_stage == "read":
+            raise OSError("simulated registry read failure")
+        return original_read(fd, size)
+
+    def failing_fstat(fd):
+        nonlocal fstat_calls
+        fstat_calls += 1
+        if failure_stage == "post-fstat" and fstat_calls == 2:
+            raise OSError("simulated registry metadata failure")
+        return original_fstat(fd)
+
+    def counted_close(fd):
+        nonlocal close_calls
+        close_calls += 1
+        return original_close(fd)
+
+    monkeypatch.setattr(module.os, "read", failing_read)
+    monkeypatch.setattr(module.os, "fstat", failing_fstat)
+    monkeypatch.setattr(module.os, "close", counted_close)
+    monkeypatch.chdir(tmp_path)
+
+    record, raw, _physical_identity, error = module._read_registry_input(
+        registry,
+        "registry:$PROJECT/io-error.json",
+        "explicit",
+        2,
+        0,
+        0,
+    )
+
+    assert record["status"] == "invalid"
+    assert raw is None
+    assert error is not None
+    assert error.code == "registry-input-unreadable"
+    assert close_calls == 1
 
 
 def test_byte_identical_distinct_registry_inodes_are_not_duplicate(run_cli, tmp_path):
