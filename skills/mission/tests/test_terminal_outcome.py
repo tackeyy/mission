@@ -218,6 +218,51 @@ def test_non_string_halt_category_fails_closed_without_breaking_conservation(
     }
 
 
+def test_stats_normalizes_every_json_halt_category_to_string_buckets(
+    run_cli, tmp_path
+):
+    cases = [
+        ("null", None, "null"),
+        ("false", False, "false"),
+        ("true", True, "true"),
+        ("zero", 0, "0"),
+        ("integer", 7, "7"),
+        ("float", 1.5, "1.5"),
+        ("empty-list", [], "[]"),
+        ("truthy-list", [1], "[1]"),
+        ("empty-map", {}, "{}"),
+        ("truthy-map", {"x": 1}, '{"x":1}'),
+        ("string", "stagnation", "stagnation"),
+    ]
+    for name, category, _bucket in cases:
+        _write_audit_state(tmp_path, name, _halted(category=category))
+
+    json_result = run_cli(
+        "stats", "--root", str(tmp_path), "--json", cwd=tmp_path
+    )
+    text_result = run_cli("stats", "--root", str(tmp_path), cwd=tmp_path)
+    data = json.loads(json_result.stdout) if json_result.returncode == 0 else {}
+    expected_buckets = {bucket: 1 for _name, _category, bucket in cases}
+
+    assert {
+        "json_returncode": json_result.returncode,
+        "text_returncode": text_result.returncode,
+        "buckets": data.get("by_halt_category"),
+        "terminal_count": data.get("terminal_count"),
+        "conservation": sum((data.get("terminal_outcome_counts") or {}).values()),
+        "text_buckets": all(
+            f"      {bucket:<18} 1" in text_result.stdout for bucket in expected_buckets
+        ),
+    } == {
+        "json_returncode": 0,
+        "text_returncode": 0,
+        "buckets": expected_buckets,
+        "terminal_count": len(cases),
+        "conservation": len(cases),
+        "text_buckets": True,
+    }
+
+
 def test_legacy_states_are_derived_without_physical_rewrite():
     states = [
         {"schema_version": 1, "passes": True, "loop_active": False, "halt_reason": ""},
@@ -286,6 +331,69 @@ def test_resolution_status_preserves_category_outcome_across_v2_and_v3(
         state["terminal_outcome"] = expected
 
     assert MC.derive_terminal_outcome(state) == expected
+
+
+@pytest.mark.parametrize("schema_version", [2, 3])
+@pytest.mark.parametrize(
+    ("resolution_status", "expected_outcome", "expected_denominator"),
+    [
+        ("resolved", "failed", 1),
+        ("closed", "failed", 1),
+        ("superseded", "stale_superseded", 0),
+    ],
+)
+def test_resolve_archive_writer_keeps_explicit_outcome_and_stats_consistent(
+    schema_version,
+    resolution_status,
+    expected_outcome,
+    expected_denominator,
+    run_cli,
+    tmp_path,
+):
+    project = tmp_path / "project"
+    state = {
+        "schema_version": schema_version,
+        **_halted(category="stagnation"),
+    }
+    if schema_version == 3:
+        state["terminal_outcome"] = "failed"
+    _write_audit_state(tmp_path, "project", state)
+    state_path = _state_file(project)
+
+    resolved = run_cli(
+        "resolve-archive",
+        "--path",
+        str(state_path),
+        "--status",
+        resolution_status,
+        "--json",
+        cwd=project,
+    )
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    stats_result = run_cli(
+        "stats", "--root", str(project), "--json", cwd=project, check=True
+    )
+    stats = json.loads(stats_result.stdout)
+
+    assert {
+        "resolve_returncode": resolved.returncode,
+        "resolution_status": persisted.get("resolution_status"),
+        "derived_outcome": MC.derive_terminal_outcome(persisted),
+        "persisted_outcome": persisted.get("terminal_outcome", "<absent>"),
+        "outcome_count": stats["terminal_outcome_counts"][expected_outcome],
+        "terminal_count": stats["terminal_count"],
+        "conservation": sum(stats["terminal_outcome_counts"].values()),
+        "implementer_denominator": stats["implementer_pass_rate_denominator"],
+    } == {
+        "resolve_returncode": 0,
+        "resolution_status": resolution_status,
+        "derived_outcome": expected_outcome,
+        "persisted_outcome": expected_outcome if schema_version == 3 else "<absent>",
+        "outcome_count": 1,
+        "terminal_count": 1,
+        "conservation": 1,
+        "implementer_denominator": expected_denominator,
+    }
 
 
 def test_role_mixture_and_31_evidence_records_preserve_implementer_rate_and_conservation():

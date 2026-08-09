@@ -8097,7 +8097,17 @@ def _build_halt_category_breakdown(states: list[dict], classes: list[str]) -> di
     for s, cls in zip(states, classes):
         if cls != "halt":
             continue
-        cat = s.get("halt_category") or "unknown"
+        if "halt_category" not in s or s.get("halt_category") == "":
+            cat = "unknown"
+        elif isinstance(s.get("halt_category"), str):
+            cat = s["halt_category"]
+        else:
+            cat = json.dumps(
+                s.get("halt_category"),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
         out[cat] = out.get(cat, 0) + 1
     return dict(sorted(out.items()))
 
@@ -8754,8 +8764,11 @@ def cmd_resolve_archive(args):
                 prev["resolution_note"] = data["resolution_note"]
             data.setdefault("resolution_history", []).append(prev)
 
-        # resolution metadata を設定 (不変フィールドには一切触れない)
+        # resolution metadata を設定し、v3 の明示 outcome だけを同じ transition 内で整合させる。
+        # outcome を持たない legacy record には追加しない。
         data["resolution_status"] = args.status
+        if "terminal_outcome" in data:
+            _write_terminal_outcome(data)
         data["resolution_decided_at"] = now
         if args.owner_issue is not None:
             data["resolution_owner_issue"] = args.owner_issue

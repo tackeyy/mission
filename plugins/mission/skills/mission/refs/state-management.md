@@ -166,7 +166,7 @@ schema v3 は control state (`passes` / `loop_active` / `halt_reason` / `halt_ca
 
 `mark-passes`、`closeout`、`mark-halt`、hard route、permission preflight、`halt --all`、`cleanup-stale` は同じ導出関数で outcome を記録する。`reactivate` と stale recovery の `refresh-pid` は outcome を消して active に戻す。`session_role` は `init --role` でのみ決まり、汎用 `set` から role や outcome を変更できない。明示 outcome と control state が矛盾する record、および明示された非文字列の `halt_category` は読み取り時に `failed` として fail-closed する。
 
-schema v1/v2 は `derive_terminal_outcome()` が読み取り時に互換導出し、物理 rewrite しない。resolution metadata の `resolved` / `closed` は元の halt category outcome を維持し、`superseded` だけを `stale_superseded` として扱う。`stats` / audit の implementer pass rate は implementer role の `completed_pass + failed + incomplete` だけを分母にし、checker/planning/analyze は evidence completion rate へ分離する。release、外部 blocker、承認待ち、stale/superseded、user abort、route、active は implementer 分母から除外する。詳細は `docs/PASS_RATE_METRICS.md` を参照。
+schema v1/v2 は `derive_terminal_outcome()` が読み取り時に互換導出し、物理 rewrite しない。resolution metadata の `resolved` / `closed` は元の halt category outcome を維持し、`superseded` だけを `stale_superseded` として扱う。明示的な `resolve-archive` は、既存の v3 `terminal_outcome` だけを同じ transition 内で更新し、outcome を持たない legacy record には追加しない。`stats` / audit の implementer pass rate は implementer role の `completed_pass + failed + incomplete` だけを分母にし、checker/planning/analyze は evidence completion rate へ分離する。release、外部 blocker、承認待ち、stale/superseded、user abort、route、active は implementer 分母から除外する。詳細は `docs/PASS_RATE_METRICS.md` を参照。
 
 ### Activity segment observability (#211)
 
