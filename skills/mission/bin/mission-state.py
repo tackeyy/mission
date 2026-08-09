@@ -79,7 +79,7 @@ from activity_segments import (  # noqa: E402
     close_activity_for_resume,
     close_activity_for_terminal,
     end_activity_segment,
-    is_manual_phase_override,
+    is_phase_default_activity,
     record_activity_event,
     sanitize_activity_detail,
     start_activity_segment,
@@ -4751,7 +4751,11 @@ def cmd_init(args):
                     # #211: same-mission init is a resume boundary. Preserve the
                     # bounded activity rollup and close an open segment only up
                     # to the last observed state update; never infer the crash gap.
-                    close_activity_for_resume(existing_data, now)
+                    current = existing_data.get("activity_current")
+                    if not (
+                        isinstance(current, dict) and current.get("started_at") == now
+                    ):
+                        close_activity_for_resume(existing_data, now)
                     _resume_phase_timing(existing_data, now)
                     for key in (
                         "activity_current",
@@ -4766,6 +4770,8 @@ def cmd_init(args):
                     ):
                         if key in existing_data:
                             initial[key] = existing_data[key]
+                    if initial.get("loop_active") is not False and not initial.get("activity_current"):
+                        start_phase_default_activity(initial, now)
             except ActivityTimingError as e:
                 print(f"ERROR: existing mission timing is invalid: {e}", file=sys.stderr)
                 sys.exit(2)
@@ -5889,7 +5895,7 @@ def cmd_set(args):
                     if (
                         normalized_phase not in {"done", "halted"}
                         and old_phase != normalized_phase
-                        and not is_manual_phase_override(current, old_phase)
+                        and is_phase_default_activity(current, old_phase)
                     ):
                         end_activity_segment(data, now)
                     _transition_phase(data, normalized_phase, now)

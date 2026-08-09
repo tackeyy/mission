@@ -382,13 +382,14 @@ def start_phase_default_activity(state: dict[str, Any], at: str) -> bool:
     return start_activity_segment(state, kind, reason, at, origin="phase-default")
 
 
-def is_manual_phase_override(current: Any, phase: str | None) -> bool:
-    """Return whether an operator explicitly retained the phase default activity."""
+def is_phase_default_activity(current: Any, phase: str | None) -> bool:
+    """Return whether a current entry is the explicit automatic phase default."""
     default = PHASE_ACTIVITY_DEFAULTS.get(phase)
     return bool(
         isinstance(current, dict)
         and default is not None
-        and current.get("origin") == "manual"
+        and current.get("origin") == "phase-default"
+        and current.get("phase") == phase
         and (current.get("kind"), current.get("reason")) == default
     )
 

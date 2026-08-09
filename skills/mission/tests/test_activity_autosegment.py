@@ -34,6 +34,44 @@ def test_advance_uses_the_destination_phase_default_when_activity_is_omitted(run
     assert _read(tmp_path)["activity_current"]["reason"] == "implementation"
 
 
+def test_same_mission_reinit_opens_missing_default_once_without_zero_length_duplicate(
+    run_cli, tmp_path
+):
+    """A resumed state without an activity measurement gets one safe default."""
+    initial_at = "2027-08-10T00:00:00Z"
+    resumed_at = "2027-08-10T00:01:00Z"
+    run_cli(
+        "init", "automatic activity", cwd=tmp_path, check=True,
+        env_extra={"MISSION_STATE_NOW": initial_at},
+    )
+    run_cli(
+        "activity", "end", "--at", resumed_at, cwd=tmp_path, check=True,
+        env_extra={"MISSION_STATE_NOW": resumed_at},
+    )
+
+    run_cli(
+        "init", "automatic activity", cwd=tmp_path, check=True,
+        env_extra={"MISSION_STATE_NOW": resumed_at},
+    )
+    after_resume = _read(tmp_path)
+    assert after_resume["activity_current"] == {
+        "kind": "active",
+        "origin": "phase-default",
+        "phase": "planning",
+        "reason": "planning",
+        "started_at": resumed_at,
+    }
+    closed_count = len(after_resume["activity_segments"])
+
+    run_cli(
+        "init", "automatic activity", cwd=tmp_path, check=True,
+        env_extra={"MISSION_STATE_NOW": resumed_at},
+    )
+    repeated = _read(tmp_path)
+    assert repeated["activity_current"] == after_resume["activity_current"]
+    assert len(repeated["activity_segments"]) == closed_count
+
+
 def test_aggregate_reviews_transitions_reviewing_to_scoring_activity(run_cli, tmp_path):
     run_cli("init", "automatic activity", cwd=tmp_path, check=True)
     run_cli(

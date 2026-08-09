@@ -311,7 +311,8 @@ def test_reinit_and_refresh_close_open_segment_once_without_losing_history(
     if command == "refresh-pid":
         assert state["activity_current"]["reason"] == "implementation"
     else:
-        assert state["activity_current"] is None
+        assert state["activity_current"]["reason"] == "implementation"
+        assert state["activity_current"]["origin"] == "phase-default"
     assert state["activity_rollup"]["observed_total_sec"] == 300.0
     assert state["activity_rollup"]["closed_segment_count"] == 1
     assert len(state["activity_segments"]) == 1
@@ -369,10 +370,10 @@ def test_phase_transition_splits_open_activity_atomically_and_terminal_closes_it
     middle = json.loads(path.read_text())
     assert middle["activity_segments"][0]["duration_sec"] == 600.0
     assert middle["activity_current"] == {
-        "kind": "reviewer-wait",
-        "origin": "phase-default",
+        "kind": "active",
+        "origin": "manual",
         "phase": "reviewing",
-        "reason": "review-response",
+        "reason": "work",
         "started_at": "2026-07-21T00:10:00Z",
     }
     assert middle["phase_durations_sec"]["executing"] == 600.0
