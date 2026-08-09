@@ -7526,8 +7526,9 @@ def cmd_push_score(args):
             )
             sys.exit(2)
         items, json_notes, json_open_high, scoring_payload = _load_scoring_json(args.scoring_json)
-        args.composite = round(sum(_numeric_item_values(items)) / len(items), 2)
-        args.min_item = round(min(_numeric_item_values(items)), 2)
+        score_axis_values = [float(items[axis]) for axis in REVIEW_SCORE_KEYS]
+        args.composite = round(sum(score_axis_values) / len(score_axis_values), 2)
+        args.min_item = round(min(score_axis_values), 2)
         # scoring JSON が authoritative: JSON に open_high があれば CLI --open-high より優先
         if json_open_high is not None:
             args.open_high = json_open_high
@@ -7570,6 +7571,7 @@ def cmd_push_score(args):
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
+        _validate_consensus_policy(data, items)
         try:
             provenance = _validate_provenance(
                 scoring_payload.get("score_provenance") if scoring_payload else None,
@@ -7595,7 +7597,6 @@ def cmd_push_score(args):
                 print(f"ERROR: provenance: {exc}", file=sys.stderr)
                 sys.exit(2)
         now = iso_now()
-        _validate_consensus_policy(data, items)
         # #122: 同一 iteration の再 push は gate 迂回の温床 (低スコア push 後に
         # 高スコアで上書き)。再 push には差し替え理由を必須化する。旧 entry は履歴として残す。
         resubmit_reason = getattr(args, "resubmit_reason", None)
@@ -7878,6 +7879,19 @@ def cmd_mark_passes(args):
             except ValueError as exc:
                 print(f"ERROR: provenance: {exc}", file=sys.stderr)
                 sys.exit(2)
+            # Findings evidence must be reconciled before applying the High
+            # gate. A High finding caps its axis at 3.0, so evaluating the
+            # generic score gates first would make this dedicated safety gate
+            # unreachable for otherwise valid, reducer-derived evidence.
+            _validate_findings_evidence_gate(cwd, latest)
+            # Issue #3: unresolved High findings always prevent a pass.
+            open_high = latest.get("open_high") or 0
+            if open_high > 0:
+                print(
+                    f"ERROR: 未解決 High が {open_high} 件あるため合格にできません。High 指摘を全て解消してから再採点してください。",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
             composite = latest.get("composite")
             min_item = latest.get("min_item")
             if composite is None or composite < threshold:
@@ -7892,18 +7906,8 @@ def cmd_mark_passes(args):
                     file=sys.stderr,
                 )
                 sys.exit(2)
-            # Issue #121: scoring-json entry は aggregate-reviews が保存した findings evidence と open_high を再照合する。
-            _validate_findings_evidence_gate(cwd, latest)
             # Issue #126: reviewer agreement は composite から独立した gate として扱う。
             _validate_review_agreement_gate(latest)
-            # Issue #3: 未解決 High が残っている場合は合格にできない (後方互換: open_high 欠如 → 0 扱い → 通過)
-            open_high = latest.get("open_high") or 0
-            if open_high > 0:
-                print(
-                    f"ERROR: 未解決 High が {open_high} 件あるため合格にできません。High 指摘を全て解消してから再採点してください。",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
             artifact_error = _artifact_gate_error(data, cwd)
             if artifact_error:
                 print(f"ERROR: {artifact_error}", file=sys.stderr)

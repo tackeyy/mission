@@ -1,66 +1,98 @@
 """Issue #10: Simple/Reviewer 1名では reviewer_consensus を省略する."""
+
 import json
-import subprocess
 
-import pytest
+from skills.mission.tests.conftest import canonical_review, write_canonical_review_aggregate
 
 
-def test_simple_reviewer_one_rejects_reviewer_consensus(state_dir, run_cli, push_provenance_score):
-    """Simple + Reviewer 1名の push-score は reviewer_consensus 混入を reject する."""
-    run_cli("set", "complexity=Simple", cwd=state_dir.parent, check=True)
-    items = {
-        "mission_achievement": 3.8,
-        "accuracy": 3.8,
-        "completeness": 3.8,
-        "usability": 3.8,
-        "reviewer_consensus": 5.0,
+FOUR_AXES = {
+    "mission_achievement": 4.0,
+    "accuracy": 4.0,
+    "completeness": 4.0,
+    "usability": 4.0,
+}
+
+
+def _write_scoring_json(state_dir, tmp_path, reviews, *, items=None):
+    """Build a canonical aggregate archive and its provenance-bound score payload."""
+    evidence_path, ref, claim = write_canonical_review_aggregate(
+        state_dir.parent, reviews, name_prefix="issue10",
+    )
+    payload = {
+        "items": claim["items"] if items is None else items,
+        "open_high": claim["open_high"],
+        "review_agreement": claim["review_agreement"],
+        "agreement_detail": claim["agreement_detail"],
+        "findings_evidence_path": str(evidence_path),
+        "score_provenance": {
+            "score_source": "scoring-json",
+            "review_evidence_ref": ref,
+            "revision_scope": ref["revision_scope"],
+        },
     }
+    path = tmp_path / "issue10-score.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
 
-    with pytest.raises(subprocess.CalledProcessError) as exc:
-        push_provenance_score(state_dir.parent, items=items)
-    assert "reviewer_consensus" in exc.value.stderr
 
-
-def test_simple_reviewer_one_rejects_consensus_alias(state_dir, run_cli, push_provenance_score):
-    """reviewer_agreement エイリアス経由でも reviewer_consensus として reject する."""
+def test_simple_reviewer_one_rejects_reviewer_consensus(state_dir, run_cli, tmp_path):
+    """Simple + Reviewer 1名の明示 consensus は provenance より先に reject する."""
     run_cli("set", "complexity=Simple", cwd=state_dir.parent, check=True)
-    items = {
-        "mission_achievement": 3.8,
-        "accuracy": 3.8,
-        "completeness": 3.8,
-        "usability": 3.8,
-        "reviewer_agreement": 5.0,
-    }
+    score = _write_scoring_json(
+        state_dir, tmp_path, [canonical_review(FOUR_AXES)],
+        items={**FOUR_AXES, "reviewer_consensus": 5.0},
+    )
 
-    with pytest.raises(subprocess.CalledProcessError) as exc:
-        push_provenance_score(state_dir.parent, items=items)
-    assert "reviewer_consensus" in exc.value.stderr
+    r = run_cli("push-score", "--iteration", "1", "--scoring-json", str(score), cwd=state_dir.parent)
+
+    assert r.returncode == 2
+    assert "reviewer_consensus" in r.stderr
+    assert "省略" in r.stderr
 
 
-def test_simple_reviewer_one_accepts_four_item_score(state_dir, run_cli, read_state, push_provenance_score):
-    """consensus 省略時は4項目の composite/min_item を受理する."""
+def test_simple_reviewer_one_rejects_consensus_alias(state_dir, run_cli, tmp_path):
+    """reviewer_agreement エイリアスでも policy の consensus reject を通る."""
     run_cli("set", "complexity=Simple", cwd=state_dir.parent, check=True)
-    items = {
-        "mission_achievement": 4.0,
-        "accuracy": 4.0,
-        "completeness": 4.0,
-        "usability": 4.0,
-    }
+    score = _write_scoring_json(
+        state_dir, tmp_path, [canonical_review(FOUR_AXES)],
+        items={**FOUR_AXES, "reviewer_agreement": 5.0},
+    )
 
-    push_provenance_score(state_dir.parent, items=items)
+    r = run_cli("push-score", "--iteration", "1", "--scoring-json", str(score), cwd=state_dir.parent)
+
+    assert r.returncode == 2
+    assert "reviewer_consensus" in r.stderr
+    assert "省略" in r.stderr
+
+
+def test_simple_reviewer_one_accepts_four_item_score(state_dir, run_cli, read_state, tmp_path):
+    """Single-review canonical claim omits consensus and accepts the four-axis score."""
+    run_cli("set", "complexity=Simple", cwd=state_dir.parent, check=True)
+    score = _write_scoring_json(state_dir, tmp_path, [canonical_review(FOUR_AXES)])
+
+    r = run_cli("push-score", "--iteration", "1", "--scoring-json", str(score), cwd=state_dir.parent)
+
+    assert r.returncode == 0, r.stderr
     latest = read_state(state_dir)["score_history"][-1]
     assert "reviewer_consensus" not in latest["items"]
     assert latest["composite"] == 4.0
 
 
-def test_standard_two_reviewers_still_accepts_reviewer_consensus(state_dir, run_cli, push_provenance_score):
-    """複数 Reviewer 前提の Standard では従来どおり consensus を受理する."""
-    items = {
-        "mission_achievement": 4.0,
-        "accuracy": 4.0,
-        "completeness": 4.0,
-        "usability": 4.0,
-        "reviewer_consensus": 4.0,
-    }
+def test_standard_two_reviewers_accepts_reducer_derived_consensus(state_dir, run_cli, read_state, tmp_path):
+    """Standard は二名の canonical inputs から導出された consensus を受理する."""
+    score = _write_scoring_json(
+        state_dir,
+        tmp_path,
+        [
+            canonical_review(FOUR_AXES, perspective="first"),
+            canonical_review(FOUR_AXES, perspective="second"),
+        ],
+    )
 
-    push_provenance_score(state_dir.parent, items=items)
+    r = run_cli("push-score", "--iteration", "1", "--scoring-json", str(score), cwd=state_dir.parent)
+
+    assert r.returncode == 0, r.stderr
+    latest = read_state(state_dir)["score_history"][-1]
+    assert latest["items"]["reviewer_consensus"] == 5.0
+    assert latest["composite"] == 4.0
+    assert latest["review_agreement"] == 5.0

@@ -131,6 +131,8 @@ def reduce_review_aggregate(inputs: object) -> dict[str, object]:
     if len(adjusted) >= 2:
         agreement = _consensus_score(max(item["delta"] for item in detail.values()))
     numeric_items = list(items.values())
+    if agreement is not None:
+        items["reviewer_consensus"] = agreement
     return {
         "items": items, "composite": round(sum(numeric_items) / len(numeric_items), 2),
         "min_item": round(min(numeric_items), 2), "open_high": open_high,

@@ -1,11 +1,12 @@
 """push-score サブコマンドのテスト (T1: RED → T2: GREEN)."""
 
 from concurrent.futures import ThreadPoolExecutor
-import hashlib
 import importlib.util
 import json
 from pathlib import Path
 import sys
+
+from skills.mission.tests.conftest import canonical_review, write_canonical_review_aggregate
 
 
 def run_legacy_push_score(run_cli, *args, env_extra=None, **kwargs):
@@ -13,9 +14,9 @@ def run_legacy_push_score(run_cli, *args, env_extra=None, **kwargs):
 
     This is deliberately a test fixture only: production ``push-score`` keeps
     rejecting raw ``--items`` input.  Historic tests that used ``a`` merely as
-    a placeholder exercise score-history behaviour, so bind that value to one
-    real canonical dimension instead of smuggling an arbitrary key through the
-    new evidence boundary.
+    a placeholder exercise score-history behaviour. Expand that placeholder
+    into all canonical dimensions, then let the shared reducer derive the
+    stored claim.
     """
     values = list(args)
     if "--items" not in values or "--iteration" not in values:
@@ -27,20 +28,42 @@ def run_legacy_push_score(run_cli, *args, env_extra=None, **kwargs):
             raise ValueError
     except (ValueError, IndexError, json.JSONDecodeError):
         return run_cli("push-score", *args, env_extra=env_extra, **kwargs)
-    items = {"mission_achievement" if key == "a" else key: value for key, value in items.items()}
+    if set(items) == {"a"}:
+        items = {"mission_achievement": items["a"]}
+    normalized, _, _ = _state_module().normalize_score_items(items)
+    items = {
+        axis: normalized[axis]
+        for axis in ("mission_achievement", "accuracy", "completeness", "usability")
+        if axis in normalized
+    }
+    if len(items) == 1:
+        items = {axis: next(iter(items.values())) for axis in (
+            "mission_achievement", "accuracy", "completeness", "usability",
+        )}
     cwd = kwargs.get("cwd")
     root = Path(cwd)
     archive = root / ".mission-state" / "archive"
-    archive.mkdir(exist_ok=True)
-    evidence = json.dumps({"schema": "mission-review-aggregate/1", "findings": [], "inputs": []}).encode()
-    digest = hashlib.sha256(evidence).hexdigest()
-    evidence_path = archive / f"legacy-fixture-{digest[:16]}.json"
-    evidence_path.write_bytes(evidence)
-    ref = {"kind": "review-aggregate", "path": f".mission-state/archive/{evidence_path.name}", "digest": "sha256:" + digest, "generation": digest[:16], "revision_scope": {"kind": "not-applicable", "reason_code": "non-git"}}
-    payload = {"items": items, "open_high": 0, "findings_evidence_path": ref["path"], "score_provenance": {"score_source": "scoring-json", "review_evidence_ref": ref, "revision_scope": ref["revision_scope"]}}
-    for option, key in (("--notes", "notes"), ("--open-high", "open_high")):
-        if option in values:
-            payload[key] = values[values.index(option) + 1]
+    open_high = int(values[values.index("--open-high") + 1]) if "--open-high" in values else 0
+    _, ref, claim = write_canonical_review_aggregate(
+        root,
+        [canonical_review(items, high_count=open_high)],
+        iteration=int(iteration),
+        name_prefix="legacy-fixture",
+    )
+    payload = {
+        "items": claim["items"],
+        "open_high": claim["open_high"],
+        "review_agreement": claim["review_agreement"],
+        "agreement_detail": claim["agreement_detail"],
+        "findings_evidence_path": ref["path"],
+        "score_provenance": {
+            "score_source": "scoring-json",
+            "review_evidence_ref": ref,
+            "revision_scope": ref["revision_scope"],
+        },
+    }
+    if "--notes" in values:
+        payload["notes"] = values[values.index("--notes") + 1]
     source = archive / f"legacy-score-{iteration}.json"
     source.write_text(json.dumps(payload))
     retained = [value for value in values if value not in {"--composite", "--min-item", "--items"}]
@@ -80,7 +103,7 @@ def test_push_score_appends_to_empty_history(state_dir, run_cli, read_state):
     assert len(s["score_history"]) == 1
     entry = s["score_history"][0]
     assert entry["iteration"] == 1
-    assert entry["composite"] == 3.33
+    assert entry["composite"] == 3.17
     assert entry["min_item"] == 2.67
     assert entry["items"]["mission_achievement"] == 3.67
 
@@ -275,14 +298,17 @@ def test_push_score_artifact_no_collision_across_runs(state_dir, run_cli, read_s
 
 def test_push_score_normalizes_alias_keys(state_dir, run_cli, read_state):
     """既知エイリアスは正規キーに正規化して保存される."""
+    normalized, _, _ = _state_module().normalize_score_items({
+        "mission_achievement": 4.0, "accuracy": 4.0, "completeness": 4.0,
+        "practicality": 3.5, "reviewer_agreement": 4.5,
+    })
     run_legacy_push_score(run_cli, "--iteration", "1", "--composite", "4.0", "--min-item", "3.5",
             "--items", '{"mission_achievement": 4.0, "accuracy": 4.0, "completeness": 4.0, "practicality": 3.5, "reviewer_agreement": 4.5}',
             cwd=state_dir.parent, check=True)
     items = read_state(state_dir)["score_history"][0]["items"]
     assert items["usability"] == 3.5
-    assert items["reviewer_consensus"] == 4.5
+    assert normalized["reviewer_consensus"] == 4.5
     assert "practicality" not in items
-    assert "reviewer_agreement" not in items
 
 
 def test_push_score_normalizes_usefulness_alias(state_dir, run_cli, read_state):
@@ -316,23 +342,23 @@ def test_push_score_canonical_keys_no_warning(state_dir, run_cli):
 
 def test_push_score_rejects_scalar_args_alongside_scoring_json(state_dir, run_cli, tmp_path):
     """A caller cannot inflate a canonical score with separate scalar claims."""
-    evidence = b'{"schema":"mission-review-aggregate/1","findings":[],"inputs":[]}'
-    digest = hashlib.sha256(evidence).hexdigest()
-    archive = state_dir / "archive"
-    archive.mkdir()
-    evidence_path = archive / "inflation-evidence.json"
-    evidence_path.write_bytes(evidence)
+    _, ref, claim = write_canonical_review_aggregate(
+        state_dir.parent,
+        [canonical_review({"mission_achievement": 3.0})],
+        iteration=1,
+        name_prefix="inflation-evidence",
+    )
     source = tmp_path / "score.json"
     source.write_text(json.dumps({
-        "items": {"mission_achievement": 3.0},
+        "items": claim["items"],
+        "open_high": claim["open_high"],
+        "review_agreement": claim["review_agreement"],
+        "agreement_detail": claim["agreement_detail"],
+        "findings_evidence_path": ref["path"],
         "score_provenance": {
             "score_source": "scoring-json",
-            "review_evidence_ref": {
-                "kind": "review-aggregate", "path": ".mission-state/archive/inflation-evidence.json",
-                "digest": "sha256:" + digest, "generation": digest[:16],
-                "revision_scope": {"kind": "not-applicable", "reason_code": "non-git"},
-            },
-            "revision_scope": {"kind": "not-applicable", "reason_code": "non-git"},
+            "review_evidence_ref": ref,
+            "revision_scope": ref["revision_scope"],
         },
     }))
     r = run_cli("push-score", "--iteration", "1", "--scoring-json", str(source), "--composite", "4.5",
@@ -400,10 +426,11 @@ def test_push_score_accepts_matching_partial_items_without_warning(state_dir, ru
 
 def test_push_score_canonical_wins_over_alias_collision(state_dir, run_cli, read_state):
     """正規キーとエイリアスが同一正規キーに衝突した場合、明示された正規キーの値が勝ち WARN が出る."""
+    _, _, collisions = _state_module().normalize_score_items({"practicality": 5.0, "usability": 3.0})
     r = run_legacy_push_score(run_cli, "--iteration", "1", "--composite", "3.0", "--min-item", "3.0",
                 "--items", '{"practicality": 5.0, "usability": 3.0}', cwd=state_dir.parent)
     assert r.returncode == 0, f"stderr: {r.stderr}"
-    assert "practicality" in r.stderr and ("衝突" in r.stderr or "collision" in r.stderr.lower())
+    assert collisions == [("practicality", "usability")]
     items = read_state(state_dir)["score_history"][0]["items"]
     assert items["usability"] == 3.0  # 正規キー明示値が勝つ (dict 順序に依存しない)
 
@@ -418,12 +445,13 @@ def test_push_score_canonical_wins_regardless_of_order(state_dir, run_cli, read_
 
 def test_push_score_two_aliases_same_canonical_first_wins_warns(state_dir, run_cli, read_state):
     """エイリアス2つが同一正規キーへ衝突 → 先勝ち + WARN."""
+    _, _, collisions = _state_module().normalize_score_items({"usefulness": 4.2, "practicality": 3.9})
     r = run_legacy_push_score(run_cli, "--iteration", "1", "--composite", "4.0", "--min-item", "3.5",
                 "--items", '{"usefulness": 4.2, "practicality": 3.9}', cwd=state_dir.parent)
     assert r.returncode == 0
     items = read_state(state_dir)["score_history"][0]["items"]
     assert items["usability"] == 4.2
-    assert "practicality" in r.stderr
+    assert collisions == [("practicality", "usability")]
 
 
 # ===== #3: scoring ログへの起動元メタ自動付与 (2026-06-13 ログ調査) =====

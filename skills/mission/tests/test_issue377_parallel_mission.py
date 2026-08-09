@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from skills.mission.tests.conftest import canonical_review, write_canonical_review_aggregate
+
 HOOK = Path(__file__).resolve().parents[3] / "scripts" / "mission-stop-guard.sh"
 MISSION_STATE_PY = Path(__file__).resolve().parent.parent / "bin" / "mission-state.py"
 
@@ -168,14 +170,19 @@ def test_parallel_mark_passes_only_finishes_own_session(tmp_path):
 
     # sid_a に push-score を積み mark-passes できる状態にする
     archive = tmp_path / ".mission-state" / "archive"
-    archive.mkdir(exist_ok=True)
-    evidence = json.dumps({"schema": "mission-review-aggregate/1", "findings": [], "inputs": []}).encode()
-    digest = hashlib.sha256(evidence).hexdigest()
-    evidence_name = f"fixture-{digest[:16]}.json"
-    (archive / evidence_name).write_bytes(evidence)
-    ref = {"kind": "review-aggregate", "path": f".mission-state/archive/{evidence_name}", "digest": "sha256:" + digest, "generation": digest[:16], "revision_scope": {"kind": "not-applicable", "reason_code": "non-git"}}
+    review_items = json.loads(_ITEMS)
+    review_items.pop("reviewer_consensus")
+    _, ref, claim = write_canonical_review_aggregate(
+        tmp_path, [canonical_review(review_items)], name_prefix="fixture",
+    )
     score = archive / "fixture-score.json"
-    score.write_text(json.dumps({"items": json.loads(_ITEMS), "open_high": 0, "findings_evidence_path": ref["path"], "score_provenance": {"score_source": "scoring-json", "review_evidence_ref": ref, "revision_scope": ref["revision_scope"]}}))
+    score.write_text(json.dumps({
+        "items": claim["items"], "open_high": claim["open_high"],
+        "review_agreement": claim["review_agreement"], "agreement_detail": claim["agreement_detail"],
+        "findings_evidence_path": ref["path"],
+        "score_provenance": {"score_source": "scoring-json", "review_evidence_ref": ref,
+                             "revision_scope": ref["revision_scope"]},
+    }))
     r_push = _run_state(["push-score", "--iteration", "1", "--scoring-json", str(score)], tmp_path, session_id=sid_a, lease_id=lease_a)
     assert r_push.returncode == 0, f"push-score stderr: {r_push.stderr}"
 

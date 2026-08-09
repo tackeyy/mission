@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
+
+from skills.mission.tests.conftest import canonical_review, write_canonical_review_aggregate
 
 
 ITEMS = {
@@ -15,51 +16,26 @@ ITEMS = {
 
 
 def _write_evidence(state_dir, *, high_count=0):
-    findings = [
-        {
-            "id": f"H-{i}",
-            "severity": "High",
-            "axis": "accuracy",
-            "summary": "High finding",
-            "evidence": "file.py:1 `bad()`",
-            "recommendation": "Fix it",
-        }
-        for i in range(high_count)
-    ]
-    evidence = {
-        "schema": "mission-review-aggregate/1",
-        "iteration": 1,
-        "inputs": [
-            {
-                "schema": "mission-review/1",
-                "perspective": "A",
-                "iteration": 1,
-                "scores": ITEMS,
-                "findings": findings,
-            }
-        ],
-    }
-    path = state_dir / "archive" / "iter-1-abc12345-reviews.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(evidence), encoding="utf-8")
-    return path
+    return write_canonical_review_aggregate(
+        state_dir.parent,
+        [canonical_review(ITEMS, perspective="A", high_count=high_count)],
+        name_prefix="findings-gate",
+    )
 
 
-def _write_scoring_json(tmp_path, evidence_path=None, *, open_high=0):
+def _write_scoring_json(tmp_path, evidence=None, *, open_high=None, record_findings_evidence=True):
+    if evidence is None:
+        evidence = _write_evidence(tmp_path / ".mission-state", high_count=0)
+    evidence_path, ref, claim = evidence
     payload = {
-        "items": ITEMS,
-        "open_high": open_high,
+        "items": claim["items"],
+        "open_high": claim["open_high"] if open_high is None else open_high,
+        "review_agreement": claim["review_agreement"],
+        "agreement_detail": claim["agreement_detail"],
         "notes": "aggregate-reviews test payload",
     }
-    if evidence_path is not None:
+    if record_findings_evidence:
         payload["findings_evidence_path"] = str(evidence_path)
-    if evidence_path is None:
-        evidence_path = _write_evidence(tmp_path / ".mission-state", high_count=0)
-    evidence = evidence_path.read_bytes()
-    digest = hashlib.sha256(evidence).hexdigest()
-    ref = {"kind": "review-aggregate", "path": str(evidence_path.relative_to(tmp_path)),
-           "digest": "sha256:" + digest, "generation": digest[:16],
-           "revision_scope": {"kind": "not-applicable", "reason_code": "non-git"}}
     payload["score_provenance"] = {"score_source": "scoring-json", "review_evidence_ref": ref,
                                    "revision_scope": ref["revision_scope"]}
     path = tmp_path / "scoring.json"
@@ -74,11 +50,12 @@ def test_push_score_records_findings_evidence_path(state_dir, run_cli, read_stat
     run_cli("push-score", "--iteration", "1", "--scoring-json", str(scoring), cwd=state_dir.parent, check=True)
 
     latest = read_state(state_dir)["score_history"][-1]
-    assert latest["findings_evidence_path"] == str(evidence)
+    assert latest["findings_evidence_path"] == str(evidence[0])
 
 
 def test_mark_passes_rejects_scoring_json_missing_findings_evidence_path(state_dir, run_cli, read_state, tmp_path):
-    scoring = _write_scoring_json(tmp_path, evidence_path=None, open_high=0)
+    evidence = _write_evidence(state_dir, high_count=0)
+    scoring = _write_scoring_json(tmp_path, evidence, open_high=0, record_findings_evidence=False)
     run_cli("push-score", "--iteration", "1", "--scoring-json", str(scoring), cwd=state_dir.parent, check=True)
 
     r = run_cli("mark-passes", cwd=state_dir.parent)
@@ -88,15 +65,14 @@ def test_mark_passes_rejects_scoring_json_missing_findings_evidence_path(state_d
     assert read_state(state_dir)["passes"] is False
 
 
-def test_mark_passes_rejects_findings_evidence_open_high_mismatch(state_dir, run_cli, read_state, tmp_path):
+def test_push_score_rejects_findings_evidence_open_high_mismatch(state_dir, run_cli, read_state, tmp_path):
     evidence = _write_evidence(state_dir, high_count=1)
     scoring = _write_scoring_json(tmp_path, evidence, open_high=0)
-    run_cli("push-score", "--iteration", "1", "--scoring-json", str(scoring), cwd=state_dir.parent, check=True)
-
-    r = run_cli("mark-passes", cwd=state_dir.parent)
+    r = run_cli("push-score", "--iteration", "1", "--scoring-json", str(scoring), cwd=state_dir.parent)
 
     assert r.returncode == 2
-    assert "High 件数" in r.stderr
+    assert "score claim mismatch" in r.stderr
+    assert read_state(state_dir)["score_history"] == []
     assert read_state(state_dir)["passes"] is False
 
 
@@ -126,7 +102,8 @@ def test_active_legacy_entry_without_provenance_cannot_mark_passes(state_dir, ru
 
 
 def test_mark_passes_force_bypasses_missing_findings_evidence(state_dir, run_cli, read_state, tmp_path):
-    scoring = _write_scoring_json(tmp_path, evidence_path=None, open_high=0)
+    evidence = _write_evidence(state_dir, high_count=0)
+    scoring = _write_scoring_json(tmp_path, evidence, open_high=0, record_findings_evidence=False)
     run_cli("push-score", "--iteration", "1", "--scoring-json", str(scoring), cwd=state_dir.parent, check=True)
 
     r = run_cli("mark-passes", "--force", "--reason", "manual override in test", "--approved-by-user",

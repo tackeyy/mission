@@ -60,6 +60,27 @@ def test_review_aggregate_reducer_rejects_duplicate_perspective_and_non_finite_s
         reduce_review_aggregate([invalid])
 
 
+def test_review_aggregate_reducer_derives_consensus_item_only_for_multiple_reviewers():
+    """Consensus item is reducer-derived only for independent multi-review input."""
+    from scoring_provenance import reduce_review_aggregate
+
+    first = {
+        "perspective": "first", "scores": ITEMS, "findings": [],
+        "same_score_note": None,
+    }
+    second = {
+        "perspective": "second", "scores": ITEMS, "findings": [],
+        "same_score_note": None,
+    }
+
+    single = reduce_review_aggregate([first])
+    multiple = reduce_review_aggregate([first, second])
+
+    assert "reviewer_consensus" not in single["items"]
+    assert multiple["items"]["reviewer_consensus"] == 5.0
+    assert multiple["composite"] == 4.25
+
+
 def _review(path):
     payload = {
         "schema": "mission-review/1", "perspective": "neutral",

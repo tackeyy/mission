@@ -9,6 +9,72 @@ from pathlib import Path
 import pytest
 
 MISSION_STATE_PY = Path(__file__).resolve().parent.parent / "bin" / "mission-state.py"
+MISSION_LIB = MISSION_STATE_PY.parent.parent / "lib"
+if str(MISSION_LIB) not in sys.path:
+    sys.path.insert(0, str(MISSION_LIB))
+
+from scoring_provenance import reduce_review_aggregate
+
+
+REVIEW_SCORE_KEYS = ("mission_achievement", "accuracy", "completeness", "usability")
+
+
+def write_canonical_review_aggregate(root, reviews, *, iteration=1, name_prefix="fixture"):
+    """Write a content-addressed aggregate whose claim is reducer-derived.
+
+    Tests that model a current scoring decision must archive complete
+    ``mission-review/1`` inputs, rather than an empty legacy aggregate.  Keep
+    the reducer as the single definition of claim semantics.
+    """
+    aggregate = {
+        "schema": "mission-review-aggregate/1",
+        "iteration": iteration,
+        "inputs": reviews,
+    }
+    aggregate["score_claim"] = {"iteration": iteration, **reduce_review_aggregate(reviews)}
+    content = (json.dumps(aggregate, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    digest = hashlib.sha256(content).hexdigest()
+    archive = Path(root) / ".mission-state" / "archive"
+    archive.mkdir(parents=True, exist_ok=True)
+    path = archive / f"{name_prefix}-{digest[:16]}.json"
+    path.write_bytes(content)
+    scope = {"kind": "not-applicable", "reason_code": "non-git"}
+    ref = {
+        "kind": "review-aggregate",
+        "path": str(path.relative_to(root)),
+        "digest": "sha256:" + digest,
+        "generation": digest[:16],
+        "revision_scope": scope,
+    }
+    return path, ref, aggregate["score_claim"]
+
+
+def canonical_review(scores, *, perspective="fixture", high_count=0):
+    """Return one valid current review input for aggregate fixture setup."""
+    def fixture_score(value):
+        return value if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 5 else 4.0
+
+    normalized = {
+        "mission_achievement": fixture_score(scores.get("mission_achievement", 4.0)),
+        "accuracy": fixture_score(scores.get("accuracy", 4.0)),
+        "completeness": fixture_score(scores.get("completeness", 4.0)),
+        "usability": fixture_score(scores.get("usability", scores.get("practicality", 4.0))),
+    }
+    findings = [
+        {"id": f"{perspective}-H-{index}", "severity": "High", "axis": "accuracy"}
+        for index in range(high_count)
+    ]
+    review = {
+        "schema": "mission-review/1",
+        "perspective": perspective,
+        "iteration": 1,
+        "scores": normalized,
+        "findings": findings,
+        "same_score_note": None,
+    }
+    if len(set(normalized.values())) == 1:
+        review["same_score_note"] = "axis-specific fixture review"
+    return review
 
 # Claude Code/Codex のセッション識別 env。実運用では multi-session を自動有効化するが、
 # テストは legacy 既定で動かすため隔離する (明示テストは env_extra/monkeypatch で注入)。
@@ -105,20 +171,31 @@ def run_cli(tmp_path):
                 except (ValueError, IndexError):
                     return default
             composite, minimum = float(option("--composite", "4.5")), float(option("--min-item", "4.5"))
-            other = (3 * composite - minimum) / 2
-            items = {"mission_achievement": minimum, "accuracy": other, "completeness": other}
+            other = (4 * composite - minimum) / 3
+            items = {
+                "mission_achievement": minimum,
+                "accuracy": other,
+                "completeness": other,
+                "usability": other,
+            }
             if all(0 <= value <= 5 for value in items.values()):
                 open_high = int(option("--open-high", "0"))
+                _, ref, claim = write_canonical_review_aggregate(
+                    command_cwd,
+                    [canonical_review(items, high_count=open_high)],
+                    iteration=int(option("--iteration", "1")),
+                    name_prefix="legacy-normalized",
+                )
                 archive = command_cwd / ".mission-state" / "archive"
-                archive.mkdir(exist_ok=True)
-                evidence = json.dumps({"schema": "mission-review-aggregate/1", "findings": [], "inputs": [{"findings": [{"severity": "High"}] * open_high}]}).encode()
-                digest = hashlib.sha256(evidence).hexdigest()
-                name = f"legacy-normalized-{digest[:16]}.json"
-                (archive / name).write_bytes(evidence)
-                scope = {"kind": "not-applicable", "reason_code": "non-git"}
-                ref = {"kind": "review-aggregate", "path": f".mission-state/archive/{name}", "digest": "sha256:" + digest, "generation": digest[:16], "revision_scope": scope}
                 score = archive / f"legacy-normalized-score-{option('--iteration', '1')}.json"
-                score.write_text(json.dumps({"items": items, "open_high": open_high, "findings_evidence_path": ref["path"], "score_provenance": {"score_source": "scoring-json", "review_evidence_ref": ref, "revision_scope": scope}}))
+                score.write_text(json.dumps({
+                    "items": claim["items"], "open_high": claim["open_high"],
+                    "review_agreement": claim["review_agreement"],
+                    "agreement_detail": claim["agreement_detail"],
+                    "findings_evidence_path": ref["path"],
+                    "score_provenance": {"score_source": "scoring-json", "review_evidence_ref": ref,
+                                         "revision_scope": ref["revision_scope"]},
+                }))
                 cleaned = []
                 skip = False
                 for value in command_args:
@@ -150,15 +227,21 @@ def push_provenance_score(run_cli):
             sid = "cc-" + env_extra["CLAUDE_CODE_SESSION_ID"]
         state = json.loads((root / ".mission-state" / "sessions" / f"{sid}.json").read_text())
         values = items or {"mission_achievement": 4.5, "accuracy": 4.5, "completeness": 4.5, "usability": 4.5}
+        _, ref, claim = write_canonical_review_aggregate(
+            root,
+            [canonical_review(values, high_count=open_high)],
+            iteration=iteration,
+            name_prefix=f"fixture-{sid}",
+        )
         archive = root / ".mission-state" / "archive"
-        archive.mkdir(exist_ok=True)
-        evidence = json.dumps({"schema": "mission-review-aggregate/1", "findings": [], "inputs": [{"findings": [{"severity": "High"}] * open_high}]}).encode()
-        digest = hashlib.sha256(evidence).hexdigest()
-        name = f"fixture-{sid}-{digest[:16]}.json"
-        (archive / name).write_bytes(evidence)
-        ref = {"kind": "review-aggregate", "path": f".mission-state/archive/{name}", "digest": "sha256:" + digest, "generation": digest[:16], "revision_scope": {"kind": "not-applicable", "reason_code": "non-git"}}
         scoring = archive / f"fixture-score-{sid}.json"
-        payload = {"items": values, "open_high": open_high, "findings_evidence_path": ref["path"], "score_provenance": {"score_source": "scoring-json", "review_evidence_ref": ref, "revision_scope": ref["revision_scope"]}}
+        payload = {
+            "items": claim["items"], "open_high": claim["open_high"],
+            "review_agreement": claim["review_agreement"], "agreement_detail": claim["agreement_detail"],
+            "findings_evidence_path": ref["path"],
+            "score_provenance": {"score_source": "scoring-json", "review_evidence_ref": ref,
+                                 "revision_scope": ref["revision_scope"]},
+        }
         if notes is not None:
             payload["notes"] = notes
         scoring.write_text(json.dumps(payload))
