@@ -307,8 +307,6 @@ def test_project_registry_can_disable_user_default_provider(run_cli, tmp_path):
 
 
 def test_recommend_supports_command_provider_yaml_schema(run_cli, tmp_path):
-    helper = tmp_path / "reviewer.py"
-    helper.write_text("import sys; print('reviewed', len(sys.stdin.read()))\n", encoding="utf-8")
     project_registry = tmp_path / ".mission" / "specialists.yml"
     project_registry.parent.mkdir()
     project_registry.write_text("\n".join([
@@ -316,8 +314,8 @@ def test_recommend_supports_command_provider_yaml_schema(run_cli, tmp_path):
         "specialists:",
         "  - role: oracle-reviewer",
         "    kind: command",
-        f"    command: {sys.executable}",
-        f"    args: [{helper}]",
+        "    command: printf",
+        "    args: []",
         "    task_profiles: [documentation, architecture]",
         "    phases: [planning, review, critic]",
         "    required: false",
@@ -343,9 +341,9 @@ def test_recommend_supports_command_provider_yaml_schema(run_cli, tmp_path):
     selected = data["specialists_selected"][0]
     assert selected["kind"] == "command"
     assert selected["skill"] == "oracle-reviewer"
-    assert selected["command"] == sys.executable
-    assert selected["args"] == [str(helper)]
-    assert selected["max_calls_per_iteration"] == "1"
+    assert selected["command"] == "printf"
+    assert selected["args"] == []
+    assert "max_calls_per_iteration" not in selected
 
 
 def test_recommend_classifies_architecture_profile(run_cli, tmp_path):
@@ -387,8 +385,8 @@ def test_risk_first_use_consent_allowlist_enables_auto_selection(run_cli, tmp_pa
         "specialists": [{
             "role": "paid-reviewer",
             "kind": "command",
-            "command": sys.executable,
-            "args": ["-c", "print('ok')"],
+            "command": "true",
+            "args": [],
             "task_profiles": ["documentation"],
             "risk": {"first_use_confirmation": True, "may_consume_paid_quota": True},
         }],
@@ -436,7 +434,7 @@ def test_missing_command_provider_degrades_to_core_reviewers(run_cli, tmp_path):
         "specialists": [{
             "role": "missing-reviewer",
             "kind": "command",
-            "command": str(tmp_path / "missing-command"),
+            "command": "mission-provider-not-installed",
             "task_profiles": ["documentation", "testing", "infra"],
             "unavailable": "continue",
         }],

@@ -149,6 +149,114 @@ def _archive(run_cli, worktree: Path, destination: Path):
     )
 
 
+def test_archive_worktree_refuses_unsafe_legacy_specialist_state(run_cli, tmp_path):
+    worktree, destination = _make_completed_worktree(tmp_path)
+    state_file = worktree / ".mission-state" / "sessions" / f"{SESSION_ID}.json"
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    private_marker = str(tmp_path / "private-temp" / "legacy-archive-provider")
+    state["specialists_candidates"] = [
+        {
+            "provider_id": "legacy-command-provider",
+            "role": "deep-planning",
+            "skill": "legacy-command-provider",
+            "kind": "command",
+            "command": private_marker,
+            "args": [],
+            "env": {},
+        }
+    ]
+    state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+    result = _archive(run_cli, worktree, destination)
+
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    assert private_marker not in result.stdout
+    assert private_marker not in result.stderr
+    data = json.loads(result.stdout)
+    assert data["reason_code"] == "unsafe-legacy-specialist-record"
+    assert data["field_path"] == "/specialists_candidates/0/command"
+    assert not list((destination / ".mission-state" / "archive").glob("worktree-*"))
+
+
+def test_audit_snapshot_refuses_unsafe_legacy_specialist_state(tmp_path):
+    worktree, _destination = _make_completed_worktree(tmp_path)
+    state_file = worktree / ".mission-state" / "sessions" / f"{SESSION_ID}.json"
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    private_marker = str(tmp_path / "private-temp" / "legacy-audit-provider")
+    state["specialists_candidates"] = [
+        {
+            "provider_id": "legacy-command-provider",
+            "role": "deep-planning",
+            "skill": "legacy-command-provider",
+            "kind": "command",
+            "command": private_marker,
+            "args": [],
+            "env": {},
+        }
+    ]
+    state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    snapshot = tmp_path / "audit-snapshot.json"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root", str(worktree),
+            "--snapshot-out", str(snapshot),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    assert private_marker not in result.stdout
+    assert private_marker not in result.stderr
+    data = json.loads(result.stdout)
+    assert data["reason_code"] == "unsafe-legacy-specialist-record"
+    assert data["field_path"] == "/specialists_candidates/0/command"
+    assert not snapshot.exists()
+
+
+def test_audit_snapshot_consumer_refuses_unsafe_specialist_record(
+    tmp_path, monkeypatch
+):
+    worktree, _destination = _make_completed_worktree(tmp_path)
+    snapshot = tmp_path / "audit-snapshot.json"
+    audit = _load_audit_module("mission_audit_snapshot_consumer_hygiene")
+    audit.create_state_snapshot([worktree], snapshot, ttl_seconds=3600)
+    document, roots, observed = audit.consume_snapshot_document(
+        snapshot,
+        requested_roots=None,
+        root_inventory_loader=audit._root_metadata_inventory,
+        evidence_inventory_loader=audit._external_evidence_inventory,
+    )
+    private_marker = str(tmp_path / "private-temp" / "snapshot-provider")
+    document["records"][0]["state"]["specialists_candidates"] = [
+        {
+            "provider_id": "legacy-command-provider",
+            "kind": "command",
+            "command": private_marker,
+            "args": [],
+            "env": {},
+        }
+    ]
+    monkeypatch.setattr(
+        audit,
+        "consume_snapshot_document",
+        lambda *args, **kwargs: (document, roots, observed),
+    )
+
+    with pytest.raises(audit.SpecialistPublicContractError) as error:
+        audit.consume_state_snapshot(snapshot, None)
+
+    assert error.value.field_path == "/specialists_candidates/0/command"
+    assert private_marker not in str(error.value)
+
+
 def _run_audit(root: Path) -> dict:
     result = subprocess.run(
         [sys.executable, str(MISSION_AUDIT_PY), "--root", str(root), "--since", "2026-07-20", "--json"],

@@ -52,6 +52,10 @@ from specialist_accounting import (  # noqa: E402
 )
 from activity_segments import summarize_activity_states  # noqa: E402
 from artifact_contract import summarize_artifact_coverage  # noqa: E402
+from provider_public_contract import (  # noqa: E402
+    SpecialistPublicContractError,
+    validate_specialist_public_state,
+)
 from audit_findings import (  # noqa: E402
     AuditFinding,
     FindingSpec,
@@ -1015,6 +1019,7 @@ def load_records(
                     continue
             if not is_mission_state(state):
                 continue
+            validate_specialist_public_state(state)
             records.append(
                 StateRecord(
                     path=path,
@@ -1249,6 +1254,8 @@ def consume_state_snapshot(
         _record_from_payload(item, document["archive_validations"])
         for item in document["records"]
     ]
+    for record in records:
+        validate_specialist_public_state(record.state)
     invalid = document["invalid_worktree_archives"]
     return records, invalid, roots, observed
 
@@ -3175,6 +3182,17 @@ def main(argv: list[str] | None = None) -> int:
                 records,
                 discovered_invalid_archives,
             )
+    except SpecialistPublicContractError as error:
+        payload = {
+            "ok": False,
+            "reason_code": "unsafe-legacy-specialist-record",
+            "field_path": error.field_path,
+        }
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False))
+        else:
+            print(json.dumps(payload, ensure_ascii=False), file=sys.stderr)
+        return 2
     except SnapshotError as error:
         print(f"ERROR: invalid state snapshot: {error}", file=sys.stderr)
         return 2

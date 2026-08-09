@@ -8,6 +8,8 @@
   skills/mission/lib/activity_segments.py
   skills/mission/lib/audit_findings.py
   skills/mission/lib/mission_common.py
+  skills/mission/lib/provider_eligibility.py
+  skills/mission/lib/provider_public_contract.py
   skills/mission/refs/specialist-registry.md (存在する場合)
   skills/mission/refs/self-improvement.md
   skills/mission/refs/changelog.md
@@ -27,6 +29,8 @@
   plugins/mission/skills/mission/lib/activity_segments.py
   plugins/mission/skills/mission/lib/audit_findings.py
   plugins/mission/skills/mission/lib/mission_common.py
+  plugins/mission/skills/mission/lib/provider_eligibility.py
+  plugins/mission/skills/mission/lib/provider_public_contract.py
   plugins/mission/skills/mission/refs/specialist-registry.md (存在する場合)
   plugins/mission/skills/mission/refs/self-improvement.md
   plugins/mission/skills/mission/refs/changelog.md
@@ -45,6 +49,8 @@
   cp skills/mission/lib/activity_segments.py plugins/mission/skills/mission/lib/activity_segments.py
   cp skills/mission/lib/audit_findings.py plugins/mission/skills/mission/lib/audit_findings.py
   cp skills/mission/lib/mission_common.py plugins/mission/skills/mission/lib/mission_common.py
+  cp skills/mission/lib/provider_eligibility.py plugins/mission/skills/mission/lib/provider_eligibility.py
+  cp skills/mission/lib/provider_public_contract.py plugins/mission/skills/mission/lib/provider_public_contract.py
   cp skills/mission/refs/specialist-registry.md plugins/mission/skills/mission/refs/specialist-registry.md
   cp skills/mission/refs/self-improvement.md plugins/mission/skills/mission/refs/self-improvement.md
   cp skills/mission/refs/changelog.md plugins/mission/skills/mission/refs/changelog.md
@@ -56,7 +62,11 @@
   cp skills/mission-scorer/SKILL.md       plugins/mission/skills/mission-scorer/SKILL.md
 """
 import hashlib
+import importlib.util
+import json
 from pathlib import Path
+import subprocess
+import sys
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # mission-selfheal/
 
@@ -110,6 +120,14 @@ SYNC_PAIRS = [
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "refs" / "state-management.md",
     ),
     (
+        REPO_ROOT / "skills" / "mission" / "lib" / "provider_eligibility.py",
+        REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "provider_eligibility.py",
+    ),
+    (
+        REPO_ROOT / "skills" / "mission" / "lib" / "provider_public_contract.py",
+        REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "provider_public_contract.py",
+    ),
+    (
         REPO_ROOT / "skills" / "mission" / "lib" / "artifact_contract.py",
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "artifact_contract.py",
     ),
@@ -152,6 +170,16 @@ MISSION_STATE_DISTRIBUTION_MARKERS = [
 
 def _md5(path: Path) -> str:
     return hashlib.md5(path.read_bytes()).hexdigest()
+
+
+def _sync_pair_for(canonical_relative_path: str) -> tuple[Path, Path]:
+    canonical = REPO_ROOT / canonical_relative_path
+    matches = [pair for pair in SYNC_PAIRS if pair[0] == canonical]
+    assert len(matches) == 1, (
+        f"expected one sync inventory entry for {canonical_relative_path}, "
+        f"found {len(matches)}"
+    )
+    return matches[0]
 
 
 def _assert_optional_pair_in_sync(src: Path, dst: Path, label: str):
@@ -255,6 +283,65 @@ def test_state_snapshot_py_in_sync():
     )
 
 
+def test_provider_eligibility_py_in_sync_and_importable():
+    """Planning eligibility contract is inventoried and importable from the plugin."""
+    src, dst = _sync_pair_for("skills/mission/lib/provider_eligibility.py")
+    assert src.exists(), f"canonical file does not exist: {src}"
+    assert dst.exists(), f"plugin mirror does not exist: {dst}"
+    assert _md5(src) == _md5(dst), (
+        "provider_eligibility.py is not synchronized; run the plugin sync script"
+    )
+    spec = importlib.util.spec_from_file_location("plugin_provider_eligibility", dst)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    result = module.normalize_selection_source("auto")
+    assert result["selection_source"] == "automatic"
+
+
+def test_provider_public_contract_py_in_sync_and_importable():
+    """Public provider-state hygiene ships with every CLI and audit consumer."""
+    src, dst = _sync_pair_for("skills/mission/lib/provider_public_contract.py")
+    assert src.exists(), f"canonical file does not exist: {src}"
+    assert dst.exists(), f"plugin mirror does not exist: {dst}"
+    assert _md5(src) == _md5(dst), (
+        "provider_public_contract.py is not synchronized; run the plugin sync script"
+    )
+    spec = importlib.util.spec_from_file_location("plugin_provider_public_contract", dst)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    module.validate_specialist_public_state({"specialists_candidates": []})
+
+
+def test_plugin_mirror_specialist_recommend_cli_smoke(tmp_path):
+    """The distributed CLI imports its mirrored provider contract in a real process."""
+    cli = REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "bin" / "mission-state.py"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(cli),
+            "specialists",
+            "recommend",
+            "--no-default-skill-roots",
+            "--task",
+            "Update README documentation",
+            "--installed-skills",
+            "documentation-provider",
+            "--json",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["specialists_candidates"][0]["provider_id"] == "documentation-provider"
+
+
 def test_audit_findings_py_in_sync():
     """Shared finding period classifier is identical in the distribution mirror."""
     src, dst = SYNC_PAIRS[-2]
@@ -298,12 +385,15 @@ def test_state_management_reference_in_sync():
 
 def test_artifact_contract_distribution_files_in_sync():
     """Artifact validator and executor handoff contract are shipped together."""
-    for index, label in (
-        (12, "artifact_contract.py"),
-        (13, "mission-executor/SKILL.md"),
-        (14, "mission-executor/refs/artifact-handoff.md"),
+    for relative_path, label in (
+        ("skills/mission/lib/artifact_contract.py", "artifact_contract.py"),
+        ("skills/mission-executor/SKILL.md", "mission-executor/SKILL.md"),
+        (
+            "skills/mission-executor/refs/artifact-handoff.md",
+            "mission-executor/refs/artifact-handoff.md",
+        ),
     ):
-        src, dst = SYNC_PAIRS[index]
+        src, dst = _sync_pair_for(relative_path)
         _assert_optional_pair_in_sync(src, dst, label)
 
 

@@ -35,6 +35,66 @@ When multiple registry sources exist, apply them in this order:
 
 Project entries may disable a user-level default for a repository by setting `enabled: false` for that role or skill. `--no-default-skill-roots` disables user registry and default skill/plugin manifest discovery for deterministic tests or isolated runs; project registries still apply.
 
+## Version 2 planning activation
+
+Complexity-triggered planning providers use the versioned registry contract. Keep it separate from version 1 so an older runtime cannot interpret an activation-only entry as an unrestricted provider.
+
+| Source | Version 2 | Version 1 compatibility |
+|---|---|---|
+| Explicit CLI | a file with `schema: mission-specialist-registry/2` | a file with `version: 1` |
+| Project | `.mission/specialists-v2.yml` | `.mission/specialists.yml` |
+| User | `~/.config/mission/specialists-v2.yml` | `~/.config/mission/specialists.yml` |
+| Installed manifest | `mission-specialist-v2.yml` | `mission-specialist.yml` |
+
+The machine precedence is `explicit v2 > explicit v1 > project v2 > project v1 > user v2 > user v1 > installed v2 > installed v1`. Multiple explicit files within one version preserve CLI argument order. Supplying the same physical file twice, including through a hardlink or symlink alias, returns `duplicate-registry-input`; byte-identical files with different device/inode identities remain distinct inputs. Duplicate provider identities in one file, or in an unordered installed tier, fail closed. A higher invalid entry blocks fallback to the same lower identity. A document that cannot be parsed strictly creates an input-level precedence barrier: only an already valid, higher-priority explicit input may remain; same-tier and lower-priority inputs and built-in candidates produce no candidate, selection, or phase-plan entry. Version 2 uses `disabled: true` as a tombstone keyed only by canonical `provider_id`, so a different provider that shares a skill alias is not suppressed. Version 1 retains alias-compatible `enabled: false`; `enabled` in a version 2 candidate is rejected as a legacy-field mix.
+
+Version 2 requires this root and does not permit a version 1 `specialists:` root in the same document:
+
+```yaml
+schema: mission-specialist-registry/2
+specialists_v2:
+  - role: deep-planning
+    skill: deep-planning-provider
+    task_profiles: [architecture]
+    phases: [planning]
+    activation:
+      min_complexity: Complex
+      auto_select_if: [complexity]
+      when_any: [architecture, stalled_iteration]
+      explicit_below_min: deny
+```
+
+The portable YAML subset permits candidate fields plus one nested mapping. Quoted `#`, commas, and escaped quotes retain their scalar meaning; nested flow collections such as `[[...]]` and `[{...}]` are rejected with the same depth contract as JSON. JSON-compatible finite numbers normalize to the same Python value and registry entry digest in JSON and YAML only when the token is at most 128 characters, integers stay within the portable safe range, and a decimal can be represented without overflow, underflow, negative zero, or precision loss. `timeout` is stricter: it must be an exact integer from 1 through 86400; booleans, fractions, zero, and non-finite values are rejected. Invalid numeric tokens return `invalid-registry-number` or `number-limit` without a traceback and create the same precedence barrier as every other invalid input; they do not globally abort or discard an already-valid higher-priority explicit input. Version 2 validates exact field types, including string identities, string-list profiles/phases, boolean flags, and the activation mapping; violations return `invalid-v2-candidate-type`. Missing schema, an unknown major, duplicate keys, a deeper mapping, or mixed version roots produce an ineligible diagnostic and zero candidates from that input. The official version 2 project, user, and installed-manifest paths are always parsed as version 2 and cannot downgrade based on their contents.
+
+### Activation semantics
+
+- `min_complexity` is a hard eligibility floor for automatic and explicit selection. The only ordered values are `Simple`, `Standard`, `Complex`, and `Critical`; missing, malformed, or `Unknown` context returns `unknown-complexity` for a floor-bearing provider.
+- `auto_select_if` is an OR list. `profile` preserves profile-driven selection; `complexity` makes a provider eligible at its floor even when profile confidence is low.
+- `when_any` is an optional OR list applied only to automatic selection. It is ANDed with the complexity, phase, and availability hard gates. An empty list matches nothing. Unsupported predicates make the configuration ineligible for every selection source.
+- `stalled_iteration` matches only when the current iteration is at least two and the prior iteration did not pass.
+- A complexity-triggered planning provider must explicitly allow `planning`. Phase lists are allow-lists; empty, unknown, and mismatched phases fail closed.
+- Version 1 `auto_use.min_complexity` remains readable. Version 1 `auto_use.when` maps to `activation.when_any` with the same internal OR semantics. Do not put `activation` in a version 1 file.
+
+### Selection and projection provenance
+
+Persisted selection sources use `automatic`, `confirmed-user`, `user-instruction`, `manual`, or `task-required`. Legacy `auto` maps to `automatic`; legacy `user-specified` maps to `user-instruction`. `selection_source_raw` preserves the received literal. A provider cannot claim `automatic` through `log-invocation` or `invoke-command`; only the recommendation producer may create it.
+
+Recommendation output records `provider_id`, registry source, registry entry digest, normalized activation digest, mission context digest, and `mission-specialist-registry-projection/1`. Each registry is opened once with a bounded nonblocking read, must be a regular file no larger than 1 MiB, and is bound to a single byte snapshot captured from one file descriptor with pre/post validation. Device, inode, mode, size, modification/change timestamps, and bytes read must remain consistent. A read or metadata failure returns the structured `registry-input-unreadable` barrier and closes the descriptor exactly once. Version detection, content digest, and parsing use those same bytes and never re-read or re-resolve the path. A symlink may identify the opened file, but a later target swap cannot change the bytes or lexical portable identity already captured. Process-local device/inode identity is used only for duplicate detection and is never persisted.
+
+Persisted identities use `$PROJECT/...`, `$HOME/...`, or an opaque external digest; process-local absolute paths are never copied into state, sources, diagnostics, barriers, or installed inventory. Because `$EXTERNAL/sha256:...` is intentionally irreversible, its ordered input carries `resolution_mode: explicit-resupply-required`. Until the runtime application work in #395 is available, a command provider from such an input is ineligible for selection. The later runtime gate will require the same explicit registry to be supplied again for current revalidation.
+
+The projection contains all ordered discovery inputs with portable identities and content digests, any `precedence_barriers`, and effective entries with explicit `projection_state` values such as `eligible`, `conflict`, `disabled`, `tombstone`, and `invalid-input-barrier`. `effective_projection_digest` binds the complete projection payload rather than only selected providers. A later application guard can therefore detect content, discovery-order, and semantic-state drift. This issue defines producer evidence only; it does not authorize or execute a provider.
+
+`specialists recommend --record-state` treats the current state's complexity and iteration as authoritative. A supplied complexity that disagrees with state, or complexity/iteration drift detected again inside the write lock, returns exit 2 with `state-context-mismatch`, emits zero output selections, and leaves every persisted selection field unchanged. Without `--record-state`, `--complexity` remains a dry-run-only virtual context and does not mutate mission state.
+
+Phase-plan construction reuses the same eligibility evaluator for every requested phase. It cannot insert a provider merely because a raw candidate lists that phase; complexity floors, phase allow-lists, activation predicates, availability, and selection source remain binding.
+
+### Temporary command-provider portability gate
+
+Issue #394 produces selection evidence but does not implement the runtime registry resolver planned in #395. During this interval, recommendation accepts a command provider only when its command is one bare PATH token, `args` is exactly empty, `env` is empty, the registry locator is reversible, and no explicit result contract must be persisted. The restriction applies to version 1 and version 2 across explicit, project, user, and installed-manifest inputs. A nonportable entry yields `non-portable-execution-config`, zero candidates/selections/unavailable entries/phase-plan providers, and an allowlisted `blocked_config_class`; raw command, argument, path, environment key/value, and nested configuration are not copied into output or state.
+
+Skill providers remain eligible when their canonical identity is portable. Portable command entries remain stored and invokable by the existing runtime. Newly generated public provider records use a recursive declarative allowlist for candidates, selections, unavailable/ineligible diagnostics, installed inventory, projection inputs/barriers/effective entries, decisions, phase plans, and invocations. Unknown keys, wrong types, unknown enums/sources, excessive lengths, malformed digests, or unsafe nested values fail closed. Candidate scores are exact bounded numeric values from 0 through 1; booleans, non-finite floats, and oversized integers fail with a field-only diagnostic. Raw environment, risk, result-contract, activation, parser detail, and registry values are excluded; invalid version 1 policy enums are represented only by a fixed reason/field code and digests. The same validator runs before dry-run output and every atomic session-state publish, as well as before stdout, backup, archive, audit snapshot, summary/accounting, or invocation evidence can expose or copy existing state. Invocation commands validate the pending entry, prospective selection metadata, evidence locator, iteration, and timeout before activity mutation, process spawn, backup, or archive publication. `--evidence-output` accepts only a non-symlink regular UTF-8 file of at most 1 MiB; one file descriptor supplies both metadata checks and a bounded body snapshot, and a metadata or length change fails before state or artifact mutation. Evidence content is sanitized by the same local-locator tokenizer as command-provider output. Evidence is written to a temporary file only after preflight, revalidated before publication, and rolled back if the matching state publish fails. Unsafe legacy records fail closed with `unsafe-legacy-specialist-record` plus a field pointer and are never silently sanitized. A safe legacy invocation may retain one bare command token, while path-bearing commands remain rejected. Public strings and provider output recognize embedded POSIX, bare/current/named-home-relative (including `~`, `~user`, `~+`, and `~-`), Windows absolute/drive-relative (including separator-free nonempty suffixes such as `C:file`), UNC/network, device, extended-length, and rooted locators after whitespace, `=`, `:`, quotes, or punctuation; rejection and redaction do not depend on a path appearing at the start of the string. A bare drive label such as `C:`, embedded general tilde text, multi-letter colon-delimited tokens, and complete well-formed HTTP(S) URL tokens remain unchanged, including URL paths containing colon or home-like segments. URL protection uses a strict raw allowlist: ASCII DNS names, IPv4, or bracketed IPv6, an optional numeric port from 1 through 65535, valid percent escapes, and no user information. Path accepts RFC 3986 pchar plus `/`; query and fragment additionally accept `?`. Unicode component text is retained, while raw backslashes, pipes, braces, brackets, controls, or other characters outside those component grammars fail closed. Missing or malformed hosts, brackets, ports, percent escapes, controls, backslashes, commas, or equals signs in the authority also fail closed. Every `file:` form, including relative, absolute, and authority forms, is a local locator. Nonempty arguments, environment configuration, filesystem-backed commands, irreversible external command registries, and explicit result contracts remain valid registry concepts, but new selection of them is temporarily fail-closed until #395 can re-resolve and revalidate current registry bytes immediately before invocation. Archive filename/identity collision handling remains owned by #387 and is not changed by this selection/publication contract.
+
 ## Provider Kinds
 
 `kind: skill` remains the default. `kind: command` lets a registry describe a local CLI provider without adding provider-specific code to mission core. For delegating an implementation step's diff generation to a headless coding agent CLI, see `refs/implementation-delegation.md`.
@@ -45,7 +105,7 @@ specialists:
   - role: oracle-reviewer
     kind: command
     command: oracle
-    args: ["review", "--stdin"]
+    args: []
     env:
       ORACLE_MISSION_WAIT_SECONDS: "900"
     timeout: 960
@@ -115,7 +175,7 @@ Fields:
 | `command` | Local executable for `kind: command`; invoked without shell interpolation. |
 | `args` | Optional argv list for `kind: command`. |
 | `env` | Optional string key/value environment overrides for `kind: command`. Values are passed only to that provider process. |
-| `timeout` | Optional command timeout seconds for `kind: command`. CLI `--timeout` overrides this value. |
+| `timeout` | Optional exact integer command timeout from 1 through 86400 seconds for `kind: command`. CLI `--timeout` overrides this value but uses the same pre-spawn range validation. |
 | `task_profiles` | Profiles that make the specialist relevant. |
 | `phases` | Allowed phases: `planning`, `execution`, `review`, `scoring`, `critic`. |
 | `required` | If `true`, missing skill becomes a blocker. Default `false`. |
@@ -204,7 +264,7 @@ The input file is wrapped in a JSON packet with mission, provider, iteration, an
 
 Command provider registries may include `env` and `timeout` to make interactive wrappers complete in one `invoke-command` call. For example, an oracle browser wrapper can set `ORACLE_MISSION_WAIT_SECONDS=900` and `timeout: 960`; the provider may open the browser, wait for the reviewer to save the result, then return substantive stdout that satisfies the result contract. This remains generic provider configuration, not oracle authority inside mission core.
 
-Command providers can define a result contract:
+Command providers can define a result contract. While the temporary #394 portability gate is active, examples with nonempty `env` or path-bearing command arguments are schema examples only and are not selectable until #395:
 
 ```yaml
 result_contract:

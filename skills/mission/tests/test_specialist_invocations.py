@@ -1,11 +1,82 @@
 """Issue #31: specialist skill invocation logging."""
 import json
+import importlib.util
+import os
+from pathlib import Path
+import re
+import shlex
 import sys
+
+import pytest
 
 
 def _json_result(result):
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
+
+
+def _load_mission_state_module(name):
+    state_path = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
+    spec = importlib.util.spec_from_file_location(name, state_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def _assert_unsafe_legacy_specialist_record(result, field):
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    data = json.loads(result.stdout)
+    assert data["ok"] is False
+    assert data["reason_code"] == "unsafe-legacy-specialist-record"
+    assert data["field_path"].startswith("/specialists_candidates/0/")
+    assert data["field_path"].rsplit("/", 1)[-1] in {
+        "command", "args", "env", "result_contract"
+    }
+
+
+def _seed_legacy_command_provider_state(tmp_path, provider, *, ask_user=False):
+    """Preserve the pre-#395 runtime consumer contract for an already-active state."""
+    state_path = tmp_path / ".mission-state" / "sessions" / "test.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    candidate = {
+        **provider,
+        "skill": provider.get("skill") or provider.get("role"),
+        "provider_id": provider.get("provider_id") or provider.get("skill") or provider.get("role"),
+        "status": "available",
+        "installed": True,
+        "available": True,
+    }
+    if not provider.get("env") and not provider.get("result_contract"):
+        command_dir = tmp_path / ".mission-test-bin"
+        command_dir.mkdir(exist_ok=True)
+        command_name = re.sub(
+            r"[^A-Za-z0-9._+-]", "-", str(candidate["provider_id"])
+        )
+        wrapper = command_dir / command_name
+        argv = [provider.get("command"), *(provider.get("args") or [])]
+        wrapper.write_text(
+            "#!/bin/sh\nexec " + " ".join(shlex.quote(str(value)) for value in argv) + "\n",
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o700)
+        os.environ["PATH"] = f"{command_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+        candidate["command"] = command_name
+        candidate["args"] = []
+        candidate["env"] = {}
+    state["specialists_candidates"] = [candidate]
+    state["specialists_selected"] = []
+    state["specialists_decision"] = (
+        {
+            "policy": "first-use",
+            "action": "ask-user",
+            "prompted_user": True,
+        }
+        if ask_user
+        else {"policy": "auto", "action": "select", "prompted_user": False}
+    )
+    state_path.write_text(json.dumps(state), encoding="utf-8")
 
 
 def test_init_includes_specialist_invocations(run_cli, tmp_path):
@@ -14,6 +85,33 @@ def test_init_includes_specialist_invocations(run_cli, tmp_path):
     state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
 
     assert state["specialist_invocations"] == []
+
+
+def test_get_accepts_safe_legacy_invocation_with_bare_command(
+    state_dir, run_cli, read_state
+):
+    state_path = state_dir / "sessions" / "test.json"
+    state = read_state(state_dir)
+    state["specialist_invocations"] = [
+        {
+            "iteration": 1,
+            "phase": "review",
+            "role": "reviewer",
+            "skill": "portable-provider",
+            "mode": "command-provider",
+            "status": "completed",
+            "timestamp": "2026-08-10T00:00:00Z",
+            "command": "portable-reviewer",
+        }
+    ]
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    result = run_cli("get", cwd=state_dir.parent)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["specialist_invocations"][0]["command"] == (
+        "portable-reviewer"
+    )
 
 
 def test_log_invocation_appends_machine_readable_record(state_dir, run_cli, read_state):
@@ -103,6 +201,371 @@ def test_log_invocation_archives_evidence_with_metadata(state_dir, run_cli, tmp_
     assert "status=completed" in content
     assert "No blocking issues." in content
     assert entry["evidence_path"] == ".mission-state/archive/iter-1-abc12345-specialist-dev-code-reviewer.md"
+
+
+def test_log_invocation_preflights_pending_entry_before_archive_or_state_side_effects(
+    state_dir, run_cli, tmp_path
+):
+    state_path = state_dir / "sessions" / "test.json"
+    state_before = state_path.read_bytes()
+    backup_path = state_path.with_suffix(".json.bak")
+    backup_path.unlink(missing_ok=True)
+    evidence = tmp_path / "pending-review.md"
+    evidence.write_text("private review body", encoding="utf-8")
+    archive_dir = state_dir / "archive"
+    artifacts_before = set(archive_dir.glob("*")) if archive_dir.exists() else set()
+    private_skill = "/home/portable-user/private-provider"
+
+    result = run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "review",
+        "--role", "reviewer",
+        "--skill", private_skill,
+        "--mode", "skill-tool",
+        "--status", "completed",
+        "--selection-source", "manual",
+        "--evidence-output", str(evidence),
+        "--json",
+        cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 2
+    assert private_skill not in result.stdout
+    assert private_skill not in result.stderr
+    assert state_path.read_bytes() == state_before
+    assert not backup_path.exists()
+    artifacts_after = set(archive_dir.glob("*")) if archive_dir.exists() else set()
+    assert artifacts_after == artifacts_before
+
+
+@pytest.mark.parametrize(
+    "private_note",
+    [
+        "finding path=/home/portable-user/private.txt",
+        "finding path:/root/private.txt",
+        "finding path=/tmp/private.txt",
+        r"finding path=C:\\Users\\portable-user\\private.txt",
+        "finding path=~/private.txt",
+        r"finding path=\\server\share\private.txt",
+        r"finding path=\\?\C:\private\file.txt",
+        r"finding path=\\.\PhysicalDrive0",
+        r"finding path=\Device\HarddiskVolume1\private.txt",
+        "finding path=//server/share/private.txt",
+        r"finding path=C:relative\private.txt",
+        "finding path=D:relative/private.txt",
+        "finding path=C:private.txt",
+        "finding metadata='D:.env'",
+        "finding path=c:private.txt",
+        "finding link=https://exa%mple/C:private.txt",
+        "finding link=https://example.test,local=/home/portable-user/secret.txt",
+        "finding link=https://example.test:bad/home/portable-user/secret.txt",
+        r"finding link=https://example.test/path\home\portable-user\private.txt",
+        "finding link=https://example.test/path?locator=|C:private.txt",
+        "finding link=https://example.test/path#locator={C:private.txt}",
+        "finding file=file:relative/private.txt",
+        "finding file=file://server/share/private.txt",
+        "finding home=~",
+        "finding home='~portable-user'",
+        "finding home=~+",
+        "finding home=~-",
+        "finding path=~portable-user/private.txt",
+        r"finding path=~portable-user\private.txt",
+    ],
+)
+def test_log_invocation_cli_rejects_embedded_private_locator_without_disclosure(
+    state_dir, run_cli, private_note
+):
+    state_path = state_dir / "sessions" / "test.json"
+    state_before = state_path.read_bytes()
+
+    result = run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "review",
+        "--role", "reviewer",
+        "--skill", "portable-provider",
+        "--mode", "skill-tool",
+        "--status", "completed",
+        "--notes", private_note,
+        "--json",
+        cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 2
+    assert private_note not in result.stdout
+    assert private_note not in result.stderr
+    assert state_path.read_bytes() == state_before
+
+
+@pytest.mark.parametrize(
+    "private_text",
+    [
+        "path=/home/portable-user/private.txt",
+        "path:/root/private.txt",
+        "path=/tmp/private.txt",
+        r"path=C:\\Users\\portable-user\\private.txt",
+        "path=~/private.txt",
+        r"path=\\server\share\private.txt",
+        r"path=\\?\C:\private\file.txt",
+        r"path=\\.\PhysicalDrive0",
+        r"path=\Device\HarddiskVolume1\private.txt",
+        "path=//server/share/private.txt",
+        r"path=C:relative\private.txt",
+        "path=D:relative/private.txt",
+        "path=C:private.txt",
+        "metadata='D:.env'",
+        "path=c:private.txt",
+        "link=https://exa%mple/C:private.txt",
+        "link=https://example.test,local=/home/portable-user/secret.txt",
+        "link=https://example.test:bad/home/portable-user/secret.txt",
+        r"link=https://example.test/path\home\portable-user\private.txt",
+        "link=https://example.test/path?locator=|C:private.txt",
+        "link=https://example.test/path#locator={C:private.txt}",
+        "file=file:relative/private.txt",
+        "file=file://server/share/private.txt",
+        "home=~",
+        "home='~portable-user'",
+        "home=~+",
+        "home=~-",
+        "path=~portable-user/private.txt",
+        r"path=~portable-user\private.txt",
+    ],
+)
+def test_provider_output_redactor_covers_every_private_locator_separator(private_text):
+    module = _load_mission_state_module("mission_state_issue394_path_redactor")
+
+    redacted = module._redact_provider_output(f"finding {private_text}")
+
+    assert private_text not in redacted
+    assert "[REDACTED_PATH]" in redacted
+
+
+def test_log_invocation_rolls_back_staged_archive_when_state_publish_fails(
+    state_dir, tmp_path, monkeypatch
+):
+    module = _load_mission_state_module("mission_state_issue394_archive_rollback")
+    state_path = state_dir / "sessions" / "test.json"
+    state_before = state_path.read_bytes()
+    evidence = tmp_path / "rollback-review.md"
+    evidence.write_text("portable review body", encoding="utf-8")
+    archive_dir = state_dir / "archive"
+    artifacts_before = set(archive_dir.glob("*")) if archive_dir.exists() else set()
+    args = module._build_parser().parse_args(
+        [
+            "specialists", "log-invocation",
+            "--iteration", "1",
+            "--phase", "review",
+            "--role", "reviewer",
+            "--skill", "portable-provider",
+            "--mode", "skill-tool",
+            "--status", "completed",
+            "--evidence-output", str(evidence),
+            "--json",
+        ]
+    )
+    monkeypatch.chdir(state_dir.parent)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    monkeypatch.setattr(
+        module,
+        "atomic_write_json",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("publish failed")),
+    )
+
+    with pytest.raises(OSError, match="publish failed"):
+        args.func(args)
+
+    assert state_path.read_bytes() == state_before
+    artifacts_after = set(archive_dir.glob("*")) if archive_dir.exists() else set()
+    assert artifacts_after == artifacts_before
+
+
+def test_log_invocation_redacts_local_locators_from_evidence_body(
+    state_dir, run_cli, tmp_path
+):
+    private_locators = [
+        "/home/portable-user/private.txt",
+        "/root/private.txt",
+        "/tmp/private.txt",
+        r"C:\\Users\\portable-user\\private.txt",
+        r"\\server\share\private.txt",
+        r"\\?\C:\private\file.txt",
+        r"\\.\PhysicalDrive0",
+        r"\Device\HarddiskVolume1\private.txt",
+        "~/private.txt",
+        r"C:relative\private.txt",
+        "D:relative/private.txt",
+        "C:private.txt",
+        "D:.env",
+        "c:private.txt",
+        "https://exa%mple/C:private.txt",
+        "https://example.test,local=/home/portable-user/secret.txt",
+        "https://example.test:bad/home/portable-user/secret.txt",
+        r"https://example.test/path\home\portable-user\private.txt",
+        "https://example.test/path?locator=|C:private.txt",
+        "https://example.test/path#locator={C:private.txt}",
+        "file:relative/private.txt",
+        "file://server/share/private.txt",
+        "~",
+        "~portable-user",
+        "~+",
+        "~-",
+        "~portable-user/private.txt",
+        r"~portable-user\private.txt",
+    ]
+    evidence = tmp_path / "private-locator-review.md"
+    evidence.write_text(
+        "\n".join(f"finding path={value}" for value in private_locators),
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "review",
+        "--role", "reviewer",
+        "--skill", "portable-provider",
+        "--mode", "skill-tool",
+        "--status", "completed",
+        "--evidence-output", str(evidence),
+        "--json",
+        cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 0, result.stderr
+    entry = json.loads(result.stdout)["entry"]
+    archived = state_dir.parent / entry["evidence_path"]
+    archived_text = archived.read_text(encoding="utf-8")
+    assert "[REDACTED_PATH]" in archived_text
+    for locator in private_locators:
+        assert locator not in archived_text
+        assert locator not in result.stdout
+        assert locator not in result.stderr
+
+
+def test_provider_output_redactor_rejects_control_in_http_candidate():
+    module = _load_mission_state_module("mission_state_issue394_url_control")
+    unsafe = "https://example.test/path\x7fC:private.txt"
+
+    redacted = module._redact_provider_output(f"finding link={unsafe}")
+
+    assert unsafe not in redacted
+    assert "[REDACTED_PATH]" in redacted
+
+
+@pytest.mark.parametrize(
+    "input_kind", ["symlink", "oversize", "non-regular", "invalid-encoding"]
+)
+def test_log_invocation_rejects_unsafe_evidence_snapshot_without_side_effects(
+    input_kind, state_dir, run_cli, tmp_path
+):
+    state_path = state_dir / "sessions" / "test.json"
+    state_before = state_path.read_bytes()
+    archive_dir = state_dir / "archive"
+    artifacts_before = set(archive_dir.glob("*")) if archive_dir.exists() else set()
+    if input_kind == "symlink":
+        target = tmp_path / "evidence-target.md"
+        target.write_text("portable evidence", encoding="utf-8")
+        evidence = tmp_path / "evidence-link.md"
+        evidence.symlink_to(target)
+    else:
+        evidence = tmp_path / f"{input_kind}-evidence.md"
+        if input_kind == "oversize":
+            evidence.write_bytes(b"x" * (1024 * 1024 + 1))
+        elif input_kind == "non-regular":
+            evidence.mkdir()
+        else:
+            evidence.write_bytes(b"\xff\xfe")
+
+    result = run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "review",
+        "--role", "reviewer",
+        "--skill", "portable-provider",
+        "--mode", "skill-tool",
+        "--status", "completed",
+        "--evidence-output", str(evidence),
+        "--json",
+        cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    assert str(evidence) not in result.stdout
+    assert str(evidence) not in result.stderr
+    assert state_path.read_bytes() == state_before
+    artifacts_after = set(archive_dir.glob("*")) if archive_dir.exists() else set()
+    assert artifacts_after == artifacts_before
+
+
+def test_evidence_snapshot_detects_in_place_mutation_from_one_open_fd(
+    tmp_path, monkeypatch
+):
+    module = _load_mission_state_module("mission_state_issue394_evidence_snapshot")
+    evidence = tmp_path / "mutable-evidence.md"
+    evidence.write_bytes(b"portable evidence")
+    original_read = module.os.read
+    mutated = False
+
+    def mutating_read(fd, size):
+        nonlocal mutated
+        chunk = original_read(fd, size)
+        if not mutated:
+            mutated = True
+            evidence.write_bytes(b"changed evidence!")
+        return chunk
+
+    monkeypatch.setattr(module.os, "read", mutating_read)
+
+    with pytest.raises(module.SpecialistEvidenceInputError) as caught:
+        module._read_specialist_evidence_input(evidence)
+
+    assert caught.value.reason_code == "specialist-evidence-changed"
+
+
+@pytest.mark.parametrize("failing_operation", ["read", "second-fstat"])
+def test_evidence_snapshot_io_error_is_structured_and_closes_once(
+    failing_operation, tmp_path, monkeypatch
+):
+    module = _load_mission_state_module(
+        f"mission_state_issue394_evidence_io_{failing_operation}"
+    )
+    evidence = tmp_path / "evidence.md"
+    evidence.write_text("portable evidence", encoding="utf-8")
+    original_read = module.os.read
+    original_fstat = module.os.fstat
+    original_close = module.os.close
+    close_count = 0
+    fstat_count = 0
+
+    def close_spy(fd):
+        nonlocal close_count
+        close_count += 1
+        return original_close(fd)
+
+    def fstat_spy(fd):
+        nonlocal fstat_count
+        fstat_count += 1
+        if failing_operation == "second-fstat" and fstat_count == 2:
+            raise OSError("metadata changed")
+        return original_fstat(fd)
+
+    monkeypatch.setattr(module.os, "close", close_spy)
+    monkeypatch.setattr(module.os, "fstat", fstat_spy)
+    if failing_operation == "read":
+        monkeypatch.setattr(
+            module.os, "read", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("read failed"))
+        )
+    else:
+        monkeypatch.setattr(module.os, "read", original_read)
+
+    with pytest.raises(module.SpecialistEvidenceInputError) as caught:
+        module._read_specialist_evidence_input(evidence)
+
+    assert caught.value.reason_code == "specialist-evidence-unreadable"
+    assert close_count == 1
 
 
 def test_log_invocation_records_codex_inline_usage(state_dir, run_cli, read_state):
@@ -624,6 +1087,9 @@ def test_invoke_command_provider_archives_evidence_and_logs_invocation(run_cli, 
         cwd=tmp_path,
         check=True,
     )
+    _seed_legacy_command_provider_state(
+        tmp_path, json.loads(registry.read_text())["specialists"][0]
+    )
     r = run_cli(
         "specialists", "invoke-command",
         "--provider", "fake-reviewer",
@@ -643,10 +1109,71 @@ def test_invoke_command_provider_archives_evidence_and_logs_invocation(run_cli, 
     assert entry["status"] == "completed"
     assert entry["provider_kind"] == "command"
     assert entry["exit_code"] == 0
+    assert state["activity_current"] is None
+    assert any(
+        segment["kind"] == "external-wait"
+        and segment["reason"] == "external-command"
+        for segment in state["activity_segments"]
+    )
     assert evidence.exists()
     content = evidence.read_text(encoding="utf-8")
     assert "phase=review" in content
     assert "body=review this diff" in content
+    public_state = run_cli("get", cwd=tmp_path)
+    assert public_state.returncode == 0, public_state.stderr
+    assert json.loads(public_state.stdout)["specialist_invocations"][0] == entry
+
+
+def test_invoke_command_preflights_timeout_before_activity_spawn_or_archive(
+    run_cli, tmp_path
+):
+    run_cli(
+        "init", "command provider preflight", "--complexity", "Complex",
+        cwd=tmp_path, check=True,
+    )
+    spawned = tmp_path / "provider-spawned"
+    helper = tmp_path / "provider.py"
+    helper.write_text(
+        "from pathlib import Path\n"
+        f"Path({str(spawned)!r}).write_text('spawned', encoding='utf-8')\n"
+        "print('substantive provider output')\n",
+        encoding="utf-8",
+    )
+    provider = {
+        "provider_id": "portable-timeout-provider",
+        "role": "portable-timeout-provider",
+        "skill": "portable-timeout-provider",
+        "kind": "command",
+        "command": sys.executable,
+        "args": [str(helper)],
+        "task_profiles": ["documentation"],
+        "phases": ["planning"],
+    }
+    _seed_legacy_command_provider_state(tmp_path, provider)
+    state_path = tmp_path / ".mission-state" / "sessions" / "test.json"
+    state_before = state_path.read_bytes()
+    backup_path = state_path.with_suffix(".json.bak")
+    backup_path.unlink(missing_ok=True)
+    archive_dir = tmp_path / ".mission-state" / "archive"
+    artifacts_before = set(archive_dir.glob("*")) if archive_dir.exists() else set()
+
+    result = run_cli(
+        "specialists", "invoke-command",
+        "--provider", "portable-timeout-provider",
+        "--iteration", "1",
+        "--phase", "planning",
+        "--timeout", "86401",
+        "--json",
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    assert state_path.read_bytes() == state_before
+    assert not backup_path.exists()
+    assert not spawned.exists()
+    artifacts_after = set(archive_dir.glob("*")) if archive_dir.exists() else set()
+    assert artifacts_after == artifacts_before
 
 
 def test_invoke_command_provider_records_failure_without_blocking_optional_provider(run_cli, tmp_path):
@@ -674,6 +1201,9 @@ def test_invoke_command_provider_records_failure_without_blocking_optional_provi
         "--json",
         cwd=tmp_path,
         check=True,
+    )
+    _seed_legacy_command_provider_state(
+        tmp_path, json.loads(registry.read_text())["specialists"][0]
     )
 
     r = run_cli(
@@ -731,6 +1261,9 @@ def test_invoke_command_provider_marks_approval_marker_as_awaiting_input(run_cli
         cwd=tmp_path,
         check=True,
     )
+    _seed_legacy_command_provider_state(
+        tmp_path, json.loads(registry.read_text())["specialists"][0]
+    )
 
     r = run_cli(
         "specialists", "invoke-command",
@@ -741,12 +1274,7 @@ def test_invoke_command_provider_marks_approval_marker_as_awaiting_input(run_cli
         cwd=tmp_path,
     )
 
-    data = _json_result(r)
-    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
-    entry = state["specialist_invocations"][0]
-    assert data["ok"] is False
-    assert entry["status"] == "awaiting-input"
-    assert "awaiting input" in entry["reason"]
+    _assert_unsafe_legacy_specialist_record(r, "result_contract")
 
 
 def test_invoke_command_provider_marks_configured_exit_code_as_awaiting_input(run_cli, tmp_path):
@@ -778,6 +1306,9 @@ def test_invoke_command_provider_marks_configured_exit_code_as_awaiting_input(ru
         cwd=tmp_path,
         check=True,
     )
+    _seed_legacy_command_provider_state(
+        tmp_path, json.loads(registry.read_text())["specialists"][0]
+    )
 
     r = run_cli(
         "specialists", "invoke-command",
@@ -788,12 +1319,7 @@ def test_invoke_command_provider_marks_configured_exit_code_as_awaiting_input(ru
         cwd=tmp_path,
     )
 
-    data = _json_result(r)
-    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
-    entry = state["specialist_invocations"][0]
-    assert data["ok"] is False
-    assert entry["status"] == "awaiting-input"
-    assert "exit code 75" in entry["reason"]
+    _assert_unsafe_legacy_specialist_record(r, "result_contract")
 
 
 def test_invoke_command_provider_marks_preparation_only_output_as_not_applied(run_cli, tmp_path):
@@ -823,6 +1349,9 @@ def test_invoke_command_provider_marks_preparation_only_output_as_not_applied(ru
         cwd=tmp_path,
         check=True,
     )
+    _seed_legacy_command_provider_state(
+        tmp_path, json.loads(registry.read_text())["specialists"][0]
+    )
 
     r = run_cli(
         "specialists", "invoke-command",
@@ -833,12 +1362,7 @@ def test_invoke_command_provider_marks_preparation_only_output_as_not_applied(ru
         cwd=tmp_path,
     )
 
-    data = _json_result(r)
-    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
-    entry = state["specialist_invocations"][0]
-    assert data["ok"] is False
-    assert entry["status"] == "prepared"
-    assert "preparation-only" in entry["reason"]
+    _assert_unsafe_legacy_specialist_record(r, "result_contract")
 
 
 def test_invoke_command_provider_rejects_preparation_marker_even_with_long_output(run_cli, tmp_path):
@@ -872,6 +1396,9 @@ def test_invoke_command_provider_rejects_preparation_marker_even_with_long_outpu
         cwd=tmp_path,
         check=True,
     )
+    _seed_legacy_command_provider_state(
+        tmp_path, json.loads(registry.read_text())["specialists"][0]
+    )
 
     r = run_cli(
         "specialists", "invoke-command",
@@ -882,12 +1409,7 @@ def test_invoke_command_provider_rejects_preparation_marker_even_with_long_outpu
         cwd=tmp_path,
     )
 
-    data = _json_result(r)
-    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
-    entry = state["specialist_invocations"][0]
-    assert data["ok"] is False
-    assert entry["status"] == "prepared"
-    assert "preparation-only" in entry["reason"]
+    _assert_unsafe_legacy_specialist_record(r, "result_contract")
 
 
 def test_invoke_command_provider_requires_confirmed_selection_after_ask_user(run_cli, tmp_path):
@@ -916,6 +1438,11 @@ def test_invoke_command_provider_requires_confirmed_selection_after_ask_user(run
         "--json",
         cwd=tmp_path,
         check=True,
+    )
+    _seed_legacy_command_provider_state(
+        tmp_path,
+        json.loads(registry.read_text())["specialists"][0],
+        ask_user=True,
     )
 
     r = run_cli(
@@ -956,6 +1483,11 @@ def test_invoke_command_provider_persists_confirmed_selection_after_ask_user(run
         "--json",
         cwd=tmp_path,
         check=True,
+    )
+    _seed_legacy_command_provider_state(
+        tmp_path,
+        json.loads(registry.read_text())["specialists"][0],
+        ask_user=True,
     )
 
     r = run_cli(
@@ -1002,6 +1534,9 @@ def test_invoke_command_provider_accepts_result_contract_evidence(run_cli, tmp_p
         cwd=tmp_path,
         check=True,
     )
+    _seed_legacy_command_provider_state(
+        tmp_path, json.loads(registry.read_text())["specialists"][0]
+    )
 
     r = run_cli(
         "specialists", "invoke-command",
@@ -1012,11 +1547,7 @@ def test_invoke_command_provider_accepts_result_contract_evidence(run_cli, tmp_p
         cwd=tmp_path,
     )
 
-    data = _json_result(r)
-    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
-    entry = state["specialist_invocations"][0]
-    assert data["ok"] is True
-    assert entry["status"] == "completed"
+    _assert_unsafe_legacy_specialist_record(r, "result_contract")
 
 
 def test_invoke_command_provider_uses_registry_env_and_timeout(run_cli, tmp_path):
@@ -1054,6 +1585,9 @@ def test_invoke_command_provider_uses_registry_env_and_timeout(run_cli, tmp_path
         cwd=tmp_path,
         check=True,
     )
+    _seed_legacy_command_provider_state(
+        tmp_path, json.loads(registry.read_text())["specialists"][0]
+    )
 
     r = run_cli(
         "specialists", "invoke-command",
@@ -1064,14 +1598,7 @@ def test_invoke_command_provider_uses_registry_env_and_timeout(run_cli, tmp_path
         cwd=tmp_path,
     )
 
-    data = _json_result(r)
-    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
-    entry = state["specialist_invocations"][0]
-    evidence = tmp_path / entry["evidence_path"]
-    assert data["ok"] is True
-    assert entry["status"] == "completed"
-    assert entry["timeout"] == 17
-    assert "registry env reached the provider" in evidence.read_text(encoding="utf-8")
+    _assert_unsafe_legacy_specialist_record(r, "env")
 
 
 def test_confirmed_command_provider_selection_preserves_invocation_config(run_cli, tmp_path):
@@ -1110,7 +1637,12 @@ def test_confirmed_command_provider_selection_preserves_invocation_config(run_cl
         cwd=tmp_path,
         check=True,
     )
-    run_cli(
+    _seed_legacy_command_provider_state(
+        tmp_path,
+        json.loads(registry.read_text())["specialists"][0],
+        ask_user=True,
+    )
+    r = run_cli(
         "specialists", "invoke-command",
         "--provider", "paid-reviewer",
         "--iteration", "1",
@@ -1118,26 +1650,5 @@ def test_confirmed_command_provider_selection_preserves_invocation_config(run_cl
         "--selection-source", "confirmed-user",
         "--json",
         cwd=tmp_path,
-        check=True,
     )
-
-    r = run_cli(
-        "specialists", "invoke-command",
-        "--provider", "paid-reviewer",
-        "--iteration", "2",
-        "--phase", "review",
-        "--json",
-        cwd=tmp_path,
-    )
-
-    data = _json_result(r)
-    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
-    selected = state["specialists_selected"][0]
-    second_entry = state["specialist_invocations"][1]
-    assert data["ok"] is True
-    assert selected["command"] == sys.executable
-    assert selected["args"] == [str(helper)]
-    assert selected["env"]["REVIEW_TEXT"].startswith("finding:")
-    assert selected["timeout"] == 19
-    assert second_entry["status"] == "completed"
-    assert second_entry["timeout"] == 19
+    _assert_unsafe_legacy_specialist_record(r, "env")
