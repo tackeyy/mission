@@ -5614,6 +5614,7 @@ FROZEN_FIELDS = {
     "score_history",
     "threshold",
     "schema_version",
+    "session_role",
     "terminal_outcome",
     "project_root",
     "started_at",

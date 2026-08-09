@@ -1588,6 +1588,8 @@ def halt_audit_disposition(record: StateRecord) -> str:
         return "user-aborted"
 
     category = state.get("halt_category")
+    if "halt_category" in state and not isinstance(category, str):
+        return "actionable"
     has_delegated_reason = (
         state.get("delegated_to_parent") is True
         or reason in _DELEGATED_HALT_REASONS

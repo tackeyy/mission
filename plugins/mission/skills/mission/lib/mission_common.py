@@ -63,8 +63,10 @@ def _derive_control_terminal_outcome(state: dict[str, Any]) -> str | None:
     category = state.get("halt_category")
     reason = str(state.get("halt_reason") or "").strip().lower()
     resolution_status = str(state.get("resolution_status") or "").strip().lower()
+    if "halt_category" in state and not isinstance(category, str):
+        return "failed"
     if (
-        resolution_status in {"resolved", "superseded", "closed"}
+        resolution_status == "superseded"
         or reason in {
             "superseded by a replacement run",
             "superseded by replacement run",

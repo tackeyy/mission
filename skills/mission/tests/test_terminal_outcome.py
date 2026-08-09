@@ -9,6 +9,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
 
 def _load_common():
     path = Path(__file__).resolve().parents[1] / "lib" / "mission_common.py"
@@ -175,6 +177,47 @@ def test_explicit_outcome_conflict_is_classified_as_halt_not_active_or_pass():
     assert MC.classify_state(conflicting_pass) == "halt"
 
 
+@pytest.mark.parametrize("invalid_category", [None, True, 1, 1.5, [], {}])
+def test_non_string_halt_category_fails_closed_without_breaking_conservation(
+    invalid_category, run_cli, tmp_path
+):
+    state = _halted(category=invalid_category)
+    _write_audit_state(tmp_path, "invalid-category", state)
+
+    outcome = MC.derive_terminal_outcome(state)
+    summary = MC.summarize_pass_rate_population([state], stale_after_sec=10_800)
+    stats_result = run_cli(
+        "stats", "--root", str(tmp_path), "--json", cwd=tmp_path, check=True
+    )
+    stats = json.loads(stats_result.stdout)
+    audit = Path(__file__).resolve().parents[3] / "scripts" / "mission-audit.py"
+    audit_result = subprocess.run(
+        [sys.executable, str(audit), "--root", str(tmp_path), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    audit_data = json.loads(audit_result.stdout)
+
+    assert {
+        "outcome": outcome,
+        "summary_failed": summary["terminal_outcome_counts"]["failed"],
+        "summary_conservation": sum(summary["terminal_outcome_counts"].values()),
+        "stats_failed": stats["terminal_outcome_counts"]["failed"],
+        "stats_conservation": sum(stats["terminal_outcome_counts"].values()),
+        "audit_failed": audit_data["terminal_outcome_counts"]["failed"],
+        "audit_conservation": sum(audit_data["terminal_outcome_counts"].values()),
+    } == {
+        "outcome": "failed",
+        "summary_failed": 1,
+        "summary_conservation": 1,
+        "stats_failed": 1,
+        "stats_conservation": 1,
+        "audit_failed": 1,
+        "audit_conservation": 1,
+    }
+
+
 def test_legacy_states_are_derived_without_physical_rewrite():
     states = [
         {"schema_version": 1, "passes": True, "loop_active": False, "halt_reason": ""},
@@ -220,6 +263,29 @@ def test_legacy_states_are_derived_without_physical_rewrite():
         ],
         before,
     )
+
+
+@pytest.mark.parametrize("schema_version", [2, 3])
+@pytest.mark.parametrize(
+    ("resolution_status", "category", "expected"),
+    [
+        ("resolved", "blocked-external", "blocked_external"),
+        ("closed", "partial-done", "incomplete"),
+        ("superseded", "blocked-external", "stale_superseded"),
+    ],
+)
+def test_resolution_status_preserves_category_outcome_across_v2_and_v3(
+    schema_version, resolution_status, category, expected
+):
+    state = {
+        "schema_version": schema_version,
+        "resolution_status": resolution_status,
+        **_halted(category=category),
+    }
+    if schema_version == 3:
+        state["terminal_outcome"] = expected
+
+    assert MC.derive_terminal_outcome(state) == expected
 
 
 def test_role_mixture_and_31_evidence_records_preserve_implementer_rate_and_conservation():
@@ -451,6 +517,45 @@ def test_generic_set_cannot_forge_terminal_outcome(run_cli, tmp_path):
     state = json.loads(_state_file(tmp_path).read_text(encoding="utf-8"))
 
     assert (result.returncode, "terminal_outcome" in state) == (2, False)
+
+
+def test_session_role_is_init_only_and_failed_implementer_stays_in_rate_population(
+    run_cli, tmp_path
+):
+    run_cli("init", "fixed role", "--complexity", "Standard", cwd=tmp_path, check=True)
+
+    active_result = run_cli("set", "session_role=release", cwd=tmp_path)
+    active_state = json.loads(_state_file(tmp_path).read_text(encoding="utf-8"))
+    run_cli(
+        "mark-halt",
+        "--reason",
+        "quality gate failed",
+        "--category",
+        "stagnation",
+        cwd=tmp_path,
+        check=True,
+    )
+    terminal_result = run_cli("set", "session_role=release", cwd=tmp_path)
+    terminal_state = json.loads(_state_file(tmp_path).read_text(encoding="utf-8"))
+    summary = MC.summarize_pass_rate_population(
+        [terminal_state], stale_after_sec=10_800
+    )
+
+    assert {
+        "active_returncode": active_result.returncode,
+        "active_role": active_state["session_role"],
+        "terminal_returncode": terminal_result.returncode,
+        "terminal_role": terminal_state["session_role"],
+        "denominator": summary["implementer_pass_rate_denominator"],
+        "rate": summary["implementer_pass_rate"],
+    } == {
+        "active_returncode": 2,
+        "active_role": "implementer",
+        "terminal_returncode": 2,
+        "terminal_role": "implementer",
+        "denominator": 1,
+        "rate": 0.0,
+    }
 
 
 def test_audit_uses_role_aware_rate_and_excludes_31_evidence_halts(tmp_path):
