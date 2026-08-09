@@ -109,6 +109,8 @@ from scoring_provenance import (  # noqa: E402
     VERIFIER_ID_RE as _APPROVAL_VERIFIER_NAME_RE,
     build_request as build_approval_request,
     digest as provenance_digest,
+    reduce_review_aggregate,
+    terminal_state_digest,
     validate_receipt_binding,
     validate_recorded_envelope,
 )
@@ -6551,6 +6553,10 @@ def _revalidate_score_provenance(cwd: Path, entry: dict, data: dict, *, require_
         raise ValueError("review evidence must be valid UTF-8 JSON") from exc
     if not isinstance(parsed, dict) or parsed.get("schema") != "mission-review-aggregate/1":
         raise ValueError("review evidence has invalid schema")
+    try:
+        derived = reduce_review_aggregate(parsed.get("inputs"))
+    except ValueError as exc:
+        raise ValueError(f"review evidence inputs are invalid: {exc}") from exc
     claim = parsed.get("score_claim")
     expected_claim = {
         "iteration": entry.get("iteration"), "items": entry.get("items"),
@@ -6558,10 +6564,10 @@ def _revalidate_score_provenance(cwd: Path, entry: dict, data: dict, *, require_
         "open_high": entry.get("open_high"), "review_agreement": entry.get("review_agreement"),
         "agreement_detail": entry.get("agreement_detail"),
     }
-    # Prior aggregate archives predate score_claim. They remain readable only
-    # when attached through a provenance-bearing migration; current schema
-    # writers and all current pass decisions require the semantic binding.
-    if claim is not None and claim != expected_claim:
+    derived_claim = {"iteration": entry.get("iteration"), **derived}
+    if claim != derived_claim:
+        raise ValueError("review evidence score claim is absent or not derived from inputs")
+    if expected_claim != derived_claim:
         raise ValueError("review evidence score claim mismatch")
     score_ref = provenance.get("scoring_evidence_ref")
     if require_scoring_artifact:
@@ -7174,6 +7180,18 @@ def cmd_aggregate_reviews(args):
         for finding in review.get("findings", [])
         if finding.get("severity") == "High"
     )
+    # The archive claim is authored by the same pure reducer that later
+    # validates the untrusted archive.  Keep the surrounding observability
+    # fields, but do not let this writer become a second scoring authority.
+    try:
+        derived_score = reduce_review_aggregate(reviews)
+    except ValueError as exc:
+        print(f"ERROR: review aggregate inputs are invalid: {exc}", file=sys.stderr)
+        sys.exit(2)
+    items = derived_score["items"]
+    open_high = derived_score["open_high"]
+    review_agreement = derived_score["review_agreement"]
+    agreement_detail = derived_score["agreement_detail"]
 
     # #282/#350: reviewer 並列実行の観測。2 名以上では全 reviewer の
     # self-report を fail-closed で要求し、実行形態そのものは gate しない。
@@ -7281,11 +7299,7 @@ def cmd_aggregate_reviews(args):
             # archived review inputs. push-score and mark-passes compare every
             # decision value to it; a digest alone is not semantic binding.
             "score_claim": {
-                "iteration": args.iteration, "items": items,
-                "composite": round(sum(_numeric_item_values(items)) / len(items), 2),
-                "min_item": round(min(_numeric_item_values(items)), 2),
-                "open_high": open_high, "review_agreement": review_agreement,
-                "agreement_detail": agreement_detail,
+                "iteration": args.iteration, **derived_score,
             },
         }
         evidence_content = (json.dumps(evidence, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
@@ -7776,14 +7790,16 @@ def cmd_mark_passes(args):
                 latest_scope = next((entry.get("revision_scope") for entry in reversed(data.get("score_history", []))
                                      if isinstance(entry, dict) and isinstance(entry.get("revision_scope"), dict)),
                                     {"kind": "not-applicable", "reason_code": "non-git"})
-                terminal_object = {
-                    "session_id": data.get("session_id"), "mission_id": data.get("mission_id"),
-                    "score_history": data.get("score_history", []), "threshold": data.get("threshold"),
-                    "revision_scope": latest_scope,
-                }
+                # Bind the approval to the exact terminal state that this
+                # invocation will persist.  The shared projection excludes
+                # force_approval and timestamps, so it can be reproduced by
+                # the post-write assertion and historical audit.
+                terminal_object = dict(data)
+                terminal_object.update({"passes": True, "loop_active": False, "passes_forced": True})
+                _write_terminal_outcome(terminal_object)
                 request = build_approval_request(
                     session_id=data.get("session_id"), mission_id=data.get("mission_id"),
-                    revision_scope=latest_scope, terminal_object_digest=provenance_digest(terminal_object),
+                    revision_scope=latest_scope, terminal_object_digest=terminal_state_digest(terminal_object),
                     approval_evidence_ref=approval_ref, approved_actor=approved_actor, approved_at=approved_at,
                     reason_code=reason_code, event_nonce=secrets.token_hex(32),
                 )
@@ -7923,6 +7939,9 @@ def cmd_mark_passes(args):
             data["force_reason"] = reason
             data["force_approved_by_user"] = approved_by_user  # #185
             data["force_approval"] = verification
+            if verification["request"]["terminal_object_digest"] != terminal_state_digest(data):
+                print("ERROR: force approval terminal state binding changed before write", file=sys.stderr)
+                sys.exit(2)
             data["force_approval"]["consumed"] = True
         backup_state(sf)
         atomic_write_json(sf, data)

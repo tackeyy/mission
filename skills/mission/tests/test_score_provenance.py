@@ -11,12 +11,53 @@ from pathlib import Path
 import pytest
 
 
+LIB_ROOT = Path(__file__).resolve().parents[1] / "lib"
+if str(LIB_ROOT) not in sys.path:
+    sys.path.insert(0, str(LIB_ROOT))
+
+
 ITEMS = {
     "mission_achievement": 4.5,
     "accuracy": 4.5,
     "completeness": 4.0,
     "usability": 4.0,
 }
+
+
+def test_terminal_state_projection_binds_gate_relevant_fields_only():
+    """Force approval receipts must be portable yet non-transferable state bindings."""
+    from scoring_provenance import terminal_state_digest
+
+    state = {
+        "session_id": "session-a", "mission_id": "mission-a", "iteration": 2,
+        "threshold": 4.0, "score_history": [{"iteration": 2, "composite": 3.0}],
+        "revision_scope": {"kind": "not-applicable", "reason_code": "non-git"},
+        "passes": False, "loop_active": True, "terminal_outcome": None,
+        "updated_at": "2026-08-10T00:00:00Z",
+    }
+    expected = terminal_state_digest(state)
+    assert expected == terminal_state_digest({**state, "updated_at": "2026-08-12T00:00:00Z", "future_note": "ignored"})
+    for field, replacement in (
+        ("session_id", "session-b"), ("mission_id", "mission-b"), ("iteration", 3),
+        ("threshold", 4.5), ("score_history", []), ("terminal_outcome", "completed_pass"),
+    ):
+        changed = {**state, field: replacement}
+        assert terminal_state_digest(changed) != expected, field
+
+
+def test_review_aggregate_reducer_rejects_duplicate_perspective_and_non_finite_score():
+    """Canonical re-derivation must fail closed before a claim is compared."""
+    from scoring_provenance import reduce_review_aggregate
+
+    review = {
+        "perspective": "neutral", "scores": ITEMS, "findings": [],
+        "same_score_note": None,
+    }
+    with pytest.raises(ValueError, match="duplicate"):
+        reduce_review_aggregate([review, review])
+    invalid = {**review, "scores": {**ITEMS, "accuracy": float("inf")}}
+    with pytest.raises(ValueError, match="finite"):
+        reduce_review_aggregate([invalid])
 
 
 def _review(path):
@@ -94,6 +135,28 @@ def test_mark_passes_rejects_score_values_that_disagree_with_aggregate_derivatio
     payload["items"] = {key: 5.0 for key in payload["items"]}
     out.write_text(json.dumps(payload))
     assert run_cli("push-score", "--iteration", "1", "--scoring-json", str(out), cwd=state_dir.parent).returncode == 2
+
+
+def test_push_score_rederives_claim_from_archived_inputs_not_self_consistent_claim(state_dir, run_cli, tmp_path):
+    """A rehashed archive cannot pair low review inputs with a high claim."""
+    review, out = _review(tmp_path / "review.json"), tmp_path / "score.json"
+    assert run_cli("aggregate-reviews", "--iteration", "1", "--input", str(review), "--out", str(out), cwd=state_dir.parent).returncode == 0
+    payload = json.loads(out.read_text())
+    ref = payload["score_provenance"]["review_evidence_ref"]
+    archive = state_dir.parent / ref["path"]
+    evidence = json.loads(archive.read_text())
+    evidence["inputs"][0]["scores"] = {
+        "mission_achievement": 3.0, "accuracy": 3.1,
+        "completeness": 3.0, "usability": 3.2,
+    }
+    content = (json.dumps(evidence, ensure_ascii=False, indent=2) + "\n").encode()
+    archive.write_bytes(content)
+    ref["digest"] = "sha256:" + hashlib.sha256(content).hexdigest()
+    ref["generation"] = ref["digest"][7:23]
+    out.write_text(json.dumps(payload))
+    result = run_cli("push-score", "--iteration", "1", "--scoring-json", str(out), cwd=state_dir.parent)
+    assert result.returncode == 2
+    assert "derived from inputs" in result.stderr
 
 
 def test_active_legacy_state_cannot_mark_passes_with_unprovenanced_score(state_dir, run_cli):
