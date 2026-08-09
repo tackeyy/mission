@@ -1,6 +1,13 @@
 """Issue #383: immutable, structured scoring provenance."""
 
 import json
+import importlib.util
+import sys
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
 
 
 ITEMS = {
@@ -67,7 +74,7 @@ def test_mark_passes_rejects_tampered_review_evidence(state_dir, run_cli, read_s
     review = _review(tmp_path / "review.json")
     assert run_cli("review-finalize", "--iteration", "1", "--input", str(review), cwd=state_dir.parent).returncode == 0
     ref = read_state(state_dir)["score_history"][0]["review_evidence_ref"]
-    with open(ref["path"], "ab") as handle:
+    with open(state_dir.parent / ref["path"], "ab") as handle:
         handle.write(b"tamper")
     result = run_cli("mark-passes", cwd=state_dir.parent)
     assert result.returncode == 2
@@ -93,3 +100,119 @@ def test_resubmit_preserves_prior_content_addressed_archive(state_dir, run_cli, 
     assert run_cli("push-score", "--iteration", "1", "--scoring-json", str(second),
                    "--resubmit-reason", "neutral correction", cwd=state_dir.parent).returncode == 0
     assert open(old_path, "rb").read() == old_bytes
+
+
+def test_manual_import_source_is_preserved_with_typed_evidence_ref(state_dir, run_cli, read_state, tmp_path):
+    state = json.loads((state_dir / "sessions" / "test.json").read_text())
+    state["schema_version"] = 4
+    (state_dir / "sessions" / "test.json").write_text(json.dumps(state))
+    review = _review(tmp_path / "review.json")
+    out = tmp_path / "score.json"
+    assert run_cli("aggregate-reviews", "--iteration", "1", "--input", str(review), "--out", str(out), cwd=state_dir.parent).returncode == 0
+    payload = json.loads(out.read_text())
+    payload["score_provenance"]["score_source"] = "manual-import"
+    out.write_text(json.dumps(payload))
+    result = run_cli("push-score", "--iteration", "1", "--scoring-json", str(out), cwd=state_dir.parent)
+    assert result.returncode == 0, result.stderr
+    assert read_state(state_dir)["score_history"][0]["score_source"] == "manual-import"
+
+
+@pytest.mark.parametrize("attack", ["absolute", "traversal", "nul", "symlink", "fifo", "oversize", "utf8", "same-size", "swap"])
+def test_push_score_rejects_adversarial_evidence_refs(state_dir, run_cli, tmp_path, attack):
+    state = json.loads((state_dir / "sessions" / "test.json").read_text())
+    state["schema_version"] = 4
+    (state_dir / "sessions" / "test.json").write_text(json.dumps(state))
+    review, out = _review(tmp_path / "review.json"), tmp_path / "score.json"
+    assert run_cli("aggregate-reviews", "--iteration", "1", "--input", str(review), "--out", str(out), cwd=state_dir.parent).returncode == 0
+    payload = json.loads(out.read_text())
+    ref = payload["score_provenance"]["review_evidence_ref"]
+    target = state_dir.parent / ref["path"]
+    if attack == "absolute":
+        ref["path"] = str(target)
+    elif attack == "traversal":
+        ref["path"] = ".mission-state/archive/../sessions/test.json"
+    elif attack == "nul":
+        ref["path"] = ".mission-state/archive/x\x00.json"
+    else:
+        target.unlink()
+        if attack == "symlink":
+            target.symlink_to(tmp_path / "review.json")
+        elif attack == "fifo":
+            os.mkfifo(target)
+        elif attack == "oversize":
+            target.write_bytes(b"x" * (4 * 1024 * 1024 + 1))
+        elif attack == "utf8":
+            target.write_bytes(b"\xff")
+        elif attack == "same-size":
+            target.write_bytes(b" " * len(json.dumps({"schema": "mission-review-aggregate/1"})))
+        else:  # replacement after unlink models a pathname swap, not a retained FD.
+            target.write_text(json.dumps({"schema": "mission-review-aggregate/1"}), encoding="utf-8")
+    out.write_text(json.dumps(payload))
+    result = run_cli("push-score", "--iteration", "1", "--scoring-json", str(out), cwd=state_dir.parent)
+    assert result.returncode == 2
+    assert "provenance" in result.stderr
+
+
+@pytest.mark.parametrize("attack", ["absolute", "traversal", "nul", "symlink", "fifo", "oversize", "utf8", "same-size", "swap"])
+def test_mark_passes_rejects_adversarial_evidence_refs(state_dir, run_cli, read_state, tmp_path, attack):
+    state = json.loads((state_dir / "sessions" / "test.json").read_text())
+    state["schema_version"] = 4
+    (state_dir / "sessions" / "test.json").write_text(json.dumps(state))
+    review = _review(tmp_path / "review.json")
+    assert run_cli("review-finalize", "--iteration", "1", "--input", str(review), cwd=state_dir.parent).returncode == 0
+    ref = read_state(state_dir)["score_history"][0]["review_evidence_ref"]
+    target = state_dir.parent / ref["path"]
+    if attack == "absolute": ref["path"] = str(target)
+    elif attack == "traversal": ref["path"] = ".mission-state/archive/../sessions/test.json"
+    elif attack == "nul": ref["path"] = ".mission-state/archive/x\x00.json"
+    else:
+        target.unlink()
+        if attack == "symlink": target.symlink_to(tmp_path / "review.json")
+        elif attack == "fifo": os.mkfifo(target)
+        elif attack == "oversize": target.write_bytes(b"x" * (4 * 1024 * 1024 + 1))
+        elif attack == "utf8": target.write_bytes(b"\xff")
+        else: target.write_text(json.dumps({"schema": "mission-review-aggregate/1"}), encoding="utf-8")
+    session = state_dir / "sessions" / "test.json"
+    document = json.loads(session.read_text())
+    document["score_history"][0]["review_evidence_ref"]["path"] = ref["path"]
+    document["score_history"][0]["score_provenance"]["review_evidence_ref"]["path"] = ref["path"]
+    session.write_text(json.dumps(document))
+    result = run_cli("mark-passes", cwd=state_dir.parent)
+    assert result.returncode == 2
+    assert "provenance" in result.stderr
+
+
+def test_force_pass_has_no_builtin_trusted_verifier(state_dir, run_cli):
+    state = json.loads((state_dir / "sessions" / "test.json").read_text())
+    state["schema_version"] = 4
+    (state_dir / "sessions" / "test.json").write_text(json.dumps(state))
+    result = run_cli(
+        "mark-passes", "--force", "--reason", "bounded override", "--approved-by-user",
+        "--approval-evidence-ref", "sha256:" + "a" * 64,
+        "--approved-actor", "role:owner", "--approved-at", datetime.now(timezone.utc).isoformat(),
+        "--reason-code", "user-override", "--approval-verifier", "neutral-test",
+        cwd=state_dir.parent,
+    )
+    assert result.returncode == 2
+    assert "not configured" in result.stderr
+
+
+def test_approval_verifier_callback_returns_typed_verified_envelope(tmp_path):
+    script = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
+    spec = importlib.util.spec_from_file_location("state_for_test", script)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    module.register_approval_verifier(
+        "fixture-verifier",
+        lambda request: module.ApprovalVerification(verified=True, verifier="fixture-verifier"),
+    )
+    result = module.verify_force_approval({
+        "approval_evidence_ref": "sha256:" + "a" * 64,
+        "approved_actor": "role:owner",
+        "approved_at": datetime.now(timezone.utc).isoformat(),
+        "reason_code": "user-override",
+    }, "fixture-verifier")
+    assert result.verified is True
+    assert result.verifier == "fixture-verifier"

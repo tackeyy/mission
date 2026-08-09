@@ -47,6 +47,7 @@ import time
 import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import NamedTuple, Protocol
 
 LIB_DIR = Path(__file__).resolve().parents[1] / "lib"
 if str(LIB_DIR) not in sys.path:
@@ -6224,6 +6225,73 @@ def _archive_scoring_json(cwd: Path, iteration: int, data: dict, entry: dict, pa
 
 _SHA256_REF_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PROVENANCE_REASON_CODES = {"user-override", "safety-exception", "operational-recovery"}
+_APPROVAL_VERIFIER_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+_APPROVAL_ACTOR_RE = re.compile(r"^role:[a-z][a-z0-9-]{0,63}$")
+_MAX_APPROVAL_AGE = timedelta(days=1)
+
+
+class ApprovalRequest(NamedTuple):
+    """Minimal, non-secret verifier input for a forced-pass approval."""
+    approval_evidence_ref: str
+    approved_actor: str
+    approved_at: str
+    reason_code: str
+
+
+class ApprovalVerification(NamedTuple):
+    """Typed verifier response; raw approval bodies never enter mission state."""
+    verified: bool
+    verifier: str
+
+
+class ApprovalVerifier(Protocol):
+    def __call__(self, request: ApprovalRequest) -> ApprovalVerification:
+        ...
+
+
+_APPROVAL_VERIFIERS: dict[str, ApprovalVerifier] = {}
+
+
+def register_approval_verifier(name: str, verifier: ApprovalVerifier) -> None:
+    """Register a host-provided verifier. The portable CLI ships with none."""
+    if not _APPROVAL_VERIFIER_NAME_RE.fullmatch(name) or not callable(verifier):
+        raise ValueError("invalid approval verifier registration")
+    _APPROVAL_VERIFIERS[name] = verifier
+
+
+def _approval_request_from_fields(approval_ref: object, actor: object, approved_at: object,
+                                  reason_code: object, *, now: datetime | None = None) -> ApprovalRequest:
+    if not (_SHA256_REF_RE.fullmatch(str(approval_ref or ""))
+            and isinstance(actor, str) and _APPROVAL_ACTOR_RE.fullmatch(actor)
+            and isinstance(approved_at, str) and reason_code in _PROVENANCE_REASON_CODES):
+        raise ValueError("--approval-evidence-ref, opaque --approved-actor role, --approved-at, and --reason-code are required")
+    parsed = parse_iso_datetime(approved_at)
+    if parsed is None or parsed.tzinfo is None:
+        raise ValueError("approval timestamp is invalid")
+    current = now or datetime.now(timezone.utc)
+    if parsed > current or current - parsed > _MAX_APPROVAL_AGE:
+        raise ValueError("approval timestamp is expired or in the future")
+    return ApprovalRequest(str(approval_ref), actor, approved_at, str(reason_code))
+
+
+def verify_force_approval(fields: dict, verifier_name: object) -> ApprovalVerification:
+    """Fail closed unless a registered callback returns a matching typed envelope."""
+    request = _approval_request_from_fields(
+        fields.get("approval_evidence_ref"), fields.get("approved_actor"),
+        fields.get("approved_at"), fields.get("reason_code"),
+    )
+    if not isinstance(verifier_name, str) or not _APPROVAL_VERIFIER_NAME_RE.fullmatch(verifier_name):
+        raise ValueError("approval verifier is invalid or not configured")
+    verifier = _APPROVAL_VERIFIERS.get(verifier_name)
+    if verifier is None:
+        raise ValueError("approval verifier is not configured")
+    try:
+        result = verifier(request)
+    except Exception as exc:
+        raise ValueError("approval verifier rejected the evidence") from exc
+    if not isinstance(result, ApprovalVerification) or not result.verified or result.verifier != verifier_name:
+        raise ValueError("approval verifier did not return a verified envelope")
+    return result
 
 
 def _is_new_provenance_state(data: dict) -> bool:
@@ -6265,23 +6333,68 @@ def _validate_provenance(provenance: object, *, require: bool) -> dict | None:
     return provenance
 
 
+def _read_bounded_review_evidence(cwd: Path, path_text: object) -> bytes:
+    """Read a state-local evidence file through one descriptor chain, without TOCTOU."""
+    if not isinstance(path_text, str) or "\x00" in path_text:
+        raise ValueError("review evidence path is invalid")
+    raw = Path(path_text)
+    root_parts = state_dir(cwd).relative_to(cwd).parts
+    if raw.is_absolute() or not raw.parts or raw.parts[:len(root_parts)] != root_parts:
+        raise ValueError("review evidence must be repo-relative and under state")
+    if any(part in {"", ".", ".."} for part in raw.parts):
+        raise ValueError("review evidence path is invalid")
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(str(cwd), os.O_RDONLY | directory)
+    try:
+        for index, part in enumerate(raw.parts):
+            flags = os.O_RDONLY | nofollow
+            if index + 1 < len(raw.parts):
+                flags |= directory
+            else:
+                flags |= os.O_NONBLOCK
+            next_fd = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        initial = os.fstat(fd)
+        if not stat.S_ISREG(initial.st_mode) or initial.st_size > 4 * 1024 * 1024:
+            raise ValueError("review evidence must be a bounded regular non-symlink file")
+        chunks: list[bytes] = []
+        remaining = initial.st_size
+        while remaining:
+            chunk = os.read(fd, min(remaining, 64 * 1024))
+            if not chunk:
+                raise ValueError("review evidence changed while being read")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(fd, 1) or os.fstat(fd).st_size != initial.st_size:
+            raise ValueError("review evidence changed while being read")
+        content = b"".join(chunks)
+    except OSError as exc:
+        raise ValueError("review evidence path is invalid") from exc
+    finally:
+        os.close(fd)
+    return content
+
+
 def _revalidate_score_provenance(cwd: Path, entry: dict, data: dict) -> None:
     """Re-check immutable evidence at the pass boundary; never trust a saved digest alone."""
     provenance = _validate_provenance(entry.get("score_provenance"), require=_is_new_provenance_state(data))
     if provenance is None:
         return
     ref = provenance["review_evidence_ref"]
-    raw = Path(ref["path"])
-    path = raw if raw.is_absolute() else cwd / raw
-    try:
-        path.relative_to(state_dir(cwd))
-        info = path.lstat()
-    except (OSError, ValueError) as exc:
-        raise ValueError("review evidence path is invalid") from exc
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_size > 4 * 1024 * 1024:
-        raise ValueError("review evidence must be a bounded regular non-symlink file")
-    if "sha256:" + _sha256_file(path) != ref["digest"]:
+    content = _read_bounded_review_evidence(cwd, ref["path"])
+    digest = hashlib.sha256(content).hexdigest()
+    if "sha256:" + digest != ref["digest"]:
         raise ValueError("review evidence digest mismatch")
+    if ref["generation"] != digest[:16]:
+        raise ValueError("review evidence generation mismatch")
+    try:
+        parsed = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("review evidence must be valid UTF-8 JSON") from exc
+    if not isinstance(parsed, dict) or parsed.get("schema") != "mission-review-aggregate/1":
+        raise ValueError("review evidence has invalid schema")
 
 
 def _resolve_recorded_path(cwd: Path, path_text: str) -> Path:
@@ -6984,6 +7097,7 @@ def cmd_aggregate_reviews(args):
             sys.exit(2)
         if not evidence_path.exists():
             atomic_write_bytes(evidence_path, evidence_content)
+        evidence_ref_path = str(evidence_path.relative_to(cwd))
 
         out_path = Path(args.out) if args.out else Path("/tmp") / f"mission-scorer-iter-{args.iteration}-{mission8}.json"
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -6991,13 +7105,13 @@ def cmd_aggregate_reviews(args):
             "items": items,
             "notes": f"aggregate-reviews: {len(adjusted_scores)} scoring reviewer(s), {len(reviews) - len(scoring_reviews)} findings-only reviewer(s)",
             "open_high": open_high,
-            "findings_evidence_path": str(evidence_path),
+            "findings_evidence_path": evidence_ref_path,
             "review_agreement": review_agreement,
             "agreement_detail": agreement_detail,
             "score_provenance": {
                 "score_source": "scoring-json",
                 "review_evidence_ref": {
-                    "kind": "review-aggregate", "path": str(evidence_path),
+                    "kind": "review-aggregate", "path": evidence_ref_path,
                     "digest": evidence_digest,
                     "generation": evidence_digest[7:23],
                     "revision_scope": revision_scope,
@@ -7206,6 +7320,12 @@ def cmd_push_score(args):
         except ValueError as exc:
             print(f"ERROR: provenance: {exc}", file=sys.stderr)
             sys.exit(2)
+        if provenance is not None:
+            try:
+                _revalidate_score_provenance(cwd, {"score_provenance": provenance}, data)
+            except ValueError as exc:
+                print(f"ERROR: provenance: {exc}", file=sys.stderr)
+                sys.exit(2)
         now = iso_now()
         _validate_consensus_policy(data, items)
         # #122: 同一 iteration の再 push は gate 迂回の温床 (低スコア push 後に
@@ -7244,7 +7364,7 @@ def cmd_push_score(args):
                 entry["agreement_detail"] = scoring_payload["agreement_detail"]
             # archive を state 書き込みより先に行う (crash 時に state が実在しない
             # scoring_evidence_path を指す dangling reference を防ぐ。他 archive 系と同順序)
-            entry["score_source"] = "scoring-json"
+            entry["score_source"] = provenance["score_source"] if provenance else "scoring-json"
             if provenance is not None:
                 entry["score_provenance"] = provenance
                 entry["review_evidence_ref"] = provenance["review_evidence_ref"]
@@ -7432,14 +7552,15 @@ def cmd_mark_passes(args):
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
         if force and _is_new_provenance_state(data):
-            if not (_SHA256_REF_RE.fullmatch(str(approval_ref or ""))
-                    and isinstance(approved_actor, str) and re.fullmatch(r"role:[a-z0-9-]+", approved_actor)
-                    and isinstance(approved_at, str) and parse_iso_datetime(approved_at) is not None
-                    and reason_code in _PROVENANCE_REASON_CODES):
-                print("ERROR: --force requires verified --approval-evidence-ref, --approved-actor role:<opaque>, --approved-at, and allowlisted --reason-code", file=sys.stderr)
-                sys.exit(2)
-            if approval_verifier != "neutral-test":
-                print("ERROR: approval verifier is not configured or did not verify the evidence", file=sys.stderr)
+            try:
+                verification = verify_force_approval({
+                    "approval_evidence_ref": approval_ref,
+                    "approved_actor": approved_actor,
+                    "approved_at": approved_at,
+                    "reason_code": reason_code,
+                }, approval_verifier)
+            except ValueError as exc:
+                print(f"ERROR: force approval: {exc}", file=sys.stderr)
                 sys.exit(2)
         try:
             validate_artifact_state_consistency(data, require_resolved=True)
@@ -7574,6 +7695,7 @@ def cmd_mark_passes(args):
                     "approved_at": approved_at,
                     "reason_code": reason_code,
                     "verification": "verified",
+                    "verifier": verification.verifier,
                 }
         backup_state(sf)
         atomic_write_json(sf, data)

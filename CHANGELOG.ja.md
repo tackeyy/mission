@@ -9,7 +9,7 @@
 
 ## [Unreleased]
 
-- 新規 session は content-addressed な不変 scoring/review provenance を記録し、通常 pass には aggregate evidence の digest、opaque generation、portable な revision scope を必須化しました。既存 state は破壊的変更せず legacy として読み取り互換を保ちます。force pass は boolean 宣言ではなく verifier による approval metadata を要求し、audit は検証済み承認と検証不能な旧 override を分離します (#383)。
+- 新規 session は content-addressed な不変 scoring/review provenance を記録し、通常 pass には aggregate evidence の digest、opaque generation、portable な revision scope を必須化しました。既存 state は破壊的変更せず legacy として読み取り互換を保ちます。force pass は boolean 宣言ではなく host 登録 verifier callback の typed approval envelope を要求し、audit は検証済み承認と検証不能な旧 override を分離します (#383)。
 
 ### 追加
 

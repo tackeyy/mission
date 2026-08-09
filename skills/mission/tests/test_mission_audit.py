@@ -2143,8 +2143,8 @@ def test_audit_flags_forced_pass_without_approval_evidence(tmp_path):
     assert any(f["code"] == "forced-pass-autonomous-suspect" for f in data["findings"])
 
 
-def test_audit_does_not_flag_forced_pass_with_approval_flag(tmp_path):
-    """force_approved_by_user=true (新形式) は自律疑いから除外される."""
+def test_audit_flags_legacy_force_pass_with_approval_flag_as_unverifiable(tmp_path):
+    """Historical boolean approval is retained but never treated as verified."""
     _write_state(
         tmp_path / ".mission-state" / "sessions" / "approved-force.json",
         project_root=str(tmp_path),
@@ -2164,12 +2164,12 @@ def test_audit_does_not_flag_forced_pass_with_approval_flag(tmp_path):
     )
     data = json.loads(result.stdout)
     assert data["forced_pass_count"] == 1
-    assert data["forced_pass_autonomous_suspect_count"] == 0
-    assert not any(f["code"] == "forced-pass-autonomous-suspect" for f in data["findings"])
+    assert data["forced_pass_autonomous_suspect_count"] == 1
+    assert any(f["code"] == "forced-pass-autonomous-suspect" for f in data["findings"])
 
 
-def test_audit_does_not_flag_forced_pass_with_user_mention_in_reason(tmp_path):
-    """旧形式 (force_approved_by_user 未記録) でも force_reason にユーザー承認の言及があれば除外."""
+def test_audit_flags_legacy_force_pass_with_user_mention_as_unverifiable(tmp_path):
+    """Historical approval prose is retained but never treated as verified."""
     _write_state(
         tmp_path / ".mission-state" / "sessions" / "legacy-mention.json",
         project_root=str(tmp_path),
@@ -2187,7 +2187,7 @@ def test_audit_does_not_flag_forced_pass_with_user_mention_in_reason(tmp_path):
         check=True,
     )
     data = json.loads(result.stdout)
-    assert data["forced_pass_autonomous_suspect_count"] == 0
+    assert data["forced_pass_autonomous_suspect_count"] == 1
 
 
 # ===== #190: halt_category による構造化 halt bucket =====

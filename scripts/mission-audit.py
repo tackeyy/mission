@@ -1623,11 +1623,7 @@ def is_forced_pass_autonomous_suspect(state: dict[str, Any]) -> bool:
     if isinstance(approval, dict):
         # New-format records are approved only after a configured verifier said so.
         return approval.get("verification") != "verified"
-    if state.get("force_approved_by_user") is True:
-        return True  # legacy boolean is explicitly unverifiable
-    reason = str(state.get("force_reason") or "").lower()
-    if any(token in reason for token in _USER_APPROVAL_MENTION_TOKENS):
-        return False
+    # Historical booleans and free text are retained, but are never verification.
     return True
 
 
@@ -3207,6 +3203,7 @@ def main(argv: list[str] | None = None) -> int:
             if k not in {
                 "duplicates",
                 "forced_pass_sessions",
+                "forced_pass_approved_verified_sessions",
                 "forced_pass_autonomous_suspect_sessions",
                 "halt_sessions",
                 "actionable_halt_sessions",
