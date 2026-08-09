@@ -9,7 +9,7 @@
 
 ## [Unreleased]
 
-- review aggregate は write / pass 境界で archive `inputs` から全 gate 値を再導出し、claim 欠落・自己整合だが偽の claim を拒否するようにした。force approval は versioned terminal-state projection に bind し、audit は state のコピー・改ざんを検出する。approval verifier の trust root は host registry のみとし、distribution/version/source identity を pin して reaped child process で時間制限付き実行する (#383)。
+- review aggregate は write / pass 境界で archive `inputs` から全 gate 値を再導出し、claim 欠落・自己整合だが偽の claim を拒否するようにした。force approval は versioned terminal-state projection に bind し、audit は state のコピー・改ざんを検出する。approval verifier の trust root は user-only `$XDG_CONFIG_HOME/mission/approval-verifiers.json` の `mission-approval-verifier-registry/2` とし、唯一の登録手順で `entry_point`、`distribution`、`version`、`source_digest` を pin する。parent/child が同じ pin を再照合し、load と callback を reaped child process 内で時間制限付き実行する (#383)。
 
 - schema marker の欠落・改ざんにかかわらず新規 score 書込みに content-addressed な不変 scoring/review provenance を必須化し、成功した書込みだけが state を schema v4 へ上げます。既存 terminal state は破壊的変更せず read-only の legacy として扱います。force pass は boolean 宣言ではなく、canonical request/response/receipt と consumed marker を返す host 登録 verifier callback を要求し、audit も同じ envelope を検証してから verified と分類します (#383)。
 

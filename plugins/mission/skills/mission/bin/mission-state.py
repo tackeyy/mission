@@ -41,6 +41,7 @@ import multiprocessing
 import os
 import re
 import secrets
+import signal
 import socket
 import stat
 import subprocess
@@ -6269,6 +6270,7 @@ _APPROVAL_VERIFIER_ENTRY_POINT_GROUP = "mission.approval_verifiers"
 _APPROVAL_VERIFIER_REGISTRY_SCHEMA = "mission-approval-verifier-registry/2"
 _APPROVAL_VERIFIER_REGISTRY_LIMIT = 64 * 1024
 _APPROVAL_VERIFIER_TIMEOUT_SEC = 5
+_APPROVAL_VERIFIER_TERMINATE_GRACE_SEC = 0.2
 
 
 def register_approval_verifier(name: str, verifier: ApprovalVerifier) -> None:
@@ -6328,7 +6330,7 @@ def _read_approval_verifier_registry(path: Path) -> dict:
 
 
 def _configured_approval_entry_point(cwd: Path, verifier_name: str):
-    """Resolve a verifier only from the host-controlled registry and pinned metadata."""
+    """Return a pinned, non-executable verifier descriptor for a child to load."""
     xdg = os.environ.get("XDG_CONFIG_HOME")
     locations = [(Path(xdg) if xdg else Path.home() / ".config") / "mission" / "approval-verifiers.json"]
     configured = {}
@@ -6370,11 +6372,48 @@ def _configured_approval_entry_point(cwd: Path, verifier_name: str):
         raise ValueError("approval verifier source is invalid") from exc
     if "sha256:" + hashlib.sha256(source).hexdigest() != configured_item["source_digest"]:
         raise ValueError("approval verifier source digest mismatch")
-    return entry_point
+    # Never call EntryPoint.load() in the state-mutating parent.  Loading is
+    # arbitrary provider code and belongs to the bounded child below.
+    entry_point_value = getattr(entry_point, "value", None)
+    if not isinstance(entry_point_value, str) or not entry_point_value:
+        raise ValueError("approval verifier entry point is invalid")
+    # Keep this immutable lookup result as a parent-side pin.  The child must
+    # rediscover the same entry point before it calls load(), so metadata churn
+    # cannot retarget a same-name provider during the handoff.
+    return {**configured_item, "module": module_name, "entry_point_value": entry_point_value}
 
 
-def _approval_verifier_child(callback, request: dict, channel) -> None:
+def _approval_verifier_child(verifier, request: dict, channel) -> None:
     try:
+        # A verifier may create descendants; make this child their process
+        # group leader so timeout cleanup has one bounded target.
+        with contextlib.suppress(OSError):
+            os.setsid()
+        callback = verifier
+        if isinstance(verifier, dict):
+            discovered = importlib.metadata.entry_points()
+            candidates = (discovered.select(group=_APPROVAL_VERIFIER_ENTRY_POINT_GROUP)
+                          if hasattr(discovered, "select") else discovered.get(_APPROVAL_VERIFIER_ENTRY_POINT_GROUP, ()))
+            matches = [item for item in candidates if item.name == verifier["entry_point"]]
+            if len(matches) != 1:
+                raise ValueError("approval verifier entry point is not installed")
+            entry_point = matches[0]
+            distribution = getattr(entry_point, "dist", None)
+            if (distribution is None
+                    or str(distribution.metadata.get("Name") or "").lower() != verifier["distribution"].lower()
+                    or str(distribution.version) != verifier["version"]):
+                raise ValueError("approval verifier distribution identity mismatch")
+            module_name = getattr(entry_point, "module", "")
+            if (module_name != verifier["module"]
+                    or getattr(entry_point, "value", None) != verifier["entry_point_value"]):
+                raise ValueError("approval verifier entry point changed after pinning")
+            module_spec = importlib.util.find_spec(module_name)
+            origin = getattr(module_spec, "origin", None)
+            if not isinstance(origin, str) or "sha256:" + hashlib.sha256(Path(origin).read_bytes()).hexdigest() != verifier["source_digest"]:
+                raise ValueError("approval verifier source digest mismatch")
+            callback = entry_point.load()
+        if not callable(callback):
+            raise ValueError("approval verifier entry point is invalid")
         channel.send((True, callback(request)))
     except Exception:
         channel.send((False, None))
@@ -6382,21 +6421,36 @@ def _approval_verifier_child(callback, request: dict, channel) -> None:
         channel.close()
 
 
-def _run_approval_verifier(callback, request: dict) -> dict:
+def _stop_approval_verifier_child(child) -> None:
+    """Bound timeout cleanup even when provider code absorbs SIGTERM."""
+    for signal_number, fallback in ((signal.SIGTERM, child.terminate), (signal.SIGKILL, child.kill)):
+        if not child.is_alive():
+            child.join()
+            return
+        with contextlib.suppress(OSError):
+            os.killpg(child.pid, signal_number)
+        if child.is_alive():
+            with contextlib.suppress(OSError):
+                fallback()
+        child.join(_APPROVAL_VERIFIER_TERMINATE_GRACE_SEC)
+    if not child.is_alive():
+        child.join()
+
+
+def _run_approval_verifier(verifier, request: dict) -> dict:
     """Execute verifier in a reaped child; timeouts cannot leave it running."""
     try:
         context = multiprocessing.get_context("fork")
     except ValueError as exc:
         raise ValueError("isolated approval verifier execution is unavailable on this host") from exc
     receiver, sender = context.Pipe(duplex=False)
-    child = context.Process(target=_approval_verifier_child, args=(callback, request, sender))
+    child = context.Process(target=_approval_verifier_child, args=(verifier, request, sender))
     try:
         child.start()
         sender.close()
         child.join(_APPROVAL_VERIFIER_TIMEOUT_SEC)
         if child.is_alive():
-            child.terminate()
-            child.join()
+            _stop_approval_verifier_child(child)
             raise ValueError("approval verifier timed out")
         if child.exitcode != 0 or not receiver.poll():
             raise ValueError("approval verifier rejected the evidence")
@@ -6405,10 +6459,12 @@ def _run_approval_verifier(callback, request: dict) -> dict:
             raise ValueError("approval verifier rejected the evidence")
         return result
     finally:
+        sender.close()
         receiver.close()
         if child.is_alive():
-            child.terminate()
-            child.join()
+            _stop_approval_verifier_child(child)
+        if not child.is_alive():
+            child.close()
 
 
 def verify_force_approval(request: dict, verifier_name: object, *, cwd: Path | None = None) -> dict:
@@ -6416,15 +6472,11 @@ def verify_force_approval(request: dict, verifier_name: object, *, cwd: Path | N
     if not isinstance(verifier_name, str) or not _APPROVAL_VERIFIER_NAME_RE.fullmatch(verifier_name):
         raise ValueError("approval verifier is invalid or not configured")
     verifier = _APPROVAL_VERIFIERS.get(verifier_name)
-    entry_point = _configured_approval_entry_point(cwd, verifier_name) if verifier is None and cwd is not None else None
-    if verifier is None and entry_point is None:
+    descriptor = _configured_approval_entry_point(cwd, verifier_name) if verifier is None and cwd is not None else None
+    if verifier is None and descriptor is None:
         raise ValueError("approval verifier is not configured")
     try:
-        if verifier is None:
-            verifier = entry_point.load()
-            if not callable(verifier):
-                raise ValueError("approval verifier entry point is invalid")
-        result = _run_approval_verifier(verifier, request)
+        result = _run_approval_verifier(verifier if verifier is not None else descriptor, request)
     except Exception as exc:
         raise ValueError("approval verifier rejected the evidence") from exc
     try:
@@ -6598,7 +6650,12 @@ def _revalidate_score_provenance(cwd: Path, entry: dict, data: dict, *, require_
     if not isinstance(parsed, dict) or parsed.get("schema") != "mission-review-aggregate/1":
         raise ValueError("review evidence has invalid schema")
     try:
-        derived = reduce_review_aggregate(parsed.get("inputs"))
+        archive_iteration = parsed.get("iteration")
+        expected_iteration = entry.get("iteration")
+        if (isinstance(archive_iteration, bool) or not isinstance(archive_iteration, int)
+                or archive_iteration < 1 or archive_iteration != expected_iteration):
+            raise ValueError("review evidence iteration mismatch")
+        derived = reduce_review_aggregate(parsed.get("inputs"), expected_iteration=expected_iteration)
     except ValueError as exc:
         raise ValueError(f"review evidence inputs are invalid: {exc}") from exc
     claim = parsed.get("score_claim")
@@ -6608,7 +6665,7 @@ def _revalidate_score_provenance(cwd: Path, entry: dict, data: dict, *, require_
         "open_high": entry.get("open_high"), "review_agreement": entry.get("review_agreement"),
         "agreement_detail": entry.get("agreement_detail"),
     }
-    derived_claim = {"iteration": entry.get("iteration"), **derived}
+    derived_claim = {"iteration": expected_iteration, **derived}
     if claim != derived_claim:
         raise ValueError("review evidence score claim is absent or not derived from inputs")
     if expected_claim != derived_claim:
@@ -7228,7 +7285,7 @@ def cmd_aggregate_reviews(args):
     # validates the untrusted archive.  Keep the surrounding observability
     # fields, but do not let this writer become a second scoring authority.
     try:
-        derived_score = reduce_review_aggregate(reviews)
+        derived_score = reduce_review_aggregate(reviews, expected_iteration=args.iteration)
     except ValueError as exc:
         print(f"ERROR: review aggregate inputs are invalid: {exc}", file=sys.stderr)
         sys.exit(2)

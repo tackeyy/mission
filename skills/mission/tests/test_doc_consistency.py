@@ -319,6 +319,31 @@ def test_distribution_release_requires_remote_tag_and_github_release_verificatio
     assert "git ls-remote --tags origin vX.Y.Z" in agents
 
 
+def test_force_approval_docs_describe_only_the_pinned_user_registry_v2_contract():
+    """#383: public guidance must not revive an unpinned project-registry escape hatch."""
+    source_docs = {
+        "state-management": _r(REFS / "state-management.md"),
+        "skill": _r(SKILL_MD),
+        "changelog-en": _r(REPO_ROOT / "CHANGELOG.md"),
+        "changelog-ja": _r(REPO_ROOT / "CHANGELOG.ja.md"),
+    }
+    required = (
+        "approval-verifiers.json",
+        "mission-approval-verifier-registry/2",
+        "entry_point",
+        "distribution",
+        "version",
+        "source_digest",
+    )
+    for name, text in source_docs.items():
+        for token in required:
+            assert token in text, f"{name} must document pinned user-registry token: {token}"
+    state_management = source_docs["state-management"]
+    assert "$XDG_CONFIG_HOME/mission/approval-verifiers.json" in state_management
+    assert ".mission/approval-verifiers.json" not in state_management
+    assert "mission-approval-verifier-registry/1" not in state_management
+
+
 def test_versioning_policy_separates_merge_and_distribution_releases():
     """通常 PR merge と配布 version bump を混同しないための方針を docs で固定する."""
     en = _r(REPO_ROOT / "docs/VERSIONING.md").lower()

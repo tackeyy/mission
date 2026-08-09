@@ -63,7 +63,7 @@ def _consensus_score(max_delta: float) -> float:
     return 1.0
 
 
-def reduce_review_aggregate(inputs: object) -> dict[str, object]:
+def reduce_review_aggregate(inputs: object, *, expected_iteration: int | None = None) -> dict[str, object]:
     """Re-derive every score gate field from archived review inputs.
 
     This deliberately accepts the already-normalized review archive shape, but
@@ -72,12 +72,25 @@ def reduce_review_aggregate(inputs: object) -> dict[str, object]:
     """
     if not isinstance(inputs, list) or not inputs:
         raise ValueError("review aggregate inputs must be a non-empty list")
+    if expected_iteration is not None and (
+        isinstance(expected_iteration, bool)
+        or not isinstance(expected_iteration, int)
+        or expected_iteration < 1
+    ):
+        raise ValueError("review aggregate expected iteration is invalid")
     perspectives: set[str] = set()
     adjusted: list[dict[str, object]] = []
     open_high = 0
     for index, review in enumerate(inputs):
         if not isinstance(review, dict):
             raise ValueError("review aggregate input must be an object")
+        if expected_iteration is not None:
+            if review.get("schema") != "mission-review/1":
+                raise ValueError("review aggregate schema must be mission-review/1")
+            iteration = review.get("iteration")
+            if (isinstance(iteration, bool) or not isinstance(iteration, int)
+                    or iteration < 1 or iteration != expected_iteration):
+                raise ValueError("review aggregate iteration does not match expected iteration")
         perspective = review.get("perspective")
         if not isinstance(perspective, str) or not perspective.strip():
             raise ValueError("review aggregate perspective is invalid")

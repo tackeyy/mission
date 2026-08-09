@@ -26,12 +26,15 @@ def write_canonical_review_aggregate(root, reviews, *, iteration=1, name_prefix=
     ``mission-review/1`` inputs, rather than an empty legacy aggregate.  Keep
     the reducer as the single definition of claim semantics.
     """
+    # Fixture producers model the same iteration binding as aggregate-reviews;
+    # never construct a replayable archive by carrying an old review forward.
+    bound_reviews = [{**review, "iteration": iteration} if isinstance(review, dict) else review for review in reviews]
     aggregate = {
         "schema": "mission-review-aggregate/1",
         "iteration": iteration,
-        "inputs": reviews,
+        "inputs": bound_reviews,
     }
-    aggregate["score_claim"] = {"iteration": iteration, **reduce_review_aggregate(reviews)}
+    aggregate["score_claim"] = {"iteration": iteration, **reduce_review_aggregate(bound_reviews, expected_iteration=iteration)}
     content = (json.dumps(aggregate, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     digest = hashlib.sha256(content).hexdigest()
     archive = Path(root) / ".mission-state" / "archive"

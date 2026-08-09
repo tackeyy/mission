@@ -11,6 +11,8 @@
 
 ### 追加
 
+- approval verifier の trust root は user-only `$XDG_CONFIG_HOME/mission/approval-verifiers.json` の `mission-approval-verifier-registry/2` とし、唯一の登録手順で `entry_point`、`distribution`、`version`、`source_digest` を pin する。parent/child が同じ pin を再照合し、load と callback を reaped child process 内で時間制限付き実行する (#383)。
+
 - activity 計測を planning の自動開始から全非終端 phase の portable default まで連動させ、`advance --phase` は明示 override がなければ既定 activity を使うようにした。review 集計は scoring の計測を atomic に開始し、terminal writer は open segment を閉じ、recovery は bounded な unobserved-gap reason を記録する。audit は elapsed conservation を明示し、coverage 70% 未満では slow-run finding より instrumentation-gap を優先する (#382)。
 
 - artifact production を end-to-end の portable contract にした。init は applicability を `pending` として記録し、executor handoff が review 前に解消する。nested `artifact` identity は repository-relative path、SHA-256 digest、byte size、producer run id を保持する。aggregate review と pass marking は bounded regular non-symlink validator を共有し、mutation / substitution を reject する。stats と audit は terminal outcome・profile 別 coverage を、eligible / observed / missing / invalid と clean / findings の conservation 付きで報告する。明示 not-applicable は clean ではなく skipped とし、profile coverage 95% 未満は WARN-only、到達後は現行観測 gate を有効化する。top-level `artifact_path` は legacy の read-only fallback として維持する (#381)。

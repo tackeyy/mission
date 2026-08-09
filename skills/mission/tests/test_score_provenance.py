@@ -24,6 +24,38 @@ ITEMS = {
 }
 
 
+def _load_state_module():
+    script = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
+    spec = importlib.util.spec_from_file_location("state_for_timeout_test", script)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _ignore_term_and_hang(_request):
+    import signal
+    import time
+
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    while True:
+        time.sleep(0.01)
+
+
+def test_approval_verifier_timeout_kills_a_term_ignoring_callback_within_bound(monkeypatch):
+    """#383: callback timeouts cannot convert a pass attempt into a parent hang."""
+    import time
+
+    module = _load_state_module()
+    monkeypatch.setattr(module, "_APPROVAL_VERIFIER_TIMEOUT_SEC", 0.05)
+    monkeypatch.setattr(module, "_APPROVAL_VERIFIER_TERMINATE_GRACE_SEC", 0.05)
+    started = time.monotonic()
+    with pytest.raises(ValueError, match="timed out"):
+        module._run_approval_verifier(_ignore_term_and_hang, {})
+    assert time.monotonic() - started < 1
+
+
 def test_terminal_state_projection_binds_gate_relevant_fields_only():
     """Force approval receipts must be portable yet non-transferable state bindings."""
     from scoring_provenance import terminal_state_digest
@@ -79,6 +111,28 @@ def test_review_aggregate_reducer_derives_consensus_item_only_for_multiple_revie
     assert "reviewer_consensus" not in single["items"]
     assert multiple["items"]["reviewer_consensus"] == 5.0
     assert multiple["composite"] == 4.25
+
+
+@pytest.mark.parametrize("iteration", [None, True, False, 1.0, "1", 0, -1])
+def test_review_aggregate_reducer_requires_canonical_review_iteration(iteration):
+    """Untrusted archive inputs cannot be replayed across scoring iterations."""
+    from scoring_provenance import reduce_review_aggregate
+
+    review = {
+        "schema": "mission-review/1", "iteration": iteration, "perspective": "neutral",
+        "scores": ITEMS, "findings": [], "same_score_note": "independent evidence supports each axis",
+    }
+    with pytest.raises(ValueError, match="iteration"):
+        reduce_review_aggregate([review], expected_iteration=1)
+
+
+def test_review_aggregate_reducer_rejects_mixed_review_iterations():
+    from scoring_provenance import reduce_review_aggregate
+
+    first = {"schema": "mission-review/1", "iteration": 1, "perspective": "first", "scores": ITEMS, "findings": [], "same_score_note": "independent evidence supports each axis"}
+    second = {"schema": "mission-review/1", "iteration": 2, "perspective": "second", "scores": ITEMS, "findings": [], "same_score_note": "independent evidence supports each axis"}
+    with pytest.raises(ValueError, match="iteration"):
+        reduce_review_aggregate([first, second], expected_iteration=2)
 
 
 def _review(path):
@@ -359,6 +413,31 @@ def test_force_pass_bootstraps_only_a_registered_entry_point(state_dir, run_cli,
     recorded = json.loads((state_dir / "sessions" / "test.json").read_text())
     assert recorded["passes"] is True
     assert recorded["force_approval"]["response"]["verifier_id"] == "fixture-verifier"
+
+
+@pytest.mark.parametrize("mode", ["load-error", "callback-error", "callback-hang"])
+def test_force_pass_verifier_failures_leave_state_bytes_unchanged(state_dir, run_cli, tmp_path, mode):
+    """#383: provider load/callback failures are bounded and precede every state write."""
+    state = json.loads((state_dir / "sessions" / "test.json").read_text())
+    state["schema_version"] = 4
+    state_path = state_dir / "sessions" / "test.json"
+    state_path.write_text(json.dumps(state))
+    package_root = tmp_path / "providers"; package_root.mkdir()
+    body = {
+        "load-error": "raise RuntimeError('load fails')\n",
+        "callback-error": "def verify(request):\n raise RuntimeError('callback fails')\n",
+        "callback-hang": "import signal, time\ndef verify(request):\n signal.signal(signal.SIGTERM, signal.SIG_IGN)\n while True: time.sleep(.01)\n",
+    }[mode]
+    (package_root / "fixture_provider.py").write_text(body)
+    dist_info = package_root / "fixture_provider-1.0.dist-info"; dist_info.mkdir()
+    (dist_info / "METADATA").write_text("Name: fixture-provider\nVersion: 1.0\n")
+    (dist_info / "entry_points.txt").write_text("[mission.approval_verifiers]\nfixture-entry = fixture_provider:verify\n")
+    registry = tmp_path / "host-config" / "mission"; registry.mkdir(parents=True)
+    (registry / "approval-verifiers.json").write_text(json.dumps({"schema": "mission-approval-verifier-registry/2", "verifiers": [{"id": "fixture-verifier", "entry_point": "fixture-entry", "distribution": "fixture-provider", "version": "1.0", "source_digest": "sha256:" + hashlib.sha256((package_root / "fixture_provider.py").read_bytes()).hexdigest()}]}))
+    before = state_path.read_bytes()
+    result = run_cli("mark-passes", "--force", "--reason", "bounded override", "--approved-by-user", "--approval-evidence-ref", "sha256:" + "a" * 64, "--approved-actor", "role:owner", "--approved-at", datetime.now(timezone.utc).isoformat(), "--reason-code", "user-override", "--approval-verifier", "fixture-verifier", cwd=state_dir.parent, env_extra={"PYTHONPATH": str(package_root), "XDG_CONFIG_HOME": str(tmp_path / "host-config")})
+    assert result.returncode == 2
+    assert state_path.read_bytes() == before
 
 
 @pytest.mark.parametrize("attack", ["malformed", "duplicate", "traversal", "symlink", "fifo", "hardlink", "oversize"])
