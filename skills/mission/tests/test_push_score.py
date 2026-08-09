@@ -172,11 +172,15 @@ def test_push_score_requires_iteration(state_dir, run_cli):
     assert r.returncode != 0
 
 
-def test_push_score_rejects_iteration_zero(state_dir, run_cli):
-    r = run_legacy_push_score(run_cli, "--iteration", "0", "--composite", "4.0", "--min-item", "3.5",
-                "--items", '{"a": 4.0}', cwd=state_dir.parent)
+def test_push_score_rejects_iteration_zero_before_reading_scoring_evidence(state_dir, run_cli, tmp_path):
+    """Argument validation rejects zero before an untrusted evidence path is read."""
+    state_path = state_dir / "sessions" / "test.json"
+    before = state_path.read_bytes()
+    r = run_cli("push-score", "--iteration", "0", "--scoring-json", str(tmp_path / "unread.json"),
+                cwd=state_dir.parent)
     assert r.returncode != 0
     assert "1 以上" in r.stderr
+    assert state_path.read_bytes() == before
 
 
 def test_push_score_rejects_invalid_items_json(state_dir, run_cli):
