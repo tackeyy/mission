@@ -253,6 +253,26 @@ def test_approval_verifier_callback_returns_typed_verified_envelope(tmp_path):
     assert result["response"]["verifier_id"] == "fixture-verifier"
 
 
+def test_historical_approval_envelope_keeps_canonicality_after_freshness_window():
+    """Audit validation is historical, whereas the writer's validation is fresh."""
+    from scoring_provenance import build_request, digest, validate_recorded_envelope
+    recorded_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    request = build_request(
+        session_id="test", mission_id="abc12345", revision_scope={"kind": "not-applicable", "reason_code": "non-git"},
+        terminal_object_digest="sha256:" + "b" * 64, approval_evidence_ref="sha256:" + "a" * 64,
+        approved_actor="role:owner", approved_at=recorded_at.isoformat(), reason_code="user-override",
+        event_nonce="c" * 64, now=recorded_at,
+    )
+    receipt = {"kind": "approval-receipt", "path": ".mission-state/archive/receipt.json", "digest": "sha256:" + "d" * 64}
+    envelope = {"request": request, "response": {
+        "schema": "mission-force-approval-response/1", "decision": "approved", "verifier_id": "fixture-verifier",
+        "request_digest": request["request_digest"], "receipt_ref": receipt, "verified_at": recorded_at.isoformat(),
+    }, "receipt_ref": receipt, "consumed": True}
+    with pytest.raises(ValueError):
+        validate_recorded_envelope(envelope, now=datetime(2026, 1, 3, tzinfo=timezone.utc))
+    assert validate_recorded_envelope(envelope, now=datetime(2026, 1, 3, tzinfo=timezone.utc), require_fresh=False)["consumed"]
+
+
 @pytest.mark.parametrize("schema", [None, 3, "4", 4.0])
 def test_push_score_requires_provenance_despite_schema_downgrade(state_dir, run_cli, schema):
     document = json.loads((state_dir / "sessions" / "test.json").read_text())

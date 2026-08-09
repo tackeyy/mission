@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -24,7 +26,7 @@ def digest(value: object) -> str:
     return "sha256:" + hashlib.sha256(canonical_json(value)).hexdigest()
 
 
-def _timestamp(value: object, *, now: datetime | None = None) -> str:
+def _timestamp(value: object, *, now: datetime | None = None, require_fresh: bool = True) -> str:
     if not isinstance(value, str):
         raise ValueError("approval timestamp is invalid")
     try:
@@ -34,7 +36,7 @@ def _timestamp(value: object, *, now: datetime | None = None) -> str:
     if parsed.tzinfo is None:
         raise ValueError("approval timestamp is invalid")
     current = now or datetime.now(timezone.utc)
-    if parsed > current or current - parsed > MAX_APPROVAL_AGE:
+    if parsed > current or (require_fresh and current - parsed > MAX_APPROVAL_AGE):
         raise ValueError("approval timestamp is expired or in the future")
     return value
 
@@ -53,7 +55,8 @@ def _receipt_ref(value: object) -> dict[str, str]:
 def build_request(*, session_id: object, mission_id: object, revision_scope: object,
                   terminal_object_digest: object, approval_evidence_ref: object,
                   approved_actor: object, approved_at: object, reason_code: object,
-                  event_nonce: object, now: datetime | None = None) -> dict[str, str | dict]:
+                  event_nonce: object, now: datetime | None = None,
+                  require_fresh: bool = True) -> dict[str, str | dict]:
     if not (isinstance(session_id, str) and session_id and isinstance(mission_id, str) and mission_id
             and isinstance(revision_scope, dict) and SHA256_REF_RE.fullmatch(str(terminal_object_digest or ""))
             and SHA256_REF_RE.fullmatch(str(approval_evidence_ref or ""))
@@ -65,29 +68,31 @@ def build_request(*, session_id: object, mission_id: object, revision_scope: obj
         "schema": REQUEST_SCHEMA, "session_id": session_id, "mission_id": mission_id,
         "revision_scope": revision_scope, "terminal_object_digest": terminal_object_digest,
         "approval_evidence_ref": approval_evidence_ref, "approved_actor": approved_actor,
-        "approved_at": _timestamp(approved_at, now=now), "reason_code": reason_code,
+        "approved_at": _timestamp(approved_at, now=now, require_fresh=require_fresh), "reason_code": reason_code,
         "event_nonce": event_nonce,
     }
     request["request_digest"] = digest(request)
     return request
 
 
-def validate_request(value: object, *, now: datetime | None = None) -> dict[str, str | dict]:
+def validate_request(value: object, *, now: datetime | None = None,
+                     require_fresh: bool = True) -> dict[str, str | dict]:
     if not isinstance(value, dict):
         raise ValueError("approval request is invalid")
     expected = build_request(**{key: value.get(key) for key in (
         "session_id", "mission_id", "revision_scope", "terminal_object_digest", "approval_evidence_ref",
         "approved_actor", "approved_at", "reason_code", "event_nonce",
-    )}, now=now)
+    )}, now=now, require_fresh=require_fresh)
     if value != expected:
         raise ValueError("approval request is not canonical")
     return expected
 
 
-def validate_recorded_envelope(value: object, *, now: datetime | None = None) -> dict[str, Any]:
+def validate_recorded_envelope(value: object, *, now: datetime | None = None,
+                              require_fresh: bool = True) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {"request", "response", "receipt_ref", "consumed"}:
         raise ValueError("approval envelope is invalid")
-    request = validate_request(value["request"], now=now)
+    request = validate_request(value["request"], now=now, require_fresh=require_fresh)
     response = value["response"]
     if not isinstance(response, dict) or set(response) != {"schema", "decision", "verifier_id", "request_digest", "receipt_ref", "verified_at"}:
         raise ValueError("approval response is invalid")
@@ -98,5 +103,37 @@ def validate_recorded_envelope(value: object, *, now: datetime | None = None) ->
             or response.get("receipt_ref") != receipt or not isinstance(value["consumed"], bool)
             or not value["consumed"]):
         raise ValueError("approval response is invalid")
-    _timestamp(response.get("verified_at"), now=now)
+    _timestamp(response.get("verified_at"), now=now, require_fresh=require_fresh)
     return {"request": request, "response": response, "receipt_ref": receipt, "consumed": True}
+
+
+def read_state_local_bytes(root: object, path_text: object, *, limit: int = 4 * 1024 * 1024) -> bytes:
+    """Read one state-local regular file through no-follow descriptors."""
+    if not isinstance(root, (str, os.PathLike)) or not isinstance(path_text, str) or "\x00" in path_text:
+        raise ValueError("approval receipt path is invalid")
+    raw = Path(path_text)
+    if raw.is_absolute() or any(part in {"", ".", ".."} for part in raw.parts) or not raw.parts or raw.parts[0] != ".mission-state":
+        raise ValueError("approval receipt path is invalid")
+    fd = os.open(os.fspath(root), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        for index, part in enumerate(raw.parts):
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            if index + 1 < len(raw.parts):
+                flags |= getattr(os, "O_DIRECTORY", 0)
+            else:
+                flags |= os.O_NONBLOCK
+            next_fd = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > limit:
+            raise ValueError("approval receipt must be a bounded regular file")
+        content = os.read(fd, info.st_size + 1)
+        if len(content) != info.st_size or os.fstat(fd).st_size != info.st_size:
+            raise ValueError("approval receipt changed while being read")
+        content.decode("utf-8")
+        return content
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError("approval receipt path is invalid") from exc
+    finally:
+        os.close(fd)

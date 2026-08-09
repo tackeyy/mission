@@ -81,7 +81,7 @@ from state_snapshot import (  # noqa: E402
     value_digest,
     write_snapshot,
 )
-from scoring_provenance import validate_recorded_envelope  # noqa: E402
+from scoring_provenance import read_state_local_bytes, validate_recorded_envelope  # noqa: E402
 
 
 PRUNE_DIRS = {
@@ -1621,7 +1621,8 @@ _USER_APPROVAL_MENTION_TOKENS = (
 )
 
 
-def is_forced_pass_autonomous_suspect(state: dict[str, Any]) -> bool:
+def is_forced_pass_autonomous_suspect(state: dict[str, Any], *, root: Path | None = None,
+                                      consumed: set[tuple[str, str]] | None = None) -> bool:
     """#185: force_approved_by_user が記録されておらず (旧形式)、かつ force_reason にも
     ユーザー承認への言及がない forced-pass を「自律 force の疑いあり」として検出する。"""
     approval = state.get("force_approval")
@@ -1629,12 +1630,43 @@ def is_forced_pass_autonomous_suspect(state: dict[str, Any]) -> bool:
         # Audit does not trust a self-declared verification string.  The same
         # complete canonical envelope accepted by the writer is required.
         try:
-            validate_recorded_envelope(approval)
+            envelope = validate_recorded_envelope(approval, require_fresh=False)
+            if root is None:
+                return True
+            receipt = envelope["receipt_ref"]
+            content = read_state_local_bytes(root, receipt["path"])
+            if "sha256:" + hashlib.sha256(content).hexdigest() != receipt["digest"]:
+                return True
+            # A receipt is a canonical binding object, not an opaque blob.
+            document = json.loads(content)
+            request = envelope["request"]
+            if not isinstance(document, dict) or document != {
+                "schema": "mission-force-approval-receipt/1",
+                "session_id": request["session_id"], "mission_id": request["mission_id"],
+                "revision_scope": request["revision_scope"],
+                "terminal_object_digest": request["terminal_object_digest"],
+                "event_nonce": request["event_nonce"], "request_digest": request["request_digest"],
+            }:
+                return True
+            key = (request["request_digest"], receipt["digest"])
+            if consumed is not None and key in consumed:
+                return True
+            if consumed is not None:
+                consumed.add(key)
             return False
-        except ValueError:
+        except (ValueError, json.JSONDecodeError):
             return True
     # Historical booleans and free text are retained, but are never verification.
     return True
+
+
+def state_root_for_record(record: StateRecord) -> Path | None:
+    """Derive the state owner directory without trusting state metadata."""
+    try:
+        index = record.path.parts.index(".mission-state")
+    except ValueError:
+        return None
+    return Path(record.path.anchor, *record.path.parts[1:index])
 
 
 def is_active_no_score_checkpoint(record: StateRecord) -> bool:
@@ -2202,7 +2234,15 @@ def aggregate(
     pass_count = classes.count("pass")
     pass_records = [r for r, cls in zip(records, classes) if cls == "pass"]
     forced = [r for r in records if r.state.get("passes") and r.state.get("passes_forced")]
-    forced_autonomous_suspect = [r for r in forced if is_forced_pass_autonomous_suspect(r.state)]
+    consumed_force_receipts: set[tuple[str, str]] = set()
+    forced_autonomous_suspect = [
+        r for r in forced
+        if is_forced_pass_autonomous_suspect(
+            r.state,
+            root=state_root_for_record(r),
+            consumed=consumed_force_receipts,
+        )
+    ]
     forced_approved_verified = [r for r in forced if r not in forced_autonomous_suspect]
     ungated = [
         r for r in records
