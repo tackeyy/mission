@@ -316,19 +316,23 @@ def test_force_pass_bootstraps_only_a_registered_entry_point(state_dir, run_cli,
     dist_info.mkdir()
     (dist_info / "METADATA").write_text("Name: fixture-provider\nVersion: 1.0\n")
     (dist_info / "entry_points.txt").write_text("[mission.approval_verifiers]\nfixture-entry = fixture_provider:verify\n")
-    registry = state_dir.parent / ".mission"
-    registry.mkdir()
+    registry = tmp_path / "host-config" / "mission"
+    registry.mkdir(parents=True)
     (state_dir / "archive").mkdir()
     (registry / "approval-verifiers.json").write_text(json.dumps({
-        "schema": "mission-approval-verifier-registry/1",
-        "verifiers": [{"id": "fixture-verifier", "entry_point": "fixture-entry"}],
+        "schema": "mission-approval-verifier-registry/2",
+        "verifiers": [{
+            "id": "fixture-verifier", "entry_point": "fixture-entry",
+            "distribution": "fixture-provider", "version": "1.0",
+            "source_digest": "sha256:" + hashlib.sha256((package_root / "fixture_provider.py").read_bytes()).hexdigest(),
+        }],
     }))
     result = run_cli(
         "mark-passes", "--force", "--reason", "bounded override", "--approved-by-user",
         "--approval-evidence-ref", "sha256:" + "a" * 64,
         "--approved-actor", "role:owner", "--approved-at", datetime.now(timezone.utc).isoformat(),
         "--reason-code", "user-override", "--approval-verifier", "fixture-verifier",
-        cwd=state_dir.parent, env_extra={"PYTHONPATH": str(package_root)},
+        cwd=state_dir.parent, env_extra={"PYTHONPATH": str(package_root), "XDG_CONFIG_HOME": str(tmp_path / "host-config")},
     )
     assert result.returncode == 0, result.stderr
     recorded = json.loads((state_dir / "sessions" / "test.json").read_text())

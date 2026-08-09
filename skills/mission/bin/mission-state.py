@@ -33,13 +33,14 @@ import contextlib
 import fcntl
 import hashlib
 import importlib.metadata
+import importlib.util
 import io
 import json
 import math
+import multiprocessing
 import os
 import re
 import secrets
-import signal
 import socket
 import stat
 import subprocess
@@ -6265,7 +6266,7 @@ class ApprovalVerifier(Protocol):
 
 _APPROVAL_VERIFIERS: dict[str, ApprovalVerifier] = {}
 _APPROVAL_VERIFIER_ENTRY_POINT_GROUP = "mission.approval_verifiers"
-_APPROVAL_VERIFIER_REGISTRY_SCHEMA = "mission-approval-verifier-registry/1"
+_APPROVAL_VERIFIER_REGISTRY_SCHEMA = "mission-approval-verifier-registry/2"
 _APPROVAL_VERIFIER_REGISTRY_LIMIT = 64 * 1024
 _APPROVAL_VERIFIER_TIMEOUT_SEC = 5
 
@@ -6311,22 +6312,25 @@ def _read_approval_verifier_registry(path: Path) -> dict:
         raise ValueError("approval verifier registry is invalid")
     result = {}
     for item in verifiers:
-        if not isinstance(item, dict) or set(item) != {"id", "entry_point"}:
+        if not isinstance(item, dict) or set(item) != {"id", "entry_point", "distribution", "version", "source_digest"}:
             raise ValueError("approval verifier registry is invalid")
         identifier, entry_point = item.get("id"), item.get("entry_point")
+        distribution, version, source_digest = item.get("distribution"), item.get("version"), item.get("source_digest")
         if (not isinstance(identifier, str) or not _APPROVAL_VERIFIER_NAME_RE.fullmatch(identifier)
                 or not isinstance(entry_point, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", entry_point)
+                or not isinstance(distribution, str) or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", distribution)
+                or not isinstance(version, str) or not version or len(version) > 128
+                or not isinstance(source_digest, str) or not _SHA256_REF_RE.fullmatch(source_digest)
                 or identifier in result):
             raise ValueError("approval verifier registry is invalid")
-        result[identifier] = entry_point
+        result[identifier] = {"entry_point": entry_point, "distribution": distribution, "version": version, "source_digest": source_digest}
     return result
 
 
 def _configured_approval_entry_point(cwd: Path, verifier_name: str):
-    """Resolve a named verifier from fixed local/user registries and installed metadata only."""
-    locations = [cwd / ".mission" / "approval-verifiers.json"]
+    """Resolve a verifier only from the host-controlled registry and pinned metadata."""
     xdg = os.environ.get("XDG_CONFIG_HOME")
-    locations.append((Path(xdg) if xdg else Path.home() / ".config") / "mission" / "approval-verifiers.json")
+    locations = [(Path(xdg) if xdg else Path.home() / ".config") / "mission" / "approval-verifiers.json"]
     configured = {}
     for location in locations:
         try:
@@ -6339,31 +6343,72 @@ def _configured_approval_entry_point(cwd: Path, verifier_name: str):
             if identifier in configured:
                 raise ValueError("approval verifier registry has duplicate verifier ids")
             configured[identifier] = entry_point
-    entry_point_name = configured.get(verifier_name)
-    if entry_point_name is None:
+    configured_item = configured.get(verifier_name)
+    if configured_item is None:
         return None
     discovered = importlib.metadata.entry_points()
     candidates = discovered.select(group=_APPROVAL_VERIFIER_ENTRY_POINT_GROUP) if hasattr(discovered, "select") else discovered.get(_APPROVAL_VERIFIER_ENTRY_POINT_GROUP, ())
-    matches = [item for item in candidates if item.name == entry_point_name]
+    matches = [item for item in candidates if item.name == configured_item["entry_point"]]
     if len(matches) != 1:
         raise ValueError("approval verifier entry point is not installed")
-    return matches[0]
-
-
-@contextlib.contextmanager
-def _approval_verifier_timeout():
-    """Bound verifier execution; timeout rejects before the state writer can run."""
-    if not hasattr(signal, "SIGALRM") or not hasattr(signal, "setitimer"):
-        raise ValueError("approval verifier timeout is unavailable on this host")
-    def expired(_signum, _frame):
-        raise TimeoutError("approval verifier timed out")
-    previous = signal.signal(signal.SIGALRM, expired)
-    previous_timer = signal.setitimer(signal.ITIMER_REAL, _APPROVAL_VERIFIER_TIMEOUT_SEC)
+    entry_point = matches[0]
+    distribution = getattr(entry_point, "dist", None)
+    if (distribution is None
+            or str(distribution.metadata.get("Name") or "").lower() != configured_item["distribution"].lower()
+            or str(distribution.version) != configured_item["version"]):
+        raise ValueError("approval verifier distribution identity mismatch")
+    module_name = getattr(entry_point, "module", "")
+    if not isinstance(module_name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", module_name):
+        raise ValueError("approval verifier entry point is invalid")
+    module_spec = importlib.util.find_spec(module_name)
+    origin = getattr(module_spec, "origin", None)
+    if not isinstance(origin, str) or not origin or origin in {"built-in", "frozen"}:
+        raise ValueError("approval verifier source is invalid")
     try:
-        yield
+        source = Path(origin).read_bytes()
+    except OSError as exc:
+        raise ValueError("approval verifier source is invalid") from exc
+    if "sha256:" + hashlib.sha256(source).hexdigest() != configured_item["source_digest"]:
+        raise ValueError("approval verifier source digest mismatch")
+    return entry_point
+
+
+def _approval_verifier_child(callback, request: dict, channel) -> None:
+    try:
+        channel.send((True, callback(request)))
+    except Exception:
+        channel.send((False, None))
     finally:
-        signal.signal(signal.SIGALRM, previous)
-        signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+        channel.close()
+
+
+def _run_approval_verifier(callback, request: dict) -> dict:
+    """Execute verifier in a reaped child; timeouts cannot leave it running."""
+    try:
+        context = multiprocessing.get_context("fork")
+    except ValueError as exc:
+        raise ValueError("isolated approval verifier execution is unavailable on this host") from exc
+    receiver, sender = context.Pipe(duplex=False)
+    child = context.Process(target=_approval_verifier_child, args=(callback, request, sender))
+    try:
+        child.start()
+        sender.close()
+        child.join(_APPROVAL_VERIFIER_TIMEOUT_SEC)
+        if child.is_alive():
+            child.terminate()
+            child.join()
+            raise ValueError("approval verifier timed out")
+        if child.exitcode != 0 or not receiver.poll():
+            raise ValueError("approval verifier rejected the evidence")
+        success, result = receiver.recv()
+        if not success or not isinstance(result, dict):
+            raise ValueError("approval verifier rejected the evidence")
+        return result
+    finally:
+        receiver.close()
+        if child.is_alive():
+            child.terminate()
+            child.join()
 
 
 def verify_force_approval(request: dict, verifier_name: object, *, cwd: Path | None = None) -> dict:
@@ -6375,12 +6420,11 @@ def verify_force_approval(request: dict, verifier_name: object, *, cwd: Path | N
     if verifier is None and entry_point is None:
         raise ValueError("approval verifier is not configured")
     try:
-        with _approval_verifier_timeout():
-            if verifier is None:
-                verifier = entry_point.load()
-                if not callable(verifier):
-                    raise ValueError("approval verifier entry point is invalid")
-            result = verifier(request)
+        if verifier is None:
+            verifier = entry_point.load()
+            if not callable(verifier):
+                raise ValueError("approval verifier entry point is invalid")
+        result = _run_approval_verifier(verifier, request)
     except Exception as exc:
         raise ValueError("approval verifier rejected the evidence") from exc
     try:

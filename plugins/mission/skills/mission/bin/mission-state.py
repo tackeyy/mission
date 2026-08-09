@@ -33,13 +33,14 @@ import contextlib
 import fcntl
 import hashlib
 import importlib.metadata
+import importlib.util
 import io
 import json
 import math
+import multiprocessing
 import os
 import re
 import secrets
-import signal
 import socket
 import stat
 import subprocess
@@ -109,6 +110,8 @@ from scoring_provenance import (  # noqa: E402
     VERIFIER_ID_RE as _APPROVAL_VERIFIER_NAME_RE,
     build_request as build_approval_request,
     digest as provenance_digest,
+    reduce_review_aggregate,
+    terminal_state_digest,
     validate_receipt_binding,
     validate_recorded_envelope,
 )
@@ -6263,7 +6266,7 @@ class ApprovalVerifier(Protocol):
 
 _APPROVAL_VERIFIERS: dict[str, ApprovalVerifier] = {}
 _APPROVAL_VERIFIER_ENTRY_POINT_GROUP = "mission.approval_verifiers"
-_APPROVAL_VERIFIER_REGISTRY_SCHEMA = "mission-approval-verifier-registry/1"
+_APPROVAL_VERIFIER_REGISTRY_SCHEMA = "mission-approval-verifier-registry/2"
 _APPROVAL_VERIFIER_REGISTRY_LIMIT = 64 * 1024
 _APPROVAL_VERIFIER_TIMEOUT_SEC = 5
 
@@ -6309,22 +6312,25 @@ def _read_approval_verifier_registry(path: Path) -> dict:
         raise ValueError("approval verifier registry is invalid")
     result = {}
     for item in verifiers:
-        if not isinstance(item, dict) or set(item) != {"id", "entry_point"}:
+        if not isinstance(item, dict) or set(item) != {"id", "entry_point", "distribution", "version", "source_digest"}:
             raise ValueError("approval verifier registry is invalid")
         identifier, entry_point = item.get("id"), item.get("entry_point")
+        distribution, version, source_digest = item.get("distribution"), item.get("version"), item.get("source_digest")
         if (not isinstance(identifier, str) or not _APPROVAL_VERIFIER_NAME_RE.fullmatch(identifier)
                 or not isinstance(entry_point, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", entry_point)
+                or not isinstance(distribution, str) or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", distribution)
+                or not isinstance(version, str) or not version or len(version) > 128
+                or not isinstance(source_digest, str) or not _SHA256_REF_RE.fullmatch(source_digest)
                 or identifier in result):
             raise ValueError("approval verifier registry is invalid")
-        result[identifier] = entry_point
+        result[identifier] = {"entry_point": entry_point, "distribution": distribution, "version": version, "source_digest": source_digest}
     return result
 
 
 def _configured_approval_entry_point(cwd: Path, verifier_name: str):
-    """Resolve a named verifier from fixed local/user registries and installed metadata only."""
-    locations = [cwd / ".mission" / "approval-verifiers.json"]
+    """Resolve a verifier only from the host-controlled registry and pinned metadata."""
     xdg = os.environ.get("XDG_CONFIG_HOME")
-    locations.append((Path(xdg) if xdg else Path.home() / ".config") / "mission" / "approval-verifiers.json")
+    locations = [(Path(xdg) if xdg else Path.home() / ".config") / "mission" / "approval-verifiers.json"]
     configured = {}
     for location in locations:
         try:
@@ -6337,31 +6343,72 @@ def _configured_approval_entry_point(cwd: Path, verifier_name: str):
             if identifier in configured:
                 raise ValueError("approval verifier registry has duplicate verifier ids")
             configured[identifier] = entry_point
-    entry_point_name = configured.get(verifier_name)
-    if entry_point_name is None:
+    configured_item = configured.get(verifier_name)
+    if configured_item is None:
         return None
     discovered = importlib.metadata.entry_points()
     candidates = discovered.select(group=_APPROVAL_VERIFIER_ENTRY_POINT_GROUP) if hasattr(discovered, "select") else discovered.get(_APPROVAL_VERIFIER_ENTRY_POINT_GROUP, ())
-    matches = [item for item in candidates if item.name == entry_point_name]
+    matches = [item for item in candidates if item.name == configured_item["entry_point"]]
     if len(matches) != 1:
         raise ValueError("approval verifier entry point is not installed")
-    return matches[0]
-
-
-@contextlib.contextmanager
-def _approval_verifier_timeout():
-    """Bound verifier execution; timeout rejects before the state writer can run."""
-    if not hasattr(signal, "SIGALRM") or not hasattr(signal, "setitimer"):
-        raise ValueError("approval verifier timeout is unavailable on this host")
-    def expired(_signum, _frame):
-        raise TimeoutError("approval verifier timed out")
-    previous = signal.signal(signal.SIGALRM, expired)
-    previous_timer = signal.setitimer(signal.ITIMER_REAL, _APPROVAL_VERIFIER_TIMEOUT_SEC)
+    entry_point = matches[0]
+    distribution = getattr(entry_point, "dist", None)
+    if (distribution is None
+            or str(distribution.metadata.get("Name") or "").lower() != configured_item["distribution"].lower()
+            or str(distribution.version) != configured_item["version"]):
+        raise ValueError("approval verifier distribution identity mismatch")
+    module_name = getattr(entry_point, "module", "")
+    if not isinstance(module_name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", module_name):
+        raise ValueError("approval verifier entry point is invalid")
+    module_spec = importlib.util.find_spec(module_name)
+    origin = getattr(module_spec, "origin", None)
+    if not isinstance(origin, str) or not origin or origin in {"built-in", "frozen"}:
+        raise ValueError("approval verifier source is invalid")
     try:
-        yield
+        source = Path(origin).read_bytes()
+    except OSError as exc:
+        raise ValueError("approval verifier source is invalid") from exc
+    if "sha256:" + hashlib.sha256(source).hexdigest() != configured_item["source_digest"]:
+        raise ValueError("approval verifier source digest mismatch")
+    return entry_point
+
+
+def _approval_verifier_child(callback, request: dict, channel) -> None:
+    try:
+        channel.send((True, callback(request)))
+    except Exception:
+        channel.send((False, None))
     finally:
-        signal.signal(signal.SIGALRM, previous)
-        signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+        channel.close()
+
+
+def _run_approval_verifier(callback, request: dict) -> dict:
+    """Execute verifier in a reaped child; timeouts cannot leave it running."""
+    try:
+        context = multiprocessing.get_context("fork")
+    except ValueError as exc:
+        raise ValueError("isolated approval verifier execution is unavailable on this host") from exc
+    receiver, sender = context.Pipe(duplex=False)
+    child = context.Process(target=_approval_verifier_child, args=(callback, request, sender))
+    try:
+        child.start()
+        sender.close()
+        child.join(_APPROVAL_VERIFIER_TIMEOUT_SEC)
+        if child.is_alive():
+            child.terminate()
+            child.join()
+            raise ValueError("approval verifier timed out")
+        if child.exitcode != 0 or not receiver.poll():
+            raise ValueError("approval verifier rejected the evidence")
+        success, result = receiver.recv()
+        if not success or not isinstance(result, dict):
+            raise ValueError("approval verifier rejected the evidence")
+        return result
+    finally:
+        receiver.close()
+        if child.is_alive():
+            child.terminate()
+            child.join()
 
 
 def verify_force_approval(request: dict, verifier_name: object, *, cwd: Path | None = None) -> dict:
@@ -6373,12 +6420,11 @@ def verify_force_approval(request: dict, verifier_name: object, *, cwd: Path | N
     if verifier is None and entry_point is None:
         raise ValueError("approval verifier is not configured")
     try:
-        with _approval_verifier_timeout():
-            if verifier is None:
-                verifier = entry_point.load()
-                if not callable(verifier):
-                    raise ValueError("approval verifier entry point is invalid")
-            result = verifier(request)
+        if verifier is None:
+            verifier = entry_point.load()
+            if not callable(verifier):
+                raise ValueError("approval verifier entry point is invalid")
+        result = _run_approval_verifier(verifier, request)
     except Exception as exc:
         raise ValueError("approval verifier rejected the evidence") from exc
     try:
@@ -6551,6 +6597,10 @@ def _revalidate_score_provenance(cwd: Path, entry: dict, data: dict, *, require_
         raise ValueError("review evidence must be valid UTF-8 JSON") from exc
     if not isinstance(parsed, dict) or parsed.get("schema") != "mission-review-aggregate/1":
         raise ValueError("review evidence has invalid schema")
+    try:
+        derived = reduce_review_aggregate(parsed.get("inputs"))
+    except ValueError as exc:
+        raise ValueError(f"review evidence inputs are invalid: {exc}") from exc
     claim = parsed.get("score_claim")
     expected_claim = {
         "iteration": entry.get("iteration"), "items": entry.get("items"),
@@ -6558,10 +6608,10 @@ def _revalidate_score_provenance(cwd: Path, entry: dict, data: dict, *, require_
         "open_high": entry.get("open_high"), "review_agreement": entry.get("review_agreement"),
         "agreement_detail": entry.get("agreement_detail"),
     }
-    # Prior aggregate archives predate score_claim. They remain readable only
-    # when attached through a provenance-bearing migration; current schema
-    # writers and all current pass decisions require the semantic binding.
-    if claim is not None and claim != expected_claim:
+    derived_claim = {"iteration": entry.get("iteration"), **derived}
+    if claim != derived_claim:
+        raise ValueError("review evidence score claim is absent or not derived from inputs")
+    if expected_claim != derived_claim:
         raise ValueError("review evidence score claim mismatch")
     score_ref = provenance.get("scoring_evidence_ref")
     if require_scoring_artifact:
@@ -7174,6 +7224,18 @@ def cmd_aggregate_reviews(args):
         for finding in review.get("findings", [])
         if finding.get("severity") == "High"
     )
+    # The archive claim is authored by the same pure reducer that later
+    # validates the untrusted archive.  Keep the surrounding observability
+    # fields, but do not let this writer become a second scoring authority.
+    try:
+        derived_score = reduce_review_aggregate(reviews)
+    except ValueError as exc:
+        print(f"ERROR: review aggregate inputs are invalid: {exc}", file=sys.stderr)
+        sys.exit(2)
+    items = derived_score["items"]
+    open_high = derived_score["open_high"]
+    review_agreement = derived_score["review_agreement"]
+    agreement_detail = derived_score["agreement_detail"]
 
     # #282/#350: reviewer 並列実行の観測。2 名以上では全 reviewer の
     # self-report を fail-closed で要求し、実行形態そのものは gate しない。
@@ -7281,11 +7343,7 @@ def cmd_aggregate_reviews(args):
             # archived review inputs. push-score and mark-passes compare every
             # decision value to it; a digest alone is not semantic binding.
             "score_claim": {
-                "iteration": args.iteration, "items": items,
-                "composite": round(sum(_numeric_item_values(items)) / len(items), 2),
-                "min_item": round(min(_numeric_item_values(items)), 2),
-                "open_high": open_high, "review_agreement": review_agreement,
-                "agreement_detail": agreement_detail,
+                "iteration": args.iteration, **derived_score,
             },
         }
         evidence_content = (json.dumps(evidence, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
@@ -7776,14 +7834,16 @@ def cmd_mark_passes(args):
                 latest_scope = next((entry.get("revision_scope") for entry in reversed(data.get("score_history", []))
                                      if isinstance(entry, dict) and isinstance(entry.get("revision_scope"), dict)),
                                     {"kind": "not-applicable", "reason_code": "non-git"})
-                terminal_object = {
-                    "session_id": data.get("session_id"), "mission_id": data.get("mission_id"),
-                    "score_history": data.get("score_history", []), "threshold": data.get("threshold"),
-                    "revision_scope": latest_scope,
-                }
+                # Bind the approval to the exact terminal state that this
+                # invocation will persist.  The shared projection excludes
+                # force_approval and timestamps, so it can be reproduced by
+                # the post-write assertion and historical audit.
+                terminal_object = dict(data)
+                terminal_object.update({"passes": True, "loop_active": False, "passes_forced": True})
+                _write_terminal_outcome(terminal_object)
                 request = build_approval_request(
                     session_id=data.get("session_id"), mission_id=data.get("mission_id"),
-                    revision_scope=latest_scope, terminal_object_digest=provenance_digest(terminal_object),
+                    revision_scope=latest_scope, terminal_object_digest=terminal_state_digest(terminal_object),
                     approval_evidence_ref=approval_ref, approved_actor=approved_actor, approved_at=approved_at,
                     reason_code=reason_code, event_nonce=secrets.token_hex(32),
                 )
@@ -7923,6 +7983,9 @@ def cmd_mark_passes(args):
             data["force_reason"] = reason
             data["force_approved_by_user"] = approved_by_user  # #185
             data["force_approval"] = verification
+            if verification["request"]["terminal_object_digest"] != terminal_state_digest(data):
+                print("ERROR: force approval terminal state binding changed before write", file=sys.stderr)
+                sys.exit(2)
             data["force_approval"]["consumed"] = True
         backup_state(sf)
         atomic_write_json(sf, data)

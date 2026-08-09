@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -17,6 +18,151 @@ REASON_CODES = {"user-override", "safety-exception", "operational-recovery"}
 MAX_APPROVAL_AGE = timedelta(days=1)
 REQUEST_SCHEMA = "mission-force-approval-request/1"
 RESPONSE_SCHEMA = "mission-force-approval-response/1"
+TERMINAL_STATE_BINDING_SCHEMA = "mission-terminal-state-binding/1"
+REVIEW_SCORE_KEYS = ("mission_achievement", "accuracy", "completeness", "usability")
+REVIEW_SEVERITIES = {"High", "Medium", "Low"}
+
+
+def _finite_score(value: object, *, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        raise ValueError(f"{field} must be a finite number")
+    if not 0.0 <= float(value) <= 5.0:
+        raise ValueError(f"{field} must be in the 0-5 range")
+    return float(value)
+
+
+def _finding_cap(findings: list[dict[str, object]]) -> float | None:
+    counts = {severity: 0 for severity in REVIEW_SEVERITIES}
+    for finding in findings:
+        severity = finding["severity"]
+        counts[severity] += 1
+    if counts["High"]:
+        return 3.0
+    if counts["Medium"] >= 3:
+        return 3.5
+    if counts["Medium"]:
+        return 4.0
+    if counts["Low"] >= 4:
+        return 4.3
+    if counts["Low"] >= 2:
+        return 4.5
+    if counts["Low"]:
+        return 4.7
+    return None
+
+
+def _consensus_score(max_delta: float) -> float:
+    if max_delta <= 0.5:
+        return 5.0
+    if max_delta <= 1.0:
+        return 4.0
+    if max_delta <= 1.5:
+        return 3.0
+    if max_delta <= 2.0:
+        return 2.0
+    return 1.0
+
+
+def reduce_review_aggregate(inputs: object) -> dict[str, object]:
+    """Re-derive every score gate field from archived review inputs.
+
+    This deliberately accepts the already-normalized review archive shape, but
+    still validates it independently.  Evidence is untrusted I/O at every
+    later writer/audit boundary, not a cached assertion from aggregate time.
+    """
+    if not isinstance(inputs, list) or not inputs:
+        raise ValueError("review aggregate inputs must be a non-empty list")
+    perspectives: set[str] = set()
+    adjusted: list[dict[str, object]] = []
+    open_high = 0
+    for index, review in enumerate(inputs):
+        if not isinstance(review, dict):
+            raise ValueError("review aggregate input must be an object")
+        perspective = review.get("perspective")
+        if not isinstance(perspective, str) or not perspective.strip():
+            raise ValueError("review aggregate perspective is invalid")
+        if perspective in perspectives:
+            raise ValueError("review aggregate has duplicate perspective")
+        perspectives.add(perspective)
+        findings = review.get("findings")
+        if not isinstance(findings, list):
+            raise ValueError("review aggregate findings must be a list")
+        by_axis: dict[str, list[dict[str, object]]] = {key: [] for key in REVIEW_SCORE_KEYS}
+        finding_ids: set[str] = set()
+        for finding in findings:
+            if not isinstance(finding, dict):
+                raise ValueError("review aggregate finding must be an object")
+            identifier, severity, axis = finding.get("id"), finding.get("severity"), finding.get("axis")
+            if (not isinstance(identifier, str) or identifier in finding_ids or severity not in REVIEW_SEVERITIES
+                    or axis not in REVIEW_SCORE_KEYS):
+                raise ValueError("review aggregate finding is invalid")
+            finding_ids.add(identifier)
+            if severity == "High":
+                open_high += 1
+            by_axis[axis].append({"severity": severity})
+        scores = review.get("scores")
+        if scores is None:
+            continue
+        if not isinstance(scores, dict) or set(scores) != set(REVIEW_SCORE_KEYS):
+            raise ValueError("review aggregate scores must contain canonical axes")
+        normalized = {axis: _finite_score(scores[axis], field=f"review score {axis}") for axis in REVIEW_SCORE_KEYS}
+        values = list(normalized.values())
+        note = review.get("same_score_note")
+        if len(set(values)) == 1 and (not isinstance(note, str) or not note.strip()):
+            raise ValueError("review aggregate same score note is required")
+        if len(set(values)) == 1 and isinstance(note, str) and (
+            "全体印象" in note or "overall impression" in note.lower()
+        ):
+            continue
+        for axis in REVIEW_SCORE_KEYS:
+            cap = _finding_cap(by_axis[axis])
+            if cap is not None and normalized[axis] > cap:
+                normalized[axis] = cap
+        adjusted.append({"perspective": perspective, "scores": normalized})
+    if not adjusted:
+        raise ValueError("review aggregate has no scoring reviewers")
+    values_by_axis = {axis: [entry["scores"][axis] for entry in adjusted] for axis in REVIEW_SCORE_KEYS}
+    items = {axis: round(sum(values) / len(values), 2) for axis, values in values_by_axis.items()}
+    detail = {
+        axis: {"min": round(min(values), 2), "max": round(max(values), 2), "delta": round(max(values) - min(values), 2)}
+        for axis, values in values_by_axis.items()
+    }
+    agreement = None
+    if len(adjusted) >= 2:
+        agreement = _consensus_score(max(item["delta"] for item in detail.values()))
+    numeric_items = list(items.values())
+    return {
+        "items": items, "composite": round(sum(numeric_items) / len(numeric_items), 2),
+        "min_item": round(min(numeric_items), 2), "open_high": open_high,
+        "review_agreement": agreement, "agreement_detail": detail,
+    }
+
+
+def terminal_state_projection(state: object) -> dict[str, object]:
+    """Return the versioned, stable subset a force approval is allowed to bind."""
+    if not isinstance(state, dict):
+        raise ValueError("terminal state is invalid")
+    history = state.get("score_history", [])
+    if not isinstance(history, list):
+        raise ValueError("terminal state score_history is invalid")
+    score_fields = (
+        "iteration", "items", "composite", "min_item", "open_high", "review_agreement",
+        "agreement_detail", "score_provenance", "revision_scope", "score_source",
+    )
+    return {
+        "schema": TERMINAL_STATE_BINDING_SCHEMA,
+        "session_id": state.get("session_id"), "mission_id": state.get("mission_id"),
+        "iteration": state.get("iteration"), "threshold": state.get("threshold"),
+        "revision_scope": state.get("revision_scope"),
+        "score_history": [{key: entry.get(key) for key in score_fields} if isinstance(entry, dict) else entry for entry in history],
+        "passes": state.get("passes"), "loop_active": state.get("loop_active"),
+        "passes_forced": state.get("passes_forced"), "terminal_outcome": state.get("terminal_outcome"),
+        "halt_reason": state.get("halt_reason"), "halt_category": state.get("halt_category"),
+    }
+
+
+def terminal_state_digest(state: object) -> str:
+    return digest(terminal_state_projection(state))
 
 
 def canonical_json(value: object) -> bytes:

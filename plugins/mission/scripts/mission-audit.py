@@ -81,7 +81,11 @@ from state_snapshot import (  # noqa: E402
     value_digest,
     write_snapshot,
 )
-from scoring_provenance import validate_receipt_binding, validate_recorded_envelope  # noqa: E402
+from scoring_provenance import (  # noqa: E402
+    terminal_state_digest,
+    validate_receipt_binding,
+    validate_recorded_envelope,
+)
 
 
 PRUNE_DIRS = {
@@ -1635,6 +1639,8 @@ def is_forced_pass_autonomous_suspect(state: dict[str, Any], *, root: Path | Non
                 return True
             validate_receipt_binding(root, envelope)
             request = envelope["request"]
+            if request["terminal_object_digest"] != terminal_state_digest(state):
+                return True
             receipt = envelope["receipt_ref"]
             key = (request["request_digest"], receipt["digest"])
             if consumed is not None and key in consumed:
