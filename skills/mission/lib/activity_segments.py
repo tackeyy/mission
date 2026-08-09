@@ -297,6 +297,11 @@ def close_activity_for_resume(state: dict[str, Any], at: str) -> bool:
         return False
     if not isinstance(current, dict):
         raise ActivityTimingError("activity current is malformed")
+    kind = current.get("kind")
+    reason = current.get("reason")
+    if not isinstance(kind, str) or not isinstance(reason, str):
+        raise ActivityTimingError("activity current labels are malformed")
+    validate_activity(kind, reason)
     boundary = _resume_boundary(state, at)
     # A resume boundary equal to the open start means all elapsed time is an
     # explicitly recorded unobserved gap.  Do not turn that gap into a

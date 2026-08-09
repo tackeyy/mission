@@ -318,6 +318,31 @@ def test_reinit_and_refresh_close_open_segment_once_without_losing_history(
     assert len(state["activity_segments"]) == 1
 
 
+@pytest.mark.parametrize("command", ["init", "refresh-pid"])
+@pytest.mark.parametrize(
+    "current",
+    [
+        {"phase": "executing", "reason": "work", "started_at": "2026-07-21T00:00:00Z"},
+        {"kind": "unknown", "phase": "executing", "reason": "work", "started_at": "2026-07-21T00:00:00Z"},
+        {"kind": "active", "phase": "executing", "started_at": "2026-07-21T00:00:00Z"},
+        {"kind": "active", "phase": "executing", "reason": "user-approval", "started_at": "2026-07-21T00:00:00Z"},
+    ],
+)
+def test_resume_rejects_malformed_zero_boundary_without_mutating_state(
+    tmp_path, run_cli, command, current
+):
+    path = _write_state(tmp_path, activity_current=current, activity_segments=[])
+    before = path.read_bytes()
+    args = ("init", TASK_TEXT) if command == "init" else ("refresh-pid",)
+
+    result = run_cli(
+        *args, cwd=tmp_path, env_extra={"MISSION_STATE_NOW": "2026-07-21T00:10:00Z"}
+    )
+
+    assert result.returncode != 0
+    assert path.read_bytes() == before
+
+
 def test_same_mission_reinit_accrues_and_preserves_the_open_phase(tmp_path, run_cli):
     path = _write_state(
         tmp_path,
