@@ -401,6 +401,125 @@ def test_advance_atomically_records_executor_artifact_handoff(
     }
 
 
+def test_planning_projection_and_nested_artifact_identity_coexist_fail_closed(
+    state_dir, run_cli, read_state
+):
+    root = state_dir.parent
+    state_path = state_dir / "sessions" / "test.json"
+    state = read_state(state_dir)
+    state.update(
+        {
+            "phase": "executing",
+            "complexity": "Complex",
+            "artifact_applicability": "pending",
+        }
+    )
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    registry = root / "planning-providers.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "schema": "mission-specialist-registry/2",
+                "specialists_v2": [
+                    {
+                        "role": "deep-planning",
+                        "skill": "deep-planning-provider",
+                        "task_profiles": ["architecture"],
+                        "phases": ["planning"],
+                        "activation": {
+                            "min_complexity": "Complex",
+                            "auto_select_if": ["complexity"],
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    recommendation = run_cli(
+        "specialists",
+        "recommend",
+        "--no-default-skill-roots",
+        "--task",
+        "Coordinate a multi-step architecture change",
+        "--registry",
+        str(registry),
+        "--complexity",
+        "Complex",
+        "--installed-skills",
+        "deep-planning-provider",
+        "--record-state",
+        "--json",
+        cwd=root,
+    )
+    assert recommendation.returncode == 0, recommendation.stderr
+    selected_before = read_state(state_dir)["specialists_selected"]
+    projection_before = read_state(state_dir)["specialist_registry_projection"]
+
+    artifact_path = root / "reports" / "nested" / "result.md"
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_text("# Result\nverified output\n", encoding="utf-8")
+    handoff = run_cli(
+        "advance",
+        "--phase",
+        "reviewing",
+        "--activity",
+        "reviewer-wait:review-response",
+        "--artifact-applicability",
+        "producing",
+        "--artifact-path",
+        "reports/nested/result.md",
+        "--producer-run-id",
+        "executor-run-nested",
+        cwd=root,
+    )
+    assert handoff.returncode == 0, handoff.stderr
+    recorded = read_state(state_dir)
+    assert recorded["specialists_selected"] == selected_before
+    assert recorded["specialist_registry_projection"] == projection_before
+    assert recorded["artifact"] == {
+        "path": "reports/nested/result.md",
+        "digest": hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
+        "size": artifact_path.stat().st_size,
+        "producer_run_id": "executor-run-nested",
+    }
+
+    review = _write_review(root / "review.json")
+    observed = run_cli(
+        "aggregate-reviews",
+        "--iteration",
+        "1",
+        "--input",
+        str(review),
+        "--json",
+        cwd=root,
+    )
+    assert observed.returncode == 0, observed.stderr
+    observed_state = read_state(state_dir)
+    assert observed_state["artifact_lint_status"] == "clean"
+    assert observed_state["artifact_lint_identity"] == observed_state["artifact"]
+    assert observed_state["specialists_selected"] == selected_before
+    assert observed_state["specialist_registry_projection"] == projection_before
+
+    artifact_path.write_text("# Mutated\nunbound bytes\n", encoding="utf-8")
+    rejected = run_cli(
+        "aggregate-reviews",
+        "--iteration",
+        "1",
+        "--input",
+        str(review),
+        "--json",
+        cwd=root,
+    )
+    assert rejected.returncode == 2
+    assert "artifact identity does not match recorded state" in rejected.stderr
+    rejected_state = read_state(state_dir)
+    assert rejected_state["artifact_lint_status"] == "invalid"
+    assert rejected_state["specialists_selected"] == selected_before
+    assert rejected_state["specialist_registry_projection"] == projection_before
+
+
 def test_stats_reports_conserved_terminal_artifact_coverage_by_profile(
     run_cli, tmp_path
 ):

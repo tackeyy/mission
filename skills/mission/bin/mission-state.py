@@ -29,7 +29,9 @@ from __future__ import annotations
 
 import argparse
 from bisect import bisect_left, bisect_right
+import copy
 import contextlib
+import errno
 import fcntl
 import hashlib
 import importlib.metadata
@@ -95,6 +97,22 @@ from activity_segments import (  # noqa: E402
 )
 from worktree_archive import validate_worktree_archive_bundle  # noqa: E402
 from state_snapshot import SnapshotError, consume_snapshot_document  # noqa: E402
+from provider_eligibility import (  # noqa: E402
+    RegistryContractError,
+    _strict_json_loads,
+    detect_registry_version,
+    evaluate_provider_eligibility,
+    normalize_selection_source,
+    parse_v2_registry_json,
+    registry_entry_digest,
+    value_digest as provider_value_digest,
+)
+from provider_public_contract import (  # noqa: E402
+    SpecialistPublicContractError,
+    contains_local_locator,
+    redact_local_locators,
+    validate_specialist_public_state as _validate_specialist_public_state,
+)
 from artifact_contract import (  # noqa: E402
     ArtifactContractError,
     artifact_lint_observation_matches,
@@ -145,6 +163,7 @@ ARTIFACT_SECTIONS = {
 }
 ARTIFACT_REDACTION_STATUSES = {"unchecked", "checked", "reviewed", "not-needed"}
 ARTIFACT_PUBLISH_PROVIDERS = {"claude-code", "local"}
+MAX_REGISTRY_BYTES = 1024 * 1024
 
 
 BUILTIN_SPECIALIST_CANDIDATES = [
@@ -1011,6 +1030,8 @@ def atomic_write_json(path: Path, data: dict, *, administrative: bool = False) -
     上書きされ壁時計が最大 500 倍膨張した実害があるため)。
 
     """
+    if _is_session_state_shape(data):
+        _validate_specialist_public_state(data)
     lease_decision = _enforce_session_lease_for_write(path, data)
     if not administrative and _is_session_state_shape(data):
         data["last_activity_at"] = iso_now()
@@ -1173,6 +1194,9 @@ def _guarded_init_state_lock(cwd: Path, sf: Path):
 def backup_state(path: Path) -> None:
     """A-4: 更新前に .bak をコピー生成."""
     if path.exists():
+        _validate_specialist_public_state(
+            json.loads(path.read_text(encoding="utf-8"))
+        )
         bak = path.with_suffix(path.suffix + ".bak")
         atomic_write_bytes(bak, path.read_bytes())
 
@@ -2338,20 +2362,10 @@ def _coerce_yaml_value(value: str):
     return _coerce_scalar(value)
 
 
-def _load_specialist_registry(path: str | None) -> list[dict]:
-    """Load the small registry subset used by specialist selection.
-
-    JSON is accepted directly. YAML support intentionally covers only the documented
-    `specialists: - key: value` shape to avoid adding a runtime dependency.
-    """
-    if not path:
-        return []
-    p = Path(path).expanduser()
-    if not p.exists():
-        return []
-    txt = p.read_text(encoding="utf-8")
+def _parse_specialist_registry_text(txt: str) -> list[dict]:
+    """Parse the documented version 1 JSON/limited-YAML registry shape."""
     try:
-        data = json.loads(txt)
+        data = _strict_json_loads(txt)
         return list(data.get("specialists") or [])
     except json.JSONDecodeError:
         pass
@@ -2406,6 +2420,18 @@ def _load_specialist_registry(path: str | None) -> list[dict]:
     return specialists
 
 
+def _load_specialist_registry(path: str | None) -> list[dict]:
+    """Compatibility loader for callers that explicitly request the legacy parser."""
+    if not path:
+        return []
+    p = Path(path).expanduser()
+    try:
+        raw = p.read_bytes()
+        return _parse_specialist_registry_text(raw.decode("utf-8"))
+    except (OSError, UnicodeError):
+        return []
+
+
 def _registry_arg_paths(value) -> list[Path]:
     if not value:
         return []
@@ -2416,18 +2442,242 @@ def _registry_arg_paths(value) -> list[Path]:
     return paths
 
 
-def _load_registry_candidates(path: Path, source: str) -> list[dict]:
+def _load_registry_candidates(raw: bytes, source: str) -> list[dict]:
     candidates = []
-    for item in _load_specialist_registry(str(path)):
+    try:
+        items = _parse_specialist_registry_text(raw.decode("utf-8"))
+    except UnicodeError:
+        items = []
+    for item in items:
         if not isinstance(item, dict):
             continue
         candidate = dict(item)
-        candidate.setdefault("source", source)
+        candidate["source"] = source
+        candidate["registry_version"] = 1
+        if "activation" in candidate or "disabled" in candidate:
+            candidate["_registry_error"] = "mixed-registry-version"
+        candidate["registry_entry_digest"] = registry_entry_digest(candidate)
         candidates.append(candidate)
     return candidates
 
 
-def _discover_specialist_registry_candidates(args) -> list[dict]:
+def _load_v2_registry_candidates(raw: bytes, source: str) -> tuple[list[dict], list[dict]]:
+    try:
+        items = parse_v2_registry_json(raw.decode("utf-8"))
+    except (UnicodeError, RegistryContractError) as error:
+        return [], [{
+            "provider_id": "<registry>",
+            "source": source,
+            "reason_code": getattr(error, "code", "invalid-registry-contract"),
+            "detail": str(error),
+        }]
+    candidates = []
+    for item in items:
+        candidate = dict(item)
+        candidate["source"] = source
+        candidate["registry_version"] = 2
+        candidate["_v2_auto_use_present"] = "auto_use" in item
+        candidate["registry_entry_digest"] = registry_entry_digest(candidate)
+        candidates.append(candidate)
+    return candidates, []
+
+
+def _portable_registry_identity(path: Path) -> str:
+    resolved = Path(os.path.abspath(os.fspath(path.expanduser())))
+    for anchor, label in (
+        (Path.cwd().resolve(strict=False), "$PROJECT"),
+        (Path.home().resolve(strict=False), "$HOME"),
+    ):
+        try:
+            relative = resolved.relative_to(anchor)
+        except ValueError:
+            continue
+        suffix = relative.as_posix()
+        return label if suffix == "." else f"{label}/{suffix}"
+    digest = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()
+    return f"$EXTERNAL/sha256:{digest}"
+
+
+def _registry_source(path: Path, kind: str) -> str:
+    identity = _portable_registry_identity(path)
+    if kind == "explicit":
+        return f"registry:{identity}"
+    if kind == "installed":
+        return f"skill-manifest:{identity}"
+    if kind == "skill-root":
+        return f"skill-root:{identity}"
+    return identity
+
+
+def _read_registry_input(
+    path: Path, source: str, kind: str, version: int, tier: int, order: int
+) -> tuple[
+    dict,
+    bytes | None,
+    tuple[int, int] | None,
+    RegistryContractError | None,
+]:
+    record = {
+        "kind": kind,
+        "source": source,
+        "canonical_identity": _portable_registry_identity(path),
+        "version": version,
+        "precedence_tier": tier,
+        "order": order,
+        "status": "missing",
+        "content_digest": None,
+    }
+    if record["canonical_identity"].startswith("$EXTERNAL/sha256:"):
+        record["resolution_mode"] = "explicit-resupply-required"
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+        fd = os.open(path, flags)
+    except OSError as error:
+        if error.errno not in {errno.ENOENT, errno.ENOTDIR}:
+            record["status"] = "invalid"
+            return (
+                record,
+                None,
+                None,
+                RegistryContractError("registry-input-unreadable"),
+            )
+        return record, None, None, None
+    physical_identity: tuple[int, int] | None = None
+    try:
+        before = os.fstat(fd)
+        physical_identity = (before.st_dev, before.st_ino)
+        if not stat.S_ISREG(before.st_mode):
+            record["status"] = "invalid"
+            return (
+                record,
+                None,
+                physical_identity,
+                RegistryContractError("registry-input-not-regular"),
+            )
+        chunks: list[bytes] = []
+        remaining = MAX_REGISTRY_BYTES + 1
+        while remaining:
+            chunk = os.read(fd, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        after = os.fstat(fd)
+        if len(raw) > MAX_REGISTRY_BYTES:
+            record["status"] = "invalid"
+            return (
+                record,
+                None,
+                physical_identity,
+                RegistryContractError("registry-input-too-large"),
+            )
+        if (
+            (
+                after.st_dev,
+                after.st_ino,
+                after.st_mode,
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
+            )
+            != (
+                before.st_dev,
+                before.st_ino,
+                before.st_mode,
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_ctime_ns,
+            )
+            or len(raw) != after.st_size
+        ):
+            record["status"] = "invalid"
+            return (
+                record,
+                None,
+                physical_identity,
+                RegistryContractError("registry-input-changed"),
+            )
+    except OSError:
+        record["status"] = "invalid"
+        return (
+            record,
+            None,
+            physical_identity,
+            RegistryContractError("registry-input-unreadable"),
+        )
+    finally:
+        os.close(fd)
+    record["status"] = "present"
+    record["content_digest"] = "sha256:" + hashlib.sha256(raw).hexdigest()
+    return record, raw, physical_identity, None
+
+
+def _resolve_registry_precedence(
+    candidates: list[dict], diagnostics: list[dict]
+) -> tuple[list[dict], list[dict]]:
+    ordered = sorted(
+        candidates,
+        key=lambda item: (
+            int(item.get("_precedence_tier", 99)),
+            int(item.get("_input_order", 0)),
+            str(item.get("_input_identity") or ""),
+            int(item.get("_candidate_order", 0)),
+        ),
+    )
+    conflict_groups: dict[tuple, list[dict]] = {}
+    for item in ordered:
+        identity = _provider_id(item)
+        tier = int(item.get("_precedence_tier", 99))
+        explicit_subrank = int(item.get("_input_order", 0)) if tier in {0, 1} else 0
+        conflict_groups.setdefault((tier, explicit_subrank, identity), []).append(item)
+
+    conflicted = {
+        key for key, items in conflict_groups.items()
+        if key[2] and len(items) > 1
+    }
+    resolved: list[dict] = []
+    decided: set[str] = set()
+    for item in ordered:
+        identity = _provider_id(item)
+        if not identity or identity in decided:
+            continue
+        tier = int(item.get("_precedence_tier", 99))
+        explicit_subrank = int(item.get("_input_order", 0)) if tier in {0, 1} else 0
+        group_key = (tier, explicit_subrank, identity)
+        decided.add(identity)
+        if group_key in conflicted:
+            diagnostics.append({
+                "provider_id": _safe_provider_reference(identity),
+                "source": item.get("source"),
+                "reason_code": "same-tier-identity-conflict",
+                "registry_entry_digest": item.get("registry_entry_digest"),
+            })
+            resolved.append({**item, "enabled": False, "_projection_state": "conflict"})
+            continue
+        if item.get("disabled") is True or item.get("enabled") is False:
+            projection_state = (
+                "tombstone"
+                if item.get("registry_version") == 2 and item.get("disabled") is True
+                else "disabled"
+            )
+            diagnostics.append({
+                "provider_id": _safe_provider_reference(identity),
+                "source": item.get("source"),
+                "reason_code": "provider-disabled",
+                "registry_entry_digest": item.get("registry_entry_digest"),
+            })
+            resolved.append({
+                **item,
+                "enabled": False,
+                "_projection_state": projection_state,
+            })
+            continue
+        resolved.append(item)
+    return resolved, diagnostics
+
+
+def _discover_specialist_registry_candidates(args) -> tuple[list[dict], list[dict], dict]:
     """Discover registry candidates in deterministic precedence order.
 
     Explicit CLI registries have the highest precedence, then project, user, and
@@ -2435,22 +2685,274 @@ def _discover_specialist_registry_candidates(args) -> list[dict]:
     registry-level `enabled: false` entries can suppress lower-precedence defaults.
     """
     candidates: list[dict] = []
-    for path in _registry_arg_paths(getattr(args, "registry", None)):
-        candidates.extend(_load_registry_candidates(path, f"registry:{path}"))
+    diagnostics: list[dict] = []
+    inputs: list[dict] = []
+    invalid_barriers: list[dict] = []
+
+    def register(
+        path: Path,
+        source: str,
+        kind: str,
+        version: int,
+        tier: int,
+        order: int,
+        detection_error: RegistryContractError | None = None,
+        snapshot: tuple[
+            dict,
+            bytes | None,
+            tuple[int, int] | None,
+            RegistryContractError | None,
+        ] | None = None,
+    ):
+        record, raw, _physical_identity, snapshot_error = snapshot or _read_registry_input(
+            path, source, kind, version, tier, order
+        )
+        record.update({
+            "source": source,
+            "kind": kind,
+            "version": version,
+            "precedence_tier": tier,
+            "order": order,
+        })
+        inputs.append(record)
+        if record["status"] == "missing":
+            return record
+        if snapshot_error is not None:
+            loaded, invalid = [], [{
+                "provider_id": "<registry>",
+                "source": source,
+                "reason_code": snapshot_error.code,
+                "detail": str(snapshot_error),
+            }]
+        elif detection_error is not None:
+            loaded, invalid = [], [{
+                "provider_id": "<registry>",
+                "source": source,
+                "reason_code": detection_error.code,
+                "detail": str(detection_error),
+            }]
+        elif raw is not None and version == 2:
+            loaded, invalid = _load_v2_registry_candidates(raw, source)
+        elif raw is not None:
+            try:
+                loaded, invalid = _load_registry_candidates(raw, source), []
+            except RegistryContractError as error:
+                loaded, invalid = [], [{
+                    "provider_id": "<registry>",
+                    "source": source,
+                    "reason_code": error.code,
+                }]
+        else:
+            loaded, invalid = [], []
+        if invalid:
+            record["status"] = "invalid"
+            barrier = {
+                "source": source,
+                "canonical_identity": record["canonical_identity"],
+                "content_digest": record["content_digest"],
+                "kind": kind,
+                "precedence_tier": tier,
+                "order": order,
+            }
+            invalid_barriers.append(barrier)
+            diagnostics.extend({**item, "registry_input": barrier} for item in invalid)
+        for candidate_order, candidate in enumerate(loaded):
+            candidate["_precedence_tier"] = tier
+            candidate["_input_order"] = order
+            candidate["_input_identity"] = record["canonical_identity"]
+            candidate["_candidate_order"] = candidate_order
+            candidates.append(candidate)
+        return record
+
+    explicit: list[
+        tuple[
+            Path,
+            int,
+            int,
+            RegistryContractError | None,
+            tuple[
+                dict,
+                bytes | None,
+                tuple[int, int] | None,
+                RegistryContractError | None,
+            ],
+            tuple[int, int] | None,
+        ]
+    ] = []
+    for order, path in enumerate(_registry_arg_paths(getattr(args, "registry", None))):
+        source = _registry_source(path, "explicit")
+        snapshot = _read_registry_input(path, source, "explicit", 0, 99, order)
+        raw_bytes = snapshot[1]
+        if snapshot[3] is not None:
+            version = 2
+            detection_error = snapshot[3]
+        else:
+            try:
+                raw = raw_bytes.decode("utf-8") if raw_bytes is not None else ""
+                version = detect_registry_version(raw)
+                detection_error = None
+            except UnicodeError as error:
+                version = 2
+                detection_error = RegistryContractError("invalid-registry-contract", str(error))
+            except RegistryContractError as error:
+                version = 2
+                detection_error = error
+        physical_identity = snapshot[2]
+        explicit.append((path, version, order, detection_error, snapshot, physical_identity))
+    duplicate_explicit = {
+        identity
+        for identity in {item[5] for item in explicit if item[5] is not None}
+        if sum(item[5] == identity for item in explicit) > 1
+    }
+    for path, version, order, detection_error, snapshot, physical_identity in sorted(
+        explicit, key=lambda item: (-item[1], item[2])
+    ):
+        if physical_identity in duplicate_explicit:
+            detection_error = RegistryContractError("duplicate-registry-input")
+        register(
+            path,
+            snapshot[0]["source"],
+            "explicit",
+            version,
+            0 if version == 2 else 1,
+            order,
+            detection_error,
+            snapshot,
+        )
+
+    project_v2 = Path.cwd() / ".mission" / "specialists-v2.yml"
+    register(project_v2, "project:.mission/specialists-v2.yml", "project", 2, 2, 0)
 
     project_registry = Path.cwd() / ".mission" / "specialists.yml"
-    candidates.extend(_load_registry_candidates(project_registry, "project:.mission/specialists.yml"))
+    register(project_registry, "project:.mission/specialists.yml", "project", 1, 3, 0)
 
     if not getattr(args, "no_default_skill_roots", False):
+        user_v2 = Path.home() / ".config" / "mission" / "specialists-v2.yml"
+        register(user_v2, "user:~/.config/mission/specialists-v2.yml", "user", 2, 4, 0)
         user_registry = Path.home() / ".config" / "mission" / "specialists.yml"
-        candidates.extend(_load_registry_candidates(user_registry, "user:~/.config/mission/specialists.yml"))
+        register(user_registry, "user:~/.config/mission/specialists.yml", "user", 1, 5, 0)
 
-    for root in _skill_roots(args):
+    for root_order, root in enumerate(_skill_roots(args)):
         if not root.is_dir():
             continue
-        for manifest in sorted(root.glob("*/mission-specialist.yml")):
-            candidates.extend(_load_registry_candidates(manifest, f"skill-manifest:{manifest}"))
-    return candidates
+        v2_manifests = sorted(root.glob("*/mission-specialist-v2.yml"))
+        v1_manifests = sorted(root.glob("*/mission-specialist.yml"))
+        inventory = []
+        for manifest_order, manifest in enumerate(v2_manifests):
+            record = register(
+                manifest,
+                _registry_source(manifest, "installed"),
+                "installed",
+                2,
+                6,
+                manifest_order,
+            )
+            inventory.append({
+                "identity": record["canonical_identity"],
+                "digest": record["content_digest"],
+            })
+        for manifest_order, manifest in enumerate(v1_manifests):
+            record = register(
+                manifest,
+                _registry_source(manifest, "installed"),
+                "installed",
+                1,
+                7,
+                manifest_order,
+            )
+            inventory.append({
+                "identity": record["canonical_identity"],
+                "digest": record["content_digest"],
+            })
+        inputs.append({
+            "kind": "skill-root",
+            "source": _registry_source(root, "skill-root"),
+            "canonical_identity": _portable_registry_identity(root),
+            "version": 0,
+            "precedence_tier": 6,
+            "order": root_order,
+            "status": "present",
+            "content_digest": provider_value_digest(inventory),
+        })
+
+    active_barrier = None
+    if invalid_barriers:
+        active_barrier = min(
+            invalid_barriers,
+            key=lambda item: (
+                int(item["precedence_tier"]),
+                int(item["order"]) if item["kind"] == "explicit" else -1,
+            ),
+        )
+
+        def is_higher_than_barrier(candidate: dict) -> bool:
+            candidate_tier = int(candidate.get("_precedence_tier", 99))
+            barrier_tier = int(active_barrier["precedence_tier"])
+            if candidate_tier != barrier_tier:
+                return candidate_tier < barrier_tier
+            return (
+                active_barrier["kind"] == "explicit"
+                and int(candidate.get("_input_order", 0)) < int(active_barrier["order"])
+            )
+
+        candidates = [candidate for candidate in candidates if is_higher_than_barrier(candidate)]
+
+    resolved, diagnostics = _resolve_registry_precedence(candidates, diagnostics)
+    if active_barrier is not None:
+        resolved.append({
+            "_blocks_builtin_candidates": True,
+            "_projection_state": "invalid-input-barrier",
+            "source": active_barrier["source"],
+            "_precedence_tier": active_barrier["precedence_tier"],
+            "_input_order": active_barrier["order"],
+        })
+    effective = [
+        {
+            "provider_id": _safe_provider_reference(_provider_id(candidate)),
+            "source": candidate.get("source"),
+            "registry_version": candidate.get("registry_version"),
+            "registry_entry_digest": candidate.get("registry_entry_digest"),
+            "projection_state": candidate.get("_projection_state", "eligible"),
+        }
+        for candidate in resolved
+        if _provider_id(candidate)
+    ]
+    if active_barrier is not None:
+        effective.append({
+            "provider_id": "<registry>",
+            "source": active_barrier["source"],
+            "projection_state": "invalid-input-barrier",
+            "content_digest": active_barrier["content_digest"],
+        })
+    ordered_inputs = sorted(
+        inputs,
+        key=lambda item: (
+            int(item.get("precedence_tier", 99)),
+            int(item.get("order", 0)),
+            str(item.get("canonical_identity") or ""),
+        ),
+    )
+    ordered_barriers = sorted(
+        invalid_barriers,
+        key=lambda item: (
+            int(item.get("precedence_tier", 99)),
+            int(item.get("order", 0)),
+            str(item.get("canonical_identity") or ""),
+        ),
+    )
+    projection_payload = {
+        "schema": "mission-specialist-registry-projection/1",
+        "ordered_inputs": ordered_inputs,
+        "precedence_barriers": ordered_barriers,
+        "effective_entries": effective,
+    }
+    projection = {
+        **projection_payload,
+        "effective_projection_digest": provider_value_digest(projection_payload),
+    }
+    for candidate in resolved:
+        candidate["registry_projection_digest"] = projection["effective_projection_digest"]
+    return resolved, diagnostics, projection
 
 
 def _skill_roots(args) -> list[Path]:
@@ -2545,7 +3047,8 @@ def _candidate_profiles(candidate: dict) -> list[str]:
 
 def _provider_id(candidate: dict) -> str:
     return str(
-        candidate.get("skill")
+        candidate.get("provider_id")
+        or candidate.get("skill")
         or candidate.get("role")
         or candidate.get("name")
         or candidate.get("command")
@@ -2554,7 +3057,11 @@ def _provider_id(candidate: dict) -> str:
 
 
 def _disable_keys(candidate: dict) -> set[str]:
+    if candidate.get("registry_version") == 2:
+        provider_id = _provider_id(candidate)
+        return {provider_id} if provider_id else set()
     return {str(v) for v in (
+        candidate.get("provider_id"),
         candidate.get("role"),
         candidate.get("skill"),
         candidate.get("name"),
@@ -2566,10 +3073,19 @@ def _enabled_registry_candidates(registry_candidates: list[dict]) -> list[dict]:
     disabled: set[str] = set()
     enabled_keys: set[str] = set()
     enabled: list[dict] = []
-    for raw in [*registry_candidates, *BUILTIN_SPECIALIST_CANDIDATES]:
+    block_builtins = any(
+        isinstance(item, dict) and item.get("_blocks_builtin_candidates") is True
+        for item in registry_candidates
+    )
+    source_candidates = list(registry_candidates)
+    if not block_builtins:
+        source_candidates.extend(BUILTIN_SPECIALIST_CANDIDATES)
+    for raw in source_candidates:
         if not isinstance(raw, dict):
             continue
         keys = _disable_keys(raw)
+        if not keys:
+            continue
         if raw.get("enabled") is False:
             disabled.update(keys)
             continue
@@ -2594,15 +3110,6 @@ def _string_map(value) -> dict[str, str]:
     return {str(k): str(v) for k, v in value.items() if k is not None and v is not None}
 
 
-def _complexity_at_least(current: str | None, minimum: str | None) -> bool:
-    if not minimum:
-        return True
-    order = {"Simple": 1, "Standard": 2, "Complex": 3, "Critical": 4}
-    if not current:
-        return False
-    return order.get(str(current), 0) >= order.get(str(minimum), 0)
-
-
 def _command_is_available(command: str | None) -> bool:
     if not command:
         return False
@@ -2610,6 +3117,214 @@ def _command_is_available(command: str | None) -> bool:
         path = Path(command).expanduser()
         return path.is_file() and os.access(path, os.X_OK)
     return shutil.which(command) is not None
+
+
+def _portable_provider_identifier(value: object) -> bool:
+    text = str(value or "")
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", text))
+
+
+def _classify_non_portable_execution_config(candidate: dict) -> str | None:
+    if any(
+        not _portable_provider_identifier(candidate.get(field))
+        for field in ("provider_id", "role", "skill")
+    ):
+        return "provider-identity"
+    if candidate.get("kind") != "command":
+        return None
+    if "$EXTERNAL/sha256:" in str(candidate.get("source") or ""):
+        return "external-registry-resupply"
+    command = candidate.get("command")
+    if not command or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", str(command)):
+        return "command-locator"
+    args = candidate.get("args") or []
+    if args:
+        return "argument-locator"
+    if candidate.get("env"):
+        return "environment-values"
+    if candidate.get("_explicit_result_contract_present") is True:
+        return "result-contract-resupply"
+    return None
+
+
+def _safe_provider_reference(identity: object) -> str:
+    canonical_identity = str(identity or "")
+    if re.fullmatch(r"provider:sha256:[0-9a-f]{64}", canonical_identity):
+        return canonical_identity
+    if _portable_provider_identifier(canonical_identity):
+        return canonical_identity
+    digest = hashlib.sha256(canonical_identity.encode("utf-8")).hexdigest()
+    return f"provider:sha256:{digest}"
+
+
+def _public_specialist_record(record: dict) -> dict:
+    """Project one internal provider record onto the portable public contract."""
+    identity = _provider_id(record)
+    public: dict = {"provider_id": _safe_provider_reference(identity)}
+    for field in ("role", "skill"):
+        value = record.get(field)
+        if value:
+            public[field] = (
+                str(value)
+                if _portable_provider_identifier(value)
+                else _safe_provider_reference(value)
+            )
+    kind = record.get("kind")
+    if kind in {"skill", "command"}:
+        public["kind"] = kind
+    command = record.get("command")
+    if command and _portable_provider_identifier(command):
+        public["command"] = str(command)
+        public["args"] = []
+    timeout = record.get("timeout")
+    if type(timeout) is int and 1 <= timeout <= 86400:
+        public["timeout"] = timeout
+    for field in ("task_profiles", "phases", "matched_conditions"):
+        values = record.get(field)
+        if isinstance(values, list):
+            public[field] = [
+                str(value)
+                for value in values
+                if isinstance(value, str)
+                and len(value) <= 128
+                and not any(ord(char) < 32 or ord(char) == 127 for char in value)
+                and "/" not in value
+                and "\\" not in value
+            ]
+    for field in (
+        "required",
+        "bounded_use",
+        "bounded_purpose_required",
+        "installed",
+        "available",
+        "first_use",
+    ):
+        if type(record.get(field)) is bool:
+            public[field] = record[field]
+    for field in (
+        "source",
+        "registry_entry_digest",
+        "registry_projection_digest",
+        "context_digest",
+        "activation_digest",
+        "status",
+        "eligibility_reason",
+        "selection_source",
+        "selection_source_raw",
+        "eligibility_selection_source",
+    ):
+        value = record.get(field)
+        if isinstance(value, str):
+            public[field] = value
+    if type(record.get("registry_version")) is int:
+        public["registry_version"] = record["registry_version"]
+    score = record.get("score")
+    if (
+        (type(score) is int and 0 <= score <= 1)
+        or (type(score) is float and math.isfinite(score) and 0.0 <= score <= 1.0)
+    ):
+        public["score"] = score
+    normalized = record.get("normalized_activation")
+    if isinstance(normalized, dict):
+        public["normalized_activation"] = {
+            key: normalized[key]
+            for key in (
+                "min_complexity",
+                "auto_select_if",
+                "explicit_below_min",
+                "when_any",
+            )
+            if key in normalized
+        }
+    risk = record.get("risk")
+    if isinstance(risk, dict):
+        public["risk_confirmation_required"] = bool(
+            risk.get("first_use_confirmation")
+        )
+    result_contract = record.get("result_contract")
+    if isinstance(result_contract, dict) and result_contract:
+        public["result_contract_digest"] = provider_value_digest(result_contract)
+    return public
+
+
+def _public_specialist_records(records: list[dict]) -> list[dict]:
+    return [
+        _public_specialist_record(record)
+        for record in records
+        if isinstance(record, dict)
+    ]
+
+
+def _public_registry_input_record(record: dict) -> dict:
+    return {
+        field: record[field]
+        for field in (
+            "kind",
+            "source",
+            "canonical_identity",
+            "version",
+            "precedence_tier",
+            "order",
+            "status",
+            "content_digest",
+            "resolution_mode",
+        )
+        if field in record
+    }
+
+
+def _public_specialist_diagnostic(record: dict) -> dict:
+    identity = str(record.get("provider_id") or "<registry>")
+    public = {
+        "provider_id": (
+            "<registry>"
+            if identity == "<registry>"
+            else _safe_provider_reference(identity)
+        )
+    }
+    for field in (
+        "source",
+        "reason_code",
+        "field_code",
+        "blocked_config_class",
+        "registry_entry_digest",
+        "registry_projection_digest",
+        "context_digest",
+        "activation_digest",
+        "selection_source",
+        "selection_source_raw",
+        "requested_phase",
+        "current_complexity",
+        "minimum_complexity",
+    ):
+        value = record.get(field)
+        if isinstance(value, str):
+            public[field] = value
+    registry_input = record.get("registry_input")
+    if isinstance(registry_input, dict):
+        public["registry_input"] = _public_registry_input_record(registry_input)
+    return public
+
+
+def _public_specialist_diagnostics(records: list[dict]) -> list[dict]:
+    return [
+        _public_specialist_diagnostic(record)
+        for record in records
+        if isinstance(record, dict)
+    ]
+
+
+def _public_eligibility_context_fields(eligibility: dict, complexity: object) -> dict:
+    """Expose only contract enums; bind rejected raw policy through digests."""
+    fields: dict = {}
+    if complexity in {"Simple", "Standard", "Complex", "Critical"}:
+        fields["current_complexity"] = complexity
+    minimum = (eligibility.get("normalized_activation") or {}).get("min_complexity")
+    if minimum in {"Simple", "Standard", "Complex", "Critical"}:
+        fields["minimum_complexity"] = minimum
+    elif minimum is not None:
+        fields["field_code"] = "activation.min_complexity"
+    return fields
 
 
 def _default_result_contract_for(skill: str | None, role: str | None = None) -> dict:
@@ -2644,7 +3359,12 @@ def _normalize_candidate(candidate: dict, source: str) -> dict:
     command = candidate.get("command")
     skill = candidate.get("skill") or candidate.get("name") or candidate.get("role")
     role = candidate.get("role") or skill
-    phases = candidate.get("phases") or ["planning", "review"]
+    raw_phases = candidate.get("phases")
+    phases = (
+        ([] if candidate.get("registry_version") == 2 else ["planning", "review"])
+        if raw_phases is None
+        else raw_phases
+    )
     if isinstance(phases, str):
         phases = [phases]
     args = _as_list(candidate.get("args"))
@@ -2674,11 +3394,19 @@ def _normalize_candidate(candidate: dict, source: str) -> dict:
         "unavailable": candidate.get("unavailable", "continue"),
         "confirm": bool(candidate.get("confirm", False)),
         "auto_use": auto_use,
+        "activation": candidate.get("activation"),
         "risk": risk,
         "result_contract": result_contract,
         "bounded_use": bounded_use,
         "bounded_purpose_required": bool(candidate.get("bounded_purpose_required", bounded_use)),
         "install_hint": bool(candidate.get("install_hint", True)),
+        "provider_id": _provider_id(candidate),
+        "registry_version": candidate.get("registry_version", 1),
+        "registry_entry_digest": candidate.get("registry_entry_digest") or registry_entry_digest(candidate),
+        "registry_projection_digest": candidate.get("registry_projection_digest"),
+        "_registry_error": candidate.get("_registry_error"),
+        "_v2_auto_use_present": candidate.get("_v2_auto_use_present"),
+        "_explicit_result_contract_present": "result_contract" in candidate,
     }
 
 
@@ -2719,25 +3447,91 @@ def _load_provider_consent(path_text: str | None) -> set[str]:
 
 def rank_specialist_candidates(task_profile: dict, registry_candidates: list[dict],
                                installed: dict[str, dict], first_use: set[str] | None = None,
-                               complexity: str | None = None, consented: set[str] | None = None) -> list[dict]:
+                               complexity: str | None = None, consented: set[str] | None = None,
+                               user_specified: list[str] | None = None,
+                               mission_context: dict | None = None) -> tuple[list[dict], list[dict]]:
     first_use = first_use or set()
     consented = consented or set()
     profiles = [task_profile.get("primary"), *(task_profile.get("secondary") or [])]
     ranked = []
+    ineligible = []
+    named = set(user_specified or [])
+    mission_context = mission_context or {
+        "complexity": complexity,
+        "task_profile": task_profile,
+        "iteration": 1,
+        "previous_iteration_passed": None,
+    }
     for raw in _enabled_registry_candidates(registry_candidates):
         c = _normalize_candidate(raw, raw.get("source", "registry") if isinstance(raw, dict) else "registry")
         skill = c.get("skill")
         if not skill:
             continue
-        if not _complexity_at_least(complexity, c.get("auto_use", {}).get("min_complexity")):
-            continue
         overlap = [p for p in c.get("task_profiles", []) if p in profiles]
-        if not overlap:
+        raw_source = "user-specified" if skill in named else "automatic"
+        canonical_source = normalize_selection_source(raw_source)["selection_source"]
+        requested_phase = (
+            "planning"
+            if "complexity" in ((c.get("activation") or {}).get("auto_select_if") or [])
+            else None
+        )
+        blocked_config_class = _classify_non_portable_execution_config(c)
+        if blocked_config_class is not None:
+            eligibility = evaluate_provider_eligibility(
+                c,
+                mission_context,
+                requested_phase=requested_phase,
+                selection_source=raw_source,
+            )
+            ineligible.append({
+                "provider_id": _safe_provider_reference(_provider_id(c)),
+                "source": c["source"],
+                "registry_entry_digest": c["registry_entry_digest"],
+                "selection_source": canonical_source,
+                "selection_source_raw": raw_source,
+                "requested_phase": requested_phase,
+                "reason_code": "non-portable-execution-config",
+                "blocked_config_class": blocked_config_class,
+                "context_digest": eligibility["context_digest"],
+                "activation_digest": eligibility["activation_digest"],
+                "registry_projection_digest": c.get("registry_projection_digest"),
+                **_public_eligibility_context_fields(eligibility, complexity),
+            })
             continue
         if c.get("kind") == "command":
             installed_info = {"available": True} if _command_is_available(c.get("command")) else None
         else:
             installed_info = installed.get(skill)
+        c["available"] = bool(installed_info)
+        eligibility = evaluate_provider_eligibility(
+            c,
+            mission_context,
+            requested_phase=requested_phase,
+            selection_source=raw_source,
+        )
+        c.update({
+            "eligibility_reason": eligibility["reason_code"],
+            "matched_conditions": eligibility["matched_conditions"],
+            "context_digest": eligibility["context_digest"],
+            "activation_digest": eligibility["activation_digest"],
+            "normalized_activation": eligibility["normalized_activation"],
+            "eligibility_selection_source": canonical_source,
+        })
+        if not eligibility["eligible"] and eligibility["reason_code"] != "provider-unavailable":
+            ineligible.append({
+                "provider_id": c["provider_id"],
+                "source": c["source"],
+                "registry_entry_digest": c["registry_entry_digest"],
+                "selection_source": canonical_source,
+                "selection_source_raw": raw_source,
+                "requested_phase": requested_phase,
+                "reason_code": eligibility["reason_code"],
+                "context_digest": eligibility["context_digest"],
+                "activation_digest": eligibility["activation_digest"],
+                "registry_projection_digest": c.get("registry_projection_digest"),
+                **_public_eligibility_context_fields(eligibility, complexity),
+            })
+            continue
         base = 0.45 + (0.25 if task_profile.get("primary") in overlap else 0.1)
         base += min(0.2, 0.05 * len(overlap))
         if installed_info:
@@ -2754,10 +3548,14 @@ def rank_specialist_candidates(task_profile: dict, registry_candidates: list[dic
             "available": bool(installed_info),
             "status": "available" if installed_info else "missing",
             "first_use": skill in first_use or provider_id in first_use or needs_first_use,
-            "reason": f"{', '.join(overlap)} profile match",
+            "reason": (
+                "complexity activation match"
+                if "complexity" in eligibility["matched_conditions"]
+                else f"{', '.join(overlap)} profile match"
+            ),
         })
     ranked.sort(key=lambda c: (-c["score"], _candidate_source_rank(c), c["skill"]))
-    return ranked
+    return ranked, ineligible
 
 
 def decide_specialists(task_profile: dict, candidates: list[dict],
@@ -2847,7 +3645,10 @@ def decide_specialists(task_profile: dict, candidates: list[dict],
             "reason": f"tie-break: auto-selected {top['skill']} over {second['skill']} (score delta <= 0.05)",
             "prompted_user": False,
         }
-    if task_profile.get("confidence", 0) < 0.5 or top.get("score", 0) < 0.45:
+    if (
+        "complexity" not in (top.get("matched_conditions") or [])
+        and (task_profile.get("confidence", 0) < 0.5 or top.get("score", 0) < 0.45)
+    ):
         return {
             "policy": "fallback",
             "action": "continue-core",
@@ -2867,30 +3668,63 @@ def _selection_from_decision(candidates: list[dict], decision: dict) -> tuple[li
     if decision.get("policy") == "user-specified":
         names = set(decision.get("user_specified") or [])
         selected = [
-            {**c, "status": "selected", "selection_source": "user-specified"}
+            {
+                **c,
+                "status": "selected",
+                **normalize_selection_source("user-specified"),
+            }
             for c in candidates
             if str(c.get("skill") or "") in names and c.get("installed")
         ]
         return selected, unavailable
     if decision.get("policy") == "auto" and candidates:
-        return [{**candidates[0], "status": "selected"}], unavailable
+        return [{
+            **candidates[0],
+            "status": "selected",
+            **normalize_selection_source("automatic"),
+        }], unavailable
     return [], unavailable
 
 
-def build_phase_plan(candidates: list[dict], complexity: str | None = None) -> list[dict]:
+def build_phase_plan(
+    candidates: list[dict],
+    complexity: str | None = None,
+    mission_context: dict | None = None,
+) -> list[dict]:
     """Return a bounded advisory provider plan grouped by mission phase."""
     if not candidates:
         return []
+    context = mission_context or {
+        "complexity": complexity,
+        "task_profile": {"primary": "general", "secondary": [], "confidence": 0.0},
+        "iteration": 1,
+        "previous_iteration_passed": None,
+    }
     max_per_phase = 1 if complexity in {None, "Simple", "Standard"} else 2
     plan: list[dict] = []
     seen_skills: set[str] = set()
     for phase, preferred_roles in PHASE_ROLE_ORDER.items():
-        phase_candidates = [
-            c for c in candidates
-            if c.get("installed")
-            and phase in (c.get("phases") or [])
-            and str(c.get("skill") or "") not in seen_skills
-        ]
+        phase_candidates = []
+        for candidate in candidates:
+            if (
+                not candidate.get("installed")
+                or phase not in (candidate.get("phases") or [])
+                or str(candidate.get("skill") or "") in seen_skills
+            ):
+                continue
+            try:
+                eligibility = evaluate_provider_eligibility(
+                    candidate,
+                    context,
+                    requested_phase=phase,
+                    selection_source=candidate.get(
+                        "eligibility_selection_source", "automatic"
+                    ),
+                )
+            except ValueError:
+                continue
+            if eligibility["eligible"]:
+                phase_candidates.append(candidate)
         if not phase_candidates:
             continue
 
@@ -2914,36 +3748,121 @@ def build_phase_plan(candidates: list[dict], complexity: str | None = None) -> l
     return plan
 
 
+def _reject_specialist_state_context_mismatch(
+    args, *, state_complexity, state_iteration, observed_complexity, observed_iteration
+) -> None:
+    result = {
+        "ok": False,
+        "reason_code": "state-context-mismatch",
+        "state_context": {
+            "complexity": state_complexity,
+            "iteration": state_iteration,
+        },
+        "observed_context": {
+            "complexity": observed_complexity,
+            "iteration": observed_iteration,
+        },
+        "specialists_candidates": [],
+        "specialists_selected": [],
+        "specialists_unavailable": [],
+        "specialists_ineligible": [],
+        "specialist_registry_projection": None,
+        "specialists_decision": None,
+        "specialists_phase_plan": [],
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print(
+            "ERROR: mission state changed or disagrees with the requested specialist context",
+            file=sys.stderr,
+        )
+    raise SystemExit(2)
+
+
 def cmd_specialists(args):
     task = getattr(args, "task", "") or ""
     files = _split_csv(getattr(args, "files", None))
+    state_context = None
+    try:
+        state_path = resolve_state_file(Path.cwd())
+        if state_path.exists():
+            state_context = json.loads(state_path.read_text(encoding="utf-8"))
+            _validate_specialist_public_state(state_context)
+    except (OSError, UnicodeError, json.JSONDecodeError, RuntimeError):
+        state_context = None
+    state_iteration_snapshot = (
+        state_context.get("iteration") if isinstance(state_context, dict) else None
+    )
+    requested_complexity = getattr(args, "complexity", None)
+    record_state = bool(getattr(args, "record_state", False))
+    if record_state and isinstance(state_context, dict):
+        state_complexity = state_context.get("complexity")
+        state_iteration = state_context.get("iteration")
+        if requested_complexity is not None and requested_complexity != state_complexity:
+            _reject_specialist_state_context_mismatch(
+                args,
+                state_complexity=state_complexity,
+                state_iteration=state_iteration,
+                observed_complexity=requested_complexity,
+                observed_iteration=state_iteration,
+            )
+        effective_complexity = state_complexity
+    else:
+        effective_complexity = requested_complexity
+    if effective_complexity is None and isinstance(state_context, dict):
+        effective_complexity = state_context.get("complexity")
+    iteration = state_context.get("iteration", 1) if isinstance(state_context, dict) else 1
     installed = _discover_installed_skills(args)
-    registry_candidates = _discover_specialist_registry_candidates(args)
+    registry_candidates, registry_ineligible, registry_projection = _discover_specialist_registry_candidates(args)
     task_profile = classify_task_profile(task, files)
-    candidates = rank_specialist_candidates(
+    mission_context = {
+        "complexity": effective_complexity,
+        "task_profile": task_profile,
+        "iteration": iteration if type(iteration) is int and iteration >= 1 else 1,
+        "previous_iteration_passed": (
+            bool(state_context.get("passes"))
+            if isinstance(state_context, dict) and type(iteration) is int and iteration >= 2
+            else None
+        ),
+    }
+    candidates, eligibility_ineligible = rank_specialist_candidates(
         task_profile,
         registry_candidates,
         installed,
         set(_split_csv(getattr(args, "first_use", None))),
-        getattr(args, "complexity", None),
+        effective_complexity,
         _load_provider_consent(getattr(args, "consent_file", None)),
+        _split_csv(getattr(args, "user_specified", None)),
+        mission_context,
     )
     decision = decide_specialists(task_profile, candidates,
                                   _split_csv(getattr(args, "user_specified", None)))
     selected, unavailable = _selection_from_decision(candidates, decision)
-    phase_plan = build_phase_plan(candidates, getattr(args, "complexity", None))
+    phase_plan = build_phase_plan(candidates, effective_complexity, mission_context)
+    public_candidates = _public_specialist_records(candidates)
+    public_selected = _public_specialist_records(selected)
+    public_unavailable = _public_specialist_records(unavailable)
+    public_ineligible = _public_specialist_diagnostics(
+        [*registry_ineligible, *eligibility_ineligible]
+    )
     result = {
         "ok": True,
         "task_profile": task_profile,
-        "installed_skills": sorted(installed.keys()),
-        "specialists_candidates": candidates,
-        "specialists_selected": selected,
-        "specialists_unavailable": unavailable,
+        "installed_skills": sorted(
+            {_safe_provider_reference(identity) for identity in installed}
+        ),
+        "specialists_candidates": public_candidates,
+        "specialists_selected": public_selected,
+        "specialists_unavailable": public_unavailable,
+        "specialists_ineligible": public_ineligible,
+        "specialist_registry_projection": registry_projection,
         "specialists_decision": decision,
         "specialists_phase_plan": phase_plan,
     }
+    _validate_specialist_public_state(result)
 
-    if getattr(args, "record_state", False):
+    if record_state:
         cwd = Path.cwd()
         sf = resolve_state_file(cwd)
         if not sf.exists():
@@ -2951,10 +3870,24 @@ def cmd_specialists(args):
             sys.exit(1)
         with StateLock(lock_file(cwd)):
             data = json.loads(sf.read_text())
+            _validate_specialist_public_state(data)
+            if (
+                data.get("complexity") != effective_complexity
+                or data.get("iteration") != state_iteration_snapshot
+            ):
+                _reject_specialist_state_context_mismatch(
+                    args,
+                    state_complexity=data.get("complexity"),
+                    state_iteration=data.get("iteration"),
+                    observed_complexity=effective_complexity,
+                    observed_iteration=state_iteration_snapshot,
+                )
             data["task_profile"] = task_profile
-            data["specialists_candidates"] = candidates
-            data["specialists_selected"] = selected
-            data["specialists_unavailable"] = unavailable
+            data["specialists_candidates"] = public_candidates
+            data["specialists_selected"] = public_selected
+            data["specialists_unavailable"] = public_unavailable
+            data["specialists_ineligible"] = public_ineligible
+            data["specialist_registry_projection"] = registry_projection
             data["specialists_decision"] = decision
             data["specialists_phase_plan"] = phase_plan
             data["specialists_mode"] = "interactive" if decision.get("prompted_user") else "auto"
@@ -2998,6 +3931,7 @@ def cmd_specialists_accounting(args):
         print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
         sys.exit(1)
     data = json.loads(sf.read_text())
+    _validate_specialist_public_state(data)
     report = {
         "ok": True,
         "session_id": data.get("session_id") or sf.stem,
@@ -3106,6 +4040,7 @@ def cmd_specialists_summary(args):
         print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
         sys.exit(1)
     data = json.loads(sf.read_text())
+    _validate_specialist_public_state(data)
     summary = specialist_usage_summary(data)
     result = {
         "ok": True,
@@ -3126,31 +4061,184 @@ def cmd_specialists_summary(args):
     )
 
 
-def _archive_specialist_evidence(cwd: Path, evidence_output: str, iteration: int,
-                                 data: dict, entry: dict) -> str | None:
-    """Specialist evidence を archive/iter-N-<mission8>-specialist-<skill>.md に保存する."""
-    src = Path(evidence_output)
-    if not (src.exists() and src.is_file()):
-        print(f"WARNING: --evidence-output のファイルが見つかりません: {src}", file=sys.stderr)
-        return None
-    return _archive_specialist_text(cwd, src.read_text(encoding="utf-8"), iteration, data, entry)
+MAX_SPECIALIST_EVIDENCE_BYTES = 1024 * 1024
 
 
-def _archive_specialist_text(cwd: Path, text: str, iteration: int, data: dict, entry: dict) -> str:
+class SpecialistEvidenceInputError(ValueError):
+    """An evidence input cannot be snapshotted without a disclosure or race."""
+
+    def __init__(self, reason_code: str):
+        self.reason_code = reason_code
+        self.field_path = "/specialist_invocations/pending/evidence_output"
+        super().__init__(reason_code)
+
+
+def _evidence_error(reason_code: str) -> None:
+    raise SpecialistEvidenceInputError(reason_code)
+
+
+def _read_specialist_evidence_input(path: Path) -> str:
+    """Read one bounded, non-symlink regular-file snapshot from a single FD."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            _evidence_error("specialist-evidence-symlink")
+        _evidence_error("specialist-evidence-unreadable")
+    try:
+        try:
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode):
+                _evidence_error("specialist-evidence-non-regular")
+            if before.st_size < 0 or before.st_size > MAX_SPECIALIST_EVIDENCE_BYTES:
+                _evidence_error("specialist-evidence-too-large")
+            chunks = []
+            remaining = MAX_SPECIALIST_EVIDENCE_BYTES + 1
+            while remaining:
+                chunk = os.read(fd, min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            raw = b"".join(chunks)
+            after = os.fstat(fd)
+        except SpecialistEvidenceInputError:
+            raise
+        except OSError:
+            _evidence_error("specialist-evidence-unreadable")
+    finally:
+        os.close(fd)
+    before_identity = (
+        before.st_dev,
+        before.st_ino,
+        before.st_mode,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    )
+    after_identity = (
+        after.st_dev,
+        after.st_ino,
+        after.st_mode,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    )
+    if (
+        len(raw) > MAX_SPECIALIST_EVIDENCE_BYTES
+        or len(raw) != after.st_size
+        or before_identity != after_identity
+    ):
+        _evidence_error("specialist-evidence-changed")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        _evidence_error("specialist-evidence-invalid-encoding")
+    redacted = _redact_provider_output(text)
+    if contains_local_locator(redacted):
+        _evidence_error("specialist-evidence-unsafe-content")
+    return redacted
+
+
+def _planned_specialist_archive_path(
+    cwd: Path, iteration: int, data: dict, entry: dict
+) -> Path:
     archive_dir = state_dir(cwd) / "archive"
-    archive_dir.mkdir(parents=True, exist_ok=True)
     gid = (data.get("mission_id") or "unknown")[:8]
     skill_slug = _slug_for_filename(entry.get("skill") or "unknown")
-    dst = archive_dir / f"iter-{iteration}-{gid}-specialist-{skill_slug}.md"
-    meta = (
+    return archive_dir / f"iter-{iteration}-{gid}-specialist-{skill_slug}.md"
+
+
+def _specialist_archive_document(text: str, iteration: int, data: dict, entry: dict) -> str:
+    return (
         f"<!-- mission-specialist-meta: session_id={data.get('session_id')} "
         f"agent={data.get('agent') or 'unknown'} mission_id={data.get('mission_id')} "
         f"iteration={iteration} phase={entry.get('phase')} role={entry.get('role')} "
         f"skill={entry.get('skill')} mode={entry.get('mode')} status={entry.get('status')} "
         f"timestamp={entry['timestamp']} -->\n"
+        f"{text}"
     )
-    dst.write_text(meta + text, encoding="utf-8")
-    return str(dst)
+
+
+def _stage_specialist_archive(dst: Path, document: str) -> Path:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{dst.name}.", dir=dst.parent)
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(document)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
+    return temp_path
+
+
+def _publish_staged_specialist_archive(temp_path: Path, dst: Path) -> Path | None:
+    previous = None
+    try:
+        if dst.exists() or dst.is_symlink():
+            fd, previous_name = tempfile.mkstemp(prefix=f".{dst.name}.previous.", dir=dst.parent)
+            os.close(fd)
+            previous = Path(previous_name)
+            previous.unlink()
+            os.replace(dst, previous)
+        os.replace(temp_path, dst)
+    except BaseException:
+        if previous is not None and previous.exists():
+            os.replace(previous, dst)
+        raise
+    return previous
+
+
+def _rollback_specialist_archive(
+    temp_path: Path | None, dst: Path | None, previous: Path | None, published: bool
+) -> None:
+    if temp_path is not None:
+        temp_path.unlink(missing_ok=True)
+    if published and dst is not None:
+        dst.unlink(missing_ok=True)
+    if previous is not None and dst is not None and previous.exists():
+        os.replace(previous, dst)
+
+
+def _commit_specialist_state_with_archive(
+    sf: Path,
+    cwd: Path,
+    data: dict,
+    entry: dict,
+    iteration: int,
+    evidence_text: str | None,
+) -> str | None:
+    """Publish validated evidence and state together, restoring the archive on failure."""
+    _validate_specialist_public_state(data)
+    dst = (
+        _planned_specialist_archive_path(cwd, iteration, data, entry)
+        if evidence_text is not None
+        else None
+    )
+    temp_path = None
+    previous = None
+    published = False
+    try:
+        if dst is not None:
+            document = _specialist_archive_document(evidence_text, iteration, data, entry)
+            temp_path = _stage_specialist_archive(dst, document)
+            _validate_specialist_public_state(data)
+            previous = _publish_staged_specialist_archive(temp_path, dst)
+            temp_path = None
+            published = True
+        backup_state(sf)
+        atomic_write_json(sf, data)
+    except BaseException:
+        _rollback_specialist_archive(temp_path, dst, previous, published)
+        raise
+    if previous is not None:
+        previous.unlink(missing_ok=True)
+    return str(dst) if dst is not None else None
 
 
 def _find_provider(data: dict, provider_id: str) -> dict | None:
@@ -3172,7 +4260,7 @@ def _redact_provider_output(text: str) -> str:
     redacted = text
     for pattern in patterns:
         redacted = pattern.sub(lambda m: f"{m.group(1)}=[REDACTED]", redacted)
-    return redacted
+    return redact_local_locators(redacted)
 
 
 def _non_template_text_length(text: str, forbidden_markers: list[str]) -> int:
@@ -3228,12 +4316,12 @@ def _classify_command_provider_result(provider: dict, exit_code: int | None,
 
 
 def _provider_timeout(provider: dict, override: int | None) -> int:
-    if override is not None:
-        return override
-    try:
-        return int(provider.get("timeout") or 120)
-    except (TypeError, ValueError):
-        return 120
+    value = override if override is not None else provider.get("timeout", 120)
+    if value is None:
+        value = 120
+    if type(value) is not int or not 1 <= value <= 86400:
+        raise SpecialistPublicContractError("/specialist_invocations/pending/timeout")
+    return value
 
 
 def _selected_specialist_skills(data: dict) -> set[str]:
@@ -3312,8 +4400,48 @@ def _add_selected_specialist_metadata(data: dict, entry: dict, selection_source:
             selected_entry[key] = provider[key]
     if reason:
         selected_entry["reason"] = reason
-    selected.append(selected_entry)
-    return selected_entry
+    public_entry = _public_specialist_record(selected_entry)
+    selected.append(public_entry)
+    return public_entry
+
+
+def _prepare_specialist_invocation_state(
+    data: dict,
+    entry: dict,
+    *,
+    cwd: Path,
+    iteration: int,
+    evidence_planned: bool,
+    selection_source: str | None = None,
+    provider: dict | None = None,
+    selection_reason: str | None = None,
+) -> tuple[dict, dict, dict | None]:
+    """Build and validate the complete public state before any invocation side effect."""
+    prospective = copy.deepcopy(data)
+    pending_entry = copy.deepcopy(entry)
+    validation_probe = copy.deepcopy(prospective)
+    validation_probe.setdefault("specialist_invocations", []).append(
+        copy.deepcopy(pending_entry)
+    )
+    _validate_specialist_public_state(validation_probe)
+    if evidence_planned:
+        planned = _planned_specialist_archive_path(
+            cwd, iteration, prospective, pending_entry
+        )
+        pending_entry["evidence_path"] = _state_relative_path(cwd, planned)
+    selected_entry = None
+    if selection_source:
+        selected_entry = _add_selected_specialist_metadata(
+            prospective,
+            pending_entry,
+            selection_source,
+            pending_entry.get("timestamp") or iso_now(),
+            provider,
+            selection_reason,
+        )
+    prospective.setdefault("specialist_invocations", []).append(pending_entry)
+    _validate_specialist_public_state(prospective)
+    return prospective, pending_entry, selected_entry
 
 
 def _command_provider_packet(data: dict, provider: dict, args) -> str:
@@ -3345,6 +4473,7 @@ def cmd_invoke_command_provider(args):
         print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
         sys.exit(1)
     data = json.loads(sf.read_text())
+    _validate_specialist_public_state(data)
     provider = _find_provider(data, args.provider)
     if not provider:
         print(f"ERROR: provider not found in mission state: {args.provider}", file=sys.stderr)
@@ -3372,9 +4501,9 @@ def cmd_invoke_command_provider(args):
         "timestamp": now,
         "started_at": now,
         "provider_kind": "command",
-        "command": provider.get("command"),
     }
     command = provider.get("command")
+    timeout = _provider_timeout(provider, args.timeout)
     if not _command_is_available(command):
         entry.update({
             "status": "unavailable",
@@ -3383,10 +4512,19 @@ def cmd_invoke_command_provider(args):
         })
         with StateLock(lock_file(cwd)):
             data = json.loads(sf.read_text())
-            data.setdefault("specialist_invocations", []).append(entry)
+            _validate_specialist_public_state(data)
+            data = stamp_metadata(data, cwd)
             data["updated_at"] = entry["completed_at"]
-            backup_state(sf)
-            atomic_write_json(sf, stamp_metadata(data, cwd))
+            data, entry, _ = _prepare_specialist_invocation_state(
+                data,
+                entry,
+                cwd=cwd,
+                iteration=args.iteration,
+                evidence_planned=False,
+            )
+            _commit_specialist_state_with_archive(
+                sf, cwd, data, entry, args.iteration, None
+            )
         print(json.dumps({"ok": False, "entry": entry}, indent=2 if args.json else None, ensure_ascii=False))
         return
 
@@ -3394,9 +4532,28 @@ def cmd_invoke_command_provider(args):
     packet = _command_provider_packet(data, provider, args)
     command_env = os.environ.copy()
     command_env.update(_string_map(provider.get("env")))
-    timeout = _provider_timeout(provider, args.timeout)
+    entry["timeout"] = timeout
+    _prepare_specialist_invocation_state(
+        data,
+        entry,
+        cwd=cwd,
+        iteration=args.iteration,
+        evidence_planned=True,
+        selection_source=args.selection_source,
+        provider=provider,
+    )
     with StateLock(lock_file(cwd)):
         dispatch_state = json.loads(sf.read_text())
+        _validate_specialist_public_state(dispatch_state)
+        _prepare_specialist_invocation_state(
+            dispatch_state,
+            entry,
+            cwd=cwd,
+            iteration=args.iteration,
+            evidence_planned=True,
+            selection_source=args.selection_source,
+            provider=provider,
+        )
         record_activity_event(dispatch_state, "specialist", now)
         dispatch_state["updated_at"] = now
         backup_state(sf)
@@ -3425,7 +4582,6 @@ def cmd_invoke_command_provider(args):
         "status": status,
         "completed_at": completed_at,
         "exit_code": exit_code,
-        "timeout": timeout,
     })
     if reason:
         entry["reason"] = reason
@@ -3442,6 +4598,7 @@ def cmd_invoke_command_provider(args):
     )
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
+        _validate_specialist_public_state(data)
         current = data.get("activity_current")
         if (
             isinstance(current, dict)
@@ -3450,23 +4607,28 @@ def cmd_invoke_command_provider(args):
             and current.get("started_at") == now
         ):
             end_activity_segment(data, completed_at)
-        selected_entry = None
-        if status in APPLIED_SPECIALIST_INVOCATION_STATUSES and args.selection_source:
-            entry["selection_source"] = args.selection_source
-            selected_entry = _add_selected_specialist_metadata(
-                data,
-                entry,
-                args.selection_source,
-                completed_at,
-                provider,
-                reason,
-            )
-        archived_to = _archive_specialist_text(cwd, evidence, args.iteration, data, entry)
-        entry["evidence_path"] = _state_relative_path(cwd, archived_to)
-        data.setdefault("specialist_invocations", []).append(entry)
         data["updated_at"] = completed_at
-        backup_state(sf)
-        atomic_write_json(sf, stamp_metadata(data, cwd))
+        data = stamp_metadata(data, cwd)
+        applied_selection_source = (
+            args.selection_source
+            if status in APPLIED_SPECIALIST_INVOCATION_STATUSES
+            else None
+        )
+        if applied_selection_source:
+            entry["selection_source"] = applied_selection_source
+        data, entry, selected_entry = _prepare_specialist_invocation_state(
+            data,
+            entry,
+            cwd=cwd,
+            iteration=args.iteration,
+            evidence_planned=True,
+            selection_source=applied_selection_source,
+            provider=provider,
+            selection_reason=reason,
+        )
+        archived_to = _commit_specialist_state_with_archive(
+            sf, cwd, data, entry, args.iteration, evidence
+        )
     result = {"ok": status == "completed", "entry": entry}
     if selected_entry:
         result["selected_entry"] = selected_entry
@@ -3896,6 +5058,7 @@ def cmd_archive_worktree(args):
         with StateLock(lock_file(destination_root)):
             with StateLock(lock_file(cwd)):
                 data = json.loads(sf.read_text(encoding="utf-8"))
+                _validate_specialist_public_state(data)
                 specs = _collect_worktree_archive_specs(cwd, sf, data)
                 if args.dry_run:
                     result = {
@@ -4422,8 +5585,8 @@ def cmd_log_specialist_invocation(args):
     if not sf.exists():
         print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
         sys.exit(1)
-    if args.iteration < 0:
-        print("ERROR: --iteration は 0 以上で指定してください", file=sys.stderr)
+    if not 0 <= args.iteration <= 1_000_000:
+        print("ERROR: --iteration は 0..1000000 で指定してください", file=sys.stderr)
         sys.exit(2)
     role = (args.role or "").strip()
     skill = (args.skill or "").strip()
@@ -4444,6 +5607,7 @@ def cmd_log_specialist_invocation(args):
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
+        _validate_specialist_public_state(data)
         if _confirmed_selection_required(data, skill, args.status) and not getattr(args, "selection_source", None):
             print(
                 "ERROR: specialists_decision requested user confirmation; pass --selection-source confirmed-user "
@@ -4483,32 +5647,31 @@ def cmd_log_specialist_invocation(args):
         if getattr(args, "bounded_purpose", None):
             entry["bounded_purpose"] = args.bounded_purpose
 
+        evidence_src = Path(args.evidence_output) if args.evidence_output else None
+        evidence_planned = evidence_src is not None
         data = stamp_metadata(data, cwd)
-        selected_entry = None
-        if getattr(args, "selection_source", None):
-            selected_entry = _add_selected_specialist_metadata(
-                data,
-                entry,
-                args.selection_source,
-                now,
-                reason=reason or notes,
-            )
-        archived_to = None
-        if args.evidence_output:
-            archived_to = _archive_specialist_evidence(cwd, args.evidence_output, args.iteration, data, entry)
-            if archived_to:
-                entry["evidence_path"] = _state_relative_path(cwd, archived_to)
-
-        data.setdefault("specialist_invocations", []).append(entry)
         data["updated_at"] = now
-        backup_state(sf)
-        atomic_write_json(sf, data)
+        data, entry, selected_entry = _prepare_specialist_invocation_state(
+            data,
+            entry,
+            cwd=cwd,
+            iteration=args.iteration,
+            evidence_planned=evidence_planned,
+            selection_source=getattr(args, "selection_source", None),
+            selection_reason=reason or notes,
+        )
+        evidence_text = None
+        if evidence_planned and evidence_src is not None:
+            evidence_text = _read_specialist_evidence_input(evidence_src)
+        archived_to = _commit_specialist_state_with_archive(
+            sf, cwd, data, entry, args.iteration, evidence_text
+        )
 
     result = {"ok": True, "entry": entry}
     if selected_entry:
         result["selected_entry"] = selected_entry
     if archived_to:
-        result["archived_to"] = archived_to
+        result["archived_to"] = entry["evidence_path"]
     if getattr(args, "json", False):
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
@@ -4714,6 +5877,7 @@ def cmd_init(args):
             existing_mid = ""
             try:
                 existing_data = json.loads(sf_target.read_text())
+                _validate_specialist_public_state(existing_data)
                 existing_mid = existing_data.get("mission_id", "")
                 new_mid = initial.get("mission_id", "")
                 if existing_mid and new_mid and existing_mid != new_mid:
@@ -4790,6 +5954,8 @@ def cmd_init(args):
             except ActivityTimingError as e:
                 print(f"ERROR: existing mission timing is invalid: {e}", file=sys.stderr)
                 sys.exit(2)
+            except SpecialistPublicContractError:
+                raise
             except json.JSONDecodeError as e:
                 quarantine_suffix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
                 quarantine = sf_target.with_name(f"{sf_target.name}.corrupt-{quarantine_suffix}")
@@ -4849,6 +6015,7 @@ def cmd_get(args):
         sys.exit(1)
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
+        _validate_specialist_public_state(data)
     if args.field:
         print(json.dumps(data.get(args.field)))
     else:
@@ -8508,6 +9675,7 @@ def _terminalize_state_file(
             )
         _write_terminal_outcome(latest)
         latest["updated_at"] = now
+        _validate_specialist_public_state(latest)
         backup_state(sf)
         # Publish the janitor CAS directly on every terminalize path: the janitor
         # is not a normal writer and must neither impersonate the owner token nor
@@ -10027,7 +11195,7 @@ def _build_parser():
     p_rec.add_argument("--first-use", default=None, help="初回確認扱いにする skill 名カンマ区切り")
     p_rec.add_argument("--consent-file", default=None,
                        help="first-use provider consent allowlist JSON (default: ~/.config/mission/provider-consent.json)")
-    p_rec.add_argument("--complexity", default=None, choices=["Simple", "Standard", "Complex", "Critical"],
+    p_rec.add_argument("--complexity", default=None, choices=["Simple", "Standard", "Complex", "Critical", "Unknown"],
                        help="auto_use.min_complexity 判定用の mission complexity")
     p_rec.add_argument("--record-state", action="store_true", help="現在の mission state に推薦結果を記録")
     p_rec.add_argument("--user-specified", default=None, dest="user_specified",
@@ -10126,7 +11294,22 @@ def _build_parser():
 
 def main():
     args = _build_parser().parse_args()
-    args.func(args)
+    try:
+        args.func(args)
+    except SpecialistPublicContractError as error:
+        print(json.dumps({
+            "ok": False,
+            "reason_code": "unsafe-legacy-specialist-record",
+            "field_path": error.field_path,
+        }, ensure_ascii=False))
+        raise SystemExit(2)
+    except SpecialistEvidenceInputError as error:
+        print(json.dumps({
+            "ok": False,
+            "reason_code": error.reason_code,
+            "field_path": error.field_path,
+        }, ensure_ascii=False))
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":
