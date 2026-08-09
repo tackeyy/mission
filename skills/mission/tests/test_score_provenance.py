@@ -92,14 +92,17 @@ def test_git_revision_scope_requires_exact_pair(state_dir, run_cli, tmp_path):
 def test_resubmit_preserves_prior_content_addressed_archive(state_dir, run_cli, read_state, tmp_path):
     first = tmp_path / "first.json"
     second = tmp_path / "second.json"
-    first.write_text(json.dumps({"items": ITEMS}), encoding="utf-8")
-    second.write_text(json.dumps({"items": dict(ITEMS, accuracy=4.4)}), encoding="utf-8")
+    review = _review(tmp_path / "review.json")
+    assert run_cli("aggregate-reviews", "--iteration", "1", "--input", str(review), "--out", str(first), cwd=state_dir.parent).returncode == 0
+    payload = json.loads(first.read_text())
+    payload["items"]["accuracy"] = 4.4
+    second.write_text(json.dumps(payload), encoding="utf-8")
     assert run_cli("push-score", "--iteration", "1", "--scoring-json", str(first), cwd=state_dir.parent).returncode == 0
     old_path = read_state(state_dir)["score_history"][0]["scoring_evidence_path"]
-    old_bytes = open(old_path, "rb").read()
+    old_bytes = (state_dir.parent / old_path).read_bytes()
     assert run_cli("push-score", "--iteration", "1", "--scoring-json", str(second),
                    "--resubmit-reason", "neutral correction", cwd=state_dir.parent).returncode == 0
-    assert open(old_path, "rb").read() == old_bytes
+    assert (state_dir.parent / old_path).read_bytes() == old_bytes
 
 
 def test_manual_import_source_is_preserved_with_typed_evidence_ref(state_dir, run_cli, read_state, tmp_path):
@@ -204,18 +207,38 @@ def test_approval_verifier_callback_returns_typed_verified_envelope(tmp_path):
     assert spec and spec.loader
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    module.register_approval_verifier(
-        "fixture-verifier",
-        lambda request: module.ApprovalVerification(verified=True, verifier="fixture-verifier"),
+    request = module.build_approval_request(
+        session_id="test", mission_id="abc12345", revision_scope={"kind": "not-applicable", "reason_code": "non-git"},
+        terminal_object_digest="sha256:" + "b" * 64, approval_evidence_ref="sha256:" + "a" * 64,
+        approved_actor="role:owner", approved_at=datetime.now(timezone.utc).isoformat(),
+        reason_code="user-override", event_nonce="c" * 64,
     )
-    result = module.verify_force_approval({
-        "approval_evidence_ref": "sha256:" + "a" * 64,
-        "approved_actor": "role:owner",
-        "approved_at": datetime.now(timezone.utc).isoformat(),
-        "reason_code": "user-override",
-    }, "fixture-verifier")
-    assert result.verified is True
-    assert result.verifier == "fixture-verifier"
+    receipt = {"kind": "approval-receipt", "path": ".mission-state/archive/receipt.json", "digest": "sha256:" + "d" * 64}
+    module.register_approval_verifier("fixture-verifier", lambda _: {
+        "schema": "mission-force-approval-response/1", "decision": "approved", "verifier_id": "fixture-verifier",
+        "request_digest": request["request_digest"], "receipt_ref": receipt,
+        "verified_at": datetime.now(timezone.utc).isoformat(),
+    })
+    result = module.verify_force_approval(request, "fixture-verifier")
+    assert result["consumed"] is True
+    assert result["response"]["verifier_id"] == "fixture-verifier"
+
+
+@pytest.mark.parametrize("schema", [None, 3, "4", 4.0])
+def test_push_score_requires_provenance_despite_schema_downgrade(state_dir, run_cli, schema):
+    document = json.loads((state_dir / "sessions" / "test.json").read_text())
+    if schema is None:
+        document.pop("schema_version")
+    else:
+        document["schema_version"] = schema
+    before = json.dumps(document, sort_keys=True)
+    (state_dir / "sessions" / "test.json").write_text(json.dumps(document))
+    score = state_dir.parent / "score.json"
+    score.write_text(json.dumps({"items": ITEMS}))
+    result = run_cli("push-score", "--iteration", "1", "--scoring-json", str(score), cwd=state_dir.parent)
+    assert result.returncode == 2
+    assert "provenance" in result.stderr
+    assert json.dumps(json.loads((state_dir / "sessions" / "test.json").read_text()), sort_keys=True) == before
 
 
 def test_new_score_entry_binds_content_addressed_score_artifact(state_dir, run_cli, read_state, tmp_path):

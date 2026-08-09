@@ -1,0 +1,102 @@
+"""Portable validators for immutable scoring and forced-pass provenance."""
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+SHA256_REF_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+VERIFIER_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+ACTOR_RE = re.compile(r"^(?:role:[a-z][a-z0-9-]{0,63}|sha256:[0-9a-f]{64})$")
+REASON_CODES = {"user-override", "safety-exception", "operational-recovery"}
+MAX_APPROVAL_AGE = timedelta(days=1)
+REQUEST_SCHEMA = "mission-force-approval-request/1"
+RESPONSE_SCHEMA = "mission-force-approval-response/1"
+
+
+def canonical_json(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+
+
+def digest(value: object) -> str:
+    return "sha256:" + hashlib.sha256(canonical_json(value)).hexdigest()
+
+
+def _timestamp(value: object, *, now: datetime | None = None) -> str:
+    if not isinstance(value, str):
+        raise ValueError("approval timestamp is invalid")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("approval timestamp is invalid") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("approval timestamp is invalid")
+    current = now or datetime.now(timezone.utc)
+    if parsed > current or current - parsed > MAX_APPROVAL_AGE:
+        raise ValueError("approval timestamp is expired or in the future")
+    return value
+
+
+def _receipt_ref(value: object) -> dict[str, str]:
+    if not isinstance(value, dict) or value.get("kind") != "approval-receipt":
+        raise ValueError("approval receipt reference is invalid")
+    path, value_digest = value.get("path"), value.get("digest")
+    if (not isinstance(path, str) or not path or path.startswith("/") or "\x00" in path
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+            or not SHA256_REF_RE.fullmatch(str(value_digest or ""))):
+        raise ValueError("approval receipt reference is invalid")
+    return {"kind": "approval-receipt", "path": path, "digest": value_digest}
+
+
+def build_request(*, session_id: object, mission_id: object, revision_scope: object,
+                  terminal_object_digest: object, approval_evidence_ref: object,
+                  approved_actor: object, approved_at: object, reason_code: object,
+                  event_nonce: object, now: datetime | None = None) -> dict[str, str | dict]:
+    if not (isinstance(session_id, str) and session_id and isinstance(mission_id, str) and mission_id
+            and isinstance(revision_scope, dict) and SHA256_REF_RE.fullmatch(str(terminal_object_digest or ""))
+            and SHA256_REF_RE.fullmatch(str(approval_evidence_ref or ""))
+            and isinstance(approved_actor, str) and ACTOR_RE.fullmatch(approved_actor)
+            and reason_code in REASON_CODES and isinstance(event_nonce, str)
+            and re.fullmatch(r"[0-9a-f]{32,128}", event_nonce)):
+        raise ValueError("--approval-evidence-ref, opaque --approved-actor role, --approved-at, and --reason-code are required")
+    request: dict[str, str | dict] = {
+        "schema": REQUEST_SCHEMA, "session_id": session_id, "mission_id": mission_id,
+        "revision_scope": revision_scope, "terminal_object_digest": terminal_object_digest,
+        "approval_evidence_ref": approval_evidence_ref, "approved_actor": approved_actor,
+        "approved_at": _timestamp(approved_at, now=now), "reason_code": reason_code,
+        "event_nonce": event_nonce,
+    }
+    request["request_digest"] = digest(request)
+    return request
+
+
+def validate_request(value: object, *, now: datetime | None = None) -> dict[str, str | dict]:
+    if not isinstance(value, dict):
+        raise ValueError("approval request is invalid")
+    expected = build_request(**{key: value.get(key) for key in (
+        "session_id", "mission_id", "revision_scope", "terminal_object_digest", "approval_evidence_ref",
+        "approved_actor", "approved_at", "reason_code", "event_nonce",
+    )}, now=now)
+    if value != expected:
+        raise ValueError("approval request is not canonical")
+    return expected
+
+
+def validate_recorded_envelope(value: object, *, now: datetime | None = None) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {"request", "response", "receipt_ref", "consumed"}:
+        raise ValueError("approval envelope is invalid")
+    request = validate_request(value["request"], now=now)
+    response = value["response"]
+    if not isinstance(response, dict) or set(response) != {"schema", "decision", "verifier_id", "request_digest", "receipt_ref", "verified_at"}:
+        raise ValueError("approval response is invalid")
+    receipt = _receipt_ref(value["receipt_ref"])
+    if (response.get("schema") != RESPONSE_SCHEMA or response.get("decision") != "approved"
+            or not isinstance(response.get("verifier_id"), str) or not VERIFIER_ID_RE.fullmatch(response["verifier_id"])
+            or response.get("request_digest") != request["request_digest"]
+            or response.get("receipt_ref") != receipt or not isinstance(value["consumed"], bool)
+            or not value["consumed"]):
+        raise ValueError("approval response is invalid")
+    _timestamp(response.get("verified_at"), now=now)
+    return {"request": request, "response": response, "receipt_ref": receipt, "consumed": True}

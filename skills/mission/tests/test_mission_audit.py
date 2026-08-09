@@ -2190,6 +2190,21 @@ def test_audit_flags_legacy_force_pass_with_user_mention_as_unverifiable(tmp_pat
     assert data["forced_pass_autonomous_suspect_count"] == 1
 
 
+def test_audit_rejects_self_declared_force_verification(tmp_path):
+    """A string claiming verification is not a canonical recorded envelope."""
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "claimed-verified.json",
+        project_root=str(tmp_path), session_id="claimed-verified", passes=True,
+        passes_forced=True, force_reason="bounded override", score_history=[],
+        force_approval={"verification": "verified"},
+    )
+    result = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--since", "2026-06-18", "--json"],
+        capture_output=True, text=True, check=True,
+    )
+    assert json.loads(result.stdout)["forced_pass_autonomous_suspect_count"] == 1
+
+
 # ===== #190: halt_category による構造化 halt bucket =====
 
 

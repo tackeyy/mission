@@ -49,6 +49,10 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py review-finaliz
 # --force は非対応。override はユーザー明示承認の上で mark-passes --force を直接使う。
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py closeout
 
+### Forced-pass verifier protocol
+
+`mark-passes --force` is fail-closed. A host must register an in-process verifier callback; the portable command accepts no shell command, URL, or arbitrary provider execution. The callback receives a canonical request containing session and mission identifiers, revision scope, terminal-object digest, approval-evidence digest, opaque actor role or digest, bounded approval time, allowlisted reason code, and fresh event nonce. It returns `decision: approved`, its safe verifier identifier, the exact request digest, a relative content-addressed receipt reference, and bounded verification time. The command stores the complete request/response/receipt/consumed envelope and rejects replay, malformed values, absolute paths, raw approval text, or receipt digest mismatch. Audit treats only this same canonical envelope as verified; historical terminal records remain read-only and are reported as unverifiable.
+
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score \
     --iteration <N> \
     --scoring-json /tmp/mission-scorer-iter-<N>-<mission_id先頭8>.json \

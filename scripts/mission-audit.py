@@ -81,6 +81,7 @@ from state_snapshot import (  # noqa: E402
     value_digest,
     write_snapshot,
 )
+from scoring_provenance import validate_recorded_envelope  # noqa: E402
 
 
 PRUNE_DIRS = {
@@ -1621,8 +1622,13 @@ def is_forced_pass_autonomous_suspect(state: dict[str, Any]) -> bool:
     ユーザー承認への言及がない forced-pass を「自律 force の疑いあり」として検出する。"""
     approval = state.get("force_approval")
     if isinstance(approval, dict):
-        # New-format records are approved only after a configured verifier said so.
-        return approval.get("verification") != "verified"
+        # Audit does not trust a self-declared verification string.  The same
+        # complete canonical envelope accepted by the writer is required.
+        try:
+            validate_recorded_envelope(approval)
+            return False
+        except ValueError:
+            return True
     # Historical booleans and free text are retained, but are never verification.
     return True
 

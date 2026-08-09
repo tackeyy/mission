@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- New sessions record immutable, content-addressed scoring and review provenance. Normal passes require an aggregate evidence digest, opaque generation, and an explicit portable revision scope; historical state remains read-only legacy data. Forced passes require a host-registered verifier callback returning a typed approval envelope rather than a boolean assertion, and audit separates verified approvals from unverifiable legacy overrides (#383).
+- New score writes record immutable, content-addressed scoring and review provenance regardless of a mutable or missing schema marker; a successful write upgrades state to schema v4 while historical terminal data remains read-only. Forced passes require a host-registered verifier callback returning a canonical request/response/receipt envelope with a consumed marker rather than a boolean assertion, and audit validates that same envelope before classifying it verified (#383).
 
 ### Added
 

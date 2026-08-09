@@ -102,6 +102,13 @@ from artifact_contract import (  # noqa: E402
     validate_artifact_identity,
     validate_artifact_state_consistency,
 )
+from scoring_provenance import (  # noqa: E402
+    REASON_CODES as _PROVENANCE_REASON_CODES,
+    VERIFIER_ID_RE as _APPROVAL_VERIFIER_NAME_RE,
+    build_request as build_approval_request,
+    digest as provenance_digest,
+    validate_recorded_envelope,
+)
 
 SCHEMA_VERSION = 4  # v4: structured scoring provenance is mandatory for new sessions
 GOAL_DISPATCH_MODES = {"inline", "host-native"}
@@ -6244,28 +6251,10 @@ def _archive_scoring_json(cwd: Path, iteration: int, data: dict, entry: dict, pa
 
 
 _SHA256_REF_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-_PROVENANCE_REASON_CODES = {"user-override", "safety-exception", "operational-recovery"}
-_APPROVAL_VERIFIER_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
-_APPROVAL_ACTOR_RE = re.compile(r"^role:[a-z][a-z0-9-]{0,63}$")
-_MAX_APPROVAL_AGE = timedelta(days=1)
-
-
-class ApprovalRequest(NamedTuple):
-    """Minimal, non-secret verifier input for a forced-pass approval."""
-    approval_evidence_ref: str
-    approved_actor: str
-    approved_at: str
-    reason_code: str
-
-
-class ApprovalVerification(NamedTuple):
-    """Typed verifier response; raw approval bodies never enter mission state."""
-    verified: bool
-    verifier: str
 
 
 class ApprovalVerifier(Protocol):
-    def __call__(self, request: ApprovalRequest) -> ApprovalVerification:
+    def __call__(self, request: dict) -> dict:
         ...
 
 
@@ -6279,27 +6268,8 @@ def register_approval_verifier(name: str, verifier: ApprovalVerifier) -> None:
     _APPROVAL_VERIFIERS[name] = verifier
 
 
-def _approval_request_from_fields(approval_ref: object, actor: object, approved_at: object,
-                                  reason_code: object, *, now: datetime | None = None) -> ApprovalRequest:
-    if not (_SHA256_REF_RE.fullmatch(str(approval_ref or ""))
-            and isinstance(actor, str) and _APPROVAL_ACTOR_RE.fullmatch(actor)
-            and isinstance(approved_at, str) and reason_code in _PROVENANCE_REASON_CODES):
-        raise ValueError("--approval-evidence-ref, opaque --approved-actor role, --approved-at, and --reason-code are required")
-    parsed = parse_iso_datetime(approved_at)
-    if parsed is None or parsed.tzinfo is None:
-        raise ValueError("approval timestamp is invalid")
-    current = now or datetime.now(timezone.utc)
-    if parsed > current or current - parsed > _MAX_APPROVAL_AGE:
-        raise ValueError("approval timestamp is expired or in the future")
-    return ApprovalRequest(str(approval_ref), actor, approved_at, str(reason_code))
-
-
-def verify_force_approval(fields: dict, verifier_name: object) -> ApprovalVerification:
+def verify_force_approval(request: dict, verifier_name: object) -> dict:
     """Fail closed unless a registered callback returns a matching typed envelope."""
-    request = _approval_request_from_fields(
-        fields.get("approval_evidence_ref"), fields.get("approved_actor"),
-        fields.get("approved_at"), fields.get("reason_code"),
-    )
     if not isinstance(verifier_name, str) or not _APPROVAL_VERIFIER_NAME_RE.fullmatch(verifier_name):
         raise ValueError("approval verifier is invalid or not configured")
     verifier = _APPROVAL_VERIFIERS.get(verifier_name)
@@ -6309,13 +6279,40 @@ def verify_force_approval(fields: dict, verifier_name: object) -> ApprovalVerifi
         result = verifier(request)
     except Exception as exc:
         raise ValueError("approval verifier rejected the evidence") from exc
-    if not isinstance(result, ApprovalVerification) or not result.verified or result.verifier != verifier_name:
+    try:
+        envelope = {"request": request, "response": result, "receipt_ref": result.get("receipt_ref"), "consumed": True}
+        validated = validate_recorded_envelope(envelope)
+    except (AttributeError, ValueError) as exc:
+        raise ValueError("approval verifier did not return a verified envelope") from exc
+    if validated["response"]["verifier_id"] != verifier_name:
         raise ValueError("approval verifier did not return a verified envelope")
-    return result
+    return validated
+
+
+def _force_envelope_replayed(cwd: Path, envelope: dict) -> bool:
+    """Reject a request or receipt already consumed by any local session."""
+    request_digest = envelope["request"]["request_digest"]
+    receipt = envelope["receipt_ref"]
+    sessions = state_dir(cwd) / "sessions"
+    for candidate in sessions.glob("*.json"):
+        try:
+            other = json.loads(candidate.read_text(encoding="utf-8"))
+            recorded = other.get("force_approval") if isinstance(other, dict) else None
+            if not isinstance(recorded, dict):
+                continue
+            validated = validate_recorded_envelope(recorded)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            # A malformed record must never become a bypass; it is not a
+            # reusable approved envelope, and audit will flag it separately.
+            continue
+        if (validated["request"]["request_digest"] == request_digest
+                or validated["receipt_ref"] == receipt):
+            return True
+    return False
 
 
 def _is_new_provenance_state(data: dict) -> bool:
-    """Schema is the migration boundary; old states are never rewritten."""
+    """Legacy terminal records are display-only; new writers do not consult this."""
     return isinstance(data.get("schema_version"), int) and data["schema_version"] >= 4
 
 
@@ -7387,7 +7384,9 @@ def cmd_push_score(args):
         try:
             provenance = _validate_provenance(
                 scoring_payload.get("score_provenance") if scoring_payload else None,
-                require=_is_new_provenance_state(data),
+                # A push is always a new score write, even if an attacker
+                # deleted/downgraded schema_version from an active state.
+                require=True,
             )
         except ValueError as exc:
             print(f"ERROR: provenance: {exc}", file=sys.stderr)
@@ -7472,6 +7471,8 @@ def cmd_push_score(args):
         else:
             data["stagnation_count"] = 0
         data["updated_at"] = now
+        # A successful provenance-bearing score is the only migration path.
+        data["schema_version"] = SCHEMA_VERSION
         data = stamp_metadata(data, cwd)
         backup_state(sf)
         atomic_write_json(sf, data)
@@ -7632,14 +7633,30 @@ def cmd_mark_passes(args):
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
-        if force and _is_new_provenance_state(data):
+        if force:
             try:
-                verification = verify_force_approval({
-                    "approval_evidence_ref": approval_ref,
-                    "approved_actor": approved_actor,
-                    "approved_at": approved_at,
-                    "reason_code": reason_code,
-                }, approval_verifier)
+                latest_scope = next((entry.get("revision_scope") for entry in reversed(data.get("score_history", []))
+                                     if isinstance(entry, dict) and isinstance(entry.get("revision_scope"), dict)),
+                                    {"kind": "not-applicable", "reason_code": "non-git"})
+                terminal_object = {
+                    "session_id": data.get("session_id"), "mission_id": data.get("mission_id"),
+                    "score_history": data.get("score_history", []), "threshold": data.get("threshold"),
+                    "revision_scope": latest_scope,
+                }
+                request = build_approval_request(
+                    session_id=data.get("session_id"), mission_id=data.get("mission_id"),
+                    revision_scope=latest_scope, terminal_object_digest=provenance_digest(terminal_object),
+                    approval_evidence_ref=approval_ref, approved_actor=approved_actor, approved_at=approved_at,
+                    reason_code=reason_code, event_nonce=secrets.token_hex(32),
+                )
+                verification = verify_force_approval(request, approval_verifier)
+                if _force_envelope_replayed(cwd, verification):
+                    raise ValueError("approval request or receipt was already consumed")
+                receipt_bytes = _read_bounded_review_evidence(cwd, verification["receipt_ref"]["path"])
+                if "sha256:" + hashlib.sha256(receipt_bytes).hexdigest() != verification["receipt_ref"]["digest"]:
+                    raise ValueError("approval receipt digest mismatch")
+                if data.get("force_approval"):
+                    raise ValueError("approval envelope was already consumed")
             except ValueError as exc:
                 print(f"ERROR: force approval: {exc}", file=sys.stderr)
                 sys.exit(2)
@@ -7769,15 +7786,8 @@ def cmd_mark_passes(args):
         if force:
             data["force_reason"] = reason
             data["force_approved_by_user"] = approved_by_user  # #185
-            if _is_new_provenance_state(data):
-                data["force_approval"] = {
-                    "approval_evidence_ref": approval_ref,
-                    "approved_actor": approved_actor,
-                    "approved_at": approved_at,
-                    "reason_code": reason_code,
-                    "verification": "verified",
-                    "verifier": verification.verifier,
-                }
+            data["force_approval"] = verification
+            data["force_approval"]["consumed"] = True
         backup_state(sf)
         atomic_write_json(sf, data)
         # #11: aggregate 更新も同じ StateLock 内で行う (lock 外だと並列 mark で lost update)
