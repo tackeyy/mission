@@ -6208,7 +6208,27 @@ def _archive_scoring_json(cwd: Path, iteration: int, data: dict, entry: dict, pa
         "computed_composite": entry["composite"],
         "computed_min_item": entry["min_item"],
     }
-    out = {"_meta": meta}
+    # This is the immutable object that binds what the scorer supplied to what
+    # the state machine subsequently accepts.  Do not put the self-reference
+    # (scoring_evidence_ref) in it: the digest names this exact byte sequence.
+    out = {
+        "schema": "mission-scoring-artifact/1",
+        "_meta": meta,
+        "binding": {
+            "session_id": data.get("session_id"),
+            "mission_id": data.get("mission_id"),
+            "iteration": iteration,
+            "items": entry["items"],
+            "composite": entry["composite"],
+            "min_item": entry["min_item"],
+            "revision_scope": entry.get("revision_scope"),
+            "review_generation": (entry.get("review_evidence_ref") or {}).get("generation"),
+            "review_evidence_ref": entry.get("review_evidence_ref"),
+        },
+        "payload": payload,
+    }
+    # Keep the original top-level shape for historical archive consumers.  The
+    # binding above, not these convenience fields, is authoritative.
     out.update(payload)
     content = (json.dumps(out, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     digest = hashlib.sha256(content).hexdigest()
@@ -6309,6 +6329,37 @@ def _revision_scope_from_args(args) -> dict:
     return {"kind": "git", "base_sha": base, "head_sha": head}
 
 
+def _validate_revision_scope(cwd: Path, scope: object) -> None:
+    """Bind git scope to this checked-out project, never to a SHA-shaped claim."""
+    if not isinstance(scope, dict):
+        raise ValueError("revision_scope is invalid")
+    git = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
+                         capture_output=True, text=True)
+    is_git = git.returncode == 0
+    if scope.get("kind") == "not-applicable":
+        if scope != {"kind": "not-applicable", "reason_code": "non-git"} or is_git:
+            raise ValueError("not-applicable revision_scope is allowed only for non-git projects")
+        return
+    if scope.get("kind") != "git":
+        raise ValueError("revision_scope is invalid")
+    if not is_git:
+        raise ValueError("git revision_scope requires a git project")
+    base, head = scope.get("base_sha"), scope.get("head_sha")
+    if not all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value)
+               for value in (base, head)):
+        raise ValueError("git revision_scope must use exact SHAs")
+    def checked(*command: str) -> str:
+        result = subprocess.run(["git", "-C", str(cwd), *command], capture_output=True, text=True)
+        if result.returncode != 0:
+            raise ValueError("git revision_scope names an unknown commit")
+        return result.stdout.strip()
+    checked("cat-file", "-e", f"{base}^{{commit}}")
+    checked("cat-file", "-e", f"{head}^{{commit}}")
+    checked("merge-base", "--is-ancestor", base, head)
+    if checked("rev-parse", "HEAD") != head:
+        raise ValueError("git revision_scope head is not the current reviewed HEAD")
+
+
 def _validate_provenance(provenance: object, *, require: bool) -> dict | None:
     if provenance is None:
         if require:
@@ -6325,11 +6376,9 @@ def _validate_provenance(provenance: object, *, require: bool) -> dict | None:
         raise ValueError("score provenance has invalid review_evidence_ref")
     if not isinstance(scope, dict) or scope != ref["revision_scope"]:
         raise ValueError("score provenance revision_scope mismatch")
-    if scope.get("kind") == "git":
-        if not all(re.fullmatch(r"[0-9a-f]{40}", str(scope.get(k) or "")) for k in ("base_sha", "head_sha")):
-            raise ValueError("score provenance git revision_scope must use exact SHAs")
-    elif scope.get("kind") != "not-applicable" or scope.get("reason_code") != "non-git":
-        raise ValueError("score provenance has invalid revision_scope")
+    if not isinstance(provenance.get("scoring_evidence_ref"), dict) and require:
+        # push-score adds this after archiving; raw aggregate output has none.
+        pass
     return provenance
 
 
@@ -6357,7 +6406,7 @@ def _read_bounded_review_evidence(cwd: Path, path_text: object) -> bytes:
             os.close(fd)
             fd = next_fd
         initial = os.fstat(fd)
-        if not stat.S_ISREG(initial.st_mode) or initial.st_size > 4 * 1024 * 1024:
+        if not stat.S_ISREG(initial.st_mode) or initial.st_nlink != 1 or initial.st_size > 4 * 1024 * 1024:
             raise ValueError("review evidence must be a bounded regular non-symlink file")
         chunks: list[bytes] = []
         remaining = initial.st_size
@@ -6377,12 +6426,13 @@ def _read_bounded_review_evidence(cwd: Path, path_text: object) -> bytes:
     return content
 
 
-def _revalidate_score_provenance(cwd: Path, entry: dict, data: dict) -> None:
+def _revalidate_score_provenance(cwd: Path, entry: dict, data: dict, *, require_scoring_artifact: bool = True) -> None:
     """Re-check immutable evidence at the pass boundary; never trust a saved digest alone."""
     provenance = _validate_provenance(entry.get("score_provenance"), require=_is_new_provenance_state(data))
     if provenance is None:
         return
     ref = provenance["review_evidence_ref"]
+    _validate_revision_scope(cwd, provenance["revision_scope"])
     content = _read_bounded_review_evidence(cwd, ref["path"])
     digest = hashlib.sha256(content).hexdigest()
     if "sha256:" + digest != ref["digest"]:
@@ -6395,6 +6445,27 @@ def _revalidate_score_provenance(cwd: Path, entry: dict, data: dict) -> None:
         raise ValueError("review evidence must be valid UTF-8 JSON") from exc
     if not isinstance(parsed, dict) or parsed.get("schema") != "mission-review-aggregate/1":
         raise ValueError("review evidence has invalid schema")
+    score_ref = provenance.get("scoring_evidence_ref")
+    if _is_new_provenance_state(data) and require_scoring_artifact:
+        if not isinstance(score_ref, dict) or score_ref.get("kind") != "scoring-artifact" or not _SHA256_REF_RE.fullmatch(str(score_ref.get("digest") or "")):
+            raise ValueError("scoring evidence reference is invalid")
+        score_bytes = _read_bounded_review_evidence(cwd, score_ref.get("path"))
+        if "sha256:" + hashlib.sha256(score_bytes).hexdigest() != score_ref["digest"]:
+            raise ValueError("scoring evidence digest mismatch")
+        try:
+            artifact = json.loads(score_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("scoring evidence must be valid UTF-8 JSON") from exc
+        binding = artifact.get("binding") if isinstance(artifact, dict) else None
+        expected = {
+            "session_id": data.get("session_id"), "mission_id": data.get("mission_id"),
+            "iteration": entry.get("iteration"), "items": entry.get("items"),
+            "composite": entry.get("composite"), "min_item": entry.get("min_item"),
+            "revision_scope": provenance["revision_scope"], "review_generation": ref["generation"],
+            "review_evidence_ref": ref,
+        }
+        if artifact.get("schema") != "mission-scoring-artifact/1" or binding != expected:
+            raise ValueError("scoring evidence binding mismatch")
 
 
 def _resolve_recorded_path(cwd: Path, path_text: str) -> Path:
@@ -6889,6 +6960,7 @@ def cmd_aggregate_reviews(args):
         sys.exit(2)
     try:
         revision_scope = _revision_scope_from_args(args)
+        _validate_revision_scope(cwd, revision_scope)
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
@@ -7322,7 +7394,8 @@ def cmd_push_score(args):
             sys.exit(2)
         if provenance is not None:
             try:
-                _revalidate_score_provenance(cwd, {"score_provenance": provenance}, data)
+                _revalidate_score_provenance(cwd, {"score_provenance": provenance}, data,
+                                              require_scoring_artifact=False)
             except ValueError as exc:
                 print(f"ERROR: provenance: {exc}", file=sys.stderr)
                 sys.exit(2)
@@ -7370,7 +7443,15 @@ def cmd_push_score(args):
                 entry["review_evidence_ref"] = provenance["review_evidence_ref"]
                 entry["revision_scope"] = provenance["revision_scope"]
             scoring_json_archived_to = _archive_scoring_json(cwd, args.iteration, data, entry, scoring_payload)
-            entry["scoring_evidence_path"] = scoring_json_archived_to
+            artifact_state_path = str(Path(scoring_json_archived_to).relative_to(cwd))
+            entry["scoring_evidence_path"] = artifact_state_path if provenance is not None else scoring_json_archived_to
+            artifact_bytes = _read_bounded_review_evidence(cwd, artifact_state_path)
+            if provenance is not None:
+                provenance["scoring_evidence_ref"] = {
+                    "kind": "scoring-artifact",
+                    "path": artifact_state_path,
+                    "digest": "sha256:" + hashlib.sha256(artifact_bytes).hexdigest(),
+                }
         data.setdefault("score_history", []).append(entry)
         # 改善2: top-level iteration を同期 (orchestrator の set 取りこぼしで
         # iteration と score_history 長が不整合になる問題への対処)。

@@ -216,3 +216,42 @@ def test_approval_verifier_callback_returns_typed_verified_envelope(tmp_path):
     }, "fixture-verifier")
     assert result.verified is True
     assert result.verifier == "fixture-verifier"
+
+
+def test_new_score_entry_binds_content_addressed_score_artifact(state_dir, run_cli, read_state, tmp_path):
+    state = json.loads((state_dir / "sessions" / "test.json").read_text())
+    state["schema_version"] = 4
+    (state_dir / "sessions" / "test.json").write_text(json.dumps(state))
+    review = _review(tmp_path / "review.json")
+    assert run_cli("review-finalize", "--iteration", "1", "--input", str(review), cwd=state_dir.parent).returncode == 0
+    entry = read_state(state_dir)["score_history"][0]
+    ref = entry["score_provenance"]["scoring_evidence_ref"]
+    assert ref["path"].startswith(".mission-state/")
+    artifact = json.loads((state_dir.parent / ref["path"]).read_text())
+    assert artifact["schema"] == "mission-scoring-artifact/1"
+    assert artifact["binding"]["items"] == entry["items"]
+    assert artifact["binding"]["composite"] == entry["composite"]
+
+
+def test_mark_passes_rejects_hardlinked_evidence(state_dir, run_cli, read_state, tmp_path):
+    state = json.loads((state_dir / "sessions" / "test.json").read_text())
+    state["schema_version"] = 4
+    (state_dir / "sessions" / "test.json").write_text(json.dumps(state))
+    review = _review(tmp_path / "review.json")
+    assert run_cli("review-finalize", "--iteration", "1", "--input", str(review), cwd=state_dir.parent).returncode == 0
+    entry = read_state(state_dir)["score_history"][0]
+    path = state_dir.parent / entry["score_provenance"]["review_evidence_ref"]["path"]
+    os.link(path, tmp_path / "linked-evidence.json")
+    result = run_cli("mark-passes", cwd=state_dir.parent)
+    assert result.returncode == 2
+    assert "provenance" in result.stderr
+
+
+def test_git_scope_is_rejected_outside_a_git_project(state_dir, run_cli, tmp_path):
+    review = _review(tmp_path / "review.json")
+    result = run_cli(
+        "aggregate-reviews", "--iteration", "1", "--input", str(review),
+        "--base-sha", "a" * 40, "--head-sha", "b" * 40, cwd=state_dir.parent,
+    )
+    assert result.returncode == 2
+    assert "git project" in result.stderr
