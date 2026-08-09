@@ -152,12 +152,21 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py progress get -
 - `pid` (agent CLI プロセス PID, A-2: orphan 自動回収)
 - `hostname`, `session_id` (uuid), `created_at_session` (B-3: owner 識別)
 - `mission_id` (mission の SHA256[:16], C-1: 別ミッション検出)
-- `schema_version` (現在 2)
+- `schema_version` (現在 3)
+- `terminal_outcome` (terminal writer のみ。active state では未設定。`reactivate` / `refresh-pid` で再開時に削除)
 - `cli_version` (実行中の mission-state.py のバージョン, #186: plugin cache 陳腐化の検出用)
 
 **#186 バージョン skew 警告**: `codex-preflight --json` と `resume` の出力 (`resume.version_skew`) は、`~/.claude/plugins/cache/mission-marketplace/mission/*` および `${CODEX_HOME:-~/.codex}/plugins/cache/mission-marketplace/mission/*` を走査し、実行中の `MISSION_CLI_VERSION` より古いバージョンディレクトリが存在すれば `version_skew` (null 以外) を返す。古い cache は Wave 1/Wave 2 の修正を反映しない古い SKILL.md・gate ロジックで動作し続けるため、`stats --json` の `by_cli_version` と合わせて陳腐化を検出できる。検出のみで自動修復はしない (plugin update / cache 削除は手動)。cache root は `MISSION_CLAUDE_HOME` (Claude Code 側。未設定なら `~/.claude`) / `CODEX_HOME` (既存の hook 探索と同じ変数。未設定なら `~/.codex`) で override できる (主にテスト隔離用)。
 
 更新前の `.bak` 自動生成 (A-4)、`fcntl.flock` ロック (B-1)、`fsync + os.replace` atomic write (B-2) もスクリプトが内包する。
+
+### Terminal outcome と role-aware rate (#380)
+
+schema v3 は control state (`passes` / `loop_active` / `halt_reason` / `halt_category`) と business outcome を分離し、terminal writer が `terminal_outcome` を明示記録する。値は `completed_pass` / `completed_evidence` / `blocked_external` / `awaiting_approval` / `stale_superseded` / `failed` / `incomplete` / `user_aborted` / `routed_elsewhere` のいずれか。`evidence-submitted` は checker/planning/analyze だけ `completed_evidence`、implementer/release では `incomplete`。`partial-done` は `incomplete`、`routed-goal` は非比較の `routed_elsewhere`。active state には outcome を付けない。
+
+`mark-passes`、`closeout`、`mark-halt`、hard route、permission preflight、`halt --all`、`cleanup-stale` は同じ導出関数で outcome を記録する。`reactivate` と stale recovery の `refresh-pid` は outcome を消して active に戻す。汎用 `set` からの outcome 変更は禁止。明示 outcome と control state が矛盾する record は読み取り時に `failed` として fail-closed する。
+
+schema v1/v2 は `derive_terminal_outcome()` が読み取り時に互換導出し、物理 rewrite しない。`stats` / audit の implementer pass rate は implementer role の `completed_pass + failed + incomplete` だけを分母にし、checker/planning/analyze は evidence completion rate へ分離する。release、外部 blocker、承認待ち、stale/superseded、user abort、route、active は implementer 分母から除外する。詳細は `docs/PASS_RATE_METRICS.md` を参照。
 
 ### Activity segment observability (#211)
 

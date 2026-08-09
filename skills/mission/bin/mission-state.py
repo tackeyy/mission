@@ -55,8 +55,11 @@ if str(LIB_DIR) not in sys.path:
 from mission_common import (  # noqa: E402
     HALT_CATEGORIES,
     PREPARATION_ONLY_MARKERS,
+    SESSION_ROLES,
     SPECIALIST_SELECTION_CHECKPOINT_REQUIRED_AT,
+    TERMINAL_OUTCOMES,
     classify_state as _classify,
+    derive_terminal_outcome,
     duration_sec as _duration_sec,
     parse_iso_datetime,
     state_dedupe_rank,
@@ -84,7 +87,7 @@ from activity_segments import (  # noqa: E402
 from worktree_archive import validate_worktree_archive_bundle  # noqa: E402
 from state_snapshot import SnapshotError, consume_snapshot_document  # noqa: E402
 
-SCHEMA_VERSION = 2  # v1: 旧 schema (project_root/pid なし), v2: A-1/A-2/B-3 追加
+SCHEMA_VERSION = 3  # v3: role-aware terminal_outcome を terminal writer が明示記録
 GOAL_DISPATCH_MODES = {"inline", "host-native"}
 
 # #186: 実行中の mission-state.py のバージョン。.claude-plugin/plugin.json 等の manifest と
@@ -1071,6 +1074,7 @@ def _record_permission_preflight_halt(cwd: Path, sf: Path, reason: str) -> bool:
             data["halt_category"] = "blocked-external"
             data["loop_active"] = False
             _transition_phase(data, "halted", now)
+            _write_terminal_outcome(data)
             data["updated_at"] = now
             backup_state(sf)
             atomic_write_json(sf, data)
@@ -1093,6 +1097,7 @@ def _exit_init_evidence_write_failure(target: str) -> None:
         "ok": False,
         "halt_recorded": False,
         "halt_category": "blocked-external",
+        "terminal_outcome": "blocked_external",
         "halt_reason": reason,
         "probes": [
             {"target": target, "ok": False, "error": "write-unavailable"}
@@ -1116,6 +1121,7 @@ def _exit_init_write_failure(cwd: Path, sf: Path | None = None) -> None:
         "ok": False,
         "halt_recorded": halt_recorded,
         "halt_category": "blocked-external",
+        "terminal_outcome": "blocked_external",
         "halt_reason": reason,
         "probes": [
             {"target": "state", "ok": False, "error": "write-unavailable"}
@@ -1518,6 +1524,15 @@ def _normalize_halt_category(value: str | None) -> str:
         )
         return "other"
     return value
+
+
+def _write_terminal_outcome(data: dict) -> None:
+    """Persist the outcome implied by an authorized terminal transition."""
+    data.pop("terminal_outcome", None)
+    outcome = derive_terminal_outcome(data)
+    if outcome is None:
+        raise ValueError("terminal transition did not produce a terminal outcome")
+    data["terminal_outcome"] = outcome
 
 
 def _halt_category_for_confirmation(value) -> str:
@@ -5485,6 +5500,7 @@ def _permission_preflight(cwd: Path) -> dict:
             "ok": False,
             "halt_recorded": False,
             "halt_category": "blocked-external",
+            "terminal_outcome": "blocked_external",
             "error": "state-not-found",
             "probes": [],
         }
@@ -5500,6 +5516,7 @@ def _permission_preflight(cwd: Path) -> dict:
             "ok": False,
             "halt_recorded": False,
             "halt_category": "blocked-external",
+            "terminal_outcome": "blocked_external",
             "halt_reason": reason,
             "probes": [
                 {"target": "state", "ok": False, "error": "write-unavailable"}
@@ -5515,6 +5532,7 @@ def _permission_preflight(cwd: Path) -> dict:
             "ok": False,
             "halt_recorded": _record_permission_preflight_halt(cwd, sf, reason),
             "halt_category": "blocked-external",
+            "terminal_outcome": "blocked_external",
             "halt_reason": reason,
             "error": "assumptions-path-missing",
             "probes": [],
@@ -5533,6 +5551,7 @@ def _permission_preflight(cwd: Path) -> dict:
             "ok": False,
             "halt_recorded": _record_permission_preflight_halt(cwd, sf, reason),
             "halt_category": "blocked-external",
+            "terminal_outcome": "blocked_external",
             "halt_reason": reason,
             "probes": [
                 {
@@ -5564,6 +5583,7 @@ def _permission_preflight(cwd: Path) -> dict:
                 "ok": False,
                 "halt_recorded": halt_recorded,
                 "halt_category": "blocked-external",
+                "terminal_outcome": "blocked_external",
                 "halt_reason": reason,
                 "probes": probes,
             }
@@ -5594,6 +5614,7 @@ FROZEN_FIELDS = {
     "score_history",
     "threshold",
     "schema_version",
+    "terminal_outcome",
     "project_root",
     "started_at",
     "created_at_session",
@@ -5789,6 +5810,7 @@ def cmd_set(args):
             data["halt_reason"] = "routed-to-goal (#330: Simple + リスクシグナルなし)"
             data["halt_category"] = "routed-goal"
             _transition_phase(data, "halted", now)
+            _write_terminal_outcome(data)
             _remove_from_aggregate(cwd, sf.stem)
             _routed_verdict = {
                 "ok": True,
@@ -7159,6 +7181,7 @@ def cmd_mark_passes(args):
         data["loop_active"] = False
         data["passes_forced"] = force  # 改善1: force-pass を機械可読に記録 (stats で集計)
         _transition_phase(data, "done", now)  # M4 (2026-06-10): phase 自動更新
+        _write_terminal_outcome(data)
         data["updated_at"] = now
         if force:
             data["force_reason"] = reason
@@ -7212,6 +7235,7 @@ def cmd_mark_halt(args):
             now,
             terminal_trusted_boundary=category == "stale",
         )  # M4 (2026-06-10): phase 自動更新
+        _write_terminal_outcome(data)
         data["updated_at"] = now
         backup_state(sf)
         atomic_write_json(sf, data)
@@ -7285,6 +7309,7 @@ def cmd_reactivate(args):
         close_activity_for_terminal(data, now, trusted_boundary=True)
         data["halt_reason"] = ""
         data.pop("halt_category", None)
+        data.pop("terminal_outcome", None)
         data.pop("resume_target_phase", None)
         data["loop_active"] = True
         data["phase"] = args.phase
@@ -7394,6 +7419,7 @@ def cmd_refresh_pid(args):
                 restored_phase = True
             data["halt_reason"] = ""
             data.pop("halt_category", None)
+            data.pop("terminal_outcome", None)
             data["loop_active"] = True
             _add_to_aggregate(cwd, sf.stem)  # F-4: 再活性化分を active_sessions へ戻す
         if not restored_phase:
@@ -7612,6 +7638,7 @@ def _terminalize_state_file(
                 now,
                 trusted_boundary=category == "stale",
             )
+        _write_terminal_outcome(latest)
         latest["updated_at"] = now
         backup_state(sf)
         # Publish the janitor CAS directly on every terminalize path: the janitor
@@ -8156,6 +8183,15 @@ def _aggregate(
             "raw_pass_rate": None,
             "completed_pass_rate_numerator": 0, "completed_pass_rate_denominator": 0,
             "completed_pass_rate": None,
+            "terminal_outcome_counts": {name: 0 for name in TERMINAL_OUTCOMES},
+            "terminal_count": 0, "non_terminal_count": 0,
+            "role_counts": {name: 0 for name in SESSION_ROLES},
+            "implementer_pass_rate_numerator": 0,
+            "implementer_pass_rate_denominator": 0,
+            "implementer_pass_rate": None,
+            "evidence_completion_rate_numerator": 0,
+            "evidence_completion_rate_denominator": 0,
+            "evidence_completion_rate": None,
             # Deprecated compatibility aliases: stats historically reported raw quality.
             "pass_rate_numerator": 0, "pass_rate_denominator": 0, "pass_rate": None,
             "forced_pass_count": 0, "forced_pass_rate": None,
@@ -8262,6 +8298,16 @@ def _aggregate(
         "completed_pass_rate_numerator": pass_rate_summary["completed_pass_rate_numerator"],
         "completed_pass_rate_denominator": pass_rate_summary["completed_pass_rate_denominator"],
         "completed_pass_rate": pass_rate_summary["completed_pass_rate"],
+        "terminal_outcome_counts": pass_rate_summary["terminal_outcome_counts"],
+        "terminal_count": pass_rate_summary["terminal_count"],
+        "non_terminal_count": pass_rate_summary["non_terminal_count"],
+        "role_counts": pass_rate_summary["role_counts"],
+        "implementer_pass_rate_numerator": pass_rate_summary["implementer_pass_rate_numerator"],
+        "implementer_pass_rate_denominator": pass_rate_summary["implementer_pass_rate_denominator"],
+        "implementer_pass_rate": pass_rate_summary["implementer_pass_rate"],
+        "evidence_completion_rate_numerator": pass_rate_summary["evidence_completion_rate_numerator"],
+        "evidence_completion_rate_denominator": pass_rate_summary["evidence_completion_rate_denominator"],
+        "evidence_completion_rate": pass_rate_summary["evidence_completion_rate"],
         # Deprecated compatibility aliases: stats historically reported raw quality.
         "pass_rate_numerator": pass_rate_summary["raw_pass_rate_numerator"],
         "pass_rate_denominator": pass_rate_summary["raw_pass_rate_denominator"],
@@ -8298,12 +8344,16 @@ def _pct_detail(rate) -> str:
     return f" / {rate*100:.0f}% of PASS" if rate is not None else ""
 
 
-def _rate_detail(stats: dict, prefix: str) -> str:
-    numerator = stats[f"{prefix}_pass_rate_numerator"]
-    denominator = stats[f"{prefix}_pass_rate_denominator"]
-    rate = stats[f"{prefix}_pass_rate"]
+def _ratio_detail(stats: dict, prefix: str) -> str:
+    numerator = stats[f"{prefix}_numerator"]
+    denominator = stats[f"{prefix}_denominator"]
+    rate = stats[prefix]
     percentage = f" ({rate * 100:.1f}%)" if rate is not None else " (-)"
     return f"{numerator}/{denominator}{percentage}"
+
+
+def _rate_detail(stats: dict, prefix: str) -> str:
+    return _ratio_detail(stats, f"{prefix}_pass_rate")
 
 
 def _format_text(stats: dict, since: str | None, until: str | None) -> str:
@@ -8320,6 +8370,8 @@ def _format_text(stats: dict, since: str | None, until: str | None) -> str:
         f"duplicate_state_groups:   {stats.get('duplicate_state_group_count', 0)}",
         f"raw_pass_rate:            {_rate_detail(stats, 'raw')}",
         f"completed_pass_rate:      {_rate_detail(stats, 'completed')}",
+        f"implementer_pass_rate:    {_rate_detail(stats, 'implementer')}",
+        f"evidence_completion_rate: {_ratio_detail(stats, 'evidence_completion_rate')}",
         f"  PASS:                   {stats['pass_count']}",
         f"    (forced:              {stats['forced_pass_count']}{_pct_detail(stats.get('forced_pass_rate'))})",
         f"    (ungated:             {stats['ungated_pass_count']}{_pct_detail(stats.get('ungated_pass_rate'))})",
@@ -8333,6 +8385,10 @@ def _format_text(stats: dict, since: str | None, until: str | None) -> str:
         lines.append("    (by category)")
         for cat, cnt in by_halt_category.items():
             lines.append(f"      {cat:<18} {cnt}")
+    lines.append("terminal_outcomes:")
+    for outcome, count in (stats.get("terminal_outcome_counts") or {}).items():
+        lines.append(f"  {outcome:<20} {count}")
+    lines.append(f"  {'non_terminal':<20} {stats.get('non_terminal_count', 0)}")
     lines += [
         f"  incomplete:             {stats['incomplete_count']}",
         f"  abandoned:              {stats['abandoned_count']}",

@@ -34,6 +34,7 @@ from mission_common import (  # noqa: E402
     SPECIALIST_SELECTION_CHECKPOINT_REQUIRED_AT,
     classify_pass_rate_health,
     classify_state as classify,
+    derive_terminal_outcome,
     duration_sec,
     has_scoring_checkpoint,
     parse_iso_datetime,
@@ -1466,12 +1467,9 @@ def halt_or_incomplete_bucket(
     record: StateRecord, *, now: datetime | None = None
 ) -> str:
     state = record.state
-    # #190: 構造化 halt_category があればそれを正とする (自由文ヒューリスティックより信頼できる)。
-    # incomplete (未 halt) には適用しない -- halt_category は halt 発生時のみ記録される。
-    if classify(state) == "halt":
-        category = state.get("halt_category")
-        if isinstance(category, str) and category in HALT_CATEGORIES:
-            return f"structured:{category}"
+    outcome = derive_terminal_outcome(state)
+    if outcome is not None:
+        return f"outcome:{outcome}"
     reason = str(state.get("halt_reason") or "").lower()
     if classify(state) == "incomplete":
         if not state.get("score_history"):
@@ -1575,6 +1573,20 @@ def halt_audit_disposition(record: StateRecord) -> str:
     ):
         return "superseded-resolved"
 
+    outcome = derive_terminal_outcome(state)
+    if outcome == "completed_evidence":
+        return "evidence-completed"
+    if outcome == "blocked_external":
+        return "blocked-external"
+    if outcome == "awaiting_approval":
+        return "awaiting-external"
+    if outcome == "stale_superseded":
+        return "superseded-resolved"
+    if outcome == "routed_elsewhere":
+        return "routed-elsewhere"
+    if outcome == "user_aborted":
+        return "user-aborted"
+
     category = state.get("halt_category")
     has_delegated_reason = (
         state.get("delegated_to_parent") is True
@@ -1585,18 +1597,6 @@ def halt_audit_disposition(record: StateRecord) -> str:
         return "delegated"
     if category in {"partial-done", "other"} and _matches_intentional_freeze_switch(reason):
         return "intentional-freeze-switch"
-    if category == "awaiting-approval" and (
-        reason in _EXTERNAL_WAIT_REASONS
-        or any(token in reason for token in _APPROVAL_WAIT_REASON_TOKENS)
-    ):
-        return "awaiting-external"
-    if category == "user-abort":
-        return "user-aborted"
-    if (
-        category == "blocked-external"
-        and reason in _EXTERNAL_WAIT_REASONS
-    ):
-        return "awaiting-external"
     return "actionable"
 
 
@@ -2285,15 +2285,8 @@ def aggregate(
     current_actionable_halt_sessions, historical_actionable_halt_sessions = (
         split_current_historical_records(actionable_halt_sessions, current_since)
     )
-    actionable_pass_rate_denominator = (
-        pass_rate_summary["completed_pass_rate_denominator"]
-        - len(non_actionable_halt_sessions)
-    )
-    actionable_pass_rate = (
-        pass_count / actionable_pass_rate_denominator
-        if actionable_pass_rate_denominator
-        else None
-    )
+    actionable_pass_rate_denominator = pass_rate_summary["implementer_pass_rate_denominator"]
+    actionable_pass_rate = pass_rate_summary["implementer_pass_rate"]
     current_slow_sessions, historical_slow_sessions = split_current_historical_records(
         slow, current_since
     )
@@ -2339,7 +2332,17 @@ def aggregate(
         "completed_pass_rate_numerator": pass_rate_summary["completed_pass_rate_numerator"],
         "completed_pass_rate_denominator": pass_rate_summary["completed_pass_rate_denominator"],
         "completed_pass_rate": pass_rate_summary["completed_pass_rate"],
-        "actionable_pass_rate_numerator": pass_count,
+        "terminal_outcome_counts": pass_rate_summary["terminal_outcome_counts"],
+        "terminal_count": pass_rate_summary["terminal_count"],
+        "non_terminal_count": pass_rate_summary["non_terminal_count"],
+        "role_counts": pass_rate_summary["role_counts"],
+        "implementer_pass_rate_numerator": pass_rate_summary["implementer_pass_rate_numerator"],
+        "implementer_pass_rate_denominator": pass_rate_summary["implementer_pass_rate_denominator"],
+        "implementer_pass_rate": pass_rate_summary["implementer_pass_rate"],
+        "evidence_completion_rate_numerator": pass_rate_summary["evidence_completion_rate_numerator"],
+        "evidence_completion_rate_denominator": pass_rate_summary["evidence_completion_rate_denominator"],
+        "evidence_completion_rate": pass_rate_summary["evidence_completion_rate"],
+        "actionable_pass_rate_numerator": pass_rate_summary["implementer_pass_rate_numerator"],
         "actionable_pass_rate_denominator": actionable_pass_rate_denominator,
         "actionable_pass_rate": actionable_pass_rate,
         # Deprecated compatibility aliases: audit historically reported completed quality.
@@ -2709,6 +2712,8 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
         f"- pass / halt / incomplete / abandoned: {stats['pass_count']} / {stats['halt_count']} / {stats['incomplete_count']} / {stats['abandoned_count']}",
         f"- raw pass rate: {fmt_float(stats['raw_pass_rate'] * 100 if stats['raw_pass_rate'] is not None else None, 1)}% ({stats['raw_pass_rate_numerator']}/{stats['raw_pass_rate_denominator']})",
         f"- completed pass rate: {fmt_float(stats['completed_pass_rate'] * 100 if stats['completed_pass_rate'] is not None else None, 1)}% ({stats['completed_pass_rate_numerator']}/{stats['completed_pass_rate_denominator']})",
+        f"- implementer pass rate: {fmt_float(stats['implementer_pass_rate'] * 100 if stats['implementer_pass_rate'] is not None else None, 1)}% ({stats['implementer_pass_rate_numerator']}/{stats['implementer_pass_rate_denominator']})",
+        f"- evidence completion rate: {fmt_float(stats['evidence_completion_rate'] * 100 if stats['evidence_completion_rate'] is not None else None, 1)}% ({stats['evidence_completion_rate_numerator']}/{stats['evidence_completion_rate_denominator']})",
         f"- actionable pass rate: {fmt_float(stats['actionable_pass_rate'] * 100 if stats['actionable_pass_rate'] is not None else None, 1)}% ({stats['actionable_pass_rate_numerator']}/{stats['actionable_pass_rate_denominator']})",
         f"- raw halt sessions: {stats['halt_count']}",
         f"- actionable halt sessions: {stats['actionable_halt_count']}",
@@ -2742,6 +2747,14 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
     coverage = activity.get("coverage_ratio")
     coverage_text = f"{coverage * 100:.1f}%" if coverage is not None else "-"
     lines.extend([
+        "",
+        "## Terminal Outcomes",
+        "",
+        *[
+            f"- `{outcome}`: {count}"
+            for outcome, count in stats["terminal_outcome_counts"].items()
+        ],
+        f"- non-terminal active records: {stats['non_terminal_count']}",
         "",
         "## Activity Timing",
         "",

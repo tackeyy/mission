@@ -70,6 +70,7 @@ def test_permission_preflight_halts_without_question_when_assumptions_write_fail
     assert output["ok"] is False
     assert output["halt_recorded"] is True
     assert output["halt_category"] == "blocked-external"
+    assert output["terminal_outcome"] == "blocked_external"
     assert output["probes"][-1] == {
         "target": "assumptions",
         "ok": False,
@@ -84,6 +85,7 @@ def test_permission_preflight_halts_without_question_when_assumptions_write_fail
     assert state["loop_active"] is False
     assert state["phase"] == "halted"
     assert state["halt_category"] == "blocked-external"
+    assert state["terminal_outcome"] == "blocked_external"
 
 
 def test_permission_preflight_emits_fallback_evidence_when_state_write_fails(
@@ -109,6 +111,7 @@ def test_permission_preflight_emits_fallback_evidence_when_state_write_fails(
     assert output["ok"] is False
     assert output["halt_recorded"] is False
     assert output["halt_category"] == "blocked-external"
+    assert output["terminal_outcome"] == "blocked_external"
     assert output["probes"] == [
         {"target": "state", "ok": False, "error": "write-unavailable"}
     ]
@@ -146,6 +149,7 @@ def test_init_runs_permission_preflight_before_returning_success(
     )
     assert state["halt_category"] == "blocked-external"
     assert state["loop_active"] is False
+    assert state["terminal_outcome"] == "blocked_external"
 
 
 def test_skill_allows_only_state_cli_and_forbids_questions_on_preflight_failure():

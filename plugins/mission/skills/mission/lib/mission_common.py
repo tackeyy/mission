@@ -37,6 +37,74 @@ HALT_CATEGORIES = {
 # #311: session の役割。checker 系は iter=0 で証拠提出して終わるのが設計どおりのため、
 # pass-rate は implementer 限定の指標を別途出す (既存指標は全 role 対象のまま不変)
 SESSION_ROLES = ("implementer", "checker", "planning", "analyze", "release")
+TERMINAL_OUTCOMES = (
+    "completed_pass",
+    "completed_evidence",
+    "blocked_external",
+    "awaiting_approval",
+    "stale_superseded",
+    "failed",
+    "incomplete",
+    "user_aborted",
+    "routed_elsewhere",
+)
+EVIDENCE_COMPLETION_ROLES = {"checker", "planning", "analyze"}
+
+
+def _derive_control_terminal_outcome(state: dict[str, Any]) -> str | None:
+    if state.get("passes") is True:
+        if state.get("loop_active") is False and not state.get("halt_reason"):
+            return "completed_pass"
+        return "failed"
+    if state.get("loop_active") is True:
+        return "failed" if state.get("halt_reason") else None
+    if not state.get("halt_reason"):
+        return "incomplete"
+    category = state.get("halt_category")
+    reason = str(state.get("halt_reason") or "").strip().lower()
+    resolution_status = str(state.get("resolution_status") or "").strip().lower()
+    if (
+        resolution_status in {"resolved", "superseded", "closed"}
+        or reason in {
+            "superseded by a replacement run",
+            "superseded by replacement run",
+        }
+    ):
+        return "stale_superseded"
+    if category not in HALT_CATEGORIES and reason.startswith(("orphan:", "stale:")):
+        return "stale_superseded"
+    if category == "evidence-submitted":
+        return (
+            "completed_evidence"
+            if session_role(state) in EVIDENCE_COMPLETION_ROLES
+            else "incomplete"
+        )
+    return {
+        "partial-done": "incomplete",
+        "blocked-external": "blocked_external",
+        "awaiting-approval": "awaiting_approval",
+        "stale": "stale_superseded",
+        "stagnation": "failed",
+        "other": "failed",
+        "user-abort": "user_aborted",
+        "routed-goal": "routed_elsewhere",
+    }.get(category, "failed")
+
+
+def derive_terminal_outcome(state: dict[str, Any]) -> str | None:
+    """Return a terminal business outcome without rewriting legacy state.
+
+    Active states return ``None``. Persisted explicit outcomes are accepted only
+    when they match the control fields; malformed or contradictory input fails
+    closed as ``failed``.
+    """
+    derived = _derive_control_terminal_outcome(state)
+    if "terminal_outcome" not in state:
+        return derived
+    explicit = state.get("terminal_outcome")
+    if explicit not in TERMINAL_OUTCOMES or explicit != derived:
+        return "failed"
+    return explicit
 
 
 def session_role(state: dict) -> str:
@@ -55,6 +123,8 @@ def parse_iso_datetime(value: str | None) -> datetime | None:
 
 
 def classify_state(state: dict[str, Any]) -> str:
+    if "terminal_outcome" in state:
+        return "pass" if derive_terminal_outcome(state) == "completed_pass" else "halt"
     if state.get("passes") is True:
         return "pass"
     if state.get("halt_reason"):
@@ -151,13 +221,16 @@ def summarize_pass_rate_population(
     counts = {name: 0 for name in PASS_RATE_HEALTH_CLASSES}
     for classification in health_classes:
         counts[classification] += 1
+    terminal_outcomes = [derive_terminal_outcome(state) for state in states]
+    terminal_outcome_counts = {name: 0 for name in TERMINAL_OUTCOMES}
+    for outcome in terminal_outcomes:
+        if outcome is not None:
+            terminal_outcome_counts[outcome] += 1
+    terminal_count = sum(terminal_outcome_counts.values())
     raw_denominator = len(states)
     # #325: routed-goal halt は「mission が仕事を辞退した」記録であり品質債務ではない。
     # completed 分母から除外し routed_count として別計上する。
-    routed = sum(
-        1 for state, cls in zip(states, health_classes)
-        if cls == "halt" and state.get("halt_category") == "routed-goal"
-    )
+    routed = terminal_outcome_counts["routed_elsewhere"]
     completed_denominator = sum(
         counts[name] for name in ("pass", "halt", "abandoned", "stale")
     ) - routed
@@ -166,22 +239,37 @@ def summarize_pass_rate_population(
     role_counts: dict[str, int] = {name: 0 for name in SESSION_ROLES}
     impl_pass = 0
     impl_completed = 0
-    for state, classification in zip(states, health_classes):
+    evidence_completed = 0
+    evidence_comparable = 0
+    for state, outcome in zip(states, terminal_outcomes):
         role = session_role(state)
         role_counts[role] += 1
-        if role == "implementer" and classification in ("pass", "halt", "abandoned", "stale"):
-            if classification == "halt" and state.get("halt_category") == "routed-goal":
-                continue  # #325: routed は implementer 分母からも除外
+        if role == "implementer" and outcome in {"completed_pass", "failed", "incomplete"}:
             impl_completed += 1
-            if classification == "pass":
+            if outcome == "completed_pass":
                 impl_pass += 1
+        if role in EVIDENCE_COMPLETION_ROLES and outcome in {
+            "completed_evidence", "failed", "incomplete"
+        }:
+            evidence_comparable += 1
+            if outcome == "completed_evidence":
+                evidence_completed += 1
     return {
         "health_classes": health_classes,
+        "terminal_outcomes": terminal_outcomes,
+        "terminal_outcome_counts": terminal_outcome_counts,
+        "terminal_count": terminal_count,
+        "non_terminal_count": len(states) - terminal_count,
         "routed_count": routed,
         "role_counts": role_counts,
         "implementer_pass_rate_numerator": impl_pass,
         "implementer_pass_rate_denominator": impl_completed,
         "implementer_pass_rate": impl_pass / impl_completed if impl_completed else None,
+        "evidence_completion_rate_numerator": evidence_completed,
+        "evidence_completion_rate_denominator": evidence_comparable,
+        "evidence_completion_rate": (
+            evidence_completed / evidence_comparable if evidence_comparable else None
+        ),
         "raw_pass_rate_numerator": pass_count,
         "raw_pass_rate_denominator": raw_denominator,
         "raw_pass_rate": pass_count / raw_denominator if raw_denominator else None,
