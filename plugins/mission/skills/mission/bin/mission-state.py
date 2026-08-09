@@ -73,13 +73,16 @@ from specialist_accounting import (  # noqa: E402
 )
 from activity_segments import (  # noqa: E402
     ACTIVITY_KINDS,
+    PHASE_ACTIVITY_DEFAULTS,
     ACTIVITY_REASONS_BY_KIND,
     ActivityTimingError,
     close_activity_for_resume,
     close_activity_for_terminal,
     end_activity_segment,
+    record_activity_event,
     sanitize_activity_detail,
     start_activity_segment,
+    start_phase_default_activity,
     summarize_activity_states,
     transition_activity_phase,
     validate_activity,
@@ -4426,6 +4429,8 @@ def cmd_log_specialist_invocation(args):
             )
             sys.exit(2)
         now = iso_now()
+        if data.get("loop_active") is not False:
+            record_activity_event(data, "specialist", now)
         entry = {
             "iteration": args.iteration,
             "phase": args.phase,
@@ -4551,12 +4556,14 @@ def cmd_init(args):
             "wait_reason_totals_sec": {},
         },
         "activity_unobserved_gap_sec": 0.0,
+        "activity_unobserved_gap_reasons_sec": {},
         # S3: issue_ref (未指定 None)。issue_ref_key は #295 の比較用正規化キー。
         "issue_ref": getattr(args, "issue_ref", None),
         "issue_ref_key": _normalize_issue_ref(getattr(args, "issue_ref", None)),
         # S3-files: 同一 project の file-set overlap WARN 用 (未指定は空 list)
         "planned_files": planned_files,
     }
+    start_phase_default_activity(initial, now)
     # S3: 同プロジェクト内の active session で同一 issue_ref があれば WARN (reject しない)
     # #295: 形式差 (裸番号 / #番号 / host:owner/repo#番号 / URL) を正規化キーで同一視する
     _issue_ref = getattr(args, "issue_ref", None)
@@ -4738,6 +4745,7 @@ def cmd_init(args):
                         "activity_segments",
                         "activity_rollup",
                         "activity_unobserved_gap_sec",
+                        "activity_unobserved_gap_reasons_sec",
                         "activity_anomaly_counts",
                         "phase_durations_sec",
                         "phase",
@@ -4939,9 +4947,24 @@ def cmd_advance(args):
     """
     cwd = Path.cwd()
     sf = _activity_state_file(cwd)
-    raw = args.activity or ""
-    kind, sep, reason = raw.partition(":")
-    if not sep or not kind or not reason:
+    raw = args.activity
+    if raw is None:
+        new_phase = _normalize_set_phase_value(args.phase)
+        default = PHASE_ACTIVITY_DEFAULTS.get(new_phase)
+        if default is None:
+            print(f"ERROR: phase '{new_phase}' has no default activity.", file=sys.stderr)
+            sys.exit(2)
+        kind, reason = default
+    else:
+        kind, sep, reason = raw.partition(":")
+        if not sep or not kind or not reason:
+            print(
+                f"ERROR: --activity は <kind>:<reason> 形式で指定してください (例: active:implementation)。"
+                f" 受領値: '{raw}'",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+    if not kind or not reason:
         print(
             f"ERROR: --activity は <kind>:<reason> 形式で指定してください (例: active:implementation)。"
             f" 受領値: '{raw}'",
@@ -5018,7 +5041,10 @@ def cmd_advance(args):
             # 現 segment を先に閉じる。_transition_phase の split (旧 kind/reason の
             # キャリーフォワード) が「旧 reason + 新 phase・0秒」の phantom segment を
             # 作るのを防ぐ。advance は直後に新 segment を開くため carry-forward 不要。
-            if isinstance(data.get("activity_current"), dict):
+            if (
+                isinstance(data.get("activity_current"), dict)
+                and data.get("phase") != new_phase
+            ):
                 end_activity_segment(data, at)
             _transition_phase(data, new_phase, at)
             start_activity_segment(data, kind, reason, at, detail=args.detail)
@@ -6811,6 +6837,12 @@ def cmd_aggregate_reviews(args):
             )
         # #338: 観測結果を state へ永続化し stats で横断集計可能にする (gate 不変)
         data["last_parallel_execution"] = parallel_execution
+        if data.get("phase") == "reviewing":
+            now = iso_now()
+            if isinstance(data.get("activity_current"), dict):
+                end_activity_segment(data, now)
+            _transition_phase(data, "scoring", now)
+            record_activity_event(data, "review-aggregate", now)
         prior_metrics = [
             record for record in data.get("reviewer_output_records", [])
             if isinstance(record, dict) and record.get("iteration") != args.iteration
@@ -7419,6 +7451,8 @@ def cmd_mark_halt(args):
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
         now = iso_now()
+        if category == "awaiting-approval":
+            record_activity_event(data, "awaiting-approval", now)
         data["halt_reason"] = args.reason
         data["halt_category"] = category  # #190
         data["loop_active"] = False
@@ -9234,8 +9268,8 @@ def _build_parser():
     )
     p_advance.add_argument("--phase", required=True,
                            help=f"遷移先 phase。terminal (done/halted) は mark-passes / mark-halt 専用。有効値: {sorted(VALID_PHASES - {'done', 'halted'})}")
-    p_advance.add_argument("--activity", required=True,
-                           help="<kind>:<reason> (例: active:implementation, reviewer-wait:review-response)")
+    p_advance.add_argument("--activity", default=None,
+                           help="任意の <kind>:<reason> override。省略時は遷移先 phase の既定値")
     p_advance.add_argument("--detail", default=None,
                            help="任意の補足。control 文字除去・160文字へ正規化")
     p_advance.add_argument("--at", default=None,

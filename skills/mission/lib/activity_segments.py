@@ -32,6 +32,17 @@ ACTIVITY_REASONS_BY_KIND = {
     "idle": {"no-runnable-work", "interrupted", "other"},
 }
 TERMINAL_PHASES = {"done", "halted"}
+PHASE_ACTIVITY_DEFAULTS = {
+    "planning": ("active", "planning"),
+    "executing": ("active", "implementation"),
+    "reviewing": ("reviewer-wait", "review-response"),
+    "scoring": ("active", "scoring"),
+}
+ACTIVITY_EVENT_DEFAULTS = {
+    "awaiting-approval": ("approval-wait", "user-approval"),
+    "specialist": ("external-wait", "external-command"),
+    "review-aggregate": ("active", "scoring"),
+}
 RECENT_SEGMENT_LIMIT = 32
 PERCENTILE_METHOD = "linear-interpolation-r7"
 TASK_KEY_METHOD = "mission_id-or-unknown"
@@ -255,6 +266,20 @@ def _resume_boundary(state: dict[str, Any], at: str) -> str:
         if updated_gap is None:
             raise ActivityTimingError("activity unobserved gap overflow")
         state["activity_unobserved_gap_sec"] = updated_gap
+        reasons = state.setdefault("activity_unobserved_gap_reasons_sec", {})
+        if not isinstance(reasons, dict):
+            reasons = {}
+            state["activity_unobserved_gap_reasons_sec"] = reasons
+        last_event = _parse_at(state.get("activity_last_event_at"))
+        if updated is None:
+            reason = "legacy"
+        elif last_event is not None:
+            reason = "crash"
+        elif isinstance(current, dict) and current.get("kind") == "external-wait":
+            reason = "provider-no-events"
+        else:
+            reason = "clock-gap"
+        reasons[reason] = (_finite_nonnegative(reasons.get(reason)) or 0.0) + gap
     return boundary.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -334,6 +359,27 @@ def start_activity_segment(
     state.setdefault("activity_segments", [])
     _rollup(state)
     return True
+
+
+def start_phase_default_activity(state: dict[str, Any], at: str) -> bool:
+    """Open the portable default measurement for the state's current phase."""
+    phase = state.get("phase")
+    default = PHASE_ACTIVITY_DEFAULTS.get(phase)
+    if default is None:
+        return False
+    kind, reason = default
+    return start_activity_segment(state, kind, reason, at)
+
+
+def record_activity_event(state: dict[str, Any], event: str, at: str) -> bool:
+    """Apply a lifecycle event through the single activity writer."""
+    default = ACTIVITY_EVENT_DEFAULTS.get(event)
+    if default is None:
+        raise ActivityTimingError(f"unknown activity event: {event}")
+    kind, reason = default
+    changed = start_activity_segment(state, kind, reason, at)
+    state["activity_last_event_at"] = at
+    return changed
 
 
 def transition_activity_phase(
@@ -640,6 +686,7 @@ def summarize_activity_states(states: list[dict[str, Any]]) -> dict[str, Any]:
     open_count = 0
     closed_count = 0
     unobserved_gap = 0.0
+    gap_reasons: dict[str, float] = {}
     states_with = 0
     totals_consistent = True
     for state in states:
@@ -675,6 +722,12 @@ def summarize_activity_states(states: list[dict[str, Any]]) -> dict[str, Any]:
         observed_total = _finite_add(observed_total, item["observed"]) or 0.0
         phase_wall_total = _finite_add(phase_wall_total, item["phase_wall"]) or 0.0
         unobserved_gap = _finite_add(unobserved_gap, item["unobserved_gap"]) or 0.0
+        raw_gap_reasons = state.get("activity_unobserved_gap_reasons_sec")
+        if isinstance(raw_gap_reasons, dict):
+            for reason, value in raw_gap_reasons.items():
+                seconds = _finite_nonnegative(value)
+                if isinstance(reason, str) and seconds is not None:
+                    gap_reasons[reason] = _finite_add(gap_reasons.get(reason, 0.0), seconds) or 0.0
         task_key = str(state.get("mission_id") or "unknown")
         if item["valid_closed_sample"]:
             task_samples.setdefault(task_key, []).append(item["observed"])
@@ -715,10 +768,13 @@ def summarize_activity_states(states: list[dict[str, Any]]) -> dict[str, Any]:
         },
         "observed_total_sec": observed_total,
         "phase_duration_total_sec": phase_wall_total,
+        "elapsed_total_sec": phase_wall_total,
         "coverage_denominator_sec": coverage_denominator,
         "unclassified_sec": unclassified,
+        "conservation_delta_sec": phase_wall_total - observed_total - unclassified,
         "coverage_ratio": coverage_ratio,
         "unobserved_gap_sec": unobserved_gap,
+        "unobserved_gap_reasons_sec": dict(sorted(gap_reasons.items())),
         "closed_segment_count": closed_count,
         "open_segment_count": open_count,
         "invalid_segment_count": invalid_count,

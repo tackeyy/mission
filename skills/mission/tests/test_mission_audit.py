@@ -36,6 +36,40 @@ def _write_state(path, **overrides):
     path.write_text(json.dumps(state), encoding="utf-8")
 
 
+def test_low_activity_coverage_prioritizes_instrumentation_over_slow_run(tmp_path):
+    sessions = tmp_path / ".mission-state" / "sessions"
+    _write_state(
+        sessions / "missing-activity.json",
+        session_id="missing-activity",
+        started_at="2026-06-18T00:00:00Z",
+        updated_at="2026-06-18T02:00:00Z",
+        phase="done",
+        phase_durations_sec={"planning": 7200.0},
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root",
+            str(tmp_path),
+            "--slow-threshold-sec",
+            "60",
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    audit = json.loads(result.stdout)
+    assert audit["slow_session_breakdown"] == {"extreme-long-pass": 1}
+    assert audit["instrumentation_gaps"][0]["coverage_ratio"] == 0.0
+    codes = [item["code"] for item in audit["all_findings"]]
+    assert "instrumentation-gap" in codes
+    assert "slow-runs" not in codes
+
+
 def test_audit_deduplicates_worktree_archive(tmp_path):
     sessions = tmp_path / ".mission-state" / "sessions"
     archive = tmp_path / ".mission-state" / "archive" / "worktree-feat"
@@ -624,6 +658,7 @@ def test_audit_reports_halt_incomplete_slow_and_low_score_buckets(tmp_path):
     assert data["halt_incomplete_breakdown"]["outcome:stale_superseded"] == 1
     assert data["halt_incomplete_breakdown"]["active-no-score-checkpoint"] == 1
     assert data["slow_session_breakdown"]["healthy-long-pass"] == 1
+    assert data["all_finding_code_counts"]["instrumentation-gap"] == 1
     assert data["low_score_pass_breakdown"]["valid-threshold-pass"] == 1
 
 
@@ -1148,7 +1183,8 @@ def test_audit_reports_coarse_phase_attribution(tmp_path):
     assert data["coarse_phase_attributions"][0]["session_id"] == "coarse-planning"
     assert data["slow_phase_duration_breakdown"]["slow-with-coarse-phase-attribution"] == 1
     assert data["slow_phase_duration_breakdown"]["slow-with-phase-durations"] == 1
-    assert any(f["code"] == "coarse-phase-attribution" for f in data["findings"])
+    assert not any(f["code"] == "coarse-phase-attribution" for f in data["findings"])
+    assert any(f["code"] == "instrumentation-gap" for f in data["findings"])
 
 
 def test_audit_self_improvement_prompt_mentions_findings(tmp_path):

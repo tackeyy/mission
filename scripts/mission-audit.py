@@ -179,6 +179,11 @@ FINDING_SPECS = {
         "slow-runs", "P2", "slow_sessions", "record",
         "session exceeded slow threshold", "{count} {sessions} exceeded slow threshold",
     ),
+    "instrumentation-gap": FindingSpec(
+        "instrumentation-gap", "P1", "instrumentation_gaps", "item",
+        "activity coverage is below the diagnostic threshold",
+        "{count} activity coverage gap requires instrumentation before speed diagnosis",
+    ),
     "coarse-phase-attribution": FindingSpec(
         "coarse-phase-attribution", "P2", "coarse_phase_attributions", "item",
         "slow session attributes most elapsed time to planning",
@@ -2195,10 +2200,20 @@ def aggregate(
         and not r.state.get("passes_forced")
         and not r.state.get("force_reason")
     ]
+    activity_timing = summarize_activity_states([record.state for record in records])
     slow = [
         r for r in records
         if (duration_sec(r.state) or 0) >= slow_threshold_sec
     ]
+    coverage = activity_timing.get("coverage_ratio")
+    instrumentation_gaps = []
+    if slow and (coverage is None or coverage < 0.70):
+        instrumentation_gaps.append({
+            "priority": "P1",
+            "coverage_ratio": coverage,
+            "slow_session_count": len(slow),
+            "updated_at": max((str(r.state.get("updated_at") or "") for r in slow), default=""),
+        })
     low_score_pass = [
         r for r in pass_records
         if ((latest_scored_entry(r.state) or {}).get("composite") or 0) < 4.3
@@ -2311,8 +2326,6 @@ def aggregate(
             row["total"] += 1
             row[cls] += 1
 
-    activity_timing = summarize_activity_states([record.state for record in records])
-
     return {
         "total_sessions": len(records),
         "invalid_worktree_archives": invalid_worktree_archives,
@@ -2364,6 +2377,7 @@ def aggregate(
         "median_session_duration_sec": statistics.median(durations) if durations else None,
         "avg_session_duration_sec": sum(durations) / len(durations) if durations else None,
         "slow_sessions": slow,
+        "instrumentation_gaps": instrumentation_gaps,
         "halt_sessions": halt_sessions,
         "actionable_halt_sessions": actionable_halt_sessions,
         "actionable_halt_count": len(actionable_halt_sessions),
@@ -2563,6 +2577,11 @@ def attach_finding_model(
     """Build one period-aware model after detection without changing any gate."""
     findings: list[AuditFinding] = []
     for spec in FINDING_SPECS.values():
+        if (
+            spec.code in {"slow-runs", "coarse-phase-attribution"}
+            and stats.get("instrumentation_gaps")
+        ):
+            continue
         if spec.source_kind == "low-pass-rate":
             pass_rate = stats.get(spec.source_key)
             source: list[Any] = (
