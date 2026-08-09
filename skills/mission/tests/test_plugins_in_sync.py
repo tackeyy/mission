@@ -8,6 +8,7 @@
   skills/mission/lib/activity_segments.py
   skills/mission/lib/audit_findings.py
   skills/mission/lib/mission_common.py
+  skills/mission/lib/provider_eligibility.py
   skills/mission/refs/specialist-registry.md (存在する場合)
   skills/mission/refs/self-improvement.md
   skills/mission/refs/changelog.md
@@ -27,6 +28,7 @@
   plugins/mission/skills/mission/lib/activity_segments.py
   plugins/mission/skills/mission/lib/audit_findings.py
   plugins/mission/skills/mission/lib/mission_common.py
+  plugins/mission/skills/mission/lib/provider_eligibility.py
   plugins/mission/skills/mission/refs/specialist-registry.md (存在する場合)
   plugins/mission/skills/mission/refs/self-improvement.md
   plugins/mission/skills/mission/refs/changelog.md
@@ -45,6 +47,7 @@
   cp skills/mission/lib/activity_segments.py plugins/mission/skills/mission/lib/activity_segments.py
   cp skills/mission/lib/audit_findings.py plugins/mission/skills/mission/lib/audit_findings.py
   cp skills/mission/lib/mission_common.py plugins/mission/skills/mission/lib/mission_common.py
+  cp skills/mission/lib/provider_eligibility.py plugins/mission/skills/mission/lib/provider_eligibility.py
   cp skills/mission/refs/specialist-registry.md plugins/mission/skills/mission/refs/specialist-registry.md
   cp skills/mission/refs/self-improvement.md plugins/mission/skills/mission/refs/self-improvement.md
   cp skills/mission/refs/changelog.md plugins/mission/skills/mission/refs/changelog.md
@@ -56,6 +59,7 @@
   cp skills/mission-scorer/SKILL.md       plugins/mission/skills/mission-scorer/SKILL.md
 """
 import hashlib
+import importlib.util
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # mission-selfheal/
@@ -108,6 +112,10 @@ SYNC_PAIRS = [
     (
         REPO_ROOT / "skills" / "mission" / "refs" / "state-management.md",
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "refs" / "state-management.md",
+    ),
+    (
+        REPO_ROOT / "skills" / "mission" / "lib" / "provider_eligibility.py",
+        REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "provider_eligibility.py",
     ),
     (
         REPO_ROOT / "skills" / "mission" / "lib" / "state_snapshot.py",
@@ -241,6 +249,22 @@ def test_state_snapshot_py_in_sync():
         f"  plugins: {dst}\n"
         f"  同期コマンド: cp {src} {dst}"
     )
+
+
+def test_provider_eligibility_py_in_sync_and_importable():
+    """Planning eligibility contract is inventoried and importable from the plugin."""
+    src, dst = SYNC_PAIRS[12]
+    assert src.exists(), f"canonical file does not exist: {src}"
+    assert dst.exists(), f"plugin mirror does not exist: {dst}"
+    assert _md5(src) == _md5(dst), (
+        "provider_eligibility.py is not synchronized; run the plugin sync script"
+    )
+    spec = importlib.util.spec_from_file_location("plugin_provider_eligibility", dst)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    result = module.normalize_selection_source("auto")
+    assert result["selection_source"] == "automatic"
 
 
 def test_audit_findings_py_in_sync():

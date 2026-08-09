@@ -891,3 +891,22 @@ def test_v1_registry_rejects_v2_activation_field_mixing(run_cli, tmp_path):
     assert data["specialists_selected"] == []
     rejected = next(item for item in data["specialists_ineligible"] if item["provider_id"] == "deep-planning-provider")
     assert rejected["reason_code"] == "mixed-registry-version"
+
+
+def test_registry_docs_define_v2_activation_and_selection_provenance():
+    reference = (
+        Path(__file__).resolve().parents[1] / "refs" / "specialist-registry.md"
+    ).read_text(encoding="utf-8")
+
+    for token in (
+        ".mission/specialists-v2.yml",
+        "mission-specialist-registry/2",
+        "specialists_v2:",
+        "auto_select_if: [complexity]",
+        "when_any",
+        "unknown-complexity",
+        "selection_source_raw",
+        "mission-specialist-registry-projection/1",
+        "effective_projection_digest",
+    ):
+        assert token in reference

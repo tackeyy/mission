@@ -35,6 +35,52 @@ When multiple registry sources exist, apply them in this order:
 
 Project entries may disable a user-level default for a repository by setting `enabled: false` for that role or skill. `--no-default-skill-roots` disables user registry and default skill/plugin manifest discovery for deterministic tests or isolated runs; project registries still apply.
 
+## Version 2 planning activation
+
+Complexity-triggered planning providers use the versioned registry contract. Keep it separate from version 1 so an older runtime cannot interpret an activation-only entry as an unrestricted provider.
+
+| Source | Version 2 | Version 1 compatibility |
+|---|---|---|
+| Explicit CLI | a file with `schema: mission-specialist-registry/2` | a file with `version: 1` |
+| Project | `.mission/specialists-v2.yml` | `.mission/specialists.yml` |
+| User | `~/.config/mission/specialists-v2.yml` | `~/.config/mission/specialists.yml` |
+| Installed manifest | `mission-specialist-v2.yml` | `mission-specialist.yml` |
+
+The machine precedence is `explicit v2 > explicit v1 > project v2 > project v1 > user v2 > user v1 > installed v2 > installed v1`. Multiple explicit files within one version preserve CLI argument order. Duplicate provider identities in one file, or in an unordered installed tier, fail closed. A higher invalid entry blocks fallback to the same lower identity. Version 2 uses `disabled: true` as a tombstone; version 1 retains `enabled: false`.
+
+Version 2 requires this root and does not permit a version 1 `specialists:` root in the same document:
+
+```yaml
+schema: mission-specialist-registry/2
+specialists_v2:
+  - role: deep-planning
+    skill: deep-planning-provider
+    task_profiles: [architecture]
+    phases: [planning]
+    activation:
+      min_complexity: Complex
+      auto_select_if: [complexity]
+      when_any: [architecture, stalled_iteration]
+      explicit_below_min: deny
+```
+
+The portable YAML subset permits candidate fields plus one nested mapping. JSON and YAML normalize to the same entry digest. Missing schema, an unknown major, duplicate keys, a deeper mapping, or mixed version roots produce an ineligible diagnostic and zero candidates from that input.
+
+### Activation semantics
+
+- `min_complexity` is a hard eligibility floor for automatic and explicit selection. The only ordered values are `Simple`, `Standard`, `Complex`, and `Critical`; missing, malformed, or `Unknown` context returns `unknown-complexity` for a floor-bearing provider.
+- `auto_select_if` is an OR list. `profile` preserves profile-driven selection; `complexity` makes a provider eligible at its floor even when profile confidence is low.
+- `when_any` is an optional OR list applied only to automatic selection. It is ANDed with the complexity, phase, and availability hard gates. An empty list matches nothing. Unsupported predicates make the configuration ineligible for every selection source.
+- `stalled_iteration` matches only when the current iteration is at least two and the prior iteration did not pass.
+- A complexity-triggered planning provider must explicitly allow `planning`. Phase lists are allow-lists; empty, unknown, and mismatched phases fail closed.
+- Version 1 `auto_use.min_complexity` remains readable. Version 1 `auto_use.when` maps to `activation.when_any` with the same internal OR semantics. Do not put `activation` in a version 1 file.
+
+### Selection and projection provenance
+
+Persisted selection sources use `automatic`, `confirmed-user`, `user-instruction`, `manual`, or `task-required`. Legacy `auto` maps to `automatic`; legacy `user-specified` maps to `user-instruction`. `selection_source_raw` preserves the received literal. A provider cannot claim `automatic` through `log-invocation` or `invoke-command`; only the recommendation producer may create it.
+
+Recommendation output records `provider_id`, registry source, registry entry digest, normalized activation digest, mission context digest, and `mission-specialist-registry-projection/1`. The projection contains ordered discovery inputs with canonical identities and content digests, plus `effective_projection_digest`. A later application guard can re-resolve the same inputs and detect a newly added higher-priority registry or other precedence drift. This issue defines producer evidence only; it does not authorize or execute a provider.
+
 ## Provider Kinds
 
 `kind: skill` remains the default. `kind: command` lets a registry describe a local CLI provider without adding provider-specific code to mission core. For delegating an implementation step's diff generation to a headless coding agent CLI, see `refs/implementation-delegation.md`.
