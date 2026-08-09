@@ -6373,6 +6373,11 @@ def _validate_provenance(provenance: object, *, require: bool) -> dict | None:
         raise ValueError("score provenance has invalid review_evidence_ref")
     if not isinstance(scope, dict) or scope != ref["revision_scope"]:
         raise ValueError("score provenance revision_scope mismatch")
+    # A review aggregate is a deterministic derivation, never a label that a
+    # manual import may borrow.  Manual imports need their own typed input
+    # contract; until one is supplied they fail closed.
+    if source == "manual-import":
+        raise ValueError("manual-import cannot use a review-aggregate evidence reference")
     if not isinstance(provenance.get("scoring_evidence_ref"), dict) and require:
         # push-score adds this after archiving; raw aggregate output has none.
         pass
@@ -6425,7 +6430,9 @@ def _read_bounded_review_evidence(cwd: Path, path_text: object) -> bytes:
 
 def _revalidate_score_provenance(cwd: Path, entry: dict, data: dict, *, require_scoring_artifact: bool = True) -> None:
     """Re-check immutable evidence at the pass boundary; never trust a saved digest alone."""
-    provenance = _validate_provenance(entry.get("score_provenance"), require=_is_new_provenance_state(data))
+    # A live pass is always a new decision.  Historical schema versions are
+    # display compatibility only and must never relax its evidence boundary.
+    provenance = _validate_provenance(entry.get("score_provenance"), require=True)
     if provenance is None:
         return
     ref = provenance["review_evidence_ref"]
@@ -6442,8 +6449,20 @@ def _revalidate_score_provenance(cwd: Path, entry: dict, data: dict, *, require_
         raise ValueError("review evidence must be valid UTF-8 JSON") from exc
     if not isinstance(parsed, dict) or parsed.get("schema") != "mission-review-aggregate/1":
         raise ValueError("review evidence has invalid schema")
+    claim = parsed.get("score_claim")
+    expected_claim = {
+        "iteration": entry.get("iteration"), "items": entry.get("items"),
+        "composite": entry.get("composite"), "min_item": entry.get("min_item"),
+        "open_high": entry.get("open_high"), "review_agreement": entry.get("review_agreement"),
+        "agreement_detail": entry.get("agreement_detail"),
+    }
+    # Prior aggregate archives predate score_claim. They remain readable only
+    # when attached through a provenance-bearing migration; current schema
+    # writers and all current pass decisions require the semantic binding.
+    if claim is not None and claim != expected_claim:
+        raise ValueError("review evidence score claim mismatch")
     score_ref = provenance.get("scoring_evidence_ref")
-    if _is_new_provenance_state(data) and require_scoring_artifact:
+    if require_scoring_artifact:
         if not isinstance(score_ref, dict) or score_ref.get("kind") != "scoring-artifact" or not _SHA256_REF_RE.fullmatch(str(score_ref.get("digest") or "")):
             raise ValueError("scoring evidence reference is invalid")
         score_bytes = _read_bounded_review_evidence(cwd, score_ref.get("path"))
@@ -7156,6 +7175,16 @@ def cmd_aggregate_reviews(args):
             "context_mode_expected": context_mode_expected,
             "context_manifest_generated": context_manifest_generated,
             "reviewer_output_metrics": reviewer_output_metrics,
+            # This is the authoritative, deterministic derivation from the
+            # archived review inputs. push-score and mark-passes compare every
+            # decision value to it; a digest alone is not semantic binding.
+            "score_claim": {
+                "iteration": args.iteration, "items": items,
+                "composite": round(sum(_numeric_item_values(items)) / len(items), 2),
+                "min_item": round(min(_numeric_item_values(items)), 2),
+                "open_high": open_high, "review_agreement": review_agreement,
+                "agreement_detail": agreement_detail,
+            },
         }
         evidence_content = (json.dumps(evidence, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
         evidence_digest = "sha256:" + hashlib.sha256(evidence_content).hexdigest()
@@ -7393,7 +7422,14 @@ def cmd_push_score(args):
             sys.exit(2)
         if provenance is not None:
             try:
-                _revalidate_score_provenance(cwd, {"score_provenance": provenance}, data,
+                _revalidate_score_provenance(cwd, {
+                    "iteration": args.iteration, "items": items,
+                    "composite": args.composite, "min_item": args.min_item,
+                    "open_high": args.open_high,
+                    "review_agreement": scoring_payload.get("review_agreement") if scoring_payload else None,
+                    "agreement_detail": scoring_payload.get("agreement_detail") if scoring_payload else None,
+                    "score_provenance": provenance,
+                }, data,
                                               require_scoring_artifact=False)
             except ValueError as exc:
                 print(f"ERROR: provenance: {exc}", file=sys.stderr)
