@@ -254,3 +254,175 @@ def test_coverage_keeps_true_not_applicable_and_legacy_fallback_skipped(extra):
         "skipped": 1,
     }
     assert coverage["counts_conserved"] is True
+
+
+def test_coverage_rejects_producing_clean_claim_without_canonical_identity():
+    state = {
+        "phase": "done",
+        "passes": True,
+        "loop_active": False,
+        "terminal_outcome": "completed_pass",
+        "artifact_applicability": "producing",
+        "artifact_lint_status": "clean",
+        "artifact_lint": [],
+    }
+
+    coverage = summarize_artifact_coverage([state])
+
+    assert coverage["counts"] == {
+        "eligible": 1,
+        "observed": 0,
+        "missing": 0,
+        "invalid": 1,
+        "clean": 0,
+        "findings": 0,
+        "skipped": 0,
+    }
+    assert coverage["counts_conserved"] is True
+
+
+@pytest.mark.parametrize("lint_status", ["clean", "findings"])
+@pytest.mark.parametrize(
+    ("artifact_present", "artifact"),
+    [
+        (False, None),
+        (True, None),
+        (True, "invalid"),
+        (True, []),
+        (True, {}),
+        (True, {"path": "reports/partial.md"}),
+        (
+            True,
+            {
+                "path": "reports/malformed.md",
+                "digest": "not-a-digest",
+                "size": True,
+                "producer_run_id": "portable-run",
+            },
+        ),
+    ],
+)
+def test_coverage_rejects_unverifiable_producing_lint_claims(
+    artifact_present, artifact, lint_status
+):
+    state = {
+        "phase": "done",
+        "passes": False,
+        "loop_active": False,
+        "terminal_outcome": "failed",
+        "task_profile": {"primary": "portable-analysis"},
+        "artifact_applicability": "producing",
+        "artifact_lint_status": lint_status,
+        "artifact_lint": [] if lint_status == "clean" else [{"kind": "finding"}],
+    }
+    if artifact_present:
+        state["artifact"] = artifact
+        if isinstance(artifact, dict):
+            state["artifact_lint_identity"] = artifact
+
+    coverage = summarize_artifact_coverage([state])
+
+    assert coverage["counts"]["eligible"] == 1
+    assert coverage["counts"]["observed"] == 0
+    assert coverage["counts"]["invalid"] == 1
+    assert coverage["counts"]["clean"] == 0
+    assert coverage["counts"]["findings"] == 0
+    assert coverage["counts_conserved"] is True
+    assert coverage["by_profile"]["portable-analysis"]["counts"] == coverage["counts"]
+    assert coverage["by_terminal_outcome"]["failed"]["counts"] == coverage["counts"]
+
+
+@pytest.mark.parametrize(
+    "lint_identity",
+    [
+        None,
+        "invalid",
+        {"path": "reports/result.md"},
+        {
+            "path": "reports/result.md",
+            "digest": "not-a-digest",
+            "size": 12,
+            "producer_run_id": "portable-run",
+        },
+        {
+            "path": "reports/result.md",
+            "digest": "b" * 64,
+            "size": 12,
+            "producer_run_id": "stale-run",
+        },
+    ],
+)
+def test_coverage_rejects_complete_identity_without_exact_complete_lint_snapshot(
+    lint_identity,
+):
+    identity = {
+        "path": "reports/result.md",
+        "digest": "a" * 64,
+        "size": 12,
+        "producer_run_id": "portable-run",
+    }
+    state = {
+        "phase": "done",
+        "passes": True,
+        "loop_active": False,
+        "terminal_outcome": "completed_pass",
+        "artifact_applicability": "producing",
+        "artifact": identity,
+        "artifact_lint_status": "clean",
+        "artifact_lint": [],
+    }
+    if lint_identity is not None:
+        state["artifact_lint_identity"] = lint_identity
+
+    coverage = summarize_artifact_coverage([state])
+
+    assert coverage["counts"]["eligible"] == 1
+    assert coverage["counts"]["observed"] == 0
+    assert coverage["counts"]["invalid"] == 1
+    assert coverage["counts_conserved"] is True
+
+
+@pytest.mark.parametrize("lint_status", ["clean", "findings"])
+def test_coverage_accepts_only_exact_complete_identity_bound_observation(lint_status):
+    identity = {
+        "path": "reports/result.md",
+        "digest": "a" * 64,
+        "size": 12,
+        "producer_run_id": "portable-run",
+    }
+    state = {
+        "phase": "done",
+        "passes": True,
+        "loop_active": False,
+        "terminal_outcome": "completed_pass",
+        "artifact_applicability": "producing",
+        "artifact": identity,
+        "artifact_lint_status": lint_status,
+        "artifact_lint_identity": identity,
+    }
+
+    coverage = summarize_artifact_coverage([state])
+
+    assert coverage["counts"]["eligible"] == 1
+    assert coverage["counts"]["observed"] == 1
+    assert coverage["counts"][lint_status] == 1
+    assert coverage["counts_conserved"] is True
+
+
+@pytest.mark.parametrize("extra", [{}, {"artifact_path": "legacy/result.md"}])
+def test_coverage_keeps_producing_without_lint_claim_as_missing(extra):
+    state = {
+        "phase": "done",
+        "passes": False,
+        "loop_active": False,
+        "terminal_outcome": "failed",
+        "artifact_applicability": "producing",
+        **extra,
+    }
+
+    coverage = summarize_artifact_coverage([state])
+
+    assert coverage["counts"]["eligible"] == 1
+    assert coverage["counts"]["missing"] == 1
+    assert coverage["counts"]["invalid"] == 0
+    assert coverage["counts_conserved"] is True

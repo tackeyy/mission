@@ -434,6 +434,15 @@ def test_stats_reports_conserved_terminal_artifact_coverage_by_profile(
                 if lint_status == "clean"
                 else [{"kind": "empty-section", "heading": "Result"}]
             )
+            if lint_status in {"clean", "findings"}:
+                identity = {
+                    "path": f"reports/{name}.md",
+                    "digest": hashlib.sha256(name.encode()).hexdigest(),
+                    "size": len(name),
+                    "producer_run_id": f"portable-{name}",
+                }
+                state["artifact"] = identity
+                state["artifact_lint_identity"] = identity
         sessions.joinpath(f"{name}.json").write_text(
             json.dumps(state), encoding="utf-8"
         )
@@ -530,11 +539,22 @@ def test_stats_json_and_text_keep_not_applicable_identity_contradiction_invalid(
         "mission_id": "skipped",
         "session_id": "skipped",
     }
+    forged_producing = {
+        **base,
+        "mission_id": "forged-producing",
+        "session_id": "forged-producing",
+        "artifact_applicability": "producing",
+        "artifact_lint_status": "findings",
+        "artifact_lint": [{"kind": "unverified"}],
+    }
     sessions.joinpath("contradiction.json").write_text(
         json.dumps(contradiction), encoding="utf-8"
     )
     sessions.joinpath("skipped.json").write_text(
         json.dumps(skipped), encoding="utf-8"
+    )
+    sessions.joinpath("forged-producing.json").write_text(
+        json.dumps(forged_producing), encoding="utf-8"
     )
 
     json_result = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
@@ -544,10 +564,10 @@ def test_stats_json_and_text_keep_not_applicable_identity_contradiction_invalid(
     assert text_result.returncode == 0, text_result.stderr
     coverage = json.loads(json_result.stdout)["artifact_coverage"]
     assert coverage["counts"] == {
-        "eligible": 1,
+        "eligible": 2,
         "observed": 0,
         "missing": 0,
-        "invalid": 1,
+        "invalid": 2,
         "clean": 0,
         "findings": 0,
         "skipped": 1,
@@ -555,7 +575,7 @@ def test_stats_json_and_text_keep_not_applicable_identity_contradiction_invalid(
     assert coverage["counts_conserved"] is True
     assert coverage["by_profile"]["portable-analysis"]["counts"] == coverage["counts"]
     assert coverage["by_terminal_outcome"]["failed"]["counts"] == coverage["counts"]
-    assert "eligible 1 / observed 0 / missing 0 / invalid 1" in text_result.stdout
+    assert "eligible 2 / observed 0 / missing 0 / invalid 2" in text_result.stdout
     assert "clean 0 / findings 0 / skipped 1" in text_result.stdout
 
 
@@ -617,6 +637,18 @@ def test_mark_passes_gates_missing_identity_after_profile_reaches_threshold(
         "terminal_outcome": "completed_pass",
         "artifact_lint_status": "clean",
         "artifact_lint": [],
+        "artifact": {
+            "path": "reports/observed-history.md",
+            "digest": "a" * 64,
+            "size": 12,
+            "producer_run_id": "portable-history",
+        },
+        "artifact_lint_identity": {
+            "path": "reports/observed-history.md",
+            "digest": "a" * 64,
+            "size": 12,
+            "producer_run_id": "portable-history",
+        },
     }
     state_path.with_name("observed-history.json").write_text(
         json.dumps(historical), encoding="utf-8"
@@ -1108,7 +1140,7 @@ def test_active_gate_rejects_lint_observation_from_before_official_rehandoff(
 
 @pytest.mark.parametrize(
     ("observed_count", "expected_gate_active", "expected_mark_returncode"),
-    [(18, False, 0), (19, True, 2)],
+    [(18, False, 0), (38, True, 2)],
 )
 def test_contradiction_remains_in_history_denominator_at_coverage_gate_boundary(
     observed_count,
@@ -1169,6 +1201,19 @@ def test_contradiction_remains_in_history_denominator_at_coverage_gate_boundary(
     state_path.with_name("contradiction.json").write_text(
         json.dumps(contradiction), encoding="utf-8"
     )
+    forged_producing = {
+        **terminal_common,
+        "session_id": "forged-producing",
+        "mission_id": "forged-producing",
+        "passes": False,
+        "terminal_outcome": "failed",
+        "artifact_applicability": "producing",
+        "artifact_lint_status": "clean",
+        "artifact_lint": [],
+    }
+    state_path.with_name("forged-producing.json").write_text(
+        json.dumps(forged_producing), encoding="utf-8"
+    )
 
     stats_result = run_cli("stats", "--root", str(root), "--json", cwd=root)
     coverage = json.loads(stats_result.stdout)["artifact_coverage"]["by_profile"][
@@ -1176,10 +1221,10 @@ def test_contradiction_remains_in_history_denominator_at_coverage_gate_boundary(
     ]
     result = run_cli("mark-passes", cwd=root)
 
-    assert coverage["counts"]["eligible"] == observed_count + 1
+    assert coverage["counts"]["eligible"] == observed_count + 2
     assert coverage["counts"]["observed"] == observed_count
-    assert coverage["counts"]["invalid"] == 1
-    assert coverage["coverage"] == pytest.approx(observed_count / (observed_count + 1))
+    assert coverage["counts"]["invalid"] == 2
+    assert coverage["coverage"] == pytest.approx(observed_count / (observed_count + 2))
     assert coverage["gate_active"] is expected_gate_active
     assert coverage["counts_conserved"] is True
     assert result.returncode == expected_mark_returncode, result.stderr

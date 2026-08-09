@@ -309,7 +309,6 @@ def summarize_artifact_coverage(
             bucket = "invalid"
         elif (
             status in {"clean", "findings"}
-            and canonical_identity
             and not artifact_lint_observation_matches(state)
         ):
             bucket = "invalid"

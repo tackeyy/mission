@@ -64,8 +64,20 @@ def test_audit_reports_conserved_artifact_coverage(tmp_path):
         terminal_outcome="completed_pass",
         task_profile={"primary": "portable-analysis"},
         artifact_applicability="producing",
+        artifact={
+            "path": "reports/observed.md",
+            "digest": "a" * 64,
+            "size": 12,
+            "producer_run_id": "portable-observed",
+        },
         artifact_lint_status="clean",
         artifact_lint=[],
+        artifact_lint_identity={
+            "path": "reports/observed.md",
+            "digest": "a" * 64,
+            "size": 12,
+            "producer_run_id": "portable-observed",
+        },
     )
     _write_state(
         sessions / "skipped.json",
@@ -128,6 +140,14 @@ def test_audit_json_and_markdown_keep_not_applicable_identity_contradiction_inva
         session_id="skipped",
         mission_id="skipped",
     )
+    _write_state(
+        sessions / "forged-producing.json",
+        **{**common, "artifact_applicability": "producing"},
+        session_id="forged-producing",
+        mission_id="forged-producing",
+        artifact_lint_status="findings",
+        artifact_lint=[{"kind": "unverified"}],
+    )
 
     json_result = subprocess.run(
         [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--json"],
@@ -144,10 +164,10 @@ def test_audit_json_and_markdown_keep_not_applicable_identity_contradiction_inva
 
     coverage = json.loads(json_result.stdout)["artifact_coverage"]
     assert coverage["counts"] == {
-        "eligible": 1,
+        "eligible": 2,
         "observed": 0,
         "missing": 0,
-        "invalid": 1,
+        "invalid": 2,
         "clean": 0,
         "findings": 0,
         "skipped": 1,
@@ -155,7 +175,7 @@ def test_audit_json_and_markdown_keep_not_applicable_identity_contradiction_inva
     assert coverage["counts_conserved"] is True
     assert coverage["by_profile"]["portable-analysis"]["counts"] == coverage["counts"]
     assert coverage["by_terminal_outcome"]["failed"]["counts"] == coverage["counts"]
-    assert "eligible / observed / missing / invalid: 1 / 0 / 0 / 1" in markdown_result.stdout
+    assert "eligible / observed / missing / invalid: 2 / 0 / 0 / 2" in markdown_result.stdout
     assert "clean / findings / skipped: 0 / 0 / 1" in markdown_result.stdout
     assert "counts conserved: true" in markdown_result.stdout
 
