@@ -3379,6 +3379,12 @@ def cmd_invoke_command_provider(args):
     command_env = os.environ.copy()
     command_env.update(_string_map(provider.get("env")))
     timeout = _provider_timeout(provider, args.timeout)
+    with StateLock(lock_file(cwd)):
+        dispatch_state = json.loads(sf.read_text())
+        record_activity_event(dispatch_state, "specialist", now)
+        dispatch_state["updated_at"] = now
+        backup_state(sf)
+        atomic_write_json(sf, stamp_metadata(dispatch_state, cwd))
     try:
         completed = subprocess.run(
             argv,
@@ -3420,6 +3426,14 @@ def cmd_invoke_command_provider(args):
     )
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
+        current = data.get("activity_current")
+        if (
+            isinstance(current, dict)
+            and current.get("kind") == "external-wait"
+            and current.get("reason") == "external-command"
+            and current.get("started_at") == now
+        ):
+            end_activity_segment(data, completed_at)
         selected_entry = None
         if status in APPLIED_SPECIALIST_INVOCATION_STATUSES and args.selection_source:
             entry["selection_source"] = args.selection_source
@@ -4429,8 +4443,6 @@ def cmd_log_specialist_invocation(args):
             )
             sys.exit(2)
         now = iso_now()
-        if data.get("loop_active") is not False:
-            record_activity_event(data, "specialist", now)
         entry = {
             "iteration": args.iteration,
             "phase": args.phase,
@@ -5863,28 +5875,21 @@ def cmd_set(args):
             if key == "phase":
                 normalized_phase = _normalize_set_phase_value(str(parsed_value))
                 try:
+                    if (
+                        normalized_phase not in {"done", "halted"}
+                        and data.get("phase") != normalized_phase
+                        and isinstance(data.get("activity_current"), dict)
+                    ):
+                        end_activity_segment(data, now)
                     _transition_phase(data, normalized_phase, now)
                 except ArtifactContractError as exc:
                     print(f"ERROR: {exc}", file=sys.stderr)
                     sys.exit(2)
-                # #312: CC が set phase 経路を使っても segment が欠落しないよう、
-                # open segment が無ければ phase に応じた segment を fallback で開く。
-                # set 時点から開始し過去は塗らない (#237 精度契約)。既に open が
-                # あれば推測で切り替えない。終端 phase は対象外。
-                _fallback_activity = {
-                    "planning": ("active", "planning"),
-                    "executing": ("active", "implementation"),
-                    "reviewing": ("reviewer-wait", "review-response"),
-                    "scoring": ("active", "scoring"),
-                }.get(normalized_phase)
-                if _fallback_activity and not data.get("activity_current"):
+                if normalized_phase not in {"done", "halted"}:
                     try:
-                        start_activity_segment(
-                            data, _fallback_activity[0], _fallback_activity[1], now,
-                            detail="auto-opened by set phase (#312)",
-                        )
+                        start_phase_default_activity(data, now)
                     except ActivityTimingError:
-                        pass  # fail-open: fallback が set 本体を壊さない
+                        pass
             else:
                 data[key] = parsed_value
         # A-M1 (2026-06-10 / Issue #168 拡張): complexity 変更時の reviewer_count と review_tier 同期
@@ -6843,6 +6848,7 @@ def cmd_aggregate_reviews(args):
                 end_activity_segment(data, now)
             _transition_phase(data, "scoring", now)
             record_activity_event(data, "review-aggregate", now)
+            data["updated_at"] = now
         prior_metrics = [
             record for record in data.get("reviewer_output_records", [])
             if isinstance(record, dict) and record.get("iteration") != args.iteration
@@ -7609,7 +7615,9 @@ def cmd_refresh_pid(args):
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
         now = iso_now()
-        close_activity_for_resume(data, now)
+        current = data.get("activity_current")
+        if not (isinstance(current, dict) and current.get("started_at") == now):
+            close_activity_for_resume(data, now)
         old_pid = data.get("pid")
         if (
             not _lease_fields_present(data)
@@ -7659,6 +7667,8 @@ def cmd_refresh_pid(args):
             _add_to_aggregate(cwd, sf.stem)  # F-4: 再活性化分を active_sessions へ戻す
         if not restored_phase:
             _resume_phase_timing(data, now)
+        if data.get("loop_active") is not False and not data.get("activity_current"):
+            start_phase_default_activity(data, now)
         data["updated_at"] = now
         backup_state(sf)
         with _lease_write_reason(getattr(args, "lease_reason", None)):

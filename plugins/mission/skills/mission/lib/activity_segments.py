@@ -43,6 +43,7 @@ ACTIVITY_EVENT_DEFAULTS = {
     "specialist": ("external-wait", "external-command"),
     "review-aggregate": ("active", "scoring"),
 }
+UNOBSERVED_GAP_REASONS = {"legacy", "crash", "provider-no-events", "clock-gap"}
 RECENT_SEGMENT_LIMIT = 32
 PERCENTILE_METHOD = "linear-interpolation-r7"
 TASK_KEY_METHOD = "mission_id-or-unknown"
@@ -271,9 +272,15 @@ def _resume_boundary(state: dict[str, Any], at: str) -> str:
             reasons = {}
             state["activity_unobserved_gap_reasons_sec"] = reasons
         last_event = _parse_at(state.get("activity_last_event_at"))
+        event_phase = state.get("activity_last_event_phase")
+        event_is_current = bool(
+            last_event
+            and started <= last_event <= resumed
+            and event_phase == current.get("phase")
+        )
         if updated is None:
             reason = "legacy"
-        elif last_event is not None:
+        elif event_is_current:
             reason = "crash"
         elif isinstance(current, dict) and current.get("kind") == "external-wait":
             reason = "provider-no-events"
@@ -379,6 +386,7 @@ def record_activity_event(state: dict[str, Any], event: str, at: str) -> bool:
     kind, reason = default
     changed = start_activity_segment(state, kind, reason, at)
     state["activity_last_event_at"] = at
+    state["activity_last_event_phase"] = state.get("phase")
     return changed
 
 
@@ -724,10 +732,21 @@ def summarize_activity_states(states: list[dict[str, Any]]) -> dict[str, Any]:
         unobserved_gap = _finite_add(unobserved_gap, item["unobserved_gap"]) or 0.0
         raw_gap_reasons = state.get("activity_unobserved_gap_reasons_sec")
         if isinstance(raw_gap_reasons, dict):
+            state_reason_total = 0.0
+            valid_reason_map = True
             for reason, value in raw_gap_reasons.items():
                 seconds = _finite_nonnegative(value)
-                if isinstance(reason, str) and seconds is not None:
+                if reason in UNOBSERVED_GAP_REASONS and seconds is not None:
+                    state_reason_total = _finite_add(state_reason_total, seconds) or 0.0
                     gap_reasons[reason] = _finite_add(gap_reasons.get(reason, 0.0), seconds) or 0.0
+                else:
+                    valid_reason_map = False
+            if not valid_reason_map or abs(state_reason_total - item["unobserved_gap"]) > 0.001:
+                invalid_count += 1
+                totals_consistent = False
+        elif raw_gap_reasons is not None:
+            invalid_count += 1
+            totals_consistent = False
         task_key = str(state.get("mission_id") or "unknown")
         if item["valid_closed_sample"]:
             task_samples.setdefault(task_key, []).append(item["observed"])

@@ -92,6 +92,7 @@ def test_resume_gap_classifies_legacy_crash_provider_and_clock_boundaries():
             "phase": "executing", "loop_active": True,
             "updated_at": "2027-08-10T00:00:00Z",
             "activity_last_event_at": "2027-08-10T00:00:30Z",
+            "activity_last_event_phase": "executing",
         },
         "provider-no-events": {
             "phase": "executing", "loop_active": True,
@@ -126,7 +127,7 @@ def test_parallel_implementer_sessions_have_no_zero_activity_cohort(run_cli, tmp
     assert activity["coverage_ratio"] >= 0.90
 
 
-def test_specialist_invocation_records_the_common_activity_event(run_cli, tmp_path):
+def test_specialist_invocation_evidence_does_not_change_activity(run_cli, tmp_path):
     run_cli("init", "specialist boundary", cwd=tmp_path, check=True)
 
     result = run_cli(
@@ -136,4 +137,19 @@ def test_specialist_invocation_records_the_common_activity_event(run_cli, tmp_pa
     )
 
     assert result.returncode == 0, result.stderr
-    assert _read(tmp_path)["activity_current"]["reason"] == "external-command"
+    assert _read(tmp_path)["activity_current"]["reason"] == "planning"
+
+
+def test_gap_reason_tampering_is_invalid_and_never_counted():
+    from activity_segments import summarize_activity_states
+
+    state = {
+        "phase": "done",
+        "phase_durations_sec": {"executing": 10.0},
+        "activity_unobserved_gap_sec": 10.0,
+        "activity_unobserved_gap_reasons_sec": {"bogus": 999.0},
+    }
+    timing = summarize_activity_states([state])
+    assert timing["invalid_segment_count"] >= 1
+    assert timing["totals_consistent"] is False
+    assert timing["unobserved_gap_reasons_sec"] == {}
