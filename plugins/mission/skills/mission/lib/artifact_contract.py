@@ -22,6 +22,35 @@ class ArtifactContractError(ValueError):
     """The artifact path, bytes, or recorded identity is invalid."""
 
 
+def validate_artifact_state_consistency(
+    state: dict, *, require_resolved: bool = False
+) -> str | None:
+    """Reject contradictory or unresolved canonical artifact control state."""
+    applicability = state.get("artifact_applicability")
+    if applicability is None:
+        return None  # Legacy state: observe without physical migration.
+    if applicability not in ARTIFACT_APPLICABILITIES:
+        raise ArtifactContractError("artifact applicability is invalid")
+    artifact = state.get("artifact")
+    canonical_identity = isinstance(artifact, dict) and any(
+        key in artifact for key in ("path", "digest", "size", "producer_run_id")
+    )
+    if applicability == "pending":
+        if canonical_identity:
+            raise ArtifactContractError(
+                "pending artifact applicability contradicts canonical artifact identity"
+            )
+        if require_resolved:
+            raise ArtifactContractError(
+                "artifact applicability is pending; resolve it to producing or not-applicable"
+            )
+    if applicability == "not-applicable" and canonical_identity:
+        raise ArtifactContractError(
+            "not-applicable artifact applicability contradicts canonical artifact identity"
+        )
+    return applicability
+
+
 def artifact_path_from_state(state: dict) -> tuple[str | None, bool]:
     """Return (path, canonical), preferring nested state.artifact.path."""
     artifact = state.get("artifact")

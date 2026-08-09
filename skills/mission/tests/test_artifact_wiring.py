@@ -80,6 +80,22 @@ def test_advance_to_reviewing_rejects_pending_artifact_contract(
     assert read_state(state_dir)["phase"] == "executing"
 
 
+def test_generic_set_cannot_move_pending_artifact_contract_to_reviewing(
+    state_dir, run_cli, read_state
+):
+    state_path = state_dir / "sessions" / "test.json"
+    state = read_state(state_dir)
+    state["phase"] = "executing"
+    state["artifact_applicability"] = "pending"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    result = run_cli("set", "phase=reviewing", cwd=state_dir.parent)
+
+    assert result.returncode == 2
+    assert "artifact applicability is pending" in result.stderr
+    assert read_state(state_dir)["phase"] == "executing"
+
+
 def test_artifact_render_persists_canonical_identity(state_dir, run_cli, read_state):
     root = state_dir.parent
     init_result = run_cli("artifact", "init", "--json", cwd=root)
@@ -149,6 +165,79 @@ def test_mark_passes_rejects_artifact_identity_substitution(
     assert result.returncode == 2
     assert "artifact identity does not match recorded state" in result.stderr
     assert read_state(state_dir)["passes"] is False
+
+
+def test_generic_set_cannot_downgrade_mutated_producing_artifact(
+    state_dir, run_cli, read_state
+):
+    root = state_dir.parent
+    assert run_cli("artifact", "init", "--json", cwd=root).returncode == 0
+    assert run_cli("artifact", "render", "--json", cwd=root).returncode == 0
+    state_path = state_dir / "sessions" / "test.json"
+    state = read_state(state_dir)
+    state["score_history"] = [
+        {"iteration": 1, "composite": 4.5, "min_item": 4.0, "open_high": 0}
+    ]
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    (root / state["artifact"]["path"]).write_text(
+        "# changed after clean observation\n", encoding="utf-8"
+    )
+
+    downgrade = run_cli(
+        "set", "artifact_applicability=not-applicable", cwd=root
+    )
+
+    assert downgrade.returncode == 2
+    assert "artifact_applicability" in downgrade.stderr
+    assert read_state(state_dir)["artifact_applicability"] == "producing"
+    mark = run_cli("mark-passes", cwd=root)
+    assert mark.returncode == 2
+    assert read_state(state_dir)["passes"] is False
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("artifact_applicability", "not-applicable"),
+        ("artifact", '{"path":"result.md"}'),
+        ("artifact_path", "legacy.md"),
+        ("artifact_lint", "[]"),
+        ("artifact_lint_status", "clean"),
+    ],
+)
+def test_generic_set_freezes_artifact_contract_and_observation_fields(
+    key, value, state_dir, run_cli, read_state
+):
+    before = read_state(state_dir)
+
+    result = run_cli("set", f"{key}={value}", cwd=state_dir.parent)
+
+    assert result.returncode == 2
+    assert f"`{key}`" in result.stderr
+    assert read_state(state_dir) == before
+
+
+def test_advance_cannot_downgrade_producing_artifact_to_not_applicable(
+    state_dir, run_cli, read_state
+):
+    root = state_dir.parent
+    assert run_cli("artifact", "init", "--json", cwd=root).returncode == 0
+    before = read_state(state_dir)
+
+    result = run_cli(
+        "advance",
+        "--phase",
+        "executing",
+        "--activity",
+        "active:implementation",
+        "--artifact-applicability",
+        "not-applicable",
+        cwd=root,
+    )
+
+    assert result.returncode == 2
+    assert "cannot downgrade producing" in result.stderr
+    assert read_state(state_dir) == before
 
 
 def test_advance_atomically_records_executor_artifact_handoff(
@@ -300,6 +389,24 @@ def test_mark_passes_warns_for_missing_identity_before_profile_reaches_threshold
     assert read_state(state_dir)["passes"] is True
 
 
+def test_mark_passes_rejects_pending_artifact_contract_defense_in_depth(
+    state_dir, run_cli, read_state
+):
+    state_path = state_dir / "sessions" / "test.json"
+    state = read_state(state_dir)
+    state["artifact_applicability"] = "pending"
+    state["score_history"] = [
+        {"iteration": 1, "composite": 4.5, "min_item": 4.0, "open_high": 0}
+    ]
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    result = run_cli("mark-passes", cwd=state_dir.parent)
+
+    assert result.returncode == 2
+    assert "artifact applicability is pending" in result.stderr
+    assert read_state(state_dir)["passes"] is False
+
+
 def test_mark_passes_gates_missing_identity_after_profile_reaches_threshold(
     state_dir, run_cli, read_state
 ):
@@ -357,6 +464,102 @@ def test_aggregate_records_producing_without_identity_as_missing(
     recorded = read_state(state_dir)
     assert recorded["artifact_lint_status"] == "missing"
     assert "artifact_lint" not in recorded
+
+
+def test_aggregate_rejects_pending_artifact_contract_defense_in_depth(
+    state_dir, run_cli, read_state
+):
+    root = state_dir.parent
+    state_path = state_dir / "sessions" / "test.json"
+    state = read_state(state_dir)
+    state["phase"] = "reviewing"
+    state["artifact_applicability"] = "pending"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    result = run_cli(
+        "aggregate-reviews",
+        "--iteration",
+        "1",
+        "--input",
+        str(_write_review(root / "review.json")),
+        "--json",
+        cwd=root,
+    )
+
+    assert result.returncode == 2
+    assert "artifact applicability is pending" in result.stderr
+    assert read_state(state_dir)["artifact_lint_status"] == "invalid"
+
+
+def test_review_finalize_inherits_pending_artifact_rejection(
+    state_dir, run_cli, read_state
+):
+    root = state_dir.parent
+    state_path = state_dir / "sessions" / "test.json"
+    state = read_state(state_dir)
+    state["phase"] = "reviewing"
+    state["artifact_applicability"] = "pending"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    result = run_cli(
+        "review-finalize",
+        "--iteration",
+        "1",
+        "--input",
+        str(_write_review(root / "review.json")),
+        cwd=root,
+    )
+
+    assert result.returncode == 2
+    assert "artifact applicability is pending" in result.stderr
+    assert read_state(state_dir)["score_history"] == []
+
+
+def test_aggregate_rejects_not_applicable_with_canonical_identity(
+    state_dir, run_cli, read_state
+):
+    root = state_dir.parent
+    assert run_cli("artifact", "init", "--json", cwd=root).returncode == 0
+    assert run_cli("artifact", "render", "--json", cwd=root).returncode == 0
+    state_path = state_dir / "sessions" / "test.json"
+    state = read_state(state_dir)
+    state["artifact_applicability"] = "not-applicable"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    result = run_cli(
+        "aggregate-reviews",
+        "--iteration",
+        "1",
+        "--input",
+        str(_write_review(root / "review.json")),
+        "--json",
+        cwd=root,
+    )
+
+    assert result.returncode == 2
+    assert "contradicts canonical artifact identity" in result.stderr
+    assert read_state(state_dir)["artifact_lint_status"] == "invalid"
+
+
+def test_mark_passes_rejects_pending_with_canonical_identity(
+    state_dir, run_cli, read_state
+):
+    root = state_dir.parent
+    assert run_cli("artifact", "init", "--json", cwd=root).returncode == 0
+    assert run_cli("artifact", "render", "--json", cwd=root).returncode == 0
+    state_path = state_dir / "sessions" / "test.json"
+    state = read_state(state_dir)
+    state["artifact_applicability"] = "pending"
+    state["score_history"] = [
+        {"iteration": 1, "composite": 4.5, "min_item": 4.0, "open_high": 0}
+    ]
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    result = run_cli("mark-passes", cwd=root)
+
+    assert result.returncode == 2
+    assert "contradicts canonical artifact identity" in result.stderr
+    assert read_state(state_dir)["passes"] is False
 
 
 def test_aggregate_keeps_not_applicable_skipped_even_with_legacy_path(

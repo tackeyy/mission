@@ -92,6 +92,7 @@ from artifact_contract import (  # noqa: E402
     capture_artifact_identity,
     summarize_artifact_coverage,
     validate_artifact_identity,
+    validate_artifact_state_consistency,
 )
 
 SCHEMA_VERSION = 3  # v3: role-aware terminal_outcome を terminal writer が明示記録
@@ -1398,6 +1399,8 @@ def _transition_phase(
     terminal_trusted_boundary: bool = False,
 ) -> None:
     """phase を変更し、旧 phase の経過秒数を phase_durations_sec に加算する."""
+    if new_phase == "reviewing":
+        validate_artifact_state_consistency(data, require_resolved=True)
     now = now or iso_now()
     old_phase = data.get("phase")
     if new_phase in {"done", "halted"}:
@@ -4983,6 +4986,12 @@ def cmd_advance(args):
                         file=sys.stderr,
                     )
                     sys.exit(2)
+                if data.get("artifact_applicability") == "producing":
+                    print(
+                        "ERROR: cannot downgrade producing artifact applicability to not-applicable",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
                 data["artifact_applicability"] = "not-applicable"
             elif artifact_path or producer_run_id:
                 print(
@@ -5010,7 +5019,7 @@ def cmd_advance(args):
             data["updated_at"] = at
             backup_state(sf)
             atomic_write_json(sf, stamp_metadata(data, cwd))
-    except ActivityTimingError as error:
+    except (ActivityTimingError, ArtifactContractError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         sys.exit(2)
     print(
@@ -5704,6 +5713,11 @@ FROZEN_FIELDS = {
     "schema_version",
     "session_role",
     "terminal_outcome",
+    "artifact_applicability",
+    "artifact",
+    "artifact_path",
+    "artifact_lint",
+    "artifact_lint_status",
     "project_root",
     "started_at",
     "created_at_session",
@@ -5815,7 +5829,11 @@ def cmd_set(args):
                 parsed_value = value
             if key == "phase":
                 normalized_phase = _normalize_set_phase_value(str(parsed_value))
-                _transition_phase(data, normalized_phase, now)
+                try:
+                    _transition_phase(data, normalized_phase, now)
+                except ArtifactContractError as exc:
+                    print(f"ERROR: {exc}", file=sys.stderr)
+                    sys.exit(2)
                 # #312: CC が set phase 経路を使っても segment が欠落しないよう、
                 # open segment が無ければ phase に応じた segment を fallback で開く。
                 # set 時点から開始し過去は塗らない (#237 精度契約)。既に open が
@@ -6567,7 +6585,7 @@ def _lint_state_artifact(cwd: Path, data: dict) -> tuple[list[dict], str]:
     if not artifact_path:
         return (
             ([], "missing")
-            if data.get("artifact_applicability") == "producing"
+            if data.get("artifact_applicability") in {"producing", "pending"}
             else ([], "skipped")
         )
     if not canonical:
@@ -6758,6 +6776,7 @@ def cmd_aggregate_reviews(args):
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
         try:
+            validate_artifact_state_consistency(data, require_resolved=True)
             artifact_lint, artifact_lint_status = _lint_state_artifact(cwd, data)
         except ArtifactContractError as exc:
             data.pop("artifact_lint", None)
@@ -7235,6 +7254,11 @@ def cmd_mark_passes(args):
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
+        try:
+            validate_artifact_state_consistency(data, require_resolved=True)
+        except ArtifactContractError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(2)
         now = iso_now()
         threshold = data.get("threshold", DEFAULT_THRESHOLD)
         history = data.get("score_history", [])

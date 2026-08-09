@@ -7,7 +7,11 @@ _ITEMS = '{"mission_achievement":4.5,"accuracy":4.5,"completeness":4.5,"usabilit
 
 def test_explicit_session_id_routing(tmp_path, run_cli):
     env = {"MISSION_SESSION_ID": "sess-x"}
-    run_cli("init", "mission text", "--complexity", "Standard", cwd=tmp_path, env_extra=env, check=True)
+    run_cli(
+        "init", "mission text", "--complexity", "Standard",
+        "--artifact-applicability", "not-applicable",
+        cwd=tmp_path, env_extra=env, check=True,
+    )
     sf = tmp_path / ".mission-state" / "sessions" / "sess-x.json"
     assert sf.exists(), "session ファイルが作られていない"
     assert not (tmp_path / ".mission-state" / "state.json").exists(), "legacy を汚染した"
