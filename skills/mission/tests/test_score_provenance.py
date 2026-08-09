@@ -4,6 +4,7 @@ import json
 import importlib.util
 import sys
 import os
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -227,6 +228,81 @@ def test_force_pass_has_no_builtin_trusted_verifier(state_dir, run_cli):
     )
     assert result.returncode == 2
     assert "not configured" in result.stderr
+
+
+def test_force_pass_bootstraps_only_a_registered_entry_point(state_dir, run_cli, tmp_path):
+    """A fresh CLI may load a verifier only through the fixed registry + entry-point contract."""
+    state = json.loads((state_dir / "sessions" / "test.json").read_text())
+    state["schema_version"] = 4
+    (state_dir / "sessions" / "test.json").write_text(json.dumps(state))
+    package_root = tmp_path / "providers"
+    package_root.mkdir()
+    (package_root / "fixture_provider.py").write_text(
+        "import hashlib, json\n"
+        "from datetime import datetime, timezone\n"
+        "def verify(request):\n"
+        " p = '.mission-state/archive/fixture-receipt.json'\n"
+        " doc = {'schema':'mission-force-approval-receipt/1','session_id':request['session_id'],'mission_id':request['mission_id'],'revision_scope':request['revision_scope'],'terminal_object_digest':request['terminal_object_digest'],'event_nonce':request['event_nonce'],'request_digest':request['request_digest']}\n"
+        " raw = json.dumps(doc, sort_keys=True, separators=(',', ':')).encode()\n"
+        " open(p, 'wb').write(raw)\n"
+        " ref = {'kind':'approval-receipt','path':p,'digest':'sha256:'+hashlib.sha256(raw).hexdigest()}\n"
+        " return {'schema':'mission-force-approval-response/1','decision':'approved','verifier_id':'fixture-verifier','request_digest':request['request_digest'],'receipt_ref':ref,'verified_at':datetime.now(timezone.utc).isoformat()}\n",
+        encoding="utf-8",
+    )
+    dist_info = package_root / "fixture_provider-1.0.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text("Name: fixture-provider\nVersion: 1.0\n")
+    (dist_info / "entry_points.txt").write_text("[mission.approval_verifiers]\nfixture-entry = fixture_provider:verify\n")
+    registry = state_dir.parent / ".mission"
+    registry.mkdir()
+    (state_dir / "archive").mkdir()
+    (registry / "approval-verifiers.json").write_text(json.dumps({
+        "schema": "mission-approval-verifier-registry/1",
+        "verifiers": [{"id": "fixture-verifier", "entry_point": "fixture-entry"}],
+    }))
+    result = run_cli(
+        "mark-passes", "--force", "--reason", "bounded override", "--approved-by-user",
+        "--approval-evidence-ref", "sha256:" + "a" * 64,
+        "--approved-actor", "role:owner", "--approved-at", datetime.now(timezone.utc).isoformat(),
+        "--reason-code", "user-override", "--approval-verifier", "fixture-verifier",
+        cwd=state_dir.parent, env_extra={"PYTHONPATH": str(package_root)},
+    )
+    assert result.returncode == 0, result.stderr
+    recorded = json.loads((state_dir / "sessions" / "test.json").read_text())
+    assert recorded["passes"] is True
+    assert recorded["force_approval"]["response"]["verifier_id"] == "fixture-verifier"
+
+
+@pytest.mark.parametrize("attack", ["malformed", "duplicate", "traversal", "symlink", "fifo", "hardlink", "oversize"])
+def test_force_bootstrap_rejects_unsafe_registry_without_mutating_state(state_dir, run_cli, tmp_path, attack):
+    registry_dir = state_dir.parent / ".mission"
+    registry_dir.mkdir()
+    registry = registry_dir / "approval-verifiers.json"
+    if attack == "malformed":
+        registry.write_text("{")
+    elif attack == "duplicate":
+        registry.write_text('{"schema":"mission-approval-verifier-registry/1","schema":"x","verifiers":[]}')
+    elif attack == "traversal":
+        registry.write_text(json.dumps({"schema": "mission-approval-verifier-registry/1", "verifiers": [{"id": "fixture-verifier", "entry_point": "../unsafe"}]}))
+    elif attack == "symlink":
+        registry.symlink_to(tmp_path / "elsewhere.json")
+    elif attack == "fifo":
+        os.mkfifo(registry)
+    elif attack == "hardlink":
+        source = tmp_path / "registry.json"
+        source.write_text(json.dumps({"schema": "mission-approval-verifier-registry/1", "verifiers": []}))
+        os.link(source, registry)
+    else:
+        registry.write_bytes(b"x" * (64 * 1024 + 1))
+    before = (state_dir / "sessions" / "test.json").read_bytes()
+    result = run_cli(
+        "mark-passes", "--force", "--reason", "bounded override", "--approved-by-user",
+        "--approval-evidence-ref", "sha256:" + "a" * 64,
+        "--approved-actor", "role:owner", "--approved-at", datetime.now(timezone.utc).isoformat(),
+        "--reason-code", "user-override", "--approval-verifier", "fixture-verifier", cwd=state_dir.parent,
+    )
+    assert result.returncode == 2
+    assert (state_dir / "sessions" / "test.json").read_bytes() == before
 
 
 def test_approval_verifier_callback_returns_typed_verified_envelope(tmp_path):

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- New score writes record immutable, content-addressed scoring and review provenance regardless of a mutable or missing schema marker; a successful write upgrades state to schema v4 while historical terminal data remains read-only. Forced passes require a host-registered verifier callback returning a canonical request/response/receipt envelope with a consumed marker rather than a boolean assertion, and audit validates that same envelope before classifying it verified (#383).
+- New score writes record immutable, content-addressed scoring and review provenance regardless of a mutable or missing schema marker; a successful write upgrades state to schema v4 while historical terminal data remains read-only. Forced passes require a canonical request/response/receipt envelope with a consumed marker rather than a boolean assertion. Hosts may map only safe verifier and installed entry-point identifiers in fixed repository/user registries; malformed or linked registries, uninstalled/ambiguous entry points, arbitrary providers, load errors, invalid typed responses, and timeouts fail closed. Audit validates that same envelope before classifying it verified (#383).
 
 ### Added
 

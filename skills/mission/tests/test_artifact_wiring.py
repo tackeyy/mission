@@ -269,17 +269,16 @@ def test_aggregate_rejects_artifact_mutated_after_identity_capture(
 
 
 def test_mark_passes_rejects_artifact_identity_substitution(
-    state_dir, run_cli, read_state
+    state_dir, run_cli, read_state, tmp_path
 ):
     root = state_dir.parent
     assert run_cli("artifact", "init", "--json", cwd=root).returncode == 0
     assert run_cli("artifact", "render", "--json", cwd=root).returncode == 0
-    state_path = state_dir / "sessions" / "test.json"
     state = read_state(state_dir)
-    state["score_history"] = [
-        {"iteration": 1, "composite": 4.5, "min_item": 4.0, "open_high": 0}
-    ]
-    state_path.write_text(json.dumps(state), encoding="utf-8")
+    state["schema_version"] = 4
+    (state_dir / "sessions" / "test.json").write_text(json.dumps(state), encoding="utf-8")
+    review = _write_review(tmp_path / "review.json")
+    assert run_cli("review-finalize", "--iteration", "1", "--input", str(review), cwd=root).returncode == 0
     (root / state["artifact"]["path"]).write_text(
         "# substituted artifact\n", encoding="utf-8"
     )
@@ -580,16 +579,16 @@ def test_stats_json_and_text_keep_not_applicable_identity_contradiction_invalid(
 
 
 def test_mark_passes_warns_for_missing_identity_before_profile_reaches_threshold(
-    state_dir, run_cli, read_state
+    state_dir, run_cli, read_state, tmp_path
 ):
     state_path = state_dir / "sessions" / "test.json"
     state = read_state(state_dir)
     state["task_profile"] = {"primary": "portable-analysis"}
     state["artifact_applicability"] = "producing"
-    state["score_history"] = [
-        {"iteration": 1, "composite": 4.5, "min_item": 4.0, "open_high": 0}
-    ]
+    state["schema_version"] = 4
     state_path.write_text(json.dumps(state), encoding="utf-8")
+    review = _write_review(tmp_path / "review.json")
+    assert run_cli("review-finalize", "--iteration", "1", "--input", str(review), cwd=state_dir.parent).returncode == 0
 
     result = run_cli("mark-passes", cwd=state_dir.parent)
 

@@ -32,12 +32,14 @@ from bisect import bisect_left, bisect_right
 import contextlib
 import fcntl
 import hashlib
+import importlib.metadata
 import io
 import json
 import math
 import os
 import re
 import secrets
+import signal
 import socket
 import stat
 import subprocess
@@ -6260,6 +6262,10 @@ class ApprovalVerifier(Protocol):
 
 
 _APPROVAL_VERIFIERS: dict[str, ApprovalVerifier] = {}
+_APPROVAL_VERIFIER_ENTRY_POINT_GROUP = "mission.approval_verifiers"
+_APPROVAL_VERIFIER_REGISTRY_SCHEMA = "mission-approval-verifier-registry/1"
+_APPROVAL_VERIFIER_REGISTRY_LIMIT = 64 * 1024
+_APPROVAL_VERIFIER_TIMEOUT_SEC = 5
 
 
 def register_approval_verifier(name: str, verifier: ApprovalVerifier) -> None:
@@ -6269,15 +6275,110 @@ def register_approval_verifier(name: str, verifier: ApprovalVerifier) -> None:
     _APPROVAL_VERIFIERS[name] = verifier
 
 
-def verify_force_approval(request: dict, verifier_name: object) -> dict:
+def _reject_duplicate_registry_key(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("approval verifier registry has duplicate keys")
+        value[key] = item
+    return value
+
+
+def _read_approval_verifier_registry(path: Path) -> dict:
+    """Read a bounded registry without following a file replacement or link."""
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise ValueError("approval verifier registry cannot be read safely on this host")
+    try:
+        fd = os.open(os.fspath(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > _APPROVAL_VERIFIER_REGISTRY_LIMIT:
+                raise ValueError("approval verifier registry must be a bounded regular file")
+            raw = os.read(fd, info.st_size + 1)
+            if len(raw) != info.st_size or os.fstat(fd).st_size != info.st_size:
+                raise ValueError("approval verifier registry changed while being read")
+        finally:
+            os.close(fd)
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_registry_key)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("approval verifier registry is invalid") from exc
+    if not isinstance(value, dict) or set(value) != {"schema", "verifiers"} or value.get("schema") != _APPROVAL_VERIFIER_REGISTRY_SCHEMA:
+        raise ValueError("approval verifier registry is invalid")
+    verifiers = value.get("verifiers")
+    if not isinstance(verifiers, list) or len(verifiers) > 64:
+        raise ValueError("approval verifier registry is invalid")
+    result = {}
+    for item in verifiers:
+        if not isinstance(item, dict) or set(item) != {"id", "entry_point"}:
+            raise ValueError("approval verifier registry is invalid")
+        identifier, entry_point = item.get("id"), item.get("entry_point")
+        if (not isinstance(identifier, str) or not _APPROVAL_VERIFIER_NAME_RE.fullmatch(identifier)
+                or not isinstance(entry_point, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", entry_point)
+                or identifier in result):
+            raise ValueError("approval verifier registry is invalid")
+        result[identifier] = entry_point
+    return result
+
+
+def _configured_approval_entry_point(cwd: Path, verifier_name: str):
+    """Resolve a named verifier from fixed local/user registries and installed metadata only."""
+    locations = [cwd / ".mission" / "approval-verifiers.json"]
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    locations.append((Path(xdg) if xdg else Path.home() / ".config") / "mission" / "approval-verifiers.json")
+    configured = {}
+    for location in locations:
+        try:
+            exists = location.exists()
+        except OSError as exc:
+            raise ValueError("approval verifier registry is invalid") from exc
+        if not exists:
+            continue
+        for identifier, entry_point in _read_approval_verifier_registry(location).items():
+            if identifier in configured:
+                raise ValueError("approval verifier registry has duplicate verifier ids")
+            configured[identifier] = entry_point
+    entry_point_name = configured.get(verifier_name)
+    if entry_point_name is None:
+        return None
+    discovered = importlib.metadata.entry_points()
+    candidates = discovered.select(group=_APPROVAL_VERIFIER_ENTRY_POINT_GROUP) if hasattr(discovered, "select") else discovered.get(_APPROVAL_VERIFIER_ENTRY_POINT_GROUP, ())
+    matches = [item for item in candidates if item.name == entry_point_name]
+    if len(matches) != 1:
+        raise ValueError("approval verifier entry point is not installed")
+    return matches[0]
+
+
+@contextlib.contextmanager
+def _approval_verifier_timeout():
+    """Bound verifier execution; timeout rejects before the state writer can run."""
+    if not hasattr(signal, "SIGALRM") or not hasattr(signal, "setitimer"):
+        raise ValueError("approval verifier timeout is unavailable on this host")
+    def expired(_signum, _frame):
+        raise TimeoutError("approval verifier timed out")
+    previous = signal.signal(signal.SIGALRM, expired)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, _APPROVAL_VERIFIER_TIMEOUT_SEC)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGALRM, previous)
+        signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+
+
+def verify_force_approval(request: dict, verifier_name: object, *, cwd: Path | None = None) -> dict:
     """Fail closed unless a registered callback returns a matching typed envelope."""
     if not isinstance(verifier_name, str) or not _APPROVAL_VERIFIER_NAME_RE.fullmatch(verifier_name):
         raise ValueError("approval verifier is invalid or not configured")
     verifier = _APPROVAL_VERIFIERS.get(verifier_name)
-    if verifier is None:
+    entry_point = _configured_approval_entry_point(cwd, verifier_name) if verifier is None and cwd is not None else None
+    if verifier is None and entry_point is None:
         raise ValueError("approval verifier is not configured")
     try:
-        result = verifier(request)
+        with _approval_verifier_timeout():
+            if verifier is None:
+                verifier = entry_point.load()
+                if not callable(verifier):
+                    raise ValueError("approval verifier entry point is invalid")
+            result = verifier(request)
     except Exception as exc:
         raise ValueError("approval verifier rejected the evidence") from exc
     try:
@@ -7686,7 +7787,7 @@ def cmd_mark_passes(args):
                     approval_evidence_ref=approval_ref, approved_actor=approved_actor, approved_at=approved_at,
                     reason_code=reason_code, event_nonce=secrets.token_hex(32),
                 )
-                verification = verify_force_approval(request, approval_verifier)
+                verification = verify_force_approval(request, approval_verifier, cwd=cwd)
                 if _force_envelope_replayed(cwd, verification):
                     raise ValueError("approval request or receipt was already consumed")
                 validate_receipt_binding(cwd, verification)
