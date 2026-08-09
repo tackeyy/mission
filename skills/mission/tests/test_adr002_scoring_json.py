@@ -167,7 +167,9 @@ def test_scoring_json_archives_evidence_with_meta(state_dir, run_cli, read_state
     r = run_cli("push-score", "--iteration", "1", "--scoring-json", str(src),
                 cwd=state_dir.parent)
     assert r.returncode == 0, f"stderr: {r.stderr}"
-    dst = state_dir / "archive" / "iter-1-abc12345-scoring.json"
+    archived = list((state_dir / "archive").glob("iter-1-abc12345-scoring-*.json"))
+    assert len(archived) == 1
+    dst = archived[0]
     assert dst.exists()
     payload = json.loads(dst.read_text(encoding="utf-8"))
     assert payload["_meta"]["session_id"] == "test"

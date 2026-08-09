@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- New sessions record immutable, content-addressed scoring and review provenance. Normal passes require an aggregate evidence digest, opaque generation, and an explicit portable revision scope; historical state remains read-only legacy data. Forced passes require verifier-backed approval metadata rather than a boolean assertion, and audit separates verified approvals from unverifiable legacy overrides (#383).
+
 ### Added
 
 - Activity measurement now starts automatically with planning, follows portable defaults for every non-terminal phase, and lets `advance --phase` use that default unless an explicit activity override is supplied. Review aggregation atomically begins scoring measurement, terminal writers close any open segment, and recovery records bounded unobserved-gap reasons. Audit reports explicit elapsed conservation and treats coverage below 70% as an instrumentation gap before emitting slow-run findings (#382).

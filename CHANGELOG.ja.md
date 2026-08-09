@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+- 新規 session は content-addressed な不変 scoring/review provenance を記録し、通常 pass には aggregate evidence の digest、opaque generation、portable な revision scope を必須化しました。既存 state は破壊的変更せず legacy として読み取り互換を保ちます。force pass は boolean 宣言ではなく verifier による approval metadata を要求し、audit は検証済み承認と検証不能な旧 override を分離します (#383)。
+
 ### 追加
 
 - activity 計測を planning の自動開始から全非終端 phase の portable default まで連動させ、`advance --phase` は明示 override がなければ既定 activity を使うようにした。review 集計は scoring の計測を atomic に開始し、terminal writer は open segment を閉じ、recovery は bounded な unobserved-gap reason を記録する。audit は elapsed conservation を明示し、coverage 70% 未満では slow-run finding より instrumentation-gap を優先する (#382)。

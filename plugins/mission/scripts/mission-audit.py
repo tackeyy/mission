@@ -1619,8 +1619,12 @@ _USER_APPROVAL_MENTION_TOKENS = (
 def is_forced_pass_autonomous_suspect(state: dict[str, Any]) -> bool:
     """#185: force_approved_by_user が記録されておらず (旧形式)、かつ force_reason にも
     ユーザー承認への言及がない forced-pass を「自律 force の疑いあり」として検出する。"""
+    approval = state.get("force_approval")
+    if isinstance(approval, dict):
+        # New-format records are approved only after a configured verifier said so.
+        return approval.get("verification") != "verified"
     if state.get("force_approved_by_user") is True:
-        return False
+        return True  # legacy boolean is explicitly unverifiable
     reason = str(state.get("force_reason") or "").lower()
     if any(token in reason for token in _USER_APPROVAL_MENTION_TOKENS):
         return False
@@ -2193,6 +2197,7 @@ def aggregate(
     pass_records = [r for r, cls in zip(records, classes) if cls == "pass"]
     forced = [r for r in records if r.state.get("passes") and r.state.get("passes_forced")]
     forced_autonomous_suspect = [r for r in forced if is_forced_pass_autonomous_suspect(r.state)]
+    forced_approved_verified = [r for r in forced if r not in forced_autonomous_suspect]
     ungated = [
         r for r in records
         if r.state.get("passes")
@@ -2369,6 +2374,7 @@ def aggregate(
         "pass_rate_denominator": pass_rate_summary["completed_pass_rate_denominator"],
         "pass_rate": pass_rate_summary["completed_pass_rate"],
         "forced_pass_count": len(forced),
+        "forced_pass_approved_verified_count": len(forced_approved_verified),
         "forced_pass_autonomous_suspect_count": len(forced_autonomous_suspect),  # #185
         "ungated_pass_count": len(ungated),
         "duplicate_group_count": len(duplicates),
@@ -2389,6 +2395,7 @@ def aggregate(
         "low_score_pass_sessions": low_score_pass,
         "specialist_invocation_gap_sessions": specialist_invocation_gaps,
         "forced_pass_sessions": forced,
+        "forced_pass_approved_verified_sessions": forced_approved_verified,
         "forced_pass_autonomous_suspect_sessions": forced_autonomous_suspect,  # #185
         "ungated_pass_sessions": ungated,
         "duplicates": duplicates,
