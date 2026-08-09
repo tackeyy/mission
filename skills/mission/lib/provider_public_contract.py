@@ -12,7 +12,9 @@ OPAQUE_PROVIDER_ID = re.compile(r"provider:sha256:[0-9a-f]{64}\Z")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+:-]{0,127}\Z")
 PRIVATE_PATH = re.compile(
-    r"(?:^|[\s\"'(])(?:/(?:Users|home|root|private|tmp)(?:/|\Z)|[A-Za-z]:[\\/])"
+    r"(?:file:/|(?<![A-Za-z0-9/])/(?!/)|(?<![A-Za-z0-9])~[\\/]|"
+    r"(?<![A-Za-z0-9])[A-Za-z]:[\\/])",
+    re.IGNORECASE,
 )
 VALID_PHASES = {"planning", "execution", "review", "scoring", "critic", "synthesis"}
 VALID_COMPLEXITIES = {"Simple", "Standard", "Complex", "Critical"}
@@ -22,6 +24,26 @@ VALID_SELECTION_SOURCES = {
     "user-instruction",
     "manual",
     "task-required",
+}
+VALID_INVOCATION_MODES = {
+    "core-loop",
+    "skill-tool",
+    "command-provider",
+    "codex-inline",
+    "natural-language",
+    "fallback-core",
+}
+VALID_INVOCATION_STATUSES = {
+    "selected",
+    "started",
+    "completed",
+    "prepared",
+    "awaiting-input",
+    "inline-applied",
+    "skill-tool-applied",
+    "skipped",
+    "unavailable",
+    "failed",
 }
 VALID_PROJECTION_STATES = {
     "eligible",
@@ -93,13 +115,24 @@ def _reject_unknown(record: dict[str, Any], allowed: frozenset[str], base: str) 
         _reject(f"{base}/{unknown[0]}")
 
 
-def _safe_text(value: object, *, maximum: int = 2048) -> bool:
+def _safe_plain_text(value: object, *, maximum: int = 2048) -> bool:
     return (
         isinstance(value, str)
         and len(value) <= maximum
         and not any(ord(char) < 32 or ord(char) == 127 for char in value)
-        and PRIVATE_PATH.search(value) is None
     )
+
+
+def _safe_text(value: object, *, maximum: int = 2048) -> bool:
+    return _safe_plain_text(value, maximum=maximum) and PRIVATE_PATH.search(value) is None
+
+
+def _safe_score(value: object) -> bool:
+    if type(value) is int:
+        return 0 <= value <= 1
+    if type(value) is float:
+        return math.isfinite(value) and 0.0 <= value <= 1.0
+    return False
 
 
 def _safe_identity(value: object) -> bool:
@@ -108,7 +141,7 @@ def _safe_identity(value: object) -> bool:
 
 
 def _safe_source(value: object) -> bool:
-    if not _safe_text(value, maximum=512):
+    if not _safe_plain_text(value, maximum=512):
         return False
     text = str(value)
     if ".." in text.replace("\\", "/").split("/"):
@@ -223,9 +256,7 @@ def _validate_candidate(record: object, base: str) -> None:
     ):
         if field in record and not _safe_digest(record[field]):
             _reject(f"{base}/{field}")
-    if "score" in record and (
-        type(record["score"]) not in {int, float} or not math.isfinite(record["score"])
-    ):
+    if "score" in record and not _safe_score(record["score"]):
         _reject(f"{base}/score")
     for field in ("status", "eligibility_reason"):
         if field in record and not (
@@ -385,7 +416,7 @@ def _validate_invocation(record: object, base: str) -> None:
         _reject(base)
     _reject_unknown(record, INVOCATION_FIELDS, base)
     if "iteration" in record and (
-        type(record["iteration"]) is not int or record["iteration"] < 0
+        type(record["iteration"]) is not int or not 0 <= record["iteration"] <= 1_000_000
     ):
         _reject(f"{base}/iteration")
     if "phase" in record and record["phase"] not in VALID_PHASES:
@@ -393,11 +424,14 @@ def _validate_invocation(record: object, base: str) -> None:
     for field in ("role", "skill", "reason", "notes", "bounded_purpose"):
         if field in record and not _safe_text(record[field], maximum=2048):
             _reject(f"{base}/{field}")
-    for field in ("mode", "status", "reason_code"):
-        if field in record and not (
-            isinstance(record[field], str) and TOKEN.fullmatch(record[field])
-        ):
-            _reject(f"{base}/{field}")
+    if "mode" in record and record["mode"] not in VALID_INVOCATION_MODES:
+        _reject(f"{base}/mode")
+    if "status" in record and record["status"] not in VALID_INVOCATION_STATUSES:
+        _reject(f"{base}/status")
+    if "reason_code" in record and not (
+        isinstance(record["reason_code"], str) and TOKEN.fullmatch(record["reason_code"])
+    ):
+        _reject(f"{base}/reason_code")
     for field in ("timestamp", "started_at", "completed_at"):
         if field in record and not _safe_text(record[field], maximum=64):
             _reject(f"{base}/{field}")

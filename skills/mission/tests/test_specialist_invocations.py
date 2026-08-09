@@ -1,14 +1,27 @@
 """Issue #31: specialist skill invocation logging."""
 import json
+import importlib.util
 import os
+from pathlib import Path
 import re
 import shlex
 import sys
+
+import pytest
 
 
 def _json_result(result):
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
+
+
+def _load_mission_state_module(name):
+    state_path = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
+    spec = importlib.util.spec_from_file_location(name, state_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 def _assert_unsafe_legacy_specialist_record(result, field):
@@ -188,6 +201,136 @@ def test_log_invocation_archives_evidence_with_metadata(state_dir, run_cli, tmp_
     assert "status=completed" in content
     assert "No blocking issues." in content
     assert entry["evidence_path"] == ".mission-state/archive/iter-1-abc12345-specialist-dev-code-reviewer.md"
+
+
+def test_log_invocation_preflights_pending_entry_before_archive_or_state_side_effects(
+    state_dir, run_cli, tmp_path
+):
+    state_path = state_dir / "sessions" / "test.json"
+    state_before = state_path.read_bytes()
+    backup_path = state_path.with_suffix(".json.bak")
+    backup_path.unlink(missing_ok=True)
+    evidence = tmp_path / "pending-review.md"
+    evidence.write_text("private review body", encoding="utf-8")
+    archive_dir = state_dir / "archive"
+    artifacts_before = set(archive_dir.glob("*")) if archive_dir.exists() else set()
+    private_skill = "/home/portable-user/private-provider"
+
+    result = run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "review",
+        "--role", "reviewer",
+        "--skill", private_skill,
+        "--mode", "skill-tool",
+        "--status", "completed",
+        "--selection-source", "manual",
+        "--evidence-output", str(evidence),
+        "--json",
+        cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 2
+    assert private_skill not in result.stdout
+    assert private_skill not in result.stderr
+    assert state_path.read_bytes() == state_before
+    assert not backup_path.exists()
+    artifacts_after = set(archive_dir.glob("*")) if archive_dir.exists() else set()
+    assert artifacts_after == artifacts_before
+
+
+@pytest.mark.parametrize(
+    "private_note",
+    [
+        "finding path=/home/portable-user/private.txt",
+        "finding path:/root/private.txt",
+        "finding path=/tmp/private.txt",
+        r"finding path=C:\\Users\\portable-user\\private.txt",
+        "finding path=~/private.txt",
+    ],
+)
+def test_log_invocation_cli_rejects_embedded_private_locator_without_disclosure(
+    state_dir, run_cli, private_note
+):
+    state_path = state_dir / "sessions" / "test.json"
+    state_before = state_path.read_bytes()
+
+    result = run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "review",
+        "--role", "reviewer",
+        "--skill", "portable-provider",
+        "--mode", "skill-tool",
+        "--status", "completed",
+        "--notes", private_note,
+        "--json",
+        cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 2
+    assert private_note not in result.stdout
+    assert private_note not in result.stderr
+    assert state_path.read_bytes() == state_before
+
+
+@pytest.mark.parametrize(
+    "private_text",
+    [
+        "path=/home/portable-user/private.txt",
+        "path:/root/private.txt",
+        "path=/tmp/private.txt",
+        r"path=C:\\Users\\portable-user\\private.txt",
+        "path=~/private.txt",
+    ],
+)
+def test_provider_output_redactor_covers_every_private_locator_separator(private_text):
+    module = _load_mission_state_module("mission_state_issue394_path_redactor")
+
+    redacted = module._redact_provider_output(f"finding {private_text}")
+
+    assert private_text not in redacted
+    assert "[REDACTED_PATH]" in redacted
+
+
+def test_log_invocation_rolls_back_staged_archive_when_state_publish_fails(
+    state_dir, tmp_path, monkeypatch
+):
+    module = _load_mission_state_module("mission_state_issue394_archive_rollback")
+    state_path = state_dir / "sessions" / "test.json"
+    state_before = state_path.read_bytes()
+    evidence = tmp_path / "rollback-review.md"
+    evidence.write_text("portable review body", encoding="utf-8")
+    archive_dir = state_dir / "archive"
+    artifacts_before = set(archive_dir.glob("*")) if archive_dir.exists() else set()
+    args = module._build_parser().parse_args(
+        [
+            "specialists", "log-invocation",
+            "--iteration", "1",
+            "--phase", "review",
+            "--role", "reviewer",
+            "--skill", "portable-provider",
+            "--mode", "skill-tool",
+            "--status", "completed",
+            "--evidence-output", str(evidence),
+            "--json",
+        ]
+    )
+    monkeypatch.chdir(state_dir.parent)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    monkeypatch.setattr(
+        module,
+        "atomic_write_json",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("publish failed")),
+    )
+
+    with pytest.raises(OSError, match="publish failed"):
+        args.func(args)
+
+    assert state_path.read_bytes() == state_before
+    artifacts_after = set(archive_dir.glob("*")) if archive_dir.exists() else set()
+    assert artifacts_after == artifacts_before
 
 
 def test_log_invocation_records_codex_inline_usage(state_dir, run_cli, read_state):
@@ -744,6 +887,58 @@ def test_invoke_command_provider_archives_evidence_and_logs_invocation(run_cli, 
     public_state = run_cli("get", cwd=tmp_path)
     assert public_state.returncode == 0, public_state.stderr
     assert json.loads(public_state.stdout)["specialist_invocations"][0] == entry
+
+
+def test_invoke_command_preflights_timeout_before_activity_spawn_or_archive(
+    run_cli, tmp_path
+):
+    run_cli(
+        "init", "command provider preflight", "--complexity", "Complex",
+        cwd=tmp_path, check=True,
+    )
+    spawned = tmp_path / "provider-spawned"
+    helper = tmp_path / "provider.py"
+    helper.write_text(
+        "from pathlib import Path\n"
+        f"Path({str(spawned)!r}).write_text('spawned', encoding='utf-8')\n"
+        "print('substantive provider output')\n",
+        encoding="utf-8",
+    )
+    provider = {
+        "provider_id": "portable-timeout-provider",
+        "role": "portable-timeout-provider",
+        "skill": "portable-timeout-provider",
+        "kind": "command",
+        "command": sys.executable,
+        "args": [str(helper)],
+        "task_profiles": ["documentation"],
+        "phases": ["planning"],
+    }
+    _seed_legacy_command_provider_state(tmp_path, provider)
+    state_path = tmp_path / ".mission-state" / "sessions" / "test.json"
+    state_before = state_path.read_bytes()
+    backup_path = state_path.with_suffix(".json.bak")
+    backup_path.unlink(missing_ok=True)
+    archive_dir = tmp_path / ".mission-state" / "archive"
+    artifacts_before = set(archive_dir.glob("*")) if archive_dir.exists() else set()
+
+    result = run_cli(
+        "specialists", "invoke-command",
+        "--provider", "portable-timeout-provider",
+        "--iteration", "1",
+        "--phase", "planning",
+        "--timeout", "86401",
+        "--json",
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    assert state_path.read_bytes() == state_before
+    assert not backup_path.exists()
+    assert not spawned.exists()
+    artifacts_after = set(archive_dir.glob("*")) if archive_dir.exists() else set()
+    assert artifacts_after == artifacts_before
 
 
 def test_invoke_command_provider_records_failure_without_blocking_optional_provider(run_cli, tmp_path):

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 from bisect import bisect_left, bisect_right
+import copy
 import contextlib
 import errno
 import fcntl
@@ -3201,7 +3202,10 @@ def _public_specialist_record(record: dict) -> dict:
     if type(record.get("registry_version")) is int:
         public["registry_version"] = record["registry_version"]
     score = record.get("score")
-    if type(score) in {int, float} and math.isfinite(score):
+    if (
+        (type(score) is int and 0 <= score <= 1)
+        or (type(score) is float and math.isfinite(score) and 0.0 <= score <= 1.0)
+    ):
         public["score"] = score
     normalized = record.get("normalized_activation")
     if isinstance(normalized, dict):
@@ -4040,31 +4044,103 @@ def cmd_specialists_summary(args):
     )
 
 
-def _archive_specialist_evidence(cwd: Path, evidence_output: str, iteration: int,
-                                 data: dict, entry: dict) -> str | None:
-    """Specialist evidence を archive/iter-N-<mission8>-specialist-<skill>.md に保存する."""
-    src = Path(evidence_output)
-    if not (src.exists() and src.is_file()):
-        print(f"WARNING: --evidence-output のファイルが見つかりません: {src}", file=sys.stderr)
-        return None
-    return _archive_specialist_text(cwd, src.read_text(encoding="utf-8"), iteration, data, entry)
-
-
-def _archive_specialist_text(cwd: Path, text: str, iteration: int, data: dict, entry: dict) -> str:
+def _planned_specialist_archive_path(
+    cwd: Path, iteration: int, data: dict, entry: dict
+) -> Path:
     archive_dir = state_dir(cwd) / "archive"
-    archive_dir.mkdir(parents=True, exist_ok=True)
     gid = (data.get("mission_id") or "unknown")[:8]
     skill_slug = _slug_for_filename(entry.get("skill") or "unknown")
-    dst = archive_dir / f"iter-{iteration}-{gid}-specialist-{skill_slug}.md"
-    meta = (
+    return archive_dir / f"iter-{iteration}-{gid}-specialist-{skill_slug}.md"
+
+
+def _specialist_archive_document(text: str, iteration: int, data: dict, entry: dict) -> str:
+    return (
         f"<!-- mission-specialist-meta: session_id={data.get('session_id')} "
         f"agent={data.get('agent') or 'unknown'} mission_id={data.get('mission_id')} "
         f"iteration={iteration} phase={entry.get('phase')} role={entry.get('role')} "
         f"skill={entry.get('skill')} mode={entry.get('mode')} status={entry.get('status')} "
         f"timestamp={entry['timestamp']} -->\n"
+        f"{text}"
     )
-    dst.write_text(meta + text, encoding="utf-8")
-    return str(dst)
+
+
+def _stage_specialist_archive(dst: Path, document: str) -> Path:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{dst.name}.", dir=dst.parent)
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(document)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
+    return temp_path
+
+
+def _publish_staged_specialist_archive(temp_path: Path, dst: Path) -> Path | None:
+    previous = None
+    try:
+        if dst.exists() or dst.is_symlink():
+            fd, previous_name = tempfile.mkstemp(prefix=f".{dst.name}.previous.", dir=dst.parent)
+            os.close(fd)
+            previous = Path(previous_name)
+            previous.unlink()
+            os.replace(dst, previous)
+        os.replace(temp_path, dst)
+    except BaseException:
+        if previous is not None and previous.exists():
+            os.replace(previous, dst)
+        raise
+    return previous
+
+
+def _rollback_specialist_archive(
+    temp_path: Path | None, dst: Path | None, previous: Path | None, published: bool
+) -> None:
+    if temp_path is not None:
+        temp_path.unlink(missing_ok=True)
+    if published and dst is not None:
+        dst.unlink(missing_ok=True)
+    if previous is not None and dst is not None and previous.exists():
+        os.replace(previous, dst)
+
+
+def _commit_specialist_state_with_archive(
+    sf: Path,
+    cwd: Path,
+    data: dict,
+    entry: dict,
+    iteration: int,
+    evidence_text: str | None,
+) -> str | None:
+    """Publish validated evidence and state together, restoring the archive on failure."""
+    _validate_specialist_public_state(data)
+    dst = (
+        _planned_specialist_archive_path(cwd, iteration, data, entry)
+        if evidence_text is not None
+        else None
+    )
+    temp_path = None
+    previous = None
+    published = False
+    try:
+        if dst is not None:
+            document = _specialist_archive_document(evidence_text, iteration, data, entry)
+            temp_path = _stage_specialist_archive(dst, document)
+            _validate_specialist_public_state(data)
+            previous = _publish_staged_specialist_archive(temp_path, dst)
+            temp_path = None
+            published = True
+        backup_state(sf)
+        atomic_write_json(sf, data)
+    except BaseException:
+        _rollback_specialist_archive(temp_path, dst, previous, published)
+        raise
+    if previous is not None:
+        previous.unlink(missing_ok=True)
+    return str(dst) if dst is not None else None
 
 
 def _find_provider(data: dict, provider_id: str) -> dict | None:
@@ -4087,7 +4163,8 @@ def _redact_provider_output(text: str) -> str:
     for pattern in patterns:
         redacted = pattern.sub(lambda m: f"{m.group(1)}=[REDACTED]", redacted)
     redacted = re.sub(
-        r"(?<![A-Za-z0-9:/])(?:/(?!/)[^\s'\"`]+|~/[^\s'\"`]+|[A-Za-z]:[\\/][^\s'\"`]+)",
+        r"(?i)(?:file:/{1,3}|(?<![A-Za-z0-9/])/(?!/)|"
+        r"(?<![A-Za-z0-9])~[\\/]|(?<![A-Za-z0-9])[A-Za-z]:[\\/])[^\s'\"`]*",
         "[REDACTED_PATH]",
         redacted,
     )
@@ -4147,12 +4224,12 @@ def _classify_command_provider_result(provider: dict, exit_code: int | None,
 
 
 def _provider_timeout(provider: dict, override: int | None) -> int:
-    if override is not None:
-        return override
-    try:
-        return int(provider.get("timeout") or 120)
-    except (TypeError, ValueError):
-        return 120
+    value = override if override is not None else provider.get("timeout", 120)
+    if value is None:
+        value = 120
+    if type(value) is not int or not 1 <= value <= 86400:
+        raise SpecialistPublicContractError("/specialist_invocations/pending/timeout")
+    return value
 
 
 def _selected_specialist_skills(data: dict) -> set[str]:
@@ -4236,6 +4313,45 @@ def _add_selected_specialist_metadata(data: dict, entry: dict, selection_source:
     return public_entry
 
 
+def _prepare_specialist_invocation_state(
+    data: dict,
+    entry: dict,
+    *,
+    cwd: Path,
+    iteration: int,
+    evidence_planned: bool,
+    selection_source: str | None = None,
+    provider: dict | None = None,
+    selection_reason: str | None = None,
+) -> tuple[dict, dict, dict | None]:
+    """Build and validate the complete public state before any invocation side effect."""
+    prospective = copy.deepcopy(data)
+    pending_entry = copy.deepcopy(entry)
+    validation_probe = copy.deepcopy(prospective)
+    validation_probe.setdefault("specialist_invocations", []).append(
+        copy.deepcopy(pending_entry)
+    )
+    _validate_specialist_public_state(validation_probe)
+    if evidence_planned:
+        planned = _planned_specialist_archive_path(
+            cwd, iteration, prospective, pending_entry
+        )
+        pending_entry["evidence_path"] = _state_relative_path(cwd, planned)
+    selected_entry = None
+    if selection_source:
+        selected_entry = _add_selected_specialist_metadata(
+            prospective,
+            pending_entry,
+            selection_source,
+            pending_entry.get("timestamp") or iso_now(),
+            provider,
+            selection_reason,
+        )
+    prospective.setdefault("specialist_invocations", []).append(pending_entry)
+    _validate_specialist_public_state(prospective)
+    return prospective, pending_entry, selected_entry
+
+
 def _command_provider_packet(data: dict, provider: dict, args) -> str:
     body = ""
     if getattr(args, "input_file", None):
@@ -4295,6 +4411,7 @@ def cmd_invoke_command_provider(args):
         "provider_kind": "command",
     }
     command = provider.get("command")
+    timeout = _provider_timeout(provider, args.timeout)
     if not _command_is_available(command):
         entry.update({
             "status": "unavailable",
@@ -4304,10 +4421,18 @@ def cmd_invoke_command_provider(args):
         with StateLock(lock_file(cwd)):
             data = json.loads(sf.read_text())
             _validate_specialist_public_state(data)
-            data.setdefault("specialist_invocations", []).append(entry)
+            data = stamp_metadata(data, cwd)
             data["updated_at"] = entry["completed_at"]
-            backup_state(sf)
-            atomic_write_json(sf, stamp_metadata(data, cwd))
+            data, entry, _ = _prepare_specialist_invocation_state(
+                data,
+                entry,
+                cwd=cwd,
+                iteration=args.iteration,
+                evidence_planned=False,
+            )
+            _commit_specialist_state_with_archive(
+                sf, cwd, data, entry, args.iteration, None
+            )
         print(json.dumps({"ok": False, "entry": entry}, indent=2 if args.json else None, ensure_ascii=False))
         return
 
@@ -4315,9 +4440,28 @@ def cmd_invoke_command_provider(args):
     packet = _command_provider_packet(data, provider, args)
     command_env = os.environ.copy()
     command_env.update(_string_map(provider.get("env")))
-    timeout = _provider_timeout(provider, args.timeout)
+    entry["timeout"] = timeout
+    _prepare_specialist_invocation_state(
+        data,
+        entry,
+        cwd=cwd,
+        iteration=args.iteration,
+        evidence_planned=True,
+        selection_source=args.selection_source,
+        provider=provider,
+    )
     with StateLock(lock_file(cwd)):
         dispatch_state = json.loads(sf.read_text())
+        _validate_specialist_public_state(dispatch_state)
+        _prepare_specialist_invocation_state(
+            dispatch_state,
+            entry,
+            cwd=cwd,
+            iteration=args.iteration,
+            evidence_planned=True,
+            selection_source=args.selection_source,
+            provider=provider,
+        )
         record_activity_event(dispatch_state, "specialist", now)
         dispatch_state["updated_at"] = now
         backup_state(sf)
@@ -4346,7 +4490,6 @@ def cmd_invoke_command_provider(args):
         "status": status,
         "completed_at": completed_at,
         "exit_code": exit_code,
-        "timeout": timeout,
     })
     if reason:
         entry["reason"] = reason
@@ -4372,23 +4515,28 @@ def cmd_invoke_command_provider(args):
             and current.get("started_at") == now
         ):
             end_activity_segment(data, completed_at)
-        selected_entry = None
-        if status in APPLIED_SPECIALIST_INVOCATION_STATUSES and args.selection_source:
-            entry["selection_source"] = args.selection_source
-            selected_entry = _add_selected_specialist_metadata(
-                data,
-                entry,
-                args.selection_source,
-                completed_at,
-                provider,
-                reason,
-            )
-        archived_to = _archive_specialist_text(cwd, evidence, args.iteration, data, entry)
-        entry["evidence_path"] = _state_relative_path(cwd, archived_to)
-        data.setdefault("specialist_invocations", []).append(entry)
         data["updated_at"] = completed_at
-        backup_state(sf)
-        atomic_write_json(sf, stamp_metadata(data, cwd))
+        data = stamp_metadata(data, cwd)
+        applied_selection_source = (
+            args.selection_source
+            if status in APPLIED_SPECIALIST_INVOCATION_STATUSES
+            else None
+        )
+        if applied_selection_source:
+            entry["selection_source"] = applied_selection_source
+        data, entry, selected_entry = _prepare_specialist_invocation_state(
+            data,
+            entry,
+            cwd=cwd,
+            iteration=args.iteration,
+            evidence_planned=True,
+            selection_source=applied_selection_source,
+            provider=provider,
+            selection_reason=reason,
+        )
+        archived_to = _commit_specialist_state_with_archive(
+            sf, cwd, data, entry, args.iteration, evidence
+        )
     result = {"ok": status == "completed", "entry": entry}
     if selected_entry:
         result["selected_entry"] = selected_entry
@@ -5345,8 +5493,8 @@ def cmd_log_specialist_invocation(args):
     if not sf.exists():
         print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
         sys.exit(1)
-    if args.iteration < 0:
-        print("ERROR: --iteration は 0 以上で指定してください", file=sys.stderr)
+    if not 0 <= args.iteration <= 1_000_000:
+        print("ERROR: --iteration は 0..1000000 で指定してください", file=sys.stderr)
         sys.exit(2)
     role = (args.role or "").strip()
     skill = (args.skill or "").strip()
@@ -5367,6 +5515,7 @@ def cmd_log_specialist_invocation(args):
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
+        _validate_specialist_public_state(data)
         if _confirmed_selection_required(data, skill, args.status) and not getattr(args, "selection_source", None):
             print(
                 "ERROR: specialists_decision requested user confirmation; pass --selection-source confirmed-user "
@@ -5406,32 +5555,35 @@ def cmd_log_specialist_invocation(args):
         if getattr(args, "bounded_purpose", None):
             entry["bounded_purpose"] = args.bounded_purpose
 
+        evidence_src = Path(args.evidence_output) if args.evidence_output else None
+        evidence_planned = bool(
+            evidence_src is not None and evidence_src.exists() and evidence_src.is_file()
+        )
         data = stamp_metadata(data, cwd)
-        selected_entry = None
-        if getattr(args, "selection_source", None):
-            selected_entry = _add_selected_specialist_metadata(
-                data,
-                entry,
-                args.selection_source,
-                now,
-                reason=reason or notes,
-            )
-        archived_to = None
-        if args.evidence_output:
-            archived_to = _archive_specialist_evidence(cwd, args.evidence_output, args.iteration, data, entry)
-            if archived_to:
-                entry["evidence_path"] = _state_relative_path(cwd, archived_to)
-
-        data.setdefault("specialist_invocations", []).append(entry)
         data["updated_at"] = now
-        backup_state(sf)
-        atomic_write_json(sf, data)
+        data, entry, selected_entry = _prepare_specialist_invocation_state(
+            data,
+            entry,
+            cwd=cwd,
+            iteration=args.iteration,
+            evidence_planned=evidence_planned,
+            selection_source=getattr(args, "selection_source", None),
+            selection_reason=reason or notes,
+        )
+        evidence_text = None
+        if evidence_planned and evidence_src is not None:
+            evidence_text = evidence_src.read_text(encoding="utf-8")
+        elif evidence_src is not None:
+            print("WARNING: --evidence-output file is unavailable", file=sys.stderr)
+        archived_to = _commit_specialist_state_with_archive(
+            sf, cwd, data, entry, args.iteration, evidence_text
+        )
 
     result = {"ok": True, "entry": entry}
     if selected_entry:
         result["selected_entry"] = selected_entry
     if archived_to:
-        result["archived_to"] = archived_to
+        result["archived_to"] = entry["evidence_path"]
     if getattr(args, "json", False):
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:

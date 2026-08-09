@@ -246,6 +246,69 @@ def test_public_invocation_schema_accepts_safe_legacy_bare_command():
     validate_specialist_public_state(state)
 
 
+@pytest.mark.parametrize(
+    "private_locator",
+    [
+        "finding path=/home/portable-user/private.txt",
+        "finding path:/root/private.txt",
+        "finding path=/tmp/private.txt",
+        r"finding path=C:\\Users\\portable-user\\private.txt",
+        "finding path=~/private.txt",
+    ],
+)
+@pytest.mark.parametrize(
+    ("surface", "field", "expected_path"),
+    [
+        ("specialists_candidates", "role", "/specialists_candidates/0/role"),
+        ("specialists_selected", "reason", "/specialists_selected/0/reason"),
+        ("specialist_invocations", "notes", "/specialist_invocations/0/notes"),
+    ],
+)
+def test_public_text_fields_reject_embedded_private_locators_after_any_separator(
+    private_locator, surface, field, expected_path
+):
+    if surface == "specialist_invocations":
+        record = {
+            "iteration": 1,
+            "phase": "planning",
+            "role": "planner",
+            "skill": "portable-provider",
+            "mode": "skill-tool",
+            "status": "completed",
+            "timestamp": "2026-08-10T00:00:00Z",
+        }
+    else:
+        record = {"provider_id": "portable-provider", "kind": "skill"}
+    record[field] = private_locator
+
+    with pytest.raises(SpecialistPublicContractError) as caught:
+        validate_specialist_public_state({surface: [record]})
+
+    assert caught.value.field_path == expected_path
+    assert private_locator not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "score",
+    [True, 10**4000, float("nan"), float("inf"), -1, 1.01],
+)
+def test_public_candidate_score_is_exact_bounded_numeric_without_overflow(score):
+    state = {
+        "specialists_candidates": [
+            {
+                "provider_id": "portable-provider",
+                "kind": "skill",
+                "score": score,
+            }
+        ]
+    }
+
+    with pytest.raises(SpecialistPublicContractError) as caught:
+        validate_specialist_public_state(state)
+
+    assert caught.value.field_path == "/specialists_candidates/0/score"
+
+
 def test_complexity_trigger_is_eligible_without_profile_match():
     candidate = {
         "role": "deep-planning",
@@ -2747,6 +2810,32 @@ def test_unsafe_legacy_specialist_state_fails_closed_before_read_write_or_invoke
         assert not backup_path.exists()
 
     assert json.loads(state_path.read_text(encoding="utf-8"))["phase"] == "scoring"
+
+
+def test_get_rejects_huge_legacy_candidate_score_without_traceback(
+    run_cli, state_dir, read_state
+):
+    state_path = state_dir / "sessions" / "test.json"
+    state = read_state(state_dir)
+    state["specialists_candidates"] = [
+        {
+            "provider_id": "portable-provider",
+            "kind": "skill",
+            "score": 10**4000,
+        }
+    ]
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    result = run_cli("get", cwd=state_dir.parent)
+
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    data = json.loads(result.stdout)
+    assert data == {
+        "ok": False,
+        "reason_code": "unsafe-legacy-specialist-record",
+        "field_path": "/specialists_candidates/0/score",
+    }
 
 
 def test_init_refuses_to_archive_unsafe_legacy_specialist_state(
