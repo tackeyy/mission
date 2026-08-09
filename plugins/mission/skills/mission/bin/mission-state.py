@@ -2315,18 +2315,8 @@ def _coerce_yaml_value(value: str):
     return _coerce_scalar(value)
 
 
-def _load_specialist_registry(path: str | None) -> list[dict]:
-    """Load the small registry subset used by specialist selection.
-
-    JSON is accepted directly. YAML support intentionally covers only the documented
-    `specialists: - key: value` shape to avoid adding a runtime dependency.
-    """
-    if not path:
-        return []
-    p = Path(path).expanduser()
-    if not p.exists():
-        return []
-    txt = p.read_text(encoding="utf-8")
+def _parse_specialist_registry_text(txt: str) -> list[dict]:
+    """Parse the documented version 1 JSON/limited-YAML registry shape."""
     try:
         data = json.loads(txt)
         return list(data.get("specialists") or [])
@@ -2383,6 +2373,18 @@ def _load_specialist_registry(path: str | None) -> list[dict]:
     return specialists
 
 
+def _load_specialist_registry(path: str | None) -> list[dict]:
+    """Compatibility loader for callers that explicitly request the legacy parser."""
+    if not path:
+        return []
+    p = Path(path).expanduser()
+    try:
+        raw = p.read_bytes()
+        return _parse_specialist_registry_text(raw.decode("utf-8"))
+    except (OSError, UnicodeError):
+        return []
+
+
 def _registry_arg_paths(value) -> list[Path]:
     if not value:
         return []
@@ -2393,9 +2395,13 @@ def _registry_arg_paths(value) -> list[Path]:
     return paths
 
 
-def _load_registry_candidates(path: Path, source: str) -> list[dict]:
+def _load_registry_candidates(raw: bytes, source: str) -> list[dict]:
     candidates = []
-    for item in _load_specialist_registry(str(path)):
+    try:
+        items = _parse_specialist_registry_text(raw.decode("utf-8"))
+    except UnicodeError:
+        items = []
+    for item in items:
         if not isinstance(item, dict):
             continue
         candidate = dict(item)
@@ -2408,12 +2414,10 @@ def _load_registry_candidates(path: Path, source: str) -> list[dict]:
     return candidates
 
 
-def _load_v2_registry_candidates(path: Path, source: str) -> tuple[list[dict], list[dict]]:
-    if not path.exists():
-        return [], []
+def _load_v2_registry_candidates(raw: bytes, source: str) -> tuple[list[dict], list[dict]]:
     try:
-        items = parse_v2_registry_json(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, RegistryContractError) as error:
+        items = parse_v2_registry_json(raw.decode("utf-8"))
+    except (UnicodeError, RegistryContractError) as error:
         return [], [{
             "provider_id": "<registry>",
             "source": source,
@@ -2431,14 +2435,40 @@ def _load_v2_registry_candidates(path: Path, source: str) -> tuple[list[dict], l
     return candidates, []
 
 
-def _registry_input_record(
+def _portable_registry_identity(path: Path) -> str:
+    resolved = path.expanduser().resolve(strict=False)
+    for anchor, label in (
+        (Path.cwd().resolve(strict=False), "$PROJECT"),
+        (Path.home().resolve(strict=False), "$HOME"),
+    ):
+        try:
+            relative = resolved.relative_to(anchor)
+        except ValueError:
+            continue
+        suffix = relative.as_posix()
+        return label if suffix == "." else f"{label}/{suffix}"
+    digest = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()
+    return f"$EXTERNAL/sha256:{digest}"
+
+
+def _registry_source(path: Path, kind: str) -> str:
+    identity = _portable_registry_identity(path)
+    if kind == "explicit":
+        return f"registry:{identity}"
+    if kind == "installed":
+        return f"skill-manifest:{identity}"
+    if kind == "skill-root":
+        return f"skill-root:{identity}"
+    return identity
+
+
+def _read_registry_input(
     path: Path, source: str, kind: str, version: int, tier: int, order: int
-) -> dict:
-    canonical = str(path.expanduser().resolve(strict=False))
+) -> tuple[dict, bytes | None]:
     record = {
         "kind": kind,
         "source": source,
-        "canonical_identity": canonical,
+        "canonical_identity": _portable_registry_identity(path),
         "version": version,
         "precedence_tier": tier,
         "order": order,
@@ -2448,10 +2478,10 @@ def _registry_input_record(
     try:
         raw = path.read_bytes()
     except OSError:
-        return record
+        return record, None
     record["status"] = "present"
     record["content_digest"] = "sha256:" + hashlib.sha256(raw).hexdigest()
-    return record
+    return record, raw
 
 
 def _resolve_registry_precedence(
@@ -2497,13 +2527,22 @@ def _resolve_registry_precedence(
             resolved.append({**item, "enabled": False, "_projection_state": "conflict"})
             continue
         if item.get("disabled") is True or item.get("enabled") is False:
+            projection_state = (
+                "tombstone"
+                if item.get("registry_version") == 2 and item.get("disabled") is True
+                else "disabled"
+            )
             diagnostics.append({
                 "provider_id": identity,
                 "source": item.get("source"),
                 "reason_code": "provider-disabled",
                 "registry_entry_digest": item.get("registry_entry_digest"),
             })
-            resolved.append({**item, "enabled": False, "_projection_state": "disabled"})
+            resolved.append({
+                **item,
+                "enabled": False,
+                "_projection_state": projection_state,
+            })
             continue
         resolved.append(item)
     return resolved, diagnostics
@@ -2521,15 +2560,40 @@ def _discover_specialist_registry_candidates(args) -> tuple[list[dict], list[dic
     inputs: list[dict] = []
     invalid_barriers: list[dict] = []
 
-    def register(path: Path, source: str, kind: str, version: int, tier: int, order: int):
-        record = _registry_input_record(path, source, kind, version, tier, order)
+    def register(
+        path: Path,
+        source: str,
+        kind: str,
+        version: int,
+        tier: int,
+        order: int,
+        detection_error: RegistryContractError | None = None,
+        snapshot: tuple[dict, bytes | None] | None = None,
+    ):
+        record, raw = snapshot or _read_registry_input(
+            path, source, kind, version, tier, order
+        )
+        record.update({
+            "source": source,
+            "kind": kind,
+            "version": version,
+            "precedence_tier": tier,
+            "order": order,
+        })
         inputs.append(record)
-        if record["status"] != "present":
-            return
-        if version == 2:
-            loaded, invalid = _load_v2_registry_candidates(path, source)
+        if record["status"] != "present" or raw is None:
+            return record
+        if detection_error is not None:
+            loaded, invalid = [], [{
+                "provider_id": "<registry>",
+                "source": source,
+                "reason_code": detection_error.code,
+                "detail": str(detection_error),
+            }]
+        elif version == 2:
+            loaded, invalid = _load_v2_registry_candidates(raw, source)
         else:
-            loaded, invalid = _load_registry_candidates(path, source), []
+            loaded, invalid = _load_registry_candidates(raw, source), []
         if invalid:
             record["status"] = "invalid"
             barrier = {
@@ -2548,17 +2612,54 @@ def _discover_specialist_registry_candidates(args) -> tuple[list[dict], list[dic
             candidate["_input_identity"] = record["canonical_identity"]
             candidate["_candidate_order"] = candidate_order
             candidates.append(candidate)
+        return record
 
-    explicit: list[tuple[Path, int, int]] = []
+    explicit: list[
+        tuple[
+            Path,
+            int,
+            int,
+            RegistryContractError | None,
+            tuple[dict, bytes | None],
+            str,
+        ]
+    ] = []
     for order, path in enumerate(_registry_arg_paths(getattr(args, "registry", None))):
+        source = _registry_source(path, "explicit")
+        snapshot = _read_registry_input(path, source, "explicit", 0, 99, order)
+        raw_bytes = snapshot[1]
         try:
-            raw = path.read_text(encoding="utf-8") if path.exists() else ""
-        except (OSError, UnicodeError):
-            raw = ""
-        version = detect_registry_version(raw)
-        explicit.append((path, version, order))
-    for path, version, order in sorted(explicit, key=lambda item: (-item[1], item[2])):
-        register(path, f"registry:{path}", "explicit", version, 0 if version == 2 else 1, order)
+            raw = raw_bytes.decode("utf-8") if raw_bytes is not None else ""
+            version = detect_registry_version(raw)
+            detection_error = None
+        except UnicodeError as error:
+            version = 2
+            detection_error = RegistryContractError("invalid-registry-contract", str(error))
+        except RegistryContractError as error:
+            version = 2
+            detection_error = error
+        physical_identity = str(path.expanduser().resolve(strict=False))
+        explicit.append((path, version, order, detection_error, snapshot, physical_identity))
+    duplicate_explicit = {
+        identity
+        for identity in {item[5] for item in explicit}
+        if sum(item[5] == identity for item in explicit) > 1
+    }
+    for path, version, order, detection_error, snapshot, physical_identity in sorted(
+        explicit, key=lambda item: (-item[1], item[2])
+    ):
+        if physical_identity in duplicate_explicit:
+            detection_error = RegistryContractError("duplicate-registry-input")
+        register(
+            path,
+            _registry_source(path, "explicit"),
+            "explicit",
+            version,
+            0 if version == 2 else 1,
+            order,
+            detection_error,
+            snapshot,
+        )
 
     project_v2 = Path.cwd() / ".mission" / "specialists-v2.yml"
     register(project_v2, "project:.mission/specialists-v2.yml", "project", 2, 2, 0)
@@ -2577,28 +2678,43 @@ def _discover_specialist_registry_candidates(args) -> tuple[list[dict], list[dic
             continue
         v2_manifests = sorted(root.glob("*/mission-specialist-v2.yml"))
         v1_manifests = sorted(root.glob("*/mission-specialist.yml"))
-        inventory = [
-            {
-                "identity": str(path.resolve(strict=False)),
-                "digest": _registry_input_record(path, str(path), "manifest", version, tier, index)["content_digest"],
-            }
-            for version, tier, paths in ((2, 6, v2_manifests), (1, 7, v1_manifests))
-            for index, path in enumerate(paths)
-        ]
+        inventory = []
+        for manifest_order, manifest in enumerate(v2_manifests):
+            record = register(
+                manifest,
+                _registry_source(manifest, "installed"),
+                "installed",
+                2,
+                6,
+                manifest_order,
+            )
+            inventory.append({
+                "identity": record["canonical_identity"],
+                "digest": record["content_digest"],
+            })
+        for manifest_order, manifest in enumerate(v1_manifests):
+            record = register(
+                manifest,
+                _registry_source(manifest, "installed"),
+                "installed",
+                1,
+                7,
+                manifest_order,
+            )
+            inventory.append({
+                "identity": record["canonical_identity"],
+                "digest": record["content_digest"],
+            })
         inputs.append({
             "kind": "skill-root",
-            "source": f"skill-root:{root}",
-            "canonical_identity": str(root.resolve(strict=False)),
+            "source": _registry_source(root, "skill-root"),
+            "canonical_identity": _portable_registry_identity(root),
             "version": 0,
             "precedence_tier": 6,
             "order": root_order,
             "status": "present",
             "content_digest": provider_value_digest(inventory),
         })
-        for manifest_order, manifest in enumerate(v2_manifests):
-            register(manifest, f"skill-manifest:{manifest}", "installed", 2, 6, manifest_order)
-        for manifest_order, manifest in enumerate(v1_manifests):
-            register(manifest, f"skill-manifest:{manifest}", "installed", 1, 7, manifest_order)
 
     active_barrier = None
     if invalid_barriers:
@@ -2637,6 +2753,7 @@ def _discover_specialist_registry_candidates(args) -> tuple[list[dict], list[dic
             "source": candidate.get("source"),
             "registry_version": candidate.get("registry_version"),
             "registry_entry_digest": candidate.get("registry_entry_digest"),
+            "projection_state": candidate.get("_projection_state", "eligible"),
         }
         for candidate in resolved
         if _provider_id(candidate)
@@ -2648,19 +2765,31 @@ def _discover_specialist_registry_candidates(args) -> tuple[list[dict], list[dic
             "projection_state": "invalid-input-barrier",
             "content_digest": active_barrier["content_digest"],
         })
-    projection = {
-        "schema": "mission-specialist-registry-projection/1",
-        "ordered_inputs": sorted(
-            inputs,
-            key=lambda item: (
-                int(item.get("precedence_tier", 99)),
-                int(item.get("order", 0)),
-                str(item.get("canonical_identity") or ""),
-            ),
+    ordered_inputs = sorted(
+        inputs,
+        key=lambda item: (
+            int(item.get("precedence_tier", 99)),
+            int(item.get("order", 0)),
+            str(item.get("canonical_identity") or ""),
         ),
-        "precedence_barriers": invalid_barriers,
+    )
+    ordered_barriers = sorted(
+        invalid_barriers,
+        key=lambda item: (
+            int(item.get("precedence_tier", 99)),
+            int(item.get("order", 0)),
+            str(item.get("canonical_identity") or ""),
+        ),
+    )
+    projection_payload = {
+        "schema": "mission-specialist-registry-projection/1",
+        "ordered_inputs": ordered_inputs,
+        "precedence_barriers": ordered_barriers,
         "effective_entries": effective,
-        "effective_projection_digest": provider_value_digest(effective),
+    }
+    projection = {
+        **projection_payload,
+        "effective_projection_digest": provider_value_digest(projection_payload),
     }
     for candidate in resolved:
         candidate["registry_projection_digest"] = projection["effective_projection_digest"]
@@ -2759,7 +2888,8 @@ def _candidate_profiles(candidate: dict) -> list[str]:
 
 def _provider_id(candidate: dict) -> str:
     return str(
-        candidate.get("skill")
+        candidate.get("provider_id")
+        or candidate.get("skill")
         or candidate.get("role")
         or candidate.get("name")
         or candidate.get("command")
@@ -2972,6 +3102,7 @@ def rank_specialist_candidates(task_profile: dict, registry_candidates: list[dic
             installed_info = installed.get(skill)
         c["available"] = bool(installed_info)
         raw_source = "user-specified" if skill in named else "automatic"
+        canonical_source = normalize_selection_source(raw_source)["selection_source"]
         requested_phase = (
             "planning"
             if "complexity" in ((c.get("activation") or {}).get("auto_select_if") or [])
@@ -2989,13 +3120,14 @@ def rank_specialist_candidates(task_profile: dict, registry_candidates: list[dic
             "context_digest": eligibility["context_digest"],
             "activation_digest": eligibility["activation_digest"],
             "normalized_activation": eligibility["normalized_activation"],
+            "eligibility_selection_source": canonical_source,
         })
         if not eligibility["eligible"] and eligibility["reason_code"] != "provider-unavailable":
             ineligible.append({
                 "provider_id": c["provider_id"],
                 "source": c["source"],
                 "registry_entry_digest": c["registry_entry_digest"],
-                "selection_source": normalize_selection_source(raw_source)["selection_source"],
+                "selection_source": canonical_source,
                 "selection_source_raw": raw_source,
                 "requested_phase": requested_phase,
                 "current_complexity": complexity,
@@ -3160,20 +3292,45 @@ def _selection_from_decision(candidates: list[dict], decision: dict) -> tuple[li
     return [], unavailable
 
 
-def build_phase_plan(candidates: list[dict], complexity: str | None = None) -> list[dict]:
+def build_phase_plan(
+    candidates: list[dict],
+    complexity: str | None = None,
+    mission_context: dict | None = None,
+) -> list[dict]:
     """Return a bounded advisory provider plan grouped by mission phase."""
     if not candidates:
         return []
+    context = mission_context or {
+        "complexity": complexity,
+        "task_profile": {"primary": "general", "secondary": [], "confidence": 0.0},
+        "iteration": 1,
+        "previous_iteration_passed": None,
+    }
     max_per_phase = 1 if complexity in {None, "Simple", "Standard"} else 2
     plan: list[dict] = []
     seen_skills: set[str] = set()
     for phase, preferred_roles in PHASE_ROLE_ORDER.items():
-        phase_candidates = [
-            c for c in candidates
-            if c.get("installed")
-            and phase in (c.get("phases") or [])
-            and str(c.get("skill") or "") not in seen_skills
-        ]
+        phase_candidates = []
+        for candidate in candidates:
+            if (
+                not candidate.get("installed")
+                or phase not in (candidate.get("phases") or [])
+                or str(candidate.get("skill") or "") in seen_skills
+            ):
+                continue
+            try:
+                eligibility = evaluate_provider_eligibility(
+                    candidate,
+                    context,
+                    requested_phase=phase,
+                    selection_source=candidate.get(
+                        "eligibility_selection_source", "automatic"
+                    ),
+                )
+            except ValueError:
+                continue
+            if eligibility["eligible"]:
+                phase_candidates.append(candidate)
         if not phase_candidates:
             continue
 
@@ -3287,7 +3444,7 @@ def cmd_specialists(args):
     decision = decide_specialists(task_profile, candidates,
                                   _split_csv(getattr(args, "user_specified", None)))
     selected, unavailable = _selection_from_decision(candidates, decision)
-    phase_plan = build_phase_plan(candidates, effective_complexity)
+    phase_plan = build_phase_plan(candidates, effective_complexity, mission_context)
     result = {
         "ok": True,
         "task_profile": task_profile,

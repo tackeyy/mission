@@ -12,10 +12,25 @@ LIB_DIR = Path(__file__).resolve().parents[1] / "lib"
 sys.path.insert(0, str(LIB_DIR))
 
 from provider_eligibility import (  # noqa: E402
+    RegistryContractError,
     detect_registry_version,
     evaluate_provider_eligibility,
     normalize_selection_source,
+    parse_v2_registry,
 )
+
+
+def _load_mission_state_module(name: str):
+    state_path = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
+    spec = importlib.util.spec_from_file_location(name, state_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def _project_identity(path: Path, project: Path) -> str:
+    return f"$PROJECT/{path.resolve().relative_to(project.resolve()).as_posix()}"
 
 
 def test_complexity_trigger_is_eligible_without_profile_match():
@@ -663,14 +678,16 @@ def test_unparseable_higher_input_blocks_lower_registry_and_builtin_candidates(
         item for item in data["specialists_ineligible"]
         if item["reason_code"] == "duplicate-registry-key"
     )
-    assert invalid["source"] == f"registry:{high}"
+    assert invalid["source"] == f"registry:{_project_identity(high, tmp_path)}"
     projection = data["specialist_registry_projection"]
     invalid_input = next(
         item for item in projection["ordered_inputs"]
-        if item["canonical_identity"] == str(high.resolve())
+        if item["canonical_identity"] == _project_identity(high, tmp_path)
     )
     assert invalid_input["status"] == "invalid"
-    assert projection["precedence_barriers"][0]["source"] == f"registry:{high}"
+    assert projection["precedence_barriers"][0]["source"] == (
+        f"registry:{_project_identity(high, tmp_path)}"
+    )
 
 
 def test_invalid_explicit_input_preserves_only_earlier_valid_explicit_input(
@@ -735,7 +752,9 @@ def test_invalid_explicit_input_preserves_only_earlier_valid_explicit_input(
         "deep-planning-provider"
     ]
     assert data["specialists_selected"][0]["provider_id"] == "deep-planning-provider"
-    assert data["specialists_selected"][0]["source"] == f"registry:{valid}"
+    assert data["specialists_selected"][0]["source"] == (
+        f"registry:{_project_identity(valid, tmp_path)}"
+    )
     assert data["specialists_phase_plan"][0]["providers"] == ["deep-planning-provider"]
 
 
@@ -859,7 +878,7 @@ def test_invalid_higher_entry_does_not_fall_back_to_lower_v1(run_cli, tmp_path):
     assert data["specialists_selected"] == []
     item = next(entry for entry in data["specialists_ineligible"] if entry["provider_id"] == "deep-planning-provider")
     assert item["reason_code"] == "conflicting-activation-config"
-    assert item["source"] == f"registry:{high}"
+    assert item["source"] == f"registry:{_project_identity(high, tmp_path)}"
 
 
 def test_v2_empty_auto_use_mixed_with_activation_fails_closed(run_cli, tmp_path):
@@ -989,7 +1008,7 @@ def test_multiple_explicit_v2_paths_use_argument_order(run_cli, tmp_path):
     )
     selected = json.loads(result.stdout)["specialists_selected"][0]
 
-    assert selected["source"] == f"registry:{paths[0]}"
+    assert selected["source"] == f"registry:{_project_identity(paths[0], tmp_path)}"
     assert selected["phases"] == ["planning"]
 
 
@@ -1181,9 +1200,14 @@ def test_installed_v2_manifest_is_in_projection_inventory(run_cli, tmp_path):
     inputs = data["specialist_registry_projection"]["ordered_inputs"]
 
     selected = data["specialists_selected"][0]
-    assert selected["source"] == f"skill-manifest:{manifest}"
+    assert selected["source"] == (
+        f"skill-manifest:{_project_identity(manifest, tmp_path)}"
+    )
     assert any(item["kind"] == "skill-root" and item["content_digest"].startswith("sha256:") for item in inputs)
-    manifest_input = next(item for item in inputs if item["canonical_identity"] == str(manifest.resolve()))
+    manifest_input = next(
+        item for item in inputs
+        if item["canonical_identity"] == _project_identity(manifest, tmp_path)
+    )
     assert manifest_input["version"] == 2
     assert manifest_input["content_digest"].startswith("sha256:")
 
@@ -1240,5 +1264,562 @@ def test_registry_docs_define_v2_activation_and_selection_provenance():
         "effective_projection_digest",
         "precedence_barriers",
         "state-context-mismatch",
+        "duplicate-registry-input",
+        "invalid-v2-candidate-type",
+        "invalid-json-number",
+        "$PROJECT",
+        "$HOME",
+        "projection_state",
+        "single byte snapshot",
     ):
         assert token in reference
+
+
+def test_duplicate_schema_cannot_downgrade_explicit_v2_to_v1(run_cli, tmp_path):
+    registry = tmp_path / "duplicate-schema.json"
+    registry.write_text(
+        '{"schema":"mission-specialist-registry/2","schema":"legacy",'
+        '"specialists":[{"role":"doc-writer","skill":"documentation-provider",'
+        '"task_profiles":["documentation"],"phases":["planning"]}]}',
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        "specialists", "recommend", "--no-default-skill-roots",
+        "--task", "Update README documentation", "--registry", str(registry),
+        "--complexity", "Complex", "--installed-skills", "documentation-provider",
+        "--json", cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["specialists_candidates"] == []
+    assert data["specialists_selected"] == []
+    assert data["specialists_phase_plan"] == []
+    assert any(
+        item["reason_code"] == "duplicate-registry-key"
+        for item in data["specialists_ineligible"]
+    )
+
+
+def test_yaml_version_detector_rejects_duplicate_root_schema():
+    with pytest.raises(RegistryContractError) as raised:
+        detect_registry_version(
+            "\n".join(
+                [
+                    "schema: mission-specialist-registry/2",
+                    "schema: legacy",
+                    "specialists:",
+                ]
+            )
+        )
+
+    assert raised.value.code == "duplicate-registry-key"
+
+
+def test_official_project_v2_path_cannot_contain_v1_document(run_cli, tmp_path):
+    registry = tmp_path / ".mission" / "specialists-v2.yml"
+    registry.parent.mkdir()
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "specialists": [
+                    {
+                        "role": "doc-writer",
+                        "skill": "documentation-provider",
+                        "task_profiles": ["documentation"],
+                        "phases": ["planning"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        "specialists", "recommend", "--no-default-skill-roots",
+        "--task", "Update README documentation", "--complexity", "Complex",
+        "--installed-skills", "documentation-provider", "--json", cwd=tmp_path,
+    )
+
+    data = json.loads(result.stdout)
+    assert data["specialists_candidates"] == []
+    assert any(
+        item["reason_code"] == "missing-registry-schema"
+        for item in data["specialists_ineligible"]
+    )
+
+
+@pytest.mark.parametrize("location", ["user", "manifest"])
+def test_official_user_and_manifest_v2_paths_cannot_downgrade_to_v1(
+    location, run_cli, tmp_path
+):
+    fake_home = tmp_path / "home"
+    args = [
+        "specialists", "recommend", "--task", "Update README documentation",
+        "--complexity", "Complex", "--installed-skills", "documentation-provider",
+        "--json",
+    ]
+    if location == "user":
+        registry = fake_home / ".config" / "mission" / "specialists-v2.yml"
+        registry.parent.mkdir(parents=True)
+    else:
+        skill_root = tmp_path / "skills"
+        registry = skill_root / "documentation-provider" / "mission-specialist-v2.yml"
+        registry.parent.mkdir(parents=True)
+        args.extend(["--no-default-skill-roots", "--skills-dir", str(skill_root)])
+    registry.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "specialists": [
+                    {
+                        "role": "doc-writer",
+                        "skill": "documentation-provider",
+                        "task_profiles": ["documentation"],
+                        "phases": ["planning"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_cli(*args, cwd=tmp_path, env_extra={"HOME": str(fake_home)})
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["specialists_candidates"] == []
+    assert any(
+        item["reason_code"] == "missing-registry-schema"
+        for item in data["specialists_ineligible"]
+    )
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"provider_id": 42},
+        {"skill": 42},
+        {"task_profiles": "architecture"},
+        {"phases": "planning"},
+        {"disabled": 1},
+        {"activation": []},
+        {"activation": {"min_complexity": 3, "auto_select_if": ["complexity"]}},
+    ],
+    ids=[
+        "provider-id",
+        "skill",
+        "profiles",
+        "phases",
+        "disabled-bool",
+        "activation-map",
+        "activation-member",
+    ],
+)
+def test_v2_candidate_schema_rejects_wrong_exact_types(
+    override, run_cli, tmp_path
+):
+    registry = tmp_path / "typed-v2.json"
+    candidate = {
+        "provider_id": "deep-planning-provider",
+        "role": "deep-planning",
+        "skill": "deep-planning-provider",
+        "task_profiles": ["architecture"],
+        "phases": ["planning"],
+        "disabled": False,
+        "activation": {
+            "min_complexity": "Complex",
+            "auto_select_if": ["complexity"],
+            "explicit_below_min": "deny",
+        },
+    }
+    candidate.update(override)
+    registry.write_text(
+        json.dumps(
+            {
+                "schema": "mission-specialist-registry/2",
+                "specialists_v2": [candidate],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        "specialists", "recommend", "--no-default-skill-roots",
+        "--task", "Review the architecture", "--registry", str(registry),
+        "--complexity", "Complex", "--installed-skills", "deep-planning-provider",
+        "--json", cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["specialists_candidates"] == []
+    assert data["specialists_selected"] == []
+    assert any(
+        item["reason_code"] == "invalid-v2-candidate-type"
+        for item in data["specialists_ineligible"]
+    )
+
+
+def test_v2_json_nan_is_rejected_before_candidate_selection(run_cli, tmp_path):
+    registry = tmp_path / "nan-v2.json"
+    registry.write_text(
+        '{"schema":"mission-specialist-registry/2","specialists_v2":['
+        '{"role":"deep-planning","skill":"deep-planning-provider",'
+        '"task_profiles":["architecture"],"phases":["planning"],'
+        '"timeout":NaN,"activation":{"min_complexity":"Complex",'
+        '"auto_select_if":["complexity"]}}]}',
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        "specialists", "recommend", "--no-default-skill-roots",
+        "--task", "Review the architecture", "--registry", str(registry),
+        "--complexity", "Complex", "--installed-skills", "deep-planning-provider",
+        "--json", cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["specialists_candidates"] == []
+    assert any(
+        item["reason_code"] == "invalid-json-number"
+        for item in data["specialists_ineligible"]
+    )
+
+
+def test_v2_yaml_quoted_hash_comma_and_escaped_quote_match_json():
+    document = {
+        "schema": "mission-specialist-registry/2",
+        "specialists_v2": [
+            {
+                "role": "deep#planning",
+                "skill": "deep,planning-provider",
+                "task_profiles": ["architecture", "risk"],
+                "phases": ["planning"],
+                "notes": 'say "plan, then #review"',
+                "activation": {
+                    "min_complexity": "Complex",
+                    "auto_select_if": ["complexity"],
+                },
+            }
+        ],
+    }
+    yaml_text = "\n".join(
+        [
+            "schema: mission-specialist-registry/2",
+            "specialists_v2:",
+            '  - role: "deep#planning"',
+            '    skill: "deep,planning-provider"',
+            '    task_profiles: ["architecture", "risk"]',
+            "    phases: [planning]",
+            '    notes: "say \\"plan, then #review\\""',
+            "    activation:",
+            "      min_complexity: Complex",
+            "      auto_select_if: [complexity]",
+        ]
+    )
+
+    assert parse_v2_registry(yaml_text) == parse_v2_registry(json.dumps(document))
+
+
+def test_generated_selection_and_projection_do_not_persist_home_paths(
+    run_cli, tmp_path
+):
+    fake_home = tmp_path / "Users" / "private-user"
+    explicit = fake_home / "registries" / "planning-v2.json"
+    explicit.parent.mkdir(parents=True)
+    explicit.write_text(
+        json.dumps(
+            {
+                "schema": "mission-specialist-registry/2",
+                "specialists_v2": [
+                    {
+                        "role": "deep-planning",
+                        "skill": "deep-planning-provider",
+                        "task_profiles": ["architecture"],
+                        "phases": ["planning"],
+                        "activation": {
+                            "min_complexity": "Complex",
+                            "auto_select_if": ["complexity"],
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    invalid = fake_home / "registries" / "invalid-v2.json"
+    invalid.write_text(
+        '{"schema":"mission-specialist-registry/2",'
+        '"specialists_v2":[],"specialists_v2":[]}',
+        encoding="utf-8",
+    )
+    skill_root = fake_home / "skills"
+    manifest = skill_root / "review-provider" / "mission-specialist-v2.yml"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        "\n".join(
+            [
+                "schema: mission-specialist-registry/2",
+                "specialists_v2:",
+                "  - role: reviewer",
+                "    skill: review-provider",
+                "    task_profiles: [architecture]",
+                "    phases: [review]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    env = {"HOME": str(fake_home)}
+    run_cli(
+        "init", "portable planning state", "--complexity", "Complex",
+        cwd=project, check=True, env_extra=env,
+    )
+
+    result = run_cli(
+        "specialists", "recommend", "--no-default-skill-roots",
+        "--task", "Review the architecture", "--registry", str(explicit),
+        "--registry", str(invalid),
+        "--skills-dir", str(skill_root), "--complexity", "Complex",
+        "--installed-skills", "deep-planning-provider,review-provider",
+        "--record-state", "--json", cwd=project, env_extra=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    state = (project / ".mission-state" / "sessions" / "test.json").read_text(
+        encoding="utf-8"
+    )
+    assert str(fake_home) not in result.stdout
+    assert str(fake_home) not in state
+
+
+def test_registry_discovery_reads_each_input_once(monkeypatch, tmp_path):
+    registry = tmp_path / "single-read-v2.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "schema": "mission-specialist-registry/2",
+                "specialists_v2": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    module = _load_mission_state_module("mission_state_issue394_single_read")
+    original_read_bytes = Path.read_bytes
+    original_read_text = Path.read_text
+    reads = 0
+
+    def counted_read_bytes(path):
+        nonlocal reads
+        if path == registry:
+            reads += 1
+        return original_read_bytes(path)
+
+    def counted_read_text(path, *args, **kwargs):
+        nonlocal reads
+        if path == registry:
+            reads += 1
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
+    monkeypatch.setattr(Path, "read_text", counted_read_text)
+    monkeypatch.chdir(tmp_path)
+    args = SimpleNamespace(
+        registry=[str(registry)],
+        no_default_skill_roots=True,
+        skills_dir=None,
+    )
+
+    module._discover_specialist_registry_candidates(args)
+
+    assert reads == 1
+
+
+def test_projection_digest_binds_ordered_discovery_inputs(run_cli, tmp_path):
+    registry = tmp_path / "explicit-v2.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "schema": "mission-specialist-registry/2",
+                "specialists_v2": [
+                    {
+                        "role": "deep-planning",
+                        "skill": "deep-planning-provider",
+                        "task_profiles": ["architecture"],
+                        "phases": ["planning"],
+                        "activation": {
+                            "min_complexity": "Complex",
+                            "auto_select_if": ["complexity"],
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def projection_digest():
+        result = run_cli(
+            "specialists", "recommend", "--no-default-skill-roots",
+            "--task", "Review the architecture", "--registry", str(registry),
+            "--complexity", "Complex", "--installed-skills", "deep-planning-provider",
+            "--json", cwd=tmp_path,
+        )
+        return json.loads(result.stdout)["specialist_registry_projection"][
+            "effective_projection_digest"
+        ]
+
+    before = projection_digest()
+    project_v2 = tmp_path / ".mission" / "specialists-v2.yml"
+    project_v2.parent.mkdir()
+    project_v2.write_text(
+        "schema: mission-specialist-registry/2\nspecialists_v2:\n",
+        encoding="utf-8",
+    )
+
+    assert projection_digest() != before
+
+
+def test_projection_digest_and_entries_bind_conflict_semantics(run_cli, tmp_path):
+    registry = tmp_path / "semantic-v2.json"
+    entry = {
+        "role": "deep-planning",
+        "skill": "deep-planning-provider",
+        "task_profiles": ["architecture"],
+        "phases": ["planning"],
+        "activation": {
+            "min_complexity": "Complex",
+            "auto_select_if": ["complexity"],
+        },
+    }
+
+    def projection(document):
+        registry.write_text(json.dumps(document), encoding="utf-8")
+        result = run_cli(
+            "specialists", "recommend", "--no-default-skill-roots",
+            "--task", "Review the architecture", "--registry", str(registry),
+            "--complexity", "Complex", "--installed-skills", "deep-planning-provider",
+            "--json", cwd=tmp_path,
+        )
+        return json.loads(result.stdout)["specialist_registry_projection"]
+
+    valid = projection(
+        {"schema": "mission-specialist-registry/2", "specialists_v2": [entry]}
+    )
+    conflict = projection(
+        {"schema": "mission-specialist-registry/2", "specialists_v2": [entry, entry]}
+    )
+
+    assert valid["effective_projection_digest"] != conflict["effective_projection_digest"]
+    assert valid["effective_entries"][0]["projection_state"] == "eligible"
+    assert conflict["effective_entries"][0]["projection_state"] == "conflict"
+
+
+def test_projection_entries_distinguish_disabled_tombstone_and_barrier(
+    run_cli, tmp_path
+):
+    registry = tmp_path / "semantic-registry.json"
+    entry = {
+        "role": "deep-planning",
+        "skill": "deep-planning-provider",
+        "task_profiles": ["architecture"],
+        "phases": ["planning"],
+    }
+
+    def state_for(content: str) -> tuple[str, str]:
+        registry.write_text(content, encoding="utf-8")
+        result = run_cli(
+            "specialists", "recommend", "--no-default-skill-roots",
+            "--task", "Review the architecture", "--registry", str(registry),
+            "--complexity", "Complex", "--json", cwd=tmp_path,
+        )
+        projection = json.loads(result.stdout)["specialist_registry_projection"]
+        effective = projection["effective_entries"][0]
+        return effective["projection_state"], projection["effective_projection_digest"]
+
+    disabled = state_for(
+        json.dumps({"version": 1, "specialists": [{**entry, "enabled": False}]})
+    )
+    tombstone = state_for(
+        json.dumps(
+            {
+                "schema": "mission-specialist-registry/2",
+                "specialists_v2": [{**entry, "disabled": True}],
+            }
+        )
+    )
+    barrier = state_for(
+        '{"schema":"mission-specialist-registry/2",'
+        '"specialists_v2":[],"specialists_v2":[]}'
+    )
+
+    assert [disabled[0], tombstone[0], barrier[0]] == [
+        "disabled", "tombstone", "invalid-input-barrier"
+    ]
+    assert len({disabled[1], tombstone[1], barrier[1]}) == 3
+
+
+def test_duplicate_explicit_registry_symlink_alias_fails_closed(run_cli, tmp_path):
+    registry = tmp_path / "planning-v2.json"
+    alias = tmp_path / "planning-alias.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "schema": "mission-specialist-registry/2",
+                "specialists_v2": [
+                    {
+                        "role": "deep-planning",
+                        "skill": "deep-planning-provider",
+                        "task_profiles": ["architecture"],
+                        "phases": ["planning"],
+                        "activation": {
+                            "min_complexity": "Complex",
+                            "auto_select_if": ["complexity"],
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    alias.symlink_to(registry)
+
+    result = run_cli(
+        "specialists", "recommend", "--no-default-skill-roots",
+        "--task", "Review the architecture", "--registry", str(registry),
+        "--registry", str(alias), "--complexity", "Complex",
+        "--installed-skills", "deep-planning-provider", "--json", cwd=tmp_path,
+    )
+
+    data = json.loads(result.stdout)
+    assert data["specialists_candidates"] == []
+    assert data["specialists_selected"] == []
+    assert data["specialists_phase_plan"] == []
+    assert any(
+        item["reason_code"] == "duplicate-registry-input"
+        for item in data["specialists_ineligible"]
+    )
+
+
+def test_build_phase_plan_rejects_below_floor_candidate_directly():
+    module = _load_mission_state_module("mission_state_issue394_phase_floor")
+    candidate = {
+        "role": "deep-planning",
+        "skill": "deep-planning-provider",
+        "task_profiles": ["architecture"],
+        "phases": ["planning"],
+        "activation": {
+            "min_complexity": "Complex",
+            "auto_select_if": ["complexity"],
+        },
+        "installed": True,
+        "available": True,
+        "score": 1.0,
+    }
+
+    assert module.build_phase_plan([candidate], "Simple") == []

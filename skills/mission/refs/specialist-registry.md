@@ -46,7 +46,7 @@ Complexity-triggered planning providers use the versioned registry contract. Kee
 | User | `~/.config/mission/specialists-v2.yml` | `~/.config/mission/specialists.yml` |
 | Installed manifest | `mission-specialist-v2.yml` | `mission-specialist.yml` |
 
-The machine precedence is `explicit v2 > explicit v1 > project v2 > project v1 > user v2 > user v1 > installed v2 > installed v1`. Multiple explicit files within one version preserve CLI argument order. Duplicate provider identities in one file, or in an unordered installed tier, fail closed. A higher invalid entry blocks fallback to the same lower identity. A document that cannot be parsed strictly creates an input-level precedence barrier: only an already valid, higher-priority explicit input may remain; same-tier and lower-priority inputs and built-in candidates produce no candidate, selection, or phase-plan entry. Version 2 uses `disabled: true` as a tombstone; version 1 retains `enabled: false`.
+The machine precedence is `explicit v2 > explicit v1 > project v2 > project v1 > user v2 > user v1 > installed v2 > installed v1`. Multiple explicit files within one version preserve CLI argument order. Supplying the same physical file twice, including through a symlink alias, returns `duplicate-registry-input`. Duplicate provider identities in one file, or in an unordered installed tier, fail closed. A higher invalid entry blocks fallback to the same lower identity. A document that cannot be parsed strictly creates an input-level precedence barrier: only an already valid, higher-priority explicit input may remain; same-tier and lower-priority inputs and built-in candidates produce no candidate, selection, or phase-plan entry. Version 2 uses `disabled: true` as a tombstone; version 1 retains `enabled: false`.
 
 Version 2 requires this root and does not permit a version 1 `specialists:` root in the same document:
 
@@ -64,7 +64,7 @@ specialists_v2:
       explicit_below_min: deny
 ```
 
-The portable YAML subset permits candidate fields plus one nested mapping. JSON and YAML normalize to the same entry digest. Missing schema, an unknown major, duplicate keys, a deeper mapping, or mixed version roots produce an ineligible diagnostic and zero candidates from that input.
+The portable YAML subset permits candidate fields plus one nested mapping. Quoted `#`, commas, and escaped quotes retain their scalar meaning, and JSON and YAML normalize to the same entry digest. Version 2 validates exact field types, including string identities, string-list profiles/phases, boolean flags, and the activation mapping; violations return `invalid-v2-candidate-type`. Non-finite JSON numbers return `invalid-json-number`. Missing schema, an unknown major, duplicate keys, a deeper mapping, or mixed version roots produce an ineligible diagnostic and zero candidates from that input. The official version 2 project, user, and installed-manifest paths are always parsed as version 2 and cannot downgrade based on their contents.
 
 ### Activation semantics
 
@@ -79,9 +79,13 @@ The portable YAML subset permits candidate fields plus one nested mapping. JSON 
 
 Persisted selection sources use `automatic`, `confirmed-user`, `user-instruction`, `manual`, or `task-required`. Legacy `auto` maps to `automatic`; legacy `user-specified` maps to `user-instruction`. `selection_source_raw` preserves the received literal. A provider cannot claim `automatic` through `log-invocation` or `invoke-command`; only the recommendation producer may create it.
 
-Recommendation output records `provider_id`, registry source, registry entry digest, normalized activation digest, mission context digest, and `mission-specialist-registry-projection/1`. The projection contains ordered discovery inputs with canonical identities and content digests, any `precedence_barriers`, plus `effective_projection_digest`. A later application guard can re-resolve the same inputs and detect a newly added higher-priority registry or other precedence drift. This issue defines producer evidence only; it does not authorize or execute a provider.
+Recommendation output records `provider_id`, registry source, registry entry digest, normalized activation digest, mission context digest, and `mission-specialist-registry-projection/1`. Each registry is consumed from a single byte snapshot: version detection, content digest, and parsing never re-read the path. Persisted identities use `$PROJECT/...`, `$HOME/...`, or an opaque external digest; process-local absolute paths are never copied into state, sources, diagnostics, barriers, or installed inventory.
+
+The projection contains all ordered discovery inputs with portable identities and content digests, any `precedence_barriers`, and effective entries with explicit `projection_state` values such as `eligible`, `conflict`, `disabled`, `tombstone`, and `invalid-input-barrier`. `effective_projection_digest` binds the complete projection payload rather than only selected providers. A later application guard can therefore detect content, discovery-order, and semantic-state drift. This issue defines producer evidence only; it does not authorize or execute a provider.
 
 `specialists recommend --record-state` treats the current state's complexity and iteration as authoritative. A supplied complexity that disagrees with state, or complexity/iteration drift detected again inside the write lock, returns exit 2 with `state-context-mismatch`, emits zero output selections, and leaves every persisted selection field unchanged. Without `--record-state`, `--complexity` remains a dry-run-only virtual context and does not mutate mission state.
+
+Phase-plan construction reuses the same eligibility evaluator for every requested phase. It cannot insert a provider merely because a raw candidate lists that phase; complexity floors, phase allow-lists, activation predicates, availability, and selection source remain binding.
 
 ## Provider Kinds
 

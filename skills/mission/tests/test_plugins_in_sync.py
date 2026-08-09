@@ -60,7 +60,10 @@
 """
 import hashlib
 import importlib.util
+import json
 from pathlib import Path
+import subprocess
+import sys
 
 REPO_ROOT = Path(__file__).resolve().parents[3]  # mission-selfheal/
 
@@ -265,6 +268,34 @@ def test_provider_eligibility_py_in_sync_and_importable():
     spec.loader.exec_module(module)
     result = module.normalize_selection_source("auto")
     assert result["selection_source"] == "automatic"
+
+
+def test_plugin_mirror_specialist_recommend_cli_smoke(tmp_path):
+    """The distributed CLI imports its mirrored provider contract in a real process."""
+    cli = REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "bin" / "mission-state.py"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(cli),
+            "specialists",
+            "recommend",
+            "--no-default-skill-roots",
+            "--task",
+            "Update README documentation",
+            "--installed-skills",
+            "documentation-provider",
+            "--json",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["specialists_candidates"][0]["provider_id"] == "documentation-provider"
 
 
 def test_audit_findings_py_in_sync():

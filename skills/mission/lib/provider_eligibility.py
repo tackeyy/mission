@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from typing import Any
 
 
@@ -55,6 +56,10 @@ def _reject_duplicate_key(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _reject_json_constant(value: str) -> None:
+    raise RegistryContractError("invalid-json-number", f"invalid JSON number: {value}")
+
+
 def _validate_v2_document(document: Any) -> list[dict[str, Any]]:
     if not isinstance(document, dict):
         raise RegistryContractError("invalid-registry-contract", "registry document must be an object")
@@ -85,7 +90,130 @@ def _validate_v2_document(document: Any) -> list[dict[str, Any]]:
                     raise RegistryContractError("unsupported-registry-depth")
             elif isinstance(value, list) and any(isinstance(item, (dict, list)) for item in value):
                 raise RegistryContractError("unsupported-registry-depth")
+        _validate_v2_candidate_types(candidate)
     return [dict(item) for item in candidates]
+
+
+def _invalid_candidate_type(field: str) -> None:
+    raise RegistryContractError(
+        "invalid-v2-candidate-type", f"invalid version 2 candidate field type: {field}"
+    )
+
+
+def _is_exact_bool(value: Any) -> bool:
+    return type(value) is bool
+
+
+def _is_string_list(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _validate_v2_candidate_types(candidate: dict[str, Any]) -> None:
+    for field in ("provider_id", "role", "skill", "name", "kind", "command", "unavailable", "notes"):
+        if field in candidate and not isinstance(candidate[field], str):
+            _invalid_candidate_type(field)
+    for field in ("task_profiles", "profiles", "phases", "args"):
+        if field in candidate and not _is_string_list(candidate[field]):
+            _invalid_candidate_type(field)
+    for field in (
+        "required",
+        "confirm",
+        "bounded",
+        "bounded_use",
+        "broad_orchestrator",
+        "bounded_purpose_required",
+        "install_hint",
+        "disabled",
+    ):
+        if field in candidate and not _is_exact_bool(candidate[field]):
+            _invalid_candidate_type(field)
+    for field in ("env", "risk", "result_contract", "auto_use"):
+        if field in candidate and not isinstance(candidate[field], dict):
+            _invalid_candidate_type(field)
+    if "env" in candidate and any(
+        not isinstance(key, str) or not isinstance(value, str)
+        for key, value in candidate["env"].items()
+    ):
+        _invalid_candidate_type("env")
+    if "timeout" in candidate:
+        timeout = candidate["timeout"]
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or timeout < 0
+        ):
+            _invalid_candidate_type("timeout")
+    if "max_calls_per_iteration" in candidate:
+        calls = candidate["max_calls_per_iteration"]
+        if type(calls) is not int or calls < 1:
+            _invalid_candidate_type("max_calls_per_iteration")
+    if "activation" in candidate:
+        activation = candidate["activation"]
+        if not isinstance(activation, dict):
+            _invalid_candidate_type("activation")
+        allowed = {"min_complexity", "auto_select_if", "when_any", "explicit_below_min"}
+        if set(activation) - allowed:
+            _invalid_candidate_type("activation")
+        if (
+            "min_complexity" in activation
+            and not isinstance(activation["min_complexity"], str)
+        ):
+            _invalid_candidate_type("activation.min_complexity")
+        for field in ("auto_select_if", "when_any"):
+            if field in activation and not _is_string_list(activation[field]):
+                _invalid_candidate_type(f"activation.{field}")
+        if (
+            "explicit_below_min" in activation
+            and not isinstance(activation["explicit_below_min"], str)
+        ):
+            _invalid_candidate_type("activation.explicit_below_min")
+
+
+def _strip_yaml_comment(raw: str) -> str:
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(raw):
+        if quote == '"' and escaped:
+            escaped = False
+            continue
+        if quote == '"' and char == "\\":
+            escaped = True
+            continue
+        if quote is not None:
+            if char == quote:
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+        elif char == "#":
+            return raw[:index]
+    return raw
+
+
+def _split_yaml_flow_items(value: str) -> list[str]:
+    items: list[str] = []
+    start = 0
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(value):
+        if quote == '"' and escaped:
+            escaped = False
+            continue
+        if quote == '"' and char == "\\":
+            escaped = True
+            continue
+        if quote is not None:
+            if char == quote:
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+        elif char == ",":
+            items.append(value[start:index].strip())
+            start = index + 1
+    items.append(value[start:].strip())
+    return [item for item in items if item]
 
 
 def _yaml_scalar(value: str) -> Any:
@@ -94,7 +222,19 @@ def _yaml_scalar(value: str) -> Any:
         return None
     if value.startswith("[") and value.endswith("]"):
         inner = value[1:-1].strip()
-        return [_yaml_scalar(item) for item in inner.split(",") if item.strip()]
+        return [_yaml_scalar(item) for item in _split_yaml_flow_items(inner)]
+    if value.startswith('"'):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as error:
+            raise RegistryContractError("invalid-registry-contract", str(error)) from error
+        if not isinstance(parsed, str):
+            raise RegistryContractError("invalid-registry-contract")
+        return parsed
+    if value.startswith("'"):
+        if len(value) < 2 or not value.endswith("'"):
+            raise RegistryContractError("invalid-registry-contract")
+        return value[1:-1].replace("''", "'")
     if value.lower() == "true":
         return True
     if value.lower() == "false":
@@ -103,7 +243,7 @@ def _yaml_scalar(value: str) -> Any:
         return None
     if value.isdigit():
         return int(value)
-    return value.strip('"').strip("'")
+    return value
 
 
 def _parse_v2_registry_yaml(text: str) -> dict[str, Any]:
@@ -114,7 +254,7 @@ def _parse_v2_registry_yaml(text: str) -> dict[str, Any]:
     for number, raw in enumerate(text.splitlines(), 1):
         if "\t" in raw:
             raise RegistryContractError("unsupported-registry-depth", f"tabs at line {number}")
-        line = raw.split("#", 1)[0].rstrip()
+        line = _strip_yaml_comment(raw).rstrip()
         if not line.strip():
             continue
         indent = len(line) - len(line.lstrip(" "))
@@ -173,7 +313,11 @@ def _parse_v2_registry_yaml(text: str) -> dict[str, Any]:
 def parse_v2_registry(text: str) -> list[dict[str, Any]]:
     if text.lstrip().startswith(("{", "[")):
         try:
-            document = json.loads(text, object_pairs_hook=_reject_duplicate_key)
+            document = json.loads(
+                text,
+                object_pairs_hook=_reject_duplicate_key,
+                parse_constant=_reject_json_constant,
+            )
         except RegistryContractError:
             raise
         except json.JSONDecodeError as error:
@@ -202,7 +346,13 @@ def detect_registry_version(text: str) -> int:
     stripped = text.lstrip()
     if stripped.startswith(("{", "[")):
         try:
-            document = json.loads(text)
+            document = json.loads(
+                text,
+                object_pairs_hook=_reject_duplicate_key,
+                parse_constant=_reject_json_constant,
+            )
+        except RegistryContractError:
+            raise
         except json.JSONDecodeError:
             return 2
         if not isinstance(document, dict):
@@ -213,10 +363,14 @@ def detect_registry_version(text: str) -> int:
         root_keys: set[str] = set()
         schema = None
         for raw in text.splitlines():
-            line = raw.split("#", 1)[0].rstrip()
+            line = _strip_yaml_comment(raw).rstrip()
             if not line.strip() or line.startswith((" ", "\t")) or ":" not in line:
                 continue
             key, raw_value = (part.strip() for part in line.split(":", 1))
+            if key in root_keys:
+                raise RegistryContractError(
+                    "duplicate-registry-key", f"duplicate root key: {key}"
+                )
             root_keys.add(key)
             if key == "schema":
                 schema = _yaml_scalar(raw_value)
