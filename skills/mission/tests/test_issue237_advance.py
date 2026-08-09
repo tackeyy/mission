@@ -41,7 +41,8 @@ def test_advance_rejects_invalid_activity_and_leaves_phase_unchanged(run_cli, tm
     assert r.returncode == 2, f"expected exit 2, got {r.returncode}: {r.stderr}"
     s = _read(tmp_path)
     assert s["phase"] == before
-    assert s.get("activity_current") in (None, {})
+    assert s["activity_current"]["kind"] == "active"
+    assert s["activity_current"]["reason"] == "planning"
 
 
 def test_advance_rejects_malformed_activity_format(run_cli, tmp_path):

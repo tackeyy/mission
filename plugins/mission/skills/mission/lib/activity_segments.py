@@ -32,6 +32,18 @@ ACTIVITY_REASONS_BY_KIND = {
     "idle": {"no-runnable-work", "interrupted", "other"},
 }
 TERMINAL_PHASES = {"done", "halted"}
+PHASE_ACTIVITY_DEFAULTS = {
+    "planning": ("active", "planning"),
+    "executing": ("active", "implementation"),
+    "reviewing": ("reviewer-wait", "review-response"),
+    "scoring": ("active", "scoring"),
+}
+ACTIVITY_EVENT_DEFAULTS = {
+    "awaiting-approval": ("approval-wait", "user-approval"),
+    "specialist": ("external-wait", "external-command"),
+    "review-aggregate": ("active", "scoring"),
+}
+UNOBSERVED_GAP_REASONS = {"legacy", "crash", "provider-no-events", "clock-gap"}
 RECENT_SEGMENT_LIMIT = 32
 PERCENTILE_METHOD = "linear-interpolation-r7"
 TASK_KEY_METHOD = "mission_id-or-unknown"
@@ -255,6 +267,26 @@ def _resume_boundary(state: dict[str, Any], at: str) -> str:
         if updated_gap is None:
             raise ActivityTimingError("activity unobserved gap overflow")
         state["activity_unobserved_gap_sec"] = updated_gap
+        reasons = state.setdefault("activity_unobserved_gap_reasons_sec", {})
+        if not isinstance(reasons, dict):
+            reasons = {}
+            state["activity_unobserved_gap_reasons_sec"] = reasons
+        last_event = _parse_at(state.get("activity_last_event_at"))
+        event_phase = state.get("activity_last_event_phase")
+        event_is_current = bool(
+            last_event
+            and started <= last_event <= resumed
+            and event_phase == current.get("phase")
+        )
+        if updated is None:
+            reason = "legacy"
+        elif event_is_current:
+            reason = "crash"
+        elif isinstance(current, dict) and current.get("kind") == "external-wait":
+            reason = "provider-no-events"
+        else:
+            reason = "clock-gap"
+        reasons[reason] = (_finite_nonnegative(reasons.get(reason)) or 0.0) + gap
     return boundary.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -265,7 +297,19 @@ def close_activity_for_resume(state: dict[str, Any], at: str) -> bool:
         return False
     if not isinstance(current, dict):
         raise ActivityTimingError("activity current is malformed")
-    return end_activity_segment(state, _resume_boundary(state, at))
+    kind = current.get("kind")
+    reason = current.get("reason")
+    if not isinstance(kind, str) or not isinstance(reason, str):
+        raise ActivityTimingError("activity current labels are malformed")
+    validate_activity(kind, reason)
+    boundary = _resume_boundary(state, at)
+    # A resume boundary equal to the open start means all elapsed time is an
+    # explicitly recorded unobserved gap.  Do not turn that gap into a
+    # zero-duration sample; a caller may safely open the phase default next.
+    if _parse_at(boundary) == _parse_at(current.get("started_at")):
+        state["activity_current"] = None
+        return True
+    return end_activity_segment(state, boundary)
 
 
 def close_activity_for_terminal(
@@ -302,6 +346,7 @@ def start_activity_segment(
     *,
     detail: str | None = None,
     resume: bool = False,
+    origin: str | None = None,
 ) -> bool:
     validate_activity(kind, reason)
     _reject_state_clock_rollback(state, at)
@@ -315,6 +360,7 @@ def start_activity_segment(
             and current.get("reason") == reason
             and current.get("phase") == (state.get("phase") or "unknown")
             and sanitize_activity_detail(current.get("detail")) == clean_detail
+            and (origin is None or current.get("origin") == origin)
         )
         # A normal duplicate start is idempotent.  On resume, however, equal
         # labels can still describe a stale pre-crash segment.  Close that
@@ -330,10 +376,46 @@ def start_activity_segment(
     }
     if clean_detail:
         entry["detail"] = clean_detail
+    if origin:
+        entry["origin"] = origin
     state["activity_current"] = entry
     state.setdefault("activity_segments", [])
     _rollup(state)
     return True
+
+
+def start_phase_default_activity(state: dict[str, Any], at: str) -> bool:
+    """Open the portable default measurement for the state's current phase."""
+    phase = state.get("phase")
+    default = PHASE_ACTIVITY_DEFAULTS.get(phase)
+    if default is None:
+        return False
+    kind, reason = default
+    return start_activity_segment(state, kind, reason, at, origin="phase-default")
+
+
+def is_phase_default_activity(current: Any, phase: str | None) -> bool:
+    """Return whether a current entry is the explicit automatic phase default."""
+    default = PHASE_ACTIVITY_DEFAULTS.get(phase)
+    return bool(
+        isinstance(current, dict)
+        and default is not None
+        and current.get("origin") == "phase-default"
+        and current.get("phase") == phase
+        and (current.get("kind"), current.get("reason")) == default
+    )
+
+
+def record_activity_event(state: dict[str, Any], event: str, at: str) -> bool:
+    """Apply a lifecycle event through the single activity writer."""
+    default = ACTIVITY_EVENT_DEFAULTS.get(event)
+    if default is None:
+        raise ActivityTimingError(f"unknown activity event: {event}")
+    kind, reason = default
+    changed = start_activity_segment(state, kind, reason, at)
+    state["activity_last_event_at"] = at
+    state["activity_last_event_phase"] = state.get("phase")
+    return changed
 
 
 def transition_activity_phase(
@@ -365,6 +447,7 @@ def transition_activity_phase(
             "reason": preserved.get("reason"),
             "started_at": at,
             "detail": sanitize_activity_detail(preserved.get("detail")),
+            "origin": preserved.get("origin"),
         }.items()
         if value is not None
     }
@@ -640,6 +723,7 @@ def summarize_activity_states(states: list[dict[str, Any]]) -> dict[str, Any]:
     open_count = 0
     closed_count = 0
     unobserved_gap = 0.0
+    gap_reasons: dict[str, float] = {}
     states_with = 0
     totals_consistent = True
     for state in states:
@@ -675,6 +759,23 @@ def summarize_activity_states(states: list[dict[str, Any]]) -> dict[str, Any]:
         observed_total = _finite_add(observed_total, item["observed"]) or 0.0
         phase_wall_total = _finite_add(phase_wall_total, item["phase_wall"]) or 0.0
         unobserved_gap = _finite_add(unobserved_gap, item["unobserved_gap"]) or 0.0
+        raw_gap_reasons = state.get("activity_unobserved_gap_reasons_sec")
+        if isinstance(raw_gap_reasons, dict):
+            state_reason_total = 0.0
+            valid_reason_map = True
+            for reason, value in raw_gap_reasons.items():
+                seconds = _finite_nonnegative(value)
+                if reason in UNOBSERVED_GAP_REASONS and seconds is not None:
+                    state_reason_total = _finite_add(state_reason_total, seconds) or 0.0
+                    gap_reasons[reason] = _finite_add(gap_reasons.get(reason, 0.0), seconds) or 0.0
+                else:
+                    valid_reason_map = False
+            if not valid_reason_map or abs(state_reason_total - item["unobserved_gap"]) > 0.001:
+                invalid_count += 1
+                totals_consistent = False
+        elif raw_gap_reasons is not None:
+            invalid_count += 1
+            totals_consistent = False
         task_key = str(state.get("mission_id") or "unknown")
         if item["valid_closed_sample"]:
             task_samples.setdefault(task_key, []).append(item["observed"])
@@ -715,10 +816,13 @@ def summarize_activity_states(states: list[dict[str, Any]]) -> dict[str, Any]:
         },
         "observed_total_sec": observed_total,
         "phase_duration_total_sec": phase_wall_total,
+        "elapsed_total_sec": phase_wall_total,
         "coverage_denominator_sec": coverage_denominator,
         "unclassified_sec": unclassified,
+        "conservation_delta_sec": phase_wall_total - observed_total - unclassified,
         "coverage_ratio": coverage_ratio,
         "unobserved_gap_sec": unobserved_gap,
+        "unobserved_gap_reasons_sec": dict(sorted(gap_reasons.items())),
         "closed_segment_count": closed_count,
         "open_segment_count": open_count,
         "invalid_segment_count": invalid_count,

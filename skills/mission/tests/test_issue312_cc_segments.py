@@ -18,6 +18,8 @@ import json
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 
 def _load():
     path = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
@@ -73,10 +75,51 @@ def test_set_phase_keeps_existing_open_segment(run_cli, tmp_path):
     run_cli("init", "m", "--complexity", "Standard", cwd=tmp_path, check=True)
     run_cli("activity", "start", "--kind", "active", "--reason", "planning",
             cwd=tmp_path, check=True)
+    before = json.loads(_sessions(tmp_path)[0].read_text())["activity_current"]
+    assert before["origin"] == "manual"
     run_cli("set", "phase=executing", cwd=tmp_path, check=True)
     state = json.loads(_sessions(tmp_path)[0].read_text())
     cur = state.get("activity_current")
-    assert cur and cur["reason"] == "planning", "既存 open segment を推測で切り替えない"
+    assert cur and cur["reason"] == "planning", "手動 override は phase 遷移後も保持する"
+    assert cur["origin"] == "manual"
+
+
+@pytest.mark.parametrize(
+    ("kind", "reason"),
+    [
+        ("active", "work"),
+        ("idle", "no-runnable-work"),
+        ("external-wait", "external-response"),
+    ],
+)
+def test_set_phase_preserves_manual_override_regardless_of_activity_kind(
+    run_cli, tmp_path, kind, reason
+):
+    run_cli("init", "m", "--complexity", "Standard", cwd=tmp_path, check=True)
+    run_cli("activity", "start", "--kind", kind, "--reason", reason, cwd=tmp_path, check=True)
+    run_cli("set", "phase=executing", cwd=tmp_path, check=True)
+
+    cur = json.loads(_sessions(tmp_path)[0].read_text())["activity_current"]
+    assert cur["origin"] == "manual"
+    assert (cur["kind"], cur["reason"], cur["phase"]) == (kind, reason, "executing")
+
+
+def test_set_phase_preserves_legacy_current_without_origin(run_cli, tmp_path):
+    run_cli("init", "m", "--complexity", "Standard", cwd=tmp_path, check=True)
+    path = _sessions(tmp_path)[0]
+    state = json.loads(path.read_text())
+    state["activity_current"] = {
+        "kind": "active",
+        "phase": "planning",
+        "reason": "work",
+        "started_at": state["updated_at"],
+    }
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+    run_cli("set", "phase=executing", cwd=tmp_path, check=True)
+    cur = json.loads(path.read_text())["activity_current"]
+    assert (cur["kind"], cur["reason"], cur["phase"]) == ("active", "work", "executing")
+    assert "origin" not in cur
 
 
 def test_set_reviewing_opens_reviewer_wait(run_cli, tmp_path):

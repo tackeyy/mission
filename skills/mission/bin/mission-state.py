@@ -74,13 +74,17 @@ from specialist_accounting import (  # noqa: E402
 )
 from activity_segments import (  # noqa: E402
     ACTIVITY_KINDS,
+    PHASE_ACTIVITY_DEFAULTS,
     ACTIVITY_REASONS_BY_KIND,
     ActivityTimingError,
     close_activity_for_resume,
     close_activity_for_terminal,
     end_activity_segment,
+    is_phase_default_activity,
+    record_activity_event,
     sanitize_activity_detail,
     start_activity_segment,
+    start_phase_default_activity,
     summarize_activity_states,
     transition_activity_phase,
     validate_activity,
@@ -4312,6 +4316,12 @@ def cmd_invoke_command_provider(args):
     command_env = os.environ.copy()
     command_env.update(_string_map(provider.get("env")))
     timeout = _provider_timeout(provider, args.timeout)
+    with StateLock(lock_file(cwd)):
+        dispatch_state = json.loads(sf.read_text())
+        record_activity_event(dispatch_state, "specialist", now)
+        dispatch_state["updated_at"] = now
+        backup_state(sf)
+        atomic_write_json(sf, stamp_metadata(dispatch_state, cwd))
     try:
         completed = subprocess.run(
             argv,
@@ -4354,6 +4364,14 @@ def cmd_invoke_command_provider(args):
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
         _validate_specialist_public_state(data)
+        current = data.get("activity_current")
+        if (
+            isinstance(current, dict)
+            and current.get("kind") == "external-wait"
+            and current.get("reason") == "external-command"
+            and current.get("started_at") == now
+        ):
+            end_activity_segment(data, completed_at)
         selected_entry = None
         if status in APPLIED_SPECIALIST_INVOCATION_STATUSES and args.selection_source:
             entry["selection_source"] = args.selection_source
@@ -5489,12 +5507,14 @@ def cmd_init(args):
             "wait_reason_totals_sec": {},
         },
         "activity_unobserved_gap_sec": 0.0,
+        "activity_unobserved_gap_reasons_sec": {},
         # S3: issue_ref (未指定 None)。issue_ref_key は #295 の比較用正規化キー。
         "issue_ref": getattr(args, "issue_ref", None),
         "issue_ref_key": _normalize_issue_ref(getattr(args, "issue_ref", None)),
         # S3-files: 同一 project の file-set overlap WARN 用 (未指定は空 list)
         "planned_files": planned_files,
     }
+    start_phase_default_activity(initial, now)
     # S3: 同プロジェクト内の active session で同一 issue_ref があれば WARN (reject しない)
     # #295: 形式差 (裸番号 / #番号 / host:owner/repo#番号 / URL) を正規化キーで同一視する
     _issue_ref = getattr(args, "issue_ref", None)
@@ -5670,13 +5690,18 @@ def cmd_init(args):
                     # #211: same-mission init is a resume boundary. Preserve the
                     # bounded activity rollup and close an open segment only up
                     # to the last observed state update; never infer the crash gap.
-                    close_activity_for_resume(existing_data, now)
+                    current = existing_data.get("activity_current")
+                    if not (
+                        isinstance(current, dict) and current.get("started_at") == now
+                    ):
+                        close_activity_for_resume(existing_data, now)
                     _resume_phase_timing(existing_data, now)
                     for key in (
                         "activity_current",
                         "activity_segments",
                         "activity_rollup",
                         "activity_unobserved_gap_sec",
+                        "activity_unobserved_gap_reasons_sec",
                         "activity_anomaly_counts",
                         "phase_durations_sec",
                         "phase",
@@ -5684,6 +5709,8 @@ def cmd_init(args):
                     ):
                         if key in existing_data:
                             initial[key] = existing_data[key]
+                    if initial.get("loop_active") is not False and not initial.get("activity_current"):
+                        start_phase_default_activity(initial, now)
             except ActivityTimingError as e:
                 print(f"ERROR: existing mission timing is invalid: {e}", file=sys.stderr)
                 sys.exit(2)
@@ -5777,6 +5804,7 @@ def cmd_activity_start(args):
                 at,
                 detail=args.detail,
                 resume=args.resume,
+                origin="manual",
             )
             if changed:
                 data["updated_at"] = at
@@ -5881,9 +5909,24 @@ def cmd_advance(args):
     """
     cwd = Path.cwd()
     sf = _activity_state_file(cwd)
-    raw = args.activity or ""
-    kind, sep, reason = raw.partition(":")
-    if not sep or not kind or not reason:
+    raw = args.activity
+    if raw is None:
+        new_phase = _normalize_set_phase_value(args.phase)
+        default = PHASE_ACTIVITY_DEFAULTS.get(new_phase)
+        if default is None:
+            print(f"ERROR: phase '{new_phase}' has no default activity.", file=sys.stderr)
+            sys.exit(2)
+        kind, reason = default
+    else:
+        kind, sep, reason = raw.partition(":")
+        if not sep or not kind or not reason:
+            print(
+                f"ERROR: --activity は <kind>:<reason> 形式で指定してください (例: active:implementation)。"
+                f" 受領値: '{raw}'",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+    if not kind or not reason:
         print(
             f"ERROR: --activity は <kind>:<reason> 形式で指定してください (例: active:implementation)。"
             f" 受領値: '{raw}'",
@@ -5960,10 +6003,20 @@ def cmd_advance(args):
             # 現 segment を先に閉じる。_transition_phase の split (旧 kind/reason の
             # キャリーフォワード) が「旧 reason + 新 phase・0秒」の phantom segment を
             # 作るのを防ぐ。advance は直後に新 segment を開くため carry-forward 不要。
-            if isinstance(data.get("activity_current"), dict):
+            if (
+                isinstance(data.get("activity_current"), dict)
+                and data.get("phase") != new_phase
+            ):
                 end_activity_segment(data, at)
             _transition_phase(data, new_phase, at)
-            start_activity_segment(data, kind, reason, at, detail=args.detail)
+            start_activity_segment(
+                data,
+                kind,
+                reason,
+                at,
+                detail=args.detail,
+                origin="phase-default" if raw is None else None,
+            )
             data["updated_at"] = at
             backup_state(sf)
             atomic_write_json(sf, stamp_metadata(data, cwd))
@@ -6779,28 +6832,23 @@ def cmd_set(args):
             if key == "phase":
                 normalized_phase = _normalize_set_phase_value(str(parsed_value))
                 try:
+                    old_phase = data.get("phase")
+                    current = data.get("activity_current")
+                    if (
+                        normalized_phase not in {"done", "halted"}
+                        and old_phase != normalized_phase
+                        and is_phase_default_activity(current, old_phase)
+                    ):
+                        end_activity_segment(data, now)
                     _transition_phase(data, normalized_phase, now)
                 except ArtifactContractError as exc:
                     print(f"ERROR: {exc}", file=sys.stderr)
                     sys.exit(2)
-                # #312: CC が set phase 経路を使っても segment が欠落しないよう、
-                # open segment が無ければ phase に応じた segment を fallback で開く。
-                # set 時点から開始し過去は塗らない (#237 精度契約)。既に open が
-                # あれば推測で切り替えない。終端 phase は対象外。
-                _fallback_activity = {
-                    "planning": ("active", "planning"),
-                    "executing": ("active", "implementation"),
-                    "reviewing": ("reviewer-wait", "review-response"),
-                    "scoring": ("active", "scoring"),
-                }.get(normalized_phase)
-                if _fallback_activity and not data.get("activity_current"):
+                if normalized_phase not in {"done", "halted"} and not data.get("activity_current"):
                     try:
-                        start_activity_segment(
-                            data, _fallback_activity[0], _fallback_activity[1], now,
-                            detail="auto-opened by set phase (#312)",
-                        )
+                        start_phase_default_activity(data, now)
                     except ActivityTimingError:
-                        pass  # fail-open: fallback が set 本体を壊さない
+                        pass
             else:
                 data[key] = parsed_value
         # A-M1 (2026-06-10 / Issue #168 拡張): complexity 変更時の reviewer_count と review_tier 同期
@@ -7753,6 +7801,13 @@ def cmd_aggregate_reviews(args):
             )
         # #338: 観測結果を state へ永続化し stats で横断集計可能にする (gate 不変)
         data["last_parallel_execution"] = parallel_execution
+        if data.get("phase") == "reviewing":
+            now = iso_now()
+            if isinstance(data.get("activity_current"), dict):
+                end_activity_segment(data, now)
+            _transition_phase(data, "scoring", now)
+            record_activity_event(data, "review-aggregate", now)
+            data["updated_at"] = now
         prior_metrics = [
             record for record in data.get("reviewer_output_records", [])
             if isinstance(record, dict) and record.get("iteration") != args.iteration
@@ -8361,6 +8416,8 @@ def cmd_mark_halt(args):
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
         now = iso_now()
+        if category == "awaiting-approval":
+            record_activity_event(data, "awaiting-approval", now)
         data["halt_reason"] = args.reason
         data["halt_category"] = category  # #190
         data["loop_active"] = False
@@ -8517,7 +8574,9 @@ def cmd_refresh_pid(args):
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
         now = iso_now()
-        close_activity_for_resume(data, now)
+        current = data.get("activity_current")
+        if not (isinstance(current, dict) and current.get("started_at") == now):
+            close_activity_for_resume(data, now)
         old_pid = data.get("pid")
         if (
             not _lease_fields_present(data)
@@ -8567,6 +8626,8 @@ def cmd_refresh_pid(args):
             _add_to_aggregate(cwd, sf.stem)  # F-4: 再活性化分を active_sessions へ戻す
         if not restored_phase:
             _resume_phase_timing(data, now)
+        if data.get("loop_active") is not False and not data.get("activity_current"):
+            start_phase_default_activity(data, now)
         data["updated_at"] = now
         backup_state(sf)
         with _lease_write_reason(getattr(args, "lease_reason", None)):
@@ -10177,8 +10238,8 @@ def _build_parser():
     )
     p_advance.add_argument("--phase", required=True,
                            help=f"遷移先 phase。terminal (done/halted) は mark-passes / mark-halt 専用。有効値: {sorted(VALID_PHASES - {'done', 'halted'})}")
-    p_advance.add_argument("--activity", required=True,
-                           help="<kind>:<reason> (例: active:implementation, reviewer-wait:review-response)")
+    p_advance.add_argument("--activity", default=None,
+                           help="任意の <kind>:<reason> override。省略時は遷移先 phase の既定値")
     p_advance.add_argument("--detail", default=None,
                            help="任意の補足。control 文字除去・160文字へ正規化")
     p_advance.add_argument("--at", default=None,

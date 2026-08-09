@@ -170,7 +170,7 @@ schema v1/v2 は `derive_terminal_outcome()` が読み取り時に互換導出�
 
 ### Activity segment observability (#211)
 
-`phase_durations_sec` の wall-clock 意味論を維持したまま、作業と待機を明示的に区別する。`activity start` は既存 open segment を閉じて新しい segment を開き、`activity end` は閉じる。どちらも state lock 内で atomic write され、同一操作の再実行は duration を二重加算しない。phase 遷移は open segment を同じ kind/reason のまま split し、`done` / `halted` は open segment を閉じる。
+`phase_durations_sec` の wall-clock 意味論を維持したまま、作業と待機を明示的に区別する。`init` は planning の default segment を開き、`advance --phase` は planning/executing/reviewing/scoring の phase default を使う（明示 `--activity` は override）。`activity start` は既存 open segment を閉じて新しい segment を開き、`activity end` は閉じる。どちらも state lock 内で atomic write され、同一操作の再実行は duration を二重加算しない。`aggregate-reviews` は reviewing から scoring へ遷移し、`done` / `halted` は open segment を閉じる。
 
 ```bash
 mission-state.py activity start --kind active --reason <work|implementation|planning|review|scoring|resumed-implementation|other> [--detail "..."]

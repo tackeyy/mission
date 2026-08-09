@@ -731,10 +731,19 @@ def test_invoke_command_provider_archives_evidence_and_logs_invocation(run_cli, 
     assert entry["status"] == "completed"
     assert entry["provider_kind"] == "command"
     assert entry["exit_code"] == 0
+    assert state["activity_current"] is None
+    assert any(
+        segment["kind"] == "external-wait"
+        and segment["reason"] == "external-command"
+        for segment in state["activity_segments"]
+    )
     assert evidence.exists()
     content = evidence.read_text(encoding="utf-8")
     assert "phase=review" in content
     assert "body=review this diff" in content
+    public_state = run_cli("get", cwd=tmp_path)
+    assert public_state.returncode == 0, public_state.stderr
+    assert json.loads(public_state.stdout)["specialist_invocations"][0] == entry
 
 
 def test_invoke_command_provider_records_failure_without_blocking_optional_provider(run_cli, tmp_path):
