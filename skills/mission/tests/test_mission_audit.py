@@ -496,7 +496,7 @@ def test_audit_reports_halt_incomplete_slow_and_low_score_buckets(tmp_path):
         env={**os.environ, "MISSION_AUDIT_NOW": "2026-06-18T00:15:00Z"},
     )
     data = json.loads(result.stdout)
-    assert data["halt_incomplete_breakdown"]["stale-state-cleanup"] == 1
+    assert data["halt_incomplete_breakdown"]["outcome:stale_superseded"] == 1
     assert data["halt_incomplete_breakdown"]["active-no-score-checkpoint"] == 1
     assert data["slow_session_breakdown"]["healthy-long-pass"] == 1
     assert data["low_score_pass_breakdown"]["valid-threshold-pass"] == 1
@@ -2055,7 +2055,7 @@ def test_audit_prefers_structured_halt_category_over_free_text_heuristic(tmp_pat
         check=True,
     )
     data = json.loads(result.stdout)
-    assert data["halt_incomplete_breakdown"] == {"structured:partial-done": 1}
+    assert data["halt_incomplete_breakdown"] == {"outcome:incomplete": 1}
 
 
 def test_audit_falls_back_to_heuristic_when_halt_category_absent(tmp_path):
@@ -2077,7 +2077,7 @@ def test_audit_falls_back_to_heuristic_when_halt_category_absent(tmp_path):
         check=True,
     )
     data = json.loads(result.stdout)
-    assert data["halt_incomplete_breakdown"] == {"stale-state-cleanup": 1}
+    assert data["halt_incomplete_breakdown"] == {"outcome:stale_superseded": 1}
 
 
 # ===== #221: halted-run の actionable 分類 =====
@@ -2227,21 +2227,22 @@ def test_audit_preserves_raw_halts_but_only_flags_actionable_halts(tmp_path):
     data = json.loads(result.stdout)
 
     assert data["halt_count"] == 23
-    assert data["actionable_halt_count"] == 17
-    assert data["non_actionable_halt_count"] == 6
+    assert data["actionable_halt_count"] == 10
+    assert data["non_actionable_halt_count"] == 13
     assert data["halt_disposition_breakdown"] == {
-        "actionable": 17,
-        "awaiting-external": 2,
+        "actionable": 10,
+        "awaiting-external": 3,
+        "blocked-external": 5,
         "delegated": 1,
-        "superseded-resolved": 2,
+        "superseded-resolved": 3,
         "user-aborted": 1,
     }
     assert data["completed_pass_rate"] == 1 / 24
     assert data["actionable_pass_rate_numerator"] == 1
-    assert data["actionable_pass_rate_denominator"] == 18
-    assert data["actionable_pass_rate"] == 1 / 18
+    assert data["actionable_pass_rate_denominator"] == 12
+    assert data["actionable_pass_rate"] == 1 / 12
     assert data["pass_rate"] == data["completed_pass_rate"]
-    assert data["all_finding_code_counts"]["halted-runs"] == 17
+    assert data["all_finding_code_counts"]["halted-runs"] == 10
     assert data["all_finding_code_counts"]["low-pass-rate"] == 1
     assert "actionable_halt_sessions" not in data
     assert "non_actionable_halt_sessions" not in data
@@ -2318,14 +2319,14 @@ def test_audit_halt_disposition_matches_real_handoff_and_approval_reasons(tmp_pa
     data = json.loads(result.stdout)
 
     assert data["halt_count"] == 6
-    assert data["actionable_halt_count"] == 1
-    assert data["non_actionable_halt_count"] == 5
+    assert data["actionable_halt_count"] == 0
+    assert data["non_actionable_halt_count"] == 6
     assert data["halt_disposition_breakdown"] == {
-        "actionable": 1,
         "awaiting-external": 1,
         "delegated": 4,
+        "superseded-resolved": 1,
     }
-    assert data["all_finding_code_counts"]["halted-runs"] == 1
+    assert data["all_finding_code_counts"].get("halted-runs", 0) == 0
 
 
 def test_audit_halt_disposition_matches_intentional_freeze_switch_reasons(tmp_path):
@@ -2432,9 +2433,9 @@ def test_audit_actionable_halts_keep_current_historical_periods(tmp_path):
     )
     data = json.loads(result.stdout)
 
-    assert data["current_actionable_halt_count"] == 1
+    assert data["current_actionable_halt_count"] == 0
     assert data["historical_actionable_halt_count"] == 1
-    assert data["current_finding_code_counts"]["halted-runs"] == 1
+    assert data["current_finding_code_counts"].get("halted-runs", 0) == 0
     assert data["historical_finding_code_counts"]["halted-runs"] == 1
 
 
@@ -2459,6 +2460,6 @@ def test_audit_markdown_distinguishes_raw_and_actionable_halts(tmp_path):
 
     assert "- raw halt sessions: 1" in result.stdout
     assert "- actionable halt sessions: 0" in result.stdout
-    assert "- actionable pass rate: -% (0/0)" in result.stdout
+    assert "- actionable pass rate: 0.0% (0/1)" in result.stdout
     assert "## Halt Dispositions" in result.stdout
     assert "`delegated`: 1" in result.stdout
