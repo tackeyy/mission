@@ -87,8 +87,6 @@ def run_cli(tmp_path):
         # Model a real caller that pre-issues and carries its fencing token. This
         # fixed token is never learned from state; explicit None tests missing-token paths.
         base_env["MISSION_LEASE_ID"] = "test-lease"
-        if args and args[0] == "push-score" and "--scoring-json" not in args and "--scoring-output" not in args:
-            base_env["MISSION_REQUIRE_SCORING_EVIDENCE"] = "0"
         if env_extra is not None:
             for key, value in env_extra.items():
                 if value is None:
@@ -110,7 +108,7 @@ def run_cli(tmp_path):
 @pytest.fixture
 def push_provenance_score(run_cli):
     """Create the v4 typed scoring/evidence contract for tests that need a pass."""
-    def _push(cwd, *, env_extra=None, iteration=1, items=None):
+    def _push(cwd, *, env_extra=None, iteration=1, items=None, open_high=0, notes=None):
         root = Path(cwd)
         sid = (env_extra or {}).get("MISSION_SESSION_ID", "test")
         if "CLAUDE_CODE_SESSION_ID" in (env_extra or {}) and "MISSION_SESSION_ID" not in (env_extra or {}):
@@ -119,12 +117,15 @@ def push_provenance_score(run_cli):
         values = items or {"mission_achievement": 4.5, "accuracy": 4.5, "completeness": 4.5, "usability": 4.5}
         archive = root / ".mission-state" / "archive"
         archive.mkdir(exist_ok=True)
-        evidence = json.dumps({"schema": "mission-review-aggregate/1", "findings": [], "inputs": []}).encode()
+        evidence = json.dumps({"schema": "mission-review-aggregate/1", "findings": [], "inputs": [{"findings": [{"severity": "High"}] * open_high}]}).encode()
         digest = hashlib.sha256(evidence).hexdigest()
         name = f"fixture-{sid}-{digest[:16]}.json"
         (archive / name).write_bytes(evidence)
         ref = {"kind": "review-aggregate", "path": f".mission-state/archive/{name}", "digest": "sha256:" + digest, "generation": digest[:16], "revision_scope": {"kind": "not-applicable", "reason_code": "non-git"}}
         scoring = archive / f"fixture-score-{sid}.json"
-        scoring.write_text(json.dumps({"items": values, "open_high": 0, "findings_evidence_path": ref["path"], "score_provenance": {"score_source": "scoring-json", "review_evidence_ref": ref, "revision_scope": ref["revision_scope"]}}))
+        payload = {"items": values, "open_high": open_high, "findings_evidence_path": ref["path"], "score_provenance": {"score_source": "scoring-json", "review_evidence_ref": ref, "revision_scope": ref["revision_scope"]}}
+        if notes is not None:
+            payload["notes"] = notes
+        scoring.write_text(json.dumps(payload))
         return run_cli("push-score", "--iteration", str(iteration), "--scoring-json", str(scoring), cwd=root, env_extra=env_extra, check=True)
     return _push
