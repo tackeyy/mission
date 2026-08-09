@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import math
 import re
 from typing import Any
@@ -12,14 +13,16 @@ PORTABLE_PROVIDER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}\Z")
 OPAQUE_PROVIDER_ID = re.compile(r"provider:sha256:[0-9a-f]{64}\Z")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+:-]{0,127}\Z")
-HTTP_URL = re.compile(r"(?<![A-Za-z0-9+.-])https?://[^\\\s'\"`]+", re.IGNORECASE)
+HTTP_URL = re.compile(r"(?<![A-Za-z0-9+.-])https?://[^\s'\"`]+", re.IGNORECASE)
+DNS_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
+HEX_ESCAPE = re.compile(r"[0-9A-Fa-f]{2}\Z")
 LOCAL_LOCATOR = re.compile(
     r"(?:"
-    r"file:/{1,3}[^\s'\"`]*|"
+    r"(?<![A-Za-z0-9+.-])file:[^\s'\"`]*|"
     r"(?<![A-Za-z0-9:])//[^\s'\"`]+|"
     r"(?<![A-Za-z0-9\\])\\\\[^\s'\"`]+|"
     r"(?<![A-Za-z0-9\\])\\(?!\\)[^\s'\"`]+|"
-    r"(?<![A-Za-z0-9])~(?:[A-Za-z0-9._-]+)?[\\/][^\s'\"`]*|"
+    r"(?<![A-Za-z0-9._+-])~(?:[A-Za-z0-9._-]+|[+-])?(?:[\\/][^\s'\"`]*)?(?![A-Za-z0-9._+-])|"
     r"(?<![A-Za-z0-9])[A-Za-z]:[^\s'\"`]+|"
     r"(?<![A-Za-z0-9/])/(?!/)[^\s'\"`]*"
     r")",
@@ -141,8 +144,10 @@ def contains_local_locator(value: object) -> bool:
     if not isinstance(value, str):
         return False
     cursor = 0
-    for start, end in _http_url_spans(value):
+    for start, end, protected in _http_url_candidates(value):
         if LOCAL_LOCATOR.search(value, cursor, start) is not None:
+            return True
+        if not protected:
             return True
         cursor = end
     return LOCAL_LOCATOR.search(value, cursor) is not None
@@ -151,26 +156,96 @@ def contains_local_locator(value: object) -> bool:
 def redact_local_locators(text: str, replacement: str = "[REDACTED_PATH]") -> str:
     chunks: list[str] = []
     cursor = 0
-    for start, end in _http_url_spans(text):
+    for start, end, protected in _http_url_candidates(text):
         chunks.append(LOCAL_LOCATOR.sub(replacement, text[cursor:start]))
-        chunks.append(text[start:end])
+        chunks.append(text[start:end] if protected else replacement)
         cursor = end
     chunks.append(LOCAL_LOCATOR.sub(replacement, text[cursor:]))
     return "".join(chunks)
 
 
-def _http_url_spans(text: str) -> list[tuple[int, int]]:
-    spans: list[tuple[int, int]] = []
+def _http_url_candidates(text: str) -> list[tuple[int, int, bool]]:
+    candidates: list[tuple[int, int, bool]] = []
     for match in HTTP_URL.finditer(text):
+        candidates.append((*match.span(), _is_strict_http_url(match.group(0))))
+    return candidates
+
+
+def _is_strict_http_url(candidate: str) -> bool:
+    if any(ord(char) < 32 or ord(char) == 127 for char in candidate):
+        return False
+    for index, char in enumerate(candidate):
+        if char == "%" and (
+            index + 2 >= len(candidate)
+            or HEX_ESCAPE.fullmatch(candidate[index + 1:index + 3]) is None
+        ):
+            return False
+    try:
+        parsed = urlsplit(candidate)
+    except ValueError:
+        return False
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return False
+    authority = candidate.split("://", 1)[1].split("/", 1)[0]
+    authority = authority.split("?", 1)[0].split("#", 1)[0]
+    if (
+        authority != parsed.netloc
+        or any(char in authority for char in "@,=\\%")
+    ):
+        return False
+    host: str
+    port_text = ""
+    if authority.startswith("["):
+        close = authority.find("]")
+        if close < 0:
+            return False
+        host = authority[1:close]
+        remainder = authority[close + 1:]
+        if remainder:
+            if not remainder.startswith(":"):
+                return False
+            port_text = remainder[1:]
         try:
-            parsed = urlsplit(match.group(0))
-            hostname = parsed.hostname
-            parsed.port
-        except ValueError:
-            continue
-        if parsed.scheme.lower() in {"http", "https"} and hostname:
-            spans.append(match.span())
-    return spans
+            ipaddress.IPv6Address(host)
+        except ipaddress.AddressValueError:
+            return False
+    else:
+        if "[" in authority or "]" in authority or authority.count(":") > 1:
+            return False
+        host, separator, port_text = authority.rpartition(":")
+        if not separator:
+            host = authority
+            port_text = ""
+        if not _is_strict_dns_or_ipv4(host):
+            return False
+    if port_text and (
+        not port_text.isascii()
+        or not port_text.isdigit()
+        or not 1 <= int(port_text) <= 65535
+    ):
+        return False
+    if authority.endswith(":"):
+        return False
+    try:
+        return parsed.hostname is not None and parsed.port == (
+            int(port_text) if port_text else None
+        )
+    except ValueError:
+        return False
+
+
+def _is_strict_dns_or_ipv4(host: str) -> bool:
+    if not host or len(host) > 253 or not host.isascii():
+        return False
+    try:
+        return ipaddress.ip_address(host).version == 4
+    except ValueError:
+        if all(char in "0123456789." for char in host):
+            return False
+    dns_host = host[:-1] if host.endswith(".") else host
+    return bool(dns_host) and all(
+        DNS_LABEL.fullmatch(label) is not None for label in dns_host.split(".")
+    )
 
 
 def _safe_score(value: object) -> bool:
