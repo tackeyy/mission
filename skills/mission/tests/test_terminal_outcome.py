@@ -458,7 +458,7 @@ def test_role_mixture_and_31_evidence_records_preserve_implementer_rate_and_cons
     }
 
 
-def test_init_schema_and_primary_terminal_writers_persist_explicit_outcomes(run_cli, tmp_path):
+def test_init_schema_and_primary_terminal_writers_persist_explicit_outcomes(run_cli, tmp_path, push_provenance_score):
     pass_root = tmp_path / "pass"
     pass_root.mkdir()
     run_cli(
@@ -467,15 +467,12 @@ def test_init_schema_and_primary_terminal_writers_persist_explicit_outcomes(run_
         cwd=pass_root, check=True,
     )
     initial = json.loads(_state_file(pass_root).read_text(encoding="utf-8"))
-    run_cli(
-        "mark-passes",
-        "--force",
-        "--reason",
-        "fixture override",
-        "--approved-by-user",
-        cwd=pass_root,
-        check=True,
-    )
+    push_provenance_score(pass_root)
+    state = json.loads(_state_file(pass_root).read_text(encoding="utf-8"))
+    state["task_profile"] = {"primary": "test"}
+    state["specialists_decision"] = {"policy": "fallback", "action": "continue-core"}
+    _state_file(pass_root).write_text(json.dumps(state), encoding="utf-8")
+    run_cli("mark-passes", cwd=pass_root, check=True)
     passed = json.loads(_state_file(pass_root).read_text(encoding="utf-8"))
 
     evidence_root = tmp_path / "evidence"
@@ -507,7 +504,7 @@ def test_init_schema_and_primary_terminal_writers_persist_explicit_outcomes(run_
         "passed": passed["terminal_outcome"],
         "evidence": evidence["terminal_outcome"],
     } == {
-        "schema": 3,
+        "schema": 4,
         "initial_has_outcome": False,
         "passed": "completed_pass",
         "evidence": "completed_evidence",

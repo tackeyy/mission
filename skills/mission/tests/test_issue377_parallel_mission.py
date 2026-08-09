@@ -7,6 +7,7 @@ AC-3: stop-guard の block メッセージに未達セッションの session_id
 AC-4: 並列命名規約 (<base>-m<issue>) で同一 issue_ref を重複 init すると警告が出る。
 """
 import json
+import hashlib
 import os
 import subprocess
 from pathlib import Path
@@ -166,11 +167,16 @@ def test_parallel_mark_passes_only_finishes_own_session(tmp_path):
     lease_a = _get_lease(r_a)
 
     # sid_a に push-score を積み mark-passes できる状態にする
-    r_push = _run_state(
-        ["push-score", "--iteration", "1", "--composite", "4.5",
-         "--min-item", "4.0", "--items", _ITEMS],
-        tmp_path, session_id=sid_a, lease_id=lease_a,
-    )
+    archive = tmp_path / ".mission-state" / "archive"
+    archive.mkdir(exist_ok=True)
+    evidence = json.dumps({"schema": "mission-review-aggregate/1", "findings": [], "inputs": []}).encode()
+    digest = hashlib.sha256(evidence).hexdigest()
+    evidence_name = f"fixture-{digest[:16]}.json"
+    (archive / evidence_name).write_bytes(evidence)
+    ref = {"kind": "review-aggregate", "path": f".mission-state/archive/{evidence_name}", "digest": "sha256:" + digest, "generation": digest[:16], "revision_scope": {"kind": "not-applicable", "reason_code": "non-git"}}
+    score = archive / "fixture-score.json"
+    score.write_text(json.dumps({"items": json.loads(_ITEMS), "open_high": 0, "findings_evidence_path": ref["path"], "score_provenance": {"score_source": "scoring-json", "review_evidence_ref": ref, "revision_scope": ref["revision_scope"]}}))
+    r_push = _run_state(["push-score", "--iteration", "1", "--scoring-json", str(score)], tmp_path, session_id=sid_a, lease_id=lease_a)
     assert r_push.returncode == 0, f"push-score stderr: {r_push.stderr}"
 
     # task_profile / specialists_decision を set (mark-passes に必要)
