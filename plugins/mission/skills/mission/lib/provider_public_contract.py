@@ -5,12 +5,14 @@ from __future__ import annotations
 import math
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 
 PORTABLE_PROVIDER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}\Z")
 OPAQUE_PROVIDER_ID = re.compile(r"provider:sha256:[0-9a-f]{64}\Z")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+:-]{0,127}\Z")
+HTTP_URL = re.compile(r"(?<![A-Za-z0-9+.-])https?://[^\\\s'\"`]+", re.IGNORECASE)
 LOCAL_LOCATOR = re.compile(
     r"(?:"
     r"file:/{1,3}[^\s'\"`]*|"
@@ -18,8 +20,7 @@ LOCAL_LOCATOR = re.compile(
     r"(?<![A-Za-z0-9\\])\\\\[^\s'\"`]+|"
     r"(?<![A-Za-z0-9\\])\\(?!\\)[^\s'\"`]+|"
     r"(?<![A-Za-z0-9])~(?:[A-Za-z0-9._-]+)?[\\/][^\s'\"`]*|"
-    r"(?<![A-Za-z0-9])[A-Za-z]:[^\\/\s'\"`]+[\\/][^\s'\"`]*|"
-    r"(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s'\"`]*|"
+    r"(?<![A-Za-z0-9])[A-Za-z]:[^\s'\"`]+|"
     r"(?<![A-Za-z0-9/])/(?!/)[^\s'\"`]*"
     r")",
     re.IGNORECASE,
@@ -137,11 +138,39 @@ def _safe_text(value: object, *, maximum: int = 2048) -> bool:
 
 
 def contains_local_locator(value: object) -> bool:
-    return isinstance(value, str) and LOCAL_LOCATOR.search(value) is not None
+    if not isinstance(value, str):
+        return False
+    cursor = 0
+    for start, end in _http_url_spans(value):
+        if LOCAL_LOCATOR.search(value, cursor, start) is not None:
+            return True
+        cursor = end
+    return LOCAL_LOCATOR.search(value, cursor) is not None
 
 
 def redact_local_locators(text: str, replacement: str = "[REDACTED_PATH]") -> str:
-    return LOCAL_LOCATOR.sub(replacement, text)
+    chunks: list[str] = []
+    cursor = 0
+    for start, end in _http_url_spans(text):
+        chunks.append(LOCAL_LOCATOR.sub(replacement, text[cursor:start]))
+        chunks.append(text[start:end])
+        cursor = end
+    chunks.append(LOCAL_LOCATOR.sub(replacement, text[cursor:]))
+    return "".join(chunks)
+
+
+def _http_url_spans(text: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    for match in HTTP_URL.finditer(text):
+        try:
+            parsed = urlsplit(match.group(0))
+            hostname = parsed.hostname
+            parsed.port
+        except ValueError:
+            continue
+        if parsed.scheme.lower() in {"http", "https"} and hostname:
+            spans.append(match.span())
+    return spans
 
 
 def _safe_score(value: object) -> bool:
