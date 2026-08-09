@@ -109,7 +109,10 @@ def test_envless_hook_selects_pid_owner_after_foreign_unexpired_lease(tmp_path):
 
     assert "block" in result.stdout
     assert "own" in result.stdout
-    assert "foreign" not in result.stdout
+    # AC-3 (#377): セッション内訳 breakdown に "aaa-foreign" (session_id) が含まれることがあるが、
+    # ブロック対象の MISSION フィールドは pid-4242 の "own" であり、
+    # "foreign" session の MISSION テキストが blocking reason を支配してはならない。
+    assert "ミッション: foreign" not in result.stdout
 
 
 def test_envless_hook_does_not_bypass_own_after_foreign_expired_lease(tmp_path):

@@ -250,6 +250,55 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py cleanup-stale 
 
 ⚠️ `cleanup-stale --execute` は他 Claude セッションで進行中のミッションも halt する可能性がある。`--root "$(pwd)"` で対象を絞り、事前に dry-run で `would_halt` を確認すること。
 
+### 並列 mission 公式レシピ (#377, 2026-08-09)
+
+1 つのオーケストレーターセッション (CC / Codex) が複数の Issue を並列に進めたい場合の標準手順。
+
+#### 命名規約
+
+```
+MISSION_SESSION_ID=<base>-m<issue>
+```
+
+- `<base>`: native セッション ID をそのまま使う (例: `cc-df831137`)。base を変えると stop-guard・cleanup-stale の所有者照合がずれるため維持する
+- `-m<issue>`: 論理分離 suffix。Issue 番号を付けるのが推奨だが任意のラベルでよい
+- 例: `cc-df831137-m824`、`cc-df831137-m825`
+
+#### 手順
+
+```bash
+# --- 論理セッション A: Issue #824 ---
+MISSION_SESSION_ID=cc-${CLAUDE_CODE_SESSION_ID}-m824 \
+  python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py \
+    init "Issue #824 の実装" --issue-ref 824 --complexity Standard
+# stdout の lease_id を保存: LEASE_A=$(... | jq -r .lease_id)
+
+# --- 論理セッション B: Issue #825 (並列) ---
+MISSION_SESSION_ID=cc-${CLAUDE_CODE_SESSION_ID}-m825 \
+  python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py \
+    init "Issue #825 の実装" --issue-ref 825 --complexity Standard
+# stdout の lease_id を保存: LEASE_B=$(... | jq -r .lease_id)
+```
+
+#### 注意事項
+
+- **lease の独立**: 各論理セッションの `init` は独立した `lease_id` を生成する。後続の mutating command (`push-score`, `mark-passes` 等) には **自セッションの LEASE_ID を渡す**。別セッションの LEASE_ID を渡すと fencing 違反で exit 2。
+- **closeout の独立**: `push-score` と `mark-passes` はセッションごとに実行する。片方の `mark-passes` は他方の state に影響しない。
+- **stop-guard の挙動**: 各論理セッションの Stop hook は自 session_id にマッチする state だけをブロック対象にする。片方が `mark-passes` (passes=true) になると、そちらのブロックは解除される。ブロック中の block reason には未達セッションの session_id / issue_ref の内訳が表示される。
+- **重複 init 警告**: 同一 issue_ref を複数の論理セッションが init すると `WARNING [S3]` が stderr に出る (ブロックはしない)。company-os 側 claim protocol と二重の防壁として機能する。
+- **assumptions の分離**: 各セッションの `assumptions_path` は `sessions/<sid>-assumptions.md` に自動設定される。固定パスに直書きしない。
+
+#### Stop hook の block 出力例 (2 session 並列・1 件未達の場合)
+
+```json
+{
+  "decision": "block",
+  "reason": "/mission skill アクティブ・未達 (session=cc-df831137-m824(#824), 未達一覧=[cc-df831137-m824(#824)], iter=2, last_score=4.2, threshold=4.0)。 state.json の passes=true か halt_reason を立てるまでループを継続。 ミッション: Issue #824 の実装"
+}
+```
+
+`未達一覧` に表示されるのは **同プロジェクト内の未達セッション** (最大 5 件)。#825 が mark-passes 済みなら一覧から消え、#824 だけが残る。
+
 ### Phase C: 旧 state.json → sessions/ 移行 (任意)
 
 既存の single state.json を multi-session 構造に変換するスクリプト:

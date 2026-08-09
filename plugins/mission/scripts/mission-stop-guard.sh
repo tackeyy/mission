@@ -310,7 +310,48 @@ if [ -d "$SESSIONS_DIR" ]; then
     if [ "$SCORE_HISTORY_LEN" -eq 0 ] 2>/dev/null && [ "$ITER" -ge "$PLANNING_WARN_ITER" ] 2>/dev/null; then
       PUSH_SCORE_WARN="[WARN: push-score 未実行の疑い (iter=$ITER, score_history 空, phase=$PHASE)。mission-state.py get で state を確認し、push-score 未実行なら push-score を実行してください] "
     fi
-    REASON="${STALE}${PUSH_SCORE_WARN}/mission skill アクティブ・未達 (multi-session: iter=$ITER, last_score=$LAST_SCORE, threshold=$THRESHOLD)。 state.json の passes=true か halt_reason を立てるまでループを継続。 ミッション: $MISSION"
+    # AC-3 (#377): 未達セッションの session_id / issue_ref 内訳を block reason に含める。
+    # ブロック対象セッション自身の識別子を取得 (session_id フィールド優先、なければファイル名)。
+    SESSION_SID=$(jq -r '.session_id // empty' "$SESSION_FILE_TO_BLOCK" 2>/dev/null || echo "")
+    [ -z "$SESSION_SID" ] && SESSION_SID=$(basename "$SESSION_FILE_TO_BLOCK" .json)
+    SESSION_ISSUE_REF=$(jq -r '.issue_ref // empty' "$SESSION_FILE_TO_BLOCK" 2>/dev/null || echo "")
+    # 同プロジェクトの全未達セッションを走査して内訳を構築 (最大 5 件)。
+    PENDING_BREAKDOWN=""
+    _PENDING_COUNT=0
+    _CWD_REAL=$(cd "$CWD" 2>/dev/null && pwd -P || echo "$CWD")
+    for _sf in "$SESSIONS_DIR"/*.json; do
+      [ -f "$_sf" ] || continue
+      _sl=$(jq -r '.loop_active // false' "$_sf" 2>/dev/null || echo "false")
+      [ "$_sl" != "true" ] && continue
+      _sp=$(jq -r '.passes // false' "$_sf" 2>/dev/null || echo "false")
+      [ "$_sp" = "true" ] && continue
+      _sh=$(jq -r '.halt_reason // empty' "$_sf" 2>/dev/null || echo "")
+      [ -n "$_sh" ] && continue
+      # project_root 一致のみ対象
+      _sr=$(jq -r '.project_root // empty' "$_sf" 2>/dev/null || echo "")
+      if [ -n "$_sr" ]; then
+        _ROOT_REAL=$(cd "$_sr" 2>/dev/null && pwd -P || echo "$_sr")
+        [ "$_CWD_REAL" != "$_ROOT_REAL" ] && continue
+      fi
+      _PENDING_COUNT=$(( _PENDING_COUNT + 1 ))
+      if [ "$_PENDING_COUNT" -gt 5 ]; then
+        PENDING_BREAKDOWN="${PENDING_BREAKDOWN},..."
+        break
+      fi
+      _psid=$(jq -r '.session_id // empty' "$_sf" 2>/dev/null || echo "")
+      [ -z "$_psid" ] && _psid=$(basename "$_sf" .json)
+      _piref=$(jq -r '.issue_ref // empty' "$_sf" 2>/dev/null || echo "")
+      _entry="$_psid"
+      [ -n "$_piref" ] && _entry="${_psid}(#${_piref})"
+      if [ -z "$PENDING_BREAKDOWN" ]; then
+        PENDING_BREAKDOWN="$_entry"
+      else
+        PENDING_BREAKDOWN="${PENDING_BREAKDOWN}, $_entry"
+      fi
+    done
+    SESSION_LABEL="$SESSION_SID"
+    [ -n "$SESSION_ISSUE_REF" ] && SESSION_LABEL="${SESSION_SID}(#${SESSION_ISSUE_REF})"
+    REASON="${STALE}${PUSH_SCORE_WARN}/mission skill アクティブ・未達 (session=$SESSION_LABEL, 未達一覧=[$PENDING_BREAKDOWN], iter=$ITER, last_score=$LAST_SCORE, threshold=$THRESHOLD)。 state.json の passes=true か halt_reason を立てるまでループを継続。 ミッション: $MISSION"
     jq -n --arg r "$REASON" '{decision:"block", reason:$r}'
     exit 0
   fi
