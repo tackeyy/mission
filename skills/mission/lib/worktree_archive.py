@@ -296,10 +296,13 @@ def validate_worktree_archive_bundle(bundle: Path) -> WorktreeArchiveValidation:
     if stat.S_ISLNK(pointer_stat.st_mode) or not stat.S_ISREG(pointer_stat.st_mode):
         return _invalid(bundle, bundle, "pointer-not-regular-file")
     try:
-        pointer_bytes, _pointer_metadata = _read_generation_file(bundle, Path("current.json"))
-        pointer = json.loads(pointer_bytes.decode("utf-8"))
+        pointer_bytes, _pointer_metadata = _read_generation_file(
+            bundle, Path("current.json")
+        )
     except (OSError, ValueError):
         return _invalid(bundle, bundle, "pointer-access-error")
+    try:
+        pointer = json.loads(pointer_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return _invalid(bundle, bundle, "pointer-invalid-json")
     generation = pointer.get("generation") if isinstance(pointer, dict) else None

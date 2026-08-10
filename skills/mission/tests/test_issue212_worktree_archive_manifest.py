@@ -646,7 +646,10 @@ def test_audit_uses_valid_manifest_for_noncanonical_scoring_path(tmp_path, run_c
 
 @pytest.mark.parametrize(
     "pointer_failure",
-    ["malformed", "symlink", "hardlink", "fifo", "oversize", "missing-generation"],
+    [
+        "malformed", "invalid-utf8", "symlink", "hardlink", "fifo",
+        "oversize", "missing-generation",
+    ],
 )
 def test_audit_reports_invalid_current_pointer_instead_of_silently_omitting_archive(
     tmp_path, run_cli, pointer_failure
@@ -660,6 +663,8 @@ def test_audit_reports_invalid_current_pointer_instead_of_silently_omitting_arch
         pytest.skip("FIFO is not supported")
     if pointer_failure == "malformed":
         pointer.write_text("{not-json\n", encoding="utf-8")
+    elif pointer_failure == "invalid-utf8":
+        pointer.write_bytes(b"\xff")
     elif pointer_failure == "symlink":
         external = tmp_path / "external-pointer.json"
         external.write_text(pointer.read_text(encoding="utf-8"), encoding="utf-8")
@@ -681,13 +686,35 @@ def test_audit_reports_invalid_current_pointer_instead_of_silently_omitting_arch
     data = _run_audit(destination)
 
     assert data["invalid_worktree_archive_count"] == 1
-    assert data["invalid_worktree_archives"][0]["bundle_path"] == str(bundle)
+    invalid = data["invalid_worktree_archives"][0]
+    assert invalid["bundle_path"] == str(bundle)
+    expected_reason = (
+        "pointer-invalid-json"
+        if pointer_failure in {"malformed", "invalid-utf8"}
+        else "pointer-access-error"
+        if pointer_failure in {"hardlink", "oversize"}
+        else None
+    )
+    if expected_reason:
+        assert invalid["reason"] == expected_reason
     codes = {finding["code"] for finding in data["findings"]}
     assert "invalid-worktree-archive" in codes
     assert "no-critical-findings" not in codes
     stats = run_cli("stats", "--root", str(destination), "--json", cwd=destination)
     assert stats.returncode == 0, stats.stderr
     assert json.loads(stats.stdout)["total_sessions"] == 0
+    spec = importlib.util.spec_from_file_location(
+        "worktree_archive_pointer_taxonomy_issue383",
+        REPO_ROOT / "skills" / "mission" / "lib" / "worktree_archive.py",
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    validation = module.validate_worktree_archive_bundle(bundle)
+    assert validation.status == "invalid"
+    if expected_reason:
+        assert validation.reason == expected_reason
 
 
 @pytest.mark.parametrize("state_failure", ["missing", "invalid-json"])
