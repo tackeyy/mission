@@ -8161,6 +8161,133 @@ def _review_prose_bytes(text: str) -> int:
     return len("\n".join(prose_lines).encode("utf-8"))
 
 
+MAX_REVIEW_INPUT_BYTES = 4 * 1024 * 1024
+
+
+def _stat_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+    """Return the stable identity fields used for hostile review input reads."""
+    return (
+        metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink,
+        metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns,
+    )
+
+
+def _read_strict_review_file(source: Path) -> bytes:
+    """Read one bounded regular review input without following its final path."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(os.fspath(source), os.O_RDONLY | os.O_NONBLOCK | nofollow)
+    except OSError as exc:
+        raise ValueError("review input is unavailable") from exc
+    try:
+        initial = os.fstat(fd)
+        if (
+            not stat.S_ISREG(initial.st_mode)
+            or initial.st_nlink != 1
+            or initial.st_size > MAX_REVIEW_INPUT_BYTES
+        ):
+            raise ValueError("review input must be a bounded regular non-linked file")
+        chunks: list[bytes] = []
+        remaining = initial.st_size
+        while remaining:
+            chunk = os.read(fd, min(remaining, 64 * 1024))
+            if not chunk:
+                raise ValueError("review input changed while being read")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(fd, 1) or _stat_identity(os.fstat(fd)) != _stat_identity(initial):
+            raise ValueError("review input changed while being read")
+        try:
+            named = os.lstat(source)
+        except OSError as exc:
+            raise ValueError("review input changed while being read") from exc
+        if _stat_identity(named) != _stat_identity(initial):
+            raise ValueError("review input changed while being read")
+        return b"".join(chunks)
+    except OSError as exc:
+        raise ValueError("review input is unavailable") from exc
+    finally:
+        os.close(fd)
+
+
+class _DuplicateReviewJsonKey(ValueError):
+    pass
+
+
+def _reject_duplicate_review_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateReviewJsonKey(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _parse_strict_review_bytes(content: bytes, expected_iteration: int) -> dict:
+    """Parse exactly one UTF-8 mission-review/1 document with no prose fallback."""
+    if len(content) > MAX_REVIEW_INPUT_BYTES:
+        raise ValueError("review input exceeds 4 MiB")
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("review input is invalid UTF-8") from exc
+    try:
+        payload = json.loads(text, object_pairs_hook=_reject_duplicate_review_keys)
+    except (_DuplicateReviewJsonKey, json.JSONDecodeError) as exc:
+        raise ValueError("review input must be exactly one JSON document") from exc
+    _validate_review_payload(payload, expected_iteration)
+    return payload
+
+
+def _validate_review_payload(payload: object, expected_iteration: int) -> None:
+    """Validate the shared mission-review/1 contract without mutating state."""
+    if not isinstance(payload, dict):
+        raise ValueError("review must be a JSON object")
+    if payload.get("schema") != "mission-review/1":
+        raise ValueError("schema must be mission-review/1")
+    if payload.get("iteration") != expected_iteration:
+        raise ValueError(f"iteration must be {expected_iteration}")
+    perspective = payload.get("perspective")
+    if not isinstance(perspective, str) or not perspective.strip():
+        raise ValueError("perspective must be a non-empty string")
+    findings = payload.get("findings")
+    if not isinstance(findings, list):
+        raise ValueError("findings must be a list")
+    seen_ids = set()
+    for idx, finding in enumerate(findings, start=1):
+        if not isinstance(finding, dict):
+            raise ValueError(f"finding {idx} must be an object")
+        fid = finding.get("id")
+        if not isinstance(fid, str) or not fid.startswith(f"{perspective}-"):
+            raise ValueError(f"finding {idx} id must start with '{perspective}-'")
+        if fid in seen_ids:
+            raise ValueError(f"duplicate finding id: {fid}")
+        seen_ids.add(fid)
+        severity = finding.get("severity")
+        if severity not in REVIEW_SEVERITIES:
+            raise ValueError(f"finding {fid} severity must be one of {sorted(REVIEW_SEVERITIES)}")
+        axis = finding.get("axis")
+        if axis not in REVIEW_SCORE_KEYS:
+            raise ValueError(f"finding {fid} axis must be one of {list(REVIEW_SCORE_KEYS)}")
+        if severity in {"High", "Medium"} and not str(finding.get("evidence") or "").strip():
+            raise ValueError(f"finding {fid} evidence is required for {severity}")
+    if "scores" not in payload:
+        raise ValueError("scores field is required; use null only for findings-only reviewers")
+    scores = payload.get("scores")
+    if scores is None:
+        return
+    if not isinstance(scores, dict) or set(scores) != set(REVIEW_SCORE_KEYS):
+        raise ValueError(f"scores must contain exactly {list(REVIEW_SCORE_KEYS)}")
+    for key, value in scores.items():
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or math.isnan(float(value)) or not (SCORE_MIN <= float(value) <= SCORE_MAX):
+            raise ValueError(f"score {key} must be a {SCORE_MIN}-{SCORE_MAX} number")
+    values = [float(scores[key]) for key in REVIEW_SCORE_KEYS]
+    if max(values) <= 1.0:
+        raise ValueError("scores look like 0-1 normalized scale; use 0-5 scale")
+    if len(set(values)) == 1 and not str(payload.get("same_score_note") or "").strip():
+        raise ValueError("same_score_note is required when all four scores are equal")
+
+
 def _extract_review_payload(src: Path) -> tuple[dict, dict]:
     """Extract one mission-review/1 payload and measure its external prose."""
     try:
@@ -8257,6 +8384,98 @@ def _load_review_json(path_str: str, expected_iteration: int) -> tuple[dict, dic
     if len(set(values)) == 1 and not str(payload.get("same_score_note") or "").strip():
         _review_error(src, "same_score_note is required when all four scores are equal")
     return payload, metric
+
+
+def _review_import_ref_is_valid(reference: object, expected_iteration: int) -> bool:
+    return (
+        isinstance(reference, dict)
+        and reference.get("kind") == "review-input"
+        and isinstance(reference.get("path"), str)
+        and isinstance(reference.get("digest"), str)
+        and _SHA256_REF_RE.fullmatch(reference["digest"]) is not None
+        and isinstance(reference.get("size"), int)
+        and not isinstance(reference.get("size"), bool)
+        and 0 <= reference["size"] <= MAX_REVIEW_INPUT_BYTES
+        and reference.get("iteration") == expected_iteration
+        and isinstance(reference.get("perspective"), str)
+        and reference["perspective"].strip()
+    )
+
+
+def _load_imported_review(cwd: Path, state: dict, reference_path: str, expected_iteration: int) -> tuple[dict, dict, dict]:
+    """Resolve a state-recorded immutable import; caller-provided paths add no authority."""
+    records = state.get("review_evidence_refs")
+    if not isinstance(records, list):
+        raise ValueError("review import reference is unavailable")
+    matches = [
+        ref for ref in records
+        if _review_import_ref_is_valid(ref, expected_iteration) and ref.get("path") == reference_path
+    ]
+    if len(matches) != 1:
+        raise ValueError("review import reference is missing or ambiguous")
+    reference = matches[0]
+    try:
+        content = _read_strict_review_file(cwd / reference["path"])
+    except ValueError as exc:
+        raise ValueError("review import evidence is unavailable") from exc
+    if len(content) != reference["size"] or "sha256:" + hashlib.sha256(content).hexdigest() != reference["digest"]:
+        raise ValueError("review import evidence integrity mismatch")
+    payload = _parse_strict_review_bytes(content, expected_iteration)
+    if payload["perspective"] != reference["perspective"]:
+        raise ValueError("review import evidence perspective mismatch")
+    metric = {"json_bytes": len(content), "prose_bytes": 0, "prose_ratio": 0}
+    return payload, metric, reference
+
+
+def cmd_review_import(args):
+    """Validate one untrusted review before atomically making it state-owned evidence."""
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        print("ERROR: state.json が見つかりません。先に init してください。", file=sys.stderr)
+        sys.exit(1)
+    if args.iteration < 1:
+        print("ERROR: --iteration は 1 以上で指定してください", file=sys.stderr)
+        sys.exit(2)
+    try:
+        if args.input is not None:
+            content = _read_strict_review_file(Path(args.input))
+        else:
+            content = sys.stdin.buffer.read(MAX_REVIEW_INPUT_BYTES + 1)
+        review = _parse_strict_review_bytes(content, args.iteration)
+    except ValueError as exc:
+        print(f"ERROR: review import rejected: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+    digest = "sha256:" + hashlib.sha256(content).hexdigest()
+    mission8 = "unknown"
+    with StateLock(lock_file(cwd)):
+        data = json.loads(sf.read_text())
+        mission8 = str(data.get("mission_id") or "unknown")[:8]
+        archive_dir = state_dir(cwd) / "archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        destination = archive_dir / f"iter-{args.iteration}-{mission8}-review-input-{digest[7:23]}.json"
+        if destination.exists() and _sha256_file(destination) != digest[7:]:
+            print("ERROR: immutable review import archive collision", file=sys.stderr)
+            sys.exit(2)
+        if not destination.exists():
+            atomic_write_bytes(destination, content)
+        reference = {
+            "kind": "review-input",
+            "path": str(destination.relative_to(cwd)),
+            "digest": digest,
+            "size": len(content),
+            "iteration": args.iteration,
+            "perspective": review["perspective"],
+        }
+        previous = data.get("review_evidence_refs")
+        records = previous if isinstance(previous, list) else []
+        retained = [item for item in records if isinstance(item, dict) and item != reference]
+        data["review_evidence_refs"] = (retained + [reference])[-128:]
+        data["updated_at"] = iso_now()
+        backup_state(sf)
+        atomic_write_json(sf, stamp_metadata(data, cwd))
+    print(json.dumps({"ok": True, "review_evidence_ref": reference}, ensure_ascii=False))
 
 
 def _cap_for_findings(findings: list[dict]) -> float | None:
@@ -8564,7 +8783,25 @@ def cmd_aggregate_reviews(args):
                 file=sys.stderr,
             )
             sys.exit(2)
-    loaded_reviews = [_load_review_json(path, args.iteration) for path in args.input]
+    input_paths = getattr(args, "input", None) or []
+    input_refs = getattr(args, "input_refs", None) or []
+    if not input_paths and not input_refs:
+        print("ERROR: --input または --input-ref を少なくとも 1 件指定してください", file=sys.stderr)
+        sys.exit(2)
+    loaded_reviews = [_load_review_json(path, args.iteration) for path in input_paths]
+    imported_refs: list[dict] = []
+    if input_refs:
+        try:
+            source_state = json.loads(sf.read_text())
+            for reference_path in input_refs:
+                review, metric, reference = _load_imported_review(
+                    cwd, source_state, reference_path, args.iteration
+                )
+                loaded_reviews.append((review, metric))
+                imported_refs.append(reference)
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            print(f"ERROR: review import reference rejected: {exc}", file=sys.stderr)
+            sys.exit(2)
     reviews = [review for review, _metric in loaded_reviews]
     reviewer_output_metrics = [
         {"perspective": review["perspective"], **metric}
@@ -8742,6 +8979,7 @@ def cmd_aggregate_reviews(args):
             "schema": "mission-review-aggregate/1",
             "iteration": args.iteration,
             "inputs": reviews,
+            "input_refs": imported_refs,
             "scoring_perspectives": [entry["perspective"] for entry in adjusted_scores],
             "excluded": excluded,
             "cap_log": cap_log,
@@ -9108,6 +9346,7 @@ def cmd_review_finalize(args):
     agg_args = argparse.Namespace(
         iteration=args.iteration,
         input=args.input,
+        input_refs=getattr(args, "input_refs", []) or [],
         out=args.out,
         json=True,
         min_reviewers=args.min_reviewers,
@@ -11179,10 +11418,22 @@ def _build_parser():
     p_manual_score.add_argument("--out", required=True, help="push-score --scoring-json に渡す出力 JSON")
     p_manual_score.set_defaults(func=cmd_manual_score_capture)
 
+    p_import = sub.add_parser(
+        "review-import",
+        help="strict mission-review/1 を検証して state-local immutable evidence に取り込む",
+    )
+    p_import.add_argument("--iteration", type=int, required=True)
+    import_source = p_import.add_mutually_exclusive_group(required=True)
+    import_source.add_argument("--input", default=None, help="review JSON の regular file")
+    import_source.add_argument("--stdin", action="store_true", help="stdin から review JSON を読む")
+    p_import.set_defaults(func=cmd_review_import)
+
     p_agg = sub.add_parser("aggregate-reviews", help="#119: mission-review/1 JSON を決定論集計して push-score 互換 scoring JSON を生成")
     p_agg.add_argument("--iteration", type=int, required=True)
-    p_agg.add_argument("--input", action="append", required=True,
-                       help="reviewer が出力した mission-review/1 JSON。複数指定可")
+    p_agg.add_argument("--input", action="append", default=[],
+                       help="reviewer が出力した legacy mission-review/1 JSON。複数指定可")
+    p_agg.add_argument("--input-ref", action="append", default=[], dest="input_refs",
+                       help="review-import が返した state-local review evidence path。複数指定可")
     p_agg.add_argument("--out", default=None,
                        help="出力する push-score 互換 scoring JSON パス。未指定なら /tmp/mission-scorer-iter-N-<mission8>.json")
     p_agg.add_argument("--json", action="store_true", help="結果を JSON で出力")
@@ -11199,8 +11450,10 @@ def _build_parser():
     p_rf = sub.add_parser("review-finalize",
                           help="#283: aggregate-reviews → push-score を 1 コマンドで実行 (Phase 5 transactional)")
     p_rf.add_argument("--iteration", type=int, required=True)
-    p_rf.add_argument("--input", action="append", required=True,
-                      help="reviewer が出力した mission-review/1 JSON。複数指定可")
+    p_rf.add_argument("--input", action="append", default=[],
+                      help="reviewer が出力した legacy mission-review/1 JSON。複数指定可")
+    p_rf.add_argument("--input-ref", action="append", default=[], dest="input_refs",
+                      help="review-import が返した state-local review evidence path。複数指定可")
     p_rf.add_argument("--out", default=None,
                       help="scoring JSON の出力パス。未指定なら /tmp/mission-scorer-iter-N-<mission8>.json")
     p_rf.add_argument("--min-reviewers", type=int, default=None, dest="min_reviewers",

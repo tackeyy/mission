@@ -175,6 +175,25 @@ def worktree_archive_lineage_references(
         "assumptions", iteration, state.get("assumptions_path")
     ):
         return None
+    imported_reviews = state.get("review_evidence_refs")
+    if imported_reviews is not None:
+        if not isinstance(imported_reviews, list):
+            return None
+        for reference in imported_reviews:
+            if (
+                not isinstance(reference, dict)
+                or reference.get("kind") != "review-input"
+                or not isinstance(reference.get("iteration"), int)
+                or isinstance(reference.get("iteration"), bool)
+                or not isinstance(reference.get("digest"), str)
+                or not isinstance(reference.get("size"), int)
+                or isinstance(reference.get("size"), bool)
+                or reference["size"] < 0
+                or not isinstance(reference.get("perspective"), str)
+                or not reference["perspective"].strip()
+                or not add("review-input", reference["iteration"], reference.get("path"))
+            ):
+                return None
     artifact = state.get("artifact") if isinstance(state.get("artifact"), dict) else {}
     if artifact.get("path") and not add("artifact", iteration, artifact.get("path")):
         return None
