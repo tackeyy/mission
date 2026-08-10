@@ -144,8 +144,9 @@ def reduce_review_aggregate(inputs: object, *, expected_iteration: int | None = 
     if len(adjusted) >= 2:
         agreement = _consensus_score(max(item["delta"] for item in detail.values()))
     numeric_items = list(items.values())
-    if agreement is not None:
-        items["reviewer_consensus"] = agreement
+    # Agreement is a gate observation, not a fifth quality axis.  Keeping the
+    # score vector fixed makes composite/min semantics invariant across review
+    # tiers and prevents an old consensus value from changing a new score.
     return {
         "items": items, "composite": round(sum(numeric_items) / len(numeric_items), 2),
         "min_item": round(min(numeric_items), 2), "open_high": open_high,

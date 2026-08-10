@@ -92,8 +92,8 @@ def test_review_aggregate_reducer_rejects_duplicate_perspective_and_non_finite_s
         reduce_review_aggregate([invalid])
 
 
-def test_review_aggregate_reducer_derives_consensus_item_only_for_multiple_reviewers():
-    """Consensus item is reducer-derived only for independent multi-review input."""
+def test_review_aggregate_reducer_keeps_consensus_out_of_score_items():
+    """Agreement is metadata: every newly derived score has exactly four axes."""
     from scoring_provenance import reduce_review_aggregate
 
     first = {
@@ -108,8 +108,9 @@ def test_review_aggregate_reducer_derives_consensus_item_only_for_multiple_revie
     single = reduce_review_aggregate([first])
     multiple = reduce_review_aggregate([first, second])
 
-    assert "reviewer_consensus" not in single["items"]
-    assert multiple["items"]["reviewer_consensus"] == 5.0
+    assert set(single["items"]) == set(ITEMS)
+    assert set(multiple["items"]) == set(ITEMS)
+    assert multiple["review_agreement"] == 5.0
     assert multiple["composite"] == 4.25
 
 

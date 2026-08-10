@@ -7177,7 +7177,7 @@ def cmd_set(args):
 
 # H2 (2026-06-10): スコア項目キーの正規形とエイリアス。実ログで表記揺れが混在し
 # stats 横断集計・min_item 検証が壊れたため push-score 時に正規化する。
-CANONICAL_SCORE_KEYS = {"mission_achievement", "accuracy", "completeness", "usability", "reviewer_consensus"}
+CANONICAL_SCORE_KEYS = {"mission_achievement", "accuracy", "completeness", "usability"}
 REVIEW_SCORE_KEYS = ("mission_achievement", "accuracy", "completeness", "usability")
 REVIEW_SEVERITIES = {"High", "Medium", "Low"}
 # #353: provisional observation thresholds. Calibrate from reviewer_output_stats
@@ -7198,8 +7198,13 @@ REVIEW_JSON_FENCE_RE = re.compile(
 SCORE_KEY_ALIASES = {
     "usefulness": "usability",
     "practicality": "usability",
-    "reviewer_agreement": "reviewer_consensus",
 }
+
+# `reviewer_consensus` used to be treated as an item.  It is now represented
+# only by the independent review_agreement field.  New writers reject both the
+# raw legacy name and its alias for every complexity; old state remains
+# display-only and is classified separately by audit.
+LEGACY_SCORE_ITEM_KEYS = {"reviewer_consensus", "reviewer_agreement"}
 
 
 def normalize_score_items(items: dict):
@@ -7272,6 +7277,13 @@ def _validate_score_args(args) -> dict:
     if not isinstance(items, dict):
         print("ERROR: --items は JSON オブジェクト (key->score) で指定してください。", file=sys.stderr)
         sys.exit(1)
+    if LEGACY_SCORE_ITEM_KEYS & set(items):
+        print(
+            "ERROR: reviewer_consensus / reviewer_agreement は新規 score items では使用できません。"
+            " 合意度は review_agreement の独立フィールドで記録し、items は4軸だけにしてください。",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     # H2: エイリアス正規化 + 未知キー WARN (reject はしない: 後方互換)
     items, unknown_keys, collisions = normalize_score_items(items)
     if collisions:
@@ -7343,6 +7355,13 @@ def _load_scoring_json(path_str: str):
         print(
             f"ERROR: --scoring-json に非正規のスコア項目キー {unknown_keys} があります。"
             f" 正規キー: {sorted(CANONICAL_SCORE_KEYS)} (エイリアス: {SCORE_KEY_ALIASES})",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if set(items) != CANONICAL_SCORE_KEYS:
+        print(
+            "ERROR: --scoring-json の items は4つの正規採点軸だけで指定してください。"
+            f" 正規キー: {sorted(CANONICAL_SCORE_KEYS)}",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -8651,16 +8670,9 @@ def _reject_on_score_item_mismatch(args, items: dict) -> None:
 
 
 def _validate_consensus_policy(data: dict, items: dict) -> None:
-    """Issue #10: Simple/Reviewer 1名では reviewer_consensus を採点 items から省略する."""
-    if "reviewer_consensus" not in items:
-        return
-    if data.get("complexity") == "Simple" and data.get("reviewer_count") == 1:
-        print(
-            "ERROR: Simple 複雑度かつ Reviewer 1名では reviewer_consensus を --items から省略してください "
-            "(Issue #10: consensus は複数 Reviewer 間の合意度であり、1名では検証できません)。"
-            " composite/min_item は残り4項目で算出し、notes に consensus 省略を明記してください。",
-            file=sys.stderr,
-        )
+    """Retained call site: new score items are always exactly the four axes."""
+    if set(items) != CANONICAL_SCORE_KEYS:
+        print("ERROR: 新規 score items は4つの正規採点軸だけで指定してください。", file=sys.stderr)
         sys.exit(2)
 
 

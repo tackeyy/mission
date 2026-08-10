@@ -65,8 +65,8 @@ def test_aggregate_reviews_outputs_derived_consensus_and_independent_agreement(s
             cwd=state_dir.parent, check=True)
 
     payload = json.loads(out.read_text())
-    assert set(payload["items"]) == {"mission_achievement", "accuracy", "completeness", "usability", "reviewer_consensus"}
-    assert payload["items"]["reviewer_consensus"] == 4.0
+    assert set(payload["items"]) == {"mission_achievement", "accuracy", "completeness", "usability"}
+    assert payload["review_agreement"] == 4.0
     assert payload["review_agreement"] == 4.0
     assert payload["agreement_detail"]["mission_achievement"]["delta"] == 1.0
 
@@ -78,7 +78,7 @@ def test_push_score_records_review_agreement_independently(state_dir, run_cli, r
     run_cli("push-score", "--iteration", "1", "--scoring-json", str(scoring), cwd=state_dir.parent, check=True)
 
     entry = read_state(state_dir)["score_history"][-1]
-    assert entry["items"] == {**ITEMS, "reviewer_consensus": 4.0}
+    assert entry["items"] == ITEMS
     assert entry["composite"] == 4.35
     assert entry["review_agreement"] == 4.0
     assert entry["agreement_detail"]["mission_achievement"]["delta"] == 1.0
