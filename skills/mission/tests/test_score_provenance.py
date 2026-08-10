@@ -5,6 +5,7 @@ import importlib.util
 import sys
 import os
 import hashlib
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -155,6 +156,79 @@ def test_new_scoring_json_requires_complete_provenance(state_dir, run_cli, tmp_p
     result = run_cli("push-score", "--iteration", "1", "--scoring-json", str(scoring), cwd=state_dir.parent)
     assert result.returncode == 2
     assert "provenance" in result.stderr
+
+
+def test_manual_score_capture_uses_its_own_typed_archive_and_revalidates_it(state_dir, run_cli, read_state, tmp_path):
+    """#383: manual imports never borrow review aggregate evidence."""
+    from scoring_provenance import digest
+
+    unsigned = {
+        "schema": "mission-manual-score/1", "session_id": "test", "mission_id": "abc12345",
+        "iteration": 1, "items": ITEMS, "composite": 4.25, "min_item": 4.0,
+        "open_high": 0, "revision_scope": {"kind": "not-applicable", "reason_code": "non-git"},
+        "source_evidence_ref": {"kind": "manual-source-evidence", "ref": "sha256:" + "1" * 64,
+                                "digest": "sha256:" + "1" * 64},
+        "imported_at": "2026-08-10T00:00:00Z",
+    }
+    manual = {**unsigned, "input_digest": digest(unsigned)}
+    source = tmp_path / "manual.json"
+    source.write_text(json.dumps(manual), encoding="utf-8")
+    scoring = tmp_path / "manual-scoring.json"
+    captured = run_cli("manual-score-capture", "--input", str(source), "--out", str(scoring), cwd=state_dir.parent)
+    assert captured.returncode == 0, captured.stderr
+    payload = json.loads(scoring.read_text())
+    provenance = payload["score_provenance"]
+    assert provenance["score_source"] == "manual-import"
+    assert "manual_evidence_ref" in provenance
+    assert "review_evidence_ref" not in provenance
+    pushed = run_cli("push-score", "--iteration", "1", "--scoring-json", str(scoring), cwd=state_dir.parent)
+    assert pushed.returncode == 0, pushed.stderr
+    entry = read_state(state_dir)["score_history"][-1]
+    archive = state_dir.parent / entry["manual_evidence_ref"]["path"]
+    archive.write_text("{}", encoding="utf-8")
+    rejected = run_cli("mark-passes", cwd=state_dir.parent)
+    assert rejected.returncode == 2
+    assert "digest mismatch" in rejected.stderr
+
+
+@pytest.mark.parametrize("case", ["symlink", "fifo", "hardlink", "oversize", "cross-session", "mixed-iteration"])
+def test_manual_score_capture_rejects_untrusted_input_without_mutating_state(state_dir, run_cli, tmp_path, case):
+    """Manual import fails closed for hostile files and incompatible typed claims."""
+    from scoring_provenance import digest
+
+    unsigned = {
+        "schema": "mission-manual-score/1", "session_id": "test", "mission_id": "abc12345",
+        "iteration": 1, "items": ITEMS, "composite": 4.25, "min_item": 4.0, "open_high": 0,
+        "revision_scope": {"kind": "not-applicable", "reason_code": "non-git"},
+        "source_evidence_ref": {"kind": "manual-source-evidence", "ref": "sha256:" + "2" * 64,
+                                "digest": "sha256:" + "2" * 64},
+        "imported_at": "2026-08-10T00:00:00Z",
+    }
+    if case == "cross-session":
+        unsigned["session_id"] = "other"
+    if case == "mixed-iteration":
+        unsigned["iteration"] = 2
+    payload = {**unsigned, "input_digest": digest(unsigned)}
+    source = tmp_path / "manual.json"
+    source.write_text(json.dumps(payload), encoding="utf-8")
+    if case == "symlink":
+        link = tmp_path / "manual-link.json"
+        link.symlink_to(source)
+        source = link
+    elif case == "hardlink":
+        linked = tmp_path / "manual-hardlink.json"
+        os.link(source, linked)
+        source = linked
+    elif case == "fifo":
+        fifo = tmp_path / "manual.fifo"
+        os.mkfifo(fifo)
+        source = fifo
+    elif case == "oversize":
+        source.write_bytes(b"x" * (4 * 1024 * 1024 + 1))
+    before = (state_dir / "sessions" / "test.json").read_bytes()
+    result = run_cli("manual-score-capture", "--input", str(source), "--out", str(tmp_path / "out.json"), cwd=state_dir.parent)
+    assert result.returncode == 2
+    assert (state_dir / "sessions" / "test.json").read_bytes() == before
 
 
 def test_review_finalize_records_immutable_evidence_refs(state_dir, run_cli, read_state, tmp_path):

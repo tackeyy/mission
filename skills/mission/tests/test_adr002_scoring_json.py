@@ -187,7 +187,7 @@ def test_scoring_json_respects_consensus_policy(state_dir, run_cli, tmp_path):
                 cwd=state_dir.parent)
     assert r.returncode == 2
     assert "reviewer_consensus" in r.stderr
-    assert "省略" in r.stderr
+    assert "非正規" in r.stderr
 
 
 # ===== evidence の archive =====
@@ -280,7 +280,7 @@ def test_single_low_item_without_provenance_is_rejected(state_dir, run_cli):
                 cwd=state_dir.parent,
                 env_extra={"MISSION_REQUIRE_SCORING_EVIDENCE": "0"})
     assert r.returncode == 2
-    assert "provenance" in r.stderr
+    assert "4つの正規採点軸" in r.stderr
 
 
 # ===== evidence なし push-score の hard reject (G-2 default flip) =====
@@ -301,7 +301,7 @@ def test_evidence_less_env_cannot_bypass_provenance(state_dir, run_cli, read_sta
                 "--items", '{"mission_achievement": 4.0}', cwd=state_dir.parent,
                 env_extra={"MISSION_REQUIRE_SCORING_EVIDENCE": "0"})
     assert r.returncode == 2
-    assert "provenance" in r.stderr
+    assert "4つの正規採点軸" in r.stderr
     assert "DEPRECATED ESCAPE HATCH" in r.stderr
     assert len(read_state(state_dir)["score_history"]) == 0
 

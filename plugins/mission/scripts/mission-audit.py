@@ -86,6 +86,7 @@ from state_snapshot import (  # noqa: E402
     write_snapshot,
 )
 from scoring_provenance import (  # noqa: E402
+    classify_score_provenance,
     terminal_state_digest,
     validate_receipt_binding,
     validate_recorded_envelope,
@@ -155,6 +156,11 @@ FINDING_SPECS = {
         "invalid-score-iteration", "P1", "invalid_score_iterations", "item",
         "score history has an iteration outside iteration >= 1",
         "{count} {sessions} have score_history entries outside iteration >= 1",
+    ),
+    "invalid-score-provenance": FindingSpec(
+        "invalid-score-provenance", "P1", "invalid_score_provenance", "item",
+        "new score has malformed or unverifiable provenance",
+        "{count} {sessions} have malformed or unverifiable new score provenance",
     ),
     "blank-specialist-invocation": FindingSpec(
         "blank-specialist-invocation", "P2", "blank_specialist_invocations", "item",
@@ -2165,6 +2171,37 @@ def invalid_score_iteration_item(record: StateRecord) -> dict[str, Any] | None:
     }
 
 
+def score_provenance_item(record: StateRecord) -> dict[str, Any] | None:
+    """Classify every score read-only; legacy terminal bytes remain untouched."""
+    terminal = not bool(record.state.get("loop_active"))
+    classifications: list[dict[str, Any]] = []
+    for index, entry in enumerate(record.state.get("score_history") or [], start=1):
+        status = classify_score_provenance(entry, terminal=terminal)
+        if status == "verified":
+            provenance = entry.get("score_provenance", {})
+            ref = provenance.get("manual_evidence_ref") if provenance.get("score_source") == "manual-import" else provenance.get("review_evidence_ref")
+            try:
+                root = record.path.parents[2]
+                path = root / str(ref["path"])
+                st = path.stat(follow_symlinks=False)
+                content = path.read_bytes()
+                if (path.is_symlink() or not stat.S_ISREG(st.st_mode) or st.st_nlink != 1
+                        or "sha256:" + hashlib.sha256(content).hexdigest() != ref["digest"]):
+                    status = "invalid"
+            except (OSError, TypeError, KeyError):
+                status = "invalid"
+        classifications.append({"index": index, "iteration": entry.get("iteration") if isinstance(entry, dict) else None,
+                                "classification": status})
+    if not classifications:
+        return None
+    return {
+        "project": project_name(record.state), "project_root": project_root_for(record),
+        "session_id": record.state.get("session_id") or record.path.stem,
+        "mission_id": record.state.get("mission_id") or "", "path": str(record.path),
+        "updated_at": record.state.get("updated_at") or "", "classifications": classifications,
+    }
+
+
 def blank_specialist_invocation_item(record: StateRecord) -> dict[str, Any] | None:
     blank_entries: list[dict[str, Any]] = []
     for index, invocation in enumerate(record.state.get("specialist_invocations") or [], start=1):
@@ -2295,6 +2332,15 @@ def aggregate(
     invalid_score_iterations = [
         item for r in records
         if (item := invalid_score_iteration_item(r)) is not None
+    ]
+    score_provenance = [
+        item for r in records
+        if (item := score_provenance_item(r)) is not None
+    ]
+    invalid_score_provenance = [
+        {**item, "invalid_entries": [entry for entry in item["classifications"] if entry["classification"] == "invalid"]}
+        for item in score_provenance
+        if any(entry["classification"] == "invalid" for entry in item["classifications"])
     ]
     blank_specialist_invocations = [
         item for r in records
@@ -2456,6 +2502,12 @@ def aggregate(
         "invalid_score_iteration_breakdown": bucket_count_keys(
             [str(item.get("project") or "unknown") for item in invalid_score_iterations]
         ),
+        "score_provenance": score_provenance,
+        "score_provenance_counts": dict(Counter(
+            entry["classification"] for item in score_provenance for entry in item["classifications"]
+        )),
+        "invalid_score_provenance": invalid_score_provenance,
+        "invalid_score_provenance_count": len(invalid_score_provenance),
         "blank_specialist_invocations": blank_specialist_invocations,
         "blank_specialist_invocation_count": len(blank_specialist_invocations),
         "blank_specialist_invocation_breakdown": bucket_count_keys(
@@ -2809,6 +2861,7 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
         f"- resolved archive duplicates: {stats['resolved_duplicate_group_count']}",
         f"- missing scoring evidence: {stats['missing_scoring_evidence_count']}",
         f"- invalid score iterations: {stats['invalid_score_iteration_count']}",
+        f"- score provenance (verified / legacy-unverifiable / invalid): {stats['score_provenance_counts'].get('verified', 0)} / {stats['score_provenance_counts'].get('legacy-unverifiable', 0)} / {stats['score_provenance_counts'].get('invalid', 0)}",
         f"- blank specialist invocations: {stats['blank_specialist_invocation_count']}",
         f"- preparation-only completed command providers: {stats['preparation_only_completed_provider_count']}",
         f"- missing specialist selection checkpoints: {stats['missing_specialist_selection_checkpoint_count']}",

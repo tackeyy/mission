@@ -23,6 +23,38 @@ REVIEW_SCORE_KEYS = ("mission_achievement", "accuracy", "completeness", "usabili
 REVIEW_SEVERITIES = {"High", "Medium", "Low"}
 
 
+def classify_score_provenance(entry: object, *, terminal: bool) -> str:
+    """Pure historical classification; never upgrades a legacy score to verified.
+
+    The caller may additionally verify bytes/references.  This function only
+    decides whether a record has the shape required for that verification.
+    """
+    if not isinstance(entry, dict):
+        return "invalid"
+    provenance = entry.get("score_provenance")
+    if provenance is None:
+        return "legacy-unverifiable" if terminal else "invalid"
+    if not isinstance(provenance, dict):
+        return "invalid"
+    source = provenance.get("score_source")
+    if source == "scoring-json":
+        ref = provenance.get("review_evidence_ref")
+    elif source == "manual-import":
+        if "review_evidence_ref" in provenance:
+            return "invalid"
+        ref = provenance.get("manual_evidence_ref")
+    else:
+        return "invalid"
+    if not isinstance(ref, dict) or not isinstance(provenance.get("revision_scope"), dict):
+        return "invalid"
+    required = {"path", "digest", "generation", "revision_scope"}
+    if not required <= set(ref) or ref.get("revision_scope") != provenance.get("revision_scope"):
+        return "invalid"
+    if not isinstance(ref["path"], str) or not SHA256_REF_RE.fullmatch(str(ref["digest"])):
+        return "invalid"
+    return "verified"
+
+
 def _finite_score(value: object, *, field: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
         raise ValueError(f"{field} must be a finite number")

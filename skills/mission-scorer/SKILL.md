@@ -71,7 +71,7 @@ allowed-tools: Read, Grep, Glob
 
 ## NG行動
 
-- composite / min_item / reviewer_consensus / review_agreement を計算する
+- composite / min_item / review_agreement を計算する（items は4軸のまま）
 - pass / fail を判断する
 - reviewer の散文に無い evidence を作る
 - `mission-state.py` を呼ぶ

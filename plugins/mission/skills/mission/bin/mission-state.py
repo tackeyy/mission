@@ -129,6 +129,7 @@ from scoring_provenance import (  # noqa: E402
     VERIFIER_ID_RE as _APPROVAL_VERIFIER_NAME_RE,
     build_request as build_approval_request,
     digest as provenance_digest,
+    classify_score_provenance,
     reduce_review_aggregate,
     terminal_state_digest,
     validate_receipt_binding,
@@ -7755,19 +7756,67 @@ def _validate_provenance(provenance: object, *, require: bool) -> dict | None:
     scope = provenance.get("revision_scope")
     if source not in {"scoring-json", "manual-import"}:
         raise ValueError("score provenance has invalid score_source")
-    if not isinstance(ref, dict) or ref.get("kind") != "review-aggregate" or not isinstance(ref.get("path"), str) or not _SHA256_REF_RE.fullmatch(str(ref.get("digest") or "")) or not isinstance(ref.get("generation"), str) or not isinstance(ref.get("revision_scope"), dict):
-        raise ValueError("score provenance has invalid review_evidence_ref")
-    if not isinstance(scope, dict) or scope != ref["revision_scope"]:
-        raise ValueError("score provenance revision_scope mismatch")
-    # A review aggregate is a deterministic derivation, never a label that a
-    # manual import may borrow.  Manual imports need their own typed input
-    # contract; until one is supplied they fail closed.
-    if source == "manual-import":
-        raise ValueError("manual-import cannot use a review-aggregate evidence reference")
+    if source == "scoring-json":
+        if not isinstance(ref, dict) or ref.get("kind") != "review-aggregate" or not isinstance(ref.get("path"), str) or not _SHA256_REF_RE.fullmatch(str(ref.get("digest") or "")) or not isinstance(ref.get("generation"), str) or not isinstance(ref.get("revision_scope"), dict):
+            raise ValueError("score provenance has invalid review_evidence_ref")
+        if not isinstance(scope, dict) or scope != ref["revision_scope"]:
+            raise ValueError("score provenance revision_scope mismatch")
+    else:
+        # Manual imports intentionally do not reuse reviewer aggregates.  The
+        # typed capture is the only supported host-file route.
+        manual = provenance.get("manual_evidence_ref")
+        if ref is not None:
+            raise ValueError("manual-import must not contain review_evidence_ref")
+        if (not isinstance(manual, dict) or manual.get("kind") != "manual-score"
+                or not isinstance(manual.get("path"), str)
+                or not _SHA256_REF_RE.fullmatch(str(manual.get("digest") or ""))
+                or not isinstance(manual.get("generation"), str)
+                or not isinstance(manual.get("revision_scope"), dict)):
+            raise ValueError("score provenance has invalid manual_evidence_ref")
+        if not isinstance(scope, dict) or scope != manual["revision_scope"]:
+            raise ValueError("manual-import revision_scope mismatch")
     if not isinstance(provenance.get("scoring_evidence_ref"), dict) and require:
         # push-score adds this after archiving; raw aggregate output has none.
         pass
     return provenance
+
+
+def _manual_score_binding(data: dict, entry: dict, payload: dict) -> dict:
+    """The complete claim a manually supplied score is permitted to carry."""
+    return {
+        "session_id": data.get("session_id"), "mission_id": data.get("mission_id"),
+        "iteration": entry.get("iteration"), "items": entry.get("items"),
+        "composite": entry.get("composite"), "min_item": entry.get("min_item"),
+        "open_high": entry.get("open_high"), "revision_scope": payload.get("revision_scope"),
+        "source_evidence_ref": payload.get("source_evidence_ref"),
+    }
+
+
+def _validate_manual_score_payload(payload: object, data: dict, entry: dict) -> None:
+    if not isinstance(payload, dict) or payload.get("schema") != "mission-manual-score/1":
+        raise ValueError("manual score evidence has invalid schema")
+    if "review_evidence_ref" in payload or payload.get("manual_evidence_ref") is not None:
+        raise ValueError("manual score evidence must not use review aggregate references")
+    required = {"schema", "session_id", "mission_id", "iteration", "items", "composite", "min_item",
+                "open_high", "revision_scope", "source_evidence_ref", "imported_at", "input_digest"}
+    if set(payload) != required:
+        raise ValueError("manual score evidence has invalid fields")
+    if not isinstance(payload.get("imported_at"), str) or not payload["imported_at"].strip():
+        raise ValueError("manual score evidence imported_at is invalid")
+    source = payload.get("source_evidence_ref")
+    if (not isinstance(source, dict) or set(source) != {"kind", "ref", "digest"}
+            or source.get("kind") != "manual-source-evidence"
+            or not _SHA256_REF_RE.fullmatch(str(source.get("ref") or ""))
+            or source.get("ref") != source.get("digest")):
+        raise ValueError("manual score evidence source reference is invalid")
+    claimed_digest = payload.get("input_digest")
+    unsigned = {key: value for key, value in payload.items() if key != "input_digest"}
+    if claimed_digest != provenance_digest(unsigned):
+        raise ValueError("manual score evidence input digest mismatch")
+    if _manual_score_binding(data, entry, payload) != {
+        key: payload.get(key) for key in _manual_score_binding(data, entry, payload)
+    }:
+        raise ValueError("manual score evidence binding mismatch")
 
 
 def _read_bounded_review_evidence(cwd: Path, path_text: object) -> bytes:
@@ -7814,6 +7863,88 @@ def _read_bounded_review_evidence(cwd: Path, path_text: object) -> bytes:
     return content
 
 
+def _read_bounded_manual_input(path_text: object) -> bytes:
+    """Safely capture one host-provided manual-score JSON file before archiving."""
+    if not isinstance(path_text, str) or not path_text or "\x00" in path_text:
+        raise ValueError("manual score input path is invalid")
+    try:
+        fd = os.open(path_text, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            initial = os.fstat(fd)
+            if not stat.S_ISREG(initial.st_mode) or initial.st_nlink != 1 or initial.st_size > 4 * 1024 * 1024:
+                raise ValueError("manual score input must be a bounded regular non-symlink file")
+            content = os.read(fd, initial.st_size)
+            if len(content) != initial.st_size or os.read(fd, 1) or os.fstat(fd).st_size != initial.st_size:
+                raise ValueError("manual score input changed while being read")
+            return content
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise ValueError("manual score input path is invalid") from exc
+
+
+def cmd_manual_score_capture(args):
+    """Capture a typed manual score into the only manual-import evidence route."""
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        print("ERROR: state.json が見つかりません。先に init してください。", file=sys.stderr)
+        sys.exit(2)
+    try:
+        content = _read_bounded_manual_input(args.input)
+        payload = json.loads(content.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        print(f"ERROR: manual score input: {exc}", file=sys.stderr)
+        sys.exit(2)
+    with StateLock(lock_file(cwd)):
+        data = json.loads(sf.read_text(encoding="utf-8"))
+        entry = {
+            "iteration": payload.get("iteration"), "items": payload.get("items"),
+            "composite": payload.get("composite"), "min_item": payload.get("min_item"),
+            "open_high": payload.get("open_high"),
+        }
+        try:
+            _validate_manual_score_payload(payload, data, entry)
+            _validate_revision_scope(cwd, payload["revision_scope"])
+            if (not isinstance(entry["iteration"], int) or isinstance(entry["iteration"], bool)
+                    or entry["iteration"] < 1 or entry["iteration"] != data.get("iteration")
+                    or set(entry["items"] or {}) != CANONICAL_SCORE_KEYS):
+                raise ValueError("manual score iteration or items are invalid")
+            values = [float(entry["items"][axis]) for axis in REVIEW_SCORE_KEYS]
+            if any(not SCORE_MIN <= value <= SCORE_MAX for value in values):
+                raise ValueError("manual score item is out of range")
+            if entry["composite"] != round(sum(values) / len(values), 2) or entry["min_item"] != round(min(values), 2):
+                raise ValueError("manual score composite or min_item is not derived from four axes")
+            if not isinstance(entry["open_high"], int) or isinstance(entry["open_high"], bool) or entry["open_high"] < 0:
+                raise ValueError("manual score open_high is invalid")
+        except (TypeError, ValueError) as exc:
+            print(f"ERROR: manual score input: {exc}", file=sys.stderr)
+            sys.exit(2)
+        digest = hashlib.sha256(content).hexdigest()
+        mission8 = str(data.get("mission_id") or "unknown")[:8]
+        archive = state_dir(cwd) / "archive" / f"iter-{entry['iteration']}-{mission8}-manual-{digest[:16]}.json"
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        if archive.exists() and _sha256_file(archive) != digest:
+            print("ERROR: immutable manual score archive collision", file=sys.stderr)
+            sys.exit(2)
+        if not archive.exists():
+            atomic_write_bytes(archive, content)
+        ref = {
+            "kind": "manual-score", "path": str(archive.relative_to(cwd)),
+            "digest": "sha256:" + digest, "generation": digest[:16],
+            "revision_scope": payload["revision_scope"],
+        }
+        scoring = {
+            "items": entry["items"], "open_high": entry["open_high"],
+            "score_provenance": {"score_source": "manual-import", "manual_evidence_ref": ref,
+                                  "revision_scope": payload["revision_scope"]},
+        }
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(out, scoring)
+    print(json.dumps({"ok": True, "scoring_json": str(out), "manual_evidence_ref": ref}, ensure_ascii=False))
+
+
 def _revalidate_score_provenance(cwd: Path, entry: dict, data: dict, *, require_scoring_artifact: bool = True) -> None:
     """Re-check immutable evidence at the pass boundary; never trust a saved digest alone."""
     # A live pass is always a new decision.  Historical schema versions are
@@ -7821,7 +7952,8 @@ def _revalidate_score_provenance(cwd: Path, entry: dict, data: dict, *, require_
     provenance = _validate_provenance(entry.get("score_provenance"), require=True)
     if provenance is None:
         return
-    ref = provenance["review_evidence_ref"]
+    is_manual = provenance["score_source"] == "manual-import"
+    ref = provenance["manual_evidence_ref"] if is_manual else provenance["review_evidence_ref"]
     _validate_revision_scope(cwd, provenance["revision_scope"])
     content = _read_bounded_review_evidence(cwd, ref["path"])
     digest = hashlib.sha256(content).hexdigest()
@@ -7833,6 +7965,16 @@ def _revalidate_score_provenance(cwd: Path, entry: dict, data: dict, *, require_
         parsed = json.loads(content.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("review evidence must be valid UTF-8 JSON") from exc
+    if is_manual:
+        _validate_manual_score_payload(parsed, data, entry)
+        score_ref = provenance.get("scoring_evidence_ref")
+        if require_scoring_artifact:
+            if not isinstance(score_ref, dict) or score_ref.get("kind") != "scoring-artifact" or not _SHA256_REF_RE.fullmatch(str(score_ref.get("digest") or "")):
+                raise ValueError("scoring evidence reference is invalid")
+            score_bytes = _read_bounded_review_evidence(cwd, score_ref.get("path"))
+            if "sha256:" + hashlib.sha256(score_bytes).hexdigest() != score_ref["digest"]:
+                raise ValueError("scoring evidence digest mismatch")
+        return
     if not isinstance(parsed, dict) or parsed.get("schema") != "mission-review-aggregate/1":
         raise ValueError("review evidence has invalid schema")
     try:
@@ -8872,7 +9014,10 @@ def cmd_push_score(args):
             entry["score_source"] = provenance["score_source"] if provenance else "scoring-json"
             if provenance is not None:
                 entry["score_provenance"] = provenance
-                entry["review_evidence_ref"] = provenance["review_evidence_ref"]
+                if provenance["score_source"] == "manual-import":
+                    entry["manual_evidence_ref"] = provenance["manual_evidence_ref"]
+                else:
+                    entry["review_evidence_ref"] = provenance["review_evidence_ref"]
                 entry["revision_scope"] = provenance["revision_scope"]
             scoring_json_archived_to = _archive_scoring_json(cwd, args.iteration, data, entry, scoring_payload)
             artifact_state_path = str(Path(scoring_json_archived_to).relative_to(cwd))
@@ -10221,6 +10366,15 @@ def _artifact_lint_counts(states: list[dict]) -> dict:
     return counts
 
 
+def _score_provenance_counts(states: list[dict]) -> dict[str, int]:
+    counts = {"verified": 0, "legacy-unverifiable": 0, "invalid": 0}
+    for state in states:
+        terminal = not bool(state.get("loop_active"))
+        for entry in state.get("score_history") or []:
+            counts[classify_score_provenance(entry, terminal=terminal)] += 1
+    return counts
+
+
 def _aggregate(
     states: list[dict], duplicate_state_group_count: int = 0,
     *, observation_now: datetime | None = None,
@@ -10273,6 +10427,7 @@ def _aggregate(
                 "fallback_full": 0,
             },
             "reviewer_output_stats": _reviewer_output_stats([]),
+            "score_provenance_counts": _score_provenance_counts([]),
             "activity_timing": summarize_activity_states([]),
         }
     # _classify を 1 回だけ評価 (旧実装は pass/halt/incomplete で 3N 回呼んでいた)
@@ -10377,6 +10532,7 @@ def _aggregate(
         "artifact_coverage": summarize_artifact_coverage(states),
         "bounded_context_counts": bounded_context_counts,
         "reviewer_output_stats": _reviewer_output_stats(states),
+        "score_provenance_counts": _score_provenance_counts(states),
         "forced_pass_rate": forced_pass_count / pass_count if pass_count else None,
         "ungated_pass_count": ungated_pass_count,
         "ungated_pass_rate": ungated_pass_count / pass_count if pass_count else None,
@@ -10463,6 +10619,11 @@ def _format_text(stats: dict, since: str | None, until: str | None) -> str:
         f"counts_conserved {str(artifact_coverage.get('counts_conserved', False)).lower()}",
     ])
     lines += [
+        "score_provenance:       verified {verified} / legacy-unverifiable {legacy} / invalid {invalid}".format(
+            verified=(stats.get("score_provenance_counts") or {}).get("verified", 0),
+            legacy=(stats.get("score_provenance_counts") or {}).get("legacy-unverifiable", 0),
+            invalid=(stats.get("score_provenance_counts") or {}).get("invalid", 0),
+        ),
         f"  incomplete:             {stats['incomplete_count']}",
         f"  abandoned:              {stats['abandoned_count']}",
         f"avg_iterations:           {stats['avg_iterations']:.2f}" if stats['avg_iterations'] is not None else "avg_iterations: -",
@@ -10923,7 +11084,7 @@ def _build_parser():
     p_set.add_argument("kvs", nargs="+")
     p_set.set_defaults(func=cmd_set)
 
-    p_pass = sub.add_parser("mark-passes", help="threshold gate を満たすとき passes=true, loop_active=false (--force --reason --approved-by-user で override 可)")
+    p_pass = sub.add_parser("mark-passes", help="threshold gate を満たすとき passes=true, loop_active=false (--force には --reason --approved-by-user --approval-evidence-ref --approved-actor --approved-at --reason-code --approval-verifier が全て必須)")
     p_pass.add_argument("--force", action="store_true",
                         help="threshold gate を skip して強制的に passes=true を書き込む (--reason と --approved-by-user が必須)")
     p_pass.add_argument("--reason", default=None,
@@ -10960,6 +11121,14 @@ def _build_parser():
     p_score.add_argument("--resubmit-reason", default=None, dest="resubmit_reason",
                          help="同一 iteration を再 push する際に必須 (#122)。理由を score_history entry の resubmit_reason に記録する")
     p_score.set_defaults(func=cmd_push_score)
+
+    p_manual_score = sub.add_parser(
+        "manual-score-capture",
+        help="typed mission-manual-score/1 を安全に archive し、manual-import 用 scoring JSON を生成",
+    )
+    p_manual_score.add_argument("--input", required=True, help="host user が用意した mission-manual-score/1 JSON")
+    p_manual_score.add_argument("--out", required=True, help="push-score --scoring-json に渡す出力 JSON")
+    p_manual_score.set_defaults(func=cmd_manual_score_capture)
 
     p_agg = sub.add_parser("aggregate-reviews", help="#119: mission-review/1 JSON を決定論集計して push-score 互換 scoring JSON を生成")
     p_agg.add_argument("--iteration", type=int, required=True)

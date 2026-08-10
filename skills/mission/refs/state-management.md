@@ -448,7 +448,8 @@ meta/non-operation の証明は context 全体が `review/analyze/document/inspe
 
 ## スコア項目キーの正規化 (H2) / scoring archive 命名 (H1) — 2026-06-10
 
-- push-score は items のキーを正規 5 キー (`mission_achievement` / `accuracy` / `completeness` / `usability` / `reviewer_consensus`) に正規化する。エイリアス (`usefulness`→`usability`, `practicality`→`usability`, `reviewer_agreement`→`reviewer_consensus`) は自動変換。未知キーは `--items` 経路では WARN 付きで受理 (後方互換) だが、`--scoring-json` 経路では reject (strict)
+- 新規 score の items は正規 4 軸 (`mission_achievement` / `accuracy` / `completeness` / `usability`) だけである。`reviewer_consensus` と `reviewer_agreement` は旧形式として全 complexity で reject し、合意度は独立した `review_agreement` フィールドで扱う。旧 state は表示・監査のみの互換対象で、新規 score に移植しない。
+- 手動採点を取り込む場合は review aggregate や `--items` を流用せず、host user が用意した `mission-manual-score/1` を `manual-score-capture --input <file> --out <scoring.json>` で state-local archive に安全に固定してから、`push-score --scoring-json <scoring.json>` を実行する。capture は session/mission/iteration、4軸、composite/min、revision scope、source evidence reference、input digest を検証する。`manual-import` に review evidence reference は使用できない。
 - push-score は経路を問わず「全 items が 1.0 以下」を 0-1 正規化スケール混入として reject する (実ログ回帰: xai-cli cx-019efece が composite 0.96 = 4.8/5 を push した事例)
 - `--scoring-output` の保存先は `.mission-state/archive/iter-<N>-<mission_id先頭8>-scoring.md`。連続ランでの上書き消失 (2026-06-10 実害確認) を防ぐため mission_id を含む
 
