@@ -8,6 +8,7 @@ Phase 5 の aggregate-reviews → push-score、Phase 6 の mark-passes → next 
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 
@@ -92,6 +93,47 @@ def test_review_finalize_passes_reviewer_windows_through(state_dir, run_cli, tmp
     assert r.returncode == 0, r.stderr
     assert "WARN" in r.stderr and "直列" in r.stderr
     assert json.loads(r.stdout)["aggregate"]["parallel_execution"] is False
+
+
+def test_review_finalize_reviewer_window_gate_emits_own_typed_outcome_once(state_dir, run_cli, tmp_path):
+    a, b = _two_reviews(tmp_path)
+    state_file = state_dir / "sessions" / "test.json"
+    before = state_file.read_bytes()
+
+    result = run_cli(
+        "review-finalize", "--iteration", "1", "--input", str(a), "--input", str(b),
+        "--event-id", "finalize-event", "--root-event-id", "finalize-root", cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 2
+    payload = json.loads(result.stdout)
+    assert payload["outcome_kind"] == "expected-gate"
+    assert payload["outcome"]["command"] == "review-finalize"
+    assert payload["outcome"]["event_id"] == "finalize-event"
+    assert state_file.read_bytes() == before
+    token = hashlib.sha256(b"test").hexdigest()[:16]
+    sidecar = json.loads(
+        (state_dir / "telemetry" / "command-outcomes" / f"{token}.json").read_text(encoding="utf-8")
+    )
+    assert sidecar["records"] == [payload["outcome"]]
+
+
+def test_review_finalize_nested_invalid_review_maps_to_invalid_input(state_dir, run_cli, tmp_path):
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text('{"schema":"wrong"}', encoding="utf-8")
+    state_file = state_dir / "sessions" / "test.json"
+    before = state_file.read_bytes()
+
+    result = run_cli(
+        "review-finalize", "--iteration", "1", "--input", str(invalid),
+        "--event-id", "finalize-invalid", cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 2
+    payload = json.loads(result.stdout)
+    assert payload["outcome_kind"] == "invalid-input"
+    assert payload["outcome"]["command"] == "review-finalize"
+    assert state_file.read_bytes() == before
 
 
 def test_review_finalize_gate_values_match_split_commands(state_dir, run_cli, read_state, tmp_path):

@@ -97,6 +97,7 @@ from activity_segments import (  # noqa: E402
     validate_activity,
 )
 from worktree_archive import (  # noqa: E402
+    read_verified_review_input_evidence,
     validated_archive_evidence_reader,
     validate_worktree_archive_bundle,
     worktree_archive_lineage_references,
@@ -4750,15 +4751,30 @@ def _collect_worktree_archive_specs(cwd: Path, state_file_path: Path, data: dict
 
     def add(kind: str, reference: str, archive_path: Path, item_iteration: int | None = None) -> None:
         source, normalized_reference = _archive_source_file(cwd, reference, kind)
-        specs.append(
-            {
-                "evidence_kind": kind,
-                "iteration": iteration if item_iteration is None else item_iteration,
-                "source": source,
-                "source_reference": normalized_reference,
-                "archive_path": archive_path,
-            }
-        )
+        effective_iteration = iteration if item_iteration is None else item_iteration
+        spec = {
+            "evidence_kind": kind,
+            "iteration": effective_iteration,
+            "source": source,
+            "source_reference": normalized_reference,
+            "archive_path": archive_path,
+        }
+        if kind == "review-input":
+            matches = [
+                item for item in (data.get("review_evidence_refs") or [])
+                if isinstance(item, dict)
+                and item.get("path") == normalized_reference
+                and item.get("iteration") == effective_iteration
+            ]
+            if len(matches) != 1:
+                raise WorktreeArchiveError("review input reference is missing or ambiguous")
+            try:
+                spec["verified_content"] = read_verified_review_input_evidence(
+                    cwd, matches[0], expected_iteration=effective_iteration,
+                )
+            except ValueError as exc:
+                raise WorktreeArchiveError("review input evidence integrity mismatch") from exc
+        specs.append(spec)
 
     add("state", str(state_file_path), Path("sessions") / f"{_sanitize_sid(session_id)}.json")
 
@@ -4942,8 +4958,13 @@ def _build_worktree_archive_staging(staging: Path, data: dict, specs: list[dict]
     for spec in specs:
         destination = staging / spec["archive_path"]
         destination.parent.mkdir(parents=True, exist_ok=True)
-        source_hash = _sha256_file(spec["source"])
-        shutil.copy2(spec["source"], destination)
+        verified_content = spec.get("verified_content")
+        if verified_content is not None:
+            source_hash = hashlib.sha256(verified_content).hexdigest()
+            destination.write_bytes(verified_content)
+        else:
+            source_hash = _sha256_file(spec["source"])
+            shutil.copy2(spec["source"], destination)
         archived_hash = _sha256_file(destination)
         if archived_hash != source_hash:
             raise WorktreeArchiveError(f"checksum mismatch after copy: {spec['source_reference']}")
@@ -8998,7 +9019,8 @@ def cmd_aggregate_reviews(args):
         missing_perspectives = sorted(valid_perspectives - reported_perspectives)
         if missing_perspectives:
             gate_outcome = _command_outcome(args, "aggregate-reviews", "expected-gate")
-            _record_command_outcome_only(cwd, gate_outcome)
+            if getattr(args, "record_outcome", True):
+                _record_command_outcome_only(cwd, gate_outcome)
             _emit_json_command_failure(args, gate_outcome)
             print(
                 "ERROR: reviewer window の報告が不足しています。"
@@ -9462,8 +9484,25 @@ def cmd_review_finalize(args):
         record_outcome=False,
     )
     agg_stdout = io.StringIO()
-    with contextlib.redirect_stdout(agg_stdout):
-        cmd_aggregate_reviews(agg_args)  # 失敗時は sys.exit がそのまま伝播する
+    try:
+        with contextlib.redirect_stdout(agg_stdout):
+            cmd_aggregate_reviews(agg_args)
+    except SystemExit as error:
+        nested_kind = "invalid-input"
+        try:
+            nested_payload = json.loads(agg_stdout.getvalue())
+            if nested_payload.get("outcome_kind") in COMMAND_OUTCOME_KINDS:
+                nested_kind = nested_payload["outcome_kind"]
+        except (AttributeError, json.JSONDecodeError):
+            pass
+        failure = _command_outcome(args, "review-finalize", nested_kind)
+        _record_command_outcome_only(Path.cwd(), failure)
+        print(json.dumps({
+            "ok": False,
+            "outcome_kind": nested_kind,
+            "outcome": failure,
+        }, ensure_ascii=False))
+        raise error
     agg_result = json.loads(agg_stdout.getvalue())
 
     push_args = argparse.Namespace(
