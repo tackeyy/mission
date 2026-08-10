@@ -9,7 +9,7 @@
 
 ## [Unreleased]
 
-- 採点項目を4軸に統一し、reviewer の合意度を独立して記録するようにしました。手動採点の取り込みには専用の検証済み経路を用意し、audit と stats で採点 provenance を確認できます (#383)。
+- 採点項目を4軸に統一し、reviewer の合意度を独立して記録するようにしました。手動採点の取り込みには typed かつ content-addressed な専用経路を用意し、全スコアを bool ではない有限の範囲内数値、open High 件数を bool ではない 0 以上の整数として検証します。audit と stats で採点 provenance を確認できます (#383)。
 
 - review aggregate は write / pass 境界で archive `inputs` から全 gate 値を再導出し、claim 欠落・自己整合だが偽の claim を拒否するようにした。force approval は versioned terminal-state projection に bind し、audit は state のコピー・改ざんを検出する。approval verifier の trust root は user-only `$XDG_CONFIG_HOME/mission/approval-verifiers.json` の `mission-approval-verifier-registry/2` とし、唯一の登録手順で `entry_point`、`distribution`、`version`、`source_digest` を pin する。parent/child が同じ pin を再照合し、load と callback を reaped child process 内で時間制限付き実行する (#383)。
 

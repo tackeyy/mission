@@ -1,4 +1,4 @@
-# Scoring Rubric — /mission の5項目×5点評価基準
+# Scoring Rubric — /mission の4項目×5点評価基準
 
 合格条件: **平均スコア ≥ threshold（デフォルト4.0）** かつ **全項目 ≥ 3.5（足切り）**
 

@@ -87,6 +87,7 @@ from state_snapshot import (  # noqa: E402
 )
 from scoring_provenance import (  # noqa: E402
     classify_score_provenance,
+    project_root_from_state_path,
     terminal_state_digest,
     validate_receipt_binding,
     validate_recorded_envelope,
@@ -2175,21 +2176,11 @@ def score_provenance_item(record: StateRecord) -> dict[str, Any] | None:
     """Classify every score read-only; legacy terminal bytes remain untouched."""
     terminal = not bool(record.state.get("loop_active"))
     classifications: list[dict[str, Any]] = []
+    source_root = project_root_from_state_path(record.path)
     for index, entry in enumerate(record.state.get("score_history") or [], start=1):
-        status = classify_score_provenance(entry, terminal=terminal)
-        if status == "verified":
-            provenance = entry.get("score_provenance", {})
-            ref = provenance.get("manual_evidence_ref") if provenance.get("score_source") == "manual-import" else provenance.get("review_evidence_ref")
-            try:
-                root = record.path.parents[2]
-                path = root / str(ref["path"])
-                st = path.stat(follow_symlinks=False)
-                content = path.read_bytes()
-                if (path.is_symlink() or not stat.S_ISREG(st.st_mode) or st.st_nlink != 1
-                        or "sha256:" + hashlib.sha256(content).hexdigest() != ref["digest"]):
-                    status = "invalid"
-            except (OSError, TypeError, KeyError):
-                status = "invalid"
+        status = classify_score_provenance(
+            entry, terminal=terminal, project_root=source_root, state=record.state,
+        )
         classifications.append({"index": index, "iteration": entry.get("iteration") if isinstance(entry, dict) else None,
                                 "classification": status})
     if not classifications:

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Scoring now keeps quality assessment to four axes and records reviewer agreement separately. Manual score imports have a dedicated verified capture route, and audit/statistics show score provenance status (#383).
+- Scoring now keeps quality assessment to four axes and records reviewer agreement separately. Manual score imports use a dedicated typed, content-addressed capture route: all score fields must be finite non-boolean values in range, and open High counts must be non-boolean non-negative integers. Audit/statistics show score provenance status (#383).
 
 ### Added
 

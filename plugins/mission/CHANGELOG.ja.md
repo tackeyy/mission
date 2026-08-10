@@ -9,7 +9,7 @@
 
 ## [Unreleased]
 
-- 採点項目を4軸に統一し、reviewer の合意度を独立して記録するようにしました。手動採点の取り込みには専用の検証済み経路を用意し、audit と stats で採点 provenance を確認できます (#383)。
+- 採点項目を4軸に統一し、reviewer の合意度を独立して記録するようにしました。手動採点の取り込みには typed かつ content-addressed な専用経路を用意し、全スコアを bool ではない有限の範囲内数値、open High 件数を bool ではない 0 以上の整数として検証します。audit と stats で採点 provenance を確認できます (#383)。
 
 ### 追加
 

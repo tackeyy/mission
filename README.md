@@ -57,8 +57,8 @@ implemented as a local Markdown artifact with explicit opt-in publish evidence.
 - Mission orchestration skill: `skills/mission`
 - Five supporting skills: planner, executor, reviewer, critic, and scorer
 - State management CLI for `.mission-state` sessions
-- Deterministic `aggregate-reviews` scoring from reviewer JSON, with High-finding
-  evidence and review-agreement gates before `mark-passes`
+- Deterministic four-axis `aggregate-reviews` scoring from reviewer JSON, with
+  High-finding evidence and independent review-agreement gates before `mark-passes`; explicitly supplied manual scores use a typed, content-addressed capture route
 - Local-first mission artifact CLI for auditable completion evidence
   ([contract](docs/MISSION_ARTIFACTS.md))
 - Multi-session state isolation for Claude Code and Codex
@@ -237,7 +237,9 @@ Before marketplace submission, run through
 The orchestrator records assumptions, decomposes the mission, executes work,
 collects reviewer JSON, runs `aggregate-reviews`, records the result with
 `push-score --scoring-json`, and repeats until `mark-passes` accepts the state or
-a halt condition is reached. See [`skills/mission/SKILL.md`](skills/mission/SKILL.md)
+a halt condition is reached. An explicitly user-supplied manual score must first
+pass `manual-score-capture`; it is a typed, content-addressed import and does
+not reuse reviewer-aggregate evidence. See [`skills/mission/SKILL.md`](skills/mission/SKILL.md)
 for the execution protocol and [`docs/PASS_RATE_METRICS.md`](docs/PASS_RATE_METRICS.md)
 for the `stats`/audit raw, completed, role-aware, and terminal-outcome quality schema. Reusable, explicit-only
 audit/stats state snapshots are documented in

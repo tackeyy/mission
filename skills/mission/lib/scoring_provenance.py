@@ -21,37 +21,249 @@ RESPONSE_SCHEMA = "mission-force-approval-response/1"
 TERMINAL_STATE_BINDING_SCHEMA = "mission-terminal-state-binding/1"
 REVIEW_SCORE_KEYS = ("mission_achievement", "accuracy", "completeness", "usability")
 REVIEW_SEVERITIES = {"High", "Medium", "Low"}
+MAX_SCORING_EVIDENCE_BYTES = 4 * 1024 * 1024
 
 
-def classify_score_provenance(entry: object, *, terminal: bool) -> str:
-    """Pure historical classification; never upgrades a legacy score to verified.
+def project_root_from_state_path(source_path: object) -> Path | None:
+    """Derive the project boundary from a discovered state path, not its data."""
+    if not isinstance(source_path, (str, os.PathLike)):
+        return None
+    try:
+        path = Path(source_path).expanduser()
+    except (TypeError, ValueError):
+        return None
+    try:
+        index = path.parts.index(".mission-state")
+    except ValueError:
+        return None
+    return Path(*path.parts[:index]) if index else Path(".")
 
-    The caller may additionally verify bytes/references.  This function only
-    decides whether a record has the shape required for that verification.
-    """
+
+def _score_provenance_reference(entry: object) -> tuple[dict[str, object], dict[str, object]] | None:
+    """Return the selected immutable evidence reference after structural checks."""
+    if not isinstance(entry, dict):
+        return None
+    provenance = entry.get("score_provenance")
+    if not isinstance(provenance, dict):
+        return None
+    source = provenance.get("score_source")
+    if source == "scoring-json":
+        ref = provenance.get("review_evidence_ref")
+        kind = "review-aggregate"
+    elif source == "manual-import":
+        if "review_evidence_ref" in provenance:
+            return None
+        ref = provenance.get("manual_evidence_ref")
+        kind = "manual-score"
+    else:
+        return None
+    if not isinstance(ref, dict) or not isinstance(provenance.get("revision_scope"), dict):
+        return None
+    required = {"kind", "path", "digest", "generation", "revision_scope"}
+    if (
+        not required <= set(ref)
+        or ref.get("kind") != kind
+        or ref.get("revision_scope") != provenance.get("revision_scope")
+        or not isinstance(ref["path"], str)
+        or not SHA256_REF_RE.fullmatch(str(ref["digest"]))
+        or not isinstance(ref["generation"], str)
+        or ref["generation"] != str(ref["digest"])[7:23]
+    ):
+        return None
+    return provenance, ref
+
+
+def read_score_provenance_evidence(project_root: object, path_text: object) -> bytes:
+    """Read one state-local evidence file through a symlink-safe descriptor chain."""
+    if not isinstance(project_root, (str, os.PathLike)) or not isinstance(path_text, str) or "\x00" in path_text:
+        raise ValueError("score provenance evidence path is invalid")
+    raw = Path(path_text)
+    if raw.is_absolute() or not raw.parts or raw.parts[0] != ".mission-state":
+        raise ValueError("score provenance evidence must be project-relative and under state")
+    if any(part in {"", ".", ".."} for part in raw.parts):
+        raise ValueError("score provenance evidence path is invalid")
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+
+    def identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+        return (
+            metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink,
+            metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns,
+        )
+    try:
+        root_fd = os.open(os.fspath(project_root), os.O_RDONLY | directory)
+    except OSError as exc:
+        raise ValueError("score provenance project root is invalid") from exc
+
+    def open_evidence() -> int:
+        fd = os.dup(root_fd)
+        try:
+            for index, part in enumerate(raw.parts):
+                flags = os.O_RDONLY | nofollow
+                if index + 1 < len(raw.parts):
+                    flags |= directory
+                else:
+                    flags |= os.O_NONBLOCK
+                next_fd = os.open(part, flags, dir_fd=fd)
+                os.close(fd)
+                fd = next_fd
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
+
+    try:
+        fd = open_evidence()
+        try:
+            initial = os.fstat(fd)
+            if (
+                not stat.S_ISREG(initial.st_mode)
+                or initial.st_nlink != 1
+                or initial.st_size > MAX_SCORING_EVIDENCE_BYTES
+            ):
+                raise ValueError("score provenance evidence must be a bounded regular non-linked file")
+            chunks: list[bytes] = []
+            remaining = initial.st_size
+            while remaining:
+                chunk = os.read(fd, min(remaining, 64 * 1024))
+                if not chunk:
+                    raise ValueError("score provenance evidence changed while being read")
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            if os.read(fd, 1) or identity(os.fstat(fd)) != identity(initial):
+                raise ValueError("score provenance evidence changed while being read")
+            current_fd = open_evidence()
+            try:
+                if identity(os.fstat(current_fd)) != identity(initial):
+                    raise ValueError("score provenance evidence changed while being read")
+            finally:
+                os.close(current_fd)
+            return b"".join(chunks)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise ValueError("score provenance evidence path is invalid") from exc
+    finally:
+        os.close(root_fd)
+
+
+def _score_entry_claim(entry: dict[str, object]) -> dict[str, object]:
+    return {
+        "iteration": entry.get("iteration"), "items": entry.get("items"),
+        "composite": entry.get("composite"), "min_item": entry.get("min_item"),
+        "open_high": entry.get("open_high"), "review_agreement": entry.get("review_agreement"),
+        "agreement_detail": entry.get("agreement_detail"),
+    }
+
+
+def _validate_semantic_score_provenance(
+    entry: dict[str, object], provenance: dict[str, object], ref: dict[str, object],
+    *, project_root: object, state: object,
+) -> None:
+    """Re-derive the score claim and its artifact binding from archived bytes."""
+    if not isinstance(state, dict):
+        raise ValueError("score provenance state is invalid")
+    content = read_score_provenance_evidence(project_root, ref["path"])
+    if "sha256:" + hashlib.sha256(content).hexdigest() != ref["digest"]:
+        raise ValueError("score provenance evidence digest mismatch")
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("score provenance evidence is not UTF-8 JSON") from exc
+    expected_claim = _score_entry_claim(entry)
+    if provenance["score_source"] == "manual-import":
+        unsigned = {key: value for key, value in payload.items() if key != "input_digest"} if isinstance(payload, dict) else {}
+        required = {
+            "schema", "session_id", "mission_id", "iteration", "items", "composite", "min_item",
+            "open_high", "review_agreement", "revision_scope", "source_evidence_ref", "imported_at",
+            "input_digest",
+        }
+        agreement = payload.get("review_agreement") if isinstance(payload, dict) else None
+        source = payload.get("source_evidence_ref") if isinstance(payload, dict) else None
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schema") != "mission-manual-score/1"
+            or set(payload) != required
+            or not isinstance(payload.get("imported_at"), str)
+            or not payload["imported_at"].strip()
+            or payload.get("input_digest") != digest(unsigned)
+            or (agreement is not None and _finite_score(agreement, field="manual review_agreement") != agreement)
+            or not isinstance(source, dict)
+            or set(source) != {"kind", "ref", "digest"}
+            or source.get("kind") != "manual-source-evidence"
+            or not SHA256_REF_RE.fullmatch(str(source.get("ref") or ""))
+            or source.get("ref") != source.get("digest")
+            or {key: payload.get(key) for key in (
+                "session_id", "mission_id", "iteration", "items", "composite", "min_item", "open_high",
+                "review_agreement", "revision_scope",
+            )} != {
+                "session_id": state.get("session_id"), "mission_id": state.get("mission_id"),
+                "iteration": expected_claim["iteration"], "items": expected_claim["items"],
+                "composite": expected_claim["composite"], "min_item": expected_claim["min_item"],
+                "open_high": expected_claim["open_high"],
+                "review_agreement": expected_claim["review_agreement"],
+                "revision_scope": provenance["revision_scope"],
+            }
+        ):
+            raise ValueError("manual score provenance binding is invalid")
+    else:
+        if not isinstance(payload, dict) or payload.get("schema") != "mission-review-aggregate/1":
+            raise ValueError("review score provenance schema is invalid")
+        expected_iteration = expected_claim["iteration"]
+        if isinstance(expected_iteration, bool) or not isinstance(expected_iteration, int) or expected_iteration < 1:
+            raise ValueError("review score provenance iteration is invalid")
+        if payload.get("iteration") != expected_iteration:
+            raise ValueError("review score provenance iteration mismatch")
+        derived = reduce_review_aggregate(payload.get("inputs"), expected_iteration=expected_iteration)
+        claim = {"iteration": expected_iteration, **derived}
+        if payload.get("score_claim") != claim or expected_claim != claim:
+            raise ValueError("review score provenance claim mismatch")
+    artifact_ref = provenance.get("scoring_evidence_ref")
+    if (
+        not isinstance(artifact_ref, dict)
+        or artifact_ref.get("kind") != "scoring-artifact"
+        or not isinstance(artifact_ref.get("path"), str)
+        or not SHA256_REF_RE.fullmatch(str(artifact_ref.get("digest") or ""))
+    ):
+        raise ValueError("score provenance artifact reference is invalid")
+    artifact_bytes = read_score_provenance_evidence(project_root, artifact_ref["path"])
+    if "sha256:" + hashlib.sha256(artifact_bytes).hexdigest() != artifact_ref["digest"]:
+        raise ValueError("score provenance artifact digest mismatch")
+    try:
+        artifact = json.loads(artifact_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("score provenance artifact is not UTF-8 JSON") from exc
+    expected_binding = {
+        "session_id": state.get("session_id"), "mission_id": state.get("mission_id"),
+        "iteration": expected_claim["iteration"], "items": expected_claim["items"],
+        "composite": expected_claim["composite"], "min_item": expected_claim["min_item"],
+        "revision_scope": provenance["revision_scope"], "review_generation": ref["generation"],
+        "review_evidence_ref": entry.get("review_evidence_ref"),
+    }
+    if not isinstance(artifact, dict) or artifact.get("schema") != "mission-scoring-artifact/1" or artifact.get("binding") != expected_binding:
+        raise ValueError("score provenance artifact binding is invalid")
+
+
+def classify_score_provenance(
+    entry: object, *, terminal: bool, project_root: object | None = None,
+    state: object | None = None,
+) -> str:
+    """Classify scores without upgrading legacy records; verify files when rooted."""
     if not isinstance(entry, dict):
         return "invalid"
     provenance = entry.get("score_provenance")
     if provenance is None:
         return "legacy-unverifiable" if terminal else "invalid"
-    if not isinstance(provenance, dict):
+    pair = _score_provenance_reference(entry)
+    if pair is None:
         return "invalid"
-    source = provenance.get("score_source")
-    if source == "scoring-json":
-        ref = provenance.get("review_evidence_ref")
-    elif source == "manual-import":
-        if "review_evidence_ref" in provenance:
+    if project_root is not None or state is not None:
+        if project_root is None or state is None:
             return "invalid"
-        ref = provenance.get("manual_evidence_ref")
-    else:
-        return "invalid"
-    if not isinstance(ref, dict) or not isinstance(provenance.get("revision_scope"), dict):
-        return "invalid"
-    required = {"path", "digest", "generation", "revision_scope"}
-    if not required <= set(ref) or ref.get("revision_scope") != provenance.get("revision_scope"):
-        return "invalid"
-    if not isinstance(ref["path"], str) or not SHA256_REF_RE.fullmatch(str(ref["digest"])):
-        return "invalid"
+        try:
+            _validate_semantic_score_provenance(entry, *pair, project_root=project_root, state=state)
+        except (OSError, TypeError, ValueError, KeyError):
+            return "invalid"
     return "verified"
 
 

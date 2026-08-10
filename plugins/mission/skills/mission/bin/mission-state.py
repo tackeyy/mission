@@ -130,6 +130,8 @@ from scoring_provenance import (  # noqa: E402
     build_request as build_approval_request,
     digest as provenance_digest,
     classify_score_provenance,
+    project_root_from_state_path,
+    read_score_provenance_evidence,
     reduce_review_aggregate,
     terminal_state_digest,
     validate_receipt_binding,
@@ -151,6 +153,21 @@ DEFAULT_THRESHOLD = 4.0     # 合格 composite 閾値 (init --threshold 未指�
 MIN_ITEM_THRESHOLD = 3.5    # 各項目スコアの足切り (これ未満は mark-passes が reject)
 DEFAULT_MAX_ITER = 3        # init --max-iter 未指定時の最大反復回数 (0=上限なし)
 SCORE_MIN, SCORE_MAX = 0.0, 5.0  # composite/min_item の許容範囲
+
+
+def _finite_score(value: object) -> bool:
+    """Return whether a score is a non-boolean finite number on the 0–5 scale."""
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        and SCORE_MIN <= float(value) <= SCORE_MAX
+    )
+
+
+def _nonnegative_int(value: object) -> bool:
+    """Return whether an open High count is an exact non-boolean integer."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 ARTIFACT_SECTIONS = {
     "mission": "Mission",
@@ -7299,16 +7316,16 @@ def _validate_score_args(args) -> dict:
             f" 正規キー: {sorted(CANONICAL_SCORE_KEYS)} (エイリアス: {SCORE_KEY_ALIASES})",
             file=sys.stderr,
         )
-    # 改善3a: composite / min_item の範囲バリデーション (NaN・範囲外を弾く)。
+    # 改善3a: composite / min_item の有限値・範囲バリデーション。
     for label, val in (("composite", args.composite), ("min_item", args.min_item)):
-        if math.isnan(val) or not (SCORE_MIN <= val <= SCORE_MAX):
-            print(f"ERROR: --{label} {val} は {SCORE_MIN}〜{SCORE_MAX} の範囲で指定してください。", file=sys.stderr)
+        if not _finite_score(val):
+            print(f"ERROR: --{label} {val} は bool ではない有限の {SCORE_MIN}〜{SCORE_MAX} 数値で指定してください。", file=sys.stderr)
             sys.exit(1)
     return items
 
 
 def _numeric_item_values(items: dict) -> list:
-    return [float(v) for v in items.values() if isinstance(v, (int, float)) and not math.isnan(float(v))]
+    return [float(v) for v in items.values() if _finite_score(v)]
 
 
 def _reject_normalized_scale(items: dict) -> None:
@@ -7367,8 +7384,8 @@ def _load_scoring_json(path_str: str):
         )
         sys.exit(2)
     for k, v in items.items():
-        if not isinstance(v, (int, float)) or math.isnan(float(v)) or not (SCORE_MIN <= float(v) <= SCORE_MAX):
-            print(f"ERROR: --scoring-json の item '{k}'={v} は {SCORE_MIN}〜{SCORE_MAX} の数値で指定してください。", file=sys.stderr)
+        if not _finite_score(v):
+            print(f"ERROR: --scoring-json の item '{k}'={v} は bool ではない有限の {SCORE_MIN}〜{SCORE_MAX} 数値で指定してください。", file=sys.stderr)
             sys.exit(2)
     notes = payload.get("notes")
     if notes is not None and not isinstance(notes, str):
@@ -7376,20 +7393,16 @@ def _load_scoring_json(path_str: str):
         sys.exit(2)
     # open_high はキー欠如 (None) と明示 0 を区別する: 明示値は CLI --open-high より優先される
     open_high = payload.get("open_high")
-    if open_high is not None and (not isinstance(open_high, int) or open_high < 0):
-        print("ERROR: --scoring-json の open_high は 0 以上の整数で指定してください。", file=sys.stderr)
+    if open_high is not None and not _nonnegative_int(open_high):
+        print("ERROR: --scoring-json の open_high は bool ではない 0 以上の整数で指定してください。", file=sys.stderr)
         sys.exit(2)
     findings_evidence_path = payload.get("findings_evidence_path")
     if findings_evidence_path is not None and not isinstance(findings_evidence_path, str):
         print("ERROR: --scoring-json の findings_evidence_path は文字列で指定してください。", file=sys.stderr)
         sys.exit(2)
     review_agreement = payload.get("review_agreement")
-    if review_agreement is not None and (
-        not isinstance(review_agreement, (int, float))
-        or math.isnan(float(review_agreement))
-        or not (SCORE_MIN <= float(review_agreement) <= SCORE_MAX)
-    ):
-        print("ERROR: --scoring-json の review_agreement は 0〜5 の数値または null で指定してください。", file=sys.stderr)
+    if review_agreement is not None and not _finite_score(review_agreement):
+        print("ERROR: --scoring-json の review_agreement は bool ではない有限の 0〜5 数値または null で指定してください。", file=sys.stderr)
         sys.exit(2)
     agreement_detail = payload.get("agreement_detail")
     if agreement_detail is not None and not isinstance(agreement_detail, dict):
@@ -7787,6 +7800,7 @@ def _manual_score_binding(data: dict, entry: dict, payload: dict) -> dict:
         "session_id": data.get("session_id"), "mission_id": data.get("mission_id"),
         "iteration": entry.get("iteration"), "items": entry.get("items"),
         "composite": entry.get("composite"), "min_item": entry.get("min_item"),
+        "review_agreement": entry.get("review_agreement"),
         "open_high": entry.get("open_high"), "revision_scope": payload.get("revision_scope"),
         "source_evidence_ref": payload.get("source_evidence_ref"),
     }
@@ -7798,11 +7812,22 @@ def _validate_manual_score_payload(payload: object, data: dict, entry: dict) -> 
     if "review_evidence_ref" in payload or payload.get("manual_evidence_ref") is not None:
         raise ValueError("manual score evidence must not use review aggregate references")
     required = {"schema", "session_id", "mission_id", "iteration", "items", "composite", "min_item",
-                "open_high", "revision_scope", "source_evidence_ref", "imported_at", "input_digest"}
+                "review_agreement", "open_high", "revision_scope", "source_evidence_ref", "imported_at", "input_digest"}
     if set(payload) != required:
         raise ValueError("manual score evidence has invalid fields")
     if not isinstance(payload.get("imported_at"), str) or not payload["imported_at"].strip():
         raise ValueError("manual score evidence imported_at is invalid")
+    items = payload.get("items")
+    if not isinstance(items, dict) or set(items) != CANONICAL_SCORE_KEYS:
+        raise ValueError("manual score items are invalid")
+    for axis in REVIEW_SCORE_KEYS:
+        if not _finite_score(items[axis]):
+            raise ValueError(f"manual score item {axis} must be a finite in-range number")
+    for label in ("composite", "min_item", "review_agreement"):
+        if not _finite_score(payload.get(label)):
+            raise ValueError(f"manual score {label} must be a finite in-range number")
+    if not _nonnegative_int(payload.get("open_high")):
+        raise ValueError("manual score open_high must be a non-negative integer")
     source = payload.get("source_evidence_ref")
     if (not isinstance(source, dict) or set(source) != {"kind", "ref", "digest"}
             or source.get("kind") != "manual-source-evidence"
@@ -7821,46 +7846,10 @@ def _validate_manual_score_payload(payload: object, data: dict, entry: dict) -> 
 
 def _read_bounded_review_evidence(cwd: Path, path_text: object) -> bytes:
     """Read a state-local evidence file through one descriptor chain, without TOCTOU."""
-    if not isinstance(path_text, str) or "\x00" in path_text:
-        raise ValueError("review evidence path is invalid")
-    raw = Path(path_text)
-    root_parts = state_dir(cwd).relative_to(cwd).parts
-    if raw.is_absolute() or not raw.parts or raw.parts[:len(root_parts)] != root_parts:
-        raise ValueError("review evidence must be repo-relative and under state")
-    if any(part in {"", ".", ".."} for part in raw.parts):
-        raise ValueError("review evidence path is invalid")
-    nofollow = getattr(os, "O_NOFOLLOW", 0)
-    directory = getattr(os, "O_DIRECTORY", 0)
-    fd = os.open(str(cwd), os.O_RDONLY | directory)
     try:
-        for index, part in enumerate(raw.parts):
-            flags = os.O_RDONLY | nofollow
-            if index + 1 < len(raw.parts):
-                flags |= directory
-            else:
-                flags |= os.O_NONBLOCK
-            next_fd = os.open(part, flags, dir_fd=fd)
-            os.close(fd)
-            fd = next_fd
-        initial = os.fstat(fd)
-        if not stat.S_ISREG(initial.st_mode) or initial.st_nlink != 1 or initial.st_size > 4 * 1024 * 1024:
-            raise ValueError("review evidence must be a bounded regular non-symlink file")
-        chunks: list[bytes] = []
-        remaining = initial.st_size
-        while remaining:
-            chunk = os.read(fd, min(remaining, 64 * 1024))
-            if not chunk:
-                raise ValueError("review evidence changed while being read")
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        if os.read(fd, 1) or os.fstat(fd).st_size != initial.st_size:
-            raise ValueError("review evidence changed while being read")
-        content = b"".join(chunks)
-    except OSError as exc:
-        raise ValueError("review evidence path is invalid") from exc
-    finally:
-        os.close(fd)
-    return content
+        return read_score_provenance_evidence(cwd, path_text)
+    except ValueError as exc:
+        raise ValueError(str(exc).replace("score provenance evidence", "review evidence")) from exc
 
 
 def _read_bounded_manual_input(path_text: object) -> bytes:
@@ -7912,6 +7901,7 @@ def cmd_manual_score_capture(args):
         entry = {
             "iteration": payload.get("iteration"), "items": payload.get("items"),
             "composite": payload.get("composite"), "min_item": payload.get("min_item"),
+            "review_agreement": payload.get("review_agreement"),
             "open_high": payload.get("open_high"),
         }
         try:
@@ -7922,12 +7912,8 @@ def cmd_manual_score_capture(args):
                     or set(entry["items"] or {}) != CANONICAL_SCORE_KEYS):
                 raise ValueError("manual score iteration or items are invalid")
             values = [float(entry["items"][axis]) for axis in REVIEW_SCORE_KEYS]
-            if any(not SCORE_MIN <= value <= SCORE_MAX for value in values):
-                raise ValueError("manual score item is out of range")
             if entry["composite"] != round(sum(values) / len(values), 2) or entry["min_item"] != round(min(values), 2):
                 raise ValueError("manual score composite or min_item is not derived from four axes")
-            if not isinstance(entry["open_high"], int) or isinstance(entry["open_high"], bool) or entry["open_high"] < 0:
-                raise ValueError("manual score open_high is invalid")
         except (TypeError, ValueError) as exc:
             print(f"ERROR: manual score input: {exc}", file=sys.stderr)
             sys.exit(2)
@@ -7947,6 +7933,7 @@ def cmd_manual_score_capture(args):
         }
         scoring = {
             "items": entry["items"], "open_high": entry["open_high"],
+            "review_agreement": entry["review_agreement"],
             "score_provenance": {"score_source": "manual-import", "manual_evidence_ref": ref,
                                   "revision_scope": payload["revision_scope"]},
         }
@@ -8897,8 +8884,8 @@ def cmd_push_score(args):
     if not sf.exists():
         print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
         sys.exit(1)
-    if args.open_high < 0:
-        print("ERROR: --open-high は 0 以上で指定してください", file=sys.stderr)
+    if not _nonnegative_int(args.open_high):
+        print("ERROR: --open-high は bool ではない 0 以上の整数で指定してください", file=sys.stderr)
         sys.exit(2)
     if args.iteration < 1:
         print("ERROR: --iteration は 1 以上で指定してください", file=sys.stderr)
@@ -9261,7 +9248,10 @@ def cmd_mark_passes(args):
         if not force:
             # 改善3b: composite を持つ直近エントリで判定 (末尾に進捗ノート等の
             # composite 欠損エントリが混入していても gate を壊さない)。
-            scored = [h for h in history if _is_valid_composite(h.get("composite"))]
+            # Select the newest declared score before validating its immutable
+            # provenance.  Filtering malformed values first would misreport a
+            # forged manual score as "not scored" and skip its typed boundary.
+            scored = [h for h in history if isinstance(h, dict) and "composite" in h]
             if not scored:
                 print("ERROR: 採点未実施。`push-score` を先に呼んでください。", file=sys.stderr)
                 sys.exit(2)
@@ -10251,7 +10241,7 @@ def _dedupe_states(states: list[dict]) -> tuple[list[dict], int]:
 
 def _is_valid_composite(c) -> bool:
     """composite が採点値として有効か (数値・bool除外・NaN除外)."""
-    return isinstance(c, (int, float)) and not isinstance(c, bool) and not math.isnan(c)
+    return _finite_score(c)
 
 
 def _latest_composite(history: list) -> float | None:
@@ -10381,8 +10371,11 @@ def _score_provenance_counts(states: list[dict]) -> dict[str, int]:
     counts = {"verified": 0, "legacy-unverifiable": 0, "invalid": 0}
     for state in states:
         terminal = not bool(state.get("loop_active"))
+        project_root = project_root_from_state_path(state.get("_mission_source_path"))
         for entry in state.get("score_history") or []:
-            counts[classify_score_provenance(entry, terminal=terminal)] += 1
+            counts[classify_score_provenance(
+                entry, terminal=terminal, project_root=project_root, state=state,
+            )] += 1
     return counts
 
 

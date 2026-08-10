@@ -48,6 +48,34 @@ def test_no_obsolete_multi_session_flag():
     assert "export MISSION_MULTI_SESSION" not in txt, "廃止 env export が残存"
 
 
+def test_documented_scoring_json_is_four_axis_and_reaches_provenance_validation(state_dir, run_cli, tmp_path):
+    """The public example must remain a parseable current score payload.
+
+    A dry CLI invocation deliberately stops at the provenance gate: the sample
+    teaches only the shape of a scoring JSON and must not embed a forged
+    evidence reference.  Reaching that gate proves that the documented values
+    passed the strict four-axis numeric validator first.
+    """
+    text = _r(REFS / "state-management.md")
+    match = re.search(r"# JSON 形式: (\{[^\n]+\})", text)
+    assert match, "state-management.md must include one-machine-readable scoring JSON example"
+    payload = json.loads(match.group(1))
+    assert set(payload["items"]) == {
+        "mission_achievement", "accuracy", "completeness", "usability",
+    }
+    assert "reviewer_consensus" not in payload["items"]
+    assert "review_agreement" in payload
+
+    sample = tmp_path / "documented-score.json"
+    sample.write_text(json.dumps(payload), encoding="utf-8")
+    result = run_cli(
+        "push-score", "--iteration", "1", "--scoring-json", str(sample),
+        cwd=state_dir.parent,
+    )
+    assert result.returncode == 2
+    assert "provenance" in result.stderr
+
+
 # ---- Tier1-5: react-loop-details に jq 直叩きで state.json を書く例が残っていない ----
 def test_no_jq_direct_state_write():
     txt = _r(REFS / "react-loop-details.md")

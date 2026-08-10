@@ -57,7 +57,8 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score \
     --iteration <N> \
     --scoring-json /tmp/mission-scorer-iter-<N>-<mission_id先頭8>.json \
     --open-high <未解決High件数>
-# JSON 形式: {"items": {"mission_achievement": 4.0, "accuracy": 3.5, "completeness": 4.2, "usability": 3.8, "reviewer_consensus": 4.0}, "notes": "<任意>", "open_high": 0}
+# JSON 形式: {"items": {"mission_achievement": 4.0, "accuracy": 3.5, "completeness": 4.2, "usability": 3.8}, "review_agreement": 4.5, "notes": "<任意>", "open_high": 0}
+# items は4軸だけで、review_agreement は composite/min に含めない独立フィールド。
 
 # 従来経路 (非推奨・DeprecationWarning あり。scoring evidence なしは default reject。
 # 移行専用の一時 escape hatch として MISSION_REQUIRE_SCORING_EVIDENCE=0 のみ許可):
@@ -69,7 +70,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score \
     --iteration <N> \
     --composite <総合スコア (items mean を 0.1 超で上回らないこと)> \
     --min-item <最低項目スコア (items min を 0.1 超で上回らないこと)> \
-    --items '{"mission_achievement": 4.0, "accuracy": 3.5, "completeness": 4.2, "usability": 3.8, "reviewer_consensus": 4.0}' \
+    --items '{"mission_achievement": 4.0, "accuracy": 3.5, "completeness": 4.2, "usability": 3.8}' \
     --open-high <未解決High件数> \
     --scoring-output /tmp/mission-scorer-iter-<N>-<mission_id先頭8>.md \
     [--resubmit-reason "<同一 iteration 再 push 時のみ必須>"] \
@@ -449,7 +450,7 @@ meta/non-operation の証明は context 全体が `review/analyze/document/inspe
 ## スコア項目キーの正規化 (H2) / scoring archive 命名 (H1) — 2026-06-10
 
 - 新規 score の items は正規 4 軸 (`mission_achievement` / `accuracy` / `completeness` / `usability`) だけである。`reviewer_consensus` と `reviewer_agreement` は旧形式として全 complexity で reject し、合意度は独立した `review_agreement` フィールドで扱う。旧 state は表示・監査のみの互換対象で、新規 score に移植しない。
-- 手動採点を取り込む場合は review aggregate や `--items` を流用せず、host user が用意した `mission-manual-score/1` を `manual-score-capture --input <file> --out <scoring.json>` で state-local archive に安全に固定してから、`push-score --scoring-json <scoring.json>` を実行する。capture は session/mission/iteration、4軸、composite/min、revision scope、source evidence reference、input digest を検証する。`manual-import` に review evidence reference は使用できない。
+- 手動採点を取り込む場合は review aggregate や `--items` を流用せず、host user が用意した `mission-manual-score/1` を `manual-score-capture --input <file> --out <scoring.json>` で state-local archive に安全に固定してから、`push-score --scoring-json <scoring.json>` を実行する。capture は session/mission/iteration、4軸、composite/min、独立した review_agreement、revision scope、source evidence reference、input digest を検証する。4軸と composite/min/review_agreement は bool ではない有限の 0〜5 数値、open_high は bool ではない 0 以上の整数でなければならない。`manual-import` に review evidence reference は使用できない。
 - push-score は経路を問わず「全 items が 1.0 以下」を 0-1 正規化スケール混入として reject する (実ログ回帰: xai-cli cx-019efece が composite 0.96 = 4.8/5 を push した事例)
 - `--scoring-output` の保存先は `.mission-state/archive/iter-<N>-<mission_id先頭8>-scoring.md`。連続ランでの上書き消失 (2026-06-10 実害確認) を防ぐため mission_id を含む
 

@@ -166,6 +166,7 @@ def test_manual_score_capture_uses_its_own_typed_archive_and_revalidates_it(stat
     unsigned = {
         "schema": "mission-manual-score/1", "session_id": "test", "mission_id": "abc12345",
         "iteration": 1, "items": ITEMS, "composite": 4.25, "min_item": 4.0,
+        "review_agreement": 4.5,
         "open_high": 0, "revision_scope": {"kind": "not-applicable", "reason_code": "non-git"},
         "source_evidence_ref": {"kind": "manual-source-evidence", "ref": "sha256:" + "1" * 64,
                                 "digest": "sha256:" + "1" * 64},
@@ -200,6 +201,7 @@ def test_manual_score_capture_rejects_same_size_path_swap_during_single_fd_read(
     unsigned = {
         "schema": "mission-manual-score/1", "session_id": "test", "mission_id": "abc12345",
         "iteration": 1, "items": ITEMS, "composite": 4.25, "min_item": 4.0,
+        "review_agreement": 4.5,
         "open_high": 0, "revision_scope": {"kind": "not-applicable", "reason_code": "non-git"},
         "source_evidence_ref": {"kind": "manual-source-evidence", "ref": "sha256:" + "1" * 64,
                                 "digest": "sha256:" + "1" * 64},
@@ -244,7 +246,8 @@ def test_manual_score_capture_rejects_untrusted_input_without_mutating_state(sta
 
     unsigned = {
         "schema": "mission-manual-score/1", "session_id": "test", "mission_id": "abc12345",
-        "iteration": 1, "items": ITEMS, "composite": 4.25, "min_item": 4.0, "open_high": 0,
+        "iteration": 1, "items": ITEMS, "composite": 4.25, "min_item": 4.0,
+        "review_agreement": 4.5, "open_high": 0,
         "revision_scope": {"kind": "not-applicable", "reason_code": "non-git"},
         "source_evidence_ref": {"kind": "manual-source-evidence", "ref": "sha256:" + "2" * 64,
                                 "digest": "sha256:" + "2" * 64},
