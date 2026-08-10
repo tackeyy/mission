@@ -298,7 +298,7 @@ def validate_worktree_archive_bundle(bundle: Path) -> WorktreeArchiveValidation:
     try:
         pointer_bytes, _pointer_metadata = _read_generation_file(bundle, Path("current.json"))
         pointer = json.loads(pointer_bytes.decode("utf-8"))
-    except OSError:
+    except (OSError, ValueError):
         return _invalid(bundle, bundle, "pointer-access-error")
     except (UnicodeDecodeError, json.JSONDecodeError):
         return _invalid(bundle, bundle, "pointer-invalid-json")

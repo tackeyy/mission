@@ -644,7 +644,10 @@ def test_audit_uses_valid_manifest_for_noncanonical_scoring_path(tmp_path, run_c
     assert without_manifest["invalid_worktree_archive_count"] == 1
 
 
-@pytest.mark.parametrize("pointer_failure", ["malformed", "symlink", "missing-generation"])
+@pytest.mark.parametrize(
+    "pointer_failure",
+    ["malformed", "symlink", "hardlink", "fifo", "oversize", "missing-generation"],
+)
 def test_audit_reports_invalid_current_pointer_instead_of_silently_omitting_archive(
     tmp_path, run_cli, pointer_failure
 ):
@@ -653,6 +656,8 @@ def test_audit_reports_invalid_current_pointer_instead_of_silently_omitting_arch
     assert result.returncode == 0, result.stderr
     bundle = Path(json.loads(result.stdout)["bundle_path"])
     pointer = bundle / "current.json"
+    if pointer_failure == "fifo" and not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO is not supported")
     if pointer_failure == "malformed":
         pointer.write_text("{not-json\n", encoding="utf-8")
     elif pointer_failure == "symlink":
@@ -660,6 +665,13 @@ def test_audit_reports_invalid_current_pointer_instead_of_silently_omitting_arch
         external.write_text(pointer.read_text(encoding="utf-8"), encoding="utf-8")
         pointer.unlink()
         pointer.symlink_to(external)
+    elif pointer_failure == "hardlink":
+        os.link(pointer, tmp_path / "pointer-hardlink.json")
+    elif pointer_failure == "fifo":
+        pointer.unlink()
+        os.mkfifo(pointer)
+    elif pointer_failure == "oversize":
+        pointer.write_bytes(b"x" * (4 * 1024 * 1024 + 1))
     else:
         pointer.write_text(
             json.dumps({"schema": "mission-worktree-current/1", "generation": "f" * 64}) + "\n",
@@ -673,6 +685,9 @@ def test_audit_reports_invalid_current_pointer_instead_of_silently_omitting_arch
     codes = {finding["code"] for finding in data["findings"]}
     assert "invalid-worktree-archive" in codes
     assert "no-critical-findings" not in codes
+    stats = run_cli("stats", "--root", str(destination), "--json", cwd=destination)
+    assert stats.returncode == 0, stats.stderr
+    assert json.loads(stats.stdout)["total_sessions"] == 0
 
 
 @pytest.mark.parametrize("state_failure", ["missing", "invalid-json"])
