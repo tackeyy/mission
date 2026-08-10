@@ -40,3 +40,45 @@ def test_corrupt_sidecar_is_never_silently_accepted_and_is_visible_in_stats(stat
 
     assert result.returncode == 0
     assert json.loads(result.stdout)["command_outcome_counts"]["corrupt_sidecars"] == 1
+
+
+def test_command_provider_unavailable_is_an_external_outcome_producer(state_dir, run_cli):
+    state_file = state_dir / "sessions" / "test.json"
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    state["specialists_selected"] = [{
+        "role": "evidence", "skill": "fixture-provider", "kind": "command",
+        "command": "definitely-not-an-installed-command", "args": [], "source": "registry:$PROJECT",
+    }]
+    state["specialists_decision"] = {"policy": "auto"}
+    state_file.write_text(json.dumps(state), encoding="utf-8")
+
+    result = run_cli(
+        "specialists", "invoke-command", "--provider", "fixture-provider", "--iteration", "1",
+        "--phase", "review", "--event-id", "provider-attempt", cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["outcome_kind"] == "external"
+
+
+def test_phase_and_lease_gates_keep_state_bytes_and_emit_expected_gate_sidecars(state_dir, run_cli):
+    state_file = state_dir / "sessions" / "test.json"
+    before_phase = state_file.read_bytes()
+    phase = run_cli(
+        "advance", "--phase", "halted", "--json", "--event-id", "phase-gate", cwd=state_dir.parent,
+    )
+    assert phase.returncode == 2
+    assert json.loads(phase.stdout)["outcome_kind"] == "expected-gate"
+    assert state_file.read_bytes() == before_phase
+
+    state = json.loads(before_phase)
+    state.update({
+        "owner_session_id": "another-session", "lease_id": "another-lease", "fencing_epoch": 1,
+        "lease_expires_at": "2099-01-01T00:00:00Z",
+    })
+    state_file.write_text(json.dumps(state), encoding="utf-8")
+    before_lease = state_file.read_bytes()
+    lease = run_cli("set", "phase=executing", "--json", "--event-id", "lease-gate", cwd=state_dir.parent)
+    assert lease.returncode == 2
+    assert json.loads(lease.stdout)["outcome_kind"] == "expected-gate"
+    assert state_file.read_bytes() == before_lease

@@ -4537,6 +4537,7 @@ def cmd_invoke_command_provider(args):
     command = provider.get("command")
     timeout = _provider_timeout(provider, args.timeout)
     if not _command_is_available(command):
+        outcome = _command_outcome(args, "specialists-invoke-command", "external")
         entry.update({
             "status": "unavailable",
             "completed_at": iso_now(),
@@ -4554,10 +4555,11 @@ def cmd_invoke_command_provider(args):
                 iteration=args.iteration,
                 evidence_planned=False,
             )
+            _append_command_outcome(data, outcome)
             _commit_specialist_state_with_archive(
                 sf, cwd, data, entry, args.iteration, None
             )
-        print(json.dumps({"ok": False, "entry": entry}, indent=2 if args.json else None, ensure_ascii=False))
+        print(json.dumps({"ok": False, "outcome_kind": "external", "outcome": outcome, "entry": entry}, indent=2 if args.json else None, ensure_ascii=False))
         return
 
     argv = [command, *[str(a) for a in provider.get("args") or []]]
@@ -4609,6 +4611,10 @@ def cmd_invoke_command_provider(args):
         stderr = _redact_provider_output(str(exc))
 
     status, reason = _classify_command_provider_result(provider, exit_code, stdout, stderr)
+    outcome = _command_outcome(
+        args, "specialists-invoke-command",
+        "ok" if status == "completed" else "external",
+    )
     completed_at = iso_now()
     entry.update({
         "status": status,
@@ -4658,10 +4664,11 @@ def cmd_invoke_command_provider(args):
             provider=provider,
             selection_reason=reason,
         )
+        _append_command_outcome(data, outcome)
         archived_to = _commit_specialist_state_with_archive(
             sf, cwd, data, entry, args.iteration, evidence
         )
-    result = {"ok": status == "completed", "entry": entry}
+    result = {"ok": status == "completed", "outcome_kind": outcome["outcome_kind"], "outcome": outcome, "entry": entry}
     if selected_entry:
         result["selected_entry"] = selected_entry
     print(json.dumps(result, indent=2 if args.json else None, ensure_ascii=False))
@@ -11505,7 +11512,9 @@ def _build_parser():
 
     p_set = sub.add_parser("set", help="state.json のフィールド更新 (key=value 複数可)")
     p_set.add_argument("kvs", nargs="+")
-    p_set.set_defaults(func=cmd_set)
+    p_set.add_argument("--json", action="store_true", help="失敗時に機械可読 outcome を出力")
+    _add_command_lineage_arguments(p_set)
+    p_set.set_defaults(func=cmd_set, command_outcome_tracking=True)
 
     p_pass = sub.add_parser("mark-passes", help="threshold gate を満たすとき passes=true, loop_active=false (--force には --reason --approved-by-user --approval-evidence-ref --approved-actor --approved-at --reason-code --approval-verifier が全て必須)")
     p_pass.add_argument("--force", action="store_true",
@@ -11725,7 +11734,9 @@ def _build_parser():
         default=None,
         help="artifact bytes を生成した executor run identifier",
     )
-    p_advance.set_defaults(func=cmd_advance)
+    p_advance.add_argument("--json", action="store_true", help="失敗時に機械可読 outcome を出力")
+    _add_command_lineage_arguments(p_advance)
+    p_advance.set_defaults(func=cmd_advance, command_outcome_tracking=True)
 
     p_activity = sub.add_parser("activity", help="#211: phase 内の active/wait/idle segment を記録")
     activity_sub = p_activity.add_subparsers(dest="activity_cmd", required=True)
@@ -11873,6 +11884,7 @@ def _build_parser():
     p_cmd.add_argument("--timeout", type=int, default=None,
                        help="command timeout seconds (default: provider timeout, then 120)")
     p_cmd.add_argument("--json", action="store_true", help="JSON 形式で出力")
+    _add_command_lineage_arguments(p_cmd)
     p_cmd.set_defaults(func=cmd_invoke_command_provider)
 
     p_resolve = sub.add_parser(
@@ -11917,6 +11929,26 @@ def main():
     args = _build_parser().parse_args()
     try:
         args.func(args)
+    except SystemExit as error:
+        code = error.code if isinstance(error.code, int) else 1
+        if code and getattr(args, "command_outcome_tracking", False):
+            try:
+                outcome = _command_outcome(
+                    args, str(getattr(args, "cmd", "unknown")),
+                    "expected-gate" if code == 2 else "invalid-input",
+                )
+                _record_command_outcome_only(Path.cwd(), outcome)
+                if getattr(args, "json", False):
+                    print(json.dumps({"ok": False, "outcome_kind": outcome["outcome_kind"], "outcome": outcome}, ensure_ascii=False))
+            except Exception:
+                pass
+        raise
+    except LeaseRejectedError:
+        outcome = _command_outcome(args, str(getattr(args, "cmd", "unknown")), "expected-gate")
+        _record_command_outcome_only(Path.cwd(), outcome)
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "outcome_kind": "expected-gate", "outcome": outcome}, ensure_ascii=False))
+        raise SystemExit(2)
     except SpecialistPublicContractError as error:
         print(json.dumps({
             "ok": False,
@@ -11931,6 +11963,16 @@ def main():
             "field_path": error.field_path,
         }, ensure_ascii=False))
         raise SystemExit(2)
+    except Exception:
+        # Never serialize exception text or a traceback: CLI input and provider
+        # output may be sensitive.  The typed outcome is the machine contract.
+        try:
+            outcome = _command_outcome(args, str(getattr(args, "cmd", "unknown")), "internal-error")
+            _record_command_outcome_only(Path.cwd(), outcome)
+            print(json.dumps({"ok": False, "outcome_kind": "internal-error", "outcome": outcome}, ensure_ascii=False))
+        except Exception:
+            print(json.dumps({"ok": False, "outcome_kind": "internal-error"}, ensure_ascii=False))
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

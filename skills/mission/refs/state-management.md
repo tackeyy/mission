@@ -173,6 +173,12 @@ schema v3 は control state (`passes` / `loop_active` / `halt_reason` / `halt_ca
 
 schema v1/v2 は `derive_terminal_outcome()` が読み取り時に互換導出し、物理 rewrite しない。resolution metadata の `resolved` / `closed` は元の halt category outcome を維持し、`superseded` だけを `stale_superseded` として扱う。明示的な `resolve-archive` は、既存の v3 `terminal_outcome` だけを同じ transition 内で更新し、outcome を持たない legacy record には追加しない。`stats` / audit の implementer pass rate は implementer role の `completed_pass + failed + incomplete` だけを分母にし、checker/planning/analyze は evidence completion rate へ分離する。release、外部 blocker、承認待ち、stale/superseded、user abort、route、active は implementer 分母から除外する。詳細は `docs/PASS_RATE_METRICS.md` を参照。
 
+### Command outcome telemetry (#386)
+
+`review-import`、`aggregate-reviews`、`review-finalize`、command provider と state transition gate は、opaque `event_id`、`root_event_id`、positive `attempt`、optional `retry_of` を持つ `mission-command-outcomes/1` record を返す。kind は `ok`、`expected-gate`、`invalid-input`、`external`、`internal-error` に限定する。成功 record は state の `command_outcomes` に、state を変更してはならない invalid/gate rejection は `.mission-state/telemetry/command-outcomes/` の sidecar に保存する。
+
+sidecar は session-id の hash 名、128 record cap、別 lock、atomic replace、regular/non-symlink/non-hardlink/no-follow read を必須とする。corrupt/unsafe sidecar は空扱いにせず fail-closed として `stats` / `mission-audit.py` の `command_outcome_counts.corrupt_sidecars` に計上する。count は kind 別に加え、`unique_root_events` と retry の件数、invalid record 数を返す。これは観測専用で、pass gate や KPI 判定を変更しない。
+
 ### Activity segment observability (#211)
 
 `phase_durations_sec` の wall-clock 意味論を維持したまま、作業と待機を明示的に区別する。`init` は planning の default segment を開き、`advance --phase` は planning/executing/reviewing/scoring の phase default を使う（明示 `--activity` は override）。`activity start` は既存 open segment を閉じて新しい segment を開き、`activity end` は閉じる。どちらも state lock 内で atomic write され、同一操作の再実行は duration を二重加算しない。`aggregate-reviews` は reviewing から scoring へ遷移し、`done` / `halted` は open segment を閉じる。

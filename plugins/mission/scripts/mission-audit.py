@@ -93,6 +93,10 @@ from scoring_provenance import (  # noqa: E402
     validate_receipt_binding,
     validate_recorded_envelope,
 )
+from command_outcomes import (  # noqa: E402
+    iter_records as iter_command_outcome_records,
+    summarize as summarize_command_outcomes,
+)
 
 
 PRUNE_DIRS = {
@@ -2243,6 +2247,25 @@ def aggregate(
 ) -> dict[str, Any]:
     invalid_worktree_archives = invalid_worktree_archives or []
     observation_now = observation_now or utc_now()
+    command_outcome_records: list[dict[str, Any]] = []
+    command_outcome_invalid = command_outcome_corrupt = 0
+    for record in records:
+        project_root = state_root_for_record(record)
+        sid = record.state.get("session_id")
+        if project_root is None or not isinstance(sid, str) or not sid:
+            command_outcome_invalid += 1
+            continue
+        token = hashlib.sha256(sid.encode("utf-8")).hexdigest()[:16]
+        found, invalid, corrupt = iter_command_outcome_records(
+            record.state, project_root / ".mission-state", token
+        )
+        command_outcome_records.extend(found)
+        command_outcome_invalid += invalid
+        command_outcome_corrupt += corrupt
+    command_outcome_counts = summarize_command_outcomes(
+        command_outcome_records, invalid_records=command_outcome_invalid,
+        corrupt_sidecars=command_outcome_corrupt,
+    )
     classes = [classify(r.state) for r in records]
     pass_rate_summary = summarize_pass_rate_population(
         [record.state for record in records],
@@ -2448,6 +2471,7 @@ def aggregate(
         "completed_pass_rate_denominator": pass_rate_summary["completed_pass_rate_denominator"],
         "completed_pass_rate": pass_rate_summary["completed_pass_rate"],
         "terminal_outcome_counts": pass_rate_summary["terminal_outcome_counts"],
+        "command_outcome_counts": command_outcome_counts,
         "artifact_coverage": summarize_artifact_coverage(
             [record.state for record in records]
         ),
