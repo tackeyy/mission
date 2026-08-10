@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import subprocess
@@ -206,3 +207,23 @@ def test_review_import_fifo_is_nonblocking_rejection_without_state_or_archive_mu
     result = run_cli("review-import", "--iteration", "1", "--input", str(source), cwd=state_dir.parent)
     assert result.returncode == 2
     assert state_file.read_bytes() == before
+
+
+def test_review_input_single_descriptor_rejects_same_size_path_swap_identity(monkeypatch, tmp_path):
+    spec = importlib.util.spec_from_file_location("mission_state_review_swap", MISSION_STATE_PY)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    source = tmp_path / "review.json"
+    source.write_bytes(_review_bytes())
+    original = module.os.lstat
+
+    def swapped(path):
+        metadata = original(path)
+        values = list(metadata)
+        values[1] += 1  # same byte length, different final pathname identity
+        return os.stat_result(values)
+
+    monkeypatch.setattr(module.os, "lstat", swapped)
+    with pytest.raises(ValueError, match="changed while being read"):
+        module._read_strict_review_file(source)
