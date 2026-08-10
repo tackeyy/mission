@@ -4,8 +4,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
+
+
+MISSION_STATE_PY = Path(__file__).resolve().parent.parent / "bin" / "mission-state.py"
+
+
+def _stdin_import(payload, cwd):
+    env = {key: value for key, value in os.environ.items() if not key.startswith("MISSION_")}
+    env.update({"MISSION_SESSION_ID": "test", "MISSION_LEASE_ID": "test-lease"})
+    return subprocess.run(
+        [sys.executable, str(MISSION_STATE_PY), "review-import", "--iteration", "1", "--stdin"],
+        cwd=cwd, input=payload, capture_output=True, env=env,
+    )
 
 
 def _review_bytes(*, perspective="quality", iteration=1):
@@ -119,3 +135,74 @@ def test_review_import_rejects_hostile_input_without_changing_state_or_archives(
     assert json.loads(telemetry.read_text(encoding="utf-8"))["records"][-1]["outcome_kind"] == "invalid-input"
     archive = state_dir / "archive"
     assert not archive.exists() or not list(archive.iterdir())
+
+
+@pytest.mark.parametrize("mode", ["symlink", "hardlink"])
+def test_review_import_rejects_linked_source_without_state_or_archive_mutation(state_dir, run_cli, tmp_path, mode):
+    source = tmp_path / "review.json"
+    target = tmp_path / "target.json"
+    target.write_bytes(_review_bytes())
+    if mode == "symlink":
+        source.symlink_to(target)
+    else:
+        source.hardlink_to(target)
+    state_file = state_dir / "sessions" / "test.json"
+    before = state_file.read_bytes()
+
+    result = run_cli("review-import", "--iteration", "1", "--input", str(source), cwd=state_dir.parent)
+
+    assert result.returncode == 2
+    assert state_file.read_bytes() == before
+    archive = state_dir / "archive"
+    assert not archive.exists() or not list(archive.iterdir())
+
+
+def test_review_import_archive_write_is_atomic_and_leaves_no_temp_evidence(state_dir, run_cli, tmp_path):
+    source = tmp_path / "review.json"
+    source.write_bytes(_review_bytes())
+
+    result = run_cli("review-import", "--iteration", "1", "--input", str(source), cwd=state_dir.parent)
+
+    assert result.returncode == 0, result.stderr
+    archive = state_dir / "archive"
+    assert not list(archive.glob(".*.tmp"))
+
+
+def test_review_import_accepts_valid_stdin_and_rejects_truncated_stdin_atomically(state_dir):
+    valid = _stdin_import(_review_bytes(), state_dir.parent)
+    assert valid.returncode == 0, valid.stderr.decode()
+    state_file = state_dir / "sessions" / "test.json"
+    before = state_file.read_bytes()
+    truncated = _stdin_import(b'{"schema":"mission-review/1"', state_dir.parent)
+    assert truncated.returncode == 2
+    assert json.loads(truncated.stdout)["outcome_kind"] == "invalid-input"
+    assert state_file.read_bytes() == before
+
+
+def test_review_import_rejects_oversize_stdin_before_state_or_archive_write(state_dir):
+    state_file = state_dir / "sessions" / "test.json"
+    before = state_file.read_bytes()
+    result = _stdin_import(b"{" + b" " * (4 * 1024 * 1024), state_dir.parent)
+    assert result.returncode == 2
+    assert json.loads(result.stdout)["outcome_kind"] == "invalid-input"
+    assert state_file.read_bytes() == before
+
+
+def test_review_import_input_and_stdin_are_mutually_exclusive_before_any_write(state_dir, run_cli, tmp_path):
+    source = tmp_path / "review.json"
+    source.write_bytes(_review_bytes())
+    state_file = state_dir / "sessions" / "test.json"
+    before = state_file.read_bytes()
+    result = run_cli("review-import", "--iteration", "1", "--input", str(source), "--stdin", cwd=state_dir.parent)
+    assert result.returncode == 2
+    assert state_file.read_bytes() == before
+
+
+def test_review_import_fifo_is_nonblocking_rejection_without_state_or_archive_mutation(state_dir, run_cli, tmp_path):
+    source = tmp_path / "review.fifo"
+    os.mkfifo(source)
+    state_file = state_dir / "sessions" / "test.json"
+    before = state_file.read_bytes()
+    result = run_cli("review-import", "--iteration", "1", "--input", str(source), cwd=state_dir.parent)
+    assert result.returncode == 2
+    assert state_file.read_bytes() == before

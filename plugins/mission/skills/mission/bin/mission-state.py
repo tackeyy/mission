@@ -8183,21 +8183,25 @@ COMMAND_OUTCOME_LIMIT = 128
 _OUTCOME_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
 
 
+class CommandOutcomeInputError(ValueError):
+    """Opaque command lineage input failed validation."""
+
+
 def _command_outcome(args: argparse.Namespace, command: str, outcome_kind: str) -> dict:
     """Build bounded, locator-free command lineage for state and JSON consumers."""
     if outcome_kind not in COMMAND_OUTCOME_KINDS:
-        raise ValueError("command outcome kind is invalid")
+        raise CommandOutcomeInputError("command outcome kind is invalid")
     provided_event = getattr(args, "event_id", None)
     if provided_event is not None and not _valid_command_outcome_identifier(provided_event):
-        raise ValueError("command event_id is invalid")
+        raise CommandOutcomeInputError("command event_id is invalid")
     event_id = provided_event or secrets.token_hex(16)
     provided_root = getattr(args, "root_event_id", None)
     if provided_root is not None and not _valid_command_outcome_identifier(provided_root):
-        raise ValueError("command root_event_id is invalid")
+        raise CommandOutcomeInputError("command root_event_id is invalid")
     root_event_id = provided_root or event_id
     attempt = getattr(args, "attempt", 1)
     if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
-        raise ValueError("command attempt is invalid")
+        raise CommandOutcomeInputError("command attempt is invalid")
     outcome = {
         "event_id": event_id,
         "root_event_id": root_event_id,
@@ -8207,7 +8211,7 @@ def _command_outcome(args: argparse.Namespace, command: str, outcome_kind: str) 
     }
     retry_of = getattr(args, "retry_of", None)
     if retry_of is not None and not _valid_command_outcome_identifier(retry_of):
-        raise ValueError("command retry_of is invalid")
+        raise CommandOutcomeInputError("command retry_of is invalid")
     if retry_of is not None:
         outcome["retry_of"] = retry_of
     return outcome
@@ -11948,6 +11952,9 @@ def main():
         _record_command_outcome_only(Path.cwd(), outcome)
         if getattr(args, "json", False):
             print(json.dumps({"ok": False, "outcome_kind": "expected-gate", "outcome": outcome}, ensure_ascii=False))
+        raise SystemExit(2)
+    except CommandOutcomeInputError:
+        print(json.dumps({"ok": False, "outcome_kind": "invalid-input"}, ensure_ascii=False))
         raise SystemExit(2)
     except SpecialistPublicContractError as error:
         print(json.dumps({

@@ -4,6 +4,16 @@ from __future__ import annotations
 
 import json
 import hashlib
+import pytest
+from command_outcomes import LIMIT, OutcomeStoreError, append_sidecar
+
+
+def _review_bytes():
+    return (json.dumps({
+        "schema": "mission-review/1", "iteration": 1, "perspective": "quality",
+        "scores": {"mission_achievement": 4.5, "accuracy": 4.5, "completeness": 4.5, "usability": 4.5},
+        "findings": [],
+    }) + "\n").encode("utf-8")
 
 
 def test_stats_and_audit_count_state_and_sidecar_command_outcomes(state_dir, run_cli, tmp_path):
@@ -61,6 +71,28 @@ def test_command_provider_unavailable_is_an_external_outcome_producer(state_dir,
     assert json.loads(result.stdout)["outcome_kind"] == "external"
 
 
+def test_unexpected_provider_packet_error_is_internal_without_leaking_path(state_dir, run_cli, tmp_path):
+    state_file = state_dir / "sessions" / "test.json"
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    state["specialists_selected"] = [{
+        "role": "evidence", "skill": "fixture-provider", "kind": "command",
+        "command": "echo", "args": [], "source": "registry:$PROJECT",
+    }]
+    state["specialists_decision"] = {"policy": "auto"}
+    state_file.write_text(json.dumps(state), encoding="utf-8")
+    missing = tmp_path / "not-present.json"
+
+    result = run_cli(
+        "specialists", "invoke-command", "--provider", "fixture-provider", "--iteration", "1",
+        "--phase", "review", "--input-file", str(missing), "--event-id", "internal-attempt",
+        cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["outcome_kind"] == "internal-error"
+    assert str(missing) not in result.stdout
+
+
 def test_phase_and_lease_gates_keep_state_bytes_and_emit_expected_gate_sidecars(state_dir, run_cli):
     state_file = state_dir / "sessions" / "test.json"
     before_phase = state_file.read_bytes()
@@ -82,3 +114,58 @@ def test_phase_and_lease_gates_keep_state_bytes_and_emit_expected_gate_sidecars(
     assert lease.returncode == 2
     assert json.loads(lease.stdout)["outcome_kind"] == "expected-gate"
     assert state_file.read_bytes() == before_lease
+
+
+@pytest.mark.parametrize(("option", "value"), [
+    ("--event-id", "../escape"), ("--root-event-id", "/absolute"),
+    ("--retry-of", "contains space"), ("--attempt", "0"),
+])
+def test_lineage_inputs_are_validated_before_review_state_write(state_dir, run_cli, tmp_path, option, value):
+    source = tmp_path / "review.json"
+    source.write_bytes(_review_bytes())
+    state_file = state_dir / "sessions" / "test.json"
+    before = state_file.read_bytes()
+
+    result = run_cli("review-import", "--iteration", "1", "--input", str(source), option, value, cwd=state_dir.parent)
+
+    assert result.returncode == 2
+    assert json.loads(result.stdout)["outcome_kind"] == "invalid-input"
+    assert state_file.read_bytes() == before
+
+
+def _outcome(index):
+    return {"event_id": f"event-{index}", "root_event_id": "root", "attempt": index + 1,
+            "retry_of": "prior" if index else None, "command": "fixture", "outcome_kind": "expected-gate"}
+
+
+def test_sidecar_cap_and_atomic_publish_leave_no_temp_files(state_dir):
+    token = hashlib.sha256(b"test").hexdigest()[:16]
+    for index in range(LIMIT + 2):
+        record = _outcome(index)
+        if index == 0:
+            record.pop("retry_of")
+        append_sidecar(state_dir, token, record)
+    directory = state_dir / "telemetry" / "command-outcomes"
+    sidecar = json.loads((directory / f"{token}.json").read_text(encoding="utf-8"))
+    assert len(sidecar["records"]) == LIMIT
+    assert not list(directory.glob(".*.tmp"))
+
+
+@pytest.mark.parametrize("mode", ["symlink", "hardlink", "oversize"])
+def test_sidecar_hostile_files_fail_closed(mode, state_dir, tmp_path):
+    token = hashlib.sha256(b"test").hexdigest()[:16]
+    directory = state_dir / "telemetry" / "command-outcomes"
+    directory.mkdir(parents=True)
+    sidecar = directory / f"{token}.json"
+    if mode == "symlink":
+        target = tmp_path / "target.json"
+        target.write_text("{}", encoding="utf-8")
+        sidecar.symlink_to(target)
+    elif mode == "hardlink":
+        target = tmp_path / "target.json"
+        target.write_text("{}", encoding="utf-8")
+        sidecar.hardlink_to(target)
+    else:
+        sidecar.write_bytes(b"x" * (256 * 1024 + 1))
+    with pytest.raises(OutcomeStoreError):
+        append_sidecar(state_dir, token, _outcome(1))
