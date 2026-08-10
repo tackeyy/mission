@@ -98,6 +98,7 @@ from activity_segments import (  # noqa: E402
 )
 from worktree_archive import (  # noqa: E402
     read_verified_review_input_evidence,
+    valid_review_perspective,
     validated_archive_evidence_reader,
     validate_worktree_archive_bundle,
     worktree_archive_lineage_references,
@@ -6387,11 +6388,32 @@ def _happy_path_sequence(phase: str, reviewer_count: int, *, plan_mode: str = "s
         "Skill: mission-executor",
         "mission-state.py advance --phase reviewing --activity reviewer-wait:review-response",
         f"Skill: mission-reviewer x{reviewer_count} (1 message, parallel)",
-        "mission-state.py review-finalize --iteration <i> --scoring-json <out> (aggregate+push を transactional に)",
+        "mission-state.py review-import --iteration <i> --stdin (reviewer ごとに実行し review_evidence_ref.path を保持)",
+        f"mission-state.py review-finalize --iteration <i> --input-ref <review_evidence_ref.path> (全 reviewer 分を反復) --min-reviewers {reviewer_count}",
         "mission-state.py closeout",
     ]
     start = {"planning": 0, "executing": 2, "reviewing": 4}[phase]
     return steps[start:]
+
+
+def _native_review_handoff_hint(
+    iteration: int | str,
+    reviewer_count: int | str,
+    *,
+    resubmit: bool = False,
+) -> str:
+    """Return staged native commands without temp files or shell composition."""
+    resubmit_hint = (
+        ' --resubmit-reason "retry with review evidence"' if resubmit else ""
+    )
+    return (
+        f"Step 1 (reviewer ごと): mission-state.py review-import --iteration {iteration} "
+        "--stdin; 返却 JSON の review_evidence_ref.path を保持する。 "
+        f"Step 2: mission-state.py review-finalize --iteration {iteration} "
+        "--input-ref <review_evidence_ref.path> (全 reviewer 分だけ --input-ref を反復) "
+        f"--min-reviewers {reviewer_count}{resubmit_hint}。 "
+        "Step 3: mission-state.py mark-passes。"
+    )
 
 
 def _expected_context_mode(data: dict, iteration: int) -> str:
@@ -6504,7 +6526,6 @@ def _derive_next_action(data: dict) -> dict:
     effective_reviewer_count = reviewer_count
     if iteration >= 2 and data.get("critic_has_new_scope") is False:
         effective_reviewer_count = min(reviewer_count, 2)
-    mid8 = (data.get("mission_id") or "unknown")[:8]
     stagnation = data.get("stagnation_count", 0) or 0
     # 通常経路では push-score が phase=scoring へ遷移させるため stagnation>=3 と
     # phase=reviewing は共起しないが、手動 `set stagnation_count=N` は許可された操作。
@@ -6631,14 +6652,10 @@ def _derive_next_action(data: dict) -> dict:
                     "exit 2 になります。--force は使わず aggregate-reviews からやり直してください。"
                 ),
                 "command_hint": (
-                    "reviewer が mission-review/1 JSON を直接出力できない場合 (Codex で並列 Skill が"
-                    "使えない等) は mission-scorer を散文→JSON 変換の fallback として使ってから: "
-                    f"mission-state.py aggregate-reviews --iteration {iteration} "
-                    f"--input /tmp/mission-reviewer-iter-{iteration}-{mid8}-a.json "
-                    f"--out /tmp/mission-scorer-iter-{iteration}-{mid8}.json && "
-                    f"mission-state.py push-score --iteration {iteration} "
-                    f"--scoring-json /tmp/mission-scorer-iter-{iteration}-{mid8}.json "
-                    '--resubmit-reason "retry with aggregate-reviews evidence"'
+                    _native_review_handoff_hint(
+                        iteration, effective_reviewer_count, resubmit=True,
+                    )
+                    + " mission-scorer fallback を使った場合も、その mission-review/1 出力を Step 1 に渡す。"
                 ),
                 "details": {
                     "missing_findings_evidence": True,
@@ -6652,14 +6669,16 @@ def _derive_next_action(data: dict) -> dict:
             "command_hint": "mission-state.py mark-passes",
             "details": {"unclosed_specialists": unclosed} if unclosed else {},
         }
-    min_rev_flag = f" --min-reviewers {effective_reviewer_count}" if effective_reviewer_count >= 2 else ""
     return {
         "next_action": "aggregate-reviews",
         "summary": (
-            f"iteration {iteration}: reviewer の mission-review/1 JSON を aggregate-reviews で集計し、"
-            "push-score --scoring-json で記録する。--force は使わない (scoring evidence を作る経路がこれ)。"
+            f"iteration {iteration}: reviewer の mission-review/1 JSON を review-import --stdin で"
+            " state-owned evidence にし、review-finalize --input-ref で集計・記録する。"
+            "--force は使わない。"
         ),
-        "command_hint": f"mission-state.py aggregate-reviews --iteration {iteration} --input /tmp/mission-reviewer-iter-{iteration}-{mid8}-a.json{min_rev_flag} --out /tmp/mission-scorer-iter-{iteration}-{mid8}.json && mission-state.py push-score --iteration {iteration} --scoring-json /tmp/mission-scorer-iter-{iteration}-{mid8}.json",
+        "command_hint": _native_review_handoff_hint(
+            iteration, effective_reviewer_count,
+        ),
     }
 
 
@@ -6903,12 +6922,14 @@ def cmd_codex_preflight(args):
         # aggregate-reviews が初回失敗すると --force に逃げやすい。scoring パイプラインの
         # 正規手順を preflight 時点で明示し、`next` の command_hint と合わせて force を回避する。
         "scoring_pipeline": (
-            "Standard scoring path: reviewers write mission-review/1 JSON -> "
-            "`aggregate-reviews --input <files> --out <path>` -> "
-            "`push-score --scoring-json <path>` -> `mark-passes`. "
+            "Standard scoring path: for each reviewer, run "
+            "`review-import --iteration <N> --stdin` and retain the returned "
+            "review_evidence_ref.path; then run "
+            "`review-finalize --iteration <N> --input-ref <review_evidence_ref.path>` "
+            "with one --input-ref per reviewer; then run `mark-passes`. "
             "If reviewer JSON cannot be produced in this Codex context, use mission-scorer as a "
-            "prose-to-JSON fallback converter, then feed its output through aggregate-reviews the "
-            "same way. Never fall back to `mark-passes --force` just because aggregate-reviews "
+            "prose-to-JSON fallback converter, then feed its output through review-import and "
+            "review-finalize the same way. Never fall back to `mark-passes --force` just because review import "
             "failed once; `mission-state.py next` will report a retry hint when the latest score "
             "entry is missing findings evidence."
         ),
@@ -8587,8 +8608,8 @@ def _validate_review_payload(payload: object, expected_iteration: int) -> None:
     ):
         raise ValueError(f"iteration must be {expected_iteration}")
     perspective = payload.get("perspective")
-    if not isinstance(perspective, str) or not perspective.strip():
-        raise ValueError("perspective must be a non-empty string")
+    if not valid_review_perspective(perspective):
+        raise ValueError("perspective must be a non-empty trimmed string")
     findings = payload.get("findings")
     if not isinstance(findings, list):
         raise ValueError("findings must be a list")
@@ -8701,8 +8722,7 @@ def _review_import_ref_is_valid(reference: object, expected_iteration: int) -> b
         and not isinstance(reference.get("iteration"), bool)
         and reference["iteration"] >= 1
         and reference["iteration"] == expected_iteration
-        and isinstance(reference.get("perspective"), str)
-        and reference["perspective"].strip()
+        and valid_review_perspective(reference.get("perspective"))
     )
 
 

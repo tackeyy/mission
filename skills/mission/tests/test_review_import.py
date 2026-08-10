@@ -17,11 +17,14 @@ import pytest
 MISSION_STATE_PY = Path(__file__).resolve().parent.parent / "bin" / "mission-state.py"
 
 
-def _stdin_import(payload, cwd):
+def _stdin_import(payload, cwd, *extra):
     env = {key: value for key, value in os.environ.items() if not key.startswith("MISSION_")}
     env.update({"MISSION_SESSION_ID": "test", "MISSION_LEASE_ID": "test-lease"})
     return subprocess.run(
-        [sys.executable, str(MISSION_STATE_PY), "review-import", "--iteration", "1", "--stdin"],
+        [
+            sys.executable, str(MISSION_STATE_PY), "review-import", "--iteration", "1",
+            "--stdin", *extra,
+        ],
         cwd=cwd, input=payload, capture_output=True, env=env,
     )
 
@@ -42,6 +45,7 @@ def _review_bytes(*, perspective="quality", iteration=1):
 
 
 INVALID_REVIEW_ITERATIONS = [True, 1.0, False, 0, -1, "1", None]
+WHITESPACE_PERSPECTIVES = [" quality ", "\tquality", "quality\n", "\u2003quality"]
 
 
 def _archive_bytes(state_dir):
@@ -51,6 +55,114 @@ def _archive_bytes(state_dir):
         for path in archive.rglob("*")
         if path.is_file()
     } if archive.exists() else {}
+
+
+def _assert_invalid_once_and_atomic(result, state_dir, state_before, archive_before, event_id):
+    stdout = result.stdout.decode("utf-8") if isinstance(result.stdout, bytes) else result.stdout
+    assert result.returncode == 2
+    payload = json.loads(stdout)
+    assert payload["outcome_kind"] == "invalid-input"
+    assert payload["outcome"]["event_id"] == event_id
+    assert (state_dir / "sessions" / "test.json").read_bytes() == state_before
+    assert _archive_bytes(state_dir) == archive_before
+    sidecar = next((state_dir / "telemetry" / "command-outcomes").glob("*.json"))
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["records"] == [payload["outcome"]]
+    assert not list(state_dir.rglob(".*.tmp"))
+
+
+@pytest.mark.parametrize("perspective", WHITESPACE_PERSPECTIVES, ids=repr)
+@pytest.mark.parametrize("source_mode", ["file", "stdin"])
+def test_review_import_rejects_whitespace_padded_perspective_atomically(
+    state_dir, run_cli, tmp_path, perspective, source_mode,
+):
+    content = _review_bytes(perspective=perspective)
+    state_file = state_dir / "sessions" / "test.json"
+    state_before = state_file.read_bytes()
+    archive_before = _archive_bytes(state_dir)
+    event_id = f"import-whitespace-{source_mode}"
+    if source_mode == "stdin":
+        result = _stdin_import(
+            content, state_dir.parent, "--event-id", event_id,
+        )
+    else:
+        source = tmp_path / "review.json"
+        source.write_bytes(content)
+        result = run_cli(
+            "review-import", "--iteration", "1", "--input", str(source),
+            "--event-id", event_id, cwd=state_dir.parent,
+        )
+
+    _assert_invalid_once_and_atomic(
+        result, state_dir, state_before, archive_before, event_id,
+    )
+
+
+@pytest.mark.parametrize("perspective", WHITESPACE_PERSPECTIVES, ids=repr)
+@pytest.mark.parametrize("command", ["aggregate-reviews", "review-finalize"])
+def test_legacy_review_consumer_rejects_whitespace_padded_perspective_atomically(
+    state_dir, run_cli, tmp_path, perspective, command,
+):
+    source = tmp_path / "review.json"
+    source.write_bytes(_review_bytes(perspective=perspective))
+    state_file = state_dir / "sessions" / "test.json"
+    state_before = state_file.read_bytes()
+    archive_before = _archive_bytes(state_dir)
+    event_id = f"legacy-whitespace-{command}"
+    args = [
+        command, "--iteration", "1", "--input", str(source),
+        "--event-id", event_id,
+    ]
+    if command == "aggregate-reviews":
+        args.append("--json")
+
+    result = run_cli(*args, cwd=state_dir.parent)
+
+    _assert_invalid_once_and_atomic(
+        result, state_dir, state_before, archive_before, event_id,
+    )
+
+
+@pytest.mark.parametrize("perspective", WHITESPACE_PERSPECTIVES, ids=repr)
+@pytest.mark.parametrize("command", ["aggregate-reviews", "review-finalize"])
+def test_import_ref_consumer_rejects_whitespace_padded_perspective_atomically(
+    state_dir, run_cli, tmp_path, perspective, command,
+):
+    source = tmp_path / "review.json"
+    source.write_bytes(_review_bytes())
+    imported = run_cli(
+        "review-import", "--iteration", "1", "--input", str(source),
+        cwd=state_dir.parent,
+    )
+    assert imported.returncode == 0, imported.stderr
+    reference = json.loads(imported.stdout)["review_evidence_ref"]
+    state_file = state_dir / "sessions" / "test.json"
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    evidence = state_dir.parent / reference["path"]
+    document = json.loads(evidence.read_text(encoding="utf-8"))
+    document["perspective"] = perspective
+    changed = (json.dumps(document) + "\n").encode("utf-8")
+    evidence.write_bytes(changed)
+    state["review_evidence_refs"][0].update({
+        "perspective": perspective,
+        "digest": "sha256:" + hashlib.sha256(changed).hexdigest(),
+        "size": len(changed),
+    })
+    state_file.write_text(json.dumps(state) + "\n", encoding="utf-8")
+    state_before = state_file.read_bytes()
+    archive_before = _archive_bytes(state_dir)
+    event_id = f"ref-whitespace-{command}"
+    args = [
+        command, "--iteration", "1", "--input-ref", reference["path"],
+        "--event-id", event_id,
+    ]
+    if command == "aggregate-reviews":
+        args.append("--json")
+
+    result = run_cli(*args, cwd=state_dir.parent)
+
+    _assert_invalid_once_and_atomic(
+        result, state_dir, state_before, archive_before, event_id,
+    )
 
 
 @pytest.mark.parametrize("iteration", INVALID_REVIEW_ITERATIONS, ids=repr)

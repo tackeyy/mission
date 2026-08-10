@@ -94,7 +94,7 @@ Iteration 内で Reviewer が指摘 → Executor/Critic が修正 → **再採�
 
 ### セキュリティ/性能/エラーパス High の扱い
 
-Critical/Complex のコード変更では、OWASP Top 10、シークレット露出、権限境界、入力検証、エラーパス、性能劣化を確認する。未解決 High は scorer が `push-score --open-high <N>` に反映できるよう、Issues 表の重要度を明確にする。採点軸は 5 軸のまま維持し、High>0 は `mark-passes` gate で不合格化する。
+Critical/Complex のコード変更では、OWASP Top 10、シークレット露出、権限境界、入力検証、エラーパス、性能劣化を確認する。未解決 High は `review-finalize` が `open_high` に反映できるよう、`mission-review/1` の findings で重要度を明確にする。採点軸は 5 軸のまま維持し、High>0 は `mark-passes` gate で不合格化する。
 
 ### オプション観点D: 計画指示明瞭度 (EPT 由来 / 採点対象外)
 
@@ -127,7 +127,7 @@ Critical/Complex のコード変更では、OWASP Top 10、シークレット露
 
 ## アウトプット形式
 
-人間向けレビュー本文の末尾に、必ず `mission-review/1` の fenced JSON を 1 個だけ付ける。Reviewer / scorer は Write 権限を持たないため、orchestrator がこの JSON を verbatim で保存し、`mission-state.py aggregate-reviews` が strict 検証する。
+人間向けレビュー本文の末尾に、必ず `mission-review/1` の fenced JSON を 1 個だけ付ける。Reviewer / scorer は Write 権限を持たないため、orchestrator はこの JSON をそのまま `mission-state.py review-import --iteration N --stdin` に渡し、返却された `review_evidence_ref.path` を `mission-state.py review-finalize --input-ref <review_evidence_ref.path>` に渡す。review JSON の一時ファイル化や shell chain での組み立ては禁止する。
 
 ### 出力境界 (#281)
 

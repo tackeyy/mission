@@ -83,15 +83,15 @@ legacy 廃止(2026-06-13)後、`cmd_init` は `skipped` を返さない。同一
 - 併走の watchdog (stall 検知) を仕込む場合: ①完了マーカーの grep は **dry-run 時の古いログ行に誤反応**する (「fetch complete」が既にログにあった実害) → チェックポイント JSON の processed>=total 比較にする ②zsh は `set -- $var` で語分割しないため数値比較が壊れる (cli-cheatsheet の bash/zsh 表参照)
 - executor サブエージェントに数時間ジョブを持たせない (タイムアウトする)。ジョブは orchestrator が background で持ち、サブエージェントには離散タスクのみ渡す
 
-### 9. aggregate-reviews / fallback converter が失敗することがある
+### 9. review-import / fallback converter が失敗することがある
 
-標準 Phase 5 は `aggregate-reviews` で reviewer JSON を決定論集計する。失敗原因の大半は reviewer の `mission-review/1` 契約違反か、fallback converter の出力 JSON 不備。
+標準 Phase 5 は reviewer JSON を `review-import --iteration N --stdin` で検証・保存し、返却 path を `review-finalize --input-ref` で決定論集計する。失敗原因の大半は reviewer の `mission-review/1` 契約違反か、fallback converter の出力 JSON 不備。
 
 **復旧手順**:
-1. `aggregate-reviews` の exit 2 メッセージを読み、どの reviewer JSON が契約違反か確認する。
+1. `review-import` の exit 2 メッセージを読み、どの reviewer JSON が契約違反か確認する。
 2. `skills/mission-scorer/SKILL.md` の「Fallback 発動条件」に合致するか確認する。
 3. 条件を満たす場合だけ、`mission-scorer` を fallback converter として呼び、散文レビューを `mission-review/1` JSON に変換させる。
-4. fallback 後も `aggregate-reviews` → `push-score --scoring-json` の通常経路に戻す。fallback 使用は scoring JSON の notes に明記する。
+4. fallback 出力も `review-import --iteration N --stdin` に渡し、返却 path を `review-finalize --input-ref` に渡す。fallback 使用は review notes に明記する。
 
 **注意**: internal error 中も `loop_active: true` は維持される。Stop hook が継続を強制するため、エラーを理由に黙ってループを抜けない。
 

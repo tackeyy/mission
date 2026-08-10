@@ -19,6 +19,11 @@ _REVIEW_INPUT_REFERENCE_FIELDS = {
 }
 
 
+def valid_review_perspective(value: Any) -> bool:
+    """Use one identity contract for review producers, references, and archives."""
+    return isinstance(value, str) and bool(value) and value == value.strip()
+
+
 @dataclass(frozen=True)
 class WorktreeArchiveValidation:
     status: str
@@ -182,9 +187,7 @@ def verify_review_input_evidence(
         or isinstance(iteration, bool)
         or iteration < 1
         or expected_iteration is not None and iteration != expected_iteration
-        or not isinstance(perspective, str)
-        or not perspective.strip()
-        or perspective != perspective.strip()
+        or not valid_review_perspective(perspective)
     ):
         raise ValueError("review input reference schema is invalid")
     if len(content) != size or "sha256:" + hashlib.sha256(content).hexdigest() != digest:
@@ -201,6 +204,7 @@ def verify_review_input_evidence(
         or isinstance(payload_iteration, bool)
         or payload_iteration < 1
         or payload_iteration != iteration
+        or not valid_review_perspective(payload.get("perspective"))
         or payload.get("perspective") != perspective
     ):
         raise ValueError("review input evidence identity mismatch")
@@ -269,8 +273,7 @@ def worktree_archive_lineage_references(
                 or not isinstance(reference.get("size"), int)
                 or isinstance(reference.get("size"), bool)
                 or reference["size"] < 0
-                or not isinstance(reference.get("perspective"), str)
-                or not reference["perspective"].strip()
+                or not valid_review_perspective(reference.get("perspective"))
                 or not add("review-input", reference["iteration"], reference.get("path"))
             ):
                 return None

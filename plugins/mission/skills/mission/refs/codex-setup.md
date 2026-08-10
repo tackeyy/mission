@@ -173,25 +173,25 @@ final の直前は `mission-state.py next` を呼ぶ。`next_action=report-compl
 python3 "$MISSION_PLUGIN_ROOT/skills/mission/bin/mission-state.py" refresh-pid
 ```
 
-## aggregate-reviews が回らない時のトラブルシュート (#187)
+## review import / finalize が回らない時のトラブルシュート (#187)
 
-Codex は (a) Skill tool の単一メッセージ並列起動ができない (b) reviewer 役をロール切替で同一コンテキストに適用しがちで reviewer JSON の書き出しが自演になりやすい、という制約がある。この制約下で `aggregate-reviews` の初回試行が失敗すると、`mark-passes --force` に逃げてしまう実害が確認されている (実運用ログ監査 #185/#187 参照)。**`--force` はユーザーが明示指示した場合のみ**。aggregate-reviews が失敗しても force には進まず、以下の手順でやり直す。
+Codex は (a) Skill tool の単一メッセージ並列起動ができない (b) reviewer 役をロール切替で同一コンテキストに適用しがちで reviewer JSON が契約違反になりやすい、という制約がある。**`--force` はユーザーが明示指示した場合のみ**。review import が失敗しても force には進まず、以下の native command を段階的に実行する。
 
 ### 正規経路 (毎 iteration)
 
-```
-reviewer が mission-review/1 JSON を出力
-  -> mission-state.py aggregate-reviews --iteration N --input <file...> --out <path>
-  -> mission-state.py push-score --iteration N --scoring-json <path>
-  -> mission-state.py mark-passes
-```
+1. reviewer ごとに `mission-state.py review-import --iteration N --stdin` を実行する。
+2. 各返却 JSON の `review_evidence_ref.path` を保持する。
+3. `mission-state.py review-finalize --iteration N --input-ref <review_evidence_ref.path>` を実行する。reviewer ごとに `--input-ref` を 1 回ずつ付け、必要なら `--min-reviewers N` と reviewer window を付ける。
+4. `mission-state.py mark-passes` を実行する。
+
+これらは別々の段階で実行し、shell command substitution、inline Python、一時 review JSON の手組みを使わない。
 
 ### 初回失敗時のリトライ手順
 
-1. `mission-state.py next` を呼ぶ。直前の score entry が `score_source=scoring-json` なのに `findings_evidence_path` が無い場合、`next_action=aggregate-reviews` と共に「force を使わずやり直す」旨の `command_hint` が返る。
+1. `mission-state.py next` を呼ぶ。直前の score entry が `score_source=scoring-json` なのに `findings_evidence_path` が無い場合、force を使わず native import/finalize をやり直す `command_hint` が返る。
 2. reviewer 役が Codex の同一コンテキストで `mission-review/1` 形式の JSON を直接出力できない場合は、**mission-scorer を散文→JSON 変換の fallback として使う** (reviewer の散文レビューを scorer に渡し、`mission-review/1` 形式へ整形させる)。
-3. 変換された JSON を `aggregate-reviews` に渡し直す。得られた `--out` パスを `push-score --scoring-json` へ渡す。同一 iteration への 2 回目の push なので `--resubmit-reason` が必須 (#122)。
-4. それでも `aggregate-reviews` の入力が用意できない場合は、`mark-halt --reason "<理由>" --category blocked-external` で正直に中断する。**未達を force で覆い隠さない**。
+3. 変換された JSON も `review-import --iteration N --stdin` に渡し、返却 path を `review-finalize --input-ref` に渡す。同一 iteration の再記録では `--resubmit-reason` が必須 (#122)。
+4. それでも review input を用意できない場合は、`mark-halt --reason "<理由>" --category blocked-external` で正直に中断する。**未達を force で覆い隠さない**。
 
 ### codex-preflight での事前確認
 

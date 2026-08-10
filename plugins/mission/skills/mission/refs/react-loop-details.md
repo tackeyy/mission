@@ -63,7 +63,9 @@ Skill(skill="mission-reviewer", args="観点D: 計画指示明瞭度 — Executo
 Skill(skill="mission-critic",   args="スコア結果 + 成果物 + 観点D フィードバック → 改善案 + Planner 申し送り")
 ```
 
-fallback 条件は `skills/mission-scorer/SKILL.md` の「Fallback 発動条件」を正とする。fallback 後も平均・合意度・合否判定は必ず `aggregate-reviews` と `push-score --scoring-json` が担う。
+fallback 条件は `skills/mission-scorer/SKILL.md` の「Fallback 発動条件」を正とする。fallback 出力も `review-import --iteration N --stdin` で取り込み、返却 path を `review-finalize --input-ref` に渡す。平均・合意度・合否判定は native finalize 経路が担う。
+
+互換性: host user が明示した manual score capture や既存の legacy caller では `push-score --scoring-json <path>` を引き続き利用できる。reviewer handoff の標準経路には使わず、上記 native import/finalize を使う。
 
 **並列実行 (P4 強化)**: Phase 4 のレビュー呼び出しは、Claude Code では**必ず 1 つの assistant メッセージ内に複数 Skill 呼び出しを並べる**。別メッセージに分割しても観測上は非同期並列になるが (実測 2026-06-12、gotchas §1)、挙動保証がないため単一メッセージに統一する。watchdog: 制御が戻った時点で 15 分超未返の Reviewer は待たずに再 spawn (gotchas §1)。Codex では順次実行で代替。
 

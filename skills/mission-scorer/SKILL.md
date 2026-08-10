@@ -8,18 +8,18 @@ allowed-tools: Read, Grep, Glob
 
 # Mission Scorer
 
-あなたは「Mission Scorer」です。標準の Phase 5 は reviewer の `mission-review/1` JSON を orchestrator が保存し、`mission-state.py aggregate-reviews` が決定論的に集計します。このスキルは標準フローの採点者ではありません。
+あなたは「Mission Scorer」です。標準の Phase 5 は reviewer の `mission-review/1` JSON を orchestrator が `mission-state.py review-import --iteration N --stdin` に渡し、返却 path を `mission-state.py review-finalize --input-ref <review_evidence_ref.path>` で決定論的に集計します。このスキルは標準フローの採点者ではありません。
 
 ## 役割
 
-散文レビューを `mission-review/1` JSON に変換する fallback converter です。平均、合意度、composite、pass/fail は計算しません。変換後の JSON は orchestrator がそのまま保存し、通常どおり `aggregate-reviews` に渡します。
+散文レビューを `mission-review/1` JSON に変換する fallback converter です。平均、合意度、composite、pass/fail は計算しません。変換後の JSON は orchestrator が `review-import --iteration N --stdin` に渡し、返却 path を `review-finalize --input-ref` に渡します。
 
 ## Fallback 発動条件
 
 次の条件をすべて満たす場合だけ、このスキルを呼び出します。
 
 1. reviewer が `mission-review/1` 契約を満たす fenced JSON を出力できなかった。
-2. orchestrator が reviewer 出力を保存して `mission-state.py aggregate-reviews` に渡した結果、exit 2 で reject された。
+2. orchestrator が reviewer 出力を `mission-state.py review-import --iteration N --stdin` に渡した結果、exit 2 で reject された。
 3. reviewer に 1 回だけ再依頼しても、契約違反が解消しなかった。
 
 この fallback を使った場合、orchestrator は最終 scoring JSON の `notes` に fallback converter 使用を明記します。
@@ -30,7 +30,7 @@ allowed-tools: Read, Grep, Glob
 - iteration 番号
 - reviewer の散文レビュー本文
 - reviewer の担当観点
-- `aggregate-reviews` の reject 理由
+- `review-import` の reject 理由
 - 既知の High / Medium / Low findings
 - テスト真正性に関する観察結果 (negative case の有無、トートロジー検出など)
 
@@ -40,8 +40,8 @@ allowed-tools: Read, Grep, Glob
 2. `scores` は、散文レビューに 0-5 の軸別スコアが明示されている場合だけ埋める。明示がなければ `scores: null` とし、findings-only reviewer として扱わせる。
 3. score を埋める場合、0-1 正規化値を 0-5 に変換してはならない。元レビューが 0-1 と疑われる場合は `scores: null` にして finding に残す。
 4. High / Medium finding には、散文内にある根拠テキストを `evidence` として入れる。根拠が無い指摘を High / Medium に昇格しない。
-5. 全 4 軸が同点の場合、元レビューに自己警告や理由が無ければ `same_score_note` を追加しない。`aggregate-reviews` に reject させる。
-6. 採点、平均、合意度、合否判定、rubric cap の適用は `aggregate-reviews` に任せる。
+5. 全 4 軸が同点の場合、元レビューに自己警告や理由が無ければ `same_score_note` を追加しない。native import/finalize 経路に reject させる。
+6. 採点、平均、合意度、合否判定、rubric cap の適用は `review-finalize` に任せる。
 
 ## 出力形式
 
@@ -76,4 +76,4 @@ allowed-tools: Read, Grep, Glob
 - reviewer の散文に無い evidence を作る
 - `mission-state.py` を呼ぶ
 - JSON ファイルを書き込む
-- `aggregate-reviews` の reject を避けるために不確かな scores や `same_score_note` を補う
+- native import/finalize の reject を避けるために不確かな scores や `same_score_note` を補う

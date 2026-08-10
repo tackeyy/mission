@@ -33,11 +33,15 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py set iteration=
 # strict 検証: 未知キー reject / 全 items <= 1.0 (0-1 正規化疑い) reject / 範囲外 reject。
 # evidence は archive/iter-N-<mission8>-scoring.json に _meta 付きで自動保存され、
 # score_history entry に score_source="scoring-json" と scoring_evidence_path が記録される。
-# Phase 5 transactional (#283, 推奨): aggregate-reviews → push-score を 1 コマンドで実行。
+# Phase 5 native import/finalize (#283, 推奨)。reviewer JSON ごとに次を実行し、
+# 返却 JSON の review_evidence_ref.path を保持する。
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py review-import --iteration <N> --stdin
+
+# 全 reviewer の返却 path を --input-ref として渡し、集計と score 記録を 1 コマンドで実行。
 # validator は分割実行と同一 (min-reviewers / strict review 検証 / findings gate / #122 再 push 保護)。
 # 集計が exit 非0 なら score は push されない (atomic)。--reviewer-window は #282 の並列観測。
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py review-finalize \
-    --iteration <N> --input a.json --input b.json --min-reviewers <N> \
+    --iteration <N> --input-ref <review_evidence_ref.path> --input-ref <review_evidence_ref.path> --min-reviewers <N> \
     --reviewer-window "A=<start_iso>..<end_iso>" --reviewer-window "B=<start_iso>..<end_iso>"
 
 # artifact_path 指定時の WARN-only lint は state・evidence・JSON 結果に
