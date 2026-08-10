@@ -8162,6 +8162,84 @@ def _review_prose_bytes(text: str) -> int:
 
 
 MAX_REVIEW_INPUT_BYTES = 4 * 1024 * 1024
+COMMAND_OUTCOME_KINDS = frozenset({"ok", "expected-gate", "invalid-input", "external", "internal-error"})
+COMMAND_OUTCOME_LIMIT = 128
+_OUTCOME_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
+
+
+def _command_outcome(args: argparse.Namespace, command: str, outcome_kind: str) -> dict:
+    """Build bounded, locator-free command lineage for state and JSON consumers."""
+    if outcome_kind not in COMMAND_OUTCOME_KINDS:
+        raise ValueError("command outcome kind is invalid")
+    provided_event = getattr(args, "event_id", None)
+    event_id = provided_event if isinstance(provided_event, str) and _OUTCOME_ID_RE.fullmatch(provided_event) else secrets.token_hex(16)
+    provided_root = getattr(args, "root_event_id", None)
+    root_event_id = provided_root if isinstance(provided_root, str) and _OUTCOME_ID_RE.fullmatch(provided_root) else event_id
+    attempt = getattr(args, "attempt", 1)
+    if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+        attempt = 1
+    outcome = {
+        "event_id": event_id,
+        "root_event_id": root_event_id,
+        "attempt": attempt,
+        "command": command,
+        "outcome_kind": outcome_kind,
+    }
+    retry_of = getattr(args, "retry_of", None)
+    if isinstance(retry_of, str) and _OUTCOME_ID_RE.fullmatch(retry_of):
+        outcome["retry_of"] = retry_of
+    return outcome
+
+
+def _append_command_outcome(data: dict, outcome: dict) -> None:
+    """Keep command classification bounded; business writes call this under their lock."""
+    prior = data.get("command_outcomes")
+    records = prior if isinstance(prior, list) else []
+    sanitized = [item for item in records if isinstance(item, dict)]
+    data["command_outcomes"] = (sanitized + [outcome])[-COMMAND_OUTCOME_LIMIT:]
+
+
+def _add_command_lineage_arguments(parser: argparse.ArgumentParser) -> None:
+    """Expose retry lineage without accepting prompts, paths, or other raw input."""
+    parser.add_argument("--event-id", default=None, help="opaque command event identifier")
+    parser.add_argument("--root-event-id", default=None, help="opaque root event identifier")
+    parser.add_argument("--attempt", type=int, default=1, help="positive retry attempt number")
+    parser.add_argument("--retry-of", default=None, help="opaque prior event identifier")
+
+
+def _record_command_outcome_only(cwd: Path, outcome: dict) -> None:
+    """Persist a bounded failure classification without touching state bytes.
+
+    This is a materialized telemetry view, not the lifecycle journal reserved
+    for later work.  Its schema is deliberately small and contains only the
+    opaque command lineage produced above.
+    """
+    session_token = hashlib.sha256(resolve_session_id().encode("utf-8")).hexdigest()[:16]
+    directory = state_dir(cwd) / "telemetry" / "command-outcomes"
+    path = directory / f"{session_token}.json"
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        with StateLock(path.with_suffix(".lock")):
+            if path.exists():
+                document = json.loads(path.read_text(encoding="utf-8"))
+            else:
+                document = {"schema": "mission-command-outcomes/1", "records": []}
+            records = document.get("records") if isinstance(document, dict) else None
+            if not isinstance(records, list):
+                raise ValueError("command telemetry sidecar is invalid")
+            document = {
+                "schema": "mission-command-outcomes/1",
+                "records": ([item for item in records if isinstance(item, dict)] + [outcome])[-COMMAND_OUTCOME_LIMIT:],
+            }
+            atomic_write_json(path, document, administrative=True)
+    except (OSError, ValueError, json.JSONDecodeError):
+        # A rejection must retain its legacy exit/stderr behavior even if audit storage is unavailable.
+        return
+
+
+def _emit_json_command_failure(args: argparse.Namespace, outcome: dict) -> None:
+    if getattr(args, "json", False):
+        print(json.dumps({"ok": False, "outcome_kind": outcome["outcome_kind"], "outcome": outcome}, ensure_ascii=False))
 
 
 def _stat_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
@@ -8444,10 +8522,14 @@ def cmd_review_import(args):
             content = sys.stdin.buffer.read(MAX_REVIEW_INPUT_BYTES + 1)
         review = _parse_strict_review_bytes(content, args.iteration)
     except ValueError as exc:
+        outcome = _command_outcome(args, "review-import", "invalid-input")
+        _record_command_outcome_only(cwd, outcome)
+        print(json.dumps({"ok": False, "outcome_kind": "invalid-input", "outcome": outcome}, ensure_ascii=False))
         print(f"ERROR: review import rejected: {exc}", file=sys.stderr)
         sys.exit(2)
 
     digest = "sha256:" + hashlib.sha256(content).hexdigest()
+    outcome = _command_outcome(args, "review-import", "ok")
     mission8 = "unknown"
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
@@ -8472,10 +8554,16 @@ def cmd_review_import(args):
         records = previous if isinstance(previous, list) else []
         retained = [item for item in records if isinstance(item, dict) and item != reference]
         data["review_evidence_refs"] = (retained + [reference])[-128:]
+        _append_command_outcome(data, outcome)
         data["updated_at"] = iso_now()
         backup_state(sf)
         atomic_write_json(sf, stamp_metadata(data, cwd))
-    print(json.dumps({"ok": True, "review_evidence_ref": reference}, ensure_ascii=False))
+    print(json.dumps({
+        "ok": True,
+        "outcome_kind": "ok",
+        "outcome": outcome,
+        "review_evidence_ref": reference,
+    }, ensure_ascii=False))
 
 
 def _cap_for_findings(findings: list[dict]) -> float | None:
@@ -8760,6 +8848,7 @@ def cmd_aggregate_reviews(args):
     if args.iteration < 1:
         print("ERROR: --iteration は 1 以上で指定してください", file=sys.stderr)
         sys.exit(2)
+    outcome = _command_outcome(args, "aggregate-reviews", "ok")
     try:
         revision_scope = _revision_scope_from_args(args)
         _validate_revision_scope(cwd, revision_scope)
@@ -8899,6 +8988,9 @@ def cmd_aggregate_reviews(args):
         reported_perspectives = {window["perspective"] for window in reviewer_windows}
         missing_perspectives = sorted(valid_perspectives - reported_perspectives)
         if missing_perspectives:
+            gate_outcome = _command_outcome(args, "aggregate-reviews", "expected-gate")
+            _record_command_outcome_only(cwd, gate_outcome)
+            _emit_json_command_failure(args, gate_outcome)
             print(
                 "ERROR: reviewer window の報告が不足しています。"
                 f"不足 perspective: {', '.join(missing_perspectives)}。"
@@ -8966,6 +9058,8 @@ def cmd_aggregate_reviews(args):
             {"iteration": args.iteration, **metric}
             for metric in reviewer_output_metrics
         ]
+        if getattr(args, "record_outcome", True):
+            _append_command_outcome(data, outcome)
         atomic_write_json(sf, data)
         context_mode_expected = _expected_context_mode(data, args.iteration)
         context_manifest_generated = _context_manifest_generated(data, args.iteration)
@@ -9034,6 +9128,8 @@ def cmd_aggregate_reviews(args):
 
     result = {
         "ok": True,
+        "outcome_kind": "ok",
+        "outcome": outcome,
         "out": str(out_path),
         "findings_evidence_path": str(evidence_path),
         "open_high": open_high,
@@ -9343,6 +9439,7 @@ def cmd_review_finalize(args):
     validator (min-reviewers / strict review 検証 / findings gate / #122 再 push 保護) を複製しない。
     集計が exit 非0 なら push-score には到達せず、score_history は不変 (atomic)。
     """
+    outcome = _command_outcome(args, "review-finalize", "ok")
     agg_args = argparse.Namespace(
         iteration=args.iteration,
         input=args.input,
@@ -9353,6 +9450,7 @@ def cmd_review_finalize(args):
         reviewer_windows=args.reviewer_windows,
         base_sha=args.base_sha,
         head_sha=args.head_sha,
+        record_outcome=False,
     )
     agg_stdout = io.StringIO()
     with contextlib.redirect_stdout(agg_stdout):
@@ -9375,8 +9473,17 @@ def cmd_review_finalize(args):
         cmd_push_score(push_args)
     push_result = json.loads(push_stdout.getvalue())
 
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    with StateLock(lock_file(cwd)):
+        data = json.loads(sf.read_text())
+        _append_command_outcome(data, outcome)
+        atomic_write_json(sf, data)
+
     print(json.dumps({
         "ok": True,
+        "outcome_kind": "ok",
+        "outcome": outcome,
         "aggregate": agg_result,
         "push": push_result,
     }, ensure_ascii=False, indent=2))
@@ -11426,6 +11533,7 @@ def _build_parser():
     import_source = p_import.add_mutually_exclusive_group(required=True)
     import_source.add_argument("--input", default=None, help="review JSON の regular file")
     import_source.add_argument("--stdin", action="store_true", help="stdin から review JSON を読む")
+    _add_command_lineage_arguments(p_import)
     p_import.set_defaults(func=cmd_review_import)
 
     p_agg = sub.add_parser("aggregate-reviews", help="#119: mission-review/1 JSON を決定論集計して push-score 互換 scoring JSON を生成")
@@ -11445,6 +11553,7 @@ def _build_parser():
                             "実行時間帯の重なりは evidence に記録 (#350)")
     p_agg.add_argument("--base-sha", default=None, help="exact reviewed git base SHA (requires --head-sha)")
     p_agg.add_argument("--head-sha", default=None, help="exact reviewed git head SHA (requires --base-sha)")
+    _add_command_lineage_arguments(p_agg)
     p_agg.set_defaults(func=cmd_aggregate_reviews)
 
     p_rf = sub.add_parser("review-finalize",
@@ -11466,6 +11575,7 @@ def _build_parser():
                       help="#122: 同一 iteration の再 push 理由")
     p_rf.add_argument("--base-sha", default=None, help="exact reviewed git base SHA")
     p_rf.add_argument("--head-sha", default=None, help="exact reviewed git head SHA")
+    _add_command_lineage_arguments(p_rf)
     p_rf.set_defaults(func=cmd_review_finalize)
 
     p_closeout = sub.add_parser("closeout",

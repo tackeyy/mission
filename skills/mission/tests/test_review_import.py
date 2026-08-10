@@ -35,6 +35,8 @@ def test_review_import_archives_a_strict_review_as_a_typed_reference(state_dir, 
 
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
+    assert payload["outcome_kind"] == "ok"
+    assert payload["outcome"]["event_id"] == payload["outcome"]["root_event_id"]
     ref = payload["review_evidence_ref"]
     assert ref == {
         "kind": "review-input",
@@ -46,6 +48,8 @@ def test_review_import_archives_a_strict_review_as_a_typed_reference(state_dir, 
     }
     assert not ref["path"].startswith("/")
     assert (state_dir.parent / ref["path"]).read_bytes() == content
+    state = json.loads((state_dir / "sessions" / "test.json").read_text(encoding="utf-8"))
+    assert state["command_outcomes"][-1]["outcome_kind"] == "ok"
 
 
 def test_aggregate_reviews_revalidates_an_import_after_its_source_is_removed(state_dir, run_cli, tmp_path):
@@ -66,8 +70,27 @@ def test_aggregate_reviews_revalidates_an_import_after_its_source_is_removed(sta
     )
 
     assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["outcome_kind"] == "ok"
     scoring = json.loads(output.read_text(encoding="utf-8"))
     assert scoring["items"]["mission_achievement"] == 4.5
+
+
+def test_reviewer_window_rejection_is_an_expected_gate_without_state_mutation(state_dir, run_cli, tmp_path):
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    first.write_bytes(_review_bytes(perspective="quality"))
+    second.write_bytes(_review_bytes(perspective="safety"))
+    state_file = state_dir / "sessions" / "test.json"
+    before = state_file.read_bytes()
+
+    result = run_cli(
+        "aggregate-reviews", "--iteration", "1", "--input", str(first), "--input", str(second),
+        "--json", cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 2
+    assert json.loads(result.stdout)["outcome_kind"] == "expected-gate"
+    assert state_file.read_bytes() == before
 
 
 @pytest.mark.parametrize(("content", "case"), [
@@ -90,6 +113,9 @@ def test_review_import_rejects_hostile_input_without_changing_state_or_archives(
     )
 
     assert result.returncode == 2
+    assert json.loads(result.stdout)["outcome_kind"] == "invalid-input"
     assert state_file.read_bytes() == before
+    telemetry = next((state_dir / "telemetry" / "command-outcomes").glob("*.json"))
+    assert json.loads(telemetry.read_text(encoding="utf-8"))["records"][-1]["outcome_kind"] == "invalid-input"
     archive = state_dir / "archive"
     assert not archive.exists() or not list(archive.iterdir())
