@@ -553,7 +553,7 @@ def test_stats_rejects_generation_with_manifest_lineage_omission(tmp_path, run_c
     assert stats_data["completed_pass_rate_denominator"] == 0
 
 
-def test_archive_evidence_is_hashed_once_per_consumer(tmp_path, run_cli, monkeypatch):
+def test_archive_evidence_is_read_once_per_consumer(tmp_path, run_cli, monkeypatch):
     worktree, destination = _make_completed_worktree(tmp_path)
     result = _archive(run_cli, worktree, destination)
     assert result.returncode == 0, result.stderr
@@ -566,25 +566,21 @@ def test_archive_evidence_is_hashed_once_per_consumer(tmp_path, run_cli, monkeyp
 
     audit_mod = _load_audit_module("mission_audit_issue208_hash_once")
     shared = sys.modules["worktree_archive"]
-    shared_hash = shared._sha256
-    audit_hash = audit_mod._file_sha256
     audit_calls = []
 
-    def counted_shared(path):
-        audit_calls.append(path)
-        return shared_hash(path)
+    shared_read = shared._read_generation_file
 
-    def counted_audit(path):
-        audit_calls.append(path)
-        return audit_hash(path)
+    def counted_shared(*args, **kwargs):
+        audit_calls.append(args[1])
+        return shared_read(*args, **kwargs)
 
-    monkeypatch.setattr(shared, "_sha256", counted_shared)
-    monkeypatch.setattr(audit_mod, "_file_sha256", counted_audit)
+    monkeypatch.setattr(shared, "_read_generation_file", counted_shared)
     discovered = []
     records = audit_mod.load_records([destination], discovered)
     audit_mod.collect_invalid_worktree_archives(records, discovered)
     assert len(records) == 1
-    assert len(audit_calls) == evidence_count
+    # current pointer + manifest + each manifest evidence is consumed once.
+    assert len(audit_calls) == evidence_count + 2
 
     state_path = REPO_ROOT / "skills" / "mission" / "bin" / "mission-state.py"
     spec = importlib.util.spec_from_file_location("mission_state_issue208_hash_once", state_path)
@@ -594,13 +590,13 @@ def test_archive_evidence_is_hashed_once_per_consumer(tmp_path, run_cli, monkeyp
     spec.loader.exec_module(state_mod)
     stats_calls = []
 
-    def counted_stats(path):
-        stats_calls.append(path)
-        return shared_hash(path)
+    def counted_stats(*args, **kwargs):
+        stats_calls.append(args[1])
+        return shared_read(*args, **kwargs)
 
-    monkeypatch.setattr(shared, "_sha256", counted_stats)
+    monkeypatch.setattr(shared, "_read_generation_file", counted_stats)
     assert len(state_mod._collect_states(destination)) == 1
-    assert len(stats_calls) == evidence_count
+    assert len(stats_calls) == evidence_count + 2
 
 
 def test_audit_resolves_specialist_evidence_from_generation_manifest_after_source_removal(
@@ -974,6 +970,46 @@ def test_audit_rejects_manifest_lineage_that_disagrees_with_state(tmp_path, run_
     assert data["invalid_worktree_archive_count"] == 1
 
 
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "hardlink-evidence",
+        "symlink-evidence",
+        "oversize-evidence",
+        "fifo-evidence",
+    ],
+)
+def test_audit_rejects_unsafe_generation_evidence_before_consuming_it(tmp_path, run_cli, tamper):
+    """Archive evidence must be read through one no-follow, bounded descriptor."""
+    if tamper == "fifo-evidence" and not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO is not supported")
+    worktree, destination = _make_completed_worktree(tmp_path)
+    result = _archive(run_cli, worktree, destination)
+    assert result.returncode == 0, result.stderr
+    bundle = Path(json.loads(result.stdout)["bundle_path"])
+    generation_root = _active_bundle_root(bundle)
+    manifest = json.loads((generation_root / "manifest.json").read_text(encoding="utf-8"))
+    evidence = next(item for item in manifest["evidence"] if item["evidence_kind"] == "scoring")
+    archived = generation_root / evidence["archive_path"]
+    replacement = archived.with_name(f"{archived.name}.replacement")
+    if tamper == "hardlink-evidence":
+        os.link(archived, replacement)
+    elif tamper == "symlink-evidence":
+        replacement.write_bytes(archived.read_bytes())
+        archived.unlink()
+        archived.symlink_to(replacement)
+    elif tamper == "oversize-evidence":
+        archived.write_bytes(b"x" * (4 * 1024 * 1024 + 1))
+    else:
+        archived.unlink()
+        os.mkfifo(archived)
+
+    data = _run_audit(destination)
+
+    assert data["total_sessions"] == 0
+    assert data["invalid_worktree_archive_count"] == 1
+
+
 def test_audit_validates_manifest_hashes_once_per_record(tmp_path, run_cli, monkeypatch):
     worktree, destination = _make_completed_worktree(tmp_path)
     result = _archive(run_cli, worktree, destination)
@@ -1001,7 +1037,9 @@ def test_audit_validates_manifest_hashes_once_per_record(tmp_path, run_cli, monk
     for _ in range(3):
         assert module.scoring_evidence_paths(record, 2)
 
-    assert hash_count == len(manifest["evidence"])
+    # Generation validation hashes bytes obtained from the no-follow descriptor,
+    # not through the old pathname-opening compatibility helper.
+    assert hash_count == 0
 
 
 def test_audit_record_keeps_discovery_generation_snapshot_when_pointer_advances(tmp_path, run_cli):
