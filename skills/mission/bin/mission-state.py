@@ -992,6 +992,7 @@ def _is_session_state_path(path: Path) -> bool:
 _LEASE_KEYS = (*LEASE_STATE_FIELDS, "lease_history")
 _LEASE_WRITE_REASON: str | None = None
 _PROCESS_LEASE_IDS: dict[str, str] = {}
+_LEASE_DECISION_UNSET = object()
 
 
 @contextlib.contextmanager
@@ -1030,7 +1031,6 @@ def _enforce_session_lease_for_write(path: Path, data: dict) -> LeaseDecision | 
     except LeaseRejectedError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         raise CommandOutcomeExit(2, "expected-gate")
-    _PROCESS_LEASE_IDS[path_key] = decision.lease_id
     for key in _LEASE_KEYS:
         if key in lease_state:
             data[key] = lease_state[key]
@@ -1055,7 +1055,13 @@ def _emit_lease_carrier(data: dict, decision: LeaseDecision | None) -> None:
     )
 
 
-def atomic_write_json(path: Path, data: dict, *, administrative: bool = False) -> None:
+def atomic_write_json(
+    path: Path,
+    data: dict,
+    *,
+    administrative: bool = False,
+    lease_decision: LeaseDecision | None | object = _LEASE_DECISION_UNSET,
+) -> None:
     """Phase B-2: fsync + os.replace で完全な前 or 後状態を保証.
 
     #310: session state 形状の書き込みは既定で `last_activity_at` を刻む (エージェント
@@ -1067,10 +1073,13 @@ def atomic_write_json(path: Path, data: dict, *, administrative: bool = False) -
     """
     if _is_session_state_shape(data):
         _validate_specialist_public_state(data)
-    lease_decision = _enforce_session_lease_for_write(path, data)
+    if lease_decision is _LEASE_DECISION_UNSET:
+        lease_decision = _enforce_session_lease_for_write(path, data)
     if not administrative and _is_session_state_shape(data):
         data["last_activity_at"] = iso_now()
     _atomic_write(path, lambda f: json.dump(data, f, indent=2, ensure_ascii=False))
+    if isinstance(lease_decision, LeaseDecision):
+        _PROCESS_LEASE_IDS[str(path.resolve())] = lease_decision.lease_id
     _emit_lease_carrier(data, lease_decision)
 
 
@@ -8410,7 +8419,9 @@ def _open_review_archive_directory(cwd: Path) -> tuple[int, Path]:
         os.close(root_fd)
 
 
-def _read_review_archive_at(directory_fd: int, name: str) -> bytes | None:
+def _read_review_archive_at(
+    directory_fd: int, name: str,
+) -> tuple[bytes, tuple[int, int, int, int, int, int, int]] | None:
     flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(name, flags, dir_fd=directory_fd)
@@ -8443,7 +8454,7 @@ def _read_review_archive_at(directory_fd: int, name: str) -> bytes | None:
         named_after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
         if _stat_identity(initial) != _stat_identity(after) or _stat_identity(after) != _stat_identity(named_after):
             raise ValueError("review archive evidence changed")
-        return b"".join(chunks)
+        return b"".join(chunks), _stat_identity(after)
     except OSError as exc:
         raise ValueError("review archive evidence is unsafe") from exc
     finally:
@@ -8458,10 +8469,23 @@ def _publish_review_import_evidence(cwd: Path, name: str, content: bytes) -> Pat
     temp_fd: int | None = None
     try:
         _verify_review_archive_directory(directory_fd, archive_path)
-        existing = _read_review_archive_at(directory_fd, name)
-        if existing is not None:
+        existing_entry = _read_review_archive_at(directory_fd, name)
+        if existing_entry is not None:
+            existing, existing_identity = existing_entry
             if existing != content:
                 raise ValueError("immutable review archive collision")
+            _verify_review_archive_directory(directory_fd, archive_path)
+            confirmed_entry = _read_review_archive_at(directory_fd, name)
+            if confirmed_entry is None:
+                raise ValueError("review archive evidence changed")
+            confirmed, confirmed_identity = confirmed_entry
+            if (
+                confirmed != content
+                or confirmed_identity != existing_identity
+                or hashlib.sha256(confirmed).digest() != hashlib.sha256(content).digest()
+            ):
+                raise ValueError("review archive evidence changed")
+            _verify_review_archive_directory(directory_fd, archive_path)
             return archive_path / name
         for _attempt in range(32):
             temporary = f".{name}.{secrets.token_hex(8)}.tmp"
@@ -8726,7 +8750,7 @@ def cmd_review_import(args):
     except ValueError as exc:
         outcome = _command_outcome(args, "review-import", "invalid-input")
         _record_command_outcome_only(cwd, outcome)
-        print(json.dumps({"ok": False, "outcome_kind": "invalid-input", "outcome": outcome}, ensure_ascii=False))
+        _emit_json_command_failure(args, outcome)
         print(f"ERROR: review import rejected: {exc}", file=sys.stderr)
         sys.exit(2)
 
@@ -8735,6 +8759,7 @@ def cmd_review_import(args):
     mission8 = "unknown"
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
+        lease_decision = _enforce_session_lease_for_write(sf, data)
         mission8 = str(data.get("mission_id") or "unknown")[:8]
         archive_name = f"iter-{args.iteration}-{mission8}-review-input-{digest[7:23]}.json"
         try:
@@ -8742,7 +8767,7 @@ def cmd_review_import(args):
         except ValueError as exc:
             failure = _command_outcome(args, "review-import", "invalid-input")
             _record_command_outcome_only(cwd, failure)
-            print(json.dumps({"ok": False, "outcome_kind": "invalid-input", "outcome": failure}, ensure_ascii=False))
+            _emit_json_command_failure(args, failure)
             print(f"ERROR: review import archive rejected: {exc}", file=sys.stderr)
             sys.exit(2)
         reference = {
@@ -8760,7 +8785,9 @@ def cmd_review_import(args):
         _append_command_outcome(data, outcome)
         data["updated_at"] = iso_now()
         backup_state(sf)
-        atomic_write_json(sf, stamp_metadata(data, cwd))
+        atomic_write_json(
+            sf, stamp_metadata(data, cwd), lease_decision=lease_decision,
+        )
     print(json.dumps({
         "ok": True,
         "outcome_kind": "ok",
@@ -11792,7 +11819,9 @@ def _build_parser():
     import_source.add_argument("--input", default=None, help="review JSON の regular file")
     import_source.add_argument("--stdin", action="store_true", help="stdin から review JSON を読む")
     _add_command_lineage_arguments(p_import)
-    p_import.set_defaults(func=cmd_review_import)
+    p_import.set_defaults(
+        func=cmd_review_import, command_outcome_tracking=True, json=True,
+    )
 
     p_agg = sub.add_parser("aggregate-reviews", help="#119: mission-review/1 JSON を決定論集計して push-score 互換 scoring JSON を生成")
     p_agg.add_argument("--iteration", type=int, required=True)

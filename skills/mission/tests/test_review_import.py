@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -403,3 +404,128 @@ def test_review_archive_parent_replacement_before_publish_is_fail_closed(monkeyp
     assert (archive / "sentinel").read_bytes() == b"replacement"
     assert not (archive / "review.json").exists()
     assert not (detached / "review.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("owner", "lease_id"),
+    [("foreign-owner", "foreign-lease"), ("test", "wrong-owner-token")],
+    ids=["foreign-owner", "same-owner-wrong-token"],
+)
+def test_review_import_rejects_lease_before_archive_publish_exactly_once(
+    state_dir, run_cli, tmp_path, owner, lease_id,
+):
+    source = tmp_path / "review.json"
+    source.write_bytes(_review_bytes())
+    archive = state_dir / "archive"
+    archive.mkdir()
+    (archive / "preexisting.bin").write_bytes(b"archive-before")
+    state_file = state_dir / "sessions" / "test.json"
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    state.update({
+        "owner_session_id": owner,
+        "lease_id": lease_id,
+        "fencing_epoch": 3,
+        "lease_expires_at": "2099-01-01T00:00:00Z",
+    })
+    state_file.write_text(json.dumps(state) + "\n", encoding="utf-8")
+    state_before = state_file.read_bytes()
+    score_before = json.dumps(state["score_history"], sort_keys=True)
+    archive_before = _archive_bytes(state_dir)
+
+    result = run_cli(
+        "review-import", "--iteration", "1", "--input", str(source),
+        "--event-id", f"lease-{owner}", cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 2
+    payload = json.loads(result.stdout)
+    assert payload["outcome_kind"] == "expected-gate"
+    assert payload["outcome"]["command"] == "review-import"
+    assert payload["outcome"]["event_id"] == f"lease-{owner}"
+    assert result.stdout.count('"outcome_kind"') == 2  # envelope + one record
+    assert "MISSION_LEASE_CARRIER" not in result.stderr
+    assert state_file.read_bytes() == state_before
+    assert json.dumps(json.loads(state_file.read_text())["score_history"], sort_keys=True) == score_before
+    assert _archive_bytes(state_dir) == archive_before
+    sidecar = next((state_dir / "telemetry" / "command-outcomes").glob("*.json"))
+    assert json.loads(sidecar.read_text(encoding="utf-8"))["records"] == [payload["outcome"]]
+    assert not list(state_dir.rglob(".*.tmp"))
+
+
+def test_existing_review_evidence_parent_swap_is_rejected_before_fast_path_return(
+    monkeypatch, tmp_path,
+):
+    spec = importlib.util.spec_from_file_location(
+        "mission_state_existing_review_archive_swap", MISSION_STATE_PY,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    cwd = tmp_path / "project"
+    archive = cwd / ".mission-state" / "archive"
+    archive.mkdir(parents=True)
+    content = _review_bytes()
+    (archive / "review.json").write_bytes(content)
+    detached = cwd / ".mission-state" / "detached-archive"
+    original_verify = module._verify_review_archive_directory
+    calls = 0
+
+    def swap_existing_parent(directory_fd, named_parent):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            archive.rename(detached)
+            archive.mkdir()
+            (archive / "review.json").write_bytes(content)
+            (archive / "sentinel").write_bytes(b"replacement-parent")
+        return original_verify(directory_fd, named_parent)
+
+    monkeypatch.setattr(
+        module, "_verify_review_archive_directory", swap_existing_parent,
+    )
+    with pytest.raises(ValueError, match="directory changed"):
+        module._publish_review_import_evidence(cwd, "review.json", content)
+
+    assert (archive / "review.json").read_bytes() == content
+    assert (archive / "sentinel").read_bytes() == b"replacement-parent"
+    assert (detached / "review.json").read_bytes() == content
+    assert not list(cwd.rglob(".*.tmp"))
+
+
+def test_review_import_success_reuses_one_lease_decision_and_emits_one_carrier(
+    monkeypatch, capsys, state_dir, tmp_path,
+):
+    spec = importlib.util.spec_from_file_location(
+        "mission_state_review_import_single_lease", MISSION_STATE_PY,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    source = tmp_path / "review.json"
+    source.write_bytes(_review_bytes())
+    monkeypatch.chdir(state_dir.parent)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    original_enforce = module._enforce_session_lease_for_write
+    lease_checks = 0
+
+    def counted_enforce(path, data):
+        nonlocal lease_checks
+        lease_checks += 1
+        return original_enforce(path, data)
+
+    monkeypatch.setattr(module, "_enforce_session_lease_for_write", counted_enforce)
+    module.cmd_review_import(SimpleNamespace(
+        iteration=1, input=str(source), stdin=False, event_id="success-once",
+        root_event_id=None, attempt=1, retry_of=None, json=True,
+    ))
+
+    captured = capsys.readouterr()
+    assert lease_checks == 1
+    assert captured.err.count(module.LEASE_CARRIER_PREFIX) == 1
+    payload = json.loads(captured.out)
+    assert payload["outcome_kind"] == "ok"
+    state = json.loads((state_dir / "sessions" / "test.json").read_text())
+    assert state["owner_session_id"] == "test"
+    assert state["lease_id"] == "test-lease"
+    assert state["fencing_epoch"] == 1
