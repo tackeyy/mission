@@ -193,10 +193,14 @@ def verify_review_input_evidence(
         payload = json.loads(content.decode("utf-8"), object_pairs_hook=_strict_object)
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError("review input evidence is invalid JSON") from exc
+    payload_iteration = payload.get("iteration") if isinstance(payload, dict) else None
     if (
         not isinstance(payload, dict)
         or payload.get("schema") != "mission-review/1"
-        or payload.get("iteration") != iteration
+        or not isinstance(payload_iteration, int)
+        or isinstance(payload_iteration, bool)
+        or payload_iteration < 1
+        or payload_iteration != iteration
         or payload.get("perspective") != perspective
     ):
         raise ValueError("review input evidence identity mismatch")

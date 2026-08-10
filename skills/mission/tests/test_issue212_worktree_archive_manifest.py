@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import worktree_archive
 
 from skills.mission.tests.conftest import canonical_review, write_canonical_review_aggregate
 
@@ -156,12 +157,14 @@ def _archive(run_cli, worktree: Path, destination: Path):
     )
 
 
-def _attach_review_import_reference(worktree: Path) -> tuple[Path, dict, bytes]:
+def _attach_review_import_reference(
+    worktree: Path, *, iteration: int = 2,
+) -> tuple[Path, dict, bytes]:
     content = (
         json.dumps(
             {
                 "schema": "mission-review/1",
-                "iteration": 2,
+                "iteration": iteration,
                 "perspective": "quality",
                 "scores": {
                     "mission_achievement": 4.5,
@@ -182,7 +185,7 @@ def _attach_review_import_reference(worktree: Path) -> tuple[Path, dict, bytes]:
         "path": str(evidence.relative_to(worktree)),
         "digest": "sha256:" + hashlib.sha256(content).hexdigest(),
         "size": len(content),
-        "iteration": 2,
+        "iteration": iteration,
         "perspective": "quality",
     }
     state_file = worktree / ".mission-state" / "sessions" / f"{SESSION_ID}.json"
@@ -216,6 +219,94 @@ def test_archive_writer_rejects_unbound_review_input_evidence(
     assert not list((destination / ".mission-state" / "archive").glob("worktree-*"))
 
 
+INVALID_REVIEW_ITERATIONS = [True, False, 0, -1, 1.0, "1", None]
+
+
+@pytest.mark.parametrize(
+    ("target", "field", "value"),
+    [
+        ("reference", "size", True),
+        ("reference", "perspective", True),
+        ("document", "schema", True),
+        ("document", "perspective", True),
+    ],
+    ids=("reference-size-bool", "reference-perspective-bool", "document-schema-bool", "document-perspective-bool"),
+)
+def test_shared_review_input_verifier_rejects_bool_type_confusion(target, field, value):
+    content = (
+        json.dumps(
+            {"schema": "mission-review/1", "iteration": 1, "perspective": "quality"}
+        )
+        + "\n"
+    ).encode("utf-8")
+    reference = {
+        "kind": "review-input",
+        "path": ".mission-state/archive/review.json",
+        "digest": "sha256:" + hashlib.sha256(content).hexdigest(),
+        "size": len(content),
+        "iteration": 1,
+        "perspective": "quality",
+    }
+    if target == "reference":
+        reference[field] = value
+    else:
+        document = json.loads(content)
+        document[field] = value
+        content = (json.dumps(document) + "\n").encode("utf-8")
+        reference.update(
+            {
+                "digest": "sha256:" + hashlib.sha256(content).hexdigest(),
+                "size": len(content),
+            }
+        )
+
+    with pytest.raises(ValueError):
+        worktree_archive.verify_review_input_evidence(reference, content)
+
+
+@pytest.mark.parametrize("invalid_iteration", INVALID_REVIEW_ITERATIONS, ids=repr)
+def test_archive_writer_rejects_invalid_review_document_iteration(
+    tmp_path, run_cli, invalid_iteration,
+):
+    worktree, destination = _make_completed_worktree(tmp_path)
+    evidence, _reference, content = _attach_review_import_reference(worktree, iteration=1)
+    document = json.loads(content)
+    document["iteration"] = invalid_iteration
+    changed = (json.dumps(document, ensure_ascii=False) + "\n").encode("utf-8")
+    evidence.write_bytes(changed)
+    state_file = worktree / ".mission-state" / "sessions" / f"{SESSION_ID}.json"
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    state["review_evidence_refs"][0].update(
+        {
+            "digest": "sha256:" + hashlib.sha256(changed).hexdigest(),
+            "size": len(changed),
+        }
+    )
+    state_file.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+    result = _archive(run_cli, worktree, destination)
+
+    assert result.returncode == 2
+    assert not list((destination / ".mission-state" / "archive").glob("worktree-*"))
+
+
+@pytest.mark.parametrize("invalid_iteration", INVALID_REVIEW_ITERATIONS, ids=repr)
+def test_archive_writer_rejects_invalid_review_reference_iteration(
+    tmp_path, run_cli, invalid_iteration,
+):
+    worktree, destination = _make_completed_worktree(tmp_path)
+    _evidence, _reference, _content = _attach_review_import_reference(worktree, iteration=1)
+    state_file = worktree / ".mission-state" / "sessions" / f"{SESSION_ID}.json"
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    state["review_evidence_refs"][0]["iteration"] = invalid_iteration
+    state_file.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+    result = _archive(run_cli, worktree, destination)
+
+    assert result.returncode == 2
+    assert not list((destination / ".mission-state" / "archive").glob("worktree-*"))
+
+
 def test_archive_validator_rejects_resigned_review_copy_that_disagrees_with_state_ref(
     tmp_path, run_cli,
 ):
@@ -246,6 +337,72 @@ def test_archive_validator_rejects_resigned_review_copy_that_disagrees_with_stat
         + "\n",
         encoding="utf-8",
     )
+
+    data = _run_audit(destination)
+
+    assert data["total_sessions"] == 0
+    assert data["invalid_worktree_archive_count"] == 1
+
+
+@pytest.mark.parametrize("invalid_iteration", INVALID_REVIEW_ITERATIONS, ids=repr)
+def test_archive_validator_rejects_resigned_invalid_review_document_iteration(
+    tmp_path, run_cli, invalid_iteration,
+):
+    worktree, destination = _make_completed_worktree(tmp_path)
+    _attach_review_import_reference(worktree, iteration=1)
+    result = _archive(run_cli, worktree, destination)
+    assert result.returncode == 0, result.stderr
+    bundle = Path(json.loads(result.stdout)["bundle_path"])
+    generation_root = _active_bundle_root(bundle)
+    manifest_path = generation_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    item = next(entry for entry in manifest["evidence"] if entry["evidence_kind"] == "review-input")
+    archived = generation_root / item["archive_path"]
+    document = json.loads(archived.read_bytes())
+    document["iteration"] = invalid_iteration
+    archived.write_text(json.dumps(document) + "\n", encoding="utf-8")
+    item["sha256"] = _sha256(archived)
+    item["size"] = archived.stat().st_size
+    state_item = next(entry for entry in manifest["evidence"] if entry["evidence_kind"] == "state")
+    archived_state = generation_root / state_item["archive_path"]
+    state = json.loads(archived_state.read_text(encoding="utf-8"))
+    state["review_evidence_refs"][0].update(
+        {
+            "digest": "sha256:" + item["sha256"],
+            "size": item["size"],
+        }
+    )
+    archived_state.write_text(json.dumps(state) + "\n", encoding="utf-8")
+    state_item["sha256"] = _sha256(archived_state)
+    state_item["size"] = archived_state.stat().st_size
+    _republish_generation(bundle, generation_root, manifest)
+
+    data = _run_audit(destination)
+
+    assert data["total_sessions"] == 0
+    assert data["invalid_worktree_archive_count"] == 1
+
+
+@pytest.mark.parametrize("invalid_iteration", INVALID_REVIEW_ITERATIONS, ids=repr)
+def test_archive_validator_rejects_resigned_invalid_review_reference_iteration(
+    tmp_path, run_cli, invalid_iteration,
+):
+    worktree, destination = _make_completed_worktree(tmp_path)
+    _attach_review_import_reference(worktree, iteration=1)
+    result = _archive(run_cli, worktree, destination)
+    assert result.returncode == 0, result.stderr
+    bundle = Path(json.loads(result.stdout)["bundle_path"])
+    generation_root = _active_bundle_root(bundle)
+    manifest_path = generation_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    item = next(entry for entry in manifest["evidence"] if entry["evidence_kind"] == "state")
+    archived = generation_root / item["archive_path"]
+    state = json.loads(archived.read_text(encoding="utf-8"))
+    state["review_evidence_refs"][0]["iteration"] = invalid_iteration
+    archived.write_text(json.dumps(state) + "\n", encoding="utf-8")
+    item["sha256"] = _sha256(archived)
+    item["size"] = archived.stat().st_size
+    _republish_generation(bundle, generation_root, manifest)
 
     data = _run_audit(destination)
 
@@ -380,6 +537,24 @@ def _rewrite_manifest_digest(manifest_path: Path, manifest: dict) -> None:
         json.dumps(core, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+
+def _republish_generation(bundle: Path, generation_root: Path, manifest: dict) -> Path:
+    manifest_path = generation_root / "manifest.json"
+    _rewrite_manifest_digest(manifest_path, manifest)
+    replacement = generation_root.with_name(manifest["content_digest"])
+    generation_root.replace(replacement)
+    (bundle / "current.json").write_text(
+        json.dumps(
+            {
+                "schema": "mission-worktree-current/1",
+                "generation": manifest["content_digest"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return replacement
 
 
 def _move_scoring_to_manifest_only_path(bundle: Path) -> Path:
