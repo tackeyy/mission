@@ -152,7 +152,7 @@ def test_sidecar_cap_and_atomic_publish_leave_no_temp_files(state_dir):
     assert not list(directory.glob(".*.tmp"))
 
 
-@pytest.mark.parametrize("mode", ["symlink", "hardlink", "oversize"])
+@pytest.mark.parametrize("mode", ["symlink", "hardlink", "fifo", "oversize", "corrupt"])
 def test_sidecar_hostile_files_fail_closed(mode, state_dir, tmp_path):
     token = hashlib.sha256(b"test").hexdigest()[:16]
     directory = state_dir / "telemetry" / "command-outcomes"
@@ -166,6 +166,12 @@ def test_sidecar_hostile_files_fail_closed(mode, state_dir, tmp_path):
         target = tmp_path / "target.json"
         target.write_text("{}", encoding="utf-8")
         sidecar.hardlink_to(target)
+    elif mode == "fifo":
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.unlink(missing_ok=True)
+        command_outcomes.os.mkfifo(sidecar)
+    elif mode == "corrupt":
+        sidecar.write_text("not-json", encoding="utf-8")
     else:
         sidecar.write_bytes(b"x" * (256 * 1024 + 1))
     with pytest.raises(OutcomeStoreError):
@@ -200,6 +206,9 @@ def test_sidecar_unsafe_symlink_ancestor_is_rejected_without_external_writes(sta
         append_sidecar(state_dir, token, _outcome(1))
 
     assert not list(external.rglob("*"))
+    records, invalid, corrupt = command_outcomes.iter_records({}, state_dir, token)
+    assert (records, invalid, corrupt) == ([], 0, 1)
+    assert not list(external.rglob("*"))
 
 
 def test_lock_same_name_replacement_after_open_is_rejected(monkeypatch, state_dir):
@@ -222,3 +231,67 @@ def test_lock_same_name_replacement_after_open_is_rejected(monkeypatch, state_di
         with command_outcomes._Lock(lock):
             pass
     assert lock.read_bytes() == b"replacement"
+
+
+def test_sidecar_parent_replacement_after_lock_fails_before_publish(
+    monkeypatch, state_dir,
+):
+    token = hashlib.sha256(b"test").hexdigest()[:16]
+    directory = state_dir / "telemetry" / "command-outcomes"
+    directory.mkdir(parents=True)
+    detached = state_dir / "telemetry" / "detached-command-outcomes"
+    original_verify = getattr(command_outcomes, "_verify_directory_identity", None)
+    verification_count = 0
+
+    def replace_parent_after_lock(directory_fd, named_parent):
+        nonlocal verification_count
+        verification_count += 1
+        if verification_count == 2:
+            directory.rename(detached)
+            directory.mkdir()
+            (directory / "sentinel").write_bytes(b"replacement-directory")
+        if original_verify is not None:
+            return original_verify(directory_fd, named_parent)
+        return None
+
+    monkeypatch.setattr(
+        command_outcomes, "_verify_directory_identity", replace_parent_after_lock,
+        raising=False,
+    )
+
+    with pytest.raises(OutcomeStoreError, match="directory changed"):
+        append_sidecar(state_dir, token, _outcome(1))
+
+    assert (directory / "sentinel").read_bytes() == b"replacement-directory"
+    assert not (directory / f"{token}.json").exists()
+    assert not (detached / f"{token}.json").exists()
+
+
+@pytest.mark.parametrize("mode", ["symlink", "hardlink", "fifo", "oversize", "corrupt"])
+def test_iter_records_rejects_hostile_sidecars_without_touching_targets(
+    mode, state_dir, tmp_path,
+):
+    token = hashlib.sha256(b"test").hexdigest()[:16]
+    directory = state_dir / "telemetry" / "command-outcomes"
+    directory.mkdir(parents=True)
+    sidecar = directory / f"{token}.json"
+    target = tmp_path / "external.json"
+    original = b"external-must-not-change"
+    target.write_bytes(original)
+    if mode == "symlink":
+        sidecar.symlink_to(target)
+    elif mode == "hardlink":
+        sidecar.hardlink_to(target)
+    elif mode == "fifo":
+        command_outcomes.os.mkfifo(sidecar)
+    elif mode == "oversize":
+        sidecar.write_bytes(b"x" * (256 * 1024 + 1))
+    else:
+        sidecar.write_text("not-json", encoding="utf-8")
+
+    records, invalid, corrupt = command_outcomes.iter_records({}, state_dir, token)
+
+    assert records == []
+    assert invalid == 0
+    assert corrupt == 1
+    assert target.read_bytes() == original

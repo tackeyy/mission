@@ -11,8 +11,8 @@ import fcntl
 import json
 import os
 import re
+import secrets
 import stat
-import tempfile
 import time
 from collections import Counter
 from pathlib import Path
@@ -33,7 +33,33 @@ def _directory_flags() -> int:
     return os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 
 
-def _open_sidecar_directory(state_directory: Path) -> int:
+def _same_identity(first: os.stat_result, second: os.stat_result) -> bool:
+    return (
+        first.st_dev == second.st_dev
+        and first.st_ino == second.st_ino
+        and first.st_mode == second.st_mode
+        and first.st_nlink == second.st_nlink
+    )
+
+
+def _verify_directory_identity(directory_fd: int, named_parent: Path) -> None:
+    """Prove that a held directory descriptor is still the named sidecar parent."""
+    try:
+        opened = os.fstat(directory_fd)
+        named = named_parent.lstat()
+    except OSError as exc:
+        raise OutcomeStoreError("command outcome telemetry directory changed") from exc
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or not stat.S_ISDIR(named.st_mode)
+        or opened.st_dev != named.st_dev
+        or opened.st_ino != named.st_ino
+        or opened.st_mode != named.st_mode
+    ):
+        raise OutcomeStoreError("command outcome telemetry directory changed")
+
+
+def _open_sidecar_directory(state_directory: Path, *, create: bool = True) -> int | None:
     """Create/open telemetry descendants through a no-follow descriptor chain."""
     try:
         current_fd = os.open(os.fspath(state_directory), _directory_flags())
@@ -44,6 +70,9 @@ def _open_sidecar_directory(state_directory: Path) -> int:
             try:
                 next_fd = os.open(name, _directory_flags(), dir_fd=current_fd)
             except FileNotFoundError:
+                if not create:
+                    os.close(current_fd)
+                    return None
                 try:
                     os.mkdir(name, 0o700, dir_fd=current_fd)
                     next_fd = os.open(name, _directory_flags(), dir_fd=current_fd)
@@ -129,28 +158,39 @@ def _safe_sidecar(directory: Path, sid_token: str) -> Path:
     return path
 
 
-def _read_regular(path: Path) -> bytes:
+def _read_regular_at(directory_fd: int, name: str, *, missing_ok: bool = False) -> bytes | None:
+    """Read one bounded sidecar through the already-verified parent descriptor."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
-        metadata = path.lstat()
-    except OSError as exc:
-        raise OutcomeStoreError("command outcome telemetry is unavailable") from exc
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-        raise OutcomeStoreError("command outcome telemetry is unsafe")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        fd = os.open(os.fspath(path), flags)
+        fd = os.open(name, flags, dir_fd=directory_fd)
+    except FileNotFoundError:
+        if missing_ok:
+            return None
+        raise OutcomeStoreError("command outcome telemetry is unavailable")
     except OSError as exc:
         raise OutcomeStoreError("command outcome telemetry is unavailable") from exc
     try:
         opened = os.fstat(fd)
         if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1 or opened.st_size > 256 * 1024:
             raise OutcomeStoreError("command outcome telemetry is unsafe")
-        content = os.read(fd, opened.st_size + 1)
-        if len(content) != opened.st_size or os.fstat(fd).st_ino != opened.st_ino:
+        named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if not _same_identity(opened, named):
             raise OutcomeStoreError("command outcome telemetry changed while being read")
-        if path.lstat().st_ino != opened.st_ino:
+        chunks: list[bytes] = []
+        remaining = opened.st_size
+        while remaining:
+            chunk = os.read(fd, min(remaining, 64 * 1024))
+            if not chunk:
+                raise OutcomeStoreError("command outcome telemetry changed while being read")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(fd, 1):
             raise OutcomeStoreError("command outcome telemetry changed while being read")
-        return content
+        after = os.fstat(fd)
+        named_after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if not _same_identity(opened, after) or not _same_identity(after, named_after):
+            raise OutcomeStoreError("command outcome telemetry changed while being read")
+        return b"".join(chunks)
     except OSError as exc:
         raise OutcomeStoreError("command outcome telemetry is unavailable") from exc
     finally:
@@ -181,12 +221,7 @@ class _Lock:
 
     @staticmethod
     def _same_identity(first: os.stat_result, second: os.stat_result) -> bool:
-        return (
-            first.st_dev == second.st_dev
-            and first.st_ino == second.st_ino
-            and first.st_mode == second.st_mode
-            and first.st_nlink == second.st_nlink
-        )
+        return _same_identity(first, second)
 
     def __enter__(self):
         if self.parent_fd is None:
@@ -246,17 +281,66 @@ class _Lock:
         self._close()
 
 
-def _atomic_json(path: Path, document: dict[str, Any]) -> None:
-    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-    temporary = Path(name)
+def _atomic_json_at(
+    directory_fd: int, name: str, document: dict[str, Any], named_parent: Path,
+) -> None:
+    """Publish JSON atomically without resolving the sidecar parent pathname."""
+    payload = json.dumps(
+        document, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    temporary = ""
+    fd: int | None = None
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(document, handle, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            handle.flush(); os.fsync(handle.fileno())
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, path)
+        for _attempt in range(32):
+            temporary = f".{name}.{secrets.token_hex(8)}.tmp"
+            try:
+                fd = os.open(
+                    temporary,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=directory_fd,
+                )
+                break
+            except FileExistsError:
+                continue
+        if fd is None:
+            raise OutcomeStoreError("command outcome telemetry temporary file is unavailable")
+        initial = os.fstat(fd)
+        if (
+            not stat.S_ISREG(initial.st_mode)
+            or initial.st_nlink != 1
+            or stat.S_IMODE(initial.st_mode) != 0o600
+        ):
+            raise OutcomeStoreError("command outcome telemetry temporary file is unsafe")
+        offset = 0
+        while offset < len(payload):
+            written = os.write(fd, payload[offset:])
+            if written <= 0:
+                raise OutcomeStoreError("command outcome telemetry write failed")
+            offset += written
+        os.fsync(fd)
+        current = os.fstat(fd)
+        named = os.stat(temporary, dir_fd=directory_fd, follow_symlinks=False)
+        if current.st_size != len(payload) or not _same_identity(initial, current) or not _same_identity(current, named):
+            raise OutcomeStoreError("command outcome telemetry temporary file changed")
+        _verify_directory_identity(directory_fd, named_parent)
+        os.replace(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        temporary = ""
+        published = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if not _same_identity(current, published):
+            raise OutcomeStoreError("command outcome telemetry publish changed")
+        _verify_directory_identity(directory_fd, named_parent)
+        os.fsync(directory_fd)
+    except OSError as exc:
+        raise OutcomeStoreError("command outcome telemetry publish failed") from exc
     finally:
-        temporary.unlink(missing_ok=True)
+        if fd is not None:
+            os.close(fd)
+        if temporary:
+            try:
+                os.unlink(temporary, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
 
 
 def append_sidecar(state_directory: Path, sid_token: str, record: dict[str, Any]) -> None:
@@ -266,10 +350,19 @@ def append_sidecar(state_directory: Path, sid_token: str, record: dict[str, Any]
         raise OutcomeStoreError("command outcome record is invalid")
     path = _safe_sidecar(state_directory, sid_token)
     directory_fd = _open_sidecar_directory(state_directory)
+    if directory_fd is None:  # create=True always yields a descriptor or raises.
+        raise OutcomeStoreError("command outcome telemetry directory is unavailable")
     try:
+        _verify_directory_identity(directory_fd, path.parent)
         with _Lock(path.with_suffix(".lock"), parent_fd=directory_fd):
-            records = _decode_document(_read_regular(path)) if path.exists() else []
-            _atomic_json(path, {"schema": SCHEMA, "records": (records + [validated])[-LIMIT:]})
+            _verify_directory_identity(directory_fd, path.parent)
+            payload = _read_regular_at(directory_fd, path.name, missing_ok=True)
+            records = _decode_document(payload) if payload is not None else []
+            _atomic_json_at(
+                directory_fd, path.name,
+                {"schema": SCHEMA, "records": (records + [validated])[-LIMIT:]},
+                path.parent,
+            )
     finally:
         os.close(directory_fd)
 
@@ -292,11 +385,20 @@ def iter_records(state: dict[str, Any], state_directory: Path, sid_token: str) -
                 if normalized is None: invalid += 1
                 else: records.append(normalized)
     corrupt = 0
+    directory_fd: int | None = None
     try:
         path = _safe_sidecar(state_directory, sid_token)
-        if path.exists(): records.extend(_decode_document(_read_regular(path)))
+        directory_fd = _open_sidecar_directory(state_directory, create=False)
+        if directory_fd is not None:
+            _verify_directory_identity(directory_fd, path.parent)
+            payload = _read_regular_at(directory_fd, path.name, missing_ok=True)
+            if payload is not None:
+                records.extend(_decode_document(payload))
     except OutcomeStoreError:
         corrupt = 1
+    finally:
+        if directory_fd is not None:
+            os.close(directory_fd)
     return records, invalid, corrupt
 
 
