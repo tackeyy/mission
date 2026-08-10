@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from mission_common import parse_iso_datetime, state_identity
+from worktree_archive import worktree_archive_lineage_references
 
 
 SNAPSHOT_SCHEMA = "mission-state-snapshot/1"
@@ -194,71 +195,10 @@ def _normalized_state_reference(value: Any) -> str | None:
 def _expected_archive_lineage(
     state: dict[str, Any], state_path: Path
 ) -> Counter[tuple[str, int, str]] | None:
-    iteration = state.get("iteration")
-    if not isinstance(iteration, int) or isinstance(iteration, bool):
-        return None
-    expected: Counter[tuple[str, int, str]] = Counter()
-
-    def add(kind: str, item_iteration: Any, reference: Any) -> bool:
-        normalized = _normalized_state_reference(reference)
-        if (
-            not isinstance(item_iteration, int)
-            or isinstance(item_iteration, bool)
-            or normalized is None
-        ):
-            return False
-        expected[(kind, item_iteration, normalized)] += 1
-        return True
-
-    if not add("state", iteration, f".mission-state/sessions/{state_path.name}"):
-        return None
-    if state.get("assumptions_path") and not add(
-        "assumptions", iteration, state.get("assumptions_path")
-    ):
-        return None
-    artifact = state.get("artifact") if isinstance(state.get("artifact"), dict) else {}
-    if artifact.get("path") and not add("artifact", iteration, artifact.get("path")):
-        return None
-    score_history = state.get("score_history") or []
-    if not isinstance(score_history, list):
-        return None
-    for entry in score_history:
-        if not isinstance(entry, dict):
-            continue
-        item_iteration = entry.get("iteration")
-        if entry.get("scoring_evidence_path") and not add(
-            "scoring", item_iteration, entry.get("scoring_evidence_path")
-        ):
-            return None
-        if entry.get("findings_evidence_path") and not add(
-            "reviews", item_iteration, entry.get("findings_evidence_path")
-        ):
-            return None
-    invocations = state.get("specialist_invocations") or []
-    if not isinstance(invocations, list):
-        return None
-    for invocation in invocations:
-        if not isinstance(invocation, dict) or not invocation.get("evidence_path"):
-            continue
-        item_iteration = invocation.get("iteration")
-        if (
-            not isinstance(item_iteration, int)
-            or isinstance(item_iteration, bool)
-            or item_iteration < 0
-        ):
-            item_iteration = iteration
-        if not add("specialist", item_iteration, invocation.get("evidence_path")):
-            return None
-    progress = state.get("progress") if isinstance(state.get("progress"), dict) else {}
-    if progress.get("evidence_path") and not add(
-        "progress", iteration, progress.get("evidence_path")
-    ):
-        return None
-    if progress.get("artifact_path") and not add(
-        "progress-artifact", iteration, progress.get("artifact_path")
-    ):
-        return None
-    return expected
+    references = worktree_archive_lineage_references(
+        state, f".mission-state/sessions/{state_path.name}"
+    )
+    return Counter(references) if references is not None else None
 
 
 def _is_sha256(value: Any) -> bool:
