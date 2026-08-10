@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+from skills.mission.tests.conftest import canonical_review, write_canonical_review_aggregate
+
 
 ITEMS = {
     "mission_achievement": 4.5,
@@ -13,37 +15,36 @@ ITEMS = {
 }
 
 
-def _write_evidence(state_dir):
-    path = state_dir / "archive" / "iter-1-abc12345-reviews.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
-        "schema": "mission-review-aggregate/1",
-        "iteration": 1,
-        "inputs": [{"findings": []}],
-        "open_high": 0,
-    }), encoding="utf-8")
-    return path
+def _write_evidence(state_dir, *, delta):
+    reviewer_a = dict(ITEMS, mission_achievement=5.0)
+    reviewer_b = dict(ITEMS, mission_achievement=5.0 - delta)
+    return write_canonical_review_aggregate(
+        state_dir.parent,
+        [
+            canonical_review(reviewer_a, perspective="A"),
+            canonical_review(reviewer_b, perspective="B"),
+        ],
+        name_prefix="review-agreement",
+    )
 
 
-def _write_scoring(tmp_path, evidence_path, *, delta, review_agreement=3.0):
+def _write_scoring(tmp_path, evidence):
+    evidence_path, ref, claim = evidence
     payload = {
-        "items": ITEMS,
-        "open_high": 0,
+        "items": claim["items"],
+        "open_high": claim["open_high"],
         "findings_evidence_path": str(evidence_path),
-        "review_agreement": review_agreement,
-        "agreement_detail": {
-            "mission_achievement": {"min": 3.0, "max": 3.0 + delta, "delta": delta},
-            "accuracy": {"min": 4.0, "max": 4.0, "delta": 0.0},
-            "completeness": {"min": 4.0, "max": 4.0, "delta": 0.0},
-            "usability": {"min": 4.0, "max": 4.0, "delta": 0.0},
-        },
+        "review_agreement": claim["review_agreement"],
+        "agreement_detail": claim["agreement_detail"],
     }
+    payload["score_provenance"] = {"score_source": "scoring-json", "review_evidence_ref": ref,
+                                   "revision_scope": ref["revision_scope"]}
     path = tmp_path / "scoring.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path
 
 
-def test_aggregate_reviews_outputs_four_axis_items_and_independent_agreement(state_dir, run_cli, tmp_path):
+def test_aggregate_reviews_outputs_derived_consensus_and_independent_agreement(state_dir, run_cli, tmp_path):
     a = tmp_path / "a.json"
     b = tmp_path / "b.json"
     base = {
@@ -66,12 +67,13 @@ def test_aggregate_reviews_outputs_four_axis_items_and_independent_agreement(sta
     payload = json.loads(out.read_text())
     assert set(payload["items"]) == {"mission_achievement", "accuracy", "completeness", "usability"}
     assert payload["review_agreement"] == 4.0
+    assert payload["review_agreement"] == 4.0
     assert payload["agreement_detail"]["mission_achievement"]["delta"] == 1.0
 
 
 def test_push_score_records_review_agreement_independently(state_dir, run_cli, read_state, tmp_path):
-    evidence = _write_evidence(state_dir)
-    scoring = _write_scoring(tmp_path, evidence, delta=1.0, review_agreement=4.0)
+    evidence = _write_evidence(state_dir, delta=1.0)
+    scoring = _write_scoring(tmp_path, evidence)
 
     run_cli("push-score", "--iteration", "1", "--scoring-json", str(scoring), cwd=state_dir.parent, check=True)
 
@@ -83,8 +85,8 @@ def test_push_score_records_review_agreement_independently(state_dir, run_cli, r
 
 
 def test_mark_passes_rejects_max_delta_above_1_5(state_dir, run_cli, read_state, tmp_path):
-    evidence = _write_evidence(state_dir)
-    scoring = _write_scoring(tmp_path, evidence, delta=1.6, review_agreement=2.0)
+    evidence = _write_evidence(state_dir, delta=1.6)
+    scoring = _write_scoring(tmp_path, evidence)
     run_cli("push-score", "--iteration", "1", "--scoring-json", str(scoring), cwd=state_dir.parent, check=True)
 
     r = run_cli("mark-passes", cwd=state_dir.parent)
@@ -96,8 +98,8 @@ def test_mark_passes_rejects_max_delta_above_1_5(state_dir, run_cli, read_state,
 
 
 def test_mark_passes_warns_for_delta_above_1_0_and_passes(state_dir, run_cli, read_state, tmp_path):
-    evidence = _write_evidence(state_dir)
-    scoring = _write_scoring(tmp_path, evidence, delta=1.1, review_agreement=3.0)
+    evidence = _write_evidence(state_dir, delta=1.1)
+    scoring = _write_scoring(tmp_path, evidence)
     run_cli("push-score", "--iteration", "1", "--scoring-json", str(scoring), cwd=state_dir.parent, check=True)
 
     r = run_cli("mark-passes", cwd=state_dir.parent)
@@ -108,8 +110,8 @@ def test_mark_passes_warns_for_delta_above_1_0_and_passes(state_dir, run_cli, re
 
 
 def test_mark_passes_allows_delta_at_1_5_boundary(state_dir, run_cli, read_state, tmp_path):
-    evidence = _write_evidence(state_dir)
-    scoring = _write_scoring(tmp_path, evidence, delta=1.5, review_agreement=3.0)
+    evidence = _write_evidence(state_dir, delta=1.5)
+    scoring = _write_scoring(tmp_path, evidence)
     run_cli("push-score", "--iteration", "1", "--scoring-json", str(scoring), cwd=state_dir.parent, check=True)
 
     r = run_cli("mark-passes", cwd=state_dir.parent)

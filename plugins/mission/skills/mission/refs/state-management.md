@@ -49,11 +49,16 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py review-finaliz
 # --force は非対応。override はユーザー明示承認の上で mark-passes --force を直接使う。
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py closeout
 
+### Forced-pass verifier protocol
+
+`mark-passes --force` is fail-closed. The portable command accepts no shell command, URL, arbitrary module name, or arbitrary provider execution. A host may configure an installed verifier only through the standard user registry `$XDG_CONFIG_HOME/mission/approval-verifiers.json` (or `~/.config/mission/...`); a project-local registry is not an escape hatch. The bounded UTF-8 JSON registry is `{"schema":"mission-approval-verifier-registry/2","verifiers":[{"id":"<safe-id>","entry_point":"<safe-entry-point-id>","distribution":"<installed-distribution-name>","version":"<installed-distribution-version>","source_digest":"sha256:<module-source-digest>"}]}`. This is the single registration procedure: the CLI discovers that `entry_point` only in installed distribution metadata group `mission.approval_verifiers`, pins its `distribution`, `version`, and `source_digest`, and loads the one parent-pinned callable only inside a bounded child. The child rechecks the pin before loading; load and callback share the five-second bound. Duplicate keys/ids, links, non-regular files, oversized input, malformed schema, ambiguous/missing metadata, pin changes, load errors, invalid responses, and timeouts reject without changing state. The callback receives a canonical request containing session and mission identifiers, revision scope, terminal-object digest, approval-evidence digest, opaque actor role or digest, bounded approval time, allowlisted reason code, and fresh event nonce. It returns `decision: approved`, its safe verifier identifier, the exact request digest, a relative content-addressed receipt reference, and bounded verification time. The command stores the complete request/response/receipt/consumed envelope and rejects replay, malformed values, absolute paths, raw approval text, or receipt digest mismatch. Audit treats only this same canonical envelope as verified; historical terminal records remain read-only and are reported as unverifiable.
+
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score \
     --iteration <N> \
     --scoring-json /tmp/mission-scorer-iter-<N>-<mission_id先頭8>.json \
     --open-high <未解決High件数>
-# JSON 形式: {"items": {"mission_achievement": 4.0, "accuracy": 3.5, "completeness": 4.2, "usability": 3.8, "reviewer_consensus": 4.0}, "notes": "<任意>", "open_high": 0}
+# JSON 形式: {"items": {"mission_achievement": 4.0, "accuracy": 3.5, "completeness": 4.2, "usability": 3.8}, "review_agreement": 4.5, "notes": "<任意>", "open_high": 0}
+# items は4軸だけで、review_agreement は composite/min に含めない独立フィールド。
 
 # 従来経路 (非推奨・DeprecationWarning あり。scoring evidence なしは default reject。
 # 移行専用の一時 escape hatch として MISSION_REQUIRE_SCORING_EVIDENCE=0 のみ許可):
@@ -65,7 +70,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score \
     --iteration <N> \
     --composite <総合スコア (items mean を 0.1 超で上回らないこと)> \
     --min-item <最低項目スコア (items min を 0.1 超で上回らないこと)> \
-    --items '{"mission_achievement": 4.0, "accuracy": 3.5, "completeness": 4.2, "usability": 3.8, "reviewer_consensus": 4.0}' \
+    --items '{"mission_achievement": 4.0, "accuracy": 3.5, "completeness": 4.2, "usability": 3.8}' \
     --open-high <未解決High件数> \
     --scoring-output /tmp/mission-scorer-iter-<N>-<mission_id先頭8>.md \
     [--resubmit-reason "<同一 iteration 再 push 時のみ必須>"] \
@@ -219,9 +224,9 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py archive-worktr
 - evidence type、`.mission-state/` 起点の source reference、bundle 内の archive relative path
 - 各 evidence の SHA-256 と byte size
 
-対象は現 session の state に明示された assumptions、artifact、score history の scoring/reviews、specialist invocation、progress evidence の allowlist のみ。元 state の identity や内容は書き換えず byte copy する。必須 evidence の欠落、`.mission-state` 外への path escape、symlink、重複 archive path、manifest/checksum 不整合は exit 2 で fail-closed になり、不完全な世代を current として公開しない。同一 filesystem 内で一時世代を完成させ、content digest 名の immutable generation として publish してから `current.json` だけを atomic replace する。更新中・pointer swap 失敗時も reader は旧世代を参照でき、同じ入力の再実行は `action=unchanged` となる。旧世代は reader safety のため自動削除しない。
+対象は現 session の state に明示された assumptions、artifact、score history の scoring/reviews と typed review/manual source/scoring artifact、force approval receipt、specialist invocation、progress evidence の allowlist のみ。これらは creator と validator が共有する lineage schema から導出される。元 state の identity や内容は書き換えず byte copy する。必須 evidence の欠落、`.mission-state` 外への path escape、symlink、hard link、上限超過、重複 archive path、manifest/checksum 不整合は exit 2 で fail-closed になり、不完全な世代を current として公開しない。同一 filesystem 内で一時世代を完成させ、content digest 名の immutable generation として publish してから `current.json` だけを atomic replace する。更新中・pointer swap 失敗時も reader は旧世代を参照でき、同じ入力の再実行は `action=unchanged` となる。旧世代は reader safety のため自動削除しない。
 
-`mission-audit.py` は discovery 時に pointer が示した generation を record snapshot として固定し、同じ audit run の途中で `current.json` が進んでも別世代を再読込しない。record をロードする前に bundle 単位で manifest と archived state の JSON・identity・path・size・checksum を preflight し、その state から導出した `(evidence type, iteration, source reference)` multiset との完全一致を検証する。valid manifest の scoring と specialist evidence は kind・iteration・source reference で generation 内の検証済み path を解決する。1 audit run では同じ record の検証結果を cache し、score history の iteration ごとに全 evidence を再 hash しない。`.mission-state` は walk の降下前に `lstat` と `scandir` で readiness を確認し、競合する access failure も walk error callback から収集する。`.mission-state` / `archive` が directory 以外の file type である場合、それらや bundle / `generations` ancestor の symlink、非symlink archive root 外へ解決される bundle、archive / pointer / generation の stat・scan・read access failure、pointer の malformed/symlink/参照先欠落、archived state の欠落/不正 JSON、または generation の manifest 欠落・不整合は `invalid-worktree-archive` finding として明示し、root 外や旧来の filename fallback に進まない。overlap する複数 root から同じ不正 bundle を発見しても canonical bundle path ごとに1件へまとめる。pointer が存在しないことを `lstat` で確認できた既存 bundle だけは #201 までの配置互換を維持する。
+`mission-audit.py` は discovery 時に pointer が示した generation を record snapshot として固定し、同じ audit run の途中で `current.json` が進んでも別世代を再読込しない。record をロードする前に bundle 単位で manifest と archived state の JSON・identity・path・size・checksum を preflight し、その state から導出した `(evidence type, iteration, source reference)` multiset との完全一致を検証する。valid manifest の scoring provenance、scoring、specialist evidence は source reference を generation 内の検証済み byte reader で解決し、元 worktree がなくても同じ検証結果になる。1 audit run では同じ record の検証結果を cache し、score history の iteration ごとに全 evidence を再 hash しない。`.mission-state` は walk の降下前に `lstat` と `scandir` で readiness を確認し、競合する access failure も walk error callback から収集する。`.mission-state` / `archive` が directory 以外の file type である場合、それらや bundle / `generations` ancestor の symlink、非symlink archive root 外へ解決される bundle、archive / pointer / generation の stat・scan・read access failure、pointer の malformed/symlink/参照先欠落、archived state の欠落/不正 JSON、または generation の manifest 欠落・不整合は `invalid-worktree-archive` finding として明示し、root 外や旧来の filename fallback に進まない。overlap する複数 root から同じ不正 bundle を発見しても canonical bundle path ごとに1件へまとめる。pointer が存在しないことを `lstat` で確認できた既存 bundle だけは #201 までの配置互換を維持する。
 
 ### Phase C: multi-session 並列実行 (2026-06-13 デフォルト有効化)
 
@@ -444,7 +449,8 @@ meta/non-operation の証明は context 全体が `review/analyze/document/inspe
 
 ## スコア項目キーの正規化 (H2) / scoring archive 命名 (H1) — 2026-06-10
 
-- push-score は items のキーを正規 5 キー (`mission_achievement` / `accuracy` / `completeness` / `usability` / `reviewer_consensus`) に正規化する。エイリアス (`usefulness`→`usability`, `practicality`→`usability`, `reviewer_agreement`→`reviewer_consensus`) は自動変換。未知キーは `--items` 経路では WARN 付きで受理 (後方互換) だが、`--scoring-json` 経路では reject (strict)
+- 新規 score の items は正規 4 軸 (`mission_achievement` / `accuracy` / `completeness` / `usability`) だけである。`reviewer_consensus` と `reviewer_agreement` は旧形式として全 complexity で reject し、合意度は独立した `review_agreement` フィールドで扱う。旧 state は表示・監査のみの互換対象で、新規 score に移植しない。
+- 手動採点を取り込む場合は review aggregate や `--items` を流用せず、host user が用意した `mission-manual-score/1` を `manual-score-capture --input <file> --out <scoring.json>` で state-local archive に安全に固定してから、`push-score --scoring-json <scoring.json>` を実行する。capture は session/mission/iteration、4軸、composite/min、独立した review_agreement、revision scope、source evidence reference、input digest を検証する。4軸と composite/min/review_agreement は bool ではない有限の 0〜5 数値、open_high は bool ではない 0 以上の整数でなければならない。`manual-import` に review evidence reference は使用できない。
 - push-score は経路を問わず「全 items が 1.0 以下」を 0-1 正規化スケール混入として reject する (実ログ回帰: xai-cli cx-019efece が composite 0.96 = 4.8/5 を push した事例)
 - `--scoring-output` の保存先は `.mission-state/archive/iter-<N>-<mission_id先頭8>-scoring.md`。連続ランでの上書き消失 (2026-06-10 実害確認) を防ぐため mission_id を含む
 

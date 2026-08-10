@@ -589,6 +589,51 @@ def test_snapshot_consume_uses_metadata_only_and_skips_all_candidate_content_wor
     }
 
 
+def test_snapshot_consume_accepts_archived_typed_score_lineage_after_source_removal(
+    tmp_path, run_cli
+):
+    """Snapshot semantic validation uses the archive's complete lineage contract."""
+    worktree, destination = archive_fixture._make_completed_worktree(tmp_path)
+    state_path = (
+        worktree / ".mission-state" / "sessions"
+        / f"{archive_fixture.SESSION_ID}.json"
+    )
+    manual = archive_fixture._write(
+        worktree / ".mission-state" / "archive" / "snapshot-manual-source.json", "{}\n"
+    )
+    scoring = archive_fixture._write(
+        worktree / ".mission-state" / "archive" / "snapshot-scoring-artifact.json", "{}\n"
+    )
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    entry = state["score_history"][0]
+    entry["score_source"] = "manual-import"
+    entry["score_provenance"] = {
+        "score_source": "manual-import",
+        "manual_evidence_ref": {"path": str(manual.relative_to(worktree))},
+        "scoring_evidence_ref": {"path": str(scoring.relative_to(worktree))},
+    }
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    archived = archive_fixture._archive(run_cli, worktree, destination)
+    assert archived.returncode == 0, archived.stderr
+    shutil.rmtree(worktree)
+    snapshot = tmp_path / "typed-lineage.snapshot.json"
+    spec = importlib.util.spec_from_file_location(
+        "issue210_typed_lineage_snapshot", AUDIT_PY
+    )
+    assert spec and spec.loader
+    audit = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = audit
+    spec.loader.exec_module(audit)
+
+    audit.create_state_snapshot([destination], snapshot, ttl_seconds=3600)
+    records, invalid, roots, _observed = audit.consume_state_snapshot(snapshot, None)
+
+    assert len(records) == 1
+    assert invalid == []
+    assert roots == [destination.resolve()]
+
+
 def test_snapshot_capture_rejects_drift_between_metadata_checks(tmp_path, monkeypatch):
     root = tmp_path / "root"
     state = _write_state(root, "one", "2026-07-21T00:00:00Z")

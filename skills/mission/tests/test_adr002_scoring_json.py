@@ -6,18 +6,49 @@
 - --scoring-json は items を JSON ファイルから読み、composite/min_item を CLI 側で再計算する。
 """
 
+import hashlib
 import json
+
+from skills.mission.tests.conftest import canonical_review, write_canonical_review_aggregate
 
 CANONICAL_ITEMS = {
     "mission_achievement": 4.0,
     "accuracy": 4.5,
     "completeness": 4.0,
     "usability": 3.5,
-    "reviewer_consensus": 4.0,
 }
 
 
-def _write_scoring_json(tmp_path, payload, name="scorer-out.json"):
+def _write_scoring_json(tmp_path, payload, name="scorer-out.json", *, iteration=1, evidence_open_high=None):
+    items = payload.get("items", {})
+    high_count = int(payload.get("open_high", 0)) if evidence_open_high is None else evidence_open_high
+    review_items = items
+    if high_count:
+        # A High finding caps its axis at 3.0.  Keep this fixture above the
+        # pass threshold so the test reaches the High gate itself.
+        review_items = {
+            "mission_achievement": 5.0,
+            "accuracy": 3.0,
+            "completeness": 5.0,
+            "usability": 5.0,
+        }
+    evidence_path, ref, claim = write_canonical_review_aggregate(
+        tmp_path,
+        [canonical_review(review_items, high_count=high_count)],
+        iteration=iteration,
+    )
+    payload = {
+        **payload,
+        "review_agreement": claim["review_agreement"],
+        "agreement_detail": claim["agreement_detail"],
+        "score_provenance": {
+            "score_source": "scoring-json", "review_evidence_ref": ref,
+            "revision_scope": ref["revision_scope"],
+        },
+    }
+    if high_count:
+        payload["items"] = claim["items"]
+        payload["findings_evidence_path"] = ref["path"]
     p = tmp_path / name
     p.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     return p
@@ -32,7 +63,7 @@ def test_scoring_json_computes_composite_and_min_item(state_dir, run_cli, read_s
                 cwd=state_dir.parent)
     assert r.returncode == 0, f"stderr: {r.stderr}"
     entry = read_state(state_dir)["score_history"][0]
-    assert entry["composite"] == 4.0  # mean(4.0, 4.5, 4.0, 3.5, 4.0)
+    assert entry["composite"] == 4.0  # mean(4.0, 4.5, 4.0, 3.5)
     assert entry["min_item"] == 3.5
     assert entry["items"]["accuracy"] == 4.5
     assert entry["score_source"] == "scoring-json"
@@ -68,7 +99,7 @@ def test_scoring_json_stagnation_still_updates(state_dir, run_cli, read_state, t
     low = {k: 3.0 for k in CANONICAL_ITEMS}
     low2 = dict(low, mission_achievement=3.1)  # mean 3.02 → 改善幅 0.02 < 0.1
     s1 = _write_scoring_json(tmp_path, {"items": low}, "s1.json")
-    s2 = _write_scoring_json(tmp_path, {"items": low2}, "s2.json")
+    s2 = _write_scoring_json(tmp_path, {"items": low2}, "s2.json", iteration=2)
     run_cli("push-score", "--iteration", "1", "--scoring-json", str(s1),
             cwd=state_dir.parent, check=True)
     run_cli("push-score", "--iteration", "2", "--scoring-json", str(s2),
@@ -80,7 +111,7 @@ def test_scoring_json_stagnation_still_updates(state_dir, run_cli, read_state, t
 
 
 def test_scoring_json_conflicts_with_items(state_dir, run_cli, tmp_path):
-    src = _write_scoring_json(tmp_path, {"items": CANONICAL_ITEMS})
+    src = _write_scoring_json(tmp_path, {"items": {**CANONICAL_ITEMS, "reviewer_consensus": 4.0}})
     r = run_cli("push-score", "--iteration", "1", "--scoring-json", str(src),
                 "--items", '{"a": 4.0}', cwd=state_dir.parent)
     assert r.returncode == 2, f"stderr: {r.stderr}"
@@ -127,14 +158,13 @@ def test_scoring_json_rejects_unknown_keys(state_dir, run_cli, tmp_path):
 
 def test_scoring_json_normalizes_alias_keys(state_dir, run_cli, read_state, tmp_path):
     items = {"mission_achievement": 4.0, "accuracy": 4.0, "completeness": 4.0,
-             "practicality": 3.5, "reviewer_agreement": 4.5}
+             "practicality": 3.5}
     src = _write_scoring_json(tmp_path, {"items": items})
     r = run_cli("push-score", "--iteration", "1", "--scoring-json", str(src),
                 cwd=state_dir.parent)
     assert r.returncode == 0, f"stderr: {r.stderr}"
     saved = read_state(state_dir)["score_history"][0]["items"]
     assert saved["usability"] == 3.5
-    assert saved["reviewer_consensus"] == 4.5
 
 
 def test_scoring_json_rejects_out_of_range_item(state_dir, run_cli, tmp_path):
@@ -146,17 +176,18 @@ def test_scoring_json_rejects_out_of_range_item(state_dir, run_cli, tmp_path):
 
 
 def test_scoring_json_respects_consensus_policy(state_dir, run_cli, tmp_path):
-    """Issue #10: Simple+Reviewer1名では reviewer_consensus を含む scoring-json も reject."""
+    """A legacy consensus item cannot bypass the derived aggregate contract."""
     sf = state_dir / "sessions" / "test.json"
     s = json.loads(sf.read_text())
     s["complexity"] = "Simple"
     s["reviewer_count"] = 1
     sf.write_text(json.dumps(s))
-    src = _write_scoring_json(tmp_path, {"items": CANONICAL_ITEMS})
+    src = _write_scoring_json(tmp_path, {"items": {**CANONICAL_ITEMS, "reviewer_consensus": 4.0}})
     r = run_cli("push-score", "--iteration", "1", "--scoring-json", str(src),
                 cwd=state_dir.parent)
     assert r.returncode == 2
     assert "reviewer_consensus" in r.stderr
+    assert "非正規" in r.stderr
 
 
 # ===== evidence の archive =====
@@ -167,7 +198,9 @@ def test_scoring_json_archives_evidence_with_meta(state_dir, run_cli, read_state
     r = run_cli("push-score", "--iteration", "1", "--scoring-json", str(src),
                 cwd=state_dir.parent)
     assert r.returncode == 0, f"stderr: {r.stderr}"
-    dst = state_dir / "archive" / "iter-1-abc12345-scoring.json"
+    archived = list((state_dir / "archive").glob("iter-1-abc12345-scoring-*.json"))
+    assert len(archived) == 1
+    dst = archived[0]
     assert dst.exists()
     payload = json.loads(dst.read_text(encoding="utf-8"))
     assert payload["_meta"]["session_id"] == "test"
@@ -175,14 +208,15 @@ def test_scoring_json_archives_evidence_with_meta(state_dir, run_cli, read_state
     assert payload["_meta"]["computed_composite"] == 4.0
     assert payload["items"]["accuracy"] == 4.5
     entry = read_state(state_dir)["score_history"][0]
-    assert entry["scoring_evidence_path"] == str(dst)
+    assert entry["scoring_evidence_path"] == str(dst.relative_to(state_dir.parent))
 
 
 def test_scoring_json_open_high_flows_to_gate(state_dir, run_cli, tmp_path):
-    """scoring-json の open_high が mark-passes の High gate に届く."""
+    """scoring-json の open_high は canonical findings evidence 経由で gate に届く."""
     src = _write_scoring_json(tmp_path, {"items": CANONICAL_ITEMS, "open_high": 2})
     run_cli("push-score", "--iteration", "1", "--scoring-json", str(src),
             cwd=state_dir.parent, check=True)
+    assert json.loads((state_dir / "sessions" / "test.json").read_text())["score_history"][0]["open_high"] == 2
     r = run_cli("mark-passes", cwd=state_dir.parent)
     assert r.returncode == 2
     assert "High" in r.stderr
@@ -199,7 +233,7 @@ def test_scoring_json_open_high_wins_over_cli_flag(state_dir, run_cli, read_stat
 
 def test_scoring_json_without_open_high_falls_back_to_cli(state_dir, run_cli, read_state, tmp_path):
     """JSON に open_high キーがなければ CLI --open-high をフォールバックとして使う."""
-    src = _write_scoring_json(tmp_path, {"items": CANONICAL_ITEMS})
+    src = _write_scoring_json(tmp_path, {"items": CANONICAL_ITEMS}, evidence_open_high=2)
     run_cli("push-score", "--iteration", "1", "--scoring-json", str(src),
             "--open-high", "2", cwd=state_dir.parent, check=True)
     entry = read_state(state_dir)["score_history"][0]
@@ -214,7 +248,7 @@ def test_scoring_json_evidence_written_before_state_records_path(state_dir, run_
             cwd=state_dir.parent, check=True)
     entry = read_state(state_dir)["score_history"][0]
     from pathlib import Path
-    assert Path(entry["scoring_evidence_path"]).exists()
+    assert (state_dir.parent / Path(entry["scoring_evidence_path"])).exists()
 
 
 # ===== 0-1 正規化スケール reject (xai-cli cx-019efece 回帰) =====
@@ -239,13 +273,14 @@ def test_items_path_rejects_normalized_scale(state_dir, run_cli):
     assert "0-1" in r.stderr or "正規化" in r.stderr
 
 
-def test_single_low_item_among_normal_passes(state_dir, run_cli):
-    """1 項目だけ低い正当な採点 (max > 1.0) は通過する."""
+def test_single_low_item_without_provenance_is_rejected(state_dir, run_cli):
+    """The obsolete evidence-less path cannot bypass the provenance gate."""
     r = run_cli("push-score", "--iteration", "1", "--composite", "2.25", "--min-item", "0.5",
                 "--items", '{"mission_achievement": 0.5, "accuracy": 4.0}',
                 cwd=state_dir.parent,
                 env_extra={"MISSION_REQUIRE_SCORING_EVIDENCE": "0"})
-    assert r.returncode == 0, f"stderr: {r.stderr}"
+    assert r.returncode == 2
+    assert "4つの正規採点軸" in r.stderr
 
 
 # ===== evidence なし push-score の hard reject (G-2 default flip) =====
@@ -261,14 +296,14 @@ def test_no_evidence_rejects_by_default(state_dir, run_cli, read_state):
     assert len(read_state(state_dir)["score_history"]) == 0
 
 
-def test_allow_evidence_less_env_retains_deprecated_escape_hatch(state_dir, run_cli, read_state):
-    # #226 (A-4): escape hatch は削除まで機能を維持するが、文言は DEPRECATED を明示する。
+def test_evidence_less_env_cannot_bypass_provenance(state_dir, run_cli, read_state):
     r = run_cli("push-score", "--iteration", "1", "--composite", "4.0", "--min-item", "3.5",
                 "--items", '{"mission_achievement": 4.0}', cwd=state_dir.parent,
                 env_extra={"MISSION_REQUIRE_SCORING_EVIDENCE": "0"})
-    assert r.returncode == 0, f"stderr: {r.stderr}"
+    assert r.returncode == 2
+    assert "4つの正規採点軸" in r.stderr
     assert "DEPRECATED ESCAPE HATCH" in r.stderr
-    assert len(read_state(state_dir)["score_history"]) == 1
+    assert len(read_state(state_dir)["score_history"]) == 0
 
 
 def test_require_evidence_env_accepts_scoring_json(state_dir, run_cli, tmp_path):

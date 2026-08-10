@@ -5,7 +5,7 @@ import json
 _ITEMS = '{"mission_achievement":4.5,"accuracy":4.5,"completeness":4.5,"usability":4.5,"reviewer_consensus":4.5}'
 
 
-def test_explicit_session_id_routing(tmp_path, run_cli):
+def test_explicit_session_id_routing(tmp_path, run_cli, push_provenance_score):
     env = {"MISSION_SESSION_ID": "sess-x"}
     run_cli(
         "init", "mission text", "--complexity", "Standard",
@@ -16,8 +16,7 @@ def test_explicit_session_id_routing(tmp_path, run_cli):
     assert sf.exists(), "session ファイルが作られていない"
     assert not (tmp_path / ".mission-state" / "state.json").exists(), "legacy を汚染した"
     # push-score → session ファイルへ
-    run_cli("push-score", "--iteration", "1", "--composite", "4.5", "--min-item", "4.0",
-            "--items", _ITEMS, cwd=tmp_path, env_extra=env, check=True)
+    push_provenance_score(tmp_path, env_extra=env)
     d = json.loads(sf.read_text())
     assert len(d["score_history"]) == 1 and d["score_history"][0]["composite"] == 4.5
     d["task_profile"] = {"primary": "test"}
@@ -29,14 +28,13 @@ def test_explicit_session_id_routing(tmp_path, run_cli):
     assert json.loads(sf.read_text())["passes"] is True
 
 
-def test_cc_env_consistent_file(tmp_path, run_cli):
+def test_cc_env_consistent_file(tmp_path, run_cli, push_provenance_score):
     """MISSION_SESSION_ID なし + Claude Code env のみでも cmd_init と push-score が同じ sessions/cc-<id>.json を見る."""
     env = {"CLAUDE_CODE_SESSION_ID": "abc"}
     run_cli("init", "g", "--complexity", "Standard", cwd=tmp_path, env_extra=env, check=True)
     sf = tmp_path / ".mission-state" / "sessions" / "cc-abc.json"
     assert sf.exists(), "session_id が cc-abc に統一されていない"
-    run_cli("push-score", "--iteration", "1", "--composite", "4.5", "--min-item", "4.0",
-            "--items", _ITEMS, cwd=tmp_path, env_extra=env, check=True)
+    push_provenance_score(tmp_path, env_extra=env)
     assert len(json.loads(sf.read_text())["score_history"]) == 1
 
 

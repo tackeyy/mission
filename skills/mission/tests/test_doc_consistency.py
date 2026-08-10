@@ -48,6 +48,34 @@ def test_no_obsolete_multi_session_flag():
     assert "export MISSION_MULTI_SESSION" not in txt, "廃止 env export が残存"
 
 
+def test_documented_scoring_json_is_four_axis_and_reaches_provenance_validation(state_dir, run_cli, tmp_path):
+    """The public example must remain a parseable current score payload.
+
+    A dry CLI invocation deliberately stops at the provenance gate: the sample
+    teaches only the shape of a scoring JSON and must not embed a forged
+    evidence reference.  Reaching that gate proves that the documented values
+    passed the strict four-axis numeric validator first.
+    """
+    text = _r(REFS / "state-management.md")
+    match = re.search(r"# JSON 形式: (\{[^\n]+\})", text)
+    assert match, "state-management.md must include one-machine-readable scoring JSON example"
+    payload = json.loads(match.group(1))
+    assert set(payload["items"]) == {
+        "mission_achievement", "accuracy", "completeness", "usability",
+    }
+    assert "reviewer_consensus" not in payload["items"]
+    assert "review_agreement" in payload
+
+    sample = tmp_path / "documented-score.json"
+    sample.write_text(json.dumps(payload), encoding="utf-8")
+    result = run_cli(
+        "push-score", "--iteration", "1", "--scoring-json", str(sample),
+        cwd=state_dir.parent,
+    )
+    assert result.returncode == 2
+    assert "provenance" in result.stderr
+
+
 # ---- Tier1-5: react-loop-details に jq 直叩きで state.json を書く例が残っていない ----
 def test_no_jq_direct_state_write():
     txt = _r(REFS / "react-loop-details.md")
@@ -317,6 +345,31 @@ def test_distribution_release_requires_remote_tag_and_github_release_verificatio
     assert "Distribution Release Rule" in agents
     assert "gh release view vX.Y.Z --repo tackeyy/mission" in agents
     assert "git ls-remote --tags origin vX.Y.Z" in agents
+
+
+def test_force_approval_docs_describe_only_the_pinned_user_registry_v2_contract():
+    """#383: public guidance must not revive an unpinned project-registry escape hatch."""
+    source_docs = {
+        "state-management": _r(REFS / "state-management.md"),
+        "skill": _r(SKILL_MD),
+        "changelog-en": _r(REPO_ROOT / "CHANGELOG.md"),
+        "changelog-ja": _r(REPO_ROOT / "CHANGELOG.ja.md"),
+    }
+    required = (
+        "approval-verifiers.json",
+        "mission-approval-verifier-registry/2",
+        "entry_point",
+        "distribution",
+        "version",
+        "source_digest",
+    )
+    for name, text in source_docs.items():
+        for token in required:
+            assert token in text, f"{name} must document pinned user-registry token: {token}"
+    state_management = source_docs["state-management"]
+    assert "$XDG_CONFIG_HOME/mission/approval-verifiers.json" in state_management
+    assert ".mission/approval-verifiers.json" not in state_management
+    assert "mission-approval-verifier-registry/1" not in state_management
 
 
 def test_versioning_policy_separates_merge_and_distribution_releases():

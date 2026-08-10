@@ -123,15 +123,14 @@ def test_refresh_pid_rejects_alive_agent_owner(tmp_path, monkeypatch, run_cli):
 
 
 # ===== e2e: push-score → mark-passes → stop hook unblock =====
-def test_e2e_pushscore_markpasses_hook_unblocks(tmp_path, run_cli):
+def test_e2e_pushscore_markpasses_hook_unblocks(tmp_path, run_cli, push_provenance_score):
     sid = {"MISSION_SESSION_ID": "e2e"}
     run_cli("init", "g", "--complexity", "Simple", "--force-mission", "--threshold", "4.0",
             "--artifact-applicability", "not-applicable",
             cwd=tmp_path, env_extra=sid)
     before = _run_hook(tmp_path, sid)
     assert "block" in before.stdout, "未達 state は hook が block すべき"
-    run_cli("push-score", "--iteration", "1", "--composite", "4.5", "--min-item", "4.0",
-            "--items", '{"a":4.5}', cwd=tmp_path, env_extra=sid)
+    push_provenance_score(tmp_path, env_extra=sid)
     mp = run_cli("mark-passes", cwd=tmp_path, env_extra=sid)
     assert mp.returncode == 0, mp.stderr
     after = _run_hook(tmp_path, sid)
@@ -201,14 +200,22 @@ def test_reactivate_readds_session_to_aggregate(tmp_path, run_cli):
     assert "react" in agg["active_sessions"]
 
 
-def test_push_score_rejects_bad_items_and_range(tmp_path, run_cli):
-    """A#1: _validate_score_args の異常系 (不正JSON / 非dict / 範囲外) は exit 1."""
-    run_cli("init", "g", "--complexity", "Standard", cwd=tmp_path)
-    base = ["push-score", "--iteration", "1", "--composite", "4.0", "--min-item", "4.0"]
-    assert run_cli(*base, "--items", "not json", cwd=tmp_path).returncode == 1
-    assert run_cli(*base, "--items", "[1,2]", cwd=tmp_path).returncode == 1
-    assert run_cli("push-score", "--iteration", "1", "--composite", "9.9",
-                   "--min-item", "4.0", "--items", '{"a":4}', cwd=tmp_path).returncode == 1
+@pytest.mark.parametrize(
+    "items,composite,min_item",
+    [("not json", 4.0, 4.0), ("[1,2]", 4.0, 4.0), ('{"mission_achievement":4}', 9.9, 4.0)],
+)
+def test_validate_score_args_rejects_bad_items_and_range(items, composite, min_item):
+    """A#1: the pure legacy parser retains its malformed-input contract.
+
+    The public CLI now rejects evidence-less raw scores before reaching this
+    compatibility parser; keeping the assertion here proves that validation
+    itself did not weaken while canonical provenance remains mandatory.
+    """
+    with pytest.raises(SystemExit) as exc:
+        _load()._validate_score_args(argparse.Namespace(
+            items=items, composite=composite, min_item=min_item,
+        ))
+    assert exc.value.code == 1
 
 
 def test_init_survives_corrupt_aggregate(tmp_path, run_cli):

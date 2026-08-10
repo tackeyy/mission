@@ -310,7 +310,7 @@ def test_checkpoint_and_unselected_provenance_use_updated_at_cutoff(tmp_path: Pa
 def test_all_finding_specs_are_registry_wired_and_priority_sorted(tmp_path: Path):
     audit = _load_audit_module()
 
-    assert len(audit.FINDING_SPECS) == 21
+    assert len(audit.FINDING_SPECS) == 22
     assert all(spec.source_key for spec in audit.FINDING_SPECS.values())
     assert all(spec.source_kind for spec in audit.FINDING_SPECS.values())
     assert all(spec.item_summary for spec in audit.FINDING_SPECS.values())
@@ -414,6 +414,7 @@ def test_all_registry_aggregate_summaries_preserve_specific_meaning():
         "duplicate-state": "2 duplicate state groups found; stats may double-count",
         "missing-scoring-evidence": "2 current sessions have score_history without archived scoring evidence",
         "invalid-score-iteration": "2 current sessions have score_history entries outside iteration >= 1",
+        "invalid-score-provenance": "2 current sessions have malformed or unverifiable new score provenance",
         "blank-specialist-invocation": "2 current sessions have blank specialist role or skill fields",
         "preparation-only-completed-provider": "2 current sessions marked command-provider preparation-only evidence as completed",
         "missing-specialist-selection-checkpoint": "2 current sessions started after checkpoint rollout without selection metadata",

@@ -51,7 +51,7 @@ local-first artifact contract と CLI は
 - メインオーケストレータ: `skills/mission`
 - 5 つのサブスキル: planner / executor / reviewer / critic / scorer
 - `.mission-state` セッションを扱う state 管理 CLI
-- reviewer JSON から決定論的に採点 payload を作る `aggregate-reviews` と、High finding evidence / review agreement の合格ゲート
+- reviewer JSON から4軸の採点 payload を決定論的に作る `aggregate-reviews` と、High finding evidence / 独立した review agreement の合格ゲート。明示的な手動採点は typed かつ content-addressed な capture 経路を使う
 - completion evidence を監査可能にする local-first mission artifact CLI（[契約](docs/MISSION_ARTIFACTS.ja.md)）
 - Claude Code / Codex の複数セッション分離
 - compaction/resume 復帰順序を統合する `mission-state.py resume`
@@ -203,7 +203,7 @@ marketplace 提出前は [`docs/MARKETPLACE_RELEASE_CHECKLIST.ja.md`](docs/MARKE
 /mission <ミッション記述> [--max-iter N] [--threshold X] [--skip-preflight]
 ```
 
-orchestrator は仮置き、ミッション分解、実行、reviewer JSON 収集、`aggregate-reviews`、`push-score --scoring-json` 記録を行い、`mark-passes` が state を受理するか中断条件が成立するまで反復します。
+orchestrator は仮置き、ミッション分解、実行、reviewer JSON 収集、`aggregate-reviews`、`push-score --scoring-json` 記録を行い、`mark-passes` が state を受理するか中断条件が成立するまで反復します。ユーザーが明示的に供給した手動採点は、先に `manual-score-capture` で typed・content-addressed な入力として固定します。review aggregate の evidence を流用しません。
 詳細な運用プロトコルは [`skills/mission/SKILL.md`](skills/mission/SKILL.md)、`stats` / audit の raw・completed 品質 schema は [`docs/PASS_RATE_METRICS.ja.md`](docs/PASS_RATE_METRICS.ja.md)、明示的に再利用する state snapshot は [`docs/STATE_SNAPSHOTS.ja.md`](docs/STATE_SNAPSHOTS.ja.md) を参照してください。
 
 ## 動作環境

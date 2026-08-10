@@ -10,6 +10,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MISSION_AUDIT_PY = REPO_ROOT / "scripts" / "mission-audit.py"
+LIB_ROOT = REPO_ROOT / "skills" / "mission" / "lib"
+if str(LIB_ROOT) not in sys.path:
+    sys.path.insert(0, str(LIB_ROOT))
 
 
 def _write_state(path, **overrides):
@@ -34,6 +37,51 @@ def _write_state(path, **overrides):
     }
     state.update(overrides)
     path.write_text(json.dumps(state), encoding="utf-8")
+
+
+def test_audit_marks_force_receipt_suspect_after_terminal_state_copy_mutation(tmp_path):
+    """A valid receipt cannot be copied onto another terminal score state."""
+    from scoring_provenance import build_request, terminal_state_digest
+
+    session = tmp_path / ".mission-state" / "sessions" / "force.json"
+    _write_state(session, passes_forced=True, force_approved_by_user=True)
+    state = json.loads(session.read_text())
+    state["loop_active"] = False
+    state["terminal_outcome"] = "completed_pass"
+    request = build_request(
+        session_id=state["session_id"], mission_id=state["mission_id"],
+        revision_scope={"kind": "not-applicable", "reason_code": "non-git"},
+        terminal_object_digest=terminal_state_digest(state), approval_evidence_ref="sha256:" + "a" * 64,
+        approved_actor="role:owner", approved_at="2026-06-18T00:10:00+00:00",
+        reason_code="user-override", event_nonce="c" * 64,
+        now=datetime(2026, 6, 18, 0, 10, tzinfo=timezone.utc),
+    )
+    receipt_doc = {
+        "schema": "mission-force-approval-receipt/1", "session_id": request["session_id"],
+        "mission_id": request["mission_id"], "revision_scope": request["revision_scope"],
+        "terminal_object_digest": request["terminal_object_digest"], "event_nonce": request["event_nonce"],
+        "request_digest": request["request_digest"],
+    }
+    receipt_path = tmp_path / ".mission-state" / "archive" / "receipt.json"
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    receipt_bytes = json.dumps(receipt_doc, sort_keys=True, separators=(",", ":")).encode()
+    receipt_path.write_bytes(receipt_bytes)
+    receipt = {"kind": "approval-receipt", "path": ".mission-state/archive/receipt.json",
+               "digest": "sha256:" + __import__("hashlib").sha256(receipt_bytes).hexdigest()}
+    state["force_approval"] = {"request": request, "response": {
+        "schema": "mission-force-approval-response/1", "decision": "approved", "verifier_id": "fixture-verifier",
+        "request_digest": request["request_digest"], "receipt_ref": receipt, "verified_at": "2026-06-18T00:10:00+00:00",
+    }, "receipt_ref": receipt, "consumed": True}
+    session.write_text(json.dumps(state))
+
+    def audit():
+        return json.loads(subprocess.run([sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--json"],
+                                         capture_output=True, text=True, check=True).stdout)
+
+    assert audit()["forced_pass_autonomous_suspect_count"] == 0
+    state["threshold"] = 4.5
+    session.write_text(json.dumps(state))
+    assert audit()["forced_pass_autonomous_suspect_count"] == 1
 
 
 def test_low_activity_coverage_prioritizes_instrumentation_over_slow_run(tmp_path):
@@ -2143,8 +2191,8 @@ def test_audit_flags_forced_pass_without_approval_evidence(tmp_path):
     assert any(f["code"] == "forced-pass-autonomous-suspect" for f in data["findings"])
 
 
-def test_audit_does_not_flag_forced_pass_with_approval_flag(tmp_path):
-    """force_approved_by_user=true (新形式) は自律疑いから除外される."""
+def test_audit_flags_legacy_force_pass_with_approval_flag_as_unverifiable(tmp_path):
+    """Historical boolean approval is retained but never treated as verified."""
     _write_state(
         tmp_path / ".mission-state" / "sessions" / "approved-force.json",
         project_root=str(tmp_path),
@@ -2164,12 +2212,12 @@ def test_audit_does_not_flag_forced_pass_with_approval_flag(tmp_path):
     )
     data = json.loads(result.stdout)
     assert data["forced_pass_count"] == 1
-    assert data["forced_pass_autonomous_suspect_count"] == 0
-    assert not any(f["code"] == "forced-pass-autonomous-suspect" for f in data["findings"])
+    assert data["forced_pass_autonomous_suspect_count"] == 1
+    assert any(f["code"] == "forced-pass-autonomous-suspect" for f in data["findings"])
 
 
-def test_audit_does_not_flag_forced_pass_with_user_mention_in_reason(tmp_path):
-    """旧形式 (force_approved_by_user 未記録) でも force_reason にユーザー承認の言及があれば除外."""
+def test_audit_flags_legacy_force_pass_with_user_mention_as_unverifiable(tmp_path):
+    """Historical approval prose is retained but never treated as verified."""
     _write_state(
         tmp_path / ".mission-state" / "sessions" / "legacy-mention.json",
         project_root=str(tmp_path),
@@ -2187,7 +2235,22 @@ def test_audit_does_not_flag_forced_pass_with_user_mention_in_reason(tmp_path):
         check=True,
     )
     data = json.loads(result.stdout)
-    assert data["forced_pass_autonomous_suspect_count"] == 0
+    assert data["forced_pass_autonomous_suspect_count"] == 1
+
+
+def test_audit_rejects_self_declared_force_verification(tmp_path):
+    """A string claiming verification is not a canonical recorded envelope."""
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "claimed-verified.json",
+        project_root=str(tmp_path), session_id="claimed-verified", passes=True,
+        passes_forced=True, force_reason="bounded override", score_history=[],
+        force_approval={"verification": "verified"},
+    )
+    result = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--since", "2026-06-18", "--json"],
+        capture_output=True, text=True, check=True,
+    )
+    assert json.loads(result.stdout)["forced_pass_autonomous_suspect_count"] == 1
 
 
 # ===== #190: halt_category による構造化 halt bucket =====

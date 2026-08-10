@@ -159,6 +159,10 @@ SYNC_PAIRS = [
         REPO_ROOT / "skills" / "mission" / "lib" / "mission_common.py",
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "mission_common.py",
     ),
+    (
+        REPO_ROOT / "skills" / "mission" / "lib" / "scoring_provenance.py",
+        REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "scoring_provenance.py",
+    ),
 ]
 
 MISSION_STATE_DISTRIBUTION_MARKERS = [

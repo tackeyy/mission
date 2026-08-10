@@ -190,14 +190,13 @@ def test_mark_passes_force_with_reason_records_override(state_dir, run_cli, read
         "mark-passes", "--force", "--reason", "manual approval after offline review", "--approved-by-user",
         cwd=state_dir.parent,
     )
-    assert r.returncode == 0, f"expected exit 0, got {r.returncode}\nstderr: {r.stderr}"
-    # WARNING が stderr に出ること
-    assert "warning" in r.stderr.lower() or "WARNING" in r.stderr
+    assert r.returncode == 2, f"CLI force must require typed verification, got {r.returncode}\nstderr: {r.stderr}"
+    assert "force approval" in r.stderr
     s = read_state(state_dir)
-    assert s["passes"] is True
-    assert s["loop_active"] is False
-    assert s.get("force_reason") == "manual approval after offline review"
-    assert s.get("force_approved_by_user") is True
+    assert s["passes"] is False
+    assert s["loop_active"] is True
+    assert s.get("force_reason") is None
+    assert s.get("force_approved_by_user") is not True
 
 
 def test_mark_passes_force_with_reason_but_without_approved_by_user_rejects(state_dir, run_cli, read_state):
@@ -228,9 +227,9 @@ def test_mark_passes_force_works_even_when_score_history_empty(state_dir, run_cl
         "mark-passes", "--force", "--reason", "emergency manual close", "--approved-by-user",
         cwd=state_dir.parent,
     )
-    assert r.returncode == 0, f"expected exit 0, got {r.returncode}\nstderr: {r.stderr}"
+    assert r.returncode == 2, f"CLI force must require typed verification, got {r.returncode}\nstderr: {r.stderr}"
     s = read_state(state_dir)
-    assert s["passes"] is True
+    assert s["passes"] is False
 
 
 # ===== 境界値テスト (Reviewer B M-3 反映) =====

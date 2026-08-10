@@ -1,4 +1,4 @@
-# Scoring Rubric — /mission の5項目×5点評価基準
+# Scoring Rubric — /mission の4項目×5点評価基準
 
 合格条件: **平均スコア ≥ threshold（デフォルト4.0）** かつ **全項目 ≥ 3.5（足切り）**
 
@@ -113,7 +113,7 @@
 `mark-passes` の gate:
 - max delta > 1.5: exit 2。争点軸の追加レビュー 1 名を実施して再集計する。
 - max delta > 1.0: WARN のみ。
-- 旧 `reviewer_consensus` 入り score entry は履歴として読むが、新規 `aggregate-reviews` 出力の `items` には含めない。
+- 旧 `reviewer_consensus` 入り score entry は履歴として読むが、新規 `aggregate-reviews` 出力の `items` には含めない。新規 score の composite/min は常に4軸で算出し、reviewer agreement は独立 gate とする。
 
 ---
 

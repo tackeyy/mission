@@ -34,12 +34,17 @@ import contextlib
 import errno
 import fcntl
 import hashlib
+from collections import Counter
+import importlib.metadata
+import importlib.util
 import io
 import json
 import math
+import multiprocessing
 import os
 import re
 import secrets
+import signal
 import socket
 import stat
 import subprocess
@@ -49,6 +54,7 @@ import time
 import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import NamedTuple, Protocol
 
 LIB_DIR = Path(__file__).resolve().parents[1] / "lib"
 if str(LIB_DIR) not in sys.path:
@@ -90,7 +96,11 @@ from activity_segments import (  # noqa: E402
     transition_activity_phase,
     validate_activity,
 )
-from worktree_archive import validate_worktree_archive_bundle  # noqa: E402
+from worktree_archive import (  # noqa: E402
+    validated_archive_evidence_reader,
+    validate_worktree_archive_bundle,
+    worktree_archive_lineage_references,
+)
 from state_snapshot import SnapshotError, consume_snapshot_document  # noqa: E402
 from provider_eligibility import (  # noqa: E402
     RegistryContractError,
@@ -119,8 +129,21 @@ from artifact_contract import (  # noqa: E402
     validate_artifact_identity,
     validate_artifact_state_consistency,
 )
+from scoring_provenance import (  # noqa: E402
+    REASON_CODES as _PROVENANCE_REASON_CODES,
+    VERIFIER_ID_RE as _APPROVAL_VERIFIER_NAME_RE,
+    build_request as build_approval_request,
+    digest as provenance_digest,
+    classify_score_provenance,
+    project_root_from_state_path,
+    read_score_provenance_evidence,
+    reduce_review_aggregate,
+    terminal_state_digest,
+    validate_receipt_binding,
+    validate_recorded_envelope,
+)
 
-SCHEMA_VERSION = 3  # v3: role-aware terminal_outcome を terminal writer が明示記録
+SCHEMA_VERSION = 4  # v4: structured scoring provenance is mandatory for new sessions
 GOAL_DISPATCH_MODES = {"inline", "host-native"}
 
 # #186: 実行中の mission-state.py のバージョン。.claude-plugin/plugin.json 等の manifest と
@@ -135,6 +158,21 @@ DEFAULT_THRESHOLD = 4.0     # 合格 composite 閾値 (init --threshold 未指�
 MIN_ITEM_THRESHOLD = 3.5    # 各項目スコアの足切り (これ未満は mark-passes が reject)
 DEFAULT_MAX_ITER = 3        # init --max-iter 未指定時の最大反復回数 (0=上限なし)
 SCORE_MIN, SCORE_MAX = 0.0, 5.0  # composite/min_item の許容範囲
+
+
+def _finite_score(value: object) -> bool:
+    """Return whether a score is a non-boolean finite number on the 0–5 scale."""
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        and SCORE_MIN <= float(value) <= SCORE_MAX
+    )
+
+
+def _nonnegative_int(value: object) -> bool:
+    """Return whether an open High count is an exact non-boolean integer."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 ARTIFACT_SECTIONS = {
     "mission": "Mission",
@@ -4783,6 +4821,33 @@ def _collect_worktree_archive_specs(cwd: Path, state_file_path: Path, data: dict
             suffix = Path(reference).suffix
             add(kind, reference, Path("archive") / f"iter-{iteration}-{mission8}-{kind}{suffix}")
 
+    # The shared extractor is the archive contract.  Keep the historical
+    # human-friendly destinations above, then add every provenance-only
+    # reference it identifies using a content-addressed collision-safe name.
+    expected = worktree_archive_lineage_references(
+        data, f".mission-state/sessions/{state_file_path.name}",
+    )
+    if expected is None:
+        raise WorktreeArchiveError("state lineage references are invalid")
+    existing = Counter(
+        (spec["evidence_kind"], spec["iteration"], spec["source_reference"])
+        for spec in specs
+    )
+    required = Counter(expected)
+    for (kind, item_iteration, reference), count in required.items():
+        while existing[(kind, item_iteration, reference)] < count:
+            suffix = Path(reference).suffix or ".json"
+            identity = hashlib.sha256(
+                f"{kind}\0{item_iteration}\0{reference}\0{existing[(kind, item_iteration, reference)]}".encode("utf-8")
+            ).hexdigest()[:16]
+            add(
+                kind,
+                reference,
+                Path("archive") / "lineage" / f"iter-{item_iteration}-{mission8}-{kind}-{identity}{suffix}",
+                item_iteration,
+            )
+            existing[(kind, item_iteration, reference)] += 1
+
     destinations: dict[str, Path] = {}
     for spec in specs:
         archive_path = spec["archive_path"].as_posix()
@@ -7162,7 +7227,7 @@ def cmd_set(args):
 
 # H2 (2026-06-10): スコア項目キーの正規形とエイリアス。実ログで表記揺れが混在し
 # stats 横断集計・min_item 検証が壊れたため push-score 時に正規化する。
-CANONICAL_SCORE_KEYS = {"mission_achievement", "accuracy", "completeness", "usability", "reviewer_consensus"}
+CANONICAL_SCORE_KEYS = {"mission_achievement", "accuracy", "completeness", "usability"}
 REVIEW_SCORE_KEYS = ("mission_achievement", "accuracy", "completeness", "usability")
 REVIEW_SEVERITIES = {"High", "Medium", "Low"}
 # #353: provisional observation thresholds. Calibrate from reviewer_output_stats
@@ -7183,8 +7248,13 @@ REVIEW_JSON_FENCE_RE = re.compile(
 SCORE_KEY_ALIASES = {
     "usefulness": "usability",
     "practicality": "usability",
-    "reviewer_agreement": "reviewer_consensus",
 }
+
+# `reviewer_consensus` used to be treated as an item.  It is now represented
+# only by the independent review_agreement field.  New writers reject both the
+# raw legacy name and its alias for every complexity; old state remains
+# display-only and is classified separately by audit.
+LEGACY_SCORE_ITEM_KEYS = {"reviewer_consensus", "reviewer_agreement"}
 
 
 def normalize_score_items(items: dict):
@@ -7257,6 +7327,13 @@ def _validate_score_args(args) -> dict:
     if not isinstance(items, dict):
         print("ERROR: --items は JSON オブジェクト (key->score) で指定してください。", file=sys.stderr)
         sys.exit(1)
+    if LEGACY_SCORE_ITEM_KEYS & set(items):
+        print(
+            "ERROR: reviewer_consensus / reviewer_agreement は新規 score items では使用できません。"
+            " 合意度は review_agreement の独立フィールドで記録し、items は4軸だけにしてください。",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     # H2: エイリアス正規化 + 未知キー WARN (reject はしない: 後方互換)
     items, unknown_keys, collisions = normalize_score_items(items)
     if collisions:
@@ -7271,16 +7348,16 @@ def _validate_score_args(args) -> dict:
             f" 正規キー: {sorted(CANONICAL_SCORE_KEYS)} (エイリアス: {SCORE_KEY_ALIASES})",
             file=sys.stderr,
         )
-    # 改善3a: composite / min_item の範囲バリデーション (NaN・範囲外を弾く)。
+    # 改善3a: composite / min_item の有限値・範囲バリデーション。
     for label, val in (("composite", args.composite), ("min_item", args.min_item)):
-        if math.isnan(val) or not (SCORE_MIN <= val <= SCORE_MAX):
-            print(f"ERROR: --{label} {val} は {SCORE_MIN}〜{SCORE_MAX} の範囲で指定してください。", file=sys.stderr)
+        if not _finite_score(val):
+            print(f"ERROR: --{label} {val} は bool ではない有限の {SCORE_MIN}〜{SCORE_MAX} 数値で指定してください。", file=sys.stderr)
             sys.exit(1)
     return items
 
 
 def _numeric_item_values(items: dict) -> list:
-    return [float(v) for v in items.values() if isinstance(v, (int, float)) and not math.isnan(float(v))]
+    return [float(v) for v in items.values() if _finite_score(v)]
 
 
 def _reject_normalized_scale(items: dict) -> None:
@@ -7331,9 +7408,16 @@ def _load_scoring_json(path_str: str):
             file=sys.stderr,
         )
         sys.exit(2)
+    if set(items) != CANONICAL_SCORE_KEYS:
+        print(
+            "ERROR: --scoring-json の items は4つの正規採点軸だけで指定してください。"
+            f" 正規キー: {sorted(CANONICAL_SCORE_KEYS)}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     for k, v in items.items():
-        if not isinstance(v, (int, float)) or math.isnan(float(v)) or not (SCORE_MIN <= float(v) <= SCORE_MAX):
-            print(f"ERROR: --scoring-json の item '{k}'={v} は {SCORE_MIN}〜{SCORE_MAX} の数値で指定してください。", file=sys.stderr)
+        if not _finite_score(v):
+            print(f"ERROR: --scoring-json の item '{k}'={v} は bool ではない有限の {SCORE_MIN}〜{SCORE_MAX} 数値で指定してください。", file=sys.stderr)
             sys.exit(2)
     notes = payload.get("notes")
     if notes is not None and not isinstance(notes, str):
@@ -7341,20 +7425,16 @@ def _load_scoring_json(path_str: str):
         sys.exit(2)
     # open_high はキー欠如 (None) と明示 0 を区別する: 明示値は CLI --open-high より優先される
     open_high = payload.get("open_high")
-    if open_high is not None and (not isinstance(open_high, int) or open_high < 0):
-        print("ERROR: --scoring-json の open_high は 0 以上の整数で指定してください。", file=sys.stderr)
+    if open_high is not None and not _nonnegative_int(open_high):
+        print("ERROR: --scoring-json の open_high は bool ではない 0 以上の整数で指定してください。", file=sys.stderr)
         sys.exit(2)
     findings_evidence_path = payload.get("findings_evidence_path")
     if findings_evidence_path is not None and not isinstance(findings_evidence_path, str):
         print("ERROR: --scoring-json の findings_evidence_path は文字列で指定してください。", file=sys.stderr)
         sys.exit(2)
     review_agreement = payload.get("review_agreement")
-    if review_agreement is not None and (
-        not isinstance(review_agreement, (int, float))
-        or math.isnan(float(review_agreement))
-        or not (SCORE_MIN <= float(review_agreement) <= SCORE_MAX)
-    ):
-        print("ERROR: --scoring-json の review_agreement は 0〜5 の数値または null で指定してください。", file=sys.stderr)
+    if review_agreement is not None and not _finite_score(review_agreement):
+        print("ERROR: --scoring-json の review_agreement は bool ではない有限の 0〜5 数値または null で指定してください。", file=sys.stderr)
         sys.exit(2)
     agreement_detail = payload.get("agreement_detail")
     if agreement_detail is not None and not isinstance(agreement_detail, dict):
@@ -7364,8 +7444,7 @@ def _load_scoring_json(path_str: str):
 
 
 def _archive_scoring_json(cwd: Path, iteration: int, data: dict, entry: dict, payload: dict) -> str:
-    """--scoring-json の payload を _meta 付きで archive/iter-N-<mid8>-scoring.json に保存する."""
-    dst = _scoring_archive_path(cwd, iteration, data, suffix=".json")
+    """Archive scoring output under an immutable content-addressed name."""
     meta = {
         "session_id": data.get("session_id"),
         "agent": data.get("agent") or "unknown",
@@ -7375,10 +7454,601 @@ def _archive_scoring_json(cwd: Path, iteration: int, data: dict, entry: dict, pa
         "computed_composite": entry["composite"],
         "computed_min_item": entry["min_item"],
     }
-    out = {"_meta": meta}
+    # This is the immutable object that binds what the scorer supplied to what
+    # the state machine subsequently accepts.  Do not put the self-reference
+    # (scoring_evidence_ref) in it: the digest names this exact byte sequence.
+    out = {
+        "schema": "mission-scoring-artifact/1",
+        "_meta": meta,
+        "binding": {
+            "session_id": data.get("session_id"),
+            "mission_id": data.get("mission_id"),
+            "iteration": iteration,
+            "items": entry["items"],
+            "composite": entry["composite"],
+            "min_item": entry["min_item"],
+            "revision_scope": entry.get("revision_scope"),
+            "review_generation": (entry.get("review_evidence_ref") or {}).get("generation"),
+            "review_evidence_ref": entry.get("review_evidence_ref"),
+        },
+        "payload": payload,
+    }
+    # Keep the original top-level shape for historical archive consumers.  The
+    # binding above, not these convenience fields, is authoritative.
     out.update(payload)
-    dst.write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    content = (json.dumps(out, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    digest = hashlib.sha256(content).hexdigest()
+    archive_dir = state_dir(cwd) / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    mission8 = str(data.get("mission_id") or "unknown")[:8]
+    dst = archive_dir / f"iter-{iteration}-{mission8}-scoring-{digest[:16]}.json"
+    if dst.exists() and _sha256_file(dst) != digest:
+        raise RuntimeError("immutable scoring archive collision")
+    if not dst.exists():
+        atomic_write_bytes(dst, content)
     return str(dst)
+
+
+_SHA256_REF_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+class ApprovalVerifier(Protocol):
+    def __call__(self, request: dict) -> dict:
+        ...
+
+
+_APPROVAL_VERIFIERS: dict[str, ApprovalVerifier] = {}
+_APPROVAL_VERIFIER_ENTRY_POINT_GROUP = "mission.approval_verifiers"
+_APPROVAL_VERIFIER_REGISTRY_SCHEMA = "mission-approval-verifier-registry/2"
+_APPROVAL_VERIFIER_REGISTRY_LIMIT = 64 * 1024
+_APPROVAL_VERIFIER_TIMEOUT_SEC = 5
+_APPROVAL_VERIFIER_TERMINATE_GRACE_SEC = 0.2
+
+
+def register_approval_verifier(name: str, verifier: ApprovalVerifier) -> None:
+    """Register a host-provided verifier. The portable CLI ships with none."""
+    if not _APPROVAL_VERIFIER_NAME_RE.fullmatch(name) or not callable(verifier):
+        raise ValueError("invalid approval verifier registration")
+    _APPROVAL_VERIFIERS[name] = verifier
+
+
+def _reject_duplicate_registry_key(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("approval verifier registry has duplicate keys")
+        value[key] = item
+    return value
+
+
+def _read_approval_verifier_registry(path: Path) -> dict:
+    """Read a bounded registry without following a file replacement or link."""
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise ValueError("approval verifier registry cannot be read safely on this host")
+    try:
+        fd = os.open(os.fspath(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > _APPROVAL_VERIFIER_REGISTRY_LIMIT:
+                raise ValueError("approval verifier registry must be a bounded regular file")
+            raw = os.read(fd, info.st_size + 1)
+            if len(raw) != info.st_size or os.fstat(fd).st_size != info.st_size:
+                raise ValueError("approval verifier registry changed while being read")
+        finally:
+            os.close(fd)
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_registry_key)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("approval verifier registry is invalid") from exc
+    if not isinstance(value, dict) or set(value) != {"schema", "verifiers"} or value.get("schema") != _APPROVAL_VERIFIER_REGISTRY_SCHEMA:
+        raise ValueError("approval verifier registry is invalid")
+    verifiers = value.get("verifiers")
+    if not isinstance(verifiers, list) or len(verifiers) > 64:
+        raise ValueError("approval verifier registry is invalid")
+    result = {}
+    for item in verifiers:
+        if not isinstance(item, dict) or set(item) != {"id", "entry_point", "distribution", "version", "source_digest"}:
+            raise ValueError("approval verifier registry is invalid")
+        identifier, entry_point = item.get("id"), item.get("entry_point")
+        distribution, version, source_digest = item.get("distribution"), item.get("version"), item.get("source_digest")
+        if (not isinstance(identifier, str) or not _APPROVAL_VERIFIER_NAME_RE.fullmatch(identifier)
+                or not isinstance(entry_point, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", entry_point)
+                or not isinstance(distribution, str) or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", distribution)
+                or not isinstance(version, str) or not version or len(version) > 128
+                or not isinstance(source_digest, str) or not _SHA256_REF_RE.fullmatch(source_digest)
+                or identifier in result):
+            raise ValueError("approval verifier registry is invalid")
+        result[identifier] = {"entry_point": entry_point, "distribution": distribution, "version": version, "source_digest": source_digest}
+    return result
+
+
+def _configured_approval_entry_point(cwd: Path, verifier_name: str):
+    """Return a pinned, non-executable verifier descriptor for a child to load."""
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    locations = [(Path(xdg) if xdg else Path.home() / ".config") / "mission" / "approval-verifiers.json"]
+    configured = {}
+    for location in locations:
+        try:
+            exists = location.exists()
+        except OSError as exc:
+            raise ValueError("approval verifier registry is invalid") from exc
+        if not exists:
+            continue
+        for identifier, entry_point in _read_approval_verifier_registry(location).items():
+            if identifier in configured:
+                raise ValueError("approval verifier registry has duplicate verifier ids")
+            configured[identifier] = entry_point
+    configured_item = configured.get(verifier_name)
+    if configured_item is None:
+        return None
+    discovered = importlib.metadata.entry_points()
+    candidates = discovered.select(group=_APPROVAL_VERIFIER_ENTRY_POINT_GROUP) if hasattr(discovered, "select") else discovered.get(_APPROVAL_VERIFIER_ENTRY_POINT_GROUP, ())
+    matches = [item for item in candidates if item.name == configured_item["entry_point"]]
+    if len(matches) != 1:
+        raise ValueError("approval verifier entry point is not installed")
+    entry_point = matches[0]
+    distribution = getattr(entry_point, "dist", None)
+    if (distribution is None
+            or str(distribution.metadata.get("Name") or "").lower() != configured_item["distribution"].lower()
+            or str(distribution.version) != configured_item["version"]):
+        raise ValueError("approval verifier distribution identity mismatch")
+    module_name = getattr(entry_point, "module", "")
+    if not isinstance(module_name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", module_name):
+        raise ValueError("approval verifier entry point is invalid")
+    module_spec = importlib.util.find_spec(module_name)
+    origin = getattr(module_spec, "origin", None)
+    if not isinstance(origin, str) or not origin or origin in {"built-in", "frozen"}:
+        raise ValueError("approval verifier source is invalid")
+    try:
+        source = Path(origin).read_bytes()
+    except OSError as exc:
+        raise ValueError("approval verifier source is invalid") from exc
+    if "sha256:" + hashlib.sha256(source).hexdigest() != configured_item["source_digest"]:
+        raise ValueError("approval verifier source digest mismatch")
+    # Never call EntryPoint.load() in the state-mutating parent.  Loading is
+    # arbitrary provider code and belongs to the bounded child below.
+    entry_point_value = getattr(entry_point, "value", None)
+    if not isinstance(entry_point_value, str) or not entry_point_value:
+        raise ValueError("approval verifier entry point is invalid")
+    # Keep this immutable lookup result as a parent-side pin.  The child must
+    # rediscover the same entry point before it calls load(), so metadata churn
+    # cannot retarget a same-name provider during the handoff.
+    return {**configured_item, "module": module_name, "entry_point_value": entry_point_value}
+
+
+def _approval_verifier_child(verifier, request: dict, channel) -> None:
+    try:
+        # A verifier may create descendants; make this child their process
+        # group leader so timeout cleanup has one bounded target.
+        with contextlib.suppress(OSError):
+            os.setsid()
+        callback = verifier
+        if isinstance(verifier, dict):
+            discovered = importlib.metadata.entry_points()
+            candidates = (discovered.select(group=_APPROVAL_VERIFIER_ENTRY_POINT_GROUP)
+                          if hasattr(discovered, "select") else discovered.get(_APPROVAL_VERIFIER_ENTRY_POINT_GROUP, ()))
+            matches = [item for item in candidates if item.name == verifier["entry_point"]]
+            if len(matches) != 1:
+                raise ValueError("approval verifier entry point is not installed")
+            entry_point = matches[0]
+            distribution = getattr(entry_point, "dist", None)
+            if (distribution is None
+                    or str(distribution.metadata.get("Name") or "").lower() != verifier["distribution"].lower()
+                    or str(distribution.version) != verifier["version"]):
+                raise ValueError("approval verifier distribution identity mismatch")
+            module_name = getattr(entry_point, "module", "")
+            if (module_name != verifier["module"]
+                    or getattr(entry_point, "value", None) != verifier["entry_point_value"]):
+                raise ValueError("approval verifier entry point changed after pinning")
+            module_spec = importlib.util.find_spec(module_name)
+            origin = getattr(module_spec, "origin", None)
+            if not isinstance(origin, str) or "sha256:" + hashlib.sha256(Path(origin).read_bytes()).hexdigest() != verifier["source_digest"]:
+                raise ValueError("approval verifier source digest mismatch")
+            callback = entry_point.load()
+        if not callable(callback):
+            raise ValueError("approval verifier entry point is invalid")
+        channel.send((True, callback(request)))
+    except Exception:
+        channel.send((False, None))
+    finally:
+        channel.close()
+
+
+def _stop_approval_verifier_child(child) -> None:
+    """Bound timeout cleanup even when provider code absorbs SIGTERM."""
+    for signal_number, fallback in ((signal.SIGTERM, child.terminate), (signal.SIGKILL, child.kill)):
+        if not child.is_alive():
+            child.join()
+            return
+        with contextlib.suppress(OSError):
+            os.killpg(child.pid, signal_number)
+        if child.is_alive():
+            with contextlib.suppress(OSError):
+                fallback()
+        child.join(_APPROVAL_VERIFIER_TERMINATE_GRACE_SEC)
+    if not child.is_alive():
+        child.join()
+
+
+def _run_approval_verifier(verifier, request: dict) -> dict:
+    """Execute verifier in a reaped child; timeouts cannot leave it running."""
+    try:
+        context = multiprocessing.get_context("fork")
+    except ValueError as exc:
+        raise ValueError("isolated approval verifier execution is unavailable on this host") from exc
+    receiver, sender = context.Pipe(duplex=False)
+    child = context.Process(target=_approval_verifier_child, args=(verifier, request, sender))
+    try:
+        child.start()
+        sender.close()
+        child.join(_APPROVAL_VERIFIER_TIMEOUT_SEC)
+        if child.is_alive():
+            _stop_approval_verifier_child(child)
+            raise ValueError("approval verifier timed out")
+        if child.exitcode != 0 or not receiver.poll():
+            raise ValueError("approval verifier rejected the evidence")
+        success, result = receiver.recv()
+        if not success or not isinstance(result, dict):
+            raise ValueError("approval verifier rejected the evidence")
+        return result
+    finally:
+        sender.close()
+        receiver.close()
+        if child.is_alive():
+            _stop_approval_verifier_child(child)
+        if not child.is_alive():
+            child.close()
+
+
+def verify_force_approval(request: dict, verifier_name: object, *, cwd: Path | None = None) -> dict:
+    """Fail closed unless a registered callback returns a matching typed envelope."""
+    if not isinstance(verifier_name, str) or not _APPROVAL_VERIFIER_NAME_RE.fullmatch(verifier_name):
+        raise ValueError("approval verifier is invalid or not configured")
+    verifier = _APPROVAL_VERIFIERS.get(verifier_name)
+    descriptor = _configured_approval_entry_point(cwd, verifier_name) if verifier is None and cwd is not None else None
+    if verifier is None and descriptor is None:
+        raise ValueError("approval verifier is not configured")
+    try:
+        result = _run_approval_verifier(verifier if verifier is not None else descriptor, request)
+    except Exception as exc:
+        raise ValueError("approval verifier rejected the evidence") from exc
+    try:
+        envelope = {"request": request, "response": result, "receipt_ref": result.get("receipt_ref"), "consumed": True}
+        validated = validate_recorded_envelope(envelope)
+    except (AttributeError, ValueError) as exc:
+        raise ValueError("approval verifier did not return a verified envelope") from exc
+    if validated["response"]["verifier_id"] != verifier_name:
+        raise ValueError("approval verifier did not return a verified envelope")
+    return validated
+
+
+def _force_envelope_replayed(cwd: Path, envelope: dict) -> bool:
+    """Reject a request or receipt already consumed by any local session."""
+    request_digest = envelope["request"]["request_digest"]
+    receipt = envelope["receipt_ref"]
+    sessions = state_dir(cwd) / "sessions"
+    for candidate in sessions.glob("*.json"):
+        try:
+            other = json.loads(candidate.read_text(encoding="utf-8"))
+            recorded = other.get("force_approval") if isinstance(other, dict) else None
+            if not isinstance(recorded, dict):
+                continue
+            validated = validate_recorded_envelope(recorded)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            # A malformed record must never become a bypass; it is not a
+            # reusable approved envelope, and audit will flag it separately.
+            continue
+        if (validated["request"]["request_digest"] == request_digest
+                or validated["receipt_ref"] == receipt):
+            return True
+    return False
+
+
+def _is_new_provenance_state(data: dict) -> bool:
+    """Legacy terminal records are display-only; new writers do not consult this."""
+    return isinstance(data.get("schema_version"), int) and data["schema_version"] >= 4
+
+
+def _revision_scope_from_args(args) -> dict:
+    base, head = getattr(args, "base_sha", None), getattr(args, "head_sha", None)
+    if base is None and head is None:
+        return {"kind": "not-applicable", "reason_code": "non-git"}
+    if not (isinstance(base, str) and isinstance(head, str)
+            and re.fullmatch(r"[0-9a-f]{40}", base) and re.fullmatch(r"[0-9a-f]{40}", head)):
+        raise ValueError("git revision_scope requires exact 40-character --base-sha and --head-sha")
+    return {"kind": "git", "base_sha": base, "head_sha": head}
+
+
+def _validate_revision_scope(cwd: Path, scope: object) -> None:
+    """Bind git scope to this checked-out project, never to a SHA-shaped claim."""
+    if not isinstance(scope, dict):
+        raise ValueError("revision_scope is invalid")
+    git = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
+                         capture_output=True, text=True)
+    is_git = git.returncode == 0
+    if scope.get("kind") == "not-applicable":
+        if scope != {"kind": "not-applicable", "reason_code": "non-git"} or is_git:
+            raise ValueError("not-applicable revision_scope is allowed only for non-git projects")
+        return
+    if scope.get("kind") != "git":
+        raise ValueError("revision_scope is invalid")
+    if not is_git:
+        raise ValueError("git revision_scope requires a git project")
+    base, head = scope.get("base_sha"), scope.get("head_sha")
+    if not all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value)
+               for value in (base, head)):
+        raise ValueError("git revision_scope must use exact SHAs")
+    def checked(*command: str) -> str:
+        result = subprocess.run(["git", "-C", str(cwd), *command], capture_output=True, text=True)
+        if result.returncode != 0:
+            raise ValueError("git revision_scope names an unknown commit")
+        return result.stdout.strip()
+    checked("cat-file", "-e", f"{base}^{{commit}}")
+    checked("cat-file", "-e", f"{head}^{{commit}}")
+    checked("merge-base", "--is-ancestor", base, head)
+    if checked("rev-parse", "HEAD") != head:
+        raise ValueError("git revision_scope head is not the current reviewed HEAD")
+
+
+def _validate_provenance(provenance: object, *, require: bool) -> dict | None:
+    if provenance is None:
+        if require:
+            raise ValueError("structured score provenance is required")
+        return None
+    if not isinstance(provenance, dict):
+        raise ValueError("score provenance must be an object")
+    source = provenance.get("score_source")
+    ref = provenance.get("review_evidence_ref")
+    scope = provenance.get("revision_scope")
+    if source not in {"scoring-json", "manual-import"}:
+        raise ValueError("score provenance has invalid score_source")
+    if source == "scoring-json":
+        if not isinstance(ref, dict) or ref.get("kind") != "review-aggregate" or not isinstance(ref.get("path"), str) or not _SHA256_REF_RE.fullmatch(str(ref.get("digest") or "")) or not isinstance(ref.get("generation"), str) or not isinstance(ref.get("revision_scope"), dict):
+            raise ValueError("score provenance has invalid review_evidence_ref")
+        if not isinstance(scope, dict) or scope != ref["revision_scope"]:
+            raise ValueError("score provenance revision_scope mismatch")
+    else:
+        # Manual imports intentionally do not reuse reviewer aggregates.  The
+        # typed capture is the only supported host-file route.
+        manual = provenance.get("manual_evidence_ref")
+        if ref is not None:
+            raise ValueError("manual-import must not contain review_evidence_ref")
+        if (not isinstance(manual, dict) or manual.get("kind") != "manual-score"
+                or not isinstance(manual.get("path"), str)
+                or not _SHA256_REF_RE.fullmatch(str(manual.get("digest") or ""))
+                or not isinstance(manual.get("generation"), str)
+                or not isinstance(manual.get("revision_scope"), dict)):
+            raise ValueError("score provenance has invalid manual_evidence_ref")
+        if not isinstance(scope, dict) or scope != manual["revision_scope"]:
+            raise ValueError("manual-import revision_scope mismatch")
+    if not isinstance(provenance.get("scoring_evidence_ref"), dict) and require:
+        # push-score adds this after archiving; raw aggregate output has none.
+        pass
+    return provenance
+
+
+def _manual_score_binding(data: dict, entry: dict, payload: dict) -> dict:
+    """The complete claim a manually supplied score is permitted to carry."""
+    return {
+        "session_id": data.get("session_id"), "mission_id": data.get("mission_id"),
+        "iteration": entry.get("iteration"), "items": entry.get("items"),
+        "composite": entry.get("composite"), "min_item": entry.get("min_item"),
+        "review_agreement": entry.get("review_agreement"),
+        "open_high": entry.get("open_high"), "revision_scope": payload.get("revision_scope"),
+        "source_evidence_ref": payload.get("source_evidence_ref"),
+    }
+
+
+def _validate_manual_score_payload(payload: object, data: dict, entry: dict) -> None:
+    if not isinstance(payload, dict) or payload.get("schema") != "mission-manual-score/1":
+        raise ValueError("manual score evidence has invalid schema")
+    if "review_evidence_ref" in payload or payload.get("manual_evidence_ref") is not None:
+        raise ValueError("manual score evidence must not use review aggregate references")
+    required = {"schema", "session_id", "mission_id", "iteration", "items", "composite", "min_item",
+                "review_agreement", "open_high", "revision_scope", "source_evidence_ref", "imported_at", "input_digest"}
+    if set(payload) != required:
+        raise ValueError("manual score evidence has invalid fields")
+    if not isinstance(payload.get("imported_at"), str) or not payload["imported_at"].strip():
+        raise ValueError("manual score evidence imported_at is invalid")
+    items = payload.get("items")
+    if not isinstance(items, dict) or set(items) != CANONICAL_SCORE_KEYS:
+        raise ValueError("manual score items are invalid")
+    for axis in REVIEW_SCORE_KEYS:
+        if not _finite_score(items[axis]):
+            raise ValueError(f"manual score item {axis} must be a finite in-range number")
+    for label in ("composite", "min_item", "review_agreement"):
+        if not _finite_score(payload.get(label)):
+            raise ValueError(f"manual score {label} must be a finite in-range number")
+    if not _nonnegative_int(payload.get("open_high")):
+        raise ValueError("manual score open_high must be a non-negative integer")
+    source = payload.get("source_evidence_ref")
+    if (not isinstance(source, dict) or set(source) != {"kind", "ref", "digest"}
+            or source.get("kind") != "manual-source-evidence"
+            or not _SHA256_REF_RE.fullmatch(str(source.get("ref") or ""))
+            or source.get("ref") != source.get("digest")):
+        raise ValueError("manual score evidence source reference is invalid")
+    claimed_digest = payload.get("input_digest")
+    unsigned = {key: value for key, value in payload.items() if key != "input_digest"}
+    if claimed_digest != provenance_digest(unsigned):
+        raise ValueError("manual score evidence input digest mismatch")
+    if _manual_score_binding(data, entry, payload) != {
+        key: payload.get(key) for key in _manual_score_binding(data, entry, payload)
+    }:
+        raise ValueError("manual score evidence binding mismatch")
+
+
+def _read_bounded_review_evidence(cwd: Path, path_text: object) -> bytes:
+    """Read a state-local evidence file through one descriptor chain, without TOCTOU."""
+    try:
+        return read_score_provenance_evidence(cwd, path_text)
+    except ValueError as exc:
+        raise ValueError(str(exc).replace("score provenance evidence", "review evidence")) from exc
+
+
+def _read_bounded_manual_input(path_text: object) -> bytes:
+    """Safely capture one host-provided manual-score JSON file before archiving."""
+    if not isinstance(path_text, str) or not path_text or "\x00" in path_text:
+        raise ValueError("manual score input path is invalid")
+    try:
+        fd = os.open(path_text, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            initial = os.fstat(fd)
+            if not stat.S_ISREG(initial.st_mode) or initial.st_nlink != 1 or initial.st_size > 4 * 1024 * 1024:
+                raise ValueError("manual score input must be a bounded regular non-symlink file")
+            content = os.read(fd, initial.st_size)
+            final = os.fstat(fd)
+            current = os.stat(path_text, follow_symlinks=False)
+            identity = lambda metadata: (
+                metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink,
+                metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns,
+            )
+            if (
+                len(content) != initial.st_size
+                or os.read(fd, 1)
+                or identity(final) != identity(initial)
+                or identity(current) != identity(initial)
+            ):
+                raise ValueError("manual score input changed while being read")
+            return content
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise ValueError("manual score input path is invalid") from exc
+
+
+def cmd_manual_score_capture(args):
+    """Capture a typed manual score into the only manual-import evidence route."""
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        print("ERROR: state.json が見つかりません。先に init してください。", file=sys.stderr)
+        sys.exit(2)
+    try:
+        content = _read_bounded_manual_input(args.input)
+        payload = json.loads(content.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        print(f"ERROR: manual score input: {exc}", file=sys.stderr)
+        sys.exit(2)
+    with StateLock(lock_file(cwd)):
+        data = json.loads(sf.read_text(encoding="utf-8"))
+        entry = {
+            "iteration": payload.get("iteration"), "items": payload.get("items"),
+            "composite": payload.get("composite"), "min_item": payload.get("min_item"),
+            "review_agreement": payload.get("review_agreement"),
+            "open_high": payload.get("open_high"),
+        }
+        try:
+            _validate_manual_score_payload(payload, data, entry)
+            _validate_revision_scope(cwd, payload["revision_scope"])
+            if (not isinstance(entry["iteration"], int) or isinstance(entry["iteration"], bool)
+                    or entry["iteration"] < 1 or entry["iteration"] != data.get("iteration")
+                    or set(entry["items"] or {}) != CANONICAL_SCORE_KEYS):
+                raise ValueError("manual score iteration or items are invalid")
+            values = [float(entry["items"][axis]) for axis in REVIEW_SCORE_KEYS]
+            if entry["composite"] != round(sum(values) / len(values), 2) or entry["min_item"] != round(min(values), 2):
+                raise ValueError("manual score composite or min_item is not derived from four axes")
+        except (TypeError, ValueError) as exc:
+            print(f"ERROR: manual score input: {exc}", file=sys.stderr)
+            sys.exit(2)
+        digest = hashlib.sha256(content).hexdigest()
+        mission8 = str(data.get("mission_id") or "unknown")[:8]
+        archive = state_dir(cwd) / "archive" / f"iter-{entry['iteration']}-{mission8}-manual-{digest[:16]}.json"
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        if archive.exists() and _sha256_file(archive) != digest:
+            print("ERROR: immutable manual score archive collision", file=sys.stderr)
+            sys.exit(2)
+        if not archive.exists():
+            atomic_write_bytes(archive, content)
+        ref = {
+            "kind": "manual-score", "path": str(archive.relative_to(cwd)),
+            "digest": "sha256:" + digest, "generation": digest[:16],
+            "revision_scope": payload["revision_scope"],
+        }
+        scoring = {
+            "items": entry["items"], "open_high": entry["open_high"],
+            "review_agreement": entry["review_agreement"],
+            "score_provenance": {"score_source": "manual-import", "manual_evidence_ref": ref,
+                                  "revision_scope": payload["revision_scope"]},
+        }
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(out, scoring)
+    print(json.dumps({"ok": True, "scoring_json": str(out), "manual_evidence_ref": ref}, ensure_ascii=False))
+
+
+def _revalidate_score_provenance(cwd: Path, entry: dict, data: dict, *, require_scoring_artifact: bool = True) -> None:
+    """Re-check immutable evidence at the pass boundary; never trust a saved digest alone."""
+    # A live pass is always a new decision.  Historical schema versions are
+    # display compatibility only and must never relax its evidence boundary.
+    provenance = _validate_provenance(entry.get("score_provenance"), require=True)
+    if provenance is None:
+        return
+    is_manual = provenance["score_source"] == "manual-import"
+    ref = provenance["manual_evidence_ref"] if is_manual else provenance["review_evidence_ref"]
+    _validate_revision_scope(cwd, provenance["revision_scope"])
+    content = _read_bounded_review_evidence(cwd, ref["path"])
+    digest = hashlib.sha256(content).hexdigest()
+    if "sha256:" + digest != ref["digest"]:
+        raise ValueError("review evidence digest mismatch")
+    if ref["generation"] != digest[:16]:
+        raise ValueError("review evidence generation mismatch")
+    try:
+        parsed = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("review evidence must be valid UTF-8 JSON") from exc
+    if is_manual:
+        _validate_manual_score_payload(parsed, data, entry)
+        score_ref = provenance.get("scoring_evidence_ref")
+        if require_scoring_artifact:
+            if not isinstance(score_ref, dict) or score_ref.get("kind") != "scoring-artifact" or not _SHA256_REF_RE.fullmatch(str(score_ref.get("digest") or "")):
+                raise ValueError("scoring evidence reference is invalid")
+            score_bytes = _read_bounded_review_evidence(cwd, score_ref.get("path"))
+            if "sha256:" + hashlib.sha256(score_bytes).hexdigest() != score_ref["digest"]:
+                raise ValueError("scoring evidence digest mismatch")
+        return
+    if not isinstance(parsed, dict) or parsed.get("schema") != "mission-review-aggregate/1":
+        raise ValueError("review evidence has invalid schema")
+    try:
+        archive_iteration = parsed.get("iteration")
+        expected_iteration = entry.get("iteration")
+        if (isinstance(archive_iteration, bool) or not isinstance(archive_iteration, int)
+                or archive_iteration < 1 or archive_iteration != expected_iteration):
+            raise ValueError("review evidence iteration mismatch")
+        derived = reduce_review_aggregate(parsed.get("inputs"), expected_iteration=expected_iteration)
+    except ValueError as exc:
+        raise ValueError(f"review evidence inputs are invalid: {exc}") from exc
+    claim = parsed.get("score_claim")
+    expected_claim = {
+        "iteration": entry.get("iteration"), "items": entry.get("items"),
+        "composite": entry.get("composite"), "min_item": entry.get("min_item"),
+        "open_high": entry.get("open_high"), "review_agreement": entry.get("review_agreement"),
+        "agreement_detail": entry.get("agreement_detail"),
+    }
+    derived_claim = {"iteration": expected_iteration, **derived}
+    if claim != derived_claim:
+        raise ValueError("review evidence score claim is absent or not derived from inputs")
+    if expected_claim != derived_claim:
+        raise ValueError("review evidence score claim mismatch")
+    score_ref = provenance.get("scoring_evidence_ref")
+    if require_scoring_artifact:
+        if not isinstance(score_ref, dict) or score_ref.get("kind") != "scoring-artifact" or not _SHA256_REF_RE.fullmatch(str(score_ref.get("digest") or "")):
+            raise ValueError("scoring evidence reference is invalid")
+        score_bytes = _read_bounded_review_evidence(cwd, score_ref.get("path"))
+        if "sha256:" + hashlib.sha256(score_bytes).hexdigest() != score_ref["digest"]:
+            raise ValueError("scoring evidence digest mismatch")
+        try:
+            artifact = json.loads(score_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("scoring evidence must be valid UTF-8 JSON") from exc
+        binding = artifact.get("binding") if isinstance(artifact, dict) else None
+        expected = {
+            "session_id": data.get("session_id"), "mission_id": data.get("mission_id"),
+            "iteration": entry.get("iteration"), "items": entry.get("items"),
+            "composite": entry.get("composite"), "min_item": entry.get("min_item"),
+            "revision_scope": provenance["revision_scope"], "review_generation": ref["generation"],
+            "review_evidence_ref": ref,
+        }
+        if artifact.get("schema") != "mission-scoring-artifact/1" or binding != expected:
+            raise ValueError("scoring evidence binding mismatch")
 
 
 def _resolve_recorded_path(cwd: Path, path_text: str) -> Path:
@@ -7871,6 +8541,12 @@ def cmd_aggregate_reviews(args):
     if args.iteration < 1:
         print("ERROR: --iteration は 1 以上で指定してください", file=sys.stderr)
         sys.exit(2)
+    try:
+        revision_scope = _revision_scope_from_args(args)
+        _validate_revision_scope(cwd, revision_scope)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
     # #326: critic scope 記録の hard gate。#309 の guidance 層は next を呼ばない
     # orchestrator に bypass される実測 (disc-v3) があるため、集計側で fail-closed に
     # 強制する。escape hatch は作らない (#240 の合意偽装防止と同思想)。
@@ -7963,6 +8639,18 @@ def cmd_aggregate_reviews(args):
         for finding in review.get("findings", [])
         if finding.get("severity") == "High"
     )
+    # The archive claim is authored by the same pure reducer that later
+    # validates the untrusted archive.  Keep the surrounding observability
+    # fields, but do not let this writer become a second scoring authority.
+    try:
+        derived_score = reduce_review_aggregate(reviews, expected_iteration=args.iteration)
+    except ValueError as exc:
+        print(f"ERROR: review aggregate inputs are invalid: {exc}", file=sys.stderr)
+        sys.exit(2)
+    items = derived_score["items"]
+    open_high = derived_score["open_high"]
+    review_agreement = derived_score["review_agreement"]
+    agreement_detail = derived_score["agreement_detail"]
 
     # #282/#350: reviewer 並列実行の観測。2 名以上では全 reviewer の
     # self-report を fail-closed で要求し、実行形態そのものは gate しない。
@@ -8050,8 +8738,6 @@ def cmd_aggregate_reviews(args):
                 file=sys.stderr,
             )
         mission8 = (data.get("mission_id") or "unknown")[:8]
-        evidence_path = state_dir(cwd) / "archive" / f"iter-{args.iteration}-{mission8}-reviews.json"
-        evidence_path.parent.mkdir(parents=True, exist_ok=True)
         evidence = {
             "schema": "mission-review-aggregate/1",
             "iteration": args.iteration,
@@ -8068,8 +8754,23 @@ def cmd_aggregate_reviews(args):
             "context_mode_expected": context_mode_expected,
             "context_manifest_generated": context_manifest_generated,
             "reviewer_output_metrics": reviewer_output_metrics,
+            # This is the authoritative, deterministic derivation from the
+            # archived review inputs. push-score and mark-passes compare every
+            # decision value to it; a digest alone is not semantic binding.
+            "score_claim": {
+                "iteration": args.iteration, **derived_score,
+            },
         }
-        evidence_path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        evidence_content = (json.dumps(evidence, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        evidence_digest = "sha256:" + hashlib.sha256(evidence_content).hexdigest()
+        evidence_path = state_dir(cwd) / "archive" / f"iter-{args.iteration}-{mission8}-reviews-{evidence_digest[7:23]}.json"
+        evidence_path.parent.mkdir(parents=True, exist_ok=True)
+        if evidence_path.exists() and _sha256_file(evidence_path) != evidence_digest[7:]:
+            print("ERROR: immutable review archive collision", file=sys.stderr)
+            sys.exit(2)
+        if not evidence_path.exists():
+            atomic_write_bytes(evidence_path, evidence_content)
+        evidence_ref_path = str(evidence_path.relative_to(cwd))
 
         out_path = Path(args.out) if args.out else Path("/tmp") / f"mission-scorer-iter-{args.iteration}-{mission8}.json"
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -8077,9 +8778,19 @@ def cmd_aggregate_reviews(args):
             "items": items,
             "notes": f"aggregate-reviews: {len(adjusted_scores)} scoring reviewer(s), {len(reviews) - len(scoring_reviews)} findings-only reviewer(s)",
             "open_high": open_high,
-            "findings_evidence_path": str(evidence_path),
+            "findings_evidence_path": evidence_ref_path,
             "review_agreement": review_agreement,
             "agreement_detail": agreement_detail,
+            "score_provenance": {
+                "score_source": "scoring-json",
+                "review_evidence_ref": {
+                    "kind": "review-aggregate", "path": evidence_ref_path,
+                    "digest": evidence_digest,
+                    "generation": evidence_digest[7:23],
+                    "revision_scope": revision_scope,
+                },
+                "revision_scope": revision_scope,
+            },
         }
         out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -8131,16 +8842,9 @@ def _reject_on_score_item_mismatch(args, items: dict) -> None:
 
 
 def _validate_consensus_policy(data: dict, items: dict) -> None:
-    """Issue #10: Simple/Reviewer 1名では reviewer_consensus を採点 items から省略する."""
-    if "reviewer_consensus" not in items:
-        return
-    if data.get("complexity") == "Simple" and data.get("reviewer_count") == 1:
-        print(
-            "ERROR: Simple 複雑度かつ Reviewer 1名では reviewer_consensus を --items から省略してください "
-            "(Issue #10: consensus は複数 Reviewer 間の合意度であり、1名では検証できません)。"
-            " composite/min_item は残り4項目で算出し、notes に consensus 省略を明記してください。",
-            file=sys.stderr,
-        )
+    """Retained call site: new score items are always exactly the four axes."""
+    if set(items) != CANONICAL_SCORE_KEYS:
+        print("ERROR: 新規 score items は4つの正規採点軸だけで指定してください。", file=sys.stderr)
         sys.exit(2)
 
 
@@ -8212,8 +8916,8 @@ def cmd_push_score(args):
     if not sf.exists():
         print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
         sys.exit(1)
-    if args.open_high < 0:
-        print("ERROR: --open-high は 0 以上で指定してください", file=sys.stderr)
+    if not _nonnegative_int(args.open_high):
+        print("ERROR: --open-high は bool ではない 0 以上の整数で指定してください", file=sys.stderr)
         sys.exit(2)
     if args.iteration < 1:
         print("ERROR: --iteration は 1 以上で指定してください", file=sys.stderr)
@@ -8230,8 +8934,9 @@ def cmd_push_score(args):
             )
             sys.exit(2)
         items, json_notes, json_open_high, scoring_payload = _load_scoring_json(args.scoring_json)
-        args.composite = round(sum(_numeric_item_values(items)) / len(items), 2)
-        args.min_item = round(min(_numeric_item_values(items)), 2)
+        score_axis_values = [float(items[axis]) for axis in REVIEW_SCORE_KEYS]
+        args.composite = round(sum(score_axis_values) / len(score_axis_values), 2)
+        args.min_item = round(min(score_axis_values), 2)
         # scoring JSON が authoritative: JSON に open_high があれば CLI --open-high より優先
         if json_open_high is not None:
             args.open_high = json_open_high
@@ -8274,8 +8979,32 @@ def cmd_push_score(args):
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
-        now = iso_now()
         _validate_consensus_policy(data, items)
+        try:
+            provenance = _validate_provenance(
+                scoring_payload.get("score_provenance") if scoring_payload else None,
+                # A push is always a new score write, even if an attacker
+                # deleted/downgraded schema_version from an active state.
+                require=True,
+            )
+        except ValueError as exc:
+            print(f"ERROR: provenance: {exc}", file=sys.stderr)
+            sys.exit(2)
+        if provenance is not None:
+            try:
+                _revalidate_score_provenance(cwd, {
+                    "iteration": args.iteration, "items": items,
+                    "composite": args.composite, "min_item": args.min_item,
+                    "open_high": args.open_high,
+                    "review_agreement": scoring_payload.get("review_agreement") if scoring_payload else None,
+                    "agreement_detail": scoring_payload.get("agreement_detail") if scoring_payload else None,
+                    "score_provenance": provenance,
+                }, data,
+                                              require_scoring_artifact=False)
+            except ValueError as exc:
+                print(f"ERROR: provenance: {exc}", file=sys.stderr)
+                sys.exit(2)
+        now = iso_now()
         # #122: 同一 iteration の再 push は gate 迂回の温床 (低スコア push 後に
         # 高スコアで上書き)。再 push には差し替え理由を必須化する。旧 entry は履歴として残す。
         resubmit_reason = getattr(args, "resubmit_reason", None)
@@ -8312,9 +9041,24 @@ def cmd_push_score(args):
                 entry["agreement_detail"] = scoring_payload["agreement_detail"]
             # archive を state 書き込みより先に行う (crash 時に state が実在しない
             # scoring_evidence_path を指す dangling reference を防ぐ。他 archive 系と同順序)
-            entry["score_source"] = "scoring-json"
+            entry["score_source"] = provenance["score_source"] if provenance else "scoring-json"
+            if provenance is not None:
+                entry["score_provenance"] = provenance
+                if provenance["score_source"] == "manual-import":
+                    entry["manual_evidence_ref"] = provenance["manual_evidence_ref"]
+                else:
+                    entry["review_evidence_ref"] = provenance["review_evidence_ref"]
+                entry["revision_scope"] = provenance["revision_scope"]
             scoring_json_archived_to = _archive_scoring_json(cwd, args.iteration, data, entry, scoring_payload)
-            entry["scoring_evidence_path"] = scoring_json_archived_to
+            artifact_state_path = str(Path(scoring_json_archived_to).relative_to(cwd))
+            entry["scoring_evidence_path"] = artifact_state_path if provenance is not None else scoring_json_archived_to
+            artifact_bytes = _read_bounded_review_evidence(cwd, artifact_state_path)
+            if provenance is not None:
+                provenance["scoring_evidence_ref"] = {
+                    "kind": "scoring-artifact",
+                    "path": artifact_state_path,
+                    "digest": "sha256:" + hashlib.sha256(artifact_bytes).hexdigest(),
+                }
         data.setdefault("score_history", []).append(entry)
         # 改善2: top-level iteration を同期 (orchestrator の set 取りこぼしで
         # iteration と score_history 長が不整合になる問題への対処)。
@@ -8335,6 +9079,8 @@ def cmd_push_score(args):
         else:
             data["stagnation_count"] = 0
         data["updated_at"] = now
+        # A successful provenance-bearing score is the only migration path.
+        data["schema_version"] = SCHEMA_VERSION
         data = stamp_metadata(data, cwd)
         backup_state(sf)
         atomic_write_json(sf, data)
@@ -8366,6 +9112,8 @@ def cmd_review_finalize(args):
         json=True,
         min_reviewers=args.min_reviewers,
         reviewer_windows=args.reviewer_windows,
+        base_sha=args.base_sha,
+        head_sha=args.head_sha,
     )
     agg_stdout = io.StringIO()
     with contextlib.redirect_stdout(agg_stdout):
@@ -8472,6 +9220,11 @@ def cmd_mark_passes(args):
     force = bool(getattr(args, "force", False))
     reason = getattr(args, "reason", None)
     approved_by_user = bool(getattr(args, "approved_by_user", False))
+    approval_ref = getattr(args, "approval_evidence_ref", None)
+    approved_actor = getattr(args, "approved_actor", None)
+    approved_at = getattr(args, "approved_at", None)
+    reason_code = getattr(args, "reason_code", None)
+    approval_verifier = getattr(args, "approval_verifier", None)
 
     if force and not reason:
         print("ERROR: --force を指定する場合は --reason \"<理由>\" が必須です。", file=sys.stderr)
@@ -8488,6 +9241,33 @@ def cmd_mark_passes(args):
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
+        if force:
+            try:
+                latest_scope = next((entry.get("revision_scope") for entry in reversed(data.get("score_history", []))
+                                     if isinstance(entry, dict) and isinstance(entry.get("revision_scope"), dict)),
+                                    {"kind": "not-applicable", "reason_code": "non-git"})
+                # Bind the approval to the exact terminal state that this
+                # invocation will persist.  The shared projection excludes
+                # force_approval and timestamps, so it can be reproduced by
+                # the post-write assertion and historical audit.
+                terminal_object = dict(data)
+                terminal_object.update({"passes": True, "loop_active": False, "passes_forced": True})
+                _write_terminal_outcome(terminal_object)
+                request = build_approval_request(
+                    session_id=data.get("session_id"), mission_id=data.get("mission_id"),
+                    revision_scope=latest_scope, terminal_object_digest=terminal_state_digest(terminal_object),
+                    approval_evidence_ref=approval_ref, approved_actor=approved_actor, approved_at=approved_at,
+                    reason_code=reason_code, event_nonce=secrets.token_hex(32),
+                )
+                verification = verify_force_approval(request, approval_verifier, cwd=cwd)
+                if _force_envelope_replayed(cwd, verification):
+                    raise ValueError("approval request or receipt was already consumed")
+                validate_receipt_binding(cwd, verification)
+                if data.get("force_approval"):
+                    raise ValueError("approval envelope was already consumed")
+            except ValueError as exc:
+                print(f"ERROR: force approval: {exc}", file=sys.stderr)
+                sys.exit(2)
         try:
             validate_artifact_state_consistency(data, require_resolved=True)
         except ArtifactContractError as exc:
@@ -8500,11 +9280,32 @@ def cmd_mark_passes(args):
         if not force:
             # 改善3b: composite を持つ直近エントリで判定 (末尾に進捗ノート等の
             # composite 欠損エントリが混入していても gate を壊さない)。
-            scored = [h for h in history if _is_valid_composite(h.get("composite"))]
+            # Select the newest declared score before validating its immutable
+            # provenance.  Filtering malformed values first would misreport a
+            # forged manual score as "not scored" and skip its typed boundary.
+            scored = [h for h in history if isinstance(h, dict) and "composite" in h]
             if not scored:
                 print("ERROR: 採点未実施。`push-score` を先に呼んでください。", file=sys.stderr)
                 sys.exit(2)
             latest = scored[-1]
+            try:
+                _revalidate_score_provenance(cwd, latest, data)
+            except ValueError as exc:
+                print(f"ERROR: provenance: {exc}", file=sys.stderr)
+                sys.exit(2)
+            # Findings evidence must be reconciled before applying the High
+            # gate. A High finding caps its axis at 3.0, so evaluating the
+            # generic score gates first would make this dedicated safety gate
+            # unreachable for otherwise valid, reducer-derived evidence.
+            _validate_findings_evidence_gate(cwd, latest)
+            # Issue #3: unresolved High findings always prevent a pass.
+            open_high = latest.get("open_high") or 0
+            if open_high > 0:
+                print(
+                    f"ERROR: 未解決 High が {open_high} 件あるため合格にできません。High 指摘を全て解消してから再採点してください。",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
             composite = latest.get("composite")
             min_item = latest.get("min_item")
             if composite is None or composite < threshold:
@@ -8519,18 +9320,8 @@ def cmd_mark_passes(args):
                     file=sys.stderr,
                 )
                 sys.exit(2)
-            # Issue #121: scoring-json entry は aggregate-reviews が保存した findings evidence と open_high を再照合する。
-            _validate_findings_evidence_gate(cwd, latest)
             # Issue #126: reviewer agreement は composite から独立した gate として扱う。
             _validate_review_agreement_gate(latest)
-            # Issue #3: 未解決 High が残っている場合は合格にできない (後方互換: open_high 欠如 → 0 扱い → 通過)
-            open_high = latest.get("open_high") or 0
-            if open_high > 0:
-                print(
-                    f"ERROR: 未解決 High が {open_high} 件あるため合格にできません。High 指摘を全て解消してから再採点してください。",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
             artifact_error = _artifact_gate_error(data, cwd)
             if artifact_error:
                 print(f"ERROR: {artifact_error}", file=sys.stderr)
@@ -8609,6 +9400,11 @@ def cmd_mark_passes(args):
         if force:
             data["force_reason"] = reason
             data["force_approved_by_user"] = approved_by_user  # #185
+            data["force_approval"] = verification
+            if verification["request"]["terminal_object_digest"] != terminal_state_digest(data):
+                print("ERROR: force approval terminal state binding changed before write", file=sys.stderr)
+                sys.exit(2)
+            data["force_approval"]["consumed"] = True
         backup_state(sf)
         atomic_write_json(sf, data)
         # #11: aggregate 更新も同じ StateLock 内で行う (lock 外だと並列 mark で lost update)
@@ -9477,7 +10273,7 @@ def _dedupe_states(states: list[dict]) -> tuple[list[dict], int]:
 
 def _is_valid_composite(c) -> bool:
     """composite が採点値として有効か (数値・bool除外・NaN除外)."""
-    return isinstance(c, (int, float)) and not isinstance(c, bool) and not math.isnan(c)
+    return _finite_score(c)
 
 
 def _latest_composite(history: list) -> float | None:
@@ -9603,6 +10399,31 @@ def _artifact_lint_counts(states: list[dict]) -> dict:
     return counts
 
 
+def _score_provenance_counts(states: list[dict]) -> dict[str, int]:
+    counts = {"verified": 0, "legacy-unverifiable": 0, "invalid": 0}
+    for state in states:
+        terminal = not bool(state.get("loop_active"))
+        source_path = state.get("_mission_source_path")
+        project_root = project_root_from_state_path(source_path)
+        reader = None
+        if isinstance(source_path, str):
+            source = Path(source_path)
+            parts = source.parts
+            if ".mission-state" in parts:
+                index = parts.index(".mission-state")
+                if index + 2 < len(parts) and parts[index + 1] == "archive" and parts[index + 2].startswith("worktree-"):
+                    validation = validate_worktree_archive_bundle(Path(*parts[:index + 3]))
+                    persisted_state = {key: value for key, value in state.items() if key != "_mission_source_path"}
+                    if validation.status == "valid" and validation.state == persisted_state:
+                        reader = validated_archive_evidence_reader(validation)
+        for entry in state.get("score_history") or []:
+            counts[classify_score_provenance(
+                entry, terminal=terminal, project_root=project_root, state=state,
+                evidence_reader=reader,
+            )] += 1
+    return counts
+
+
 def _aggregate(
     states: list[dict], duplicate_state_group_count: int = 0,
     *, observation_now: datetime | None = None,
@@ -9655,6 +10476,7 @@ def _aggregate(
                 "fallback_full": 0,
             },
             "reviewer_output_stats": _reviewer_output_stats([]),
+            "score_provenance_counts": _score_provenance_counts([]),
             "activity_timing": summarize_activity_states([]),
         }
     # _classify を 1 回だけ評価 (旧実装は pass/halt/incomplete で 3N 回呼んでいた)
@@ -9759,6 +10581,7 @@ def _aggregate(
         "artifact_coverage": summarize_artifact_coverage(states),
         "bounded_context_counts": bounded_context_counts,
         "reviewer_output_stats": _reviewer_output_stats(states),
+        "score_provenance_counts": _score_provenance_counts(states),
         "forced_pass_rate": forced_pass_count / pass_count if pass_count else None,
         "ungated_pass_count": ungated_pass_count,
         "ungated_pass_rate": ungated_pass_count / pass_count if pass_count else None,
@@ -9845,6 +10668,11 @@ def _format_text(stats: dict, since: str | None, until: str | None) -> str:
         f"counts_conserved {str(artifact_coverage.get('counts_conserved', False)).lower()}",
     ])
     lines += [
+        "score_provenance:       verified {verified} / legacy-unverifiable {legacy} / invalid {invalid}".format(
+            verified=(stats.get("score_provenance_counts") or {}).get("verified", 0),
+            legacy=(stats.get("score_provenance_counts") or {}).get("legacy-unverifiable", 0),
+            invalid=(stats.get("score_provenance_counts") or {}).get("invalid", 0),
+        ),
         f"  incomplete:             {stats['incomplete_count']}",
         f"  abandoned:              {stats['abandoned_count']}",
         f"avg_iterations:           {stats['avg_iterations']:.2f}" if stats['avg_iterations'] is not None else "avg_iterations: -",
@@ -10305,7 +11133,7 @@ def _build_parser():
     p_set.add_argument("kvs", nargs="+")
     p_set.set_defaults(func=cmd_set)
 
-    p_pass = sub.add_parser("mark-passes", help="threshold gate を満たすとき passes=true, loop_active=false (--force --reason --approved-by-user で override 可)")
+    p_pass = sub.add_parser("mark-passes", help="threshold gate を満たすとき passes=true, loop_active=false (--force には --reason --approved-by-user --approval-evidence-ref --approved-actor --approved-at --reason-code --approval-verifier が全て必須)")
     p_pass.add_argument("--force", action="store_true",
                         help="threshold gate を skip して強制的に passes=true を書き込む (--reason と --approved-by-user が必須)")
     p_pass.add_argument("--reason", default=None,
@@ -10313,6 +11141,15 @@ def _build_parser():
     p_pass.add_argument("--approved-by-user", action="store_true", dest="approved_by_user",
                         help="#185: --force と併用必須。ユーザーが明示的に override を承認したことの宣言 "
                              "(orchestrator が自律的に付けてはならない — ユーザーの明示指示があった場合のみ)")
+    p_pass.add_argument("--approval-evidence-ref", default=None,
+                        help="verified approval record digest (sha256:<64 hex>)")
+    p_pass.add_argument("--approved-actor", default=None,
+                        help="approval role only; role:<opaque>, never an identity")
+    p_pass.add_argument("--approved-at", default=None, help="timezone-aware approval timestamp")
+    p_pass.add_argument("--reason-code", default=None,
+                        choices=sorted(_PROVENANCE_REASON_CODES))
+    p_pass.add_argument("--approval-verifier", default=None,
+                        help="configured approval verifier provider (neutral-test is test-only)")
     p_pass.set_defaults(func=cmd_mark_passes)
 
     p_score = sub.add_parser("push-score", help="score_history に採点結果を append (orchestrator が Phase 5 直後に呼ぶ)")
@@ -10334,6 +11171,14 @@ def _build_parser():
                          help="同一 iteration を再 push する際に必須 (#122)。理由を score_history entry の resubmit_reason に記録する")
     p_score.set_defaults(func=cmd_push_score)
 
+    p_manual_score = sub.add_parser(
+        "manual-score-capture",
+        help="typed mission-manual-score/1 を安全に archive し、manual-import 用 scoring JSON を生成",
+    )
+    p_manual_score.add_argument("--input", required=True, help="host user が用意した mission-manual-score/1 JSON")
+    p_manual_score.add_argument("--out", required=True, help="push-score --scoring-json に渡す出力 JSON")
+    p_manual_score.set_defaults(func=cmd_manual_score_capture)
+
     p_agg = sub.add_parser("aggregate-reviews", help="#119: mission-review/1 JSON を決定論集計して push-score 互換 scoring JSON を生成")
     p_agg.add_argument("--iteration", type=int, required=True)
     p_agg.add_argument("--input", action="append", required=True,
@@ -10347,6 +11192,8 @@ def _build_parser():
                        help="#282: reviewer 実行時間帯 '<perspective>=<start>..<end>' (ISO 8601)。"
                             "reviewer 2 名以上では全 perspective 分が必須 (不足は exit 2)。"
                             "実行時間帯の重なりは evidence に記録 (#350)")
+    p_agg.add_argument("--base-sha", default=None, help="exact reviewed git base SHA (requires --head-sha)")
+    p_agg.add_argument("--head-sha", default=None, help="exact reviewed git head SHA (requires --base-sha)")
     p_agg.set_defaults(func=cmd_aggregate_reviews)
 
     p_rf = sub.add_parser("review-finalize",
@@ -10364,6 +11211,8 @@ def _build_parser():
     p_rf.add_argument("--notes", default=None)
     p_rf.add_argument("--resubmit-reason", default=None, dest="resubmit_reason",
                       help="#122: 同一 iteration の再 push 理由")
+    p_rf.add_argument("--base-sha", default=None, help="exact reviewed git base SHA")
+    p_rf.add_argument("--head-sha", default=None, help="exact reviewed git head SHA")
     p_rf.set_defaults(func=cmd_review_finalize)
 
     p_closeout = sub.add_parser("closeout",

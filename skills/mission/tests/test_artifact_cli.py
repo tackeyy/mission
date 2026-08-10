@@ -90,7 +90,7 @@ def test_artifact_init_append_render_and_export(state_dir, run_cli, read_state):
     assert read_state(state_dir)["artifact"]["status"] == "exported"
 
 
-def test_artifact_required_for_pass_blocks_until_rendered(state_dir, run_cli, read_state):
+def test_artifact_required_for_pass_blocks_until_rendered(state_dir, run_cli, read_state, push_provenance_score):
     root = state_dir.parent
     run_cli(
         "artifact",
@@ -100,7 +100,7 @@ def test_artifact_required_for_pass_blocks_until_rendered(state_dir, run_cli, re
         cwd=root,
         check=True,
     )
-    run_cli(*_passing_score_args(), cwd=root, check=True)
+    push_provenance_score(root)
 
     blocked = run_cli("mark-passes", cwd=root)
     assert blocked.returncode == 2

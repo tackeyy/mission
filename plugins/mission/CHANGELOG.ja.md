@@ -9,7 +9,11 @@
 
 ## [Unreleased]
 
+- 採点項目を4軸に統一し、reviewer の合意度を独立して記録するようにしました。手動採点の取り込みには typed かつ content-addressed な専用経路を用意し、全スコアを bool ではない有限の範囲内数値、open High 件数を bool ではない 0 以上の整数として検証します。audit と stats で採点 provenance を確認できます (#383)。
+
 ### 追加
+
+- approval verifier の trust root は user-only `$XDG_CONFIG_HOME/mission/approval-verifiers.json` の `mission-approval-verifier-registry/2` とし、唯一の登録手順で `entry_point`、`distribution`、`version`、`source_digest` を pin する。parent/child が同じ pin を再照合し、load と callback を reaped child process 内で時間制限付き実行する (#383)。
 
 - activity 計測を planning の自動開始から全非終端 phase の portable default まで連動させ、`advance --phase` は明示 override がなければ既定 activity を使うようにした。review 集計は scoring の計測を atomic に開始し、terminal writer は open segment を閉じ、recovery は bounded な unobserved-gap reason を記録する。audit は elapsed conservation を明示し、coverage 70% 未満では slow-run finding より instrumentation-gap を優先する (#382)。
 

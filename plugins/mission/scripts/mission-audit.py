@@ -70,6 +70,7 @@ from audit_findings import (  # noqa: E402
 )
 from worktree_archive import (  # noqa: E402
     WorktreeArchiveValidation,
+    validated_archive_evidence_reader,
     validate_worktree_archive_bundle,
 )
 from state_snapshot import (  # noqa: E402
@@ -84,6 +85,13 @@ from state_snapshot import (  # noqa: E402
     root_metadata_inventory as snapshot_root_metadata_inventory,
     value_digest,
     write_snapshot,
+)
+from scoring_provenance import (  # noqa: E402
+    classify_score_provenance,
+    project_root_from_state_path,
+    terminal_state_digest,
+    validate_receipt_binding,
+    validate_recorded_envelope,
 )
 
 
@@ -150,6 +158,11 @@ FINDING_SPECS = {
         "invalid-score-iteration", "P1", "invalid_score_iterations", "item",
         "score history has an iteration outside iteration >= 1",
         "{count} {sessions} have score_history entries outside iteration >= 1",
+    ),
+    "invalid-score-provenance": FindingSpec(
+        "invalid-score-provenance", "P1", "invalid_score_provenance", "item",
+        "new score has malformed or unverifiable provenance",
+        "{count} {sessions} have malformed or unverifiable new score provenance",
     ),
     "blank-specialist-invocation": FindingSpec(
         "blank-specialist-invocation", "P2", "blank_specialist_invocations", "item",
@@ -459,6 +472,10 @@ def _expected_manifest_lineage(record: StateRecord) -> Counter[tuple[str, int, s
             "reviews", entry_iteration, entry.get("findings_evidence_path")
         ):
             return None
+    approval = state.get("force_approval") if isinstance(state.get("force_approval"), dict) else {}
+    receipt = approval.get("receipt_ref") if isinstance(approval.get("receipt_ref"), dict) else {}
+    if receipt.get("path") and not add("approval-receipt", iteration, receipt.get("path")):
+        return None
     for invocation in state.get("specialist_invocations") or []:
         if not isinstance(invocation, dict) or not invocation.get("evidence_path"):
             continue
@@ -1623,15 +1640,42 @@ _USER_APPROVAL_MENTION_TOKENS = (
 )
 
 
-def is_forced_pass_autonomous_suspect(state: dict[str, Any]) -> bool:
+def is_forced_pass_autonomous_suspect(state: dict[str, Any], *, root: Path | None = None,
+                                      consumed: set[tuple[str, str]] | None = None) -> bool:
     """#185: force_approved_by_user が記録されておらず (旧形式)、かつ force_reason にも
     ユーザー承認への言及がない forced-pass を「自律 force の疑いあり」として検出する。"""
-    if state.get("force_approved_by_user") is True:
-        return False
-    reason = str(state.get("force_reason") or "").lower()
-    if any(token in reason for token in _USER_APPROVAL_MENTION_TOKENS):
-        return False
+    approval = state.get("force_approval")
+    if isinstance(approval, dict):
+        # Audit does not trust a self-declared verification string.  The same
+        # complete canonical envelope accepted by the writer is required.
+        try:
+            envelope = validate_recorded_envelope(approval, require_fresh=False)
+            if root is None:
+                return True
+            validate_receipt_binding(root, envelope)
+            request = envelope["request"]
+            if request["terminal_object_digest"] != terminal_state_digest(state):
+                return True
+            receipt = envelope["receipt_ref"]
+            key = (request["request_digest"], receipt["digest"])
+            if consumed is not None and key in consumed:
+                return True
+            if consumed is not None:
+                consumed.add(key)
+            return False
+        except (ValueError, json.JSONDecodeError):
+            return True
+    # Historical booleans and free text are retained, but are never verification.
     return True
+
+
+def state_root_for_record(record: StateRecord) -> Path | None:
+    """Derive the state owner directory without trusting state metadata."""
+    try:
+        index = record.path.parts.index(".mission-state")
+    except ValueError:
+        return None
+    return Path(record.path.anchor, *record.path.parts[1:index])
 
 
 def is_active_no_score_checkpoint(record: StateRecord) -> bool:
@@ -2129,6 +2173,36 @@ def invalid_score_iteration_item(record: StateRecord) -> dict[str, Any] | None:
     }
 
 
+def score_provenance_item(record: StateRecord) -> dict[str, Any] | None:
+    """Classify every score read-only; legacy terminal bytes remain untouched."""
+    terminal = not bool(record.state.get("loop_active"))
+    classifications: list[dict[str, Any]] = []
+    source_root = project_root_from_state_path(record.path)
+    reader = None
+    validation = record.archive_validation
+    if validation is not None and validation.status == "valid":
+        reader = validated_archive_evidence_reader(validation)
+    elif (bundle := _worktree_archive_root(record)) is not None:
+        candidate = validate_worktree_archive_bundle(bundle)
+        if candidate.status == "valid" and candidate.state == record.state:
+            reader = validated_archive_evidence_reader(candidate)
+    for index, entry in enumerate(record.state.get("score_history") or [], start=1):
+        status = classify_score_provenance(
+            entry, terminal=terminal, project_root=source_root, state=record.state,
+            evidence_reader=reader,
+        )
+        classifications.append({"index": index, "iteration": entry.get("iteration") if isinstance(entry, dict) else None,
+                                "classification": status})
+    if not classifications:
+        return None
+    return {
+        "project": project_name(record.state), "project_root": project_root_for(record),
+        "session_id": record.state.get("session_id") or record.path.stem,
+        "mission_id": record.state.get("mission_id") or "", "path": str(record.path),
+        "updated_at": record.state.get("updated_at") or "", "classifications": classifications,
+    }
+
+
 def blank_specialist_invocation_item(record: StateRecord) -> dict[str, Any] | None:
     blank_entries: list[dict[str, Any]] = []
     for index, invocation in enumerate(record.state.get("specialist_invocations") or [], start=1):
@@ -2199,7 +2273,16 @@ def aggregate(
     pass_count = classes.count("pass")
     pass_records = [r for r, cls in zip(records, classes) if cls == "pass"]
     forced = [r for r in records if r.state.get("passes") and r.state.get("passes_forced")]
-    forced_autonomous_suspect = [r for r in forced if is_forced_pass_autonomous_suspect(r.state)]
+    consumed_force_receipts: set[tuple[str, str]] = set()
+    forced_autonomous_suspect = [
+        r for r in forced
+        if is_forced_pass_autonomous_suspect(
+            r.state,
+            root=state_root_for_record(r),
+            consumed=consumed_force_receipts,
+        )
+    ]
+    forced_approved_verified = [r for r in forced if r not in forced_autonomous_suspect]
     ungated = [
         r for r in records
         if r.state.get("passes")
@@ -2250,6 +2333,15 @@ def aggregate(
     invalid_score_iterations = [
         item for r in records
         if (item := invalid_score_iteration_item(r)) is not None
+    ]
+    score_provenance = [
+        item for r in records
+        if (item := score_provenance_item(r)) is not None
+    ]
+    invalid_score_provenance = [
+        {**item, "invalid_entries": [entry for entry in item["classifications"] if entry["classification"] == "invalid"]}
+        for item in score_provenance
+        if any(entry["classification"] == "invalid" for entry in item["classifications"])
     ]
     blank_specialist_invocations = [
         item for r in records
@@ -2376,6 +2468,7 @@ def aggregate(
         "pass_rate_denominator": pass_rate_summary["completed_pass_rate_denominator"],
         "pass_rate": pass_rate_summary["completed_pass_rate"],
         "forced_pass_count": len(forced),
+        "forced_pass_approved_verified_count": len(forced_approved_verified),
         "forced_pass_autonomous_suspect_count": len(forced_autonomous_suspect),  # #185
         "ungated_pass_count": len(ungated),
         "duplicate_group_count": len(duplicates),
@@ -2396,6 +2489,7 @@ def aggregate(
         "low_score_pass_sessions": low_score_pass,
         "specialist_invocation_gap_sessions": specialist_invocation_gaps,
         "forced_pass_sessions": forced,
+        "forced_pass_approved_verified_sessions": forced_approved_verified,
         "forced_pass_autonomous_suspect_sessions": forced_autonomous_suspect,  # #185
         "ungated_pass_sessions": ungated,
         "duplicates": duplicates,
@@ -2409,6 +2503,12 @@ def aggregate(
         "invalid_score_iteration_breakdown": bucket_count_keys(
             [str(item.get("project") or "unknown") for item in invalid_score_iterations]
         ),
+        "score_provenance": score_provenance,
+        "score_provenance_counts": dict(Counter(
+            entry["classification"] for item in score_provenance for entry in item["classifications"]
+        )),
+        "invalid_score_provenance": invalid_score_provenance,
+        "invalid_score_provenance_count": len(invalid_score_provenance),
         "blank_specialist_invocations": blank_specialist_invocations,
         "blank_specialist_invocation_count": len(blank_specialist_invocations),
         "blank_specialist_invocation_breakdown": bucket_count_keys(
@@ -2762,6 +2862,7 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
         f"- resolved archive duplicates: {stats['resolved_duplicate_group_count']}",
         f"- missing scoring evidence: {stats['missing_scoring_evidence_count']}",
         f"- invalid score iterations: {stats['invalid_score_iteration_count']}",
+        f"- score provenance (verified / legacy-unverifiable / invalid): {stats['score_provenance_counts'].get('verified', 0)} / {stats['score_provenance_counts'].get('legacy-unverifiable', 0)} / {stats['score_provenance_counts'].get('invalid', 0)}",
         f"- blank specialist invocations: {stats['blank_specialist_invocation_count']}",
         f"- preparation-only completed command providers: {stats['preparation_only_completed_provider_count']}",
         f"- missing specialist selection checkpoints: {stats['missing_specialist_selection_checkpoint_count']}",
@@ -3218,6 +3319,7 @@ def main(argv: list[str] | None = None) -> int:
             if k not in {
                 "duplicates",
                 "forced_pass_sessions",
+                "forced_pass_approved_verified_sessions",
                 "forced_pass_autonomous_suspect_sessions",
                 "halt_sessions",
                 "actionable_halt_sessions",

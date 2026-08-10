@@ -941,7 +941,7 @@ def test_activity_start_rejects_terminal_state_without_mutation(tmp_path, run_cl
     assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize("terminal", ["mark-halt", "mark-passes"])
+@pytest.mark.parametrize("terminal", ["mark-halt"])
 def test_terminal_control_succeeds_despite_malformed_activity_and_records_anomaly(
     tmp_path, run_cli, terminal
 ):

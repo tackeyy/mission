@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import stat
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 WORKTREE_ARCHIVE_SCHEMA = "mission-worktree-archive/1"
 WORKTREE_ARCHIVE_POINTER_SCHEMA = "mission-worktree-current/1"
@@ -50,6 +51,89 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _stat_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+    return (
+        metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink,
+        metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns,
+    )
+
+
+def _read_generation_file(
+    root: Path, relative: Path, *, limit: int = 4 * 1024 * 1024,
+    expected_size: int | None = None,
+) -> tuple[bytes, os.stat_result]:
+    """Read an archive object through one no-follow descriptor chain.
+
+    The returned bytes and metadata identify the same regular, unlinked object.
+    A second descriptor-chain lookup catches pathname replacement after the read.
+    """
+    if (
+        not relative.parts or relative.is_absolute()
+        or any(part in {"", ".", ".."} for part in relative.parts)
+        or expected_size is not None
+        and (isinstance(expected_size, bool) or expected_size < 0 or expected_size > limit)
+    ):
+        raise ValueError("archive evidence path is invalid")
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    try:
+        root_fd = os.open(os.fspath(root), os.O_RDONLY | directory | nofollow)
+    except OSError as exc:
+        raise ValueError("archive generation is unavailable") from exc
+
+    def open_target() -> int:
+        fd = os.dup(root_fd)
+        try:
+            for index, part in enumerate(relative.parts):
+                flags = os.O_RDONLY | nofollow
+                if index + 1 < len(relative.parts):
+                    flags |= directory
+                else:
+                    flags |= os.O_NONBLOCK
+                next_fd = os.open(part, flags, dir_fd=fd)
+                os.close(fd)
+                fd = next_fd
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
+
+    try:
+        fd = open_target()
+        try:
+            initial = os.fstat(fd)
+            if (
+                not stat.S_ISREG(initial.st_mode)
+                or initial.st_nlink != 1
+                or initial.st_size > limit
+                or expected_size is not None and initial.st_size != expected_size
+            ):
+                raise ValueError("archive evidence must be a bounded regular non-linked file")
+            chunks: list[bytes] = []
+            remaining = initial.st_size
+            while remaining:
+                chunk = os.read(fd, min(remaining, 64 * 1024))
+                if not chunk:
+                    raise ValueError("archive evidence changed while being read")
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            if os.read(fd, 1) or _stat_identity(os.fstat(fd)) != _stat_identity(initial):
+                raise ValueError("archive evidence changed while being read")
+            current_fd = open_target()
+            try:
+                if _stat_identity(os.fstat(current_fd)) != _stat_identity(initial):
+                    raise ValueError("archive evidence changed while being read")
+            finally:
+                os.close(current_fd)
+            return b"".join(chunks), initial
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise ValueError("archive evidence is unavailable") from exc
+    finally:
+        os.close(root_fd)
+
+
 def _normalized_state_reference(value: Any) -> str | None:
     if not isinstance(value, str) or not value:
         return None
@@ -60,11 +144,19 @@ def _normalized_state_reference(value: Any) -> str | None:
     return Path(*path.parts[index:]).as_posix()
 
 
-def _expected_lineage(state: dict[str, Any], state_path: Path):
+def worktree_archive_lineage_references(
+    state: dict[str, Any], state_reference: str,
+) -> tuple[tuple[str, int, str], ...] | None:
+    """Return every state-owned immutable reference an archive must preserve.
+
+    This is deliberately the one schema reader used by both the archive writer
+    and generation validator.  Archive paths are transport details; source
+    references remain the immutable state contract.
+    """
     iteration = state.get("iteration")
     if not isinstance(iteration, int) or isinstance(iteration, bool):
         return None
-    expected: Counter[tuple[str, int, str]] = Counter()
+    expected: list[tuple[str, int, str]] = []
 
     def add(kind: str, item_iteration: Any, reference: Any) -> bool:
         normalized = _normalized_state_reference(reference)
@@ -74,10 +166,10 @@ def _expected_lineage(state: dict[str, Any], state_path: Path):
             or normalized is None
         ):
             return False
-        expected[(kind, item_iteration, normalized)] += 1
+        expected.append((kind, item_iteration, normalized))
         return True
 
-    if not add("state", iteration, f".mission-state/sessions/{state_path.name}"):
+    if not add("state", iteration, state_reference):
         return None
     if state.get("assumptions_path") and not add(
         "assumptions", iteration, state.get("assumptions_path")
@@ -98,6 +190,30 @@ def _expected_lineage(state: dict[str, Any], state_path: Path):
             "reviews", item_iteration, entry.get("findings_evidence_path")
         ):
             return None
+        provenance = entry.get("score_provenance") if isinstance(entry.get("score_provenance"), dict) else {}
+        source = provenance.get("score_source")
+        if source == "scoring-json":
+            reference = provenance.get("review_evidence_ref")
+            kind = "review-aggregate"
+        elif source == "manual-import":
+            reference = provenance.get("manual_evidence_ref")
+            kind = "manual-score-source"
+        else:
+            reference = None
+            kind = ""
+        if reference is not None:
+            if not isinstance(reference, dict) or not add(kind, item_iteration, reference.get("path")):
+                return None
+        artifact_reference = provenance.get("scoring_evidence_ref")
+        if artifact_reference is not None:
+            if not isinstance(artifact_reference, dict) or not add(
+                "scoring-artifact", item_iteration, artifact_reference.get("path")
+            ):
+                return None
+    approval = state.get("force_approval") if isinstance(state.get("force_approval"), dict) else {}
+    receipt = approval.get("receipt_ref") if isinstance(approval.get("receipt_ref"), dict) else {}
+    if receipt.get("path") and not add("approval-receipt", iteration, receipt.get("path")):
+        return None
     for invocation in state.get("specialist_invocations") or []:
         if not isinstance(invocation, dict) or not invocation.get("evidence_path"):
             continue
@@ -115,7 +231,48 @@ def _expected_lineage(state: dict[str, Any], state_path: Path):
         "progress-artifact", iteration, progress.get("artifact_path")
     ):
         return None
-    return expected
+    return tuple(expected)
+
+
+def _expected_lineage(state: dict[str, Any], state_path: Path):
+    references = worktree_archive_lineage_references(
+        state, f".mission-state/sessions/{state_path.name}",
+    )
+    return Counter(references) if references is not None else None
+
+
+def read_validated_archive_evidence(
+    validation: WorktreeArchiveValidation, source_reference: object,
+    *, limit: int = 4 * 1024 * 1024,
+) -> bytes:
+    """Read an evidence copy only after resolving it through a valid manifest."""
+    normalized = _normalized_state_reference(source_reference)
+    if validation.status != "valid" or normalized is None:
+        raise ValueError("archive evidence resolver is invalid")
+    matches = [item for item in validation.evidence if item.get("source_reference") == normalized]
+    if not matches or len({item.get("sha256") for item in matches}) != 1:
+        raise ValueError("archive evidence reference is missing or ambiguous")
+    item = matches[0]
+    path = item.get("path")
+    if not isinstance(path, Path):
+        raise ValueError("archive evidence resolver is invalid")
+    try:
+        relative = path.relative_to(validation.root)
+        content, _metadata = _read_generation_file(
+            validation.root, relative, limit=limit, expected_size=item.get("size"),
+        )
+    except (OSError, ValueError) as exc:
+        raise ValueError("archive evidence is unavailable") from exc
+    if hashlib.sha256(content).hexdigest() != item.get("sha256"):
+        raise ValueError("archive evidence integrity mismatch")
+    return content
+
+
+def validated_archive_evidence_reader(
+    validation: WorktreeArchiveValidation,
+) -> Callable[[object], bytes]:
+    """Expose a bounded source-reference reader for scoring consumers."""
+    return lambda reference: read_validated_archive_evidence(validation, reference)
 
 
 def validate_worktree_archive_bundle(bundle: Path) -> WorktreeArchiveValidation:
@@ -124,7 +281,7 @@ def validate_worktree_archive_bundle(bundle: Path) -> WorktreeArchiveValidation:
         bundle_stat = bundle.lstat()
     except FileNotFoundError:
         return _invalid(bundle, bundle, "bundle-not-regular-directory")
-    except OSError:
+    except (OSError, ValueError):
         return _invalid(bundle, bundle, "bundle-access-error")
     if stat.S_ISLNK(bundle_stat.st_mode) or not stat.S_ISDIR(bundle_stat.st_mode):
         return _invalid(bundle, bundle, "bundle-not-regular-directory")
@@ -139,10 +296,13 @@ def validate_worktree_archive_bundle(bundle: Path) -> WorktreeArchiveValidation:
     if stat.S_ISLNK(pointer_stat.st_mode) or not stat.S_ISREG(pointer_stat.st_mode):
         return _invalid(bundle, bundle, "pointer-not-regular-file")
     try:
-        pointer_bytes = pointer_path.read_bytes()
-        pointer = json.loads(pointer_bytes.decode("utf-8"))
-    except OSError:
+        pointer_bytes, _pointer_metadata = _read_generation_file(
+            bundle, Path("current.json")
+        )
+    except (OSError, ValueError):
         return _invalid(bundle, bundle, "pointer-access-error")
+    try:
+        pointer = json.loads(pointer_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return _invalid(bundle, bundle, "pointer-invalid-json")
     generation = pointer.get("generation") if isinstance(pointer, dict) else None
@@ -180,12 +340,12 @@ def validate_worktree_archive_bundle(bundle: Path) -> WorktreeArchiveValidation:
         return _invalid(bundle, generation_root, "generation-missing-or-not-directory", generation)
 
     manifest_path = generation_root / "manifest.json"
-    if manifest_path.is_symlink() or not manifest_path.is_file():
-        return _invalid(bundle, generation_root, "manifest-not-regular-file", generation)
     try:
-        manifest_bytes = manifest_path.read_bytes()
+        manifest_bytes, _manifest_metadata = _read_generation_file(
+            generation_root, Path("manifest.json")
+        )
         manifest = json.loads(manifest_bytes.decode("utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
         return _invalid(bundle, generation_root, "manifest-invalid-json", generation)
     if not isinstance(manifest, dict) or manifest.get("schema") != WORKTREE_ARCHIVE_SCHEMA:
         return _invalid(bundle, generation_root, "manifest-invalid-schema", generation)
@@ -207,6 +367,7 @@ def validate_worktree_archive_bundle(bundle: Path) -> WorktreeArchiveValidation:
 
     seen_paths: set[str] = set()
     state_paths: list[Path] = []
+    state_payloads: dict[str, bytes] = {}
     checked: list[dict[str, Any]] = []
     for item in evidence:
         if not isinstance(item, dict):
@@ -225,16 +386,10 @@ def validate_worktree_archive_bundle(bundle: Path) -> WorktreeArchiveValidation:
             return _invalid(bundle, generation_root, "manifest-unsafe-or-duplicate-path", generation)
         seen_paths.add(archive_path.as_posix())
         archived = generation_root / archive_path
-        current = generation_root
-        for part in archive_path.parts:
-            current = current / part
-            if current.is_symlink():
-                return _invalid(bundle, generation_root, "manifest-evidence-symlink", generation)
         expected_size = item.get("size")
         expected_hash = item.get("sha256")
         if (
-            not archived.is_file()
-            or not isinstance(expected_size, int)
+            not isinstance(expected_size, int)
             or isinstance(expected_size, bool)
             or expected_size < 0
             or not isinstance(expected_hash, str)
@@ -242,19 +397,24 @@ def validate_worktree_archive_bundle(bundle: Path) -> WorktreeArchiveValidation:
         ):
             return _invalid(bundle, generation_root, "manifest-invalid-evidence-file", generation)
         try:
-            if archived.stat().st_size != expected_size or _sha256(archived) != expected_hash:
-                return _invalid(bundle, generation_root, "manifest-evidence-integrity-mismatch", generation)
-        except OSError:
+            content, _metadata = _read_generation_file(
+                generation_root, archive_path, expected_size=expected_size,
+            )
+        except (OSError, ValueError):
             return _invalid(bundle, generation_root, "manifest-evidence-access-error", generation)
+        if hashlib.sha256(content).hexdigest() != expected_hash:
+            return _invalid(bundle, generation_root, "manifest-evidence-integrity-mismatch", generation)
         if item["evidence_kind"] == "state":
             state_paths.append(archived)
+            state_payloads[archive_path.as_posix()] = content
         checked.append({**item, "path": archived})
 
     if len(state_paths) != 1:
         return _invalid(bundle, generation_root, "manifest-state-count-invalid", generation)
     try:
-        state = json.loads(state_paths[0].read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        state_archive_path = state_paths[0].relative_to(generation_root).as_posix()
+        state = json.loads(state_payloads[state_archive_path].decode("utf-8"))
+    except (KeyError, OSError, UnicodeDecodeError, json.JSONDecodeError):
         return _invalid(bundle, generation_root, "manifest-state-invalid-json", generation)
     if (
         not isinstance(state, dict)

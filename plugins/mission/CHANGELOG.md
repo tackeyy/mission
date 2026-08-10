@@ -9,7 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Scoring now keeps quality assessment to four axes and records reviewer agreement separately. Manual score imports use a dedicated typed, content-addressed capture route: all score fields must be finite non-boolean values in range, and open High counts must be non-boolean non-negative integers. Audit/statistics show score provenance status (#383).
+
 ### Added
+
+- Approval verifier trust is the user-only `$XDG_CONFIG_HOME/mission/approval-verifiers.json` `mission-approval-verifier-registry/2`: its unique registration pins `entry_point`, `distribution`, `version`, and `source_digest`; parent and child recheck that pin, and load plus callback run in a reaped bounded child process (#383).
 
 - Activity measurement now starts automatically with planning, follows portable defaults for every non-terminal phase, and lets `advance --phase` use that default unless an explicit activity override is supplied. Review aggregation atomically begins scoring measurement, terminal writers close any open segment, and recovery records bounded unobserved-gap reasons. Audit reports explicit elapsed conservation and treats coverage below 70% as an instrumentation gap before emitting slow-run findings (#382).
 

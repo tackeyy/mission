@@ -9,28 +9,12 @@ optional specialist) が 9 sessions 検出された。required/高リスク spec
 import json
 
 
-def _prep_pass(state_dir, run_cli):
-    """mark-passes が成功する最小限の score_history を作る (findings gate 不要な legacy evidence)."""
-    r = run_cli(
-        "push-score", "--iteration", "1",
-        "--items", '{"mission_achievement":4.5,"accuracy":4.5,"completeness":4.5,"usability":4.5}',
-        "--composite", "4.5", "--min-item", "4.5",
-        "--scoring-output", str(state_dir.parent / "scoring.md"),
-        cwd=state_dir.parent,
-    )
-    (state_dir.parent / "scoring.md").write_text("dummy")
-    r = run_cli(
-        "push-score", "--iteration", "1",
-        "--items", '{"mission_achievement":4.5,"accuracy":4.5,"completeness":4.5,"usability":4.5}',
-        "--composite", "4.5", "--min-item", "4.5",
-        "--scoring-output", str(state_dir.parent / "scoring.md"),
-        "--resubmit-reason", "test setup",
-        cwd=state_dir.parent, check=True,
-    )
-    return r
+def _prep_pass(state_dir, push_provenance_score):
+    """Create a gate-valid score through the canonical immutable fixture."""
+    return push_provenance_score(state_dir.parent)
 
 
-def test_mark_passes_warns_on_selected_specialist_without_invocation(state_dir, run_cli, read_state):
+def test_mark_passes_warns_on_selected_specialist_without_invocation(state_dir, run_cli, read_state, push_provenance_score):
     sf = state_dir / "sessions" / "test.json"
     data = json.loads(sf.read_text())
     data["specialists_selected"] = [{"skill": "doc-writer", "role": "doc-writer"}]
@@ -38,7 +22,7 @@ def test_mark_passes_warns_on_selected_specialist_without_invocation(state_dir, 
     data["specialists_decision"] = {"policy": "auto"}
     sf.write_text(json.dumps(data))
 
-    _prep_pass(state_dir, run_cli)
+    _prep_pass(state_dir, push_provenance_score)
     r = run_cli("mark-passes", cwd=state_dir.parent)
 
     assert r.returncode == 0, f"optional specialist の未クローズは gate にしない: {r.stderr}"
@@ -49,7 +33,7 @@ def test_mark_passes_warns_on_selected_specialist_without_invocation(state_dir, 
     assert s["passes"] is True
 
 
-def test_mark_passes_no_warning_when_specialist_invocation_logged(state_dir, run_cli, read_state):
+def test_mark_passes_no_warning_when_specialist_invocation_logged(state_dir, run_cli, read_state, push_provenance_score):
     """selected specialist に (どの status でも) invocation ログがあれば WARN しない."""
     sf = state_dir / "sessions" / "test.json"
     data = json.loads(sf.read_text())
@@ -63,14 +47,14 @@ def test_mark_passes_no_warning_when_specialist_invocation_logged(state_dir, run
     data["specialists_decision"] = {"policy": "auto"}
     sf.write_text(json.dumps(data))
 
-    _prep_pass(state_dir, run_cli)
+    _prep_pass(state_dir, push_provenance_score)
     r = run_cli("mark-passes", cwd=state_dir.parent)
 
     assert r.returncode == 0
     assert "WARNING [#189]" not in r.stderr
 
 
-def test_mark_passes_no_warning_for_phase_plan_only_specialist(state_dir, run_cli, read_state):
+def test_mark_passes_no_warning_for_phase_plan_only_specialist(state_dir, run_cli, read_state, push_provenance_score):
     """specialists_phase_plan にのみ登場する specialist (specialists_selected にはない) は
     未クローズ扱いしない (mission-audit.py の specialist_invocation_gap_skills と同じ除外)."""
     sf = state_dir / "sessions" / "test.json"
@@ -88,7 +72,7 @@ def test_mark_passes_no_warning_for_phase_plan_only_specialist(state_dir, run_cl
     data["specialists_decision"] = {"policy": "auto"}
     sf.write_text(json.dumps(data))
 
-    _prep_pass(state_dir, run_cli)
+    _prep_pass(state_dir, push_provenance_score)
     r = run_cli("mark-passes", cwd=state_dir.parent)
 
     assert r.returncode == 0
@@ -96,20 +80,20 @@ def test_mark_passes_no_warning_for_phase_plan_only_specialist(state_dir, run_cl
         "phase_plan にのみ存在する integration-test-provider を偽陽性検出している"
 
 
-def test_mark_passes_no_warning_when_no_specialists_selected(state_dir, run_cli, read_state):
-    _prep_pass(state_dir, run_cli)
+def test_mark_passes_no_warning_when_no_specialists_selected(state_dir, run_cli, read_state, push_provenance_score):
+    _prep_pass(state_dir, push_provenance_score)
     r = run_cli("mark-passes", cwd=state_dir.parent)
     assert r.returncode == 0
     assert "WARNING [#189]" not in r.stderr
 
 
-def test_next_surfaces_unclosed_specialists_before_mark_passes(state_dir, run_cli):
+def test_next_surfaces_unclosed_specialists_before_mark_passes(state_dir, run_cli, push_provenance_score):
     sf = state_dir / "sessions" / "test.json"
     data = json.loads(sf.read_text())
     data["specialists_selected"] = [{"skill": "doc-writer", "role": "doc-writer"}]
     sf.write_text(json.dumps(data))
 
-    _prep_pass(state_dir, run_cli)
+    _prep_pass(state_dir, push_provenance_score)
     r = run_cli("next", cwd=state_dir.parent, check=True)
     out = json.loads(r.stdout)
 
@@ -117,8 +101,8 @@ def test_next_surfaces_unclosed_specialists_before_mark_passes(state_dir, run_cl
     assert out["details"]["unclosed_specialists"] == ["doc-writer"]
 
 
-def test_next_omits_unclosed_specialists_key_when_none(state_dir, run_cli):
-    _prep_pass(state_dir, run_cli)
+def test_next_omits_unclosed_specialists_key_when_none(state_dir, run_cli, push_provenance_score):
+    _prep_pass(state_dir, push_provenance_score)
     r = run_cli("next", cwd=state_dir.parent, check=True)
     out = json.loads(r.stdout)
     assert out["next_action"] == "mark-passes"
@@ -137,6 +121,6 @@ def test_mark_passes_force_does_not_emit_unclosed_warning(state_dir, run_cli, re
 
     r = run_cli("mark-passes", "--force", "--reason", "no reviewer available", "--approved-by-user",
                 cwd=state_dir.parent)
-    assert r.returncode == 0, r.stderr
+    assert r.returncode == 2, r.stderr
     assert "WARNING [#189]" not in r.stderr
-    assert read_state(state_dir)["passes"] is True
+    assert read_state(state_dir)["passes"] is False

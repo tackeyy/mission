@@ -31,7 +31,7 @@ def _push_score(run_cli, tmp_path, composite=4.5, min_item=4.0, sid="arch-sess")
     )
 
 
-def test_init_archives_old_state_on_mission_change(tmp_path, run_cli):
+def test_init_archives_old_state_on_mission_change(tmp_path, run_cli, push_provenance_score):
     """同 sid で別ミッション (別 mission_id) を init すると archive に退避される。"""
     sid = "arch-sess"
 
@@ -47,7 +47,7 @@ def test_init_archives_old_state_on_mission_change(tmp_path, run_cli):
     assumptions_file.write_text("# Assumption Registry\nA_1: first mission scope\n")
 
     # Push a score so score_history is non-empty
-    _push_score(run_cli, tmp_path, sid=sid)
+    push_provenance_score(tmp_path, env_extra={"MISSION_SESSION_ID": sid})
 
     # Re-read to confirm score_history exists
     score_data = json.loads(sf.read_text())
