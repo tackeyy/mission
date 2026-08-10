@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from skills.mission.tests.conftest import canonical_review, write_canonical_review_aggregate
+
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MISSION_AUDIT_PY = REPO_ROOT / "scripts" / "mission-audit.py"
@@ -86,6 +88,10 @@ def _make_completed_worktree(tmp_path: Path) -> tuple[Path, Path]:
         mission_state / "archive" / "progress-data.json",
         '{"completed":1}\n',
     )
+    approval_receipt = _write(
+        mission_state / "archive" / "approval-receipt.json",
+        '{"receipt":"fixture"}\n',
+    )
 
     state = {
         "mission": "neutral archive manifest test",
@@ -132,6 +138,7 @@ def _make_completed_worktree(tmp_path: Path) -> tuple[Path, Path]:
             "evidence_path": str(progress.relative_to(worktree)),
             "artifact_path": str(progress_artifact.relative_to(worktree)),
         },
+        "force_approval": {"receipt_ref": {"path": str(approval_receipt.relative_to(worktree))}},
     }
     state_file = mission_state / "sessions" / f"{SESSION_ID}.json"
     _write(state_file, json.dumps(state, indent=2) + "\n")
@@ -351,6 +358,7 @@ def test_archive_worktree_copies_allowlisted_evidence_and_writes_manifest(tmp_pa
         "specialist",
         "progress",
         "progress-artifact",
+        "approval-receipt",
     }
     for item in manifest["evidence"]:
         archived = generation_root / item["archive_path"]
@@ -376,6 +384,87 @@ def test_archived_bundle_survives_worktree_removal_without_missing_scoring(tmp_p
     assert data["total_sessions"] == 1
     assert data["missing_scoring_evidence_count"] == 0
     assert data["duplicate_group_count"] == 0
+
+
+def test_archive_worktree_preserves_manual_score_source_and_separate_artifact(tmp_path, run_cli):
+    """Manual imports retain their typed source and emitted scoring artifact."""
+    worktree, destination = _make_completed_worktree(tmp_path)
+    state_file = worktree / ".mission-state" / "sessions" / f"{SESSION_ID}.json"
+    manual = _write(worktree / ".mission-state" / "archive" / "manual-source.json", "{}\n")
+    artifact = _write(worktree / ".mission-state" / "archive" / "manual-artifact.json", "{}\n")
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    entry = state["score_history"][0]
+    entry["score_source"] = "manual-import"
+    entry["score_provenance"] = {
+        "score_source": "manual-import",
+        "manual_evidence_ref": {"path": str(manual.relative_to(worktree))},
+        "scoring_evidence_ref": {"path": str(artifact.relative_to(worktree))},
+    }
+    state_file.write_text(json.dumps(state), encoding="utf-8")
+
+    result = _archive(run_cli, worktree, destination)
+
+    assert result.returncode == 0, result.stderr
+    bundle = Path(json.loads(result.stdout)["bundle_path"])
+    manifest = json.loads((_active_bundle_root(bundle) / "manifest.json").read_text(encoding="utf-8"))
+    refs = {(item["evidence_kind"], item["source_reference"]) for item in manifest["evidence"]}
+    assert ("manual-score-source", ".mission-state/archive/manual-source.json") in refs
+    assert ("scoring-artifact", ".mission-state/archive/manual-artifact.json") in refs
+
+
+def test_archive_generation_keeps_score_provenance_verified_after_source_worktree_is_removed(tmp_path, run_cli):
+    """Audit and stats resolve typed score references through the manifest copy."""
+    worktree, destination = _make_completed_worktree(tmp_path)
+    state_file = worktree / ".mission-state" / "sessions" / f"{SESSION_ID}.json"
+    _path, review_ref, claim = write_canonical_review_aggregate(
+        worktree,
+        [canonical_review({"mission_achievement": 4.5, "accuracy": 4.5, "completeness": 4.5, "usability": 4.5})],
+        iteration=2,
+    )
+    artifact = {
+        "schema": "mission-scoring-artifact/1",
+        "binding": {
+            "session_id": SESSION_ID, "mission_id": MISSION_ID, "iteration": 2,
+            "items": claim["items"], "composite": claim["composite"], "min_item": claim["min_item"],
+            "revision_scope": review_ref["revision_scope"], "review_generation": review_ref["generation"],
+            "review_evidence_ref": review_ref,
+        },
+    }
+    artifact_path = _write(
+        worktree / ".mission-state" / "archive" / "typed-scoring-artifact.json",
+        json.dumps(artifact, sort_keys=True),
+    )
+    artifact_bytes = artifact_path.read_bytes()
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    entry = {
+        **claim,
+        "timestamp": "2026-07-20T00:08:00Z",
+        "score_source": "scoring-json",
+        "review_evidence_ref": review_ref,
+        "revision_scope": review_ref["revision_scope"],
+        "score_provenance": {
+            "score_source": "scoring-json", "review_evidence_ref": review_ref,
+            "revision_scope": review_ref["revision_scope"],
+            "scoring_evidence_ref": {
+                "kind": "scoring-artifact", "path": str(artifact_path.relative_to(worktree)),
+                "digest": "sha256:" + hashlib.sha256(artifact_bytes).hexdigest(),
+            },
+        },
+        "scoring_evidence_path": str(artifact_path.relative_to(worktree)),
+        "findings_evidence_path": review_ref["path"],
+    }
+    state["score_history"] = [entry]
+    state_file.write_text(json.dumps(state), encoding="utf-8")
+
+    result = _archive(run_cli, worktree, destination)
+    assert result.returncode == 0, result.stderr
+    shutil.rmtree(worktree)
+
+    audit = _run_audit(destination)
+    assert audit["score_provenance_counts"]["verified"] == 1
+    stats = run_cli("stats", "--root", str(destination), "--json", cwd=destination)
+    assert stats.returncode == 0, stats.stderr
+    assert json.loads(stats.stdout)["score_provenance_counts"]["verified"] == 1
 
 
 def test_generation_archive_has_same_pass_rate_population_in_stats_and_audit(tmp_path, run_cli):

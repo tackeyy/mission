@@ -70,6 +70,7 @@ from audit_findings import (  # noqa: E402
 )
 from worktree_archive import (  # noqa: E402
     WorktreeArchiveValidation,
+    validated_archive_evidence_reader,
     validate_worktree_archive_bundle,
 )
 from state_snapshot import (  # noqa: E402
@@ -2177,9 +2178,18 @@ def score_provenance_item(record: StateRecord) -> dict[str, Any] | None:
     terminal = not bool(record.state.get("loop_active"))
     classifications: list[dict[str, Any]] = []
     source_root = project_root_from_state_path(record.path)
+    reader = None
+    validation = record.archive_validation
+    if validation is not None and validation.status == "valid":
+        reader = validated_archive_evidence_reader(validation)
+    elif (bundle := _worktree_archive_root(record)) is not None:
+        candidate = validate_worktree_archive_bundle(bundle)
+        if candidate.status == "valid" and candidate.state == record.state:
+            reader = validated_archive_evidence_reader(candidate)
     for index, entry in enumerate(record.state.get("score_history") or [], start=1):
         status = classify_score_provenance(
             entry, terminal=terminal, project_root=source_root, state=record.state,
+            evidence_reader=reader,
         )
         classifications.append({"index": index, "iteration": entry.get("iteration") if isinstance(entry, dict) else None,
                                 "classification": status})

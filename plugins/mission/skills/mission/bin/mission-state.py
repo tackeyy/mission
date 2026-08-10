@@ -34,6 +34,7 @@ import contextlib
 import errno
 import fcntl
 import hashlib
+from collections import Counter
 import importlib.metadata
 import importlib.util
 import io
@@ -95,7 +96,11 @@ from activity_segments import (  # noqa: E402
     transition_activity_phase,
     validate_activity,
 )
-from worktree_archive import validate_worktree_archive_bundle  # noqa: E402
+from worktree_archive import (  # noqa: E402
+    validated_archive_evidence_reader,
+    validate_worktree_archive_bundle,
+    worktree_archive_lineage_references,
+)
 from state_snapshot import SnapshotError, consume_snapshot_document  # noqa: E402
 from provider_eligibility import (  # noqa: E402
     RegistryContractError,
@@ -4815,6 +4820,33 @@ def _collect_worktree_archive_specs(cwd: Path, state_file_path: Path, data: dict
         if reference:
             suffix = Path(reference).suffix
             add(kind, reference, Path("archive") / f"iter-{iteration}-{mission8}-{kind}{suffix}")
+
+    # The shared extractor is the archive contract.  Keep the historical
+    # human-friendly destinations above, then add every provenance-only
+    # reference it identifies using a content-addressed collision-safe name.
+    expected = worktree_archive_lineage_references(
+        data, f".mission-state/sessions/{state_file_path.name}",
+    )
+    if expected is None:
+        raise WorktreeArchiveError("state lineage references are invalid")
+    existing = Counter(
+        (spec["evidence_kind"], spec["iteration"], spec["source_reference"])
+        for spec in specs
+    )
+    required = Counter(expected)
+    for (kind, item_iteration, reference), count in required.items():
+        while existing[(kind, item_iteration, reference)] < count:
+            suffix = Path(reference).suffix or ".json"
+            identity = hashlib.sha256(
+                f"{kind}\0{item_iteration}\0{reference}\0{existing[(kind, item_iteration, reference)]}".encode("utf-8")
+            ).hexdigest()[:16]
+            add(
+                kind,
+                reference,
+                Path("archive") / "lineage" / f"iter-{item_iteration}-{mission8}-{kind}-{identity}{suffix}",
+                item_iteration,
+            )
+            existing[(kind, item_iteration, reference)] += 1
 
     destinations: dict[str, Path] = {}
     for spec in specs:
@@ -10371,10 +10403,23 @@ def _score_provenance_counts(states: list[dict]) -> dict[str, int]:
     counts = {"verified": 0, "legacy-unverifiable": 0, "invalid": 0}
     for state in states:
         terminal = not bool(state.get("loop_active"))
-        project_root = project_root_from_state_path(state.get("_mission_source_path"))
+        source_path = state.get("_mission_source_path")
+        project_root = project_root_from_state_path(source_path)
+        reader = None
+        if isinstance(source_path, str):
+            source = Path(source_path)
+            parts = source.parts
+            if ".mission-state" in parts:
+                index = parts.index(".mission-state")
+                if index + 2 < len(parts) and parts[index + 1] == "archive" and parts[index + 2].startswith("worktree-"):
+                    validation = validate_worktree_archive_bundle(Path(*parts[:index + 3]))
+                    persisted_state = {key: value for key, value in state.items() if key != "_mission_source_path"}
+                    if validation.status == "valid" and validation.state == persisted_state:
+                        reader = validated_archive_evidence_reader(validation)
         for entry in state.get("score_history") or []:
             counts[classify_score_provenance(
                 entry, terminal=terminal, project_root=project_root, state=state,
+                evidence_reader=reader,
             )] += 1
     return counts
 

@@ -9,7 +9,7 @@ import re
 import stat
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 SHA256_REF_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 VERIFIER_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
@@ -158,12 +158,13 @@ def _score_entry_claim(entry: dict[str, object]) -> dict[str, object]:
 
 def _validate_semantic_score_provenance(
     entry: dict[str, object], provenance: dict[str, object], ref: dict[str, object],
-    *, project_root: object, state: object,
+    *, project_root: object, state: object, evidence_reader: Callable[[object], bytes] | None = None,
 ) -> None:
     """Re-derive the score claim and its artifact binding from archived bytes."""
     if not isinstance(state, dict):
         raise ValueError("score provenance state is invalid")
-    content = read_score_provenance_evidence(project_root, ref["path"])
+    reader = evidence_reader or (lambda path: read_score_provenance_evidence(project_root, path))
+    content = reader(ref["path"])
     if "sha256:" + hashlib.sha256(content).hexdigest() != ref["digest"]:
         raise ValueError("score provenance evidence digest mismatch")
     try:
@@ -226,7 +227,7 @@ def _validate_semantic_score_provenance(
         or not SHA256_REF_RE.fullmatch(str(artifact_ref.get("digest") or ""))
     ):
         raise ValueError("score provenance artifact reference is invalid")
-    artifact_bytes = read_score_provenance_evidence(project_root, artifact_ref["path"])
+    artifact_bytes = reader(artifact_ref["path"])
     if "sha256:" + hashlib.sha256(artifact_bytes).hexdigest() != artifact_ref["digest"]:
         raise ValueError("score provenance artifact digest mismatch")
     try:
@@ -246,7 +247,7 @@ def _validate_semantic_score_provenance(
 
 def classify_score_provenance(
     entry: object, *, terminal: bool, project_root: object | None = None,
-    state: object | None = None,
+    state: object | None = None, evidence_reader: Callable[[object], bytes] | None = None,
 ) -> str:
     """Classify scores without upgrading legacy records; verify files when rooted."""
     if not isinstance(entry, dict):
@@ -261,7 +262,9 @@ def classify_score_provenance(
         if project_root is None or state is None:
             return "invalid"
         try:
-            _validate_semantic_score_provenance(entry, *pair, project_root=project_root, state=state)
+            _validate_semantic_score_provenance(
+                entry, *pair, project_root=project_root, state=state, evidence_reader=evidence_reader,
+            )
         except (OSError, TypeError, ValueError, KeyError):
             return "invalid"
     return "verified"

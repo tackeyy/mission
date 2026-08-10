@@ -8,7 +8,7 @@ import stat
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 WORKTREE_ARCHIVE_SCHEMA = "mission-worktree-archive/1"
 WORKTREE_ARCHIVE_POINTER_SCHEMA = "mission-worktree-current/1"
@@ -60,11 +60,19 @@ def _normalized_state_reference(value: Any) -> str | None:
     return Path(*path.parts[index:]).as_posix()
 
 
-def _expected_lineage(state: dict[str, Any], state_path: Path):
+def worktree_archive_lineage_references(
+    state: dict[str, Any], state_reference: str,
+) -> tuple[tuple[str, int, str], ...] | None:
+    """Return every state-owned immutable reference an archive must preserve.
+
+    This is deliberately the one schema reader used by both the archive writer
+    and generation validator.  Archive paths are transport details; source
+    references remain the immutable state contract.
+    """
     iteration = state.get("iteration")
     if not isinstance(iteration, int) or isinstance(iteration, bool):
         return None
-    expected: Counter[tuple[str, int, str]] = Counter()
+    expected: list[tuple[str, int, str]] = []
 
     def add(kind: str, item_iteration: Any, reference: Any) -> bool:
         normalized = _normalized_state_reference(reference)
@@ -74,10 +82,10 @@ def _expected_lineage(state: dict[str, Any], state_path: Path):
             or normalized is None
         ):
             return False
-        expected[(kind, item_iteration, normalized)] += 1
+        expected.append((kind, item_iteration, normalized))
         return True
 
-    if not add("state", iteration, f".mission-state/sessions/{state_path.name}"):
+    if not add("state", iteration, state_reference):
         return None
     if state.get("assumptions_path") and not add(
         "assumptions", iteration, state.get("assumptions_path")
@@ -98,6 +106,26 @@ def _expected_lineage(state: dict[str, Any], state_path: Path):
             "reviews", item_iteration, entry.get("findings_evidence_path")
         ):
             return None
+        provenance = entry.get("score_provenance") if isinstance(entry.get("score_provenance"), dict) else {}
+        source = provenance.get("score_source")
+        if source == "scoring-json":
+            reference = provenance.get("review_evidence_ref")
+            kind = "review-aggregate"
+        elif source == "manual-import":
+            reference = provenance.get("manual_evidence_ref")
+            kind = "manual-score-source"
+        else:
+            reference = None
+            kind = ""
+        if reference is not None:
+            if not isinstance(reference, dict) or not add(kind, item_iteration, reference.get("path")):
+                return None
+        artifact_reference = provenance.get("scoring_evidence_ref")
+        if artifact_reference is not None:
+            if not isinstance(artifact_reference, dict) or not add(
+                "scoring-artifact", item_iteration, artifact_reference.get("path")
+            ):
+                return None
     approval = state.get("force_approval") if isinstance(state.get("force_approval"), dict) else {}
     receipt = approval.get("receipt_ref") if isinstance(approval.get("receipt_ref"), dict) else {}
     if receipt.get("path") and not add("approval-receipt", iteration, receipt.get("path")):
@@ -119,7 +147,58 @@ def _expected_lineage(state: dict[str, Any], state_path: Path):
         "progress-artifact", iteration, progress.get("artifact_path")
     ):
         return None
-    return expected
+    return tuple(expected)
+
+
+def _expected_lineage(state: dict[str, Any], state_path: Path):
+    references = worktree_archive_lineage_references(
+        state, f".mission-state/sessions/{state_path.name}",
+    )
+    return Counter(references) if references is not None else None
+
+
+def read_validated_archive_evidence(
+    validation: WorktreeArchiveValidation, source_reference: object,
+    *, limit: int = 4 * 1024 * 1024,
+) -> bytes:
+    """Read an evidence copy only after resolving it through a valid manifest."""
+    normalized = _normalized_state_reference(source_reference)
+    if validation.status != "valid" or normalized is None:
+        raise ValueError("archive evidence resolver is invalid")
+    matches = [item for item in validation.evidence if item.get("source_reference") == normalized]
+    if not matches or len({item.get("sha256") for item in matches}) != 1:
+        raise ValueError("archive evidence reference is missing or ambiguous")
+    item = matches[0]
+    path = item.get("path")
+    if not isinstance(path, Path):
+        raise ValueError("archive evidence resolver is invalid")
+    try:
+        metadata = path.lstat()
+        if (stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_nlink != 1 or metadata.st_size > limit):
+            raise ValueError("archive evidence must be a bounded regular non-linked file")
+        content = path.read_bytes()
+        final = path.lstat()
+    except OSError as exc:
+        raise ValueError("archive evidence is unavailable") from exc
+    identity = lambda value: (
+        value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
+        value.st_size, value.st_mtime_ns, value.st_ctime_ns,
+    )
+    if (
+        identity(final) != identity(metadata)
+        or len(content) != metadata.st_size
+        or hashlib.sha256(content).hexdigest() != item.get("sha256")
+    ):
+        raise ValueError("archive evidence integrity mismatch")
+    return content
+
+
+def validated_archive_evidence_reader(
+    validation: WorktreeArchiveValidation,
+) -> Callable[[object], bytes]:
+    """Expose a bounded source-reference reader for scoring consumers."""
+    return lambda reference: read_validated_archive_evidence(validation, reference)
 
 
 def validate_worktree_archive_bundle(bundle: Path) -> WorktreeArchiveValidation:
