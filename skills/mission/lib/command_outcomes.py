@@ -29,6 +29,46 @@ class OutcomeStoreError(ValueError):
     """A sidecar cannot be safely read or appended."""
 
 
+def _directory_flags() -> int:
+    return os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _open_sidecar_directory(state_directory: Path) -> int:
+    """Create/open telemetry descendants through a no-follow descriptor chain."""
+    try:
+        current_fd = os.open(os.fspath(state_directory), _directory_flags())
+    except OSError as exc:
+        raise OutcomeStoreError("command outcome state directory is unsafe") from exc
+    try:
+        for name in ("telemetry", "command-outcomes"):
+            try:
+                next_fd = os.open(name, _directory_flags(), dir_fd=current_fd)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(name, 0o700, dir_fd=current_fd)
+                    next_fd = os.open(name, _directory_flags(), dir_fd=current_fd)
+                except OSError as exc:
+                    raise OutcomeStoreError("command outcome telemetry directory is unsafe") from exc
+            except OSError as exc:
+                raise OutcomeStoreError("command outcome telemetry directory is unsafe") from exc
+            opened = os.fstat(next_fd)
+            named = os.stat(name, dir_fd=current_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(opened.st_mode)
+                or opened.st_dev != named.st_dev
+                or opened.st_ino != named.st_ino
+                or opened.st_mode != named.st_mode
+            ):
+                os.close(next_fd)
+                raise OutcomeStoreError("command outcome telemetry directory changed")
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd
+    except BaseException:
+        os.close(current_fd)
+        raise
+
+
 def valid_identifier(value: Any) -> bool:
     return isinstance(value, str) and bool(_ID_RE.fullmatch(value))
 
@@ -76,11 +116,14 @@ def _safe_sidecar(directory: Path, sid_token: str) -> Path:
     root = directory / "telemetry" / "command-outcomes"
     path = root / f"{sid_token}.json"
     try:
-        root_parent = directory.resolve(strict=False)
-        if root_parent.is_symlink() or (root.exists() and root.is_symlink()):
-            raise OutcomeStoreError("command outcome telemetry directory is unsafe")
-        candidate = path.resolve(strict=False)
-        candidate.relative_to(root.resolve(strict=False))
+        current = directory
+        for candidate in (directory, directory / "telemetry", root):
+            if candidate.exists() or candidate.is_symlink():
+                metadata = candidate.lstat()
+                if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                    raise OutcomeStoreError("command outcome telemetry directory is unsafe")
+            current = candidate
+        path.absolute().relative_to(root.absolute())
     except (OSError, RuntimeError, ValueError) as exc:
         raise OutcomeStoreError("command outcome telemetry path is unsafe") from exc
     return path
@@ -131,23 +174,76 @@ def _decode_document(payload: bytes) -> list[dict[str, Any]]:
 
 
 class _Lock:
-    def __init__(self, path: Path): self.path, self.fd = path, None
+    def __init__(self, path: Path, *, parent_fd: int | None = None):
+        self.path = path
+        self.fd: int | None = None
+        self.parent_fd: int | None = os.dup(parent_fd) if parent_fd is not None else None
+
+    @staticmethod
+    def _same_identity(first: os.stat_result, second: os.stat_result) -> bool:
+        return (
+            first.st_dev == second.st_dev
+            and first.st_ino == second.st_ino
+            and first.st_mode == second.st_mode
+            and first.st_nlink == second.st_nlink
+        )
+
     def __enter__(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if self.path.is_symlink(): raise OutcomeStoreError("command outcome telemetry lock is unsafe")
-        self.fd = open(self.path, "w")
+        if self.parent_fd is None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        lock_flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            if self.parent_fd is None:
+                self.parent_fd = os.open(os.fspath(self.path.parent), _directory_flags())
+            self.fd = os.open(self.path.name, lock_flags, 0o600, dir_fd=self.parent_fd)
+            opened = os.fstat(self.fd)
+            named = os.stat(self.path.name, dir_fd=self.parent_fd, follow_symlinks=False)
+        except OSError as exc:
+            self._close()
+            raise OutcomeStoreError("command outcome telemetry lock is unsafe") from exc
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or not self._same_identity(opened, named)
+        ):
+            self._close()
+            raise OutcomeStoreError("command outcome telemetry lock is unsafe")
         deadline = time.monotonic() + 5
         while True:
             try:
-                fcntl.flock(self.fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                after = os.fstat(self.fd)
+                named_after = os.stat(
+                    self.path.name, dir_fd=self.parent_fd, follow_symlinks=False
+                )
+                if (
+                    after.st_nlink != 1
+                    or not self._same_identity(opened, after)
+                    or not self._same_identity(after, named_after)
+                ):
+                    self._close()
+                    raise OutcomeStoreError("command outcome telemetry lock changed")
                 return self
             except BlockingIOError:
-                if time.monotonic() >= deadline: raise OutcomeStoreError("command outcome telemetry lock timed out")
+                if time.monotonic() >= deadline:
+                    self._close()
+                    raise OutcomeStoreError("command outcome telemetry lock timed out")
                 time.sleep(.05)
-    def __exit__(self, *_):
+
+    def _close(self) -> None:
         if self.fd is not None:
-            fcntl.flock(self.fd.fileno(), fcntl.LOCK_UN)
-            self.fd.close()
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(self.fd)
+            self.fd = None
+        if self.parent_fd is not None:
+            os.close(self.parent_fd)
+            self.parent_fd = None
+
+    def __exit__(self, *_):
+        self._close()
 
 
 def _atomic_json(path: Path, document: dict[str, Any]) -> None:
@@ -169,12 +265,13 @@ def append_sidecar(state_directory: Path, sid_token: str, record: dict[str, Any]
     if validated is None:
         raise OutcomeStoreError("command outcome record is invalid")
     path = _safe_sidecar(state_directory, sid_token)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.parent.is_symlink():
-        raise OutcomeStoreError("command outcome telemetry directory is unsafe")
-    with _Lock(path.with_suffix(".lock")):
-        records = _decode_document(_read_regular(path)) if path.exists() else []
-        _atomic_json(path, {"schema": SCHEMA, "records": (records + [validated])[-LIMIT:]})
+    directory_fd = _open_sidecar_directory(state_directory)
+    try:
+        with _Lock(path.with_suffix(".lock"), parent_fd=directory_fd):
+            records = _decode_document(_read_regular(path)) if path.exists() else []
+            _atomic_json(path, {"schema": SCHEMA, "records": (records + [validated])[-LIMIT:]})
+    finally:
+        os.close(directory_fd)
 
 
 def iter_records(state: dict[str, Any], state_directory: Path, sid_token: str) -> tuple[list[dict[str, Any]], int, int]:

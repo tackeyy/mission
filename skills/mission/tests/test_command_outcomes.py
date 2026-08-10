@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import pytest
+import command_outcomes
 from command_outcomes import LIMIT, OutcomeStoreError, append_sidecar
 
 
@@ -169,3 +170,55 @@ def test_sidecar_hostile_files_fail_closed(mode, state_dir, tmp_path):
         sidecar.write_bytes(b"x" * (256 * 1024 + 1))
     with pytest.raises(OutcomeStoreError):
         append_sidecar(state_dir, token, _outcome(1))
+
+
+def test_sidecar_lock_hardlink_is_rejected_without_touching_external_bytes(state_dir, tmp_path):
+    token = hashlib.sha256(b"test").hexdigest()[:16]
+    directory = state_dir / "telemetry" / "command-outcomes"
+    directory.mkdir(parents=True)
+    external = tmp_path / "external.lock"
+    original = b"must-not-be-truncated"
+    external.write_bytes(original)
+    lock = directory / f"{token}.lock"
+    lock.hardlink_to(external)
+
+    with pytest.raises(OutcomeStoreError):
+        append_sidecar(state_dir, token, _outcome(1))
+
+    assert external.read_bytes() == original
+    assert not (directory / f"{token}.json").exists()
+
+
+def test_sidecar_unsafe_symlink_ancestor_is_rejected_without_external_writes(state_dir, tmp_path):
+    external = tmp_path / "outside"
+    external.mkdir()
+    telemetry = state_dir / "telemetry"
+    telemetry.symlink_to(external, target_is_directory=True)
+    token = hashlib.sha256(b"test").hexdigest()[:16]
+
+    with pytest.raises(OutcomeStoreError):
+        append_sidecar(state_dir, token, _outcome(1))
+
+    assert not list(external.rglob("*"))
+
+
+def test_lock_same_name_replacement_after_open_is_rejected(monkeypatch, state_dir):
+    directory = state_dir / "telemetry" / "command-outcomes"
+    directory.mkdir(parents=True)
+    lock = directory / "race.lock"
+    original_flock = command_outcomes.fcntl.flock
+    replaced = False
+
+    def replace_before_flock(fd, operation):
+        nonlocal replaced
+        if operation & command_outcomes.fcntl.LOCK_EX and not replaced:
+            replaced = True
+            lock.unlink()
+            lock.write_bytes(b"replacement")
+        return original_flock(fd, operation)
+
+    monkeypatch.setattr(command_outcomes.fcntl, "flock", replace_before_flock)
+    with pytest.raises(OutcomeStoreError, match="changed"):
+        with command_outcomes._Lock(lock):
+            pass
+    assert lock.read_bytes() == b"replacement"
