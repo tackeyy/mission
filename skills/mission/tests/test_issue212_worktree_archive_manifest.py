@@ -156,6 +156,103 @@ def _archive(run_cli, worktree: Path, destination: Path):
     )
 
 
+def _attach_review_import_reference(worktree: Path) -> tuple[Path, dict, bytes]:
+    content = (
+        json.dumps(
+            {
+                "schema": "mission-review/1",
+                "iteration": 2,
+                "perspective": "quality",
+                "scores": {
+                    "mission_achievement": 4.5,
+                    "accuracy": 4.4,
+                    "completeness": 4.3,
+                    "usability": 4.2,
+                },
+                "findings": [],
+            },
+            ensure_ascii=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    evidence = worktree / ".mission-state" / "archive" / "review-input.json"
+    evidence.write_bytes(content)
+    reference = {
+        "kind": "review-input",
+        "path": str(evidence.relative_to(worktree)),
+        "digest": "sha256:" + hashlib.sha256(content).hexdigest(),
+        "size": len(content),
+        "iteration": 2,
+        "perspective": "quality",
+    }
+    state_file = worktree / ".mission-state" / "sessions" / f"{SESSION_ID}.json"
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    state["review_evidence_refs"] = [reference]
+    state_file.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    return evidence, reference, content
+
+
+@pytest.mark.parametrize("tamper", ["content", "legacy-ref", "malformed"], ids=str)
+def test_archive_writer_rejects_unbound_review_input_evidence(
+    tmp_path, run_cli, tamper,
+):
+    """The writer must bind copied bytes to the state-owned review reference."""
+    worktree, destination = _make_completed_worktree(tmp_path)
+    evidence, reference, content = _attach_review_import_reference(worktree)
+    if tamper == "content":
+        evidence.write_bytes(content.replace(b'"accuracy": 4.4', b'"accuracy": 4.1'))
+    elif tamper == "legacy-ref":
+        state_file = worktree / ".mission-state" / "sessions" / f"{SESSION_ID}.json"
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        del state["review_evidence_refs"][0]["digest"]
+        state_file.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+    else:
+        evidence.write_bytes(b'{"schema":"mission-review/1"')
+
+    result = _archive(run_cli, worktree, destination)
+
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    assert not list((destination / ".mission-state" / "archive").glob("worktree-*"))
+
+
+def test_archive_validator_rejects_resigned_review_copy_that_disagrees_with_state_ref(
+    tmp_path, run_cli,
+):
+    """A self-consistent manifest cannot authorize bytes outside the state reference."""
+    worktree, destination = _make_completed_worktree(tmp_path)
+    _attach_review_import_reference(worktree)
+    result = _archive(run_cli, worktree, destination)
+    assert result.returncode == 0, result.stderr
+    bundle = Path(json.loads(result.stdout)["bundle_path"])
+    generation_root = _active_bundle_root(bundle)
+    manifest_path = generation_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    item = next(entry for entry in manifest["evidence"] if entry["evidence_kind"] == "review-input")
+    archived = generation_root / item["archive_path"]
+    archived.write_bytes(archived.read_bytes().replace(b'"accuracy": 4.4', b'"accuracy": 4.1'))
+    item["sha256"] = _sha256(archived)
+    item["size"] = archived.stat().st_size
+    _rewrite_manifest_digest(manifest_path, manifest)
+    replacement = generation_root.with_name(manifest["content_digest"])
+    generation_root.replace(replacement)
+    (bundle / "current.json").write_text(
+        json.dumps(
+            {
+                "schema": "mission-worktree-current/1",
+                "generation": manifest["content_digest"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    data = _run_audit(destination)
+
+    assert data["total_sessions"] == 0
+    assert data["invalid_worktree_archive_count"] == 1
+
+
 def test_archive_worktree_refuses_unsafe_legacy_specialist_state(run_cli, tmp_path):
     worktree, destination = _make_completed_worktree(tmp_path)
     state_file = worktree / ".mission-state" / "sessions" / f"{SESSION_ID}.json"

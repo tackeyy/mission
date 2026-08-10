@@ -13,6 +13,10 @@ from typing import Any, Callable
 
 WORKTREE_ARCHIVE_SCHEMA = "mission-worktree-archive/1"
 WORKTREE_ARCHIVE_POINTER_SCHEMA = "mission-worktree-current/1"
+REVIEW_INPUT_MAX_BYTES = 4 * 1024 * 1024
+_REVIEW_INPUT_REFERENCE_FIELDS = {
+    "kind", "path", "digest", "size", "iteration", "perspective",
+}
 
 
 @dataclass(frozen=True)
@@ -142,6 +146,78 @@ def _normalized_state_reference(value: Any) -> str | None:
         return None
     index = path.parts.index(".mission-state")
     return Path(*path.parts[index:]).as_posix()
+
+
+def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("review input contains duplicate JSON keys")
+        result[key] = value
+    return result
+
+
+def verify_review_input_evidence(
+    reference: object, content: bytes, *, expected_iteration: int | None = None,
+) -> dict[str, Any]:
+    """Bind one immutable review-input reference to its exact review bytes."""
+    if not isinstance(reference, dict) or set(reference) != _REVIEW_INPUT_REFERENCE_FIELDS:
+        raise ValueError("review input reference schema is invalid")
+    path = _safe_relative_path(reference.get("path"), state_reference=True)
+    digest = reference.get("digest")
+    size = reference.get("size")
+    iteration = reference.get("iteration")
+    perspective = reference.get("perspective")
+    if (
+        reference.get("kind") != "review-input"
+        or path is None
+        or not isinstance(digest, str)
+        or not digest.startswith("sha256:")
+        or len(digest) != 71
+        or any(character not in "0123456789abcdef" for character in digest[7:])
+        or not isinstance(size, int)
+        or isinstance(size, bool)
+        or not 0 <= size <= REVIEW_INPUT_MAX_BYTES
+        or not isinstance(iteration, int)
+        or isinstance(iteration, bool)
+        or iteration < 1
+        or expected_iteration is not None and iteration != expected_iteration
+        or not isinstance(perspective, str)
+        or not perspective.strip()
+        or perspective != perspective.strip()
+    ):
+        raise ValueError("review input reference schema is invalid")
+    if len(content) != size or "sha256:" + hashlib.sha256(content).hexdigest() != digest:
+        raise ValueError("review input evidence integrity mismatch")
+    try:
+        payload = json.loads(content.decode("utf-8"), object_pairs_hook=_strict_object)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError("review input evidence is invalid JSON") from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema") != "mission-review/1"
+        or payload.get("iteration") != iteration
+        or payload.get("perspective") != perspective
+    ):
+        raise ValueError("review input evidence identity mismatch")
+    return payload
+
+
+def read_verified_review_input_evidence(
+    root: Path, reference: object, *, expected_iteration: int | None = None,
+) -> bytes:
+    """Read and verify a state-owned review through one no-follow descriptor chain."""
+    if not isinstance(reference, dict):
+        raise ValueError("review input reference schema is invalid")
+    relative = _safe_relative_path(reference.get("path"), state_reference=True)
+    size = reference.get("size")
+    if relative is None or not isinstance(size, int) or isinstance(size, bool):
+        raise ValueError("review input reference schema is invalid")
+    content, _metadata = _read_generation_file(
+        root, relative, limit=REVIEW_INPUT_MAX_BYTES, expected_size=size,
+    )
+    verify_review_input_evidence(reference, content, expected_iteration=expected_iteration)
+    return content
 
 
 def worktree_archive_lineage_references(
@@ -387,6 +463,7 @@ def validate_worktree_archive_bundle(bundle: Path) -> WorktreeArchiveValidation:
     seen_paths: set[str] = set()
     state_paths: list[Path] = []
     state_payloads: dict[str, bytes] = {}
+    evidence_payloads: dict[str, bytes] = {}
     checked: list[dict[str, Any]] = []
     for item in evidence:
         if not isinstance(item, dict):
@@ -426,6 +503,7 @@ def validate_worktree_archive_bundle(bundle: Path) -> WorktreeArchiveValidation:
         if item["evidence_kind"] == "state":
             state_paths.append(archived)
             state_payloads[archive_path.as_posix()] = content
+        evidence_payloads[archive_path.as_posix()] = content
         checked.append({**item, "path": archived})
 
     if len(state_paths) != 1:
@@ -449,6 +527,27 @@ def validate_worktree_archive_bundle(bundle: Path) -> WorktreeArchiveValidation:
     )
     if expected_lineage is None or actual_lineage != expected_lineage:
         return _invalid(bundle, generation_root, "manifest-state-lineage-mismatch", generation)
+    review_references = state.get("review_evidence_refs")
+    if review_references is not None and not isinstance(review_references, list):
+        return _invalid(bundle, generation_root, "manifest-review-input-reference-invalid", generation)
+    for item in checked:
+        if item["evidence_kind"] != "review-input":
+            continue
+        matches = [
+            reference for reference in (review_references or [])
+            if isinstance(reference, dict)
+            and reference.get("path") == item["source_reference"]
+            and reference.get("iteration") == item["iteration"]
+        ]
+        if len(matches) != 1:
+            return _invalid(bundle, generation_root, "manifest-review-input-reference-invalid", generation)
+        try:
+            verify_review_input_evidence(
+                matches[0], evidence_payloads[item["archive_path"]],
+                expected_iteration=item["iteration"],
+            )
+        except (KeyError, ValueError):
+            return _invalid(bundle, generation_root, "manifest-review-input-integrity-mismatch", generation)
     state_entries = [item for item in checked if item["evidence_kind"] == "state"]
     state_archive_path = state_paths[0].relative_to(generation_root).as_posix()
     if len(state_entries) != 1 or state_entries[0]["archive_path"] != state_archive_path:
