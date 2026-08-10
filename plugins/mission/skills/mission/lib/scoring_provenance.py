@@ -187,7 +187,7 @@ def _validate_semantic_score_provenance(
             or not isinstance(payload.get("imported_at"), str)
             or not payload["imported_at"].strip()
             or payload.get("input_digest") != digest(unsigned)
-            or (agreement is not None and _finite_score(agreement, field="manual review_agreement") != agreement)
+            or _finite_score(agreement, field="manual review_agreement") != agreement
             or not isinstance(source, dict)
             or set(source) != {"kind", "ref", "digest"}
             or source.get("kind") != "manual-source-evidence"
