@@ -4,9 +4,24 @@ from __future__ import annotations
 
 import json
 import hashlib
+import subprocess
+import sys
+from pathlib import Path
 import pytest
 import command_outcomes
 from command_outcomes import LIMIT, OutcomeStoreError, append_sidecar
+
+
+AUDIT_PY = Path(__file__).resolve().parents[3] / "scripts" / "mission-audit.py"
+
+
+def _audit_counts(root: Path) -> dict:
+    result = subprocess.run(
+        [sys.executable, str(AUDIT_PY), "--root", str(root), "--json"],
+        cwd=root, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)["command_outcome_counts"]
 
 
 def _review_bytes():
@@ -39,6 +54,7 @@ def test_stats_and_audit_count_state_and_sidecar_command_outcomes(state_dir, run
         "internal-error": 0, "unique_root_events": 1, "retry_count": 1,
         "invalid_records": 0, "corrupt_sidecars": 0,
     }
+    assert _audit_counts(state_dir.parent) == stats["command_outcome_counts"]
 
 
 def test_corrupt_sidecar_is_never_silently_accepted_and_is_visible_in_stats(state_dir, run_cli):
@@ -295,3 +311,61 @@ def test_iter_records_rejects_hostile_sidecars_without_touching_targets(
     assert invalid == 0
     assert corrupt == 1
     assert target.read_bytes() == original
+
+
+def test_state_and_sidecar_identical_event_is_counted_once(state_dir):
+    token = hashlib.sha256(b"test").hexdigest()[:16]
+    record = _outcome(1)
+    append_sidecar(state_dir, token, record)
+
+    records, invalid, corrupt = command_outcomes.iter_records(
+        {"command_outcomes": [record]}, state_dir, token,
+    )
+
+    assert records == [record]
+    assert (invalid, corrupt) == (0, 0)
+    summary = command_outcomes.summarize(records)
+    assert summary["expected-gate"] == 1
+    assert summary["unique_root_events"] == 1
+    assert summary["retry_count"] == 1
+
+
+def test_conflicting_duplicate_event_is_excluded_and_marked_invalid(state_dir):
+    token = hashlib.sha256(b"test").hexdigest()[:16]
+    state_record = _outcome(1)
+    sidecar_record = {**state_record, "outcome_kind": "invalid-input"}
+    append_sidecar(state_dir, token, sidecar_record)
+
+    records, invalid, corrupt = command_outcomes.iter_records(
+        {"command_outcomes": [state_record]}, state_dir, token,
+    )
+
+    assert records == []
+    assert (invalid, corrupt) == (1, 0)
+
+
+@pytest.mark.parametrize("conflicting", [False, True])
+def test_stats_and_audit_share_cross_source_event_dedupe(
+    conflicting, state_dir, run_cli,
+):
+    token = hashlib.sha256(b"test").hexdigest()[:16]
+    state_record = _outcome(1)
+    state_file = state_dir / "sessions" / "test.json"
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    state["command_outcomes"] = [state_record]
+    state_file.write_text(json.dumps(state), encoding="utf-8")
+    sidecar_record = (
+        {**state_record, "outcome_kind": "invalid-input"}
+        if conflicting else state_record
+    )
+    append_sidecar(state_dir, token, sidecar_record)
+
+    stats_result = run_cli(
+        "stats", "--root", str(state_dir.parent), "--json", cwd=state_dir.parent,
+    )
+    assert stats_result.returncode == 0, stats_result.stderr
+    stats = json.loads(stats_result.stdout)["command_outcome_counts"]
+    assert _audit_counts(state_dir.parent) == stats
+    assert stats["expected-gate"] == (0 if conflicting else 1)
+    assert stats["invalid-input"] == 0
+    assert stats["invalid_records"] == (1 if conflicting else 0)

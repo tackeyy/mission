@@ -149,7 +149,9 @@ from command_outcomes import (  # noqa: E402
     append_sidecar as append_command_outcome_sidecar,
     append_state_record as append_command_outcome_state,
     iter_records as iter_command_outcome_records,
+    observe_state_only as observe_state_command_outcomes,
     summarize as summarize_command_outcomes,
+    validate_observation as validate_command_outcome_observation,
     valid_identifier as _valid_command_outcome_identifier,
 )
 
@@ -1027,7 +1029,7 @@ def _enforce_session_lease_for_write(path: Path, data: dict) -> LeaseDecision | 
         )
     except LeaseRejectedError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
-        raise SystemExit(2)
+        raise CommandOutcomeExit(2, "expected-gate")
     _PROCESS_LEASE_IDS[path_key] = decision.lease_id
     for key in _LEASE_KEYS:
         if key in lease_state:
@@ -6236,9 +6238,16 @@ def cmd_advance(args):
     """
     cwd = Path.cwd()
     sf = _activity_state_file(cwd)
+    new_phase = _normalize_set_phase_value(args.phase)
+    if new_phase in {"done", "halted"}:
+        print(
+            "ERROR: advance で terminal phase へは遷移できません。"
+            " 合格は mark-passes、中断は mark-halt を使ってください。",
+            file=sys.stderr,
+        )
+        raise CommandOutcomeExit(2, "expected-gate")
     raw = args.activity
     if raw is None:
-        new_phase = _normalize_set_phase_value(args.phase)
         default = PHASE_ACTIVITY_DEFAULTS.get(new_phase)
         if default is None:
             print(f"ERROR: phase '{new_phase}' has no default activity.", file=sys.stderr)
@@ -6264,14 +6273,6 @@ def cmd_advance(args):
         validate_activity(kind, reason)
     except ActivityTimingError as error:
         print(f"ERROR: {error}", file=sys.stderr)
-        sys.exit(2)
-    new_phase = _normalize_set_phase_value(args.phase)
-    if new_phase in {"done", "halted"}:
-        print(
-            "ERROR: advance で terminal phase へは遷移できません。"
-            " 合格は mark-passes、中断は mark-halt を使ってください。",
-            file=sys.stderr,
-        )
         sys.exit(2)
     at = args.at or iso_now()
     try:
@@ -8208,6 +8209,14 @@ class CommandOutcomeInputError(ValueError):
     """Opaque command lineage input failed validation."""
 
 
+class CommandOutcomeExit(SystemExit):
+    """A legacy-compatible exit carrying the centralized outcome taxonomy."""
+
+    def __init__(self, code: int, outcome_kind: str):
+        super().__init__(code)
+        self.outcome_kind = outcome_kind
+
+
 def _command_outcome(args: argparse.Namespace, command: str, outcome_kind: str) -> dict:
     """Build bounded, locator-free command lineage for state and JSON consumers."""
     if outcome_kind not in COMMAND_OUTCOME_KINDS:
@@ -8268,8 +8277,33 @@ def _record_command_outcome_only(cwd: Path, outcome: dict) -> None:
 
 
 def _emit_json_command_failure(args: argparse.Namespace, outcome: dict) -> None:
+    args.command_outcome_emitted = True
     if getattr(args, "json", False):
         print(json.dumps({"ok": False, "outcome_kind": outcome["outcome_kind"], "outcome": outcome}, ensure_ascii=False))
+
+
+def _nested_command_failure_kind(stdout: str, error: SystemExit) -> str:
+    kind = getattr(error, "outcome_kind", None)
+    if kind in COMMAND_OUTCOME_KINDS:
+        return kind
+    try:
+        payload = json.loads(stdout)
+        kind = payload.get("outcome_kind") if isinstance(payload, dict) else None
+    except json.JSONDecodeError:
+        kind = None
+    return kind if kind in COMMAND_OUTCOME_KINDS else "invalid-input"
+
+
+def _emit_finalize_failure(args: argparse.Namespace, stdout: str, error: SystemExit) -> None:
+    kind = _nested_command_failure_kind(stdout, error)
+    failure = _command_outcome(args, "review-finalize", kind)
+    _record_command_outcome_only(Path.cwd(), failure)
+    args.command_outcome_emitted = True
+    print(json.dumps({
+        "ok": False,
+        "outcome_kind": kind,
+        "outcome": failure,
+    }, ensure_ascii=False))
 
 
 def _stat_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
@@ -8318,6 +8352,167 @@ def _read_strict_review_file(source: Path) -> bytes:
         os.close(fd)
 
 
+def _same_inode(first: os.stat_result, second: os.stat_result) -> bool:
+    return (
+        first.st_dev == second.st_dev
+        and first.st_ino == second.st_ino
+        and first.st_mode == second.st_mode
+        and first.st_nlink == second.st_nlink
+    )
+
+
+def _verify_review_archive_directory(directory_fd: int, archive_path: Path) -> None:
+    try:
+        opened = os.fstat(directory_fd)
+        named = archive_path.lstat()
+    except OSError as exc:
+        raise ValueError("review archive directory changed") from exc
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or not stat.S_ISDIR(named.st_mode)
+        or opened.st_dev != named.st_dev
+        or opened.st_ino != named.st_ino
+        or opened.st_mode != named.st_mode
+    ):
+        raise ValueError("review archive directory changed")
+
+
+def _open_review_archive_directory(cwd: Path) -> tuple[int, Path]:
+    root = state_dir(cwd)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        root_fd = os.open(os.fspath(root), flags)
+    except OSError as exc:
+        raise ValueError("review state directory is unsafe") from exc
+    archive_fd: int | None = None
+    try:
+        try:
+            archive_fd = os.open("archive", flags, dir_fd=root_fd)
+        except FileNotFoundError:
+            try:
+                os.mkdir("archive", 0o700, dir_fd=root_fd)
+                archive_fd = os.open("archive", flags, dir_fd=root_fd)
+            except OSError as exc:
+                raise ValueError("review archive directory is unsafe") from exc
+        opened = os.fstat(archive_fd)
+        named = os.stat("archive", dir_fd=root_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(opened.st_mode) or not _same_inode(opened, named):
+            os.close(archive_fd)
+            raise ValueError("review archive directory changed")
+        result = archive_fd
+        archive_fd = None
+        return result, root / "archive"
+    except OSError as exc:
+        raise ValueError("review archive directory is unsafe") from exc
+    finally:
+        if archive_fd is not None:
+            os.close(archive_fd)
+        os.close(root_fd)
+
+
+def _read_review_archive_at(directory_fd: int, name: str) -> bytes | None:
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(name, flags, dir_fd=directory_fd)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ValueError("review archive evidence is unsafe") from exc
+    try:
+        initial = os.fstat(fd)
+        if (
+            not stat.S_ISREG(initial.st_mode)
+            or initial.st_nlink != 1
+            or initial.st_size > MAX_REVIEW_INPUT_BYTES
+        ):
+            raise ValueError("review archive evidence is unsafe")
+        named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if _stat_identity(initial) != _stat_identity(named):
+            raise ValueError("review archive evidence changed")
+        chunks: list[bytes] = []
+        remaining = initial.st_size
+        while remaining:
+            chunk = os.read(fd, min(remaining, 64 * 1024))
+            if not chunk:
+                raise ValueError("review archive evidence changed")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(fd, 1):
+            raise ValueError("review archive evidence changed")
+        after = os.fstat(fd)
+        named_after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if _stat_identity(initial) != _stat_identity(after) or _stat_identity(after) != _stat_identity(named_after):
+            raise ValueError("review archive evidence changed")
+        return b"".join(chunks)
+    except OSError as exc:
+        raise ValueError("review archive evidence is unsafe") from exc
+    finally:
+        os.close(fd)
+
+
+def _publish_review_import_evidence(cwd: Path, name: str, content: bytes) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", name):
+        raise ValueError("review archive filename is invalid")
+    directory_fd, archive_path = _open_review_archive_directory(cwd)
+    temporary = ""
+    temp_fd: int | None = None
+    try:
+        _verify_review_archive_directory(directory_fd, archive_path)
+        existing = _read_review_archive_at(directory_fd, name)
+        if existing is not None:
+            if existing != content:
+                raise ValueError("immutable review archive collision")
+            return archive_path / name
+        for _attempt in range(32):
+            temporary = f".{name}.{secrets.token_hex(8)}.tmp"
+            try:
+                temp_fd = os.open(
+                    temporary,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=directory_fd,
+                )
+                break
+            except FileExistsError:
+                continue
+        if temp_fd is None:
+            raise ValueError("review archive temporary file is unavailable")
+        initial = os.fstat(temp_fd)
+        if not stat.S_ISREG(initial.st_mode) or initial.st_nlink != 1 or stat.S_IMODE(initial.st_mode) != 0o600:
+            raise ValueError("review archive temporary file is unsafe")
+        offset = 0
+        while offset < len(content):
+            written = os.write(temp_fd, content[offset:])
+            if written <= 0:
+                raise ValueError("review archive write failed")
+            offset += written
+        os.fsync(temp_fd)
+        current = os.fstat(temp_fd)
+        named_temp = os.stat(temporary, dir_fd=directory_fd, follow_symlinks=False)
+        if current.st_size != len(content) or not _same_inode(initial, current) or not _same_inode(current, named_temp):
+            raise ValueError("review archive temporary file changed")
+        _verify_review_archive_directory(directory_fd, archive_path)
+        os.replace(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        temporary = ""
+        published = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if not _same_inode(current, published) or published.st_size != len(content):
+            raise ValueError("review archive publish changed")
+        _verify_review_archive_directory(directory_fd, archive_path)
+        os.fsync(directory_fd)
+        return archive_path / name
+    except OSError as exc:
+        raise ValueError("review archive publish failed") from exc
+    finally:
+        if temp_fd is not None:
+            os.close(temp_fd)
+        if temporary:
+            try:
+                os.unlink(temporary, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+        os.close(directory_fd)
+
+
 class _DuplicateReviewJsonKey(ValueError):
     pass
 
@@ -8349,11 +8544,23 @@ def _parse_strict_review_bytes(content: bytes, expected_iteration: int) -> dict:
 
 def _validate_review_payload(payload: object, expected_iteration: int) -> None:
     """Validate the shared mission-review/1 contract without mutating state."""
+    if (
+        not isinstance(expected_iteration, int)
+        or isinstance(expected_iteration, bool)
+        or expected_iteration < 1
+    ):
+        raise ValueError("expected iteration must be a positive integer")
     if not isinstance(payload, dict):
         raise ValueError("review must be a JSON object")
     if payload.get("schema") != "mission-review/1":
         raise ValueError("schema must be mission-review/1")
-    if payload.get("iteration") != expected_iteration:
+    payload_iteration = payload.get("iteration")
+    if (
+        not isinstance(payload_iteration, int)
+        or isinstance(payload_iteration, bool)
+        or payload_iteration < 1
+        or payload_iteration != expected_iteration
+    ):
         raise ValueError(f"iteration must be {expected_iteration}")
     perspective = payload.get("perspective")
     if not isinstance(perspective, str) or not perspective.strip():
@@ -8446,57 +8653,19 @@ def _load_review_json(path_str: str, expected_iteration: int) -> tuple[dict, dic
         print(f"ERROR: reviewer input not found: {src}", file=sys.stderr)
         sys.exit(2)
     payload, metric = _extract_review_payload(src)
-    if not isinstance(payload, dict):
-        _review_error(src, "review must be a JSON object")
-    if payload.get("schema") != "mission-review/1":
-        _review_error(src, "schema must be mission-review/1")
-    if payload.get("iteration") != expected_iteration:
-        _review_error(src, f"iteration must be {expected_iteration}")
-    perspective = payload.get("perspective")
-    if not isinstance(perspective, str) or not perspective.strip():
-        _review_error(src, "perspective must be a non-empty string")
-    findings = payload.get("findings")
-    if not isinstance(findings, list):
-        _review_error(src, "findings must be a list")
-    seen_ids = set()
-    for idx, finding in enumerate(findings, start=1):
-        if not isinstance(finding, dict):
-            _review_error(src, f"finding {idx} must be an object")
-        fid = finding.get("id")
-        if not isinstance(fid, str) or not fid.startswith(f"{perspective}-"):
-            _review_error(src, f"finding {idx} id must start with '{perspective}-'")
-        if fid in seen_ids:
-            _review_error(src, f"duplicate finding id: {fid}")
-        seen_ids.add(fid)
-        severity = finding.get("severity")
-        if severity not in REVIEW_SEVERITIES:
-            _review_error(src, f"finding {fid} severity must be one of {sorted(REVIEW_SEVERITIES)}")
-        axis = finding.get("axis")
-        if axis not in REVIEW_SCORE_KEYS:
-            _review_error(src, f"finding {fid} axis must be one of {list(REVIEW_SCORE_KEYS)}")
-        if severity in {"High", "Medium"} and not str(finding.get("evidence") or "").strip():
-            _review_error(src, f"finding {fid} evidence is required for {severity}")
-    if "scores" not in payload:
-        _review_error(src, "scores field is required; use null only for findings-only reviewers")
-    scores = payload.get("scores")
-    if scores is None:
-        return payload, metric
-    if not isinstance(scores, dict) or set(scores) != set(REVIEW_SCORE_KEYS):
-        _review_error(src, f"scores must contain exactly {list(REVIEW_SCORE_KEYS)}")
-    for key, value in scores.items():
-        if not isinstance(value, (int, float)) or isinstance(value, bool) or math.isnan(float(value)) or not (SCORE_MIN <= float(value) <= SCORE_MAX):
-            _review_error(src, f"score {key} must be a {SCORE_MIN}-{SCORE_MAX} number")
-    values = [float(scores[key]) for key in REVIEW_SCORE_KEYS]
-    if max(values) <= 1.0:
-        _review_error(src, "scores look like 0-1 normalized scale; use 0-5 scale")
-    if len(set(values)) == 1 and not str(payload.get("same_score_note") or "").strip():
-        _review_error(src, "same_score_note is required when all four scores are equal")
+    try:
+        _validate_review_payload(payload, expected_iteration)
+    except ValueError as exc:
+        _review_error(src, str(exc))
     return payload, metric
 
 
 def _review_import_ref_is_valid(reference: object, expected_iteration: int) -> bool:
     return (
-        isinstance(reference, dict)
+        isinstance(expected_iteration, int)
+        and not isinstance(expected_iteration, bool)
+        and expected_iteration >= 1
+        and isinstance(reference, dict)
         and reference.get("kind") == "review-input"
         and isinstance(reference.get("path"), str)
         and isinstance(reference.get("digest"), str)
@@ -8504,7 +8673,10 @@ def _review_import_ref_is_valid(reference: object, expected_iteration: int) -> b
         and isinstance(reference.get("size"), int)
         and not isinstance(reference.get("size"), bool)
         and 0 <= reference["size"] <= MAX_REVIEW_INPUT_BYTES
-        and reference.get("iteration") == expected_iteration
+        and isinstance(reference.get("iteration"), int)
+        and not isinstance(reference.get("iteration"), bool)
+        and reference["iteration"] >= 1
+        and reference["iteration"] == expected_iteration
         and isinstance(reference.get("perspective"), str)
         and reference["perspective"].strip()
     )
@@ -8564,14 +8736,15 @@ def cmd_review_import(args):
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
         mission8 = str(data.get("mission_id") or "unknown")[:8]
-        archive_dir = state_dir(cwd) / "archive"
-        archive_dir.mkdir(parents=True, exist_ok=True)
-        destination = archive_dir / f"iter-{args.iteration}-{mission8}-review-input-{digest[7:23]}.json"
-        if destination.exists() and _sha256_file(destination) != digest[7:]:
-            print("ERROR: immutable review import archive collision", file=sys.stderr)
+        archive_name = f"iter-{args.iteration}-{mission8}-review-input-{digest[7:23]}.json"
+        try:
+            destination = _publish_review_import_evidence(cwd, archive_name, content)
+        except ValueError as exc:
+            failure = _command_outcome(args, "review-import", "invalid-input")
+            _record_command_outcome_only(cwd, failure)
+            print(json.dumps({"ok": False, "outcome_kind": "invalid-input", "outcome": failure}, ensure_ascii=False))
+            print(f"ERROR: review import archive rejected: {exc}", file=sys.stderr)
             sys.exit(2)
-        if not destination.exists():
-            atomic_write_bytes(destination, content)
         reference = {
             "kind": "review-input",
             "path": str(destination.relative_to(cwd)),
@@ -8901,7 +9074,7 @@ def cmd_aggregate_reviews(args):
                 " または `'true'` (new を含む) を実行してから再集計してください。",
                 file=sys.stderr,
             )
-            sys.exit(2)
+            raise CommandOutcomeExit(2, "expected-gate")
     input_paths = getattr(args, "input", None) or []
     input_refs = getattr(args, "input_refs", None) or []
     if not input_paths and not input_refs:
@@ -8946,7 +9119,7 @@ def cmd_aggregate_reviews(args):
             " reviewer を追加してやり直してください。",
             file=sys.stderr,
         )
-        sys.exit(2)
+        raise CommandOutcomeExit(2, "expected-gate")
 
     scoring_reviews = [r for r in reviews if r.get("scores") is not None]
     if not scoring_reviews:
@@ -8967,7 +9140,7 @@ def cmd_aggregate_reviews(args):
         cap_log.extend(caps)
     if not adjusted_scores:
         print("ERROR: 全採点 reviewer が除外されました (Reviewer 独立性に疑念)", file=sys.stderr)
-        sys.exit(2)
+        raise CommandOutcomeExit(2, "expected-gate")
 
     axis_values = {
         axis: [entry["scores"][axis] for entry in adjusted_scores]
@@ -9029,7 +9202,7 @@ def cmd_aggregate_reviews(args):
                 "#350: 並列実行の検証可能性のため必須",
                 file=sys.stderr,
             )
-            sys.exit(2)
+            raise CommandOutcomeExit(2, "expected-gate")
     parallel_execution = _observe_parallel_execution(reviewer_windows)
     reviewer_windows_public = [
         {k: v for k, v in window.items() if not k.startswith("_")}
@@ -9382,7 +9555,7 @@ def cmd_push_score(args):
                 ' 同一 iteration を再 push する場合は --resubmit-reason "<理由>" を指定してください (#122)。',
                 file=sys.stderr,
             )
-            sys.exit(2)
+            raise CommandOutcomeExit(2, "expected-gate")
         entry = {
             "iteration": args.iteration,
             "composite": args.composite,
@@ -9488,20 +9661,7 @@ def cmd_review_finalize(args):
         with contextlib.redirect_stdout(agg_stdout):
             cmd_aggregate_reviews(agg_args)
     except SystemExit as error:
-        nested_kind = "invalid-input"
-        try:
-            nested_payload = json.loads(agg_stdout.getvalue())
-            if nested_payload.get("outcome_kind") in COMMAND_OUTCOME_KINDS:
-                nested_kind = nested_payload["outcome_kind"]
-        except (AttributeError, json.JSONDecodeError):
-            pass
-        failure = _command_outcome(args, "review-finalize", nested_kind)
-        _record_command_outcome_only(Path.cwd(), failure)
-        print(json.dumps({
-            "ok": False,
-            "outcome_kind": nested_kind,
-            "outcome": failure,
-        }, ensure_ascii=False))
+        _emit_finalize_failure(args, agg_stdout.getvalue(), error)
         raise error
     agg_result = json.loads(agg_stdout.getvalue())
 
@@ -9515,10 +9675,15 @@ def cmd_review_finalize(args):
         scoring_output=None,
         open_high=0,
         resubmit_reason=args.resubmit_reason,
+        record_outcome=False,
     )
     push_stdout = io.StringIO()
-    with contextlib.redirect_stdout(push_stdout):
-        cmd_push_score(push_args)
+    try:
+        with contextlib.redirect_stdout(push_stdout):
+            cmd_push_score(push_args)
+    except SystemExit as error:
+        _emit_finalize_failure(args, push_stdout.getvalue(), error)
+        raise error
     push_result = json.loads(push_stdout.getvalue())
 
     cwd = Path.cwd()
@@ -10823,6 +10988,16 @@ def _command_outcome_counts(states: list[dict]) -> dict[str, int]:
     records: list[dict] = []
     invalid = corrupt = 0
     for state in states:
+        if state.get("_mission_snapshot_record") is True:
+            observation = validate_command_outcome_observation(
+                state.get("_command_outcome_observation")
+            )
+            if observation is None:
+                observation = observe_state_command_outcomes(state)
+            records.extend(observation["records"])
+            invalid += observation["invalid_records"]
+            corrupt += observation["corrupt_sidecars"]
+            continue
         source = state.get("_mission_source_path")
         if not isinstance(source, str):
             # Snapshots contain no live sidecars but may carry valid state data.
@@ -11194,6 +11369,9 @@ def cmd_stats(args):
         for item in document["records"]:
             state = dict(item["state"])
             state["_mission_source_path"] = str(item["path"])
+            state["_mission_snapshot_record"] = True
+            if "command_outcome_observation" in item:
+                state["_command_outcome_observation"] = item["command_outcome_observation"]
             all_states.append(state)
     else:
         for r in roots:
@@ -11634,7 +11812,7 @@ def _build_parser():
     p_agg.add_argument("--base-sha", default=None, help="exact reviewed git base SHA (requires --head-sha)")
     p_agg.add_argument("--head-sha", default=None, help="exact reviewed git head SHA (requires --base-sha)")
     _add_command_lineage_arguments(p_agg)
-    p_agg.set_defaults(func=cmd_aggregate_reviews)
+    p_agg.set_defaults(func=cmd_aggregate_reviews, command_outcome_tracking=True)
 
     p_rf = sub.add_parser("review-finalize",
                           help="#283: aggregate-reviews → push-score を 1 コマンドで実行 (Phase 5 transactional)")
@@ -11974,11 +12152,18 @@ def main():
         args.func(args)
     except SystemExit as error:
         code = error.code if isinstance(error.code, int) else 1
-        if code and getattr(args, "command_outcome_tracking", False):
+        if (
+            code
+            and getattr(args, "command_outcome_tracking", False)
+            and not getattr(args, "command_outcome_emitted", False)
+        ):
             try:
+                kind = getattr(error, "outcome_kind", "invalid-input")
+                if kind not in COMMAND_OUTCOME_KINDS:
+                    kind = "invalid-input"
                 outcome = _command_outcome(
                     args, str(getattr(args, "cmd", "unknown")),
-                    "expected-gate" if code == 2 else "invalid-input",
+                    kind,
                 )
                 _record_command_outcome_only(Path.cwd(), outcome)
                 if getattr(args, "json", False):

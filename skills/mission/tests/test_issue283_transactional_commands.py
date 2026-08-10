@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
+
+import pytest
 
 
 def _review(tmp_path, name, *, perspective="A", scores=None):
@@ -72,14 +75,20 @@ def test_review_finalize_aggregates_and_pushes_in_one_command(state_dir, run_cli
 
 def test_review_finalize_min_reviewers_failure_is_atomic(state_dir, run_cli, read_state, tmp_path):
     a = _review(tmp_path, "a.json", perspective="A")
+    state_file = state_dir / "sessions" / "test.json"
+    before = state_file.read_bytes()
 
     r = run_cli("review-finalize", "--iteration", "1", "--input", str(a),
-                "--min-reviewers", "2", cwd=state_dir.parent)
+                "--min-reviewers", "2", "--event-id", "minimum-gate", cwd=state_dir.parent)
 
     assert r.returncode == 2
     assert "reviewer 数不足" in r.stderr
+    payload = json.loads(r.stdout)
+    assert payload["outcome_kind"] == "expected-gate"
+    assert payload["outcome"]["event_id"] == "minimum-gate"
     # 集計に失敗したら score は push されない (atomic)
     assert read_state(state_dir)["score_history"] == []
+    assert state_file.read_bytes() == before
 
 
 def test_review_finalize_passes_reviewer_windows_through(state_dir, run_cli, tmp_path):
@@ -219,9 +228,49 @@ def test_review_finalize_push_failure_after_aggregate_keeps_history(state_dir, r
     run_cli("review-finalize", "--iteration", "1", "--input", str(a), "--input", str(b),
             *_reviewer_windows(), cwd=state_dir.parent, check=True)
 
-    r = run_cli("review-finalize", "--iteration", "1", "--input", str(a), "--input", str(b),
-                *_reviewer_windows(), cwd=state_dir.parent)
+    before = list(read_state(state_dir)["score_history"])
+    r = run_cli(
+        "review-finalize", "--iteration", "1", "--input", str(a), "--input", str(b),
+        *_reviewer_windows(), "--event-id", "push-gate", "--root-event-id", "push-root",
+        cwd=state_dir.parent,
+    )
 
     assert r.returncode == 2
     assert "resubmit-reason" in r.stderr
-    assert len(read_state(state_dir)["score_history"]) == 1
+    payload = json.loads(r.stdout)
+    assert payload["outcome_kind"] == "expected-gate"
+    assert payload["outcome"]["command"] == "review-finalize"
+    assert payload["outcome"]["event_id"] == "push-gate"
+    assert read_state(state_dir)["score_history"] == before
+    token = hashlib.sha256(b"test").hexdigest()[:16]
+    sidecar = json.loads(
+        (state_dir / "telemetry" / "command-outcomes" / f"{token}.json").read_text(encoding="utf-8")
+    )
+    assert sidecar["records"] == [payload["outcome"]]
+
+
+def test_review_finalize_push_invalid_input_emits_own_outcome_once(
+    state_dir, run_cli, read_state, tmp_path,
+):
+    if not Path("/dev/null").exists():
+        pytest.skip("requires a null device")
+    a = _review(tmp_path, "a.json", perspective="A")
+    before = list(read_state(state_dir)["score_history"])
+
+    result = run_cli(
+        "review-finalize", "--iteration", "1", "--input", str(a),
+        "--out", "/dev/null", "--event-id", "push-invalid",
+        "--root-event-id", "push-invalid-root", cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 2
+    payload = json.loads(result.stdout)
+    assert payload["outcome_kind"] == "invalid-input"
+    assert payload["outcome"]["command"] == "review-finalize"
+    assert payload["outcome"]["event_id"] == "push-invalid"
+    assert read_state(state_dir)["score_history"] == before
+    token = hashlib.sha256(b"test").hexdigest()[:16]
+    sidecar = json.loads(
+        (state_dir / "telemetry" / "command-outcomes" / f"{token}.json").read_text(encoding="utf-8")
+    )
+    assert sidecar["records"] == [payload["outcome"]]

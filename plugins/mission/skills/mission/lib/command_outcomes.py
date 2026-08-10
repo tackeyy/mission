@@ -20,6 +20,7 @@ from typing import Any, Iterable
 
 
 SCHEMA = "mission-command-outcomes/1"
+OBSERVATION_SCHEMA = "mission-command-outcome-observation/1"
 KINDS = ("ok", "expected-gate", "invalid-input", "external", "internal-error")
 LIMIT = 128
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -399,17 +400,110 @@ def iter_records(state: dict[str, Any], state_directory: Path, sid_token: str) -
     finally:
         if directory_fd is not None:
             os.close(directory_fd)
-    return records, invalid, corrupt
+    merged, conflicts = merge_records(records)
+    return merged, invalid + conflicts, corrupt
+
+
+def merge_records(records: Iterable[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """Deduplicate exact events and exclude conflicting reuse of an event id."""
+    by_event: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    conflicts: set[str] = set()
+    invalid = 0
+    for record in records:
+        normalized = validate_record(record)
+        if normalized is None:
+            invalid += 1
+            continue
+        event_id = normalized["event_id"]
+        if event_id in conflicts:
+            continue
+        prior = by_event.get(event_id)
+        if prior is None:
+            by_event[event_id] = normalized
+            order.append(event_id)
+        elif prior != normalized:
+            by_event.pop(event_id, None)
+            conflicts.add(event_id)
+            invalid += 1
+    return [by_event[event_id] for event_id in order if event_id in by_event], invalid
+
+
+def validate_observation(value: Any) -> dict[str, Any] | None:
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema", "records", "invalid_records", "corrupt_sidecars"}
+        or value.get("schema") != OBSERVATION_SCHEMA
+        or not isinstance(value.get("records"), list)
+        or len(value["records"]) > LIMIT * 2
+        or not isinstance(value.get("invalid_records"), int)
+        or isinstance(value.get("invalid_records"), bool)
+        or not 0 <= value["invalid_records"] <= LIMIT * 2
+        or not isinstance(value.get("corrupt_sidecars"), int)
+        or isinstance(value.get("corrupt_sidecars"), bool)
+        or not 0 <= value["corrupt_sidecars"] <= 1
+    ):
+        return None
+    merged, invalid = merge_records(value["records"])
+    if invalid or merged != value["records"]:
+        return None
+    return {
+        "schema": OBSERVATION_SCHEMA,
+        "records": merged,
+        "invalid_records": value["invalid_records"],
+        "corrupt_sidecars": value["corrupt_sidecars"],
+    }
+
+
+def observe(state: dict[str, Any], state_directory: Path, sid_token: str) -> dict[str, Any]:
+    records, invalid, corrupt = iter_records(state, state_directory, sid_token)
+    observation = {
+        "schema": OBSERVATION_SCHEMA,
+        "records": records,
+        "invalid_records": invalid,
+        "corrupt_sidecars": corrupt,
+    }
+    validated = validate_observation(observation)
+    if validated is None:
+        raise OutcomeStoreError("command outcome observation is invalid")
+    return validated
+
+
+def observe_state_only(state: dict[str, Any]) -> dict[str, Any]:
+    """Build the explicit legacy-snapshot observation without consulting disk."""
+    records: list[dict[str, Any]] = []
+    invalid = 0
+    raw = state.get("command_outcomes", [])
+    if raw is not None:
+        if not isinstance(raw, list):
+            invalid += 1
+        else:
+            for item in raw:
+                normalized = validate_record(item)
+                if normalized is None:
+                    invalid += 1
+                else:
+                    records.append(normalized)
+    merged, conflicts = merge_records(records)
+    observation = {
+        "schema": OBSERVATION_SCHEMA,
+        "records": merged,
+        "invalid_records": invalid + conflicts,
+        "corrupt_sidecars": 0,
+    }
+    validated = validate_observation(observation)
+    if validated is None:
+        raise OutcomeStoreError("command outcome observation is invalid")
+    return validated
 
 
 def summarize(records: Iterable[dict[str, Any]], *, invalid_records: int = 0, corrupt_sidecars: int = 0) -> dict[str, int]:
     counts = Counter({kind: 0 for kind in KINDS})
     roots: set[str] = set()
     retries = 0
-    for record in records:
-        normalized = validate_record(record)
-        if normalized is None:
-            invalid_records += 1; continue
+    merged, merge_invalid = merge_records(records)
+    invalid_records += merge_invalid
+    for normalized in merged:
         counts[normalized["outcome_kind"]] += 1
         roots.add(normalized["root_event_id"])
         if normalized["attempt"] > 1 or "retry_of" in normalized: retries += 1
