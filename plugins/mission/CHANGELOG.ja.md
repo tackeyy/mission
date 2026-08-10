@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+- 採点項目を4軸に統一し、reviewer の合意度を独立して記録するようにしました。手動採点の取り込みには専用の検証済み経路を用意し、audit と stats で採点 provenance を確認できます (#383)。
+
 ### 追加
 
 - approval verifier の trust root は user-only `$XDG_CONFIG_HOME/mission/approval-verifiers.json` の `mission-approval-verifier-registry/2` とし、唯一の登録手順で `entry_point`、`distribution`、`version`、`source_digest` を pin する。parent/child が同じ pin を再照合し、load と callback を reaped child process 内で時間制限付き実行する (#383)。

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Scoring now keeps quality assessment to four axes and records reviewer agreement separately. Manual score imports have a dedicated verified capture route, and audit/statistics show score provenance status (#383).
+
 ### Added
 
 - Approval verifier trust is the user-only `$XDG_CONFIG_HOME/mission/approval-verifiers.json` `mission-approval-verifier-registry/2`: its unique registration pins `entry_point`, `distribution`, `version`, and `source_digest`; parent and child recheck that pin, and load plus callback run in a reaped bounded child process (#383).
