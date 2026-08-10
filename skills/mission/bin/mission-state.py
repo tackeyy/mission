@@ -142,6 +142,15 @@ from scoring_provenance import (  # noqa: E402
     validate_receipt_binding,
     validate_recorded_envelope,
 )
+from command_outcomes import (  # noqa: E402
+    KINDS as COMMAND_OUTCOME_KIND_ORDER,
+    OutcomeStoreError,
+    append_sidecar as append_command_outcome_sidecar,
+    append_state_record as append_command_outcome_state,
+    iter_records as iter_command_outcome_records,
+    summarize as summarize_command_outcomes,
+    valid_identifier as _valid_command_outcome_identifier,
+)
 
 SCHEMA_VERSION = 4  # v4: structured scoring provenance is mandatory for new sessions
 GOAL_DISPATCH_MODES = {"inline", "host-native"}
@@ -8172,12 +8181,16 @@ def _command_outcome(args: argparse.Namespace, command: str, outcome_kind: str) 
     if outcome_kind not in COMMAND_OUTCOME_KINDS:
         raise ValueError("command outcome kind is invalid")
     provided_event = getattr(args, "event_id", None)
-    event_id = provided_event if isinstance(provided_event, str) and _OUTCOME_ID_RE.fullmatch(provided_event) else secrets.token_hex(16)
+    if provided_event is not None and not _valid_command_outcome_identifier(provided_event):
+        raise ValueError("command event_id is invalid")
+    event_id = provided_event or secrets.token_hex(16)
     provided_root = getattr(args, "root_event_id", None)
-    root_event_id = provided_root if isinstance(provided_root, str) and _OUTCOME_ID_RE.fullmatch(provided_root) else event_id
+    if provided_root is not None and not _valid_command_outcome_identifier(provided_root):
+        raise ValueError("command root_event_id is invalid")
+    root_event_id = provided_root or event_id
     attempt = getattr(args, "attempt", 1)
     if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
-        attempt = 1
+        raise ValueError("command attempt is invalid")
     outcome = {
         "event_id": event_id,
         "root_event_id": root_event_id,
@@ -8186,17 +8199,16 @@ def _command_outcome(args: argparse.Namespace, command: str, outcome_kind: str) 
         "outcome_kind": outcome_kind,
     }
     retry_of = getattr(args, "retry_of", None)
-    if isinstance(retry_of, str) and _OUTCOME_ID_RE.fullmatch(retry_of):
+    if retry_of is not None and not _valid_command_outcome_identifier(retry_of):
+        raise ValueError("command retry_of is invalid")
+    if retry_of is not None:
         outcome["retry_of"] = retry_of
     return outcome
 
 
 def _append_command_outcome(data: dict, outcome: dict) -> None:
     """Keep command classification bounded; business writes call this under their lock."""
-    prior = data.get("command_outcomes")
-    records = prior if isinstance(prior, list) else []
-    sanitized = [item for item in records if isinstance(item, dict)]
-    data["command_outcomes"] = (sanitized + [outcome])[-COMMAND_OUTCOME_LIMIT:]
+    append_command_outcome_state(data, outcome)
 
 
 def _add_command_lineage_arguments(parser: argparse.ArgumentParser) -> None:
@@ -8215,25 +8227,11 @@ def _record_command_outcome_only(cwd: Path, outcome: dict) -> None:
     opaque command lineage produced above.
     """
     session_token = hashlib.sha256(resolve_session_id().encode("utf-8")).hexdigest()[:16]
-    directory = state_dir(cwd) / "telemetry" / "command-outcomes"
-    path = directory / f"{session_token}.json"
     try:
-        directory.mkdir(parents=True, exist_ok=True)
-        with StateLock(path.with_suffix(".lock")):
-            if path.exists():
-                document = json.loads(path.read_text(encoding="utf-8"))
-            else:
-                document = {"schema": "mission-command-outcomes/1", "records": []}
-            records = document.get("records") if isinstance(document, dict) else None
-            if not isinstance(records, list):
-                raise ValueError("command telemetry sidecar is invalid")
-            document = {
-                "schema": "mission-command-outcomes/1",
-                "records": ([item for item in records if isinstance(item, dict)] + [outcome])[-COMMAND_OUTCOME_LIMIT:],
-            }
-            atomic_write_json(path, document, administrative=True)
-    except (OSError, ValueError, json.JSONDecodeError):
-        # A rejection must retain its legacy exit/stderr behavior even if audit storage is unavailable.
+        append_command_outcome_sidecar(state_dir(cwd), session_token, outcome)
+    except OutcomeStoreError:
+        # The command remains rejected.  Do not recover by accepting a corrupt
+        # sidecar or following a hostile path; readers surface this telemetry.
         return
 
 
@@ -10770,6 +10768,34 @@ def _score_provenance_counts(states: list[dict]) -> dict[str, int]:
     return counts
 
 
+def _command_outcome_counts(states: list[dict]) -> dict[str, int]:
+    """Summarize state and failure-sidecar outcomes without trusting paths."""
+    records: list[dict] = []
+    invalid = corrupt = 0
+    for state in states:
+        source = state.get("_mission_source_path")
+        if not isinstance(source, str):
+            # Snapshots contain no live sidecars but may carry valid state data.
+            raw = state.get("command_outcomes") or []
+            if isinstance(raw, list):
+                records.extend(item for item in raw if isinstance(item, dict))
+            else:
+                invalid += 1
+            continue
+        source_path = Path(source)
+        root = source_path.parent.parent if source_path.parent.name == "sessions" else source_path.parent
+        sid = state.get("session_id")
+        if not isinstance(sid, str) or not sid:
+            invalid += 1
+            continue
+        token = hashlib.sha256(sid.encode("utf-8")).hexdigest()[:16]
+        found, bad, damaged = iter_command_outcome_records(state, root, token)
+        records.extend(found)
+        invalid += bad
+        corrupt += damaged
+    return summarize_command_outcomes(records, invalid_records=invalid, corrupt_sidecars=corrupt)
+
+
 def _aggregate(
     states: list[dict], duplicate_state_group_count: int = 0,
     *, observation_now: datetime | None = None,
@@ -10823,6 +10849,7 @@ def _aggregate(
             },
             "reviewer_output_stats": _reviewer_output_stats([]),
             "score_provenance_counts": _score_provenance_counts([]),
+            "command_outcome_counts": summarize_command_outcomes([]),
             "activity_timing": summarize_activity_states([]),
         }
     # _classify を 1 回だけ評価 (旧実装は pass/halt/incomplete で 3N 回呼んでいた)
@@ -10928,6 +10955,7 @@ def _aggregate(
         "bounded_context_counts": bounded_context_counts,
         "reviewer_output_stats": _reviewer_output_stats(states),
         "score_provenance_counts": _score_provenance_counts(states),
+        "command_outcome_counts": _command_outcome_counts(states),
         "forced_pass_rate": forced_pass_count / pass_count if pass_count else None,
         "ungated_pass_count": ungated_pass_count,
         "ungated_pass_rate": ungated_pass_count / pass_count if pass_count else None,
