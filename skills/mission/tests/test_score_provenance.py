@@ -8,6 +8,7 @@ import hashlib
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -189,6 +190,51 @@ def test_manual_score_capture_uses_its_own_typed_archive_and_revalidates_it(stat
     rejected = run_cli("mark-passes", cwd=state_dir.parent)
     assert rejected.returncode == 2
     assert "digest mismatch" in rejected.stderr
+
+
+def test_manual_score_capture_rejects_same_size_path_swap_during_single_fd_read(
+        state_dir, tmp_path, monkeypatch):
+    """A pathname replacement during capture cannot detach the input binding."""
+    from scoring_provenance import digest
+
+    unsigned = {
+        "schema": "mission-manual-score/1", "session_id": "test", "mission_id": "abc12345",
+        "iteration": 1, "items": ITEMS, "composite": 4.25, "min_item": 4.0,
+        "open_high": 0, "revision_scope": {"kind": "not-applicable", "reason_code": "non-git"},
+        "source_evidence_ref": {"kind": "manual-source-evidence", "ref": "sha256:" + "1" * 64,
+                                "digest": "sha256:" + "1" * 64},
+        "imported_at": "2026-08-10T00:00:00Z",
+    }
+    source = tmp_path / "manual.json"
+    source.write_text(json.dumps({**unsigned, "input_digest": digest(unsigned)}), encoding="utf-8")
+    replacement = tmp_path / "replacement.json"
+    swapped_unsigned = {**unsigned, "source_evidence_ref": {
+        "kind": "manual-source-evidence", "ref": "sha256:" + "2" * 64,
+        "digest": "sha256:" + "2" * 64,
+    }}
+    replacement.write_text(
+        json.dumps({**swapped_unsigned, "input_digest": digest(swapped_unsigned)}), encoding="utf-8"
+    )
+    assert replacement.stat().st_size == source.stat().st_size
+    before = (state_dir / "sessions" / "test.json").read_bytes()
+    module = _load_state_module()
+    original_read = module.os.read
+    swapped = False
+
+    def read_then_swap(fd, size):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            replacement.replace(source)
+        return original_read(fd, size)
+
+    monkeypatch.setattr(module.os, "read", read_then_swap)
+    monkeypatch.chdir(state_dir.parent)
+    with pytest.raises(SystemExit) as exc:
+        module.cmd_manual_score_capture(SimpleNamespace(input=str(source), out=str(tmp_path / "score.json")))
+    assert exc.value.code == 2
+    assert (state_dir / "sessions" / "test.json").read_bytes() == before
+    assert not (tmp_path / "score.json").exists()
 
 
 @pytest.mark.parametrize("case", ["symlink", "fifo", "hardlink", "oversize", "cross-session", "mixed-iteration"])

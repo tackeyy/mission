@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import sys
 
+import pytest
+
 from skills.mission.tests.conftest import canonical_review, write_canonical_review_aggregate
 
 
@@ -218,13 +220,15 @@ def test_push_score_archives_content_addressed_scoring_artifact(state_dir, run_c
 
 def test_push_score_raw_scoring_output_without_provenance_rejects(state_dir, run_cli, read_state, tmp_path):
     """A legacy output path cannot substitute for structured provenance."""
+    state_path = state_dir / "sessions" / "test.json"
+    before = state_path.read_bytes()
     r = run_cli("push-score", "--iteration", "1", "--composite", "4.0", "--min-item", "3.5",
-                "--items", '{"a": 4.0}', "--scoring-output", str(tmp_path / "does-not-exist.md"),
+                "--items", '{"mission_achievement":4.0,"accuracy":4.0,"completeness":4.0,"usability":4.0}',
+                "--scoring-output", str(tmp_path / "does-not-exist.md"),
                 cwd=state_dir.parent)
     assert r.returncode == 2, r.stderr
     assert "provenance" in r.stderr
-    s = read_state(state_dir)
-    assert len(s["score_history"]) == 0
+    assert state_path.read_bytes() == before
 
 
 def test_push_score_without_scoring_output_rejects_by_default(state_dir, run_cli, read_state):
@@ -300,19 +304,33 @@ def test_push_score_artifact_no_collision_across_runs(state_dir, run_cli, read_s
 # 実ログで usefulness/practicality, reviewer_agreement/reviewer_consensus が混在し stats 集計が壊れる
 
 
-def test_push_score_normalizes_alias_keys(state_dir, run_cli, read_state):
-    """既知エイリアスは正規キーに正規化して保存される."""
+def test_push_score_normalizes_practicality_alias_only(state_dir, run_cli, read_state):
+    """practicality だけが score item の互換 alias として正規化される."""
     normalized, _, _ = _state_module().normalize_score_items({
         "mission_achievement": 4.0, "accuracy": 4.0, "completeness": 4.0,
-        "practicality": 3.5, "reviewer_agreement": 4.5,
+        "practicality": 3.5,
     })
     run_legacy_push_score(run_cli, "--iteration", "1", "--composite", "4.0", "--min-item", "3.5",
-            "--items", '{"mission_achievement": 4.0, "accuracy": 4.0, "completeness": 4.0, "practicality": 3.5, "reviewer_agreement": 4.5}',
+            "--items", '{"mission_achievement": 4.0, "accuracy": 4.0, "completeness": 4.0, "practicality": 3.5}',
             cwd=state_dir.parent, check=True)
     items = read_state(state_dir)["score_history"][0]["items"]
     assert items["usability"] == 3.5
-    assert normalized["reviewer_consensus"] == 4.5
+    assert normalized == items
     assert "practicality" not in items
+
+
+@pytest.mark.parametrize("legacy_key", ["reviewer_agreement", "reviewer_consensus"])
+def test_push_score_rejects_legacy_agreement_items(state_dir, run_cli, legacy_key):
+    """Agreement is metadata, never a fifth score axis (see existing M1 contract)."""
+    r = run_cli(
+        "push-score", "--iteration", "1", "--composite", "4.0", "--min-item", "3.5",
+        "--items", json.dumps({
+            "mission_achievement": 4.0, "accuracy": 4.0, "completeness": 4.0,
+            "usability": 4.0, legacy_key: 4.0,
+        }), "--scoring-output", "missing.md", cwd=state_dir.parent,
+    )
+    assert r.returncode == 2
+    assert "reviewer_consensus / reviewer_agreement" in r.stderr
 
 
 def test_push_score_normalizes_usefulness_alias(state_dir, run_cli, read_state):
@@ -332,9 +350,9 @@ def test_normalize_score_items_reports_unknown_key_without_discarding_it():
 
 
 def test_push_score_canonical_keys_no_warning(state_dir, run_cli):
-    """正規 5 キーのみなら stderr にキー関連の警告を出さない."""
+    """4 正規キーのみなら stderr にキー関連の警告を出さない."""
     r = run_legacy_push_score(run_cli, "--iteration", "1", "--composite", "4.0", "--min-item", "3.5",
-                "--items", '{"mission_achievement": 4.0, "accuracy": 4.0, "completeness": 4.0, "usability": 4.0, "reviewer_consensus": 4.0}',
+                "--items", '{"mission_achievement": 4.0, "accuracy": 4.0, "completeness": 4.0, "usability": 4.0}',
                 cwd=state_dir.parent)
     assert r.returncode == 0
     diagnostics = "\n".join(

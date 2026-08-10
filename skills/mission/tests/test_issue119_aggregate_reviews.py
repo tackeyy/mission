@@ -63,7 +63,6 @@ def test_aggregate_reviews_writes_scoring_json_and_evidence(state_dir, run_cli, 
         "accuracy": 4.3,
         "completeness": 4.1,
         "usability": 3.9,
-        "reviewer_consensus": 5.0,
     }
     assert payload["review_agreement"] == 5.0
     assert payload["open_high"] == 0
@@ -166,8 +165,8 @@ def test_aggregate_reviews_consensus_score_boundaries(state_dir, run_cli, tmp_pa
             "--out", str(out), *_reviewer_windows("A", "B"), cwd=state_dir.parent, check=True)
 
     payload = _load(out)
-    assert payload["items"]["reviewer_consensus"] == 2.0
     assert payload["review_agreement"] == 2.0
+    assert payload["agreement_detail"]["mission_achievement"]["delta"] == 1.6
 
 
 def test_aggregate_reviews_output_can_be_pushed(state_dir, run_cli, read_state, tmp_path):

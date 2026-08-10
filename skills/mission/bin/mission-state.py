@@ -7874,7 +7874,18 @@ def _read_bounded_manual_input(path_text: object) -> bytes:
             if not stat.S_ISREG(initial.st_mode) or initial.st_nlink != 1 or initial.st_size > 4 * 1024 * 1024:
                 raise ValueError("manual score input must be a bounded regular non-symlink file")
             content = os.read(fd, initial.st_size)
-            if len(content) != initial.st_size or os.read(fd, 1) or os.fstat(fd).st_size != initial.st_size:
+            final = os.fstat(fd)
+            current = os.stat(path_text, follow_symlinks=False)
+            identity = lambda metadata: (
+                metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink,
+                metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns,
+            )
+            if (
+                len(content) != initial.st_size
+                or os.read(fd, 1)
+                or identity(final) != identity(initial)
+                or identity(current) != identity(initial)
+            ):
                 raise ValueError("manual score input changed while being read")
             return content
         finally:
