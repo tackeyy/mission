@@ -52,7 +52,7 @@ def test_audit_projects_latest_review_generation_and_keeps_raw_lineage(tmp_path)
     )
 
     result = subprocess.run(
-        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--json"],
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--json", "--lineage"],
         capture_output=True, text=True, check=True,
     )
     data = json.loads(result.stdout)
@@ -64,6 +64,74 @@ def test_audit_projects_latest_review_generation_and_keeps_raw_lineage(tmp_path)
         "review_group_id": "issue-385", "current_generation": 2,
         "current_session_id": "current", "raw_session_ids": ["old", "current"],
     }]
+
+
+def test_audit_lineage_resolves_direct_and_parent_embedded_without_heuristics(tmp_path):
+    sessions = tmp_path / ".mission-state" / "sessions"
+    _write_state(sessions / "root.json", session_id="root", host_run_id="host-root", root_run_id="host-root")
+    _write_state(sessions / "child.json", session_id="child", host_run_id="host-child", root_run_id="host-root")
+    _write_state(sessions / "parent.json", session_id="parent", host_run_id="host-parent", root_run_id="root-external")
+    _write_state(
+        sessions / "embedded.json", session_id="embedded", host_run_id="host-embedded",
+        root_run_id="root-external", parent_run_id="host-parent", child_run_id="host-child",
+        logical_group_id="logical-385",
+    )
+    _write_state(
+        sessions / "legacy.json", session_id="legacy", host_run_id="host-legacy",
+        root_run_id="root-external", parent_run_id="host-missing",
+    )
+
+    default = json.loads(subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--json"],
+        capture_output=True, text=True, check=True,
+    ).stdout)
+    assert "records" not in default["correlation_lineage"]
+    assert "groups" not in default["review_lineage"]
+
+    data = json.loads(subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--json", "--lineage"],
+        capture_output=True, text=True, check=True,
+    ).stdout)
+    lineage = data["correlation_lineage"]
+    assert lineage["direct_count"] == 2
+    assert lineage["parent_embedded_count"] == 1
+    assert lineage["unresolved_count"] == 2
+    assert lineage["resolvable_ratio"] == 0.6
+    by_session = {item["session_id"]: item for item in lineage["records"]}
+    assert by_session["embedded"] == {
+        "session_id": "embedded", "resolution": "parent-embedded",
+        "host_run_id": "host-embedded", "root_run_id": "root-external",
+        "parent_run_id": "host-parent", "child_run_id": "host-child",
+        "logical_group_id": "logical-385",
+    }
+    assert by_session["legacy"]["resolution"] == "unresolved"
+
+
+def test_audit_lineage_operational_fixture_has_at_least_95_percent_explicit_resolution(tmp_path):
+    sessions = tmp_path / ".mission-state" / "sessions"
+    _write_state(sessions / "root.json", session_id="root", host_run_id="host-root", root_run_id="host-root")
+    for index in range(36):
+        _write_state(
+            sessions / f"child-{index}.json", session_id=f"child-{index}",
+            host_run_id=f"host-child-{index}", root_run_id="host-root",
+        )
+    _write_state(sessions / "parent.json", session_id="parent", host_run_id="host-parent", root_run_id="external-root")
+    _write_state(
+        sessions / "embedded.json", session_id="embedded", host_run_id="host-embedded",
+        root_run_id="external-root", parent_run_id="host-parent",
+    )
+    _write_state(sessions / "legacy.json", session_id="legacy")
+
+    data = json.loads(subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--json"],
+        capture_output=True, text=True, check=True,
+    ).stdout)["correlation_lineage"]
+
+    assert data == {
+        "record_count": 40, "direct_count": 37, "parent_embedded_count": 1,
+        "unresolved_count": 2, "resolvable_ratio": 38 / 40,
+    }
+    assert data["resolvable_ratio"] >= 0.95
 
 
 def test_audit_marks_force_receipt_suspect_after_terminal_state_copy_mutation(tmp_path):

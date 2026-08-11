@@ -1695,6 +1695,55 @@ def project_latest_review_generations(
     }
 
 
+_CORRELATION_FIELDS = (
+    "host_run_id", "root_run_id", "parent_run_id", "child_run_id", "logical_group_id",
+)
+
+
+def _opaque_correlation_id(value: object) -> str | None:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return None
+    return value
+
+
+def summarize_correlation_lineage(records: list[StateRecord]) -> dict[str, Any]:
+    """Resolve only explicit host/root/parent references; never infer a lineage."""
+    by_host: dict[str, list[StateRecord]] = {}
+    for record in records:
+        host = _opaque_correlation_id(record.state.get("host_run_id"))
+        if host is not None:
+            by_host.setdefault(host, []).append(record)
+    details = []
+    counts = Counter()
+    for record in records:
+        state = record.state
+        ids = {field: _opaque_correlation_id(state.get(field)) for field in _CORRELATION_FIELDS}
+        root_record = by_host.get(ids["root_run_id"] or "", [])
+        parent_record = by_host.get(ids["parent_run_id"] or "", [])
+        if len(root_record) == 1:
+            resolution = "direct"
+        elif (len(parent_record) == 1
+                and _opaque_correlation_id(parent_record[0].state.get("root_run_id")) == ids["root_run_id"]):
+            resolution = "parent-embedded"
+        else:
+            resolution = "unresolved"
+        counts[resolution] += 1
+        details.append({
+            "session_id": str(state.get("session_id") or record.path.stem),
+            "resolution": resolution,
+            **ids,
+        })
+    resolved = counts["direct"] + counts["parent-embedded"]
+    return {
+        "record_count": len(records),
+        "direct_count": counts["direct"],
+        "parent_embedded_count": counts["parent-embedded"],
+        "unresolved_count": counts["unresolved"],
+        "resolvable_ratio": resolved / len(records) if records else None,
+        "records": details,
+    }
+
+
 def bucket_counts(records: list[StateRecord], bucket_fn) -> dict[str, int]:
     counts: dict[str, int] = {}
     for record in records:
@@ -3202,6 +3251,10 @@ def render_markdown(
         "projected_record_count": stats.get("total_sessions", 0),
         "groups": [],
     }
+    correlation_lineage = stats.get("correlation_lineage") or {
+        "record_count": 0, "direct_count": 0, "parent_embedded_count": 0,
+        "unresolved_count": 0, "resolvable_ratio": None,
+    }
     lines = [
         "# /mission Audit Report",
         "",
@@ -3221,6 +3274,7 @@ def render_markdown(
         "",
         f"- total sessions: {stats['total_sessions']}",
         f"- review lineage raw / projected: {review_lineage['raw_record_count']} / {review_lineage['projected_record_count']}",
+        f"- correlation resolvability (direct / parent-embedded / unresolved): {correlation_lineage['direct_count']} / {correlation_lineage['parent_embedded_count']} / {correlation_lineage['unresolved_count']} (coverage {fmt_float(correlation_lineage['resolvable_ratio'] * 100 if correlation_lineage['resolvable_ratio'] is not None else None, 1)}%)",
         f"- current finding cutoff: {stats['current_since'] or '(not set; all findings are treated as current)'}",
         f"- pass / halt / incomplete / abandoned: {stats['pass_count']} / {stats['halt_count']} / {stats['incomplete_count']} / {stats['abandoned_count']}",
         f"- raw pass rate: {fmt_float(stats['raw_pass_rate'] * 100 if stats['raw_pass_rate'] is not None else None, 1)}% ({stats['raw_pass_rate_numerator']}/{stats['raw_pass_rate_denominator']})",
@@ -3644,6 +3698,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--slow-threshold-sec", type=int, default=1800, help="Slow session threshold")
     parser.add_argument("--min-pass-rate", type=float, default=0.9, help="Finding threshold for pass rate")
     parser.add_argument("--json", action="store_true", help="Print machine-readable summary")
+    parser.add_argument("--lineage", action="store_true", help="Include raw review and correlation lineage details")
     parser.add_argument("--out", default=None, help="Write report to path")
     parser.add_argument("--privacy", action="store_true", help="Redact scanned root paths from report output")
     parser.add_argument("--self-improvement-prompt", action="store_true", help="Print only the prompt for /mission")
@@ -3744,6 +3799,7 @@ def main(argv: list[str] | None = None) -> int:
     filtered = filter_records(records, since, until, after)
     deduped, duplicates, resolved_duplicate_count = dedupe_records(filtered)
     projected, review_lineage = project_latest_review_generations(deduped)
+    correlation_lineage = summarize_correlation_lineage(deduped)
     stats = aggregate(
         projected,
         duplicates,
@@ -3753,7 +3809,19 @@ def main(argv: list[str] | None = None) -> int:
         invalid_worktree_archives,
         observation_now,
     )
-    stats["review_lineage"] = review_lineage
+    stats["review_lineage"] = (
+        review_lineage
+        if args.lineage
+        else {key: review_lineage[key] for key in ("raw_record_count", "projected_record_count")}
+        | {"group_count": len(review_lineage["groups"])}
+    )
+    stats["correlation_lineage"] = (
+        correlation_lineage
+        if args.lineage
+        else {key: correlation_lineage[key] for key in (
+            "record_count", "direct_count", "parent_embedded_count", "unresolved_count", "resolvable_ratio",
+        )}
+    )
     attach_finding_model(stats, args.min_pass_rate, current_since)
     rows = finding_rows(stats, args.min_pass_rate)
 

@@ -4586,6 +4586,10 @@ def _command_provider_packet(data: dict, provider: dict, args) -> str:
     packet = {
         "mission": data.get("mission"),
         "mission_id": data.get("mission_id"),
+        "correlation": {
+            field: data.get(field)
+            for field in ("host_run_id", "root_run_id", "parent_run_id", "child_run_id", "logical_group_id")
+        },
         "iteration": args.iteration,
         "phase": args.phase,
         "provider": {
@@ -4637,6 +4641,11 @@ def cmd_invoke_command_provider(args):
         "transitioned_at": now,
         "started_at": now,
         "provider_kind": "command",
+        **{
+            field: data.get(field)
+            for field in ("host_run_id", "root_run_id", "parent_run_id", "child_run_id", "logical_group_id")
+            if data.get(field) is not None
+        },
     }
     selection_id = _current_selection_id(data)
     if selection_id:

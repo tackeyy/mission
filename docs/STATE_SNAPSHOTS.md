@@ -8,11 +8,16 @@ current state changes with `--from-snapshot <snapshot_id>`:
 
 ```bash
 python3 scripts/mission-audit.py --root /path/to/projects --json
+python3 scripts/mission-audit.py --root /path/to/projects --json --lineage
 python3 scripts/mission-audit.py \
   --root /path/to/projects \
   --from-snapshot <snapshot_id> \
   --json
 ```
+
+Default audit statistics use only the latest unambiguous review generation.
+Use `--lineage` when raw review generations and explicit host/root/parent/child
+correlation resolution are needed; it never guesses missing links.
 
 `--privacy` replaces configured root prefixes in Markdown and JSON output with
 anonymous `root-N` labels. Its default snapshot persists the same anonymous
