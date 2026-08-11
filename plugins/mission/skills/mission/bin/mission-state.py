@@ -67,6 +67,7 @@ from mission_common import (  # noqa: E402
     SPECIALIST_SELECTION_CHECKPOINT_REQUIRED_AT,
     TERMINAL_OUTCOMES,
     classify_state as _classify,
+    correlation_id,
     derive_terminal_outcome,
     duration_sec as _duration_sec,
     parse_iso_datetime,
@@ -5924,10 +5925,29 @@ def cmd_init(args):
         _exit_init_write_failure(cwd)
     planned_files = _parse_files_arg(getattr(args, "files", None))
     now = iso_now()
+    try:
+        host_run_id = correlation_id(getattr(args, "host_run_id", None))
+        root_run_id = correlation_id(getattr(args, "root_run_id", None) or host_run_id)
+        parent_run_id = correlation_id(args.parent_run_id) if getattr(args, "parent_run_id", None) else None
+        child_run_id = correlation_id(args.child_run_id) if getattr(args, "child_run_id", None) else None
+    except ValueError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
 
     initial = {
         "mission": args.mission,
         "mission_id": mission_id(args.mission),
+        "host_run_id": host_run_id,
+        "root_run_id": root_run_id,
+        "parent_run_id": parent_run_id,
+        "child_run_id": child_run_id,
+        "logical_group_id": getattr(args, "logical_group_id", None),
+        "review_group_id": getattr(args, "review_group_id", None),
+        "review_generation": 1 if getattr(args, "review_group_id", None) else None,
+        "review_perspective": getattr(args, "review_perspective", None),
+        "base_sha": getattr(args, "base_sha", None),
+        "head_sha": getattr(args, "head_sha", None),
+        "supersedes": [],
         "goal_dispatch_requested": goal_dispatch["mode"],
         "goal_dispatch_source": goal_dispatch["source"],
         **(
@@ -12658,6 +12678,15 @@ def _build_parser():
     p_init.add_argument("--review-tier", choices=list(TIER_REVIEWER_COUNT), default=None,
                         dest="review_tier",
                         help="レビュー深度 (light/standard/full)。未指定は complexity・ミッション記述から auto 導出 (Issue #168)")
+    p_init.add_argument("--host-run-id", default=None)
+    p_init.add_argument("--root-run-id", default=None)
+    p_init.add_argument("--parent-run-id", default=None)
+    p_init.add_argument("--child-run-id", default=None)
+    p_init.add_argument("--logical-group-id", default=None)
+    p_init.add_argument("--review-group-id", default=None)
+    p_init.add_argument("--review-perspective", default=None)
+    p_init.add_argument("--base-sha", default=None)
+    p_init.add_argument("--head-sha", default=None)
     p_init.set_defaults(func=cmd_init)
 
     p_next = sub.add_parser("next", help="ADR-002 Stage 3: state から次の 1 手を JSON で返す (read-only。Codex/compaction 復帰時の進行ガイド)")
