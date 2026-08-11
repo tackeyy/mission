@@ -124,6 +124,31 @@ def test_mark_passes_rejects_selected_decision_without_current_selected_record(
     assert "selected checkpoint has no current selected provider" in result.stderr
 
 
+def test_mark_passes_rejects_idless_terminal_record_for_typed_checkpoint_without_mutation(
+    state_dir, run_cli, read_state, push_provenance_score
+):
+    """ID-less legacy-shaped evidence cannot close a typed current checkpoint."""
+    selection_id = "sel_0123456789abcdef0123456789abcdef"
+    state_file = state_dir / "sessions" / "test.json"
+    state = read_state(state_dir)
+    state.update({"task_profile": {"primary": "backend"},
+        "specialists_decision": {"policy": "auto", "action": "select", "decision": "selected",
+            "reason_code": "candidate-selected", "lifecycle_state": "selected", "selection_id": selection_id},
+        "specialists_selected": [{"role": "backend", "skill": "backend-provider", "selection_id": selection_id}],
+        "specialist_invocations": [{"selection_id": selection_id, "skill": "backend-provider", "status": "completed"}]})
+    state_file.write_text(json.dumps(state), encoding="utf-8")
+    push_provenance_score(state_dir.parent)
+    before = state_file.read_bytes()
+    from specialist_accounting import selected_without_terminal_invocations
+    assert selected_without_terminal_invocations(read_state(state_dir)) == [
+        {"skill": "backend-provider", "role": "backend"}
+    ]
+    result = run_cli("mark-passes", cwd=state_dir.parent)
+    assert result.returncode == 2
+    assert "invocation_id must be an opaque" in result.stderr
+    assert state_file.read_bytes() == before
+
+
 def test_waiver_records_current_selection_identity_and_allows_selected_gap(
     state_dir, run_cli, read_state, push_provenance_score
 ):

@@ -182,9 +182,11 @@ def validate_specialist_lifecycle(
     for invocation in invocations:
         if not isinstance(invocation, Mapping):
             raise SpecialistLifecycleError("specialist_invocations entries must be objects")
-        if not invocation.get("invocation_id"):
-            continue
         validate_invocation_record(invocation)
+        if invocation.get("selection_id") is None:
+            raise SpecialistLifecycleError(
+                "typed checkpoint invocation must carry selection_id"
+            )
         invocation_id = str(invocation["invocation_id"])
         if invocation_id in seen:
             raise SpecialistLifecycleError("duplicate specialist invocation_id")

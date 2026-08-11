@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from specialist_lifecycle import is_terminal_invocation
+
 
 TERMINAL_SPECIALIST_INVOCATION_STATUSES = {
     "completed",
@@ -84,7 +86,12 @@ def selected_without_terminal_invocations(state: dict[str, Any]) -> list[dict[st
         if not isinstance(invocation, dict):
             continue
         skill = invocation.get("skill")
-        if skill and invocation.get("status") in TERMINAL_SPECIALIST_INVOCATION_STATUSES:
+        is_terminal = (
+            is_terminal_invocation(invocation)
+            if checkpoint_id
+            else invocation.get("status") in TERMINAL_SPECIALIST_INVOCATION_STATUSES
+        )
+        if skill and is_terminal:
             terminal_pairs.add((str(skill), invocation.get("selection_id")))
     gaps: list[dict[str, str]] = []
     for selected in state.get("specialists_selected") or []:
