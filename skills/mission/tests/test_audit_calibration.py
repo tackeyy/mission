@@ -68,15 +68,16 @@ def test_kpi_buckets_dedupes_defects_and_keeps_retry_separate():
 def test_duration_percentiles_censor_blocked_records_and_defer_unavailable_provider_kpi():
     audit = _load()
     summary = audit.summarize_benchmark_kpi([
-        {"human_quality_score": 4.3, "elapsed_minutes": 1.0},
-        {"human_quality_score": 4.3, "elapsed_minutes": 5.0},
-        {"human_quality_score": 4.3, "elapsed_minutes": 9.0},
+        {"human_quality_score": 4.3, "elapsed_minutes": 1.0, "run_status": "completed"},
+        {"human_quality_score": 4.3, "elapsed_minutes": 5.0, "run_status": "completed"},
+        {"human_quality_score": 4.3, "elapsed_minutes": 9.0, "run_status": "completed"},
         {"human_quality_score": 4.3, "elapsed_minutes": 100.0, "run_status": "blocked"},
     ])
 
     assert summary["duration_minutes"] == {
         "included_records": 3,
         "blocked_censored_records": 1,
+        "noncompleted_excluded_records": 0,
         "invalid_records": 0,
         "p50": 5.0,
         "p90": 8.2,
@@ -91,6 +92,25 @@ def test_duration_percentiles_censor_blocked_records_and_defer_unavailable_provi
         assert observation.get("rate", observation.get("count", observation.get("value"))) is None, key
 
 
+def test_duration_percentiles_exclude_failed_and_other_noncompleted_records():
+    audit = _load()
+    summary = audit.summarize_benchmark_kpi([
+        {"human_quality_score": 4.3, "elapsed_minutes": 2.0, "run_status": "completed"},
+        {"human_quality_score": 4.3, "elapsed_minutes": 98.0, "run_status": "failed"},
+        {"human_quality_score": 4.3, "elapsed_minutes": 200.0, "run_status": "blocked"},
+    ])
+
+    assert summary["duration_minutes"] == {
+        "included_records": 1,
+        "blocked_censored_records": 1,
+        "noncompleted_excluded_records": 1,
+        "invalid_records": 0,
+        "p50": 2.0,
+        "p90": 2.0,
+        "tail": 2.0,
+    }
+
+
 def test_provider_kpi_payload_is_rejected_until_the_versioned_consumer_is_enabled():
     audit = _load()
 
@@ -99,6 +119,75 @@ def test_provider_kpi_payload_is_rejected_until_the_versioned_consumer_is_enable
             "human_quality_score": 4.3,
             "planning_provider_kpi": {"schema": "mission-planning-provider-kpi/1"},
         }])
+
+
+def _valid_measurement_observations():
+    return {
+        "artifact_observation_coverage": {"status": "observed", "numerator": 1, "denominator": 1},
+        "activity_coverage": {"status": "observed", "numerator": 1, "denominator": 1},
+        "structured_score_provenance": {"status": "observed", "numerator": 1, "denominator": 1},
+        "reviewer_freshness": {"status": "observed", "numerator": 1, "denominator": 1},
+        "force_pass_rate": {"status": "observed", "numerator": 0, "denominator": 1},
+        "expected_gate_retry_count": {"status": "observed", "count": 0},
+        "group_closeout_completeness": {"status": "unavailable", "value": None},
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "observation"),
+    [
+        ("artifact_observation_coverage", {"status": "observed", "numerator": True, "denominator": 1}),
+        ("activity_coverage", {"status": "observed", "numerator": float("nan"), "denominator": 1}),
+        ("structured_score_provenance", {"status": "observed", "numerator": -1, "denominator": 1}),
+        ("reviewer_freshness", {"status": "observed", "numerator": 2, "denominator": 1}),
+        ("force_pass_rate", {"status": "observed", "numerator": 0}),
+        ("expected_gate_retry_count", {"status": "observed"}),
+        ("expected_gate_retry_count", {"status": "observed", "count": True}),
+        ("expected_gate_retry_count", {"status": "observed", "count": -1}),
+        ("group_closeout_completeness", {"status": "observed"}),
+        ("group_closeout_completeness", {"status": "unknown", "value": None}),
+        ("group_closeout_completeness", []),
+        ("artifact_observation_coverage", {"status": "unknown", "value": None}),
+        ("activity_coverage", []),
+    ],
+)
+def test_present_malformed_measurement_observations_fail_closed(field, observation):
+    audit = _load()
+    measurements = _valid_measurement_observations()
+    measurements[field] = observation
+
+    with pytest.raises(audit.BenchmarkAuditInputError, match="measurement observation"):
+        audit.summarize_benchmark_kpi([{
+            "human_quality_score": 4.3,
+            "measurement_observations": measurements,
+        }])
+
+
+def test_missing_measurement_document_or_field_stays_unavailable():
+    audit = _load()
+    measurements = _valid_measurement_observations()
+    del measurements["activity_coverage"]
+    summary = audit.summarize_benchmark_kpi([
+        {"human_quality_score": 4.3},
+        {"human_quality_score": 4.3, "measurement_observations": measurements},
+    ])
+
+    assert summary["measurement_observations"]["activity_coverage"]["status"] == "unavailable"
+    assert summary["measurement_observations"]["activity_coverage"]["unavailable_records"] == 2
+
+
+def test_observed_zero_denominator_rate_is_explicitly_null():
+    audit = _load()
+    measurements = _valid_measurement_observations()
+    measurements["activity_coverage"] = {
+        "status": "observed", "numerator": 0, "denominator": 0,
+    }
+    summary = audit.summarize_benchmark_kpi([{
+        "human_quality_score": 4.3,
+        "measurement_observations": measurements,
+    }])
+
+    assert summary["measurement_observations"]["activity_coverage"]["rate"] is None
 
 
 def test_kpi_aggregates_versioned_mission_observations_without_reading_state():

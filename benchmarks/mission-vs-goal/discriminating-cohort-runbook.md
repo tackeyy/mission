@@ -61,8 +61,10 @@ summary, not as a replacement for it.
   defect totals.
 - `audit_context.coverage` is an observed/eligible pair and `tier` is context
   only. Coverage with zero eligible items reports a null rate.
-- Duration p50/p90/tail use completed records only. A `blocked` record is
-  counted as censored and cannot distort the timing percentiles.
+- Duration p50/p90/tail use `run_status=completed` records only. A `blocked`
+  record is counted as censored (`blocked_censored_records`), while every other
+  noncompleted record is counted separately (`noncompleted_excluded_records`);
+  neither category can distort timing percentiles.
 
 The `mission-planning-provider-kpi/1` producer belongs to Issue #399 and is
 not consumed by this runner yet. `planning_provider_kpi.status=deferred` is an

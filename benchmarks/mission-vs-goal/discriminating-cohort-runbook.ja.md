@@ -91,8 +91,9 @@ state を読む・再計算するものではない。通常の arm summary の�
   可視化する。`expected-gate` は報告するが defect total から除外する。
 - `audit_context.coverage` は observed/eligible、`tier` は文脈情報である。
   eligible が 0 の coverage rate は null とする。
-- duration の p50/p90/tail は完了 record だけを使う。`blocked` record は censored
-  として数えるが、percentile を歪めない。
+- duration の p50/p90/tail は `run_status=completed` record だけを使う。`blocked`
+  record は `blocked_censored_records`、他の非完了 record は
+  `noncompleted_excluded_records` として別々に数え、いずれも percentile を歪めない。
 
 `mission-planning-provider-kpi/1` の producer は Issue #399 の責務であり、現時点で
 runner は消費しない。`planning_provider_kpi.status=deferred` は意図した versioned
