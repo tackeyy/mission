@@ -273,15 +273,16 @@ separator, for example `~/workspace:~/dev` on macOS/Linux.
 ## Testing
 
 ```bash
-cd skills/mission
-python3 -m pytest -q
+make test-smoke  # no-install syntax/import check
+make test        # CI-identical full suite in .venv-ci
+make test-e2e    # slow operational scenarios
 ```
 
-Local verification snapshot:
+Each target prints a `mission-test-report/1` JSON line with the exact Git tree
+SHA, tier, and test manifest. `make test` creates `.venv-ci` and installs the
+pinned `.github/requirements-ci.txt`; CI invokes the same target.
 
-```text
-2026-07-21: 1208 passed
-```
+Historical local verification snapshot: `2026-07-21: 1208 passed`.
 
 Additional project-specific testing guidance is in
 [`docs/TESTING.md`](docs/TESTING.md).

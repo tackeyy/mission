@@ -5,6 +5,7 @@ __pycache__/
 .env*
 .mission-state/
 .pytest_cache/
+.venv-ci/
 .serena/
 .worktrees/
 output/

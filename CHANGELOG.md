@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Repository-managed `make test-smoke`, `make test`, and `make test-e2e` targets now share the CI entrypoint, create a pinned test environment when needed, and emit exact tree/test-manifest reports (#391).
 - State archive compaction now records canonical and superseded state relations in immutable content-addressed generations without deleting physical lineage. Audit reads materialized canonical records by default and exposes full physical lineage with `--forensic` (#391).
 - Stop-hook block output now fingerprints the unfinished session set, phase, and lease fields. It emits full detail only on change or after the heartbeat TTL, otherwise returning a compact blocker category plus one next command. Project-local `mission-stop-guard/1` state keeps atomic block/reinjection/detail/heartbeat counters without mutating the fenced session (#389).
 - Parallel missions can now create a versioned planned-child manifest, classify each child as planned/running/waiting/pass/halt, and close the group only after every planned child is terminal and all leases are released. Group status reports actual artifact, activity, and review-provenance coverage; duplicate, unplanned, malformed, or unsafe manifests fail closed without rewriting rejected state (#388).

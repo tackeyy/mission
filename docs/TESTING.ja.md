@@ -6,18 +6,22 @@
 
 ## テストコマンド
 
-Python テスト全体:
+no-install smoke、CI と同一の全テスト、slow operational を分けて実行します。
 
 ```bash
-cd skills/mission
-python3 -m pytest -q
+make test-smoke
+make test
+make test-e2e
 ```
+
+full / E2E tier は pinned された `.github/requirements-ci.txt` から
+`.venv-ci` を作ります。各 target は exact Git tree SHA と実行 test manifest を
+`mission-test-report/1` JSON で出力します。
 
 特定ファイル:
 
 ```bash
-cd skills/mission
-python3 -m pytest -q tests/test_mark_passes_threshold.py
+.venv-ci/bin/python -m pytest -q skills/mission/tests/test_mark_passes_threshold.py
 ```
 
 shell lint:

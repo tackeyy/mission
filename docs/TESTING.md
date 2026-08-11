@@ -8,18 +8,22 @@ unless the score history satisfies the threshold gate.
 
 ## Test Commands
 
-Run all Python tests:
+Run the no-install smoke tier, CI-identical full suite, or slow operational tier:
 
 ```bash
-cd skills/mission
-python3 -m pytest -q
+make test-smoke
+make test
+make test-e2e
 ```
+
+The full and E2E tiers create `.venv-ci` from the pinned
+`.github/requirements-ci.txt`. Each target prints a `mission-test-report/1`
+line containing the exact Git tree SHA and executed test manifest.
 
 Run a specific test file:
 
 ```bash
-cd skills/mission
-python3 -m pytest -q tests/test_mark_passes_threshold.py
+.venv-ci/bin/python -m pytest -q skills/mission/tests/test_mark_passes_threshold.py
 ```
 
 Run shell linting:

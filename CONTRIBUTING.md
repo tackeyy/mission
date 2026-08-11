@@ -36,20 +36,19 @@ git clone https://github.com/tackeyy/mission.git
 cd mission
 ```
 
-Install test tools if needed:
-
-```bash
-python3 -m pip install pytest
-```
-
 ## Running Tests
 
-Run the Python test suite:
+Run the deterministic repository-managed test tiers:
 
 ```bash
-cd skills/mission
-python3 -m pytest -q
+make test-smoke
+make test
+make test-e2e
 ```
+
+`make test` creates `.venv-ci`, installs the pinned CI requirements, and runs
+the same full pytest command as GitHub Actions. Every tier prints the exact Git
+tree SHA and its test manifest.
 
 Run shell linting:
 
@@ -97,7 +96,7 @@ Use conventional commit prefixes where practical:
 
 Before opening a pull request:
 
-- Run `python3 -m pytest -q` from `skills/mission`
+- Run `make test`
 - Run `shellcheck scripts/mission-stop-guard.sh` if the hook changed
 - Update README or reference docs for user-visible behavior
 - Add or update tests for behavior changes
