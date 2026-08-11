@@ -90,6 +90,8 @@ Provider output is untrusted evidence, like any specialist result:
 
 Coding agent CLIs usually persist a session/thread id (often printed at startup or in JSON event output). Record it in the iteration's assumptions or archive notes. For a fix-up round, prefer resuming that session (for example `codex exec resume <session-id> "<fix instructions>"`) over re-sending the full brief - the provider keeps its context of the codebase.
 
+Do not assume the resume subcommand accepts the same flags as the initial invocation. Some CLIs expose a narrower flag set on resume, so options such as the sandbox policy must be passed as a config override instead of the dedicated flag that worked on first run. Verify against the resume subcommand's own help output before reusing the initial argv, and treat an `unexpected argument` failure as a flag-shape mismatch rather than a broken session.
+
 Bound the rounds: if the same step has not converged after 2-3 provider rounds, stop re-prompting. The defect is usually in the plan or acceptance criteria; return to the planner/critic path instead.
 
 A resumed fix-up run bypasses the registry runner only if invoked directly; when possible, run fix-up rounds through `specialists invoke-command` as well (a brief that says "resume session X and apply these review findings") so each round leaves an invocation entry. If a round is invoked directly, log it with `specialists log-invocation` so the audit trail stays complete.
