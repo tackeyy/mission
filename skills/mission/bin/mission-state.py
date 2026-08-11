@@ -10078,18 +10078,26 @@ def cmd_aggregate_reviews(args):
             _verify_published_file(out_publish)
             atomic_write_json(sf, data)
         except BaseException as exc:
+            recovery_error: PublishedRollbackRecoveryError | None = None
             if out_publish is not None:
                 try:
                     _rollback_published_file(out_publish)
+                except PublishedRollbackRecoveryError as rollback_error:
+                    recovery_error = rollback_error
                 except ValueError as rollback_error:
                     print(f"ERROR: aggregate output rollback rejected: {rollback_error}", file=sys.stderr)
                 out_publish = None
             if archive_publish is not None:
                 try:
                     _rollback_published_file(archive_publish)
+                except PublishedRollbackRecoveryError as rollback_error:
+                    if recovery_error is None:
+                        recovery_error = rollback_error
                 except ValueError as rollback_error:
                     print(f"ERROR: aggregate archive rollback rejected: {rollback_error}", file=sys.stderr)
                 archive_publish = None
+            if recovery_error is not None:
+                raise recovery_error from exc
             if isinstance(exc, ValueError):
                 print(f"ERROR: aggregate output rejected: {exc}", file=sys.stderr)
                 raise CommandOutcomeExit(2, "invalid-input") from exc

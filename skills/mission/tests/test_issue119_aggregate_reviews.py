@@ -689,35 +689,54 @@ def test_pending_sigint_cannot_replace_fileexists_conflict_ownership(
 
 
 def test_main_internal_error_envelope_exposes_recovery_ref_without_sidecar_locator(
-    state_dir, monkeypatch, capsys,
+    state_dir, tmp_path, monkeypatch, capsys,
 ):
     module = _load_mission_state()
-    recovery_ref = {
-        "basename": ".score.json.recovery-deadbeef-1-2-0.json",
-        "digest": "sha256:" + "a" * 64,
-        "size": 16,
-    }
-    args = argparse.Namespace(
-        cmd="aggregate-reviews", json=True, command_outcome_tracking=True,
-        command_outcome_emitted=False, event_id="recovery-envelope",
-        root_event_id=None, attempt=1, retry_of=None,
-    )
+    review = _review(tmp_path, "recovery-envelope-review.json", perspective="quality")
+    out = tmp_path / "score.json"
+    previous = b"previous-output\n"
+    out.write_bytes(previous)
+    state_path = state_dir / "sessions" / "test.json"
+    state_before = state_path.read_bytes()
+    archive_before = _archive_bytes(state_dir)
+    original_write = module.atomic_write_json
+    original_replace = module.os.replace
 
-    def fail_with_recovery(_args):
-        raise module.PublishedRollbackRecoveryError(recovery_ref)
+    def fail_state_publish(path, data, **kwargs):
+        if path == state_path:
+            raise OSError("simulated aggregate state publish failure")
+        return original_write(path, data, **kwargs)
 
-    args.func = fail_with_recovery
+    def fail_restore_replace(src, dst, **kwargs):
+        if ".restore." in str(src):
+            raise OSError("simulated aggregate restore failure")
+        return original_replace(src, dst, **kwargs)
+
+    monkeypatch.setattr(module, "atomic_write_json", fail_state_publish)
+    monkeypatch.setattr(module.os, "replace", fail_restore_replace)
+    args = _aggregate_args(review, out)
+    args.cmd = "aggregate-reviews"
+    args.func = module.cmd_aggregate_reviews
+    args.command_outcome_tracking = True
+    args.command_outcome_emitted = False
     parser = argparse.Namespace(parse_args=lambda: args)
     monkeypatch.setattr(module, "_build_parser", lambda: parser)
     monkeypatch.chdir(state_dir.parent)
     monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
 
     with pytest.raises(SystemExit) as stopped:
         module.main()
 
     assert stopped.value.code == 1
     envelope = json.loads(capsys.readouterr().out)
-    assert envelope["recovery_ref"] == recovery_ref
+    recovery_ref = envelope["recovery_ref"]
+    recovery = tmp_path / recovery_ref["basename"]
+    assert recovery.read_bytes() == previous
+    assert recovery_ref["digest"] == "sha256:" + hashlib.sha256(previous).hexdigest()
+    assert recovery_ref["size"] == len(previous)
+    assert state_path.read_bytes() == state_before
+    assert _archive_bytes(state_dir) == archive_before
     sidecar = next((state_dir / "telemetry" / "command-outcomes").glob("*.json"))
     record = json.loads(sidecar.read_text(encoding="utf-8"))["records"][-1]
     assert "recovery_ref" not in record
