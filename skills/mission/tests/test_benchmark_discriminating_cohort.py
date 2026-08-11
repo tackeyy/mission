@@ -132,3 +132,12 @@ def test_adoption_runbook_exists():
     # 採用ゲート: 分散の解消と iter>=2 の観測を要求
     assert "marker_score_variance" in text
     assert "iteration" in text or "iter" in text
+
+
+def test_audit_kpi_contract_is_documented_in_both_runbooks():
+    for name in ("discriminating-cohort-runbook.md", "discriminating-cohort-runbook.ja.md"):
+        text = (BENCHMARK_DIR / name).read_text(encoding="utf-8")
+        assert "benchmark_kpi" in text
+        assert "expected-gate" in text
+        assert "blocked" in text
+        assert "mission-planning-provider-kpi/1" in text

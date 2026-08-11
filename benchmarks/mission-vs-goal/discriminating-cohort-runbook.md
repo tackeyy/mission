@@ -46,6 +46,29 @@ or mission profile changes.
 | mission Standard | USD 8.0 | `2026-08-07-portfolio-v6-repeats3`, `portfolio-std-contract` mission rep 1 completed at USD 5.9400; Standard reps capped at USD 6.0085 and USD 6.0259 show that a USD 6 cap is insufficient. |
 | mission full profile (Standard + Complex) | USD 10.0 | `2026-08-02-portfolio-v5-speed`, `portfolio-std-contract-mission` reached iteration 2 at USD 4.8770; combined with the v6 USD 5.9400 completed maximum, USD 10 preserves iteration-2 headroom. |
 
+### Benchmark audit KPI
+
+Each runner summary now includes `benchmark_kpi` (`mission-benchmark-kpi/1`).
+It reduces only synthetic result-record annotations; it does not read or
+recompute any raw planning state. Interpret it alongside the normal arm
+summary, not as a replacement for it.
+
+- `score_buckets` separates below-pass (`<4.0`), pass-but-below-target
+  (`4.0.. <4.3`), and target-met (`>=4.3`) records.
+- `audit_events` must carry `root_event_id`, positive `attempt`, and a `kind`
+  of `defect` or `expected-gate`. Defects dedupe by root event while retries
+  remain separately visible; `expected-gate` is reported but excluded from
+  defect totals.
+- `audit_context.coverage` is an observed/eligible pair and `tier` is context
+  only. Coverage with zero eligible items reports a null rate.
+- Duration p50/p90/tail use completed records only. A `blocked` record is
+  counted as censored and cannot distort the timing percentiles.
+
+The `mission-planning-provider-kpi/1` producer belongs to Issue #399 and is
+not consumed by this runner yet. `planning_provider_kpi.status=deferred` is an
+intentional versioned seam: do not add a payload to benchmark records until
+the #399 consumer contract is implemented and validated.
+
 Record results in `report.md` / `report.ja.md` with the standard unsafe-
 interpretation guard, then close #262 with the verdict.
 
