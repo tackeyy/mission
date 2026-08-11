@@ -145,6 +145,13 @@ def _valid_measurement_observations():
         ("expected_gate_retry_count", {"status": "observed", "count": True}),
         ("expected_gate_retry_count", {"status": "observed", "count": -1}),
         ("group_closeout_completeness", {"status": "observed"}),
+        ("group_closeout_completeness", {"status": "observed", "value": None}),
+        ("group_closeout_completeness", {"status": "observed", "value": True}),
+        ("group_closeout_completeness", {"status": "observed", "value": float("nan")}),
+        ("group_closeout_completeness", {"status": "observed", "value": -0.1}),
+        ("group_closeout_completeness", {"status": "observed", "value": 1.1}),
+        ("group_closeout_completeness", {"status": "unavailable", "value": 0.0}),
+        ("group_closeout_completeness", {"status": "not-applicable", "value": 0.0}),
         ("group_closeout_completeness", {"status": "unknown", "value": None}),
         ("group_closeout_completeness", []),
         ("artifact_observation_coverage", {"status": "unknown", "value": None}),
@@ -188,6 +195,21 @@ def test_observed_zero_denominator_rate_is_explicitly_null():
     }])
 
     assert summary["measurement_observations"]["activity_coverage"]["rate"] is None
+
+
+def test_observed_group_closeout_keeps_its_typed_value():
+    audit = _load()
+    measurements = _valid_measurement_observations()
+    measurements["group_closeout_completeness"] = {"status": "observed", "value": 0.5}
+    summary = audit.summarize_benchmark_kpi([{
+        "human_quality_score": 4.3,
+        "measurement_observations": measurements,
+    }])
+
+    assert summary["measurement_observations"]["group_closeout_completeness"] == {
+        "status": "observed", "value": 0.5, "observed_records": 1,
+        "unavailable_records": 0, "not_applicable_records": 0,
+    }
 
 
 def test_kpi_aggregates_versioned_mission_observations_without_reading_state():

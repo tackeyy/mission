@@ -185,20 +185,29 @@ def _measurement_observations(records: list[dict]) -> dict:
         }
     for field in set(MEASUREMENT_OBSERVATION_FIELDS) - set(output):
         observed = unavailable = not_applicable = 0
+        observed_values: list[float] = []
         for record in records:
             value = observation_for(record, field)
             status = value.get("status") if value is not None else "unavailable"
             if status == "not-applicable":
+                if "value" not in value or value["value"] is not None:
+                    raise BenchmarkAuditInputError(f"measurement observation {field} unavailable value is invalid")
                 not_applicable += 1
             elif status == "observed":
                 if "value" not in value:
                     raise BenchmarkAuditInputError(f"measurement observation {field} value is required")
+                observed_value = _finite_number(value["value"])
+                if observed_value is None or observed_value < 0 or observed_value > 1:
+                    raise BenchmarkAuditInputError(f"measurement observation {field} value is invalid")
+                observed_values.append(observed_value)
                 observed += 1
             else:
+                if value is not None and ("value" not in value or value["value"] is not None):
+                    raise BenchmarkAuditInputError(f"measurement observation {field} unavailable value is invalid")
                 unavailable += 1
         output[field] = {
             "status": "observed" if observed else "unavailable",
-            "value": None,
+            "value": round(sum(observed_values) / observed, 4) if observed else None,
             "observed_records": observed,
             "unavailable_records": unavailable,
             "not_applicable_records": not_applicable,
