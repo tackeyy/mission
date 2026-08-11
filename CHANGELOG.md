@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added bounded command outcome telemetry for review import/finalization, transition gates, and command providers. Records classify `ok`, `expected-gate`, `invalid-input`, `external`, or `internal-error`, retain opaque retry lineage, preserve state bytes for rejected gates, and report deduplicated root-event/retry/corruption counts through `stats` and audit (#386).
+
 - Scoring now keeps quality assessment to four axes and records reviewer agreement separately. Manual score imports use a dedicated typed, content-addressed capture route: all score fields must be finite non-boolean values in range, and open High counts must be non-boolean non-negative integers. Audit/statistics show score provenance status (#383).
 
 - Review aggregates now re-derive every gate value from archived inputs at write and pass boundaries, rejecting missing or self-consistent-but-false claims. Force approvals bind a versioned terminal-state projection and audit detects copied or mutated terminal state. Approval verifier trust is the user-only `$XDG_CONFIG_HOME/mission/approval-verifiers.json` `mission-approval-verifier-registry/2`: its unique registration pins `entry_point`, `distribution`, `version`, and `source_digest`; parent and child recheck that pin, and load plus callback run in a reaped bounded child process (#383).

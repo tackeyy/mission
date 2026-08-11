@@ -105,11 +105,17 @@ def test_codex_preflight_includes_scoring_pipeline_summary(tmp_path, run_cli):
     force を推奨する文言を含まない (force に触れる場合も禁止文脈のみ)."""
     out = _json(run_cli, "--hook-config", str(tmp_path / "hooks.json"), cwd=tmp_path)
     pipeline = out["scoring_pipeline"]
-    assert "aggregate-reviews" in pipeline
-    assert "push-score" in pipeline
+    assert "review-import --iteration" in pipeline
+    assert "--stdin" in pipeline
+    assert "review-finalize --iteration" in pipeline
+    assert "--input-ref <review_evidence_ref.path>" in pipeline
     assert "mark-passes" in pipeline
     assert "mission-scorer" in pipeline  # Codex 向け fallback 変換器への言及
     assert "just because" in pipeline or "Never" in pipeline  # force を安易に使わない旨の警告
+    assert "/tmp/mission-reviewer" not in pipeline
+    assert "aggregate-reviews --input" not in pipeline
+    assert "push-score" not in pipeline
+    assert "&&" not in pipeline
 
 
 def test_codex_preflight_strict_rejects_scoring_evidence_escape_hatch(tmp_path, run_cli):

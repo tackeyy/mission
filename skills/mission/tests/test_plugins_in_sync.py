@@ -171,6 +171,11 @@ MISSION_STATE_DISTRIBUTION_MARKERS = [
     "_classify_command_provider_result",
 ]
 
+COMMAND_OUTCOME_SYNC_PAIR = (
+    REPO_ROOT / "skills" / "mission" / "lib" / "command_outcomes.py",
+    REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "command_outcomes.py",
+)
+
 
 def _md5(path: Path) -> str:
     return hashlib.md5(path.read_bytes()).hexdigest()
@@ -210,6 +215,13 @@ def test_stop_guard_in_sync():
         f"  plugins: {dst}\n"
         f"  同期コマンド: cp {src} {dst}"
     )
+
+
+def test_command_outcomes_py_in_sync():
+    """Shared command outcome reader is shipped with the plugin mirror."""
+    src, dst = COMMAND_OUTCOME_SYNC_PAIR
+    assert src.exists() and dst.exists()
+    assert _md5(src) == _md5(dst)
 
 
 def test_local_authoring_bootstrap_files_in_sync():

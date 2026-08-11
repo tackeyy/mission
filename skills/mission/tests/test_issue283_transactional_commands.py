@@ -8,7 +8,27 @@ Phase 5 の aggregate-reviews → push-score、Phase 6 の mark-passes → next 
 
 from __future__ import annotations
 
+import argparse
+import copy
+import hashlib
+import importlib.util
 import json
+from pathlib import Path
+
+import pytest
+
+
+MISSION_STATE_PY = Path(__file__).resolve().parent.parent / "bin" / "mission-state.py"
+
+
+def _load_mission_state():
+    spec = importlib.util.spec_from_file_location(
+        "mission_state_issue283_transaction", MISSION_STATE_PY,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 def _review(tmp_path, name, *, perspective="A", scores=None):
@@ -49,6 +69,25 @@ def _reviewer_windows():
     )
 
 
+def _finalize_args(review, out, *, event_id="finalize-transaction"):
+    return argparse.Namespace(
+        iteration=1,
+        input=[str(review)],
+        input_refs=[],
+        out=str(out),
+        min_reviewers=None,
+        reviewer_windows=[],
+        base_sha=None,
+        head_sha=None,
+        notes=None,
+        resubmit_reason=None,
+        event_id=event_id,
+        root_event_id=f"{event_id}-root",
+        attempt=1,
+        retry_of=None,
+    )
+
+
 # ===== review-finalize =====
 
 
@@ -67,18 +106,124 @@ def test_review_finalize_aggregates_and_pushes_in_one_command(state_dir, run_cli
     assert entry["score_source"] == "scoring-json"
     assert entry["composite"] == result["push"]["appended"]["composite"]
     assert entry["items"]["mission_achievement"] == 4.5
+    assert read_state(state_dir)["command_outcomes"] == [result["outcome"]]
+
+
+@pytest.mark.parametrize("failure_kind", ["lease-takeover", "io-error"])
+def test_review_finalize_has_no_post_push_transaction_failure_window(
+    state_dir, tmp_path, monkeypatch, capsys, failure_kind,
+):
+    """A committed score must not be followed by a second outcome transaction."""
+    module = _load_mission_state()
+    monkeypatch.chdir(state_dir.parent)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    review = _review(tmp_path, "single.json", perspective="quality")
+    original_write = module.atomic_write_json
+    score_publish_count = 0
+    publish_candidates = []
+
+    def reject_second_score_transaction(path, data, **kwargs):
+        nonlocal score_publish_count
+        publish_candidates.append(copy.deepcopy(data))
+        if data.get("score_history"):
+            score_publish_count += 1
+            if score_publish_count == 2:
+                if failure_kind == "lease-takeover":
+                    raise module.CommandOutcomeExit(2, "expected-gate")
+                raise OSError("simulated post-push publish failure")
+        return original_write(path, data, **kwargs)
+
+    monkeypatch.setattr(module, "atomic_write_json", reject_second_score_transaction)
+
+    module.cmd_review_finalize(
+        _finalize_args(review, tmp_path / "score.json", event_id=failure_kind),
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    state = json.loads((state_dir / "sessions" / "test.json").read_text())
+    assert payload["ok"] is True
+    assert state["score_history"] == [payload["push"]["appended"]]
+    outcomes = [
+        record for record in state.get("command_outcomes", [])
+        if record.get("command") == "review-finalize"
+    ]
+    assert outcomes == [payload["outcome"]]
+    score_candidates = [item for item in publish_candidates if item.get("score_history")]
+    assert len(score_candidates) == 1
+    assert score_candidates[0]["command_outcomes"][-1] == payload["outcome"]
+
+
+def test_review_finalize_combined_score_outcome_publish_failure_is_atomic(
+    state_dir, tmp_path, monkeypatch,
+):
+    """The single score/outcome publish leaves neither record after an I/O failure."""
+    module = _load_mission_state()
+    monkeypatch.chdir(state_dir.parent)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    review = _review(tmp_path, "single.json", perspective="quality")
+    original_write = module.atomic_write_json
+    state_path = state_dir / "sessions" / "test.json"
+    state_after_aggregate = None
+    archive_after_aggregate = None
+
+    def fail_combined_publish(path, data, **kwargs):
+        nonlocal state_after_aggregate, archive_after_aggregate
+        if data.get("score_history"):
+            finalize_outcomes = [
+                record for record in data.get("command_outcomes", [])
+                if record.get("command") == "review-finalize"
+            ]
+            assert len(finalize_outcomes) == 1
+            raise OSError("simulated combined publish failure")
+        result = original_write(path, data, **kwargs)
+        if path == state_path:
+            state_after_aggregate = state_path.read_bytes()
+            archive_after_aggregate = {
+                item.name: item.read_bytes()
+                for item in (state_dir / "archive").iterdir()
+            }
+        return result
+
+    monkeypatch.setattr(module, "atomic_write_json", fail_combined_publish)
+
+    with pytest.raises(OSError, match="simulated combined publish failure"):
+        module.cmd_review_finalize(
+            _finalize_args(review, tmp_path / "score.json", event_id="atomic-failure"),
+        )
+
+    assert state_after_aggregate is not None
+    assert archive_after_aggregate is not None
+    assert state_path.read_bytes() == state_after_aggregate
+    assert {
+        item.name: item.read_bytes()
+        for item in (state_dir / "archive").iterdir()
+    } == archive_after_aggregate
+    state = json.loads(state_path.read_text())
+    assert state["score_history"] == []
+    assert not [
+        record for record in state.get("command_outcomes", [])
+        if record.get("command") == "review-finalize"
+    ]
 
 
 def test_review_finalize_min_reviewers_failure_is_atomic(state_dir, run_cli, read_state, tmp_path):
     a = _review(tmp_path, "a.json", perspective="A")
+    state_file = state_dir / "sessions" / "test.json"
+    before = state_file.read_bytes()
 
     r = run_cli("review-finalize", "--iteration", "1", "--input", str(a),
-                "--min-reviewers", "2", cwd=state_dir.parent)
+                "--min-reviewers", "2", "--event-id", "minimum-gate", cwd=state_dir.parent)
 
     assert r.returncode == 2
     assert "reviewer 数不足" in r.stderr
+    payload = json.loads(r.stdout)
+    assert payload["outcome_kind"] == "expected-gate"
+    assert payload["outcome"]["event_id"] == "minimum-gate"
     # 集計に失敗したら score は push されない (atomic)
     assert read_state(state_dir)["score_history"] == []
+    assert state_file.read_bytes() == before
 
 
 def test_review_finalize_passes_reviewer_windows_through(state_dir, run_cli, tmp_path):
@@ -92,6 +237,47 @@ def test_review_finalize_passes_reviewer_windows_through(state_dir, run_cli, tmp
     assert r.returncode == 0, r.stderr
     assert "WARN" in r.stderr and "直列" in r.stderr
     assert json.loads(r.stdout)["aggregate"]["parallel_execution"] is False
+
+
+def test_review_finalize_reviewer_window_gate_emits_own_typed_outcome_once(state_dir, run_cli, tmp_path):
+    a, b = _two_reviews(tmp_path)
+    state_file = state_dir / "sessions" / "test.json"
+    before = state_file.read_bytes()
+
+    result = run_cli(
+        "review-finalize", "--iteration", "1", "--input", str(a), "--input", str(b),
+        "--event-id", "finalize-event", "--root-event-id", "finalize-root", cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 2
+    payload = json.loads(result.stdout)
+    assert payload["outcome_kind"] == "expected-gate"
+    assert payload["outcome"]["command"] == "review-finalize"
+    assert payload["outcome"]["event_id"] == "finalize-event"
+    assert state_file.read_bytes() == before
+    token = hashlib.sha256(b"test").hexdigest()[:16]
+    sidecar = json.loads(
+        (state_dir / "telemetry" / "command-outcomes" / f"{token}.json").read_text(encoding="utf-8")
+    )
+    assert sidecar["records"] == [payload["outcome"]]
+
+
+def test_review_finalize_nested_invalid_review_maps_to_invalid_input(state_dir, run_cli, tmp_path):
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text('{"schema":"wrong"}', encoding="utf-8")
+    state_file = state_dir / "sessions" / "test.json"
+    before = state_file.read_bytes()
+
+    result = run_cli(
+        "review-finalize", "--iteration", "1", "--input", str(invalid),
+        "--event-id", "finalize-invalid", cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 2
+    payload = json.loads(result.stdout)
+    assert payload["outcome_kind"] == "invalid-input"
+    assert payload["outcome"]["command"] == "review-finalize"
+    assert state_file.read_bytes() == before
 
 
 def test_review_finalize_gate_values_match_split_commands(state_dir, run_cli, read_state, tmp_path):
@@ -177,9 +363,83 @@ def test_review_finalize_push_failure_after_aggregate_keeps_history(state_dir, r
     run_cli("review-finalize", "--iteration", "1", "--input", str(a), "--input", str(b),
             *_reviewer_windows(), cwd=state_dir.parent, check=True)
 
-    r = run_cli("review-finalize", "--iteration", "1", "--input", str(a), "--input", str(b),
-                *_reviewer_windows(), cwd=state_dir.parent)
+    before = list(read_state(state_dir)["score_history"])
+    r = run_cli(
+        "review-finalize", "--iteration", "1", "--input", str(a), "--input", str(b),
+        *_reviewer_windows(), "--event-id", "push-gate", "--root-event-id", "push-root",
+        cwd=state_dir.parent,
+    )
 
     assert r.returncode == 2
     assert "resubmit-reason" in r.stderr
-    assert len(read_state(state_dir)["score_history"]) == 1
+    payload = json.loads(r.stdout)
+    assert payload["outcome_kind"] == "expected-gate"
+    assert payload["outcome"]["command"] == "review-finalize"
+    assert payload["outcome"]["event_id"] == "push-gate"
+    assert read_state(state_dir)["score_history"] == before
+    token = hashlib.sha256(b"test").hexdigest()[:16]
+    sidecar = json.loads(
+        (state_dir / "telemetry" / "command-outcomes" / f"{token}.json").read_text(encoding="utf-8")
+    )
+    assert sidecar["records"] == [payload["outcome"]]
+
+
+def test_review_finalize_resubmit_gate_precedes_aggregate_side_effects(
+    state_dir, run_cli, tmp_path,
+):
+    a, b = _two_reviews(tmp_path)
+    out = tmp_path / "score.json"
+    first = run_cli(
+        "review-finalize", "--iteration", "1", "--input", str(a), "--input", str(b),
+        "--out", str(out), *_reviewer_windows(), cwd=state_dir.parent,
+        env_extra={"MISSION_STATE_NOW": "2026-08-11T00:00:00Z"}, check=True,
+    )
+    assert first.returncode == 0
+    state_path = state_dir / "sessions" / "test.json"
+    state_before = state_path.read_bytes()
+    archive_before = {
+        path.name: path.read_bytes() for path in (state_dir / "archive").iterdir()
+    }
+    out_before = out.read_bytes()
+
+    result = run_cli(
+        "review-finalize", "--iteration", "1", "--input", str(a), "--input", str(b),
+        "--out", str(out), *_reviewer_windows(), "--event-id", "early-resubmit-gate",
+        cwd=state_dir.parent,
+        env_extra={"MISSION_STATE_NOW": "2026-08-11T00:01:00Z"},
+    )
+
+    assert result.returncode == 2
+    payload = json.loads(result.stdout)
+    assert payload["outcome_kind"] == "expected-gate"
+    assert payload["outcome"]["command"] == "review-finalize"
+    assert state_path.read_bytes() == state_before
+    assert {path.name: path.read_bytes() for path in (state_dir / "archive").iterdir()} == archive_before
+    assert out.read_bytes() == out_before
+
+
+def test_review_finalize_push_invalid_input_emits_own_outcome_once(
+    state_dir, run_cli, read_state, tmp_path,
+):
+    if not Path("/dev/null").exists():
+        pytest.skip("requires a null device")
+    a = _review(tmp_path, "a.json", perspective="A")
+    before = list(read_state(state_dir)["score_history"])
+
+    result = run_cli(
+        "review-finalize", "--iteration", "1", "--input", str(a),
+        "--out", "/dev/null", "--event-id", "push-invalid",
+        "--root-event-id", "push-invalid-root", cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 2
+    payload = json.loads(result.stdout)
+    assert payload["outcome_kind"] == "invalid-input"
+    assert payload["outcome"]["command"] == "review-finalize"
+    assert payload["outcome"]["event_id"] == "push-invalid"
+    assert read_state(state_dir)["score_history"] == before
+    token = hashlib.sha256(b"test").hexdigest()[:16]
+    sidecar = json.loads(
+        (state_dir / "telemetry" / "command-outcomes" / f"{token}.json").read_text(encoding="utf-8")
+    )
+    assert sidecar["records"] == [payload["outcome"]]

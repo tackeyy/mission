@@ -33,11 +33,15 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py set iteration=
 # strict 検証: 未知キー reject / 全 items <= 1.0 (0-1 正規化疑い) reject / 範囲外 reject。
 # evidence は archive/iter-N-<mission8>-scoring.json に _meta 付きで自動保存され、
 # score_history entry に score_source="scoring-json" と scoring_evidence_path が記録される。
-# Phase 5 transactional (#283, 推奨): aggregate-reviews → push-score を 1 コマンドで実行。
+# Phase 5 native import/finalize (#283, 推奨)。reviewer JSON ごとに次を実行し、
+# 返却 JSON の review_evidence_ref.path を保持する。
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py review-import --iteration <N> --stdin
+
+# 全 reviewer の返却 path を --input-ref として渡し、集計と score 記録を 1 コマンドで実行。
 # validator は分割実行と同一 (min-reviewers / strict review 検証 / findings gate / #122 再 push 保護)。
 # 集計が exit 非0 なら score は push されない (atomic)。--reviewer-window は #282 の並列観測。
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py review-finalize \
-    --iteration <N> --input a.json --input b.json --min-reviewers <N> \
+    --iteration <N> --input-ref <review_evidence_ref.path> --input-ref <review_evidence_ref.path> --min-reviewers <N> \
     --reviewer-window "A=<start_iso>..<end_iso>" --reviewer-window "B=<start_iso>..<end_iso>"
 
 # artifact_path 指定時の WARN-only lint は state・evidence・JSON 結果に
@@ -172,6 +176,12 @@ schema v3 は control state (`passes` / `loop_active` / `halt_reason` / `halt_ca
 `mark-passes`、`closeout`、`mark-halt`、hard route、permission preflight、`halt --all`、`cleanup-stale` は同じ導出関数で outcome を記録する。`reactivate` と stale recovery の `refresh-pid` は outcome を消して active に戻す。`session_role` は `init --role` でのみ決まり、汎用 `set` から role や outcome を変更できない。明示 outcome と control state が矛盾する record、および明示された非文字列の `halt_category` は読み取り時に `failed` として fail-closed する。
 
 schema v1/v2 は `derive_terminal_outcome()` が読み取り時に互換導出し、物理 rewrite しない。resolution metadata の `resolved` / `closed` は元の halt category outcome を維持し、`superseded` だけを `stale_superseded` として扱う。明示的な `resolve-archive` は、既存の v3 `terminal_outcome` だけを同じ transition 内で更新し、outcome を持たない legacy record には追加しない。`stats` / audit の implementer pass rate は implementer role の `completed_pass + failed + incomplete` だけを分母にし、checker/planning/analyze は evidence completion rate へ分離する。release、外部 blocker、承認待ち、stale/superseded、user abort、route、active は implementer 分母から除外する。詳細は `docs/PASS_RATE_METRICS.md` を参照。
+
+### Command outcome telemetry (#386)
+
+`review-import`、`aggregate-reviews`、`review-finalize`、command provider と state transition gate は、opaque `event_id`、`root_event_id`、positive `attempt`、optional `retry_of` を持つ `mission-command-outcomes/1` record を返す。kind は `ok`、`expected-gate`、`invalid-input`、`external`、`internal-error` に限定する。成功 record は state の `command_outcomes` に、state を変更してはならない invalid/gate rejection は `.mission-state/telemetry/command-outcomes/` の sidecar に保存する。
+
+sidecar は session-id の hash 名、128 record cap、別 lock、atomic replace、regular/non-symlink/non-hardlink/no-follow read を必須とする。corrupt/unsafe sidecar は空扱いにせず fail-closed として `stats` / `mission-audit.py` の `command_outcome_counts.corrupt_sidecars` に計上する。count は kind 別に加え、`unique_root_events` と retry の件数、invalid record 数を返す。これは観測専用で、pass gate や KPI 判定を変更しない。
 
 ### Activity segment observability (#211)
 
@@ -453,6 +463,14 @@ meta/non-operation の証明は context 全体が `review/analyze/document/inspe
 - 手動採点を取り込む場合は review aggregate や `--items` を流用せず、host user が用意した `mission-manual-score/1` を `manual-score-capture --input <file> --out <scoring.json>` で state-local archive に安全に固定してから、`push-score --scoring-json <scoring.json>` を実行する。capture は session/mission/iteration、4軸、composite/min、独立した review_agreement、revision scope、source evidence reference、input digest を検証する。4軸と composite/min/review_agreement は bool ではない有限の 0〜5 数値、open_high は bool ではない 0 以上の整数でなければならない。`manual-import` に review evidence reference は使用できない。
 - push-score は経路を問わず「全 items が 1.0 以下」を 0-1 正規化スケール混入として reject する (実ログ回帰: xai-cli cx-019efece が composite 0.96 = 4.8/5 を push した事例)
 - `--scoring-output` の保存先は `.mission-state/archive/iter-<N>-<mission_id先頭8>-scoring.md`。連続ランでの上書き消失 (2026-06-10 実害確認) を防ぐため mission_id を含む
+
+## review publish rollback の recovery residue
+
+既存 output の rollback が失敗して旧 bytes を自動復元できない場合、同じ親ディレクトリに
+`.basename.recovery-<digest prefix>-<identity nonce>-<attempt>.json` を 0600 / regular / link count 1 で残す。
+`--json` の失敗 envelope は top-level `recovery_ref` として `basename` / `digest` (`sha256:`) / `size` を返すが、永続 state と command outcome sidecar には locator を保存しない。
+
+回収時は command 実行時の output 親ディレクトリで `basename` を解決し、symlink を追わず regular file・0600・link count 1 を確認してから、bytes の size と SHA-256 が `recovery_ref` に一致することを検証する。一致した場合だけ旧 output として安全な別名へ copy/move する。削除も同じ dev/inode を再確認してから行い、不一致・欠落・複数候補は fail-closed とする。成功 rollback では recovery residue は残らない。
 
 ### GitHub Flow (issue 連携)
 

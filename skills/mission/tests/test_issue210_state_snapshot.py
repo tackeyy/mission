@@ -13,6 +13,7 @@ import shutil
 from pathlib import Path
 
 import pytest
+from command_outcomes import append_sidecar
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -88,6 +89,149 @@ def _rewrite_snapshot(path: Path, mutate) -> None:
 def _json(result: subprocess.CompletedProcess[str]) -> dict:
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
+
+
+def _outcome(event_id: str, kind: str = "expected-gate") -> dict:
+    return {
+        "event_id": event_id,
+        "root_event_id": "snapshot-root",
+        "attempt": 1,
+        "command": "fixture",
+        "outcome_kind": kind,
+    }
+
+
+@pytest.mark.parametrize("mutation", ["append", "delete", "corrupt"])
+def test_snapshot_command_outcome_observation_never_rereads_live_sidecar(
+    tmp_path, run_cli, mutation,
+):
+    root = tmp_path / "root"
+    _write_state(root, "observed", "2026-07-21T00:00:00Z")
+    state_dir = root / ".mission-state"
+    token = hashlib.sha256(b"observed").hexdigest()[:16]
+    append_sidecar(state_dir, token, _outcome("before"))
+    snapshot = tmp_path / "state.snapshot.json"
+    built = _snapshot(root, snapshot)
+    baseline = _json(built)["command_outcome_counts"]
+    sidecar = state_dir / "telemetry" / "command-outcomes" / f"{token}.json"
+    if mutation == "append":
+        append_sidecar(state_dir, token, _outcome("after", "invalid-input"))
+    elif mutation == "delete":
+        sidecar.unlink()
+    else:
+        sidecar.write_text("not-json", encoding="utf-8")
+
+    audit = _run_audit("--snapshot-in", str(snapshot), "--json", cwd=root)
+    stats = run_cli("stats", "--snapshot", str(snapshot), "--json", cwd=root)
+
+    assert _json(audit)["command_outcome_counts"] == baseline
+    assert _json(stats)["command_outcome_counts"] == baseline
+    assert baseline["expected-gate"] == 1
+    assert baseline["invalid-input"] == 0
+
+
+def test_snapshot_counts_same_event_and_root_once_per_session(tmp_path, run_cli):
+    root = tmp_path / "root"
+    shared = _outcome("shared-event")
+    _write_state(
+        root, "session-a", "2026-07-21T00:00:00Z",
+        command_outcomes=[shared],
+    )
+    _write_state(
+        root, "session-b", "2026-07-21T00:00:01Z",
+        command_outcomes=[{**shared, "outcome_kind": "invalid-input"}],
+    )
+    snapshot = tmp_path / "two-sessions.snapshot.json"
+    assert _snapshot(root, snapshot).returncode == 0
+
+    audit = _run_audit("--snapshot-in", str(snapshot), "--json", cwd=root)
+    stats = run_cli("stats", "--snapshot", str(snapshot), "--json", cwd=root)
+
+    for result in (audit, stats):
+        counts = _json(result)["command_outcome_counts"]
+        assert counts["expected-gate"] == 1
+        assert counts["invalid-input"] == 1
+        assert counts["unique_root_events"] == 2
+        assert counts["invalid_records"] == 0
+
+
+def test_snapshot_rejects_resigned_command_outcome_observation_tamper(tmp_path):
+    root = tmp_path / "root"
+    _write_state(root, "observed", "2026-07-21T00:00:00Z")
+    state_dir = root / ".mission-state"
+    token = hashlib.sha256(b"observed").hexdigest()[:16]
+    append_sidecar(state_dir, token, _outcome("before"))
+    snapshot = tmp_path / "state.snapshot.json"
+    assert _snapshot(root, snapshot).returncode == 0
+
+    _rewrite_snapshot(
+        snapshot,
+        lambda document: document["records"][0]["command_outcome_observation"]["records"][0].__setitem__(
+            "outcome_kind", "invalid-input"
+        ),
+    )
+
+    assert _run_audit("--snapshot-in", str(snapshot), "--json", cwd=root).returncode != 0
+
+
+def test_legacy_snapshot_without_observation_uses_state_records_only(
+    tmp_path, run_cli,
+):
+    root = tmp_path / "root"
+    state_path = _write_state(
+        root, "legacy-observation", "2026-07-21T00:00:00Z",
+        command_outcomes=[_outcome("state-only")],
+    )
+    state_dir = root / ".mission-state"
+    token = hashlib.sha256(b"legacy-observation").hexdigest()[:16]
+    append_sidecar(state_dir, token, _outcome("sidecar-only", "invalid-input"))
+    snapshot = tmp_path / "legacy-observation.snapshot.json"
+    assert _snapshot(root, snapshot).returncode == 0
+
+    def remove_observation(document):
+        document["records"][0].pop("command_outcome_observation")
+        document["record_index"][0].pop("command_outcome_observation_sha256")
+
+    _rewrite_snapshot(snapshot, remove_observation)
+    append_sidecar(state_dir, token, _outcome("post-capture", "internal-error"))
+
+    audit = _run_audit("--snapshot-in", str(snapshot), "--json", cwd=root)
+    stats = run_cli("stats", "--snapshot", str(snapshot), "--json", cwd=root)
+    for result in (audit, stats):
+        counts = _json(result)["command_outcome_counts"]
+        assert counts["ok"] == 0
+        assert counts["expected-gate"] == 1
+        assert counts["invalid-input"] == 0
+        assert counts["internal-error"] == 0
+
+
+def test_snapshot_capture_rejects_command_outcome_drift(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    _write_state(root, "outcome-race", "2026-07-21T00:00:00Z")
+    state_dir = root / ".mission-state"
+    token = hashlib.sha256(b"outcome-race").hexdigest()[:16]
+    append_sidecar(state_dir, token, _outcome("before"))
+    snapshot = tmp_path / "outcome-race.snapshot.json"
+    spec = importlib.util.spec_from_file_location("audit_issue210_outcome_race", AUDIT_PY)
+    assert spec and spec.loader
+    audit = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = audit
+    spec.loader.exec_module(audit)
+    real_inventory = audit._command_outcome_inventory
+    calls = 0
+
+    def drifting_inventory(records):
+        nonlocal calls
+        calls += 1
+        result = real_inventory(records)
+        if calls == 1:
+            append_sidecar(state_dir, token, _outcome("during-capture", "external"))
+        return result
+
+    monkeypatch.setattr(audit, "_command_outcome_inventory", drifting_inventory)
+    with pytest.raises(audit.SnapshotError, match="telemetry changed"):
+        audit.create_state_snapshot([root], snapshot, ttl_seconds=3600)
+    assert not snapshot.exists()
 
 
 def test_audit_snapshot_matches_direct_and_preserves_filter_before_dedupe(tmp_path):

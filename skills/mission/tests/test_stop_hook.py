@@ -40,7 +40,9 @@ def test_hook_blocks_own_session(tmp_path):
     """自分の session_id (cc-mine) の未達 state は block される."""
     _write_session(tmp_path, "cc-mine")
     r = _run_hook(tmp_path, {"CLAUDE_CODE_SESSION_ID": "mine"})
-    assert '"decision"' in r.stdout and "block" in r.stdout
+    payload = json.loads(r.stdout)
+    assert payload["decision"] == "block"
+    assert payload["outcome_kind"] == "expected-gate"
 
 
 def test_hook_ignores_other_session(tmp_path):

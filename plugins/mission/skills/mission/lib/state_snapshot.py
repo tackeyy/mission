@@ -14,6 +14,7 @@ from typing import Any
 
 from mission_common import parse_iso_datetime, state_identity
 from worktree_archive import worktree_archive_lineage_references
+from command_outcomes import validate_observation as validate_command_outcome_observation
 
 
 SNAPSHOT_SCHEMA = "mission-state-snapshot/1"
@@ -110,6 +111,8 @@ def root_metadata_inventory(roots: list[Path]) -> list[list[Any]]:
                 dirnames[:] = sorted(name for name in dirnames if name not in PRUNE_DIRS)
             else:
                 dirnames[:] = sorted(dirnames)
+                if relative.parts[-2:] == (".mission-state", "telemetry"):
+                    dirnames[:] = [name for name in dirnames if name != "command-outcomes"]
             inventory.append(_metadata_entry(
                 directory, ["root", root_index, relative.as_posix()]
             ))
@@ -179,6 +182,10 @@ def record_index(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "state_sha256": value_digest(state),
             "source_inventory": source_inventory,
         })
+        if "command_outcome_observation" in item:
+            index[-1]["command_outcome_observation_sha256"] = value_digest(
+                item["command_outcome_observation"]
+            )
     return index
 
 
@@ -259,6 +266,12 @@ def _validate_record_shape(record: Any) -> None:
         or any(not isinstance(item, list) for item in source_inventory)
     ):
         raise SnapshotError("snapshot record source inventory is invalid")
+    if "command_outcome_observation" in record:
+        observation = validate_command_outcome_observation(
+            record.get("command_outcome_observation")
+        )
+        if observation is None or observation != record["command_outcome_observation"]:
+            raise SnapshotError("snapshot command outcome observation is invalid")
     for key in ("archive_bundle", "archive_root"):
         value = record.get(key)
         if value is not None and not _is_safe_path_text(value):

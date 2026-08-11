@@ -93,6 +93,14 @@ from scoring_provenance import (  # noqa: E402
     validate_receipt_binding,
     validate_recorded_envelope,
 )
+from command_outcomes import (  # noqa: E402
+    iter_records as iter_command_outcome_records,
+    observe as observe_command_outcomes,
+    observe_state_only as observe_state_command_outcomes,
+    summarize as summarize_command_outcomes,
+    summarize_sessions as summarize_command_outcome_sessions,
+    validate_observation as validate_command_outcome_observation,
+)
 
 
 PRUNE_DIRS = {
@@ -241,6 +249,7 @@ class StateRecord:
     archive_root: Path | None = None
     archive_generation: str | None = None
     archive_validation: WorktreeArchiveValidation | None = None
+    command_outcome_observation: dict[str, Any] | None = None
     audit_specialist_invocation_gap_skills: tuple[str, ...] = ()
 
 
@@ -1149,7 +1158,7 @@ def _serialize_archive_validation(record: StateRecord) -> dict[str, Any] | None:
 def _serialize_record(
     record: StateRecord, roots: list[Path], validation_ref: str | None = None
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "path": str(record.path.absolute()),
         "state": record.state,
         "archive_bundle": str(record.archive_bundle.absolute()) if record.archive_bundle else None,
@@ -1158,6 +1167,15 @@ def _serialize_record(
         "archive_validation_ref": validation_ref,
         "source_inventory": record_source_inventory(record.path, roots),
     }
+    root = state_root_for_record(record)
+    sid = record.state.get("session_id")
+    if root is None or not isinstance(sid, str) or not sid:
+        raise SnapshotError("snapshot command outcome source is invalid")
+    token = hashlib.sha256(sid.encode("utf-8")).hexdigest()[:16]
+    payload["command_outcome_observation"] = observe_command_outcomes(
+        record.state, root / ".mission-state", token,
+    )
+    return payload
 
 
 def _serialize_records(
@@ -1177,6 +1195,33 @@ def _serialize_records(
             validations.setdefault(validation_ref, validation_payload)
         payloads.append(_serialize_record(record, roots, validation_ref))
     return payloads, validations
+
+
+def _command_outcome_inventory(records: list[StateRecord]) -> list[list[Any]]:
+    inventory: list[list[Any]] = []
+    for record in records:
+        root = state_root_for_record(record)
+        sid = record.state.get("session_id")
+        if root is None or not isinstance(sid, str) or not sid:
+            continue
+        token = hashlib.sha256(sid.encode("utf-8")).hexdigest()[:16]
+        for path in (
+            root / ".mission-state" / "telemetry",
+            root / ".mission-state" / "telemetry" / "command-outcomes",
+            root / ".mission-state" / "telemetry" / "command-outcomes" / f"{token}.json",
+        ):
+            try:
+                metadata = path.lstat()
+                inventory.append([
+                    str(path), metadata.st_dev, metadata.st_ino, metadata.st_mode,
+                    metadata.st_nlink, metadata.st_size, metadata.st_mtime_ns,
+                    metadata.st_ctime_ns,
+                ])
+            except FileNotFoundError:
+                inventory.append([str(path), "missing"])
+            except OSError as exc:
+                inventory.append([str(path), "error", exc.errno])
+    return inventory
 
 
 def _record_from_payload(
@@ -1211,6 +1256,11 @@ def _record_from_payload(
         archive_root=Path(item["archive_root"]) if item.get("archive_root") else None,
         archive_generation=item.get("archive_generation"),
         archive_validation=validation,
+        command_outcome_observation=(
+            validate_command_outcome_observation(item.get("command_outcome_observation"))
+            if "command_outcome_observation" in item
+            else observe_state_command_outcomes(item["state"])
+        ),
     )
 
 
@@ -1241,7 +1291,11 @@ def create_state_snapshot(
                 seen_external.add(key)
     evidence_before = _external_evidence_inventory(external_paths)
     index = root_before + evidence_before
+    outcome_inventory_before = _command_outcome_inventory(records)
     record_payloads, archive_validations = _serialize_records(records, normalized)
+    outcome_inventory_after = _command_outcome_inventory(records)
+    if outcome_inventory_after != outcome_inventory_before:
+        raise SnapshotError("command outcome telemetry changed while the snapshot was captured")
     document = build_snapshot_document(
         roots=normalized,
         records=record_payloads,
@@ -2243,6 +2297,33 @@ def aggregate(
 ) -> dict[str, Any]:
     invalid_worktree_archives = invalid_worktree_archives or []
     observation_now = observation_now or utc_now()
+    command_outcome_sessions: list[tuple[list[dict[str, Any]], int, int]] = []
+    for record in records:
+        if record.command_outcome_observation is not None:
+            observation = validate_command_outcome_observation(
+                record.command_outcome_observation
+            )
+            if observation is None:
+                command_outcome_sessions.append(([], 1, 0))
+                continue
+            command_outcome_sessions.append((
+                observation["records"], observation["invalid_records"],
+                observation["corrupt_sidecars"],
+            ))
+            continue
+        project_root = state_root_for_record(record)
+        sid = record.state.get("session_id")
+        if project_root is None or not isinstance(sid, str) or not sid:
+            command_outcome_sessions.append(([], 1, 0))
+            continue
+        token = hashlib.sha256(sid.encode("utf-8")).hexdigest()[:16]
+        found, invalid, corrupt = iter_command_outcome_records(
+            record.state, project_root / ".mission-state", token
+        )
+        command_outcome_sessions.append((found, invalid, corrupt))
+    command_outcome_counts = summarize_command_outcome_sessions(
+        command_outcome_sessions,
+    )
     classes = [classify(r.state) for r in records]
     pass_rate_summary = summarize_pass_rate_population(
         [record.state for record in records],
@@ -2448,6 +2529,7 @@ def aggregate(
         "completed_pass_rate_denominator": pass_rate_summary["completed_pass_rate_denominator"],
         "completed_pass_rate": pass_rate_summary["completed_pass_rate"],
         "terminal_outcome_counts": pass_rate_summary["terminal_outcome_counts"],
+        "command_outcome_counts": command_outcome_counts,
         "artifact_coverage": summarize_artifact_coverage(
             [record.state for record in records]
         ),

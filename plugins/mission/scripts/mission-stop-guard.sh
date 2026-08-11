@@ -352,7 +352,7 @@ if [ -d "$SESSIONS_DIR" ]; then
     SESSION_LABEL="$SESSION_SID"
     [ -n "$SESSION_ISSUE_REF" ] && SESSION_LABEL="${SESSION_SID}(#${SESSION_ISSUE_REF})"
     REASON="${STALE}${PUSH_SCORE_WARN}/mission skill アクティブ・未達 (session=$SESSION_LABEL, 未達一覧=[$PENDING_BREAKDOWN], iter=$ITER, last_score=$LAST_SCORE, threshold=$THRESHOLD)。 state.json の passes=true か halt_reason を立てるまでループを継続。 ミッション: $MISSION"
-    jq -n --arg r "$REASON" '{decision:"block", reason:$r}'
+    jq -n --arg r "$REASON" '{decision:"block", reason:$r, outcome_kind:"expected-gate"}'
     exit 0
   fi
 fi

@@ -75,6 +75,9 @@ def test_planning_sequence_reaches_closeout(run_cli, tmp_path):
     seq = payload["command_sequence"]
     assert seq[0] == "Skill: mission-planner"
     assert any("review-finalize" in s for s in seq)
+    assert any("review-import" in s and "--stdin" in s for s in seq)
+    assert any("review-finalize" in s and "--input-ref" in s for s in seq)
+    assert not any("aggregate-reviews --input" in s or "push-score" in s or "&&" in s for s in seq)
     assert seq[-1].endswith("closeout")
 
 

@@ -114,6 +114,23 @@ def test_penalty_table_single_source():
     assert "Low 2-3 件" not in scorer, "ペナルティ表が mission-scorer に重複 (ポインタ化すべき)"
 
 
+def test_review_handoff_docs_use_native_import_finalize_route_only():
+    sources = [
+        REFS / "codex-setup.md",
+        REFS / "react-loop-details.md",
+        REFS / "gotchas.md",
+        SKILLS_ROOT / "mission-reviewer" / "SKILL.md",
+        SKILLS_ROOT / "mission-scorer" / "SKILL.md",
+    ]
+    for source in sources:
+        text = _r(source)
+        assert "review-import --iteration" in text, source
+        assert "review-finalize" in text and "--input-ref" in text, source
+        assert "/tmp/mission-reviewer" not in text, source
+        assert "aggregate-reviews --input" not in text, source
+        assert "&& push-score" not in text, source
+
+
 # ---- Tier2-10: サブスキルからの scoring-rubric.md 参照は絶対パス ----
 def test_scoring_rubric_absolute_path():
     for sub in ("mission-scorer", "mission-critic", "mission-reviewer"):

@@ -22,6 +22,17 @@ def _next(run_cli, state_dir):
     return json.loads(r.stdout)
 
 
+def _assert_native_review_hint(hint):
+    assert "review-import --iteration" in hint
+    assert "--stdin" in hint
+    assert "review-finalize --iteration" in hint
+    assert "--input-ref <review_evidence_ref.path>" in hint
+    assert "/tmp/mission-reviewer" not in hint
+    assert "aggregate-reviews --input" not in hint
+    assert "push-score" not in hint
+    assert "&&" not in hint
+
+
 def test_next_without_state_suggests_init(tmp_path, run_cli):
     r = run_cli("next", cwd=tmp_path)
     assert r.returncode == 0, f"stderr: {r.stderr}"
@@ -116,8 +127,7 @@ def test_next_scoring_phase_without_score_suggests_aggregate_reviews(state_dir, 
     # fixture 既定: phase=scoring, iteration=1, score_history=[]
     out = _next(run_cli, state_dir)
     assert out["next_action"] == "aggregate-reviews"
-    assert "aggregate-reviews" in out["command_hint"]
-    assert "--scoring-json" in out["command_hint"]
+    _assert_native_review_hint(out["command_hint"])
 
 
 def test_next_scoring_phase_with_current_score_suggests_mark_passes(state_dir, run_cli):
@@ -189,6 +199,7 @@ def test_next_scoring_json_entry_without_findings_evidence_suggests_retry_not_fo
     out = _next(run_cli, state_dir)
     assert out["next_action"] == "aggregate-reviews"
     assert out["details"]["missing_findings_evidence"] is True
+    _assert_native_review_hint(out["command_hint"])
     # command_hint は実行すべきコマンド列そのものなので --force を一切含めない (提案しない)
     assert "--force" not in out["command_hint"]
     # summary は「force を使うな」という禁止の文脈でのみ言及してよい
