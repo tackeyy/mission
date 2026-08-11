@@ -6289,6 +6289,8 @@ def cmd_init(args):
 
 PARALLEL_GROUP_SCHEMA = "mission-parallel-group/1"
 PARALLEL_GROUP_MAX_BYTES = 256 * 1024
+STOP_GUARD_SCHEMA = "mission-stop-guard/1"
+STOP_GUARD_MAX_BYTES = 64 * 1024
 
 
 def _parallel_file_identity(metadata: os.stat_result) -> tuple:
@@ -6814,6 +6816,133 @@ def cmd_parallel_closeout(args):
         sys.exit(2)
     print(json.dumps({"ok": True, **status}, ensure_ascii=False))
 
+
+
+def _stop_guard_state_name(session_id: str) -> str:
+    token = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
+    return f".{token}.stop-guard"
+
+
+def _validate_stop_guard_state(payload: object, session_id: str) -> dict:
+    if not isinstance(payload, dict) or set(payload) != {
+        "schema", "session_id", "last_digest", "last_detail_epoch",
+        "block_count", "reinjection_count", "detail_count", "heartbeat_count",
+    }:
+        raise ValueError("stop guard state is malformed")
+    if payload.get("schema") != STOP_GUARD_SCHEMA or payload.get("session_id") != session_id:
+        raise ValueError("stop guard state identity is invalid")
+    digest = payload.get("last_digest")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("stop guard state digest is invalid")
+    for key in (
+        "last_detail_epoch", "block_count", "reinjection_count",
+        "detail_count", "heartbeat_count",
+    ):
+        value = payload.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError("stop guard counters are invalid")
+    return dict(payload)
+
+
+def _read_stop_guard_state(
+    store: _ParallelGroupStore, session_id: str,
+) -> tuple[dict | None, tuple | None]:
+    name = _stop_guard_state_name(session_id)
+    try:
+        payload, identity = _read_parallel_regular_at(
+            store.sessions_fd, name, limit=STOP_GUARD_MAX_BYTES
+        )
+    except ValueError as exc:
+        try:
+            os.stat(name, dir_fd=store.sessions_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None, None
+        raise ValueError("stop guard state is unsafe") from exc
+    try:
+        document = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("stop guard state is malformed") from exc
+    return _validate_stop_guard_state(document, session_id), identity
+
+
+def _write_stop_guard_state(
+    store: _ParallelGroupStore,
+    session_id: str,
+    document: dict,
+    expected_identity: tuple | None,
+) -> None:
+    store.verify()
+    name = _stop_guard_state_name(session_id)
+    payload = json.dumps(
+        document, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    temporary = _write_parallel_temp(store.sessions_fd, payload)
+    try:
+        if expected_identity is None:
+            try:
+                os.link(
+                    temporary, name,
+                    src_dir_fd=store.sessions_fd, dst_dir_fd=store.sessions_fd,
+                )
+            except FileExistsError as exc:
+                raise ValueError("stop guard state appeared during create") from exc
+            os.unlink(temporary, dir_fd=store.sessions_fd)
+            temporary = ""
+        else:
+            current = os.stat(name, dir_fd=store.sessions_fd, follow_symlinks=False)
+            if _parallel_file_identity(current) != expected_identity:
+                raise ValueError("stop guard state changed before publish")
+            os.replace(
+                temporary, name,
+                src_dir_fd=store.sessions_fd, dst_dir_fd=store.sessions_fd,
+            )
+            temporary = ""
+        os.fsync(store.sessions_fd)
+        store.verify()
+        current, _identity = _read_stop_guard_state(store, session_id)
+        if current != document:
+            raise ValueError("stop guard state publish verification failed")
+    finally:
+        if temporary:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temporary, dir_fd=store.sessions_fd)
+
+
+def cmd_stop_guard_observe(args):
+    """Record a block observation without mutating the fenced mission session."""
+    try:
+        session_id = opaque_token(args.session_id)
+        if session_id is None:
+            raise ValueError("stop guard session id is invalid")
+        if not re.fullmatch(r"[0-9a-f]{64}", args.digest):
+            raise ValueError("stop guard digest is invalid")
+        if args.now_epoch < 0 or args.ttl_seconds < 1:
+            raise ValueError("stop guard time input is invalid")
+        with _ParallelGroupStore(Path.cwd(), create=False) as store:
+            previous, identity = _read_stop_guard_state(store, session_id)
+            changed = previous is None or previous["last_digest"] != args.digest
+            ttl_elapsed = (
+                previous is not None
+                and args.now_epoch - previous["last_detail_epoch"] >= args.ttl_seconds
+            )
+            mode = "detail" if changed or ttl_elapsed else "heartbeat"
+            document = {
+                "schema": STOP_GUARD_SCHEMA,
+                "session_id": session_id,
+                "last_digest": args.digest,
+                "last_detail_epoch": (
+                    args.now_epoch if mode == "detail" else previous["last_detail_epoch"]
+                ),
+                "block_count": (previous["block_count"] if previous else 0) + 1,
+                "reinjection_count": (previous["reinjection_count"] if previous else 0) + 1,
+                "detail_count": (previous["detail_count"] if previous else 0) + int(mode == "detail"),
+                "heartbeat_count": (previous["heartbeat_count"] if previous else 0) + int(mode == "heartbeat"),
+            }
+            _write_stop_guard_state(store, session_id, document, identity)
+    except (OSError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+    print(json.dumps({"ok": True, "mode": mode, **document}, ensure_ascii=False))
 
 
 def cmd_get(args):
@@ -13419,6 +13548,16 @@ def _build_parser():
     p_parallel_closeout = sub.add_parser("parallel-closeout", help="terminalize a complete parallel group")
     p_parallel_closeout.add_argument("--group-id", required=True)
     p_parallel_closeout.set_defaults(func=cmd_parallel_closeout)
+
+    p_stop_guard = sub.add_parser(
+        "stop-guard-observe",
+        help="record one digest-based stop-hook block observation",
+    )
+    p_stop_guard.add_argument("--session-id", required=True)
+    p_stop_guard.add_argument("--digest", required=True)
+    p_stop_guard.add_argument("--now-epoch", type=int, required=True)
+    p_stop_guard.add_argument("--ttl-seconds", type=int, required=True)
+    p_stop_guard.set_defaults(func=cmd_stop_guard_observe)
 
     p_next = sub.add_parser("next", help="ADR-002 Stage 3: state から次の 1 手を JSON で返す (read-only。Codex/compaction 復帰時の進行ガイド)")
     p_next.set_defaults(func=cmd_next)
