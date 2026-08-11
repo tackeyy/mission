@@ -1061,6 +1061,7 @@ _LEASE_KEYS = (*LEASE_STATE_FIELDS, "lease_history")
 _LEASE_WRITE_REASON: str | None = None
 _PROCESS_LEASE_IDS: dict[str, str] = {}
 _LEASE_DECISION_UNSET = object()
+_SUPERSEDE_TERMINAL_PATHS: set[str] = set()
 
 
 @contextlib.contextmanager
@@ -1077,6 +1078,8 @@ def _lease_write_reason(reason: str | None):
 def _enforce_session_lease_for_write(path: Path, data: dict) -> LeaseDecision | None:
     """CAS the lease against the latest state immediately before publish."""
     if not (_is_session_state_path(path) and _is_session_state_shape(data)):
+        return None
+    if str(path.resolve()) in _SUPERSEDE_TERMINAL_PATHS:
         return None
     latest = None
     if path.exists():
@@ -6005,6 +6008,19 @@ def cmd_init(args):
         # S3-files: 同一 project の file-set overlap WARN 用 (未指定は空 list)
         "planned_files": planned_files,
     }
+    if initial["review_group_id"]:
+        prior_generations = []
+        for state_path in _iter_state_files(cwd):
+            try:
+                prior = json.loads(state_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            if prior.get("review_group_id") != initial["review_group_id"]:
+                continue
+            generation = prior.get("review_generation")
+            if isinstance(generation, int) and not isinstance(generation, bool) and generation > 0:
+                prior_generations.append(generation)
+        initial["review_generation"] = (max(prior_generations, default=0) + 1)
     start_phase_default_activity(initial, now)
     # S3: 同プロジェクト内の active session で同一 issue_ref があれば WARN (reject しない)
     # #295: 形式差 (裸番号 / #番号 / host:owner/repo#番号 / URL) を正規化キーで同一視する
@@ -10957,6 +10973,86 @@ def cmd_mark_passes(args):
     print(json.dumps(output))
 
 
+def cmd_supersede_reviews(args):
+    """Terminalize older review generations without deleting their raw records."""
+    cwd = Path.cwd()
+    group = args.group
+    if not isinstance(group, str) or not group or "\x00" in group:
+        print("ERROR: review group is invalid", file=sys.stderr)
+        sys.exit(2)
+
+    def capture(path):
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or path.parent != session_dir(cwd):
+            raise ValueError("review state path is unsafe")
+        payload = path.read_bytes()
+        return payload, (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink,
+                         metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns)
+
+    def unchanged(path, identity, payload):
+        current_payload, current_identity = capture(path)
+        return current_identity == identity and current_payload == payload
+
+    with StateLock(lock_file(cwd)):
+        members = []
+        try:
+            for state_path in _iter_state_files(cwd):
+                payload, identity = capture(state_path)
+                state = json.loads(payload)
+                if state.get("review_group_id") != group:
+                    continue
+                generation = state.get("review_generation")
+                if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+                    raise ValueError("review group has an invalid generation")
+                members.append((generation, state_path, state, payload, identity))
+        except (OSError, json.JSONDecodeError, ValueError) as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            sys.exit(2)
+        if not members:
+            print("ERROR: review group was not found", file=sys.stderr)
+            sys.exit(2)
+        current_generation = max(item[0] for item in members)
+        current = [item for item in members if item[0] == current_generation]
+        if len(current) != 1:
+            print("ERROR: review group has no single current generation", file=sys.stderr)
+            sys.exit(2)
+        targets = [item for item in members if item[0] < current_generation]
+        if not all(unchanged(path, identity, payload) for _, path, _, payload, identity in members):
+            print("ERROR: review group changed during supersede preflight", file=sys.stderr)
+            sys.exit(2)
+        now = iso_now()
+        superseded = []
+        originals = [(path, payload) for _, path, _, payload, _ in targets]
+        try:
+            for generation, state_path, state, payload, identity in targets:
+                if not unchanged(state_path, identity, payload):
+                    raise ValueError("review state changed during supersede")
+                state.update({"passes": False, "loop_active": False,
+                              "halt_reason": "superseded by a replacement run", "halt_category": "stale"})
+                _transition_phase(state, "halted", now, terminal_trusted_boundary=True)
+                _write_terminal_outcome(state)
+                state["updated_at"] = now
+                path_key = str(state_path.resolve())
+                _SUPERSEDE_TERMINAL_PATHS.add(path_key)
+                try:
+                    atomic_write_json(state_path, state)
+                finally:
+                    _SUPERSEDE_TERMINAL_PATHS.discard(path_key)
+                superseded.append(state.get("session_id"))
+            _, current_path, current_state, current_payload, current_identity = current[0]
+            if not unchanged(current_path, current_identity, current_payload):
+                raise ValueError("current review state changed during supersede")
+            current_state["supersedes"] = superseded
+            current_state["updated_at"] = now
+            atomic_write_json(current_path, current_state)
+        except (OSError, ValueError, CommandOutcomeExit):
+            for path, payload in originals:
+                _atomic_write(path, lambda handle, content=payload: handle.write(content.decode("utf-8")))
+            print("ERROR: supersede transaction was rolled back", file=sys.stderr)
+            sys.exit(2)
+    print(json.dumps({"ok": True, "group": group, "current_generation": current_generation, "superseded": superseded}))
+
+
 def cmd_mark_halt(args):
     cwd = Path.cwd()
     sf = resolve_state_file(cwd)
@@ -12841,6 +12937,10 @@ def _build_parser():
                          help=f"#190: halt の種別。有効値: {sorted(HALT_CATEGORIES)}。省略/不正値は 'other' + WARN"
                               " (argparse choices は使わない: _normalize_halt_category が WARN+fallback で検証する)")
     p_halt.set_defaults(func=cmd_mark_halt)
+
+    p_supersede = sub.add_parser("supersede-reviews", help="review groupの旧generationをstale_supersededへ終端化")
+    p_supersede.add_argument("--group", required=True)
+    p_supersede.set_defaults(func=cmd_supersede_reviews)
 
     p_reactivate = sub.add_parser(
         "reactivate",
