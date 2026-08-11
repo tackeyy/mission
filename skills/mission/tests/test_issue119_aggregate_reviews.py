@@ -271,6 +271,167 @@ def test_aggregate_rollback_does_not_publish_into_replaced_output_parent(
     assert (detached_parent / "score.json").is_file()
 
 
+def test_output_publisher_post_replace_stat_failure_restores_previous_bytes(
+    tmp_path, monkeypatch,
+):
+    module = _load_mission_state()
+    out = tmp_path / "score.json"
+    previous = b"previous-output\n"
+    replacement = b"replacement-output\n"
+    out.write_bytes(previous)
+    original_replace = module.os.replace
+    original_stat = module.os.stat
+    replaced = rejected = False
+
+    def observe_replace(src, dst, **kwargs):
+        nonlocal replaced
+        result = original_replace(src, dst, **kwargs)
+        if dst == out.name:
+            replaced = True
+        return result
+
+    def fail_first_post_replace_stat(path, *args, **kwargs):
+        nonlocal rejected
+        if replaced and path == out.name and not rejected:
+            rejected = True
+            raise OSError("simulated post-replace stat failure")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "replace", observe_replace)
+    monkeypatch.setattr(module.os, "stat", fail_first_post_replace_stat)
+
+    with pytest.raises(ValueError, match="publish failed"):
+        module._publish_output_transaction(out, replacement)
+
+    assert rejected is True
+    assert out.read_bytes() == previous
+    assert not list(tmp_path.glob(".*.tmp"))
+    assert not list(tmp_path.glob(".*.rollback"))
+
+
+@pytest.mark.parametrize("preexisting", [False, True], ids=["new", "existing"])
+def test_output_publisher_return_boundary_failure_restores_prior_state(
+    preexisting, tmp_path, monkeypatch,
+):
+    module = _load_mission_state()
+    out = tmp_path / "score.json"
+    previous = b"previous-output\n"
+    if preexisting:
+        out.write_bytes(previous)
+    original_finish = module._finish_published_file
+    rejected = False
+
+    def fail_after_verify(published):
+        nonlocal rejected
+        result = original_finish(published)
+        if not rejected:
+            rejected = True
+            raise OSError("simulated output return-boundary failure")
+        return result
+
+    monkeypatch.setattr(module, "_finish_published_file", fail_after_verify)
+
+    with pytest.raises(ValueError, match="publish failed"):
+        module._publish_output_transaction(out, b"replacement-output\n")
+
+    assert rejected is True
+    if preexisting:
+        assert out.read_bytes() == previous
+    else:
+        assert not out.exists()
+    assert not list(tmp_path.glob(".*.tmp"))
+    assert not list(tmp_path.glob(".*.rollback"))
+
+
+@pytest.mark.parametrize("alias_kind", ["symlink-ancestor", "relative-parent"])
+def test_aggregate_rejects_alias_of_evidence_target_before_output_publish(
+    alias_kind, state_dir, tmp_path, monkeypatch,
+):
+    module = _load_mission_state()
+    monkeypatch.chdir(state_dir.parent)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    review = _review(tmp_path, "alias-target.json", perspective="quality")
+    module.cmd_aggregate_reviews(_aggregate_args(review, tmp_path / "first-score.json"))
+    archive = state_dir / "archive"
+    evidence = next(archive.glob("*-reviews-*.json"))
+    if alias_kind == "symlink-ancestor":
+        alias = tmp_path / "archive-alias"
+        alias.symlink_to(archive, target_is_directory=True)
+        alias_out = alias / evidence.name
+    else:
+        alias_out = archive / ".." / "archive" / evidence.name
+    state_path = state_dir / "sessions" / "test.json"
+    state_before = state_path.read_bytes()
+    archive_before = _archive_bytes(state_dir)
+    original_publish = module._publish_output_transaction
+    publish_calls = 0
+
+    def counted_publish(path, content, **kwargs):
+        nonlocal publish_calls
+        publish_calls += 1
+        return original_publish(path, content, **kwargs)
+
+    monkeypatch.setattr(module, "_publish_output_transaction", counted_publish)
+
+    with pytest.raises(module.CommandOutcomeExit) as stopped:
+        module.cmd_aggregate_reviews(_aggregate_args(review, alias_out))
+
+    assert stopped.value.code == 2
+    assert publish_calls == 0
+    assert state_path.read_bytes() == state_before
+    assert _archive_bytes(state_dir) == archive_before
+
+
+@pytest.mark.skipif(
+    Path("/tmp").resolve() == Path("/tmp"),
+    reason="system temporary directory has no canonical alias",
+)
+def test_publish_target_identity_recognizes_system_temporary_alias():
+    module = _load_mission_state()
+
+    assert module._same_publish_target(
+        Path("/tmp") / "mission-output.json",
+        Path("/tmp").resolve() / "mission-output.json",
+    )
+
+
+def test_aggregate_rechecks_opened_output_directory_against_archive_identity(
+    state_dir, tmp_path, monkeypatch,
+):
+    module = _load_mission_state()
+    monkeypatch.chdir(state_dir.parent)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    review = _review(tmp_path, "opened-alias.json", perspective="quality")
+    module.cmd_aggregate_reviews(_aggregate_args(review, tmp_path / "first-score.json"))
+    archive = state_dir / "archive"
+    evidence = next(archive.glob("*-reviews-*.json"))
+    alias = tmp_path / "late-alias"
+    alias.symlink_to(archive, target_is_directory=True)
+    state_path = state_dir / "sessions" / "test.json"
+    state_before = state_path.read_bytes()
+    archive_before = _archive_bytes(state_dir)
+    temp_writes = 0
+    original_temp_write = module._write_temp_at
+
+    def counted_temp_write(*args, **kwargs):
+        nonlocal temp_writes
+        temp_writes += 1
+        return original_temp_write(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_same_publish_target", lambda *_: False)
+    monkeypatch.setattr(module, "_write_temp_at", counted_temp_write)
+
+    with pytest.raises(module.CommandOutcomeExit) as stopped:
+        module.cmd_aggregate_reviews(_aggregate_args(review, alias / evidence.name))
+
+    assert stopped.value.code == 2
+    assert temp_writes == 0
+    assert state_path.read_bytes() == state_before
+    assert _archive_bytes(state_dir) == archive_before
+
+
 def test_aggregate_reviews_is_deterministic(state_dir, run_cli, tmp_path):
     a = _review(tmp_path, "a.json", perspective="A")
     out1 = tmp_path / "one.json"

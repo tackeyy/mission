@@ -673,6 +673,91 @@ def test_review_archive_concurrent_publish_never_overwrites_other_writer(
     assert not list(archive.glob(".*.tmp"))
 
 
+def test_review_archive_post_publish_fsync_failure_self_rolls_back(
+    monkeypatch, tmp_path,
+):
+    spec = importlib.util.spec_from_file_location(
+        "mission_state_review_archive_fsync_failure", MISSION_STATE_PY,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    cwd = tmp_path / "project"
+    archive = cwd / ".mission-state" / "archive"
+    archive.mkdir(parents=True)
+    original_fsync = module.os.fsync
+    rejected = False
+
+    def fail_directory_fsync(fd):
+        nonlocal rejected
+        if stat.S_ISDIR(module.os.fstat(fd).st_mode) and not rejected:
+            rejected = True
+            raise OSError("simulated post-publish directory fsync failure")
+        return original_fsync(fd)
+
+    monkeypatch.setattr(module.os, "fsync", fail_directory_fsync)
+
+    with pytest.raises(ValueError, match="publish failed"):
+        module._publish_review_archive_transaction(cwd, "review.json", _review_bytes())
+
+    assert rejected is True
+    assert not (archive / "review.json").exists()
+    assert not list(archive.glob(".*.tmp"))
+    assert not list(archive.glob(".*.rollback"))
+
+
+@pytest.mark.parametrize("fault", ["verify", "return-boundary"])
+@pytest.mark.parametrize("preexisting", [False, True], ids=["new", "existing"])
+def test_review_archive_finish_fault_rolls_back_only_new_object(
+    fault, preexisting, monkeypatch, tmp_path,
+):
+    spec = importlib.util.spec_from_file_location(
+        f"mission_state_review_archive_finish_{fault}_{preexisting}", MISSION_STATE_PY,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    cwd = tmp_path / "project"
+    archive = cwd / ".mission-state" / "archive"
+    archive.mkdir(parents=True)
+    content = _review_bytes()
+    if preexisting:
+        module._publish_review_import_evidence(cwd, "review.json", content)
+    archive_before = _archive_bytes(archive.parent)
+    rejected = False
+    if fault == "verify":
+        original = module._verify_published_file
+
+        def fail_once(published):
+            nonlocal rejected
+            if not rejected:
+                rejected = True
+                raise OSError("simulated finish verification failure")
+            return original(published)
+
+        monkeypatch.setattr(module, "_verify_published_file", fail_once)
+    else:
+        original = module._finish_published_file
+
+        def fail_once(published):
+            nonlocal rejected
+            result = original(published)
+            if not rejected:
+                rejected = True
+                raise OSError("simulated return-boundary failure")
+            return result
+
+        monkeypatch.setattr(module, "_finish_published_file", fail_once)
+
+    with pytest.raises(ValueError, match="publish failed"):
+        module._publish_review_archive_transaction(cwd, "review.json", content)
+
+    assert rejected is True
+    assert _archive_bytes(archive.parent) == archive_before
+    assert not list(archive.glob(".*.tmp"))
+    assert not list(archive.glob(".*.rollback"))
+
+
 def test_review_import_success_reuses_one_lease_decision_and_emits_one_carrier(
     monkeypatch, capsys, state_dir, tmp_path,
 ):
@@ -710,3 +795,57 @@ def test_review_import_success_reuses_one_lease_decision_and_emits_one_carrier(
     assert state["owner_session_id"] == "test"
     assert state["lease_id"] == "test-lease"
     assert state["fencing_epoch"] == 1
+
+
+@pytest.mark.parametrize("preexisting", [False, True], ids=["new", "existing"])
+def test_review_import_state_publish_failure_rolls_back_new_evidence_and_emits_internal_outcome(
+    preexisting, monkeypatch, capsys, state_dir, tmp_path,
+):
+    spec = importlib.util.spec_from_file_location(
+        "mission_state_review_import_state_failure", MISSION_STATE_PY,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    source = tmp_path / "review.json"
+    source.write_bytes(_review_bytes())
+    monkeypatch.chdir(state_dir.parent)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    state_path = state_dir / "sessions" / "test.json"
+    if preexisting:
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+        module._publish_review_import_evidence(
+            state_dir.parent,
+            f"iter-1-abc12345-review-input-{digest[:16]}.json",
+            source.read_bytes(),
+        )
+    state_before = state_path.read_bytes()
+    archive_before = _archive_bytes(state_dir)
+    score_before = json.loads(state_before)["score_history"]
+    original_write = module.atomic_write_json
+
+    def fail_import_state_publish(path, data, **kwargs):
+        if path == state_path and data.get("review_evidence_refs"):
+            raise OSError("simulated review import state publish failure")
+        return original_write(path, data, **kwargs)
+
+    monkeypatch.setattr(module, "atomic_write_json", fail_import_state_publish)
+    monkeypatch.setattr(sys, "argv", [
+        str(MISSION_STATE_PY), "review-import", "--iteration", "1",
+        "--input", str(source), "--event-id", "review-import-state-fault",
+    ])
+
+    with pytest.raises(SystemExit) as stopped:
+        module.main()
+
+    assert stopped.value.code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["outcome_kind"] == "internal-error"
+    assert payload["outcome"]["command"] == "review-import"
+    assert state_path.read_bytes() == state_before
+    assert json.loads(state_path.read_text())["score_history"] == score_before
+    assert _archive_bytes(state_dir) == archive_before
+    assert not list(state_dir.rglob(".*.tmp"))
+    sidecar = next((state_dir / "telemetry" / "command-outcomes").glob("*.json"))
+    assert json.loads(sidecar.read_text())["records"] == [payload["outcome"]]
