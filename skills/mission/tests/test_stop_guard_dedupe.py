@@ -152,6 +152,41 @@ def test_child_completion_and_new_init_restore_full_detail(tmp_path: Path) -> No
     assert "未達一覧" in str(after_new_init["reason"])
 
 
+def test_legacy_session_filename_change_restores_full_detail(tmp_path: Path) -> None:
+    _write_session(tmp_path, "cx-dedupe", issue_ref="389")
+    legacy = _write_session(tmp_path, "legacy-a", issue_ref="390")
+    legacy_payload = json.loads(legacy.read_text(encoding="utf-8"))
+    legacy_payload.pop("session_id")
+    legacy.write_text(json.dumps(legacy_payload), encoding="utf-8")
+
+    _run_hook(tmp_path)
+    assert "heartbeat" in str(_run_hook(tmp_path, now_epoch=1_800_000_001)["reason"])
+
+    legacy.rename(legacy.with_name("legacy-b.json"))
+    after_filename_change = _run_hook(tmp_path, now_epoch=1_800_000_002)
+
+    assert "未達一覧" in str(after_filename_change["reason"])
+
+
+def test_duplicate_counter_keys_fail_safe_without_rewriting_sidecar(tmp_path: Path) -> None:
+    _write_session(tmp_path, "cx-dedupe", issue_ref="389")
+    _run_hook(tmp_path)
+    token = hashlib.sha256(b"cx-dedupe").hexdigest()[:16]
+    sidecar = tmp_path / ".mission-state" / "sessions" / f".{token}.stop-guard"
+    current = json.loads(sidecar.read_text(encoding="utf-8"))["last_digest"]
+    duplicate = sidecar.read_text(encoding="utf-8").replace(
+        f'"last_digest":"{current}"',
+        f'"last_digest":"{"0" * 64}","last_digest":"{current}"',
+    )
+    sidecar.write_text(duplicate, encoding="utf-8")
+    before = sidecar.read_bytes()
+
+    payload = _run_hook(tmp_path, now_epoch=1_800_000_001)
+
+    assert "未達一覧" in str(payload["reason"])
+    assert sidecar.read_bytes() == before
+
+
 @pytest.mark.parametrize("kind", ["symlink", "hardlink", "malformed", "oversize"])
 def test_unsafe_counter_sidecar_fails_safe_without_external_write(
     tmp_path: Path, kind: str,

@@ -6844,6 +6844,15 @@ def _validate_stop_guard_state(payload: object, session_id: str) -> dict:
     return dict(payload)
 
 
+def _reject_duplicate_stop_guard_keys(pairs: list[tuple[str, object]]) -> dict:
+    document: dict[str, object] = {}
+    for key, value in pairs:
+        if key in document:
+            raise ValueError("stop guard state has duplicate keys")
+        document[key] = value
+    return document
+
+
 def _read_stop_guard_state(
     store: _ParallelGroupStore, session_id: str,
 ) -> tuple[dict | None, tuple | None]:
@@ -6859,8 +6868,11 @@ def _read_stop_guard_state(
             return None, None
         raise ValueError("stop guard state is unsafe") from exc
     try:
-        document = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        document = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_stop_guard_keys,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError("stop guard state is malformed") from exc
     return _validate_stop_guard_state(document, session_id), identity
 

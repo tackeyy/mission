@@ -351,7 +351,7 @@ if [ -d "$SESSIONS_DIR" ]; then
       [ -z "$_psid" ] && _psid=$(basename "$_sf" .json)
       _piref=$(jq -r '.issue_ref // empty' "$_sf" 2>/dev/null || echo "")
       _pgroup=$(jq -r '.logical_group_id // empty' "$_sf" 2>/dev/null || echo "")
-      _digest_entry=$(jq -cS '{session_id:(.session_id // ""),issue_ref:(.issue_ref // ""),logical_group_id:(.logical_group_id // ""),phase:(.phase // "unknown"),owner_session_id:(.owner_session_id // ""),lease_id:(.lease_id // ""),fencing_epoch:(.fencing_epoch // 0),lease_expires_at:(.lease_expires_at // "")}' "$_sf" 2>/dev/null || echo "")
+      _digest_entry=$(jq -cS --arg resolved_session_id "$_psid" '{session_id:$resolved_session_id,issue_ref:(.issue_ref // ""),logical_group_id:(.logical_group_id // ""),phase:(.phase // "unknown"),owner_session_id:(.owner_session_id // ""),lease_id:(.lease_id // ""),fencing_epoch:(.fencing_epoch // 0),lease_expires_at:(.lease_expires_at // "")}' "$_sf" 2>/dev/null || echo "")
       [ -n "$_digest_entry" ] && _PENDING_DIGEST_INPUT="${_PENDING_DIGEST_INPUT}${_digest_entry}
 "
       if [ -n "$_pgroup" ]; then
