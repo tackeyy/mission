@@ -1,7 +1,25 @@
 # Reusable state snapshots
 
-`mission-audit.py` can explicitly capture one short-lived, read-only state
-snapshot and reuse it for later audit and `stats` windows:
+`mission-audit.py` captures an immutable snapshot by default. It stores the
+content-addressed `snapshot_id` below the first root at
+`.mission-state/audit-snapshots/<snapshot_id>.json`, and includes the ID and
+digest in both Markdown and JSON reports. Reaggregate that frozen payload after
+current state changes with `--from-snapshot <snapshot_id>`:
+
+```bash
+python3 scripts/mission-audit.py --root /path/to/projects --json
+python3 scripts/mission-audit.py \
+  --root /path/to/projects \
+  --from-snapshot <snapshot_id> \
+  --json
+```
+
+`--privacy` replaces configured root prefixes in Markdown and JSON output with
+anonymous `root-N` labels. It is for report sharing; the local snapshot remains
+an owner-controlled artifact and must not be shared as an anonymized export.
+
+An explicit portable snapshot is still available for strict live-freshness
+checking and later audit or `stats` windows:
 
 ```bash
 python3 scripts/mission-audit.py \
@@ -21,10 +39,10 @@ python3 skills/mission/bin/mission-state.py stats \
   --json
 ```
 
-Snapshot use is explicit only. Omitting the snapshot option preserves direct
-discovery. The output path must be outside every scanned root so creating the
-file cannot invalidate its own discovery metadata. The command does not add the
-snapshot to Git or another artifact store.
+`--snapshot` is an alias of `--snapshot-out`. Its output path must be outside
+every scanned root. The command does not add snapshots to Git or another
+artifact store; the default state-local directory is excluded from state
+discovery so audit output cannot become audit input.
 
 ## Correctness contract
 
@@ -49,17 +67,24 @@ before the atomic write and rejects concurrent drift. The snapshot stores the
 inventory count and digest, the external candidate paths needed to reproduce
 it, and each record's source entry instead of duplicating the complete inventory.
 
-Consumption performs one metadata-only rewalk plus `lstat` checks for external
-evidence. It does not reread, rehash, or reparse state/evidence content. Only
-after the metadata matches exactly does it reuse the captured semantic archive
-validation. State, directory, pointer, manifest, evidence, legacy candidate, or
-generation changes therefore make the snapshot stale.
+`--snapshot-in` performs one metadata-only rewalk plus `lstat` checks for
+external evidence. It does not reread, rehash, or reparse state/evidence
+content. Only after the metadata matches exactly does it reuse the captured
+semantic archive validation. State, directory, pointer, manifest, evidence,
+legacy candidate, or generation changes therefore make that strict snapshot
+stale.
+
+`--from-snapshot` instead verifies the snapshot payload, digest, expiry, and
+requested ordered roots, then aggregates the frozen payload without consulting
+mutable current state. This is the reproducibility mode: later current-state
+changes cannot alter past totals or findings.
 
 Snapshots are written through a unique same-directory temporary file, mode
 `0600`, file `fsync`, atomic replace, and directory `fsync`. Consumers reject
 symlinks, non-regular files, group/world-readable files, expired/future
-snapshots, root/version/count/index/digest mismatches, and stale discovery. An
-invalid snapshot never falls back to a live scan.
+snapshots, and root/version/count/index/digest mismatches. Strict
+`--snapshot-in` consumers also reject stale discovery. An invalid snapshot
+never falls back to a live scan.
 
 A snapshot is a local, owner-controlled trusted artifact, not an authenticated
 exchange format. Mode `0600`, content digest checks, semantic self-consistency,

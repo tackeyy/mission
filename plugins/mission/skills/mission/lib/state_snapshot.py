@@ -27,6 +27,8 @@ PRUNE_DIRS = frozenset({
     ".git", ".next", ".pytest_cache", ".venv", "__pycache__", "build",
     "dist", "node_modules", "target", "vendor", "venv",
 })
+AUDIT_SNAPSHOT_DIRECTORY = "audit-snapshots"
+FALLBACK_AUDIT_SNAPSHOT_DIRECTORY = ".mission-audit-snapshots"
 
 
 class SnapshotError(ValueError):
@@ -64,7 +66,9 @@ def discovery_digest(index: list[dict[str, Any]]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _metadata_entry(source_path: Path, identity: list[Any]) -> list[Any]:
+def _metadata_entry(
+    source_path: Path, identity: list[Any], *, ignore_content_metadata: bool = False,
+) -> list[Any]:
     absolute = Path(source_path).expanduser().absolute()
     try:
         path_stat = absolute.lstat()
@@ -72,14 +76,11 @@ def _metadata_entry(source_path: Path, identity: list[Any]) -> list[Any]:
         return [*identity, "missing"]
     except OSError as error:
         return [*identity, "error", error.errno]
-    common = [
-        path_stat.st_dev,
-        path_stat.st_ino,
-        path_stat.st_mode,
-        path_stat.st_size,
-        path_stat.st_mtime_ns,
-        path_stat.st_ctime_ns,
-    ]
+    common = [path_stat.st_dev, path_stat.st_ino, path_stat.st_mode]
+    if ignore_content_metadata:
+        common.extend(["ignored", "ignored", "ignored"])
+    else:
+        common.extend([path_stat.st_size, path_stat.st_mtime_ns, path_stat.st_ctime_ns])
     if stat.S_ISLNK(path_stat.st_mode):
         try:
             target = os.readlink(absolute)
@@ -106,6 +107,11 @@ def root_metadata_inventory(roots: list[Path]) -> list[list[Any]]:
         for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
             directory = Path(dirpath)
             relative = directory.relative_to(root)
+            if relative.parts == (FALLBACK_AUDIT_SNAPSHOT_DIRECTORY,):
+                # This is used only if .mission-state cannot be entered.  It is
+                # immutable audit output, not an input to a later snapshot.
+                dirnames[:] = []
+                continue
             inside_state = ".mission-state" in relative.parts
             if not inside_state:
                 dirnames[:] = sorted(name for name in dirnames if name not in PRUNE_DIRS)
@@ -113,8 +119,16 @@ def root_metadata_inventory(roots: list[Path]) -> list[list[Any]]:
                 dirnames[:] = sorted(dirnames)
                 if relative.parts[-2:] == (".mission-state", "telemetry"):
                     dirnames[:] = [name for name in dirnames if name != "command-outcomes"]
+                if relative.parts[-2:] == (".mission-state", AUDIT_SNAPSHOT_DIRECTORY):
+                    # Immutable audit snapshots are state-local output, never audit input.
+                    # Exclude the directory itself as well so first capture does not
+                    # stale a pre-existing external snapshot.
+                    dirnames[:] = []
+                    continue
             inventory.append(_metadata_entry(
-                directory, ["root", root_index, relative.as_posix()]
+                directory,
+                ["root", root_index, relative.as_posix()],
+                ignore_content_metadata=relative.parts == (".mission-state",),
             ))
             retained_dirs: list[str] = []
             for name in dirnames:
