@@ -166,9 +166,10 @@ def test_review_finalize_combined_score_outcome_publish_failure_is_atomic(
     original_write = module.atomic_write_json
     state_path = state_dir / "sessions" / "test.json"
     state_after_aggregate = None
+    archive_after_aggregate = None
 
     def fail_combined_publish(path, data, **kwargs):
-        nonlocal state_after_aggregate
+        nonlocal state_after_aggregate, archive_after_aggregate
         if data.get("score_history"):
             finalize_outcomes = [
                 record for record in data.get("command_outcomes", [])
@@ -179,6 +180,10 @@ def test_review_finalize_combined_score_outcome_publish_failure_is_atomic(
         result = original_write(path, data, **kwargs)
         if path == state_path:
             state_after_aggregate = state_path.read_bytes()
+            archive_after_aggregate = {
+                item.name: item.read_bytes()
+                for item in (state_dir / "archive").iterdir()
+            }
         return result
 
     monkeypatch.setattr(module, "atomic_write_json", fail_combined_publish)
@@ -189,7 +194,12 @@ def test_review_finalize_combined_score_outcome_publish_failure_is_atomic(
         )
 
     assert state_after_aggregate is not None
+    assert archive_after_aggregate is not None
     assert state_path.read_bytes() == state_after_aggregate
+    assert {
+        item.name: item.read_bytes()
+        for item in (state_dir / "archive").iterdir()
+    } == archive_after_aggregate
     state = json.loads(state_path.read_text())
     assert state["score_history"] == []
     assert not [

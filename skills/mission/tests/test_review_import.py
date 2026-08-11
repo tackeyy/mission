@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -602,6 +603,74 @@ def test_existing_review_evidence_parent_swap_is_rejected_before_fast_path_retur
     assert (archive / "sentinel").read_bytes() == b"replacement-parent"
     assert (detached / "review.json").read_bytes() == content
     assert not list(cwd.rglob(".*.tmp"))
+
+
+@pytest.mark.parametrize("mode", ["symlink", "hardlink", "fifo"])
+def test_review_archive_publisher_rejects_unsafe_existing_entry(
+    mode, tmp_path,
+):
+    spec = importlib.util.spec_from_file_location(
+        f"mission_state_review_archive_{mode}", MISSION_STATE_PY,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    cwd = tmp_path / "project"
+    archive = cwd / ".mission-state" / "archive"
+    archive.mkdir(parents=True)
+    entry = archive / "review.json"
+    external = tmp_path / "external.json"
+    external.write_bytes(b"external-object")
+    if mode == "symlink":
+        entry.symlink_to(external)
+    elif mode == "hardlink":
+        entry.hardlink_to(external)
+    else:
+        os.mkfifo(entry)
+
+    with pytest.raises(ValueError, match="unsafe"):
+        module._publish_review_import_evidence(cwd, entry.name, _review_bytes())
+
+    assert external.read_bytes() == b"external-object"
+    if mode == "fifo":
+        assert stat.S_ISFIFO(entry.lstat().st_mode)
+    else:
+        assert entry.exists()
+
+
+@pytest.mark.parametrize("same_content", [True, False], ids=["same-content", "collision"])
+def test_review_archive_concurrent_publish_never_overwrites_other_writer(
+    same_content, monkeypatch, tmp_path,
+):
+    spec = importlib.util.spec_from_file_location(
+        f"mission_state_review_archive_concurrent_{same_content}", MISSION_STATE_PY,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    cwd = tmp_path / "project"
+    archive = cwd / ".mission-state" / "archive"
+    archive.mkdir(parents=True)
+    content = _review_bytes()
+    competitor = content if same_content else b"competitor-object"
+    original_link = module.os.link
+
+    def concurrent_publish(src, dst, **kwargs):
+        (archive / dst).write_bytes(competitor)
+        raise FileExistsError("simulated concurrent publish")
+
+    monkeypatch.setattr(module.os, "link", concurrent_publish)
+    if same_content:
+        published = module._publish_review_archive_transaction(cwd, "review.json", content)
+        assert published.created is False
+        module._rollback_published_file(published)
+    else:
+        with pytest.raises(ValueError, match="collision"):
+            module._publish_review_archive_transaction(cwd, "review.json", content)
+    monkeypatch.setattr(module.os, "link", original_link)
+
+    assert (archive / "review.json").read_bytes() == competitor
+    assert not list(archive.glob(".*.tmp"))
 
 
 def test_review_import_success_reuses_one_lease_decision_and_emits_one_carrier(

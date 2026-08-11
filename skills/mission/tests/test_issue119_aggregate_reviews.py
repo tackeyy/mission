@@ -156,6 +156,121 @@ def test_aggregate_state_publish_failure_rolls_back_new_archive_and_output(
     assert not list(state_dir.rglob(".*.tmp"))
 
 
+def test_aggregate_state_failure_preserves_concurrently_published_archive(
+    state_dir, tmp_path, monkeypatch,
+):
+    module = _load_mission_state()
+    monkeypatch.chdir(state_dir.parent)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    review = _review(tmp_path, "concurrent.json", perspective="quality")
+    first_out = tmp_path / "first-score.json"
+    module.cmd_aggregate_reviews(_aggregate_args(review, first_out))
+    archive = state_dir / "archive"
+    published_path = next(archive.iterdir())
+    published_name = published_path.name
+    published_content = published_path.read_bytes()
+    published_path.unlink()
+    state_path = state_dir / "sessions" / "test.json"
+    state_before = state_path.read_bytes()
+    second_out = tmp_path / "second-score.json"
+    original_publish = module._publish_review_archive_transaction
+    original_write = module.atomic_write_json
+
+    def concurrent_publish(cwd, name, content):
+        assert name == published_name
+        assert content == published_content
+        (archive / name).write_bytes(content)
+        return original_publish(cwd, name, content)
+
+    def fail_state_publish(path, data, **kwargs):
+        if path == state_path:
+            raise OSError("simulated aggregate state publish failure")
+        return original_write(path, data, **kwargs)
+
+    monkeypatch.setattr(module, "_publish_review_archive_transaction", concurrent_publish)
+    monkeypatch.setattr(module, "atomic_write_json", fail_state_publish)
+
+    with pytest.raises(OSError, match="simulated aggregate state publish failure"):
+        module.cmd_aggregate_reviews(_aggregate_args(review, second_out))
+
+    assert state_path.read_bytes() == state_before
+    assert _archive_bytes(state_dir) == {published_name: published_content}
+    assert not second_out.exists()
+    assert not list(state_dir.rglob(".*.tmp"))
+
+
+def test_aggregate_rollback_does_not_unlink_replaced_output(
+    state_dir, tmp_path, monkeypatch,
+):
+    module = _load_mission_state()
+    monkeypatch.chdir(state_dir.parent)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    review = _review(tmp_path, "output-swap.json", perspective="quality")
+    out = tmp_path / "score.json"
+    detached = tmp_path / "detached-score.json"
+    external = b"external-writer\n"
+    state_path = state_dir / "sessions" / "test.json"
+    state_before = state_path.read_bytes()
+    archive_before = _archive_bytes(state_dir)
+    original_write = module.atomic_write_json
+
+    def fail_after_output_swap(path, data, **kwargs):
+        if path == state_path:
+            out.rename(detached)
+            out.write_bytes(external)
+            raise OSError("simulated state failure after output replacement")
+        return original_write(path, data, **kwargs)
+
+    monkeypatch.setattr(module, "atomic_write_json", fail_after_output_swap)
+
+    with pytest.raises(OSError, match="simulated state failure after output replacement"):
+        module.cmd_aggregate_reviews(_aggregate_args(review, out))
+
+    assert state_path.read_bytes() == state_before
+    assert _archive_bytes(state_dir) == archive_before
+    assert out.read_bytes() == external
+    assert detached.exists()
+
+
+def test_aggregate_rollback_does_not_publish_into_replaced_output_parent(
+    state_dir, tmp_path, monkeypatch,
+):
+    module = _load_mission_state()
+    monkeypatch.chdir(state_dir.parent)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    review = _review(tmp_path, "output-parent-swap.json", perspective="quality")
+    output_parent = tmp_path / "output"
+    output_parent.mkdir()
+    out = output_parent / "score.json"
+    detached_parent = tmp_path / "detached-output"
+    state_path = state_dir / "sessions" / "test.json"
+    state_before = state_path.read_bytes()
+    archive_before = _archive_bytes(state_dir)
+    original_write = module.atomic_write_json
+
+    def fail_after_parent_swap(path, data, **kwargs):
+        if path == state_path:
+            output_parent.rename(detached_parent)
+            output_parent.mkdir()
+            (output_parent / "sentinel").write_bytes(b"replacement-parent")
+            raise OSError("simulated state failure after output parent replacement")
+        return original_write(path, data, **kwargs)
+
+    monkeypatch.setattr(module, "atomic_write_json", fail_after_parent_swap)
+
+    with pytest.raises(OSError, match="simulated state failure after output parent replacement"):
+        module.cmd_aggregate_reviews(_aggregate_args(review, out))
+
+    assert state_path.read_bytes() == state_before
+    assert _archive_bytes(state_dir) == archive_before
+    assert (output_parent / "sentinel").read_bytes() == b"replacement-parent"
+    assert not (output_parent / "score.json").exists()
+    assert (detached_parent / "score.json").is_file()
+
+
 def test_aggregate_reviews_is_deterministic(state_dir, run_cli, tmp_path):
     a = _review(tmp_path, "a.json", perspective="A")
     out1 = tmp_path / "one.json"

@@ -7512,7 +7512,9 @@ def _load_scoring_json(path_str: str):
     return items, notes, open_high, payload
 
 
-def _archive_scoring_json(cwd: Path, iteration: int, data: dict, entry: dict, payload: dict) -> str:
+def _archive_scoring_json(
+    cwd: Path, iteration: int, data: dict, entry: dict, payload: dict,
+) -> _PublishedFile:
     """Archive scoring output under an immutable content-addressed name."""
     meta = {
         "session_id": data.get("session_id"),
@@ -7547,15 +7549,9 @@ def _archive_scoring_json(cwd: Path, iteration: int, data: dict, entry: dict, pa
     out.update(payload)
     content = (json.dumps(out, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     digest = hashlib.sha256(content).hexdigest()
-    archive_dir = state_dir(cwd) / "archive"
-    archive_dir.mkdir(parents=True, exist_ok=True)
     mission8 = str(data.get("mission_id") or "unknown")[:8]
-    dst = archive_dir / f"iter-{iteration}-{mission8}-scoring-{digest[:16]}.json"
-    if dst.exists() and _sha256_file(dst) != digest:
-        raise RuntimeError("immutable scoring archive collision")
-    if not dst.exists():
-        atomic_write_bytes(dst, content)
-    return str(dst)
+    name = f"iter-{iteration}-{mission8}-scoring-{digest[:16]}.json"
+    return _publish_review_archive_transaction(cwd, name, content)
 
 
 _SHA256_REF_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -8483,14 +8479,290 @@ def _read_review_archive_at(
         os.close(fd)
 
 
-def _publish_review_import_evidence(cwd: Path, name: str, content: bytes) -> Path:
+class _PublishedFile(NamedTuple):
+    path: Path
+    created: bool
+    directory_fd: int
+    directory_identity: tuple[int, int, int]
+    object_identity: tuple[int, int, int, int, int, int, int]
+    previous_content: bytes | None = None
+
+
+def _directory_identity(value: os.stat_result) -> tuple[int, int, int]:
+    return value.st_dev, value.st_ino, value.st_mode
+
+
+def _verify_published_file(published: _PublishedFile) -> None:
+    try:
+        opened_parent = os.fstat(published.directory_fd)
+        named_parent = published.path.parent.lstat()
+        if (
+            not stat.S_ISDIR(opened_parent.st_mode)
+            or _directory_identity(opened_parent) != published.directory_identity
+            or _directory_identity(named_parent) != published.directory_identity
+        ):
+            raise ValueError("published file directory changed")
+        named = os.stat(
+            published.path.name,
+            dir_fd=published.directory_fd,
+            follow_symlinks=False,
+        )
+        if _stat_identity(named) != published.object_identity:
+            raise ValueError("published file changed")
+    except OSError as exc:
+        raise ValueError("published file changed") from exc
+
+
+def _write_temp_at(directory_fd: int, name: str, content: bytes) -> tuple[str, os.stat_result]:
+    temporary = ""
+    fd: int | None = None
+    try:
+        for _attempt in range(32):
+            temporary = f".{name}.{secrets.token_hex(8)}.tmp"
+            try:
+                fd = os.open(
+                    temporary,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=directory_fd,
+                )
+                break
+            except FileExistsError:
+                continue
+        if fd is None:
+            raise ValueError("publish temporary file is unavailable")
+        initial = os.fstat(fd)
+        if not stat.S_ISREG(initial.st_mode) or initial.st_nlink != 1 or stat.S_IMODE(initial.st_mode) != 0o600:
+            raise ValueError("publish temporary file is unsafe")
+        offset = 0
+        while offset < len(content):
+            written = os.write(fd, content[offset:])
+            if written <= 0:
+                raise ValueError("publish write failed")
+            offset += written
+        os.fsync(fd)
+        current = os.fstat(fd)
+        named = os.stat(temporary, dir_fd=directory_fd, follow_symlinks=False)
+        if current.st_size != len(content) or not _same_inode(initial, current) or not _same_inode(current, named):
+            raise ValueError("publish temporary file changed")
+        result = temporary, current
+        temporary = ""
+        return result
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if temporary:
+            try:
+                os.unlink(temporary, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+
+
+def _rollback_published_file(published: _PublishedFile) -> None:
+    quarantine = ""
+    previous_temporary = ""
+    try:
+        _verify_published_file(published)
+        if not published.created and published.previous_content is None:
+            os.fsync(published.directory_fd)
+            return
+        for _attempt in range(32):
+            candidate = f".{published.path.name}.{secrets.token_hex(8)}.rollback"
+            try:
+                os.stat(candidate, dir_fd=published.directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                quarantine = candidate
+                break
+        if not quarantine:
+            raise ValueError("published file rollback quarantine is unavailable")
+        os.rename(
+            published.path.name,
+            quarantine,
+            src_dir_fd=published.directory_fd,
+            dst_dir_fd=published.directory_fd,
+        )
+        quarantined = os.stat(quarantine, dir_fd=published.directory_fd, follow_symlinks=False)
+        # rename may update ctime on some filesystems; dev/inode/mode/link/size/mtime
+        # remain the identity of the exact object that this transaction published.
+        if _stat_identity(quarantined)[:6] != published.object_identity[:6]:
+            try:
+                os.stat(published.path.name, dir_fd=published.directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                os.rename(
+                    quarantine,
+                    published.path.name,
+                    src_dir_fd=published.directory_fd,
+                    dst_dir_fd=published.directory_fd,
+                )
+                quarantine = ""
+            raise ValueError("published file changed before rollback")
+        if not published.created and published.previous_content is not None:
+            previous_temporary, temporary_stat = _write_temp_at(
+                published.directory_fd, published.path.name, published.previous_content,
+            )
+            os.link(
+                    previous_temporary,
+                    published.path.name,
+                    src_dir_fd=published.directory_fd,
+                    dst_dir_fd=published.directory_fd,
+                    follow_symlinks=False,
+                )
+            os.unlink(previous_temporary, dir_fd=published.directory_fd)
+            previous_temporary = ""
+            restored = os.stat(
+                published.path.name,
+                dir_fd=published.directory_fd,
+                follow_symlinks=False,
+            )
+            if not _same_inode(temporary_stat, restored):
+                raise ValueError("published file rollback changed")
+        os.unlink(quarantine, dir_fd=published.directory_fd)
+        quarantine = ""
+        os.fsync(published.directory_fd)
+    except OSError as exc:
+        raise ValueError("published file rollback failed") from exc
+    finally:
+        if previous_temporary:
+            try:
+                os.unlink(previous_temporary, dir_fd=published.directory_fd)
+            except FileNotFoundError:
+                pass
+        os.close(published.directory_fd)
+
+
+def _close_published_file(published: _PublishedFile) -> None:
+    os.close(published.directory_fd)
+
+
+class _PublishedFilesTransaction:
+    def __init__(self) -> None:
+        self._published: list[_PublishedFile] = []
+
+    def __enter__(self) -> _PublishedFilesTransaction:
+        return self
+
+    def add(self, published: _PublishedFile) -> _PublishedFile:
+        self._published.append(published)
+        return published
+
+    def __exit__(self, exc_type, _exc, _traceback) -> bool:
+        if exc_type is None:
+            for published in self._published:
+                _close_published_file(published)
+            return False
+        for published in reversed(self._published):
+            try:
+                _rollback_published_file(published)
+            except ValueError as rollback_error:
+                print(f"ERROR: published file rollback rejected: {rollback_error}", file=sys.stderr)
+        return False
+
+
+def _open_publish_directory(path: Path) -> tuple[int, tuple[int, int, int]]:
+    path.mkdir(parents=True, exist_ok=True)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    directory_fd: int | None = None
+    try:
+        directory_fd = os.open(os.fspath(path), flags)
+        opened = os.fstat(directory_fd)
+        named = path.lstat()
+        identity = _directory_identity(opened)
+        if not stat.S_ISDIR(opened.st_mode) or _directory_identity(named) != identity:
+            raise ValueError("publish directory changed")
+        result = directory_fd, identity
+        directory_fd = None
+        return result
+    except OSError as exc:
+        raise ValueError("publish directory is unsafe") from exc
+    finally:
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
+def _publish_output_transaction(path: Path, content: bytes) -> _PublishedFile:
+    if not path.name or path.name in {".", ".."}:
+        raise ValueError("output filename is invalid")
+    directory_path = path.parent.resolve()
+    directory_fd, directory_identity = _open_publish_directory(directory_path)
+    temporary = ""
+    keep_directory_fd = False
+    try:
+        previous_entry = _read_review_archive_at(directory_fd, path.name)
+        temporary, temporary_stat = _write_temp_at(directory_fd, path.name, content)
+        opened_parent = os.fstat(directory_fd)
+        named_parent = directory_path.lstat()
+        if (
+            _directory_identity(opened_parent) != directory_identity
+            or _directory_identity(named_parent) != directory_identity
+        ):
+            raise ValueError("publish directory changed")
+        named_temporary = os.stat(temporary, dir_fd=directory_fd, follow_symlinks=False)
+        if _stat_identity(named_temporary) != _stat_identity(temporary_stat):
+            raise ValueError("output temporary file changed")
+        if previous_entry is None:
+            try:
+                os.link(
+                    temporary,
+                    path.name,
+                    src_dir_fd=directory_fd,
+                    dst_dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+            except FileExistsError as exc:
+                raise ValueError("output appeared during publish") from exc
+            os.unlink(temporary, dir_fd=directory_fd)
+            temporary = ""
+            created = True
+            previous_content = None
+        else:
+            current = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+            if _stat_identity(current) != previous_entry[1]:
+                raise ValueError("output changed during publish")
+            os.replace(
+                temporary,
+                path.name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            temporary = ""
+            created = False
+            previous_content = previous_entry[0]
+        published = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+        if not _same_inode(temporary_stat, published) or published.st_size != len(content):
+            raise ValueError("output publish changed")
+        os.fsync(directory_fd)
+        result = _PublishedFile(
+            directory_path / path.name,
+            created,
+            directory_fd,
+            directory_identity,
+            _stat_identity(published),
+            previous_content,
+        )
+        _verify_published_file(result)
+        keep_directory_fd = True
+        return result
+    except OSError as exc:
+        raise ValueError("output publish failed") from exc
+    finally:
+        if temporary:
+            try:
+                os.unlink(temporary, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+        if not keep_directory_fd:
+            os.close(directory_fd)
+
+
+def _publish_review_archive_transaction(cwd: Path, name: str, content: bytes) -> _PublishedFile:
     if not re.fullmatch(r"[A-Za-z0-9._-]+", name):
         raise ValueError("review archive filename is invalid")
     directory_fd, archive_path = _open_review_archive_directory(cwd)
     temporary = ""
-    temp_fd: int | None = None
+    keep_directory_fd = False
     try:
         _verify_review_archive_directory(directory_fd, archive_path)
+        directory_identity = _directory_identity(os.fstat(directory_fd))
         existing_entry = _read_review_archive_at(directory_fd, name)
         if existing_entry is not None:
             existing, existing_identity = existing_entry
@@ -8508,55 +8780,67 @@ def _publish_review_import_evidence(cwd: Path, name: str, content: bytes) -> Pat
             ):
                 raise ValueError("review archive evidence changed")
             _verify_review_archive_directory(directory_fd, archive_path)
-            return archive_path / name
-        for _attempt in range(32):
-            temporary = f".{name}.{secrets.token_hex(8)}.tmp"
-            try:
-                temp_fd = os.open(
-                    temporary,
-                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-                    0o600,
-                    dir_fd=directory_fd,
-                )
-                break
-            except FileExistsError:
-                continue
-        if temp_fd is None:
-            raise ValueError("review archive temporary file is unavailable")
-        initial = os.fstat(temp_fd)
-        if not stat.S_ISREG(initial.st_mode) or initial.st_nlink != 1 or stat.S_IMODE(initial.st_mode) != 0o600:
-            raise ValueError("review archive temporary file is unsafe")
-        offset = 0
-        while offset < len(content):
-            written = os.write(temp_fd, content[offset:])
-            if written <= 0:
-                raise ValueError("review archive write failed")
-            offset += written
-        os.fsync(temp_fd)
-        current = os.fstat(temp_fd)
-        named_temp = os.stat(temporary, dir_fd=directory_fd, follow_symlinks=False)
-        if current.st_size != len(content) or not _same_inode(initial, current) or not _same_inode(current, named_temp):
-            raise ValueError("review archive temporary file changed")
+            keep_directory_fd = True
+            return _PublishedFile(
+                archive_path / name, False, directory_fd, directory_identity,
+                confirmed_identity,
+            )
+        temporary, temporary_stat = _write_temp_at(directory_fd, name, content)
         _verify_review_archive_directory(directory_fd, archive_path)
-        os.replace(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        named_temporary = os.stat(temporary, dir_fd=directory_fd, follow_symlinks=False)
+        if _stat_identity(named_temporary) != _stat_identity(temporary_stat):
+            raise ValueError("review archive temporary file changed")
+        try:
+            os.link(
+                temporary,
+                name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            os.unlink(temporary, dir_fd=directory_fd)
+            temporary = ""
+            concurrent_entry = _read_review_archive_at(directory_fd, name)
+            if concurrent_entry is None or concurrent_entry[0] != content:
+                raise ValueError("immutable review archive collision")
+            _verify_review_archive_directory(directory_fd, archive_path)
+            keep_directory_fd = True
+            return _PublishedFile(
+                archive_path / name, False, directory_fd, directory_identity,
+                concurrent_entry[1],
+            )
+        os.unlink(temporary, dir_fd=directory_fd)
         temporary = ""
         published = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-        if not _same_inode(current, published) or published.st_size != len(content):
+        if not _same_inode(temporary_stat, published) or published.st_size != len(content):
             raise ValueError("review archive publish changed")
         _verify_review_archive_directory(directory_fd, archive_path)
         os.fsync(directory_fd)
-        return archive_path / name
+        keep_directory_fd = True
+        return _PublishedFile(
+            archive_path / name, True, directory_fd, directory_identity,
+            _stat_identity(published),
+        )
     except OSError as exc:
         raise ValueError("review archive publish failed") from exc
     finally:
-        if temp_fd is not None:
-            os.close(temp_fd)
         if temporary:
             try:
                 os.unlink(temporary, dir_fd=directory_fd)
             except FileNotFoundError:
                 pass
-        os.close(directory_fd)
+        if not keep_directory_fd:
+            os.close(directory_fd)
+
+
+def _publish_review_import_evidence(cwd: Path, name: str, content: bytes) -> Path:
+    published = _publish_review_archive_transaction(cwd, name, content)
+    try:
+        _verify_published_file(published)
+        return published.path
+    finally:
+        _close_published_file(published)
 
 
 class _DuplicateReviewJsonKey(ValueError):
@@ -9347,7 +9631,6 @@ def cmd_aggregate_reviews(args):
         evidence_content = (json.dumps(evidence, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
         evidence_digest = "sha256:" + hashlib.sha256(evidence_content).hexdigest()
         evidence_path = state_dir(cwd) / "archive" / f"iter-{args.iteration}-{mission8}-reviews-{evidence_digest[7:23]}.json"
-        evidence_existed = evidence_path.exists()
         evidence_ref_path = str(evidence_path.relative_to(cwd))
 
         out_path = Path(args.out) if args.out else Path("/tmp") / f"mission-scorer-iter-{args.iteration}-{mission8}.json"
@@ -9372,40 +9655,40 @@ def cmd_aggregate_reviews(args):
             },
         }
         payload_content = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-        previous_out: bytes | None = None
-        out_existed = out_path.exists() or out_path.is_symlink()
-        archive_created = out_published = False
+        archive_publish: _PublishedFile | None = None
+        out_publish: _PublishedFile | None = None
         try:
-            destination = _publish_review_import_evidence(
+            archive_publish = _publish_review_archive_transaction(
                 cwd, evidence_path.name, evidence_content,
             )
-            if destination != evidence_path:
+            if archive_publish.path != evidence_path:
                 raise ValueError("review aggregate archive path mismatch")
-            archive_created = not evidence_existed
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            if out_existed:
-                previous_out = _read_strict_review_file(out_path)
-            atomic_write_bytes(out_path, payload_content)
-            out_published = True
-            if _read_strict_review_file(out_path) != payload_content:
-                raise OSError("aggregate scoring output verification failed")
+            out_publish = _publish_output_transaction(out_path, payload_content)
+            _verify_published_file(archive_publish)
+            _verify_published_file(out_publish)
             atomic_write_json(sf, data)
         except BaseException as exc:
-            if out_published:
-                if out_existed and previous_out is not None:
-                    atomic_write_bytes(out_path, previous_out)
-                elif not out_existed:
-                    out_path.unlink(missing_ok=True)
-            if archive_created:
+            if out_publish is not None:
                 try:
-                    if _read_strict_review_file(evidence_path) == evidence_content:
-                        evidence_path.unlink()
-                except (OSError, ValueError):
-                    pass
+                    _rollback_published_file(out_publish)
+                except ValueError as rollback_error:
+                    print(f"ERROR: aggregate output rollback rejected: {rollback_error}", file=sys.stderr)
+                out_publish = None
+            if archive_publish is not None:
+                try:
+                    _rollback_published_file(archive_publish)
+                except ValueError as rollback_error:
+                    print(f"ERROR: aggregate archive rollback rejected: {rollback_error}", file=sys.stderr)
+                archive_publish = None
             if isinstance(exc, ValueError):
                 print(f"ERROR: aggregate output rejected: {exc}", file=sys.stderr)
                 raise CommandOutcomeExit(2, "invalid-input") from exc
             raise
+        finally:
+            if out_publish is not None:
+                _close_published_file(out_publish)
+            if archive_publish is not None:
+                _close_published_file(archive_publish)
 
     result = {
         "ok": True,
@@ -9607,7 +9890,7 @@ def cmd_push_score(args):
         _reject_on_score_item_mismatch(args, items)
     _reject_normalized_scale(items)
 
-    with StateLock(lock_file(cwd)):
+    with StateLock(lock_file(cwd)), _PublishedFilesTransaction() as published_files:
         data = json.loads(sf.read_text())
         lease_decision = _enforce_session_lease_for_write(sf, data)
         _validate_consensus_policy(data, items)
@@ -9671,8 +9954,11 @@ def cmd_push_score(args):
                 else:
                     entry["review_evidence_ref"] = provenance["review_evidence_ref"]
                 entry["revision_scope"] = provenance["revision_scope"]
-            scoring_json_archived_to = _archive_scoring_json(cwd, args.iteration, data, entry, scoring_payload)
-            artifact_state_path = str(Path(scoring_json_archived_to).relative_to(cwd))
+            scoring_publish = published_files.add(
+                _archive_scoring_json(cwd, args.iteration, data, entry, scoring_payload)
+            )
+            scoring_json_archived_to = str(scoring_publish.path)
+            artifact_state_path = str(scoring_publish.path.relative_to(cwd))
             entry["scoring_evidence_path"] = artifact_state_path if provenance is not None else scoring_json_archived_to
             artifact_bytes = _read_bounded_review_evidence(cwd, artifact_state_path)
             if provenance is not None:
@@ -9708,6 +9994,8 @@ def cmd_push_score(args):
         data["schema_version"] = SCHEMA_VERSION
         data = stamp_metadata(data, cwd)
         backup_state(sf)
+        if args.scoring_json:
+            _verify_published_file(scoring_publish)
         atomic_write_json(sf, data, lease_decision=lease_decision)
 
     if args.scoring_json:

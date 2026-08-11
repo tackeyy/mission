@@ -1,5 +1,6 @@
 """push-score サブコマンドのテスト (T1: RED → T2: GREEN)."""
 
+import argparse
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import importlib.util
@@ -162,6 +163,58 @@ def test_push_score_rejects_foreign_lease_before_scoring_archive_publish(
         (state_dir / "telemetry" / "command-outcomes" / f"{token}.json").read_text()
     )
     assert sidecar["records"] == [payload["outcome"]]
+
+
+def test_push_score_state_failure_rolls_back_new_scoring_archive(
+    state_dir, tmp_path, monkeypatch,
+):
+    module = _state_module()
+    monkeypatch.chdir(state_dir.parent)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    items = {
+        "mission_achievement": 4.5, "accuracy": 4.4,
+        "completeness": 4.3, "usability": 4.2,
+    }
+    _, review_ref, claim = write_canonical_review_aggregate(
+        state_dir.parent, [canonical_review(items)], iteration=1,
+        name_prefix="state-failure",
+    )
+    score = tmp_path / "score.json"
+    score.write_text(json.dumps({
+        "items": claim["items"], "open_high": claim["open_high"],
+        "review_agreement": claim["review_agreement"],
+        "agreement_detail": claim["agreement_detail"],
+        "findings_evidence_path": review_ref["path"],
+        "score_provenance": {
+            "score_source": "scoring-json", "review_evidence_ref": review_ref,
+            "revision_scope": review_ref["revision_scope"],
+        },
+    }), encoding="utf-8")
+    score_before = score.read_bytes()
+    state_path = state_dir / "sessions" / "test.json"
+    state_before = state_path.read_bytes()
+    archive = state_dir / "archive"
+    archive_before = {path.name: path.read_bytes() for path in archive.iterdir()}
+    original_write = module.atomic_write_json
+
+    def fail_score_state_publish(path, data, **kwargs):
+        if path == state_path and data.get("score_history"):
+            raise OSError("simulated score state publish failure")
+        return original_write(path, data, **kwargs)
+
+    monkeypatch.setattr(module, "atomic_write_json", fail_score_state_publish)
+
+    with pytest.raises(OSError, match="simulated score state publish failure"):
+        module.cmd_push_score(argparse.Namespace(
+            iteration=1, open_high=0, scoring_json=str(score), items=None,
+            composite=None, min_item=None, notes=None, scoring_output=None,
+            resubmit_reason=None, transaction_outcome=None,
+        ))
+
+    assert state_path.read_bytes() == state_before
+    assert score.read_bytes() == score_before
+    assert {path.name: path.read_bytes() for path in archive.iterdir()} == archive_before
 
 
 def test_push_score_appends_multiple_in_order(state_dir, run_cli, read_state):
