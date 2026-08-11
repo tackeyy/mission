@@ -27,6 +27,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BENCH_DIR = REPO_ROOT / "benchmarks" / "mission-vs-goal"
+if str(BENCH_DIR) not in sys.path:
+    sys.path.insert(0, str(BENCH_DIR))
+from benchmark_audit import summarize_benchmark_kpi
+
 DEFAULT_TASKS_PATH = BENCH_DIR / "tasks.complex.json"
 RESULTS_DIR = BENCH_DIR / "results"
 ARTIFACTS_DIR = BENCH_DIR / "artifacts"
@@ -1135,6 +1139,7 @@ def summarize(
         "expected_records": expected_records,
         "stopped_early": stopped_early,
         "limitations": limitations,
+        "benchmark_kpi": summarize_benchmark_kpi(records),
         "arms": {
             arm: {
                 "records": len(items),
