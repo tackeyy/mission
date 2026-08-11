@@ -167,6 +167,14 @@ def validate_specialist_lifecycle(
                 raise SpecialistLifecycleError(
                     f"{collection_name} entry is not bound to the current selection_id"
                 )
+    if checkpoint.get("decision") == "selected" and not any(
+        item.get("selection_id") == selection_id
+        for item in state.get("specialists_selected") or []
+        if isinstance(item, Mapping)
+    ):
+        raise SpecialistLifecycleError(
+            "selected checkpoint has no current selected provider"
+        )
     invocations = state.get("specialist_invocations") or []
     if not isinstance(invocations, list):
         raise SpecialistLifecycleError("specialist_invocations must be a list")

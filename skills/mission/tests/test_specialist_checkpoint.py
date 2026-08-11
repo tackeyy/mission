@@ -106,6 +106,24 @@ def test_mark_passes_rejects_selected_checkpoint_without_terminal_evidence(
     assert "terminal specialist invocation missing" in result.stderr
 
 
+def test_mark_passes_rejects_selected_decision_without_current_selected_record(
+    state_dir, run_cli, read_state, push_provenance_score
+):
+    """A selected decision cannot bypass the terminal-evidence gate with an empty set."""
+    selection_id = "sel_0123456789abcdef0123456789abcdef"
+    state_file = state_dir / "sessions" / "test.json"
+    state = read_state(state_dir)
+    state.update({"task_profile": {"primary": "backend"},
+        "specialists_decision": {"policy": "auto", "action": "select", "decision": "selected",
+            "reason_code": "candidate-selected", "lifecycle_state": "selected", "selection_id": selection_id},
+        "specialists_candidates": [], "specialists_selected": [], "specialist_invocations": []})
+    state_file.write_text(json.dumps(state), encoding="utf-8")
+    push_provenance_score(state_dir.parent)
+    result = run_cli("mark-passes", cwd=state_dir.parent)
+    assert result.returncode == 2
+    assert "selected checkpoint has no current selected provider" in result.stderr
+
+
 def test_waiver_records_current_selection_identity_and_allows_selected_gap(
     state_dir, run_cli, read_state, push_provenance_score
 ):
