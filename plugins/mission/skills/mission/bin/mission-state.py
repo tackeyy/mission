@@ -6307,19 +6307,127 @@ def _parallel_manifest_path(cwd: Path, group_id: str) -> Path:
     return session_dir(cwd) / f"{group_id}.group.json"
 
 
-def _read_parallel_manifest(path: Path) -> tuple[bytes, tuple]:
+def _parallel_directory_flags() -> int:
+    return os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _parallel_same_directory(opened: os.stat_result, named: os.stat_result) -> bool:
+    return (
+        stat.S_ISDIR(opened.st_mode)
+        and stat.S_ISDIR(named.st_mode)
+        and opened.st_dev == named.st_dev
+        and opened.st_ino == named.st_ino
+        and opened.st_mode == named.st_mode
+    )
+
+
+def _open_parallel_child_directory(parent_fd: int, name: str, *, create: bool) -> int:
+    try:
+        child_fd = os.open(name, _parallel_directory_flags(), dir_fd=parent_fd)
+    except FileNotFoundError:
+        if not create:
+            raise ValueError("parallel group directory is missing")
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent_fd)
+            child_fd = os.open(name, _parallel_directory_flags(), dir_fd=parent_fd)
+        except OSError as exc:
+            raise ValueError("parallel group directory is unsafe") from exc
+    except OSError as exc:
+        raise ValueError("parallel group directory is unsafe") from exc
+    try:
+        opened = os.fstat(child_fd)
+        named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if not _parallel_same_directory(opened, named):
+            raise ValueError("parallel group directory changed")
+        return child_fd
+    except BaseException:
+        os.close(child_fd)
+        raise
+
+
+class _ParallelGroupStore:
+    """Hold the project/state/sessions descriptor chain and shared state lock."""
+
+    def __init__(self, cwd: Path, *, create: bool):
+        self.cwd = cwd
+        self.create = create
+        self.root_fd = None
+        self.state_fd = None
+        self.sessions_fd = None
+        self.lock_fd = None
+
+    def __enter__(self):
+        try:
+            self.root_fd = os.open(os.fspath(self.cwd), _parallel_directory_flags())
+            self.state_fd = _open_parallel_child_directory(
+                self.root_fd, ".mission-state", create=self.create
+            )
+            lock_flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+            self.lock_fd = os.open(".state.lock", lock_flags, 0o600, dir_fd=self.state_fd)
+            opened_lock = os.fstat(self.lock_fd)
+            named_lock = os.stat(".state.lock", dir_fd=self.state_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(opened_lock.st_mode)
+                or opened_lock.st_nlink != 1
+                or _parallel_file_identity(opened_lock) != _parallel_file_identity(named_lock)
+            ):
+                raise ValueError("parallel group lock is unsafe")
+            deadline = time.time() + 5.0
+            while True:
+                try:
+                    fcntl.flock(self.lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.time() > deadline:
+                        raise ValueError("parallel group lock timed out")
+                    time.sleep(0.05)
+            self.sessions_fd = _open_parallel_child_directory(
+                self.state_fd, "sessions", create=self.create
+            )
+            self.verify()
+            return self
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
+
+    def verify(self) -> None:
+        if self.root_fd is None or self.state_fd is None or self.sessions_fd is None:
+            raise ValueError("parallel group directory is unavailable")
+        root_named = self.cwd.lstat()
+        if not _parallel_same_directory(os.fstat(self.root_fd), root_named):
+            raise ValueError("parallel group project root changed")
+        state_named = os.stat(".mission-state", dir_fd=self.root_fd, follow_symlinks=False)
+        if not _parallel_same_directory(os.fstat(self.state_fd), state_named):
+            raise ValueError("parallel group state directory changed")
+        sessions_named = os.stat("sessions", dir_fd=self.state_fd, follow_symlinks=False)
+        if not _parallel_same_directory(os.fstat(self.sessions_fd), sessions_named):
+            raise ValueError("parallel group sessions directory changed")
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.lock_fd is not None:
+            with contextlib.suppress(OSError):
+                fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
+        for attribute in ("sessions_fd", "lock_fd", "state_fd", "root_fd"):
+            descriptor = getattr(self, attribute)
+            if descriptor is not None:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
+                setattr(self, attribute, None)
+
+
+def _read_parallel_regular_at(directory_fd: int, name: str, *, limit: int) -> tuple[bytes, tuple]:
     flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(os.fspath(path), flags)
+        fd = os.open(name, flags, dir_fd=directory_fd)
         try:
             before = os.fstat(fd)
             if (
                 not stat.S_ISREG(before.st_mode)
                 or before.st_nlink != 1
                 or before.st_size < 1
-                or before.st_size > PARALLEL_GROUP_MAX_BYTES
+                or before.st_size > limit
             ):
-                raise ValueError("parallel group manifest is unsafe")
+                raise ValueError("parallel group file is unsafe")
             remaining = before.st_size
             chunks = []
             while remaining:
@@ -6330,7 +6438,7 @@ def _read_parallel_manifest(path: Path) -> tuple[bytes, tuple]:
                 remaining -= len(chunk)
             payload = b"".join(chunks)
             after = os.fstat(fd)
-            named = os.stat(path, follow_symlinks=False)
+            named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
             identity = _parallel_file_identity(before)
             if (
                 len(payload) != before.st_size
@@ -6338,12 +6446,18 @@ def _read_parallel_manifest(path: Path) -> tuple[bytes, tuple]:
                 or _parallel_file_identity(after) != identity
                 or _parallel_file_identity(named) != identity
             ):
-                raise ValueError("parallel group manifest changed while being read")
+                raise ValueError("parallel group file changed while being read")
             return payload, identity
         finally:
             os.close(fd)
     except OSError as exc:
-        raise ValueError("parallel group manifest is missing or unsafe") from exc
+        raise ValueError("parallel group file is missing or unsafe") from exc
+
+
+def _read_parallel_manifest(directory_fd: int, name: str) -> tuple[bytes, tuple]:
+    return _read_parallel_regular_at(
+        directory_fd, name, limit=PARALLEL_GROUP_MAX_BYTES
+    )
 
 
 def _validate_parallel_manifest(payload: object, group_id: str) -> dict:
@@ -6387,12 +6501,23 @@ def _validate_parallel_manifest(payload: object, group_id: str) -> dict:
     return payload
 
 
-def _parallel_manifest(cwd: Path, group_id: str) -> tuple[Path, dict, tuple]:
-    path = _parallel_manifest_path(cwd, group_id)
-    content, identity = _read_parallel_manifest(path)
+def _reject_duplicate_parallel_keys(pairs: list[tuple[str, object]]) -> dict:
+    document = {}
+    for key, value in pairs:
+        if key in document:
+            raise ValueError(f"parallel group manifest has duplicate JSON key: {key}")
+        document[key] = value
+    return document
+
+
+def _parallel_manifest(store: _ParallelGroupStore, group_id: str) -> tuple[Path, dict, tuple]:
+    path = _parallel_manifest_path(store.cwd, group_id)
+    content, identity = _read_parallel_manifest(store.sessions_fd, path.name)
     try:
-        parsed = json.loads(content.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        parsed = json.loads(
+            content.decode("utf-8"), object_pairs_hook=_reject_duplicate_parallel_keys
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError("parallel group manifest is malformed") from exc
     return path, _validate_parallel_manifest(parsed, group_id), identity
 
@@ -6421,12 +6546,9 @@ def _write_parallel_temp(directory_fd: int, payload: bytes) -> str:
     return name
 
 
-def _create_parallel_manifest(path: Path, manifest: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    directory_fd = os.open(
-        os.fspath(path.parent),
-        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
-    )
+def _create_parallel_manifest(store: _ParallelGroupStore, path: Path, manifest: dict) -> None:
+    store.verify()
+    directory_fd = store.sessions_fd
     temporary = None
     try:
         parent_before = os.fstat(directory_fd)
@@ -6448,19 +6570,19 @@ def _create_parallel_manifest(path: Path, manifest: dict) -> None:
         parent_after = os.fstat(directory_fd)
         if (parent_before.st_dev, parent_before.st_ino) != (parent_after.st_dev, parent_after.st_ino):
             raise ValueError("parallel group manifest directory changed")
-        _parallel_manifest(path.parent.parent.parent, manifest["group_id"])
+        store.verify()
+        _parallel_manifest(store, manifest["group_id"])
     finally:
         if temporary is not None:
             with contextlib.suppress(OSError):
                 os.unlink(temporary, dir_fd=directory_fd)
-        os.close(directory_fd)
 
 
-def _replace_parallel_manifest(path: Path, manifest: dict, expected_identity: tuple) -> None:
-    directory_fd = os.open(
-        os.fspath(path.parent),
-        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
-    )
+def _replace_parallel_manifest(
+    store: _ParallelGroupStore, path: Path, manifest: dict, expected_identity: tuple
+) -> None:
+    store.verify()
+    directory_fd = store.sessions_fd
     temporary = None
     try:
         current = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
@@ -6474,11 +6596,11 @@ def _replace_parallel_manifest(path: Path, manifest: dict, expected_identity: tu
         os.replace(temporary, path.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
         temporary = None
         os.fsync(directory_fd)
+        store.verify()
     finally:
         if temporary is not None:
             with contextlib.suppress(OSError):
                 os.unlink(temporary, dir_fd=directory_fd)
-        os.close(directory_fd)
 
 
 def cmd_parallel_init(args):
@@ -6498,8 +6620,10 @@ def cmd_parallel_init(args):
             "status": "running",
             "coverage": {},
         }
-        with StateLock(lock_file(cwd)):
-            _create_parallel_manifest(_parallel_manifest_path(cwd, group_id), manifest)
+        with _ParallelGroupStore(cwd, create=True) as store:
+            _create_parallel_manifest(
+                store, _parallel_manifest_path(cwd, group_id), manifest
+            )
     except (OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
@@ -6572,18 +6696,23 @@ def _parallel_coverage(records: dict[str, list[dict]], planned: list[str]) -> di
     return result
 
 
-def _parallel_status(cwd: Path, group_id: str) -> tuple[Path, dict, tuple, dict]:
-    path, manifest, manifest_identity = _parallel_manifest(cwd, group_id)
+def _parallel_status(store: _ParallelGroupStore, group_id: str) -> tuple[Path, dict, tuple, dict]:
+    path, manifest, manifest_identity = _parallel_manifest(store, group_id)
     planned_children = [item["issue_ref"] for item in manifest["planned_children"]]
     states = []
-    for state_path in _iter_state_files(cwd):
-        try:
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+    for name in sorted(os.listdir(store.sessions_fd)):
+        if not name.endswith(".json") or name.endswith(".group.json"):
             continue
+        try:
+            state_content, _identity = _read_parallel_regular_at(
+                store.sessions_fd, name, limit=4 * 1024 * 1024
+            )
+            state = json.loads(state_content.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise ValueError("parallel group session state is malformed or unsafe") from exc
         if not _is_mission_state_record(state) or state.get("logical_group_id") != group_id:
             continue
-        state["_mission_source_path"] = str(state_path)
+        state["_mission_source_path"] = str(session_dir(store.cwd) / name)
         states.append(state)
     states, _duplicate_files = _dedupe_states(states)
     by_issue: dict[str, list[dict]] = {}
@@ -6655,7 +6784,8 @@ def _parallel_status(cwd: Path, group_id: str) -> tuple[Path, dict, tuple, dict]
 def cmd_parallel_status(args):
     try:
         group_id = opaque_token(args.group_id)
-        _path, _manifest, _identity, status = _parallel_status(Path.cwd(), group_id)
+        with _ParallelGroupStore(Path.cwd(), create=False) as store:
+            _path, _manifest, _identity, status = _parallel_status(store, group_id)
     except (OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
@@ -6666,8 +6796,8 @@ def cmd_parallel_closeout(args):
     cwd = Path.cwd()
     try:
         group_id = opaque_token(args.group_id)
-        with StateLock(lock_file(cwd)):
-            path, manifest, manifest_identity, status = _parallel_status(cwd, group_id)
+        with _ParallelGroupStore(cwd, create=False) as store:
+            path, manifest, manifest_identity, status = _parallel_status(store, group_id)
             if manifest["status"] != "running":
                 raise ValueError("parallel group is already terminal")
             if status["incomplete"] or status["duplicates"] or status["late_children"] or status["active_leases"]:
@@ -6676,7 +6806,7 @@ def cmd_parallel_closeout(args):
             manifest["outcome"] = "halt" if status["halt"] else "pass"
             manifest["closed_at"] = iso_now()
             manifest["coverage"] = status["coverage"]
-            _replace_parallel_manifest(path, manifest, manifest_identity)
+            _replace_parallel_manifest(store, path, manifest, manifest_identity)
             status["manifest_status"] = "terminal"
             status["outcome"] = manifest["outcome"]
     except (OSError, ValueError) as exc:

@@ -309,6 +309,49 @@ def test_parallel_manifest_rejects_malformed_duplicate_and_unsafe_files(run_cli,
     assert run_cli("parallel-status", "--group-id", "unsafe-388", cwd=tmp_path).returncode == 2
 
 
+def test_parallel_init_rejects_symlinked_state_ancestor_without_external_write(run_cli, tmp_path):
+    project = tmp_path / "project"
+    external = tmp_path / "external"
+    project.mkdir()
+    external.mkdir()
+    (project / ".mission-state").symlink_to(external, target_is_directory=True)
+
+    result = run_cli(
+        "parallel-init",
+        "--group-id",
+        "escape-388",
+        "--issue-ref",
+        "388",
+        cwd=project,
+    )
+
+    assert result.returncode == 2
+    assert list(external.rglob("*")) == []
+
+
+def test_parallel_status_rejects_duplicate_json_keys(run_cli, tmp_path):
+    run_cli(
+        "parallel-init",
+        "--group-id",
+        "duplicate-key-388",
+        "--issue-ref",
+        "388",
+        cwd=tmp_path,
+        check=True,
+    )
+    manifest = _manifest_path(tmp_path, "duplicate-key-388")
+    manifest.write_text(
+        '{"schema":"mission-parallel-group/1",'
+        '"group_id":"duplicate-key-388",'
+        '"created_at":"2026-08-11T00:00:00Z",'
+        '"planned_children":[{"issue_ref":"388"}],'
+        '"planned_children":[{"issue_ref":"389"}],'
+        '"status":"running","coverage":{}}'
+    )
+
+    assert run_cli("parallel-status", "--group-id", "duplicate-key-388", cwd=tmp_path).returncode == 2
+
+
 def test_parallel_status_ignores_legacy_sessions_without_group(run_cli, tmp_path):
     result = run_cli(
         "init",
