@@ -8021,6 +8021,68 @@ def _validate_revision_scope(cwd: Path, scope: object) -> None:
         raise ValueError("git revision_scope head is not the current reviewed HEAD")
 
 
+_REVIEW_LINEAGE_REF_FIELDS = ("review_group_id", "review_generation", "base_sha", "head_sha")
+
+
+def _current_review_lineage(cwd: Path, data: dict, revision_scope: dict) -> dict | None:
+    """Return the active review generation binding, or preserve pre-rollout state."""
+    group = data.get("review_group_id")
+    if group is None:
+        return None
+    generation = data.get("review_generation")
+    base, head = data.get("base_sha"), data.get("head_sha")
+    if (not isinstance(group, str) or not group or "\x00" in group
+            or not isinstance(generation, int) or isinstance(generation, bool) or generation < 1
+            or revision_scope.get("kind") != "git"
+            or (base, head) != (revision_scope.get("base_sha"), revision_scope.get("head_sha"))):
+        raise ValueError("review lineage state must bind a valid group, generation, and git revision")
+
+    members = []
+    try:
+        for state_path in _iter_state_files(cwd):
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            if state.get("review_group_id") != group:
+                continue
+            member_generation = state.get("review_generation")
+            if (not isinstance(member_generation, int) or isinstance(member_generation, bool)
+                    or member_generation < 1):
+                raise ValueError("review lineage group has an invalid generation")
+            members.append(state)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("review lineage state is unreadable") from exc
+    if not members:
+        raise ValueError("review lineage group is missing")
+    newest_generation = max(member["review_generation"] for member in members)
+    newest = [member for member in members if member["review_generation"] == newest_generation]
+    if len(newest) != 1:
+        raise ValueError("review lineage group has no single active generation")
+    current = newest[0]
+    if (generation != newest_generation or current.get("session_id") != data.get("session_id")
+            or current.get("passes") is not False or current.get("loop_active") is not True
+            or current.get("terminal_outcome") is not None):
+        raise ValueError("review lineage is not the current active generation")
+    return {
+        "review_group_id": group,
+        "review_generation": generation,
+        "base_sha": base,
+        "head_sha": head,
+    }
+
+
+def _validate_review_lineage_ref(cwd: Path, data: dict, ref: dict, revision_scope: dict) -> None:
+    """Bind an aggregate to the session's active review generation when present."""
+    provided = [field in ref for field in _REVIEW_LINEAGE_REF_FIELDS]
+    if any(provided) and not all(provided):
+        raise ValueError("review lineage reference is incomplete")
+    expected = _current_review_lineage(cwd, data, revision_scope)
+    if expected is None:
+        if any(provided):
+            raise ValueError("review lineage reference is not allowed for a legacy session")
+        return
+    if not all(provided) or {field: ref[field] for field in _REVIEW_LINEAGE_REF_FIELDS} != expected:
+        raise ValueError("review lineage reference does not bind the current generation")
+
+
 def _validate_provenance(provenance: object, *, require: bool) -> dict | None:
     if provenance is None:
         if require:
@@ -8036,6 +8098,18 @@ def _validate_provenance(provenance: object, *, require: bool) -> dict | None:
     if source == "scoring-json":
         if not isinstance(ref, dict) or ref.get("kind") != "review-aggregate" or not isinstance(ref.get("path"), str) or not _SHA256_REF_RE.fullmatch(str(ref.get("digest") or "")) or not isinstance(ref.get("generation"), str) or not isinstance(ref.get("revision_scope"), dict):
             raise ValueError("score provenance has invalid review_evidence_ref")
+        lineage_fields = [field in ref for field in _REVIEW_LINEAGE_REF_FIELDS]
+        if any(lineage_fields) and (
+                not all(lineage_fields)
+                or not isinstance(ref.get("review_group_id"), str)
+                or not ref["review_group_id"]
+                or "\x00" in ref["review_group_id"]
+                or not isinstance(ref.get("review_generation"), int)
+                or isinstance(ref["review_generation"], bool)
+                or ref["review_generation"] < 1
+                or not all(isinstance(ref.get(field), str) and re.fullmatch(r"[0-9a-f]{40}", ref[field])
+                           for field in ("base_sha", "head_sha"))):
+            raise ValueError("score provenance has invalid review lineage reference")
         if not isinstance(scope, dict) or scope != ref["revision_scope"]:
             raise ValueError("score provenance revision_scope mismatch")
     else:
@@ -8217,6 +8291,8 @@ def _revalidate_score_provenance(cwd: Path, entry: dict, data: dict, *, require_
     is_manual = provenance["score_source"] == "manual-import"
     ref = provenance["manual_evidence_ref"] if is_manual else provenance["review_evidence_ref"]
     _validate_revision_scope(cwd, provenance["revision_scope"])
+    if not is_manual:
+        _validate_review_lineage_ref(cwd, data, ref, provenance["revision_scope"])
     content = _read_bounded_review_evidence(cwd, ref["path"])
     digest = hashlib.sha256(content).hexdigest()
     if "sha256:" + digest != ref["digest"]:
@@ -10124,6 +10200,11 @@ def cmd_aggregate_reviews(args):
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
         try:
+            review_lineage = _current_review_lineage(cwd, data, revision_scope)
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(2)
+        try:
             validate_artifact_state_consistency(data, require_resolved=True)
             artifact_lint, artifact_lint_status = _lint_state_artifact(cwd, data)
         except ArtifactContractError as exc:
@@ -10223,6 +10304,7 @@ def cmd_aggregate_reviews(args):
                     "digest": evidence_digest,
                     "generation": evidence_digest[7:23],
                     "revision_scope": revision_scope,
+                    **(review_lineage or {}),
                 },
                 "revision_scope": revision_scope,
             },

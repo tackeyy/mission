@@ -3,10 +3,46 @@
 from __future__ import annotations
 
 import json
+import subprocess
+
+
+ITEMS = {
+    "mission_achievement": 4.5,
+    "accuracy": 4.5,
+    "completeness": 4.0,
+    "usability": 4.0,
+}
 
 
 def _state(root):
     return json.loads(next((root / ".mission-state" / "sessions").glob("*.json")).read_text())
+
+
+def _git_review_scope(root):
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=root, check=True, text=True,
+                              capture_output=True).stdout.strip()
+
+    git("init")
+    git("config", "user.email", "fixture@example.invalid")
+    git("config", "user.name", "fixture")
+    tracked = root / "tracked.txt"
+    tracked.write_text("base\n", encoding="utf-8")
+    git("add", "tracked.txt")
+    git("commit", "-m", "base")
+    base = git("rev-parse", "HEAD")
+    tracked.write_text("head\n", encoding="utf-8")
+    git("commit", "-am", "head")
+    return base, git("rev-parse", "HEAD")
+
+
+def _review(path):
+    path.write_text(json.dumps({
+        "schema": "mission-review/1", "perspective": "neutral", "iteration": 1,
+        "scores": ITEMS, "findings": [], "same_score_note": None,
+        "notes": "neutral fixture",
+    }), encoding="utf-8")
+    return path
 
 
 def test_init_records_typed_correlation_and_reviewer_generation(run_cli, tmp_path):
@@ -83,3 +119,65 @@ def test_supersede_rejects_duplicate_current_generation_without_writing(run_cli,
 
     assert result.returncode == 2
     assert {path.name: path.read_bytes() for path in (first, second)} == before
+
+
+def test_review_provenance_binds_current_generation_and_rejects_old_aggregate_replay(run_cli, tmp_path):
+    """A previous reviewer generation cannot supply a new generation's score."""
+    base, head = _git_review_scope(tmp_path)
+    common = [
+        "init", "review issue", "--force-mission", "--issue-ref", "385",
+        "--artifact-applicability", "not-applicable", "--review-group-id", "issue-385",
+        "--review-perspective", "quality", "--base-sha", base, "--head-sha", head,
+    ]
+    assert run_cli(*common, cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "old"}).returncode == 0
+    review = _review(tmp_path / "review.json")
+    old_score = tmp_path / "old-score.json"
+    aggregate = run_cli(
+        "aggregate-reviews", "--iteration", "1", "--input", str(review), "--out", str(old_score),
+        "--base-sha", base, "--head-sha", head, cwd=tmp_path,
+        env_extra={"MISSION_SESSION_ID": "old"},
+    )
+    assert aggregate.returncode == 0, aggregate.stderr
+    ref = json.loads(old_score.read_text(encoding="utf-8"))["score_provenance"]["review_evidence_ref"]
+    assert ref["review_group_id"] == "issue-385"
+    assert ref["review_generation"] == 1
+    assert ref["base_sha"] == base
+    assert ref["head_sha"] == head
+
+    assert run_cli(*common, cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "current"}).returncode == 0
+    replay = run_cli(
+        "push-score", "--iteration", "1", "--scoring-json", str(old_score), cwd=tmp_path,
+        env_extra={"MISSION_SESSION_ID": "current"},
+    )
+    assert replay.returncode == 2
+    assert "review lineage" in replay.stderr
+
+
+def test_mark_passes_revalidates_review_generation_without_writing(run_cli, tmp_path):
+    """The terminal gate cannot use a provenance ref from another generation."""
+    base, head = _git_review_scope(tmp_path)
+    common = [
+        "init", "review issue", "--force-mission", "--issue-ref", "385",
+        "--artifact-applicability", "not-applicable", "--review-group-id", "issue-385",
+        "--review-perspective", "quality", "--base-sha", base, "--head-sha", head,
+    ]
+    assert run_cli(*common, cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "old"}).returncode == 0
+    assert run_cli(*common, cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "current"}).returncode == 0
+    review = _review(tmp_path / "review.json")
+    finalized = run_cli(
+        "review-finalize", "--iteration", "1", "--input", str(review),
+        "--base-sha", base, "--head-sha", head, cwd=tmp_path,
+        env_extra={"MISSION_SESSION_ID": "current"},
+    )
+    assert finalized.returncode == 0, finalized.stderr
+    state_path = tmp_path / ".mission-state" / "sessions" / "current.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["score_history"][-1]["score_provenance"]["review_evidence_ref"]["review_generation"] = 1
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    before = state_path.read_bytes()
+
+    rejected = run_cli("mark-passes", cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "current"})
+
+    assert rejected.returncode == 2
+    assert "review lineage" in rejected.stderr
+    assert state_path.read_bytes() == before
