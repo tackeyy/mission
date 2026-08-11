@@ -86,6 +86,7 @@ from state_snapshot import (  # noqa: E402
     normalize_roots,
     read_snapshot,
     record_source_inventory,
+    root_identity_digest,
     root_metadata_inventory as snapshot_root_metadata_inventory,
     value_digest,
     write_snapshot,
@@ -1375,7 +1376,12 @@ def create_default_state_snapshot(
             ])
             for index in range(len(normalized))
         ]
-        document = anonymize_snapshot_document(document, normalized, root_content_digests)
+        document = anonymize_snapshot_document(
+            document,
+            normalized,
+            root_content_digests,
+            [root_identity_digest(root) for root in normalized],
+        )
     path = directory / f"{document['content_digest']}.json"
     write_snapshot(path, document)
     return path, document

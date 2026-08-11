@@ -15,8 +15,9 @@ python3 scripts/mission-audit.py \
 
 `--privacy` は Markdown / JSON output 内の configured root prefix を匿名の `root-N`
 label へ置換します。既定snapshotにもsource pathではなく匿名root ID、root inventory由来の
-content digest、relative locatorだけを保存します。`--from-snapshot` ではrequested rootを
-memory上でlocatorを復元するためだけに使い、current stateは再readしません。
+content digest、canonical root identity digest、relative locatorだけを保存します。
+`--from-snapshot` ではrequested root identityの一致を確認してから、memory上でlocatorを
+復元するためだけに使い、current stateは再readしません。
 
 strict な live freshness 確認と、後続の audit / `stats` window 用には portable snapshot も
 明示指定で利用できます。

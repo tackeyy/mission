@@ -142,6 +142,7 @@ def test_privacy_snapshot_persists_only_anonymous_relative_locators(tmp_path):
     assert str(root) not in payload
     assert "root-1" in payload
     assert "root_content_digest" in payload
+    assert "root_identity_digest" in payload
 
     state.write_text(state.read_text(encoding="utf-8").replace("before", "after"), encoding="utf-8")
     replayed = _audit(
@@ -149,3 +150,21 @@ def test_privacy_snapshot_persists_only_anonymous_relative_locators(tmp_path):
     )
     assert replayed.returncode == 0, replayed.stderr
     assert replayed.stdout == captured.stdout
+
+
+def test_privacy_snapshot_rejects_an_absolute_snapshot_path_with_other_root(tmp_path):
+    root = tmp_path / "root-a"
+    _write_state(root)
+    captured = _audit("--root", str(root), "--privacy", "--json", cwd=root)
+    assert captured.returncode == 0, captured.stderr
+    snapshot_id = json.loads(captured.stdout)["snapshot_id"]
+    snapshot = root / ".mission-state" / "audit-snapshots" / f"{snapshot_id}.json"
+
+    other_root = tmp_path / "root-b"
+    _write_state(other_root)
+    replayed = _audit(
+        "--root", str(other_root), "--privacy", "--from-snapshot", str(snapshot), "--json", cwd=other_root,
+    )
+
+    assert replayed.returncode == 2
+    assert "roots do not match" in replayed.stderr

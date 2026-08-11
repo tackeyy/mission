@@ -60,13 +60,26 @@ def value_digest(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def root_identity_digest(root: Path) -> str:
+    """Digest canonical root identity without reading mutable state content."""
+    try:
+        metadata = Path(root).expanduser().resolve(strict=False).lstat()
+    except (OSError, ValueError, RuntimeError, TypeError) as error:
+        raise SnapshotError("requested snapshot roots are invalid") from error
+    return value_digest([metadata.st_dev, metadata.st_ino, metadata.st_mode])
+
+
 def anonymize_snapshot_document(
     document: dict[str, Any], roots: list[Path], root_content_digests: list[str],
+    root_identity_digests: list[str],
 ) -> dict[str, Any]:
     """Return a digest-bound snapshot whose persisted locators disclose no paths."""
     normalized = normalize_roots(roots)
-    if len(normalized) != len(root_content_digests) or not all(
-        _is_sha256(value) for value in root_content_digests
+    if (
+        len(normalized) != len(root_content_digests)
+        or len(normalized) != len(root_identity_digests)
+        or not all(_is_sha256(value) for value in root_content_digests)
+        or not all(_is_sha256(value) for value in root_identity_digests)
     ):
         raise SnapshotError("snapshot privacy root content digests are invalid")
     aliases = [(root, f"root-{index + 1}") for index, root in enumerate(normalized)]
@@ -95,9 +108,13 @@ def anonymize_snapshot_document(
     anonymized["privacy"] = {
         "schema": PRIVACY_SCHEMA,
         "roots": [
-            {"id": alias, "root_content_digest": content_digest}
-            for (_root, alias), content_digest in zip(
-                aliases, root_content_digests, strict=True
+            {
+                "id": alias,
+                "root_content_digest": content_digest,
+                "root_identity_digest": identity_digest,
+            }
+            for (_root, alias), content_digest, identity_digest in zip(
+                aliases, root_content_digests, root_identity_digests, strict=True
             )
         ],
     }
@@ -124,6 +141,8 @@ def _privacy_root_mapping(document: dict[str, Any], requested_roots: list[Path] 
             or not isinstance(entry.get("id"), str)
             or not entry["id"].startswith("root-")
             or not _is_sha256(entry.get("root_content_digest"))
+            or not _is_sha256(entry.get("root_identity_digest"))
+            or entry["root_identity_digest"] != root_identity_digest(Path(root))
             or entry["id"] in mapping
         ):
             raise SnapshotError("snapshot roots do not match the requested ordered multiset")
