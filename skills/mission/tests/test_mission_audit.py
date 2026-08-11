@@ -1319,6 +1319,21 @@ def test_audit_typed_checkpoint_does_not_count_terminal_status_without_invocatio
     assert data["specialist_invocation_gap_breakdown"]["documentation-provider"] == 1
 
 
+def test_audit_real_init_terminal_checkpoint_is_present_outside_active_window(run_cli, tmp_path):
+    run_cli(
+        "init", "audit checkpoint", "--complexity", "Complex", "--force-mission",
+        cwd=tmp_path, check=True,
+    )
+    state_path = tmp_path / ".mission-state" / "sessions" / "test.json"
+    state = json.loads(state_path.read_text())
+    for field in ("created_at_session", "started_at", "updated_at", "last_activity_at"):
+        state[field] = "2026-08-11T00:00:00Z"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    result = subprocess.run([sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--json"],
+                            capture_output=True, text=True, check=True)
+    assert json.loads(result.stdout)["missing_specialist_selection_checkpoint_count"] == 0
+
+
 def test_audit_ignores_untrusted_internal_gap_cache_field(tmp_path):
     _write_state(
         tmp_path / ".mission-state" / "sessions" / "sess-a.json",

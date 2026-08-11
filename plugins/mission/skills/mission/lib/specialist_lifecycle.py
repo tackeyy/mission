@@ -69,8 +69,8 @@ def validate_selection_checkpoint(
         raise SpecialistLifecycleError("selection reason_code is required")
     lifecycle_state = checkpoint.get("lifecycle_state")
     if allow_pending and decision == "none" and reason_code == "pending-evaluation":
-        if lifecycle_state != "candidate":
-            raise SpecialistLifecycleError("pending selection must remain in candidate state")
+        if lifecycle_state not in {"candidate", "terminal"}:
+            raise SpecialistLifecycleError("pending selection must be candidate or terminal")
         return
     expected = "selected" if decision == "selected" else "terminal"
     if lifecycle_state != expected:

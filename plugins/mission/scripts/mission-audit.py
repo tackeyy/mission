@@ -1848,16 +1848,15 @@ def has_specialist_selection_checkpoint(state: dict[str, Any]) -> bool:
         and isinstance(decision, dict)
         and bool(decision.get("policy"))
     )
-    if not legacy_shape_valid:
-        return False
-    if decision.get("selection_id"):
+    if isinstance(decision, dict) and decision.get("selection_id"):
         try:
             # Existence/classification accepts the new init checkpoint.  Its
             # terminality belongs exclusively to mark-passes.
             validate_selection_checkpoint(decision, allow_pending=True)
         except SpecialistLifecycleError:
             return False
-    return True
+        return True
+    return legacy_shape_valid
 
 
 def missing_specialist_selection_checkpoint_item(
