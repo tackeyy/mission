@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
+
+from .conftest import MISSION_STATE_PY
 
 
 ITEMS = {
@@ -74,6 +78,35 @@ def test_init_uses_local_correlation_when_provider_does_not_supply_one(run_cli, 
     state = _state(tmp_path)
     assert state["host_run_id"].startswith("mission-local-")
     assert state["root_run_id"] == state["host_run_id"]
+
+
+def test_init_allocates_unique_review_generations_under_one_project_lock(tmp_path):
+    """Concurrent init must allocate one current generation, not race on max + 1."""
+    common = [
+        sys.executable, str(MISSION_STATE_PY), "init", "review", "--force-mission",
+        "--review-group-id", "issue-385-lock",
+    ]
+    processes = []
+    for index in range(8):
+        env = dict(os.environ)
+        env["MISSION_SESSION_ID"] = f"concurrent-{index}"
+        processes.append(subprocess.Popen(
+            common, cwd=tmp_path, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        ))
+    results = [process.communicate() for process in processes]
+    assert all(process.returncode == 0 for process in processes), results
+    states = [json.loads(path.read_text()) for path in (tmp_path / ".mission-state" / "sessions").glob("*.json")]
+    generations = sorted(state["review_generation"] for state in states)
+    assert generations == list(range(1, 9))
+    assert sum(state["review_generation"] == max(generations) and state["loop_active"] for state in states) == 1
+
+
+def test_init_rejects_malformed_group_tokens_before_state_write(run_cli, tmp_path):
+    for option in ("--review-group-id", "--logical-group-id"):
+        result = run_cli("init", "review", "--force-mission", option, "invalid token\n", cwd=tmp_path)
+        assert result.returncode == 2
+        assert "opaque token" in result.stderr
+        assert not list((tmp_path / ".mission-state" / "sessions").glob("*.json"))
 
 
 def test_supersede_reviews_terminals_only_old_generation_and_keeps_raw_records(run_cli, tmp_path):

@@ -78,7 +78,7 @@ def test_audit_lineage_resolves_direct_and_parent_embedded_without_heuristics(tm
     )
     _write_state(
         sessions / "legacy.json", session_id="legacy", host_run_id="host-legacy",
-        root_run_id="root-external", parent_run_id="host-missing",
+        root_run_id="legacy malformed\n", parent_run_id="host-missing",
     )
 
     default = json.loads(subprocess.run(

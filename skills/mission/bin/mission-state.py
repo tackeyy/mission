@@ -68,6 +68,7 @@ from mission_common import (  # noqa: E402
     TERMINAL_OUTCOMES,
     classify_state as _classify,
     correlation_id,
+    opaque_token,
     derive_terminal_outcome,
     duration_sec as _duration_sec,
     parse_iso_datetime,
@@ -5942,6 +5943,8 @@ def cmd_init(args):
         root_run_id = correlation_id(getattr(args, "root_run_id", None) or host_run_id)
         parent_run_id = correlation_id(args.parent_run_id) if getattr(args, "parent_run_id", None) else None
         child_run_id = correlation_id(args.child_run_id) if getattr(args, "child_run_id", None) else None
+        logical_group_id = opaque_token(args.logical_group_id) if getattr(args, "logical_group_id", None) is not None else None
+        review_group_id = opaque_token(args.review_group_id) if getattr(args, "review_group_id", None) is not None else None
     except ValueError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         sys.exit(2)
@@ -5953,9 +5956,9 @@ def cmd_init(args):
         "root_run_id": root_run_id,
         "parent_run_id": parent_run_id,
         "child_run_id": child_run_id,
-        "logical_group_id": getattr(args, "logical_group_id", None),
-        "review_group_id": getattr(args, "review_group_id", None),
-        "review_generation": 1 if getattr(args, "review_group_id", None) else None,
+        "logical_group_id": logical_group_id,
+        "review_group_id": review_group_id,
+        "review_generation": 1 if review_group_id else None,
         "review_perspective": getattr(args, "review_perspective", None),
         "base_sha": getattr(args, "base_sha", None),
         "head_sha": getattr(args, "head_sha", None),
@@ -6017,19 +6020,6 @@ def cmd_init(args):
         # S3-files: 同一 project の file-set overlap WARN 用 (未指定は空 list)
         "planned_files": planned_files,
     }
-    if initial["review_group_id"]:
-        prior_generations = []
-        for state_path in _iter_state_files(cwd):
-            try:
-                prior = json.loads(state_path.read_text())
-            except (OSError, json.JSONDecodeError):
-                continue
-            if prior.get("review_group_id") != initial["review_group_id"]:
-                continue
-            generation = prior.get("review_generation")
-            if isinstance(generation, int) and not isinstance(generation, bool) and generation > 0:
-                prior_generations.append(generation)
-        initial["review_generation"] = (max(prior_generations, default=0) + 1)
     start_phase_default_activity(initial, now)
     # S3: 同プロジェクト内の active session で同一 issue_ref があれば WARN (reject しない)
     # #295: 形式差 (裸番号 / #番号 / host:owner/repo#番号 / URL) を正規化キーで同一視する
@@ -6258,6 +6248,21 @@ def cmd_init(args):
                 atomic_write_text(assumptions_file, "# Assumption Registry\n")
         except (OSError, ValueError):
             _exit_init_evidence_write_failure("assumptions")
+        # Allocate generations under the same project lock as publication.  A
+        # pre-lock max+1 scan lets concurrent sessions choose one generation.
+        if initial["review_group_id"]:
+            prior_generations = []
+            for state_path in _iter_state_files(cwd):
+                try:
+                    prior = json.loads(state_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if prior.get("review_group_id") != initial["review_group_id"]:
+                    continue
+                generation = prior.get("review_generation")
+                if isinstance(generation, int) and not isinstance(generation, bool) and generation > 0:
+                    prior_generations.append(generation)
+            initial["review_generation"] = max(prior_generations, default=0) + 1
         backup_state(sf_target)
         atomic_write_json(sf_target, initial)
         existing_agg.setdefault("active_sessions", [])

@@ -6,6 +6,8 @@ import ipaddress
 import math
 import re
 from typing import Any
+
+from mission_common import opaque_token
 from urllib.parse import urlsplit
 
 
@@ -603,8 +605,11 @@ def _validate_invocation(record: object, base: str) -> None:
     if "invocation_id" in record and not re.fullmatch(r"inv_[0-9a-f]{32}", str(record["invocation_id"])):
         _reject(f"{base}/invocation_id")
     for field in ("host_run_id", "root_run_id", "parent_run_id", "child_run_id", "logical_group_id"):
-        if field in record and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", str(record[field])):
-            _reject(f"{base}/{field}")
+        if field in record:
+            try:
+                opaque_token(record[field])
+            except ValueError:
+                _reject(f"{base}/{field}")
     if "lifecycle_state" in record and record["lifecycle_state"] not in {"selected", "invoked", "terminal"}:
         _reject(f"{base}/lifecycle_state")
 

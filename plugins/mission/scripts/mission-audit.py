@@ -38,6 +38,7 @@ from mission_common import (  # noqa: E402
     duration_sec,
     has_scoring_checkpoint,
     parse_iso_datetime,
+    opaque_token,
     state_dedupe_rank,
     state_identity,
     summarize_pass_rate_population,
@@ -1701,9 +1702,10 @@ _CORRELATION_FIELDS = (
 
 
 def _opaque_correlation_id(value: object) -> str | None:
-    if not isinstance(value, str) or not value or "\x00" in value:
+    try:
+        return opaque_token(value)
+    except ValueError:
         return None
-    return value
 
 
 def summarize_correlation_lineage(records: list[StateRecord]) -> dict[str, Any]:
