@@ -6287,6 +6287,108 @@ def cmd_init(args):
     }))
 
 
+def cmd_parallel_init(args):
+    """Create one immutable planned-child manifest before parallel child init."""
+    cwd = Path.cwd()
+    try:
+        group_id = opaque_token(args.group_id)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
+    refs = list(args.issue_ref or [])
+    keys = [_normalize_issue_ref(ref) for ref in refs]
+    if not refs or any(key is None for key in keys) or len(set(keys)) != len(keys):
+        print("ERROR: planned issue_ref values must be unique", file=sys.stderr)
+        sys.exit(2)
+    path = session_dir(cwd) / f"{group_id}.group.json"
+    manifest = {
+        "schema": "mission-parallel-group/1", "group_id": group_id,
+        "created_at": iso_now(),
+        "planned_children": [{"issue_ref": ref} for ref in refs],
+        "status": "running", "coverage": {},
+    }
+    with StateLock(lock_file(cwd)):
+        session_dir(cwd).mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            print("ERROR: parallel group manifest already exists", file=sys.stderr)
+            sys.exit(2)
+        atomic_write_json(path, manifest)
+    print(json.dumps({"ok": True, "manifest": str(path), "group_id": group_id}))
+
+
+def _parallel_manifest(cwd: Path, group_id: str) -> tuple[Path, dict]:
+    path = session_dir(cwd) / f"{group_id}.group.json"
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("parallel group manifest is missing or malformed") from exc
+    if (not isinstance(manifest, dict) or manifest.get("schema") != "mission-parallel-group/1"
+            or manifest.get("group_id") != group_id or not isinstance(manifest.get("planned_children"), list)):
+        raise ValueError("parallel group manifest is malformed")
+    return path, manifest
+
+
+def _parallel_status(cwd: Path, group_id: str) -> tuple[Path, dict, dict]:
+    path, manifest = _parallel_manifest(cwd, group_id)
+    planned = [item.get("issue_ref") for item in manifest["planned_children"] if isinstance(item, dict)]
+    states = []
+    for state_path in _iter_state_files(cwd):
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if state.get("logical_group_id") == group_id:
+            states.append(state)
+    by_issue = {}
+    for state in states:
+        key = _normalize_issue_ref(state.get("issue_ref"))
+        if key:
+            by_issue.setdefault(key, []).append(state)
+    incomplete=[]; terminal=[]; late=[]; active_leases=[]; coverage={"artifact": 0, "activity": 0, "review_provenance": 0, "eligible": len(planned)}
+    for ref in planned:
+        records = by_issue.get(_normalize_issue_ref(ref), [])
+        if len(records) != 1 or records[0].get("loop_active") is True:
+            incomplete.append(ref)
+        else:
+            terminal.append(ref)
+        if len(records) == 1:
+            state = records[0]
+            coverage["artifact"] += int(state.get("artifact_applicability") in {"producing", "not-applicable"})
+            coverage["activity"] += int(isinstance(state.get("activity_segments"), list))
+            coverage["review_provenance"] += int(any(isinstance(entry, dict) and isinstance(entry.get("score_provenance"), dict) for entry in state.get("score_history", [])))
+            expires = parse_iso_datetime(state.get("lease_expires_at"))
+            if expires and expires > datetime.now(timezone.utc): active_leases.append(ref)
+    planned_keys = {_normalize_issue_ref(ref) for ref in planned}
+    for key, records in by_issue.items():
+        if key not in planned_keys:
+            late.extend(state.get("issue_ref") for state in records)
+    coverage["ratio"] = (sum(coverage[k] for k in ("artifact", "activity", "review_provenance")) / (3 * coverage["eligible"]) if coverage["eligible"] else 1.0)
+    return path, manifest, {"group_id": group_id, "planned": planned, "terminal": terminal, "incomplete": incomplete, "late_children": late, "active_leases": active_leases, "coverage": coverage}
+
+
+def cmd_parallel_status(args):
+    try:
+        group_id = opaque_token(args.group_id)
+        _path, _manifest, status = _parallel_status(Path.cwd(), group_id)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr); sys.exit(2)
+    print(json.dumps(status, ensure_ascii=False))
+
+
+def cmd_parallel_closeout(args):
+    cwd = Path.cwd()
+    try: group_id = opaque_token(args.group_id)
+    except ValueError as exc: print(f"ERROR: {exc}", file=sys.stderr); sys.exit(2)
+    with StateLock(lock_file(cwd)):
+        try: path, manifest, status = _parallel_status(cwd, group_id)
+        except ValueError as exc: print(f"ERROR: {exc}", file=sys.stderr); sys.exit(2)
+        if status["incomplete"] or status["late_children"] or status["active_leases"]:
+            print("ERROR: parallel group has incomplete children", file=sys.stderr); sys.exit(2)
+        manifest["status"] = "terminal"; manifest["closed_at"] = iso_now()
+        atomic_write_json(path, manifest)
+    print(json.dumps({"ok": True, **status}))
+
+
 
 def cmd_get(args):
     cwd = Path.cwd()
@@ -12880,6 +12982,17 @@ def _build_parser():
     p_init.add_argument("--base-sha", default=None)
     p_init.add_argument("--head-sha", default=None)
     p_init.set_defaults(func=cmd_init)
+
+    p_parallel_init = sub.add_parser("parallel-init", help="create a versioned parallel child manifest")
+    p_parallel_init.add_argument("--group-id", required=True)
+    p_parallel_init.add_argument("--issue-ref", action="append", default=[])
+    p_parallel_init.set_defaults(func=cmd_parallel_init)
+    p_parallel_status = sub.add_parser("parallel-status", help="summarize planned parallel children")
+    p_parallel_status.add_argument("--group-id", required=True)
+    p_parallel_status.set_defaults(func=cmd_parallel_status)
+    p_parallel_closeout = sub.add_parser("parallel-closeout", help="terminalize a complete parallel group")
+    p_parallel_closeout.add_argument("--group-id", required=True)
+    p_parallel_closeout.set_defaults(func=cmd_parallel_closeout)
 
     p_next = sub.add_parser("next", help="ADR-002 Stage 3: state から次の 1 手を JSON で返す (read-only。Codex/compaction 復帰時の進行ガイド)")
     p_next.set_defaults(func=cmd_next)
