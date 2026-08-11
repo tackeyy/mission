@@ -39,6 +39,33 @@ def _write_state(path, **overrides):
     path.write_text(json.dumps(state), encoding="utf-8")
 
 
+def test_audit_projects_latest_review_generation_and_keeps_raw_lineage(tmp_path):
+    sessions = tmp_path / ".mission-state" / "sessions"
+    _write_state(
+        sessions / "old.json", session_id="old", passes=False, loop_active=False,
+        halt_reason="superseded by a replacement run", terminal_outcome="stale_superseded",
+        review_group_id="issue-385", review_generation=1,
+    )
+    _write_state(
+        sessions / "current.json", session_id="current", review_group_id="issue-385",
+        review_generation=2,
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--json"],
+        capture_output=True, text=True, check=True,
+    )
+    data = json.loads(result.stdout)
+
+    assert data["total_sessions"] == 1
+    assert data["review_lineage"]["raw_record_count"] == 2
+    assert data["review_lineage"]["projected_record_count"] == 1
+    assert data["review_lineage"]["groups"] == [{
+        "review_group_id": "issue-385", "current_generation": 2,
+        "current_session_id": "current", "raw_session_ids": ["old", "current"],
+    }]
+
+
 def test_audit_marks_force_receipt_suspect_after_terminal_state_copy_mutation(tmp_path):
     """A valid receipt cannot be copied onto another terminal score state."""
     from scoring_provenance import build_request, terminal_state_digest

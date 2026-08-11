@@ -1648,6 +1648,53 @@ def filter_records(
     return out
 
 
+def project_latest_review_generations(
+    records: list[StateRecord],
+) -> tuple[list[StateRecord], dict[str, Any]]:
+    """Use one unambiguous latest reviewer generation while retaining raw lineage."""
+    groups: dict[tuple[str, str], list[StateRecord]] = {}
+    for record in records:
+        state = record.state
+        group = state.get("review_group_id")
+        generation = state.get("review_generation")
+        if (not isinstance(group, str) or not group or "\x00" in group
+                or not isinstance(generation, int) or isinstance(generation, bool)
+                or generation < 1):
+            continue
+        groups.setdefault((project_root_for(record), group), []).append(record)
+
+    retained_ids = {id(record) for record in records}
+    lineage_groups = []
+    for (_root, group), members in sorted(groups.items(), key=lambda item: item[0]):
+        latest_generation = max(member.state["review_generation"] for member in members)
+        current = [member for member in members if member.state["review_generation"] == latest_generation]
+        ordered_members = sorted(
+            members,
+            key=lambda member: (member.state["review_generation"], str(member.state.get("session_id") or member.path.stem)),
+        )
+        current_session_id = None
+        if len(current) == 1:
+            current_record = current[0]
+            current_session_id = str(current_record.state.get("session_id") or current_record.path.stem)
+            retained_ids.difference_update(id(member) for member in members)
+            retained_ids.add(id(current_record))
+        lineage_groups.append({
+            "review_group_id": group,
+            "current_generation": latest_generation,
+            "current_session_id": current_session_id,
+            "raw_session_ids": [
+                str(member.state.get("session_id") or member.path.stem)
+                for member in ordered_members
+            ],
+        })
+    projected = [record for record in records if id(record) in retained_ids]
+    return projected, {
+        "raw_record_count": len(records),
+        "projected_record_count": len(projected),
+        "groups": lineage_groups,
+    }
+
+
 def bucket_counts(records: list[StateRecord], bucket_fn) -> dict[str, int]:
     counts: dict[str, int] = {}
     for record in records:
@@ -3150,6 +3197,11 @@ def render_markdown(
     stats: dict[str, Any], rows: list[tuple[str, str, str]], roots: list[Path],
     since: str | None, until: str | None, snapshot: dict[str, str] | None = None,
 ) -> str:
+    review_lineage = stats.get("review_lineage") or {
+        "raw_record_count": stats.get("total_sessions", 0),
+        "projected_record_count": stats.get("total_sessions", 0),
+        "groups": [],
+    }
     lines = [
         "# /mission Audit Report",
         "",
@@ -3168,6 +3220,7 @@ def render_markdown(
         "## Summary",
         "",
         f"- total sessions: {stats['total_sessions']}",
+        f"- review lineage raw / projected: {review_lineage['raw_record_count']} / {review_lineage['projected_record_count']}",
         f"- current finding cutoff: {stats['current_since'] or '(not set; all findings are treated as current)'}",
         f"- pass / halt / incomplete / abandoned: {stats['pass_count']} / {stats['halt_count']} / {stats['incomplete_count']} / {stats['abandoned_count']}",
         f"- raw pass rate: {fmt_float(stats['raw_pass_rate'] * 100 if stats['raw_pass_rate'] is not None else None, 1)}% ({stats['raw_pass_rate_numerator']}/{stats['raw_pass_rate_denominator']})",
@@ -3205,6 +3258,19 @@ def render_markdown(
         f"- median duration: {fmt_minutes(stats['median_session_duration_sec'])}",
         f"- avg duration: {fmt_minutes(stats['avg_session_duration_sec'])}",
     ]
+    groups = review_lineage.get("groups") or []
+    if groups:
+        lines.extend([
+            "",
+            "## Review Lineage",
+            "",
+            *[
+                f"- `{group['review_group_id']}`: generation {group['current_generation']}, "
+                f"current `{group['current_session_id'] or 'ambiguous'}`, "
+                f"raw {', '.join(f'`{session}`' for session in group['raw_session_ids'])}"
+                for group in groups
+            ],
+        ])
     activity = stats.get("activity_timing") or {}
     coverage = activity.get("coverage_ratio")
     coverage_text = f"{coverage * 100:.1f}%" if coverage is not None else "-"
@@ -3677,8 +3743,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     filtered = filter_records(records, since, until, after)
     deduped, duplicates, resolved_duplicate_count = dedupe_records(filtered)
+    projected, review_lineage = project_latest_review_generations(deduped)
     stats = aggregate(
-        deduped,
+        projected,
         duplicates,
         resolved_duplicate_count,
         args.slow_threshold_sec,
@@ -3686,6 +3753,7 @@ def main(argv: list[str] | None = None) -> int:
         invalid_worktree_archives,
         observation_now,
     )
+    stats["review_lineage"] = review_lineage
     attach_finding_model(stats, args.min_pass_rate, current_since)
     rows = finding_rows(stats, args.min_pass_rate)
 
