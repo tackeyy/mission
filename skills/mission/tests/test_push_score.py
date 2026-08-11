@@ -108,6 +108,7 @@ def test_push_score_appends_to_empty_history(state_dir, run_cli, read_state):
     assert entry["composite"] == 3.17
     assert entry["min_item"] == 2.67
     assert entry["items"]["mission_achievement"] == 3.67
+    assert s.get("command_outcomes", []) == []
 
 
 def test_push_score_appends_multiple_in_order(state_dir, run_cli, read_state):

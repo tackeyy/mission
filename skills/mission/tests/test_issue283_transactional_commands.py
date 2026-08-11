@@ -8,11 +8,27 @@ Phase 5 の aggregate-reviews → push-score、Phase 6 の mark-passes → next 
 
 from __future__ import annotations
 
+import argparse
+import copy
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 
 import pytest
+
+
+MISSION_STATE_PY = Path(__file__).resolve().parent.parent / "bin" / "mission-state.py"
+
+
+def _load_mission_state():
+    spec = importlib.util.spec_from_file_location(
+        "mission_state_issue283_transaction", MISSION_STATE_PY,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 def _review(tmp_path, name, *, perspective="A", scores=None):
@@ -53,6 +69,25 @@ def _reviewer_windows():
     )
 
 
+def _finalize_args(review, out, *, event_id="finalize-transaction"):
+    return argparse.Namespace(
+        iteration=1,
+        input=[str(review)],
+        input_refs=[],
+        out=str(out),
+        min_reviewers=None,
+        reviewer_windows=[],
+        base_sha=None,
+        head_sha=None,
+        notes=None,
+        resubmit_reason=None,
+        event_id=event_id,
+        root_event_id=f"{event_id}-root",
+        attempt=1,
+        retry_of=None,
+    )
+
+
 # ===== review-finalize =====
 
 
@@ -71,6 +106,96 @@ def test_review_finalize_aggregates_and_pushes_in_one_command(state_dir, run_cli
     assert entry["score_source"] == "scoring-json"
     assert entry["composite"] == result["push"]["appended"]["composite"]
     assert entry["items"]["mission_achievement"] == 4.5
+    assert read_state(state_dir)["command_outcomes"] == [result["outcome"]]
+
+
+@pytest.mark.parametrize("failure_kind", ["lease-takeover", "io-error"])
+def test_review_finalize_has_no_post_push_transaction_failure_window(
+    state_dir, tmp_path, monkeypatch, capsys, failure_kind,
+):
+    """A committed score must not be followed by a second outcome transaction."""
+    module = _load_mission_state()
+    monkeypatch.chdir(state_dir.parent)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    review = _review(tmp_path, "single.json", perspective="quality")
+    original_write = module.atomic_write_json
+    score_publish_count = 0
+    publish_candidates = []
+
+    def reject_second_score_transaction(path, data, **kwargs):
+        nonlocal score_publish_count
+        publish_candidates.append(copy.deepcopy(data))
+        if data.get("score_history"):
+            score_publish_count += 1
+            if score_publish_count == 2:
+                if failure_kind == "lease-takeover":
+                    raise module.CommandOutcomeExit(2, "expected-gate")
+                raise OSError("simulated post-push publish failure")
+        return original_write(path, data, **kwargs)
+
+    monkeypatch.setattr(module, "atomic_write_json", reject_second_score_transaction)
+
+    module.cmd_review_finalize(
+        _finalize_args(review, tmp_path / "score.json", event_id=failure_kind),
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    state = json.loads((state_dir / "sessions" / "test.json").read_text())
+    assert payload["ok"] is True
+    assert state["score_history"] == [payload["push"]["appended"]]
+    outcomes = [
+        record for record in state.get("command_outcomes", [])
+        if record.get("command") == "review-finalize"
+    ]
+    assert outcomes == [payload["outcome"]]
+    score_candidates = [item for item in publish_candidates if item.get("score_history")]
+    assert len(score_candidates) == 1
+    assert score_candidates[0]["command_outcomes"][-1] == payload["outcome"]
+
+
+def test_review_finalize_combined_score_outcome_publish_failure_is_atomic(
+    state_dir, tmp_path, monkeypatch,
+):
+    """The single score/outcome publish leaves neither record after an I/O failure."""
+    module = _load_mission_state()
+    monkeypatch.chdir(state_dir.parent)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    review = _review(tmp_path, "single.json", perspective="quality")
+    original_write = module.atomic_write_json
+    state_path = state_dir / "sessions" / "test.json"
+    state_after_aggregate = None
+
+    def fail_combined_publish(path, data, **kwargs):
+        nonlocal state_after_aggregate
+        if data.get("score_history"):
+            finalize_outcomes = [
+                record for record in data.get("command_outcomes", [])
+                if record.get("command") == "review-finalize"
+            ]
+            assert len(finalize_outcomes) == 1
+            raise OSError("simulated combined publish failure")
+        result = original_write(path, data, **kwargs)
+        if path == state_path:
+            state_after_aggregate = state_path.read_bytes()
+        return result
+
+    monkeypatch.setattr(module, "atomic_write_json", fail_combined_publish)
+
+    with pytest.raises(OSError, match="simulated combined publish failure"):
+        module.cmd_review_finalize(
+            _finalize_args(review, tmp_path / "score.json", event_id="atomic-failure"),
+        )
+
+    assert state_after_aggregate is not None
+    assert state_path.read_bytes() == state_after_aggregate
+    state = json.loads(state_path.read_text())
+    assert state["score_history"] == []
+    assert not [
+        record for record in state.get("command_outcomes", [])
+        if record.get("command") == "review-finalize"
+    ]
 
 
 def test_review_finalize_min_reviewers_failure_is_atomic(state_dir, run_cli, read_state, tmp_path):

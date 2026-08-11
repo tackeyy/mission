@@ -9663,6 +9663,9 @@ def cmd_push_score(args):
                 data["stagnation_count"] = 0
         else:
             data["stagnation_count"] = 0
+        transaction_outcome = getattr(args, "transaction_outcome", None)
+        if transaction_outcome is not None:
+            _append_command_outcome(data, transaction_outcome)
         data["updated_at"] = now
         # A successful provenance-bearing score is the only migration path.
         data["schema_version"] = SCHEMA_VERSION
@@ -9723,6 +9726,7 @@ def cmd_review_finalize(args):
         open_high=0,
         resubmit_reason=args.resubmit_reason,
         record_outcome=False,
+        transaction_outcome=outcome,
     )
     push_stdout = io.StringIO()
     try:
@@ -9732,13 +9736,6 @@ def cmd_review_finalize(args):
         _emit_finalize_failure(args, push_stdout.getvalue(), error)
         raise error
     push_result = json.loads(push_stdout.getvalue())
-
-    cwd = Path.cwd()
-    sf = resolve_state_file(cwd)
-    with StateLock(lock_file(cwd)):
-        data = json.loads(sf.read_text())
-        _append_command_outcome(data, outcome)
-        atomic_write_json(sf, data)
 
     print(json.dumps({
         "ok": True,
