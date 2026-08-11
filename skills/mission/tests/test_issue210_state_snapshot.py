@@ -250,7 +250,17 @@ def test_audit_snapshot_matches_direct_and_preserves_filter_before_dedupe(tmp_pa
     direct = _run_audit("--root", str(root), "--since", "2026-07-20", "--json", cwd=root)
     consumed = _run_audit("--snapshot-in", str(snapshot), "--since", "2026-07-20", "--json", cwd=root)
 
-    assert _json(built) == _json(direct) == _json(consumed)
+    def semantic(payload: dict) -> dict:
+        return {
+            key: value for key, value in payload.items()
+            if key not in {"snapshot_id", "snapshot_digest"}
+        }
+
+    built_payload = _json(built)
+    direct_payload = _json(direct)
+    consumed_payload = _json(consumed)
+    assert semantic(built_payload) == semantic(direct_payload) == semantic(consumed_payload)
+    assert built_payload == consumed_payload
     document = json.loads(snapshot.read_text(encoding="utf-8"))
     assert document["record_count"] == 2
     assert len(document["records"]) == len(document["record_index"]) == 2

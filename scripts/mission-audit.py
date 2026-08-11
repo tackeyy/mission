@@ -76,6 +76,7 @@ from worktree_archive import (  # noqa: E402
     validate_worktree_archive_bundle,
 )
 from state_snapshot import (  # noqa: E402
+    anonymize_snapshot_document,
     DEFAULT_TTL_SECONDS,
     SnapshotError,
     build_snapshot_document,
@@ -83,7 +84,9 @@ from state_snapshot import (  # noqa: E402
     discovery_digest,
     external_evidence_inventory as snapshot_external_evidence_inventory,
     normalize_roots,
+    read_snapshot,
     record_source_inventory,
+    root_identity_digest,
     root_metadata_inventory as snapshot_root_metadata_inventory,
     value_digest,
     write_snapshot,
@@ -1272,18 +1275,10 @@ def _record_from_payload(
     )
 
 
-def create_state_snapshot(
-    roots: list[Path], path: Path, *, ttl_seconds: int = DEFAULT_TTL_SECONDS,
-    observed_at: datetime | None = None,
-) -> tuple[list[StateRecord], list[dict[str, Any]], datetime]:
+def _capture_state_snapshot_document(
+    roots: list[Path], *, ttl_seconds: int, observed_at: datetime | None,
+) -> tuple[list[StateRecord], list[dict[str, Any]], datetime, dict[str, Any], list[list[Any]]]:
     normalized = [Path(root) for root in normalize_roots(roots)]
-    target = Path(path).expanduser().resolve(strict=False)
-    for root in normalized:
-        try:
-            target.relative_to(root)
-        except ValueError:
-            continue
-        raise SnapshotError("snapshot output must be outside every scanned root")
     observed = observed_at or utc_now()
     root_before = _root_metadata_inventory(normalized)
     discovered_invalid: list[dict[str, Any]] = []
@@ -1316,8 +1311,80 @@ def create_state_snapshot(
     fresh_index = _root_metadata_inventory(normalized) + _external_evidence_inventory(external_paths)
     if discovery_digest(fresh_index) != document["discovery_digest"]:
         raise SnapshotError("filesystem changed while the snapshot was being captured")
+    return records, invalid, observed, document, root_before
+
+
+def create_state_snapshot(
+    roots: list[Path], path: Path, *, ttl_seconds: int = DEFAULT_TTL_SECONDS,
+    observed_at: datetime | None = None,
+) -> tuple[list[StateRecord], list[dict[str, Any]], datetime]:
+    normalized = [Path(root) for root in normalize_roots(roots)]
+    target = Path(path).expanduser().resolve(strict=False)
+    for root in normalized:
+        try:
+            target.relative_to(root)
+        except ValueError:
+            continue
+        raise SnapshotError("snapshot output must be outside every scanned root")
+    records, invalid, observed, document, _root_index = _capture_state_snapshot_document(
+        normalized, ttl_seconds=ttl_seconds, observed_at=observed_at,
+    )
     write_snapshot(path, document)
     return records, invalid, observed
+
+
+def default_snapshot_directory(roots: list[Path]) -> Path:
+    normalized = [Path(root) for root in normalize_roots(roots)]
+    if not normalized:
+        raise SnapshotError("snapshot roots are required")
+    directory = normalized[0] / ".mission-state" / "audit-snapshots"
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # An unreadable mission-state root is itself an audit finding.  Keep that
+        # audit observable by storing its immutable report input beside (rather
+        # than inside) the inaccessible state directory.
+        directory = normalized[0] / ".mission-audit-snapshots"
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise SnapshotError(f"snapshot directory is not accessible: {error}") from error
+    try:
+        mode = directory.lstat().st_mode
+    except OSError as error:
+        raise SnapshotError(f"snapshot directory is not accessible: {error}") from error
+    if not stat.S_ISDIR(mode) or directory.is_symlink():
+        raise SnapshotError("snapshot directory must be a real directory")
+    return directory
+
+
+def create_default_state_snapshot(
+    roots: list[Path], *, ttl_seconds: int = DEFAULT_TTL_SECONDS,
+    observed_at: datetime | None = None, privacy: bool = False,
+) -> tuple[Path, dict[str, Any]]:
+    """Capture one content-addressed immutable snapshot below the first root."""
+    directory = default_snapshot_directory(roots)
+    _records, _invalid, _observed, document, root_index = _capture_state_snapshot_document(
+        roots, ttl_seconds=ttl_seconds, observed_at=observed_at,
+    )
+    if privacy:
+        normalized = [Path(root) for root in normalize_roots(roots)]
+        root_content_digests = [
+            discovery_digest([
+                item for item in root_index
+                if len(item) >= 2 and item[0] == "root" and item[1] == index
+            ])
+            for index in range(len(normalized))
+        ]
+        document = anonymize_snapshot_document(
+            document,
+            normalized,
+            root_content_digests,
+            [root_identity_digest(root) for root in normalized],
+        )
+    path = directory / f"{document['content_digest']}.json"
+    write_snapshot(path, document)
+    return path, document
 
 
 def consume_state_snapshot(
@@ -1337,6 +1404,40 @@ def consume_state_snapshot(
         validate_specialist_public_state(record.state)
     invalid = document["invalid_worktree_archives"]
     return records, invalid, roots, observed
+
+
+def load_immutable_state_snapshot(
+    path: Path, requested_roots: list[Path] | None,
+) -> tuple[list[StateRecord], list[dict[str, Any]], list[Path], datetime, dict[str, Any]]:
+    """Read a verified snapshot payload without consulting mutable current state."""
+    document = read_snapshot(path, requested_roots=requested_roots)
+    roots = [Path(root) for root in document["roots"]]
+    observed = parse_iso_datetime(document["observed_at"])
+    if observed is None or observed.tzinfo is None:
+        raise SnapshotError("snapshot observed_at is invalid")
+    records = [
+        _record_from_payload(item, document["archive_validations"])
+        for item in document["records"]
+    ]
+    for record in records:
+        validate_specialist_public_state(record.state)
+    return (
+        records,
+        document["invalid_worktree_archives"],
+        roots,
+        observed.astimezone(timezone.utc),
+        document,
+    )
+
+
+def snapshot_reference_path(reference: str, roots: list[Path]) -> Path:
+    candidate = Path(reference).expanduser()
+    if candidate.exists() or candidate.is_absolute() or candidate.parent != Path("."):
+        return candidate
+    normalized = [Path(root) for root in normalize_roots(roots)]
+    if not normalized:
+        raise SnapshotError("snapshot ID requires a requested root")
+    return normalized[0] / ".mission-state" / "audit-snapshots" / f"{reference}.json"
 
 
 def collect_invalid_worktree_archives(
@@ -3045,7 +3146,10 @@ def self_improvement_prompt(
 """
 
 
-def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roots: list[Path], since: str | None, until: str | None) -> str:
+def render_markdown(
+    stats: dict[str, Any], rows: list[tuple[str, str, str]], roots: list[Path],
+    since: str | None, until: str | None, snapshot: dict[str, str] | None = None,
+) -> str:
     lines = [
         "# /mission Audit Report",
         "",
@@ -3053,6 +3157,13 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
         "",
         f"- roots: {', '.join(str(r) for r in roots)}",
         f"- period: {since or '(all)'} ~ {until or '(now)'}",
+        *(
+            [
+                f"- snapshot ID: {snapshot['id']}",
+                f"- snapshot digest: {snapshot['digest']}",
+            ]
+            if snapshot else []
+        ),
         "",
         "## Summary",
         "",
@@ -3438,8 +3549,22 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
     return "\n".join(lines)
 
 
+def redact_root_paths(output: str, roots: list[Path]) -> str:
+    """Replace only configured root prefixes in a report-safe output string."""
+    redacted = output
+    replacements = [
+        (str(Path(root).expanduser().resolve(strict=False)), f"root-{index + 1}")
+        for index, root in enumerate(roots)
+    ]
+    for source, replacement in sorted(replacements, key=lambda item: len(item[0]), reverse=True):
+        redacted = redacted.replace(source, replacement)
+    return redacted
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Audit local /mission state logs")
+    parser = argparse.ArgumentParser(
+        description="Audit local /mission state logs", allow_abbrev=False,
+    )
     parser.add_argument("--root", action="append", default=None, help="Root to scan. Can be repeated. Defaults to cwd.")
     parser.add_argument("--since", default=None, help="Updated-at lower bound, YYYY-MM-DD or ISO timestamp")
     parser.add_argument("--until", default=None, help="Updated-at upper bound, YYYY-MM-DD or ISO timestamp")
@@ -3454,10 +3579,18 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--min-pass-rate", type=float, default=0.9, help="Finding threshold for pass rate")
     parser.add_argument("--json", action="store_true", help="Print machine-readable summary")
     parser.add_argument("--out", default=None, help="Write report to path")
+    parser.add_argument("--privacy", action="store_true", help="Redact scanned root paths from report output")
     parser.add_argument("--self-improvement-prompt", action="store_true", help="Print only the prompt for /mission")
     snapshot_group = parser.add_mutually_exclusive_group()
-    snapshot_group.add_argument("--snapshot-out", default=None, help="Explicitly write a reusable read-only state snapshot")
+    snapshot_group.add_argument(
+        "--snapshot-out", "--snapshot", dest="snapshot_out", default=None,
+        help="Write a reusable immutable state snapshot",
+    )
     snapshot_group.add_argument("--snapshot-in", default=None, help="Consume a reusable state snapshot; invalid input fails closed")
+    snapshot_group.add_argument(
+        "--from-snapshot", default=None,
+        help="Reaggregate an immutable snapshot payload without consulting current state",
+    )
     parser.add_argument(
         "--snapshot-ttl-sec", type=int, default=DEFAULT_TTL_SECONDS,
         help=f"Snapshot TTL for --snapshot-out (default: {DEFAULT_TTL_SECONDS})",
@@ -3481,26 +3614,53 @@ def main(argv: list[str] | None = None) -> int:
     if args.current_since and current_since is None:
         raise SystemExit(f"Invalid --current-since value: {args.current_since}")
     observation_now: datetime | None = None
+    snapshot_metadata: dict[str, str] | None = None
     try:
         if args.snapshot_in:
             records, invalid_worktree_archives, roots, observation_now = consume_state_snapshot(
                 Path(args.snapshot_in), requested_roots
             )
+            document = read_snapshot(Path(args.snapshot_in), requested_roots=requested_roots)
+            snapshot_metadata = {
+                "id": document["content_digest"],
+                "digest": document["content_digest"],
+            }
+        elif args.from_snapshot:
+            records, invalid_worktree_archives, roots, observation_now, document = load_immutable_state_snapshot(
+                snapshot_reference_path(args.from_snapshot, roots), requested_roots,
+            )
+            snapshot_metadata = {
+                "id": document["content_digest"],
+                "digest": document["content_digest"],
+            }
         elif args.snapshot_out:
-            records, invalid_worktree_archives, observation_now = create_state_snapshot(
+            create_state_snapshot(
                 roots,
                 Path(args.snapshot_out),
                 ttl_seconds=args.snapshot_ttl_sec,
                 observed_at=utc_now(),
             )
-            roots = [Path(root) for root in normalize_roots(roots)]
-        else:
-            discovered_invalid_archives: list[dict[str, Any]] = []
-            records = load_records(roots, discovered_invalid_archives)
-            invalid_worktree_archives = collect_invalid_worktree_archives(
-                records,
-                discovered_invalid_archives,
+            records, invalid_worktree_archives, roots, observation_now, document = load_immutable_state_snapshot(
+                Path(args.snapshot_out), requested_roots,
             )
+            snapshot_metadata = {
+                "id": document["content_digest"],
+                "digest": document["content_digest"],
+            }
+        else:
+            snapshot_path, _document = create_default_state_snapshot(
+                roots,
+                ttl_seconds=args.snapshot_ttl_sec,
+                observed_at=utc_now(),
+                privacy=args.privacy,
+            )
+            records, invalid_worktree_archives, roots, observation_now, document = load_immutable_state_snapshot(
+                snapshot_path, roots if args.privacy else requested_roots,
+            )
+            snapshot_metadata = {
+                "id": document["content_digest"],
+                "digest": document["content_digest"],
+            }
     except SpecialistPublicContractError as error:
         payload = {
             "ok": False,
@@ -3561,9 +3721,20 @@ def main(argv: list[str] | None = None) -> int:
             }
         }
         json_stats["findings"] = [{"priority": p, "code": c, "summary": s} for p, c, s in rows]
+        json_stats["snapshot_id"] = snapshot_metadata["id"] if snapshot_metadata else None
+        json_stats["snapshot_digest"] = snapshot_metadata["digest"] if snapshot_metadata else None
         output = json.dumps(json_stats, indent=2, ensure_ascii=False)
     else:
-        output = render_markdown(stats, rows, roots, args.since, args.until)
+        display_roots = (
+            [Path(f"root-{index + 1}") for index, _root in enumerate(roots)]
+            if args.privacy else roots
+        )
+        output = render_markdown(
+            stats, rows, display_roots, args.since, args.until, snapshot_metadata,
+        )
+
+    if args.privacy:
+        output = redact_root_paths(output, roots)
 
     if args.out:
         Path(args.out).write_text(output, encoding="utf-8")

@@ -1,7 +1,26 @@
 # 再利用可能な state snapshot
 
-`mission-audit.py` は、明示的に作成した短時間有効・read-only の state
-snapshot を、後続の audit と複数の `stats` 期間で再利用できます。
+`mission-audit.py` はデフォルトで immutable snapshot を取得します。最初の root の
+`.mission-state/audit-snapshots/<snapshot_id>.json` に content-addressed で保存し、
+Markdown / JSON report の両方へ `snapshot_id` と digest を出力します。current state が
+更新された後も、`--from-snapshot <snapshot_id>` で固定 payload を再集計できます。
+
+```bash
+python3 scripts/mission-audit.py --root /path/to/projects --json
+python3 scripts/mission-audit.py \
+  --root /path/to/projects \
+  --from-snapshot <snapshot_id> \
+  --json
+```
+
+`--privacy` は Markdown / JSON output 内の configured root prefix を匿名の `root-N`
+label へ置換します。既定snapshotにもsource pathではなく匿名root ID、root inventory由来の
+content digest、canonical root identity digest、relative locatorだけを保存します。
+`--from-snapshot` ではrequested root identityの一致を確認してから、memory上でlocatorを
+復元するためだけに使い、current stateは再readしません。
+
+strict な live freshness 確認と、後続の audit / `stats` window 用には portable snapshot も
+明示指定で利用できます。
 
 ```bash
 python3 scripts/mission-audit.py \
@@ -21,9 +40,9 @@ python3 skills/mission/bin/mission-state.py stats \
   --json
 ```
 
-snapshot は明示指定時だけ使います。snapshot option を省略した場合は従来どおり直接探索します。
-出力先は全 scan root の外に置きます。snapshot 作成自身による discovery metadata の変化を
-防ぐためです。コマンドが snapshot を Git や他の artifact store へ自動追加することはありません。
+`--snapshot` は `--snapshot-out` の alias です。出力先は全 scan root の外に置きます。
+コマンドが snapshot を Git や他の artifact store へ自動追加することはありません。default の
+state-local directory は state discovery から除外されるため、audit output が audit input にはなりません。
 
 ## 正確性の契約
 
@@ -45,15 +64,20 @@ size/mtime/ctime metadata を記録します。root 外の scoring / specialist 
 capture 中の drift を拒否します。snapshot には完全な inventory を重複保存せず、inventory の
 count / digest、再現に必要な root 外候補 path、各 record の source entry を保存します。
 
-consume は metadata-only rewalk 1回と root 外 evidence の `lstat` だけを行います。
+`--snapshot-in` の consume は metadata-only rewalk 1回と root 外 evidence の `lstat` だけを行います。
 state/evidence content の再read・再hash・再parseは行いません。metadata が完全一致した後だけ、
 capture時のarchive semantic validation結果を再利用します。state、directory、pointer、manifest、
-evidence、legacy candidate、generation の変更は snapshot を stale にします。
+evidence、legacy candidate、generation の変更は strict snapshot を stale にします。
+
+`--from-snapshot` は snapshot payload、digest、expiry、requested ordered roots を検証した後、
+mutable current state を参照せず固定 payload だけを集計します。これが再現性モードであり、後続の
+current-state 更新は過去の totals / findings を変えません。
 
 snapshot は同一directory内の一意なtemporary file、mode `0600`、file `fsync`、atomic replace、
 directory `fsync` で保存します。consumer は symlink、非regular file、group/world-readable file、
-期限切れ・未来時刻、root/version/count/index/digest不一致、stale discoveryを拒否します。
-invalid snapshotからlive scanへのsilent fallbackはありません。
+期限切れ・未来時刻、root/version/count/index/digest不一致を拒否します。strict な
+`--snapshot-in` consumer は stale discovery も拒否します。invalid snapshotからlive scanへの
+silent fallbackはありません。
 
 snapshot は owner が管理する local trusted artifact であり、認証済み交換形式ではありません。
 mode `0600`、content digest、semantic self-consistency、live metadata freshness は、事故または
