@@ -29,6 +29,7 @@ PRUNE_DIRS = frozenset({
 })
 AUDIT_SNAPSHOT_DIRECTORY = "audit-snapshots"
 FALLBACK_AUDIT_SNAPSHOT_DIRECTORY = ".mission-audit-snapshots"
+PRIVACY_SCHEMA = "mission-state-snapshot-privacy/1"
 
 
 class SnapshotError(ValueError):
@@ -57,6 +58,97 @@ def value_digest(value: Any) -> str:
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def anonymize_snapshot_document(
+    document: dict[str, Any], roots: list[Path], root_content_digests: list[str],
+) -> dict[str, Any]:
+    """Return a digest-bound snapshot whose persisted locators disclose no paths."""
+    normalized = normalize_roots(roots)
+    if len(normalized) != len(root_content_digests) or not all(
+        _is_sha256(value) for value in root_content_digests
+    ):
+        raise SnapshotError("snapshot privacy root content digests are invalid")
+    aliases = [(root, f"root-{index + 1}") for index, root in enumerate(normalized)]
+
+    def anonymize(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {anonymize(key): anonymize(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [anonymize(item) for item in value]
+        if not isinstance(value, str):
+            return value
+        for root, alias in aliases:
+            if value == root:
+                return alias
+            if value.startswith(root + "/"):
+                return alias + value[len(root):]
+        try:
+            is_absolute = Path(value).is_absolute()
+        except (OSError, ValueError, RuntimeError, TypeError):
+            is_absolute = False
+        if is_absolute:
+            return "external-" + value_digest(value)[:16]
+        return value
+
+    anonymized = anonymize({key: value for key, value in document.items() if key != "content_digest"})
+    anonymized["privacy"] = {
+        "schema": PRIVACY_SCHEMA,
+        "roots": [
+            {"id": alias, "root_content_digest": content_digest}
+            for (_root, alias), content_digest in zip(
+                aliases, root_content_digests, strict=True
+            )
+        ],
+    }
+    anonymized["content_digest"] = canonical_digest(anonymized)
+    return anonymized
+
+
+def _privacy_root_mapping(document: dict[str, Any], requested_roots: list[Path] | None) -> dict[str, str]:
+    privacy = document.get("privacy")
+    if not isinstance(privacy, dict) or privacy.get("schema") != PRIVACY_SCHEMA:
+        raise SnapshotError("snapshot privacy metadata is invalid")
+    entries = privacy.get("roots")
+    if not isinstance(entries, list) or not entries:
+        raise SnapshotError("snapshot privacy roots are invalid")
+    if requested_roots is None:
+        raise SnapshotError("privacy snapshot requires requested roots")
+    requested = normalize_roots(requested_roots)
+    if len(requested) != len(entries):
+        raise SnapshotError("snapshot roots do not match the requested ordered multiset")
+    mapping: dict[str, str] = {}
+    for root, entry in zip(requested, entries, strict=True):
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("id"), str)
+            or not entry["id"].startswith("root-")
+            or not _is_sha256(entry.get("root_content_digest"))
+            or entry["id"] in mapping
+        ):
+            raise SnapshotError("snapshot roots do not match the requested ordered multiset")
+        mapping[entry["id"]] = root
+    if document.get("roots") != list(mapping):
+        raise SnapshotError("snapshot privacy root locators are invalid")
+    return mapping
+
+
+def _restore_privacy_locators(value: Any, mapping: dict[str, str]) -> Any:
+    if isinstance(value, dict):
+        return {
+            _restore_privacy_locators(key, mapping): _restore_privacy_locators(item, mapping)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_restore_privacy_locators(item, mapping) for item in value]
+    if not isinstance(value, str):
+        return value
+    for alias, root in mapping.items():
+        if value == alias:
+            return root
+        if value.startswith(alias + "/"):
+            return root + value[len(alias):]
+    return value
 
 
 def discovery_digest(index: list[dict[str, Any]]) -> str:
@@ -240,12 +332,12 @@ def _is_safe_path_text(value: Any, *, absolute: bool = True) -> bool:
         return False
 
 
-def _validate_record_shape(record: Any) -> None:
+def _validate_record_shape(record: Any, *, privacy: bool = False) -> None:
     if not isinstance(record, dict):
         raise SnapshotError("snapshot record payload is invalid")
     state = record.get("state")
     if (
-        not _is_safe_path_text(record.get("path"))
+        not _is_safe_path_text(record.get("path"), absolute=not privacy)
         or not isinstance(state, dict)
         or not all(
             isinstance(state.get(key), str) and bool(state.get(key))
@@ -288,7 +380,7 @@ def _validate_record_shape(record: Any) -> None:
             raise SnapshotError("snapshot command outcome observation is invalid")
     for key in ("archive_bundle", "archive_root"):
         value = record.get(key)
-        if value is not None and not _is_safe_path_text(value):
+        if value is not None and not _is_safe_path_text(value, absolute=not privacy):
             raise SnapshotError("snapshot archive path is invalid")
     generation = record.get("archive_generation")
     validation_ref = record.get("archive_validation_ref")
@@ -309,22 +401,23 @@ def _validate_snapshot_collections(document: dict[str, Any]) -> None:
     invalid_archives = document.get("invalid_worktree_archives")
     archive_validations = document.get("archive_validations")
     roots = document.get("roots")
+    privacy = document.get("privacy") is not None
     if not isinstance(records, list) or not isinstance(stored_index, list):
         raise SnapshotError("snapshot record collection is invalid")
     for record in records:
-        _validate_record_shape(record)
+        _validate_record_shape(record, privacy=privacy)
     if any(not isinstance(item, dict) for item in stored_index):
         raise SnapshotError("snapshot record index is invalid")
     if (
         not isinstance(external_paths, list)
-        or any(not _is_safe_path_text(path) for path in external_paths)
+        or any(not _is_safe_path_text(path, absolute=not privacy) for path in external_paths)
         or len(external_paths) != len(set(external_paths))
     ):
         raise SnapshotError("snapshot external evidence paths are invalid")
     if (
         not isinstance(roots, list)
         or not roots
-        or any(not _is_safe_path_text(root) for root in roots)
+        or any(not _is_safe_path_text(root, absolute=not privacy) for root in roots)
     ):
         raise SnapshotError("snapshot roots are invalid")
     if not isinstance(invalid_archives, list):
@@ -332,7 +425,7 @@ def _validate_snapshot_collections(document: dict[str, Any]) -> None:
     for item in invalid_archives:
         if (
             not isinstance(item, dict)
-            or not _is_safe_path_text(item.get("bundle_path"))
+            or not _is_safe_path_text(item.get("bundle_path"), absolute=not privacy)
             or not isinstance(item.get("reason"), str)
             or not item.get("reason")
             or "\x00" in item["reason"]
@@ -675,7 +768,10 @@ def read_snapshot(
         or isinstance(record_count, bool)
         or record_count < 0
         or record_count != len(records)
-        or stored_index != record_index(records)
+        or (
+            document.get("privacy") is None
+            and stored_index != record_index(records)
+        )
     ):
         raise SnapshotError("snapshot record count/index mismatch")
     if (
@@ -686,7 +782,10 @@ def read_snapshot(
     ):
         raise SnapshotError("snapshot discovery count/index mismatch")
     roots = document.get("roots")
-    if requested_roots is not None:
+    privacy_mapping: dict[str, str] | None = None
+    if document.get("privacy") is not None:
+        privacy_mapping = _privacy_root_mapping(document, requested_roots)
+    elif requested_roots is not None:
         try:
             requested = normalize_roots(requested_roots)
         except (OSError, ValueError, RuntimeError, TypeError) as error:
@@ -712,6 +811,8 @@ def read_snapshot(
     age = (base.astimezone(timezone.utc) - created_at.astimezone(timezone.utc)).total_seconds()
     if age < 0 or age > ttl_seconds:
         raise SnapshotError("snapshot is expired or from the future")
+    if privacy_mapping is not None:
+        document = _restore_privacy_locators(document, privacy_mapping)
     return document
 
 

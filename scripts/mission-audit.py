@@ -76,6 +76,7 @@ from worktree_archive import (  # noqa: E402
     validate_worktree_archive_bundle,
 )
 from state_snapshot import (  # noqa: E402
+    anonymize_snapshot_document,
     DEFAULT_TTL_SECONDS,
     SnapshotError,
     build_snapshot_document,
@@ -1275,7 +1276,7 @@ def _record_from_payload(
 
 def _capture_state_snapshot_document(
     roots: list[Path], *, ttl_seconds: int, observed_at: datetime | None,
-) -> tuple[list[StateRecord], list[dict[str, Any]], datetime, dict[str, Any]]:
+) -> tuple[list[StateRecord], list[dict[str, Any]], datetime, dict[str, Any], list[list[Any]]]:
     normalized = [Path(root) for root in normalize_roots(roots)]
     observed = observed_at or utc_now()
     root_before = _root_metadata_inventory(normalized)
@@ -1309,7 +1310,7 @@ def _capture_state_snapshot_document(
     fresh_index = _root_metadata_inventory(normalized) + _external_evidence_inventory(external_paths)
     if discovery_digest(fresh_index) != document["discovery_digest"]:
         raise SnapshotError("filesystem changed while the snapshot was being captured")
-    return records, invalid, observed, document
+    return records, invalid, observed, document, root_before
 
 
 def create_state_snapshot(
@@ -1324,7 +1325,7 @@ def create_state_snapshot(
         except ValueError:
             continue
         raise SnapshotError("snapshot output must be outside every scanned root")
-    records, invalid, observed, document = _capture_state_snapshot_document(
+    records, invalid, observed, document, _root_index = _capture_state_snapshot_document(
         normalized, ttl_seconds=ttl_seconds, observed_at=observed_at,
     )
     write_snapshot(path, document)
@@ -1358,13 +1359,23 @@ def default_snapshot_directory(roots: list[Path]) -> Path:
 
 def create_default_state_snapshot(
     roots: list[Path], *, ttl_seconds: int = DEFAULT_TTL_SECONDS,
-    observed_at: datetime | None = None,
+    observed_at: datetime | None = None, privacy: bool = False,
 ) -> tuple[Path, dict[str, Any]]:
     """Capture one content-addressed immutable snapshot below the first root."""
     directory = default_snapshot_directory(roots)
-    _records, _invalid, _observed, document = _capture_state_snapshot_document(
+    _records, _invalid, _observed, document, root_index = _capture_state_snapshot_document(
         roots, ttl_seconds=ttl_seconds, observed_at=observed_at,
     )
+    if privacy:
+        normalized = [Path(root) for root in normalize_roots(roots)]
+        root_content_digests = [
+            discovery_digest([
+                item for item in root_index
+                if len(item) >= 2 and item[0] == "root" and item[1] == index
+            ])
+            for index in range(len(normalized))
+        ]
+        document = anonymize_snapshot_document(document, normalized, root_content_digests)
     path = directory / f"{document['content_digest']}.json"
     write_snapshot(path, document)
     return path, document
@@ -3635,9 +3646,10 @@ def main(argv: list[str] | None = None) -> int:
                 roots,
                 ttl_seconds=args.snapshot_ttl_sec,
                 observed_at=utc_now(),
+                privacy=args.privacy,
             )
             records, invalid_worktree_archives, roots, observation_now, document = load_immutable_state_snapshot(
-                snapshot_path, requested_roots,
+                snapshot_path, roots if args.privacy else requested_roots,
             )
             snapshot_metadata = {
                 "id": document["content_digest"],

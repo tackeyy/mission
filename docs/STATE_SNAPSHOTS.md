@@ -15,8 +15,10 @@ python3 scripts/mission-audit.py \
 ```
 
 `--privacy` replaces configured root prefixes in Markdown and JSON output with
-anonymous `root-N` labels. It is for report sharing; the local snapshot remains
-an owner-controlled artifact and must not be shared as an anonymized export.
+anonymous `root-N` labels. Its default snapshot persists the same anonymous
+root IDs, root-inventory content digests, and relative locators instead of
+source paths. On `--from-snapshot`, the requested roots are used only to
+rehydrate those locators in memory; current state is not reread.
 
 An explicit portable snapshot is still available for strict live-freshness
 checking and later audit or `stats` windows:

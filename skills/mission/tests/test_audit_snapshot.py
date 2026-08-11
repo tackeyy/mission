@@ -127,3 +127,25 @@ def test_privacy_report_hides_scanned_root_path(tmp_path):
     json_result = _audit("--root", str(root), "--privacy", "--json", cwd=root)
     assert str(root) not in json_result.stdout
     assert json.loads(json_result.stdout)["snapshot_id"]
+
+
+def test_privacy_snapshot_persists_only_anonymous_relative_locators(tmp_path):
+    root = tmp_path / "sensitive-root"
+    state = _write_state(root, "before")
+
+    captured = _audit("--root", str(root), "--privacy", "--json", cwd=root)
+
+    assert captured.returncode == 0, captured.stderr
+    snapshot_id = json.loads(captured.stdout)["snapshot_id"]
+    snapshot = root / ".mission-state" / "audit-snapshots" / f"{snapshot_id}.json"
+    payload = snapshot.read_text(encoding="utf-8")
+    assert str(root) not in payload
+    assert "root-1" in payload
+    assert "root_content_digest" in payload
+
+    state.write_text(state.read_text(encoding="utf-8").replace("before", "after"), encoding="utf-8")
+    replayed = _audit(
+        "--root", str(root), "--privacy", "--from-snapshot", snapshot_id, "--json", cwd=root,
+    )
+    assert replayed.returncode == 0, replayed.stderr
+    assert replayed.stdout == captured.stdout
