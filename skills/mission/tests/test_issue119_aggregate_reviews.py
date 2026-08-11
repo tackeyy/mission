@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
+import signal
 import stat
 from pathlib import Path
 
@@ -455,6 +457,168 @@ def test_output_rollback_fault_never_loses_the_only_recoverable_copy(
     else:
         assert out.read_bytes() == previous
         assert replacement in contents.values()
+
+
+@pytest.mark.parametrize("mutation_phase", ["pre-replace", "post-replace"])
+def test_output_rollback_rejects_same_inode_restore_content_mutation(
+    mutation_phase, tmp_path, monkeypatch,
+):
+    module = _load_mission_state()
+    out = tmp_path / "score.json"
+    state = tmp_path / "state.json"
+    previous = b"previous-output\n"
+    replacement = b"replacement-output\n"
+    mutated = b"malicious-output"
+    assert len(mutated) == len(previous)
+    out.write_bytes(previous)
+    state.write_bytes(b"state-before\n")
+    published = module._publish_output_transaction(out, replacement)
+    original_write_temp = module._write_temp_at
+    original_link = module.os.link
+    original_replace = module.os.replace
+    mutated_restore = False
+
+    def overwrite_same_inode(name, *, directory_fd):
+        fd = module.os.open(
+            name,
+            module.os.O_WRONLY | module.os.O_TRUNC | getattr(module.os, "O_NOFOLLOW", 0),
+            dir_fd=directory_fd,
+        )
+        try:
+            assert module.os.write(fd, mutated) == len(mutated)
+            module.os.fsync(fd)
+        finally:
+            module.os.close(fd)
+
+    def mutate_returned_restore(directory_fd, name, content):
+        nonlocal mutated_restore
+        result = original_write_temp(directory_fd, name, content)
+        if mutation_phase == "pre-replace" and content == previous:
+            overwrite_same_inode(result[0], directory_fd=directory_fd)
+            mutated_restore = True
+        return result
+
+    def mutate_after_link(src, dst, **kwargs):
+        nonlocal mutated_restore
+        result = original_link(src, dst, **kwargs)
+        if mutation_phase == "post-replace" and ".restore." in str(src):
+            overwrite_same_inode(dst, directory_fd=kwargs["dst_dir_fd"])
+            mutated_restore = True
+        return result
+
+    def mutate_after_replace(src, dst, **kwargs):
+        nonlocal mutated_restore
+        result = original_replace(src, dst, **kwargs)
+        if mutation_phase == "post-replace" and ".restore." in str(src):
+            overwrite_same_inode(dst, directory_fd=kwargs["dst_dir_fd"])
+            mutated_restore = True
+        return result
+
+    monkeypatch.setattr(module, "_write_temp_at", mutate_returned_restore)
+    monkeypatch.setattr(module.os, "link", mutate_after_link)
+    monkeypatch.setattr(module.os, "replace", mutate_after_replace)
+
+    with pytest.raises(ValueError, match="restore changed"):
+        module._rollback_published_file(published)
+
+    assert mutated_restore is True
+    assert state.read_bytes() == b"state-before\n"
+    assert out.read_bytes() == replacement
+    assert mutated not in {
+        path.read_bytes() for path in tmp_path.iterdir() if path.is_file() and path != state
+    }
+
+
+@pytest.mark.parametrize("publisher", ["output-new", "output-existing", "archive"])
+def test_publisher_recovers_own_target_when_base_exception_follows_syscall_success(
+    publisher, tmp_path, monkeypatch,
+):
+    module = _load_mission_state()
+
+    class SimulatedAsyncBoundary(BaseException):
+        pass
+
+    original_link = module.os.link
+    original_replace = module.os.replace
+    interrupted = False
+
+    def interrupt_after_link(src, dst, **kwargs):
+        nonlocal interrupted
+        result = original_link(src, dst, **kwargs)
+        if not interrupted:
+            interrupted = True
+            raise SimulatedAsyncBoundary("simulated signal after link success")
+        return result
+
+    def interrupt_after_replace(src, dst, **kwargs):
+        nonlocal interrupted
+        result = original_replace(src, dst, **kwargs)
+        if not interrupted:
+            interrupted = True
+            raise SimulatedAsyncBoundary("simulated signal after replace success")
+        return result
+
+    if publisher == "archive":
+        cwd = tmp_path / "project"
+        archive = cwd / ".mission-state" / "archive"
+        archive.mkdir(parents=True)
+        monkeypatch.setattr(module.os, "link", interrupt_after_link)
+        with pytest.raises(SimulatedAsyncBoundary):
+            module._publish_review_archive_transaction(cwd, "review.json", b"review\n")
+        assert not (archive / "review.json").exists()
+        residue_parent = archive
+    else:
+        out = tmp_path / "score.json"
+        previous = b"previous-output\n"
+        if publisher == "output-existing":
+            out.write_bytes(previous)
+            monkeypatch.setattr(module.os, "replace", interrupt_after_replace)
+        else:
+            monkeypatch.setattr(module.os, "link", interrupt_after_link)
+        with pytest.raises(SimulatedAsyncBoundary):
+            module._publish_output_transaction(out, b"replacement-output\n")
+        if publisher == "output-existing":
+            assert out.read_bytes() == previous
+        else:
+            assert not out.exists()
+        residue_parent = tmp_path
+
+    assert interrupted is True
+    assert not list(residue_parent.glob(".*.tmp"))
+    assert not list(residue_parent.glob(".*.rollback"))
+
+
+def test_real_sigint_cannot_escape_publish_ownership_rollback(tmp_path):
+    if not hasattr(os, "fork"):
+        pytest.skip("requires a POSIX child process")
+    pid = os.fork()
+    if pid == 0:
+        try:
+            module = _load_mission_state()
+            out = tmp_path / "signal-output.json"
+            original_link = module.os.link
+
+            def signal_after_link(src, dst, **kwargs):
+                result = original_link(src, dst, **kwargs)
+                os.kill(os.getpid(), signal.SIGINT)
+                return result
+
+            module.os.link = signal_after_link
+            try:
+                module._publish_output_transaction(out, b"signal-boundary\n")
+            except KeyboardInterrupt:
+                pass
+            else:
+                os._exit(10)
+            if out.exists() or list(tmp_path.glob(".*.tmp")):
+                os._exit(11)
+            os._exit(0)
+        except BaseException:
+            os._exit(12)
+
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFEXITED(status)
+    assert os.WEXITSTATUS(status) == 0
 
 
 @pytest.mark.parametrize("alias_kind", ["symlink-ancestor", "relative-parent"])

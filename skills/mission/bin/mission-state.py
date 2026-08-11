@@ -8488,6 +8488,50 @@ class _PublishedFile(NamedTuple):
     previous_content: bytes | None = None
 
 
+class _PublishAttempt:
+    """Tracks syscall outcome without confusing FileExists with our publish."""
+
+    def __init__(self) -> None:
+        self.attempted = False
+        self.conflict = False
+        self.completed = False
+
+    def owns_named_target(
+        self, directory_fd: int, name: str, temporary_stat: os.stat_result,
+    ) -> bool:
+        if self.completed:
+            return True
+        if not self.attempted or self.conflict:
+            return False
+        try:
+            named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        except OSError:
+            return False
+        return (
+            named.st_dev == temporary_stat.st_dev
+            and named.st_ino == temporary_stat.st_ino
+            and named.st_mode == temporary_stat.st_mode
+            and named.st_size == temporary_stat.st_size
+        )
+
+
+@contextlib.contextmanager
+def _defer_publish_signals():
+    """Close the syscall/ownership gap where pthread signal masks exist."""
+    mask = getattr(signal, "pthread_sigmask", None)
+    previous_mask = None
+    if mask is not None:
+        try:
+            previous_mask = mask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+        except (OSError, ValueError):
+            previous_mask = None
+    try:
+        yield
+    finally:
+        if previous_mask is not None:
+            mask(signal.SIG_SETMASK, previous_mask)
+
+
 def _directory_identity(value: os.stat_result) -> tuple[int, int, int]:
     return value.st_dev, value.st_ino, value.st_mode
 
@@ -8569,6 +8613,135 @@ def _write_temp_at(directory_fd: int, name: str, content: bytes) -> tuple[str, o
                 pass
 
 
+def _verify_restore_content_at(
+    directory_fd: int,
+    name: str,
+    expected_stat: os.stat_result,
+    expected_content: bytes,
+    *,
+    allow_rename_ctime: bool,
+) -> None:
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(name, flags, dir_fd=directory_fd)
+    except OSError as exc:
+        raise ValueError("published file restore changed") from exc
+    try:
+        initial = os.fstat(fd)
+        named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        initial_identity = _stat_identity(initial)
+        expected_identity = _stat_identity(expected_stat)
+        identity_matches = (
+            initial_identity[:6] == expected_identity[:6]
+            if allow_rename_ctime
+            else initial_identity == expected_identity
+        )
+        if (
+            not stat.S_ISREG(initial.st_mode)
+            or initial.st_nlink != 1
+            or not identity_matches
+            or initial_identity != _stat_identity(named)
+            or initial.st_size != len(expected_content)
+        ):
+            raise ValueError("published file restore changed")
+        chunks: list[bytes] = []
+        remaining = len(expected_content)
+        while remaining:
+            chunk = os.read(fd, min(remaining, 64 * 1024))
+            if not chunk:
+                raise ValueError("published file restore changed")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(fd, 1):
+            raise ValueError("published file restore changed")
+        content = b"".join(chunks)
+        after = os.fstat(fd)
+        named_after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if (
+            _stat_identity(initial) != _stat_identity(after)
+            or _stat_identity(after) != _stat_identity(named_after)
+            or content != expected_content
+            or hashlib.sha256(content).digest() != hashlib.sha256(expected_content).digest()
+        ):
+            raise ValueError("published file restore changed")
+    except OSError as exc:
+        raise ValueError("published file restore changed") from exc
+    finally:
+        os.close(fd)
+
+
+def _discard_rejected_restore(
+    directory_fd: int, name: str, expected_stat: os.stat_result,
+) -> None:
+    try:
+        named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if _stat_identity(named)[:5] == _stat_identity(expected_stat)[:5]:
+            os.unlink(name, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+    except OSError:
+        pass
+
+
+def _restore_current_after_rejected_restore(
+    published: _PublishedFile,
+    quarantine: str,
+    rejected_stat: os.stat_result,
+) -> bool:
+    rejected = ""
+    try:
+        named = os.stat(
+            published.path.name,
+            dir_fd=published.directory_fd,
+            follow_symlinks=False,
+        )
+        if _stat_identity(named)[:5] != _stat_identity(rejected_stat)[:5]:
+            return False
+        for _attempt in range(32):
+            candidate = f".{published.path.name}.{secrets.token_hex(8)}.restore-rejected"
+            try:
+                os.stat(candidate, dir_fd=published.directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                rejected = candidate
+                break
+        if not rejected:
+            return False
+        os.rename(
+            published.path.name,
+            rejected,
+            src_dir_fd=published.directory_fd,
+            dst_dir_fd=published.directory_fd,
+        )
+        moved = os.stat(rejected, dir_fd=published.directory_fd, follow_symlinks=False)
+        if _stat_identity(moved)[:5] != _stat_identity(rejected_stat)[:5]:
+            os.rename(
+                rejected,
+                published.path.name,
+                src_dir_fd=published.directory_fd,
+                dst_dir_fd=published.directory_fd,
+            )
+            rejected = ""
+            return False
+        os.rename(
+            quarantine,
+            published.path.name,
+            src_dir_fd=published.directory_fd,
+            dst_dir_fd=published.directory_fd,
+        )
+        restored = os.stat(
+            published.path.name,
+            dir_fd=published.directory_fd,
+            follow_symlinks=False,
+        )
+        if _stat_identity(restored)[:6] != published.object_identity[:6]:
+            return False
+        os.unlink(rejected, dir_fd=published.directory_fd)
+        rejected = ""
+        os.fsync(published.directory_fd)
+        return True
+    except OSError:
+        return False
+
+
 def _rollback_published_file(published: _PublishedFile) -> None:
     quarantine = ""
     previous_temporary = ""
@@ -8586,6 +8759,20 @@ def _rollback_published_file(published: _PublishedFile) -> None:
             )
             os.fsync(published.directory_fd)
             _verify_published_file(published)
+            try:
+                _verify_restore_content_at(
+                    published.directory_fd,
+                    previous_temporary,
+                    previous_temporary_stat,
+                    published.previous_content,
+                    allow_rename_ctime=False,
+                )
+            except ValueError:
+                _discard_rejected_restore(
+                    published.directory_fd, previous_temporary, previous_temporary_stat,
+                )
+                previous_temporary = ""
+                raise
         for _attempt in range(32):
             candidate = f".{published.path.name}.{secrets.token_hex(8)}.rollback"
             try:
@@ -8625,13 +8812,20 @@ def _rollback_published_file(published: _PublishedFile) -> None:
                 dst_dir_fd=published.directory_fd,
             )
             previous_temporary = ""
-            restored = os.stat(
-                published.path.name,
-                dir_fd=published.directory_fd,
-                follow_symlinks=False,
-            )
-            if not _same_inode(previous_temporary_stat, restored):
-                raise ValueError("published file rollback changed")
+            try:
+                _verify_restore_content_at(
+                    published.directory_fd,
+                    published.path.name,
+                    previous_temporary_stat,
+                    published.previous_content,
+                    allow_rename_ctime=True,
+                )
+            except ValueError:
+                if _restore_current_after_rejected_restore(
+                    published, quarantine, previous_temporary_stat,
+                ):
+                    quarantine = ""
+                raise
             os.fsync(published.directory_fd)
         os.unlink(quarantine, dir_fd=published.directory_fd)
         quarantine = ""
@@ -8759,7 +8953,7 @@ def _publish_output_transaction(
     temporary_stat: os.stat_result | None = None
     created = False
     previous_content: bytes | None = None
-    published_by_this_call = False
+    publish_attempt = _PublishAttempt()
     keep_directory_fd = False
     try:
         if (directory_identity, path.name) in forbidden_targets:
@@ -8779,15 +8973,18 @@ def _publish_output_transaction(
         if previous_entry is None:
             created = True
             try:
-                os.link(
-                    temporary,
-                    path.name,
-                    src_dir_fd=directory_fd,
-                    dst_dir_fd=directory_fd,
-                    follow_symlinks=False,
-                )
-                published_by_this_call = True
+                publish_attempt.attempted = True
+                with _defer_publish_signals():
+                    os.link(
+                        temporary,
+                        path.name,
+                        src_dir_fd=directory_fd,
+                        dst_dir_fd=directory_fd,
+                        follow_symlinks=False,
+                    )
+                    publish_attempt.completed = True
             except FileExistsError as exc:
+                publish_attempt.conflict = True
                 raise ValueError("output appeared during publish") from exc
             os.unlink(temporary, dir_fd=directory_fd)
             temporary = ""
@@ -8796,13 +8993,15 @@ def _publish_output_transaction(
             current = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
             if _stat_identity(current) != previous_entry[1]:
                 raise ValueError("output changed during publish")
-            os.replace(
-                temporary,
-                path.name,
-                src_dir_fd=directory_fd,
-                dst_dir_fd=directory_fd,
-            )
-            published_by_this_call = True
+            publish_attempt.attempted = True
+            with _defer_publish_signals():
+                os.replace(
+                    temporary,
+                    path.name,
+                    src_dir_fd=directory_fd,
+                    dst_dir_fd=directory_fd,
+                )
+                publish_attempt.completed = True
             temporary = ""
         published = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
         if not _same_inode(temporary_stat, published) or published.st_size != len(content):
@@ -8828,7 +9027,9 @@ def _publish_output_transaction(
             temporary_stat=temporary_stat,
             created=created,
             previous_content=previous_content,
-            published_by_this_call=published_by_this_call,
+            published_by_this_call=publish_attempt.owns_named_target(
+                directory_fd, path.name, temporary_stat,
+            ),
         ):
             keep_directory_fd = True
             temporary = ""
@@ -8851,7 +9052,7 @@ def _publish_review_archive_transaction(cwd: Path, name: str, content: bytes) ->
     directory_fd, archive_path = _open_review_archive_directory(cwd)
     temporary = ""
     temporary_stat: os.stat_result | None = None
-    published_by_this_call = False
+    publish_attempt = _PublishAttempt()
     keep_directory_fd = False
     try:
         _verify_review_archive_directory(directory_fd, archive_path)
@@ -8885,15 +9086,18 @@ def _publish_review_archive_transaction(cwd: Path, name: str, content: bytes) ->
         if _stat_identity(named_temporary) != _stat_identity(temporary_stat):
             raise ValueError("review archive temporary file changed")
         try:
-            os.link(
-                temporary,
-                name,
-                src_dir_fd=directory_fd,
-                dst_dir_fd=directory_fd,
-                follow_symlinks=False,
-            )
-            published_by_this_call = True
+            publish_attempt.attempted = True
+            with _defer_publish_signals():
+                os.link(
+                    temporary,
+                    name,
+                    src_dir_fd=directory_fd,
+                    dst_dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+                publish_attempt.completed = True
         except FileExistsError:
+            publish_attempt.conflict = True
             os.unlink(temporary, dir_fd=directory_fd)
             temporary = ""
             concurrent_entry = _read_review_archive_at(directory_fd, name)
@@ -8928,7 +9132,9 @@ def _publish_review_archive_transaction(cwd: Path, name: str, content: bytes) ->
             temporary_stat=temporary_stat,
             created=True,
             previous_content=None,
-            published_by_this_call=published_by_this_call,
+            published_by_this_call=publish_attempt.owns_named_target(
+                directory_fd, name, temporary_stat,
+            ),
         ):
             keep_directory_fd = True
             temporary = ""
