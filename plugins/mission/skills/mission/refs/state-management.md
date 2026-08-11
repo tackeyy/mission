@@ -326,7 +326,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py \
 
 - **lease の独立**: 各論理セッションの `init` は独立した `lease_id` を生成する。後続の mutating command (`push-score`, `mark-passes` 等) には **自セッションの LEASE_ID を渡す**。別セッションの LEASE_ID を渡すと fencing 違反で exit 2。
 - **closeout の独立**: `push-score` と `mark-passes` はセッションごとに実行する。片方の `mark-passes` は他方の state に影響しない。
-- **stop-guard の挙動**: 各論理セッションの Stop hook は自 session_id にマッチする state だけをブロック対象にする。片方が `mark-passes` (passes=true) になると、そちらのブロックは解除される。ブロック中の block reason には未達セッションの session_id / issue_ref の内訳が表示される。
+- **stop-guard の挙動**: 各論理セッションの Stop hook は自 session_id にマッチする state だけをブロック対象にする。片方が `mark-passes` (passes=true) になると、そちらのブロックは解除される。初回、unfinished set / phase / lease の変化時、または既定 600 秒の TTL 経過時だけ session_id / issue_ref の詳細内訳を表示する。同じ digest が続く間は blocker category と次の 1 command だけを含む 1 行 heartbeat に圧縮する。
 - **group closeout**: `parallel-closeout` は missing/waiting/running child、重複 issue_ref、manifest 外の late child、active lease が 1 件でもあれば manifest を変更せず exit 2。成功時は child の artifact / activity / review provenance coverage と pass/halt outcome を manifest に保存する。
 - **重複 init 警告**: 同一 issue_ref を複数の論理セッションが init すると `WARNING [S3]` が stderr に出る (ブロックはしない)。company-os 側 claim protocol と二重の防壁として機能する。
 - **assumptions の分離**: 各セッションの `assumptions_path` は `sessions/<sid>-assumptions.md` に自動設定される。固定パスに直書きしない。
@@ -341,6 +341,18 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py \
 ```
 
 `未達一覧` に表示されるのは **同プロジェクト内の未達セッション** (最大 5 件)。#825 が mark-passes 済みなら一覧から消え、#824 だけが残る。
+
+同じ未達状態で直後に再度 block した場合は、次のような heartbeat になる。
+
+```json
+{
+  "decision": "block",
+  "reason": "/mission heartbeat (blocker=unfinished-mission, next=python3 scripts/mission-state.py next)",
+  "outcome_kind": "expected-gate"
+}
+```
+
+block / reinjection / detail / heartbeat の累積値は、fenced session 本体を更新せず、`mission-stop-guard/1` の project-local state sidecar に atomic 保存する。sidecar は root-anchored descriptor chain、single-link regular file、共有 state lock で検証し、unsafe / corrupt の場合は外部 path を追跡・上書きせず従来の詳細表示へ fail-safe する。TTL は `MISSION_STOP_GUARD_HEARTBEAT_SECONDS` で変更できる。
 
 ### Phase C: 旧 state.json → sessions/ 移行 (任意)
 

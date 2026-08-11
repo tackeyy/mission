@@ -115,6 +115,18 @@ _mission_sanitize_sid() {
   printf '%s' "$v"
 }
 
+_mission_sha256() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 -r | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
 _mission_halt_session() {
   local sf="$1"
   local reason="$2"
@@ -319,6 +331,7 @@ if [ -d "$SESSIONS_DIR" ]; then
     PENDING_BREAKDOWN=""
     _PENDING_COUNT=0
     _PENDING_GROUPS="|"
+    _PENDING_DIGEST_INPUT=""
     _CWD_REAL=$(cd "$CWD" 2>/dev/null && pwd -P || echo "$CWD")
     for _sf in "$SESSIONS_DIR"/*.json; do
       [ -f "$_sf" ] || continue
@@ -338,6 +351,9 @@ if [ -d "$SESSIONS_DIR" ]; then
       [ -z "$_psid" ] && _psid=$(basename "$_sf" .json)
       _piref=$(jq -r '.issue_ref // empty' "$_sf" 2>/dev/null || echo "")
       _pgroup=$(jq -r '.logical_group_id // empty' "$_sf" 2>/dev/null || echo "")
+      _digest_entry=$(jq -cS --arg resolved_session_id "$_psid" '{session_id:$resolved_session_id,issue_ref:(.issue_ref // ""),logical_group_id:(.logical_group_id // ""),phase:(.phase // "unknown"),owner_session_id:(.owner_session_id // ""),lease_id:(.lease_id // ""),fencing_epoch:(.fencing_epoch // 0),lease_expires_at:(.lease_expires_at // "")}' "$_sf" 2>/dev/null || echo "")
+      [ -n "$_digest_entry" ] && _PENDING_DIGEST_INPUT="${_PENDING_DIGEST_INPUT}${_digest_entry}
+"
       if [ -n "$_pgroup" ]; then
         case "$_PENDING_GROUPS" in
           *"|${_pgroup}|"*) continue ;;
@@ -361,7 +377,35 @@ if [ -d "$SESSIONS_DIR" ]; then
     done
     SESSION_LABEL="$SESSION_SID"
     [ -n "$SESSION_ISSUE_REF" ] && SESSION_LABEL="${SESSION_SID}(#${SESSION_ISSUE_REF})"
-    REASON="${STALE}${PUSH_SCORE_WARN}/mission skill アクティブ・未達 (session=$SESSION_LABEL, 未達一覧=[$PENDING_BREAKDOWN], iter=$ITER, last_score=$LAST_SCORE, threshold=$THRESHOLD)。 state.json の passes=true か halt_reason を立てるまでループを継続。 ミッション: $MISSION"
+    STOP_GUARD_OBSERVATION=""
+    PENDING_DIGEST=$(printf '%s' "$_PENDING_DIGEST_INPUT" | _mission_sha256 2>/dev/null || echo "")
+    STOP_GUARD_NOW="${MISSION_STOP_GUARD_NOW_EPOCH:-$(date +%s)}"
+    STOP_GUARD_TTL="${MISSION_STOP_GUARD_HEARTBEAT_SECONDS:-600}"
+    case "$STOP_GUARD_NOW" in ''|*[!0-9]*) STOP_GUARD_NOW=$(date +%s) ;; esac
+    case "$STOP_GUARD_TTL" in ''|*[!0-9]*) STOP_GUARD_TTL=600 ;; esac
+    [ "$STOP_GUARD_TTL" -lt 1 ] 2>/dev/null && STOP_GUARD_TTL=600
+    if [ -n "$PENDING_DIGEST" ]; then
+      STOP_GUARD_ATTEMPT=0
+      while [ "$STOP_GUARD_ATTEMPT" -lt 3 ]; do
+        if STOP_GUARD_OBSERVATION=$(
+          cd "$CWD" 2>/dev/null || exit 1
+          python3 "$MISSION_STATE_PY" stop-guard-observe \
+            --session-id "$SESSION_SID" --digest "$PENDING_DIGEST" \
+            --now-epoch "$STOP_GUARD_NOW" --ttl-seconds "$STOP_GUARD_TTL" 2>/dev/null
+        ); then
+          break
+        fi
+        STOP_GUARD_OBSERVATION=""
+        STOP_GUARD_ATTEMPT=$((STOP_GUARD_ATTEMPT + 1))
+        sleep 0.05
+      done
+    fi
+    STOP_GUARD_MODE=$(printf '%s' "$STOP_GUARD_OBSERVATION" | jq -r '.mode // "detail"' 2>/dev/null || echo "detail")
+    if [ "$STOP_GUARD_MODE" = "heartbeat" ]; then
+      REASON="${STALE}${PUSH_SCORE_WARN}/mission heartbeat (blocker=unfinished-mission, next=python3 scripts/mission-state.py next)"
+    else
+      REASON="${STALE}${PUSH_SCORE_WARN}/mission skill アクティブ・未達 (session=$SESSION_LABEL, 未達一覧=[$PENDING_BREAKDOWN], iter=$ITER, last_score=$LAST_SCORE, threshold=$THRESHOLD)。 state.json の passes=true か halt_reason を立てるまでループを継続。 ミッション: $MISSION"
+    fi
     jq -n --arg r "$REASON" '{decision:"block", reason:$r, outcome_kind:"expected-gate"}'
     exit 0
   fi
