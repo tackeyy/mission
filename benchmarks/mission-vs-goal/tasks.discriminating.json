@@ -32,6 +32,7 @@
       "primary_metric": "quality_marker_recall",
       "hypothesis": "With 9 canonical constants x 4 services and 6 planted undocumented divergences plus 3 documented-override decoys, a single pass predictably misses rows; an independent review pass should catch missing coverage. To test, not assert.",
       "first_pass_failure_design": "36 constant-service cells across five files. Six real violations are spread so no two services share the same violated constant, and three plausible-looking documented overrides invite false positives. Exhaustive-coverage requirement makes partial audits detectable by reviewers.",
+      "planted_defect_marker": "False violation: documented billing timeout override",
       "quality_markers": [
         {"name": "Violation: auth SESSION_TTL_SEC 7200 vs 3600", "patterns": ["7200", "7,200"]},
         {"name": "Violation: auth TLS_MIN_VERSION TLSv1.1 vs TLSv1.2", "patterns": ["tlsv1.1", "tls 1.1", "tls_min_version 1.1"]},
@@ -69,6 +70,7 @@
       "primary_metric": "quality_marker_recall",
       "hypothesis": "Seven planted cross-document inconsistencies spread over five documents; each requires joining two documents on an identifier. Independent reviewers re-deriving the join should catch missed pairs. To test, not assert.",
       "first_pass_failure_design": "Five documents with overlapping but not identical identifier sets. Each inconsistency is only visible when two specific documents are compared on one identifier; no single document reveals any finding. A renumbering decoy (RFC-77) explains the apparent 2.30.x gap.",
+      "planted_defect_marker": "False finding: 2.30.x gap flagged as missing release",
       "quality_markers": [
         {"name": "MIG-2207 applied in ops log but missing from migration index", "patterns": ["mig-2207"]},
         {"name": "Hotfix 2.31.4 known only from SUP-1189, absent from changelog", "patterns": ["sup-1189"]},
@@ -101,6 +103,7 @@
       "primary_metric": "quality_marker_recall",
       "hypothesis": "Five breaking drifts spread across three clients plus two spec-permitted decoys. Reviewers re-reading the spec independently should catch drifts the executor missed. To test, not assert.",
       "first_pass_failure_design": "Each client contains one to two breaking drifts of different kinds (header name, enum spelling, unit semantics, idempotency, missing required header), so pattern-matching one drift type across clients misses the others. Two permitted differences look like violations until the extension clause is read.",
+      "planted_defect_marker": "False drift: X-Trace-Id flagged as breaking",
       "quality_markers": [
         {"name": "client-go sends X-Signature-V2 instead of spec X-Sig", "patterns": ["x-signature-v2"]},
         {"name": "client-go retries non-idempotent POST /v2/transfers", "patterns": ["/v2/transfers"]},
@@ -133,6 +136,7 @@
       "primary_metric": "quality_marker_recall",
       "hypothesis": "Four numeric discrepancies each with a distinct mechanical cause; naming the cause requires tracing the derivation, not just spotting unequal numbers. Reviewer arithmetic re-checks should catch missed or mis-attributed causes. To test, not assert.",
       "first_pass_failure_design": "The same metric appears with different values in different documents, and each discrepancy has a different mechanical cause. Spotting a difference is easy; attributing all four causes correctly requires reading every derivation note. A formatting decoy (thousands separator) is explained in a footnote.",
+      "planted_defect_marker": "False discrepancy: thousands-separator formatting decoy",
       "quality_markers": [
         {"name": "Revenue 48,210 double-counts refunds vs ledger 45,930", "patterns": ["48,210", "48210"]},
         {"name": "Ledger revenue reference 45,930", "patterns": ["45,930", "45930"]},
@@ -163,6 +167,7 @@
       "primary_metric": "quality_marker_recall",
       "hypothesis": "Three violations (expired approver role, scope cap breach, retroactive approval) and three compliant requests that look suspicious. Verdict correctness depends on joining requests against the roster's validity dates and the policy's clause list. To test, not assert.",
       "first_pass_failure_design": "The roster's role validity dates and the policy's emergency/delegation clauses are each needed for exactly one verdict; skipping either file flips at least one verdict. Wrong verdicts on the three valid-but-suspicious requests are penalized as forbidden markers.",
+      "planted_defect_marker": "False violation: REQ-01 emergency clause missed",
       "quality_markers": [
         {"name": "Violation REQ-02: approver role expired", "patterns": ["req-02"]},
         {"name": "REQ-02 roster evidence: validity ended 2026-05-31", "patterns": ["2026-05-31"]},
