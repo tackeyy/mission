@@ -231,9 +231,14 @@ Stop hook の stale-state 警告は macOS では BSD `date`、Linux では GNU `
 ## テスト
 
 ```bash
-cd skills/mission
-python3 -m pytest -q
+make test-smoke  # install 不要の syntax/import 確認
+make test        # .venv-ci で CI と同一の全テスト
+make test-e2e    # slow operational scenario
 ```
+
+各 target は exact Git tree SHA、tier、test manifest を
+`mission-test-report/1` JSON で出力します。`make test` は `.venv-ci`
+を作成し、pinned された `.github/requirements-ci.txt` を使います。
 
 ローカル検証スナップショット:
 

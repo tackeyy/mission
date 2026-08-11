@@ -68,13 +68,9 @@ jobs:
           cache: pip
           cache-dependency-path: .github/requirements-ci.txt
 
-      - name: Install test dependencies
-        if: steps.changes.outputs.python == 'true'
-        run: python -m pip install -r .github/requirements-ci.txt
-
       - name: Run Python tests
         if: steps.changes.outputs.python == 'true'
-        run: python -m pytest -q skills/mission
+        run: make test PYTHON=python
 
       - name: Verify runner ShellCheck
         if: steps.changes.outputs.shell == 'true'

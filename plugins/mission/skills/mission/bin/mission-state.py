@@ -112,7 +112,12 @@ from activity_segments import (  # noqa: E402
     validate_activity,
 )
 from worktree_archive import (  # noqa: E402
+    STATE_ARCHIVE_GENERATION_SCHEMA,
+    STATE_ARCHIVE_POINTER_SCHEMA,
+    read_state_archive_file_bytes,
+    read_state_archive_compaction,
     read_verified_review_input_evidence,
+    state_archive_content_digest,
     valid_review_perspective,
     validated_archive_evidence_reader,
     validate_worktree_archive_bundle,
@@ -13396,12 +13401,193 @@ def _validate_resolve_archive_record(
             sys.exit(2)
 
 
+def _state_archive_reference(cwd: Path, path: Path) -> str:
+    try:
+        relative = path.relative_to(cwd)
+    except ValueError as exc:
+        raise WorktreeArchiveError("state archive path is outside the project") from exc
+    value = relative.as_posix()
+    if not value.startswith(".mission-state/"):
+        raise WorktreeArchiveError("state archive path is outside .mission-state")
+    return value
+
+
+def _reject_duplicate_state_archive_keys(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    document: dict[str, object] = {}
+    for key, value in pairs:
+        if key in document:
+            raise ValueError("state archive manifest contains duplicate keys")
+        document[key] = value
+    return document
+
+
+def _publish_state_archive_compaction(
+    cwd: Path,
+    target: Path,
+    canonical: Path,
+    target_data: dict,
+    retain_generations: int,
+) -> str:
+    """Publish one immutable materialized-state index without deleting lineage."""
+    if target == canonical:
+        raise WorktreeArchiveError("canonical and superseded paths must differ")
+    canonical_ref = _state_archive_reference(cwd, canonical)
+    target_ref = _state_archive_reference(cwd, target)
+    try:
+        canonical_bytes = read_state_archive_file_bytes(cwd, canonical_ref)
+        canonical_data = json.loads(canonical_bytes.decode("utf-8"))
+        target_bytes = read_state_archive_file_bytes(cwd, target_ref)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise WorktreeArchiveError("canonical state is unreadable") from exc
+    if not _is_mission_state_record(canonical_data):
+        raise WorktreeArchiveError("canonical state is not a mission state record")
+    if (
+        canonical_data.get("session_id") != target_data.get("session_id")
+        or canonical_data.get("mission_id") != target_data.get("mission_id")
+    ):
+        raise WorktreeArchiveError("canonical state identity does not match the superseded record")
+
+    state_root = cwd / ".mission-state"
+    try:
+        current = read_state_archive_compaction(state_root, verify_superseded=True)
+    except ValueError as exc:
+        raise WorktreeArchiveError("existing state archive compaction is invalid") from exc
+    records = copy.deepcopy(list(current.records)) if current else []
+    canonical_digest = hashlib.sha256(canonical_bytes).hexdigest()
+    target_digest = hashlib.sha256(target_bytes).hexdigest()
+    identity = (str(target_data["mission_id"]), str(target_data["session_id"]))
+    matches = [
+        record for record in records
+        if (record["mission_id"], record["session_id"]) == identity
+    ]
+    if len(matches) > 1:
+        raise WorktreeArchiveError("state archive canonical identity is ambiguous")
+    if matches:
+        record = matches[0]
+        if record["canonical_path"] != canonical_ref:
+            raise WorktreeArchiveError("state archive canonical path changed")
+        record["canonical_sha256"] = canonical_digest
+    else:
+        record = {
+            "canonical_path": canonical_ref,
+            "canonical_sha256": canonical_digest,
+            "mission_id": identity[0],
+            "session_id": identity[1],
+            "superseded": [],
+        }
+        records.append(record)
+    superseded = [item for item in record["superseded"] if item["path"] != target_ref]
+    superseded.append({"path": target_ref, "sha256": target_digest})
+    record["superseded"] = sorted(superseded, key=lambda item: item["path"])
+    records.sort(key=lambda item: (item["mission_id"], item["session_id"], item["canonical_path"]))
+
+    if current and records == list(current.records) and retain_generations == current.retention_generations:
+        return current.generation
+    core = {
+        "schema": STATE_ARCHIVE_GENERATION_SCHEMA,
+        "previous_generation": current.generation if current else None,
+        "retention_policy": {
+            "retain_generations": retain_generations,
+            "physical_deletion": "forbidden",
+        },
+        "records": records,
+    }
+    generation = state_archive_content_digest(core)
+    manifest = {
+        **core,
+        "created_at": iso_now(),
+        "content_digest": generation,
+    }
+    compaction = _ensure_regular_directory_path(
+        cwd, (".mission-state", "archive", "compaction")
+    )
+    compaction.mkdir(parents=True, exist_ok=True)
+    generations = _ensure_regular_directory_path(compaction, ("generations",))
+    generations.mkdir(parents=True, exist_ok=True)
+    generation_root = generations / generation
+    manifest_bytes = json.dumps(manifest, indent=2, ensure_ascii=False).encode("utf-8")
+    if generation_root.exists() or generation_root.is_symlink():
+        if generation_root.is_symlink() or not generation_root.is_dir():
+            raise WorktreeArchiveError("state archive generation is not a regular directory")
+        existing_ref = (
+            Path(".mission-state") / "archive" / "compaction" / "generations"
+            / generation / "manifest.json"
+        ).as_posix()
+        try:
+            existing_bytes = read_state_archive_file_bytes(cwd, existing_ref)
+            existing_document = json.loads(
+                existing_bytes.decode("utf-8"),
+                object_pairs_hook=_reject_duplicate_state_archive_keys,
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise WorktreeArchiveError("state archive generation collision") from exc
+        expected_fields = {
+            "schema", "created_at", "previous_generation", "retention_policy",
+            "records", "content_digest",
+        }
+        existing_core = {
+            "schema": existing_document.get("schema"),
+            "previous_generation": existing_document.get("previous_generation"),
+            "retention_policy": existing_document.get("retention_policy"),
+            "records": existing_document.get("records"),
+        } if isinstance(existing_document, dict) else None
+        if (
+            not isinstance(existing_document, dict)
+            or set(existing_document) != expected_fields
+            or existing_core != core
+            or existing_document.get("content_digest") != generation
+            or state_archive_content_digest(existing_document) != generation
+            or not isinstance(existing_document.get("created_at"), str)
+            or not existing_document["created_at"]
+        ):
+            raise WorktreeArchiveError("state archive generation collision")
+        manifest = existing_document
+        manifest_bytes = existing_bytes
+    else:
+        staging = Path(tempfile.mkdtemp(prefix=".tmp-", dir=generations))
+        try:
+            atomic_write_json(staging / "manifest.json", manifest, administrative=True)
+            os.replace(staging, generation_root)
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+    try:
+        if (
+            read_state_archive_file_bytes(cwd, canonical_ref) != canonical_bytes
+            or read_state_archive_file_bytes(cwd, target_ref) != target_bytes
+        ):
+            raise WorktreeArchiveError("state archive source changed before publication")
+    except ValueError as exc:
+        raise WorktreeArchiveError("state archive source changed before publication") from exc
+    atomic_write_json(
+        compaction / "current.json",
+        {
+            "schema": STATE_ARCHIVE_POINTER_SCHEMA,
+            "generation": generation,
+            "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        },
+        administrative=True,
+    )
+    return generation
+
+
 def cmd_resolve_archive(args):
     """#301: terminal halted record に resolution metadata を atomic に追記する。"""
     cwd = Path.cwd().resolve()
 
     # パスの検証と解決
     target = _validate_resolve_archive_path(args.path, cwd)
+    canonical: Path | None = None
+    if args.canonical_path is not None:
+        if args.status != "superseded":
+            print("ERROR: --canonical-path requires --status superseded", file=sys.stderr)
+            sys.exit(2)
+        if args.retention_generations < 1:
+            print("ERROR: --retention-generations must be positive", file=sys.stderr)
+            sys.exit(2)
+        canonical = _validate_resolve_archive_path(args.canonical_path, cwd)
 
     # lock ファイルは対象の .mission-state/ 直下
     # (state_root = 対象ファイルから .mission-state を探す)
@@ -13428,8 +13614,10 @@ def cmd_resolve_archive(args):
             )
             sys.exit(2)
 
+    archive_generation: str | None = None
     with StateLock(lock):
-        data = json.loads(target.read_text(encoding="utf-8"))
+        original_target = target.read_bytes()
+        data = json.loads(original_target.decode("utf-8"))
 
         # #318: --frozen-snapshot フラグが指定された場合、live session の terminal 性を確認する
         if frozen_snapshot:
@@ -13486,6 +13674,19 @@ def cmd_resolve_archive(args):
 
         # #310: resolution 付与は管理系 janitor 書き込みのため last_activity_at を刻まない
         atomic_write_json(target, data, administrative=True)
+        if canonical is not None:
+            try:
+                archive_generation = _publish_state_archive_compaction(
+                    cwd,
+                    target,
+                    canonical,
+                    data,
+                    args.retention_generations,
+                )
+            except (OSError, ValueError, WorktreeArchiveError) as exc:
+                atomic_write_bytes(target, original_target)
+                print(f"ERROR: state archive compaction failed: {exc}", file=sys.stderr)
+                sys.exit(2)
 
     result: dict = {
         "ok": True,
@@ -13493,6 +13694,8 @@ def cmd_resolve_archive(args):
         "resolution_status": args.status,
         "resolution_decided_at": now,
     }
+    if archive_generation is not None:
+        result["archive_generation"] = archive_generation
     if args.owner_issue is not None:
         result["resolution_owner_issue"] = args.owner_issue
     if args.evidence_url is not None:
@@ -14001,6 +14204,17 @@ def _build_parser():
                            help="解消証跡 URL (PR / commit / コメント等)")
     p_resolve.add_argument("--note", default=None,
                            help="自由記述の解消メモ")
+    p_resolve.add_argument(
+        "--canonical-path",
+        default=None,
+        help="superseded record に対応する materialized canonical state path",
+    )
+    p_resolve.add_argument(
+        "--retention-generations",
+        type=int,
+        default=3,
+        help="generation manifest の materialized retention policy (物理削除は行わない)",
+    )
     p_resolve.add_argument("--json", action="store_true", help="JSON 形式で出力")
     p_resolve.add_argument(
         "--frozen-snapshot",

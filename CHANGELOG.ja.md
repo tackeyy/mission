@@ -19,6 +19,8 @@
 
 ### 追加
 
+- リポジトリ管理の `make test-smoke` / `make test` / `make test-e2e` がCIと同じ入口を使い、必要な場合はpinned test環境を作成して exact tree SHA と test manifest を出力するようにした (#391)。
+- state archive compaction が canonical / superseded relation を immutable content-addressed generation へ記録し、physical lineage を削除せず維持するようにした。audit は既定で materialized canonical record のみを読み、`--forensic` で full lineage を再現する (#391)。
 - Stop hookのblock出力がunfinished session set・phase・leaseのdigestを記録し、変化時またはheartbeat TTL経過時だけ詳細を再表示するようにした。同一状態ではblocker categoryと次の1 commandだけへ圧縮し、fenced session本体を変更せずproject-localな`mission-stop-guard/1` stateへblock/reinjection/detail/heartbeat countersをatomic保存する (#389)。
 - 並列 mission がversioned planned-child manifestを作成し、各childを planned / running / waiting / pass / halt に分類できるようにした。全planned childがterminalかつlease解放済みの場合だけgroupをcloseし、artifact・activity・review provenanceの実観測coverageを保存する。重複・manifest外child・malformed・unsafe manifestは拒否時のstateを書き換えずfail-closedとする (#388)。
 - specialist selection / invocation に provider-neutral な lifecycle 契約を追加した。新規 session は明示 checkpoint から開始し、recommendation record は同じ opaque `selection_id`、invocation record は started から terminal まで一意な `invocation_id` を使う。pending selection、または一致する terminal evidence のない selected provider は `--specialist-waiver` で理由を明示しない限り `mark-passes` が拒否する。legacy の checkpoint 欠落は物理 rewrite せず `missing-legacy` として別集計する (#387)。
