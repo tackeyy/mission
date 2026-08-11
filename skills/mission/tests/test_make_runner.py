@@ -14,9 +14,13 @@ def _last_json_line(output: str) -> dict:
     return json.loads([line for line in output.splitlines() if line.startswith("{")][-1])
 
 
-def test_make_smoke_runs_without_install_and_reports_tree_and_manifest() -> None:
+def test_make_smoke_runs_without_install_and_reports_tree_and_manifest(tmp_path: Path) -> None:
+    smoke_venv = tmp_path / "smoke-venv"
     result = subprocess.run(
-        ["make", "test-smoke"], cwd=REPO_ROOT, capture_output=True, text=True,
+        ["make", "test-smoke", f"VENV={smoke_venv}"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
     )
     assert result.returncode == 0, result.stderr
     report = _last_json_line(result.stdout)
@@ -28,7 +32,7 @@ def test_make_smoke_runs_without_install_and_reports_tree_and_manifest() -> None
         "scripts/mission-audit.py",
         "scripts/mission-stop-guard.sh",
     ]
-    assert not (REPO_ROOT / ".venv-ci").exists()
+    assert not smoke_venv.exists()
 
 
 def test_ci_invokes_the_same_make_test_entrypoint() -> None:

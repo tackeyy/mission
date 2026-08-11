@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -12,6 +13,16 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MISSION_STATE = REPO_ROOT / "skills" / "mission" / "bin" / "mission-state.py"
 MISSION_AUDIT = REPO_ROOT / "scripts" / "mission-audit.py"
+
+
+def _load_mission_state():
+    spec = importlib.util.spec_from_file_location(
+        "mission_state_issue391_compaction", MISSION_STATE,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 def _write_halted(path: Path, root: Path, *, session_id: str = "session-391") -> None:
@@ -224,3 +235,67 @@ def test_audit_fails_closed_on_tampered_compaction_pointer(tmp_path: Path) -> No
         finding["code"] == "invalid-worktree-archive"
         for finding in audit["findings"]
     )
+
+
+def test_compaction_rejects_hardlinked_canonical_before_pointer_publish(
+    tmp_path: Path,
+) -> None:
+    canonical = tmp_path / ".mission-state" / "sessions" / "current.json"
+    duplicate = tmp_path / ".mission-state" / "archive" / "state-copy.json"
+    alias = tmp_path / "canonical-alias.json"
+    _write_halted(canonical, tmp_path)
+    duplicate.parent.mkdir(parents=True, exist_ok=True)
+    duplicate.write_bytes(canonical.read_bytes())
+    os.link(canonical, alias)
+    before = duplicate.read_bytes()
+
+    result = _run_state(
+        tmp_path,
+        "resolve-archive",
+        "--path", ".mission-state/archive/state-copy.json",
+        "--status", "superseded",
+        "--canonical-path", ".mission-state/sessions/current.json",
+        "--json",
+    )
+
+    assert result.returncode == 2
+    assert duplicate.read_bytes() == before
+    assert not (
+        tmp_path / ".mission-state" / "archive" / "compaction" / "current.json"
+    ).exists()
+
+
+def test_compaction_retry_reuses_valid_generation_bytes_after_pointer_gap(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module = _load_mission_state()
+    canonical = tmp_path / ".mission-state" / "sessions" / "current.json"
+    duplicate = tmp_path / ".mission-state" / "archive" / "state-copy.json"
+    _write_halted(canonical, tmp_path)
+    duplicate.parent.mkdir(parents=True, exist_ok=True)
+    duplicate.write_bytes(canonical.read_bytes())
+    data = json.loads(duplicate.read_text(encoding="utf-8"))
+
+    monkeypatch.setattr(module, "iso_now", lambda: "2026-08-12T00:10:00Z")
+    first = module._publish_state_archive_compaction(
+        tmp_path, duplicate, canonical, data, 1,
+    )
+    pointer = (
+        tmp_path / ".mission-state" / "archive" / "compaction" / "current.json"
+    )
+    manifest_path = (
+        tmp_path / ".mission-state" / "archive" / "compaction"
+        / "generations" / first / "manifest.json"
+    )
+    manifest_before = manifest_path.read_bytes()
+    pointer.unlink()
+
+    monkeypatch.setattr(module, "iso_now", lambda: "2026-08-12T00:11:00Z")
+    second = module._publish_state_archive_compaction(
+        tmp_path, duplicate, canonical, data, 1,
+    )
+
+    assert second == first
+    assert manifest_path.read_bytes() == manifest_before
+    assert json.loads(pointer.read_text(encoding="utf-8"))["generation"] == first

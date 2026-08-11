@@ -163,6 +163,17 @@ def _read_generation_file(
         os.close(root_fd)
 
 
+def read_state_archive_file_bytes(
+    project_root: Path, reference: str, *, limit: int = 4 * 1024 * 1024,
+) -> bytes:
+    """Read one state-owned archive input with the consumer's strict contract."""
+    relative = _safe_relative_path(reference, state_reference=True)
+    if relative is None:
+        raise ValueError("state archive reference is invalid")
+    content, _metadata = _read_generation_file(project_root, relative, limit=limit)
+    return content
+
+
 def _normalized_state_reference(value: Any) -> str | None:
     if not isinstance(value, str) or not value:
         return None
