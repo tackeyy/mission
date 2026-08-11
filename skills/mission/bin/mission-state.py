@@ -182,7 +182,7 @@ def _new_specialist_selection_checkpoint() -> dict:
         "reason": "specialist selection has not been evaluated",
         "reason_code": "pending-evaluation",
         "prompted_user": False,
-        "lifecycle_state": "candidate",
+        "lifecycle_state": "terminal",
         "selection_id": new_selection_id(),
     }
 

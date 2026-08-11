@@ -93,7 +93,7 @@ def test_init_specialist_metadata_defaults(run_cli, tmp_path):
     assert s["specialists_unavailable"] == []
     assert s["specialists_decision"]["decision"] == "none"
     assert s["specialists_decision"]["reason_code"] == "pending-evaluation"
-    assert s["specialists_decision"]["lifecycle_state"] == "candidate"
+    assert s["specialists_decision"]["lifecycle_state"] == "terminal"
     assert s["specialists_decision"]["selection_id"].startswith("sel_")
 
 

@@ -25,7 +25,7 @@ def test_init_always_writes_a_pending_selection_checkpoint_for_every_profile_and
 
     assert checkpoint["decision"] == "none"
     assert checkpoint["reason_code"] == "pending-evaluation"
-    assert checkpoint["lifecycle_state"] == "candidate"
+    assert checkpoint["lifecycle_state"] == "terminal"
     assert checkpoint["selection_id"].startswith("sel_")
     assert len(checkpoint["selection_id"]) == 36
 
