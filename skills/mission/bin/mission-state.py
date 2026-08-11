@@ -8572,11 +8572,20 @@ def _write_temp_at(directory_fd: int, name: str, content: bytes) -> tuple[str, o
 def _rollback_published_file(published: _PublishedFile) -> None:
     quarantine = ""
     previous_temporary = ""
+    previous_temporary_stat: os.stat_result | None = None
     try:
         _verify_published_file(published)
         if not published.created and published.previous_content is None:
             os.fsync(published.directory_fd)
             return
+        if not published.created and published.previous_content is not None:
+            previous_temporary, previous_temporary_stat = _write_temp_at(
+                published.directory_fd,
+                f"{published.path.name}.restore",
+                published.previous_content,
+            )
+            os.fsync(published.directory_fd)
+            _verify_published_file(published)
         for _attempt in range(32):
             candidate = f".{published.path.name}.{secrets.token_hex(8)}.rollback"
             try:
@@ -8608,36 +8617,30 @@ def _rollback_published_file(published: _PublishedFile) -> None:
                 quarantine = ""
             raise ValueError("published file changed before rollback")
         if not published.created and published.previous_content is not None:
-            previous_temporary, temporary_stat = _write_temp_at(
-                published.directory_fd, published.path.name, published.previous_content,
+            assert previous_temporary_stat is not None
+            os.replace(
+                previous_temporary,
+                published.path.name,
+                src_dir_fd=published.directory_fd,
+                dst_dir_fd=published.directory_fd,
             )
-            os.link(
-                    previous_temporary,
-                    published.path.name,
-                    src_dir_fd=published.directory_fd,
-                    dst_dir_fd=published.directory_fd,
-                    follow_symlinks=False,
-                )
-            os.unlink(previous_temporary, dir_fd=published.directory_fd)
             previous_temporary = ""
             restored = os.stat(
                 published.path.name,
                 dir_fd=published.directory_fd,
                 follow_symlinks=False,
             )
-            if not _same_inode(temporary_stat, restored):
+            if not _same_inode(previous_temporary_stat, restored):
                 raise ValueError("published file rollback changed")
+            os.fsync(published.directory_fd)
         os.unlink(quarantine, dir_fd=published.directory_fd)
         quarantine = ""
         os.fsync(published.directory_fd)
     except OSError as exc:
         raise ValueError("published file rollback failed") from exc
     finally:
-        if previous_temporary:
-            try:
-                os.unlink(previous_temporary, dir_fd=published.directory_fd)
-            except FileNotFoundError:
-                pass
+        # A fully written .restore.*.tmp is intentionally recoverable after a
+        # failed rollback; deleting the only previous-content copy loses data.
         os.close(published.directory_fd)
 
 
@@ -8660,6 +8663,7 @@ def _rollback_unreturned_publish(
     temporary_stat: os.stat_result,
     created: bool,
     previous_content: bytes | None,
+    published_by_this_call: bool,
 ) -> bool:
     """Rollback our temp inode when publish succeeded but no handle was returned."""
     if temporary:
@@ -8669,6 +8673,8 @@ def _rollback_unreturned_publish(
             pass
         except OSError:
             return False
+    if not published_by_this_call:
+        return False
     try:
         named = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
     except OSError:
@@ -8753,6 +8759,7 @@ def _publish_output_transaction(
     temporary_stat: os.stat_result | None = None
     created = False
     previous_content: bytes | None = None
+    published_by_this_call = False
     keep_directory_fd = False
     try:
         if (directory_identity, path.name) in forbidden_targets:
@@ -8779,6 +8786,7 @@ def _publish_output_transaction(
                     dst_dir_fd=directory_fd,
                     follow_symlinks=False,
                 )
+                published_by_this_call = True
             except FileExistsError as exc:
                 raise ValueError("output appeared during publish") from exc
             os.unlink(temporary, dir_fd=directory_fd)
@@ -8794,6 +8802,7 @@ def _publish_output_transaction(
                 src_dir_fd=directory_fd,
                 dst_dir_fd=directory_fd,
             )
+            published_by_this_call = True
             temporary = ""
         published = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
         if not _same_inode(temporary_stat, published) or published.st_size != len(content):
@@ -8819,6 +8828,7 @@ def _publish_output_transaction(
             temporary_stat=temporary_stat,
             created=created,
             previous_content=previous_content,
+            published_by_this_call=published_by_this_call,
         ):
             keep_directory_fd = True
             temporary = ""
@@ -8841,6 +8851,7 @@ def _publish_review_archive_transaction(cwd: Path, name: str, content: bytes) ->
     directory_fd, archive_path = _open_review_archive_directory(cwd)
     temporary = ""
     temporary_stat: os.stat_result | None = None
+    published_by_this_call = False
     keep_directory_fd = False
     try:
         _verify_review_archive_directory(directory_fd, archive_path)
@@ -8881,6 +8892,7 @@ def _publish_review_archive_transaction(cwd: Path, name: str, content: bytes) ->
                 dst_dir_fd=directory_fd,
                 follow_symlinks=False,
             )
+            published_by_this_call = True
         except FileExistsError:
             os.unlink(temporary, dir_fd=directory_fd)
             temporary = ""
@@ -8916,6 +8928,7 @@ def _publish_review_archive_transaction(cwd: Path, name: str, content: bytes) ->
             temporary_stat=temporary_stat,
             created=True,
             previous_content=None,
+            published_by_this_call=published_by_this_call,
         ):
             keep_directory_fd = True
             temporary = ""

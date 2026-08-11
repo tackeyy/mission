@@ -758,6 +758,52 @@ def test_review_archive_finish_fault_rolls_back_only_new_object(
     assert not list(archive.glob(".*.rollback"))
 
 
+def test_review_archive_return_fault_preserves_competitor_hardlink_of_its_temp(
+    monkeypatch, tmp_path,
+):
+    spec = importlib.util.spec_from_file_location(
+        "mission_state_review_archive_competitor_temp", MISSION_STATE_PY,
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    cwd = tmp_path / "project"
+    archive = cwd / ".mission-state" / "archive"
+    archive.mkdir(parents=True)
+    content = _review_bytes()
+    original_link = module.os.link
+    original_finish = module._finish_published_file
+    competed = rejected = False
+
+    def publish_same_temp_first(src, dst, **kwargs):
+        nonlocal competed
+        if dst == "review.json" and not competed:
+            competed = True
+            original_link(src, dst, **kwargs)
+        return original_link(src, dst, **kwargs)
+
+    def fail_return_boundary(published):
+        nonlocal rejected
+        result = original_finish(published)
+        if not rejected:
+            rejected = True
+            raise OSError("simulated concurrent return-boundary failure")
+        return result
+
+    monkeypatch.setattr(module.os, "link", publish_same_temp_first)
+    monkeypatch.setattr(module, "_finish_published_file", fail_return_boundary)
+
+    with pytest.raises(ValueError, match="publish failed"):
+        module._publish_review_archive_transaction(cwd, "review.json", content)
+
+    assert competed is True
+    assert rejected is True
+    assert (archive / "review.json").read_bytes() == content
+    assert (archive / "review.json").stat().st_nlink == 1
+    assert not list(archive.glob(".*.tmp"))
+    assert not list(archive.glob(".*.rollback"))
+
+
 def test_review_import_success_reuses_one_lease_decision_and_emits_one_carrier(
     monkeypatch, capsys, state_dir, tmp_path,
 ):

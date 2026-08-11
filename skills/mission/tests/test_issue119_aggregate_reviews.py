@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import stat
 from pathlib import Path
 
 import pytest
@@ -341,6 +342,119 @@ def test_output_publisher_return_boundary_failure_restores_prior_state(
         assert not out.exists()
     assert not list(tmp_path.glob(".*.tmp"))
     assert not list(tmp_path.glob(".*.rollback"))
+
+
+def test_output_publisher_does_not_rollback_competitor_hardlink_of_its_temp(
+    tmp_path, monkeypatch,
+):
+    module = _load_mission_state()
+    out = tmp_path / "score.json"
+    content = b"competitor-published-output\n"
+    original_link = module.os.link
+    competed = False
+
+    def publish_same_temp_first(src, dst, **kwargs):
+        nonlocal competed
+        if dst == out.name and not competed:
+            competed = True
+            original_link(src, dst, **kwargs)
+        return original_link(src, dst, **kwargs)
+
+    monkeypatch.setattr(module.os, "link", publish_same_temp_first)
+
+    with pytest.raises(ValueError, match="appeared during publish"):
+        module._publish_output_transaction(out, content)
+
+    assert competed is True
+    assert out.read_bytes() == content
+    assert out.stat().st_nlink == 1
+    assert not list(tmp_path.glob(".*.tmp"))
+    assert not list(tmp_path.glob(".*.rollback"))
+
+
+@pytest.mark.parametrize(
+    "fault", ["temp-write", "temp-fsync", "link", "replace", "directory-fsync"],
+)
+def test_output_rollback_fault_never_loses_the_only_recoverable_copy(
+    fault, tmp_path, monkeypatch,
+):
+    module = _load_mission_state()
+    out = tmp_path / "score.json"
+    state = tmp_path / "state.json"
+    previous = b"previous-output\n"
+    replacement = b"replacement-output\n"
+    state.write_bytes(b"state-before\n")
+    out.write_bytes(previous)
+    published = module._publish_output_transaction(out, replacement)
+    original_write_temp = module._write_temp_at
+    original_fsync = module.os.fsync
+    faulted = False
+    directory_fsyncs = 0
+
+    def fail_previous_temp(directory_fd, name, content):
+        nonlocal faulted
+        if content == previous and not faulted:
+            faulted = True
+            raise OSError("simulated previous-output temp write failure")
+        return original_write_temp(directory_fd, name, content)
+
+    def fail_selected_fsync(fd):
+        nonlocal directory_fsyncs, faulted
+        is_directory = stat.S_ISDIR(module.os.fstat(fd).st_mode)
+        if is_directory:
+            directory_fsyncs += 1
+        if not faulted and (
+            (fault == "temp-fsync" and not is_directory)
+            or (fault == "directory-fsync" and is_directory and directory_fsyncs == 2)
+        ):
+            faulted = True
+            raise OSError(f"simulated {fault} failure")
+        return original_fsync(fd)
+
+    def fail_restore_link(*args, **kwargs):
+        nonlocal faulted
+        faulted = True
+        raise OSError("simulated restore link failure")
+
+    def fail_restore_replace(*args, **kwargs):
+        nonlocal faulted
+        faulted = True
+        raise OSError("simulated restore replace failure")
+
+    if fault == "temp-write":
+        monkeypatch.setattr(module, "_write_temp_at", fail_previous_temp)
+    elif fault in {"temp-fsync", "directory-fsync"}:
+        monkeypatch.setattr(module.os, "fsync", fail_selected_fsync)
+    elif fault == "link":
+        monkeypatch.setattr(module.os, "link", fail_restore_link)
+    else:
+        monkeypatch.setattr(module.os, "replace", fail_restore_replace)
+
+    if fault == "link":
+        module._rollback_published_file(published)
+        assert faulted is False
+    else:
+        with pytest.raises(ValueError, match="rollback failed"):
+            module._rollback_published_file(published)
+        assert faulted is True
+
+    contents = {
+        path.name: path.read_bytes()
+        for path in tmp_path.iterdir()
+        if path.is_file() and path != state
+    }
+    assert state.read_bytes() == b"state-before\n"
+    if fault in {"temp-write", "temp-fsync"}:
+        assert out.read_bytes() == replacement
+    elif fault == "link":
+        assert out.read_bytes() == previous
+        assert contents == {out.name: previous}
+    elif fault == "replace":
+        assert previous in contents.values()
+        assert replacement in contents.values()
+    else:
+        assert out.read_bytes() == previous
+        assert replacement in contents.values()
 
 
 @pytest.mark.parametrize("alias_kind", ["symlink-ancestor", "relative-parent"])
