@@ -1299,6 +1299,26 @@ def test_audit_reports_selected_specialist_without_invocation(tmp_path):
     assert any(f["code"] == "specialist-invocation-gap" for f in data["findings"])
 
 
+def test_audit_typed_checkpoint_does_not_count_terminal_status_without_invocation_id(tmp_path):
+    selection_id = "sel_0123456789abcdef0123456789abcdef"
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "typed.json",
+        started_at="2026-08-11T10:10:00Z", created_at_session="2026-08-11T10:10:00Z",
+        task_profile={"primary": "documentation"},
+        specialists_decision={"policy": "auto", "action": "select", "decision": "selected",
+            "reason_code": "candidate-selected", "lifecycle_state": "selected", "selection_id": selection_id},
+        specialists_selected=[{"role": "doc-writer", "skill": "documentation-provider", "selection_id": selection_id}],
+        specialist_invocations=[{"selection_id": selection_id, "role": "doc-writer",
+            "skill": "documentation-provider", "phase": "review", "mode": "skill-tool",
+            "status": "completed", "lifecycle_state": "terminal", "iteration": 1}],
+    )
+    result = subprocess.run([sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--json"],
+                            capture_output=True, text=True, check=True)
+    data = json.loads(result.stdout)
+    assert data["specialist_invocation_gap_count"] == 1
+    assert data["specialist_invocation_gap_breakdown"]["documentation-provider"] == 1
+
+
 def test_audit_ignores_untrusted_internal_gap_cache_field(tmp_path):
     _write_state(
         tmp_path / ".mission-state" / "sessions" / "sess-a.json",
