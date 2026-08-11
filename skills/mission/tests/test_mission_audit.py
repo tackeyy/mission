@@ -1299,6 +1299,41 @@ def test_audit_reports_selected_specialist_without_invocation(tmp_path):
     assert any(f["code"] == "specialist-invocation-gap" for f in data["findings"])
 
 
+def test_audit_typed_checkpoint_does_not_count_terminal_status_without_invocation_id(tmp_path):
+    selection_id = "sel_0123456789abcdef0123456789abcdef"
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "typed.json",
+        started_at="2026-08-11T10:10:00Z", created_at_session="2026-08-11T10:10:00Z",
+        task_profile={"primary": "documentation"},
+        specialists_decision={"policy": "auto", "action": "select", "decision": "selected",
+            "reason_code": "candidate-selected", "lifecycle_state": "selected", "selection_id": selection_id},
+        specialists_selected=[{"role": "doc-writer", "skill": "documentation-provider", "selection_id": selection_id}],
+        specialist_invocations=[{"selection_id": selection_id, "role": "doc-writer",
+            "skill": "documentation-provider", "phase": "review", "mode": "skill-tool",
+            "status": "completed", "lifecycle_state": "terminal", "iteration": 1}],
+    )
+    result = subprocess.run([sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--json"],
+                            capture_output=True, text=True, check=True)
+    data = json.loads(result.stdout)
+    assert data["specialist_invocation_gap_count"] == 1
+    assert data["specialist_invocation_gap_breakdown"]["documentation-provider"] == 1
+
+
+def test_audit_real_init_terminal_checkpoint_is_present_outside_active_window(run_cli, tmp_path):
+    run_cli(
+        "init", "audit checkpoint", "--complexity", "Complex", "--force-mission",
+        cwd=tmp_path, check=True,
+    )
+    state_path = tmp_path / ".mission-state" / "sessions" / "test.json"
+    state = json.loads(state_path.read_text())
+    for field in ("created_at_session", "started_at", "updated_at", "last_activity_at"):
+        state[field] = "2026-08-11T00:00:00Z"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    result = subprocess.run([sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--json"],
+                            capture_output=True, text=True, check=True)
+    assert json.loads(result.stdout)["missing_specialist_selection_checkpoint_count"] == 0
+
+
 def test_audit_ignores_untrusted_internal_gap_cache_field(tmp_path):
     _write_state(
         tmp_path / ".mission-state" / "sessions" / "sess-a.json",
@@ -2128,7 +2163,24 @@ def test_audit_does_not_report_legacy_missing_specialist_selection_checkpoint(tm
 
     data = json.loads(result.stdout)
     assert data["missing_specialist_selection_checkpoint_count"] == 0
+    assert data["legacy_missing_specialist_selection_checkpoint_count"] == 1
+    assert data["legacy_missing_specialist_selection_checkpoints"][0]["classification"] == "missing-legacy"
     assert all(f["code"] != "missing-specialist-selection-checkpoint" for f in data["findings"])
+
+
+def test_audit_counts_pending_new_checkpoint_as_present_not_missing(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "pending.json",
+        started_at="2026-08-11T10:00:00Z", created_at_session="2026-08-11T10:00:00Z",
+        task_profile={"primary": "backend"},
+        specialists_decision={"policy": "checkpoint", "action": "continue-core", "decision": "none",
+            "reason_code": "pending-evaluation", "lifecycle_state": "candidate",
+            "selection_id": "sel_0123456789abcdef0123456789abcdef"},
+    )
+    result = subprocess.run([sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--json"],
+                            capture_output=True, text=True, check=True)
+    data = json.loads(result.stdout)
+    assert data["missing_specialist_selection_checkpoint_count"] == 0
 
 
 def test_audit_does_not_require_specialist_selection_checkpoint_for_simple(tmp_path):

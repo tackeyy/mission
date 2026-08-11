@@ -10,6 +10,7 @@
   skills/mission/lib/mission_common.py
   skills/mission/lib/provider_eligibility.py
   skills/mission/lib/provider_public_contract.py
+  skills/mission/lib/specialist_lifecycle.py
   skills/mission/refs/specialist-registry.md (存在する場合)
   skills/mission/refs/self-improvement.md
   skills/mission/refs/changelog.md
@@ -31,6 +32,7 @@
   plugins/mission/skills/mission/lib/mission_common.py
   plugins/mission/skills/mission/lib/provider_eligibility.py
   plugins/mission/skills/mission/lib/provider_public_contract.py
+  plugins/mission/skills/mission/lib/specialist_lifecycle.py
   plugins/mission/skills/mission/refs/specialist-registry.md (存在する場合)
   plugins/mission/skills/mission/refs/self-improvement.md
   plugins/mission/skills/mission/refs/changelog.md
@@ -51,6 +53,7 @@
   cp skills/mission/lib/mission_common.py plugins/mission/skills/mission/lib/mission_common.py
   cp skills/mission/lib/provider_eligibility.py plugins/mission/skills/mission/lib/provider_eligibility.py
   cp skills/mission/lib/provider_public_contract.py plugins/mission/skills/mission/lib/provider_public_contract.py
+  cp skills/mission/lib/specialist_lifecycle.py plugins/mission/skills/mission/lib/specialist_lifecycle.py
   cp skills/mission/refs/specialist-registry.md plugins/mission/skills/mission/refs/specialist-registry.md
   cp skills/mission/refs/self-improvement.md plugins/mission/skills/mission/refs/self-improvement.md
   cp skills/mission/refs/changelog.md plugins/mission/skills/mission/refs/changelog.md
@@ -162,6 +165,10 @@ SYNC_PAIRS = [
     (
         REPO_ROOT / "skills" / "mission" / "lib" / "scoring_provenance.py",
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "scoring_provenance.py",
+    ),
+    (
+        REPO_ROOT / "skills" / "mission" / "lib" / "specialist_lifecycle.py",
+        REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "specialist_lifecycle.py",
     ),
 ]
 
@@ -328,6 +335,18 @@ def test_provider_public_contract_py_in_sync_and_importable():
     assert spec.loader is not None
     spec.loader.exec_module(module)
     module.validate_specialist_public_state({"specialists_candidates": []})
+
+
+def test_specialist_lifecycle_py_in_sync_and_importable():
+    """The checkpoint identity and transition validator ship in the plugin mirror."""
+    src, dst = _sync_pair_for("skills/mission/lib/specialist_lifecycle.py")
+    assert src.exists() and dst.exists()
+    assert _md5(src) == _md5(dst)
+    spec = importlib.util.spec_from_file_location("plugin_specialist_lifecycle", dst)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    assert module.new_selection_id().startswith("sel_")
 
 
 def test_plugin_mirror_specialist_recommend_cli_smoke(tmp_path):

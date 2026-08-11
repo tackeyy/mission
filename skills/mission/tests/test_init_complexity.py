@@ -91,7 +91,10 @@ def test_init_specialist_metadata_defaults(run_cli, tmp_path):
     assert s["specialists_candidates"] == []
     assert s["specialists_selected"] == []
     assert s["specialists_unavailable"] == []
-    assert s["specialists_decision"] == {}
+    assert s["specialists_decision"]["decision"] == "none"
+    assert s["specialists_decision"]["reason_code"] == "pending-evaluation"
+    assert s["specialists_decision"]["lifecycle_state"] == "terminal"
+    assert s["specialists_decision"]["selection_id"].startswith("sel_")
 
 
 def test_set_records_specialist_metadata_json(run_cli, tmp_path):

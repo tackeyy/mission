@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from specialist_lifecycle import (
+    SpecialistLifecycleError,
+    is_terminal_invocation,
+    validate_invocation_record,
+)
+
 
 TERMINAL_SPECIALIST_INVOCATION_STATUSES = {
     "completed",
@@ -69,6 +75,43 @@ def terminal_invoked_specialist_skills(state: dict[str, Any]) -> set[str]:
         if skill and status in TERMINAL_SPECIALIST_INVOCATION_STATUSES:
             skills.add(str(skill))
     return skills
+
+
+def selected_without_terminal_invocations(state: dict[str, Any]) -> list[dict[str, str]]:
+    """Return selected providers lacking terminal evidence for this checkpoint.
+
+    Legacy records carry no selection_id and retain the historical skill-only
+    accounting semantics; new checkpoints require the same selection identity.
+    """
+    decision = state.get("specialists_decision")
+    checkpoint_id = decision.get("selection_id") if isinstance(decision, dict) else None
+    terminal_pairs: set[tuple[str, str | None]] = set()
+    for invocation in state.get("specialist_invocations") or []:
+        if not isinstance(invocation, dict):
+            continue
+        skill = invocation.get("skill")
+        if checkpoint_id:
+            try:
+                validate_invocation_record(invocation)
+            except SpecialistLifecycleError:
+                is_terminal = False
+            else:
+                is_terminal = is_terminal_invocation(invocation)
+        else:
+            is_terminal = invocation.get("status") in TERMINAL_SPECIALIST_INVOCATION_STATUSES
+        if skill and is_terminal:
+            terminal_pairs.add((str(skill), invocation.get("selection_id")))
+    gaps: list[dict[str, str]] = []
+    for selected in state.get("specialists_selected") or []:
+        if not isinstance(selected, dict) or not selected.get("skill"):
+            continue
+        selected_id = selected.get("selection_id")
+        if checkpoint_id and selected_id != checkpoint_id:
+            continue
+        pair = (str(selected["skill"]), selected_id if checkpoint_id else None)
+        if pair not in terminal_pairs:
+            gaps.append({"skill": str(selected["skill"]), "role": str(selected.get("role") or selected["skill"])})
+    return gaps
 
 
 def applied_specialist_invocation_skills(state: dict[str, Any]) -> set[str]:
