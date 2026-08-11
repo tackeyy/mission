@@ -86,18 +86,9 @@ def test_duration_percentiles_censor_blocked_records_and_defer_unavailable_provi
         "status": "deferred",
         "schema": "mission-planning-provider-kpi/1",
     }
-    assert summary["measurement_observations"] == {
-        key: {"status": "unavailable", "value": None}
-        for key in (
-            "artifact_observation_coverage",
-            "activity_coverage",
-            "structured_score_provenance",
-            "reviewer_freshness",
-            "force_pass_rate",
-            "expected_gate_retry_count",
-            "group_closeout_completeness",
-        )
-    }
+    for key, observation in summary["measurement_observations"].items():
+        assert observation["status"] == "unavailable", key
+        assert observation.get("rate", observation.get("count", observation.get("value"))) is None, key
 
 
 def test_provider_kpi_payload_is_rejected_until_the_versioned_consumer_is_enabled():
@@ -108,6 +99,43 @@ def test_provider_kpi_payload_is_rejected_until_the_versioned_consumer_is_enable
             "human_quality_score": 4.3,
             "planning_provider_kpi": {"schema": "mission-planning-provider-kpi/1"},
         }])
+
+
+def test_kpi_aggregates_versioned_mission_observations_without_reading_state():
+    audit = _load()
+    observed = {
+        "artifact_observation_coverage": {"status": "observed", "numerator": 1, "denominator": 1},
+        "activity_coverage": {"status": "observed", "numerator": 30.0, "denominator": 60.0},
+        "structured_score_provenance": {"status": "observed", "numerator": 1, "denominator": 2},
+        "reviewer_freshness": {"status": "observed", "numerator": 2, "denominator": 2},
+        "force_pass_rate": {"status": "observed", "numerator": 0, "denominator": 1},
+        "expected_gate_retry_count": {"status": "observed", "count": 2},
+        "group_closeout_completeness": {"status": "unavailable", "value": None},
+    }
+    not_applicable = {
+        key: {"status": "not-applicable", "value": None}
+        for key in observed
+    }
+    summary = audit.summarize_benchmark_kpi([
+        {"arm": "mission", "human_quality_score": 4.3, "measurement_observations": observed},
+        {"arm": "claude_code_goal_command", "human_quality_score": 4.3, "measurement_observations": not_applicable},
+    ])
+
+    artifact = summary["measurement_observations"]["artifact_observation_coverage"]
+    assert artifact["numerator"] == 1
+    assert artifact["denominator"] == 1
+    assert artifact["rate"] == 1.0
+    assert artifact["not_applicable_records"] == 1
+    activity = summary["measurement_observations"]["activity_coverage"]
+    assert activity["rate"] == 0.5
+    assert summary["measurement_observations"]["expected_gate_retry_count"] == {
+        "status": "observed", "count": 2, "observed_records": 1,
+        "unavailable_records": 0, "not_applicable_records": 1,
+    }
+    assert summary["measurement_observations"]["group_closeout_completeness"] == {
+        "status": "unavailable", "value": None, "observed_records": 0,
+        "unavailable_records": 1, "not_applicable_records": 1,
+    }
 
 
 def test_runner_summary_publishes_benchmark_kpi_with_blocked_duration_censoring():

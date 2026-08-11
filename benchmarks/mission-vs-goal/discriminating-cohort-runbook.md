@@ -82,9 +82,12 @@ the record's `activity_coverage_ratio` and `review_tier`.
 The benchmark's `measurement_observations` explicitly lists
 `artifact_observation_coverage`, `activity_coverage`,
 `structured_score_provenance`, `reviewer_freshness`, `force_pass_rate`,
-`expected_gate_retry_count`, and `group_closeout_completeness`. They are
-`{status: unavailable, value: null}` until a runner supplies a versioned,
-already-derived observation; the benchmark reducer must not reconstruct them
+`expected_gate_retry_count`, and `group_closeout_completeness`. The mission
+runner supplies versioned observations from typed mission-state evidence for
+the first six fields; goal records explicitly mark them `not-applicable`.
+`group_closeout_completeness` remains unavailable until its producer exists.
+The benchmark reducer aggregates only each record's numerator/denominator or
+counter (zero denominator gives a null rate); it must not reconstruct values
 from raw mission state.
 
 Record results in `report.md` / `report.ja.md` with the standard unsafe-

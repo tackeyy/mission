@@ -95,6 +95,26 @@ def test_extract_mission_state_fields(tmp_path):
     _write_state(tmp_path, "abc.json", {
         "review_tier": "light", "iteration": 2, "complexity": "Simple",
         "passes": True, "halt_category": None,
+        "schema_version": 3, "terminal_outcome": "completed_pass",
+        "artifact_applicability": "producing",
+        "artifact": {"path": "reports/out.md", "digest": "a" * 64, "size": 1, "producer_run_id": "run-1"},
+        "artifact_lint_status": "clean",
+        "artifact_lint_identity": {"path": "reports/out.md", "digest": "a" * 64, "size": 1, "producer_run_id": "run-1"},
+        "activity_segments": [{
+            "kind": "active", "reason": "work", "phase": "executing", "duration_sec": 60.0,
+            "started_at": "2026-08-12T00:00:00Z", "ended_at": "2026-08-12T00:01:00Z",
+        }],
+        "score_history": [{"iteration": 2, "composite": 4.5, "score_provenance": {"score_source": "scoring-json"}}],
+        "reviewer_count": 2,
+        "review_evidence_refs": [
+            {"iteration": 2, "perspective": "reviewer-a"},
+            {"iteration": 2, "perspective": "reviewer-b"},
+        ],
+        "passes_forced": True,
+        "command_outcomes": [
+            {"event_id": "gate-1", "root_event_id": "gate-root", "attempt": 1, "command": "fixture", "outcome_kind": "expected-gate"},
+            {"event_id": "gate-2", "root_event_id": "gate-root", "attempt": 2, "retry_of": "gate-1", "command": "fixture", "outcome_kind": "expected-gate"},
+        ],
     })
     fields, note = module.extract_mission_state_fields(tmp_path)
     assert fields["mission_review_tier"] == "light"
@@ -102,6 +122,15 @@ def test_extract_mission_state_fields(tmp_path):
     assert fields["mission_complexity"] == "Simple"
     assert fields["mission_passes"] is True
     assert fields["mission_halt_category"] is None
+    assert fields["measurement_observations"] == {
+        "artifact_observation_coverage": {"status": "observed", "numerator": 1, "denominator": 1},
+        "activity_coverage": {"status": "observed", "numerator": 60.0, "denominator": 60.0},
+        "structured_score_provenance": {"status": "observed", "numerator": 1, "denominator": 1},
+        "reviewer_freshness": {"status": "observed", "numerator": 2, "denominator": 2},
+        "force_pass_rate": {"status": "observed", "numerator": 1, "denominator": 1},
+        "expected_gate_retry_count": {"status": "observed", "count": 1},
+        "group_closeout_completeness": {"status": "unavailable", "value": None},
+    }
     assert note is None
 
 
@@ -118,14 +147,22 @@ def test_extract_mission_state_picks_newest_session(tmp_path):
 
 def test_extract_mission_state_fail_open_on_missing_or_corrupt(tmp_path):
     module = _load("run_claude_goal_vs_mission.py")
+
+    def assert_fail_open(fields):
+        assert all(value is None for key, value in fields.items() if key != "measurement_observations")
+        assert all(
+            value == {"status": "unavailable", "value": None}
+            for value in fields["measurement_observations"].values()
+        )
+
     fields, note = module.extract_mission_state_fields(tmp_path)  # state なし
-    assert all(v is None for v in fields.values())
+    assert_fail_open(fields)
     assert note is not None
     d = tmp_path / ".mission-state" / "sessions"
     d.mkdir(parents=True)
     (d / "bad.json").write_text("{not json", encoding="utf-8")
     fields2, note2 = module.extract_mission_state_fields(tmp_path)
-    assert all(v is None for v in fields2.values())
+    assert_fail_open(fields2)
     assert note2 is not None
 
 
@@ -133,7 +170,8 @@ def test_schema_accepts_instrumentation_fields():
     schema = json.loads((BENCH / "result.schema.json").read_text())
     props = schema["properties"]
     for key in ("run_index", "mission_review_tier", "mission_iterations",
-                "mission_complexity", "mission_passes", "mission_halt_category"):
+                "mission_complexity", "mission_passes", "mission_halt_category",
+                "measurement_observations"):
         assert key in props, key
         # 既存 JSONL の後方互換: 新フィールドは required に含めない
         assert key not in schema["required"], key

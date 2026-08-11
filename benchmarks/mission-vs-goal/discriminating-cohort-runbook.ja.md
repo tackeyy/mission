@@ -112,8 +112,11 @@ benchmark の `measurement_observations` は
 `artifact_observation_coverage`、`activity_coverage`、
 `structured_score_provenance`、`reviewer_freshness`、`force_pass_rate`、
 `expected_gate_retry_count`、`group_closeout_completeness` を明示する。runner が
-versioned かつ既導出の observation を渡すまでは全て
-`{status: unavailable, value: null}` とし、reducer は raw mission state から再計算しない。
+mission arm の typed state evidence から最初の6項目を versioned observation として渡し、
+goal arm は明示的に `not-applicable` とする。`group_closeout_completeness` は producer
+未実装のため unavailable のままである。reducer は各 record に埋め込まれた
+numerator/denominator または counter だけを集計し（denominator 0 の rate は null）、
+raw mission state から再計算しない。
 
 ## Step 3: 採用判定ゲート
 

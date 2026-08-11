@@ -28,6 +28,9 @@ MEASUREMENT_OBSERVATION_FIELDS = (
     "expected_gate_retry_count",
     "group_closeout_completeness",
 )
+MEASUREMENT_RATE_FIELDS = MEASUREMENT_OBSERVATION_FIELDS[:5]
+MEASUREMENT_COUNTER_FIELDS = ("expected_gate_retry_count",)
+
 
 
 class BenchmarkAuditInputError(ValueError):
@@ -108,6 +111,86 @@ def _context(record: dict) -> tuple[str, int, int]:
     return tier, observed, eligible
 
 
+def _measurement_observations(records: list[dict]) -> dict:
+    """Aggregate only runner-supplied observations; never reopen mission state."""
+    output: dict[str, dict] = {}
+    for field in MEASUREMENT_RATE_FIELDS:
+        numerator = denominator = 0.0
+        observed = unavailable = not_applicable = 0
+        for record in records:
+            document = record.get("measurement_observations")
+            value = document.get(field) if isinstance(document, dict) else None
+            status = value.get("status") if isinstance(value, dict) else "unavailable"
+            if status == "not-applicable":
+                not_applicable += 1
+                continue
+            if status != "observed":
+                unavailable += 1
+                continue
+            raw_numerator = _finite_number(value.get("numerator"))
+            raw_denominator = _finite_number(value.get("denominator"))
+            if raw_numerator is None or raw_denominator is None or raw_numerator < 0 or raw_denominator < 0 or raw_numerator > raw_denominator:
+                unavailable += 1
+                continue
+            numerator += raw_numerator
+            denominator += raw_denominator
+            observed += 1
+        output[field] = {
+            "status": "observed" if observed else "unavailable",
+            "numerator": int(numerator) if numerator.is_integer() else numerator,
+            "denominator": int(denominator) if denominator.is_integer() else denominator,
+            "rate": round(numerator / denominator, 4) if denominator else None,
+            "observed_records": observed,
+            "unavailable_records": unavailable,
+            "not_applicable_records": not_applicable,
+        }
+    for field in MEASUREMENT_COUNTER_FIELDS:
+        count = observed = unavailable = not_applicable = 0
+        for record in records:
+            document = record.get("measurement_observations")
+            value = document.get(field) if isinstance(document, dict) else None
+            status = value.get("status") if isinstance(value, dict) else "unavailable"
+            if status == "not-applicable":
+                not_applicable += 1
+                continue
+            if status != "observed":
+                unavailable += 1
+                continue
+            raw_count = value.get("count")
+            if isinstance(raw_count, bool) or not isinstance(raw_count, int) or raw_count < 0:
+                unavailable += 1
+                continue
+            count += raw_count
+            observed += 1
+        output[field] = {
+            "status": "observed" if observed else "unavailable",
+            "count": count if observed else None,
+            "observed_records": observed,
+            "unavailable_records": unavailable,
+            "not_applicable_records": not_applicable,
+        }
+    for field in set(MEASUREMENT_OBSERVATION_FIELDS) - set(output):
+        observed = unavailable = not_applicable = 0
+        for record in records:
+            document = record.get("measurement_observations")
+            value = document.get(field) if isinstance(document, dict) else None
+            status = value.get("status") if isinstance(value, dict) else "unavailable"
+            if status == "not-applicable":
+                not_applicable += 1
+            elif status == "observed":
+                observed += 1
+            else:
+                unavailable += 1
+        output[field] = {
+            "status": "observed" if observed else "unavailable",
+            "value": None,
+            "observed_records": observed,
+            "unavailable_records": unavailable,
+            "not_applicable_records": not_applicable,
+        }
+    return {field: output[field] for field in MEASUREMENT_OBSERVATION_FIELDS}
+
+
 def summarize_benchmark_kpi(records: list[dict]) -> dict:
     """Return a JSON-safe benchmark KPI summary from synthetic runner records."""
     score_buckets = {
@@ -184,10 +267,5 @@ def summarize_benchmark_kpi(records: list[dict]) -> dict:
             "status": "deferred",
             "schema": "mission-planning-provider-kpi/1",
         },
-        # These fields belong to audited mission observations. Benchmark
-        # records do not carry raw state, so never reconstruct them here.
-        "measurement_observations": {
-            key: {"status": "unavailable", "value": None}
-            for key in MEASUREMENT_OBSERVATION_FIELDS
-        },
+        "measurement_observations": _measurement_observations(records),
     }
