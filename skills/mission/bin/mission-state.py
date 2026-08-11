@@ -8488,6 +8488,29 @@ class _PublishedFile(NamedTuple):
     previous_content: bytes | None = None
 
 
+class PublishedRollbackRecoveryError(ValueError):
+    """A rollback failed but left a content-verifiable recovery file."""
+
+    def __init__(self, recovery_ref: dict):
+        basename = recovery_ref.get("basename") if isinstance(recovery_ref, dict) else None
+        digest = recovery_ref.get("digest") if isinstance(recovery_ref, dict) else None
+        size = recovery_ref.get("size") if isinstance(recovery_ref, dict) else None
+        if (
+            not isinstance(recovery_ref, dict)
+            or set(recovery_ref) != {"basename", "digest", "size"}
+            or not isinstance(basename, str)
+            or re.fullmatch(r"[A-Za-z0-9._-]{1,200}", basename) is None
+            or not isinstance(digest, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or size < 0
+        ):
+            raise ValueError("published file recovery reference is invalid")
+        super().__init__("published file rollback requires recovery")
+        self.recovery_ref = dict(recovery_ref)
+
+
 class _PublishAttempt:
     """Tracks syscall outcome without confusing FileExists with our publish."""
 
@@ -8742,6 +8765,50 @@ def _restore_current_after_rejected_restore(
         return False
 
 
+def _publish_recovery_residue(
+    published: _PublishedFile,
+    temporary: str,
+    temporary_stat: os.stat_result,
+) -> dict:
+    assert published.previous_content is not None
+    digest = hashlib.sha256(published.previous_content).hexdigest()
+    safe_stem = re.sub(r"[^A-Za-z0-9._-]", "_", published.path.name)[:64] or "output"
+    recovery_name = ""
+    for attempt in range(32):
+        candidate = (
+            f".{safe_stem}.recovery-{digest[:16]}-"
+            f"{temporary_stat.st_dev:x}-{temporary_stat.st_ino:x}-{attempt}.json"
+        )
+        try:
+            os.link(
+                temporary,
+                candidate,
+                src_dir_fd=published.directory_fd,
+                dst_dir_fd=published.directory_fd,
+                follow_symlinks=False,
+            )
+            recovery_name = candidate
+            break
+        except FileExistsError:
+            continue
+    if not recovery_name:
+        raise ValueError("published file recovery name is unavailable")
+    os.unlink(temporary, dir_fd=published.directory_fd)
+    os.fsync(published.directory_fd)
+    _verify_restore_content_at(
+        published.directory_fd,
+        recovery_name,
+        temporary_stat,
+        published.previous_content,
+        allow_rename_ctime=True,
+    )
+    return {
+        "basename": recovery_name,
+        "digest": f"sha256:{digest}",
+        "size": len(published.previous_content),
+    }
+
+
 def _rollback_published_file(published: _PublishedFile) -> None:
     quarantine = ""
     previous_temporary = ""
@@ -8830,8 +8897,16 @@ def _rollback_published_file(published: _PublishedFile) -> None:
         os.unlink(quarantine, dir_fd=published.directory_fd)
         quarantine = ""
         os.fsync(published.directory_fd)
-    except OSError as exc:
-        raise ValueError("published file rollback failed") from exc
+    except Exception as exc:
+        if previous_temporary and previous_temporary_stat is not None:
+            recovery_ref = _publish_recovery_residue(
+                published, previous_temporary, previous_temporary_stat,
+            )
+            previous_temporary = ""
+            raise PublishedRollbackRecoveryError(recovery_ref) from exc
+        if isinstance(exc, OSError):
+            raise ValueError("published file rollback failed") from exc
+        raise
     finally:
         # A fully written .restore.*.tmp is intentionally recoverable after a
         # failed rollback; deleting the only previous-content copy loses data.
@@ -8889,6 +8964,8 @@ def _rollback_unreturned_publish(
     )
     try:
         _rollback_published_file(published)
+    except PublishedRollbackRecoveryError:
+        raise
     except ValueError as rollback_error:
         print(f"ERROR: unreturned publish rollback rejected: {rollback_error}", file=sys.stderr)
     return True
@@ -8913,6 +8990,8 @@ class _PublishedFilesTransaction:
         for published in reversed(self._published):
             try:
                 _rollback_published_file(published)
+            except PublishedRollbackRecoveryError:
+                raise
             except ValueError as rollback_error:
                 print(f"ERROR: published file rollback rejected: {rollback_error}", file=sys.stderr)
         return False
@@ -8975,16 +9054,19 @@ def _publish_output_transaction(
             try:
                 publish_attempt.attempted = True
                 with _defer_publish_signals():
-                    os.link(
-                        temporary,
-                        path.name,
-                        src_dir_fd=directory_fd,
-                        dst_dir_fd=directory_fd,
-                        follow_symlinks=False,
-                    )
+                    try:
+                        os.link(
+                            temporary,
+                            path.name,
+                            src_dir_fd=directory_fd,
+                            dst_dir_fd=directory_fd,
+                            follow_symlinks=False,
+                        )
+                    except FileExistsError:
+                        publish_attempt.conflict = True
+                        raise
                     publish_attempt.completed = True
             except FileExistsError as exc:
-                publish_attempt.conflict = True
                 raise ValueError("output appeared during publish") from exc
             os.unlink(temporary, dir_fd=directory_fd)
             temporary = ""
@@ -9088,16 +9170,19 @@ def _publish_review_archive_transaction(cwd: Path, name: str, content: bytes) ->
         try:
             publish_attempt.attempted = True
             with _defer_publish_signals():
-                os.link(
-                    temporary,
-                    name,
-                    src_dir_fd=directory_fd,
-                    dst_dir_fd=directory_fd,
-                    follow_symlinks=False,
-                )
+                try:
+                    os.link(
+                        temporary,
+                        name,
+                        src_dir_fd=directory_fd,
+                        dst_dir_fd=directory_fd,
+                        follow_symlinks=False,
+                    )
+                except FileExistsError:
+                    publish_attempt.conflict = True
+                    raise
                 publish_attempt.completed = True
         except FileExistsError:
-            publish_attempt.conflict = True
             os.unlink(temporary, dir_fd=directory_fd)
             temporary = ""
             concurrent_entry = _read_review_archive_at(directory_fd, name)
@@ -12903,6 +12988,22 @@ def main():
             "field_path": error.field_path,
         }, ensure_ascii=False))
         raise SystemExit(2)
+    except PublishedRollbackRecoveryError as error:
+        envelope = {
+            "ok": False,
+            "outcome_kind": "internal-error",
+            "recovery_ref": error.recovery_ref,
+        }
+        try:
+            outcome = _command_outcome(
+                args, str(getattr(args, "cmd", "unknown")), "internal-error",
+            )
+            _record_command_outcome_only(Path.cwd(), outcome)
+            envelope["outcome"] = outcome
+        except Exception:
+            pass
+        print(json.dumps(envelope, ensure_ascii=False))
+        raise SystemExit(1)
     except Exception:
         # Never serialize exception text or a traceback: CLI input and provider
         # output may be sensitive.  The typed outcome is the machine contract.

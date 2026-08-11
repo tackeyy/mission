@@ -464,6 +464,14 @@ meta/non-operation の証明は context 全体が `review/analyze/document/inspe
 - push-score は経路を問わず「全 items が 1.0 以下」を 0-1 正規化スケール混入として reject する (実ログ回帰: xai-cli cx-019efece が composite 0.96 = 4.8/5 を push した事例)
 - `--scoring-output` の保存先は `.mission-state/archive/iter-<N>-<mission_id先頭8>-scoring.md`。連続ランでの上書き消失 (2026-06-10 実害確認) を防ぐため mission_id を含む
 
+## review publish rollback の recovery residue
+
+既存 output の rollback が失敗して旧 bytes を自動復元できない場合、同じ親ディレクトリに
+`.basename.recovery-<digest prefix>-<identity nonce>-<attempt>.json` を 0600 / regular / link count 1 で残す。
+`--json` の失敗 envelope は top-level `recovery_ref` として `basename` / `digest` (`sha256:`) / `size` を返すが、永続 state と command outcome sidecar には locator を保存しない。
+
+回収時は command 実行時の output 親ディレクトリで `basename` を解決し、symlink を追わず regular file・0600・link count 1 を確認してから、bytes の size と SHA-256 が `recovery_ref` に一致することを検証する。一致した場合だけ旧 output として安全な別名へ copy/move する。削除も同じ dev/inode を再確認してから行い、不一致・欠落・複数候補は fail-closed とする。成功 rollback では recovery residue は残らない。
+
 ### GitHub Flow (issue 連携)
 
 GitHub issue に紐づくミッションは次のフローで進める:

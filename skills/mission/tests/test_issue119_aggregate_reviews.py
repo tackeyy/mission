@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -432,9 +433,15 @@ def test_output_rollback_fault_never_loses_the_only_recoverable_copy(
     else:
         monkeypatch.setattr(module.os, "replace", fail_restore_replace)
 
+    rollback_error = None
     if fault == "link":
         module._rollback_published_file(published)
         assert faulted is False
+    elif fault == "replace":
+        with pytest.raises(module.PublishedRollbackRecoveryError) as stopped:
+            module._rollback_published_file(published)
+        rollback_error = stopped.value
+        assert faulted is True
     else:
         with pytest.raises(ValueError, match="rollback failed"):
             module._rollback_published_file(published)
@@ -452,6 +459,18 @@ def test_output_rollback_fault_never_loses_the_only_recoverable_copy(
         assert out.read_bytes() == previous
         assert contents == {out.name: previous}
     elif fault == "replace":
+        assert rollback_error is not None
+        recovery_ref = rollback_error.recovery_ref
+        assert set(recovery_ref) == {"basename", "digest", "size"}
+        recovery = tmp_path / recovery_ref["basename"]
+        recovery_stat = recovery.stat()
+        assert stat.S_ISREG(recovery_stat.st_mode)
+        assert stat.S_IMODE(recovery_stat.st_mode) == 0o600
+        assert recovery_stat.st_nlink == 1
+        assert recovery.read_bytes() == previous
+        assert recovery_ref["digest"] == "sha256:" + hashlib.sha256(previous).hexdigest()
+        assert recovery_ref["size"] == len(previous)
+        assert not list(tmp_path.glob(".score.json.restore.*.tmp"))
         assert previous in contents.values()
         assert replacement in contents.values()
     else:
@@ -619,6 +638,90 @@ def test_real_sigint_cannot_escape_publish_ownership_rollback(tmp_path):
     _, status = os.waitpid(pid, 0)
     assert os.WIFEXITED(status)
     assert os.WEXITSTATUS(status) == 0
+
+
+@pytest.mark.parametrize("publisher", ["output", "archive"])
+def test_pending_sigint_cannot_replace_fileexists_conflict_ownership(
+    publisher, tmp_path,
+):
+    if not hasattr(os, "fork"):
+        pytest.skip("requires a POSIX child process")
+    pid = os.fork()
+    if pid == 0:
+        try:
+            module = _load_mission_state()
+            content = b"competitor-same-temp\n"
+            if publisher == "archive":
+                cwd = tmp_path / "project"
+                target = cwd / ".mission-state" / "archive" / "review.json"
+                target.parent.mkdir(parents=True)
+            else:
+                cwd = tmp_path
+                target = tmp_path / "score.json"
+            original_link = module.os.link
+
+            def competitor_then_pending_signal(src, dst, **kwargs):
+                original_link(src, dst, **kwargs)
+                os.kill(os.getpid(), signal.SIGINT)
+                raise FileExistsError("simulated competitor publish")
+
+            module.os.link = competitor_then_pending_signal
+            try:
+                if publisher == "archive":
+                    module._publish_review_archive_transaction(cwd, target.name, content)
+                else:
+                    module._publish_output_transaction(target, content)
+            except KeyboardInterrupt:
+                pass
+            else:
+                os._exit(20)
+            if not target.exists() or target.read_bytes() != content:
+                os._exit(21)
+            if target.stat().st_nlink != 1 or list(target.parent.glob(".*.tmp")):
+                os._exit(22)
+            os._exit(0)
+        except BaseException:
+            os._exit(23)
+
+    _, status = os.waitpid(pid, 0)
+    assert os.WIFEXITED(status)
+    assert os.WEXITSTATUS(status) == 0
+
+
+def test_main_internal_error_envelope_exposes_recovery_ref_without_sidecar_locator(
+    state_dir, monkeypatch, capsys,
+):
+    module = _load_mission_state()
+    recovery_ref = {
+        "basename": ".score.json.recovery-deadbeef-1-2-0.json",
+        "digest": "sha256:" + "a" * 64,
+        "size": 16,
+    }
+    args = argparse.Namespace(
+        cmd="aggregate-reviews", json=True, command_outcome_tracking=True,
+        command_outcome_emitted=False, event_id="recovery-envelope",
+        root_event_id=None, attempt=1, retry_of=None,
+    )
+
+    def fail_with_recovery(_args):
+        raise module.PublishedRollbackRecoveryError(recovery_ref)
+
+    args.func = fail_with_recovery
+    parser = argparse.Namespace(parse_args=lambda: args)
+    monkeypatch.setattr(module, "_build_parser", lambda: parser)
+    monkeypatch.chdir(state_dir.parent)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+
+    with pytest.raises(SystemExit) as stopped:
+        module.main()
+
+    assert stopped.value.code == 1
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["recovery_ref"] == recovery_ref
+    sidecar = next((state_dir / "telemetry" / "command-outcomes").glob("*.json"))
+    record = json.loads(sidecar.read_text(encoding="utf-8"))["records"][-1]
+    assert "recovery_ref" not in record
+    assert "path" not in json.dumps(record)
 
 
 @pytest.mark.parametrize("alias_kind", ["symlink-ancestor", "relative-parent"])
