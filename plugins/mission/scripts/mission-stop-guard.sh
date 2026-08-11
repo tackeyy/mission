@@ -341,8 +341,10 @@ if [ -d "$SESSIONS_DIR" ]; then
       _psid=$(jq -r '.session_id // empty' "$_sf" 2>/dev/null || echo "")
       [ -z "$_psid" ] && _psid=$(basename "$_sf" .json)
       _piref=$(jq -r '.issue_ref // empty' "$_sf" 2>/dev/null || echo "")
+      _pgroup=$(jq -r '.logical_group_id // empty' "$_sf" 2>/dev/null || echo "")
       _entry="$_psid"
       [ -n "$_piref" ] && _entry="${_psid}(#${_piref})"
+      [ -n "$_pgroup" ] && _entry="${_entry}{group=$_pgroup}"
       if [ -z "$PENDING_BREAKDOWN" ]; then
         PENDING_BREAKDOWN="$_entry"
       else
