@@ -1,6 +1,7 @@
 """push-score サブコマンドのテスト (T1: RED → T2: GREEN)."""
 
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -109,6 +110,58 @@ def test_push_score_appends_to_empty_history(state_dir, run_cli, read_state):
     assert entry["min_item"] == 2.67
     assert entry["items"]["mission_achievement"] == 3.67
     assert s.get("command_outcomes", []) == []
+
+
+def test_push_score_rejects_foreign_lease_before_scoring_archive_publish(
+    state_dir, run_cli, tmp_path,
+):
+    items = {
+        "mission_achievement": 4.5, "accuracy": 4.4,
+        "completeness": 4.3, "usability": 4.2,
+    }
+    _, review_ref, claim = write_canonical_review_aggregate(
+        state_dir.parent, [canonical_review(items)], iteration=1,
+        name_prefix="lease-preflight",
+    )
+    score = tmp_path / "score.json"
+    score.write_text(json.dumps({
+        "items": claim["items"], "open_high": claim["open_high"],
+        "review_agreement": claim["review_agreement"],
+        "agreement_detail": claim["agreement_detail"],
+        "findings_evidence_path": review_ref["path"],
+        "score_provenance": {
+            "score_source": "scoring-json", "review_evidence_ref": review_ref,
+            "revision_scope": review_ref["revision_scope"],
+        },
+    }), encoding="utf-8")
+    state_path = state_dir / "sessions" / "test.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state.update({
+        "owner_session_id": "foreign", "lease_id": "foreign-lease",
+        "fencing_epoch": 7, "lease_expires_at": "2099-01-01T00:00:00Z",
+    })
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    state_before = state_path.read_bytes()
+    archive = state_dir / "archive"
+    archive_before = {path.name: path.read_bytes() for path in archive.iterdir()}
+
+    result = run_cli(
+        "push-score", "--iteration", "1", "--scoring-json", str(score),
+        "--event-id", "push-lease-gate", cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 2
+    payload = json.loads(result.stdout)
+    assert payload["outcome_kind"] == "expected-gate"
+    assert payload["outcome"]["command"] == "push-score"
+    assert payload["outcome"]["event_id"] == "push-lease-gate"
+    assert state_path.read_bytes() == state_before
+    assert {path.name: path.read_bytes() for path in archive.iterdir()} == archive_before
+    token = hashlib.sha256(b"test").hexdigest()[:16]
+    sidecar = json.loads(
+        (state_dir / "telemetry" / "command-outcomes" / f"{token}.json").read_text()
+    )
+    assert sidecar["records"] == [payload["outcome"]]
 
 
 def test_push_score_appends_multiple_in_order(state_dir, run_cli, read_state):

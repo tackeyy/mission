@@ -9312,7 +9312,6 @@ def cmd_aggregate_reviews(args):
         ]
         if getattr(args, "record_outcome", True):
             _append_command_outcome(data, outcome)
-        atomic_write_json(sf, data)
         context_mode_expected = _expected_context_mode(data, args.iteration)
         context_manifest_generated = _context_manifest_generated(data, args.iteration)
         if context_mode_expected == "bounded" and not context_manifest_generated:
@@ -9348,16 +9347,12 @@ def cmd_aggregate_reviews(args):
         evidence_content = (json.dumps(evidence, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
         evidence_digest = "sha256:" + hashlib.sha256(evidence_content).hexdigest()
         evidence_path = state_dir(cwd) / "archive" / f"iter-{args.iteration}-{mission8}-reviews-{evidence_digest[7:23]}.json"
-        evidence_path.parent.mkdir(parents=True, exist_ok=True)
-        if evidence_path.exists() and _sha256_file(evidence_path) != evidence_digest[7:]:
-            print("ERROR: immutable review archive collision", file=sys.stderr)
-            sys.exit(2)
-        if not evidence_path.exists():
-            atomic_write_bytes(evidence_path, evidence_content)
+        evidence_existed = evidence_path.exists()
         evidence_ref_path = str(evidence_path.relative_to(cwd))
 
         out_path = Path(args.out) if args.out else Path("/tmp") / f"mission-scorer-iter-{args.iteration}-{mission8}.json"
-        out_path.parent.mkdir(parents=True, exist_ok=True)
+        if out_path.absolute() == evidence_path.absolute():
+            raise CommandOutcomeExit(2, "invalid-input")
         payload = {
             "items": items,
             "notes": f"aggregate-reviews: {len(adjusted_scores)} scoring reviewer(s), {len(reviews) - len(scoring_reviews)} findings-only reviewer(s)",
@@ -9376,7 +9371,41 @@ def cmd_aggregate_reviews(args):
                 "revision_scope": revision_scope,
             },
         }
-        out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        payload_content = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        previous_out: bytes | None = None
+        out_existed = out_path.exists() or out_path.is_symlink()
+        archive_created = out_published = False
+        try:
+            destination = _publish_review_import_evidence(
+                cwd, evidence_path.name, evidence_content,
+            )
+            if destination != evidence_path:
+                raise ValueError("review aggregate archive path mismatch")
+            archive_created = not evidence_existed
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            if out_existed:
+                previous_out = _read_strict_review_file(out_path)
+            atomic_write_bytes(out_path, payload_content)
+            out_published = True
+            if _read_strict_review_file(out_path) != payload_content:
+                raise OSError("aggregate scoring output verification failed")
+            atomic_write_json(sf, data)
+        except BaseException as exc:
+            if out_published:
+                if out_existed and previous_out is not None:
+                    atomic_write_bytes(out_path, previous_out)
+                elif not out_existed:
+                    out_path.unlink(missing_ok=True)
+            if archive_created:
+                try:
+                    if _read_strict_review_file(evidence_path) == evidence_content:
+                        evidence_path.unlink()
+                except (OSError, ValueError):
+                    pass
+            if isinstance(exc, ValueError):
+                print(f"ERROR: aggregate output rejected: {exc}", file=sys.stderr)
+                raise CommandOutcomeExit(2, "invalid-input") from exc
+            raise
 
     result = {
         "ok": True,
@@ -9432,6 +9461,21 @@ def _validate_consensus_policy(data: dict, items: dict) -> None:
     if set(items) != CANONICAL_SCORE_KEYS:
         print("ERROR: 新規 score items は4つの正規採点軸だけで指定してください。", file=sys.stderr)
         sys.exit(2)
+
+
+def _require_score_resubmit_reason(data: dict, iteration: int, reason: str | None) -> None:
+    """Reject a duplicate score before any aggregate or archive side effect."""
+    already_scored = any(
+        isinstance(entry, dict) and entry.get("iteration") == iteration
+        for entry in data.get("score_history", [])
+    )
+    if already_scored and not reason:
+        print(
+            f"ERROR: iteration {iteration} は既に採点済みです。"
+            ' 同一 iteration を再 push する場合は --resubmit-reason "<理由>" を指定してください (#122)。',
+            file=sys.stderr,
+        )
+        raise CommandOutcomeExit(2, "expected-gate")
 
 
 def cmd_context_manifest(args):
@@ -9565,6 +9609,7 @@ def cmd_push_score(args):
 
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
+        lease_decision = _enforce_session_lease_for_write(sf, data)
         _validate_consensus_policy(data, items)
         try:
             provenance = _validate_provenance(
@@ -9594,16 +9639,7 @@ def cmd_push_score(args):
         # #122: 同一 iteration の再 push は gate 迂回の温床 (低スコア push 後に
         # 高スコアで上書き)。再 push には差し替え理由を必須化する。旧 entry は履歴として残す。
         resubmit_reason = getattr(args, "resubmit_reason", None)
-        already_scored = any(
-            h.get("iteration") == args.iteration for h in data.get("score_history", [])
-        )
-        if already_scored and not resubmit_reason:
-            print(
-                f"ERROR: iteration {args.iteration} は既に採点済みです。"
-                ' 同一 iteration を再 push する場合は --resubmit-reason "<理由>" を指定してください (#122)。',
-                file=sys.stderr,
-            )
-            raise CommandOutcomeExit(2, "expected-gate")
+        _require_score_resubmit_reason(data, args.iteration, resubmit_reason)
         entry = {
             "iteration": args.iteration,
             "composite": args.composite,
@@ -9672,7 +9708,7 @@ def cmd_push_score(args):
         data["schema_version"] = SCHEMA_VERSION
         data = stamp_metadata(data, cwd)
         backup_state(sf)
-        atomic_write_json(sf, data)
+        atomic_write_json(sf, data, lease_decision=lease_decision)
 
     if args.scoring_json:
         archived_to = scoring_json_archived_to  # StateLock 内で archive 済み (dangling path 防止)
@@ -9695,6 +9731,17 @@ def cmd_review_finalize(args):
     集計が exit 非0 なら push-score には到達せず、score_history は不変 (atomic)。
     """
     outcome = _command_outcome(args, "review-finalize", "ok")
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if sf.exists():
+        try:
+            with StateLock(lock_file(cwd)):
+                _require_score_resubmit_reason(
+                    json.loads(sf.read_text()), args.iteration, args.resubmit_reason,
+                )
+        except SystemExit as error:
+            _emit_finalize_failure(args, "", error)
+            raise error
     agg_args = argparse.Namespace(
         iteration=args.iteration,
         input=args.input,
@@ -11819,7 +11866,8 @@ def _build_parser():
                          help="未解決の High 指摘件数 (mark-passes の gate で使用)。--scoring-json に open_high があればそちらを優先")
     p_score.add_argument("--resubmit-reason", default=None, dest="resubmit_reason",
                          help="同一 iteration を再 push する際に必須 (#122)。理由を score_history entry の resubmit_reason に記録する")
-    p_score.set_defaults(func=cmd_push_score)
+    _add_command_lineage_arguments(p_score)
+    p_score.set_defaults(func=cmd_push_score, command_outcome_tracking=True, json=True)
 
     p_manual_score = sub.add_parser(
         "manual-score-capture",

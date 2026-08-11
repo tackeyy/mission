@@ -374,6 +374,40 @@ def test_review_finalize_push_failure_after_aggregate_keeps_history(state_dir, r
     assert sidecar["records"] == [payload["outcome"]]
 
 
+def test_review_finalize_resubmit_gate_precedes_aggregate_side_effects(
+    state_dir, run_cli, tmp_path,
+):
+    a, b = _two_reviews(tmp_path)
+    out = tmp_path / "score.json"
+    first = run_cli(
+        "review-finalize", "--iteration", "1", "--input", str(a), "--input", str(b),
+        "--out", str(out), *_reviewer_windows(), cwd=state_dir.parent,
+        env_extra={"MISSION_STATE_NOW": "2026-08-11T00:00:00Z"}, check=True,
+    )
+    assert first.returncode == 0
+    state_path = state_dir / "sessions" / "test.json"
+    state_before = state_path.read_bytes()
+    archive_before = {
+        path.name: path.read_bytes() for path in (state_dir / "archive").iterdir()
+    }
+    out_before = out.read_bytes()
+
+    result = run_cli(
+        "review-finalize", "--iteration", "1", "--input", str(a), "--input", str(b),
+        "--out", str(out), *_reviewer_windows(), "--event-id", "early-resubmit-gate",
+        cwd=state_dir.parent,
+        env_extra={"MISSION_STATE_NOW": "2026-08-11T00:01:00Z"},
+    )
+
+    assert result.returncode == 2
+    payload = json.loads(result.stdout)
+    assert payload["outcome_kind"] == "expected-gate"
+    assert payload["outcome"]["command"] == "review-finalize"
+    assert state_path.read_bytes() == state_before
+    assert {path.name: path.read_bytes() for path in (state_dir / "archive").iterdir()} == archive_before
+    assert out.read_bytes() == out_before
+
+
 def test_review_finalize_push_invalid_input_emits_own_outcome_once(
     state_dir, run_cli, read_state, tmp_path,
 ):
