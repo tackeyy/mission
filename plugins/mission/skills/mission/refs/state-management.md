@@ -295,17 +295,31 @@ MISSION_SESSION_ID=<base>-m<issue>
 #### 手順
 
 ```bash
+# --- group manifest を child 起動前に固定 ---
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py \
+  parallel-init --group-id group-824-825 --issue-ref 824 --issue-ref 825
+
 # --- 論理セッション A: Issue #824 ---
 MISSION_SESSION_ID=cc-${CLAUDE_CODE_SESSION_ID}-m824 \
   python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py \
-    init "Issue #824 の実装" --issue-ref 824 --complexity Standard
+    init "Issue #824 の実装" --issue-ref 824 --complexity Standard \
+      --logical-group-id group-824-825
 # stdout の lease_id を保存: LEASE_A=$(... | jq -r .lease_id)
 
 # --- 論理セッション B: Issue #825 (並列) ---
 MISSION_SESSION_ID=cc-${CLAUDE_CODE_SESSION_ID}-m825 \
   python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py \
-    init "Issue #825 の実装" --issue-ref 825 --complexity Standard
+    init "Issue #825 の実装" --issue-ref 825 --complexity Standard \
+      --logical-group-id group-824-825
 # stdout の lease_id を保存: LEASE_B=$(... | jq -r .lease_id)
+
+# planned/running/waiting/pass/halt と証跡 coverage を確認
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py \
+  parallel-status --group-id group-824-825
+
+# 全 planned child が terminal かつ lease 解放済みの時だけ group を終端化
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py \
+  parallel-closeout --group-id group-824-825
 ```
 
 #### 注意事項
@@ -313,6 +327,7 @@ MISSION_SESSION_ID=cc-${CLAUDE_CODE_SESSION_ID}-m825 \
 - **lease の独立**: 各論理セッションの `init` は独立した `lease_id` を生成する。後続の mutating command (`push-score`, `mark-passes` 等) には **自セッションの LEASE_ID を渡す**。別セッションの LEASE_ID を渡すと fencing 違反で exit 2。
 - **closeout の独立**: `push-score` と `mark-passes` はセッションごとに実行する。片方の `mark-passes` は他方の state に影響しない。
 - **stop-guard の挙動**: 各論理セッションの Stop hook は自 session_id にマッチする state だけをブロック対象にする。片方が `mark-passes` (passes=true) になると、そちらのブロックは解除される。ブロック中の block reason には未達セッションの session_id / issue_ref の内訳が表示される。
+- **group closeout**: `parallel-closeout` は missing/waiting/running child、重複 issue_ref、manifest 外の late child、active lease が 1 件でもあれば manifest を変更せず exit 2。成功時は child の artifact / activity / review provenance coverage と pass/halt outcome を manifest に保存する。
 - **重複 init 警告**: 同一 issue_ref を複数の論理セッションが init すると `WARNING [S3]` が stderr に出る (ブロックはしない)。company-os 側 claim protocol と二重の防壁として機能する。
 - **assumptions の分離**: 各セッションの `assumptions_path` は `sessions/<sid>-assumptions.md` に自動設定される。固定パスに直書きしない。
 

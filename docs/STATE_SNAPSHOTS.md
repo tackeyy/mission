@@ -19,6 +19,13 @@ Default audit statistics use only the latest unambiguous review generation.
 Use `--lineage` when raw review generations and explicit host/root/parent/child
 correlation resolution are needed; it never guesses missing links.
 
+Parallel child work uses `mission-state.py parallel-init --group-id <opaque> --issue-ref <ref>`
+followed by child `init --logical-group-id <opaque>`. Use `parallel-status` before
+`parallel-closeout`; closeout requires every planned child terminal and no active lease.
+Status classifies each planned child as planned, running, waiting, pass, or halt and reports
+artifact, activity, and review-provenance coverage. Unplanned or duplicate children are
+fail-closed; a rejected closeout does not rewrite the manifest.
+
 `--privacy` replaces configured root prefixes in Markdown and JSON output with
 anonymous `root-N` labels. Its default snapshot persists the same anonymous
 root IDs, root-inventory content digests, canonical root identity digests, and
