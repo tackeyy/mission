@@ -318,6 +318,7 @@ if [ -d "$SESSIONS_DIR" ]; then
     # 同プロジェクトの全未達セッションを走査して内訳を構築 (最大 5 件)。
     PENDING_BREAKDOWN=""
     _PENDING_COUNT=0
+    _PENDING_GROUPS="|"
     _CWD_REAL=$(cd "$CWD" 2>/dev/null && pwd -P || echo "$CWD")
     for _sf in "$SESSIONS_DIR"/*.json; do
       [ -f "$_sf" ] || continue
@@ -333,18 +334,25 @@ if [ -d "$SESSIONS_DIR" ]; then
         _ROOT_REAL=$(cd "$_sr" 2>/dev/null && pwd -P || echo "$_sr")
         [ "$_CWD_REAL" != "$_ROOT_REAL" ] && continue
       fi
+      _psid=$(jq -r '.session_id // empty' "$_sf" 2>/dev/null || echo "")
+      [ -z "$_psid" ] && _psid=$(basename "$_sf" .json)
+      _piref=$(jq -r '.issue_ref // empty' "$_sf" 2>/dev/null || echo "")
+      _pgroup=$(jq -r '.logical_group_id // empty' "$_sf" 2>/dev/null || echo "")
+      if [ -n "$_pgroup" ]; then
+        case "$_PENDING_GROUPS" in
+          *"|${_pgroup}|"*) continue ;;
+        esac
+        _PENDING_GROUPS="${_PENDING_GROUPS}${_pgroup}|"
+        _entry="group:${_pgroup}(incomplete)"
+      else
+        _entry="$_psid"
+        [ -n "$_piref" ] && _entry="${_psid}(#${_piref})"
+      fi
       _PENDING_COUNT=$(( _PENDING_COUNT + 1 ))
       if [ "$_PENDING_COUNT" -gt 5 ]; then
         PENDING_BREAKDOWN="${PENDING_BREAKDOWN},..."
         break
       fi
-      _psid=$(jq -r '.session_id // empty' "$_sf" 2>/dev/null || echo "")
-      [ -z "$_psid" ] && _psid=$(basename "$_sf" .json)
-      _piref=$(jq -r '.issue_ref // empty' "$_sf" 2>/dev/null || echo "")
-      _pgroup=$(jq -r '.logical_group_id // empty' "$_sf" 2>/dev/null || echo "")
-      _entry="$_psid"
-      [ -n "$_piref" ] && _entry="${_psid}(#${_piref})"
-      [ -n "$_pgroup" ] && _entry="${_entry}{group=$_pgroup}"
       if [ -z "$PENDING_BREAKDOWN" ]; then
         PENDING_BREAKDOWN="$_entry"
       else

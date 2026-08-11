@@ -21,6 +21,9 @@ generation と明示的な host/root/parent/child correlation の解決状況を
 並列 child は `parallel-init --group-id <opaque> --issue-ref <ref>` でgroupを作成し、
 child `init --logical-group-id <opaque>` と結合します。`parallel-status` で確認後に
 `parallel-closeout` を実行します。全planned childのterminal化とactive lease解放が必須です。
+status は各childを planned / running / waiting / pass / halt に分類し、artifact・activity・
+review provenance coverageを返します。manifest外または重複childはfail-closedとし、
+closeout拒否時はmanifestを書き換えません。
 
 `--privacy` は Markdown / JSON output 内の configured root prefix を匿名の `root-N`
 label へ置換します。既定snapshotにもsource pathではなく匿名root ID、root inventory由来の

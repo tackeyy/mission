@@ -6287,106 +6287,402 @@ def cmd_init(args):
     }))
 
 
+PARALLEL_GROUP_SCHEMA = "mission-parallel-group/1"
+PARALLEL_GROUP_MAX_BYTES = 256 * 1024
+
+
+def _parallel_file_identity(metadata: os.stat_result) -> tuple:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _parallel_manifest_path(cwd: Path, group_id: str) -> Path:
+    return session_dir(cwd) / f"{group_id}.group.json"
+
+
+def _read_parallel_manifest(path: Path) -> tuple[bytes, tuple]:
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(os.fspath(path), flags)
+        try:
+            before = os.fstat(fd)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_nlink != 1
+                or before.st_size < 1
+                or before.st_size > PARALLEL_GROUP_MAX_BYTES
+            ):
+                raise ValueError("parallel group manifest is unsafe")
+            remaining = before.st_size
+            chunks = []
+            while remaining:
+                chunk = os.read(fd, remaining)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            payload = b"".join(chunks)
+            after = os.fstat(fd)
+            named = os.stat(path, follow_symlinks=False)
+            identity = _parallel_file_identity(before)
+            if (
+                len(payload) != before.st_size
+                or os.read(fd, 1)
+                or _parallel_file_identity(after) != identity
+                or _parallel_file_identity(named) != identity
+            ):
+                raise ValueError("parallel group manifest changed while being read")
+            return payload, identity
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise ValueError("parallel group manifest is missing or unsafe") from exc
+
+
+def _validate_parallel_manifest(payload: object, group_id: str) -> dict:
+    if not isinstance(payload, dict) or payload.get("schema") != PARALLEL_GROUP_SCHEMA:
+        raise ValueError("parallel group manifest has an invalid schema")
+    allowed = {
+        "schema",
+        "group_id",
+        "created_at",
+        "planned_children",
+        "status",
+        "coverage",
+        "outcome",
+        "closed_at",
+    }
+    if set(payload) - allowed or payload.get("group_id") != group_id:
+        raise ValueError("parallel group manifest is malformed")
+    if parse_iso_datetime(payload.get("created_at")) is None:
+        raise ValueError("parallel group manifest created_at is invalid")
+    planned = payload.get("planned_children")
+    if not isinstance(planned, list) or not planned:
+        raise ValueError("parallel group manifest planned children are invalid")
+    normalized = []
+    for item in planned:
+        if not isinstance(item, dict) or set(item) != {"issue_ref"}:
+            raise ValueError("parallel group manifest child is invalid")
+        key = _normalize_issue_ref(item.get("issue_ref"))
+        if key is None:
+            raise ValueError("parallel group manifest child issue_ref is invalid")
+        normalized.append(key)
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("parallel group manifest child issue_ref values are duplicated")
+    status = payload.get("status")
+    if status not in {"running", "terminal"} or not isinstance(payload.get("coverage"), dict):
+        raise ValueError("parallel group manifest status is invalid")
+    if status == "terminal":
+        if payload.get("outcome") not in {"pass", "halt"} or parse_iso_datetime(payload.get("closed_at")) is None:
+            raise ValueError("parallel group terminal metadata is invalid")
+    elif "outcome" in payload or "closed_at" in payload:
+        raise ValueError("running parallel group cannot contain terminal metadata")
+    return payload
+
+
+def _parallel_manifest(cwd: Path, group_id: str) -> tuple[Path, dict, tuple]:
+    path = _parallel_manifest_path(cwd, group_id)
+    content, identity = _read_parallel_manifest(path)
+    try:
+        parsed = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("parallel group manifest is malformed") from exc
+    return path, _validate_parallel_manifest(parsed, group_id), identity
+
+
+def _write_parallel_temp(directory_fd: int, payload: bytes) -> str:
+    name = f".parallel-{secrets.token_hex(12)}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(name, flags, 0o600, dir_fd=directory_fd)
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("parallel group manifest write made no progress")
+            view = view[written:]
+        os.fsync(fd)
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_size != len(payload):
+            raise ValueError("parallel group manifest temporary file is unsafe")
+    except BaseException:
+        os.close(fd)
+        with contextlib.suppress(OSError):
+            os.unlink(name, dir_fd=directory_fd)
+        raise
+    os.close(fd)
+    return name
+
+
+def _create_parallel_manifest(path: Path, manifest: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    directory_fd = os.open(
+        os.fspath(path.parent),
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    temporary = None
+    try:
+        parent_before = os.fstat(directory_fd)
+        payload = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        temporary = _write_parallel_temp(directory_fd, payload)
+        try:
+            os.link(
+                temporary,
+                path.name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError as exc:
+            raise ValueError("parallel group manifest already exists") from exc
+        os.unlink(temporary, dir_fd=directory_fd)
+        temporary = None
+        os.fsync(directory_fd)
+        parent_after = os.fstat(directory_fd)
+        if (parent_before.st_dev, parent_before.st_ino) != (parent_after.st_dev, parent_after.st_ino):
+            raise ValueError("parallel group manifest directory changed")
+        _parallel_manifest(path.parent.parent.parent, manifest["group_id"])
+    finally:
+        if temporary is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary, dir_fd=directory_fd)
+        os.close(directory_fd)
+
+
+def _replace_parallel_manifest(path: Path, manifest: dict, expected_identity: tuple) -> None:
+    directory_fd = os.open(
+        os.fspath(path.parent),
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    temporary = None
+    try:
+        current = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+        if _parallel_file_identity(current) != expected_identity:
+            raise ValueError("parallel group manifest changed before closeout")
+        payload = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        temporary = _write_parallel_temp(directory_fd, payload)
+        current = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+        if _parallel_file_identity(current) != expected_identity:
+            raise ValueError("parallel group manifest changed before publish")
+        os.replace(temporary, path.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        temporary = None
+        os.fsync(directory_fd)
+    finally:
+        if temporary is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary, dir_fd=directory_fd)
+        os.close(directory_fd)
+
+
 def cmd_parallel_init(args):
     """Create one immutable planned-child manifest before parallel child init."""
     cwd = Path.cwd()
     try:
         group_id = opaque_token(args.group_id)
-    except ValueError as exc:
+        refs = list(args.issue_ref or [])
+        keys = [_normalize_issue_ref(ref) for ref in refs]
+        if not refs or any(key is None for key in keys) or len(set(keys)) != len(keys):
+            raise ValueError("planned issue_ref values must be unique")
+        manifest = {
+            "schema": PARALLEL_GROUP_SCHEMA,
+            "group_id": group_id,
+            "created_at": iso_now(),
+            "planned_children": [{"issue_ref": ref} for ref in refs],
+            "status": "running",
+            "coverage": {},
+        }
+        with StateLock(lock_file(cwd)):
+            _create_parallel_manifest(_parallel_manifest_path(cwd, group_id), manifest)
+    except (OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
-    refs = list(args.issue_ref or [])
-    keys = [_normalize_issue_ref(ref) for ref in refs]
-    if not refs or any(key is None for key in keys) or len(set(keys)) != len(keys):
-        print("ERROR: planned issue_ref values must be unique", file=sys.stderr)
-        sys.exit(2)
-    path = session_dir(cwd) / f"{group_id}.group.json"
-    manifest = {
-        "schema": "mission-parallel-group/1", "group_id": group_id,
-        "created_at": iso_now(),
-        "planned_children": [{"issue_ref": ref} for ref in refs],
-        "status": "running", "coverage": {},
+    print(json.dumps({"ok": True, "manifest": str(_parallel_manifest_path(cwd, group_id)), "group_id": group_id}))
+
+
+def _parallel_artifact_observed(state: dict) -> bool:
+    applicability = state.get("artifact_applicability")
+    if applicability == "not-applicable":
+        return True
+    artifact = state.get("artifact")
+    return (
+        applicability == "producing"
+        and isinstance(artifact, dict)
+        and isinstance(artifact.get("path"), str)
+        and bool(artifact["path"].strip())
+    )
+
+
+def _parallel_activity_observed(state: dict) -> bool:
+    segments = state.get("activity_segments")
+    if not isinstance(segments, list) or not segments:
+        return False
+    return any(
+        isinstance(segment, dict)
+        and segment.get("kind") in ACTIVITY_KINDS
+        and isinstance(segment.get("started_at"), str)
+        and bool(segment["started_at"].strip())
+        for segment in segments
+    )
+
+
+def _parallel_review_provenance_observed(state: dict) -> bool:
+    history = state.get("score_history")
+    if not isinstance(history, list):
+        return False
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            _validate_provenance(entry.get("score_provenance"), require=True)
+        except ValueError:
+            continue
+        return True
+    return False
+
+
+def _parallel_coverage(records: dict[str, list[dict]], planned: list[str]) -> dict:
+    eligible = len(planned)
+    observed = {"artifact": 0, "activity": 0, "review_provenance": 0}
+    for ref in planned:
+        candidates = records.get(_normalize_issue_ref(ref), [])
+        if len(candidates) != 1:
+            continue
+        state = candidates[0]
+        observed["artifact"] += int(_parallel_artifact_observed(state))
+        observed["activity"] += int(_parallel_activity_observed(state))
+        observed["review_provenance"] += int(_parallel_review_provenance_observed(state))
+    result = {
+        key: {
+            "observed": value,
+            "eligible": eligible,
+            "ratio": round(value / eligible, 4) if eligible else 1.0,
+        }
+        for key, value in observed.items()
     }
-    with StateLock(lock_file(cwd)):
-        session_dir(cwd).mkdir(parents=True, exist_ok=True)
-        if path.exists():
-            print("ERROR: parallel group manifest already exists", file=sys.stderr)
-            sys.exit(2)
-        atomic_write_json(path, manifest)
-    print(json.dumps({"ok": True, "manifest": str(path), "group_id": group_id}))
+    result["ratio"] = (
+        round(sum(observed.values()) / (3 * eligible), 4) if eligible else 1.0
+    )
+    return result
 
 
-def _parallel_manifest(cwd: Path, group_id: str) -> tuple[Path, dict]:
-    path = session_dir(cwd) / f"{group_id}.group.json"
-    try:
-        manifest = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError("parallel group manifest is missing or malformed") from exc
-    if (not isinstance(manifest, dict) or manifest.get("schema") != "mission-parallel-group/1"
-            or manifest.get("group_id") != group_id or not isinstance(manifest.get("planned_children"), list)):
-        raise ValueError("parallel group manifest is malformed")
-    return path, manifest
-
-
-def _parallel_status(cwd: Path, group_id: str) -> tuple[Path, dict, dict]:
-    path, manifest = _parallel_manifest(cwd, group_id)
-    planned = [item.get("issue_ref") for item in manifest["planned_children"] if isinstance(item, dict)]
+def _parallel_status(cwd: Path, group_id: str) -> tuple[Path, dict, tuple, dict]:
+    path, manifest, manifest_identity = _parallel_manifest(cwd, group_id)
+    planned_children = [item["issue_ref"] for item in manifest["planned_children"]]
     states = []
     for state_path in _iter_state_files(cwd):
         try:
             state = json.loads(state_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if state.get("logical_group_id") == group_id:
-            states.append(state)
-    by_issue = {}
+        if not _is_mission_state_record(state) or state.get("logical_group_id") != group_id:
+            continue
+        state["_mission_source_path"] = str(state_path)
+        states.append(state)
+    states, _duplicate_files = _dedupe_states(states)
+    by_issue: dict[str, list[dict]] = {}
     for state in states:
         key = _normalize_issue_ref(state.get("issue_ref"))
         if key:
             by_issue.setdefault(key, []).append(state)
-    incomplete=[]; terminal=[]; late=[]; active_leases=[]; coverage={"artifact": 0, "activity": 0, "review_provenance": 0, "eligible": len(planned)}
-    for ref in planned:
-        records = by_issue.get(_normalize_issue_ref(ref), [])
-        if len(records) != 1 or records[0].get("loop_active") is True:
-            incomplete.append(ref)
-        else:
-            terminal.append(ref)
-        if len(records) == 1:
+
+    categories = {name: [] for name in ("planned", "running", "waiting", "pass", "halt")}
+    children = {}
+    active_leases = []
+    duplicates = []
+    now = datetime.now(timezone.utc)
+    for ref in planned_children:
+        key = _normalize_issue_ref(ref)
+        records = by_issue.get(key, [])
+        status = "planned"
+        session_ids = [str(record.get("session_id") or "") for record in records]
+        if len(records) > 1:
+            status = "incomplete"
+            duplicates.append(ref)
+        elif records:
             state = records[0]
-            coverage["artifact"] += int(state.get("artifact_applicability") in {"producing", "not-applicable"})
-            coverage["activity"] += int(isinstance(state.get("activity_segments"), list))
-            coverage["review_provenance"] += int(any(isinstance(entry, dict) and isinstance(entry.get("score_provenance"), dict) for entry in state.get("score_history", [])))
             expires = parse_iso_datetime(state.get("lease_expires_at"))
-            if expires and expires > datetime.now(timezone.utc): active_leases.append(ref)
-    planned_keys = {_normalize_issue_ref(ref) for ref in planned}
-    for key, records in by_issue.items():
-        if key not in planned_keys:
-            late.extend(state.get("issue_ref") for state in records)
-    coverage["ratio"] = (sum(coverage[k] for k in ("artifact", "activity", "review_provenance")) / (3 * coverage["eligible"]) if coverage["eligible"] else 1.0)
-    return path, manifest, {"group_id": group_id, "planned": planned, "terminal": terminal, "incomplete": incomplete, "late_children": late, "active_leases": active_leases, "coverage": coverage}
+            lease_active = expires is not None and expires > now
+            if lease_active:
+                active_leases.append(ref)
+            if state.get("loop_active") is True:
+                status = "running" if lease_active else "waiting"
+            elif state.get("passes") is True:
+                status = "pass"
+            elif isinstance(state.get("halt_reason"), str) and state["halt_reason"].strip():
+                status = "halt"
+            else:
+                status = "incomplete"
+        if status in categories:
+            categories[status].append(ref)
+        children[str(ref)] = {"status": status, "session_ids": session_ids}
+
+    planned_keys = {_normalize_issue_ref(ref) for ref in planned_children}
+    late = sorted(
+        str(state.get("issue_ref"))
+        for key, records in by_issue.items()
+        if key not in planned_keys
+        for state in records
+    )
+    incomplete = [
+        ref
+        for ref in planned_children
+        if children[str(ref)]["status"] not in {"pass", "halt"}
+    ]
+    coverage = _parallel_coverage(by_issue, planned_children)
+    status = {
+        "group_id": group_id,
+        "manifest_status": manifest["status"],
+        "planned_children": planned_children,
+        "children": children,
+        **categories,
+        "terminal": categories["pass"] + categories["halt"],
+        "incomplete": incomplete,
+        "duplicates": duplicates,
+        "late_children": late,
+        "active_leases": active_leases,
+        "coverage": coverage,
+    }
+    return path, manifest, manifest_identity, status
 
 
 def cmd_parallel_status(args):
     try:
         group_id = opaque_token(args.group_id)
-        _path, _manifest, status = _parallel_status(Path.cwd(), group_id)
-    except ValueError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr); sys.exit(2)
+        _path, _manifest, _identity, status = _parallel_status(Path.cwd(), group_id)
+    except (OSError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
     print(json.dumps(status, ensure_ascii=False))
 
 
 def cmd_parallel_closeout(args):
     cwd = Path.cwd()
-    try: group_id = opaque_token(args.group_id)
-    except ValueError as exc: print(f"ERROR: {exc}", file=sys.stderr); sys.exit(2)
-    with StateLock(lock_file(cwd)):
-        try: path, manifest, status = _parallel_status(cwd, group_id)
-        except ValueError as exc: print(f"ERROR: {exc}", file=sys.stderr); sys.exit(2)
-        if status["incomplete"] or status["late_children"] or status["active_leases"]:
-            print("ERROR: parallel group has incomplete children", file=sys.stderr); sys.exit(2)
-        manifest["status"] = "terminal"; manifest["closed_at"] = iso_now()
-        atomic_write_json(path, manifest)
-    print(json.dumps({"ok": True, **status}))
+    try:
+        group_id = opaque_token(args.group_id)
+        with StateLock(lock_file(cwd)):
+            path, manifest, manifest_identity, status = _parallel_status(cwd, group_id)
+            if manifest["status"] != "running":
+                raise ValueError("parallel group is already terminal")
+            if status["incomplete"] or status["duplicates"] or status["late_children"] or status["active_leases"]:
+                raise ValueError("parallel group has incomplete children or active leases")
+            manifest["status"] = "terminal"
+            manifest["outcome"] = "halt" if status["halt"] else "pass"
+            manifest["closed_at"] = iso_now()
+            manifest["coverage"] = status["coverage"]
+            _replace_parallel_manifest(path, manifest, manifest_identity)
+            status["manifest_status"] = "terminal"
+            status["outcome"] = manifest["outcome"]
+    except (OSError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
+    print(json.dumps({"ok": True, **status}, ensure_ascii=False))
 
 
 

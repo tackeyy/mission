@@ -66,6 +66,42 @@ def test_hook_codex_session(tmp_path):
     assert '"decision"' in r.stdout and "block" in r.stdout
 
 
+def test_hook_summarizes_parallel_group_once_without_treating_manifest_as_session(tmp_path):
+    """#388: grouped unfinished children are one aggregate breakdown entry."""
+    _write_session(
+        tmp_path,
+        "cc-mine",
+        issue_ref="388",
+        logical_group_id="group-388",
+    )
+    _write_session(
+        tmp_path,
+        "cc-other",
+        issue_ref="389",
+        logical_group_id="group-388",
+    )
+    sessions = tmp_path / ".mission-state" / "sessions"
+    (sessions / "group-388.group.json").write_text(
+        json.dumps(
+            {
+                "schema": "mission-parallel-group/1",
+                "group_id": "group-388",
+                "created_at": "2026-08-11T00:00:00Z",
+                "planned_children": [{"issue_ref": "388"}, {"issue_ref": "389"}],
+                "status": "running",
+                "coverage": {},
+            }
+        )
+    )
+
+    result = _run_hook(tmp_path, {"CLAUDE_CODE_SESSION_ID": "mine"})
+    payload = json.loads(result.stdout)
+
+    assert payload["decision"] == "block"
+    assert payload["reason"].count("group:group-388(incomplete)") == 1
+    assert "group-388.group" not in payload["reason"]
+
+
 def test_hook_sanitizes_session_id(tmp_path):
     """MISSION_SESSION_ID に / が含まれてもサニタイズ後の sf 名 (a_b) と一致して block する."""
     _write_session(tmp_path, "a_b")
