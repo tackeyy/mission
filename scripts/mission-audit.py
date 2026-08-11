@@ -47,8 +47,13 @@ from specialist_accounting import (  # noqa: E402
     candidate_accounting_report,
     candidate_specialist_skills,
     explicitly_selected_specialist_skills,
+    selected_without_terminal_invocations,
     selected_specialist_skills,
     terminal_invoked_specialist_skills,
+)
+from specialist_lifecycle import (  # noqa: E402
+    SpecialistLifecycleError,
+    validate_selection_checkpoint,
 )
 from activity_segments import summarize_activity_states  # noqa: E402
 from audit_findings import (  # noqa: E402
@@ -1729,12 +1734,20 @@ def specialist_selection_checkpoint_expected(state: dict[str, Any]) -> bool:
 def has_specialist_selection_checkpoint(state: dict[str, Any]) -> bool:
     task_profile = state.get("task_profile")
     decision = state.get("specialists_decision")
-    return (
+    legacy_shape_valid = (
         isinstance(task_profile, dict)
         and bool(task_profile.get("primary"))
         and isinstance(decision, dict)
         and bool(decision.get("policy"))
     )
+    if not legacy_shape_valid:
+        return False
+    if decision.get("selection_id"):
+        try:
+            validate_selection_checkpoint(decision)
+        except SpecialistLifecycleError:
+            return False
+    return True
 
 
 def missing_specialist_selection_checkpoint_item(
@@ -1758,6 +1771,32 @@ def missing_specialist_selection_checkpoint_item(
     }
 
 
+def legacy_missing_specialist_selection_checkpoint_item(
+    record: StateRecord, *, now: datetime | None = None
+) -> dict[str, Any] | None:
+    """Classify pre-rollout absence without turning it into an actionable finding."""
+    state = record.state
+    if is_active_no_score_pending(record, now=now):
+        return None
+    if str(state.get("complexity") or "") not in SPECIALIST_SELECTION_CHECKPOINT_COMPLEXITIES:
+        return None
+    if has_specialist_selection_checkpoint(state):
+        return None
+    started = parse_dt(state.get("created_at_session") or state.get("started_at"))
+    if not started or started.astimezone(timezone.utc) >= SPECIALIST_SELECTION_CHECKPOINT_REQUIRED_AT:
+        return None
+    return {
+        "classification": "missing-legacy",
+        "project": project_name(state),
+        "project_root": project_root_for(record),
+        "session_id": state.get("session_id") or record.path.stem,
+        "mission_id": state.get("mission_id") or "",
+        "path": str(record.path),
+        "started_at": state.get("created_at_session") or state.get("started_at") or "",
+        "updated_at": state.get("updated_at") or "",
+    }
+
+
 def specialist_invocation_gap_skills(
     record: StateRecord, *, now: datetime | None = None
 ) -> list[str]:
@@ -1765,6 +1804,9 @@ def specialist_invocation_gap_skills(
         return list(record.audit_specialist_invocation_gap_skills)
     if is_active_no_score_pending(record, now=now):
         return []
+    decision = record.state.get("specialists_decision")
+    if isinstance(decision, dict) and decision.get("selection_id"):
+        return sorted(item["skill"] for item in selected_without_terminal_invocations(record.state))
     selected = explicitly_selected_specialist_skills(record.state)
     if not selected:
         return []
@@ -2244,6 +2286,14 @@ def aggregate(
             )
         ) is not None
     ]
+    legacy_missing_specialist_selection_checkpoints = [
+        item for r in records
+        if (
+            item := legacy_missing_specialist_selection_checkpoint_item(
+                r, now=observation_now
+            )
+        ) is not None
+    ]
     candidate_only_specialists = [
         item for r in records
         if (item := candidate_only_specialist_item(r, now=observation_now)) is not None
@@ -2398,6 +2448,10 @@ def aggregate(
         "missing_specialist_selection_checkpoint_count": len(missing_specialist_selection_checkpoints),
         "missing_specialist_selection_checkpoint_breakdown": bucket_count_keys(
             [str(item.get("project") or "unknown") for item in missing_specialist_selection_checkpoints]
+        ),
+        "legacy_missing_specialist_selection_checkpoints": legacy_missing_specialist_selection_checkpoints,
+        "legacy_missing_specialist_selection_checkpoint_count": len(
+            legacy_missing_specialist_selection_checkpoints
         ),
         "unselected_specialist_invocations": unselected_specialist_invocations,
         "unselected_specialist_invocation_count": len(unselected_specialist_invocations),
@@ -2735,6 +2789,7 @@ def render_markdown(stats: dict[str, Any], rows: list[tuple[str, str, str]], roo
         f"- blank specialist invocations: {stats['blank_specialist_invocation_count']}",
         f"- preparation-only completed command providers: {stats['preparation_only_completed_provider_count']}",
         f"- missing specialist selection checkpoints: {stats['missing_specialist_selection_checkpoint_count']}",
+        f"- legacy missing specialist selection checkpoints: {stats['legacy_missing_specialist_selection_checkpoint_count']}",
         f"- unresolved confirm specialist selections: {stats['unresolved_confirm_specialist_selection_count']}",
         f"- unselected specialist invocations: {stats['unselected_specialist_invocation_count']}",
         f"- candidate-only specialists: {stats['candidate_only_specialist_count']}",

@@ -198,7 +198,17 @@ terminal state は新しい activity start を拒否する。pass/halt/cleanup/S
 
 `specialists accounting` は available candidate のうち selected / invoked / skipped / unavailable / failed 等の terminal decision trail がないものを表示する。`Critical` と high-risk は全 available candidate、`Complex` は security/testing/infra と、schema/migration/query/persistence 等の強いシグナルがある database/backend candidate を重点対象にする。これは optional provider を blanket hard gate にするものではなく、ハッカブルな plugin/provider 拡張性を保ちながら判断理由を監査可能にするための pre-completion warning である。ただし `required: true` provider は stricter gate で、`prepared` / `awaiting-input` / `skipped` / `failed` だけでは結果証跡と見なさず、`completed` / `inline-applied` / `skill-tool-applied` のいずれかが無い限り `mark-passes` が exit 2 で拒否する。
 
+### Specialist selection / invocation lifecycle (#387)
+
+新規 state は `init` 直後から `specialists_decision` に `decision=none`、`reason_code=pending-evaluation`、`lifecycle_state=candidate`、opaque な `selection_id` を持つ。`specialists recommend --record-state` は評価ごとに新しい `selection_id` を発行し、decision・candidate・selected を同じ ID へ束縛する。decision は `none` / `selected` / `declined` / `unavailable` の列挙型で、選定しない場合も reason code を残す。pending のまま terminal pass することはできない。
+
+各新規 invocation は opaque な `invocation_id` と現在の `selection_id` を持つ。`selected` → `started` → terminal status、または外部で完了済みの証拠を一度に記録する `selected` → terminal status だけを許可し、identity の途中変更、terminal record の再利用、duplicate ID は fail-closed にする。command provider は subprocess 起動前に `started` を永続化し、同じ record を terminal result へ更新するため、crash 時も invocation gap が残る。schema v2 以前や ID のない既存 invocation は読み取り互換とし、物理 rewrite しない。
+
+current checkpoint が `selected` なのに同じ `selection_id` の terminal invocation がない場合、`mark-passes` は拒否する。実行不要になった場合だけ `--specialist-waiver "<理由>"` で selection ID と理由を明示記録できる。user-approved `--force` とは別の限定 waiver であり、required provider の applied-result gate は緩和しない。監査は rollout 前の欠落を actionable finding にせず `missing-legacy` として別集計する。
+
 **#189 (自動 WARN)**: `mark-passes` は成功時、`specialists_selected` にあるが `specialist_invocations` に一件も (skipped/unavailable/failed 等どのステータスでも) 記録のない specialist を stderr WARN で列挙する (呼び出し不要・自動発火。`specialists accounting` の手動確認とは別。判定は `specialists_phase_plan` の providers を含まない `specialists_selected` のみを対象にし、phase_plan にしか登場しない specialist を誤検知しない)。非 `--force` 経路では required specialist は accounting_required/result_required gate がここに到達する前に exit 2 で止めるため、この WARN の対象は常に optional。`--force` はこれらの gate ごと skip するため、`--force` 経路ではこの WARN 自体を出さない (required specialist が混入していた場合に「optional のため」という文言が誤りになるのを避ける)。`mission-state.py next` も `mark-passes` action の `details.unclosed_specialists` に同じ一覧を含める。hard gate ではないため mark-passes 自体は成功するが、`specialists log-invocation --status skipped --reason "<理由>"` 等でクローズアウトしておくのが望ましい。
+
+#387 の `selection_id` を持つ state では、上記 #189 WARN より selected-without-terminal hard gate と `--specialist-waiver` 契約を優先する。WARN-only の挙動は ID のない legacy state に限る。
 
 `progress update` は `.mission-state/archive/iter-<N>-<mission8>-progress.md` に checkpoint を保存し、state の `progress` に `total` / `completed` / `remaining` / `last_unit` / `artifact_path` / `evidence_path` を記録する。これは score や pass/fail を変更しない観測用データであり、長時間 batch が compaction や中断を挟んでも audit report の slow session 行から進捗を復元できるようにする。
 

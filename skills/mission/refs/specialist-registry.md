@@ -322,6 +322,7 @@ The orchestrator preserves enough traceability to explain specialist selection w
     {
       "role": "doc-writer",
       "skill": "documentation-provider",
+      "selection_id": "sel_0123456789abcdef0123456789abcdef",
       "phases": ["planning", "execution", "review"],
       "status": "selected",
       "source": "preset:docs"
@@ -337,27 +338,37 @@ The orchestrator preserves enough traceability to explain specialist selection w
   "specialists_decision": {
     "policy": "auto",
     "action": "select",
+    "decision": "selected",
+    "reason_code": "candidate-selected",
+    "lifecycle_state": "selected",
+    "selection_id": "sel_0123456789abcdef0123456789abcdef",
     "reason": "top candidate documentation-provider is installed with score 0.82",
     "prompted_user": false
   },
   "specialist_invocations": [
     {
+      "invocation_id": "inv_0123456789abcdef0123456789abcdef",
+      "selection_id": "sel_0123456789abcdef0123456789abcdef",
       "iteration": 1,
       "phase": "review",
       "role": "doc-writer",
       "skill": "documentation-provider",
       "mode": "codex-inline",
       "status": "inline-applied",
+      "lifecycle_state": "terminal",
       "timestamp": "2026-06-19T08:00:00Z",
       "evidence_path": ".mission-state/archive/iter-1-deadbeef-specialist-documentation-provider.md"
     },
     {
+      "invocation_id": "inv_abcdef0123456789abcdef0123456789",
+      "selection_id": "sel_0123456789abcdef0123456789abcdef",
       "iteration": 1,
       "phase": "planning",
       "role": "security-reviewer",
       "skill": "security-review-provider",
       "mode": "fallback-core",
       "status": "skipped",
+      "lifecycle_state": "terminal",
       "reason": "Core reviewer covered the security checklist for this docs-only change",
       "timestamp": "2026-06-19T08:03:00Z"
     }
@@ -365,7 +376,7 @@ The orchestrator preserves enough traceability to explain specialist selection w
 }
 ```
 
-Use `task_profile` as an object/dict for the classification record, `specialists_mode` for automatic or manual selection mode, `specialists_candidates` for ranked candidates, `specialists_selected` for selected specialist intent, `specialists_unavailable` for missing or unavailable specialists, and `specialists_decision` for the policy outcome. Use `specialist_invocations` for append-only execution evidence after selection: actual Skill tool calls, Codex inline application, natural-language role application, fallback-core usage, skips, unavailable cases, and failures.
+Use `task_profile` as an object/dict for the classification record, `specialists_mode` for automatic or manual selection mode, `specialists_candidates` for ranked candidates, `specialists_selected` for selected specialist intent, `specialists_unavailable` for missing or unavailable specialists, and `specialists_decision` for the policy outcome. `selection_id` binds those selection records; each invocation uses a unique `invocation_id` and carries the matching `selection_id`. Use `specialist_invocations` for execution evidence after selection: actual Skill tool calls, Codex inline application, natural-language role application, fallback-core usage, skips, unavailable cases, and failures. A started record is updated in place to its terminal result instead of appending a second identity.
 
 `specialists_selected` and `specialist_invocations` intentionally remain separate. Selection answers "what should be used"; invocation answers "what was actually used or skipped." This keeps ADR-001's audit requirement intact without pretending Codex inline usage is a real forked Skill tool call.
 

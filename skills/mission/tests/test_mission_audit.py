@@ -1919,6 +1919,8 @@ def test_audit_does_not_report_legacy_missing_specialist_selection_checkpoint(tm
 
     data = json.loads(result.stdout)
     assert data["missing_specialist_selection_checkpoint_count"] == 0
+    assert data["legacy_missing_specialist_selection_checkpoint_count"] == 1
+    assert data["legacy_missing_specialist_selection_checkpoints"][0]["classification"] == "missing-legacy"
     assert all(f["code"] != "missing-specialist-selection-checkpoint" for f in data["findings"])
 
 

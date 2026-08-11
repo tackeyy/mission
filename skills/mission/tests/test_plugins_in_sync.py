@@ -137,6 +137,11 @@ MISSION_STATE_DISTRIBUTION_MARKERS = [
     "_classify_command_provider_result",
 ]
 
+SPECIALIST_LIFECYCLE_PAIR = (
+    REPO_ROOT / "skills" / "mission" / "lib" / "specialist_lifecycle.py",
+    REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "specialist_lifecycle.py",
+)
+
 
 def _md5(path: Path) -> str:
     return hashlib.md5(path.read_bytes()).hexdigest()
@@ -276,6 +281,11 @@ def test_mission_state_distribution_contains_specialist_accounting_guards():
         text = path.read_text(encoding="utf-8")
         missing = [marker for marker in MISSION_STATE_DISTRIBUTION_MARKERS if marker not in text]
         assert not missing, f"{path} is missing distribution-critical markers: {missing}"
+
+
+def test_specialist_lifecycle_contract_in_sync():
+    """Provider-neutral checkpoint/ID validators ship in the plugin mirror."""
+    _assert_optional_pair_in_sync(*SPECIALIST_LIFECYCLE_PAIR, "specialist_lifecycle.py")
 
 
 def test_state_management_reference_in_sync():
