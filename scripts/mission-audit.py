@@ -38,6 +38,7 @@ from mission_common import (  # noqa: E402
     duration_sec,
     has_scoring_checkpoint,
     parse_iso_datetime,
+    opaque_token,
     state_dedupe_rank,
     state_identity,
     summarize_pass_rate_population,
@@ -1648,6 +1649,103 @@ def filter_records(
     return out
 
 
+def project_latest_review_generations(
+    records: list[StateRecord],
+) -> tuple[list[StateRecord], dict[str, Any]]:
+    """Use one unambiguous latest reviewer generation while retaining raw lineage."""
+    groups: dict[tuple[str, str], list[StateRecord]] = {}
+    for record in records:
+        state = record.state
+        group = state.get("review_group_id")
+        generation = state.get("review_generation")
+        if (not isinstance(group, str) or not group or "\x00" in group
+                or not isinstance(generation, int) or isinstance(generation, bool)
+                or generation < 1):
+            continue
+        groups.setdefault((project_root_for(record), group), []).append(record)
+
+    retained_ids = {id(record) for record in records}
+    lineage_groups = []
+    for (_root, group), members in sorted(groups.items(), key=lambda item: item[0]):
+        latest_generation = max(member.state["review_generation"] for member in members)
+        current = [member for member in members if member.state["review_generation"] == latest_generation]
+        ordered_members = sorted(
+            members,
+            key=lambda member: (member.state["review_generation"], str(member.state.get("session_id") or member.path.stem)),
+        )
+        current_session_id = None
+        if len(current) == 1:
+            current_record = current[0]
+            current_session_id = str(current_record.state.get("session_id") or current_record.path.stem)
+            retained_ids.difference_update(id(member) for member in members)
+            retained_ids.add(id(current_record))
+        lineage_groups.append({
+            "review_group_id": group,
+            "current_generation": latest_generation,
+            "current_session_id": current_session_id,
+            "raw_session_ids": [
+                str(member.state.get("session_id") or member.path.stem)
+                for member in ordered_members
+            ],
+        })
+    projected = [record for record in records if id(record) in retained_ids]
+    return projected, {
+        "raw_record_count": len(records),
+        "projected_record_count": len(projected),
+        "groups": lineage_groups,
+    }
+
+
+_CORRELATION_FIELDS = (
+    "host_run_id", "root_run_id", "parent_run_id", "child_run_id", "logical_group_id",
+)
+
+
+def _opaque_correlation_id(value: object) -> str | None:
+    try:
+        return opaque_token(value)
+    except ValueError:
+        return None
+
+
+def summarize_correlation_lineage(records: list[StateRecord]) -> dict[str, Any]:
+    """Resolve only explicit host/root/parent references; never infer a lineage."""
+    by_host: dict[str, list[StateRecord]] = {}
+    for record in records:
+        host = _opaque_correlation_id(record.state.get("host_run_id"))
+        if host is not None:
+            by_host.setdefault(host, []).append(record)
+    details = []
+    counts = Counter()
+    for record in records:
+        state = record.state
+        ids = {field: _opaque_correlation_id(state.get(field)) for field in _CORRELATION_FIELDS}
+        root_record = by_host.get(ids["root_run_id"] or "", [])
+        parent_record = by_host.get(ids["parent_run_id"] or "", [])
+        if len(root_record) == 1:
+            resolution = "direct"
+        elif (len(parent_record) == 1
+                and _opaque_correlation_id(parent_record[0].state.get("root_run_id")) == ids["root_run_id"]):
+            resolution = "parent-embedded"
+        else:
+            resolution = "unresolved"
+        counts[resolution] += 1
+        details.append({
+            "session_id": str(state.get("session_id") or record.path.stem),
+            "resolution": resolution,
+            **ids,
+        })
+    resolved = counts["direct"] + counts["parent-embedded"]
+    return {
+        "record_count": len(records),
+        "direct_count": counts["direct"],
+        "parent_embedded_count": counts["parent-embedded"],
+        "unresolved_count": counts["unresolved"],
+        "resolvable_ratio": resolved / len(records) if records else None,
+        "records": details,
+    }
+
+
 def bucket_counts(records: list[StateRecord], bucket_fn) -> dict[str, int]:
     counts: dict[str, int] = {}
     for record in records:
@@ -3150,6 +3248,15 @@ def render_markdown(
     stats: dict[str, Any], rows: list[tuple[str, str, str]], roots: list[Path],
     since: str | None, until: str | None, snapshot: dict[str, str] | None = None,
 ) -> str:
+    review_lineage = stats.get("review_lineage") or {
+        "raw_record_count": stats.get("total_sessions", 0),
+        "projected_record_count": stats.get("total_sessions", 0),
+        "groups": [],
+    }
+    correlation_lineage = stats.get("correlation_lineage") or {
+        "record_count": 0, "direct_count": 0, "parent_embedded_count": 0,
+        "unresolved_count": 0, "resolvable_ratio": None,
+    }
     lines = [
         "# /mission Audit Report",
         "",
@@ -3168,6 +3275,8 @@ def render_markdown(
         "## Summary",
         "",
         f"- total sessions: {stats['total_sessions']}",
+        f"- review lineage raw / projected: {review_lineage['raw_record_count']} / {review_lineage['projected_record_count']}",
+        f"- correlation resolvability (direct / parent-embedded / unresolved): {correlation_lineage['direct_count']} / {correlation_lineage['parent_embedded_count']} / {correlation_lineage['unresolved_count']} (coverage {fmt_float(correlation_lineage['resolvable_ratio'] * 100 if correlation_lineage['resolvable_ratio'] is not None else None, 1)}%)",
         f"- current finding cutoff: {stats['current_since'] or '(not set; all findings are treated as current)'}",
         f"- pass / halt / incomplete / abandoned: {stats['pass_count']} / {stats['halt_count']} / {stats['incomplete_count']} / {stats['abandoned_count']}",
         f"- raw pass rate: {fmt_float(stats['raw_pass_rate'] * 100 if stats['raw_pass_rate'] is not None else None, 1)}% ({stats['raw_pass_rate_numerator']}/{stats['raw_pass_rate_denominator']})",
@@ -3205,6 +3314,19 @@ def render_markdown(
         f"- median duration: {fmt_minutes(stats['median_session_duration_sec'])}",
         f"- avg duration: {fmt_minutes(stats['avg_session_duration_sec'])}",
     ]
+    groups = review_lineage.get("groups") or []
+    if groups:
+        lines.extend([
+            "",
+            "## Review Lineage",
+            "",
+            *[
+                f"- `{group['review_group_id']}`: generation {group['current_generation']}, "
+                f"current `{group['current_session_id'] or 'ambiguous'}`, "
+                f"raw {', '.join(f'`{session}`' for session in group['raw_session_ids'])}"
+                for group in groups
+            ],
+        ])
     activity = stats.get("activity_timing") or {}
     coverage = activity.get("coverage_ratio")
     coverage_text = f"{coverage * 100:.1f}%" if coverage is not None else "-"
@@ -3578,6 +3700,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--slow-threshold-sec", type=int, default=1800, help="Slow session threshold")
     parser.add_argument("--min-pass-rate", type=float, default=0.9, help="Finding threshold for pass rate")
     parser.add_argument("--json", action="store_true", help="Print machine-readable summary")
+    parser.add_argument("--lineage", action="store_true", help="Include raw review and correlation lineage details")
     parser.add_argument("--out", default=None, help="Write report to path")
     parser.add_argument("--privacy", action="store_true", help="Redact scanned root paths from report output")
     parser.add_argument("--self-improvement-prompt", action="store_true", help="Print only the prompt for /mission")
@@ -3677,14 +3800,29 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     filtered = filter_records(records, since, until, after)
     deduped, duplicates, resolved_duplicate_count = dedupe_records(filtered)
+    projected, review_lineage = project_latest_review_generations(deduped)
+    correlation_lineage = summarize_correlation_lineage(deduped)
     stats = aggregate(
-        deduped,
+        projected,
         duplicates,
         resolved_duplicate_count,
         args.slow_threshold_sec,
         current_since,
         invalid_worktree_archives,
         observation_now,
+    )
+    stats["review_lineage"] = (
+        review_lineage
+        if args.lineage
+        else {key: review_lineage[key] for key in ("raw_record_count", "projected_record_count")}
+        | {"group_count": len(review_lineage["groups"])}
+    )
+    stats["correlation_lineage"] = (
+        correlation_lineage
+        if args.lineage
+        else {key: correlation_lineage[key] for key in (
+            "record_count", "direct_count", "parent_embedded_count", "unresolved_count", "resolvable_ratio",
+        )}
     )
     attach_finding_model(stats, args.min_pass_rate, current_since)
     rows = finding_rows(stats, args.min_pass_rate)

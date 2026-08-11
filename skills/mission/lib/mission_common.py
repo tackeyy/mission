@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import re
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -49,6 +51,24 @@ TERMINAL_OUTCOMES = (
     "routed_elsewhere",
 )
 EVIDENCE_COMPLETION_ROLES = {"checker", "planning", "analyze"}
+_CORRELATION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+
+def opaque_token(value: Any) -> str:
+    """Validate one portable, locator-free token used by correlation and groups."""
+    if not isinstance(value, str) or not _CORRELATION_ID.fullmatch(value):
+        raise ValueError("opaque token must be a non-empty portable token")
+    return value
+
+
+def correlation_id(value: Any | None = None) -> str:
+    """Return one portable opaque correlation ID, locally issued when absent."""
+    if value is None:
+        return "mission-local-" + secrets.token_hex(16)
+    try:
+        return opaque_token(value)
+    except ValueError:
+        raise ValueError("correlation ID must be a non-empty opaque token")
 
 
 def _derive_control_terminal_outcome(state: dict[str, Any]) -> str | None:

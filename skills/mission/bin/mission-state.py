@@ -67,6 +67,8 @@ from mission_common import (  # noqa: E402
     SPECIALIST_SELECTION_CHECKPOINT_REQUIRED_AT,
     TERMINAL_OUTCOMES,
     classify_state as _classify,
+    correlation_id,
+    opaque_token,
     derive_terminal_outcome,
     duration_sec as _duration_sec,
     parse_iso_datetime,
@@ -1060,6 +1062,7 @@ _LEASE_KEYS = (*LEASE_STATE_FIELDS, "lease_history")
 _LEASE_WRITE_REASON: str | None = None
 _PROCESS_LEASE_IDS: dict[str, str] = {}
 _LEASE_DECISION_UNSET = object()
+_SUPERSEDE_TERMINAL_PATHS: set[str] = set()
 
 
 @contextlib.contextmanager
@@ -1076,6 +1079,8 @@ def _lease_write_reason(reason: str | None):
 def _enforce_session_lease_for_write(path: Path, data: dict) -> LeaseDecision | None:
     """CAS the lease against the latest state immediately before publish."""
     if not (_is_session_state_path(path) and _is_session_state_shape(data)):
+        return None
+    if str(path.resolve()) in _SUPERSEDE_TERMINAL_PATHS:
         return None
     latest = None
     if path.exists():
@@ -4582,6 +4587,10 @@ def _command_provider_packet(data: dict, provider: dict, args) -> str:
     packet = {
         "mission": data.get("mission"),
         "mission_id": data.get("mission_id"),
+        "correlation": {
+            field: data.get(field)
+            for field in ("host_run_id", "root_run_id", "parent_run_id", "child_run_id", "logical_group_id")
+        },
         "iteration": args.iteration,
         "phase": args.phase,
         "provider": {
@@ -4633,6 +4642,11 @@ def cmd_invoke_command_provider(args):
         "transitioned_at": now,
         "started_at": now,
         "provider_kind": "command",
+        **{
+            field: data.get(field)
+            for field in ("host_run_id", "root_run_id", "parent_run_id", "child_run_id", "logical_group_id")
+            if data.get(field) is not None
+        },
     }
     selection_id = _current_selection_id(data)
     if selection_id:
@@ -5924,10 +5938,31 @@ def cmd_init(args):
         _exit_init_write_failure(cwd)
     planned_files = _parse_files_arg(getattr(args, "files", None))
     now = iso_now()
+    try:
+        host_run_id = correlation_id(getattr(args, "host_run_id", None))
+        root_run_id = correlation_id(getattr(args, "root_run_id", None) or host_run_id)
+        parent_run_id = correlation_id(args.parent_run_id) if getattr(args, "parent_run_id", None) else None
+        child_run_id = correlation_id(args.child_run_id) if getattr(args, "child_run_id", None) else None
+        logical_group_id = opaque_token(args.logical_group_id) if getattr(args, "logical_group_id", None) is not None else None
+        review_group_id = opaque_token(args.review_group_id) if getattr(args, "review_group_id", None) is not None else None
+    except ValueError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
 
     initial = {
         "mission": args.mission,
         "mission_id": mission_id(args.mission),
+        "host_run_id": host_run_id,
+        "root_run_id": root_run_id,
+        "parent_run_id": parent_run_id,
+        "child_run_id": child_run_id,
+        "logical_group_id": logical_group_id,
+        "review_group_id": review_group_id,
+        "review_generation": 1 if review_group_id else None,
+        "review_perspective": getattr(args, "review_perspective", None),
+        "base_sha": getattr(args, "base_sha", None),
+        "head_sha": getattr(args, "head_sha", None),
+        "supersedes": [],
         "goal_dispatch_requested": goal_dispatch["mode"],
         "goal_dispatch_source": goal_dispatch["source"],
         **(
@@ -6213,6 +6248,21 @@ def cmd_init(args):
                 atomic_write_text(assumptions_file, "# Assumption Registry\n")
         except (OSError, ValueError):
             _exit_init_evidence_write_failure("assumptions")
+        # Allocate generations under the same project lock as publication.  A
+        # pre-lock max+1 scan lets concurrent sessions choose one generation.
+        if initial["review_group_id"]:
+            prior_generations = []
+            for state_path in _iter_state_files(cwd):
+                try:
+                    prior = json.loads(state_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if prior.get("review_group_id") != initial["review_group_id"]:
+                    continue
+                generation = prior.get("review_generation")
+                if isinstance(generation, int) and not isinstance(generation, bool) and generation > 0:
+                    prior_generations.append(generation)
+            initial["review_generation"] = max(prior_generations, default=0) + 1
         backup_state(sf_target)
         atomic_write_json(sf_target, initial)
         existing_agg.setdefault("active_sessions", [])
@@ -7985,6 +8035,68 @@ def _validate_revision_scope(cwd: Path, scope: object) -> None:
         raise ValueError("git revision_scope head is not the current reviewed HEAD")
 
 
+_REVIEW_LINEAGE_REF_FIELDS = ("review_group_id", "review_generation", "base_sha", "head_sha")
+
+
+def _current_review_lineage(cwd: Path, data: dict, revision_scope: dict) -> dict | None:
+    """Return the active review generation binding, or preserve pre-rollout state."""
+    group = data.get("review_group_id")
+    if group is None:
+        return None
+    generation = data.get("review_generation")
+    base, head = data.get("base_sha"), data.get("head_sha")
+    if (not isinstance(group, str) or not group or "\x00" in group
+            or not isinstance(generation, int) or isinstance(generation, bool) or generation < 1
+            or revision_scope.get("kind") != "git"
+            or (base, head) != (revision_scope.get("base_sha"), revision_scope.get("head_sha"))):
+        raise ValueError("review lineage state must bind a valid group, generation, and git revision")
+
+    members = []
+    try:
+        for state_path in _iter_state_files(cwd):
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            if state.get("review_group_id") != group:
+                continue
+            member_generation = state.get("review_generation")
+            if (not isinstance(member_generation, int) or isinstance(member_generation, bool)
+                    or member_generation < 1):
+                raise ValueError("review lineage group has an invalid generation")
+            members.append(state)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("review lineage state is unreadable") from exc
+    if not members:
+        raise ValueError("review lineage group is missing")
+    newest_generation = max(member["review_generation"] for member in members)
+    newest = [member for member in members if member["review_generation"] == newest_generation]
+    if len(newest) != 1:
+        raise ValueError("review lineage group has no single active generation")
+    current = newest[0]
+    if (generation != newest_generation or current.get("session_id") != data.get("session_id")
+            or current.get("passes") is not False or current.get("loop_active") is not True
+            or current.get("terminal_outcome") is not None):
+        raise ValueError("review lineage is not the current active generation")
+    return {
+        "review_group_id": group,
+        "review_generation": generation,
+        "base_sha": base,
+        "head_sha": head,
+    }
+
+
+def _validate_review_lineage_ref(cwd: Path, data: dict, ref: dict, revision_scope: dict) -> None:
+    """Bind an aggregate to the session's active review generation when present."""
+    provided = [field in ref for field in _REVIEW_LINEAGE_REF_FIELDS]
+    if any(provided) and not all(provided):
+        raise ValueError("review lineage reference is incomplete")
+    expected = _current_review_lineage(cwd, data, revision_scope)
+    if expected is None:
+        if any(provided):
+            raise ValueError("review lineage reference is not allowed for a legacy session")
+        return
+    if not all(provided) or {field: ref[field] for field in _REVIEW_LINEAGE_REF_FIELDS} != expected:
+        raise ValueError("review lineage reference does not bind the current generation")
+
+
 def _validate_provenance(provenance: object, *, require: bool) -> dict | None:
     if provenance is None:
         if require:
@@ -8000,6 +8112,18 @@ def _validate_provenance(provenance: object, *, require: bool) -> dict | None:
     if source == "scoring-json":
         if not isinstance(ref, dict) or ref.get("kind") != "review-aggregate" or not isinstance(ref.get("path"), str) or not _SHA256_REF_RE.fullmatch(str(ref.get("digest") or "")) or not isinstance(ref.get("generation"), str) or not isinstance(ref.get("revision_scope"), dict):
             raise ValueError("score provenance has invalid review_evidence_ref")
+        lineage_fields = [field in ref for field in _REVIEW_LINEAGE_REF_FIELDS]
+        if any(lineage_fields) and (
+                not all(lineage_fields)
+                or not isinstance(ref.get("review_group_id"), str)
+                or not ref["review_group_id"]
+                or "\x00" in ref["review_group_id"]
+                or not isinstance(ref.get("review_generation"), int)
+                or isinstance(ref["review_generation"], bool)
+                or ref["review_generation"] < 1
+                or not all(isinstance(ref.get(field), str) and re.fullmatch(r"[0-9a-f]{40}", ref[field])
+                           for field in ("base_sha", "head_sha"))):
+            raise ValueError("score provenance has invalid review lineage reference")
         if not isinstance(scope, dict) or scope != ref["revision_scope"]:
             raise ValueError("score provenance revision_scope mismatch")
     else:
@@ -8181,6 +8305,8 @@ def _revalidate_score_provenance(cwd: Path, entry: dict, data: dict, *, require_
     is_manual = provenance["score_source"] == "manual-import"
     ref = provenance["manual_evidence_ref"] if is_manual else provenance["review_evidence_ref"]
     _validate_revision_scope(cwd, provenance["revision_scope"])
+    if not is_manual:
+        _validate_review_lineage_ref(cwd, data, ref, provenance["revision_scope"])
     content = _read_bounded_review_evidence(cwd, ref["path"])
     digest = hashlib.sha256(content).hexdigest()
     if "sha256:" + digest != ref["digest"]:
@@ -10088,6 +10214,11 @@ def cmd_aggregate_reviews(args):
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
         try:
+            review_lineage = _current_review_lineage(cwd, data, revision_scope)
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(2)
+        try:
             validate_artifact_state_consistency(data, require_resolved=True)
             artifact_lint, artifact_lint_status = _lint_state_artifact(cwd, data)
         except ArtifactContractError as exc:
@@ -10187,6 +10318,7 @@ def cmd_aggregate_reviews(args):
                     "digest": evidence_digest,
                     "generation": evidence_digest[7:23],
                     "revision_scope": revision_scope,
+                    **(review_lineage or {}),
                 },
                 "revision_scope": revision_scope,
             },
@@ -10935,6 +11067,86 @@ def cmd_mark_passes(args):
     if force:
         output["force_approved_by_user"] = approved_by_user
     print(json.dumps(output))
+
+
+def cmd_supersede_reviews(args):
+    """Terminalize older review generations without deleting their raw records."""
+    cwd = Path.cwd()
+    group = args.group
+    if not isinstance(group, str) or not group or "\x00" in group:
+        print("ERROR: review group is invalid", file=sys.stderr)
+        sys.exit(2)
+
+    def capture(path):
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or path.parent != session_dir(cwd):
+            raise ValueError("review state path is unsafe")
+        payload = path.read_bytes()
+        return payload, (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink,
+                         metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns)
+
+    def unchanged(path, identity, payload):
+        current_payload, current_identity = capture(path)
+        return current_identity == identity and current_payload == payload
+
+    with StateLock(lock_file(cwd)):
+        members = []
+        try:
+            for state_path in _iter_state_files(cwd):
+                payload, identity = capture(state_path)
+                state = json.loads(payload)
+                if state.get("review_group_id") != group:
+                    continue
+                generation = state.get("review_generation")
+                if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
+                    raise ValueError("review group has an invalid generation")
+                members.append((generation, state_path, state, payload, identity))
+        except (OSError, json.JSONDecodeError, ValueError) as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            sys.exit(2)
+        if not members:
+            print("ERROR: review group was not found", file=sys.stderr)
+            sys.exit(2)
+        current_generation = max(item[0] for item in members)
+        current = [item for item in members if item[0] == current_generation]
+        if len(current) != 1:
+            print("ERROR: review group has no single current generation", file=sys.stderr)
+            sys.exit(2)
+        targets = [item for item in members if item[0] < current_generation]
+        if not all(unchanged(path, identity, payload) for _, path, _, payload, identity in members):
+            print("ERROR: review group changed during supersede preflight", file=sys.stderr)
+            sys.exit(2)
+        now = iso_now()
+        superseded = []
+        originals = [(path, payload) for _, path, _, payload, _ in targets]
+        try:
+            for generation, state_path, state, payload, identity in targets:
+                if not unchanged(state_path, identity, payload):
+                    raise ValueError("review state changed during supersede")
+                state.update({"passes": False, "loop_active": False,
+                              "halt_reason": "superseded by a replacement run", "halt_category": "stale"})
+                _transition_phase(state, "halted", now, terminal_trusted_boundary=True)
+                _write_terminal_outcome(state)
+                state["updated_at"] = now
+                path_key = str(state_path.resolve())
+                _SUPERSEDE_TERMINAL_PATHS.add(path_key)
+                try:
+                    atomic_write_json(state_path, state)
+                finally:
+                    _SUPERSEDE_TERMINAL_PATHS.discard(path_key)
+                superseded.append(state.get("session_id"))
+            _, current_path, current_state, current_payload, current_identity = current[0]
+            if not unchanged(current_path, current_identity, current_payload):
+                raise ValueError("current review state changed during supersede")
+            current_state["supersedes"] = superseded
+            current_state["updated_at"] = now
+            atomic_write_json(current_path, current_state)
+        except (OSError, ValueError, CommandOutcomeExit):
+            for path, payload in originals:
+                _atomic_write(path, lambda handle, content=payload: handle.write(content.decode("utf-8")))
+            print("ERROR: supersede transaction was rolled back", file=sys.stderr)
+            sys.exit(2)
+    print(json.dumps({"ok": True, "group": group, "current_generation": current_generation, "superseded": superseded}))
 
 
 def cmd_mark_halt(args):
@@ -12658,6 +12870,15 @@ def _build_parser():
     p_init.add_argument("--review-tier", choices=list(TIER_REVIEWER_COUNT), default=None,
                         dest="review_tier",
                         help="レビュー深度 (light/standard/full)。未指定は complexity・ミッション記述から auto 導出 (Issue #168)")
+    p_init.add_argument("--host-run-id", default=None)
+    p_init.add_argument("--root-run-id", default=None)
+    p_init.add_argument("--parent-run-id", default=None)
+    p_init.add_argument("--child-run-id", default=None)
+    p_init.add_argument("--logical-group-id", default=None)
+    p_init.add_argument("--review-group-id", default=None)
+    p_init.add_argument("--review-perspective", default=None)
+    p_init.add_argument("--base-sha", default=None)
+    p_init.add_argument("--head-sha", default=None)
     p_init.set_defaults(func=cmd_init)
 
     p_next = sub.add_parser("next", help="ADR-002 Stage 3: state から次の 1 手を JSON で返す (read-only。Codex/compaction 復帰時の進行ガイド)")
@@ -12812,6 +13033,10 @@ def _build_parser():
                          help=f"#190: halt の種別。有効値: {sorted(HALT_CATEGORIES)}。省略/不正値は 'other' + WARN"
                               " (argparse choices は使わない: _normalize_halt_category が WARN+fallback で検証する)")
     p_halt.set_defaults(func=cmd_mark_halt)
+
+    p_supersede = sub.add_parser("supersede-reviews", help="review groupの旧generationをstale_supersededへ終端化")
+    p_supersede.add_argument("--group", required=True)
+    p_supersede.set_defaults(func=cmd_supersede_reviews)
 
     p_reactivate = sub.add_parser(
         "reactivate",

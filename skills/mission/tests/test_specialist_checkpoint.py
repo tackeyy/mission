@@ -198,14 +198,19 @@ def test_public_contract_rejects_duplicate_invocation_identity():
 
 
 def test_command_provider_propagates_selection_and_invocation_ids(run_cli, tmp_path):
-    run_cli("init", "command checkpoint", "--complexity", "Complex", cwd=tmp_path, check=True)
+    run_cli(
+        "init", "command checkpoint", "--complexity", "Complex",
+        "--host-run-id", "host-385", "--root-run-id", "root-385",
+        "--parent-run-id", "parent-385", "--child-run-id", "child-385",
+        "--logical-group-id", "logical-385", cwd=tmp_path, check=True,
+    )
     state_path = tmp_path / ".mission-state" / "sessions" / "test.json"
     state = _read_state(tmp_path)
     selection_id = "sel_0123456789abcdef0123456789abcdef"
     state["specialists_decision"] = {"policy": "auto", "action": "select", "decision": "selected",
         "reason_code": "candidate-selected", "lifecycle_state": "selected", "selection_id": selection_id}
     state["specialists_selected"] = [{"role": "command-review", "skill": "command-provider",
-        "kind": "command", "command": "true", "selection_id": selection_id}]
+        "kind": "command", "command": "cat", "selection_id": selection_id}]
     state_path.write_text(json.dumps(state), encoding="utf-8")
     result = run_cli("specialists", "invoke-command", "--provider", "command-provider",
                      "--iteration", "1", "--phase", "review", "--json", cwd=tmp_path, check=True)
@@ -213,3 +218,13 @@ def test_command_provider_propagates_selection_and_invocation_ids(run_cli, tmp_p
     assert entry["selection_id"] == selection_id
     assert entry["invocation_id"].startswith("inv_")
     assert entry["lifecycle_state"] == "terminal"
+    correlation = {
+        "host_run_id": "host-385", "root_run_id": "root-385", "parent_run_id": "parent-385",
+        "child_run_id": "child-385", "logical_group_id": "logical-385",
+    }
+    assert {field: entry[field] for field in correlation} == correlation
+    persisted = _read_state(tmp_path)["specialist_invocations"][0]
+    assert {field: persisted[field] for field in correlation} == correlation
+    evidence = (tmp_path / persisted["evidence_path"]).read_text(encoding="utf-8")
+    packet = json.loads(evidence.split("## Stdout\n\n```text\n", 1)[1].split("\n```", 1)[0])
+    assert packet["correlation"] == correlation

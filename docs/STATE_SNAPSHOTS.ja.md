@@ -7,11 +7,16 @@ Markdown / JSON report の両方へ `snapshot_id` と digest を出力します�
 
 ```bash
 python3 scripts/mission-audit.py --root /path/to/projects --json
+python3 scripts/mission-audit.py --root /path/to/projects --json --lineage
 python3 scripts/mission-audit.py \
   --root /path/to/projects \
   --from-snapshot <snapshot_id> \
   --json
 ```
+
+既定の audit 統計は、一意に確定できる最新 review generation だけを使います。raw review
+generation と明示的な host/root/parent/child correlation の解決状況を確認する時だけ
+`--lineage` を指定します。不足した link を推測で補いません。
 
 `--privacy` は Markdown / JSON output 内の configured root prefix を匿名の `root-N`
 label へ置換します。既定snapshotにもsource pathではなく匿名root ID、root inventory由来の

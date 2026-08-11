@@ -6,6 +6,8 @@ import ipaddress
 import math
 import re
 from typing import Any
+
+from mission_common import opaque_token
 from urllib.parse import urlsplit
 
 
@@ -111,6 +113,7 @@ INVOCATION_FIELDS = frozenset({
     "completed_at", "provider_kind", "exit_code", "timeout", "reason_code",
     "selection_source", "bounded_purpose", "evidence_path", "reason", "notes", "command", "kind",
     "selection_id", "invocation_id", "lifecycle_state", "transitioned_at",
+    "host_run_id", "root_run_id", "parent_run_id", "child_run_id", "logical_group_id",
 })
 ACTIVATION_FIELDS = frozenset({
     "min_complexity", "auto_select_if", "explicit_below_min", "when_any",
@@ -601,6 +604,12 @@ def _validate_invocation(record: object, base: str) -> None:
         _reject(f"{base}/selection_id")
     if "invocation_id" in record and not re.fullmatch(r"inv_[0-9a-f]{32}", str(record["invocation_id"])):
         _reject(f"{base}/invocation_id")
+    for field in ("host_run_id", "root_run_id", "parent_run_id", "child_run_id", "logical_group_id"):
+        if field in record:
+            try:
+                opaque_token(record[field])
+            except ValueError:
+                _reject(f"{base}/{field}")
     if "lifecycle_state" in record and record["lifecycle_state"] not in {"selected", "invoked", "terminal"}:
         _reject(f"{base}/lifecycle_state")
 
