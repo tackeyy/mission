@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 from collections import Counter
 from dataclasses import dataclass
@@ -13,6 +14,8 @@ from typing import Any, Callable
 
 WORKTREE_ARCHIVE_SCHEMA = "mission-worktree-archive/1"
 WORKTREE_ARCHIVE_POINTER_SCHEMA = "mission-worktree-current/1"
+STATE_ARCHIVE_GENERATION_SCHEMA = "mission-state-archive-generation/1"
+STATE_ARCHIVE_POINTER_SCHEMA = "mission-state-archive-current/1"
 REVIEW_INPUT_MAX_BYTES = 4 * 1024 * 1024
 _REVIEW_INPUT_REFERENCE_FIELDS = {
     "kind", "path", "digest", "size", "iteration", "perspective",
@@ -35,6 +38,23 @@ class WorktreeArchiveValidation:
     evidence: tuple[dict[str, Any], ...] = ()
     pointer_sha256: str | None = None
     manifest_sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class StateArchiveCompaction:
+    generation: str
+    manifest_sha256: str
+    previous_generation: str | None
+    retention_generations: int
+    records: tuple[dict[str, Any], ...]
+
+    @property
+    def superseded_paths(self) -> frozenset[str]:
+        return frozenset(
+            item["path"]
+            for record in self.records
+            for item in record["superseded"]
+        )
 
 
 def _invalid(bundle: Path, root: Path, reason: str, generation: str | None = None):
@@ -160,6 +180,173 @@ def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             raise ValueError("review input contains duplicate JSON keys")
         result[key] = value
     return result
+
+
+def _state_archive_core(document: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": document.get("schema"),
+        "previous_generation": document.get("previous_generation"),
+        "retention_policy": document.get("retention_policy"),
+        "records": document.get("records"),
+    }
+
+
+def state_archive_content_digest(document: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            _state_archive_core(document),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _state_archive_path(value: Any) -> str | None:
+    path = _safe_relative_path(value, state_reference=True)
+    return path.as_posix() if path is not None else None
+
+
+def read_state_archive_compaction(
+    state_root: Path, *, verify_superseded: bool = False,
+) -> StateArchiveCompaction | None:
+    """Read the current state-archive generation through the shared no-follow reader."""
+    compaction = state_root / "archive" / "compaction"
+    pointer_path = compaction / "current.json"
+    try:
+        pointer_path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ValueError("state archive pointer is unavailable") from exc
+    try:
+        pointer_bytes, _pointer_metadata = _read_generation_file(
+            compaction, Path("current.json"), limit=64 * 1024,
+        )
+        pointer = json.loads(
+            pointer_bytes.decode("utf-8"), object_pairs_hook=_strict_object,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, OSError, ValueError) as exc:
+        raise ValueError("state archive pointer is invalid") from exc
+    generation = pointer.get("generation") if isinstance(pointer, dict) else None
+    manifest_sha256 = pointer.get("manifest_sha256") if isinstance(pointer, dict) else None
+    if (
+        not isinstance(pointer, dict)
+        or set(pointer) != {"schema", "generation", "manifest_sha256"}
+        or pointer.get("schema") != STATE_ARCHIVE_POINTER_SCHEMA
+        or not isinstance(generation, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", generation)
+        or not isinstance(manifest_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", manifest_sha256)
+    ):
+        raise ValueError("state archive pointer schema is invalid")
+    relative_manifest = Path("generations") / generation / "manifest.json"
+    try:
+        manifest_bytes, _manifest_metadata = _read_generation_file(
+            compaction, relative_manifest, limit=4 * 1024 * 1024,
+        )
+        manifest = json.loads(
+            manifest_bytes.decode("utf-8"), object_pairs_hook=_strict_object,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, OSError, ValueError) as exc:
+        raise ValueError("state archive generation manifest is invalid") from exc
+    if hashlib.sha256(manifest_bytes).hexdigest() != manifest_sha256:
+        raise ValueError("state archive manifest digest mismatch")
+    if (
+        not isinstance(manifest, dict)
+        or set(manifest) != {
+            "schema", "created_at", "previous_generation", "retention_policy",
+            "records", "content_digest",
+        }
+        or manifest.get("schema") != STATE_ARCHIVE_GENERATION_SCHEMA
+        or manifest.get("content_digest") != generation
+        or state_archive_content_digest(manifest) != generation
+    ):
+        raise ValueError("state archive generation schema is invalid")
+    previous = manifest.get("previous_generation")
+    if previous is not None and (
+        not isinstance(previous, str) or not re.fullmatch(r"[0-9a-f]{64}", previous)
+    ):
+        raise ValueError("state archive previous generation is invalid")
+    retention = manifest.get("retention_policy")
+    if (
+        not isinstance(retention, dict)
+        or set(retention) != {"retain_generations", "physical_deletion"}
+        or not isinstance(retention.get("retain_generations"), int)
+        or isinstance(retention["retain_generations"], bool)
+        or retention["retain_generations"] < 1
+        or retention.get("physical_deletion") != "forbidden"
+    ):
+        raise ValueError("state archive retention policy is invalid")
+    records = manifest.get("records")
+    if not isinstance(records, list):
+        raise ValueError("state archive records are invalid")
+    canonical_seen: set[str] = set()
+    superseded_seen: set[str] = set()
+    validated: list[dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, dict) or set(record) != {
+            "canonical_path", "canonical_sha256", "mission_id", "session_id", "superseded",
+        }:
+            raise ValueError("state archive record schema is invalid")
+        canonical = _state_archive_path(record.get("canonical_path"))
+        canonical_sha256 = record.get("canonical_sha256")
+        superseded = record.get("superseded")
+        if (
+            canonical is None
+            or canonical in canonical_seen
+            or not isinstance(canonical_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", canonical_sha256)
+            or not isinstance(record.get("mission_id"), str)
+            or not record["mission_id"]
+            or not isinstance(record.get("session_id"), str)
+            or not record["session_id"]
+            or not isinstance(superseded, list)
+            or not superseded
+        ):
+            raise ValueError("state archive canonical record is invalid")
+        canonical_seen.add(canonical)
+        try:
+            canonical_bytes, _canonical_metadata = _read_generation_file(
+                state_root.parent, Path(canonical), limit=4 * 1024 * 1024,
+            )
+        except ValueError as exc:
+            raise ValueError("state archive canonical record is unavailable") from exc
+        if hashlib.sha256(canonical_bytes).hexdigest() != canonical_sha256:
+            raise ValueError("state archive canonical record digest mismatch")
+        validated_superseded: list[dict[str, str]] = []
+        for item in superseded:
+            path = _state_archive_path(item.get("path")) if isinstance(item, dict) else None
+            digest = item.get("sha256") if isinstance(item, dict) else None
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"path", "sha256"}
+                or path is None
+                or path == canonical
+                or path in superseded_seen
+                or not isinstance(digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            ):
+                raise ValueError("state archive superseded record is invalid")
+            superseded_seen.add(path)
+            if verify_superseded:
+                try:
+                    superseded_bytes, _superseded_metadata = _read_generation_file(
+                        state_root.parent, Path(path), limit=4 * 1024 * 1024,
+                    )
+                except ValueError as exc:
+                    raise ValueError("state archive superseded record is unavailable") from exc
+                if hashlib.sha256(superseded_bytes).hexdigest() != digest:
+                    raise ValueError("state archive superseded record digest mismatch")
+            validated_superseded.append({"path": path, "sha256": digest})
+        validated.append({**record, "canonical_path": canonical, "superseded": validated_superseded})
+    return StateArchiveCompaction(
+        generation=generation,
+        manifest_sha256=manifest_sha256,
+        previous_generation=previous,
+        retention_generations=retention["retain_generations"],
+        records=tuple(validated),
+    )
 
 
 def verify_review_input_evidence(

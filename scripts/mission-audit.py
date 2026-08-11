@@ -73,6 +73,7 @@ from audit_findings import (  # noqa: E402
 )
 from worktree_archive import (  # noqa: E402
     WorktreeArchiveValidation,
+    read_state_archive_compaction,
     validated_archive_evidence_reader,
     validate_worktree_archive_bundle,
 )
@@ -839,7 +840,8 @@ def _preflight_generation_state(
 
 
 def _iter_state_candidates(
-    root: Path, invalid_archives: list[dict[str, Any]] | None = None
+    root: Path, invalid_archives: list[dict[str, Any]] | None = None,
+    *, forensic: bool = False,
 ):
     root = root.expanduser()
     if not root.exists():
@@ -1017,6 +1019,33 @@ def _iter_state_candidates(
                         StateCandidate(path, **snapshot)
                         for path in sorted(worktree_sessions.glob("*.json"))
                     )
+        if archive_root is not None:
+            try:
+                compaction = read_state_archive_compaction(
+                    mission_state, verify_superseded=forensic,
+                )
+            except ValueError:
+                _append_invalid_archive_root(
+                    invalid_archives,
+                    mission_state / "archive" / "compaction",
+                    "state-archive-compaction-invalid",
+                )
+                candidates = []
+            else:
+                if compaction is not None and not forensic:
+                    superseded = compaction.superseded_paths
+                    state_parent = Path(os.path.abspath(mission_state.parent))
+                    materialized: list[StateCandidate] = []
+                    for candidate in candidates:
+                        try:
+                            relative = Path(os.path.abspath(candidate.path)).relative_to(
+                                state_parent
+                            ).as_posix()
+                        except ValueError:
+                            relative = ""
+                        if relative not in superseded:
+                            materialized.append(candidate)
+                    candidates = materialized
         seen: set[Path] = set()
         for candidate in candidates:
             path = candidate.path
@@ -1028,7 +1057,7 @@ def _iter_state_candidates(
 
 def iter_state_files(root: Path):
     """Yield state paths while preserving the pre-manifest iterator contract."""
-    for candidate in _iter_state_candidates(root) or []:
+    for candidate in _iter_state_candidates(root, forensic=True) or []:
         yield candidate.path
 
 
@@ -1043,11 +1072,14 @@ def parse_state_bytes(payload: bytes) -> Any:
 
 
 def load_records(
-    roots: list[Path], invalid_archives: list[dict[str, Any]] | None = None
+    roots: list[Path], invalid_archives: list[dict[str, Any]] | None = None,
+    *, forensic: bool = False,
 ) -> list[StateRecord]:
     records: list[StateRecord] = []
     for root in roots:
-        for candidate in _iter_state_candidates(root, invalid_archives) or []:
+        for candidate in _iter_state_candidates(
+            root, invalid_archives, forensic=forensic,
+        ) or []:
             path = candidate.path
             state = candidate.state
             if state is None:
@@ -1278,12 +1310,13 @@ def _record_from_payload(
 
 def _capture_state_snapshot_document(
     roots: list[Path], *, ttl_seconds: int, observed_at: datetime | None,
+    forensic: bool = False,
 ) -> tuple[list[StateRecord], list[dict[str, Any]], datetime, dict[str, Any], list[list[Any]]]:
     normalized = [Path(root) for root in normalize_roots(roots)]
     observed = observed_at or utc_now()
     root_before = _root_metadata_inventory(normalized)
     discovered_invalid: list[dict[str, Any]] = []
-    records = load_records(normalized, discovered_invalid)
+    records = load_records(normalized, discovered_invalid, forensic=forensic)
     invalid = collect_invalid_worktree_archives(records, discovered_invalid)
     external_paths: list[Path] = []
     seen_external: set[str] = set()
@@ -1317,7 +1350,7 @@ def _capture_state_snapshot_document(
 
 def create_state_snapshot(
     roots: list[Path], path: Path, *, ttl_seconds: int = DEFAULT_TTL_SECONDS,
-    observed_at: datetime | None = None,
+    observed_at: datetime | None = None, forensic: bool = False,
 ) -> tuple[list[StateRecord], list[dict[str, Any]], datetime]:
     normalized = [Path(root) for root in normalize_roots(roots)]
     target = Path(path).expanduser().resolve(strict=False)
@@ -1329,6 +1362,7 @@ def create_state_snapshot(
         raise SnapshotError("snapshot output must be outside every scanned root")
     records, invalid, observed, document, _root_index = _capture_state_snapshot_document(
         normalized, ttl_seconds=ttl_seconds, observed_at=observed_at,
+        forensic=forensic,
     )
     write_snapshot(path, document)
     return records, invalid, observed
@@ -1362,11 +1396,13 @@ def default_snapshot_directory(roots: list[Path]) -> Path:
 def create_default_state_snapshot(
     roots: list[Path], *, ttl_seconds: int = DEFAULT_TTL_SECONDS,
     observed_at: datetime | None = None, privacy: bool = False,
+    forensic: bool = False,
 ) -> tuple[Path, dict[str, Any]]:
     """Capture one content-addressed immutable snapshot below the first root."""
     directory = default_snapshot_directory(roots)
     _records, _invalid, _observed, document, root_index = _capture_state_snapshot_document(
         roots, ttl_seconds=ttl_seconds, observed_at=observed_at,
+        forensic=forensic,
     )
     if privacy:
         normalized = [Path(root) for root in normalize_roots(roots)]
@@ -3701,6 +3737,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--min-pass-rate", type=float, default=0.9, help="Finding threshold for pass rate")
     parser.add_argument("--json", action="store_true", help="Print machine-readable summary")
     parser.add_argument("--lineage", action="store_true", help="Include raw review and correlation lineage details")
+    parser.add_argument(
+        "--forensic",
+        action="store_true",
+        help="Read superseded physical state lineage in addition to materialized canonical records",
+    )
     parser.add_argument("--out", default=None, help="Write report to path")
     parser.add_argument("--privacy", action="store_true", help="Redact scanned root paths from report output")
     parser.add_argument("--self-improvement-prompt", action="store_true", help="Print only the prompt for /mission")
@@ -3762,6 +3803,7 @@ def main(argv: list[str] | None = None) -> int:
                 Path(args.snapshot_out),
                 ttl_seconds=args.snapshot_ttl_sec,
                 observed_at=utc_now(),
+                forensic=args.forensic,
             )
             records, invalid_worktree_archives, roots, observation_now, document = load_immutable_state_snapshot(
                 Path(args.snapshot_out), requested_roots,
@@ -3776,6 +3818,7 @@ def main(argv: list[str] | None = None) -> int:
                 ttl_seconds=args.snapshot_ttl_sec,
                 observed_at=utc_now(),
                 privacy=args.privacy,
+                forensic=args.forensic,
             )
             records, invalid_worktree_archives, roots, observation_now, document = load_immutable_state_snapshot(
                 snapshot_path, roots if args.privacy else requested_roots,
@@ -3811,6 +3854,10 @@ def main(argv: list[str] | None = None) -> int:
         invalid_worktree_archives,
         observation_now,
     )
+    stats["archive_compaction"] = {
+        "view": "forensic" if args.forensic else "materialized",
+        "discovered_record_count": len(records),
+    }
     stats["review_lineage"] = (
         review_lineage
         if args.lineage
