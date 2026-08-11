@@ -46,6 +46,52 @@ or mission profile changes.
 | mission Standard | USD 8.0 | `2026-08-07-portfolio-v6-repeats3`, `portfolio-std-contract` mission rep 1 completed at USD 5.9400; Standard reps capped at USD 6.0085 and USD 6.0259 show that a USD 6 cap is insufficient. |
 | mission full profile (Standard + Complex) | USD 10.0 | `2026-08-02-portfolio-v5-speed`, `portfolio-std-contract-mission` reached iteration 2 at USD 4.8770; combined with the v6 USD 5.9400 completed maximum, USD 10 preserves iteration-2 headroom. |
 
+### Benchmark audit KPI
+
+Each runner summary now includes `benchmark_kpi` (`mission-benchmark-kpi/1`).
+It reduces only synthetic result-record annotations; it does not read or
+recompute any raw planning state. Interpret it alongside the normal arm
+summary, not as a replacement for it.
+
+- `score_buckets` separates below-pass (`<4.0`), pass-but-below-target
+  (`4.0.. <4.3`), and target-met (`>=4.3`) records.
+- `audit_events` must carry `root_event_id`, positive `attempt`, and a `kind`
+  of `defect` or `expected-gate`. Defects dedupe by root event while retries
+  remain separately visible; `expected-gate` is reported but excluded from
+  defect totals.
+- `audit_context.coverage` is an observed/eligible pair and `tier` is context
+  only. Coverage with zero eligible items reports a null rate.
+- Duration p50/p90/tail use `run_status=completed` records only. A `blocked`
+  record is counted as censored (`blocked_censored_records`), while every other
+  noncompleted record is counted separately (`noncompleted_excluded_records`);
+  neither category can distort timing percentiles.
+
+The `mission-planning-provider-kpi/1` producer belongs to Issue #399 and is
+not consumed by this runner yet. `planning_provider_kpi.status=deferred` is an
+intentional versioned seam: do not add a payload to benchmark records until
+the #399 consumer contract is implemented and validated.
+
+`scripts/mission-audit.py --json` separately reports calibrated mission-state
+evidence. Its `score_calibration` population is pass sessions: scores below a
+session's threshold emit `below-pass-threshold`, scores from threshold through
+below 4.3 emit `pass-but-below-target`, and target-met scores are counted but
+do not create a finding. The historical `low_score_pass_*` JSON fields remain
+compatibility aliases and do not double-create findings. `command_outcome_defects`
+dedupes non-gate defects by root event, exposes retries, and excludes
+`expected-gate` while retaining its separate count. Slow-run findings include
+the record's `activity_coverage_ratio` and `review_tier`.
+
+The benchmark's `measurement_observations` explicitly lists
+`artifact_observation_coverage`, `activity_coverage`,
+`structured_score_provenance`, `reviewer_freshness`, `force_pass_rate`,
+`expected_gate_retry_count`, and `group_closeout_completeness`. The mission
+runner supplies versioned observations from typed mission-state evidence for
+the first six fields; goal records explicitly mark them `not-applicable`.
+`group_closeout_completeness` remains unavailable until its producer exists.
+The benchmark reducer aggregates only each record's numerator/denominator or
+counter (zero denominator gives a null rate); it must not reconstruct values
+from raw mission state.
+
 Record results in `report.md` / `report.ja.md` with the standard unsafe-
 interpretation guard, then close #262 with the verdict.
 

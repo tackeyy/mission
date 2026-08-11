@@ -27,6 +27,16 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BENCH_DIR = REPO_ROOT / "benchmarks" / "mission-vs-goal"
+MISSION_LIB = REPO_ROOT / "skills" / "mission" / "lib"
+if str(BENCH_DIR) not in sys.path:
+    sys.path.insert(0, str(BENCH_DIR))
+if str(MISSION_LIB) not in sys.path:
+    sys.path.insert(0, str(MISSION_LIB))
+from benchmark_audit import summarize_benchmark_kpi
+from activity_segments import summarize_activity_states
+from artifact_contract import summarize_artifact_coverage
+from command_outcomes import observe_state_only
+
 DEFAULT_TASKS_PATH = BENCH_DIR / "tasks.complex.json"
 RESULTS_DIR = BENCH_DIR / "results"
 ARTIFACTS_DIR = BENCH_DIR / "artifacts"
@@ -543,6 +553,7 @@ def extract_mission_state_fields(worktree: Path) -> tuple[dict, str | None]:
         "mission_halt_category": None,
         "mission_routed": None,  # #333: routed-goal halt = true / state あり非 routed = false
         "mission_evidence_only": None,  # #341: evidence-submitted halt = true (gated loop 未実行)
+        "measurement_observations": unavailable_measurement_observations(),
     }
     sessions = worktree / ".mission-state" / "sessions"
     candidates = sorted(sessions.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True) if sessions.is_dir() else []
@@ -569,7 +580,98 @@ def extract_mission_state_fields(worktree: Path) -> tuple[dict, str | None]:
     fields["mission_halt_category"] = halt_category if isinstance(halt_category, str) else None
     fields["mission_routed"] = halt_category == "routed-goal"  # #333
     fields["mission_evidence_only"] = halt_category == "evidence-submitted"  # #341
+    fields["measurement_observations"] = extract_measurement_observations(state)
     return fields, None
+
+
+MEASUREMENT_RATE_FIELDS = (
+    "artifact_observation_coverage",
+    "activity_coverage",
+    "structured_score_provenance",
+    "reviewer_freshness",
+    "force_pass_rate",
+)
+MEASUREMENT_COUNTER_FIELDS = ("expected_gate_retry_count",)
+MEASUREMENT_UNAVAILABLE_FIELDS = ("group_closeout_completeness",)
+
+
+def unavailable_measurement_observations(*, status: str = "unavailable") -> dict:
+    return {
+        key: {"status": status, "value": None}
+        for key in (*MEASUREMENT_RATE_FIELDS, *MEASUREMENT_COUNTER_FIELDS, *MEASUREMENT_UNAVAILABLE_FIELDS)
+    }
+
+
+def _rate_observation(numerator: int | float, denominator: int | float) -> dict:
+    if denominator <= 0:
+        return {"status": "unavailable", "value": None}
+    return {"status": "observed", "numerator": numerator, "denominator": denominator}
+
+
+def extract_measurement_observations(state: dict) -> dict:
+    """Reduce typed mission-state observations without reading planning-provider state."""
+    observations = unavailable_measurement_observations()
+
+    artifact = summarize_artifact_coverage([state])
+    artifact_counts = artifact["counts"]
+    observations["artifact_observation_coverage"] = _rate_observation(
+        artifact_counts["observed"], artifact_counts["eligible"],
+    )
+
+    activity = summarize_activity_states([state])
+    activity_numerator = activity.get("observed_total_sec")
+    activity_denominator = activity.get("coverage_denominator_sec")
+    if all(
+        isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+        for value in (activity_numerator, activity_denominator)
+    ):
+        observations["activity_coverage"] = _rate_observation(
+            activity_numerator, activity_denominator,
+        )
+
+    history = state.get("score_history")
+    if isinstance(history, list):
+        entries = [entry for entry in history if isinstance(entry, dict)]
+        if entries:
+            observations["structured_score_provenance"] = _rate_observation(
+                sum(isinstance(entry.get("score_provenance"), dict) for entry in entries),
+                len(entries),
+            )
+
+    iteration = state.get("iteration")
+    references = state.get("review_evidence_refs")
+    if isinstance(references, list):
+        perspectives = {
+            reference.get("perspective")
+            for reference in references
+            if isinstance(reference, dict)
+            and reference.get("iteration") == iteration
+            and isinstance(reference.get("perspective"), str)
+            and reference["perspective"]
+        }
+        reviewer_count = state.get("reviewer_count")
+        if perspectives and isinstance(reviewer_count, int) and not isinstance(reviewer_count, bool) and reviewer_count > 0:
+            observations["reviewer_freshness"] = _rate_observation(len(perspectives), reviewer_count)
+
+    if isinstance(state.get("passes"), bool):
+        observations["force_pass_rate"] = _rate_observation(
+            int(state.get("passes_forced") is True), 1,
+        )
+
+    try:
+        outcomes = observe_state_only(state)["records"]
+    except Exception:
+        outcomes = None
+    if isinstance(outcomes, list):
+        observations["expected_gate_retry_count"] = {
+            "status": "observed",
+            "count": sum(
+                1 for outcome in outcomes
+                if outcome.get("outcome_kind") == "expected-gate"
+                and (outcome.get("attempt", 1) > 1 or outcome.get("retry_of") is not None)
+            ),
+        }
+    return observations
 
 
 def evaluate_run(
@@ -776,6 +878,8 @@ def run_one(
                 "mission_passes": None,
                 "mission_halt_category": None,
                 "mission_routed": None,
+                "mission_evidence_only": None,
+                "measurement_observations": unavailable_measurement_observations(status="not-applicable"),
             },
             None,
         )
@@ -1135,6 +1239,7 @@ def summarize(
         "expected_records": expected_records,
         "stopped_early": stopped_early,
         "limitations": limitations,
+        "benchmark_kpi": summarize_benchmark_kpi(records),
         "arms": {
             arm: {
                 "records": len(items),

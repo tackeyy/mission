@@ -310,7 +310,7 @@ def test_checkpoint_and_unselected_provenance_use_updated_at_cutoff(tmp_path: Pa
 def test_all_finding_specs_are_registry_wired_and_priority_sorted(tmp_path: Path):
     audit = _load_audit_module()
 
-    assert len(audit.FINDING_SPECS) == 22
+    assert len(audit.FINDING_SPECS) == 23
     assert all(spec.source_key for spec in audit.FINDING_SPECS.values())
     assert all(spec.source_kind for spec in audit.FINDING_SPECS.values())
     assert all(spec.item_summary for spec in audit.FINDING_SPECS.values())
@@ -424,7 +424,8 @@ def test_all_registry_aggregate_summaries_preserve_specific_meaning():
         "slow-runs": "2 current sessions exceeded slow threshold",
         "instrumentation-gap": "2 activity coverage gap requires instrumentation before speed diagnosis",
         "coarse-phase-attribution": "2 slow sessions attribute most elapsed time to planning",
-        "low-score-pass": "2 current pass sessions scored below 4.3",
+        "below-pass-threshold": "2 current pass sessions scored below the pass threshold",
+        "pass-but-below-target": "2 current pass sessions passed but scored below the 4.3 target",
         "specialist-invocation-gap": "2 current sessions selected specialists without terminal invocation logs",
         "unresolved-confirm-specialist-selection": "2 current sessions applied specialists after ask-user without confirmed selection metadata",
         "unselected-specialist-invocation": "2 current sessions invoked specialists without matching selection metadata",

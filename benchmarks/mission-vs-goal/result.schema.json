@@ -214,6 +214,10 @@
       "type": ["string", "null"],
       "description": "#250: mission arm の halt_category。goal arm / halt なし / 抽出不能は null。"
     },
+    "measurement_observations": {
+      "type": "object",
+      "description": "#390: versioned mission-state observations. Goal records explicitly use not-applicable; the reducer never reopens raw state."
+    },
     "total_cost_usd": {
       "type": [
         "number",

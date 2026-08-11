@@ -78,6 +78,47 @@ PATH="<shim-dir>:$PATH" python3 run_claude_goal_vs_mission.py \
 | mission Standard | USD 8.0 | `2026-08-07-portfolio-v6-repeats3` の `portfolio-std-contract` mission rep 1 が USD 5.9400 で完走。Standard の USD 6.0085 / 6.0259 capped record から USD 6 では不足。 |
 | mission full profile（Standard + Complex） | USD 10.0 | `2026-08-02-portfolio-v5-speed` の `portfolio-std-contract-mission` が iteration 2、USD 4.8770。v6 完走最大 USD 5.9400 と併せ、iteration 2 の余裕を確保。 |
 
+### benchmark audit KPI
+
+runner summary には `benchmark_kpi`（`mission-benchmark-kpi/1`）が出力される。
+これは synthetic な result record の annotation だけを集計し、raw planning
+state を読む・再計算するものではない。通常の arm summary の代替ではなく、併読する。
+
+- `score_buckets` は below-pass（`<4.0`）、pass-but-below-target
+  （`4.0.. <4.3`）、target-met（`>=4.3`）に分ける。
+- `audit_events` は `root_event_id`、正の `attempt`、`defect` または
+  `expected-gate` の `kind` を持つ。defect は root event で dedupe し retry は別に
+  可視化する。`expected-gate` は報告するが defect total から除外する。
+- `audit_context.coverage` は observed/eligible、`tier` は文脈情報である。
+  eligible が 0 の coverage rate は null とする。
+- duration の p50/p90/tail は `run_status=completed` record だけを使う。`blocked`
+  record は `blocked_censored_records`、他の非完了 record は
+  `noncompleted_excluded_records` として別々に数え、いずれも percentile を歪めない。
+
+`mission-planning-provider-kpi/1` の producer は Issue #399 の責務であり、現時点で
+runner は消費しない。`planning_provider_kpi.status=deferred` は意図した versioned
+seam である。#399 の consumer contract を実装・検証するまで、benchmark record へ
+payload を追加しない。
+
+`scripts/mission-audit.py --json` は mission state の較正済み evidence を別途出力する。
+`score_calibration` の population は pass session である。session threshold 未満は
+`below-pass-threshold`、threshold 以上かつ 4.3 未満は
+`pass-but-below-target` の finding を発火し、target-met は数えるが finding を発火しない。
+既存の `low_score_pass_*` JSON は互換 alias として残るが、finding を二重発火しない。
+`command_outcome_defects` は expected-gate を除外して non-gate defect を root event
+で dedupe し、retry は別に出力する。slow-run finding には
+`activity_coverage_ratio` と `review_tier` を併記する。
+
+benchmark の `measurement_observations` は
+`artifact_observation_coverage`、`activity_coverage`、
+`structured_score_provenance`、`reviewer_freshness`、`force_pass_rate`、
+`expected_gate_retry_count`、`group_closeout_completeness` を明示する。runner が
+mission arm の typed state evidence から最初の6項目を versioned observation として渡し、
+goal arm は明示的に `not-applicable` とする。`group_closeout_completeness` は producer
+未実装のため unavailable のままである。reducer は各 record に埋め込まれた
+numerator/denominator または counter だけを集計し（denominator 0 の rate は null）、
+raw mission state から再計算しない。
+
 ## Step 3: 採用判定ゲート
 
 すべて summary / records から機械的に判定する:

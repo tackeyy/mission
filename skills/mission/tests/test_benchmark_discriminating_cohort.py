@@ -12,11 +12,20 @@ sonnet-5 に対して判別力を失った実害への対策。Contract under te
 """
 
 import json
+import importlib.util
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 BENCHMARK_DIR = REPO_ROOT / "benchmarks" / "mission-vs-goal"
 TASKS_PATH = BENCHMARK_DIR / "tasks.discriminating.json"
+
+
+def _runner():
+    path = BENCHMARK_DIR / "run_claude_goal_vs_mission.py"
+    spec = importlib.util.spec_from_file_location("run_claude_goal_vs_mission", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _data() -> dict:
@@ -50,6 +59,25 @@ def test_discrimination_marker_density():
     for task in _data()["tasks"]:
         assert len(task["quality_markers"]) >= 6, task["id"]
         assert len(task["forbidden_markers"]) >= 1, task["id"]
+
+
+def test_planted_defect_marker_is_strictly_lower_than_clean_without_saturation():
+    """A planted false finding lowers marker score; neither synthetic arm saturates."""
+    runner = _runner()
+    for task in _data()["tasks"]:
+        marker_name = task["planted_defect_marker"]
+        quality = task["quality_markers"][0]
+        clean_bonus = task["quality_markers"][1]
+        defect = next(marker for marker in task["forbidden_markers"] if marker["name"] == marker_name)
+        clean = runner.evaluate_quality_markers(
+            f"{quality['patterns'][0]} {clean_bonus['patterns'][0]}", task,
+        )
+        planted = runner.evaluate_quality_markers(
+            f"{quality['patterns'][0]} {defect['patterns'][0]}", task,
+        )
+        assert planted["quality_marker_score"] < clean["quality_marker_score"], task["id"]
+        assert clean["quality_marker_score"] < 1.0, task["id"]
+        assert planted["quality_marker_score"] < 1.0, task["id"]
 
 
 def test_fail_first_tasks_present():
@@ -104,3 +132,12 @@ def test_adoption_runbook_exists():
     # 採用ゲート: 分散の解消と iter>=2 の観測を要求
     assert "marker_score_variance" in text
     assert "iteration" in text or "iter" in text
+
+
+def test_audit_kpi_contract_is_documented_in_both_runbooks():
+    for name in ("discriminating-cohort-runbook.md", "discriminating-cohort-runbook.ja.md"):
+        text = (BENCHMARK_DIR / name).read_text(encoding="utf-8")
+        assert "benchmark_kpi" in text
+        assert "expected-gate" in text
+        assert "blocked" in text
+        assert "mission-planning-provider-kpi/1" in text

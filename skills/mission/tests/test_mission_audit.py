@@ -118,6 +118,67 @@ def test_low_activity_coverage_prioritizes_instrumentation_over_slow_run(tmp_pat
     assert "slow-runs" not in codes
 
 
+def test_audit_calibrates_score_buckets_and_command_outcome_defects(tmp_path):
+    sessions = tmp_path / ".mission-state" / "sessions"
+    _write_state(
+        sessions / "below.json", session_id="below", mission_id="below",
+        score_history=[{"iteration": 1, "composite": 3.9, "min_item": 3.9, "items": {}, "timestamp": "2026-06-18T00:05:00Z"}],
+        command_outcomes=[
+            {"event_id": "gate-1", "root_event_id": "gate-root", "attempt": 1, "command": "fixture", "outcome_kind": "expected-gate"},
+            {"event_id": "gate-2", "root_event_id": "gate-root", "attempt": 2, "retry_of": "gate-1", "command": "fixture", "outcome_kind": "expected-gate"},
+            {"event_id": "defect-1", "root_event_id": "defect-root", "attempt": 1, "command": "fixture", "outcome_kind": "invalid-input"},
+            {"event_id": "defect-2", "root_event_id": "defect-root", "attempt": 2, "retry_of": "defect-1", "command": "fixture", "outcome_kind": "invalid-input"},
+        ],
+    )
+    _write_state(
+        sessions / "below-target.json", session_id="below-target", mission_id="below-target",
+        score_history=[{"iteration": 1, "composite": 4.1, "min_item": 4.0, "items": {}, "timestamp": "2026-06-18T00:05:00Z"}],
+    )
+    _write_state(
+        sessions / "target.json", session_id="target", mission_id="target",
+        score_history=[{"iteration": 1, "composite": 4.3, "min_item": 4.0, "items": {}, "timestamp": "2026-06-18T00:05:00Z"}],
+    )
+    _write_state(
+        sessions / "slow.json", session_id="slow", mission_id="slow", review_tier="full",
+        started_at="2026-06-18T00:00:00Z", updated_at="2026-06-18T02:00:00Z",
+        score_history=[{"iteration": 1, "composite": 4.5, "min_item": 4.0, "items": {}, "timestamp": "2026-06-18T00:05:00Z"}],
+        activity_segments=[{
+            "kind": "active", "reason": "work", "phase": "executing", "duration_sec": 7200.0,
+            "started_at": "2026-06-18T00:00:00Z", "ended_at": "2026-06-18T02:00:00Z",
+        }],
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--slow-threshold-sec", "60", "--json"],
+        capture_output=True, text=True, check=True,
+    )
+    audit = json.loads(result.stdout)
+
+    assert audit["score_calibration"] == {
+        "below-pass-threshold": 1,
+        "pass-but-below-target": 1,
+        "target-met": 2,
+        "unavailable": 0,
+    }
+    assert audit["command_outcome_defects"] == {
+        "unique_root_events": 1,
+        "event_attempts": 2,
+        "retry_attempts": 1,
+        "expected_gate_events": 2,
+        "expected_gate_retry_count": 1,
+    }
+    codes = [item["code"] for item in audit["all_findings"]]
+    assert codes.count("below-pass-threshold") == 1
+    assert codes.count("pass-but-below-target") == 1
+    assert "low-score-pass" not in codes
+    slow_finding = next(
+        item for item in audit["all_findings"]
+        if item["code"] == "slow-runs" and item["session_id"] == "slow"
+    )
+    assert slow_finding["review_tier"] == "full"
+    assert slow_finding["activity_coverage_ratio"] == 1.0
+
+
 def test_audit_deduplicates_worktree_archive(tmp_path):
     sessions = tmp_path / ".mission-state" / "sessions"
     archive = tmp_path / ".mission-state" / "archive" / "worktree-feat"
