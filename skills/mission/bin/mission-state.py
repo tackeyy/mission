@@ -77,7 +77,20 @@ from mission_common import (  # noqa: E402
 from specialist_accounting import (  # noqa: E402
     candidate_accounting_report,
     explicitly_selected_specialist_skills as _accounting_selected_specialist_skills,
+    selected_without_terminal_invocations,
     terminal_invoked_specialist_skills as _accounting_terminal_invoked_specialist_skills,
+)
+from specialist_lifecycle import (  # noqa: E402
+    SpecialistLifecycleError,
+    invocation_by_id,
+    invocation_lifecycle_state,
+    is_terminal_invocation,
+    new_invocation_id,
+    new_selection_id,
+    selection_checkpoint,
+    validate_invocation_record,
+    validate_invocation_transition,
+    validate_specialist_lifecycle,
 )
 from activity_segments import (  # noqa: E402
     ACTIVITY_KINDS,
@@ -159,6 +172,58 @@ from command_outcomes import (  # noqa: E402
 
 SCHEMA_VERSION = 4  # v4: structured scoring provenance is mandatory for new sessions
 GOAL_DISPATCH_MODES = {"inline", "host-native"}
+
+
+def _new_specialist_selection_checkpoint() -> dict:
+    return {
+        "policy": "checkpoint",
+        "action": "continue-core",
+        "decision": "none",
+        "reason": "specialist selection has not been evaluated",
+        "reason_code": "pending-evaluation",
+        "prompted_user": False,
+        "lifecycle_state": "candidate",
+        "selection_id": new_selection_id(),
+    }
+
+
+def _current_selection_id(data: dict) -> str | None:
+    decision = data.get("specialists_decision")
+    selection_id = decision.get("selection_id") if isinstance(decision, dict) else None
+    return str(selection_id) if isinstance(selection_id, str) else None
+
+
+def _finalize_specialist_selection_checkpoint(
+    decision: dict, candidates: list[dict], selected: list[dict], unavailable: list[dict]
+) -> tuple[dict, list[dict], list[dict], list[dict]]:
+    """Bind one recommendation result to one opaque, durable checkpoint."""
+    selection_id = new_selection_id()
+    if selected:
+        checkpoint = {"decision": "selected", "reason_code": "candidate-selected", "lifecycle_state": "selected"}
+    elif decision.get("action") == "ask-user":
+        checkpoint = {"decision": "none", "reason_code": "awaiting-confirmation", "lifecycle_state": "candidate"}
+    elif unavailable:
+        checkpoint = {"decision": "unavailable", "reason_code": "provider-unavailable", "lifecycle_state": "terminal"}
+    else:
+        checkpoint = {
+            "decision": "none",
+            "reason_code": "no-candidates" if not candidates else "profile-not-applicable",
+            "lifecycle_state": "terminal",
+        }
+    decision = {**decision, **checkpoint, "selection_id": selection_id}
+    bind = lambda records: [{**record, "selection_id": selection_id} for record in records]
+    return decision, bind(candidates), bind(selected), bind(unavailable)
+
+
+def _specialist_selection_checkpoint_error(data: dict) -> str | None:
+    decision = data.get("specialists_decision")
+    if not isinstance(decision, dict) or not decision.get("selection_id"):
+        return None  # legacy sessions remain readable and are classified by audit
+    try:
+        validate_specialist_lifecycle(data)
+    except SpecialistLifecycleError as exc:
+        return f"specialist selection checkpoint is not terminal or valid: {exc}"
+    return None
 
 # #186: 実行中の mission-state.py のバージョン。.claude-plugin/plugin.json 等の manifest と
 # 一致させる (release 時に手動 bump。test_doc_consistency.py::test_release_version_paths_are_in_sync
@@ -3258,6 +3323,7 @@ def _public_specialist_record(record: dict) -> dict:
         "selection_source",
         "selection_source_raw",
         "eligibility_selection_source",
+        "selection_id",
     ):
         value = record.get(field)
         if isinstance(value, str):
@@ -3885,6 +3951,9 @@ def cmd_specialists(args):
     decision = decide_specialists(task_profile, candidates,
                                   _split_csv(getattr(args, "user_specified", None)))
     selected, unavailable = _selection_from_decision(candidates, decision)
+    decision, candidates, selected, unavailable = _finalize_specialist_selection_checkpoint(
+        decision, candidates, selected, unavailable
+    )
     phase_plan = build_phase_plan(candidates, effective_complexity, mission_context)
     public_candidates = _public_specialist_records(candidates)
     public_selected = _public_specialist_records(selected)
@@ -4432,6 +4501,9 @@ def _add_selected_specialist_metadata(data: dict, entry: dict, selection_source:
         "selection_source": selection_source,
         "selected_at": now,
     }
+    selection_id = entry.get("selection_id") or _current_selection_id(data)
+    if selection_id:
+        selected_entry["selection_id"] = selection_id
     for key in (
         "source",
         "command",
@@ -4448,6 +4520,17 @@ def _add_selected_specialist_metadata(data: dict, entry: dict, selection_source:
         selected_entry["reason"] = reason
     public_entry = _public_specialist_record(selected_entry)
     selected.append(public_entry)
+    decision = data.get("specialists_decision")
+    if isinstance(decision, dict) and selection_id:
+        decision.update({
+            "action": "select",
+            "decision": "selected",
+            "reason_code": "confirmed-selection" if selection_source == "confirmed-user" else "explicit-selection",
+            "lifecycle_state": "selected",
+            "selection_id": selection_id,
+        })
+        if selection_source == "confirmed-user":
+            decision["confirmation_resolved"] = True
     return public_entry
 
 
@@ -4538,22 +4621,30 @@ def cmd_invoke_command_provider(args):
 
     now = iso_now()
     entry = {
+        "invocation_id": new_invocation_id(),
         "iteration": args.iteration,
         "phase": args.phase,
         "role": provider.get("role"),
         "skill": provider.get("skill") or provider.get("role"),
         "mode": "command-provider",
         "status": "started",
+        "lifecycle_state": "invoked",
         "timestamp": now,
+        "transitioned_at": now,
         "started_at": now,
         "provider_kind": "command",
     }
+    selection_id = _current_selection_id(data)
+    if selection_id:
+        entry["selection_id"] = selection_id
     command = provider.get("command")
     timeout = _provider_timeout(provider, args.timeout)
     if not _command_is_available(command):
         outcome = _command_outcome(args, "specialists-invoke-command", "external")
         entry.update({
             "status": "unavailable",
+            "lifecycle_state": "terminal",
+            "transitioned_at": iso_now(),
             "completed_at": iso_now(),
             "reason": f"command provider is not available: {command}",
         })
@@ -4593,7 +4684,7 @@ def cmd_invoke_command_provider(args):
     with StateLock(lock_file(cwd)):
         dispatch_state = json.loads(sf.read_text())
         _validate_specialist_public_state(dispatch_state)
-        _prepare_specialist_invocation_state(
+        dispatch_state, entry, _ = _prepare_specialist_invocation_state(
             dispatch_state,
             entry,
             cwd=cwd,
@@ -4632,6 +4723,8 @@ def cmd_invoke_command_provider(args):
     completed_at = iso_now()
     entry.update({
         "status": status,
+        "lifecycle_state": "terminal",
+        "transitioned_at": completed_at,
         "completed_at": completed_at,
         "exit_code": exit_code,
     })
@@ -4668,16 +4761,22 @@ def cmd_invoke_command_provider(args):
         )
         if applied_selection_source:
             entry["selection_source"] = applied_selection_source
-        data, entry, selected_entry = _prepare_specialist_invocation_state(
-            data,
-            entry,
-            cwd=cwd,
-            iteration=args.iteration,
-            evidence_planned=True,
-            selection_source=applied_selection_source,
-            provider=provider,
-            selection_reason=reason,
-        )
+        try:
+            current_entry = invocation_by_id(data, entry["invocation_id"])
+            validate_invocation_transition(current_entry, entry)
+        except SpecialistLifecycleError as exc:
+            print(f"ERROR: command invocation checkpoint is invalid: {exc}", file=sys.stderr)
+            sys.exit(2)
+        selected_entry = None
+        if applied_selection_source:
+            selected_entry = _add_selected_specialist_metadata(
+                data, entry, applied_selection_source, completed_at, provider, reason
+            )
+        for index, item in enumerate(data["specialist_invocations"]):
+            if item.get("invocation_id") == entry["invocation_id"]:
+                data["specialist_invocations"][index] = entry
+                break
+        _validate_specialist_public_state(data)
         _append_command_outcome(data, outcome)
         archived_to = _commit_specialist_state_with_archive(
             sf, cwd, data, entry, args.iteration, evidence
@@ -5723,15 +5822,33 @@ def cmd_log_specialist_invocation(args):
             )
             sys.exit(2)
         now = iso_now()
+        invocations = data.setdefault("specialist_invocations", [])
+        requested_id = getattr(args, "invocation_id", None)
+        existing_index = None
+        existing_entry = None
+        if requested_id:
+            matches = [(index, item) for index, item in enumerate(invocations)
+                       if isinstance(item, dict) and item.get("invocation_id") == requested_id]
+            if len(matches) != 1:
+                print("ERROR: --invocation-id must identify exactly one invocation", file=sys.stderr)
+                sys.exit(2)
+            existing_index, existing_entry = matches[0]
         entry = {
+            **(existing_entry or {}),
+            "invocation_id": requested_id or new_invocation_id(),
             "iteration": args.iteration,
             "phase": args.phase,
             "role": role,
             "skill": skill,
             "mode": args.mode,
             "status": args.status,
-            "timestamp": now,
+            "lifecycle_state": invocation_lifecycle_state(args.status),
+            "timestamp": (existing_entry or {}).get("timestamp") or now,
+            "transitioned_at": now,
         }
+        selection_id = _current_selection_id(data)
+        if selection_id:
+            entry["selection_id"] = selection_id
         if args.started_at:
             entry["started_at"] = args.started_at
         if args.completed_at:
@@ -5747,19 +5864,33 @@ def cmd_log_specialist_invocation(args):
         if getattr(args, "bounded_purpose", None):
             entry["bounded_purpose"] = args.bounded_purpose
 
+        try:
+            validate_invocation_record(entry)
+            if existing_entry is not None:
+                validate_invocation_transition(existing_entry, entry)
+        except SpecialistLifecycleError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(2)
+
         evidence_src = Path(args.evidence_output) if args.evidence_output else None
         evidence_planned = evidence_src is not None
         data = stamp_metadata(data, cwd)
         data["updated_at"] = now
-        data, entry, selected_entry = _prepare_specialist_invocation_state(
-            data,
-            entry,
-            cwd=cwd,
-            iteration=args.iteration,
-            evidence_planned=evidence_planned,
-            selection_source=getattr(args, "selection_source", None),
-            selection_reason=reason or notes,
-        )
+        if existing_entry is None:
+            data, entry, selected_entry = _prepare_specialist_invocation_state(
+                data, entry, cwd=cwd, iteration=args.iteration,
+                evidence_planned=evidence_planned,
+                selection_source=getattr(args, "selection_source", None),
+                selection_reason=reason or notes,
+            )
+        else:
+            selected_entry = None
+            if getattr(args, "selection_source", None):
+                selected_entry = _add_selected_specialist_metadata(
+                    data, entry, args.selection_source, now, reason=reason or notes
+                )
+            invocations[existing_index] = entry
+            _validate_specialist_public_state(data)
         evidence_text = None
         if evidence_planned and evidence_src is not None:
             evidence_text = _read_specialist_evidence_input(evidence_src)
@@ -5815,7 +5946,7 @@ def cmd_init(args):
         "specialists_candidates": [],
         "specialists_selected": [],
         "specialists_unavailable": [],
-        "specialists_decision": {},
+        "specialists_decision": _new_specialist_selection_checkpoint(),
         "specialist_invocations": [],
         # M-audit-2 (2026-06-11): 未指定は 3 (98 セッション実測で iter>3 の ROI 低下)。
         # 0 は「上限なし (stagnation 停止モード)」として None を保持する。
@@ -10577,6 +10708,7 @@ def cmd_mark_passes(args):
     force = bool(getattr(args, "force", False))
     reason = getattr(args, "reason", None)
     approved_by_user = bool(getattr(args, "approved_by_user", False))
+    specialist_waiver = (getattr(args, "specialist_waiver", None) or "").strip()
     approval_ref = getattr(args, "approval_evidence_ref", None)
     approved_actor = getattr(args, "approved_actor", None)
     approved_at = getattr(args, "approved_at", None)
@@ -10691,6 +10823,21 @@ def cmd_mark_passes(args):
                     file=sys.stderr,
                 )
                 sys.exit(2)
+            checkpoint_error = _specialist_selection_checkpoint_error(data)
+            if checkpoint_error:
+                print(f"ERROR: {checkpoint_error}", file=sys.stderr)
+                sys.exit(2)
+            decision = data.get("specialists_decision")
+            if isinstance(decision, dict) and decision.get("decision") == "selected":
+                invocation_gaps = selected_without_terminal_invocations(data)
+                if invocation_gaps and not specialist_waiver:
+                    skills = ", ".join(item["skill"] for item in invocation_gaps)
+                    print(
+                        "ERROR: terminal specialist invocation missing before pass: "
+                        f"{skills}. Record a terminal result or pass --specialist-waiver <reason>.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
             specialist_report = candidate_accounting_report(data)
             if specialist_report.get("accounting_required"):
                 skills = ", ".join(c["skill"] for c in specialist_report.get("required_unaccounted_candidates", []))
@@ -10762,6 +10909,12 @@ def cmd_mark_passes(args):
                 print("ERROR: force approval terminal state binding changed before write", file=sys.stderr)
                 sys.exit(2)
             data["force_approval"]["consumed"] = True
+        elif specialist_waiver:
+            data["specialist_waiver"] = {
+                "reason": specialist_waiver,
+                "selection_id": _current_selection_id(data),
+                "recorded_at": now,
+            }
         backup_state(sf)
         atomic_write_json(sf, data)
         # #11: aggregate 更新も同じ StateLock 内で行う (lock 外だと並列 mark で lost update)
@@ -12544,6 +12697,8 @@ def _build_parser():
     p_pass.add_argument("--approved-by-user", action="store_true", dest="approved_by_user",
                         help="#185: --force と併用必須。ユーザーが明示的に override を承認したことの宣言 "
                              "(orchestrator が自律的に付けてはならない — ユーザーの明示指示があった場合のみ)")
+    p_pass.add_argument("--specialist-waiver", default=None,
+                        help="selected checkpoint に terminal invocation がない場合の明示理由")
     p_pass.add_argument("--approval-evidence-ref", default=None,
                         help="verified approval record digest (sha256:<64 hex>)")
     p_pass.add_argument("--approved-actor", default=None,
@@ -12876,6 +13031,8 @@ def _build_parser():
     p_summary.set_defaults(func=cmd_specialists_summary)
 
     p_log = spec_sub.add_parser("log-invocation", help="specialist skill の実呼び出し/inline/skip 証跡を記録")
+    p_log.add_argument("--invocation-id", default=None,
+                       help="既存 selected/started invocation を同一 ID のまま terminal へ遷移")
     p_log.add_argument("--iteration", type=int, required=True)
     p_log.add_argument("--phase", required=True,
                        choices=["planning", "execution", "review", "scoring", "critic"])

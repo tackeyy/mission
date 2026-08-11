@@ -2128,7 +2128,24 @@ def test_audit_does_not_report_legacy_missing_specialist_selection_checkpoint(tm
 
     data = json.loads(result.stdout)
     assert data["missing_specialist_selection_checkpoint_count"] == 0
+    assert data["legacy_missing_specialist_selection_checkpoint_count"] == 1
+    assert data["legacy_missing_specialist_selection_checkpoints"][0]["classification"] == "missing-legacy"
     assert all(f["code"] != "missing-specialist-selection-checkpoint" for f in data["findings"])
+
+
+def test_audit_counts_pending_new_checkpoint_as_present_not_missing(tmp_path):
+    _write_state(
+        tmp_path / ".mission-state" / "sessions" / "pending.json",
+        started_at="2026-08-11T10:00:00Z", created_at_session="2026-08-11T10:00:00Z",
+        task_profile={"primary": "backend"},
+        specialists_decision={"policy": "checkpoint", "action": "continue-core", "decision": "none",
+            "reason_code": "pending-evaluation", "lifecycle_state": "candidate",
+            "selection_id": "sel_0123456789abcdef0123456789abcdef"},
+    )
+    result = subprocess.run([sys.executable, str(MISSION_AUDIT_PY), "--root", str(tmp_path), "--json"],
+                            capture_output=True, text=True, check=True)
+    data = json.loads(result.stdout)
+    assert data["missing_specialist_selection_checkpoint_count"] == 0
 
 
 def test_audit_does_not_require_specialist_selection_checkpoint_for_simple(tmp_path):

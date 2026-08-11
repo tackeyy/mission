@@ -425,7 +425,7 @@ The orchestrator preserves enough traceability to explain specialist selection w
 }
 ```
 
-Use `task_profile` as an object/dict for the classification record, `specialists_mode` for automatic or manual selection mode, `specialists_candidates` for ranked candidates, `specialists_selected` for selected specialist intent, `specialists_unavailable` for missing or unavailable specialists, and `specialists_decision` for the policy outcome. Use `specialist_invocations` for append-only execution evidence after selection: actual Skill tool calls, Codex inline application, natural-language role application, fallback-core usage, skips, unavailable cases, and failures.
+Use `task_profile` as an object/dict for the classification record, `specialists_mode` for automatic or manual selection mode, `specialists_candidates` for ranked candidates, `specialists_selected` for selected specialist intent, `specialists_unavailable` for missing or unavailable specialists, and `specialists_decision` for the policy outcome. `selection_id` binds a recommendation checkpoint; each invocation has a unique `invocation_id` and carries that identity. A started record is updated in place to its terminal result, preserving crash-visible evidence.
 
 `specialists_selected` and `specialist_invocations` intentionally remain separate. Selection answers "what should be used"; invocation answers "what was actually used or skipped." This keeps ADR-001's audit requirement intact without pretending Codex inline usage is a real forked Skill tool call.
 

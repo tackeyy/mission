@@ -71,6 +71,34 @@ def terminal_invoked_specialist_skills(state: dict[str, Any]) -> set[str]:
     return skills
 
 
+def selected_without_terminal_invocations(state: dict[str, Any]) -> list[dict[str, str]]:
+    """Return selected providers lacking terminal evidence for this checkpoint.
+
+    Legacy records carry no selection_id and retain the historical skill-only
+    accounting semantics; new checkpoints require the same selection identity.
+    """
+    decision = state.get("specialists_decision")
+    checkpoint_id = decision.get("selection_id") if isinstance(decision, dict) else None
+    terminal_pairs: set[tuple[str, str | None]] = set()
+    for invocation in state.get("specialist_invocations") or []:
+        if not isinstance(invocation, dict):
+            continue
+        skill = invocation.get("skill")
+        if skill and invocation.get("status") in TERMINAL_SPECIALIST_INVOCATION_STATUSES:
+            terminal_pairs.add((str(skill), invocation.get("selection_id")))
+    gaps: list[dict[str, str]] = []
+    for selected in state.get("specialists_selected") or []:
+        if not isinstance(selected, dict) or not selected.get("skill"):
+            continue
+        selected_id = selected.get("selection_id")
+        if checkpoint_id and selected_id != checkpoint_id:
+            continue
+        pair = (str(selected["skill"]), selected_id if checkpoint_id else None)
+        if pair not in terminal_pairs:
+            gaps.append({"skill": str(selected["skill"]), "role": str(selected.get("role") or selected["skill"])})
+    return gaps
+
+
 def applied_specialist_invocation_skills(state: dict[str, Any]) -> set[str]:
     skills: set[str] = set()
     for invocation in state.get("specialist_invocations") or []:

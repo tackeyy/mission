@@ -36,6 +36,7 @@ SKILL.md 本文の token 節約のため、日付付き改修注記と実測デ�
 - **Issue #201 (2026-07-20)**: archived worktree bundle 内の `iter-N-<mission8>/scoring.{json,md}` を scoring evidence として認識し、worktree cleanup 後の historical missing-scoring-evidence false positive を解消
 - **Issue #233 (2026-07-22)**: 実ログの日本語 root 引き渡し・parent ownership・明示的 merge 承認待ち reason を halted-run actionable 分類に反映し、raw halt count を保持したまま delegated / awaiting-external へ分類できるように修正
 - **Issue #347 (2026-08-04)**: owner による明示的な凍結・意図的 close・replacement issue への切替を示す halt reason を非 actionable の `intentional-freeze-switch` として分類し、raw halt count を保持したまま P1 halted-runs false positive を減らすように修正
+- **Issue #387 (2026-08-10)**: specialist selection checkpoint を init から常時生成し、selection/invocation の opaque ID と許可遷移を導入。selected 未実行の terminal pass は明示 waiver がない限り拒否し、legacy 欠落は `missing-legacy` として分離した。
 
 ## P4: 並列処理強化 (2026-06-12)
 直近 6 ラン (6/10-6/12) の transcript 実測レビューに基づく 4 改修:

@@ -78,7 +78,7 @@ CANDIDATE_FIELDS = frozenset({
     "context_digest", "activation_digest", "score", "installed", "available", "status",
     "first_use", "eligibility_reason", "matched_conditions", "selection_source",
     "selection_source_raw", "eligibility_selection_source", "normalized_activation",
-    "risk_confirmation_required", "result_contract_digest", "reason",
+    "risk_confirmation_required", "result_contract_digest", "reason", "selection_id",
 })
 DIAGNOSTIC_FIELDS = frozenset({
     "provider_id", "source", "reason_code", "field_code", "blocked_config_class",
@@ -103,12 +103,14 @@ PROJECTION_FIELDS = frozenset({
 })
 DECISION_FIELDS = frozenset({
     "policy", "action", "reason", "reason_code", "prompted_user", "user_specified",
+    "decision", "lifecycle_state", "selection_id", "confirmation_resolved",
 })
 PHASE_PLAN_FIELDS = frozenset({"phase", "roles", "providers", "max_providers"})
 INVOCATION_FIELDS = frozenset({
     "iteration", "phase", "role", "skill", "mode", "status", "timestamp", "started_at",
     "completed_at", "provider_kind", "exit_code", "timeout", "reason_code",
     "selection_source", "bounded_purpose", "evidence_path", "reason", "notes", "command", "kind",
+    "selection_id", "invocation_id", "lifecycle_state", "transitioned_at",
 })
 ACTIVATION_FIELDS = frozenset({
     "min_complexity", "auto_select_if", "explicit_below_min", "when_any",
@@ -528,6 +530,14 @@ def _validate_decision(value: object, base: str) -> None:
             _reject(f"{base}/{field}")
     if "user_specified" in value and not _safe_string_list(value["user_specified"], identities=True):
         _reject(f"{base}/user_specified")
+    if "decision" in value and value["decision"] not in {"none", "selected", "declined", "unavailable"}:
+        _reject(f"{base}/decision")
+    if "lifecycle_state" in value and value["lifecycle_state"] not in {"candidate", "selected", "terminal"}:
+        _reject(f"{base}/lifecycle_state")
+    if "selection_id" in value and not re.fullmatch(r"sel_[0-9a-f]{32}", str(value["selection_id"])):
+        _reject(f"{base}/selection_id")
+    if "confirmation_resolved" in value and type(value["confirmation_resolved"]) is not bool:
+        _reject(f"{base}/confirmation_resolved")
 
 
 def _validate_phase_plan(value: object, base: str) -> None:
@@ -568,7 +578,7 @@ def _validate_invocation(record: object, base: str) -> None:
         isinstance(record["reason_code"], str) and TOKEN.fullmatch(record["reason_code"])
     ):
         _reject(f"{base}/reason_code")
-    for field in ("timestamp", "started_at", "completed_at"):
+    for field in ("timestamp", "started_at", "completed_at", "transitioned_at"):
         if field in record and not _safe_text(record[field], maximum=64):
             _reject(f"{base}/{field}")
     if "provider_kind" in record and record["provider_kind"] not in {"skill", "command"}:
@@ -587,6 +597,12 @@ def _validate_invocation(record: object, base: str) -> None:
         _reject(f"{base}/evidence_path")
     if "command" in record and not PORTABLE_PROVIDER_ID.fullmatch(str(record["command"])):
         _reject(f"{base}/command")
+    if "selection_id" in record and not re.fullmatch(r"sel_[0-9a-f]{32}", str(record["selection_id"])):
+        _reject(f"{base}/selection_id")
+    if "invocation_id" in record and not re.fullmatch(r"inv_[0-9a-f]{32}", str(record["invocation_id"])):
+        _reject(f"{base}/invocation_id")
+    if "lifecycle_state" in record and record["lifecycle_state"] not in {"selected", "invoked", "terminal"}:
+        _reject(f"{base}/lifecycle_state")
 
 
 def validate_specialist_public_state(data: dict[str, Any]) -> None:
