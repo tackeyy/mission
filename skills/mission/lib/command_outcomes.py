@@ -509,3 +509,22 @@ def summarize(records: Iterable[dict[str, Any]], *, invalid_records: int = 0, co
         if normalized["attempt"] > 1 or "retry_of" in normalized: retries += 1
     return {**dict(counts), "unique_root_events": len(roots), "retry_count": retries,
             "invalid_records": invalid_records, "corrupt_sidecars": corrupt_sidecars}
+
+
+def summarize_sessions(
+    sessions: Iterable[tuple[Iterable[dict[str, Any]], int, int]],
+) -> dict[str, int]:
+    """Sum independently deduplicated session summaries.
+
+    Event and root identifiers are opaque only within their owning session.
+    Summarizing each session first therefore namespaces both identities without
+    exposing a project path or changing the public record schema.
+    """
+    totals = summarize([])
+    for records, invalid, corrupt in sessions:
+        summary = summarize(
+            records, invalid_records=invalid, corrupt_sidecars=corrupt,
+        )
+        for key in totals:
+            totals[key] += summary[key]
+    return totals

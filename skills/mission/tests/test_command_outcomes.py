@@ -369,3 +369,34 @@ def test_stats_and_audit_share_cross_source_event_dedupe(
     assert stats["expected-gate"] == (0 if conflicting else 1)
     assert stats["invalid-input"] == 0
     assert stats["invalid_records"] == (1 if conflicting else 0)
+
+
+def test_stats_and_audit_namespace_event_and_root_ids_per_session(
+    state_dir, run_cli,
+):
+    sessions = state_dir / "sessions"
+    first_path = sessions / "test.json"
+    first = json.loads(first_path.read_text(encoding="utf-8"))
+    shared = {
+        "event_id": "shared-event", "root_event_id": "shared-root", "attempt": 1,
+        "command": "fixture", "outcome_kind": "expected-gate",
+    }
+    first["command_outcomes"] = [shared]
+    first_path.write_text(json.dumps(first), encoding="utf-8")
+    second = {
+        **first, "session_id": "other", "mission_id": "other-mission",
+        "command_outcomes": [{**shared, "outcome_kind": "invalid-input"}],
+    }
+    (sessions / "other.json").write_text(json.dumps(second), encoding="utf-8")
+
+    result = run_cli(
+        "stats", "--root", str(state_dir.parent), "--json", cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 0, result.stderr
+    counts = json.loads(result.stdout)["command_outcome_counts"]
+    assert _audit_counts(state_dir.parent) == counts
+    assert counts["expected-gate"] == 1
+    assert counts["invalid-input"] == 1
+    assert counts["unique_root_events"] == 2
+    assert counts["invalid_records"] == 0

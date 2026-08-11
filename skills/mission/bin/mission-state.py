@@ -152,6 +152,7 @@ from command_outcomes import (  # noqa: E402
     iter_records as iter_command_outcome_records,
     observe_state_only as observe_state_command_outcomes,
     summarize as summarize_command_outcomes,
+    summarize_sessions as summarize_command_outcome_sessions,
     validate_observation as validate_command_outcome_observation,
     valid_identifier as _valid_command_outcome_identifier,
 )
@@ -11029,8 +11030,7 @@ def _score_provenance_counts(states: list[dict]) -> dict[str, int]:
 
 def _command_outcome_counts(states: list[dict]) -> dict[str, int]:
     """Summarize state and failure-sidecar outcomes without trusting paths."""
-    records: list[dict] = []
-    invalid = corrupt = 0
+    sessions: list[tuple[list[dict], int, int]] = []
     for state in states:
         if state.get("_mission_snapshot_record") is True:
             observation = validate_command_outcome_observation(
@@ -11038,31 +11038,33 @@ def _command_outcome_counts(states: list[dict]) -> dict[str, int]:
             )
             if observation is None:
                 observation = observe_state_command_outcomes(state)
-            records.extend(observation["records"])
-            invalid += observation["invalid_records"]
-            corrupt += observation["corrupt_sidecars"]
+            sessions.append((
+                observation["records"], observation["invalid_records"],
+                observation["corrupt_sidecars"],
+            ))
             continue
         source = state.get("_mission_source_path")
         if not isinstance(source, str):
             # Snapshots contain no live sidecars but may carry valid state data.
             raw = state.get("command_outcomes") or []
             if isinstance(raw, list):
-                records.extend(item for item in raw if isinstance(item, dict))
+                sessions.append((
+                    [item for item in raw if isinstance(item, dict)],
+                    sum(not isinstance(item, dict) for item in raw), 0,
+                ))
             else:
-                invalid += 1
+                sessions.append(([], 1, 0))
             continue
         source_path = Path(source)
         root = source_path.parent.parent if source_path.parent.name == "sessions" else source_path.parent
         sid = state.get("session_id")
         if not isinstance(sid, str) or not sid:
-            invalid += 1
+            sessions.append(([], 1, 0))
             continue
         token = hashlib.sha256(sid.encode("utf-8")).hexdigest()[:16]
         found, bad, damaged = iter_command_outcome_records(state, root, token)
-        records.extend(found)
-        invalid += bad
-        corrupt += damaged
-    return summarize_command_outcomes(records, invalid_records=invalid, corrupt_sidecars=corrupt)
+        sessions.append((found, bad, damaged))
+    return summarize_command_outcome_sessions(sessions)
 
 
 def _aggregate(

@@ -98,6 +98,7 @@ from command_outcomes import (  # noqa: E402
     observe as observe_command_outcomes,
     observe_state_only as observe_state_command_outcomes,
     summarize as summarize_command_outcomes,
+    summarize_sessions as summarize_command_outcome_sessions,
     validate_observation as validate_command_outcome_observation,
 )
 
@@ -2296,35 +2297,32 @@ def aggregate(
 ) -> dict[str, Any]:
     invalid_worktree_archives = invalid_worktree_archives or []
     observation_now = observation_now or utc_now()
-    command_outcome_records: list[dict[str, Any]] = []
-    command_outcome_invalid = command_outcome_corrupt = 0
+    command_outcome_sessions: list[tuple[list[dict[str, Any]], int, int]] = []
     for record in records:
         if record.command_outcome_observation is not None:
             observation = validate_command_outcome_observation(
                 record.command_outcome_observation
             )
             if observation is None:
-                command_outcome_invalid += 1
+                command_outcome_sessions.append(([], 1, 0))
                 continue
-            command_outcome_records.extend(observation["records"])
-            command_outcome_invalid += observation["invalid_records"]
-            command_outcome_corrupt += observation["corrupt_sidecars"]
+            command_outcome_sessions.append((
+                observation["records"], observation["invalid_records"],
+                observation["corrupt_sidecars"],
+            ))
             continue
         project_root = state_root_for_record(record)
         sid = record.state.get("session_id")
         if project_root is None or not isinstance(sid, str) or not sid:
-            command_outcome_invalid += 1
+            command_outcome_sessions.append(([], 1, 0))
             continue
         token = hashlib.sha256(sid.encode("utf-8")).hexdigest()[:16]
         found, invalid, corrupt = iter_command_outcome_records(
             record.state, project_root / ".mission-state", token
         )
-        command_outcome_records.extend(found)
-        command_outcome_invalid += invalid
-        command_outcome_corrupt += corrupt
-    command_outcome_counts = summarize_command_outcomes(
-        command_outcome_records, invalid_records=command_outcome_invalid,
-        corrupt_sidecars=command_outcome_corrupt,
+        command_outcome_sessions.append((found, invalid, corrupt))
+    command_outcome_counts = summarize_command_outcome_sessions(
+        command_outcome_sessions,
     )
     classes = [classify(r.state) for r in records]
     pass_rate_summary = summarize_pass_rate_population(

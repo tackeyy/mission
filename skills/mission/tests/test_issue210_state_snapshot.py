@@ -130,6 +130,31 @@ def test_snapshot_command_outcome_observation_never_rereads_live_sidecar(
     assert baseline["invalid-input"] == 0
 
 
+def test_snapshot_counts_same_event_and_root_once_per_session(tmp_path, run_cli):
+    root = tmp_path / "root"
+    shared = _outcome("shared-event")
+    _write_state(
+        root, "session-a", "2026-07-21T00:00:00Z",
+        command_outcomes=[shared],
+    )
+    _write_state(
+        root, "session-b", "2026-07-21T00:00:01Z",
+        command_outcomes=[{**shared, "outcome_kind": "invalid-input"}],
+    )
+    snapshot = tmp_path / "two-sessions.snapshot.json"
+    assert _snapshot(root, snapshot).returncode == 0
+
+    audit = _run_audit("--snapshot-in", str(snapshot), "--json", cwd=root)
+    stats = run_cli("stats", "--snapshot", str(snapshot), "--json", cwd=root)
+
+    for result in (audit, stats):
+        counts = _json(result)["command_outcome_counts"]
+        assert counts["expected-gate"] == 1
+        assert counts["invalid-input"] == 1
+        assert counts["unique_root_events"] == 2
+        assert counts["invalid_records"] == 0
+
+
 def test_snapshot_rejects_resigned_command_outcome_observation_tamper(tmp_path):
     root = tmp_path / "root"
     _write_state(root, "observed", "2026-07-21T00:00:00Z")
