@@ -69,6 +69,24 @@ not consumed by this runner yet. `planning_provider_kpi.status=deferred` is an
 intentional versioned seam: do not add a payload to benchmark records until
 the #399 consumer contract is implemented and validated.
 
+`scripts/mission-audit.py --json` separately reports calibrated mission-state
+evidence. Its `score_calibration` population is pass sessions: scores below a
+session's threshold emit `below-pass-threshold`, scores from threshold through
+below 4.3 emit `pass-but-below-target`, and target-met scores are counted but
+do not create a finding. The historical `low_score_pass_*` JSON fields remain
+compatibility aliases and do not double-create findings. `command_outcome_defects`
+dedupes non-gate defects by root event, exposes retries, and excludes
+`expected-gate` while retaining its separate count. Slow-run findings include
+the record's `activity_coverage_ratio` and `review_tier`.
+
+The benchmark's `measurement_observations` explicitly lists
+`artifact_observation_coverage`, `activity_coverage`,
+`structured_score_provenance`, `reviewer_freshness`, `force_pass_rate`,
+`expected_gate_retry_count`, and `group_closeout_completeness`. They are
+`{status: unavailable, value: null}` until a runner supplies a versioned,
+already-derived observation; the benchmark reducer must not reconstruct them
+from raw mission state.
+
 Record results in `report.md` / `report.ja.md` with the standard unsafe-
 interpretation guard, then close #262 with the verdict.
 

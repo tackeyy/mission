@@ -86,6 +86,18 @@ def test_duration_percentiles_censor_blocked_records_and_defer_unavailable_provi
         "status": "deferred",
         "schema": "mission-planning-provider-kpi/1",
     }
+    assert summary["measurement_observations"] == {
+        key: {"status": "unavailable", "value": None}
+        for key in (
+            "artifact_observation_coverage",
+            "activity_coverage",
+            "structured_score_provenance",
+            "reviewer_freshness",
+            "force_pass_rate",
+            "expected_gate_retry_count",
+            "group_closeout_completeness",
+        )
+    }
 
 
 def test_provider_kpi_payload_is_rejected_until_the_versioned_consumer_is_enabled():

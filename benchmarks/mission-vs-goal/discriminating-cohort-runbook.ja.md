@@ -99,6 +99,22 @@ runner は消費しない。`planning_provider_kpi.status=deferred` は意図し
 seam である。#399 の consumer contract を実装・検証するまで、benchmark record へ
 payload を追加しない。
 
+`scripts/mission-audit.py --json` は mission state の較正済み evidence を別途出力する。
+`score_calibration` の population は pass session である。session threshold 未満は
+`below-pass-threshold`、threshold 以上かつ 4.3 未満は
+`pass-but-below-target` の finding を発火し、target-met は数えるが finding を発火しない。
+既存の `low_score_pass_*` JSON は互換 alias として残るが、finding を二重発火しない。
+`command_outcome_defects` は expected-gate を除外して non-gate defect を root event
+で dedupe し、retry は別に出力する。slow-run finding には
+`activity_coverage_ratio` と `review_tier` を併記する。
+
+benchmark の `measurement_observations` は
+`artifact_observation_coverage`、`activity_coverage`、
+`structured_score_provenance`、`reviewer_freshness`、`force_pass_rate`、
+`expected_gate_retry_count`、`group_closeout_completeness` を明示する。runner が
+versioned かつ既導出の observation を渡すまでは全て
+`{status: unavailable, value: null}` とし、reducer は raw mission state から再計算しない。
+
 ## Step 3: 採用判定ゲート
 
 すべて summary / records から機械的に判定する:

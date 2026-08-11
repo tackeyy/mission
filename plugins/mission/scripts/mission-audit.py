@@ -216,9 +216,15 @@ FINDING_SPECS = {
         "slow session attributes most elapsed time to planning",
         "{count} slow sessions attribute most elapsed time to planning",
     ),
-    "low-score-pass": FindingSpec(
-        "low-score-pass", "P2", "low_score_pass_sessions", "record",
-        "pass session scored below 4.3", "{count} {pass_sessions} scored below 4.3",
+    "below-pass-threshold": FindingSpec(
+        "below-pass-threshold", "P1", "below_pass_threshold_sessions", "record",
+        "pass session scored below its pass threshold",
+        "{count} {pass_sessions} scored below the pass threshold",
+    ),
+    "pass-but-below-target": FindingSpec(
+        "pass-but-below-target", "P2", "pass_but_below_target_sessions", "record",
+        "pass session scored below the 4.3 target",
+        "{count} {pass_sessions} passed but scored below the 4.3 target",
     ),
     "specialist-invocation-gap": FindingSpec(
         "specialist-invocation-gap", "P2", "specialist_invocation_gap_sessions", "gap-record",
@@ -1827,6 +1833,58 @@ def low_score_pass_bucket(record: StateRecord) -> str:
     return "valid-threshold-pass"
 
 
+def score_calibration_bucket(record: StateRecord) -> str:
+    """Classify an observed score without changing the pass gate."""
+    latest = latest_scored_entry(record.state)
+    if latest is None:
+        return "unavailable"
+    composite = latest.get("composite")
+    threshold = record.state.get("threshold", 4.0)
+    if (
+        isinstance(composite, bool)
+        or not isinstance(composite, (int, float))
+        or not math.isfinite(composite)
+        or isinstance(threshold, bool)
+        or not isinstance(threshold, (int, float))
+        or not math.isfinite(threshold)
+    ):
+        return "unavailable"
+    if composite < threshold:
+        return "below-pass-threshold"
+    if composite < 4.3:
+        return "pass-but-below-target"
+    return "target-met"
+
+
+def command_outcome_defect_counts(
+    sessions: list[tuple[list[dict[str, Any]], int, int]],
+) -> dict[str, int]:
+    """Count observed command defects while excluding expected gate outcomes."""
+    defects: list[dict[str, Any]] = []
+    expected_gates: list[dict[str, Any]] = []
+    for records, _invalid, _corrupt in sessions:
+        for event in records:
+            if event.get("outcome_kind") == "expected-gate":
+                expected_gates.append(event)
+            elif event.get("outcome_kind") in {"invalid-input", "external", "internal-error"}:
+                defects.append(event)
+    return {
+        "unique_root_events": len({event["root_event_id"] for event in defects}),
+        "event_attempts": len(defects),
+        "retry_attempts": sum(1 for event in defects if event.get("retry_of") is not None),
+        "expected_gate_events": len(expected_gates),
+        "expected_gate_retry_count": sum(
+            1 for event in expected_gates if event.get("retry_of") is not None
+        ),
+    }
+
+
+def activity_coverage_ratio(record: StateRecord) -> float | None:
+    """Expose one slow record's activity coverage as finding provenance."""
+    value = summarize_activity_states([record.state]).get("coverage_ratio")
+    return value if isinstance(value, (int, float)) and math.isfinite(value) else None
+
+
 SPECIALIST_SELECTION_CHECKPOINT_COMPLEXITIES = {"Standard", "Complex", "Critical"}
 
 
@@ -2362,6 +2420,7 @@ def aggregate(
     command_outcome_counts = summarize_command_outcome_sessions(
         command_outcome_sessions,
     )
+    command_outcome_defects = command_outcome_defect_counts(command_outcome_sessions)
     classes = [classify(r.state) for r in records]
     pass_rate_summary = summarize_pass_rate_population(
         [record.state for record in records],
@@ -2426,6 +2485,15 @@ def aggregate(
     low_score_pass = [
         r for r in pass_records
         if ((latest_scored_entry(r.state) or {}).get("composite") or 0) < 4.3
+    ]
+    score_calibration = bucket_counts(pass_records, score_calibration_bucket)
+    below_pass_threshold_sessions = [
+        record for record in pass_records
+        if score_calibration_bucket(record) == "below-pass-threshold"
+    ]
+    pass_but_below_target_sessions = [
+        record for record in pass_records
+        if score_calibration_bucket(record) == "pass-but-below-target"
     ]
     specialist_invocation_gaps = []
     for record in records:
@@ -2572,6 +2640,7 @@ def aggregate(
         "completed_pass_rate": pass_rate_summary["completed_pass_rate"],
         "terminal_outcome_counts": pass_rate_summary["terminal_outcome_counts"],
         "command_outcome_counts": command_outcome_counts,
+        "command_outcome_defects": command_outcome_defects,
         "artifact_coverage": summarize_artifact_coverage(
             [record.state for record in records]
         ),
@@ -2611,6 +2680,8 @@ def aggregate(
             halt_sessions, halt_audit_disposition
         ),
         "low_score_pass_sessions": low_score_pass,
+        "below_pass_threshold_sessions": below_pass_threshold_sessions,
+        "pass_but_below_target_sessions": pass_but_below_target_sessions,
         "specialist_invocation_gap_sessions": specialist_invocation_gaps,
         "forced_pass_sessions": forced,
         "forced_pass_approved_verified_sessions": forced_approved_verified,
@@ -2689,6 +2760,21 @@ def aggregate(
         "coarse_phase_attributions": coarse_phase_attributions,
         "coarse_phase_attribution_count": len(coarse_phase_attributions),
         "low_score_pass_breakdown": bucket_counts(low_score_pass, low_score_pass_bucket),
+        "score_calibration": {
+            key: score_calibration.get(key, 0)
+            for key in (
+                "below-pass-threshold",
+                "pass-but-below-target",
+                "target-met",
+                "unavailable",
+            )
+        },
+        "score_calibration_population": {
+            "population": "pass_sessions",
+            "eligible_sessions": len(pass_records),
+            "scored_sessions": len(pass_records) - score_calibration.get("unavailable", 0),
+            "unavailable_sessions": score_calibration.get("unavailable", 0),
+        },
         "specialist_invocation_gap_count": len(specialist_invocation_gaps),
         "specialist_invocation_gap_breakdown": bucket_counts(
             [
@@ -2831,11 +2917,16 @@ def attach_finding_model(
             if spec.source_kind in {"item", "dynamic-item", "low-pass-rate"}:
                 evidence = dict(value)
             elif spec.source_kind in {"record", "gap-record"}:
-                extra = (
-                    {"skills": specialist_invocation_gap_skills(value)}
-                    if spec.source_kind == "gap-record"
-                    else {}
-                )
+                extra = {}
+                if spec.source_kind == "gap-record":
+                    extra["skills"] = specialist_invocation_gap_skills(value)
+                if spec.code == "slow-runs":
+                    extra.update({
+                        "activity_coverage_ratio": activity_coverage_ratio(value),
+                        "review_tier": value.state.get("review_tier")
+                        if isinstance(value.state.get("review_tier"), str)
+                        else None,
+                    })
                 evidence = finding_record_evidence(value, **extra)
             elif spec.source_kind == "duplicate":
                 records = sorted(value, key=dedupe_rank)
@@ -3456,6 +3547,8 @@ def main(argv: list[str] | None = None) -> int:
                 "current_actionable_halt_sessions",
                 "historical_actionable_halt_sessions",
                 "low_score_pass_sessions",
+                "below_pass_threshold_sessions",
+                "pass_but_below_target_sessions",
                 "current_low_score_pass_sessions",
                 "historical_low_score_pass_sessions",
                 "specialist_invocation_gap_sessions",

@@ -19,6 +19,17 @@ from __future__ import annotations
 import math
 
 
+MEASUREMENT_OBSERVATION_FIELDS = (
+    "artifact_observation_coverage",
+    "activity_coverage",
+    "structured_score_provenance",
+    "reviewer_freshness",
+    "force_pass_rate",
+    "expected_gate_retry_count",
+    "group_closeout_completeness",
+)
+
+
 class BenchmarkAuditInputError(ValueError):
     """Raised when a benchmark audit annotation is not safe to aggregate."""
 
@@ -172,5 +183,11 @@ def summarize_benchmark_kpi(records: list[dict]) -> dict:
         "planning_provider_kpi": {
             "status": "deferred",
             "schema": "mission-planning-provider-kpi/1",
+        },
+        # These fields belong to audited mission observations. Benchmark
+        # records do not carry raw state, so never reconstruct them here.
+        "measurement_observations": {
+            key: {"status": "unavailable", "value": None}
+            for key in MEASUREMENT_OBSERVATION_FIELDS
         },
     }
