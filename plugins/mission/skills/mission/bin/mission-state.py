@@ -4876,6 +4876,13 @@ def _provider_preflight_subject(data: dict, provider: dict, args) -> dict:
         "session_id": str(data.get("session_id") or resolve_session_id()),
         "mission_id": str(data.get("mission_id") or ""),
         "mission": str(data.get("mission") or ""),
+        "correlation": {
+            field: data.get(field)
+            for field in (
+                "host_run_id", "root_run_id", "parent_run_id",
+                "child_run_id", "logical_group_id",
+            )
+        },
         "provider_id": str(provider.get("provider_id") or provider.get("skill") or ""),
         "registry_entry_digest": provider.get("registry_entry_digest"),
         "selection_id": provider.get("selection_id"),

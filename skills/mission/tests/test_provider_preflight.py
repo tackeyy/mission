@@ -31,6 +31,11 @@ def _subject():
     return {
         "session_id": "session-396", "mission_id": "mission-396",
         "mission": "Design a portable provider contract.",
+        "correlation": {
+            "host_run_id": "host-396", "root_run_id": "root-396",
+            "parent_run_id": None, "child_run_id": None,
+            "logical_group_id": "logical-396",
+        },
         "provider_id": "portable-provider", "registry_entry_digest": _digest("b"),
         "selection_id": "sel_0123456789abcdef0123456789abcdef",
         "selection_source": "automatic",

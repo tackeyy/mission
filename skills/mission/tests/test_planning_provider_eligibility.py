@@ -3035,7 +3035,7 @@ def test_nonempty_command_env_fails_closed_for_every_registry_source(
 
 @pytest.mark.parametrize("version", [1, 2], ids=["v1", "v2"])
 def test_portable_path_command_remains_invokable_and_accounted(
-    version, run_cli, tmp_path
+    version, run_cli, tmp_path, prepare_approved_invocation
 ):
     command_dir = tmp_path / "commands"
     command_dir.mkdir()
@@ -3087,11 +3087,11 @@ def test_portable_path_command_remains_invokable_and_accounted(
     assert selected["args"] == []
     assert "env" not in selected
 
-    invoked = run_cli(
-        "specialists", "invoke-command", "--provider", "portable-command-provider",
-        "--iteration", "1", "--phase", "planning", "--json", cwd=tmp_path,
-        env_extra=env,
+    invoke_args, invoke_env, _ = prepare_approved_invocation(
+        cwd=tmp_path, provider="portable-command-provider", iteration=1,
+        phase="planning", registry=registry, env_extra=env, json_output=True,
     )
+    invoked = run_cli(*invoke_args, cwd=tmp_path, env_extra=invoke_env)
 
     assert invoked.returncode == 0, invoked.stderr
     output = json.loads(invoked.stdout)
@@ -3119,7 +3119,7 @@ def test_portable_path_command_remains_invokable_and_accounted(
     ],
 )
 def test_command_provider_evidence_redacts_process_local_paths(
-    path_kind, run_cli, tmp_path
+    path_kind, run_cli, tmp_path, prepare_approved_invocation
 ):
     command_dir = tmp_path / "commands"
     command_dir.mkdir()
@@ -3196,12 +3196,11 @@ def test_command_provider_evidence_redacts_process_local_paths(
         cwd=tmp_path, check=True, env_extra=env,
     )
 
-    result = run_cli(
-        "specialists", "invoke-command",
-        "--provider", "portable-path-reporter",
-        "--iteration", "1", "--phase", "planning", "--json",
-        cwd=tmp_path, env_extra=env,
+    invoke_args, invoke_env, _ = prepare_approved_invocation(
+        cwd=tmp_path, provider="portable-path-reporter", iteration=1,
+        phase="planning", registry=registry, env_extra=env, json_output=True,
     )
+    result = run_cli(*invoke_args, cwd=tmp_path, env_extra=invoke_env)
 
     assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout)

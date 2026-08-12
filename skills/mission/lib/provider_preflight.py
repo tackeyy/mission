@@ -238,13 +238,20 @@ def dispatch_prepared_packet(
 
 def _packet_projection(subject: Mapping[str, Any], inputs: list[dict[str, Any]]) -> dict[str, Any]:
     required = (
-        "session_id", "mission_id", "mission", "provider_id", "registry_entry_digest", "selection_id",
+        "session_id", "mission_id", "mission", "correlation", "provider_id", "registry_entry_digest", "selection_id",
         "selection_source", "invocation_id", "iteration", "phase", "destination", "risk_scopes",
         "quota_mode", "effective_argv", "env_keys", "execution_context",
     )
     if any(key not in subject for key in required):
         raise ProviderPreflightError("preflight-subject-incomplete")
     if not isinstance(subject["mission"], str) or not isinstance(subject["provider_id"], str):
+        raise ProviderPreflightError("preflight-subject-invalid")
+    correlation_fields = {
+        "host_run_id", "root_run_id", "parent_run_id", "child_run_id", "logical_group_id",
+    }
+    correlation = subject["correlation"]
+    if (not isinstance(correlation, Mapping) or set(correlation) != correlation_fields
+            or not all(value is None or isinstance(value, str) for value in correlation.values())):
         raise ProviderPreflightError("preflight-subject-invalid")
     _require_digest(subject["registry_entry_digest"], "registry-digest-invalid")
     if not isinstance(subject["risk_scopes"], list) or not all(isinstance(item, str) and item for item in subject["risk_scopes"]):
@@ -283,6 +290,7 @@ def _packet_projection(subject: Mapping[str, Any], inputs: list[dict[str, Any]])
     return dict(sorted({
         "schema": "mission-provider-outbound-packet/1",
         "session_id": subject["session_id"], "mission_id": subject["mission_id"], "mission": subject["mission"],
+        "correlation": dict(subject["correlation"]),
         "provider": {"id": subject["provider_id"], "registry_entry_digest": subject["registry_entry_digest"], "kind": "command"},
         "selection": {"id": subject["selection_id"], "source": subject["selection_source"]},
         "invocation_id": subject["invocation_id"], "iteration": subject["iteration"], "phase": subject["phase"],

@@ -110,7 +110,9 @@ def test_corrupt_sidecar_is_never_silently_accepted_and_is_visible_in_stats(stat
     assert json.loads(result.stdout)["command_outcome_counts"]["corrupt_sidecars"] == 1
 
 
-def test_command_provider_unavailable_is_an_external_outcome_producer(state_dir, run_cli):
+def test_command_provider_unavailable_is_an_external_outcome_producer(
+    state_dir, run_cli, prepare_approved_invocation
+):
     command_dir = state_dir.parent / "commands"
     command_dir.mkdir()
     command = command_dir / "fixture-provider-command"
@@ -119,19 +121,24 @@ def test_command_provider_unavailable_is_an_external_outcome_producer(state_dir,
     registry, env = _prepare_current_command_provider(
         state_dir, run_cli, "fixture-provider-command"
     )
+    invoke_args, env, _ = prepare_approved_invocation(
+        cwd=state_dir.parent, provider="fixture-provider", iteration=1,
+        phase="review", registry=registry, env_extra=env,
+    )
     command.unlink()
 
     result = run_cli(
-        "specialists", "invoke-command", "--provider", "fixture-provider", "--iteration", "1",
-        "--phase", "review", "--registry", str(registry),
-        "--event-id", "provider-attempt", cwd=state_dir.parent, env_extra=env,
+        *invoke_args, "--event-id", "provider-attempt",
+        cwd=state_dir.parent, env_extra=env,
     )
 
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["outcome_kind"] == "external"
 
 
-def test_unexpected_provider_packet_error_is_internal_without_leaking_path(state_dir, run_cli, tmp_path):
+def test_unexpected_provider_packet_error_is_internal_without_leaking_path(
+    state_dir, run_cli, tmp_path, prepare_approved_invocation
+):
     command_dir = state_dir.parent / "commands"
     command_dir.mkdir()
     command = command_dir / "fixture-provider-command"
@@ -140,12 +147,17 @@ def test_unexpected_provider_packet_error_is_internal_without_leaking_path(state
     registry, env = _prepare_current_command_provider(
         state_dir, run_cli, "fixture-provider-command"
     )
-    missing = tmp_path / "not-present.json"
+    invoke_args, env, prepared = prepare_approved_invocation(
+        cwd=state_dir.parent, provider="fixture-provider", iteration=1,
+        phase="review", registry=registry, env_extra=env,
+    )
+    state = json.loads((state_dir / "sessions" / "test.json").read_text(encoding="utf-8"))
+    missing = state_dir / state["provider_preflights"][prepared["preflight_id"]]["artifact_path"]
+    missing.unlink()
 
     result = run_cli(
-        "specialists", "invoke-command", "--provider", "fixture-provider", "--iteration", "1",
-        "--phase", "review", "--registry", str(registry), "--input-file", str(missing),
-        "--event-id", "internal-attempt", cwd=state_dir.parent, env_extra=env,
+        *invoke_args, "--event-id", "internal-attempt",
+        cwd=state_dir.parent, env_extra=env,
     )
 
     assert result.returncode == 1

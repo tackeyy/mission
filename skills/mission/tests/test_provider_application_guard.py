@@ -8,6 +8,7 @@ import sys
 import time
 
 
+
 MISSION_STATE_PY = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
 
 
@@ -62,6 +63,7 @@ def _prepare_command_provider(run_cli, tmp_path, *, phase="planning", max_calls=
         "--complexity", "Complex", "--record-state", cwd=tmp_path,
         check=True, env_extra=env,
     )
+    (tmp_path / "provider-input.txt").write_text("test provider input\n", encoding="utf-8")
     return marker, env
 
 
@@ -78,8 +80,9 @@ def test_invoke_command_rejects_below_current_complexity_before_process_spawn(ru
     before = state_path.read_bytes()
 
     result = run_cli(
-        "specialists", "invoke-command", "--provider", "guarded-command-provider",
-        "--iteration", "1", "--phase", "planning", cwd=tmp_path, env_extra=env,
+        "specialists", "prepare-invocation", "--provider", "guarded-command-provider",
+        "--iteration", "1", "--phase", "planning",
+        "--input-file", str(tmp_path / "provider-input.txt"), cwd=tmp_path, env_extra=env,
     )
 
     assert result.returncode == 2
@@ -97,8 +100,9 @@ def test_invoke_command_rejects_requested_phase_that_disagrees_with_current_stat
     before = state_path.read_bytes()
 
     result = run_cli(
-        "specialists", "invoke-command", "--provider", "guarded-command-provider",
-        "--iteration", "1", "--phase", "planning", cwd=tmp_path, env_extra=env,
+        "specialists", "prepare-invocation", "--provider", "guarded-command-provider",
+        "--iteration", "1", "--phase", "planning",
+        "--input-file", str(tmp_path / "provider-input.txt"), cwd=tmp_path, env_extra=env,
     )
 
     assert result.returncode == 2
@@ -153,8 +157,9 @@ def test_invoke_command_rejects_stale_selection_identity_without_process_spawn(r
     before = state_path.read_bytes()
 
     result = run_cli(
-        "specialists", "invoke-command", "--provider", "guarded-command-provider",
-        "--iteration", "1", "--phase", "planning", cwd=tmp_path, env_extra=env,
+        "specialists", "prepare-invocation", "--provider", "guarded-command-provider",
+        "--iteration", "1", "--phase", "planning",
+        "--input-file", str(tmp_path / "provider-input.txt"), cwd=tmp_path, env_extra=env,
     )
 
     assert result.returncode == 2
@@ -163,23 +168,29 @@ def test_invoke_command_rejects_stale_selection_identity_without_process_spawn(r
     assert state_path.read_bytes() == before
 
 
-def test_invoke_command_consumes_call_limit_before_second_process_spawn(run_cli, tmp_path):
+def test_invoke_command_consumes_call_limit_before_second_process_spawn(
+    run_cli, tmp_path, prepare_approved_invocation
+):
     marker, env = _prepare_command_provider(run_cli, tmp_path, max_calls=1)
     state_path = _state_path(tmp_path)
     state = json.loads(state_path.read_text(encoding="utf-8"))
     assert state["specialists_candidates"][0]["max_calls_per_iteration"] == 1
     assert state["specialists_selected"][0]["max_calls_per_iteration"] == 1
-    first = run_cli(
-        "specialists", "invoke-command", "--provider", "guarded-command-provider",
-        "--iteration", "1", "--phase", "planning", cwd=tmp_path, env_extra=env,
+    invoke_args, invoke_env, _ = prepare_approved_invocation(
+        cwd=tmp_path, provider="guarded-command-provider", iteration=1,
+        phase="planning", env_extra=env,
     )
+    first = run_cli(*invoke_args, cwd=tmp_path, env_extra=invoke_env)
     assert first.returncode == 0, first.stderr
     marker.unlink()
     before = state_path.read_bytes()
 
+    before = state_path.read_bytes()
     second = run_cli(
-        "specialists", "invoke-command", "--provider", "guarded-command-provider",
-        "--iteration", "1", "--phase", "planning", cwd=tmp_path, env_extra=env,
+        "specialists", "prepare-invocation", "--provider", "guarded-command-provider",
+        "--iteration", "1", "--phase", "planning",
+        "--input-file", str(tmp_path / ".test-provider-preflight" / "input.txt"),
+        cwd=tmp_path, env_extra=env,
     )
 
     assert second.returncode == 2
@@ -198,8 +209,9 @@ def test_invoke_command_reresolves_registry_and_rejects_activation_drift_before_
     before = state_path.read_bytes()
 
     result = run_cli(
-        "specialists", "invoke-command", "--provider", "guarded-command-provider",
-        "--iteration", "1", "--phase", "planning", cwd=tmp_path, env_extra=env,
+        "specialists", "prepare-invocation", "--provider", "guarded-command-provider",
+        "--iteration", "1", "--phase", "planning",
+        "--input-file", str(tmp_path / "provider-input.txt"), cwd=tmp_path, env_extra=env,
     )
 
     assert result.returncode == 2
@@ -209,7 +221,9 @@ def test_invoke_command_reresolves_registry_and_rejects_activation_drift_before_
     assert state_path.read_bytes() == before
 
 
-def test_running_invocation_fences_state_mutation_until_terminal(run_cli, tmp_path):
+def test_running_invocation_fences_state_mutation_until_terminal(
+    run_cli, tmp_path, prepare_approved_invocation
+):
     marker, env = _prepare_command_provider(run_cli, tmp_path)
     release = tmp_path / "provider-release"
     command = tmp_path / "commands" / "provider-command"
@@ -228,11 +242,14 @@ def test_running_invocation_fences_state_mutation_until_terminal(run_cli, tmp_pa
         "MISSION_SESSION_ID": "test",
         "MISSION_LEASE_ID": "test-lease",
     })
+    invoke_args, invoke_env, _ = prepare_approved_invocation(
+        cwd=tmp_path, provider="guarded-command-provider", iteration=1,
+        phase="planning", env_extra=process_env,
+    )
+    process_env.update(invoke_env)
     process = subprocess.Popen(
         [
-            sys.executable, str(MISSION_STATE_PY), "specialists", "invoke-command",
-            "--provider", "guarded-command-provider", "--iteration", "1",
-            "--phase", "planning",
+            sys.executable, str(MISSION_STATE_PY), *invoke_args,
         ],
         cwd=tmp_path,
         stdin=subprocess.DEVNULL,
