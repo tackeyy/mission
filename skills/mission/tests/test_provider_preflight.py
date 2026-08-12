@@ -1,6 +1,7 @@
 """Issue #396: exact outbound packet and receipt gates for command providers."""
 
 import json
+import importlib.util
 import os
 from pathlib import Path
 import sys
@@ -446,6 +447,61 @@ def test_strict_host_backend_receives_exact_packet_only_after_complete_attestati
     assert received == [(b'{"exact":true}', attestation)]
 
 
+def test_dispatch_prepared_packet_never_routes_strict_bytes_to_ambient_callable():
+    from provider_preflight import dispatch_prepared_packet  # noqa: E402
+
+    attestation = {
+        "schema": "execution-isolator/1", "backend_id": "fixture-host", "version": "1", "host_support": True,
+        "policy_digest": _digest("a"),
+        "enforced_capabilities": ["filesystem-namespace", "readonly-mount", "env-reset", "network-policy"],
+    }
+    context = {"isolation": "strict", "isolator": attestation, "ambient_scopes": []}
+    called = []
+    result = dispatch_prepared_packet(
+        context, _digest("a"), b'{"exact":true}',
+        lambda _: (_ for _ in ()).throw(AssertionError("plain spawn must not run")),
+        lambda _: (attestation, lambda packet, _: called.append(packet) or {"returncode": 0}),
+    )
+
+    assert result == {"returncode": 0}
+    assert called == [b'{"exact":true}']
+
+
+@pytest.mark.parametrize("current, backend, expected", [
+    (None, None, "isolator-unavailable"),
+    ({"schema": "execution-isolator/1", "backend_id": "other", "version": "1", "host_support": True,
+      "policy_digest": _digest("a"), "enforced_capabilities": ["filesystem-namespace", "readonly-mount", "env-reset", "network-policy"]},
+     lambda *_: None, "isolator-drift"),
+])
+def test_dispatch_prepared_packet_rejects_missing_or_drifted_strict_backend(current, backend, expected):
+    from provider_preflight import dispatch_prepared_packet  # noqa: E402
+
+    attestation = {"schema": "execution-isolator/1", "backend_id": "fixture-host", "version": "1", "host_support": True,
+                   "policy_digest": _digest("a"), "enforced_capabilities": ["filesystem-namespace", "readonly-mount", "env-reset", "network-policy"]}
+    with pytest.raises(ProviderPreflightError, match=expected):
+        dispatch_prepared_packet({"isolation": "strict", "isolator": attestation, "ambient_scopes": []}, _digest("a"), b"{}",
+                                 lambda _: pytest.fail("plain spawn must not run"), lambda _: (current, backend))
+
+
+def test_cli_execution_dispatch_never_routes_strict_packet_to_plain_runner():
+    state_path = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
+    spec = importlib.util.spec_from_file_location("mission_state_issue396_dispatch", state_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    attestation = {"schema": "execution-isolator/1", "policy_digest": _digest("a")}
+    received = []
+
+    result = module._dispatch_provider_execution(
+        {"isolation": "strict", "isolator": attestation}, b'{"exact":true}',
+        lambda _: pytest.fail("plain Popen runner must not run"),
+        lambda current, policy, packet: received.append((current, policy, packet)) or {"returncode": 0},
+    )
+
+    assert result == {"returncode": 0}
+    assert received == [(attestation, _digest("a"), b'{"exact":true}')]
+
+
 def test_strict_cli_requires_host_isolator_before_any_provider_spawn(run_cli, tmp_path):
     command_dir = tmp_path / "commands"; command_dir.mkdir()
     command = command_dir / "provider-command"
@@ -465,3 +521,31 @@ def test_strict_cli_requires_host_isolator_before_any_provider_spawn(run_cli, tm
 
     assert result.returncode == 2
     assert "isolator-unavailable" in result.stderr
+
+
+def test_strict_preflight_never_falls_back_to_plain_spawn_without_live_isolator(run_cli, tmp_path):
+    command_dir = tmp_path / "commands"; command_dir.mkdir()
+    marker = tmp_path / "marker"; command = command_dir / "provider-command"
+    command.write_text("#!/bin/sh\nprintf spawned > \"$PROVIDER_MARKER\"\n", encoding="utf-8"); command.chmod(0o700)
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps({"schema": "mission-specialist-registry/2", "specialists_v2": [{
+        "provider_id": "strict-live-provider", "role": "planning-provider", "skill": "strict-live-provider", "kind": "command",
+        "command": "provider-command", "args": [], "env": {}, "task_profiles": ["architecture"], "phases": ["planning"],
+        "activation": {"min_complexity": "Complex", "auto_select_if": ["complexity"]},
+    }]}), encoding="utf-8")
+    env = {"PATH": f"{command_dir}{os.pathsep}{os.environ.get('PATH', '')}", "PROVIDER_MARKER": str(marker)}
+    source = tmp_path / "input.txt"; source.write_text("brief", encoding="utf-8")
+    run_cli("init", "strict live", "--complexity", "Complex", cwd=tmp_path, check=True, env_extra=env)
+    run_cli("specialists", "recommend", "--no-default-skill-roots", "--task", "Review architecture", "--registry", str(registry), "--complexity", "Complex", "--record-state", cwd=tmp_path, check=True, env_extra=env)
+    preflight = json.loads(run_cli("specialists", "prepare-invocation", "--provider", "strict-live-provider", "--iteration", "1", "--phase", "planning", "--input-file", str(source), cwd=tmp_path, env_extra=env, check=True).stdout)
+    state_path = tmp_path / ".mission-state" / "sessions" / "test.json"; state = json.loads(state_path.read_text(encoding="utf-8"))
+    pointer = state["provider_preflights"][preflight["preflight_id"]]
+    pointer.update({"status": "approved", "receipt": {"artifact_path": "missing", "digest": _digest()}, "execution_context": {
+        "isolation": "strict", "isolator": {"schema": "execution-isolator/1", "backend_id": "fixture-host", "version": "1", "host_support": True,
+        "policy_digest": _digest("a"), "enforced_capabilities": ["filesystem-namespace", "readonly-mount", "env-reset", "network-policy"]}}})
+    state_path.write_text(json.dumps(state), encoding="utf-8"); before = state_path.read_bytes()
+
+    result = run_cli("specialists", "invoke-command", "--provider", "strict-live-provider", "--iteration", "1", "--phase", "planning", "--preflight-id", preflight["preflight_id"], "--input-file", str(source), cwd=tmp_path, env_extra=env)
+
+    assert result.returncode == 2 and "isolator-unavailable" in result.stderr
+    assert not marker.exists() and state_path.read_bytes() == before

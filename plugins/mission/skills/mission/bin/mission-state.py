@@ -144,6 +144,7 @@ from provider_public_contract import (  # noqa: E402
 from provider_preflight import (  # noqa: E402
     ProviderPreflightError,
     build_preflight,
+    dispatch_prepared_packet,
     safe_input_snapshot,
     validate_receipt as validate_provider_receipt,
 )
@@ -4817,6 +4818,22 @@ def _command_provider_packet(data: dict, provider: dict, args) -> str:
     return json.dumps(packet, indent=2, ensure_ascii=False)
 
 
+def _dispatch_provider_execution(execution_context: object, packet_bytes: bytes, plain_runner, strict_runner):
+    """Route a strict packet exclusively through the host strict runner."""
+    if not isinstance(execution_context, dict):
+        raise ProviderPreflightError("execution-context-invalid")
+    if execution_context.get("isolation") != "strict":
+        if not callable(plain_runner):
+            raise ProviderPreflightError("execution-context-invalid")
+        return plain_runner(packet_bytes)
+    attestation = execution_context.get("isolator")
+    if not isinstance(attestation, dict) or not isinstance(attestation.get("policy_digest"), str):
+        raise ProviderPreflightError("isolator-unavailable")
+    if not callable(strict_runner):
+        raise ProviderPreflightError("isolator-unavailable")
+    return strict_runner(dict(attestation), attestation["policy_digest"], packet_bytes)
+
+
 def _provider_preflight_subject(data: dict, provider: dict, args) -> dict:
     """Project the exact current command-provider request into #396 inputs."""
     command = provider.get("command")
@@ -4886,6 +4903,18 @@ def _verified_preflight_packet(
     try:
         subject = _provider_preflight_subject(data, provider, args)
         subject["invocation_id"] = pointer.get("invocation_id")
+        stored_context = pointer.get("execution_context")
+        if isinstance(stored_context, dict) and stored_context.get("isolation") == "strict":
+            isolator_name = getattr(args, "execution_isolator", None)
+            if not isolator_name:
+                _provider_gate("isolator-unavailable")
+            try:
+                live_isolator = _configured_execution_isolator(cwd, isolator_name)
+            except ValueError:
+                _provider_gate("isolator-unavailable")
+            if live_isolator is None or live_isolator.get("attestation") != stored_context.get("isolator"):
+                _provider_gate("isolator-drift")
+            subject["execution_context"] = stored_context
         rebuilt = build_preflight(subject, [safe_input_snapshot(args.input_file, root=cwd)])
         if (rebuilt["outbound_context_digest"] != pointer.get("outbound_context_digest")
                 or rebuilt["outbound_packet_digest"] != pointer.get("outbound_packet_digest")):
@@ -4923,7 +4952,7 @@ def _verified_preflight_packet(
             _provider_gate("verifier-untrusted")
         validate_provider_receipt(receipt_preflight, receipt, trusted_verifiers={verifier: provenance.get("verifier_version")}, now=iso_now())
         return pointer, raw
-    except ProviderPreflightError as error:
+    except (ProviderPreflightError, ValueError) as error:
         _provider_gate(str(error))
 
 
@@ -5026,6 +5055,7 @@ def cmd_prepare_provider_invocation(args):
             "outbound_packet_digest": preflight["outbound_packet_digest"],
             "outbound_context_digest": preflight["outbound_context_digest"],
             "invocation_id": preflight["invocation_id"], "status": "awaiting-approval",
+            "execution_context": preflight["outbound_packet"]["execution_context"],
         }
         data.setdefault("provider_preflights", {})[preflight["preflight_id"]] = pointer
         data["updated_at"] = iso_now()
@@ -5156,7 +5186,7 @@ def cmd_invoke_command_provider(args):
         )
         # Re-snapshot payload inputs after the reservation lock acquisition;
         # no byte validated before this point is eligible for subprocess stdin.
-        _, packet = _verified_preflight_packet(
+        preflight_pointer, packet = _verified_preflight_packet(
             cwd, dispatch_state, provider, args, consuming_invocation_id=entry["invocation_id"]
         )
         if provider.pop("_application_context_digest") != current_entry.get("application_context_digest"):
@@ -5182,7 +5212,20 @@ def cmd_invoke_command_provider(args):
     argv = [command, *[str(a) for a in provider.get("args") or []]]
     command_env = os.environ.copy()
     command_env.update(_string_map(provider.get("env")))
-    if not _command_is_available(command):
+    execution_context = preflight_pointer.get("execution_context") if isinstance(preflight_pointer, dict) else None
+    strict_result = None
+    if isinstance(execution_context, dict) and execution_context.get("isolation") == "strict":
+        try:
+            strict_result = _dispatch_provider_execution(
+                execution_context, packet,
+                lambda _: (_ for _ in ()).throw(ProviderPreflightError("isolator-unavailable")),
+                lambda attestation, _policy, exact_packet: _run_strict_provider_backend(
+                    _configured_execution_isolator(cwd, args.execution_isolator), exact_packet
+                ) if args.execution_isolator else (_ for _ in ()).throw(ProviderPreflightError("isolator-unavailable")),
+            )
+        except (ProviderPreflightError, ValueError, OSError):
+            _provider_gate("isolator-unavailable")
+    elif not _command_is_available(command):
         completed_at = iso_now()
         failed = {**entry, "status": "failed-before-start", "lifecycle_state": "terminal",
                   "transitioned_at": completed_at, "completed_at": completed_at,
@@ -5198,54 +5241,35 @@ def cmd_invoke_command_provider(args):
         print(json.dumps({"ok": False, "outcome_kind": "external", "entry": failed}, ensure_ascii=False))
         return
     spawn_failed_reason = None
-    try:
-        process = subprocess.Popen(
-            argv,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=command_env,
-        )
-    except OSError as exc:
-        spawn_failed_reason = "spawn-failed"
-        exit_code = None
-        stdout = ""
-        stderr = _redact_provider_output(str(exc))
-        completed_at = iso_now()
-        entry.update({"status": "failed-before-start", "lifecycle_state": "terminal",
-                      "transitioned_at": completed_at, "completed_at": completed_at,
-                      "reason_code": "spawn-failed"})
+    if strict_result is not None:
+        exit_code = strict_result["returncode"]
+        stdout = _redact_provider_output(str(strict_result.get("stdout") or ""))
+        stderr = _redact_provider_output(str(strict_result.get("stderr") or ""))
     else:
-        entry["child_pid"] = process.pid
-        entry["process_identity_digest"] = provider_value_digest({
-            "invocation_id": entry["invocation_id"], "pid": process.pid, "running_at": running_at,
-        })
-        with StateLock(lock_file(cwd)):
-            dispatch_state = json.loads(sf.read_text())
-            current_entry = dict(invocation_by_id(dispatch_state, entry["invocation_id"]))
-            if current_entry.get("status") != "running":
-                process.terminate()
-                process.wait(timeout=5)
-                print("ERROR: provider-ineligible: invocation-not-running", file=sys.stderr)
-                raise SystemExit(2)
-            current_entry.update({
-                "child_pid": entry["child_pid"],
-                "process_identity_digest": entry["process_identity_digest"],
-                "heartbeat_at": iso_now(),
-            })
-            _replace_provider_invocation(dispatch_state, current_entry)
-            backup_state(sf)
-            atomic_write_json(sf, stamp_metadata(dispatch_state, cwd))
-            entry = current_entry
         try:
-            raw_stdout, raw_stderr = process.communicate(input=packet, timeout=timeout)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            raw_stdout, raw_stderr = process.communicate()
-            raw_stderr = (raw_stderr or b"") + b"\ncommand provider timed out"
-        exit_code = process.returncode
-        stdout = _redact_provider_output((raw_stdout or b"").decode("utf-8", errors="replace"))
-        stderr = _redact_provider_output((raw_stderr or b"").decode("utf-8", errors="replace"))
+            process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=command_env)
+        except OSError as exc:
+            spawn_failed_reason = "spawn-failed"; exit_code = None; stdout = ""; stderr = _redact_provider_output(str(exc))
+            completed_at = iso_now()
+            entry.update({"status": "failed-before-start", "lifecycle_state": "terminal", "transitioned_at": completed_at,
+                          "completed_at": completed_at, "reason_code": "spawn-failed"})
+        else:
+            entry["child_pid"] = process.pid
+            entry["process_identity_digest"] = provider_value_digest({"invocation_id": entry["invocation_id"], "pid": process.pid, "running_at": running_at})
+            with StateLock(lock_file(cwd)):
+                dispatch_state = json.loads(sf.read_text()); current_entry = dict(invocation_by_id(dispatch_state, entry["invocation_id"]))
+                if current_entry.get("status") != "running":
+                    process.terminate(); process.wait(timeout=5)
+                    print("ERROR: provider-ineligible: invocation-not-running", file=sys.stderr); raise SystemExit(2)
+                current_entry.update({"child_pid": entry["child_pid"], "process_identity_digest": entry["process_identity_digest"], "heartbeat_at": iso_now()})
+                _replace_provider_invocation(dispatch_state, current_entry); backup_state(sf); atomic_write_json(sf, stamp_metadata(dispatch_state, cwd)); entry = current_entry
+            try:
+                raw_stdout, raw_stderr = process.communicate(input=packet, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                process.kill(); raw_stdout, raw_stderr = process.communicate(); raw_stderr = (raw_stderr or b"") + b"\ncommand provider timed out"
+            exit_code = process.returncode
+            stdout = _redact_provider_output((raw_stdout or b"").decode("utf-8", errors="replace"))
+            stderr = _redact_provider_output((raw_stderr or b"").decode("utf-8", errors="replace"))
 
     if spawn_failed_reason:
         status, reason = "failed-before-start", stderr
@@ -9174,6 +9198,26 @@ def _configured_execution_isolator(cwd: Path, isolator_name: str):
         "enforced_capabilities": sorted(configured["enforced_capabilities"]),
     }
     return {**configured, "module": module_name, "entry_point_value": value, "attestation": attestation}
+
+
+def _run_strict_provider_backend(descriptor: dict, packet: bytes) -> dict:
+    """Run only the host-pinned backend; no subprocess fallback exists."""
+    entry_points = importlib.metadata.entry_points()
+    candidates = (entry_points.select(group=_EXECUTION_ISOLATOR_ENTRY_POINT_GROUP)
+                  if hasattr(entry_points, "select") else entry_points.get(_EXECUTION_ISOLATOR_ENTRY_POINT_GROUP, ()))
+    matches = [entry for entry in candidates if entry.name == descriptor["entry_point"]]
+    if len(matches) != 1 or getattr(matches[0], "value", None) != descriptor["entry_point_value"]:
+        raise ProviderPreflightError("isolator-drift")
+    backend = matches[0].load()
+    result = dispatch_prepared_packet(
+        {"isolation": "strict", "isolator": descriptor["attestation"], "ambient_scopes": []},
+        descriptor["attestation"]["policy_digest"], packet,
+        lambda _: (_ for _ in ()).throw(ProviderPreflightError("isolator-unavailable")),
+        lambda _: (descriptor["attestation"], backend),
+    )
+    if not isinstance(result, dict) or type(result.get("returncode")) is not int:
+        raise ProviderPreflightError("isolator-result-invalid")
+    return result
 
 
 def _configured_approval_entry_point(cwd: Path, verifier_name: str):

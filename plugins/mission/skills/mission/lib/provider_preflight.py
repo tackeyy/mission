@@ -165,6 +165,35 @@ def strict_spawn(attestation: object, packet: bytes, backend) -> object:
     return backend(packet, dict(attestation))
 
 
+def dispatch_prepared_packet(
+    execution_context: object,
+    expected_policy_digest: object,
+    packet: bytes,
+    ambient_callable,
+    strict_backend_resolver,
+) -> object:
+    """Dispatch exact bytes; a strict packet can only reach its host backend."""
+    if not isinstance(execution_context, Mapping):
+        raise ProviderPreflightError("execution-context-invalid")
+    if execution_context.get("isolation") != "strict":
+        validate_execution_context(execution_context, approved_scopes=execution_context.get("ambient_scopes") or ())
+        if not callable(ambient_callable):
+            raise ProviderPreflightError("execution-context-invalid")
+        return ambient_callable(packet)
+    attestation = execution_context.get("isolator")
+    _require_digest(expected_policy_digest, "isolator-policy-invalid")
+    if not isinstance(attestation, Mapping) or attestation.get("policy_digest") != expected_policy_digest:
+        raise ProviderPreflightError("isolator-drift")
+    if not callable(strict_backend_resolver):
+        raise ProviderPreflightError("isolator-unavailable")
+    current, backend = strict_backend_resolver(dict(attestation))
+    if current is None or backend is None:
+        raise ProviderPreflightError("isolator-unavailable")
+    if not isinstance(current, Mapping) or dict(current) != dict(attestation):
+        raise ProviderPreflightError("isolator-drift")
+    return strict_spawn(current, packet, backend)
+
+
 def _packet_projection(subject: Mapping[str, Any], inputs: list[dict[str, Any]]) -> dict[str, Any]:
     required = (
         "session_id", "mission_id", "mission", "provider_id", "registry_entry_digest", "selection_id",
