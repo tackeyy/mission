@@ -241,6 +241,9 @@ def end_activity_segment(state: dict[str, Any], at: str) -> bool:
     detail = sanitize_activity_detail(current.get("detail"))
     if detail:
         segment["detail"] = detail
+    iteration = current.get("iteration")
+    if isinstance(iteration, int) and not isinstance(iteration, bool) and iteration > 0:
+        segment["iteration"] = iteration
     _record_closed_segment(state, segment)
     state["activity_current"] = None
     return True
@@ -353,6 +356,15 @@ def start_activity_segment(
     if state.get("phase") in TERMINAL_PHASES or state.get("loop_active") is False:
         raise ActivityTimingError("cannot start activity in a terminal state")
     current = state.get("activity_current")
+    # ``state.iteration`` is the last scored iteration.  A segment starts in
+    # the next in-flight iteration (0 -> 1 on the first pass), so never stamp
+    # it with the completed iteration's value.
+    iteration = state.get("iteration")
+    owned_iteration = (
+        iteration + 1
+        if isinstance(iteration, int) and not isinstance(iteration, bool) and iteration >= 0
+        else None
+    )
     clean_detail = sanitize_activity_detail(detail)
     if isinstance(current, dict):
         same = (
@@ -361,6 +373,7 @@ def start_activity_segment(
             and current.get("phase") == (state.get("phase") or "unknown")
             and sanitize_activity_detail(current.get("detail")) == clean_detail
             and (origin is None or current.get("origin") == origin)
+            and current.get("iteration") == owned_iteration
         )
         # A normal duplicate start is idempotent.  On resume, however, equal
         # labels can still describe a stale pre-crash segment.  Close that
@@ -378,6 +391,8 @@ def start_activity_segment(
         entry["detail"] = clean_detail
     if origin:
         entry["origin"] = origin
+    if owned_iteration is not None:
+        entry["iteration"] = owned_iteration
     state["activity_current"] = entry
     state.setdefault("activity_segments", [])
     _rollup(state)
@@ -448,6 +463,7 @@ def transition_activity_phase(
             "started_at": at,
             "detail": sanitize_activity_detail(preserved.get("detail")),
             "origin": preserved.get("origin"),
+            "iteration": preserved.get("iteration"),
         }.items()
         if value is not None
     }

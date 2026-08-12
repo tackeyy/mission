@@ -1,4 +1,4 @@
-# Discriminating cohort N≥10 採用判定 runbook
+# Discriminating cohort N≥5 diff-review 計測 runbook
 
 目的: openworld-v1 で確認した品質天井 (marker 1.0 / 分散 0) を解消した
 `tasks.discriminating.json` cohort で、「品質>goal・速度≈goal」の採用判定を行う。
@@ -48,9 +48,9 @@ smoke gate (すべて満たしたら Step 2 へ):
 smoke で iter1 素通しした場合は fail-first タスクの難度を上げてから再 smoke する
 (本 run に進まない)。
 
-## Step 2: N≥10 本 run
+## Step 2: N≥5 本 run
 
-5 tasks x 2 arms x `--repeats 1` = 10 records (N=10)。分散を厚くする場合は
+5 tasks x 2 arms x `--repeats 1` = 10 records (mission N=5)。分散を厚くする場合は
 `--repeats 2` で 20 records。
 
 ```bash
@@ -64,8 +64,9 @@ PATH="<shim-dir>:$PATH" python3 run_claude_goal_vs_mission.py \
   --mission-budget-minutes 30 --timeout 2400
 ```
 
-見積: 較正実測 (goal $1.3-5.0 / mission $5.1-7.4 名目) から、repeats 1 で
-名目 $35-60。壁時計は `--parallel 3` で約 1 時間 (逐次なら 2-3 時間)。repeats 2 は名目 2 倍。
+課金実行はこの手順の外である。上限は smoke USD 13、本 run USD 65、合計 USD 78。
+本 run は必ず `--parallel 3` とする。API/spend 上限、clean gate 不達、または観測 burn
+から該当上限を超えると判断できた時点で停止する。
 
 ### 実測に基づく予算上限の推奨値
 
@@ -123,11 +124,14 @@ raw mission state から再計算しない。
 
 すべて summary / records から機械的に判定する:
 
-1. **測定妥当性**: `mission_loop_not_initialized` record が 0、または除外後の
-   comparable N >= 10
+1. **測定妥当性**: summary の `diff_review_measurement_gate` で
+   `iter2_eligible_records >= 5`、`permission_degraded_records = 0`、
+   `mission_loop_not_initialized_records = 0`。context manifest の expected / generated /
+   fallback iteration count を必ず記録し、generated と fallback を同一視しない。
+   iteration 単位の cost は推定しない。eligible iter-2 record の cost total / mean を記録する
 2. **判別力**: 両 arm の `marker_score_variance` が 0 でない (天井飽和の解消)
-3. **iter>=2 の実運用観測**: mission records に `mission_iterations >= 2` が 1 件以上、
-   その record の state で `critic_has_new_scope` 記録を確認 (#240/#241 発火証跡)
+3. **iter>=2 の実運用観測**: `iter2_eligible_records >= 5` を満たし、各 eligible record の
+   state で boolean の `critic_has_new_scope` 記録を確認 (#240/#241 発火証跡)
 4. **品質判定**: `comparable_average_quality_score` と marker recall の arm 差で
    「品質>goal」を判定。同点なら「mission の価値はテール保険+ガバナンス」の
    現行結論を維持する
@@ -138,7 +142,7 @@ raw mission state から再計算しない。
 
 - results JSONL + summary + artifacts を commit し、report.ja.md / report.md に
   セクション追記 (openworld-v1 節の形式に従い「危険な解釈」ガードを必ず付ける)
-- 判定結果を Issue #262 に記録してクローズ
+- 判定結果を Issue #275 に記録してクローズする。Issue #262 は以前の採用runbookの履歴参照である
 
 ---
 

@@ -18,6 +18,7 @@ def test_init_opens_the_planning_activity_by_default(run_cli, tmp_path):
     current = _read(tmp_path)["activity_current"]
     assert current == {
         "kind": "active",
+        "iteration": 1,
         "origin": "phase-default",
         "phase": "planning",
         "reason": "planning",
@@ -57,6 +58,7 @@ def test_same_mission_reinit_opens_missing_default_once_without_zero_length_dupl
     after_resume = _read(tmp_path)
     assert after_resume["activity_current"] == {
         "kind": "active",
+        "iteration": 1,
         "origin": "phase-default",
         "phase": "planning",
         "reason": "planning",
@@ -93,6 +95,7 @@ def test_same_mission_reinit_drops_unobserved_open_boundary_without_zero_segment
     assert resumed["activity_unobserved_gap_sec"] == 600.0
     assert resumed["activity_current"] == {
         "kind": "active",
+        "iteration": 1,
         "origin": "phase-default",
         "phase": "planning",
         "reason": "planning",
