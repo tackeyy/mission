@@ -34,6 +34,23 @@ def _digest_bytes(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
 
 
+def _redacted_argv(argv: object) -> list[str]:
+    """Keep switches but never serialize argument values into packets."""
+    if not isinstance(argv, list) or not all(isinstance(item, str) for item in argv):
+        raise ProviderPreflightError("argv-invalid")
+    safe = []
+    for index, item in enumerate(argv):
+        if index == 0 or (item.startswith("-") and "=" not in item):
+            safe.append(item)
+        elif re.fullmatch(r"\$\{[A-Z][A-Z0-9_]*_REF\}", item):
+            safe.append(item)
+        elif item.startswith("--") and "=" in item:
+            safe.append(item.split("=", 1)[0] + "=${ARG_%d_REF}" % index)
+        else:
+            safe.append("${ARG_%d_REF}" % index)
+    return safe
+
+
 def _require_digest(value: object, code: str) -> str:
     if not isinstance(value, str) or not _DIGEST.fullmatch(value):
         raise ProviderPreflightError(code)
@@ -207,8 +224,7 @@ def _packet_projection(subject: Mapping[str, Any], inputs: list[dict[str, Any]])
     _require_digest(subject["registry_entry_digest"], "registry-digest-invalid")
     if not isinstance(subject["risk_scopes"], list) or not all(isinstance(item, str) and item for item in subject["risk_scopes"]):
         raise ProviderPreflightError("risk-scope-invalid")
-    if not isinstance(subject["effective_argv"], list) or not all(isinstance(item, str) for item in subject["effective_argv"]):
-        raise ProviderPreflightError("argv-invalid")
+    effective_argv = _redacted_argv(subject["effective_argv"])
     if not isinstance(subject["env_keys"], list) or not all(isinstance(item, str) for item in subject["env_keys"]):
         raise ProviderPreflightError("env-keys-invalid")
     # A declared-ambient preflight is permitted to describe its complete
@@ -247,7 +263,7 @@ def _packet_projection(subject: Mapping[str, Any], inputs: list[dict[str, Any]])
         "invocation_id": subject["invocation_id"], "iteration": subject["iteration"], "phase": subject["phase"],
         "destination": dict(subject["destination"]), "inputs": packets,
         "redaction_policy_version": "1", "risk_scopes": sorted(set(subject["risk_scopes"])),
-        "quota_mode": subject["quota_mode"], "effective_argv": subject["effective_argv"],
+        "quota_mode": subject["quota_mode"], "effective_argv": effective_argv,
         "env_keys": sorted(set(subject["env_keys"])), "execution_context": execution,
     }.items())), manifests
 

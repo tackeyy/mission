@@ -4818,6 +4818,20 @@ def _command_provider_packet(data: dict, provider: dict, args) -> str:
     return json.dumps(packet, indent=2, ensure_ascii=False)
 
 
+def _publish_preflight_pointer_transaction(packet_path: Path, packet_bytes: bytes, commit_state) -> None:
+    """Publish a private packet only when its pointer state also commits."""
+    published = False
+    try:
+        atomic_write_bytes(packet_path, packet_bytes)
+        published = True
+        commit_state()
+    except BaseException:
+        if published:
+            with contextlib.suppress(OSError):
+                packet_path.unlink()
+        raise
+
+
 def _dispatch_provider_execution(execution_context: object, packet_bytes: bytes, plain_runner, strict_runner):
     """Route a strict packet exclusively through the host strict runner."""
     if not isinstance(execution_context, dict):
@@ -5049,7 +5063,6 @@ def cmd_prepare_provider_invocation(args):
         artifact = private_dir / f"{preflight['preflight_id']}.json"
         # The private artifact is atomically published before the pointer.  If
         # either write fails, no state points at a partial packet.
-        atomic_write_bytes(artifact, preflight["outbound_packet_bytes"])
         pointer = {
             "artifact_path": str(artifact.resolve().relative_to(state_dir(cwd).resolve())),
             "outbound_packet_digest": preflight["outbound_packet_digest"],
@@ -5059,8 +5072,10 @@ def cmd_prepare_provider_invocation(args):
         }
         data.setdefault("provider_preflights", {})[preflight["preflight_id"]] = pointer
         data["updated_at"] = iso_now()
-        backup_state(sf)
-        atomic_write_json(sf, stamp_metadata(data, cwd))
+        def commit_pointer_state():
+            backup_state(sf)
+            atomic_write_json(sf, stamp_metadata(data, cwd))
+        _publish_preflight_pointer_transaction(artifact, preflight["outbound_packet_bytes"], commit_pointer_state)
     public = {key: value for key, value in preflight.items() if key not in {"outbound_packet_bytes"}}
     print(json.dumps(public, indent=2 if args.json else None, ensure_ascii=False))
 

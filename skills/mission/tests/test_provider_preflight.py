@@ -95,13 +95,17 @@ def test_canonical_packet_uses_exact_sorted_bytes_and_redacts_secret_values(tmp_
     assert list(preflight["outbound_packet"]) == sorted(preflight["outbound_packet"])
 
 
-@pytest.mark.parametrize("kind", ["symlink", "fifo", "oversize", "invalid-utf8", "traversal", "nul"])
+@pytest.mark.parametrize("kind", ["symlink", "hardlink", "fifo", "oversize", "invalid-utf8", "traversal", "nul"])
 def test_input_snapshot_fails_closed_for_unsafe_input(kind, tmp_path):
     source = tmp_path / "input"
     if kind == "symlink":
         target = tmp_path / "target"
         target.write_text("safe", encoding="utf-8")
         source.symlink_to(target)
+    elif kind == "hardlink":
+        target = tmp_path / "target"
+        target.write_text("safe", encoding="utf-8")
+        os.link(target, source)
     elif kind == "fifo":
         os.mkfifo(source)
     elif kind == "oversize":
@@ -115,6 +119,22 @@ def test_input_snapshot_fails_closed_for_unsafe_input(kind, tmp_path):
         source = Path(str(tmp_path / "bad\x00name"))
 
     with pytest.raises(ProviderPreflightError):
+        safe_input_snapshot(source, root=tmp_path)
+
+
+def test_input_snapshot_rejects_path_swapped_between_identity_and_open(tmp_path, monkeypatch):
+    source = tmp_path / "input"; replacement = tmp_path / "replacement"
+    source.write_text("before", encoding="utf-8"); replacement.write_text("after", encoding="utf-8")
+    import provider_preflight
+    original_open = provider_preflight.os.open
+
+    def swap_then_open(path, flags):
+        if os.fspath(path) == os.fspath(source):
+            source.unlink(); replacement.replace(source)
+        return original_open(path, flags)
+
+    monkeypatch.setattr(provider_preflight.os, "open", swap_then_open)
+    with pytest.raises(ProviderPreflightError, match="input-identity-drift"):
         safe_input_snapshot(source, root=tmp_path)
 
 
@@ -161,6 +181,44 @@ def test_receipt_requires_trusted_verifier_scope_subject_expiry_and_nonce(tmp_pa
     ):
         with pytest.raises(ProviderPreflightError):
             validate_receipt(preflight, mutated, trusted_verifiers={"trusted-verifier": "1"}, now="2026-08-12T00:00:00Z")
+
+
+@pytest.mark.parametrize("field,value", [
+    ("preflight_id", "pf_other"), ("session_id", "session-other"), ("mission_id", "mission-other"),
+    ("outbound_context_digest", _digest("0")), ("invocation_id", "inv_other"),
+    ("outbound_packet_digest", _digest("1")), ("registry_entry_digest", _digest("2")),
+    ("selection_id", "sel_other"), ("selection_source", "manual"), ("iteration", 999), ("phase", "review"),
+])
+def test_receipt_binds_every_subject_field(field, value, tmp_path):
+    preflight = _preflight(tmp_path); receipt = _receipt(preflight); receipt[field] = value
+    with pytest.raises(ProviderPreflightError, match="receipt-binding-mismatch"):
+        validate_receipt(preflight, receipt, trusted_verifiers={"trusted-verifier": "1"}, now="2026-08-12T00:00:00Z")
+
+
+def test_packet_never_carries_literal_argv_or_environment_secret(tmp_path):
+    subject = _subject() | {"effective_argv": ["portable-provider", "--token=literal-credential", "literal-positional"],
+                            "env_keys": ["API_TOKEN"]}
+    source = tmp_path / "input"; source.write_text("brief", encoding="utf-8")
+    packet = build_preflight(subject, [safe_input_snapshot(source, root=tmp_path)])
+    rendered = packet["outbound_packet_bytes"].decode("utf-8")
+    assert "literal-credential" not in rendered and "literal-positional" not in rendered
+
+
+def test_prepare_publish_rolls_back_private_packet_when_state_commit_fails(tmp_path):
+    state_path = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
+    spec = importlib.util.spec_from_file_location("mission_state_issue396_rollback", state_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None; spec.loader.exec_module(module)
+    private = tmp_path / "private-preflights"; private.mkdir()
+    packet = private / "pf_test.json"; state_before = b'{"state":"before"}'
+
+    with pytest.raises(OSError, match="state write failed"):
+        module._publish_preflight_pointer_transaction(
+            packet, b'{"packet":true}', lambda: (_ for _ in ()).throw(OSError("state write failed")),
+        )
+
+    assert not packet.exists()
+    assert not list(private.glob(".*.tmp"))
 
 
 def test_receipt_consumes_once_and_rejects_replay(tmp_path):
