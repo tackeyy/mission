@@ -121,10 +121,11 @@ def test_duration_percentiles_exclude_failed_and_other_noncompleted_records():
     }
 
 
-def test_provider_kpi_payload_is_rejected_until_the_versioned_consumer_is_enabled():
+def test_provider_kpi_consumer_defers_missing_block_and_rejects_malformed_block():
     audit = _load()
 
-    with pytest.raises(audit.BenchmarkAuditInputError, match="deferred"):
+    assert audit.summarize_benchmark_kpi([{"human_quality_score": 4.3}])["planning_provider_kpi"]["status"] == "deferred"
+    with pytest.raises(audit.BenchmarkAuditInputError, match="invalid"):
         audit.summarize_benchmark_kpi([{
             "human_quality_score": 4.3,
             "planning_provider_kpi": {"schema": "mission-planning-provider-kpi/1"},

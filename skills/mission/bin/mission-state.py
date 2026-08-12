@@ -3532,6 +3532,7 @@ def _normalize_candidate(candidate: dict, source: str) -> dict:
         "activation": candidate.get("activation"),
         "risk": risk,
         "result_contract": result_contract,
+        "planning": candidate.get("planning") if isinstance(candidate.get("planning"), dict) else {},
         "bounded_use": bounded_use,
         "bounded_purpose_required": bool(candidate.get("bounded_purpose_required", bounded_use)),
         "install_hint": bool(candidate.get("install_hint", True)),

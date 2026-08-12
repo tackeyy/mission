@@ -433,6 +433,20 @@ If a specialist appears in `specialist_invocations` but not in `specialists_sele
 
 ## Phased Rollout
 
+## Planning provider migration and operator flow
+
+For a planning provider, declare `planning.mode: primary` only with a structured
+result contract. `advisory` evidence informs the core planner and is never
+execution authority. Legacy `auto_use.min_complexity` remains read-compatible;
+new entries use `activation.min_complexity`, and unknown, empty, or conflicting
+conditions are rejected.
+
+Run `specialists recommend`, `prepare-invocation`, host-trusted approval,
+`invoke-prepared`, `plan-import`, then executor handoff. Confirm stdin digest,
+destination, execution context, quota/risk scopes, and ambient-access limits;
+a changed digest requires new preflight. Upgrade/resume never migrates an active
+legacy session into provider flow: use explicit planning reselection.
+
 1. **Docs-only protocol**: document selection rules and update SKILL.md to mention optional evidence providers.
 2. **Manual audit fields**: record `task_profile`, selected specialists, and missing specialists in assumptions/archive notes.
 3. **YAML registry parser**: add schema validation and deterministic merge order.

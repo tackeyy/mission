@@ -57,6 +57,7 @@ def test_core_strategy_is_eligible_but_not_provider_selection_and_counters_are_f
 
 @pytest.mark.parametrize("mutate", [
     lambda value: value["totals"]["eligible_complex_planning_selection"].update({"numerator": 2, "denominator": 1}),
+    lambda value: value["totals"]["eligible_complex_planning_selection"].update({"numerator": False}),
     lambda value: value["totals"].pop("authority_injection_accept_count"),
     lambda value: value.update({"schema": "mission-planning-provider-kpi/9"}),
 ])
