@@ -105,3 +105,27 @@ def test_legacy_reselection_is_explicit_and_drops_unsafe_raw_records(run_cli, tm
     assert response.returncode == 0
     assert migrated["planning_policy_version"] == 1 and migrated["specialists_candidates"] == []
     assert "auto_use" not in state_file.read_text()
+
+
+@pytest.mark.parametrize(("required", "expected"), [(False, "run-planner"), (True, "halt-required-planning-provider")])
+def test_terminal_provider_failure_has_deterministic_optional_or_required_outcome(required, expected):
+    state = {"planning_policy_version": 1, "phase": "planning", "iteration": 1,
+             "planning_strategy": "provider-primary",
+             "specialist_invocations": [{"phase": "planning", "iteration": 1, "status": "failed", "required": required}]}
+    assert derive_planning_lifecycle(state)["next_action"] == expected
+
+
+def test_handoff_rejects_duplicate_and_dependency_before_lineage_record(run_cli, tmp_path):
+    run_cli("init", "provider plan", "--complexity", "Complex", cwd=tmp_path, check=True)
+    state_file, _plan = _canonical_core_state(tmp_path)
+    assert run_cli("advance", "--phase", "executing", cwd=tmp_path).returncode == 0
+    assert run_cli("executor-handoff", "begin", cwd=tmp_path).returncode == 0
+    assert run_cli("executor-handoff", "begin", cwd=tmp_path).returncode == 2
+    assert run_cli("executor-handoff", "record-step", "--step-id", "s2", "--result", "ok", cwd=tmp_path).returncode == 2
+    assert run_cli("executor-handoff", "record-step", "--step-id", "s1", "--result", "ok", cwd=tmp_path).returncode == 0
+    assert run_cli("executor-handoff", "record-step", "--step-id", "s1", "--result", "ok", cwd=tmp_path).returncode == 2
+    assert run_cli("executor-handoff", "record-step", "--step-id", "s2", "--result", "ok", cwd=tmp_path).returncode == 0
+    assert run_cli("executor-handoff", "complete", cwd=tmp_path).returncode == 0
+    decisions = __import__("json").loads(state_file.read_text())["decisions"]
+    assert {entry["step_id"] for entry in decisions} == {"s1", "s2"}
+    assert all(entry["plan_source"] == "core" and entry["plan_generation"] == 1 for entry in decisions)

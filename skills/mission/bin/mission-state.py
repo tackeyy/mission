@@ -11480,7 +11480,9 @@ def _cmd_executor_handoff(args, operation: str):
                 if set(steps) != done: raise PlanningLifecycleError("executor-handoff-steps-incomplete")
                 handoff["status"] = "consumed"; handoff["consumed_at"] = iso_now()
         except (OSError, ValueError, PlanningLifecycleError) as exc:
-            if isinstance(handoff, dict) and operation in {"begin", "verify"}:
+            # Identity mutation is terminal; a duplicate begin or invalid step
+            # request is merely rejected and leaves a resumable handoff intact.
+            if isinstance(handoff, dict) and operation in {"begin", "verify"} and str(exc).startswith("canonical-"):
                 handoff["status"] = "rejected"; handoff["rejected_reason"] = str(exc)
                 data["updated_at"] = iso_now(); backup_state(sf); atomic_write_json(sf, stamp_metadata(data, cwd))
             print(f"ERROR: executor handoff rejected: {exc}", file=sys.stderr); sys.exit(2)
