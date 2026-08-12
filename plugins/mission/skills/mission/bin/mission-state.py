@@ -160,6 +160,10 @@ from planning_lifecycle import (  # noqa: E402
     validate_handoff_step,
 )
 from planning_provider_metrics import reduce_planning_provider_kpis  # noqa: E402
+from review_learning import (  # noqa: E402
+    LearningContractError,
+    validate_review_learning,
+)
 from artifact_contract import (  # noqa: E402
     ArtifactContractError,
     artifact_lint_observation_matches,
@@ -11124,6 +11128,10 @@ def _validate_review_payload(payload: object, expected_iteration: int) -> None:
     findings = payload.get("findings")
     if not isinstance(findings, list):
         raise ValueError("findings must be a list")
+    try:
+        validate_review_learning(payload)
+    except LearningContractError as exc:
+        raise ValueError(str(exc)) from exc
     seen_ids = set()
     for idx, finding in enumerate(findings, start=1):
         if not isinstance(finding, dict):

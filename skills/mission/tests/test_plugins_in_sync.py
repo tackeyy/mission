@@ -140,6 +140,10 @@ SYNC_PAIRS = [
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "planning_provider_metrics.py",
     ),
     (
+        REPO_ROOT / "skills" / "mission" / "lib" / "review_learning.py",
+        REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "review_learning.py",
+    ),
+    (
         REPO_ROOT / "skills" / "mission" / "lib" / "provider_public_contract.py",
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "provider_public_contract.py",
     ),
@@ -388,6 +392,16 @@ def test_planning_provider_metrics_py_in_sync_and_importable():
     assert spec.loader is not None
     spec.loader.exec_module(module)
     assert module.reduce_planning_provider_kpis([], population_kind="observed")["schema"] == "mission-planning-provider-kpi/1"
+
+
+def test_review_learning_py_in_sync_and_importable():
+    src, dst = _sync_pair_for("skills/mission/lib/review_learning.py")
+    assert src.exists() and dst.exists() and _md5(src) == _md5(dst)
+    spec = importlib.util.spec_from_file_location("plugin_review_learning", dst)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    assert module.learning_identity("execution", "validate every boundary").startswith("sha256:")
 
 
 def test_plugin_mirror_specialist_recommend_cli_smoke(tmp_path):
