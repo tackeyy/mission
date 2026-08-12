@@ -132,6 +132,7 @@ from provider_eligibility import (  # noqa: E402
     normalize_selection_source,
     parse_v2_registry_json,
     registry_entry_digest,
+    validate_provider_application,
     value_digest as provider_value_digest,
 )
 from provider_public_contract import (  # noqa: E402
@@ -3314,6 +3315,7 @@ def _public_specialist_record(record: dict) -> dict:
             ]
     for field in (
         "required",
+        "max_calls_per_iteration",
         "bounded_use",
         "bounded_purpose_required",
         "installed",
@@ -4475,6 +4477,38 @@ def _provider_for_skill(data: dict, skill: str | None) -> dict | None:
     return None
 
 
+def _require_current_provider_application(
+    data: dict,
+    provider: dict | None,
+    *,
+    requested_phase: str,
+    requested_iteration: int,
+    application_kind: str,
+    selection_source: str | None = None,
+    invocation_id: str | None = None,
+) -> dict:
+    """Reject an application before it can mutate state or start a process."""
+    if provider is None:
+        print("ERROR: provider-ineligible: provider-not-selected", file=sys.stderr)
+        raise SystemExit(2)
+    verdict = validate_provider_application(
+        provider,
+        data,
+        requested_phase=requested_phase,
+        requested_iteration=requested_iteration,
+        application_kind=application_kind,
+        selection_source=selection_source,
+        invocation_id=invocation_id,
+    )
+    if not verdict["eligible"]:
+        print(
+            f"ERROR: provider-ineligible: {verdict['reason_code']}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return provider
+
+
 def _bounded_purpose_required(data: dict, skill: str | None, phase: str, status: str) -> bool:
     if status not in APPLIED_SPECIALIST_INVOCATION_STATUSES:
         return False
@@ -4631,6 +4665,14 @@ def cmd_invoke_command_provider(args):
             file=sys.stderr,
         )
         sys.exit(2)
+    _require_current_provider_application(
+        data,
+        provider,
+        requested_phase=args.phase,
+        requested_iteration=args.iteration,
+        application_kind="preflight",
+        selection_source=args.selection_source,
+    )
     _reject_unbounded_orchestrator_execution(data, provider.get("skill") or provider.get("role"), args.phase)
 
     now = iso_now()
@@ -4703,14 +4745,21 @@ def cmd_invoke_command_provider(args):
     with StateLock(lock_file(cwd)):
         dispatch_state = json.loads(sf.read_text())
         _validate_specialist_public_state(dispatch_state)
+        provider = _require_current_provider_application(
+            dispatch_state,
+            _find_provider(dispatch_state, args.provider),
+            requested_phase=args.phase,
+            requested_iteration=args.iteration,
+            application_kind="preflight",
+            selection_source=args.selection_source,
+            invocation_id=entry["invocation_id"],
+        )
         dispatch_state, entry, _ = _prepare_specialist_invocation_state(
             dispatch_state,
             entry,
             cwd=cwd,
             iteration=args.iteration,
             evidence_planned=True,
-            selection_source=args.selection_source,
-            provider=provider,
         )
         record_activity_event(dispatch_state, "specialist", now)
         dispatch_state["updated_at"] = now
@@ -4763,6 +4812,15 @@ def cmd_invoke_command_provider(args):
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
         _validate_specialist_public_state(data)
+        _require_current_provider_application(
+            data,
+            _find_provider(data, args.provider),
+            requested_phase=args.phase,
+            requested_iteration=args.iteration,
+            application_kind="result-import",
+            selection_source=args.selection_source,
+            invocation_id=entry["invocation_id"],
+        )
         current = data.get("activity_current")
         if (
             isinstance(current, dict)
@@ -5826,6 +5884,7 @@ def cmd_log_specialist_invocation(args):
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
         _validate_specialist_public_state(data)
+        provider = _provider_for_skill(data, skill)
         if _confirmed_selection_required(data, skill, args.status) and not getattr(args, "selection_source", None):
             print(
                 "ERROR: specialists_decision requested user confirmation; pass --selection-source confirmed-user "
@@ -5833,6 +5892,18 @@ def cmd_log_specialist_invocation(args):
                 file=sys.stderr,
             )
             sys.exit(2)
+        if args.status in APPLIED_SPECIALIST_INVOCATION_STATUSES and isinstance(
+            data.get("specialists_decision"), dict
+        ):
+            _require_current_provider_application(
+                data,
+                provider,
+                requested_phase=args.phase,
+                requested_iteration=args.iteration,
+                application_kind="result-import",
+                selection_source=getattr(args, "selection_source", None),
+                invocation_id=getattr(args, "invocation_id", None),
+            )
         _reject_unbounded_orchestrator_execution(data, skill, args.phase)
         if _bounded_purpose_required(data, skill, args.phase, args.status) and not getattr(args, "bounded_purpose", None):
             print(
@@ -5899,15 +5970,9 @@ def cmd_log_specialist_invocation(args):
             data, entry, selected_entry = _prepare_specialist_invocation_state(
                 data, entry, cwd=cwd, iteration=args.iteration,
                 evidence_planned=evidence_planned,
-                selection_source=getattr(args, "selection_source", None),
-                selection_reason=reason or notes,
             )
         else:
             selected_entry = None
-            if getattr(args, "selection_source", None):
-                selected_entry = _add_selected_specialist_metadata(
-                    data, entry, args.selection_source, now, reason=reason or notes
-                )
             invocations[existing_index] = entry
             _validate_specialist_public_state(data)
         evidence_text = None
