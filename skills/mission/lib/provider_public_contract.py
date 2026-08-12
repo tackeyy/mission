@@ -87,6 +87,7 @@ CANDIDATE_FIELDS = frozenset({
     "first_use", "eligibility_reason", "matched_conditions", "selection_source",
     "selection_source_raw", "eligibility_selection_source", "normalized_activation",
     "risk_confirmation_required", "result_contract_digest", "reason", "selection_id",
+    "planning_mode", "planning_contract_digest",
 })
 DIAGNOSTIC_FIELDS = frozenset({
     "provider_id", "source", "reason_code", "field_code", "blocked_config_class",
@@ -120,6 +121,7 @@ INVOCATION_FIELDS = frozenset({
     "selection_source", "bounded_purpose", "evidence_path", "reason", "notes", "command", "kind",
     "selection_id", "invocation_id", "lifecycle_state", "transitioned_at",
     "reserved_at", "running_at", "application_context_digest",
+    "provider_id",
     "reservation_owner_session_id", "fencing_epoch", "child_pid",
     "process_identity_digest", "heartbeat_at", "result_artifact_digest",
     "host_run_id", "root_run_id", "parent_run_id", "child_run_id", "logical_group_id",
@@ -367,6 +369,8 @@ def _validate_candidate(record: object, base: str) -> None:
             _reject(f"{base}/{field}")
     if "reason" in record and not _safe_text(record["reason"], maximum=1024):
         _reject(f"{base}/reason")
+    if "planning_mode" in record and record["planning_mode"] not in {"advisory", "primary"}:
+        _reject(f"{base}/planning_mode")
     kind = record.get("kind")
     if kind is not None and kind not in {"skill", "command"}:
         _reject(f"{base}/kind")

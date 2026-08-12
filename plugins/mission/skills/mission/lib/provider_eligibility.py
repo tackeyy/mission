@@ -194,7 +194,7 @@ def _validate_v2_candidate_types(candidate: dict[str, Any]) -> None:
     ):
         if field in candidate and not _is_exact_bool(candidate[field]):
             _invalid_candidate_type(field)
-    for field in ("env", "risk", "result_contract", "auto_use"):
+    for field in ("env", "risk", "result_contract", "auto_use", "planning"):
         if field in candidate and not isinstance(candidate[field], dict):
             _invalid_candidate_type(field)
     if "env" in candidate and any(
@@ -218,6 +218,14 @@ def _validate_v2_candidate_types(candidate: dict[str, Any]) -> None:
         for field in ("min_non_template_chars",):
             if field in contract and (type(contract[field]) is not int or contract[field] < 0):
                 _invalid_candidate_type(f"result_contract.{field}")
+    if "planning" in candidate:
+        planning = candidate["planning"]
+        if set(planning) != {"mode"} or planning.get("mode") not in {"advisory", "primary"}:
+            _invalid_candidate_type("planning")
+        if planning.get("mode") == "primary":
+            contract = candidate.get("result_contract")
+            if not isinstance(contract, dict) or not contract.get("envelope_schema") or not contract.get("artifact_schema"):
+                _invalid_candidate_type("planning.primary-requires-result-contract")
     if "timeout" in candidate:
         timeout = candidate["timeout"]
         if type(timeout) is not int or not 1 <= timeout <= 86400:

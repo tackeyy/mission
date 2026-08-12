@@ -26,6 +26,15 @@ from provider_public_contract import (  # noqa: E402
 )
 
 
+def test_primary_planning_mode_requires_structured_result_contract():
+    document = {"schema": "mission-specialist-registry/2", "specialists_v2": [{
+        "provider_id": "portable", "skill": "portable", "kind": "command", "command": "portable",
+        "planning": {"mode": "primary"},
+    }]}
+    with pytest.raises(RegistryContractError, match="planning.primary-requires-result-contract"):
+        parse_v2_registry(json.dumps(document))
+
+
 def _load_mission_state_module(name: str):
     state_path = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
     spec = importlib.util.spec_from_file_location(name, state_path)

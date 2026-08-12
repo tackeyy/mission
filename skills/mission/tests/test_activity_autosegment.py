@@ -25,8 +25,9 @@ def test_init_opens_the_planning_activity_by_default(run_cli, tmp_path):
     }
 
 
-def test_advance_uses_the_destination_phase_default_when_activity_is_omitted(run_cli, tmp_path):
+def test_advance_uses_the_destination_phase_default_when_activity_is_omitted(run_cli, tmp_path, canonical_core_plan):
     run_cli("init", "automatic activity", cwd=tmp_path, check=True)
+    canonical_core_plan(tmp_path)
 
     result = run_cli("advance", "--phase", "executing", cwd=tmp_path)
 
