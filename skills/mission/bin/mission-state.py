@@ -153,6 +153,12 @@ from plan_contract import (  # noqa: E402
     canonical_plan_bytes,
     parse_provider_result,
 )
+from planning_lifecycle import (  # noqa: E402
+    PlanningLifecycleError,
+    canonical_plan_identity,
+    derive_planning_lifecycle,
+    validate_handoff_step,
+)
 from artifact_contract import (  # noqa: E402
     ArtifactContractError,
     artifact_lint_observation_matches,
@@ -3376,6 +3382,10 @@ def _public_specialist_record(record: dict) -> dict:
     result_contract = record.get("result_contract")
     if isinstance(result_contract, dict) and result_contract:
         public["result_contract_digest"] = provider_value_digest(result_contract)
+    planning = record.get("planning")
+    if isinstance(planning, dict) and planning.get("mode") in {"advisory", "primary"}:
+        public["planning_mode"] = planning["mode"]
+        public["planning_contract_digest"] = provider_value_digest(planning)
     return public
 
 
@@ -4018,6 +4028,12 @@ def cmd_specialists(args):
             data["specialist_registry_projection"] = registry_projection
             data["specialists_decision"] = decision
             data["specialists_phase_plan"] = phase_plan
+            planning_selected = next((item for item in public_selected if item.get("planning_mode") in {"advisory", "primary"}), None)
+            if planning_selected:
+                data["planning_strategy"] = "provider-" + planning_selected["planning_mode"]
+                data["planning_contract_digest"] = planning_selected["planning_contract_digest"]
+            elif data.get("planning_policy_version") == 1:
+                data["planning_strategy"] = "core"
             data["specialists_mode"] = "interactive" if decision.get("prompted_user") else "auto"
             data["updated_at"] = iso_now()
             backup_state(sf)
@@ -6646,6 +6662,9 @@ def cmd_init(args):
         "specialists_unavailable": [],
         "specialists_decision": _new_specialist_selection_checkpoint(),
         "specialist_invocations": [],
+        # New sessions opt into the explicit provider-planning lifecycle.  A
+        # same-mission init below preserves absence for legacy sessions.
+        "planning_policy_version": 1,
         # M-audit-2 (2026-06-11): 未指定は 3 (98 セッション実測で iter>3 の ROI 低下)。
         # 0 は「上限なし (stagnation 停止モード)」として None を保持する。
         "max_iter": (DEFAULT_MAX_ITER if args.max_iter is None else (None if args.max_iter == 0 else args.max_iter)),
@@ -6853,6 +6872,10 @@ def cmd_init(args):
                         f"{time.time_ns()}-assumptions.md"
                     )
                 elif existing_mid and existing_mid == new_mid:
+                    if "planning_policy_version" not in existing_data:
+                        initial.pop("planning_policy_version", None)
+                    else:
+                        initial["planning_policy_version"] = existing_data["planning_policy_version"]
                     existing_assumptions_path = existing_data.get("assumptions_path")
                     if existing_assumptions_path:
                         initial["assumptions_path"] = existing_assumptions_path
@@ -7803,6 +7826,30 @@ def cmd_advance(args):
         with StateLock(lock_file(cwd)):
             data = json.loads(sf.read_text())
             _reject_active_provider_mutation(data, "advance")
+            if new_phase == "executing" and data.get("planning_policy_version") == 1:
+                plan = data.get("canonical_plan")
+                if not isinstance(plan, dict):
+                    print("ERROR: policy v1 requires a canonical plan before executing", file=sys.stderr)
+                    sys.exit(2)
+                try:
+                    expected_binding = _trusted_canonical_plan_binding(data, plan)
+                    _raw_plan, step_ids = canonical_plan_identity(
+                        cwd, plan, expected=expected_binding, reader=_read_strict_review_file
+                    )
+                except (OSError, PlanningLifecycleError) as exc:
+                    print(f"ERROR: canonical plan gate failed: {exc}", file=sys.stderr)
+                    sys.exit(2)
+                if data.get("executor_handoff") is not None:
+                    print("ERROR: executor handoff already exists; use handoff resume", file=sys.stderr)
+                    sys.exit(2)
+                data["executor_handoff"] = {
+                    "schema": "mission-executor-handoff/1",
+                    "handoff_id": "handoff_" + secrets.token_hex(16),
+                    "plan_path": plan["path"], "plan_digest": plan["digest"],
+                    "plan_generation": plan["generation"], "plan_source": plan["source"],
+                    "source_id": plan["source_id"], "selection_source": plan["selection_source"],
+                    "iteration": data["iteration"], "step_ids": step_ids, "status": "prepared",
+                }
             requested_applicability = getattr(args, "artifact_applicability", None)
             artifact_path = getattr(args, "artifact_path", None)
             producer_run_id = getattr(args, "producer_run_id", None)
@@ -7909,6 +7956,28 @@ def _happy_path_sequence(phase: str, reviewer_count: int, *, plan_mode: str = "s
     ]
     start = {"planning": 0, "executing": 2, "reviewing": 4}[phase]
     return steps[start:]
+
+
+def _trusted_canonical_plan_binding(data: dict, plan: dict) -> dict:
+    """Resolve plan lineage from state-owned producer evidence, never CLI input."""
+    source = plan.get("source")
+    source_id = plan.get("source_id")
+    if source == "provider":
+        imports = data.get("provider_plan_imports") or {}
+        record = imports.get(source_id) if isinstance(imports, dict) else None
+        if not isinstance(record, dict):
+            raise PlanningLifecycleError("canonical-plan-provider-import-missing")
+        if record.get("candidate_path") != plan.get("path") or record.get("candidate_digest") != plan.get("digest"):
+            raise PlanningLifecycleError("canonical-plan-provider-candidate-mismatch")
+        expected = {"generation": record.get("generation"), "source": source, "source_id": source_id,
+                    "selection_source": plan.get("selection_source"), "iteration": data.get("iteration")}
+    else:
+        records = data.get("planning_source_records") or {}
+        record = records.get(f"{source}:{source_id}") if isinstance(records, dict) else None
+        if not isinstance(record, dict):
+            raise PlanningLifecycleError("canonical-plan-source-record-missing")
+        expected = {key: record.get(key) for key in ("generation", "source", "source_id", "selection_source", "iteration")}
+    return expected
 
 
 def _native_review_handoff_hint(
@@ -8081,6 +8150,38 @@ def _derive_next_action(data: dict) -> dict:
             "details": {"complexity": "Simple", "route": "goal", **dispatch_fields},
         }
     if phase == "planning":
+        lifecycle = derive_planning_lifecycle(data)
+        if lifecycle["mode"] == "policy-v1":
+            action = lifecycle.get("next_action")
+            if action == "reconcile-provider-invocation":
+                running = next(
+                    record for record in data.get("specialist_invocations") or []
+                    if isinstance(record, dict) and record.get("phase") == "planning"
+                    and record.get("iteration") == iteration and record.get("status") == "running"
+                )
+                return {
+                    "next_action": action,
+                    "summary": "running planning provider must be reconciled before any new planning action",
+                    "command_hint": f"mission-state.py specialists reconcile-invocation --invocation-id {running['invocation_id']} --status <completed|failed|abandoned-unknown> --evidence <ref> --expected-fencing-epoch <epoch>",
+                }
+            if action:
+                hints = {
+                    "prepare-planning-provider": "mission-state.py specialists prepare-invocation ...",
+                    "await-planning-approval": "mission-state.py specialists verify-approval --preflight-id <id> --evidence-ref <ref> --approval-verifier <id>",
+                    "invoke-planning-provider": "mission-state.py specialists invoke-prepared --provider <provider> --preflight-id <id> --iteration <i> --phase planning",
+                    "import-planning-result": "mission-state.py specialists plan-import --input <result> --invocation-id <id>",
+                    "promote-canonical-plan": "mission-state.py planning promote-provider-plan --invocation-id <id>",
+                    "run-planner-with-evidence": "Skill: mission-planner (provider evidence is advisory only)",
+                    "run-executor": "mission-state.py advance --phase executing --activity active:implementation",
+                    "halt-required-planning-provider": "mission-state.py mark-halt --category required-planning-provider --reason <reason>",
+                    "run-planner": "Skill: mission-planner",
+                }
+                return {
+                    "next_action": action,
+                    "summary": "policy v1 returns exactly one gated planning action",
+                    "command_hint": hints[action],
+                    "details": {"planning_policy_version": 1, **({"degraded": True} if lifecycle.get("degraded") else {})},
+                }
         # #339: Standard iteration 1 は planner subagent を省略し orchestrator inline 計画。
         # portfolio-v4 実測: 時間比 (6.9-14.5x) > トークン比 (4.0-4.7x) の差分はターン数
         # (mission 19-31 turns vs goal 5) — subagent spin-up 1 回の削減がそのまま効く。
@@ -11286,6 +11387,111 @@ def cmd_plan_import(args):
         _verify_published_file(raw_file); _verify_published_file(candidate_file)
         backup_state(sf); atomic_write_json(sf, stamp_metadata(data, cwd))
     print(json.dumps({"ok": True, "plan_import": reference}, indent=2 if args.json else None, ensure_ascii=False))
+
+
+def cmd_planning_promote_provider_plan(args):
+    """Promote only a #397-validated provider candidate to canonical authority."""
+    cwd = Path.cwd(); sf = resolve_state_file(cwd)
+    with StateLock(lock_file(cwd)):
+        data = json.loads(sf.read_text(encoding="utf-8"))
+        if data.get("planning_policy_version") != 1 or data.get("phase") != "planning":
+            _provider_gate("planning-policy-not-active")
+        if data.get("planning_strategy") != "provider-primary":
+            _provider_gate("planning-strategy-not-primary")
+        imports = data.get("provider_plan_imports") or {}
+        record = imports.get(args.invocation_id) if isinstance(imports, dict) else None
+        if not isinstance(record, dict):
+            _provider_gate("provider-plan-import-missing")
+        invocation = invocation_by_id(data, args.invocation_id)
+        if invocation.get("status") != "completed" or invocation.get("iteration") != data.get("iteration"):
+            _provider_gate("provider-plan-invocation-not-current")
+        candidate_path, candidate_digest = record.get("candidate_path"), record.get("candidate_digest")
+        if not isinstance(candidate_path, str) or not isinstance(candidate_digest, str):
+            _provider_gate("provider-plan-import-invalid")
+        source_digest = record.get("raw_result_digest")
+        plan = {"schema": "mission-plan/1", "path": candidate_path, "digest": candidate_digest,
+                "source": "provider", "source_id": args.invocation_id, "source_digest": source_digest,
+                "selection_source": invocation.get("selection_source") or "automatic",
+                "iteration": data.get("iteration"), "generation": record.get("generation"), "validated_at": iso_now()}
+        try:
+            _raw, _steps = canonical_plan_identity(cwd, plan, reader=_read_strict_review_file)
+        except (OSError, PlanningLifecycleError) as exc:
+            _provider_gate(f"provider-plan-candidate-invalid:{exc}")
+        data["canonical_plan"] = plan
+        data.setdefault("planning_source_records", {})[f"provider:{args.invocation_id}"] = {
+            key: plan[key] for key in ("generation", "source", "source_id", "selection_source", "iteration")
+        }
+        data["updated_at"] = iso_now(); backup_state(sf); atomic_write_json(sf, stamp_metadata(data, cwd))
+    print(json.dumps({"ok": True, "canonical_plan": plan}, ensure_ascii=False))
+
+
+def cmd_planning_reselect(args):
+    """Explicitly opt an active legacy planning session into fresh selection only."""
+    cwd = Path.cwd(); sf = resolve_state_file(cwd)
+    with StateLock(lock_file(cwd)):
+        data = json.loads(sf.read_text(encoding="utf-8"))
+        if not data.get("loop_active") or data.get("halt_reason") or data.get("phase") != "planning":
+            _provider_gate("legacy-reselection-requires-active-planning")
+        if any(isinstance(r, dict) and r.get("status") == "running" for r in data.get("specialist_invocations") or []):
+            _provider_gate("legacy-reselection-running-invocation")
+        # Do not copy raw legacy candidate records.  Fresh recommendation is
+        # deliberately a separate caller action after this bounded migration.
+        data["planning_policy_version"] = 1
+        data.pop("planning_strategy", None)
+        data.pop("canonical_plan", None)
+        data.pop("executor_handoff", None)
+        data["specialists_candidates"] = []
+        data["specialists_selected"] = []
+        data["specialists_decision"] = _new_specialist_selection_checkpoint()
+        # A legacy raw specialist record is intentionally not copied into a
+        # public backup before it is discarded.
+        data["updated_at"] = iso_now(); atomic_write_json(sf, stamp_metadata(data, cwd))
+    print(json.dumps({"ok": True, "planning_policy_version": 1, "next_action": "reselect-planning-provider"}, ensure_ascii=False))
+
+
+def _cmd_executor_handoff(args, operation: str):
+    cwd = Path.cwd(); sf = resolve_state_file(cwd)
+    with StateLock(lock_file(cwd)):
+        data = json.loads(sf.read_text(encoding="utf-8"))
+        handoff = data.get("executor_handoff")
+        plan = data.get("canonical_plan")
+        try:
+            if not isinstance(handoff, dict) or not isinstance(plan, dict):
+                raise PlanningLifecycleError("executor-handoff-missing")
+            expected = _trusted_canonical_plan_binding(data, plan)
+            _raw, steps = canonical_plan_identity(cwd, plan, expected=expected, reader=_read_strict_review_file)
+            if handoff.get("plan_digest") != plan.get("digest") or handoff.get("plan_generation") != plan.get("generation") or handoff.get("step_ids") != steps:
+                raise PlanningLifecycleError("executor-handoff-plan-drift")
+            if operation == "begin":
+                if handoff.get("status") != "prepared": raise PlanningLifecycleError("executor-handoff-not-prepared")
+                handoff["status"] = "consuming"; handoff["begun_at"] = iso_now()
+            elif operation == "verify":
+                validate_handoff_step(data, args.step_id)
+            elif operation == "record":
+                validate_handoff_step(data, args.step_id)
+                done = {d.get("step_id") for d in data.get("decisions") or [] if isinstance(d, dict) and d.get("handoff_id") == handoff.get("handoff_id")}
+                if args.step_id in done: raise PlanningLifecycleError("executor-step-already-recorded")
+                document = json.loads(_raw); step = next(s for s in document["steps"] if s["id"] == args.step_id)
+                if any(dep not in done for dep in step.get("depends_on", [])): raise PlanningLifecycleError("executor-step-dependency-incomplete")
+                data.setdefault("decisions", []).append({"handoff_id": handoff["handoff_id"], "plan_digest": plan["digest"], "plan_generation": plan["generation"], "plan_source": plan["source"], "source_id": plan["source_id"], "selection_source": plan["selection_source"], "iteration": plan["iteration"], "step_id": args.step_id, "result": args.result})
+            else:
+                if handoff.get("status") != "consuming": raise PlanningLifecycleError("executor-handoff-not-consuming")
+                done = {d.get("step_id") for d in data.get("decisions") or [] if isinstance(d, dict) and d.get("handoff_id") == handoff.get("handoff_id")}
+                if set(steps) != done: raise PlanningLifecycleError("executor-handoff-steps-incomplete")
+                handoff["status"] = "consumed"; handoff["consumed_at"] = iso_now()
+        except (OSError, ValueError, PlanningLifecycleError) as exc:
+            if isinstance(handoff, dict) and operation in {"begin", "verify"}:
+                handoff["status"] = "rejected"; handoff["rejected_reason"] = str(exc)
+                data["updated_at"] = iso_now(); backup_state(sf); atomic_write_json(sf, stamp_metadata(data, cwd))
+            print(f"ERROR: executor handoff rejected: {exc}", file=sys.stderr); sys.exit(2)
+        data["updated_at"] = iso_now(); backup_state(sf); atomic_write_json(sf, stamp_metadata(data, cwd))
+    print(json.dumps({"ok": True, "operation": operation, "executor_handoff": handoff}, ensure_ascii=False))
+
+
+def cmd_executor_handoff_begin(args): _cmd_executor_handoff(args, "begin")
+def cmd_executor_handoff_verify(args): _cmd_executor_handoff(args, "verify")
+def cmd_executor_handoff_record(args): _cmd_executor_handoff(args, "record")
+def cmd_executor_handoff_complete(args): _cmd_executor_handoff(args, "complete")
 
 
 def _cap_for_findings(findings: list[dict]) -> float | None:
@@ -15075,6 +15281,28 @@ def _build_parser():
     p_plan_import.add_argument("--registry", action="append", default=None)
     p_plan_import.add_argument("--json", action="store_true")
     p_plan_import.set_defaults(func=cmd_plan_import, command_outcome_tracking=True)
+
+    p_planning = sub.add_parser("planning", help="policy v1 planning lifecycle transitions")
+    planning_sub = p_planning.add_subparsers(dest="planning_cmd", required=True)
+    p_promote = planning_sub.add_parser("promote-provider-plan", help="promote one validated primary provider candidate")
+    p_promote.add_argument("--invocation-id", required=True)
+    p_promote.set_defaults(func=cmd_planning_promote_provider_plan, command_outcome_tracking=True)
+    p_reselect = planning_sub.add_parser("reselect", help="explicitly migrate active legacy planning state without raw copy")
+    p_reselect.set_defaults(func=cmd_planning_reselect, command_outcome_tracking=True)
+
+    p_handoff = sub.add_parser("executor-handoff", help="consume a prepared canonical executor handoff")
+    handoff_sub = p_handoff.add_subparsers(dest="executor_handoff_cmd", required=True)
+    p_begin = handoff_sub.add_parser("begin", help="atomically begin one prepared handoff")
+    p_begin.set_defaults(func=cmd_executor_handoff_begin, command_outcome_tracking=True)
+    p_verify_step = handoff_sub.add_parser("verify-step", help="revalidate plan before a step")
+    p_verify_step.add_argument("--step-id", required=True)
+    p_verify_step.set_defaults(func=cmd_executor_handoff_verify, command_outcome_tracking=True)
+    p_record_step = handoff_sub.add_parser("record-step", help="record one verified completed step")
+    p_record_step.add_argument("--step-id", required=True)
+    p_record_step.add_argument("--result", required=True, choices=["ok", "partial", "failed"])
+    p_record_step.set_defaults(func=cmd_executor_handoff_record, command_outcome_tracking=True)
+    p_complete = handoff_sub.add_parser("complete", help="consume handoff after all canonical steps")
+    p_complete.set_defaults(func=cmd_executor_handoff_complete, command_outcome_tracking=True)
 
     p_verify_approval = spec_sub.add_parser(
         "verify-approval", help="host-trusted verifierのevidenceからper-invocation receiptを生成する"

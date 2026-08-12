@@ -87,6 +87,7 @@ CANDIDATE_FIELDS = frozenset({
     "first_use", "eligibility_reason", "matched_conditions", "selection_source",
     "selection_source_raw", "eligibility_selection_source", "normalized_activation",
     "risk_confirmation_required", "result_contract_digest", "reason", "selection_id",
+    "planning_mode", "planning_contract_digest",
 })
 DIAGNOSTIC_FIELDS = frozenset({
     "provider_id", "source", "reason_code", "field_code", "blocked_config_class",
@@ -367,6 +368,8 @@ def _validate_candidate(record: object, base: str) -> None:
             _reject(f"{base}/{field}")
     if "reason" in record and not _safe_text(record["reason"], maximum=1024):
         _reject(f"{base}/reason")
+    if "planning_mode" in record and record["planning_mode"] not in {"advisory", "primary"}:
+        _reject(f"{base}/planning_mode")
     kind = record.get("kind")
     if kind is not None and kind not in {"skill", "command"}:
         _reject(f"{base}/kind")
