@@ -117,3 +117,15 @@ def test_symlink_component_is_rejected_even_when_it_resolves_inside(tmp_path):
     value = _result(); value["artifacts"][0]["document"]["scope"]["resources"][0]["identifier"] = "link/file.md"
     with pytest.raises(PlanContractError, match="path-symlink-escape"):
         parse_provider_result(json.dumps(value).encode(), expected_binding=value["binding"], result_contract={}, workspace=tmp_path)
+
+
+@pytest.mark.parametrize("resource", [
+    {"type": "uri", "identifier": "https://example.test/input", "access": "read", "constraints": []},
+    {"type": "record", "identifier": "record-42", "access": "read", "constraints": []},
+    {"type": "dataset", "identifier": "dataset-42", "access": "read", "constraints": []},
+    {"type": "other", "identifier": "opaque-resource-42", "access": "read", "constraints": []},
+])
+def test_typed_non_file_resources_are_valid(resource):
+    value = _result(); value["artifacts"][0]["document"]["scope"]["resources"] = [resource]
+    parsed = parse_provider_result(json.dumps(value).encode(), expected_binding=value["binding"], result_contract={}, workspace=Path.cwd())
+    assert parsed["document"]["scope"]["resources"] == [resource]

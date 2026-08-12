@@ -81,9 +81,8 @@ def _validate_document(doc: object, workspace: Path):
         elif resource["type"] == "uri":
             parsed = urlsplit(resource["identifier"])
             if parsed.scheme not in {"https", "http"} or not parsed.netloc: raise PlanContractError("uri-invalid")
-        elif resource["type"] in {"record", "dataset"}:
+        elif resource["type"] in {"record", "dataset", "other"}:
             if not resource["identifier"].strip() or any(char.isspace() for char in resource["identifier"]): raise PlanContractError("resource-identifier-invalid")
-        else: raise PlanContractError("resource-type-invalid")
     for action in scope["actions"]:
         if not isinstance(action, dict) or action.get("type") not in ACTION_TYPES or action.get("effect_class") not in EFFECT_CLASSES: raise PlanContractError("action-invalid")
     if not isinstance(doc["assumptions"], list) or any(not isinstance(x, dict) or not all(isinstance(x.get(k), str) and x[k] for k in ("id","statement","validation")) for x in doc["assumptions"]): raise PlanContractError("assumption-invalid")

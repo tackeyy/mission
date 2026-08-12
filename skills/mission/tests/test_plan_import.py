@@ -1,6 +1,16 @@
 import hashlib
+import importlib.util
 import json
 import os
+import sys
+from pathlib import Path
+
+import pytest
+
+MISSION_STATE_PY = Path(__file__).resolve().parent.parent / "bin" / "mission-state.py"
+LIB_DIR = MISSION_STATE_PY.parent.parent / "lib"
+sys.path.insert(0, str(LIB_DIR))
+from specialist_accounting import candidate_accounting_report
 
 
 def _contract():
@@ -61,4 +71,45 @@ def test_invalid_plan_input_preserves_state_and_no_candidate(run_cli, tmp_path):
     response = run_cli("specialists", "plan-import", "--input", str(source), "--invocation-id", invocation, "--registry", str(registry), "--json", cwd=tmp_path, env_extra=env)
     assert response.returncode == 2
     assert state_file.read_bytes() == before
-    assert not (tmp_path / ".mission-state" / "plans").exists()
+    assert not list((tmp_path / ".mission-state" / "plans").glob("*.json"))
+
+
+def test_plan_import_state_publish_fault_rolls_back_raw_candidate_and_state(monkeypatch, capsys, run_cli, tmp_path):
+    registry, state_file, result, invocation, env = _setup(run_cli, tmp_path)
+    source = tmp_path / "result.json"; source.write_text(json.dumps(result))
+    spec = importlib.util.spec_from_file_location("mission_state_plan_import_fault", MISSION_STATE_PY)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None; spec.loader.exec_module(module)
+    state_before = state_file.read_bytes()
+    archive = tmp_path / ".mission-state" / "archive"
+    archive_before = {path.relative_to(archive): path.read_bytes() for path in archive.rglob("*") if path.is_file()} if archive.exists() else {}
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", env["PATH"])
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    original_write = module.atomic_write_json
+    def fail_state_publish(path, data, **kwargs):
+        if path == state_file and data.get("provider_plan_imports"):
+            raise OSError("simulated plan import state publish failure")
+        return original_write(path, data, **kwargs)
+    monkeypatch.setattr(module, "atomic_write_json", fail_state_publish)
+    monkeypatch.setattr(sys, "argv", [str(MISSION_STATE_PY), "specialists", "plan-import", "--input", str(source), "--invocation-id", invocation, "--registry", str(registry), "--json"])
+    with pytest.raises(SystemExit) as stopped: module.main()
+    assert stopped.value.code == 1
+    assert state_file.read_bytes() == state_before
+    assert not list((tmp_path / ".mission-state" / "plans").glob("*.json"))
+    archive_after = {path.relative_to(archive): path.read_bytes() for path in archive.rglob("*") if path.is_file()} if archive.exists() else {}
+    assert archive_after == archive_before
+
+
+def test_uncontracted_exit_zero_is_terminal_but_not_applied_required_evidence():
+    spec = importlib.util.spec_from_file_location("mission_state_unvalidated_evidence", MISSION_STATE_PY)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None; spec.loader.exec_module(module)
+    status, _ = module._classify_command_provider_result({}, 0, "substantive output", "")
+    assert status == "unvalidated-evidence"
+    report = candidate_accounting_report({
+        "specialists_candidates": [{"skill": "portable-provider", "role": "planning", "required": True}],
+        "specialist_invocations": [{"skill": "portable-provider", "status": status}],
+    })
+    assert report["result_required_unmet_candidates"][0]["skill"] == "portable-provider"

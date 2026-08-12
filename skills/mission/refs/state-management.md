@@ -185,6 +185,28 @@ command provider は `specialists prepare-invocation` で canonical outbound pac
 
 sidecar は session-id の hash 名、128 record cap、別 lock、atomic replace、regular/non-symlink/non-hardlink/no-follow read を必須とする。corrupt/unsafe sidecar は空扱いにせず fail-closed として `stats` / `mission-audit.py` の `command_outcome_counts.corrupt_sidecars` に計上する。count は kind 別に加え、`unique_root_events` と retry の件数、invalid record 数を返す。これは観測専用で、pass gate や KPI 判定を変更しない。
 
+### Structured provider plan import (#397)
+
+Planning provider の結果は、registry が明示する `result_contract` に一致する
+`mission-provider-result/1` だけを import できる。provider の exit 0 だけ、または
+contract のない出力は `unvalidated-evidence` であり、required provider の適用済み証拠にはならない。
+
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py specialists plan-import \
+  --input /tmp/provider-plan.json \
+  --invocation-id inv_<32hex> \
+  --registry ./specialists.json \
+  --json
+```
+
+入力は最大 4 MiB の単一 UTF-8 JSON document で、`binding` は current invocation,
+preflight, outbound digest, selection, iteration と全一致が必要である。成功時だけ raw
+result と canonical `mission-plan/1` candidate を publish し、state の
+`provider_plan_imports[invocation_id]` に digest・binding・単調 generation を記録する。
+validation、registry/preflight drift、または state publish の失敗では既存 state と公開済み
+candidate は変更しない。これは inert import だけであり、plan promotion、phase transition、
+executor handoff は別の操作である。
+
 ### Activity segment observability (#211)
 
 `phase_durations_sec` の wall-clock 意味論を維持したまま、作業と待機を明示的に区別する。`init` は planning の default segment を開き、`advance --phase` は planning/executing/reviewing/scoring の phase default を使う（明示 `--activity` は override）。`activity start` は既存 open segment を閉じて新しい segment を開き、`activity end` は閉じる。どちらも state lock 内で atomic write され、同一操作の再実行は duration を二重加算しない。`aggregate-reviews` は reviewing から scoring へ遷移し、`done` / `halted` は open segment を閉じる。
