@@ -1144,28 +1144,10 @@ def test_invoke_command_provider_archives_evidence_and_logs_invocation(run_cli, 
         env_extra=provider_env,
     )
 
-    data = _json_result(r)
+    assert r.returncode == 2
+    assert "preflight-required" in r.stderr
     state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
-    entry = state["specialist_invocations"][0]
-    evidence = tmp_path / entry["evidence_path"]
-    assert data["ok"] is True
-    assert entry["mode"] == "command-provider"
-    assert entry["status"] == "completed"
-    assert entry["provider_kind"] == "command"
-    assert entry["exit_code"] == 0
-    assert state["activity_current"] is None
-    assert any(
-        segment["kind"] == "external-wait"
-        and segment["reason"] == "external-command"
-        for segment in state["activity_segments"]
-    )
-    assert evidence.exists()
-    content = evidence.read_text(encoding="utf-8")
-    assert "phase=review" in content
-    assert "body=review this diff" in content
-    public_state = run_cli("get", cwd=tmp_path)
-    assert public_state.returncode == 0, public_state.stderr
-    assert json.loads(public_state.stdout)["specialist_invocations"][0] == entry
+    assert state["specialist_invocations"] == []
 
 
 def test_invoke_command_preflights_timeout_before_activity_spawn_or_archive(
@@ -1271,16 +1253,10 @@ def test_invoke_command_provider_records_failure_without_blocking_optional_provi
         env_extra=provider_env,
     )
 
-    data = _json_result(r)
+    assert r.returncode == 2
+    assert "preflight-required" in r.stderr
     state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
-    entry = state["specialist_invocations"][0]
-    evidence = tmp_path / entry["evidence_path"]
-    assert r.returncode == 0
-    assert data["ok"] is False
-    assert entry["status"] == "failed"
-    assert entry["exit_code"] == 7
-    assert "status 7" in entry["reason"]
-    assert "token=[REDACTED]" in evidence.read_text(encoding="utf-8")
+    assert state["specialist_invocations"] == []
 
 
 def test_invoke_command_provider_marks_approval_marker_as_awaiting_input(run_cli, tmp_path):
@@ -1510,7 +1486,7 @@ def test_invoke_command_provider_requires_confirmed_selection_after_ask_user(run
     )
 
     assert r.returncode != 0
-    assert "--selection-source confirmed-user" in r.stderr
+    assert "preflight-required" in r.stderr
 
 
 def test_invoke_command_provider_confirmed_source_cannot_promote_candidate_after_ask_user(run_cli, tmp_path):

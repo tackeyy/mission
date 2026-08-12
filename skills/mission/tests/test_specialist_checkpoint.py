@@ -5,6 +5,7 @@ import json
 import pytest
 
 
+
 def _read_state(root):
     return json.loads(
         (root / ".mission-state" / "sessions" / "test.json").read_text(encoding="utf-8")
@@ -197,7 +198,9 @@ def test_public_contract_rejects_duplicate_invocation_identity():
         validate_invocation_transition(invocation, invocation)
 
 
-def test_command_provider_propagates_selection_and_invocation_ids(run_cli, tmp_path):
+def test_command_provider_propagates_selection_and_invocation_ids(
+    run_cli, tmp_path, prepare_approved_invocation
+):
     registry = tmp_path / "provider-registry.json"
     registry.write_text(json.dumps({
         "schema": "mission-specialist-registry/2",
@@ -234,9 +237,11 @@ def test_command_provider_propagates_selection_and_invocation_ids(run_cli, tmp_p
     state["phase"] = "reviewing"
     state_path.write_text(json.dumps(state), encoding="utf-8")
     selection_id = state["specialists_decision"]["selection_id"]
-    result = run_cli("specialists", "invoke-command", "--provider", "command-provider",
-                     "--iteration", "1", "--phase", "review", "--registry", str(registry),
-                     "--json", cwd=tmp_path)
+    invoke_args, invoke_env, _ = prepare_approved_invocation(
+        cwd=tmp_path, provider="command-provider", iteration=1,
+        phase="review", registry=registry, json_output=True,
+    )
+    result = run_cli(*invoke_args, cwd=tmp_path, env_extra=invoke_env)
     assert result.returncode == 0, result.stderr
     entry = json.loads(result.stdout)["entry"]
     assert entry["selection_id"] == selection_id

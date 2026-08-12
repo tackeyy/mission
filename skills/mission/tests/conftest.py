@@ -221,6 +221,77 @@ def run_cli(tmp_path):
 
 
 @pytest.fixture
+def prepare_approved_invocation(run_cli):
+    """Prepare and host-approve a command provider for canonical invocation tests."""
+    def _prepare(*, cwd, provider, iteration, phase, env_extra=None, registry=None,
+                 input_file=None, json_output=False):
+        root = Path(cwd)
+        provider_root = root / ".test-provider-preflight"
+        provider_root.mkdir(exist_ok=True)
+        source = provider_root / "test_approval_provider.py"
+        source.write_text(
+            "import hashlib\n"
+            "def verify(request):\n"
+            " nonce=hashlib.sha256(request['preflight_id'].encode()).hexdigest()[:32]\n"
+            " return {**request,'schema':'approval-evidence/1','issuer_id':'test-host-event',"
+            "'verifier_id':'test-verifier','verifier_version':'1.0','actor_kind':'human',"
+            "'actor_id':'actor:test','proof_kind':'opaque-host-event',"
+            "'proof_digest':'sha256:'+'f'*64,'expires_at':'2099-01-01T00:00:00Z',"
+            "'single_use_nonce':nonce}\n",
+            encoding="utf-8",
+        )
+        dist = provider_root / "test_approval_provider-1.0.dist-info"
+        dist.mkdir(exist_ok=True)
+        (dist / "METADATA").write_text(
+            "Name: test-approval-provider\nVersion: 1.0\n", encoding="utf-8"
+        )
+        (dist / "entry_points.txt").write_text(
+            "[mission.approval_verifiers]\ntest-entry = test_approval_provider:verify\n",
+            encoding="utf-8",
+        )
+        config = root / ".test-host-config" / "mission"
+        config.mkdir(parents=True, exist_ok=True)
+        (config / "approval-verifiers.json").write_text(json.dumps({
+            "schema": "mission-approval-verifier-registry/2",
+            "verifiers": [{
+                "id": "test-verifier", "entry_point": "test-entry",
+                "distribution": "test-approval-provider", "version": "1.0",
+                "source_digest": "sha256:" + hashlib.sha256(source.read_bytes()).hexdigest(),
+            }],
+        }), encoding="utf-8")
+        env = dict(env_extra or {})
+        inherited = env.get("PYTHONPATH") or os.environ.get("PYTHONPATH")
+        env["PYTHONPATH"] = str(provider_root) + (os.pathsep + inherited if inherited else "")
+        env["XDG_CONFIG_HOME"] = str(config.parent)
+        common = ["--provider", provider, "--iteration", str(iteration), "--phase", phase]
+        if input_file is None:
+            input_file = provider_root / "input.txt"
+            input_file.write_text("test provider input\n", encoding="utf-8")
+        bound = []
+        if registry is not None:
+            bound += ["--registry", str(registry)]
+        bound += ["--input-file", str(input_file)]
+        prepared_result = run_cli(
+            "specialists", "prepare-invocation", *common, *bound,
+            cwd=root, env_extra=env,
+        )
+        assert prepared_result.returncode == 0, prepared_result.stderr
+        prepared = json.loads(prepared_result.stdout)
+        if prepared["requires_approval"]:
+            run_cli(
+                "specialists", "verify-approval", "--preflight-id", prepared["preflight_id"],
+                "--evidence-ref", "sha256:" + "e" * 64,
+                "--approval-verifier", "test-verifier", cwd=root, env_extra=env, check=True,
+            )
+        args = ["specialists", "invoke-prepared", *common,
+                "--preflight-id", prepared["preflight_id"], *bound]
+        if json_output:
+            args.append("--json")
+        return args, env, prepared
+    return _prepare
+
+
+@pytest.fixture
 def push_provenance_score(run_cli):
     """Create the v4 typed scoring/evidence contract for tests that need a pass."""
     def _push(cwd, *, env_extra=None, iteration=1, items=None, open_high=0, notes=None):
