@@ -9,6 +9,7 @@
   skills/mission/lib/audit_findings.py
   skills/mission/lib/mission_common.py
   skills/mission/lib/provider_eligibility.py
+  skills/mission/lib/planning_provider_metrics.py
   skills/mission/lib/provider_public_contract.py
   skills/mission/lib/provider_preflight.py
   skills/mission/lib/specialist_lifecycle.py
@@ -32,6 +33,7 @@
   plugins/mission/skills/mission/lib/audit_findings.py
   plugins/mission/skills/mission/lib/mission_common.py
   plugins/mission/skills/mission/lib/provider_eligibility.py
+  plugins/mission/skills/mission/lib/planning_provider_metrics.py
   plugins/mission/skills/mission/lib/provider_public_contract.py
   plugins/mission/skills/mission/lib/provider_preflight.py
   plugins/mission/skills/mission/lib/specialist_lifecycle.py
@@ -132,6 +134,10 @@ SYNC_PAIRS = [
     (
         REPO_ROOT / "skills" / "mission" / "lib" / "planning_lifecycle.py",
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "planning_lifecycle.py",
+    ),
+    (
+        REPO_ROOT / "skills" / "mission" / "lib" / "planning_provider_metrics.py",
+        REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "planning_provider_metrics.py",
     ),
     (
         REPO_ROOT / "skills" / "mission" / "lib" / "provider_public_contract.py",
@@ -371,6 +377,17 @@ def test_planning_lifecycle_py_in_sync_and_importable():
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None; spec.loader.exec_module(module)
     assert module.derive_planning_lifecycle({"phase": "planning"})["mode"] == "legacy-core"
+
+
+def test_planning_provider_metrics_py_in_sync_and_importable():
+    """The versioned KPI reducer ships with the plugin consumer imports."""
+    src, dst = _sync_pair_for("skills/mission/lib/planning_provider_metrics.py")
+    assert src.exists() and dst.exists() and _md5(src) == _md5(dst)
+    spec = importlib.util.spec_from_file_location("plugin_planning_provider_metrics", dst)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    assert module.reduce_planning_provider_kpis([], population_kind="observed")["schema"] == "mission-planning-provider-kpi/1"
 
 
 def test_plugin_mirror_specialist_recommend_cli_smoke(tmp_path):

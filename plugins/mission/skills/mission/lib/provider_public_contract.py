@@ -124,6 +124,7 @@ INVOCATION_FIELDS = frozenset({
     "provider_id",
     "reservation_owner_session_id", "fencing_epoch", "child_pid",
     "process_identity_digest", "heartbeat_at", "result_artifact_digest",
+    "input_outbound_packet_digest",
     "host_run_id", "root_run_id", "parent_run_id", "child_run_id", "logical_group_id",
 })
 ACTIVATION_FIELDS = frozenset({
@@ -602,7 +603,7 @@ def _validate_invocation(record: object, base: str) -> None:
     for field in ("timestamp", "started_at", "completed_at", "transitioned_at", "reserved_at", "running_at", "heartbeat_at"):
         if field in record and not _safe_text(record[field], maximum=64):
             _reject(f"{base}/{field}")
-    for field in ("application_context_digest", "process_identity_digest", "result_artifact_digest"):
+    for field in ("application_context_digest", "process_identity_digest", "result_artifact_digest", "input_outbound_packet_digest"):
         if field in record and not (isinstance(record[field], str) and DIGEST.fullmatch(record[field])):
             _reject(f"{base}/{field}")
     if "reservation_owner_session_id" in record and not (

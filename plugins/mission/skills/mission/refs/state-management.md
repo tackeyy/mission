@@ -207,6 +207,18 @@ validation、registry/preflight drift、または state publish の失敗では�
 candidate は変更しない。これは inert import だけであり、plan promotion、phase transition、
 executor handoff は別の操作である。
 
+### Planning provider migration and operator flow (#399)
+
+新規registryは `activation.min_complexity` と `planning.mode` を使う。`primary` は
+structured result contract必須で、`advisory` はcore plannerへの入力に留まる。旧
+`auto_use.min_complexity` は読取互換だが、空・未知・競合条件は拒否する。
+
+`specialists recommend` → `prepare-invocation` → host trusted approval receipt →
+`invoke-prepared` → `plan-import` → executor handoff の順に実行する。live前にstdin
+digest、destination、execution context、quota/risk scope、ambient access非保証を確認し、
+digest変更時はpreflightを作り直す。upgrade/resumeだけでlegacy active sessionをprovider
+flowへ移行せず、明示的planning reselectionだけをopt-inとする。
+
 ### Activity segment observability (#211)
 
 `phase_durations_sec` の wall-clock 意味論を維持したまま、作業と待機を明示的に区別する。`init` は planning の default segment を開き、`advance --phase` は planning/executing/reviewing/scoring の phase default を使う（明示 `--activity` は override）。`activity start` は既存 open segment を閉じて新しい segment を開き、`activity end` は閉じる。どちらも state lock 内で atomic write され、同一操作の再実行は duration を二重加算しない。`aggregate-reviews` は reviewing から scoring へ遷移し、`done` / `halted` は open segment を閉じる。

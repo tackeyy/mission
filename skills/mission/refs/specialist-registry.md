@@ -278,7 +278,7 @@ result_contract:
 
 If a command exits successfully but only returns a preparation banner or less than the required non-template evidence, the runner records `status: prepared` instead of `completed`. If the provider output or exit code matches `awaiting_input_markers` or `awaiting_input_exit_codes`, the runner records `status: awaiting-input`. `prepared` and `awaiting-input` are terminal accounting statuses for transparency, but they are not applied result evidence. A provider marked `required: true` must produce `completed`, `inline-applied`, or `skill-tool-applied` evidence before `mission-state.py mark-passes` can succeed.
 
-The `oracle-reviewer` provider role gets a conservative default result contract even if a project registry omits one. Its default rejects common browser-review preparation markers such as prompt/result/packet paths and review URLs, so an exit code of 0 cannot satisfy required evidence unless the provider returns substantive findings.
+Every provider that requires result evidence must declare its result contract in the explicit registry entry. The contract should reject preparation-only markers such as prompt/result/packet paths and review URLs, so an exit code of 0 cannot satisfy required evidence unless the provider returns substantive findings.
 
 For providers with `risk.first_use_confirmation: true`, record consent after a user approval boundary:
 
@@ -432,6 +432,20 @@ Use `task_profile` as an object/dict for the classification record, `specialists
 If a specialist appears in `specialist_invocations` but not in `specialists_selected`, report it as `unselected-manual`: evidence was used after the Phase 1 selection checkpoint, but the selection intent was not recorded. This is an observability warning for optional specialists, not a mission failure unless a future strict-mode policy marks that specialist as required.
 
 ## Phased Rollout
+
+## Planning provider migration and operator flow
+
+For a planning provider, declare `planning.mode: primary` only with a structured
+result contract. `advisory` evidence informs the core planner and is never
+execution authority. Legacy `auto_use.min_complexity` remains read-compatible;
+new entries use `activation.min_complexity`, and unknown, empty, or conflicting
+conditions are rejected.
+
+Run `specialists recommend`, `prepare-invocation`, host-trusted approval,
+`invoke-prepared`, `plan-import`, then executor handoff. Confirm stdin digest,
+destination, execution context, quota/risk scopes, and ambient-access limits;
+a changed digest requires new preflight. Upgrade/resume never migrates an active
+legacy session into provider flow: use explicit planning reselection.
 
 1. **Docs-only protocol**: document selection rules and update SKILL.md to mention optional evidence providers.
 2. **Manual audit fields**: record `task_profile`, selected specialists, and missing specialists in assumptions/archive notes.

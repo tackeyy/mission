@@ -21,6 +21,7 @@ from provider_preflight import (  # noqa: E402
     validate_receipt,
     verify_live_packet,
 )
+from planning_provider_metrics import reduce_planning_provider_kpis  # noqa: E402
 
 
 def _digest(char="a"):
@@ -515,6 +516,14 @@ def test_host_verified_receipt_runs_exact_packet_once_and_rejects_replay(run_cli
     assert marker.exists() and captured.read_bytes() == packet_path.read_bytes()
     state_path = tmp_path / ".mission-state" / "sessions" / "test.json"; state = json.loads(state_path.read_text(encoding="utf-8"))
     assert state["provider_preflights"][preflight["preflight_id"]]["status"] == "consumed"
+    invocation = state["specialist_invocations"][-1]
+    assert invocation["input_outbound_packet_digest"] == state["provider_preflights"][preflight["preflight_id"]]["outbound_packet_digest"]
+    totals = reduce_planning_provider_kpis([state], population_kind="controlled")["totals"]
+    assert totals["preflight_live_digest_match"] == {"numerator": 1, "denominator": 1, "rate": 1.0}
+    forged = json.loads(json.dumps(state)); forged["specialist_invocations"][-1]["input_outbound_packet_digest"] = _digest("d")
+    assert reduce_planning_provider_kpis([forged], population_kind="controlled")["totals"]["preflight_live_digest_match"] == {"numerator": 0, "denominator": 1, "rate": 0.0}
+    forged["specialist_invocations"][-1]["status"] = "reserved"
+    assert reduce_planning_provider_kpis([forged], population_kind="controlled")["totals"]["preflight_live_digest_match"]["denominator"] == 0
     private_receipt = tmp_path / ".mission-state" / state["provider_preflights"][preflight["preflight_id"]]["receipt"]["artifact_path"]
     evidence_files = list((tmp_path / ".mission-state" / "archive").rglob("*.md"))
     public_and_private = [invoked.stdout, invoked.stderr, state_path.read_text(encoding="utf-8"),

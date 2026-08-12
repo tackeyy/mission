@@ -92,6 +92,16 @@ def test_duration_percentiles_censor_blocked_records_and_defer_unavailable_provi
         assert observation.get("rate", observation.get("count", observation.get("value"))) is None, key
 
 
+def test_benchmark_consumer_accepts_only_valid_versioned_planning_provider_block():
+    audit = _load()
+    from planning_provider_metrics import reduce_planning_provider_kpis
+    block = reduce_planning_provider_kpis([], population_kind="controlled")
+    assert audit.summarize_benchmark_kpi([{"planning_provider_kpi": block}])["planning_provider_kpi"]["status"] == "observed"
+    block["schema"] = "mission-planning-provider-kpi/9"
+    with pytest.raises(audit.BenchmarkAuditInputError):
+        audit.summarize_benchmark_kpi([{"planning_provider_kpi": block}])
+
+
 def test_duration_percentiles_exclude_failed_and_other_noncompleted_records():
     audit = _load()
     summary = audit.summarize_benchmark_kpi([
@@ -111,10 +121,11 @@ def test_duration_percentiles_exclude_failed_and_other_noncompleted_records():
     }
 
 
-def test_provider_kpi_payload_is_rejected_until_the_versioned_consumer_is_enabled():
+def test_provider_kpi_consumer_defers_missing_block_and_rejects_malformed_block():
     audit = _load()
 
-    with pytest.raises(audit.BenchmarkAuditInputError, match="deferred"):
+    assert audit.summarize_benchmark_kpi([{"human_quality_score": 4.3}])["planning_provider_kpi"]["status"] == "deferred"
+    with pytest.raises(audit.BenchmarkAuditInputError, match="invalid"):
         audit.summarize_benchmark_kpi([{
             "human_quality_score": 4.3,
             "planning_provider_kpi": {"schema": "mission-planning-provider-kpi/1"},
