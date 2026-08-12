@@ -39,8 +39,20 @@ def test_policy_v1_lineage_and_rejected_drift_are_counted_without_lowering_live_
         "decisions": [{"step_id": "s", "handoff_id": "h", "plan_digest": "sha256:plan", "plan_generation": 1}],
     }
     totals = reduce_planning_provider_kpis([state], population_kind="controlled")["totals"]
+    assert totals["eligible_complex_planning_selection"] == {"numerator": 1, "denominator": 1, "rate": 1.0}
     assert totals["preflight_live_digest_match"] == {"numerator": 1, "denominator": 1, "rate": 1.0}
     assert totals["canonical_plan_executor_lineage"] == {"numerator": 1, "denominator": 1, "rate": 1.0}
+
+
+def test_core_strategy_is_eligible_but_not_provider_selection_and_counters_are_fail_closed():
+    state = {"planning_policy_version": 1, "complexity": "Complex", "planning_strategy": "core",
+             "ineligible_external_planning_invocations": 1, "dry_run_external_effect_count": 0,
+             "authority_injection_accept_count": 0, "legacy_session_retroactive_provider_invocations": 0}
+    result = reduce_planning_provider_kpis([state], population_kind="controlled")
+    assert result["totals"]["eligible_complex_planning_selection"] == {"numerator": 0, "denominator": 1, "rate": 0.0}
+    state["dry_run_external_effect_count"] = True
+    with pytest.raises(PlanningProviderMetricError, match="counter"):
+        reduce_planning_provider_kpis([state], population_kind="controlled")
 
 
 @pytest.mark.parametrize("mutate", [

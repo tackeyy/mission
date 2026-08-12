@@ -79,14 +79,18 @@ def reduce_planning_provider_kpis(
         if not isinstance(state, Mapping):
             raise PlanningProviderMetricError("state must be an object")
         key = _cohort(state, population_kind); cohorts[key]["session_count"] += 1
+        for counter in _COUNTERS:
+            value = state.get(counter, 0)
+            if type(value) is not int or value < 0:
+                raise PlanningProviderMetricError("counter is invalid")
+            totals[counter] += value
         policy_v1 = state.get("planning_policy_version") == 1
         invocations = [entry for entry in state.get("specialist_invocations") or [] if isinstance(entry, Mapping) and entry.get("phase") == "planning"]
         if not policy_v1:
-            totals["legacy_session_retroactive_provider_invocations"] += sum(1 for entry in invocations if entry.get("provider_id"))
             continue
         if state.get("complexity") in {"Complex", "Critical"}:
             eligible[1] += 1
-            if state.get("planning_strategy") in {"provider-primary", "provider-advisory", "core"}:
+            if state.get("planning_strategy") in {"provider-primary", "provider-advisory"}:
                 eligible[0] += 1
         for invocation in invocations:
             if invocation.get("status") in {"reserved", "running", "completed"}:
@@ -96,7 +100,12 @@ def reduce_planning_provider_kpis(
                 if len(matched) == 1 and matched[0].get("status") == "consumed":
                     preflight[0] += 1
             if invocation.get("status") in {"failed", "rejected", "unvalidated-evidence"}:
-                reasons["fallback"][_reason("fallback", invocation.get("reason_code") or invocation.get("status"))] += 1
+                reason = invocation.get("reason_code") or invocation.get("status")
+                reasons["fallback"][_reason("fallback", reason)] += 1
+                if reason == "preflight-required":
+                    reasons["preflight_rejection"]["preflight-required"] += 1
+                if reason == "invalid-plan":
+                    reasons["invalid_plan"]["invalid-plan"] += 1
         for record in (state.get("provider_preflights") or {}).values() if isinstance(state.get("provider_preflights"), Mapping) else []:
             if isinstance(record, Mapping) and record.get("status") == "awaiting-approval":
                 reasons["approval_wait"]["awaiting-approval"] += 1
