@@ -29,6 +29,18 @@ def derive_planning_lifecycle(state: Mapping[str, Any]) -> dict[str, Any]:
     if any(r.get("status") == "running" for r in planning):
         return {"mode": "policy-v1", "next_action": "reconcile-provider-invocation"}
     strategy = state.get("planning_strategy") or "core"
+    if strategy == "provider-primary":
+        binding = state.get("planning_provider_binding")
+        selected = state.get("specialists_selected") or []
+        if not isinstance(binding, Mapping) or not any(
+            isinstance(item, Mapping)
+            and item.get("planning_mode") == "primary"
+            and item.get("provider_id") == binding.get("provider_id")
+            and item.get("selection_id") == binding.get("selection_id")
+            and item.get("planning_contract_digest") == binding.get("planning_contract_digest")
+            for item in selected
+        ):
+            return {"mode": "policy-v1", "next_action": "run-planner"}
     canonical = state.get("canonical_plan")
     if isinstance(canonical, Mapping):
         return {"mode": "policy-v1", "next_action": "run-executor"}

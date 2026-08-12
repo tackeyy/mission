@@ -130,6 +130,10 @@ SYNC_PAIRS = [
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "provider_eligibility.py",
     ),
     (
+        REPO_ROOT / "skills" / "mission" / "lib" / "planning_lifecycle.py",
+        REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "planning_lifecycle.py",
+    ),
+    (
         REPO_ROOT / "skills" / "mission" / "lib" / "provider_public_contract.py",
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "provider_public_contract.py",
     ),
@@ -358,6 +362,15 @@ def test_specialist_lifecycle_py_in_sync_and_importable():
     assert spec.loader is not None
     spec.loader.exec_module(module)
     assert module.new_selection_id().startswith("sel_")
+
+
+def test_planning_lifecycle_py_in_sync_and_importable():
+    src, dst = _sync_pair_for("skills/mission/lib/planning_lifecycle.py")
+    assert src.exists() and dst.exists() and _md5(src) == _md5(dst)
+    spec = importlib.util.spec_from_file_location("plugin_planning_lifecycle", dst)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None; spec.loader.exec_module(module)
+    assert module.derive_planning_lifecycle({"phase": "planning"})["mode"] == "legacy-core"
 
 
 def test_plugin_mirror_specialist_recommend_cli_smoke(tmp_path):

@@ -4032,8 +4032,13 @@ def cmd_specialists(args):
             if planning_selected:
                 data["planning_strategy"] = "provider-" + planning_selected["planning_mode"]
                 data["planning_contract_digest"] = planning_selected["planning_contract_digest"]
+                data["planning_provider_binding"] = {
+                    key: planning_selected[key]
+                    for key in ("provider_id", "selection_id", "planning_contract_digest")
+                }
             elif data.get("planning_policy_version") == 1:
                 data["planning_strategy"] = "core"
+                data.pop("planning_provider_binding", None)
             data["specialists_mode"] = "interactive" if decision.get("prompted_user") else "auto"
             data["updated_at"] = iso_now()
             backup_state(sf)
@@ -7985,6 +7990,21 @@ def _trusted_canonical_plan_binding(data: dict, plan: dict) -> dict:
     return expected
 
 
+def _require_current_primary_planning_binding(data: dict, provider_id: str | None = None) -> dict:
+    binding = data.get("planning_provider_binding")
+    selected = data.get("specialists_selected") or []
+    if not isinstance(binding, dict):
+        _provider_gate("planning-primary-binding-missing")
+    matches = [item for item in selected if isinstance(item, dict)
+               and item.get("planning_mode") == "primary"
+               and item.get("provider_id") == binding.get("provider_id")
+               and item.get("selection_id") == binding.get("selection_id")
+               and item.get("planning_contract_digest") == binding.get("planning_contract_digest")]
+    if len(matches) != 1 or (provider_id is not None and matches[0].get("provider_id") != provider_id):
+        _provider_gate("planning-primary-binding-mismatch")
+    return matches[0]
+
+
 def _native_review_handoff_hint(
     iteration: int | str,
     reviewer_count: int | str,
@@ -11321,6 +11341,8 @@ def cmd_plan_import(args):
     with StateLock(lock_file(cwd)), _PublishedFilesTransaction() as published_files:
         data = json.loads(sf.read_text(encoding="utf-8"))
         invocation = invocation_by_id(data, args.invocation_id)
+        if data.get("planning_policy_version") == 1 and data.get("planning_strategy") == "provider-primary":
+            _require_current_primary_planning_binding(data)
         if not isinstance(invocation, dict):
             _provider_gate("invocation-not-found")
         if (invocation.get("iteration") != data.get("iteration") or invocation.get("phase") != "planning"
@@ -11403,11 +11425,14 @@ def cmd_planning_promote_provider_plan(args):
             _provider_gate("planning-policy-not-active")
         if data.get("planning_strategy") != "provider-primary":
             _provider_gate("planning-strategy-not-primary")
+        primary = _require_current_primary_planning_binding(data)
         imports = data.get("provider_plan_imports") or {}
         record = imports.get(args.invocation_id) if isinstance(imports, dict) else None
         if not isinstance(record, dict):
             _provider_gate("provider-plan-import-missing")
         invocation = invocation_by_id(data, args.invocation_id)
+        if primary.get("provider_id") not in {invocation.get("skill"), invocation.get("role")}:
+            _provider_gate("planning-primary-invocation-provider-mismatch")
         if invocation.get("status") != "completed" or invocation.get("iteration") != data.get("iteration"):
             _provider_gate("provider-plan-invocation-not-current")
         candidate_path, candidate_digest = record.get("candidate_path"), record.get("candidate_digest")

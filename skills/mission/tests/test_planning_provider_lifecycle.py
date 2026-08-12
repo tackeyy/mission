@@ -29,7 +29,8 @@ def test_policy_v1_primary_without_invocation_prepares_one_safe_action():
         "phase": "planning",
         "iteration": 1,
         "planning_strategy": "provider-primary",
-        "specialists_selected": [{"provider_id": "planner"}],
+        "specialists_selected": [{"provider_id": "planner", "planning_mode": "primary", "selection_id": "sel", "planning_contract_digest": "sha256:test"}],
+        "planning_provider_binding": {"provider_id": "planner", "selection_id": "sel", "planning_contract_digest": "sha256:test"},
         "specialist_invocations": [],
     }
     assert derive_planning_lifecycle(state)["next_action"] == "prepare-planning-provider"
@@ -132,7 +133,7 @@ def test_handoff_rejects_duplicate_and_dependency_before_lineage_record(run_cli,
     assert all(entry["plan_source"] == "core" and entry["plan_generation"] == 1 for entry in decisions)
 
 
-def _provider_import_fixture(run_cli, tmp_path):
+def _provider_import_fixture(run_cli, tmp_path, mode="primary"):
     fixture_path = Path(__file__).with_name("test_plan_import.py")
     spec = importlib.util.spec_from_file_location("issue398_plan_import_fixture", fixture_path)
     module = importlib.util.module_from_spec(spec)
@@ -141,6 +142,10 @@ def _provider_import_fixture(run_cli, tmp_path):
     state = __import__("json").loads(state_file.read_text())
     state["planning_policy_version"] = 1
     state["planning_strategy"] = "provider-primary"
+    selected = state["specialists_selected"][0]
+    selected["planning_mode"] = mode
+    selected["planning_contract_digest"] = "sha256:" + "b" * 64
+    state["planning_provider_binding"] = {key: selected[key] for key in ("provider_id", "selection_id", "planning_contract_digest")} if mode == "primary" else None
     state_file.write_text(__import__("json").dumps(state))
     source = tmp_path / "provider-result.json"; source.write_text(__import__("json").dumps(result))
     return registry, state_file, source, invocation, env
@@ -157,6 +162,14 @@ def test_provider_import_promote_advance_and_handoff_preserves_identity(run_cli,
     assert state["executor_handoff"]["plan_generation"] == state["canonical_plan"]["generation"]
     state["canonical_plan"]["selection_source"] = "confirmed-user"; state_file.write_text(__import__("json").dumps(state))
     assert run_cli("advance", "--phase", "executing", cwd=tmp_path, env_extra=env).returncode == 2
+
+
+@pytest.mark.parametrize("mode", ["advisory", "missing"])
+def test_primary_promotion_rejects_advisory_or_missing_selected_mode(run_cli, tmp_path, mode):
+    registry, _state_file, source, invocation, env = _provider_import_fixture(run_cli, tmp_path, mode="advisory" if mode == "advisory" else "primary")
+    if mode == "missing":
+        state = __import__("json").loads(_state_file.read_text()); state["specialists_selected"][0].pop("planning_mode"); _state_file.write_text(__import__("json").dumps(state))
+    assert run_cli("specialists", "plan-import", "--input", str(source), "--invocation-id", invocation, "--registry", str(registry), cwd=tmp_path, env_extra=env).returncode == 2
 
 
 def test_advance_publish_fault_rolls_back_phase_and_handoff(monkeypatch, run_cli, tmp_path):
