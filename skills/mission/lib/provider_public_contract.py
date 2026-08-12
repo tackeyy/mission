@@ -75,7 +75,7 @@ VALID_PROJECTION_STATES = {
 
 CANDIDATE_FIELDS = frozenset({
     "provider_id", "id", "role", "skill", "kind", "command", "args", "env", "timeout",
-    "task_profiles", "phases", "required", "bounded_use", "bounded_purpose_required",
+    "task_profiles", "phases", "required", "max_calls_per_iteration", "bounded_use", "bounded_purpose_required",
     "source", "registry_version", "registry_entry_digest", "registry_projection_digest",
     "context_digest", "activation_digest", "score", "installed", "available", "status",
     "first_use", "eligibility_reason", "matched_conditions", "selection_source",
@@ -373,6 +373,11 @@ def _validate_candidate(record: object, base: str) -> None:
         type(record["timeout"]) is not int or not 1 <= record["timeout"] <= 86400
     ):
         _reject(f"{base}/timeout")
+    if "max_calls_per_iteration" in record and (
+        type(record["max_calls_per_iteration"]) is not int
+        or not 1 <= record["max_calls_per_iteration"] <= 1000
+    ):
+        _reject(f"{base}/max_calls_per_iteration")
     for field in ("task_profiles", "matched_conditions"):
         if field in record and not _safe_string_list(record[field]):
             _reject(f"{base}/{field}")
