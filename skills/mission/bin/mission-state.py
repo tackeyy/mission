@@ -141,7 +141,11 @@ from provider_public_contract import (  # noqa: E402
     redact_local_locators,
     validate_specialist_public_state as _validate_specialist_public_state,
 )
-from provider_preflight import ProviderPreflightError  # noqa: E402
+from provider_preflight import (  # noqa: E402
+    ProviderPreflightError,
+    build_preflight,
+    safe_input_snapshot,
+)
 from artifact_contract import (  # noqa: E402
     ArtifactContractError,
     artifact_lint_observation_matches,
@@ -4810,6 +4814,75 @@ def _command_provider_packet(data: dict, provider: dict, args) -> str:
         "input": body,
     }
     return json.dumps(packet, indent=2, ensure_ascii=False)
+
+
+def _provider_preflight_subject(data: dict, provider: dict, args) -> dict:
+    """Project the exact current command-provider request into #396 inputs."""
+    command = provider.get("command")
+    if not isinstance(command, str) or not _portable_provider_identifier(command):
+        _provider_gate("command-identity-invalid")
+    return {
+        "session_id": str(data.get("session_id") or resolve_session_id()),
+        "mission_id": str(data.get("mission_id") or ""),
+        "mission": str(data.get("mission") or ""),
+        "provider_id": str(provider.get("provider_id") or provider.get("skill") or ""),
+        "registry_entry_digest": provider.get("registry_entry_digest"),
+        "selection_id": provider.get("selection_id"),
+        "selection_source": args.selection_source or provider.get("eligibility_selection_source") or "automatic",
+        "invocation_id": getattr(args, "invocation_id", None) or new_invocation_id(),
+        "iteration": args.iteration,
+        "phase": args.phase,
+        "destination": {"kind": "external-service", "display_name": str(provider.get("role") or "provider")},
+        "risk_scopes": ["external-context"],
+        "quota_mode": "unknown",
+        "effective_argv": [command, *[str(value) for value in provider.get("args") or []]],
+        "env_keys": sorted(_string_map(provider.get("env")).keys()),
+        "execution_context": {
+            "isolation": "declared-ambient", "assurance": "stdin-exact-ambient-declared",
+            "cwd": "session-local-empty", "resource_mounts": [],
+            "env_allowlist": sorted(_string_map(provider.get("env")).keys()),
+            "ambient_scopes": ["inherited-env"], "network_destination_policy": "unverified",
+        },
+    }
+
+
+def cmd_prepare_provider_invocation(args):
+    """Create a side-effect-free, private exact-packet preflight pointer."""
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        _provider_gate("state-missing")
+    with StateLock(lock_file(cwd)):
+        data = json.loads(sf.read_text(encoding="utf-8"))
+        _validate_specialist_public_state(data)
+        provider = _require_current_provider_application(
+            data, _find_provider(data, args.provider), requested_phase=args.phase,
+            requested_iteration=args.iteration, application_kind="preflight",
+            selection_source=args.selection_source, cwd=cwd, registry_args=args,
+        )
+        try:
+            snapshot = safe_input_snapshot(args.input_file, root=cwd)
+            preflight = build_preflight(_provider_preflight_subject(data, provider, args), [snapshot])
+        except ProviderPreflightError as error:
+            _provider_gate(str(error))
+        private_dir = state_dir(cwd) / "private-preflights"
+        private_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        artifact = private_dir / f"{preflight['preflight_id']}.json"
+        # The private artifact is atomically published before the pointer.  If
+        # either write fails, no state points at a partial packet.
+        atomic_write_bytes(artifact, preflight["outbound_packet_bytes"])
+        pointer = {
+            "artifact_path": str(artifact.resolve().relative_to(state_dir(cwd).resolve())),
+            "outbound_packet_digest": preflight["outbound_packet_digest"],
+            "outbound_context_digest": preflight["outbound_context_digest"],
+            "invocation_id": preflight["invocation_id"], "status": "awaiting-approval",
+        }
+        data.setdefault("provider_preflights", {})[preflight["preflight_id"]] = pointer
+        data["updated_at"] = iso_now()
+        backup_state(sf)
+        atomic_write_json(sf, stamp_metadata(data, cwd))
+    public = {key: value for key, value in preflight.items() if key not in {"outbound_packet_bytes"}}
+    print(json.dumps(public, indent=2 if args.json else None, ensure_ascii=False))
 
 
 def cmd_invoke_command_provider(args):
@@ -14581,6 +14654,19 @@ def _build_parser():
     p_cmd.add_argument("--json", action="store_true", help="JSON 形式で出力")
     _add_command_lineage_arguments(p_cmd)
     p_cmd.set_defaults(func=cmd_invoke_command_provider, command_outcome_tracking=True)
+
+    p_prepare = spec_sub.add_parser(
+        "prepare-invocation", help="command provider のexact outbound packetを副作用なしでprepareする"
+    )
+    p_prepare.add_argument("--provider", required=True)
+    p_prepare.add_argument("--iteration", type=int, required=True)
+    p_prepare.add_argument("--phase", required=True,
+                           choices=["planning", "execution", "review", "scoring", "critic"])
+    p_prepare.add_argument("--input-file", required=True)
+    p_prepare.add_argument("--registry", action="append", default=None)
+    p_prepare.add_argument("--selection-source", default=None, choices=sorted(SPECIALIST_SELECTION_SOURCES))
+    p_prepare.add_argument("--json", action="store_true")
+    p_prepare.set_defaults(func=cmd_prepare_provider_invocation, command_outcome_tracking=True)
 
     p_reconcile = spec_sub.add_parser(
         "reconcile-invocation",

@@ -164,7 +164,13 @@ def _packet_projection(subject: Mapping[str, Any], inputs: list[dict[str, Any]])
         raise ProviderPreflightError("argv-invalid")
     if not isinstance(subject["env_keys"], list) or not all(isinstance(item, str) for item in subject["env_keys"]):
         raise ProviderPreflightError("env-keys-invalid")
-    validate_execution_context(subject["execution_context"])
+    # A declared-ambient preflight is permitted to describe its complete
+    # ambient scope; live execution later requires those scopes in a receipt.
+    execution_context = subject["execution_context"]
+    validate_execution_context(
+        execution_context,
+        approved_scopes=(execution_context.get("ambient_scopes") or []),
+    )
     if not isinstance(subject["destination"], Mapping) or set(subject["destination"]) != {"kind", "display_name"}:
         raise ProviderPreflightError("destination-unverified")
     packets = []

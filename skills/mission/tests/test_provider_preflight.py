@@ -224,3 +224,40 @@ def test_direct_risk_scoped_command_invoke_requires_preflight_before_spawn(run_c
     assert "preflight-required" in result.stderr
     assert not marker.exists()
     assert state_path.read_bytes() == before
+
+
+def test_prepare_invocation_publishes_private_packet_and_state_pointer_without_spawn(run_cli, tmp_path):
+    command_dir = tmp_path / "commands"
+    command_dir.mkdir()
+    marker = tmp_path / "provider-ran"
+    command = command_dir / "provider-command"
+    command.write_text("#!/bin/sh\nprintf invoked > \"$PROVIDER_MARKER\"\ncat >/dev/null\n", encoding="utf-8")
+    command.chmod(0o700)
+    registry = tmp_path / "provider-registry.json"
+    registry.write_text(json.dumps({"schema": "mission-specialist-registry/2", "specialists_v2": [{
+        "provider_id": "prepared-command-provider", "role": "planning-provider",
+        "skill": "prepared-command-provider", "kind": "command", "command": "provider-command",
+        "args": [], "env": {}, "task_profiles": ["architecture"], "phases": ["planning"],
+        "activation": {"min_complexity": "Complex", "auto_select_if": ["complexity"]},
+    }]}), encoding="utf-8")
+    env = {"PATH": f"{command_dir}{os.pathsep}{os.environ.get('PATH', '')}", "PROVIDER_MARKER": str(marker)}
+    source = tmp_path / "input.txt"
+    source.write_text("TOKEN=not-for-state\nbrief", encoding="utf-8")
+    run_cli("init", "provider preflight prepare", "--complexity", "Complex", cwd=tmp_path, check=True, env_extra=env)
+    run_cli("specialists", "recommend", "--no-default-skill-roots", "--task", "Review architecture",
+            "--registry", str(registry), "--complexity", "Complex", "--record-state", cwd=tmp_path, check=True, env_extra=env)
+
+    result = run_cli("specialists", "prepare-invocation", "--provider", "prepared-command-provider",
+                     "--iteration", "1", "--phase", "planning", "--input-file", str(source),
+                     cwd=tmp_path, env_extra=env)
+
+    assert result.returncode == 0, result.stderr
+    prepared = json.loads(result.stdout)
+    assert prepared["schema"] == "mission-provider-preflight/1"
+    assert not marker.exists()
+    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text(encoding="utf-8"))
+    pointer = state["provider_preflights"][prepared["preflight_id"]]
+    assert pointer["outbound_packet_digest"] == prepared["outbound_packet_digest"]
+    artifact = tmp_path / ".mission-state" / pointer["artifact_path"]
+    assert artifact.is_file()
+    assert "not-for-state" not in artifact.read_text(encoding="utf-8")
