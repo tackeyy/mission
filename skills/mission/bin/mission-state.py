@@ -159,6 +159,7 @@ from planning_lifecycle import (  # noqa: E402
     derive_planning_lifecycle,
     validate_handoff_step,
 )
+from planning_provider_metrics import reduce_planning_provider_kpis  # noqa: E402
 from artifact_contract import (  # noqa: E402
     ArtifactContractError,
     artifact_lint_observation_matches,
@@ -14007,6 +14008,7 @@ def _aggregate(
             "score_provenance_counts": _score_provenance_counts([]),
             "command_outcome_counts": summarize_command_outcomes([]),
             "activity_timing": summarize_activity_states([]),
+            "planning_provider_kpis": reduce_planning_provider_kpis([], population_kind="observed"),
         }
     # _classify を 1 回だけ評価 (旧実装は pass/halt/incomplete で 3N 回呼んでいた)
     classes = [_classify(s) for s in states]
@@ -14131,6 +14133,7 @@ def _aggregate(
         "by_cli_version": by_cli_version,
         "by_halt_category": by_halt_category,
         "activity_timing": activity_timing,
+        "planning_provider_kpis": reduce_planning_provider_kpis(states, population_kind="observed"),
     }
 
 

@@ -14,6 +14,8 @@ _KNOWN_REASONS = {
     "invalid_plan": {"invalid-plan", "binding-mismatch", "canonical-plan-digest-drift", "unknown"},
     "preflight_rejection": {"preflight-required", "preflight-not-consumed", "receipt-invalid", "unknown"},
 }
+_COUNTERS = ("ineligible_external_planning_invocations", "dry_run_external_effect_count", "legacy_session_retroactive_provider_invocations", "authority_injection_accept_count")
+_RATES = ("eligible_complex_planning_selection", "preflight_live_digest_match", "canonical_plan_executor_lineage")
 
 
 class PlanningProviderMetricError(ValueError):
@@ -39,6 +41,27 @@ def _cohort(state: Mapping[str, Any], population_kind: str) -> tuple[str, str, s
         str(state.get("planning_strategy") or "legacy-core"),
         "required" if state.get("planning_provider_required") is True else "optional", population_kind,
     )
+
+
+def validate_planning_provider_kpis(value: Mapping[str, Any]) -> None:
+    if not isinstance(value, Mapping) or value.get("schema") != SCHEMA:
+        raise PlanningProviderMetricError("schema is invalid")
+    population = value.get("population")
+    if not isinstance(population, Mapping) or population.get("kind") not in _POPULATIONS or type(population.get("session_count")) is not int or population["session_count"] < 0:
+        raise PlanningProviderMetricError("population is invalid")
+    totals = value.get("totals")
+    if not isinstance(totals, Mapping):
+        raise PlanningProviderMetricError("totals are invalid")
+    for key in _COUNTERS:
+        if type(totals.get(key)) is not int or totals[key] < 0:
+            raise PlanningProviderMetricError("counter is invalid")
+    for key in _RATES:
+        detail = totals.get(key)
+        if not isinstance(detail, Mapping) or set(detail) != {"numerator", "denominator", "rate"}:
+            raise PlanningProviderMetricError("rate is invalid")
+        expected = _rate(detail["numerator"], detail["denominator"])
+        if detail != expected:
+            raise PlanningProviderMetricError("rate is inconsistent")
 
 
 def reduce_planning_provider_kpis(
@@ -92,5 +115,7 @@ def reduce_planning_provider_kpis(
         {"complexity": key[0], "task_profile": key[1], "planning_strategy": key[2], "requirement": key[3], "population_kind": key[4], **value}
         for key, value in sorted(cohorts.items())
     ]
-    return {"schema": SCHEMA, "population": {"kind": population_kind, "session_count": len(states)},
+    result = {"schema": SCHEMA, "population": {"kind": population_kind, "session_count": len(states)},
             "totals": totals, "reason_code_counts": {key: dict(sorted(value.items())) for key, value in reasons.items()}, "cohorts": cohort_docs}
+    validate_planning_provider_kpis(result)
+    return result

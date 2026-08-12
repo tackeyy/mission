@@ -17,6 +17,13 @@ would make this consumer silently drift from that versioned contract.
 from __future__ import annotations
 
 import math
+import sys
+from pathlib import Path
+
+MISSION_LIB = Path(__file__).resolve().parents[2] / "skills" / "mission" / "lib"
+if str(MISSION_LIB) not in sys.path:
+    sys.path.insert(0, str(MISSION_LIB))
+from planning_provider_metrics import PlanningProviderMetricError, validate_planning_provider_kpis
 
 
 MEASUREMENT_OBSERVATION_FIELDS = (
@@ -234,7 +241,10 @@ def summarize_benchmark_kpi(records: list[dict]) -> dict:
         if not isinstance(record, dict):
             raise BenchmarkAuditInputError("benchmark record must be an object")
         if "planning_provider_kpi" in record:
-            raise BenchmarkAuditInputError("planning provider KPI consumer is deferred pending Issue #399")
+            try:
+                validate_planning_provider_kpis(record["planning_provider_kpi"])
+            except PlanningProviderMetricError as exc:
+                raise BenchmarkAuditInputError("planning provider KPI is invalid") from exc
 
         score_buckets[_score_bucket(record.get("human_quality_score"))] += 1
         tier, observed, eligible = _context(record)
@@ -267,6 +277,7 @@ def summarize_benchmark_kpi(records: list[dict]) -> dict:
             continue
         durations.append(duration)
 
+    provider_blocks = [record["planning_provider_kpi"] for record in records if "planning_provider_kpi" in record]
     return {
         "schema": "mission-benchmark-kpi/1",
         "score_buckets": score_buckets,
@@ -291,9 +302,9 @@ def summarize_benchmark_kpi(records: list[dict]) -> dict:
             "p90": _percentile_r7(durations, 0.9),
             "tail": max(durations) if durations else None,
         },
-        "planning_provider_kpi": {
-            "status": "deferred",
-            "schema": "mission-planning-provider-kpi/1",
-        },
+        "planning_provider_kpi": (
+            {"status": "deferred", "schema": "mission-planning-provider-kpi/1"}
+            if not provider_blocks else {"status": "observed", "schema": "mission-planning-provider-kpi/1", "blocks": provider_blocks}
+        ),
         "measurement_observations": _measurement_observations(records),
     }

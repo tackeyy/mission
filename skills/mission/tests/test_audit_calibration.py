@@ -92,6 +92,16 @@ def test_duration_percentiles_censor_blocked_records_and_defer_unavailable_provi
         assert observation.get("rate", observation.get("count", observation.get("value"))) is None, key
 
 
+def test_benchmark_consumer_accepts_only_valid_versioned_planning_provider_block():
+    audit = _load()
+    from planning_provider_metrics import reduce_planning_provider_kpis
+    block = reduce_planning_provider_kpis([], population_kind="controlled")
+    assert audit.summarize_benchmark_kpi([{"planning_provider_kpi": block}])["planning_provider_kpi"]["status"] == "observed"
+    block["schema"] = "mission-planning-provider-kpi/9"
+    with pytest.raises(audit.BenchmarkAuditInputError):
+        audit.summarize_benchmark_kpi([{"planning_provider_kpi": block}])
+
+
 def test_duration_percentiles_exclude_failed_and_other_noncompleted_records():
     audit = _load()
     summary = audit.summarize_benchmark_kpi([
