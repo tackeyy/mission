@@ -198,22 +198,46 @@ def test_public_contract_rejects_duplicate_invocation_identity():
 
 
 def test_command_provider_propagates_selection_and_invocation_ids(run_cli, tmp_path):
+    registry = tmp_path / "provider-registry.json"
+    registry.write_text(json.dumps({
+        "schema": "mission-specialist-registry/2",
+        "specialists_v2": [{
+            "provider_id": "command-provider",
+            "role": "command-review",
+            "skill": "command-provider",
+            "kind": "command",
+            "command": "cat",
+            "args": [],
+            "env": {},
+            "task_profiles": ["architecture"],
+            "phases": ["planning", "review"],
+            "activation": {
+                "min_complexity": "Complex",
+                "auto_select_if": ["complexity"],
+            },
+        }],
+    }), encoding="utf-8")
     run_cli(
         "init", "command checkpoint", "--complexity", "Complex",
         "--host-run-id", "host-385", "--root-run-id", "root-385",
         "--parent-run-id", "parent-385", "--child-run-id", "child-385",
         "--logical-group-id", "logical-385", cwd=tmp_path, check=True,
     )
+    run_cli(
+        "specialists", "recommend", "--no-default-skill-roots", "--task",
+        "Review the architecture", "--registry", str(registry),
+        "--complexity", "Complex", "--record-state", cwd=tmp_path, check=True,
+    )
     state_path = tmp_path / ".mission-state" / "sessions" / "test.json"
     state = _read_state(tmp_path)
-    selection_id = "sel_0123456789abcdef0123456789abcdef"
-    state["specialists_decision"] = {"policy": "auto", "action": "select", "decision": "selected",
-        "reason_code": "candidate-selected", "lifecycle_state": "selected", "selection_id": selection_id}
-    state["specialists_selected"] = [{"role": "command-review", "skill": "command-provider",
-        "kind": "command", "command": "cat", "selection_id": selection_id}]
+    assert state["specialists_selected"], state
+    state["phase"] = "reviewing"
     state_path.write_text(json.dumps(state), encoding="utf-8")
+    selection_id = state["specialists_decision"]["selection_id"]
     result = run_cli("specialists", "invoke-command", "--provider", "command-provider",
-                     "--iteration", "1", "--phase", "review", "--json", cwd=tmp_path, check=True)
+                     "--iteration", "1", "--phase", "review", "--registry", str(registry),
+                     "--json", cwd=tmp_path)
+    assert result.returncode == 0, result.stderr
     entry = json.loads(result.stdout)["entry"]
     assert entry["selection_id"] == selection_id
     assert entry["invocation_id"].startswith("inv_")
