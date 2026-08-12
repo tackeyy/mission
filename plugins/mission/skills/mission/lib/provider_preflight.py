@@ -320,6 +320,10 @@ def validate_receipt(preflight: Mapping[str, Any], receipt: Mapping[str, Any], *
     provenance = receipt.get("approval_provenance")
     if not isinstance(provenance, Mapping):
         raise ProviderPreflightError("receipt-provenance-invalid")
+    if (not isinstance(provenance.get("issuer_id"), str) or not provenance["issuer_id"]
+            or not isinstance(provenance.get("actor_kind"), str) or not provenance["actor_kind"]
+            or not isinstance(provenance.get("actor_id"), str) or not provenance["actor_id"]):
+        raise ProviderPreflightError("receipt-provenance-invalid")
     verifier_id = provenance.get("verifier_id")
     if not isinstance(verifier_id, str) or trusted_verifiers.get(verifier_id) != provenance.get("verifier_version"):
         raise ProviderPreflightError("verifier-untrusted")

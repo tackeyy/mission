@@ -181,6 +181,8 @@ schema v1/v2 は `derive_terminal_outcome()` が読み取り時に互換導出�
 
 `review-import`、`aggregate-reviews`、`review-finalize`、command provider と state transition gate は、opaque `event_id`、`root_event_id`、positive `attempt`、optional `retry_of` を持つ `mission-command-outcomes/1` record を返す。kind は `ok`、`expected-gate`、`invalid-input`、`external`、`internal-error` に限定する。成功 record は state の `command_outcomes` に、state を変更してはならない invalid/gate rejection は `.mission-state/telemetry/command-outcomes/` の sidecar に保存する。
 
+command provider は `specialists prepare-invocation` で canonical outbound packet を private artifact として準備し、`specialists verify-approval` の host-pinned evidence receipt 後だけ `invoke-command --preflight-id` を実行できる。input は regular single-link UTF-8 file の安全な snapshot に限定され、literal argument values と environment values は packet、state、evidence に保存しない。strict execution は host-only execution-isolator registry の source/version/policy/capability pin を再検証し、host backend 経由だけで dispatchする。receipt、input、provider、verifier、isolator のdriftまたは不足は spawnなしで拒否する。
+
 sidecar は session-id の hash 名、128 record cap、別 lock、atomic replace、regular/non-symlink/non-hardlink/no-follow read を必須とする。corrupt/unsafe sidecar は空扱いにせず fail-closed として `stats` / `mission-audit.py` の `command_outcome_counts.corrupt_sidecars` に計上する。count は kind 別に加え、`unique_root_events` と retry の件数、invalid record 数を返す。これは観測専用で、pass gate や KPI 判定を変更しない。
 
 ### Activity segment observability (#211)

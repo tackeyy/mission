@@ -183,6 +183,17 @@ def test_receipt_requires_trusted_verifier_scope_subject_expiry_and_nonce(tmp_pa
             validate_receipt(preflight, mutated, trusted_verifiers={"trusted-verifier": "1"}, now="2026-08-12T00:00:00Z")
 
 
+@pytest.mark.parametrize("provenance", [
+    {"issuer_id": "", "verifier_id": "trusted-verifier", "verifier_version": "1", "actor_kind": "human", "actor_id": "actor:opaque", "proof_kind": "opaque-host-event", "proof_digest": _digest("d")},
+    {"issuer_id": "host-approval", "verifier_id": "trusted-verifier", "verifier_version": "1", "actor_kind": "human", "actor_id": "actor:opaque", "proof_kind": "forged", "proof_digest": _digest("d")},
+])
+def test_receipt_rejects_unknown_issuer_or_forged_provenance(provenance, tmp_path):
+    preflight = _preflight(tmp_path); receipt = _receipt(preflight)
+    receipt["approval_provenance"] = provenance
+    with pytest.raises(ProviderPreflightError):
+        validate_receipt(preflight, receipt, trusted_verifiers={"trusted-verifier": "1"}, now="2026-08-12T00:00:00Z")
+
+
 @pytest.mark.parametrize("field,value", [
     ("preflight_id", "pf_other"), ("session_id", "session-other"), ("mission_id", "mission-other"),
     ("outbound_context_digest", _digest("0")), ("invocation_id", "inv_other"),
@@ -429,7 +440,8 @@ def test_host_verified_receipt_runs_exact_packet_once_and_rejects_replay(run_cli
     }]}), encoding="utf-8")
     env = {"PATH": f"{command_dir}{os.pathsep}{os.environ.get('PATH', '')}", "PROVIDER_MARKER": str(marker),
            "CAPTURED_PACKET": str(captured), "PYTHONPATH": str(providers), "XDG_CONFIG_HOME": str(tmp_path / "host-config")}
-    source = tmp_path / "input.txt"; source.write_text("brief", encoding="utf-8")
+    secret = "private-fixture-value"
+    source = tmp_path / "input.txt"; source.write_text(f"TOKEN={secret}\nbrief", encoding="utf-8")
     run_cli("init", "trusted receipt", "--complexity", "Complex", cwd=tmp_path, check=True, env_extra=env)
     run_cli("specialists", "recommend", "--no-default-skill-roots", "--task", "Review architecture", "--registry", str(registry), "--complexity", "Complex", "--record-state", cwd=tmp_path, check=True, env_extra=env)
     preflight = json.loads(run_cli("specialists", "prepare-invocation", "--provider", "trusted-provider", "--iteration", "1", "--phase", "planning", "--input-file", str(source), cwd=tmp_path, env_extra=env, check=True).stdout)
@@ -442,7 +454,17 @@ def test_host_verified_receipt_runs_exact_packet_once_and_rejects_replay(run_cli
     assert marker.exists() and captured.read_bytes() == packet_path.read_bytes()
     state_path = tmp_path / ".mission-state" / "sessions" / "test.json"; state = json.loads(state_path.read_text(encoding="utf-8"))
     assert state["provider_preflights"][preflight["preflight_id"]]["status"] == "consumed"
+    private_receipt = tmp_path / ".mission-state" / state["provider_preflights"][preflight["preflight_id"]]["receipt"]["artifact_path"]
+    evidence_files = list((tmp_path / ".mission-state" / "archive").rglob("*.md"))
+    public_and_private = [invoked.stdout, invoked.stderr, state_path.read_text(encoding="utf-8"),
+                          packet_path.read_text(encoding="utf-8"), private_receipt.read_text(encoding="utf-8"),
+                          *(path.read_text(encoding="utf-8") for path in evidence_files)]
+    assert all(secret not in value for value in public_and_private)
+    verifier_source.write_text("def verify(request):\n raise RuntimeError('source changed')\n", encoding="utf-8")
     before = state_path.read_bytes(); marker.unlink()
+    source_drift = run_cli("specialists", "invoke-command", "--provider", "trusted-provider", "--iteration", "1", "--phase", "planning", "--preflight-id", preflight["preflight_id"], "--input-file", str(source), cwd=tmp_path, env_extra=env)
+    assert source_drift.returncode == 2 and not marker.exists() and state_path.read_bytes() == before
+    before = state_path.read_bytes()
     replay = run_cli("specialists", "invoke-command", "--provider", "trusted-provider", "--iteration", "1", "--phase", "planning", "--preflight-id", preflight["preflight_id"], "--input-file", str(source), cwd=tmp_path, env_extra=env)
     assert replay.returncode == 2 and "receipt-replayed" in replay.stderr and not marker.exists() and state_path.read_bytes() == before
 

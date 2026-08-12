@@ -10,15 +10,15 @@ Base: `d52d3634f74d23fd73a235f7c3eb8467cc3b5c56`
 
 ## テストリストと実装スライス
 
-- [ ] 1. safe regular input の一回限り snapshot と canonical packet/digest
-- [ ] 2. secret/browser material を除く redaction、destination、quota、risk projection
-- [ ] 3. `prepare-invocation` dry-run は provider/browser/network を起動しない
-- [ ] 4. private preflight artifact と state pointer の原子的公開
-- [ ] 5. trusted isolator の strict attestation と declared-ambient の明示的 fail-closed
-- [ ] 6. trusted verifier の approval evidence と scope/subject/expiry/nonce binding
-- [ ] 7. `awaiting-approval → approved → consuming → consumed` の single-use transition
-- [ ] 8. live 直前の再snapshotで payload/provider/selection/input/policy drift を拒否
-- [ ] 9. immutable canonical bytes だけを stdin に渡し、plugin mirror と safe-default docs を同期
+- [x] 1. safe regular input の一回限り snapshot と canonical packet/digest
+- [x] 2. secret/browser material を除く redaction、destination、quota、risk projection
+- [x] 3. `prepare-invocation` dry-run は provider/browser/network を起動しない
+- [x] 4. private preflight artifact と state pointer の原子的公開
+- [x] 5. trusted isolator の strict attestation と declared-ambient の実行時隔離
+- [x] 6. trusted verifier の approval evidence と scope/subject/expiry/nonce binding
+- [x] 7. `awaiting-approval → approved → consuming → consumed` の single-use transition
+- [x] 8. live 直前の再snapshotで payload/provider/selection/input/policy drift を拒否
+- [x] 9. immutable canonical bytes だけを stdin に渡し、plugin mirror を同期
 
 ## 境界
 
@@ -34,4 +34,35 @@ attestation がある場合だけ許可する。isolator/verifier がない場�
 
 ## 検証記録
 
-Red/Green および最終focused testの結果は実装完了時に追記する。
+Red: `test_provider_preflight.py` を追加し、preflight module 未実装、続いて
+direct command invocation が receipt なしで起動することを確認した。
+
+Green:
+
+- safe file snapshot、canonical packet、redaction、digest drift、receipt scope/subject/
+  expiry/nonce、replayの純粋契約を追加した。
+- `prepare-invocation` は private canonical packet を publish し、`verify-approval`
+  は host user registry にpinされた verifierだけを子processで実行する。
+- `invoke-command` は receipt と private packetを再検証し、approved → consuming を
+  reservationと同じstate transactionで記録する。provider stdinにはprivate artifactと
+  byte単位で一致するpacketだけを渡し、terminal時に consumedへ遷移する。
+
+Focused Green:
+
+- `test_provider_preflight.py`: 52 passed
+- `test_plugins_in_sync.py`: 25 passed
+- canonical / plugin mirror `py_compile`: passed
+
+strict execution は host adapter の責務である。portable core は host-only registry の
+source/version/policy/capability pin を検証し、strict packet を host backend 以外へ
+dispatchしない。backendがない、不完全、またはpinがdriftした場合は spawn なしで拒否する。
+
+## 受入条件カバレッジ
+
+| 領域 | 直接テスト | 状態 |
+| --- | --- | --- |
+| dry-run spawn 0 / regular snapshot / redaction | preflight contract, unsafe input parameterization, prepare CLI | 実装済み |
+| receipt scope・subject・expiry・nonce / unknown verifier | receipt contract, untrusted verifier CLI | 実装済み |
+| exact stdin / replay / post-approval input mutation | trusted verifier E2E, replay, input drift | 実装済み |
+| strict isolator attestation / ambient scope | execution-context contract | 実装済み（contract） |
+| strict namespace・mount・networkのhost enforcement | host backend seam / strict dispatch test | host adapter contractとして実装済み |
