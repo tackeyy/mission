@@ -56,10 +56,12 @@ def test_fail_first_protocol_is_mission_only():
 
 
 def test_activity_segments_are_owned_by_positive_state_iteration_and_split_on_change():
-    state = {"phase": "executing", "loop_active": True, "iteration": 1}
+    # The state records the *last completed* score iteration. During iteration
+    # 1 it is 0; after push-score it is 1 while iteration 2 is executing.
+    state = {"phase": "executing", "loop_active": True, "iteration": 0}
 
     assert ACTIVITY.start_activity_segment(state, "active", "implementation", "2026-08-12T00:00:00Z") is True
-    state["iteration"] = 2
+    state["iteration"] = 1
     assert ACTIVITY.start_activity_segment(state, "active", "implementation", "2026-08-12T00:01:00Z") is True
     assert ACTIVITY.end_activity_segment(state, "2026-08-12T00:02:00Z") is True
 

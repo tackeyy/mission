@@ -30,3 +30,4 @@
 | 1 | fail-first task/prompt tests failed before implementation | Green: 2 passed |
 | 2 | summary gate absent | Green: per-iteration observation and gate tests passed |
 | 3 | adversarial context evidence tests added | Green: digest/path/symlink/hardlink fail open |
+| 4 | lifecycle-equivalent iteration 0 -> 1 -> 2 segment test failed | Green: target iteration is state-owned `last_scored_iteration + 1` |

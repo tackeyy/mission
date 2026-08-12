@@ -356,8 +356,15 @@ def start_activity_segment(
     if state.get("phase") in TERMINAL_PHASES or state.get("loop_active") is False:
         raise ActivityTimingError("cannot start activity in a terminal state")
     current = state.get("activity_current")
+    # ``state.iteration`` is the last scored iteration.  A segment starts in
+    # the next in-flight iteration (0 -> 1 on the first pass), so never stamp
+    # it with the completed iteration's value.
     iteration = state.get("iteration")
-    owned_iteration = iteration if isinstance(iteration, int) and not isinstance(iteration, bool) and iteration > 0 else None
+    owned_iteration = (
+        iteration + 1
+        if isinstance(iteration, int) and not isinstance(iteration, bool) and iteration >= 0
+        else None
+    )
     clean_detail = sanitize_activity_detail(detail)
     if isinstance(current, dict):
         same = (
