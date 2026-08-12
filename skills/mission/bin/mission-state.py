@@ -4905,6 +4905,10 @@ def cmd_invoke_command_provider(args):
     # guard before reservation, state mutation, and subprocess creation.
     if not getattr(args, "preflight_id", None):
         _provider_gate("preflight-required")
+    preflights = data.get("provider_preflights")
+    pointer = preflights.get(args.preflight_id) if isinstance(preflights, dict) else None
+    if not isinstance(pointer, dict) or pointer.get("status") != "approved":
+        _provider_gate("approval-required")
     if _confirmed_selection_required(data, provider.get("skill") or provider.get("role"), "completed") and not args.selection_source:
         print(
             "ERROR: specialists_decision requested user confirmation; pass --selection-source confirmed-user "
@@ -14645,6 +14649,8 @@ def _build_parser():
     p_cmd.add_argument("--phase", required=True,
                        choices=["planning", "execution", "review", "scoring", "critic"])
     p_cmd.add_argument("--input-file", default=None, help="provider stdin packet に含める入力ファイル")
+    p_cmd.add_argument("--preflight-id", default=None,
+                       help="prepare-invocationで生成したper-invocation preflight ID")
     p_cmd.add_argument("--registry", action="append", default=None,
                        help="external explicit registry の application 時再供給。複数指定可")
     p_cmd.add_argument("--selection-source", default=None, choices=sorted(SPECIALIST_SELECTION_SOURCES),
