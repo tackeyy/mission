@@ -1,0 +1,65 @@
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+LIB_DIR = Path(__file__).resolve().parents[1] / "lib"
+sys.path.insert(0, str(LIB_DIR))
+
+from plan_contract import PlanContractError, canonical_plan_bytes, parse_provider_result  # noqa: E402
+
+
+def _result(*, document=None):
+    document = document or {
+        "objective": "Create a bounded plan",
+        "scope": {
+            "resources": [{"type": "path", "identifier": "docs/new.md", "access": "write", "constraints": []}],
+            "actions": [{"type": "write", "effect_class": "reversible"}],
+        },
+        "assumptions": [{"id": "a1", "statement": "input is available", "validation": "inspect it"}],
+        "steps": [{"id": "s1", "action": "write", "inputs": [], "outputs": [], "depends_on": [], "acceptance_checks": ["file exists"], "risk": "low", "rollback": "remove file"}],
+        "global_acceptance": ["plan is bounded"],
+        "stop_conditions": ["required input unavailable"],
+    }
+    return {
+        "schema": "mission-provider-result/1",
+        "binding": {"invocation_id": "inv_" + "a" * 32, "preflight_id": "pf_1", "outbound_packet_digest": "sha256:" + "b" * 64, "selection_id": "sel_1", "selection_source": "automatic", "iteration": 1},
+        "capability_attestation": {"requested_class": "deep-planning", "effective_class": "deep-planning", "requested_variant": "portable-v1", "effective_variant": "portable-v1"},
+        "artifacts": [{"schema": "mission-plan/1", "document": document}],
+    }
+
+
+def test_minimal_envelope_accepts_exactly_one_bounded_plan():
+    result = parse_provider_result(
+        json.dumps(_result()).encode(),
+        expected_binding=_result()["binding"],
+        result_contract={"envelope_schema": "mission-provider-result/1", "artifact_schema": "mission-plan/1", "cardinality": "exactly-one", "required_capability_class": "deep-planning", "require_exact_variant": True},
+        workspace=Path.cwd(),
+    )
+    assert result["document"]["objective"] == "Create a bounded plan"
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda value: value.update({"artifacts": []}),
+    lambda value: value.update({"artifacts": value["artifacts"] * 2}),
+    lambda value: value.update({"artifacts": [*value["artifacts"], {"schema": "other/1", "document": {}}]}),
+])
+def test_artifact_cardinality_is_fail_closed(mutate):
+    value = _result(); mutate(value)
+    with pytest.raises(PlanContractError, match="artifact-cardinality"):
+        parse_provider_result(json.dumps(value).encode(), expected_binding=value["binding"], result_contract={"required_capability_class": "deep-planning", "require_exact_variant": True}, workspace=Path.cwd())
+
+
+def test_reserved_mission_authority_is_rejected():
+    value = _result(); value["artifacts"][0]["document"]["mission_metadata"] = {}
+    with pytest.raises(PlanContractError, match="mission-authority-field-injection"):
+        parse_provider_result(json.dumps(value).encode(), expected_binding=value["binding"], result_contract={"required_capability_class": "deep-planning", "require_exact_variant": True}, workspace=Path.cwd())
+
+
+def test_canonical_bytes_sort_keys_but_keep_array_order():
+    left = {"b": 1, "a": ["first", "second"]}
+    same = {"a": ["first", "second"], "b": 1}
+    changed = {"a": ["second", "first"], "b": 1}
+    assert canonical_plan_bytes(left) == canonical_plan_bytes(same)
+    assert canonical_plan_bytes(left) != canonical_plan_bytes(changed)

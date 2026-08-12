@@ -148,6 +148,11 @@ from provider_preflight import (  # noqa: E402
     safe_input_snapshot,
     validate_receipt as validate_provider_receipt,
 )
+from plan_contract import (  # noqa: E402
+    PlanContractError,
+    canonical_plan_bytes,
+    parse_provider_result,
+)
 from artifact_contract import (  # noqa: E402
     ArtifactContractError,
     artifact_lint_observation_matches,
@@ -473,13 +478,6 @@ APPLIED_SPECIALIST_INVOCATION_STATUSES = {
     "completed",
     "inline-applied",
     "skill-tool-applied",
-}
-
-DEFAULT_COMMAND_RESULT_CONTRACTS = {
-    "oracle-reviewer": {
-        "min_non_template_chars": 200,
-        "forbidden_markers": list(PREPARATION_ONLY_MARKERS),
-    },
 }
 
 SPECIALIST_SELECTION_CHECKPOINT_COMPLEXITIES = {"Standard", "Complex", "Critical"}
@@ -3462,14 +3460,6 @@ def _public_eligibility_context_fields(eligibility: dict, complexity: object) ->
     return fields
 
 
-def _default_result_contract_for(skill: str | None, role: str | None = None) -> dict:
-    keys = {str(skill or ""), str(role or "")} - {""}
-    for key in keys:
-        if key in DEFAULT_COMMAND_RESULT_CONTRACTS:
-            return dict(DEFAULT_COMMAND_RESULT_CONTRACTS[key])
-    return {}
-
-
 def _merge_result_contract(defaults: dict, explicit: dict) -> dict:
     merged = dict(defaults)
     merged.update(explicit)
@@ -3507,7 +3497,7 @@ def _normalize_candidate(candidate: dict, source: str) -> dict:
     auto_use = candidate.get("auto_use") if isinstance(candidate.get("auto_use"), dict) else {}
     risk = candidate.get("risk") if isinstance(candidate.get("risk"), dict) else {}
     explicit_result_contract = candidate.get("result_contract") if isinstance(candidate.get("result_contract"), dict) else {}
-    result_contract = _merge_result_contract(_default_result_contract_for(skill, role), explicit_result_contract)
+    result_contract = _merge_result_contract({}, explicit_result_contract)
     if kind == "command" and not skill:
         skill = role or command
     bounded_use = _is_bounded_orchestrator_candidate(candidate)
@@ -4426,10 +4416,7 @@ def _contract_exit_codes(contract: dict, key: str) -> set[int]:
 def _classify_command_provider_result(provider: dict, exit_code: int | None,
                                       stdout: str, stderr: str) -> tuple[str, str | None]:
     explicit_contract = provider.get("result_contract") if isinstance(provider.get("result_contract"), dict) else {}
-    contract = _merge_result_contract(
-        _default_result_contract_for(provider.get("skill"), provider.get("role")),
-        explicit_contract,
-    )
+    contract = _merge_result_contract({}, explicit_contract)
     combined = "\n".join([stdout or "", stderr or ""])
     awaiting_markers = [str(v) for v in contract.get("awaiting_input_markers") or []]
     awaiting_hits = [marker for marker in awaiting_markers if marker and marker in combined]
