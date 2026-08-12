@@ -21,4 +21,10 @@ candidate だけを原子的に記録する。plan の昇格、phase transition�
 
 ## 実装スライス
 
-進行中。各 slice の Red / Green 証跡と focused test 結果を完了時に追記する。
+Red: `plan_contract` 未実装時に `ModuleNotFoundError` を確認した。
+
+Green: strict UTF-8 / 4MiB / duplicate key / NaN 拒否、envelope binding、artifact
+cardinality、capability attestation、typed scope、DAG、reserved authority field、canonical
+serialization を実装した。`specialists plan-import` は current state の invocation,
+preflight, selection, registry contract を再検証し、raw archive と canonical candidate を
+publish transaction 内で作成してから state の `provider_plan_imports` pointer を公開する。

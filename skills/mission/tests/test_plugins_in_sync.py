@@ -177,6 +177,10 @@ SYNC_PAIRS = [
         REPO_ROOT / "skills" / "mission" / "lib" / "provider_preflight.py",
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "provider_preflight.py",
     ),
+    (
+        REPO_ROOT / "skills" / "mission" / "lib" / "plan_contract.py",
+        REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "plan_contract.py",
+    ),
 ]
 
 MISSION_STATE_DISTRIBUTION_MARKERS = [

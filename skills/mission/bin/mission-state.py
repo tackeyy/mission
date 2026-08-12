@@ -11195,6 +11195,70 @@ def cmd_review_import(args):
     }, ensure_ascii=False))
 
 
+def cmd_plan_import(args):
+    """Validate one provider result and atomically publish only an inert plan candidate."""
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        _provider_gate("state-missing")
+    if not re.fullmatch(r"inv_[0-9a-f]{32}", args.invocation_id):
+        _provider_gate("invocation-id-invalid")
+    try:
+        raw = Path(args.input).read_bytes()
+    except OSError:
+        _provider_gate("plan-input-unreadable")
+    with StateLock(lock_file(cwd)), _PublishedFilesTransaction() as published_files:
+        data = json.loads(sf.read_text(encoding="utf-8"))
+        invocation = invocation_by_id(data, args.invocation_id)
+        if not isinstance(invocation, dict):
+            _provider_gate("invocation-not-found")
+        provider = _find_provider(data, str(invocation.get("skill") or invocation.get("role") or ""))
+        current = _require_current_provider_application(
+            data, provider, requested_phase="planning", requested_iteration=data.get("iteration"),
+            application_kind="result-import", selection_source=invocation.get("selection_source"),
+            invocation_id=args.invocation_id, cwd=cwd, registry_args=args,
+        )
+        contract = current.get("result_contract") if isinstance(current.get("result_contract"), dict) else {}
+        if not contract:
+            _provider_gate("missing-structured-result-contract")
+        pointers = data.get("provider_preflights") if isinstance(data.get("provider_preflights"), dict) else {}
+        matches = [(key, value) for key, value in pointers.items() if isinstance(value, dict) and value.get("invocation_id") == args.invocation_id]
+        if len(matches) != 1:
+            _provider_gate("preflight-binding-missing")
+        preflight_id, pointer = matches[0]
+        expected = {"invocation_id": args.invocation_id, "preflight_id": preflight_id,
+                    "outbound_packet_digest": pointer.get("outbound_packet_digest"),
+                    "selection_id": current.get("selection_id"),
+                    "selection_source": current.get("eligibility_selection_source") or "automatic",
+                    "iteration": data.get("iteration")}
+        try:
+            parsed = parse_provider_result(raw, expected_binding=expected, result_contract=contract, workspace=cwd)
+        except PlanContractError as exc:
+            _provider_gate(str(exc))
+        digest = parsed["raw_result_digest"]
+        metadata = {
+            "authority": {"owner": "mission", "may_write_state": False, "may_decide_review": False, "may_decide_score": False, "may_decide_completion": False},
+            "provenance": {"provider_id": current.get("provider_id"), "registry_entry_digest": current.get("registry_entry_digest"), "selection_id": expected["selection_id"], "selection_source": expected["selection_source"], "invocation_id": args.invocation_id, "iteration": expected["iteration"], "input_outbound_packet_digest": expected["outbound_packet_digest"], "raw_result_digest": digest},
+            "capability_verification": {"selection_verified": True, "class_exact_match": True, "variant_exact_match": True},
+        }
+        candidate = {**parsed["document"], "mission_metadata": metadata}
+        canonical = canonical_plan_bytes(candidate)
+        canonical_digest = "sha256:" + hashlib.sha256(canonical).hexdigest()
+        mission8 = str(data.get("mission_id") or "unknown")[:8]
+        raw_name = f"plan-result-{mission8}-{digest[7:23]}.json"
+        raw_file = published_files.add(_publish_review_archive_transaction(cwd, raw_name, raw))
+        candidate_path = state_dir(cwd) / "plans" / f"{canonical_digest[7:23]}.json"
+        candidate_file = published_files.add(_publish_output_transaction(candidate_path, canonical))
+        reference = {"raw_result_path": str(raw_file.path.relative_to(cwd)), "raw_result_digest": digest,
+                     "candidate_path": str(candidate_file.path.relative_to(cwd)), "candidate_digest": canonical_digest,
+                     "invocation_id": args.invocation_id, "preflight_id": preflight_id, "generation": canonical_digest[7:23]}
+        data.setdefault("provider_plan_imports", {})[args.invocation_id] = reference
+        data["updated_at"] = iso_now()
+        _verify_published_file(raw_file); _verify_published_file(candidate_file)
+        backup_state(sf); atomic_write_json(sf, stamp_metadata(data, cwd))
+    print(json.dumps({"ok": True, "plan_import": reference}, indent=2 if args.json else None, ensure_ascii=False))
+
+
 def _cap_for_findings(findings: list[dict]) -> float | None:
     counts = {"High": 0, "Medium": 0, "Low": 0}
     for finding in findings:
@@ -14973,6 +15037,15 @@ def _build_parser():
                            help="host-only execution-isolator/1 ID")
     p_prepare.add_argument("--json", action="store_true")
     p_prepare.set_defaults(func=cmd_prepare_provider_invocation, command_outcome_tracking=True)
+
+    p_plan_import = spec_sub.add_parser(
+        "plan-import", help="strict provider plan resultを検証してinert canonical candidateへ取り込む"
+    )
+    p_plan_import.add_argument("--input", required=True, help="providerが返したmission-provider-result/1 regular file")
+    p_plan_import.add_argument("--invocation-id", required=True)
+    p_plan_import.add_argument("--registry", action="append", default=None)
+    p_plan_import.add_argument("--json", action="store_true")
+    p_plan_import.set_defaults(func=cmd_plan_import, command_outcome_tracking=True)
 
     p_verify_approval = spec_sub.add_parser(
         "verify-approval", help="host-trusted verifierのevidenceからper-invocation receiptを生成する"
