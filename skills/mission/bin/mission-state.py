@@ -4833,7 +4833,7 @@ def _provider_preflight_subject(data: dict, provider: dict, args) -> dict:
         "iteration": args.iteration,
         "phase": args.phase,
         "destination": {"kind": "external-service", "display_name": str(provider.get("role") or "provider")},
-        "risk_scopes": ["external-context"],
+        "risk_scopes": ["external-context", "inherited-env", "destination-unverified"],
         "quota_mode": "unknown",
         "effective_argv": [command, *[str(value) for value in provider.get("args") or []]],
         "env_keys": sorted(_string_map(provider.get("env")).keys()),
