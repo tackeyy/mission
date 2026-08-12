@@ -11,7 +11,7 @@ sys.path.insert(0, str(LIB_DIR))
 from planning_provider_metrics import reduce_planning_provider_kpis
 
 
-@pytest.mark.parametrize("name,state,assertion", [
+CONFORMANCE_CASES = [
     ("simple-floor", {"planning_policy_version": 1, "complexity": "Simple", "planning_strategy": "core"}, lambda t: t["eligible_complex_planning_selection"]["denominator"] == 0),
     ("unknown-floor", {"planning_policy_version": 1, "complexity": "Unknown", "planning_strategy": "core"}, lambda t: t["eligible_complex_planning_selection"]["denominator"] == 0),
     ("complex-primary", {"planning_policy_version": 1, "complexity": "Complex", "planning_strategy": "provider-primary"}, lambda t: t["eligible_complex_planning_selection"]["rate"] == 1.0),
@@ -19,7 +19,27 @@ from planning_provider_metrics import reduce_planning_provider_kpis
     ("approval-wait", {"planning_policy_version": 1, "provider_preflights": {"p": {"status": "awaiting-approval"}}}, lambda t: t["preflight_live_digest_match"]["denominator"] == 0),
     ("invalid-plan", {"planning_policy_version": 1, "specialist_invocations": [{"phase": "planning", "status": "failed", "reason_code": "invalid-plan"}]}, lambda t: t["canonical_plan_executor_lineage"]["denominator"] == 0),
     ("legacy", {"complexity": "Complex", "legacy_session_retroactive_provider_invocations": 0}, lambda t: t["legacy_session_retroactive_provider_invocations"] == 0),
-])
+    ("standard-core", {"planning_policy_version": 1, "complexity": "Standard", "planning_strategy": "core"}, lambda t: t["eligible_complex_planning_selection"]["denominator"] == 0),
+    ("critical-advisory", {"planning_policy_version": 1, "complexity": "Critical", "planning_strategy": "provider-advisory"}, lambda t: t["eligible_complex_planning_selection"]["rate"] == 1.0),
+    ("required-halt", {"planning_policy_version": 1, "planning_provider_required": True, "specialist_invocations": [{"phase": "planning", "status": "failed", "reason_code": "provider-unavailable"}]}, lambda t: t["eligible_complex_planning_selection"]["denominator"] == 0),
+    ("preflight-reserved-excluded", {"planning_policy_version": 1, "specialist_invocations": [{"phase": "planning", "status": "reserved"}]}, lambda t: t["preflight_live_digest_match"]["denominator"] == 0),
+    ("preflight-running-digest-match", {"planning_policy_version": 1, "specialist_invocations": [{"invocation_id": "i", "phase": "planning", "status": "running", "input_outbound_packet_digest": "sha256:x"}], "provider_preflights": {"p": {"invocation_id": "i", "status": "consumed", "outbound_packet_digest": "sha256:x"}}}, lambda t: t["preflight_live_digest_match"]["rate"] == 1.0),
+    ("preflight-digest-drift", {"planning_policy_version": 1, "specialist_invocations": [{"invocation_id": "i", "phase": "planning", "status": "completed", "input_outbound_packet_digest": "sha256:x"}], "provider_preflights": {"p": {"invocation_id": "i", "status": "consumed", "outbound_packet_digest": "sha256:y"}}}, lambda t: t["preflight_live_digest_match"]["rate"] == 0.0),
+    ("preflight-required-rejection", {"planning_policy_version": 1, "specialist_invocations": [{"phase": "planning", "status": "failed", "reason_code": "preflight-required"}]}, lambda t: t["preflight_live_digest_match"]["denominator"] == 0),
+    ("ambient-authority-rejected", {"planning_policy_version": 1, "provider_plan_imports": {"i": {"candidate": {"mission_metadata": {"authority": {"owner": "provider"}}}}}}, lambda t: t["authority_injection_accept_count"] == 1),
+    ("orphan-import-no-lineage", {"planning_policy_version": 1, "decisions": [{"step_id": "s"}]}, lambda t: t["canonical_plan_executor_lineage"]["rate"] == 0.0),
+    ("executor-lineage-match", {"planning_policy_version": 1, "canonical_plan": {"digest": "sha256:p", "generation": 1}, "executor_handoff": {"handoff_id": "h"}, "decisions": [{"step_id": "s", "handoff_id": "h", "plan_digest": "sha256:p", "plan_generation": 1}]}, lambda t: t["canonical_plan_executor_lineage"]["rate"] == 1.0),
+    ("executor-mutation-step-zero", {"planning_policy_version": 1, "canonical_plan": {"digest": "sha256:p", "generation": 1}, "executor_handoff": {"handoff_id": "h"}, "decisions": []}, lambda t: t["canonical_plan_executor_lineage"]["denominator"] == 0),
+    ("dual-v1-v2-core", {"planning_policy_version": 1, "planning_strategy": "core", "complexity": "Complex"}, lambda t: t["eligible_complex_planning_selection"]["numerator"] == 0),
+    ("legacy-provider-invocation", {"specialist_invocations": [{"phase": "planning", "status": "completed", "mode": "command-provider"}]}, lambda t: t["legacy_session_retroactive_provider_invocations"] == 1),
+    ("dry-run-no-effect", {"planning_policy_version": 1, "provider_preflights": {"p": {"dry_run": True}}}, lambda t: t["dry_run_external_effect_count"] == 0),
+    ("dry-run-effect-evidence", {"planning_policy_version": 1, "provider_preflights": {"p": {"dry_run": True, "external_effect_evidence": {"count": 1}}}}, lambda t: t["dry_run_external_effect_count"] == 1),
+    ("phase-ineligible-after-start", {"planning_policy_version": 1, "specialist_invocations": [{"phase": "planning", "status": "running", "reason_code": "phase-not-allowed"}]}, lambda t: t["ineligible_external_planning_invocations"] == 1),
+    ("application-ineligible-before-start", {"planning_policy_version": 1, "specialist_invocations": [{"phase": "planning", "status": "failed", "reason_code": "provider-not-selected"}]}, lambda t: t["ineligible_external_planning_invocations"] == 0),
+]
+
+
+@pytest.mark.parametrize("name,state,assertion", CONFORMANCE_CASES)
 def test_existing_lifecycle_state_contracts_reduce_to_conformance_kpis(name, state, assertion):
     totals = reduce_planning_provider_kpis([state], population_kind="controlled")["totals"]
     assert assertion(totals), name

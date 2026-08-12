@@ -16,6 +16,11 @@ _KNOWN_REASONS = {
 }
 _COUNTERS = ("ineligible_external_planning_invocations", "dry_run_external_effect_count", "legacy_session_retroactive_provider_invocations", "authority_injection_accept_count")
 _RATES = ("eligible_complex_planning_selection", "preflight_live_digest_match", "canonical_plan_executor_lineage")
+_TOP_LEVEL_KEYS = {"schema", "population", "totals", "reason_code_counts", "cohorts"}
+_TOTAL_KEYS = set(_COUNTERS) | set(_RATES)
+_COHORT_KEYS = {"complexity", "task_profile", "planning_strategy", "requirement", "population_kind", "session_count"}
+_STRATEGIES = {"core", "provider-primary", "provider-advisory", "legacy-core"}
+_INELIGIBLE_REASONS = {"unknown-complexity", "below-min-complexity", "phase-not-allowed", "invalid-phase-allow-list", "provider-not-selected", "provider-identity-mismatch", "selection-identity-mismatch", "planning-primary-binding-mismatch"}
 
 
 class PlanningProviderMetricError(ValueError):
@@ -44,13 +49,13 @@ def _cohort(state: Mapping[str, Any], population_kind: str) -> tuple[str, str, s
 
 
 def validate_planning_provider_kpis(value: Mapping[str, Any]) -> None:
-    if not isinstance(value, Mapping) or value.get("schema") != SCHEMA:
+    if not isinstance(value, Mapping) or set(value) != _TOP_LEVEL_KEYS or value.get("schema") != SCHEMA:
         raise PlanningProviderMetricError("schema is invalid")
     population = value.get("population")
     if not isinstance(population, Mapping) or population.get("kind") not in _POPULATIONS or type(population.get("session_count")) is not int or population["session_count"] < 0:
         raise PlanningProviderMetricError("population is invalid")
     totals = value.get("totals")
-    if not isinstance(totals, Mapping):
+    if not isinstance(totals, Mapping) or set(totals) != _TOTAL_KEYS:
         raise PlanningProviderMetricError("totals are invalid")
     for key in _COUNTERS:
         if type(totals.get(key)) is not int or totals[key] < 0:
@@ -62,6 +67,43 @@ def validate_planning_provider_kpis(value: Mapping[str, Any]) -> None:
         expected = _rate(detail["numerator"], detail["denominator"])
         if detail != expected:
             raise PlanningProviderMetricError("rate is inconsistent")
+    reason_counts = value.get("reason_code_counts")
+    if not isinstance(reason_counts, Mapping) or set(reason_counts) != set(_REASON_BUCKETS):
+        raise PlanningProviderMetricError("reason counts are invalid")
+    for bucket in _REASON_BUCKETS:
+        counts = reason_counts[bucket]
+        if (not isinstance(counts, Mapping)
+                or any(reason not in _KNOWN_REASONS[bucket] or type(count) is not int or count < 0
+                       for reason, count in counts.items())):
+            raise PlanningProviderMetricError("reason count is invalid")
+    cohorts = value.get("cohorts")
+    if not isinstance(cohorts, list):
+        raise PlanningProviderMetricError("cohorts are invalid")
+    for cohort in cohorts:
+        if (not isinstance(cohort, Mapping) or set(cohort) != _COHORT_KEYS
+                or not all(isinstance(cohort[key], str) and cohort[key] for key in
+                           ("complexity", "task_profile"))
+                or cohort["planning_strategy"] not in _STRATEGIES
+                or cohort["requirement"] not in {"optional", "required"}
+                or cohort["population_kind"] not in _POPULATIONS
+                or type(cohort["session_count"]) is not int or cohort["session_count"] < 0):
+            raise PlanningProviderMetricError("cohort is invalid")
+
+
+def _planning_invocations(state: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    records = state.get("specialist_invocations")
+    return [record for record in records if isinstance(record, Mapping) and record.get("phase") == "planning"] if isinstance(records, list) else []
+
+
+def _has_external_start(invocation: Mapping[str, Any]) -> bool:
+    return invocation.get("status") in {"reserved", "running", "completed"} or invocation.get("lifecycle_state") in {"reserved", "running", "terminal"}
+
+
+def _non_mission_authority(value: object) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    owner = value.get("owner")
+    return isinstance(owner, str) and owner != "mission"
 
 
 def reduce_planning_provider_kpis(
@@ -79,13 +121,26 @@ def reduce_planning_provider_kpis(
         if not isinstance(state, Mapping):
             raise PlanningProviderMetricError("state must be an object")
         key = _cohort(state, population_kind); cohorts[key]["session_count"] += 1
-        for counter in _COUNTERS:
-            value = state.get(counter, 0)
-            if type(value) is not int or value < 0:
-                raise PlanningProviderMetricError("counter is invalid")
-            totals[counter] += value
         policy_v1 = state.get("planning_policy_version") == 1
-        invocations = [entry for entry in state.get("specialist_invocations") or [] if isinstance(entry, Mapping) and entry.get("phase") == "planning"]
+        invocations = _planning_invocations(state)
+        if not policy_v1:
+            totals["legacy_session_retroactive_provider_invocations"] += sum(
+                1 for record in invocations if record.get("mode") in {"command-provider", "skill-provider"}
+            )
+        pointers = state.get("provider_preflights") if isinstance(state.get("provider_preflights"), Mapping) else {}
+        for pointer in pointers.values():
+            if (isinstance(pointer, Mapping) and pointer.get("dry_run") is True
+                    and isinstance(pointer.get("external_effect_evidence"), Mapping)
+                    and type(pointer["external_effect_evidence"].get("count")) is int
+                    and pointer["external_effect_evidence"]["count"] > 0):
+                totals["dry_run_external_effect_count"] += pointer["external_effect_evidence"]["count"]
+        imports = state.get("provider_plan_imports")
+        if isinstance(imports, Mapping):
+            for record in imports.values():
+                candidate = record.get("candidate") if isinstance(record, Mapping) else None
+                metadata = candidate.get("mission_metadata") if isinstance(candidate, Mapping) else None
+                if isinstance(metadata, Mapping) and _non_mission_authority(metadata.get("authority")):
+                    totals["authority_injection_accept_count"] += 1
         if not policy_v1:
             continue
         if state.get("complexity") in {"Complex", "Critical"}:
@@ -93,11 +148,15 @@ def reduce_planning_provider_kpis(
             if state.get("planning_strategy") in {"provider-primary", "provider-advisory"}:
                 eligible[0] += 1
         for invocation in invocations:
-            if invocation.get("status") in {"reserved", "running", "completed"}:
+            if invocation.get("reason_code") in _INELIGIBLE_REASONS and _has_external_start(invocation):
+                totals["ineligible_external_planning_invocations"] += 1
+            if (invocation.get("reason_code") not in _INELIGIBLE_REASONS
+                    and (invocation.get("status") in {"running", "completed"}
+                         or (invocation.get("lifecycle_state") == "terminal" and invocation.get("status") != "reserved"))):
                 preflight[1] += 1
-                pointers = state.get("provider_preflights") if isinstance(state.get("provider_preflights"), Mapping) else {}
                 matched = [record for record in pointers.values() if isinstance(record, Mapping) and record.get("invocation_id") == invocation.get("invocation_id")]
-                if len(matched) == 1 and matched[0].get("status") == "consumed":
+                if (len(matched) == 1 and matched[0].get("status") == "consumed"
+                        and matched[0].get("outbound_packet_digest") == invocation.get("input_outbound_packet_digest")):
                     preflight[0] += 1
             if invocation.get("status") in {"failed", "rejected", "unvalidated-evidence"}:
                 reason = invocation.get("reason_code") or invocation.get("status")
@@ -106,7 +165,7 @@ def reduce_planning_provider_kpis(
                     reasons["preflight_rejection"]["preflight-required"] += 1
                 if reason == "invalid-plan":
                     reasons["invalid_plan"]["invalid-plan"] += 1
-        for record in (state.get("provider_preflights") or {}).values() if isinstance(state.get("provider_preflights"), Mapping) else []:
+        for record in pointers.values():
             if isinstance(record, Mapping) and record.get("status") == "awaiting-approval":
                 reasons["approval_wait"]["awaiting-approval"] += 1
         plan = state.get("canonical_plan") if isinstance(state.get("canonical_plan"), Mapping) else None

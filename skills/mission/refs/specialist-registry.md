@@ -278,7 +278,7 @@ result_contract:
 
 If a command exits successfully but only returns a preparation banner or less than the required non-template evidence, the runner records `status: prepared` instead of `completed`. If the provider output or exit code matches `awaiting_input_markers` or `awaiting_input_exit_codes`, the runner records `status: awaiting-input`. `prepared` and `awaiting-input` are terminal accounting statuses for transparency, but they are not applied result evidence. A provider marked `required: true` must produce `completed`, `inline-applied`, or `skill-tool-applied` evidence before `mission-state.py mark-passes` can succeed.
 
-The `oracle-reviewer` provider role gets a conservative default result contract even if a project registry omits one. Its default rejects common browser-review preparation markers such as prompt/result/packet paths and review URLs, so an exit code of 0 cannot satisfy required evidence unless the provider returns substantive findings.
+Every provider that requires result evidence must declare its result contract in the explicit registry entry. The contract should reject preparation-only markers such as prompt/result/packet paths and review URLs, so an exit code of 0 cannot satisfy required evidence unless the provider returns substantive findings.
 
 For providers with `risk.first_use_confirmation: true`, record consent after a user approval boundary:
 
