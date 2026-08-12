@@ -297,3 +297,31 @@ def test_prepared_risk_scoped_command_still_requires_verified_receipt_before_spa
     assert "approval-required" in result.stderr
     assert not marker.exists()
     assert state_path.read_bytes() == before
+
+
+def test_hand_marked_approved_preflight_without_receipt_never_spawns(run_cli, tmp_path):
+    command_dir = tmp_path / "commands"; command_dir.mkdir()
+    marker = tmp_path / "provider-ran"
+    command = command_dir / "provider-command"
+    command.write_text("#!/bin/sh\nprintf invoked > \"$PROVIDER_MARKER\"\ncat >/dev/null\n", encoding="utf-8"); command.chmod(0o700)
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps({"schema": "mission-specialist-registry/2", "specialists_v2": [{
+        "provider_id": "manual-approval-provider", "role": "planning-provider", "skill": "manual-approval-provider",
+        "kind": "command", "command": "provider-command", "args": [], "env": {}, "task_profiles": ["architecture"],
+        "phases": ["planning"], "activation": {"min_complexity": "Complex", "auto_select_if": ["complexity"]},
+    }]}), encoding="utf-8")
+    env = {"PATH": f"{command_dir}{os.pathsep}{os.environ.get('PATH', '')}", "PROVIDER_MARKER": str(marker)}
+    source = tmp_path / "input.txt"; source.write_text("brief", encoding="utf-8")
+    run_cli("init", "manual receipt rejection", "--complexity", "Complex", cwd=tmp_path, check=True, env_extra=env)
+    run_cli("specialists", "recommend", "--no-default-skill-roots", "--task", "Review architecture", "--registry", str(registry), "--complexity", "Complex", "--record-state", cwd=tmp_path, check=True, env_extra=env)
+    preflight = json.loads(run_cli("specialists", "prepare-invocation", "--provider", "manual-approval-provider", "--iteration", "1", "--phase", "planning", "--input-file", str(source), cwd=tmp_path, env_extra=env, check=True).stdout)
+    state_path = tmp_path / ".mission-state" / "sessions" / "test.json"
+    state = json.loads(state_path.read_text(encoding="utf-8")); state["provider_preflights"][preflight["preflight_id"]]["status"] = "approved"; state_path.write_text(json.dumps(state), encoding="utf-8")
+    before = state_path.read_bytes()
+
+    result = run_cli("specialists", "invoke-command", "--provider", "manual-approval-provider", "--iteration", "1", "--phase", "planning", "--preflight-id", preflight["preflight_id"], "--input-file", str(source), cwd=tmp_path, env_extra=env)
+
+    assert result.returncode == 2
+    assert "receipt-invalid" in result.stderr
+    assert not marker.exists()
+    assert state_path.read_bytes() == before

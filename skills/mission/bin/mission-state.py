@@ -4846,6 +4846,37 @@ def _provider_preflight_subject(data: dict, provider: dict, args) -> dict:
     }
 
 
+def _verified_preflight_packet(cwd: Path, data: dict, provider: dict, args) -> tuple[dict, bytes]:
+    """Rebuild #396's exact packet and reject every drift before process reservation."""
+    pointers = data.get("provider_preflights")
+    pointer = pointers.get(args.preflight_id) if isinstance(pointers, dict) else None
+    if not isinstance(pointer, dict) or pointer.get("status") != "approved":
+        _provider_gate("approval-required")
+    # An approved state bit is never a receipt.  Receipt issuance is a host
+    # verifier responsibility; do not let a hand-edited pointer authorize I/O.
+    if not isinstance(pointer.get("receipt"), dict):
+        _provider_gate("receipt-invalid")
+    if not isinstance(args.input_file, str) or not args.input_file:
+        _provider_gate("preflight-input-required")
+    try:
+        subject = _provider_preflight_subject(data, provider, args)
+        subject["invocation_id"] = pointer.get("invocation_id")
+        rebuilt = build_preflight(subject, [safe_input_snapshot(args.input_file, root=cwd)])
+        if (rebuilt["outbound_context_digest"] != pointer.get("outbound_context_digest")
+                or rebuilt["outbound_packet_digest"] != pointer.get("outbound_packet_digest")):
+            _provider_gate("payload-drift")
+        artifact_path = pointer.get("artifact_path")
+        if not isinstance(artifact_path, str) or not artifact_path:
+            _provider_gate("preflight-artifact-invalid")
+        artifact = state_dir(cwd) / artifact_path
+        raw = artifact.read_bytes()
+        if raw != rebuilt["outbound_packet_bytes"]:
+            _provider_gate("payload-drift")
+        return pointer, raw
+    except ProviderPreflightError as error:
+        _provider_gate(str(error))
+
+
 def cmd_prepare_provider_invocation(args):
     """Create a side-effect-free, private exact-packet preflight pointer."""
     cwd = Path.cwd()
@@ -4905,10 +4936,7 @@ def cmd_invoke_command_provider(args):
     # guard before reservation, state mutation, and subprocess creation.
     if not getattr(args, "preflight_id", None):
         _provider_gate("preflight-required")
-    preflights = data.get("provider_preflights")
-    pointer = preflights.get(args.preflight_id) if isinstance(preflights, dict) else None
-    if not isinstance(pointer, dict) or pointer.get("status") != "approved":
-        _provider_gate("approval-required")
+    pointer, packet = _verified_preflight_packet(cwd, data, provider, args)
     if _confirmed_selection_required(data, provider.get("skill") or provider.get("role"), "completed") and not args.selection_source:
         print(
             "ERROR: specialists_decision requested user confirmation; pass --selection-source confirmed-user "
@@ -5023,7 +5051,6 @@ def cmd_invoke_command_provider(args):
 
     command = provider.get("command")
     argv = [command, *[str(a) for a in provider.get("args") or []]]
-    packet = _command_provider_packet(data, provider, args)
     command_env = os.environ.copy()
     command_env.update(_string_map(provider.get("env")))
     if not _command_is_available(command):
