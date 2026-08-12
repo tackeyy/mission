@@ -4620,15 +4620,25 @@ def _require_current_registry_application(
 
 def _is_provider_backed_application(data: dict, skill: str, args, provider: dict | None) -> bool:
     """Keep core activity records compatible; fail closed for any provider signal."""
-    return bool(
+    selected_provider_signal = bool(
         provider
+        and (
+            provider.get("kind") == "command"
+            or provider.get("registry_projection_digest")
+        )
+    )
+    return bool(
+        selected_provider_signal
         or getattr(args, "selection_source", None)
-        or getattr(args, "invocation_id", None)
         or getattr(args, "mode", None) == "command-provider"
         or any(
             isinstance(item, dict)
             and str(item.get("skill") or "") == skill
-            and any(key in item for key in ("provider_id", "selection_id", "registry_entry_digest"))
+            and (
+                item.get("mode") == "command-provider"
+                or item.get("provider_kind") == "command"
+                or any(key in item for key in ("provider_id", "registry_entry_digest"))
+            )
             for item in data.get("specialist_invocations") or []
         )
     )
