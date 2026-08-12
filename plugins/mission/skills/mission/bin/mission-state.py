@@ -148,6 +148,11 @@ from provider_preflight import (  # noqa: E402
     safe_input_snapshot,
     validate_receipt as validate_provider_receipt,
 )
+from plan_contract import (  # noqa: E402
+    PlanContractError,
+    canonical_plan_bytes,
+    parse_provider_result,
+)
 from artifact_contract import (  # noqa: E402
     ArtifactContractError,
     artifact_lint_observation_matches,
@@ -437,6 +442,7 @@ SPECIALIST_INVOCATION_STATUSES = {
     "selected",
     "started",
     "completed",
+    "unvalidated-evidence",
     "prepared",
     "awaiting-input",
     "inline-applied",
@@ -473,13 +479,6 @@ APPLIED_SPECIALIST_INVOCATION_STATUSES = {
     "completed",
     "inline-applied",
     "skill-tool-applied",
-}
-
-DEFAULT_COMMAND_RESULT_CONTRACTS = {
-    "oracle-reviewer": {
-        "min_non_template_chars": 200,
-        "forbidden_markers": list(PREPARATION_ONLY_MARKERS),
-    },
 }
 
 SPECIALIST_SELECTION_CHECKPOINT_COMPLEXITIES = {"Standard", "Complex", "Critical"}
@@ -3271,8 +3270,6 @@ def _classify_non_portable_execution_config(candidate: dict) -> str | None:
         return "argument-locator"
     if candidate.get("env"):
         return "environment-values"
-    if candidate.get("_explicit_result_contract_present") is True:
-        return "result-contract-resupply"
     return None
 
 
@@ -3462,14 +3459,6 @@ def _public_eligibility_context_fields(eligibility: dict, complexity: object) ->
     return fields
 
 
-def _default_result_contract_for(skill: str | None, role: str | None = None) -> dict:
-    keys = {str(skill or ""), str(role or "")} - {""}
-    for key in keys:
-        if key in DEFAULT_COMMAND_RESULT_CONTRACTS:
-            return dict(DEFAULT_COMMAND_RESULT_CONTRACTS[key])
-    return {}
-
-
 def _merge_result_contract(defaults: dict, explicit: dict) -> dict:
     merged = dict(defaults)
     merged.update(explicit)
@@ -3507,7 +3496,7 @@ def _normalize_candidate(candidate: dict, source: str) -> dict:
     auto_use = candidate.get("auto_use") if isinstance(candidate.get("auto_use"), dict) else {}
     risk = candidate.get("risk") if isinstance(candidate.get("risk"), dict) else {}
     explicit_result_contract = candidate.get("result_contract") if isinstance(candidate.get("result_contract"), dict) else {}
-    result_contract = _merge_result_contract(_default_result_contract_for(skill, role), explicit_result_contract)
+    result_contract = _merge_result_contract({}, explicit_result_contract)
     if kind == "command" and not skill:
         skill = role or command
     bounded_use = _is_bounded_orchestrator_candidate(candidate)
@@ -4426,10 +4415,7 @@ def _contract_exit_codes(contract: dict, key: str) -> set[int]:
 def _classify_command_provider_result(provider: dict, exit_code: int | None,
                                       stdout: str, stderr: str) -> tuple[str, str | None]:
     explicit_contract = provider.get("result_contract") if isinstance(provider.get("result_contract"), dict) else {}
-    contract = _merge_result_contract(
-        _default_result_contract_for(provider.get("skill"), provider.get("role")),
-        explicit_contract,
-    )
+    contract = _merge_result_contract({}, explicit_contract)
     combined = "\n".join([stdout or "", stderr or ""])
     awaiting_markers = [str(v) for v in contract.get("awaiting_input_markers") or []]
     awaiting_hits = [marker for marker in awaiting_markers if marker and marker in combined]
@@ -4449,6 +4435,8 @@ def _classify_command_provider_result(provider: dict, exit_code: int | None,
     non_template_len = _non_template_text_length(combined, forbidden_markers)
     if marker_hits:
         return "prepared", f"command provider returned preparation-only evidence: {', '.join(marker_hits[:3])}"
+    if not explicit_contract:
+        return "unvalidated-evidence", "command provider has no explicit result contract"
     if min_chars and non_template_len < min_chars:
         return "prepared", f"command provider evidence below result_contract.min_non_template_chars ({non_template_len} < {min_chars})"
     return "completed", None
@@ -4505,7 +4493,7 @@ def _require_current_provider_application(
     if provider is None:
         _provider_gate("provider-not-selected")
     if cwd is not None and isinstance(data.get("specialist_registry_projection"), dict):
-        _require_current_registry_application(
+        provider = _require_current_registry_application(
             data,
             provider,
             cwd=cwd,
@@ -4551,7 +4539,7 @@ def _require_current_registry_application(
     requested_phase: str,
     requested_iteration: int,
     selection_source: str | None,
-) -> None:
+) -> dict:
     """Re-resolve the recorded registry projection from safe current inputs."""
     recorded = data.get("specialist_registry_projection") or {}
     inputs = recorded.get("ordered_inputs") or []
@@ -4605,6 +4593,9 @@ def _require_current_registry_application(
     if candidate.get("registry_entry_digest") != provider.get("registry_entry_digest"):
         _provider_gate("registry-entry-mismatch")
     normalized = _normalize_candidate(candidate, str(candidate.get("source") or "registry"))
+    for field in ("selection_id", "eligibility_selection_source", "registry_projection_digest", "context_digest", "activation_digest"):
+        if field in provider:
+            normalized[field] = provider[field]
     current_iteration = data.get("iteration")
     eligibility = evaluate_provider_eligibility(
         normalized,
@@ -4623,6 +4614,7 @@ def _require_current_registry_application(
         _provider_gate("activation-digest-mismatch")
     if not eligibility.get("eligible"):
         _provider_gate(str(eligibility.get("reason_code")))
+    return normalized
 
 
 def _is_provider_backed_application(data: dict, skill: str, args, provider: dict | None) -> bool:
@@ -11208,6 +11200,94 @@ def cmd_review_import(args):
     }, ensure_ascii=False))
 
 
+def cmd_plan_import(args):
+    """Validate one provider result and atomically publish only an inert plan candidate."""
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        _provider_gate("state-missing")
+    if not re.fullmatch(r"inv_[0-9a-f]{32}", args.invocation_id):
+        _provider_gate("invocation-id-invalid")
+    try:
+        raw = _read_strict_review_file(Path(args.input))
+    except ValueError:
+        _provider_gate("plan-input-unreadable")
+    with StateLock(lock_file(cwd)), _PublishedFilesTransaction() as published_files:
+        data = json.loads(sf.read_text(encoding="utf-8"))
+        invocation = invocation_by_id(data, args.invocation_id)
+        if not isinstance(invocation, dict):
+            _provider_gate("invocation-not-found")
+        if (invocation.get("iteration") != data.get("iteration") or invocation.get("phase") != "planning"
+                or invocation.get("status") != "completed" or invocation.get("lifecycle_state") != "terminal"):
+            _provider_gate("invocation-not-current-completed-plan")
+        provider = _find_provider(data, str(invocation.get("skill") or invocation.get("role") or ""))
+        current = _require_current_provider_application(
+            data, provider, requested_phase="planning", requested_iteration=data.get("iteration"),
+            application_kind="result-import", selection_source=invocation.get("selection_source"),
+            invocation_id=args.invocation_id, cwd=cwd, registry_args=args,
+        )
+        contract = current.get("result_contract") if isinstance(current.get("result_contract"), dict) else {}
+        if not contract:
+            _provider_gate("missing-structured-result-contract")
+        pointers = data.get("provider_preflights") if isinstance(data.get("provider_preflights"), dict) else {}
+        matches = [(key, value) for key, value in pointers.items() if isinstance(value, dict) and value.get("invocation_id") == args.invocation_id]
+        if len(matches) != 1:
+            _provider_gate("preflight-binding-missing")
+        preflight_id, pointer = matches[0]
+        if pointer.get("status") != "consumed" or pointer.get("consumed_invocation_id") != args.invocation_id:
+            _provider_gate("preflight-not-consumed")
+        artifact_path = pointer.get("artifact_path")
+        receipt = pointer.get("receipt") if isinstance(pointer.get("receipt"), dict) else {}
+        receipt_path, receipt_digest = receipt.get("artifact_path"), receipt.get("digest")
+        try:
+            for relative in (artifact_path, receipt_path):
+                if not isinstance(relative, str) or not relative or Path(relative).is_absolute() or ".." in Path(relative).parts: raise ValueError
+            if not isinstance(receipt_digest, str) or _SHA256_REF_RE.fullmatch(receipt_digest) is None: raise ValueError
+            packet_bytes = _read_strict_review_file(state_dir(cwd) / artifact_path)
+            if "sha256:" + hashlib.sha256(packet_bytes).hexdigest() != pointer.get("outbound_packet_digest"): raise ValueError
+            receipt_bytes = _read_strict_review_file(state_dir(cwd) / receipt_path)
+            if "sha256:" + hashlib.sha256(receipt_bytes).hexdigest() != receipt_digest: raise ValueError
+        except ValueError:
+            _provider_gate("consumed-preflight-evidence-invalid")
+        expected = {"invocation_id": args.invocation_id, "preflight_id": preflight_id,
+                    "outbound_packet_digest": pointer.get("outbound_packet_digest"),
+                    "selection_id": current.get("selection_id"),
+                    "selection_source": current.get("eligibility_selection_source") or "automatic",
+                    "iteration": data.get("iteration")}
+        try:
+            parsed = parse_provider_result(raw, expected_binding=expected, result_contract=contract, workspace=cwd)
+        except PlanContractError as exc:
+            _provider_gate(str(exc))
+        digest = parsed["raw_result_digest"]
+        metadata = {
+            "authority": {"owner": "mission", "may_write_state": False, "may_decide_review": False, "may_decide_score": False, "may_decide_completion": False},
+            "provenance": {"provider_id": current.get("provider_id"), "registry_entry_digest": current.get("registry_entry_digest"), "selection_id": expected["selection_id"], "selection_source": expected["selection_source"], "invocation_id": args.invocation_id, "iteration": expected["iteration"], "input_outbound_packet_digest": expected["outbound_packet_digest"], "raw_result_digest": digest},
+            "capability_verification": {"selection_verified": True, "class_exact_match": True, "variant_exact_match": True},
+        }
+        candidate = {"schema": "mission-plan/1", **parsed["document"], "mission_metadata": metadata}
+        canonical = canonical_plan_bytes(candidate)
+        canonical_digest = "sha256:" + hashlib.sha256(canonical).hexdigest()
+        mission8 = str(data.get("mission_id") or "unknown")[:8]
+        raw_name = f"plan-result-{mission8}-{digest[7:23]}.json"
+        raw_file = published_files.add(_publish_review_archive_transaction(cwd, raw_name, raw))
+        candidate_path = state_dir(cwd) / "plans" / f"{canonical_digest[7:23]}.json"
+        candidate_file = published_files.add(_publish_output_transaction(candidate_path, canonical))
+        previous = (data.get("provider_plan_imports") or {}).get(args.invocation_id)
+        generation = (previous.get("generation", 0) if isinstance(previous, dict) and previous.get("candidate_digest") != canonical_digest else 0)
+        if not generation:
+            generation = (previous.get("generation", 0) if isinstance(previous, dict) else 0) or 1
+        else:
+            generation += 1
+        reference = {"raw_result_path": str(raw_file.path.relative_to(cwd)), "raw_result_digest": digest,
+                     "candidate_path": str(candidate_file.path.relative_to(cwd)), "candidate_digest": canonical_digest,
+                     "invocation_id": args.invocation_id, "preflight_id": preflight_id, "generation": generation}
+        data.setdefault("provider_plan_imports", {})[args.invocation_id] = reference
+        data["updated_at"] = iso_now()
+        _verify_published_file(raw_file); _verify_published_file(candidate_file)
+        backup_state(sf); atomic_write_json(sf, stamp_metadata(data, cwd))
+    print(json.dumps({"ok": True, "plan_import": reference}, indent=2 if args.json else None, ensure_ascii=False))
+
+
 def _cap_for_findings(findings: list[dict]) -> float | None:
     counts = {"High": 0, "Medium": 0, "Low": 0}
     for finding in findings:
@@ -14986,6 +15066,15 @@ def _build_parser():
                            help="host-only execution-isolator/1 ID")
     p_prepare.add_argument("--json", action="store_true")
     p_prepare.set_defaults(func=cmd_prepare_provider_invocation, command_outcome_tracking=True)
+
+    p_plan_import = spec_sub.add_parser(
+        "plan-import", help="strict provider plan resultを検証してinert canonical candidateへ取り込む"
+    )
+    p_plan_import.add_argument("--input", required=True, help="providerが返したmission-provider-result/1 regular file")
+    p_plan_import.add_argument("--invocation-id", required=True)
+    p_plan_import.add_argument("--registry", action="append", default=None)
+    p_plan_import.add_argument("--json", action="store_true")
+    p_plan_import.set_defaults(func=cmd_plan_import, command_outcome_tracking=True)
 
     p_verify_approval = spec_sub.add_parser(
         "verify-approval", help="host-trusted verifierのevidenceからper-invocation receiptを生成する"

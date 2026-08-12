@@ -202,6 +202,22 @@ def _validate_v2_candidate_types(candidate: dict[str, Any]) -> None:
         for key, value in candidate["env"].items()
     ):
         _invalid_candidate_type("env")
+    if "result_contract" in candidate:
+        contract = candidate["result_contract"]
+        allowed = {"envelope_schema", "artifact_schema", "cardinality", "required_capability_class", "required_capability_variant", "require_exact_variant", "forbidden_markers", "min_non_template_chars", "awaiting_input_markers", "awaiting_input_exit_codes"}
+        if set(contract) - allowed:
+            _invalid_candidate_type("result_contract")
+        for field in ("envelope_schema", "artifact_schema", "cardinality", "required_capability_class", "required_capability_variant"):
+            if field in contract and not isinstance(contract[field], str):
+                _invalid_candidate_type(f"result_contract.{field}")
+        if "require_exact_variant" in contract and not _is_exact_bool(contract["require_exact_variant"]):
+            _invalid_candidate_type("result_contract.require_exact_variant")
+        for field in ("forbidden_markers", "awaiting_input_markers"):
+            if field in contract and not _is_string_list(contract[field]):
+                _invalid_candidate_type(f"result_contract.{field}")
+        for field in ("min_non_template_chars",):
+            if field in contract and (type(contract[field]) is not int or contract[field] < 0):
+                _invalid_candidate_type(f"result_contract.{field}")
     if "timeout" in candidate:
         timeout = candidate["timeout"]
         if type(timeout) is not int or not 1 <= timeout <= 86400:
@@ -781,7 +797,7 @@ def validate_provider_application(
             and str(item.get("skill") or item.get("role") or "") == skill
             and item.get("invocation_id") != invocation_id
             and item.get("status") in {
-                "reserved", "running", "completed", "failed-before-start", "abandoned-unknown",
+                "reserved", "running", "completed", "unvalidated-evidence", "failed-before-start", "abandoned-unknown",
                 "started", "prepared", "awaiting-input", "inline-applied", "skill-tool-applied",
                 "skipped", "unavailable", "failed",
             }

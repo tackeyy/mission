@@ -3095,13 +3095,14 @@ def test_portable_path_command_remains_invokable_and_accounted(
 
     assert invoked.returncode == 0, invoked.stderr
     output = json.loads(invoked.stdout)
-    assert output["ok"] is True
+    assert output["ok"] is False
+    assert output["entry"]["status"] == "unvalidated-evidence"
     state = json.loads(
         (tmp_path / ".mission-state" / "sessions" / "test.json").read_text(
             encoding="utf-8"
         )
     )
-    assert state["specialist_invocations"][-1]["status"] == "completed"
+    assert state["specialist_invocations"][-1]["status"] == "unvalidated-evidence"
 
 
 @pytest.mark.parametrize(

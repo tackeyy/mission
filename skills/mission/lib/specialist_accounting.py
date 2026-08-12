@@ -13,6 +13,7 @@ from specialist_lifecycle import (
 
 TERMINAL_SPECIALIST_INVOCATION_STATUSES = {
     "completed",
+    "unvalidated-evidence",
     "prepared",
     "awaiting-input",
     "inline-applied",

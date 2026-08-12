@@ -14,6 +14,7 @@ TERMINAL_INVOCATION_STATUSES = frozenset(
         "failed-before-start",
         "abandoned-unknown",
         "completed",
+        "unvalidated-evidence",
         "prepared",
         "awaiting-input",
         "inline-applied",
