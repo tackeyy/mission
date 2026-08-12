@@ -202,6 +202,22 @@ def _validate_v2_candidate_types(candidate: dict[str, Any]) -> None:
         for key, value in candidate["env"].items()
     ):
         _invalid_candidate_type("env")
+    if "result_contract" in candidate:
+        contract = candidate["result_contract"]
+        allowed = {"envelope_schema", "artifact_schema", "cardinality", "required_capability_class", "require_exact_variant", "forbidden_markers", "min_non_template_chars", "awaiting_input_markers", "awaiting_input_exit_codes"}
+        if set(contract) - allowed:
+            _invalid_candidate_type("result_contract")
+        for field in ("envelope_schema", "artifact_schema", "cardinality", "required_capability_class"):
+            if field in contract and not isinstance(contract[field], str):
+                _invalid_candidate_type(f"result_contract.{field}")
+        if "require_exact_variant" in contract and not _is_exact_bool(contract["require_exact_variant"]):
+            _invalid_candidate_type("result_contract.require_exact_variant")
+        for field in ("forbidden_markers", "awaiting_input_markers"):
+            if field in contract and not _is_string_list(contract[field]):
+                _invalid_candidate_type(f"result_contract.{field}")
+        for field in ("min_non_template_chars",):
+            if field in contract and (type(contract[field]) is not int or contract[field] < 0):
+                _invalid_candidate_type(f"result_contract.{field}")
     if "timeout" in candidate:
         timeout = candidate["timeout"]
         if type(timeout) is not int or not 1 <= timeout <= 86400:

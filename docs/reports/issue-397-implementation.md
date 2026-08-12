@@ -28,3 +28,8 @@ cardinality、capability attestation、typed scope、DAG、reserved authority fi
 serialization を実装した。`specialists plan-import` は current state の invocation,
 preflight, selection, registry contract を再検証し、raw archive と canonical candidate を
 publish transaction 内で作成してから state の `provider_plan_imports` pointer を公開する。
+
+追加 E2E Green: current registry を再解決した selected planning provider について、
+valid input が immutable raw archive、canonical candidate、digest、Mission 注入 metadata、
+`provider_plan_imports[invocation_id]` を公開することを確認した。binding mismatch は state
+bytes と candidate directory を不変に保つ。focused suite は 33 passed。

@@ -62,6 +62,7 @@ VALID_INVOCATION_STATUSES = {
     "failed-before-start",
     "abandoned-unknown",
     "completed",
+    "unvalidated-evidence",
     "prepared",
     "awaiting-input",
     "inline-applied",

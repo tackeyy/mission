@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import os
+from urllib.parse import urlsplit
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ MAX_PLAN_RESULT_BYTES = 4 * 1024 * 1024
 RESERVED_DOCUMENT_FIELDS = {"provenance", "authority", "mission_metadata", "passes", "score", "phase", "state_path"}
 RESOURCE_TYPES = {"path", "uri", "record", "dataset", "other"}
 EFFECT_CLASSES = {"reversible", "irreversible", "external"}
+ACTION_TYPES = {"read", "write", "analyze", "research", "decide", "communicate"}
 
 class PlanContractError(ValueError):
     pass
@@ -54,7 +56,7 @@ def _validate_path(identifier: object, workspace: Path):
     try: target.relative_to(workspace.resolve())
     except ValueError as exc: raise PlanContractError("path-outside-workspace") from exc
     # Existing links must not escape; new paths need only syntactic containment.
-    if path.exists() and target != (workspace / path).absolute() and not str(target).startswith(str(workspace.resolve()) + os.sep):
+    if (workspace / path).exists() and target != (workspace / path).absolute() and not str(target).startswith(str(workspace.resolve()) + os.sep):
         raise PlanContractError("path-symlink-escape")
 
 def _validate_document(doc: object, workspace: Path):
@@ -65,10 +67,16 @@ def _validate_document(doc: object, workspace: Path):
     scope = doc["scope"]
     if not isinstance(scope, dict) or not isinstance(scope.get("resources"), list) or not isinstance(scope.get("actions"), list): raise PlanContractError("scope-invalid")
     for resource in scope["resources"]:
-        if not isinstance(resource, dict) or resource.get("type") not in RESOURCE_TYPES or not isinstance(resource.get("identifier"), str) or not isinstance(resource.get("access"), str): raise PlanContractError("resource-invalid")
+        if not isinstance(resource, dict) or resource.get("type") not in RESOURCE_TYPES or not isinstance(resource.get("identifier"), str) or not isinstance(resource.get("access"), str) or not isinstance(resource.get("constraints"), list) or not all(isinstance(x, str) for x in resource["constraints"]): raise PlanContractError("resource-invalid")
         if resource["type"] == "path": _validate_path(resource["identifier"], workspace)
+        elif resource["type"] == "uri":
+            parsed = urlsplit(resource["identifier"])
+            if parsed.scheme not in {"https", "http"} or not parsed.netloc: raise PlanContractError("uri-invalid")
+        elif resource["type"] in {"record", "dataset"}:
+            if not resource["identifier"].strip() or any(char.isspace() for char in resource["identifier"]): raise PlanContractError("resource-identifier-invalid")
+        else: raise PlanContractError("resource-type-invalid")
     for action in scope["actions"]:
-        if not isinstance(action, dict) or not isinstance(action.get("type"), str) or action.get("effect_class") not in EFFECT_CLASSES: raise PlanContractError("action-invalid")
+        if not isinstance(action, dict) or action.get("type") not in ACTION_TYPES or action.get("effect_class") not in EFFECT_CLASSES: raise PlanContractError("action-invalid")
     if not isinstance(doc["assumptions"], list) or any(not isinstance(x, dict) or not all(isinstance(x.get(k), str) and x[k] for k in ("id","statement","validation")) for x in doc["assumptions"]): raise PlanContractError("assumption-invalid")
     steps = doc["steps"]
     if not isinstance(steps, list) or not steps: raise PlanContractError("steps-invalid")
@@ -76,7 +84,7 @@ def _validate_document(doc: object, workspace: Path):
     for step in steps:
         if not isinstance(step, dict) or not isinstance(step.get("id"), str) or not step["id"] or step["id"] in ids: raise PlanContractError("duplicate-step-id")
         ids.add(step["id"]); edges[step["id"]]=step.get("depends_on")
-        if not isinstance(step.get("action"), str) or not isinstance(step.get("acceptance_checks"), list) or not step["acceptance_checks"] or not all(isinstance(x,str) and x.strip() for x in step["acceptance_checks"]): raise PlanContractError("step-acceptance-invalid")
+        if step.get("action") not in ACTION_TYPES or not isinstance(step.get("inputs"), list) or not isinstance(step.get("outputs"), list) or not isinstance(step.get("risk"), str) or not isinstance(step.get("rollback"), str) or not isinstance(step.get("acceptance_checks"), list) or not step["acceptance_checks"] or not all(isinstance(x,str) and x.strip() for x in step["acceptance_checks"]): raise PlanContractError("step-invalid")
         if not isinstance(edges[step["id"]], list) or not all(isinstance(x,str) for x in edges[step["id"]]): raise PlanContractError("dependency-invalid")
         if step.get("risk") in {"irreversible", "external"} and (not step.get("rollback") or not doc["stop_conditions"]): raise PlanContractError("risk-rollback-required")
     if any(dep not in ids for deps in edges.values() for dep in deps): raise PlanContractError("unknown-dependency")

@@ -63,3 +63,43 @@ def test_canonical_bytes_sort_keys_but_keep_array_order():
     changed = {"a": ["second", "first"], "b": 1}
     assert canonical_plan_bytes(left) == canonical_plan_bytes(same)
     assert canonical_plan_bytes(left) != canonical_plan_bytes(changed)
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda d: d["scope"]["resources"][0].pop("constraints"),
+    lambda d: d["scope"]["actions"][0].update({"type": "unknown"}),
+    lambda d: d["steps"][0].pop("inputs"),
+    lambda d: d["steps"][0].pop("rollback"),
+])
+def test_typed_scope_and_complete_step_fields_are_required(mutate):
+    value = _result(); mutate(value["artifacts"][0]["document"])
+    with pytest.raises(PlanContractError):
+        parse_provider_result(json.dumps(value).encode(), expected_binding=value["binding"], result_contract={"required_capability_class": "deep-planning", "require_exact_variant": True}, workspace=Path.cwd())
+
+
+@pytest.mark.parametrize("raw", [
+    b'{"schema":"mission-provider-result/1","schema":"mission-provider-result/1"}',
+    b'{"schema":NaN}', b'\xff\xfe', b"{" + b" " * (4 * 1024 * 1024) + b"}",
+])
+def test_hostile_json_is_rejected(raw):
+    with pytest.raises(PlanContractError):
+        parse_provider_result(raw, expected_binding=_result()["binding"], result_contract={}, workspace=Path.cwd())
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda d: d["steps"][0].update({"id": "s2"}) or d["steps"].append({**d["steps"][0], "id": "s2"}),
+    lambda d: d["steps"][0].update({"depends_on": ["missing"]}),
+    lambda d: d["steps"][0].update({"depends_on": ["s2"]}) or d["steps"].append({**d["steps"][0], "id": "s2", "depends_on": ["s1"]}),
+    lambda d: d["steps"][0].update({"acceptance_checks": []}),
+])
+def test_dag_and_observable_acceptance_are_required(mutate):
+    value = _result(); mutate(value["artifacts"][0]["document"])
+    with pytest.raises(PlanContractError):
+        parse_provider_result(json.dumps(value).encode(), expected_binding=value["binding"], result_contract={}, workspace=Path.cwd())
+
+
+@pytest.mark.parametrize("identifier", ["/absolute", "../escape", "bad\x00path"])
+def test_unsafe_paths_are_rejected(identifier):
+    value = _result(); value["artifacts"][0]["document"]["scope"]["resources"][0]["identifier"] = identifier
+    with pytest.raises(PlanContractError):
+        parse_provider_result(json.dumps(value).encode(), expected_binding=value["binding"], result_contract={}, workspace=Path.cwd())

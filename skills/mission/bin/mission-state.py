@@ -442,6 +442,7 @@ SPECIALIST_INVOCATION_STATUSES = {
     "selected",
     "started",
     "completed",
+    "unvalidated-evidence",
     "prepared",
     "awaiting-input",
     "inline-applied",
@@ -3269,8 +3270,6 @@ def _classify_non_portable_execution_config(candidate: dict) -> str | None:
         return "argument-locator"
     if candidate.get("env"):
         return "environment-values"
-    if candidate.get("_explicit_result_contract_present") is True:
-        return "result-contract-resupply"
     return None
 
 
@@ -4436,6 +4435,8 @@ def _classify_command_provider_result(provider: dict, exit_code: int | None,
     non_template_len = _non_template_text_length(combined, forbidden_markers)
     if marker_hits:
         return "prepared", f"command provider returned preparation-only evidence: {', '.join(marker_hits[:3])}"
+    if not explicit_contract:
+        return "unvalidated-evidence", "command provider has no explicit result contract"
     if min_chars and non_template_len < min_chars:
         return "prepared", f"command provider evidence below result_contract.min_non_template_chars ({non_template_len} < {min_chars})"
     return "completed", None
@@ -4492,7 +4493,7 @@ def _require_current_provider_application(
     if provider is None:
         _provider_gate("provider-not-selected")
     if cwd is not None and isinstance(data.get("specialist_registry_projection"), dict):
-        _require_current_registry_application(
+        provider = _require_current_registry_application(
             data,
             provider,
             cwd=cwd,
@@ -4538,7 +4539,7 @@ def _require_current_registry_application(
     requested_phase: str,
     requested_iteration: int,
     selection_source: str | None,
-) -> None:
+) -> dict:
     """Re-resolve the recorded registry projection from safe current inputs."""
     recorded = data.get("specialist_registry_projection") or {}
     inputs = recorded.get("ordered_inputs") or []
@@ -4592,6 +4593,9 @@ def _require_current_registry_application(
     if candidate.get("registry_entry_digest") != provider.get("registry_entry_digest"):
         _provider_gate("registry-entry-mismatch")
     normalized = _normalize_candidate(candidate, str(candidate.get("source") or "registry"))
+    for field in ("selection_id", "eligibility_selection_source", "registry_projection_digest", "context_digest", "activation_digest"):
+        if field in provider:
+            normalized[field] = provider[field]
     current_iteration = data.get("iteration")
     eligibility = evaluate_provider_eligibility(
         normalized,
@@ -4610,6 +4614,7 @@ def _require_current_registry_application(
         _provider_gate("activation-digest-mismatch")
     if not eligibility.get("eligible"):
         _provider_gate(str(eligibility.get("reason_code")))
+    return normalized
 
 
 def _is_provider_backed_application(data: dict, skill: str, args, provider: dict | None) -> bool:
@@ -11204,8 +11209,8 @@ def cmd_plan_import(args):
     if not re.fullmatch(r"inv_[0-9a-f]{32}", args.invocation_id):
         _provider_gate("invocation-id-invalid")
     try:
-        raw = Path(args.input).read_bytes()
-    except OSError:
+        raw = _read_strict_review_file(Path(args.input))
+    except ValueError:
         _provider_gate("plan-input-unreadable")
     with StateLock(lock_file(cwd)), _PublishedFilesTransaction() as published_files:
         data = json.loads(sf.read_text(encoding="utf-8"))
