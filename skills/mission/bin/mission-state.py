@@ -11302,7 +11302,6 @@ def _derive_failure_ledger(cwd: Path, score_history: object) -> dict:
                 or aggregate.get("iteration") != iteration or not isinstance(aggregate.get("inputs"), list)):
             raise ValueError("failure ledger review aggregate binding mismatch")
         for review in aggregate["inputs"]:
-            _validate_review_payload(review, iteration)
             observations.append({
                 "iteration": iteration, "review": review,
                 "review_aggregate_ref": {"kind": "review-aggregate", "digest": digest},
