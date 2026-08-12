@@ -147,6 +147,24 @@ def validate_execution_context(context: object, *, approved_scopes: Iterable[str
         raise ProviderPreflightError("strict-context-invalid")
 
 
+def strict_spawn(attestation: object, packet: bytes, backend) -> object:
+    """Call only a host-supplied strict backend after complete attestation.
+
+    The portable core intentionally ships no backend.  A host adapter must
+    supply this callable and enforce the attested namespace, mounts, env reset,
+    and network policy; plain subprocess is never a strict backend.
+    """
+    context = {
+        "isolation": "strict", "cwd": "session-local-empty", "resource_mounts": [],
+        "env_allowlist": [], "ambient_scopes": [], "network_destination_policy": "verified",
+        "isolator": attestation,
+    }
+    validate_execution_context(context)
+    if not isinstance(packet, bytes) or not callable(backend):
+        raise ProviderPreflightError("isolator-unavailable")
+    return backend(packet, dict(attestation))
+
+
 def _packet_projection(subject: Mapping[str, Any], inputs: list[dict[str, Any]]) -> dict[str, Any]:
     required = (
         "session_id", "mission_id", "mission", "provider_id", "registry_entry_digest", "selection_id",

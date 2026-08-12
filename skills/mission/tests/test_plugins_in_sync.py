@@ -10,6 +10,7 @@
   skills/mission/lib/mission_common.py
   skills/mission/lib/provider_eligibility.py
   skills/mission/lib/provider_public_contract.py
+  skills/mission/lib/provider_preflight.py
   skills/mission/lib/specialist_lifecycle.py
   skills/mission/refs/specialist-registry.md (存在する場合)
   skills/mission/refs/self-improvement.md
@@ -32,6 +33,7 @@
   plugins/mission/skills/mission/lib/mission_common.py
   plugins/mission/skills/mission/lib/provider_eligibility.py
   plugins/mission/skills/mission/lib/provider_public_contract.py
+  plugins/mission/skills/mission/lib/provider_preflight.py
   plugins/mission/skills/mission/lib/specialist_lifecycle.py
   plugins/mission/skills/mission/refs/specialist-registry.md (存在する場合)
   plugins/mission/skills/mission/refs/self-improvement.md
@@ -53,6 +55,7 @@
   cp skills/mission/lib/mission_common.py plugins/mission/skills/mission/lib/mission_common.py
   cp skills/mission/lib/provider_eligibility.py plugins/mission/skills/mission/lib/provider_eligibility.py
   cp skills/mission/lib/provider_public_contract.py plugins/mission/skills/mission/lib/provider_public_contract.py
+  cp skills/mission/lib/provider_preflight.py plugins/mission/skills/mission/lib/provider_preflight.py
   cp skills/mission/lib/specialist_lifecycle.py plugins/mission/skills/mission/lib/specialist_lifecycle.py
   cp skills/mission/refs/specialist-registry.md plugins/mission/skills/mission/refs/specialist-registry.md
   cp skills/mission/refs/self-improvement.md plugins/mission/skills/mission/refs/self-improvement.md
@@ -169,6 +172,10 @@ SYNC_PAIRS = [
     (
         REPO_ROOT / "skills" / "mission" / "lib" / "specialist_lifecycle.py",
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "specialist_lifecycle.py",
+    ),
+    (
+        REPO_ROOT / "skills" / "mission" / "lib" / "provider_preflight.py",
+        REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "provider_preflight.py",
     ),
 ]
 

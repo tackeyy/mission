@@ -4822,6 +4822,25 @@ def _provider_preflight_subject(data: dict, provider: dict, args) -> dict:
     command = provider.get("command")
     if not isinstance(command, str) or not _portable_provider_identifier(command):
         _provider_gate("command-identity-invalid")
+    execution_context = {
+        "isolation": "declared-ambient", "assurance": "stdin-exact-ambient-declared",
+        "cwd": "session-local-empty", "resource_mounts": [],
+        "env_allowlist": sorted(_string_map(provider.get("env")).keys()),
+        "ambient_scopes": ["inherited-env"], "network_destination_policy": "unverified",
+    }
+    isolator_name = getattr(args, "execution_isolator", None)
+    if isolator_name:
+        descriptor = _configured_execution_isolator(Path.cwd(), isolator_name)
+        if descriptor is None:
+            _provider_gate("isolator-unavailable")
+        execution_context = {
+            "isolation": "strict", "assurance": "host-attested-execution-isolator/1",
+            "cwd": "session-local-empty", "resource_mounts": [], "env_allowlist": [],
+            "ambient_scopes": [], "network_destination_policy": "verified",
+            "isolator": descriptor["attestation"],
+        }
+    risk_scopes = (["external-context", "destination-unverified", "inherited-env"]
+                   if execution_context["isolation"] == "declared-ambient" else ["external-context"])
     return {
         "session_id": str(data.get("session_id") or resolve_session_id()),
         "mission_id": str(data.get("mission_id") or ""),
@@ -4834,16 +4853,11 @@ def _provider_preflight_subject(data: dict, provider: dict, args) -> dict:
         "iteration": args.iteration,
         "phase": args.phase,
         "destination": {"kind": "external-service", "display_name": str(provider.get("role") or "provider")},
-        "risk_scopes": ["external-context", "inherited-env", "destination-unverified"],
+        "risk_scopes": risk_scopes,
         "quota_mode": "unknown",
         "effective_argv": [command, *[str(value) for value in provider.get("args") or []]],
         "env_keys": sorted(_string_map(provider.get("env")).keys()),
-        "execution_context": {
-            "isolation": "declared-ambient", "assurance": "stdin-exact-ambient-declared",
-            "cwd": "session-local-empty", "resource_mounts": [],
-            "env_allowlist": sorted(_string_map(provider.get("env")).keys()),
-            "ambient_scopes": ["inherited-env"], "network_destination_policy": "unverified",
-        },
+        "execution_context": execution_context,
     }
 
 
@@ -4999,6 +5013,8 @@ def cmd_prepare_provider_invocation(args):
             preflight = build_preflight(_provider_preflight_subject(data, provider, args), [snapshot])
         except ProviderPreflightError as error:
             _provider_gate(str(error))
+        except ValueError:
+            _provider_gate("isolator-unavailable")
         private_dir = state_dir(cwd) / "private-preflights"
         private_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         artifact = private_dir / f"{preflight['preflight_id']}.json"
@@ -9027,6 +9043,9 @@ _APPROVAL_VERIFIER_REGISTRY_SCHEMA = "mission-approval-verifier-registry/2"
 _APPROVAL_VERIFIER_REGISTRY_LIMIT = 64 * 1024
 _APPROVAL_VERIFIER_TIMEOUT_SEC = 5
 _APPROVAL_VERIFIER_TERMINATE_GRACE_SEC = 0.2
+_EXECUTION_ISOLATOR_ENTRY_POINT_GROUP = "mission.execution_isolators"
+_EXECUTION_ISOLATOR_REGISTRY_SCHEMA = "mission-execution-isolator-registry/1"
+_EXECUTION_ISOLATOR_REQUIRED = frozenset({"filesystem-namespace", "readonly-mount", "env-reset", "network-policy"})
 
 
 def register_approval_verifier(name: str, verifier: ApprovalVerifier) -> None:
@@ -9083,6 +9102,78 @@ def _read_approval_verifier_registry(path: Path) -> dict:
             raise ValueError("approval verifier registry is invalid")
         result[identifier] = {"entry_point": entry_point, "distribution": distribution, "version": version, "source_digest": source_digest}
     return result
+
+
+def _configured_execution_isolator(cwd: Path, isolator_name: str):
+    """Resolve one host-only strict backend and pin its code and policy."""
+    if not isinstance(isolator_name, str) or not _APPROVAL_VERIFIER_NAME_RE.fullmatch(isolator_name):
+        raise ValueError("execution isolator is invalid")
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    location = (Path(xdg) if xdg else Path.home() / ".config") / "mission" / "execution-isolators.json"
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise ValueError("execution isolator registry cannot be read safely on this host")
+    try:
+        fd = os.open(os.fspath(location), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > _APPROVAL_VERIFIER_REGISTRY_LIMIT:
+                raise ValueError("execution isolator registry is invalid")
+            raw = os.read(fd, info.st_size + 1)
+            if len(raw) != info.st_size or os.fstat(fd).st_size != info.st_size:
+                raise ValueError("execution isolator registry changed while being read")
+        finally:
+            os.close(fd)
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=_reject_duplicate_registry_key)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("execution isolator registry is invalid") from exc
+    if not isinstance(value, dict) or set(value) != {"schema", "isolators"} or value.get("schema") != _EXECUTION_ISOLATOR_REGISTRY_SCHEMA:
+        raise ValueError("execution isolator registry is invalid")
+    configured = None
+    for item in value.get("isolators", []):
+        expected = {"id", "entry_point", "distribution", "version", "source_digest", "policy_digest", "enforced_capabilities"}
+        if not isinstance(item, dict) or set(item) != expected:
+            raise ValueError("execution isolator registry is invalid")
+        if item.get("id") == isolator_name:
+            if configured is not None:
+                raise ValueError("execution isolator registry has duplicate ids")
+            configured = item
+    if configured is None:
+        return None
+    if (not isinstance(configured.get("entry_point"), str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", configured["entry_point"])
+            or not isinstance(configured.get("distribution"), str) or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", configured["distribution"])
+            or not isinstance(configured.get("version"), str) or not configured["version"]
+            or not isinstance(configured.get("source_digest"), str) or not _SHA256_REF_RE.fullmatch(configured["source_digest"])
+            or not isinstance(configured.get("policy_digest"), str) or not _SHA256_REF_RE.fullmatch(configured["policy_digest"])
+            or not isinstance(configured.get("enforced_capabilities"), list)
+            or not _EXECUTION_ISOLATOR_REQUIRED.issubset(set(configured["enforced_capabilities"]))):
+        raise ValueError("execution isolator registry is invalid")
+    discovered = importlib.metadata.entry_points()
+    candidates = (discovered.select(group=_EXECUTION_ISOLATOR_ENTRY_POINT_GROUP)
+                  if hasattr(discovered, "select") else discovered.get(_EXECUTION_ISOLATOR_ENTRY_POINT_GROUP, ()))
+    matches = [entry for entry in candidates if entry.name == configured["entry_point"]]
+    if len(matches) != 1:
+        raise ValueError("execution isolator entry point is not installed")
+    entry = matches[0]; distribution = getattr(entry, "dist", None)
+    if (distribution is None or str(distribution.metadata.get("Name") or "").lower() != configured["distribution"].lower()
+            or str(distribution.version) != configured["version"]):
+        raise ValueError("execution isolator distribution identity mismatch")
+    module_name = getattr(entry, "module", "")
+    module_spec = importlib.util.find_spec(module_name) if isinstance(module_name, str) else None
+    origin = getattr(module_spec, "origin", None)
+    if not isinstance(origin, str) or not origin:
+        raise ValueError("execution isolator source is invalid")
+    source = Path(origin).read_bytes()
+    if "sha256:" + hashlib.sha256(source).hexdigest() != configured["source_digest"]:
+        raise ValueError("execution isolator source digest mismatch")
+    value = getattr(entry, "value", None)
+    if not isinstance(value, str) or not value:
+        raise ValueError("execution isolator entry point is invalid")
+    attestation = {
+        "schema": "execution-isolator/1", "backend_id": configured["id"], "version": configured["version"],
+        "host_support": True, "policy_digest": configured["policy_digest"],
+        "enforced_capabilities": sorted(configured["enforced_capabilities"]),
+    }
+    return {**configured, "module": module_name, "entry_point_value": value, "attestation": attestation}
 
 
 def _configured_approval_entry_point(cwd: Path, verifier_name: str):
@@ -14794,6 +14885,8 @@ def _build_parser():
     p_cmd.add_argument("--input-file", default=None, help="provider stdin packet に含める入力ファイル")
     p_cmd.add_argument("--preflight-id", default=None,
                        help="prepare-invocationで生成したper-invocation preflight ID")
+    p_cmd.add_argument("--execution-isolator", default=None,
+                       help="prepare時と一致するhost-only strict isolator ID")
     p_cmd.add_argument("--registry", action="append", default=None,
                        help="external explicit registry の application 時再供給。複数指定可")
     p_cmd.add_argument("--selection-source", default=None, choices=sorted(SPECIALIST_SELECTION_SOURCES),
@@ -14814,6 +14907,8 @@ def _build_parser():
     p_prepare.add_argument("--input-file", required=True)
     p_prepare.add_argument("--registry", action="append", default=None)
     p_prepare.add_argument("--selection-source", default=None, choices=sorted(SPECIALIST_SELECTION_SOURCES))
+    p_prepare.add_argument("--execution-isolator", default=None,
+                           help="host-only execution-isolator/1 ID")
     p_prepare.add_argument("--json", action="store_true")
     p_prepare.set_defaults(func=cmd_prepare_provider_invocation, command_outcome_tracking=True)
 

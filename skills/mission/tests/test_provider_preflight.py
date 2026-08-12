@@ -386,3 +386,82 @@ def test_host_verified_receipt_runs_exact_packet_once_and_rejects_replay(run_cli
     before = state_path.read_bytes(); marker.unlink()
     replay = run_cli("specialists", "invoke-command", "--provider", "trusted-provider", "--iteration", "1", "--phase", "planning", "--preflight-id", preflight["preflight_id"], "--input-file", str(source), cwd=tmp_path, env_extra=env)
     assert replay.returncode == 2 and "receipt-replayed" in replay.stderr and not marker.exists() and state_path.read_bytes() == before
+
+
+def test_input_byte_mutation_after_approval_blocks_spawn(run_cli, tmp_path):
+    # The E2E receipt fixture above exercises one successful invocation.  This
+    # direct setup verifies the TOCTOU boundary: a post-approval input byte is
+    # rebuilt under the lock and cannot reach the command process.
+    command_dir = tmp_path / "commands"; command_dir.mkdir()
+    marker = tmp_path / "provider-ran"; command = command_dir / "provider-command"
+    command.write_text("#!/bin/sh\nprintf invoked > \"$PROVIDER_MARKER\"\ncat >/dev/null\n", encoding="utf-8"); command.chmod(0o700)
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps({"schema": "mission-specialist-registry/2", "specialists_v2": [{
+        "provider_id": "drift-provider", "role": "planning-provider", "skill": "drift-provider", "kind": "command",
+        "command": "provider-command", "args": [], "env": {}, "task_profiles": ["architecture"], "phases": ["planning"],
+        "activation": {"min_complexity": "Complex", "auto_select_if": ["complexity"]},
+    }]}), encoding="utf-8")
+    env = {"PATH": f"{command_dir}{os.pathsep}{os.environ.get('PATH', '')}", "PROVIDER_MARKER": str(marker)}
+    source = tmp_path / "input.txt"; source.write_text("original", encoding="utf-8")
+    run_cli("init", "drift rejection", "--complexity", "Complex", cwd=tmp_path, check=True, env_extra=env)
+    run_cli("specialists", "recommend", "--no-default-skill-roots", "--task", "Review architecture", "--registry", str(registry), "--complexity", "Complex", "--record-state", cwd=tmp_path, check=True, env_extra=env)
+    preflight = json.loads(run_cli("specialists", "prepare-invocation", "--provider", "drift-provider", "--iteration", "1", "--phase", "planning", "--input-file", str(source), cwd=tmp_path, env_extra=env, check=True).stdout)
+    state_path = tmp_path / ".mission-state" / "sessions" / "test.json"; state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["provider_preflights"][preflight["preflight_id"]].update({"status": "approved", "receipt": {"artifact_path": "missing", "digest": _digest()}})
+    state_path.write_text(json.dumps(state), encoding="utf-8"); source.write_text("mutated", encoding="utf-8")
+    before = state_path.read_bytes()
+
+    result = run_cli("specialists", "invoke-command", "--provider", "drift-provider", "--iteration", "1", "--phase", "planning", "--preflight-id", preflight["preflight_id"], "--input-file", str(source), cwd=tmp_path, env_extra=env)
+
+    assert result.returncode == 2 and "payload-drift" in result.stderr
+    assert not marker.exists() and state_path.read_bytes() == before
+
+
+def test_strict_host_backend_requires_all_attested_capabilities_before_spawn():
+    from provider_preflight import strict_spawn  # noqa: E402
+
+    attempted = []
+    incomplete = {
+        "schema": "execution-isolator/1", "backend_id": "fixture-host", "version": "1",
+        "policy_digest": _digest("c"), "host_support": True,
+        "enforced_capabilities": ["env-reset"],
+    }
+    with pytest.raises(ProviderPreflightError, match="isolator-capability-missing"):
+        strict_spawn(incomplete, b"{}", lambda *_: attempted.append(True))
+    assert attempted == []
+
+
+def test_strict_host_backend_receives_exact_packet_only_after_complete_attestation():
+    from provider_preflight import strict_spawn  # noqa: E402
+
+    attestation = {
+        "schema": "execution-isolator/1", "backend_id": "fixture-host", "version": "1",
+        "host_support": True, "policy_digest": "sha256:" + "a" * 64,
+        "enforced_capabilities": ["filesystem-namespace", "readonly-mount", "env-reset", "network-policy"],
+    }
+    received = []
+    result = strict_spawn(attestation, b'{"exact":true}', lambda packet, current: received.append((packet, current)) or {"ok": True})
+
+    assert result == {"ok": True}
+    assert received == [(b'{"exact":true}', attestation)]
+
+
+def test_strict_cli_requires_host_isolator_before_any_provider_spawn(run_cli, tmp_path):
+    command_dir = tmp_path / "commands"; command_dir.mkdir()
+    command = command_dir / "provider-command"
+    command.write_text("#!/bin/sh\nprintf spawned > \"$PROVIDER_MARKER\"\n", encoding="utf-8"); command.chmod(0o700)
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps({"schema": "mission-specialist-registry/2", "specialists_v2": [{
+        "provider_id": "strict-provider", "role": "planning-provider", "skill": "strict-provider", "kind": "command",
+        "command": "provider-command", "args": [], "env": {}, "task_profiles": ["architecture"], "phases": ["planning"],
+        "activation": {"min_complexity": "Complex", "auto_select_if": ["complexity"]},
+    }]}), encoding="utf-8")
+    source = tmp_path / "input.txt"; source.write_text("brief", encoding="utf-8")
+    env = {"PATH": f"{command_dir}{os.pathsep}{os.environ.get('PATH', '')}", "PROVIDER_MARKER": str(tmp_path / "marker")}
+    run_cli("init", "strict provider", "--complexity", "Complex", cwd=tmp_path, check=True, env_extra=env)
+    run_cli("specialists", "recommend", "--no-default-skill-roots", "--task", "Review architecture", "--registry", str(registry), "--complexity", "Complex", "--record-state", cwd=tmp_path, check=True, env_extra=env)
+
+    result = run_cli("specialists", "prepare-invocation", "--provider", "strict-provider", "--iteration", "1", "--phase", "planning", "--input-file", str(source), "--execution-isolator", "missing-host-isolator", cwd=tmp_path, env_extra=env)
+
+    assert result.returncode == 2
+    assert "isolator-unavailable" in result.stderr
