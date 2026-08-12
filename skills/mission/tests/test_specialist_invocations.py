@@ -9,6 +9,8 @@ import sys
 
 import pytest
 
+from provider_eligibility import evaluate_provider_eligibility, value_digest
+
 
 def _json_result(result):
     assert result.returncode == 0, result.stderr
@@ -37,7 +39,7 @@ def _assert_unsafe_legacy_specialist_record(result, field):
 
 
 def _seed_legacy_command_provider_state(tmp_path, provider, *, ask_user=False):
-    """Preserve the pre-#395 runtime consumer contract for an already-active state."""
+    """Seed a current selected command-provider contract for runtime tests."""
     state_path = tmp_path / ".mission-state" / "sessions" / "test.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
     candidate = {
@@ -48,6 +50,8 @@ def _seed_legacy_command_provider_state(tmp_path, provider, *, ask_user=False):
         "installed": True,
         "available": True,
     }
+    if not candidate.get("phases"):
+        candidate["phases"] = ["planning", "review"]
     if not provider.get("env") and not provider.get("result_contract"):
         command_dir = tmp_path / ".mission-test-bin"
         command_dir.mkdir(exist_ok=True)
@@ -66,17 +70,90 @@ def _seed_legacy_command_provider_state(tmp_path, provider, *, ask_user=False):
         candidate["args"] = []
         candidate["env"] = {}
     state["specialists_candidates"] = [candidate]
-    state["specialists_selected"] = []
+    selection_id = "sel_0123456789abcdef0123456789abcdef"
+    for item in state["specialists_candidates"]:
+        item["selection_id"] = selection_id
+    state["specialists_selected"] = [] if ask_user else [dict(candidate)]
+    provider_phase = "review" if "review" in candidate["phases"] else candidate["phases"][0]
+    state["phase"] = {
+        "planning": "planning",
+        "execution": "executing",
+        "review": "reviewing",
+        "scoring": "scoring",
+        "critic": "critic",
+    }[provider_phase]
     state["specialists_decision"] = (
         {
             "policy": "first-use",
             "action": "ask-user",
             "prompted_user": True,
+            "decision": "none",
+            "reason_code": "pending-confirmation",
+            "lifecycle_state": "terminal",
+            "selection_id": selection_id,
         }
         if ask_user
-        else {"policy": "auto", "action": "select", "prompted_user": False}
+        else {
+            "policy": "auto", "action": "select", "prompted_user": False,
+            "decision": "selected", "reason_code": "candidate-selected",
+            "lifecycle_state": "selected", "selection_id": selection_id,
+        }
     )
     state_path.write_text(json.dumps(state), encoding="utf-8")
+
+
+def _set_current_bounded_provider(state, *, provider_phase):
+    """Install the typed selection checkpoint required by application paths."""
+    activation = {
+        "min_complexity": "Standard",
+        "auto_select_if": ["complexity"],
+        "explicit_below_min": "deny",
+    }
+    candidate = {
+        "provider_id": "broad-methodology",
+        "role": "methodology",
+        "skill": "broad-methodology",
+        "kind": "skill",
+        "phases": [provider_phase],
+        "activation": activation,
+        "available": True,
+    }
+    context = {
+        "complexity": state["complexity"],
+        "task_profile": {},
+        "iteration": state["iteration"],
+        "previous_iteration_passed": None,
+    }
+    eligibility = evaluate_provider_eligibility(
+        candidate,
+        context,
+        requested_phase=provider_phase,
+        selection_source="automatic",
+    )
+    selection_id = "sel_0123456789abcdef0123456789abcdef"
+    state.update({
+        "phase": {"execution": "executing", "review": "reviewing"}[provider_phase],
+        "specialists_decision": {
+            "decision": "selected",
+            "action": "select",
+            "selection_id": selection_id,
+        },
+        "specialists_selected": [{
+            **candidate,
+            "status": "selected",
+            "source": "project:.mission/specialists.yml",
+            "bounded_use": True,
+            "bounded_purpose_required": True,
+            "selection_id": selection_id,
+            "registry_entry_digest": value_digest({"provider_id": "broad-methodology"}),
+            "registry_projection_digest": value_digest({"providers": ["broad-methodology"]}),
+            "context_digest": eligibility["context_digest"],
+            "activation_digest": eligibility["activation_digest"],
+            "normalized_activation": eligibility["normalized_activation"],
+            "eligibility_selection_source": "automatic",
+        }],
+    })
+    state["specialists_selected"][0].pop("activation", None)
 
 
 def test_init_includes_specialist_invocations(run_cli, tmp_path):
@@ -586,7 +663,7 @@ def test_log_invocation_records_codex_inline_usage(state_dir, run_cli, read_stat
     assert entry["status"] == "inline-applied"
 
 
-def test_log_invocation_selection_source_adds_selection_metadata(state_dir, run_cli, read_state):
+def test_log_invocation_selection_source_does_not_create_selection_metadata(state_dir, run_cli, read_state):
     r = run_cli(
         "specialists", "log-invocation",
         "--iteration", "1",
@@ -601,19 +678,11 @@ def test_log_invocation_selection_source_adds_selection_metadata(state_dir, run_
         cwd=state_dir.parent,
     )
 
-    data = _json_result(r)
-    state = read_state(state_dir)
-    entry = state["specialist_invocations"][0]
-    selected = state["specialists_selected"][0]
-    assert entry["selection_source"] == "user-instruction"
-    assert selected["skill"] == "documentation-provider"
-    assert selected["status"] == "selected"
-    assert selected["selection_source"] == "user-instruction"
-    assert selected["source"] == "user-instruction:log-invocation"
-    assert data["selected_entry"] == selected
+    assert r.returncode == 2
+    assert "provider-ineligible" in r.stderr
 
 
-def test_log_invocation_task_required_selection_source_adds_selection_metadata(state_dir, run_cli, read_state):
+def test_log_invocation_task_required_source_does_not_create_selection_metadata(state_dir, run_cli, read_state):
     r = run_cli(
         "specialists", "log-invocation",
         "--iteration", "1",
@@ -628,15 +697,8 @@ def test_log_invocation_task_required_selection_source_adds_selection_metadata(s
         cwd=state_dir.parent,
     )
 
-    data = _json_result(r)
-    state = read_state(state_dir)
-    entry = state["specialist_invocations"][0]
-    selected = state["specialists_selected"][0]
-    assert entry["selection_source"] == "task-required"
-    assert selected["skill"] == "source-retrieval-provider"
-    assert selected["selection_source"] == "task-required"
-    assert selected["source"] == "task-required:log-invocation"
-    assert data["selected_entry"] == selected
+    assert r.returncode == 2
+    assert "provider-ineligible" in r.stderr
 
 
 def test_log_invocation_requires_selection_source_after_ask_user_confirmation(state_dir, run_cli):
@@ -666,7 +728,7 @@ def test_log_invocation_requires_selection_source_after_ask_user_confirmation(st
     assert "--selection-source confirmed-user" in r.stderr
 
 
-def test_log_invocation_confirmed_user_selection_resolves_ask_user_metadata(state_dir, run_cli, read_state):
+def test_log_invocation_confirmed_user_source_cannot_promote_candidate_to_selection(state_dir, run_cli, read_state):
     state_path = state_dir / "sessions" / "test.json"
     state = json.loads(state_path.read_text())
     state.update({
@@ -677,8 +739,9 @@ def test_log_invocation_confirmed_user_selection_resolves_ask_user_metadata(stat
         ],
     })
     state_path.write_text(json.dumps(state))
+    before = state_path.read_bytes()
 
-    run_cli(
+    result = run_cli(
         "specialists", "log-invocation",
         "--iteration", "1",
         "--phase", "review",
@@ -688,28 +751,17 @@ def test_log_invocation_confirmed_user_selection_resolves_ask_user_metadata(stat
         "--status", "inline-applied",
         "--selection-source", "confirmed-user",
         cwd=state_dir.parent,
-        check=True,
     )
 
-    state = read_state(state_dir)
-    assert state["specialist_invocations"][0]["selection_source"] == "confirmed-user"
-    assert state["specialists_selected"][0]["selection_source"] == "confirmed-user"
+    assert result.returncode == 2
+    assert "provider-ineligible" in result.stderr
+    assert state_path.read_bytes() == before
 
 
 def test_log_invocation_rejects_bounded_orchestrator_execution(state_dir, run_cli):
     state_path = state_dir / "sessions" / "test.json"
     state = json.loads(state_path.read_text())
-    state.update({
-        "specialists_selected": [{
-            "role": "methodology",
-            "skill": "broad-methodology",
-            "kind": "skill",
-            "status": "selected",
-            "source": "project:.mission/specialists.yml",
-            "bounded_use": True,
-            "bounded_purpose_required": True,
-        }],
-    })
+    _set_current_bounded_provider(state, provider_phase="execution")
     state_path.write_text(json.dumps(state))
 
     r = run_cli(
@@ -731,17 +783,7 @@ def test_log_invocation_rejects_bounded_orchestrator_execution(state_dir, run_cl
 def test_log_invocation_requires_bounded_purpose_for_broad_orchestrator(state_dir, run_cli):
     state_path = state_dir / "sessions" / "test.json"
     state = json.loads(state_path.read_text())
-    state.update({
-        "specialists_selected": [{
-            "role": "methodology",
-            "skill": "broad-methodology",
-            "kind": "skill",
-            "status": "selected",
-            "source": "project:.mission/specialists.yml",
-            "bounded_use": True,
-            "bounded_purpose_required": True,
-        }],
-    })
+    _set_current_bounded_provider(state, provider_phase="review")
     state_path.write_text(json.dumps(state))
 
     r = run_cli(
@@ -762,17 +804,7 @@ def test_log_invocation_requires_bounded_purpose_for_broad_orchestrator(state_di
 def test_log_invocation_records_bounded_orchestrator_purpose(state_dir, run_cli, read_state):
     state_path = state_dir / "sessions" / "test.json"
     state = json.loads(state_path.read_text())
-    state.update({
-        "specialists_selected": [{
-            "role": "methodology",
-            "skill": "broad-methodology",
-            "kind": "skill",
-            "status": "selected",
-            "source": "project:.mission/specialists.yml",
-            "bounded_use": True,
-            "bounded_purpose_required": True,
-        }],
-    })
+    _set_current_bounded_provider(state, provider_phase="review")
     state_path.write_text(json.dumps(state))
 
     run_cli(
@@ -1061,6 +1093,15 @@ def test_invoke_command_provider_archives_evidence_and_logs_invocation(run_cli, 
         "print('body=' + packet['input'])\n",
         encoding="utf-8",
     )
+    command_dir = tmp_path / "provider-bin"
+    command_dir.mkdir()
+    command = command_dir / "fake-reviewer-command"
+    command.write_text(
+        "#!/bin/sh\nexec " + shlex.quote(sys.executable) + " " + shlex.quote(str(helper)) + "\n",
+        encoding="utf-8",
+    )
+    command.chmod(0o700)
+    provider_env = {"PATH": f"{command_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
     registry = tmp_path / ".mission" / "specialists.yml"
     registry.parent.mkdir()
     registry.write_text(json.dumps({
@@ -1068,8 +1109,8 @@ def test_invoke_command_provider_archives_evidence_and_logs_invocation(run_cli, 
         "specialists": [{
             "role": "fake-reviewer",
             "kind": "command",
-            "command": sys.executable,
-            "args": [str(helper)],
+                "command": command.name,
+                "args": [],
             "task_profiles": ["documentation"],
             "phases": ["review"],
         }],
@@ -1084,12 +1125,14 @@ def test_invoke_command_provider_archives_evidence_and_logs_invocation(run_cli, 
         "--complexity", "Complex",
         "--record-state",
         "--json",
-        cwd=tmp_path,
-        check=True,
-    )
-    _seed_legacy_command_provider_state(
-        tmp_path, json.loads(registry.read_text())["specialists"][0]
-    )
+            cwd=tmp_path,
+            check=True,
+            env_extra=provider_env,
+        )
+    state_path = tmp_path / ".mission-state" / "sessions" / "test.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["phase"] = "reviewing"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
     r = run_cli(
         "specialists", "invoke-command",
         "--provider", "fake-reviewer",
@@ -1098,6 +1141,7 @@ def test_invoke_command_provider_archives_evidence_and_logs_invocation(run_cli, 
         "--input-file", str(context),
         "--json",
         cwd=tmp_path,
+        env_extra=provider_env,
     )
 
     data = _json_result(r)
@@ -1180,6 +1224,15 @@ def test_invoke_command_provider_records_failure_without_blocking_optional_provi
     run_cli("init", "command provider failure mission", "--complexity", "Complex", cwd=tmp_path, check=True)
     helper = tmp_path / "provider.py"
     helper.write_text("import sys; print('bad token=abc123'); sys.exit(7)\n", encoding="utf-8")
+    command_dir = tmp_path / "provider-bin"
+    command_dir.mkdir()
+    command = command_dir / "failing-reviewer-command"
+    command.write_text(
+        "#!/bin/sh\nexec " + shlex.quote(sys.executable) + " " + shlex.quote(str(helper)) + "\n",
+        encoding="utf-8",
+    )
+    command.chmod(0o700)
+    provider_env = {"PATH": f"{command_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
     registry = tmp_path / ".mission" / "specialists.yml"
     registry.parent.mkdir()
     registry.write_text(json.dumps({
@@ -1187,8 +1240,8 @@ def test_invoke_command_provider_records_failure_without_blocking_optional_provi
         "specialists": [{
             "role": "failing-reviewer",
             "kind": "command",
-            "command": sys.executable,
-            "args": [str(helper)],
+                "command": command.name,
+                "args": [],
             "task_profiles": ["documentation"],
         }],
     }))
@@ -1199,12 +1252,14 @@ def test_invoke_command_provider_records_failure_without_blocking_optional_provi
         "--complexity", "Complex",
         "--record-state",
         "--json",
-        cwd=tmp_path,
-        check=True,
-    )
-    _seed_legacy_command_provider_state(
-        tmp_path, json.loads(registry.read_text())["specialists"][0]
-    )
+            cwd=tmp_path,
+            check=True,
+            env_extra=provider_env,
+        )
+    state_path = tmp_path / ".mission-state" / "sessions" / "test.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["phase"] = "reviewing"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
 
     r = run_cli(
         "specialists", "invoke-command",
@@ -1213,6 +1268,7 @@ def test_invoke_command_provider_records_failure_without_blocking_optional_provi
         "--phase", "review",
         "--json",
         cwd=tmp_path,
+        env_extra=provider_env,
     )
 
     data = _json_result(r)
@@ -1457,7 +1513,7 @@ def test_invoke_command_provider_requires_confirmed_selection_after_ask_user(run
     assert "--selection-source confirmed-user" in r.stderr
 
 
-def test_invoke_command_provider_persists_confirmed_selection_after_ask_user(run_cli, tmp_path):
+def test_invoke_command_provider_confirmed_source_cannot_promote_candidate_after_ask_user(run_cli, tmp_path):
     run_cli("init", "command provider confirmed mission", "--complexity", "Complex", cwd=tmp_path, check=True)
     helper = tmp_path / "provider.py"
     helper.write_text("print('finding: review evidence is complete and actionable')\n", encoding="utf-8")
@@ -1489,6 +1545,8 @@ def test_invoke_command_provider_persists_confirmed_selection_after_ask_user(run
         json.loads(registry.read_text())["specialists"][0],
         ask_user=True,
     )
+    state_path = tmp_path / ".mission-state" / "sessions" / "test.json"
+    before = state_path.read_bytes()
 
     r = run_cli(
         "specialists", "invoke-command",
@@ -1500,11 +1558,9 @@ def test_invoke_command_provider_persists_confirmed_selection_after_ask_user(run
         cwd=tmp_path,
     )
 
-    data = _json_result(r)
-    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
-    assert data["ok"] is True
-    assert state["specialist_invocations"][0]["selection_source"] == "confirmed-user"
-    assert state["specialists_selected"][0]["selection_source"] == "confirmed-user"
+    assert r.returncode == 2
+    assert "provider-ineligible" in r.stderr
+    assert state_path.read_bytes() == before
 
 
 def test_invoke_command_provider_accepts_result_contract_evidence(run_cli, tmp_path):

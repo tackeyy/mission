@@ -12,6 +12,19 @@ from typing import Any
 
 COMPLEXITY_ORDER = {"Simple": 1, "Standard": 2, "Complex": 3, "Critical": 4}
 VALID_PHASES = {"planning", "execution", "review", "scoring", "critic", "synthesis"}
+MISSION_PHASE_TO_PROVIDER_PHASE = {
+    "planning": "planning",
+    "executing": "execution",
+    "reviewing": "review",
+    "scoring": "scoring",
+    "critic": "critic",
+}
+APPLICATION_KINDS = {
+    "preflight",
+    "result-import",
+    "plan-promotion",
+    "executor-handoff",
+}
 CANONICAL_SELECTION_SOURCES = {
     "automatic",
     "confirmed-user",
@@ -629,3 +642,150 @@ def evaluate_provider_eligibility(
 
     reason = "eligible-complexity" if "complexity" in matched else "eligible-profile"
     return _result(True, reason, matched, mission_context, activation)
+
+
+def _provider_identity(candidate: dict[str, Any]) -> tuple[str, str]:
+    """Return the stable public identity pair used by selected records."""
+    return (
+        str(candidate.get("provider_id") or ""),
+        str(candidate.get("skill") or candidate.get("role") or ""),
+    )
+
+
+def _application_result(
+    eligible: bool,
+    reason_code: str,
+    context: dict[str, Any],
+    *,
+    eligibility: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    result = {
+        "eligible": eligible,
+        "reason_code": reason_code,
+        "application_context": context,
+        "application_context_digest": _context_digest(context),
+    }
+    if eligibility is not None:
+        result.update({
+            "context_digest": eligibility["context_digest"],
+            "activation_digest": eligibility["activation_digest"],
+        })
+    return result
+
+
+def validate_provider_application(
+    provider: dict[str, Any],
+    mission_state: dict[str, Any],
+    *,
+    requested_phase: str,
+    requested_iteration: int,
+    application_kind: str,
+    selection_source: str | None = None,
+    invocation_id: str | None = None,
+) -> dict[str, Any]:
+    """Fail closed against the *current* selected provider application context.
+
+    This is deliberately pure: callers perform their final invocation under a
+    state lock, and future consumers can use the same seam before accepting a
+    provider result without importing command-provider implementation details.
+    """
+    provider_id, skill = _provider_identity(provider)
+    context = {
+        "schema": "mission-provider-application-context/1",
+        "application_kind": application_kind,
+        "provider_id": provider_id,
+        "registry_entry_digest": provider.get("registry_entry_digest"),
+        "registry_projection_digest": provider.get("registry_projection_digest"),
+        "selection_source": (
+            selection_source
+            or provider.get("selection_source")
+            or provider.get("eligibility_selection_source")
+            or "automatic"
+        ),
+        "selection_id": provider.get("selection_id"),
+        "invocation_id": invocation_id,
+        "iteration": requested_iteration,
+        "complexity": mission_state.get("complexity"),
+        "phase": mission_state.get("phase"),
+        "activation_digest": provider.get("activation_digest"),
+        "eligibility_context_digest": provider.get("context_digest"),
+    }
+    if application_kind not in APPLICATION_KINDS:
+        return _application_result(False, "invalid-application-kind", context)
+    if requested_phase not in VALID_PHASES:
+        return _application_result(False, "invalid-requested-phase", context)
+    try:
+        source = normalize_selection_source(context["selection_source"])["selection_source"]
+    except ValueError:
+        return _application_result(False, "invalid-selection-source", context)
+    context["selection_source"] = source
+
+    current_phase = mission_state.get("phase")
+    if MISSION_PHASE_TO_PROVIDER_PHASE.get(current_phase) != requested_phase:
+        return _application_result(False, "mission-phase-mismatch", context)
+    current_iteration = mission_state.get("iteration")
+    expected_iteration = 1 if current_iteration == 0 else current_iteration
+    if type(current_iteration) is not int or requested_iteration != expected_iteration:
+        return _application_result(False, "iteration-mismatch", context)
+
+    decision = mission_state.get("specialists_decision")
+    selected = mission_state.get("specialists_selected")
+    if not isinstance(decision, dict) or decision.get("decision") != "selected":
+        return _application_result(False, "provider-not-selected", context)
+    if not isinstance(selected, list):
+        return _application_result(False, "provider-not-selected", context)
+    matching = [
+        item for item in selected
+        if isinstance(item, dict) and _provider_identity(item) == (provider_id, skill)
+    ]
+    if len(matching) != 1:
+        return _application_result(False, "provider-not-selected", context)
+    selected_provider = matching[0]
+    selection_id = decision.get("selection_id")
+    if (
+        not isinstance(selection_id, str)
+        or selected_provider.get("selection_id") != selection_id
+        or provider.get("selection_id") != selection_id
+    ):
+        return _application_result(False, "selection-identity-mismatch", context)
+    for field in ("registry_entry_digest", "registry_projection_digest", "activation_digest", "context_digest"):
+        if provider.get(field) != selected_provider.get(field):
+            return _application_result(False, "provider-identity-mismatch", context)
+
+    candidate = dict(selected_provider)
+    candidate["activation"] = candidate.get("normalized_activation")
+    eligibility_context = {
+        "complexity": mission_state.get("complexity"),
+        "task_profile": mission_state.get("task_profile") or {},
+        "iteration": current_iteration,
+        "previous_iteration_passed": (
+            bool(mission_state.get("passes")) if current_iteration >= 2 else None
+        ),
+    }
+    eligibility = evaluate_provider_eligibility(
+        candidate,
+        eligibility_context,
+        requested_phase=requested_phase,
+        selection_source=source,
+    )
+    if not eligibility["eligible"]:
+        return _application_result(False, eligibility["reason_code"], context, eligibility=eligibility)
+
+    maximum = selected_provider.get("max_calls_per_iteration")
+    if type(maximum) is int:
+        used = sum(
+            1
+            for item in mission_state.get("specialist_invocations") or []
+            if isinstance(item, dict)
+            and item.get("iteration") == requested_iteration
+            and str(item.get("skill") or item.get("role") or "") == skill
+            and item.get("invocation_id") != invocation_id
+            and item.get("status") in {
+                "reserved", "running", "completed", "failed-before-start", "abandoned-unknown",
+                "started", "prepared", "awaiting-input", "inline-applied", "skill-tool-applied",
+                "skipped", "unavailable", "failed",
+            }
+        )
+        if used >= maximum:
+            return _application_result(False, "call-limit-exceeded", context, eligibility=eligibility)
+    return _application_result(True, "eligible", context, eligibility=eligibility)

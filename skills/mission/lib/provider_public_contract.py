@@ -56,6 +56,11 @@ VALID_INVOCATION_MODES = {
 VALID_INVOCATION_STATUSES = {
     "selected",
     "started",
+    "reserved",
+    "running",
+    "rejected",
+    "failed-before-start",
+    "abandoned-unknown",
     "completed",
     "prepared",
     "awaiting-input",
@@ -75,7 +80,7 @@ VALID_PROJECTION_STATES = {
 
 CANDIDATE_FIELDS = frozenset({
     "provider_id", "id", "role", "skill", "kind", "command", "args", "env", "timeout",
-    "task_profiles", "phases", "required", "bounded_use", "bounded_purpose_required",
+    "task_profiles", "phases", "required", "max_calls_per_iteration", "bounded_use", "bounded_purpose_required",
     "source", "registry_version", "registry_entry_digest", "registry_projection_digest",
     "context_digest", "activation_digest", "score", "installed", "available", "status",
     "first_use", "eligibility_reason", "matched_conditions", "selection_source",
@@ -113,6 +118,9 @@ INVOCATION_FIELDS = frozenset({
     "completed_at", "provider_kind", "exit_code", "timeout", "reason_code",
     "selection_source", "bounded_purpose", "evidence_path", "reason", "notes", "command", "kind",
     "selection_id", "invocation_id", "lifecycle_state", "transitioned_at",
+    "reserved_at", "running_at", "application_context_digest",
+    "reservation_owner_session_id", "fencing_epoch", "child_pid",
+    "process_identity_digest", "heartbeat_at", "result_artifact_digest",
     "host_run_id", "root_run_id", "parent_run_id", "child_run_id", "logical_group_id",
 })
 ACTIVATION_FIELDS = frozenset({
@@ -373,6 +381,11 @@ def _validate_candidate(record: object, base: str) -> None:
         type(record["timeout"]) is not int or not 1 <= record["timeout"] <= 86400
     ):
         _reject(f"{base}/timeout")
+    if "max_calls_per_iteration" in record and (
+        type(record["max_calls_per_iteration"]) is not int
+        or not 1 <= record["max_calls_per_iteration"] <= 1000
+    ):
+        _reject(f"{base}/max_calls_per_iteration")
     for field in ("task_profiles", "matched_conditions"):
         if field in record and not _safe_string_list(record[field]):
             _reject(f"{base}/{field}")
@@ -581,8 +594,19 @@ def _validate_invocation(record: object, base: str) -> None:
         isinstance(record["reason_code"], str) and TOKEN.fullmatch(record["reason_code"])
     ):
         _reject(f"{base}/reason_code")
-    for field in ("timestamp", "started_at", "completed_at", "transitioned_at"):
+    for field in ("timestamp", "started_at", "completed_at", "transitioned_at", "reserved_at", "running_at", "heartbeat_at"):
         if field in record and not _safe_text(record[field], maximum=64):
+            _reject(f"{base}/{field}")
+    for field in ("application_context_digest", "process_identity_digest", "result_artifact_digest"):
+        if field in record and not (isinstance(record[field], str) and DIGEST.fullmatch(record[field])):
+            _reject(f"{base}/{field}")
+    if "reservation_owner_session_id" in record and not (
+        isinstance(record["reservation_owner_session_id"], str)
+        and TOKEN.fullmatch(record["reservation_owner_session_id"])
+    ):
+        _reject(f"{base}/reservation_owner_session_id")
+    for field in ("fencing_epoch", "child_pid"):
+        if field in record and (type(record[field]) is not int or record[field] < 1):
             _reject(f"{base}/{field}")
     if "provider_kind" in record and record["provider_kind"] not in {"skill", "command"}:
         _reject(f"{base}/provider_kind")
@@ -610,7 +634,9 @@ def _validate_invocation(record: object, base: str) -> None:
                 opaque_token(record[field])
             except ValueError:
                 _reject(f"{base}/{field}")
-    if "lifecycle_state" in record and record["lifecycle_state"] not in {"selected", "invoked", "terminal"}:
+    if "lifecycle_state" in record and record["lifecycle_state"] not in {
+        "selected", "invoked", "reserved", "running", "terminal"
+    }:
         _reject(f"{base}/lifecycle_state")
 
 

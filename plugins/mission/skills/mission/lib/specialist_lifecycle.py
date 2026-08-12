@@ -10,6 +10,9 @@ from typing import Any, Mapping
 SELECTION_DECISIONS = frozenset({"none", "selected", "declined", "unavailable"})
 TERMINAL_INVOCATION_STATUSES = frozenset(
     {
+        "rejected",
+        "failed-before-start",
+        "abandoned-unknown",
         "completed",
         "prepared",
         "awaiting-input",
@@ -44,6 +47,10 @@ def invocation_lifecycle_state(status: str) -> str:
         return "selected"
     if status == "started":
         return "invoked"
+    if status == "reserved":
+        return "reserved"
+    if status == "running":
+        return "running"
     return "terminal"
 
 
@@ -139,8 +146,10 @@ def validate_invocation_transition(
     previous_status = str(existing.get("status"))
     next_status = str(requested.get("status"))
     if previous_status == "selected":
-        allowed = next_status == "started" or next_status in TERMINAL_INVOCATION_STATUSES
-    elif previous_status == "started":
+        allowed = next_status in {"started", "reserved"} or next_status in TERMINAL_INVOCATION_STATUSES
+    elif previous_status == "reserved":
+        allowed = next_status == "running" or next_status in TERMINAL_INVOCATION_STATUSES
+    elif previous_status in {"started", "running"}:
         allowed = next_status in TERMINAL_INVOCATION_STATUSES
     else:
         allowed = False
