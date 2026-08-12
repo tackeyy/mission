@@ -277,7 +277,7 @@ def test_running_invocation_fences_state_mutation_until_terminal(
     assert process.returncode == 0, (stdout, stderr)
     state = json.loads(state_path.read_text(encoding="utf-8"))
     invocation = state["specialist_invocations"][0]
-    assert invocation["status"] == "completed"
+    assert invocation["status"] == "unvalidated-evidence"
     assert invocation["lifecycle_state"] == "terminal"
     assert marker.exists()
 

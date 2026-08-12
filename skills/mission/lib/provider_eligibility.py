@@ -797,7 +797,7 @@ def validate_provider_application(
             and str(item.get("skill") or item.get("role") or "") == skill
             and item.get("invocation_id") != invocation_id
             and item.get("status") in {
-                "reserved", "running", "completed", "failed-before-start", "abandoned-unknown",
+                "reserved", "running", "completed", "unvalidated-evidence", "failed-before-start", "abandoned-unknown",
                 "started", "prepared", "awaiting-input", "inline-applied", "skill-tool-applied",
                 "skipped", "unavailable", "failed",
             }
