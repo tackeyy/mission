@@ -11217,6 +11217,9 @@ def cmd_plan_import(args):
         invocation = invocation_by_id(data, args.invocation_id)
         if not isinstance(invocation, dict):
             _provider_gate("invocation-not-found")
+        if (invocation.get("iteration") != data.get("iteration") or invocation.get("phase") != "planning"
+                or invocation.get("status") != "completed" or invocation.get("lifecycle_state") != "terminal"):
+            _provider_gate("invocation-not-current-completed-plan")
         provider = _find_provider(data, str(invocation.get("skill") or invocation.get("role") or ""))
         current = _require_current_provider_application(
             data, provider, requested_phase="planning", requested_iteration=data.get("iteration"),
@@ -11231,6 +11234,21 @@ def cmd_plan_import(args):
         if len(matches) != 1:
             _provider_gate("preflight-binding-missing")
         preflight_id, pointer = matches[0]
+        if pointer.get("status") != "consumed" or pointer.get("consumed_invocation_id") != args.invocation_id:
+            _provider_gate("preflight-not-consumed")
+        artifact_path = pointer.get("artifact_path")
+        receipt = pointer.get("receipt") if isinstance(pointer.get("receipt"), dict) else {}
+        receipt_path, receipt_digest = receipt.get("artifact_path"), receipt.get("digest")
+        try:
+            for relative in (artifact_path, receipt_path):
+                if not isinstance(relative, str) or not relative or Path(relative).is_absolute() or ".." in Path(relative).parts: raise ValueError
+            if not isinstance(receipt_digest, str) or _SHA256_REF_RE.fullmatch(receipt_digest) is None: raise ValueError
+            packet_bytes = _read_strict_review_file(state_dir(cwd) / artifact_path)
+            if "sha256:" + hashlib.sha256(packet_bytes).hexdigest() != pointer.get("outbound_packet_digest"): raise ValueError
+            receipt_bytes = _read_strict_review_file(state_dir(cwd) / receipt_path)
+            if "sha256:" + hashlib.sha256(receipt_bytes).hexdigest() != receipt_digest: raise ValueError
+        except ValueError:
+            _provider_gate("consumed-preflight-evidence-invalid")
         expected = {"invocation_id": args.invocation_id, "preflight_id": preflight_id,
                     "outbound_packet_digest": pointer.get("outbound_packet_digest"),
                     "selection_id": current.get("selection_id"),

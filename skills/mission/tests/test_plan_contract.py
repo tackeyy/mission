@@ -8,6 +8,9 @@ LIB_DIR = Path(__file__).resolve().parents[1] / "lib"
 sys.path.insert(0, str(LIB_DIR))
 
 from plan_contract import PlanContractError, canonical_plan_bytes, parse_provider_result  # noqa: E402
+from provider_eligibility import RegistryContractError, parse_v2_registry_json  # noqa: E402
+
+STRUCTURED_CONTRACT = {"envelope_schema": "mission-provider-result/1", "artifact_schema": "mission-plan/1", "cardinality": "exactly-one", "required_capability_class": "deep-planning", "required_capability_variant": "portable-v1", "require_exact_variant": True}
 
 
 def _result(*, document=None):
@@ -34,7 +37,7 @@ def test_minimal_envelope_accepts_exactly_one_bounded_plan():
     result = parse_provider_result(
         json.dumps(_result()).encode(),
         expected_binding=_result()["binding"],
-        result_contract={"envelope_schema": "mission-provider-result/1", "artifact_schema": "mission-plan/1", "cardinality": "exactly-one", "required_capability_class": "deep-planning", "require_exact_variant": True},
+        result_contract=STRUCTURED_CONTRACT,
         workspace=Path.cwd(),
     )
     assert result["document"]["objective"] == "Create a bounded plan"
@@ -48,13 +51,13 @@ def test_minimal_envelope_accepts_exactly_one_bounded_plan():
 def test_artifact_cardinality_is_fail_closed(mutate):
     value = _result(); mutate(value)
     with pytest.raises(PlanContractError, match="artifact-cardinality"):
-        parse_provider_result(json.dumps(value).encode(), expected_binding=value["binding"], result_contract={"required_capability_class": "deep-planning", "require_exact_variant": True}, workspace=Path.cwd())
+        parse_provider_result(json.dumps(value).encode(), expected_binding=value["binding"], result_contract=STRUCTURED_CONTRACT, workspace=Path.cwd())
 
 
 def test_reserved_mission_authority_is_rejected():
     value = _result(); value["artifacts"][0]["document"]["mission_metadata"] = {}
     with pytest.raises(PlanContractError, match="mission-authority-field-injection"):
-        parse_provider_result(json.dumps(value).encode(), expected_binding=value["binding"], result_contract={"required_capability_class": "deep-planning", "require_exact_variant": True}, workspace=Path.cwd())
+        parse_provider_result(json.dumps(value).encode(), expected_binding=value["binding"], result_contract=STRUCTURED_CONTRACT, workspace=Path.cwd())
 
 
 def test_canonical_bytes_sort_keys_but_keep_array_order():
@@ -129,3 +132,33 @@ def test_typed_non_file_resources_are_valid(resource):
     value = _result(); value["artifacts"][0]["document"]["scope"]["resources"] = [resource]
     parsed = parse_provider_result(json.dumps(value).encode(), expected_binding=value["binding"], result_contract={}, workspace=Path.cwd())
     assert parsed["document"]["scope"]["resources"] == [resource]
+
+
+def test_exact_variant_must_match_registry_pin_not_provider_choice():
+    value = _result(); value["capability_attestation"].update({"requested_variant": "self-chosen", "effective_variant": "self-chosen"})
+    with pytest.raises(PlanContractError, match="capability-variant-mismatch"):
+        parse_provider_result(json.dumps(value).encode(), expected_binding=value["binding"], result_contract=STRUCTURED_CONTRACT, workspace=Path.cwd())
+
+
+def test_registry_rejects_non_string_required_capability_variant():
+    candidate = {"provider_id":"portable","skill":"portable","kind":"command","command":"portable","result_contract":{**STRUCTURED_CONTRACT,"required_capability_variant":1}}
+    with pytest.raises(RegistryContractError, match="result_contract.required_capability_variant"):
+        parse_v2_registry_json(json.dumps({"schema":"mission-specialist-registry/2","specialists_v2":[candidate]}))
+
+
+@pytest.mark.parametrize("field,value", [
+    ("global_acceptance", []), ("global_acceptance", [""]),
+    ("stop_conditions", []), ("stop_conditions", ["  "]),
+])
+def test_global_acceptance_and_stop_conditions_require_nonblank_entries(field, value):
+    result = _result(); result["artifacts"][0]["document"][field] = value
+    with pytest.raises(PlanContractError):
+        parse_provider_result(json.dumps(result).encode(), expected_binding=result["binding"], result_contract=STRUCTURED_CONTRACT, workspace=Path.cwd())
+
+
+@pytest.mark.parametrize("effect", ["external", "irreversible"])
+def test_scope_effect_requires_matching_step_risk_rollback_and_stop(effect):
+    result = _result(); document = result["artifacts"][0]["document"]
+    document["scope"]["actions"][0]["effect_class"] = effect
+    with pytest.raises(PlanContractError, match="risk-rollback-required"):
+        parse_provider_result(json.dumps(result).encode(), expected_binding=result["binding"], result_contract=STRUCTURED_CONTRACT, workspace=Path.cwd())

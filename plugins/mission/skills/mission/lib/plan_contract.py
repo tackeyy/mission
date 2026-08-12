@@ -85,6 +85,8 @@ def _validate_document(doc: object, workspace: Path):
             if not resource["identifier"].strip() or any(char.isspace() for char in resource["identifier"]): raise PlanContractError("resource-identifier-invalid")
     for action in scope["actions"]:
         if not isinstance(action, dict) or action.get("type") not in ACTION_TYPES or action.get("effect_class") not in EFFECT_CLASSES: raise PlanContractError("action-invalid")
+    for name in ("global_acceptance", "stop_conditions"):
+        if not isinstance(doc[name], list) or not doc[name] or not all(isinstance(item, str) and item.strip() for item in doc[name]): raise PlanContractError(f"{name}-invalid")
     if not isinstance(doc["assumptions"], list) or any(not isinstance(x, dict) or not all(isinstance(x.get(k), str) and x[k] for k in ("id","statement","validation")) for x in doc["assumptions"]): raise PlanContractError("assumption-invalid")
     steps = doc["steps"]
     if not isinstance(steps, list) or not steps: raise PlanContractError("steps-invalid")
@@ -104,6 +106,9 @@ def _validate_document(doc: object, workspace: Path):
             for dep in edges[node]: visit(dep)
             visiting.remove(node); done.add(node)
     for node in ids: visit(node)
+    effect_classes = {action["effect_class"] for action in scope["actions"]}
+    for effect in effect_classes & {"external", "irreversible"}:
+        if not any(step.get("risk") == effect and step.get("rollback", "").strip() for step in steps): raise PlanContractError("risk-rollback-required")
     return doc
 
 def parse_provider_result(raw: bytes, *, expected_binding: dict, result_contract: dict, workspace: Path) -> dict:
@@ -113,7 +118,8 @@ def parse_provider_result(raw: bytes, *, expected_binding: dict, result_contract
     if binding != expected_binding: raise PlanContractError("binding-mismatch")
     attestation=_require(result,"capability_attestation",dict); required=result_contract.get("required_capability_class")
     if required and (attestation.get("requested_class") != required or attestation.get("effective_class") != required): raise PlanContractError("capability-class-mismatch")
-    if result_contract.get("require_exact_variant") and attestation.get("requested_variant") != attestation.get("effective_variant"): raise PlanContractError("capability-variant-mismatch")
+    pinned_variant=result_contract.get("required_capability_variant")
+    if result_contract.get("require_exact_variant") and (not isinstance(pinned_variant,str) or not pinned_variant or attestation.get("requested_variant") != pinned_variant or attestation.get("effective_variant") != pinned_variant): raise PlanContractError("capability-variant-mismatch")
     artifacts=_require(result,"artifacts",list); schema=result_contract.get("artifact_schema","mission-plan/1")
     if len(artifacts)!=1 or not isinstance(artifacts[0],dict) or artifacts[0].get("schema") != schema: raise PlanContractError("artifact-cardinality")
     return {"document":_validate_document(artifacts[0].get("document"),workspace), "raw_result_digest":"sha256:"+hashlib.sha256(raw).hexdigest()}

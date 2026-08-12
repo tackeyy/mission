@@ -14,7 +14,7 @@ from specialist_accounting import candidate_accounting_report
 
 
 def _contract():
-    return {"envelope_schema": "mission-provider-result/1", "artifact_schema": "mission-plan/1", "cardinality": "exactly-one", "required_capability_class": "deep-planning", "require_exact_variant": True}
+    return {"envelope_schema": "mission-provider-result/1", "artifact_schema": "mission-plan/1", "cardinality": "exactly-one", "required_capability_class": "deep-planning", "required_capability_variant": "portable-v1", "require_exact_variant": True}
 
 
 def _document():
@@ -40,9 +40,14 @@ def _setup(run_cli, tmp_path):
     selected["eligibility_selection_source"] = "automatic"
     state["specialists_selected"] = [selected]
     state["specialists_decision"] = {"policy":"provider-primary","action":"select","prompted_user":False,"decision":"selected","selection_id":selected["selection_id"]}
-    invocation = "inv_" + "a" * 32; preflight = "pf_test"; outbound = "sha256:" + "b" * 64
+    invocation = "inv_" + "a" * 32; preflight = "pf_test"
     state["specialist_invocations"] = [{"invocation_id":invocation,"iteration":1,"phase":"planning","role":"deep-planning","skill":"portable-plan-provider","mode":"command-provider","status":"completed","lifecycle_state":"terminal","timestamp":"2026-01-01T00:00:00Z"}]
-    state["provider_preflights"] = {preflight:{"invocation_id":invocation,"outbound_packet_digest":outbound,"status":"consumed"}}
+    private = tmp_path / ".mission-state" / "private-preflights"; private.mkdir()
+    packet = private / f"{preflight}.json"; packet.write_text("packet")
+    outbound = "sha256:" + hashlib.sha256(packet.read_bytes()).hexdigest()
+    receipts = tmp_path / ".mission-state" / "private-receipts"; receipts.mkdir()
+    receipt = receipts / f"{preflight}.json"; receipt.write_text("receipt")
+    state["provider_preflights"] = {preflight:{"invocation_id":invocation,"consumed_invocation_id":invocation,"outbound_packet_digest":outbound,"status":"consumed","artifact_path":str(packet.relative_to(tmp_path / ".mission-state")),"receipt":{"artifact_path":str(receipt.relative_to(tmp_path / ".mission-state")),"digest":"sha256:"+hashlib.sha256(receipt.read_bytes()).hexdigest()}}}
     state_file.write_text(json.dumps(state))
     binding = {"invocation_id":invocation,"preflight_id":preflight,"outbound_packet_digest":outbound,"selection_id":selected["selection_id"],"selection_source":"automatic","iteration":1}
     result = {"schema":"mission-provider-result/1","binding":binding,"capability_attestation":{"requested_class":"deep-planning","effective_class":"deep-planning","requested_variant":"portable-v1","effective_variant":"portable-v1"},"artifacts":[{"schema":"mission-plan/1","document":_document()}]}
@@ -113,3 +118,20 @@ def test_uncontracted_exit_zero_is_terminal_but_not_applied_required_evidence():
         "specialist_invocations": [{"skill": "portable-provider", "status": status}],
     })
     assert report["result_required_unmet_candidates"][0]["skill"] == "portable-provider"
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda state, invocation: state["specialist_invocations"][0].update({"status": "started", "lifecycle_state": "invoked"}),
+    lambda state, invocation: state["specialist_invocations"][0].update({"iteration": 0}),
+    lambda state, invocation: next(iter(state["provider_preflights"].values())).update({"status": "approved"}),
+    lambda state, invocation: next(iter(state["provider_preflights"].values())).pop("receipt"),
+    lambda state, invocation: next(iter(state["provider_preflights"].values())).pop("artifact_path"),
+])
+def test_import_rejects_noncurrent_invocation_or_unproven_consumed_preflight(mutate, run_cli, tmp_path):
+    registry, state_file, result, invocation, env = _setup(run_cli, tmp_path)
+    state = json.loads(state_file.read_text()); mutate(state, invocation); state_file.write_text(json.dumps(state))
+    source = tmp_path / "result.json"; source.write_text(json.dumps(result)); before = state_file.read_bytes()
+    response = run_cli("specialists", "plan-import", "--input", str(source), "--invocation-id", invocation, "--registry", str(registry), "--json", cwd=tmp_path, env_extra=env)
+    assert response.returncode == 2
+    assert state_file.read_bytes() == before
+    assert not list((tmp_path / ".mission-state" / "plans").glob("*.json"))

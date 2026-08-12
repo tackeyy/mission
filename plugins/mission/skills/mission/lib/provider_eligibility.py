@@ -204,10 +204,10 @@ def _validate_v2_candidate_types(candidate: dict[str, Any]) -> None:
         _invalid_candidate_type("env")
     if "result_contract" in candidate:
         contract = candidate["result_contract"]
-        allowed = {"envelope_schema", "artifact_schema", "cardinality", "required_capability_class", "require_exact_variant", "forbidden_markers", "min_non_template_chars", "awaiting_input_markers", "awaiting_input_exit_codes"}
+        allowed = {"envelope_schema", "artifact_schema", "cardinality", "required_capability_class", "required_capability_variant", "require_exact_variant", "forbidden_markers", "min_non_template_chars", "awaiting_input_markers", "awaiting_input_exit_codes"}
         if set(contract) - allowed:
             _invalid_candidate_type("result_contract")
-        for field in ("envelope_schema", "artifact_schema", "cardinality", "required_capability_class"):
+        for field in ("envelope_schema", "artifact_schema", "cardinality", "required_capability_class", "required_capability_variant"):
             if field in contract and not isinstance(contract[field], str):
                 _invalid_candidate_type(f"result_contract.{field}")
         if "require_exact_variant" in contract and not _is_exact_bool(contract["require_exact_variant"]):
