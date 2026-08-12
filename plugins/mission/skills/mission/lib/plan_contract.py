@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 MAX_PLAN_RESULT_BYTES = 4 * 1024 * 1024
-RESERVED_DOCUMENT_FIELDS = {"provenance", "authority", "mission_metadata", "passes", "score", "phase", "state_path"}
+RESERVED_DOCUMENT_FIELDS = {"provenance", "authority", "mission_metadata", "passes", "score", "phase", "state_path", "selection_verified"}
 RESOURCE_TYPES = {"path", "uri", "record", "dataset", "other"}
 EFFECT_CLASSES = {"reversible", "irreversible", "external"}
 ACTION_TYPES = {"read", "write", "analyze", "research", "decide", "communicate"}
@@ -52,6 +52,10 @@ def _validate_path(identifier: object, workspace: Path):
     if not isinstance(identifier, str) or not identifier or "\0" in identifier: raise PlanContractError("path-invalid")
     path = Path(identifier)
     if path.is_absolute() or ".." in path.parts: raise PlanContractError("path-outside-workspace")
+    cursor = workspace
+    for part in path.parts:
+        cursor = cursor / part
+        if cursor.is_symlink(): raise PlanContractError("path-symlink-escape")
     target = (workspace / path).resolve(strict=False)
     try: target.relative_to(workspace.resolve())
     except ValueError as exc: raise PlanContractError("path-outside-workspace") from exc
@@ -61,7 +65,12 @@ def _validate_path(identifier: object, workspace: Path):
 
 def _validate_document(doc: object, workspace: Path):
     if not isinstance(doc, dict): raise PlanContractError("plan-document-invalid")
-    if RESERVED_DOCUMENT_FIELDS & set(doc): raise PlanContractError("mission-authority-field-injection")
+    def has_reserved(value):
+        if isinstance(value, dict):
+            return bool(RESERVED_DOCUMENT_FIELDS & set(value)) or any(has_reserved(child) for child in value.values())
+        if isinstance(value, list): return any(has_reserved(child) for child in value)
+        return False
+    if has_reserved(doc): raise PlanContractError("mission-authority-field-injection")
     for name in ("objective", "scope", "assumptions", "steps", "global_acceptance", "stop_conditions"):_require(doc, name)
     if not isinstance(doc["objective"], str) or not doc["objective"].strip(): raise PlanContractError("objective-invalid")
     scope = doc["scope"]

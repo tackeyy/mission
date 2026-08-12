@@ -11246,7 +11246,7 @@ def cmd_plan_import(args):
             "provenance": {"provider_id": current.get("provider_id"), "registry_entry_digest": current.get("registry_entry_digest"), "selection_id": expected["selection_id"], "selection_source": expected["selection_source"], "invocation_id": args.invocation_id, "iteration": expected["iteration"], "input_outbound_packet_digest": expected["outbound_packet_digest"], "raw_result_digest": digest},
             "capability_verification": {"selection_verified": True, "class_exact_match": True, "variant_exact_match": True},
         }
-        candidate = {**parsed["document"], "mission_metadata": metadata}
+        candidate = {"schema": "mission-plan/1", **parsed["document"], "mission_metadata": metadata}
         canonical = canonical_plan_bytes(candidate)
         canonical_digest = "sha256:" + hashlib.sha256(canonical).hexdigest()
         mission8 = str(data.get("mission_id") or "unknown")[:8]
@@ -11254,9 +11254,15 @@ def cmd_plan_import(args):
         raw_file = published_files.add(_publish_review_archive_transaction(cwd, raw_name, raw))
         candidate_path = state_dir(cwd) / "plans" / f"{canonical_digest[7:23]}.json"
         candidate_file = published_files.add(_publish_output_transaction(candidate_path, canonical))
+        previous = (data.get("provider_plan_imports") or {}).get(args.invocation_id)
+        generation = (previous.get("generation", 0) if isinstance(previous, dict) and previous.get("candidate_digest") != canonical_digest else 0)
+        if not generation:
+            generation = (previous.get("generation", 0) if isinstance(previous, dict) else 0) or 1
+        else:
+            generation += 1
         reference = {"raw_result_path": str(raw_file.path.relative_to(cwd)), "raw_result_digest": digest,
                      "candidate_path": str(candidate_file.path.relative_to(cwd)), "candidate_digest": canonical_digest,
-                     "invocation_id": args.invocation_id, "preflight_id": preflight_id, "generation": canonical_digest[7:23]}
+                     "invocation_id": args.invocation_id, "preflight_id": preflight_id, "generation": generation}
         data.setdefault("provider_plan_imports", {})[args.invocation_id] = reference
         data["updated_at"] = iso_now()
         _verify_published_file(raw_file); _verify_published_file(candidate_file)

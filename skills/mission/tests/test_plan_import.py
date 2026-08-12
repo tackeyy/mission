@@ -48,6 +48,7 @@ def test_plan_import_publishes_raw_canonical_and_bound_state(run_cli, tmp_path):
     state = json.loads(state_file.read_text()); stored = state["provider_plan_imports"][invocation]
     assert stored == record and (tmp_path / record["raw_result_path"]).read_bytes() == source.read_bytes()
     candidate = json.loads((tmp_path / record["candidate_path"]).read_text())
+    assert candidate["schema"] == "mission-plan/1" and record["generation"] == 1
     assert candidate["mission_metadata"]["provenance"]["invocation_id"] == invocation
     assert record["candidate_digest"] == "sha256:" + hashlib.sha256((tmp_path / record["candidate_path"]).read_bytes()).hexdigest()
 

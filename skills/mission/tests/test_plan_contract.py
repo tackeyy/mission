@@ -103,3 +103,17 @@ def test_unsafe_paths_are_rejected(identifier):
     value = _result(); value["artifacts"][0]["document"]["scope"]["resources"][0]["identifier"] = identifier
     with pytest.raises(PlanContractError):
         parse_provider_result(json.dumps(value).encode(), expected_binding=value["binding"], result_contract={}, workspace=Path.cwd())
+
+
+@pytest.mark.parametrize("field", ["passes", "score", "phase", "state_path", "authority", "provenance", "mission_metadata", "selection_verified"])
+def test_nested_mission_control_fields_are_rejected(field):
+    value = _result(); value["artifacts"][0]["document"]["steps"][0][field] = True
+    with pytest.raises(PlanContractError, match="mission-authority-field-injection"):
+        parse_provider_result(json.dumps(value).encode(), expected_binding=value["binding"], result_contract={}, workspace=Path.cwd())
+
+
+def test_symlink_component_is_rejected_even_when_it_resolves_inside(tmp_path):
+    (tmp_path / "real").mkdir(); (tmp_path / "link").symlink_to(tmp_path / "real", target_is_directory=True)
+    value = _result(); value["artifacts"][0]["document"]["scope"]["resources"][0]["identifier"] = "link/file.md"
+    with pytest.raises(PlanContractError, match="path-symlink-escape"):
+        parse_provider_result(json.dumps(value).encode(), expected_binding=value["binding"], result_contract={}, workspace=tmp_path)
