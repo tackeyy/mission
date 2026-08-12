@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -30,6 +31,46 @@ def _review_bytes():
         "scores": {"mission_achievement": 4.5, "accuracy": 4.5, "completeness": 4.5, "usability": 4.5},
         "findings": [],
     }) + "\n").encode("utf-8")
+
+
+def _prepare_current_command_provider(state_dir, run_cli, command: str):
+    root = state_dir.parent
+    state_file = state_dir / "sessions" / "test.json"
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    state["complexity"] = "Complex"
+    state_file.write_text(json.dumps(state), encoding="utf-8")
+    registry = root / "provider-registry.json"
+    registry.write_text(json.dumps({
+        "schema": "mission-specialist-registry/2",
+        "specialists_v2": [{
+            "provider_id": "fixture-provider",
+            "role": "evidence",
+            "skill": "fixture-provider",
+            "kind": "command",
+            "command": command,
+            "args": [],
+            "env": {},
+            "task_profiles": ["architecture"],
+            "phases": ["planning", "review"],
+            "activation": {
+                "min_complexity": "Complex",
+                "auto_select_if": ["complexity"],
+            },
+        }],
+    }), encoding="utf-8")
+    env = {"PATH": f"{root / 'commands'}{os.pathsep}{os.environ.get('PATH', '')}"}
+    recommendation = run_cli(
+        "specialists", "recommend", "--no-default-skill-roots", "--task",
+        "Review the architecture", "--registry", str(registry),
+        "--complexity", "Complex", "--record-state", cwd=root,
+        env_extra=env,
+    )
+    assert recommendation.returncode == 0, recommendation.stderr
+    run_cli(
+        "advance", "--phase", "reviewing", "--artifact-applicability", "not-applicable",
+        cwd=root, check=True, env_extra=env,
+    )
+    return registry, env
 
 
 def test_stats_and_audit_count_state_and_sidecar_command_outcomes(state_dir, run_cli, tmp_path):
@@ -70,18 +111,20 @@ def test_corrupt_sidecar_is_never_silently_accepted_and_is_visible_in_stats(stat
 
 
 def test_command_provider_unavailable_is_an_external_outcome_producer(state_dir, run_cli):
-    state_file = state_dir / "sessions" / "test.json"
-    state = json.loads(state_file.read_text(encoding="utf-8"))
-    state["specialists_selected"] = [{
-        "role": "evidence", "skill": "fixture-provider", "kind": "command",
-        "command": "definitely-not-an-installed-command", "args": [], "source": "registry:$PROJECT",
-    }]
-    state["specialists_decision"] = {"policy": "auto"}
-    state_file.write_text(json.dumps(state), encoding="utf-8")
+    command_dir = state_dir.parent / "commands"
+    command_dir.mkdir()
+    command = command_dir / "fixture-provider-command"
+    command.write_text("#!/bin/sh\ncat\n", encoding="utf-8")
+    command.chmod(0o700)
+    registry, env = _prepare_current_command_provider(
+        state_dir, run_cli, "fixture-provider-command"
+    )
+    command.unlink()
 
     result = run_cli(
         "specialists", "invoke-command", "--provider", "fixture-provider", "--iteration", "1",
-        "--phase", "review", "--event-id", "provider-attempt", cwd=state_dir.parent,
+        "--phase", "review", "--registry", str(registry),
+        "--event-id", "provider-attempt", cwd=state_dir.parent, env_extra=env,
     )
 
     assert result.returncode == 0, result.stderr
@@ -89,20 +132,20 @@ def test_command_provider_unavailable_is_an_external_outcome_producer(state_dir,
 
 
 def test_unexpected_provider_packet_error_is_internal_without_leaking_path(state_dir, run_cli, tmp_path):
-    state_file = state_dir / "sessions" / "test.json"
-    state = json.loads(state_file.read_text(encoding="utf-8"))
-    state["specialists_selected"] = [{
-        "role": "evidence", "skill": "fixture-provider", "kind": "command",
-        "command": "echo", "args": [], "source": "registry:$PROJECT",
-    }]
-    state["specialists_decision"] = {"policy": "auto"}
-    state_file.write_text(json.dumps(state), encoding="utf-8")
+    command_dir = state_dir.parent / "commands"
+    command_dir.mkdir()
+    command = command_dir / "fixture-provider-command"
+    command.write_text("#!/bin/sh\ncat\n", encoding="utf-8")
+    command.chmod(0o700)
+    registry, env = _prepare_current_command_provider(
+        state_dir, run_cli, "fixture-provider-command"
+    )
     missing = tmp_path / "not-present.json"
 
     result = run_cli(
         "specialists", "invoke-command", "--provider", "fixture-provider", "--iteration", "1",
-        "--phase", "review", "--input-file", str(missing), "--event-id", "internal-attempt",
-        cwd=state_dir.parent,
+        "--phase", "review", "--registry", str(registry), "--input-file", str(missing),
+        "--event-id", "internal-attempt", cwd=state_dir.parent, env_extra=env,
     )
 
     assert result.returncode == 1
