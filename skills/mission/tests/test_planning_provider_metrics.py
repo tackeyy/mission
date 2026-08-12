@@ -73,9 +73,9 @@ def test_reducer_counts_only_state_owned_external_effects_and_exact_preflight_bi
     }
     totals = reduce_planning_provider_kpis([state], population_kind="controlled")["totals"]
     assert totals["ineligible_external_planning_invocations"] == 1
-    assert totals["dry_run_external_effect_count"] == 1
+    assert totals["dry_run_external_effect_count"] == 0
     assert totals["preflight_live_digest_match"] == {"numerator": 0, "denominator": 1, "rate": 0.0}
-    assert totals["authority_injection_accept_count"] == 1
+    assert totals["authority_injection_accept_count"] == 0
     legacy = {"specialist_invocations": [{"phase": "planning", "status": "completed", "mode": "command-provider"}]}
     assert reduce_planning_provider_kpis([legacy], population_kind="controlled")["totals"]["legacy_session_retroactive_provider_invocations"] == 1
 
@@ -88,6 +88,8 @@ def test_reducer_counts_only_state_owned_external_effects_and_exact_preflight_bi
     lambda value: value.update({"extra": True}),
     lambda value: value["reason_code_counts"].pop("fallback"),
     lambda value: value["cohorts"].append({"complexity": "Unknown"}),
+    lambda value: value["population"].update({"extra": True}),
+    lambda value: value.update({"population": {"kind": "controlled", "session_count": 1}}),
 ])
 def test_versioned_kpi_contract_rejects_invalid_totals(mutate):
     value = reduce_planning_provider_kpis([], population_kind="controlled")

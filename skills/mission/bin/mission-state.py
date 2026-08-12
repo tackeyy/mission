@@ -5159,6 +5159,7 @@ def cmd_invoke_command_provider(args):
         "transitioned_at": now,
         "reserved_at": now,
         "provider_kind": "command",
+        "input_outbound_packet_digest": pointer["outbound_packet_digest"],
         **{
             field: data.get(field)
             for field in ("host_run_id", "root_run_id", "parent_run_id", "child_run_id", "logical_group_id")

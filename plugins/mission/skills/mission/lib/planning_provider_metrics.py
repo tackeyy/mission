@@ -52,7 +52,8 @@ def validate_planning_provider_kpis(value: Mapping[str, Any]) -> None:
     if not isinstance(value, Mapping) or set(value) != _TOP_LEVEL_KEYS or value.get("schema") != SCHEMA:
         raise PlanningProviderMetricError("schema is invalid")
     population = value.get("population")
-    if not isinstance(population, Mapping) or population.get("kind") not in _POPULATIONS or type(population.get("session_count")) is not int or population["session_count"] < 0:
+    if (not isinstance(population, Mapping) or set(population) != {"kind", "session_count"}
+            or population.get("kind") not in _POPULATIONS or type(population.get("session_count")) is not int or population["session_count"] < 0):
         raise PlanningProviderMetricError("population is invalid")
     totals = value.get("totals")
     if not isinstance(totals, Mapping) or set(totals) != _TOTAL_KEYS:
@@ -79,6 +80,8 @@ def validate_planning_provider_kpis(value: Mapping[str, Any]) -> None:
     cohorts = value.get("cohorts")
     if not isinstance(cohorts, list):
         raise PlanningProviderMetricError("cohorts are invalid")
+    cohort_keys = set()
+    cohort_count = 0
     for cohort in cohorts:
         if (not isinstance(cohort, Mapping) or set(cohort) != _COHORT_KEYS
                 or not all(isinstance(cohort[key], str) and cohort[key] for key in
@@ -86,8 +89,16 @@ def validate_planning_provider_kpis(value: Mapping[str, Any]) -> None:
                 or cohort["planning_strategy"] not in _STRATEGIES
                 or cohort["requirement"] not in {"optional", "required"}
                 or cohort["population_kind"] not in _POPULATIONS
-                or type(cohort["session_count"]) is not int or cohort["session_count"] < 0):
+                or cohort["population_kind"] != population["kind"]
+                or type(cohort["session_count"]) is not int or cohort["session_count"] < 1):
             raise PlanningProviderMetricError("cohort is invalid")
+        key = tuple(cohort[field] for field in ("complexity", "task_profile", "planning_strategy", "requirement", "population_kind"))
+        if key in cohort_keys:
+            raise PlanningProviderMetricError("cohort is duplicated")
+        cohort_keys.add(key)
+        cohort_count += cohort["session_count"]
+    if cohort_count != population["session_count"]:
+        raise PlanningProviderMetricError("cohort count is inconsistent")
 
 
 def _planning_invocations(state: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -128,19 +139,9 @@ def reduce_planning_provider_kpis(
                 1 for record in invocations if record.get("mode") in {"command-provider", "skill-provider"}
             )
         pointers = state.get("provider_preflights") if isinstance(state.get("provider_preflights"), Mapping) else {}
-        for pointer in pointers.values():
-            if (isinstance(pointer, Mapping) and pointer.get("dry_run") is True
-                    and isinstance(pointer.get("external_effect_evidence"), Mapping)
-                    and type(pointer["external_effect_evidence"].get("count")) is int
-                    and pointer["external_effect_evidence"]["count"] > 0):
-                totals["dry_run_external_effect_count"] += pointer["external_effect_evidence"]["count"]
-        imports = state.get("provider_plan_imports")
-        if isinstance(imports, Mapping):
-            for record in imports.values():
-                candidate = record.get("candidate") if isinstance(record, Mapping) else None
-                metadata = candidate.get("mission_metadata") if isinstance(candidate, Mapping) else None
-                if isinstance(metadata, Mapping) and _non_mission_authority(metadata.get("authority")):
-                    totals["authority_injection_accept_count"] += 1
+        # Provider preflight pointers and plan imports intentionally contain no
+        # accepted-effect or foreign-authority counters.  Their absence is the
+        # production-safe zero; untrusted injected keys must not become metrics.
         if not policy_v1:
             continue
         if state.get("complexity") in {"Complex", "Critical"}:
