@@ -124,6 +124,17 @@ def test_failure_ledger_counts_are_text_free_and_invalid_is_observable():
     assert "validate every boundary" not in json.dumps(counts)
 
 
+def test_weak_phase_counts_iteration_occurrences_not_pattern_rows():
+    ledger = reduce_failure_ledger([
+        {"iteration": 1, "review": _review(iteration=1), "review_aggregate_ref": {"kind": "review-aggregate", "digest": "sha256:" + "1" * 64}},
+        {"iteration": 2, "review": _review(iteration=2), "review_aggregate_ref": {"kind": "review-aggregate", "digest": "sha256:" + "2" * 64}},
+    ])
+    counts = failure_ledger_counts([{"failure_ledger": ledger}])
+    assert counts["pattern_count"] == 1
+    assert counts["recurring_pattern_count"] == 1
+    assert counts["weak_phase_counts"] == {"execution": 2}
+
+
 def test_mission_state_strict_parser_enforces_learning_marker():
     path = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
     spec = importlib.util.spec_from_file_location("mission_state_learning", path)

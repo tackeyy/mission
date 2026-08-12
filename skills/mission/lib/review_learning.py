@@ -160,7 +160,7 @@ def failure_ledger_counts(states: Sequence[Mapping[str, Any]]) -> dict[str, Any]
             continue
         for pattern in validated["patterns"]:
             pattern_count += 1
-            phase_counts[pattern["weak_phase"]] += 1
+            phase_counts[pattern["weak_phase"]] += len(pattern["iterations"])
             if pattern["recurrence_count"] > 0:
                 recurring += 1
     return {
