@@ -463,6 +463,7 @@ def transition_activity_phase(
             "started_at": at,
             "detail": sanitize_activity_detail(preserved.get("detail")),
             "origin": preserved.get("origin"),
+            "iteration": preserved.get("iteration"),
         }.items()
         if value is not None
     }

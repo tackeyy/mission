@@ -396,6 +396,7 @@ def test_phase_transition_splits_open_activity_atomically_and_terminal_closes_it
     assert middle["activity_segments"][0]["duration_sec"] == 600.0
     assert middle["activity_current"] == {
         "kind": "active",
+        "iteration": 2,
         "origin": "manual",
         "phase": "reviewing",
         "reason": "work",
@@ -419,6 +420,7 @@ def test_phase_transition_splits_open_activity_atomically_and_terminal_closes_it
         600.0,
         600.0,
     ]
+    assert [segment["iteration"] for segment in final["activity_segments"]] == [2, 2]
     assert final["phase_durations_sec"]["reviewing"] == 600.0
 
 

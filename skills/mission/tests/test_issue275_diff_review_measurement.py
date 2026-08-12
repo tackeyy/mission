@@ -68,6 +68,16 @@ def test_activity_segments_are_owned_by_positive_state_iteration_and_split_on_ch
     assert [segment["iteration"] for segment in state["activity_segments"]] == [1, 2]
 
 
+def test_phase_transition_preserves_active_iteration_across_closed_segments():
+    state = {"phase": "executing", "loop_active": True, "iteration": 0}
+
+    ACTIVITY.start_activity_segment(state, "active", "implementation", "2026-08-12T00:00:00Z")
+    ACTIVITY.transition_activity_phase(state, "reviewing", "2026-08-12T00:01:00Z")
+    ACTIVITY.end_activity_segment(state, "2026-08-12T00:02:00Z")
+
+    assert [segment["iteration"] for segment in state["activity_segments"]] == [1, 1]
+
+
 def test_state_observations_measure_iteration_two_and_verified_context_manifest(tmp_path):
     archive = tmp_path / ".mission-state" / "archive"
     archive.mkdir(parents=True)
