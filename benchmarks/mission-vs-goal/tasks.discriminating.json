@@ -90,8 +90,9 @@
       "category": "api-contract",
       "difficulty": "open_world_spec_vs_three_clients_breaking_drift_with_compatible_decoys",
       "mission_complexity": "Complex",
-      "mission_max_iter": 2,
+      "mission_max_iter": 3,
       "markers_hidden": true,
+      "fail_first": true,
       "fixtures": [
         "benchmarks/mission-vs-goal/fixtures/discriminating/contract-drift/api-spec.md",
         "benchmarks/mission-vs-goal/fixtures/discriminating/contract-drift/client-go.md",
@@ -123,8 +124,9 @@
       "category": "analytics",
       "difficulty": "open_world_numeric_reconciliation_across_four_reports",
       "mission_complexity": "Complex",
-      "mission_max_iter": 2,
+      "mission_max_iter": 3,
       "markers_hidden": true,
+      "fail_first": true,
       "fixtures": [
         "benchmarks/mission-vs-goal/fixtures/discriminating/metrics-reconcile/finance-report.md",
         "benchmarks/mission-vs-goal/fixtures/discriminating/metrics-reconcile/product-report.md",
@@ -155,8 +157,9 @@
       "category": "governance",
       "difficulty": "open_world_exception_request_audit_against_policy_with_valid_decoys",
       "mission_complexity": "Critical",
-      "mission_max_iter": 2,
+      "mission_max_iter": 3,
       "markers_hidden": true,
+      "fail_first": true,
       "fixtures": [
         "benchmarks/mission-vs-goal/fixtures/discriminating/policy-exceptions/access-policy.md",
         "benchmarks/mission-vs-goal/fixtures/discriminating/policy-exceptions/approver-roster.md",

@@ -1,4 +1,4 @@
-# Discriminating cohort N>=10 adoption runbook
+# Discriminating cohort N>=5 diff-review measurement runbook
 
 Purpose: run the adoption-decision benchmark for "quality > goal, speed ≈ goal"
 on the `tasks.discriminating.json` cohort, which removes the quality ceiling
@@ -8,19 +8,20 @@ follows #236: calibration at N=3, adoption decisions at N>=10 paired records.
 See `discriminating-cohort-runbook.ja.md` for the full procedure (Japanese is
 the canonical version). Summary:
 
-1. **Smoke (1 task)**: run `disc-config-sprawl` paired; require
-   `mission_iterations >= 2`, a recorded `critic_has_new_scope`, no
-   `mission_loop_not_initialized` records, and at least one marker score
-   below 1.0 before proceeding.
-2. **Main run**: 5 tasks x 2 arms x `--repeats 1` = 10 records (N=10);
-   `--repeats 2` for variance depth. Estimated notional cost $35-60 for one
-   repeat, wall clock 2-3 hours, model pinned to `claude-sonnet-5` via the
-   PATH shim.
-3. **Adoption gates**: measurement validity (no invalid records or
-   comparable N >= 10), discrimination (`marker_score_variance` non-zero in
-   both arms), at least one mission record with `mission_iterations >= 2`,
-   then judge quality via `comparable_average_quality_score` / marker recall
-   and speed via `comparable_average_elapsed_minutes` (target within 1.5x).
+1. **Smoke (1 task)**: run `disc-config-sprawl` paired; cap is USD 13.
+   Require `mission_iterations >= 2`, no degraded or
+   `mission_loop_not_initialized` records, and inspect iteration-2 wall-clock,
+   cost availability, and bounded-context success/fallback before proceeding.
+2. **Main run**: 5 tasks x 2 arms x `--repeats 1` = 10 records (mission N=5),
+   parallel 3, cap USD 65. Total smoke + main cap is USD 78.
+3. **Measurement gates**: `diff_review_measurement_gate` must report
+   `iter2_eligible_records >= 5`, `permission_degraded_records = 0`, and
+   `mission_loop_not_initialized_records = 0`. Bounded-context iteration counts
+   must be reported; generated and fallback are distinct outcomes, not inferred.
+   Per-iteration cost is unavailable by design; inspect the eligible iter-2
+   record-cost total/mean without allocating it across iterations.
+   Stop immediately if any clean gate fails, a spend/API limit is reached, or
+   the observed burn makes the relevant cap unattainable.
 
 Main-run command:
 

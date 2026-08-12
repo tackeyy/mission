@@ -241,6 +241,9 @@ def end_activity_segment(state: dict[str, Any], at: str) -> bool:
     detail = sanitize_activity_detail(current.get("detail"))
     if detail:
         segment["detail"] = detail
+    iteration = current.get("iteration")
+    if isinstance(iteration, int) and not isinstance(iteration, bool) and iteration > 0:
+        segment["iteration"] = iteration
     _record_closed_segment(state, segment)
     state["activity_current"] = None
     return True
@@ -353,6 +356,8 @@ def start_activity_segment(
     if state.get("phase") in TERMINAL_PHASES or state.get("loop_active") is False:
         raise ActivityTimingError("cannot start activity in a terminal state")
     current = state.get("activity_current")
+    iteration = state.get("iteration")
+    owned_iteration = iteration if isinstance(iteration, int) and not isinstance(iteration, bool) and iteration > 0 else None
     clean_detail = sanitize_activity_detail(detail)
     if isinstance(current, dict):
         same = (
@@ -361,6 +366,7 @@ def start_activity_segment(
             and current.get("phase") == (state.get("phase") or "unknown")
             and sanitize_activity_detail(current.get("detail")) == clean_detail
             and (origin is None or current.get("origin") == origin)
+            and current.get("iteration") == owned_iteration
         )
         # A normal duplicate start is idempotent.  On resume, however, equal
         # labels can still describe a stale pre-crash segment.  Close that
@@ -378,6 +384,8 @@ def start_activity_segment(
         entry["detail"] = clean_detail
     if origin:
         entry["origin"] = origin
+    if owned_iteration is not None:
+        entry["iteration"] = owned_iteration
     state["activity_current"] = entry
     state.setdefault("activity_segments", [])
     _rollup(state)

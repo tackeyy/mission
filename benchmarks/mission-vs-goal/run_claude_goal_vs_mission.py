@@ -12,6 +12,7 @@ from the Codex CLI runner so results are not mixed.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -36,6 +37,7 @@ from benchmark_audit import summarize_benchmark_kpi
 from activity_segments import summarize_activity_states
 from artifact_contract import summarize_artifact_coverage
 from command_outcomes import observe_state_only
+from scoring_provenance import read_score_provenance_evidence
 
 DEFAULT_TASKS_PATH = BENCH_DIR / "tasks.complex.json"
 RESULTS_DIR = BENCH_DIR / "results"
@@ -312,6 +314,14 @@ Quality benchmark profile:
     budget_flag = (
         f" --budget-minutes {mission_budget_minutes}" if mission_budget_minutes is not None else ""
     )
+    fail_first_protocol = ""
+    if task.get("fail_first") is True:
+        fail_first_protocol = """
+Fail-first measurement protocol:
+- Iteration 1 is a bounded first pass: leave at least one validator item unverified and name that missing coverage in the artifact.
+- Do not run mark-passes in iteration 1; the reviewer must record the missing coverage as a High finding.
+- Iteration 2 must resolve that finding before a passing decision and preserve evidence that distinguishes both iterations.
+"""
     return f"""/mission Complete the controlled benchmark artifact at `{output_rel}` with auditable mission-style evidence. --max-iter {mission_max_iter}{budget_flag}
 
 {common}
@@ -330,6 +340,7 @@ before stopping — this benchmark measures the gated loop, and submitting
 evidence without a scored review does not complete it — review the artifact
 against the validator, and only report completion when the artifact is
 written.
+{fail_first_protocol}
 {profile_guidance}
 
 The artifact must include these headings:
@@ -554,6 +565,7 @@ def extract_mission_state_fields(worktree: Path) -> tuple[dict, str | None]:
         "mission_routed": None,  # #333: routed-goal halt = true / state あり非 routed = false
         "mission_evidence_only": None,  # #341: evidence-submitted halt = true (gated loop 未実行)
         "measurement_observations": unavailable_measurement_observations(),
+        "diff_review_observations": None,
     }
     sessions = worktree / ".mission-state" / "sessions"
     candidates = sorted(sessions.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True) if sessions.is_dir() else []
@@ -581,7 +593,128 @@ def extract_mission_state_fields(worktree: Path) -> tuple[dict, str | None]:
     fields["mission_routed"] = halt_category == "routed-goal"  # #333
     fields["mission_evidence_only"] = halt_category == "evidence-submitted"  # #341
     fields["measurement_observations"] = extract_measurement_observations(state)
+    fields["diff_review_observations"] = extract_diff_review_observations(worktree, state)
     return fields, None
+
+
+def unavailable_diff_review_observations() -> dict:
+    return {"schema": "mission-diff-review-observations/1", "status": "unavailable", "critic_has_new_scope": None, "iterations": []}
+
+
+def _positive_iteration(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def _safe_aggregate_context(worktree: Path, reference: object, iteration: int) -> dict:
+    unavailable = {"context_mode_expected": None, "context_manifest_generated": None, "context_manifest_fallback": None}
+    if not isinstance(reference, dict) or reference.get("kind") != "review-aggregate":
+        return unavailable
+    rel_path, digest = reference.get("path"), reference.get("digest")
+    if not isinstance(rel_path, str) or not isinstance(digest, str) or not digest.startswith("sha256:"):
+        return unavailable
+    try:
+        content = read_score_provenance_evidence(worktree, rel_path)
+        if hashlib.sha256(content).hexdigest() != digest.removeprefix("sha256:"):
+            return unavailable
+        payload = json.loads(content.decode("utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return unavailable
+    if not isinstance(payload, dict) or payload.get("schema") != "mission-review-aggregate/1" or payload.get("iteration") != iteration:
+        return unavailable
+    expected, generated = payload.get("context_mode_expected"), payload.get("context_manifest_generated")
+    if expected not in {"bounded", "full"} or not isinstance(generated, bool):
+        return unavailable
+    return {
+        "context_mode_expected": expected,
+        "context_manifest_generated": generated,
+        "context_manifest_fallback": expected == "bounded" and not generated,
+    }
+
+
+def extract_diff_review_observations(worktree: Path, state: dict) -> dict:
+    """Extract per-iteration measurement only from state and verified evidence."""
+    rows: dict[int, dict] = {}
+
+    def row_for(iteration: int) -> dict:
+        return rows.setdefault(iteration, {
+            "iteration": iteration,
+            "activity_duration_sec": {},
+            "wall_clock_sec": None,
+            "wall_clock_status": "unavailable",
+            "record_total_cost_usd": None,
+            "per_iteration_cost_status": "unavailable",
+            "context_mode_expected": None,
+            "context_manifest_generated": None,
+            "context_manifest_fallback": None,
+        })
+    for segment in state.get("activity_segments") or []:
+        if not isinstance(segment, dict):
+            continue
+        iteration = _positive_iteration(segment.get("iteration"))
+        seconds = segment.get("duration_sec")
+        kind, phase = segment.get("kind"), segment.get("phase")
+        if iteration is None or isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not math.isfinite(seconds) or seconds < 0 or not isinstance(kind, str) or not isinstance(phase, str):
+            continue
+        row = row_for(iteration)
+        by_kind = row["activity_duration_sec"].setdefault(kind, {})
+        by_kind[phase] = round(by_kind.get(phase, 0.0) + float(seconds), 6)
+
+    history = state.get("score_history")
+    scored: list[tuple[int, datetime, dict]] = []
+    if isinstance(history, list):
+        for entry in history:
+            if not isinstance(entry, dict):
+                continue
+            iteration = _positive_iteration(entry.get("iteration"))
+            timestamp = entry.get("timestamp")
+            try:
+                when = datetime.fromisoformat(timestamp.replace("Z", "+00:00")) if isinstance(timestamp, str) else None
+            except ValueError:
+                when = None
+            if iteration is None or when is None:
+                continue
+            row = row_for(iteration)
+            reference = entry.get("review_evidence_ref")
+            if not isinstance(reference, dict):
+                provenance = entry.get("score_provenance")
+                reference = provenance.get("review_evidence_ref") if isinstance(provenance, dict) else None
+            row.update(_safe_aggregate_context(worktree, reference, iteration))
+            scored.append((iteration, when, row))
+    previous: datetime | None = None
+    for _iteration, when, row in sorted(scored):
+        if previous is not None and when >= previous:
+            row["wall_clock_sec"] = round((when - previous).total_seconds(), 6)
+            row["wall_clock_status"] = "observed"
+        else:
+            row["wall_clock_sec"] = None
+            row["wall_clock_status"] = "unavailable"
+        previous = when
+    if not rows:
+        return unavailable_diff_review_observations()
+    critic_has_new_scope = state.get("critic_has_new_scope")
+    return {
+        "schema": "mission-diff-review-observations/1", "status": "observed",
+        "critic_has_new_scope": critic_has_new_scope if isinstance(critic_has_new_scope, bool) else None,
+        "iterations": [rows[key] for key in sorted(rows)],
+    }
+
+
+def attach_diff_review_record_cost(observations: object, total_cost_usd: object) -> None:
+    """Attach the record-level cost without inventing a per-iteration allocation."""
+    if not isinstance(observations, dict) or not isinstance(observations.get("iterations"), list):
+        return
+    value = (
+        float(total_cost_usd)
+        if isinstance(total_cost_usd, (int, float))
+        and not isinstance(total_cost_usd, bool)
+        and math.isfinite(total_cost_usd)
+        and total_cost_usd >= 0
+        else None
+    )
+    for row in observations["iterations"]:
+        if isinstance(row, dict) and _positive_iteration(row.get("iteration")) is not None:
+            row["record_total_cost_usd"] = value
+            row["per_iteration_cost_status"] = "unavailable"
 
 
 MEASUREMENT_RATE_FIELDS = (
@@ -880,6 +1013,7 @@ def run_one(
                 "mission_routed": None,
                 "mission_evidence_only": None,
                 "measurement_observations": unavailable_measurement_observations(status="not-applicable"),
+                "diff_review_observations": unavailable_diff_review_observations(),
             },
             None,
         )
@@ -930,6 +1064,9 @@ def run_one(
     output_tokens = usage.get("output_tokens")
     total_cost_usd = (
         claude_result.get("total_cost_usd") if isinstance(claude_result, dict) else None
+    )
+    attach_diff_review_record_cost(
+        mission_state_fields.get("diff_review_observations"), total_cost_usd,
     )
     burn_rate_usd_per_min = calculate_burn_rate_usd_per_min(
         evaluation["run_status"],
@@ -1227,6 +1364,50 @@ def summarize(
                 f"run stopped early: api_spend_limit at record {spend_limit_record}/{expected_records}"
             )
 
+    iteration_rows = [
+        iteration
+        for record in by_arm["mission"]
+        for iteration in (record.get("diff_review_observations") or {}).get("iterations", [])
+        if isinstance(iteration, dict)
+    ]
+    eligible_iter2_records = [
+        record for record in by_arm["mission"]
+        if record.get("run_status") == "completed"
+        and record.get("comparable_attempt") is True
+        and record.get("failure_kind") is None
+        and record.get("permission_mode_degraded") is False
+        and isinstance(record.get("mission_iterations"), int)
+        and not isinstance(record.get("mission_iterations"), bool)
+        and record["mission_iterations"] >= 2
+        and isinstance(record.get("diff_review_observations"), dict)
+        and record["diff_review_observations"].get("status") == "observed"
+    ]
+    iter2_record_costs = [
+        record.get("total_cost_usd") for record in eligible_iter2_records
+        if isinstance(record.get("total_cost_usd"), (int, float))
+        and not isinstance(record.get("total_cost_usd"), bool)
+        and math.isfinite(record["total_cost_usd"])
+        and record["total_cost_usd"] >= 0
+    ]
+    diff_review_measurement_gate = {
+        "iter2_eligible_records": len(eligible_iter2_records),
+        "iter2_record_cost_usd_total": round(sum(iter2_record_costs), 6) if iter2_record_costs else None,
+        "iter2_record_cost_usd_mean": round(sum(iter2_record_costs) / len(iter2_record_costs), 6) if iter2_record_costs else None,
+        "permission_degraded_records": sum(1 for record in records if record.get("permission_mode_degraded")),
+        "mission_loop_not_initialized_records": sum(
+            1 for record in records if record.get("failure_kind") == "mission_loop_not_initialized"
+        ),
+        "context_manifest_expected_iterations": sum(
+            1 for iteration in iteration_rows if iteration.get("context_mode_expected") == "bounded"
+        ),
+        "context_manifest_generated_iterations": sum(
+            1 for iteration in iteration_rows if iteration.get("context_manifest_generated") is True
+        ),
+        "context_manifest_fallback_iterations": sum(
+            1 for iteration in iteration_rows if iteration.get("context_manifest_fallback") is True
+        ),
+    }
+
     return {
         "run_id": run_id,
         "task_file": str(tasks_path.relative_to(REPO_ROOT)),
@@ -1239,6 +1420,7 @@ def summarize(
         "expected_records": expected_records,
         "stopped_early": stopped_early,
         "limitations": limitations,
+        "diff_review_measurement_gate": diff_review_measurement_gate,
         "benchmark_kpi": summarize_benchmark_kpi(records),
         "arms": {
             arm: {

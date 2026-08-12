@@ -218,6 +218,10 @@
       "type": "object",
       "description": "#390: versioned mission-state observations. Goal records explicitly use not-applicable; the reducer never reopens raw state."
     },
+    "diff_review_observations": {
+      "type": "object",
+      "description": "#275: additive versioned per-iteration activity, wall-clock availability, cost availability, and verified bounded-context observations."
+    },
     "total_cost_usd": {
       "type": [
         "number",
