@@ -95,6 +95,34 @@ def test_canonical_packet_uses_exact_sorted_bytes_and_redacts_secret_values(tmp_
     assert list(preflight["outbound_packet"]) == sorted(preflight["outbound_packet"])
 
 
+@pytest.mark.parametrize(("content", "secret", "placeholder"), [
+    ("Authorization: Bearer bearer-literal\nbody", "bearer-literal", "Authorization: ${REDACTED}"),
+    ("Authorization: Basic basic-literal\nbody", "basic-literal", "Authorization: ${REDACTED}"),
+    ("Cookie: browser-literal\nbody", "browser-literal", "Cookie: ${REDACTED}"),
+    ("Set-Cookie: session-literal\nbody", "session-literal", "Set-Cookie: ${REDACTED}"),
+    ('{"nested":{"api-key":"json-literal"},"safe":"body"}', "json-literal", '"api-key":"${REDACTED}"'),
+    ('{"browser_session":"browser-json-literal"}', "browser-json-literal", '"browser_session":"${REDACTED}"'),
+])
+def test_structured_secret_carriers_are_redacted_before_canonical_packet(
+    content, secret, placeholder, tmp_path
+):
+    preflight = _preflight(tmp_path, content.encode("utf-8"))
+
+    serialized = preflight["outbound_packet_bytes"].decode("utf-8")
+    assert secret not in serialized
+    assert placeholder in preflight["_test_snapshots"][0]["redacted_content"]
+    assert preflight["outbound_packet_bytes"] == canonical_json_bytes(preflight["outbound_packet"])
+
+
+def test_invalid_json_remains_ordinary_text_except_secret_headers(tmp_path):
+    content = '{"token":"ordinary prose"\nAuthorization: Bearer header-literal'
+    preflight = _preflight(tmp_path, content.encode("utf-8"))
+
+    serialized = preflight["outbound_packet_bytes"].decode("utf-8")
+    assert "ordinary prose" in serialized
+    assert "header-literal" not in serialized
+
+
 @pytest.mark.parametrize("kind", ["symlink", "hardlink", "fifo", "oversize", "invalid-utf8", "traversal", "nul"])
 def test_input_snapshot_fails_closed_for_unsafe_input(kind, tmp_path):
     source = tmp_path / "input"
@@ -286,7 +314,7 @@ def test_direct_risk_scoped_command_invoke_requires_preflight_before_spawn(run_c
     before = state_path.read_bytes()
 
     result = run_cli(
-        "specialists", "invoke-command", "--provider", "guarded-command-provider",
+        "specialists", "invoke-prepared", "--provider", "guarded-command-provider",
         "--iteration", "1", "--phase", "planning", cwd=tmp_path, env_extra=env,
     )
 
@@ -359,13 +387,41 @@ def test_prepared_risk_scoped_command_still_requires_verified_receipt_before_spa
     state_path = tmp_path / ".mission-state" / "sessions" / "test.json"
     before = state_path.read_bytes()
 
-    result = run_cli("specialists", "invoke-command", "--provider", "receipt-command-provider",
+    result = run_cli("specialists", "invoke-prepared", "--provider", "receipt-command-provider",
                      "--iteration", "1", "--phase", "planning", "--preflight-id", preflight["preflight_id"],
                      cwd=tmp_path, env_extra=env)
 
     assert result.returncode == 2
     assert "approval-required" in result.stderr
     assert not marker.exists()
+    assert state_path.read_bytes() == before
+
+
+def test_legacy_invoke_command_rejects_prepared_flow_without_state_change(run_cli, tmp_path):
+    command_dir = tmp_path / "commands"; command_dir.mkdir()
+    command = command_dir / "provider-command"
+    command.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8"); command.chmod(0o700)
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps({"schema": "mission-specialist-registry/2", "specialists_v2": [{
+        "provider_id": "legacy-provider", "role": "planning-provider", "skill": "legacy-provider",
+        "kind": "command", "command": "provider-command", "args": [], "env": {},
+        "task_profiles": ["architecture"], "phases": ["planning"],
+        "activation": {"min_complexity": "Complex", "auto_select_if": ["complexity"]},
+    }]}), encoding="utf-8")
+    env = {"PATH": f"{command_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
+    source = tmp_path / "input.txt"; source.write_text("brief", encoding="utf-8")
+    run_cli("init", "legacy gate", "--complexity", "Complex", cwd=tmp_path, check=True, env_extra=env)
+    run_cli("specialists", "recommend", "--no-default-skill-roots", "--task", "Review architecture",
+            "--registry", str(registry), "--complexity", "Complex", "--record-state",
+            cwd=tmp_path, check=True, env_extra=env)
+    prepared = json.loads(run_cli("specialists", "prepare-invocation", "--provider", "legacy-provider",
+                                  "--iteration", "1", "--phase", "planning", "--input-file", str(source),
+                                  cwd=tmp_path, check=True, env_extra=env).stdout)
+    state_path = tmp_path / ".mission-state" / "sessions" / "test.json"; before = state_path.read_bytes()
+    result = run_cli("specialists", "invoke-command", "--provider", "legacy-provider", "--iteration", "1",
+                     "--phase", "planning", "--preflight-id", prepared["preflight_id"],
+                     "--input-file", str(source), cwd=tmp_path, env_extra=env)
+    assert result.returncode == 2 and "use-invoke-prepared" in result.stderr
     assert state_path.read_bytes() == before
 
 
@@ -389,7 +445,7 @@ def test_hand_marked_approved_preflight_without_receipt_never_spawns(run_cli, tm
     state = json.loads(state_path.read_text(encoding="utf-8")); state["provider_preflights"][preflight["preflight_id"]]["status"] = "approved"; state_path.write_text(json.dumps(state), encoding="utf-8")
     before = state_path.read_bytes()
 
-    result = run_cli("specialists", "invoke-command", "--provider", "manual-approval-provider", "--iteration", "1", "--phase", "planning", "--preflight-id", preflight["preflight_id"], "--input-file", str(source), cwd=tmp_path, env_extra=env)
+    result = run_cli("specialists", "invoke-prepared", "--provider", "manual-approval-provider", "--iteration", "1", "--phase", "planning", "--preflight-id", preflight["preflight_id"], "--input-file", str(source), cwd=tmp_path, env_extra=env)
 
     assert result.returncode == 2
     assert "receipt-invalid" in result.stderr
@@ -448,7 +504,7 @@ def test_host_verified_receipt_runs_exact_packet_once_and_rejects_replay(run_cli
     verified = run_cli("specialists", "verify-approval", "--preflight-id", preflight["preflight_id"], "--evidence-ref", _digest("e"), "--approval-verifier", "fixture-verifier", cwd=tmp_path, env_extra=env)
     assert verified.returncode == 0, verified.stderr
 
-    invoked = run_cli("specialists", "invoke-command", "--provider", "trusted-provider", "--iteration", "1", "--phase", "planning", "--preflight-id", preflight["preflight_id"], "--input-file", str(source), cwd=tmp_path, env_extra=env)
+    invoked = run_cli("specialists", "invoke-prepared", "--provider", "trusted-provider", "--iteration", "1", "--phase", "planning", "--preflight-id", preflight["preflight_id"], "--input-file", str(source), cwd=tmp_path, env_extra=env)
     assert invoked.returncode == 0, invoked.stderr
     packet_path = tmp_path / ".mission-state" / "private-preflights" / f"{preflight['preflight_id']}.json"
     assert marker.exists() and captured.read_bytes() == packet_path.read_bytes()
@@ -462,10 +518,10 @@ def test_host_verified_receipt_runs_exact_packet_once_and_rejects_replay(run_cli
     assert all(secret not in value for value in public_and_private)
     verifier_source.write_text("def verify(request):\n raise RuntimeError('source changed')\n", encoding="utf-8")
     before = state_path.read_bytes(); marker.unlink()
-    source_drift = run_cli("specialists", "invoke-command", "--provider", "trusted-provider", "--iteration", "1", "--phase", "planning", "--preflight-id", preflight["preflight_id"], "--input-file", str(source), cwd=tmp_path, env_extra=env)
+    source_drift = run_cli("specialists", "invoke-prepared", "--provider", "trusted-provider", "--iteration", "1", "--phase", "planning", "--preflight-id", preflight["preflight_id"], "--input-file", str(source), cwd=tmp_path, env_extra=env)
     assert source_drift.returncode == 2 and not marker.exists() and state_path.read_bytes() == before
     before = state_path.read_bytes()
-    replay = run_cli("specialists", "invoke-command", "--provider", "trusted-provider", "--iteration", "1", "--phase", "planning", "--preflight-id", preflight["preflight_id"], "--input-file", str(source), cwd=tmp_path, env_extra=env)
+    replay = run_cli("specialists", "invoke-prepared", "--provider", "trusted-provider", "--iteration", "1", "--phase", "planning", "--preflight-id", preflight["preflight_id"], "--input-file", str(source), cwd=tmp_path, env_extra=env)
     assert replay.returncode == 2 and "receipt-replayed" in replay.stderr and not marker.exists() and state_path.read_bytes() == before
 
 
@@ -492,7 +548,7 @@ def test_input_byte_mutation_after_approval_blocks_spawn(run_cli, tmp_path):
     state_path.write_text(json.dumps(state), encoding="utf-8"); source.write_text("mutated", encoding="utf-8")
     before = state_path.read_bytes()
 
-    result = run_cli("specialists", "invoke-command", "--provider", "drift-provider", "--iteration", "1", "--phase", "planning", "--preflight-id", preflight["preflight_id"], "--input-file", str(source), cwd=tmp_path, env_extra=env)
+    result = run_cli("specialists", "invoke-prepared", "--provider", "drift-provider", "--iteration", "1", "--phase", "planning", "--preflight-id", preflight["preflight_id"], "--input-file", str(source), cwd=tmp_path, env_extra=env)
 
     assert result.returncode == 2 and "payload-drift" in result.stderr
     assert not marker.exists() and state_path.read_bytes() == before
@@ -625,7 +681,7 @@ def test_strict_preflight_never_falls_back_to_plain_spawn_without_live_isolator(
         "policy_digest": _digest("a"), "enforced_capabilities": ["filesystem-namespace", "readonly-mount", "env-reset", "network-policy"]}}})
     state_path.write_text(json.dumps(state), encoding="utf-8"); before = state_path.read_bytes()
 
-    result = run_cli("specialists", "invoke-command", "--provider", "strict-live-provider", "--iteration", "1", "--phase", "planning", "--preflight-id", preflight["preflight_id"], "--input-file", str(source), cwd=tmp_path, env_extra=env)
+    result = run_cli("specialists", "invoke-prepared", "--provider", "strict-live-provider", "--iteration", "1", "--phase", "planning", "--preflight-id", preflight["preflight_id"], "--input-file", str(source), cwd=tmp_path, env_extra=env)
 
     assert result.returncode == 2 and "isolator-unavailable" in result.stderr
     assert not marker.exists() and state_path.read_bytes() == before

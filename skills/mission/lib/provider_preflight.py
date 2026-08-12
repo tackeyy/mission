@@ -19,6 +19,12 @@ REQUIRED_STRICT_CAPABILITIES = frozenset({
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _NONCE = re.compile(r"[0-9A-Za-z_-]{32,128}\Z")
 _SECRET_ASSIGNMENT = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*[^\s\r\n]+")
+_SECRET_HEADER = re.compile(
+    r"(?im)^(\s*(?:authorization|cookie|set-cookie)\s*:)\s*[^\r\n]*$"
+)
+_SECRET_JSON_KEYS = frozenset({
+    "token", "secret", "password", "api_key", "authorization", "cookie", "browser_session",
+})
 
 
 class ProviderPreflightError(ValueError):
@@ -78,7 +84,26 @@ def _relative_regular_path(source: object, root: object) -> tuple[Path, str]:
 
 
 def _redact_text(value: str) -> str:
-    return _SECRET_ASSIGNMENT.sub(lambda match: f"{match.group(1)}=${{REDACTED}}", value)
+    header_redacted = _SECRET_HEADER.sub(lambda match: f"{match.group(1)} ${{REDACTED}}", value)
+    try:
+        structured = json.loads(header_redacted)
+    except json.JSONDecodeError:
+        return _SECRET_ASSIGNMENT.sub(
+            lambda match: f"{match.group(1)}=${{REDACTED}}", header_redacted
+        )
+
+    def redact(item: object) -> object:
+        if isinstance(item, dict):
+            result = {}
+            for key, child in item.items():
+                normalized = re.sub(r"[-_]+", "_", str(key).strip().lower())
+                result[key] = "${REDACTED}" if normalized in _SECRET_JSON_KEYS else redact(child)
+            return result
+        if isinstance(item, list):
+            return [redact(child) for child in item]
+        return item
+
+    return canonical_json_bytes(redact(structured)).decode("utf-8")
 
 
 def safe_input_snapshot(source: object, *, root: object, maximum_bytes: int = MAX_INPUT_BYTES) -> dict[str, Any]:

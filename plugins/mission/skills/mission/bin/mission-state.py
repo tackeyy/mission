@@ -5095,6 +5095,8 @@ def cmd_invoke_command_provider(args):
     if provider.get("kind") != "command":
         print(f"ERROR: provider is not kind=command: {args.provider}", file=sys.stderr)
         sys.exit(2)
+    if getattr(args, "specialists_cmd", None) != "invoke-prepared" and getattr(args, "preflight_id", None):
+        _provider_gate("use-invoke-prepared")
     # #396: any command provider is an external-risk invocation until a
     # verified per-invocation preflight/receipt proves otherwise.  Keep this
     # guard before reservation, state mutation, and subprocess creation.
@@ -14936,25 +14938,32 @@ def _build_parser():
     p_log.add_argument("--json", action="store_true", help="JSON 形式で出力")
     p_log.set_defaults(func=cmd_log_specialist_invocation, command_outcome_tracking=True)
 
-    p_cmd = spec_sub.add_parser("invoke-command", help="kind=command provider を argv/stdin/stdout で実行して証跡を記録")
-    p_cmd.add_argument("--provider", required=True, help="state 内の role / skill / command")
-    p_cmd.add_argument("--iteration", type=int, required=True)
-    p_cmd.add_argument("--phase", required=True,
-                       choices=["planning", "execution", "review", "scoring", "critic"])
-    p_cmd.add_argument("--input-file", default=None, help="provider stdin packet に含める入力ファイル")
-    p_cmd.add_argument("--preflight-id", default=None,
-                       help="prepare-invocationで生成したper-invocation preflight ID")
-    p_cmd.add_argument("--execution-isolator", default=None,
-                       help="prepare時と一致するhost-only strict isolator ID")
-    p_cmd.add_argument("--registry", action="append", default=None,
-                       help="external explicit registry の application 時再供給。複数指定可")
-    p_cmd.add_argument("--selection-source", default=None, choices=sorted(SPECIALIST_SELECTION_SOURCES),
-                       help="ask-user 後に command provider を適用する場合の confirmed selection metadata")
-    p_cmd.add_argument("--timeout", type=int, default=None,
-                       help="command timeout seconds (default: provider timeout, then 120)")
-    p_cmd.add_argument("--json", action="store_true", help="JSON 形式で出力")
-    _add_command_lineage_arguments(p_cmd)
-    p_cmd.set_defaults(func=cmd_invoke_command_provider, command_outcome_tracking=True)
+    def add_provider_invoke_arguments(command_parser):
+        command_parser.add_argument("--provider", required=True, help="state 内の role / skill / command")
+        command_parser.add_argument("--iteration", type=int, required=True)
+        command_parser.add_argument("--phase", required=True,
+                                    choices=["planning", "execution", "review", "scoring", "critic"])
+        command_parser.add_argument("--input-file", default=None, help="provider stdin packet に含める入力ファイル")
+        command_parser.add_argument("--preflight-id", default=None,
+                                    help="prepare-invocationで生成したper-invocation preflight ID")
+        command_parser.add_argument("--execution-isolator", default=None,
+                                    help="prepare時と一致するhost-only strict isolator ID")
+        command_parser.add_argument("--registry", action="append", default=None,
+                                    help="external explicit registry の application 時再供給。複数指定可")
+        command_parser.add_argument("--selection-source", default=None, choices=sorted(SPECIALIST_SELECTION_SOURCES),
+                                    help="ask-user 後に command provider を適用する場合の confirmed selection metadata")
+        command_parser.add_argument("--timeout", type=int, default=None,
+                                    help="command timeout seconds (default: provider timeout, then 120)")
+        command_parser.add_argument("--json", action="store_true", help="JSON 形式で出力")
+        _add_command_lineage_arguments(command_parser)
+        command_parser.set_defaults(func=cmd_invoke_command_provider, command_outcome_tracking=True)
+
+    p_cmd = spec_sub.add_parser("invoke-command", help="legacy command provider entrypoint; prepared flowはinvoke-preparedを使う")
+    add_provider_invoke_arguments(p_cmd)
+    p_invoke_prepared = spec_sub.add_parser(
+        "invoke-prepared", help="verified per-invocation preflightをsingle-use receiptで実行する"
+    )
+    add_provider_invoke_arguments(p_invoke_prepared)
 
     p_prepare = spec_sub.add_parser(
         "prepare-invocation", help="command provider のexact outbound packetを副作用なしでprepareする"
