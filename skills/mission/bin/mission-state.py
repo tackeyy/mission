@@ -141,6 +141,7 @@ from provider_public_contract import (  # noqa: E402
     redact_local_locators,
     validate_specialist_public_state as _validate_specialist_public_state,
 )
+from provider_preflight import ProviderPreflightError  # noqa: E402
 from artifact_contract import (  # noqa: E402
     ArtifactContractError,
     artifact_lint_observation_matches,
@@ -4826,6 +4827,11 @@ def cmd_invoke_command_provider(args):
     if provider.get("kind") != "command":
         print(f"ERROR: provider is not kind=command: {args.provider}", file=sys.stderr)
         sys.exit(2)
+    # #396: any command provider is an external-risk invocation until a
+    # verified per-invocation preflight/receipt proves otherwise.  Keep this
+    # guard before reservation, state mutation, and subprocess creation.
+    if not getattr(args, "preflight_id", None):
+        _provider_gate("preflight-required")
     if _confirmed_selection_required(data, provider.get("skill") or provider.get("role"), "completed") and not args.selection_source:
         print(
             "ERROR: specialists_decision requested user confirmation; pass --selection-source confirmed-user "
