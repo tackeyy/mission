@@ -3315,7 +3315,6 @@ def _public_specialist_record(record: dict) -> dict:
             ]
     for field in (
         "required",
-        "max_calls_per_iteration",
         "bounded_use",
         "bounded_purpose_required",
         "installed",
@@ -3324,6 +3323,11 @@ def _public_specialist_record(record: dict) -> dict:
     ):
         if type(record.get(field)) is bool:
             public[field] = record[field]
+    if (
+        type(record.get("max_calls_per_iteration")) is int
+        and 1 <= record["max_calls_per_iteration"] <= 1000
+    ):
+        public["max_calls_per_iteration"] = record["max_calls_per_iteration"]
     for field in (
         "source",
         "registry_entry_digest",
@@ -3997,6 +4001,7 @@ def cmd_specialists(args):
             sys.exit(1)
         with StateLock(lock_file(cwd)):
             data = json.loads(sf.read_text())
+            _reject_active_provider_mutation(data, "specialists-recommend")
             _validate_specialist_public_state(data)
             if (
                 data.get("complexity") != effective_complexity
@@ -4486,11 +4491,22 @@ def _require_current_provider_application(
     application_kind: str,
     selection_source: str | None = None,
     invocation_id: str | None = None,
+    cwd: Path | None = None,
+    registry_args=None,
 ) -> dict:
     """Reject an application before it can mutate state or start a process."""
     if provider is None:
-        print("ERROR: provider-ineligible: provider-not-selected", file=sys.stderr)
-        raise SystemExit(2)
+        _provider_gate("provider-not-selected")
+    if cwd is not None and isinstance(data.get("specialist_registry_projection"), dict):
+        _require_current_registry_application(
+            data,
+            provider,
+            cwd=cwd,
+            registry_args=registry_args,
+            requested_phase=requested_phase,
+            requested_iteration=requested_iteration,
+            selection_source=selection_source,
+        )
     verdict = validate_provider_application(
         provider,
         data,
@@ -4501,12 +4517,154 @@ def _require_current_provider_application(
         invocation_id=invocation_id,
     )
     if not verdict["eligible"]:
+        _provider_gate(str(verdict["reason_code"]))
+    current = dict(provider)
+    current["_application_context_digest"] = verdict["application_context_digest"]
+    return current
+
+
+def _registry_identity_path(identity: str, cwd: Path) -> Path | None:
+    if identity == "$PROJECT":
+        return cwd
+    if identity.startswith("$PROJECT/"):
+        return cwd / identity.removeprefix("$PROJECT/")
+    if identity == "$HOME":
+        return Path.home()
+    if identity.startswith("$HOME/"):
+        return Path.home() / identity.removeprefix("$HOME/")
+    return None
+
+
+def _require_current_registry_application(
+    data: dict,
+    provider: dict,
+    *,
+    cwd: Path,
+    registry_args,
+    requested_phase: str,
+    requested_iteration: int,
+    selection_source: str | None,
+) -> None:
+    """Re-resolve the recorded registry projection from safe current inputs."""
+    recorded = data.get("specialist_registry_projection") or {}
+    inputs = recorded.get("ordered_inputs") or []
+    supplied = _registry_arg_paths(getattr(registry_args, "registry", None))
+    supplied_by_identity = {
+        _portable_registry_identity(path): path for path in supplied
+    }
+    explicit_paths: list[Path] = []
+    for item in inputs:
+        if not isinstance(item, dict) or item.get("kind") != "explicit":
+            continue
+        identity = str(item.get("canonical_identity") or "")
+        path = supplied_by_identity.get(identity) or _registry_identity_path(identity, cwd)
+        if path is None:
+            _provider_gate("explicit-registry-resupply-required")
+        explicit_paths.append(path)
+    if set(supplied_by_identity) - {
+        str(item.get("canonical_identity") or "")
+        for item in inputs if isinstance(item, dict) and item.get("kind") == "explicit"
+    }:
+        _provider_gate("registry-input-mismatch")
+
+    recorded_roots = [
+        _registry_identity_path(str(item.get("canonical_identity") or ""), cwd)
+        for item in inputs
+        if isinstance(item, dict) and item.get("kind") == "skill-root"
+    ]
+    default_roots = {Path.home() / ".codex" / "skills", Path.home() / ".claude" / "skills"}
+    custom_roots = [path for path in recorded_roots if path is not None and path not in default_roots]
+    probe = argparse.Namespace(
+        registry=[str(path) for path in explicit_paths],
+        no_default_skill_roots=not any(
+            isinstance(item, dict) and item.get("kind") in {"user", "skill-root"}
+            for item in inputs
+        ),
+        skills_dir=os.pathsep.join(str(path) for path in custom_roots) or None,
+    )
+    current_candidates, _diagnostics, current_projection = _discover_specialist_registry_candidates(probe)
+    if current_projection.get("effective_projection_digest") != recorded.get("effective_projection_digest"):
+        _provider_gate("registry-projection-mismatch")
+    provider_id = str(provider.get("provider_id") or "")
+    skill = str(provider.get("skill") or provider.get("role") or "")
+    matches = [
+        candidate for candidate in current_candidates
+        if _safe_provider_reference(_provider_id(candidate)) == provider_id
+        and str(candidate.get("skill") or candidate.get("role") or "") == skill
+    ]
+    if len(matches) != 1:
+        _provider_gate("provider-not-selected")
+    candidate = matches[0]
+    if candidate.get("registry_entry_digest") != provider.get("registry_entry_digest"):
+        _provider_gate("registry-entry-mismatch")
+    normalized = _normalize_candidate(candidate, str(candidate.get("source") or "registry"))
+    current_iteration = data.get("iteration")
+    eligibility = evaluate_provider_eligibility(
+        normalized,
+        {
+            "complexity": data.get("complexity"),
+            "task_profile": data.get("task_profile") or {},
+            "iteration": current_iteration,
+            "previous_iteration_passed": (
+                bool(data.get("passes")) if isinstance(current_iteration, int) and current_iteration >= 2 else None
+            ),
+        },
+        requested_phase=requested_phase,
+        selection_source=(selection_source or provider.get("eligibility_selection_source") or "automatic"),
+    )
+    if eligibility.get("activation_digest") != provider.get("activation_digest"):
+        _provider_gate("activation-digest-mismatch")
+    if not eligibility.get("eligible"):
+        _provider_gate(str(eligibility.get("reason_code")))
+
+
+def _is_provider_backed_application(data: dict, skill: str, args, provider: dict | None) -> bool:
+    """Keep core activity records compatible; fail closed for any provider signal."""
+    return bool(
+        provider
+        or getattr(args, "selection_source", None)
+        or getattr(args, "invocation_id", None)
+        or getattr(args, "mode", None) == "command-provider"
+        or any(
+            isinstance(item, dict)
+            and str(item.get("skill") or "") == skill
+            and any(key in item for key in ("provider_id", "selection_id", "registry_entry_digest"))
+            for item in data.get("specialist_invocations") or []
+        )
+    )
+
+
+ACTIVE_PROVIDER_INVOCATION_STATUSES = frozenset({"reserved", "running"})
+
+
+def _active_provider_invocations(data: dict, *, exclude: str | None = None) -> list[dict]:
+    return [
+        item for item in data.get("specialist_invocations") or []
+        if isinstance(item, dict)
+        and item.get("status") in ACTIVE_PROVIDER_INVOCATION_STATUSES
+        and item.get("invocation_id") != exclude
+    ]
+
+
+def _reject_active_provider_mutation(data: dict, operation: str, *, exclude: str | None = None) -> None:
+    active = _active_provider_invocations(data, exclude=exclude)
+    if active:
         print(
-            f"ERROR: provider-ineligible: {verdict['reason_code']}",
+            f"ERROR: provider-invocation-active: {operation} is fenced until "
+            f"{active[0].get('invocation_id')} becomes terminal",
             file=sys.stderr,
         )
-        raise SystemExit(2)
-    return provider
+        error = CommandOutcomeExit(2, "expected-gate")
+        error.provider_reason_code = "provider-invocation-active"
+        raise error
+
+
+def _replace_provider_invocation(data: dict, entry: dict) -> None:
+    for index, item in enumerate(data.get("specialist_invocations") or []):
+        if isinstance(item, dict) and item.get("invocation_id") == entry.get("invocation_id"):
+            data["specialist_invocations"][index] = entry
+            return
+    raise SpecialistLifecycleError("invocation_id must identify exactly one invocation")
 
 
 def _bounded_purpose_required(data: dict, skill: str | None, phase: str, status: str) -> bool:
@@ -4672,6 +4830,8 @@ def cmd_invoke_command_provider(args):
         requested_iteration=args.iteration,
         application_kind="preflight",
         selection_source=args.selection_source,
+        cwd=cwd,
+        registry_args=args,
     )
     _reject_unbounded_orchestrator_execution(data, provider.get("skill") or provider.get("role"), args.phase)
 
@@ -4683,11 +4843,11 @@ def cmd_invoke_command_provider(args):
         "role": provider.get("role"),
         "skill": provider.get("skill") or provider.get("role"),
         "mode": "command-provider",
-        "status": "started",
-        "lifecycle_state": "invoked",
+        "status": "reserved",
+        "lifecycle_state": "reserved",
         "timestamp": now,
         "transitioned_at": now,
-        "started_at": now,
+        "reserved_at": now,
         "provider_kind": "command",
         **{
             field: data.get(field)
@@ -4698,53 +4858,14 @@ def cmd_invoke_command_provider(args):
     selection_id = _current_selection_id(data)
     if selection_id:
         entry["selection_id"] = selection_id
-    command = provider.get("command")
     timeout = _provider_timeout(provider, args.timeout)
-    if not _command_is_available(command):
-        outcome = _command_outcome(args, "specialists-invoke-command", "external")
-        entry.update({
-            "status": "unavailable",
-            "lifecycle_state": "terminal",
-            "transitioned_at": iso_now(),
-            "completed_at": iso_now(),
-            "reason": f"command provider is not available: {command}",
-        })
-        with StateLock(lock_file(cwd)):
-            data = json.loads(sf.read_text())
-            _validate_specialist_public_state(data)
-            data = stamp_metadata(data, cwd)
-            data["updated_at"] = entry["completed_at"]
-            data, entry, _ = _prepare_specialist_invocation_state(
-                data,
-                entry,
-                cwd=cwd,
-                iteration=args.iteration,
-                evidence_planned=False,
-            )
-            _append_command_outcome(data, outcome)
-            _commit_specialist_state_with_archive(
-                sf, cwd, data, entry, args.iteration, None
-            )
-        print(json.dumps({"ok": False, "outcome_kind": "external", "outcome": outcome, "entry": entry}, indent=2 if args.json else None, ensure_ascii=False))
-        return
-
-    argv = [command, *[str(a) for a in provider.get("args") or []]]
-    packet = _command_provider_packet(data, provider, args)
-    command_env = os.environ.copy()
-    command_env.update(_string_map(provider.get("env")))
     entry["timeout"] = timeout
-    _prepare_specialist_invocation_state(
-        data,
-        entry,
-        cwd=cwd,
-        iteration=args.iteration,
-        evidence_planned=True,
-        selection_source=args.selection_source,
-        provider=provider,
-    )
+    # Reservation and call-slot consumption are one atomic state mutation.
     with StateLock(lock_file(cwd)):
         dispatch_state = json.loads(sf.read_text())
         _validate_specialist_public_state(dispatch_state)
+        _reject_active_provider_mutation(dispatch_state, "invoke-command")
+        lease_decision = _enforce_session_lease_for_write(sf, dispatch_state)
         provider = _require_current_provider_application(
             dispatch_state,
             _find_provider(dispatch_state, args.provider),
@@ -4753,7 +4874,12 @@ def cmd_invoke_command_provider(args):
             application_kind="preflight",
             selection_source=args.selection_source,
             invocation_id=entry["invocation_id"],
+            cwd=cwd,
+            registry_args=args,
         )
+        entry["application_context_digest"] = provider.pop("_application_context_digest")
+        entry["reservation_owner_session_id"] = str(dispatch_state.get("owner_session_id") or resolve_session_id())
+        entry["fencing_epoch"] = int(dispatch_state.get("fencing_epoch") or lease_decision.fencing_epoch)
         dispatch_state, entry, _ = _prepare_specialist_invocation_state(
             dispatch_state,
             entry,
@@ -4765,25 +4891,118 @@ def cmd_invoke_command_provider(args):
         dispatch_state["updated_at"] = now
         backup_state(sf)
         atomic_write_json(sf, stamp_metadata(dispatch_state, cwd))
+
+    # Re-read state and registry immediately before the one allowed spawn.
+    running_at = iso_now()
+    with StateLock(lock_file(cwd)):
+        dispatch_state = json.loads(sf.read_text())
+        _validate_specialist_public_state(dispatch_state)
+        current_entry = dict(invocation_by_id(dispatch_state, entry["invocation_id"]))
+        provider = _require_current_provider_application(
+            dispatch_state,
+            _find_provider(dispatch_state, args.provider),
+            requested_phase=args.phase,
+            requested_iteration=args.iteration,
+            application_kind="preflight",
+            selection_source=args.selection_source,
+            invocation_id=entry["invocation_id"],
+            cwd=cwd,
+            registry_args=args,
+        )
+        if provider.pop("_application_context_digest") != current_entry.get("application_context_digest"):
+            rejected = {**current_entry, "status": "rejected", "lifecycle_state": "terminal",
+                        "reason_code": "application-context-drift", "completed_at": running_at,
+                        "transitioned_at": running_at}
+            validate_invocation_transition(current_entry, rejected)
+            _replace_provider_invocation(dispatch_state, rejected)
+            backup_state(sf)
+            atomic_write_json(sf, stamp_metadata(dispatch_state, cwd))
+            print("ERROR: provider-ineligible: application-context-drift", file=sys.stderr)
+            raise SystemExit(2)
+        entry = {**current_entry, "status": "running", "lifecycle_state": "running",
+                 "running_at": running_at, "started_at": running_at,
+                 "transitioned_at": running_at, "heartbeat_at": running_at}
+        validate_invocation_transition(current_entry, entry)
+        _replace_provider_invocation(dispatch_state, entry)
+        dispatch_state["updated_at"] = running_at
+        backup_state(sf)
+        atomic_write_json(sf, stamp_metadata(dispatch_state, cwd))
+
+    command = provider.get("command")
+    argv = [command, *[str(a) for a in provider.get("args") or []]]
+    packet = _command_provider_packet(data, provider, args)
+    command_env = os.environ.copy()
+    command_env.update(_string_map(provider.get("env")))
+    if not _command_is_available(command):
+        completed_at = iso_now()
+        failed = {**entry, "status": "failed-before-start", "lifecycle_state": "terminal",
+                  "transitioned_at": completed_at, "completed_at": completed_at,
+                  "reason_code": "command-unavailable",
+                  "reason": f"command provider is not available: {command}"}
+        with StateLock(lock_file(cwd)):
+            dispatch_state = json.loads(sf.read_text())
+            current_entry = invocation_by_id(dispatch_state, entry["invocation_id"])
+            validate_invocation_transition(current_entry, failed)
+            _replace_provider_invocation(dispatch_state, failed)
+            backup_state(sf)
+            atomic_write_json(sf, stamp_metadata(dispatch_state, cwd))
+        print(json.dumps({"ok": False, "outcome_kind": "external", "entry": failed}, ensure_ascii=False))
+        return
+    spawn_failed_reason = None
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             argv,
-            input=packet,
-            capture_output=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
-            check=False,
             env=command_env,
         )
-        exit_code = completed.returncode
-        stdout = _redact_provider_output(completed.stdout or "")
-        stderr = _redact_provider_output(completed.stderr or "")
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except OSError as exc:
+        spawn_failed_reason = "spawn-failed"
         exit_code = None
         stdout = ""
         stderr = _redact_provider_output(str(exc))
+        completed_at = iso_now()
+        entry.update({"status": "failed-before-start", "lifecycle_state": "terminal",
+                      "transitioned_at": completed_at, "completed_at": completed_at,
+                      "reason_code": "spawn-failed"})
+    else:
+        entry["child_pid"] = process.pid
+        entry["process_identity_digest"] = provider_value_digest({
+            "invocation_id": entry["invocation_id"], "pid": process.pid, "running_at": running_at,
+        })
+        with StateLock(lock_file(cwd)):
+            dispatch_state = json.loads(sf.read_text())
+            current_entry = dict(invocation_by_id(dispatch_state, entry["invocation_id"]))
+            if current_entry.get("status") != "running":
+                process.terminate()
+                process.wait(timeout=5)
+                print("ERROR: provider-ineligible: invocation-not-running", file=sys.stderr)
+                raise SystemExit(2)
+            current_entry.update({
+                "child_pid": entry["child_pid"],
+                "process_identity_digest": entry["process_identity_digest"],
+                "heartbeat_at": iso_now(),
+            })
+            _replace_provider_invocation(dispatch_state, current_entry)
+            backup_state(sf)
+            atomic_write_json(sf, stamp_metadata(dispatch_state, cwd))
+            entry = current_entry
+        try:
+            raw_stdout, raw_stderr = process.communicate(input=packet, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            raw_stdout, raw_stderr = process.communicate()
+            raw_stderr = (raw_stderr or "") + "\ncommand provider timed out"
+        exit_code = process.returncode
+        stdout = _redact_provider_output(raw_stdout or "")
+        stderr = _redact_provider_output(raw_stderr or "")
 
-    status, reason = _classify_command_provider_result(provider, exit_code, stdout, stderr)
+    if spawn_failed_reason:
+        status, reason = "failed-before-start", stderr
+    else:
+        status, reason = _classify_command_provider_result(provider, exit_code, stdout, stderr)
     outcome = _command_outcome(
         args, "specialists-invoke-command",
         "ok" if status == "completed" else "external",
@@ -4820,6 +5039,8 @@ def cmd_invoke_command_provider(args):
             application_kind="result-import",
             selection_source=args.selection_source,
             invocation_id=entry["invocation_id"],
+            cwd=cwd,
+            registry_args=args,
         )
         current = data.get("activity_current")
         if (
@@ -4862,6 +5083,84 @@ def cmd_invoke_command_provider(args):
     if selected_entry:
         result["selected_entry"] = selected_entry
     print(json.dumps(result, indent=2 if args.json else None, ensure_ascii=False))
+
+
+def _process_identity_is_live(entry: dict) -> bool:
+    pid = entry.get("child_pid")
+    if type(pid) is not int or pid < 1:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+    return True
+
+
+def cmd_reconcile_provider_invocation(args):
+    """Fenced terminalization for an orphaned running provider invocation."""
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
+        raise SystemExit(1)
+    with StateLock(lock_file(cwd)):
+        data = json.loads(sf.read_text())
+        _validate_specialist_public_state(data)
+        lease_decision = _enforce_session_lease_for_write(sf, data)
+        try:
+            existing = dict(invocation_by_id(data, args.invocation_id))
+        except SpecialistLifecycleError as exc:
+            _provider_gate(str(exc))
+        if existing.get("status") != "running":
+            _provider_gate("invocation-not-running")
+        reservation_epoch = existing.get("fencing_epoch")
+        current_epoch = int(data.get("fencing_epoch") or lease_decision.fencing_epoch)
+        if args.expected_fencing_epoch != reservation_epoch or current_epoch < reservation_epoch:
+            _provider_gate("stale-fencing-epoch")
+        reservation_owner = existing.get("reservation_owner_session_id")
+        current_owner = str(data.get("owner_session_id") or resolve_session_id())
+        if current_epoch == reservation_epoch and current_owner != reservation_owner:
+            _provider_gate("reservation-owner-mismatch")
+        if current_epoch > reservation_epoch and args.status != "abandoned-unknown":
+            _provider_gate("recovered-result-unknown")
+        if _process_identity_is_live(existing):
+            _provider_gate("process-still-running")
+        if args.status in {"completed", "failed"} and not existing.get("process_identity_digest"):
+            _provider_gate("process-identity-unknown")
+        try:
+            evidence = _read_specialist_evidence_input(Path(args.evidence))
+        except SpecialistEvidenceInputError as exc:
+            _provider_gate(exc.reason_code)
+        completed_at = iso_now()
+        terminal = {
+            **existing,
+            "status": args.status,
+            "lifecycle_state": "terminal",
+            "transitioned_at": completed_at,
+            "completed_at": completed_at,
+            "result_artifact_digest": provider_value_digest(evidence),
+            "reason_code": (
+                "reconciled-result" if args.status in {"completed", "failed"}
+                else "reconciled-outcome-unknown"
+            ),
+        }
+        if args.status == "abandoned-unknown":
+            terminal["reason"] = "operator could not establish a trustworthy child result"
+        validate_invocation_transition(existing, terminal)
+        _replace_provider_invocation(data, terminal)
+        data["updated_at"] = completed_at
+        backup_state(sf)
+        archived_to = _commit_specialist_state_with_archive(
+            sf, cwd, stamp_metadata(data, cwd), terminal, terminal["iteration"], evidence
+        )
+    print(json.dumps({
+        "ok": True,
+        "invocation_id": args.invocation_id,
+        "status": args.status,
+        "evidence_path": str(archived_to),
+    }, indent=2 if args.json else None, ensure_ascii=False))
 
 
 def _state_relative_path(cwd: Path, path_text: str) -> str:
@@ -5892,8 +6191,8 @@ def cmd_log_specialist_invocation(args):
                 file=sys.stderr,
             )
             sys.exit(2)
-        if args.status in APPLIED_SPECIALIST_INVOCATION_STATUSES and isinstance(
-            data.get("specialists_decision"), dict
+        if args.status in APPLIED_SPECIALIST_INVOCATION_STATUSES and _is_provider_backed_application(
+            data, skill, args, provider
         ):
             _require_current_provider_application(
                 data,
@@ -5903,6 +6202,8 @@ def cmd_log_specialist_invocation(args):
                 application_kind="result-import",
                 selection_source=getattr(args, "selection_source", None),
                 invocation_id=getattr(args, "invocation_id", None),
+                cwd=cwd,
+                registry_args=args,
             )
         _reject_unbounded_orchestrator_execution(data, skill, args.phase)
         if _bounded_purpose_required(data, skill, args.phase, args.status) and not getattr(args, "bounded_purpose", None):
@@ -7209,6 +7510,7 @@ def cmd_advance(args):
     try:
         with StateLock(lock_file(cwd)):
             data = json.loads(sf.read_text())
+            _reject_active_provider_mutation(data, "advance")
             requested_applicability = getattr(args, "artifact_applicability", None)
             artifact_path = getattr(args, "artifact_path", None)
             producer_run_id = getattr(args, "producer_run_id", None)
@@ -8014,6 +8316,7 @@ def cmd_set(args):
         sys.exit(1)
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
+        _reject_active_provider_mutation(data, "set")
         now = iso_now()
         explicit_keys = {kv.partition("=")[0] for kv in args.kvs}
         # Issue #222 (A-2/A-3): gate 判定に影響する state フィールドの条件付き set ガード。
@@ -9238,6 +9541,13 @@ class CommandOutcomeExit(SystemExit):
     def __init__(self, code: int, outcome_kind: str):
         super().__init__(code)
         self.outcome_kind = outcome_kind
+
+
+def _provider_gate(reason_code: str) -> None:
+    print(f"ERROR: provider-ineligible: {reason_code}", file=sys.stderr)
+    error = CommandOutcomeExit(2, "expected-gate")
+    error.provider_reason_code = reason_code
+    raise error
 
 
 def _command_outcome(args: argparse.Namespace, command: str, outcome_kind: str) -> dict:
@@ -11312,6 +11622,7 @@ def cmd_push_score(args):
 
     with StateLock(lock_file(cwd)), _PublishedFilesTransaction() as published_files:
         data = json.loads(sf.read_text())
+        _reject_active_provider_mutation(data, "push-score")
         lease_decision = _enforce_session_lease_for_write(sf, data)
         _validate_consensus_policy(data, items)
         try:
@@ -11897,6 +12208,7 @@ def cmd_mark_halt(args):
     category = _normalize_halt_category(getattr(args, "category", None))
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text())
+        _reject_active_provider_mutation(data, "mark-halt")
         now = iso_now()
         if category == "awaiting-approval":
             record_activity_event(data, "awaiting-approval", now)
@@ -14233,8 +14545,10 @@ def _build_parser():
                        help="broad/bounded orchestrator specialist を限定用途で使った目的")
     p_log.add_argument("--evidence-output", default=None,
                        help="specialist 出力 Markdown。指定時 archive/iter-N-<mission8>-specialist-<skill>.md に保存")
+    p_log.add_argument("--registry", action="append", default=None,
+                       help="external explicit registry の application 時再供給。複数指定可")
     p_log.add_argument("--json", action="store_true", help="JSON 形式で出力")
-    p_log.set_defaults(func=cmd_log_specialist_invocation)
+    p_log.set_defaults(func=cmd_log_specialist_invocation, command_outcome_tracking=True)
 
     p_cmd = spec_sub.add_parser("invoke-command", help="kind=command provider を argv/stdin/stdout で実行して証跡を記録")
     p_cmd.add_argument("--provider", required=True, help="state 内の role / skill / command")
@@ -14242,13 +14556,28 @@ def _build_parser():
     p_cmd.add_argument("--phase", required=True,
                        choices=["planning", "execution", "review", "scoring", "critic"])
     p_cmd.add_argument("--input-file", default=None, help="provider stdin packet に含める入力ファイル")
+    p_cmd.add_argument("--registry", action="append", default=None,
+                       help="external explicit registry の application 時再供給。複数指定可")
     p_cmd.add_argument("--selection-source", default=None, choices=sorted(SPECIALIST_SELECTION_SOURCES),
                        help="ask-user 後に command provider を適用する場合の confirmed selection metadata")
     p_cmd.add_argument("--timeout", type=int, default=None,
                        help="command timeout seconds (default: provider timeout, then 120)")
     p_cmd.add_argument("--json", action="store_true", help="JSON 形式で出力")
     _add_command_lineage_arguments(p_cmd)
-    p_cmd.set_defaults(func=cmd_invoke_command_provider)
+    p_cmd.set_defaults(func=cmd_invoke_command_provider, command_outcome_tracking=True)
+
+    p_reconcile = spec_sub.add_parser(
+        "reconcile-invocation",
+        help="orphaned running provider invocationをfenced evidenceでterminal化",
+    )
+    p_reconcile.add_argument("--invocation-id", required=True)
+    p_reconcile.add_argument(
+        "--status", required=True, choices=["completed", "failed", "abandoned-unknown"]
+    )
+    p_reconcile.add_argument("--evidence", required=True)
+    p_reconcile.add_argument("--expected-fencing-epoch", required=True, type=int)
+    p_reconcile.add_argument("--json", action="store_true")
+    p_reconcile.set_defaults(func=cmd_reconcile_provider_invocation, command_outcome_tracking=True)
 
     p_resolve = sub.add_parser(
         "resolve-archive",
@@ -14320,7 +14649,14 @@ def main():
                 )
                 _record_command_outcome_only(Path.cwd(), outcome)
                 if getattr(args, "json", False):
-                    print(json.dumps({"ok": False, "outcome_kind": outcome["outcome_kind"], "outcome": outcome}, ensure_ascii=False))
+                    envelope = {"ok": False, "outcome_kind": outcome["outcome_kind"], "outcome": outcome}
+                    provider_reason = getattr(error, "provider_reason_code", None)
+                    if provider_reason:
+                        envelope["error"] = {
+                            "code": "provider-ineligible",
+                            "reason_code": provider_reason,
+                        }
+                    print(json.dumps(envelope, ensure_ascii=False))
             except Exception:
                 pass
         raise
