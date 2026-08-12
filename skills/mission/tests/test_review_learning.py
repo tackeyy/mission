@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -47,6 +48,30 @@ def test_marker_requires_structured_learning_fields():
     bad["findings"][0]["weak_phase"] = "testing"
     with pytest.raises(LearningContractError):
         validate_review_learning(bad)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("cause", ""),
+    ("cause", "bad\nline"),
+    ("general_fix_rule", "x" * 4097),
+    ("weak_phase", 1),
+])
+def test_marker_rejects_empty_control_oversize_and_type_errors(field, value):
+    payload = _review()
+    payload["findings"][0][field] = value
+    with pytest.raises(LearningContractError):
+        validate_review_learning(payload)
+
+
+def test_marker_rejects_unknown_learning_keys():
+    payload = _review()
+    payload["learning_extra"] = True
+    with pytest.raises(LearningContractError):
+        validate_review_learning(payload)
+    payload = _review()
+    payload["findings"][0]["learning_extra"] = True
+    with pytest.raises(LearningContractError):
+        validate_review_learning(payload)
 
 
 def test_legacy_accepts_absent_learning_but_rejects_mixed_fields():
@@ -110,3 +135,35 @@ def test_mission_state_strict_parser_enforces_learning_marker():
     payload["findings"][0].pop("cause")
     with pytest.raises(ValueError, match="cause"):
         module._validate_review_payload(payload, 1)
+
+
+def test_stats_and_audit_failure_ledger_counts_match(run_cli, tmp_path):
+    run_cli("init", "learning counts", "--complexity", "Standard", cwd=tmp_path, check=True)
+    state_path = tmp_path / ".mission-state" / "sessions" / "test.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["failure_ledger"] = reduce_failure_ledger([{
+        "iteration": 1, "review": _review(),
+        "review_aggregate_ref": {"kind": "review-aggregate", "digest": "sha256:" + "e" * 64},
+    }])
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    stats = json.loads(run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path, check=True).stdout)
+    audit_path = Path(__file__).resolve().parents[3] / "scripts" / "mission-audit.py"
+    audit = subprocess.run(
+        [sys.executable, str(audit_path), "--root", str(tmp_path), "--json"],
+        capture_output=True, text=True, check=True,
+    )
+    audit_counts = json.loads(audit.stdout)["failure_ledger_counts"]
+    assert stats["failure_ledger_counts"] == audit_counts
+    assert audit_counts["weak_phase_counts"] == {"execution": 1}
+    assert "general_fix_rule" not in json.dumps(audit_counts)
+
+
+def test_generic_set_cannot_modify_failure_ledger(run_cli, tmp_path):
+    run_cli("init", "immutable learning ledger", "--complexity", "Standard", cwd=tmp_path, check=True)
+    state_path = tmp_path / ".mission-state" / "sessions" / "test.json"
+    before = state_path.read_bytes()
+    result = run_cli("set", 'failure_ledger={"schema":"mission-failure-ledger/1","patterns":[]}', cwd=tmp_path)
+    assert result.returncode == 2
+    assert "変更不可" in result.stderr
+    assert state_path.read_bytes() == before

@@ -39,7 +39,7 @@ def _aggregate_args(review, out):
     )
 
 
-def _review(tmp_path, name, *, perspective="A", iteration=1, scores=None, findings=None, same_score_note=None):
+def _review(tmp_path, name, *, perspective="A", iteration=1, scores=None, findings=None, same_score_note=None, learning=False):
     payload = {
         "schema": "mission-review/1",
         "perspective": perspective,
@@ -54,6 +54,14 @@ def _review(tmp_path, name, *, perspective="A", iteration=1, scores=None, findin
         "same_score_note": same_score_note,
         "notes": f"{perspective} review",
     }
+    if learning:
+        payload["learning_schema"] = "mission-review-learning/1"
+        payload["findings"] = [{
+            "id": f"{perspective}-1", "severity": "Medium", "axis": "accuracy",
+            "summary": "Boundary missing", "evidence": "bounded evidence", "recommendation": "validate it",
+            "cause": "Validation was omitted", "general_fix_rule": "Validate every boundary",
+            "weak_phase": "execution",
+        }]
     path = tmp_path / name
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     return path
@@ -944,6 +952,24 @@ def test_aggregate_reviews_output_can_be_pushed(state_dir, run_cli, read_state, 
     assert entry["score_source"] == "scoring-json"
     assert entry["items"]["accuracy"] == 4.4
     assert entry["review_agreement"] is None
+
+
+def test_learning_review_materializes_digest_only_failure_ledger(state_dir, run_cli, read_state, tmp_path):
+    review = _review(tmp_path, "learning.json", perspective="A", learning=True)
+    out = tmp_path / "scoring-learning.json"
+
+    run_cli("aggregate-reviews", "--iteration", "1", "--input", str(review), "--out", str(out), cwd=state_dir.parent, check=True)
+    result = run_cli("push-score", "--iteration", "1", "--scoring-json", str(out), cwd=state_dir.parent)
+
+    assert result.returncode == 0, result.stderr
+    ledger = read_state(state_dir)["failure_ledger"]
+    pattern = ledger["patterns"][0]
+    assert pattern["weak_phase"] == "execution"
+    assert pattern["iterations"] == [1]
+    serialized = json.dumps(ledger)
+    assert "bounded evidence" not in serialized
+    assert "Validation was omitted" not in serialized
+    assert pattern["examples"][0]["review_aggregate_digest"].startswith("sha256:")
 
 
 @pytest.mark.parametrize(

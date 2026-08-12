@@ -8,6 +8,7 @@
 
 - Red: `test_review_learning.py` は `review_learning` module不在でcollection error。
 - Green: strict schema/reducer `6 passed`。
+- Green: ledger materialization・atomic rollback・stats/audit parity・critic contract・distribution/hygieneを含む focused `203 passed`。
 
 ## Non-goals
 

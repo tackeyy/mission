@@ -23,7 +23,7 @@ class LearningContractError(ValueError):
 def _text(value: object, field: str) -> str:
     if not isinstance(value, str) or not value.strip() or len(value) > _MAX_TEXT:
         raise LearningContractError(f"{field} must be a non-empty bounded string")
-    if any(ord(char) < 32 and char not in "\t\n\r" for char in value):
+    if any(ord(char) < 32 for char in value):
         raise LearningContractError(f"{field} contains a control character")
     return value.strip()
 
@@ -45,6 +45,8 @@ def validate_review_learning(review: object) -> None:
     if not isinstance(review, Mapping):
         raise LearningContractError("review must be an object")
     marker = review.get("learning_schema")
+    if any(isinstance(key, str) and key.startswith("learning_") and key != "learning_schema" for key in review):
+        raise LearningContractError("unknown learning field")
     findings = review.get("findings")
     if not isinstance(findings, list):
         raise LearningContractError("findings must be a list")
@@ -64,6 +66,8 @@ def validate_review_learning(review: object) -> None:
         normalize_general_fix_rule(finding.get("general_fix_rule"))
         if finding.get("weak_phase") not in WEAK_PHASES:
             raise LearningContractError("weak_phase is invalid")
+        if any(isinstance(key, str) and key.startswith("learning_") for key in finding):
+            raise LearningContractError("unknown finding learning field")
 
 
 def _aggregate_ref(value: object) -> tuple[str, str]:
@@ -114,7 +118,9 @@ def validate_failure_ledger(value: object) -> dict[str, Any]:
         raise LearningContractError("failure ledger patterns are invalid")
     seen: set[str] = set()
     for pattern in patterns:
-        if not isinstance(pattern, Mapping) or pattern.get("pattern_id") in seen:
+        if (not isinstance(pattern, Mapping)
+                or set(pattern) != {"pattern_id", "weak_phase", "general_fix_rule", "iterations", "recurrence_count", "examples"}
+                or pattern.get("pattern_id") in seen):
             raise LearningContractError("failure ledger pattern is invalid")
         identity = learning_identity(pattern.get("weak_phase"), pattern.get("general_fix_rule"))
         if pattern.get("pattern_id") != identity:
@@ -126,13 +132,17 @@ def validate_failure_ledger(value: object) -> dict[str, Any]:
                 or any(type(item) is not int or item < 1 for item in iterations)
                 or type(pattern.get("recurrence_count")) is not int
                 or pattern["recurrence_count"] != len(iterations) - 1
-                or not isinstance(examples, list)):
+                or not isinstance(examples, list) or len(examples) != len(iterations)):
             raise LearningContractError("failure ledger occurrence is invalid")
+        example_iterations: set[int] = set()
         for example in examples:
             if (not isinstance(example, Mapping) or set(example) != {"iteration", "review_aggregate_digest"}
                     or example.get("iteration") not in iterations or not isinstance(example.get("review_aggregate_digest"), str)
                     or _SHA256_REF.fullmatch(example["review_aggregate_digest"]) is None):
                 raise LearningContractError("failure ledger example is invalid")
+            if example["iteration"] in example_iterations:
+                raise LearningContractError("failure ledger example is duplicated")
+            example_iterations.add(example["iteration"])
     return dict(value)
 
 

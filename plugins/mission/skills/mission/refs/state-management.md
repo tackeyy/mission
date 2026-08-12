@@ -533,6 +533,14 @@ meta/non-operation の証明は context 全体が `review/analyze/document/inspe
 - push-score は経路を問わず「全 items が 1.0 以下」を 0-1 正規化スケール混入として reject する (実ログ回帰: xai-cli cx-019efece が composite 0.96 = 4.8/5 を push した事例)
 - `--scoring-output` の保存先は `.mission-state/archive/iter-<N>-<mission_id先頭8>-scoring.md`。連続ランでの上書き消失 (2026-06-10 実害確認) を防ぐため mission_id を含む
 
+## Structured review learning / failure ledger
+
+新規reviewはtop-level `learning_schema: mission-review-learning/1` を任意で宣言できる。宣言した場合は各findingに非空の `cause`、正規化可能な `general_fix_rule`、`weak_phase` (`understanding | planning | execution | formatting`) が必須になる。markerなしのlegacy reviewは従来どおり採点できるが、learning fieldの混在はrejectする。
+
+`push-score` はverified immutable review aggregateだけから `failure_ledger` (`mission-failure-ledger/1`) を再生成し、score entryと同じStateLock・atomic state writeで保存する。pattern IDはweak phaseと空白/caseを正規化したgeneral ruleのSHA-256。同一iterationの複数reviewerやresubmitは1観測、異なるiterationへの出現だけを再発として数える。ledgerは一般化ruleとaggregate digest参照だけを保持し、Cause・raw evidence・archive pathを複製しない。`set failure_ledger=...` は禁止する。
+
+`stats --json` と `mission-audit.py --json` は同じpure reducerで `failure_ledger_counts` を返す。出力はpattern数、再発pattern数、weak phase別件数、invalid ledger数だけで、rule本文やdigest参照は出力しない。ledger欠落のlegacy stateは空として扱い、audit findingにはしない。
+
 ## review publish rollback の recovery residue
 
 既存 output の rollback が失敗して旧 bytes を自動復元できない場合、同じ親ディレクトリに

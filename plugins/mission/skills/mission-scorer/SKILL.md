@@ -42,6 +42,7 @@ allowed-tools: Read, Grep, Glob
 4. High / Medium finding には、散文内にある根拠テキストを `evidence` として入れる。根拠が無い指摘を High / Medium に昇格しない。
 5. 全 4 軸が同点の場合、元レビューに自己警告や理由が無ければ `same_score_note` を追加しない。native import/finalize 経路に reject させる。
 6. 採点、平均、合意度、合否判定、rubric cap の適用は `review-finalize` に任せる。
+7. 元レビューが各findingについて Cause / General Fix Rule / Weak phase の3値を明記している場合だけ `learning_schema: mission-review-learning/1` と3値を変換する。1つでも明記がなければmarkerごと省略し、推測補完しない。
 
 ## 出力形式
 
@@ -50,6 +51,7 @@ allowed-tools: Read, Grep, Glob
 ```json
 {
   "schema": "mission-review/1",
+  "learning_schema": "mission-review-learning/1",
   "iteration": 1,
   "reviewer": "fallback-scorer",
   "axis": "accuracy",
@@ -61,7 +63,10 @@ allowed-tools: Read, Grep, Glob
       "axis": "accuracy",
       "summary": "散文レビューに書かれていた指摘の要約",
       "evidence": "散文レビュー内の根拠テキスト",
-      "recommendation": "契約を満たすための具体的な修正"
+      "recommendation": "契約を満たすための具体的な修正",
+      "cause": "元レビューに明記された原因",
+      "general_fix_rule": "元レビューに明記された一般化ルール",
+      "weak_phase": "execution"
     }
   ],
   "same_score_note": null,
@@ -74,6 +79,7 @@ allowed-tools: Read, Grep, Glob
 - composite / min_item / review_agreement を計算する（items は4軸のまま）
 - pass / fail を判断する
 - reviewer の散文に無い evidence を作る
+- reviewer の散文に無い Cause / General Fix Rule / Weak phaseを作る。3値が揃わなければ `learning_schema` も出さない
 - `mission-state.py` を呼ぶ
 - JSON ファイルを書き込む
 - native import/finalize の reject を避けるために不確かな scores や `same_score_note` を補う

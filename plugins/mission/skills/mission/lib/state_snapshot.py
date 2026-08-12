@@ -379,7 +379,7 @@ def _validate_record_shape(record: Any, *, privacy: bool = False) -> None:
             raise SnapshotError(f"snapshot record {key} collection is invalid")
     for key in (
         "artifact", "progress", "task_profile", "specialists_decision",
-        "phase_durations_sec",
+        "phase_durations_sec", "failure_ledger",
     ):
         value = state.get(key)
         if value is not None and not isinstance(value, dict):
