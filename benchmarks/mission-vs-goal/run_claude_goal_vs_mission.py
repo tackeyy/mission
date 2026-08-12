@@ -605,6 +605,18 @@ def _positive_iteration(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
 
 
+def _score_timestamp(value: object) -> tuple[datetime | None, bool]:
+    if not isinstance(value, str):
+        return None, False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None, False
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None, True
+    return parsed.astimezone(timezone.utc), True
+
+
 def _safe_aggregate_context(worktree: Path, reference: object, iteration: int) -> dict:
     unavailable = {"context_mode_expected": None, "context_manifest_generated": None, "context_manifest_fallback": None}
     if not isinstance(reference, dict) or reference.get("kind") != "review-aggregate":
@@ -666,14 +678,14 @@ def extract_diff_review_observations(worktree: Path, state: dict) -> dict:
             if not isinstance(entry, dict):
                 continue
             iteration = _positive_iteration(entry.get("iteration"))
-            timestamp = entry.get("timestamp")
-            try:
-                when = datetime.fromisoformat(timestamp.replace("Z", "+00:00")) if isinstance(timestamp, str) else None
-            except ValueError:
-                when = None
-            if iteration is None or when is None:
+            when, timestamp_valid = _score_timestamp(entry.get("timestamp"))
+            if iteration is None:
+                continue
+            if not timestamp_valid:
                 continue
             row = row_for(iteration)
+            if when is None:
+                continue
             reference = entry.get("review_evidence_ref")
             if not isinstance(reference, dict):
                 provenance = entry.get("score_provenance")
@@ -715,6 +727,20 @@ def attach_diff_review_record_cost(observations: object, total_cost_usd: object)
         if isinstance(row, dict) and _positive_iteration(row.get("iteration")) is not None:
             row["record_total_cost_usd"] = value
             row["per_iteration_cost_status"] = "unavailable"
+
+
+def _has_positive_activity_duration(row: object) -> bool:
+    durations = row.get("activity_duration_sec") if isinstance(row, dict) else None
+    if not isinstance(durations, dict):
+        return False
+    return any(
+        isinstance(seconds, (int, float))
+        and not isinstance(seconds, bool)
+        and math.isfinite(seconds)
+        and seconds > 0
+        for phases in durations.values() if isinstance(phases, dict)
+        for seconds in phases.values()
+    )
 
 
 MEASUREMENT_RATE_FIELDS = (
@@ -1381,6 +1407,15 @@ def summarize(
         and record["mission_iterations"] >= 2
         and isinstance(record.get("diff_review_observations"), dict)
         and record["diff_review_observations"].get("status") == "observed"
+        and isinstance(record["diff_review_observations"].get("critic_has_new_scope"), bool)
+        and any(
+            _positive_iteration(row.get("iteration")) is not None
+            and row["iteration"] >= 2
+            and row.get("wall_clock_status") == "observed"
+            and _has_positive_activity_duration(row)
+            for row in record["diff_review_observations"].get("iterations", [])
+            if isinstance(row, dict)
+        )
     ]
     iter2_record_costs = [
         record.get("total_cost_usd") for record in eligible_iter2_records

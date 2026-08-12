@@ -119,7 +119,7 @@ def test_summary_exposes_diff_review_measurement_gate_counts():
         "permission_mode_degraded": False, "failure_kind": None,
     }
     records = [
-        {**base, "arm": "mission", "mission_iterations": 2, "diff_review_observations": {"status": "observed", "iterations": [{"iteration": 2, "context_mode_expected": "bounded", "context_manifest_generated": True, "context_manifest_fallback": False}]}},
+        {**base, "arm": "mission", "mission_iterations": 2, "diff_review_observations": {"status": "observed", "critic_has_new_scope": False, "iterations": [{"iteration": 2, "wall_clock_status": "observed", "activity_duration_sec": {"active": {"scoring": 1.0}}, "context_mode_expected": "bounded", "context_manifest_generated": True, "context_manifest_fallback": False}]}},
         {**base, "arm": "claude_code_goal_command", "mission_iterations": None},
     ]
     summary = RUNNER.summarize(records, [{"id": "fixture"}], "rid", "abc1234", BENCHMARK_DIR / "tasks.discriminating.json")
@@ -176,7 +176,7 @@ def test_invalid_iteration_is_excluded_while_legacy_segment_remains_generically_
 def test_iter2_gate_excludes_blocked_degraded_and_noncomparable_records():
     base = {"arm": "mission", "run_status": "completed", "comparable_attempt": True, "failure_kind": None,
             "permission_mode_degraded": False, "mission_iterations": 2,
-            "diff_review_observations": {"status": "observed", "iterations": []},
+            "diff_review_observations": {"status": "observed", "critic_has_new_scope": False, "iterations": [{"iteration": 2, "wall_clock_status": "observed", "activity_duration_sec": {"active": {"scoring": 1.0}}}]},
             "completion": True, "validator_pass": True, "human_quality_score": 5.0,
             "intervention_count": 0, "evidence_completeness": 5.0, "quality_marker_score": 1.0,
             "elapsed_minutes": 1.0, "total_cost_usd": 1.0}
@@ -188,3 +188,31 @@ def test_iter2_gate_excludes_blocked_degraded_and_noncomparable_records():
 
     summary = RUNNER.summarize(records, [{"id": "fixture"}], "rid", "abc1234", BENCHMARK_DIR / "tasks.discriminating.json")
     assert summary["diff_review_measurement_gate"]["iter2_eligible_records"] == 0
+
+
+@pytest.mark.parametrize("observation", [
+    {"status": "observed", "critic_has_new_scope": None, "iterations": [{"iteration": 2, "wall_clock_status": "observed", "activity_duration_sec": {"active": {"scoring": 1.0}}}]},
+    {"status": "observed", "critic_has_new_scope": False, "iterations": [{"iteration": 2, "wall_clock_status": "unavailable", "activity_duration_sec": {"active": {"scoring": 1.0}}}]},
+    {"status": "observed", "critic_has_new_scope": False, "iterations": [{"iteration": 2, "wall_clock_status": "observed", "activity_duration_sec": {"active": {"scoring": 0.0}}}]},
+])
+def test_iter2_gate_requires_observed_wall_activity_and_critic_scope_evidence(observation):
+    record = {"arm": "mission", "run_status": "completed", "comparable_attempt": True, "failure_kind": None,
+              "permission_mode_degraded": False, "mission_iterations": 2, "diff_review_observations": observation,
+              "completion": True, "validator_pass": True, "human_quality_score": 5.0, "intervention_count": 0,
+              "evidence_completeness": 5.0, "quality_marker_score": 1.0, "elapsed_minutes": 1.0, "total_cost_usd": 1.0}
+
+    summary = RUNNER.summarize([record], [{"id": "fixture"}], "rid", "abc1234", BENCHMARK_DIR / "tasks.discriminating.json")
+    assert summary["diff_review_measurement_gate"]["iter2_eligible_records"] == 0
+
+
+def test_mixed_or_naive_score_timestamps_leave_wall_clock_unavailable_without_crashing(tmp_path):
+    state = {"score_history": [
+        {"iteration": 1, "timestamp": "2026-08-12T00:00:00Z"},
+        {"iteration": 2, "timestamp": "2026-08-12T00:01:00"},
+        {"iteration": 3, "timestamp": "not-a-timestamp"},
+    ]}
+
+    rows = RUNNER.extract_diff_review_observations(tmp_path, state)["iterations"]
+    assert [(row["iteration"], row["wall_clock_status"]) for row in rows] == [
+        (1, "unavailable"), (2, "unavailable"),
+    ]

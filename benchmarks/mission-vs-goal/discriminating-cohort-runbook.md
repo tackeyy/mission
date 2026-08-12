@@ -94,7 +94,8 @@ counter (zero denominator gives a null rate); it must not reconstruct values
 from raw mission state.
 
 Record results in `report.md` / `report.ja.md` with the standard unsafe-
-interpretation guard, then close #262 with the verdict.
+interpretation guard, then record the verdict on and close Issue #275. Issue
+#262 is a historical source for the earlier adoption runbook.
 
 Environment notes (2026-07-25, #292): on CC 2.1.219+ the
 `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0` opt-out no longer prevents permission-mode

@@ -130,8 +130,8 @@ raw mission state から再計算しない。
    fallback iteration count を必ず記録し、generated と fallback を同一視しない。
    iteration 単位の cost は推定しない。eligible iter-2 record の cost total / mean を記録する
 2. **判別力**: 両 arm の `marker_score_variance` が 0 でない (天井飽和の解消)
-3. **iter>=2 の実運用観測**: mission records に `mission_iterations >= 2` が 1 件以上、
-   その record の state で `critic_has_new_scope` 記録を確認 (#240/#241 発火証跡)
+3. **iter>=2 の実運用観測**: `iter2_eligible_records >= 5` を満たし、各 eligible record の
+   state で boolean の `critic_has_new_scope` 記録を確認 (#240/#241 発火証跡)
 4. **品質判定**: `comparable_average_quality_score` と marker recall の arm 差で
    「品質>goal」を判定。同点なら「mission の価値はテール保険+ガバナンス」の
    現行結論を維持する
@@ -142,7 +142,7 @@ raw mission state から再計算しない。
 
 - results JSONL + summary + artifacts を commit し、report.ja.md / report.md に
   セクション追記 (openworld-v1 節の形式に従い「危険な解釈」ガードを必ず付ける)
-- 判定結果を Issue #262 に記録してクローズ
+- 判定結果を Issue #275 に記録してクローズする。Issue #262 は以前の採用runbookの履歴参照である
 
 ---
 
