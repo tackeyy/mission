@@ -120,8 +120,16 @@ def test_push_score_rejects_foreign_lease_before_scoring_archive_publish(
         "mission_achievement": 4.5, "accuracy": 4.4,
         "completeness": 4.3, "usability": 4.2,
     }
+    learning_review = canonical_review(items)
+    learning_review["learning_schema"] = "mission-review-learning/1"
+    learning_review["findings"] = [{
+        "id": "fixture-1", "severity": "Medium", "axis": "accuracy",
+        "summary": "Boundary missing", "evidence": "bounded evidence", "recommendation": "validate it",
+        "cause": "Validation was omitted", "general_fix_rule": "Validate every boundary",
+        "weak_phase": "execution",
+    }]
     _, review_ref, claim = write_canonical_review_aggregate(
-        state_dir.parent, [canonical_review(items)], iteration=1,
+        state_dir.parent, [learning_review], iteration=1,
         name_prefix="lease-preflight",
     )
     score = tmp_path / "score.json"
@@ -176,8 +184,16 @@ def test_push_score_state_failure_rolls_back_new_scoring_archive(
         "mission_achievement": 4.5, "accuracy": 4.4,
         "completeness": 4.3, "usability": 4.2,
     }
+    learning_review = canonical_review(items)
+    learning_review["learning_schema"] = "mission-review-learning/1"
+    learning_review["findings"] = [{
+        "id": "fixture-1", "severity": "Medium", "axis": "accuracy",
+        "summary": "Boundary missing", "evidence": "bounded evidence", "recommendation": "validate it",
+        "cause": "Validation was omitted", "general_fix_rule": "Validate every boundary",
+        "weak_phase": "execution",
+    }]
     _, review_ref, claim = write_canonical_review_aggregate(
-        state_dir.parent, [canonical_review(items)], iteration=1,
+        state_dir.parent, [learning_review], iteration=1,
         name_prefix="state-failure",
     )
     score = tmp_path / "score.json"

@@ -170,6 +170,7 @@ scoring/issues テンプレ + mission-review/1 JSON 以外の散文を出力し�
 ```json
 {
   "schema": "mission-review/1",
+  "learning_schema": "mission-review-learning/1",
   "perspective": "A",
   "iteration": 1,
   "scores": {
@@ -185,7 +186,10 @@ scoring/issues テンプレ + mission-review/1 JSON 以外の散文を出力し�
       "axis": "accuracy",
       "summary": "<1文>",
       "evidence": "<path:line + verbatim 引用>",
-      "recommendation": "<修正方法>"
+      "recommendation": "<修正方法>",
+      "cause": "<指示または成果物レベルの原因>",
+      "general_fix_rule": "<同種の誤りを防ぐ一般化ルール>",
+      "weak_phase": "execution"
     }
   ],
   "same_score_note": null,
@@ -197,6 +201,8 @@ scoring/issues テンプレ + mission-review/1 JSON 以外の散文を出力し�
 ### JSON 契約
 
 - `schema` は必ず `mission-review/1`。
+- 新しいreviewは `learning_schema: mission-review-learning/1` を付け、全findingに非空の `cause` / `general_fix_rule` と `weak_phase` (`understanding | planning | execution | formatting`) を記録する。既存legacy reviewだけmarkerなしを許容する。
+- `summary` を観測Issueとして再利用する。Causeは指示・成果物レベルの原因、General Fix Ruleは同種の誤りを防ぐ一般化ルールにし、単なる当該行の修正手順にしない。
 - `perspective` は Reviewer 内の識別子 (`A` / `B` / `C` / `D` / `verify` など)。
 - `scores` は `mission_achievement` / `accuracy` / `completeness` / `usability` の 4 キー完全一致、各 0-5 の数値。観点Dや検証専任で採点しない場合だけ `null`。
 - `severity` は `High` / `Medium` / `Low`、`axis` は上記 4 軸のいずれか。

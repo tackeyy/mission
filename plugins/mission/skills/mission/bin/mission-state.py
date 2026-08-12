@@ -160,6 +160,12 @@ from planning_lifecycle import (  # noqa: E402
     validate_handoff_step,
 )
 from planning_provider_metrics import reduce_planning_provider_kpis  # noqa: E402
+from review_learning import (  # noqa: E402
+    failure_ledger_counts,
+    LearningContractError,
+    reduce_failure_ledger,
+    validate_review_learning,
+)
 from artifact_contract import (  # noqa: E402
     ArtifactContractError,
     artifact_lint_observation_matches,
@@ -8714,6 +8720,7 @@ FROZEN_FIELDS = {
     "passes_forced",
     "force_reason",
     "score_history",
+    "failure_ledger",
     "threshold",
     "schema_version",
     "session_role",
@@ -11124,6 +11131,10 @@ def _validate_review_payload(payload: object, expected_iteration: int) -> None:
     findings = payload.get("findings")
     if not isinstance(findings, list):
         raise ValueError("findings must be a list")
+    try:
+        validate_review_learning(payload)
+    except LearningContractError as exc:
+        raise ValueError(str(exc)) from exc
     seen_ids = set()
     for idx, finding in enumerate(findings, start=1):
         if not isinstance(finding, dict):
@@ -11260,6 +11271,45 @@ def _load_imported_review(cwd: Path, state: dict, reference_path: str, expected_
         raise ValueError("review import evidence perspective mismatch")
     metric = {"json_bytes": len(content), "prose_bytes": 0, "prose_ratio": 0}
     return payload, metric, reference
+
+
+def _derive_failure_ledger(cwd: Path, score_history: object) -> dict:
+    """Rebuild the materialized ledger only from immutable review aggregates."""
+    if not isinstance(score_history, list):
+        raise ValueError("score_history must be a list")
+    observations: list[dict] = []
+    for entry in score_history:
+        if not isinstance(entry, dict):
+            raise ValueError("score_history entry must be an object")
+        reference = entry.get("review_evidence_ref")
+        if reference is None:
+            continue
+        if (not isinstance(reference, dict) or reference.get("kind") != "review-aggregate"
+                or not isinstance(reference.get("path"), str)
+                or not isinstance(reference.get("digest"), str)
+                or _SHA256_REF_RE.fullmatch(reference["digest"]) is None):
+            raise ValueError("failure ledger review reference is invalid")
+        content = _read_bounded_review_evidence(cwd, reference["path"])
+        digest = "sha256:" + hashlib.sha256(content).hexdigest()
+        if digest != reference["digest"] or reference.get("generation") != digest[7:23]:
+            raise ValueError("failure ledger review reference integrity mismatch")
+        try:
+            aggregate = json.loads(content.decode("utf-8"), object_pairs_hook=_reject_duplicate_review_keys)
+        except (UnicodeDecodeError, json.JSONDecodeError, _DuplicateReviewJsonKey) as exc:
+            raise ValueError("failure ledger review aggregate is invalid") from exc
+        iteration = entry.get("iteration")
+        if (not isinstance(aggregate, dict) or aggregate.get("schema") != "mission-review-aggregate/1"
+                or aggregate.get("iteration") != iteration or not isinstance(aggregate.get("inputs"), list)):
+            raise ValueError("failure ledger review aggregate binding mismatch")
+        for review in aggregate["inputs"]:
+            observations.append({
+                "iteration": iteration, "review": review,
+                "review_aggregate_ref": {"kind": "review-aggregate", "digest": digest},
+            })
+    try:
+        return reduce_failure_ledger(observations)
+    except LearningContractError as exc:
+        raise ValueError(f"failure ledger input is invalid: {exc}") from exc
 
 
 def cmd_review_import(args):
@@ -12418,6 +12468,7 @@ def cmd_push_score(args):
                     "digest": "sha256:" + hashlib.sha256(artifact_bytes).hexdigest(),
                 }
         data.setdefault("score_history", []).append(entry)
+        data["failure_ledger"] = _derive_failure_ledger(cwd, data["score_history"])
         # 改善2: top-level iteration を同期 (orchestrator の set 取りこぼしで
         # iteration と score_history 長が不整合になる問題への対処)。
         data["iteration"] = args.iteration
@@ -14011,6 +14062,7 @@ def _aggregate(
             "command_outcome_counts": summarize_command_outcomes([]),
             "activity_timing": summarize_activity_states([]),
             "planning_provider_kpis": reduce_planning_provider_kpis([], population_kind="observed"),
+            "failure_ledger_counts": failure_ledger_counts([]),
         }
     # _classify を 1 回だけ評価 (旧実装は pass/halt/incomplete で 3N 回呼んでいた)
     classes = [_classify(s) for s in states]
@@ -14136,6 +14188,7 @@ def _aggregate(
         "by_halt_category": by_halt_category,
         "activity_timing": activity_timing,
         "planning_provider_kpis": reduce_planning_provider_kpis(states, population_kind="observed"),
+        "failure_ledger_counts": failure_ledger_counts(states),
     }
 
 

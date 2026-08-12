@@ -60,6 +60,7 @@ from provider_public_contract import (  # noqa: E402
     validate_specialist_public_state,
 )
 from planning_provider_metrics import reduce_planning_provider_kpis  # noqa: E402
+from review_learning import failure_ledger_counts  # noqa: E402
 from audit_findings import (  # noqa: E402
     AuditFinding,
     FindingSpec,
@@ -2631,6 +2632,7 @@ def aggregate(
     planning_provider_kpis = reduce_planning_provider_kpis(
         [record.state for record in records], population_kind="observed"
     )
+    learning_counts = failure_ledger_counts([record.state for record in records])
     observation_now = observation_now or utc_now()
     command_outcome_sessions: list[tuple[list[dict[str, Any]], int, int]] = []
     for record in records:
@@ -2880,6 +2882,7 @@ def aggregate(
         "terminal_outcome_counts": pass_rate_summary["terminal_outcome_counts"],
         "command_outcome_counts": command_outcome_counts,
         "planning_provider_kpis": planning_provider_kpis,
+        "failure_ledger_counts": learning_counts,
         "command_outcome_defects": command_outcome_defects,
         "artifact_coverage": summarize_artifact_coverage(
             [record.state for record in records]
