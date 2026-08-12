@@ -121,6 +121,7 @@ INVOCATION_FIELDS = frozenset({
     "selection_source", "bounded_purpose", "evidence_path", "reason", "notes", "command", "kind",
     "selection_id", "invocation_id", "lifecycle_state", "transitioned_at",
     "reserved_at", "running_at", "application_context_digest",
+    "provider_id",
     "reservation_owner_session_id", "fencing_epoch", "child_pid",
     "process_identity_digest", "heartbeat_at", "result_artifact_digest",
     "host_run_id", "root_run_id", "parent_run_id", "child_run_id", "logical_group_id",

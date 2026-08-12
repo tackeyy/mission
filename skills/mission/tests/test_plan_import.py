@@ -26,7 +26,7 @@ def _setup(run_cli, tmp_path):
     command = commands / "portable-plan-provider"; command.write_text("#!/bin/sh\n", encoding="utf-8"); command.chmod(0o700)
     env = {"PATH": f"{commands}{os.pathsep}{os.environ.get('PATH', '')}"}
     registry = tmp_path / "registry.json"
-    registry.write_text(json.dumps({"schema":"mission-specialist-registry/2","specialists_v2":[{"provider_id":"portable-plan-provider","role":"deep-planning","skill":"portable-plan-provider","kind":"command","command":"portable-plan-provider","args":[],"env":{},"task_profiles":["architecture"],"phases":["planning"],"activation":{"min_complexity":"Complex","auto_select_if":["complexity"]},"result_contract":_contract()}]}))
+    registry.write_text(json.dumps({"schema":"mission-specialist-registry/2","specialists_v2":[{"provider_id":"portable-provider","role":"deep-planning","skill":"portable-plan-provider","kind":"command","command":"portable-plan-provider","args":[],"env":{},"task_profiles":["architecture"],"phases":["planning"],"activation":{"min_complexity":"Complex","auto_select_if":["complexity"]},"result_contract":_contract()}]}))
     run_cli("init", "plan import", "--complexity", "Complex", cwd=tmp_path, check=True)
     recommended = run_cli("specialists", "recommend", "--no-default-skill-roots", "--task", "Review architecture", "--registry", str(registry), "--complexity", "Complex", "--record-state", "--json", cwd=tmp_path, env_extra=env)
     assert recommended.returncode == 0, recommended.stderr

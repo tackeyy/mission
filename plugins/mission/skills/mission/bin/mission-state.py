@@ -5145,6 +5145,7 @@ def cmd_invoke_command_provider(args):
     now = iso_now()
     entry = {
         "invocation_id": pointer["invocation_id"],
+        "provider_id": provider.get("provider_id"),
         "iteration": args.iteration,
         "phase": args.phase,
         "role": provider.get("role"),
@@ -11431,7 +11432,8 @@ def cmd_planning_promote_provider_plan(args):
         if not isinstance(record, dict):
             _provider_gate("provider-plan-import-missing")
         invocation = invocation_by_id(data, args.invocation_id)
-        if primary.get("provider_id") not in {invocation.get("skill"), invocation.get("role")}:
+        if (invocation.get("provider_id") != primary.get("provider_id")
+                or invocation.get("selection_id") != primary.get("selection_id")):
             _provider_gate("planning-primary-invocation-provider-mismatch")
         if invocation.get("status") != "completed" or invocation.get("iteration") != data.get("iteration"):
             _provider_gate("provider-plan-invocation-not-current")

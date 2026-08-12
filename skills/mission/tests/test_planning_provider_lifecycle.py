@@ -146,6 +146,9 @@ def _provider_import_fixture(run_cli, tmp_path, mode="primary"):
     selected["planning_mode"] = mode
     selected["planning_contract_digest"] = "sha256:" + "b" * 64
     state["planning_provider_binding"] = {key: selected[key] for key in ("provider_id", "selection_id", "planning_contract_digest")} if mode == "primary" else None
+    invocation_record = state["specialist_invocations"][0]
+    invocation_record["provider_id"] = selected["provider_id"]
+    invocation_record["selection_id"] = selected["selection_id"]
     state_file.write_text(__import__("json").dumps(state))
     source = tmp_path / "provider-result.json"; source.write_text(__import__("json").dumps(result))
     return registry, state_file, source, invocation, env
