@@ -222,6 +222,10 @@ def _validate_v2_candidate_types(candidate: dict[str, Any]) -> None:
         planning = candidate["planning"]
         if set(planning) != {"mode"} or planning.get("mode") not in {"advisory", "primary"}:
             _invalid_candidate_type("planning")
+        if planning.get("mode") == "primary":
+            contract = candidate.get("result_contract")
+            if not isinstance(contract, dict) or not contract.get("envelope_schema") or not contract.get("artifact_schema"):
+                _invalid_candidate_type("planning.primary-requires-result-contract")
     if "timeout" in candidate:
         timeout = candidate["timeout"]
         if type(timeout) is not int or not 1 <= timeout <= 86400:

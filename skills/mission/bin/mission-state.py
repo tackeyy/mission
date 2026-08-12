@@ -7969,8 +7969,13 @@ def _trusted_canonical_plan_binding(data: dict, plan: dict) -> dict:
             raise PlanningLifecycleError("canonical-plan-provider-import-missing")
         if record.get("candidate_path") != plan.get("path") or record.get("candidate_digest") != plan.get("digest"):
             raise PlanningLifecycleError("canonical-plan-provider-candidate-mismatch")
+        invocation = invocation_by_id(data, str(source_id))
+        if invocation.get("iteration") != data.get("iteration") or invocation.get("phase") != "planning":
+            raise PlanningLifecycleError("canonical-plan-provider-invocation-mismatch")
         expected = {"generation": record.get("generation"), "source": source, "source_id": source_id,
-                    "selection_source": plan.get("selection_source"), "iteration": data.get("iteration")}
+                    "selection_source": invocation.get("selection_source") or "automatic", "iteration": data.get("iteration")}
+        if plan.get("source_digest") != record.get("raw_result_digest"):
+            raise PlanningLifecycleError("canonical-plan-provider-source-digest-mismatch")
     else:
         records = data.get("planning_source_records") or {}
         record = records.get(f"{source}:{source_id}") if isinstance(records, dict) else None

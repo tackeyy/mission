@@ -155,6 +155,8 @@ def test_provider_import_promote_advance_and_handoff_preserves_identity(run_cli,
     assert state["canonical_plan"]["source_id"] == invocation
     assert state["executor_handoff"]["plan_digest"] == state["canonical_plan"]["digest"]
     assert state["executor_handoff"]["plan_generation"] == state["canonical_plan"]["generation"]
+    state["canonical_plan"]["selection_source"] = "confirmed-user"; state_file.write_text(__import__("json").dumps(state))
+    assert run_cli("advance", "--phase", "executing", cwd=tmp_path, env_extra=env).returncode == 2
 
 
 def test_advance_publish_fault_rolls_back_phase_and_handoff(monkeypatch, run_cli, tmp_path):
