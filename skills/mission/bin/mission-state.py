@@ -145,6 +145,7 @@ from provider_preflight import (  # noqa: E402
     ProviderPreflightError,
     build_preflight,
     safe_input_snapshot,
+    validate_receipt as validate_provider_receipt,
 )
 from artifact_contract import (  # noqa: E402
     ArtifactContractError,
@@ -4846,15 +4847,25 @@ def _provider_preflight_subject(data: dict, provider: dict, args) -> dict:
     }
 
 
-def _verified_preflight_packet(cwd: Path, data: dict, provider: dict, args) -> tuple[dict, bytes]:
+def _verified_preflight_packet(
+    cwd: Path, data: dict, provider: dict, args, *, consuming_invocation_id: str | None = None
+) -> tuple[dict, bytes]:
     """Rebuild #396's exact packet and reject every drift before process reservation."""
     pointers = data.get("provider_preflights")
     pointer = pointers.get(args.preflight_id) if isinstance(pointers, dict) else None
-    if not isinstance(pointer, dict) or pointer.get("status") != "approved":
+    if not isinstance(pointer, dict):
+        _provider_gate("approval-required")
+    status = pointer.get("status")
+    if status == "consuming" and pointer.get("consuming_invocation_id") == consuming_invocation_id:
+        pass
+    elif status == "consumed":
+        _provider_gate("receipt-replayed")
+    elif status != "approved":
         _provider_gate("approval-required")
     # An approved state bit is never a receipt.  Receipt issuance is a host
     # verifier responsibility; do not let a hand-edited pointer authorize I/O.
-    if not isinstance(pointer.get("receipt"), dict):
+    receipt_ref = pointer.get("receipt")
+    if not isinstance(receipt_ref, dict):
         _provider_gate("receipt-invalid")
     if not isinstance(args.input_file, str) or not args.input_file:
         _provider_gate("preflight-input-required")
@@ -4872,9 +4883,101 @@ def _verified_preflight_packet(cwd: Path, data: dict, provider: dict, args) -> t
         raw = artifact.read_bytes()
         if raw != rebuilt["outbound_packet_bytes"]:
             _provider_gate("payload-drift")
+        receipt_path = receipt_ref.get("artifact_path")
+        receipt_digest = receipt_ref.get("digest")
+        if not isinstance(receipt_path, str) or not isinstance(receipt_digest, str):
+            _provider_gate("receipt-invalid")
+        receipt_bytes = (state_dir(cwd) / receipt_path).read_bytes()
+        if "sha256:" + hashlib.sha256(receipt_bytes).hexdigest() != receipt_digest:
+            _provider_gate("receipt-invalid")
+        receipt = json.loads(receipt_bytes)
+        expected = {
+            "preflight_id": args.preflight_id, "session_id": rebuilt["session_id"],
+            "mission_id": rebuilt["mission_id"], "outbound_context_digest": rebuilt["outbound_context_digest"],
+            "invocation_id": rebuilt["invocation_id"], "outbound_packet_digest": rebuilt["outbound_packet_digest"],
+            "registry_entry_digest": rebuilt["registry_entry_digest"], "selection_id": rebuilt["selection_id"],
+            "selection_source": rebuilt["selection_source"], "iteration": rebuilt["iteration"], "phase": rebuilt["phase"],
+            "risk_scopes": rebuilt["risk_scopes"],
+        }
+        receipt_preflight = {**expected, "risk_scopes": rebuilt["risk_scopes"]}
+        # The verifier registry already pins source/version before receipt
+        # creation.  Re-read it here to reject registry churn before spawn.
+        provenance = receipt.get("approval_provenance") if isinstance(receipt, dict) else {}
+        verifier = provenance.get("verifier_id") if isinstance(provenance, dict) else None
+        descriptor = _configured_approval_entry_point(cwd, verifier) if isinstance(verifier, str) else None
+        if descriptor is None:
+            _provider_gate("verifier-untrusted")
+        validate_provider_receipt(receipt_preflight, receipt, trusted_verifiers={verifier: provenance.get("verifier_version")}, now=iso_now())
         return pointer, raw
     except ProviderPreflightError as error:
         _provider_gate(str(error))
+
+
+def cmd_verify_provider_approval(args):
+    """Ask only a host-registered verifier to turn evidence into a receipt."""
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        _provider_gate("state-missing")
+    with StateLock(lock_file(cwd)):
+        data = json.loads(sf.read_text(encoding="utf-8"))
+        pointer = (data.get("provider_preflights") or {}).get(args.preflight_id)
+        if not isinstance(pointer, dict) or pointer.get("status") != "awaiting-approval":
+            _provider_gate("preflight-not-awaiting-approval")
+        try:
+            packet_path = state_dir(cwd) / str(pointer["artifact_path"])
+            packet_bytes = packet_path.read_bytes()
+            if "sha256:" + hashlib.sha256(packet_bytes).hexdigest() != pointer["outbound_packet_digest"]:
+                _provider_gate("preflight-artifact-invalid")
+            packet = json.loads(packet_bytes)
+            request = {
+                "schema": "mission-provider-approval-request/1", "preflight_id": args.preflight_id,
+                "session_id": packet["session_id"], "mission_id": packet["mission_id"],
+                "outbound_context_digest": packet["outbound_context_digest"], "invocation_id": packet["invocation_id"],
+                "outbound_packet_digest": pointer["outbound_packet_digest"],
+                "registry_entry_digest": packet["provider"]["registry_entry_digest"],
+                "selection_id": packet["selection"]["id"], "selection_source": packet["selection"]["source"],
+                "iteration": packet["iteration"], "phase": packet["phase"], "risk_scopes": packet["risk_scopes"],
+                "evidence_ref": args.evidence_ref,
+            }
+            descriptor = _configured_approval_entry_point(cwd, args.approval_verifier)
+            if descriptor is None:
+                _provider_gate("verifier-untrusted")
+            evidence = _run_approval_verifier(descriptor, request)
+            if not isinstance(evidence, dict) or evidence.get("schema") != "approval-evidence/1":
+                _provider_gate("approval-evidence-invalid")
+            if evidence.get("verifier_id") != args.approval_verifier:
+                _provider_gate("verifier-untrusted")
+            for key, value in request.items():
+                if key != "schema" and evidence.get(key) != value:
+                    _provider_gate("approval-evidence-binding-mismatch")
+            expires_at = evidence.get("expires_at")
+            nonce = evidence.get("single_use_nonce")
+            if not isinstance(expires_at, str) or not isinstance(nonce, str) or not re.fullmatch(r"[0-9A-Za-z_-]{32,128}", nonce):
+                _provider_gate("approval-evidence-invalid")
+            receipt = {
+                "schema": "mission-provider-approval-receipt/1",
+                **{key: request[key] for key in request if key not in {"schema", "risk_scopes", "evidence_ref"}},
+                "approved_scopes": request["risk_scopes"], "expires_at": expires_at,
+                "single_use_nonce": nonce, "approval_provenance": {
+                    "issuer_id": evidence.get("issuer_id"), "verifier_id": args.approval_verifier,
+                    "verifier_version": evidence.get("verifier_version"), "proof_kind": evidence.get("proof_kind"),
+                    "proof_digest": evidence.get("proof_digest"), "actor_kind": evidence.get("actor_kind"),
+                    "actor_id": evidence.get("actor_id"),
+                },
+            }
+            receipt_bytes = json.dumps(receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            receipt_dir = state_dir(cwd) / "private-receipts"; receipt_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            receipt_file = receipt_dir / f"{args.preflight_id}.json"; atomic_write_bytes(receipt_file, receipt_bytes)
+            pointer["receipt"] = {"artifact_path": str(receipt_file.resolve().relative_to(state_dir(cwd).resolve())),
+                                  "digest": "sha256:" + hashlib.sha256(receipt_bytes).hexdigest()}
+            pointer["status"] = "approved"
+            backup_state(sf); atomic_write_json(sf, stamp_metadata(data, cwd))
+        except (OSError, KeyError, ValueError, json.JSONDecodeError) as error:
+            # Exception type is bounded and contains no evidence values.
+            print(f"ERROR: provider approval verification failed: {type(error).__name__}", file=sys.stderr)
+            _provider_gate("approval-evidence-invalid")
+    print(json.dumps({"ok": True, "preflight_id": args.preflight_id, "status": "approved"}, ensure_ascii=False))
 
 
 def cmd_prepare_provider_invocation(args):
@@ -4958,7 +5061,7 @@ def cmd_invoke_command_provider(args):
 
     now = iso_now()
     entry = {
-        "invocation_id": new_invocation_id(),
+        "invocation_id": pointer["invocation_id"],
         "iteration": args.iteration,
         "phase": args.phase,
         "role": provider.get("role"),
@@ -5008,6 +5111,11 @@ def cmd_invoke_command_provider(args):
             iteration=args.iteration,
             evidence_planned=True,
         )
+        preflight_pointer = (dispatch_state.get("provider_preflights") or {}).get(args.preflight_id)
+        if not isinstance(preflight_pointer, dict) or preflight_pointer.get("status") != "approved":
+            _provider_gate("approval-required")
+        preflight_pointer["status"] = "consuming"
+        preflight_pointer["consuming_invocation_id"] = entry["invocation_id"]
         record_activity_event(dispatch_state, "specialist", now)
         dispatch_state["updated_at"] = now
         backup_state(sf)
@@ -5029,6 +5137,11 @@ def cmd_invoke_command_provider(args):
             invocation_id=entry["invocation_id"],
             cwd=cwd,
             registry_args=args,
+        )
+        # Re-snapshot payload inputs after the reservation lock acquisition;
+        # no byte validated before this point is eligible for subprocess stdin.
+        _, packet = _verified_preflight_packet(
+            cwd, dispatch_state, provider, args, consuming_invocation_id=entry["invocation_id"]
         )
         if provider.pop("_application_context_digest") != current_entry.get("application_context_digest"):
             rejected = {**current_entry, "status": "rejected", "lifecycle_state": "terminal",
@@ -5075,7 +5188,6 @@ def cmd_invoke_command_provider(args):
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
             env=command_env,
         )
     except OSError as exc:
@@ -5114,10 +5226,10 @@ def cmd_invoke_command_provider(args):
         except subprocess.TimeoutExpired:
             process.kill()
             raw_stdout, raw_stderr = process.communicate()
-            raw_stderr = (raw_stderr or "") + "\ncommand provider timed out"
+            raw_stderr = (raw_stderr or b"") + b"\ncommand provider timed out"
         exit_code = process.returncode
-        stdout = _redact_provider_output(raw_stdout or "")
-        stderr = _redact_provider_output(raw_stderr or "")
+        stdout = _redact_provider_output((raw_stdout or b"").decode("utf-8", errors="replace"))
+        stderr = _redact_provider_output((raw_stderr or b"").decode("utf-8", errors="replace"))
 
     if spawn_failed_reason:
         status, reason = "failed-before-start", stderr
@@ -5194,6 +5306,10 @@ def cmd_invoke_command_provider(args):
             if item.get("invocation_id") == entry["invocation_id"]:
                 data["specialist_invocations"][index] = entry
                 break
+        preflight_pointer = (data.get("provider_preflights") or {}).get(args.preflight_id)
+        if isinstance(preflight_pointer, dict) and preflight_pointer.get("status") == "consuming":
+            preflight_pointer["status"] = "consumed"
+            preflight_pointer["consumed_invocation_id"] = entry["invocation_id"]
         _validate_specialist_public_state(data)
         _append_command_outcome(data, outcome)
         archived_to = _commit_specialist_state_with_archive(
@@ -14700,6 +14816,15 @@ def _build_parser():
     p_prepare.add_argument("--selection-source", default=None, choices=sorted(SPECIALIST_SELECTION_SOURCES))
     p_prepare.add_argument("--json", action="store_true")
     p_prepare.set_defaults(func=cmd_prepare_provider_invocation, command_outcome_tracking=True)
+
+    p_verify_approval = spec_sub.add_parser(
+        "verify-approval", help="host-trusted verifierのevidenceからper-invocation receiptを生成する"
+    )
+    p_verify_approval.add_argument("--preflight-id", required=True)
+    p_verify_approval.add_argument("--evidence-ref", required=True)
+    p_verify_approval.add_argument("--approval-verifier", required=True)
+    p_verify_approval.add_argument("--json", action="store_true")
+    p_verify_approval.set_defaults(func=cmd_verify_provider_approval, command_outcome_tracking=True)
 
     p_reconcile = spec_sub.add_parser(
         "reconcile-invocation",

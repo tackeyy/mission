@@ -325,3 +325,64 @@ def test_hand_marked_approved_preflight_without_receipt_never_spawns(run_cli, tm
     assert "receipt-invalid" in result.stderr
     assert not marker.exists()
     assert state_path.read_bytes() == before
+
+
+def test_verify_approval_without_host_registered_verifier_keeps_preflight_awaiting(run_cli, tmp_path):
+    run_cli("init", "untrusted verifier", "--complexity", "Complex", cwd=tmp_path, check=True)
+    state_path = tmp_path / ".mission-state" / "sessions" / "test.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["provider_preflights"] = {"pf_0123456789abcdef0123456789abcdef": {"status": "awaiting-approval", "artifact_path": "missing", "outbound_packet_digest": _digest()}}
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    before = state_path.read_bytes()
+
+    result = run_cli("specialists", "verify-approval", "--preflight-id", "pf_0123456789abcdef0123456789abcdef", "--evidence-ref", _digest("e"), "--approval-verifier", "unknown-verifier", cwd=tmp_path)
+
+    assert result.returncode == 2
+    assert state_path.read_bytes() == before
+
+
+def test_host_verified_receipt_runs_exact_packet_once_and_rejects_replay(run_cli, tmp_path):
+    command_dir = tmp_path / "commands"; command_dir.mkdir()
+    marker, captured = tmp_path / "provider-ran", tmp_path / "captured-packet"
+    command = command_dir / "provider-command"
+    command.write_text("#!/bin/sh\ncat > \"$CAPTURED_PACKET\"\nprintf invoked > \"$PROVIDER_MARKER\"\n", encoding="utf-8"); command.chmod(0o700)
+    registry = tmp_path / "registry.json"
+    registry.write_text(json.dumps({"schema": "mission-specialist-registry/2", "specialists_v2": [{
+        "provider_id": "trusted-provider", "role": "planning-provider", "skill": "trusted-provider", "kind": "command",
+        "command": "provider-command", "args": [], "env": {}, "task_profiles": ["architecture"], "phases": ["planning"],
+        "activation": {"min_complexity": "Complex", "auto_select_if": ["complexity"]},
+    }]}), encoding="utf-8")
+    providers = tmp_path / "providers"; providers.mkdir()
+    verifier_source = providers / "fixture_provider.py"
+    verifier_source.write_text(
+        "from datetime import datetime,timezone\n"
+        "def verify(request):\n"
+        " return {**request,'schema':'approval-evidence/1','issuer_id':'host-event','verifier_id':'fixture-verifier','verifier_version':'1.0','actor_kind':'human','actor_id':'actor:opaque','proof_kind':'opaque-host-event','proof_digest':'sha256:'+'f'*64,'expires_at':'2099-01-01T00:00:00Z','single_use_nonce':'n'*32}\n",
+        encoding="utf-8")
+    dist = providers / "fixture_provider-1.0.dist-info"; dist.mkdir()
+    (dist / "METADATA").write_text("Name: fixture-provider\nVersion: 1.0\n", encoding="utf-8")
+    (dist / "entry_points.txt").write_text("[mission.approval_verifiers]\nfixture-entry = fixture_provider:verify\n", encoding="utf-8")
+    config = tmp_path / "host-config" / "mission"; config.mkdir(parents=True)
+    import hashlib
+    (config / "approval-verifiers.json").write_text(json.dumps({"schema": "mission-approval-verifier-registry/2", "verifiers": [{
+        "id": "fixture-verifier", "entry_point": "fixture-entry", "distribution": "fixture-provider", "version": "1.0",
+        "source_digest": "sha256:" + hashlib.sha256(verifier_source.read_bytes()).hexdigest(),
+    }]}), encoding="utf-8")
+    env = {"PATH": f"{command_dir}{os.pathsep}{os.environ.get('PATH', '')}", "PROVIDER_MARKER": str(marker),
+           "CAPTURED_PACKET": str(captured), "PYTHONPATH": str(providers), "XDG_CONFIG_HOME": str(tmp_path / "host-config")}
+    source = tmp_path / "input.txt"; source.write_text("brief", encoding="utf-8")
+    run_cli("init", "trusted receipt", "--complexity", "Complex", cwd=tmp_path, check=True, env_extra=env)
+    run_cli("specialists", "recommend", "--no-default-skill-roots", "--task", "Review architecture", "--registry", str(registry), "--complexity", "Complex", "--record-state", cwd=tmp_path, check=True, env_extra=env)
+    preflight = json.loads(run_cli("specialists", "prepare-invocation", "--provider", "trusted-provider", "--iteration", "1", "--phase", "planning", "--input-file", str(source), cwd=tmp_path, env_extra=env, check=True).stdout)
+    verified = run_cli("specialists", "verify-approval", "--preflight-id", preflight["preflight_id"], "--evidence-ref", _digest("e"), "--approval-verifier", "fixture-verifier", cwd=tmp_path, env_extra=env)
+    assert verified.returncode == 0, verified.stderr
+
+    invoked = run_cli("specialists", "invoke-command", "--provider", "trusted-provider", "--iteration", "1", "--phase", "planning", "--preflight-id", preflight["preflight_id"], "--input-file", str(source), cwd=tmp_path, env_extra=env)
+    assert invoked.returncode == 0, invoked.stderr
+    packet_path = tmp_path / ".mission-state" / "private-preflights" / f"{preflight['preflight_id']}.json"
+    assert marker.exists() and captured.read_bytes() == packet_path.read_bytes()
+    state_path = tmp_path / ".mission-state" / "sessions" / "test.json"; state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["provider_preflights"][preflight["preflight_id"]]["status"] == "consumed"
+    before = state_path.read_bytes(); marker.unlink()
+    replay = run_cli("specialists", "invoke-command", "--provider", "trusted-provider", "--iteration", "1", "--phase", "planning", "--preflight-id", preflight["preflight_id"], "--input-file", str(source), cwd=tmp_path, env_extra=env)
+    assert replay.returncode == 2 and "receipt-replayed" in replay.stderr and not marker.exists() and state_path.read_bytes() == before
