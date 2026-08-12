@@ -1,4 +1,5 @@
 import sys
+import importlib.util
 from pathlib import Path
 
 import pytest
@@ -129,3 +130,49 @@ def test_handoff_rejects_duplicate_and_dependency_before_lineage_record(run_cli,
     decisions = __import__("json").loads(state_file.read_text())["decisions"]
     assert {entry["step_id"] for entry in decisions} == {"s1", "s2"}
     assert all(entry["plan_source"] == "core" and entry["plan_generation"] == 1 for entry in decisions)
+
+
+def _provider_import_fixture(run_cli, tmp_path):
+    fixture_path = Path(__file__).with_name("test_plan_import.py")
+    spec = importlib.util.spec_from_file_location("issue398_plan_import_fixture", fixture_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None; spec.loader.exec_module(module)
+    registry, state_file, result, invocation, env = module._setup(run_cli, tmp_path)
+    state = __import__("json").loads(state_file.read_text())
+    state["planning_policy_version"] = 1
+    state["planning_strategy"] = "provider-primary"
+    state_file.write_text(__import__("json").dumps(state))
+    source = tmp_path / "provider-result.json"; source.write_text(__import__("json").dumps(result))
+    return registry, state_file, source, invocation, env
+
+
+def test_provider_import_promote_advance_and_handoff_preserves_identity(run_cli, tmp_path):
+    registry, state_file, source, invocation, env = _provider_import_fixture(run_cli, tmp_path)
+    assert run_cli("specialists", "plan-import", "--input", str(source), "--invocation-id", invocation, "--registry", str(registry), cwd=tmp_path, env_extra=env).returncode == 0
+    assert run_cli("planning", "promote-provider-plan", "--invocation-id", invocation, cwd=tmp_path, env_extra=env).returncode == 0
+    assert run_cli("advance", "--phase", "executing", cwd=tmp_path, env_extra=env).returncode == 0
+    state = __import__("json").loads(state_file.read_text())
+    assert state["canonical_plan"]["source_id"] == invocation
+    assert state["executor_handoff"]["plan_digest"] == state["canonical_plan"]["digest"]
+    assert state["executor_handoff"]["plan_generation"] == state["canonical_plan"]["generation"]
+
+
+def test_advance_publish_fault_rolls_back_phase_and_handoff(monkeypatch, run_cli, tmp_path):
+    run_cli("init", "atomic", "--complexity", "Complex", cwd=tmp_path, check=True)
+    state_file, _plan = _canonical_core_state(tmp_path)
+    before = state_file.read_bytes()
+    cli_path = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
+    spec = importlib.util.spec_from_file_location("issue398_advance_fault", cli_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None; spec.loader.exec_module(module)
+    original = module.atomic_write_json
+    def fail(path, data, **kwargs):
+        if path == state_file and data.get("executor_handoff"):
+            raise OSError("simulated advance publish failure")
+        return original(path, data, **kwargs)
+    monkeypatch.chdir(tmp_path); monkeypatch.setenv("MISSION_SESSION_ID", "test"); monkeypatch.setattr(module, "atomic_write_json", fail)
+    monkeypatch.setattr(sys, "argv", [str(cli_path), "advance", "--phase", "executing"])
+    with pytest.raises(SystemExit) as stopped:
+        module.main()
+    assert stopped.value.code == 1
+    assert state_file.read_bytes() == before
