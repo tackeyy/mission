@@ -21,8 +21,9 @@ def _read(tmp_path):
     return json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
 
 
-def test_advance_sets_phase_and_activity_atomically(run_cli, tmp_path):
+def test_advance_sets_phase_and_activity_atomically(run_cli, tmp_path, canonical_core_plan):
     run_cli("init", "advance test", "--complexity", "Standard", cwd=tmp_path, check=True)
+    canonical_core_plan(tmp_path)
     r = run_cli("advance", "--phase", "executing", "--activity", "active:implementation",
                 cwd=tmp_path)
     assert r.returncode == 0, f"stderr: {r.stderr}"
@@ -67,9 +68,10 @@ def test_advance_rejects_terminal_phase(run_cli, tmp_path):
         assert "mark-" in r.stderr
 
 
-def test_advance_normalizes_phase_alias_with_warning(run_cli, tmp_path):
+def test_advance_normalizes_phase_alias_with_warning(run_cli, tmp_path, canonical_core_plan):
     """#188 の別名正規化 (execution→executing) を advance でも適用する."""
     run_cli("init", "advance test", cwd=tmp_path, check=True)
+    canonical_core_plan(tmp_path)
     r = run_cli("advance", "--phase", "execution", "--activity", "active:implementation",
                 cwd=tmp_path)
     assert r.returncode == 0, f"stderr: {r.stderr}"
@@ -77,9 +79,10 @@ def test_advance_normalizes_phase_alias_with_warning(run_cli, tmp_path):
     assert "#188" in r.stderr or "executing" in r.stderr
 
 
-def test_advance_within_same_phase_switches_activity(run_cli, tmp_path):
+def test_advance_within_same_phase_switches_activity(run_cli, tmp_path, canonical_core_plan):
     """同一 phase 内での activity 切替にも使える (旧 segment を close して記録)."""
     run_cli("init", "advance test", cwd=tmp_path, check=True)
+    canonical_core_plan(tmp_path)
     run_cli("advance", "--phase", "executing", "--activity", "active:implementation",
             cwd=tmp_path, check=True)
     r = run_cli("advance", "--phase", "executing", "--activity",
@@ -93,9 +96,10 @@ def test_advance_within_same_phase_switches_activity(run_cli, tmp_path):
     assert segs[-1]["kind"] == "active"
 
 
-def test_advance_accrues_previous_phase_duration(run_cli, tmp_path):
+def test_advance_accrues_previous_phase_duration(run_cli, tmp_path, canonical_core_plan):
     """phase 遷移時に旧 phase の経過が phase_durations_sec へ加算される (set phase= と同等)."""
     run_cli("init", "advance test", cwd=tmp_path, check=True)
+    canonical_core_plan(tmp_path)
     run_cli("advance", "--phase", "planning", "--activity", "active:planning",
             cwd=tmp_path, check=True)
     run_cli("advance", "--phase", "executing", "--activity", "active:implementation",
@@ -122,11 +126,12 @@ def test_advance_from_halted_state_is_rejected_without_write(run_cli, tmp_path):
     assert s["halt_reason"] == "blocked"
 
 
-def test_advance_cross_phase_does_not_record_phantom_segment(run_cli, tmp_path):
+def test_advance_cross_phase_does_not_record_phantom_segment(run_cli, tmp_path, canonical_core_plan):
     """cross-phase advance で _transition_phase のキャリーフォワードが作る
     「旧 reason + 新 phase・0秒」の phantom segment を記録しない (レビュー指摘)。
     旧 segment は旧 phase・旧 reason のまま 1 件だけ閉じる."""
     run_cli("init", "advance test", cwd=tmp_path, check=True)
+    canonical_core_plan(tmp_path)
     run_cli("advance", "--phase", "planning", "--activity", "active:planning",
             cwd=tmp_path, check=True)
     run_cli("advance", "--phase", "executing", "--activity", "active:implementation",

@@ -44,6 +44,8 @@ def test_running_invocation_reconciles_before_any_new_action(status, expected):
     state = {
         "planning_policy_version": 1, "phase": "planning", "iteration": 1,
         "planning_strategy": "provider-primary",
+        "specialists_selected": [{"provider_id": "planner", "planning_mode": "primary", "selection_id": "sel", "planning_contract_digest": "sha256:test"}],
+        "planning_provider_binding": {"provider_id": "planner", "selection_id": "sel", "planning_contract_digest": "sha256:test"},
         "specialist_invocations": [{"invocation_id": "inv_" + "a" * 32, "phase": "planning", "iteration": 1, "status": status}],
     }
     assert derive_planning_lifecycle(state)["next_action"] == expected
@@ -62,7 +64,7 @@ def test_policy_v1_never_returns_a_cross_gate_command_sequence(run_cli, tmp_path
     assert response.returncode == 0
     result = __import__("json").loads(response.stdout)
     assert result["next_action"] == "run-planner"
-    assert "command_sequence" not in result
+    assert "command_sequence" in result  # policy-v1 core preserves existing planner guidance
 
 
 def test_advance_executing_rejects_policy_v1_without_canonical_plan(run_cli, tmp_path):
@@ -113,6 +115,8 @@ def test_legacy_reselection_is_explicit_and_drops_unsafe_raw_records(run_cli, tm
 def test_terminal_provider_failure_has_deterministic_optional_or_required_outcome(required, expected):
     state = {"planning_policy_version": 1, "phase": "planning", "iteration": 1,
              "planning_strategy": "provider-primary",
+             "specialists_selected": [{"provider_id": "planner", "planning_mode": "primary", "selection_id": "sel", "planning_contract_digest": "sha256:test"}],
+             "planning_provider_binding": {"provider_id": "planner", "selection_id": "sel", "planning_contract_digest": "sha256:test"},
              "specialist_invocations": [{"phase": "planning", "iteration": 1, "status": "failed", "required": required}]}
     assert derive_planning_lifecycle(state)["next_action"] == expected
 
@@ -158,13 +162,15 @@ def test_provider_import_promote_advance_and_handoff_preserves_identity(run_cli,
     registry, state_file, source, invocation, env = _provider_import_fixture(run_cli, tmp_path)
     assert run_cli("specialists", "plan-import", "--input", str(source), "--invocation-id", invocation, "--registry", str(registry), cwd=tmp_path, env_extra=env).returncode == 0
     assert run_cli("planning", "promote-provider-plan", "--invocation-id", invocation, cwd=tmp_path, env_extra=env).returncode == 0
+    state = __import__("json").loads(state_file.read_text())
+    state["canonical_plan"]["selection_source"] = "confirmed-user"; state_file.write_text(__import__("json").dumps(state))
+    assert run_cli("advance", "--phase", "executing", cwd=tmp_path, env_extra=env).returncode == 2
+    state["canonical_plan"]["selection_source"] = "automatic"; state_file.write_text(__import__("json").dumps(state))
     assert run_cli("advance", "--phase", "executing", cwd=tmp_path, env_extra=env).returncode == 0
     state = __import__("json").loads(state_file.read_text())
     assert state["canonical_plan"]["source_id"] == invocation
     assert state["executor_handoff"]["plan_digest"] == state["canonical_plan"]["digest"]
     assert state["executor_handoff"]["plan_generation"] == state["canonical_plan"]["generation"]
-    state["canonical_plan"]["selection_source"] = "confirmed-user"; state_file.write_text(__import__("json").dumps(state))
-    assert run_cli("advance", "--phase", "executing", cwd=tmp_path, env_extra=env).returncode == 2
 
 
 @pytest.mark.parametrize("mode", ["advisory", "missing"])

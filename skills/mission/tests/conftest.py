@@ -79,6 +79,25 @@ def canonical_review(scores, *, perspective="fixture", high_count=0):
         review["same_score_note"] = "axis-specific fixture review"
     return review
 
+
+@pytest.fixture
+def canonical_core_plan():
+    """Attach the policy-v1 canonical core-plan authority to an init fixture."""
+    def attach(root):
+        root = Path(root)
+        state_file = root / ".mission-state" / "sessions" / "test.json"
+        state = json.loads(state_file.read_text())
+        plan = root / ".mission-state" / "plans" / "canonical-core.json"
+        plan.parent.mkdir(exist_ok=True)
+        payload = {"schema": "mission-plan/1", "steps": [{"id": "s1", "depends_on": []}]}
+        raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        plan.write_bytes(raw)
+        binding = {"generation": 1, "source": "core", "source_id": "fixture-core", "selection_source": "automatic", "iteration": state["iteration"]}
+        state["canonical_plan"] = {"path": str(plan.relative_to(root)), "digest": "sha256:" + hashlib.sha256(raw).hexdigest(), **binding}
+        state["planning_source_records"] = {"core:fixture-core": binding}
+        state_file.write_text(json.dumps(state))
+    return attach
+
 # Claude Code/Codex のセッション識別 env。実運用では multi-session を自動有効化するが、
 # テストは legacy 既定で動かすため隔離する (明示テストは env_extra/monkeypatch で注入)。
 _SESSION_ENV_VARS = ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID")

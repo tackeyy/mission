@@ -7832,7 +7832,8 @@ def cmd_advance(args):
         with StateLock(lock_file(cwd)):
             data = json.loads(sf.read_text())
             _reject_active_provider_mutation(data, "advance")
-            if new_phase == "executing" and data.get("planning_policy_version") == 1:
+            if (new_phase == "executing" and data.get("phase") != "executing"
+                    and data.get("planning_policy_version") == 1):
                 plan = data.get("canonical_plan")
                 if not isinstance(plan, dict):
                     print("ERROR: policy v1 requires a canonical plan before executing", file=sys.stderr)
@@ -8190,7 +8191,7 @@ def _derive_next_action(data: dict) -> dict:
                     "summary": "running planning provider must be reconciled before any new planning action",
                     "command_hint": f"mission-state.py specialists reconcile-invocation --invocation-id {running['invocation_id']} --status <completed|failed|abandoned-unknown> --evidence <ref> --expected-fencing-epoch <epoch>",
                 }
-            if action:
+            if action and action != "run-planner":
                 hints = {
                     "prepare-planning-provider": "mission-state.py specialists prepare-invocation ...",
                     "await-planning-approval": "mission-state.py specialists verify-approval --preflight-id <id> --evidence-ref <ref> --approval-verifier <id>",
