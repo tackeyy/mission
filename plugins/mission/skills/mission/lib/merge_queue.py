@@ -319,6 +319,50 @@ def _current_session_id() -> str:
     )
 
 
+def _latest_score_history_entry(state: dict[str, Any]) -> dict[str, Any]:
+    history = state.get("score_history")
+    if not isinstance(history, list) or not history:
+        raise MergeQueueError(
+            "merge queue --from-state requires a non-empty score_history; use manual --head-sha/--base-sha fallback"
+        )
+    latest = history[-1]
+    if not isinstance(latest, dict):
+        raise MergeQueueError(
+            "merge queue --from-state requires the latest score_history entry to be an object; use manual --head-sha/--base-sha fallback"
+        )
+    return latest
+
+
+def _revision_scope_from_score_entry(entry: dict[str, Any]) -> dict[str, Any] | None:
+    direct = entry.get("revision_scope")
+    if isinstance(direct, dict):
+        return direct
+    provenance = entry.get("score_provenance")
+    if not isinstance(provenance, dict):
+        return None
+    review_ref = provenance.get("review_evidence_ref")
+    if isinstance(review_ref, dict):
+        revision_scope = review_ref.get("revision_scope")
+        if isinstance(revision_scope, dict):
+            return revision_scope
+    revision_scope = provenance.get("revision_scope")
+    if isinstance(revision_scope, dict):
+        return revision_scope
+    return None
+
+
+def derive_revision_scope_shas(state: dict[str, Any]) -> tuple[str, str]:
+    latest = _latest_score_history_entry(state)
+    revision_scope = _revision_scope_from_score_entry(latest)
+    if not isinstance(revision_scope, dict):
+        raise MergeQueueError(
+            "merge queue --from-state requires revision_scope on the latest score_history entry; use manual --head-sha/--base-sha fallback"
+        )
+    base_sha = _validate_sha(revision_scope.get("base_sha"), field="revision_scope.base_sha")
+    head_sha = _validate_sha(revision_scope.get("head_sha"), field="revision_scope.head_sha")
+    return base_sha, head_sha
+
+
 def _find_entry(queue: dict[str, Any], queue_id: str) -> dict[str, Any] | None:
     for entry in queue["entries"]:
         if entry["queue_id"] == queue_id:
