@@ -165,6 +165,7 @@ from review_learning import (  # noqa: E402
     LEARNING_BRIEF_SCHEMA,
     failure_ledger_counts,
     LearningContractError,
+    reduce_iteration_recovery,
     reduce_failure_ledger,
     summarize_learning_brief,
     WEAK_PHASES,
@@ -14755,6 +14756,7 @@ def _aggregate(
             "activity_timing": summarize_activity_states([]),
             "planning_provider_kpis": reduce_planning_provider_kpis([], population_kind="observed"),
             "failure_ledger_counts": failure_ledger_counts([]),
+            "iteration_recovery": reduce_iteration_recovery([]),
         }
     # _classify を 1 回だけ評価 (旧実装は pass/halt/incomplete で 3N 回呼んでいた)
     classes = [_classify(s) for s in states]
@@ -14881,6 +14883,7 @@ def _aggregate(
         "activity_timing": activity_timing,
         "planning_provider_kpis": reduce_planning_provider_kpis(states, population_kind="observed"),
         "failure_ledger_counts": failure_ledger_counts(states),
+        "iteration_recovery": reduce_iteration_recovery(states),
     }
 
 
