@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -14,13 +15,15 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 HELPER = REPO_ROOT / "scripts" / "ci_changed_scopes.js"
 NODE = shutil.which("node") or shutil.which("nodejs")
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "ci_changed_scopes"
-FAST_PATH_TARGETS = [
-    "skills/mission/tests/test_artifact_hygiene.py",
-    "skills/mission/tests/test_vendor_fingerprint.py",
-    "skills/mission/tests/test_plugins_in_sync.py",
-    "skills/mission/tests/test_actions_cost_guard.py",
-    "skills/mission/tests/test_doc_consistency.py",
-]
+def _fast_path_targets_from_helper() -> list[str]:
+    """単一ソース: JS 側の FAST_PATH_TARGETS 定義を正規表現で抽出する (#448 二重定義排除)。"""
+    text = HELPER.read_text(encoding="utf-8")
+    block = re.search(r"const FAST_PATH_TARGETS = \[(.*?)\]\.join", text, re.DOTALL)
+    assert block, "FAST_PATH_TARGETS definition not found in helper"
+    return re.findall(r'"([^"]+)"', block.group(1))
+
+
+FAST_PATH_TARGETS = _fast_path_targets_from_helper()
 
 
 def _classify(*, event_name: str, files) -> dict:
@@ -93,3 +96,15 @@ def test_empty_or_invalid_file_list_fails_safe_to_full_suite():
     assert result["docsOnly"] is False
     assert result["pythonTargets"] == "skills/mission"
     assert result["shell"] is True
+
+
+def test_fast_path_targets_exist_and_cover_repo_wide_guards():
+    assert "skills/mission/tests/test_codex_wrapper_sync.py" in FAST_PATH_TARGETS
+    for target in FAST_PATH_TARGETS:
+        assert (REPO_ROOT / target).exists(), target
+
+
+def test_code_file_under_docs_is_not_fast_pathed():
+    result = _classify(event_name="pull_request", files=["docs/design/helper.py"])
+    assert result["docsOnly"] is False
+    assert result["pythonTargets"] == "skills/mission"
