@@ -1,0 +1,169 @@
+"""Issue #421: pregate cache の CLI と init 連携の検査."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+
+def _cache_dir(root: Path) -> Path:
+    return root / ".mission-state" / "pregate"
+
+
+def _record_payload(
+    *,
+    issue_ref: str,
+    subject_digest: str,
+    evaluated_at: str = "2026-08-13T00:00:00Z",
+    ttl_hours: int = 72,
+    verdict: str = "accepted",
+    gate_id: str = "planning-check",
+    evidence_refs: list[dict] | None = None,
+    producer_session: str = "session-1",
+    payload: dict | None = None,
+) -> str:
+    return json.dumps(
+        {
+            "schema": "mission-pregate-evaluation/1",
+            "issue_ref": issue_ref,
+            "subject_digest": subject_digest,
+            "evaluated_at": evaluated_at,
+            "ttl_hours": ttl_hours,
+            "verdict": verdict,
+            "gate_id": gate_id,
+            "evidence_refs": evidence_refs if evidence_refs is not None else [{"kind": "path", "value": ".mission-state/archive/evidence.json"}],
+            "producer_session": producer_session,
+            "payload": payload if payload is not None else {"detail": "fixture"},
+        },
+        ensure_ascii=False,
+    )
+
+
+def _json(result):
+    return json.loads(result.stdout)
+
+
+def test_pregate_record_and_check_hit(state_dir, run_cli):
+    root = state_dir.parent
+    input_path = root / "pregate.json"
+    input_path.write_text(_record_payload(issue_ref="421", subject_digest="sha256:" + "1" * 64), encoding="utf-8")
+
+    recorded = _json(run_cli("pregate", "record", "--issue-ref", "421", "--input", str(input_path), cwd=root, check=True))
+    assert recorded["subject_digest"] == "sha256:" + "1" * 64
+    assert recorded["path"].startswith(str(_cache_dir(root)))
+
+    checked = _json(run_cli("pregate", "check", "--issue-ref", "421", "--subject-digest", "sha256:" + "1" * 64, cwd=root, check=True))
+    assert checked["status"] == "hit"
+    assert checked["record"]["issue_ref"] == "421"
+    assert checked["record"]["subject_digest"] == "sha256:" + "1" * 64
+
+
+def test_pregate_check_returns_miss_without_record(state_dir, run_cli):
+    root = state_dir.parent
+    checked = _json(run_cli("pregate", "check", "--issue-ref", "421", "--subject-digest", "sha256:" + "2" * 64, cwd=root, check=True))
+    assert checked == {"status": "miss"}
+
+
+def test_pregate_check_returns_stale_for_digest_mismatch(state_dir, run_cli):
+    root = state_dir.parent
+    input_path = root / "pregate.json"
+    input_path.write_text(_record_payload(issue_ref="421", subject_digest="sha256:" + "3" * 64), encoding="utf-8")
+    run_cli("pregate", "record", "--issue-ref", "421", "--input", str(input_path), cwd=root, check=True)
+
+    checked = _json(run_cli("pregate", "check", "--issue-ref", "421", "--subject-digest", "sha256:" + "4" * 64, cwd=root, check=True))
+    assert checked["status"] == "stale"
+
+
+def test_pregate_check_returns_stale_after_ttl_expires(state_dir, run_cli):
+    root = state_dir.parent
+    input_path = root / "pregate.json"
+    input_path.write_text(
+        _record_payload(
+            issue_ref="421",
+            subject_digest="sha256:" + "5" * 64,
+            evaluated_at="2026-08-13T00:00:00Z",
+            ttl_hours=1,
+        ),
+        encoding="utf-8",
+    )
+    run_cli("pregate", "record", "--issue-ref", "421", "--input", str(input_path), cwd=root, check=True)
+
+    checked = _json(
+        run_cli(
+            "pregate",
+            "check",
+            "--issue-ref",
+            "421",
+            "--subject-digest",
+            "sha256:" + "5" * 64,
+            cwd=root,
+            check=True,
+            env_extra={"MISSION_STATE_NOW": "2026-08-13T01:00:01Z"},
+        )
+    )
+    assert checked["status"] == "stale"
+
+
+def test_pregate_record_overwrites_same_issue_ref(state_dir, run_cli):
+    root = state_dir.parent
+    first = root / "first.json"
+    second = root / "second.json"
+    first.write_text(_record_payload(issue_ref="421", subject_digest="sha256:" + "6" * 64, gate_id="gate-a"), encoding="utf-8")
+    second.write_text(_record_payload(issue_ref="421", subject_digest="sha256:" + "7" * 64, gate_id="gate-b"), encoding="utf-8")
+
+    first_out = _json(run_cli("pregate", "record", "--issue-ref", "421", "--input", str(first), cwd=root, check=True))
+    second_out = _json(run_cli("pregate", "record", "--issue-ref", "421", "--input", str(second), cwd=root, check=True))
+
+    assert first_out["path"] == second_out["path"]
+    checked = _json(run_cli("pregate", "check", "--issue-ref", "421", "--subject-digest", "sha256:" + "7" * 64, cwd=root, check=True))
+    assert checked["record"]["gate_id"] == "gate-b"
+
+
+def test_pregate_check_ignores_corrupt_cache(state_dir, run_cli):
+    root = state_dir.parent
+    cache = _cache_dir(root)
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / "421.json").write_text("{broken", encoding="utf-8")
+
+    checked = _json(run_cli("pregate", "check", "--issue-ref", "421", "--subject-digest", "sha256:" + "8" * 64, cwd=root, check=True))
+    assert checked == {"status": "miss"}
+
+
+def test_init_records_fresh_pregate_reference(run_cli, tmp_path):
+    root = tmp_path
+    (root / ".mission-state").mkdir()
+    input_path = root / "pregate.json"
+    input_path.write_text(_record_payload(issue_ref="421", subject_digest="sha256:" + "9" * 64), encoding="utf-8")
+
+    run_cli("pregate", "record", "--issue-ref", "421", "--input", str(input_path), cwd=root, check=True)
+    run_cli("init", "issue 421 mission", "--complexity", "Standard", "--issue-ref", "421", cwd=root, check=True)
+
+    state = json.loads((root / ".mission-state" / "sessions" / "test.json").read_text())
+    assert state["issue_ref_key"] == "421"
+    assert state["pregate"] == {
+        "path": str(_cache_dir(root) / "421.json"),
+        "subject_digest": "sha256:" + "9" * 64,
+        "verdict": "accepted",
+        "gate_id": "planning-check",
+        "evaluated_at": "2026-08-13T00:00:00Z",
+    }
+
+
+def test_init_omits_pregate_reference_when_missing(run_cli, tmp_path):
+    root = tmp_path
+    run_cli("init", "issue 421 mission", "--complexity", "Standard", "--issue-ref", "421", cwd=root, check=True)
+
+    state = json.loads((root / ".mission-state" / "sessions" / "test.json").read_text())
+    assert "pregate" not in state
+
+
+def test_pregate_issue_ref_is_sanitized_for_path(state_dir, run_cli):
+    root = state_dir.parent
+    input_path = root / "sanitized.json"
+    input_path.write_text(_record_payload(issue_ref="../issue/421", subject_digest="sha256:" + "a" * 64), encoding="utf-8")
+
+    recorded = _json(run_cli("pregate", "record", "--issue-ref", "../issue/421", "--input", str(input_path), cwd=root, check=True))
+    path = Path(recorded["path"])
+    assert path.parent == _cache_dir(root)
+    assert path.name == "___issue_421.json"
+    assert path.exists()
