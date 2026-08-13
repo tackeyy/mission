@@ -162,9 +162,12 @@ from planning_lifecycle import (  # noqa: E402
 )
 from planning_provider_metrics import reduce_planning_provider_kpis  # noqa: E402
 from review_learning import (  # noqa: E402
+    LEARNING_BRIEF_SCHEMA,
     failure_ledger_counts,
     LearningContractError,
     reduce_failure_ledger,
+    summarize_learning_brief,
+    WEAK_PHASES,
     validate_review_learning,
 )
 from artifact_contract import (  # noqa: E402
@@ -14411,6 +14414,71 @@ def _collect_states(root: Path) -> list[dict]:
     return states
 
 
+def _discover_project_roots(root: Path) -> list[Path]:
+    """Return project roots that contain a .mission-state directory under root."""
+    discovered: list[Path] = []
+    seen: set[str] = set()
+    root = Path(root)
+    if root.name == ".mission-state":
+        candidate = root.parent
+        key = str(candidate)
+        if key not in seen:
+            seen.add(key)
+            discovered.append(candidate)
+        return discovered
+    for dirpath, dirnames, _filenames in os.walk(root, followlinks=False):
+        dirnames[:] = [d for d in dirnames if d not in _PRUNE_DIRS]
+        if os.path.basename(dirpath) != ".mission-state":
+            continue
+        dirnames[:] = []
+        candidate = Path(dirpath).parent
+        key = str(candidate)
+        if key not in seen:
+            seen.add(key)
+            discovered.append(candidate)
+    return discovered
+
+
+def _collect_learning_brief_states(roots: list[Path]) -> list[dict]:
+    """Collect readable session states plus archived terminal generations."""
+    states: list[dict] = []
+    project_roots: list[Path] = []
+    seen_projects: set[str] = set()
+    for root in roots:
+        if not root.exists():
+            continue
+        states.extend(_collect_states(root))
+        for project_root in _discover_project_roots(root):
+            key = str(project_root)
+            if key in seen_projects:
+                continue
+            seen_projects.add(key)
+            project_roots.append(project_root)
+    for project_root in sorted(project_roots, key=lambda path: str(path)):
+        state_root = project_root / ".mission-state"
+        try:
+            compaction = read_state_archive_compaction(state_root)
+        except ValueError:
+            continue
+        if compaction is None:
+            continue
+        for record in compaction.records:
+            canonical_path = record.get("canonical_path")
+            if not isinstance(canonical_path, str) or not canonical_path:
+                continue
+            try:
+                canonical_bytes = read_state_archive_file_bytes(project_root, canonical_path)
+                canonical_state = json.loads(canonical_bytes.decode("utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                continue
+            if not _is_mission_state_record(canonical_state):
+                continue
+            canonical_state["_mission_source_path"] = str(project_root / canonical_path)
+            states.append(canonical_state)
+    deduped, _duplicate_state_group_count = _dedupe_states(states)
+    return deduped
+
+
 def _is_mission_state_record(state: object) -> bool:
     if not isinstance(state, dict):
         return False
@@ -15000,6 +15068,33 @@ def cmd_stats(args):
         print(json.dumps(stats, indent=2, ensure_ascii=False))
     else:
         print(_format_text(stats, since, until))
+
+
+def cmd_learning_brief(args):
+    """Read-only failure-ledger learning brief across session and archive state roots."""
+    requested_roots = [Path(root) for root in args.root] if args.root else None
+    roots = requested_roots or _default_search_roots()
+    try:
+        states = _collect_learning_brief_states(roots)
+        brief = summarize_learning_brief(
+            states,
+            weak_phase=getattr(args, "weak_phase", None),
+            limit=getattr(args, "limit", 10),
+        )
+    except LearningContractError as exc:
+        print(f"ERROR: learning brief: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+    if args.json:
+        print(json.dumps(brief, indent=2, ensure_ascii=False))
+        return
+    lines = [
+        "recurrence={recurrence} sessions={sessions} weak_phase={weak_phase} general_fix_rule={general_fix_rule}".format(
+            **rule,
+        )
+        for rule in brief["rules"]
+    ]
+    if lines:
+        print("\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
@@ -15827,6 +15922,17 @@ def _build_parser():
     p_stats.add_argument("--json", action="store_true", help="JSON 形式で出力")
     p_stats.add_argument("--snapshot", default=None, help="audit --snapshot-out で明示作成したsnapshotを利用 (invalid時はfail closed)")
     p_stats.set_defaults(func=cmd_stats)
+
+    p_learning = sub.add_parser("learning", help="failure-ledger learning brief and related read-only helpers")
+    learning_sub = p_learning.add_subparsers(dest="learning_cmd", required=True)
+    p_brief = learning_sub.add_parser("brief", help="failure_ledger を横断集計して learning brief を出力")
+    p_brief.add_argument("--root", action="append", default=None,
+                         help="スキャン対象ルート。複数回指定可 (デフォルト: MISSION_SEARCH_ROOTS、未設定なら cwd)")
+    p_brief.add_argument("--weak-phase", default=None, choices=sorted(WEAK_PHASES),
+                         help="学習対象の weak_phase で絞り込む")
+    p_brief.add_argument("--limit", type=int, default=10, help="出力する rule の上限 (default: 10)")
+    p_brief.add_argument("--json", action="store_true", help="JSON 形式で出力")
+    p_brief.set_defaults(func=cmd_learning_brief)
 
     p_advance = sub.add_parser(
         "advance",

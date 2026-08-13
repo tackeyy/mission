@@ -14,6 +14,7 @@ sys.path.insert(0, str(LIB_DIR))
 
 from review_learning import (
     LearningContractError,
+    summarize_learning_brief,
     failure_ledger_counts,
     reduce_failure_ledger,
     validate_review_learning,
@@ -34,6 +35,29 @@ def _review(*, iteration=1, perspective="A", learning=True):
         payload["learning_schema"] = "mission-review-learning/1"
         finding.update(cause="The validation boundary was omitted", general_fix_rule="  Validate   every boundary  ", weak_phase="execution")
     return payload
+
+
+def _ledger(*observations):
+    return reduce_failure_ledger([
+        {
+            "iteration": iteration,
+            "review": review,
+            "review_aggregate_ref": {"kind": "review-aggregate", "digest": "sha256:" + digest},
+        }
+        for iteration, review, digest in observations
+    ])
+
+
+def _learning_review(*, iteration, perspective, phase, rule, cause):
+    review = _review(iteration=iteration, perspective=perspective, learning=False)
+    review["learning_schema"] = "mission-review-learning/1"
+    review["findings"] = [{
+        **review["findings"][0],
+        "cause": cause,
+        "general_fix_rule": rule,
+        "weak_phase": phase,
+    }]
+    return review
 
 
 def test_marker_requires_structured_learning_fields():
@@ -178,3 +202,160 @@ def test_generic_set_cannot_modify_failure_ledger(run_cli, tmp_path):
     assert result.returncode == 2
     assert "変更不可" in result.stderr
     assert state_path.read_bytes() == before
+
+
+def test_learning_brief_groups_rules_by_phase_and_orders_by_recurrence():
+    states = [
+        {
+            "session_id": "a",
+            "mission_id": "m1",
+            "project_root": "/tmp/project-a",
+            "failure_ledger": _ledger(
+                (1, _learning_review(
+                    iteration=1,
+                    perspective="A",
+                    phase="planning",
+                    rule="Validate every boundary",
+                    cause="The validation boundary was omitted",
+                ), "1" * 64),
+                (2, _learning_review(
+                    iteration=2,
+                    perspective="A",
+                    phase="planning",
+                    rule="Validate every boundary",
+                    cause="The validation boundary was omitted again",
+                ), "2" * 64),
+                (3, _learning_review(
+                    iteration=3,
+                    perspective="A",
+                    phase="planning",
+                    rule="Validate every boundary",
+                    cause="The validation boundary was omitted once more",
+                ), "3" * 64),
+                (1, _learning_review(
+                    iteration=1,
+                    perspective="A",
+                    phase="execution",
+                    rule="Keep the loop closed",
+                    cause="The loop was not closed",
+                ), "6" * 64),
+            ),
+        },
+        {
+            "session_id": "b",
+            "mission_id": "m2",
+            "project_root": "/tmp/project-b",
+            "failure_ledger": _ledger(
+                (1, _learning_review(
+                    iteration=1,
+                    perspective="B",
+                    phase="planning",
+                    rule="Validate every boundary",
+                    cause="The validation boundary was omitted",
+                ), "4" * 64),
+                (2, _learning_review(
+                    iteration=2,
+                    perspective="B",
+                    phase="planning",
+                    rule="Validate every boundary",
+                    cause="The validation boundary was omitted again",
+                ), "5" * 64),
+            ),
+        },
+    ]
+
+    brief = summarize_learning_brief(states, limit=10)
+
+    assert brief["schema"] == "mission-learning-brief/1"
+    assert brief["rules"] == [
+        {
+            "general_fix_rule": "validate every boundary",
+            "weak_phase": "planning",
+            "recurrence": 3,
+            "sessions": 2,
+        },
+        {
+            "general_fix_rule": "keep the loop closed",
+            "weak_phase": "execution",
+            "recurrence": 0,
+            "sessions": 1,
+        },
+    ]
+
+
+def test_learning_brief_filters_phase_and_applies_limit():
+    states = [
+        {
+            "session_id": "a",
+            "mission_id": "m1",
+            "project_root": "/tmp/project-a",
+            "failure_ledger": _ledger(
+                (1, _learning_review(
+                    iteration=1,
+                    perspective="A",
+                    phase="planning",
+                    rule="Validate every boundary",
+                    cause="The validation boundary was omitted",
+                ), "1" * 64),
+                (2, _learning_review(
+                    iteration=2,
+                    perspective="A",
+                    phase="planning",
+                    rule="Validate every boundary",
+                    cause="The validation boundary was omitted again",
+                ), "2" * 64),
+                (1, _learning_review(
+                    iteration=1,
+                    perspective="A",
+                    phase="execution",
+                    rule="Keep the loop closed",
+                    cause="The loop was not closed",
+                ), "3" * 64),
+                (2, _learning_review(
+                    iteration=2,
+                    perspective="A",
+                    phase="execution",
+                    rule="Keep the loop closed",
+                    cause="The loop was not closed",
+                ), "4" * 64),
+                (3, _learning_review(
+                    iteration=3,
+                    perspective="A",
+                    phase="execution",
+                    rule="Keep the loop closed",
+                    cause="The loop was not closed",
+                ), "5" * 64),
+                (1, _learning_review(
+                    iteration=1,
+                    perspective="A",
+                    phase="execution",
+                    rule="Stop on the first bad input",
+                    cause="The input was not stopped early",
+                ), "6" * 64),
+            ),
+        },
+    ]
+
+    brief = summarize_learning_brief(states, weak_phase="execution", limit=1)
+
+    assert brief["rules"] == [
+        {
+            "general_fix_rule": "keep the loop closed",
+            "weak_phase": "execution",
+            "recurrence": 2,
+            "sessions": 1,
+        }
+    ]
+
+
+def test_learning_brief_empty_ledger_returns_empty_rules():
+    brief = summarize_learning_brief([
+        {
+            "session_id": "a",
+            "mission_id": "m1",
+            "project_root": "/tmp/project-a",
+            "failure_ledger": {"schema": "mission-failure-ledger/1", "patterns": []},
+        }
+    ])
+
+    assert brief == {"schema": "mission-learning-brief/1", "rules": []}
