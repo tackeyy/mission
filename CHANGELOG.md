@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fixed core-plan adoption guidance so both inline and planner paths require `planning adopt-core` before execution; invalid iterations and non-planning phases now fail without mutating state, while valid pretty-printed JSON is normalized to the same canonical plan as compact JSON (#469).
+
 - Added `planning adopt-core` so policy-v1 core planning can validate and publish a canonical `mission-plan/1`, proceed through the existing execution gate, and receive matching `next` and failure guidance (#465).
 
 ## [2.4.0] - 2026-08-14

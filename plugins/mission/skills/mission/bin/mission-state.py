@@ -8615,6 +8615,11 @@ def _derive_next_action(data: dict) -> dict:
             and data.get("planning_strategy") in {None, "core"}
             and data.get("planning_provider_required") is not True
         )
+        adoption_hint = (
+            " → mission-state.py planning adopt-core --input <plan.json>"
+            if core_adoption_required
+            else ""
+        )
         # #339: Standard iteration 1 は planner subagent を省略し orchestrator inline 計画。
         # portfolio-v4 実測: 時間比 (6.9-14.5x) > トークン比 (4.0-4.7x) の差分はターン数
         # (mission 19-31 turns vs goal 5) — subagent spin-up 1 回の削減がそのまま効く。
@@ -8634,7 +8639,10 @@ def _derive_next_action(data: dict) -> dict:
             return {
                 "next_action": "plan-inline",
                 "summary": summary,
-                "command_hint": "plan を artifact に記載 → mission-state.py advance --phase executing --activity active:implementation",
+                "command_hint": (
+                    f"plan を artifact に記載{adoption_hint}"
+                    " → mission-state.py advance --phase executing --activity active:implementation"
+                ),
                 "details": {"plan_mode": "inline"},
                 "command_sequence": _happy_path_sequence(
                     "planning",
@@ -8646,7 +8654,10 @@ def _derive_next_action(data: dict) -> dict:
         return {
             "next_action": "run-planner",
             "summary": _planning_summary(f"iteration {iteration}: mission-planner を起動して計画を立てる (完了後 set phase=executing)"),
-            "command_hint": "Skill: mission-planner → mission-state.py advance --phase executing --activity active:implementation",
+            "command_hint": (
+                f"Skill: mission-planner{adoption_hint}"
+                " → mission-state.py advance --phase executing --activity active:implementation"
+            ),
             "command_sequence": _happy_path_sequence(
                 "planning",
                 effective_reviewer_count,
@@ -12010,8 +12021,6 @@ def cmd_planning_adopt_core(args):
     try:
         raw = _read_core_plan_input(Path(args.input))
         document = _validate_document(_strict_plan_load(raw), workspace=cwd)
-        if canonical_plan_bytes(document) != raw:
-            raise PlanContractError("plan-document-not-canonical")
     except PlanContractError as exc:
         _provider_gate(str(exc))
 
@@ -12025,6 +12034,8 @@ def cmd_planning_adopt_core(args):
             _provider_gate("planning-provider-required")
 
         iteration = data.get("iteration")
+        if type(iteration) is not int or iteration < 1:
+            _provider_gate("core-iteration-invalid")
         source_id = (
             f"core-{iteration}-{secrets.token_hex(6)}"
             if args.source_id is None
@@ -12055,7 +12066,6 @@ def cmd_planning_adopt_core(args):
                 "source": "core",
                 "source_id": source_id,
                 "iteration": iteration,
-                "raw_document_digest": source_digest,
             },
             "capability_verification": {
                 "selection_verified": False,

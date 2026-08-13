@@ -52,7 +52,8 @@ mission-state.py planning adopt-core --input <path> [--source-id <id>] [--json]
 2. `phase == "planning"`
 3. `planning_strategy` が `None` または `"core"`（**`provider-primary` は拒否**。required provider の迂回路を作らない）
 4. `planning_provider_required is not True`（provider 必須宣言があるセッションでは core 採用を許さない）
-5. `--input` が strict に読める regular file であり、`_validate_document` を通過する（reserved field injection ガードを含む）
+5. `iteration` が bool ではない 1 以上の int
+6. `--input` が strict に読める regular file であり、`_validate_document` を通過する（reserved field injection ガードを含む）。入力 bytes 自体の canonical JSON は要求せず、妥当な JSON は内部で正規化する
 
 ### 状態遷移
 
@@ -61,8 +62,7 @@ document = _validate_document(_strict_load(raw), workspace=cwd)
 candidate = {"schema": "mission-plan/1", **document, "mission_metadata": {
     "authority": {"owner": "mission", "may_write_state": False, "may_decide_review": False,
                   "may_decide_score": False, "may_decide_completion": False},
-    "provenance": {"source": "core", "source_id": source_id, "iteration": iteration,
-                   "raw_document_digest": digest},
+    "provenance": {"source": "core", "source_id": source_id, "iteration": iteration},
     "capability_verification": {"selection_verified": False, "class_exact_match": False,
                                 "variant_exact_match": False},
 }}
@@ -92,7 +92,7 @@ data["planning_source_records"][f"core:{source_id}"] = {k: plan[k] for k in
 - AC-1: core planning（strategy が `None` / `"core"`）のセッションで `planning adopt-core --input <valid document>` → `advance --phase executing` が成功し、`executor_handoff` が `plan_source: "core"` で生成される
 - AC-2: `planning_strategy == "provider-primary"` のセッションで `adopt-core` が拒否される（provider 経路の迂回不可）
 - AC-3: `planning_provider_required is True` のセッションで `adopt-core` が拒否される
-- AC-4: 不正な plan document（steps 空・依存循環・未知依存・reserved field 混入・非 canonical JSON）が拒否され、state が変更されない
+- AC-4: 不正な plan document（steps 空・依存循環・未知依存・reserved field 混入）が拒否され、state が変更されない。妥当な pretty-printed JSON は受理され、同一内容の compact JSON と同じ canonical plan digest になる
 - AC-5: `advance --phase executing` の失敗ガイダンスが、core planning では `planning adopt-core` を案内する（`planning reselect` / `plan-import` 単独の案内を残さない）
 - AC-6: `next` の `command_sequence` に `planning adopt-core` が含まれ、案内どおり実行して executing へ到達できる
 - AC-7: 既存テスト全緑（`make test`）。provider 経路のテストは無変更で通る
@@ -109,6 +109,10 @@ data["planning_source_records"][f"core:{source_id}"] = {k: plan[k] for k in
 6. 同一 iteration で 2 回 adopt-core すると generation が 1 → 2 へ上がり、canonical_plan が最新を指す
 7. adopt-core 直後の `next` が `run-executor` を返す
 8. 登録した plan ファイルを改竄すると advance が `canonical-plan-digest-drift` で失敗する（自己検証が効いている）
+9. Standard の plan-inline と Complex の run-planner の両方で `command_hint` / `command_sequence` が adopt-core を案内する
+10. iteration が None / 0 / -1 / True / "1" のとき state 不変で拒否する
+11. phase が planning 以外のとき `planning-policy-not-active` で state 不変のまま拒否する
+12. 同一内容の compact / pretty-printed JSON は raw source digest が異なっても同じ canonical plan digest へ正規化される
 
 ## 非機能・規約
 
