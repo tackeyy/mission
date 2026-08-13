@@ -645,6 +645,38 @@ def _default_search_roots() -> list[Path]:
     return [Path.cwd()]
 
 
+def _learning_brief_default_roots(cwd: Path) -> list[Path]:
+    """learning brief 専用の default root を返す。
+
+    worktree では main checkout root の .mission-state を読みたいので、
+    `git rev-parse --git-common-dir` の親を優先する。git 解決が失敗した場合や
+    non-git では、従来どおり cwd を使って fail-safe に落とす。
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return [cwd]
+    if result.returncode != 0:
+        return [cwd]
+    common_dir = result.stdout.strip()
+    if not common_dir:
+        return [cwd]
+    common_path = Path(common_dir)
+    if not common_path.is_absolute():
+        common_path = cwd / common_path
+    try:
+        checkout_root = common_path.resolve().parent
+    except OSError:
+        return [cwd]
+    # 非 worktree でも common-dir の親は checkout root になるので、そのまま使う。
+    return [checkout_root]
+
+
 def _project_root_of(sf: Path) -> Path:
     """Derive a project root from the state file's nearest valid structure."""
     if sf.parent.name == "sessions" and sf.parent.parent.name == ".mission-state":
@@ -15076,7 +15108,7 @@ def cmd_stats(args):
 def cmd_learning_brief(args):
     """Read-only failure-ledger learning brief across session and archive state roots."""
     requested_roots = [Path(root) for root in args.root] if args.root else None
-    roots = requested_roots or _default_search_roots()
+    roots = requested_roots or _learning_brief_default_roots(Path.cwd())
     try:
         states = _collect_learning_brief_states(roots)
         brief = summarize_learning_brief(
