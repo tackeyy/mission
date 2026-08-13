@@ -207,6 +207,7 @@ def _median(values: Sequence[float]) -> float | None:
 
 
 def reduce_iteration_recovery(states: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """対象は pass 終了の implementer のみ（halt は除外）。sessions_with_reject=0 のとき数値フィールドは null（float|None）。"""
     sessions_with_reject = 0
     deltas: list[float] = []
     iterations: list[float] = []
@@ -229,6 +230,7 @@ def reduce_iteration_recovery(states: Sequence[Mapping[str, Any]]) -> dict[str, 
         iterations.append(float(len(score_history)))
         first_open_high = first_entry.get("open_high")
         final_open_high = final_entry.get("open_high")
+        # open_high が両方ある run だけを分母に入れて、欠落 run を除外する。
         if (
             isinstance(first_open_high, int)
             and not isinstance(first_open_high, bool)

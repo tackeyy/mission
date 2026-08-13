@@ -428,6 +428,127 @@ def test_iteration_recovery_reducer_uses_terminal_implementer_runs_only():
     }
 
 
+def test_iteration_recovery_returns_null_metrics_for_empty_states():
+    assert reduce_iteration_recovery([]) == {
+        "sessions_with_reject": 0,
+        "first_to_final_composite_delta": {"mean": None, "median": None},
+        "avg_iterations": None,
+        "resolved_findings_ratio": None,
+    }
+
+
+def test_iteration_recovery_excludes_halt_runs_with_score_history():
+    states = [
+        {
+            "session_id": "kept-pass",
+            "session_role": "implementer",
+            "passes": True,
+            "loop_active": False,
+            "score_history": [
+                {"iteration": 1, "composite": 3.0, "open_high": 4},
+                {"iteration": 2, "composite": 4.0, "open_high": 1},
+            ],
+        },
+        {
+            "session_id": "ignored-halt",
+            "session_role": "implementer",
+            "passes": False,
+            "halt_reason": "blocked externally",
+            "loop_active": False,
+            "score_history": [
+                {"iteration": 1, "composite": 2.5, "open_high": 2},
+                {"iteration": 2, "composite": 3.0, "open_high": 0},
+            ],
+        },
+    ]
+
+    recovery = reduce_iteration_recovery(states)
+
+    assert recovery == {
+        "sessions_with_reject": 1,
+        "first_to_final_composite_delta": {
+            "mean": pytest.approx(1.0),
+            "median": pytest.approx(1.0),
+        },
+        "avg_iterations": pytest.approx(2.0),
+        "resolved_findings_ratio": pytest.approx(3 / 4),
+    }
+
+
+def test_iteration_recovery_uses_even_median_for_distinct_delta_pair():
+    states = [
+        {
+            "session_id": "delta-low",
+            "session_role": "implementer",
+            "passes": True,
+            "loop_active": False,
+            "score_history": [
+                {"iteration": 1, "composite": 2.5, "open_high": 2},
+                {"iteration": 2, "composite": 3.0, "open_high": 1},
+            ],
+        },
+        {
+            "session_id": "delta-high",
+            "session_role": "implementer",
+            "passes": True,
+            "loop_active": False,
+            "score_history": [
+                {"iteration": 1, "composite": 3.0, "open_high": 4},
+                {"iteration": 2, "composite": 4.5, "open_high": 0},
+            ],
+        },
+    ]
+
+    recovery = reduce_iteration_recovery(states)
+
+    assert recovery == {
+        "sessions_with_reject": 2,
+        "first_to_final_composite_delta": {
+            "mean": pytest.approx(1.0),
+            "median": pytest.approx(1.0),
+        },
+        "avg_iterations": pytest.approx(2.0),
+        "resolved_findings_ratio": pytest.approx(5 / 6),
+    }
+
+
+def test_iteration_recovery_excludes_runs_missing_open_high_from_ratio_denominator():
+    states = [
+        {
+            "session_id": "kept-valid",
+            "session_role": "implementer",
+            "passes": True,
+            "loop_active": False,
+            "score_history": [
+                {"iteration": 1, "composite": 3.0, "open_high": 4},
+                {"iteration": 2, "composite": 4.0, "open_high": 1},
+            ],
+        },
+        {
+            "session_id": "ignored-missing-open-high",
+            "session_role": "implementer",
+            "passes": True,
+            "loop_active": False,
+            "score_history": [
+                {"iteration": 1, "composite": 2.0},
+                {"iteration": 2, "composite": 2.5},
+            ],
+        },
+    ]
+
+    recovery = reduce_iteration_recovery(states)
+
+    assert recovery == {
+        "sessions_with_reject": 2,
+        "first_to_final_composite_delta": {
+            "mean": pytest.approx(0.75),
+            "median": pytest.approx(0.75),
+        },
+        "avg_iterations": pytest.approx(2.0),
+        "resolved_findings_ratio": pytest.approx(3 / 4),
+    }
+
+
 def test_stats_and_audit_iteration_recovery_match(run_cli, tmp_path):
     # Issue #275: stats --json と audit が同じ reducer を共有していることを固定する。
     run_cli("init", "iteration recovery", "--complexity", "Standard", cwd=tmp_path, check=True)
