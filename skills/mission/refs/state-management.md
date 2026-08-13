@@ -567,6 +567,22 @@ issue 起票 → worktree feature ブランチ → PR (本文に `Closes #N` を
 - Phase 7 のマージ前に PR 本文へ `Closes #N` が含まれることを確認し、欠けていれば `gh pr edit <PR番号> --body` で追記してからマージする。
 - これは reject しない補助規律 (issue 連携がないミッションには影響しない・後方互換)。
 
+## Merge queue
+
+並列 mission で同一 state root に複数 active implementer がいる場合、merge 順序を直列化する sidecar として `.mission-state/merge-queue.json` を使う。queue は state / lease / gate の意味論に触れず、順序と検証状態だけを管理する。
+
+- 登録: `queue enqueue --issue-ref <ref> --pr-ref <ref> --head-sha <sha> --base-sha <sha> [--depends-on <csv>] [--session <sid>]`
+- 次候補: `queue next --json`
+- 直前検証: `queue verify --queue-id <id> --current-base-sha <sha>`
+- 状態更新: `queue mark --queue-id <id> --status merged|invalidated|superseded [--reason <text>]`
+
+運用:
+
+- enqueue 後は `queue next` で自分の entry が返ることを確認し、merge 直前に live base sha で `queue verify` を通す。
+- `verify` が exit 2 なら、その entry は invalidated なので base 統合 → refreeze (`--head-sha` を更新して再 enqueue) → fresh review → 再登録の順でやり直す。
+- `depends_on` に列挙した issue_ref_key が `merged` になるまで、後続 entry は `queue next` に出ない。
+- 単独 mission は従来どおり queue を使わなくてよい。
+
 ## Phase 7 自動マージ — 詳細判定ロジック
 
 > SKILL.md 本体の「## Phase 7」から退避 (2026-06-10)。合格判定後に PR を自動マージしてよいか迷ったとき参照。

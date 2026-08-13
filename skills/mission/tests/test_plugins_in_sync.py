@@ -14,6 +14,7 @@
   skills/mission/lib/provider_preflight.py
   skills/mission/lib/specialist_lifecycle.py
   skills/mission/lib/pregate_cache.py
+  skills/mission/lib/merge_queue.py
   skills/mission/refs/specialist-registry.md (存在する場合)
   skills/mission/refs/self-improvement.md
   skills/mission/refs/changelog.md
@@ -61,6 +62,7 @@
   cp skills/mission/lib/provider_preflight.py plugins/mission/skills/mission/lib/provider_preflight.py
   cp skills/mission/lib/specialist_lifecycle.py plugins/mission/skills/mission/lib/specialist_lifecycle.py
   cp skills/mission/lib/pregate_cache.py plugins/mission/skills/mission/lib/pregate_cache.py
+  cp skills/mission/lib/merge_queue.py plugins/mission/skills/mission/lib/merge_queue.py
   cp skills/mission/refs/specialist-registry.md plugins/mission/skills/mission/refs/specialist-registry.md
   cp skills/mission/refs/self-improvement.md plugins/mission/skills/mission/refs/self-improvement.md
   cp skills/mission/refs/changelog.md plugins/mission/skills/mission/refs/changelog.md
@@ -144,6 +146,10 @@ SYNC_PAIRS = [
     (
         REPO_ROOT / "skills" / "mission" / "lib" / "pregate_cache.py",
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "pregate_cache.py",
+    ),
+    (
+        REPO_ROOT / "skills" / "mission" / "lib" / "merge_queue.py",
+        REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "merge_queue.py",
     ),
     (
         REPO_ROOT / "skills" / "mission" / "lib" / "planning_lifecycle.py",
