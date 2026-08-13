@@ -52,7 +52,7 @@ mission-state.py planning adopt-core --input <path> [--source-id <id>] [--json]
 2. `phase == "planning"`
 3. `planning_strategy` が `None` または `"core"`（**`provider-primary` は拒否**。required provider の迂回路を作らない）
 4. `planning_provider_required is not True`（provider 必須宣言があるセッションでは core 採用を許さない）
-5. `iteration` が bool ではない 1 以上の int
+5. `iteration` が bool ではない 0 以上の int（`init` は 0 を書き、`push-score` で初めて 1 以上になる。セッション最初の計画は 0 のまま採用される）
 6. `--input` が strict に読める regular file であり、`_validate_document` を通過する（reserved field injection ガードを含む）。入力 bytes 自体の canonical JSON は要求せず、妥当な JSON は内部で正規化する
 
 ### 状態遷移

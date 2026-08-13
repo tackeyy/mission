@@ -71,8 +71,9 @@ def _write_pretty_document(root, document=None, *, name="plan.json"):
 def _init_core(run_cli, root, *, complexity="Complex"):
     response = run_cli("init", "core planning", "--complexity", complexity, cwd=root)
     assert response.returncode == 0, response.stderr
+    # Keep whatever `init` writes.  Overriding `iteration` here previously let
+    # the suite pass against a state no real session ever reaches (#471).
     state = _read_state(root)
-    state["iteration"] = 1
     state["phase"] = "planning"
     state.pop("planning_strategy", None)
     state.pop("planning_provider_required", None)
@@ -118,7 +119,7 @@ def test_core_adoption_records_canonical_plan_and_exact_source_binding(run_cli, 
     assert plan["source_id"] == "core-fixture"
     assert plan["source_digest"] == "sha256:" + hashlib.sha256(source.read_bytes()).hexdigest()
     assert plan["selection_source"] == "core"
-    assert plan["iteration"] == 1
+    assert plan["iteration"] == state["iteration"]
     assert plan["generation"] == 1
     assert set(state["planning_source_records"]["core:core-fixture"]) == {
         "generation", "source", "source_id", "selection_source", "iteration"
@@ -209,7 +210,7 @@ def test_non_planning_phase_rejects_core_adoption_without_state_change(
     assert _state_file(tmp_path).read_bytes() == before
 
 
-@pytest.mark.parametrize("iteration", [None, 0, -1, True, "1"])
+@pytest.mark.parametrize("iteration", [None, -1, True, False, "1"])
 def test_invalid_core_iteration_is_rejected_without_state_change(
     run_cli, tmp_path, iteration
 ):
@@ -314,6 +315,33 @@ def test_next_guides_core_adoption_then_returns_executor_after_adoption(run_cli,
     assert after["next_action"] == "run-executor"
 
 
+def test_pristine_init_reaches_executing_through_documented_sequence(run_cli, tmp_path):
+    """A real `init` state must complete the sequence `next` prints, unedited.
+
+    Other tests normalize the session first, which hides whether the values
+    `init` actually writes satisfy the adoption gate.
+    """
+    assert run_cli("init", "core planning", "--complexity", "Standard", cwd=tmp_path).returncode == 0
+
+    guidance = json.loads(run_cli("next", cwd=tmp_path).stdout)
+    assert "planning adopt-core --input <plan.json>" in guidance["command_hint"]
+
+    adopted = _adopt(run_cli, tmp_path, _write_document(tmp_path))
+    assert adopted.returncode == 0, adopted.stderr
+
+    advanced = run_cli(
+        "advance", "--phase", "executing", "--activity", "active:implementation", cwd=tmp_path
+    )
+    assert advanced.returncode == 0, advanced.stderr
+    state = _read_state(tmp_path)
+    assert state["phase"] == "executing"
+    assert state["executor_handoff"]["plan_source"] == "core"
+    # Pin the value `init` actually writes so a future change to it fails here.
+    assert state["iteration"] == 0
+    assert state["canonical_plan"]["iteration"] == 0
+    assert state["executor_handoff"]["iteration"] == 0
+
+
 def test_tampered_core_plan_is_rejected_by_advance_digest_gate(run_cli, tmp_path):
     _init_core(run_cli, tmp_path)
     source = _write_document(tmp_path)
@@ -351,7 +379,7 @@ def test_invalid_existing_core_generation_fails_closed(run_cli, tmp_path, genera
             "source": "core",
             "source_id": "core-fixture",
             "selection_source": "core",
-            "iteration": 1,
+            "iteration": state["iteration"],
         }
     }
     _state_file(tmp_path).write_text(json.dumps(state), encoding="utf-8")
