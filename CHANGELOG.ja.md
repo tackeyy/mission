@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+- `planning adopt-core` が、`iteration` がまだ 0 の初期化直後のセッションでも最初の計画を採用できるよう修正しました。従来の検証は実際の `init` state をすべて拒否しており、core planning が実行フェーズへ到達できない状態でした (#471)。
+
 - core plan 採用時の inline / planner 両経路のガイダンスで、実行前の `planning adopt-core` を必須手順として案内するよう修正しました。不正な iteration と planning 以外の phase は state を変更せず拒否し、妥当な pretty-printed JSON は compact JSON と同一の canonical plan へ正規化します (#469)。
 
 - policy v1 の core planning が canonical `mission-plan/1` を検証・登録し、既存の execution gate を維持したまま先へ進める `planning adopt-core` と、対応する `next` / 失敗ガイダンスを追加しました (#465)。
