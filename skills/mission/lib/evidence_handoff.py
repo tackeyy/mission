@@ -8,6 +8,7 @@ import json
 import os
 import re
 import stat
+import sys
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -90,7 +91,7 @@ def payload_digest(payload: Any) -> str:
 
 def load_payload(source: str) -> Any:
     if source == "-":
-        raw = os.read(0, 1 << 30)
+        raw = sys.stdin.buffer.read()
     else:
         raw = Path(source).read_bytes()
     try:

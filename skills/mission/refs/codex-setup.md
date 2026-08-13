@@ -211,3 +211,4 @@ GitHub コメントのポーリングで待つ代わりに、implementer は `mi
 | 2026-07-03 | `codex-preflight` を追加し、state 未初期化 / Stop hook 未設定 / `next` fallback の診断手順を明文化 |
 | 2026-07-11 | #187: aggregate-reviews が回らない時のトラブルシュート節を追加。`next` の findings evidence 欠落検出と `codex-preflight` の `scoring_pipeline` フィールドを併記し、`--force` へ逃げない手順を明記 |
 | 2026-07-21 | #144: Codex開始時の `--strict` を必須化し、task setup / worktree / implementation 前のexit 0確認と、final前の`next` terminal gateを明記 |
+| 2026-08-13 | #422: checker ランデブー節を追加（GitHubコメントポーリングから handoff await へ) |

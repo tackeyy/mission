@@ -91,6 +91,16 @@ def test_publish_stdin_input(state_dir):
     assert output["payload_digest"] == _digest(payload)
 
 
+def test_publish_reads_complete_large_stdin_input(state_dir):
+    payload = {"content": "x" * (2 * 1024 * 1024)}
+
+    result = _publish(None, state_dir.parent, "issue-422-large-stdin", payload, stdin=True)
+
+    assert result.returncode == 0, result.stderr
+    output = json.loads(result.stdout)
+    assert output["payload_digest"] == _digest(payload)
+
+
 def test_await_returns_new_evidence_after_seq(run_cli, state_dir):
     topic = "issue-422-after-seq"
     first = _publish(run_cli, state_dir.parent, topic, {"seq": 1})
