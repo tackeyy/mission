@@ -168,6 +168,30 @@ def test_derive_review_tier_irreversible_japanese_keyword_escalates(kw):
     assert any("irreversible-keyword" in s for s in signals)
 
 
+def test_derive_review_tier_public_api_usage_does_not_escalate():
+    """公開API のコード語彙は公開操作ではないので standard のまま."""
+    mod = _get_module()
+    tier, signals = mod.derive_review_tier("公開API使用", "Standard")
+    assert tier == "standard"
+    assert signals == []
+
+
+def test_derive_review_tier_public_operation_still_escalates():
+    """本番へ公開する は操作文脈なので full に昇格する."""
+    mod = _get_module()
+    tier, signals = mod.derive_review_tier("本番へ公開する", "Standard")
+    assert tier == "full"
+    assert "irreversible-keyword:公開" in signals
+
+
+def test_derive_review_tier_public_api_then_public_operation_still_escalates():
+    """公開APIを公開する はコード語彙の公開を抑制しても、別の公開操作で full."""
+    mod = _get_module()
+    tier, signals = mod.derive_review_tier("公開APIを公開する", "Standard")
+    assert tier == "full"
+    assert "irreversible-keyword:公開" in signals
+
+
 # --- セキュリティ系英語キーワード ---
 
 @pytest.mark.parametrize("kw", [

@@ -1848,6 +1848,20 @@ _IRREVERSIBLE_KEYWORDS_EN = (
 # 不可逆系キーワード (日本語) — そのまま部分一致
 # Issue #174 で 505 mission 遡及分析に基づき較正: 単体「削除」を除外し複合語に置換 (可逆なコード変更への誤発火)
 _IRREVERSIBLE_KEYWORDS_JA = ("本番", "リリース", "マイグレーション", "データ削除", "レコード削除", "物理削除", "公開", "決済")
+_REVIEW_TECHNICAL_NOUN_SUFFIXES = (
+    "API",
+    "Api",
+    "api",
+    "関数",
+    "メソッド",
+    "クラス",
+    "インターフェース",
+    "プロパティ",
+    "属性",
+    "型",
+    "モジュール",
+    "フィールド",
+)
 # セキュリティ系キーワード (英語) — 小文字化して部分一致
 # Issue #174 で 505 mission 遡及分析に基づき較正:
 #   token → 複合語 (api token / api-token / api_key / access token / access-token / bearer) に置換
@@ -2062,6 +2076,12 @@ def _review_segment_span(
     return start, end
 
 
+def _review_has_technical_noun_suffix(mission_text: str, start: int, end: int) -> bool:
+    """Suppress public-operation keywords when they form a compound technical noun."""
+    suffix = mission_text[end:].lstrip()
+    return any(suffix.startswith(noun) for noun in _REVIEW_TECHNICAL_NOUN_SUFFIXES)
+
+
 def _review_quote_span_index(
     text: str,
     offset: int,
@@ -2213,6 +2233,10 @@ def _review_context_analysis(
                     keyword,
                     ignore_case=ignore_case,
                 )
+                if not (
+                    keyword == "公開"
+                    and _review_has_technical_noun_suffix(context, match.start(), match.end())
+                )
             }),
             "negated_operations": _review_regex_span_index(
                 context,
@@ -2336,6 +2360,8 @@ def _actual_operation_signal_detail(
     if keyword == "release" and _release_noun_reference(mission_text, start, end):
         # #313: 版名・文書名への substring マッチはエスカレート対象外 (監査 FP 36%)
         decision, reason = "suppressed", "noun-reference-non-operation"
+    elif keyword == "公開" and _review_has_technical_noun_suffix(mission_text, start, end):
+        decision, reason = "suppressed", "compound-technical-noun"
     elif quoted and quoted_execution_target:
         decision, reason = "included", "affirmative-actual-operation"
     elif quoted and quote_only and quote_only_unknown_residual:
