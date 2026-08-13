@@ -210,7 +210,7 @@ def test_non_planning_phase_rejects_core_adoption_without_state_change(
     assert _state_file(tmp_path).read_bytes() == before
 
 
-@pytest.mark.parametrize("iteration", [None, -1, True, "1"])
+@pytest.mark.parametrize("iteration", [None, -1, True, False, "1"])
 def test_invalid_core_iteration_is_rejected_without_state_change(
     run_cli, tmp_path, iteration
 ):
@@ -336,6 +336,10 @@ def test_pristine_init_reaches_executing_through_documented_sequence(run_cli, tm
     state = _read_state(tmp_path)
     assert state["phase"] == "executing"
     assert state["executor_handoff"]["plan_source"] == "core"
+    # Pin the value `init` actually writes so a future change to it fails here.
+    assert state["iteration"] == 0
+    assert state["canonical_plan"]["iteration"] == 0
+    assert state["executor_handoff"]["iteration"] == 0
 
 
 def test_tampered_core_plan_is_rejected_by_advance_digest_gate(run_cli, tmp_path):
@@ -375,7 +379,7 @@ def test_invalid_existing_core_generation_fails_closed(run_cli, tmp_path, genera
             "source": "core",
             "source_id": "core-fixture",
             "selection_source": "core",
-            "iteration": 1,
+            "iteration": state["iteration"],
         }
     }
     _state_file(tmp_path).write_text(json.dumps(state), encoding="utf-8")
