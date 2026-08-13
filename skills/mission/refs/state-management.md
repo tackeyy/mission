@@ -586,6 +586,8 @@ issue 起票 → worktree feature ブランチ → PR (本文に `Closes #N` を
 - `init --issue-ref <owner/repo#N>` で issue を state に記録する (S3 重複 WARN も兼ねる)。
 - PR 作成時、本文に `Closes #N` を必ず入れる (N は issue 番号)。これによりマージで issue が自動クローズされる。
 - Phase 7 のマージ前に PR 本文へ `Closes #N` が含まれることを確認し、欠けていれば `gh pr edit <PR番号> --body` で追記してからマージする。
+- 単独 mission の既定マージは `gh pr merge --auto --squash` とし、base が動いて auto-merge が発火しない場合は `gh api repos/{owner}/{repo}/pulls/{n}/update-branch` で機械的に base 統合して待つ。
+- 個人リポジトリでは GitHub Merge Queue を使わない。queue 相当の順序制御が必要なときは `.mission-state/merge-queue.json` と `update-branch` を使って直列化する。
 - これは reject しない補助規律 (issue 連携がないミッションには影響しない・後方互換)。
 
 ## Merge queue
