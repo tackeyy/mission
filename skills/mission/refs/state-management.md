@@ -185,6 +185,14 @@ command provider は `specialists prepare-invocation` で canonical outbound pac
 
 sidecar は session-id の hash 名、128 record cap、別 lock、atomic replace、regular/non-symlink/non-hardlink/no-follow read を必須とする。corrupt/unsafe sidecar は空扱いにせず fail-closed として `stats` / `mission-audit.py` の `command_outcome_counts.corrupt_sidecars` に計上する。count は kind 別に加え、`unique_root_events` と retry の件数、invalid record 数を返す。これは観測専用で、pass gate や KPI 判定を変更しない。
 
+### Pre-Gate evaluation cache (#421)
+
+`pregate` sidecar は `.mission-state/pregate/<issue_ref_key>.json` に置く。`issue_ref_key` は issue 参照を比較用に正規化したうえで、英数と `-_` 以外を `_` に置換した安全なファイル名にする。envelope schema は `mission-pregate-evaluation/1` で、`subject_digest`、`evaluated_at`、`ttl_hours`、`verdict`、`gate_id`、`evidence_refs`、`producer_session`、`payload` を持つ。
+
+`pregate record` は tmp+rename の atomic write で上書きし、`check` は `subject_digest` 不一致または TTL 超過を `stale`、未記録・破損 JSON・schema 不整合を `miss` として扱う。`check` は gate ではないため exit 0 を維持する。`verdict` はゲート本体の代替ではなく、planning 時に再評価を省略してよい根拠としてだけ使う。
+
+`init --issue-ref` は fresh な pregate record がある場合だけ state の `pregate` に `{path, subject_digest, verdict, gate_id, evaluated_at}` を記録する。digest は init 時点では未確定のため、init は存在参照に留め、後続の `pregate check` で subject_digest を照合する。pregate が無ければ既存の init 挙動を変えない。
+
 ### Structured provider plan import (#397)
 
 Planning provider の結果は、registry が明示する `result_contract` に一致する
