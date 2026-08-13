@@ -65,7 +65,14 @@ def build_guidance(command: str, reason: str, context: dict) -> list[str]:
         ]
     if command_name == "advance" and reason_code == "missing-canonical-plan":
         phase = context.get("phase") or "executing"
-        iteration = context.get("iteration")
+        if (
+            context.get("planning_strategy") in {None, "core"}
+            and context.get("planning_provider_required") is not True
+        ):
+            return [
+                f"HINT: policy v1 の {phase} では先に canonical plan を登録してから advance を呼んでください。",
+                "HINT: 正しい呼び出し例: mission-state.py planning adopt-core --input <plan.json>",
+            ]
         return [
             f"HINT: policy v1 の {phase} では先に canonical plan を登録してから advance を呼んでください。",
             (
@@ -130,4 +137,3 @@ def build_guidance(command: str, reason: str, context: dict) -> list[str]:
     return [
         f"HINT: mission-state.py {command_name} の失敗理由 {reason_code or '<unknown>'} を確認して再実行してください。",
     ]
-
