@@ -10226,10 +10226,13 @@ def _nested_command_failure_kind(stdout: str, error: SystemExit) -> str:
     return kind if kind in COMMAND_OUTCOME_KINDS else "invalid-input"
 
 
-def _emit_finalize_failure(args: argparse.Namespace, stdout: str, error: SystemExit) -> None:
+def _emit_finalize_failure(
+    args: argparse.Namespace, stdout: str, error: SystemExit, *, site: str = "aggregate"
+) -> None:
     kind = _nested_command_failure_kind(stdout, error)
     failure = _command_outcome(args, "review-finalize", kind)
-    guidance = None
+    guidance = getattr(error, "guidance", None) or None
+    guidance_printed_at_site = guidance is not None
     state_data = {}
     state_file = resolve_state_file(Path.cwd())
     if state_file.exists():
@@ -10245,16 +10248,16 @@ def _emit_finalize_failure(args: argparse.Namespace, stdout: str, error: SystemE
             if isinstance(ref, str)
         ],
     )
-    if not (getattr(args, "input", None) or getattr(args, "input_refs", None)):
-        guidance = build_guidance("review-finalize", "missing-input-ref", context)
-    elif isinstance(args.min_reviewers, int) and args.min_reviewers > 0:
-        guidance = build_guidance("review-finalize", "min-reviewers", context)
-    elif getattr(args, "resubmit_reason", None) is None:
-        guidance = build_guidance("review-finalize", "resubmit-reason-missing", context)
+    if guidance is None:
+        if site == "resubmit":
+            guidance = build_guidance("review-finalize", "resubmit-reason-missing", context)
+        elif not (getattr(args, "input", None) or getattr(args, "input_refs", None)):
+            guidance = build_guidance("review-finalize", "missing-input-ref", context)
     if guidance:
         failure["guidance"] = True
-        for line in guidance:
-            print(line, file=sys.stderr)
+        if not guidance_printed_at_site:
+            for line in guidance:
+                print(line, file=sys.stderr)
     _record_command_outcome_only(Path.cwd(), failure)
     args.command_outcome_emitted = True
     payload = {
@@ -12034,12 +12037,28 @@ def cmd_aggregate_reviews(args):
 
     min_reviewers = getattr(args, "min_reviewers", None)
     if min_reviewers is not None and len(reviews) < min_reviewers:
+        state_reviewer_count = None
+        try:
+            state_reviewer_count = json.loads(sf.read_text()).get("reviewer_count")
+        except (OSError, json.JSONDecodeError):
+            state_reviewer_count = None
+        shortage_guidance = build_guidance(
+            "review-finalize",
+            "min-reviewers",
+            {
+                "iteration": args.iteration,
+                "reviewer_count": state_reviewer_count,
+                "latest_review_input_ref": input_refs[0] if input_refs else None,
+            },
+        )
         print(
             f"ERROR: reviewer 数不足 (期待 {min_reviewers} 名, 実際 {len(reviews)} 名)。"
             " reviewer を追加してやり直してください。",
             file=sys.stderr,
         )
-        raise CommandOutcomeExit(2, "expected-gate")
+        for line in shortage_guidance:
+            print(line, file=sys.stderr)
+        raise CommandOutcomeExit(2, "expected-gate", guidance=shortage_guidance)
 
     scoring_reviews = [r for r in reviews if r.get("scores") is not None]
     if not scoring_reviews:
@@ -12636,7 +12655,7 @@ def cmd_review_finalize(args):
                     json.loads(sf.read_text()), args.iteration, args.resubmit_reason,
                 )
         except SystemExit as error:
-            _emit_finalize_failure(args, "", error)
+            _emit_finalize_failure(args, "", error, site="resubmit")
             raise error
     agg_args = argparse.Namespace(
         iteration=args.iteration,
@@ -12677,7 +12696,7 @@ def cmd_review_finalize(args):
         with contextlib.redirect_stdout(push_stdout):
             cmd_push_score(push_args)
     except SystemExit as error:
-        _emit_finalize_failure(args, push_stdout.getvalue(), error)
+        _emit_finalize_failure(args, push_stdout.getvalue(), error, site="push")
         raise error
     push_result = json.loads(push_stdout.getvalue())
 
