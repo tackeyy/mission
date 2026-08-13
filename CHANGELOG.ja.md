@@ -9,6 +9,14 @@
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-08-14
+
+- feat: `stats` と `audit` に `iteration_recovery` 集計を追加し、recovery 件数を #461 として要約できるようにしました。
+
+- fix: learning brief が worktree の main root に自動 fallback するようにし、明示上書き用の `--root` オプションを追加しました (#463)。
+
+- test: `iteration_recovery` 周辺の境界値テストと意図コメント / docstring を強化しました (#462)。
+
 ## [2.3.0] - 2026-08-13
 
 - review import/finalize、transition gate、command provider に bounded な command outcome telemetry を追加した。`ok` / `expected-gate` / `invalid-input` / `external` / `internal-error` を opaque な retry lineage とともに記録し、拒否 gate では state bytes を変更せず、`stats` と audit で root-event/retry/corrupt 件数を観測する (#386)。
@@ -415,6 +423,7 @@
 - 状態ルーティング・スコアゲート・hook 挙動をカバーする Python テストスイート。
 - GitHub Actions CI（`push` / `pull_request` / `workflow_dispatch`）。pytest と ShellCheck を実行。
 
+[2.4.0]: https://github.com/tackeyy/mission/releases/tag/v2.4.0
 [2.3.0]: https://github.com/tackeyy/mission/releases/tag/v2.3.0
 [2.0.0]: https://github.com/tackeyy/mission/releases/tag/v2.0.0
 [1.2.0]: https://github.com/tackeyy/mission/releases/tag/v1.2.0
