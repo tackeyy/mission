@@ -1,0 +1,5 @@
+成果物を作成しました。
+
+- `[benchmarks/mission-vs-goal/run-output/2026-08-13-slo-validation-mini-r2/docs-small-edit-goal_only.md](/tmp/<scratchpad>/slo-bench-run/docs-small-edit-goal_only/repo/benchmarks/mission-vs-goal/run-output/2026-08-13-slo-validation-mini-r2/docs-small-edit-goal_only.md)`
+
+内容は `Goal / Result / Evidence / Assumptions` の4見出しで、インストール前提の明示だけを記録しています。README 本体や他ファイルは触っていません。
