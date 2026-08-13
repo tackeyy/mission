@@ -18,6 +18,35 @@ def _queue_entries(run_cli, root: Path):
     return _json(run_cli("queue", "status", "--json", cwd=root, check=True))["entries"]
 
 
+def _write_score_history_revision_scope(state_dir: Path, *, base_sha: str, head_sha: str, include_scope: bool = True):
+    state_path = state_dir / "sessions" / "test.json"
+    state = json.loads(state_path.read_text())
+    entry = {
+        "iteration": 1,
+        "composite": 4.25,
+        "min_item": 4.0,
+        "open_high": 0,
+        "score_provenance": {
+            "score_source": "scoring-json",
+            "review_evidence_ref": {
+                "kind": "review-aggregate",
+                "path": ".mission-state/archive/review.json",
+                "digest": "sha256:" + "1" * 64,
+                "generation": "1" * 16,
+            },
+        },
+    }
+    if include_scope:
+        entry["score_provenance"]["review_evidence_ref"]["revision_scope"] = {
+            "kind": "git",
+            "base_sha": base_sha,
+            "head_sha": head_sha,
+        }
+        entry["score_provenance"]["revision_scope"] = entry["score_provenance"]["review_evidence_ref"]["revision_scope"]
+    state["score_history"] = [entry]
+    state_path.write_text(json.dumps(state))
+
+
 def test_queue_enqueue_next_verify_and_mark_merged_happy_path(state_dir, run_cli):
     root = state_dir.parent
 
@@ -76,6 +105,91 @@ def test_queue_enqueue_next_verify_and_mark_merged_happy_path(state_dir, run_cli
     )
     assert marked["status"] == "ok"
     assert marked["entry"]["status"] == "merged"
+
+
+def test_queue_enqueue_from_state_derives_sha_from_latest_score_history(state_dir, run_cli):
+    root = state_dir.parent
+    _write_score_history_revision_scope(
+        state_dir,
+        base_sha="2" * 40,
+        head_sha="1" * 40,
+    )
+
+    enqueued = _json(
+        run_cli(
+            "queue",
+            "enqueue",
+            "--issue-ref",
+            "434",
+            "--pr-ref",
+            "https://example.invalid/pr/434",
+            "--from-state",
+            cwd=root,
+            check=True,
+            env_extra={"MISSION_STATE_NOW": "2026-08-13T00:05:00Z"},
+        )
+    )
+
+    assert enqueued["status"] == "ok"
+    assert enqueued["entry"]["head_sha"] == "1" * 40
+    assert enqueued["entry"]["accepted_base_sha"] == "2" * 40
+
+
+def test_queue_enqueue_from_state_detects_manual_sha_mismatch_and_exits_two(state_dir, run_cli):
+    root = state_dir.parent
+    _write_score_history_revision_scope(
+        state_dir,
+        base_sha="2" * 40,
+        head_sha="1" * 40,
+    )
+
+    result = run_cli(
+        "queue",
+        "enqueue",
+        "--issue-ref",
+        "434",
+        "--pr-ref",
+        "https://example.invalid/pr/434",
+        "--from-state",
+        "--head-sha",
+        "3" * 40,
+        "--base-sha",
+        "4" * 40,
+        cwd=root,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "mismatch" in result.stderr
+    assert "HINT:" in result.stderr
+    assert "fallback" in result.stderr
+
+
+def test_queue_enqueue_from_state_fails_closed_when_revision_scope_is_missing(state_dir, run_cli):
+    root = state_dir.parent
+    _write_score_history_revision_scope(
+        state_dir,
+        base_sha="2" * 40,
+        head_sha="1" * 40,
+        include_scope=False,
+    )
+
+    result = run_cli(
+        "queue",
+        "enqueue",
+        "--issue-ref",
+        "434",
+        "--pr-ref",
+        "https://example.invalid/pr/434",
+        "--from-state",
+        cwd=root,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "revision_scope" in result.stderr
+    assert "HINT:" in result.stderr
+    assert "fallback" in result.stderr
 
 
 def test_queue_depends_on_blocks_next_until_dependency_is_merged(state_dir, run_cli):

@@ -222,6 +222,7 @@ from pregate_cache import (  # noqa: E402
 from merge_queue import (  # noqa: E402
     BaseMismatchError,
     MergeQueueError,
+    derive_revision_scope_shas as derive_queue_revision_scope_shas,
     enqueue as enqueue_merge_queue,
     mark as mark_merge_queue,
     next_candidate as next_merge_queue_candidate,
@@ -7090,6 +7091,35 @@ def cmd_pregate(args):
     raise AssertionError(f"unsupported pregate command: {args.pregate_cmd}")
 
 
+def _resolve_queue_enqueue_shas(cwd: Path, args) -> tuple[str, str]:
+    if not getattr(args, "from_state", False):
+        if args.head_sha is None or args.base_sha is None:
+            raise MergeQueueError("merge queue enqueue requires either --from-state or manual --head-sha/--base-sha")
+        return args.base_sha, args.head_sha
+
+    state_path = resolve_state_file(cwd)
+    if not state_path.exists():
+        raise MergeQueueError(
+            "merge queue --from-state requires a current session state file; use manual --head-sha/--base-sha fallback"
+        )
+    try:
+        state = json.loads(state_path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise MergeQueueError(
+            "merge queue --from-state requires a readable JSON session state; use manual --head-sha/--base-sha fallback"
+        ) from exc
+    derived_base_sha, derived_head_sha = derive_queue_revision_scope_shas(state)
+    if args.base_sha is not None and args.base_sha != derived_base_sha:
+        raise MergeQueueError(
+            "merge queue --from-state sha mismatch: --base-sha does not match the latest score_history revision_scope; use manual --head-sha/--base-sha fallback"
+        )
+    if args.head_sha is not None and args.head_sha != derived_head_sha:
+        raise MergeQueueError(
+            "merge queue --from-state sha mismatch: --head-sha does not match the latest score_history revision_scope; use manual --head-sha/--base-sha fallback"
+        )
+    return derived_base_sha, derived_head_sha
+
+
 def cmd_queue(args):
     cwd = Path.cwd()
     try:
@@ -7097,12 +7127,13 @@ def cmd_queue(args):
             depends_on = []
             if args.depends_on:
                 depends_on = [item for item in (part.strip() for part in args.depends_on.split(",")) if item]
+            base_sha, head_sha = _resolve_queue_enqueue_shas(cwd, args)
             result = enqueue_merge_queue(
                 cwd,
                 issue_ref=args.issue_ref,
                 pr_ref=args.pr_ref,
-                head_sha=args.head_sha,
-                base_sha=args.base_sha,
+                head_sha=head_sha,
+                base_sha=base_sha,
                 depends_on=depends_on,
                 session_id=args.session,
             )
@@ -7122,6 +7153,11 @@ def cmd_queue(args):
         sys.exit(2)
     except MergeQueueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
+        if "use manual --head-sha/--base-sha fallback" in str(exc):
+            print(
+                "HINT: 正しい呼び出し例: mission-state.py queue enqueue --issue-ref <ref> --pr-ref <ref> --head-sha <40hex> --base-sha <40hex>",
+                file=sys.stderr,
+            )
         sys.exit(2)
     print(json.dumps(result, indent=2 if getattr(args, "json", False) else None, ensure_ascii=False))
 
@@ -15355,8 +15391,9 @@ def _build_parser():
     p_queue_enqueue = p_queue_sub.add_parser("enqueue", help="enqueue one merge candidate")
     p_queue_enqueue.add_argument("--issue-ref", required=True)
     p_queue_enqueue.add_argument("--pr-ref", required=True)
-    p_queue_enqueue.add_argument("--head-sha", required=True)
-    p_queue_enqueue.add_argument("--base-sha", required=True)
+    p_queue_enqueue.add_argument("--head-sha", default=None)
+    p_queue_enqueue.add_argument("--base-sha", default=None)
+    p_queue_enqueue.add_argument("--from-state", action="store_true")
     p_queue_enqueue.add_argument("--depends-on", default=None)
     p_queue_enqueue.add_argument("--session", default=None)
     p_queue_enqueue.set_defaults(func=cmd_queue)

@@ -160,7 +160,7 @@ Stop hook が無効な環境でも、Phase 6 直後に `next` と state 再取�
 
 ## Phase 7
 
-Pass 後に PR がある場合だけ実行する。自動 merge 条件は、CI/テスト pass、明示 opt-in、`gh pr checks` 1 件以上、draft/CODEOWNERS/branch protection/禁止文言などの NG なし。自由記述の「merge してよい」は許可根拠にしない。並列 mission で同一 state root に複数 active implementer がいる場合は、merge 前に `queue enqueue` → `queue next` → `queue verify` → `queue mark --status merged` を通し、`verify` が exit 2 なら base 統合 → refreeze → fresh review → 再 enqueue でやり直す。詳細判定は `refs/state-management.md`。
+Pass 後に PR がある場合だけ実行する。自動 merge 条件は、CI/テスト pass、明示 opt-in、`gh pr checks` 1 件以上、draft/CODEOWNERS/branch protection/禁止文言などの NG なし。自由記述の「merge してよい」は許可根拠にしない。並列 mission で同一 state root に複数 active implementer がいる場合は、merge 前に `queue enqueue` (`--from-state` で state 由来の sha 自動導出も可) → `queue next` → `queue verify` → `queue mark --status merged` を通し、`verify` が exit 2 なら base 統合 → refreeze → fresh review → 再 enqueue でやり直す。詳細判定は `refs/state-management.md`。
 
 通常 PR merge は distribution release ではない。version bump を伴う distribution release は `docs/VERSIONING.md` と release checklist に従い、remote tag と GitHub Release を確認する。
 
