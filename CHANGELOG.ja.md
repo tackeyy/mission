@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-08-13
+
 - review import/finalize、transition gate、command provider に bounded な command outcome telemetry を追加した。`ok` / `expected-gate` / `invalid-input` / `external` / `internal-error` を opaque な retry lineage とともに記録し、拒否 gate では state bytes を変更せず、`stats` と audit で root-event/retry/corrupt 件数を観測する (#386)。
 
 - 採点項目を4軸に統一し、reviewer の合意度を独立して記録するようにしました。手動採点の取り込みには typed かつ content-addressed な専用経路を用意し、全スコアを bool ではない有限の範囲内数値、open High 件数を bool ではない 0 以上の整数として検証します。audit と stats で採点 provenance を確認できます (#383)。
@@ -19,6 +21,18 @@
 
 ### 追加
 
+- learning brief が failure_ledger の general_fix_rule を sessions と archive の terminal state から横断集計し、read-only の `learning brief` コマンドで再発回数降順の guidance を返すようになった。SKILL の規律で planner / executor brief へ注入し、reviewer の独立性は維持する (#457)。
+- planning-provider の KPI conformance、structured plan contract の validation/import、lifecycle handoff、provider preflight/application の hardening により、plan evidence・provider identity・invocation packet を fail-closed に保つようにしました (#417, #418, #415, #414, #413)。
+- host execution correlation、review-generation lineage、immutable audit snapshot、benchmark calibration、specialist checkpoint、review-import の structured outcome、resume 文書化をまとめて反映しました (#410, #409, #408, #407, #406, #405, #404)。
+- Pre-Gate 評価キャッシュで `pregate record/check` を記録し、`issue_ref` をキーに `subject_digest` の hit / miss / stale / fail-safe を追跡して、`init` の参照記録を安定化しました (#430)。
+- pregate digest コマンドと事前充填レシピで、次回チェック前に digest を先読みしてキャッシュを温めるようにしました (#437)。
+- accepted 以外の pregate verdict では `init` と `next` に警告を出し、続行前に不一致が見えるようにしました (#439)。
+- checker evidence handoff はローカルの `publish` / `await` / `verify` に切り替え、atomic write・digest 照合・timeout exit 3 で GitHub コメントポーリングを不要にしました (#427)。
+- 並列 mission 向け merge queue は `enqueue` / `status` / `next` / `verify` / `mark` を備え、base 移動時は invalidated にして refreeze を促すようにしました (#431)。
+- `queue enqueue --from-state` で `revision_scope` を自動突合し、後続 queue entry が元 state とずれないようにしました (#440)。
+- lane-report は `session_role` ごとの wall-clock / 実働 / 待ちを分けて SLO 判定し、`root_run_id` 単位で grouping して bench 回収と集計に渡すようにしました (#429, #441, #438)。
+- invalid-input と expected-gate 失敗には、正しい呼び出し例・`--json` guidance 配列・telemetry マーキングを含む自己修復 HINT を返すようにしました (#428)。
+- 小さめの release-window follow-up も traceability のためにここへ含めています: #432, #433, #434, #435, #436, #444, #446, #447, #448, #449, #450, #454。
 - リポジトリ管理の `make test-smoke` / `make test` / `make test-e2e` がCIと同じ入口を使い、必要な場合はpinned test環境を作成して exact tree SHA と test manifest を出力するようにした (#391)。
 - state archive compaction が canonical / superseded relation を immutable content-addressed generation へ記録し、physical lineage を削除せず維持するようにした。audit は既定で materialized canonical record のみを読み、`--forensic` で full lineage を再現する (#391)。
 - Stop hookのblock出力がunfinished session set・phase・leaseのdigestを記録し、変化時またはheartbeat TTL経過時だけ詳細を再表示するようにした。同一状態ではblocker categoryと次の1 commandだけへ圧縮し、fenced session本体を変更せずproject-localな`mission-stop-guard/1` stateへblock/reinjection/detail/heartbeat countersをatomic保存する (#389)。
@@ -32,8 +46,23 @@
 - bounded context の発火条件・fallback・review gate を変えず観測可能にした。`context-manifest` は iteration ごとの path・SHA-256 digest・生成時刻を session state へ記録し、`aggregate-reviews` は期待 context mode と manifest 生成有無を evidence archive へ保存、bounded 期待時の未生成を exit 0 の WARN にする。`stats --json` は期待・生成・full fallback 件数を集計し、bounded review の mission-reviewer は notes に `context: bounded` を明記する。aggregate / stats が manifest 観測を有効と数えるには、iteration が bool・float を除く正の整数で、生成時刻が timezone 付き ISO 形式であることを必須とする。embedded NUL 改ざんを含む不正・読取不能 path は未生成扱いにし、aggregate / stats を中断しない (#352)。
 - Simple task の adaptive routing に設定可能な goal dispatch provider を追加した (#355)。portable な `inline` を既定に保ち、mission 内の明示指示、`--goal-dispatch`、project `.mission/routing.yml`、user 設定から `host-native` を選べる。init / set / next verdict は実効 dispatch を記録し、host 不明・設定不正時は WARN して inline へ fail-safe する。routing gate と `--force-mission` の挙動は変更しない。
 
+### CI / Testing
+
+- `pytest-xdist` によってテストスイートを並列化し、今回の release 実行では実測 5.5 倍速になりました (#451)。
+- docs/results-only の PR は guard 限定 fast path に乗るようにし、merge 手順も更新内容を明文化しました (#453)。
+- Quality timeout を 25 分にし、pregate digest の未検証経路を公開 digest helper でテスト補強しました (#445)。
+- 2026-08-13 の SLO 実測結果を記録し、lane-report の bench 収集連携を維持しました (#443)。
+
+### Documentation
+
+- worktree 実行 mission の init 配置規律を `SKILL.md` 参照先として明文化しました (#455)。
+- auto-merge と `update-branch` の merge 運用を docs-only fast path の注意書きとあわせて整理しました (#453)。
+
 ### 修正
 
+- stop-guard の CWD 解決は hook input を優先するようにし、agent CLI 配下でのテスト誤失敗を解消しました (#442)。
+- `review_tier` の導出は「公開」などの複合技術名詞に誤発火しないように較正しました (#452)。
+- `archive-worktree` は repo-managed artifact にも対応し、repo-artifact reference、index 非依存検証、staged 診断、symlink 拒否を行うようにしました (#456)。
 - state に `artifact_path` がある場合、`aggregate-reviews` が WARN-only の構造 lint を実行するようにした。H1〜H3 の空節と英日 forward-reference のみの stub を検出し、reviewer finding・score・exit status は変更しない。結果は review aggregate evidence と state に記録し、`stats --json` が empty-section / stub-forward-reference / clean の件数を返す。embedded NUL 改ざんや非 regular file を含む path の resolve・relative 判定・read 失敗は `artifact_lint_status=skipped` として fail-open し、過去の lint 観測を削除して stale stats を防ぐ。成功した `clean` 観測とも区別する。空の ATX 見出し、閉じ hash 列、backtick を含む無効な backtick fence info は Markdown 構文に従って解釈する (#351)。
 - `aggregate-reviews` は reviewer が 2 名以上の場合、全 perspective の `--reviewer-window` 報告を必須化し、不足 perspective と報告書式を示して exit 2 とするようにした。`review-finalize` もこの fail-closed gate を継承し、集計失敗後に score を push しない。単一 reviewer は対象外のまま、報告済みの直列実行も従来どおり WARN のみ (#350)。
 - reviewer 出力境界を品質 gate にせず観測可能にした (#353)。`aggregate-reviews` は入力ごとの `mission-review/1` JSON byte 数とテンプレ外散文の byte 数・比率を計測し、evidence と session 横断 p50/p90 stats に記録する。暫定閾値 20 KB / 0.7 超過は exit 0 の WARN に留め、score・finding・agreement の集計結果は変更しない。
@@ -386,6 +415,7 @@
 - 状態ルーティング・スコアゲート・hook 挙動をカバーする Python テストスイート。
 - GitHub Actions CI（`push` / `pull_request` / `workflow_dispatch`）。pytest と ShellCheck を実行。
 
+[2.3.0]: https://github.com/tackeyy/mission/releases/tag/v2.3.0
 [2.0.0]: https://github.com/tackeyy/mission/releases/tag/v2.0.0
 [1.2.0]: https://github.com/tackeyy/mission/releases/tag/v1.2.0
 [1.1.1]: https://github.com/tackeyy/mission/releases/tag/v1.1.1
