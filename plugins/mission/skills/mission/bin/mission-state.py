@@ -217,6 +217,7 @@ from pregate_cache import (  # noqa: E402
     inspect as inspect_pregate_cache,
     lookup as lookup_pregate_cache,
     record as record_pregate_cache,
+    subject_digest as subject_digest_pregate_cache,
 )
 from merge_queue import (  # noqa: E402
     BaseMismatchError,
@@ -7052,6 +7053,15 @@ def cmd_pregate(args):
         try:
             evaluation = load_handoff_payload(args.input)
             result = record_pregate_cache(cwd, evaluation, issue_ref=args.issue_ref)
+        except (PregateCacheError, EvidenceHandoffError, OSError, ValueError) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(2)
+        print(json.dumps(result, ensure_ascii=False))
+        return
+    if args.pregate_cmd == "digest":
+        try:
+            payload = load_handoff_payload(args.input)
+            result = {"subject_digest": subject_digest_pregate_cache(payload)}
         except (PregateCacheError, EvidenceHandoffError, OSError, ValueError) as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             sys.exit(2)
@@ -15314,6 +15324,9 @@ def _build_parser():
     p_pregate_check.add_argument("--subject-digest", required=True)
     p_pregate_check.add_argument("--json", action="store_true")
     p_pregate_check.set_defaults(func=cmd_pregate)
+    p_pregate_digest = p_pregate_sub.add_parser("digest", help="compute a canonical pregate subject digest")
+    p_pregate_digest.add_argument("--input", required=True, help="snapshot JSON file path or - for stdin")
+    p_pregate_digest.set_defaults(func=cmd_pregate)
 
     p_queue = sub.add_parser("queue", help="merge queue sidecar")
     p_queue_sub = p_queue.add_subparsers(dest="queue_cmd", required=True)

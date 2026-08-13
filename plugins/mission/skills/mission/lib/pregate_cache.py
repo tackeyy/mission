@@ -109,7 +109,7 @@ def _canonical_bytes(payload: Any) -> bytes:
         raise PregateCacheError("pregate payload is not JSON serializable") from exc
 
 
-def _record_digest(payload: Any) -> str:
+def subject_digest(payload: Any) -> str:
     return "sha256:" + hashlib.sha256(_canonical_bytes(payload)).hexdigest()
 
 
