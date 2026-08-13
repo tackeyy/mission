@@ -23,8 +23,8 @@ def test_python_and_shell_quality_gates_remain():
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
     assert "$(VENV_PYTHON) -m pytest -q skills/mission" in makefile
     assert (
-        "shellcheck scripts/mission-stop-guard.sh scripts/sync-codex-plugin-wrapper.sh "
-        "scripts/mission-local-authoring-sync.sh"
+        "shellcheck scripts/mission-stop-guard.sh plugins/mission/scripts/mission-stop-guard.sh "
+        "scripts/sync-codex-plugin-wrapper.sh scripts/mission-local-authoring-sync.sh"
     ) in CI
     assert "apt-get" not in CI
     assert "cache: pip" in CI
