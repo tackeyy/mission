@@ -132,6 +132,10 @@ SYNC_PAIRS = [
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "provider_eligibility.py",
     ),
     (
+        REPO_ROOT / "skills" / "mission" / "lib" / "error_guidance.py",
+        REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "error_guidance.py",
+    ),
+    (
         REPO_ROOT / "skills" / "mission" / "lib" / "evidence_handoff.py",
         REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib" / "evidence_handoff.py",
     ),

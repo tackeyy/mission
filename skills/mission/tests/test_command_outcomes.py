@@ -88,6 +88,7 @@ def test_stats_and_audit_count_state_and_sidecar_command_outcomes(state_dir, run
     assert payload["outcome"] == {
         "event_id": "attempt-2", "root_event_id": "root-1", "attempt": 2,
         "retry_of": "attempt-1", "command": "review-import", "outcome_kind": "invalid-input",
+        "guidance": True,
     }
     stats = json.loads(run_cli("stats", "--root", str(state_dir.parent), "--json", cwd=state_dir.parent).stdout)
     assert stats["command_outcome_counts"] == {

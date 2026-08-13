@@ -107,7 +107,7 @@ def validate_record(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
     required = ("event_id", "root_event_id", "attempt", "command", "outcome_kind")
-    if set(value) - {*required, "retry_of"} or any(key not in value for key in required):
+    if set(value) - {*required, "retry_of", "guidance"} or any(key not in value for key in required):
         return None
     if not all(valid_identifier(value[key]) for key in ("event_id", "root_event_id")):
         return None
@@ -118,6 +118,8 @@ def validate_record(value: Any) -> dict[str, Any] | None:
     if value["outcome_kind"] not in KINDS:
         return None
     if "retry_of" in value and not valid_identifier(value["retry_of"]):
+        return None
+    if "guidance" in value and not isinstance(value["guidance"], bool):
         return None
     return dict(value)
 
