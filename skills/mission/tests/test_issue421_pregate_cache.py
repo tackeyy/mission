@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 
@@ -43,6 +44,11 @@ def _json(result):
     return json.loads(result.stdout)
 
 
+def _digest(payload):
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
 def test_pregate_record_and_check_hit(state_dir, run_cli):
     root = state_dir.parent
     input_path = root / "pregate.json"
@@ -56,6 +62,52 @@ def test_pregate_record_and_check_hit(state_dir, run_cli):
     assert checked["status"] == "hit"
     assert checked["record"]["issue_ref"] == "421"
     assert checked["record"]["subject_digest"] == "sha256:" + "1" * 64
+
+
+def test_pregate_digest_returns_canonical_subject_digest_for_file_input(state_dir, run_cli):
+    root = state_dir.parent
+    input_path = root / "pregate-digest.json"
+    payload = {"z": 1, "a": ["x", {"b": False}]}
+    input_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    digested = _json(run_cli("pregate", "digest", "--input", str(input_path), cwd=root, check=True))
+    assert digested == {"subject_digest": _digest(payload)}
+
+
+def test_pregate_digest_supports_stdin_and_seeds_record_check(state_dir, run_cli):
+    root = state_dir.parent
+    snapshot = {"body": "hello", "title": "issue 432"}
+    digest = _json(
+        run_cli(
+            "pregate",
+            "digest",
+            "--input",
+            "-",
+            cwd=root,
+            check=True,
+            input_text=json.dumps(snapshot, ensure_ascii=False),
+        )
+    )
+    assert digest == {"subject_digest": _digest(snapshot)}
+
+    evaluation = root / "pregate-evaluation.json"
+    evaluation.write_text(
+        _record_payload(issue_ref="432", subject_digest=digest["subject_digest"], payload=snapshot),
+        encoding="utf-8",
+    )
+    run_cli("pregate", "record", "--issue-ref", "432", "--input", str(evaluation), cwd=root, check=True)
+
+    checked = _json(run_cli("pregate", "check", "--issue-ref", "432", "--subject-digest", digest["subject_digest"], cwd=root, check=True))
+    assert checked["status"] == "hit"
+    assert checked["record"]["payload"] == snapshot
+
+
+def test_pregate_digest_rejects_invalid_json_input(state_dir, run_cli):
+    root = state_dir.parent
+    result = run_cli("pregate", "digest", "--input", "-", cwd=root, input_text="not-json")
+
+    assert result.returncode == 2
+    assert "ERROR:" in result.stderr
 
 
 def test_pregate_check_returns_miss_without_record(state_dir, run_cli):
