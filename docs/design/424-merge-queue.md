@@ -38,9 +38,9 @@
      }
      ```
 2. **`mission-state.py` にサブコマンド `queue` を追加**（登録とディスパッチの最小行）:
-   - `queue enqueue --issue-ref <ref> --pr-ref <ref> --head-sha <sha> --base-sha <sha> [--depends-on <csv>] [--session <sid>]`: 追加して queue_id を返す。同一 issue_ref_key の既存 queued/ready entry は `superseded` に落として置き換える
+   - `queue enqueue --issue-ref <ref> --pr-ref <ref> --head-sha <sha> --base-sha <sha> [--depends-on <csv>] [--session <sid>]`: 追加して queue_id を返す。同一 issue_ref_key の既存 queued/ready entry は `superseded` に落として置き換える。自己依存は exit 2。依存先が未 enqueue の場合は正当なケース（兄弟 mission の完走順は不定）として受理し、`unknown_depends_on` フィールドで可視化する（typo は `next` の `blocked_by: ["... (missing)"]` でも検出可能）
    - `queue status [--json]`: read-only。全 entry を enqueue 順で出力
-   - `queue next [--json]`: read-only。「depends_on の全 issue_ref_key が `merged` であり、かつ最も早く enqueue された queued entry」を1件返す（= 次に merge してよい候補）。候補なしは `{"status": "empty"}`（exit 0)
+   - `queue next [--json]`: read-only。「depends_on の全 issue_ref_key が `merged` であり、かつ最も早く enqueue された queued entry」を1件返す（= 次に merge してよい候補）。候補なしは `{"status": "empty"}`（exit 0）。依存未解決で出られない entry がある場合は `blocked: [{queue_id, issue_ref_key, blocked_by: ["<dep> (<status>|missing)"]}]` を併記し、サイレントデッドロックを防ぐ（依存先が invalidated の場合は依存なしで再 enqueue するか依存先を再登録する）
    - `queue verify --queue-id <id> --current-base-sha <sha>`: candidate の `accepted_base_sha == current-base-sha` なら exit 0。**不一致なら status を `invalidated` に更新して exit 2** + HINT（base 統合 → refreeze（--head-sha 更新で再 enqueue）→ fresh review の3手順を stderr に出力）
    - `queue mark --queue-id <id> --status merged|invalidated|superseded [--reason <text>]`: 状態遷移。`merged` への遷移は queued/ready からのみ許可（不正遷移は exit 2）
    - すべて lease 不要（session state の mutation ではない）。`.mission-state` 不在は exit 2

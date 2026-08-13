@@ -292,3 +292,54 @@ def test_queue_rejects_non_hex_sha_and_sanitizes_issue_ref(state_dir, run_cli):
         )
     )
     assert enqueued["entry"]["issue_ref_key"] == "___issue_424"
+
+
+def test_queue_verify_missing_entry_does_not_print_refreeze_hint(state_dir, run_cli):
+    root = state_dir.parent
+    result = run_cli("queue", "verify", "--queue-id", "0" * 16, "--current-base-sha", "a" * 40, cwd=root)
+    assert result.returncode == 2
+    assert "refreeze" not in result.stderr
+    assert "missing" in result.stderr
+
+
+def test_queue_next_reports_blocked_reasons(state_dir, run_cli):
+    root = state_dir.parent
+    dep = _json(run_cli("queue", "enqueue", "--issue-ref", "100", "--pr-ref", "pr-100", "--head-sha", "a" * 40, "--base-sha", "b" * 40, cwd=root, check=True))
+    run_cli("queue", "mark", "--queue-id", dep["queue_id"], "--status", "invalidated", "--reason", "base moved", cwd=root, check=True)
+    _json(run_cli("queue", "enqueue", "--issue-ref", "101", "--pr-ref", "pr-101", "--head-sha", "c" * 40, "--base-sha", "d" * 40, "--depends-on", "100", cwd=root, check=True))
+
+    result = _json(run_cli("queue", "next", "--json", cwd=root, check=True))
+    assert result["status"] == "empty"
+    assert result["blocked"][0]["issue_ref_key"] == "101"
+    assert result["blocked"][0]["blocked_by"] == ["100 (invalidated)"]
+
+
+def test_queue_enqueue_reports_unknown_depends_on(state_dir, run_cli):
+    root = state_dir.parent
+    result = _json(run_cli("queue", "enqueue", "--issue-ref", "200", "--pr-ref", "pr-200", "--head-sha", "a" * 40, "--base-sha", "b" * 40, "--depends-on", "9999", cwd=root, check=True))
+    assert result["unknown_depends_on"] == ["9999"]
+    nxt = _json(run_cli("queue", "next", "--json", cwd=root, check=True))
+    assert nxt["status"] == "empty"
+    assert nxt["blocked"][0]["blocked_by"] == ["9999 (missing)"]
+
+
+def test_queue_enqueue_rejects_self_dependency(state_dir, run_cli):
+    root = state_dir.parent
+    result = run_cli("queue", "enqueue", "--issue-ref", "300", "--pr-ref", "pr-300", "--head-sha", "a" * 40, "--base-sha", "b" * 40, "--depends-on", "300", cwd=root)
+    assert result.returncode == 2
+    assert "itself" in result.stderr
+
+
+def test_queue_concurrent_enqueue_keeps_all_entries(state_dir, run_cli):
+    from concurrent.futures import ThreadPoolExecutor
+
+    root = state_dir.parent
+
+    def _enqueue(n):
+        return run_cli("queue", "enqueue", "--issue-ref", str(400 + n), "--pr-ref", f"pr-{n}", "--head-sha", "a" * 40, "--base-sha", "b" * 40, cwd=root, check=True)
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        list(pool.map(_enqueue, range(6)))
+
+    entries = _json(run_cli("queue", "status", "--json", cwd=root, check=True))["entries"]
+    assert len(entries) == 6

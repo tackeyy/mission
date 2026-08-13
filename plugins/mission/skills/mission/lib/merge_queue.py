@@ -28,6 +28,10 @@ class MergeQueueError(ValueError):
     """Raised when a merge queue document or directory is invalid."""
 
 
+class BaseMismatchError(MergeQueueError):
+    """Raised when a candidate's accepted base no longer matches the live base."""
+
+
 def _canonical_issue_ref(value: Any) -> str | None:
     if value is None:
         return None
@@ -260,10 +264,10 @@ def _queue_digest(entry: dict[str, Any], now: datetime) -> str:
     return hashlib.sha256(canonical).hexdigest()[:16]
 
 
-def _write_queue(cwd: Path, queue: dict[str, Any]) -> Path:
+def _write_queue_unlocked(cwd: Path, queue: dict[str, Any]) -> Path:
+    """Atomic write of the queue document. Caller must hold the queue lock."""
     path = _queue_path(cwd)
     root = path.parent
-    lock_fd = _lock_file(root)
     temp_path: Path | None = None
     try:
         data = json.dumps(queue, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -282,6 +286,26 @@ def _write_queue(cwd: Path, queue: dict[str, Any]) -> Path:
             except FileNotFoundError:
                 pass
         raise
+
+
+def _locked_queue_update(cwd: Path, mutate):
+    """Run read → mutate → write as one critical section under the queue lock.
+
+    mutate(queue) は queue を更新して結果 dict を返す。書き込みを省略したい場合は
+    (result, False) のタプルを返す。
+    """
+    root = _ensure_mission_state_dir(cwd)
+    lock_fd = _lock_file(root)
+    try:
+        queue = _load_queue(cwd)
+        outcome = mutate(queue)
+        if isinstance(outcome, tuple):
+            result, should_write = outcome
+        else:
+            result, should_write = outcome, True
+        if should_write:
+            _write_queue_unlocked(cwd, queue)
+        return result
     finally:
         os.close(lock_fd)
 
@@ -317,6 +341,31 @@ def _candidate_entries(queue: dict[str, Any]) -> list[dict[str, Any]]:
     return candidates
 
 
+def _blocked_entries(queue: dict[str, Any]) -> list[dict[str, Any]]:
+    """依存未解決で next に出られない entry と、その理由を返す (I-1: silent deadlock 防止)."""
+    merged = _merged_issue_refs(queue)
+    status_by_ref: dict[str, str] = {}
+    for entry in queue["entries"]:
+        status_by_ref[entry["issue_ref_key"]] = entry["status"]
+    blocked = []
+    for entry in queue["entries"]:
+        if entry["status"] not in {"queued", "ready"}:
+            continue
+        reasons = []
+        for dep in entry["depends_on"]:
+            if dep in merged:
+                continue
+            dep_status = status_by_ref.get(dep, "missing")
+            reasons.append(f"{dep} ({dep_status})")
+        if reasons:
+            blocked.append({
+                "queue_id": entry["queue_id"],
+                "issue_ref_key": entry["issue_ref_key"],
+                "blocked_by": reasons,
+            })
+    return blocked
+
+
 def enqueue(
     cwd: Path,
     *,
@@ -329,7 +378,6 @@ def enqueue(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     now_utc = _queue_now(now)
-    queue = _load_queue(cwd)
     issue_ref_key = _issue_ref_key(issue_ref)
     pr_ref_text = str(pr_ref).strip()
     if not pr_ref_text:
@@ -348,18 +396,28 @@ def enqueue(
         "updated_at": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     new_entry["queue_id"] = _queue_digest(new_entry, now_utc)
-    retained: list[dict[str, Any]] = []
-    replaced = False
-    for entry in queue["entries"]:
-        if entry["issue_ref_key"] == issue_ref_key and entry["status"] in {"queued", "ready"}:
-            retained.append({**entry, "status": "superseded", "reason": "replaced by newer enqueue", "updated_at": new_entry["updated_at"]})
-            replaced = True
-            continue
-        retained.append(entry)
-    retained.append(new_entry)
-    written = {"schema": SCHEMA, "entries": retained}
-    _write_queue(cwd, written)
-    return {"status": "ok", "queue_id": new_entry["queue_id"], "entry": new_entry}
+    if issue_ref_key in new_entry["depends_on"]:
+        raise MergeQueueError("merge queue depends_on must not reference the entry itself")
+
+    def _mutate(queue: dict[str, Any]):
+        # 依存先が未 enqueue のケースは正当 (兄弟 mission の完走順は不定) なので拒否しない。
+        # typo 検出のため unknown_depends_on として可視化し、next の blocked_by でも missing 表示する。
+        known_refs = {entry["issue_ref_key"] for entry in queue["entries"]}
+        unknown_deps = [dep for dep in new_entry["depends_on"] if dep not in known_refs]
+        retained: list[dict[str, Any]] = []
+        for entry in queue["entries"]:
+            if entry["issue_ref_key"] == issue_ref_key and entry["status"] in {"queued", "ready"}:
+                retained.append({**entry, "status": "superseded", "reason": "replaced by newer enqueue", "updated_at": new_entry["updated_at"]})
+                continue
+            retained.append(entry)
+        retained.append(new_entry)
+        queue["entries"] = retained
+        result = {"status": "ok", "queue_id": new_entry["queue_id"], "entry": new_entry}
+        if unknown_deps:
+            result["unknown_depends_on"] = unknown_deps
+        return result
+
+    return _locked_queue_update(cwd, _mutate)
 
 
 def status(cwd: Path) -> dict[str, Any]:
@@ -371,44 +429,54 @@ def next_candidate(cwd: Path) -> dict[str, Any]:
     queue = _load_queue(cwd)
     candidates = _candidate_entries(queue)
     if not candidates:
-        return {"status": "empty"}
+        result: dict[str, Any] = {"status": "empty"}
+        blocked = _blocked_entries(queue)
+        if blocked:
+            result["blocked"] = blocked
+        return result
     return {"status": "ok", "entry": candidates[0]}
 
 
 def verify(cwd: Path, *, queue_id: str, current_base_sha: Any, now: datetime | None = None) -> dict[str, Any]:
-    queue = _load_queue(cwd)
-    entry = _find_entry(queue, queue_id)
-    if entry is None:
-        raise MergeQueueError("merge queue entry is missing")
-    if entry["status"] not in {"queued", "ready"}:
-        raise MergeQueueError("merge queue entry is not mergeable")
     current_base_sha_text = _validate_sha(current_base_sha, field="current_base_sha")
-    if entry["accepted_base_sha"] != current_base_sha_text:
-        entry["status"] = "invalidated"
-        entry["reason"] = "base changed; refreeze required"
-        entry["updated_at"] = _queue_now(now).strftime("%Y-%m-%dT%H:%M:%SZ")
-        _write_queue(cwd, queue)
-        raise MergeQueueError(
+
+    def _mutate(queue: dict[str, Any]):
+        entry = _find_entry(queue, queue_id)
+        if entry is None:
+            raise MergeQueueError("merge queue entry is missing")
+        if entry["status"] not in {"queued", "ready"}:
+            raise MergeQueueError("merge queue entry is not mergeable")
+        if entry["accepted_base_sha"] != current_base_sha_text:
+            entry["status"] = "invalidated"
+            entry["reason"] = "base changed; refreeze required"
+            entry["updated_at"] = _queue_now(now).strftime("%Y-%m-%dT%H:%M:%SZ")
+            return {"__base_mismatch__": True}
+        return ({"status": "ok", "queue_id": entry["queue_id"], "entry": entry}, False)
+
+    result = _locked_queue_update(cwd, _mutate)
+    if isinstance(result, dict) and result.get("__base_mismatch__"):
+        raise BaseMismatchError(
             "base changed; refreeze required: re-integrate base, refreeze with the new head sha, then request fresh review"
         )
-    return {"status": "ok", "queue_id": entry["queue_id"], "entry": entry}
+    return result
 
 
 def mark(cwd: Path, *, queue_id: str, status_value: str, reason: str | None = None, now: datetime | None = None) -> dict[str, Any]:
-    queue = _load_queue(cwd)
-    entry = _find_entry(queue, queue_id)
-    if entry is None:
-        raise MergeQueueError("merge queue entry is missing")
-    if entry["status"] in {"merged", "invalidated", "superseded"}:
-        raise MergeQueueError("merge queue entry is terminal")
-    if status_value not in {"merged", "invalidated", "superseded"}:
-        raise MergeQueueError("merge queue status is invalid")
-    if status_value == "merged" and entry["status"] not in {"queued", "ready"}:
-        raise MergeQueueError("merge queue entry is not mergeable")
-    if status_value == entry["status"]:
-        raise MergeQueueError("merge queue entry is already in that status")
-    entry["status"] = status_value
-    entry["reason"] = (reason or "").strip()
-    entry["updated_at"] = _queue_now(now).strftime("%Y-%m-%dT%H:%M:%SZ")
-    _write_queue(cwd, queue)
-    return {"status": "ok", "queue_id": entry["queue_id"], "entry": entry}
+    def _mutate(queue: dict[str, Any]):
+        entry = _find_entry(queue, queue_id)
+        if entry is None:
+            raise MergeQueueError("merge queue entry is missing")
+        if entry["status"] in {"merged", "invalidated", "superseded"}:
+            raise MergeQueueError("merge queue entry is terminal")
+        if status_value not in {"merged", "invalidated", "superseded"}:
+            raise MergeQueueError("merge queue status is invalid")
+        if status_value == "merged" and entry["status"] not in {"queued", "ready"}:
+            raise MergeQueueError("merge queue entry is not mergeable")
+        if status_value == entry["status"]:
+            raise MergeQueueError("merge queue entry is already in that status")
+        entry["status"] = status_value
+        entry["reason"] = (reason or "").strip()
+        entry["updated_at"] = _queue_now(now).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return {"status": "ok", "queue_id": entry["queue_id"], "entry": entry}
+
+    return _locked_queue_update(cwd, _mutate)

@@ -219,6 +219,7 @@ from pregate_cache import (  # noqa: E402
     record as record_pregate_cache,
 )
 from merge_queue import (  # noqa: E402
+    BaseMismatchError,
     MergeQueueError,
     enqueue as enqueue_merge_queue,
     mark as mark_merge_queue,
@@ -7093,12 +7094,12 @@ def cmd_queue(args):
             result = mark_merge_queue(cwd, queue_id=args.queue_id, status_value=args.status, reason=args.reason)
         else:
             raise AssertionError(f"unsupported queue command: {args.queue_cmd}")
+    except BaseMismatchError:
+        print("ERROR: base changed; refreeze required", file=sys.stderr)
+        print("HINT: base 統合 → refreeze（--head-sha を更新して再 enqueue）→ fresh review", file=sys.stderr)
+        sys.exit(2)
     except MergeQueueError as exc:
-        if args.queue_cmd == "verify":
-            print("ERROR: base changed; refreeze required", file=sys.stderr)
-            print("HINT: base 統合 → refreeze（--head-sha を更新して再 enqueue）→ fresh review", file=sys.stderr)
-        else:
-            print(f"ERROR: {exc}", file=sys.stderr)
+        print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
     print(json.dumps(result, indent=2 if getattr(args, "json", False) else None, ensure_ascii=False))
 
