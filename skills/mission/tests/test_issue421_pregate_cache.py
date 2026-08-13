@@ -116,8 +116,8 @@ def test_pregate_digest_succeeds_without_mission_state_dir(run_cli, tmp_path):
 
     assert not (root / ".mission-state").exists()
     # Issue #444: .mission-state 不在でも digest 計算のみは許可される設計要件 (#432) を固定
-    result = run_cli("pregate", "digest", "--input", str(input_path), cwd=root, check=True)
-    assert result.returncode == 0
+    result = run_cli("pregate", "digest", "--input", str(input_path), cwd=root)
+    assert result.returncode == 0, result.stderr
     assert _json(result) == {"subject_digest": compute_subject_digest(payload)}
 
 
