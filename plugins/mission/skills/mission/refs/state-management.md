@@ -193,6 +193,27 @@ sidecar は session-id の hash 名、128 record cap、別 lock、atomic replace
 
 `init --issue-ref` は fresh な pregate record がある場合だけ state の `pregate` に `{path, subject_digest, verdict, gate_id, evaluated_at}` を記録する。digest は init 時点では未確定のため、init は存在参照に留め、後続の `pregate check` で subject_digest を照合する。pregate が無ければ既存の init 挙動を変えない。
 
+### 事前充填レシピ
+
+起票時や定期実行で pregate キャッシュを先に埋める場合は、次の順で進める。
+
+1. ゲート対象スナップショットを 1 つ用意する。
+2. そのスナップショットの正規化 digest を計算する。
+3. 外部のゲート評価器で snapshot と digest を突き合わせ、`accepted` / `split-required` / `rejected` のいずれかを決める。
+4. 評価結果を `pregate record` に渡してキャッシュへ保存する。
+5. 後続の起票や再開では `pregate check` で digest と TTL を確認し、fresh なときだけ `init --issue-ref` が state へ参照を取り込む。
+
+擬似手順:
+
+```bash
+snapshot_digest = pregate digest --input <snapshot.json>
+evaluation = external gate evaluator(snapshot, snapshot_digest)
+pregate record --issue-ref <issue-ref> --input <evaluation.json>
+pregate check --issue-ref <issue-ref> --subject-digest "$snapshot_digest"
+```
+
+この手順はホスト名や実行基盤に依存しない。digest の計算と record/check の整合だけを正とし、評価器の配置や起動方法は各環境で差し替えてよい。
+
 ### Structured provider plan import (#397)
 
 Planning provider の結果は、registry が明示する `result_contract` に一致する

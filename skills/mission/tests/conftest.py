@@ -163,7 +163,7 @@ def run_cli(tmp_path):
     継承環境から除去し、env_extra による明示注入のみ許す。外部セッションの
     MISSION_* 汚染でテスト結果が変わる非決定性を遮断する。
     """
-    def _run(*args, cwd=None, check=False, env_extra=None):
+    def _run(*args, cwd=None, check=False, env_extra=None, input_text=None):
         # MISSION_* prefix 一括遮断 (将来 mission-state.py が新しい MISSION_* を読んでも自動でマスク)
         base_env = {k: v for k, v in os.environ.items()
                     if not k.startswith("MISSION_") and k not in _SESSION_ENV_VARS}
@@ -231,6 +231,7 @@ def run_cli(tmp_path):
         return subprocess.run(
             [sys.executable, str(MISSION_STATE_PY), *command_args],
             cwd=str(command_cwd),
+            input=input_text,
             capture_output=True,
             text=True,
             check=check,
