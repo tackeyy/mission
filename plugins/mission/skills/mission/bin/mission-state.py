@@ -6962,6 +6962,9 @@ def cmd_init(args):
                     ):
                         if key in existing_data:
                             initial[key] = existing_data[key]
+                    # resume 後も、より新しい pregate 評価があればそちらを優先する
+                    if _pregate is not None:
+                        initial["pregate"] = _pregate
                     if initial.get("loop_active") is not False and not initial.get("activity_current"):
                         start_phase_default_activity(initial, now)
             except ActivityTimingError as e:
@@ -7051,7 +7054,7 @@ def cmd_pregate(args):
         except Exception:
             result = {"status": "miss"}
         output = result if result.get("status") == "hit" else {"status": result.get("status", "miss")}
-        print(json.dumps(output, ensure_ascii=False))
+        print(json.dumps(output, indent=2 if getattr(args, "json", False) else None, ensure_ascii=False))
         return
     raise AssertionError(f"unsupported pregate command: {args.pregate_cmd}")
 

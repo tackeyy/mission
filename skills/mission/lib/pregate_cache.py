@@ -86,7 +86,11 @@ def _pregate_root(cwd: Path, *, create: bool) -> Path:
 def _lock_file(pregate_root: Path):
     lock_path = pregate_root / ".pregate.lock"
     fd = os.open(os.fspath(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
-    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except Exception:
+        os.close(fd)
+        raise
     return fd
 
 

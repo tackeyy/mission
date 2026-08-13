@@ -167,3 +167,22 @@ def test_pregate_issue_ref_is_sanitized_for_path(state_dir, run_cli):
     assert path.parent == _cache_dir(root)
     assert path.name == "___issue_421.json"
     assert path.exists()
+
+
+def test_resume_init_prefers_fresher_pregate_reference(run_cli, tmp_path):
+    root = tmp_path
+    (root / ".mission-state").mkdir()
+    old = root / "old.json"
+    old.write_text(_record_payload(issue_ref="421", subject_digest="sha256:" + "9" * 64, gate_id="gate-old"), encoding="utf-8")
+    run_cli("pregate", "record", "--issue-ref", "421", "--input", str(old), cwd=root, check=True)
+    run_cli("init", "issue 421 mission", "--complexity", "Standard", "--issue-ref", "421", cwd=root, check=True)
+
+    fresh = root / "fresh.json"
+    fresh.write_text(_record_payload(issue_ref="421", subject_digest="sha256:" + "b" * 64, gate_id="gate-fresh"), encoding="utf-8")
+    run_cli("pregate", "record", "--issue-ref", "421", "--input", str(fresh), cwd=root, check=True)
+    # 同一 mission の再 init (= resume boundary) で新しい評価が反映されること
+    run_cli("init", "issue 421 mission", "--complexity", "Standard", "--issue-ref", "421", cwd=root, check=True)
+
+    state = json.loads((root / ".mission-state" / "sessions" / "test.json").read_text())
+    assert state["pregate"]["gate_id"] == "gate-fresh"
+    assert state["pregate"]["subject_digest"] == "sha256:" + "b" * 64
