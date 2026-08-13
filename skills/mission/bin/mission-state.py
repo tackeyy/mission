@@ -1848,19 +1848,11 @@ _IRREVERSIBLE_KEYWORDS_EN = (
 # 不可逆系キーワード (日本語) — そのまま部分一致
 # Issue #174 で 505 mission 遡及分析に基づき較正: 単体「削除」を除外し複合語に置換 (可逆なコード変更への誤発火)
 _IRREVERSIBLE_KEYWORDS_JA = ("本番", "リリース", "マイグレーション", "データ削除", "レコード削除", "物理削除", "公開", "決済")
-_REVIEW_TECHNICAL_NOUN_SUFFIXES = (
-    "API",
-    "Api",
-    "api",
-    "関数",
-    "メソッド",
-    "クラス",
-    "インターフェース",
-    "プロパティ",
-    "属性",
-    "型",
-    "モジュール",
-    "フィールド",
+# 「公開」複合語抑制の技術名詞 (#450)。「クラス」は否定先読みで「クラスタ/クラスター」
+# (cluster = 不可逆な公開操作の対象になり得る) への誤マッチを除外する。
+_REVIEW_TECHNICAL_NOUN_SUFFIX_RE = re.compile(
+    r"(?:API|Api|api|関数|メソッド|クラス(?![ァ-ヶー])|インターフェース"
+    r"|プロパティ|属性|型|モジュール|フィールド)"
 )
 # セキュリティ系キーワード (英語) — 小文字化して部分一致
 # Issue #174 で 505 mission 遡及分析に基づき較正:
@@ -2079,7 +2071,7 @@ def _review_segment_span(
 def _review_has_technical_noun_suffix(mission_text: str, start: int, end: int) -> bool:
     """Suppress public-operation keywords when they form a compound technical noun."""
     suffix = mission_text[end:].lstrip()
-    return any(suffix.startswith(noun) for noun in _REVIEW_TECHNICAL_NOUN_SUFFIXES)
+    return bool(_REVIEW_TECHNICAL_NOUN_SUFFIX_RE.match(suffix))
 
 
 def _review_quote_span_index(

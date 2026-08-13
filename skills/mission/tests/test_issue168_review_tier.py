@@ -550,3 +550,18 @@ def test_derive_review_tier_calibrated_positive_cases(mission, expected_kw_fragm
         f"Expected signal containing {expected_kw_fragment!r} not found\n"
         f"  signals={signals!r}"
     )
+
+
+def test_public_cluster_deploy_is_not_suppressed(run_cli, tmp_path):
+    """#450 較正の安全側検証: 「公開クラスタ」は cluster であり技術名詞複合語ではない。"""
+    root = tmp_path
+    (root / ".mission-state").mkdir()
+    run_cli(
+        "init", "公開クラスタへ新サービスをデプロイする", "--complexity", "Standard", "--issue-ref", "900",
+        cwd=root, check=True,
+    )
+    state = json.loads((root / ".mission-state" / "sessions" / "test.json").read_text())
+    assert state["review_tier"] == "full"
+    assert any("公開" in s for s in state["review_tier_signals"]) or any(
+        "デプロイ" in s or "deploy" in s for s in state["review_tier_signals"]
+    )
