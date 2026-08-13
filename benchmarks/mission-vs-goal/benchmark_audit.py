@@ -308,3 +308,45 @@ def summarize_benchmark_kpi(records: list[dict]) -> dict:
         ),
         "measurement_observations": _measurement_observations(records),
     }
+
+
+def compare_lane_slo_baseline(observed: dict, baseline: dict) -> dict:
+    """Return a machine-readable diff against the lane SLO baseline."""
+    if not isinstance(observed, dict):
+        raise BenchmarkAuditInputError("observed lane SLO report must be an object")
+    if not isinstance(baseline, dict):
+        raise BenchmarkAuditInputError("baseline lane SLO report must be an object")
+
+    fields: dict[str, dict[str, float | int]] = {}
+    missing_fields: list[str] = []
+    extra_fields: list[str] = []
+    for key, expected in baseline.items():
+        if key in {"schema", "source"}:
+            continue
+        expected_value = _finite_number(expected)
+        if expected_value is None:
+            continue
+        actual_value = _finite_number(observed.get(key))
+        if actual_value is None:
+            missing_fields.append(key)
+            continue
+        normalized_expected = int(expected_value) if expected_value.is_integer() else expected_value
+        normalized_actual = int(actual_value) if actual_value.is_integer() else actual_value
+        fields[key] = {
+            "baseline": normalized_expected,
+            "observed": normalized_actual,
+            "delta": normalized_actual - normalized_expected,
+        }
+
+    for key, value in observed.items():
+        if key in {"schema", "source"} or key in fields:
+            continue
+        if _finite_number(value) is not None and key not in baseline:
+            extra_fields.append(key)
+
+    return {
+        "schema": "mission-lane-slo-baseline-diff/1",
+        "fields": dict(sorted(fields.items())),
+        "missing_fields": sorted(missing_fields),
+        "extra_fields": sorted(extra_fields),
+    }

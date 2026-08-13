@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 import subprocess
 import sys
 import time
+from statistics import median
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -157,6 +159,13 @@ def load_tasks(tasks_path: Path) -> list[dict]:
     return data["tasks"]
 
 
+def _finite_float(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return value if math.isfinite(value) else None
+
+
 def prepare_clone(source: Path, target: Path, starting_commit: str) -> None:
     if target.exists():
         shutil.rmtree(target)
@@ -167,6 +176,36 @@ def prepare_clone(source: Path, target: Path, starting_commit: str) -> None:
     checkout = run_command(["git", "checkout", "--detach", starting_commit], cwd=target, timeout=120)
     if checkout.returncode != 0:
         raise RuntimeError(f"git checkout failed: {checkout.stderr}")
+
+
+def run_lane_report(worktree: Path, artifact_dir: Path, slo_minutes: int = 15) -> tuple[dict, Path]:
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    command = [
+        sys.executable,
+        str(REPO_ROOT / "skills" / "mission" / "bin" / "mission-state.py"),
+        "lane-report",
+        "--json",
+        "--slo-minutes",
+        str(slo_minutes),
+    ]
+    result = subprocess.run(
+        command,
+        cwd=worktree,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=120,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"lane-report failed: {result.stderr}")
+    try:
+        report = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("lane-report produced invalid JSON") from exc
+    artifact_path = artifact_dir / "lane-report.json"
+    artifact_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return report, artifact_path
 
 
 def build_prompt(task: dict, arm: str, output_rel: str, session_id: str) -> str:
@@ -311,7 +350,60 @@ def copy_artifacts(worktree: Path, artifact_dir: Path, output_rel: str, last_mes
     return copied
 
 
-def run_one(task: dict, arm: str, run_id: str, starting_commit: str, run_root: Path, timeout: int, arm_order: int, model_id: str) -> dict:
+def summarize(
+    records: list[dict],
+    lane_reports: list[dict],
+    tasks: list[dict],
+    run_id: str,
+    starting_commit: str,
+    tasks_path: Path,
+    task_cohort: str = "baseline",
+) -> dict:
+    by_arm: dict[str, list[dict]] = {arm: [r for r in records if r["arm"] == arm] for arm in ARMS}
+    breached_records = 0
+    wall_clock_values: list[float] = []
+    for report in lane_reports:
+        if not isinstance(report, dict):
+            continue
+        sessions = report.get("sessions", [])
+        if not isinstance(sessions, list):
+            continue
+        for session in sessions:
+            if not isinstance(session, dict):
+                continue
+            if session.get("slo_breached") is True:
+                breached_records += 1
+            wall_clock = _finite_float(session.get("wall_clock_sec"))
+            if wall_clock is not None:
+                wall_clock_values.append(wall_clock)
+
+    return {
+        "run_id": run_id,
+        "task_file": str(tasks_path.relative_to(REPO_ROOT)),
+        "task_cohort": task_cohort,
+        "starting_commit": starting_commit,
+        "records": len(records),
+        "expected_records": len(tasks) * len(ARMS),
+        "arms": {
+            arm: {
+                "records": len(items),
+                "completion_rate": sum(1 for r in items if r["completion"]) / len(items) if items else None,
+                "validator_pass_rate": sum(1 for r in items if r["validator_pass"]) / len(items) if items else None,
+                "average_quality_score": round(sum(r["human_quality_score"] for r in items) / len(items), 2) if items else None,
+                "average_intervention_count": round(sum(r["intervention_count"] for r in items) / len(items), 2) if items else None,
+                "average_evidence_completeness": round(sum(r["evidence_completeness"] for r in items) / len(items), 2) if items else None,
+                "average_elapsed_minutes": round(sum(r["elapsed_minutes"] for r in items) / len(items), 2) if items else None,
+            }
+            for arm, items in by_arm.items()
+        },
+        "slo": {
+            "breached_records": breached_records,
+            "wall_clock_median_sec": median(wall_clock_values) if wall_clock_values else None,
+        },
+    }
+
+
+def run_one(task: dict, arm: str, run_id: str, starting_commit: str, run_root: Path, timeout: int, arm_order: int, model_id: str) -> tuple[dict, dict]:
     task_id = task["id"]
     run_name = f"{task_id}-{arm}"
     worktree = run_root / run_name / "repo"
@@ -351,7 +443,9 @@ def run_one(task: dict, arm: str, run_id: str, starting_commit: str, run_root: P
     elapsed = round((time.monotonic() - start_time) / 60, 2)
     completed = iso_now()
     evaluation = evaluate_run(worktree, task, arm, output_rel, session_id, proc.returncode)
+    lane_report, lane_report_path = run_lane_report(worktree, artifact_dir)
     artifacts = copy_artifacts(worktree, artifact_dir, output_rel, last_message, event_log)
+    artifacts.append(str(lane_report_path.relative_to(REPO_ROOT)))
     stderr_path = artifact_dir / "stderr.txt"
     stderr_path.write_text(proc.stderr, encoding="utf-8")
     artifacts.append(str(stderr_path.relative_to(REPO_ROOT)))
@@ -365,7 +459,7 @@ def run_one(task: dict, arm: str, run_id: str, starting_commit: str, run_root: P
     if proc.stderr.strip():
         notes.append("stderr captured in artifact")
 
-    return {
+    record = {
         "benchmark": "mission-vs-goal-pilot",
         "run_id": run_id,
         "task_id": task_id,
@@ -389,6 +483,7 @@ def run_one(task: dict, arm: str, run_id: str, starting_commit: str, run_root: P
         "artifacts": artifacts,
         "notes": "; ".join(notes),
     }
+    return record, lane_report
 
 
 def main() -> int:
@@ -429,33 +524,22 @@ def main() -> int:
         planned = planned[: args.limit]
 
     records = []
+    lane_reports = []
     for task, arm, arm_order in planned:
-        record = run_one(task, arm, args.run_id, args.starting_commit, Path(args.run_root), args.timeout, arm_order, args.model_id)
+        record, lane_report = run_one(task, arm, args.run_id, args.starting_commit, Path(args.run_root), args.timeout, arm_order, args.model_id)
         records.append(record)
+        lane_reports.append(lane_report)
         with result_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
-
-    by_arm: dict[str, list[dict]] = {arm: [r for r in records if r["arm"] == arm] for arm in ARMS}
-    summary = {
-        "run_id": args.run_id,
-        "task_file": str(tasks_path.relative_to(REPO_ROOT)),
-        "task_cohort": task_data.get("cohort", "baseline"),
-        "starting_commit": args.starting_commit,
-        "records": len(records),
-        "expected_records": len(tasks) * len(ARMS),
-        "arms": {
-            arm: {
-                "records": len(items),
-                "completion_rate": sum(1 for r in items if r["completion"]) / len(items) if items else None,
-                "validator_pass_rate": sum(1 for r in items if r["validator_pass"]) / len(items) if items else None,
-                "average_quality_score": round(sum(r["human_quality_score"] for r in items) / len(items), 2) if items else None,
-                "average_intervention_count": round(sum(r["intervention_count"] for r in items) / len(items), 2) if items else None,
-                "average_evidence_completeness": round(sum(r["evidence_completeness"] for r in items) / len(items), 2) if items else None,
-                "average_elapsed_minutes": round(sum(r["elapsed_minutes"] for r in items) / len(items), 2) if items else None,
-            }
-            for arm, items in by_arm.items()
-        },
-    }
+    summary = summarize(
+        records,
+        lane_reports,
+        tasks,
+        args.run_id,
+        args.starting_commit,
+        tasks_path,
+        task_cohort=task_data.get("cohort", "baseline"),
+    )
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
