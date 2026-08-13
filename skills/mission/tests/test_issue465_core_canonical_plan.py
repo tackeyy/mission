@@ -59,8 +59,17 @@ def _write_document(root, document=None, *, name="plan.json"):
     return path
 
 
-def _init_core(run_cli, root):
-    response = run_cli("init", "core planning", "--complexity", "Complex", cwd=root)
+def _write_pretty_document(root, document=None, *, name="plan.json"):
+    path = root / name
+    path.write_text(
+        json.dumps(document or _document(), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _init_core(run_cli, root, *, complexity="Complex"):
+    response = run_cli("init", "core planning", "--complexity", complexity, cwd=root)
     assert response.returncode == 0, response.stderr
     state = _read_state(root)
     state["iteration"] = 1
@@ -75,6 +84,25 @@ def _adopt(run_cli, root, source, *, source_id=None):
     if source_id is not None:
         args.extend(["--source-id", source_id])
     return run_cli(*args, cwd=root)
+
+
+@pytest.mark.parametrize(
+    ("complexity", "next_action"),
+    [("Standard", "plan-inline"), ("Complex", "run-planner")],
+)
+def test_next_hint_and_sequence_require_core_adoption_before_execution(
+    run_cli, tmp_path, complexity, next_action
+):
+    _init_core(run_cli, tmp_path, complexity=complexity)
+
+    guidance = json.loads(run_cli("next", cwd=tmp_path).stdout)
+
+    assert guidance["next_action"] == next_action
+    assert "planning adopt-core --input <plan.json>" in guidance["command_hint"]
+    assert any(
+        "planning adopt-core --input <plan.json>" in step
+        for step in guidance["command_sequence"]
+    )
 
 
 def test_core_adoption_records_canonical_plan_and_exact_source_binding(run_cli, tmp_path):
@@ -98,6 +126,30 @@ def test_core_adoption_records_canonical_plan_and_exact_source_binding(run_cli, 
     stored = tmp_path / plan["path"]
     assert stored.read_bytes() == _canonical_bytes(json.loads(stored.read_text(encoding="utf-8")))
     assert plan["digest"] == "sha256:" + hashlib.sha256(stored.read_bytes()).hexdigest()
+
+
+def test_core_adoption_normalizes_canonical_and_pretty_json_to_the_same_plan(
+    run_cli, tmp_path
+):
+    adopted = []
+    for name, writer in (("canonical", _write_document), ("pretty", _write_pretty_document)):
+        root = tmp_path / name
+        root.mkdir()
+        _init_core(run_cli, root)
+        source = writer(root)
+
+        response = _adopt(run_cli, root, source, source_id="core-fixture")
+
+        assert response.returncode == 0, response.stderr
+        plan = _read_state(root)["canonical_plan"]
+        stored = root / plan["path"]
+        assert stored.read_bytes() == _canonical_bytes(
+            json.loads(stored.read_text(encoding="utf-8"))
+        )
+        adopted.append(plan)
+
+    assert adopted[0]["digest"] == adopted[1]["digest"]
+    assert adopted[0]["source_digest"] != adopted[1]["source_digest"]
 
 
 def test_adopted_core_plan_advances_with_ordered_executor_handoff(run_cli, tmp_path):
@@ -141,6 +193,39 @@ def test_required_provider_rejects_core_adoption_without_state_change(run_cli, t
     assert _state_file(tmp_path).read_bytes() == before
 
 
+def test_non_planning_phase_rejects_core_adoption_without_state_change(
+    run_cli, tmp_path
+):
+    _init_core(run_cli, tmp_path)
+    state = _read_state(tmp_path)
+    state["phase"] = "executing"
+    _state_file(tmp_path).write_text(json.dumps(state), encoding="utf-8")
+    before = _state_file(tmp_path).read_bytes()
+
+    response = _adopt(run_cli, tmp_path, _write_document(tmp_path))
+
+    assert response.returncode != 0
+    assert "planning-policy-not-active" in response.stderr
+    assert _state_file(tmp_path).read_bytes() == before
+
+
+@pytest.mark.parametrize("iteration", [None, 0, -1, True, "1"])
+def test_invalid_core_iteration_is_rejected_without_state_change(
+    run_cli, tmp_path, iteration
+):
+    _init_core(run_cli, tmp_path)
+    state = _read_state(tmp_path)
+    state["iteration"] = iteration
+    _state_file(tmp_path).write_text(json.dumps(state), encoding="utf-8")
+    before = _state_file(tmp_path).read_bytes()
+
+    response = _adopt(run_cli, tmp_path, _write_document(tmp_path))
+
+    assert response.returncode != 0
+    assert "core-iteration-invalid" in response.stderr
+    assert _state_file(tmp_path).read_bytes() == before
+
+
 def _invalid_document(case):
     document = _document()
     if case == "empty-steps":
@@ -165,7 +250,6 @@ def _invalid_document(case):
         "unknown-dependency",
         "reserved-field",
         "schema-mismatch",
-        "non-canonical",
         "invalid-utf8",
         "oversize",
     ],
@@ -177,8 +261,6 @@ def test_invalid_core_documents_fail_closed_without_state_change(run_cli, tmp_pa
         source.write_bytes(b"\xff")
     elif case == "oversize":
         source.write_bytes(b"{" + b" " * (4 * 1024 * 1024) + b"}")
-    elif case == "non-canonical":
-        source.write_text(json.dumps(_document(), indent=2), encoding="utf-8")
     else:
         source.write_bytes(_canonical_bytes(_invalid_document(case)))
     before = _state_file(tmp_path).read_bytes()
@@ -192,7 +274,6 @@ def test_invalid_core_documents_fail_closed_without_state_change(run_cli, tmp_pa
         "unknown-dependency": "unknown-dependency",
         "reserved-field": "mission-authority-field-injection",
         "schema-mismatch": "core-plan-schema-invalid",
-        "non-canonical": "plan-document-not-canonical",
         "invalid-utf8": "invalid-utf8",
         "oversize": "result-too-large",
     }[case]
