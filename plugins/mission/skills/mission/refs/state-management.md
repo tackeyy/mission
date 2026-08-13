@@ -609,6 +609,20 @@ issue 起票 → worktree feature ブランチ → PR (本文に `Closes #N` を
 - `verify` が exit 2 なら、その entry は invalidated なので base 統合 → refreeze (`--head-sha` を更新して再 enqueue) → fresh review → 再登録の順でやり直す。
 - `depends_on` に列挙した issue_ref_key が `merged` になるまで、後続 entry は `queue next` に出ない。
 - 単独 mission は従来どおり queue を使わなくてよい。
+- [worktree での init 配置規律 (#454)](#worktree-での-init-配置規律-454)
+
+## worktree での init 配置規律 (#454)
+
+- worktree で queue enqueue --from-state / queue verify を回すときは、最新 `score_history` の `revision_scope.head_sha` が実際にレビューした HEAD と一致していることを先に確認する。checkout 移動や rename で `project_root` が stale になっている場合は、先に `update-project-root --path <new-root>` で救済してから review / push-score / queue 再登録をやり直す。`git revision_scope head is not the current reviewed HEAD` は、別 HEAD の score を流用したか、レビュー後に HEAD がずれた失敗であり、`--from-state` の上書きではなく再レビュー → 再採点 → 再 enqueue を要求する。
+- `<sid>` は `ls .mission-state/sessions/` または `mission-state.py list` で確認する。
+- 具体例:
+  ```bash
+  mkdir -p <worktree>/.mission-state/sessions
+  cp <main-root>/.mission-state/sessions/<sid>.json <worktree>/.mission-state/sessions/
+  update-project-root --path <worktree>
+  ```
+- 併せて当該 mission が参照する evidence も同じ相対パスで複製する。.mission-state/archive/ 配下の当該 iteration の `review-input` / `scoring` ファイル、`.mission-state/plans/` 配下の canonical plan、`sessions/<sid>-*-assumptions.md` を移す。
+- root 全体の一括移送は行わない。他 session を巻き込むため、必要な対象だけを個別に複製する。
 
 ## Phase 7 自動マージ — 詳細判定ロジック
 
@@ -633,3 +647,9 @@ issue 起票 → worktree feature ブランチ → PR (本文に `Closes #N` を
 - 不明なら `--squash` をデフォルトに
 - CI pending 中なら `--auto` フラグで完了待ち
 - 推奨形: `gh pr merge <N> --repo <owner/repo> --squash --auto --delete-branch`
+
+## 修正履歴
+
+| 日付 | 変更内容 |
+|---|---|
+| 2026-08-13 | Issue #454: worktree 実行の init 配置規律と `update-project-root` による復旧、revision_scope/head 一致失敗の扱いを明文化 |
