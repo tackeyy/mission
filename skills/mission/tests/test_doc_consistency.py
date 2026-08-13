@@ -312,7 +312,7 @@ def test_readmes_describe_current_scoring_flow_and_test_snapshot():
             "mission-review/1",
             "aggregate-reviews",
             "push-score --scoring-json",
-            "2026-07-21: 1208 passed",
+            "2026-08-14: 3020 passed",
         ):
             assert token in txt, f"{rel} missing current README source-sync token: {token}"
         assert "553 passed" not in txt, f"{rel} still reports stale test count"
