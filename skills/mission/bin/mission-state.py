@@ -14021,6 +14021,11 @@ def _lane_report_session_role(state: dict) -> str:
     return role if isinstance(role, str) and role else "implementer"
 
 
+def _lane_report_root_run_id(state: dict):
+    root_run_id = state.get("root_run_id")
+    return root_run_id if isinstance(root_run_id, str) and root_run_id else None
+
+
 def _lane_report_session_entry(
     state: dict,
     *,
@@ -14063,6 +14068,22 @@ def _lane_report_session_entry(
     return entry
 
 
+def _lane_report_group_entry(root_run_id, sessions: list[dict]) -> dict:
+    implementer_wait_sec = 0.0
+    non_implementer_active_sec = 0.0
+    for session in sessions:
+        role = session["session_role"]
+        if role == "implementer":
+            implementer_wait_sec += float(session["wait_total_sec"])
+        else:
+            non_implementer_active_sec += float(session["observed_active_sec"])
+    return {
+        "root_run_id": root_run_id,
+        "sessions": sessions,
+        "rendezvous_loss_sec": max(0.0, implementer_wait_sec - non_implementer_active_sec),
+    }
+
+
 def _lane_positive_minutes(value: str) -> int:
     minutes = int(value)
     if minutes <= 0:
@@ -14091,13 +14112,6 @@ def cmd_lane_report(args):
         print("ERROR: lane-report requires at least one mission state", file=sys.stderr)
         sys.exit(1)
     overall = summarize_activity_states(states)
-    non_implementer_active_sec = 0.0
-    for role, summary in (overall.get("role_summaries") or {}).items():
-        if role == "implementer":
-            continue
-        active = summary.get("observed_active_sec") if isinstance(summary, dict) else None
-        if isinstance(active, (int, float)) and not isinstance(active, bool) and active >= 0:
-            non_implementer_active_sec += float(active)
     entries = [
         _lane_report_session_entry(
             state,
@@ -14105,16 +14119,25 @@ def cmd_lane_report(args):
         )
         for state in sorted(states, key=lambda item: str(item.get("session_id") or ""))
     ]
-    implementer_wait_sec = sum(
-        float(entry["wait_total_sec"])
-        for entry in entries
-        if entry["session_role"] == "implementer"
-    )
+    groups: dict[object, list[dict]] = {}
+    for state, entry in zip(sorted(states, key=lambda item: str(item.get("session_id") or "")), entries):
+        groups.setdefault(_lane_report_root_run_id(state), []).append(entry)
+    grouped_entries = [
+        _lane_report_group_entry(
+            root_run_id,
+            sorted(sessions, key=lambda item: str(item.get("session_id") or "")),
+        )
+        for root_run_id, sessions in sorted(
+            groups.items(),
+            key=lambda item: (item[0] is not None, str(item[0]) if item[0] is not None else ""),
+        )
+    ]
     report = {
         "sessions": entries,
         "role_summaries": overall.get("role_summaries", {}),
+        "groups": grouped_entries,
         # 集約意味論: 全 implementer の待機合算 - 従属レーンの実働合算 (下限0)
-        "rendezvous_loss_sec": max(0.0, implementer_wait_sec - non_implementer_active_sec),
+        "rendezvous_loss_sec": sum(group["rendezvous_loss_sec"] for group in grouped_entries),
     }
     if getattr(args, "slo_minutes", None) is not None:
         report["slo_minutes"] = args.slo_minutes

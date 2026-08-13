@@ -30,6 +30,7 @@ def _write_session(
     session_id: str,
     *,
     session_role: str,
+    root_run_id: str | None = None,
     started_at: str,
     updated_at: str,
     phase: str = "executing",
@@ -52,6 +53,8 @@ def _write_session(
         "updated_at": updated_at,
         "project_root": str(tmp_path),
     }
+    if root_run_id is not None:
+        state["root_run_id"] = root_run_id
     if activity_segments is not None:
         state["activity_segments"] = activity_segments
     if activity_rollup is not None:
@@ -349,6 +352,168 @@ def test_lane_report_rendezvous_loss_aggregated_across_implementers(tmp_path, ru
     assert payload["rendezvous_loss_sec"] == 200.0
 
 
+def test_lane_report_groups_by_root_run_id(tmp_path, run_cli):
+    _write_session(
+        tmp_path,
+        "impl-a",
+        session_role="implementer",
+        root_run_id="root-a",
+        phase="done",
+        passes=True,
+        loop_active=False,
+        halt_reason="",
+        started_at="2026-08-13T00:00:00Z",
+        updated_at="2026-08-13T00:10:00Z",
+        activity_segments=[
+            {
+                "kind": "subagent-wait",
+                "reason": "checker-evidence",
+                "phase": "executing",
+                "started_at": "2026-08-13T00:00:00Z",
+                "ended_at": "2026-08-13T00:05:00Z",
+                "duration_sec": 300.0,
+            }
+        ],
+    )
+    _write_session(
+        tmp_path,
+        "checker-a",
+        session_role="checker",
+        root_run_id="root-a",
+        phase="done",
+        passes=False,
+        loop_active=False,
+        halt_reason="done",
+        started_at="2026-08-13T00:00:00Z",
+        updated_at="2026-08-13T00:05:00Z",
+        activity_segments=[
+            {
+                "kind": "active",
+                "reason": "work",
+                "phase": "reviewing",
+                "started_at": "2026-08-13T00:00:00Z",
+                "ended_at": "2026-08-13T00:01:40Z",
+                "duration_sec": 100.0,
+            }
+        ],
+    )
+    _write_session(
+        tmp_path,
+        "impl-b",
+        session_role="implementer",
+        root_run_id="root-b",
+        phase="done",
+        passes=True,
+        loop_active=False,
+        halt_reason="",
+        started_at="2026-08-13T00:00:00Z",
+        updated_at="2026-08-13T00:08:20Z",
+        activity_segments=[
+            {
+                "kind": "subagent-wait",
+                "reason": "checker-evidence",
+                "phase": "executing",
+                "started_at": "2026-08-13T00:00:00Z",
+                "ended_at": "2026-08-13T00:03:20Z",
+                "duration_sec": 200.0,
+            }
+        ],
+    )
+    _write_session(
+        tmp_path,
+        "checker-b",
+        session_role="checker",
+        root_run_id="root-b",
+        phase="done",
+        passes=False,
+        loop_active=False,
+        halt_reason="done",
+        started_at="2026-08-13T00:00:00Z",
+        updated_at="2026-08-13T00:00:50Z",
+        activity_segments=[
+            {
+                "kind": "active",
+                "reason": "work",
+                "phase": "reviewing",
+                "started_at": "2026-08-13T00:00:00Z",
+                "ended_at": "2026-08-13T00:00:50Z",
+                "duration_sec": 50.0,
+            }
+        ],
+    )
+
+    result = run_cli("lane-report", "--json", cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    groups = {group["root_run_id"]: group for group in payload["groups"]}
+    assert payload["rendezvous_loss_sec"] == 350.0
+    assert set(groups) == {"root-a", "root-b"}
+    assert groups["root-a"]["rendezvous_loss_sec"] == 200.0
+    assert [session["session_id"] for session in groups["root-a"]["sessions"]] == [
+        "checker-a",
+        "impl-a",
+    ]
+    assert groups["root-b"]["rendezvous_loss_sec"] == 150.0
+    assert [session["session_id"] for session in groups["root-b"]["sessions"]] == [
+        "checker-b",
+        "impl-b",
+    ]
+
+
+def test_lane_report_falls_back_to_shared_group_without_root_run_id(tmp_path, run_cli):
+    _write_session(
+        tmp_path,
+        "impl",
+        session_role="implementer",
+        phase="done",
+        passes=True,
+        loop_active=False,
+        halt_reason="",
+        started_at="2026-08-13T00:00:00Z",
+        updated_at="2026-08-13T00:05:00Z",
+        activity_segments=[
+            {
+                "kind": "subagent-wait",
+                "reason": "checker-evidence",
+                "phase": "executing",
+                "started_at": "2026-08-13T00:00:00Z",
+                "ended_at": "2026-08-13T00:03:20Z",
+                "duration_sec": 200.0,
+            }
+        ],
+    )
+    _write_session(
+        tmp_path,
+        "checker",
+        session_role="checker",
+        phase="done",
+        passes=False,
+        loop_active=False,
+        halt_reason="done",
+        started_at="2026-08-13T00:00:00Z",
+        updated_at="2026-08-13T00:01:20Z",
+        activity_segments=[
+            {
+                "kind": "active",
+                "reason": "work",
+                "phase": "reviewing",
+                "started_at": "2026-08-13T00:00:00Z",
+                "ended_at": "2026-08-13T00:01:20Z",
+                "duration_sec": 80.0,
+            }
+        ],
+    )
+
+    result = run_cli("lane-report", "--json", cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert [group["root_run_id"] for group in payload["groups"]] == [None]
+    assert payload["groups"][0]["rendezvous_loss_sec"] == 120.0
+    assert payload["rendezvous_loss_sec"] == 120.0
+
+
 def test_lane_report_slo_minutes_rejects_non_positive(tmp_path, run_cli):
     _write_session(
         tmp_path,
@@ -367,3 +532,72 @@ def test_lane_report_slo_minutes_rejects_non_positive(tmp_path, run_cli):
         result = run_cli("lane-report", "--json", "--slo-minutes", bad, cwd=tmp_path)
         assert result.returncode == 2
         assert "positive" in result.stderr
+
+
+def test_lane_report_group_clipping_diverges_from_global_subtraction(tmp_path, run_cli):
+    """グループ内クリップの意図的な意味変更を数値で固定する。
+
+    root-a: implementer wait 100 < checker active 300 → クリップで 0
+    root-b: implementer wait 500 > checker active 50 → 450
+    合算 450 は、旧グローバル計算 max(0, 600-350)=250 と意図的に異なる。
+    """
+    def _impl(name, root, wait_sec, end):
+        _write_session(
+            tmp_path,
+            name,
+            session_role="implementer",
+            root_run_id=root,
+            phase="done",
+            passes=True,
+            loop_active=False,
+            halt_reason="",
+            started_at="2026-08-13T00:00:00Z",
+            updated_at="2026-08-13T00:20:00Z",
+            activity_segments=[
+                {
+                    "kind": "subagent-wait",
+                    "reason": "checker-evidence",
+                    "phase": "executing",
+                    "started_at": "2026-08-13T00:00:00Z",
+                    "ended_at": end,
+                    "duration_sec": float(wait_sec),
+                }
+            ],
+        )
+
+    def _checker(name, root, active_sec, end):
+        _write_session(
+            tmp_path,
+            name,
+            session_role="checker",
+            root_run_id=root,
+            phase="done",
+            passes=False,
+            loop_active=False,
+            halt_reason="done",
+            started_at="2026-08-13T00:00:00Z",
+            updated_at="2026-08-13T00:20:00Z",
+            activity_segments=[
+                {
+                    "kind": "active",
+                    "reason": "work",
+                    "phase": "reviewing",
+                    "started_at": "2026-08-13T00:00:00Z",
+                    "ended_at": end,
+                    "duration_sec": float(active_sec),
+                }
+            ],
+        )
+
+    _impl("impl-a", "root-a", 100, "2026-08-13T00:01:40Z")
+    _checker("chk-a", "root-a", 300, "2026-08-13T00:05:00Z")
+    _impl("impl-b", "root-b", 500, "2026-08-13T00:08:20Z")
+    _checker("chk-b", "root-b", 50, "2026-08-13T00:00:50Z")
+
+    result = run_cli("lane-report", "--json", cwd=tmp_path, check=True)
+    payload = json.loads(result.stdout)
+    groups = {group["root_run_id"]: group for group in payload["groups"]}
+    assert groups["root-a"]["rendezvous_loss_sec"] == 0.0
+    assert groups["root-b"]["rendezvous_loss_sec"] == 450.0
+    # 旧グローバル計算 max(0, 600-350)=250 ではなくグループ合算 450
+    assert payload["rendezvous_loss_sec"] == 450.0
