@@ -212,6 +212,12 @@ from evidence_handoff import (  # noqa: E402
     publish as publish_evidence_handoff,
     verify_handoff as verify_evidence_handoff,
 )
+from pregate_cache import (  # noqa: E402
+    PregateCacheError,
+    inspect as inspect_pregate_cache,
+    lookup as lookup_pregate_cache,
+    record as record_pregate_cache,
+)
 
 SCHEMA_VERSION = 4  # v4: structured scoring provenance is mandatory for new sessions
 GOAL_DISPATCH_MODES = {"inline", "host-native"}
@@ -1523,6 +1529,19 @@ def _normalize_issue_ref(value):
         return m.group(1)
     # 数値を抽出できない参照は生値 (大文字小文字非依存) で比較
     return raw.lower()
+
+
+def _pregate_state_reference(cwd: Path, issue_ref: Any) -> dict[str, Any] | None:
+    record = inspect_pregate_cache(cwd, issue_ref)
+    if record is None:
+        return None
+    return {
+        "path": record["path"],
+        "subject_digest": record["subject_digest"],
+        "verdict": record["verdict"],
+        "gate_id": record["gate_id"],
+        "evaluated_at": record["evaluated_at"],
+    }
 
 
 def _ensure_phase_timing(data: dict, now: str | None = None) -> None:
@@ -6810,6 +6829,9 @@ def cmd_init(args):
         initial["review_tier_signal_details"] = _auto_decision["signal_details"]
     # reviewer_count は review_tier から設定 (COMPLEXITY_REVIEWER_COUNT と同値になる設計)
     initial["reviewer_count"] = TIER_REVIEWER_COUNT[initial["review_tier"]]
+    _pregate = _pregate_state_reference(cwd, getattr(args, "issue_ref", None))
+    if _pregate is not None:
+        initial["pregate"] = _pregate
 
     # #276: adaptive routing — Simple + リスクシグナルなし + 強制なしは goal へ。
     # discriminating-v2 (品質同点・mission 5.4x 時間/4.9x コスト) と実運用 95% の
@@ -6936,9 +6958,13 @@ def cmd_init(args):
                         "phase_durations_sec",
                         "phase",
                         "phase_started_at",
+                        "pregate",
                     ):
                         if key in existing_data:
                             initial[key] = existing_data[key]
+                    # resume 後も、より新しい pregate 評価があればそちらを優先する
+                    if _pregate is not None:
+                        initial["pregate"] = _pregate
                     if initial.get("loop_active") is not False and not initial.get("activity_current"):
                         start_phase_default_activity(initial, now)
             except ActivityTimingError as e:
@@ -7009,6 +7035,28 @@ def cmd_init(args):
         "lease_expires_at": initial["lease_expires_at"],
         "permission_preflight": "passed",
     }))
+
+
+def cmd_pregate(args):
+    cwd = Path.cwd()
+    if args.pregate_cmd == "record":
+        try:
+            evaluation = load_handoff_payload(args.input)
+            result = record_pregate_cache(cwd, evaluation, issue_ref=args.issue_ref)
+        except (PregateCacheError, EvidenceHandoffError, OSError, ValueError) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(2)
+        print(json.dumps(result, ensure_ascii=False))
+        return
+    if args.pregate_cmd == "check":
+        try:
+            result = lookup_pregate_cache(cwd, args.issue_ref, args.subject_digest)
+        except Exception:
+            result = {"status": "miss"}
+        output = result if result.get("status") == "hit" else {"status": result.get("status", "miss")}
+        print(json.dumps(output, indent=2 if getattr(args, "json", False) else None, ensure_ascii=False))
+        return
+    raise AssertionError(f"unsupported pregate command: {args.pregate_cmd}")
 
 
 PARALLEL_GROUP_SCHEMA = "mission-parallel-group/1"
@@ -15209,6 +15257,18 @@ def _build_parser():
     p_parallel_closeout = sub.add_parser("parallel-closeout", help="terminalize a complete parallel group")
     p_parallel_closeout.add_argument("--group-id", required=True)
     p_parallel_closeout.set_defaults(func=cmd_parallel_closeout)
+
+    p_pregate = sub.add_parser("pregate", help="pre-gate evaluation cache sidecar")
+    p_pregate_sub = p_pregate.add_subparsers(dest="pregate_cmd", required=True)
+    p_pregate_record = p_pregate_sub.add_parser("record", help="record a pregate evaluation")
+    p_pregate_record.add_argument("--issue-ref", required=True)
+    p_pregate_record.add_argument("--input", required=True, help="evaluation JSON file path or - for stdin")
+    p_pregate_record.set_defaults(func=cmd_pregate)
+    p_pregate_check = p_pregate_sub.add_parser("check", help="lookup a pregate evaluation")
+    p_pregate_check.add_argument("--issue-ref", required=True)
+    p_pregate_check.add_argument("--subject-digest", required=True)
+    p_pregate_check.add_argument("--json", action="store_true")
+    p_pregate_check.set_defaults(func=cmd_pregate)
 
     p_stop_guard = sub.add_parser(
         "stop-guard-observe",

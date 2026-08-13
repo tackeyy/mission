@@ -21,6 +21,7 @@ SKILL.md 本文の token 節約のため、日付付き改修注記と実測デ�
 ## M 系 (2026-06-10 検査レポート)
 - **M6**: インライン修正の Maker-Checker。orchestrator の自己検証のみで合格にした事例への対策
 - **M7**: init `--complexity` 記録の必須化。全ランで Unknown 放置され P3-5 と差分レビューが機能しなかった
+- **Issue #421 (2026-08-13)**: planning gate / checker 評価の pre-gate cache sidecar を追加し、init は fresh record の参照だけを state に残すようにした。
 - **Issue #211 (2026-07-21)**: active / external-wait / approval-wait / reviewer-wait / idle の bounded segment と共有 stats/audit reducer を追加。crash gap は推測分類せず、品質ゲートは不変。
 
 ## M-audit 系 (2026-06-11 skill-auditor 監査)
