@@ -52,6 +52,13 @@ local-first artifact contract と CLI は
 - 5 つのサブスキル: planner / executor / reviewer / critic / scorer
 - `.mission-state` セッションを扱う state 管理 CLI
 - reviewer JSON から4軸の採点 payload を決定論的に作る `aggregate-reviews` と、High finding evidence / 独立した review agreement の合格ゲート。明示的な手動採点は typed かつ content-addressed な capture 経路を使う
+- pre-gate の評価キャッシュ: `pregate record` / `pregate check` で同じ Issue と subject digest の再評価を省き、記録済み evidence を再利用する
+- evidence handoff: `handoff publish` / `handoff await` / `handoff verify` でセッション間に証跡を受け渡し、場当たり的なファイル共有に頼らない
+- merge queue: `queue enqueue` / `queue status` / `queue next` / `queue verify` / `queue mark` で、同じ state root 上の並列 mission が不一致 base のまま merge するのを防ぐ
+- lane report と SLO 判定: `lane-report --slo-minutes` で経過時間を SLO と突き合わせ、待機種別ごとの内訳を出す
+- failure ledger と learning brief: reviewer の `general_fix_rule` を蓄積し、`learning brief` で反復回数の多い項目を planner / executor に注入する。ただし reviewer には注入せず、採点の独立性を保つ
+- 反復回復の統計: `stats` / audit の `iteration_recovery` で、gate reject 後の初回→最終スコア差、反復回数、修正完了率を集計する
+- 実装委譲（任意）: registry に implementation provider があれば、実装ステップの diff 生成を headless coding agent に委譲できる。検証・レビュー・pass 判定は core が保持する（[設計](skills/mission/refs/implementation-delegation.md)）
 - completion evidence を監査可能にする local-first mission artifact CLI（[契約](docs/MISSION_ARTIFACTS.ja.md)）
 - Claude Code / Codex の複数セッション分離
 - compaction/resume 復帰順序を統合する `mission-state.py resume`
@@ -129,7 +136,10 @@ Simple task の adaptive routing は portable な inline 完遂を既定とし�
 | `skills/mission-reviewer/` | ピアレビューサブスキル |
 | `skills/mission-critic/` | 改善案立案サブスキル |
 | `skills/mission-scorer/` | reviewer output を JSON 化するフォールバック変換器 |
+| `docs/` | 設計・運用ドキュメント |
+| `benchmarks/` | mission vs goal のパイロット計測 |
 | `scripts/mission-local-authoring-sync.sh` | Git-backed local authoring を最新 mainへ揃える fail-closed bootstrap |
+| `scripts/ci_changed_scopes.js` | CI の変更スコープ判定 |
 | `scripts/mission-stop-guard.sh` | ループ継続を強制する Stop hook |
 | `claude-hooks/hooks.json` | Claude Code 用 Stop hook 宣言 |
 | `.claude-plugin/` | `plugin.json` / `marketplace.json` |
@@ -200,11 +210,12 @@ marketplace 提出前は [`docs/MARKETPLACE_RELEASE_CHECKLIST.ja.md`](docs/MARKE
 ## 使い方
 
 ```text
-/mission <ミッション記述> [--max-iter N] [--threshold X] [--skip-preflight]
+/mission <ミッション記述> [--max-iter N] [--skip-preflight] [--threshold X] [--budget-minutes N] [--goal-dispatch <inline|host-native>] [--force-mission]
 ```
 
 orchestrator は仮置き、ミッション分解、実行、reviewer JSON 収集、`aggregate-reviews`、`push-score --scoring-json` 記録を行い、`mark-passes` が state を受理するか中断条件が成立するまで反復します。ユーザーが明示的に供給した手動採点は、先に `manual-score-capture` で typed・content-addressed な入力として固定します。review aggregate の evidence を流用しません。
 詳細な運用プロトコルは [`skills/mission/SKILL.md`](skills/mission/SKILL.md)、`stats` / audit の raw・completed 品質 schema は [`docs/PASS_RATE_METRICS.ja.md`](docs/PASS_RATE_METRICS.ja.md)、明示的に再利用する state snapshot は [`docs/STATE_SNAPSHOTS.ja.md`](docs/STATE_SNAPSHOTS.ja.md) を参照してください。
+`--goal-dispatch` は Simple routing 後の完遂先を inline / host-native から選び、`--force-mission` は Simple なら goal に逃がす場面でも mission ループを維持します。
 
 ## 動作環境
 
@@ -225,6 +236,12 @@ Stop hook の stale-state 警告は macOS では BSD `date`、Linux では GNU `
 | `MISSION_PLUGIN_ROOT` | 未設定 | Codex/local install で使う agent-neutral な plugin root |
 | `CLAUDE_PLUGIN_ROOT` | 未設定 | 既存の model-visible command text と Claude Code hook path 互換用 |
 | `MISSION_SEARCH_ROOTS` | 現在のディレクトリ | `list` / `cleanup-stale` / `stats` / `halt --all` の検索対象 |
+| `MISSION_LEASE_ID` | 未設定 | mutating command 用の明示 fencing token。lease-free な legacy state は最初の write で取得できる |
+| `MISSION_LEASE_TTL_SECONDS` | `900` | mutating command の lease TTL（秒） |
+| `MISSION_SESSION_ID` | 未設定 | 明示 session ID。`CLAUDE_CODE_SESSION_ID` → `CODEX_THREAD_ID` → pid にフォールバックする |
+| `MISSION_STALE_ACTIVE_SECONDS` | `10800` | active state の stale 判定しきい値（秒） |
+| `MISSION_SKILL_ROOTS` | 未設定 | 既定の `~/.codex/skills` / `~/.claude/skills` より前に探索する追加 skill root |
+| `MISSION_REQUIRE_SCORING_EVIDENCE` | 未設定 | `push-score` の scoring-evidence gate。`0` で deprecated escape hatch を使う |
 
 `MISSION_SEARCH_ROOTS` は OS の path separator で複数指定できます。macOS/Linux では `~/workspace:~/dev` のように指定します。
 
@@ -238,25 +255,32 @@ make test-e2e    # slow operational scenario
 
 各 target は exact Git tree SHA、tier、test manifest を
 `mission-test-report/1` JSON で出力します。`make test` は `.venv-ci`
-を作成し、pinned された `.github/requirements-ci.txt` を使います。
+を作成し、pinned された `.github/requirements-ci.txt` を使います。`make test` と
+`make test-e2e` は `pytest-xdist` の `-n auto --dist loadfile` で並列実行され、docs だけの差分は
+`scripts/ci_changed_scopes.js` が判定する CI fast path に乗れます。
 
 ローカル検証スナップショット:
 
 ```text
-2026-07-21: 1208 passed
+2026-08-14: 3020 passed
 ```
 
 詳細は [`docs/TESTING.md`](docs/TESTING.md) を参照してください。
 
 ## E2E 検証済み事項
 
-2026-06-14、Claude Code 2.1.177、隔離 `CLAUDE_CONFIG_DIR` で正式 install し、以下を確認しました。
+2026-08-14、Claude Code 2.1.222、隔離 `CLAUDE_CONFIG_DIR` に mission 2.4.0 を
+ローカル marketplace から正式 install し、以下を再確認しました。
 
-- 6 スキル + Stop hook が登録される
-- install 時に `${CLAUDE_PLUGIN_ROOT}` が実パスに解決する
-- `mission-state.py` が `.mission-state/sessions/*.json` を生成できる
-- `mission-reviewer` などの非修飾サブスキル名が実行時に解決される
-- Python テストが通る
+- `claude plugin validate` が marketplace manifest を受理する
+- `claude plugin install mission@mission-marketplace` が 2.4.0 を install し enabled になる
+- `claude plugin details mission` に 6 スキルと Stop hook 1 件が並び、常時コストは約 149 tok
+- install 先 cache が `<config>/plugins/cache/mission-marketplace/mission/2.4.0` に解決し、README の `MISSION_PLUGIN_ROOT` 例と一致する
+- install 済み cache の `mission-state.py` が `.mission-state/sessions/*.json` を生成し、permission preflight を通過する
+- Python テストが通る（`make test`: 3020 passed、`make test-e2e`: 3 passed）
+
+`mission-reviewer` などの非修飾サブスキル名の実行時解決は、2026-06-14（Claude Code
+2.1.177）の検証で確認済みで、今回の headless 実行では再確認していません。
 
 ## コントリビューション
 

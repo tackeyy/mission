@@ -59,6 +59,22 @@ implemented as a local Markdown artifact with explicit opt-in publish evidence.
 - State management CLI for `.mission-state` sessions
 - Deterministic four-axis `aggregate-reviews` scoring from reviewer JSON, with
   High-finding evidence and independent review-agreement gates before `mark-passes`; explicitly supplied manual scores use a typed, content-addressed capture route
+- Pre-gate evaluation cache: `pregate record` / `pregate check` skips repeated
+  evaluation for the same Issue and subject digest by reusing recorded evidence
+- Evidence handoff: `handoff publish` / `handoff await` / `handoff verify` passes evidence
+  between sessions without relying on ad hoc file sharing
+- Merge queue: `queue enqueue` / `queue status` / `queue next` / `queue verify` / `queue mark` keeps
+  parallel missions on the same state root from merging against a mismatched base
+- Lane report and SLO checks: `lane-report --slo-minutes` compares elapsed time
+  with the SLO and breaks waiting time down by kind
+- Failure ledger and learning brief: reviewer `general_fix_rule` entries are
+  accumulated, then `learning brief` feeds the most repetitive items into the
+  planner and executor without injecting them into reviewers
+- Iteration recovery stats: `stats` / audit `iteration_recovery` summarize the
+  first-to-last score delta, iteration count, and fix-completion rate after gate rejections
+- Optional implementation delegation: if the registry has an implementation
+  provider, implementation-step diff generation can be delegated to a headless
+  coding agent while validation, review, and pass judgment stay in core
 - Local-first mission artifact CLI for auditable completion evidence
   ([contract](docs/MISSION_ARTIFACTS.md))
 - Multi-session state isolation for Claude Code and Codex
@@ -145,7 +161,10 @@ workflow claim.
 | `skills/mission-reviewer/` | Peer-review subskill |
 | `skills/mission-critic/` | Iteration-improvement subskill |
 | `skills/mission-scorer/` | Fallback prose-to-JSON converter for reviewer output |
+| `docs/` | Design and operations documentation |
+| `benchmarks/` | Mission-vs-goal pilot measurements |
 | `scripts/mission-local-authoring-sync.sh` | Fail-closed latest-main bootstrap for Git-backed local authoring |
+| `scripts/ci_changed_scopes.js` | CI changed-scope detector |
 | `scripts/mission-stop-guard.sh` | Stop hook used to keep active missions running |
 | `claude-hooks/hooks.json` | Claude Code Stop hook declaration |
 | `.claude-plugin/` | Claude Code plugin metadata and marketplace manifest |
@@ -231,7 +250,7 @@ Before marketplace submission, run through
 ## Usage
 
 ```text
-/mission <mission description> [--max-iter N] [--threshold X] [--skip-preflight]
+/mission <mission description> [--max-iter N] [--skip-preflight] [--threshold X] [--budget-minutes N] [--goal-dispatch <inline|host-native>] [--force-mission]
 ```
 
 The orchestrator records assumptions, decomposes the mission, executes work,
@@ -244,6 +263,10 @@ for the execution protocol and [`docs/PASS_RATE_METRICS.md`](docs/PASS_RATE_METR
 for the `stats`/audit raw, completed, role-aware, and terminal-outcome quality schema. Reusable, explicit-only
 audit/stats state snapshots are documented in
 [`docs/STATE_SNAPSHOTS.md`](docs/STATE_SNAPSHOTS.md).
+
+`--goal-dispatch` selects inline or host-native goal guidance after Simple
+routing, and `--force-mission` keeps the mission loop active even when a Simple
+task would normally route to goal.
 
 ## Requirements
 
@@ -266,6 +289,12 @@ parsers fail; the core blocking behavior always works.
 | `MISSION_PLUGIN_ROOT` | unset | Agent-neutral plugin root used by Codex/local installs |
 | `CLAUDE_PLUGIN_ROOT` | unset | Compatibility alias for existing model-visible command text and Claude Code hook paths |
 | `MISSION_SEARCH_ROOTS` | current directory | Search roots for `list`, `cleanup-stale`, `stats`, and `halt --all` |
+| `MISSION_LEASE_ID` | unset | Explicit fencing token for mutating commands; lease-free legacy state may acquire one on first write |
+| `MISSION_LEASE_TTL_SECONDS` | `900` | Lease TTL in seconds for mutating commands |
+| `MISSION_SESSION_ID` | unset | Explicit session ID; falls back to `CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`, then pid |
+| `MISSION_STALE_ACTIVE_SECONDS` | `10800` | Active-state staleness threshold in seconds |
+| `MISSION_SKILL_ROOTS` | unset | Additional skill roots searched before the default `~/.codex/skills` and `~/.claude/skills` |
+| `MISSION_REQUIRE_SCORING_EVIDENCE` | unset | Scoring-evidence gate for `push-score`; set `0` only for the deprecated escape hatch |
 
 `MISSION_SEARCH_ROOTS` accepts multiple paths separated by the platform path
 separator, for example `~/workspace:~/dev` on macOS/Linux.
@@ -280,25 +309,34 @@ make test-e2e    # slow operational scenarios
 
 Each target prints a `mission-test-report/1` JSON line with the exact Git tree
 SHA, tier, and test manifest. `make test` creates `.venv-ci` and installs the
-pinned `.github/requirements-ci.txt`; CI invokes the same target.
+pinned `.github/requirements-ci.txt`; CI invokes the same target. Both
+`make test` and `make test-e2e` run pytest with `-n auto --dist loadfile`, and
+docs-only diffs can take the CI fast path selected by
+`scripts/ci_changed_scopes.js`.
 
-Historical local verification snapshot: `2026-07-21: 1208 passed`.
+Historical local verification snapshot: `2026-08-14: 3020 passed`.
 
 Additional project-specific testing guidance is in
 [`docs/TESTING.md`](docs/TESTING.md).
 
 ## Verified Behavior
 
-E2E verification was completed on 2026-06-14 with Claude Code 2.1.177 using an
-isolated `CLAUDE_CONFIG_DIR`.
+E2E verification was re-run on 2026-08-14 with Claude Code 2.1.222 against
+mission 2.4.0, installing the plugin from the local marketplace into an isolated
+`CLAUDE_CONFIG_DIR`.
 
 Verified:
 
-- Six skills and the Stop hook are registered by `claude plugin details mission`
-- `${CLAUDE_PLUGIN_ROOT}` resolves to the installed plugin path
-- `mission-state.py` can create `.mission-state/sessions/*.json`
-- Unqualified subskill names such as `mission-reviewer` resolve during execution
-- The Python test suite passes
+- `claude plugin validate` accepts the marketplace manifest
+- `claude plugin install mission@mission-marketplace` installs 2.4.0 and reports it as enabled
+- `claude plugin details mission` lists six skills and one Stop hook at roughly 149 always-on tokens
+- The installed cache resolves to `<config>/plugins/cache/mission-marketplace/mission/2.4.0`, matching the documented `MISSION_PLUGIN_ROOT` example
+- `mission-state.py` from the installed cache creates `.mission-state/sessions/*.json` and passes its permission preflight
+- The Python test suite passes (`make test`: 3020 passed, `make test-e2e`: 3 passed)
+
+Unqualified subskill name resolution during execution was verified in the
+earlier 2026-06-14 run with Claude Code 2.1.177 and was not re-checked in this
+headless run.
 
 ## Contributing
 
