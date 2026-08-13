@@ -13,9 +13,10 @@ ACTIVITY_KINDS = {
     "external-wait",
     "approval-wait",
     "reviewer-wait",
+    "subagent-wait",
     "idle",
 }
-WAIT_KINDS = {"external-wait", "approval-wait", "reviewer-wait"}
+WAIT_KINDS = {"external-wait", "approval-wait", "reviewer-wait", "subagent-wait"}
 ACTIVITY_REASONS_BY_KIND = {
     "active": {
         "work",
@@ -29,6 +30,12 @@ ACTIVITY_REASONS_BY_KIND = {
     "external-wait": {"external-response", "external-command", "other"},
     "approval-wait": {"user-approval", "policy-approval", "other"},
     "reviewer-wait": {"review-response", "independent-review", "other"},
+    "subagent-wait": {
+        "checker-evidence",
+        "planner-response",
+        "implementation-provider",
+        "other",
+    },
     "idle": {"no-runnable-work", "interrupted", "other"},
 }
 TERMINAL_PHASES = {"done", "halted"}
@@ -731,6 +738,7 @@ def _state_activity(state: dict[str, Any]) -> dict[str, Any]:
 def summarize_activity_states(states: list[dict[str, Any]]) -> dict[str, Any]:
     kind_totals: dict[str, float] = {}
     reason_totals: dict[str, dict[str, float]] = {}
+    role_summaries: dict[str, dict[str, Any]] = {}
     task_samples: dict[str, list[float]] = {}
     phase_samples: dict[str, list[float]] = {}
     observed_total = 0.0
@@ -744,6 +752,23 @@ def summarize_activity_states(states: list[dict[str, Any]]) -> dict[str, Any]:
     totals_consistent = True
     for state in states:
         item = _state_activity(state)
+        role = state.get("session_role")
+        role_key = role if isinstance(role, str) and role else "implementer"
+        wall_clock = _elapsed(state.get("started_at"), state.get("updated_at")) or 0.0
+        role_summary = role_summaries.setdefault(
+            role_key,
+            {"wall_clock_sec": 0.0, "observed_active_sec": 0.0, "wait_totals_sec": {}},
+        )
+        role_summary["wall_clock_sec"] = _finite_add(role_summary["wall_clock_sec"], wall_clock) or 0.0
+        role_summary["observed_active_sec"] = _finite_add(
+            role_summary["observed_active_sec"], item["kinds"].get("active", 0.0)
+        ) or 0.0
+        wait_totals = role_summary.setdefault("wait_totals_sec", {})
+        for kind in WAIT_KINDS:
+            seconds = item["kinds"].get(kind)
+            if seconds is None:
+                continue
+            wait_totals[kind] = _finite_add(wait_totals.get(kind, 0.0), seconds) or 0.0
         if item["observed"] or item["open"] or item["closed"]:
             states_with += 1
         aggregate_overflow = any(
@@ -844,5 +869,13 @@ def summarize_activity_states(states: list[dict[str, Any]]) -> dict[str, Any]:
         "invalid_segment_count": invalid_count,
         "states_with_activity_count": states_with,
         "states_without_activity_count": len(states) - states_with,
+        "role_summaries": {
+            role: {
+                "wall_clock_sec": summary["wall_clock_sec"],
+                "observed_active_sec": summary["observed_active_sec"],
+                "wait_totals_sec": dict(sorted(summary["wait_totals_sec"].items())),
+            }
+            for role, summary in sorted(role_summaries.items())
+        },
         "totals_consistent": totals_consistent,
     }
