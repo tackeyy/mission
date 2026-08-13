@@ -5591,12 +5591,19 @@ def _archive_source_file(cwd: Path, reference: str, evidence_kind: str) -> tuple
     raw = Path(reference).expanduser()
     candidate = raw if raw.is_absolute() else cwd / raw
     candidate = Path(os.path.abspath(str(candidate)))
+    state_root = Path(os.path.abspath(str(state_root)))
     try:
-        relative = candidate.relative_to(state_root)
+        relative = candidate.resolve(strict=False).relative_to(state_root.resolve(strict=False))
     except ValueError as exc:
         raise WorktreeArchiveError(
             f"required evidence is outside .mission-state: {evidence_kind}: {reference}"
         ) from exc
+
+    current = Path(candidate.anchor or candidate.root)
+    for part in candidate.parts[1:]:
+        current = current / part
+        if current.is_symlink():
+            raise WorktreeArchiveError(f"required evidence must not be a symlink: {evidence_kind}: {reference}")
 
     current = state_root
     if current.is_symlink():
@@ -5678,7 +5685,23 @@ def _collect_worktree_archive_specs(cwd: Path, state_file_path: Path, data: dict
     if artifact.get("required_for_pass") and not artifact_path:
         raise WorktreeArchiveError("required evidence reference is missing: artifact")
     if artifact_path:
-        add("artifact", str(artifact_path), Path("artifacts") / _sanitize_sid(session_id) / Path(str(artifact_path)).name)
+        artifact_reference = str(artifact_path)
+        if _normalized_state_reference(artifact_reference) is not None:
+            add("artifact", str(artifact_path), Path("artifacts") / _sanitize_sid(session_id) / Path(str(artifact_path)).name)
+        else:
+            artifact_candidate = Path(artifact_reference).expanduser()
+            if artifact_candidate.is_absolute():
+                try:
+                    artifact_relative = artifact_candidate.resolve(strict=False).relative_to(cwd.resolve(strict=False))
+                except ValueError as exc:
+                    raise WorktreeArchiveError(
+                        f"required evidence is outside .mission-state: artifact: {artifact_reference}"
+                    ) from exc
+            else:
+                artifact_relative = _safe_archive_relative_path(artifact_reference, "artifact")
+            specs.append(
+                _tracked_repo_artifact_spec(cwd, artifact_relative.as_posix(), "artifact", iteration)
+            )
 
     history = [entry for entry in (data.get("score_history") or []) if isinstance(entry, dict)]
     if data.get("passes") is True and not history and not data.get("force_approved_by_user"):
@@ -5748,7 +5771,7 @@ def _collect_worktree_archive_specs(cwd: Path, state_file_path: Path, data: dict
     # human-friendly destinations above, then add every provenance-only
     # reference it identifies using a content-addressed collision-safe name.
     expected = worktree_archive_lineage_references(
-        data, f".mission-state/sessions/{state_file_path.name}",
+        data, f".mission-state/sessions/{state_file_path.name}", repo_root=cwd,
     )
     if expected is None:
         raise WorktreeArchiveError("state lineage references are invalid")
@@ -5763,20 +5786,27 @@ def _collect_worktree_archive_specs(cwd: Path, state_file_path: Path, data: dict
             identity = hashlib.sha256(
                 f"{kind}\0{item_iteration}\0{reference}\0{existing[(kind, item_iteration, reference)]}".encode("utf-8")
             ).hexdigest()[:16]
-            add(
-                kind,
-                reference,
-                Path("archive") / "lineage" / f"iter-{item_iteration}-{mission8}-{kind}-{identity}{suffix}",
-                item_iteration,
-            )
+            if kind == "artifact" and not reference.startswith(".mission-state/"):
+                specs.append(_tracked_repo_artifact_spec(cwd, reference, kind, item_iteration))
+            else:
+                add(
+                    kind,
+                    reference,
+                    Path("archive") / "lineage" / f"iter-{item_iteration}-{mission8}-{kind}-{identity}{suffix}",
+                    item_iteration,
+                )
             existing[(kind, item_iteration, reference)] += 1
 
     destinations: dict[str, Path] = {}
     for spec in specs:
-        archive_path = spec["archive_path"].as_posix()
+        archive_path = (
+            spec["archive_path"].as_posix()
+            if "archive_path" in spec
+            else f"repo-artifact:{spec['source_reference']}"
+        )
         if archive_path in destinations:
             raise WorktreeArchiveError(f"duplicate archive path: {archive_path}")
-        destinations[archive_path] = spec["source"]
+        destinations[archive_path] = spec.get("source")
     return specs
 
 
@@ -5797,6 +5827,59 @@ def _safe_archive_relative_path(value: object, field: str, *, state_reference: b
     if state_reference and (not path.parts or path.parts[0] != ".mission-state"):
         raise WorktreeArchiveError(f"invalid archive manifest {field}: {value}")
     return path
+
+
+def _normalized_state_reference(value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    path = Path(value)
+    if ".mission-state" not in path.parts:
+        return None
+    index = path.parts.index(".mission-state")
+    return Path(*path.parts[index:]).as_posix()
+
+
+def _git_command_bytes(cwd: Path, *args: str) -> bytes:
+    result = subprocess.run(
+        ["git", "-C", str(cwd), *args],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise WorktreeArchiveError("required evidence is outside .mission-state")
+    return result.stdout
+
+
+def _git_command_text(cwd: Path, *args: str) -> str:
+    return _git_command_bytes(cwd, *args).decode("utf-8").strip()
+
+
+def _tracked_repo_artifact_spec(
+    cwd: Path, reference: str, kind: str, iteration: int,
+) -> dict[str, Any]:
+    relative = _safe_archive_relative_path(reference, kind)
+    if not relative:
+        raise WorktreeArchiveError(f"required evidence is outside .mission-state: {kind}: {reference}")
+    tracked = subprocess.run(
+        ["git", "-C", str(cwd), "ls-files", "--error-unmatch", "--", relative.as_posix()],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if tracked.returncode != 0:
+        raise WorktreeArchiveError(f"required evidence is outside .mission-state: {kind}: {reference}")
+    head_sha = _git_command_text(cwd, "rev-parse", "HEAD")
+    content = _git_command_bytes(cwd, "show", f"{head_sha}:{relative.as_posix()}")
+    digest = hashlib.sha256(content).hexdigest()
+    return {
+        "evidence_kind": kind,
+        "kind": "repo-artifact",
+        "iteration": iteration,
+        "source_reference": relative.as_posix(),
+        "path": relative.as_posix(),
+        "digest": digest,
+        "head_sha": head_sha,
+    }
 
 
 def _ensure_regular_directory_path(root: Path, relative_parts: tuple[str, ...]) -> Path:
@@ -5847,6 +5930,21 @@ def _validate_archive_git_boundary(source: Path, destination: Path) -> None:
 def _build_worktree_archive_staging(staging: Path, data: dict, specs: list[dict], created_at: str) -> dict:
     evidence: list[dict] = []
     for spec in specs:
+        if spec.get("kind") == "repo-artifact":
+            evidence.append(
+                {
+                    "session_id": data["session_id"],
+                    "mission_id": data["mission_id"],
+                    "iteration": spec["iteration"],
+                    "evidence_kind": spec["evidence_kind"],
+                    "kind": spec["kind"],
+                    "source_reference": spec["source_reference"],
+                    "path": spec["path"],
+                    "digest": spec["digest"],
+                    "head_sha": spec["head_sha"],
+                }
+            )
+            continue
         destination = staging / spec["archive_path"]
         destination.parent.mkdir(parents=True, exist_ok=True)
         verified_content = spec.get("verified_content")
@@ -5920,6 +6018,20 @@ def _existing_archive_manifest(bundle: Path) -> dict | None:
         if not isinstance(item, dict):
             raise WorktreeArchiveError(f"existing archive manifest evidence is invalid: {manifest_path}")
         _safe_archive_relative_path(item.get("source_reference"), "source_reference", state_reference=True)
+        if item.get("kind") == "repo-artifact":
+            if (
+                not isinstance(item.get("path"), str)
+                or not isinstance(item.get("digest"), str)
+                or len(item["digest"]) != 64
+                or not isinstance(item.get("head_sha"), str)
+                or len(item["head_sha"]) != 64
+                or item.get("archive_path") is not None
+                or item.get("sha256") is not None
+                or item.get("size") is not None
+            ):
+                raise WorktreeArchiveError(f"existing archive manifest evidence is invalid: {manifest_path}")
+            _safe_archive_relative_path(item.get("path"), "path")
+            continue
         relative = _safe_archive_relative_path(item.get("archive_path"), "archive_path")
         if relative.as_posix() in seen_paths:
             raise WorktreeArchiveError(f"duplicate archive path in existing manifest: {relative}")
