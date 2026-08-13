@@ -202,6 +202,14 @@ from command_outcomes import (  # noqa: E402
     validate_observation as validate_command_outcome_observation,
     valid_identifier as _valid_command_outcome_identifier,
 )
+from evidence_handoff import (  # noqa: E402
+    EvidenceHandoffError,
+    EvidenceHandoffTimeout,
+    await_handoff as await_evidence_handoff,
+    load_payload as load_handoff_payload,
+    publish as publish_evidence_handoff,
+    verify_handoff as verify_evidence_handoff,
+)
 
 SCHEMA_VERSION = 4  # v4: structured scoring provenance is mandatory for new sessions
 GOAL_DISPATCH_MODES = {"inline", "host-native"}
@@ -11582,6 +11590,49 @@ def cmd_executor_handoff_record(args): _cmd_executor_handoff(args, "record")
 def cmd_executor_handoff_complete(args): _cmd_executor_handoff(args, "complete")
 
 
+def _emit_handoff_error(exc: Exception) -> None:
+    print(f"ERROR: {exc}", file=sys.stderr)
+
+
+def cmd_handoff_publish(args):
+    cwd = Path.cwd()
+    try:
+        payload = load_handoff_payload(args.input)
+        result = publish_evidence_handoff(cwd, args.topic, payload, producer_session=args.producer_session)
+    except EvidenceHandoffError as exc:
+        _emit_handoff_error(exc)
+        sys.exit(2)
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def cmd_handoff_await(args):
+    cwd = Path.cwd()
+    try:
+        result = await_evidence_handoff(cwd, args.topic, after_seq=args.after_seq, timeout_sec=args.timeout_sec)
+    except EvidenceHandoffTimeout:
+        print(json.dumps({
+            "status": "timeout",
+            "topic": args.topic,
+            "after_seq": args.after_seq,
+            "timeout_sec": args.timeout_sec,
+        }, ensure_ascii=False))
+        sys.exit(3)
+    except EvidenceHandoffError as exc:
+        _emit_handoff_error(exc)
+        sys.exit(2)
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def cmd_handoff_verify(args):
+    cwd = Path.cwd()
+    try:
+        result = verify_evidence_handoff(args.path, expect_digest=args.expect_digest, cwd=cwd)
+    except EvidenceHandoffError as exc:
+        _emit_handoff_error(exc)
+        sys.exit(2)
+    print(json.dumps(result, ensure_ascii=False))
+
+
 def _cap_for_findings(findings: list[dict]) -> float | None:
     counts = {"High": 0, "Medium": 0, "Low": 0}
     for finding in findings:
@@ -15396,6 +15447,23 @@ def _build_parser():
     p_record_step.set_defaults(func=cmd_executor_handoff_record, command_outcome_tracking=True)
     p_complete = handoff_sub.add_parser("complete", help="consume handoff after all canonical steps")
     p_complete.set_defaults(func=cmd_executor_handoff_complete, command_outcome_tracking=True)
+
+    p_handoff = sub.add_parser("handoff", help="local evidence handoff sidecar contract")
+    handoff_cli = p_handoff.add_subparsers(dest="handoff_cmd", required=True)
+    p_handoff_publish = handoff_cli.add_parser("publish", help="atomic write one evidence handoff envelope")
+    p_handoff_publish.add_argument("--topic", required=True)
+    p_handoff_publish.add_argument("--input", required=True, help="payload JSON regular file or '-' for stdin")
+    p_handoff_publish.add_argument("--producer-session", default=None)
+    p_handoff_publish.set_defaults(func=cmd_handoff_publish)
+    p_handoff_await = handoff_cli.add_parser("await", help="block until one newer evidence handoff exists")
+    p_handoff_await.add_argument("--topic", required=True)
+    p_handoff_await.add_argument("--after-seq", type=int, default=0)
+    p_handoff_await.add_argument("--timeout-sec", type=int, default=600)
+    p_handoff_await.set_defaults(func=cmd_handoff_await)
+    p_handoff_verify = handoff_cli.add_parser("verify", help="recompute and compare one handoff digest")
+    p_handoff_verify.add_argument("--path", required=True)
+    p_handoff_verify.add_argument("--expect-digest", default=None)
+    p_handoff_verify.set_defaults(func=cmd_handoff_verify)
 
     p_verify_approval = spec_sub.add_parser(
         "verify-approval", help="host-trusted verifierのevidenceからper-invocation receiptを生成する"
