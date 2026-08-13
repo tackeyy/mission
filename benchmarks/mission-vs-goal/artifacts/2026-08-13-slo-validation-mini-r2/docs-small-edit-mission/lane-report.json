@@ -1,0 +1,49 @@
+{
+  "groups": [
+    {
+      "rendezvous_loss_sec": 7.0,
+      "root_run_id": "mission-local-1badb000f4daee57240ef209b9cef8bc",
+      "sessions": [
+        {
+          "observed_active_sec": 286.0,
+          "phase": "done",
+          "session_id": "bench-2026-08-13-slo-validation-mini-r2-docs-small-edit-mission",
+          "session_role": "implementer",
+          "slo_breached": false,
+          "unobserved_gap_sec": 0.0,
+          "wait_total_sec": 7.0,
+          "wait_totals_sec": {
+            "reviewer-wait": 7.0
+          },
+          "wall_clock_sec": 293.0
+        }
+      ]
+    }
+  ],
+  "rendezvous_loss_sec": 7.0,
+  "role_summaries": {
+    "implementer": {
+      "observed_active_sec": 286.0,
+      "wait_totals_sec": {
+        "reviewer-wait": 7.0
+      },
+      "wall_clock_sec": 293.0
+    }
+  },
+  "sessions": [
+    {
+      "observed_active_sec": 286.0,
+      "phase": "done",
+      "session_id": "bench-2026-08-13-slo-validation-mini-r2-docs-small-edit-mission",
+      "session_role": "implementer",
+      "slo_breached": false,
+      "unobserved_gap_sec": 0.0,
+      "wait_total_sec": 7.0,
+      "wait_totals_sec": {
+        "reviewer-wait": 7.0
+      },
+      "wall_clock_sec": 293.0
+    }
+  ],
+  "slo_minutes": 15
+}
