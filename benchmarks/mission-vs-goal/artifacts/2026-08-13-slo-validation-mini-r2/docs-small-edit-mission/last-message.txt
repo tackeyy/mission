@@ -1,0 +1,7 @@
+ベンチマーク成果物を作成し、mission state も合格まで通しました。
+
+- 成果物: [docs-small-edit-mission.md](/tmp/<scratchpad>/slo-bench-run/docs-small-edit-mission/repo/benchmarks/mission-vs-goal/run-output/2026-08-13-slo-validation-mini-r2/docs-small-edit-mission.md)
+- 追記内容: README のインストール節で、`git clone` に必要な前提として `git` CLI がインストール済みで `PATH` 上にあることを明示する案を記録しました。
+- 検証結果: `push-score` で composite 4.6、`mark-passes` 成功、`next` は `report-complete` を返しました。
+
+コミット、push、パッケージインストール、ネットワークアクセスはしていません。

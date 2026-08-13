@@ -1,0 +1,32 @@
+{
+  "arms": {
+    "goal_only": {
+      "average_elapsed_minutes": 1.43,
+      "average_evidence_completeness": 4.0,
+      "average_intervention_count": 0.0,
+      "average_quality_score": 4.0,
+      "completion_rate": 1.0,
+      "records": 1,
+      "validator_pass_rate": 1.0
+    },
+    "mission": {
+      "average_elapsed_minutes": 6.99,
+      "average_evidence_completeness": 4.0,
+      "average_intervention_count": 0.0,
+      "average_quality_score": 4.0,
+      "completion_rate": 1.0,
+      "records": 1,
+      "validator_pass_rate": 1.0
+    }
+  },
+  "expected_records": 20,
+  "records": 2,
+  "run_id": "2026-08-13-slo-validation-mini-r2",
+  "slo": {
+    "breached_records": 0,
+    "wall_clock_median_sec": 293.0
+  },
+  "starting_commit": "2639a82",
+  "task_cohort": "baseline",
+  "task_file": "benchmarks/mission-vs-goal/tasks.json"
+}
