@@ -609,11 +609,12 @@ issue 起票 → worktree feature ブランチ → PR (本文に `Closes #N` を
 - `verify` が exit 2 なら、その entry は invalidated なので base 統合 → refreeze (`--head-sha` を更新して再 enqueue) → fresh review → 再登録の順でやり直す。
 - `depends_on` に列挙した issue_ref_key が `merged` になるまで、後続 entry は `queue next` に出ない。
 - 単独 mission は従来どおり queue を使わなくてよい。
-- → #454 節参照
+- [worktree での init 配置規律 (#454)](#worktree-での-init-配置規律-454)
 
-### worktree での init 配置規律 (#454)
+## worktree での init 配置規律 (#454)
 
 - worktree で queue enqueue --from-state / queue verify を回すときは、最新 `score_history` の `revision_scope.head_sha` が実際にレビューした HEAD と一致していることを先に確認する。checkout 移動や rename で `project_root` が stale になっている場合は、先に `update-project-root --path <new-root>` で救済してから review / push-score / queue 再登録をやり直す。`git revision_scope head is not the current reviewed HEAD` は、別 HEAD の score を流用したか、レビュー後に HEAD がずれた失敗であり、`--from-state` の上書きではなく再レビュー → 再採点 → 再 enqueue を要求する。
+- 具体例: `cp -R <main-root>/.mission-state/sessions/<sid>.json` ほか必要 evidence を `<worktree>/.mission-state/` へ複製し、`update-project-root --path <worktree>` を実行して state root を付け替える。
 
 ## Phase 7 自動マージ — 詳細判定ロジック
 
