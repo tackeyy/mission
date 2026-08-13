@@ -12034,7 +12034,9 @@ def cmd_planning_adopt_core(args):
             _provider_gate("planning-provider-required")
 
         iteration = data.get("iteration")
-        if type(iteration) is not int or iteration < 1:
+        # `init` writes 0 and only `push-score` raises it, so the first plan of a
+        # session is adopted at 0.  Reject bool, non-int, and negative values.
+        if type(iteration) is not int or iteration < 0:
             _provider_gate("core-iteration-invalid")
         source_id = (
             f"core-{iteration}-{secrets.token_hex(6)}"
