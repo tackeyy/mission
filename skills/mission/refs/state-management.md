@@ -572,6 +572,8 @@ meta/non-operation の証明は context 全体が `review/analyze/document/inspe
 
 `stats --json` と `mission-audit.py --json` は同じpure reducerで `failure_ledger_counts` を返す。出力はpattern数、再発pattern数、weak phase別件数、invalid ledger数だけで、rule本文やdigest参照は出力しない。ledger欠落のlegacy stateは空として扱い、audit findingにはしない。
 
+`learning brief` は read-only の別集計で、state root の sessions/ と archive の terminal state を走査し、valid な failure_ledger から normalised `general_fix_rule` を weak_phase 別・再発回数降順で出力する。`--weak-phase` と `--limit` は観測の絞り込みで、gate 意味論は変えない。planner / executor には brief を注入してよいが、reviewer には注入しない。
+
 ## review publish rollback の recovery residue
 
 既存 output の rollback が失敗して旧 bytes を自動復元できない場合、同じ親ディレクトリに
