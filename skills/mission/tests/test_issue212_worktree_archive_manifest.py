@@ -242,6 +242,197 @@ def _make_completed_worktree_with_repo_artifact(tmp_path: Path) -> tuple[Path, P
     return worktree, destination, repo_artifact
 
 
+def _make_completed_worktree_with_staged_repo_artifact(tmp_path: Path) -> tuple[Path, Path, Path]:
+    worktree, destination = _make_neutral_git_worktree(tmp_path)
+    mission_state = worktree / ".mission-state"
+    repo_artifact = _write(
+        worktree / "docs" / "repo-artifact.md",
+        "# repo artifact\n",
+    )
+    _git(worktree, "add", "docs/repo-artifact.md")
+
+    assumptions = _write(
+        mission_state / "sessions" / f"{SESSION_ID}-assumptions.md",
+        "# assumptions\n",
+    )
+    artifact = repo_artifact
+    scoring = _write(
+        mission_state / "archive" / "noncanonical-scoring.json",
+        '{"items":{"accuracy":4.6}}\n',
+    )
+    reviews = _write(
+        mission_state / "archive" / "noncanonical-reviews.json",
+        '{"reviews":[]}\n',
+    )
+    specialist = _write(
+        mission_state / "archive" / "specialist-note.md",
+        "# specialist evidence\n",
+    )
+    progress = _write(
+        mission_state / "archive" / "progress.md",
+        "# progress evidence\n",
+    )
+    progress_artifact = _write(
+        mission_state / "archive" / "progress-data.json",
+        '{"completed":1}\n',
+    )
+    approval_receipt = _write(
+        mission_state / "archive" / "approval-receipt.json",
+        '{"receipt":"fixture"}\n',
+    )
+
+    artifact_payload = artifact.read_bytes()
+    state = {
+        "mission": "neutral archive manifest test",
+        "mission_id": MISSION_ID,
+        "session_id": SESSION_ID,
+        "iteration": 2,
+        "project_root": str(worktree),
+        "passes": True,
+        "loop_active": False,
+        "halt_reason": "",
+        "phase": "done",
+        "started_at": "2026-07-20T00:00:00Z",
+        "updated_at": "2026-07-20T00:10:00Z",
+        "assumptions_path": str(assumptions),
+        "artifact": {
+            "path": str(artifact.relative_to(worktree)),
+            "required_for_pass": True,
+            "status": "rendered",
+            "last_rendered_at": "2026-07-20T00:09:00Z",
+            "digest": _sha256(artifact),
+            "size": len(artifact_payload),
+            "producer_run_id": "repo-artifact-run",
+        },
+        "score_history": [
+            {
+                "iteration": 2,
+                "composite": 4.6,
+                "min_item": 4.5,
+                "items": {"accuracy": 4.6},
+                "timestamp": "2026-07-20T00:08:00Z",
+                "score_source": "scoring-json",
+                "scoring_evidence_path": str(scoring),
+                "findings_evidence_path": str(reviews.relative_to(worktree)),
+                "open_high": 0,
+            }
+        ],
+        "specialist_invocations": [
+            {
+                "iteration": 2,
+                "phase": "execution",
+                "skill": "neutral-specialist",
+                "status": "completed",
+                "evidence_path": str(specialist.relative_to(worktree)),
+            }
+        ],
+        "progress": {
+            "evidence_path": str(progress.relative_to(worktree)),
+            "artifact_path": str(progress_artifact.relative_to(worktree)),
+        },
+        "force_approval": {"receipt_ref": {"path": str(approval_receipt.relative_to(worktree))}},
+    }
+    state_file = mission_state / "sessions" / f"{SESSION_ID}.json"
+    _write(state_file, json.dumps(state, indent=2) + "\n")
+    return worktree, destination, repo_artifact
+
+
+def _make_completed_worktree_with_repo_symlink_artifact(tmp_path: Path) -> tuple[Path, Path, Path]:
+    worktree, destination = _make_neutral_git_worktree(tmp_path)
+    mission_state = worktree / ".mission-state"
+    target = _write(tmp_path / "repo-artifact-target.md", "# repo artifact\n")
+    repo_artifact = worktree / "docs" / "repo-artifact.md"
+    repo_artifact.parent.mkdir(parents=True, exist_ok=True)
+    repo_artifact.symlink_to(target)
+    _git(worktree, "add", "docs/repo-artifact.md")
+    _git(worktree, "commit", "-m", "add symlink repo artifact")
+
+    assumptions = _write(
+        mission_state / "sessions" / f"{SESSION_ID}-assumptions.md",
+        "# assumptions\n",
+    )
+    artifact = repo_artifact
+    scoring = _write(
+        mission_state / "archive" / "noncanonical-scoring.json",
+        '{"items":{"accuracy":4.6}}\n',
+    )
+    reviews = _write(
+        mission_state / "archive" / "noncanonical-reviews.json",
+        '{"reviews":[]}\n',
+    )
+    specialist = _write(
+        mission_state / "archive" / "specialist-note.md",
+        "# specialist evidence\n",
+    )
+    progress = _write(
+        mission_state / "archive" / "progress.md",
+        "# progress evidence\n",
+    )
+    progress_artifact = _write(
+        mission_state / "archive" / "progress-data.json",
+        '{"completed":1}\n',
+    )
+    approval_receipt = _write(
+        mission_state / "archive" / "approval-receipt.json",
+        '{"receipt":"fixture"}\n',
+    )
+
+    artifact_payload = artifact.read_bytes()
+    state = {
+        "mission": "neutral archive manifest test",
+        "mission_id": MISSION_ID,
+        "session_id": SESSION_ID,
+        "iteration": 2,
+        "project_root": str(worktree),
+        "passes": True,
+        "loop_active": False,
+        "halt_reason": "",
+        "phase": "done",
+        "started_at": "2026-07-20T00:00:00Z",
+        "updated_at": "2026-07-20T00:10:00Z",
+        "assumptions_path": str(assumptions),
+        "artifact": {
+            "path": str(artifact.relative_to(worktree)),
+            "required_for_pass": True,
+            "status": "rendered",
+            "last_rendered_at": "2026-07-20T00:09:00Z",
+            "digest": _sha256(artifact),
+            "size": len(artifact_payload),
+            "producer_run_id": "repo-artifact-run",
+        },
+        "score_history": [
+            {
+                "iteration": 2,
+                "composite": 4.6,
+                "min_item": 4.5,
+                "items": {"accuracy": 4.6},
+                "timestamp": "2026-07-20T00:08:00Z",
+                "score_source": "scoring-json",
+                "scoring_evidence_path": str(scoring),
+                "findings_evidence_path": str(reviews.relative_to(worktree)),
+                "open_high": 0,
+            }
+        ],
+        "specialist_invocations": [
+            {
+                "iteration": 2,
+                "phase": "execution",
+                "skill": "neutral-specialist",
+                "status": "completed",
+                "evidence_path": str(specialist.relative_to(worktree)),
+            }
+        ],
+        "progress": {
+            "evidence_path": str(progress.relative_to(worktree)),
+            "artifact_path": str(progress_artifact.relative_to(worktree)),
+        },
+        "force_approval": {"receipt_ref": {"path": str(approval_receipt.relative_to(worktree))}},
+    }
+    state_file = mission_state / "sessions" / f"{SESSION_ID}.json"
+    _write(state_file, json.dumps(state, indent=2) + "\n")
+    return worktree, destination, repo_artifact
+
+
 def _archive(run_cli, worktree: Path, destination: Path):
     return run_cli(
         "archive-worktree",
@@ -1776,6 +1967,48 @@ def test_archive_worktree_records_tracked_repo_artifact_reference(
     assert "archive_path" not in item
     assert "sha256" not in item
     assert "size" not in item
+
+
+def test_archive_validator_accepts_repo_artifact_after_source_git_rm_and_commit(
+    tmp_path, run_cli
+):
+    worktree, destination, repo_artifact = _make_completed_worktree_with_repo_artifact(tmp_path)
+    expected_digest = _sha256(repo_artifact)
+
+    result = _archive(run_cli, worktree, destination)
+
+    assert result.returncode == 0, result.stderr
+    bundle = Path(json.loads(result.stdout)["bundle_path"])
+    _git(worktree, "rm", "docs/repo-artifact.md")
+    _git(worktree, "commit", "-m", "remove repo artifact")
+
+    validation = worktree_archive.validate_worktree_archive_bundle(bundle)
+
+    assert validation.status == "valid"
+    assert validation.checkout_root == destination.resolve()
+    item = next(entry for entry in validation.evidence if entry.get("kind") == "repo-artifact")
+    assert item["path"] == str(repo_artifact.relative_to(worktree))
+    assert item["digest"] == expected_digest
+
+
+def test_archive_worktree_rejects_staged_repo_artifact_with_diagnostic(
+    tmp_path, run_cli
+):
+    worktree, destination, _repo_artifact = _make_completed_worktree_with_staged_repo_artifact(tmp_path)
+
+    result = _archive(run_cli, worktree, destination)
+
+    assert result.returncode == 2
+    assert "artifact is staged but not yet committed: docs/repo-artifact.md; commit before archiving" in result.stderr
+
+
+def test_archive_worktree_rejects_tracked_repo_symlink_artifact(tmp_path, run_cli):
+    worktree, destination, _repo_artifact = _make_completed_worktree_with_repo_symlink_artifact(tmp_path)
+
+    result = _archive(run_cli, worktree, destination)
+
+    assert result.returncode == 2
+    assert "repo artifact must not be a symlink: docs/repo-artifact.md" in result.stderr
 
 
 def test_archive_worktree_rejects_symlink_evidence(tmp_path, run_cli):

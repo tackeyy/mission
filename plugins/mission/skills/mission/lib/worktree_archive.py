@@ -82,6 +82,10 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _git_object_id(value: object) -> bool:
+    return isinstance(value, str) and bool(re.fullmatch(r"[0-9a-f]{40}([0-9a-f]{24})?", value))
+
+
 def _git_bytes(cwd: Path, *args: str) -> bytes:
     result = subprocess.run(
         ["git", "-C", str(cwd), *args],
@@ -107,7 +111,7 @@ def _stat_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, i
 def _git_repo_artifact_bytes(
     checkout_root: Path, *, path: str, head_sha: str,
 ) -> bytes:
-    if not re.fullmatch(r"[0-9a-f]{64}", head_sha):
+    if not _git_object_id(head_sha):
         raise ValueError("archive repo artifact head sha is invalid")
     if not _safe_relative_path(path):
         raise ValueError("archive repo artifact path is invalid")
@@ -455,6 +459,7 @@ def read_verified_review_input_evidence(
 
 def worktree_archive_lineage_references(
     state: dict[str, Any], state_reference: str, *, repo_root: Path | None = None,
+    verify_repo_artifact_tracking: bool = True,
 ) -> tuple[tuple[str, int, str], ...] | None:
     """Return every state-owned immutable reference an archive must preserve.
 
@@ -531,21 +536,24 @@ def worktree_archive_lineage_references(
                 repo_relative = _safe_relative_path(artifact_path)
                 if repo_relative is None:
                     return None
-            tracked = subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(repo_root),
-                    "ls-files",
-                    "--error-unmatch",
-                    "--",
-                    repo_relative.as_posix(),
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if tracked.returncode != 0 or not add("artifact", iteration, repo_relative.as_posix()):
+            if verify_repo_artifact_tracking:
+                tracked = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(repo_root),
+                        "ls-files",
+                        "--error-unmatch",
+                        "--",
+                        repo_relative.as_posix(),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if tracked.returncode != 0:
+                    return None
+            if not add("artifact", iteration, repo_relative.as_posix()):
                 return None
     for entry in state.get("score_history") or []:
         if not isinstance(entry, dict):
@@ -605,7 +613,9 @@ def worktree_archive_lineage_references(
 
 def _expected_lineage(state: dict[str, Any], state_path: Path, *, repo_root: Path | None = None):
     references = worktree_archive_lineage_references(
-        state, f".mission-state/sessions/{state_path.name}", repo_root=repo_root,
+        state, f".mission-state/sessions/{state_path.name}",
+        repo_root=repo_root,
+        verify_repo_artifact_tracking=False,
     )
     return Counter(references) if references is not None else None
 
@@ -633,8 +643,7 @@ def read_validated_archive_evidence(
         if (
             checkout_root is None
             or _safe_relative_path(path) is None
-            or not isinstance(head_sha, str)
-            or not re.fullmatch(r"[0-9a-f]{64}", head_sha)
+            or not _git_object_id(head_sha)
             or not isinstance(digest, str)
             or not re.fullmatch(r"[0-9a-f]{64}", digest)
         ):
@@ -787,13 +796,22 @@ def validate_worktree_archive_bundle(bundle: Path) -> WorktreeArchiveValidation:
             if (
                 not isinstance(digest, str)
                 or len(digest) != 64
-                or not isinstance(head_sha, str)
-                or not re.fullmatch(r"[0-9a-f]{64}", head_sha)
+                or not _git_object_id(head_sha)
                 or item.get("archive_path") is not None
                 or item.get("sha256") is not None
                 or item.get("size") is not None
             ):
                 return _invalid(bundle, generation_root, "manifest-invalid-evidence-file", generation)
+            try:
+                content = _git_repo_artifact_bytes(
+                    bundle.parent.parent.parent,
+                    path=source_reference.as_posix(),
+                    head_sha=head_sha,
+                )
+            except ValueError:
+                return _invalid(bundle, generation_root, "manifest-evidence-access-error", generation)
+            if hashlib.sha256(content).hexdigest() != digest:
+                return _invalid(bundle, generation_root, "manifest-evidence-integrity-mismatch", generation)
             checked.append({
                 **item,
                 "source_reference": source_reference.as_posix(),
@@ -856,6 +874,8 @@ def validate_worktree_archive_bundle(bundle: Path) -> WorktreeArchiveValidation:
     if review_references is not None and not isinstance(review_references, list):
         return _invalid(bundle, generation_root, "manifest-review-input-reference-invalid", generation)
     for item in checked:
+        if item["evidence_kind"] == "repo-artifact":
+            continue
         if item["evidence_kind"] != "review-input":
             continue
         matches = [
@@ -886,4 +906,5 @@ def validate_worktree_archive_bundle(bundle: Path) -> WorktreeArchiveValidation:
         evidence=tuple(checked),
         pointer_sha256=hashlib.sha256(pointer_bytes).hexdigest(),
         manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+        checkout_root=bundle.parent.parent.parent,
     )

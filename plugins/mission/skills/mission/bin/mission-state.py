@@ -5869,7 +5869,22 @@ def _tracked_repo_artifact_spec(
     if tracked.returncode != 0:
         raise WorktreeArchiveError(f"required evidence is outside .mission-state: {kind}: {reference}")
     head_sha = _git_command_text(cwd, "rev-parse", "HEAD")
-    content = _git_command_bytes(cwd, "show", f"{head_sha}:{relative.as_posix()}")
+    tree_entry = subprocess.run(
+        ["git", "-C", str(cwd), "ls-tree", "-l", "HEAD", "--", relative.as_posix()],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if tree_entry.returncode == 0 and tree_entry.stdout.strip():
+        mode = tree_entry.stdout.split(None, 1)[0]
+        if mode == "120000":
+            raise WorktreeArchiveError(f"repo artifact must not be a symlink: {reference}")
+    try:
+        content = _git_command_bytes(cwd, "show", f"{head_sha}:{relative.as_posix()}")
+    except WorktreeArchiveError as exc:
+        raise WorktreeArchiveError(
+            f"artifact is staged but not yet committed: {reference}; commit before archiving"
+        ) from exc
     digest = hashlib.sha256(content).hexdigest()
     return {
         "evidence_kind": kind,
@@ -6024,7 +6039,7 @@ def _existing_archive_manifest(bundle: Path) -> dict | None:
                 or not isinstance(item.get("digest"), str)
                 or len(item["digest"]) != 64
                 or not isinstance(item.get("head_sha"), str)
-                or len(item["head_sha"]) != 64
+                or len(item["head_sha"]) not in {40, 64}
                 or item.get("archive_path") is not None
                 or item.get("sha256") is not None
                 or item.get("size") is not None
