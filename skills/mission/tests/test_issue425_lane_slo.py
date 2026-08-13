@@ -532,3 +532,72 @@ def test_lane_report_slo_minutes_rejects_non_positive(tmp_path, run_cli):
         result = run_cli("lane-report", "--json", "--slo-minutes", bad, cwd=tmp_path)
         assert result.returncode == 2
         assert "positive" in result.stderr
+
+
+def test_lane_report_group_clipping_diverges_from_global_subtraction(tmp_path, run_cli):
+    """グループ内クリップの意図的な意味変更を数値で固定する。
+
+    root-a: implementer wait 100 < checker active 300 → クリップで 0
+    root-b: implementer wait 500 > checker active 50 → 450
+    合算 450 は、旧グローバル計算 max(0, 600-350)=250 と意図的に異なる。
+    """
+    def _impl(name, root, wait_sec, end):
+        _write_session(
+            tmp_path,
+            name,
+            session_role="implementer",
+            root_run_id=root,
+            phase="done",
+            passes=True,
+            loop_active=False,
+            halt_reason="",
+            started_at="2026-08-13T00:00:00Z",
+            updated_at="2026-08-13T00:20:00Z",
+            activity_segments=[
+                {
+                    "kind": "subagent-wait",
+                    "reason": "checker-evidence",
+                    "phase": "executing",
+                    "started_at": "2026-08-13T00:00:00Z",
+                    "ended_at": end,
+                    "duration_sec": float(wait_sec),
+                }
+            ],
+        )
+
+    def _checker(name, root, active_sec, end):
+        _write_session(
+            tmp_path,
+            name,
+            session_role="checker",
+            root_run_id=root,
+            phase="done",
+            passes=False,
+            loop_active=False,
+            halt_reason="done",
+            started_at="2026-08-13T00:00:00Z",
+            updated_at="2026-08-13T00:20:00Z",
+            activity_segments=[
+                {
+                    "kind": "active",
+                    "reason": "work",
+                    "phase": "reviewing",
+                    "started_at": "2026-08-13T00:00:00Z",
+                    "ended_at": end,
+                    "duration_sec": float(active_sec),
+                }
+            ],
+        )
+
+    _impl("impl-a", "root-a", 100, "2026-08-13T00:01:40Z")
+    _checker("chk-a", "root-a", 300, "2026-08-13T00:05:00Z")
+    _impl("impl-b", "root-b", 500, "2026-08-13T00:08:20Z")
+    _checker("chk-b", "root-b", 50, "2026-08-13T00:00:50Z")
+
+    result = run_cli("lane-report", "--json", cwd=tmp_path, check=True)
+    payload = json.loads(result.stdout)
+    groups = {group["root_run_id"]: group for group in payload["groups"]}
+    assert groups["root-a"]["rendezvous_loss_sec"] == 0.0
+    assert groups["root-b"]["rendezvous_loss_sec"] == 450.0
+    # 旧グローバル計算 max(0, 600-350)=250 ではなくグループ合算 450
+    assert payload["rendezvous_loss_sec"] == 450.0

@@ -14112,13 +14112,6 @@ def cmd_lane_report(args):
         print("ERROR: lane-report requires at least one mission state", file=sys.stderr)
         sys.exit(1)
     overall = summarize_activity_states(states)
-    non_implementer_active_sec = 0.0
-    for role, summary in (overall.get("role_summaries") or {}).items():
-        if role == "implementer":
-            continue
-        active = summary.get("observed_active_sec") if isinstance(summary, dict) else None
-        if isinstance(active, (int, float)) and not isinstance(active, bool) and active >= 0:
-            non_implementer_active_sec += float(active)
     entries = [
         _lane_report_session_entry(
             state,
