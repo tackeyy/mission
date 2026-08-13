@@ -197,6 +197,10 @@ Codex は (a) Skill tool の単一メッセージ並列起動ができない (b)
 
 `codex-preflight --json` の `scoring_pipeline` フィールドに上記の正規経路が要約されている。Codex セッション開始時に一度読んでおくと、初回失敗時に force へ逃げるリスクを減らせる。
 
+## checker ランデブー
+
+GitHub コメントのポーリングで待つ代わりに、implementer は `mission-state.py handoff await --topic <slug> --after-seq <N> --timeout-sec 600` を 1 回だけ実行して evidence の到着を待つ。checker は `handoff publish` で返る `payload_digest` を GitHub コメント本文に含め、受領側は `handoff verify --path <file> --expect-digest <sha256:...>` でローカル evidence と正規記録の一致を確認してから使う。`.mission-state/handoff/` は一時ランデブー領域として扱い、手動 prune はしない。
+
 ## 修正履歴
 
 | 日時 | 内容 |
@@ -207,3 +211,4 @@ Codex は (a) Skill tool の単一メッセージ並列起動ができない (b)
 | 2026-07-03 | `codex-preflight` を追加し、state 未初期化 / Stop hook 未設定 / `next` fallback の診断手順を明文化 |
 | 2026-07-11 | #187: aggregate-reviews が回らない時のトラブルシュート節を追加。`next` の findings evidence 欠落検出と `codex-preflight` の `scoring_pipeline` フィールドを併記し、`--force` へ逃げない手順を明記 |
 | 2026-07-21 | #144: Codex開始時の `--strict` を必須化し、task setup / worktree / implementation 前のexit 0確認と、final前の`next` terminal gateを明記 |
+| 2026-08-13 | #422: checker ランデブー節を追加（GitHubコメントポーリングから handoff await へ) |
