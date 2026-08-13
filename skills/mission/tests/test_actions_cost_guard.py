@@ -21,7 +21,8 @@ def test_ci_is_one_bounded_quality_job():
 def test_python_and_shell_quality_gates_remain():
     assert "run: make test PYTHON=python" in CI
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
-    assert "$(VENV_PYTHON) -m pytest -q skills/mission" in makefile
+    assert "$(VENV_PYTHON) -m pytest -q -n auto --dist loadfile skills/mission" in makefile
+    assert "$(VENV_PYTHON) -m pytest -q -n auto --dist loadfile skills/mission -k" in makefile  # test-e2e も並列維持
     assert (
         "shellcheck scripts/mission-stop-guard.sh plugins/mission/scripts/mission-stop-guard.sh "
         "scripts/sync-codex-plugin-wrapper.sh scripts/mission-local-authoring-sync.sh"
