@@ -197,6 +197,10 @@ Codex は (a) Skill tool の単一メッセージ並列起動ができない (b)
 
 `codex-preflight --json` の `scoring_pipeline` フィールドに上記の正規経路が要約されている。Codex セッション開始時に一度読んでおくと、初回失敗時に force へ逃げるリスクを減らせる。
 
+## checker ランデブー
+
+GitHub コメントのポーリングで待つ代わりに、implementer は `mission-state.py handoff await --topic <slug> --after-seq <N> --timeout-sec 600` を 1 回だけ実行して evidence の到着を待つ。checker は `handoff publish` で返る `payload_digest` を GitHub コメント本文に含め、受領側は `handoff verify --path <file> --expect-digest <sha256:...>` でローカル evidence と正規記録の一致を確認してから使う。`.mission-state/handoff/` は一時ランデブー領域として扱い、手動 prune はしない。
+
 ## 修正履歴
 
 | 日時 | 内容 |
