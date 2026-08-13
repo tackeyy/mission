@@ -31,10 +31,12 @@ jobs:
         uses: actions/github-script@v9
         with:
           script: |
+            const {
+              classifyChangedFiles,
+            } = require('./scripts/ci_changed_scopes');
             let files = [];
-            let runAll = context.eventName !== 'pull_request';
             try {
-              if (!runAll) {
+              if (context.eventName === 'pull_request') {
                 const response = await github.paginate(github.rest.pulls.listFiles, {
                   owner: context.repo.owner,
                   repo: context.repo.repo,
@@ -45,20 +47,18 @@ jobs:
               }
             } catch (error) {
               core.warning(`Changed-file detection failed; running all checks: ${error.message}`);
-              runAll = true;
+              files = [];
             }
-            if (files.length === 0) runAll = true;
-
-            const workflow = files.some((file) =>
-              file.startsWith('.github/workflows/') || file === '.github/dependabot.yml',
-            );
-            // The Python suite validates repository-wide docs, plugin manifests,
-            // hooks, distribution copies, and source together. Keep it required
-            // for every PR so a newly added cross-file invariant cannot be skipped.
-            const python = true;
-            const shell = runAll || workflow || files.some((file) => file.endsWith('.sh'));
-            core.setOutput('python', python ? 'true' : 'false');
-            core.setOutput('shell', shell ? 'true' : 'false');
+            const decision = classifyChangedFiles({
+              eventName: context.eventName,
+              files,
+            });
+            // The Python suite must remain fail-safe: docs/results-only PRs use
+            // a smaller guard set, but any ambiguity, code change, or non-PR
+            // event falls back to the full tracked-tree suite.
+            core.setOutput('python', decision.python ? 'true' : 'false');
+            core.setOutput('python_targets', decision.pythonTargets);
+            core.setOutput('shell', decision.shell ? 'true' : 'false');
 
       - name: Set up Python
         if: steps.changes.outputs.python == 'true'
@@ -70,7 +70,7 @@ jobs:
 
       - name: Run Python tests
         if: steps.changes.outputs.python == 'true'
-        run: make test PYTHON=python
+        run: make test PYTHON=python PYTEST_TARGETS="${{ steps.changes.outputs.python_targets }}"
 
       - name: Verify runner ShellCheck
         if: steps.changes.outputs.shell == 'true'
