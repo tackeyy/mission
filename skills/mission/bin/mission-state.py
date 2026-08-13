@@ -13863,7 +13863,6 @@ def _lane_report_session_role(state: dict) -> str:
 def _lane_report_session_entry(
     state: dict,
     *,
-    non_implementer_active_sec: float,
     slo_minutes: int | None,
 ) -> dict:
     summary = summarize_activity_states([state])
@@ -13883,9 +13882,6 @@ def _lane_report_session_entry(
         active = role_summary.get("observed_active_sec")
         if isinstance(active, (int, float)) and not isinstance(active, bool) and active >= 0:
             observed_active_sec = float(active)
-    rendezvous_loss_sec = 0.0
-    if role == "implementer":
-        rendezvous_loss_sec = max(0.0, wait_total_sec - non_implementer_active_sec)
     entry = {
         "session_id": state.get("session_id"),
         "session_role": role,
@@ -13894,7 +13890,7 @@ def _lane_report_session_entry(
         "observed_active_sec": observed_active_sec,
         "wait_totals_sec": normalized_wait_totals,
         "unobserved_gap_sec": float(summary.get("unobserved_gap_sec") or 0.0),
-        "rendezvous_loss_sec": rendezvous_loss_sec,
+        "wait_total_sec": wait_total_sec,
     }
     if slo_minutes is not None:
         terminal = state.get("phase") in {"done", "halted"} or state.get("loop_active") is False
@@ -13904,6 +13900,13 @@ def _lane_report_session_entry(
             and entry["wall_clock_sec"] > float(slo_minutes) * 60.0
         )
     return entry
+
+
+def _lane_positive_minutes(value: str) -> int:
+    minutes = int(value)
+    if minutes <= 0:
+        raise argparse.ArgumentTypeError("--slo-minutes must be a positive integer")
+    return minutes
 
 
 def cmd_lane_report(args):
@@ -13937,15 +13940,20 @@ def cmd_lane_report(args):
     entries = [
         _lane_report_session_entry(
             state,
-            non_implementer_active_sec=non_implementer_active_sec,
             slo_minutes=getattr(args, "slo_minutes", None),
         )
         for state in sorted(states, key=lambda item: str(item.get("session_id") or ""))
     ]
+    implementer_wait_sec = sum(
+        float(entry["wait_total_sec"])
+        for entry in entries
+        if entry["session_role"] == "implementer"
+    )
     report = {
         "sessions": entries,
         "role_summaries": overall.get("role_summaries", {}),
-        "rendezvous_loss_sec": sum(float(entry["rendezvous_loss_sec"]) for entry in entries),
+        # 集約意味論: 全 implementer の待機合算 - 従属レーンの実働合算 (下限0)
+        "rendezvous_loss_sec": max(0.0, implementer_wait_sec - non_implementer_active_sec),
     }
     if getattr(args, "slo_minutes", None) is not None:
         report["slo_minutes"] = args.slo_minutes
@@ -15430,7 +15438,7 @@ def _build_parser():
         help="read-only lane duration report across current search roots",
     )
     p_lane.add_argument("--json", action="store_true", help="JSON 形式で出力")
-    p_lane.add_argument("--slo-minutes", type=int, default=None, dest="slo_minutes")
+    p_lane.add_argument("--slo-minutes", type=_lane_positive_minutes, default=None, dest="slo_minutes")
     p_lane.set_defaults(func=cmd_lane_report)
 
     p_halt2 = sub.add_parser("halt", help="state.json を halt させる (--all で全プロジェクト)")

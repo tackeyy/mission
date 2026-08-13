@@ -216,7 +216,7 @@ def test_lane_report_rendezvous_loss_computed(tmp_path, run_cli):
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
     implementer = next(session for session in payload["sessions"] if session["session_id"] == "impl")
-    assert implementer["rendezvous_loss_sec"] == 148.0
+    assert implementer["wait_total_sec"] == 300.0
     assert payload["rendezvous_loss_sec"] == 148.0
 
 
@@ -294,3 +294,76 @@ def test_baseline_json_schema_valid():
     assert payload["checker_wall_sec"] == 678
     assert payload["checker_active_sec"] == 152
     assert payload["rendezvous_loss_sec"] == 526
+
+
+def test_lane_report_rendezvous_loss_aggregated_across_implementers(tmp_path, run_cli):
+    for name in ("impl-a", "impl-b"):
+        _write_session(
+            tmp_path,
+            name,
+            session_role="implementer",
+            phase="done",
+            passes=True,
+            loop_active=False,
+            halt_reason="",
+            started_at="2026-08-13T00:00:00Z",
+            updated_at="2026-08-13T00:10:00Z",
+            activity_segments=[
+                {
+                    "kind": "subagent-wait",
+                    "reason": "checker-evidence",
+                    "phase": "executing",
+                    "started_at": "2026-08-13T00:00:00Z",
+                    "ended_at": "2026-08-13T00:05:00Z",
+                    "duration_sec": 300.0,
+                }
+            ],
+        )
+    _write_session(
+        tmp_path,
+        "checker",
+        session_role="checker",
+        phase="done",
+        passes=False,
+        loop_active=False,
+        halt_reason="done",
+        started_at="2026-08-13T00:00:00Z",
+        updated_at="2026-08-13T00:10:00Z",
+        activity_segments=[
+            {
+                "kind": "active",
+                "reason": "work",
+                "phase": "reviewing",
+                "started_at": "2026-08-13T00:00:00Z",
+                "ended_at": "2026-08-13T00:06:40Z",
+                "duration_sec": 400.0,
+            }
+        ],
+    )
+
+    result = run_cli("lane-report", "--json", cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    # 集約意味論: implementer 待機合算 600 - 従属レーン実働 400 = 200
+    assert payload["rendezvous_loss_sec"] == 200.0
+
+
+def test_lane_report_slo_minutes_rejects_non_positive(tmp_path, run_cli):
+    _write_session(
+        tmp_path,
+        "impl",
+        session_role="implementer",
+        phase="done",
+        passes=True,
+        loop_active=False,
+        halt_reason="",
+        started_at="2026-08-13T00:00:00Z",
+        updated_at="2026-08-13T00:10:00Z",
+        activity_segments=[],
+    )
+
+    for bad in ("0", "-5"):
+        result = run_cli("lane-report", "--json", "--slo-minutes", bad, cwd=tmp_path)
+        assert result.returncode == 2
+        assert "positive" in result.stderr

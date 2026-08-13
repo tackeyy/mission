@@ -20,7 +20,7 @@
 2. **`mission-state.py` に read-only サブコマンド `lane-report` を追加**（lease 不要・state mutation なし）:
    - `mission-state.py lane-report [--json] [--slo-minutes N]`
    - `.mission-state/sessions/*.json`（archive は対象外）を走査し、session ごとに `{session_id, session_role, phase, wall_clock_sec, observed_active_sec, wait_totals_sec, unobserved_gap_sec}` を出力
-   - `rendezvous_loss_sec`: 各 session の `subagent-wait` + `reviewer-wait` 合計から、同期間に稼働した従属 session（role != implementer）の `observed_active_sec` を引いた値の下限 0 クリップ。従属 session の対応付けは同一 state root 内の role で近似（v1 では厳密な親子リンクは不要と明記）
+   - `rendezvous_loss_sec`: **集約意味論** — 全 implementer session の wait 合算から、従属 session（role != implementer）の `observed_active_sec` 合算を引いた値の下限 0 クリップ（report レベルで 1 値。per-session への分配は行わない — 複数 implementer 時に per-session 減算だと系統的過小になるため）。従属 session の対応付けは同一 state root 内の role で近似（v1 では厳密な親子リンクは不要）
    - `--slo-minutes N` 指定時: terminal（done/halted）な implementer session について `wall_clock_sec > N*60` なら `slo_breached: true` を付ける。**観測のみで gate 意味論・exit code に影響しない**（常に exit 0、state 不在時のみ exit 1）
 3. **ベースライン記録**: `benchmarks/mission-vs-goal/results/2026-08-13-lane-slo-baseline.json` を新規作成。schema `mission-lane-slo-baseline/1` で上記実測値（cc_full_tier_wall_sec: 2220, codex_planning_sec: 1021, checker_wall_sec: 678, checker_active_sec: 152, rendezvous_loss_sec: 526）と出典（実運用ログ観測、2026-08-12/13）を記録
 4. **テスト** `skills/mission/tests/test_issue425_lane_slo.py`:
