@@ -92,10 +92,23 @@ if [ -n "${MISSION_HOOK_CWD:-}" ]; then
   CWD="${MISSION_HOOK_CWD}"
   AGENT_PID="${MISSION_HOOK_AGENT_PID:-${MISSION_HOOK_CLAUDE_PID:-}}"
 else
-  find_agent_proc || true
-  # Fallback: hook input .cwd
-  if [ -z "${CWD:-}" ]; then
-    CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")
+  # CWD は hook input .cwd を一次情報として優先し、祖先 agent の実 cwd は fallback に降格 (#426)。
+  # AGENT_PID は env sid (MISSION_SESSION_ID / CLAUDE_CODE_SESSION_ID / CODEX_THREAD_ID) が
+  # 全て欠落した pid fallback 照合でのみ必要なため、その場合に限り探索する
+  # (常時探索すると slow lsof で hook 全体が固まる #94 に逆行する)。
+  INPUT_CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")
+  _HAS_ENV_SID=false
+  if [ -n "${MISSION_SESSION_ID:-}" ] || [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] || [ -n "${CODEX_THREAD_ID:-}" ]; then
+    _HAS_ENV_SID=true
+  fi
+  if [ -n "$INPUT_CWD" ] && [ -d "$INPUT_CWD" ]; then
+    if [ "$_HAS_ENV_SID" != "true" ]; then
+      find_agent_proc || true
+    fi
+    # find_agent_proc は CWD も設定するため、input .cwd を最終値として再固定する
+    CWD="$INPUT_CWD"
+  else
+    find_agent_proc || true
   fi
   # Last resort: $PWD
   [ -z "${CWD:-}" ] && CWD="$PWD"
