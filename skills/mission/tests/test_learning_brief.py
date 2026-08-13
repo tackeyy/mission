@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from review_learning import reduce_failure_ledger
 
@@ -62,6 +65,100 @@ def _write_state(root: Path, state: dict, name: str) -> None:
     sessions = root / ".mission-state" / "sessions"
     sessions.mkdir(parents=True, exist_ok=True)
     (sessions / name).write_text(json.dumps(state), encoding="utf-8")
+
+
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _make_learning_brief_git_repo(tmp_path: Path) -> tuple[Path, Path]:
+    main_root = tmp_path / "main-checkout"
+    main_root.mkdir()
+    _git(main_root, "init", "--initial-branch=main")
+    _git(main_root, "config", "user.name", "Test User")
+    _git(main_root, "config", "user.email", "test@example.invalid")
+    (main_root / "README.md").write_text("main checkout\n", encoding="utf-8")
+    _git(main_root, "add", "README.md")
+    _git(main_root, "commit", "-m", "initial commit")
+
+    worktree_root = tmp_path / "worktree"
+    _git(main_root, "worktree", "add", str(worktree_root))
+    return main_root, worktree_root
+
+
+def _learning_brief_fixture_state(root: Path, *, session_name: str = "a") -> None:
+    ledger = reduce_failure_ledger([
+        {"iteration": 1, "review": _review(
+            iteration=1,
+            perspective="A",
+            phase="planning",
+            rule="Validate every boundary",
+            cause="The validation boundary was omitted",
+        ), "review_aggregate_ref": {"kind": "review-aggregate", "digest": "sha256:" + "a" * 64}},
+        {"iteration": 2, "review": _review(
+            iteration=2,
+            perspective="A",
+            phase="planning",
+            rule="Validate every boundary",
+            cause="The validation boundary was omitted again",
+        ), "review_aggregate_ref": {"kind": "review-aggregate", "digest": "sha256:" + "b" * 64}},
+    ])
+    _write_state(root, _state(session_name, "m1", root, ledger), f"{session_name}.json")
+
+
+@pytest.mark.parametrize(
+    "root_case, root_args",
+    [
+        ("explicit_root", lambda paths: ["--root", str(paths["main_root"])]),
+        ("worktree_auto", lambda paths: []),
+    ],
+    # lambda を含むため ids=str は不可 (メモリアドレス入り id が worker 間で異なり
+    # xdist の collection 不一致を起こす)。root_case と同名の明示 id を使う。
+    ids=["explicit_root", "worktree_auto"],
+)
+def test_learning_brief_root_resolution(root_case, root_args, tmp_path: Path, run_cli):
+    main_root, worktree_root = _make_learning_brief_git_repo(tmp_path)
+    _learning_brief_fixture_state(main_root)
+    worktree_state_root = worktree_root / ".mission-state"
+    (worktree_state_root / "sessions").mkdir(parents=True, exist_ok=True)
+    paths = {"main_root": main_root, "worktree_root": worktree_root}
+
+    result = run_cli(
+        "learning",
+        "brief",
+        *root_args(paths),
+        "--json",
+        cwd=worktree_root,
+        check=True,
+    )
+    payload = json.loads(result.stdout)
+    assert payload["rules"] == [{
+        "general_fix_rule": "validate every boundary",
+        "weak_phase": "planning",
+        "recurrence": 1,
+        "sessions": 1,
+    }]
+
+
+def test_learning_brief_default_roots_fall_back_to_cwd_on_git_failure(monkeypatch, tmp_path: Path):
+    module_path = Path(__file__).resolve().parent.parent / "bin" / "mission-state.py"
+    spec = importlib.util.spec_from_file_location("mission_state_learning_brief", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    def fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(args[0], 1, stdout="", stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    assert module._learning_brief_default_roots(tmp_path) == [tmp_path]
 
 
 def test_learning_brief_cli_outputs_json_and_text(tmp_path: Path, run_cli):
