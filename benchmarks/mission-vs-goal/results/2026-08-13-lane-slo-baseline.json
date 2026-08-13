@@ -1,0 +1,9 @@
+{
+  "schema": "mission-lane-slo-baseline/1",
+  "source": "実運用ログ観測 (2026-08-12/13)",
+  "cc_full_tier_wall_sec": 2220,
+  "codex_planning_sec": 1021,
+  "checker_wall_sec": 678,
+  "checker_active_sec": 152,
+  "rendezvous_loss_sec": 526
+}

@@ -99,6 +99,7 @@ from activity_segments import (  # noqa: E402
     PHASE_ACTIVITY_DEFAULTS,
     ACTIVITY_REASONS_BY_KIND,
     ActivityTimingError,
+    WAIT_KINDS,
     close_activity_for_resume,
     close_activity_for_terminal,
     end_activity_segment,
@@ -13842,6 +13843,123 @@ def cmd_list(args):
     print(json.dumps(results, indent=2, ensure_ascii=False))
 
 
+def _lane_report_wall_clock_sec(state: dict) -> float:
+    started = parse_iso_datetime(state.get("started_at"))
+    updated = parse_iso_datetime(state.get("updated_at"))
+    if not started or not updated:
+        return 0.0
+    try:
+        seconds = (updated - started).total_seconds()
+    except TypeError:
+        return 0.0
+    return seconds if seconds >= 0 else 0.0
+
+
+def _lane_report_session_role(state: dict) -> str:
+    role = state.get("session_role")
+    return role if isinstance(role, str) and role else "implementer"
+
+
+def _lane_report_session_entry(
+    state: dict,
+    *,
+    slo_minutes: int | None,
+) -> dict:
+    summary = summarize_activity_states([state])
+    role = _lane_report_session_role(state)
+    role_summary = summary.get("role_summaries", {}).get(role, {})
+    wait_totals = role_summary.get("wait_totals_sec") if isinstance(role_summary, dict) else {}
+    wait_totals = wait_totals if isinstance(wait_totals, dict) else {}
+    wait_total_sec = 0.0
+    normalized_wait_totals: dict[str, float] = {}
+    for kind in sorted(WAIT_KINDS):
+        seconds = wait_totals.get(kind)
+        if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) and seconds >= 0:
+            wait_total_sec += float(seconds)
+            normalized_wait_totals[kind] = float(seconds)
+    observed_active_sec = 0.0
+    if isinstance(role_summary, dict):
+        active = role_summary.get("observed_active_sec")
+        if isinstance(active, (int, float)) and not isinstance(active, bool) and active >= 0:
+            observed_active_sec = float(active)
+    entry = {
+        "session_id": state.get("session_id"),
+        "session_role": role,
+        "phase": state.get("phase"),
+        "wall_clock_sec": _lane_report_wall_clock_sec(state),
+        "observed_active_sec": observed_active_sec,
+        "wait_totals_sec": normalized_wait_totals,
+        "unobserved_gap_sec": float(summary.get("unobserved_gap_sec") or 0.0),
+        "wait_total_sec": wait_total_sec,
+    }
+    if slo_minutes is not None:
+        terminal = state.get("phase") in {"done", "halted"} or state.get("loop_active") is False
+        entry["slo_breached"] = bool(
+            role == "implementer"
+            and terminal
+            and entry["wall_clock_sec"] > float(slo_minutes) * 60.0
+        )
+    return entry
+
+
+def _lane_positive_minutes(value: str) -> int:
+    minutes = int(value)
+    if minutes <= 0:
+        raise argparse.ArgumentTypeError("--slo-minutes must be a positive integer")
+    return minutes
+
+
+def cmd_lane_report(args):
+    """Read-only lane duration report across current search roots."""
+    search_roots = _default_search_roots()
+    states: list[dict] = []
+    for root in search_roots:
+        if not root.exists():
+            continue
+        for sf in _iter_state_files(root):
+            if sf.parent.name != "sessions":
+                continue
+            try:
+                data = json.loads(sf.read_text())
+            except Exception:
+                continue
+            if not _is_mission_state_record(data):
+                continue
+            states.append(data)
+    if not states:
+        print("ERROR: lane-report requires at least one mission state", file=sys.stderr)
+        sys.exit(1)
+    overall = summarize_activity_states(states)
+    non_implementer_active_sec = 0.0
+    for role, summary in (overall.get("role_summaries") or {}).items():
+        if role == "implementer":
+            continue
+        active = summary.get("observed_active_sec") if isinstance(summary, dict) else None
+        if isinstance(active, (int, float)) and not isinstance(active, bool) and active >= 0:
+            non_implementer_active_sec += float(active)
+    entries = [
+        _lane_report_session_entry(
+            state,
+            slo_minutes=getattr(args, "slo_minutes", None),
+        )
+        for state in sorted(states, key=lambda item: str(item.get("session_id") or ""))
+    ]
+    implementer_wait_sec = sum(
+        float(entry["wait_total_sec"])
+        for entry in entries
+        if entry["session_role"] == "implementer"
+    )
+    report = {
+        "sessions": entries,
+        "role_summaries": overall.get("role_summaries", {}),
+        # 集約意味論: 全 implementer の待機合算 - 従属レーンの実働合算 (下限0)
+        "rendezvous_loss_sec": max(0.0, implementer_wait_sec - non_implementer_active_sec),
+    }
+    if getattr(args, "slo_minutes", None) is not None:
+        report["slo_minutes"] = args.slo_minutes
+    print(json.dumps(report, indent=2 if getattr(args, "json", False) else 0, ensure_ascii=False))
+
+
 def cmd_halt(args):
     """C-4: active state.json に halt_reason を立てて停止."""
     if args.all:
@@ -15314,6 +15432,14 @@ def _build_parser():
 
     p_list = sub.add_parser("list", help="全プロジェクトの active state.json 一覧")
     p_list.set_defaults(func=cmd_list)
+
+    p_lane = sub.add_parser(
+        "lane-report",
+        help="read-only lane duration report across current search roots",
+    )
+    p_lane.add_argument("--json", action="store_true", help="JSON 形式で出力")
+    p_lane.add_argument("--slo-minutes", type=_lane_positive_minutes, default=None, dest="slo_minutes")
+    p_lane.set_defaults(func=cmd_lane_report)
 
     p_halt2 = sub.add_parser("halt", help="state.json を halt させる (--all で全プロジェクト)")
     p_halt2.add_argument("--reason", required=True)
