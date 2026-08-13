@@ -1554,6 +1554,15 @@ def _pregate_state_reference(cwd: Path, issue_ref: Any) -> dict[str, Any] | None
     }
 
 
+def _pregate_verdict_warning(record: dict[str, Any] | None) -> str | None:
+    if not record or not isinstance(record, dict):
+        return None
+    verdict = record.get("verdict")
+    if verdict in {None, "accepted"}:
+        return None
+    return f"WARNING: pregate verdict={verdict}。planning 前に分割を解決してください"
+
+
 def _ensure_phase_timing(data: dict, now: str | None = None) -> None:
     """phase 別所要時間の計測フィールドを後方互換で初期化する."""
     now = now or iso_now()
@@ -6842,6 +6851,9 @@ def cmd_init(args):
     _pregate = _pregate_state_reference(cwd, getattr(args, "issue_ref", None))
     if _pregate is not None:
         initial["pregate"] = _pregate
+        _pregate_warning = _pregate_verdict_warning(_pregate)
+        if _pregate_warning:
+            print(_pregate_warning, file=sys.stderr)
 
     # #276: adaptive routing — Simple + リスクシグナルなし + 強制なしは goal へ。
     # discriminating-v2 (品質同点・mission 5.4x 時間/4.9x コスト) と実運用 95% の
@@ -8291,6 +8303,13 @@ def _derive_next_action(data: dict) -> dict:
     effective_reviewer_count = reviewer_count
     if iteration >= 2 and data.get("critic_has_new_scope") is False:
         effective_reviewer_count = min(reviewer_count, 2)
+    pregate_warning = _pregate_verdict_warning(data.get("pregate"))
+
+    def _planning_summary(summary: str) -> str:
+        if not pregate_warning:
+            return summary
+        return f"{summary} {pregate_warning.removeprefix('WARNING: ')}"
+
     stagnation = data.get("stagnation_count", 0) or 0
     # 通常経路では push-score が phase=scoring へ遷移させるため stagnation>=3 と
     # phase=reviewing は共起しないが、手動 `set stagnation_count=N` は許可された操作。
@@ -8359,7 +8378,7 @@ def _derive_next_action(data: dict) -> dict:
                 }
                 return {
                     "next_action": action,
-                    "summary": "policy v1 returns exactly one gated planning action",
+                    "summary": _planning_summary("policy v1 returns exactly one gated planning action"),
                     "command_hint": hints[action],
                     "details": {"planning_policy_version": 1, **({"degraded": True} if lifecycle.get("degraded") else {})},
                 }
@@ -8372,20 +8391,23 @@ def _derive_next_action(data: dict) -> dict:
             and iteration <= 1
             and (data.get("review_tier") or "standard") != "full"
         ):
-            return {
-                "next_action": "plan-inline",
-                "summary": (
+            summary = _planning_summary(
+                (
                     f"iteration {iteration} (Standard): mission-planner を起動せず、この turn 内で "
                     "bounded plan (steps + 依存関係 + 完了条件) を artifact に書く (#339)。"
                     "計画の成果物要件は subagent 経路と同一"
-                ),
+                )
+            )
+            return {
+                "next_action": "plan-inline",
+                "summary": summary,
                 "command_hint": "plan を artifact に記載 → mission-state.py advance --phase executing --activity active:implementation",
                 "details": {"plan_mode": "inline"},
                 "command_sequence": _happy_path_sequence("planning", effective_reviewer_count, plan_mode="inline"),
             }
         return {
             "next_action": "run-planner",
-            "summary": f"iteration {iteration}: mission-planner を起動して計画を立てる (完了後 set phase=executing)",
+            "summary": _planning_summary(f"iteration {iteration}: mission-planner を起動して計画を立てる (完了後 set phase=executing)"),
             "command_hint": "Skill: mission-planner → mission-state.py advance --phase executing --activity active:implementation",
             "command_sequence": _happy_path_sequence("planning", effective_reviewer_count, plan_mode="subagent"),
         }
