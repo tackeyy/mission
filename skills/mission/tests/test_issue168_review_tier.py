@@ -168,6 +168,30 @@ def test_derive_review_tier_irreversible_japanese_keyword_escalates(kw):
     assert any("irreversible-keyword" in s for s in signals)
 
 
+def test_derive_review_tier_public_api_usage_does_not_escalate():
+    """公開API のコード語彙は公開操作ではないので standard のまま."""
+    mod = _get_module()
+    tier, signals = mod.derive_review_tier("公開API使用", "Standard")
+    assert tier == "standard"
+    assert signals == []
+
+
+def test_derive_review_tier_public_operation_still_escalates():
+    """本番へ公開する は操作文脈なので full に昇格する."""
+    mod = _get_module()
+    tier, signals = mod.derive_review_tier("本番へ公開する", "Standard")
+    assert tier == "full"
+    assert "irreversible-keyword:公開" in signals
+
+
+def test_derive_review_tier_public_api_then_public_operation_still_escalates():
+    """公開APIを公開する はコード語彙の公開を抑制しても、別の公開操作で full."""
+    mod = _get_module()
+    tier, signals = mod.derive_review_tier("公開APIを公開する", "Standard")
+    assert tier == "full"
+    assert "irreversible-keyword:公開" in signals
+
+
 # --- セキュリティ系英語キーワード ---
 
 @pytest.mark.parametrize("kw", [
@@ -525,4 +549,19 @@ def test_derive_review_tier_calibrated_positive_cases(mission, expected_kw_fragm
     assert any(expected_kw_fragment in s for s in signals), (
         f"Expected signal containing {expected_kw_fragment!r} not found\n"
         f"  signals={signals!r}"
+    )
+
+
+def test_public_cluster_deploy_is_not_suppressed(run_cli, tmp_path):
+    """#450 較正の安全側検証: 「公開クラスタ」は cluster であり技術名詞複合語ではない。"""
+    root = tmp_path
+    (root / ".mission-state").mkdir()
+    run_cli(
+        "init", "公開クラスタへ新サービスをデプロイする", "--complexity", "Standard", "--issue-ref", "900",
+        cwd=root, check=True,
+    )
+    state = json.loads((root / ".mission-state" / "sessions" / "test.json").read_text())
+    assert state["review_tier"] == "full"
+    assert any("公開" in s for s in state["review_tier_signals"]) or any(
+        "デプロイ" in s or "deploy" in s for s in state["review_tier_signals"]
     )

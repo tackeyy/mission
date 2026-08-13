@@ -224,6 +224,31 @@ def test_global_explicit_non_operation_statement_suppresses_prior_candidate():
     assert {item["reason"] for item in _details(decision)} == {"global-explicit-non-operation"}
 
 
+def test_public_api_compound_noun_is_suppressed_with_audit_trail():
+    decision = _decision("公開API使用")
+
+    assert decision["tier"] == "light"
+    assert decision["signals"] == []
+    actual = _details(decision)
+    assert actual
+    assert {item["decision"] for item in actual} == {"suppressed"}
+    assert {item["reason"] for item in actual} == {"compound-technical-noun"}
+
+
+def test_public_api_then_public_operation_keeps_the_suppressed_detail():
+    decision = _decision("公開APIを公開する")
+
+    actual = _details(decision)
+    public_details = [item for item in actual if item["keyword"] == "公開"]
+    assert decision["tier"] == "full"
+    assert decision["signals"] == ["irreversible-keyword:公開"]
+    assert [item["decision"] for item in public_details] == ["suppressed", "included"]
+    assert [item["reason"] for item in public_details] == [
+        "compound-technical-noun",
+        "affirmative-actual-operation",
+    ]
+
+
 def test_global_non_operation_suppresses_all_candidates_in_the_logical_unit():
     decision = _decision("deploy to production の手順を調査する。実操作は行わない")
 
