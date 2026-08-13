@@ -9,6 +9,7 @@ from typing import Any, Mapping, Sequence
 
 
 LEARNING_SCHEMA = "mission-review-learning/1"
+LEARNING_BRIEF_SCHEMA = "mission-learning-brief/1"
 LEDGER_SCHEMA = "mission-failure-ledger/1"
 WEAK_PHASES = ("understanding", "planning", "execution", "formatting")
 _LEARNING_FIELDS = {"cause", "general_fix_rule", "weak_phase"}
@@ -167,3 +168,45 @@ def failure_ledger_counts(states: Sequence[Mapping[str, Any]]) -> dict[str, Any]
         "pattern_count": pattern_count, "recurring_pattern_count": recurring,
         "weak_phase_counts": dict(sorted(phase_counts.items())), "invalid_ledger_count": invalid,
     }
+
+
+def summarize_learning_brief(
+    states: Sequence[Mapping[str, Any]], *, weak_phase: str | None = None, limit: int = 10,
+) -> dict[str, Any]:
+    if weak_phase is not None and weak_phase not in WEAK_PHASES:
+        raise LearningContractError("weak_phase is invalid")
+    if type(limit) is not int or limit < 0:
+        raise LearningContractError("limit is invalid")
+    patterns: dict[tuple[str, str], dict[str, Any]] = {}
+    for state in states:
+        if not isinstance(state, Mapping):
+            raise LearningContractError("learning state is invalid")
+        ledger = state.get("failure_ledger")
+        if ledger is None:
+            continue
+        try:
+            validated = validate_failure_ledger(ledger)
+        except LearningContractError:
+            continue
+        for pattern in validated["patterns"]:
+            phase = pattern["weak_phase"]
+            if weak_phase is not None and phase != weak_phase:
+                continue
+            rule = normalize_general_fix_rule(pattern["general_fix_rule"])
+            key = (phase, rule)
+            bucket = patterns.setdefault(
+                key,
+                {
+                    "general_fix_rule": rule,
+                    "weak_phase": phase,
+                    "recurrence": 0,
+                    "sessions": 0,
+                },
+            )
+            bucket["recurrence"] += int(pattern["recurrence_count"])
+            bucket["sessions"] += 1
+    rules = sorted(
+        patterns.values(),
+        key=lambda item: (-item["recurrence"], -item["sessions"], item["weak_phase"], item["general_fix_rule"]),
+    )
+    return {"schema": LEARNING_BRIEF_SCHEMA, "rules": rules[:limit]}
