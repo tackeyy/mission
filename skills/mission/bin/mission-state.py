@@ -202,6 +202,7 @@ from command_outcomes import (  # noqa: E402
     validate_observation as validate_command_outcome_observation,
     valid_identifier as _valid_command_outcome_identifier,
 )
+from error_guidance import build_guidance  # noqa: E402
 
 SCHEMA_VERSION = 4  # v4: structured scoring provenance is mandatory for new sessions
 GOAL_DISPATCH_MODES = {"inline", "host-native"}
@@ -674,7 +675,16 @@ def resolve_session_id() -> str:
     cx = os.environ.get("CODEX_THREAD_ID")
     if cx:
         return f"cx-{_sanitize_sid(cx)}"
-    return f"pid-{find_agent_pid()}"  # fallback (env なし環境)
+    pid = find_agent_pid()
+    global _PID_FALLBACK_WARNING_EMITTED
+    if not _PID_FALLBACK_WARNING_EMITTED:
+        print(
+            "WARNING: MISSION_SESSION_ID 未設定のため pid フォールバックを使用しています "
+            f"(pid-{pid})。",
+            file=sys.stderr,
+        )
+        _PID_FALLBACK_WARNING_EMITTED = True
+    return f"pid-{pid}"  # fallback (env なし環境)
 
 
 def _lease_ttl_seconds() -> int:
@@ -1088,6 +1098,7 @@ _LEASE_WRITE_REASON: str | None = None
 _PROCESS_LEASE_IDS: dict[str, str] = {}
 _LEASE_DECISION_UNSET = object()
 _SUPERSEDE_TERMINAL_PATHS: set[str] = set()
+_PID_FALLBACK_WARNING_EMITTED = False
 
 
 @contextlib.contextmanager
@@ -1127,7 +1138,10 @@ def _enforce_session_lease_for_write(path: Path, data: dict) -> LeaseDecision | 
         )
     except LeaseRejectedError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
-        raise CommandOutcomeExit(2, "expected-gate")
+        guidance = build_guidance("lease", "lease-rejected", _guidance_context_for_state(lease_state))
+        for line in guidance:
+            print(line, file=sys.stderr)
+        raise CommandOutcomeExit(2, "expected-gate", guidance=guidance)
     for key in _LEASE_KEYS:
         if key in lease_state:
             data[key] = lease_state[key]
@@ -7800,14 +7814,22 @@ def cmd_advance(args):
     """
     cwd = Path.cwd()
     sf = _activity_state_file(cwd)
+    state_preview = None
+    if sf.exists():
+        try:
+            state_preview = json.loads(sf.read_text())
+        except (OSError, json.JSONDecodeError):
+            state_preview = None
     new_phase = _normalize_set_phase_value(args.phase)
     if new_phase in {"done", "halted"}:
-        print(
-            "ERROR: advance で terminal phase へは遷移できません。"
+        _raise_guided_failure(
+            "advance で terminal phase へは遷移できません。"
             " 合格は mark-passes、中断は mark-halt を使ってください。",
-            file=sys.stderr,
+            command="advance",
+            reason="terminal-phase",
+            context=_guidance_context_for_state(state_preview, phase=state_preview.get("phase") if isinstance(state_preview, dict) else new_phase),
+            outcome_kind="expected-gate",
         )
-        raise CommandOutcomeExit(2, "expected-gate")
     raw = args.activity
     if raw is None:
         default = PHASE_ACTIVITY_DEFAULTS.get(new_phase)
@@ -7818,19 +7840,23 @@ def cmd_advance(args):
     else:
         kind, sep, reason = raw.partition(":")
         if not sep or not kind or not reason:
-            print(
-                f"ERROR: --activity は <kind>:<reason> 形式で指定してください (例: active:implementation)。"
+            _raise_guided_failure(
+                f"--activity は <kind>:<reason> 形式で指定してください (例: active:implementation)。"
                 f" 受領値: '{raw}'",
-                file=sys.stderr,
+                command="advance",
+                reason="activity-format",
+                context=_guidance_context_for_state(state_preview, phase=new_phase),
+                outcome_kind="invalid-input",
             )
-            sys.exit(2)
     if not kind or not reason:
-        print(
-            f"ERROR: --activity は <kind>:<reason> 形式で指定してください (例: active:implementation)。"
+        _raise_guided_failure(
+            f"--activity は <kind>:<reason> 形式で指定してください (例: active:implementation)。"
             f" 受領値: '{raw}'",
-            file=sys.stderr,
+            command="advance",
+            reason="activity-format",
+            context=_guidance_context_for_state(state_preview, phase=new_phase),
+            outcome_kind="invalid-input",
         )
-        sys.exit(2)
     try:
         validate_activity(kind, reason)
     except ActivityTimingError as error:
@@ -7845,8 +7871,13 @@ def cmd_advance(args):
                     and data.get("planning_policy_version") == 1):
                 plan = data.get("canonical_plan")
                 if not isinstance(plan, dict):
-                    print("ERROR: policy v1 requires a canonical plan before executing", file=sys.stderr)
-                    sys.exit(2)
+                    _raise_guided_failure(
+                        "policy v1 requires a canonical plan before executing",
+                        command="advance",
+                        reason="missing-canonical-plan",
+                        context=_guidance_context_for_state(data, phase=data.get("phase"), iteration=data.get("iteration")),
+                        outcome_kind="expected-gate",
+                    )
                 try:
                     expected_binding = _trusted_canonical_plan_binding(data, plan)
                     _raw_plan, step_ids = canonical_plan_identity(
@@ -7871,11 +7902,13 @@ def cmd_advance(args):
             producer_run_id = getattr(args, "producer_run_id", None)
             if requested_applicability == "producing":
                 if not artifact_path or not producer_run_id:
-                    print(
-                        "ERROR: producing artifact handoff requires --artifact-path and --producer-run-id",
-                        file=sys.stderr,
+                    _raise_guided_failure(
+                        "producing artifact handoff requires --artifact-path and --producer-run-id",
+                        command="advance",
+                        reason="producing-artifact",
+                        context=_guidance_context_for_state(data, phase=data.get("phase"), iteration=data.get("iteration")),
+                        outcome_kind="invalid-input",
                     )
-                    sys.exit(2)
                 try:
                     identity, _ = capture_artifact_identity(
                         cwd, artifact_path, producer_run_id, canonical=True
@@ -8753,36 +8786,35 @@ def cmd_set(args):
         # reviewer_count は tier と同時の運用上書きだけを許し、halt の解除は承認監査付きの
         # dedicated reactivate command に限定する。
         if "reviewer_count" in explicit_keys and not ({"complexity", "review_tier"} & explicit_keys):
-            # A-2: reviewer_count 単独 set は tier 由来値より小さくして agreement gate を
-            # 無効化しうる (reviewer 1 名なら delta=0 が確定)。complexity/review_tier と
-            # 同時指定の運用上書きだけ許す。
-            print(
-                "ERROR: `reviewer_count` は単独 set 不可。"
+            _raise_guided_failure(
+                "`reviewer_count` は単独 set 不可。"
                 " 変更する場合は `complexity` または `review_tier` と同時に指定してください "
                 "(A-2: agreement gate 無効化の防止)。",
-                file=sys.stderr,
+                command="set",
+                reason="reviewer-count",
+                context=_guidance_context_for_state(data),
+                outcome_kind="expected-gate",
             )
-            sys.exit(2)
         if "halt_category" in explicit_keys:
-            # A-3: halt_category の変更は mark-halt/refresh-pid/resume 専用。
-            # set での書き換え (例: blocked-external -> stale) は無承認 reactivate を招く。
-            print(
-                "ERROR: `halt_category` は set で変更不可。"
+            _raise_guided_failure(
+                "`halt_category` は set で変更不可。"
                 " 変更は mark-halt / refresh-pid / resume 経由でのみ行ってください "
                 "(A-3: 無承認 reactivate の防止)。",
-                file=sys.stderr,
+                command="set",
+                reason="halt-category",
+                context=_guidance_context_for_state(data),
+                outcome_kind="expected-gate",
             )
-            sys.exit(2)
         if "halt_reason" in explicit_keys:
-            # Approval-bearing halt transitions must retain their prior reason/category
-            # in reactivation_history. Generic set cannot provide that audit contract.
-            print(
-                "ERROR: `halt_reason` は set で変更不可。"
+            _raise_guided_failure(
+                "`halt_reason` は set で変更不可。"
                 " 明示 halt の解除は `reactivate --approved-by-user` を使用してください "
                 "(A-3: 承認監査を伴わない再活性化の防止)。",
-                file=sys.stderr,
+                command="set",
+                reason="halt-reason",
+                context=_guidance_context_for_state(data),
+                outcome_kind="expected-gate",
             )
-            sys.exit(2)
         if "loop_active" in explicit_keys and data.get("halt_reason"):
             loop_active_raw = next(
                 (value for key, _, value in (kv.partition("=") for kv in args.kvs) if key == "loop_active"),
@@ -10063,9 +10095,10 @@ class CommandOutcomeInputError(ValueError):
 class CommandOutcomeExit(SystemExit):
     """A legacy-compatible exit carrying the centralized outcome taxonomy."""
 
-    def __init__(self, code: int, outcome_kind: str):
+    def __init__(self, code: int, outcome_kind: str, *, guidance: list[str] | None = None):
         super().__init__(code)
         self.outcome_kind = outcome_kind
+        self.guidance = guidance or None
 
 
 def _provider_gate(reason_code: str) -> None:
@@ -10073,6 +10106,42 @@ def _provider_gate(reason_code: str) -> None:
     error = CommandOutcomeExit(2, "expected-gate")
     error.provider_reason_code = reason_code
     raise error
+
+
+def _guidance_context_for_state(data: dict | None = None, **extra) -> dict:
+    context: dict = {}
+    if isinstance(data, dict):
+        for key in ("phase", "iteration", "reviewer_count", "session_id"):
+            if key in data:
+                context[key] = data.get(key)
+        review_refs = data.get("review_evidence_refs")
+        if isinstance(review_refs, list):
+            for ref in reversed(review_refs):
+                if isinstance(ref, dict) and isinstance(ref.get("path"), str):
+                    context.setdefault("latest_review_input_path", ref["path"])
+                    context.setdefault("latest_review_input_ref", ref["path"])
+                    break
+        canonical_plan = data.get("canonical_plan")
+        if isinstance(canonical_plan, dict) and isinstance(canonical_plan.get("path"), str):
+            context.setdefault("canonical_plan_path", canonical_plan["path"])
+    context.update({k: v for k, v in extra.items() if v is not None})
+    return context
+
+
+def _raise_guided_failure(
+    message: str,
+    *,
+    command: str,
+    reason: str,
+    context: dict | None = None,
+    outcome_kind: str = "invalid-input",
+    exit_code: int = 2,
+) -> None:
+    guidance = build_guidance(command, reason, context or {})
+    print(f"ERROR: {message}", file=sys.stderr)
+    for line in guidance:
+        print(line, file=sys.stderr)
+    raise CommandOutcomeExit(exit_code, outcome_kind, guidance=guidance)
 
 
 def _command_outcome(args: argparse.Namespace, command: str, outcome_kind: str) -> dict:
@@ -10134,10 +10203,15 @@ def _record_command_outcome_only(cwd: Path, outcome: dict) -> None:
         return
 
 
-def _emit_json_command_failure(args: argparse.Namespace, outcome: dict) -> None:
+def _emit_json_command_failure(args: argparse.Namespace, outcome: dict, guidance: list[str] | None = None) -> None:
     args.command_outcome_emitted = True
     if getattr(args, "json", False):
-        print(json.dumps({"ok": False, "outcome_kind": outcome["outcome_kind"], "outcome": outcome}, ensure_ascii=False))
+        payload = {"ok": False, "outcome_kind": outcome["outcome_kind"], "outcome": outcome}
+        if guidance:
+            payload["guidance"] = guidance
+            for line in guidance:
+                print(line, file=sys.stderr)
+        print(json.dumps(payload, ensure_ascii=False))
 
 
 def _nested_command_failure_kind(stdout: str, error: SystemExit) -> str:
@@ -10155,13 +10229,42 @@ def _nested_command_failure_kind(stdout: str, error: SystemExit) -> str:
 def _emit_finalize_failure(args: argparse.Namespace, stdout: str, error: SystemExit) -> None:
     kind = _nested_command_failure_kind(stdout, error)
     failure = _command_outcome(args, "review-finalize", kind)
+    guidance = None
+    state_data = {}
+    state_file = resolve_state_file(Path.cwd())
+    if state_file.exists():
+        try:
+            state_data = json.loads(state_file.read_text())
+        except (OSError, json.JSONDecodeError):
+            state_data = {}
+    context = _guidance_context_for_state(
+        state_data,
+        iteration=args.iteration,
+        review_evidence_refs=[
+            {"path": ref} for ref in (getattr(args, "input_refs", []) or [])
+            if isinstance(ref, str)
+        ],
+    )
+    if not (getattr(args, "input", None) or getattr(args, "input_refs", None)):
+        guidance = build_guidance("review-finalize", "missing-input-ref", context)
+    elif isinstance(args.min_reviewers, int) and args.min_reviewers > 0:
+        guidance = build_guidance("review-finalize", "min-reviewers", context)
+    elif getattr(args, "resubmit_reason", None) is None:
+        guidance = build_guidance("review-finalize", "resubmit-reason-missing", context)
+    if guidance:
+        failure["guidance"] = True
+        for line in guidance:
+            print(line, file=sys.stderr)
     _record_command_outcome_only(Path.cwd(), failure)
     args.command_outcome_emitted = True
-    print(json.dumps({
+    payload = {
         "ok": False,
         "outcome_kind": kind,
         "outcome": failure,
-    }, ensure_ascii=False))
+    }
+    if guidance:
+        payload["guidance"] = guidance
+    print(json.dumps(payload, ensure_ascii=False))
 
 
 def _stat_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
@@ -11330,8 +11433,10 @@ def cmd_review_import(args):
         review = _parse_strict_review_bytes(content, args.iteration)
     except ValueError as exc:
         outcome = _command_outcome(args, "review-import", "invalid-input")
+        guidance = build_guidance("review-import", "schema-invalid", {"iteration": args.iteration})
+        outcome["guidance"] = True
         _record_command_outcome_only(cwd, outcome)
-        _emit_json_command_failure(args, outcome)
+        _emit_json_command_failure(args, outcome, guidance)
         print(f"ERROR: review import rejected: {exc}", file=sys.stderr)
         sys.exit(2)
 
@@ -11350,8 +11455,10 @@ def cmd_review_import(args):
             destination = evidence_publish.path
         except ValueError as exc:
             failure = _command_outcome(args, "review-import", "invalid-input")
+            guidance = build_guidance("review-import", "schema-invalid", {"iteration": args.iteration})
+            failure["guidance"] = True
             _record_command_outcome_only(cwd, failure)
-            _emit_json_command_failure(args, failure)
+            _emit_json_command_failure(args, failure, guidance)
             print(f"ERROR: review import archive rejected: {exc}", file=sys.stderr)
             sys.exit(2)
         reference = {
@@ -15008,6 +15115,7 @@ def _build_parser():
         help="strict mission-review/1 を検証して state-local immutable evidence に取り込む",
     )
     p_import.add_argument("--iteration", type=int, required=True)
+    p_import.add_argument("--json", action="store_true", help="失敗時に機械可読 outcome を出力")
     import_source = p_import.add_mutually_exclusive_group(required=True)
     import_source.add_argument("--input", default=None, help="review JSON の regular file")
     import_source.add_argument("--stdin", action="store_true", help="stdin から review JSON を読む")
@@ -15487,9 +15595,14 @@ def main():
                     args, str(getattr(args, "cmd", "unknown")),
                     kind,
                 )
+                guidance = getattr(error, "guidance", None)
+                if guidance:
+                    outcome["guidance"] = True
                 _record_command_outcome_only(Path.cwd(), outcome)
                 if getattr(args, "json", False):
                     envelope = {"ok": False, "outcome_kind": outcome["outcome_kind"], "outcome": outcome}
+                    if guidance:
+                        envelope["guidance"] = guidance
                     provider_reason = getattr(error, "provider_reason_code", None)
                     if provider_reason:
                         envelope["error"] = {
@@ -15500,11 +15613,17 @@ def main():
             except Exception:
                 pass
         raise
-    except LeaseRejectedError:
+    except LeaseRejectedError as error:
         outcome = _command_outcome(args, str(getattr(args, "cmd", "unknown")), "expected-gate")
+        guidance = getattr(error, "guidance", None)
+        if guidance:
+            outcome["guidance"] = True
         _record_command_outcome_only(Path.cwd(), outcome)
         if getattr(args, "json", False):
-            print(json.dumps({"ok": False, "outcome_kind": "expected-gate", "outcome": outcome}, ensure_ascii=False))
+            envelope = {"ok": False, "outcome_kind": "expected-gate", "outcome": outcome}
+            if guidance:
+                envelope["guidance"] = guidance
+            print(json.dumps(envelope, ensure_ascii=False))
         raise SystemExit(2)
     except CommandOutcomeInputError:
         print(json.dumps({"ok": False, "outcome_kind": "invalid-input"}, ensure_ascii=False))
