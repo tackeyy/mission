@@ -161,7 +161,8 @@ def test_queue_enqueue_from_state_detects_manual_sha_mismatch_and_exits_two(stat
 
     assert result.returncode == 2
     assert "mismatch" in result.stderr
-    assert "manual" in result.stderr or "fallback" in result.stderr
+    assert "HINT:" in result.stderr
+    assert "fallback" in result.stderr
 
 
 def test_queue_enqueue_from_state_fails_closed_when_revision_scope_is_missing(state_dir, run_cli):
@@ -187,7 +188,8 @@ def test_queue_enqueue_from_state_fails_closed_when_revision_scope_is_missing(st
 
     assert result.returncode == 2
     assert "revision_scope" in result.stderr
-    assert "manual" in result.stderr or "fallback" in result.stderr
+    assert "HINT:" in result.stderr
+    assert "fallback" in result.stderr
 
 
 def test_queue_depends_on_blocks_next_until_dependency_is_merged(state_dir, run_cli):

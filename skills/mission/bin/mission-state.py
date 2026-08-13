@@ -7153,6 +7153,11 @@ def cmd_queue(args):
         sys.exit(2)
     except MergeQueueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
+        if "use manual --head-sha/--base-sha fallback" in str(exc):
+            print(
+                "HINT: 正しい呼び出し例: mission-state.py queue enqueue --issue-ref <ref> --pr-ref <ref> --head-sha <40hex> --base-sha <40hex>",
+                file=sys.stderr,
+            )
         sys.exit(2)
     print(json.dumps(result, indent=2 if getattr(args, "json", False) else None, ensure_ascii=False))
 
