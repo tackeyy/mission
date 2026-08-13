@@ -44,5 +44,5 @@ def test_ci_invokes_the_same_make_test_entrypoint() -> None:
         ["make", "-n", "test"], cwd=REPO_ROOT, capture_output=True, text=True,
     )
     assert dry_run.returncode == 0, dry_run.stderr
-    assert "pytest -q skills/mission" in dry_run.stdout
+    assert "pytest -q -n auto --dist loadfile skills/mission" in dry_run.stdout
     assert '"tier":"full"' in dry_run.stdout

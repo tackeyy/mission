@@ -19,9 +19,11 @@ def test_ci_is_one_bounded_quality_job():
 
 
 def test_python_and_shell_quality_gates_remain():
-    assert "run: make test PYTHON=python" in CI
+    assert 'run: make test PYTHON=python PYTEST_TARGETS="${{ steps.changes.outputs.python_targets }}"' in CI
     makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
-    assert "$(VENV_PYTHON) -m pytest -q skills/mission" in makefile
+    assert "PYTEST_TARGETS ?= skills/mission" in makefile
+    assert "$(VENV_PYTHON) -m pytest -q -n auto --dist loadfile $(PYTEST_TARGETS)" in makefile
+    assert "$(VENV_PYTHON) -m pytest -q -n auto --dist loadfile skills/mission -k" in makefile  # test-e2e も並列維持
     assert (
         "shellcheck scripts/mission-stop-guard.sh plugins/mission/scripts/mission-stop-guard.sh "
         "scripts/sync-codex-plugin-wrapper.sh scripts/mission-local-authoring-sync.sh"
@@ -32,7 +34,8 @@ def test_python_and_shell_quality_gates_remain():
 
 
 def test_repository_wide_python_suite_runs_for_every_pr():
-    assert "const python = true;" in CI
+    assert "const decision = classifyChangedFiles({" in CI
+    assert "core.setOutput('python_targets', decision.pythonTargets);" in CI
 
 
 def test_stale_prs_are_cancelled_and_ready_prs_run_full_ci():

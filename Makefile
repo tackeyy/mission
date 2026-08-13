@@ -3,6 +3,7 @@ VENV ?= .venv-ci
 VENV_PYTHON := $(VENV)/bin/python
 REQUIREMENTS := .github/requirements-ci.txt
 REQUIREMENTS_STAMP := $(VENV)/.requirements-ci.stamp
+PYTEST_TARGETS ?= skills/mission
 
 .PHONY: test-smoke test test-e2e
 
@@ -19,9 +20,9 @@ test-smoke:
 	@printf '{"schema":"mission-test-report/1","tree_sha":"%s","tier":"smoke","test_manifest":["skills/mission/bin/mission-state.py","scripts/mission-audit.py","scripts/mission-stop-guard.sh"]}\n' "$$(git rev-parse 'HEAD^{tree}')"
 
 test: $(REQUIREMENTS_STAMP)
-	$(VENV_PYTHON) -m pytest -q skills/mission
+	$(VENV_PYTHON) -m pytest -q -n auto --dist loadfile $(PYTEST_TARGETS)
 	@printf '{"schema":"mission-test-report/1","tree_sha":"%s","tier":"full","test_manifest":["skills/mission"]}\n' "$$(git rev-parse 'HEAD^{tree}')"
 
 test-e2e: $(REQUIREMENTS_STAMP)
-	$(VENV_PYTHON) -m pytest -q skills/mission -k 'e2e or operational'
+	$(VENV_PYTHON) -m pytest -q -n auto --dist loadfile skills/mission -k 'e2e or operational'
 	@printf '{"schema":"mission-test-report/1","tree_sha":"%s","tier":"e2e","test_manifest":["skills/mission","-k","e2e or operational"]}\n' "$$(git rev-parse 'HEAD^{tree}')"
