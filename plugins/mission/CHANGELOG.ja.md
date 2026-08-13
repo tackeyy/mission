@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+- core plan 採用時の inline / planner 両経路のガイダンスで、実行前の `planning adopt-core` を必須手順として案内するよう修正しました。不正な iteration と planning 以外の phase は state を変更せず拒否し、妥当な pretty-printed JSON は compact JSON と同一の canonical plan へ正規化します (#469)。
+
 ## [2.4.0] - 2026-08-14
 
 - feat: `stats` と `audit` に `iteration_recovery` 集計を追加し、recovery 件数を #461 として要約できるようにしました。
