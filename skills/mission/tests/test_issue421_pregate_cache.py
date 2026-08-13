@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from skills.mission.lib.pregate_cache import subject_digest
+from skills.mission.lib.pregate_cache import subject_digest as compute_subject_digest
 
 
 def _cache_dir(root: Path) -> Path:
@@ -69,7 +69,7 @@ def test_pregate_digest_returns_canonical_subject_digest_for_file_input(state_di
     input_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
     digested = _json(run_cli("pregate", "digest", "--input", str(input_path), cwd=root, check=True))
-    assert digested == {"subject_digest": subject_digest(payload)}
+    assert digested == {"subject_digest": compute_subject_digest(payload)}
 
 
 def test_pregate_digest_supports_stdin_and_seeds_record_check(state_dir, run_cli):
@@ -86,7 +86,7 @@ def test_pregate_digest_supports_stdin_and_seeds_record_check(state_dir, run_cli
             input_text=json.dumps(snapshot, ensure_ascii=False),
         )
     )
-    assert digest == {"subject_digest": subject_digest(snapshot)}
+    assert digest == {"subject_digest": compute_subject_digest(snapshot)}
 
     evaluation = root / "pregate-evaluation.json"
     evaluation.write_text(
@@ -115,14 +115,16 @@ def test_pregate_digest_succeeds_without_mission_state_dir(run_cli, tmp_path):
     input_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
     assert not (root / ".mission-state").exists()
-    digested = _json(run_cli("pregate", "digest", "--input", str(input_path), cwd=root, check=True))
-    assert digested == {"subject_digest": subject_digest(payload)}
+    # Issue #444: .mission-state 不在でも digest 計算のみは許可される設計要件 (#432) を固定
+    result = run_cli("pregate", "digest", "--input", str(input_path), cwd=root, check=True)
+    assert result.returncode == 0
+    assert _json(result) == {"subject_digest": compute_subject_digest(payload)}
 
 
-@pytest.mark.parametrize("input_path_factory", ["missing", "directory"])
-def test_pregate_digest_rejects_missing_or_directory_input(run_cli, tmp_path, input_path_factory):
+@pytest.mark.parametrize("input_kind", ["missing", "directory"], ids=str)
+def test_pregate_digest_rejects_missing_or_directory_input(run_cli, tmp_path, input_kind):
     root = tmp_path
-    if input_path_factory == "missing":
+    if input_kind == "missing":
         input_path = root / "missing-pregate.json"
     else:
         input_path = root / "pregate-dir"
