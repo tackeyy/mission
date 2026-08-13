@@ -150,7 +150,10 @@ from provider_preflight import (  # noqa: E402
     validate_receipt as validate_provider_receipt,
 )
 from plan_contract import (  # noqa: E402
+    MAX_PLAN_RESULT_BYTES,
     PlanContractError,
+    _strict_load as _strict_plan_load,
+    _validate_document,
     canonical_plan_bytes,
     parse_provider_result,
 )
@@ -8321,7 +8324,13 @@ def cmd_advance(args):
     )
 
 
-def _happy_path_sequence(phase: str, reviewer_count: int, *, plan_mode: str = "subagent") -> list[str]:
+def _happy_path_sequence(
+    phase: str,
+    reviewer_count: int,
+    *,
+    plan_mode: str = "subagent",
+    adopt_core: bool = False,
+) -> list[str]:
     """#339: 現 phase から closeout までの happy-path コマンド列.
 
     ゲート失敗 (exit 2) がない限り、orchestrator はこの列を `next` の再呼び出し
@@ -8344,6 +8353,8 @@ def _happy_path_sequence(phase: str, reviewer_count: int, *, plan_mode: str = "s
         f"mission-state.py review-finalize --iteration <i> --input-ref <review_evidence_ref.path> (全 reviewer 分を反復) --min-reviewers {reviewer_count}",
         "mission-state.py closeout",
     ]
+    if adopt_core and phase == "planning":
+        steps.insert(1, "mission-state.py planning adopt-core --input <plan.json>")
     start = {"planning": 0, "executing": 2, "reviewing": 4}[phase]
     return steps[start:]
 
@@ -8599,6 +8610,11 @@ def _derive_next_action(data: dict) -> dict:
                     "command_hint": hints[action],
                     "details": {"planning_policy_version": 1, **({"degraded": True} if lifecycle.get("degraded") else {})},
                 }
+        core_adoption_required = (
+            data.get("planning_policy_version") == 1
+            and data.get("planning_strategy") in {None, "core"}
+            and data.get("planning_provider_required") is not True
+        )
         # #339: Standard iteration 1 は planner subagent を省略し orchestrator inline 計画。
         # portfolio-v4 実測: 時間比 (6.9-14.5x) > トークン比 (4.0-4.7x) の差分はターン数
         # (mission 19-31 turns vs goal 5) — subagent spin-up 1 回の削減がそのまま効く。
@@ -8620,13 +8636,23 @@ def _derive_next_action(data: dict) -> dict:
                 "summary": summary,
                 "command_hint": "plan を artifact に記載 → mission-state.py advance --phase executing --activity active:implementation",
                 "details": {"plan_mode": "inline"},
-                "command_sequence": _happy_path_sequence("planning", effective_reviewer_count, plan_mode="inline"),
+                "command_sequence": _happy_path_sequence(
+                    "planning",
+                    effective_reviewer_count,
+                    plan_mode="inline",
+                    adopt_core=core_adoption_required,
+                ),
             }
         return {
             "next_action": "run-planner",
             "summary": _planning_summary(f"iteration {iteration}: mission-planner を起動して計画を立てる (完了後 set phase=executing)"),
             "command_hint": "Skill: mission-planner → mission-state.py advance --phase executing --activity active:implementation",
-            "command_sequence": _happy_path_sequence("planning", effective_reviewer_count, plan_mode="subagent"),
+            "command_sequence": _happy_path_sequence(
+                "planning",
+                effective_reviewer_count,
+                plan_mode="subagent",
+                adopt_core=core_adoption_required,
+            ),
         }
     if phase == "executing":
         return {
@@ -10462,7 +10488,14 @@ def _provider_gate(reason_code: str) -> None:
 def _guidance_context_for_state(data: dict | None = None, **extra) -> dict:
     context: dict = {}
     if isinstance(data, dict):
-        for key in ("phase", "iteration", "reviewer_count", "session_id"):
+        for key in (
+            "phase",
+            "iteration",
+            "reviewer_count",
+            "session_id",
+            "planning_strategy",
+            "planning_provider_required",
+        ):
             if key in data:
                 context[key] = data.get(key)
         review_refs = data.get("review_evidence_refs")
@@ -11930,6 +11963,142 @@ def cmd_plan_import(args):
         _verify_published_file(raw_file); _verify_published_file(candidate_file)
         backup_state(sf); atomic_write_json(sf, stamp_metadata(data, cwd))
     print(json.dumps({"ok": True, "plan_import": reference}, indent=2 if args.json else None, ensure_ascii=False))
+
+
+def _read_core_plan_input(source: Path) -> bytes:
+    """Read one stable bounded regular plan document without following links."""
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(os.fspath(source), os.O_RDONLY | os.O_NONBLOCK | nofollow)
+    except OSError as exc:
+        raise PlanContractError("plan-input-unreadable") from exc
+    try:
+        initial = os.fstat(fd)
+        if not stat.S_ISREG(initial.st_mode) or initial.st_nlink != 1:
+            raise PlanContractError("plan-input-not-regular")
+        if initial.st_size > MAX_PLAN_RESULT_BYTES:
+            raise PlanContractError("result-too-large")
+        chunks: list[bytes] = []
+        remaining = initial.st_size
+        while remaining:
+            chunk = os.read(fd, min(remaining, 64 * 1024))
+            if not chunk:
+                raise PlanContractError("plan-input-changed")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(fd, 1) or _stat_identity(os.fstat(fd)) != _stat_identity(initial):
+            raise PlanContractError("plan-input-changed")
+        try:
+            named = os.lstat(source)
+        except OSError as exc:
+            raise PlanContractError("plan-input-changed") from exc
+        if _stat_identity(named) != _stat_identity(initial):
+            raise PlanContractError("plan-input-changed")
+        return b"".join(chunks)
+    except OSError as exc:
+        raise PlanContractError("plan-input-unreadable") from exc
+    finally:
+        os.close(fd)
+
+
+def cmd_planning_adopt_core(args):
+    """Validate and publish one core-produced plan as canonical authority."""
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        _provider_gate("state-missing")
+    try:
+        raw = _read_core_plan_input(Path(args.input))
+        document = _validate_document(_strict_plan_load(raw), workspace=cwd)
+        if canonical_plan_bytes(document) != raw:
+            raise PlanContractError("plan-document-not-canonical")
+    except PlanContractError as exc:
+        _provider_gate(str(exc))
+
+    with StateLock(lock_file(cwd)), _PublishedFilesTransaction() as published_files:
+        data = json.loads(sf.read_text(encoding="utf-8"))
+        if data.get("planning_policy_version") != 1 or data.get("phase") != "planning":
+            _provider_gate("planning-policy-not-active")
+        if data.get("planning_strategy") not in {None, "core"}:
+            _provider_gate("planning-strategy-not-core")
+        if data.get("planning_provider_required") is True:
+            _provider_gate("planning-provider-required")
+
+        iteration = data.get("iteration")
+        source_id = (
+            f"core-{iteration}-{secrets.token_hex(6)}"
+            if args.source_id is None
+            else args.source_id
+        )
+        if not isinstance(source_id, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", source_id) is None:
+            _provider_gate("core-source-id-invalid")
+        records = data.get("planning_source_records")
+        records = records if isinstance(records, dict) else {}
+        previous = records.get(f"core:{source_id}")
+        if previous is None:
+            generation = 1
+        else:
+            previous_generation = previous.get("generation") if isinstance(previous, dict) else None
+            if type(previous_generation) is not int or previous_generation < 1:
+                _provider_gate("core-source-generation-invalid")
+            generation = previous_generation + 1
+        source_digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+        metadata = {
+            "authority": {
+                "owner": "mission",
+                "may_write_state": False,
+                "may_decide_review": False,
+                "may_decide_score": False,
+                "may_decide_completion": False,
+            },
+            "provenance": {
+                "source": "core",
+                "source_id": source_id,
+                "iteration": iteration,
+                "raw_document_digest": source_digest,
+            },
+            "capability_verification": {
+                "selection_verified": False,
+                "class_exact_match": False,
+                "variant_exact_match": False,
+            },
+        }
+        # document 側の schema は candidate へ展開されるため、mission-plan/1 以外を
+        # 持ち込まれると保存 plan の schema が乗っ取られる。値を検証して fail-closed にする。
+        if "schema" in document and document["schema"] != "mission-plan/1":
+            _provider_gate("core-plan-schema-invalid")
+        candidate = {"schema": "mission-plan/1", **document, "mission_metadata": metadata}
+        canonical = canonical_plan_bytes(candidate)
+        canonical_digest = "sha256:" + hashlib.sha256(canonical).hexdigest()
+        candidate_path = state_dir(cwd) / "plans" / f"{canonical_digest[7:23]}.json"
+        candidate_file = published_files.add(_publish_output_transaction(candidate_path, canonical))
+        plan = {
+            "schema": "mission-plan/1",
+            "path": str(candidate_file.path.relative_to(cwd)),
+            "digest": canonical_digest,
+            "source": "core",
+            "source_id": source_id,
+            "source_digest": source_digest,
+            "selection_source": "core",
+            "iteration": iteration,
+            "generation": generation,
+            "validated_at": iso_now(),
+        }
+        try:
+            canonical_plan_identity(cwd, plan, reader=_read_strict_review_file)
+        except (OSError, PlanningLifecycleError) as exc:
+            _provider_gate(f"core-plan-candidate-invalid:{exc}")
+        data["canonical_plan"] = plan
+        records[f"core:{source_id}"] = {
+            key: plan[key]
+            for key in ("generation", "source", "source_id", "selection_source", "iteration")
+        }
+        data["planning_source_records"] = records
+        data["updated_at"] = iso_now()
+        _verify_published_file(candidate_file)
+        backup_state(sf)
+        atomic_write_json(sf, stamp_metadata(data, cwd))
+    print(json.dumps({"ok": True, "canonical_plan": plan}, indent=2 if args.json else None, ensure_ascii=False))
 
 
 def cmd_planning_promote_provider_plan(args):
@@ -16193,6 +16362,11 @@ def _build_parser():
 
     p_planning = sub.add_parser("planning", help="policy v1 planning lifecycle transitions")
     planning_sub = p_planning.add_subparsers(dest="planning_cmd", required=True)
+    p_adopt_core = planning_sub.add_parser("adopt-core", help="validate and adopt one core planning document")
+    p_adopt_core.add_argument("--input", required=True, help="canonical mission-plan/1 document regular file")
+    p_adopt_core.add_argument("--source-id", default=None, help="bounded source generation identifier")
+    p_adopt_core.add_argument("--json", action="store_true")
+    p_adopt_core.set_defaults(func=cmd_planning_adopt_core, command_outcome_tracking=True)
     p_promote = planning_sub.add_parser("promote-provider-plan", help="promote one validated primary provider candidate")
     p_promote.add_argument("--invocation-id", required=True)
     p_promote.set_defaults(func=cmd_planning_promote_provider_plan, command_outcome_tracking=True)

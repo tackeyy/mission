@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+- policy v1 の core planning が canonical `mission-plan/1` を検証・登録し、既存の execution gate を維持したまま先へ進める `planning adopt-core` と、対応する `next` / 失敗ガイダンスを追加しました (#465)。
+
 ## [2.4.0] - 2026-08-14
 
 - feat: `stats` と `audit` に `iteration_recovery` 集計を追加し、recovery 件数を #461 として要約できるようにしました。
