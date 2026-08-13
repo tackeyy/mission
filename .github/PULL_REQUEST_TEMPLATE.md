@@ -10,7 +10,7 @@
 ## Validation
 
 <!-- How did you verify the change? Check all that apply. -->
-- [ ] `python3 -m pytest -q skills/mission` passes
+- [ ] `.venv-ci/bin/python -m pytest -q -n auto --dist loadfile skills/mission` passes
 - [ ] `shellcheck scripts/*.sh` passes (if shell scripts changed)
 - [ ] `claude plugin validate .` passes (if plugin metadata changed)
 - [ ] Docs updated (if behavior or install steps changed)
