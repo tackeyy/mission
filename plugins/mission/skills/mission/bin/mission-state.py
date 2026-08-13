@@ -1555,7 +1555,7 @@ def _pregate_state_reference(cwd: Path, issue_ref: Any) -> dict[str, Any] | None
 
 
 def _pregate_verdict_warning(record: dict[str, Any] | None) -> str | None:
-    if not record:
+    if not record or not isinstance(record, dict):
         return None
     verdict = record.get("verdict")
     if verdict in {None, "accepted"}:

@@ -132,3 +132,16 @@ def test_next_is_silent_for_accepted_or_missing_pregate(run_cli, tmp_path):
     assert missing.returncode == 0
     assert "pregate verdict" not in missing_out["summary"]
     assert missing.stderr == ""
+
+
+def test_next_does_not_crash_when_pregate_is_not_dict(run_cli, tmp_path):
+    root = tmp_path
+    (root / ".mission-state").mkdir()
+    _init_state(run_cli, root)
+    run_cli("set", "pregate=bad_string", cwd=root, check=True)
+
+    result = run_cli("next", cwd=root, check=True)
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert "pregate verdict" not in json.dumps(payload, ensure_ascii=False)
