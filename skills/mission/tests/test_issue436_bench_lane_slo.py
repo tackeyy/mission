@@ -170,3 +170,39 @@ def test_compare_lane_slo_baseline_reports_numeric_deltas():
         "observed": 150,
         "delta": -2,
     }
+
+
+def test_run_lane_report_failure_exit_code_is_fail_safe(tmp_path, monkeypatch):
+    module = RUNNER
+
+    def _fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="ERROR: lane-report requires at least one mission state")
+
+    monkeypatch.setattr(module.subprocess, "run", _fake_run)
+    report, path = module.run_lane_report(tmp_path, tmp_path / "artifacts")
+    assert report is None
+    assert path is None
+
+
+def test_run_lane_report_timeout_is_fail_safe(tmp_path, monkeypatch):
+    module = RUNNER
+
+    def _fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="lane-report", timeout=120)
+
+    monkeypatch.setattr(module.subprocess, "run", _fake_run)
+    report, path = module.run_lane_report(tmp_path, tmp_path / "artifacts")
+    assert report is None
+    assert path is None
+
+
+def test_run_lane_report_invalid_json_is_fail_safe(tmp_path, monkeypatch):
+    module = RUNNER
+
+    def _fake_run(*args, **kwargs):
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="{broken", stderr="")
+
+    monkeypatch.setattr(module.subprocess, "run", _fake_run)
+    report, path = module.run_lane_report(tmp_path, tmp_path / "artifacts")
+    assert report is None
+    assert path is None

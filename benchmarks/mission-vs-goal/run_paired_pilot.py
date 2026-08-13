@@ -178,7 +178,12 @@ def prepare_clone(source: Path, target: Path, starting_commit: str) -> None:
         raise RuntimeError(f"git checkout failed: {checkout.stderr}")
 
 
-def run_lane_report(worktree: Path, artifact_dir: Path, slo_minutes: int = 15) -> tuple[dict, Path]:
+def run_lane_report(worktree: Path, artifact_dir: Path, slo_minutes: int = 15) -> tuple[dict | None, Path | None]:
+    """Post-run lane-report collection.
+
+    fail-safe: lane-report は観測であり、失敗 (state 不在の goal arm・timeout・
+    不正 JSON) で bench 全体を落とさず (None, None) を返す。
+    """
     artifact_dir.mkdir(parents=True, exist_ok=True)
     command = [
         sys.executable,
@@ -188,21 +193,24 @@ def run_lane_report(worktree: Path, artifact_dir: Path, slo_minutes: int = 15) -
         "--slo-minutes",
         str(slo_minutes),
     ]
-    result = subprocess.run(
-        command,
-        cwd=worktree,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=120,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            command,
+            cwd=worktree,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=120,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None, None
     if result.returncode != 0:
-        raise RuntimeError(f"lane-report failed: {result.stderr}")
+        return None, None
     try:
         report = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("lane-report produced invalid JSON") from exc
+    except json.JSONDecodeError:
+        return None, None
     artifact_path = artifact_dir / "lane-report.json"
     artifact_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return report, artifact_path
@@ -445,7 +453,8 @@ def run_one(task: dict, arm: str, run_id: str, starting_commit: str, run_root: P
     evaluation = evaluate_run(worktree, task, arm, output_rel, session_id, proc.returncode)
     lane_report, lane_report_path = run_lane_report(worktree, artifact_dir)
     artifacts = copy_artifacts(worktree, artifact_dir, output_rel, last_message, event_log)
-    artifacts.append(str(lane_report_path.relative_to(REPO_ROOT)))
+    if lane_report_path is not None:
+        artifacts.append(str(lane_report_path.relative_to(REPO_ROOT)))
     stderr_path = artifact_dir / "stderr.txt"
     stderr_path.write_text(proc.stderr, encoding="utf-8")
     artifacts.append(str(stderr_path.relative_to(REPO_ROOT)))
@@ -528,7 +537,8 @@ def main() -> int:
     for task, arm, arm_order in planned:
         record, lane_report = run_one(task, arm, args.run_id, args.starting_commit, Path(args.run_root), args.timeout, arm_order, args.model_id)
         records.append(record)
-        lane_reports.append(lane_report)
+        if lane_report is not None:
+            lane_reports.append(lane_report)
         with result_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
     summary = summarize(
