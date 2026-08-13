@@ -60,7 +60,7 @@ from provider_public_contract import (  # noqa: E402
     validate_specialist_public_state,
 )
 from planning_provider_metrics import reduce_planning_provider_kpis  # noqa: E402
-from review_learning import failure_ledger_counts  # noqa: E402
+from review_learning import failure_ledger_counts, reduce_iteration_recovery  # noqa: E402
 from audit_findings import (  # noqa: E402
     AuditFinding,
     FindingSpec,
@@ -2883,6 +2883,7 @@ def aggregate(
         "command_outcome_counts": command_outcome_counts,
         "planning_provider_kpis": planning_provider_kpis,
         "failure_ledger_counts": learning_counts,
+        "iteration_recovery": reduce_iteration_recovery([record.state for record in records]),
         "command_outcome_defects": command_outcome_defects,
         "artifact_coverage": summarize_artifact_coverage(
             [record.state for record in records]

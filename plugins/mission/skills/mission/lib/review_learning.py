@@ -4,8 +4,11 @@ from __future__ import annotations
 from collections import Counter
 import hashlib
 import json
+import math
 import re
 from typing import Any, Mapping, Sequence
+
+from mission_common import classify_state, session_role
 
 
 LEARNING_SCHEMA = "mission-review-learning/1"
@@ -167,6 +170,83 @@ def failure_ledger_counts(states: Sequence[Mapping[str, Any]]) -> dict[str, Any]
     return {
         "pattern_count": pattern_count, "recurring_pattern_count": recurring,
         "weak_phase_counts": dict(sorted(phase_counts.items())), "invalid_ledger_count": invalid,
+    }
+
+
+def _valid_score_entries(score_history: object) -> list[Mapping[str, Any]]:
+    if not isinstance(score_history, list):
+        return []
+    entries: list[Mapping[str, Any]] = []
+    for entry in score_history:
+        if not isinstance(entry, Mapping):
+            continue
+        composite = entry.get("composite")
+        if (
+            isinstance(composite, (int, float))
+            and not isinstance(composite, bool)
+            and math.isfinite(float(composite))
+        ):
+            entries.append(entry)
+    return entries
+
+
+def _mean(values: Sequence[float]) -> float | None:
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def _median(values: Sequence[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return float(ordered[middle])
+    return (ordered[middle - 1] + ordered[middle]) / 2
+
+
+def reduce_iteration_recovery(states: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    sessions_with_reject = 0
+    deltas: list[float] = []
+    iterations: list[float] = []
+    resolved_findings = 0.0
+    first_findings = 0.0
+    for state in states:
+        if not isinstance(state, Mapping):
+            continue
+        if session_role(state) != "implementer" or classify_state(state) != "pass":
+            continue
+        score_history = _valid_score_entries(state.get("score_history"))
+        if len(score_history) < 2:
+            continue
+        sessions_with_reject += 1
+        first_entry = score_history[0]
+        final_entry = score_history[-1]
+        first_composite = float(first_entry["composite"])
+        final_composite = float(final_entry["composite"])
+        deltas.append(final_composite - first_composite)
+        iterations.append(float(len(score_history)))
+        first_open_high = first_entry.get("open_high")
+        final_open_high = final_entry.get("open_high")
+        if (
+            isinstance(first_open_high, int)
+            and not isinstance(first_open_high, bool)
+            and first_open_high > 0
+            and isinstance(final_open_high, int)
+            and not isinstance(final_open_high, bool)
+            and final_open_high >= 0
+        ):
+            resolved_findings += float(max(0, first_open_high - final_open_high))
+            first_findings += float(first_open_high)
+    return {
+        "sessions_with_reject": sessions_with_reject,
+        "first_to_final_composite_delta": {
+            "mean": _mean(deltas),
+            "median": _median(deltas),
+        },
+        "avg_iterations": _mean(iterations),
+        "resolved_findings_ratio": (resolved_findings / first_findings) if first_findings else None,
     }
 
 

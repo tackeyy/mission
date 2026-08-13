@@ -16,6 +16,7 @@ from review_learning import (
     LearningContractError,
     summarize_learning_brief,
     failure_ledger_counts,
+    reduce_iteration_recovery,
     reduce_failure_ledger,
     validate_review_learning,
 )
@@ -359,3 +360,104 @@ def test_learning_brief_empty_ledger_returns_empty_rules():
     ])
 
     assert brief == {"schema": "mission-learning-brief/1", "rules": []}
+
+
+def test_iteration_recovery_reducer_uses_terminal_implementer_runs_only():
+    # Issue #275: stats/audit に追加する iteration_recovery の回帰防止。
+    states = [
+        {
+            "session_id": "recovered-a",
+            "session_role": "implementer",
+            "passes": True,
+            "loop_active": False,
+            "score_history": [
+                {"iteration": 1, "composite": 3.0, "open_high": 4},
+                {"iteration": 2, "composite": 4.0, "open_high": 1},
+            ],
+        },
+        {
+            "session_id": "recovered-b",
+            "session_role": "implementer",
+            "passes": True,
+            "loop_active": False,
+            "score_history": [
+                {"iteration": 1, "composite": 2.5, "open_high": 2},
+                {"iteration": 2, "composite": 3.0, "open_high": 0},
+                {"iteration": 3, "composite": 3.5, "open_high": 0},
+            ],
+        },
+        {
+            "session_id": "ignored-checker",
+            "session_role": "checker",
+            "passes": True,
+            "loop_active": False,
+            "score_history": [
+                {"iteration": 1, "composite": 3.0, "open_high": 2},
+                {"iteration": 2, "composite": 4.0, "open_high": 0},
+            ],
+        },
+        {
+            "session_id": "ignored-active",
+            "session_role": "implementer",
+            "passes": False,
+            "loop_active": True,
+            "score_history": [
+                {"iteration": 1, "composite": 3.0, "open_high": 2},
+                {"iteration": 2, "composite": 4.0, "open_high": 0},
+            ],
+        },
+        {
+            "session_id": "ignored-short",
+            "session_role": "implementer",
+            "passes": True,
+            "loop_active": False,
+            "score_history": [{"iteration": 1, "composite": 4.0, "open_high": 0}],
+        },
+    ]
+
+    recovery = reduce_iteration_recovery(states)
+
+    assert recovery == {
+        "sessions_with_reject": 2,
+        "first_to_final_composite_delta": {
+            "mean": pytest.approx(1.0),
+            "median": pytest.approx(1.0),
+        },
+        "avg_iterations": pytest.approx(2.5),
+        "resolved_findings_ratio": pytest.approx(5 / 6),
+    }
+
+
+def test_stats_and_audit_iteration_recovery_match(run_cli, tmp_path):
+    # Issue #275: stats --json と audit が同じ reducer を共有していることを固定する。
+    run_cli("init", "iteration recovery", "--complexity", "Standard", cwd=tmp_path, check=True)
+    state_path = tmp_path / ".mission-state" / "sessions" / "test.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state.update(
+        session_role="implementer",
+        passes=True,
+        loop_active=False,
+        score_history=[
+            {"iteration": 1, "composite": 3.0, "open_high": 4},
+            {"iteration": 2, "composite": 4.0, "open_high": 1},
+        ],
+    )
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    stats = json.loads(run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path, check=True).stdout)
+    audit_path = Path(__file__).resolve().parents[3] / "scripts" / "mission-audit.py"
+    audit = subprocess.run(
+        [sys.executable, str(audit_path), "--root", str(tmp_path), "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    audit_json = json.loads(audit.stdout)
+
+    assert stats["iteration_recovery"] == audit_json["iteration_recovery"]
+    assert stats["iteration_recovery"] == {
+        "sessions_with_reject": 1,
+        "first_to_final_composite_delta": {"mean": pytest.approx(1.0), "median": pytest.approx(1.0)},
+        "avg_iterations": pytest.approx(2.0),
+        "resolved_findings_ratio": pytest.approx(3 / 4),
+    }
