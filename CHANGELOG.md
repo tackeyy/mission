@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-08-13
+
 - Added bounded command outcome telemetry for review import/finalization, transition gates, and command providers. Records classify `ok`, `expected-gate`, `invalid-input`, `external`, or `internal-error`, retain opaque retry lineage, preserve state bytes for rejected gates, and report deduplicated root-event/retry/corruption counts through `stats` and audit (#386).
 
 - Scoring now keeps quality assessment to four axes and records reviewer agreement separately. Manual score imports use a dedicated typed, content-addressed capture route: all score fields must be finite non-boolean values in range, and open High counts must be non-boolean non-negative integers. Audit/statistics show score provenance status (#383).
@@ -19,6 +21,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Learning brief now aggregates `failure_ledger` general fix rules across sessions and archived terminal states, returning recurrence-ordered guidance via the read-only `learning brief` command; SKILL guidance injects it into planner and executor briefs while keeping reviewers independent (#457).
+- Planning-provider KPI conformance, structured plan contract validation/import, lifecycle handoff, and provider preflight/application hardening now keep plan evidence, provider identity, and invocation packets fail-closed (#417, #418, #415, #414, #413).
+- State/archive/review instrumentation now records host execution correlation, review-generation lineage, immutable audit snapshots, benchmark calibration, specialist checkpoints, review-import structured outcomes, and resume docs (#410, #409, #408, #407, #406, #405, #404).
+- Pre-Gate evaluation cache now records `pregate record/check`, keys entries by `issue_ref`, and tracks `subject_digest` hits, misses, stale data, and fail-safe fallback during `init` reference recording (#430).
+- Pregate digest now supports an ahead-of-time fill recipe that preloads the digest before the next check, keeping the cache warm for repeated runs (#437).
+- Non-accepted pregate verdicts now trigger explicit `init` and `next` warnings so the operator sees the mismatch before continuing (#439).
+- Checker evidence handoff now uses local `publish` / `await` / `verify` flow with atomic writes, digest comparison, and timeout exit 3, which removes GitHub comment polling from the normal path (#427).
+- Parallel mission merge queue now supports `enqueue`, `status`, `next`, `verify`, and `mark`, and invalidates queued work when the base moves so the flow can refreeze cleanly (#431).
+- `queue enqueue --from-state` now auto-matches `revision_scope` from the current state, so follow-up queue entries stay aligned with the originating revision (#440).
+- lane-report now breaks out wall-clock, active, and waiting time by `session_role`, applies SLO classification, and groups reports by `root_run_id` for bench collection and SLO aggregation (#429, #441, #438).
+- invalid-input and expected-gate failures now emit self-repair HINTs with a correct invocation example, a `--json` guidance array, and telemetry marking so the next retry can recover faster (#428).
+- Smaller release-window follow-ups are also retained here for traceability: #432, #433, #434, #435, #436, #444, #446, #447, #448, #449, #450, #454.
 - Repository-managed `make test-smoke`, `make test`, and `make test-e2e` targets now share the CI entrypoint, create a pinned test environment when needed, and emit exact tree/test-manifest reports (#391).
 - State archive compaction now records canonical and superseded state relations in immutable content-addressed generations without deleting physical lineage. Audit reads materialized canonical records by default and exposes full physical lineage with `--forensic` (#391).
 - Stop-hook block output now fingerprints the unfinished session set, phase, and lease fields. It emits full detail only on change or after the heartbeat TTL, otherwise returning a compact blocker category plus one next command. Project-local `mission-stop-guard/1` state keeps atomic block/reinjection/detail/heartbeat counters without mutating the fenced session (#389).
@@ -32,8 +46,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bounded-context execution is now observable without changing its trigger, fallback, or review gates: `context-manifest` records each iteration's path, SHA-256 digest, and generation time in session state; `aggregate-reviews` archives expected/effective manifest evidence and emits an exit-0 warning when bounded context was expected but not generated; `stats --json` reports expected, generated, and full-fallback counts; and bounded mission-reviewer output identifies `context: bounded` in its notes. Manifest observations require strict positive-integer iterations (excluding booleans and floats) and a timezone-aware ISO generation timestamp before aggregate or stats count them. Malformed or unreadable paths, including embedded-NUL tampering, are treated as ungenerated without aborting aggregation or stats (#352).
 - Adaptive Simple-task routing now supports a configurable goal dispatch provider (#355): portable `inline` remains the default, while explicit mission guidance, `--goal-dispatch`, project `.mission/routing.yml`, or user configuration can select `host-native`. Init, set, and next verdicts record the effective dispatch; unknown hosts and invalid configuration warn and fail safe to inline without changing routing gates or `--force-mission` behavior.
 
+### CI / Testing
+
+- `pytest-xdist` now parallelizes the test suite and achieved a measured 5.5x speedup on the release run (#451).
+- Docs/results-only PRs now take the guard-only fast path, and the merge workflow documents the updated behavior (#453).
+- Quality timeout is now 25 minutes, and pregate digest tests cover the previously unverified path with the public digest helper (#445).
+- The SLO run was recorded for 2026-08-13, and lane-report auto-collection remained wired into the bench runner (#443).
+
+### Documentation
+
+- Worktree-run mission init placement rules are now documented in `SKILL.md` references (#455).
+- Merge-operation guidance now covers auto-merge and `update-branch` handling alongside the docs-only fast path note (#453).
+
 ### Fixed
 
+- Stop-guard CWD resolution now prefers hook input, which avoids the agent CLI test false failures (#442).
+- `review_tier` derivation no longer fires on compound technical nouns such as public API wording (#452).
+- `archive-worktree` now handles repository-managed artifacts with repo-artifact references, index-independent verification, staged diagnostics, and symlink refusal (#456).
 - `aggregate-reviews` now runs a WARN-only structural lint when state declares `artifact_path`, detecting empty H1-H3 sections and English/Japanese forward-reference-only stubs without changing reviewer findings, scores, or exit status. Results are recorded in review aggregate evidence and state, while `stats --json` reports empty-section, stub-forward-reference, and clean counts for measuring incidence before any future gate decision. Path-resolution and read failures, including embedded-NUL tampering and non-regular files, fail open as `artifact_lint_status=skipped`, clear any prior lint observation to prevent stale stats, and remain distinct from a successful `clean` observation. Empty ATX titles, closing hash sequences, and invalid backtick-fence info strings follow Markdown syntax (#351).
 - `aggregate-reviews` now requires `--reviewer-window` for every perspective when two or more reviewers are supplied, exiting 2 with the missing perspectives and required format; `review-finalize` inherits the fail-closed gate and never pushes a score after this aggregation failure. Single-reviewer runs remain exempt, while reported serial execution remains WARN-only (#350).
 - Reviewer output bounds are now observable without becoming a quality gate (#353): `aggregate-reviews` measures each input's `mission-review/1` JSON bytes and template-external prose bytes/ratio, records the evidence and cross-session p50/p90 stats, and emits an exit-0 warning above provisional 20 KB / 0.7 thresholds. Scoring, findings, and agreement results are unchanged.
@@ -386,6 +415,7 @@ First public release.
 - Python test suite covering state routing, scoring gates, and hook behavior.
 - GitHub Actions CI (`push`, `pull_request`, `workflow_dispatch`) with pytest and ShellCheck.
 
+[2.3.0]: https://github.com/tackeyy/mission/releases/tag/v2.3.0
 [2.0.0]: https://github.com/tackeyy/mission/releases/tag/v2.0.0
 [1.2.0]: https://github.com/tackeyy/mission/releases/tag/v1.2.0
 [1.1.1]: https://github.com/tackeyy/mission/releases/tag/v1.1.1
