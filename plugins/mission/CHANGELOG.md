@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-08-14
+
+- feat: Added `iteration_recovery` aggregation to `stats` and `audit` so recovery counts are summarized for #461.
+
+- fix: Learning brief now falls back automatically to the worktree main root, and `--root` was added for explicit override (#463).
+
+- test: Strengthened boundary-value tests and intent comments/docstrings around `iteration_recovery` (#462).
+
 ## [2.3.0] - 2026-08-13
 
 - Added bounded command outcome telemetry for review import/finalization, transition gates, and command providers. Records classify `ok`, `expected-gate`, `invalid-input`, `external`, or `internal-error`, retain opaque retry lineage, preserve state bytes for rejected gates, and report deduplicated root-event/retry/corruption counts through `stats` and audit (#386).
@@ -415,6 +423,7 @@ First public release.
 - Python test suite covering state routing, scoring gates, and hook behavior.
 - GitHub Actions CI (`push`, `pull_request`, `workflow_dispatch`) with pytest and ShellCheck.
 
+[2.4.0]: https://github.com/tackeyy/mission/releases/tag/v2.4.0
 [2.3.0]: https://github.com/tackeyy/mission/releases/tag/v2.3.0
 [2.0.0]: https://github.com/tackeyy/mission/releases/tag/v2.0.0
 [1.2.0]: https://github.com/tackeyy/mission/releases/tag/v1.2.0
