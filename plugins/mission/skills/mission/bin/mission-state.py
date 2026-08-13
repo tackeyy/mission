@@ -218,6 +218,14 @@ from pregate_cache import (  # noqa: E402
     lookup as lookup_pregate_cache,
     record as record_pregate_cache,
 )
+from merge_queue import (  # noqa: E402
+    MergeQueueError,
+    enqueue as enqueue_merge_queue,
+    mark as mark_merge_queue,
+    next_candidate as next_merge_queue_candidate,
+    status as status_merge_queue,
+    verify as verify_merge_queue,
+)
 
 SCHEMA_VERSION = 4  # v4: structured scoring provenance is mandatory for new sessions
 GOAL_DISPATCH_MODES = {"inline", "host-native"}
@@ -7057,6 +7065,42 @@ def cmd_pregate(args):
         print(json.dumps(output, indent=2 if getattr(args, "json", False) else None, ensure_ascii=False))
         return
     raise AssertionError(f"unsupported pregate command: {args.pregate_cmd}")
+
+
+def cmd_queue(args):
+    cwd = Path.cwd()
+    try:
+        if args.queue_cmd == "enqueue":
+            depends_on = []
+            if args.depends_on:
+                depends_on = [item for item in (part.strip() for part in args.depends_on.split(",")) if item]
+            result = enqueue_merge_queue(
+                cwd,
+                issue_ref=args.issue_ref,
+                pr_ref=args.pr_ref,
+                head_sha=args.head_sha,
+                base_sha=args.base_sha,
+                depends_on=depends_on,
+                session_id=args.session,
+            )
+        elif args.queue_cmd == "status":
+            result = status_merge_queue(cwd)
+        elif args.queue_cmd == "next":
+            result = next_merge_queue_candidate(cwd)
+        elif args.queue_cmd == "verify":
+            result = verify_merge_queue(cwd, queue_id=args.queue_id, current_base_sha=args.current_base_sha)
+        elif args.queue_cmd == "mark":
+            result = mark_merge_queue(cwd, queue_id=args.queue_id, status_value=args.status, reason=args.reason)
+        else:
+            raise AssertionError(f"unsupported queue command: {args.queue_cmd}")
+    except MergeQueueError as exc:
+        if args.queue_cmd == "verify":
+            print("ERROR: base changed; refreeze required", file=sys.stderr)
+            print("HINT: base 統合 → refreeze（--head-sha を更新して再 enqueue）→ fresh review", file=sys.stderr)
+        else:
+            print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
+    print(json.dumps(result, indent=2 if getattr(args, "json", False) else None, ensure_ascii=False))
 
 
 PARALLEL_GROUP_SCHEMA = "mission-parallel-group/1"
@@ -15269,6 +15313,32 @@ def _build_parser():
     p_pregate_check.add_argument("--subject-digest", required=True)
     p_pregate_check.add_argument("--json", action="store_true")
     p_pregate_check.set_defaults(func=cmd_pregate)
+
+    p_queue = sub.add_parser("queue", help="merge queue sidecar")
+    p_queue_sub = p_queue.add_subparsers(dest="queue_cmd", required=True)
+    p_queue_enqueue = p_queue_sub.add_parser("enqueue", help="enqueue one merge candidate")
+    p_queue_enqueue.add_argument("--issue-ref", required=True)
+    p_queue_enqueue.add_argument("--pr-ref", required=True)
+    p_queue_enqueue.add_argument("--head-sha", required=True)
+    p_queue_enqueue.add_argument("--base-sha", required=True)
+    p_queue_enqueue.add_argument("--depends-on", default=None)
+    p_queue_enqueue.add_argument("--session", default=None)
+    p_queue_enqueue.set_defaults(func=cmd_queue)
+    p_queue_status = p_queue_sub.add_parser("status", help="list queue entries in enqueue order")
+    p_queue_status.add_argument("--json", action="store_true")
+    p_queue_status.set_defaults(func=cmd_queue)
+    p_queue_next = p_queue_sub.add_parser("next", help="return the next merge candidate")
+    p_queue_next.add_argument("--json", action="store_true")
+    p_queue_next.set_defaults(func=cmd_queue)
+    p_queue_verify = p_queue_sub.add_parser("verify", help="validate a candidate against the live base sha")
+    p_queue_verify.add_argument("--queue-id", required=True)
+    p_queue_verify.add_argument("--current-base-sha", required=True)
+    p_queue_verify.set_defaults(func=cmd_queue)
+    p_queue_mark = p_queue_sub.add_parser("mark", help="transition one queue entry")
+    p_queue_mark.add_argument("--queue-id", required=True)
+    p_queue_mark.add_argument("--status", required=True, choices=["merged", "invalidated", "superseded"])
+    p_queue_mark.add_argument("--reason", default=None)
+    p_queue_mark.set_defaults(func=cmd_queue)
 
     p_stop_guard = sub.add_parser(
         "stop-guard-observe",
