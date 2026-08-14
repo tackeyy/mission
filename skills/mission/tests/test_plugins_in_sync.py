@@ -80,7 +80,16 @@ from pathlib import Path
 import subprocess
 import sys
 
+from mission_python_inventory import (
+    assert_python_module_inventory_compatible,
+    assert_python_module_inventory_matches,
+    discover_python_module_inventory,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[3]  # mission-selfheal/
+LIB_ROOT = REPO_ROOT / "skills" / "mission" / "lib"
+PLUGIN_LIB_ROOT = REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib"
+PYTHON_LIBRARY_INVENTORY = discover_python_module_inventory(LIB_ROOT, PLUGIN_LIB_ROOT)
 
 SYNC_PAIRS = [
     (
@@ -615,3 +624,13 @@ def test_changelog_md_in_sync():
         f"  plugins: {dst}\n"
         f"  同期コマンド: cp {src} {dst}"
     )
+
+
+def test_recursive_python_library_inventory_in_sync():
+    """Recursive inventory covers every production Python library module and its plugin mirror."""
+    assert_python_module_inventory_matches(PYTHON_LIBRARY_INVENTORY)
+
+
+def test_recursive_python_library_inventory_is_python39_compatible():
+    """Recursive inventory modules parse under the supported grammar and import from both roots."""
+    assert_python_module_inventory_compatible(PYTHON_LIBRARY_INVENTORY)

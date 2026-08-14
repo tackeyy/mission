@@ -12,17 +12,21 @@ from pathlib import Path
 
 import pytest
 
+from mission_python_inventory import discover_python_module_inventory
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 BIN = Path(__file__).resolve().parents[1] / "bin"
+LIB_ROOT = Path(__file__).resolve().parents[1] / "lib"
+PLUGIN_LIB_ROOT = REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "lib"
+PYTHON_LIBRARY_INVENTORY = discover_python_module_inventory(LIB_ROOT, PLUGIN_LIB_ROOT)
 
 # python3 直書きで実行され得る CLI エントリポイントと、それらが import するモジュール
 TARGETS = [
     BIN / "mission-state.py",
     BIN / "mission-migrate.py",
-    Path(__file__).resolve().parents[1] / "lib" / "specialist_accounting.py",
     REPO_ROOT / "scripts" / "mission-audit.py",
     REPO_ROOT / "scripts" / "mission-state.py",
-]
+] + [entry.canonical_path for entry in PYTHON_LIBRARY_INVENTORY.entries]
 
 
 def _has_future_annotations(path: Path) -> bool:
@@ -34,7 +38,7 @@ def _has_future_annotations(path: Path) -> bool:
     return False
 
 
-@pytest.mark.parametrize("path", TARGETS, ids=lambda p: p.name)
+@pytest.mark.parametrize("path", TARGETS, ids=[path.name for path in TARGETS])
 def test_future_annotations_import_present(path):
     """全 CLI エントリポイントが from __future__ import annotations を持つ (3.9 互換)."""
     assert path.exists(), f"missing target: {path}"
