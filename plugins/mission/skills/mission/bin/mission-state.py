@@ -4482,8 +4482,11 @@ def _planned_specialist_archive_path(
 ) -> Path:
     archive_dir = state_dir(cwd) / "archive"
     gid = (data.get("mission_id") or "unknown")[:8]
+    invocation_id = entry.get("invocation_id")
+    if not isinstance(invocation_id, str) or not invocation_id.strip():
+        raise SpecialistLifecycleError("invocation_id is required for specialist evidence archiving")
     skill_slug = _slug_for_filename(entry.get("skill") or "unknown")
-    return archive_dir / f"iter-{iteration}-{gid}-specialist-{skill_slug}.md"
+    return archive_dir / f"iter-{iteration}-{gid}-{invocation_id}-specialist-{skill_slug}.md"
 
 
 def _specialist_archive_document(text: str, iteration: int, data: dict, entry: dict) -> str:
@@ -4513,20 +4516,10 @@ def _stage_specialist_archive(dst: Path, document: str) -> Path:
 
 
 def _publish_staged_specialist_archive(temp_path: Path, dst: Path) -> Path | None:
-    previous = None
-    try:
-        if dst.exists() or dst.is_symlink():
-            fd, previous_name = tempfile.mkstemp(prefix=f".{dst.name}.previous.", dir=dst.parent)
-            os.close(fd)
-            previous = Path(previous_name)
-            previous.unlink()
-            os.replace(dst, previous)
-        os.replace(temp_path, dst)
-    except BaseException:
-        if previous is not None and previous.exists():
-            os.replace(previous, dst)
-        raise
-    return previous
+    if dst.exists() or dst.is_symlink():
+        raise FileExistsError(f"specialist evidence already exists at {dst}")
+    os.replace(temp_path, dst)
+    return None
 
 
 def _rollback_specialist_archive(
@@ -4549,30 +4542,32 @@ def _commit_specialist_state_with_archive(
     evidence_text: str | None,
 ) -> str | None:
     """Publish validated evidence and state together, restoring the archive on failure."""
-    _validate_specialist_public_state(data)
     dst = (
         _planned_specialist_archive_path(cwd, iteration, data, entry)
         if evidence_text is not None
         else None
     )
+    if evidence_text is not None:
+        document = _specialist_archive_document(evidence_text, iteration, data, entry)
+        entry["content_digest"] = "sha256:" + hashlib.sha256(
+            document.encode("utf-8")
+        ).hexdigest()
+    _validate_specialist_public_state(data)
     temp_path = None
-    previous = None
     published = False
     try:
         if dst is not None:
             document = _specialist_archive_document(evidence_text, iteration, data, entry)
             temp_path = _stage_specialist_archive(dst, document)
             _validate_specialist_public_state(data)
-            previous = _publish_staged_specialist_archive(temp_path, dst)
+            _publish_staged_specialist_archive(temp_path, dst)
             temp_path = None
             published = True
         backup_state(sf)
         atomic_write_json(sf, data)
     except BaseException:
-        _rollback_specialist_archive(temp_path, dst, previous, published)
+        _rollback_specialist_archive(temp_path, dst, None, published)
         raise
-    if previous is not None:
-        previous.unlink(missing_ok=True)
     return str(dst) if dst is not None else None
 
 

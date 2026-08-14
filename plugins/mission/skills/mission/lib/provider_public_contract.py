@@ -118,7 +118,7 @@ PHASE_PLAN_FIELDS = frozenset({"phase", "roles", "providers", "max_providers"})
 INVOCATION_FIELDS = frozenset({
     "iteration", "phase", "role", "skill", "mode", "status", "timestamp", "started_at",
     "completed_at", "provider_kind", "exit_code", "timeout", "reason_code",
-    "selection_source", "bounded_purpose", "evidence_path", "reason", "notes", "command", "kind",
+    "selection_source", "bounded_purpose", "evidence_path", "content_digest", "reason", "notes", "command", "kind",
     "selection_id", "invocation_id", "lifecycle_state", "transitioned_at",
     "reserved_at", "running_at", "application_context_digest",
     "provider_id",
@@ -606,6 +606,8 @@ def _validate_invocation(record: object, base: str) -> None:
     for field in ("application_context_digest", "process_identity_digest", "result_artifact_digest", "input_outbound_packet_digest"):
         if field in record and not (isinstance(record[field], str) and DIGEST.fullmatch(record[field])):
             _reject(f"{base}/{field}")
+    if "content_digest" in record and not (isinstance(record["content_digest"], str) and DIGEST.fullmatch(record["content_digest"])):
+        _reject(f"{base}/content_digest")
     if "reservation_owner_session_id" in record and not (
         isinstance(record["reservation_owner_session_id"], str)
         and TOKEN.fullmatch(record["reservation_owner_session_id"])

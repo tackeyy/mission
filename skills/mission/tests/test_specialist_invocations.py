@@ -1,4 +1,5 @@
 """Issue #31: specialist skill invocation logging."""
+import hashlib
 import json
 import importlib.util
 import os
@@ -156,6 +157,13 @@ def _set_current_bounded_provider(state, *, provider_phase):
     state["specialists_selected"][0].pop("activation", None)
 
 
+def _expected_specialist_archive_path(state_dir, entry):
+    return state_dir / "archive" / (
+        f"iter-{entry['iteration']}-abc12345-{entry['invocation_id']}-specialist-"
+        f"{entry['skill']}.md"
+    )
+
+
 def test_init_includes_specialist_invocations(run_cli, tmp_path):
     run_cli("init", "specialist invocation mission", "--complexity", "Standard", cwd=tmp_path, check=True)
 
@@ -268,16 +276,153 @@ def test_log_invocation_archives_evidence_with_metadata(state_dir, run_cli, tmp_
         check=True,
     )
 
-    archived = state_dir / "archive" / "iter-1-abc12345-specialist-dev-code-reviewer.md"
-    content = archived.read_text(encoding="utf-8")
     entry = read_state(state_dir)["specialist_invocations"][0]
+    archived = _expected_specialist_archive_path(state_dir, entry)
+    content = archived.read_text(encoding="utf-8")
     assert archived.exists()
     assert "session_id=test" in content
     assert "mission_id=abc12345" in content
     assert "skill=dev-code-reviewer" in content
     assert "status=completed" in content
     assert "No blocking issues." in content
-    assert entry["evidence_path"] == ".mission-state/archive/iter-1-abc12345-specialist-dev-code-reviewer.md"
+    assert entry["content_digest"] == "sha256:" + hashlib.sha256(
+        archived.read_bytes()
+    ).hexdigest()
+    assert entry["evidence_path"] == (
+        f".mission-state/archive/iter-1-abc12345-{entry['invocation_id']}-specialist-"
+        "dev-code-reviewer.md"
+    )
+
+
+def test_log_invocation_preserves_both_evidence_archives_for_same_skill_and_iteration(
+    state_dir, run_cli, tmp_path, read_state
+):
+    first = tmp_path / "review-1.md"
+    first.write_text("# Specialist Review\n\nFirst pass.\n", encoding="utf-8")
+    second = tmp_path / "review-2.md"
+    second.write_text("# Specialist Review\n\nSecond pass.\n", encoding="utf-8")
+
+    run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "review",
+        "--role", "code-reviewer",
+        "--skill", "dev-code-reviewer",
+        "--mode", "skill-tool",
+        "--status", "completed",
+        "--evidence-output", str(first),
+        cwd=state_dir.parent,
+        check=True,
+    )
+    run_cli(
+        "specialists", "log-invocation",
+        "--iteration", "1",
+        "--phase", "review",
+        "--role", "code-reviewer",
+        "--skill", "dev-code-reviewer",
+        "--mode", "skill-tool",
+        "--status", "completed",
+        "--evidence-output", str(second),
+        cwd=state_dir.parent,
+        check=True,
+    )
+
+    state = read_state(state_dir)
+    assert len(state["specialist_invocations"]) == 2
+    first_entry, second_entry = state["specialist_invocations"]
+    first_archive = _expected_specialist_archive_path(state_dir, first_entry)
+    second_archive = _expected_specialist_archive_path(state_dir, second_entry)
+    assert first_archive.exists()
+    assert second_archive.exists()
+    assert first_archive != second_archive
+    assert first_archive.read_text(encoding="utf-8") != second_archive.read_text(encoding="utf-8")
+    assert first_entry["content_digest"] == "sha256:" + hashlib.sha256(
+        first_archive.read_bytes()
+    ).hexdigest()
+    assert second_entry["content_digest"] == "sha256:" + hashlib.sha256(
+        second_archive.read_bytes()
+    ).hexdigest()
+
+
+def test_legacy_evidence_path_is_readable_without_rewrite(state_dir, run_cli, read_state):
+    state_path = state_dir / "sessions" / "test.json"
+    state = read_state(state_dir)
+    state["specialist_invocations"] = [
+        {
+            "invocation_id": "inv_0123456789abcdef0123456789abcdef",
+            "iteration": 1,
+            "phase": "review",
+            "role": "reviewer",
+            "skill": "dev-code-reviewer",
+            "mode": "skill-tool",
+            "status": "completed",
+            "lifecycle_state": "terminal",
+            "timestamp": "2026-08-10T00:00:00Z",
+            "evidence_path": ".mission-state/archive/iter-1-abc12345-specialist-dev-code-reviewer.md",
+        }
+    ]
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    before = state_path.read_bytes()
+
+    summary = run_cli("specialists", "summary", "--json", cwd=state_dir.parent)
+    accounting = run_cli("specialists", "accounting", "--json", cwd=state_dir.parent)
+
+    assert summary.returncode == 0, summary.stderr
+    assert accounting.returncode == 0, accounting.stderr
+    assert state_path.read_bytes() == before
+
+
+def test_log_invocation_rejects_rewrite_when_archive_path_already_exists(
+    state_dir, run_cli, tmp_path, read_state
+):
+    state_path = state_dir / "sessions" / "test.json"
+    evidence = tmp_path / "rewrite.md"
+    evidence.write_text("# Specialist Review\n\nRewrite attempt.\n", encoding="utf-8")
+    state = read_state(state_dir)
+    state["specialist_invocations"] = [
+        {
+            "invocation_id": "inv_0123456789abcdef0123456789abcdef",
+            "iteration": 1,
+            "phase": "review",
+            "role": "code-reviewer",
+            "skill": "dev-code-reviewer",
+            "mode": "skill-tool",
+            "status": "started",
+            "lifecycle_state": "invoked",
+            "timestamp": "2026-08-10T00:00:00Z",
+        }
+    ]
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    archive_path = _expected_specialist_archive_path(
+        state_dir,
+        {
+            "iteration": 1,
+            "invocation_id": "inv_0123456789abcdef0123456789abcdef",
+            "skill": "dev-code-reviewer",
+        },
+    )
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    archive_path.write_text("original archive", encoding="utf-8")
+    state_before = state_path.read_bytes()
+    archive_before = archive_path.read_text(encoding="utf-8")
+
+    result = run_cli(
+        "specialists", "log-invocation",
+        "--invocation-id", "inv_0123456789abcdef0123456789abcdef",
+        "--iteration", "1",
+        "--phase", "review",
+        "--role", "code-reviewer",
+        "--skill", "dev-code-reviewer",
+        "--mode", "skill-tool",
+        "--status", "completed",
+        "--evidence-output", str(evidence),
+        cwd=state_dir.parent,
+    )
+
+    assert result.returncode != 0
+    assert state_path.read_bytes() == state_before
+    assert archive_path.read_text(encoding="utf-8") == archive_before
 
 
 def test_log_invocation_preflights_pending_entry_before_archive_or_state_side_effects(
