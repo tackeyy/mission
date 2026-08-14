@@ -91,7 +91,7 @@ def _checked_cli(
 def _run_cli_with_clock(
     root: Path,
     *arguments: str,
-    lease_id: str,
+    lease_id: str | None,
     now: str,
 ) -> subprocess.CompletedProcess:
     """Execute the CLI module with only its clock seam fixed for lease takeover."""
@@ -104,12 +104,13 @@ def _run_cli_with_clock(
     environment.update(
         {
             "MISSION_SESSION_ID": "test",
-            "MISSION_LEASE_ID": lease_id,
             "ISSUE500_CLI_PATH": str(_MISSION_STATE_PY),
             "ISSUE500_CLI_NOW": now,
             "ISSUE500_CLI_ARGS": json.dumps(list(arguments)),
         }
     )
+    if lease_id is not None:
+        environment["MISSION_LEASE_ID"] = lease_id
     bootstrap = (
         "import importlib.util,json,os,sys;"
         "p=os.environ['ISSUE500_CLI_PATH'];"

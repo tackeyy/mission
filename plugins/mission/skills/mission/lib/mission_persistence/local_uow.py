@@ -1820,3 +1820,41 @@ def publish_generation(
         generation_digest=expected_generation_digest,
         reused=not manifest_created,
     )
+
+
+def validate_staged_generation(
+    repository_root: Path | str,
+    staged: StagedGeneration,
+) -> None:
+    """Revalidate a private stage without publishing it.
+
+    U2 uses this immediately before its fenced CAS prepare boundary.  Keeping
+    the validation owner here avoids a second manifest/file-identity contract.
+    """
+    _validate_staged_generation(Path(repository_root), staged)
+
+
+def validate_verified_blob_set(blobs: VerifiedBlobSet) -> None:
+    """Validate one immutable captured blob set without staging it."""
+    if not isinstance(blobs, VerifiedBlobSet) or type(blobs.blobs) is not tuple:
+        raise LocalUnitOfWorkError(
+            "immutable-input-required", "verified blobs must be immutable"
+        )
+    bindings = []
+    for blob in blobs.blobs:
+        if not isinstance(blob, VerifiedBlob):
+            raise LocalUnitOfWorkError(
+                "blob-binding-mismatch", "captured blob type is invalid"
+            )
+        bindings.append(blob.binding)
+    _validate_blob_bindings(tuple(bindings), blobs)
+
+
+def discard_staged_generation(
+    repository_root: Path | str,
+    staged: StagedGeneration,
+) -> None:
+    """Remove one still-valid private stage without touching public objects."""
+    repository = Path(repository_root)
+    validated = _validate_staged_generation(repository, staged)
+    _remove_validated_stage(repository, staged, validated)
