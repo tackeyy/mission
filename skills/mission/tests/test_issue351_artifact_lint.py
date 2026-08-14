@@ -1,8 +1,12 @@
 """Issue #351: preventive artifact completeness lint."""
 
 import importlib.util
+import getpass
 import json
 import os
+import re
+import signal
+import time
 from pathlib import Path
 import stat
 import subprocess
@@ -17,6 +21,15 @@ SPEC = importlib.util.spec_from_file_location("mission_state_issue351", MISSION_
 MISSION_STATE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(MISSION_STATE)
+
+
+# FIFO open can block forever if no reader arrives; 1s stays tight while
+# still leaving enough room for the expected fast skip path.
+FIFO_ARTIFACT_TIMEOUT_SECONDS = 1
+_ABSOLUTE_PATH_RE = re.compile(r"(?<!\w)/(?:[^\s\"']+)")
+_CURRENT_USER = getpass.getuser()
+# home prefix はリテラルで書くと artifact hygiene の走査に引っかかるため組み立てる
+_HOME_PREFIX = "/" + "Users" + "/"
 
 
 def _review(path: Path) -> Path:
@@ -34,6 +47,83 @@ def _review(path: Path) -> Path:
         "notes": "review",
     }))
     return path
+
+
+def _redact_timeout_diagnostic(text):
+    if text is None:
+        return "<empty>"
+    if isinstance(text, bytes):
+        text = text.decode(errors="replace")
+    redacted = text.replace(str(Path.home()), "<home>")
+    redacted = redacted.replace(_CURRENT_USER, "<user>")
+    redacted = _ABSOLUTE_PATH_RE.sub("<path>", redacted)
+    return redacted
+
+
+def _describe_child_state(returncode):
+    if returncode is None:
+        return "running"
+    if returncode < 0:
+        try:
+            signal_name = signal.Signals(-returncode).name
+        except ValueError:
+            signal_name = f"signal {-returncode}"
+        return f"terminated by {signal_name} (returncode={returncode})"
+    return f"exited {returncode}"
+
+
+def _format_fifo_timeout_diagnostic(*, elapsed, stderr, returncode):
+    margin = FIFO_ARTIFACT_TIMEOUT_SECONDS - elapsed
+    return (
+        "FIFO aggregate-reviews timed out "
+        f"after {elapsed:.3f}s (budget={FIFO_ARTIFACT_TIMEOUT_SECONDS:.3f}s, "
+        f"margin={margin:.3f}s); "
+        f"child={_describe_child_state(returncode)}; "
+        f"stderr={_redact_timeout_diagnostic(stderr)}"
+    )
+
+
+def _run_fifo_aggregate_reviews(*, cwd, env, review):
+    command = [
+        sys.executable,
+        str(MISSION_STATE_PY),
+        "aggregate-reviews",
+        "--iteration",
+        "1",
+        "--input",
+        str(review),
+        "--json",
+    ]
+    started = time.perf_counter()
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=FIFO_ARTIFACT_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        elapsed = time.perf_counter() - started
+        process.kill()
+        _, killed_stderr = process.communicate()
+        stderr = killed_stderr if killed_stderr else exc.stderr
+        raise AssertionError(
+            _format_fifo_timeout_diagnostic(
+                elapsed=elapsed,
+                stderr=stderr,
+                returncode=process.returncode,
+            )
+        ) from exc
+    elapsed = time.perf_counter() - started
+    return SimpleNamespace(
+        returncode=process.returncode,
+        stdout=stdout,
+        stderr=stderr,
+        elapsed=elapsed,
+    )
 
 
 def test_empty_sections_at_supported_heading_levels_are_detected():
@@ -372,31 +462,75 @@ def test_aggregate_fifo_artifact_skips_without_blocking_and_clears_stale_lint(
     }
     env["MISSION_SESSION_ID"] = "test"
 
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(MISSION_STATE_PY),
-            "aggregate-reviews",
-            "--iteration",
-            "1",
-            "--input",
-            str(review),
-            "--json",
-        ],
+    result = _run_fifo_aggregate_reviews(
         cwd=state_dir.parent,
-        capture_output=True,
-        text=True,
-        timeout=1,
         env=env,
+        review=review,
     )
 
-    assert result.returncode == 0
-    assert "WARN #351: artifact lint skipped" in result.stderr
+    assert result.elapsed < FIFO_ARTIFACT_TIMEOUT_SECONDS, (
+        f"elapsed={result.elapsed:.3f}s "
+        f"budget={FIFO_ARTIFACT_TIMEOUT_SECONDS:.3f}s "
+        f"margin={FIFO_ARTIFACT_TIMEOUT_SECONDS - result.elapsed:.3f}s"
+    )
+    diagnostic_context = (
+        f"elapsed={result.elapsed:.3f}s "
+        f"budget={FIFO_ARTIFACT_TIMEOUT_SECONDS:.3f}s "
+        f"margin={FIFO_ARTIFACT_TIMEOUT_SECONDS - result.elapsed:.3f}s "
+        f"stderr={_redact_timeout_diagnostic(result.stderr)}"
+    )
+    assert result.returncode == 0, diagnostic_context
+    assert "WARN #351: artifact lint skipped" in result.stderr, diagnostic_context
     observation = json.loads(result.stdout)
     assert observation["artifact_lint_status"] == "skipped"
     persisted = json.loads(state_path.read_text())
     assert "artifact_lint" not in persisted
     assert persisted["artifact_lint_status"] == "skipped"
+
+
+def test_fifo_timeout_diagnostic_redacts_environment_specific_details(
+    monkeypatch, tmp_path,
+):
+    review = _review(tmp_path / "review.json")
+    env = {"MISSION_SESSION_ID": "test"}
+
+    class FakeProcess:
+        def __init__(self):
+            self.returncode = None
+            self._killed = False
+
+        def communicate(self, timeout=None):
+            if timeout is not None:
+                raise subprocess.TimeoutExpired(
+                    cmd=["python", "aggregate-reviews"],
+                    timeout=FIFO_ARTIFACT_TIMEOUT_SECONDS,
+                    stderr=(
+                        f"traceback {_HOME_PREFIX}{_CURRENT_USER}/mission "
+                        f"user={_CURRENT_USER}"
+                    ),
+                )
+            self.returncode = -9
+            if self._killed:
+                return ("", f"traceback {_HOME_PREFIX}{_CURRENT_USER}/mission user={_CURRENT_USER}")
+            return ("", "")
+
+        def kill(self):
+            self._killed = True
+            self.returncode = -9
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: FakeProcess())
+
+    with pytest.raises(AssertionError) as exc_info:
+        _run_fifo_aggregate_reviews(cwd=tmp_path, env=env, review=review)
+
+    message = str(exc_info.value)
+    assert "after " in message
+    assert "budget=1.000s" in message
+    assert "margin=" in message
+    assert "child=terminated by SIGKILL" in message
+    assert "traceback" in message
+    assert _HOME_PREFIX not in message
+    assert _CURRENT_USER not in message
 
 
 @pytest.mark.parametrize("stage", ["resolve", "relative_to"])
