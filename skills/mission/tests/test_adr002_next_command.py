@@ -8,6 +8,8 @@ compaction 後の復元も散文 Compact Instructions への依存から state �
 
 import json
 
+import pytest
+
 
 def _set_state(state_dir, **kv):
     sf = state_dir / "sessions" / "test.json"
@@ -63,6 +65,48 @@ def test_next_manual_halt_suggests_audited_reactivate(state_dir, run_cli):
     assert "--approved-by-user" in out["command_hint"]
     assert "--expected-category awaiting-approval" in out["command_hint"]
     assert "refresh-pid" not in out["command_hint"]
+
+
+def test_next_evidence_submitted_for_checker_reports_terminal(state_dir, run_cli):
+    _set_state(
+        state_dir,
+        loop_active=False,
+        phase="halted",
+        halt_reason="証拠提出完了",
+        halt_category="evidence-submitted",
+        session_role="checker",
+    )
+
+    out = _next(run_cli, state_dir)
+
+    assert out["next_action"] == "report-terminal"
+    assert "reactivate" not in out["command_hint"]
+
+
+@pytest.mark.parametrize(
+    "role, expected_action",
+    [
+        ("planning", "report-terminal"),
+        ("analyze", "report-terminal"),
+        ("implementer", "report-blocker"),
+    ],
+    ids=["planning-terminal", "analyze-terminal", "implementer-blocker"],
+)
+def test_next_evidence_submitted_role_matrix(state_dir, run_cli, role, expected_action):
+    _set_state(
+        state_dir,
+        loop_active=False,
+        phase="halted",
+        halt_reason="証拠提出完了",
+        halt_category="evidence-submitted",
+        session_role=role,
+    )
+
+    out = _next(run_cli, state_dir)
+
+    assert out["next_action"] == expected_action
+    if expected_action == "report-terminal":
+        assert "reactivate" not in out["command_hint"]
 
 
 def test_next_stale_halt_suggests_resume_not_manual_reactivate(state_dir, run_cli):

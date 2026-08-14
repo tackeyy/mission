@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+MISSION_STATE_PY = REPO_ROOT / "skills" / "mission" / "bin" / "mission-state.py"
+
+
+def _load_mission_state():
+    spec = importlib.util.spec_from_file_location("mission_state_codex_guard", MISSION_STATE_PY)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 def _isolated_env(tmp_path: Path) -> dict[str, str]:
@@ -74,6 +84,7 @@ def test_codex_contract_requires_strict_preflight_before_setup_and_terminal_gate
     skill = (REPO_ROOT / "skills/mission/SKILL.md").read_text(encoding="utf-8")
     setup = (REPO_ROOT / "skills/mission/refs/codex-setup.md").read_text(encoding="utf-8")
     state_management = (REPO_ROOT / "skills/mission/refs/state-management.md").read_text(encoding="utf-8")
+    mission_state = _load_mission_state()
 
     compact = skill.split("## Compact Instructions", 1)[1].split("## state.json 操作", 1)[0]
     assert "codex-preflight --json --strict" in compact
@@ -87,9 +98,13 @@ def test_codex_contract_requires_strict_preflight_before_setup_and_terminal_gate
     assert "final" in start
     assert "mission-state.py next" in setup
     assert "report-complete" in setup
+    assert "report-terminal" in setup
     assert "report-blocker" in setup
     assert "passed / halted は terminal state" in setup
     assert "inactive / passed / halted。作業開始・final 報告は禁止" not in setup
+
+    assert mission_state._codex_next_fallback_available(True, "report-terminal") is False
+    assert mission_state._codex_next_fallback_available(True, "plan-inline") is True
 
     startup = state_management.split("# Codex startup health check", 1)[1].split(
         "# 空 .mission-state/", 1

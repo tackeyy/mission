@@ -117,7 +117,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py refresh-pid
 
 # ADR-002 Stage 3: 次の 1 手を state から決定論的に取得 (read-only)
 # 返り値: {"next_action": "run-planner|run-executor|run-reviewers|run-scorer|mark-passes|
-#          report-complete|report-blocker|resume|await-user|consider-halt|init",
+#          report-complete|report-terminal|report-blocker|resume|await-user|consider-halt|init",
 #          "summary": "...", "command_hint": "...", phase/iteration/... の snapshot}
 # 用途: compaction 復帰・Codex (Stop hook なし) の各 iteration 区切りで呼び、散文の手順解釈より優先する
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py next
