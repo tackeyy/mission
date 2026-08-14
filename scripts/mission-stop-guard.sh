@@ -168,6 +168,34 @@ _mission_cleanup_expired_lease() {
   printf '%s' "$output" | jq -e --arg target "$sf" \
     'any(.halted[]?; .path == $target)' >/dev/null 2>&1
 }
+
+_mission_state_freshness() {
+  local sf="$1"
+  local root output
+  root=$(jq -r '.project_root // empty' "$sf" 2>/dev/null || echo "")
+  [ -z "$root" ] && root="$CWD"
+  if command -v timeout >/dev/null 2>&1; then
+    output=$(
+      cd "$root" 2>/dev/null || exit 1
+      timeout 5 python3 "$MISSION_STATE_PY" freshness --state-file "$sf"
+    ) || return 1
+  elif command -v perl >/dev/null 2>&1; then
+    output=$(
+      cd "$root" 2>/dev/null || exit 1
+      perl -e 'alarm shift; exec @ARGV' 5 python3 "$MISSION_STATE_PY" freshness --state-file "$sf"
+    ) || return 1
+  else
+    output=$(
+      cd "$root" 2>/dev/null || exit 1
+      python3 "$MISSION_STATE_PY" freshness --state-file "$sf"
+    ) || return 1
+  fi
+  printf '%s' "$output" | jq -e '
+    .ok == true and
+    (.verdict == "fresh" or .verdict == "warn" or .verdict == "stale")
+  ' >/dev/null 2>&1 || return 1
+  printf '%s' "$output"
+}
 HOOK_SID=""
 HOOK_SID_FROM_PID=false
 if [ -n "${MISSION_SESSION_ID:-}" ]; then
@@ -271,55 +299,52 @@ if [ -d "$SESSIONS_DIR" ]; then
     LAST_SCORE=$(jq -r '.score_history[-1].composite // "n/a"' "$SESSION_FILE_TO_BLOCK" 2>/dev/null || echo "n/a")
     THRESHOLD=$(jq -r '.threshold // 4.0' "$SESSION_FILE_TO_BLOCK" 2>/dev/null || echo "4.0")
     MISSION=$(jq -r '.mission // ""' "$SESSION_FILE_TO_BLOCK" 2>/dev/null | head -c 200)
-    # Issue #1 / F-5 (v4): updated_at が古ければ WARN 前置 or auto-halt。
-    # MISSION_STALE_HALT_SECONDS (既定 10800=3h) 超: 自セッションを halt して exit 0 (block しない)
-    # 1h < DIFF <= halt_seconds: 従来通り WARN 前置 + block
+    # Issue #1 / F-5 (v4): freshness verdict は Python の read-only 判定へ集約する。
+    # 判定不能時は stale auto-halt を行わず、通常の block 継続へ戻す。
     STALE=""
-    UPDATED_AT=$(jq -r '.updated_at // empty' "$SESSION_FILE_TO_BLOCK" 2>/dev/null || echo "")
-    if [ -n "$UPDATED_AT" ]; then
-      # BSD (macOS): date -j -f ... / GNU (Linux): date -u -d ... へフォールバック。-u: Z=UTC として解釈し JST 誤判定を防止
-      U_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" -u "$UPDATED_AT" +%s 2>/dev/null || date -u -d "$UPDATED_AT" +%s 2>/dev/null || echo "")
-      if [ -n "$U_EPOCH" ]; then
-        DIFF=$(( $(date +%s) - U_EPOCH ))
-        STALE_HALT_SEC="${MISSION_STALE_HALT_SECONDS:-10800}"
-        case "$STALE_HALT_SEC" in ''|*[!0-9]*) STALE_HALT_SEC=10800 ;; esac
-        [ "$STALE_HALT_SEC" -lt 300 ] && STALE_HALT_SEC=10800
-        if [ "$DIFF" -gt "$STALE_HALT_SEC" ] 2>/dev/null; then
+    FRESHNESS=""
+    if FRESHNESS=$(_mission_state_freshness "$SESSION_FILE_TO_BLOCK"); then
+      FRESHNESS_VERDICT=$(printf '%s' "$FRESHNESS" | jq -r '.verdict // empty' 2>/dev/null || echo "")
+      FRESHNESS_AGE_SEC=$(printf '%s' "$FRESHNESS" | jq -r 'if .age_sec == null then empty else .age_sec end' 2>/dev/null || echo "")
+      case "$FRESHNESS_VERDICT" in
+        stale)
           AWAITING_USER=$(jq -r '.awaiting_user // false' "$SESSION_FILE_TO_BLOCK" 2>/dev/null || echo "false")
           if [ "${SESSION_LEASE_UNEXPIRED:-false}" = "true" ]; then
-            STALE="[WARN: state が $(( DIFF / 60 ))分 未更新だが session lease は有効なため stale auto-halt を保留] "
+            STALE="[WARN: state が $(( FRESHNESS_AGE_SEC / 60 ))分 未更新だが session lease は有効なため stale auto-halt を保留] "
           elif [ "$AWAITING_USER" = "true" ]; then
-            STALE="[WARN: state が $(( DIFF / 60 ))分 未更新だが awaiting_user=true のため stale auto-halt を保留] "
+            STALE="[WARN: state が $(( FRESHNESS_AGE_SEC / 60 ))分 未更新だが awaiting_user=true のため stale auto-halt を保留] "
           else
-          # 3h (または MISSION_STALE_HALT_SECONDS) 超: state CLI の lock/terminal helper で halt
-          STALE_MINS=$(( DIFF / 60 ))
-          STALE_HALT_REASON="stale: auto-halted after ${STALE_MINS}m idle"
-          if [ "${SESSION_LEASE_PRESENT:-false}" = "true" ]; then
-            if _mission_cleanup_expired_lease "$SESSION_FILE_TO_BLOCK"; then
-              HALT_OK=0
+            STALE_MINS=$(( FRESHNESS_AGE_SEC / 60 ))
+            STALE_HALT_REASON="stale: auto-halted after ${STALE_MINS}m idle"
+            if [ "${SESSION_LEASE_PRESENT:-false}" = "true" ]; then
+              if _mission_cleanup_expired_lease "$SESSION_FILE_TO_BLOCK"; then
+                HALT_OK=0
+              else
+                HALT_OK=$?
+              fi
             else
-              HALT_OK=$?
+              if _mission_halt_session "$SESSION_FILE_TO_BLOCK" "$STALE_HALT_REASON"; then
+                HALT_OK=0
+              else
+                HALT_OK=$?
+              fi
             fi
-          else
-            if _mission_halt_session "$SESSION_FILE_TO_BLOCK" "$STALE_HALT_REASON"; then
-              HALT_OK=0
-            else
-              HALT_OK=$?
-            fi
-          fi
-          if [ "$HALT_OK" -ne 0 ]; then
-            printf '{"decision":"block","reason":"stale auto-halt の書き込みに失敗。手動で cleanup-stale を実行してください"}
+            if [ "$HALT_OK" -ne 0 ]; then
+              printf '{"decision":"block","reason":"stale auto-halt の書き込みに失敗。手動で cleanup-stale を実行してください"}
 '
+              exit 0
+            fi
+            # halt 済みなので block せず通す
             exit 0
           fi
-          # halt 済みなので block せず通す
-          exit 0
-          fi
-        elif [ "$DIFF" -gt 3600 ]; then
-          # 1h < DIFF <= halt_seconds: 従来通り WARN 前置
-          STALE="[WARN: state が $(( DIFF / 60 ))分 未更新。stuck/放置の可能性 — cleanup-stale を検討] "
-        fi
-      fi
+          ;;
+        warn)
+          STALE="[WARN: state が $(( FRESHNESS_AGE_SEC / 60 ))分 未更新。stuck/放置の可能性 — cleanup-stale を検討] "
+          ;;
+        fresh)
+          :
+          ;;
+      esac
     fi
     # P1-2: planning 滞留(push-score 未実行) bd12 型の早期検出。
     # 検出条件: loop_active=true かつ score_history 空(=push-score未実行) かつ
