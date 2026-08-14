@@ -1,5 +1,10 @@
+import importlib.util
+import argparse
 import json
 from pathlib import Path
+import sys
+
+import pytest
 
 
 def _json_result(result):
@@ -21,6 +26,359 @@ def _passing_score_args():
         "--open-high",
         "0",
     )
+
+
+def _state_module():
+    script = Path(__file__).resolve().parent.parent / "bin" / "mission-state.py"
+    spec = importlib.util.spec_from_file_location("state_artifact_test", script)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _artifact_path(root):
+    return root / ".mission-state" / "artifacts" / "test" / "mission-artifact.md"
+
+
+def _export_path(root):
+    return root / "docs" / "generated-artifact-smoke.md"
+
+
+def _set_foreign_lease(state_dir):
+    state_path = state_dir / "sessions" / "test.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state.update({
+        "owner_session_id": "foreign",
+        "lease_id": "foreign-lease",
+        "fencing_epoch": 7,
+        "lease_expires_at": "2099-01-01T00:00:00Z",
+    })
+    state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    return state_path
+
+
+def _forbid_artifact_write(module, monkeypatch):
+    calls = []
+
+    def fail_write_artifact(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("artifact publication must not start before lease validation")
+
+    monkeypatch.setattr(module, "_write_artifact", fail_write_artifact)
+    return calls
+
+
+def test_artifact_init_rejects_foreign_lease_without_creating_file(state_dir, run_cli, read_state):
+    root = state_dir.parent
+    state_path = _set_foreign_lease(state_dir)
+    state_before = state_path.read_bytes()
+    artifact_path = _artifact_path(root)
+
+    result = run_cli(
+        "artifact",
+        "init",
+        "--title",
+        "Artifact Smoke",
+        "--required-for-pass",
+        "--json",
+        cwd=root,
+    )
+
+    assert result.returncode == 2
+    assert "lease" in result.stderr.lower()
+    assert not artifact_path.exists()
+    assert state_path.read_bytes() == state_before
+    assert read_state(state_dir) == json.loads(state_before)
+
+
+def test_artifact_render_rejects_foreign_lease_without_mutating_artifact_file(
+    state_dir, run_cli, read_state
+):
+    root = state_dir.parent
+    assert run_cli("artifact", "init", "--json", cwd=root).returncode == 0
+    artifact_path = _artifact_path(root)
+    artifact_before = artifact_path.read_bytes()
+    state_path = _set_foreign_lease(state_dir)
+    state_before = state_path.read_bytes()
+
+    result = run_cli(
+        "artifact",
+        "render",
+        "--redaction-status",
+        "reviewed",
+        "--json",
+        cwd=root,
+    )
+
+    assert result.returncode == 2
+    assert "lease" in result.stderr.lower()
+    assert artifact_path.read_bytes() == artifact_before
+    assert state_path.read_bytes() == state_before
+    assert read_state(state_dir)["artifact"]["status"] == "draft"
+
+
+def test_artifact_export_rejects_foreign_lease_without_mutating_artifact_file(
+    state_dir, run_cli, read_state
+):
+    root = state_dir.parent
+    assert run_cli("artifact", "init", "--json", cwd=root).returncode == 0
+    assert run_cli("artifact", "render", "--json", cwd=root).returncode == 0
+    artifact_path = _artifact_path(root)
+    artifact_before = artifact_path.read_bytes()
+    export_path = _export_path(root)
+    state_path = _set_foreign_lease(state_dir)
+    state_before = state_path.read_bytes()
+
+    result = run_cli(
+        "artifact",
+        "export",
+        "--to",
+        "docs/generated-artifact-smoke.md",
+        "--redaction-status",
+        "reviewed",
+        "--json",
+        cwd=root,
+    )
+
+    assert result.returncode == 2
+    assert "lease" in result.stderr.lower()
+    assert artifact_path.read_bytes() == artifact_before
+    assert not export_path.exists()
+    assert state_path.read_bytes() == state_before
+
+
+def test_artifact_init_does_not_publish_before_foreign_lease_rejection(state_dir, monkeypatch, capsys):
+    module = _state_module()
+    root = state_dir.parent
+    monkeypatch.chdir(root)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    state_path = _set_foreign_lease(state_dir)
+    state_before = state_path.read_bytes()
+    artifact_path = _artifact_path(root)
+    calls = _forbid_artifact_write(module, monkeypatch)
+
+    with pytest.raises(module.CommandOutcomeExit) as excinfo:
+        module.cmd_artifact_init(argparse.Namespace(
+            format="markdown",
+            title="Artifact Smoke",
+            required_for_pass=True,
+            redaction_status="unchecked",
+            json=True,
+        ))
+
+    captured = capsys.readouterr()
+    assert excinfo.value.code == 2
+    assert "lease" in captured.err.lower()
+    assert calls == []
+    assert not artifact_path.exists()
+    assert state_path.read_bytes() == state_before
+
+
+def test_artifact_render_does_not_publish_before_foreign_lease_rejection(state_dir, monkeypatch, capsys):
+    module = _state_module()
+    root = state_dir.parent
+    monkeypatch.chdir(root)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    assert module.cmd_artifact_init(argparse.Namespace(
+        format="markdown",
+        title="Artifact Smoke",
+        required_for_pass=True,
+        redaction_status="unchecked",
+        json=True,
+    )) is None
+    artifact_path = _artifact_path(root)
+    artifact_before = artifact_path.read_bytes()
+    state_path = _set_foreign_lease(state_dir)
+    state_before = state_path.read_bytes()
+    calls = _forbid_artifact_write(module, monkeypatch)
+
+    with pytest.raises(module.CommandOutcomeExit) as excinfo:
+        module.cmd_artifact_render(argparse.Namespace(
+            redaction_status="reviewed",
+            json=True,
+        ))
+
+    captured = capsys.readouterr()
+    assert excinfo.value.code == 2
+    assert "lease" in captured.err.lower()
+    assert calls == []
+    assert artifact_path.read_bytes() == artifact_before
+    assert state_path.read_bytes() == state_before
+
+
+def test_artifact_export_does_not_publish_before_foreign_lease_rejection(state_dir, monkeypatch, capsys):
+    module = _state_module()
+    root = state_dir.parent
+    monkeypatch.chdir(root)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    assert module.cmd_artifact_init(argparse.Namespace(
+        format="markdown",
+        title="Artifact Smoke",
+        required_for_pass=True,
+        redaction_status="unchecked",
+        json=True,
+    )) is None
+    assert module.cmd_artifact_render(argparse.Namespace(
+        redaction_status="reviewed",
+        json=True,
+    )) is None
+    artifact_path = _artifact_path(root)
+    artifact_before = artifact_path.read_bytes()
+    export_path = _export_path(root)
+    state_path = _set_foreign_lease(state_dir)
+    state_before = state_path.read_bytes()
+    calls = _forbid_artifact_write(module, monkeypatch)
+
+    with pytest.raises(module.CommandOutcomeExit) as excinfo:
+        module.cmd_artifact_export(argparse.Namespace(
+            to="docs/generated-artifact-smoke.md",
+            redaction_status="reviewed",
+            json=True,
+        ))
+
+    captured = capsys.readouterr()
+    assert excinfo.value.code == 2
+    assert "lease" in captured.err.lower()
+    assert calls == []
+    assert artifact_path.read_bytes() == artifact_before
+    assert not export_path.exists()
+    assert state_path.read_bytes() == state_before
+
+
+def test_artifact_publish_does_not_publish_before_foreign_lease_rejection(state_dir, monkeypatch, capsys):
+    module = _state_module()
+    root = state_dir.parent
+    monkeypatch.chdir(root)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    assert module.cmd_artifact_init(argparse.Namespace(
+        format="markdown",
+        title="Artifact Smoke",
+        required_for_pass=True,
+        redaction_status="unchecked",
+        json=True,
+    )) is None
+    assert module.cmd_artifact_render(argparse.Namespace(
+        redaction_status="reviewed",
+        json=True,
+    )) is None
+    artifact_path = _artifact_path(root)
+    artifact_before = artifact_path.read_bytes()
+    state_path = _set_foreign_lease(state_dir)
+    state_before = state_path.read_bytes()
+    calls = _forbid_artifact_write(module, monkeypatch)
+
+    with pytest.raises(module.CommandOutcomeExit) as excinfo:
+        module.cmd_artifact_publish(argparse.Namespace(
+            provider="claude-code",
+            destination=None,
+            require_confirm=True,
+            approval_text="user approved artifact publish preparation",
+            json=True,
+        ))
+
+    captured = capsys.readouterr()
+    assert excinfo.value.code == 2
+    assert "lease" in captured.err.lower()
+    assert calls == []
+    assert artifact_path.read_bytes() == artifact_before
+    assert state_path.read_bytes() == state_before
+
+
+def test_artifact_init_rolls_back_when_identity_refresh_fails(state_dir, tmp_path, monkeypatch):
+    module = _state_module()
+    monkeypatch.chdir(state_dir.parent)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    artifact_path = _artifact_path(state_dir.parent)
+
+    def fail_refresh(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(module, "_refresh_artifact_identity", fail_refresh)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        module.cmd_artifact_init(argparse.Namespace(
+            format="markdown",
+            title="Artifact Smoke",
+            required_for_pass=True,
+            redaction_status="unchecked",
+            json=True,
+        ))
+
+    assert not artifact_path.exists()
+
+
+def test_artifact_render_rolls_back_when_identity_refresh_fails(state_dir, monkeypatch):
+    module = _state_module()
+    root = state_dir.parent
+    monkeypatch.chdir(root)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    assert module.cmd_artifact_init(argparse.Namespace(
+        format="markdown",
+        title="Artifact Smoke",
+        required_for_pass=True,
+        redaction_status="unchecked",
+        json=True,
+    )) is None
+    artifact_path = _artifact_path(root)
+    artifact_before = artifact_path.read_bytes()
+
+    def fail_refresh(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(module, "_refresh_artifact_identity", fail_refresh)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        module.cmd_artifact_render(argparse.Namespace(
+            redaction_status="reviewed",
+            json=True,
+        ))
+
+    assert artifact_path.read_bytes() == artifact_before
+
+
+def test_artifact_export_rolls_back_when_identity_refresh_fails(state_dir, monkeypatch):
+    module = _state_module()
+    root = state_dir.parent
+    monkeypatch.chdir(root)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    assert module.cmd_artifact_init(argparse.Namespace(
+        format="markdown",
+        title="Artifact Smoke",
+        required_for_pass=True,
+        redaction_status="unchecked",
+        json=True,
+    )) is None
+    assert module.cmd_artifact_render(argparse.Namespace(
+        redaction_status="reviewed",
+        json=True,
+    )) is None
+    artifact_path = _artifact_path(root)
+    artifact_before = artifact_path.read_bytes()
+    export_path = _export_path(root)
+
+    def fail_refresh(*_args, **_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(module, "_refresh_artifact_identity", fail_refresh)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        module.cmd_artifact_export(argparse.Namespace(
+            to="docs/generated-artifact-smoke.md",
+            redaction_status="reviewed",
+            json=True,
+        ))
+
+    assert artifact_path.read_bytes() == artifact_before
+    assert not export_path.exists()
 
 
 def test_artifact_init_append_render_and_export(state_dir, run_cli, read_state):
@@ -146,3 +504,33 @@ def test_artifact_publish_requires_explicit_consent(state_dir, run_cli, read_sta
     assert "status: publish-prepared" in (
         root / ".mission-state" / "artifacts" / "test" / "mission-artifact.md"
     ).read_text(encoding="utf-8")
+
+
+def test_artifact_publish_rejects_foreign_lease_without_mutating_artifact_file(
+    state_dir, run_cli, read_state
+):
+    root = state_dir.parent
+    run_cli("artifact", "init", "--json", cwd=root, check=True)
+    run_cli("artifact", "render", "--redaction-status", "reviewed", cwd=root, check=True)
+    artifact_path = _artifact_path(root)
+    artifact_before = artifact_path.read_bytes()
+    state_path = _set_foreign_lease(state_dir)
+    state_before = state_path.read_bytes()
+
+    result = run_cli(
+        "artifact",
+        "publish",
+        "--provider",
+        "claude-code",
+        "--require-confirm",
+        "--approval-text",
+        "user approved artifact publish preparation",
+        "--json",
+        cwd=root,
+    )
+
+    assert result.returncode == 2
+    assert "lease" in result.stderr.lower()
+    assert artifact_path.read_bytes() == artifact_before
+    assert state_path.read_bytes() == state_before
+    assert read_state(state_dir)["artifact"]["status"] == "rendered"
