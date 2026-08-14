@@ -1,5 +1,9 @@
 import hashlib
+import argparse
+import importlib.util
 import json
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -85,6 +89,16 @@ def _adopt(run_cli, root, source, *, source_id=None):
     if source_id is not None:
         args.extend(["--source-id", source_id])
     return run_cli(*args, cwd=root)
+
+
+def _state_module():
+    script = Path(__file__).resolve().parent.parent / "bin" / "mission-state.py"
+    spec = importlib.util.spec_from_file_location("mission_state_core_adopt_lease_test", script)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 @pytest.mark.parametrize(
@@ -191,6 +205,70 @@ def test_required_provider_rejects_core_adoption_without_state_change(run_cli, t
 
     assert response.returncode != 0
     assert "planning-provider-required" in response.stderr
+    assert _state_file(tmp_path).read_bytes() == before
+
+
+def test_core_adoption_rejects_foreign_lease_without_publishing_candidate(
+    run_cli, tmp_path
+):
+    _init_core(run_cli, tmp_path)
+    source = _write_document(tmp_path)
+    state = _read_state(tmp_path)
+    state.update({
+        "owner_session_id": "foreign",
+        "lease_id": "foreign-lease",
+        "fencing_epoch": 7,
+        "lease_expires_at": "2099-01-01T00:00:00Z",
+    })
+    _state_file(tmp_path).write_text(json.dumps(state), encoding="utf-8")
+    before = _state_file(tmp_path).read_bytes()
+
+    response = _adopt(run_cli, tmp_path, source)
+
+    assert response.returncode == 2
+    assert "lease" in response.stderr.lower()
+    assert _state_file(tmp_path).read_bytes() == before
+    plans = tmp_path / ".mission-state" / "plans"
+    assert not plans.exists() or not list(plans.glob("*.json"))
+
+
+def test_core_adoption_does_not_publish_before_foreign_lease_rejection(
+    monkeypatch, capsys, run_cli, tmp_path
+):
+    module = _state_module()
+    _init_core(run_cli, tmp_path)
+    source = _write_document(tmp_path)
+    state = _read_state(tmp_path)
+    state.update({
+        "owner_session_id": "foreign",
+        "lease_id": "foreign-lease",
+        "fencing_epoch": 7,
+        "lease_expires_at": "2099-01-01T00:00:00Z",
+    })
+    _state_file(tmp_path).write_text(json.dumps(state), encoding="utf-8")
+    before = _state_file(tmp_path).read_bytes()
+    calls = []
+
+    def record_publish(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("core adoption must reject foreign lease before publish")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    monkeypatch.setattr(module, "_publish_output_transaction", record_publish)
+
+    with pytest.raises(module.CommandOutcomeExit) as excinfo:
+        module.cmd_planning_adopt_core(argparse.Namespace(
+            input=str(source),
+            source_id="core-fixture",
+            json=True,
+        ))
+
+    captured = capsys.readouterr()
+    assert excinfo.value.code == 2
+    assert "lease" in captured.err.lower()
+    assert calls == []
     assert _state_file(tmp_path).read_bytes() == before
 
 
