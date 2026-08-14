@@ -9,11 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Fixed `planning adopt-core` so a freshly initialized session, where `iteration` is still 0, can adopt its first plan; the earlier check rejected every real `init` state and left core planning unable to reach execution (#471).
+## [2.5.0] - 2026-08-14
 
-- Fixed core-plan adoption guidance so both inline and planner paths require `planning adopt-core` before execution; invalid iterations and non-planning phases now fail without mutating state, while valid pretty-printed JSON is normalized to the same canonical plan as compact JSON (#469).
+- feat: Added `planning adopt-core` so policy-v1 core planning can validate and publish a canonical `mission-plan/1`, then continue through the existing execution gate with matching `next` and failure guidance (#465).
 
-- Added `planning adopt-core` so policy-v1 core planning can validate and publish a canonical `mission-plan/1`, proceed through the existing execution gate, and receive matching `next` and failure guidance (#465).
+- fix: `planning adopt-core` guidance now requires the command before execution on both inline and planner paths, and invalid iterations or non-planning phases fail without mutating state (#469).
+
+- fix: `planning adopt-core` now accepts a freshly initialized session with `iteration=0`, fixing the regression that rejected every real `init` state and blocked the first plan adoption (#471).
+
+- fix: Publish transaction failures now include the comparison value and the mismatched fields, making rejected publish diagnoses explicit (#468).
+
+- test: FIFO artifact tests now classify timeout failures as a distinct observable outcome, so timeout exits can be separated from other failures (#480).
+
+- docs: ADR-003 now defines the review-tier boundary contract and the FP/FN corpus used to calibrate it (#481).
+
+- fix: Artifact commands now wait for lease validation before publishing files, closing the window where `init`, `render`, `export`, or `publish` could expose artifacts too early (#475).
+
+- fix: Review-tier keyword matching now uses lexical boundaries, preventing partial-word matches from escalating tier incorrectly (#482).
+
+- fix: `MISSION_CLI_VERSION` and the distribution version now share one source of truth, removing the mismatch between the CLI constant and the published package version (#479).
+
+- fix: Successful evidence completion now records the terminal outcome in `next_action`, so `report-terminal` is emitted when evidence work finishes (#477).
+
+- fix: Specialist evidence is now referenced by invocation ID plus content digest, giving each invocation a unique content-addressed handle (#478).
+
+- fix: Stop-hook freshness checks now run through one Python implementation, keeping freshness decisions consistent across code paths (#476).
 
 ## [2.4.0] - 2026-08-14
 
@@ -429,6 +449,7 @@ First public release.
 - Python test suite covering state routing, scoring gates, and hook behavior.
 - GitHub Actions CI (`push`, `pull_request`, `workflow_dispatch`) with pytest and ShellCheck.
 
+[2.5.0]: https://github.com/tackeyy/mission/releases/tag/v2.5.0
 [2.4.0]: https://github.com/tackeyy/mission/releases/tag/v2.4.0
 [2.3.0]: https://github.com/tackeyy/mission/releases/tag/v2.3.0
 [2.0.0]: https://github.com/tackeyy/mission/releases/tag/v2.0.0
