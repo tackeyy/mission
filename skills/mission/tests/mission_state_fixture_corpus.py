@@ -148,6 +148,13 @@ def _init_cli_state(root: Path, *, role: str = "implementer") -> dict:
     return _read_cli_state(root)
 
 
+def generate_cli_state_bytes(root: Path, *, role: str = "implementer") -> tuple[Path, bytes]:
+    """Return the exact state bytes emitted by the production CLI ``init`` writer."""
+    _init_cli_state(root, role=role)
+    state_path = root / ".mission-state" / "sessions" / "test.json"
+    return state_path, state_path.read_bytes()
+
+
 def _write_core_plan(root: Path) -> Path:
     plan = {
         "objective": "capture the production writer shape",
