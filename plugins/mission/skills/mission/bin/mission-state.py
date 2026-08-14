@@ -300,7 +300,7 @@ def _specialist_selection_checkpoint_error(data: dict) -> str | None:
 # が manifest 間の一致は既に保証しているため、ここでは manifest との一致のみ追加で固定する)。
 # 実行時に manifest ファイルを読みに行かない設計: plugin cache 配布・symlink 配布・単一ファイル
 # 実行のいずれでも `.claude-plugin/plugin.json` への相対パスが安定しないため。
-MISSION_CLI_VERSION = "2.0.0"
+MISSION_CLI_VERSION = "2.4.0"
 
 # Tier5: スコア/反復のマジックナンバーを単一定義 (散在防止・閾値変更を1箇所に集約)
 DEFAULT_THRESHOLD = 4.0     # 合格 composite 閾値 (init --threshold 未指定時 / mark-passes fallback)
@@ -8552,6 +8552,13 @@ def _derive_next_action(data: dict) -> dict:
     compaction 後の復元で、散文指示に依存せず「state を読めば次手が自明」にする。
     分岐は SKILL.md の Phase 0-7 と同じ決定木を機械化したもの。
     """
+    terminal_outcome = derive_terminal_outcome(data)
+    if terminal_outcome == "completed_evidence":
+        return {
+            "next_action": "report-terminal",
+            "summary": "証拠提出で正常終了した mission。最終報告では evidence 提出の完了を伝え、passes=true は主張しない",
+            "command_hint": "mission-state.py specialists summary",
+        }
     halt_reason = data.get("halt_reason") or ""
     if halt_reason:
         halt_category = data.get("halt_category")
@@ -9024,6 +9031,10 @@ def _detect_version_skew() -> dict | None:
     return {"cli_version": MISSION_CLI_VERSION, "stale_caches": stale}
 
 
+def _codex_next_fallback_available(state_active: bool, next_action: str) -> bool:
+    return state_active and next_action not in {"init", "report-blocker", "report-complete", "report-terminal"}
+
+
 def cmd_codex_preflight(args):
     """Codex /mission startup health check.
 
@@ -9098,7 +9109,7 @@ def cmd_codex_preflight(args):
             "install or clear the stale cache directory."
         )
 
-    fallback_available = state_active and next_action not in {"init", "report-blocker", "report-complete"}
+    fallback_available = _codex_next_fallback_available(state_active, next_action)
     result = {
         "ok": state_active and (hook_status["configured"] or (fallback_available and not getattr(args, "require_stop_hook", False))) and not (scoring_evidence_escape_hatch and getattr(args, "strict", False)),
         "state_guard": {

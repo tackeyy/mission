@@ -41,7 +41,7 @@ user-facing な変更は `CHANGELOG.md` と `CHANGELOG.ja.md` の `[Unreleased]`
 distribution release PR は、基本的に機械的な変更だけにします。
 
 - 両方の changelog で該当する `[Unreleased]` entry を `vX.Y.Z` に移す
-- `.claude-plugin/plugin.json`、`.codex-plugin/plugin.json`、`plugins/mission/.codex-plugin/plugin.json` を更新する
+- `MISSION_CLI_VERSION` と `.claude-plugin/plugin.json`、`.codex-plugin/plugin.json`、`plugins/mission/.codex-plugin/plugin.json` を同時に更新する
 - README と Codex setup docs の visible install path を更新する
 - `git log <previous-tag>..HEAD --oneline` と両方の changelog を突合する
 - marketplace release checklist を実行する
