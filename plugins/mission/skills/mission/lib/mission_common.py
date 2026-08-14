@@ -140,7 +140,7 @@ def parse_iso_datetime(value: str | None) -> datetime | None:
         return None
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (TypeError, ValueError):
+    except (AttributeError, TypeError, ValueError):
         return None
 
 
@@ -166,23 +166,46 @@ PASS_RATE_HEALTH_CLASSES = (
 )
 
 
-def state_age_since_update_sec(
+def state_age_details(
     state: dict[str, Any], *, now: datetime | None = None
-) -> float | None:
-    """Return non-negative age from the best progress timestamp, normalized to UTC."""
-    updated = parse_iso_datetime(
-        state.get("heartbeat_at") or state.get("last_progress_at")
-        or state.get("last_activity_at") or state.get("updated_at")  # #310
-    )
-    if updated is None:
-        return None
+) -> dict[str, Any]:
+    """Return the selected progress timestamp source and the derived age."""
+    source_field = None
+    for field in ("heartbeat_at", "last_progress_at", "last_activity_at", "updated_at"):
+        value = state.get(field)
+        if not value:
+            continue
+        if not isinstance(value, str):
+            # Preserve the legacy `or` chain: once the first present timestamp is malformed,
+            # do not fall through to older fields and accidentally turn a broken heartbeat into
+            # a stale auto-halt.
+            return {"timestamp_field": None, "age_sec": None}
+        updated = parse_iso_datetime(value)
+        if updated is None:
+            # Same legacy short-circuit for unparseable strings.
+            return {"timestamp_field": None, "age_sec": None}
+        source_field = field
+        break
+    if source_field is None:
+        return {"timestamp_field": None, "age_sec": None}
     if updated.tzinfo is None:
         updated = updated.replace(tzinfo=timezone.utc)
     base = now or datetime.now(timezone.utc)
     if base.tzinfo is None:
         base = base.replace(tzinfo=timezone.utc)
-    seconds = (base.astimezone(timezone.utc) - updated.astimezone(timezone.utc)).total_seconds()
-    return seconds if math.isfinite(seconds) and seconds >= 0 else None
+    seconds = (
+        base.astimezone(timezone.utc) - updated.astimezone(timezone.utc)
+    ).total_seconds()
+    if not math.isfinite(seconds) or seconds < 0:
+        return {"timestamp_field": source_field, "age_sec": None}
+    return {"timestamp_field": source_field, "age_sec": seconds}
+
+
+def state_age_since_update_sec(
+    state: dict[str, Any], *, now: datetime | None = None
+) -> float | None:
+    """Return non-negative age from the best progress timestamp, normalized to UTC."""
+    return state_age_details(state, now=now)["age_sec"]
 
 
 def has_scoring_checkpoint(state: dict[str, Any]) -> bool:

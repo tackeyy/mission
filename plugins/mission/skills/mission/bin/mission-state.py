@@ -77,6 +77,7 @@ from mission_common import (  # noqa: E402
     state_dedupe_rank,
     state_identity,
     summarize_pass_rate_population,
+    state_age_details as _state_age_details,
 )
 from specialist_accounting import (  # noqa: E402
     candidate_accounting_report,
@@ -1529,17 +1530,7 @@ def _has_specialist_selection_checkpoint(data: dict) -> bool:
 
 
 def _state_age_since_update_sec(data: dict, *, now: datetime | None = None) -> float | None:
-    updated = _parse_iso_datetime(
-        data.get("heartbeat_at") or data.get("last_progress_at")
-        or data.get("last_activity_at") or data.get("updated_at")  # #310
-    )
-    if not updated:
-        return None
-    if updated.tzinfo is None:
-        updated = updated.replace(tzinfo=timezone.utc)
-    base = now or datetime.now(timezone.utc)
-    seconds = (base - updated.astimezone(timezone.utc)).total_seconds()
-    return seconds if seconds >= 0 else None
+    return _state_age_details(data, now=now)["age_sec"]
 
 
 def _stale_active_seconds() -> int:
@@ -8879,6 +8870,64 @@ def cmd_next(args):
     print(json.dumps(out, ensure_ascii=False))
 
 
+def _stale_halt_seconds() -> int:
+    raw = os.environ.get("MISSION_STALE_HALT_SECONDS")
+    if raw:
+        try:
+            parsed = int(raw)
+            if parsed >= 0:
+                stale_halt_sec = parsed
+            else:
+                stale_halt_sec = 10800
+        except ValueError:
+            stale_halt_sec = 10800
+    else:
+        stale_halt_sec = 10800
+    if stale_halt_sec < 300:
+        stale_halt_sec = 10800
+    return stale_halt_sec
+
+
+def cmd_freshness(args):
+    """Read-only freshness verdict for stop-hook gating."""
+    sf = Path(args.state_file)
+    if not sf.is_absolute():
+        sf = (Path.cwd() / sf).resolve()
+    try:
+        root = sf.parents[2]
+    except IndexError as exc:
+        print(json.dumps({"ok": False, "error": "state file path is unsafe"}, ensure_ascii=False), file=sys.stderr)
+        raise SystemExit(2) from exc
+    if not sf.exists():
+        print(json.dumps({"ok": False, "error": "state file not found"}, ensure_ascii=False), file=sys.stderr)
+        raise SystemExit(2)
+    with StateLock(lock_file(root)):
+        try:
+            data = json.loads(sf.read_text())
+        except json.JSONDecodeError as exc:
+            print(json.dumps({"ok": False, "error": "state file JSON is invalid"}, ensure_ascii=False), file=sys.stderr)
+            raise SystemExit(2) from exc
+    details = _state_age_details(data)
+    age_sec = details["age_sec"]
+    if age_sec is None:
+        verdict = "fresh"
+    else:
+        age_sec = int(age_sec)
+        halt_after_sec = _stale_halt_seconds()
+        if age_sec > halt_after_sec:
+            verdict = "stale"
+        elif age_sec > 3600:
+            verdict = "warn"
+        else:
+            verdict = "fresh"
+    print(json.dumps({
+        "ok": True,
+        "timestamp_field": details["timestamp_field"],
+        "age_sec": age_sec,
+        "verdict": verdict,
+    }, ensure_ascii=False))
+
+
 def _codex_hook_config_paths(explicit_path: str | None = None) -> list[Path]:
     """Return candidate Codex user hook config paths in deterministic order."""
     if explicit_path:
@@ -16099,6 +16148,9 @@ def _build_parser():
 
     p_next = sub.add_parser("next", help="ADR-002 Stage 3: state から次の 1 手を JSON で返す (read-only。Codex/compaction 復帰時の進行ガイド)")
     p_next.set_defaults(func=cmd_next)
+    p_freshness = sub.add_parser("freshness", help="state の freshness 判定を JSON で返す (read-only)")
+    p_freshness.add_argument("--state-file", required=True, help="判定対象の session state JSON")
+    p_freshness.set_defaults(func=cmd_freshness)
 
     p_codex = sub.add_parser("codex-preflight", help="Codex /mission 起動時の state/hook guard readiness を診断")
     p_codex.add_argument("--json", action="store_true", help="診断結果を JSON で出力")

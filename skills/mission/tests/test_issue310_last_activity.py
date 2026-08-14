@@ -18,6 +18,8 @@ import json
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 
 def _load(name: str, rel: str):
     path = Path(__file__).resolve().parents[1] / rel
@@ -99,6 +101,28 @@ def test_age_chain_uses_last_activity_before_updated():
     now = datetime(2026, 8, 1, 1, 0, 0, tzinfo=timezone.utc)
     assert MC.state_age_since_update_sec(state, now=now) == 3600.0
     assert MS._state_age_since_update_sec(state, now=now) == 3600.0
+    assert MC.state_age_details(state, now=now)["timestamp_field"] == "last_activity_at"
+
+
+def test_age_chain_stops_on_malformed_heartbeat():
+    from datetime import datetime, timezone
+
+    state = {
+        "heartbeat_at": "not-a-date",
+        "last_progress_at": "2026-08-01T00:00:00Z",
+        "updated_at": "2026-08-01T06:00:00Z",
+    }
+    now = datetime(2026, 8, 1, 1, 0, 0, tzinfo=timezone.utc)
+    assert MC.state_age_since_update_sec(state, now=now) is None
+    assert MC.state_age_details(state, now=now) == {
+        "timestamp_field": None,
+        "age_sec": None,
+    }
+
+
+@pytest.mark.parametrize("value", [123, True, [], {"value": "x"}])
+def test_parse_iso_datetime_returns_none_for_non_strings(value):
+    assert MC.parse_iso_datetime(value) is None
 
 
 # ===== 6. 統合: terminalize は last_activity_at を変更しない =====

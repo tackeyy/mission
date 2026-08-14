@@ -5,6 +5,8 @@ import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 HOOK = Path(__file__).resolve().parents[3] / "scripts" / "mission-stop-guard.sh"
 
 
@@ -354,6 +356,224 @@ def test_hook_warns_on_stale_state(tmp_path):
     _write_session(tmp_path, "cc-stale", updated_at=two_hours_ago)
     r = _run_hook(tmp_path, {"CLAUDE_CODE_SESSION_ID": "stale"})
     assert "block" in r.stdout and "WARN" in r.stdout
+
+
+def test_hook_does_not_autohalt_when_heartbeat_is_recent_even_if_updated_at_is_old(tmp_path):
+    """heartbeat_at が新しい state は updated_at が古くても auto-halt しない."""
+    import datetime
+
+    heartbeat = (
+        datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=30)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    very_old = "2020-01-01T00:00:00Z"
+    _write_session(
+        tmp_path,
+        "cc-heartbeat-fresh",
+        heartbeat_at=heartbeat,
+        updated_at=very_old,
+        project_root=str(tmp_path),
+        phase="executing",
+        phase_started_at=very_old,
+    )
+
+    result = _run_hook(tmp_path, {"CLAUDE_CODE_SESSION_ID": "heartbeat-fresh"})
+
+    assert "block" in result.stdout, result.stdout
+    state = json.loads(
+        (tmp_path / ".mission-state" / "sessions" / "cc-heartbeat-fresh.json").read_text()
+    )
+    assert state["loop_active"] is True
+    assert state["halt_reason"] == ""
+
+
+def test_hook_does_not_autohalt_when_last_progress_is_recent_even_if_updated_at_is_old(tmp_path):
+    """last_progress_at が新しい state は updated_at が古くても auto-halt しない."""
+    import datetime
+
+    last_progress = (
+        datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=30)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    very_old = "2020-01-01T00:00:00Z"
+    _write_session(
+        tmp_path,
+        "cc-last-progress-fresh",
+        last_progress_at=last_progress,
+        updated_at=very_old,
+        project_root=str(tmp_path),
+        phase="executing",
+        phase_started_at=very_old,
+    )
+
+    result = _run_hook(tmp_path, {"CLAUDE_CODE_SESSION_ID": "last-progress-fresh"})
+
+    assert "block" in result.stdout, result.stdout
+    state = json.loads(
+        (tmp_path / ".mission-state" / "sessions" / "cc-last-progress-fresh.json").read_text()
+    )
+    assert state["loop_active"] is True
+    assert state["halt_reason"] == ""
+
+
+def test_hook_does_not_autohalt_when_last_activity_is_recent_even_if_updated_at_is_old(tmp_path):
+    """last_activity_at が新しい state は updated_at が古くても auto-halt しない."""
+    import datetime
+
+    last_activity = (
+        datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=30)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    very_old = "2020-01-01T00:00:00Z"
+    _write_session(
+        tmp_path,
+        "cc-last-activity-fresh",
+        last_activity_at=last_activity,
+        updated_at=very_old,
+        project_root=str(tmp_path),
+        phase="executing",
+        phase_started_at=very_old,
+    )
+
+    result = _run_hook(tmp_path, {"CLAUDE_CODE_SESSION_ID": "last-activity-fresh"})
+
+    assert "block" in result.stdout, result.stdout
+    state = json.loads(
+        (tmp_path / ".mission-state" / "sessions" / "cc-last-activity-fresh.json").read_text()
+    )
+    assert state["loop_active"] is True
+    assert state["halt_reason"] == ""
+
+
+def test_hook_autohalts_when_all_progress_timestamps_are_stale(tmp_path):
+    """4 フィールドすべてが古い state は従来どおり auto-halt する."""
+    very_old = "2020-01-01T00:00:00Z"
+    _write_session(
+        tmp_path,
+        "cc-stale-all",
+        heartbeat_at=very_old,
+        last_progress_at=very_old,
+        last_activity_at=very_old,
+        updated_at=very_old,
+        project_root=str(tmp_path),
+        phase="executing",
+        phase_started_at=very_old,
+    )
+
+    result = _run_hook(tmp_path, {"CLAUDE_CODE_SESSION_ID": "stale-all"})
+
+    assert "block" not in result.stdout, result.stdout
+    state = json.loads(
+        (tmp_path / ".mission-state" / "sessions" / "cc-stale-all.json").read_text()
+    )
+    assert state["loop_active"] is False
+    assert state["halt_category"] == "stale"
+
+
+def test_hook_warns_when_freshness_is_between_warn_and_halt_threshold(tmp_path):
+    """2 時間前の state は warn のみで auto-halt しない."""
+    import datetime
+
+    two_hours_ago = (
+        datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=2)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _write_session(
+        tmp_path,
+        "cc-warn-only",
+        heartbeat_at=two_hours_ago,
+        updated_at="2020-01-01T00:00:00Z",
+        project_root=str(tmp_path),
+        phase="executing",
+        phase_started_at="2020-01-01T00:00:00Z",
+    )
+
+    result = _run_hook(tmp_path, {"CLAUDE_CODE_SESSION_ID": "warn-only"})
+
+    assert "block" in result.stdout, result.stdout
+    assert "WARN" in result.stdout, result.stdout
+    state = json.loads(
+        (tmp_path / ".mission-state" / "sessions" / "cc-warn-only.json").read_text()
+    )
+    assert state["loop_active"] is True
+    assert state["halt_reason"] == ""
+
+
+def test_hook_does_not_autohalt_when_heartbeat_is_invalid_and_last_progress_is_old(tmp_path):
+    """不正な heartbeat_at があっても、旧実装どおり後続フィールドへ落とさず auto-halt しない."""
+    very_old = "2020-01-01T00:00:00Z"
+    _write_session(
+        tmp_path,
+        "cc-bad-heartbeat",
+        heartbeat_at="not-a-date",
+        last_progress_at=very_old,
+        updated_at=very_old,
+        project_root=str(tmp_path),
+        phase="executing",
+        phase_started_at=very_old,
+    )
+
+    result = _run_hook(tmp_path, {"CLAUDE_CODE_SESSION_ID": "bad-heartbeat"})
+
+    assert "block" in result.stdout, result.stdout
+    state = json.loads(
+        (tmp_path / ".mission-state" / "sessions" / "cc-bad-heartbeat.json").read_text()
+    )
+    assert state["loop_active"] is True
+    assert state["halt_reason"] == ""
+
+
+@pytest.mark.parametrize(
+    "mode,script,expected_label",
+    [
+        (
+            "nonzero",
+            "#!/usr/bin/env bash\nexit 1\n",
+            "nonzero",
+        ),
+        (
+            "invalid-json",
+            "#!/usr/bin/env bash\nprintf 'not-json'\n",
+            "parse",
+        ),
+        (
+            "timeout",
+            "#!/usr/bin/env bash\nsleep 6\n",
+            "timeout",
+        ),
+        (
+            "ok-false",
+            "#!/usr/bin/env bash\nprintf '{\"ok\":false,\"verdict\":\"fresh\"}'\n",
+            "ok-false",
+        ),
+    ],
+    ids=["python-nonzero", "python-invalid-json", "python-timeout", "python-ok-false"],
+)
+def test_hook_does_not_autohalt_when_freshness_python_call_fails(tmp_path, mode, script, expected_label):
+    """Python CLI 失敗時は判定不能を stale 扱いせず auto-halt しない."""
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    python3 = fake_bin / "python3"
+    python3.write_text(script)
+    python3.chmod(0o755)
+    _write_session(
+        tmp_path,
+        f"cc-{mode}",
+        heartbeat_at="2020-01-01T00:00:00Z",
+        updated_at="2020-01-01T00:00:00Z",
+        project_root=str(tmp_path),
+        phase="executing",
+        phase_started_at="2020-01-01T00:00:00Z",
+    )
+
+    result = _run_hook(
+        tmp_path,
+        {
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "CLAUDE_CODE_SESSION_ID": mode,
+        },
+    )
+
+    assert "block" in result.stdout, result.stdout
+    state = json.loads((tmp_path / ".mission-state" / "sessions" / f"cc-{mode}.json").read_text())
+    assert state["loop_active"] is True
+    assert state["halt_reason"] == ""
 
 
 def test_hook_autohalts_on_very_stale_state(tmp_path):
