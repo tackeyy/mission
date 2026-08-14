@@ -6399,12 +6399,24 @@ def _score_gate_summary(data: dict) -> str:
     )
 
 
-def _write_artifact(cwd: Path, data: dict, artifact: dict) -> Path:
+def _write_artifact(
+    cwd: Path,
+    published_files: _PublishedFilesTransaction,
+    data: dict,
+    artifact: dict,
+    *,
+    path: Path | None = None,
+) -> Path:
     path_text = artifact.get("path")
-    path = _resolve_project_output_path(cwd, path_text) if path_text else _artifact_path(cwd, data.get("session_id") or resolve_session_id())
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_render_artifact_markdown(data, artifact), encoding="utf-8")
-    return path
+    path = path or (
+        _resolve_project_output_path(cwd, path_text)
+        if path_text
+        else _artifact_path(cwd, data.get("session_id") or resolve_session_id())
+    )
+    content = _render_artifact_markdown(data, artifact).encode("utf-8")
+    return published_files.add(
+        _publish_output_transaction(path, content)
+    ).path
 
 
 def _refresh_artifact_identity(cwd: Path, data: dict, artifact: dict, path: Path) -> None:
@@ -6465,8 +6477,9 @@ def cmd_artifact_init(args):
         print("ERROR: invalid --redaction-status", file=sys.stderr)
         sys.exit(2)
     now = iso_now()
-    with StateLock(lock_file(cwd)):
+    with StateLock(lock_file(cwd)), _PublishedFilesTransaction() as published_files:
         data = json.loads(sf.read_text())
+        lease_decision = _enforce_session_lease_for_write(sf, data)
         sid = data.get("session_id") or resolve_session_id()
         artifact_path = _artifact_path(cwd, sid)
         artifact = {
@@ -6485,10 +6498,10 @@ def cmd_artifact_init(args):
         data["artifact"] = artifact
         data["artifact_applicability"] = "producing"
         data["updated_at"] = now
-        path = _write_artifact(cwd, data, artifact)
+        path = _write_artifact(cwd, published_files, data, artifact)
         _refresh_artifact_identity(cwd, data, artifact, path)
         backup_state(sf)
-        atomic_write_json(sf, stamp_metadata(data, cwd))
+        atomic_write_json(sf, stamp_metadata(data, cwd), lease_decision=lease_decision)
     print(json.dumps({"ok": True, "artifact": artifact}, indent=2 if args.json else None, ensure_ascii=False))
 
 
@@ -6533,8 +6546,9 @@ def cmd_artifact_render(args):
         print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
         sys.exit(1)
     now = iso_now()
-    with StateLock(lock_file(cwd)):
+    with StateLock(lock_file(cwd)), _PublishedFilesTransaction() as published_files:
         data = json.loads(sf.read_text())
+        lease_decision = _enforce_session_lease_for_write(sf, data)
         artifact = _require_artifact(data)
         if args.redaction_status:
             if args.redaction_status not in ARTIFACT_REDACTION_STATUSES:
@@ -6546,10 +6560,10 @@ def cmd_artifact_render(args):
         artifact["updated_at"] = now
         data["artifact"] = artifact
         data["updated_at"] = now
-        path = _write_artifact(cwd, data, artifact)
+        path = _write_artifact(cwd, published_files, data, artifact)
         _refresh_artifact_identity(cwd, data, artifact, path)
         backup_state(sf)
-        atomic_write_json(sf, stamp_metadata(data, cwd))
+        atomic_write_json(sf, stamp_metadata(data, cwd), lease_decision=lease_decision)
     result = {"ok": True, "path": _state_relative_path(cwd, str(path)), "artifact": artifact}
     print(json.dumps(result, indent=2 if args.json else None, ensure_ascii=False))
 
@@ -6565,17 +6579,17 @@ def cmd_artifact_export(args):
         sys.exit(2)
     now = iso_now()
     dst = _resolve_project_output_path(cwd, args.to)
-    with StateLock(lock_file(cwd)):
+    with StateLock(lock_file(cwd)), _PublishedFilesTransaction() as published_files:
         data = json.loads(sf.read_text())
+        lease_decision = _enforce_session_lease_for_write(sf, data)
         artifact = _require_artifact(data)
         artifact["redaction_status"] = args.redaction_status
         artifact["status"] = "exported"
         artifact["last_rendered_at"] = now
         artifact["updated_at"] = now
-        src = _write_artifact(cwd, data, artifact)
+        src = _write_artifact(cwd, published_files, data, artifact)
         _refresh_artifact_identity(cwd, data, artifact, src)
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
+        published_files.add(_publish_output_transaction(dst, src.read_bytes()))
         export_entry = {
             "path": _state_relative_path(cwd, str(dst)),
             "timestamp": now,
@@ -6585,7 +6599,7 @@ def cmd_artifact_export(args):
         data["artifact"] = artifact
         data["updated_at"] = now
         backup_state(sf)
-        atomic_write_json(sf, stamp_metadata(data, cwd))
+        atomic_write_json(sf, stamp_metadata(data, cwd), lease_decision=lease_decision)
     result = {"ok": True, "export": export_entry, "artifact": artifact}
     print(json.dumps(result, indent=2 if args.json else None, ensure_ascii=False))
 
@@ -6607,8 +6621,9 @@ def cmd_artifact_publish(args):
         )
         sys.exit(2)
     now = iso_now()
-    with StateLock(lock_file(cwd)):
+    with StateLock(lock_file(cwd)), _PublishedFilesTransaction() as published_files:
         data = json.loads(sf.read_text())
+        lease_decision = _enforce_session_lease_for_write(sf, data)
         artifact = _require_artifact(data)
         if artifact.get("redaction_status") == "unchecked":
             print("ERROR: publish requires redaction_status other than unchecked", file=sys.stderr)
@@ -6624,13 +6639,13 @@ def cmd_artifact_publish(args):
         artifact.setdefault("publish_events", []).append(event)
         artifact["status"] = event["status"]
         artifact["updated_at"] = now
-        path = _write_artifact(cwd, data, artifact)
+        path = _write_artifact(cwd, published_files, data, artifact)
         _refresh_artifact_identity(cwd, data, artifact, path)
         event["artifact_path"] = _state_relative_path(cwd, str(path))
         data["artifact"] = artifact
         data["updated_at"] = now
         backup_state(sf)
-        atomic_write_json(sf, stamp_metadata(data, cwd))
+        atomic_write_json(sf, stamp_metadata(data, cwd), lease_decision=lease_decision)
     result = {"ok": True, "publish_event": event, "artifact": artifact}
     print(json.dumps(result, indent=2 if args.json else None, ensure_ascii=False))
 
