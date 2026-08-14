@@ -54,6 +54,7 @@ import time
 import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import NamedTuple, Protocol
 
 LIB_DIR = Path(__file__).resolve().parents[1] / "lib"
@@ -10720,6 +10721,88 @@ def _same_inode(first: os.stat_result, second: os.stat_result) -> bool:
     )
 
 
+def _stat_like_from_identity(identity: tuple[int, int, int, int, int, int, int]) -> SimpleNamespace:
+    return SimpleNamespace(
+        st_dev=identity[0],
+        st_ino=identity[1],
+        st_mode=identity[2],
+        st_nlink=identity[3],
+        st_size=identity[4],
+        st_mtime_ns=identity[5],
+        st_ctime_ns=identity[6],
+    )
+
+
+class _PublishStatLike(Protocol):
+    st_dev: int
+    st_ino: int
+    st_mode: int
+    st_nlink: int
+    st_size: int
+    st_mtime_ns: int
+    st_ctime_ns: int
+
+
+def _publish_directory_detail(
+    expected: tuple[int, int, int],
+    opened: os.stat_result,
+    named: os.stat_result,
+    *,
+    reason: str,
+) -> str:
+    parts = [f"reason={reason}"]
+    expected_dev, expected_ino, expected_mode = expected
+    parts.extend((
+        f"expected_dev={expected_dev}",
+        f"expected_ino={expected_ino}",
+        f"expected_mode={oct(expected_mode)}",
+        f"opened_dev={opened.st_dev}",
+        f"opened_ino={opened.st_ino}",
+        f"opened_mode={oct(opened.st_mode)}",
+        f"named_dev={named.st_dev}",
+        f"named_ino={named.st_ino}",
+        f"named_mode={oct(named.st_mode)}",
+    ))
+    return " ".join(parts)
+
+
+def _publish_identity_detail(
+    expected: _PublishStatLike,
+    observed: _PublishStatLike,
+    *,
+    reason: str,
+    expected_size: int | None = None,
+) -> str:
+    parts = [
+        f"reason={reason}",
+        f"expected_dev={expected.st_dev}",
+        f"expected_ino={expected.st_ino}",
+        f"expected_mode={oct(expected.st_mode)}",
+        f"expected_nlink={expected.st_nlink}",
+        f"observed_dev={observed.st_dev}",
+        f"observed_ino={observed.st_ino}",
+        f"observed_mode={oct(observed.st_mode)}",
+        f"observed_nlink={observed.st_nlink}",
+    ]
+    if expected_size is not None:
+        parts.append(f"expected_size={expected_size}")
+        parts.append(f"observed_size={observed.st_size}")
+    return " ".join(parts)
+
+
+def _publish_first_mismatch_reason(
+    expected: _PublishStatLike,
+    observed: _PublishStatLike,
+    fields: tuple[str, ...],
+    *,
+    default: str,
+) -> str:
+    for name in fields:
+        if getattr(expected, name) != getattr(observed, name):
+            return name[3:]
+    return default
+
+
 def _verify_review_archive_directory(directory_fd: int, archive_path: Path) -> None:
     try:
         opened = os.fstat(directory_fd)
@@ -11338,8 +11421,14 @@ def _open_publish_directory(path: Path) -> tuple[int, tuple[int, int, int]]:
         opened = os.fstat(directory_fd)
         named = path.lstat()
         identity = _directory_identity(opened)
-        if not stat.S_ISDIR(opened.st_mode) or _directory_identity(named) != identity:
-            raise ValueError("publish directory changed")
+        if not stat.S_ISDIR(opened.st_mode):
+            raise ValueError(
+                f"publish directory changed: {_publish_directory_detail(identity, opened, named, reason='not-a-dir')}",
+            )
+        if _directory_identity(named) != identity:
+            raise ValueError(
+                f"publish directory changed: {_publish_directory_detail(identity, opened, named, reason='pre-open')}",
+            )
         result = directory_fd, identity
         directory_fd = None
         return result
@@ -11373,14 +11462,24 @@ def _publish_output_transaction(
         temporary, temporary_stat = _write_temp_at(directory_fd, path.name, content)
         opened_parent = os.fstat(directory_fd)
         named_parent = directory_path.lstat()
-        if (
-            _directory_identity(opened_parent) != directory_identity
-            or _directory_identity(named_parent) != directory_identity
-        ):
-            raise ValueError("publish directory changed")
+        opened_identity = _directory_identity(opened_parent)
+        named_identity = _directory_identity(named_parent)
+        if opened_identity != directory_identity or named_identity != directory_identity:
+            reason = "directory-opened" if opened_identity != directory_identity else "directory-named"
+            raise ValueError(
+                f"publish directory changed: {_publish_directory_detail(directory_identity, opened_parent, named_parent, reason=reason)}",
+            )
         named_temporary = os.stat(temporary, dir_fd=directory_fd, follow_symlinks=False)
         if _stat_identity(named_temporary) != _stat_identity(temporary_stat):
-            raise ValueError("output temporary file changed")
+            reason = _publish_first_mismatch_reason(
+                temporary_stat,
+                named_temporary,
+                ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns"),
+                default="identity",
+            )
+            raise ValueError(
+                f"output temporary file changed: {_publish_identity_detail(temporary_stat, named_temporary, reason=reason, expected_size=temporary_stat.st_size)}",
+            )
         if previous_entry is None:
             created = True
             try:
@@ -11406,7 +11505,16 @@ def _publish_output_transaction(
             previous_content = previous_entry[0]
             current = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
             if _stat_identity(current) != previous_entry[1]:
-                raise ValueError("output changed during publish")
+                previous_identity = _stat_like_from_identity(previous_entry[1])
+                reason = _publish_first_mismatch_reason(
+                    previous_identity,
+                    current,
+                    ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns"),
+                    default="identity",
+                )
+                raise ValueError(
+                    f"output changed during publish: {_publish_identity_detail(previous_identity, current, reason=reason, expected_size=previous_identity.st_size)}",
+                )
             publish_attempt.attempted = True
             with _defer_publish_signals():
                 os.replace(
@@ -11419,7 +11527,15 @@ def _publish_output_transaction(
             temporary = ""
         published = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
         if not _same_inode(temporary_stat, published) or published.st_size != len(content):
-            raise ValueError("output publish changed")
+            reason = _publish_first_mismatch_reason(
+                temporary_stat,
+                published,
+                ("st_dev", "st_ino", "st_mode", "st_nlink"),
+                default="size",
+            )
+            raise ValueError(
+                f"output publish changed: {_publish_identity_detail(temporary_stat, published, reason=reason, expected_size=len(content))}",
+            )
         os.fsync(directory_fd)
         result = _PublishedFile(
             directory_path / path.name,
