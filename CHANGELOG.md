@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-08-14
+
+- test: schema v1-v4 golden snapshots now cover the known versions, and unknown schema versions fail closed during validation (#483).
+
+- docs: state-management and ADR-002 now reflect the implementation details instead of the earlier draft wording (#484).
+
+- docs: ADR-005 now documents the Typed Kernel / UnitOfWork migration path and its transition plan (#485).
+
+- fix: `plan-import` and `adopt-core` no longer publish evidence before lease validation completes, closing the premature-exposure window (#498).
+
+- chore: distribution mirrors and the Python compatibility gate now recurse through the package tree, matching Wave 3 / D1 expectations (#499).
+
 ## [2.5.0] - 2026-08-14
 
 - feat: Added `planning adopt-core` so policy-v1 core planning can validate and publish a canonical `mission-plan/1`, then continue through the existing execution gate with matching `next` and failure guidance (#465).
@@ -449,6 +461,7 @@ First public release.
 - Python test suite covering state routing, scoring gates, and hook behavior.
 - GitHub Actions CI (`push`, `pull_request`, `workflow_dispatch`) with pytest and ShellCheck.
 
+[2.6.0]: https://github.com/tackeyy/mission/releases/tag/v2.6.0
 [2.5.0]: https://github.com/tackeyy/mission/releases/tag/v2.5.0
 [2.4.0]: https://github.com/tackeyy/mission/releases/tag/v2.4.0
 [2.3.0]: https://github.com/tackeyy/mission/releases/tag/v2.3.0

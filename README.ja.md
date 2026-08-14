@@ -201,7 +201,7 @@ plugin 配布用に、この repo には `.codex-plugin/plugin.json` と `.agent
 `codex plugin add mission@mission-marketplace` 後は、`MISSION_PLUGIN_ROOT` を install cache path に設定し、現行 model-visible command text 互換のため `CLAUDE_PLUGIN_ROOT` も同じ値にします。
 
 ```bash
-export MISSION_PLUGIN_ROOT="${CODEX_HOME:-$HOME/.codex}/plugins/cache/mission-marketplace/mission/2.5.0"
+export MISSION_PLUGIN_ROOT="${CODEX_HOME:-$HOME/.codex}/plugins/cache/mission-marketplace/mission/2.6.0"
 export CLAUDE_PLUGIN_ROOT="$MISSION_PLUGIN_ROOT"
 ```
 
@@ -262,22 +262,22 @@ make test-e2e    # slow operational scenario
 ローカル検証スナップショット:
 
 ```text
-2026-08-14: 3185 passed
+2026-08-14: 3244 passed
 ```
 
 詳細は [`docs/TESTING.md`](docs/TESTING.md) を参照してください。
 
 ## E2E 検証済み事項
 
-2026-08-14、Claude Code 2.1.222、隔離 `CLAUDE_CONFIG_DIR` に mission 2.5.0 を
+2026-08-14、Claude Code 2.1.222、隔離 `CLAUDE_CONFIG_DIR` に mission 2.6.0 を
 ローカル marketplace から正式 install し、以下を再確認しました。
 
 - `claude plugin validate` が marketplace manifest を受理する
-- `claude plugin install mission@mission-marketplace` が 2.5.0 を install し enabled になる
+- `claude plugin install mission@mission-marketplace` が 2.6.0 を install し enabled になる
 - `claude plugin details mission` に 6 スキルと Stop hook 1 件が並び、常時コストは約 149 tok
-- install 先 cache が `<config>/plugins/cache/mission-marketplace/mission/2.5.0` に解決し、README の `MISSION_PLUGIN_ROOT` 例と一致する
+- install 先 cache が `<config>/plugins/cache/mission-marketplace/mission/2.6.0` に解決し、README の `MISSION_PLUGIN_ROOT` 例と一致する
 - install 済み cache の `mission-state.py` が `.mission-state/sessions/*.json` を生成し、permission preflight を通過する
-- Python テストが通る（`make test`: 3185 passed、`make test-e2e`: 3 passed）
+- Python テストが通る（`make test`: 3244 passed、`make test-e2e`: 3 passed）
 
 `mission-reviewer` などの非修飾サブスキル名の実行時解決は、2026-06-14（Claude Code
 2.1.177）の検証で確認済みで、今回の headless 実行では再確認していません。
