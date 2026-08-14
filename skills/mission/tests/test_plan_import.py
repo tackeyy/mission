@@ -2,6 +2,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import argparse
 import sys
 from pathlib import Path
 
@@ -52,6 +53,16 @@ def _setup(run_cli, tmp_path):
     binding = {"invocation_id":invocation,"preflight_id":preflight,"outbound_packet_digest":outbound,"selection_id":selected["selection_id"],"selection_source":"automatic","iteration":1}
     result = {"schema":"mission-provider-result/1","binding":binding,"capability_attestation":{"requested_class":"deep-planning","effective_class":"deep-planning","requested_variant":"portable-v1","effective_variant":"portable-v1"},"artifacts":[{"schema":"mission-plan/1","document":_document()}]}
     return registry, state_file, result, invocation, env
+
+
+def _state_module():
+    script = Path(__file__).resolve().parent.parent / "bin" / "mission-state.py"
+    spec = importlib.util.spec_from_file_location("mission_state_plan_import_lease_test", script)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_plan_import_publishes_raw_canonical_and_bound_state(run_cli, tmp_path):
@@ -105,6 +116,85 @@ def test_plan_import_state_publish_fault_rolls_back_raw_candidate_and_state(monk
     assert not list((tmp_path / ".mission-state" / "plans").glob("*.json"))
     archive_after = {path.relative_to(archive): path.read_bytes() for path in archive.rglob("*") if path.is_file()} if archive.exists() else {}
     assert archive_after == archive_before
+
+
+def test_plan_import_rejects_foreign_lease_before_publishing_any_evidence(
+    run_cli, tmp_path,
+):
+    registry, state_file, result, invocation, env = _setup(run_cli, tmp_path)
+    source = tmp_path / "result.json"
+    source.write_text(json.dumps(result), encoding="utf-8")
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    state.update({
+        "owner_session_id": "foreign",
+        "lease_id": "foreign-lease",
+        "fencing_epoch": 7,
+        "lease_expires_at": "2099-01-01T00:00:00Z",
+    })
+    state_file.write_text(json.dumps(state), encoding="utf-8")
+    state_before = state_file.read_bytes()
+    archive = tmp_path / ".mission-state" / "archive"
+    archive_before = {path.relative_to(archive): path.read_bytes() for path in archive.rglob("*") if path.is_file()} if archive.exists() else {}
+
+    result = run_cli(
+        "specialists", "plan-import", "--input", str(source),
+        "--invocation-id", invocation, "--registry", str(registry), "--json",
+        cwd=tmp_path, env_extra=env,
+    )
+
+    assert result.returncode == 2
+    assert "lease" in result.stderr.lower()
+    assert state_file.read_bytes() == state_before
+    archive_after = {path.relative_to(archive): path.read_bytes() for path in archive.rglob("*") if path.is_file()} if archive.exists() else {}
+    assert archive_after == archive_before
+    assert not list((tmp_path / ".mission-state" / "plans").glob("*.json"))
+
+
+def test_plan_import_does_not_publish_before_foreign_lease_rejection(monkeypatch, capsys, run_cli, tmp_path):
+    module = _state_module()
+    registry, state_file, result, invocation, env = _setup(run_cli, tmp_path)
+    source = tmp_path / "result.json"
+    source.write_text(json.dumps(result), encoding="utf-8")
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    state.update({
+        "owner_session_id": "foreign",
+        "lease_id": "foreign-lease",
+        "fencing_epoch": 7,
+        "lease_expires_at": "2099-01-01T00:00:00Z",
+    })
+    state_file.write_text(json.dumps(state), encoding="utf-8")
+    state_before = state_file.read_bytes()
+    calls = []
+
+    def record_review_publish(*args, **kwargs):
+        calls.append(("review", args, kwargs))
+        raise AssertionError("plan-import must reject foreign lease before review archive publish")
+
+    def record_output_publish(*args, **kwargs):
+        calls.append(("output", args, kwargs))
+        raise AssertionError("plan-import must reject foreign lease before output publish")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", env["PATH"])
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    monkeypatch.setattr(module, "_publish_review_archive_transaction", record_review_publish)
+    monkeypatch.setattr(module, "_publish_output_transaction", record_output_publish)
+
+    with pytest.raises(module.CommandOutcomeExit) as excinfo:
+        module.cmd_plan_import(argparse.Namespace(
+            input=str(source),
+            invocation_id=invocation,
+            json=True,
+            registry=str(registry),
+        ))
+
+    captured = capsys.readouterr()
+    assert excinfo.value.code == 2
+    assert "lease" in captured.err.lower()
+    assert calls == []
+    assert state_file.read_bytes() == state_before
+    assert not list((tmp_path / ".mission-state" / "plans").glob("*.json"))
 
 
 def test_uncontracted_exit_zero_is_terminal_but_not_applied_required_evidence():
