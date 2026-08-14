@@ -16,13 +16,18 @@ import pytest
 
 
 MISSION_STATE_PY = Path(__file__).resolve().parent.parent / "bin" / "mission-state.py"
+_MODULE = None
 
 
 def _load_module():
+    global _MODULE
+    if _MODULE is not None:
+        return _MODULE
     spec = importlib.util.spec_from_file_location("mission_state_issue209", MISSION_STATE_PY)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    _MODULE = module
     return module
 
 
@@ -32,6 +37,49 @@ def _decision(mission: str, complexity: str = "Simple", risk: str | None = None)
 
 def _details(decision: dict, *, category: str = "actual-operation") -> list[dict]:
     return [item for item in decision["signal_details"] if item["category"] == category]
+
+
+def _counted_decision(
+    mission: str,
+    *,
+    complexity: str = "Simple",
+    risk: str | None = None,
+    cost_per_call=None,
+) -> tuple[int, dict]:
+    """Count per-candidate evaluation work instead of measuring elapsed time."""
+    module = _load_module()
+    original = module._actual_operation_signal_detail
+    cost = 0
+
+    def counted(*args, **kwargs):
+        nonlocal cost
+        mission_text = args[0]
+        cost += cost_per_call(mission_text) if cost_per_call is not None else 1
+        return original(*args, **kwargs)
+
+    module._actual_operation_signal_detail = counted
+    try:
+        decision = module.derive_review_tier_decision(mission, complexity, risk)
+    finally:
+        module._actual_operation_signal_detail = original
+    return cost, decision
+
+
+def _assert_dense_no_boundary_context_analysis_scales_below_quadratic(
+    *, cost_per_call=None
+) -> None:
+    small_cost, _ = _counted_decision(
+        "deploy " * 1_000,
+        cost_per_call=cost_per_call,
+    )
+    large_cost, large = _counted_decision(
+        "deploy " * 4_000,
+        cost_per_call=cost_per_call,
+    )
+
+    deploy_details = [item for item in _details(large) if item["keyword"] == "deploy"]
+    assert len(deploy_details) == 4_000
+    assert large_cost < small_cost * 8
 
 
 def test_affirmative_actual_operation_is_kept_with_provenance():
@@ -1108,18 +1156,14 @@ def test_repeated_keyword_context_lookup_scales_below_quadratic():
 
 
 def test_dense_no_boundary_context_analysis_scales_below_quadratic():
-    def elapsed_for(count: int) -> tuple[float, dict]:
-        started = time.perf_counter()
-        decision = _decision("deploy " * count)
-        return time.perf_counter() - started, decision
+    _assert_dense_no_boundary_context_analysis_scales_below_quadratic()
 
-    small_elapsed, _ = elapsed_for(1_000)
-    large_elapsed, large = elapsed_for(4_000)
 
-    deploy_details = [item for item in _details(large) if item["keyword"] == "deploy"]
-    assert len(deploy_details) == 4_000
-    assert large_elapsed < 2.5
-    assert large_elapsed < (small_elapsed * 8) + 0.05
+def test_dense_no_boundary_context_analysis_detector_rejects_quadratic_cost():
+    with pytest.raises(AssertionError):
+        _assert_dense_no_boundary_context_analysis_scales_below_quadratic(
+            cost_per_call=lambda mission_text: len(mission_text)
+        )
 
 
 def test_dense_global_markers_and_prior_candidates_scale_below_quadratic():
