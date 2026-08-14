@@ -239,6 +239,14 @@ from merge_queue import (  # noqa: E402
     status as status_merge_queue,
     verify as verify_merge_queue,
 )
+from mission_kernel.errors import MissionStateDecodeError, StrictReadError  # noqa: E402
+from mission_kernel.json_codec import (  # noqa: E402
+    _reject_duplicate_json_pairs,
+    decode_json_object as _decode_strict_json_object,
+    thaw_json_object as _thaw_strict_json_object,
+)
+from mission_kernel.versions import read_schema_version as _read_schema_version  # noqa: E402
+from mission_persistence.strict_reader import read_stable_bytes as _read_stable_bytes  # noqa: E402
 
 SCHEMA_VERSION = 4  # v4: structured scoring provenance is mandatory for new sessions
 GOAL_DISPATCH_MODES = {"inline", "host-native"}
@@ -251,17 +259,15 @@ class UnsupportedSchemaVersionError(ValueError):
 
 def _validate_schema_version(data: dict) -> int | None:
     version = data.get("schema_version", _SCHEMA_VERSION_MISSING)
-    if version is _SCHEMA_VERSION_MISSING:
-        return None
-    if isinstance(version, bool) or not isinstance(version, int):
+    try:
+        origin = _read_schema_version(data, max_reader_version=4)
+    except MissionStateDecodeError as exc:
         raise UnsupportedSchemaVersionError(
             f"unsupported schema_version {version!r}; expected a missing field or an integer in 1..{SCHEMA_VERSION}"
-        )
-    if version < 1 or version > SCHEMA_VERSION:
-        raise UnsupportedSchemaVersionError(
-            f"unsupported schema_version {version}; expected a missing field or an integer in 1..{SCHEMA_VERSION}"
-        )
-    return version
+        ) from exc
+    if version is _SCHEMA_VERSION_MISSING:
+        return None
+    return int(origin.value[1:])
 
 
 def _load_state_json(sf: Path) -> dict:
@@ -10842,41 +10848,23 @@ def _stat_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, i
 
 
 def _read_strict_review_file(source: Path) -> bytes:
-    """Read one bounded regular review input without following its final path."""
-    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    """Compatibility wrapper over the shared stable snapshot reader."""
     try:
-        fd = os.open(os.fspath(source), os.O_RDONLY | os.O_NONBLOCK | nofollow)
-    except OSError as exc:
-        raise ValueError("review input is unavailable") from exc
-    try:
-        initial = os.fstat(fd)
-        if (
-            not stat.S_ISREG(initial.st_mode)
-            or initial.st_nlink != 1
-            or initial.st_size > MAX_REVIEW_INPUT_BYTES
-        ):
-            raise ValueError("review input must be a bounded regular non-linked file")
-        chunks: list[bytes] = []
-        remaining = initial.st_size
-        while remaining:
-            chunk = os.read(fd, min(remaining, 64 * 1024))
-            if not chunk:
-                raise ValueError("review input changed while being read")
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        if os.read(fd, 1) or _stat_identity(os.fstat(fd)) != _stat_identity(initial):
-            raise ValueError("review input changed while being read")
-        try:
-            named = os.lstat(source)
-        except OSError as exc:
+        return _read_stable_bytes(source, limit=MAX_REVIEW_INPUT_BYTES)
+    except StrictReadError as exc:
+        if exc.code == "identity-changed":
             raise ValueError("review input changed while being read") from exc
-        if _stat_identity(named) != _stat_identity(initial):
-            raise ValueError("review input changed while being read")
-        return b"".join(chunks)
-    except OSError as exc:
+        if exc.code == "record-too-large":
+            raise ValueError("review input must be a bounded regular non-linked file") from exc
+        if exc.code == "not-regular-single-link":
+            try:
+                unavailable = not source.exists() or source.is_symlink()
+            except OSError:
+                unavailable = True
+            if unavailable:
+                raise ValueError("review input is unavailable") from exc
+            raise ValueError("review input must be a bounded regular non-linked file") from exc
         raise ValueError("review input is unavailable") from exc
-    finally:
-        os.close(fd)
 
 
 def _same_inode(first: os.stat_result, second: os.stat_result) -> bool:
@@ -11865,25 +11853,31 @@ class _DuplicateReviewJsonKey(ValueError):
 
 
 def _reject_duplicate_review_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise _DuplicateReviewJsonKey(f"duplicate JSON key: {key}")
-        result[key] = value
-    return result
+    try:
+        return _reject_duplicate_json_pairs(pairs)
+    except MissionStateDecodeError as exc:
+        duplicate = next(
+            (
+                key
+                for index, (key, _) in enumerate(pairs)
+                if key in {prior for prior, _ in pairs[:index]}
+            ),
+            "unknown",
+        )
+        raise _DuplicateReviewJsonKey(f"duplicate JSON key: {duplicate}") from exc
 
 
 def _parse_strict_review_bytes(content: bytes, expected_iteration: int) -> dict:
     """Parse exactly one UTF-8 mission-review/1 document with no prose fallback."""
-    if len(content) > MAX_REVIEW_INPUT_BYTES:
-        raise ValueError("review input exceeds 4 MiB")
     try:
-        text = content.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ValueError("review input is invalid UTF-8") from exc
-    try:
-        payload = json.loads(text, object_pairs_hook=_reject_duplicate_review_keys)
-    except (_DuplicateReviewJsonKey, json.JSONDecodeError) as exc:
+        payload = _thaw_strict_json_object(
+            _decode_strict_json_object(content, limit=MAX_REVIEW_INPUT_BYTES)
+        )
+    except MissionStateDecodeError as exc:
+        if exc.code == "record-too-large":
+            raise ValueError("review input exceeds 4 MiB") from exc
+        if exc.code == "invalid-utf8":
+            raise ValueError("review input is invalid UTF-8") from exc
         raise ValueError("review input must be exactly one JSON document") from exc
     _validate_review_payload(payload, expected_iteration)
     return payload
