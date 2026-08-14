@@ -167,7 +167,7 @@ python3 "$MISSION_PLUGIN_ROOT/skills/mission/bin/mission-state.py" next
 
 `state_guard.active=true` かつ `passes != true` / `halt_reason` 空なら、`next_action` に従って続行する。PID が古い場合は `refresh-pid` 後に続行する。
 
-final の直前は `mission-state.py next` を呼ぶ。`next_action=report-complete`（`passes=true`）なら完了報告、`next_action=report-blocker`（明示的な `halt_reason` あり）なら未完了報告を返す。それ以外の action では final を返さず、指示されたphaseを継続する。terminal stateはactiveではないため、`mark-passes` / `mark-halt` 後のfinal判定にstrict preflightを再利用しない。
+final の直前は `mission-state.py next` を呼ぶ。`next_action=report-complete`（`passes=true`）なら完了報告、`next_action=report-terminal`（`mark-halt --category evidence-submitted` の正常終了、`passes=true` は主張しない）なら証拠提出完了の最終報告、`next_action=report-blocker`（明示的な `halt_reason` あり）なら未完了報告を返す。それ以外の action では final を返さず、指示されたphaseを継続する。terminal stateはactiveではないため、`mark-passes` / `mark-halt` 後のfinal判定にstrict preflightを再利用しない。
 
 ```bash
 python3 "$MISSION_PLUGIN_ROOT/skills/mission/bin/mission-state.py" refresh-pid

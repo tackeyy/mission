@@ -401,6 +401,15 @@ def test_versioning_policy_separates_merge_and_distribution_releases():
     assert "hotfix" in ja and "最大でも週 1 回" in ja
 
 
+def test_versioning_policy_lists_mission_cli_version_as_release_target():
+    """version bump 手順が MISSION_CLI_VERSION を更新対象から落とさない."""
+    for rel in ("docs/VERSIONING.md", "docs/VERSIONING.ja.md"):
+        txt = _r(REPO_ROOT / rel)
+        assert "MISSION_CLI_VERSION" in txt, f"{rel} must mention MISSION_CLI_VERSION"
+        assert ".claude-plugin/plugin.json" in txt, f"{rel} must keep manifest update guidance"
+        assert "plugins/mission/.codex-plugin/plugin.json" in txt, f"{rel} must keep plugin mirror guidance"
+
+
 def test_release_checklist_links_versioning_policy_before_version_bump():
     """distribution release checklist は version bump 前に versioning policy 確認を求める."""
     for rel, policy in (
