@@ -664,8 +664,19 @@ def test_receipt_must_bind_the_exact_canonical_request(tmp_path):
         validate_receipt_binding(tmp_path, envelope)
 
 
-@pytest.mark.parametrize("schema", [None, 3, "4", 4.0])
-def test_push_score_requires_provenance_despite_schema_downgrade(state_dir, run_cli, schema):
+@pytest.mark.parametrize(
+    ("schema", "expected_error"),
+    [
+        (None, "provenance"),
+        (3, "provenance"),
+        ("4", "schema_version"),
+        (4.0, "schema_version"),
+    ],
+    ids=["missing", "v3", "string-v4", "float-v4"],
+)
+def test_push_score_requires_provenance_despite_schema_downgrade(
+    state_dir, run_cli, schema, expected_error
+):
     document = json.loads((state_dir / "sessions" / "test.json").read_text())
     if schema is None:
         document.pop("schema_version")
@@ -677,7 +688,7 @@ def test_push_score_requires_provenance_despite_schema_downgrade(state_dir, run_
     score.write_text(json.dumps({"items": ITEMS}))
     result = run_cli("push-score", "--iteration", "1", "--scoring-json", str(score), cwd=state_dir.parent)
     assert result.returncode == 2
-    assert "provenance" in result.stderr
+    assert expected_error in result.stderr
     assert json.dumps(json.loads((state_dir / "sessions" / "test.json").read_text()), sort_keys=True) == before
 
 

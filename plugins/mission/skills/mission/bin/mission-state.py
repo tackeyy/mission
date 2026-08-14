@@ -242,6 +242,32 @@ from merge_queue import (  # noqa: E402
 
 SCHEMA_VERSION = 4  # v4: structured scoring provenance is mandatory for new sessions
 GOAL_DISPATCH_MODES = {"inline", "host-native"}
+_SCHEMA_VERSION_MISSING = object()
+
+
+class UnsupportedSchemaVersionError(ValueError):
+    """The reader only accepts legacy-missing or supported schema versions."""
+
+
+def _validate_schema_version(data: dict) -> int | None:
+    version = data.get("schema_version", _SCHEMA_VERSION_MISSING)
+    if version is _SCHEMA_VERSION_MISSING:
+        return None
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise UnsupportedSchemaVersionError(
+            f"unsupported schema_version {version!r}; expected a missing field or an integer in 1..{SCHEMA_VERSION}"
+        )
+    if version < 1 or version > SCHEMA_VERSION:
+        raise UnsupportedSchemaVersionError(
+            f"unsupported schema_version {version}; expected a missing field or an integer in 1..{SCHEMA_VERSION}"
+        )
+    return version
+
+
+def _load_state_json(sf: Path) -> dict:
+    data = json.loads(sf.read_text())
+    _validate_schema_version(data)
+    return data
 
 
 def _new_specialist_selection_checkpoint() -> dict:
@@ -8083,8 +8109,12 @@ def cmd_get(args):
         print(json.dumps({"ok": False, "error": "state.json not found"}))
         sys.exit(1)
     with StateLock(lock_file(cwd)):
-        data = json.loads(sf.read_text())
-        _validate_specialist_public_state(data)
+        try:
+            data = _load_state_json(sf)
+            _validate_specialist_public_state(data)
+        except UnsupportedSchemaVersionError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(2)
     if args.field:
         print(json.dumps(data.get(args.field)))
     else:
@@ -8834,7 +8864,11 @@ def cmd_next(args):
         }, ensure_ascii=False))
         return
     with StateLock(lock_file(cwd)):
-        data = json.loads(sf.read_text())
+        try:
+            data = _load_state_json(sf)
+        except UnsupportedSchemaVersionError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(2)
     out = _derive_next_action(data)
     # #238 (S6): 時間予算の消費率を advisory として常に添付する。
     # exceeded 時のみ、spawn 系の高コスト手を consider-halt へ差し替え、
@@ -9295,7 +9329,11 @@ def cmd_set(args):
         print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
         sys.exit(1)
     with StateLock(lock_file(cwd)):
-        data = json.loads(sf.read_text())
+        try:
+            data = _load_state_json(sf)
+        except UnsupportedSchemaVersionError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(2)
         _reject_active_provider_mutation(data, "set")
         now = iso_now()
         explicit_keys = {kv.partition("=")[0] for kv in args.kvs}
@@ -10107,7 +10145,8 @@ def _force_envelope_replayed(cwd: Path, envelope: dict) -> bool:
 
 def _is_new_provenance_state(data: dict) -> bool:
     """Legacy terminal records are display-only; new writers do not consult this."""
-    return isinstance(data.get("schema_version"), int) and data["schema_version"] >= 4
+    version = _validate_schema_version(data)
+    return version is not None and version >= 4
 
 
 def _revision_scope_from_args(args) -> dict:
@@ -13335,7 +13374,11 @@ def cmd_push_score(args):
     _reject_normalized_scale(items)
 
     with StateLock(lock_file(cwd)), _PublishedFilesTransaction() as published_files:
-        data = json.loads(sf.read_text())
+        try:
+            data = _load_state_json(sf)
+        except UnsupportedSchemaVersionError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(2)
         _reject_active_provider_mutation(data, "push-score")
         lease_decision = _enforce_session_lease_for_write(sf, data)
         _validate_consensus_policy(data, items)
@@ -13626,7 +13669,11 @@ def cmd_mark_passes(args):
         sys.exit(2)
 
     with StateLock(lock_file(cwd)):
-        data = json.loads(sf.read_text())
+        try:
+            data = _load_state_json(sf)
+        except UnsupportedSchemaVersionError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(2)
         if force:
             try:
                 latest_scope = next((entry.get("revision_scope") for entry in reversed(data.get("score_history", []))
@@ -13922,7 +13969,11 @@ def cmd_mark_halt(args):
         sys.exit(1)
     category = _normalize_halt_category(getattr(args, "category", None))
     with StateLock(lock_file(cwd)):
-        data = json.loads(sf.read_text())
+        try:
+            data = _load_state_json(sf)
+        except UnsupportedSchemaVersionError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(2)
         _reject_active_provider_mutation(data, "mark-halt")
         now = iso_now()
         if category == "awaiting-approval":
@@ -13973,7 +14024,11 @@ def cmd_reactivate(args):
         sys.exit(1)
 
     with StateLock(lock_file(cwd)):
-        data = json.loads(sf.read_text())
+        try:
+            data = _load_state_json(sf)
+        except UnsupportedSchemaVersionError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(2)
         previous_halt_reason = data.get("halt_reason") or ""
         raw_halt_category = data.get("halt_category")
         previous_halt_category = raw_halt_category if raw_halt_category not in (None, "") else "unknown"
@@ -14862,7 +14917,9 @@ def _collect_states(root: Path) -> list[dict]:
     states = []
     for sf in _iter_state_files(root, include_archive=True):
         try:
-            state = json.loads(sf.read_text())
+            state = _load_state_json(sf)
+        except UnsupportedSchemaVersionError:
+            raise
         except Exception:
             continue
         if not _is_mission_state_record(state):
@@ -15509,15 +15566,24 @@ def cmd_stats(args):
             raise SystemExit(2)
         for item in document["records"]:
             state = dict(item["state"])
+            try:
+                _validate_schema_version(state)
+            except UnsupportedSchemaVersionError as exc:
+                print(f"ERROR: invalid state snapshot: {exc}", file=sys.stderr)
+                raise SystemExit(2)
             state["_mission_source_path"] = str(item["path"])
             state["_mission_snapshot_record"] = True
             if "command_outcome_observation" in item:
                 state["_command_outcome_observation"] = item["command_outcome_observation"]
             all_states.append(state)
     else:
-        for r in roots:
-            if r.exists():
-                all_states.extend(_collect_states(r))
+        try:
+            for r in roots:
+                if r.exists():
+                    all_states.extend(_collect_states(r))
+        except UnsupportedSchemaVersionError as exc:
+            print(f"ERROR: invalid state snapshot: {exc}", file=sys.stderr)
+            raise SystemExit(2)
     filtered = [s for s in all_states if _matches_period(s, since, until)]
     deduped, duplicate_state_group_count = _dedupe_states(filtered)
     stats = _aggregate(
