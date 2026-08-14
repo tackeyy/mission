@@ -53,8 +53,8 @@ non-blocking UX improvements should accumulate in `[Unreleased]`.
 A distribution release PR should be mostly mechanical:
 
 - move relevant `[Unreleased]` entries into `vX.Y.Z` in both changelogs
-- update `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, and
-  `plugins/mission/.codex-plugin/plugin.json`
+- update `MISSION_CLI_VERSION` together with `.claude-plugin/plugin.json`,
+  `.codex-plugin/plugin.json`, and `plugins/mission/.codex-plugin/plugin.json`
 - update visible install paths in README and Codex setup docs
 - reconcile `git log <previous-tag>..HEAD --oneline` with both changelogs
 - run the marketplace release checklist
