@@ -4,6 +4,9 @@
 
 Accepted
 
+This revision supersedes the original substring-only wording for keyword
+matching while keeping the ADR status as Accepted.
+
 ## Date
 
 2026-07-10
@@ -60,10 +63,47 @@ downgrade path):
 | Signal | Trigger |
 |---|---|
 | `task_profile.risk=high` | `task_profile` risk field is `"high"` |
-| Irreversible keyword (EN) | `deploy`, `release`, `migration`, `drop`, `delete`, `publish`, `production` — case-insensitive substring match in mission text |
-| Irreversible keyword (JA) | `本番`, `リリース`, `マイグレーション`, `データ削除`, `レコード削除`, `物理削除`, `公開`, `決済` — substring match |
-| Security keyword (EN) | `secret`, `credential`, `password`, `api token`, `api-token`, `api_key`, `access token`, `access-token`, `bearer`, `authenticat`, `authoriz`, `oauth` — case-insensitive substring match |
-| Security keyword (JA) | `認証`, `秘密`, `鍵` |
+| Irreversible keyword (EN) | `deploy`, `release`, `migration`, `drop`, `delete`, `publish`, `production` — lexical match with English word boundaries |
+| Irreversible keyword (JA) | `本番`, `リリース`, `マイグレーション`, `データ削除`, `レコード削除`, `物理削除`, `公開`, `決済` — Japanese-specific lexical match; `\b` is not used |
+| Security keyword (EN) | `secret`, `credential`, `password`, `api token`, `api-token`, `api_key`, `access token`, `access-token`, `bearer`, `authenticat`, `authoriz`, `oauth` — lexical match with English word boundaries |
+| Security keyword (JA) | `認証`, `秘密`, `鍵` — Japanese-specific lexical match; `\b` is not used |
+
+### Boundary contract
+
+English keywords are matched on lexical word boundaries. A hit counts only
+when the keyword or approved family form begins and ends on a token boundary.
+Embedded substrings inside larger lexemes, identifiers, or compounds do not
+count. This prevents accidental promotion from words such as
+`reproduction`, `deployment`, `redeployment`, `soft-delete`, and
+`secretariat`.
+
+English family membership is restricted to inflectional, not derivational forms.
+For a lexical stem that is present in the keyword list, the family may include
+regular tense/number/participle variants that preserve the same verb or noun
+reading, such as `deploy` / `deploys` / `deployed` / `deploying` and
+`release` / `releases` / `released` / `releasing`. Derivational nouns and
+compounds such as `deployment`, `redeployment`, or `dropdown` are excluded
+unless they are explicitly listed as separate keywords.
+
+Japanese keywords are not matched with `\b`, because Japanese text does not
+use whitespace-delimited word boundaries in the same way English does. Instead,
+Japanese hits are matched as surface lexical units: whitespace, punctuation,
+particles, and sentence delimiters may separate the keyword from surrounding
+text, but a keyword embedded inside a larger orthographic compound or
+identifier does not count. Bare single-character keywords such as `鍵` are
+allowed only when they stand as the intended lexical item; common compounds and
+idioms such as `鍵盤` and `解決の鍵` remain negative examples in the corpus.
+
+Boundary uncertainty splits into two cases. Contextual uncertainty
+(negation, conditionals, quote-only intent, or other ambiguous references)
+keeps the existing full-preserving contract unchanged: ambiguity does not
+relax escalation, and `task_profile.risk` continues to escalate as before.
+
+Lexical boundary uncertainty is narrower. If the implementation cannot prove
+that a keyword appears as an independent lexical hit, do not count it as a
+signal match. That non-match decision only blocks substring-only false
+positives; it does not weaken contextual escalation or suppress
+`task_profile.risk`.
 
 Every occurrence of an irreversible keyword is evaluated in sentence/contrast
 clauses within paragraph, list-item, blockquote, and heading-delimited logical
@@ -198,8 +238,8 @@ conditions regardless of `review_tier`.
   API spend or wall-clock time has not been quantified in production runs.
   Do not cite this ADR as evidence of cost reduction until production
   measurements are available.
-- **The escalator is conservative.** The escalator errs on the safe side;
-  keyword calibration is an ongoing process as retrospective data accumulates.
+- **The escalator errs on the safe side.** Keyword calibration remains an
+  ongoing process as retrospective data accumulates.
 - **Keyword calibration is iterative.** The initial keyword lists were chosen
   conservatively. Issue #174 applied the first retrospective calibration
   (see below). Further refinement should be driven by accumulated production data.
@@ -280,6 +320,8 @@ Implemented in `skills/mission/bin/mission-state.py` (Issue #168):
   provenance; `derive_review_tier()` preserves the existing tuple API. They are
   covered by `test_issue168_review_tier.py` and
   `test_issue209_review_tier_negation.py`.
+- The FP/FN boundary corpus lives at
+  `skills/mission/tests/fixtures/review_tier_boundary_corpus.json`.
 - `cmd_init` stores `review_tier`, `review_tier_source`, `review_tier_signals`,
   `review_tier_signal_details`, and `reviewer_count` in the initial state.
 - `cmd_set` validates the value, warns on downgrade, and syncs `reviewer_count`
