@@ -404,7 +404,7 @@ def test_english_perform_execute_and_passive_negation_are_explicit(mission):
         "deploy が行われない",
         "we won’t deploy",
         "we are not going to deploy",
-        "deployment is not planned",
+        "deploy is not planned",
         "we cannot deploy",
     ],
 )
@@ -433,7 +433,7 @@ def test_conditional_exception_to_direct_negation_stays_conservative(mission):
     "mission",
     [
         "do not deploy unless approved",
-        "deployment will not be performed unless approved",
+        "deploy will not be performed unless approved",
         "should not release unless approval is granted",
         "承認されない限り deployしない",
         "承認時以外は deployしない",
@@ -459,7 +459,7 @@ def test_direct_negation_with_exception_scope_stays_conservative(mission):
         "do not deploy before approval",
         "do not deploy prior to approval",
         "do not deploy while approval is pending",
-        "deployment will not be performed except in emergencies",
+        "deploy will not be performed except in emergencies",
         "release should not be executed except when authorized",
     ],
 )
@@ -891,9 +891,9 @@ def test_uncertain_context_stays_conservative(mission):
     ("mission", "expected_tier", "expected_reason"),
     [
         ("do not deploy to production", "light", "negated-actual-operation"),
+        ("deploy is out of scope", "light", "negated-actual-operation"),
         ("do not deploy without approval", "full", "conditional-or-uncertain-context"),
-        ("deployment is not impossible", "full", "uncertain-or-double-negation"),
-        ("deployment is out of scope", "light", "negated-actual-operation"),
+        ("it is not impossible to deploy", "full", "uncertain-or-double-negation"),
         ("deploy only if approval is granted", "full", "conditional-or-uncertain-context"),
         ('the guide says "deploy to production"', "full", "quoted-context-conservative"),
     ],

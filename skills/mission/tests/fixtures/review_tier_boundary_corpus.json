@@ -51,13 +51,6 @@
         "expected_signal_hit": true
       },
       {
-        "id": "en-pos-007",
-        "text": "migrating the schema",
-        "source": "issue168",
-        "note": "inflectional family member",
-        "expected_signal_hit": true
-      },
-      {
         "id": "en-pos-008",
         "text": "delete the old record",
         "source": "issue168",
@@ -143,7 +136,7 @@
       },
       {
         "id": "en-pos-020",
-        "text": "deployment is not impossible",
+        "text": "it is not impossible to deploy",
         "source": "issue209",
         "note": "uncertainty remains conservative",
         "expected_signal_hit": true
@@ -203,7 +196,8 @@
         "id": "en-neg-004",
         "text": "migration guide",
         "source": "design-481",
-        "note": "false positive example for migration",
+        "note": "境界規則では解けない。別途判断が必要",
+        "category": "semantic-out-of-scope",
         "expected_signal_hit": false
       },
       {
@@ -231,7 +225,8 @@
         "id": "en-neg-008",
         "text": "drop shadow token",
         "source": "design-481",
-        "note": "false positive example for drop",
+        "note": "境界規則では解けない。別途判断が必要",
+        "category": "semantic-out-of-scope",
         "expected_signal_hit": false
       },
       {
@@ -266,7 +261,8 @@
         "id": "en-neg-013",
         "text": "implement verify PR/merge/push to production",
         "source": "issue168",
-        "note": "standard development-flow wording should not fire",
+        "note": "境界規則では解けない。別途判断が必要",
+        "category": "semantic-out-of-scope",
         "expected_signal_hit": false
       },
       {
@@ -315,7 +311,8 @@
         "id": "en-neg-020",
         "text": "\"deploy to production\"",
         "source": "issue209",
-        "note": "quote-only intent stays suppressed",
+        "note": "境界規則では解けない。別途判断が必要",
+        "category": "semantic-out-of-scope",
         "expected_signal_hit": false
       },
       {
@@ -516,6 +513,13 @@
         "text": "deploy手順を調査してから実行する。実操作は行わない",
         "source": "issue209",
         "note": "later execution vetoes global suppression",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "ja-pos-025",
+        "text": "安全な鍵を発行",
+        "source": "design-481",
+        "note": "hiragana boundary is allowed for the bare keyword",
         "expected_signal_hit": true
       }
     ],

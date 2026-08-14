@@ -52,6 +52,7 @@ import sys
 import tempfile
 import time
 import shutil
+from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -1907,6 +1908,30 @@ _SECURITY_KEYWORDS_EN = (
 # セキュリティ系キーワード (日本語) — そのまま部分一致
 _SECURITY_KEYWORDS_JA = ("認証", "秘密", "鍵")
 
+_REVIEW_ENGLISH_KEYWORD_FAMILY_PATTERNS: dict[str, str] = {
+    "deploy": r"deploy(?:s|ed|ing)?",
+    "release": r"release(?:s|d|ing)?",
+    "migration": r"migration(?:s)?",
+    "drop": r"drop(?:s|ped|ping)?",
+    "delete": r"delete(?:s|d|ing)?",
+    "publish": r"publish(?:es|ed|ing)?",
+    "production": r"production(?:s)?",
+    "secret": r"secret(?:s)?",
+    "credential": r"credential(?:s)?",
+    "password": r"password(?:s)?",
+    "authenticat": r"authenticat(?:e|es|ed|ing|ion|ions)?",
+    "authoriz": r"authoriz(?:e|es|ed|ing|ation|ations)?",
+    "oauth": r"oauth",
+    "api token": r"api token",
+    "api-token": r"api-token",
+    "api_key": r"api_key",
+    "access token": r"access token",
+    "access-token": r"access-token",
+    "bearer": r"bearer",
+}
+_REVIEW_ENGLISH_BOUNDARY_CHAR_CLASS = r"0-9A-Za-z_-"
+_REVIEW_JA_PARTICLES = frozenset({"の", "は", "が", "を", "に", "へ", "で", "も", "と", "や", "か"})
+
 
 _REVIEW_CONTEXT_BOUNDARY_RE = re.compile(
     r"[。.!！?？;；\n]+|(?:だが|けど|けれど|ただし|しかし|一方(?:で)?)[、,]?\s*|"
@@ -2064,9 +2089,42 @@ _REVIEW_QUOTE_RESIDUAL_NOISE_RE = re.compile(
 
 
 def _review_keyword_matches(text: str, keyword: str, *, ignore_case: bool) -> list[re.Match]:
-    """Return every literal keyword occurrence in source order."""
-    flags = re.IGNORECASE if ignore_case else 0
-    return list(re.finditer(re.escape(keyword), text, flags))
+    """Return keyword occurrences that satisfy the boundary contract."""
+    pattern = _review_keyword_pattern(keyword, ignore_case)
+    matches = list(pattern.finditer(text))
+    if not ignore_case and keyword == "鍵":
+        matches = [
+            match
+            for match in matches
+            if _review_japanese_key_match_allowed(text, match.start(), match.end())
+        ]
+    return matches
+
+
+@lru_cache(maxsize=None)
+def _review_keyword_pattern(keyword: str, ignore_case: bool) -> re.Pattern:
+    """Compile a boundary-aware regex for a review keyword."""
+    if ignore_case:
+        escaped = _REVIEW_ENGLISH_KEYWORD_FAMILY_PATTERNS.get(keyword.lower(), re.escape(keyword))
+        return re.compile(
+            rf"(?<![{_REVIEW_ENGLISH_BOUNDARY_CHAR_CLASS}])(?:{escaped})(?![{_REVIEW_ENGLISH_BOUNDARY_CHAR_CLASS}])",
+            re.IGNORECASE,
+        )
+    return re.compile(re.escape(keyword))
+
+
+def _review_japanese_key_match_allowed(text: str, start: int, end: int) -> bool:
+    """Exclude bare single-character ``鍵`` when it is embedded in compounds or idioms."""
+    left = text[max(0, start - 1):start]
+    right = text[end:min(len(text), end + 1)]
+    if left and left[-1].isalnum() and left[-1] not in _REVIEW_JA_PARTICLES:
+        if not re.match(r"[ぁ-ゟ゠-ヿ]", left[-1]):
+            return False
+    if right and right[0].isalnum() and right[0] not in _REVIEW_JA_PARTICLES:
+        return False
+    if re.search(r"[一-龯ぁ-んァ-ヶ]+の$", text[max(0, start - 8):start]):
+        return False
+    return True
 
 
 def _review_segment_index(text: str, boundary_re: re.Pattern) -> tuple[list[int], list[tuple[int, int]]]:
