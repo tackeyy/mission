@@ -1,0 +1,637 @@
+{
+  "schema": "mission-review-tier-corpus/1",
+  "description": "Boundary-focused FP/FN corpus for review_tier calibration. This corpus uses option (b): each case declares expected_signal_hit, and the test is responsible for converting signal hits into tiers using the complexity under evaluation.",
+  "sources": [
+    "docs/adr/003-adaptive-review-gating.md",
+    "skills/mission/tests/test_issue168_review_tier.py",
+    "skills/mission/tests/test_issue209_review_tier_negation.py"
+  ],
+  "english": {
+    "positive": [
+      {
+        "id": "en-pos-001",
+        "text": "deploy to production environment",
+        "source": "issue168",
+        "note": "baseline irreversible keyword hit",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "en-pos-002",
+        "text": "deploys to production",
+        "source": "issue168",
+        "note": "inflectional family member",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "en-pos-003",
+        "text": "deployed the patch to production",
+        "source": "issue168",
+        "note": "inflectional family member",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "en-pos-004",
+        "text": "deploying the patch to production",
+        "source": "issue168",
+        "note": "inflectional family member",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "en-pos-005",
+        "text": "release the build",
+        "source": "issue168",
+        "note": "direct irreversible keyword",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "en-pos-006",
+        "text": "released the build",
+        "source": "issue168",
+        "note": "inflectional family member",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "en-pos-007",
+        "text": "migrating the schema",
+        "source": "issue168",
+        "note": "inflectional family member",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "en-pos-008",
+        "text": "delete the old record",
+        "source": "issue168",
+        "note": "direct irreversible keyword",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "en-pos-009",
+        "text": "publishing the release notes",
+        "source": "issue168",
+        "note": "inflectional family member",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "en-pos-010",
+        "text": "drop the legacy table",
+        "source": "issue168",
+        "note": "direct irreversible keyword",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "en-pos-011",
+        "text": "secret rotation before release",
+        "source": "issue168",
+        "note": "security keyword hit",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "en-pos-012",
+        "text": "api token rotation",
+        "source": "issue209",
+        "note": "compound security keyword hit",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "en-pos-013",
+        "text": "authentication flow",
+        "source": "issue168",
+        "note": "security stem hit",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "en-pos-014",
+        "text": "authorization header validation",
+        "source": "issue168",
+        "note": "security stem hit",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "en-pos-015",
+        "text": "oauth callback implementation",
+        "source": "issue168",
+        "note": "security keyword hit",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "en-pos-016",
+        "text": "it is not the case that we do not deploy",
+        "source": "issue209",
+        "note": "outer negation remains conservative",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "en-pos-017",
+        "text": "we will not not deploy",
+        "source": "issue209",
+        "note": "double negation stays conservative",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "en-pos-018",
+        "text": "do not deploy and then deploy",
+        "source": "issue209",
+        "note": "mixed intent, later affirmative remains included",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "en-pos-019",
+        "text": "we won't deploy unless approval is granted",
+        "source": "issue209",
+        "note": "conditional scope stays conservative",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "en-pos-020",
+        "text": "deployment is not impossible",
+        "source": "issue209",
+        "note": "uncertainty remains conservative",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "en-pos-021",
+        "text": "do not deploy without approval",
+        "source": "issue209",
+        "note": "conditional exception keeps the candidate conservative",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "en-pos-022",
+        "text": "the guide says \"deploy to production\"",
+        "source": "issue209",
+        "note": "quoted context remains conservative without quote-only intent",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "en-pos-023",
+        "text": "Review the deploy procedure, then execute it. Actual operations will not be performed.",
+        "source": "issue209",
+        "note": "ambiguous execution reference vetoes global suppression",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "en-pos-024",
+        "text": "Review the deploy procedure. Follow it. Actual operations will not be performed.",
+        "source": "issue209",
+        "note": "pronoun action vetoes global suppression",
+        "expected_signal_hit": true
+      }
+    ],
+    "negative": [
+      {
+        "id": "en-neg-001",
+        "text": "reproduction report",
+        "source": "design-481",
+        "note": "false positive example for production",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "en-neg-002",
+        "text": "deployment diagram",
+        "source": "design-481",
+        "note": "false positive example for deploy",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "en-neg-003",
+        "text": "redeployment plan",
+        "source": "design-481",
+        "note": "false positive example for deploy",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "en-neg-004",
+        "text": "migration guide",
+        "source": "design-481",
+        "note": "false positive example for migration",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "en-neg-005",
+        "text": "deleteHandler refactor",
+        "source": "design-481",
+        "note": "false positive example for delete",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "en-neg-006",
+        "text": "soft-delete helper",
+        "source": "design-481",
+        "note": "false positive example for delete",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "en-neg-007",
+        "text": "dropdown component",
+        "source": "design-481",
+        "note": "false positive example for drop",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "en-neg-008",
+        "text": "drop shadow token",
+        "source": "design-481",
+        "note": "false positive example for drop",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "en-neg-009",
+        "text": "secretariat update",
+        "source": "design-481",
+        "note": "false positive example for secret",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "en-neg-010",
+        "text": "awaiting external authority",
+        "source": "issue168",
+        "note": "authority should not match the auth stem",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "en-neg-011",
+        "text": "acme-token-app LP",
+        "source": "issue168",
+        "note": "product name should not fire token",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "en-neg-012",
+        "text": "AcmeTokenApp UI",
+        "source": "issue168",
+        "note": "PascalCase product name should not fire token",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "en-neg-013",
+        "text": "implement verify PR/merge/push to production",
+        "source": "issue168",
+        "note": "standard development-flow wording should not fire",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "en-neg-014",
+        "text": "we will not deploy",
+        "source": "issue209",
+        "note": "direct negation stays suppressed",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "en-neg-015",
+        "text": "we cannot deploy",
+        "source": "issue209",
+        "note": "direct negation stays suppressed",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "en-neg-016",
+        "text": "never deploy",
+        "source": "issue209",
+        "note": "direct negation stays suppressed",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "en-neg-017",
+        "text": "it is the case that we do not deploy",
+        "source": "issue209",
+        "note": "positive reporting of a simple negation remains suppressed",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "en-neg-018",
+        "text": "we will not perform a production migration",
+        "source": "issue209",
+        "note": "explicit negated operation stays suppressed",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "en-neg-019",
+        "text": "deployment is out of scope",
+        "source": "issue209",
+        "note": "explicit non-operation wording stays suppressed",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "en-neg-020",
+        "text": "\"deploy to production\"",
+        "source": "issue209",
+        "note": "quote-only intent stays suppressed",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "en-neg-021",
+        "text": "we will not deploy to the target production environment",
+        "source": "issue209",
+        "note": "explicit direct negation stays suppressed",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "en-neg-022",
+        "text": "public API usage",
+        "source": "issue168",
+        "note": "compound technical noun suppression",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "en-neg-023",
+        "text": "actual operations will not be performed. review the deploy procedure.",
+        "source": "issue209",
+        "note": "global non-operation marker suppresses prior meta candidate",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "en-neg-024",
+        "text": "review the deploy procedure. actual operations will not be performed.",
+        "source": "issue209",
+        "note": "global non-operation marker suppresses prior meta candidate on either side",
+        "expected_signal_hit": false
+      }
+    ]
+  },
+  "japanese": {
+    "positive": [
+      {
+        "id": "ja-pos-001",
+        "text": "本番へ公開する",
+        "source": "issue168",
+        "note": "irreversible keyword hit",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "ja-pos-002",
+        "text": "本番リリースを行う",
+        "source": "issue168",
+        "note": "irreversible keyword hit",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "ja-pos-003",
+        "text": "マイグレーションを実施する",
+        "source": "issue168",
+        "note": "irreversible keyword hit",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "ja-pos-004",
+        "text": "データ削除を行う",
+        "source": "issue168",
+        "note": "compound keyword hit",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "ja-pos-005",
+        "text": "レコード削除を実施する",
+        "source": "issue168",
+        "note": "compound keyword hit",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "ja-pos-006",
+        "text": "物理削除する",
+        "source": "issue168",
+        "note": "compound keyword hit",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "ja-pos-007",
+        "text": "鍵の管理",
+        "source": "issue168",
+        "note": "security keyword hit",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "ja-pos-008",
+        "text": "認証フローを修正する",
+        "source": "issue168",
+        "note": "security keyword hit",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "ja-pos-009",
+        "text": "秘密情報を更新する",
+        "source": "issue168",
+        "note": "security keyword hit",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "ja-pos-010",
+        "text": "本番へ deploy する",
+        "source": "issue209",
+        "note": "mixed-language affirmative operation",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "ja-pos-011",
+        "text": "必要なら本番へ deploy する",
+        "source": "issue209",
+        "note": "conditional actual operation stays conservative",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "ja-pos-012",
+        "text": "手順書には「本番へ deploy する」と書かれている",
+        "source": "issue209",
+        "note": "quoted context without explicit non-execution stays conservative",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "ja-pos-013",
+        "text": "手順書の「本番へ deploy する」を実際に実行する",
+        "source": "issue209",
+        "note": "explicit execution over quoted example",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "ja-pos-014",
+        "text": "データ削除は行わない。代わりに本番へ deploy する",
+        "source": "issue209",
+        "note": "distant negation does not suppress a separate operation",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "ja-pos-015",
+        "text": "deploy しないが、deploy する",
+        "source": "issue209",
+        "note": "mixed intent keeps the affirmative occurrence",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "ja-pos-016",
+        "text": "deploy しないけど deploy する",
+        "source": "issue209",
+        "note": "mixed intent keeps the affirmative occurrence",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "ja-pos-017",
+        "text": "deploy する一方、データ削除はしない",
+        "source": "issue209",
+        "note": "one included candidate and one suppressed candidate",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "ja-pos-018",
+        "text": "deploy しない予定ではない",
+        "source": "issue209",
+        "note": "double negation stays conservative",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "ja-pos-019",
+        "text": "deployしないこともない",
+        "source": "issue209",
+        "note": "additional negation reversal stays conservative",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "ja-pos-020",
+        "text": "原則 deployしない",
+        "source": "issue209",
+        "note": "exception cue keeps the candidate conservative",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "ja-pos-021",
+        "text": "緊急時を除き deployしない",
+        "source": "issue209",
+        "note": "exception cue keeps the candidate conservative",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "ja-pos-022",
+        "text": "実操作は行わない。ただし release する",
+        "source": "issue209",
+        "note": "global suppression does not leak across the exception boundary",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "ja-pos-023",
+        "text": "実操作は行わない。だが release する",
+        "source": "issue209",
+        "note": "later contradictory operation remains included",
+        "expected_signal_hit": true
+      },
+      {
+        "id": "ja-pos-024",
+        "text": "deploy手順を調査してから実行する。実操作は行わない",
+        "source": "issue209",
+        "note": "later execution vetoes global suppression",
+        "expected_signal_hit": true
+      }
+    ],
+    "negative": [
+      {
+        "id": "ja-neg-001",
+        "text": "公開API使用",
+        "source": "issue168",
+        "note": "compound technical noun suppression",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "ja-neg-002",
+        "text": "本番への deploy は実行しない",
+        "source": "issue209",
+        "note": "direct negation stays suppressed",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "ja-neg-003",
+        "text": "deploy せず調査だけ行う",
+        "source": "issue209",
+        "note": "explicit non-operation variant stays suppressed",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "ja-neg-004",
+        "text": "deploy しません",
+        "source": "issue209",
+        "note": "explicit non-operation variant stays suppressed",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "ja-neg-005",
+        "text": "deploy を禁止する",
+        "source": "issue209",
+        "note": "explicit non-operation variant stays suppressed",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "ja-neg-006",
+        "text": "deploy は対象外とする",
+        "source": "issue209",
+        "note": "explicit non-operation variant stays suppressed",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "ja-neg-007",
+        "text": "例外なく deployしない",
+        "source": "issue209",
+        "note": "this is a negative corpus example only when read as a pure negation control",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "ja-neg-008",
+        "text": "緊急時にもdeployしない",
+        "source": "issue209",
+        "note": "explicit non-operation variant stays suppressed",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "ja-neg-009",
+        "text": "原則ではなく絶対にdeployしない",
+        "source": "issue209",
+        "note": "explicit non-operation variant stays suppressed",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "ja-neg-010",
+        "text": "deployしないので問題ない",
+        "source": "issue209",
+        "note": "causal assurance after simple negation stays suppressed",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "ja-neg-011",
+        "text": "deployしないし、releaseもしない",
+        "source": "issue209",
+        "note": "multiple direct negations stay suppressed",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "ja-neg-012",
+        "text": "deploy 手順を調査する。実操作は行わない",
+        "source": "issue209",
+        "note": "global non-operation suppresses the meta candidate",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "ja-neg-013",
+        "text": "鍵盤の修理",
+        "source": "design-481",
+        "note": "false positive example for 鍵",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "ja-neg-014",
+        "text": "解決の鍵",
+        "source": "design-481",
+        "note": "false positive example for 鍵",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "ja-neg-015",
+        "text": "NavBar削除をTDDで実装する",
+        "source": "issue168",
+        "note": "reversible code-level removal should not fire",
+        "expected_signal_hit": false
+      },
+      {
+        "id": "ja-neg-016",
+        "text": "本番へ deploy する予定はない",
+        "source": "issue209",
+        "note": "direct negation variant stays suppressed",
+        "expected_signal_hit": false
+      }
+    ]
+  }
+}
