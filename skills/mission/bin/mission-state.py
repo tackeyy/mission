@@ -12183,6 +12183,7 @@ def cmd_plan_import(args):
         _provider_gate("plan-input-unreadable")
     with StateLock(lock_file(cwd)), _PublishedFilesTransaction() as published_files:
         data = json.loads(sf.read_text(encoding="utf-8"))
+        lease_decision = _enforce_session_lease_for_write(sf, data)
         invocation = invocation_by_id(data, args.invocation_id)
         if data.get("planning_policy_version") == 1 and data.get("planning_strategy") == "provider-primary":
             _require_current_primary_planning_binding(data)
@@ -12255,7 +12256,7 @@ def cmd_plan_import(args):
         data.setdefault("provider_plan_imports", {})[args.invocation_id] = reference
         data["updated_at"] = iso_now()
         _verify_published_file(raw_file); _verify_published_file(candidate_file)
-        backup_state(sf); atomic_write_json(sf, stamp_metadata(data, cwd))
+        backup_state(sf); atomic_write_json(sf, stamp_metadata(data, cwd), lease_decision=lease_decision)
     print(json.dumps({"ok": True, "plan_import": reference}, indent=2 if args.json else None, ensure_ascii=False))
 
 
@@ -12309,6 +12310,7 @@ def cmd_planning_adopt_core(args):
 
     with StateLock(lock_file(cwd)), _PublishedFilesTransaction() as published_files:
         data = json.loads(sf.read_text(encoding="utf-8"))
+        lease_decision = _enforce_session_lease_for_write(sf, data)
         if data.get("planning_policy_version") != 1 or data.get("phase") != "planning":
             _provider_gate("planning-policy-not-active")
         if data.get("planning_strategy") not in {None, "core"}:
@@ -12392,7 +12394,7 @@ def cmd_planning_adopt_core(args):
         data["updated_at"] = iso_now()
         _verify_published_file(candidate_file)
         backup_state(sf)
-        atomic_write_json(sf, stamp_metadata(data, cwd))
+        atomic_write_json(sf, stamp_metadata(data, cwd), lease_decision=lease_decision)
     print(json.dumps({"ok": True, "canonical_plan": plan}, indent=2 if args.json else None, ensure_ascii=False))
 
 
