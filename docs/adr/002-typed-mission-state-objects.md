@@ -2,7 +2,14 @@
 
 ## Status
 
-Proposed
+Accepted
+
+Implementation status (2026-08-14): Stage 1 (`push-score --scoring-json`),
+Stage 2 (pass gate on machine-derived open High findings plus findings
+evidence), and Stage 3 (`next`) are implemented and covered by
+`test_adr002_scoring_json.py` / `test_adr002_next_command.py`. The `Finding`
+status vocabulary beyond `open` / `resolved` — `accepted-risk` and
+`not-reproducible` — is **not** implemented; do not assume those states exist.
 
 ## Date
 

@@ -161,7 +161,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py progress get -
 - `pid` (agent CLI プロセス PID, A-2: orphan 自動回収)
 - `hostname`, `session_id` (uuid), `created_at_session` (B-3: owner 識別)
 - `mission_id` (mission の SHA256[:16], C-1: 別ミッション検出)
-- `schema_version` (現在 3)
+- `schema_version` (現在 4; v4 では structured scoring provenance (`score_provenance`) が必須。v1/v2/v3 は read-time 互換導出で、物理 rewrite しない)
 - `terminal_outcome` (terminal writer のみ。active state では未設定。`reactivate` / `refresh-pid` で再開時に削除)
 - `cli_version` (実行中の mission-state.py のバージョン, #186: plugin cache 陳腐化の検出用)
 
@@ -171,7 +171,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py progress get -
 
 ### Terminal outcome と role-aware rate (#380)
 
-schema v3 は control state (`passes` / `loop_active` / `halt_reason` / `halt_category`) と business outcome を分離し、terminal writer が `terminal_outcome` を明示記録する。値は `completed_pass` / `completed_evidence` / `blocked_external` / `awaiting_approval` / `stale_superseded` / `failed` / `incomplete` / `user_aborted` / `routed_elsewhere` のいずれか。`evidence-submitted` は checker/planning/analyze だけ `completed_evidence`、implementer/release では `incomplete`。`partial-done` は `incomplete`、`routed-goal` は非比較の `routed_elsewhere`。active state には outcome を付けない。
+schema v4 は control state (`passes` / `loop_active` / `halt_reason` / `halt_category`) と business outcome を分離し、terminal writer が `terminal_outcome` を明示記録する。値は `completed_pass` / `completed_evidence` / `blocked_external` / `awaiting_approval` / `stale_superseded` / `failed` / `incomplete` / `user_aborted` / `routed_elsewhere` のいずれか。`evidence-submitted` は checker/planning/analyze だけ `completed_evidence`、implementer/release では `incomplete`。`partial-done` は `incomplete`、`routed-goal` は非比較の `routed_elsewhere`。active state には outcome を付けない。
 
 `mark-passes`、`closeout`、`mark-halt`、hard route、permission preflight、`halt --all`、`cleanup-stale` は同じ導出関数で outcome を記録する。`reactivate` と stale recovery の `refresh-pid` は outcome を消して active に戻す。`session_role` は `init --role` でのみ決まり、汎用 `set` から role や outcome を変更できない。明示 outcome と control state が矛盾する record、および明示された非文字列の `halt_category` は読み取り時に `failed` として fail-closed する。
 
