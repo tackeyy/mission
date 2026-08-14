@@ -240,7 +240,7 @@ installed cache path and keep `CLAUDE_PLUGIN_ROOT` as a compatibility alias for
 the current model-visible command text:
 
 ```bash
-export MISSION_PLUGIN_ROOT="${CODEX_HOME:-$HOME/.codex}/plugins/cache/mission-marketplace/mission/2.5.0"
+export MISSION_PLUGIN_ROOT="${CODEX_HOME:-$HOME/.codex}/plugins/cache/mission-marketplace/mission/2.6.0"
 export CLAUDE_PLUGIN_ROOT="$MISSION_PLUGIN_ROOT"
 ```
 
@@ -314,7 +314,7 @@ pinned `.github/requirements-ci.txt`; CI invokes the same target. Both
 docs-only diffs can take the CI fast path selected by
 `scripts/ci_changed_scopes.js`.
 
-Historical local verification snapshot: `2026-08-14: 3185 passed`.
+Historical local verification snapshot: `2026-08-14: 3244 passed`.
 
 Additional project-specific testing guidance is in
 [`docs/TESTING.md`](docs/TESTING.md).
@@ -322,17 +322,17 @@ Additional project-specific testing guidance is in
 ## Verified Behavior
 
 E2E verification was re-run on 2026-08-14 with Claude Code 2.1.222 against
-mission 2.5.0, installing the plugin from the local marketplace into an isolated
+mission 2.6.0, installing the plugin from the local marketplace into an isolated
 `CLAUDE_CONFIG_DIR`.
 
 Verified:
 
 - `claude plugin validate` accepts the marketplace manifest
-- `claude plugin install mission@mission-marketplace` installs 2.5.0 and reports it as enabled
+- `claude plugin install mission@mission-marketplace` installs 2.6.0 and reports it as enabled
 - `claude plugin details mission` lists six skills and one Stop hook at roughly 149 always-on tokens
-- The installed cache resolves to `<config>/plugins/cache/mission-marketplace/mission/2.5.0`, matching the documented `MISSION_PLUGIN_ROOT` example
+- The installed cache resolves to `<config>/plugins/cache/mission-marketplace/mission/2.6.0`, matching the documented `MISSION_PLUGIN_ROOT` example
 - `mission-state.py` from the installed cache creates `.mission-state/sessions/*.json` and passes its permission preflight
-- The Python test suite passes (`make test`: 3185 passed, `make test-e2e`: 3 passed)
+- The Python test suite passes (`make test`: 3244 passed, `make test-e2e`: 3 passed)
 
 Unqualified subskill name resolution during execution was verified in the
 earlier 2026-06-14 run with Claude Code 2.1.177 and was not re-checked in this

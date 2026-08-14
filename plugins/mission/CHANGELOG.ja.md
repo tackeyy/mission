@@ -9,6 +9,18 @@
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-08-14
+
+- test: schema v1-v4 の golden snapshot を既知 version まで揃え、未知 schema version は validation で fail-closed にしました (#483)。
+
+- docs: state-management と ADR-002 を、初期ドラフトではなく実装に沿った記述へ更新しました (#484)。
+
+- docs: ADR-005 に Typed Kernel / UnitOfWork への移行経路と移行計画を記述しました (#485)。
+
+- fix: `plan-import` と `adopt-core` が lease validation 完了前に evidence を公開しないようにし、早出しの窓を塞ぎました (#498)。
+
+- chore: distribution mirror と Python compatibility gate を package tree 再帰探索にし、Wave 3 / D1 の期待に合わせました (#499)。
+
 ## [2.5.0] - 2026-08-14
 
 - feat: policy v1 の core planning が canonical `mission-plan/1` を検証・登録し、既存の execution gate を通過して `next` と失敗ガイダンスを受け取れるようにしました (#465)。
@@ -449,6 +461,7 @@
 - 状態ルーティング・スコアゲート・hook 挙動をカバーする Python テストスイート。
 - GitHub Actions CI（`push` / `pull_request` / `workflow_dispatch`）。pytest と ShellCheck を実行。
 
+[2.6.0]: https://github.com/tackeyy/mission/releases/tag/v2.6.0
 [2.5.0]: https://github.com/tackeyy/mission/releases/tag/v2.5.0
 [2.4.0]: https://github.com/tackeyy/mission/releases/tag/v2.4.0
 [2.3.0]: https://github.com/tackeyy/mission/releases/tag/v2.3.0
