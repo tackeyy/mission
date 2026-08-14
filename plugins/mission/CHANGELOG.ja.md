@@ -9,11 +9,31 @@
 
 ## [Unreleased]
 
-- `planning adopt-core` が、`iteration` がまだ 0 の初期化直後のセッションでも最初の計画を採用できるよう修正しました。従来の検証は実際の `init` state をすべて拒否しており、core planning が実行フェーズへ到達できない状態でした (#471)。
+## [2.5.0] - 2026-08-14
 
-- core plan 採用時の inline / planner 両経路のガイダンスで、実行前の `planning adopt-core` を必須手順として案内するよう修正しました。不正な iteration と planning 以外の phase は state を変更せず拒否し、妥当な pretty-printed JSON は compact JSON と同一の canonical plan へ正規化します (#469)。
+- feat: policy v1 の core planning が canonical `mission-plan/1` を検証・登録し、既存の execution gate を通過して `next` と失敗ガイダンスを受け取れるようにしました (#465)。
 
-- policy v1 の core planning が canonical `mission-plan/1` を検証・登録し、既存の execution gate を維持したまま先へ進める `planning adopt-core` と、対応する `next` / 失敗ガイダンスを追加しました (#465)。
+- fix: `planning adopt-core` のガイダンスで、inline / planner の両経路とも実行前に `planning adopt-core` を要求するようにし、不正な iteration や planning 以外の phase は state を変更せず拒否するようにしました (#469)。
+
+- fix: `iteration=0` の初期化直後セッションでも `planning adopt-core` が受理されるようにし、実際の `init` state をすべて拒否していた回帰を修正しました (#471)。
+
+- fix: publish transaction の失敗時に比較値と不一致だった項目を出力するようにし、拒否された publish の診断を明確にしました (#468)。
+
+- test: FIFO artifact テストで timeout 失敗を独立した観測結果として分類できるようにし、timeout exit と他の失敗を切り分けられるようにしました (#480)。
+
+- docs: ADR-003 で review tier の境界契約と、その境界を較正する FP/FN コーパスを定義しました (#481)。
+
+- fix: artifact 系コマンドが lease 検証前にファイルを公開しないようにし、`init` / `render` / `export` / `publish` で artifact が早出しされる窓を塞ぎました (#475)。
+
+- fix: review tier のキーワード判定に lexical boundary を導入し、部分一致で tier が誤昇格しないようにしました (#482)。
+
+- fix: `MISSION_CLI_VERSION` と配布 version を単一の管理元にまとめ、CLI 定数と公開パッケージ version の不一致を解消しました (#479)。
+
+- fix: evidence completion の成功 terminal を `next_action` に記録するようにし、evidence 作業完了時に `report-terminal` が出るようにしました (#477)。
+
+- fix: specialist evidence を invocation ID + content digest で一意参照するようにし、各 invocation に content-addressed な識別子を持たせました (#478)。
+
+- fix: Stop hook の freshness 判定を 1 つの Python 実装へ集約し、経路ごとの差をなくしました (#476)。
 
 ## [2.4.0] - 2026-08-14
 
@@ -429,6 +449,7 @@
 - 状態ルーティング・スコアゲート・hook 挙動をカバーする Python テストスイート。
 - GitHub Actions CI（`push` / `pull_request` / `workflow_dispatch`）。pytest と ShellCheck を実行。
 
+[2.5.0]: https://github.com/tackeyy/mission/releases/tag/v2.5.0
 [2.4.0]: https://github.com/tackeyy/mission/releases/tag/v2.4.0
 [2.3.0]: https://github.com/tackeyy/mission/releases/tag/v2.3.0
 [2.0.0]: https://github.com/tackeyy/mission/releases/tag/v2.0.0
