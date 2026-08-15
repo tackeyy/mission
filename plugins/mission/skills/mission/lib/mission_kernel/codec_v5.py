@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Mapping
 
 from mission_common import derive_terminal_outcome
@@ -66,6 +67,7 @@ from .model import (
     SchemaOrigin,
     ScoreSource,
     SessionRole,
+    SnapshotProvenance,
     TerminalOutcome,
 )
 from .versions import read_schema_version
@@ -80,6 +82,7 @@ _TOP_LEVEL = {
     "findings",
     "scores",
     "lease",
+    "guidance",
     "extensions",
 }
 _CONTROL = {
@@ -538,6 +541,16 @@ def _decode_v5_object(document: Mapping[str, Any]) -> MissionState:
     if read_schema_version(document, max_reader_version=5) is not SchemaOrigin.V5:
         raise _fail("unsupported-schema-version", "$.schema_version", "expected schema_version 5")
     identity = _decode_identity(document)
+    from .guidance import decode_v5_guidance
+
+    decode_v5_guidance(
+        document["guidance"],
+        SnapshotProvenance(
+            schema_origin=SchemaOrigin.V5,
+            session_id=identity.session_id,
+            document_digest="sha256:" + "0" * 64,
+        ),
+    )
     control = _decode_control(document)
     plan = _decode_plan(document)
     handoff = _decode_handoff(document, plan)
@@ -558,7 +571,6 @@ def _decode_v5_object(document: Mapping[str, Any]) -> MissionState:
         schema_origin=SchemaOrigin.V5,
         identity=identity,
         control=control,
-        terminal_outcome=control.terminal_outcome,
         plan=plan,
         handoff=handoff,
         reviews=reviews,
@@ -701,7 +713,9 @@ def _lease_json(lease: FencedLease) -> dict[str, Any]:
     }
 
 
-def _state_payload(state: MissionState) -> dict[str, Any]:
+def _state_payload(state: MissionState, guidance: Any) -> dict[str, Any]:
+    from .guidance import guidance_payload
+
     if isinstance(state.plan, AbsentPlan):
         plan = {"kind": "absent"}
     else:
@@ -737,19 +751,20 @@ def _state_payload(state: MissionState) -> dict[str, Any]:
         "findings": [_finding_json(finding) for finding in state.findings.findings],
         "scores": [_score_json(score) for score in state.scores],
         "lease": _lease_json(state.lease),
+        "guidance": guidance_payload(guidance),
         "extensions": state.extensions.thaw(),
     }
 
 
-def encode_v5_state(state: MissionState) -> bytes:
+def encode_v5_state(state: MissionState, guidance: Any) -> bytes:
     if not isinstance(state, MissionState):
         raise _fail("invalid-type", "$", "encode_v5_state expects MissionState")
     if state.schema_origin is not SchemaOrigin.V5:
         raise _fail("unsupported-schema-version", "$.schema_version", "encode_v5_state requires v5 state")
     if state.legacy_passthrough is not None:
         raise _fail("invalid-value", "$", "v5 state cannot carry legacy passthrough")
-    payload = _state_payload(state)
+    payload = _state_payload(state, guidance)
     validated = _decode_v5_object(payload)
-    if validated != state:
+    if validated != replace(state, snapshot_provenance=None):
         raise _fail("invariant-violation", "$", "model does not equal its closed v5 projection")
     return encode_json_object(_freeze_object(payload))

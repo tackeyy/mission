@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
+import re
 from typing import Optional, Union
 
 
@@ -99,6 +100,35 @@ class HaltCategory(str, Enum):
     USER_ABORT = "user-abort"
     STALE = "stale"
     OTHER = "other"
+
+
+@dataclass(frozen=True)
+class SnapshotProvenance:
+    schema_origin: SchemaOrigin
+    session_id: Optional[str]
+    document_digest: str
+    generation: Optional[int] = None
+    commit_digest: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        digest = re.compile(r"sha256:[0-9a-f]{64}\Z")
+        lineage_is_paired = (self.generation is None) == (self.commit_digest is None)
+        generation_is_valid = (
+            self.generation is None
+            or (type(self.generation) is int and self.generation >= 0)
+        )
+        commit_is_valid = (
+            self.commit_digest is None
+            or digest.fullmatch(self.commit_digest) is not None
+        )
+        if (
+            not isinstance(self.schema_origin, SchemaOrigin)
+            or digest.fullmatch(self.document_digest) is None
+            or not lineage_is_paired
+            or not generation_is_valid
+            or not commit_is_valid
+        ):
+            raise ValueError("invalid-snapshot-provenance")
 
 
 @dataclass(frozen=True)
@@ -442,7 +472,6 @@ class MissionState:
     schema_origin: SchemaOrigin
     identity: MissionIdentity
     control: MissionControl
-    terminal_outcome: Optional[TerminalOutcome]
     plan: Plan
     handoff: Handoff
     reviews: tuple[ReviewRef, ...]
@@ -451,6 +480,14 @@ class MissionState:
     lease: Lease
     extensions: FrozenJsonObject
     legacy_passthrough: Optional[FrozenJsonObject]
+    snapshot_provenance: Optional[SnapshotProvenance] = None
+    _snapshot_binding: Optional[object] = field(
+        default=None, init=False, repr=False, compare=False
+    )
+
+    @property
+    def terminal_outcome(self) -> Optional[TerminalOutcome]:
+        return self.control.terminal_outcome
 
 
 def thaw_json_value(value: FrozenJsonValue) -> object:

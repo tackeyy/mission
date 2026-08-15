@@ -675,7 +675,6 @@ def _decode_v4_object(document: Mapping[str, Any], frozen: FrozenJsonObject) -> 
         schema_origin=schema_origin,
         identity=_decode_identity(document),
         control=control,
-        terminal_outcome=control.terminal_outcome,
         plan=plan,
         handoff=handoff,
         reviews=reviews,
