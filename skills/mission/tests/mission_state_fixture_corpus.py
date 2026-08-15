@@ -133,14 +133,19 @@ def _read_cli_state(root: Path) -> dict:
     return json.loads((root / ".mission-state" / "sessions" / "test.json").read_text(encoding="utf-8"))
 
 
-def _init_cli_state(root: Path, *, role: str = "implementer") -> dict:
+def _init_cli_state(
+    root: Path,
+    *,
+    role: str = "implementer",
+    complexity: str = "Standard",
+) -> dict:
     root.mkdir(parents=True, exist_ok=True)
     _checked_cli(
         root,
         "init",
         "Issue 500 CLI corpus",
         "--complexity",
-        "Standard",
+        complexity,
         "--role",
         role,
         "--artifact-applicability",
@@ -272,6 +277,13 @@ def generate_cli_state_corpus(root: Path) -> dict[str, object]:
     )
     _checked_cli(
         provider_root,
+        "set",
+        "phase=planning",
+        env_extra=provider_env,
+    )
+    corpus["provider_result_ready"] = copy.deepcopy(_read_cli_state(provider_root))
+    _checked_cli(
+        provider_root,
         "specialists",
         "plan-import",
         "--input",
@@ -282,6 +294,7 @@ def generate_cli_state_corpus(root: Path) -> dict[str, object]:
         str(registry),
         env_extra=provider_env,
     )
+    corpus["provider_plan_imported"] = copy.deepcopy(_read_cli_state(provider_root))
     _checked_cli(
         provider_root,
         "planning",
@@ -390,6 +403,18 @@ def generate_cli_state_corpus(root: Path) -> dict[str, object]:
         str(manual_scoring),
     )
     corpus["manual_import_bound_score"] = copy.deepcopy(_read_cli_state(manual_root))
+    _checked_cli(
+        manual_root,
+        "set",
+        'specialists_selected=[{"skill":"fixture-specialist","role":"quality"}]',
+        'specialist_invocations=[{"invocation_id":"inv_00000000000000000000000000000001",'
+        '"iteration":1,"phase":"scoring","role":"quality",'
+        '"skill":"fixture-specialist","mode":"skill-tool",'
+        '"status":"rejected","lifecycle_state":"terminal"}]',
+    )
+    corpus["specialist_rejected_scoring"] = copy.deepcopy(
+        _read_cli_state(manual_root)
+    )
 
     lease_root = root / "lease"
     corpus["lease_acquired"] = copy.deepcopy(_init_cli_state(lease_root))
@@ -405,6 +430,86 @@ def generate_cli_state_corpus(root: Path) -> dict[str, object]:
             f"CLI lease takeover fixture failed\nstdout={takeover.stdout}\nstderr={takeover.stderr}"
         )
     corpus["lease_taken_over"] = copy.deepcopy(_read_cli_state(lease_root))
+
+    guidance_cases: dict[str, dict] = {}
+    awaiting_root = root / "guidance-awaiting-user"
+    _init_cli_state(awaiting_root)
+    _checked_cli(awaiting_root, "set", "awaiting_user=true")
+    guidance_cases["awaiting_user"] = copy.deepcopy(_read_cli_state(awaiting_root))
+
+    inactive_root = root / "guidance-inactive"
+    _init_cli_state(inactive_root)
+    _checked_cli(inactive_root, "set", "loop_active=false")
+    guidance_cases["inactive"] = copy.deepcopy(_read_cli_state(inactive_root))
+
+    stagnation_root = root / "guidance-stagnation"
+    _init_cli_state(stagnation_root)
+    _checked_cli(stagnation_root, "set", "stagnation_count=3")
+    guidance_cases["stagnation"] = copy.deepcopy(_read_cli_state(stagnation_root))
+
+    critic_scope_root = root / "guidance-critic-scope"
+    _init_cli_state(critic_scope_root)
+    _checked_cli(critic_scope_root, "set", "iteration=2", "phase=reviewing")
+    guidance_cases["critic_scope"] = copy.deepcopy(_read_cli_state(critic_scope_root))
+
+    provider_fallback_root = root / "guidance-provider-primary-binding-missing"
+    _init_cli_state(provider_fallback_root)
+    _checked_cli(
+        provider_fallback_root,
+        "set",
+        "planning_strategy=provider-primary",
+        "planning_provider_binding=null",
+    )
+    guidance_cases["provider_primary_binding_missing"] = copy.deepcopy(
+        _read_cli_state(provider_fallback_root)
+    )
+
+    iteration_zero_root = root / "guidance-iteration-zero-scoring"
+    _init_cli_state(iteration_zero_root)
+    _checked_cli(
+        iteration_zero_root,
+        "set",
+        "iteration=0",
+        "phase=scoring",
+    )
+    iteration_zero_state = copy.deepcopy(_read_cli_state(iteration_zero_root))
+    # Current writers reject iteration-zero score creation, while the K1 legacy
+    # decoder deliberately accepts it. Keep the CLI-emitted state as the base
+    # and add only the accepted wire-boundary value needed for this parity class.
+    iteration_zero_state["score_history"] = [
+        {"iteration": 0, "composite": 4.5}
+    ]
+    guidance_cases["iteration_zero_scoring"] = iteration_zero_state
+
+    simple_route_root = root / "guidance-simple-goal-route"
+    _init_cli_state(simple_route_root)
+    _checked_cli(
+        simple_route_root,
+        "set",
+        "complexity=Simple",
+        "force_mission=true",
+    )
+    _checked_cli(simple_route_root, "set", "force_mission=false")
+    guidance_cases["simple_goal_route"] = copy.deepcopy(
+        _read_cli_state(simple_route_root)
+    )
+
+    host_route_root = root / "guidance-simple-host-route"
+    _init_cli_state(host_route_root)
+    _checked_cli(
+        host_route_root,
+        "set",
+        "complexity=Simple",
+        "force_mission=true",
+        "goal_dispatch_requested=host-native",
+        "goal_dispatch_source=mission-instruction",
+    )
+    _checked_cli(host_route_root, "set", "force_mission=false")
+    guidance_cases["simple_host_observation"] = copy.deepcopy(
+        _read_cli_state(host_route_root)
+    )
+
+    corpus["guidance_branches"] = guidance_cases
 
     phases: dict[str, dict] = {}
     phase_root = root / "phases"
@@ -554,6 +659,33 @@ def current_v5_open_state() -> dict:
             "fencing_epoch": 2,
             "lease_expires_at": "2026-08-14T00:15:00Z",
             "lease_history": (),
+        },
+        "guidance": {
+            "schema": "mission-guidance/1",
+            "routing": {
+                "awaiting_user": False,
+                "complexity": "Standard",
+                "force_mission": False,
+                "issue_ref": None,
+            },
+            "planning": {
+                "policy_version": 1,
+                "provider_required": False,
+                "strategy": "core",
+            },
+            "review": {
+                "critic_has_new_scope": None,
+                "tier": "standard",
+                "tier_source": "auto",
+                "tier_signals": (),
+            },
+            "advisories": {"pregate": None},
+            "providers": {
+                "primary_binding": None,
+                "selections": (),
+                "invocations": (),
+                "imported_invocation_ids": (),
+            },
         },
         "extensions": {"x": {"kind": "fixture"}},
     }
