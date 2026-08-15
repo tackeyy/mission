@@ -23,6 +23,12 @@ def _decode(payload: dict):
     return decode_mission_state(canonical_json_bytes(payload))
 
 
+def _decode_snapshot_payload(payload: dict):
+    from mission_kernel import decode_snapshot
+
+    return decode_snapshot(canonical_json_bytes(payload))
+
+
 def _assert_rejected(payload: dict, code: str, path: str):
     from mission_kernel.errors import MissionStateDecodeError
 
@@ -319,17 +325,18 @@ def test_v5_resolved_finding_rejects_invalid_resolution_authority(path, value, c
 
 
 def test_v5_resolved_document_round_trips_canonically():
-    from mission_kernel.codec_v5 import encode_v5_state
+    from mission_kernel import encode_v5_snapshot
     from mission_kernel.model import ResolvedFinding
 
     payload = current_v5_open_state()
     payload["findings"] = [_resolved_finding()]
-    decoded = _decode(payload)
-    encoded = encode_v5_state(decoded)
+    snapshot = _decode_snapshot_payload(payload)
+    decoded = snapshot.state
+    encoded = encode_v5_snapshot(snapshot)
 
     assert isinstance(decoded.findings.findings[0], ResolvedFinding)
     assert encoded == canonical_json_bytes(payload)
-    assert _decode(json.loads(encoded)) == decoded
+    assert _decode(json.loads(encoded)) == replace(decoded, snapshot_provenance=None)
 
 
 @pytest.mark.parametrize(
@@ -475,29 +482,30 @@ def test_v5_lease_history_is_closed_and_requires_canonical_timestamp():
 
 @pytest.mark.parametrize("source", ["scoring-json", "manual-import"])
 def test_v5_bound_score_variants_round_trip_with_complete_provenance(source):
-    from mission_kernel.codec_v5 import encode_v5_state
+    from mission_kernel import encode_v5_snapshot
     from mission_kernel.model import BoundScore
 
     payload = current_v5_open_state()
     payload["scores"] = [_bound_score_document(source)]
 
-    decoded = _decode(payload)
+    snapshot = _decode_snapshot_payload(payload)
+    decoded = snapshot.state
     assert isinstance(decoded.scores[0], BoundScore)
     assert decoded.scores[0].source.value == source
     if source == "manual-import":
         assert decoded.scores[0].manual_evidence_ref.kind == "manual-score"
         assert decoded.scores[0].review_evidence_ref is None
-    assert encode_v5_state(decoded) == canonical_json_bytes(payload)
+    assert encode_v5_snapshot(snapshot) == canonical_json_bytes(payload)
 
 
 def test_encode_v5_revalidates_hand_built_model_invariants():
     from mission_kernel.codec_v5 import encode_v5_state
     from mission_kernel.errors import MissionStateDecodeError
 
-    state = _decode(current_v5_open_state())
-    invalid = replace(state, control=replace(state.control, threshold=6.0))
+    snapshot = _decode_snapshot_payload(current_v5_open_state())
+    invalid = replace(snapshot.state, control=replace(snapshot.state.control, threshold=6.0))
     with pytest.raises(MissionStateDecodeError) as rejected:
-        encode_v5_state(invalid)
+        encode_v5_state(invalid, snapshot.guidance)
     assert rejected.value.code == "invalid-value"
     assert rejected.value.json_path == "$.control.threshold"
 
