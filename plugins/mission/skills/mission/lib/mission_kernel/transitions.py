@@ -1,0 +1,385 @@
+"""One deterministic table for the K2 state-only command subset."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+import re
+from typing import Any, Callable, Optional, Type
+
+from .commands import AdvancePhase, Command, MarkHalt, Reactivate, ResumeStale
+from .model import (
+    AbsentHandoff,
+    AbsentPlan,
+    HaltCategory,
+    MissionControl,
+    MissionState,
+    Phase,
+    PreparedHandoff,
+    SessionRole,
+    TerminalOutcome,
+)
+
+
+class TransitionTableError(ValueError):
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+class _Rejected(ValueError):
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+def _unbound_state(state: MissionState, **changes: Any) -> MissionState:
+    return replace(state, snapshot_provenance=None, **changes)
+
+
+@dataclass(frozen=True)
+class KernelEvent:
+    type: str
+
+
+@dataclass(frozen=True)
+class Transition:
+    new_state: MissionState
+    events: tuple[KernelEvent, ...]
+    effects: tuple[object, ...] = ()
+
+
+@dataclass(frozen=True)
+class Rejection:
+    code: str
+
+
+@dataclass(frozen=True)
+class Decision:
+    accepted: bool
+    transition: Optional[Transition]
+    rejection: Optional[Rejection]
+    rule_id: Optional[str] = None
+
+    @property
+    def events(self) -> tuple[KernelEvent, ...]:
+        return () if self.transition is None else self.transition.events
+
+    @property
+    def effects(self) -> tuple[object, ...]:
+        return () if self.transition is None else self.transition.effects
+
+
+@dataclass(frozen=True)
+class TransitionRule:
+    rule_id: str
+    command_type: Type[object]
+    command_guard: Callable[[MissionState, object], bool]
+    reducer: Optional[Callable[[MissionState, object], Transition]]
+    guidance_rank: Optional[int] = None
+    guidance_guard: Optional[Callable[[MissionState, object], bool]] = None
+    guidance_factory: Optional[Callable[[MissionState, object, str], object]] = None
+    continuation_contracts: tuple[tuple[str, str, str], ...] = ()
+
+
+def build_transition_table(rules: tuple[TransitionRule, ...]) -> tuple[TransitionRule, ...]:
+    identifiers = set()
+    command_types = set()
+    for rule in rules:
+        if rule.rule_id in identifiers:
+            raise TransitionTableError("duplicate-rule-id")
+        if not isinstance(rule.command_type, type) or not callable(rule.command_guard):
+            raise TransitionTableError("incomplete-command-rule")
+        if rule.reducer is not None and rule.command_type in command_types:
+            raise TransitionTableError("duplicate-command-rule")
+        guidance_metadata = (
+            rule.guidance_rank is not None,
+            rule.guidance_guard is not None,
+            rule.guidance_factory is not None,
+        )
+        if any(guidance_metadata) and not all(guidance_metadata):
+            raise TransitionTableError("incomplete-guidance-rule")
+        if all(guidance_metadata):
+            if type(rule.guidance_rank) is not int:
+                raise TransitionTableError("invalid-guidance-rank")
+            if any(
+                existing.guidance_rank == rule.guidance_rank
+                for existing in rules
+                if existing is not rule
+            ):
+                raise TransitionTableError("equal-rank-primary-tie")
+        continuation_ids = set()
+        for contract in rule.continuation_contracts:
+            if (
+                not isinstance(contract, tuple)
+                or len(contract) != 3
+                or any(not isinstance(value, str) or not value for value in contract)
+            ):
+                raise TransitionTableError("invalid-continuation-contract")
+            if contract[0] in continuation_ids:
+                raise TransitionTableError("duplicate-continuation-contract")
+            continuation_ids.add(contract[0])
+        if rule.continuation_contracts and rule.guidance_rank is None:
+            raise TransitionTableError("invalid-continuation-contract")
+        identifiers.add(rule.rule_id)
+        if rule.reducer is not None:
+            command_types.add(rule.command_type)
+    return rules
+
+
+def _active_control(state: MissionState) -> MissionControl:
+    if state.terminal_outcome is not None or state.control.phase in {Phase.DONE, Phase.HALTED}:
+        raise _Rejected("terminal-state")
+    if state.control.passes or state.control.halt_reason:
+        raise _Rejected("terminal-state")
+    return state.control
+
+
+def _advance(state: MissionState, raw_command: object) -> Transition:
+    command = raw_command
+    assert isinstance(command, AdvancePhase)
+    control = _active_control(state)
+    if command.target not in {Phase.EXECUTING, Phase.REVIEWING}:
+        raise _Rejected("terminal-target-forbidden")
+    expected = {
+        Phase.PLANNING: Phase.EXECUTING,
+        Phase.EXECUTING: Phase.REVIEWING,
+    }.get(control.phase)
+    if command.target is not expected:
+        raise _Rejected("invalid-phase-transition")
+    if command.target is Phase.EXECUTING and isinstance(state.plan, AbsentPlan):
+        raise _Rejected("canonical-plan-required")
+    new_handoff = state.handoff
+    if command.target is Phase.EXECUTING:
+        if not isinstance(state.handoff, AbsentHandoff):
+            raise _Rejected("handoff-already-exists")
+        if not isinstance(command.prepared_handoff, PreparedHandoff):
+            raise _Rejected("prepared-handoff-required")
+        if command.prepared_handoff.plan != state.plan:
+            raise _Rejected("handoff-plan-mismatch")
+        handoff_token = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+:-]{0,127}\Z")
+        if (
+            command.prepared_handoff.schema != "mission-handoff/1"
+            or handoff_token.fullmatch(command.prepared_handoff.handoff_id) is None
+            or not command.prepared_handoff.ordered_step_ids
+            or len(set(command.prepared_handoff.ordered_step_ids))
+            != len(command.prepared_handoff.ordered_step_ids)
+            or any(
+                handoff_token.fullmatch(step_id) is None
+                for step_id in command.prepared_handoff.ordered_step_ids
+            )
+        ):
+            raise _Rejected("invalid-prepared-handoff")
+        new_handoff = command.prepared_handoff
+    elif command.prepared_handoff is not None:
+        raise _Rejected("unexpected-prepared-handoff")
+    new_control = replace(control, phase=command.target)
+    return Transition(
+        _unbound_state(
+            state,
+            control=new_control,
+            handoff=new_handoff,
+        ),
+        (KernelEvent("phase-advanced"),),
+    )
+
+
+def _halt_outcome(category: HaltCategory, role: SessionRole) -> TerminalOutcome:
+    if category is HaltCategory.EVIDENCE_SUBMITTED:
+        return (
+            TerminalOutcome.COMPLETED_EVIDENCE
+            if role in {SessionRole.CHECKER, SessionRole.PLANNING, SessionRole.ANALYZE}
+            else TerminalOutcome.INCOMPLETE
+        )
+    return {
+        HaltCategory.PARTIAL_DONE: TerminalOutcome.INCOMPLETE,
+        HaltCategory.BLOCKED_EXTERNAL: TerminalOutcome.BLOCKED_EXTERNAL,
+        HaltCategory.AWAITING_APPROVAL: TerminalOutcome.AWAITING_APPROVAL,
+        HaltCategory.STALE: TerminalOutcome.STALE_SUPERSEDED,
+        HaltCategory.STAGNATION: TerminalOutcome.FAILED,
+        HaltCategory.OTHER: TerminalOutcome.FAILED,
+        HaltCategory.USER_ABORT: TerminalOutcome.USER_ABORTED,
+        HaltCategory.ROUTED_GOAL: TerminalOutcome.ROUTED_ELSEWHERE,
+    }[category]
+
+
+def _reason(value: object) -> str:
+    if not isinstance(value, str) or not value.strip() or value != value.strip() or len(value) > 2048:
+        raise _Rejected("invalid-reason")
+    return value
+
+
+def _mark_halt(state: MissionState, raw_command: object) -> Transition:
+    command = raw_command
+    assert isinstance(command, MarkHalt)
+    control = _active_control(state)
+    if not isinstance(command.category, HaltCategory):
+        raise _Rejected("unknown-halt-category")
+    reason = _reason(command.reason)
+    outcome = _halt_outcome(command.category, control.session_role)
+    new_control = replace(
+        control,
+        phase=Phase.HALTED,
+        terminal_outcome=outcome,
+        loop_active=False,
+        halt_reason=reason,
+        halt_category=command.category,
+    )
+    return Transition(
+        _unbound_state(state, control=new_control),
+        (KernelEvent("mission-halted"),),
+    )
+
+
+def _reactivation_target(value: object) -> Phase:
+    if value not in {Phase.PLANNING, Phase.EXECUTING, Phase.REVIEWING, Phase.SCORING}:
+        raise _Rejected("invalid-reactivation-target")
+    assert isinstance(value, Phase)
+    return value
+
+
+def _is_stale_halt(state: MissionState) -> bool:
+    return (
+        state.control.halt_category is HaltCategory.STALE
+        or state.terminal_outcome is TerminalOutcome.STALE_SUPERSEDED
+    )
+
+
+def _reactivate(state: MissionState, raw_command: object) -> Transition:
+    command = raw_command
+    assert isinstance(command, Reactivate)
+    control = state.control
+    if command.approved_by_user is not True:
+        raise _Rejected("approval-required")
+    _reason(command.reason)
+    if control.passes or control.phase is not Phase.HALTED or control.loop_active is not False or not control.halt_reason:
+        raise _Rejected("manual-halt-required")
+    if _is_stale_halt(state):
+        raise _Rejected("stale-requires-resume")
+    if control.halt_category is not command.expected_category:
+        raise _Rejected("halt-category-mismatch")
+    target = _reactivation_target(command.target)
+    new_control = replace(
+        control,
+        phase=target,
+        terminal_outcome=None,
+        loop_active=True,
+        halt_reason="",
+        halt_category=None,
+    )
+    return Transition(
+        _unbound_state(state, control=new_control),
+        (KernelEvent("mission-reactivated"),),
+    )
+
+
+def _resume_stale(state: MissionState, raw_command: object) -> Transition:
+    command = raw_command
+    assert isinstance(command, ResumeStale)
+    control = state.control
+    if (
+        control.phase is not Phase.HALTED
+        or control.loop_active is not False
+        or not control.halt_reason
+        or not _is_stale_halt(state)
+    ):
+        raise _Rejected("stale-halt-required")
+    target = _reactivation_target(command.target)
+    new_control = replace(
+        control,
+        phase=target,
+        terminal_outcome=None,
+        loop_active=True,
+        halt_reason="",
+        halt_category=None,
+    )
+    return Transition(
+        _unbound_state(state, control=new_control),
+        (KernelEvent("stale-mission-resumed"),),
+    )
+
+
+def _command_type_guard(expected: Type[object]) -> Callable[[MissionState, object], bool]:
+    def guard(_state: MissionState, command: object) -> bool:
+        return isinstance(command, expected)
+
+    return guard
+
+
+from .guidance import (
+    _advance_guidance_guard,
+    _rule_recipe,
+    _stagnation_guidance_guard,
+    guidance_transition_rules,
+)
+
+
+TRANSITION_TABLE = build_transition_table(
+    (
+        TransitionRule(
+            "advance-phase",
+            AdvancePhase,
+            _command_type_guard(AdvancePhase),
+            _advance,
+            85,
+            _advance_guidance_guard,
+            _rule_recipe,
+            (
+                ("A4.plan-handoff", "PreparedPlanHandoff", "AdvancePhase"),
+                ("A4.executor-handoff", "ExecutionObservation", "AdvancePhase"),
+            ),
+        ),
+        TransitionRule(
+            "mark-halt",
+            MarkHalt,
+            _command_type_guard(MarkHalt),
+            _mark_halt,
+            60,
+            _stagnation_guidance_guard,
+            _rule_recipe,
+            (("A1.mark-halt", "StagnationObservation", "MarkHalt"),),
+        ),
+        TransitionRule(
+            "reactivate",
+            Reactivate,
+            _command_type_guard(Reactivate),
+            _reactivate,
+        ),
+        TransitionRule(
+            "resume-stale",
+            ResumeStale,
+            _command_type_guard(ResumeStale),
+            _resume_stale,
+        ),
+        *guidance_transition_rules(),
+    )
+)
+
+
+def decide(state: MissionState, command: Command) -> Decision:
+    if not isinstance(state, MissionState):
+        return Decision(False, None, Rejection("invalid-state"))
+    guarded = [
+        rule
+        for rule in TRANSITION_TABLE
+        if isinstance(command, rule.command_type)
+        and rule.command_guard(state, command)
+    ]
+    matches = [rule for rule in guarded if rule.reducer is not None]
+    if len(matches) != 1:
+        deferred = [rule for rule in guarded if rule.reducer is None]
+        if len(deferred) == 1:
+            return Decision(
+                False,
+                None,
+                Rejection("external-command-authority-required"),
+                deferred[0].rule_id,
+            )
+        return Decision(False, None, Rejection("unknown-command"))
+    rule = matches[0]
+    try:
+        reducer = rule.reducer
+        assert reducer is not None
+        transition = reducer(state, command)
+    except _Rejected as rejected:
+        return Decision(False, None, Rejection(rejected.code), rule.rule_id)
+    return Decision(True, transition, None, rule.rule_id)
