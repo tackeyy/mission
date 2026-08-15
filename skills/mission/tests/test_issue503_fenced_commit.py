@@ -775,7 +775,7 @@ def test_commit_audit_contains_no_lease_token_or_raw_provider_secret(tmp_path):
 
 @pytest.mark.parametrize("fault_point", ["before-head-replace", "after-head-replace"])
 def test_head_replacement_is_the_crash_authority_boundary(tmp_path, fault_point):
-    from mission_persistence.fenced_commit import FencedCommitError
+    from mission_persistence.fenced_commit import AdmittedSnapshot
 
     fired = False
 
@@ -814,15 +814,15 @@ def test_head_replacement_is_the_crash_authority_boundary(tmp_path, fault_point)
     expected = base_bytes if fault_point == "before-head-replace" else target_bytes
     assert snapshot.state_bytes == expected
     assert list((repository / "transactions" / "prepared").glob("*.json"))
-    with pytest.raises(FencedCommitError) as blocked:
-        local.begin(
-            _request(
-                operation_id="operation-after-crash",
-                lease_id="replacement-lease",
-                argv=("set", "phase=scoring"),
-            )
+    admitted_after_recovery = local.begin(
+        _request(
+            operation_id="operation-after-crash",
+            lease_id="replacement-lease",
+            argv=("set", "phase=scoring"),
         )
-    assert blocked.value.code == "recovery-required"
+    )
+    assert isinstance(admitted_after_recovery, AdmittedSnapshot)
+    assert not list((repository / "transactions" / "prepared").glob("*.json"))
 
 
 def test_production_init_remains_v4_and_does_not_import_u2_repository(tmp_path):
@@ -1012,7 +1012,7 @@ def test_malformed_other_session_prepare_blocks_globally(tmp_path):
             )
         )
 
-    assert rejected.value.code == "recovery-required"
+    assert rejected.value.code == "recovery-ambiguous"
 
 
 @pytest.mark.parametrize("attack", ["mutable-nested", "duplicate-key"])
@@ -1632,15 +1632,9 @@ def test_commit_rechecks_expiry_at_head_authority_boundary(tmp_path):
     assert local.read("test").head_bytes == base_snapshot.head_bytes
     assert not local._operation_path("test", "operation-expiry-race").exists()
     assert list((repository / "transactions" / "prepared").glob("*.json"))
-    with pytest.raises(FencedCommitError) as blocked:
-        local.begin(
-            _request(
-                operation_id="operation-after-expiry-race",
-                lease_id="fixture-lease",
-                argv=("set", "phase=scoring"),
-            )
-        )
-    assert blocked.value.code == "recovery-required"
+    report = local.recover("test")
+    assert report.ready is True
+    assert not list((repository / "transactions" / "prepared").glob("*.json"))
 
 
 def test_fault_hook_expiry_crossing_is_rechecked_at_os_replace_boundary(tmp_path):
@@ -1688,19 +1682,13 @@ def test_fault_hook_expiry_crossing_is_rechecked_at_os_replace_boundary(tmp_path
         "test", "operation-replace-boundary-expiry"
     ).exists()
     assert list((repository / "transactions" / "prepared").glob("*.json"))
-    with pytest.raises(FencedCommitError) as blocked:
-        local.begin(
-            _request(
-                operation_id="operation-after-replace-boundary-expiry",
-                lease_id="fixture-lease",
-                argv=("set", "phase=scoring"),
-            )
-        )
-    assert blocked.value.code == "recovery-required"
+    report = local.recover("test")
+    assert report.ready is True
+    assert not list((repository / "transactions" / "prepared").glob("*.json"))
 
 
 def test_valid_retained_prepare_for_other_session_blocks_repository_globally(tmp_path):
-    """H6: without U3, every retained prepare is ambiguous and globally blocking."""
+    """U3 still refuses to recover a transaction for a different session."""
     from mission_persistence.fenced_commit import FencedCommitError
 
     def crash_before_head(point: str) -> None:
@@ -1743,7 +1731,7 @@ def test_valid_retained_prepare_for_other_session_blocks_repository_globally(tmp
     with pytest.raises(FencedCommitError) as blocked:
         local.begin(other_request)
 
-    assert blocked.value.code == "recovery-required"
+    assert blocked.value.code == "recovery-ambiguous"
 
 
 def _oversize_effect_documents():
