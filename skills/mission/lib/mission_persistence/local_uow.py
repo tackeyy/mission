@@ -1834,6 +1834,93 @@ def validate_staged_generation(
     _validate_staged_generation(Path(repository_root), staged)
 
 
+def load_staged_generation(
+    repository_root: Path | str,
+    transaction_id: str,
+) -> StagedGeneration:
+    """Reconstruct and validate one complete private stage after a process exit."""
+    if not isinstance(transaction_id, str) or re.fullmatch(
+        r"[0-9a-f]{32}", transaction_id
+    ) is None:
+        raise LocalUnitOfWorkError(
+            "stage-invalid", "private stage transaction ID is invalid"
+        )
+    repository = Path(repository_root)
+    root = repository / "transactions" / (".stage-" + transaction_id)
+    manifest_path = root / "manifest.json"
+    try:
+        root_metadata = root.lstat()
+        objects = root / "objects"
+        objects_metadata = objects.lstat()
+        if (
+            not stat.S_ISDIR(root_metadata.st_mode)
+            or not stat.S_ISDIR(objects_metadata.st_mode)
+            or stat.S_IMODE(root_metadata.st_mode) != 0o700
+            or stat.S_IMODE(objects_metadata.st_mode) != 0o700
+        ):
+            raise LocalUnitOfWorkError(
+                "stage-invalid", "private stage directories are invalid"
+            )
+        manifest_bytes = read_stable_bytes(manifest_path, limit=STATE_LIMIT)
+        frozen = decode_json_object(manifest_bytes, limit=STATE_LIMIT)
+        if encode_json_object(frozen) != manifest_bytes:
+            raise LocalUnitOfWorkError(
+                "staged-manifest-changed", "manifest is not canonical JSON"
+            )
+        manifest = thaw_json_object(frozen)
+        if (
+            set(manifest) != {"schema", "state", "blobs"}
+            or manifest.get("schema") != "mission-generation/1"
+            or not isinstance(manifest.get("state"), dict)
+            or not isinstance(manifest.get("blobs"), list)
+        ):
+            raise LocalUnitOfWorkError(
+                "staged-manifest-changed", "manifest envelope differs"
+            )
+
+        def object_path(record: object) -> Path:
+            if not isinstance(record, dict):
+                raise LocalUnitOfWorkError(
+                    "staged-manifest-changed", "manifest object record differs"
+                )
+            digest = record.get("digest")
+            reference = record.get("object")
+            if (
+                not isinstance(digest, str)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
+                or reference
+                != "objects/" + digest.removeprefix("sha256:") + ".blob"
+            ):
+                raise LocalUnitOfWorkError(
+                    "staged-manifest-changed", "manifest object path differs"
+                )
+            return root / reference
+
+        state_path = object_path(manifest["state"])
+        blob_paths = tuple(object_path(record) for record in manifest["blobs"])
+        staged = StagedGeneration(
+            root=root,
+            state_path=state_path,
+            blob_paths=blob_paths,
+            manifest_path=manifest_path,
+            manifest_bytes=manifest_bytes,
+            generation_digest="sha256:" + hashlib.sha256(manifest_bytes).hexdigest(),
+            root_identity=_directory_identity(root_metadata),
+            objects_identity=_directory_identity(objects_metadata),
+            state_identity=_file_identity(state_path.lstat()),
+            blob_identities=tuple(_file_identity(path.lstat()) for path in blob_paths),
+            manifest_identity=_file_identity(manifest_path.lstat()),
+        )
+        _validate_staged_generation(repository, staged)
+        return staged
+    except LocalUnitOfWorkError:
+        raise
+    except (OSError, StrictReadError, KeyError, TypeError, ValueError) as exc:
+        raise LocalUnitOfWorkError(
+            "stage-invalid", "private stage cannot be reconstructed safely"
+        ) from exc
+
+
 def validate_verified_blob_set(blobs: VerifiedBlobSet) -> None:
     """Validate one immutable captured blob set without staging it."""
     if not isinstance(blobs, VerifiedBlobSet) or type(blobs.blobs) is not tuple:

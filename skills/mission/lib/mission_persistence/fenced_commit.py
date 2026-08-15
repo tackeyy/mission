@@ -40,6 +40,7 @@ from .local_uow import (
     StagedGeneration,
     VerifiedBlobSet,
     discard_staged_generation,
+    load_staged_generation,
     publish_generation,
     stage_generation,
     validate_staged_generation,
@@ -149,6 +150,50 @@ class CommitResult:
 
 
 @dataclass(frozen=True)
+class RecoveryReport:
+    session_id: str
+    ready: bool
+    generation: int
+    head_digest: Optional[str]
+    commit_digest: Optional[str]
+
+
+@dataclass(frozen=True)
+class ProjectionFileRef:
+    digest: str
+    identity: tuple[int, int, int, int, int]
+    name: str
+    size: int
+
+
+@dataclass(frozen=True)
+class ProjectionRecord:
+    after: ProjectionFileRef
+    base: Optional[ProjectionFileRef]
+    blob_id: str
+    parent_identity: tuple[int, int, int]
+    relative_path: str
+
+
+@dataclass(frozen=True)
+class PrepareRecord:
+    audit: AuditRecord
+    base: BaseRef
+    effects: tuple[EffectRef, ...]
+    fencing_epoch: int
+    generation: RecordRef
+    intent_digest: str
+    operation_id: str
+    prepared_at: str
+    projections: tuple[ProjectionRecord, ...]
+    session_id: str
+    state: RecordRef
+    target_generation: int
+    transaction_id: str
+    schema: str = "mission-prepare/1"
+
+
+@dataclass(frozen=True)
 class PendingLease:
     action: str
     base: Union[LegacyAbsentLease, FencedLease]
@@ -193,6 +238,7 @@ class PreparedCommit:
     target_state: MissionState
     state_bytes: bytes
     effects: tuple[BlobBinding, ...]
+    projections: tuple[ProjectionRecord, ...]
     transaction_id: str
     precondition: CommitPrecondition
     binding_digest: str
@@ -207,6 +253,22 @@ class _PinnedDirectory:
     @property
     def descriptor(self) -> int:
         return self.descriptors[-1]
+
+
+@dataclass(frozen=True)
+class _PinnedProjectionTarget:
+    descriptors: tuple[int, ...]
+    identities: tuple[tuple[int, int, int], ...]
+    names: tuple[str, ...]
+    target_name: str
+
+    @property
+    def descriptor(self) -> int:
+        return self.descriptors[-1]
+
+    @property
+    def parent_identity(self) -> tuple[int, int, int]:
+        return self.identities[-1]
 
 
 def _sha256(content: bytes) -> str:
@@ -585,7 +647,83 @@ def _parse_commit(content: bytes) -> CommitRecord:
     )
 
 
-def _parse_prepare(content: bytes, filename: str) -> str:
+def _parse_projection_file(
+    value: object,
+    *,
+    expected_name: str,
+    name: str,
+) -> ProjectionFileRef:
+    if not isinstance(value, dict):
+        raise FencedCommitError("record-invalid", name + " is not an object")
+    _exact(value, {"digest", "identity", "name", "size"}, name)
+    identity_value = value["identity"]
+    if (
+        not isinstance(identity_value, list)
+        or len(identity_value) != 5
+        or any(type(item) is not int or item < 0 for item in identity_value)
+    ):
+        raise FencedCommitError("record-invalid", name + " identity is invalid")
+    file_name = value["name"]
+    if file_name != expected_name:
+        raise FencedCommitError("record-invalid", name + " filename differs")
+    return ProjectionFileRef(
+        digest=_digest(value["digest"], name + ".digest"),
+        identity=tuple(identity_value),
+        name=file_name,
+        size=_integer(value["size"], name + ".size"),
+    )
+
+
+def _parse_projection(value: object, index: int) -> ProjectionRecord:
+    if not isinstance(value, dict):
+        raise FencedCommitError("record-invalid", "projection is not an object")
+    _exact(
+        value,
+        {"after", "base", "blob_id", "parent_identity", "relative_path"},
+        "projection",
+    )
+    relative_path = value["relative_path"]
+    candidate = PurePosixPath(relative_path) if isinstance(relative_path, str) else None
+    if (
+        candidate is None
+        or not relative_path
+        or len(relative_path) > 4096
+        or candidate.is_absolute()
+        or candidate.as_posix() != relative_path
+        or any(part in {"", ".", ".."} for part in candidate.parts)
+    ):
+        raise FencedCommitError("record-invalid", "projection path is invalid")
+    base_value = value["base"]
+    base = None
+    if base_value is not None:
+        base = _parse_projection_file(
+            base_value,
+            expected_name="base-%03d.blob" % index,
+            name="projection.base",
+        )
+    parent_identity_value = value["parent_identity"]
+    if (
+        not isinstance(parent_identity_value, list)
+        or len(parent_identity_value) != 3
+        or any(type(item) is not int or item < 0 for item in parent_identity_value)
+    ):
+        raise FencedCommitError(
+            "record-invalid", "projection parent identity is invalid"
+        )
+    return ProjectionRecord(
+        after=_parse_projection_file(
+            value["after"],
+            expected_name="after-%03d.blob" % index,
+            name="projection.after",
+        ),
+        base=base,
+        blob_id=_token(value["blob_id"], "projection.blob_id"),
+        parent_identity=tuple(parent_identity_value),
+        relative_path=relative_path,
+    )
+
+
+def _parse_prepare(content: bytes, filename: str) -> PrepareRecord:
     document = _decode_record(content, limit=MAX_PREPARE_BYTES)
     keys = {
         "audit", "base", "effects", "fencing_epoch", "generation",
@@ -595,7 +733,7 @@ def _parse_prepare(content: bytes, filename: str) -> str:
     _exact(document, keys, "prepare")
     if document["schema"] != "mission-prepare/1":
         raise FencedCommitError("record-invalid", "prepare schema is invalid")
-    _parse_audit(document["audit"])
+    audit = _parse_audit(document["audit"])
     base = _parse_base(document["base"])
     effects_value = document["effects"]
     if not isinstance(effects_value, list) or len(effects_value) > MAX_BLOB_COUNT:
@@ -604,20 +742,28 @@ def _parse_prepare(content: bytes, filename: str) -> str:
     if len({effect.blob_id for effect in effects}) != len(effects):
         raise FencedCommitError("record-invalid", "prepare effect blob IDs are duplicated")
     _validate_effect_aggregate(effects)
-    _integer(document["fencing_epoch"], "prepare.fencing_epoch", positive=True)
-    _parse_ref(
+    fencing_epoch = _integer(document["fencing_epoch"], "prepare.fencing_epoch", positive=True)
+    generation = _parse_ref(
         document["generation"],
         directory="generations",
         suffix=".json",
         name="prepare.generation",
     )
-    _digest(document["intent_digest"], "prepare.intent_digest")
-    _token(document["operation_id"], "prepare.operation_id")
-    _timestamp(document["prepared_at"], "prepare.prepared_at")
-    if document["projections"] != []:
-        raise FencedCommitError("record-invalid", "U2 prepare projections must be empty")
+    intent_digest = _digest(document["intent_digest"], "prepare.intent_digest")
+    operation_id = _token(document["operation_id"], "prepare.operation_id")
+    prepared_at = _timestamp(document["prepared_at"], "prepare.prepared_at")
+    projections_value = document["projections"]
+    if (
+        not isinstance(projections_value, list)
+        or len(projections_value) > MAX_BLOB_COUNT
+    ):
+        raise FencedCommitError("record-invalid", "prepare projections are invalid")
+    projections = tuple(
+        _parse_projection(value, index)
+        for index, value in enumerate(projections_value)
+    )
     session_id = _session_id(document["session_id"])
-    _parse_ref(
+    state = _parse_ref(
         document["state"],
         directory="objects",
         suffix=".blob",
@@ -635,7 +781,35 @@ def _parse_prepare(content: bytes, filename: str) -> str:
         raise FencedCommitError("record-invalid", "prepare transaction ID is invalid")
     if filename != transaction_id + ".json":
         raise FencedCommitError("record-invalid", "prepare filename differs from transaction ID")
-    return session_id
+    if len(projections) != len(effects):
+        raise FencedCommitError(
+            "record-invalid", "prepare projections and effects differ"
+        )
+    for projection, effect in zip(projections, effects):
+        if (
+            projection.blob_id != effect.blob_id
+            or projection.relative_path != effect.relative_path
+            or projection.after.digest != effect.digest
+            or projection.after.size != effect.size
+        ):
+            raise FencedCommitError(
+                "record-invalid", "prepare projection differs from its effect"
+            )
+    return PrepareRecord(
+        audit=audit,
+        base=base,
+        effects=effects,
+        fencing_epoch=fencing_epoch,
+        generation=generation,
+        intent_digest=intent_digest,
+        operation_id=operation_id,
+        prepared_at=prepared_at,
+        projections=projections,
+        session_id=session_id,
+        state=state,
+        target_generation=target_generation,
+        transaction_id=transaction_id,
+    )
 
 
 def _result_document(result: CommitResult) -> dict:
@@ -713,6 +887,29 @@ def _binding_document(binding: BlobBinding) -> dict:
     }
 
 
+def _projection_file_document(reference: ProjectionFileRef) -> dict:
+    return {
+        "digest": reference.digest,
+        "identity": list(reference.identity),
+        "name": reference.name,
+        "size": reference.size,
+    }
+
+
+def _projection_document(projection: ProjectionRecord) -> dict:
+    return {
+        "after": _projection_file_document(projection.after),
+        "base": (
+            None
+            if projection.base is None
+            else _projection_file_document(projection.base)
+        ),
+        "blob_id": projection.blob_id,
+        "parent_identity": list(projection.parent_identity),
+        "relative_path": projection.relative_path,
+    }
+
+
 def _prepared_binding_digest(prepared: PreparedCommit) -> str:
     request = prepared.admitted.request
     pending = prepared.admitted.pending_lease
@@ -752,6 +949,10 @@ def _prepared_binding_digest(prepared: PreparedCommit) -> str:
         },
         "prepared": {
             "effects": [_binding_document(effect) for effect in prepared.effects],
+            "projections": [
+                _projection_document(projection)
+                for projection in prepared.projections
+            ],
             "precondition": _precondition_document(prepared.precondition),
             "state_digest": _sha256(prepared.state_bytes),
             "state_size": len(prepared.state_bytes),
@@ -958,6 +1159,8 @@ class LocalFencedRepository:
             self.root / "sessions",
             self.root / "transactions",
             self.root / "transactions" / "prepared",
+            self.root / "transactions" / "projections",
+            self.root / "transactions" / "resolved",
             self.root / "objects",
             self.root / "generations",
             self.root / "commits",
@@ -1371,6 +1574,103 @@ class LocalFencedRepository:
             raise FencedCommitError("lineage-mismatch", "operation result commit differs")
         return result
 
+    def _check_resolved_operation(self, request: ExecutionRequest) -> None:
+        with self._pinned_directory("transactions", "resolved") as pinned:
+            try:
+                entries = sorted(os.listdir(pinned.descriptor))
+            except OSError as exc:
+                raise FencedCommitError(
+                    "recovery-ambiguous", "resolved transaction index cannot be inspected"
+                ) from exc
+            self._verify_pinned_directory(pinned)
+            for name in entries:
+                if (
+                    not name.endswith(".json")
+                    or _TRANSACTION_RE.fullmatch(name[:-5]) is None
+                ):
+                    raise FencedCommitError(
+                        "recovery-ambiguous", "resolved transaction filename is invalid"
+                    )
+                content = self._read_pinned_file(
+                    pinned,
+                    name,
+                    limit=MAX_OPERATION_BYTES,
+                )
+                assert content is not None
+                try:
+                    document = _decode_record(content, limit=MAX_OPERATION_BYTES)
+                    _exact(
+                        document,
+                        {
+                            "base_generation",
+                            "disposition",
+                            "head_digest",
+                            "intent_digest",
+                            "operation_id",
+                            "schema",
+                            "session_id",
+                            "target_generation",
+                            "transaction_id",
+                        },
+                        "recovery resolution",
+                    )
+                    if document["schema"] != "mission-recovery/1":
+                        raise FencedCommitError(
+                            "record-invalid", "recovery resolution schema differs"
+                        )
+                    transaction_id = document["transaction_id"]
+                    if transaction_id != name[:-5]:
+                        raise FencedCommitError(
+                            "record-invalid", "recovery resolution filename differs"
+                        )
+                    base_generation = _integer(
+                        document["base_generation"],
+                        "recovery.base_generation",
+                    )
+                    target_generation = _integer(
+                        document["target_generation"],
+                        "recovery.target_generation",
+                        positive=True,
+                    )
+                    if target_generation != base_generation + 1:
+                        raise FencedCommitError(
+                            "record-invalid", "recovery generation is not N+1"
+                        )
+                    disposition = document["disposition"]
+                    if disposition not in {"rolled-back", "finalized"}:
+                        raise FencedCommitError(
+                            "record-invalid", "recovery disposition differs"
+                        )
+                    head_digest = document["head_digest"]
+                    if head_digest is not None:
+                        _digest(head_digest, "recovery.head_digest")
+                    session_id = _session_id(document["session_id"])
+                    operation_id = _token(
+                        document["operation_id"], "recovery.operation_id"
+                    )
+                    intent_digest = _digest(
+                        document["intent_digest"], "recovery.intent_digest"
+                    )
+                except FencedCommitError as exc:
+                    raise FencedCommitError(
+                        "recovery-ambiguous", "resolved transaction record is malformed"
+                    ) from exc
+                if (
+                    session_id != request.session_id
+                    or operation_id != request.operation_id
+                ):
+                    continue
+                if intent_digest != request.intent_digest:
+                    raise FencedCommitError(
+                        "operation-intent-collision",
+                        "rolled-back operation ID has a different intent",
+                    )
+                if disposition == "finalized":
+                    raise FencedCommitError(
+                        "recovery-ambiguous",
+                        "finalized transaction is missing its operation tombstone",
+                    )
+
     def _reject_open_prepare(self, session_id: str) -> None:
         with self._pinned_directory("transactions", "prepared") as pinned:
             try:
@@ -1389,10 +1689,18 @@ class LocalFencedRepository:
     def begin(self, request: ExecutionRequest) -> Union[AdmittedSnapshot, CommitResult]:
         _validate_request(request)
         with self._lock():
-            self._reject_open_prepare(request.session_id)
+            prepared_entries = self._prepared_entries_unlocked()
+            if not prepared_entries:
+                recorded = self._lookup_operation(request)
+                if recorded is not None:
+                    return recorded
+                self._recover_orphan_stages_unlocked()
+            else:
+                self._recover_unlocked(request.session_id)
             recorded = self._lookup_operation(request)
             if recorded is not None:
                 return recorded
+            self._check_resolved_operation(request)
             head, _head_bytes, head_digest = self._read_head_unlocked(request.session_id)
             if head is None:
                 base = None
@@ -1411,6 +1719,486 @@ class LocalFencedRepository:
             pending = _admit_lease(request, base_lease, self.clock(), self.lease_ttl_seconds)
             precondition = CommitPrecondition(base_generation, head_digest, pending.digest)
             return AdmittedSnapshot(request, base, pending, base_generation + 1, precondition)
+
+    @staticmethod
+    def _projection_identity(
+        metadata: os.stat_result,
+    ) -> tuple[int, int, int, int, int]:
+        return (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_mode,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+        )
+
+    def _projection_target(self, relative_path: str) -> Path:
+        candidate = PurePosixPath(relative_path)
+        if (
+            candidate.is_absolute()
+            or not candidate.parts
+            or candidate.parts[0] == self.root.name
+            or any(part in {"", ".", ".."} for part in candidate.parts)
+        ):
+            raise FencedCommitError(
+                "projection-invalid", "projection target is outside its compatibility root"
+            )
+        target = self.root.parent.joinpath(*candidate.parts)
+        repository_device = self.root.lstat().st_dev
+        current = self.root.parent
+        for part in candidate.parts[:-1]:
+            current = current / part
+            try:
+                metadata = current.lstat()
+            except FileNotFoundError:
+                try:
+                    current.mkdir(mode=0o700)
+                    metadata = current.lstat()
+                except OSError as exc:
+                    raise FencedCommitError(
+                        "projection-invalid", "projection parent cannot be created safely"
+                    ) from exc
+            except OSError as exc:
+                raise FencedCommitError(
+                    "projection-invalid", "projection parent cannot be inspected"
+                ) from exc
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or stat.S_ISLNK(metadata.st_mode)
+                or metadata.st_dev != repository_device
+            ):
+                raise FencedCommitError(
+                    "projection-invalid", "projection parent is not a safe same-filesystem directory"
+                )
+        return target
+
+    def _verify_pinned_projection_target(
+        self,
+        pinned: _PinnedProjectionTarget,
+    ) -> None:
+        self._verify_root()
+        try:
+            root_named = self.root.parent.lstat()
+            if (
+                _directory_identity(os.fstat(pinned.descriptors[0]))
+                != pinned.identities[0]
+                or _directory_identity(root_named) != pinned.identities[0]
+                or not stat.S_ISDIR(root_named.st_mode)
+            ):
+                raise FencedCommitError(
+                    "repository-changed",
+                    "projection root identity changed",
+                )
+            for index, name in enumerate(pinned.names):
+                parent_descriptor = pinned.descriptors[index]
+                child_descriptor = pinned.descriptors[index + 1]
+                identity = pinned.identities[index + 1]
+                named = os.stat(
+                    name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+                if (
+                    _directory_identity(os.fstat(child_descriptor)) != identity
+                    or _directory_identity(named) != identity
+                    or not stat.S_ISDIR(named.st_mode)
+                ):
+                    raise FencedCommitError(
+                        "repository-changed",
+                        "projection parent identity changed",
+                    )
+        except FencedCommitError:
+            raise
+        except OSError as exc:
+            raise FencedCommitError(
+                "repository-changed",
+                "projection parent identity changed",
+            ) from exc
+
+    @contextmanager
+    def _pinned_projection_target(self, projection: ProjectionRecord):
+        candidate = PurePosixPath(projection.relative_path)
+        if (
+            candidate.is_absolute()
+            or not candidate.parts
+            or candidate.parts[0] == self.root.name
+            or any(part in {"", ".", ".."} for part in candidate.parts)
+        ):
+            raise FencedCommitError(
+                "projection-invalid",
+                "projection target is outside its compatibility root",
+            )
+        descriptors = []
+        identities = []
+        names = tuple(candidate.parts[:-1])
+        try:
+            descriptor = os.open(
+                os.fspath(self.root.parent),
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            )
+            descriptors.append(descriptor)
+            identities.append(_directory_identity(os.fstat(descriptor)))
+            for name in names:
+                descriptor = os.open(
+                    name,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=descriptors[-1],
+                )
+                descriptors.append(descriptor)
+                opened = os.fstat(descriptor)
+                named = os.stat(
+                    name,
+                    dir_fd=descriptors[-2],
+                    follow_symlinks=False,
+                )
+                identity = _directory_identity(opened)
+                if (
+                    not stat.S_ISDIR(opened.st_mode)
+                    or _directory_identity(named) != identity
+                    or identity[0] != self.root.lstat().st_dev
+                ):
+                    raise FencedCommitError(
+                        "repository-changed",
+                        "projection parent cannot be pinned",
+                    )
+                identities.append(identity)
+            pinned = _PinnedProjectionTarget(
+                descriptors=tuple(descriptors),
+                identities=tuple(identities),
+                names=names,
+                target_name=candidate.parts[-1],
+            )
+            if pinned.parent_identity != projection.parent_identity:
+                raise FencedCommitError(
+                    "recovery-ambiguous",
+                    "projection parent differs from its durable identity",
+                )
+            self._verify_pinned_projection_target(pinned)
+            yield pinned
+            self._verify_pinned_projection_target(pinned)
+        except FencedCommitError:
+            raise
+        except OSError as exc:
+            raise FencedCommitError(
+                "repository-changed",
+                "projection parent cannot be pinned",
+            ) from exc
+        finally:
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
+
+    def _read_pinned_projection_bytes(
+        self,
+        pinned: _PinnedProjectionTarget,
+        *,
+        limit: int,
+        allow_missing: bool = False,
+        allowed_link_counts: tuple[int, ...] = (1,),
+        verify_parent: bool = True,
+    ) -> Optional[tuple[bytes, tuple[int, int, int, int, int]]]:
+        if verify_parent:
+            self._verify_pinned_projection_target(pinned)
+        try:
+            named = os.stat(
+                pinned.target_name,
+                dir_fd=pinned.descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            if allow_missing:
+                return None
+            raise FencedCommitError("projection-invalid", "projection file is missing")
+        except OSError as exc:
+            raise FencedCommitError(
+                "projection-invalid",
+                "projection cannot be stated",
+            ) from exc
+        if (
+            not stat.S_ISREG(named.st_mode)
+            or named.st_nlink not in allowed_link_counts
+            or named.st_size > limit
+        ):
+            raise FencedCommitError(
+                "projection-invalid",
+                "projection identity is invalid",
+            )
+        descriptor = None
+        try:
+            descriptor = os.open(
+                pinned.target_name,
+                os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+                dir_fd=pinned.descriptor,
+            )
+            opened = os.fstat(descriptor)
+            expected = _file_identity(named)
+            if _file_identity(opened) != expected:
+                raise FencedCommitError(
+                    "projection-invalid",
+                    "projection identity changed",
+                )
+            chunks = []
+            remaining = named.st_size
+            while remaining:
+                chunk = os.read(descriptor, min(65536, remaining))
+                if not chunk:
+                    raise FencedCommitError(
+                        "projection-invalid",
+                        "projection was truncated",
+                    )
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            if os.read(descriptor, 1):
+                raise FencedCommitError(
+                    "projection-invalid",
+                    "projection grew while read",
+                )
+            final_named = os.stat(
+                pinned.target_name,
+                dir_fd=pinned.descriptor,
+                follow_symlinks=False,
+            )
+            if (
+                _file_identity(os.fstat(descriptor)) != expected
+                or _file_identity(final_named) != expected
+            ):
+                raise FencedCommitError(
+                    "projection-invalid",
+                    "projection identity changed",
+                )
+            if verify_parent:
+                self._verify_pinned_projection_target(pinned)
+            return b"".join(chunks), self._projection_identity(named)
+        except FencedCommitError:
+            raise
+        except OSError as exc:
+            raise FencedCommitError(
+                "projection-invalid",
+                "projection cannot be read safely",
+            ) from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
+    def _read_projection_bytes(
+        self,
+        path: Path,
+        *,
+        limit: int,
+        allow_missing: bool = False,
+        allowed_link_counts: tuple[int, ...] = (1,),
+    ) -> Optional[tuple[bytes, tuple[int, int, int, int, int]]]:
+        try:
+            named = path.lstat()
+        except FileNotFoundError:
+            if allow_missing:
+                return None
+            raise FencedCommitError("projection-invalid", "projection file is missing")
+        except OSError as exc:
+            raise FencedCommitError("projection-invalid", "projection cannot be stated") from exc
+        if (
+            not stat.S_ISREG(named.st_mode)
+            or named.st_nlink not in allowed_link_counts
+            or named.st_size > limit
+        ):
+            raise FencedCommitError("projection-invalid", "projection identity is invalid")
+        descriptor = None
+        try:
+            descriptor = os.open(
+                os.fspath(path),
+                os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW,
+            )
+            opened = os.fstat(descriptor)
+            expected = _file_identity(named)
+            if _file_identity(opened) != expected:
+                raise FencedCommitError("projection-invalid", "projection identity changed")
+            chunks = []
+            remaining = named.st_size
+            while remaining:
+                chunk = os.read(descriptor, min(65536, remaining))
+                if not chunk:
+                    raise FencedCommitError("projection-invalid", "projection was truncated")
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            if os.read(descriptor, 1):
+                raise FencedCommitError("projection-invalid", "projection grew while read")
+            final_opened = os.fstat(descriptor)
+            final_named = path.lstat()
+            if (
+                _file_identity(final_opened) != expected
+                or _file_identity(final_named) != expected
+            ):
+                raise FencedCommitError("projection-invalid", "projection identity changed")
+            return b"".join(chunks), self._projection_identity(named)
+        except FencedCommitError:
+            raise
+        except OSError as exc:
+            raise FencedCommitError("projection-invalid", "projection cannot be read safely") from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
+    def _write_projection_after(self, path: Path, content: bytes) -> ProjectionFileRef:
+        descriptor = None
+        try:
+            descriptor = os.open(
+                os.fspath(path),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+            )
+            os.fchmod(descriptor, 0o600)
+            view = memoryview(content)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise FencedCommitError(
+                        "projection-invalid", "projection staging write made no progress"
+                    )
+                view = view[written:]
+            os.fsync(descriptor)
+            metadata = os.fstat(descriptor)
+            named = path.lstat()
+            if (
+                _file_identity(metadata) != _file_identity(named)
+                or metadata.st_nlink != 1
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_size != len(content)
+            ):
+                raise FencedCommitError(
+                    "projection-invalid", "projection staging identity changed"
+                )
+            return ProjectionFileRef(
+                digest=_sha256(content),
+                identity=self._projection_identity(metadata),
+                name=path.name,
+                size=len(content),
+            )
+        except FencedCommitError:
+            raise
+        except OSError as exc:
+            raise FencedCommitError(
+                "projection-invalid", "projection staging file cannot be written"
+            ) from exc
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
+    def _discard_unprepared_projection_bundle(
+        self,
+        bundle: Path,
+        names: tuple[str, ...],
+    ) -> None:
+        try:
+            for name in names:
+                path = bundle / name
+                if path.exists() or path.is_symlink():
+                    os.unlink(path)
+            os.rmdir(bundle)
+            descriptor = os.open(os.fspath(bundle.parent), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except OSError as exc:
+            raise FencedCommitError(
+                "stage-cleanup-failed", "projection stage cleanup failed"
+            ) from exc
+
+    def _stage_projections(
+        self,
+        transaction_id: str,
+        request: ExecutionRequest,
+    ) -> tuple[ProjectionRecord, ...]:
+        if not request.blobs.blobs:
+            return ()
+        parent = self.root / "transactions" / "projections"
+        try:
+            parent_metadata = parent.lstat()
+            if (
+                not stat.S_ISDIR(parent_metadata.st_mode)
+                or stat.S_ISLNK(parent_metadata.st_mode)
+                or parent_metadata.st_dev != self.root.lstat().st_dev
+            ):
+                raise FencedCommitError(
+                    "projection-invalid", "projection transaction root is invalid"
+                )
+            bundle = parent / transaction_id
+            bundle.mkdir(mode=0o700)
+            os.chmod(bundle, 0o700, follow_symlinks=False)
+            bundle_metadata = bundle.lstat()
+            if (
+                not stat.S_ISDIR(bundle_metadata.st_mode)
+                or stat.S_IMODE(bundle_metadata.st_mode) != 0o700
+            ):
+                raise FencedCommitError(
+                    "projection-invalid", "projection bundle is not private"
+                )
+        except FencedCommitError:
+            raise
+        except OSError as exc:
+            raise FencedCommitError(
+                "projection-invalid", "projection bundle cannot be created"
+            ) from exc
+        records = []
+        written_names = []
+        base_total = 0
+        try:
+            for index, blob in enumerate(request.blobs.blobs):
+                target = self._projection_target(blob.binding.relative_path)
+                parent_metadata = target.parent.lstat()
+                if (
+                    not stat.S_ISDIR(parent_metadata.st_mode)
+                    or stat.S_ISLNK(parent_metadata.st_mode)
+                    or parent_metadata.st_dev != self.root.lstat().st_dev
+                ):
+                    raise FencedCommitError(
+                        "projection-invalid",
+                        "projection parent is not a safe same-filesystem directory",
+                    )
+                base_value = self._read_projection_bytes(
+                    target,
+                    limit=STATE_LIMIT,
+                    allow_missing=True,
+                )
+                base = None
+                if base_value is not None:
+                    base_bytes, base_identity = base_value
+                    base_total += len(base_bytes)
+                    if base_total > MAX_TOTAL_BLOB_BYTES:
+                        raise FencedCommitError(
+                            "blob-set-too-large", "projection backups exceed the aggregate limit"
+                        )
+                    base = ProjectionFileRef(
+                        digest=_sha256(base_bytes),
+                        identity=base_identity,
+                        name="base-%03d.blob" % index,
+                        size=len(base_bytes),
+                    )
+                after_name = "after-%03d.blob" % index
+                after = self._write_projection_after(bundle / after_name, blob.content)
+                written_names.append(after_name)
+                records.append(
+                    ProjectionRecord(
+                        after=after,
+                        base=base,
+                        blob_id=blob.binding.blob_id,
+                        parent_identity=_directory_identity(parent_metadata),
+                        relative_path=blob.binding.relative_path,
+                    )
+                )
+            descriptor = os.open(os.fspath(bundle), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            parent_descriptor = os.open(os.fspath(parent), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(parent_descriptor)
+            finally:
+                os.close(parent_descriptor)
+            return tuple(records)
+        except BaseException:
+            self._discard_unprepared_projection_bundle(bundle, tuple(written_names))
+            raise
 
     def _stage_persistence(
         self,
@@ -1448,24 +2236,46 @@ class LocalFencedRepository:
                 discard_staged_generation(self.root, staged)
             finally:
                 raise FencedCommitError("stage-invalid", "U1 transaction ID is invalid")
-        provisional = PreparedCommit(
-            admitted=admitted,
-            staged=staged,
-            target_state=target_state,
-            state_bytes=state_bytes,
-            effects=effects,
-            transaction_id=transaction_id,
-            precondition=admitted.precondition,
-            binding_digest="sha256:" + "0" * 64,
-        )
+        try:
+            projections = self._stage_projections(transaction_id, admitted.request)
+            provisional = PreparedCommit(
+                admitted=admitted,
+                staged=staged,
+                target_state=target_state,
+                state_bytes=state_bytes,
+                effects=effects,
+                projections=projections,
+                transaction_id=transaction_id,
+                precondition=admitted.precondition,
+                binding_digest="sha256:" + "0" * 64,
+            )
+        except BaseException:
+            try:
+                discard_staged_generation(self.root, staged)
+            except (LocalUnitOfWorkError, OSError) as cleanup_exc:
+                raise FencedCommitError(
+                    "stage-cleanup-failed", "stage cleanup failed after projection rejection"
+                ) from cleanup_exc
+            raise
         prepared = replace(
             provisional,
             binding_digest=_prepared_binding_digest(provisional),
         )
         if transaction_id in self._stage_binding_registry:
             try:
+                if prepared.projections:
+                    self._discard_unprepared_projection_bundle(
+                        self.root
+                        / "transactions"
+                        / "projections"
+                        / transaction_id,
+                        tuple(
+                            projection.after.name
+                            for projection in prepared.projections
+                        ),
+                    )
                 discard_staged_generation(self.root, prepared.staged)
-            except (LocalUnitOfWorkError, OSError) as exc:
+            except (FencedCommitError, LocalUnitOfWorkError, OSError) as exc:
                 raise FencedCommitError(
                     "stage-cleanup-failed",
                     "duplicate private stage cleanup failed",
@@ -1474,7 +2284,825 @@ class LocalFencedRepository:
                 "stage-invalid", "private stage transaction is already registered"
             )
         self._stage_binding_registry[transaction_id] = prepared.binding_digest
+        self._fault("after-stage")
         return prepared
+
+    def _recovery_report_unlocked(self, session_id: str) -> RecoveryReport:
+        head, head_bytes, head_digest = self._read_head_unlocked(session_id)
+        if head is None:
+            return RecoveryReport(session_id, True, 0, None, None)
+        assert head_bytes is not None and head_digest is not None
+        snapshot = self._read_snapshot_from_head_unlocked(
+            session_id,
+            head,
+            head_bytes,
+            head_digest,
+        )
+        return RecoveryReport(
+            session_id,
+            True,
+            snapshot.head.generation,
+            snapshot.head_digest,
+            snapshot.result.commit_digest,
+        )
+
+    def _recover_orphan_stages_unlocked(self) -> None:
+        with self._pinned_directory("transactions") as pinned:
+            try:
+                entries = sorted(os.listdir(pinned.descriptor))
+            except OSError as exc:
+                raise FencedCommitError(
+                    "recovery-ambiguous", "transaction directory cannot be inspected"
+                ) from exc
+            self._verify_pinned_directory(pinned)
+        for name in entries:
+            if name in {"prepared", "projections", "resolved"}:
+                continue
+            if not name.startswith(".stage-") or _TRANSACTION_RE.fullmatch(
+                name.removeprefix(".stage-")
+            ) is None:
+                raise FencedCommitError(
+                    "recovery-ambiguous", "unexpected transaction residue blocks recovery"
+                )
+            transaction_id = name.removeprefix(".stage-")
+            try:
+                staged = load_staged_generation(self.root, transaction_id)
+                self._discard_orphan_projection_bundle_unlocked(
+                    transaction_id,
+                    staged,
+                )
+                discard_staged_generation(self.root, staged)
+            except (LocalUnitOfWorkError, OSError) as exc:
+                raise FencedCommitError(
+                    "recovery-ambiguous", "private stage residue is not verifiable"
+                ) from exc
+        projection_root = self.root / "transactions" / "projections"
+        try:
+            if any(projection_root.iterdir()):
+                raise FencedCommitError(
+                    "recovery-ambiguous",
+                    "projection bundle without a private stage is ambiguous",
+                )
+        except FencedCommitError:
+            raise
+        except OSError as exc:
+            raise FencedCommitError(
+                "recovery-ambiguous", "projection transaction root cannot be inspected"
+            ) from exc
+
+    def _discard_orphan_projection_bundle_unlocked(
+        self,
+        transaction_id: str,
+        staged: StagedGeneration,
+    ) -> None:
+        _state, effects = self._manifest_records(staged.manifest_bytes)
+        bundle = (
+            self.root / "transactions" / "projections" / transaction_id
+        )
+        if not effects:
+            if bundle.exists() or bundle.is_symlink():
+                raise FencedCommitError(
+                    "recovery-ambiguous", "empty stage has a projection bundle"
+                )
+            return
+        try:
+            metadata = bundle.lstat()
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or stat.S_IMODE(metadata.st_mode) != 0o700
+                or metadata.st_dev != self.root.lstat().st_dev
+            ):
+                raise FencedCommitError(
+                    "recovery-ambiguous", "orphan projection bundle is invalid"
+                )
+            expected_names = {"after-%03d.blob" % index for index in range(len(effects))}
+            if {path.name for path in bundle.iterdir()} != expected_names:
+                raise FencedCommitError(
+                    "recovery-ambiguous", "orphan projection bundle entries differ"
+                )
+            for index, effect in enumerate(effects):
+                path = bundle / ("after-%03d.blob" % index)
+                file_metadata = path.lstat()
+                reference = ProjectionFileRef(
+                    digest=effect.digest,
+                    identity=self._projection_identity(file_metadata),
+                    name=path.name,
+                    size=effect.size,
+                )
+                self._require_projection_ref(
+                    path,
+                    reference,
+                    allowed_link_counts=(1,),
+                )
+            self._discard_unprepared_projection_bundle(
+                bundle,
+                tuple(sorted(expected_names)),
+            )
+        except FencedCommitError:
+            raise
+        except OSError as exc:
+            raise FencedCommitError(
+                "recovery-ambiguous", "orphan projection bundle cannot be verified"
+            ) from exc
+
+    def _read_prepare_unlocked(self, name: str) -> tuple[PrepareRecord, bytes]:
+        with self._pinned_directory("transactions", "prepared") as pinned:
+            content = self._read_pinned_file(
+                pinned,
+                name,
+                limit=MAX_PREPARE_BYTES,
+            )
+        assert content is not None
+        try:
+            return _parse_prepare(content, name), content
+        except FencedCommitError as exc:
+            raise FencedCommitError(
+                "recovery-ambiguous", "durable prepare is malformed"
+            ) from exc
+
+    def _resolution_document(
+        self,
+        prepare: PrepareRecord,
+        disposition: str,
+        report: RecoveryReport,
+    ) -> dict:
+        if disposition not in {"rolled-back", "finalized"}:
+            raise FencedCommitError(
+                "recovery-ambiguous", "recovery disposition is invalid"
+            )
+        return {
+            "base_generation": prepare.base.generation,
+            "disposition": disposition,
+            "head_digest": report.head_digest,
+            "intent_digest": prepare.intent_digest,
+            "operation_id": prepare.operation_id,
+            "schema": "mission-recovery/1",
+            "session_id": prepare.session_id,
+            "target_generation": prepare.target_generation,
+            "transaction_id": prepare.transaction_id,
+        }
+
+    def _publish_resolution_unlocked(
+        self,
+        prepare: PrepareRecord,
+        disposition: str,
+        report: RecoveryReport,
+    ) -> None:
+        content = _canonical_bytes(
+            self._resolution_document(prepare, disposition, report),
+            limit=MAX_OPERATION_BYTES,
+        )
+        self._publish_named_immutable(
+            self.root
+            / "transactions"
+            / "resolved"
+            / (prepare.transaction_id + ".json"),
+            content,
+            limit=MAX_OPERATION_BYTES,
+            collision_code="recovery-ambiguous",
+        )
+
+    def _resolution_exists_unlocked(
+        self,
+        prepare: PrepareRecord,
+        disposition: str,
+        report: RecoveryReport,
+    ) -> bool:
+        expected = _canonical_bytes(
+            self._resolution_document(prepare, disposition, report),
+            limit=MAX_OPERATION_BYTES,
+        )
+        with self._pinned_directory("transactions", "resolved") as pinned:
+            current = self._read_pinned_file(
+                pinned,
+                prepare.transaction_id + ".json",
+                limit=MAX_OPERATION_BYTES,
+                allow_missing=True,
+            )
+        if current is None:
+            return False
+        if current != expected:
+            raise FencedCommitError(
+                "recovery-ambiguous",
+                "recovery resolution differs from durable lineage",
+            )
+        return True
+
+    def _prepare_matches_stage_or_generation_unlocked(
+        self,
+        prepare: PrepareRecord,
+    ) -> Optional[StagedGeneration]:
+        stage_path = (
+            self.root / "transactions" / (".stage-" + prepare.transaction_id)
+        )
+        if stage_path.exists() or stage_path.is_symlink():
+            try:
+                staged = load_staged_generation(self.root, prepare.transaction_id)
+            except (LocalUnitOfWorkError, OSError) as exc:
+                raise FencedCommitError(
+                    "recovery-ambiguous", "prepared private stage is not verifiable"
+                ) from exc
+            if (
+                staged.generation_digest != prepare.generation.digest
+                or len(staged.manifest_bytes) != prepare.generation.size
+            ):
+                raise FencedCommitError(
+                    "recovery-ambiguous", "prepared stage differs from journal"
+                )
+            state, effects = self._manifest_records(staged.manifest_bytes)
+            if state != prepare.state or effects != prepare.effects:
+                raise FencedCommitError(
+                    "recovery-ambiguous", "prepared stage lineage differs"
+                )
+            return staged
+        try:
+            manifest = self._read_exact(prepare.generation, limit=STATE_LIMIT)
+        except FencedCommitError as exc:
+            raise FencedCommitError(
+                "recovery-ambiguous", "prepared generation has no verifiable bytes"
+            ) from exc
+        state, effects = self._manifest_records(manifest)
+        if state != prepare.state or effects != prepare.effects:
+            raise FencedCommitError(
+                "recovery-ambiguous", "prepared immutable lineage differs"
+            )
+        return None
+
+    def _head_is_prepare_base_unlocked(self, prepare: PrepareRecord) -> bool:
+        head, head_bytes, head_digest = self._read_head_unlocked(prepare.session_id)
+        if prepare.base.generation == 0:
+            return head is None and head_bytes is None and head_digest is None
+        if (
+            head is None
+            or head_bytes is None
+            or head_digest is None
+            or head.generation != prepare.base.generation
+            or head_digest != prepare.base.head_digest
+        ):
+            return False
+        self._read_snapshot_from_head_unlocked(
+            prepare.session_id,
+            head,
+            head_bytes,
+            head_digest,
+        )
+        return True
+
+    def _target_snapshot_unlocked(
+        self,
+        prepare: PrepareRecord,
+    ) -> Optional[RepositorySnapshot]:
+        head, head_bytes, head_digest = self._read_head_unlocked(prepare.session_id)
+        if (
+            head is None
+            or head_bytes is None
+            or head_digest is None
+            or head.generation != prepare.target_generation
+        ):
+            return None
+        snapshot = self._read_snapshot_from_head_unlocked(
+            prepare.session_id,
+            head,
+            head_bytes,
+            head_digest,
+        )
+        commit = snapshot.commit
+        if (
+            commit.audit != prepare.audit
+            or commit.base != prepare.base
+            or commit.committed_at != prepare.prepared_at
+            or commit.effects != prepare.effects
+            or commit.fencing_epoch != prepare.fencing_epoch
+            or commit.generation != prepare.generation
+            or commit.intent_digest != prepare.intent_digest
+            or commit.operation_id != prepare.operation_id
+            or commit.session_id != prepare.session_id
+            or commit.state != prepare.state
+            or commit.target_generation != prepare.target_generation
+            or commit.transaction_id != prepare.transaction_id
+        ):
+            raise FencedCommitError(
+                "recovery-ambiguous", "target head and durable prepare disagree"
+            )
+        return snapshot
+
+    def _verify_or_publish_operation_unlocked(
+        self,
+        prepare: PrepareRecord,
+        snapshot: RepositorySnapshot,
+    ) -> None:
+        expected_document = {
+            "commit_digest": snapshot.result.commit_digest,
+            "intent_digest": prepare.intent_digest,
+            "operation_id": prepare.operation_id,
+            "result": _result_document(snapshot.result),
+            "schema": "mission-operation/1",
+            "session_id": prepare.session_id,
+        }
+        expected = _canonical_bytes(expected_document, limit=MAX_OPERATION_BYTES)
+        path = self._operation_path(prepare.session_id, prepare.operation_id)
+        with self._pinned_directory("operations") as pinned:
+            existing = self._read_pinned_file(
+                pinned,
+                path.name,
+                limit=MAX_OPERATION_BYTES,
+                allow_missing=True,
+            )
+        if existing is not None and existing != expected:
+            raise FencedCommitError(
+                "recovery-ambiguous", "operation record disagrees with target lineage"
+            )
+        if existing is None:
+            self._publish_named_immutable(
+                path,
+                expected,
+                limit=MAX_OPERATION_BYTES,
+                collision_code="recovery-ambiguous",
+            )
+
+    def _recover_target_unlocked(
+        self,
+        prepare: PrepareRecord,
+        snapshot: RepositorySnapshot,
+        prepare_path: Path,
+        prepare_bytes: bytes,
+    ) -> RecoveryReport:
+        self._prepare_matches_stage_or_generation_unlocked(prepare)
+        report = self._recovery_report_unlocked(prepare.session_id)
+        cleanup_started = self._resolution_exists_unlocked(
+            prepare,
+            "finalized",
+            report,
+        )
+        self._rollforward_projections_unlocked(
+            prepare,
+            allow_cleanup_residue=cleanup_started,
+        )
+        self._verify_or_publish_operation_unlocked(prepare, snapshot)
+        self._publish_resolution_unlocked(prepare, "finalized", report)
+        self._fault("after-resolution-marker")
+        self._cleanup_projection_bundle_unlocked(prepare, target_is_authoritative=True)
+        stage_path = (
+            self.root / "transactions" / (".stage-" + prepare.transaction_id)
+        )
+        if stage_path.exists() or stage_path.is_symlink():
+            try:
+                staged = load_staged_generation(self.root, prepare.transaction_id)
+                discard_staged_generation(self.root, staged)
+            except (LocalUnitOfWorkError, OSError) as exc:
+                raise FencedCommitError(
+                    "recovery-blocked", "verified private stage cleanup failed"
+                ) from exc
+        self._remove_exact(
+            prepare_path,
+            prepare_bytes,
+            limit=MAX_PREPARE_BYTES,
+        )
+        return report
+
+    def _rollforward_projections_unlocked(
+        self,
+        prepare: PrepareRecord,
+        *,
+        allow_cleanup_residue: bool = False,
+    ) -> None:
+        if not prepare.projections:
+            return
+        bundle = (
+            self.root / "transactions" / "projections" / prepare.transaction_id
+        )
+        if not bundle.exists() and not bundle.is_symlink():
+            if not allow_cleanup_residue:
+                raise FencedCommitError(
+                    "recovery-ambiguous",
+                    "projection recovery bundle is missing",
+                )
+            for projection in prepare.projections:
+                with self._pinned_projection_target(projection) as pinned:
+                    current = self._read_pinned_projection_bytes(
+                        pinned,
+                        limit=STATE_LIMIT,
+                        allowed_link_counts=(1,),
+                    )
+                    if not self._projection_value_matches(
+                        current,
+                        projection.after,
+                    ):
+                        raise FencedCommitError(
+                            "recovery-ambiguous",
+                            "finalized projection differs after cleanup",
+                        )
+            return
+        for index, projection in enumerate(prepare.projections):
+            after_path = bundle / projection.after.name
+            if after_path.exists() or after_path.is_symlink():
+                self._require_projection_ref(
+                    after_path,
+                    projection.after,
+                    allowed_link_counts=(1, 2),
+                )
+            elif not allow_cleanup_residue:
+                raise FencedCommitError(
+                    "recovery-ambiguous",
+                    "projection recovery source is missing",
+                )
+            base_path = bundle / ("base-%03d.blob" % index)
+            if projection.base is not None:
+                if base_path.exists() or base_path.is_symlink():
+                    self._require_projection_ref(
+                        base_path,
+                        projection.base,
+                        allowed_link_counts=(1,),
+                    )
+                elif not allow_cleanup_residue:
+                    raise FencedCommitError(
+                        "recovery-ambiguous",
+                        "projection base backup is missing",
+                    )
+            elif base_path.exists() or base_path.is_symlink():
+                raise FencedCommitError(
+                    "recovery-ambiguous", "new projection has an unexpected base backup"
+                )
+            with self._pinned_projection_target(projection) as pinned:
+                current = self._read_pinned_projection_bytes(
+                    pinned,
+                    limit=STATE_LIMIT,
+                    allow_missing=True,
+                    allowed_link_counts=(1, 2),
+                )
+                if current is None:
+                    linked = False
+                    try:
+                        os.link(
+                            os.fspath(after_path),
+                            pinned.target_name,
+                            dst_dir_fd=pinned.descriptor,
+                            follow_symlinks=False,
+                        )
+                        linked = True
+                        self._verify_pinned_projection_target(pinned)
+                    except BaseException:
+                        if linked:
+                            try:
+                                published = self._read_pinned_projection_bytes(
+                                    pinned,
+                                    limit=STATE_LIMIT,
+                                    allowed_link_counts=(2,),
+                                    verify_parent=False,
+                                )
+                                if self._projection_value_matches(
+                                    published,
+                                    projection.after,
+                                ):
+                                    os.unlink(
+                                        pinned.target_name,
+                                        dir_fd=pinned.descriptor,
+                                    )
+                                    os.fsync(pinned.descriptor)
+                            except (FencedCommitError, OSError):
+                                pass
+                        raise
+                    os.fsync(pinned.descriptor)
+                    self._fsync_projection_directory(bundle)
+                elif not self._projection_value_matches(current, projection.after):
+                    raise FencedCommitError(
+                        "recovery-ambiguous",
+                        "target projection was replaced after commit",
+                    )
+                published = self._read_pinned_projection_bytes(
+                    pinned,
+                    limit=STATE_LIMIT,
+                    allowed_link_counts=(
+                        (1, 2) if allow_cleanup_residue else (2,)
+                    ),
+                )
+                if not self._projection_value_matches(published, projection.after):
+                    raise FencedCommitError(
+                        "recovery-ambiguous",
+                        "target projection differs after recovery",
+                    )
+            if after_path.exists() or after_path.is_symlink():
+                self._require_projection_ref(
+                    after_path,
+                    projection.after,
+                    allowed_link_counts=(
+                        (1, 2) if allow_cleanup_residue else (2,)
+                    ),
+                )
+            elif not allow_cleanup_residue:
+                raise FencedCommitError(
+                    "recovery-ambiguous",
+                    "projection recovery source is missing",
+                )
+
+    def _recover_base_unlocked(
+        self,
+        prepare: PrepareRecord,
+        prepare_path: Path,
+        prepare_bytes: bytes,
+    ) -> RecoveryReport:
+        staged = self._prepare_matches_stage_or_generation_unlocked(prepare)
+        operation_path = self._operation_path(
+            prepare.session_id,
+            prepare.operation_id,
+        )
+        with self._pinned_directory("operations") as pinned:
+            operation = self._read_pinned_file(
+                pinned,
+                operation_path.name,
+                limit=MAX_OPERATION_BYTES,
+                allow_missing=True,
+            )
+        if operation is not None:
+            raise FencedCommitError(
+                "recovery-ambiguous",
+                "base head conflicts with an existing operation record",
+            )
+        report = self._recovery_report_unlocked(prepare.session_id)
+        cleanup_started = self._resolution_exists_unlocked(
+            prepare,
+            "rolled-back",
+            report,
+        )
+        if cleanup_started:
+            self._verify_rolled_back_projections_unlocked(prepare)
+        else:
+            self._rollback_projections_unlocked(prepare)
+        self._publish_resolution_unlocked(prepare, "rolled-back", report)
+        self._fault("after-resolution-marker")
+        self._cleanup_projection_bundle_unlocked(prepare, target_is_authoritative=False)
+        if staged is not None:
+            try:
+                discard_staged_generation(self.root, staged)
+            except (LocalUnitOfWorkError, OSError) as exc:
+                raise FencedCommitError(
+                    "recovery-blocked", "verified private stage cleanup failed"
+                ) from exc
+        self._remove_exact(
+            prepare_path,
+            prepare_bytes,
+            limit=MAX_PREPARE_BYTES,
+        )
+        return report
+
+    def _verify_rolled_back_projections_unlocked(
+        self,
+        prepare: PrepareRecord,
+    ) -> None:
+        bundle = (
+            self.root / "transactions" / "projections" / prepare.transaction_id
+        )
+        for index, projection in enumerate(prepare.projections):
+            target = self._projection_target(projection.relative_path)
+            if projection.base is None:
+                if target.exists() or target.is_symlink():
+                    raise FencedCommitError(
+                        "recovery-ambiguous",
+                        "rolled-back new projection still exists",
+                    )
+            else:
+                self._require_projection_ref(
+                    target,
+                    projection.base,
+                    allowed_link_counts=(1,),
+                )
+            base_path = bundle / ("base-%03d.blob" % index)
+            if base_path.exists() or base_path.is_symlink():
+                raise FencedCommitError(
+                    "recovery-ambiguous",
+                    "rolled-back projection base residue remains",
+                )
+
+    @staticmethod
+    def _projection_value_matches(
+        value: Optional[tuple[bytes, tuple[int, int, int, int, int]]],
+        reference: ProjectionFileRef,
+    ) -> bool:
+        if value is None:
+            return False
+        content, identity = value
+        return (
+            identity == reference.identity
+            and len(content) == reference.size
+            and _sha256(content) == reference.digest
+        )
+
+    def _rollback_projections_unlocked(self, prepare: PrepareRecord) -> None:
+        if not prepare.projections:
+            return
+        bundle = (
+            self.root / "transactions" / "projections" / prepare.transaction_id
+        )
+        for index, projection in enumerate(prepare.projections):
+            after_path = bundle / projection.after.name
+            self._require_projection_ref(
+                after_path,
+                projection.after,
+                allowed_link_counts=(1, 2),
+            )
+            target = self._projection_target(projection.relative_path)
+            current = self._read_projection_bytes(
+                target,
+                limit=STATE_LIMIT,
+                allow_missing=True,
+                allowed_link_counts=(1, 2),
+            )
+            base_path = bundle / ("base-%03d.blob" % index)
+            base_backup = self._read_projection_bytes(
+                base_path,
+                limit=STATE_LIMIT,
+                allow_missing=True,
+                allowed_link_counts=(1,),
+            )
+            if projection.base is None:
+                if current is not None:
+                    if not self._projection_value_matches(current, projection.after):
+                        raise FencedCommitError(
+                            "recovery-ambiguous", "created projection was replaced"
+                        )
+                    os.unlink(target)
+                    self._fsync_projection_directory(target.parent)
+                if base_backup is not None:
+                    raise FencedCommitError(
+                        "recovery-ambiguous", "new projection has an unexpected base backup"
+                    )
+            elif self._projection_value_matches(current, projection.base):
+                if base_backup is not None:
+                    raise FencedCommitError(
+                        "recovery-ambiguous", "base projection has a duplicate private inode"
+                    )
+            else:
+                if current is not None:
+                    if not self._projection_value_matches(current, projection.after):
+                        raise FencedCommitError(
+                            "recovery-ambiguous", "published projection identity is ambiguous"
+                        )
+                    os.unlink(target)
+                    self._fsync_projection_directory(target.parent)
+                self._fault("during-projection-rollback:%d" % index)
+                if not self._projection_value_matches(base_backup, projection.base):
+                    raise FencedCommitError(
+                        "recovery-blocked", "exact projection backup is unavailable"
+                    )
+                try:
+                    os.rename(os.fspath(base_path), os.fspath(target))
+                except OSError as exc:
+                    raise FencedCommitError(
+                        "recovery-blocked", "exact projection backup cannot be restored"
+                    ) from exc
+                self._fsync_projection_directory(bundle)
+                self._fsync_projection_directory(target.parent)
+            if projection.base is None:
+                if target.exists() or target.is_symlink():
+                    raise FencedCommitError(
+                        "recovery-blocked", "created projection still exists after rollback"
+                    )
+            else:
+                self._require_projection_ref(
+                    target,
+                    projection.base,
+                    allowed_link_counts=(1,),
+                )
+
+    def _cleanup_projection_bundle_unlocked(
+        self,
+        prepare: PrepareRecord,
+        *,
+        target_is_authoritative: bool,
+    ) -> None:
+        if not prepare.projections:
+            return
+        bundle = (
+            self.root / "transactions" / "projections" / prepare.transaction_id
+        )
+        if not bundle.exists() and not bundle.is_symlink():
+            return
+        for index, projection in enumerate(prepare.projections):
+            target = self._projection_target(projection.relative_path)
+            after_path = bundle / projection.after.name
+            if target_is_authoritative:
+                self._require_projection_ref(
+                    target,
+                    projection.after,
+                    allowed_link_counts=(1, 2),
+                )
+                base_path = bundle / ("base-%03d.blob" % index)
+                if projection.base is not None:
+                    if base_path.exists() or base_path.is_symlink():
+                        self._require_projection_ref(
+                            base_path,
+                            projection.base,
+                            allowed_link_counts=(1,),
+                        )
+                        os.unlink(base_path)
+                        self._fsync_projection_directory(bundle)
+                        self._fault(
+                            "during-projection-cleanup-base:%d" % index
+                        )
+                if after_path.exists() or after_path.is_symlink():
+                    self._require_projection_ref(
+                        after_path,
+                        projection.after,
+                        allowed_link_counts=(2,),
+                    )
+                else:
+                    self._require_projection_ref(
+                        target,
+                        projection.after,
+                        allowed_link_counts=(1,),
+                    )
+            else:
+                if after_path.exists() or after_path.is_symlink():
+                    self._require_projection_ref(
+                        after_path,
+                        projection.after,
+                        allowed_link_counts=(1,),
+                    )
+                base_path = bundle / ("base-%03d.blob" % index)
+                if base_path.exists() or base_path.is_symlink():
+                    raise FencedCommitError(
+                        "recovery-blocked", "projection base residue remains after rollback"
+                    )
+            if after_path.exists() or after_path.is_symlink():
+                os.unlink(after_path)
+                self._fsync_projection_directory(bundle)
+                self._fault(
+                    "during-projection-cleanup-after:%d" % index
+                )
+            if target_is_authoritative:
+                self._require_projection_ref(
+                    target,
+                    projection.after,
+                    allowed_link_counts=(1,),
+                )
+        try:
+            os.rmdir(bundle)
+            self._fsync_projection_directory(bundle.parent)
+        except OSError as exc:
+            raise FencedCommitError(
+                "recovery-blocked", "projection bundle cleanup failed"
+            ) from exc
+
+    def _prepared_entries_unlocked(self) -> list[str]:
+        with self._pinned_directory("transactions", "prepared") as pinned:
+            try:
+                prepared_entries = sorted(os.listdir(pinned.descriptor))
+            except OSError as exc:
+                raise FencedCommitError(
+                    "recovery-ambiguous", "prepare directory cannot be inspected"
+                ) from exc
+            self._verify_pinned_directory(pinned)
+        return prepared_entries
+
+    def _recover_unlocked(self, session_id: str) -> RecoveryReport:
+        prepared_entries = self._prepared_entries_unlocked()
+        if len(prepared_entries) > 1:
+            raise FencedCommitError(
+                "recovery-ambiguous", "multiple durable prepares cannot be ordered"
+            )
+        if prepared_entries:
+            name = prepared_entries[0]
+            prepare, prepare_bytes = self._read_prepare_unlocked(name)
+            if prepare.session_id != session_id:
+                raise FencedCommitError(
+                    "recovery-ambiguous", "durable prepare belongs to another session"
+                )
+            prepare_path = self.root / "transactions" / "prepared" / name
+            try:
+                if self._head_is_prepare_base_unlocked(prepare):
+                    report = self._recover_base_unlocked(
+                        prepare,
+                        prepare_path,
+                        prepare_bytes,
+                    )
+                else:
+                    target = self._target_snapshot_unlocked(prepare)
+                    if target is None:
+                        raise FencedCommitError(
+                            "recovery-ambiguous",
+                            "head is neither the prepared base nor target",
+                        )
+                    report = self._recover_target_unlocked(
+                        prepare,
+                        target,
+                        prepare_path,
+                        prepare_bytes,
+                    )
+            except FencedCommitError:
+                raise
+            except Exception as exc:
+                raise FencedCommitError(
+                    "recovery-ambiguous", "durable transaction cannot be classified"
+                ) from exc
+            self._recover_orphan_stages_unlocked()
+            return report
+        self._recover_orphan_stages_unlocked()
+        return self._recovery_report_unlocked(session_id)
+
+    def recover(self, session_id: str) -> RecoveryReport:
+        session_id = _session_id(session_id)
+        with self._lock():
+            return self._recover_unlocked(session_id)
 
     def _write_temp(self, pinned: _PinnedDirectory, content: bytes) -> str:
         self._verify_pinned_directory(pinned)
@@ -1690,8 +3318,31 @@ class LocalFencedRepository:
         if not self._invalidate_stage_binding(prepared):
             return
         try:
+            if prepared.projections:
+                bundle = (
+                    self.root
+                    / "transactions"
+                    / "projections"
+                    / prepared.transaction_id
+                )
+                for index, projection in enumerate(prepared.projections):
+                    base_path = bundle / ("base-%03d.blob" % index)
+                    if base_path.exists() or base_path.is_symlink():
+                        raise FencedCommitError(
+                            "stage-cleanup-failed",
+                            "pre-prepare projection stage contains a base backup",
+                        )
+                    self._require_projection_ref(
+                        bundle / projection.after.name,
+                        projection.after,
+                        allowed_link_counts=(1,),
+                    )
+                self._discard_unprepared_projection_bundle(
+                    bundle,
+                    tuple(projection.after.name for projection in prepared.projections),
+                )
             discard_staged_generation(self.root, prepared.staged)
-        except (LocalUnitOfWorkError, OSError) as exc:
+        except (FencedCommitError, LocalUnitOfWorkError, OSError) as exc:
             cleanup_error = FencedCommitError(
                 "stage-cleanup-failed",
                 "private stage cleanup failed after commit rejection",
@@ -1767,6 +3418,59 @@ class LocalFencedRepository:
             raise FencedCommitError(
                 "precondition-mismatch", "prepared effects differ from request blobs"
             )
+        if len(prepared.projections) != len(prepared.effects):
+            raise FencedCommitError(
+                "precondition-mismatch", "prepared projections differ from effects"
+            )
+        bundle = (
+            self.root
+            / "transactions"
+            / "projections"
+            / prepared.transaction_id
+        )
+        for index, (projection, effect) in enumerate(
+            zip(prepared.projections, prepared.effects)
+        ):
+            if (
+                projection.blob_id != effect.blob_id
+                or projection.relative_path != effect.relative_path
+                or projection.after.digest != effect.digest
+                or projection.after.size != effect.size
+                or projection.after.name != "after-%03d.blob" % index
+                or (
+                    projection.base is not None
+                    and projection.base.name != "base-%03d.blob" % index
+                )
+            ):
+                raise FencedCommitError(
+                    "precondition-mismatch", "prepared projection binding changed"
+                )
+            self._require_projection_ref(
+                bundle / projection.after.name,
+                projection.after,
+                allowed_link_counts=(1,),
+            )
+            with self._pinned_projection_target(projection) as pinned:
+                current = self._read_pinned_projection_bytes(
+                    pinned,
+                    limit=STATE_LIMIT,
+                    allow_missing=True,
+                    allowed_link_counts=(1,),
+                )
+                if projection.base is None:
+                    if current is not None:
+                        raise FencedCommitError(
+                            "projection-precondition-changed",
+                            "projection target appeared after stage",
+                        )
+                elif not self._projection_value_matches(
+                    current,
+                    projection.base,
+                ):
+                    raise FencedCommitError(
+                        "projection-precondition-changed",
+                        "projection target changed after stage",
+                    )
         state_ref, manifest_effects = self._manifest_records(
             prepared.staged.manifest_bytes
         )
@@ -1875,13 +3579,146 @@ class LocalFencedRepository:
             "intent_digest": prepared.admitted.request.intent_digest,
             "operation_id": prepared.admitted.request.operation_id,
             "prepared_at": prepared_at,
-            "projections": [],
+            "projections": [
+                _projection_document(projection)
+                for projection in prepared.projections
+            ],
             "schema": "mission-prepare/1",
             "session_id": prepared.admitted.request.session_id,
             "state": _ref_document(state_ref),
             "target_generation": prepared.admitted.target_generation,
             "transaction_id": prepared.transaction_id,
         }
+
+    def _require_projection_ref(
+        self,
+        path: Path,
+        reference: ProjectionFileRef,
+        *,
+        allowed_link_counts: tuple[int, ...],
+    ) -> bytes:
+        value = self._read_projection_bytes(
+            path,
+            limit=STATE_LIMIT,
+            allowed_link_counts=allowed_link_counts,
+        )
+        assert value is not None
+        content, identity = value
+        if (
+            identity != reference.identity
+            or len(content) != reference.size
+            or _sha256(content) != reference.digest
+        ):
+            raise FencedCommitError(
+                "projection-invalid", "projection identity or bytes differ"
+            )
+        return content
+
+    @staticmethod
+    def _fsync_projection_directory(path: Path) -> None:
+        descriptor = os.open(os.fspath(path), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def _apply_projections(self, prepared: PreparedCommit) -> None:
+        if not prepared.projections:
+            return
+        bundle = (
+            self.root
+            / "transactions"
+            / "projections"
+            / prepared.transaction_id
+        )
+        for index, projection in enumerate(prepared.projections):
+            after_path = bundle / projection.after.name
+            self._require_projection_ref(
+                after_path,
+                projection.after,
+                allowed_link_counts=(1,),
+            )
+            base_path = bundle / ("base-%03d.blob" % index)
+            with self._pinned_projection_target(projection) as pinned:
+                current = self._read_pinned_projection_bytes(
+                    pinned,
+                    limit=STATE_LIMIT,
+                    allow_missing=True,
+                    allowed_link_counts=(1,),
+                )
+                if projection.base is None:
+                    if current is not None:
+                        raise FencedCommitError(
+                            "projection-precondition-changed",
+                            "new projection target appeared",
+                        )
+                elif not self._projection_value_matches(
+                    current,
+                    projection.base,
+                ):
+                    raise FencedCommitError(
+                        "projection-precondition-changed",
+                        "projection base changed before publication",
+                    )
+                elif base_path.exists() or base_path.is_symlink():
+                    raise FencedCommitError(
+                        "projection-invalid",
+                        "projection base backup already exists",
+                    )
+                else:
+                    try:
+                        os.rename(
+                            pinned.target_name,
+                            os.fspath(base_path),
+                            src_dir_fd=pinned.descriptor,
+                        )
+                        self._verify_pinned_projection_target(pinned)
+                    except OSError as exc:
+                        raise FencedCommitError(
+                            "projection-write-failed",
+                            "projection base cannot be moved privately",
+                        ) from exc
+                    os.fsync(pinned.descriptor)
+                    self._fsync_projection_directory(bundle)
+                    self._require_projection_ref(
+                        base_path,
+                        projection.base,
+                        allowed_link_counts=(1,),
+                    )
+                try:
+                    os.link(
+                        os.fspath(after_path),
+                        pinned.target_name,
+                        dst_dir_fd=pinned.descriptor,
+                        follow_symlinks=False,
+                    )
+                    self._verify_pinned_projection_target(pinned)
+                except OSError as exc:
+                    raise FencedCommitError(
+                        "projection-write-failed",
+                        "projection target cannot be published",
+                    ) from exc
+                os.fsync(pinned.descriptor)
+                self._fsync_projection_directory(bundle)
+                published = self._read_pinned_projection_bytes(
+                    pinned,
+                    limit=STATE_LIMIT,
+                    allowed_link_counts=(2,),
+                )
+                if not self._projection_value_matches(
+                    published,
+                    projection.after,
+                ):
+                    raise FencedCommitError(
+                        "projection-write-failed",
+                        "published projection identity differs",
+                    )
+            self._require_projection_ref(
+                after_path,
+                projection.after,
+                allowed_link_counts=(2,),
+            )
+            self._fault("after-projection:%d" % index)
 
     def commit(self, prepared: PreparedCommit, precondition: CommitPrecondition) -> CommitResult:
         with self._lock():
@@ -1921,9 +3758,12 @@ class LocalFencedRepository:
                 limit=MAX_PREPARE_BYTES,
                 collision_code="immutable-prepare-collision",
             )
+            self._fault("after-prepare")
             published: PublishedGeneration = publish_generation(self.root, prepared.staged)
             if published.generation_digest != generation_ref.digest:
                 raise FencedCommitError("lineage-mismatch", "published generation digest differs")
+            self._fault("after-generation-publish")
+            self._apply_projections(prepared)
             commit = CommitRecord(
                 audit=_audit_record(prepared.admitted.request.audit),
                 base=BaseRef(prepared.precondition.base_generation, prepared.precondition.base_head_digest),
@@ -1951,6 +3791,7 @@ class LocalFencedRepository:
                 limit=MAX_COMMIT_BYTES,
                 collision_code="immutable-commit-collision",
             )
+            self._fault("after-commit-publish")
             head = HeadRecord(
                 commit=commit_ref,
                 generation=prepared.admitted.target_generation,
@@ -1995,8 +3836,28 @@ class LocalFencedRepository:
                 limit=MAX_OPERATION_BYTES,
                 collision_code="operation-intent-collision",
             )
+            self._fault("after-operation-publish")
             snapshot = self._read_snapshot_unlocked(prepared.admitted.request.session_id)
             if snapshot.result != result:
                 raise FencedCommitError("lineage-mismatch", "committed result cannot be verified")
+            self._fault("after-lineage-verify")
+            prepare_record = _parse_prepare(
+                prepare_bytes,
+                prepared.transaction_id + ".json",
+            )
+            report = self._recovery_report_unlocked(
+                prepared.admitted.request.session_id
+            )
+            self._publish_resolution_unlocked(
+                prepare_record,
+                "finalized",
+                report,
+            )
+            self._fault("after-resolution-marker")
+            self._cleanup_projection_bundle_unlocked(
+                prepare_record,
+                target_is_authoritative=True,
+            )
             self._remove_exact(prepare_path, prepare_bytes, limit=MAX_PREPARE_BYTES)
+            self._fault("after-finalize")
             return result
