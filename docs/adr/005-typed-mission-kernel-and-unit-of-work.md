@@ -190,9 +190,12 @@ typed rejection. Guidance metadata declares `eligible`, a total integer rank,
 a stable tie-break identifier, and typed continuation edges for multi-step
 recipes. Maintenance commands such as progress,
 activity, and generic property updates are not primary-guidance eligible.
-`derive_next` selects the unique lowest-ranked enabled primary rule and never
-uses a second handwritten phase tree; equal rank is a table-definition error,
-not runtime fallback.
+`derive_next(state: MissionState, guidance: GuidanceFacts)` selects the unique
+lowest-ranked enabled primary rule and never uses a second handwritten phase
+tree; equal rank is a table-definition error, not runtime fallback. `GuidanceFacts`
+is used only to choose guidance and must not be used for command accept/reject;
+command accept/reject remains governed by the transition-table command rules and
+`MissionState`.
 
 Guidance distinguishes local commands from external work. A command template
 is emitted only when the table proves that a representative valid command of
@@ -278,10 +281,12 @@ class RecoverableUnitOfWork(MissionRepository, Protocol):
 `ExecutionRequest` explicitly contains session ID, typed command, immutable
 `VerifiedBlobSet`, caller-stable operation ID, normalized intent digest, and
 presented lease identity; neither repository reads them from ambient process
-state. `Snapshot` includes the head generation and digest. `AdmittedSnapshot`
-contains that base plus a *pending* acquire/renew/verify/takeover decision and
-the complete target lease/fence values. Admission is a read-only calculation,
-not a lease-only commit. `CommitPrecondition` includes the exact base
+state. `Snapshot` is the read-side canonical view and includes `MissionState`,
+`GuidanceFacts`, `SnapshotProvenance`, the head generation, and the digest.
+`AdmittedSnapshot` contains `base: Snapshot` plus a *pending* acquire/renew/
+verify/takeover decision and the complete target lease/fence values. Admission
+is a read-only calculation, not a lease-only commit. `CommitPrecondition`
+includes the exact base
 generation/head digest and pending lease decision. Neither the lease token nor
 raw intent is copied to command outcome logs or public artifacts; commit records
 retain only the normalized intent digest.
