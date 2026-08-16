@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from mission_persistence.gc import GRACE_SECONDS, PURGE_GRACE_SECONDS
+
 from .mission_state_fixture_corpus import generate_cli_state_bytes
 from .test_issue503_fenced_commit import (
     _cli_mutation_from_bytes,
@@ -226,9 +228,19 @@ def test_r2_and_b3_prior_safety_retains_one_prior_but_not_two_prior(tmp_path):
 
     report = local.collect(RetentionPolicy())
 
+    # Prior safety keeps the current head and its immediate predecessor; only the
+    # older generation may become a GC candidate.
     assert first.state_generation_digest in report.candidates
     assert second.state_generation_digest not in report.candidates
     assert third.state_generation_digest not in report.candidates
+
+    # Destructive mode should physically remove the older, unreferenced prior
+    # generation while leaving the current head and the immediate predecessor.
+    destructive = local.collect(_destructive_policy())
+    assert destructive.quarantined == (first.state_generation_digest,)
+    assert not _generation_path(repository, first.state_generation_digest).exists()
+    assert _generation_path(repository, second.state_generation_digest).exists()
+    assert _generation_path(repository, third.state_generation_digest).exists()
 
 
 def test_r3_archive_pointer_generation_is_not_a_candidate(tmp_path):
@@ -358,6 +370,36 @@ def test_r6_operations_are_not_traversed_and_remain_byte_identical(tmp_path, mon
     }
 
 
+def test_s1b_candidate_mutation_after_revalidation_aborts_without_quarantine(tmp_path):
+    from mission_persistence.fenced_commit import FencedCommitError
+
+    fixture = _three_commits(tmp_path)
+    local = fixture["local"]
+    repository = fixture["repository"]
+    clock = fixture["clock"]
+    first = fixture["results"][0]
+    candidate = _generation_path(repository, first.state_generation_digest)
+    _age(candidate, now=clock.current, seconds=3601)
+    fired = False
+
+    def interrupt(point):
+        nonlocal fired
+        if point == "before-gc-revalidate" and not fired:
+            fired = True
+            candidate.write_bytes(candidate.read_bytes() + b"tamper")
+
+    local.fault_injector = interrupt
+
+    with pytest.raises(FencedCommitError) as excinfo:
+        local.collect(_destructive_policy())
+
+    assert excinfo.value.code == "gc-digest-mismatch"
+    # The mutation is detected before quarantine, so the source file remains in
+    # place and no quarantine entry is created.
+    assert candidate.exists()
+    assert not _quarantine_path(repository, first.state_generation_digest).exists()
+
+
 def test_c1_d1_d3_aged_unreferenced_generation_requires_destructive_mode(tmp_path):
     from mission_persistence.fenced_commit import LocalFencedRepository
     from mission_persistence.gc import RetentionPolicy
@@ -371,6 +413,8 @@ def test_c1_d1_d3_aged_unreferenced_generation_requires_destructive_mode(tmp_pat
     _age(_generation_path(repository, digest), now=now, seconds=3601)
 
     dry_run = local.collect(RetentionPolicy())
+    # Dry-run must classify the generation without touching the filesystem.
+    assert _generation_path(repository, digest).exists()
     destructive = local.collect(_destructive_policy())
 
     assert dry_run.dry_run is True
@@ -416,7 +460,7 @@ def test_c2_c3_old_operation_replays_after_generation_quarantine_and_collision_r
 
 @pytest.mark.parametrize(
     ("age_seconds", "expected_candidate"),
-    ((3599, False), (3601, True)),
+    ((GRACE_SECONDS - 1, False), (GRACE_SECONDS + 1, True)),
     ids=("grace-minus-one", "grace-plus-one"),
 )
 def test_c4_b1_generation_grace_boundary_pair(tmp_path, age_seconds, expected_candidate):
@@ -455,6 +499,8 @@ def test_c5_changed_quarantine_bytes_are_reported_and_not_purged(tmp_path):
 
     report = local.collect(_destructive_policy())
 
+    # A changed quarantine record is recorded, but the bytes mismatch makes it
+    # ineligible for purge on this pass.
     assert report.changed == (digest,)
     assert quarantined.exists()
 
@@ -715,9 +761,12 @@ def test_open_recovery_nil_generation_ref_fails_closed(tmp_path):
         encoding="utf-8",
     )
 
-    with pytest.raises(FencedCommitError):
+    with pytest.raises(FencedCommitError) as excinfo:
         local.collect(_destructive_policy())
 
+    assert excinfo.value.code == "gc-root-ambiguous"
+    # A malformed prepare record must fail closed before GC can rely on the
+    # open-recovery root, and the candidate must remain on disk.
     assert candidate.exists()
 
 
@@ -831,6 +880,8 @@ def test_open_recovery_root_is_never_purged_from_quarantine(tmp_path):
         RetentionPolicy(dry_run=False, destructive=True)
     )
 
+    # The open recovery root is still referenced, so purge must skip it even
+    # after the quarantine grace period has elapsed.
     assert report.purged == ()
     assert quarantined.exists()
 
@@ -950,7 +1001,7 @@ def test_m2_u3_crash_recovery_converges_with_gc_interleaving(tmp_path, fault_poi
 
 @pytest.mark.parametrize(
     ("age_seconds", "expected_purged"),
-    ((86399, False), (86401, True)),
+    ((PURGE_GRACE_SECONDS - 1, False), (PURGE_GRACE_SECONDS + 1, True)),
     ids=("purge-grace-minus-one", "purge-grace-plus-one"),
 )
 def test_b2_purge_grace_boundary_pair(tmp_path, age_seconds, expected_purged):
