@@ -48,6 +48,7 @@ def _run_cli(
     *arguments: str,
     lease_id: str = "fixture-lease",
     env_extra: dict[str, str] | None = None,
+    cli_path: Path | None = None,
 ) -> subprocess.CompletedProcess:
     """Run the production CLI with an isolated, deterministic session carrier."""
     environment = {
@@ -65,7 +66,7 @@ def _run_cli(
     if env_extra:
         environment.update(env_extra)
     return subprocess.run(
-        [sys.executable, str(_MISSION_STATE_PY), *arguments],
+        [sys.executable, str(cli_path or _MISSION_STATE_PY), *arguments],
         cwd=str(root),
         capture_output=True,
         text=True,
@@ -79,8 +80,15 @@ def _checked_cli(
     *arguments: str,
     lease_id: str = "fixture-lease",
     env_extra: dict[str, str] | None = None,
+    cli_path: Path | None = None,
 ) -> subprocess.CompletedProcess:
-    result = _run_cli(root, *arguments, lease_id=lease_id, env_extra=env_extra)
+    result = _run_cli(
+        root,
+        *arguments,
+        lease_id=lease_id,
+        env_extra=env_extra,
+        cli_path=cli_path,
+    )
     if result.returncode != 0:
         raise AssertionError(
             f"CLI fixture command failed: {arguments!r}\nstdout={result.stdout}\nstderr={result.stderr}"
