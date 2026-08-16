@@ -115,6 +115,35 @@ from activity_segments import (  # noqa: E402
     transition_activity_phase,
     validate_activity,
 )
+from mission_application.lifecycle import (  # noqa: E402
+    ActivityEndRequest,
+    ActivityStartRequest,
+    AdvanceRequest,
+    AdvanceServices,
+    InitRequest,
+    LifecycleFailure,
+    MarkHaltRequest,
+    MarkHaltServices,
+    ReactivateRequest,
+    RefreshPidRequest,
+    RefreshPidServices,
+    SetFieldsRequest,
+    SetFieldsServices,
+    UpdateProjectRootRequest,
+    activity_end as run_activity_end,
+    activity_start as run_activity_start,
+    advance as run_advance,
+    initialize as run_initialize,
+    mark_halt as run_mark_halt,
+    reactivate as run_reactivate,
+    refresh_pid as run_refresh_pid,
+    set_fields as run_set_fields,
+    update_project_root as run_update_project_root,
+)
+from mission_persistence.legacy_v4 import (  # noqa: E402
+    LegacyV4InitializerRepository,
+    LegacyV4Repository,
+)
 from worktree_archive import (  # noqa: E402
     STATE_ARCHIVE_GENERATION_SCHEMA,
     STATE_ARCHIVE_POINTER_SCHEMA,
@@ -754,6 +783,41 @@ def _remove_from_aggregate(cwd: Path, sid: str) -> None:
     if sid in sids:
         sids.remove(sid)
         data["active_sessions"] = sids
+        data["updated_at"] = iso_now()
+        atomic_write_json(agg, data)
+
+
+def _load_aggregate_for_lifecycle(cwd: Path) -> tuple[Path, dict]:
+    """Load the rebuildable index strictly for A1 post-session updates."""
+    agg = aggregate_file(cwd)
+    if not agg.exists():
+        return agg, {}
+    data = _read_legacy_json_file(agg)
+    if not isinstance(data, dict):
+        raise ValueError("aggregate index must be an object")
+    sessions = data.get("active_sessions", [])
+    if not isinstance(sessions, list) or any(
+        not isinstance(value, str) for value in sessions
+    ):
+        raise ValueError("aggregate active_sessions must be a string array")
+    return agg, data
+
+
+def _add_to_aggregate_strict(cwd: Path, sid: str) -> None:
+    agg, data = _load_aggregate_for_lifecycle(cwd)
+    sessions = data.setdefault("active_sessions", [])
+    if sid not in sessions:
+        sessions.append(sid)
+        data["updated_at"] = iso_now()
+        atomic_write_json(agg, data)
+
+
+def _remove_from_aggregate_strict(cwd: Path, sid: str) -> None:
+    agg, data = _load_aggregate_for_lifecycle(cwd)
+    sessions = data.get("active_sessions", [])
+    if sid in sessions:
+        sessions.remove(sid)
+        data["active_sessions"] = sessions
         data["updated_at"] = iso_now()
         atomic_write_json(agg, data)
 
@@ -6956,7 +7020,7 @@ def cmd_log_specialist_invocation(args):
 
 
 
-def cmd_init(args):
+def _initialize_legacy_v4(args):
     cwd = Path.cwd()
     goal_dispatch = _resolve_goal_dispatch(
         args.mission,
@@ -7064,7 +7128,7 @@ def cmd_init(args):
     if _issue_ref_key:
         for sf_other in _iter_state_files(cwd):
             try:
-                other = json.loads(sf_other.read_text())
+                other = _read_legacy_json_file(sf_other)
             except Exception:
                 continue
             # 同一セッションの resume では自分自身の旧 state を誤検出しないよう sid 除外
@@ -7175,7 +7239,7 @@ def cmd_init(args):
         existing_agg = {}
         if agg.exists():
             try:
-                existing_agg = json.loads(agg.read_text())
+                existing_agg = _read_legacy_json_file(agg)
             except json.JSONDecodeError:
                 existing_agg = {}  # F-6: 壊れた aggregate は空扱いで復旧 (init を落とさない)
         # Issue #2: 既存 sf_target が別 mission_id を持つ場合、上書き前に archive に退避する。
@@ -7183,7 +7247,7 @@ def cmd_init(args):
         if sf_target.exists():
             existing_mid = ""
             try:
-                existing_data = json.loads(sf_target.read_text())
+                existing_data = _read_legacy_json_file(sf_target)
                 _validate_specialist_public_state(existing_data)
                 existing_mid = existing_data.get("mission_id", "")
                 new_mid = initial.get("mission_id", "")
@@ -7303,7 +7367,7 @@ def cmd_init(args):
             prior_generations = []
             for state_path in _iter_state_files(cwd):
                 try:
-                    prior = json.loads(state_path.read_text(encoding="utf-8"))
+                    prior = _read_legacy_json_file(state_path)
                 except (OSError, json.JSONDecodeError):
                     continue
                 if prior.get("review_group_id") != initial["review_group_id"]:
@@ -7334,6 +7398,14 @@ def cmd_init(args):
         "lease_expires_at": initial["lease_expires_at"],
         "permission_preflight": "passed",
     }))
+
+
+def cmd_init(args):
+    """Adapt init arguments to the A1 v4 compatibility repository."""
+    run_initialize(
+        LegacyV4InitializerRepository(_initialize_legacy_v4),
+        InitRequest(arguments=args),
+    )
 
 
 def cmd_pregate(args):
@@ -8135,30 +8207,64 @@ def _activity_state_file(cwd: Path) -> Path:
     return sf
 
 
+def _read_legacy_json_file(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _parse_captured_json(text: str):
+    return json.loads(text)
+
+
+def _legacy_lifecycle_repository(
+    cwd: Path,
+    sf: Path,
+    *,
+    stamp: bool,
+    strict_read: bool = False,
+    lease_reason: str | None = None,
+) -> LegacyV4Repository:
+    def read_state() -> dict:
+        if strict_read:
+            return _load_state_json(sf)
+        return json.loads(sf.read_text())
+
+    def write_state(data: dict, *, administrative: bool = False) -> None:
+        proposed = stamp_metadata(data, cwd) if stamp else data
+        with _lease_write_reason(lease_reason):
+            if administrative:
+                atomic_write_json(sf, proposed, administrative=True)
+            else:
+                atomic_write_json(sf, proposed)
+
+    return LegacyV4Repository(
+        lock=lambda: StateLock(lock_file(cwd)),
+        read_state=read_state,
+        write_state=write_state,
+        backup_state=lambda: backup_state(sf),
+        add_to_aggregate=lambda: _add_to_aggregate_strict(cwd, sf.stem),
+        remove_from_aggregate=lambda: _remove_from_aggregate_strict(cwd, sf.stem),
+    )
+
+
 def cmd_activity_start(args):
     cwd = Path.cwd()
     sf = _activity_state_file(cwd)
     at = args.at or iso_now()
     try:
-        with StateLock(lock_file(cwd)):
-            data = json.loads(sf.read_text())
-            changed = start_activity_segment(
-                data,
-                args.kind,
-                args.reason,
-                at,
+        result = run_activity_start(
+            _legacy_lifecycle_repository(cwd, sf, stamp=True),
+            ActivityStartRequest(
+                kind=args.kind,
+                reason=args.reason,
+                at=at,
                 detail=args.detail,
                 resume=args.resume,
-                origin="manual",
-            )
-            if changed:
-                data["updated_at"] = at
-                backup_state(sf)
-                atomic_write_json(sf, stamp_metadata(data, cwd))
+            ),
+        )
     except ActivityTimingError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         sys.exit(2)
-    print(json.dumps({"ok": True, "changed": changed, "activity_current": data.get("activity_current")}, ensure_ascii=False))
+    print(json.dumps({"ok": True, "changed": result.changed, "activity_current": result.activity_current}, ensure_ascii=False))
 
 
 def cmd_activity_end(args):
@@ -8166,17 +8272,14 @@ def cmd_activity_end(args):
     sf = _activity_state_file(cwd)
     at = args.at or iso_now()
     try:
-        with StateLock(lock_file(cwd)):
-            data = json.loads(sf.read_text())
-            changed = end_activity_segment(data, at)
-            if changed:
-                data["updated_at"] = at
-                backup_state(sf)
-                atomic_write_json(sf, stamp_metadata(data, cwd))
+        result = run_activity_end(
+            _legacy_lifecycle_repository(cwd, sf, stamp=True),
+            ActivityEndRequest(at=at),
+        )
     except ActivityTimingError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         sys.exit(2)
-    print(json.dumps({"ok": True, "changed": changed, "activity_current": data.get("activity_current")}, ensure_ascii=False))
+    print(json.dumps({"ok": True, "changed": result.changed, "activity_current": result.activity_current}, ensure_ascii=False))
 
 
 def _validated_budget_minutes(raw) -> float | None:
@@ -8242,179 +8345,82 @@ def _budget_pressure(data: dict, now_iso: str) -> dict | None:
     }
 
 
+def _prepare_advance_handoff(cwd: Path, data: dict) -> dict:
+    plan = data["canonical_plan"]
+    expected_binding = _trusted_canonical_plan_binding(data, plan)
+    try:
+        _raw_plan, step_ids = canonical_plan_identity(
+            cwd, plan, expected=expected_binding, reader=_read_strict_review_file
+        )
+    except (OSError, PlanningLifecycleError) as error:
+        raise LifecycleFailure(
+            "canonical plan gate failed: " + str(error),
+            reason="canonical-plan-gate",
+        ) from error
+    return {
+        "schema": "mission-executor-handoff/1",
+        "handoff_id": "handoff_" + secrets.token_hex(16),
+        "plan_path": plan["path"],
+        "plan_digest": plan["digest"],
+        "plan_generation": plan["generation"],
+        "plan_source": plan["source"],
+        "source_id": plan["source_id"],
+        "selection_source": plan["selection_source"],
+        "iteration": data["iteration"],
+        "step_ids": step_ids,
+        "status": "prepared",
+    }
+
+
 def cmd_advance(args):
-    """#237 (F2): phase 遷移と activity 切替を 1 lock で atomic に行う。
-
-    `set phase=` と `activity start` が別コマンドだと「phase だけ進んで activity が
-    空」の state を作れてしまい、activity coverage の欠損 (strict cohort 9.96%) を
-    生む。advance は両方を単一 write で行い、片方だけ進んだ state を機械的に排除する。
-
-    - terminal phase (done/halted) への遷移は mark-passes / mark-halt 専用 (gate 迂回の防止)。
-    - --activity は <kind>:<reason>。検証は lock 取得前に行い、不正入力では一切 write しない。
-    """
+    """Adapt CLI syntax and presentation to the A1 advance use case."""
     cwd = Path.cwd()
     sf = _activity_state_file(cwd)
-    state_preview = None
-    if sf.exists():
-        try:
-            state_preview = json.loads(sf.read_text())
-        except (OSError, json.JSONDecodeError):
-            state_preview = None
-    new_phase = _normalize_set_phase_value(args.phase)
-    if new_phase in {"done", "halted"}:
-        _raise_guided_failure(
-            "advance で terminal phase へは遷移できません。"
-            " 合格は mark-passes、中断は mark-halt を使ってください。",
-            command="advance",
-            reason="terminal-phase",
-            context=_guidance_context_for_state(state_preview, phase=state_preview.get("phase") if isinstance(state_preview, dict) else new_phase),
-            outcome_kind="expected-gate",
-        )
-    raw = args.activity
-    if raw is None:
-        default = PHASE_ACTIVITY_DEFAULTS.get(new_phase)
-        if default is None:
-            print(f"ERROR: phase '{new_phase}' has no default activity.", file=sys.stderr)
-            sys.exit(2)
-        kind, reason = default
-    else:
-        kind, sep, reason = raw.partition(":")
-        if not sep or not kind or not reason:
-            _raise_guided_failure(
-                f"--activity は <kind>:<reason> 形式で指定してください (例: active:implementation)。"
-                f" 受領値: '{raw}'",
-                command="advance",
-                reason="activity-format",
-                context=_guidance_context_for_state(state_preview, phase=new_phase),
-                outcome_kind="invalid-input",
-            )
-    if not kind or not reason:
-        _raise_guided_failure(
-            f"--activity は <kind>:<reason> 形式で指定してください (例: active:implementation)。"
-            f" 受領値: '{raw}'",
-            command="advance",
-            reason="activity-format",
-            context=_guidance_context_for_state(state_preview, phase=new_phase),
-            outcome_kind="invalid-input",
-        )
-    try:
-        validate_activity(kind, reason)
-    except ActivityTimingError as error:
-        print(f"ERROR: {error}", file=sys.stderr)
-        sys.exit(2)
+    phase = _normalize_set_phase_value(args.phase)
     at = args.at or iso_now()
     try:
-        with StateLock(lock_file(cwd)):
-            data = json.loads(sf.read_text())
-            _reject_active_provider_mutation(data, "advance")
-            if (new_phase == "executing" and data.get("phase") != "executing"
-                    and data.get("planning_policy_version") == 1):
-                plan = data.get("canonical_plan")
-                if not isinstance(plan, dict):
-                    _raise_guided_failure(
-                        "policy v1 requires a canonical plan before executing",
-                        command="advance",
-                        reason="missing-canonical-plan",
-                        context=_guidance_context_for_state(data, phase=data.get("phase"), iteration=data.get("iteration")),
-                        outcome_kind="expected-gate",
-                    )
-                try:
-                    expected_binding = _trusted_canonical_plan_binding(data, plan)
-                    _raw_plan, step_ids = canonical_plan_identity(
-                        cwd, plan, expected=expected_binding, reader=_read_strict_review_file
-                    )
-                except (OSError, PlanningLifecycleError) as exc:
-                    print(f"ERROR: canonical plan gate failed: {exc}", file=sys.stderr)
-                    sys.exit(2)
-                if data.get("executor_handoff") is not None:
-                    print("ERROR: executor handoff already exists; use handoff resume", file=sys.stderr)
-                    sys.exit(2)
-                data["executor_handoff"] = {
-                    "schema": "mission-executor-handoff/1",
-                    "handoff_id": "handoff_" + secrets.token_hex(16),
-                    "plan_path": plan["path"], "plan_digest": plan["digest"],
-                    "plan_generation": plan["generation"], "plan_source": plan["source"],
-                    "source_id": plan["source_id"], "selection_source": plan["selection_source"],
-                    "iteration": data["iteration"], "step_ids": step_ids, "status": "prepared",
-                }
-            requested_applicability = getattr(args, "artifact_applicability", None)
-            artifact_path = getattr(args, "artifact_path", None)
-            producer_run_id = getattr(args, "producer_run_id", None)
-            if requested_applicability == "producing":
-                if not artifact_path or not producer_run_id:
-                    _raise_guided_failure(
-                        "producing artifact handoff requires --artifact-path and --producer-run-id",
-                        command="advance",
-                        reason="producing-artifact",
-                        context=_guidance_context_for_state(data, phase=data.get("phase"), iteration=data.get("iteration")),
-                        outcome_kind="invalid-input",
-                    )
-                try:
-                    identity, _ = capture_artifact_identity(
-                        cwd, artifact_path, producer_run_id, canonical=True
-                    )
-                except ArtifactContractError as exc:
-                    print(f"ERROR: {exc}", file=sys.stderr)
-                    sys.exit(2)
-                data["artifact"] = identity
-                data["artifact_applicability"] = "producing"
-                invalidate_artifact_lint_observation(data)
-            elif requested_applicability == "not-applicable":
-                if artifact_path or producer_run_id:
-                    print(
-                        "ERROR: not-applicable artifact handoff cannot include artifact identity",
-                        file=sys.stderr,
-                    )
-                    sys.exit(2)
-                if data.get("artifact_applicability") == "producing":
-                    print(
-                        "ERROR: cannot downgrade producing artifact applicability to not-applicable",
-                        file=sys.stderr,
-                    )
-                    sys.exit(2)
-                data["artifact_applicability"] = "not-applicable"
-            elif artifact_path or producer_run_id:
-                print(
-                    "ERROR: artifact identity requires --artifact-applicability producing",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-            if (
-                data.get("phase") == "executing"
-                and new_phase == "reviewing"
-                and data.get("artifact_applicability") == "pending"
-            ):
-                print(
-                    "ERROR: artifact applicability is pending; resolve it to producing or not-applicable before review",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-            # 現 segment を先に閉じる。_transition_phase の split (旧 kind/reason の
-            # キャリーフォワード) が「旧 reason + 新 phase・0秒」の phantom segment を
-            # 作るのを防ぐ。advance は直後に新 segment を開くため carry-forward 不要。
-            if (
-                isinstance(data.get("activity_current"), dict)
-                and data.get("phase") != new_phase
-            ):
-                end_activity_segment(data, at)
-            _transition_phase(data, new_phase, at)
-            start_activity_segment(
-                data,
-                kind,
-                reason,
-                at,
+        result = run_advance(
+            _legacy_lifecycle_repository(cwd, sf, stamp=True),
+            AdvanceRequest(
+                phase=phase,
+                activity=args.activity,
+                at=at,
                 detail=args.detail,
-                origin="phase-default" if raw is None else None,
+                artifact_applicability=getattr(args, "artifact_applicability", None),
+                artifact_path=getattr(args, "artifact_path", None),
+                producer_run_id=getattr(args, "producer_run_id", None),
+            ),
+            AdvanceServices(
+                reject_active_provider_mutation=_reject_active_provider_mutation,
+                prepare_handoff=lambda data: _prepare_advance_handoff(cwd, data),
+                capture_artifact=lambda path, run_id: capture_artifact_identity(
+                    cwd, path, run_id, canonical=True
+                ),
+                transition_phase=_transition_phase,
+            ),
+        )
+    except LifecycleFailure as error:
+        if error.guided:
+            context = _guidance_context_for_state(
+                error.state,
+                phase=error.state.get("phase") if isinstance(error.state, dict) else phase,
+                iteration=error.state.get("iteration") if isinstance(error.state, dict) else None,
             )
-            data["updated_at"] = at
-            backup_state(sf)
-            atomic_write_json(sf, stamp_metadata(data, cwd))
+            _raise_guided_failure(
+                error.message,
+                command="advance",
+                reason=error.reason,
+                context=context,
+                outcome_kind=error.outcome_kind,
+            )
+        print(f"ERROR: {error.message}", file=sys.stderr)
+        sys.exit(2)
     except (ActivityTimingError, ArtifactContractError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         sys.exit(2)
     print(
         json.dumps(
-            {"ok": True, "phase": data.get("phase"), "activity_current": data.get("activity_current")},
+            {"ok": True, "phase": result.phase, "activity_current": result.activity_current},
             ensure_ascii=False,
         )
     )
@@ -9329,215 +9335,60 @@ FROZEN_FIELDS = {
 
 
 def cmd_set(args):
+    """Adapt generic property syntax to the A1 v4-compatible use case."""
     cwd = Path.cwd()
     sf = resolve_state_file(cwd)
     if not sf.exists():
         print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
         sys.exit(1)
-    with StateLock(lock_file(cwd)):
-        try:
-            data = _load_state_json(sf)
-        except UnsupportedSchemaVersionError as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
-            sys.exit(2)
-        _reject_active_provider_mutation(data, "set")
-        now = iso_now()
-        explicit_keys = {kv.partition("=")[0] for kv in args.kvs}
-        # Issue #222 (A-2/A-3): gate 判定に影響する state フィールドの条件付き set ガード。
-        # reviewer_count は tier と同時の運用上書きだけを許し、halt の解除は承認監査付きの
-        # dedicated reactivate command に限定する。
-        if "reviewer_count" in explicit_keys and not ({"complexity", "review_tier"} & explicit_keys):
+    try:
+        result = run_set_fields(
+            _legacy_lifecycle_repository(cwd, sf, stamp=True, strict_read=True),
+            SetFieldsRequest(kvs=tuple(args.kvs), at=iso_now()),
+            SetFieldsServices(
+                frozen_fields=frozenset(FROZEN_FIELDS),
+                reject_active_provider_mutation=_reject_active_provider_mutation,
+                normalize_phase=_normalize_set_phase_value,
+                transition_phase=_transition_phase,
+                ensure_phase_timing=_ensure_phase_timing,
+                derive_review_tier=derive_review_tier,
+                derive_review_tier_decision=derive_review_tier_decision,
+                reviewer_count_by_tier=dict(TIER_REVIEWER_COUNT),
+                goal_dispatch_fields=_goal_dispatch_route_fields,
+                goal_dispatch_guidance=_goal_dispatch_guidance,
+            ),
+        )
+    except UnsupportedSchemaVersionError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+    except LifecycleFailure as error:
+        if error.guided:
             _raise_guided_failure(
-                "`reviewer_count` は単独 set 不可。"
-                " 変更する場合は `complexity` または `review_tier` と同時に指定してください "
-                "(A-2: agreement gate 無効化の防止)。",
+                error.message,
                 command="set",
-                reason="reviewer-count",
-                context=_guidance_context_for_state(data),
-                outcome_kind="expected-gate",
+                reason=error.reason,
+                context=_guidance_context_for_state(error.state),
+                outcome_kind=error.outcome_kind,
             )
-        if "halt_category" in explicit_keys:
-            _raise_guided_failure(
-                "`halt_category` は set で変更不可。"
-                " 変更は mark-halt / refresh-pid / resume 経由でのみ行ってください "
-                "(A-3: 無承認 reactivate の防止)。",
-                command="set",
-                reason="halt-category",
-                context=_guidance_context_for_state(data),
-                outcome_kind="expected-gate",
-            )
-        if "halt_reason" in explicit_keys:
-            _raise_guided_failure(
-                "`halt_reason` は set で変更不可。"
-                " 明示 halt の解除は `reactivate --approved-by-user` を使用してください "
-                "(A-3: 承認監査を伴わない再活性化の防止)。",
-                command="set",
-                reason="halt-reason",
-                context=_guidance_context_for_state(data),
-                outcome_kind="expected-gate",
-            )
-        if "loop_active" in explicit_keys and data.get("halt_reason"):
-            loop_active_raw = next(
-                (value for key, _, value in (kv.partition("=") for kv in args.kvs) if key == "loop_active"),
-                None,
-            )
-            try:
-                requested_loop_active = json.loads(loop_active_raw) if loop_active_raw is not None else None
-            except json.JSONDecodeError:
-                requested_loop_active = loop_active_raw
-            if requested_loop_active is True:
-                print(
-                    "ERROR: halt中の `loop_active=true` は set で変更不可。"
-                    " `reactivate --approved-by-user` を使用してください。",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-        for kv in args.kvs:
-            if "=" not in kv:
-                print(f"ERROR: key=value 形式で指定してください: {kv}", file=sys.stderr)
-                sys.exit(1)
-            key, _, value = kv.partition("=")
-            # Issue #2: FROZEN_FIELDS を変更禁止 (mission_id 整合性維持)
-            if key in FROZEN_FIELDS:
-                print(
-                    f"ERROR: `{key}` は set で変更不可。新しい mission は `init` を使用してください "
-                    f"(mission_id が再計算されます)。",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-            # Issue #168: review_tier の検証と source 管理
-            if key == "review_tier":
-                if value not in TIER_REVIEWER_COUNT:
-                    print(
-                        f"ERROR: review_tier の値 '{value}' は無効です。"
-                        f" 有効値: {list(TIER_REVIEWER_COUNT)}",
-                        file=sys.stderr,
-                    )
-                    sys.exit(2)
-                # auto 導出値より低い tier を user 指定した場合は WARNING (拒否しない)
-                _cur_mission = data.get("mission", "")
-                _cur_cx = data.get("complexity")
-                _cur_risk = (data.get("task_profile") or {}).get("risk")
-                _derived_tier, _ = derive_review_tier(_cur_mission, _cur_cx, _cur_risk)
-                _tier_order = {"light": 0, "standard": 1, "full": 2}
-                if _tier_order.get(value, 0) < _tier_order.get(_derived_tier, 0):
-                    print(
-                        f"WARNING [#168]: review_tier='{value}' は auto 導出値 '{_derived_tier}' より低いです。"
-                        f" ゲート意味論 (threshold/open_high/findings evidence/halt) は変わりません。",
-                        file=sys.stderr,
-                    )
-                data["review_tier"] = value
-                data["review_tier_source"] = "user"
-                continue
-            # 型推論: 数値 / bool / JSON
-            try:
-                parsed_value = json.loads(value)
-            except json.JSONDecodeError:
-                parsed_value = value
-            if key == "phase":
-                normalized_phase = _normalize_set_phase_value(str(parsed_value))
-                try:
-                    old_phase = data.get("phase")
-                    current = data.get("activity_current")
-                    if (
-                        normalized_phase not in {"done", "halted"}
-                        and old_phase != normalized_phase
-                        and is_phase_default_activity(current, old_phase)
-                    ):
-                        end_activity_segment(data, now)
-                    _transition_phase(data, normalized_phase, now)
-                except ArtifactContractError as exc:
-                    print(f"ERROR: {exc}", file=sys.stderr)
-                    sys.exit(2)
-                if normalized_phase not in {"done", "halted"} and not data.get("activity_current"):
-                    try:
-                        start_phase_default_activity(data, now)
-                    except ActivityTimingError:
-                        pass
-            else:
-                data[key] = parsed_value
-        # A-M1 (2026-06-10 / Issue #168 拡張): complexity 変更時の reviewer_count と review_tier 同期
-        # - review_tier_source が "auto" (またはフィールド不在) の場合: tier を再導出して reviewer_count も同期
-        # - review_tier_source が "user" の場合: tier を維持し、reviewer_count も tier 由来を維持
-        # - reviewer_count を明示した場合はそちらが優先
-        # (explicit_keys は関数冒頭で計算済み)
-        if "complexity" in explicit_keys:
-            tier_source = data.get("review_tier_source", "auto")
-            if tier_source == "user":
-                # user 指定の tier を維持: reviewer_count も tier 由来を維持 (complexity 変更に追随しない)
-                if "reviewer_count" not in explicit_keys and data.get("review_tier") in TIER_REVIEWER_COUNT:
-                    data["reviewer_count"] = TIER_REVIEWER_COUNT[data["review_tier"]]
-            else:
-                # auto: complexity 変更で tier を再導出
-                cx = data.get("complexity")
-                _mission = data.get("mission", "")
-                _risk = (data.get("task_profile") or {}).get("risk")
-                _new_decision = derive_review_tier_decision(_mission, cx, _risk)
-                _new_tier = _new_decision["tier"]
-                data["review_tier"] = _new_tier
-                data["review_tier_source"] = "auto"
-                data["review_tier_signals"] = _new_decision["signals"]
-                data["review_tier_signal_details"] = _new_decision["signal_details"]
-                if "reviewer_count" not in explicit_keys:
-                    data["reviewer_count"] = TIER_REVIEWER_COUNT[_new_tier]
-        elif "review_tier" in explicit_keys and "reviewer_count" not in explicit_keys:
-            # review_tier だけ変更された場合: reviewer_count を tier から同期
-            _tier = data.get("review_tier")
-            if _tier in TIER_REVIEWER_COUNT:
-                data["reviewer_count"] = TIER_REVIEWER_COUNT[_tier]
-        # halt 理由がない中断 state の loop 再開時は aggregate へ戻す。
-        # halt 済み state は上のガードで拒否し、reactivate / refresh-pid に限定する。
-        if "loop_active" in explicit_keys and data.get("loop_active") is True:
-            _add_to_aggregate(cwd, sf.stem)
-        # #330: routing のコマンド層 hard 化。set complexity=Simple が routing 条件を
-        # 満たす場合、コマンド自身が verdict を実行する (state を routed-goal で halt)。
-        # #325 の next 駆動 gate は orchestrator が next を呼ばない経路に 1/3 しか
-        # 効かなかった実測 (portfolio-v2) に基づく。init 経路 (#276/#304) と挙動統一。
-        _routed_verdict = None
-        if (
-            "complexity" in explicit_keys
-            and data.get("complexity") == "Simple"
-            and data.get("loop_active") is True
-            and not data.get("halt_reason")
-            and (data.get("phase") or "planning") == "planning"
-            and (data.get("iteration") or 1) <= 1
-            and not data.get("review_tier_signals")
-            and data.get("review_tier_source") != "user"
-            and not data.get("issue_ref")
-            and not data.get("force_mission")
-            and (data.get("session_role") or "implementer") == "implementer"
-            and not (data.get("score_history") or [])
-        ):
-            dispatch_fields = _goal_dispatch_route_fields(data)
-            data["goal_dispatch_effective"] = dispatch_fields["goal_dispatch_effective"]
-            data["goal_dispatch_host"] = dispatch_fields["goal_dispatch_host"]
-            if dispatch_fields.get("goal_dispatch_fallback_reason"):
-                data["goal_dispatch_fallback_reason"] = dispatch_fields["goal_dispatch_fallback_reason"]
-            else:
-                data.pop("goal_dispatch_fallback_reason", None)
-            data["loop_active"] = False
-            data["halt_reason"] = "routed-to-goal (#330: Simple + リスクシグナルなし)"
-            data["halt_category"] = "routed-goal"
-            _transition_phase(data, "halted", now)
-            _write_terminal_outcome(data)
-            _remove_from_aggregate(cwd, sf.stem)
-            _routed_verdict = {
-                "ok": True,
-                "route": "goal",
-                "complexity": "Simple",
-                "reason": "Simple complexity with no irreversible/security signals (#330)",
-                "guidance": _goal_dispatch_guidance(
-                    dispatch_fields,
-                    "state は routed-goal で halt 済み (mark-halt 不要)。mission ループを続けず、",
-                ),
-                **dispatch_fields,
-            }
-        _ensure_phase_timing(data, now)
-        data["updated_at"] = now
-        data = stamp_metadata(data, cwd)
-        backup_state(sf)
-        atomic_write_json(sf, data, administrative=bool(_routed_verdict))
-    print(json.dumps(_routed_verdict or {"ok": True}, ensure_ascii=False, indent=2 if _routed_verdict else None))
+        print(f"ERROR: {error.message}", file=sys.stderr)
+        sys.exit(2 if error.reason != "key-value-format" else 1)
+    except (ActivityTimingError, ArtifactContractError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+    for warning in result.warnings:
+        print(warning, file=sys.stderr)
+    if result.aggregate_error is not None:
+        print(
+            f"WARNING: aggregate index update failed: {result.aggregate_error}",
+            file=sys.stderr,
+        )
+    print(
+        json.dumps(
+            result.routed_verdict or {"ok": True},
+            ensure_ascii=False,
+            indent=2 if result.routed_verdict else None,
+        )
+    )
 
 
 # H2 (2026-06-10): スコア項目キーの正規形とエイリアス。実ログで表記揺れが混在し
@@ -13964,40 +13815,28 @@ def cmd_mark_halt(args):
         print("ERROR: state file が見つかりません。先に init してください。", file=sys.stderr)
         sys.exit(1)
     category = _normalize_halt_category(getattr(args, "category", None))
-    with StateLock(lock_file(cwd)):
-        try:
-            data = _load_state_json(sf)
-        except UnsupportedSchemaVersionError as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
-            sys.exit(2)
-        _reject_active_provider_mutation(data, "mark-halt")
-        now = iso_now()
-        if category == "awaiting-approval":
-            record_activity_event(data, "awaiting-approval", now)
-        data["halt_reason"] = args.reason
-        data["halt_category"] = category  # #190
-        data["loop_active"] = False
-        if category == "routed-goal":
-            dispatch_fields = _goal_dispatch_route_fields(data)
-            data["goal_dispatch_effective"] = dispatch_fields["goal_dispatch_effective"]
-            data["goal_dispatch_host"] = dispatch_fields["goal_dispatch_host"]
-            if dispatch_fields.get("goal_dispatch_fallback_reason"):
-                data["goal_dispatch_fallback_reason"] = dispatch_fields["goal_dispatch_fallback_reason"]
-            else:
-                data.pop("goal_dispatch_fallback_reason", None)
-        _transition_phase(
-            data,
-            "halted",
-            now,
-            terminal_trusted_boundary=category == "stale",
-        )  # M4 (2026-06-10): phase 自動更新
-        _write_terminal_outcome(data)
-        data["updated_at"] = now
-        backup_state(sf)
-        atomic_write_json(sf, data)
-        # #11: aggregate 更新も同じ StateLock 内で行う (lock 外だと並列 halt で lost update)
-        _remove_from_aggregate(cwd, resolve_session_id())
-    print(json.dumps({"ok": True, "halt_reason": args.reason, "halt_category": category}))
+    try:
+        result = run_mark_halt(
+            _legacy_lifecycle_repository(cwd, sf, stamp=False, strict_read=True),
+            MarkHaltRequest(args.reason, category, iso_now()),
+            MarkHaltServices(
+                reject_active_provider_mutation=_reject_active_provider_mutation,
+                transition_phase=_transition_phase,
+                goal_dispatch_fields=_goal_dispatch_route_fields,
+            ),
+        )
+    except UnsupportedSchemaVersionError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+    except LifecycleFailure as error:
+        print(f"ERROR: {error.message}", file=sys.stderr)
+        sys.exit(2)
+    if result.aggregate_error is not None:
+        print(
+            f"WARNING: aggregate index update failed: {result.aggregate_error}",
+            file=sys.stderr,
+        )
+    print(json.dumps({"ok": True, "halt_reason": result.halt_reason, "halt_category": result.halt_category}))
 
 
 def cmd_reactivate(args):
@@ -14018,76 +13857,30 @@ def cmd_reactivate(args):
     if not sf.exists():
         print("ERROR: state file が見つかりません。先に init してください。", file=sys.stderr)
         sys.exit(1)
-
-    with StateLock(lock_file(cwd)):
-        try:
-            data = _load_state_json(sf)
-        except UnsupportedSchemaVersionError as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
-            sys.exit(2)
-        previous_halt_reason = data.get("halt_reason") or ""
-        raw_halt_category = data.get("halt_category")
-        previous_halt_category = raw_halt_category if raw_halt_category not in (None, "") else "unknown"
-        expected_halt_category = _halt_category_for_confirmation(raw_halt_category)
-        previous_phase = data.get("phase") or "unknown"
-        if data.get("passes") is True:
-            print("ERROR: 合格済み mission は reactivate できません。", file=sys.stderr)
-            sys.exit(2)
-        if data.get("loop_active") is not False or not previous_halt_reason:
-            print("ERROR: reactivate 対象の停止中 mission ではありません。", file=sys.stderr)
-            sys.exit(2)
-        legacy_stale = _is_legacy_stale_halt(raw_halt_category, previous_halt_reason)
-        if expected_halt_category == "stale" or legacy_stale:
-            print(
-                "ERROR: stale/orphan halt は reactivate ではなく resume を使用してください。",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        if args.expected_category != expected_halt_category:
-            print(
-                "ERROR: --expected-category が現在の halt_category と一致しません: "
-                f"expected={args.expected_category!r} actual={previous_halt_category!r} "
-                f"normalized={expected_halt_category!r}",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-
-        now = iso_now()
-        audit_entry = {
-            "timestamp": now,
-            "previous_halt_reason": previous_halt_reason,
-            "previous_halt_category": previous_halt_category,
-            "previous_phase": previous_phase,
-            "approved_reason": approved_reason,
-            "approved_by_user": True,
-            "target_phase": args.phase,
-        }
-        history = data.get("reactivation_history")
-        if history is not None and not isinstance(history, list):
-            print("ERROR: reactivation_history が不正なため再活性化できません。", file=sys.stderr)
-            sys.exit(2)
-        close_activity_for_terminal(data, now, trusted_boundary=True)
-        data["halt_reason"] = ""
-        data.pop("halt_category", None)
-        data.pop("terminal_outcome", None)
-        data.pop("resume_target_phase", None)
-        data["loop_active"] = True
-        data["phase"] = args.phase
-        data["phase_started_at"] = now
-        start_activity_segment(
-            data,
-            "active",
-            "resumed-implementation",
-            now,
-            detail=approved_reason,
-            resume=True,
+    try:
+        result = run_reactivate(
+            _legacy_lifecycle_repository(cwd, sf, stamp=True, strict_read=True),
+            ReactivateRequest(
+                approved_by_user=args.approved_by_user,
+                reason=approved_reason,
+                expected_category=args.expected_category,
+                phase=args.phase,
+                at=iso_now(),
+            ),
         )
-        data.setdefault("reactivation_history", []).append(audit_entry)
-        data["updated_at"] = now
-        backup_state(sf)
-        atomic_write_json(sf, stamp_metadata(data, cwd))
-        _add_to_aggregate(cwd, sf.stem)
-    print(json.dumps({"ok": True, "reactivated": True, "audit": audit_entry}, ensure_ascii=False))
+    except UnsupportedSchemaVersionError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+    except (LifecycleFailure, ActivityTimingError) as error:
+        message = error.message if isinstance(error, LifecycleFailure) else str(error)
+        print(f"ERROR: {message}", file=sys.stderr)
+        sys.exit(2)
+    if result.aggregate_error is not None:
+        print(
+            f"WARNING: aggregate index update failed: {result.aggregate_error}",
+            file=sys.stderr,
+        )
+    print(json.dumps({"ok": True, "reactivated": True, "audit": result.audit}, ensure_ascii=False))
 
 
 def _pid_is_agent(pid: int) -> bool:
@@ -14131,74 +13924,42 @@ def cmd_refresh_pid(args):
         print("ERROR: state.json が見つかりません。", file=sys.stderr)
         sys.exit(1)
     new_pid = find_agent_pid()
-    with StateLock(lock_file(cwd)):
-        data = json.loads(sf.read_text())
-        now = iso_now()
-        current = data.get("activity_current")
-        if not (isinstance(current, dict) and current.get("started_at") == now):
-            close_activity_for_resume(data, now)
-        old_pid = data.get("pid")
-        if (
-            not _lease_fields_present(data)
-            and old_pid
-            and isinstance(old_pid, int)
-            and old_pid != new_pid
-        ):
-            # PID 再利用対策: comm が agent CLI でなければ別プロセス → 安全に継承可
-            if _pid_is_agent(old_pid) and not args.force:
-                print(
-                    f"ERROR: 既存の owner pid={old_pid} が agent CLI プロセスとして alive です。"
-                    f" 別セッションが現役の可能性があるため拒否しました。"
-                    f" 強制継承するには --force を指定してください。",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-        data["pid"] = new_pid
-        # halt 解除 + ループ再アクティベート (resume → orphan halt フローからの復帰用)
-        prev_halt = data.get("halt_reason", "")
-        prev_category = data.get("halt_category")
-        prev_loop = data.get("loop_active", False)
-        legacy_reactivatable_halt = _is_legacy_stale_halt(prev_category, prev_halt)
-        was_reactivatable_halt = prev_category == "stale" or legacy_reactivatable_halt
-        target_phase = data.get("resume_target_phase")
-        phase_can_reactivate = data.get("phase") != "halted" or target_phase in {
-            "planning",
-            "executing",
-            "reviewing",
-            "scoring",
-        }
-        reactivated = (
-            was_reactivatable_halt
-            and not getattr(args, "no_reactivate", False)
-            and phase_can_reactivate
+    try:
+        result = run_refresh_pid(
+            _legacy_lifecycle_repository(
+                cwd,
+                sf,
+                stamp=False,
+                lease_reason=getattr(args, "lease_reason", None),
+            ),
+            RefreshPidRequest(
+                new_pid=new_pid,
+                force=args.force,
+                reactivate=not getattr(args, "no_reactivate", False),
+                at=iso_now(),
+            ),
+            RefreshPidServices(
+                lease_fields_present=_lease_fields_present,
+                pid_is_agent=_pid_is_agent,
+                resume_phase_timing=_resume_phase_timing,
+            ),
         )
-        restored_phase = False
-        if reactivated:
-            if data.get("phase") == "halted":
-                data["phase"] = target_phase
-                data["phase_started_at"] = now
-                data.pop("resume_target_phase", None)
-                restored_phase = True
-            data["halt_reason"] = ""
-            data.pop("halt_category", None)
-            data.pop("terminal_outcome", None)
-            data["loop_active"] = True
-            _add_to_aggregate(cwd, sf.stem)  # F-4: 再活性化分を active_sessions へ戻す
-        if not restored_phase:
-            _resume_phase_timing(data, now)
-        if data.get("loop_active") is not False and not data.get("activity_current"):
-            start_phase_default_activity(data, now)
-        data["updated_at"] = now
-        backup_state(sf)
-        with _lease_write_reason(getattr(args, "lease_reason", None)):
-            atomic_write_json(sf, data)
+    except (LifecycleFailure, ActivityTimingError) as error:
+        message = error.message if isinstance(error, LifecycleFailure) else str(error)
+        print(f"ERROR: {message}", file=sys.stderr)
+        sys.exit(2)
+    if result.aggregate_error is not None:
+        print(
+            f"WARNING: aggregate index update failed: {result.aggregate_error}",
+            file=sys.stderr,
+        )
     print(json.dumps({
         "ok": True,
-        "old_pid": old_pid,
-        "new_pid": new_pid,
-        "reactivated": reactivated,
-        "prev_halt_reason": prev_halt,
-        "prev_loop_active": prev_loop,
+        "old_pid": result.old_pid,
+        "new_pid": result.new_pid,
+        "reactivated": result.reactivated,
+        "prev_halt_reason": result.previous_halt_reason,
+        "prev_loop_active": result.previous_loop_active,
     }))
 
 
@@ -14258,14 +14019,14 @@ def cmd_resume(args):
             sys.exit(code)
         resume["pid_refreshed"] = True
         try:
-            resume["reactivated"] = bool(json.loads(out).get("reactivated"))
+            resume["reactivated"] = bool(_parse_captured_json(out).get("reactivated"))
         except (ValueError, AttributeError):
             pass
 
     # 2. cleanup-empty (空 .mission-state/ を rmdir)。
     _, ce_out = _capture_command_output(cmd_cleanup_empty, argparse.Namespace(path=str(cwd)))
     try:
-        resume["cleaned_empty"] = json.loads(ce_out).get("action") == "removed"
+        resume["cleaned_empty"] = _parse_captured_json(ce_out).get("action") == "removed"
     except ValueError:
         pass
 
@@ -14275,14 +14036,14 @@ def cmd_resume(args):
         argparse.Namespace(root=str(cwd), execute=not dry_run),
     )
     try:
-        resume["halted_stale"] = len(json.loads(cs_out).get("halted", []))
+        resume["halted_stale"] = len(_parse_captured_json(cs_out).get("halted", []))
     except ValueError:
         pass
 
     # 4. next (state から次の 1 手を決定論導出)。
     _, next_out = _capture_command_output(cmd_next, argparse.Namespace())
     try:
-        out_obj = json.loads(next_out)
+        out_obj = _parse_captured_json(next_out)
     except ValueError:
         out_obj = {"next_action": "init", "summary": "state を判定できませんでした"}
     out_obj["resume"] = resume
@@ -14309,14 +14070,11 @@ def cmd_update_project_root(args):
             print("ERROR: state.json が見つかりません。", file=sys.stderr)
             sys.exit(1)
     new_root = str(Path(args.path).resolve())
-    with StateLock(lock_file(cwd)):
-        data = json.loads(sf.read_text())
-        old_root = data.get("project_root", "")
-        data["project_root"] = new_root
-        data["updated_at"] = iso_now()
-        backup_state(sf)
-        atomic_write_json(sf, data)
-    print(json.dumps({"ok": True, "old_project_root": old_root, "new_project_root": new_root}))
+    result = run_update_project_root(
+        _legacy_lifecycle_repository(cwd, sf, stamp=False),
+        UpdateProjectRootRequest(new_root=new_root, at=iso_now()),
+    )
+    print(json.dumps({"ok": True, "old_project_root": result.old_root, "new_project_root": result.new_root}))
 
 
 def cmd_cleanup_empty(args):
@@ -14378,43 +14136,59 @@ def _terminalize_state_file(
         updated = _parse_iso_datetime(latest.get("updated_at"))
         if sampled and updated and sampled < updated:
             now = str(latest["updated_at"])
-        latest["halt_reason"] = reason
-        latest["halt_category"] = category
-        latest["loop_active"] = False
-        if set_terminal_phase:
-            _transition_phase(
-                latest,
-                "halted",
-                now,
-                terminal_trusted_boundary=category == "stale",
-            )
-        else:
+
+        def terminalize_without_phase(data: dict, at: str, trusted: bool) -> None:
             if category == "stale":
                 _accrue_phase_for_terminal_control(
-                    latest,
-                    latest.get("phase"),
-                    now,
-                    trusted_boundary=True,
+                    data,
+                    data.get("phase"),
+                    at,
+                    trusted_boundary=trusted,
                 )
-                latest["phase_started_at"] = now
+                data["phase_started_at"] = at
             close_activity_for_terminal(
-                latest,
-                now,
-                trusted_boundary=category == "stale",
+                data,
+                at,
+                trusted_boundary=trusted,
             )
-        _write_terminal_outcome(latest)
-        latest["updated_at"] = now
-        _validate_specialist_public_state(latest)
-        backup_state(sf)
-        # Publish the janitor CAS directly on every terminalize path: the janitor
-        # is not a normal writer and must neither impersonate the owner token nor
-        # acquire a fresh lease onto a legacy state it is halting (which would
-        # also emit a misleading lease carrier for the dead session).
-        _atomic_write(
-            sf, lambda f: json.dump(latest, f, indent=2, ensure_ascii=False)
+
+        def write_terminal_state(data: dict, *, administrative: bool = False) -> None:
+            _validate_specialist_public_state(data)
+            # Janitor CAS deliberately bypasses owner-token acquisition; it
+            # publishes the already revalidated terminal state under this lock.
+            _atomic_write(sf, lambda f: json.dump(data, f, indent=2, ensure_ascii=False))
+
+        repository = LegacyV4Repository(
+            lock=contextlib.nullcontext,
+            read_state=lambda: copy.deepcopy(latest),
+            write_state=write_terminal_state,
+            backup_state=lambda: backup_state(sf),
+            remove_from_aggregate=(
+                (lambda: _remove_from_aggregate_strict(proj, sf.stem))
+                if sf.parent.name == "sessions"
+                else None
+            ),
         )
-        if sf.parent.name == "sessions":
-            _remove_from_aggregate(proj, sf.stem)
+        result = run_mark_halt(
+            repository,
+            MarkHaltRequest(
+                reason=reason,
+                category=category,
+                at=now,
+                set_terminal_phase=set_terminal_phase,
+            ),
+            MarkHaltServices(
+                reject_active_provider_mutation=lambda _state, _command: None,
+                transition_phase=_transition_phase,
+                goal_dispatch_fields=_goal_dispatch_route_fields,
+                terminalize_without_phase=terminalize_without_phase,
+            ),
+        )
+        if result.aggregate_error is not None:
+            print(
+                f"WARNING: aggregate index update failed: {result.aggregate_error}",
+                file=sys.stderr,
+            )
         return True
 
 
@@ -14457,7 +14231,7 @@ def cmd_cleanup_stale(args):
             continue
         for sf in _iter_state_files(root):
             try:
-                data = json.loads(sf.read_text())
+                data = _read_legacy_json_file(sf)
                 if not data.get("loop_active"):
                     continue
                 if data.get("passes") or data.get("halt_reason"):
@@ -14813,7 +14587,7 @@ def cmd_halt(args):
                 continue
             for sf in _iter_state_files(root):
                 try:
-                    data = json.loads(sf.read_text())
+                    data = _read_legacy_json_file(sf)
                     if data.get("loop_active") and not data.get("passes") and not data.get("halt_reason"):
                         proj = _project_root_of(sf)
                         changed = _terminalize_state_file(
