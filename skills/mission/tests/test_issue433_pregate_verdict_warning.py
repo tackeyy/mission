@@ -3,16 +3,30 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
-def _record_payload(*, issue_ref: str, verdict: str) -> str:
+# Shared test clock: capture UTC once per process so payloads and injected CLI
+# state use the same reference time across a test run.
+_TEST_NOW = datetime.now(timezone.utc)
+
+
+def _iso_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _now_env() -> dict[str, str]:
+    return {"MISSION_STATE_NOW": _iso_utc(_TEST_NOW)}
+
+
+def _record_payload(*, issue_ref: str, verdict: str, age_hours: int = 1) -> str:
     return json.dumps(
         {
             "schema": "mission-pregate-evaluation/1",
             "issue_ref": issue_ref,
             "subject_digest": "sha256:" + "1" * 64,
-            "evaluated_at": "2026-08-13T00:00:00Z",
+            "evaluated_at": _iso_utc(_TEST_NOW - timedelta(hours=age_hours)),
             "ttl_hours": 72,
             "verdict": verdict,
             "gate_id": "planning-check",
@@ -27,7 +41,17 @@ def _record_payload(*, issue_ref: str, verdict: str) -> str:
 def _prepare_pregate(run_cli, root: Path, verdict: str) -> None:
     input_path = root / f"pregate-{verdict}.json"
     input_path.write_text(_record_payload(issue_ref="433", verdict=verdict), encoding="utf-8")
-    run_cli("pregate", "record", "--issue-ref", "433", "--input", str(input_path), cwd=root, check=True)
+    run_cli(
+        "pregate",
+        "record",
+        "--issue-ref",
+        "433",
+        "--input",
+        str(input_path),
+        cwd=root,
+        check=True,
+        env_extra=_now_env(),
+    )
 
 
 def _init_state(run_cli, root: Path):
@@ -40,6 +64,7 @@ def _init_state(run_cli, root: Path):
         "433",
         cwd=root,
         check=True,
+        env_extra=_now_env(),
     )
 
 
@@ -101,7 +126,7 @@ def test_next_includes_pregate_warning_in_planning_guidance_for_non_accepted_ver
     _prepare_pregate(run_cli, root, "split-required")
     _init_state(run_cli, root)
 
-    result = run_cli("next", cwd=root, check=True)
+    result = run_cli("next", cwd=root, check=True, env_extra=_now_env())
     out = json.loads(result.stdout)
 
     assert result.returncode == 0
@@ -117,7 +142,7 @@ def test_next_is_silent_for_accepted_or_missing_pregate(run_cli, tmp_path):
     _prepare_pregate(run_cli, accepted_root, "accepted")
     _init_state(run_cli, accepted_root)
 
-    accepted = run_cli("next", cwd=accepted_root, check=True)
+    accepted = run_cli("next", cwd=accepted_root, check=True, env_extra=_now_env())
     accepted_out = json.loads(accepted.stdout)
     assert accepted.returncode == 0
     assert "pregate verdict" not in accepted_out["summary"]
@@ -127,7 +152,7 @@ def test_next_is_silent_for_accepted_or_missing_pregate(run_cli, tmp_path):
     missing_root.mkdir()
     (missing_root / ".mission-state").mkdir()
     _init_state(run_cli, missing_root)
-    missing = run_cli("next", cwd=missing_root, check=True)
+    missing = run_cli("next", cwd=missing_root, check=True, env_extra=_now_env())
     missing_out = json.loads(missing.stdout)
     assert missing.returncode == 0
     assert "pregate verdict" not in missing_out["summary"]
