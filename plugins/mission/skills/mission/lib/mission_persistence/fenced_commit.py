@@ -46,6 +46,12 @@ from .local_uow import (
     validate_staged_generation,
     validate_verified_blob_set,
 )
+from .gc import (
+    GCReport,
+    GarbageCollectionError,
+    RetentionPolicy,
+    collect_locked,
+)
 MAX_HEAD_BYTES = 4 * 1024
 MAX_AUDIT_BYTES = 8 * 1024
 MAX_COMMIT_BYTES = STATE_LIMIT
@@ -1160,6 +1166,7 @@ class LocalFencedRepository:
             self.root / "transactions",
             self.root / "transactions" / "prepared",
             self.root / "transactions" / "projections",
+            self.root / "transactions" / "quarantine",
             self.root / "transactions" / "resolved",
             self.root / "objects",
             self.root / "generations",
@@ -1435,6 +1442,28 @@ class LocalFencedRepository:
         if content is None:
             return None, None, None
         return _parse_head(content, session_id), content, _sha256(content)
+
+    def _gc_commit_fact_unlocked(self, name: str) -> tuple[CommitRecord, str]:
+        if not name.endswith(".json") or _DIGEST_RE.fullmatch("sha256:" + name[:-5]) is None:
+            raise FencedCommitError("record-invalid", "commit filename is invalid")
+        with self._pinned_directory("commits") as pinned:
+            content = self._read_pinned_file(pinned, name, limit=MAX_COMMIT_BYTES)
+        assert content is not None
+        digest = _sha256(content)
+        if name != digest.removeprefix("sha256:") + ".json":
+            raise FencedCommitError("record-invalid", "commit filename digest differs")
+        commit = _parse_commit(content)
+        commit_ref = RecordRef(digest, "commits/" + name, len(content))
+        prior_head = HeadRecord(
+            commit=commit_ref,
+            generation=commit.target_generation,
+            session_id=commit.session_id,
+            state_generation=commit.generation,
+        )
+        prior_head_digest = _sha256(
+            _canonical_bytes(_head_document(prior_head), limit=MAX_HEAD_BYTES)
+        )
+        return commit, prior_head_digest
 
     def _manifest_records(self, content: bytes) -> tuple[RecordRef, tuple[EffectRef, ...]]:
         document = _decode_record(content, limit=STATE_LIMIT)
@@ -2316,7 +2345,7 @@ class LocalFencedRepository:
                 ) from exc
             self._verify_pinned_directory(pinned)
         for name in entries:
-            if name in {"prepared", "projections", "resolved"}:
+            if name in {"prepared", "projections", "quarantine", "resolved"}:
                 continue
             if not name.startswith(".stage-") or _TRANSACTION_RE.fullmatch(
                 name.removeprefix(".stage-")
@@ -3103,6 +3132,13 @@ class LocalFencedRepository:
         session_id = _session_id(session_id)
         with self._lock():
             return self._recover_unlocked(session_id)
+
+    def collect(self, policy: RetentionPolicy = RetentionPolicy()) -> GCReport:
+        with self._lock():
+            try:
+                return collect_locked(self, policy)
+            except GarbageCollectionError as exc:
+                raise FencedCommitError(exc.code, exc.detail) from exc
 
     def _write_temp(self, pinned: _PinnedDirectory, content: bytes) -> str:
         self._verify_pinned_directory(pinned)
