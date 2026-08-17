@@ -190,7 +190,9 @@ from mission_persistence.legacy_v4 import (  # noqa: E402
     LegacyV4InitializerRepository,
     LegacyV4Repository,
 )
-from mission_persistence.repository_binding import require_legacy_session  # noqa: E402
+from mission_persistence.repository_binding import (  # noqa: E402
+    select_legacy_repository,
+)
 from worktree_archive import (  # noqa: E402
     STATE_ARCHIVE_GENERATION_SCHEMA,
     STATE_ARCHIVE_POINTER_SCHEMA,
@@ -6797,7 +6799,6 @@ def _resolve_evidence_output_path(cwd: Path, path_text: str) -> Path:
 
 def _legacy_evidence_repository(cwd: Path, sf: Path, *, stamp: bool) -> LegacyV4Repository:
     """Bind A3 decisions to the current fenced v4 state transaction."""
-    format_selector = require_legacy_session(sf.stem, sf)
     lease: dict[str, object] = {}
 
     def read_state() -> dict:
@@ -6809,13 +6810,17 @@ def _legacy_evidence_repository(cwd: Path, sf: Path, *, stamp: bool) -> LegacyV4
         proposed = stamp_metadata(data, cwd) if stamp else data
         atomic_write_json(sf, proposed, lease_decision=lease["decision"])
 
-    return LegacyV4Repository(
-        lock=lambda: StateLock(lock_file(cwd)),
-        read_state=read_state,
-        write_state=write_state,
-        backup_state=lambda: backup_state(sf),
-        effect_transaction=lambda effects: _publish_evidence_effects(cwd, effects),
-        format_guard=lambda: format_selector.select(),
+    return select_legacy_repository(
+        sf.stem,
+        sf,
+        lambda format_guard: LegacyV4Repository(
+            lock=lambda: StateLock(lock_file(cwd)),
+            read_state=read_state,
+            write_state=write_state,
+            backup_state=lambda: backup_state(sf),
+            effect_transaction=lambda effects: _publish_evidence_effects(cwd, effects),
+            format_guard=format_guard,
+        ),
     )
 
 
@@ -8481,8 +8486,8 @@ def _legacy_lifecycle_repository(
     lease_reason: str | None = None,
     allow_partial_lease_terminal_write: bool = False,
     pre_admit_lease: bool = False,
+    session_id: str | None = None,
 ) -> LegacyV4Repository:
-    format_selector = require_legacy_session(sf.stem, sf)
     admitted_lease = [_LEASE_DECISION_UNSET]
     admitted_identity = [None]
     backup_snapshot = [None]
@@ -8572,14 +8577,18 @@ def _legacy_lifecycle_repository(
             else:
                 atomic_write_json(sf, proposed)
 
-    return LegacyV4Repository(
-        lock=lambda: StateLock(lock_file(cwd)),
-        read_state=read_state,
-        write_state=write_state,
-        backup_state=guarded_backup,
-        add_to_aggregate=lambda: _add_to_aggregate_strict(cwd, sf.stem),
-        remove_from_aggregate=lambda: _remove_from_aggregate_strict(cwd, sf.stem),
-        format_guard=lambda: format_selector.select(),
+    return select_legacy_repository(
+        session_id or sf.stem,
+        sf,
+        lambda format_guard: LegacyV4Repository(
+            lock=lambda: StateLock(lock_file(cwd)),
+            read_state=read_state,
+            write_state=write_state,
+            backup_state=guarded_backup,
+            add_to_aggregate=lambda: _add_to_aggregate_strict(cwd, sf.stem),
+            remove_from_aggregate=lambda: _remove_from_aggregate_strict(cwd, sf.stem),
+            format_guard=format_guard,
+        ),
     )
 
 
@@ -14456,8 +14465,18 @@ def cmd_update_project_root(args):
             print("ERROR: state.json が見つかりません。", file=sys.stderr)
             sys.exit(1)
     new_root = str(Path(args.path).resolve())
+    loaded_session_id = _load_state_json(sf).get("session_id")
     result = run_update_project_root(
-        _legacy_lifecycle_repository(cwd, sf, stamp=False),
+        _legacy_lifecycle_repository(
+            cwd,
+            sf,
+            stamp=False,
+            session_id=(
+                loaded_session_id
+                if isinstance(loaded_session_id, str) and loaded_session_id
+                else sf.stem
+            ),
+        ),
         UpdateProjectRootRequest(new_root=new_root, at=iso_now()),
     )
     print(json.dumps({"ok": True, "old_project_root": result.old_root, "new_project_root": result.new_root}))
@@ -14544,18 +14563,21 @@ def _terminalize_state_file(
             # publishes the already revalidated terminal state under this lock.
             _atomic_write(sf, lambda f: json.dump(data, f, indent=2, ensure_ascii=False))
 
-        format_selector = require_legacy_session(sf.stem, sf)
-        repository = LegacyV4Repository(
-            lock=contextlib.nullcontext,
-            read_state=lambda: copy.deepcopy(latest),
-            write_state=write_terminal_state,
-            backup_state=lambda: backup_state(sf),
-            remove_from_aggregate=(
-                (lambda: _remove_from_aggregate_strict(proj, sf.stem))
-                if sf.parent.name == "sessions"
-                else None
+        repository = select_legacy_repository(
+            str(latest.get("session_id") or sf.stem),
+            sf,
+            lambda format_guard: LegacyV4Repository(
+                lock=contextlib.nullcontext,
+                read_state=lambda: copy.deepcopy(latest),
+                write_state=write_terminal_state,
+                backup_state=lambda: backup_state(sf),
+                remove_from_aggregate=(
+                    (lambda: _remove_from_aggregate_strict(proj, sf.stem))
+                    if sf.parent.name == "sessions"
+                    else None
+                ),
+                format_guard=format_guard,
             ),
-            format_guard=lambda: format_selector.select(),
         )
         result = run_mark_halt(
             repository,

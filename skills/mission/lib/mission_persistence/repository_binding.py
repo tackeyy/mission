@@ -87,6 +87,9 @@ class FormatPinnedRepositorySelector(Generic[RepositoryT]):
             {"mission", "mission_id", "session_id", "phase", "loop_active"}
         ):
             raise RepositorySelectionError("repository-format-invalid")
+        document_session = document.get("session_id")
+        if document_session is not None and document_session != self._session_id:
+            raise RepositorySelectionError("repository-session-mismatch")
         return RepositoryFormat.LEGACY_V4
 
     def select(self) -> RepositorySelection[RepositoryT]:
@@ -124,3 +127,32 @@ def require_legacy_session(
     if selected.format is not RepositoryFormat.LEGACY_V4:
         raise RepositorySelectionError("repository-format-v5-requires-uow")
     return selector
+
+
+def select_legacy_repository(
+    session_id: str,
+    session_path: Path | str,
+    legacy_factory: Callable[[Callable[[], object]], RepositoryT],
+) -> RepositoryT:
+    """Select and construct the actual v4 repository with a retained guard."""
+
+    selector: FormatPinnedRepositorySelector[RepositoryT] | None = None
+
+    def guard() -> object:
+        if selector is None:
+            raise RepositorySelectionError("repository-selector-unbound")
+        return selector.select()
+
+    def build_legacy() -> RepositoryT:
+        return legacy_factory(guard)
+
+    def reject_v5() -> RepositoryT:
+        raise RepositorySelectionError("repository-format-v5-requires-uow")
+
+    selector = FormatPinnedRepositorySelector(
+        session_id=session_id,
+        session_path=session_path,
+        legacy_factory=build_legacy,
+        v5_factory=reject_v5,
+    )
+    return selector.select().repository

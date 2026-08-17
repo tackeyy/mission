@@ -1798,6 +1798,11 @@ class LocalFencedRepository:
                 "transition-binding-mismatch",
                 "transition differs from its admitted state or command",
             )
+        event_types = tuple(event.type for event in transition.events)
+        if event_types != admitted.request.audit.event_types:
+            raise FencedCommitError(
+                "audit-binding-mismatch", "audit event categories differ"
+            )
         effects = transition.effects
         if type(effects) is not tuple or any(
             not isinstance(effect, BlobBinding) for effect in effects

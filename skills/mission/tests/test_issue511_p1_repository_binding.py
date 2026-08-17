@@ -161,6 +161,23 @@ def test_public_stage_rejects_sealed_transition_from_modified_admitted_state(tmp
         repository.stage(admitted, transition, request.blobs)
 
 
+def test_public_stage_rejects_audit_events_that_differ_from_transition(tmp_path):
+    repository, _root, lease_id = _seed_repository(tmp_path)
+    command = MarkHalt(HaltCategory.OTHER, "audit stop")
+    request = _request("audit-operation", lease_id, typed_command=command)
+    admitted = repository.begin(request)
+    assert isinstance(admitted, AdmittedSnapshot) and admitted.base is not None
+    state = replace(
+        admitted.base.state,
+        lease=admitted.pending_lease.target,
+        snapshot_provenance=None,
+    )
+    transition = decide(state, command).transition
+
+    with pytest.raises(Exception, match="audit event categories differ"):
+        repository.stage(admitted, transition, request.blobs)
+
+
 def test_execute_decides_after_pending_lease_and_rejection_publishes_nothing(tmp_path):
     repository, root, lease_id = _seed_repository(tmp_path)
     before = {
@@ -410,6 +427,79 @@ def test_retained_legacy_selector_rechecks_format_at_repository_load(tmp_path):
 
     with pytest.raises(Exception, match="repository-format-drift"):
         repository.load()
+
+
+def test_legacy_selector_rejects_cross_session_identity_before_factory(tmp_path):
+    from mission_persistence.repository_binding import (
+        FormatPinnedRepositorySelector,
+        RepositorySelectionError,
+    )
+
+    session = tmp_path / "foreign.json"
+    session.write_text(
+        json.dumps(
+            {
+                "mission": "foreign",
+                "session_id": "foreign-session",
+                "phase": "planning",
+                "loop_active": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls = []
+    with pytest.raises(RepositorySelectionError, match="repository-session-mismatch"):
+        FormatPinnedRepositorySelector(
+            session_id="expected-session",
+            session_path=session,
+            legacy_factory=lambda: calls.append("legacy"),
+            v5_factory=lambda: calls.append("v5"),
+        ).select()
+    assert calls == []
+
+
+def test_retained_selector_rejects_same_format_cross_session_replacement(tmp_path):
+    from mission_persistence.repository_binding import (
+        FormatPinnedRepositorySelector,
+        RepositorySelectionError,
+    )
+
+    session, _ = generate_cli_state_bytes(tmp_path / "same-format")
+    calls = []
+    selector = FormatPinnedRepositorySelector(
+        session_id="test",
+        session_path=session,
+        legacy_factory=lambda: calls.append("legacy") or "legacy",
+        v5_factory=lambda: calls.append("v5") or "v5",
+    )
+    selector.select()
+    foreign = json.loads(session.read_bytes())
+    foreign["session_id"] = "foreign-session"
+    session.write_text(json.dumps(foreign), encoding="utf-8")
+
+    with pytest.raises(RepositorySelectionError, match="repository-session-mismatch"):
+        selector.select()
+    assert calls == ["legacy"]
+
+
+def test_missing_version_and_session_identity_remains_bounded_legacy_compatibility(tmp_path):
+    from mission_persistence.repository_binding import (
+        FormatPinnedRepositorySelector,
+        RepositoryFormat,
+    )
+
+    session = tmp_path / "legacy.json"
+    session.write_text(
+        json.dumps({"mission": "old", "phase": "planning", "loop_active": True}),
+        encoding="utf-8",
+    )
+    selection = FormatPinnedRepositorySelector(
+        session_id="expected-session",
+        session_path=session,
+        legacy_factory=lambda: "legacy",
+        v5_factory=lambda: pytest.fail("legacy document selected v5"),
+    ).select()
+    assert selection.format is RepositoryFormat.LEGACY_V4
 
 
 @pytest.mark.parametrize(
