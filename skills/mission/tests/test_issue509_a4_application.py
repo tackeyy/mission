@@ -274,6 +274,11 @@ def test_application_rejects_pathlike_control_and_whitespace_receipt_identity():
         "receipt file:/Users/<user>/secret",
         "opaque:C:\\Users\\<user>\\secret",
         "opaque:~/private",
+        "file:relative",
+        "FILE:relative",
+        "C:relative",
+        "opaque:file:relative",
+        "opaque:C:relative",
         "x" * 257,
     ):
         original = record_dispatch_intent([], _intent())

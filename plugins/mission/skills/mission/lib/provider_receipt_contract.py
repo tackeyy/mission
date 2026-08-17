@@ -8,6 +8,9 @@ import re
 
 _RECEIPT_FIELDS = frozenset({"kind", "identity"})
 _OPAQUE_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+:-]{0,255}\Z")
+_PRIVATE_TOKEN_LOCATOR = re.compile(
+    r"(?:file:|(?<![A-Za-z0-9])[A-Za-z]:)", re.IGNORECASE
+)
 
 
 class ProviderReceiptContractError(ValueError):
@@ -27,6 +30,7 @@ def validate_closed_provider_receipt(
         or (required_kind is not None and kind != required_kind)
         or not isinstance(identity, str)
         or _OPAQUE_IDENTITY.fullmatch(identity) is None
+        or _PRIVATE_TOKEN_LOCATOR.search(identity) is not None
     ):
         raise ProviderReceiptContractError("receipt-invalid")
     return {"kind": kind, "identity": identity}
