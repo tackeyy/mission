@@ -268,7 +268,7 @@ def test_review_reduction_counts_high_even_with_arbitrary_legacy_status():
     ]
 
     reduced = reduce_reviews_to_score(
-        reviews, expected_iteration=1, reducer=reduce_review_aggregate
+        reviews, expected_iteration=1
     )
 
     assert reduced.open_high == 1
@@ -313,118 +313,58 @@ def _canonical_reviews(*, scores=(1.0,), findings=None):
     ]
 
 
-@pytest.mark.parametrize(
-    ("field", "forged_value"),
-    [("composite", 5.0), ("min_item", 5.0), ("composite", float("nan"))],
-)
-def test_review_reduction_rejects_forged_derived_score(field, forged_value):
-    from mission_application.review import ReviewFailure, reduce_reviews_to_score
+def test_review_reduction_does_not_accept_an_injected_score_provider():
+    from mission_application.review import reduce_reviews_to_score
+
+    called = False
 
     def forged_reducer(_reviews, *, expected_iteration):
-        assert expected_iteration == 1
-        return {**_canonical_reduction_result(), field: forged_value}
-
-    with pytest.raises(ReviewFailure, match="review reduction"):
-        reduce_reviews_to_score(
-            _canonical_reviews(), expected_iteration=1, reducer=forged_reducer
-        )
-
-
-@pytest.mark.parametrize(
-    "mutate_detail",
-    [
-        "missing-axis",
-        "unknown-field",
-        "inconsistent-delta",
-        "item-outside-range",
-        "agreement-mismatch",
-    ],
-)
-def test_review_reduction_rejects_noncanonical_agreement_detail(mutate_detail):
-    from mission_application.review import ReviewFailure, reduce_reviews_to_score
-
-    def forged_reducer(_reviews, *, expected_iteration):
-        assert expected_iteration == 1
-        result = _canonical_reduction_result()
-        if mutate_detail == "missing-axis":
-            result["agreement_detail"].pop("accuracy")
-        elif mutate_detail == "unknown-field":
-            result["agreement_detail"]["accuracy"]["median"] = 1.0
-        elif mutate_detail == "inconsistent-delta":
-            result["agreement_detail"]["accuracy"] = {
-                "min": 1.0, "max": 2.0, "delta": 0.0,
-            }
-        elif mutate_detail == "item-outside-range":
-            result["agreement_detail"]["accuracy"] = {
-                "min": 2.0, "max": 2.0, "delta": 0.0,
-            }
-        else:
-            result["review_agreement"] = 4.0
-        return result
-
-    with pytest.raises(ReviewFailure, match="review reduction"):
-        reduce_reviews_to_score(
-            _canonical_reviews(), expected_iteration=1, reducer=forged_reducer
-        )
-
-
-def test_review_reduction_rejects_forged_open_high_count():
-    from mission_application.review import ReviewFailure, reduce_reviews_to_score
-
-    finding = {
-        "id": "finding-1",
-        "severity": "High",
-        "axis": "accuracy",
-    }
-    reviews = _canonical_reviews(findings=[finding])
-
-    def forged_reducer(_reviews, *, expected_iteration):
-        assert expected_iteration == 1
+        nonlocal called
+        called = True
         return _canonical_reduction_result()
 
-    with pytest.raises(ReviewFailure, match="review reduction"):
-        reduce_reviews_to_score(reviews, expected_iteration=1, reducer=forged_reducer)
-
-
-def test_review_reduction_rejects_agreement_hidden_from_input_reviews():
-    from mission_application.review import ReviewFailure, reduce_reviews_to_score
-
-    def forged_reducer(_reviews, *, expected_iteration):
-        assert expected_iteration == 1
-        result = _canonical_reduction_result()
-        result["items"] = {axis: 3.0 for axis in result["items"]}
-        result["composite"] = 3.0
-        result["min_item"] = 3.0
-        result["agreement_detail"] = {
-            axis: {"min": 3.0, "max": 3.0, "delta": 0.0}
-            for axis in result["items"]
-        }
-        return result
-
-    with pytest.raises(ReviewFailure, match="does not match review inputs"):
+    with pytest.raises(TypeError, match="unexpected keyword argument 'reducer'"):
         reduce_reviews_to_score(
-            _canonical_reviews(scores=(1.0, 5.0)),
+            _canonical_reviews(),
             expected_iteration=1,
             reducer=forged_reducer,
         )
 
+    assert called is False
+
+
+def test_review_reduction_binds_agreement_to_raw_review_distribution():
+    from mission_application.review import reduce_reviews_to_score
+
+    reduced = reduce_reviews_to_score(
+        _canonical_reviews(scores=(1.0, 5.0)), expected_iteration=1
+    )
+
+    assert reduced.items == {
+        "mission_achievement": 3.0,
+        "accuracy": 3.0,
+        "completeness": 3.0,
+        "usability": 3.0,
+    }
+    assert reduced.review_agreement == 1.0
+    assert all(
+        detail == {"min": 1.0, "max": 5.0, "delta": 4.0}
+        for detail in reduced.agreement_detail.values()
+    )
+
+
+def test_review_reduction_rejects_empty_review_input():
+    from mission_application.review import ReviewFailure, reduce_reviews_to_score
+
+    with pytest.raises(ReviewFailure, match="review reduction input"):
+        reduce_reviews_to_score([], expected_iteration=1)
+
 
 def test_review_reduction_returns_canonical_axis_order():
     from mission_application.review import reduce_reviews_to_score
-    from scoring_provenance import reduce_review_aggregate
-
-    def reordered_reducer(reviews, *, expected_iteration):
-        result = reduce_review_aggregate(
-            reviews, expected_iteration=expected_iteration
-        )
-        result["items"] = dict(reversed(list(result["items"].items())))
-        result["agreement_detail"] = dict(
-            reversed(list(result["agreement_detail"].items()))
-        )
-        return result
 
     reduced = reduce_reviews_to_score(
-        _canonical_reviews(), expected_iteration=1, reducer=reordered_reducer
+        _canonical_reviews(), expected_iteration=1
     )
 
     assert list(reduced.items) == [

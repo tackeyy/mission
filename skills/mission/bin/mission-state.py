@@ -12876,7 +12876,6 @@ def cmd_aggregate_reviews(args):
         reduced = reduce_reviews_to_score(
             reviews,
             expected_iteration=args.iteration,
-            reducer=reduce_review_aggregate,
         )
     except (ReviewFailure, ValueError) as exc:
         print(f"ERROR: review aggregate inputs are invalid: {exc}", file=sys.stderr)

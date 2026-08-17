@@ -159,18 +159,16 @@ def reduce_reviews_to_score(
     reviews: list[dict],
     *,
     expected_iteration: int,
-    reducer: Callable[..., dict],
 ) -> ReducedReviewScore:
     """Own the single review-to-score reduction use case.
 
-    The reducer remains injected so the CLI adapter cannot supply a pre-decided
-    score.  Every returned decision value is revalidated as a closed result.
+    The canonical reducer is sealed inside the use case so an adapter cannot
+    inject a pre-decided score. Every decision value is then revalidated.
     """
     try:
-        canonical = _canonical_review_reduction(
+        derived = _canonical_review_reduction(
             reviews, expected_iteration=expected_iteration
         )
-        derived = reducer(reviews, expected_iteration=expected_iteration)
     except (KeyError, TypeError, ValueError) as exc:
         raise ReviewFailure(
             "review reduction input is invalid", reason="review-reduction-invalid"
@@ -288,30 +286,7 @@ def reduce_reviews_to_score(
         review_agreement=None if agreement is None else float(agreement),
         agreement_detail=normalized_detail,
     )
-    expected_reduced = ReducedReviewScore(
-        items={key: float(canonical["items"][key]) for key in _SCORE_AXES},
-        composite=float(canonical["composite"]),
-        min_item=float(canonical["min_item"]),
-        open_high=canonical["open_high"],
-        review_agreement=(
-            None
-            if canonical["review_agreement"] is None
-            else float(canonical["review_agreement"])
-        ),
-        agreement_detail={
-            axis: {
-                field: float(canonical["agreement_detail"][axis][field])
-                for field in ("min", "max", "delta")
-            }
-            for axis in _SCORE_AXES
-        },
-    )
-    if reduced != expected_reduced:
-        raise ReviewFailure(
-            "review reduction does not match review inputs",
-            reason="review-reduction-invalid",
-        )
-    return expected_reduced
+    return reduced
 
 
 @dataclass(frozen=True)
