@@ -157,6 +157,9 @@ def test_artifact_append_render_export_and_publish_keep_consent_only_contract():
 def test_evidence_effect_rejects_mutable_bytes_and_digest_tampering():
     with pytest.raises(EvidenceFailure, match="effect-content-invalid"):
         make_evidence_effect("evidence", "out.json", bytearray(b"x"))
+    for target in ("/tmp/out.json", "../out.json", "a/../../out.json"):
+        with pytest.raises(EvidenceFailure, match="effect-target-invalid"):
+            make_evidence_effect("evidence", target, b"x")
     effect = make_evidence_effect("evidence", "out.json", b"x")
     forged = effect.__class__(
         kind=effect.kind, target=effect.target, content=effect.content,
@@ -281,13 +284,34 @@ def test_real_v4_effect_publisher_rejects_link_and_fifo_targets(
         os.mkfifo(target)
     else:
         os.link(source, target)
-    effect = make_evidence_effect("evidence", str(target), b"public")
+    effect = make_evidence_effect("evidence", target.name, b"public")
 
     with pytest.raises(ValueError):
         with module._publish_evidence_effects(tmp_path, (effect,)):
             pass
 
     assert source.read_bytes() == b"private"
+
+
+@pytest.mark.parametrize("artifact_path", ["/tmp/outside.md", "../outside.md"])
+def test_artifact_render_rejects_non_relative_persisted_identity(artifact_path):
+    state = _state()
+    state["artifact"] = {
+        "status": "draft",
+        "format": "markdown",
+        "title": "Evidence",
+        "path": artifact_path,
+        "exports": [],
+        "publish_events": [],
+        "redaction_status": "reviewed",
+        "required_for_pass": False,
+        "blocks": [],
+        "created_at": NOW,
+        "updated_at": NOW,
+    }
+
+    with pytest.raises(EvidenceFailure, match="effect-target-invalid"):
+        artifact_render(state, now=NOW, redaction_status=None, render=_render)
 
 
 def test_progress_update_and_clear_only_change_progress_observation():

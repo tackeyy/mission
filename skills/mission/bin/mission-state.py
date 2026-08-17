@@ -6753,8 +6753,24 @@ def _artifact_profile_coverage(cwd: Path, data: dict) -> dict:
 
 
 def _evidence_effect_path(cwd: Path, effect: EvidenceEffect) -> Path:
-    target = Path(effect.target)
-    return target if target.is_absolute() else _resolve_project_output_path(cwd, effect.target)
+    return _resolve_evidence_output_path(cwd, effect.target)
+
+
+def _resolve_evidence_output_path(cwd: Path, path_text: str) -> Path:
+    """Resolve parent directories without following the final output entry."""
+    path = Path(path_text).expanduser()
+    if not path.is_absolute():
+        path = cwd / path
+    parent = path.parent.resolve()
+    try:
+        parent.relative_to(cwd.resolve())
+    except ValueError:
+        print(f"ERROR: output path must stay inside project root: {path_text}", file=sys.stderr)
+        sys.exit(2)
+    if not path.name or path.name in {".", ".."}:
+        print("ERROR: output filename is invalid", file=sys.stderr)
+        sys.exit(2)
+    return parent / path.name
 
 
 def _legacy_evidence_repository(cwd: Path, sf: Path, *, stamp: bool) -> LegacyV4Repository:
@@ -6779,13 +6795,20 @@ def _legacy_evidence_repository(cwd: Path, sf: Path, *, stamp: bool) -> LegacyV4
 
 
 @contextlib.contextmanager
-def _publish_evidence_effects(cwd: Path, effects: tuple[EvidenceEffect, ...]):
+def _publish_evidence_effects(
+    cwd: Path,
+    effects: tuple[EvidenceEffect, ...],
+    *,
+    path_overrides: dict[str, Path] | None = None,
+):
     """Publish already-bound bytes as one rollback-capable v4 file set."""
     with _PublishedFilesTransaction() as transaction:
         published = []
         for effect in effects:
+            target = (path_overrides or {}).get(effect.kind)
+            target = target if target is not None else _evidence_effect_path(cwd, effect)
             item = transaction.add(
-                _publish_output_transaction(_evidence_effect_path(cwd, effect), effect.content)
+                _publish_output_transaction(target, effect.content)
             )
             _verify_published_file(item)
             published.append(item)
@@ -6817,11 +6840,14 @@ def _run_evidence_decision(
     *,
     stamp: bool,
     bind_artifact: bool = False,
+    path_overrides: dict[str, Path] | None = None,
 ) -> EvidenceDecision:
     repository = _legacy_evidence_repository(cwd, sf, stamp=stamp)
     return repository.execute_effects(
         decide,
-        effect_transaction=lambda effects: _publish_evidence_effects(cwd, effects),
+        effect_transaction=lambda effects: _publish_evidence_effects(
+            cwd, effects, path_overrides=path_overrides
+        ),
         bind_published=(
             (lambda decision, published: _bind_artifact_publication(cwd, decision, published))
             if bind_artifact
@@ -6928,7 +6954,7 @@ def cmd_artifact_export(args):
     if args.redaction_status not in ARTIFACT_REDACTION_STATUSES - {"unchecked"}:
         print("ERROR: export requires --redaction-status checked|reviewed|not-needed", file=sys.stderr)
         sys.exit(2)
-    destination = _state_relative_path(cwd, str(_resolve_project_output_path(cwd, args.to)))
+    destination = _state_relative_path(cwd, str(_resolve_evidence_output_path(cwd, args.to)))
     try:
         decision = _run_evidence_decision(
             cwd,
@@ -13386,6 +13412,10 @@ def cmd_context_manifest(args):
     if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < 1:
         print("ERROR: --iteration は 1 以上で指定してください", file=sys.stderr)
         sys.exit(2)
+    out = Path(args.out)
+    if not out.name or out.name in {".", ".."}:
+        print("ERROR: context output filename is invalid", file=sys.stderr)
+        sys.exit(2)
     try:
         decision = _run_evidence_decision(
             cwd,
@@ -13394,9 +13424,11 @@ def cmd_context_manifest(args):
                 current,
                 now=iso_now(),
                 iteration=iteration,
-                output_path=str(Path(args.out)),
+                output_path=str(out),
+                effect_target=out.name,
             ),
             stamp=False,
+            path_overrides={"context-manifest": out},
         )
     except EvidenceFailure as exc:
         print(f"ERROR: {exc.code}", file=sys.stderr)

@@ -83,7 +83,7 @@ def _state(value: object) -> dict:
 def make_evidence_effect(kind: object, target: object, content: object) -> EvidenceEffect:
     if not isinstance(kind, str) or _EFFECT_KIND.fullmatch(kind) is None:
         raise EvidenceFailure("effect-kind-invalid")
-    target_text = _text(target, "effect-target-invalid")
+    target_text = _relative_target(target, "effect-target-invalid")
     if type(content) is not bytes:
         raise EvidenceFailure("effect-content-invalid")
     if len(content) > MAX_EVIDENCE_BYTES:
@@ -102,8 +102,7 @@ def validate_evidence_effect(value: object) -> EvidenceEffect:
         raise ValueError("effect-binding-invalid")
     if (
         _EFFECT_KIND.fullmatch(value.kind) is None
-        or not value.target
-        or "\x00" in value.target
+        or _relative_target(value.target, "effect-target-invalid") != value.target
         or type(value.content) is not bytes
         or type(value.size) is not int
         or value.size < 0
@@ -424,12 +423,17 @@ def context_manifest(
     now: object,
     iteration: object,
     output_path: object,
+    effect_target: object | None = None,
 ) -> EvidenceDecision:
     proposed = _state(state)
     at = _timestamp(now)
     if type(iteration) is not int or iteration < 1:
         raise EvidenceFailure("context-iteration-invalid")
     target = _text(output_path, "context-output-path-invalid")
+    publication_target = _relative_target(
+        effect_target if effect_target is not None else target,
+        "context-effect-target-invalid",
+    )
     prior_findings: list[dict] = []
     history = proposed.get("score_history")
     if history is not None and not isinstance(history, list):
@@ -450,7 +454,7 @@ def context_manifest(
         "prior_findings": prior_findings,
     }
     content = json.dumps(manifest, indent=2, ensure_ascii=False).encode("utf-8")
-    effect = make_evidence_effect("context-manifest", target, content)
+    effect = make_evidence_effect("context-manifest", publication_target, content)
     records = proposed.get("context_manifests")
     records = copy.deepcopy(records) if isinstance(records, Mapping) else {}
     records[str(iteration)] = {"path": target, "digest": effect.digest, "generated_at": at}
