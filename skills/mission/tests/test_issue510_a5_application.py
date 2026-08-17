@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import importlib.util
 import json
 from contextlib import nullcontext
 from pathlib import Path
@@ -15,6 +16,14 @@ AUTHORITY_FIELDS = {
     "passes", "halt_reason", "phase", "score_history", "lease_id",
     "fencing_epoch", "owner_session_id", "lease_expires_at",
 }
+MISSION_STATE_PY = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
+
+
+def _load_state_module():
+    spec = importlib.util.spec_from_file_location("mission_state_issue510", MISSION_STATE_PY)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class StopRepository:
@@ -378,6 +387,59 @@ def test_permission_successful_halt_keeps_prewrite_recovery_backup(tmp_path, run
     assert result.returncode == 2
     assert state_path.with_suffix(".json.bak").read_bytes() == before
     assert state_path.read_bytes() != before
+
+
+def test_permission_admission_cannot_overwrite_takeover_at_backup_boundary(
+    tmp_path, run_cli, monkeypatch
+):
+    owner = {"MISSION_SESSION_ID": "session-a", "MISSION_LEASE_ID": "lease-a"}
+    run_cli(
+        "init",
+        "A5 admission race",
+        "--complexity",
+        "Standard",
+        cwd=tmp_path,
+        env_extra=owner,
+        check=True,
+    )
+    state_path = tmp_path / ".mission-state" / "sessions" / "session-a.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["assumptions_path"] = "outside.md"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    backup_path = state_path.with_suffix(".json.bak")
+    before_backup = backup_path.read_bytes() if backup_path.exists() else None
+    module = _load_state_module()
+    original_backup = module.backup_state
+    takeover_bytes = []
+
+    def takeover_after_backup(path):
+        original_backup(path)
+        takeover = json.loads(path.read_text(encoding="utf-8"))
+        takeover.update(
+            {
+                "owner_session_id": "takeover",
+                "lease_id": "lease-takeover",
+                "fencing_epoch": takeover["fencing_epoch"] + 1,
+                "lease_expires_at": "2099-01-01T00:00:00Z",
+            }
+        )
+        payload = json.dumps(takeover, sort_keys=True).encode("utf-8")
+        path.write_bytes(payload)
+        takeover_bytes.append(payload)
+
+    monkeypatch.setenv("MISSION_SESSION_ID", "session-a")
+    monkeypatch.setenv("MISSION_LEASE_ID", "lease-a")
+    monkeypatch.setattr(module, "backup_state", takeover_after_backup)
+
+    result = module._permission_preflight(tmp_path)
+
+    assert result["ok"] is False
+    assert result["halt_recorded"] is False
+    assert state_path.read_bytes() == takeover_bytes[0]
+    if before_backup is None:
+        assert not backup_path.exists()
+    else:
+        assert backup_path.read_bytes() == before_backup
 
 
 @pytest.mark.parametrize(

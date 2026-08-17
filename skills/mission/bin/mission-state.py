@@ -1268,7 +1268,19 @@ class StateLock:
                 self.fd.close()
 
 
-def _atomic_write(path: Path, writer) -> None:
+def _state_file_identity(path: Path) -> tuple[int, int, int, int, int, int]:
+    metadata = os.stat(path, follow_symlinks=False)
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _atomic_write(path: Path, writer, *, expected_identity=None) -> None:
     """同一 directory の排他的な一時ファイルを fsync 後に publish する."""
     fd, tmp_name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
@@ -1280,6 +1292,11 @@ def _atomic_write(path: Path, writer) -> None:
             writer(f)
             f.flush()
             os.fsync(f.fileno())
+        if (
+            expected_identity is not None
+            and _state_file_identity(path) != expected_identity
+        ):
+            raise ValueError("state changed before publish")
         os.replace(tmp, path)
     finally:
         if fd >= 0:
@@ -1381,6 +1398,7 @@ def atomic_write_json(
     *,
     administrative: bool = False,
     lease_decision: LeaseDecision | None | object = _LEASE_DECISION_UNSET,
+    expected_identity=None,
 ) -> None:
     """Phase B-2: fsync + os.replace で完全な前 or 後状態を保証.
 
@@ -1397,7 +1415,11 @@ def atomic_write_json(
         lease_decision = _enforce_session_lease_for_write(path, data)
     if not administrative and _is_session_state_shape(data):
         data["last_activity_at"] = iso_now()
-    _atomic_write(path, lambda f: json.dump(data, f, indent=2, ensure_ascii=False))
+    _atomic_write(
+        path,
+        lambda f: json.dump(data, f, indent=2, ensure_ascii=False),
+        expected_identity=expected_identity,
+    )
     if isinstance(lease_decision, LeaseDecision):
         _PROCESS_LEASE_IDS[str(path.resolve())] = lease_decision.lease_id
     _emit_lease_carrier(data, lease_decision)
@@ -8457,6 +8479,38 @@ def _legacy_lifecycle_repository(
     pre_admit_lease: bool = False,
 ) -> LegacyV4Repository:
     admitted_lease = [_LEASE_DECISION_UNSET]
+    admitted_identity = [None]
+    backup_snapshot = [None]
+    backup_was_present = [False]
+    backup_published = [False]
+
+    def rollback_guarded_backup() -> None:
+        if not backup_published[0]:
+            return
+        bak = sf.with_suffix(sf.suffix + ".bak")
+        if backup_was_present[0]:
+            atomic_write_bytes(bak, backup_snapshot[0])
+        else:
+            bak.unlink(missing_ok=True)
+        backup_published[0] = False
+
+    def guarded_backup() -> None:
+        if not pre_admit_lease:
+            backup_state(sf)
+            return
+        if admitted_identity[0] is None or _state_file_identity(sf) != admitted_identity[0]:
+            raise ValueError("state changed before backup")
+        bak = sf.with_suffix(sf.suffix + ".bak")
+        backup_was_present[0] = bak.exists()
+        backup_snapshot[0] = bak.read_bytes() if backup_was_present[0] else None
+        try:
+            backup_state(sf)
+            backup_published[0] = True
+            if _state_file_identity(sf) != admitted_identity[0]:
+                raise ValueError("state changed during backup")
+        except BaseException:
+            rollback_guarded_backup()
+            raise
 
     def read_state() -> dict:
         if strict_read:
@@ -8466,6 +8520,7 @@ def _legacy_lifecycle_repository(
         if pre_admit_lease:
             with _lease_write_reason(lease_reason):
                 admitted_lease[0] = _enforce_session_lease_for_write(sf, data)
+            admitted_identity[0] = _state_file_identity(sf)
         return data
 
     def write_state(data: dict, *, administrative: bool = False) -> None:
@@ -8483,12 +8538,18 @@ def _legacy_lifecycle_repository(
             if pre_admit_lease:
                 if admitted_lease[0] is _LEASE_DECISION_UNSET:
                     raise ValueError("lease admission is missing")
-                atomic_write_json(
-                    sf,
-                    proposed,
-                    administrative=administrative,
-                    lease_decision=admitted_lease[0],
-                )
+                try:
+                    atomic_write_json(
+                        sf,
+                        proposed,
+                        administrative=administrative,
+                        lease_decision=admitted_lease[0],
+                        expected_identity=admitted_identity[0],
+                    )
+                    backup_published[0] = False
+                except BaseException:
+                    rollback_guarded_backup()
+                    raise
             elif lease_decision is None:
                 atomic_write_json(
                     sf,
@@ -8505,7 +8566,7 @@ def _legacy_lifecycle_repository(
         lock=lambda: StateLock(lock_file(cwd)),
         read_state=read_state,
         write_state=write_state,
-        backup_state=lambda: backup_state(sf),
+        backup_state=guarded_backup,
         add_to_aggregate=lambda: _add_to_aggregate_strict(cwd, sf.stem),
         remove_from_aggregate=lambda: _remove_from_aggregate_strict(cwd, sf.stem),
     )
