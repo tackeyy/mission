@@ -445,7 +445,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-migrate.py --execute --
 
 ## phase フィールドの更新セマンティクス (M4, 2026-06-10 / 2026-06-25)
 
-mission-state.py は開始・採点・終了の境界で `phase` を自動設定する。orchestrator は、実作業やレビューに入る境界を `advance --phase ... --activity ...` で明示する。generic `set` によるphase変更は#506以降拒否される。
+mission-state.py は開始・採点・終了の境界で `phase` を自動設定する。orchestrator は、実作業やレビューに入る境界を `advance --phase ... --activity ...` で明示する。generic `set` によるphase、stale復帰先、activity reducer所有fieldの変更は#506以降拒否される。
 
 | コマンド | phase |
 |---|---|

@@ -1106,6 +1106,10 @@ def test_mark_halt_remains_available_for_malformed_legacy_v4_state(
         "loop_active=false",
         "lease_id=forged",
         "activity_current=null",
+        "resume_target_phase=reviewing",
+        "activity_last_event_at=2099-01-01T00:00:00Z",
+        "activity_last_event_phase=reviewing",
+        'activity_anomaly_counts={"forged":1}',
     ),
 )
 def test_set_rejects_all_dedicated_lifecycle_fields_with_bytes_unchanged(
