@@ -11,7 +11,7 @@ from typing import Callable, ContextManager, Iterable
 from mission_application.artifact import EvidenceDecision, EvidenceEffect, validate_evidence_effect
 from mission_application.ports import AggregateIndexError
 from mission_kernel import decode_mission_state, project_legacy_document
-from mission_kernel.transitions import Decision
+from mission_kernel.transitions import Decision, bind_transition_effects, decide
 
 from .fenced_commit import (
     ExecutionRequest,
@@ -66,6 +66,7 @@ class LegacyV4Repository:
             [tuple[EvidenceEffect, ...]], ContextManager[object]
         ]
         | None = None,
+        format_guard: Callable[[], object] | None = None,
     ) -> None:
         self._lock = lock
         self._read_state = read_state
@@ -76,17 +77,24 @@ class LegacyV4Repository:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._lease_ttl_seconds = lease_ttl_seconds
         self._effect_transaction = effect_transaction
+        self._format_guard = format_guard
 
     def transaction(self) -> ContextManager[object]:
         return self._lock()
 
     def load(self) -> dict:
+        if self._format_guard is not None:
+            self._format_guard()
         return self._read_state()
 
-    def execute(self, state, mutation, transition=None):
+    def execute(self, state, mutation=None, transition=None):
         """Return the proposed v4 document without performing any I/O."""
         if isinstance(state, ExecutionRequest):
-            return self._execute_request(state, mutation)
+            if mutation is not None or transition is not None:
+                raise FencedCommitError(
+                    "request-invalid", "typed execution does not accept a decision callback"
+                )
+            return self._execute_request(state)
         # The typed transition is the authority decision, while the A1
         # compatibility reducer remains the writer for legacy timing, lease,
         # and passthrough fields.  Projecting the canonical state here would
@@ -98,12 +106,11 @@ class LegacyV4Repository:
     def _execute_request(
         self,
         request: ExecutionRequest,
-        decide_command: Callable[[object], Decision],
     ) -> RepositoryExecutionResult:
         """Evaluate the common typed request while retaining the v4 layout."""
         _validate_request(request)
-        if not callable(decide_command):
-            raise FencedCommitError("request-invalid", "decision function is not callable")
+        if request.typed_command is None:
+            raise FencedCommitError("request-invalid", "typed command is required")
         with self.transaction():
             current = self.load()
             if not isinstance(current, dict):
@@ -135,7 +142,7 @@ class LegacyV4Repository:
                 lease=pending.target,
                 snapshot_provenance=None,
             )
-            decision = decide_command(admitted_state)
+            decision = decide(admitted_state, request.typed_command)
             if not isinstance(decision, Decision):
                 raise FencedCommitError("decision-invalid", "decision result type is invalid")
             if not decision.accepted:
@@ -144,13 +151,24 @@ class LegacyV4Repository:
                 return RepositoryExecutionResult(False, None, decision.rejection.code)
             if decision.transition is None or decision.rejection is not None:
                 raise FencedCommitError("decision-invalid", "accepted decision is not closed")
-            target = decision.transition.new_state
+            event_types = tuple(event.type for event in decision.events)
+            if event_types != request.audit.event_types:
+                raise FencedCommitError(
+                    "audit-binding-mismatch", "audit event categories differ"
+                )
+            transition = decision.transition
+            if request.blobs.blobs:
+                transition = bind_transition_effects(
+                    transition,
+                    tuple(blob.binding for blob in request.blobs.blobs),
+                )
+            target = transition.new_state
             if target.lease != pending.target:
                 raise FencedCommitError(
                     "pending-lease-mismatch", "transition does not contain the pending lease"
                 )
             proposed = json.loads(project_legacy_document(target))
-            bindings = decision.transition.effects
+            bindings = transition.effects
             if type(bindings) is not tuple:
                 raise FencedCommitError(
                     "effect-binding-invalid", "transition effects are not immutable"
@@ -191,6 +209,8 @@ class LegacyV4Repository:
         administrative: bool = False,
         aggregate_action: str | None = None,
     ) -> None:
+        if self._format_guard is not None:
+            self._format_guard()
         if backup:
             self._backup_state()
         # Preserve the legacy writer call shape.  Several callers replace the

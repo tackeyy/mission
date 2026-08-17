@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Callable, ContextManager, Optional, Protocol, overload
 
 from mission_kernel.model import FrozenJsonObject, MissionState
+from mission_kernel.commands import Command
 from mission_kernel.transitions import Decision
 
 
@@ -31,6 +32,7 @@ class ExecutionRequest:
     intent_digest: str
     presented_lease_id: Optional[str]
     audit: AuditMetadata
+    typed_command: Optional[Command] = None
 
 
 @dataclass(frozen=True)
@@ -68,8 +70,6 @@ class MissionRepository(Protocol):
     def execute(
         self,
         request: ExecutionRequest,
-        mutation: Callable[[MissionState], Decision],
-        transition=None,
     ) -> RepositoryExecutionResult:
         ...
 

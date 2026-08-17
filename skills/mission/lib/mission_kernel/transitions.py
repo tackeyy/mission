@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 import math
 import re
+import weakref
 from typing import Any, Callable, Optional, Type
 
 from .commands import AdvancePhase, Command, MarkHalt, MarkPass, Reactivate, ResumeStale
@@ -49,6 +50,10 @@ class Transition:
     events: tuple[KernelEvent, ...]
     effects: tuple[object, ...] = ()
     _seal: object | None = field(default=None, init=False, repr=False, compare=False)
+    _input_state: MissionState | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _command: Command | None = field(default=None, init=False, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -470,16 +475,50 @@ def decide(state: MissionState, command: Command) -> Decision:
         transition = reducer(state, command)
     except _Rejected as rejected:
         return Decision(False, None, Rejection(rejected.code), rule.rule_id)
-    object.__setattr__(transition, "_seal", _TRANSITION_SEAL)
+    _register_transition(transition, state, command)
     return Decision(True, transition, None, rule.rule_id)
 
 
 _TRANSITION_SEAL = object()
+_ISSUED_TRANSITIONS: dict[
+    int, tuple[weakref.ReferenceType[Transition], MissionState, Command]
+] = {}
+
+
+def _register_transition(
+    transition: Transition,
+    state: MissionState,
+    command: Command,
+) -> None:
+    object.__setattr__(transition, "_seal", _TRANSITION_SEAL)
+    object.__setattr__(transition, "_input_state", state)
+    object.__setattr__(transition, "_command", command)
+    identity = id(transition)
+
+    def discard(_reference: object) -> None:
+        _ISSUED_TRANSITIONS.pop(identity, None)
+
+    _ISSUED_TRANSITIONS[identity] = (weakref.ref(transition, discard), state, command)
 
 
 def is_sealed_transition(value: object) -> bool:
     """Return whether ``value`` was issued by the canonical decision table."""
-    return isinstance(value, Transition) and value._seal is _TRANSITION_SEAL
+    if not isinstance(value, Transition) or value._seal is not _TRANSITION_SEAL:
+        return False
+    registered = _ISSUED_TRANSITIONS.get(id(value))
+    return registered is not None and registered[0]() is value
+
+
+def is_transition_bound_to(
+    transition: object,
+    state: MissionState,
+    command: Command,
+) -> bool:
+    """Verify the exact state and typed command that produced a transition."""
+    if not is_sealed_transition(transition):
+        return False
+    registered = _ISSUED_TRANSITIONS[id(transition)]
+    return registered[1] == state and registered[2] == command
 
 
 def bind_transition_effects(
@@ -489,6 +528,7 @@ def bind_transition_effects(
     """Bind immutable verified effects without reopening the state decision."""
     if not is_sealed_transition(transition) or type(effects) is not tuple:
         raise TransitionTableError("invalid-transition-effect-binding")
+    registered = _ISSUED_TRANSITIONS[id(transition)]
     bound = Transition(transition.new_state, transition.events, effects)
-    object.__setattr__(bound, "_seal", _TRANSITION_SEAL)
+    _register_transition(bound, registered[1], registered[2])
     return bound

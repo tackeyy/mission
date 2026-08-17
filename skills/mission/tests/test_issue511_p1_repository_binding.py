@@ -18,9 +18,14 @@ sys.path.insert(0, str(LIB_DIR))
 sys.path.insert(0, str(TEST_DIR))
 
 from mission_kernel import decode_mission_state  # noqa: E402
-from mission_kernel.commands import MarkHalt  # noqa: E402
+from mission_kernel.commands import (  # noqa: E402
+    AdvancePhase,
+    MarkHalt,
+    encode_kernel_command,
+    kernel_command_type,
+)
 from mission_kernel.json_codec import decode_json_object  # noqa: E402
-from mission_kernel.model import HaltCategory  # noqa: E402
+from mission_kernel.model import HaltCategory, Phase  # noqa: E402
 from mission_kernel.transitions import bind_transition_effects, decide  # noqa: E402
 from mission_kernel.transitions import Transition  # noqa: E402
 from mission_persistence.fenced_commit import (  # noqa: E402
@@ -44,13 +49,19 @@ def _request(
     operation_id: str,
     lease_id: str | None,
     blobs: VerifiedBlobSet | None = None,
+    typed_command=None,
+    event_types: tuple[str, ...] = (),
 ) -> ExecutionRequest:
-    command = decode_json_object(
-        json.dumps(
-            {"schema": "mission-command-intent/1", "type": "mark-halt"},
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
+    command = (
+        encode_kernel_command(typed_command)
+        if typed_command is not None
+        else decode_json_object(
+            json.dumps(
+                {"schema": "mission-command-intent/1", "type": "bootstrap"},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        )
     )
     blobs = VerifiedBlobSet(()) if blobs is None else blobs
     return ExecutionRequest(
@@ -67,7 +78,11 @@ def _request(
             blobs=blobs,
         ),
         presented_lease_id=lease_id,
-        audit=AuditMetadata("mark-halt", ("mission-halted",)),
+        audit=AuditMetadata(
+            kernel_command_type(typed_command) if typed_command is not None else "bootstrap",
+            event_types,
+        ),
+        typed_command=typed_command,
     )
 
 
@@ -91,7 +106,10 @@ def _seed_repository(tmp_path: Path) -> tuple[LocalFencedRepository, Path, str]:
 
 def test_public_stage_accepts_only_the_sealed_transition_and_request_blobs(tmp_path):
     repository, _root, lease_id = _seed_repository(tmp_path)
-    request = _request("halt-operation", lease_id)
+    command = MarkHalt(HaltCategory.OTHER, "bounded stop")
+    request = _request(
+        "halt-operation", lease_id, typed_command=command, event_types=("mission-halted",)
+    )
     admitted = repository.begin(request)
     assert isinstance(admitted, AdmittedSnapshot)
     assert admitted.base is not None
@@ -100,7 +118,7 @@ def test_public_stage_accepts_only_the_sealed_transition_and_request_blobs(tmp_p
         lease=admitted.pending_lease.target,
         snapshot_provenance=None,
     )
-    decision = decide(admitted_state, MarkHalt(HaltCategory.OTHER, "bounded stop"))
+    decision = decide(admitted_state, command)
     assert decision.accepted and decision.transition is not None
 
     prepared = repository.stage(admitted, decision.transition, request.blobs)
@@ -113,8 +131,34 @@ def test_public_stage_accepts_only_the_sealed_transition_and_request_blobs(tmp_p
         decision.transition.events,
         decision.transition.effects,
     )
+    object.__setattr__(forged, "_seal", decision.transition._seal)
+    object.__setattr__(forged, "_input_state", decision.transition._input_state)
+    object.__setattr__(forged, "_command", decision.transition._command)
     with pytest.raises(Exception, match="transition is not kernel-issued"):
         repository.stage(admitted, forged, request.blobs)
+
+
+def test_public_stage_rejects_sealed_transition_from_modified_admitted_state(tmp_path):
+    repository, _root, lease_id = _seed_repository(tmp_path)
+    command = MarkHalt(HaltCategory.OTHER, "bound stop")
+    request = _request(
+        "bound-operation", lease_id, typed_command=command, event_types=("mission-halted",)
+    )
+    admitted = repository.begin(request)
+    assert isinstance(admitted, AdmittedSnapshot) and admitted.base is not None
+    admitted_state = replace(
+        admitted.base.state,
+        lease=admitted.pending_lease.target,
+        snapshot_provenance=None,
+    )
+    modified = replace(
+        admitted_state,
+        control=replace(admitted_state.control, threshold=admitted_state.control.threshold + 0.1),
+    )
+    transition = decide(modified, command).transition
+
+    with pytest.raises(Exception, match="transition differs from its admitted state or command"):
+        repository.stage(admitted, transition, request.blobs)
 
 
 def test_execute_decides_after_pending_lease_and_rejection_publishes_nothing(tmp_path):
@@ -126,11 +170,11 @@ def test_execute_decides_after_pending_lease_and_rejection_publishes_nothing(tmp
     }
     observed = []
 
-    def reject(state):
-        observed.append(state.lease)
-        return decide(state, object())
-
-    result = repository.execute(_request("rejected-operation", lease_id), reject)
+    command = AdvancePhase(Phase.DONE)
+    request = _request("rejected-operation", lease_id, typed_command=command)
+    admitted = repository.begin(request)
+    observed.append(admitted.pending_lease.target)
+    result = repository.execute(request)
     after = {
         path.relative_to(root).as_posix(): path.read_bytes()
         for path in root.rglob("*")
@@ -138,7 +182,7 @@ def test_execute_decides_after_pending_lease_and_rejection_publishes_nothing(tmp
     }
 
     assert result.accepted is False
-    assert result.rejection_code == "unknown-command"
+    assert result.rejection_code == "terminal-target-forbidden"
     assert observed and observed[0].lease_id == lease_id
     assert after == before
 
@@ -154,7 +198,14 @@ def test_public_stage_binds_verified_effects_to_the_sealed_state_decision(tmp_pa
         size=len(content),
     )
     blobs = VerifiedBlobSet((VerifiedBlob(binding, content),))
-    request = _request("effect-operation", lease_id, blobs)
+    command = MarkHalt(HaltCategory.OTHER, "effect stop")
+    request = _request(
+        "effect-operation",
+        lease_id,
+        blobs,
+        typed_command=command,
+        event_types=("mission-halted",),
+    )
     admitted = repository.begin(request)
     assert isinstance(admitted, AdmittedSnapshot) and admitted.base is not None
     state = replace(
@@ -162,7 +213,7 @@ def test_public_stage_binds_verified_effects_to_the_sealed_state_decision(tmp_pa
         lease=admitted.pending_lease.target,
         snapshot_provenance=None,
     )
-    decision = decide(state, MarkHalt(HaltCategory.OTHER, "effect stop"))
+    decision = decide(state, command)
     transition = bind_transition_effects(decision.transition, (binding,))
 
     prepared = repository.stage(admitted, transition, blobs)
@@ -204,17 +255,15 @@ def test_legacy_typed_request_publishes_effect_and_state_in_one_transaction(tmp_
         effect_transaction=publish,
     )
 
-    def decide_effect(state):
-        decision = decide(state, MarkHalt(HaltCategory.OTHER, "legacy effect stop"))
-        return replace(
-            decision,
-            transition=bind_transition_effects(decision.transition, (binding,)),
-        )
-
-    result = repository.execute(
-        _request("legacy-effect-operation", lease_id, blobs),
-        decide_effect,
+    command = MarkHalt(HaltCategory.OTHER, "legacy effect stop")
+    request = _request(
+        "legacy-effect-operation",
+        lease_id,
+        blobs,
+        typed_command=command,
+        event_types=("mission-halted",),
     )
+    result = repository.execute(request)
 
     assert result.accepted is True
     assert saved[-1]["halt_reason"] == "legacy effect stop"
@@ -259,14 +308,14 @@ def test_common_typed_request_decision_result_contract(repository_kind, tmp_path
             clock=lambda: admitted_at,
         )
 
-    request = _request("common-operation", lease_id)
-    result = repository.execute(
-        request,
-        lambda state: decide(
-            state,
-            MarkHalt(HaltCategory.OTHER, "common bounded stop"),
-        ),
+    command = MarkHalt(HaltCategory.OTHER, "common bounded stop")
+    request = _request(
+        "common-operation",
+        lease_id,
+        typed_command=command,
+        event_types=("mission-halted",),
     )
+    result = repository.execute(request)
 
     assert result.accepted is True
     assert result.rejection_code is None
@@ -276,6 +325,23 @@ def test_common_typed_request_decision_result_contract(repository_kind, tmp_path
     else:
         assert result.commit is None
         assert saved and saved[-1]["halt_reason"] == "common bounded stop"
+
+
+def test_typed_execution_rejects_command_document_and_audit_drift(tmp_path):
+    repository, _root, lease_id = _seed_repository(tmp_path)
+    command = MarkHalt(HaltCategory.OTHER, "bound stop")
+    request = _request(
+        "drift-operation", lease_id, typed_command=command, event_types=("mission-halted",)
+    )
+    forged_document = replace(
+        request,
+        command=decode_json_object(b'{"schema":"mission-kernel-command/1","type":"mark-halt","value":{}}'),
+    )
+    with pytest.raises(Exception, match="typed and immutable commands differ"):
+        repository.execute(forged_document)
+    wrong_audit = replace(request, audit=AuditMetadata("advance-phase", ("mission-halted",)))
+    with pytest.raises(Exception, match="audit command category differs"):
+        repository.execute(wrong_audit)
 
 
 def test_selector_pins_one_loaded_format_and_rejects_drift(tmp_path):
@@ -325,3 +391,49 @@ def test_selector_recognizes_an_existing_v5_head_without_an_environment_flag(tmp
 
     assert selected.format is RepositoryFormat.V5
     assert selected.repository == "v5-repository"
+
+
+def test_retained_legacy_selector_rechecks_format_at_repository_load(tmp_path):
+    from mission_persistence.repository_binding import require_legacy_session
+
+    legacy_path, _ = generate_cli_state_bytes(tmp_path / "retained-legacy")
+    selector = require_legacy_session("test", legacy_path)
+    _repository, v5_root, _lease = _seed_repository(tmp_path / "retained-v5")
+    legacy_path.write_bytes((v5_root / "sessions" / "test.json").read_bytes())
+    repository = LegacyV4Repository(
+        lock=contextlib.nullcontext,
+        read_state=lambda: pytest.fail("v5 head reached legacy reader"),
+        write_state=lambda _value: None,
+        backup_state=lambda: None,
+        format_guard=lambda: selector.select(),
+    )
+
+    with pytest.raises(Exception, match="repository-format-drift"):
+        repository.load()
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {"schema": "mission-head/2", "session_id": "test"},
+        {"schema": "mission-state/5", "session_id": "test"},
+        {"schema": "future-format/1", "session_id": "test"},
+        {},
+        {"schema_version": 5, "session_id": "test"},
+    ],
+)
+def test_selector_rejects_every_unknown_or_future_format(tmp_path, document):
+    from mission_persistence.repository_binding import (
+        FormatPinnedRepositorySelector,
+        RepositorySelectionError,
+    )
+
+    session = tmp_path / "state.json"
+    session.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(RepositorySelectionError, match="repository-format-invalid"):
+        FormatPinnedRepositorySelector(
+            session_id="test",
+            session_path=session,
+            legacy_factory=lambda: pytest.fail("unknown format reached legacy"),
+            v5_factory=lambda: pytest.fail("unknown format reached v5"),
+        ).select()

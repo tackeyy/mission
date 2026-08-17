@@ -32,7 +32,15 @@ from mission_kernel.model import (
     MissionState,
     SchemaOrigin,
 )
-from mission_kernel.transitions import Decision, Transition, is_sealed_transition
+from mission_kernel.commands import encode_kernel_command, kernel_command_type
+from mission_kernel.transitions import (
+    bind_transition_effects,
+    Decision,
+    Transition,
+    decide,
+    is_sealed_transition,
+    is_transition_bound_to,
+)
 from mission_application.ports import (
     AuditMetadata,
     CommitResult,
@@ -983,6 +991,20 @@ def _validate_request(request: ExecutionRequest) -> None:
     _digest(request.intent_digest, "intent_digest")
     if not isinstance(request.command, FrozenJsonObject):
         raise FencedCommitError("request-invalid", "command must be a FrozenJsonObject")
+    if request.typed_command is not None:
+        try:
+            encoded_command = encode_kernel_command(request.typed_command)
+            expected_command_type = kernel_command_type(request.typed_command)
+        except (TypeError, ValueError) as exc:
+            raise FencedCommitError("request-invalid", "typed command is invalid") from exc
+        if encoded_command != request.command:
+            raise FencedCommitError(
+                "command-binding-mismatch", "typed and immutable commands differ"
+            )
+        if request.audit.command_type != expected_command_type:
+            raise FencedCommitError(
+                "audit-binding-mismatch", "audit command category differs"
+            )
     expected_intent = compute_intent_digest(
         session_id=request.session_id,
         lease_owner_session_id=request.lease_owner_session_id,
@@ -1758,6 +1780,24 @@ class LocalFencedRepository:
             raise FencedCommitError(
                 "pending-lease-mismatch", "transition does not contain the pending lease"
             )
+        if admitted.base is None or admitted.request.typed_command is None:
+            raise FencedCommitError(
+                "transition-binding-mismatch", "typed transition has no admitted base command"
+            )
+        admitted_state = replace(
+            admitted.base.state,
+            lease=admitted.pending_lease.target,
+            snapshot_provenance=None,
+        )
+        if not is_transition_bound_to(
+            transition,
+            admitted_state,
+            admitted.request.typed_command,
+        ):
+            raise FencedCommitError(
+                "transition-binding-mismatch",
+                "transition differs from its admitted state or command",
+            )
         effects = transition.effects
         if type(effects) is not tuple or any(
             not isinstance(effect, BlobBinding) for effect in effects
@@ -1794,11 +1834,11 @@ class LocalFencedRepository:
     def execute(
         self,
         request: ExecutionRequest,
-        decide_command: Callable[[MissionState], Decision],
     ) -> RepositoryExecutionResult:
         """Run one explicit request through admission, decision, stage, and commit."""
-        if not callable(decide_command):
-            raise FencedCommitError("request-invalid", "decision function is not callable")
+        _validate_request(request)
+        if request.typed_command is None:
+            raise FencedCommitError("request-invalid", "typed command is required")
         admitted = self.begin(request)
         if isinstance(admitted, CommitResult):
             return RepositoryExecutionResult(True, admitted, None)
@@ -1809,7 +1849,7 @@ class LocalFencedRepository:
             lease=admitted.pending_lease.target,
             snapshot_provenance=None,
         )
-        decision = decide_command(admitted_state)
+        decision = decide(admitted_state, request.typed_command)
         if not isinstance(decision, Decision):
             raise FencedCommitError("decision-invalid", "decision result type is invalid")
         if not decision.accepted:
@@ -1818,7 +1858,18 @@ class LocalFencedRepository:
             return RepositoryExecutionResult(False, None, decision.rejection.code)
         if decision.transition is None or decision.rejection is not None:
             raise FencedCommitError("decision-invalid", "accepted decision is not closed")
-        prepared = self.stage(admitted, decision.transition, request.blobs)
+        event_types = tuple(event.type for event in decision.events)
+        if event_types != request.audit.event_types:
+            raise FencedCommitError(
+                "audit-binding-mismatch", "audit event categories differ"
+            )
+        transition = decision.transition
+        if request.blobs.blobs:
+            transition = bind_transition_effects(
+                transition,
+                tuple(blob.binding for blob in request.blobs.blobs),
+            )
+        prepared = self.stage(admitted, transition, request.blobs)
         committed = self.commit(prepared, prepared.precondition)
         return RepositoryExecutionResult(True, committed, None)
 

@@ -74,6 +74,8 @@ class FormatPinnedRepositorySelector(Generic[RepositoryT]):
             except (FencedCommitError, ValueError) as head_error:
                 raise RepositorySelectionError("repository-format-invalid") from head_error
             return RepositoryFormat.V5
+        if "schema" in document:
+            raise RepositorySelectionError("repository-format-invalid")
         schema_version = document.get("schema_version")
         if schema_version is not None and (
             type(schema_version) is not int or schema_version not in {1, 2, 3, 4}
@@ -81,9 +83,10 @@ class FormatPinnedRepositorySelector(Generic[RepositoryT]):
             # A v5 state generation is immutable content, not a session head;
             # unknown versions cannot silently enter the compatibility writer.
             raise RepositorySelectionError("repository-format-invalid")
-        document_session = document.get("session_id")
-        if document_session is not None and document_session != self._session_id:
-            raise RepositorySelectionError("repository-session-mismatch")
+        if schema_version is None and not set(document).intersection(
+            {"mission", "mission_id", "session_id", "phase", "loop_active"}
+        ):
+            raise RepositorySelectionError("repository-format-invalid")
         return RepositoryFormat.LEGACY_V4
 
     def select(self) -> RepositorySelection[RepositoryT]:
@@ -106,14 +109,18 @@ class FormatPinnedRepositorySelector(Generic[RepositoryT]):
         return self._selection
 
 
-def require_legacy_session(session_id: str, session_path: Path | str) -> None:
+def require_legacy_session(
+    session_id: str, session_path: Path | str
+) -> FormatPinnedRepositorySelector[None]:
     """Fail closed before a compatibility adapter can receive a v5 head."""
 
-    selected = FormatPinnedRepositorySelector(
+    selector = FormatPinnedRepositorySelector(
         session_id=session_id,
         session_path=session_path,
         legacy_factory=lambda: None,
         v5_factory=lambda: None,
-    ).select()
+    )
+    selected = selector.select()
     if selected.format is not RepositoryFormat.LEGACY_V4:
         raise RepositorySelectionError("repository-format-v5-requires-uow")
+    return selector
