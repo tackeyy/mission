@@ -273,17 +273,25 @@ def _finalize_coverage_counts(counts: dict, threshold: float) -> dict:
 
 
 def summarize_artifact_coverage(
-    states: list[dict], *, threshold: float = DEFAULT_COVERAGE_THRESHOLD
+    states: list[dict],
+    *,
+    threshold: float = DEFAULT_COVERAGE_THRESHOLD,
+    terminal_outcomes=None,
 ) -> dict:
     """Summarize terminal artifact observations without treating skips as clean."""
     counts = _empty_coverage_counts()
     profile_counts: dict[str, dict] = {}
     outcome_counts: dict[str, dict] = {}
+    if terminal_outcomes is None:
+        outcomes = [_terminal_outcome(state) for state in states]
+    else:
+        outcomes = list(terminal_outcomes)
+        if len(outcomes) != len(states):
+            raise ValueError("terminal outcomes must align with states")
 
-    for state in states:
+    for state, outcome in zip(states, outcomes):
         if not isinstance(state, dict):
             continue
-        outcome = _terminal_outcome(state)
         if outcome is None:
             continue
         profile = _profile_name(state)

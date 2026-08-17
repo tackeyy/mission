@@ -505,7 +505,9 @@ def _percentiles(samples: list[float]) -> dict[str, Any]:
     }
 
 
-def _valid_phase_durations(state: dict[str, Any]) -> tuple[float, bool]:
+def _valid_phase_durations(
+    state: dict[str, Any], *, phase: str | None = None
+) -> tuple[float, bool]:
     raw = state.get("phase_durations_sec")
     if not isinstance(raw, dict):
         return 0.0, False
@@ -517,7 +519,8 @@ def _valid_phase_durations(state: dict[str, Any]) -> tuple[float, bool]:
     closed = _finite_sum(values)
     if closed is None:
         return 0.0, True
-    if state.get("phase") in TERMINAL_PHASES:
+    effective_phase = phase if phase is not None else state.get("phase")
+    if effective_phase in TERMINAL_PHASES:
         return closed, False
     current = _elapsed(state.get("phase_started_at"), state.get("updated_at"))
     total = _finite_add(closed, current or 0.0)
@@ -541,7 +544,9 @@ def _valid_open_activity(state: dict[str, Any]) -> bool:
     return bool(started and (not updated or started <= updated))
 
 
-def _state_activity(state: dict[str, Any]) -> dict[str, Any]:
+def _state_activity(
+    state: dict[str, Any], *, phase: str | None = None
+) -> dict[str, Any]:
     kinds: dict[str, float] = {}
     phases: dict[str, dict[str, float]] = {}
     reasons: dict[str, dict[str, float]] = {}
@@ -708,7 +713,7 @@ def _state_activity(state: dict[str, Any]) -> dict[str, Any]:
     valid_gap = _finite_nonnegative(raw_gap)
     if raw_gap is not None and valid_gap is None:
         invalid += 1
-    phase_wall, phase_overflowed = _valid_phase_durations(state)
+    phase_wall, phase_overflowed = _valid_phase_durations(state, phase=phase)
     if phase_overflowed:
         invalid += 1
         totals_consistent = False
@@ -735,7 +740,12 @@ def _state_activity(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def summarize_activity_states(states: list[dict[str, Any]]) -> dict[str, Any]:
+def summarize_activity_states(
+    states: list[dict[str, Any]],
+    *,
+    phases: list[str] | None = None,
+    session_roles: list[str] | None = None,
+) -> dict[str, Any]:
     kind_totals: dict[str, float] = {}
     reason_totals: dict[str, dict[str, float]] = {}
     role_summaries: dict[str, dict[str, Any]] = {}
@@ -750,9 +760,28 @@ def summarize_activity_states(states: list[dict[str, Any]]) -> dict[str, Any]:
     gap_reasons: dict[str, float] = {}
     states_with = 0
     totals_consistent = True
-    for state in states:
-        item = _state_activity(state)
-        role = state.get("session_role")
+    selected_phases = (
+        phases
+        if phases is not None
+        else [
+            value if isinstance(value := state.get("phase"), str) and value else "unknown"
+            for state in states
+        ]
+    )
+    selected_roles = (
+        session_roles
+        if session_roles is not None
+        else [
+            value
+            if isinstance(value := state.get("session_role"), str) and value
+            else "implementer"
+            for state in states
+        ]
+    )
+    if len(selected_phases) != len(states) or len(selected_roles) != len(states):
+        raise ValueError("activity authoritative projections must align with states")
+    for state, phase, role in zip(states, selected_phases, selected_roles):
+        item = _state_activity(state, phase=phase)
         role_key = role if isinstance(role, str) and role else "implementer"
         wall_clock = _elapsed(state.get("started_at"), state.get("updated_at")) or 0.0
         role_summary = role_summaries.setdefault(

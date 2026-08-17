@@ -245,6 +245,20 @@ def test_project_legacy_document_reprojects_typed_scores_over_passthrough(cli_st
     assert projected["score_history"] == []
 
 
+def test_v4_sparse_score_projection_preserves_writer_bytes_without_iteration_injection():
+    from mission_kernel import decode_mission_state, project_legacy_document
+
+    payload = {
+        "schema_version": 4,
+        "score_history": [{"composite": 4.0}],
+    }
+    source = canonical_json_bytes(payload)
+
+    projected = project_legacy_document(decode_mission_state(source))
+
+    assert projected == source
+
+
 def test_legacy_passthrough_is_deeply_immutable():
     decoded = _decode({"unknown": {"nested": [1, {"value": 2}]}})
     nested = dict(decoded.legacy_passthrough.items)["unknown"]

@@ -1158,7 +1158,8 @@ class LocalFencedRepository:
                 raise FencedCommitError(
                     "repository-invalid", "required repository path is not a directory"
                 )
-            os.chmod(path, 0o700, follow_symlinks=False)
+            if stat.S_IMODE(metadata.st_mode) != 0o700:
+                os.chmod(path, 0o700, follow_symlinks=False)
         except FencedCommitError:
             raise
         except OSError as exc:
@@ -1384,7 +1385,8 @@ class LocalFencedRepository:
                 or _file_identity(lock_metadata) != _file_identity(named_lock)
             ):
                 raise FencedCommitError("repository-invalid", "repository lock identity is invalid")
-            os.fchmod(descriptor, 0o600)
+            if stat.S_IMODE(lock_metadata.st_mode) != 0o600:
+                os.fchmod(descriptor, 0o600)
             deadline = time.monotonic() + 5.0
             while True:
                 try:

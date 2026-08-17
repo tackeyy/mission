@@ -9,9 +9,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Generic, TypeVar
+from typing import Callable, Generic, Optional, TypeVar
 
 from mission_kernel.json_codec import decode_json_object, thaw_json_object
+from mission_kernel.model import FrozenJsonObject
+from mission_kernel.versions import read_schema_version
 
 from .fenced_commit import FencedCommitError, MAX_HEAD_BYTES, parse_head
 from .strict_reader import read_stable_bytes
@@ -36,6 +38,69 @@ class RepositorySelection(Generic[RepositoryT]):
     session_id: str
     format: RepositoryFormat
     repository: RepositoryT
+
+
+@dataclass(frozen=True)
+class RepositoryFormatInspection:
+    """Strictly decoded repository format and its embedded session binding."""
+
+    format: RepositoryFormat
+    document: FrozenJsonObject
+    document_session: Optional[str]
+
+
+def inspect_repository_bytes(
+    source: bytes, *, expected_session_id: Optional[str] = None
+) -> RepositoryFormatInspection:
+    """Classify one session record without permitting format downgrade."""
+
+    try:
+        frozen = decode_json_object(source)
+        document = thaw_json_object(frozen)
+    except Exception as exc:
+        raise RepositorySelectionError("repository-format-invalid") from exc
+    schema = document.get("schema")
+    if schema == "mission-head/1":
+        selected_session = expected_session_id
+        if selected_session is None:
+            embedded = document.get("session_id")
+            selected_session = embedded if isinstance(embedded, str) and embedded else None
+        if selected_session is None:
+            raise RepositorySelectionError("repository-session-invalid")
+        try:
+            parse_head(source, selected_session)
+        except (FencedCommitError, ValueError) as head_error:
+            raise RepositorySelectionError("repository-format-invalid") from head_error
+        return RepositoryFormatInspection(
+            RepositoryFormat.V5, frozen, selected_session
+        )
+    if "schema" in document or {"commit", "state_generation"} & set(document):
+        raise RepositorySelectionError("repository-format-invalid")
+    try:
+        read_schema_version(document, max_reader_version=4)
+    except Exception as exc:
+        raise RepositorySelectionError("repository-format-invalid") from exc
+    identity_values = (document.get("mission"), document.get("mission_id"))
+    has_identity = any(isinstance(value, str) and value for value in identity_values)
+    phase = document.get("phase")
+    loop_active = document.get("loop_active")
+    has_control = isinstance(phase, str) or type(loop_active) is bool
+    if not has_identity or not has_control:
+        raise RepositorySelectionError("repository-format-invalid")
+    document_session = document.get("session_id")
+    if document_session is not None and (
+        not isinstance(document_session, str) or not document_session
+    ):
+        raise RepositorySelectionError("repository-session-invalid")
+    if (
+        expected_session_id is not None
+        and document_session is not None
+        and document_session != expected_session_id
+    ):
+        raise RepositorySelectionError("repository-session-mismatch")
+    return RepositoryFormatInspection(
+        RepositoryFormat.LEGACY_V4, frozen, document_session
+    )
 
 
 class FormatPinnedRepositorySelector(Generic[RepositoryT]):
@@ -65,36 +130,10 @@ class FormatPinnedRepositorySelector(Generic[RepositoryT]):
             source = read_stable_bytes(self._session_path, limit=4 * 1024 * 1024)
         except Exception as exc:
             raise RepositorySelectionError("repository-session-invalid") from exc
-        try:
-            document = thaw_json_object(decode_json_object(source))
-        except Exception as exc:
-            raise RepositorySelectionError("repository-format-invalid") from exc
-        if document.get("schema") == "mission-head/1":
-            try:
-                parse_head(source, self._session_id)
-            except (FencedCommitError, ValueError) as head_error:
-                raise RepositorySelectionError("repository-format-invalid") from head_error
-            return RepositoryFormat.V5, self._session_id
-        if "schema" in document:
-            raise RepositorySelectionError("repository-format-invalid")
-        schema_version = document.get("schema_version")
-        if schema_version is not None and (
-            type(schema_version) is not int or schema_version not in {1, 2, 3, 4}
-        ):
-            # A v5 state generation is immutable content, not a session head;
-            # unknown versions cannot silently enter the compatibility writer.
-            raise RepositorySelectionError("repository-format-invalid")
-        identity_values = (document.get("mission"), document.get("mission_id"))
-        has_identity = any(isinstance(value, str) and value for value in identity_values)
-        phase = document.get("phase")
-        loop_active = document.get("loop_active")
-        has_control = isinstance(phase, str) or type(loop_active) is bool
-        if not has_identity or not has_control:
-            raise RepositorySelectionError("repository-format-invalid")
-        document_session = document.get("session_id")
-        if document_session is not None and document_session != self._session_id:
-            raise RepositorySelectionError("repository-session-mismatch")
-        return RepositoryFormat.LEGACY_V4, document_session
+        inspected = inspect_repository_bytes(
+            source, expected_session_id=self._session_id
+        )
+        return inspected.format, inspected.document_session
 
     def select(self) -> RepositorySelection[RepositoryT]:
         loaded_format, document_session = self._loaded_format()

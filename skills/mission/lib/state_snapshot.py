@@ -15,6 +15,11 @@ from typing import Any
 from mission_common import parse_iso_datetime, state_identity
 from worktree_archive import worktree_archive_lineage_references
 from command_outcomes import validate_observation as validate_command_outcome_observation
+from mission_persistence.authoritative_reader import (
+    AuthoritativeSnapshot,
+    expected_session_id_for_live_path,
+    read_authoritative_snapshot,
+)
 
 
 SNAPSHOT_SCHEMA = "mission-state-snapshot/1"
@@ -34,6 +39,13 @@ PRIVACY_SCHEMA = "mission-state-snapshot-privacy/1"
 
 class SnapshotError(ValueError):
     """Raised when a snapshot cannot be trusted or reused."""
+
+
+def read_authoritative_record(path: Path) -> AuthoritativeSnapshot:
+    """Resolve a discovered live-session path before snapshot sealing."""
+
+    expected_session_id = expected_session_id_for_live_path(path)
+    return read_authoritative_snapshot(path, expected_session_id=expected_session_id)
 
 
 def parse_snapshot_bytes(payload: bytes) -> Any:
@@ -355,9 +367,11 @@ def _validate_record_shape(record: Any, *, privacy: bool = False) -> None:
     if not isinstance(record, dict):
         raise SnapshotError("snapshot record payload is invalid")
     state = record.get("state")
+    authoritative_document = record.get("authoritative_document", state)
     if (
         not _is_safe_path_text(record.get("path"), absolute=not privacy)
         or not isinstance(state, dict)
+        or not isinstance(authoritative_document, dict)
         or not all(
             isinstance(state.get(key), str) and bool(state.get(key))
             for key in ("mission", "mission_id", "session_id")

@@ -32,7 +32,7 @@ def _write_state(path, **overrides):
         "started_at": "2026-06-18T00:00:00Z",
         "updated_at": "2026-06-18T00:10:00Z",
         "project_root": str(path.parents[2]),
-        "session_id": "sess-a",
+        "session_id": path.stem if path.parent.name == "sessions" else "sess-a",
         "agent": "codex",
     }
     state.update(overrides)
@@ -611,7 +611,7 @@ def test_audit_reports_standard_audit_testing_candidate_only(tmp_path):
 
 def test_audit_current_since_splits_historical_debt(tmp_path):
     _write_state(
-        tmp_path / "old" / ".mission-state" / "sessions" / "old.json",
+        tmp_path / "old" / ".mission-state" / "sessions" / "old-candidate-only.json",
         mission="execution-log audit and self-improvement",
         project_root=str(tmp_path / "old"),
         session_id="old-candidate-only",
@@ -625,7 +625,7 @@ def test_audit_current_since_splits_historical_debt(tmp_path):
         specialist_invocations=[],
     )
     _write_state(
-        tmp_path / "new" / ".mission-state" / "sessions" / "new.json",
+        tmp_path / "new" / ".mission-state" / "sessions" / "new-candidate-only.json",
         mission="execution-log audit and self-improvement",
         project_root=str(tmp_path / "new"),
         session_id="new-candidate-only",
@@ -671,13 +671,13 @@ def test_audit_current_since_splits_historical_debt(tmp_path):
 
 def test_audit_since_accepts_iso_timestamp(tmp_path):
     _write_state(
-        tmp_path / "before" / ".mission-state" / "sessions" / "before.json",
+        tmp_path / "before" / ".mission-state" / "sessions" / "before-cutoff.json",
         project_root=str(tmp_path / "before"),
         session_id="before-cutoff",
         updated_at="2026-07-06T03:00:52Z",
     )
     _write_state(
-        tmp_path / "after" / ".mission-state" / "sessions" / "after.json",
+        tmp_path / "after" / ".mission-state" / "sessions" / "after-cutoff.json",
         project_root=str(tmp_path / "after"),
         session_id="after-cutoff",
         updated_at="2026-07-06T19:58:45Z",
@@ -705,7 +705,7 @@ def test_audit_since_accepts_iso_timestamp(tmp_path):
 
 def test_audit_current_since_keeps_historical_debt_out_of_blocking_findings(tmp_path):
     _write_state(
-        tmp_path / ".mission-state" / "sessions" / "old.json",
+        tmp_path / ".mission-state" / "sessions" / "old-bad-iter.json",
         project_root=str(tmp_path),
         session_id="old-bad-iter",
         updated_at="2026-06-25T23:59:00Z",
@@ -792,8 +792,9 @@ def test_audit_keeps_unresolved_duplicate_groups(tmp_path):
     sessions = tmp_path / ".mission-state" / "sessions"
     _write_state(sessions / "sess-a.json", project_root=str(tmp_path))
     _write_state(
-        sessions / "sess-a-copy.json",
+        tmp_path / ".mission-state" / "archive" / "worktree-feat" / "state.json",
         project_root=str(tmp_path),
+        session_id="sess-a",
         updated_at="2026-06-18T00:20:00Z",
     )
 
@@ -873,7 +874,7 @@ def test_audit_pass_rate_excludes_active_no_score_sessions(tmp_path):
         session_id="passed",
     )
     _write_state(
-        tmp_path / "active" / ".mission-state" / "sessions" / "active.json",
+        tmp_path / "active" / ".mission-state" / "sessions" / "active-no-score.json",
         project_root=str(tmp_path / "active"),
         passes=False,
         loop_active=True,
@@ -1038,13 +1039,13 @@ def test_audit_ignores_worktree_archive_aggregate_json(tmp_path):
 
 def test_audit_reports_missing_scoring_evidence_in_json(tmp_path):
     _write_state(
-        tmp_path / "missing" / ".mission-state" / "sessions" / "missing.json",
+        tmp_path / "missing" / ".mission-state" / "sessions" / "missing-evidence.json",
         project_root=str(tmp_path / "missing"),
         mission_id="deadbeefcafebabe",
         session_id="missing-evidence",
     )
     _write_state(
-        tmp_path / "present" / ".mission-state" / "sessions" / "present.json",
+        tmp_path / "present" / ".mission-state" / "sessions" / "has-evidence.json",
         project_root=str(tmp_path / "present"),
         mission_id="feedfacecafebabe",
         session_id="has-evidence",
@@ -1311,14 +1312,14 @@ def test_audit_reports_stale_active_no_score_as_actionable(tmp_path):
 
 def test_audit_slow_session_buckets_track_phase_duration_observability(tmp_path):
     _write_state(
-        tmp_path / "without-phases" / ".mission-state" / "sessions" / "slow.json",
+        tmp_path / "without-phases" / ".mission-state" / "sessions" / "slow-without-phases.json",
         project_root=str(tmp_path / "without-phases"),
         started_at="2026-06-18T00:00:00Z",
         updated_at="2026-06-18T01:00:00Z",
         session_id="slow-without-phases",
     )
     _write_state(
-        tmp_path / "with-phases" / ".mission-state" / "sessions" / "slow.json",
+        tmp_path / "with-phases" / ".mission-state" / "sessions" / "slow-with-phases.json",
         project_root=str(tmp_path / "with-phases"),
         started_at="2026-06-18T00:00:00Z",
         updated_at="2026-06-18T01:00:00Z",
@@ -1351,7 +1352,7 @@ def test_audit_slow_session_buckets_track_phase_duration_observability(tmp_path)
 
 def test_audit_reports_coarse_phase_attribution(tmp_path):
     _write_state(
-        tmp_path / "coarse" / ".mission-state" / "sessions" / "slow.json",
+        tmp_path / "coarse" / ".mission-state" / "sessions" / "coarse-planning.json",
         project_root=str(tmp_path / "coarse"),
         started_at="2026-06-18T00:00:00Z",
         updated_at="2026-06-18T01:00:00Z",
@@ -1359,7 +1360,7 @@ def test_audit_reports_coarse_phase_attribution(tmp_path):
         phase_durations_sec={"planning": 3500, "scoring": 5},
     )
     _write_state(
-        tmp_path / "granular" / ".mission-state" / "sessions" / "slow.json",
+        tmp_path / "granular" / ".mission-state" / "sessions" / "granular.json",
         project_root=str(tmp_path / "granular"),
         started_at="2026-06-18T00:00:00Z",
         updated_at="2026-06-18T01:00:00Z",

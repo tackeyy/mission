@@ -31,11 +31,12 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
 MISSION_STATE_PY="${MISSION_STATE_PY:-$SCRIPT_DIR/../skills/mission/bin/mission-state.py}"
 
-INPUT="$(cat)"
-
 if ! command -v jq >/dev/null 2>&1; then
+  printf '%s\n' '{"decision":"block","reason":"mission Stop guard requires jq; state verdict is unavailable","outcome_kind":"expected-gate"}'
   exit 0
 fi
+
+INPUT="$(cat)"
 
 STOP_HOOK_ACTIVE=$(printf '%s' "$INPUT" | jq -r '.stop_hook_active // false' 2>/dev/null || echo "false")
 if [ "$STOP_HOOK_ACTIVE" = "true" ]; then
@@ -147,8 +148,7 @@ _mission_halt_session() {
   local reason="$2"
   local sid root
   sid=$(basename "$sf" .json)
-  root=$(jq -r '.project_root // empty' "$sf" 2>/dev/null || echo "")
-  [ -z "$root" ] && root="$CWD"
+  root="$CWD"
   (
     cd "$root" 2>/dev/null || exit 1
     MISSION_SESSION_ID="$sid" python3 "$MISSION_STATE_PY" mark-halt \
@@ -159,8 +159,7 @@ _mission_halt_session() {
 _mission_cleanup_expired_lease() {
   local sf="$1"
   local root output
-  root=$(jq -r '.project_root // empty' "$sf" 2>/dev/null || echo "")
-  [ -z "$root" ] && root="$CWD"
+  root="$CWD"
   output=$(
     cd "$root" 2>/dev/null || exit 1
     python3 "$MISSION_STATE_PY" cleanup-stale --root "$root" --execute
@@ -172,8 +171,7 @@ _mission_cleanup_expired_lease() {
 _mission_state_freshness() {
   local sf="$1"
   local root output
-  root=$(jq -r '.project_root // empty' "$sf" 2>/dev/null || echo "")
-  [ -z "$root" ] && root="$CWD"
+  root="$CWD"
   if command -v timeout >/dev/null 2>&1; then
     output=$(
       cd "$root" 2>/dev/null || exit 1
@@ -196,6 +194,35 @@ _mission_state_freshness() {
   ' >/dev/null 2>&1 || return 1
   printf '%s' "$output"
 }
+
+_mission_stop_verdict() {
+  local sf="$1"
+  local output
+  local -a verdict_args
+  verdict_args=(stop-verdict --state-file "$sf" --json --cwd "$CWD" \
+    --planning-warn-iterations "$PLANNING_WARN_ITER")
+  if [ -n "$HOOK_SID" ]; then
+    verdict_args+=(--hook-session-id "$HOOK_SID")
+  fi
+  if [ -n "${AGENT_PID:-}" ]; then
+    verdict_args+=(--hook-pid "$AGENT_PID")
+  fi
+  if [ "$HOOK_SID_FROM_PID" = "true" ]; then
+    verdict_args+=(--hook-session-id-from-pid)
+  fi
+  if command -v timeout >/dev/null 2>&1; then
+    output=$(cd "$CWD" 2>/dev/null && timeout 5 python3 "$MISSION_STATE_PY" "${verdict_args[@]}") || return 1
+  elif command -v perl >/dev/null 2>&1; then
+    output=$(cd "$CWD" 2>/dev/null && perl -e 'alarm shift; exec @ARGV' 5 python3 "$MISSION_STATE_PY" "${verdict_args[@]}") || return 1
+  else
+    output=$(cd "$CWD" 2>/dev/null && python3 "$MISSION_STATE_PY" "${verdict_args[@]}") || return 1
+  fi
+  printf '%s' "$output" | jq -e '
+    .schema == "mission-stop-verdict/1" and
+    (.decision == "block" or .decision == "skip" or .decision == "warn")
+  ' >/dev/null 2>&1 || return 1
+  printf '%s' "$output"
+}
 HOOK_SID=""
 HOOK_SID_FROM_PID=false
 if [ -n "${MISSION_SESSION_ID:-}" ]; then
@@ -211,11 +238,14 @@ elif [ -n "${AGENT_PID:-}" ]; then
 fi
 
 # === C-2/C-3: sessions/ ディレクトリ優先 (multi-session 対応) ===
+PLANNING_WARN_ITER="${MISSION_PLANNING_WARN_ITERATIONS:-3}"
+case "$PLANNING_WARN_ITER" in ''|*[!0-9]*) PLANNING_WARN_ITER=3 ;; esac
+[ "$PLANNING_WARN_ITER" -lt 1 ] && PLANNING_WARN_ITER=3
 if [ -d "$SESSIONS_DIR" ]; then
   HAS_ACTIVE=false
   EXACT_SESSION_FILE=""
   EXACT_SESSION_SEEN=false
-  if [ -n "$HOOK_SID" ] && [ -f "$SESSIONS_DIR/$HOOK_SID.json" ]; then
+  if [ -n "$HOOK_SID" ] && { [ -e "$SESSIONS_DIR/$HOOK_SID.json" ] || [ -L "$SESSIONS_DIR/$HOOK_SID.json" ]; }; then
     EXACT_SESSION_FILE="$SESSIONS_DIR/$HOOK_SID.json"
     if [ "$HOOK_SID_FROM_PID" = "true" ]; then
       # exact fenced state を最優先し、不適格/terminal の場合だけ legacy PID stateへ降下。
@@ -227,78 +257,34 @@ if [ -d "$SESSIONS_DIR" ]; then
     set -- "$SESSIONS_DIR"/*.json
   fi
   for sf in "$@"; do
-    [ -f "$sf" ] || continue
+    [ -e "$sf" ] || [ -L "$sf" ] || continue
     if [ -n "$EXACT_SESSION_FILE" ] && [ "$sf" = "$EXACT_SESSION_FILE" ]; then
       [ "$EXACT_SESSION_SEEN" = "true" ] && continue
       EXACT_SESSION_SEEN=true
     fi
-    s_loop=$(jq -r '.loop_active // false' "$sf" 2>/dev/null || echo "false")
-    [ "$s_loop" != "true" ] && continue
-    s_passes=$(jq -r '.passes // false' "$sf" 2>/dev/null || echo "false")
-    s_halt=$(jq -r '.halt_reason // empty' "$sf" 2>/dev/null || echo "")
-    [ "$s_passes" = "true" ] && continue
-    [ -n "$s_halt" ] && continue
-
-    # project_root 照合
-    s_root=$(jq -r '.project_root // empty' "$sf" 2>/dev/null || echo "")
-    if [ -n "$s_root" ]; then
-      CWD_REAL=$(cd "$CWD" 2>/dev/null && pwd -P || echo "$CWD")
-      ROOT_REAL=$(cd "$s_root" 2>/dev/null && pwd -P || echo "$s_root")
-      [ "$CWD_REAL" != "$ROOT_REAL" ] && continue
+    if ! STATE_VERDICT=$(_mission_stop_verdict "$sf"); then
+      jq -n --arg r "authoritative session state を検証できないため安全側で停止: $sf" \
+        '{decision:"block", reason:$r, outcome_kind:"expected-gate"}'
+      exit 0
     fi
-
-    # owner 照合: session env があれば sid (ファイル名) で照合 (AGENT_PID 遡及非依存で確実)。
-    # env が無い環境のみ従来の pid 照合に fallback。
-    sf_sid=$(basename "$sf" .json)
-    s_pid=$(jq -r '.pid // empty' "$sf" 2>/dev/null || echo "")
-    s_lease_owner=$(jq -r '.owner_session_id // empty' "$sf" 2>/dev/null || echo "")
-    s_lease_id=$(jq -r '.lease_id // empty' "$sf" 2>/dev/null || echo "")
-    s_lease_epoch=$(jq -r '.fencing_epoch // empty' "$sf" 2>/dev/null || echo "")
-    s_lease_expires=$(jq -r '.lease_expires_at // empty' "$sf" 2>/dev/null || echo "")
-    LEASE_PRESENT=false
-    LEASE_UNEXPIRED=false
-    if [ -n "$s_lease_owner" ] && [ -n "$s_lease_id" ] && [ -n "$s_lease_epoch" ] && [ -n "$s_lease_expires" ]; then
-      LEASE_PRESENT=true
-      LEASE_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" -u "$s_lease_expires" +%s 2>/dev/null || date -u -d "$s_lease_expires" +%s 2>/dev/null || echo "")
-      if [ -n "$LEASE_EPOCH" ] && [ "$LEASE_EPOCH" -gt "$(date +%s)" ] 2>/dev/null; then
-        LEASE_UNEXPIRED=true
+    STATE_DECISION=$(printf '%s' "$STATE_VERDICT" | jq -r '.decision')
+    if [ "$STATE_DECISION" != "block" ] && [ "$STATE_DECISION" != "warn" ]; then
+      ORPHAN_PID=$(printf '%s' "$STATE_VERDICT" | jq -r '.orphan_pid // empty')
+      if [ -n "$ORPHAN_PID" ]; then
+        _mission_halt_session "$sf" "orphan: pid $ORPHAN_PID dead" || true
       fi
-    fi
-    if [ -n "$HOOK_SID" ]; then
-      if [ "$sf_sid" = "$HOOK_SID" ]; then
-        # fenced state はファイル名だけでなく、記録された owner も一致必須。
-        [ "$LEASE_PRESENT" = "true" ] && [ "$s_lease_owner" != "$HOOK_SID" ] && continue
-      elif [ "$HOOK_SID_FROM_PID" = "true" ] && [ "$LEASE_PRESENT" != "true" ]; then
-        # lease 導入前の任意名 state は従来どおり diagnostic PID で照合する。
-        [ -z "$s_pid" ] && continue
-        [ "$s_pid" = "null" ] && continue
-        [ "$s_pid" != "$AGENT_PID" ] && continue
-      else
-        continue
-      fi
-    fi
-
-    # PID alive 照合 (env なし pid fallback 時のみ)。HOOK_SID 一致時は自セッション確定のため
-    # スキップ — resume/compaction で PID が変わっても自分の state を block できる (M-1)。
-    if [ "$LEASE_PRESENT" != "true" ] && [ -z "$HOOK_SID" ] && [ -n "$s_pid" ] && [ "$s_pid" != "null" ] && [ "$s_pid" -gt 0 ] 2>/dev/null; then
-      if ! kill -0 "$s_pid" 2>/dev/null; then
-        _mission_halt_session "$sf" "orphan: pid $s_pid dead" || true
-        continue
-      fi
+      continue
     fi
 
     HAS_ACTIVE=true
     SESSION_FILE_TO_BLOCK="$sf"
-    SESSION_LEASE_PRESENT="$LEASE_PRESENT"
-    SESSION_LEASE_UNEXPIRED="$LEASE_UNEXPIRED"
+    SESSION_VERDICT="$STATE_VERDICT"
+    SESSION_LEASE_PRESENT=$(printf '%s' "$STATE_VERDICT" | jq -r '.lease_present')
+    SESSION_LEASE_UNEXPIRED=$(printf '%s' "$STATE_VERDICT" | jq -r '.lease_unexpired')
     break
   done
 
   if [ "$HAS_ACTIVE" = "true" ]; then
-    ITER=$(jq -r '.iteration // 0' "$SESSION_FILE_TO_BLOCK" 2>/dev/null || echo "0")
-    LAST_SCORE=$(jq -r '.score_history[-1].composite // "n/a"' "$SESSION_FILE_TO_BLOCK" 2>/dev/null || echo "n/a")
-    THRESHOLD=$(jq -r '.threshold // 4.0' "$SESSION_FILE_TO_BLOCK" 2>/dev/null || echo "4.0")
-    MISSION=$(jq -r '.mission // ""' "$SESSION_FILE_TO_BLOCK" 2>/dev/null | head -c 200)
     # Issue #1 / F-5 (v4): freshness verdict は Python の read-only 判定へ集約する。
     # 判定不能時は stale auto-halt を行わず、通常の block 継続へ戻す。
     STALE=""
@@ -308,7 +294,7 @@ if [ -d "$SESSIONS_DIR" ]; then
       FRESHNESS_AGE_SEC=$(printf '%s' "$FRESHNESS" | jq -r 'if .age_sec == null then empty else .age_sec end' 2>/dev/null || echo "")
       case "$FRESHNESS_VERDICT" in
         stale)
-          AWAITING_USER=$(jq -r '.awaiting_user // false' "$SESSION_FILE_TO_BLOCK" 2>/dev/null || echo "false")
+          AWAITING_USER=$(printf '%s' "$SESSION_VERDICT" | jq -r '.awaiting_user')
           if [ "${SESSION_LEASE_UNEXPIRED:-false}" = "true" ]; then
             STALE="[WARN: state が $(( FRESHNESS_AGE_SEC / 60 ))分 未更新だが session lease は有効なため stale auto-halt を保留] "
           elif [ "$AWAITING_USER" = "true" ]; then
@@ -346,79 +332,11 @@ if [ -d "$SESSIONS_DIR" ]; then
           ;;
       esac
     fi
-    # P1-2: planning 滞留(push-score 未実行) bd12 型の早期検出。
-    # 検出条件: loop_active=true かつ score_history 空(=push-score未実行) かつ
-    #           iteration が閾値(MISSION_PLANNING_WARN_ITERATIONS)超。
-    # haltせず警告をfeedbackに注入するのみ。偽陽性(正常なplanning初期)は閾値で制御。
-    # デフォルト閾値=3: iteration>=3 かつ score_history 空を異常とみなす根拠 —
-    # 正常run では iter1 実行後に push-score が呼ばれ score_history に1件以上入るため。
-    # テスト容易性のため環境変数 MISSION_PLANNING_WARN_ITERATIONS で override 可能。
-    PUSH_SCORE_WARN=""
-    SCORE_HISTORY_LEN=$(jq -r '.score_history | length' "$SESSION_FILE_TO_BLOCK" 2>/dev/null || echo "0")
-    PHASE=$(jq -r '.phase // "unknown"' "$SESSION_FILE_TO_BLOCK" 2>/dev/null || echo "unknown")
-    PLANNING_WARN_ITER="${MISSION_PLANNING_WARN_ITERATIONS:-3}"
-    case "$PLANNING_WARN_ITER" in ''|*[!0-9]*) PLANNING_WARN_ITER=3 ;; esac
-    [ "$PLANNING_WARN_ITER" -lt 1 ] && PLANNING_WARN_ITER=3
-    if [ "$SCORE_HISTORY_LEN" -eq 0 ] 2>/dev/null && [ "$ITER" -ge "$PLANNING_WARN_ITER" ] 2>/dev/null; then
-      PUSH_SCORE_WARN="[WARN: push-score 未実行の疑い (iter=$ITER, score_history 空, phase=$PHASE)。mission-state.py get で state を確認し、push-score 未実行なら push-score を実行してください] "
-    fi
-    # AC-3 (#377): 未達セッションの session_id / issue_ref 内訳を block reason に含める。
-    # ブロック対象セッション自身の識別子を取得 (session_id フィールド優先、なければファイル名)。
-    SESSION_SID=$(jq -r '.session_id // empty' "$SESSION_FILE_TO_BLOCK" 2>/dev/null || echo "")
-    [ -z "$SESSION_SID" ] && SESSION_SID=$(basename "$SESSION_FILE_TO_BLOCK" .json)
-    SESSION_ISSUE_REF=$(jq -r '.issue_ref // empty' "$SESSION_FILE_TO_BLOCK" 2>/dev/null || echo "")
-    # 同プロジェクトの全未達セッションを走査して内訳を構築 (最大 5 件)。
-    PENDING_BREAKDOWN=""
-    _PENDING_COUNT=0
-    _PENDING_GROUPS="|"
-    _PENDING_DIGEST_INPUT=""
-    _CWD_REAL=$(cd "$CWD" 2>/dev/null && pwd -P || echo "$CWD")
-    for _sf in "$SESSIONS_DIR"/*.json; do
-      [ -f "$_sf" ] || continue
-      _sl=$(jq -r '.loop_active // false' "$_sf" 2>/dev/null || echo "false")
-      [ "$_sl" != "true" ] && continue
-      _sp=$(jq -r '.passes // false' "$_sf" 2>/dev/null || echo "false")
-      [ "$_sp" = "true" ] && continue
-      _sh=$(jq -r '.halt_reason // empty' "$_sf" 2>/dev/null || echo "")
-      [ -n "$_sh" ] && continue
-      # project_root 一致のみ対象
-      _sr=$(jq -r '.project_root // empty' "$_sf" 2>/dev/null || echo "")
-      if [ -n "$_sr" ]; then
-        _ROOT_REAL=$(cd "$_sr" 2>/dev/null && pwd -P || echo "$_sr")
-        [ "$_CWD_REAL" != "$_ROOT_REAL" ] && continue
-      fi
-      _psid=$(jq -r '.session_id // empty' "$_sf" 2>/dev/null || echo "")
-      [ -z "$_psid" ] && _psid=$(basename "$_sf" .json)
-      _piref=$(jq -r '.issue_ref // empty' "$_sf" 2>/dev/null || echo "")
-      _pgroup=$(jq -r '.logical_group_id // empty' "$_sf" 2>/dev/null || echo "")
-      _digest_entry=$(jq -cS --arg resolved_session_id "$_psid" '{session_id:$resolved_session_id,issue_ref:(.issue_ref // ""),logical_group_id:(.logical_group_id // ""),phase:(.phase // "unknown"),owner_session_id:(.owner_session_id // ""),lease_id:(.lease_id // ""),fencing_epoch:(.fencing_epoch // 0),lease_expires_at:(.lease_expires_at // "")}' "$_sf" 2>/dev/null || echo "")
-      [ -n "$_digest_entry" ] && _PENDING_DIGEST_INPUT="${_PENDING_DIGEST_INPUT}${_digest_entry}
-"
-      if [ -n "$_pgroup" ]; then
-        case "$_PENDING_GROUPS" in
-          *"|${_pgroup}|"*) continue ;;
-        esac
-        _PENDING_GROUPS="${_PENDING_GROUPS}${_pgroup}|"
-        _entry="group:${_pgroup}(incomplete)"
-      else
-        _entry="$_psid"
-        [ -n "$_piref" ] && _entry="${_psid}(#${_piref})"
-      fi
-      _PENDING_COUNT=$(( _PENDING_COUNT + 1 ))
-      if [ "$_PENDING_COUNT" -gt 5 ]; then
-        PENDING_BREAKDOWN="${PENDING_BREAKDOWN},..."
-        break
-      fi
-      if [ -z "$PENDING_BREAKDOWN" ]; then
-        PENDING_BREAKDOWN="$_entry"
-      else
-        PENDING_BREAKDOWN="${PENDING_BREAKDOWN}, $_entry"
-      fi
-    done
-    SESSION_LABEL="$SESSION_SID"
-    [ -n "$SESSION_ISSUE_REF" ] && SESSION_LABEL="${SESSION_SID}(#${SESSION_ISSUE_REF})"
+    PUSH_SCORE_WARN=$(printf '%s' "$SESSION_VERDICT" | jq -r '.planning_warning')
+    SESSION_SID=$(printf '%s' "$SESSION_VERDICT" | jq -r '.session_id')
+    PENDING_DIGEST=$(printf '%s' "$SESSION_VERDICT" | jq -r '.pending_digest')
+    DISPLAY_REASON=$(printf '%s' "$SESSION_VERDICT" | jq -r '.display_reason')
     STOP_GUARD_OBSERVATION=""
-    PENDING_DIGEST=$(printf '%s' "$_PENDING_DIGEST_INPUT" | _mission_sha256 2>/dev/null || echo "")
     STOP_GUARD_NOW="${MISSION_STOP_GUARD_NOW_EPOCH:-$(date +%s)}"
     STOP_GUARD_TTL="${MISSION_STOP_GUARD_HEARTBEAT_SECONDS:-600}"
     case "$STOP_GUARD_NOW" in ''|*[!0-9]*) STOP_GUARD_NOW=$(date +%s) ;; esac
@@ -444,7 +362,7 @@ if [ -d "$SESSIONS_DIR" ]; then
     if [ "$STOP_GUARD_MODE" = "heartbeat" ]; then
       REASON="${STALE}${PUSH_SCORE_WARN}/mission heartbeat (blocker=unfinished-mission, next=python3 scripts/mission-state.py next)"
     else
-      REASON="${STALE}${PUSH_SCORE_WARN}/mission skill アクティブ・未達 (session=$SESSION_LABEL, 未達一覧=[$PENDING_BREAKDOWN], iter=$ITER, last_score=$LAST_SCORE, threshold=$THRESHOLD)。 state.json の passes=true か halt_reason を立てるまでループを継続。 ミッション: $MISSION"
+      REASON="${STALE}${PUSH_SCORE_WARN}${DISPLAY_REASON}"
     fi
     jq -n --arg r "$REASON" '{decision:"block", reason:$r, outcome_kind:"expected-gate"}'
     exit 0

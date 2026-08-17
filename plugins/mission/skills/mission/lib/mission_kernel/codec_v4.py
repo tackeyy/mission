@@ -791,25 +791,35 @@ def _aggregate_ref_json(reference: ReviewAggregateRef) -> dict[str, Any]:
         item = getattr(reference, key)
         if item is not None:
             value[key] = item
+    if reference.size is not None:
+        value["size"] = reference.size
+    if reference.iteration is not None:
+        value["iteration"] = reference.iteration
     return value
 
 
 def _manual_ref_json(reference: ManualScoreRef) -> dict[str, Any]:
-    return {
+    value = {
         "kind": reference.kind,
         "path": reference.relative_path,
         "digest": reference.digest,
         "generation": reference.generation,
         "revision_scope": _revision_scope_json(reference.revision_scope),
     }
+    if reference.size is not None:
+        value["size"] = reference.size
+    return value
 
 
 def _content_ref_json(reference: ContentAddressedRef) -> dict[str, Any]:
-    return {
+    value = {
         "kind": reference.kind,
         "path": reference.relative_path,
         "digest": reference.digest,
     }
+    if reference.size is not None:
+        value["size"] = reference.size
+    return value
 
 
 def _legacy_score_json(score: Score) -> dict[str, Any]:
@@ -900,7 +910,11 @@ def project_legacy_document(state: MissionState) -> bytes:
             for reference in input_refs
         ]
     if state.scores or "score_history" in document:
-        document["score_history"] = [_legacy_score_json(score) for score in state.scores]
+        projected_scores = [_legacy_score_json(score) for score in state.scores]
+        if state.schema_origin is SchemaOrigin.V5:
+            for score in projected_scores:
+                score.setdefault("iteration", control.iteration)
+        document["score_history"] = projected_scores
     if isinstance(state.lease, LegacyAbsentLease):
         for key in ("owner_session_id", "lease_id", "fencing_epoch", "lease_expires_at", "lease_history"):
             document.pop(key, None)

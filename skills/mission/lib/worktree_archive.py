@@ -59,6 +59,15 @@ class StateArchiveCompaction:
         )
 
 
+@dataclass(frozen=True)
+class TypedScoreEvidenceBinding:
+    evidence_kind: str
+    iteration: int
+    source_reference: str
+    reference: dict[str, Any]
+    expected_kind: str
+
+
 def _invalid(bundle: Path, root: Path, reason: str, generation: str | None = None):
     return WorktreeArchiveValidation("invalid", root, generation, reason)
 
@@ -457,6 +466,96 @@ def read_verified_review_input_evidence(
     return content
 
 
+def read_verified_content_addressed_evidence(
+    root: Path, reference: object, *, expected_kind: str
+) -> bytes:
+    """Read one typed score reference and bind its digest and declared size."""
+
+    if not isinstance(reference, dict) or reference.get("kind") != expected_kind:
+        raise ValueError("content-addressed evidence reference schema is invalid")
+    relative = _safe_relative_path(reference.get("path"), state_reference=True)
+    digest = reference.get("digest")
+    size = reference.get("size")
+    if (
+        relative is None
+        or not isinstance(digest, str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
+        or not isinstance(size, int)
+        or isinstance(size, bool)
+        or size < 0
+    ):
+        raise ValueError("content-addressed evidence reference schema is invalid")
+    content, _metadata = _read_generation_file(
+        root, relative, limit=REVIEW_INPUT_MAX_BYTES, expected_size=size,
+    )
+    if "sha256:" + hashlib.sha256(content).hexdigest() != digest:
+        raise ValueError("content-addressed evidence integrity mismatch")
+    return content
+
+
+def worktree_archive_typed_score_bindings(
+    state: dict[str, Any],
+) -> tuple[TypedScoreEvidenceBinding, ...]:
+    """Project complete typed score refs for writer and validator rebinding."""
+
+    bindings: list[TypedScoreEvidenceBinding] = []
+    reference_specs = {
+        "scoring-json": (
+            ("review_evidence_ref", "review-aggregate", "review-aggregate"),
+        ),
+        "manual-import": (
+            ("manual_evidence_ref", "manual-score-source", "manual-score"),
+        ),
+    }
+    for entry in state.get("score_history") or []:
+        if not isinstance(entry, dict):
+            continue
+        iteration = entry.get("iteration")
+        provenance = (
+            entry.get("score_provenance")
+            if isinstance(entry.get("score_provenance"), dict)
+            else {}
+        )
+        specs = list(reference_specs.get(provenance.get("score_source"), ()))
+        specs.append(("scoring_evidence_ref", "scoring-artifact", "scoring-artifact"))
+        for key, evidence_kind, expected_kind in specs:
+            reference = provenance.get(key)
+            if not isinstance(reference, dict):
+                continue
+            complete = all(
+                field in reference for field in ("kind", "path", "digest", "size")
+            )
+            if not complete:
+                # Historical v4 references are path-only or omit size.
+                continue
+            source_reference = _normalized_state_reference(reference.get("path"))
+            if (
+                not isinstance(iteration, int)
+                or isinstance(iteration, bool)
+                or iteration < 0
+                or source_reference is None
+                or reference.get("kind") != expected_kind
+                or not isinstance(reference.get("digest"), str)
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", reference["digest"])
+                or not isinstance(reference.get("size"), int)
+                or isinstance(reference.get("size"), bool)
+                or reference["size"] < 0
+                or (
+                    reference.get("iteration") is not None
+                    and reference.get("iteration") != iteration
+                )
+            ):
+                raise ValueError("typed score evidence binding is invalid")
+            bindings.append(TypedScoreEvidenceBinding(
+                evidence_kind=evidence_kind,
+                iteration=iteration,
+                source_reference=source_reference,
+                reference=reference,
+                expected_kind=expected_kind,
+            ))
+    return tuple(bindings)
+
+
 def worktree_archive_lineage_references(
     state: dict[str, Any], state_reference: str, *, repo_root: Path | None = None,
     verify_repo_artifact_tracking: bool = True,
@@ -679,6 +778,47 @@ def validated_archive_evidence_reader(
     return lambda reference: read_validated_archive_evidence(validation, reference)
 
 
+def read_validated_archive_authoritative_snapshot(
+    validation: WorktreeArchiveValidation,
+):
+    """Read the single manifest-bound state through the sealed-bytes reader."""
+
+    if (
+        validation.status != "valid"
+        or validation.state is None
+        or len(validation.state_paths) != 1
+    ):
+        raise ValueError("validated archive state is unavailable")
+    expected_session_id = validation.state.get("session_id")
+    if not isinstance(expected_session_id, str) or not expected_session_id:
+        raise ValueError("validated archive session identity is invalid")
+    state_path = validation.state_paths[0]
+    state_items = [
+        item for item in validation.evidence
+        if item.get("evidence_kind") == "state" and item.get("path") == state_path
+    ]
+    if len(state_items) != 1:
+        raise ValueError("validated archive state binding is invalid")
+    from mission_persistence.authoritative_reader import (
+        authoritative_snapshot_from_validated_archive_bytes,
+    )
+    from mission_persistence.strict_reader import STATE_LIMIT, read_stable_bytes
+
+    source = read_stable_bytes(state_path, limit=STATE_LIMIT)
+    item = state_items[0]
+    if (
+        len(source) != item.get("size")
+        or hashlib.sha256(source).hexdigest() != item.get("sha256")
+    ):
+        raise ValueError("validated archive state bytes drifted")
+    snapshot = authoritative_snapshot_from_validated_archive_bytes(
+        source, expected_session_id=expected_session_id
+    )
+    if snapshot.document_copy() != validation.state:
+        raise ValueError("validated archive state projection drifted")
+    return snapshot
+
+
 def validate_worktree_archive_bundle(bundle: Path) -> WorktreeArchiveValidation:
     """Resolve one bundle and verify a generation manifest before exposing state."""
     try:
@@ -850,9 +990,16 @@ def validate_worktree_archive_bundle(bundle: Path) -> WorktreeArchiveValidation:
     if len(state_paths) != 1:
         return _invalid(bundle, generation_root, "manifest-state-count-invalid", generation)
     try:
+        from mission_persistence.authoritative_reader import (
+            authoritative_snapshot_from_validated_archive_bytes,
+        )
+
         state_archive_path = state_paths[0].relative_to(generation_root).as_posix()
-        state = json.loads(state_payloads[state_archive_path].decode("utf-8"))
-    except (KeyError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        state = authoritative_snapshot_from_validated_archive_bytes(
+            state_payloads[state_archive_path],
+            expected_session_id=manifest.get("session_id"),
+        ).document_copy()
+    except (KeyError, OSError, ValueError):
         return _invalid(bundle, generation_root, "manifest-state-invalid-json", generation)
     if (
         not isinstance(state, dict)
@@ -893,6 +1040,37 @@ def validate_worktree_archive_bundle(bundle: Path) -> WorktreeArchiveValidation:
             )
         except (KeyError, ValueError):
             return _invalid(bundle, generation_root, "manifest-review-input-integrity-mismatch", generation)
+    try:
+        typed_score_bindings = worktree_archive_typed_score_bindings(state)
+    except ValueError:
+        return _invalid(
+            bundle, generation_root,
+            "manifest-score-reference-invalid", generation,
+        )
+    for binding in typed_score_bindings:
+        matches = [
+            item for item in checked
+            if item.get("evidence_kind") == binding.evidence_kind
+            and item.get("iteration") == binding.iteration
+            and item.get("source_reference") == binding.source_reference
+        ]
+        if len(matches) != 1 or matches[0].get("kind") == "repo-artifact":
+            return _invalid(
+                bundle, generation_root,
+                "manifest-score-reference-invalid", generation,
+            )
+        archive_path = matches[0].get("archive_path")
+        content = evidence_payloads.get(archive_path)
+        if (
+            content is None
+            or len(content) != binding.reference["size"]
+            or "sha256:" + hashlib.sha256(content).hexdigest()
+            != binding.reference["digest"]
+        ):
+            return _invalid(
+                bundle, generation_root,
+                "manifest-score-reference-integrity-mismatch", generation,
+            )
     state_entries = [item for item in checked if item["evidence_kind"] == "state"]
     state_archive_path = state_paths[0].relative_to(generation_root).as_posix()
     if len(state_entries) != 1 or state_entries[0]["archive_path"] != state_archive_path:
