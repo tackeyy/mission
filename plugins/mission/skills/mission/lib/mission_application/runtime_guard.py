@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import re
 from dataclasses import dataclass
 from typing import Callable, ContextManager, Protocol
@@ -40,6 +41,19 @@ _PROBE_OUTCOMES = frozenset({"allowed", "denied", "unknown"})
 _PROBE_ERRORS = frozenset(
     {None, "write-unavailable", "invalid-evidence-path", "assumptions-path-missing"}
 )
+_PERMISSION_TRANSITION_FIELDS = frozenset(
+    {
+        "activity_anomaly_counts",
+        "activity_current",
+        "activity_rollup",
+        "activity_segments",
+        "phase",
+        "phase_durations_sec",
+        "phase_started_at",
+        "resume_target_phase",
+    }
+)
+_MISSING = object()
 
 
 class StopObservationRepository(Protocol):
@@ -219,6 +233,64 @@ def _permission_reason(probe: PermissionProbe) -> str:
     return f"Phase 0 permission preflight failed before task execution: {detail}"
 
 
+def _closed_permission_transition(
+    state: dict,
+    transition_phase: Callable[[dict, str, str], None],
+    observed_at: str,
+) -> None:
+    """Project only the closed timing delta from a compatibility reducer."""
+    candidate = copy.deepcopy(state)
+    transition_phase(candidate, "halted", observed_at)
+    changed = {
+        key
+        for key in set(state) | set(candidate)
+        if state.get(key, _MISSING) != candidate.get(key, _MISSING)
+    }
+    if not changed.issubset(_PERMISSION_TRANSITION_FIELDS):
+        raise ValueError("permission-transition-invalid")
+    if (
+        candidate.get("phase") != "halted"
+        or candidate.get("phase_started_at") != observed_at
+        or "resume_target_phase" in candidate
+        or candidate.get("activity_current") is not None
+    ):
+        raise ValueError("permission-transition-invalid")
+    durations = candidate.get("phase_durations_sec")
+    if durations is not None and (
+        not isinstance(durations, dict)
+        or any(
+            not isinstance(key, str)
+            or isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or value < 0
+            for key, value in durations.items()
+        )
+    ):
+        raise ValueError("permission-transition-invalid")
+    anomalies = candidate.get("activity_anomaly_counts")
+    if anomalies is not None and (
+        not isinstance(anomalies, dict)
+        or any(
+            not isinstance(key, str)
+            or not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+            for key, value in anomalies.items()
+        )
+    ):
+        raise ValueError("permission-transition-invalid")
+    if not isinstance(candidate.get("activity_segments", []), list):
+        raise ValueError("permission-transition-invalid")
+    if not isinstance(candidate.get("activity_rollup", {}), dict):
+        raise ValueError("permission-transition-invalid")
+    for key in _PERMISSION_TRANSITION_FIELDS:
+        if key in candidate:
+            state[key] = copy.deepcopy(candidate[key])
+        else:
+            state.pop(key, None)
+
+
 def record_permission_observation(
     repository: MissionRepository,
     request: PermissionObservationRequest,
@@ -241,12 +313,16 @@ def record_permission_observation(
             if transition_phase is None:
                 proposed["phase"] = "halted"
             else:
-                transition_phase(proposed, "halted", request.observed_at)
+                _closed_permission_transition(
+                    proposed, transition_phase, request.observed_at
+                )
             proposed["terminal_outcome"] = "blocked_external"
             proposed["updated_at"] = request.observed_at
 
         proposed = repository.execute(state, mutate)
-        repository.save(proposed)
+        # Legacy v4 validates lease/fence inside the writer.  A pre-write
+        # backup would be an observable effect before that authority check.
+        repository.save(proposed, backup=False)
     return PermissionObservationResult(
         False,
         True,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import json
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -245,6 +246,82 @@ def test_permission_repository_failure_does_not_mutate_loaded_state(failure):
     assert repository.saved is None
 
 
+def test_permission_transition_callback_cannot_inject_authority_fields():
+    from mission_application.runtime_guard import (
+        PermissionObservationRequest,
+        PermissionProbe,
+        record_permission_observation,
+    )
+
+    state = _state()
+    repository = MissionRepository(state)
+
+    def forged_transition(proposed, _phase, _at):
+        proposed.update(
+            {
+                "phase": "done",
+                "passes": True,
+                "score_history": [{"composite": 5.0}],
+                "lease_id": "forged",
+                "fencing_epoch": 999,
+                "provider": {"status": "passed"},
+            }
+        )
+
+    with pytest.raises(ValueError, match="permission-transition-invalid"):
+        record_permission_observation(
+            repository,
+            PermissionObservationRequest(
+                probes=(PermissionProbe("state", "denied", "write-unavailable"),),
+                observed_at="2026-08-17T00:00:00Z",
+            ),
+            transition_phase=forged_transition,
+        )
+
+    assert repository.state == state
+    assert repository.saved is None
+
+
+def test_permission_foreign_lease_rejection_changes_no_durable_bytes(tmp_path, run_cli):
+    owner = {"MISSION_SESSION_ID": "session-a", "MISSION_LEASE_ID": "lease-a"}
+    run_cli(
+        "init",
+        "A5 foreign lease",
+        "--complexity",
+        "Standard",
+        cwd=tmp_path,
+        env_extra=owner,
+        check=True,
+    )
+    state_path = tmp_path / ".mission-state" / "sessions" / "session-a.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["assumptions_path"] = "outside.md"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    before = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in (tmp_path / ".mission-state").rglob("*")
+        if path.is_file()
+    }
+
+    result = run_cli(
+        "permission-preflight",
+        "--json",
+        cwd=tmp_path,
+        env_extra={
+            "MISSION_SESSION_ID": "session-a",
+            "MISSION_LEASE_ID": "foreign-lease",
+        },
+    )
+
+    after = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in (tmp_path / ".mission-state").rglob("*")
+        if path.is_file()
+    }
+    assert result.returncode == 2
+    assert after == before
+
+
 @pytest.mark.parametrize(
     "probes",
     [
@@ -316,6 +393,9 @@ def test_a5_cli_handlers_reach_only_the_registered_application_routes():
             if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
         }
         assert direct.isdisjoint(forbidden)
+    assert "record_permission_observation" in reachable(
+        "_record_permission_preflight_halt"
+    )
 
 
 def test_runtime_guard_application_has_no_filesystem_or_process_io():

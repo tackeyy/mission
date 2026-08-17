@@ -1480,26 +1480,18 @@ def _validated_assumptions_probe_path(cwd: Path, raw_path: str) -> Path:
 
 
 def _record_permission_preflight_halt(cwd: Path, sf: Path, reason: str) -> bool:
-    """Best-effort persisted halt; structured stdout remains the final fallback."""
-    try:
-        with StateLock(lock_file(cwd)):
-            data = json.loads(sf.read_text(encoding="utf-8"))
-            now = iso_now()
-            data["halt_reason"] = reason
-            data["halt_category"] = "blocked-external"
-            data["loop_active"] = False
-            _transition_phase(data, "halted", now)
-            _write_terminal_outcome(data)
-            data["updated_at"] = now
-            backup_state(sf)
-            atomic_write_json(sf, data)
-            try:
-                _remove_from_aggregate(cwd, resolve_session_id())
-            except OSError:
-                pass
-        return True
-    except OSError:
+    """Route init's best-effort fallback through the same closed A5 writer."""
+    expected = (
+        "Phase 0 permission preflight failed before task execution: "
+        "state write unavailable"
+    )
+    if reason != expected:
         return False
+    return _record_permission_probe_observation(
+        cwd,
+        sf,
+        (PermissionProbe("state", "denied", "write-unavailable"),),
+    )
 
 
 def _exit_init_evidence_write_failure(target: str) -> None:
