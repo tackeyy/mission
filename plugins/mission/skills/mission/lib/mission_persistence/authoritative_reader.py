@@ -801,8 +801,6 @@ def authoritative_snapshot_from_validated_archive_bytes(
     values = thaw_json_object(frozen)
     if "schema" in values or "commit" in values:
         raise ValueError("validated archive state uses an unsupported format")
-    if values.get("schema") is not None:
-        raise ValueError("authoritative state schema tag is unsupported")
     schema_origin = read_schema_version(values, max_reader_version=5)
     if schema_origin is SchemaOrigin.V5:
         state = decode_mission_state(state_bytes)

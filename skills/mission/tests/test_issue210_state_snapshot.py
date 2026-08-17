@@ -476,6 +476,7 @@ def test_snapshot_rejects_malformed_nested_semantic_payload(tmp_path, mutation):
     "mutation",
     [
         lambda document: document.__setitem__("invalid_worktree_archives", [None]),
+        lambda document: document.__setitem__("state_read_errors", [None]),
         lambda document: document.__setitem__("records", [None]),
         lambda document: document.__setitem__("record_index", [None]),
         lambda document: document.__setitem__("external_evidence_paths", [None]),

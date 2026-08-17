@@ -709,6 +709,21 @@ def test_t2_terminal_states_keep_stop_verdict_and_hook_nonblocking(
     assert "block" not in hook.stdout
 
 
+def test_t2_halted_v5_session_keeps_stop_verdict_nonblocking(tmp_path):
+    """T2: canonical v5 halt projects the same terminal verdict as v4."""
+    session_path, _repository_root, repository = _canonical_v5_session(tmp_path)
+    _halt_canonical_v5_repository(repository)
+
+    verdict = _run_stop_verdict(session_path)
+
+    assert verdict.returncode == 0, verdict.stderr
+    payload = json.loads(verdict.stdout)
+    assert payload["schema"] == "mission-stop-verdict/1"
+    assert payload["decision"] == "skip"
+    assert payload["reason"] == "halt-reason"
+    assert payload["outcome_kind"] == "halted"
+
+
 def test_t3_mixed_root_consumers_are_equivalent_for_v4_and_v5(tmp_path, run_cli):
     """T3: every query surface resolves both formats through the same reader."""
     root, v4_path, v5_path = _mixed_v4_v5_root(tmp_path)
@@ -1134,12 +1149,23 @@ def _jq_authoritative_file_reads(source: str) -> list[str]:
     return offenders
 
 
-def test_t11_static_guard_rejects_shell_jq_authoritative_reads():
+@pytest.mark.parametrize(
+    "tree_name, script_root",
+    [
+        ("scripts", REPO_ROOT / "scripts"),
+        ("plugins/mission/scripts", REPO_ROOT / "plugins" / "mission" / "scripts"),
+    ],
+)
+def test_t11_static_guard_rejects_shell_jq_authoritative_reads(
+    tree_name, script_root
+):
     """T11: stop hook may decode only Python's verdict, never session fields."""
     offenders = []
-    for script in (REPO_ROOT / "scripts").glob("*.sh"):
+    scripts = list(script_root.glob("*.sh"))
+    assert scripts, "%s shell tree must be scanned" % tree_name
+    for script in scripts:
         offenders.extend(
-            f"{script.name}:{command}"
+            f"{tree_name}/{script.name}:{command}"
             for command in _jq_authoritative_file_reads(
                 script.read_text(encoding="utf-8")
             )
@@ -1158,9 +1184,59 @@ def test_t11_static_guard_rejects_shell_jq_authoritative_reads():
     assert offenders == []
 
 
+class _FunctionAuthoritativeBindingVisitor(ast.NodeVisitor):
+    """Collect direct constant bindings without crossing a nested scope."""
+
+    def __init__(self) -> None:
+        self.bindings: dict[str, str] = {}
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        if (
+            isinstance(node.value, ast.Constant)
+            and node.value.value in _CONSUMER_AUTHORITATIVE_FIELDS
+        ):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    self.bindings[target.id] = node.value.value
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if (
+            isinstance(node.target, ast.Name)
+            and isinstance(node.value, ast.Constant)
+            and node.value.value in _CONSUMER_AUTHORITATIVE_FIELDS
+        ):
+            self.bindings[node.target.id] = node.value.value
+        self.generic_visit(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        return
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        return
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        return
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        return
+
+
 class _AuthoritativeGetVisitor(ast.NodeVisitor):
     def __init__(self) -> None:
         self.offenders: list[int] = []
+        self._bound_fields: list[dict[str, str]] = []
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        binding_visitor = _FunctionAuthoritativeBindingVisitor()
+        for statement in node.body:
+            binding_visitor.visit(statement)
+        self._bound_fields.append(binding_visitor.bindings)
+        for statement in node.body:
+            self.visit(statement)
+        self._bound_fields.pop()
+
+    visit_AsyncFunctionDef = visit_FunctionDef
 
     def visit_Call(self, node: ast.Call) -> None:
         if (
@@ -1175,8 +1251,15 @@ class _AuthoritativeGetVisitor(ast.NodeVisitor):
 
     def visit_Subscript(self, node: ast.Subscript) -> None:
         if (
-            isinstance(node.slice, ast.Constant)
-            and node.slice.value in _CONSUMER_AUTHORITATIVE_FIELDS
+            (
+                isinstance(node.slice, ast.Constant)
+                and node.slice.value in _CONSUMER_AUTHORITATIVE_FIELDS
+            )
+            or (
+                isinstance(node.slice, ast.Name)
+                and bool(self._bound_fields)
+                and node.slice.id in self._bound_fields[-1]
+            )
         ):
             self.offenders.append(node.lineno)
         self.generic_visit(node)
@@ -1338,6 +1421,33 @@ def test_t12_static_guard_detects_literal_authoritative_subscript():
     assert visitor.offenders == [2]
 
 
+def test_t12_static_guard_detects_function_local_variable_authoritative_subscript():
+    visitor = _AuthoritativeGetVisitor()
+    visitor.visit(
+        ast.parse(
+            "def cmd_lane_report(document):\n"
+            "    field = 'loop_active'\n"
+            "    return document[field]\n"
+        )
+    )
+
+    assert visitor.offenders == [3]
+
+
+def test_t12_static_guard_detects_nested_block_variable_authoritative_subscript():
+    visitor = _AuthoritativeGetVisitor()
+    visitor.visit(
+        ast.parse(
+            "def cmd_lane_report(document, enabled):\n"
+            "    if enabled:\n"
+            "        field = 'loop_active'\n"
+            "        return document[field]\n"
+        )
+    )
+
+    assert visitor.offenders == [4]
+
+
 def test_t12_production_record_guard_detects_missing_verified_snapshot():
     visitor = _VerifiedStateRecordVisitor()
     visitor.visit(ast.parse("def load_records(path, state):\n    return StateRecord(path, state)\n"))
@@ -1497,7 +1607,7 @@ def test_validated_archive_state_decode_drift_is_not_silently_skipped(
 
 
 @pytest.mark.parametrize("damage", ["malformed-head", "missing-commit", "digest-drift"])
-def test_broken_live_v5_is_not_zero_sessions_for_audit_stats_or_snapshot(
+def test_broken_live_v5_is_counted_unreadable_by_aggregate_consumers(
     tmp_path, run_cli, damage
 ):
     session_path, repository_root = _v5_session(tmp_path / damage)
@@ -1511,23 +1621,36 @@ def test_broken_live_v5_is_not_zero_sessions_for_audit_stats_or_snapshot(
             head["commit"]["digest"] = "sha256:" + "0" * 64
             _write_head(session_path, head)
     root = repository_root.parent
+    _v4_state(root / "readable")
     snapshot_path = tmp_path / (damage + ".snapshot.json")
 
     audit = _run_audit(root, "--root", str(root), "--json")
     stats = run_cli("stats", "--root", str(root), "--json", cwd=root)
+    listed = run_cli(
+        "list", cwd=root, env_extra={"MISSION_SEARCH_ROOTS": str(root)}
+    )
     lane_report = run_cli("lane-report", "--json", cwd=root)
     snapshot = _run_audit(
         root, "--root", str(root), "--snapshot-out", str(snapshot_path), "--json"
     )
 
-    assert audit.returncode != 0
-    assert stats.returncode != 0
+    assert audit.returncode == 0, audit.stderr
+    assert stats.returncode == 0, stats.stderr
+    assert listed.returncode == 0, listed.stderr
     assert lane_report.returncode != 0
-    assert snapshot.returncode != 0
-    assert not snapshot_path.exists()
+    assert snapshot.returncode == 0, snapshot.stderr
+    assert json.loads(audit.stdout)["state_read_error_count"] == 1
+    assert json.loads(audit.stdout)["total_sessions"] == 1
+    assert json.loads(stats.stdout)["state_read_error_count"] == 1
+    assert json.loads(stats.stdout)["total_sessions"] == 1
+    assert json.loads(snapshot.stdout)["state_read_error_count"] == 1
+    assert json.loads(snapshot.stdout)["total_sessions"] == 1
+    assert len(json.loads(listed.stdout)) == 2
+    assert sum("error" in item for item in json.loads(listed.stdout)) == 1
+    assert snapshot_path.exists()
 
 
-def test_live_v5_alias_head_is_rejected_by_every_discovery_consumer(tmp_path, run_cli):
+def test_live_v5_alias_head_is_counted_unreadable_by_aggregate_consumers(tmp_path, run_cli):
     session_path, repository_root = _v5_session(tmp_path)
     alias = session_path.with_name("alias.json")
     alias.write_bytes(session_path.read_bytes())
@@ -1535,8 +1658,10 @@ def test_live_v5_alias_head_is_rejected_by_every_discovery_consumer(tmp_path, ru
 
     with pytest.raises(Exception):
         _read(alias, session_id="alias")
-    assert _run_audit(root, "--root", str(root), "--json").returncode != 0
-    assert run_cli("stats", "--root", str(root), "--json", cwd=root).returncode != 0
+    audit = _run_audit(root, "--root", str(root), "--json")
+    stats = run_cli("stats", "--root", str(root), "--json", cwd=root)
+    assert json.loads(audit.stdout)["state_read_error_count"] == 1
+    assert json.loads(stats.stdout)["state_read_error_count"] == 1
 
 
 def test_live_v4_alias_is_rejected_by_path_and_document_reader(tmp_path):
@@ -1570,15 +1695,17 @@ def test_legacy_v4_missing_embedded_identity_keeps_repository_compatibility(tmp_
     assert document_snapshot.session_id is None
 
 
-def test_live_v4_alias_is_rejected_by_audit_and_stats(tmp_path, run_cli):
+def test_live_v4_alias_is_counted_unreadable_by_audit_and_stats(tmp_path, run_cli):
     session_path = _v4_state(tmp_path, session_id="real")
     alias = session_path.with_name("alias.json")
     alias.write_bytes(session_path.read_bytes())
     session_path.unlink()
     root = alias.parents[2]
 
-    assert _run_audit(root, "--root", str(root), "--json").returncode != 0
-    assert run_cli("stats", "--root", str(root), "--json", cwd=root).returncode != 0
+    audit = _run_audit(root, "--root", str(root), "--json")
+    stats = run_cli("stats", "--root", str(root), "--json", cwd=root)
+    assert json.loads(audit.stdout)["state_read_error_count"] == 1
+    assert json.loads(stats.stdout)["state_read_error_count"] == 1
 
 
 def test_nested_live_path_uses_immediate_mission_state_parent(tmp_path):
@@ -1596,7 +1723,7 @@ def test_nested_live_path_uses_immediate_mission_state_parent(tmp_path):
 
 
 @pytest.mark.parametrize("payload_kind", ["alias", "malformed"])
-def test_nested_live_alias_or_malformed_state_fails_closed_for_all_consumers(
+def test_nested_live_alias_or_malformed_state_is_unreadable_for_aggregate_consumers(
     tmp_path, run_cli, payload_kind
 ):
     project = tmp_path / ".mission-state" / "copied-project"
@@ -1613,8 +1740,10 @@ def test_nested_live_alias_or_malformed_state_fails_closed_for_all_consumers(
         _reader().read_authoritative_snapshot(
             alias, expected_session_id=alias.stem
         )
-    assert _run_audit(root, "--root", str(root), "--json").returncode != 0
-    assert run_cli("stats", "--root", str(root), "--json", cwd=root).returncode != 0
+    audit = _run_audit(root, "--root", str(root), "--json")
+    stats = run_cli("stats", "--root", str(root), "--json", cwd=root)
+    assert json.loads(audit.stdout)["state_read_error_count"] == 1
+    assert json.loads(stats.stdout)["state_read_error_count"] == 1
 
 
 def test_stop_hook_without_jq_fails_closed_with_fixed_block_json(tmp_path):

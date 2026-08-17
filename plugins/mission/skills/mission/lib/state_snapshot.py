@@ -432,6 +432,7 @@ def _validate_snapshot_collections(document: dict[str, Any]) -> None:
     stored_index = document.get("record_index")
     external_paths = document.get("external_evidence_paths")
     invalid_archives = document.get("invalid_worktree_archives")
+    state_read_errors = document.get("state_read_errors", [])
     archive_validations = document.get("archive_validations")
     roots = document.get("roots")
     privacy = document.get("privacy") is not None
@@ -472,6 +473,16 @@ def _validate_snapshot_collections(document: dict[str, Any]) -> None:
             )
         ):
             raise SnapshotError("snapshot invalid archive item is invalid")
+    if not isinstance(state_read_errors, list):
+        raise SnapshotError("snapshot state read error collection is invalid")
+    for item in state_read_errors:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"path", "reason"}
+            or not _is_safe_path_text(item.get("path"), absolute=not privacy)
+            or item.get("reason") != "authoritative-state-unreadable"
+        ):
+            raise SnapshotError("snapshot state read error item is invalid")
     if (
         not isinstance(archive_validations, dict)
         or any(
@@ -675,6 +686,7 @@ def build_snapshot_document(
     roots: list[Path],
     records: list[dict[str, Any]],
     invalid_worktree_archives: list[dict[str, Any]],
+    state_read_errors: list[dict[str, str]] | None = None,
     discovery_index: list[dict[str, Any]],
     observed_at: datetime,
     ttl_seconds: int,
@@ -705,6 +717,7 @@ def build_snapshot_document(
         "archive_validations": archive_validations or {},
         "record_index": record_index(records),
         "invalid_worktree_archives": invalid_worktree_archives,
+        "state_read_errors": state_read_errors or [],
         "external_evidence_paths": [
             item[1]
             for item in discovery_index

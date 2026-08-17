@@ -347,10 +347,6 @@ class UnsupportedSchemaVersionError(ValueError):
     """The reader only accepts legacy-missing or supported schema versions."""
 
 
-class AuthoritativeStateReadError(ValueError):
-    """A discovered live session could not be resolved safely."""
-
-
 class AuthoritativeStateRecord(dict):
     """Compatibility mapping that retains its typed authoritative projection."""
 
@@ -15535,7 +15531,17 @@ def _reviewer_output_stats(states: list[dict]) -> dict:
     }
 
 
-def _collect_states(root: Path) -> list[dict]:
+def _state_read_error(path: Path) -> dict[str, str]:
+    """Return stable aggregate metadata without exposing reader internals."""
+    return {
+        "path": str(path),
+        "reason": "authoritative-state-unreadable",
+    }
+
+
+def _collect_states(
+    root: Path, *, state_read_errors: Optional[list[dict[str, str]]] = None
+) -> list[dict]:
     """root 配下を再帰的にスキャンして state を収集 (現役 + archive、stats 用)。
 
     glob パターンは _iter_state_files に集約 (重複していた 3 つの glob を統合)。
@@ -15558,11 +15564,11 @@ def _collect_states(root: Path) -> list[dict]:
             )
         except UnsupportedSchemaVersionError:
             raise
-        except Exception as exc:
+        except Exception:
             if is_live_session_path(sf):
-                raise AuthoritativeStateReadError(
-                    "authoritative live session is unreadable: %s" % sf
-                ) from exc
+                if state_read_errors is not None:
+                    state_read_errors.append(_state_read_error(sf))
+                continue
             continue
         if not _is_mission_state_record(document):
             continue
@@ -15597,7 +15603,9 @@ def _discover_project_roots(root: Path) -> list[Path]:
     return discovered
 
 
-def _collect_learning_brief_states(roots: list[Path]) -> list[dict]:
+def _collect_learning_brief_states(
+    roots: list[Path], *, state_read_errors: Optional[list[dict[str, str]]] = None
+) -> list[dict]:
     """Collect readable session states plus archived terminal generations."""
     states: list[dict] = []
     project_roots: list[Path] = []
@@ -15605,7 +15613,9 @@ def _collect_learning_brief_states(roots: list[Path]) -> list[dict]:
     for root in roots:
         if not root.exists():
             continue
-        states.extend(_collect_states(root))
+        states.extend(
+            _collect_states(root, state_read_errors=state_read_errors)
+        )
         for project_root in _discover_project_roots(root):
             key = str(project_root)
             if key in seen_projects:
@@ -15864,7 +15874,7 @@ def _command_outcome_counts(states: list[dict]) -> dict[str, int]:
 
 def _aggregate(
     states: list[dict], duplicate_state_group_count: int = 0,
-    *, observation_now: datetime | None = None,
+    *, observation_now: datetime | None = None, state_read_error_count: int = 0,
 ) -> dict:
     n = len(states)
     snapshots = [_authoritative_snapshot_for_state(state) for state in states]
@@ -15876,6 +15886,7 @@ def _aggregate(
     if n == 0:
         return {
             "total_sessions": 0, "pass_count": 0, "halt_count": 0,
+            "state_read_error_count": state_read_error_count,
             "duplicate_state_group_count": duplicate_state_group_count,
             "incomplete_count": 0, "abandoned_count": 0,
             "active_count": 0, "active_no_score_count": 0, "stale_count": 0,
@@ -16001,6 +16012,7 @@ def _aggregate(
         iteration_histogram[_k] = iteration_histogram.get(_k, 0) + 1
     return {
         "total_sessions": n,
+        "state_read_error_count": state_read_error_count,
         "duplicate_state_group_count": duplicate_state_group_count,
         "pass_count": pass_count,
         "halt_count": halt_count,
@@ -16095,6 +16107,7 @@ def _format_text(stats: dict, since: str | None, until: str | None) -> str:
         f"=== /mission stats ({period}) ===",
         f"roots:                    {roots}",
         f"total_sessions:           {n}",
+        f"state_read_errors:        {stats.get('state_read_error_count', 0)}",
         f"duplicate_state_groups:   {stats.get('duplicate_state_group_count', 0)}",
         f"raw_pass_rate:            {_rate_detail(stats, 'raw')}",
         f"completed_pass_rate:      {_rate_detail(stats, 'completed')}",
@@ -16221,6 +16234,7 @@ def cmd_stats(args):
     since = _parse_date_to_iso_prefix(args.since)
     until = _parse_date_to_iso_prefix(args.until)
     all_states = []
+    state_read_errors: list[dict[str, str]] = []
     observation_now = None
     if args.snapshot:
         try:
@@ -16242,18 +16256,24 @@ def cmd_stats(args):
             if "command_outcome_observation" in item:
                 state["_command_outcome_observation"] = item["command_outcome_observation"]
             all_states.append(state)
+        state_read_errors = list(document.get("state_read_errors") or [])
     else:
         try:
             for r in roots:
                 if r.exists():
-                    all_states.extend(_collect_states(r))
-        except (UnsupportedSchemaVersionError, AuthoritativeStateReadError) as exc:
+                    all_states.extend(
+                        _collect_states(r, state_read_errors=state_read_errors)
+                    )
+        except UnsupportedSchemaVersionError as exc:
             print(f"ERROR: invalid state snapshot: {exc}", file=sys.stderr)
             raise SystemExit(2)
     filtered = [s for s in all_states if _matches_period(s, since, until)]
     deduped, duplicate_state_group_count = _dedupe_states(filtered)
     stats = _aggregate(
-        deduped, duplicate_state_group_count, observation_now=observation_now
+        deduped,
+        duplicate_state_group_count,
+        observation_now=observation_now,
+        state_read_error_count=len(state_read_errors),
     )
     stats["roots"] = [str(root) for root in roots]
     if args.json:
@@ -16266,8 +16286,11 @@ def cmd_learning_brief(args):
     """Read-only failure-ledger learning brief across session and archive state roots."""
     requested_roots = [Path(root) for root in args.root] if args.root else None
     roots = requested_roots or _learning_brief_default_roots(Path.cwd())
+    state_read_errors: list[dict[str, str]] = []
     try:
-        states = _collect_learning_brief_states(roots)
+        states = _collect_learning_brief_states(
+            roots, state_read_errors=state_read_errors
+        )
         brief = summarize_learning_brief(
             states,
             weak_phase=getattr(args, "weak_phase", None),
@@ -16276,6 +16299,7 @@ def cmd_learning_brief(args):
     except LearningContractError as exc:
         print(f"ERROR: learning brief: {exc}", file=sys.stderr)
         raise SystemExit(2)
+    brief["state_read_error_count"] = len(state_read_errors)
     if args.json:
         print(json.dumps(brief, indent=2, ensure_ascii=False))
         return
@@ -16285,8 +16309,8 @@ def cmd_learning_brief(args):
         )
         for rule in brief["rules"]
     ]
-    if lines:
-        print("\n".join(lines))
+    lines.insert(0, "state_read_error_count=%s" % len(state_read_errors))
+    print("\n".join(lines))
 
 
 # ---------------------------------------------------------------------------

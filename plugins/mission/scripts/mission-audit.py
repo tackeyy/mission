@@ -48,6 +48,7 @@ from mission_persistence.authoritative_reader import (  # noqa: E402
     read_legacy_compatibility_snapshot,
     summarize_authoritative_pass_rate_population,
 )
+from mission_kernel.errors import MissionStateDecodeError  # noqa: E402
 from specialist_accounting import (  # noqa: E402
     applied_specialist_invocation_skills,
     candidate_accounting_report,
@@ -1124,6 +1125,7 @@ def _read_compaction_canonical_snapshot(path: Path) -> AuthoritativeSnapshot | N
 def load_records(
     roots: list[Path], invalid_archives: list[dict[str, Any]] | None = None,
     *, forensic: bool = False,
+    state_read_errors: list[dict[str, str]] | None = None,
 ) -> list[StateRecord]:
     records: list[StateRecord] = []
     for root in roots:
@@ -1153,8 +1155,34 @@ def load_records(
                             expected_session_id=expected_session_id_for_live_path(path),
                             allow_missing_schema_session_mismatch=True,
                         )
+                except MissionStateDecodeError as decode_error:
+                    if decode_error.code in {
+                        "schema-version-type", "unsupported-schema-version"
+                    }:
+                        raise SnapshotError(
+                            "authoritative session schema is unsupported: %s" % path
+                        ) from error
+                    if is_live_session_path(path):
+                        if state_read_errors is not None:
+                            state_read_errors.append({
+                                "path": str(path),
+                                "reason": "authoritative-state-unreadable",
+                            })
+                        continue
+                    if candidate.archive_validation is not None:
+                        raise SnapshotError(
+                            "authoritative session is unreadable: %s" % path
+                        ) from error
+                    continue
                 except Exception:
-                    if is_live_session_path(path) or candidate.archive_validation is not None:
+                    if is_live_session_path(path):
+                        if state_read_errors is not None:
+                            state_read_errors.append({
+                                "path": str(path),
+                                "reason": "authoritative-state-unreadable",
+                            })
+                        continue
+                    if candidate.archive_validation is not None:
                         raise SnapshotError(
                             "authoritative session is unreadable: %s" % path
                         ) from error
@@ -1410,7 +1438,13 @@ def _capture_state_snapshot_document(
     observed = observed_at or utc_now()
     root_before = _root_metadata_inventory(normalized)
     discovered_invalid: list[dict[str, Any]] = []
-    records = load_records(normalized, discovered_invalid, forensic=forensic)
+    state_read_errors: list[dict[str, str]] = []
+    records = load_records(
+        normalized,
+        discovered_invalid,
+        forensic=forensic,
+        state_read_errors=state_read_errors,
+    )
     invalid = collect_invalid_worktree_archives(records, discovered_invalid)
     external_paths: list[Path] = []
     seen_external: set[str] = set()
@@ -1432,6 +1466,7 @@ def _capture_state_snapshot_document(
         records=record_payloads,
         archive_validations=archive_validations,
         invalid_worktree_archives=invalid,
+        state_read_errors=state_read_errors,
         discovery_index=index,
         observed_at=observed,
         ttl_seconds=ttl_seconds,
@@ -2727,8 +2762,10 @@ def aggregate(
     current_since: datetime | None = None,
     invalid_worktree_archives: list[dict[str, Any]] | None = None,
     observation_now: datetime | None = None,
+    state_read_errors: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     invalid_worktree_archives = invalid_worktree_archives or []
+    state_read_errors = state_read_errors or []
     planning_provider_kpis = reduce_planning_provider_kpis(
         [record.state for record in records], population_kind="observed"
     )
@@ -2971,6 +3008,7 @@ def aggregate(
 
     return {
         "total_sessions": len(records),
+        "state_read_error_count": len(state_read_errors),
         "invalid_worktree_archives": invalid_worktree_archives,
         "invalid_worktree_archive_count": len(invalid_worktree_archives),
         "pass_count": pass_count,
@@ -3441,6 +3479,7 @@ def render_markdown(
         "## Summary",
         "",
         f"- total sessions: {stats['total_sessions']}",
+        f"- unreadable session states: {stats.get('state_read_error_count', 0)}",
         f"- review lineage raw / projected: {review_lineage['raw_record_count']} / {review_lineage['projected_record_count']}",
         f"- correlation resolvability (direct / parent-embedded / unresolved): {correlation_lineage['direct_count']} / {correlation_lineage['parent_embedded_count']} / {correlation_lineage['unresolved_count']} (coverage {fmt_float(correlation_lineage['resolvable_ratio'] * 100 if correlation_lineage['resolvable_ratio'] is not None else None, 1)}%)",
         f"- current finding cutoff: {stats['current_since'] or '(not set; all findings are treated as current)'}",
@@ -3983,6 +4022,7 @@ def main(argv: list[str] | None = None) -> int:
         current_since,
         invalid_worktree_archives,
         observation_now,
+        list(document.get("state_read_errors") or []),
     )
     stats["archive_compaction"] = {
         "view": "forensic" if args.forensic else "materialized",
