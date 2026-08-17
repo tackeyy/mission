@@ -61,4 +61,3 @@ and release work are outside this issue.
 - Source/plugin mirror parity and D1 recursive discovery remain green.
 - Two independent Checkers review the frozen exact head and search for
   counterexamples across one hop outside the diff.
-
