@@ -314,6 +314,27 @@ def test_public_consumer_accepts_application_receipt_and_rejects_noncanonical_id
         validate_specialist_public_state({"specialist_invocations": [public_record]})
 
 
+def test_receipt_file_namespace_near_matches_remain_portable():
+    from mission_application.planning import record_dispatch_intent, record_provider_receipt
+    from provider_public_contract import validate_specialist_public_state
+
+    for identity in ("profile:opaque", "afile:opaque", "myfile:opaque", "notfile:opaque"):
+        unknown = record_dispatch_intent([], _intent())
+        accepted = record_provider_receipt(
+            [unknown], _intent(), {"kind": "provider", "identity": identity}
+        )
+        validate_specialist_public_state({
+            "specialist_invocations": [{
+                **accepted,
+                "phase": "planning",
+                "role": "planner",
+                "skill": "portable-provider",
+                "mode": "command-provider",
+                "timestamp": "2026-08-17T00:00:00Z",
+            }]
+        })
+
+
 def test_public_consumer_rejects_zero_and_bool_fencing_epoch():
     from provider_public_contract import SpecialistPublicContractError, validate_specialist_public_state
 

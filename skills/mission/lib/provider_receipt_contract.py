@@ -9,7 +9,7 @@ import re
 _RECEIPT_FIELDS = frozenset({"kind", "identity"})
 _OPAQUE_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+:-]{0,255}\Z")
 _PRIVATE_TOKEN_LOCATOR = re.compile(
-    r"(?:file:|(?<![A-Za-z0-9])[A-Za-z]:)", re.IGNORECASE
+    r"(?:(?<![A-Za-z0-9])file:|(?<![A-Za-z0-9])[A-Za-z]:)", re.IGNORECASE
 )
 
 
