@@ -8454,11 +8454,19 @@ def _legacy_lifecycle_repository(
     strict_read: bool = False,
     lease_reason: str | None = None,
     allow_partial_lease_terminal_write: bool = False,
+    pre_admit_lease: bool = False,
 ) -> LegacyV4Repository:
+    admitted_lease = [_LEASE_DECISION_UNSET]
+
     def read_state() -> dict:
         if strict_read:
-            return _load_state_json(sf)
-        return json.loads(sf.read_text())
+            data = _load_state_json(sf)
+        else:
+            data = json.loads(sf.read_text())
+        if pre_admit_lease:
+            with _lease_write_reason(lease_reason):
+                admitted_lease[0] = _enforce_session_lease_for_write(sf, data)
+        return data
 
     def write_state(data: dict, *, administrative: bool = False) -> None:
         proposed = stamp_metadata(data, cwd) if stamp else data
@@ -8472,7 +8480,16 @@ def _legacy_lifecycle_repository(
                 if allow_partial_lease_terminal_write and partial_lease
                 else _LEASE_DECISION_UNSET
             )
-            if lease_decision is None:
+            if pre_admit_lease:
+                if admitted_lease[0] is _LEASE_DECISION_UNSET:
+                    raise ValueError("lease admission is missing")
+                atomic_write_json(
+                    sf,
+                    proposed,
+                    administrative=administrative,
+                    lease_decision=admitted_lease[0],
+                )
+            elif lease_decision is None:
                 atomic_write_json(
                     sf,
                     proposed,
@@ -9598,6 +9615,7 @@ def _record_permission_probe_observation(
                 stamp=False,
                 strict_read=True,
                 lease_reason="permission-preflight",
+                pre_admit_lease=True,
             ),
             PermissionObservationRequest(probes=probes, observed_at=iso_now()),
             transition_phase=_transition_phase,

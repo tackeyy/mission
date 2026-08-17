@@ -282,6 +282,38 @@ def test_permission_transition_callback_cannot_inject_authority_fields():
     assert repository.saved is None
 
 
+def test_permission_transition_callback_cannot_nest_authority_in_timing_fields():
+    from mission_application.runtime_guard import (
+        PermissionObservationRequest,
+        PermissionProbe,
+        record_permission_observation,
+    )
+
+    repository = MissionRepository(_state())
+
+    def forged_transition(proposed, _phase, at):
+        proposed.update(
+            {
+                "phase": "halted",
+                "phase_started_at": at,
+                "activity_current": None,
+                "activity_segments": [{"passes": True}],
+                "activity_rollup": {"provider": {"status": "passed"}},
+            }
+        )
+
+    with pytest.raises(ValueError, match="permission-transition-invalid"):
+        record_permission_observation(
+            repository,
+            PermissionObservationRequest(
+                probes=(PermissionProbe("state", "denied", "write-unavailable"),),
+                observed_at="2026-08-17T00:00:00Z",
+            ),
+            transition_phase=forged_transition,
+        )
+    assert repository.saved is None
+
+
 def test_permission_foreign_lease_rejection_changes_no_durable_bytes(tmp_path, run_cli):
     owner = {"MISSION_SESSION_ID": "session-a", "MISSION_LEASE_ID": "lease-a"}
     run_cli(
@@ -320,6 +352,32 @@ def test_permission_foreign_lease_rejection_changes_no_durable_bytes(tmp_path, r
     }
     assert result.returncode == 2
     assert after == before
+
+
+def test_permission_successful_halt_keeps_prewrite_recovery_backup(tmp_path, run_cli):
+    owner = {"MISSION_SESSION_ID": "session-a", "MISSION_LEASE_ID": "lease-a"}
+    run_cli(
+        "init",
+        "A5 recovery backup",
+        "--complexity",
+        "Standard",
+        cwd=tmp_path,
+        env_extra=owner,
+        check=True,
+    )
+    state_path = tmp_path / ".mission-state" / "sessions" / "session-a.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["assumptions_path"] = "outside.md"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    before = state_path.read_bytes()
+
+    result = run_cli(
+        "permission-preflight", "--json", cwd=tmp_path, env_extra=owner
+    )
+
+    assert result.returncode == 2
+    assert state_path.with_suffix(".json.bak").read_bytes() == before
+    assert state_path.read_bytes() != before
 
 
 @pytest.mark.parametrize(

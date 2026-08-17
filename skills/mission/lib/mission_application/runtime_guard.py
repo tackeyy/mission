@@ -8,6 +8,13 @@ import re
 from dataclasses import dataclass
 from typing import Callable, ContextManager, Protocol
 
+from activity_segments import (
+    ACTIVITY_KINDS,
+    ACTIVITY_REASONS_BY_KIND,
+    RECENT_SEGMENT_LIMIT,
+    WAIT_KINDS,
+)
+
 from .ports import MissionRepository
 
 
@@ -54,6 +61,30 @@ _PERMISSION_TRANSITION_FIELDS = frozenset(
     }
 )
 _MISSING = object()
+_PHASES = frozenset({"planning", "executing", "reviewing", "scoring"})
+_ACTIVITY_PHASES = _PHASES | {"unknown"}
+_SEGMENT_KEYS = frozenset(
+    {
+        "kind",
+        "phase",
+        "reason",
+        "started_at",
+        "ended_at",
+        "duration_sec",
+        "detail",
+        "iteration",
+    }
+)
+_ROLLUP_KEYS = frozenset(
+    {
+        "observed_total_sec",
+        "closed_segment_count",
+        "activity_duration_totals_sec",
+        "phase_activity_duration_totals_sec",
+        "wait_reason_totals_sec",
+    }
+)
+_ANOMALY_KEYS = frozenset({"invalid-current-terminal", "invalid-phase-terminal"})
 
 
 class StopObservationRepository(Protocol):
@@ -233,6 +264,86 @@ def _permission_reason(probe: PermissionProbe) -> str:
     return f"Phase 0 permission preflight failed before task execution: {detail}"
 
 
+def _finite_nonnegative(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        and value >= 0
+    )
+
+
+def _timestamp(value: object) -> bool:
+    return isinstance(value, str) and bool(
+        re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z", value)
+    )
+
+
+def _numeric_map(value: object, allowed_keys: frozenset[str]) -> bool:
+    return isinstance(value, dict) and all(
+        key in allowed_keys and _finite_nonnegative(item)
+        for key, item in value.items()
+    )
+
+
+def _valid_activity_segment(segment: object) -> bool:
+    if not isinstance(segment, dict) or not set(segment).issubset(_SEGMENT_KEYS):
+        return False
+    required = {"kind", "phase", "reason", "started_at", "ended_at", "duration_sec"}
+    if not required.issubset(segment):
+        return False
+    kind = segment.get("kind")
+    reason = segment.get("reason")
+    if (
+        kind not in ACTIVITY_KINDS
+        or reason not in ACTIVITY_REASONS_BY_KIND[kind]
+        or segment.get("phase") not in _ACTIVITY_PHASES
+        or not _timestamp(segment.get("started_at"))
+        or not _timestamp(segment.get("ended_at"))
+        or not _finite_nonnegative(segment.get("duration_sec"))
+    ):
+        return False
+    detail = segment.get("detail")
+    if detail is not None and (
+        not isinstance(detail, str)
+        or not detail
+        or len(detail) > 160
+        or any(ord(char) < 0x20 or ord(char) == 0x7F for char in detail)
+    ):
+        return False
+    iteration = segment.get("iteration")
+    return iteration is None or (
+        isinstance(iteration, int) and not isinstance(iteration, bool) and iteration > 0
+    )
+
+
+def _valid_activity_rollup(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != _ROLLUP_KEYS:
+        return False
+    count = value.get("closed_segment_count")
+    if (
+        not _finite_nonnegative(value.get("observed_total_sec"))
+        or not isinstance(count, int)
+        or isinstance(count, bool)
+        or count < 0
+        or not _numeric_map(value.get("activity_duration_totals_sec"), frozenset(ACTIVITY_KINDS))
+    ):
+        return False
+    phase_totals = value.get("phase_activity_duration_totals_sec")
+    if not isinstance(phase_totals, dict) or any(
+        phase not in _ACTIVITY_PHASES
+        or not _numeric_map(totals, frozenset(ACTIVITY_KINDS))
+        for phase, totals in phase_totals.items()
+    ):
+        return False
+    wait_totals = value.get("wait_reason_totals_sec")
+    return isinstance(wait_totals, dict) and all(
+        kind in WAIT_KINDS
+        and _numeric_map(totals, frozenset(ACTIVITY_REASONS_BY_KIND[kind]))
+        for kind, totals in wait_totals.items()
+    )
+
+
 def _closed_permission_transition(
     state: dict,
     transition_phase: Callable[[dict, str, str], None],
@@ -256,23 +367,13 @@ def _closed_permission_transition(
     ):
         raise ValueError("permission-transition-invalid")
     durations = candidate.get("phase_durations_sec")
-    if durations is not None and (
-        not isinstance(durations, dict)
-        or any(
-            not isinstance(key, str)
-            or isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(float(value))
-            or value < 0
-            for key, value in durations.items()
-        )
-    ):
+    if durations is not None and not _numeric_map(durations, _PHASES):
         raise ValueError("permission-transition-invalid")
     anomalies = candidate.get("activity_anomaly_counts")
     if anomalies is not None and (
         not isinstance(anomalies, dict)
         or any(
-            not isinstance(key, str)
+            key not in _ANOMALY_KEYS
             or not isinstance(value, int)
             or isinstance(value, bool)
             or value < 0
@@ -280,9 +381,15 @@ def _closed_permission_transition(
         )
     ):
         raise ValueError("permission-transition-invalid")
-    if not isinstance(candidate.get("activity_segments", []), list):
+    segments = candidate.get("activity_segments", [])
+    if (
+        not isinstance(segments, list)
+        or len(segments) > RECENT_SEGMENT_LIMIT
+        or not all(_valid_activity_segment(segment) for segment in segments)
+    ):
         raise ValueError("permission-transition-invalid")
-    if not isinstance(candidate.get("activity_rollup", {}), dict):
+    rollup = candidate.get("activity_rollup")
+    if rollup is not None and not _valid_activity_rollup(rollup):
         raise ValueError("permission-transition-invalid")
     for key in _PERMISSION_TRANSITION_FIELDS:
         if key in candidate:
@@ -320,9 +427,7 @@ def record_permission_observation(
             proposed["updated_at"] = request.observed_at
 
         proposed = repository.execute(state, mutate)
-        # Legacy v4 validates lease/fence inside the writer.  A pre-write
-        # backup would be an observable effect before that authority check.
-        repository.save(proposed, backup=False)
+        repository.save(proposed)
     return PermissionObservationResult(
         False,
         True,
