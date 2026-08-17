@@ -57,6 +57,7 @@ VALID_INVOCATION_STATUSES = {
     "selected",
     "started",
     "reserved",
+    "dispatch-unknown",
     "running",
     "rejected",
     "failed-before-start",
@@ -125,6 +126,8 @@ INVOCATION_FIELDS = frozenset({
     "reservation_owner_session_id", "fencing_epoch", "child_pid",
     "process_identity_digest", "heartbeat_at", "result_artifact_digest",
     "input_outbound_packet_digest",
+    "operation_id", "outbound_packet_digest", "dispatch_intent_at", "provider_receipt",
+    "proven_no_dispatch",
     "host_run_id", "root_run_id", "parent_run_id", "child_run_id", "logical_group_id",
 })
 ACTIVATION_FIELDS = frozenset({
@@ -600,10 +603,10 @@ def _validate_invocation(record: object, base: str) -> None:
         isinstance(record["reason_code"], str) and TOKEN.fullmatch(record["reason_code"])
     ):
         _reject(f"{base}/reason_code")
-    for field in ("timestamp", "started_at", "completed_at", "transitioned_at", "reserved_at", "running_at", "heartbeat_at"):
+    for field in ("timestamp", "started_at", "completed_at", "transitioned_at", "reserved_at", "running_at", "heartbeat_at", "dispatch_intent_at"):
         if field in record and not _safe_text(record[field], maximum=64):
             _reject(f"{base}/{field}")
-    for field in ("application_context_digest", "process_identity_digest", "result_artifact_digest", "input_outbound_packet_digest"):
+    for field in ("application_context_digest", "process_identity_digest", "result_artifact_digest", "input_outbound_packet_digest", "outbound_packet_digest"):
         if field in record and not (isinstance(record[field], str) and DIGEST.fullmatch(record[field])):
             _reject(f"{base}/{field}")
     if "content_digest" in record and not (isinstance(record["content_digest"], str) and DIGEST.fullmatch(record["content_digest"])):
@@ -613,6 +616,18 @@ def _validate_invocation(record: object, base: str) -> None:
         and TOKEN.fullmatch(record["reservation_owner_session_id"])
     ):
         _reject(f"{base}/reservation_owner_session_id")
+    if "operation_id" in record and not (
+        isinstance(record["operation_id"], str) and TOKEN.fullmatch(record["operation_id"])
+    ):
+        _reject(f"{base}/operation_id")
+    if "provider_receipt" in record:
+        receipt = record["provider_receipt"]
+        if not isinstance(receipt, dict) or set(receipt) != {"kind", "identity"}:
+            _reject(f"{base}/provider_receipt")
+    if "proven_no_dispatch" in record and type(record["proven_no_dispatch"]) is not bool:
+        _reject(f"{base}/proven_no_dispatch")
+        if receipt.get("kind") not in {"process", "provider"} or not _safe_text(receipt.get("identity"), maximum=256):
+            _reject(f"{base}/provider_receipt")
     for field in ("fencing_epoch", "child_pid"):
         if field in record and (type(record[field]) is not int or record[field] < 1):
             _reject(f"{base}/{field}")
@@ -643,7 +658,7 @@ def _validate_invocation(record: object, base: str) -> None:
             except ValueError:
                 _reject(f"{base}/{field}")
     if "lifecycle_state" in record and record["lifecycle_state"] not in {
-        "selected", "invoked", "reserved", "running", "terminal"
+        "selected", "invoked", "reserved", "dispatch-unknown", "running", "terminal"
     }:
         _reject(f"{base}/lifecycle_state")
 

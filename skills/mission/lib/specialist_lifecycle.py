@@ -50,6 +50,8 @@ def invocation_lifecycle_state(status: str) -> str:
         return "invoked"
     if status == "reserved":
         return "reserved"
+    if status == "dispatch-unknown":
+        return "dispatch-unknown"
     if status == "running":
         return "running"
     return "terminal"
@@ -149,7 +151,16 @@ def validate_invocation_transition(
     if previous_status == "selected":
         allowed = next_status in {"started", "reserved"} or next_status in TERMINAL_INVOCATION_STATUSES
     elif previous_status == "reserved":
-        allowed = next_status == "running" or next_status in TERMINAL_INVOCATION_STATUSES
+        allowed = next_status == "dispatch-unknown" or next_status in TERMINAL_INVOCATION_STATUSES
+    elif previous_status == "dispatch-unknown":
+        allowed = (
+            next_status == "running"
+            or next_status == "abandoned-unknown"
+            or (
+                next_status == "failed-before-start"
+                and requested.get("proven_no_dispatch") is True
+            )
+        )
     elif previous_status in {"started", "running"}:
         allowed = next_status in TERMINAL_INVOCATION_STATUSES
     else:
