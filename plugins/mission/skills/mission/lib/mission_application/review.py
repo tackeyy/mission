@@ -43,6 +43,10 @@ class ReviewFailure(ValueError):
 
 
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_GIT_SHA = re.compile(r"[0-9a-f]{40}\Z")
+_SCORE_AXES = (
+    "mission_achievement", "accuracy", "completeness", "usability",
+)
 
 
 def typed_review_input_ref(value: dict) -> ReviewInputRef:
@@ -88,9 +92,20 @@ def _typed_revision_scope(value: dict):
     if not isinstance(value, dict):
         raise ReviewFailure("revision scope is invalid", reason="revision-scope-invalid")
     if value.get("kind") == "git" and set(value) == {"kind", "base_sha", "head_sha"}:
-        return GitRevisionScope(str(value["base_sha"]), str(value["head_sha"]))
+        base_sha, head_sha = value["base_sha"], value["head_sha"]
+        if (
+            not isinstance(base_sha, str)
+            or _GIT_SHA.fullmatch(base_sha) is None
+            or not isinstance(head_sha, str)
+            or _GIT_SHA.fullmatch(head_sha) is None
+        ):
+            raise ReviewFailure("revision scope is invalid", reason="revision-scope-invalid")
+        return GitRevisionScope(base_sha, head_sha)
     if value.get("kind") == "not-applicable" and set(value) == {"kind", "reason_code"}:
-        return NotApplicableRevisionScope(str(value["reason_code"]))
+        reason_code = value["reason_code"]
+        if not isinstance(reason_code, str) or not reason_code:
+            raise ReviewFailure("revision scope is invalid", reason="revision-scope-invalid")
+        return NotApplicableRevisionScope(reason_code)
     raise ReviewFailure("revision scope is invalid", reason="revision-scope-invalid")
 
 
@@ -162,19 +177,51 @@ def reduce_reviews_to_score(
     if not isinstance(derived, dict) or set(derived) != required:
         raise ReviewFailure("review reduction has invalid fields", reason="review-reduction-invalid")
     items = derived["items"]
-    if not isinstance(items, dict) or set(items) != {
-        "mission_achievement", "accuracy", "completeness", "usability"
-    }:
+    if not isinstance(items, dict) or set(items) != set(_SCORE_AXES):
         raise ReviewFailure("review reduction items are invalid", reason="review-reduction-invalid")
     if any(
         isinstance(value, bool)
         or not isinstance(value, (int, float))
         or not math.isfinite(float(value))
+        or not 1.0 <= float(value) <= 5.0
         for value in items.values()
     ):
         raise ReviewFailure("review reduction items are invalid", reason="review-reduction-invalid")
+    normalized_items = {key: float(value) for key, value in items.items()}
+    expected_composite = round(sum(normalized_items.values()) / len(normalized_items), 2)
+    expected_min_item = round(min(normalized_items.values()), 2)
+    for field, expected in (
+        ("composite", expected_composite),
+        ("min_item", expected_min_item),
+    ):
+        value = derived[field]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) != expected
+        ):
+            raise ReviewFailure("review reduction score is invalid", reason="review-reduction-invalid")
     open_high = derived["open_high"]
-    if isinstance(open_high, bool) or not isinstance(open_high, int) or open_high < 0:
+    if not isinstance(reviews, list):
+        raise ReviewFailure("review reduction input is invalid", reason="review-reduction-invalid")
+    expected_open_high = 0
+    for review in reviews:
+        if not isinstance(review, dict):
+            raise ReviewFailure("review reduction input is invalid", reason="review-reduction-invalid")
+        findings = review.get("findings", [])
+        if not isinstance(findings, list):
+            raise ReviewFailure("review reduction input is invalid", reason="review-reduction-invalid")
+        expected_open_high += sum(
+            1
+            for finding in findings
+            if isinstance(finding, dict) and finding.get("severity") == "High"
+        )
+    if (
+        isinstance(open_high, bool)
+        or not isinstance(open_high, int)
+        or open_high != expected_open_high
+    ):
         raise ReviewFailure("review reduction open_high is invalid", reason="review-reduction-invalid")
     agreement = derived["review_agreement"]
     if agreement is not None and (
@@ -184,15 +231,53 @@ def reduce_reviews_to_score(
     ):
         raise ReviewFailure("review reduction agreement is invalid", reason="review-reduction-invalid")
     detail = derived["agreement_detail"]
-    if not isinstance(detail, dict):
+    if not isinstance(detail, dict) or set(detail) != set(_SCORE_AXES):
         raise ReviewFailure("review reduction agreement detail is invalid", reason="review-reduction-invalid")
+    normalized_detail = {}
+    for axis in _SCORE_AXES:
+        axis_detail = detail[axis]
+        if (
+            not isinstance(axis_detail, dict)
+            or set(axis_detail) != {"min", "max", "delta"}
+        ):
+            raise ReviewFailure("review reduction agreement detail is invalid", reason="review-reduction-invalid")
+        if any(
+            isinstance(axis_detail[field], bool)
+            or not isinstance(axis_detail[field], (int, float))
+            or not math.isfinite(float(axis_detail[field]))
+            for field in ("min", "max", "delta")
+        ):
+            raise ReviewFailure("review reduction agreement detail is invalid", reason="review-reduction-invalid")
+        minimum = float(axis_detail["min"])
+        maximum = float(axis_detail["max"])
+        delta = float(axis_detail["delta"])
+        if (
+            not 1.0 <= minimum <= maximum <= 5.0
+            or delta != round(maximum - minimum, 2)
+            or not minimum <= normalized_items[axis] <= maximum
+        ):
+            raise ReviewFailure("review reduction agreement detail is invalid", reason="review-reduction-invalid")
+        normalized_detail[axis] = {"min": minimum, "max": maximum, "delta": delta}
+    max_delta = max(value["delta"] for value in normalized_detail.values())
+    expected_agreement = (
+        5 if max_delta <= 0.5
+        else 4 if max_delta <= 1.0
+        else 3 if max_delta <= 1.5
+        else 2 if max_delta <= 2.0
+        else 1
+    )
+    if agreement is None:
+        if max_delta != 0.0:
+            raise ReviewFailure("review reduction agreement is invalid", reason="review-reduction-invalid")
+    elif float(agreement) != float(expected_agreement):
+        raise ReviewFailure("review reduction agreement is invalid", reason="review-reduction-invalid")
     return ReducedReviewScore(
-        items={key: float(value) for key, value in items.items()},
-        composite=float(derived["composite"]),
-        min_item=float(derived["min_item"]),
+        items=normalized_items,
+        composite=expected_composite,
+        min_item=expected_min_item,
         open_high=open_high,
         review_agreement=None if agreement is None else float(agreement),
-        agreement_detail=detail,
+        agreement_detail=normalized_detail,
     )
 
 

@@ -274,6 +274,113 @@ def test_review_reduction_counts_high_even_with_arbitrary_legacy_status():
     assert reduced.open_high == 1
 
 
+def _canonical_reduction_result():
+    items = {
+        "mission_achievement": 1.0,
+        "accuracy": 1.0,
+        "completeness": 1.0,
+        "usability": 1.0,
+    }
+    return {
+        "items": items,
+        "composite": 1.0,
+        "min_item": 1.0,
+        "open_high": 0,
+        "review_agreement": None,
+        "agreement_detail": {
+            axis: {"min": value, "max": value, "delta": 0.0}
+            for axis, value in items.items()
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "forged_value"),
+    [("composite", 5.0), ("min_item", 5.0), ("composite", float("nan"))],
+)
+def test_review_reduction_rejects_forged_derived_score(field, forged_value):
+    from mission_application.review import ReviewFailure, reduce_reviews_to_score
+
+    def forged_reducer(_reviews, *, expected_iteration):
+        assert expected_iteration == 1
+        return {**_canonical_reduction_result(), field: forged_value}
+
+    with pytest.raises(ReviewFailure, match="review reduction"):
+        reduce_reviews_to_score([], expected_iteration=1, reducer=forged_reducer)
+
+
+@pytest.mark.parametrize(
+    "mutate_detail",
+    [
+        "missing-axis",
+        "unknown-field",
+        "inconsistent-delta",
+        "item-outside-range",
+        "agreement-mismatch",
+    ],
+)
+def test_review_reduction_rejects_noncanonical_agreement_detail(mutate_detail):
+    from mission_application.review import ReviewFailure, reduce_reviews_to_score
+
+    def forged_reducer(_reviews, *, expected_iteration):
+        assert expected_iteration == 1
+        result = _canonical_reduction_result()
+        if mutate_detail == "missing-axis":
+            result["agreement_detail"].pop("accuracy")
+        elif mutate_detail == "unknown-field":
+            result["agreement_detail"]["accuracy"]["median"] = 1.0
+        elif mutate_detail == "inconsistent-delta":
+            result["agreement_detail"]["accuracy"] = {
+                "min": 1.0, "max": 2.0, "delta": 0.0,
+            }
+        elif mutate_detail == "item-outside-range":
+            result["agreement_detail"]["accuracy"] = {
+                "min": 2.0, "max": 2.0, "delta": 0.0,
+            }
+        else:
+            result["review_agreement"] = 4.0
+        return result
+
+    with pytest.raises(ReviewFailure, match="review reduction"):
+        reduce_reviews_to_score([], expected_iteration=1, reducer=forged_reducer)
+
+
+def test_review_reduction_rejects_forged_open_high_count():
+    from mission_application.review import ReviewFailure, reduce_reviews_to_score
+
+    reviews = [{"findings": [{"severity": "High"}]}]
+
+    def forged_reducer(_reviews, *, expected_iteration):
+        assert expected_iteration == 1
+        return _canonical_reduction_result()
+
+    with pytest.raises(ReviewFailure, match="review reduction"):
+        reduce_reviews_to_score(reviews, expected_iteration=1, reducer=forged_reducer)
+
+
+@pytest.mark.parametrize(
+    ("base_sha", "head_sha"),
+    [(None, None), ("", ""), ("a" * 39, "b" * 40), (1, 2)],
+)
+def test_manual_score_ref_rejects_noncanonical_git_revision_scope(base_sha, head_sha):
+    from mission_application.review import ReviewFailure, typed_manual_score_ref
+
+    value = {
+        "kind": "manual-score",
+        "path": ".mission-state/archive/manual.json",
+        "digest": "sha256:" + "b" * 64,
+        "generation": "b" * 16,
+        "revision_scope": {
+            "kind": "git",
+            "base_sha": base_sha,
+            "head_sha": head_sha,
+        },
+    }
+
+    with pytest.raises(ReviewFailure, match="revision scope"):
+        typed_manual_score_ref(value)
+
+
 def test_manual_capture_foreign_lease_leaves_state_and_public_files_unchanged(
     state_dir, run_cli, tmp_path
 ):
