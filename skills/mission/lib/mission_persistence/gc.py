@@ -306,6 +306,8 @@ def _archive_generation_roots(root: Path) -> frozenset[str]:
 
 
 def _retention_roots(repository) -> frozenset[str]:
+    from .fenced_commit import FencedCommitError
+
     roots = set(_archive_generation_roots(repository.root))
     snapshots = []
     for path in _scan_directory(repository.root / "sessions"):
@@ -384,7 +386,12 @@ def _retention_roots(repository) -> frozenset[str]:
             raise GarbageCollectionError(
                 "gc-root-ambiguous", "prepare inventory contains an unexpected entry"
             )
-        prepare, _content = repository._read_prepare_unlocked(path.name)
+        try:
+            prepare, _content = repository._read_prepare_unlocked(path.name)
+        except FencedCommitError as exc:
+            raise GarbageCollectionError(
+                "gc-root-ambiguous", "prepare record cannot be read safely"
+            ) from exc
         roots.add(prepare.generation.digest)
     return frozenset(roots)
 
