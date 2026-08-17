@@ -1071,9 +1071,8 @@ def test_rollback_failure_preserves_verifiable_bundle_and_blocks_writes(tmp_path
     assert not prepare.exists()
 
 
-def test_recovery_has_no_domain_transition_or_production_route():
+def test_recovery_primitive_has_no_domain_transition_or_production_route():
     source_paths = [
-        _LIB_ROOT / "mission_persistence" / "fenced_commit.py",
         _LIB_ROOT / "mission_persistence" / "local_uow.py",
     ]
     imported = set()

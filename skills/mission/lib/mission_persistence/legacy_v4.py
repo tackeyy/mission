@@ -3,13 +3,23 @@
 from __future__ import annotations
 
 import copy
+import json
+from dataclasses import replace
+from datetime import datetime, timezone
 from typing import Callable, ContextManager, Iterable
 
 from mission_application.artifact import EvidenceDecision, EvidenceEffect, validate_evidence_effect
+from mission_application.ports import AggregateIndexError
+from mission_kernel import decode_mission_state, project_legacy_document
+from mission_kernel.transitions import Decision
 
-
-class AggregateIndexError(RuntimeError):
-    """The session write succeeded but the rebuildable aggregate index did not."""
+from .fenced_commit import (
+    ExecutionRequest,
+    FencedCommitError,
+    RepositoryExecutionResult,
+    _admit_lease,
+    _validate_request,
+)
 
 
 class LegacyV4InitializerRepository:
@@ -50,6 +60,12 @@ class LegacyV4Repository:
         backup_state: Callable[[], None],
         add_to_aggregate: Callable[[], None] | None = None,
         remove_from_aggregate: Callable[[], None] | None = None,
+        clock: Callable[[], datetime] | None = None,
+        lease_ttl_seconds: int = 15 * 60,
+        effect_transaction: Callable[
+            [tuple[EvidenceEffect, ...]], ContextManager[object]
+        ]
+        | None = None,
     ) -> None:
         self._lock = lock
         self._read_state = read_state
@@ -57,6 +73,9 @@ class LegacyV4Repository:
         self._backup_state = backup_state
         self._add_to_aggregate = add_to_aggregate
         self._remove_from_aggregate = remove_from_aggregate
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._lease_ttl_seconds = lease_ttl_seconds
+        self._effect_transaction = effect_transaction
 
     def transaction(self) -> ContextManager[object]:
         return self._lock()
@@ -64,8 +83,10 @@ class LegacyV4Repository:
     def load(self) -> dict:
         return self._read_state()
 
-    def execute(self, state: dict, mutation: Callable[[dict], None], transition=None) -> dict:
+    def execute(self, state, mutation, transition=None):
         """Return the proposed v4 document without performing any I/O."""
+        if isinstance(state, ExecutionRequest):
+            return self._execute_request(state, mutation)
         # The typed transition is the authority decision, while the A1
         # compatibility reducer remains the writer for legacy timing, lease,
         # and passthrough fields.  Projecting the canonical state here would
@@ -73,6 +94,94 @@ class LegacyV4Repository:
         proposed = copy.deepcopy(state)
         mutation(proposed)
         return proposed
+
+    def _execute_request(
+        self,
+        request: ExecutionRequest,
+        decide_command: Callable[[object], Decision],
+    ) -> RepositoryExecutionResult:
+        """Evaluate the common typed request while retaining the v4 layout."""
+        _validate_request(request)
+        if not callable(decide_command):
+            raise FencedCommitError("request-invalid", "decision function is not callable")
+        with self.transaction():
+            current = self.load()
+            if not isinstance(current, dict):
+                raise FencedCommitError("record-invalid", "legacy state is not an object")
+            source = json.dumps(
+                current,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+            try:
+                state = decode_mission_state(source)
+            except Exception as exc:
+                raise FencedCommitError(
+                    getattr(exc, "code", "record-invalid"),
+                    "legacy state cannot be decoded",
+                ) from exc
+            if state.identity.session_id not in {None, request.session_id}:
+                raise FencedCommitError("lineage-mismatch", "legacy session differs")
+            pending = _admit_lease(
+                request,
+                state.lease,
+                self._clock(),
+                self._lease_ttl_seconds,
+            )
+            admitted_state = replace(
+                state,
+                lease=pending.target,
+                snapshot_provenance=None,
+            )
+            decision = decide_command(admitted_state)
+            if not isinstance(decision, Decision):
+                raise FencedCommitError("decision-invalid", "decision result type is invalid")
+            if not decision.accepted:
+                if decision.transition is not None or decision.rejection is None:
+                    raise FencedCommitError("decision-invalid", "rejected decision is not closed")
+                return RepositoryExecutionResult(False, None, decision.rejection.code)
+            if decision.transition is None or decision.rejection is not None:
+                raise FencedCommitError("decision-invalid", "accepted decision is not closed")
+            target = decision.transition.new_state
+            if target.lease != pending.target:
+                raise FencedCommitError(
+                    "pending-lease-mismatch", "transition does not contain the pending lease"
+                )
+            proposed = json.loads(project_legacy_document(target))
+            bindings = decision.transition.effects
+            if type(bindings) is not tuple:
+                raise FencedCommitError(
+                    "effect-binding-invalid", "transition effects are not immutable"
+                )
+            expected = tuple(blob.binding for blob in request.blobs.blobs)
+            if bindings != expected:
+                raise FencedCommitError(
+                    "blob-binding-mismatch", "transition effects differ from captured blobs"
+                )
+            if bindings:
+                if self._effect_transaction is None:
+                    raise FencedCommitError(
+                        "effect-binding-invalid",
+                        "effectful typed request has no publication transaction",
+                    )
+                effects = tuple(
+                    EvidenceEffect(
+                        kind=blob.binding.kind,
+                        target=blob.binding.relative_path,
+                        content=blob.content,
+                        digest=blob.binding.digest,
+                        size=blob.binding.size,
+                    )
+                    for blob in request.blobs.blobs
+                )
+                closed = self.validate_effects(effects)
+                with self._effect_transaction(closed):
+                    self.save(proposed)
+            else:
+                self.save(proposed)
+            return RepositoryExecutionResult(True, None, None)
 
     def save(
         self,

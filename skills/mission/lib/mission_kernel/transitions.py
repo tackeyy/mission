@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import math
 import re
 from typing import Any, Callable, Optional, Type
@@ -48,6 +48,7 @@ class Transition:
     new_state: MissionState
     events: tuple[KernelEvent, ...]
     effects: tuple[object, ...] = ()
+    _seal: object | None = field(default=None, init=False, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -469,4 +470,25 @@ def decide(state: MissionState, command: Command) -> Decision:
         transition = reducer(state, command)
     except _Rejected as rejected:
         return Decision(False, None, Rejection(rejected.code), rule.rule_id)
+    object.__setattr__(transition, "_seal", _TRANSITION_SEAL)
     return Decision(True, transition, None, rule.rule_id)
+
+
+_TRANSITION_SEAL = object()
+
+
+def is_sealed_transition(value: object) -> bool:
+    """Return whether ``value`` was issued by the canonical decision table."""
+    return isinstance(value, Transition) and value._seal is _TRANSITION_SEAL
+
+
+def bind_transition_effects(
+    transition: Transition,
+    effects: tuple[object, ...],
+) -> Transition:
+    """Bind immutable verified effects without reopening the state decision."""
+    if not is_sealed_transition(transition) or type(effects) is not tuple:
+        raise TransitionTableError("invalid-transition-effect-binding")
+    bound = Transition(transition.new_state, transition.events, effects)
+    object.__setattr__(bound, "_seal", _TRANSITION_SEAL)
+    return bound

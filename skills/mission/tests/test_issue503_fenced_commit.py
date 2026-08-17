@@ -1101,13 +1101,13 @@ def test_clock_failure_before_prepare_discards_private_stage(tmp_path):
     assert not prepared.staged.root.exists()
 
 
-def test_u2_exposes_only_a_private_persistence_stage_seam(tmp_path):
-    """H1: raw state/effects staging must not masquerade as the ADR UoW API."""
+def test_p1_exposes_typed_stage_and_keeps_raw_bytes_private(tmp_path):
+    """P1 replaces the U2 seam with the ADR typed transition boundary."""
     from mission_persistence.fenced_commit import LocalFencedRepository
 
     local = LocalFencedRepository(tmp_path / "repository" / ".mission-state")
 
-    assert not hasattr(local, "stage")
+    assert callable(local.stage)
     assert callable(local._stage_persistence)
 
 

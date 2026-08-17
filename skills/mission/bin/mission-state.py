@@ -190,6 +190,7 @@ from mission_persistence.legacy_v4 import (  # noqa: E402
     LegacyV4InitializerRepository,
     LegacyV4Repository,
 )
+from mission_persistence.repository_binding import require_legacy_session  # noqa: E402
 from worktree_archive import (  # noqa: E402
     STATE_ARCHIVE_GENERATION_SCHEMA,
     STATE_ARCHIVE_POINTER_SCHEMA,
@@ -6796,6 +6797,7 @@ def _resolve_evidence_output_path(cwd: Path, path_text: str) -> Path:
 
 def _legacy_evidence_repository(cwd: Path, sf: Path, *, stamp: bool) -> LegacyV4Repository:
     """Bind A3 decisions to the current fenced v4 state transaction."""
+    require_legacy_session(sf.stem, sf)
     lease: dict[str, object] = {}
 
     def read_state() -> dict:
@@ -6812,6 +6814,7 @@ def _legacy_evidence_repository(cwd: Path, sf: Path, *, stamp: bool) -> LegacyV4
         read_state=read_state,
         write_state=write_state,
         backup_state=lambda: backup_state(sf),
+        effect_transaction=lambda effects: _publish_evidence_effects(cwd, effects),
     )
 
 
@@ -8478,6 +8481,7 @@ def _legacy_lifecycle_repository(
     allow_partial_lease_terminal_write: bool = False,
     pre_admit_lease: bool = False,
 ) -> LegacyV4Repository:
+    require_legacy_session(sf.stem, sf)
     admitted_lease = [_LEASE_DECISION_UNSET]
     admitted_identity = [None]
     backup_snapshot = [None]
@@ -14538,6 +14542,7 @@ def _terminalize_state_file(
             # publishes the already revalidated terminal state under this lock.
             _atomic_write(sf, lambda f: json.dump(data, f, indent=2, ensure_ascii=False))
 
+        require_legacy_session(sf.stem, sf)
         repository = LegacyV4Repository(
             lock=contextlib.nullcontext,
             read_state=lambda: copy.deepcopy(latest),

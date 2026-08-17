@@ -29,9 +29,7 @@ from mission_kernel.commands import (
 )
 from mission_kernel.model import HaltCategory, Phase, PreparedHandoff
 from mission_kernel.transitions import Decision, decide
-from mission_persistence.legacy_v4 import AggregateIndexError
-
-from .ports import MissionInitializer, MissionRepository
+from .ports import AggregateIndexError, MissionInitializer, MissionRepository
 
 
 LIFECYCLE_COMMAND_OWNERS = {

@@ -16,7 +16,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Callable, Optional, Union
 
-from mission_kernel import decode_mission_state
+from mission_kernel import decode_mission_state, decode_snapshot, project_legacy_document
+from mission_kernel.codec_v5 import encode_v5_state
 from mission_kernel.json_codec import (
     STATE_LIMIT,
     decode_json_object,
@@ -29,6 +30,14 @@ from mission_kernel.model import (
     LeaseHistoryEntry,
     LegacyAbsentLease,
     MissionState,
+    SchemaOrigin,
+)
+from mission_kernel.transitions import Decision, Transition, is_sealed_transition
+from mission_application.ports import (
+    AuditMetadata,
+    CommitResult,
+    ExecutionRequest,
+    RepositoryExecutionResult,
 )
 
 from .local_uow import (
@@ -75,27 +84,9 @@ class FencedCommitError(ValueError):
 
 
 @dataclass(frozen=True)
-class AuditMetadata:
-    command_type: str
-    event_types: tuple[str, ...]
-
-
-@dataclass(frozen=True)
 class AuditRecord:
     command_type_digest: str
     event_type_digests: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class ExecutionRequest:
-    session_id: str
-    lease_owner_session_id: str
-    command: FrozenJsonObject
-    blobs: VerifiedBlobSet
-    operation_id: str
-    intent_digest: str
-    presented_lease_id: Optional[str]
-    audit: AuditMetadata
 
 
 @dataclass(frozen=True)
@@ -145,14 +136,6 @@ class CommitRecord:
     target_generation: int
     transaction_id: str
     schema: str = "mission-commit/1"
-
-
-@dataclass(frozen=True)
-class CommitResult:
-    commit_digest: str
-    generation: int
-    head_digest: str
-    state_generation_digest: str
 
 
 @dataclass(frozen=True)
@@ -1748,6 +1731,96 @@ class LocalFencedRepository:
             pending = _admit_lease(request, base_lease, self.clock(), self.lease_ttl_seconds)
             precondition = CommitPrecondition(base_generation, head_digest, pending.digest)
             return AdmittedSnapshot(request, base, pending, base_generation + 1, precondition)
+
+    def stage(
+        self,
+        admitted: AdmittedSnapshot,
+        transition: Transition,
+        blobs: VerifiedBlobSet,
+    ) -> PreparedCommit:
+        """Stage only a transition issued by the canonical kernel decision table."""
+        if not isinstance(admitted, AdmittedSnapshot):
+            raise FencedCommitError("request-invalid", "admitted snapshot type is invalid")
+        if not is_sealed_transition(transition):
+            raise FencedCommitError("transition-invalid", "transition is not kernel-issued")
+        if blobs != admitted.request.blobs:
+            raise FencedCommitError("blob-binding-mismatch", "stage blobs differ from request")
+        try:
+            validate_verified_blob_set(blobs)
+        except LocalUnitOfWorkError as exc:
+            raise FencedCommitError(exc.code, exc.detail) from exc
+        if not isinstance(transition.new_state, MissionState):
+            raise FencedCommitError("transition-invalid", "transition state type is invalid")
+        target_state = replace(transition.new_state, snapshot_provenance=None)
+        if target_state.identity.session_id != admitted.request.session_id:
+            raise FencedCommitError("lineage-mismatch", "transition session differs")
+        if target_state.lease != admitted.pending_lease.target:
+            raise FencedCommitError(
+                "pending-lease-mismatch", "transition does not contain the pending lease"
+            )
+        effects = transition.effects
+        if type(effects) is not tuple or any(
+            not isinstance(effect, BlobBinding) for effect in effects
+        ):
+            raise FencedCommitError("effect-binding-invalid", "transition effects are invalid")
+        expected_effects = tuple(blob.binding for blob in blobs.blobs)
+        if effects != expected_effects:
+            raise FencedCommitError(
+                "blob-binding-mismatch", "transition effects differ from captured blobs"
+            )
+        try:
+            if target_state.schema_origin is SchemaOrigin.V5:
+                if admitted.base is None:
+                    raise FencedCommitError(
+                        "transition-invalid", "v5 transition requires an admitted base"
+                    )
+                guidance = decode_snapshot(admitted.base.state_bytes).guidance
+                state_bytes = encode_v5_state(target_state, guidance)
+            else:
+                state_bytes = project_legacy_document(target_state)
+        except FencedCommitError:
+            raise
+        except Exception as exc:
+            raise FencedCommitError(
+                getattr(exc, "code", "transition-invalid"),
+                "transition cannot be encoded canonically",
+            ) from exc
+        return self._stage_persistence(
+            admitted,
+            state_bytes=state_bytes,
+            effects=effects,
+        )
+
+    def execute(
+        self,
+        request: ExecutionRequest,
+        decide_command: Callable[[MissionState], Decision],
+    ) -> RepositoryExecutionResult:
+        """Run one explicit request through admission, decision, stage, and commit."""
+        if not callable(decide_command):
+            raise FencedCommitError("request-invalid", "decision function is not callable")
+        admitted = self.begin(request)
+        if isinstance(admitted, CommitResult):
+            return RepositoryExecutionResult(True, admitted, None)
+        if admitted.base is None:
+            return RepositoryExecutionResult(False, None, "initial-state-required")
+        admitted_state = replace(
+            admitted.base.state,
+            lease=admitted.pending_lease.target,
+            snapshot_provenance=None,
+        )
+        decision = decide_command(admitted_state)
+        if not isinstance(decision, Decision):
+            raise FencedCommitError("decision-invalid", "decision result type is invalid")
+        if not decision.accepted:
+            if decision.transition is not None or decision.rejection is None:
+                raise FencedCommitError("decision-invalid", "rejected decision is not closed")
+            return RepositoryExecutionResult(False, None, decision.rejection.code)
+        if decision.transition is None or decision.rejection is not None:
+            raise FencedCommitError("decision-invalid", "accepted decision is not closed")
+        prepared = self.stage(admitted, decision.transition, request.blobs)
+        committed = self.commit(prepared, prepared.precondition)
+        return RepositoryExecutionResult(True, committed, None)
 
     @staticmethod
     def _projection_identity(
