@@ -1013,10 +1013,12 @@ U4 + P1 + R1 -> C1
 
 Recommended issue order is D1, K1, K2, then A1 and U1 on separate branches.
 A2-A5 follow A1 while U2 and U3 follow U1. After both tracks converge, P1 binds
-the extracted use cases to the format-pinned repository. U4 can proceed after
-U3 in parallel with P1. R1 follows the reader/UoW binding, and C1 waits for U4,
-P1, and R1. This matches Stages 3-7 and keeps extraction and consumer migration
-independently releasable before v5 activation.
+the closed K2 command representation to the format-pinned repositories without
+claiming application-use-case integration. U4 can proceed after U3 in parallel
+with P1. R1 follows the reader/UoW binding, and C1 waits for U4, P1, and R1
+before connecting all extracted mutating use cases and activating v5. This
+matches Stages 3-7 and keeps extraction and consumer migration independently
+releasable before v5 activation.
 
 ## 10. Release and rollback boundaries
 
