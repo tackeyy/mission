@@ -81,7 +81,10 @@ def test_stamp_metadata_skips_pid_lookup_when_present(monkeypatch, tmp_path):
 def test_cleanup_stale_removes_orphan_from_aggregate(tmp_path, run_cli):
     """dead-pid orphan を cleanup-stale --execute すると aggregate から除去される (lock内更新)."""
     run_cli("init", "g", "--complexity", "Standard", cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "orphanX"})
-    run_cli("set", "pid=999999", "pid_source=agent", cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "orphanX"})  # dead pid 擬制
+    orphan_path = tmp_path / ".mission-state" / "sessions" / "orphanX.json"
+    orphan = json.loads(orphan_path.read_text(encoding="utf-8"))
+    orphan.update({"pid": 999999, "pid_source": "agent"})  # dead pid fixture
+    orphan_path.write_text(json.dumps(orphan), encoding="utf-8")
     _make_legacy_state(tmp_path / ".mission-state" / "sessions" / "orphanX.json")
     agg0 = json.loads((tmp_path / ".mission-state" / "aggregate.json").read_text())
     assert "orphanX" in agg0["active_sessions"]

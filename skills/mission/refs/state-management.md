@@ -23,8 +23,8 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py init "<ミッ�
 # 値の取得
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py get [--field key]
 
-# 値の更新 (複数 key=value 可、key 型は JSON 推論)
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py set iteration=1 phase='"executing"'
+# extension値の更新 (複数 key=value 可、key 型は JSON 推論)
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py set iteration=1
 
 # 採点結果を score_history に記録 (Phase 5 直後、orchestrator が必ず呼ぶ)
 # scorer は context: fork で state.json に書き込めないため orchestrator が代行する
@@ -445,14 +445,14 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-migrate.py --execute --
 
 ## phase フィールドの更新セマンティクス (M4, 2026-06-10 / 2026-06-25)
 
-mission-state.py は開始・採点・終了の境界で `phase` を自動設定する。orchestrator は、実作業やレビューに入る境界を `set phase=...` で明示する。これを省略すると長時間 run が `planning` に粗く帰属し、audit の slow-session 分析で `coarse-phase-attribution` として検出される。
+mission-state.py は開始・採点・終了の境界で `phase` を自動設定する。orchestrator は、実作業やレビューに入る境界を `advance --phase ... --activity ...` で明示する。generic `set` によるphase、stale復帰先、activity reducer所有fieldの変更は#506以降拒否される。
 
 | コマンド | phase |
 |---|---|
 | `init` | `planning` |
 | `codex-preflight` | 変更なし (read-only) |
-| `set phase=executing` | Phase 3 実行開始前に orchestrator が明示 |
-| `set phase=reviewing` | Phase 4 レビュー開始前に orchestrator が明示 |
+| `advance --phase executing --activity active:implementation` | Phase 3 実行開始前に orchestrator が明示 |
+| `advance --phase reviewing --activity reviewer-wait:review-response` | Phase 4 レビュー開始前に orchestrator が明示 |
 | `push-score` | `scoring` |
 | `mark-passes` | `done` |
 | `mark-halt` / `halt --all` | `halted` |
@@ -462,10 +462,10 @@ mission-state.py は開始・採点・終了の境界で `phase` を自動設定
 
 ```bash
 # Phase 3: 実装・調査開始
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py set phase=executing
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py advance --phase executing --activity active:implementation
 
 # Phase 4: review 開始
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py set phase=reviewing
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py advance --phase reviewing --activity reviewer-wait:review-response
 
 # Phase 5: scoring 完了時 (自動で phase=scoring)
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score ...

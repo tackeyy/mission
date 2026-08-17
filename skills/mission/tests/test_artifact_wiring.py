@@ -92,7 +92,7 @@ def test_generic_set_cannot_move_pending_artifact_contract_to_reviewing(
     result = run_cli("set", "phase=reviewing", cwd=state_dir.parent)
 
     assert result.returncode == 2
-    assert "artifact applicability is pending" in result.stderr
+    assert "専用command" in result.stderr
     assert read_state(state_dir)["phase"] == "executing"
 
 

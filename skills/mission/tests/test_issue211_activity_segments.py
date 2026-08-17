@@ -386,8 +386,9 @@ def test_phase_transition_splits_open_activity_atomically_and_terminal_closes_it
     ).returncode == 0
 
     transition = run_cli(
-        "set",
-        "phase=reviewing",
+        "advance",
+        "--phase",
+        "reviewing",
         cwd=tmp_path,
         env_extra={"MISSION_STATE_NOW": "2026-07-21T00:10:00Z"},
     )
@@ -395,11 +396,11 @@ def test_phase_transition_splits_open_activity_atomically_and_terminal_closes_it
     middle = json.loads(path.read_text())
     assert middle["activity_segments"][0]["duration_sec"] == 600.0
     assert middle["activity_current"] == {
-        "kind": "active",
+        "kind": "reviewer-wait",
         "iteration": 2,
-        "origin": "manual",
+        "origin": "phase-default",
         "phase": "reviewing",
-        "reason": "work",
+        "reason": "review-response",
         "started_at": "2026-07-21T00:10:00Z",
     }
     assert middle["phase_durations_sec"]["executing"] == 600.0
@@ -1363,8 +1364,9 @@ def test_refresh_pid_closes_and_restarts_phase_at_the_observed_resume_boundary(
         env_extra={"MISSION_STATE_NOW": "2026-07-21T01:00:00Z"},
     )
     transitioned = run_cli(
-        "set",
-        "phase=reviewing",
+        "advance",
+        "--phase",
+        "reviewing",
         cwd=tmp_path,
         env_extra={"MISSION_STATE_NOW": "2026-07-21T01:10:00Z"},
     )

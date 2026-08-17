@@ -163,11 +163,18 @@ def _cli_mutation_from_bytes(
     completed = _run_cli_with_clock(
         root,
         "set",
-        f"phase={phase}",
+        "fixture_transition_probe=true",
         lease_id=lease_id,
         now=now,
     )
     assert completed.returncode == 0, completed.stderr
+    # These repository tests need a deterministic next-generation byte image,
+    # not a lifecycle transition.  Acquire/renew the lease through the CLI,
+    # then arrange the requested historical phase directly as test fixture data.
+    state = json.loads(session.read_text(encoding="utf-8"))
+    state.pop("fixture_transition_probe", None)
+    state["phase"] = phase
+    session.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     return session.read_bytes()
 
 
@@ -381,7 +388,7 @@ def test_expired_lease_without_presented_token_generates_fenced_takeover(
     completed = _run_cli_with_clock(
         cli_root,
         "set",
-        "phase=reviewing",
+        "fixture_takeover_probe=true",
         lease_id=None,
         now="2099-01-01T00:00:00Z",
     )

@@ -159,7 +159,7 @@ def test_lease_mismatch_hint_never_prints_token(state_dir, run_cli):
 
     result = run_cli(
         "set",
-        "phase=executing",
+        "awaiting_user=true",
         cwd=state_dir.parent,
         env_extra={"MISSION_SESSION_ID": "test", "MISSION_LEASE_ID": "wrong-token"},
     )
