@@ -288,6 +288,7 @@ def test_decide_and_guidance_share_one_named_transition_table():
     assert {rule.rule_id for rule in TRANSITION_TABLE if rule.reducer is not None} == {
         "advance-phase",
         "mark-halt",
+        "mark-pass",
         "reactivate",
         "resume-stale",
     }

@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import math
 import re
 from typing import Any, Callable, Optional, Type
 
-from .commands import AdvancePhase, Command, MarkHalt, Reactivate, ResumeStale
+from .commands import AdvancePhase, Command, MarkHalt, MarkPass, Reactivate, ResumeStale
 from .model import (
     AbsentHandoff,
     AbsentPlan,
+    BoundScore,
     HaltCategory,
     MissionControl,
     MissionState,
@@ -298,6 +300,85 @@ def _resume_stale(state: MissionState, raw_command: object) -> Transition:
     )
 
 
+def _finite_number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _latest_declared_score(state: MissionState) -> tuple[BoundScore | None, dict[str, object] | None]:
+    for score in reversed(state.scores):
+        payload = score.payload.thaw()
+        if "composite" not in payload:
+            continue
+        if not isinstance(score, BoundScore) or score.authoritative is not True:
+            return None, payload
+        return score, payload
+    return None, None
+
+
+def _maximum_agreement_delta(payload: dict[str, object]) -> float | None:
+    detail = payload.get("agreement_detail")
+    if not isinstance(detail, dict):
+        return None
+    maximum = None
+    for raw in detail.values():
+        if not isinstance(raw, dict):
+            continue
+        delta = _finite_number(raw.get("delta"))
+        if delta is not None and (maximum is None or delta > maximum):
+            maximum = delta
+    return maximum
+
+
+def _mark_pass(state: MissionState, raw_command: object) -> Transition:
+    command = raw_command
+    assert isinstance(command, MarkPass)
+    control = _active_control(state)
+    if type(command.force) is not bool:
+        raise _Rejected("invalid-force-flag")
+    if command.force:
+        if command.force_approval_verified is not True:
+            raise _Rejected("force-approval-required")
+    else:
+        _score, payload = _latest_declared_score(state)
+        if payload is None:
+            raise _Rejected("score-required")
+        if _score is None:
+            raise _Rejected("authoritative-score-required")
+        open_high = payload.get("open_high", 0)
+        if isinstance(open_high, bool) or not isinstance(open_high, int) or open_high < 0:
+            raise _Rejected("invalid-open-high")
+        if open_high > 0:
+            raise _Rejected("open-high-findings")
+        composite = _finite_number(payload.get("composite"))
+        threshold = 4.0 if control.threshold is None else _finite_number(control.threshold)
+        if threshold is None or composite is None or composite < threshold:
+            raise _Rejected("composite-below-threshold")
+        minimum = _finite_number(payload.get("min_item"))
+        if minimum is None or minimum < 3.5:
+            raise _Rejected("minimum-item-below-threshold")
+        agreement_delta = _maximum_agreement_delta(payload)
+        if agreement_delta is not None and agreement_delta > 1.5:
+            raise _Rejected("review-agreement-too-low")
+        if command.specialist_gate_satisfied is not True:
+            raise _Rejected("specialist-gate-unsatisfied")
+    if command.artifact_gate_satisfied is not True:
+        raise _Rejected("artifact-gate-unsatisfied")
+    new_control = replace(
+        control,
+        phase=Phase.DONE,
+        terminal_outcome=TerminalOutcome.COMPLETED_PASS,
+        loop_active=False,
+        passes=True,
+    )
+    return Transition(
+        _unbound_state(state, control=new_control),
+        (KernelEvent("mission-passed"),),
+    )
+
+
 def _command_type_guard(expected: Type[object]) -> Callable[[MissionState, object], bool]:
     def guard(_state: MissionState, command: object) -> bool:
         return isinstance(command, expected)
@@ -337,6 +418,12 @@ TRANSITION_TABLE = build_transition_table(
             _stagnation_guidance_guard,
             _rule_recipe,
             (("A1.mark-halt", "StagnationObservation", "MarkHalt"),),
+        ),
+        TransitionRule(
+            "mark-pass",
+            MarkPass,
+            _command_type_guard(MarkPass),
+            _mark_pass,
         ),
         TransitionRule(
             "reactivate",

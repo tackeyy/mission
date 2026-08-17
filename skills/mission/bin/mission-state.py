@@ -140,6 +140,17 @@ from mission_application.lifecycle import (  # noqa: E402
     set_fields as run_set_fields,
     update_project_root as run_update_project_root,
 )
+from mission_application.review import (  # noqa: E402
+    MarkPassRequest,
+    MarkPassServices,
+    ReviewFailure,
+    legacy_manual_score_ref,
+    legacy_review_input_ref,
+    mark_pass as run_mark_pass,
+    reduce_reviews_to_score,
+    typed_manual_score_ref,
+    typed_review_input_ref,
+)
 from mission_persistence.legacy_v4 import (  # noqa: E402
     LegacyV4InitializerRepository,
     LegacyV4Repository,
@@ -10282,12 +10293,15 @@ def cmd_manual_score_capture(args):
         sys.exit(2)
     try:
         content = _read_bounded_manual_input(args.input)
-        payload = json.loads(content.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        payload = json.loads(
+            content.decode("utf-8"), object_pairs_hook=_reject_duplicate_review_keys
+        )
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError, _DuplicateReviewJsonKey) as exc:
         print(f"ERROR: manual score input: {exc}", file=sys.stderr)
         sys.exit(2)
-    with StateLock(lock_file(cwd)):
+    with StateLock(lock_file(cwd)), _PublishedFilesTransaction() as published_files:
         data = json.loads(sf.read_text(encoding="utf-8"))
+        lease_decision = _enforce_session_lease_for_write(sf, data)
         entry = {
             "iteration": payload.get("iteration"), "items": payload.get("items"),
             "composite": payload.get("composite"), "min_item": payload.get("min_item"),
@@ -10309,27 +10323,44 @@ def cmd_manual_score_capture(args):
             sys.exit(2)
         digest = hashlib.sha256(content).hexdigest()
         mission8 = str(data.get("mission_id") or "unknown")[:8]
-        archive = state_dir(cwd) / "archive" / f"iter-{entry['iteration']}-{mission8}-manual-{digest[:16]}.json"
-        archive.parent.mkdir(parents=True, exist_ok=True)
-        if archive.exists() and _sha256_file(archive) != digest:
-            print("ERROR: immutable manual score archive collision", file=sys.stderr)
+        archive_name = f"iter-{entry['iteration']}-{mission8}-manual-{digest[:16]}.json"
+        try:
+            archive_publish = published_files.add(
+                _publish_review_archive_transaction(cwd, archive_name, content)
+            )
+        except ValueError as exc:
+            print(f"ERROR: immutable manual score archive rejected: {exc}", file=sys.stderr)
             sys.exit(2)
-        if not archive.exists():
-            atomic_write_bytes(archive, content)
-        ref = {
+        archive = archive_publish.path
+        ref = legacy_manual_score_ref(typed_manual_score_ref({
             "kind": "manual-score", "path": str(archive.relative_to(cwd)),
             "digest": "sha256:" + digest, "generation": digest[:16],
             "revision_scope": payload["revision_scope"],
-        }
+        }))
         scoring = {
             "items": entry["items"], "open_high": entry["open_high"],
             "review_agreement": entry["review_agreement"],
             "score_provenance": {"score_source": "manual-import", "manual_evidence_ref": ref,
                                   "revision_scope": payload["revision_scope"]},
         }
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(out, scoring)
+        out = Path(args.out)
+        scoring_content = json.dumps(scoring, indent=2, ensure_ascii=False).encode("utf-8")
+        try:
+            output_publish = published_files.add(
+                _publish_output_transaction(
+                    out,
+                    scoring_content,
+                    forbidden_targets=((archive_publish.directory_identity, archive.name),),
+                )
+            )
+        except ValueError as exc:
+            print(f"ERROR: manual scoring output rejected: {exc}", file=sys.stderr)
+            sys.exit(2)
+        data["updated_at"] = iso_now()
+        backup_state(sf)
+        _verify_published_file(archive_publish)
+        _verify_published_file(output_publish)
+        atomic_write_json(sf, stamp_metadata(data, cwd), lease_decision=lease_decision)
     print(json.dumps({"ok": True, "scoring_json": str(out), "manual_evidence_ref": ref}, ensure_ascii=False))
 
 
@@ -12013,14 +12044,14 @@ def cmd_review_import(args):
             _emit_json_command_failure(args, failure, guidance)
             print(f"ERROR: review import archive rejected: {exc}", file=sys.stderr)
             sys.exit(2)
-        reference = {
+        reference = legacy_review_input_ref(typed_review_input_ref({
             "kind": "review-input",
             "path": str(destination.relative_to(cwd)),
             "digest": digest,
             "size": len(content),
             "iteration": args.iteration,
             "perspective": review["perspective"],
-        }
+        }))
         previous = data.get("review_evidence_refs")
         records = previous if isinstance(previous, list) else []
         retained = [item for item in records if isinstance(item, dict) and item != reference]
@@ -12842,14 +12873,26 @@ def cmd_aggregate_reviews(args):
     # validates the untrusted archive.  Keep the surrounding observability
     # fields, but do not let this writer become a second scoring authority.
     try:
-        derived_score = reduce_review_aggregate(reviews, expected_iteration=args.iteration)
-    except ValueError as exc:
+        reduced = reduce_reviews_to_score(
+            reviews,
+            expected_iteration=args.iteration,
+            reducer=reduce_review_aggregate,
+        )
+    except (ReviewFailure, ValueError) as exc:
         print(f"ERROR: review aggregate inputs are invalid: {exc}", file=sys.stderr)
         sys.exit(2)
-    items = derived_score["items"]
-    open_high = derived_score["open_high"]
-    review_agreement = derived_score["review_agreement"]
-    agreement_detail = derived_score["agreement_detail"]
+    derived_score = {
+        "items": reduced.items,
+        "composite": reduced.composite,
+        "min_item": reduced.min_item,
+        "open_high": reduced.open_high,
+        "review_agreement": reduced.review_agreement,
+        "agreement_detail": reduced.agreement_detail,
+    }
+    items = reduced.items
+    open_high = reduced.open_high
+    review_agreement = reduced.review_agreement
+    agreement_detail = reduced.agreement_detail
 
     # #282/#350: reviewer 並列実行の観測。2 名以上では全 reviewer の
     # self-report を fail-closed で要求し、実行形態そのものは gate しない。
@@ -13503,254 +13546,188 @@ def _unclosed_optional_specialist_skills(data: dict) -> list[str]:
     return sorted(selected - terminal)
 
 
-def cmd_mark_passes(args):
-    """合格マーク。score_history の最新 entry を threshold gate で検証する.
+def _verify_force_pass_approval(data: dict, args, cwd: Path) -> dict:
+    latest_scope = next(
+        (
+            entry.get("revision_scope")
+            for entry in reversed(data.get("score_history", []))
+            if isinstance(entry, dict) and isinstance(entry.get("revision_scope"), dict)
+        ),
+        {"kind": "not-applicable", "reason_code": "non-git"},
+    )
+    terminal_object = dict(data)
+    terminal_object.update({"passes": True, "loop_active": False, "passes_forced": True})
+    _write_terminal_outcome(terminal_object)
+    request = build_approval_request(
+        session_id=data.get("session_id"),
+        mission_id=data.get("mission_id"),
+        revision_scope=latest_scope,
+        terminal_object_digest=terminal_state_digest(terminal_object),
+        approval_evidence_ref=getattr(args, "approval_evidence_ref", None),
+        approved_actor=getattr(args, "approved_actor", None),
+        approved_at=getattr(args, "approved_at", None),
+        reason_code=getattr(args, "reason_code", None),
+        event_nonce=secrets.token_hex(32),
+    )
+    verification = verify_force_approval(
+        request, getattr(args, "approval_verifier", None), cwd=cwd
+    )
+    if _force_envelope_replayed(cwd, verification):
+        raise ValueError("approval request or receipt was already consumed")
+    validate_receipt_binding(cwd, verification)
+    if data.get("force_approval"):
+        raise ValueError("approval envelope was already consumed")
+    return verification
 
-    - score_history が空 -> exit 2 (採点未実施)
-    - composite < threshold -> exit 2
-    - min_item < MIN_ITEM_THRESHOLD (3.5) -> exit 2 (採点した items のいずれかが閾値未満)
-    - すべて通過なら passes=true, loop_active=false を書き込み
-    - --force --reason "<理由>" --approved-by-user は人手 override (バリデーション skip + force_reason 保存)
-      (#185: --approved-by-user はユーザーの明示承認宣言。orchestrator が自律的に付けてはならない)
-    """
+
+def _validate_force_pass_terminal(data: dict, verification: dict) -> None:
+    if verification["request"]["terminal_object_digest"] != terminal_state_digest(data):
+        raise ValueError("force approval terminal state binding changed before write")
+
+
+def _validate_pass_score_evidence(cwd: Path, data: dict, latest: dict) -> None:
+    _revalidate_score_provenance(cwd, latest, data)
+    _validate_findings_evidence_gate(cwd, latest)
+    axis, delta = _max_agreement_delta(latest)
+    if delta is not None and 1.0 < delta <= 1.5:
+        print(
+            f"WARNING: reviewer agreement is low on {axis} (max-min={delta:.2f}); "
+            "consider one additional review.",
+            file=sys.stderr,
+        )
+
+
+def _validate_pass_artifact_gate(cwd: Path, data: dict) -> None:
+    validate_artifact_state_consistency(data, require_resolved=True)
+    artifact_error = _artifact_gate_error(data, cwd)
+    if artifact_error:
+        raise ValueError(artifact_error)
+    if data.get("artifact_applicability") != "producing":
+        return
+    artifact = _artifact_state(data)
+    identity_present = any(key in artifact for key in ("path", "digest", "size", "producer_run_id"))
+    coverage = _artifact_profile_coverage(cwd, data)
+    if identity_present:
+        validate_artifact_identity(data, cwd)
+        if coverage.get("gate_active") and (
+            data.get("artifact_lint_status") not in {"clean", "findings"}
+            or not artifact_lint_observation_matches(data)
+        ):
+            raise ValueError(
+                "artifact lint observation is missing for a profile with an active coverage gate"
+            )
+    elif coverage.get("gate_active"):
+        raise ValueError("artifact path is missing")
+    else:
+        print(
+            "WARN: artifact coverage gate is not active for this profile; "
+            "recording a terminal missing observation",
+            file=sys.stderr,
+        )
+
+
+def _validate_pass_specialist_gate(data: dict, specialist_waiver: str) -> None:
+    if _specialist_selection_checkpoint_expected(data) and not _has_specialist_selection_checkpoint(data):
+        raise ValueError(
+            "specialist selection checkpoint missing before pass: record task_profile.primary "
+            "and specialists_decision.policy, including fallback/degraded policy when no external "
+            "specialist is used."
+        )
+    checkpoint_error = _specialist_selection_checkpoint_error(data)
+    if checkpoint_error:
+        raise ValueError(checkpoint_error)
+    decision = data.get("specialists_decision")
+    if isinstance(decision, dict) and decision.get("decision") == "selected":
+        invocation_gaps = selected_without_terminal_invocations(data)
+        if invocation_gaps and not specialist_waiver:
+            skills = ", ".join(item["skill"] for item in invocation_gaps)
+            raise ValueError(
+                "terminal specialist invocation missing before pass: "
+                f"{skills}. Record a terminal result or pass --specialist-waiver <reason>."
+            )
+    specialist_report = candidate_accounting_report(data)
+    if specialist_report.get("accounting_required"):
+        skills = ", ".join(
+            candidate["skill"]
+            for candidate in specialist_report.get("required_unaccounted_candidates", [])
+        )
+        raise ValueError(
+            "specialist accounting required before pass: "
+            f"{skills}. Record used/skipped/unavailable/failed evidence or use user-approved --force."
+        )
+    if specialist_report.get("result_required"):
+        skills = ", ".join(
+            candidate["skill"]
+            for candidate in specialist_report.get("result_required_unmet_candidates", [])
+        )
+        raise ValueError(
+            "required specialist result evidence missing before pass: "
+            f"{skills}. Required providers must produce completed/inline-applied/skill-tool-applied "
+            "evidence or use user-approved --force."
+        )
+
+
+def cmd_mark_passes(args):
+    """Delegate evidence validation and completion authority to A2 + kernel."""
     cwd = Path.cwd()
     sf = resolve_state_file(cwd)
     if not sf.exists():
         print("ERROR: state file が見つかりません。先に init してください。", file=sys.stderr)
         sys.exit(1)
     force = bool(getattr(args, "force", False))
-    reason = getattr(args, "reason", None)
-    approved_by_user = bool(getattr(args, "approved_by_user", False))
     specialist_waiver = (getattr(args, "specialist_waiver", None) or "").strip()
-    approval_ref = getattr(args, "approval_evidence_ref", None)
-    approved_actor = getattr(args, "approved_actor", None)
-    approved_at = getattr(args, "approved_at", None)
-    reason_code = getattr(args, "reason_code", None)
-    approval_verifier = getattr(args, "approval_verifier", None)
-
-    if force and not reason:
-        print("ERROR: --force を指定する場合は --reason \"<理由>\" が必須です。", file=sys.stderr)
+    try:
+        result = run_mark_pass(
+            _legacy_lifecycle_repository(cwd, sf, stamp=False, strict_read=True),
+            MarkPassRequest(
+                force=force,
+                reason=getattr(args, "reason", None),
+                approved_by_user=bool(getattr(args, "approved_by_user", False)),
+                specialist_waiver=specialist_waiver,
+                at=iso_now(),
+            ),
+            MarkPassServices(
+                verify_force_approval=lambda data: _verify_force_pass_approval(data, args, cwd),
+                validate_force_terminal=_validate_force_pass_terminal,
+                validate_score_evidence=lambda data, latest: _validate_pass_score_evidence(
+                    cwd, data, latest
+                ),
+                validate_artifact_gate=lambda data: _validate_pass_artifact_gate(cwd, data),
+                validate_specialist_gate=_validate_pass_specialist_gate,
+                transition_phase=_transition_phase,
+                write_terminal_outcome=_write_terminal_outcome,
+                optional_unclosed_skills=_unclosed_optional_specialist_skills,
+                selection_id=_current_selection_id,
+            ),
+        )
+    except ReviewFailure as error:
+        print(f"ERROR: {error.message}", file=sys.stderr)
         sys.exit(2)
-    if force and not approved_by_user:
+    except ArtifactContractError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+    except (MissionStateDecodeError, UnsupportedSchemaVersionError, ValueError) as error:
+        prefix = "force approval: " if force else ""
+        print(f"ERROR: {prefix}{error}", file=sys.stderr)
+        sys.exit(2)
+
+    if force:
         print(
-            "ERROR: --force を指定する場合は --approved-by-user も必須です (#185)。"
-            " これはユーザーが明示的に override を承認したことの宣言であり、"
-            " orchestrator が自律的に付けてはならないフラグです。"
-            " ユーザーから明示的な override 指示があった場合のみ指定してください。",
+            "WARNING: --force により通常の score/specialist gate を skip して "
+            f"passes=true を書き込みます。reason={getattr(args, 'reason', None)!r}",
             file=sys.stderr,
         )
-        sys.exit(2)
-
-    with StateLock(lock_file(cwd)):
-        try:
-            data = _load_state_json(sf)
-        except UnsupportedSchemaVersionError as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
-            sys.exit(2)
-        if force:
-            try:
-                latest_scope = next((entry.get("revision_scope") for entry in reversed(data.get("score_history", []))
-                                     if isinstance(entry, dict) and isinstance(entry.get("revision_scope"), dict)),
-                                    {"kind": "not-applicable", "reason_code": "non-git"})
-                # Bind the approval to the exact terminal state that this
-                # invocation will persist.  The shared projection excludes
-                # force_approval and timestamps, so it can be reproduced by
-                # the post-write assertion and historical audit.
-                terminal_object = dict(data)
-                terminal_object.update({"passes": True, "loop_active": False, "passes_forced": True})
-                _write_terminal_outcome(terminal_object)
-                request = build_approval_request(
-                    session_id=data.get("session_id"), mission_id=data.get("mission_id"),
-                    revision_scope=latest_scope, terminal_object_digest=terminal_state_digest(terminal_object),
-                    approval_evidence_ref=approval_ref, approved_actor=approved_actor, approved_at=approved_at,
-                    reason_code=reason_code, event_nonce=secrets.token_hex(32),
-                )
-                verification = verify_force_approval(request, approval_verifier, cwd=cwd)
-                if _force_envelope_replayed(cwd, verification):
-                    raise ValueError("approval request or receipt was already consumed")
-                validate_receipt_binding(cwd, verification)
-                if data.get("force_approval"):
-                    raise ValueError("approval envelope was already consumed")
-            except ValueError as exc:
-                print(f"ERROR: force approval: {exc}", file=sys.stderr)
-                sys.exit(2)
-        try:
-            validate_artifact_state_consistency(data, require_resolved=True)
-        except ArtifactContractError as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
-            sys.exit(2)
-        now = iso_now()
-        threshold = data.get("threshold", DEFAULT_THRESHOLD)
-        history = data.get("score_history", [])
-
-        if not force:
-            # 改善3b: composite を持つ直近エントリで判定 (末尾に進捗ノート等の
-            # composite 欠損エントリが混入していても gate を壊さない)。
-            # Select the newest declared score before validating its immutable
-            # provenance.  Filtering malformed values first would misreport a
-            # forged manual score as "not scored" and skip its typed boundary.
-            scored = [h for h in history if isinstance(h, dict) and "composite" in h]
-            if not scored:
-                print("ERROR: 採点未実施。`push-score` を先に呼んでください。", file=sys.stderr)
-                sys.exit(2)
-            latest = scored[-1]
-            try:
-                _revalidate_score_provenance(cwd, latest, data)
-            except ValueError as exc:
-                print(f"ERROR: provenance: {exc}", file=sys.stderr)
-                sys.exit(2)
-            # Findings evidence must be reconciled before applying the High
-            # gate. A High finding caps its axis at 3.0, so evaluating the
-            # generic score gates first would make this dedicated safety gate
-            # unreachable for otherwise valid, reducer-derived evidence.
-            _validate_findings_evidence_gate(cwd, latest)
-            # Issue #3: unresolved High findings always prevent a pass.
-            open_high = latest.get("open_high") or 0
-            if open_high > 0:
-                print(
-                    f"ERROR: 未解決 High が {open_high} 件あるため合格にできません。High 指摘を全て解消してから再採点してください。",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-            composite = latest.get("composite")
-            min_item = latest.get("min_item")
-            if composite is None or composite < threshold:
-                print(
-                    f"ERROR: composite {composite} < threshold {threshold} のため合格にできません。Critic を起動し次イテレーションへ進んでください。",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-            if min_item is None or min_item < MIN_ITEM_THRESHOLD:
-                print(
-                    f"ERROR: min_item {min_item} < {MIN_ITEM_THRESHOLD} のため合格にできません (採点した items のいずれかが {MIN_ITEM_THRESHOLD} 未満)。Critic を起動し次イテレーションへ進んでください。",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-            # Issue #126: reviewer agreement は composite から独立した gate として扱う。
-            _validate_review_agreement_gate(latest)
-            artifact_error = _artifact_gate_error(data, cwd)
-            if artifact_error:
-                print(f"ERROR: {artifact_error}", file=sys.stderr)
-                sys.exit(2)
-            if _specialist_selection_checkpoint_expected(data) and not _has_specialist_selection_checkpoint(data):
-                print(
-                    "ERROR: specialist selection checkpoint missing before pass: "
-                    "record task_profile.primary and specialists_decision.policy, "
-                    "including fallback/degraded policy when no external specialist is used.",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-            checkpoint_error = _specialist_selection_checkpoint_error(data)
-            if checkpoint_error:
-                print(f"ERROR: {checkpoint_error}", file=sys.stderr)
-                sys.exit(2)
-            decision = data.get("specialists_decision")
-            if isinstance(decision, dict) and decision.get("decision") == "selected":
-                invocation_gaps = selected_without_terminal_invocations(data)
-                if invocation_gaps and not specialist_waiver:
-                    skills = ", ".join(item["skill"] for item in invocation_gaps)
-                    print(
-                        "ERROR: terminal specialist invocation missing before pass: "
-                        f"{skills}. Record a terminal result or pass --specialist-waiver <reason>.",
-                        file=sys.stderr,
-                    )
-                    sys.exit(2)
-            specialist_report = candidate_accounting_report(data)
-            if specialist_report.get("accounting_required"):
-                skills = ", ".join(c["skill"] for c in specialist_report.get("required_unaccounted_candidates", []))
-                print(
-                    "ERROR: specialist accounting required before pass: "
-                    f"{skills}. Record used/skipped/unavailable/failed evidence or use user-approved --force.",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-            if specialist_report.get("result_required"):
-                skills = ", ".join(c["skill"] for c in specialist_report.get("result_required_unmet_candidates", []))
-                print(
-                    "ERROR: required specialist result evidence missing before pass: "
-                    f"{skills}. Required providers must produce completed/inline-applied/skill-tool-applied evidence or use user-approved --force.",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-        else:
-            print(
-                f"WARNING: --force によりバリデーションを skip して passes=true を書き込みます。reason={reason!r}",
-                file=sys.stderr,
-            )
-
-        if data.get("artifact_applicability") == "producing":
-            artifact = _artifact_state(data)
-            identity_present = any(
-                key in artifact for key in ("path", "digest", "size", "producer_run_id")
-            )
-            coverage = _artifact_profile_coverage(cwd, data)
-            if identity_present:
-                try:
-                    validate_artifact_identity(data, cwd)
-                except ArtifactContractError as exc:
-                    print(f"ERROR: {exc}", file=sys.stderr)
-                    sys.exit(2)
-                if (
-                    coverage.get("gate_active")
-                    and (
-                        data.get("artifact_lint_status") not in {"clean", "findings"}
-                        or not artifact_lint_observation_matches(data)
-                    )
-                ):
-                    print(
-                        "ERROR: artifact lint observation is missing for a profile with an active coverage gate",
-                        file=sys.stderr,
-                    )
-                    sys.exit(2)
-            elif coverage.get("gate_active"):
-                print("ERROR: artifact path is missing", file=sys.stderr)
-                sys.exit(2)
-            else:
-                print(
-                    "WARN: artifact coverage gate is not active for this profile; "
-                    "recording a terminal missing observation",
-                    file=sys.stderr,
-                )
-
-        data["passes"] = True
-        data["loop_active"] = False
-        data["passes_forced"] = force  # 改善1: force-pass を機械可読に記録 (stats で集計)
-        _transition_phase(data, "done", now)  # M4 (2026-06-10): phase 自動更新
-        _write_terminal_outcome(data)
-        data["updated_at"] = now
-        if force:
-            data["force_reason"] = reason
-            data["force_approved_by_user"] = approved_by_user  # #185
-            data["force_approval"] = verification
-            if verification["request"]["terminal_object_digest"] != terminal_state_digest(data):
-                print("ERROR: force approval terminal state binding changed before write", file=sys.stderr)
-                sys.exit(2)
-            data["force_approval"]["consumed"] = True
-        elif specialist_waiver:
-            data["specialist_waiver"] = {
-                "reason": specialist_waiver,
-                "selection_id": _current_selection_id(data),
-                "recorded_at": now,
-            }
-        backup_state(sf)
-        atomic_write_json(sf, data)
-        # #11: aggregate 更新も同じ StateLock 内で行う (lock 外だと並列 mark で lost update)
-        _remove_from_aggregate(cwd, resolve_session_id())
-        # #189: --force は accounting_required/result_required gate ごと skip するため、
-        # unclosed に required specialist が混入し得る。「optional のため」という文言が
-        # 誤りになるので --force 経路ではこの WARN 自体を出さない。
-        unclosed = [] if force else _unclosed_optional_specialist_skills(data)
-    if unclosed:
+    if result.unclosed_skills:
         print(
             "WARNING [#189]: selected specialist に invocation 終端ログがありません: "
-            f"{', '.join(unclosed)}。"
+            f"{', '.join(result.unclosed_skills)}。"
             " `mission-state.py specialists log-invocation --status skipped --reason \"<理由>\"` 等で"
             " クローズアウトしてください (optional specialist のため mark-passes は成功させています)。",
             file=sys.stderr,
         )
-    output = {"ok": True, "passes": True, "forced": force}
-    if force:
-        output["force_approved_by_user"] = approved_by_user
+    output = {"ok": True, "passes": True, "forced": result.forced}
+    if result.forced:
+        output["force_approved_by_user"] = True
     print(json.dumps(output))
 
 
