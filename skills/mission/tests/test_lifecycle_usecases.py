@@ -1048,6 +1048,86 @@ def test_set_rejects_dedicated_halt_fields_with_exact_bytes_unchanged(
     assert result_bytes == legacy_bytes
 
 
+@pytest.mark.parametrize(
+    ("malformed_update", "case_id"),
+    (
+        ({"iteration": "oops"}, "string-iteration"),
+        ({"owner_session_id": "partial-owner"}, "partial-lease"),
+        ({"reviewer_count": "oops"}, "string-reviewer-count"),
+    ),
+)
+def test_mark_halt_remains_available_for_malformed_legacy_v4_state(
+    tmp_path, malformed_update, case_id
+):
+    from .mission_state_fixture_corpus import _run_cli
+
+    now = "2026-08-17T02:00:00Z"
+    initialized = _run_cli(
+        tmp_path,
+        "init",
+        f"A1 emergency halt {case_id}",
+        "--complexity",
+        "Standard",
+        env_extra={"MISSION_STATE_NOW": now},
+    )
+    assert initialized.returncode == 0, initialized.stderr
+    state_path = tmp_path / ".mission-state" / "sessions" / "test.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    if case_id == "partial-lease":
+        for key in ("lease_id", "fencing_epoch", "lease_expires_at"):
+            state.pop(key, None)
+    state.update(malformed_update)
+    state_path.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    result = _run_cli(
+        tmp_path,
+        "mark-halt",
+        "--reason",
+        "emergency stop",
+        "--category",
+        "other",
+        env_extra={"MISSION_STATE_NOW": now},
+    )
+
+    halted = json.loads(state_path.read_text(encoding="utf-8"))
+    assert result.returncode == 0, result.stderr
+    assert halted["loop_active"] is False
+    assert halted["halt_reason"] == "emergency stop"
+    assert halted["halt_category"] == "other"
+
+
+@pytest.mark.parametrize(
+    "dedicated_update",
+    (
+        "phase=executing",
+        "pid=123",
+        "loop_active=false",
+        "lease_id=forged",
+        "activity_current=null",
+    ),
+)
+def test_set_rejects_all_dedicated_lifecycle_fields_with_bytes_unchanged(
+    tmp_path, dedicated_update
+):
+    from .mission_state_fixture_corpus import _run_cli
+
+    now = "2026-08-17T02:01:00Z"
+    state_path = _write_golden_state(tmp_path, "set_narrowing")
+    before = state_path.read_bytes()
+
+    result = _run_cli(
+        tmp_path,
+        "set",
+        dedicated_update,
+        env_extra={"MISSION_STATE_NOW": now},
+    )
+
+    assert result.returncode == 2
+    assert state_path.read_bytes() == before
+
+
 def test_reactivate_rejects_real_cli_passed_state_without_write(tmp_path):
     from mission_application.lifecycle import (
         LifecycleFailure,

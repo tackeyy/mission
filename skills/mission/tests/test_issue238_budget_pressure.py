@@ -91,7 +91,10 @@ def test_next_does_not_override_cheap_finishing_actions(run_cli, tmp_path):
     """予算超過でも scoring 完了間際 (aggregate-reviews 等のローカル手) は override しない。
     誠実な終端 (採点して pass/fail を確定する) を優先する."""
     run_cli("init", "budget test", "--budget-minutes", "10", cwd=tmp_path, check=True)
-    run_cli("set", "phase=scoring", cwd=tmp_path, check=True)
+    state_path = tmp_path / ".mission-state" / "sessions" / "test.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["phase"] = "scoring"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
     import datetime
     past = (datetime.datetime.now(datetime.timezone.utc)
             - datetime.timedelta(minutes=12)).strftime("%Y-%m-%dT%H:%M:%SZ")

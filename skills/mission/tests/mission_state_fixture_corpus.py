@@ -141,6 +141,14 @@ def _read_cli_state(root: Path) -> dict:
     return json.loads((root / ".mission-state" / "sessions" / "test.json").read_text(encoding="utf-8"))
 
 
+def _mutate_cli_state_for_fixture(root: Path, **fields: object) -> None:
+    """Arrange a historical/derived state without exercising generic ``set``."""
+    path = root / ".mission-state" / "sessions" / "test.json"
+    state = json.loads(path.read_text(encoding="utf-8"))
+    state.update(fields)
+    path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def _init_cli_state(
     root: Path,
     *,
@@ -283,12 +291,6 @@ def generate_cli_state_corpus(root: Path) -> dict[str, object]:
         provider_cli,
         provider_root,
     )
-    _checked_cli(
-        provider_root,
-        "set",
-        "phase=planning",
-        env_extra=provider_env,
-    )
     corpus["provider_result_ready"] = copy.deepcopy(_read_cli_state(provider_root))
     _checked_cli(
         provider_root,
@@ -353,7 +355,7 @@ def generate_cli_state_corpus(root: Path) -> dict[str, object]:
 
     manual_root = root / "manual-score"
     _init_cli_state(manual_root)
-    _checked_cli(manual_root, "set", "iteration=1")
+    _mutate_cli_state_for_fixture(manual_root, iteration=1)
     manual_state = _read_cli_state(manual_root)
     items = {
         "mission_achievement": 4.5,
@@ -428,8 +430,9 @@ def generate_cli_state_corpus(root: Path) -> dict[str, object]:
     corpus["lease_acquired"] = copy.deepcopy(_init_cli_state(lease_root))
     takeover = _run_cli_with_clock(
         lease_root,
-        "set",
-        "phase=reviewing",
+        "advance",
+        "--phase",
+        "reviewing",
         lease_id="replacement-lease",
         now="2099-01-01T00:00:00Z",
     )
@@ -447,17 +450,19 @@ def generate_cli_state_corpus(root: Path) -> dict[str, object]:
 
     inactive_root = root / "guidance-inactive"
     _init_cli_state(inactive_root)
-    _checked_cli(inactive_root, "set", "loop_active=false")
+    _mutate_cli_state_for_fixture(inactive_root, loop_active=False)
     guidance_cases["inactive"] = copy.deepcopy(_read_cli_state(inactive_root))
 
     stagnation_root = root / "guidance-stagnation"
     _init_cli_state(stagnation_root)
-    _checked_cli(stagnation_root, "set", "stagnation_count=3")
+    _mutate_cli_state_for_fixture(stagnation_root, stagnation_count=3)
     guidance_cases["stagnation"] = copy.deepcopy(_read_cli_state(stagnation_root))
 
     critic_scope_root = root / "guidance-critic-scope"
     _init_cli_state(critic_scope_root)
-    _checked_cli(critic_scope_root, "set", "iteration=2", "phase=reviewing")
+    _mutate_cli_state_for_fixture(
+        critic_scope_root, iteration=2, phase="reviewing"
+    )
     guidance_cases["critic_scope"] = copy.deepcopy(_read_cli_state(critic_scope_root))
 
     provider_fallback_root = root / "guidance-provider-primary-binding-missing"
@@ -474,11 +479,8 @@ def generate_cli_state_corpus(root: Path) -> dict[str, object]:
 
     iteration_zero_root = root / "guidance-iteration-zero-scoring"
     _init_cli_state(iteration_zero_root)
-    _checked_cli(
-        iteration_zero_root,
-        "set",
-        "iteration=0",
-        "phase=scoring",
+    _mutate_cli_state_for_fixture(
+        iteration_zero_root, iteration=0, phase="scoring"
     )
     iteration_zero_state = copy.deepcopy(_read_cli_state(iteration_zero_root))
     # Current writers reject iteration-zero score creation, while the K1 legacy
@@ -523,7 +525,7 @@ def generate_cli_state_corpus(root: Path) -> dict[str, object]:
     phase_root = root / "phases"
     _init_cli_state(phase_root)
     for phase in ("planning", "executing", "reviewing", "scoring", "done", "halted"):
-        _checked_cli(phase_root, "set", f"phase={phase}")
+        _mutate_cli_state_for_fixture(phase_root, phase=phase)
         phases[phase] = copy.deepcopy(_read_cli_state(phase_root))
     corpus["phases"] = phases
 

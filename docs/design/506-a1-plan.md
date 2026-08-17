@@ -120,7 +120,9 @@
 
 ### `cmd_set` の narrowing
 
-現行ガードは `halt_reason` / `halt_category` / `loop_active`（halt 中）/ `phase`（直接 set 禁止）/ `reviewer_count`（単独禁止）。これを**明示 allowlist 方式**に変え、allowlist 外への set は `expected-gate` エラーにする。**現行で許可されているフィールドの挙動は変えない**（既存スクリプトを壊さないため、A1 では新規 narrowing のみ）。
+`phase` / `pid` / `loop_active` / halt / lease / activity / lifecycle timing fieldは専用commandだけが所有し、generic `set` はbytes不変の`expected-gate`で拒否する。`complexity`、review tier、iteration、bounded orchestration observation、extension propertyの既存利用は維持する。
+
+既存v1-v4 stateにtyped decoderが受理できないlegacy fieldが残っていても、単調な安全操作である`mark-halt`は最小control projectionでkernel判断を行う。partial leaseのterminal writeはStateLock下でのみ許可し、raw legacy fieldをdecision viewからauthoritative stateへ投影し直さない。
 
 ### 層の責務境界
 

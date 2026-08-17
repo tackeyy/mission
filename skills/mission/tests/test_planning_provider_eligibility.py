@@ -2882,7 +2882,7 @@ def test_unsafe_legacy_specialist_state_fails_closed_before_read_write_or_invoke
             "--provider", "legacy-command-provider",
             "--iteration", "1", "--phase", "planning", "--json",
         ),
-        ("set", "phase=planning"),
+        ("set", "fixture_probe=true"),
     ]
 
     for command in commands:

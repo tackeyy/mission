@@ -13,7 +13,6 @@ from activity_segments import (
     close_activity_for_resume,
     close_activity_for_terminal,
     end_activity_segment,
-    is_phase_default_activity,
     record_activity_event,
     start_activity_segment,
     start_phase_default_activity,
@@ -49,6 +48,36 @@ LIFECYCLE_COMMAND_OWNERS = {
     "set": "A1.lifecycle",
     "update-project-root": "A1.lifecycle",
 }
+
+
+# Fields whose authority belongs to a dedicated lifecycle, lease, progress, or
+# scoring command.  Generic ``set`` remains available for extension properties
+# such as complexity and bounded orchestration observations, but cannot bypass
+# the command that owns a state transition or its audit trail.
+DEDICATED_SET_FIELDS = frozenset(
+    {
+        "phase",
+        "phase_started_at",
+        "phase_durations_sec",
+        "activity_current",
+        "activity_segments",
+        "activity_rollup",
+        "activity_unobserved_gap_sec",
+        "activity_unobserved_gap_reasons_sec",
+        "pid",
+        "pid_source",
+        "loop_active",
+        "halt_reason",
+        "halt_category",
+        "owner_session_id",
+        "lease_id",
+        "fencing_epoch",
+        "lease_expires_at",
+        "lease_history",
+        "last_activity_at",
+        "updated_at",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -295,6 +324,31 @@ def _typed_state(raw_state: dict):
     )
 
 
+def _mark_halt_decision_state(raw_state: dict):
+    """Build a minimal safe decision view for the monotonic halt command.
+
+    Historical v1-v4 documents may contain malformed unrelated fields written
+    before typed validation existed.  Emergency halt must not decode those
+    fields, but it also must not project them back into authoritative state.
+    The repository still persists the original document through the legacy
+    reducer; this view exists only for the closed kernel decision.
+    """
+    phase = raw_state.get("phase")
+    active_phases = {item.value for item in Phase} - {"done", "halted"}
+    if not isinstance(phase, str) or phase not in active_phases:
+        phase = "planning"
+    return _typed_state(
+        {
+            "schema_version": 4,
+            "phase": phase,
+            "loop_active": True,
+            "passes": False,
+            "halt_reason": "",
+            "session_role": "implementer",
+        }
+    )
+
+
 def _advance_decision(
     state: dict,
     request: AdvanceRequest,
@@ -498,26 +552,7 @@ def mark_halt(
         # the persisted compatibility contract.
         semantic_reason = request.reason.strip() or "legacy-empty-reason"
         command = MarkHalt(HaltCategory(request.category), semantic_reason)
-        decision_state = state
-        raw_phase = state.get("phase")
-        if (
-            isinstance(raw_phase, str) and raw_phase in {"done", "halted"}
-            or state.get("passes") is True
-            or state.get("halt_reason")
-        ):
-            decision_state = copy.deepcopy(state)
-            decision_state["phase"] = "planning"
-            decision_state["passes"] = False
-            decision_state["loop_active"] = True
-            decision_state["halt_reason"] = ""
-            decision_state.pop("halt_category", None)
-            decision_state.pop("terminal_outcome", None)
-        elif not isinstance(state.get("phase"), str) or state.get("phase") not in {
-            item.value for item in Phase
-        }:
-            decision_state = copy.deepcopy(state)
-            decision_state["phase"] = "planning"
-        decision = decide(_typed_state(decision_state), command)
+        decision = decide(_mark_halt_decision_state(state), command)
         if not decision.accepted:
             assert decision.rejection is not None
             raise LifecycleFailure(
@@ -921,6 +956,15 @@ def set_fields(
                     reason="loop-active-halt",
                     state=state,
                 )
+        remaining_dedicated = explicit_keys & DEDICATED_SET_FIELDS
+        if remaining_dedicated:
+            field = sorted(remaining_dedicated)[0]
+            raise LifecycleFailure(
+                "`%s` は set で変更不可。専用commandを使用してください。" % field,
+                reason="dedicated-field",
+                guided=True,
+                state=state,
+            )
 
         routed_verdict_holder = [None]
         decision_holder = [None]
@@ -1040,26 +1084,7 @@ def set_fields(
                     parsed = json.loads(value)
                 except json.JSONDecodeError:
                     parsed = value
-                if key == "phase":
-                    normalized = services.normalize_phase(str(parsed))
-                    old_phase = proposed.get("phase")
-                    current = proposed.get("activity_current")
-                    if (
-                        normalized not in {"done", "halted"}
-                        and old_phase != normalized
-                        and is_phase_default_activity(current, old_phase)
-                    ):
-                        end_activity_segment(proposed, request.at)
-                    services.transition_phase(proposed, normalized, request.at)
-                    if normalized not in {"done", "halted"} and not proposed.get(
-                        "activity_current"
-                    ):
-                        try:
-                            start_phase_default_activity(proposed, request.at)
-                        except ActivityTimingError:
-                            pass
-                else:
-                    proposed[key] = parsed
+                proposed[key] = parsed
 
             if "complexity" in explicit_keys:
                 tier_source = proposed.get("review_tier_source", "auto")

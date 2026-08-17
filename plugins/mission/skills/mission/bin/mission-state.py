@@ -8225,6 +8225,7 @@ def _legacy_lifecycle_repository(
     stamp: bool,
     strict_read: bool = False,
     lease_reason: str | None = None,
+    allow_partial_lease_terminal_write: bool = False,
 ) -> LegacyV4Repository:
     def read_state() -> dict:
         if strict_read:
@@ -8234,7 +8235,23 @@ def _legacy_lifecycle_repository(
     def write_state(data: dict, *, administrative: bool = False) -> None:
         proposed = stamp_metadata(data, cwd) if stamp else data
         with _lease_write_reason(lease_reason):
-            if administrative:
+            lease_field_count = sum(
+                proposed.get(key) not in (None, "") for key in LEASE_STATE_FIELDS
+            )
+            partial_lease = 0 < lease_field_count < len(LEASE_STATE_FIELDS)
+            lease_decision = (
+                None
+                if allow_partial_lease_terminal_write and partial_lease
+                else _LEASE_DECISION_UNSET
+            )
+            if lease_decision is None:
+                atomic_write_json(
+                    sf,
+                    proposed,
+                    administrative=administrative,
+                    lease_decision=None,
+                )
+            elif administrative:
                 atomic_write_json(sf, proposed, administrative=True)
             else:
                 atomic_write_json(sf, proposed)
@@ -8765,7 +8782,10 @@ def _derive_next_action(data: dict) -> dict:
             }
         return {
             "next_action": "run-planner",
-            "summary": _planning_summary(f"iteration {iteration}: mission-planner を起動して計画を立てる (完了後 set phase=executing)"),
+            "summary": _planning_summary(
+                f"iteration {iteration}: mission-planner を起動して計画を立てる "
+                "(完了後 advance --phase executing)"
+            ),
             "command_hint": (
                 f"Skill: mission-planner{adoption_hint}"
                 " → mission-state.py advance --phase executing --activity active:implementation"
@@ -8780,7 +8800,10 @@ def _derive_next_action(data: dict) -> dict:
     if phase == "executing":
         return {
             "next_action": "run-executor",
-            "summary": f"iteration {iteration}: mission-executor で計画を実行する (完了後 set phase=reviewing。10分超は progress update)",
+            "summary": (
+                f"iteration {iteration}: mission-executor で計画を実行する "
+                "(完了後 advance --phase reviewing。10分超は progress update)"
+            ),
             "command_hint": "Skill: mission-executor → mission-state.py advance --phase reviewing --activity reviewer-wait:review-response",
             "command_sequence": _happy_path_sequence("executing", effective_reviewer_count),
         }
@@ -13820,7 +13843,13 @@ def cmd_mark_halt(args):
     category = _normalize_halt_category(getattr(args, "category", None))
     try:
         result = run_mark_halt(
-            _legacy_lifecycle_repository(cwd, sf, stamp=False, strict_read=True),
+            _legacy_lifecycle_repository(
+                cwd,
+                sf,
+                stamp=False,
+                strict_read=True,
+                allow_partial_lease_terminal_write=True,
+            ),
             MarkHaltRequest(args.reason, category, iso_now()),
             MarkHaltServices(
                 reject_active_provider_mutation=_reject_active_provider_mutation,
