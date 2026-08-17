@@ -294,6 +294,25 @@ def _canonical_reduction_result():
     }
 
 
+def _canonical_reviews(*, scores=(1.0,), findings=None):
+    return [
+        {
+            "schema": "mission-review/1",
+            "iteration": 1,
+            "perspective": f"reviewer-{index}",
+            "scores": {
+                "mission_achievement": score,
+                "accuracy": score,
+                "completeness": score,
+                "usability": score,
+            },
+            "findings": [] if findings is None else findings,
+            "same_score_note": "each axis independently checked",
+        }
+        for index, score in enumerate(scores, start=1)
+    ]
+
+
 @pytest.mark.parametrize(
     ("field", "forged_value"),
     [("composite", 5.0), ("min_item", 5.0), ("composite", float("nan"))],
@@ -306,7 +325,9 @@ def test_review_reduction_rejects_forged_derived_score(field, forged_value):
         return {**_canonical_reduction_result(), field: forged_value}
 
     with pytest.raises(ReviewFailure, match="review reduction"):
-        reduce_reviews_to_score([], expected_iteration=1, reducer=forged_reducer)
+        reduce_reviews_to_score(
+            _canonical_reviews(), expected_iteration=1, reducer=forged_reducer
+        )
 
 
 @pytest.mark.parametrize(
@@ -342,13 +363,20 @@ def test_review_reduction_rejects_noncanonical_agreement_detail(mutate_detail):
         return result
 
     with pytest.raises(ReviewFailure, match="review reduction"):
-        reduce_reviews_to_score([], expected_iteration=1, reducer=forged_reducer)
+        reduce_reviews_to_score(
+            _canonical_reviews(), expected_iteration=1, reducer=forged_reducer
+        )
 
 
 def test_review_reduction_rejects_forged_open_high_count():
     from mission_application.review import ReviewFailure, reduce_reviews_to_score
 
-    reviews = [{"findings": [{"severity": "High"}]}]
+    finding = {
+        "id": "finding-1",
+        "severity": "High",
+        "axis": "accuracy",
+    }
+    reviews = _canonical_reviews(findings=[finding])
 
     def forged_reducer(_reviews, *, expected_iteration):
         assert expected_iteration == 1
@@ -356,6 +384,53 @@ def test_review_reduction_rejects_forged_open_high_count():
 
     with pytest.raises(ReviewFailure, match="review reduction"):
         reduce_reviews_to_score(reviews, expected_iteration=1, reducer=forged_reducer)
+
+
+def test_review_reduction_rejects_agreement_hidden_from_input_reviews():
+    from mission_application.review import ReviewFailure, reduce_reviews_to_score
+
+    def forged_reducer(_reviews, *, expected_iteration):
+        assert expected_iteration == 1
+        result = _canonical_reduction_result()
+        result["items"] = {axis: 3.0 for axis in result["items"]}
+        result["composite"] = 3.0
+        result["min_item"] = 3.0
+        result["agreement_detail"] = {
+            axis: {"min": 3.0, "max": 3.0, "delta": 0.0}
+            for axis in result["items"]
+        }
+        return result
+
+    with pytest.raises(ReviewFailure, match="does not match review inputs"):
+        reduce_reviews_to_score(
+            _canonical_reviews(scores=(1.0, 5.0)),
+            expected_iteration=1,
+            reducer=forged_reducer,
+        )
+
+
+def test_review_reduction_returns_canonical_axis_order():
+    from mission_application.review import reduce_reviews_to_score
+    from scoring_provenance import reduce_review_aggregate
+
+    def reordered_reducer(reviews, *, expected_iteration):
+        result = reduce_review_aggregate(
+            reviews, expected_iteration=expected_iteration
+        )
+        result["items"] = dict(reversed(list(result["items"].items())))
+        result["agreement_detail"] = dict(
+            reversed(list(result["agreement_detail"].items()))
+        )
+        return result
+
+    reduced = reduce_reviews_to_score(
+        _canonical_reviews(), expected_iteration=1, reducer=reordered_reducer
+    )
+
+    assert list(reduced.items) == [
+        "mission_achievement", "accuracy", "completeness", "usability",
+    ]
+    assert list(reduced.agreement_detail) == list(reduced.items)
 
 
 @pytest.mark.parametrize(

@@ -19,6 +19,7 @@ from mission_kernel.model import (
     ReviewInputRef,
 )
 from mission_kernel.transitions import Decision, decide
+from scoring_provenance import reduce_review_aggregate as _canonical_review_reduction
 
 from .ports import MissionRepository
 
@@ -165,7 +166,15 @@ def reduce_reviews_to_score(
     The reducer remains injected so the CLI adapter cannot supply a pre-decided
     score.  Every returned decision value is revalidated as a closed result.
     """
-    derived = reducer(reviews, expected_iteration=expected_iteration)
+    try:
+        canonical = _canonical_review_reduction(
+            reviews, expected_iteration=expected_iteration
+        )
+        derived = reducer(reviews, expected_iteration=expected_iteration)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ReviewFailure(
+            "review reduction input is invalid", reason="review-reduction-invalid"
+        ) from exc
     required = {
         "items",
         "composite",
@@ -183,14 +192,14 @@ def reduce_reviews_to_score(
         isinstance(value, bool)
         or not isinstance(value, (int, float))
         or not math.isfinite(float(value))
-        or not 1.0 <= float(value) <= 5.0
+        or not 0.0 <= float(value) <= 5.0
         for value in items.values()
     ):
         raise ReviewFailure("review reduction items are invalid", reason="review-reduction-invalid")
-    normalized_items = {key: float(value) for key, value in items.items()}
+    normalized_items = {key: float(items[key]) for key in _SCORE_AXES}
     expected_composite = round(sum(normalized_items.values()) / len(normalized_items), 2)
     expected_min_item = round(min(normalized_items.values()), 2)
-    for field, expected in (
+    for field, expected_value in (
         ("composite", expected_composite),
         ("min_item", expected_min_item),
     ):
@@ -199,7 +208,7 @@ def reduce_reviews_to_score(
             isinstance(value, bool)
             or not isinstance(value, (int, float))
             or not math.isfinite(float(value))
-            or float(value) != expected
+            or float(value) != expected_value
         ):
             raise ReviewFailure("review reduction score is invalid", reason="review-reduction-invalid")
     open_high = derived["open_high"]
@@ -252,7 +261,7 @@ def reduce_reviews_to_score(
         maximum = float(axis_detail["max"])
         delta = float(axis_detail["delta"])
         if (
-            not 1.0 <= minimum <= maximum <= 5.0
+            not 0.0 <= minimum <= maximum <= 5.0
             or delta != round(maximum - minimum, 2)
             or not minimum <= normalized_items[axis] <= maximum
         ):
@@ -271,7 +280,7 @@ def reduce_reviews_to_score(
             raise ReviewFailure("review reduction agreement is invalid", reason="review-reduction-invalid")
     elif float(agreement) != float(expected_agreement):
         raise ReviewFailure("review reduction agreement is invalid", reason="review-reduction-invalid")
-    return ReducedReviewScore(
+    reduced = ReducedReviewScore(
         items=normalized_items,
         composite=expected_composite,
         min_item=expected_min_item,
@@ -279,6 +288,30 @@ def reduce_reviews_to_score(
         review_agreement=None if agreement is None else float(agreement),
         agreement_detail=normalized_detail,
     )
+    expected_reduced = ReducedReviewScore(
+        items={key: float(canonical["items"][key]) for key in _SCORE_AXES},
+        composite=float(canonical["composite"]),
+        min_item=float(canonical["min_item"]),
+        open_high=canonical["open_high"],
+        review_agreement=(
+            None
+            if canonical["review_agreement"] is None
+            else float(canonical["review_agreement"])
+        ),
+        agreement_detail={
+            axis: {
+                field: float(canonical["agreement_detail"][axis][field])
+                for field in ("min", "max", "delta")
+            }
+            for axis in _SCORE_AXES
+        },
+    )
+    if reduced != expected_reduced:
+        raise ReviewFailure(
+            "review reduction does not match review inputs",
+            reason="review-reduction-invalid",
+        )
+    return expected_reduced
 
 
 @dataclass(frozen=True)
