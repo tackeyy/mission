@@ -1,0 +1,335 @@
+"""Issue #510: A5 runtime guard observation application boundary."""
+
+from __future__ import annotations
+
+import ast
+import copy
+from contextlib import nullcontext
+from pathlib import Path
+
+import pytest
+
+
+AUTHORITY_FIELDS = {
+    "passes", "halt_reason", "phase", "score_history", "lease_id",
+    "fencing_epoch", "owner_session_id", "lease_expires_at",
+}
+
+
+class StopRepository:
+    def __init__(self, previous=None, *, failure=None):
+        self.previous = copy.deepcopy(previous)
+        self.saved = None
+        self.failure = failure
+
+    def transaction(self):
+        return nullcontext()
+
+    def load(self, session_id):
+        return copy.deepcopy(self.previous), ("identity", 1)
+
+    def save(self, session_id, document, expected_identity):
+        if self.failure:
+            raise ValueError(self.failure)
+        self.saved = copy.deepcopy(document)
+
+
+class MissionRepository:
+    def __init__(self, state, *, failure=None):
+        self.state = copy.deepcopy(state)
+        self.saved = None
+        self.failure = failure
+
+    def transaction(self):
+        return nullcontext()
+
+    def load(self):
+        return copy.deepcopy(self.state)
+
+    def execute(self, state, mutation, transition=None):
+        proposed = copy.deepcopy(state)
+        mutation(proposed)
+        return proposed
+
+    def save(self, state, **kwargs):
+        if self.failure:
+            raise ValueError(self.failure)
+        self.saved = copy.deepcopy(state)
+
+
+def _previous():
+    return {
+        "schema": "mission-stop-guard/1",
+        "session_id": "session-1",
+        "last_digest": "a" * 64,
+        "last_detail_epoch": 100,
+        "block_count": 1,
+        "reinjection_count": 1,
+        "detail_count": 1,
+        "heartbeat_count": 0,
+    }
+
+
+def _state():
+    return {
+        "phase": "executing",
+        "passes": False,
+        "halt_reason": "",
+        "score_history": [],
+        "lease_id": "lease-1",
+        "fencing_epoch": 3,
+        "owner_session_id": "owner-1",
+        "lease_expires_at": "2030-01-01T00:00:00Z",
+    }
+
+
+def test_a5_command_ownership_is_closed_and_unique():
+    from mission_application.runtime_guard import RUNTIME_GUARD_COMMAND_OWNERS
+
+    assert RUNTIME_GUARD_COMMAND_OWNERS == {
+        "permission-preflight": "A5.runtime-guard",
+        "stop-guard-observe": "A5.runtime-guard",
+    }
+
+
+def test_stop_observation_only_updates_allowlisted_sidecar_fields():
+    from mission_application.runtime_guard import StopObservationRequest, observe_stop_guard
+
+    previous = _previous()
+    repository = StopRepository(previous)
+    request = StopObservationRequest(
+        session_id="session-1", digest="b" * 64, now_epoch=101, ttl_seconds=600
+    )
+
+    result = observe_stop_guard(repository, request)
+
+    assert result.mode == "detail"
+    assert repository.saved == {
+        **previous,
+        "last_digest": "b" * 64,
+        "last_detail_epoch": 101,
+        "block_count": 2,
+        "reinjection_count": 2,
+        "detail_count": 2,
+    }
+    assert set(repository.saved).isdisjoint(AUTHORITY_FIELDS)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"now_epoch": True},
+        {"ttl_seconds": 0},
+        {"digest": "x" * 64},
+        {"session_id": ""},
+    ],
+)
+def test_malformed_stop_observation_rejects_before_repository_write(overrides):
+    from mission_application.runtime_guard import StopObservationRequest, observe_stop_guard
+
+    values = dict(
+        session_id="session-1", digest="b" * 64, now_epoch=101, ttl_seconds=600
+    )
+    values.update(overrides)
+    repository = StopRepository(_previous())
+
+    with pytest.raises(ValueError):
+        observe_stop_guard(repository, StopObservationRequest(**values))
+
+    assert repository.saved is None
+
+
+def test_malformed_existing_sidecar_rejects_without_rewrite():
+    from mission_application.runtime_guard import StopObservationRequest, observe_stop_guard
+
+    previous = {**_previous(), "passes": True}
+    repository = StopRepository(previous)
+    with pytest.raises(ValueError):
+        observe_stop_guard(
+            repository,
+            StopObservationRequest("session-1", "b" * 64, 101, 600),
+        )
+    assert repository.saved is None
+    assert repository.previous == previous
+
+
+@pytest.mark.parametrize(
+    "failure", ["stale-generation", "foreign-lease", "stale-fence", "expiry-race"]
+)
+def test_stop_repository_cas_failure_leaves_authoritative_input_unchanged(failure):
+    from mission_application.runtime_guard import StopObservationRequest, observe_stop_guard
+
+    previous = _previous()
+    repository = StopRepository(previous, failure=failure)
+    with pytest.raises(ValueError, match=failure):
+        observe_stop_guard(
+            repository,
+            StopObservationRequest("session-1", "b" * 64, 101, 600),
+        )
+    assert repository.previous == previous
+    assert repository.saved is None
+
+
+@pytest.mark.parametrize("outcome", ["denied", "unknown"])
+def test_permission_denied_or_unknown_cannot_be_weakened_to_allowed(outcome):
+    from mission_application.runtime_guard import (
+        PermissionObservationRequest,
+        PermissionProbe,
+        record_permission_observation,
+    )
+
+    state = _state()
+    repository = MissionRepository(state)
+    result = record_permission_observation(
+        repository,
+        PermissionObservationRequest(
+            probes=(PermissionProbe("state", outcome, "write-unavailable"),),
+            observed_at="2026-08-17T00:00:00Z",
+        ),
+    )
+
+    assert result.ok is False
+    assert result.halt_recorded is True
+    assert repository.saved["phase"] == "halted"
+    assert repository.saved["passes"] is False
+    assert repository.saved["halt_category"] == "blocked-external"
+    assert repository.saved["terminal_outcome"] == "blocked_external"
+    assert repository.saved["lease_id"] == state["lease_id"]
+    assert repository.saved["fencing_epoch"] == state["fencing_epoch"]
+
+
+def test_permission_allowed_observation_does_not_write_state():
+    from mission_application.runtime_guard import (
+        PermissionObservationRequest,
+        PermissionProbe,
+        record_permission_observation,
+    )
+
+    repository = MissionRepository(_state())
+    result = record_permission_observation(
+        repository,
+        PermissionObservationRequest(
+            probes=(
+                PermissionProbe("state", "allowed", None),
+                PermissionProbe("assumptions", "allowed", None),
+            ),
+            observed_at="2026-08-17T00:00:00Z",
+        ),
+    )
+    assert result.ok is True
+    assert result.halt_recorded is False
+    assert repository.saved is None
+
+
+@pytest.mark.parametrize(
+    "failure", ["stale-generation", "foreign-lease", "stale-fence", "expiry-race"]
+)
+def test_permission_repository_failure_does_not_mutate_loaded_state(failure):
+    from mission_application.runtime_guard import (
+        PermissionObservationRequest,
+        PermissionProbe,
+        record_permission_observation,
+    )
+
+    state = _state()
+    repository = MissionRepository(state, failure=failure)
+    with pytest.raises(ValueError, match=failure):
+        record_permission_observation(
+            repository,
+            PermissionObservationRequest(
+                probes=(PermissionProbe("state", "denied", "write-unavailable"),),
+                observed_at="2026-08-17T00:00:00Z",
+            ),
+        )
+    assert repository.state == state
+    assert repository.saved is None
+
+
+@pytest.mark.parametrize(
+    "probes",
+    [
+        (object(),),
+        (),
+    ],
+)
+def test_permission_malformed_probe_sequence_rejects_before_load(probes):
+    from mission_application.runtime_guard import (
+        PermissionObservationRequest,
+        record_permission_observation,
+    )
+
+    repository = MissionRepository(_state())
+    with pytest.raises(ValueError):
+        record_permission_observation(
+            repository,
+            PermissionObservationRequest(
+                probes=probes,
+                observed_at="2026-08-17T00:00:00Z",
+            ),
+        )
+    assert repository.saved is None
+
+
+def test_permission_probe_unknown_fields_cannot_enter_typed_request():
+    from mission_application.runtime_guard import PermissionProbe
+
+    with pytest.raises(TypeError):
+        PermissionProbe(
+            target="state",
+            outcome="allowed",
+            error=None,
+            passes=True,
+        )
+
+
+def test_a5_cli_handlers_reach_only_the_registered_application_routes():
+    source = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    functions = {
+        node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)
+    }
+
+    def reachable(start):
+        pending = [start]
+        seen = set()
+        called = set()
+        while pending:
+            name = pending.pop()
+            if name in seen or name not in functions:
+                continue
+            seen.add(name)
+            for call in (
+                item for item in ast.walk(functions[name]) if isinstance(item, ast.Call)
+            ):
+                if isinstance(call.func, ast.Name):
+                    called.add(call.func.id)
+                    pending.append(call.func.id)
+        return called
+
+    assert "observe_stop_guard" in reachable("cmd_stop_guard_observe")
+    assert "record_permission_observation" in reachable("cmd_permission_preflight")
+    forbidden = {"atomic_write_json", "_write_stop_guard_state", "_record_permission_preflight_halt"}
+    for handler in ("cmd_stop_guard_observe", "cmd_permission_preflight"):
+        direct = {
+            call.func.id
+            for call in ast.walk(functions[handler])
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+        }
+        assert direct.isdisjoint(forbidden)
+
+
+def test_runtime_guard_application_has_no_filesystem_or_process_io():
+    source = Path(__file__).resolve().parents[1] / "lib" / "mission_application" / "runtime_guard.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    roots = {
+        alias.name.partition(".")[0]
+        for node in tree.body
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    roots.update(
+        node.module.partition(".")[0]
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.module
+    )
+    assert roots.isdisjoint({"os", "pathlib", "subprocess", "sys"})
