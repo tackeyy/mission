@@ -7,6 +7,7 @@ import re
 
 
 _RECEIPT_FIELDS = frozenset({"kind", "identity"})
+_OPAQUE_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+:-]{0,255}\Z")
 
 
 class ProviderReceiptContractError(ValueError):
@@ -25,13 +26,7 @@ def validate_closed_provider_receipt(
         kind not in {"process", "provider"}
         or (required_kind is not None and kind != required_kind)
         or not isinstance(identity, str)
-        or not identity
-        or identity != identity.strip()
-        or len(identity) > 256
-        or any(ord(char) < 32 or ord(char) == 127 for char in identity)
-        or identity.startswith(("/", "\\", "~"))
-        or identity.lower().startswith("file:")
-        or re.match(r"^[A-Za-z]:[\\/]", identity) is not None
+        or _OPAQUE_IDENTITY.fullmatch(identity) is None
     ):
         raise ProviderReceiptContractError("receipt-invalid")
     return {"kind": kind, "identity": identity}

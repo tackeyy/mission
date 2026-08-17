@@ -263,7 +263,19 @@ def test_application_rejects_closed_receipt_bad_kind_without_mutating_unknown_re
 def test_application_rejects_pathlike_control_and_whitespace_receipt_identity():
     from mission_application.planning import PlanningFailure, record_dispatch_intent, record_provider_receipt
 
-    for identity in ("", "  ", "provider\nidentity", "/private/identity", "x" * 257):
+    for identity in (
+        "",
+        "  ",
+        "provider\nidentity",
+        "/private/identity",
+        "../private/socket",
+        "relative/socket",
+        "opaque:/Users/<user>/secret",
+        "receipt file:/Users/<user>/secret",
+        "opaque:C:\\Users\\<user>\\secret",
+        "opaque:~/private",
+        "x" * 257,
+    ):
         original = record_dispatch_intent([], _intent())
         with pytest.raises(PlanningFailure, match="receipt-invalid"):
             record_provider_receipt([original], _intent(), {"kind": "provider", "identity": identity})
