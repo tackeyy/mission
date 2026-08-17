@@ -151,6 +151,19 @@ from mission_application.review import (  # noqa: E402
     typed_manual_score_ref,
     typed_review_input_ref,
 )
+from mission_application.artifact import (  # noqa: E402
+    EvidenceDecision,
+    EvidenceEffect,
+    EvidenceFailure,
+    artifact_append as decide_artifact_append,
+    artifact_export as decide_artifact_export,
+    artifact_init as decide_artifact_init,
+    artifact_publish as decide_artifact_publish,
+    artifact_render as decide_artifact_render,
+    context_manifest as decide_context_manifest,
+    progress_clear as decide_progress_clear,
+    progress_update as decide_progress_update,
+)
 from mission_application.planning import (  # noqa: E402
     PlanningFailure,
     commit_plan_evidence,
@@ -6739,6 +6752,84 @@ def _artifact_profile_coverage(cwd: Path, data: dict) -> dict:
     }
 
 
+def _evidence_effect_path(cwd: Path, effect: EvidenceEffect) -> Path:
+    target = Path(effect.target)
+    return target if target.is_absolute() else _resolve_project_output_path(cwd, effect.target)
+
+
+def _legacy_evidence_repository(cwd: Path, sf: Path, *, stamp: bool) -> LegacyV4Repository:
+    """Bind A3 decisions to the current fenced v4 state transaction."""
+    lease: dict[str, object] = {}
+
+    def read_state() -> dict:
+        data = json.loads(sf.read_text(encoding="utf-8"))
+        lease["decision"] = _enforce_session_lease_for_write(sf, data)
+        return data
+
+    def write_state(data: dict) -> None:
+        proposed = stamp_metadata(data, cwd) if stamp else data
+        atomic_write_json(sf, proposed, lease_decision=lease["decision"])
+
+    return LegacyV4Repository(
+        lock=lambda: StateLock(lock_file(cwd)),
+        read_state=read_state,
+        write_state=write_state,
+        backup_state=lambda: backup_state(sf),
+    )
+
+
+@contextlib.contextmanager
+def _publish_evidence_effects(cwd: Path, effects: tuple[EvidenceEffect, ...]):
+    """Publish already-bound bytes as one rollback-capable v4 file set."""
+    with _PublishedFilesTransaction() as transaction:
+        published = []
+        for effect in effects:
+            item = transaction.add(
+                _publish_output_transaction(_evidence_effect_path(cwd, effect), effect.content)
+            )
+            _verify_published_file(item)
+            published.append(item)
+        yield tuple(published)
+
+
+def _bind_artifact_publication(
+    cwd: Path,
+    decision: EvidenceDecision,
+    published: object,
+) -> None:
+    items = tuple(published) if isinstance(published, (tuple, list)) else ()
+    artifact = decision.state.get("artifact")
+    if not isinstance(artifact, dict):
+        return
+    for effect, item in zip(decision.effects, items):
+        if effect.kind != "artifact":
+            continue
+        _refresh_artifact_identity(cwd, decision.state, artifact, item.path)
+        if "artifact" in decision.result:
+            decision.result["artifact"] = copy.deepcopy(artifact)
+        return
+
+
+def _run_evidence_decision(
+    cwd: Path,
+    sf: Path,
+    decide,
+    *,
+    stamp: bool,
+    bind_artifact: bool = False,
+) -> EvidenceDecision:
+    repository = _legacy_evidence_repository(cwd, sf, stamp=stamp)
+    return repository.execute_effects(
+        decide,
+        effect_transaction=lambda effects: _publish_evidence_effects(cwd, effects),
+        bind_published=(
+            (lambda decision, published: _bind_artifact_publication(cwd, decision, published))
+            if bind_artifact
+            else None
+        ),
+    )
+
+
 def cmd_artifact_init(args):
     cwd = Path.cwd()
     sf = resolve_state_file(cwd)
@@ -6749,32 +6840,30 @@ def cmd_artifact_init(args):
         print("ERROR: invalid --redaction-status", file=sys.stderr)
         sys.exit(2)
     now = iso_now()
-    with StateLock(lock_file(cwd)), _PublishedFilesTransaction() as published_files:
-        data = json.loads(sf.read_text())
-        lease_decision = _enforce_session_lease_for_write(sf, data)
-        sid = data.get("session_id") or resolve_session_id()
-        artifact_path = _artifact_path(cwd, sid)
-        artifact = {
-            "status": "draft",
-            "format": args.format,
-            "title": args.title or data.get("mission") or "Mission Artifact",
-            "path": _state_relative_path(cwd, str(artifact_path)),
-            "exports": [],
-            "publish_events": [],
-            "redaction_status": args.redaction_status,
-            "required_for_pass": bool(args.required_for_pass),
-            "blocks": [],
-            "created_at": now,
-            "updated_at": now,
-        }
-        data["artifact"] = artifact
-        data["artifact_applicability"] = "producing"
-        data["updated_at"] = now
-        path = _write_artifact(cwd, published_files, data, artifact)
-        _refresh_artifact_identity(cwd, data, artifact, path)
-        backup_state(sf)
-        atomic_write_json(sf, stamp_metadata(data, cwd), lease_decision=lease_decision)
-    print(json.dumps({"ok": True, "artifact": artifact}, indent=2 if args.json else None, ensure_ascii=False))
+    try:
+        decision = _run_evidence_decision(
+            cwd,
+            sf,
+            lambda data: decide_artifact_init(
+                data,
+                now=now,
+                artifact_path=_state_relative_path(
+                    cwd,
+                    str(_artifact_path(cwd, data.get("session_id") or resolve_session_id())),
+                ),
+                format=args.format,
+                title=args.title or data.get("mission") or "Mission Artifact",
+                redaction_status=args.redaction_status,
+                required_for_pass=bool(args.required_for_pass),
+                render=lambda state, artifact: _render_artifact_markdown(state, artifact).encode("utf-8"),
+            ),
+            stamp=True,
+            bind_artifact=True,
+        )
+    except EvidenceFailure as exc:
+        print(f"ERROR: {exc.code}", file=sys.stderr)
+        sys.exit(2)
+    print(json.dumps({"ok": True, **decision.result}, indent=2 if args.json else None, ensure_ascii=False))
 
 
 def cmd_artifact_append(args):
@@ -6785,30 +6874,24 @@ def cmd_artifact_append(args):
         sys.exit(1)
     section = _validate_artifact_section(args.section)
     content, source = _read_artifact_input(args)
-    now = iso_now()
-    with StateLock(lock_file(cwd)):
-        data = json.loads(sf.read_text())
-        artifact = _require_artifact(data)
-        block = {
-            "section": section,
-            "content": content.rstrip(),
-            "timestamp": now,
-        }
-        if source:
-            block["source"] = source
-        if args.label:
-            block["label"] = args.label
-        artifact.setdefault("blocks", []).append(block)
-        artifact["status"] = "draft"
-        artifact.pop("digest", None)
-        artifact.pop("size", None)
-        artifact["updated_at"] = now
-        invalidate_artifact_lint_observation(data)
-        data["artifact"] = artifact
-        data["updated_at"] = now
-        backup_state(sf)
-        atomic_write_json(sf, stamp_metadata(data, cwd))
-    print(json.dumps({"ok": True, "section": section, "block": block}, indent=2 if args.json else None, ensure_ascii=False))
+    try:
+        decision = _run_evidence_decision(
+            cwd,
+            sf,
+            lambda data: decide_artifact_append(
+                data,
+                now=iso_now(),
+                section=section,
+                content=content,
+                source=source,
+                label=args.label,
+            ),
+            stamp=True,
+        )
+    except EvidenceFailure as exc:
+        print(f"ERROR: {exc.code}", file=sys.stderr)
+        sys.exit(2)
+    print(json.dumps({"ok": True, **decision.result}, indent=2 if args.json else None, ensure_ascii=False))
 
 
 def cmd_artifact_render(args):
@@ -6817,27 +6900,23 @@ def cmd_artifact_render(args):
     if not sf.exists():
         print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
         sys.exit(1)
-    now = iso_now()
-    with StateLock(lock_file(cwd)), _PublishedFilesTransaction() as published_files:
-        data = json.loads(sf.read_text())
-        lease_decision = _enforce_session_lease_for_write(sf, data)
-        artifact = _require_artifact(data)
-        if args.redaction_status:
-            if args.redaction_status not in ARTIFACT_REDACTION_STATUSES:
-                print("ERROR: invalid --redaction-status", file=sys.stderr)
-                sys.exit(2)
-            artifact["redaction_status"] = args.redaction_status
-        artifact["status"] = "rendered"
-        artifact["last_rendered_at"] = now
-        artifact["updated_at"] = now
-        data["artifact"] = artifact
-        data["updated_at"] = now
-        path = _write_artifact(cwd, published_files, data, artifact)
-        _refresh_artifact_identity(cwd, data, artifact, path)
-        backup_state(sf)
-        atomic_write_json(sf, stamp_metadata(data, cwd), lease_decision=lease_decision)
-    result = {"ok": True, "path": _state_relative_path(cwd, str(path)), "artifact": artifact}
-    print(json.dumps(result, indent=2 if args.json else None, ensure_ascii=False))
+    try:
+        decision = _run_evidence_decision(
+            cwd,
+            sf,
+            lambda data: decide_artifact_render(
+                data,
+                now=iso_now(),
+                redaction_status=args.redaction_status,
+                render=lambda state, artifact: _render_artifact_markdown(state, artifact).encode("utf-8"),
+            ),
+            stamp=True,
+            bind_artifact=True,
+        )
+    except EvidenceFailure as exc:
+        print(f"ERROR: {exc.code}", file=sys.stderr)
+        sys.exit(2)
+    print(json.dumps({"ok": True, **decision.result}, indent=2 if args.json else None, ensure_ascii=False))
 
 
 def cmd_artifact_export(args):
@@ -6849,31 +6928,25 @@ def cmd_artifact_export(args):
     if args.redaction_status not in ARTIFACT_REDACTION_STATUSES - {"unchecked"}:
         print("ERROR: export requires --redaction-status checked|reviewed|not-needed", file=sys.stderr)
         sys.exit(2)
-    now = iso_now()
-    dst = _resolve_project_output_path(cwd, args.to)
-    with StateLock(lock_file(cwd)), _PublishedFilesTransaction() as published_files:
-        data = json.loads(sf.read_text())
-        lease_decision = _enforce_session_lease_for_write(sf, data)
-        artifact = _require_artifact(data)
-        artifact["redaction_status"] = args.redaction_status
-        artifact["status"] = "exported"
-        artifact["last_rendered_at"] = now
-        artifact["updated_at"] = now
-        src = _write_artifact(cwd, published_files, data, artifact)
-        _refresh_artifact_identity(cwd, data, artifact, src)
-        published_files.add(_publish_output_transaction(dst, src.read_bytes()))
-        export_entry = {
-            "path": _state_relative_path(cwd, str(dst)),
-            "timestamp": now,
-            "redaction_status": args.redaction_status,
-        }
-        artifact.setdefault("exports", []).append(export_entry)
-        data["artifact"] = artifact
-        data["updated_at"] = now
-        backup_state(sf)
-        atomic_write_json(sf, stamp_metadata(data, cwd), lease_decision=lease_decision)
-    result = {"ok": True, "export": export_entry, "artifact": artifact}
-    print(json.dumps(result, indent=2 if args.json else None, ensure_ascii=False))
+    destination = _state_relative_path(cwd, str(_resolve_project_output_path(cwd, args.to)))
+    try:
+        decision = _run_evidence_decision(
+            cwd,
+            sf,
+            lambda data: decide_artifact_export(
+                data,
+                now=iso_now(),
+                destination=destination,
+                redaction_status=args.redaction_status,
+                render=lambda state, artifact: _render_artifact_markdown(state, artifact).encode("utf-8"),
+            ),
+            stamp=True,
+            bind_artifact=True,
+        )
+    except EvidenceFailure as exc:
+        print(f"ERROR: {exc.code}", file=sys.stderr)
+        sys.exit(2)
+    print(json.dumps({"ok": True, **decision.result}, indent=2 if args.json else None, ensure_ascii=False))
 
 
 def cmd_artifact_publish(args):
@@ -6892,57 +6965,32 @@ def cmd_artifact_publish(args):
             file=sys.stderr,
         )
         sys.exit(2)
-    now = iso_now()
-    with StateLock(lock_file(cwd)), _PublishedFilesTransaction() as published_files:
-        data = json.loads(sf.read_text())
-        lease_decision = _enforce_session_lease_for_write(sf, data)
-        artifact = _require_artifact(data)
-        if artifact.get("redaction_status") == "unchecked":
-            print("ERROR: publish requires redaction_status other than unchecked", file=sys.stderr)
-            sys.exit(2)
-        event = {
-            "provider": args.provider,
-            "timestamp": now,
-            "approval_text": args.approval_text,
-            "status": "published" if args.destination else "publish-prepared",
-        }
-        if args.destination:
-            event["destination"] = args.destination
-        artifact.setdefault("publish_events", []).append(event)
-        artifact["status"] = event["status"]
-        artifact["updated_at"] = now
-        path = _write_artifact(cwd, published_files, data, artifact)
-        _refresh_artifact_identity(cwd, data, artifact, path)
-        event["artifact_path"] = _state_relative_path(cwd, str(path))
-        data["artifact"] = artifact
-        data["updated_at"] = now
-        backup_state(sf)
-        atomic_write_json(sf, stamp_metadata(data, cwd), lease_decision=lease_decision)
-    result = {"ok": True, "publish_event": event, "artifact": artifact}
-    print(json.dumps(result, indent=2 if args.json else None, ensure_ascii=False))
+    try:
+        decision = _run_evidence_decision(
+            cwd,
+            sf,
+            lambda data: decide_artifact_publish(
+                data,
+                now=iso_now(),
+                provider=args.provider,
+                destination=args.destination,
+                approval_text=args.approval_text,
+                render=lambda state, artifact: _render_artifact_markdown(state, artifact).encode("utf-8"),
+            ),
+            stamp=True,
+            bind_artifact=True,
+        )
+    except EvidenceFailure as exc:
+        print(f"ERROR: {exc.code}", file=sys.stderr)
+        sys.exit(2)
+    print(json.dumps({"ok": True, **decision.result}, indent=2 if args.json else None, ensure_ascii=False))
 
 
-def _archive_progress(cwd: Path, data: dict, progress: dict, iteration: int) -> str:
-    archive_dir = state_dir(cwd) / "archive"
-    archive_dir.mkdir(parents=True, exist_ok=True)
+def _progress_archive_path(cwd: Path, data: dict, iteration: int) -> str:
     gid = (data.get("mission_id") or "unknown")[:8]
-    dst = archive_dir / f"iter-{iteration}-{gid}-progress.md"
-    lines = [
-        f"<!-- mission-progress-meta: session_id={data.get('session_id')} mission_id={data.get('mission_id')} iteration={iteration} updated_at={progress.get('updated_at')} -->",
-        "",
-        "# Mission Progress Checkpoint",
-        "",
-        f"- kind: {progress.get('kind')}",
-        f"- total: {progress.get('total')}",
-        f"- completed: {progress.get('completed')}",
-        f"- remaining: {progress.get('remaining')}",
-        f"- batch_size: {progress.get('batch_size')}",
-        f"- last_unit: {progress.get('last_unit') or ''}",
-        f"- artifact_path: {progress.get('artifact_path') or ''}",
-        "",
-    ]
-    dst.write_text("\n".join(lines), encoding="utf-8")
-    return str(dst)
+    return _state_relative_path(
+        cwd, str(state_dir(cwd) / "archive" / f"iter-{iteration}-{gid}-progress.md")
+    )
 
 
 def cmd_progress_update(args):
@@ -6956,27 +7004,33 @@ def cmd_progress_update(args):
     if total < 0 or completed < 0 or completed > total:
         print("ERROR: --total/--completed must satisfy 0 <= completed <= total", file=sys.stderr)
         sys.exit(2)
-    now = iso_now()
-    progress = {
-        "kind": args.kind,
-        "total": total,
-        "completed": completed,
-        "remaining": total - completed,
-        "batch_size": args.batch_size,
-        "last_unit": args.last_unit,
-        "artifact_path": args.artifact,
-        "updated_at": now,
-    }
-    with StateLock(lock_file(cwd)):
-        data = json.loads(sf.read_text())
-        iteration = int(args.iteration if args.iteration is not None else data.get("iteration", 0))
-        archived_to = _archive_progress(cwd, data, progress, iteration)
-        progress["evidence_path"] = _state_relative_path(cwd, archived_to)
-        data["progress"] = progress
-        data["updated_at"] = now
-        backup_state(sf)
-        atomic_write_json(sf, stamp_metadata(data, cwd))
-    print(json.dumps({"ok": True, "progress": progress}, indent=2 if args.json else None, ensure_ascii=False))
+    try:
+        decision = _run_evidence_decision(
+            cwd,
+            sf,
+            lambda data: (
+                decide_progress_update(
+                    data,
+                    now=iso_now(),
+                    total=total,
+                    completed=completed,
+                    batch_size=args.batch_size,
+                    last_unit=args.last_unit,
+                    artifact_path=args.artifact,
+                    iteration=(args.iteration if args.iteration is not None else data.get("iteration", 0)),
+                    evidence_path=_progress_archive_path(
+                        cwd,
+                        data,
+                        args.iteration if args.iteration is not None else data.get("iteration", 0),
+                    ),
+                )
+            ),
+            stamp=True,
+        )
+    except EvidenceFailure as exc:
+        print(f"ERROR: {exc.code}", file=sys.stderr)
+        sys.exit(2)
+    print(json.dumps({"ok": True, **decision.result}, indent=2 if args.json else None, ensure_ascii=False))
 
 
 def cmd_progress_get(args):
@@ -7001,12 +7055,16 @@ def cmd_progress_clear(args):
     if not sf.exists():
         print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
         sys.exit(1)
-    with StateLock(lock_file(cwd)):
-        data = json.loads(sf.read_text())
-        data.pop("progress", None)
-        data["updated_at"] = iso_now()
-        backup_state(sf)
-        atomic_write_json(sf, stamp_metadata(data, cwd))
+    try:
+        _run_evidence_decision(
+            cwd,
+            sf,
+            lambda data: decide_progress_clear(data, now=iso_now()),
+            stamp=True,
+        )
+    except EvidenceFailure as exc:
+        print(f"ERROR: {exc.code}", file=sys.stderr)
+        sys.exit(2)
     print(json.dumps({"ok": True}, indent=2 if args.json else None, ensure_ascii=False))
 
 
@@ -13328,45 +13386,22 @@ def cmd_context_manifest(args):
     if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < 1:
         print("ERROR: --iteration は 1 以上で指定してください", file=sys.stderr)
         sys.exit(2)
-    history = data.get("score_history") or []
-    prior_findings = []
-    for entry in history:
-        if not isinstance(entry, dict):
-            continue
-        for f in entry.get("findings_summary", []):
-            if isinstance(f, dict):
-                prior_findings.append(f)
-    manifest = {
-        "schema": "mission-context-manifest/1",
-        "iteration": iteration,
-        "mission_goal": data.get("mission", ""),
-        "mission_id": data.get("mission_id", ""),
-        "assumptions_path": data.get("assumptions_path", ""),
-        "prior_findings": prior_findings,
-    }
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
-    digest = "sha256:" + hashlib.sha256(out.read_bytes()).hexdigest()
-    generated_at = iso_now()
-    with StateLock(lock_file(cwd)):
-        current = json.loads(sf.read_text())
-        context_manifests = current.get("context_manifests")
-        if not isinstance(context_manifests, dict):
-            context_manifests = {}
-        context_manifests[str(iteration)] = {
-            "path": str(out),
-            "digest": digest,
-            "generated_at": generated_at,
-        }
-        current["context_manifests"] = context_manifests
-        atomic_write_json(sf, current)
-    print(json.dumps({
-        "ok": True,
-        "path": str(out),
-        "digest": digest,
-        "findings_count": len(prior_findings),
-    }, ensure_ascii=False))
+    try:
+        decision = _run_evidence_decision(
+            cwd,
+            sf,
+            lambda current: decide_context_manifest(
+                current,
+                now=iso_now(),
+                iteration=iteration,
+                output_path=str(Path(args.out)),
+            ),
+            stamp=False,
+        )
+    except EvidenceFailure as exc:
+        print(f"ERROR: {exc.code}", file=sys.stderr)
+        sys.exit(2)
+    print(json.dumps({"ok": True, **decision.result}, ensure_ascii=False))
 
 
 def cmd_push_score(args):

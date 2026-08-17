@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import copy
-from typing import Callable, ContextManager
+from typing import Callable, ContextManager, Iterable
+
+from mission_application.artifact import EvidenceDecision, EvidenceEffect, validate_evidence_effect
 
 
 class AggregateIndexError(RuntimeError):
@@ -102,3 +104,41 @@ class LegacyV4Repository:
             callback()
         except Exception as exc:
             raise AggregateIndexError(str(exc)) from exc
+
+    @staticmethod
+    def validate_effects(effects: Iterable[EvidenceEffect]) -> tuple[EvidenceEffect, ...]:
+        """Close every inert effect before the first public byte is emitted."""
+        if not isinstance(effects, tuple):
+            raise ValueError("effect-binding-invalid")
+        validated = tuple(validate_evidence_effect(effect) for effect in effects)
+        targets = [effect.target for effect in validated]
+        if len(targets) != len(set(targets)):
+            raise ValueError("effect-target-duplicated")
+        return validated
+
+    def execute_effects(
+        self,
+        decide: Callable[[dict], EvidenceDecision],
+        *,
+        effect_transaction: Callable[[tuple[EvidenceEffect, ...]], ContextManager[object]],
+        bind_published: Callable[[EvidenceDecision, object], None] | None = None,
+        backup: bool = True,
+    ) -> EvidenceDecision:
+        """Run one lease-first v4 evidence transaction with all-or-none effects.
+
+        ``load`` is intentionally called before the effect transaction starts;
+        callers bind the current fenced-lease check to that load.  The effect
+        context therefore sees no request after a rejected lease or decision,
+        and rolls published files back if binding or state save fails.
+        """
+        with self.transaction():
+            current = self.load()
+            decision = decide(copy.deepcopy(current))
+            if not isinstance(decision, EvidenceDecision) or not isinstance(decision.state, dict):
+                raise ValueError("effect-decision-invalid")
+            effects = self.validate_effects(decision.effects)
+            with effect_transaction(effects) as published:
+                if bind_published is not None:
+                    bind_published(decision, published)
+                self.save(decision.state, backup=backup)
+            return decision
