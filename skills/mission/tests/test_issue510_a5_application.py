@@ -442,6 +442,54 @@ def test_permission_admission_cannot_overwrite_takeover_at_backup_boundary(
         assert backup_path.read_bytes() == before_backup
 
 
+def test_permission_admission_cannot_commit_a_stale_read_snapshot(
+    tmp_path, run_cli, monkeypatch
+):
+    owner = {"MISSION_SESSION_ID": "session-a", "MISSION_LEASE_ID": "lease-a"}
+    run_cli(
+        "init",
+        "A5 read admission race",
+        "--complexity",
+        "Standard",
+        cwd=tmp_path,
+        env_extra=owner,
+        check=True,
+    )
+    state_path = tmp_path / ".mission-state" / "sessions" / "session-a.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["assumptions_path"] = "outside.md"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    backup_path = state_path.with_suffix(".json.bak")
+    before_backup = backup_path.read_bytes() if backup_path.exists() else None
+    module = _load_state_module()
+    original_enforce = module._enforce_session_lease_for_write
+    concurrent_bytes = []
+
+    def replace_before_admission(path, proposed):
+        concurrent = json.loads(path.read_text(encoding="utf-8"))
+        concurrent["concurrent_marker"] = "must-survive"
+        payload = json.dumps(concurrent, sort_keys=True).encode("utf-8")
+        path.write_bytes(payload)
+        concurrent_bytes.append(payload)
+        return original_enforce(path, proposed)
+
+    monkeypatch.setenv("MISSION_SESSION_ID", "session-a")
+    monkeypatch.setenv("MISSION_LEASE_ID", "lease-a")
+    monkeypatch.setattr(
+        module, "_enforce_session_lease_for_write", replace_before_admission
+    )
+
+    result = module._permission_preflight(tmp_path)
+
+    assert result["ok"] is False
+    assert result["halt_recorded"] is False
+    assert state_path.read_bytes() == concurrent_bytes[0]
+    if before_backup is None:
+        assert not backup_path.exists()
+    else:
+        assert backup_path.read_bytes() == before_backup
+
+
 @pytest.mark.parametrize(
     "probes",
     [

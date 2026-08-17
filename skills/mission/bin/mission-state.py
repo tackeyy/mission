@@ -8513,14 +8513,19 @@ def _legacy_lifecycle_repository(
             raise
 
     def read_state() -> dict:
+        loaded_identity = _state_file_identity(sf) if pre_admit_lease else None
         if strict_read:
             data = _load_state_json(sf)
         else:
             data = json.loads(sf.read_text())
         if pre_admit_lease:
+            if _state_file_identity(sf) != loaded_identity:
+                raise ValueError("state changed while being read")
             with _lease_write_reason(lease_reason):
                 admitted_lease[0] = _enforce_session_lease_for_write(sf, data)
-            admitted_identity[0] = _state_file_identity(sf)
+            if _state_file_identity(sf) != loaded_identity:
+                raise ValueError("state changed during lease admission")
+            admitted_identity[0] = loaded_identity
         return data
 
     def write_state(data: dict, *, administrative: bool = False) -> None:
