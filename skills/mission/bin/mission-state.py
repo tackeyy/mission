@@ -151,6 +151,21 @@ from mission_application.review import (  # noqa: E402
     typed_manual_score_ref,
     typed_review_input_ref,
 )
+from mission_application.planning import (  # noqa: E402
+    PlanningFailure,
+    commit_plan_evidence,
+    decide_provider_terminal_result,
+    ExecutorHandoffFacts,
+    ExecutorHandoffRequest,
+    decide_executor_handoff,
+    record_dispatch_intent,
+    record_provider_receipt,
+    reconcile_dispatch_unknown,
+    typed_plan_binding,
+    validate_closed_provider_receipt,
+    validate_provider_plan_import,
+    verify_handoff_binding,
+)
 from mission_persistence.legacy_v4 import (  # noqa: E402
     LegacyV4InitializerRepository,
     LegacyV4Repository,
@@ -198,7 +213,6 @@ from plan_contract import (  # noqa: E402
     _strict_load as _strict_plan_load,
     _validate_document,
     canonical_plan_bytes,
-    parse_provider_result,
 )
 from planning_lifecycle import (  # noqa: E402
     PlanningLifecycleError,
@@ -4943,7 +4957,7 @@ def _is_provider_backed_application(data: dict, skill: str, args, provider: dict
     )
 
 
-ACTIVE_PROVIDER_INVOCATION_STATUSES = frozenset({"reserved", "running"})
+ACTIVE_PROVIDER_INVOCATION_STATUSES = frozenset({"reserved", "dispatch-unknown", "running"})
 
 
 def _active_provider_invocations(data: dict, *, exclude: str | None = None) -> list[dict]:
@@ -5468,6 +5482,11 @@ def cmd_invoke_command_provider(args):
         entry["application_context_digest"] = provider.pop("_application_context_digest")
         entry["reservation_owner_session_id"] = str(dispatch_state.get("owner_session_id") or resolve_session_id())
         entry["fencing_epoch"] = int(dispatch_state.get("fencing_epoch") or lease_decision.fencing_epoch)
+        # The preflight ID is single-use and already bound to the immutable
+        # outbound packet, so it is the caller-stable operation identity for
+        # the non-rollbackable provider dispatch saga.
+        entry["operation_id"] = args.preflight_id
+        entry["outbound_packet_digest"] = pointer["outbound_packet_digest"]
         dispatch_state, entry, _ = _prepare_specialist_invocation_state(
             dispatch_state,
             entry,
@@ -5517,9 +5536,24 @@ def cmd_invoke_command_provider(args):
             atomic_write_json(sf, stamp_metadata(dispatch_state, cwd))
             print("ERROR: provider-ineligible: application-context-drift", file=sys.stderr)
             raise SystemExit(2)
-        entry = {**current_entry, "status": "running", "lifecycle_state": "running",
-                 "running_at": running_at, "started_at": running_at,
-                 "transitioned_at": running_at, "heartbeat_at": running_at}
+        try:
+            intent_decision = record_dispatch_intent(
+                [],
+                {
+                    "invocation_id": entry["invocation_id"],
+                    "operation_id": entry["operation_id"],
+                    "outbound_packet_digest": entry["outbound_packet_digest"],
+                    "iteration": entry["iteration"],
+                    "fencing_epoch": entry["fencing_epoch"],
+                },
+            )
+        except PlanningFailure as exc:
+            _provider_gate(exc.code)
+        # This is the durable pre-spawn commit.  A process crash after it but
+        # before a receipt remains deliberately unknowable and must never be
+        # retried automatically by reconciliation.
+        entry = {**current_entry, **intent_decision,
+                 "dispatch_intent_at": running_at, "transitioned_at": running_at}
         validate_invocation_transition(current_entry, entry)
         _replace_provider_invocation(dispatch_state, entry)
         dispatch_state["updated_at"] = running_at
@@ -5548,6 +5582,7 @@ def cmd_invoke_command_provider(args):
         failed = {**entry, "status": "failed-before-start", "lifecycle_state": "terminal",
                   "transitioned_at": completed_at, "completed_at": completed_at,
                   "reason_code": "command-unavailable",
+                  "proven_no_dispatch": True,
                   "reason": f"command provider is not available: {command}"}
         with StateLock(lock_file(cwd)):
             dispatch_state = json.loads(sf.read_text())
@@ -5560,6 +5595,41 @@ def cmd_invoke_command_provider(args):
         return
     spawn_failed_reason = None
     if strict_result is not None:
+        # A strict backend is still external work.  Its return value becomes
+        # usable only after it supplies a closed, identity-bearing receipt and
+        # that receipt is committed against the pre-spawn intent.
+        try:
+            strict_receipt = strict_result["receipt"]
+        except (KeyError, TypeError):
+            _provider_gate("strict-receipt-invalid")
+        with StateLock(lock_file(cwd)):
+            dispatch_state = json.loads(sf.read_text())
+            current_entry = dict(invocation_by_id(dispatch_state, entry["invocation_id"]))
+            try:
+                receipt_state = record_provider_receipt(
+                    [current_entry],
+                    {
+                        "invocation_id": entry["invocation_id"],
+                        "operation_id": entry["operation_id"],
+                        "outbound_packet_digest": entry["outbound_packet_digest"],
+                        "iteration": entry["iteration"],
+                        "fencing_epoch": entry["fencing_epoch"],
+                    },
+                    strict_receipt,
+                )
+            except PlanningFailure as exc:
+                _provider_gate(exc.code)
+            current_entry.update({
+                "provider_receipt": receipt_state["provider_receipt"],
+                "status": "running", "lifecycle_state": "running",
+                "running_at": iso_now(), "started_at": running_at,
+                "heartbeat_at": iso_now(), "transitioned_at": iso_now(),
+            })
+            validate_invocation_transition(entry, current_entry)
+            _replace_provider_invocation(dispatch_state, current_entry)
+            backup_state(sf)
+            atomic_write_json(sf, stamp_metadata(dispatch_state, cwd))
+            entry = current_entry
         exit_code = strict_result["returncode"]
         stdout = _redact_provider_output(str(strict_result.get("stdout") or ""))
         stderr = _redact_provider_output(str(strict_result.get("stderr") or ""))
@@ -5570,16 +5640,41 @@ def cmd_invoke_command_provider(args):
             spawn_failed_reason = "spawn-failed"; exit_code = None; stdout = ""; stderr = _redact_provider_output(str(exc))
             completed_at = iso_now()
             entry.update({"status": "failed-before-start", "lifecycle_state": "terminal", "transitioned_at": completed_at,
-                          "completed_at": completed_at, "reason_code": "spawn-failed"})
+                          "completed_at": completed_at, "reason_code": "spawn-failed",
+                          "proven_no_dispatch": True})
         else:
             entry["child_pid"] = process.pid
             entry["process_identity_digest"] = provider_value_digest({"invocation_id": entry["invocation_id"], "pid": process.pid, "running_at": running_at})
             with StateLock(lock_file(cwd)):
                 dispatch_state = json.loads(sf.read_text()); current_entry = dict(invocation_by_id(dispatch_state, entry["invocation_id"]))
-                if current_entry.get("status") != "running":
+                if current_entry.get("status") != "dispatch-unknown":
                     process.terminate(); process.wait(timeout=5)
-                    print("ERROR: provider-ineligible: invocation-not-running", file=sys.stderr); raise SystemExit(2)
-                current_entry.update({"child_pid": entry["child_pid"], "process_identity_digest": entry["process_identity_digest"], "heartbeat_at": iso_now()})
+                    print("ERROR: provider-ineligible: invocation-not-dispatch-unknown", file=sys.stderr); raise SystemExit(2)
+                try:
+                    receipt_state = record_provider_receipt(
+                        [current_entry],
+                        {
+                            "invocation_id": entry["invocation_id"],
+                            "operation_id": entry["operation_id"],
+                            "outbound_packet_digest": entry["outbound_packet_digest"],
+                            "iteration": entry["iteration"],
+                            "fencing_epoch": entry["fencing_epoch"],
+                        },
+                        {"kind": "process", "identity": entry["process_identity_digest"]},
+                    )
+                except PlanningFailure as exc:
+                    process.terminate(); process.wait(timeout=5)
+                    _provider_gate(exc.code)
+                current_entry.update({
+                    "child_pid": entry["child_pid"],
+                    "process_identity_digest": entry["process_identity_digest"],
+                    "provider_receipt": receipt_state["provider_receipt"],
+                    "status": receipt_state["status"],
+                    "lifecycle_state": receipt_state["lifecycle_state"],
+                    "running_at": iso_now(), "started_at": running_at,
+                    "heartbeat_at": iso_now(), "transitioned_at": iso_now(),
+                })
+                validate_invocation_transition(entry, current_entry)
                 _replace_provider_invocation(dispatch_state, current_entry); backup_state(sf); atomic_write_json(sf, stamp_metadata(dispatch_state, cwd)); entry = current_entry
             try:
                 raw_stdout, raw_stderr = process.communicate(input=packet, timeout=timeout)
@@ -5592,7 +5687,14 @@ def cmd_invoke_command_provider(args):
     if spawn_failed_reason:
         status, reason = "failed-before-start", stderr
     else:
-        status, reason = _classify_command_provider_result(provider, exit_code, stdout, stderr)
+        evidence_status, reason = _classify_command_provider_result(provider, exit_code, stdout, stderr)
+        try:
+            terminal = decide_provider_terminal_result(
+                exit_code=exit_code, evidence_status=evidence_status, reason=reason
+            )
+        except PlanningFailure as exc:
+            _provider_gate(exc.code)
+        status, reason = terminal.status, terminal.reason
     outcome = _command_outcome(
         args, "specialists-invoke-command",
         "ok" if status == "completed" else "external",
@@ -5693,7 +5795,7 @@ def _process_identity_is_live(entry: dict) -> bool:
 
 
 def cmd_reconcile_provider_invocation(args):
-    """Fenced terminalization for an orphaned running provider invocation."""
+    """Fenced recovery; receipt-less dispatches may only be abandoned."""
     cwd = Path.cwd()
     sf = resolve_state_file(cwd)
     if not sf.exists():
@@ -5707,8 +5809,8 @@ def cmd_reconcile_provider_invocation(args):
             existing = dict(invocation_by_id(data, args.invocation_id))
         except SpecialistLifecycleError as exc:
             _provider_gate(str(exc))
-        if existing.get("status") != "running":
-            _provider_gate("invocation-not-running")
+        if existing.get("status") not in {"dispatch-unknown", "running"}:
+            _provider_gate("invocation-not-reconcilable")
         reservation_epoch = existing.get("fencing_epoch")
         current_epoch = int(data.get("fencing_epoch") or lease_decision.fencing_epoch)
         if args.expected_fencing_epoch != reservation_epoch or current_epoch < reservation_epoch:
@@ -5719,6 +5821,25 @@ def cmd_reconcile_provider_invocation(args):
             _provider_gate("reservation-owner-mismatch")
         if current_epoch > reservation_epoch and args.status != "abandoned-unknown":
             _provider_gate("recovered-result-unknown")
+        if existing.get("status") == "dispatch-unknown" and args.status != "abandoned-unknown":
+            _provider_gate("receiptless-reconciliation-must-abandon")
+        if existing.get("status") == "dispatch-unknown":
+            try:
+                reconciled = reconcile_dispatch_unknown(
+                    [existing],
+                    {
+                        "invocation_id": existing.get("invocation_id"),
+                        "operation_id": existing.get("operation_id"),
+                        "outbound_packet_digest": existing.get("outbound_packet_digest"),
+                        "iteration": existing.get("iteration"),
+                        "fencing_epoch": existing.get("fencing_epoch"),
+                    },
+                    observed_receipt=None,
+                )
+            except PlanningFailure as exc:
+                _provider_gate(exc.code)
+            if reconciled["status"] != args.status:
+                _provider_gate("receiptless-reconciliation-must-abandon")
         if _process_identity_is_live(existing):
             _provider_gate("process-still-running")
         if args.status in {"completed", "failed"} and not existing.get("process_identity_digest"):
@@ -9852,6 +9973,12 @@ def _run_strict_provider_backend(descriptor: dict, packet: bytes) -> dict:
     )
     if not isinstance(result, dict) or type(result.get("returncode")) is not int:
         raise ProviderPreflightError("isolator-result-invalid")
+    try:
+        result["receipt"] = validate_closed_provider_receipt(
+            result.get("receipt"), required_kind="provider"
+        )
+    except PlanningFailure:
+        raise ProviderPreflightError("strict-receipt-invalid")
     return result
 
 
@@ -12129,9 +12256,12 @@ def cmd_plan_import(args):
                     "selection_source": current.get("eligibility_selection_source") or "automatic",
                     "iteration": data.get("iteration")}
         try:
-            parsed = parse_provider_result(raw, expected_binding=expected, result_contract=contract, workspace=cwd)
-        except PlanContractError as exc:
-            _provider_gate(str(exc))
+            parsed = validate_provider_plan_import(
+                raw, expected_binding=expected, result_contract=contract,
+                workspace=cwd,
+            )
+        except PlanningFailure as exc:
+            _provider_gate(exc.code)
         digest = parsed["raw_result_digest"]
         metadata = {
             "authority": {"owner": "mission", "may_write_state": False, "may_decide_review": False, "may_decide_score": False, "may_decide_completion": False},
@@ -12284,10 +12414,15 @@ def cmd_planning_adopt_core(args):
             "validated_at": iso_now(),
         }
         try:
+            typed_plan_binding(plan)
             canonical_plan_identity(cwd, plan, reader=_read_strict_review_file)
-        except (OSError, PlanningLifecycleError) as exc:
+        except (OSError, PlanningFailure, PlanningLifecycleError) as exc:
             _provider_gate(f"core-plan-candidate-invalid:{exc}")
-        data["canonical_plan"] = plan
+        # Publication is adapter-owned; A4 owns the authority-bearing plan
+        # admission and the canonical state mutation after that publication.
+        commit_plan_evidence(
+            state=data, plan=plan, lease_verified=True, publish=lambda _binding: None
+        )
         records[f"core:{source_id}"] = {
             key: plan[key]
             for key in ("generation", "source", "source_id", "selection_source", "iteration")
@@ -12305,6 +12440,7 @@ def cmd_planning_promote_provider_plan(args):
     cwd = Path.cwd(); sf = resolve_state_file(cwd)
     with StateLock(lock_file(cwd)):
         data = json.loads(sf.read_text(encoding="utf-8"))
+        lease_decision = _enforce_session_lease_for_write(sf, data)
         if data.get("planning_policy_version") != 1 or data.get("phase") != "planning":
             _provider_gate("planning-policy-not-active")
         if data.get("planning_strategy") != "provider-primary":
@@ -12329,14 +12465,17 @@ def cmd_planning_promote_provider_plan(args):
                 "selection_source": invocation.get("selection_source") or "automatic",
                 "iteration": data.get("iteration"), "generation": record.get("generation"), "validated_at": iso_now()}
         try:
+            typed_plan_binding(plan)
             _raw, _steps = canonical_plan_identity(cwd, plan, reader=_read_strict_review_file)
-        except (OSError, PlanningLifecycleError) as exc:
+        except (OSError, PlanningFailure, PlanningLifecycleError) as exc:
             _provider_gate(f"provider-plan-candidate-invalid:{exc}")
-        data["canonical_plan"] = plan
+        commit_plan_evidence(
+            state=data, plan=plan, lease_verified=True, publish=lambda _binding: None
+        )
         data.setdefault("planning_source_records", {})[f"provider:{args.invocation_id}"] = {
             key: plan[key] for key in ("generation", "source", "source_id", "selection_source", "iteration")
         }
-        data["updated_at"] = iso_now(); backup_state(sf); atomic_write_json(sf, stamp_metadata(data, cwd))
+        data["updated_at"] = iso_now(); backup_state(sf); atomic_write_json(sf, stamp_metadata(data, cwd), lease_decision=lease_decision)
     print(json.dumps({"ok": True, "canonical_plan": plan}, ensure_ascii=False))
 
 
@@ -12375,26 +12514,40 @@ def _cmd_executor_handoff(args, operation: str):
                 raise PlanningLifecycleError("executor-handoff-missing")
             expected = _trusted_canonical_plan_binding(data, plan)
             _raw, steps = canonical_plan_identity(cwd, plan, expected=expected, reader=_read_strict_review_file)
-            if handoff.get("plan_digest") != plan.get("digest") or handoff.get("plan_generation") != plan.get("generation") or handoff.get("step_ids") != steps:
-                raise PlanningLifecycleError("executor-handoff-plan-drift")
-            if operation == "begin":
-                if handoff.get("status") != "prepared": raise PlanningLifecycleError("executor-handoff-not-prepared")
-                handoff["status"] = "consuming"; handoff["begun_at"] = iso_now()
-            elif operation == "verify":
-                validate_handoff_step(data, args.step_id)
-            elif operation == "record":
-                validate_handoff_step(data, args.step_id)
-                done = {d.get("step_id") for d in data.get("decisions") or [] if isinstance(d, dict) and d.get("handoff_id") == handoff.get("handoff_id")}
-                if args.step_id in done: raise PlanningLifecycleError("executor-step-already-recorded")
-                document = json.loads(_raw); step = next(s for s in document["steps"] if s["id"] == args.step_id)
-                if any(dep not in done for dep in step.get("depends_on", [])): raise PlanningLifecycleError("executor-step-dependency-incomplete")
-                data.setdefault("decisions", []).append({"handoff_id": handoff["handoff_id"], "plan_digest": plan["digest"], "plan_generation": plan["generation"], "plan_source": plan["source"], "source_id": plan["source_id"], "selection_source": plan["selection_source"], "iteration": plan["iteration"], "step_id": args.step_id, "result": args.result})
-            else:
-                if handoff.get("status") != "consuming": raise PlanningLifecycleError("executor-handoff-not-consuming")
-                done = {d.get("step_id") for d in data.get("decisions") or [] if isinstance(d, dict) and d.get("handoff_id") == handoff.get("handoff_id")}
-                if set(steps) != done: raise PlanningLifecycleError("executor-handoff-steps-incomplete")
-                handoff["status"] = "consumed"; handoff["consumed_at"] = iso_now()
-        except (OSError, ValueError, PlanningLifecycleError) as exc:
+            verify_handoff_binding(
+                handoff,
+                plan_path=plan.get("path"), plan_digest=plan.get("digest"),
+                plan_generation=plan.get("generation"), plan_source=plan.get("source"),
+                source_id=plan.get("source_id"), selection_source=plan.get("selection_source"),
+                # v4 handoffs bind the active session iteration (the value
+                # that is recorded with each executor decision), not a
+                # separately persisted legacy plan iteration.
+                iteration=data.get("iteration"), step_ids=steps,
+            )
+            document = json.loads(_raw)
+            dependencies = {
+                item["id"]: tuple(item.get("depends_on", []))
+                for item in document["steps"] if isinstance(item, dict) and isinstance(item.get("id"), str)
+            }
+            result = decide_executor_handoff(
+                handoff, data.get("decisions") or [],
+                ExecutorHandoffRequest(
+                    operation=operation, at=iso_now(),
+                    step_id=getattr(args, "step_id", None), result=getattr(args, "result", None),
+                ),
+                ExecutorHandoffFacts(
+                    plan_path=plan.get("path"), plan_digest=plan.get("digest"),
+                    plan_generation=plan.get("generation"), plan_source=plan.get("source"),
+                    source_id=plan.get("source_id"), selection_source=plan.get("selection_source"),
+                    iteration=data.get("iteration"), step_ids=tuple(steps), dependencies=dependencies,
+                    decision_iteration=plan.get("iteration"),
+                ),
+            )
+            handoff = result.handoff
+            data["executor_handoff"] = handoff
+            if result.appended_decision is not None:
+                data.setdefault("decisions", []).append(result.appended_decision)
+        except (OSError, PlanningFailure, ValueError, PlanningLifecycleError) as exc:
             # Identity mutation is terminal; a duplicate begin or invalid step
             # request is merely rejected and leaves a resumable handoff intact.
             if isinstance(handoff, dict) and operation in {"begin", "verify"} and str(exc).startswith("canonical-"):
