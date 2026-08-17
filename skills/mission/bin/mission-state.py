@@ -179,6 +179,13 @@ from mission_application.planning import (  # noqa: E402
     validate_provider_plan_import,
     verify_handoff_binding,
 )
+from mission_application.runtime_guard import (  # noqa: E402
+    PermissionObservationRequest,
+    PermissionProbe,
+    StopObservationRequest,
+    observe_stop_guard,
+    record_permission_observation,
+)
 from mission_persistence.legacy_v4 import (  # noqa: E402
     LegacyV4InitializerRepository,
     LegacyV4Repository,
@@ -1261,7 +1268,19 @@ class StateLock:
                 self.fd.close()
 
 
-def _atomic_write(path: Path, writer) -> None:
+def _state_file_identity(path: Path) -> tuple[int, int, int, int, int, int]:
+    metadata = os.stat(path, follow_symlinks=False)
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _atomic_write(path: Path, writer, *, expected_identity=None) -> None:
     """同一 directory の排他的な一時ファイルを fsync 後に publish する."""
     fd, tmp_name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
@@ -1273,6 +1292,11 @@ def _atomic_write(path: Path, writer) -> None:
             writer(f)
             f.flush()
             os.fsync(f.fileno())
+        if (
+            expected_identity is not None
+            and _state_file_identity(path) != expected_identity
+        ):
+            raise ValueError("state changed before publish")
         os.replace(tmp, path)
     finally:
         if fd >= 0:
@@ -1374,6 +1398,7 @@ def atomic_write_json(
     *,
     administrative: bool = False,
     lease_decision: LeaseDecision | None | object = _LEASE_DECISION_UNSET,
+    expected_identity=None,
 ) -> None:
     """Phase B-2: fsync + os.replace で完全な前 or 後状態を保証.
 
@@ -1390,7 +1415,11 @@ def atomic_write_json(
         lease_decision = _enforce_session_lease_for_write(path, data)
     if not administrative and _is_session_state_shape(data):
         data["last_activity_at"] = iso_now()
-    _atomic_write(path, lambda f: json.dump(data, f, indent=2, ensure_ascii=False))
+    _atomic_write(
+        path,
+        lambda f: json.dump(data, f, indent=2, ensure_ascii=False),
+        expected_identity=expected_identity,
+    )
     if isinstance(lease_decision, LeaseDecision):
         _PROCESS_LEASE_IDS[str(path.resolve())] = lease_decision.lease_id
     _emit_lease_carrier(data, lease_decision)
@@ -1473,26 +1502,18 @@ def _validated_assumptions_probe_path(cwd: Path, raw_path: str) -> Path:
 
 
 def _record_permission_preflight_halt(cwd: Path, sf: Path, reason: str) -> bool:
-    """Best-effort persisted halt; structured stdout remains the final fallback."""
-    try:
-        with StateLock(lock_file(cwd)):
-            data = json.loads(sf.read_text(encoding="utf-8"))
-            now = iso_now()
-            data["halt_reason"] = reason
-            data["halt_category"] = "blocked-external"
-            data["loop_active"] = False
-            _transition_phase(data, "halted", now)
-            _write_terminal_outcome(data)
-            data["updated_at"] = now
-            backup_state(sf)
-            atomic_write_json(sf, data)
-            try:
-                _remove_from_aggregate(cwd, resolve_session_id())
-            except OSError:
-                pass
-        return True
-    except OSError:
+    """Route init's best-effort fallback through the same closed A5 writer."""
+    expected = (
+        "Phase 0 permission preflight failed before task execution: "
+        "state write unavailable"
+    )
+    if reason != expected:
         return False
+    return _record_permission_probe_observation(
+        cwd,
+        sf,
+        (PermissionProbe("state", "denied", "write-unavailable"),),
+    )
 
 
 def _exit_init_evidence_write_failure(target: str) -> None:
@@ -8362,41 +8383,54 @@ def _write_stop_guard_state(
                 os.unlink(temporary, dir_fd=store.sessions_fd)
 
 
+class _LegacyStopObservationRepository:
+    """Bind the A5 port to the descriptor-held legacy sidecar CAS."""
+
+    def __init__(self, cwd: Path):
+        self.cwd = cwd
+        self.store = None
+
+    @contextlib.contextmanager
+    def transaction(self):
+        with _ParallelGroupStore(self.cwd, create=False) as store:
+            self.store = store
+            try:
+                yield
+            finally:
+                self.store = None
+
+    def load(self, session_id: str):
+        if self.store is None:
+            raise ValueError("stop guard transaction is inactive")
+        return _read_stop_guard_state(self.store, session_id)
+
+    def save(self, session_id: str, document: dict, expected_identity) -> None:
+        if self.store is None:
+            raise ValueError("stop guard transaction is inactive")
+        _write_stop_guard_state(self.store, session_id, document, expected_identity)
+
+
 def cmd_stop_guard_observe(args):
-    """Record a block observation without mutating the fenced mission session."""
+    """Adapt one closed block observation to the A5 use case."""
     try:
-        session_id = opaque_token(args.session_id)
-        if session_id is None:
-            raise ValueError("stop guard session id is invalid")
-        if not re.fullmatch(r"[0-9a-f]{64}", args.digest):
-            raise ValueError("stop guard digest is invalid")
-        if args.now_epoch < 0 or args.ttl_seconds < 1:
-            raise ValueError("stop guard time input is invalid")
-        with _ParallelGroupStore(Path.cwd(), create=False) as store:
-            previous, identity = _read_stop_guard_state(store, session_id)
-            changed = previous is None or previous["last_digest"] != args.digest
-            ttl_elapsed = (
-                previous is not None
-                and args.now_epoch - previous["last_detail_epoch"] >= args.ttl_seconds
-            )
-            mode = "detail" if changed or ttl_elapsed else "heartbeat"
-            document = {
-                "schema": STOP_GUARD_SCHEMA,
-                "session_id": session_id,
-                "last_digest": args.digest,
-                "last_detail_epoch": (
-                    args.now_epoch if mode == "detail" else previous["last_detail_epoch"]
-                ),
-                "block_count": (previous["block_count"] if previous else 0) + 1,
-                "reinjection_count": (previous["reinjection_count"] if previous else 0) + 1,
-                "detail_count": (previous["detail_count"] if previous else 0) + int(mode == "detail"),
-                "heartbeat_count": (previous["heartbeat_count"] if previous else 0) + int(mode == "heartbeat"),
-            }
-            _write_stop_guard_state(store, session_id, document, identity)
+        result = observe_stop_guard(
+            _LegacyStopObservationRepository(Path.cwd()),
+            StopObservationRequest(
+                session_id=args.session_id,
+                digest=args.digest,
+                now_epoch=args.now_epoch,
+                ttl_seconds=args.ttl_seconds,
+            ),
+        )
     except (OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         raise SystemExit(2)
-    print(json.dumps({"ok": True, "mode": mode, **document}, ensure_ascii=False))
+    print(
+        json.dumps(
+            {"ok": True, "mode": result.mode, **result.document},
+            ensure_ascii=False,
+        )
+    )
 
 
 def cmd_get(args):
@@ -8442,11 +8476,57 @@ def _legacy_lifecycle_repository(
     strict_read: bool = False,
     lease_reason: str | None = None,
     allow_partial_lease_terminal_write: bool = False,
+    pre_admit_lease: bool = False,
 ) -> LegacyV4Repository:
+    admitted_lease = [_LEASE_DECISION_UNSET]
+    admitted_identity = [None]
+    backup_snapshot = [None]
+    backup_was_present = [False]
+    backup_published = [False]
+
+    def rollback_guarded_backup() -> None:
+        if not backup_published[0]:
+            return
+        bak = sf.with_suffix(sf.suffix + ".bak")
+        if backup_was_present[0]:
+            atomic_write_bytes(bak, backup_snapshot[0])
+        else:
+            bak.unlink(missing_ok=True)
+        backup_published[0] = False
+
+    def guarded_backup() -> None:
+        if not pre_admit_lease:
+            backup_state(sf)
+            return
+        if admitted_identity[0] is None or _state_file_identity(sf) != admitted_identity[0]:
+            raise ValueError("state changed before backup")
+        bak = sf.with_suffix(sf.suffix + ".bak")
+        backup_was_present[0] = bak.exists()
+        backup_snapshot[0] = bak.read_bytes() if backup_was_present[0] else None
+        try:
+            backup_state(sf)
+            backup_published[0] = True
+            if _state_file_identity(sf) != admitted_identity[0]:
+                raise ValueError("state changed during backup")
+        except BaseException:
+            rollback_guarded_backup()
+            raise
+
     def read_state() -> dict:
+        loaded_identity = _state_file_identity(sf) if pre_admit_lease else None
         if strict_read:
-            return _load_state_json(sf)
-        return json.loads(sf.read_text())
+            data = _load_state_json(sf)
+        else:
+            data = json.loads(sf.read_text())
+        if pre_admit_lease:
+            if _state_file_identity(sf) != loaded_identity:
+                raise ValueError("state changed while being read")
+            with _lease_write_reason(lease_reason):
+                admitted_lease[0] = _enforce_session_lease_for_write(sf, data)
+            if _state_file_identity(sf) != loaded_identity:
+                raise ValueError("state changed during lease admission")
+            admitted_identity[0] = loaded_identity
+        return data
 
     def write_state(data: dict, *, administrative: bool = False) -> None:
         proposed = stamp_metadata(data, cwd) if stamp else data
@@ -8460,7 +8540,22 @@ def _legacy_lifecycle_repository(
                 if allow_partial_lease_terminal_write and partial_lease
                 else _LEASE_DECISION_UNSET
             )
-            if lease_decision is None:
+            if pre_admit_lease:
+                if admitted_lease[0] is _LEASE_DECISION_UNSET:
+                    raise ValueError("lease admission is missing")
+                try:
+                    atomic_write_json(
+                        sf,
+                        proposed,
+                        administrative=administrative,
+                        lease_decision=admitted_lease[0],
+                        expected_identity=admitted_identity[0],
+                    )
+                    backup_published[0] = False
+                except BaseException:
+                    rollback_guarded_backup()
+                    raise
+            elif lease_decision is None:
                 atomic_write_json(
                     sf,
                     proposed,
@@ -8476,7 +8571,7 @@ def _legacy_lifecycle_repository(
         lock=lambda: StateLock(lock_file(cwd)),
         read_state=read_state,
         write_state=write_state,
-        backup_state=lambda: backup_state(sf),
+        backup_state=guarded_backup,
         add_to_aggregate=lambda: _add_to_aggregate_strict(cwd, sf.stem),
         remove_from_aggregate=lambda: _remove_from_aggregate_strict(cwd, sf.stem),
     )
@@ -9474,9 +9569,17 @@ def _permission_preflight(cwd: Path) -> dict:
             "Phase 0 permission preflight failed before task execution: "
             "assumptions path missing"
         )
+        observed = _record_permission_probe_observation(
+            cwd,
+            sf,
+            (
+                PermissionProbe("state", "allowed", None),
+                PermissionProbe("assumptions", "unknown", "assumptions-path-missing"),
+            ),
+        )
         return {
             "ok": False,
-            "halt_recorded": _record_permission_preflight_halt(cwd, sf, reason),
+            "halt_recorded": observed,
             "halt_category": "blocked-external",
             "terminal_outcome": "blocked_external",
             "halt_reason": reason,
@@ -9493,9 +9596,17 @@ def _permission_preflight(cwd: Path) -> dict:
             "Phase 0 permission preflight failed before task execution: "
             "assumptions evidence path is invalid"
         )
+        observed = _record_permission_probe_observation(
+            cwd,
+            sf,
+            (
+                PermissionProbe("state", "allowed", None),
+                PermissionProbe("assumptions", "unknown", "invalid-evidence-path"),
+            ),
+        )
         return {
             "ok": False,
-            "halt_recorded": _record_permission_preflight_halt(cwd, sf, reason),
+            "halt_recorded": observed,
             "halt_category": "blocked-external",
             "terminal_outcome": "blocked_external",
             "halt_reason": reason,
@@ -9524,7 +9635,13 @@ def _permission_preflight(cwd: Path) -> dict:
                 "Phase 0 permission preflight failed before task execution: "
                 f"{target} write unavailable"
             )
-            halt_recorded = _record_permission_preflight_halt(cwd, sf, reason)
+            observations = tuple(
+                PermissionProbe(item["target"], "allowed", None)
+                for item in probes[:-1]
+            ) + (PermissionProbe(target, "denied", "write-unavailable"),)
+            halt_recorded = _record_permission_probe_observation(
+                cwd, sf, observations
+            )
             return {
                 "ok": False,
                 "halt_recorded": halt_recorded,
@@ -9535,11 +9652,46 @@ def _permission_preflight(cwd: Path) -> dict:
             }
         probes.append({"target": target, "ok": True})
 
+    _record_permission_probe_observation(
+        cwd,
+        sf,
+        tuple(
+            PermissionProbe(item["target"], "allowed", None)
+            for item in probes
+        ),
+    )
     return {
         "ok": True,
         "halt_recorded": False,
         "probes": probes,
     }
+
+
+def _record_permission_probe_observation(
+    cwd: Path,
+    sf: Path,
+    probes: tuple[PermissionProbe, ...],
+) -> bool:
+    """Persist only the fixed A5 consequence of a closed permission result."""
+    try:
+        result = record_permission_observation(
+            _legacy_lifecycle_repository(
+                cwd,
+                sf,
+                stamp=False,
+                strict_read=True,
+                lease_reason="permission-preflight",
+                pre_admit_lease=True,
+            ),
+            PermissionObservationRequest(probes=probes, observed_at=iso_now()),
+            transition_phase=_transition_phase,
+        )
+        if result.halt_recorded:
+            with contextlib.suppress(OSError):
+                _remove_from_aggregate(cwd, sf.stem)
+        return result.halt_recorded
+    except (OSError, ValueError):
+        return False
 
 
 def cmd_permission_preflight(args):
