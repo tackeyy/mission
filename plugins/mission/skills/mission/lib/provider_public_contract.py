@@ -8,6 +8,11 @@ import re
 from typing import Any
 
 from mission_common import opaque_token
+from provider_receipt_contract import (
+    ProviderReceiptContractError,
+    validate_closed_provider_receipt,
+    validate_fencing_epoch,
+)
 from urllib.parse import urlsplit
 
 
@@ -621,15 +626,21 @@ def _validate_invocation(record: object, base: str) -> None:
     ):
         _reject(f"{base}/operation_id")
     if "provider_receipt" in record:
-        receipt = record["provider_receipt"]
-        if not isinstance(receipt, dict) or set(receipt) != {"kind", "identity"}:
+        try:
+            validate_closed_provider_receipt(record["provider_receipt"])
+        except ProviderReceiptContractError:
             _reject(f"{base}/provider_receipt")
     if "proven_no_dispatch" in record and type(record["proven_no_dispatch"]) is not bool:
         _reject(f"{base}/proven_no_dispatch")
-        if receipt.get("kind") not in {"process", "provider"} or not _safe_text(receipt.get("identity"), maximum=256):
-            _reject(f"{base}/provider_receipt")
     for field in ("fencing_epoch", "child_pid"):
-        if field in record and (type(record[field]) is not int or record[field] < 1):
+        if field not in record:
+            continue
+        if field == "fencing_epoch":
+            try:
+                validate_fencing_epoch(record[field])
+            except ProviderReceiptContractError:
+                _reject(f"{base}/{field}")
+        elif type(record[field]) is not int or record[field] < 1:
             _reject(f"{base}/{field}")
     if "provider_kind" in record and record["provider_kind"] not in {"skill", "command"}:
         _reject(f"{base}/provider_kind")

@@ -14,6 +14,11 @@ import re
 from typing import Callable, Mapping, Sequence
 
 from plan_contract import parse_provider_result
+from provider_receipt_contract import (
+    ProviderReceiptContractError,
+    validate_closed_provider_receipt as _validate_closed_provider_receipt,
+    validate_fencing_epoch as _validate_fencing_epoch,
+)
 
 
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -51,7 +56,6 @@ _HANDOFF_FIELDS = frozenset(
 _INTENT_FIELDS = frozenset(
     {"invocation_id", "operation_id", "outbound_packet_digest", "iteration", "fencing_epoch"}
 )
-_RECEIPT_FIELDS = frozenset({"kind", "identity"})
 _HANDOFF_DECISION_FIELDS = frozenset(
     {
         "handoff_id",
@@ -91,6 +95,27 @@ def _relative_path(value: object) -> bool:
         and not value.startswith("/")
         and ".." not in value.split("/")
     )
+
+
+def validate_closed_provider_receipt(value: object, *, required_kind: str | None = None) -> dict:
+    """Close the receipt carried between an execution adapter and public state.
+
+    A receipt identity is opaque evidence, never a local locator.  Keeping the
+    rule here makes the application decision, strict adapter, and persistence
+    boundary agree on precisely the same v4 wire object.
+    """
+    try:
+        return _validate_closed_provider_receipt(value, required_kind=required_kind)
+    except ProviderReceiptContractError as exc:
+        raise PlanningFailure("receipt-invalid") from exc
+
+
+def validate_fencing_epoch(value: object) -> int:
+    """Admit only a positive, non-boolean lease fence."""
+    try:
+        return _validate_fencing_epoch(value)
+    except ProviderReceiptContractError as exc:
+        raise PlanningFailure("dispatch-intent-invalid") from exc
 
 
 def _closed_handoff_wire(value: object) -> bool:
@@ -280,7 +305,9 @@ def verify_handoff_binding(
         or _IDENTIFIER.fullmatch(value["handoff_id"]) is None
         or value.get("schema") != "mission-executor-handoff/1"
         or value.get("status") not in {"prepared", "consuming", "consumed", "rejected"}
-        or any(type(number) is not int for number in (plan_generation, iteration))
+        or any(type(number) is not int for number in (
+            plan_generation, iteration, value.get("plan_generation"), value.get("iteration")
+        ))
     ):
         raise PlanningFailure("handoff-binding-invalid")
     if actual != expected or steps != step_ids:
@@ -310,6 +337,8 @@ def decide_executor_handoff(
     )
     if not isinstance(facts.dependencies, Mapping) or set(facts.dependencies) != set(steps):
         raise PlanningFailure("executor-handoff-dependencies-invalid")
+    if type(facts.decision_iteration) is not int or facts.decision_iteration < 0:
+        raise PlanningFailure("executor-handoff-decisions-invalid")
     if any(
         not isinstance(deps, tuple) or any(dep not in steps for dep in deps)
         for deps in facts.dependencies.values()
@@ -322,6 +351,8 @@ def decide_executor_handoff(
     ]
     if any(
         set(item) != _HANDOFF_DECISION_FIELDS
+        or type(item.get("plan_generation")) is not int
+        or type(item.get("iteration")) is not int
         or item.get("plan_digest") != facts.plan_digest
         or item.get("plan_generation") != facts.plan_generation
         or item.get("plan_source") != facts.plan_source
@@ -440,15 +471,18 @@ def _typed_intent(value: object) -> DispatchIntent:
         or _IDENTIFIER.fullmatch(operation_id) is None
         or not _is_digest(value.get("outbound_packet_digest"))
         or not _is_int(value.get("iteration"), minimum=0)
-        or not _is_int(value.get("fencing_epoch"), minimum=0)
     ):
         raise PlanningFailure("dispatch-intent-invalid")
+    try:
+        fencing_epoch = validate_fencing_epoch(value.get("fencing_epoch"))
+    except PlanningFailure as exc:
+        raise PlanningFailure("dispatch-intent-invalid") from exc
     return DispatchIntent(
         invocation_id,
         operation_id,
         value["outbound_packet_digest"],
         value["iteration"],
-        value["fencing_epoch"],
+        fencing_epoch,
     )
 
 
@@ -493,15 +527,7 @@ def record_dispatch_intent(invocations: Sequence[Mapping[str, object]], value: o
 
 
 def _receipt(value: object) -> dict:
-    if not isinstance(value, Mapping) or set(value) != _RECEIPT_FIELDS:
-        raise PlanningFailure("receipt-invalid")
-    if (
-        value.get("kind") not in {"process", "provider"}
-        or not isinstance(value.get("identity"), str)
-        or not value["identity"].strip()
-    ):
-        raise PlanningFailure("receipt-invalid")
-    return dict(value)
+    return validate_closed_provider_receipt(value)
 
 
 def record_provider_receipt(
@@ -519,7 +545,7 @@ def record_provider_receipt(
     if existing.get("status") != "dispatch-unknown":
         raise PlanningFailure("receipt-replay")
     result = copy.deepcopy(existing)
-    result["receipt"] = _receipt(receipt)
+    result["provider_receipt"] = _receipt(receipt)
     result["status"] = "running"
     result["lifecycle_state"] = "running"
     return result
@@ -555,3 +581,40 @@ def classify_provider_result(*, exit_code: object, result_validated: bool) -> st
     if exit_code == 0 and not result_validated:
         return "unvalidated-evidence"
     return "completed" if exit_code == 0 else "failed"
+
+
+@dataclass(frozen=True)
+class ProviderTerminalDecision:
+    """The only terminal status class an execution adapter may persist."""
+
+    status: str
+    reason: str | None
+
+
+def decide_provider_terminal_result(
+    *, exit_code: object, evidence_status: object, reason: object = None
+) -> ProviderTerminalDecision:
+    """Turn adapter-observed evidence into a closed v4 terminal status.
+
+    The adapter may parse its own textual evidence, but cannot promote it to a
+    phase/review/score/pass decision or invent a terminal state.
+    """
+    if type(exit_code) is not int or exit_code < 0:
+        raise PlanningFailure("provider-result-invalid")
+    if evidence_status not in {"completed", "unvalidated-evidence", "prepared", "awaiting-input", "failed"}:
+        raise PlanningFailure("provider-result-invalid")
+    if reason is not None and not isinstance(reason, str):
+        raise PlanningFailure("provider-result-invalid")
+    if evidence_status == "awaiting-input":
+        return ProviderTerminalDecision("awaiting-input", reason)
+    if exit_code != 0:
+        if evidence_status != "failed":
+            raise PlanningFailure("provider-result-invalid")
+        return ProviderTerminalDecision("failed", reason or f"command provider exited with status {exit_code}")
+    if evidence_status == "failed":
+        raise PlanningFailure("provider-result-invalid")
+    if evidence_status == "unvalidated-evidence":
+        return ProviderTerminalDecision("unvalidated-evidence", reason)
+    if evidence_status == "prepared":
+        return ProviderTerminalDecision(evidence_status, reason)
+    return ProviderTerminalDecision("completed", reason)

@@ -154,6 +154,7 @@ from mission_application.review import (  # noqa: E402
 from mission_application.planning import (  # noqa: E402
     PlanningFailure,
     commit_plan_evidence,
+    decide_provider_terminal_result,
     ExecutorHandoffFacts,
     ExecutorHandoffRequest,
     decide_executor_handoff,
@@ -161,6 +162,7 @@ from mission_application.planning import (  # noqa: E402
     record_provider_receipt,
     reconcile_dispatch_unknown,
     typed_plan_binding,
+    validate_closed_provider_receipt,
     validate_provider_plan_import,
     verify_handoff_binding,
 )
@@ -5535,7 +5537,7 @@ def cmd_invoke_command_provider(args):
             print("ERROR: provider-ineligible: application-context-drift", file=sys.stderr)
             raise SystemExit(2)
         try:
-            record_dispatch_intent(
+            intent_decision = record_dispatch_intent(
                 [],
                 {
                     "invocation_id": entry["invocation_id"],
@@ -5550,7 +5552,7 @@ def cmd_invoke_command_provider(args):
         # This is the durable pre-spawn commit.  A process crash after it but
         # before a receipt remains deliberately unknowable and must never be
         # retried automatically by reconciliation.
-        entry = {**current_entry, "status": "dispatch-unknown", "lifecycle_state": "dispatch-unknown",
+        entry = {**current_entry, **intent_decision,
                  "dispatch_intent_at": running_at, "transitioned_at": running_at}
         validate_invocation_transition(current_entry, entry)
         _replace_provider_invocation(dispatch_state, entry)
@@ -5618,7 +5620,7 @@ def cmd_invoke_command_provider(args):
             except PlanningFailure as exc:
                 _provider_gate(exc.code)
             current_entry.update({
-                "provider_receipt": receipt_state["receipt"],
+                "provider_receipt": receipt_state["provider_receipt"],
                 "status": "running", "lifecycle_state": "running",
                 "running_at": iso_now(), "started_at": running_at,
                 "heartbeat_at": iso_now(), "transitioned_at": iso_now(),
@@ -5666,7 +5668,7 @@ def cmd_invoke_command_provider(args):
                 current_entry.update({
                     "child_pid": entry["child_pid"],
                     "process_identity_digest": entry["process_identity_digest"],
-                    "provider_receipt": receipt_state["receipt"],
+                    "provider_receipt": receipt_state["provider_receipt"],
                     "status": receipt_state["status"],
                     "lifecycle_state": receipt_state["lifecycle_state"],
                     "running_at": iso_now(), "started_at": running_at,
@@ -5685,7 +5687,14 @@ def cmd_invoke_command_provider(args):
     if spawn_failed_reason:
         status, reason = "failed-before-start", stderr
     else:
-        status, reason = _classify_command_provider_result(provider, exit_code, stdout, stderr)
+        evidence_status, reason = _classify_command_provider_result(provider, exit_code, stdout, stderr)
+        try:
+            terminal = decide_provider_terminal_result(
+                exit_code=exit_code, evidence_status=evidence_status, reason=reason
+            )
+        except PlanningFailure as exc:
+            _provider_gate(exc.code)
+        status, reason = terminal.status, terminal.reason
     outcome = _command_outcome(
         args, "specialists-invoke-command",
         "ok" if status == "completed" else "external",
@@ -9964,14 +9973,11 @@ def _run_strict_provider_backend(descriptor: dict, packet: bytes) -> dict:
     )
     if not isinstance(result, dict) or type(result.get("returncode")) is not int:
         raise ProviderPreflightError("isolator-result-invalid")
-    receipt = result.get("receipt")
-    if (
-        not isinstance(receipt, dict)
-        or set(receipt) != {"kind", "identity"}
-        or receipt.get("kind") != "provider"
-        or not isinstance(receipt.get("identity"), str)
-        or not receipt["identity"].strip()
-    ):
+    try:
+        result["receipt"] = validate_closed_provider_receipt(
+            result.get("receipt"), required_kind="provider"
+        )
+    except PlanningFailure:
         raise ProviderPreflightError("strict-receipt-invalid")
     return result
 

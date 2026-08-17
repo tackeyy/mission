@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import pytest
+from pathlib import Path
+import importlib.util
 
 
 def _digest(char: str = "a") -> str:
@@ -247,6 +249,184 @@ def test_exit_zero_with_invalid_result_remains_unvalidated_evidence():
     from mission_application.planning import classify_provider_result
 
     assert classify_provider_result(exit_code=0, result_validated=False) == "unvalidated-evidence"
+
+
+def test_application_rejects_closed_receipt_bad_kind_without_mutating_unknown_record():
+    from mission_application.planning import PlanningFailure, record_dispatch_intent, record_provider_receipt
+
+    original = record_dispatch_intent([], _intent())
+    with pytest.raises(PlanningFailure, match="receipt-invalid"):
+        record_provider_receipt([original], _intent(), {"kind": "other", "identity": "provider:1"})
+    assert original == record_dispatch_intent([], _intent())
+
+
+def test_application_rejects_pathlike_control_and_whitespace_receipt_identity():
+    from mission_application.planning import PlanningFailure, record_dispatch_intent, record_provider_receipt
+
+    for identity in ("", "  ", "provider\nidentity", "/private/identity", "x" * 257):
+        original = record_dispatch_intent([], _intent())
+        with pytest.raises(PlanningFailure, match="receipt-invalid"):
+            record_provider_receipt([original], _intent(), {"kind": "provider", "identity": identity})
+        assert original["status"] == "dispatch-unknown"
+
+
+def test_application_rejects_zero_and_bool_fencing_epoch_without_mutation():
+    from mission_application.planning import PlanningFailure, record_dispatch_intent
+
+    for fencing_epoch in (0, False, True):
+        with pytest.raises(PlanningFailure, match="dispatch-intent-invalid"):
+            record_dispatch_intent([], _intent(fencing_epoch=fencing_epoch))
+
+
+def test_public_consumer_accepts_application_receipt_and_rejects_noncanonical_identity():
+    from mission_application.planning import record_dispatch_intent, record_provider_receipt
+    from provider_public_contract import SpecialistPublicContractError, validate_specialist_public_state
+
+    unknown = record_dispatch_intent([], _intent())
+    accepted = record_provider_receipt(
+        [unknown], _intent(), {"kind": "provider", "identity": "receipt:opaque-1"}
+    )
+    public_record = {
+        **accepted,
+        "phase": "planning", "role": "planner", "skill": "portable-provider",
+        "mode": "command-provider", "timestamp": "2026-08-17T00:00:00Z",
+    }
+    validate_specialist_public_state({"specialist_invocations": [public_record]})
+    public_record["provider_receipt"] = {"kind": "provider", "identity": "/private/identity"}
+    with pytest.raises(SpecialistPublicContractError, match="unsafe-legacy-specialist-record"):
+        validate_specialist_public_state({"specialist_invocations": [public_record]})
+
+
+def test_public_consumer_rejects_zero_and_bool_fencing_epoch():
+    from provider_public_contract import SpecialistPublicContractError, validate_specialist_public_state
+
+    base = {
+        "invocation_id": "inv_" + "1" * 32, "operation_id": "op-2",
+        "outbound_packet_digest": _digest("c"), "iteration": 2, "phase": "planning",
+        "role": "planner", "skill": "portable-provider", "mode": "command-provider",
+        "status": "dispatch-unknown", "lifecycle_state": "dispatch-unknown",
+        "timestamp": "2026-08-17T00:00:00Z",
+    }
+    for fencing_epoch in (0, False, True):
+        with pytest.raises(SpecialistPublicContractError, match="unsafe-legacy-specialist-record"):
+            validate_specialist_public_state({"specialist_invocations": [{**base, "fencing_epoch": fencing_epoch}]})
+
+
+def test_handoff_rejects_bool_equal_plan_generation_before_drift_comparison_without_mutation():
+    from mission_application.planning import PlanningFailure, verify_handoff_binding
+
+    original = _handoff(plan_generation=True)
+    with pytest.raises(PlanningFailure, match="handoff-binding-invalid"):
+        verify_handoff_binding(
+            original, plan_path=".mission-state/plans/plan.json", plan_digest=_digest("a"),
+            plan_generation=1, plan_source="provider", source_id="inv_" + "1" * 32,
+            selection_source="automatic", iteration=2, step_ids=["step-2", "step-4"],
+        )
+    assert original["plan_generation"] is True
+
+
+def test_handoff_rejects_bool_equal_decision_bindings_before_completion():
+    from mission_application.planning import (
+        ExecutorHandoffFacts,
+        PlanningFailure,
+        decide_executor_handoff,
+    )
+
+    original = _handoff(
+        status="consuming",
+        begun_at="2026-08-17T00:00:00Z",
+        plan_generation=1,
+        step_ids=["step-2"],
+    )
+    facts = ExecutorHandoffFacts(
+        plan_path=".mission-state/plans/plan.json",
+        plan_digest=_digest("a"),
+        plan_generation=1,
+        plan_source="provider",
+        source_id="inv_" + "1" * 32,
+        selection_source="automatic",
+        iteration=2,
+        step_ids=("step-2",),
+        dependencies={"step-2": ()},
+        decision_iteration=1,
+    )
+    forged = [{
+        "handoff_id": original["handoff_id"],
+        "plan_digest": _digest("a"),
+        "plan_generation": True,
+        "plan_source": "provider",
+        "source_id": "inv_" + "1" * 32,
+        "selection_source": "automatic",
+        "iteration": True,
+        "step_id": "step-2",
+        "result": "ok",
+    }]
+
+    with pytest.raises(PlanningFailure, match="executor-handoff-decisions-invalid"):
+        decide_executor_handoff(original, forged, _handoff_request("complete"), facts)
+    assert original["status"] == "consuming"
+
+
+def test_a4_terminal_decision_preserves_exit_zero_invalid_evidence():
+    from mission_application.planning import PlanningFailure, decide_provider_terminal_result
+
+    decision = decide_provider_terminal_result(
+        exit_code=0, evidence_status="unvalidated-evidence", reason="invalid structured result"
+    )
+    assert decision.status == "unvalidated-evidence"
+    assert decision.reason == "invalid structured result"
+
+    awaiting = decide_provider_terminal_result(
+        exit_code=7, evidence_status="awaiting-input", reason="approval required"
+    )
+    assert awaiting.status == "awaiting-input"
+
+    with pytest.raises(PlanningFailure, match="provider-result-invalid"):
+        decide_provider_terminal_result(exit_code=0, evidence_status="failed")
+    with pytest.raises(PlanningFailure, match="provider-result-invalid"):
+        decide_provider_terminal_result(exit_code=7, evidence_status="completed")
+
+
+def test_strict_backend_uses_the_same_closed_receipt_validator(monkeypatch):
+    module_path = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
+    spec = importlib.util.spec_from_file_location("mission_state_issue509_strict_receipt", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    class Entry:
+        name = "strict-backend"
+        value = "portable.backend:run"
+
+        @staticmethod
+        def load():
+            return object()
+
+    class Entries:
+        @staticmethod
+        def select(**_kwargs):
+            return [Entry()]
+
+    monkeypatch.setattr(module.importlib.metadata, "entry_points", lambda: Entries())
+    monkeypatch.setattr(
+        module, "dispatch_prepared_packet",
+        lambda *_args, **_kwargs: {"returncode": 0, "receipt": {"kind": "provider", "identity": "bad\nreceipt"}},
+    )
+    descriptor = {
+        "entry_point": "strict-backend", "entry_point_value": "portable.backend:run",
+        "attestation": {"policy_digest": _digest("d")},
+    }
+    with pytest.raises(module.ProviderPreflightError, match="strict-receipt-invalid"):
+        module._run_strict_provider_backend(descriptor, b"{}")
+
+
+def test_cli_call_path_uses_a4_dispatch_and_terminal_decisions():
+    source = (Path(__file__).resolve().parents[1] / "bin" / "mission-state.py").read_text(encoding="utf-8")
+
+    assert "intent_decision = record_dispatch_intent(" in source
+    assert "entry = {**current_entry, **intent_decision," in source
+    assert "terminal = decide_provider_terminal_result(" in source
+    assert "status, reason = terminal.status, terminal.reason" in source
 
 
 def test_provider_plan_import_does_not_expose_an_injectable_parser():
