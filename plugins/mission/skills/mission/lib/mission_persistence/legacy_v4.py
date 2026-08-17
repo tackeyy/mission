@@ -18,11 +18,17 @@ class LegacyV4InitializerRepository:
     case and CLI remain independent of its filesystem details.
     """
 
-    def __init__(self, initialize_state: Callable[[object], None]) -> None:
+    def __init__(
+        self,
+        *,
+        initialize_state: Callable[..., None],
+        write_state: Callable[[object, object], None],
+    ) -> None:
         self._initialize_state = initialize_state
+        self._write_state = write_state
 
     def initialize(self, arguments: object) -> None:
-        self._initialize_state(arguments)
+        self._initialize_state(arguments, write_state=self._write_state)
 
 
 class LegacyV4Repository:

@@ -732,8 +732,9 @@ def refresh_pid(
     with repository.transaction():
         state = repository.load()
         current = state.get("activity_current")
-        if not (isinstance(current, dict) and current.get("started_at") == request.at):
-            close_activity_for_resume(state, request.at)
+        should_close_activity = not (
+            isinstance(current, dict) and current.get("started_at") == request.at
+        )
         old_pid = state.get("pid")
         if (
             not services.lease_fields_present(state)
@@ -797,6 +798,8 @@ def refresh_pid(
         def mutate(proposed: dict) -> None:
             proposed.clear()
             proposed.update(copy.deepcopy(state))
+            if should_close_activity:
+                close_activity_for_resume(proposed, request.at)
             proposed["pid"] = request.new_pid
             if reactivated:
                 if restored_phase:
@@ -919,6 +922,81 @@ def set_fields(
                     state=state,
                 )
 
+        routed_verdict_holder = [None]
+        decision_holder = [None]
+
+        def route_simple_to_goal(proposed: dict) -> None:
+            # This deliberately narrow conjunction is the existing #330 route
+            # authority.  Do not simplify it: each exclusion prevents routing a
+            # state with real mission, risk, review, or user-selection authority.
+            if not (
+                "complexity" in explicit_keys
+                and proposed.get("complexity") == "Simple"
+                and proposed.get("loop_active") is True
+                and not proposed.get("halt_reason")
+                and (proposed.get("phase") or "planning") == "planning"
+                and (proposed.get("iteration") or 1) <= 1
+                and not proposed.get("review_tier_signals")
+                and proposed.get("review_tier_source") != "user"
+                and not proposed.get("issue_ref")
+                and not proposed.get("force_mission")
+                and (proposed.get("session_role") or "implementer")
+                == "implementer"
+                and not (proposed.get("score_history") or [])
+            ):
+                return
+            decision = decide(
+                _typed_state(proposed),
+                MarkHalt(
+                    HaltCategory.ROUTED_GOAL,
+                    "routed-to-goal (#330: Simple + リスクシグナルなし)",
+                ),
+            )
+            if not decision.accepted:
+                assert decision.rejection is not None
+                raise LifecycleFailure(
+                    "goal route rejected: " + decision.rejection.code,
+                    reason=decision.rejection.code,
+                    state=proposed,
+                )
+            dispatch = services.goal_dispatch_fields(proposed)
+            proposed["goal_dispatch_effective"] = dispatch[
+                "goal_dispatch_effective"
+            ]
+            proposed["goal_dispatch_host"] = dispatch["goal_dispatch_host"]
+            if dispatch.get("goal_dispatch_fallback_reason"):
+                proposed["goal_dispatch_fallback_reason"] = dispatch[
+                    "goal_dispatch_fallback_reason"
+                ]
+            else:
+                proposed.pop("goal_dispatch_fallback_reason", None)
+            proposed["loop_active"] = False
+            proposed["halt_reason"] = (
+                "routed-to-goal (#330: Simple + リスクシグナルなし)"
+            )
+            proposed["halt_category"] = "routed-goal"
+            services.transition_phase(proposed, "halted", request.at)
+            proposed.pop("terminal_outcome", None)
+            outcome = derive_terminal_outcome(proposed)
+            if outcome is None:
+                raise LifecycleFailure(
+                    "terminal transition did not produce a terminal outcome",
+                    reason="terminal-outcome-missing",
+                )
+            proposed["terminal_outcome"] = outcome
+            decision_holder[0] = decision
+            routed_verdict_holder[0] = {
+                "ok": True,
+                "route": "goal",
+                "complexity": "Simple",
+                "reason": "Simple complexity with no irreversible/security signals (#330)",
+                "guidance": services.goal_dispatch_guidance(
+                    dispatch,
+                    "state は routed-goal で halt 済み (mark-halt 不要)。mission ループを続けず、",
+                ),
+                **dispatch,
+            }
+
         def mutate(proposed: dict) -> None:
             for item in request.kvs:
                 if "=" not in item:
@@ -1020,83 +1098,23 @@ def set_fields(
                     proposed["review_tier"]
                 ]
 
+            route_simple_to_goal(proposed)
+            services.ensure_phase_timing(proposed, request.at)
+            proposed["updated_at"] = request.at
+
         proposed = repository.execute(state, mutate)
+        routed_verdict = routed_verdict_holder[0]
+        decision = decision_holder[0]
         aggregate_action = (
-            "add"
-            if "loop_active" in explicit_keys
-            and proposed.get("loop_active") is True
-            else None
+            "remove"
+            if routed_verdict is not None
+            else (
+                "add"
+                if "loop_active" in explicit_keys
+                and proposed.get("loop_active") is True
+                else None
+            )
         )
-        routed_verdict = None
-        decision = None
-        # This deliberately narrow conjunction is the existing #330 route
-        # authority.  Do not simplify it: each exclusion prevents routing a
-        # state with real mission, risk, review, or user-selection authority.
-        if (
-            "complexity" in explicit_keys
-            and proposed.get("complexity") == "Simple"
-            and proposed.get("loop_active") is True
-            and not proposed.get("halt_reason")
-            and (proposed.get("phase") or "planning") == "planning"
-            and (proposed.get("iteration") or 1) <= 1
-            and not proposed.get("review_tier_signals")
-            and proposed.get("review_tier_source") != "user"
-            and not proposed.get("issue_ref")
-            and not proposed.get("force_mission")
-            and (proposed.get("session_role") or "implementer") == "implementer"
-            and not (proposed.get("score_history") or [])
-        ):
-            decision = decide(
-                _typed_state(proposed),
-                MarkHalt(
-                    HaltCategory.ROUTED_GOAL,
-                    "routed-to-goal (#330: Simple + リスクシグナルなし)",
-                ),
-            )
-            if not decision.accepted:
-                assert decision.rejection is not None
-                raise LifecycleFailure(
-                    "goal route rejected: " + decision.rejection.code,
-                    reason=decision.rejection.code,
-                    state=proposed,
-                )
-            dispatch = services.goal_dispatch_fields(proposed)
-            proposed["goal_dispatch_effective"] = dispatch["goal_dispatch_effective"]
-            proposed["goal_dispatch_host"] = dispatch["goal_dispatch_host"]
-            if dispatch.get("goal_dispatch_fallback_reason"):
-                proposed["goal_dispatch_fallback_reason"] = dispatch[
-                    "goal_dispatch_fallback_reason"
-                ]
-            else:
-                proposed.pop("goal_dispatch_fallback_reason", None)
-            proposed["loop_active"] = False
-            proposed["halt_reason"] = (
-                "routed-to-goal (#330: Simple + リスクシグナルなし)"
-            )
-            proposed["halt_category"] = "routed-goal"
-            services.transition_phase(proposed, "halted", request.at)
-            proposed.pop("terminal_outcome", None)
-            outcome = derive_terminal_outcome(proposed)
-            if outcome is None:
-                raise LifecycleFailure(
-                    "terminal transition did not produce a terminal outcome",
-                    reason="terminal-outcome-missing",
-                )
-            proposed["terminal_outcome"] = outcome
-            aggregate_action = "remove"
-            routed_verdict = {
-                "ok": True,
-                "route": "goal",
-                "complexity": "Simple",
-                "reason": "Simple complexity with no irreversible/security signals (#330)",
-                "guidance": services.goal_dispatch_guidance(
-                    dispatch,
-                    "state は routed-goal で halt 済み (mark-halt 不要)。mission ループを続けず、",
-                ),
-                **dispatch,
-            }
-        services.ensure_phase_timing(proposed, request.at)
-        proposed["updated_at"] = request.at
         aggregate_error = None
         try:
             repository.save(

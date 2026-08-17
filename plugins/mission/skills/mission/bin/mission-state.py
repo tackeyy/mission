@@ -7020,7 +7020,7 @@ def cmd_log_specialist_invocation(args):
 
 
 
-def _initialize_legacy_v4(args):
+def _initialize_legacy_v4(args, *, write_state):
     cwd = Path.cwd()
     goal_dispatch = _resolve_goal_dispatch(
         args.mission,
@@ -7377,7 +7377,7 @@ def _initialize_legacy_v4(args):
                     prior_generations.append(generation)
             initial["review_generation"] = max(prior_generations, default=0) + 1
         backup_state(sf_target)
-        atomic_write_json(sf_target, initial)
+        write_state(sf_target, initial)
         existing_agg.setdefault("active_sessions", [])
         if sid not in existing_agg["active_sessions"]:
             existing_agg["active_sessions"].append(sid)
@@ -7403,7 +7403,10 @@ def _initialize_legacy_v4(args):
 def cmd_init(args):
     """Adapt init arguments to the A1 v4 compatibility repository."""
     run_initialize(
-        LegacyV4InitializerRepository(_initialize_legacy_v4),
+        LegacyV4InitializerRepository(
+            initialize_state=_initialize_legacy_v4,
+            write_state=atomic_write_json,
+        ),
         InitRequest(arguments=args),
     )
 

@@ -15,6 +15,7 @@ import pytest
 from .mission_state_fixture_corpus import (
     _checked_cli as _production_checked_cli,
     _run_cli as _production_run_cli,
+    _write_core_plan,
     canonical_json_bytes,
     issue483_corpus,
 )
@@ -23,8 +24,43 @@ from .mission_state_fixture_corpus import (
 _GOLDEN_PATH = Path(__file__).with_name("fixtures") / "lifecycle_a1" / "golden.json"
 _GOLDEN = json.loads(_GOLDEN_PATH.read_text(encoding="utf-8"))
 _ROOT_TOKEN = "__ROOT__"
+_GOLDEN_SENTINEL_ROOT = Path("/__golden_normalize_root__")
+_ENV_DERIVED_TOKEN = "<env-derived>"
 _FIXED_PID = 424242
 _FIXED_HOSTNAME = "fixture-host"
+
+
+class _MutationBoundaryRepository:
+    """Test port enforcing that only ``execute`` may mutate loaded state."""
+
+    def __init__(self, before, write_state):
+        self._before = copy.deepcopy(before)
+        self._write_state = write_state
+        self._executed = None
+
+    def transaction(self):
+        return contextlib.nullcontext()
+
+    def load(self):
+        return copy.deepcopy(self._before)
+
+    def execute(self, state, mutation, transition=None):
+        assert state == self._before
+        proposed = copy.deepcopy(state)
+        mutation(proposed)
+        self._executed = copy.deepcopy(proposed)
+        return proposed
+
+    def save(
+        self,
+        state,
+        *,
+        backup=True,
+        administrative=False,
+        aggregate_action=None,
+    ):
+        assert state == self._executed
+        self._write_state(state, administrative=administrative)
 
 
 def _load_cli_module(name):
@@ -49,6 +85,11 @@ def _normalize_golden_value(value, root: Path):
         for key in ("pid", "old_pid", "new_pid", "updated_by_pid"):
             if isinstance(normalized.get(key), int):
                 normalized[key] = _FIXED_PID
+        # pid を正規化するなら、同じ find_agent_pid() 由来の pid_source も
+        # 起動元プロセスツリーに依存する環境メタデータとして揃えないと、
+        # claude / codex 配下か CI 直下かで golden 比較の結果が変わる。
+        if isinstance(normalized.get("pid_source"), str):
+            normalized["pid_source"] = _ENV_DERIVED_TOKEN
         if isinstance(normalized.get("hostname"), str):
             normalized["hostname"] = _FIXED_HOSTNAME
         for key in ("host_run_id", "root_run_id"):
@@ -94,7 +135,8 @@ def _denormalize_golden_value(value, root: Path):
 def _golden_state_bytes(case: str, index: int = -1, key: str = "after_state_bytes_b64") -> bytes:
     encoded = _golden_step(case, index)[key]
     assert encoded is not None
-    return base64.b64decode(encoded)
+    payload = json.loads(base64.b64decode(encoded))
+    return canonical_json_bytes(_normalize_golden_value(payload, _GOLDEN_SENTINEL_ROOT))
 
 
 def _golden_state(case: str, root: Path, index: int = -1, key: str = "after_state_bytes_b64") -> dict:
@@ -108,7 +150,7 @@ def _golden_state_bytes_for_root(
     index: int = -1,
     key: str = "after_state_bytes_b64",
 ) -> bytes:
-    return canonical_json_bytes(_golden_state(case, root, index, key))
+    return canonical_json_bytes(_normalize_golden_value(_golden_state(case, root, index, key), root))
 
 
 def _write_golden_state(
@@ -178,37 +220,96 @@ def test_golden_fixture_records_pinned_real_cli_provenance():
     )
 
 
-def test_init_repository_boundary_matches_extraction_predecessor_bytes(tmp_path):
+@pytest.mark.parametrize(
+    ("pid_source",),
+    (("agent",), ("fallback",)),
+    ids=("agent", "fallback"),
+)
+def test_normalize_golden_value_normalizes_pid_source(tmp_path, pid_source):
+    normalized = _normalize_golden_value(
+        {"pid": 1234, "pid_source": pid_source}, tmp_path
+    )
+    assert normalized["pid"] == _FIXED_PID
+    assert normalized["pid_source"] == _ENV_DERIVED_TOKEN
+
+
+@pytest.mark.parametrize(
+    ("comm", "expected_pid_source", "expected_fallback"),
+    (
+        ("claude", "agent", False),
+        ("bash", "fallback", True),
+    ),
+    ids=("agent-ancestor", "fallback-no-ancestor"),
+)
+def test_find_agent_pid_and_stamp_metadata_track_pid_source_semantics(
+    tmp_path, monkeypatch, comm, expected_pid_source, expected_fallback
+):
+    cli = _load_cli_module(f"issue506_pid_source_{expected_pid_source}")
+    root_pid = 4321
+
+    def fake_run(args, capture_output, text, timeout):
+        assert capture_output is True
+        assert text is True
+        assert timeout == 2
+        if args == ["ps", "-o", "comm=", "-p", str(root_pid)]:
+            return type("Result", (), {"stdout": f"{comm}\n"})()
+        if args == ["ps", "-o", "ppid=", "-p", str(root_pid)]:
+            return type("Result", (), {"stdout": "1\n"})()
+        raise AssertionError(args)
+
+    monkeypatch.setattr(cli.os, "getppid", lambda: root_pid)
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    pid = cli.find_agent_pid()
+    data = {}
+    cli.stamp_metadata(data, tmp_path)
+
+    assert pid == root_pid
+    assert cli._last_pid_was_fallback() is expected_fallback
+    assert data["pid"] == root_pid
+    assert data["pid_source"] == expected_pid_source
+
+
+def test_init_repository_boundary_matches_extraction_predecessor_bytes(
+    tmp_path, monkeypatch
+):
     from mission_application.lifecycle import InitRequest, initialize
     from mission_persistence.legacy_v4 import LegacyV4InitializerRepository
 
-    current_root = tmp_path / "current"
-    current_root.mkdir()
-    arguments = (
-        "init",
-        "A1 init parity",
-        "--complexity",
-        "Standard",
-        "--host-run-id",
-        "host-run",
-        "--root-run-id",
-        "root-run",
-        "--artifact-applicability",
-        "not-applicable",
+    cli = _load_cli_module("issue506_init_repository")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "fixture-lease")
+    monkeypatch.setenv("MISSION_STATE_NOW", "2026-08-16T00:00:00Z")
+    saved = {}
+
+    def write_state(path, state):
+        cli.atomic_write_json(path, state)
+        saved.update(json.loads(path.read_text(encoding="utf-8")))
+
+    repository = LegacyV4InitializerRepository(
+        initialize_state=cli._initialize_legacy_v4,
+        write_state=write_state,
     )
-    environment = {"MISSION_STATE_NOW": "2026-08-16T00:00:00Z"}
-    completed = _production_checked_cli(current_root, *arguments, env_extra=environment)
-    current_path = current_root / ".mission-state" / "sessions" / "test.json"
-    result_bytes = _normalized_root_bytes(current_path, current_root)
-
-    calls = []
-    repository = LegacyV4InitializerRepository(calls.append)
-    request = InitRequest(arguments=object())
+    arguments = cli._build_parser().parse_args(
+        [
+            "init",
+            "A1 init parity",
+            "--complexity",
+            "Standard",
+            "--host-run-id",
+            "host-run",
+            "--root-run-id",
+            "root-run",
+            "--artifact-applicability",
+            "not-applicable",
+        ]
+    )
+    request = InitRequest(arguments=arguments)
     initialize(repository, request)
+    result_bytes = canonical_json_bytes(_normalize_golden_value(saved, tmp_path))
 
-    _assert_cli_result(completed, "init_repository", current_root)
-    assert calls == [request.arguments]
-    assert result_bytes == _golden_state_bytes("init_repository")
+    assert result_bytes == _golden_state_bytes_for_root("init_repository", tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -257,7 +358,7 @@ def test_issue483_variants_keep_exact_legacy_bytes_after_lifecycle_command(
 
     _assert_cli_result(current, case, current_root)
     assert current.returncode == expected_returncode
-    assert result_bytes == _golden_state_bytes(case)
+    assert result_bytes == _golden_state_bytes_for_root(case, current_root)
     current_state = json.loads(current_path.read_text())
     expected_schema = (
         4 if arguments[0] == "init" else issue483_corpus()[label].get("schema_version")
@@ -321,7 +422,7 @@ def test_activity_start_result_bytes_equal_real_cli_bytes(tmp_path):
             resume=False,
         ),
     )
-    result_bytes = canonical_json_bytes(saved)
+    result_bytes = canonical_json_bytes(_normalize_golden_value(saved, tmp_path))
 
     assert result.changed is True
     assert result_bytes == legacy_bytes
@@ -351,7 +452,7 @@ def test_activity_end_result_bytes_equal_real_cli_bytes(tmp_path):
         backup_state=lambda: None,
     )
     result = activity_end(repository, ActivityEndRequest(at=ended_at))
-    result_bytes = canonical_json_bytes(saved)
+    result_bytes = canonical_json_bytes(_normalize_golden_value(saved, tmp_path))
 
     assert result.changed is True
     assert result_bytes == legacy_bytes
@@ -398,11 +499,81 @@ def test_advance_result_bytes_equal_real_cli_bytes_and_kernel_accepts(tmp_path):
             transition_phase=cli._transition_phase,
         ),
     )
-    result_bytes = canonical_json_bytes(saved)
+    result_bytes = canonical_json_bytes(_normalize_golden_value(saved, tmp_path))
 
     assert result.decision.accepted is True
     assert result.decision.rule_id == "advance-phase"
     assert result_bytes == legacy_bytes
+
+
+def test_policy_v1_advance_with_plan_to_executing_matches_real_cli_bytes(tmp_path):
+    from mission_application.lifecycle import AdvanceRequest, AdvanceServices, advance
+    from mission_persistence.legacy_v4 import LegacyV4Repository
+
+    cli = _load_cli_module("issue506_executing_advance_services")
+    executing_at = "2026-08-16T02:00:00Z"
+    plan_source = _write_core_plan(tmp_path)
+    _production_checked_cli(
+        tmp_path,
+        "init",
+        "A1 advance parity",
+        "--complexity",
+        "Standard",
+        env_extra={"MISSION_STATE_NOW": executing_at},
+    )
+    _production_checked_cli(
+        tmp_path,
+        "planning",
+        "adopt-core",
+        "--input",
+        str(plan_source),
+        "--source-id",
+        "issue506-core",
+        env_extra={"MISSION_STATE_NOW": executing_at},
+    )
+    before = _golden_state("advance", tmp_path, index=1)
+    legacy_bytes = _golden_state_bytes_for_root("advance", tmp_path, index=2)
+    saved = {}
+
+    def write_state(state, *, administrative=False):
+        assert administrative is False
+        state["last_activity_at"] = executing_at
+        state["lease_expires_at"] = "2026-08-16T02:15:00Z"
+        saved.update(copy.deepcopy(state))
+
+    repository = LegacyV4Repository(
+        lock=contextlib.nullcontext,
+        read_state=lambda: copy.deepcopy(before),
+        write_state=write_state,
+        backup_state=lambda: None,
+    )
+    result = advance(
+        repository,
+        AdvanceRequest(
+            phase="executing",
+            activity="active:implementation",
+            at=executing_at,
+            detail=None,
+            artifact_applicability=None,
+            artifact_path=None,
+            producer_run_id=None,
+        ),
+        AdvanceServices(
+            reject_active_provider_mutation=cli._reject_active_provider_mutation,
+            prepare_handoff=lambda state: cli._prepare_advance_handoff(
+                tmp_path, state
+            ),
+            capture_artifact=cli.capture_artifact_identity,
+            transition_phase=cli._transition_phase,
+        ),
+    )
+    result_bytes = canonical_json_bytes(
+        _normalize_golden_value(saved, tmp_path)
+    )
+
+    assert result.decision.accepted is True
+    assert result.decision.rule_id == "advance-phase"
+    assert result_bytes == _golden_state_bytes("advance", index=2)
 
 
 def test_mark_halt_result_bytes_equal_real_cli_bytes_and_kernel_accepts(tmp_path):
@@ -441,7 +612,7 @@ def test_mark_halt_result_bytes_equal_real_cli_bytes_and_kernel_accepts(tmp_path
             goal_dispatch_fields=cli._goal_dispatch_route_fields,
         ),
     )
-    result_bytes = canonical_json_bytes(saved)
+    result_bytes = canonical_json_bytes(_normalize_golden_value(saved, tmp_path))
 
     assert result.decision.accepted is True
     assert result.decision.rule_id == "mark-halt"
@@ -516,7 +687,7 @@ def test_reactivate_result_bytes_equal_real_cli_bytes_and_kernel_accepts(tmp_pat
             at=reactivated_at,
         ),
     )
-    result_bytes = canonical_json_bytes(saved)
+    result_bytes = canonical_json_bytes(_normalize_golden_value(saved, tmp_path))
 
     assert result.decision.accepted is True
     assert result.decision.rule_id == "reactivate"
@@ -526,7 +697,6 @@ def test_reactivate_result_bytes_equal_real_cli_bytes_and_kernel_accepts(tmp_pat
 
 def test_refresh_pid_result_bytes_equal_real_cli_bytes(tmp_path):
     from mission_application.lifecycle import RefreshPidRequest, RefreshPidServices, refresh_pid
-    from mission_persistence.legacy_v4 import LegacyV4Repository
 
     cli = _load_cli_module("issue506_refresh_pid_services")
     now = "2026-08-16T05:01:03Z"
@@ -541,13 +711,7 @@ def test_refresh_pid_result_bytes_equal_real_cli_bytes(tmp_path):
         state["last_activity_at"] = now
         saved.update(copy.deepcopy(state))
 
-    repository = LegacyV4Repository(
-        lock=contextlib.nullcontext,
-        read_state=lambda: copy.deepcopy(before),
-        write_state=write_state,
-        backup_state=lambda: None,
-        add_to_aggregate=lambda: None,
-    )
+    repository = _MutationBoundaryRepository(before, write_state)
     result = refresh_pid(
         repository,
         RefreshPidRequest(
@@ -562,12 +726,79 @@ def test_refresh_pid_result_bytes_equal_real_cli_bytes(tmp_path):
             resume_phase_timing=cli._resume_phase_timing,
         ),
     )
-    result_bytes = canonical_json_bytes(saved)
+    result_bytes = canonical_json_bytes(_normalize_golden_value(saved, tmp_path))
 
     assert result.old_pid == legacy_output["old_pid"]
     assert result.new_pid == legacy_output["new_pid"]
     assert result.reactivated is False
     assert result_bytes == legacy_bytes
+
+
+def test_refresh_pid_closes_resume_activity_inside_repository_execute(tmp_path):
+    from mission_application.lifecycle import RefreshPidRequest, RefreshPidServices, refresh_pid
+
+    cli = _load_cli_module("issue506_refresh_pid_mutation_boundary")
+    before = _golden_state("refresh_pid", tmp_path, index=0)
+    now = "2026-08-16T05:02:03Z"
+    saved = {}
+
+    result = refresh_pid(
+        _MutationBoundaryRepository(
+            before,
+            lambda state, **_kwargs: saved.update(copy.deepcopy(state)),
+        ),
+        RefreshPidRequest(
+            new_pid=before["pid"],
+            force=False,
+            reactivate=True,
+            at=now,
+        ),
+        RefreshPidServices(
+            lease_fields_present=cli._lease_fields_present,
+            pid_is_agent=cli._pid_is_agent,
+            resume_phase_timing=cli._resume_phase_timing,
+        ),
+    )
+
+    assert result.new_pid == before["pid"]
+    assert saved["activity_current"]["started_at"] == now
+    assert saved["activity_unobserved_gap_sec"] == 60.0
+
+
+def test_routed_goal_set_mutates_only_inside_repository_execute(tmp_path):
+    from mission_application.lifecycle import SetFieldsRequest, SetFieldsServices, set_fields
+
+    cli = _load_cli_module("issue506_routed_goal_set_services")
+    now = "2026-08-16T09:07:09Z"
+    before = _golden_state("set_narrowing", tmp_path, index=0)
+    saved = {}
+
+    def write_state(state, *, administrative=False):
+        assert administrative is True
+        saved.update(copy.deepcopy(state))
+
+    result = set_fields(
+        _MutationBoundaryRepository(before, write_state),
+        SetFieldsRequest(kvs=("complexity=Simple",), at=now),
+        SetFieldsServices(
+            frozen_fields=frozenset(cli.FROZEN_FIELDS),
+            reject_active_provider_mutation=cli._reject_active_provider_mutation,
+            normalize_phase=cli._normalize_set_phase_value,
+            transition_phase=cli._transition_phase,
+            ensure_phase_timing=cli._ensure_phase_timing,
+            derive_review_tier=cli.derive_review_tier,
+            derive_review_tier_decision=cli.derive_review_tier_decision,
+            reviewer_count_by_tier=dict(cli.TIER_REVIEWER_COUNT),
+            goal_dispatch_fields=cli._goal_dispatch_route_fields,
+            goal_dispatch_guidance=cli._goal_dispatch_guidance,
+        ),
+    )
+
+    assert result.routed_verdict is not None
+    assert result.routed_verdict["route"] == "goal"
+    assert saved["phase"] == "halted"
+    assert saved["halt_category"] == "routed-goal"
+    assert saved["updated_at"] == now
 
 
 def test_update_project_root_result_bytes_equal_real_cli_bytes(tmp_path):
@@ -599,7 +830,7 @@ def test_update_project_root_result_bytes_equal_real_cli_bytes(tmp_path):
         repository,
         UpdateProjectRootRequest(new_root=str(destination.resolve()), at=now),
     )
-    result_bytes = canonical_json_bytes(saved)
+    result_bytes = canonical_json_bytes(_normalize_golden_value(saved, tmp_path))
 
     assert result.old_root == str(tmp_path.resolve())
     assert result.new_root == str(destination.resolve())
@@ -649,7 +880,7 @@ def test_set_result_bytes_equal_real_cli_bytes_without_new_narrowing(tmp_path):
             goal_dispatch_guidance=cli._goal_dispatch_guidance,
         ),
     )
-    result_bytes = canonical_json_bytes(saved)
+    result_bytes = canonical_json_bytes(_normalize_golden_value(saved, tmp_path))
 
     assert result.routed_verdict is None
     assert saved["custom_legacy_field"] == "preserved"
