@@ -273,10 +273,11 @@ reference-safe GC.
 
 ### Stage 5 — Route mutations through repositories and bind the v5 UnitOfWork
 
-Change the extracted use cases to depend only on `MissionRepository`; select
-the behavior-compatible v4 repository or the v5 `RecoverableUnitOfWork` from
-the loaded session format. Separate aggregates keep their own repositories but
-use the same strict filesystem primitives where applicable.
+Bind the closed K2 command representation to `MissionRepository`; select the
+behavior-compatible v4 repository or the v5 `RecoverableUnitOfWork` from the
+loaded session format. Compatibility mutations without a closed K2 command
+remain on the legacy sub-port until Stage 7. Separate aggregates keep their own
+repositories but use the same strict filesystem primitives where applicable.
 
 Consistency: writer selection is loaded-state-derived and immutable for the
 session. An environment flag cannot change it. Production query/consumer routes
@@ -285,12 +286,14 @@ coordinators call per-session repository operations rather than editing JSON
 directly.
 
 Safe interruption: `init` still creates v4, so all real sessions remain on the
-proven compatibility path while v5 gets full command-surface tests.
+proven compatibility path while v5 gets repository-level typed-request and
+sealed-transition binding tests.
 
-Exit gate: the application/repository harness can run every v5 command happy
-path and recovery path; the command inventory reports zero direct session JSON
-writers outside the two repository implementations. CLI/consumer v5 support is
-not claimed until Stage 6.
+Exit gate: both repositories pass the common typed-request and sealed-
+transition binding suite for the closed K2 representation, and retained
+selection rejects a v5 head before constructing a legacy writer. Full
+application-command coverage and repository-wide writer inventory remain the
+Stage 7 activation gate. CLI/consumer v5 support is not claimed until Stage 6.
 
 ### Stage 6 — Migrate authoritative readers
 
@@ -318,13 +321,20 @@ for life. Readers accept missing/v1-v5; readers with maximum v4 reject v5 by the
 
 Consistency: no automatic migration and no dual write. The head record is the
 only v5 authority; compatibility projections are verified/recoverable outputs.
+Every A1-A5 mutating use case, including activity, generic set, and permission
+timing/activity projection, uses the common typed repository/UnitOfWork
+boundary before this stage activates. The complete five-command v4/v5 matrix
+and repository-wide direct-writer inventory also run here.
 
 Safe interruption: rollback changes the `init` default only; already-created v5
 sessions remain readable by the new CLI and old v4 sessions remain unchanged.
 
-Exit gate: mixed v4/v5 multi-session tests, full CLI tests, plugin-mirror tests,
-artifact hygiene, and distribution documentation are green. A separate
-approval is required before removing the v4 writer.
+Exit gate: the complete application/repository command matrix and recovery
+paths are green; command inventory reports zero direct session JSON writers
+outside the two repository implementations; mixed v4/v5 multi-session tests,
+full CLI tests, plugin-mirror tests, artifact hygiene, and distribution
+documentation are green. A separate approval is required before removing the
+v4 writer.
 
 ## 5. Coexistence invariants
 
@@ -842,19 +852,31 @@ Current code: the `LegacyV4Repository` routes introduced by A1-A5; state
 locking/writing at `mission-state.py:1125-1312`; artifact/review publication at
 `:11064-12169`; and direct state writes remaining in the command inventory.
 
-Expected behavior: extracted use cases depend only on `MissionRepository`. The
-loaded session format selects either `LegacyV4Repository` or the v5
-`RecoverableUnitOfWork` once per session. v5 effects are staged, fenced, CAS
-committed, idempotently retried, and crash-recovered as one protocol; v4 keeps
-its current layout and lease-first transaction and is not advertised as a full
-UnitOfWork. Both receive the same explicit typed `ExecutionRequest`; neither
-reads session, lease, command, blobs, or operation identity from ambient state.
-No command dual-writes or selects a writer from an environment flag.
+Boundary amendment (#511, 2026-08-18): P1 binds only the closed K2 command
+subset (`AdvancePhase`, `MarkHalt`, `MarkPass`, `Reactivate`, and
+`ResumeStale`) to the common `MissionRepository.read/execute` port. Extracted
+A1-A5 compatibility mutations for which K2 does not yet define a closed command
+remain on the narrower `LegacyMissionRepository` port and are mandatory C1
+work in #513 before production v5 activation. This avoids inventing domain
+semantics during persistence binding while keeping the deferred work explicit.
+
+Expected behavior: the common repository-level binding accepts the closed K2
+subset through `MissionRepository`. The loaded session format selects either
+`LegacyV4Repository` or the v5 `RecoverableUnitOfWork` once per session. v5
+effects are staged, fenced, CAS committed, idempotently retried, and
+crash-recovered as one protocol; v4 keeps its current layout and lease-first
+transaction and is not advertised as a full UnitOfWork. Both receive the same
+explicit typed `ExecutionRequest`; neither reads session, lease, command,
+blobs, or operation identity from ambient state. No command dual-writes or
+selects a writer from an environment flag. P1 does not claim application-use-
+case integration; C1 owns that integration and its complete conformance matrix.
 
 TDD Red:
 
-- the common command/decision/result repository suite passes against v4 and
-  v5, while the stronger generation/recovery/GC suite is required only of v5;
+- closed typed request and sealed-transition repository binding passes against
+  both v4 and v5. The complete five-command by two-repository application
+  matrix is a mandatory C1 pre-cutover gate, while the stronger
+  generation/recovery/GC suite is required only of v5;
 - the same typed request satisfies v4/v5 lease-first contracts, and domain
   rejection changes neither repository's authoritative state;
 - every artifact/review/score multi-file effect gets process-crash injection at
@@ -862,12 +884,18 @@ TDD Red:
 - stale snapshot, head, generation, lease token, or fencing epoch publishes no
   state, evidence, artifact, or compatibility projection;
 - an open/ambiguous recovery record blocks both state-only and effectful writes;
-- static inventory rejects direct session/evidence writers outside the two
-  repositories.
+- retained-selector runtime tests reject a v5 head before any compatibility CLI
+  factory can construct a legacy writer. Application-route static inventory and
+  repository-wide direct-writer elimination remain C1 work in #513.
 
 Acceptance:
 
-- all A1-A5 commands use only the `MissionRepository` port;
+- both repositories implement the same typed-request and sealed-transition
+  binding for the closed K2 command representation; P1 does not claim that all
+  five application use cases are connected to the common port;
+- remaining A1-A5 compatibility mutations are isolated behind
+  `LegacyMissionRepository`, cannot reach a v5 repository, and are listed as
+  mandatory pre-cutover C1 work in #513;
 - v4 sessions retain current bytes and never upgrade; isolated v5 fixtures
   converge to base or target after every injected crash;
 - no existing CLI route creates a v5 production session yet;
@@ -917,7 +945,9 @@ Acceptance:
 Dependencies: U4, P1, R1.
 
 Current code: `_build_parser` at `mission-state.py:16109-16798`, direct JSON
-writers across `cmd_*`, query scanners, plugin mirror, and #483 fixtures.
+writers across `cmd_*`, query scanners, plugin mirror, and #483 fixtures. P1
+binds the five closed K2 commands to the common repository port; other A1-A5
+mutations still require the legacy compatibility sub-port.
 
 Expected behavior: all commands in section 2.3 have one declared owner; direct
 session writes occur only in `LegacyV4Repository` or v5
@@ -926,11 +956,23 @@ existing v1-v4 sessions keep v4.
 Mutating v5 invocations carry a caller-stable operation ID and expose an
 operation-result lookup; a caller that lacks the ID may issue a new operation
 but may not label it an automatic retry of unknown outcome.
+Before changing the production `init` default, C1 closes every remaining A1-A5
+mutation as a typed command/decision/effect contract. The deferred inventory
+includes at least activity start/end and their segment/rollup projection,
+generic set authority mutations, permission timing/activity projection, and
+every other use case that still requires `LegacyMissionRepository`.
 
 TDD Red:
 
 - static inventory fails for every unowned mutating parser command or direct
   session write outside repositories;
+- a common-port-only conformance suite runs every A1-A5 mutating use case
+  against v5; activity, generic set, and permission timing projections derive
+  from typed decisions and reject unknown, missing, or type-confused authority
+  fields;
+- a five-command by v4/v5 matrix covers every closed P1 command's positive and
+  domain-rejection paths, audit binding, lease admission, and authoritative-byte
+  non-mutation;
 - mixed concurrent v4/v5 sessions preserve independent lease/generation state;
 - v4 reader rejects v5, v5 reader accepts fixed v1-v5, and existing v4 mutation
   never upgrades to v5;
@@ -941,6 +983,14 @@ TDD Red:
 
 Acceptance:
 
+- every A1-A5 mutating command uses the common typed repository/UnitOfWork
+  boundary; `LegacyMissionRepository` is confined to the internal v4
+  projection;
+- all five closed P1 commands pass the complete v4/v5 application conformance
+  matrix;
+- activity start/end, generic set, permission timing/activity projection, and
+  all other mutations deferred by #511 execute and recover authoritatively on
+  v5 before the production cutover;
 - no dual-write or per-invocation writer switch exists;
 - new-session v5 cutover has a documented rollback limited to the init default;
 - all current safety gates are demonstrably equal or stricter;
@@ -963,10 +1013,12 @@ U4 + P1 + R1 -> C1
 
 Recommended issue order is D1, K1, K2, then A1 and U1 on separate branches.
 A2-A5 follow A1 while U2 and U3 follow U1. After both tracks converge, P1 binds
-the extracted use cases to the format-pinned repository. U4 can proceed after
-U3 in parallel with P1. R1 follows the reader/UoW binding, and C1 waits for U4,
-P1, and R1. This matches Stages 3-7 and keeps extraction and consumer migration
-independently releasable before v5 activation.
+the closed K2 command representation to the format-pinned repositories without
+claiming application-use-case integration. U4 can proceed after U3 in parallel
+with P1. R1 follows the reader/UoW binding, and C1 waits for U4, P1, and R1
+before connecting all extracted mutating use cases and activating v5. This
+matches Stages 3-7 and keeps extraction and consumer migration independently
+releasable before v5 activation.
 
 ## 10. Release and rollback boundaries
 
