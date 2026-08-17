@@ -31,7 +31,9 @@ the production CLI.
    The request carries session, lease owner/token, immutable command and blobs,
    operation identity, intent digest, and audit categories. A pure decision is
    evaluated after provisional lease admission; rejection performs no save or
-   publication.
+   publication. The common `MissionRepository` surface is only typed
+   `read/execute`; the v4 `transaction/load/save` compatibility capability is
+   a narrower sub-port and the v5 repository does not advertise it.
 3. Add a format-pinned selector. It strictly reads the loaded session once,
    accepts only missing/v1-v4 state documents or `mission-head/1`, constructs
    exactly one matching repository, and rejects format/identity drift,

@@ -13,7 +13,7 @@ from typing import Callable, Generic, TypeVar
 
 from mission_kernel.json_codec import decode_json_object, thaw_json_object
 
-from .fenced_commit import FencedCommitError, MAX_HEAD_BYTES, _parse_head
+from .fenced_commit import FencedCommitError, MAX_HEAD_BYTES, parse_head
 from .strict_reader import read_stable_bytes
 
 
@@ -71,7 +71,7 @@ class FormatPinnedRepositorySelector(Generic[RepositoryT]):
             raise RepositorySelectionError("repository-format-invalid") from exc
         if document.get("schema") == "mission-head/1":
             try:
-                _parse_head(source, self._session_id)
+                parse_head(source, self._session_id)
             except (FencedCommitError, ValueError) as head_error:
                 raise RepositorySelectionError("repository-format-invalid") from head_error
             return RepositoryFormat.V5, self._session_id

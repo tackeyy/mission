@@ -565,7 +565,8 @@ def _head_document(head: HeadRecord) -> dict:
     }
 
 
-def _parse_head(content: bytes, expected_session: str) -> HeadRecord:
+def parse_head(content: bytes, expected_session: str) -> HeadRecord:
+    """Parse a canonical head and bind it to the selected session."""
     document = _decode_record(content, limit=MAX_HEAD_BYTES)
     _exact(document, {"commit", "generation", "schema", "session_id", "state_generation"}, "head")
     if document["schema"] != "mission-head/1":
@@ -982,7 +983,8 @@ def _prepared_binding_digest(prepared: PreparedCommit) -> str:
     return _sha256(_canonical_bytes(document, limit=STATE_LIMIT))
 
 
-def _validate_request(request: ExecutionRequest) -> None:
+def validate_execution_request(request: ExecutionRequest) -> None:
+    """Validate the shared immutable request before either writer uses it."""
     if not isinstance(request, ExecutionRequest):
         raise FencedCommitError("request-invalid", "request type is invalid")
     _session_id(request.session_id)
@@ -1021,13 +1023,14 @@ def _validate_request(request: ExecutionRequest) -> None:
     _audit_record(request.audit)
 
 
-def _admit_lease(
+def admit_lease(
     request: ExecutionRequest,
     base: Union[LegacyAbsentLease, FencedLease],
     admitted_at_value: datetime,
     lease_ttl_seconds: int,
     generated_lease_id: Optional[str] = None,
 ) -> PendingLease:
+    """Derive the pending fenced lease shared by v4 and v5 repositories."""
     admitted_at = _as_utc(admitted_at_value)
     admitted_text = _format_time(admitted_at)
     expiry = _format_time(admitted_at + timedelta(seconds=lease_ttl_seconds))
@@ -1446,7 +1449,7 @@ class LocalFencedRepository:
             )
         if content is None:
             return None, None, None
-        return _parse_head(content, session_id), content, _sha256(content)
+        return parse_head(content, session_id), content, _sha256(content)
 
     def _gc_commit_fact_unlocked(self, name: str) -> tuple[CommitRecord, str]:
         if not name.endswith(".json") or _DIGEST_RE.fullmatch("sha256:" + name[:-5]) is None:
@@ -1721,7 +1724,7 @@ class LocalFencedRepository:
                 )
 
     def begin(self, request: ExecutionRequest) -> Union[AdmittedSnapshot, CommitResult]:
-        _validate_request(request)
+        validate_execution_request(request)
         with self._lock():
             prepared_entries = self._prepared_entries_unlocked()
             if not prepared_entries:
@@ -1750,7 +1753,7 @@ class LocalFencedRepository:
                 )
                 base_generation = base.head.generation
                 base_lease = base.state.lease
-            pending = _admit_lease(request, base_lease, self.clock(), self.lease_ttl_seconds)
+            pending = admit_lease(request, base_lease, self.clock(), self.lease_ttl_seconds)
             precondition = CommitPrecondition(base_generation, head_digest, pending.digest)
             return AdmittedSnapshot(request, base, pending, base_generation + 1, precondition)
 
@@ -1853,7 +1856,7 @@ class LocalFencedRepository:
         request: ExecutionRequest,
     ) -> RepositoryExecutionResult:
         """Run one explicit request through admission, decision, stage, and commit."""
-        _validate_request(request)
+        validate_execution_request(request)
         if request.typed_command is None:
             raise FencedCommitError("request-invalid", "typed command is required")
         admitted = self.begin(request)
@@ -3550,7 +3553,7 @@ class LocalFencedRepository:
             raise FencedCommitError(
                 "precondition-mismatch", "prepared transaction ID is invalid"
             )
-        _validate_request(prepared.admitted.request)
+        validate_execution_request(prepared.admitted.request)
         _digest(prepared.binding_digest, "prepared.binding_digest")
         stored_digest = self._stage_binding_registry.get(prepared.transaction_id)
         if (
@@ -3715,7 +3718,7 @@ class LocalFencedRepository:
         if base_lease != prepared.admitted.pending_lease.base:
             raise FencedCommitError("lease-precondition-changed", "base lease changed")
         admitted_at = _parse_time(prepared.admitted.pending_lease.admitted_at)
-        recomputed = _admit_lease(
+        recomputed = admit_lease(
             prepared.admitted.request,
             base_lease,
             admitted_at,

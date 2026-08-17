@@ -15,7 +15,7 @@ from activity_segments import (
     WAIT_KINDS,
 )
 
-from .ports import MissionRepository
+from .ports import LegacyMissionRepository
 
 
 RUNTIME_GUARD_COMMAND_OWNERS = {
@@ -399,7 +399,7 @@ def _closed_permission_transition(
 
 
 def record_permission_observation(
-    repository: MissionRepository,
+    repository: LegacyMissionRepository,
     request: PermissionObservationRequest,
     *,
     transition_phase: Callable[[dict, str, str], None] | None = None,

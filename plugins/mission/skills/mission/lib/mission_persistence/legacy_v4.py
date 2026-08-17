@@ -4,22 +4,30 @@ from __future__ import annotations
 
 import copy
 import json
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Callable, ContextManager, Iterable
 
 from mission_application.artifact import EvidenceDecision, EvidenceEffect, validate_evidence_effect
 from mission_application.ports import AggregateIndexError
-from mission_kernel import decode_mission_state, project_legacy_document
+from mission_kernel import MissionState, decode_mission_state, project_legacy_document
 from mission_kernel.transitions import Decision, bind_transition_effects, decide
 
 from .fenced_commit import (
     ExecutionRequest,
     FencedCommitError,
     RepositoryExecutionResult,
-    _admit_lease,
-    _validate_request,
+    admit_lease,
+    validate_execution_request,
 )
+
+
+@dataclass(frozen=True)
+class LegacyRepositorySnapshot:
+    """Canonical read result for one legacy compatibility document."""
+
+    state: MissionState
+    state_bytes: bytes
 
 
 class LegacyV4InitializerRepository:
@@ -87,6 +95,32 @@ class LegacyV4Repository:
             self._format_guard()
         return self._read_state()
 
+    def read(self, session_id: str) -> LegacyRepositorySnapshot:
+        """Read one legacy session through the common typed repository port."""
+        if not isinstance(session_id, str) or not session_id:
+            raise FencedCommitError("request-invalid", "session id is invalid")
+        with self.transaction():
+            document = self.load()
+            if not isinstance(document, dict):
+                raise FencedCommitError("record-invalid", "legacy state is not an object")
+            try:
+                source = json.dumps(
+                    document,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+                state = decode_mission_state(source)
+            except Exception as exc:
+                raise FencedCommitError(
+                    getattr(exc, "code", "record-invalid"),
+                    "legacy state cannot be decoded",
+                ) from exc
+            if state.identity.session_id not in {None, session_id}:
+                raise FencedCommitError("lineage-mismatch", "legacy session differs")
+            return LegacyRepositorySnapshot(state=state, state_bytes=source)
+
     def execute(self, state, mutation=None, transition=None):
         """Return the proposed v4 document without performing any I/O."""
         if isinstance(state, ExecutionRequest):
@@ -108,7 +142,7 @@ class LegacyV4Repository:
         request: ExecutionRequest,
     ) -> RepositoryExecutionResult:
         """Evaluate the common typed request while retaining the v4 layout."""
-        _validate_request(request)
+        validate_execution_request(request)
         if request.typed_command is None:
             raise FencedCommitError("request-invalid", "typed command is required")
         with self.transaction():
@@ -131,7 +165,7 @@ class LegacyV4Repository:
                 ) from exc
             if state.identity.session_id not in {None, request.session_id}:
                 raise FencedCommitError("lineage-mismatch", "legacy session differs")
-            pending = _admit_lease(
+            pending = admit_lease(
                 request,
                 state.lease,
                 self._clock(),
@@ -199,6 +233,9 @@ class LegacyV4Repository:
                     self.save(proposed)
             else:
                 self.save(proposed)
+            # The compatibility writer has no immutable commit/head record from
+            # which a v5 CommitResult could be derived.  Successful v4 writes
+            # therefore report acceptance with commit=None by design.
             return RepositoryExecutionResult(True, None, None)
 
     def save(

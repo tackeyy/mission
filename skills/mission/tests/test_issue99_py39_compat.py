@@ -21,6 +21,8 @@ PLUGIN_LIB_ROOT = REPO_ROOT / "plugins" / "mission" / "skills" / "mission" / "li
 PYTHON_LIBRARY_INVENTORY = discover_python_module_inventory(LIB_ROOT, PLUGIN_LIB_ROOT)
 
 # python3 直書きで実行され得る CLI エントリポイントと、それらが import するモジュール
+# The recursive inventory has no per-module allowlist, so newly added library
+# modules such as mission_persistence/repository_binding.py are automatic gates.
 TARGETS = [
     BIN / "mission-state.py",
     BIN / "mission-migrate.py",

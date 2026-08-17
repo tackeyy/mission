@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, ContextManager, Optional, Protocol, overload
+from typing import Callable, ContextManager, Optional, Protocol, overload, runtime_checkable
 
 from mission_kernel.model import FrozenJsonObject, MissionState
 from mission_kernel.commands import Command
@@ -20,6 +20,25 @@ class AuditMetadata:
     event_types: tuple[str, ...]
 
 
+class BlobBindingView(Protocol):
+    """Persistence-neutral immutable identity used by an execution request."""
+
+    blob_id: str
+    kind: str
+    relative_path: str
+    digest: str
+    size: int
+
+
+class VerifiedBlobView(Protocol):
+    binding: BlobBindingView
+    content: bytes
+
+
+class VerifiedBlobSetView(Protocol):
+    blobs: tuple[VerifiedBlobView, ...]
+
+
 @dataclass(frozen=True)
 class ExecutionRequest:
     """All authority-bearing input for one repository execution."""
@@ -27,7 +46,10 @@ class ExecutionRequest:
     session_id: str
     lease_owner_session_id: str
     command: FrozenJsonObject
-    blobs: object
+    # Structural typing keeps the application port independent of a concrete
+    # persistence module.  Runtime trust still comes from the strict
+    # ``compute_intent_digest``/verified-blob validation at repository entry.
+    blobs: VerifiedBlobSetView
     operation_id: str
     intent_digest: str
     presented_lease_id: Optional[str]
@@ -57,13 +79,38 @@ class MissionInitializer(Protocol):
         ...
 
 
+class RepositoryReadResult(Protocol):
+    """Minimum canonical read view shared by compatibility and v5 storage."""
+
+    state: MissionState
+
+
+@runtime_checkable
 class MissionRepository(Protocol):
-    """Behavior shared by the v4 compatibility repository and future v5 UoW."""
+    """Common typed command/read port implemented by both repository formats."""
+
+    def read(self, session_id: str) -> RepositoryReadResult:
+        ...
+
+    def execute(
+        self,
+        request: ExecutionRequest,
+    ) -> RepositoryExecutionResult:
+        ...
+
+
+@runtime_checkable
+class LegacyMissionRepository(MissionRepository, Protocol):
+    """Compatibility-only transaction surface; never a recoverable v5 UoW."""
 
     def transaction(self) -> ContextManager[object]:
         ...
 
     def load(self) -> dict:
+        ...
+
+    @overload
+    def execute(self, state: dict, mutation: Callable[[dict], None], transition=None) -> dict:
         ...
 
     @overload
@@ -73,11 +120,7 @@ class MissionRepository(Protocol):
     ) -> RepositoryExecutionResult:
         ...
 
-    @overload
-    def execute(self, state: dict, mutation: Callable[[dict], None], transition=None) -> dict:
-        ...
-
-    def execute(self, state, mutation, transition=None):
+    def execute(self, state, mutation=None, transition=None):
         ...
 
     def save(
@@ -91,6 +134,7 @@ class MissionRepository(Protocol):
         ...
 
 
+@runtime_checkable
 class RecoverableUnitOfWork(MissionRepository, Protocol):
     """Stronger v5 repository protocol; legacy v4 must not claim this type."""
 

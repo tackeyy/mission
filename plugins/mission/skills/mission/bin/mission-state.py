@@ -56,7 +56,7 @@ from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import NamedTuple, Protocol
+from typing import NamedTuple, NoReturn, Protocol
 
 LIB_DIR = Path(__file__).resolve().parents[1] / "lib"
 if str(LIB_DIR) not in sys.path:
@@ -354,12 +354,15 @@ def _load_state_json(sf: Path) -> dict:
     return data
 
 
-def _reject_legacy_repository_selection(sf: Path, error: RepositorySelectionError) -> None:
+def _reject_legacy_repository_selection(
+    sf: Path,
+    error: RepositorySelectionError,
+) -> NoReturn:
     """Translate a library selection rejection into the legacy CLI contract."""
     try:
         source = _read_stable_bytes(sf, limit=4 * 1024 * 1024)
         document = _thaw_strict_json_object(_decode_strict_json_object(source))
-    except Exception:
+    except (OSError, ValueError, UnicodeDecodeError):
         document = None
     if isinstance(document, dict):
         # Preserve the established #483 diagnostic and exit-code contract.
@@ -380,6 +383,7 @@ def _select_legacy_repository_for_cli(session_id, sf, legacy_factory):
                 return format_guard()
             except RepositorySelectionError as error:
                 _reject_legacy_repository_selection(Path(sf), error)
+                raise AssertionError("repository rejection translator returned")
 
         return legacy_factory(cli_format_guard)
 
@@ -387,6 +391,7 @@ def _select_legacy_repository_for_cli(session_id, sf, legacy_factory):
         return select_legacy_repository(session_id, sf, bind_cli_guard)
     except RepositorySelectionError as error:
         _reject_legacy_repository_selection(Path(sf), error)
+        raise AssertionError("repository rejection translator returned")
 
 
 def _new_specialist_selection_checkpoint() -> dict:
