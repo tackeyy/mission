@@ -29,9 +29,7 @@ from mission_kernel.commands import (
 )
 from mission_kernel.model import HaltCategory, Phase, PreparedHandoff
 from mission_kernel.transitions import Decision, decide
-from mission_persistence.legacy_v4 import AggregateIndexError
-
-from .ports import MissionInitializer, MissionRepository
+from .ports import AggregateIndexError, LegacyMissionRepository, MissionInitializer
 
 
 LIFECYCLE_COMMAND_OWNERS = {
@@ -269,7 +267,7 @@ class SetFieldsResult:
     aggregate_error: str | None
 
 
-def activity_start(repository: MissionRepository, request: ActivityStartRequest) -> ActivityResult:
+def activity_start(repository: LegacyMissionRepository, request: ActivityStartRequest) -> ActivityResult:
     with repository.transaction():
         state = repository.load()
 
@@ -293,7 +291,7 @@ def activity_start(repository: MissionRepository, request: ActivityStartRequest)
     return ActivityResult(changed_holder[0], proposed.get("activity_current"))
 
 
-def activity_end(repository: MissionRepository, request: ActivityEndRequest) -> ActivityResult:
+def activity_end(repository: LegacyMissionRepository, request: ActivityEndRequest) -> ActivityResult:
     with repository.transaction():
         state = repository.load()
 
@@ -383,7 +381,7 @@ def _advance_decision(
 
 
 def advance(
-    repository: MissionRepository,
+    repository: LegacyMissionRepository,
     request: AdvanceRequest,
     services: AdvanceServices,
 ) -> AdvanceResult:
@@ -539,7 +537,7 @@ def advance(
 
 
 def mark_halt(
-    repository: MissionRepository,
+    repository: LegacyMissionRepository,
     request: MarkHaltRequest,
     services: MarkHaltServices,
 ) -> MarkHaltResult:
@@ -624,7 +622,7 @@ def mark_halt(
 
 
 def reactivate(
-    repository: MissionRepository,
+    repository: LegacyMissionRepository,
     request: ReactivateRequest,
 ) -> ReactivateResult:
     if request.approved_by_user is not True:
@@ -764,7 +762,7 @@ def reactivate(
 
 
 def refresh_pid(
-    repository: MissionRepository,
+    repository: LegacyMissionRepository,
     request: RefreshPidRequest,
     services: RefreshPidServices,
 ) -> RefreshPidResult:
@@ -878,7 +876,7 @@ def refresh_pid(
 
 
 def update_project_root(
-    repository: MissionRepository,
+    repository: LegacyMissionRepository,
     request: UpdateProjectRootRequest,
 ) -> UpdateProjectRootResult:
     with repository.transaction():
@@ -895,7 +893,7 @@ def update_project_root(
 
 
 def set_fields(
-    repository: MissionRepository,
+    repository: LegacyMissionRepository,
     request: SetFieldsRequest,
     services: SetFieldsServices,
 ) -> SetFieldsResult:

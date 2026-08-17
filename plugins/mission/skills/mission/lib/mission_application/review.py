@@ -21,7 +21,7 @@ from mission_kernel.model import (
 from mission_kernel.transitions import Decision, decide
 from scoring_provenance import reduce_review_aggregate as _canonical_review_reduction
 
-from .ports import MissionRepository
+from .ports import LegacyMissionRepository
 
 
 REVIEW_COMMAND_OWNERS = {
@@ -419,7 +419,7 @@ def _pass_rejection_message(reason: str, data: dict, latest: dict | None) -> str
 
 
 def mark_pass(
-    repository: MissionRepository,
+    repository: LegacyMissionRepository,
     request: MarkPassRequest,
     services: MarkPassServices,
 ) -> MarkPassResult:

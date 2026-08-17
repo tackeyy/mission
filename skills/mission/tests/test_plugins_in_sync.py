@@ -627,10 +627,10 @@ def test_changelog_md_in_sync():
 
 
 def test_recursive_python_library_inventory_in_sync():
-    """Recursive inventory covers every production Python library module and its plugin mirror."""
+    """Recursive D1 inventory auto-covers new modules such as repository_binding.py."""
     assert_python_module_inventory_matches(PYTHON_LIBRARY_INVENTORY)
 
 
 def test_recursive_python_library_inventory_is_python39_compatible():
-    """Recursive inventory modules parse under the supported grammar and import from both roots."""
+    """Every recursive module, including repository_binding.py, passes Python 3.9 parse/import."""
     assert_python_module_inventory_compatible(PYTHON_LIBRARY_INVENTORY)
