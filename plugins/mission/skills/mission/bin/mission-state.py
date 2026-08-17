@@ -191,6 +191,7 @@ from mission_persistence.legacy_v4 import (  # noqa: E402
     LegacyV4Repository,
 )
 from mission_persistence.repository_binding import (  # noqa: E402
+    RepositorySelectionError,
     select_legacy_repository,
 )
 from worktree_archive import (  # noqa: E402
@@ -351,6 +352,41 @@ def _load_state_json(sf: Path) -> dict:
     data = json.loads(sf.read_text())
     _validate_schema_version(data)
     return data
+
+
+def _reject_legacy_repository_selection(sf: Path, error: RepositorySelectionError) -> None:
+    """Translate a library selection rejection into the legacy CLI contract."""
+    try:
+        source = _read_stable_bytes(sf, limit=4 * 1024 * 1024)
+        document = _thaw_strict_json_object(_decode_strict_json_object(source))
+    except Exception:
+        document = None
+    if isinstance(document, dict):
+        # Preserve the established #483 diagnostic and exit-code contract.
+        _validate_schema_version(document)
+    print(
+        f"ERROR: legacy repository selection rejected: {error.code}",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
+
+def _select_legacy_repository_for_cli(session_id, sf, legacy_factory):
+    """Bind every selector failure, including retained-guard drift, to CLI errors."""
+
+    def bind_cli_guard(format_guard):
+        def cli_format_guard():
+            try:
+                return format_guard()
+            except RepositorySelectionError as error:
+                _reject_legacy_repository_selection(Path(sf), error)
+
+        return legacy_factory(cli_format_guard)
+
+    try:
+        return select_legacy_repository(session_id, sf, bind_cli_guard)
+    except RepositorySelectionError as error:
+        _reject_legacy_repository_selection(Path(sf), error)
 
 
 def _new_specialist_selection_checkpoint() -> dict:
@@ -6810,7 +6846,7 @@ def _legacy_evidence_repository(cwd: Path, sf: Path, *, stamp: bool) -> LegacyV4
         proposed = stamp_metadata(data, cwd) if stamp else data
         atomic_write_json(sf, proposed, lease_decision=lease["decision"])
 
-    return select_legacy_repository(
+    return _select_legacy_repository_for_cli(
         sf.stem,
         sf,
         lambda format_guard: LegacyV4Repository(
@@ -8577,7 +8613,7 @@ def _legacy_lifecycle_repository(
             else:
                 atomic_write_json(sf, proposed)
 
-    return select_legacy_repository(
+    return _select_legacy_repository_for_cli(
         session_id or sf.stem,
         sf,
         lambda format_guard: LegacyV4Repository(
@@ -9705,6 +9741,8 @@ def _record_permission_probe_observation(
             with contextlib.suppress(OSError):
                 _remove_from_aggregate(cwd, sf.stem)
         return result.halt_recorded
+    except UnsupportedSchemaVersionError:
+        raise
     except (OSError, ValueError):
         return False
 
@@ -14563,7 +14601,7 @@ def _terminalize_state_file(
             # publishes the already revalidated terminal state under this lock.
             _atomic_write(sf, lambda f: json.dump(data, f, indent=2, ensure_ascii=False))
 
-        repository = select_legacy_repository(
+        repository = _select_legacy_repository_for_cli(
             str(latest.get("session_id") or sf.stem),
             sf,
             lambda format_guard: LegacyV4Repository(
@@ -16983,7 +17021,11 @@ def _build_parser():
 def main():
     args = _build_parser().parse_args()
     try:
-        args.func(args)
+        try:
+            args.func(args)
+        except UnsupportedSchemaVersionError as error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            raise SystemExit(2)
     except SystemExit as error:
         code = error.code if isinstance(error.code, int) else 1
         if (

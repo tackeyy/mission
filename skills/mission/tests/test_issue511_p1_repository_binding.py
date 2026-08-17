@@ -161,6 +161,34 @@ def test_public_stage_rejects_sealed_transition_from_modified_admitted_state(tmp
         repository.stage(admitted, transition, request.blobs)
 
 
+def test_public_stage_rejects_kernel_transition_modified_after_issue(tmp_path):
+    repository, _root, lease_id = _seed_repository(tmp_path)
+    command = MarkHalt(HaltCategory.OTHER, "authorized stop")
+    request = _request(
+        "modified-output-operation",
+        lease_id,
+        typed_command=command,
+        event_types=("mission-halted",),
+    )
+    admitted = repository.begin(request)
+    assert isinstance(admitted, AdmittedSnapshot) and admitted.base is not None
+    admitted_state = replace(
+        admitted.base.state,
+        lease=admitted.pending_lease.target,
+        snapshot_provenance=None,
+    )
+    transition = decide(admitted_state, command).transition
+    assert transition is not None
+    forged_state = replace(
+        transition.new_state,
+        control=replace(transition.new_state.control, halt_reason="forged after issue"),
+    )
+    object.__setattr__(transition, "new_state", forged_state)
+
+    with pytest.raises(Exception, match="transition differs from canonical decision output"):
+        repository.stage(admitted, transition, request.blobs)
+
+
 def test_public_stage_rejects_audit_events_that_differ_from_transition(tmp_path):
     repository, _root, lease_id = _seed_repository(tmp_path)
     command = MarkHalt(HaltCategory.OTHER, "audit stop")
@@ -410,6 +438,23 @@ def test_selector_recognizes_an_existing_v5_head_without_an_environment_flag(tmp
     assert selected.repository == "v5-repository"
 
 
+def test_legacy_set_rejects_v5_head_with_fail_closed_reason(run_cli, tmp_path):
+    _repository, repository_root, _lease_id = _seed_repository(tmp_path)
+    state_path = repository_root / "sessions" / "test.json"
+    before = state_path.read_bytes()
+
+    result = run_cli(
+        "set",
+        "compatibility_probe=1",
+        cwd=repository_root.parent,
+    )
+
+    assert result.returncode != 0
+    assert "repository-format-v5-requires-uow" in result.stderr
+    assert "internal-error" not in result.stdout
+    assert state_path.read_bytes() == before
+
+
 def test_retained_legacy_selector_rechecks_format_at_repository_load(tmp_path):
     from mission_persistence.repository_binding import require_legacy_session
 
@@ -482,6 +527,30 @@ def test_retained_selector_rejects_same_format_cross_session_replacement(tmp_pat
     assert calls == ["legacy"]
 
 
+def test_retained_selector_rejects_removal_of_known_session_identity(tmp_path):
+    from mission_persistence.repository_binding import (
+        FormatPinnedRepositorySelector,
+        RepositorySelectionError,
+    )
+
+    session, _ = generate_cli_state_bytes(tmp_path / "identity-downgrade")
+    calls = []
+    selector = FormatPinnedRepositorySelector(
+        session_id="test",
+        session_path=session,
+        legacy_factory=lambda: calls.append("legacy") or "legacy",
+        v5_factory=lambda: calls.append("v5") or "v5",
+    )
+    selector.select()
+    downgraded = json.loads(session.read_bytes())
+    downgraded.pop("session_id")
+    session.write_text(json.dumps(downgraded), encoding="utf-8")
+
+    with pytest.raises(RepositorySelectionError, match="repository-session-drift"):
+        selector.select()
+    assert calls == ["legacy"]
+
+
 def test_missing_version_and_session_identity_remains_bounded_legacy_compatibility(tmp_path):
     from mission_persistence.repository_binding import (
         FormatPinnedRepositorySelector,
@@ -510,6 +579,7 @@ def test_missing_version_and_session_identity_remains_bounded_legacy_compatibili
         {"schema": "future-format/1", "session_id": "test"},
         {},
         {"schema_version": 5, "session_id": "test"},
+        {"schema_version": 4, "session_id": "test"},
     ],
 )
 def test_selector_rejects_every_unknown_or_future_format(tmp_path, document):

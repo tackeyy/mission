@@ -23,8 +23,10 @@ the production CLI.
 1. Add the ADR-005 public `stage(admitted, transition, blobs)` method. It
    accepts only a sealed kernel `Transition`, binds its effects to the exact
    immutable blob set in the admitted `ExecutionRequest`, requires the target
-   lease already decided by `begin`, and performs canonical state encoding
-   internally before entering the existing private persistence machinery.
+   lease already decided by `begin`, independently re-derives the canonical
+   decision output from the admitted state and typed command, and performs
+   canonical state encoding internally before entering the existing private
+   persistence machinery.
 2. Add one typed command execution boundary shared by compatibility v4 and v5.
    The request carries session, lease owner/token, immutable command and blobs,
    operation identity, intent digest, and audit categories. A pure decision is
@@ -32,8 +34,11 @@ the production CLI.
    publication.
 3. Add a format-pinned selector. It strictly reads the loaded session once,
    accepts only missing/v1-v4 state documents or `mission-head/1`, constructs
-   exactly one matching repository, and rejects format/identity drift. It has
-   no environment-variable writer switch and never dual-writes.
+   exactly one matching repository, and rejects format/identity drift,
+   including removal of a session identity observed on the first selection.
+   Versioned compatibility documents must still carry a bounded legacy
+   identity/control envelope before a factory can be constructed. It has no
+   environment-variable writer switch and never dual-writes.
 4. Route the A1-A5 CLI repository factories through the selector's legacy
    assertion now. This preserves exact v4 bytes while preventing an existing
    v5 head from accidentally reaching a legacy writer. Production v5 creation

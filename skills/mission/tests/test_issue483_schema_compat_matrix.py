@@ -601,6 +601,48 @@ def test_unsupported_schema_versions_fail_closed_without_writing_state(
     assert state_path.read_bytes() == before
 
 
+def test_activity_reports_unsupported_schema_version_without_writing_state(run_cli, tmp_path):
+    root = tmp_path / "activity-unsupported-schema"
+    state = copy.deepcopy(V4_STATE)
+    state["schema_version"] = "future"
+    state_path = _write_state(root, state)
+    before = state_path.read_bytes()
+
+    result = run_cli(
+        "activity",
+        "start",
+        "--kind",
+        "active",
+        "--reason",
+        "implementation",
+        cwd=root,
+    )
+
+    assert result.returncode != 0
+    assert "schema_version" in result.stderr
+    assert "internal-error" not in result.stdout
+    assert state_path.read_bytes() == before
+
+
+def test_permission_preflight_does_not_hide_unsupported_schema_version(run_cli, tmp_path):
+    root = tmp_path / "permission-unsupported-schema"
+    state = copy.deepcopy(V4_STATE)
+    state["schema_version"] = "future"
+    state["assumptions_path"] = ".mission-state/assumptions.md"
+    state_path = _write_state(root, state)
+    assumptions_path = root / ".mission-state" / "assumptions.md"
+    assumptions_path.write_text("# Assumptions\n", encoding="utf-8")
+    before = state_path.read_bytes()
+
+    result = run_cli("permission-preflight", "--json", cwd=root)
+
+    assert result.returncode != 0
+    assert "schema_version" in result.stderr
+    assert '"ok": true' not in result.stdout
+    assert "internal-error" not in result.stdout
+    assert state_path.read_bytes() == before
+
+
 def test_schema_version_missing_keeps_legacy_v1_compatibility(run_cli, tmp_path):
     root = tmp_path / "legacy-missing"
     state = copy.deepcopy(MISSING_SCHEMA_STATE)

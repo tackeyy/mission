@@ -58,8 +58,9 @@ class FormatPinnedRepositorySelector(Generic[RepositoryT]):
         self._legacy_factory = legacy_factory
         self._v5_factory = v5_factory
         self._selection: RepositorySelection[RepositoryT] | None = None
+        self._selected_document_session: str | None = None
 
-    def _loaded_format(self) -> RepositoryFormat:
+    def _loaded_format(self) -> tuple[RepositoryFormat, str | None]:
         try:
             source = read_stable_bytes(self._session_path, limit=4 * 1024 * 1024)
         except Exception as exc:
@@ -73,7 +74,7 @@ class FormatPinnedRepositorySelector(Generic[RepositoryT]):
                 _parse_head(source, self._session_id)
             except (FencedCommitError, ValueError) as head_error:
                 raise RepositorySelectionError("repository-format-invalid") from head_error
-            return RepositoryFormat.V5
+            return RepositoryFormat.V5, self._session_id
         if "schema" in document:
             raise RepositorySelectionError("repository-format-invalid")
         schema_version = document.get("schema_version")
@@ -83,20 +84,25 @@ class FormatPinnedRepositorySelector(Generic[RepositoryT]):
             # A v5 state generation is immutable content, not a session head;
             # unknown versions cannot silently enter the compatibility writer.
             raise RepositorySelectionError("repository-format-invalid")
-        if schema_version is None and not set(document).intersection(
-            {"mission", "mission_id", "session_id", "phase", "loop_active"}
-        ):
+        identity_values = (document.get("mission"), document.get("mission_id"))
+        has_identity = any(isinstance(value, str) and value for value in identity_values)
+        phase = document.get("phase")
+        loop_active = document.get("loop_active")
+        has_control = isinstance(phase, str) or type(loop_active) is bool
+        if not has_identity or not has_control:
             raise RepositorySelectionError("repository-format-invalid")
         document_session = document.get("session_id")
         if document_session is not None and document_session != self._session_id:
             raise RepositorySelectionError("repository-session-mismatch")
-        return RepositoryFormat.LEGACY_V4
+        return RepositoryFormat.LEGACY_V4, document_session
 
     def select(self) -> RepositorySelection[RepositoryT]:
-        loaded_format = self._loaded_format()
+        loaded_format, document_session = self._loaded_format()
         if self._selection is not None:
             if loaded_format is not self._selection.format:
                 raise RepositorySelectionError("repository-format-drift")
+            if document_session != self._selected_document_session:
+                raise RepositorySelectionError("repository-session-drift")
             return self._selection
         factory = (
             self._legacy_factory
@@ -109,6 +115,7 @@ class FormatPinnedRepositorySelector(Generic[RepositoryT]):
             format=loaded_format,
             repository=repository,
         )
+        self._selected_document_session = document_session
         return self._selection
 
 

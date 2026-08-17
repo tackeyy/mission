@@ -1798,6 +1798,18 @@ class LocalFencedRepository:
                 "transition-binding-mismatch",
                 "transition differs from its admitted state or command",
             )
+        canonical_decision = decide(admitted_state, admitted.request.typed_command)
+        canonical_transition = canonical_decision.transition
+        if (
+            not canonical_decision.accepted
+            or canonical_transition is None
+            or transition.new_state != canonical_transition.new_state
+            or transition.events != canonical_transition.events
+        ):
+            raise FencedCommitError(
+                "transition-binding-mismatch",
+                "transition differs from canonical decision output",
+            )
         event_types = tuple(event.type for event in transition.events)
         if event_types != admitted.request.audit.event_types:
             raise FencedCommitError(
