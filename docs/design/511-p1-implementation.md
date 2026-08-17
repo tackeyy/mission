@@ -43,14 +43,16 @@ the production CLI.
    environment-variable writer switch and never dual-writes.
 4. Route the A1-A5 CLI repository factories through the selector's legacy
    assertion now. This preserves exact v4 bytes while preventing an existing
-   v5 head from accidentally reaching a legacy writer. Only the five closed K2
-   commands (`AdvancePhase`, `MarkHalt`, `MarkPass`, `Reactivate`, and
-   `ResumeStale`) are bound to the common port in P1. Activity, generic set,
-   permission timing/activity projection, and every other compatibility-only
-   mutation are mandatory C1 work in #513 before production v5 creation.
-5. Add a static ownership inventory for the A1-A5 routed command set and cover
-   the new modules with recursive distribution, Python 3.9 parsing, mirror,
-   and artifact-hygiene gates.
+   v5 head from accidentally reaching a legacy writer. This is a runtime
+   format guard, not application-use-case integration with the common port.
+5. Add retained-selector runtime tests for the legacy factories and cover the
+   new modules with recursive distribution, Python 3.9 parsing, mirror, and
+   artifact-hygiene gates.
+
+Application connection for all five closed K2 commands, the complete v4/v5
+matrix, route ownership inventory, and every remaining compatibility mutation
+(including activity, generic set, and permission timing/activity projection)
+are mandatory C1 work in #513 before production v5 creation.
 
 ## Red to Green sequence
 
