@@ -51,6 +51,17 @@ COMMAND_APPLICATION_ROUTES = {
     "cmd_update_project_root": "run_update_project_root",
 }
 
+FORBIDDEN_SESSION_WRITER_CALLS = {"StateLock", "atomic_write_json"}
+ALLOWED_NON_C2_CALL_SITES = {
+    # C1-owned initialization writes and locks.
+    ("_guarded_init_state_lock", "StateLock"),
+    ("_initialize_legacy_v4", "atomic_write_json"),
+    ("_initialize_new_v5_session", "StateLock"),
+    # Aggregate and review-lineage serialization do not write session state.
+    ("_remove_from_aggregate", "atomic_write_json"),
+    ("_review_lineage_transaction", "StateLock"),
+}
+
 
 def _load_mission_state_module():
     source = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
@@ -75,6 +86,78 @@ def _leaf_parser_commands(parser, prefix=()):
         for name, child in action.choices.items():
             commands.update(_leaf_parser_commands(child, prefix + (name,)))
     return commands
+
+
+def forbidden_calls_in_reachable(entry_names, *, tree=None):
+    """Find forbidden calls reachable through module-level function calls."""
+
+    if tree is None:
+        source = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+    class DirectCallVisitor(ast.NodeVisitor):
+        def __init__(self):
+            self.calls = []
+
+        def visit_Call(self, node):
+            self.calls.append(node)
+            self.generic_visit(node)
+
+        def visit_FunctionDef(self, node):
+            return
+
+        def visit_AsyncFunctionDef(self, node):
+            return
+
+        def visit_Lambda(self, node):
+            return
+
+    violations = []
+    for entry_name in sorted(entry_names):
+        pending = [entry_name]
+        visited = set()
+        while pending:
+            function_name = pending.pop()
+            if function_name in visited:
+                continue
+            visited.add(function_name)
+            function = functions.get(function_name)
+            if function is None:
+                continue
+            visitor = DirectCallVisitor()
+            for statement in function.body:
+                visitor.visit(statement)
+            for call in visitor.calls:
+                if not isinstance(call.func, ast.Name):
+                    continue
+                called_name = call.func.id
+                if called_name in FORBIDDEN_SESSION_WRITER_CALLS:
+                    if (function_name, called_name) not in ALLOWED_NON_C2_CALL_SITES:
+                        violations.append((entry_name, called_name, call.lineno))
+                elif called_name in functions and called_name not in visited:
+                    pending.append(called_name)
+    return sorted(violations)
+
+
+def test_forbidden_call_inventory_follows_module_level_helpers():
+    tree = ast.parse(
+        """
+def cmd_supersede_reviews():
+    _supersede_reviews_locked()
+
+def _supersede_reviews_locked():
+    atomic_write_json()
+"""
+    )
+
+    assert forbidden_calls_in_reachable(
+        {"cmd_supersede_reviews"}, tree=tree
+    ) == [("cmd_supersede_reviews", "atomic_write_json", 6)]
 
 
 def test_all_parser_commands_have_exactly_one_declared_owner():
@@ -122,21 +205,9 @@ def test_c2_stage_a_and_direct_write_allowlist_are_closed_and_disjoint():
 
 
 def test_c2_repository_commands_have_no_direct_legacy_session_writer_calls():
-    source = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
-    tree = ast.parse(source.read_text(encoding="utf-8"))
     target_names = {"cmd_planning_reselect", "cmd_supersede_reviews"}
-    forbidden = {"StateLock", "atomic_write_json"}
-    violations = []
-    for function in (
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name in target_names
-    ):
-        for call in (node for node in ast.walk(function) if isinstance(node, ast.Call)):
-            if isinstance(call.func, ast.Name) and call.func.id in forbidden:
-                violations.append((function.name, call.func.id, call.lineno))
 
-    assert violations == []
+    assert forbidden_calls_in_reachable(target_names) == []
 
 
 def test_direct_legacy_call_inventory_has_no_silent_parser_adapter_gap():
@@ -147,20 +218,18 @@ def test_direct_legacy_call_inventory_has_no_silent_parser_adapter_gap():
 
     source = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
     tree = ast.parse(source.read_text(encoding="utf-8"))
-    forbidden = {"StateLock", "atomic_write_json"}
-    discovered = set()
-    for function in (
-        node
+    entry_names = {
+        node.name
         for node in tree.body
-        if isinstance(node, ast.FunctionDef)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         and (node.name.startswith("cmd_") or node.name.startswith("_cmd_"))
-    ):
-        if any(
-            isinstance(call.func, ast.Name) and call.func.id in forbidden
-            for call in ast.walk(function)
-            if isinstance(call, ast.Call)
-        ):
-            discovered.add(function.name)
+    }
+    discovered = {
+        entry_name
+        for entry_name, _forbidden_name, _line in forbidden_calls_in_reachable(
+            entry_names, tree=tree
+        )
+    }
 
     assert discovered == C2_DIRECT_WRITE_FUNCTIONS | NON_SESSION_DIRECT_CALL_FUNCTIONS
 

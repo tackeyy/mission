@@ -15056,6 +15056,14 @@ def cmd_supersede_reviews(args):
 
 
 def _supersede_reviews_locked(args, cwd: Path):
+    """Publish one review group in generation order.
+
+    A mixed v4/v5 group can remain detectably inconsistent after a
+    mid-publication failure: committed v5 generations are durable while
+    committed v4 generations are rolled back.  The caller must retry once
+    with the same MISSION_OPERATION_ID to converge the group.
+    """
+
     group = args.group
     if not isinstance(group, str) or not group or "\x00" in group:
         print("ERROR: review group is invalid", file=sys.stderr)

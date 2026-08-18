@@ -138,12 +138,17 @@ C2_DIRECT_WRITE_ALLOWLIST = frozenset(
 )
 
 
-# Parser adapters whose bodies still contain a direct legacy session writer or
-# lock.  The static inventory test keeps this list synchronized with the AST;
-# migration removes names instead of silently adding new direct writers.
+# Parser adapters and their shared dispatch helper that can reach a direct
+# legacy session writer or lock.  The static inventory test follows
+# module-level helper calls; migration removes names instead of silently adding
+# new direct writers.
 C2_DIRECT_WRITE_FUNCTIONS = frozenset(
     {
         "_cmd_executor_handoff",
+        "cmd_executor_handoff_begin",
+        "cmd_executor_handoff_complete",
+        "cmd_executor_handoff_record",
+        "cmd_executor_handoff_verify",
         "cmd_invoke_command_provider",
         "cmd_log_specialist_invocation",
         "cmd_manual_score_capture",

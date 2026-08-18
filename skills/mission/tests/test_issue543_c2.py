@@ -15,6 +15,31 @@ from types import SimpleNamespace
 
 MISSION_STATE_PY = Path(__file__).resolve().parent.parent / "bin" / "mission-state.py"
 
+LOCK_READY_BOOTSTRAP = """
+import importlib.util
+import os
+from pathlib import Path
+import sys
+
+script = Path(sys.argv[1])
+arguments = sys.argv[2:]
+spec = importlib.util.spec_from_file_location("mission_state_lock_ready", script)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+original_lock = module.StateLock
+ready_path = Path(os.environ["ISSUE543_LOCK_READY"])
+
+class SignalingStateLock(original_lock):
+    def __enter__(self):
+        ready_path.write_text("ready", encoding="utf-8")
+        return super().__enter__()
+
+module.StateLock = SignalingStateLock
+sys.argv = [str(script), *arguments]
+module.main()
+"""
+
 
 def _load_mission_state_module(name: str):
     spec = importlib.util.spec_from_file_location(name, MISSION_STATE_PY)
@@ -48,6 +73,39 @@ def _state(run_cli, root, session_id: str, lease_id: str):
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
+
+
+def _start_lock_ready_cli(arguments, *, cwd, environment, ready_path):
+    child_environment = {**environment, "ISSUE543_LOCK_READY": str(ready_path)}
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            LOCK_READY_BOOTSTRAP,
+            str(MISSION_STATE_PY),
+            *arguments,
+        ],
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=child_environment,
+    )
+
+
+def _wait_for_lock_attempt(process, ready_path):
+    deadline = time.monotonic() + 10
+    while not ready_path.exists():
+        if process.poll() is not None:
+            stdout, stderr = process.communicate()
+            raise AssertionError(
+                "concurrent command exited before attempting the lock: "
+                + stderr
+                + stdout
+            )
+        if time.monotonic() >= deadline:
+            raise AssertionError("concurrent command did not attempt the lock")
+        time.sleep(0.01)
 
 
 def test_planning_reselect_real_process_preserves_v5_and_replays(run_cli, tmp_path):
@@ -188,6 +246,73 @@ def test_planning_reselect_v5_requires_a_caller_stable_operation_id(
     assert rejected.returncode == 2
     assert "MISSION_OPERATION_ID" in rejected.stderr
     assert _head(tmp_path, "planning") == before
+
+
+def test_stage_b_planning_adopt_core_fails_closed_for_a_v5_session(
+    run_cli, tmp_path
+):
+    environment = _env("stage-b-observation", "stage-b-observation-lease")
+    initialized = run_cli(
+        "init",
+        "observe retained Stage B command",
+        "--complexity",
+        "Standard",
+        cwd=tmp_path,
+        env_extra=environment,
+    )
+    assert initialized.returncode == 0, initialized.stderr
+    before = _head(tmp_path, "stage-b-observation")
+    plan = tmp_path / "stage-b-plan.json"
+    plan.write_text(
+        json.dumps(
+            {
+                "schema": "mission-plan/1",
+                "objective": "observe one retained Stage B command",
+                "scope": {
+                    "resources": [],
+                    "actions": [
+                        {"type": "analyze", "effect_class": "reversible"}
+                    ],
+                },
+                "assumptions": [
+                    {
+                        "id": "input",
+                        "statement": "the fixture exists",
+                        "validation": "read the fixture",
+                    }
+                ],
+                "steps": [
+                    {
+                        "id": "observe",
+                        "action": "analyze",
+                        "inputs": [],
+                        "outputs": ["finding"],
+                        "depends_on": [],
+                        "acceptance_checks": ["finding is recorded"],
+                        "risk": "low",
+                        "rollback": "none",
+                    }
+                ],
+                "global_acceptance": ["observation is complete"],
+                "stop_conditions": ["fixture is unavailable"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    observed = run_cli(
+        "planning",
+        "adopt-core",
+        "--input",
+        str(plan),
+        cwd=tmp_path,
+        env_extra=environment,
+    )
+
+    assert observed.returncode != 0
+    assert "planning-policy-not-active" in observed.stderr
+    assert _head(tmp_path, "stage-b-observation") == before
+    assert before["schema"] == "mission-head/1"
 
 
 def test_planning_reselect_preserves_retained_v4_behavior(
@@ -334,6 +459,134 @@ def test_supersede_reviews_retained_v4_rolls_back_all_members_on_write_failure(
     assert {
         path: json.loads(path.read_text(encoding="utf-8")) for path in session_paths
     } == {path: json.loads(payload) for path, payload in before.items()}
+
+
+def test_supersede_reviews_mixed_v5_v4_group_recovers_on_one_same_id_retry(
+    run_cli, monkeypatch, tmp_path
+):
+    from .mission_state_fixture_corpus import _materialize_legacy_init_fixture
+
+    common = [
+        "init",
+        "mixed repository review generation",
+        "--force-mission",
+        "--complexity",
+        "Standard",
+        "--review-group-id",
+        "mixed-retry-group",
+    ]
+    first_old_environment = _env("mixed-old-v5-1", "mixed-old-v5-1-lease", ttl=1)
+    second_old_environment = _env("mixed-old-v5-2", "mixed-old-v5-2-lease", ttl=1)
+    current_environment = _env("mixed-current-v4", "mixed-current-v4-lease")
+    assert run_cli(
+        *common, cwd=tmp_path, env_extra=first_old_environment
+    ).returncode == 0
+    assert run_cli(
+        *common, cwd=tmp_path, env_extra=second_old_environment
+    ).returncode == 0
+    assert run_cli(
+        *common, cwd=tmp_path, env_extra=current_environment
+    ).returncode == 0
+    _materialize_legacy_init_fixture(
+        tmp_path,
+        session_ids=("mixed-current-v4",),
+        cleanup_v5=False,
+    )
+    time.sleep(1.1)
+    module = _load_mission_state_module("mission_state_issue543_mixed_retry")
+    original_write = module.atomic_write_json
+    current_path = (
+        tmp_path / ".mission-state" / "sessions" / "mixed-current-v4.json"
+    )
+    injected = False
+
+    def fail_current_v4_write(path, data, **kwargs):
+        nonlocal injected
+        if Path(path) == current_path and not injected:
+            injected = True
+            raise OSError("injected mixed-group v4 write failure")
+        return original_write(path, data, **kwargs)
+
+    monkeypatch.setattr(module, "atomic_write_json", fail_current_v4_write)
+    monkeypatch.chdir(tmp_path)
+    for key, value in {
+        **current_environment,
+        "MISSION_OPERATION_ID": "supersede-mixed-retry",
+    }.items():
+        monkeypatch.setenv(key, value)
+
+    try:
+        module.cmd_supersede_reviews(SimpleNamespace(group="mixed-retry-group"))
+    except SystemExit as error:
+        assert error.code == 2
+    else:
+        raise AssertionError("injected mixed-group failure was not propagated")
+    assert injected
+    old_after_failure = {
+        session_id: _state(run_cli, tmp_path, session_id, session_id + "-lease")
+        for session_id in ("mixed-old-v5-1", "mixed-old-v5-2")
+    }
+    current_after_failure = _head(tmp_path, "mixed-current-v4")
+    assert all(
+        state["terminal_outcome"] == "stale_superseded"
+        for state in old_after_failure.values()
+    )
+    assert current_after_failure.get("supersedes") == []
+
+    monkeypatch.setattr(module, "atomic_write_json", original_write)
+    module.cmd_supersede_reviews(SimpleNamespace(group="mixed-retry-group"))
+
+    old_after_retry = {
+        session_id: _state(run_cli, tmp_path, session_id, session_id + "-lease")
+        for session_id in ("mixed-old-v5-1", "mixed-old-v5-2")
+    }
+    current_after_retry = _head(tmp_path, "mixed-current-v4")
+    assert all(
+        state["terminal_outcome"] == "stale_superseded"
+        for state in old_after_retry.values()
+    )
+    assert current_after_retry["supersedes"] == [
+        "mixed-old-v5-1",
+        "mixed-old-v5-2",
+    ]
+
+
+def test_supersede_reviews_v5_requires_a_caller_stable_operation_id(
+    run_cli, tmp_path
+):
+    common = [
+        "init",
+        "supersede operation contract",
+        "--force-mission",
+        "--complexity",
+        "Standard",
+        "--review-group-id",
+        "supersede-operation-group",
+    ]
+    old_environment = _env("operation-old", "operation-old-lease", ttl=1)
+    current_environment = _env("operation-current", "operation-current-lease")
+    assert run_cli(*common, cwd=tmp_path, env_extra=old_environment).returncode == 0
+    assert run_cli(*common, cwd=tmp_path, env_extra=current_environment).returncode == 0
+    time.sleep(1.1)
+    before = {
+        session_id: _head(tmp_path, session_id)
+        for session_id in ("operation-old", "operation-current")
+    }
+
+    rejected = run_cli(
+        "supersede-reviews",
+        "--group",
+        "supersede-operation-group",
+        cwd=tmp_path,
+        env_extra=current_environment,
+    )
+
+    assert rejected.returncode == 2
+    assert "MISSION_OPERATION_ID" in rejected.stderr
+    assert {
+        session_id: _head(tmp_path, session_id)
+        for session_id in ("operation-old", "operation-current")
+    } == before
 
 
 def test_supersede_reviews_retry_recovers_a_terminal_old_v5_prepare(
@@ -516,17 +769,14 @@ def test_supersede_reviews_serializes_discovery_with_separate_process_init(
         and key not in {"CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"}
     }
     child_environment.update(_env("concurrent-new", "concurrent-new-lease"))
-    concurrent_init = subprocess.Popen(
-        [sys.executable, str(MISSION_STATE_PY), *common],
-        cwd=str(tmp_path),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=child_environment,
+    init_ready = tmp_path / "concurrent-init-lock-ready"
+    concurrent_init = _start_lock_ready_cli(
+        common,
+        cwd=tmp_path,
+        environment=child_environment,
+        ready_path=init_ready,
     )
-    time.sleep(0.2)
-    assert concurrent_init.poll() is None
-
+    _wait_for_lock_attempt(concurrent_init, init_ready)
     release_locked_body.set()
     supersede_thread.join(timeout=10)
     assert not supersede_thread.is_alive()
@@ -606,30 +856,27 @@ def test_supersede_reviews_serializes_discovery_with_review_lineage_set(
         and key not in {"CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"}
     }
     child_environment.update(joiner_environment)
-    concurrent_set = subprocess.Popen(
+    set_ready = tmp_path / "concurrent-set-lock-ready"
+    concurrent_set = _start_lock_ready_cli(
         [
-            sys.executable,
-            str(MISSION_STATE_PY),
             "set",
             "review_group_id=set-race-group",
             "review_generation=3",
         ],
-        cwd=str(tmp_path),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=child_environment,
+        cwd=tmp_path,
+        environment=child_environment,
+        ready_path=set_ready,
     )
-    time.sleep(0.2)
-    set_was_blocked = concurrent_set.poll() is None
-
+    _wait_for_lock_attempt(concurrent_set, set_ready)
     release_locked_body.set()
     supersede_thread.join(timeout=10)
     assert not supersede_thread.is_alive()
     assert supersede_errors == []
     set_stdout, set_stderr = concurrent_set.communicate(timeout=10)
     assert concurrent_set.returncode == 0, set_stderr + set_stdout
-    assert set_was_blocked
+    joiner = _state(run_cli, tmp_path, "set-race-joiner", "set-race-joiner-lease")
+    assert joiner["review_group_id"] == "set-race-group"
+    assert joiner["review_generation"] == 3
 
 
 def test_supersede_reviews_serializes_with_terminal_review_refresh_pid(
@@ -703,24 +950,20 @@ def test_supersede_reviews_serializes_with_terminal_review_refresh_pid(
     }
     child_environment["MISSION_SESSION_ID"] = "refresh-race-1"
     child_environment["MISSION_FORCE_PID_IS_AGENT"] = "1"
-    concurrent_refresh = subprocess.Popen(
-        [sys.executable, str(MISSION_STATE_PY), "refresh-pid", "--force"],
-        cwd=str(tmp_path),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=child_environment,
+    refresh_ready = tmp_path / "concurrent-refresh-lock-ready"
+    concurrent_refresh = _start_lock_ready_cli(
+        ["refresh-pid", "--force"],
+        cwd=tmp_path,
+        environment=child_environment,
+        ready_path=refresh_ready,
     )
-    time.sleep(0.2)
-    refresh_was_blocked = concurrent_refresh.poll() is None
-
+    _wait_for_lock_attempt(concurrent_refresh, refresh_ready)
     release_locked_body.set()
     supersede_thread.join(timeout=10)
     assert not supersede_thread.is_alive()
     assert supersede_errors == []
     refresh_stdout, refresh_stderr = concurrent_refresh.communicate(timeout=10)
     assert concurrent_refresh.returncode == 0, refresh_stderr + refresh_stdout
-    assert refresh_was_blocked
 
 
 def test_supersede_reviews_rejects_a_live_old_v5_lease_without_any_write(
