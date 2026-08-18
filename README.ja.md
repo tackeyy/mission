@@ -238,6 +238,7 @@ Stop hook の stale-state 警告は macOS では BSD `date`、Linux では GNU `
 | `MISSION_SEARCH_ROOTS` | 現在のディレクトリ | `list` / `cleanup-stale` / `stats` / `halt --all` の検索対象 |
 | `MISSION_LEASE_ID` | 未設定 | mutating command 用の明示 fencing token。lease-free な legacy state は最初の write で取得できる |
 | `MISSION_LEASE_TTL_SECONDS` | `900` | mutating command の lease TTL（秒） |
+| `MISSION_OPERATION_ID` | 未設定 | v5 の `planning reselect` / `supersede-reviews` に必須の caller-stable retry ID。同一 retry だけ再利用し、新規 invocation では新しい ID を渡す |
 | `MISSION_SESSION_ID` | 未設定 | 明示 session ID。`CLAUDE_CODE_SESSION_ID` → `CODEX_THREAD_ID` → pid にフォールバックする |
 | `MISSION_STALE_ACTIVE_SECONDS` | `10800` | active state の stale 判定しきい値（秒） |
 | `MISSION_SKILL_ROOTS` | 未設定 | 既定の `~/.codex/skills` / `~/.claude/skills` より前に探索する追加 skill root |

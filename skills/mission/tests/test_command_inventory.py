@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import ast
+import argparse
+import importlib.util
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -47,6 +50,119 @@ COMMAND_APPLICATION_ROUTES = {
     "cmd_set": "run_set_fields",
     "cmd_update_project_root": "run_update_project_root",
 }
+
+
+def _load_mission_state_module():
+    source = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
+    spec = importlib.util.spec_from_file_location("mission_state_command_inventory", source)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _leaf_parser_commands(parser, prefix=()):
+    subparsers = [
+        action
+        for action in parser._actions
+        if isinstance(action, argparse._SubParsersAction)
+    ]
+    if not subparsers:
+        return {" ".join(prefix)}
+    commands = set()
+    for action in subparsers:
+        for name, child in action.choices.items():
+            commands.update(_leaf_parser_commands(child, prefix + (name,)))
+    return commands
+
+
+def test_all_parser_commands_have_exactly_one_declared_owner():
+    from mission_application.command_owners import COMMAND_OWNER_REGISTRY
+
+    parser_commands = _leaf_parser_commands(_load_mission_state_module()._build_parser())
+
+    assert set(COMMAND_OWNER_REGISTRY) == parser_commands
+    assert all(isinstance(owner, str) and owner for owner in COMMAND_OWNER_REGISTRY.values())
+
+
+def test_c2_stage_a_and_direct_write_allowlist_are_closed_and_disjoint():
+    from mission_application.command_owners import (
+        C2_DIRECT_WRITE_ALLOWLIST,
+        C2_REPOSITORY_COMMANDS,
+        COMMAND_OWNER_REGISTRY,
+    )
+
+    assert C2_REPOSITORY_COMMANDS == frozenset(
+        {"planning reselect", "supersede-reviews"}
+    )
+    assert C2_DIRECT_WRITE_ALLOWLIST == frozenset(
+        {
+            "executor-handoff begin",
+            "executor-handoff complete",
+            "executor-handoff record-step",
+            "executor-handoff verify-step",
+            "manual-score-capture",
+            "planning adopt-core",
+            "planning promote-provider-plan",
+            "specialists invoke-command",
+            "specialists invoke-prepared",
+            "specialists log-invocation",
+            "specialists plan-import",
+            "specialists prepare-invocation",
+            "specialists recommend",
+            "specialists reconcile-invocation",
+            "specialists verify-approval",
+        }
+    )
+    assert C2_REPOSITORY_COMMANDS.isdisjoint(C2_DIRECT_WRITE_ALLOWLIST)
+    assert C2_REPOSITORY_COMMANDS | C2_DIRECT_WRITE_ALLOWLIST <= set(
+        COMMAND_OWNER_REGISTRY
+    )
+
+
+def test_c2_repository_commands_have_no_direct_legacy_session_writer_calls():
+    source = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    target_names = {"cmd_planning_reselect", "cmd_supersede_reviews"}
+    forbidden = {"StateLock", "atomic_write_json"}
+    violations = []
+    for function in (
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in target_names
+    ):
+        for call in (node for node in ast.walk(function) if isinstance(node, ast.Call)):
+            if isinstance(call.func, ast.Name) and call.func.id in forbidden:
+                violations.append((function.name, call.func.id, call.lineno))
+
+    assert violations == []
+
+
+def test_direct_legacy_call_inventory_has_no_silent_parser_adapter_gap():
+    from mission_application.command_owners import (
+        C2_DIRECT_WRITE_FUNCTIONS,
+        NON_SESSION_DIRECT_CALL_FUNCTIONS,
+    )
+
+    source = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    forbidden = {"StateLock", "atomic_write_json"}
+    discovered = set()
+    for function in (
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and (node.name.startswith("cmd_") or node.name.startswith("_cmd_"))
+    ):
+        if any(
+            isinstance(call.func, ast.Name) and call.func.id in forbidden
+            for call in ast.walk(function)
+            if isinstance(call, ast.Call)
+        ):
+            discovered.add(function.name)
+
+    assert discovered == C2_DIRECT_WRITE_FUNCTIONS | NON_SESSION_DIRECT_CALL_FUNCTIONS
 
 
 def test_a1_registry_has_one_owner_for_every_lifecycle_command():

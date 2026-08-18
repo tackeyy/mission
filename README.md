@@ -291,6 +291,7 @@ parsers fail; the core blocking behavior always works.
 | `MISSION_SEARCH_ROOTS` | current directory | Search roots for `list`, `cleanup-stale`, `stats`, and `halt --all` |
 | `MISSION_LEASE_ID` | unset | Explicit fencing token for mutating commands; lease-free legacy state may acquire one on first write |
 | `MISSION_LEASE_TTL_SECONDS` | `900` | Lease TTL in seconds for mutating commands |
+| `MISSION_OPERATION_ID` | unset | Caller-stable retry ID required by v5 `planning reselect` and `supersede-reviews`; reuse it only for an exact retry and issue a new ID for a new invocation |
 | `MISSION_SESSION_ID` | unset | Explicit session ID; falls back to `CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`, then pid |
 | `MISSION_STALE_ACTIVE_SECONDS` | `10800` | Active-state staleness threshold in seconds |
 | `MISSION_SKILL_ROOTS` | unset | Additional skill roots searched before the default `~/.codex/skills` and `~/.claude/skills` |

@@ -8974,6 +8974,60 @@ def _parse_captured_json(text: str):
     return json.loads(text)
 
 
+_PRESENTED_LEASE_UNSET = object()
+
+
+def _canonical_compatibility_operation(
+    session_id: str,
+    command_type: str,
+    arguments: dict,
+    *,
+    caller_operation_id: str | None = None,
+):
+    document = {
+        "arguments": arguments,
+        "schema": "mission-command-intent/1",
+        "type": command_type,
+    }
+    source = json.dumps(
+        document,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    operation_digest = hashlib.sha256(
+        session_id.encode("utf-8") + b"\x00" + source
+    ).hexdigest()
+    return (
+        caller_operation_id or command_type + ":" + operation_digest,
+        _decode_strict_json_object(source),
+    )
+
+
+def _compatibility_operation_arguments(
+    arguments: dict,
+    *,
+    target_digest: str,
+    require_caller: bool,
+) -> tuple[str | None, dict]:
+    """Return the caller retry key and its canonical command arguments.
+
+    V5 requires a caller-provided ID that remains identical across a crash
+    retry.  Retained v4 does not persist operation records; its target-bound
+    fallback only supplies a deterministic compatibility request shape.
+    """
+
+    caller_operation_id = os.environ.get("MISSION_OPERATION_ID")
+    if caller_operation_id is not None:
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", caller_operation_id) is None:
+            raise ValueError("MISSION_OPERATION_ID is not a Token128")
+        return caller_operation_id, arguments
+    if require_caller:
+        raise ValueError("MISSION_OPERATION_ID is required for a v5 mutation")
+    return None, {**arguments, "target_digest": target_digest}
+
+
 def _legacy_lifecycle_repository(
     cwd: Path,
     sf: Path,
@@ -8984,6 +9038,11 @@ def _legacy_lifecycle_repository(
     allow_partial_lease_terminal_write: bool = False,
     pre_admit_lease: bool = False,
     session_id: str | None = None,
+    operation_id: str | None = None,
+    operation_command=None,
+    operation_command_type: str | None = None,
+    lease_owner_session_id: str | None = None,
+    presented_lease_id=_PRESENTED_LEASE_UNSET,
 ) -> LegacyV4Repository:
     admitted_lease = [_LEASE_DECISION_UNSET]
     admitted_identity = [None]
@@ -9094,10 +9153,16 @@ def _legacy_lifecycle_repository(
                 lease_ttl_seconds=_lease_ttl_seconds(),
             ),
             session_id=selected_session_id,
-            lease_owner_session_id=resolve_session_id(),
+            lease_owner_session_id=(
+                lease_owner_session_id or resolve_session_id()
+            ),
             presented_lease_id=(
-                os.environ.get("MISSION_LEASE_ID")
-                or _PROCESS_LEASE_IDS.get(str(sf.resolve()))
+                (
+                    os.environ.get("MISSION_LEASE_ID")
+                    or _PROCESS_LEASE_IDS.get(str(sf.resolve()))
+                )
+                if presented_lease_id is _PRESENTED_LEASE_UNSET
+                else presented_lease_id
             ),
             prepare_state=(
                 (lambda state: stamp_metadata(state, cwd))
@@ -9110,6 +9175,9 @@ def _legacy_lifecycle_repository(
                 sf, state, pending
             ),
             format_guard=format_guard,
+            operation_id=operation_id,
+            operation_command=operation_command,
+            operation_command_type=operation_command_type,
         ),
     )
 
@@ -10450,6 +10518,26 @@ FROZEN_FIELDS = {
 }
 
 
+_REVIEW_LINEAGE_SET_FIELDS = frozenset({"review_generation", "review_group_id"})
+
+
+def _set_mutates_review_lineage(kvs) -> bool:
+    return any(
+        item.partition("=")[0] in _REVIEW_LINEAGE_SET_FIELDS
+        for item in kvs
+        if isinstance(item, str)
+    )
+
+
+@contextlib.contextmanager
+def _review_lineage_transaction(cwd: Path, *, required: bool):
+    if required:
+        with StateLock(state_dir(cwd) / ".init.lock"):
+            yield
+        return
+    yield
+
+
 def cmd_set(args):
     """Adapt generic property syntax to the A1 v4-compatible use case."""
     cwd = Path.cwd()
@@ -10457,6 +10545,18 @@ def cmd_set(args):
     if not sf.exists():
         print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
         sys.exit(1)
+    try:
+        with _review_lineage_transaction(
+            cwd,
+            required=_set_mutates_review_lineage(args.kvs),
+        ):
+            _set_fields_with_repository(args, cwd, sf)
+    except TimeoutError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+
+
+def _set_fields_with_repository(args, cwd: Path, sf: Path):
     try:
         result = run_set_fields(
             _legacy_lifecycle_repository(cwd, sf, stamp=True, strict_read=True),
@@ -13442,9 +13542,46 @@ def cmd_planning_promote_provider_plan(args):
 
 def cmd_planning_reselect(args):
     """Explicitly opt an active legacy planning session into fresh selection only."""
-    cwd = Path.cwd(); sf = resolve_state_file(cwd)
-    with StateLock(lock_file(cwd)):
-        data = json.loads(sf.read_text(encoding="utf-8"))
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    session_id = sf.stem
+    try:
+        target_bytes = sf.read_bytes()
+        inspected = inspect_repository_bytes(
+            target_bytes,
+            expected_session_id=session_id,
+        )
+        target_digest = "sha256:" + hashlib.sha256(target_bytes).hexdigest()
+        caller_operation_id, operation_arguments = _compatibility_operation_arguments(
+            {},
+            target_digest=target_digest,
+            require_caller=inspected.format is RepositoryFormat.V5,
+        )
+        operation_id, operation_command = _canonical_compatibility_operation(
+            session_id,
+            "planning-reselect",
+            operation_arguments,
+            caller_operation_id=caller_operation_id,
+        )
+    except (OSError, RepositorySelectionError, ValueError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+    repository = _legacy_lifecycle_repository(
+        cwd,
+        sf,
+        stamp=True,
+        strict_read=True,
+        session_id=session_id,
+        operation_id=operation_id,
+        operation_command=operation_command,
+        operation_command_type="planning-reselect",
+    )
+    with repository.transaction():
+        data = repository.load()
+        replayed = getattr(repository, "operation_replayed", False)
+        if replayed:
+            print(json.dumps({"ok": True, "planning_policy_version": 1, "next_action": "reselect-planning-provider"}, ensure_ascii=False))
+            return
         if not data.get("loop_active") or data.get("halt_reason") or data.get("phase") != "planning":
             _provider_gate("legacy-reselection-requires-active-planning")
         if any(isinstance(r, dict) and r.get("status") == "running" for r in data.get("specialist_invocations") or []):
@@ -13460,7 +13597,8 @@ def cmd_planning_reselect(args):
         data["specialists_decision"] = _new_specialist_selection_checkpoint()
         # A legacy raw specialist record is intentionally not copied into a
         # public backup before it is discarded.
-        data["updated_at"] = iso_now(); atomic_write_json(sf, stamp_metadata(data, cwd))
+        data["updated_at"] = iso_now()
+        repository.save(data, backup=False)
     print(json.dumps({"ok": True, "planning_policy_version": 1, "next_action": "reselect-planning-provider"}, ensure_ascii=False))
 
 
@@ -14897,9 +15035,27 @@ def cmd_mark_passes(args):
     print(json.dumps(output))
 
 
+@contextlib.contextmanager
+def _review_group_transaction(cwd: Path):
+    """Serialize review discovery and publication with generation allocation."""
+
+    with _review_lineage_transaction(cwd, required=True):
+        yield
+
+
 def cmd_supersede_reviews(args):
     """Terminalize older review generations without deleting their raw records."""
+
     cwd = Path.cwd()
+    try:
+        with _review_group_transaction(cwd):
+            _supersede_reviews_locked(args, cwd)
+    except TimeoutError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+
+
+def _supersede_reviews_locked(args, cwd: Path):
     group = args.group
     if not isinstance(group, str) or not group or "\x00" in group:
         print("ERROR: review group is invalid", file=sys.stderr)
@@ -14917,63 +15073,243 @@ def cmd_supersede_reviews(args):
         current_payload, current_identity = capture(path)
         return current_identity == identity and current_payload == payload
 
-    with StateLock(lock_file(cwd)):
-        members = []
+    members = []
+    try:
+        for state_path in _iter_state_files(cwd):
+            payload, identity = capture(state_path)
+            _snapshot, state = _load_authoritative_state(
+                state_path,
+                legacy_compatibility=True,
+            )
+            if state.get("review_group_id") != group:
+                continue
+            generation = state.get("review_generation")
+            if (
+                not isinstance(generation, int)
+                or isinstance(generation, bool)
+                or generation < 1
+            ):
+                raise ValueError("review group has an invalid generation")
+            members.append((generation, state_path, state, payload, identity))
+    except (OSError, json.JSONDecodeError, ValueError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+    if not members:
+        print("ERROR: review group was not found", file=sys.stderr)
+        sys.exit(2)
+    current_generation = max(item[0] for item in members)
+    current = [item for item in members if item[0] == current_generation]
+    if len(current) != 1:
+        print("ERROR: review group has no single current generation", file=sys.stderr)
+        sys.exit(2)
+    targets = [item for item in members if item[0] < current_generation]
+    if not all(
+        unchanged(path, identity, payload)
+        for _, path, _, payload, identity in members
+    ):
+        print("ERROR: review group changed during supersede preflight", file=sys.stderr)
+        sys.exit(2)
+
+    group_target = json.dumps(
+        [
+            {
+                "digest": "sha256:" + hashlib.sha256(payload).hexdigest(),
+                "session_id": state.get("session_id") or state_path.stem,
+            }
+            for _, state_path, state, payload, _ in sorted(
+                members,
+                key=lambda item: (item[0], item[1].name),
+            )
+        ],
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    group_target_digest = "sha256:" + hashlib.sha256(group_target).hexdigest()
+    try:
+        requires_caller_operation = any(
+            inspect_repository_bytes(
+                payload,
+                expected_session_id=state.get("session_id") or state_path.stem,
+            ).format
+            is RepositoryFormat.V5
+            for _, state_path, state, payload, _ in members
+        )
+    except RepositorySelectionError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+
+    current_path = current[0][1]
+    caller_session_id = resolve_session_id()
+    repositories = []
+    for generation, state_path, state, payload, identity in targets + current:
+        role = "current" if state_path == current_path else "superseded"
+        target_session_id = state.get("session_id") or state_path.stem
+        already_superseded = role == "superseded" and (
+            state.get("terminal_outcome") == "stale_superseded"
+            and state.get("passes") is False
+            and state.get("loop_active") is False
+            and state.get("halt_category") == "stale"
+        )
         try:
-            for state_path in _iter_state_files(cwd):
-                payload, identity = capture(state_path)
-                state = json.loads(payload)
-                if state.get("review_group_id") != group:
-                    continue
-                generation = state.get("review_generation")
-                if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
-                    raise ValueError("review group has an invalid generation")
-                members.append((generation, state_path, state, payload, identity))
-        except (OSError, json.JSONDecodeError, ValueError) as error:
+            caller_operation_id, operation_arguments = _compatibility_operation_arguments(
+                {
+                    "current_generation": current_generation,
+                    "group": group,
+                    "role": role,
+                },
+                target_digest=group_target_digest,
+                require_caller=requires_caller_operation,
+            )
+            operation_id, operation_command = _canonical_compatibility_operation(
+                target_session_id,
+                "supersede-reviews",
+                operation_arguments,
+                caller_operation_id=caller_operation_id,
+            )
+        except ValueError as error:
             print(f"ERROR: {error}", file=sys.stderr)
             sys.exit(2)
-        if not members:
-            print("ERROR: review group was not found", file=sys.stderr)
-            sys.exit(2)
-        current_generation = max(item[0] for item in members)
-        current = [item for item in members if item[0] == current_generation]
-        if len(current) != 1:
-            print("ERROR: review group has no single current generation", file=sys.stderr)
-            sys.exit(2)
-        targets = [item for item in members if item[0] < current_generation]
-        if not all(unchanged(path, identity, payload) for _, path, _, payload, identity in members):
-            print("ERROR: review group changed during supersede preflight", file=sys.stderr)
-            sys.exit(2)
-        now = iso_now()
-        superseded = []
-        originals = [(path, payload) for _, path, _, payload, _ in targets]
-        try:
-            for generation, state_path, state, payload, identity in targets:
-                if not unchanged(state_path, identity, payload):
+        repository = _legacy_lifecycle_repository(
+            cwd,
+            state_path,
+            stamp=False,
+            strict_read=True,
+            session_id=target_session_id,
+            operation_id=operation_id,
+            operation_command=operation_command,
+            operation_command_type="supersede-reviews",
+            lease_owner_session_id=caller_session_id,
+            presented_lease_id=(
+                _PRESENTED_LEASE_UNSET
+                if role == "current"
+                else None
+            ),
+        )
+        if already_superseded:
+            if not isinstance(repository, V5CompatibilityRepository):
+                continue
+            try:
+                committed = repository.read(target_session_id)
+            except FencedCommitError as error:
+                print(f"ERROR: {error}", file=sys.stderr)
+                sys.exit(2)
+            # A crash after head publication leaves this terminal projection
+            # plus a durable prepare.  The same caller operation must enter
+            # begin() once more so repository recovery can finalize it.  A
+            # later review wave has a different operation and safely skips an
+            # already terminal generation without reacquiring its live lease.
+            if committed.commit.operation_id != operation_id:
+                continue
+        repositories.append(
+            (
+                generation,
+                state_path,
+                role,
+                target_session_id,
+                repository,
+            )
+        )
+
+    try:
+        # Admit every per-session fence before publishing the first generation.
+        for generation, state_path, role, _session_id, repository in repositories:
+            with repository.transaction():
+                state = repository.load()
+                if (
+                    state.get("review_group_id") != group
+                    or state.get("review_generation") != generation
+                    or (role == "current") != (generation == current_generation)
+                ):
+                    raise ValueError("review group changed during supersede preflight")
+    except (OSError, ValueError, FencedCommitError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+
+    now = iso_now()
+    superseded = [
+        state.get("session_id") or state_path.stem
+        for _, state_path, state, _, _ in targets
+    ]
+    original_states = {
+        str(state_path.resolve()): copy.deepcopy(state)
+        for _, state_path, state, _, _ in members
+    }
+    committed_legacy = []
+    try:
+        # Old generations publish first.  A crash-safe retry replays completed
+        # operations and continues forward; the current generation publishes
+        # its supersedes index only after every old generation is terminal.
+        for generation, state_path, role, _session_id, repository in repositories:
+            with repository.transaction():
+                state = repository.load()
+                if getattr(repository, "operation_replayed", False):
+                    continue
+                if (
+                    state.get("review_group_id") != group
+                    or state.get("review_generation") != generation
+                ):
                     raise ValueError("review state changed during supersede")
-                state.update({"passes": False, "loop_active": False,
-                              "halt_reason": "superseded by a replacement run", "halt_category": "stale"})
-                _transition_phase(state, "halted", now, terminal_trusted_boundary=True)
-                _write_terminal_outcome(state)
+                if role == "superseded":
+                    state.update(
+                        {
+                            "passes": False,
+                            "loop_active": False,
+                            "halt_reason": "superseded by a replacement run",
+                            "halt_category": "stale",
+                        }
+                    )
+                    _transition_phase(
+                        state,
+                        "halted",
+                        now,
+                        terminal_trusted_boundary=True,
+                    )
+                    _write_terminal_outcome(state)
+                else:
+                    state["supersedes"] = superseded
                 state["updated_at"] = now
                 path_key = str(state_path.resolve())
-                _SUPERSEDE_TERMINAL_PATHS.add(path_key)
+                if role == "superseded":
+                    _SUPERSEDE_TERMINAL_PATHS.add(path_key)
                 try:
-                    atomic_write_json(state_path, state)
+                    repository.save(
+                        state,
+                        backup=False,
+                        administrative=True,
+                    )
+                    if isinstance(repository, LegacyV4Repository):
+                        committed_legacy.append((state_path, role, repository))
                 finally:
                     _SUPERSEDE_TERMINAL_PATHS.discard(path_key)
-                superseded.append(state.get("session_id"))
-            _, current_path, current_state, current_payload, current_identity = current[0]
-            if not unchanged(current_path, current_identity, current_payload):
-                raise ValueError("current review state changed during supersede")
-            current_state["supersedes"] = superseded
-            current_state["updated_at"] = now
-            atomic_write_json(current_path, current_state)
-        except (OSError, ValueError, CommandOutcomeExit):
-            for path, payload in originals:
-                _atomic_write(path, lambda handle, content=payload: handle.write(content.decode("utf-8")))
-            print("ERROR: supersede transaction was rolled back", file=sys.stderr)
-            sys.exit(2)
+    except (OSError, ValueError, CommandOutcomeExit, FencedCommitError) as error:
+        rollback_errors = []
+        for state_path, role, repository in reversed(committed_legacy):
+            path_key = str(state_path.resolve())
+            if role == "superseded":
+                _SUPERSEDE_TERMINAL_PATHS.add(path_key)
+            try:
+                with repository.transaction():
+                    repository.save(
+                        copy.deepcopy(original_states[path_key]),
+                        backup=False,
+                        administrative=True,
+                    )
+            except (OSError, ValueError, FencedCommitError) as rollback_error:
+                rollback_errors.append(str(rollback_error))
+            finally:
+                _SUPERSEDE_TERMINAL_PATHS.discard(path_key)
+        if rollback_errors:
+            print(
+                "ERROR: supersede transaction rollback failed: "
+                + "; ".join(rollback_errors),
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"ERROR: supersede transaction was rolled back: {error}",
+                file=sys.stderr,
+            )
+        sys.exit(2)
     print(json.dumps({"ok": True, "group": group, "current_generation": current_generation, "superseded": superseded}))
 
 
@@ -15032,6 +15368,15 @@ def cmd_reactivate(args):
     if not sf.exists():
         print("ERROR: state file が見つかりません。先に init してください。", file=sys.stderr)
         sys.exit(1)
+    try:
+        with _review_lineage_transaction(cwd, required=True):
+            _reactivate_with_repository(args, cwd, sf, approved_reason)
+    except TimeoutError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+
+
+def _reactivate_with_repository(args, cwd: Path, sf: Path, approved_reason: str):
     try:
         result = run_reactivate(
             _legacy_lifecycle_repository(cwd, sf, stamp=True, strict_read=True),
@@ -15099,6 +15444,15 @@ def cmd_refresh_pid(args):
         print("ERROR: state.json が見つかりません。", file=sys.stderr)
         sys.exit(1)
     new_pid = find_agent_pid()
+    try:
+        with _review_lineage_transaction(cwd, required=True):
+            _refresh_pid_with_repository(args, cwd, sf, new_pid)
+    except TimeoutError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+
+
+def _refresh_pid_with_repository(args, cwd: Path, sf: Path, new_pid: int):
     try:
         result = run_refresh_pid(
             _legacy_lifecycle_repository(
