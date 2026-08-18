@@ -1743,7 +1743,7 @@ def test_all_parser_commands_have_exactly_one_declared_owner():
     assert all(isinstance(owner, str) and owner for owner in COMMAND_OWNER_REGISTRY.values())
 
 
-def test_c2_stage_a_and_direct_write_allowlist_are_closed_and_disjoint():
+def test_c2_repository_and_direct_write_inventories_are_closed_and_disjoint():
     from mission_application.command_owners import (
         C2_DIRECT_WRITE_ALLOWLIST,
         C2_REPOSITORY_COMMANDS,
@@ -1751,27 +1751,29 @@ def test_c2_stage_a_and_direct_write_allowlist_are_closed_and_disjoint():
     )
 
     assert C2_REPOSITORY_COMMANDS == frozenset(
-        {"planning reselect", "supersede-reviews"}
-    )
-    assert C2_DIRECT_WRITE_ALLOWLIST == frozenset(
         {
             "executor-handoff begin",
             "executor-handoff complete",
             "executor-handoff record-step",
             "executor-handoff verify-step",
-            "manual-score-capture",
-            "planning adopt-core",
-            "planning promote-provider-plan",
+            "planning reselect",
+            "supersede-reviews",
+            # Batch 2
+            "specialists recommend",
+            "specialists log-invocation",
+            "specialists verify-approval",
+            "specialists prepare-invocation",
             "specialists invoke-command",
             "specialists invoke-prepared",
-            "specialists log-invocation",
-            "specialists plan-import",
-            "specialists prepare-invocation",
-            "specialists recommend",
             "specialists reconcile-invocation",
-            "specialists verify-approval",
+            "specialists plan-import",
+            # Batch 3
+            "planning adopt-core",
+            "planning promote-provider-plan",
+            "manual-score-capture",
         }
     )
+    assert C2_DIRECT_WRITE_ALLOWLIST == frozenset()
     assert C2_REPOSITORY_COMMANDS.isdisjoint(C2_DIRECT_WRITE_ALLOWLIST)
     assert C2_REPOSITORY_COMMANDS | C2_DIRECT_WRITE_ALLOWLIST <= set(
         COMMAND_OWNER_REGISTRY
@@ -1779,7 +1781,26 @@ def test_c2_stage_a_and_direct_write_allowlist_are_closed_and_disjoint():
 
 
 def test_c2_repository_commands_have_no_direct_legacy_session_writer_calls():
-    target_names = {"cmd_planning_reselect", "cmd_supersede_reviews"}
+    target_names = {
+        "cmd_executor_handoff_begin",
+        "cmd_executor_handoff_complete",
+        "cmd_executor_handoff_record",
+        "cmd_executor_handoff_verify",
+        "cmd_planning_reselect",
+        "cmd_supersede_reviews",
+        # Batch 2
+        "cmd_specialists",
+        "cmd_log_specialist_invocation",
+        "cmd_verify_provider_approval",
+        "cmd_prepare_provider_invocation",
+        "cmd_invoke_command_provider",
+        "cmd_reconcile_provider_invocation",
+        "cmd_plan_import",
+        # Batch 3
+        "cmd_planning_adopt_core",
+        "cmd_planning_promote_provider_plan",
+        "cmd_manual_score_capture",
+    }
 
     assert forbidden_calls_in_reachable(target_names) == []
 
@@ -1827,6 +1848,21 @@ def test_direct_legacy_call_allowlist_has_no_stale_entries():
     )
 
     assert ALLOWED_NON_C2_CALL_SITES - unallowlisted_call_sites == set()
+
+
+def test_c2_direct_write_allowlist_is_empty():
+    """Enforce that the C2 migration is complete: no mutating command bypasses the repository.
+
+    This test is the mechanical guarantee that every mutating command goes through
+    the repository.  If a future change adds an entry to C2_DIRECT_WRITE_ALLOWLIST,
+    CI turns Red here before the regression reaches production.
+    """
+    from mission_application.command_owners import C2_DIRECT_WRITE_ALLOWLIST
+
+    assert C2_DIRECT_WRITE_ALLOWLIST == frozenset(), (
+        "C2_DIRECT_WRITE_ALLOWLIST must remain empty after Batch 3 migration. "
+        f"Found: {C2_DIRECT_WRITE_ALLOWLIST!r}"
+    )
 
 
 def test_a1_registry_has_one_owner_for_every_lifecycle_command():

@@ -251,6 +251,9 @@ def test_planning_reselect_v5_requires_a_caller_stable_operation_id(
 def test_planning_adopt_core_fails_closed_when_not_in_planning_phase(
     run_cli, tmp_path
 ):
+    # Keep this on a v5 session: the point of the observation is that the domain
+    # gate still fails closed after the Stage B migration, and a retained-v4
+    # fallback would stop covering the v5 path entirely.
     environment = _env("stage-b-observation", "stage-b-observation-lease")
     initialized = run_cli(
         "init",
@@ -261,8 +264,17 @@ def test_planning_adopt_core_fails_closed_when_not_in_planning_phase(
         env_extra=environment,
     )
     assert initialized.returncode == 0, initialized.stderr
-    before = _head(tmp_path, "stage-b-observation")
-    assert before["schema"] == "mission-head/1"
+    state_path = tmp_path / ".mission-state" / "sessions" / "stage-b-observation.json"
+    # Disable the planning policy through the CLI so adopt-core hits the phase
+    # gate; under v5 the session file is a head record and cannot be edited here.
+    disabled = run_cli(
+        "set",
+        "planning_policy_version=0",
+        cwd=tmp_path,
+        env_extra={**environment, "MISSION_OPERATION_ID": "stage-b-observation-disable"},
+    )
+    assert disabled.returncode == 0, disabled.stderr
+    before = state_path.read_bytes()
     plan = tmp_path / "stage-b-plan.json"
     plan.write_text(
         json.dumps(
@@ -307,12 +319,12 @@ def test_planning_adopt_core_fails_closed_when_not_in_planning_phase(
         "--input",
         str(plan),
         cwd=tmp_path,
-        env_extra=environment,
+        env_extra={**environment, "MISSION_OPERATION_ID": "stage-b-observation-adopt"},
     )
 
     assert observed.returncode != 0
     assert "planning-policy-not-active" in observed.stderr
-    assert _head(tmp_path, "stage-b-observation") == before
+    assert state_path.read_bytes() == before
 
 
 def test_planning_reselect_preserves_retained_v4_behavior(

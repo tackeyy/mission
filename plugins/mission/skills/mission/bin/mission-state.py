@@ -4540,17 +4540,24 @@ def cmd_specialists(args):
     requested_complexity = getattr(args, "complexity", None)
     record_state = bool(getattr(args, "record_state", False))
     if record_state and isinstance(state_context, dict):
-        state_complexity = state_context.get("complexity")
-        state_iteration = state_context.get("iteration")
-        if requested_complexity is not None and requested_complexity != state_complexity:
-            _reject_specialist_state_context_mismatch(
-                args,
-                state_complexity=state_complexity,
-                state_iteration=state_iteration,
-                observed_complexity=requested_complexity,
-                observed_iteration=state_iteration,
-            )
-        effective_complexity = state_complexity
+        _is_v5_head = state_context.get("schema") == "mission-head/1"
+        if _is_v5_head:
+            # v5 HEAD file does not expose complexity/iteration at the top level.
+            # Accept the caller's value; the repository transaction will verify
+            # against the actual embedded session data.
+            effective_complexity = requested_complexity
+        else:
+            state_complexity = state_context.get("complexity")
+            state_iteration = state_context.get("iteration")
+            if requested_complexity is not None and requested_complexity != state_complexity:
+                _reject_specialist_state_context_mismatch(
+                    args,
+                    state_complexity=state_complexity,
+                    state_iteration=state_iteration,
+                    observed_complexity=requested_complexity,
+                    observed_iteration=state_iteration,
+                )
+            effective_complexity = state_complexity
     else:
         effective_complexity = requested_complexity
     if effective_complexity is None and isinstance(state_context, dict):
@@ -4614,44 +4621,85 @@ def cmd_specialists(args):
         if not sf.exists():
             print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
             sys.exit(1)
-        with StateLock(lock_file(cwd)):
-            data = json.loads(sf.read_text())
-            _reject_active_provider_mutation(data, "specialists-recommend")
-            _validate_specialist_public_state(data)
-            if (
-                data.get("complexity") != effective_complexity
-                or data.get("iteration") != state_iteration_snapshot
-            ):
-                _reject_specialist_state_context_mismatch(
-                    args,
-                    state_complexity=data.get("complexity"),
-                    state_iteration=data.get("iteration"),
-                    observed_complexity=effective_complexity,
-                    observed_iteration=state_iteration_snapshot,
+        session_id = sf.stem
+        _command_name_recommend = "specialists-recommend"
+        _command_arguments_recommend = {
+            "task": getattr(args, "task", None) or "",
+            "phase": getattr(args, "phase", None) or "",
+            "complexity": str(effective_complexity),
+        }
+        try:
+            _target_bytes_recommend = sf.read_bytes()
+            _inspected_recommend = inspect_repository_bytes(_target_bytes_recommend, expected_session_id=session_id)
+            _target_digest_recommend = "sha256:" + hashlib.sha256(_target_bytes_recommend).hexdigest()
+            _caller_op_recommend, _op_args_recommend = _compatibility_operation_arguments(
+                _command_arguments_recommend, target_digest=_target_digest_recommend,
+                require_caller=_inspected_recommend.format is RepositoryFormat.V5,
+            )
+            _op_id_recommend, _op_cmd_recommend = _canonical_compatibility_operation(
+                session_id, _command_name_recommend, _op_args_recommend,
+                caller_operation_id=_caller_op_recommend,
+            )
+        except (OSError, RepositorySelectionError, ValueError) as _err_recommend:
+            print(f"ERROR: {_err_recommend}", file=sys.stderr)
+            sys.exit(2)
+        _repo_recommend = _legacy_lifecycle_repository(
+            cwd, sf, stamp=True, strict_read=True, session_id=session_id,
+            operation_id=_op_id_recommend, operation_command=_op_cmd_recommend,
+            operation_command_type=_command_name_recommend,
+        )
+        with _repo_recommend.transaction():
+            data = _repo_recommend.load()
+            if not getattr(_repo_recommend, "operation_replayed", False):
+                _reject_active_provider_mutation(data, "specialists-recommend")
+                _validate_specialist_public_state(data)
+                # For v5 sessions, state_iteration_snapshot and effective_complexity
+                # may be None (HEAD file has no iteration/complexity at top level);
+                # fall back to repository-loaded values so the check is not
+                # trivially false for a legitimate replay.
+                _eff_iter_snap = (
+                    state_iteration_snapshot
+                    if state_iteration_snapshot is not None
+                    else data.get("iteration")
                 )
-            data["task_profile"] = task_profile
-            data["specialists_candidates"] = public_candidates
-            data["specialists_selected"] = public_selected
-            data["specialists_unavailable"] = public_unavailable
-            data["specialists_ineligible"] = public_ineligible
-            data["specialist_registry_projection"] = registry_projection
-            data["specialists_decision"] = decision
-            data["specialists_phase_plan"] = phase_plan
-            planning_selected = next((item for item in public_selected if item.get("planning_mode") in {"advisory", "primary"}), None)
-            if planning_selected:
-                data["planning_strategy"] = "provider-" + planning_selected["planning_mode"]
-                data["planning_contract_digest"] = planning_selected["planning_contract_digest"]
-                data["planning_provider_binding"] = {
-                    key: planning_selected[key]
-                    for key in ("provider_id", "selection_id", "planning_contract_digest")
-                }
-            elif data.get("planning_policy_version") == 1:
-                data["planning_strategy"] = "core"
-                data.pop("planning_provider_binding", None)
-            data["specialists_mode"] = "interactive" if decision.get("prompted_user") else "auto"
-            data["updated_at"] = iso_now()
-            backup_state(sf)
-            atomic_write_json(sf, stamp_metadata(data, cwd))
+                _eff_complexity_snap = (
+                    effective_complexity
+                    if effective_complexity is not None
+                    else data.get("complexity")
+                )
+                if (
+                    data.get("complexity") != _eff_complexity_snap
+                    or data.get("iteration") != _eff_iter_snap
+                ):
+                    _reject_specialist_state_context_mismatch(
+                        args,
+                        state_complexity=data.get("complexity"),
+                        state_iteration=data.get("iteration"),
+                        observed_complexity=_eff_complexity_snap,
+                        observed_iteration=_eff_iter_snap,
+                    )
+                data["task_profile"] = task_profile
+                data["specialists_candidates"] = public_candidates
+                data["specialists_selected"] = public_selected
+                data["specialists_unavailable"] = public_unavailable
+                data["specialists_ineligible"] = public_ineligible
+                data["specialist_registry_projection"] = registry_projection
+                data["specialists_decision"] = decision
+                data["specialists_phase_plan"] = phase_plan
+                planning_selected = next((item for item in public_selected if item.get("planning_mode") in {"advisory", "primary"}), None)
+                if planning_selected:
+                    data["planning_strategy"] = "provider-" + planning_selected["planning_mode"]
+                    data["planning_contract_digest"] = planning_selected["planning_contract_digest"]
+                    data["planning_provider_binding"] = {
+                        key: planning_selected[key]
+                        for key in ("provider_id", "selection_id", "planning_contract_digest")
+                    }
+                elif data.get("planning_policy_version") == 1:
+                    data["planning_strategy"] = "core"
+                    data.pop("planning_provider_binding", None)
+                data["specialists_mode"] = "interactive" if decision.get("prompted_user") else "auto"
+                data["updated_at"] = iso_now()
+                _repo_recommend.save(data)
 
     if getattr(args, "json", False):
         print(json.dumps(result, indent=2, ensure_ascii=False))
@@ -4988,6 +5036,44 @@ def _commit_specialist_state_with_archive(
             published = True
         backup_state(sf)
         atomic_write_json(sf, data)
+    except BaseException:
+        _rollback_specialist_archive(temp_path, dst, None, published)
+        raise
+    return str(dst) if dst is not None else None
+
+
+def _commit_specialist_state_with_save(
+    cwd: Path,
+    data: dict,
+    entry: dict,
+    iteration: int,
+    evidence_text,
+    *,
+    save_state,
+) -> "str | None":
+    """Like _commit_specialist_state_with_archive but uses injectable save_state callable."""
+    dst = (
+        _planned_specialist_archive_path(cwd, iteration, data, entry)
+        if evidence_text is not None
+        else None
+    )
+    if evidence_text is not None:
+        document = _specialist_archive_document(evidence_text, iteration, data, entry)
+        entry["content_digest"] = "sha256:" + hashlib.sha256(
+            document.encode("utf-8")
+        ).hexdigest()
+    _validate_specialist_public_state(data)
+    temp_path = None
+    published = False
+    try:
+        if dst is not None:
+            document = _specialist_archive_document(evidence_text, iteration, data, entry)
+            temp_path = _stage_specialist_archive(dst, document)
+            _validate_specialist_public_state(data)
+            _publish_staged_specialist_archive(temp_path, dst)
+            temp_path = None
+            published = True
+        save_state(data)
     except BaseException:
         _rollback_specialist_archive(temp_path, dst, None, published)
         raise
@@ -5600,64 +5686,93 @@ def cmd_verify_provider_approval(args):
     sf = resolve_state_file(cwd)
     if not sf.exists():
         _provider_gate("state-missing")
-    with StateLock(lock_file(cwd)):
-        data = json.loads(sf.read_text(encoding="utf-8"))
-        pointer = (data.get("provider_preflights") or {}).get(args.preflight_id)
-        if not isinstance(pointer, dict) or pointer.get("status") != "awaiting-approval":
-            _provider_gate("preflight-not-awaiting-approval")
-        try:
-            packet_path = state_dir(cwd) / str(pointer["artifact_path"])
-            packet_bytes = packet_path.read_bytes()
-            if "sha256:" + hashlib.sha256(packet_bytes).hexdigest() != pointer["outbound_packet_digest"]:
-                _provider_gate("preflight-artifact-invalid")
-            packet = json.loads(packet_bytes)
-            request = {
-                "schema": "mission-provider-approval-request/1", "preflight_id": args.preflight_id,
-                "session_id": packet["session_id"], "mission_id": packet["mission_id"],
-                "outbound_context_digest": packet["outbound_context_digest"], "invocation_id": packet["invocation_id"],
-                "outbound_packet_digest": pointer["outbound_packet_digest"],
-                "registry_entry_digest": packet["provider"]["registry_entry_digest"],
-                "selection_id": packet["selection"]["id"], "selection_source": packet["selection"]["source"],
-                "iteration": packet["iteration"], "phase": packet["phase"], "risk_scopes": packet["risk_scopes"],
-                "evidence_ref": args.evidence_ref,
-            }
-            descriptor = _configured_approval_entry_point(cwd, args.approval_verifier)
-            if descriptor is None:
-                _provider_gate("verifier-untrusted")
-            evidence = _run_approval_verifier(descriptor, request)
-            if not isinstance(evidence, dict) or evidence.get("schema") != "approval-evidence/1":
+    session_id = sf.stem
+    _command_name_verify = "specialists-verify-approval"
+    _command_arguments_verify = {
+        "preflight_id": str(args.preflight_id),
+        "evidence_ref": str(args.evidence_ref),
+        "approval_verifier": str(args.approval_verifier),
+    }
+    try:
+        _target_bytes_verify = sf.read_bytes()
+        _inspected_verify = inspect_repository_bytes(_target_bytes_verify, expected_session_id=session_id)
+        _target_digest_verify = "sha256:" + hashlib.sha256(_target_bytes_verify).hexdigest()
+        _caller_op_verify, _op_args_verify = _compatibility_operation_arguments(
+            _command_arguments_verify, target_digest=_target_digest_verify,
+            require_caller=_inspected_verify.format is RepositoryFormat.V5,
+        )
+        _op_id_verify, _op_cmd_verify = _canonical_compatibility_operation(
+            session_id, _command_name_verify, _op_args_verify,
+            caller_operation_id=_caller_op_verify,
+        )
+    except (OSError, RepositorySelectionError, ValueError) as _err_verify:
+        print(f"ERROR: {_err_verify}", file=sys.stderr)
+        sys.exit(2)
+    _repo_verify = _legacy_lifecycle_repository(
+        cwd, sf, stamp=True, strict_read=True, session_id=session_id,
+        operation_id=_op_id_verify, operation_command=_op_cmd_verify,
+        operation_command_type=_command_name_verify,
+    )
+    with _repo_verify.transaction():
+        data = _repo_verify.load()
+        if not getattr(_repo_verify, "operation_replayed", False):
+            pointer = (data.get("provider_preflights") or {}).get(args.preflight_id)
+            if not isinstance(pointer, dict) or pointer.get("status") != "awaiting-approval":
+                _provider_gate("preflight-not-awaiting-approval")
+            try:
+                packet_path = state_dir(cwd) / str(pointer["artifact_path"])
+                packet_bytes = packet_path.read_bytes()
+                if "sha256:" + hashlib.sha256(packet_bytes).hexdigest() != pointer["outbound_packet_digest"]:
+                    _provider_gate("preflight-artifact-invalid")
+                packet = json.loads(packet_bytes)
+                request = {
+                    "schema": "mission-provider-approval-request/1", "preflight_id": args.preflight_id,
+                    "session_id": packet["session_id"], "mission_id": packet["mission_id"],
+                    "outbound_context_digest": packet["outbound_context_digest"], "invocation_id": packet["invocation_id"],
+                    "outbound_packet_digest": pointer["outbound_packet_digest"],
+                    "registry_entry_digest": packet["provider"]["registry_entry_digest"],
+                    "selection_id": packet["selection"]["id"], "selection_source": packet["selection"]["source"],
+                    "iteration": packet["iteration"], "phase": packet["phase"], "risk_scopes": packet["risk_scopes"],
+                    "evidence_ref": args.evidence_ref,
+                }
+                descriptor = _configured_approval_entry_point(cwd, args.approval_verifier)
+                if descriptor is None:
+                    _provider_gate("verifier-untrusted")
+                evidence = _run_approval_verifier(descriptor, request)
+                if not isinstance(evidence, dict) or evidence.get("schema") != "approval-evidence/1":
+                    _provider_gate("approval-evidence-invalid")
+                if evidence.get("verifier_id") != args.approval_verifier:
+                    _provider_gate("verifier-untrusted")
+                for key, value in request.items():
+                    if key != "schema" and evidence.get(key) != value:
+                        _provider_gate("approval-evidence-binding-mismatch")
+                expires_at = evidence.get("expires_at")
+                nonce = evidence.get("single_use_nonce")
+                if not isinstance(expires_at, str) or not isinstance(nonce, str) or not re.fullmatch(r"[0-9A-Za-z_-]{32,128}", nonce):
+                    _provider_gate("approval-evidence-invalid")
+                receipt = {
+                    "schema": "mission-provider-approval-receipt/1",
+                    **{key: request[key] for key in request if key not in {"schema", "risk_scopes", "evidence_ref"}},
+                    "approved_scopes": request["risk_scopes"], "expires_at": expires_at,
+                    "single_use_nonce": nonce, "approval_provenance": {
+                        "issuer_id": evidence.get("issuer_id"), "verifier_id": args.approval_verifier,
+                        "verifier_version": evidence.get("verifier_version"), "proof_kind": evidence.get("proof_kind"),
+                        "proof_digest": evidence.get("proof_digest"), "actor_kind": evidence.get("actor_kind"),
+                        "actor_id": evidence.get("actor_id"),
+                    },
+                }
+                receipt_bytes = json.dumps(receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+                receipt_dir = state_dir(cwd) / "private-receipts"; receipt_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+                receipt_file = receipt_dir / f"{args.preflight_id}.json"; atomic_write_bytes(receipt_file, receipt_bytes)
+                pointer["receipt"] = {"artifact_path": str(receipt_file.resolve().relative_to(state_dir(cwd).resolve())),
+                                      "digest": "sha256:" + hashlib.sha256(receipt_bytes).hexdigest()}
+                pointer["status"] = "approved"
+                data["updated_at"] = iso_now()
+                _repo_verify.save(data)
+            except (OSError, KeyError, ValueError, json.JSONDecodeError) as error:
+                # Exception type is bounded and contains no evidence values.
+                print(f"ERROR: provider approval verification failed: {type(error).__name__}", file=sys.stderr)
                 _provider_gate("approval-evidence-invalid")
-            if evidence.get("verifier_id") != args.approval_verifier:
-                _provider_gate("verifier-untrusted")
-            for key, value in request.items():
-                if key != "schema" and evidence.get(key) != value:
-                    _provider_gate("approval-evidence-binding-mismatch")
-            expires_at = evidence.get("expires_at")
-            nonce = evidence.get("single_use_nonce")
-            if not isinstance(expires_at, str) or not isinstance(nonce, str) or not re.fullmatch(r"[0-9A-Za-z_-]{32,128}", nonce):
-                _provider_gate("approval-evidence-invalid")
-            receipt = {
-                "schema": "mission-provider-approval-receipt/1",
-                **{key: request[key] for key in request if key not in {"schema", "risk_scopes", "evidence_ref"}},
-                "approved_scopes": request["risk_scopes"], "expires_at": expires_at,
-                "single_use_nonce": nonce, "approval_provenance": {
-                    "issuer_id": evidence.get("issuer_id"), "verifier_id": args.approval_verifier,
-                    "verifier_version": evidence.get("verifier_version"), "proof_kind": evidence.get("proof_kind"),
-                    "proof_digest": evidence.get("proof_digest"), "actor_kind": evidence.get("actor_kind"),
-                    "actor_id": evidence.get("actor_id"),
-                },
-            }
-            receipt_bytes = json.dumps(receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-            receipt_dir = state_dir(cwd) / "private-receipts"; receipt_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-            receipt_file = receipt_dir / f"{args.preflight_id}.json"; atomic_write_bytes(receipt_file, receipt_bytes)
-            pointer["receipt"] = {"artifact_path": str(receipt_file.resolve().relative_to(state_dir(cwd).resolve())),
-                                  "digest": "sha256:" + hashlib.sha256(receipt_bytes).hexdigest()}
-            pointer["status"] = "approved"
-            backup_state(sf); atomic_write_json(sf, stamp_metadata(data, cwd))
-        except (OSError, KeyError, ValueError, json.JSONDecodeError) as error:
-            # Exception type is bounded and contains no evidence values.
-            print(f"ERROR: provider approval verification failed: {type(error).__name__}", file=sys.stderr)
-            _provider_gate("approval-evidence-invalid")
     print(json.dumps({"ok": True, "preflight_id": args.preflight_id, "status": "approved"}, ensure_ascii=False))
 
 
@@ -5667,41 +5782,96 @@ def cmd_prepare_provider_invocation(args):
     sf = resolve_state_file(cwd)
     if not sf.exists():
         _provider_gate("state-missing")
-    with StateLock(lock_file(cwd)):
-        data = json.loads(sf.read_text(encoding="utf-8"))
-        _validate_specialist_public_state(data)
-        provider = _require_current_provider_application(
-            data, _find_provider(data, args.provider), requested_phase=args.phase,
-            requested_iteration=args.iteration, application_kind="preflight",
-            selection_source=args.selection_source, cwd=cwd, registry_args=args,
+    session_id = sf.stem
+    _command_name_prepare = "specialists-prepare-invocation"
+    _command_arguments_prepare = {
+        "provider": str(args.provider),
+        "iteration": int(args.iteration),
+        "phase": str(args.phase),
+    }
+    try:
+        _target_bytes_prepare = sf.read_bytes()
+        _inspected_prepare = inspect_repository_bytes(_target_bytes_prepare, expected_session_id=session_id)
+        _target_digest_prepare = "sha256:" + hashlib.sha256(_target_bytes_prepare).hexdigest()
+        _caller_op_prepare, _op_args_prepare = _compatibility_operation_arguments(
+            _command_arguments_prepare, target_digest=_target_digest_prepare,
+            require_caller=_inspected_prepare.format is RepositoryFormat.V5,
         )
-        try:
-            snapshot = safe_input_snapshot(args.input_file, root=cwd)
-            preflight = build_preflight(_provider_preflight_subject(data, provider, args), [snapshot])
-        except ProviderPreflightError as error:
-            _provider_gate(str(error))
-        except ValueError:
-            _provider_gate("isolator-unavailable")
-        private_dir = state_dir(cwd) / "private-preflights"
-        private_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        artifact = private_dir / f"{preflight['preflight_id']}.json"
-        # The private artifact is atomically published before the pointer.  If
-        # either write fails, no state points at a partial packet.
-        pointer = {
-            "artifact_path": str(artifact.resolve().relative_to(state_dir(cwd).resolve())),
-            "outbound_packet_digest": preflight["outbound_packet_digest"],
-            "outbound_context_digest": preflight["outbound_context_digest"],
-            "invocation_id": preflight["invocation_id"], "status": "awaiting-approval",
-            "execution_context": preflight["outbound_packet"]["execution_context"],
-        }
-        data.setdefault("provider_preflights", {})[preflight["preflight_id"]] = pointer
-        data["updated_at"] = iso_now()
-        def commit_pointer_state():
-            backup_state(sf)
-            atomic_write_json(sf, stamp_metadata(data, cwd))
-        _publish_preflight_pointer_transaction(artifact, preflight["outbound_packet_bytes"], commit_pointer_state)
-    public = {key: value for key, value in preflight.items() if key not in {"outbound_packet_bytes"}}
-    print(json.dumps(public, indent=2 if args.json else None, ensure_ascii=False))
+        _op_id_prepare, _op_cmd_prepare = _canonical_compatibility_operation(
+            session_id, _command_name_prepare, _op_args_prepare,
+            caller_operation_id=_caller_op_prepare,
+        )
+    except (OSError, RepositorySelectionError, ValueError) as _err_prepare:
+        print(f"ERROR: {_err_prepare}", file=sys.stderr)
+        sys.exit(2)
+    _repo_prepare = _legacy_lifecycle_repository(
+        cwd, sf, stamp=True, strict_read=True, session_id=session_id,
+        operation_id=_op_id_prepare, operation_command=_op_cmd_prepare,
+        operation_command_type=_command_name_prepare,
+    )
+    preflight = None
+    with _repo_prepare.transaction():
+        data = _repo_prepare.load()
+        if getattr(_repo_prepare, "operation_replayed", False):
+            # Reconstruct preflight from state for output
+            preflights = data.get("provider_preflights") or {}
+            # Prefer exact match by operation_id to avoid returning a different
+            # preflight when the same session has multiple prepare operations.
+            _cached_preflight_id = next(
+                (pid for pid, ptr in preflights.items()
+                 if isinstance(ptr, dict) and ptr.get("operation_id") == _op_id_prepare),
+                None,
+            )
+            if _cached_preflight_id is None:
+                # Backwards-compatible fallback for pointers that predate operation_id recording
+                _cached_preflight_id = next(
+                    (pid for pid, ptr in preflights.items()
+                     if isinstance(ptr, dict) and ptr.get("status") in {"awaiting-approval", "approved", "consuming", "consumed"}
+                     and ptr.get("invocation_id", "").startswith("inv_")),
+                    None,
+                )
+            if _cached_preflight_id:
+                _ptr = preflights[_cached_preflight_id]
+                preflight = {
+                    "preflight_id": _cached_preflight_id,
+                    "invocation_id": _ptr.get("invocation_id"),
+                    "outbound_packet_digest": _ptr.get("outbound_packet_digest"),
+                    "outbound_context_digest": _ptr.get("outbound_context_digest"),
+                    "status": _ptr.get("status"),
+                }
+        else:
+            _validate_specialist_public_state(data)
+            provider = _require_current_provider_application(
+                data, _find_provider(data, args.provider), requested_phase=args.phase,
+                requested_iteration=args.iteration, application_kind="preflight",
+                selection_source=args.selection_source, cwd=cwd, registry_args=args,
+            )
+            try:
+                snapshot = safe_input_snapshot(args.input_file, root=cwd)
+                preflight = build_preflight(_provider_preflight_subject(data, provider, args), [snapshot])
+            except ProviderPreflightError as error:
+                _provider_gate(str(error))
+            except ValueError:
+                _provider_gate("isolator-unavailable")
+            private_dir = state_dir(cwd) / "private-preflights"
+            private_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            artifact = private_dir / f"{preflight['preflight_id']}.json"
+            pointer = {
+                "artifact_path": str(artifact.resolve().relative_to(state_dir(cwd).resolve())),
+                "outbound_packet_digest": preflight["outbound_packet_digest"],
+                "outbound_context_digest": preflight["outbound_context_digest"],
+                "invocation_id": preflight["invocation_id"], "status": "awaiting-approval",
+                "execution_context": preflight["outbound_packet"]["execution_context"],
+                "operation_id": _op_id_prepare,
+            }
+            data.setdefault("provider_preflights", {})[preflight["preflight_id"]] = pointer
+            data["updated_at"] = iso_now()
+            def _commit_pointer_state_repo(saved_data=data, repo=_repo_prepare):
+                repo.save(saved_data)
+            _publish_preflight_pointer_transaction(artifact, preflight["outbound_packet_bytes"], _commit_pointer_state_repo)
+    if preflight is not None:
+        public = {key: value for key, value in preflight.items() if key not in {"outbound_packet_bytes"}}
+        print(json.dumps(public, indent=2 if args.json else None, ensure_ascii=False))
 
 
 def cmd_invoke_command_provider(args):
@@ -5710,7 +5880,49 @@ def cmd_invoke_command_provider(args):
     if not sf.exists():
         print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
         sys.exit(1)
-    data = json.loads(sf.read_text())
+    # Repository setup (before any state reads to enable MISSION_OPERATION_ID check for v5)
+    session_id = sf.stem
+    _command_name_invoke = "specialists-invoke-command"
+    _preflight_id_invoke = getattr(args, "preflight_id", None)
+    _command_arguments_invoke = {
+        "provider": str(args.provider),
+        "iteration": int(args.iteration),
+        "phase": str(args.phase),
+        "preflight_id": str(_preflight_id_invoke) if _preflight_id_invoke else "",
+    }
+    try:
+        _target_bytes_invoke = sf.read_bytes()
+        _inspected_invoke = inspect_repository_bytes(_target_bytes_invoke, expected_session_id=session_id)
+        _target_digest_invoke = "sha256:" + hashlib.sha256(_target_bytes_invoke).hexdigest()
+        _caller_op_invoke, _op_args_invoke = _compatibility_operation_arguments(
+            _command_arguments_invoke, target_digest=_target_digest_invoke,
+            require_caller=_inspected_invoke.format is RepositoryFormat.V5,
+        )
+        _op_id_invoke, _op_cmd_invoke = _canonical_compatibility_operation(
+            session_id, _command_name_invoke, _op_args_invoke,
+            caller_operation_id=_caller_op_invoke,
+        )
+    except (OSError, RepositorySelectionError, ValueError) as _err_invoke:
+        print(f"ERROR: {_err_invoke}", file=sys.stderr)
+        sys.exit(2)
+
+    def _make_repo_invoke(suffix):
+        return _legacy_lifecycle_repository(
+            cwd, sf, stamp=True, strict_read=True, session_id=session_id,
+            operation_id=_op_id_invoke + suffix,
+            operation_command=_op_cmd_invoke,
+            operation_command_type=_command_name_invoke,
+        )
+
+    # Pre-validate (read-only, before any locks)
+    # For v5 sessions sf is the HEAD file which has no session data; load the
+    # actual session state through a read-only repository transaction.
+    if _inspected_invoke.format is RepositoryFormat.V5:
+        _preread_repo = _make_repo_invoke(":v5-preread")
+        with _preread_repo.transaction():
+            data = _preread_repo.load()
+    else:
+        data = json.loads(sf.read_text())
     _validate_specialist_public_state(data)
     provider = _find_provider(data, args.provider)
     if not provider:
@@ -5726,7 +5938,21 @@ def cmd_invoke_command_provider(args):
     # guard before reservation, state mutation, and subprocess creation.
     if not getattr(args, "preflight_id", None):
         _provider_gate("preflight-required")
-    pointer, packet = _verified_preflight_packet(cwd, data, provider, args)
+    # For invoke-prepared with a consumed preflight: the preflight was already used
+    # by a previous call. Skip full validation here — Section 2 will detect
+    # operation_replayed and short-circuit without re-dispatching. Pass the raw
+    # pointer through so entry construction can read outbound_packet_digest.
+    _pf_preflights_raw = data.get("provider_preflights") or {}
+    _pf_pointer_raw = _pf_preflights_raw.get(args.preflight_id) if isinstance(_pf_preflights_raw, dict) else None
+    _pf_consumed_replay = (
+        getattr(args, "specialists_cmd", None) == "invoke-prepared"
+        and isinstance(_pf_pointer_raw, dict)
+        and _pf_pointer_raw.get("status") == "consumed"
+    )
+    if _pf_consumed_replay:
+        pointer, packet = _pf_pointer_raw, b""
+    else:
+        pointer, packet = _verified_preflight_packet(cwd, data, provider, args)
     if _confirmed_selection_required(data, provider.get("skill") or provider.get("role"), "completed") and not args.selection_source:
         print(
             "ERROR: specialists_decision requested user confirmation; pass --selection-source confirmed-user "
@@ -5773,103 +5999,135 @@ def cmd_invoke_command_provider(args):
         entry["selection_id"] = selection_id
     timeout = _provider_timeout(provider, args.timeout)
     entry["timeout"] = timeout
-    # Reservation and call-slot consumption are one atomic state mutation.
-    with StateLock(lock_file(cwd)):
-        dispatch_state = json.loads(sf.read_text())
-        _validate_specialist_public_state(dispatch_state)
-        _reject_active_provider_mutation(dispatch_state, "invoke-command")
-        lease_decision = _enforce_session_lease_for_write(sf, dispatch_state)
-        provider = _require_current_provider_application(
-            dispatch_state,
-            _find_provider(dispatch_state, args.provider),
-            requested_phase=args.phase,
-            requested_iteration=args.iteration,
-            application_kind="preflight",
-            selection_source=args.selection_source,
-            invocation_id=entry["invocation_id"],
-            cwd=cwd,
-            registry_args=args,
-        )
-        entry["application_context_digest"] = provider.pop("_application_context_digest")
-        entry["reservation_owner_session_id"] = str(dispatch_state.get("owner_session_id") or resolve_session_id())
-        entry["fencing_epoch"] = int(dispatch_state.get("fencing_epoch") or lease_decision.fencing_epoch)
-        # The preflight ID is single-use and already bound to the immutable
-        # outbound packet, so it is the caller-stable operation identity for
-        # the non-rollbackable provider dispatch saga.
-        entry["operation_id"] = args.preflight_id
-        entry["outbound_packet_digest"] = pointer["outbound_packet_digest"]
-        dispatch_state, entry, _ = _prepare_specialist_invocation_state(
-            dispatch_state,
-            entry,
-            cwd=cwd,
-            iteration=args.iteration,
-            evidence_planned=True,
-        )
-        preflight_pointer = (dispatch_state.get("provider_preflights") or {}).get(args.preflight_id)
-        if not isinstance(preflight_pointer, dict) or preflight_pointer.get("status") != "approved":
-            _provider_gate("approval-required")
-        preflight_pointer["status"] = "consuming"
-        preflight_pointer["consuming_invocation_id"] = entry["invocation_id"]
-        record_activity_event(dispatch_state, "specialist", now)
-        dispatch_state["updated_at"] = now
-        backup_state(sf)
-        atomic_write_json(sf, stamp_metadata(dispatch_state, cwd))
 
-    # Re-read state and registry immediately before the one allowed spawn.
-    running_at = iso_now()
-    with StateLock(lock_file(cwd)):
-        dispatch_state = json.loads(sf.read_text())
-        _validate_specialist_public_state(dispatch_state)
-        current_entry = dict(invocation_by_id(dispatch_state, entry["invocation_id"]))
-        provider = _require_current_provider_application(
-            dispatch_state,
-            _find_provider(dispatch_state, args.provider),
-            requested_phase=args.phase,
-            requested_iteration=args.iteration,
-            application_kind="preflight",
-            selection_source=args.selection_source,
-            invocation_id=entry["invocation_id"],
-            cwd=cwd,
-            registry_args=args,
-        )
-        # Re-snapshot payload inputs after the reservation lock acquisition;
-        # no byte validated before this point is eligible for subprocess stdin.
-        preflight_pointer, packet = _verified_preflight_packet(
-            cwd, dispatch_state, provider, args, consuming_invocation_id=entry["invocation_id"]
-        )
-        if provider.pop("_application_context_digest") != current_entry.get("application_context_digest"):
-            rejected = {**current_entry, "status": "rejected", "lifecycle_state": "terminal",
-                        "reason_code": "application-context-drift", "completed_at": running_at,
-                        "transitioned_at": running_at}
-            validate_invocation_transition(current_entry, rejected)
-            _replace_provider_invocation(dispatch_state, rejected)
-            backup_state(sf)
-            atomic_write_json(sf, stamp_metadata(dispatch_state, cwd))
-            print("ERROR: provider-ineligible: application-context-drift", file=sys.stderr)
-            raise SystemExit(2)
-        try:
-            intent_decision = record_dispatch_intent(
-                [],
-                {
-                    "invocation_id": entry["invocation_id"],
-                    "operation_id": entry["operation_id"],
-                    "outbound_packet_digest": entry["outbound_packet_digest"],
-                    "iteration": entry["iteration"],
-                    "fencing_epoch": entry["fencing_epoch"],
-                },
+    # ── Section 1: Reservation ──
+    _repo_invoke_reserve = _make_repo_invoke(":reserve")
+    with _repo_invoke_reserve.transaction():
+        dispatch_state = _repo_invoke_reserve.load()
+        if not getattr(_repo_invoke_reserve, "operation_replayed", False):
+            _validate_specialist_public_state(dispatch_state)
+            _reject_active_provider_mutation(dispatch_state, "invoke-command")
+            lease_decision = _enforce_session_lease_for_write(sf, dispatch_state)
+            provider = _require_current_provider_application(
+                dispatch_state,
+                _find_provider(dispatch_state, args.provider),
+                requested_phase=args.phase,
+                requested_iteration=args.iteration,
+                application_kind="preflight",
+                selection_source=args.selection_source,
+                invocation_id=entry["invocation_id"],
+                cwd=cwd,
+                registry_args=args,
             )
-        except PlanningFailure as exc:
-            _provider_gate(exc.code)
-        # This is the durable pre-spawn commit.  A process crash after it but
-        # before a receipt remains deliberately unknowable and must never be
-        # retried automatically by reconciliation.
-        entry = {**current_entry, **intent_decision,
-                 "dispatch_intent_at": running_at, "transitioned_at": running_at}
-        validate_invocation_transition(current_entry, entry)
-        _replace_provider_invocation(dispatch_state, entry)
-        dispatch_state["updated_at"] = running_at
-        backup_state(sf)
-        atomic_write_json(sf, stamp_metadata(dispatch_state, cwd))
+            entry["application_context_digest"] = provider.pop("_application_context_digest")
+            entry["reservation_owner_session_id"] = str(dispatch_state.get("owner_session_id") or resolve_session_id())
+            entry["fencing_epoch"] = int(dispatch_state.get("fencing_epoch") or lease_decision.fencing_epoch)
+            # The preflight ID is single-use and already bound to the immutable
+            # outbound packet, so it is the caller-stable operation identity for
+            # the non-rollbackable provider dispatch saga.
+            entry["operation_id"] = args.preflight_id
+            entry["outbound_packet_digest"] = pointer["outbound_packet_digest"]
+            dispatch_state, entry, _ = _prepare_specialist_invocation_state(
+                dispatch_state,
+                entry,
+                cwd=cwd,
+                iteration=args.iteration,
+                evidence_planned=True,
+            )
+            preflight_pointer = (dispatch_state.get("provider_preflights") or {}).get(args.preflight_id)
+            if not isinstance(preflight_pointer, dict):
+                _provider_gate("approval-required")
+            elif preflight_pointer.get("status") == "consumed":
+                _provider_gate("receipt-replayed")
+            elif preflight_pointer.get("status") != "approved":
+                _provider_gate("approval-required")
+            preflight_pointer["status"] = "consuming"
+            preflight_pointer["consuming_invocation_id"] = entry["invocation_id"]
+            record_activity_event(dispatch_state, "specialist", now)
+            dispatch_state["updated_at"] = now
+            _repo_invoke_reserve.save(dispatch_state)
+        else:
+            # Get invocation_id from cached state
+            for _inv in (dispatch_state.get("specialist_invocations") or []):
+                if isinstance(_inv, dict) and _inv.get("input_outbound_packet_digest") == pointer["outbound_packet_digest"]:
+                    entry.update({k: v for k, v in _inv.items() if k not in entry or k in ("invocation_id", "fencing_epoch", "reservation_owner_session_id", "application_context_digest", "operation_id", "outbound_packet_digest")})
+                    break
+
+    # ── Section 2: Dispatch intent (idempotency gate — if replayed, skip external dispatch) ──
+    running_at = iso_now()
+    _repo_invoke_dispatch = _make_repo_invoke(":dispatch")
+    already_dispatched = False
+    with _repo_invoke_dispatch.transaction():
+        dispatch_state = _repo_invoke_dispatch.load()
+        if getattr(_repo_invoke_dispatch, "operation_replayed", False):
+            already_dispatched = True
+        else:
+            _validate_specialist_public_state(dispatch_state)
+            current_entry = dict(invocation_by_id(dispatch_state, entry["invocation_id"]))
+            provider = _require_current_provider_application(
+                dispatch_state,
+                _find_provider(dispatch_state, args.provider),
+                requested_phase=args.phase,
+                requested_iteration=args.iteration,
+                application_kind="preflight",
+                selection_source=args.selection_source,
+                invocation_id=entry["invocation_id"],
+                cwd=cwd,
+                registry_args=args,
+            )
+            # Re-snapshot payload inputs after the reservation lock acquisition;
+            # no byte validated before this point is eligible for subprocess stdin.
+            preflight_pointer, packet = _verified_preflight_packet(
+                cwd, dispatch_state, provider, args, consuming_invocation_id=entry["invocation_id"]
+            )
+            if provider.pop("_application_context_digest") != current_entry.get("application_context_digest"):
+                rejected = {**current_entry, "status": "rejected", "lifecycle_state": "terminal",
+                            "reason_code": "application-context-drift", "completed_at": running_at,
+                            "transitioned_at": running_at}
+                validate_invocation_transition(current_entry, rejected)
+                _replace_provider_invocation(dispatch_state, rejected)
+                dispatch_state["updated_at"] = running_at
+                _repo_invoke_dispatch.save(dispatch_state)
+                print("ERROR: provider-ineligible: application-context-drift", file=sys.stderr)
+                raise SystemExit(2)
+            try:
+                intent_decision = record_dispatch_intent(
+                    [],
+                    {
+                        "invocation_id": entry["invocation_id"],
+                        "operation_id": entry["operation_id"],
+                        "outbound_packet_digest": entry["outbound_packet_digest"],
+                        "iteration": entry["iteration"],
+                        "fencing_epoch": entry["fencing_epoch"],
+                    },
+                )
+            except PlanningFailure as exc:
+                _provider_gate(exc.code)
+            # This is the durable pre-spawn commit.  A process crash after it but
+            # before a receipt remains deliberately unknowable and must never be
+            # retried automatically by reconciliation.
+            entry = {**current_entry, **intent_decision,
+                     "dispatch_intent_at": running_at, "transitioned_at": running_at}
+            validate_invocation_transition(current_entry, entry)
+            _replace_provider_invocation(dispatch_state, entry)
+            dispatch_state["updated_at"] = running_at
+            _repo_invoke_dispatch.save(dispatch_state)
+
+    # If dispatch was already committed (idempotent replay), skip external call
+    if already_dispatched:
+        # Return result from state
+        _final_state = json.loads(sf.read_text())
+        _cached_inv = next(
+            (inv for inv in (_final_state.get("specialist_invocations") or [])
+             if isinstance(inv, dict) and inv.get("invocation_id") == entry["invocation_id"]),
+            entry,
+        )
+        _outcome = _command_outcome(args, "specialists-invoke-command",
+                                    "ok" if _cached_inv.get("status") == "completed" else "external")
+        result = {"ok": _cached_inv.get("status") == "completed",
+                  "outcome_kind": _outcome["outcome_kind"], "outcome": _outcome, "entry": _cached_inv}
+        print(json.dumps(result, indent=2 if args.json else None, ensure_ascii=False))
+        return
 
     command = provider.get("command")
     argv = [command, *[str(a) for a in provider.get("args") or []]]
@@ -5895,13 +6153,15 @@ def cmd_invoke_command_provider(args):
                   "reason_code": "command-unavailable",
                   "proven_no_dispatch": True,
                   "reason": f"command provider is not available: {command}"}
-        with StateLock(lock_file(cwd)):
-            dispatch_state = json.loads(sf.read_text())
-            current_entry = invocation_by_id(dispatch_state, entry["invocation_id"])
-            validate_invocation_transition(current_entry, failed)
-            _replace_provider_invocation(dispatch_state, failed)
-            backup_state(sf)
-            atomic_write_json(sf, stamp_metadata(dispatch_state, cwd))
+        _repo_invoke_prefail = _make_repo_invoke(":prefail")
+        with _repo_invoke_prefail.transaction():
+            dispatch_state = _repo_invoke_prefail.load()
+            if not getattr(_repo_invoke_prefail, "operation_replayed", False):
+                current_entry = invocation_by_id(dispatch_state, entry["invocation_id"])
+                validate_invocation_transition(current_entry, failed)
+                _replace_provider_invocation(dispatch_state, failed)
+                dispatch_state["updated_at"] = completed_at
+                _repo_invoke_prefail.save(dispatch_state)
         print(json.dumps({"ok": False, "outcome_kind": "external", "entry": failed}, ensure_ascii=False))
         return
     spawn_failed_reason = None
@@ -5913,34 +6173,36 @@ def cmd_invoke_command_provider(args):
             strict_receipt = strict_result["receipt"]
         except (KeyError, TypeError):
             _provider_gate("strict-receipt-invalid")
-        with StateLock(lock_file(cwd)):
-            dispatch_state = json.loads(sf.read_text())
-            current_entry = dict(invocation_by_id(dispatch_state, entry["invocation_id"]))
-            try:
-                receipt_state = record_provider_receipt(
-                    [current_entry],
-                    {
-                        "invocation_id": entry["invocation_id"],
-                        "operation_id": entry["operation_id"],
-                        "outbound_packet_digest": entry["outbound_packet_digest"],
-                        "iteration": entry["iteration"],
-                        "fencing_epoch": entry["fencing_epoch"],
-                    },
-                    strict_receipt,
-                )
-            except PlanningFailure as exc:
-                _provider_gate(exc.code)
-            current_entry.update({
-                "provider_receipt": receipt_state["provider_receipt"],
-                "status": "running", "lifecycle_state": "running",
-                "running_at": iso_now(), "started_at": running_at,
-                "heartbeat_at": iso_now(), "transitioned_at": iso_now(),
-            })
-            validate_invocation_transition(entry, current_entry)
-            _replace_provider_invocation(dispatch_state, current_entry)
-            backup_state(sf)
-            atomic_write_json(sf, stamp_metadata(dispatch_state, cwd))
-            entry = current_entry
+        _repo_invoke_receipt = _make_repo_invoke(":receipt")
+        with _repo_invoke_receipt.transaction():
+            dispatch_state = _repo_invoke_receipt.load()
+            if not getattr(_repo_invoke_receipt, "operation_replayed", False):
+                current_entry = dict(invocation_by_id(dispatch_state, entry["invocation_id"]))
+                try:
+                    receipt_state = record_provider_receipt(
+                        [current_entry],
+                        {
+                            "invocation_id": entry["invocation_id"],
+                            "operation_id": entry["operation_id"],
+                            "outbound_packet_digest": entry["outbound_packet_digest"],
+                            "iteration": entry["iteration"],
+                            "fencing_epoch": entry["fencing_epoch"],
+                        },
+                        strict_receipt,
+                    )
+                except PlanningFailure as exc:
+                    _provider_gate(exc.code)
+                current_entry.update({
+                    "provider_receipt": receipt_state["provider_receipt"],
+                    "status": "running", "lifecycle_state": "running",
+                    "running_at": iso_now(), "started_at": running_at,
+                    "heartbeat_at": iso_now(), "transitioned_at": iso_now(),
+                })
+                validate_invocation_transition(entry, current_entry)
+                _replace_provider_invocation(dispatch_state, current_entry)
+                dispatch_state["updated_at"] = iso_now()
+                _repo_invoke_receipt.save(dispatch_state)
+                entry = current_entry
         exit_code = strict_result["returncode"]
         stdout = _redact_provider_output(str(strict_result.get("stdout") or ""))
         stderr = _redact_provider_output(str(strict_result.get("stderr") or ""))
@@ -5956,37 +6218,43 @@ def cmd_invoke_command_provider(args):
         else:
             entry["child_pid"] = process.pid
             entry["process_identity_digest"] = provider_value_digest({"invocation_id": entry["invocation_id"], "pid": process.pid, "running_at": running_at})
-            with StateLock(lock_file(cwd)):
-                dispatch_state = json.loads(sf.read_text()); current_entry = dict(invocation_by_id(dispatch_state, entry["invocation_id"]))
-                if current_entry.get("status") != "dispatch-unknown":
-                    process.terminate(); process.wait(timeout=5)
-                    print("ERROR: provider-ineligible: invocation-not-dispatch-unknown", file=sys.stderr); raise SystemExit(2)
-                try:
-                    receipt_state = record_provider_receipt(
-                        [current_entry],
-                        {
-                            "invocation_id": entry["invocation_id"],
-                            "operation_id": entry["operation_id"],
-                            "outbound_packet_digest": entry["outbound_packet_digest"],
-                            "iteration": entry["iteration"],
-                            "fencing_epoch": entry["fencing_epoch"],
-                        },
-                        {"kind": "process", "identity": entry["process_identity_digest"]},
-                    )
-                except PlanningFailure as exc:
-                    process.terminate(); process.wait(timeout=5)
-                    _provider_gate(exc.code)
-                current_entry.update({
-                    "child_pid": entry["child_pid"],
-                    "process_identity_digest": entry["process_identity_digest"],
-                    "provider_receipt": receipt_state["provider_receipt"],
-                    "status": receipt_state["status"],
-                    "lifecycle_state": receipt_state["lifecycle_state"],
-                    "running_at": iso_now(), "started_at": running_at,
-                    "heartbeat_at": iso_now(), "transitioned_at": iso_now(),
-                })
-                validate_invocation_transition(entry, current_entry)
-                _replace_provider_invocation(dispatch_state, current_entry); backup_state(sf); atomic_write_json(sf, stamp_metadata(dispatch_state, cwd)); entry = current_entry
+            _repo_invoke_proc = _make_repo_invoke(":proc")
+            with _repo_invoke_proc.transaction():
+                dispatch_state = _repo_invoke_proc.load()
+                if not getattr(_repo_invoke_proc, "operation_replayed", False):
+                    current_entry = dict(invocation_by_id(dispatch_state, entry["invocation_id"]))
+                    if current_entry.get("status") != "dispatch-unknown":
+                        process.terminate(); process.wait(timeout=5)
+                        print("ERROR: provider-ineligible: invocation-not-dispatch-unknown", file=sys.stderr); raise SystemExit(2)
+                    try:
+                        receipt_state = record_provider_receipt(
+                            [current_entry],
+                            {
+                                "invocation_id": entry["invocation_id"],
+                                "operation_id": entry["operation_id"],
+                                "outbound_packet_digest": entry["outbound_packet_digest"],
+                                "iteration": entry["iteration"],
+                                "fencing_epoch": entry["fencing_epoch"],
+                            },
+                            {"kind": "process", "identity": entry["process_identity_digest"]},
+                        )
+                    except PlanningFailure as exc:
+                        process.terminate(); process.wait(timeout=5)
+                        _provider_gate(exc.code)
+                    current_entry.update({
+                        "child_pid": entry["child_pid"],
+                        "process_identity_digest": entry["process_identity_digest"],
+                        "provider_receipt": receipt_state["provider_receipt"],
+                        "status": receipt_state["status"],
+                        "lifecycle_state": receipt_state["lifecycle_state"],
+                        "running_at": iso_now(), "started_at": running_at,
+                        "heartbeat_at": iso_now(), "transitioned_at": iso_now(),
+                    })
+                    validate_invocation_transition(entry, current_entry)
+                    _replace_provider_invocation(dispatch_state, current_entry)
+                    dispatch_state["updated_at"] = iso_now()
+                    _repo_invoke_proc.save(dispatch_state)
+                    entry = current_entry
             try:
                 raw_stdout, raw_stderr = process.communicate(input=packet, timeout=timeout)
             except subprocess.TimeoutExpired:
@@ -6031,67 +6299,68 @@ def cmd_invoke_command_provider(args):
         "## Stderr\n\n"
         f"```text\n{stderr}\n```\n"
     )
-    with StateLock(lock_file(cwd)):
-        data = json.loads(sf.read_text())
-        _validate_specialist_public_state(data)
-        _require_current_provider_application(
-            data,
-            _find_provider(data, args.provider),
-            requested_phase=args.phase,
-            requested_iteration=args.iteration,
-            application_kind="result-import",
-            selection_source=args.selection_source,
-            invocation_id=entry["invocation_id"],
-            cwd=cwd,
-            registry_args=args,
-        )
-        current = data.get("activity_current")
-        if (
-            isinstance(current, dict)
-            and current.get("kind") == "external-wait"
-            and current.get("reason") == "external-command"
-            and current.get("started_at") == now
-        ):
-            end_activity_segment(data, completed_at)
-        data["updated_at"] = completed_at
-        data = stamp_metadata(data, cwd)
-        applied_selection_source = (
-            args.selection_source
-            if status in APPLIED_SPECIALIST_INVOCATION_STATUSES
-            else None
-        )
-        if applied_selection_source:
-            entry["selection_source"] = applied_selection_source
-        try:
-            current_entry = invocation_by_id(data, entry["invocation_id"])
-            validate_invocation_transition(current_entry, entry)
-        except SpecialistLifecycleError as exc:
-            print(f"ERROR: command invocation checkpoint is invalid: {exc}", file=sys.stderr)
-            sys.exit(2)
-        selected_entry = None
-        if applied_selection_source:
-            selected_entry = _add_selected_specialist_metadata(
-                data, entry, applied_selection_source, completed_at, provider, reason
+    _repo_invoke_result = _make_repo_invoke(":result")
+    with _repo_invoke_result.transaction():
+        data = _repo_invoke_result.load()
+        if not getattr(_repo_invoke_result, "operation_replayed", False):
+            _validate_specialist_public_state(data)
+            _require_current_provider_application(
+                data,
+                _find_provider(data, args.provider),
+                requested_phase=args.phase,
+                requested_iteration=args.iteration,
+                application_kind="result-import",
+                selection_source=args.selection_source,
+                invocation_id=entry["invocation_id"],
+                cwd=cwd,
+                registry_args=args,
             )
-        for index, item in enumerate(data["specialist_invocations"]):
-            if item.get("invocation_id") == entry["invocation_id"]:
-                data["specialist_invocations"][index] = entry
-                break
-        preflight_pointer = (data.get("provider_preflights") or {}).get(args.preflight_id)
-        if isinstance(preflight_pointer, dict) and preflight_pointer.get("status") == "consuming":
-            preflight_pointer["status"] = "consumed"
-            preflight_pointer["consumed_invocation_id"] = entry["invocation_id"]
-        _validate_specialist_public_state(data)
-        _append_command_outcome(data, outcome)
-        archived_to = _commit_specialist_state_with_archive(
-            sf, cwd, data, entry, args.iteration, evidence
-        )
+            current = data.get("activity_current")
+            if (
+                isinstance(current, dict)
+                and current.get("kind") == "external-wait"
+                and current.get("reason") == "external-command"
+                and current.get("started_at") == now
+            ):
+                end_activity_segment(data, completed_at)
+            data["updated_at"] = completed_at
+            data = stamp_metadata(data, cwd)
+            applied_selection_source = (
+                args.selection_source
+                if status in APPLIED_SPECIALIST_INVOCATION_STATUSES
+                else None
+            )
+            if applied_selection_source:
+                entry["selection_source"] = applied_selection_source
+            try:
+                current_entry = invocation_by_id(data, entry["invocation_id"])
+                validate_invocation_transition(current_entry, entry)
+            except SpecialistLifecycleError as exc:
+                print(f"ERROR: command invocation checkpoint is invalid: {exc}", file=sys.stderr)
+                sys.exit(2)
+            selected_entry = None
+            if applied_selection_source:
+                selected_entry = _add_selected_specialist_metadata(
+                    data, entry, applied_selection_source, completed_at, provider, reason
+                )
+            for index, item in enumerate(data["specialist_invocations"]):
+                if item.get("invocation_id") == entry["invocation_id"]:
+                    data["specialist_invocations"][index] = entry
+                    break
+            preflight_pointer = (data.get("provider_preflights") or {}).get(args.preflight_id)
+            if isinstance(preflight_pointer, dict) and preflight_pointer.get("status") == "consuming":
+                preflight_pointer["status"] = "consumed"
+                preflight_pointer["consumed_invocation_id"] = entry["invocation_id"]
+            _validate_specialist_public_state(data)
+            _append_command_outcome(data, outcome)
+            _commit_specialist_state_with_save(
+                cwd, data, entry, args.iteration, evidence,
+                save_state=_repo_invoke_result.save,
+            )
     result = {"ok": status == "completed", "outcome_kind": outcome["outcome_kind"], "outcome": outcome, "entry": entry}
     if selected_entry:
         result["selected_entry"] = selected_entry
     print(json.dumps(result, indent=2 if args.json else None, ensure_ascii=False))
-
-
 def _process_identity_is_live(entry: dict) -> bool:
     pid = entry.get("child_pid")
     if type(pid) is not int or pid < 1:
@@ -6112,75 +6381,112 @@ def cmd_reconcile_provider_invocation(args):
     if not sf.exists():
         print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
         raise SystemExit(1)
-    with StateLock(lock_file(cwd)):
-        data = json.loads(sf.read_text())
-        _validate_specialist_public_state(data)
-        lease_decision = _enforce_session_lease_for_write(sf, data)
-        try:
-            existing = dict(invocation_by_id(data, args.invocation_id))
-        except SpecialistLifecycleError as exc:
-            _provider_gate(str(exc))
-        if existing.get("status") not in {"dispatch-unknown", "running"}:
-            _provider_gate("invocation-not-reconcilable")
-        reservation_epoch = existing.get("fencing_epoch")
-        current_epoch = int(data.get("fencing_epoch") or lease_decision.fencing_epoch)
-        if args.expected_fencing_epoch != reservation_epoch or current_epoch < reservation_epoch:
-            _provider_gate("stale-fencing-epoch")
-        reservation_owner = existing.get("reservation_owner_session_id")
-        current_owner = str(data.get("owner_session_id") or resolve_session_id())
-        if current_epoch == reservation_epoch and current_owner != reservation_owner:
-            _provider_gate("reservation-owner-mismatch")
-        if current_epoch > reservation_epoch and args.status != "abandoned-unknown":
-            _provider_gate("recovered-result-unknown")
-        if existing.get("status") == "dispatch-unknown" and args.status != "abandoned-unknown":
-            _provider_gate("receiptless-reconciliation-must-abandon")
-        if existing.get("status") == "dispatch-unknown":
-            try:
-                reconciled = reconcile_dispatch_unknown(
-                    [existing],
-                    {
-                        "invocation_id": existing.get("invocation_id"),
-                        "operation_id": existing.get("operation_id"),
-                        "outbound_packet_digest": existing.get("outbound_packet_digest"),
-                        "iteration": existing.get("iteration"),
-                        "fencing_epoch": existing.get("fencing_epoch"),
-                    },
-                    observed_receipt=None,
-                )
-            except PlanningFailure as exc:
-                _provider_gate(exc.code)
-            if reconciled["status"] != args.status:
-                _provider_gate("receiptless-reconciliation-must-abandon")
-        if _process_identity_is_live(existing):
-            _provider_gate("process-still-running")
-        if args.status in {"completed", "failed"} and not existing.get("process_identity_digest"):
-            _provider_gate("process-identity-unknown")
-        try:
-            evidence = _read_specialist_evidence_input(Path(args.evidence))
-        except SpecialistEvidenceInputError as exc:
-            _provider_gate(exc.reason_code)
-        completed_at = iso_now()
-        terminal = {
-            **existing,
-            "status": args.status,
-            "lifecycle_state": "terminal",
-            "transitioned_at": completed_at,
-            "completed_at": completed_at,
-            "result_artifact_digest": provider_value_digest(evidence),
-            "reason_code": (
-                "reconciled-result" if args.status in {"completed", "failed"}
-                else "reconciled-outcome-unknown"
-            ),
-        }
-        if args.status == "abandoned-unknown":
-            terminal["reason"] = "operator could not establish a trustworthy child result"
-        validate_invocation_transition(existing, terminal)
-        _replace_provider_invocation(data, terminal)
-        data["updated_at"] = completed_at
-        backup_state(sf)
-        archived_to = _commit_specialist_state_with_archive(
-            sf, cwd, stamp_metadata(data, cwd), terminal, terminal["iteration"], evidence
+    session_id = sf.stem
+    _command_name_reconcile = "specialists-reconcile-invocation"
+    _command_arguments_reconcile = {
+        "invocation_id": str(args.invocation_id),
+        "status": str(args.status),
+        "expected_fencing_epoch": int(args.expected_fencing_epoch),
+    }
+    try:
+        _target_bytes_reconcile = sf.read_bytes()
+        _inspected_reconcile = inspect_repository_bytes(_target_bytes_reconcile, expected_session_id=session_id)
+        _target_digest_reconcile = "sha256:" + hashlib.sha256(_target_bytes_reconcile).hexdigest()
+        _caller_op_reconcile, _op_args_reconcile = _compatibility_operation_arguments(
+            _command_arguments_reconcile, target_digest=_target_digest_reconcile,
+            require_caller=_inspected_reconcile.format is RepositoryFormat.V5,
         )
+        _op_id_reconcile, _op_cmd_reconcile = _canonical_compatibility_operation(
+            session_id, _command_name_reconcile, _op_args_reconcile,
+            caller_operation_id=_caller_op_reconcile,
+        )
+    except (OSError, RepositorySelectionError, ValueError) as _err_reconcile:
+        print(f"ERROR: {_err_reconcile}", file=sys.stderr)
+        sys.exit(2)
+    _repo_reconcile = _legacy_lifecycle_repository(
+        cwd, sf, stamp=True, strict_read=True, session_id=session_id,
+        operation_id=_op_id_reconcile, operation_command=_op_cmd_reconcile,
+        operation_command_type=_command_name_reconcile,
+    )
+    archived_to = None
+    terminal = None
+    with _repo_reconcile.transaction():
+        data = _repo_reconcile.load()
+        if getattr(_repo_reconcile, "operation_replayed", False):
+            invocations_cached = data.get("specialist_invocations") or []
+            terminal = next(
+                (inv for inv in invocations_cached if inv.get("invocation_id") == args.invocation_id),
+                {"invocation_id": args.invocation_id, "status": args.status},
+            )
+            archived_to = terminal.get("evidence_path", "")
+        else:
+            _validate_specialist_public_state(data)
+            lease_decision = _enforce_session_lease_for_write(sf, data)
+            try:
+                existing = dict(invocation_by_id(data, args.invocation_id))
+            except SpecialistLifecycleError as exc:
+                _provider_gate(str(exc))
+            if existing.get("status") not in {"dispatch-unknown", "running"}:
+                _provider_gate("invocation-not-reconcilable")
+            reservation_epoch = existing.get("fencing_epoch")
+            current_epoch = int(data.get("fencing_epoch") or lease_decision.fencing_epoch)
+            if args.expected_fencing_epoch != reservation_epoch or current_epoch < reservation_epoch:
+                _provider_gate("stale-fencing-epoch")
+            reservation_owner = existing.get("reservation_owner_session_id")
+            current_owner = str(data.get("owner_session_id") or resolve_session_id())
+            if current_epoch == reservation_epoch and current_owner != reservation_owner:
+                _provider_gate("reservation-owner-mismatch")
+            if current_epoch > reservation_epoch and args.status != "abandoned-unknown":
+                _provider_gate("recovered-result-unknown")
+            if existing.get("status") == "dispatch-unknown" and args.status != "abandoned-unknown":
+                _provider_gate("receiptless-reconciliation-must-abandon")
+            if existing.get("status") == "dispatch-unknown":
+                try:
+                    reconciled = reconcile_dispatch_unknown(
+                        [existing],
+                        {
+                            "invocation_id": existing.get("invocation_id"),
+                            "operation_id": existing.get("operation_id"),
+                            "outbound_packet_digest": existing.get("outbound_packet_digest"),
+                            "iteration": existing.get("iteration"),
+                            "fencing_epoch": existing.get("fencing_epoch"),
+                        },
+                        observed_receipt=None,
+                    )
+                except PlanningFailure as exc:
+                    _provider_gate(exc.code)
+                if reconciled["status"] != args.status:
+                    _provider_gate("receiptless-reconciliation-must-abandon")
+            if _process_identity_is_live(existing):
+                _provider_gate("process-still-running")
+            if args.status in {"completed", "failed"} and not existing.get("process_identity_digest"):
+                _provider_gate("process-identity-unknown")
+            try:
+                evidence = _read_specialist_evidence_input(Path(args.evidence))
+            except SpecialistEvidenceInputError as exc:
+                _provider_gate(exc.reason_code)
+            completed_at = iso_now()
+            terminal = {
+                **existing,
+                "status": args.status,
+                "lifecycle_state": "terminal",
+                "transitioned_at": completed_at,
+                "completed_at": completed_at,
+                "result_artifact_digest": provider_value_digest(evidence),
+                "reason_code": (
+                    "reconciled-result" if args.status in {"completed", "failed"}
+                    else "reconciled-outcome-unknown"
+                ),
+            }
+            if args.status == "abandoned-unknown":
+                terminal["reason"] = "operator could not establish a trustworthy child result"
+            validate_invocation_transition(existing, terminal)
+            _replace_provider_invocation(data, terminal)
+            data["updated_at"] = completed_at
+            archived_to = _commit_specialist_state_with_save(
+                cwd, stamp_metadata(data, cwd), terminal, terminal["iteration"], evidence,
+                save_state=_repo_reconcile.save,
+            )
     print(json.dumps({
         "ok": True,
         "invocation_id": args.invocation_id,
@@ -7502,108 +7808,146 @@ def cmd_log_specialist_invocation(args):
         )
         sys.exit(2)
 
-    with StateLock(lock_file(cwd)):
-        data = json.loads(sf.read_text())
-        _validate_specialist_public_state(data)
-        provider = _provider_for_skill(data, skill)
-        if _confirmed_selection_required(data, skill, args.status) and not getattr(args, "selection_source", None):
-            print(
-                "ERROR: specialists_decision requested user confirmation; pass --selection-source confirmed-user "
-                "when recording applied specialist evidence after confirmation.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        if args.status in APPLIED_SPECIALIST_INVOCATION_STATUSES and _is_provider_backed_application(
-            data, skill, args, provider
-        ):
-            _require_current_provider_application(
-                data,
-                provider,
-                requested_phase=args.phase,
-                requested_iteration=args.iteration,
-                application_kind="result-import",
-                selection_source=getattr(args, "selection_source", None),
-                invocation_id=getattr(args, "invocation_id", None),
-                cwd=cwd,
-                registry_args=args,
-            )
-        _reject_unbounded_orchestrator_execution(data, skill, args.phase)
-        if _bounded_purpose_required(data, skill, args.phase, args.status) and not getattr(args, "bounded_purpose", None):
-            print(
-                f"ERROR: bounded orchestrator specialist requires --bounded-purpose for applied evidence: {skill}",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        now = iso_now()
-        invocations = data.setdefault("specialist_invocations", [])
-        requested_id = getattr(args, "invocation_id", None)
-        existing_index = None
-        existing_entry = None
-        if requested_id:
-            matches = [(index, item) for index, item in enumerate(invocations)
-                       if isinstance(item, dict) and item.get("invocation_id") == requested_id]
-            if len(matches) != 1:
-                print("ERROR: --invocation-id must identify exactly one invocation", file=sys.stderr)
-                sys.exit(2)
-            existing_index, existing_entry = matches[0]
-        entry = {
-            **(existing_entry or {}),
-            "invocation_id": requested_id or new_invocation_id(),
-            "iteration": args.iteration,
-            "phase": args.phase,
-            "role": role,
-            "skill": skill,
-            "mode": args.mode,
-            "status": args.status,
-            "lifecycle_state": invocation_lifecycle_state(args.status),
-            "timestamp": (existing_entry or {}).get("timestamp") or now,
-            "transitioned_at": now,
-        }
-        selection_id = _current_selection_id(data)
-        if selection_id:
-            entry["selection_id"] = selection_id
-        if args.started_at:
-            entry["started_at"] = args.started_at
-        if args.completed_at:
-            entry["completed_at"] = args.completed_at
-        if notes:
-            entry["notes"] = notes
-        if reason:
-            entry["reason"] = reason
-        elif args.status in SPECIALIST_INVOCATION_REASON_REQUIRED_STATUSES and notes:
-            entry["reason"] = notes
-        if getattr(args, "selection_source", None):
-            entry["selection_source"] = args.selection_source
-        if getattr(args, "bounded_purpose", None):
-            entry["bounded_purpose"] = args.bounded_purpose
-
-        try:
-            validate_invocation_record(entry)
-            if existing_entry is not None:
-                validate_invocation_transition(existing_entry, entry)
-        except SpecialistLifecycleError as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
-            sys.exit(2)
-
-        evidence_src = Path(args.evidence_output) if args.evidence_output else None
-        evidence_planned = evidence_src is not None
-        data = stamp_metadata(data, cwd)
-        data["updated_at"] = now
-        if existing_entry is None:
-            data, entry, selected_entry = _prepare_specialist_invocation_state(
-                data, entry, cwd=cwd, iteration=args.iteration,
-                evidence_planned=evidence_planned,
-            )
-        else:
-            selected_entry = None
-            invocations[existing_index] = entry
-            _validate_specialist_public_state(data)
-        evidence_text = None
-        if evidence_planned and evidence_src is not None:
-            evidence_text = _read_specialist_evidence_input(evidence_src)
-        archived_to = _commit_specialist_state_with_archive(
-            sf, cwd, data, entry, args.iteration, evidence_text
+    session_id = sf.stem
+    _command_name_loginv = "specialists-log-invocation"
+    _command_arguments_loginv = {
+        "iteration": int(args.iteration),
+        "phase": str(args.phase),
+        "role": str(role),
+        "skill": str(skill),
+        "mode": str(args.mode),
+    }
+    try:
+        _target_bytes_loginv = sf.read_bytes()
+        _inspected_loginv = inspect_repository_bytes(_target_bytes_loginv, expected_session_id=session_id)
+        _target_digest_loginv = "sha256:" + hashlib.sha256(_target_bytes_loginv).hexdigest()
+        _caller_op_loginv, _op_args_loginv = _compatibility_operation_arguments(
+            _command_arguments_loginv, target_digest=_target_digest_loginv,
+            require_caller=_inspected_loginv.format is RepositoryFormat.V5,
         )
+        _op_id_loginv, _op_cmd_loginv = _canonical_compatibility_operation(
+            session_id, _command_name_loginv, _op_args_loginv,
+            caller_operation_id=_caller_op_loginv,
+        )
+    except (OSError, RepositorySelectionError, ValueError) as _err_loginv:
+        print(f"ERROR: {_err_loginv}", file=sys.stderr)
+        sys.exit(2)
+    _repo_loginv = _legacy_lifecycle_repository(
+        cwd, sf, stamp=True, strict_read=True, session_id=session_id,
+        operation_id=_op_id_loginv, operation_command=_op_cmd_loginv,
+        operation_command_type=_command_name_loginv,
+    )
+    entry = None
+    selected_entry = None
+    archived_to = None
+    with _repo_loginv.transaction():
+        data = _repo_loginv.load()
+        if getattr(_repo_loginv, "operation_replayed", False):
+            invocations_cached = data.get("specialist_invocations") or []
+            _matched = [inv for inv in invocations_cached if inv.get("skill") == skill and inv.get("phase") == args.phase and inv.get("iteration") == args.iteration]
+            entry = _matched[-1] if _matched else {"invocation_id": "replayed", "skill": skill, "phase": args.phase, "iteration": args.iteration, "mode": args.mode, "status": args.status}
+        else:
+            _validate_specialist_public_state(data)
+            provider = _provider_for_skill(data, skill)
+            if _confirmed_selection_required(data, skill, args.status) and not getattr(args, "selection_source", None):
+                print(
+                    "ERROR: specialists_decision requested user confirmation; pass --selection-source confirmed-user "
+                    "when recording applied specialist evidence after confirmation.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            if args.status in APPLIED_SPECIALIST_INVOCATION_STATUSES and _is_provider_backed_application(
+                data, skill, args, provider
+            ):
+                _require_current_provider_application(
+                    data,
+                    provider,
+                    requested_phase=args.phase,
+                    requested_iteration=args.iteration,
+                    application_kind="result-import",
+                    selection_source=getattr(args, "selection_source", None),
+                    invocation_id=getattr(args, "invocation_id", None),
+                    cwd=cwd,
+                    registry_args=args,
+                )
+            _reject_unbounded_orchestrator_execution(data, skill, args.phase)
+            if _bounded_purpose_required(data, skill, args.phase, args.status) and not getattr(args, "bounded_purpose", None):
+                print(
+                    f"ERROR: bounded orchestrator specialist requires --bounded-purpose for applied evidence: {skill}",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            now = iso_now()
+            invocations = data.setdefault("specialist_invocations", [])
+            requested_id = getattr(args, "invocation_id", None)
+            existing_index = None
+            existing_entry = None
+            if requested_id:
+                matches = [(index, item) for index, item in enumerate(invocations)
+                           if isinstance(item, dict) and item.get("invocation_id") == requested_id]
+                if len(matches) != 1:
+                    print("ERROR: --invocation-id must identify exactly one invocation", file=sys.stderr)
+                    sys.exit(2)
+                existing_index, existing_entry = matches[0]
+            entry = {
+                **(existing_entry or {}),
+                "invocation_id": requested_id or new_invocation_id(),
+                "iteration": args.iteration,
+                "phase": args.phase,
+                "role": role,
+                "skill": skill,
+                "mode": args.mode,
+                "status": args.status,
+                "lifecycle_state": invocation_lifecycle_state(args.status),
+                "timestamp": (existing_entry or {}).get("timestamp") or now,
+                "transitioned_at": now,
+            }
+            selection_id = _current_selection_id(data)
+            if selection_id:
+                entry["selection_id"] = selection_id
+            if args.started_at:
+                entry["started_at"] = args.started_at
+            if args.completed_at:
+                entry["completed_at"] = args.completed_at
+            if notes:
+                entry["notes"] = notes
+            if reason:
+                entry["reason"] = reason
+            elif args.status in SPECIALIST_INVOCATION_REASON_REQUIRED_STATUSES and notes:
+                entry["reason"] = notes
+            if getattr(args, "selection_source", None):
+                entry["selection_source"] = args.selection_source
+            if getattr(args, "bounded_purpose", None):
+                entry["bounded_purpose"] = args.bounded_purpose
+
+            try:
+                validate_invocation_record(entry)
+                if existing_entry is not None:
+                    validate_invocation_transition(existing_entry, entry)
+            except SpecialistLifecycleError as exc:
+                print(f"ERROR: {exc}", file=sys.stderr)
+                sys.exit(2)
+
+            evidence_src = Path(args.evidence_output) if args.evidence_output else None
+            evidence_planned = evidence_src is not None
+            data = stamp_metadata(data, cwd)
+            data["updated_at"] = now
+            if existing_entry is None:
+                data, entry, selected_entry = _prepare_specialist_invocation_state(
+                    data, entry, cwd=cwd, iteration=args.iteration,
+                    evidence_planned=evidence_planned,
+                )
+            else:
+                selected_entry = None
+                invocations[existing_index] = entry
+                _validate_specialist_public_state(data)
+            evidence_text = None
+            if evidence_planned and evidence_src is not None:
+                evidence_text = _read_specialist_evidence_input(evidence_src)
+            archived_to = _commit_specialist_state_with_save(
+                cwd, data, entry, args.iteration, evidence_text,
+                save_state=_repo_loginv.save,
+            )
 
     result = {"ok": True, "entry": entry}
     if selected_entry:
@@ -11496,9 +11840,47 @@ def cmd_manual_score_capture(args):
     except (ValueError, UnicodeDecodeError, json.JSONDecodeError, _DuplicateReviewJsonKey) as exc:
         print(f"ERROR: manual score input: {exc}", file=sys.stderr)
         sys.exit(2)
-    with StateLock(lock_file(cwd)), _PublishedFilesTransaction() as published_files:
-        data = json.loads(sf.read_text(encoding="utf-8"))
-        lease_decision = _enforce_session_lease_for_write(sf, data)
+    session_id = sf.stem
+    try:
+        target_bytes = sf.read_bytes()
+        inspected = inspect_repository_bytes(target_bytes, expected_session_id=session_id)
+        target_digest = "sha256:" + hashlib.sha256(target_bytes).hexdigest()
+        caller_operation_id, operation_arguments = _compatibility_operation_arguments(
+            {"out": args.out, "input_digest": "sha256:" + hashlib.sha256(content).hexdigest()},
+            target_digest=target_digest,
+            require_caller=inspected.format is RepositoryFormat.V5,
+        )
+        operation_id, operation_command = _canonical_compatibility_operation(
+            session_id, "manual-score-capture", operation_arguments,
+            caller_operation_id=caller_operation_id,
+        )
+    except (OSError, RepositorySelectionError, ValueError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+    repository = _legacy_lifecycle_repository(
+        cwd, sf, stamp=True, strict_read=True, session_id=session_id,
+        operation_id=operation_id, operation_command=operation_command,
+        operation_command_type="manual-score-capture",
+    )
+    with repository.transaction(), _PublishedFilesTransaction() as published_files:
+        data = repository.load()
+        replayed = getattr(repository, "operation_replayed", False)
+        if replayed:
+            replay_digest = hashlib.sha256(content).hexdigest()
+            replay_mission8 = str(data.get("mission_id") or "unknown")[:8]
+            replay_iteration = payload.get("iteration")
+            replay_archive_name = f"iter-{replay_iteration}-{replay_mission8}-manual-{replay_digest[:16]}.json"
+            replay_archive = state_dir(cwd) / "archive" / replay_archive_name
+            replay_ref = legacy_manual_score_ref(typed_manual_score_ref({
+                "kind": "manual-score",
+                "path": str(replay_archive.relative_to(cwd)),
+                "digest": "sha256:" + replay_digest,
+                "generation": replay_digest[:16],
+                "revision_scope": payload["revision_scope"],
+            }))
+            print(json.dumps({"ok": True, "scoring_json": args.out, "manual_evidence_ref": replay_ref}, ensure_ascii=False))
+            return
+        _enforce_session_lease_for_write(sf, data)
         entry = {
             "iteration": payload.get("iteration"), "items": payload.get("items"),
             "composite": payload.get("composite"), "min_item": payload.get("min_item"),
@@ -11554,10 +11936,9 @@ def cmd_manual_score_capture(args):
             print(f"ERROR: manual scoring output rejected: {exc}", file=sys.stderr)
             sys.exit(2)
         data["updated_at"] = iso_now()
-        backup_state(sf)
         _verify_published_file(archive_publish)
         _verify_published_file(output_publish)
-        atomic_write_json(sf, stamp_metadata(data, cwd), lease_decision=lease_decision)
+        repository.save(data)
     print(json.dumps({"ok": True, "scoring_json": str(out), "manual_evidence_ref": ref}, ensure_ascii=False))
 
 
@@ -13283,8 +13664,38 @@ def cmd_plan_import(args):
         raw = _read_strict_review_file(Path(args.input))
     except ValueError:
         _provider_gate("plan-input-unreadable")
-    with StateLock(lock_file(cwd)), _PublishedFilesTransaction() as published_files:
-        data = json.loads(sf.read_text(encoding="utf-8"))
+    session_id = sf.stem
+    _command_name_planimp = "specialists-plan-import"
+    _command_arguments_planimp = {
+        "invocation_id": str(args.invocation_id),
+    }
+    try:
+        _target_bytes_planimp = sf.read_bytes()
+        _inspected_planimp = inspect_repository_bytes(_target_bytes_planimp, expected_session_id=session_id)
+        _target_digest_planimp = "sha256:" + hashlib.sha256(_target_bytes_planimp).hexdigest()
+        _caller_op_planimp, _op_args_planimp = _compatibility_operation_arguments(
+            _command_arguments_planimp, target_digest=_target_digest_planimp,
+            require_caller=_inspected_planimp.format is RepositoryFormat.V5,
+        )
+        _op_id_planimp, _op_cmd_planimp = _canonical_compatibility_operation(
+            session_id, _command_name_planimp, _op_args_planimp,
+            caller_operation_id=_caller_op_planimp,
+        )
+    except (OSError, RepositorySelectionError, ValueError) as _err_planimp:
+        print(f"ERROR: {_err_planimp}", file=sys.stderr)
+        sys.exit(2)
+    _repo_planimp = _legacy_lifecycle_repository(
+        cwd, sf, stamp=True, strict_read=True, session_id=session_id,
+        operation_id=_op_id_planimp, operation_command=_op_cmd_planimp,
+        operation_command_type=_command_name_planimp,
+    )
+    with _repo_planimp.transaction(), _PublishedFilesTransaction() as published_files:
+        data = _repo_planimp.load()
+        replayed_planimp = getattr(_repo_planimp, "operation_replayed", False)
+        if replayed_planimp:
+            _existing_ref = (data.get("provider_plan_imports") or {}).get(args.invocation_id)
+            print(json.dumps({"ok": True, "plan_import": _existing_ref}, indent=2 if args.json else None, ensure_ascii=False))
+            return
         lease_decision = _enforce_session_lease_for_write(sf, data)
         invocation = invocation_by_id(data, args.invocation_id)
         if data.get("planning_policy_version") == 1 and data.get("planning_strategy") == "provider-primary":
@@ -13359,9 +13770,9 @@ def cmd_plan_import(args):
                      "candidate_path": str(candidate_file.path.relative_to(cwd)), "candidate_digest": canonical_digest,
                      "invocation_id": args.invocation_id, "preflight_id": preflight_id, "generation": generation}
         data.setdefault("provider_plan_imports", {})[args.invocation_id] = reference
-        data["updated_at"] = iso_now()
         _verify_published_file(raw_file); _verify_published_file(candidate_file)
-        backup_state(sf); atomic_write_json(sf, stamp_metadata(data, cwd), lease_decision=lease_decision)
+        data["updated_at"] = iso_now()
+        _repo_planimp.save(stamp_metadata(data, cwd))
     print(json.dumps({"ok": True, "plan_import": reference}, indent=2 if args.json else None, ensure_ascii=False))
 
 
@@ -13412,10 +13823,35 @@ def cmd_planning_adopt_core(args):
         document = _validate_document(_strict_plan_load(raw), workspace=cwd)
     except PlanContractError as exc:
         _provider_gate(str(exc))
-
-    with StateLock(lock_file(cwd)), _PublishedFilesTransaction() as published_files:
-        data = json.loads(sf.read_text(encoding="utf-8"))
-        lease_decision = _enforce_session_lease_for_write(sf, data)
+    session_id = sf.stem
+    try:
+        target_bytes = sf.read_bytes()
+        inspected = inspect_repository_bytes(target_bytes, expected_session_id=session_id)
+        target_digest = "sha256:" + hashlib.sha256(target_bytes).hexdigest()
+        caller_operation_id, operation_arguments = _compatibility_operation_arguments(
+            {"source_id": args.source_id},
+            target_digest=target_digest,
+            require_caller=inspected.format is RepositoryFormat.V5,
+        )
+        operation_id, operation_command = _canonical_compatibility_operation(
+            session_id, "planning-adopt-core", operation_arguments,
+            caller_operation_id=caller_operation_id,
+        )
+    except (OSError, RepositorySelectionError, ValueError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+    repository = _legacy_lifecycle_repository(
+        cwd, sf, stamp=True, strict_read=True, session_id=session_id,
+        operation_id=operation_id, operation_command=operation_command,
+        operation_command_type="planning-adopt-core",
+    )
+    with repository.transaction(), _PublishedFilesTransaction() as published_files:
+        data = repository.load()
+        replayed = getattr(repository, "operation_replayed", False)
+        if replayed:
+            print(json.dumps({"ok": True, "canonical_plan": data.get("canonical_plan")}, indent=2 if args.json else None, ensure_ascii=False))
+            return
+        _enforce_session_lease_for_write(sf, data)
         if data.get("planning_policy_version") != 1 or data.get("phase") != "planning":
             _provider_gate("planning-policy-not-active")
         if data.get("planning_strategy") not in {None, "core"}:
@@ -13503,17 +13939,43 @@ def cmd_planning_adopt_core(args):
         data["planning_source_records"] = records
         data["updated_at"] = iso_now()
         _verify_published_file(candidate_file)
-        backup_state(sf)
-        atomic_write_json(sf, stamp_metadata(data, cwd), lease_decision=lease_decision)
+        repository.save(data)
     print(json.dumps({"ok": True, "canonical_plan": plan}, indent=2 if args.json else None, ensure_ascii=False))
 
 
 def cmd_planning_promote_provider_plan(args):
     """Promote only a #397-validated provider candidate to canonical authority."""
-    cwd = Path.cwd(); sf = resolve_state_file(cwd)
-    with StateLock(lock_file(cwd)):
-        data = json.loads(sf.read_text(encoding="utf-8"))
-        lease_decision = _enforce_session_lease_for_write(sf, data)
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    session_id = sf.stem
+    try:
+        target_bytes = sf.read_bytes()
+        inspected = inspect_repository_bytes(target_bytes, expected_session_id=session_id)
+        target_digest = "sha256:" + hashlib.sha256(target_bytes).hexdigest()
+        caller_operation_id, operation_arguments = _compatibility_operation_arguments(
+            {"invocation_id": args.invocation_id},
+            target_digest=target_digest,
+            require_caller=inspected.format is RepositoryFormat.V5,
+        )
+        operation_id, operation_command = _canonical_compatibility_operation(
+            session_id, "planning-promote-provider-plan", operation_arguments,
+            caller_operation_id=caller_operation_id,
+        )
+    except (OSError, RepositorySelectionError, ValueError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+    repository = _legacy_lifecycle_repository(
+        cwd, sf, stamp=True, strict_read=True, session_id=session_id,
+        operation_id=operation_id, operation_command=operation_command,
+        operation_command_type="planning-promote-provider-plan",
+    )
+    with repository.transaction():
+        data = repository.load()
+        replayed = getattr(repository, "operation_replayed", False)
+        if replayed:
+            print(json.dumps({"ok": True, "canonical_plan": data.get("canonical_plan")}, ensure_ascii=False))
+            return
+        _enforce_session_lease_for_write(sf, data)
         if data.get("planning_policy_version") != 1 or data.get("phase") != "planning":
             _provider_gate("planning-policy-not-active")
         if data.get("planning_strategy") != "provider-primary":
@@ -13548,7 +14010,8 @@ def cmd_planning_promote_provider_plan(args):
         data.setdefault("planning_source_records", {})[f"provider:{args.invocation_id}"] = {
             key: plan[key] for key in ("generation", "source", "source_id", "selection_source", "iteration")
         }
-        data["updated_at"] = iso_now(); backup_state(sf); atomic_write_json(sf, stamp_metadata(data, cwd), lease_decision=lease_decision)
+        data["updated_at"] = iso_now()
+        repository.save(data)
     print(json.dumps({"ok": True, "canonical_plan": plan}, ensure_ascii=False))
 
 
@@ -13615,11 +14078,82 @@ def cmd_planning_reselect(args):
 
 
 def _cmd_executor_handoff(args, operation: str):
-    cwd = Path.cwd(); sf = resolve_state_file(cwd)
-    with StateLock(lock_file(cwd)):
-        data = json.loads(sf.read_text(encoding="utf-8"))
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    session_id = sf.stem
+    command_name = {
+        "begin": "executor-handoff-begin",
+        "verify": "executor-handoff-verify-step",
+        "record": "executor-handoff-record-step",
+        "complete": "executor-handoff-complete",
+    }[operation]
+    command_arguments = {
+        "begin": {},
+        "verify": {"step_id": getattr(args, "step_id", None)},
+        "record": {
+            "result": getattr(args, "result", None),
+            "step_id": getattr(args, "step_id", None),
+        },
+        "complete": {},
+    }[operation]
+    try:
+        target_bytes = sf.read_bytes()
+        inspected = inspect_repository_bytes(
+            target_bytes,
+            expected_session_id=session_id,
+        )
+        target_digest = "sha256:" + hashlib.sha256(target_bytes).hexdigest()
+        caller_operation_id, operation_arguments = _compatibility_operation_arguments(
+            command_arguments,
+            target_digest=target_digest,
+            require_caller=inspected.format is RepositoryFormat.V5,
+        )
+        operation_id, operation_command = _canonical_compatibility_operation(
+            session_id,
+            command_name,
+            operation_arguments,
+            caller_operation_id=caller_operation_id,
+        )
+    except (OSError, RepositorySelectionError, ValueError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+    repository = _legacy_lifecycle_repository(
+        cwd,
+        sf,
+        stamp=True,
+        strict_read=True,
+        session_id=session_id,
+        operation_id=operation_id,
+        operation_command=operation_command,
+        operation_command_type=command_name,
+    )
+    with repository.transaction():
+        data = repository.load()
         handoff = data.get("executor_handoff")
         plan = data.get("canonical_plan")
+        if getattr(repository, "operation_replayed", False):
+            if (
+                isinstance(handoff, dict)
+                and handoff.get("status") == "rejected"
+                and isinstance(handoff.get("rejected_reason"), str)
+            ):
+                print(
+                    "ERROR: executor handoff rejected: "
+                    + handoff["rejected_reason"],
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            print(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "operation": operation,
+                        "executor_handoff": handoff,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return
         try:
             if not isinstance(handoff, dict) or not isinstance(plan, dict):
                 raise PlanningLifecycleError("executor-handoff-missing")
@@ -13662,10 +14196,13 @@ def _cmd_executor_handoff(args, operation: str):
             # Identity mutation is terminal; a duplicate begin or invalid step
             # request is merely rejected and leaves a resumable handoff intact.
             if isinstance(handoff, dict) and operation in {"begin", "verify"} and str(exc).startswith("canonical-"):
-                handoff["status"] = "rejected"; handoff["rejected_reason"] = str(exc)
-                data["updated_at"] = iso_now(); backup_state(sf); atomic_write_json(sf, stamp_metadata(data, cwd))
+                handoff["status"] = "rejected"
+                handoff["rejected_reason"] = str(exc)
+                data["updated_at"] = iso_now()
+                repository.save(data)
             print(f"ERROR: executor handoff rejected: {exc}", file=sys.stderr); sys.exit(2)
-        data["updated_at"] = iso_now(); backup_state(sf); atomic_write_json(sf, stamp_metadata(data, cwd))
+        data["updated_at"] = iso_now()
+        repository.save(data)
     print(json.dumps({"ok": True, "operation": operation, "executor_handoff": handoff}, ensure_ascii=False))
 
 
