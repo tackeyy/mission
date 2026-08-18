@@ -10213,8 +10213,11 @@ def cmd_codex_preflight(args):
     next_action = "init"
     next_summary = "mission state がありません。init を先に実行してください。"
     if state_present:
-        with StateLock(lock_file(cwd)):
-            data = json.loads(sf.read_text())
+        try:
+            snapshot, data = _load_authoritative_state(sf, legacy_compatibility=True)
+        except Exception:
+            snapshot = None
+            data = {}
         state_snapshot = {
             "session_id": data.get("session_id"),
             "agent": data.get("agent"),
@@ -10229,9 +10232,13 @@ def cmd_codex_preflight(args):
             and data.get("passes") is not True
             and not (data.get("halt_reason") or "")
         )
-        derived = _derive_next_action(data)
-        next_action = derived.get("next_action") or "unknown"
-        next_summary = derived.get("summary") or ""
+        if snapshot is not None:
+            derived = _derive_next_action(data, authoritative=snapshot)
+            next_action = derived.get("next_action") or "unknown"
+            next_summary = derived.get("summary") or ""
+        else:
+            next_action = "unknown"
+            next_summary = "mission state を解決できませんでした。state ファイルを確認してください。"
 
     hook_status = _hook_config_status(_codex_hook_config_paths(getattr(args, "hook_config", None)))
     warnings: list[str] = []
