@@ -1577,6 +1577,29 @@ def _enforce_session_lease_for_write(path: Path, data: dict) -> LeaseDecision | 
     return decision
 
 
+_FENCED_CLI_EXPECTED_GATE_CODES = frozenset({
+    "head-cas-mismatch",
+    "lease-precondition-changed",
+    "lease-rejected",
+    "lease-token-required",
+    "projection-precondition-changed",
+    "session-already-initialized",
+    "stale-fencing-token",
+})
+_FENCED_CLI_INVALID_INPUT_CODES = frozenset({
+    "operation-intent-collision",
+    "session-not-found",
+})
+
+
+def _fenced_cli_outcome_kind(error_code: str) -> str:
+    if error_code in _FENCED_CLI_EXPECTED_GATE_CODES:
+        return "expected-gate"
+    if error_code in _FENCED_CLI_INVALID_INPUT_CODES:
+        return "invalid-input"
+    return "internal-error"
+
+
 def _reject_fenced_lease_for_cli(error: FencedCommitError) -> NoReturn:
     """Translate v5 lease admission failures to the established v4 CLI shape."""
 
@@ -1587,7 +1610,7 @@ def _reject_fenced_lease_for_cli(error: FencedCommitError) -> NoReturn:
     }:
         detail = error.detail.strip() if isinstance(error.detail, str) else ""
         print("ERROR: %s" % (detail or error.code), file=sys.stderr)
-        raise CommandOutcomeExit(2, "invalid-input")
+        raise CommandOutcomeExit(2, _fenced_cli_outcome_kind(error.code))
     state = {}
     try:
         _snapshot, state = _load_authoritative_state(resolve_state_file(Path.cwd()))
@@ -15494,17 +15517,28 @@ def cmd_cleanup_stale(args):
                         continue
                     proj = _project_root_of(sf)
                     if args.execute:
-                        halted = _terminalize_state_file(
-                            sf,
-                            proj,
-                            reason=(
-                                "stale: session lease expired without activity heartbeat "
-                                "(cleanup-stale)"
-                            ),
-                            category="stale",
-                            set_terminal_phase=True,
-                            require_expired_lease=True,
-                        )
+                        try:
+                            halted = _terminalize_state_file(
+                                sf,
+                                proj,
+                                reason=(
+                                    "stale: session lease expired without activity heartbeat "
+                                    "(cleanup-stale)"
+                                ),
+                                category="stale",
+                                set_terminal_phase=True,
+                                require_expired_lease=True,
+                            )
+                        except FencedCommitError as error:
+                            if error.code != "lease-rejected":
+                                raise
+                            results["skipped"].append({
+                                "path": str(sf),
+                                "reason": "lease-rejected",
+                                "owner_session_id": data.get("owner_session_id"),
+                                "lease_expires_at": data.get("lease_expires_at"),
+                            })
+                            continue
                         if halted:
                             results["halted"].append({
                                 "path": str(sf),

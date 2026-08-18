@@ -524,6 +524,129 @@ def test_cleanup_stale_detects_and_halts_an_expired_v5_session(tmp_path, run_cli
     assert state["halt_category"] == "stale"
 
 
+@pytest.mark.parametrize("repository_format", ("v4", "v5"))
+def test_cleanup_stale_never_halts_an_unexpired_session_lease(
+    tmp_path,
+    run_cli,
+    repository_format,
+):
+    session_id = "active-%s" % repository_format
+    initialized = run_cli(
+        "init",
+        "Issue 542 active lease cleanup protection",
+        "--complexity",
+        "Simple",
+        "--force-mission",
+        cwd=tmp_path,
+        env_extra=_env(session_id),
+        init_format=repository_format,
+    )
+    assert initialized.returncode == 0, initialized.stderr
+    before = _state(tmp_path, session_id)
+    cleanup_environment = {
+        "MISSION_SESSION_ID": "janitor",
+        "MISSION_STATE_NOW": "2026-08-18T00:00:01Z",
+    }
+
+    detected = run_cli(
+        "cleanup-stale",
+        "--root",
+        str(tmp_path),
+        cwd=tmp_path,
+        env_extra=cleanup_environment,
+    )
+
+    assert detected.returncode == 0, detected.stderr
+    detection = json.loads(detected.stdout)
+    assert detection["would_halt"] == []
+    assert detection["errors"] == []
+    assert [
+        entry["reason"]
+        for entry in detection["skipped"]
+        if Path(entry["path"]).stem == session_id
+    ] == ["lease-unexpired"]
+
+    executed = run_cli(
+        "cleanup-stale",
+        "--root",
+        str(tmp_path),
+        "--execute",
+        cwd=tmp_path,
+        env_extra=cleanup_environment,
+    )
+
+    assert executed.returncode == 0, executed.stderr
+    execution = json.loads(executed.stdout)
+    assert execution["halted"] == []
+    assert execution["errors"] == []
+    assert [
+        entry["reason"]
+        for entry in execution["skipped"]
+        if Path(entry["path"]).stem == session_id
+    ] == ["lease-unexpired"]
+    after = _state(tmp_path, session_id)
+    assert after == before
+    assert after["loop_active"] is True
+
+
+def test_cleanup_stale_reports_a_v5_lease_refresh_race_as_skipped(
+    tmp_path,
+    run_cli,
+    monkeypatch,
+    capsys,
+):
+    session_id = "lease-refresh-race"
+    _init_v5(run_cli, tmp_path, session_id=session_id)
+    module = _load_mission_state_module("mission_state_issue542_cleanup_race")
+    monkeypatch.setenv("MISSION_SESSION_ID", "janitor")
+    monkeypatch.delenv("MISSION_LEASE_ID", raising=False)
+    monkeypatch.setenv("MISSION_STATE_NOW", "2026-08-18T00:16:00Z")
+
+    def reject_refreshed_lease(*_args, **_kwargs):
+        raise module.FencedCommitError(
+            "lease-rejected",
+            "the current fenced lease is still live",
+        )
+
+    monkeypatch.setattr(module, "_terminalize_state_file", reject_refreshed_lease)
+
+    module.cmd_cleanup_stale(
+        type("Args", (), {"root": str(tmp_path), "execute": True})()
+    )
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["halted"] == []
+    assert result["errors"] == []
+    assert [entry["reason"] for entry in result["skipped"]] == [
+        "lease-rejected"
+    ]
+    assert _state(tmp_path, session_id)["loop_active"] is True
+
+
+def test_halt_all_silently_skips_a_v5_session(tmp_path, run_cli):
+    session_id = "halt-all-v5"
+    _init_v5(run_cli, tmp_path, session_id=session_id)
+    before = _state(tmp_path, session_id)
+
+    halted = run_cli(
+        "halt",
+        "--all",
+        "--root",
+        str(tmp_path),
+        "--reason",
+        "Issue 542 halt-all v5 compatibility probe",
+        "--category",
+        "other",
+        cwd=tmp_path,
+        env_extra={"MISSION_SESSION_ID": "janitor"},
+    )
+
+    assert halted.returncode == 0, halted.stderr
+    assert json.loads(halted.stdout)["halted"] == []
+    assert halted.stderr == ""
+    assert _state(tmp_path, session_id) == before
+
+
 def test_t4_reinit_of_v5_session_is_rejected(tmp_path, run_cli):
     _init_v5(run_cli, tmp_path)
     before = (tmp_path / ".mission-state" / "sessions" / "test.json").read_bytes()
@@ -580,6 +703,41 @@ module.main()
     assert result.returncode == 2
     assert result.stderr == "ERROR: authoritative initial state is required\n"
     assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("error_code", "expected_outcome_kind"),
+    (
+        ("lease-rejected", "expected-gate"),
+        ("projection-precondition-changed", "expected-gate"),
+        ("session-already-initialized", "expected-gate"),
+        ("operation-intent-collision", "invalid-input"),
+        ("session-not-found", "invalid-input"),
+        ("request-invalid", "internal-error"),
+        ("initial-state-required", "internal-error"),
+    ),
+)
+def test_fenced_cli_error_codes_have_distinct_outcome_kinds(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    error_code,
+    expected_outcome_kind,
+):
+    module = _load_mission_state_module(
+        "mission_state_issue542_outcome_%s" % error_code.replace("-", "_")
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MISSION_SESSION_ID", "outcome-test")
+
+    with pytest.raises(module.CommandOutcomeExit) as rejected:
+        module._reject_fenced_lease_for_cli(
+            module.FencedCommitError(error_code, "classified detail")
+        )
+
+    assert rejected.value.code == 2
+    assert rejected.value.outcome_kind == expected_outcome_kind
+    assert capsys.readouterr().err.startswith("ERROR: ")
 
 
 def test_t5_real_process_crash_after_genesis_head_replays_original_result(tmp_path):

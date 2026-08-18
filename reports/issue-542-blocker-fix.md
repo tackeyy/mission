@@ -119,3 +119,40 @@ recorded as residual #543 work, not as working C1 paths.
   was fixed by running the rollback `get` subprocess with the v4 default.
 - Iteration 2 required full suite with `-n 4 --dist loadfile`:
   `4073 passed in 325.24s`, failed 0.
+
+## Iteration 3 review findings
+
+- The active-lease cleanup contract is now symmetric: v4 and v5 each prove
+  that dry-run reports no `would_halt`, execution reports no `halted`, the
+  session is listed as `lease-unexpired`, and the authoritative state remains
+  byte-for-byte unchanged with `loop_active=true`.
+- A v5 lease refresh between stale observation and janitor publication now
+  reports `lease-rejected` in `skipped` rather than treating the expected
+  fencing race as an error. Other fenced commit failures still propagate.
+- Fenced CLI failures now use an explicit outcome taxonomy. Live-lease and
+  already-initialized gates and concurrent projection changes are
+  `expected-gate`; missing sessions and operation ID collisions are
+  `invalid-input`; unclassified repository or integration failures, including
+  `request-invalid`, are `internal-error`. Exit code 2 and the existing detail
+  output remain unchanged.
+- `halt --all` has subprocess coverage for its current v5 behavior: it exits 0,
+  reports no halted session, emits no warning when category is explicit, and
+  leaves the v5 state unchanged. The silent skip should become structured
+  `skipped` output when #543 migrates this bulk command to authoritative v5
+  ownership; changing that behavior remains outside #542 C1.
+
+## Iteration 3 verification
+
+- New contract tests: `11 passed`; the active-lease negative cases were Green
+  before the production change because the implementation was already safe.
+  The lease-refresh classification and fenced outcome taxonomy tests were Red
+  before their respective fixes.
+- Targeted #542 and lease regression files: `68 passed`.
+- Python 3.9 AST parsing and the plugin mirror byte comparison passed.
+- Manual v5 active-lease cleanup execution reported `halted=[]`,
+  `skipped.reason=lease-unexpired`, and `errors=[]`. The authoritative head
+  SHA-256 was identical before and after, and `loop_active` remained `true`.
+- Independent Checker: accepted with High 0, Medium 0, Low 0 after adding the
+  missing `projection-precondition-changed` expected-gate classification.
+- Required full suite with `-n 4 --dist loadfile`:
+  `4084 passed in 323.60s`, failed 0.
