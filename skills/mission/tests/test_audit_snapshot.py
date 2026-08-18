@@ -15,7 +15,7 @@ AUDIT_PY = REPO_ROOT / "scripts" / "mission-audit.py"
 
 
 def _write_state(root: Path, mission: str = "before") -> Path:
-    path = root / ".mission-state" / "sessions" / "session.json"
+    path = root / ".mission-state" / "sessions" / "session-1.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({
         "mission": mission,

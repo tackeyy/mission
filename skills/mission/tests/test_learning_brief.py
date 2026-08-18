@@ -196,6 +196,7 @@ def test_learning_brief_cli_outputs_json_and_text(tmp_path: Path, run_cli):
     payload = json.loads(json_result.stdout)
     assert payload == {
         "schema": "mission-learning-brief/1",
+        "state_read_error_count": 0,
         "rules": [
             {
                 "general_fix_rule": "validate every boundary",
@@ -213,6 +214,21 @@ def test_learning_brief_cli_outputs_json_and_text(tmp_path: Path, run_cli):
     }
     assert "recurrence=1 sessions=1 weak_phase=planning general_fix_rule=validate every boundary" in text_result.stdout
     assert "recurrence=0 sessions=1 weak_phase=execution general_fix_rule=keep the loop closed" in text_result.stdout
+
+
+def test_learning_brief_counts_unreadable_live_state_and_keeps_readable_rules(
+    tmp_path: Path, run_cli
+):
+    _learning_brief_fixture_state(tmp_path, session_name="readable")
+    broken = tmp_path / ".mission-state" / "sessions" / "broken.json"
+    broken.write_text('{"session_id":"broken"', encoding="utf-8")
+
+    result = run_cli("learning", "brief", "--json", cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["state_read_error_count"] == 1
+    assert payload["rules"][0]["general_fix_rule"] == "validate every boundary"
 
 
 def test_learning_brief_cli_supports_phase_filter_and_limit(tmp_path: Path, run_cli):

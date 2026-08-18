@@ -32,7 +32,7 @@ def _run_hook_with_input(cwd, env_extra, *, timeout=None):
 
 def _write_session(cwd, sid, **kw):
     sd = cwd / ".mission-state" / "sessions"; sd.mkdir(parents=True, exist_ok=True)
-    base = {"loop_active": True, "passes": False, "halt_reason": "", "pid": os.getpid(),
+    base = {"session_id": sid, "loop_active": True, "passes": False, "halt_reason": "", "pid": os.getpid(),
             "project_root": str(cwd), "mission": "g", "iteration": 0, "threshold": 4.0, "score_history": []}
     base.update(kw)
     (sd / f"{sid}.json").write_text(json.dumps(base))

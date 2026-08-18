@@ -32,17 +32,23 @@ from mission_common import (  # noqa: E402
     HALT_CATEGORIES,
     PREPARATION_ONLY_MARKERS,
     SPECIALIST_SELECTION_CHECKPOINT_REQUIRED_AT,
-    classify_pass_rate_health,
     classify_state as classify,
-    derive_terminal_outcome,
     duration_sec,
-    has_scoring_checkpoint,
     parse_iso_datetime,
     opaque_token,
-    state_dedupe_rank,
     state_identity,
-    summarize_pass_rate_population,
 )
+from mission_persistence.authoritative_reader import (  # noqa: E402
+    AuthoritativeSnapshot,
+    authoritative_snapshot_from_document,
+    authoritative_snapshot_from_validated_archive_bytes,
+    expected_session_id_for_live_path,
+    is_live_session_path,
+    legacy_compatibility_snapshot_from_document,
+    read_legacy_compatibility_snapshot,
+    summarize_authoritative_pass_rate_population,
+)
+from mission_kernel.errors import MissionStateDecodeError  # noqa: E402
 from specialist_accounting import (  # noqa: E402
     applied_specialist_invocation_skills,
     candidate_accounting_report,
@@ -75,6 +81,8 @@ from audit_findings import (  # noqa: E402
 )
 from worktree_archive import (  # noqa: E402
     WorktreeArchiveValidation,
+    read_state_archive_file_bytes,
+    read_validated_archive_authoritative_snapshot,
     read_state_archive_compaction,
     validated_archive_evidence_reader,
     validate_worktree_archive_bundle,
@@ -90,6 +98,7 @@ from state_snapshot import (  # noqa: E402
     normalize_roots,
     read_snapshot,
     record_source_inventory,
+    read_authoritative_record,
     root_identity_digest,
     root_metadata_inventory as snapshot_root_metadata_inventory,
     value_digest,
@@ -260,6 +269,7 @@ FINDING_SPECS = {
 class StateRecord:
     path: Path
     state: dict[str, Any]
+    authoritative_snapshot: AuthoritativeSnapshot | None = None
     archive_bundle: Path | None = None
     archive_root: Path | None = None
     archive_generation: str | None = None
@@ -267,6 +277,13 @@ class StateRecord:
     command_outcome_observation: dict[str, Any] | None = None
     audit_specialist_invocation_gap_skills: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        if self.authoritative_snapshot is None:
+            object.__setattr__(
+                self,
+                "authoritative_snapshot",
+                authoritative_snapshot_from_document(self.state),
+            )
 
 @dataclass(frozen=True)
 class StateCandidate:
@@ -686,8 +703,11 @@ def _env_int(name: str, default: int) -> int:
     return value if value >= 0 else default
 
 
-def age_since_update_sec(state: dict[str, Any], *, now: datetime | None = None) -> float | None:
-    updated = parse_dt(state.get("heartbeat_at") or state.get("last_progress_at") or state.get("updated_at"))
+def age_since_update_sec(record: StateRecord, *, now: datetime | None = None) -> float | None:
+    snapshot = record.authoritative_snapshot
+    updated = parse_dt(
+        snapshot.heartbeat_at or snapshot.last_progress_at or snapshot.updated_at
+    )
     if not updated:
         return None
     if updated.tzinfo is None:
@@ -822,6 +842,9 @@ def _preflight_generation_state(
     record = StateRecord(
         path=state_path,
         state=state,
+        authoritative_snapshot=authoritative_snapshot_from_document(
+            state, expected_session_id=expected_session_id_for_live_path(state_path)
+        ),
         archive_bundle=resolution.bundle,
         archive_root=resolution.root,
         archive_generation=resolution.generation,
@@ -1073,9 +1096,36 @@ def parse_state_bytes(payload: bytes) -> Any:
     return json.loads(payload.decode("utf-8"))
 
 
+def _read_compaction_canonical_snapshot(path: Path) -> AuthoritativeSnapshot | None:
+    """Read a canonical state through its validated compaction generation."""
+
+    if path.parent.name != "sessions" or path.parent.parent.name != ".mission-state":
+        return None
+    state_root = path.parent.parent
+    compaction = read_state_archive_compaction(state_root)
+    if compaction is None:
+        return None
+    project_root = state_root.parent
+    try:
+        reference = path.absolute().relative_to(project_root.absolute()).as_posix()
+    except ValueError:
+        return None
+    matches = [
+        record for record in compaction.records
+        if record.get("canonical_path") == reference
+    ]
+    if len(matches) != 1:
+        return None
+    source = read_state_archive_file_bytes(project_root, reference)
+    return authoritative_snapshot_from_validated_archive_bytes(
+        source, expected_session_id=matches[0]["session_id"]
+    )
+
+
 def load_records(
     roots: list[Path], invalid_archives: list[dict[str, Any]] | None = None,
     *, forensic: bool = False,
+    state_read_errors: list[dict[str, str]] | None = None,
 ) -> list[StateRecord]:
     records: list[StateRecord] = []
     for root in roots:
@@ -1084,11 +1134,61 @@ def load_records(
         ) or []:
             path = candidate.path
             state = candidate.state
-            if state is None:
+            try:
+                if (
+                    candidate.archive_validation is not None
+                    and candidate.archive_validation.status == "valid"
+                ):
+                    authoritative_snapshot = (
+                        read_validated_archive_authoritative_snapshot(
+                            candidate.archive_validation
+                        )
+                    )
+                else:
+                    authoritative_snapshot = read_authoritative_record(path)
+            except Exception as error:
                 try:
-                    state = parse_state_bytes(read_state_bytes(path))
-                except Exception:
+                    authoritative_snapshot = _read_compaction_canonical_snapshot(path)
+                    if authoritative_snapshot is None:
+                        authoritative_snapshot = read_legacy_compatibility_snapshot(
+                            path,
+                            expected_session_id=expected_session_id_for_live_path(path),
+                            allow_missing_schema_session_mismatch=True,
+                        )
+                except MissionStateDecodeError as decode_error:
+                    if decode_error.code in {
+                        "schema-version-type", "unsupported-schema-version"
+                    }:
+                        raise SnapshotError(
+                            "authoritative session schema is unsupported: %s" % path
+                        ) from error
+                    if is_live_session_path(path):
+                        if state_read_errors is not None:
+                            state_read_errors.append({
+                                "path": str(path),
+                                "reason": "authoritative-state-unreadable",
+                            })
+                        continue
+                    if candidate.archive_validation is not None:
+                        raise SnapshotError(
+                            "authoritative session is unreadable: %s" % path
+                        ) from error
                     continue
+                except Exception:
+                    if is_live_session_path(path):
+                        if state_read_errors is not None:
+                            state_read_errors.append({
+                                "path": str(path),
+                                "reason": "authoritative-state-unreadable",
+                            })
+                        continue
+                    if candidate.archive_validation is not None:
+                        raise SnapshotError(
+                            "authoritative session is unreadable: %s" % path
+                        ) from error
+                    continue
+            if state is None:
+                state = authoritative_snapshot.document_copy()
             if not is_mission_state(state):
                 continue
             validate_specialist_public_state(state)
@@ -1096,6 +1196,7 @@ def load_records(
                 StateRecord(
                     path=path,
                     state=state,
+                    authoritative_snapshot=authoritative_snapshot,
                     archive_bundle=candidate.archive_bundle,
                     archive_root=candidate.archive_root,
                     archive_generation=candidate.archive_generation,
@@ -1207,6 +1308,7 @@ def _serialize_record(
     payload = {
         "path": str(record.path.absolute()),
         "state": record.state,
+        "authoritative_document": record.authoritative_snapshot.raw_document_copy(),
         "archive_bundle": str(record.archive_bundle.absolute()) if record.archive_bundle else None,
         "archive_root": str(record.archive_root.absolute()) if record.archive_root else None,
         "archive_generation": record.archive_generation,
@@ -1295,9 +1397,27 @@ def _record_from_payload(
             pointer_sha256=validation_payload.get("pointer_sha256"),
             manifest_sha256=validation_payload.get("manifest_sha256"),
         )
+    authoritative_document = item.get("authoritative_document", item["state"])
+    if not isinstance(authoritative_document, dict):
+        raise SnapshotError("snapshot authoritative document is invalid")
+    try:
+        authoritative_snapshot = authoritative_snapshot_from_document(
+            authoritative_document,
+            expected_session_id=expected_session_id_for_live_path(path),
+        )
+    except Exception:
+        authoritative_snapshot = legacy_compatibility_snapshot_from_document(
+            authoritative_document,
+        )
+    if (
+        "authoritative_document" in item
+        and not authoritative_snapshot.matches_consumer_document(item["state"])
+    ):
+        raise SnapshotError("snapshot authoritative projection differs from state")
     return StateRecord(
         path=path,
         state=item["state"],
+        authoritative_snapshot=authoritative_snapshot,
         archive_bundle=Path(item["archive_bundle"]) if item.get("archive_bundle") else None,
         archive_root=Path(item["archive_root"]) if item.get("archive_root") else None,
         archive_generation=item.get("archive_generation"),
@@ -1318,7 +1438,13 @@ def _capture_state_snapshot_document(
     observed = observed_at or utc_now()
     root_before = _root_metadata_inventory(normalized)
     discovered_invalid: list[dict[str, Any]] = []
-    records = load_records(normalized, discovered_invalid, forensic=forensic)
+    state_read_errors: list[dict[str, str]] = []
+    records = load_records(
+        normalized,
+        discovered_invalid,
+        forensic=forensic,
+        state_read_errors=state_read_errors,
+    )
     invalid = collect_invalid_worktree_archives(records, discovered_invalid)
     external_paths: list[Path] = []
     seen_external: set[str] = set()
@@ -1340,6 +1466,7 @@ def _capture_state_snapshot_document(
         records=record_payloads,
         archive_validations=archive_validations,
         invalid_worktree_archives=invalid,
+        state_read_errors=state_read_errors,
         discovery_index=index,
         observed_at=observed,
         ttl_seconds=ttl_seconds,
@@ -1579,17 +1706,18 @@ def record_rank(record: StateRecord) -> tuple[int, str]:
 
 
 def dedupe_status_rank(record: StateRecord) -> int:
-    if classify(record.state) == "pass" or record.state.get("phase") == "done":
+    classification = record.authoritative_snapshot.classification
+    if classification == "pass" or record.authoritative_snapshot.phase == "done":
         return 0
-    if classify(record.state) == "halt":
+    if classification == "halt":
         return 1
-    if classify(record.state) == "incomplete":
+    if classification == "incomplete":
         return 2
     return 3
 
 
 def updated_timestamp_rank(record: StateRecord) -> float:
-    updated = parse_dt(record.state.get("updated_at"))
+    updated = parse_dt(record.authoritative_snapshot.updated_at)
     if not updated:
         return 0
     if updated.tzinfo is None:
@@ -1598,11 +1726,14 @@ def updated_timestamp_rank(record: StateRecord) -> float:
 
 
 def is_current_record(record: StateRecord, current_since: datetime | None) -> bool:
-    return classify_finding_period(record.state.get("updated_at"), current_since) == "current"
+    return classify_finding_period(
+        record.authoritative_snapshot.updated_at, current_since
+    ) == "current"
 
 
 def is_current_item(item: dict[str, Any], current_since: datetime | None) -> bool:
-    return classify_finding_period(str(item.get("updated_at") or ""), current_since) == "current"
+    updated_at = item["updated_at"] if "updated_at" in item else ""
+    return classify_finding_period(str(updated_at or ""), current_since) == "current"
 
 
 def split_current_historical(
@@ -1638,7 +1769,7 @@ def split_current_historical_records(
 
 
 def dedupe_rank(record: StateRecord) -> tuple[int, float, int, str]:
-    return state_dedupe_rank(record.state, str(record.path))
+    return record.authoritative_snapshot.dedupe_rank(str(record.path))
 
 
 def is_resolved_by_precedence(group: list[StateRecord]) -> bool:
@@ -1671,7 +1802,7 @@ def filter_records(
 ) -> list[StateRecord]:
     out: list[StateRecord] = []
     for record in records:
-        updated_dt = parse_dt(record.state.get("updated_at"))
+        updated_dt = parse_dt(record.authoritative_snapshot.updated_at)
         if updated_dt and updated_dt.tzinfo is None:
             updated_dt = updated_dt.replace(tzinfo=timezone.utc)
         if updated_dt:
@@ -1796,11 +1927,11 @@ def halt_or_incomplete_bucket(
     record: StateRecord, *, now: datetime | None = None
 ) -> str:
     state = record.state
-    outcome = derive_terminal_outcome(state)
+    outcome = record.authoritative_snapshot.terminal_outcome
     if outcome is not None:
         return f"outcome:{outcome}"
-    reason = str(state.get("halt_reason") or "").lower()
-    if classify(state) == "incomplete":
+    reason = record.authoritative_snapshot.halt_reason.lower()
+    if record.authoritative_snapshot.classification == "incomplete":
         if not state.get("score_history"):
             if is_stale_active_no_score(record, now=now):
                 return "stale-active-live-pid"
@@ -1894,7 +2025,7 @@ def _matches_intentional_freeze_switch(reason: str) -> bool:
 def halt_audit_disposition(record: StateRecord) -> str:
     """Classify a terminal halt by audit actionability, failing closed."""
     state = record.state
-    reason = str(state.get("halt_reason") or "").strip().lower().removesuffix(".")
+    reason = record.authoritative_snapshot.halt_reason.strip().lower().removesuffix(".")
     resolution_status = str(state.get("resolution_status") or "").strip().lower()
     if (
         resolution_status in _RESOLVED_HALT_STATUSES
@@ -1902,7 +2033,7 @@ def halt_audit_disposition(record: StateRecord) -> str:
     ):
         return "superseded-resolved"
 
-    outcome = derive_terminal_outcome(state)
+    outcome = record.authoritative_snapshot.terminal_outcome
     if outcome == "completed_evidence":
         return "evidence-completed"
     if outcome == "blocked_external":
@@ -1979,7 +2110,8 @@ def state_root_for_record(record: StateRecord) -> Path | None:
 
 def is_active_no_score_checkpoint(record: StateRecord) -> bool:
     """Return true for live mission sessions that have not reached first scoring."""
-    return classify(record.state) == "incomplete" and not has_scoring_checkpoint(record.state)
+    snapshot = record.authoritative_snapshot
+    return snapshot.classification == "incomplete" and not snapshot.has_scoring_checkpoint
 
 
 def active_pending_threshold_sec() -> int:
@@ -1993,7 +2125,7 @@ def stale_active_threshold_sec() -> int:
 def is_active_no_score_pending(record: StateRecord, *, now: datetime | None = None) -> bool:
     if not is_active_no_score_checkpoint(record):
         return False
-    age = age_since_update_sec(record.state, now=now)
+    age = age_since_update_sec(record, now=now)
     return age is not None and age < active_pending_threshold_sec()
 
 
@@ -2003,18 +2135,16 @@ def is_stale_active_no_score(record: StateRecord, *, now: datetime | None = None
     if resolution_status in _RESOLVED_HALT_STATUSES:
         return False
     return (
-        not has_scoring_checkpoint(record.state)
-        and classify_pass_rate_health(
-            record.state,
-            now=now or utc_now(),
-            stale_after_sec=stale_active_threshold_sec(),
+        not record.authoritative_snapshot.has_scoring_checkpoint
+        and record.authoritative_snapshot.pass_rate_health(
+            now=now or utc_now(), stale_after_sec=stale_active_threshold_sec()
         ) == "stale"
     )
 
 
 def slow_session_bucket(record: StateRecord, slow_threshold_sec: int) -> str:
     state = record.state
-    cls = classify(state)
+    cls = record.authoritative_snapshot.classification
     duration = duration_sec(state) or 0
     if cls != "pass":
         return f"{cls}-slow"
@@ -2042,8 +2172,9 @@ def valid_phase_durations(state: dict[str, Any]) -> dict[str, float]:
 
 
 def slow_phase_observability_bucket(record: StateRecord) -> str:
-    if classify(record.state) != "pass":
-        return f"{classify(record.state)}-phase-durations-untracked"
+    classification = record.authoritative_snapshot.classification
+    if classification != "pass":
+        return f"{classification}-phase-durations-untracked"
     if coarse_phase_attribution_item(record) is not None:
         return "slow-with-coarse-phase-attribution"
     if valid_phase_durations(record.state):
@@ -2118,7 +2249,11 @@ def command_outcome_defect_counts(
 
 def activity_coverage_ratio(record: StateRecord) -> float | None:
     """Expose one slow record's activity coverage as finding provenance."""
-    value = summarize_activity_states([record.state]).get("coverage_ratio")
+    value = summarize_activity_states(
+        [record.state],
+        phases=[record.authoritative_snapshot.phase],
+        session_roles=[record.authoritative_snapshot.session_role],
+    ).get("coverage_ratio")
     return value if isinstance(value, (int, float)) and math.isfinite(value) else None
 
 
@@ -2171,7 +2306,7 @@ def missing_specialist_selection_checkpoint_item(
         "mission_id": state.get("mission_id") or "",
         "path": str(record.path),
         "started_at": state.get("created_at_session") or state.get("started_at") or "",
-        "updated_at": state.get("updated_at") or "",
+        "updated_at": record.authoritative_snapshot.updated_at or "",
     }
 
 
@@ -2195,7 +2330,7 @@ def legacy_missing_specialist_selection_checkpoint_item(
         "session_id": state.get("session_id") or record.path.stem,
         "mission_id": state.get("mission_id") or "", "path": str(record.path),
         "started_at": state.get("created_at_session") or state.get("started_at") or "",
-        "updated_at": state.get("updated_at") or "",
+        "updated_at": record.authoritative_snapshot.updated_at or "",
     }
 
 
@@ -2235,7 +2370,7 @@ def unselected_specialist_invocation_item(record: StateRecord) -> dict[str, Any]
         "mission_id": record.state.get("mission_id") or "",
         "path": str(record.path),
         "skills": skills,
-        "updated_at": record.state.get("updated_at") or "",
+        "updated_at": record.authoritative_snapshot.updated_at or "",
     }
 
 
@@ -2262,15 +2397,15 @@ def unresolved_confirm_specialist_selection_item(record: StateRecord) -> dict[st
         "mission_id": record.state.get("mission_id") or "",
         "path": str(record.path),
         "skills": skills,
-        "updated_at": record.state.get("updated_at") or "",
+        "updated_at": record.authoritative_snapshot.updated_at or "",
     }
 
 
-def is_active_ask_user_specialist_wait(state: dict[str, Any]) -> bool:
-    decision = state.get("specialists_decision")
+def is_active_ask_user_specialist_wait(record: StateRecord) -> bool:
+    decision = record.state.get("specialists_decision")
     return (
-        state.get("loop_active") is True
-        and not state.get("passes")
+        record.authoritative_snapshot.loop_active
+        and not record.authoritative_snapshot.passes
         and isinstance(decision, dict)
         and decision.get("action") == "ask-user"
         and decision.get("prompted_user") is True
@@ -2283,7 +2418,7 @@ def candidate_only_specialist_item(
     state = record.state
     if is_active_no_score_pending(record, now=now):
         return None
-    if is_active_ask_user_specialist_wait(state):
+    if is_active_ask_user_specialist_wait(record):
         return None
     report = candidate_accounting_report(state)
     unaccounted = report["unaccounted_candidates"]
@@ -2302,13 +2437,13 @@ def candidate_only_specialist_item(
         "candidate_count": len(unaccounted),
         "skills": [item["skill"] for item in unaccounted],
         "priority": report["priority"] or "P2",
-        "updated_at": state.get("updated_at") or "",
+        "updated_at": record.authoritative_snapshot.updated_at or "",
     }
 
 
 def coarse_phase_attribution_item(record: StateRecord, planning_ratio_threshold: float = 0.8) -> dict[str, Any] | None:
     state = record.state
-    if classify(state) != "pass":
+    if record.authoritative_snapshot.classification != "pass":
         return None
     durations = valid_phase_durations(state)
     if not durations:
@@ -2331,7 +2466,7 @@ def coarse_phase_attribution_item(record: StateRecord, planning_ratio_threshold:
         "duration_sec": duration_base,
         "planning_ratio": planning / duration_base,
         "phases": sorted(durations),
-        "updated_at": state.get("updated_at") or "",
+        "updated_at": record.authoritative_snapshot.updated_at or "",
     }
 
 
@@ -2501,7 +2636,7 @@ def preparation_only_completed_provider_item(record: StateRecord) -> dict[str, A
         "path": str(record.path),
         "bad_entries": bad_entries,
         "bad_count": len(bad_entries),
-        "updated_at": record.state.get("updated_at") or "",
+        "updated_at": record.authoritative_snapshot.updated_at or "",
     }
 
 
@@ -2531,7 +2666,7 @@ def missing_scoring_evidence_item(record: StateRecord) -> dict[str, Any] | None:
         "mission_id": record.state.get("mission_id") or "",
         "path": str(record.path),
         "missing_iterations": missing_iterations,
-        "updated_at": record.state.get("updated_at") or "",
+        "updated_at": record.authoritative_snapshot.updated_at or "",
     }
 
 
@@ -2556,13 +2691,13 @@ def invalid_score_iteration_item(record: StateRecord) -> dict[str, Any] | None:
         "mission_id": record.state.get("mission_id") or "",
         "path": str(record.path),
         "invalid_iterations": invalid_iterations,
-        "updated_at": record.state.get("updated_at") or "",
+        "updated_at": record.authoritative_snapshot.updated_at or "",
     }
 
 
 def score_provenance_item(record: StateRecord) -> dict[str, Any] | None:
     """Classify every score read-only; legacy terminal bytes remain untouched."""
-    terminal = not bool(record.state.get("loop_active"))
+    terminal = not record.authoritative_snapshot.loop_active
     classifications: list[dict[str, Any]] = []
     source_root = project_root_from_state_path(record.path)
     reader = None
@@ -2586,7 +2721,7 @@ def score_provenance_item(record: StateRecord) -> dict[str, Any] | None:
         "project": project_name(record.state), "project_root": project_root_for(record),
         "session_id": record.state.get("session_id") or record.path.stem,
         "mission_id": record.state.get("mission_id") or "", "path": str(record.path),
-        "updated_at": record.state.get("updated_at") or "", "classifications": classifications,
+        "updated_at": record.authoritative_snapshot.updated_at or "", "classifications": classifications,
     }
 
 
@@ -2615,7 +2750,7 @@ def blank_specialist_invocation_item(record: StateRecord) -> dict[str, Any] | No
         "path": str(record.path),
         "blank_entries": blank_entries,
         "blank_count": len(blank_entries),
-        "updated_at": record.state.get("updated_at") or "",
+        "updated_at": record.authoritative_snapshot.updated_at or "",
     }
 
 
@@ -2627,8 +2762,10 @@ def aggregate(
     current_since: datetime | None = None,
     invalid_worktree_archives: list[dict[str, Any]] | None = None,
     observation_now: datetime | None = None,
+    state_read_errors: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     invalid_worktree_archives = invalid_worktree_archives or []
+    state_read_errors = state_read_errors or []
     planning_provider_kpis = reduce_planning_provider_kpis(
         [record.state for record in records], population_kind="observed"
     )
@@ -2662,9 +2799,9 @@ def aggregate(
         command_outcome_sessions,
     )
     command_outcome_defects = command_outcome_defect_counts(command_outcome_sessions)
-    classes = [classify(r.state) for r in records]
-    pass_rate_summary = summarize_pass_rate_population(
-        [record.state for record in records],
+    classes = [r.authoritative_snapshot.classification for r in records]
+    pass_rate_summary = summarize_authoritative_pass_rate_population(
+        [record.authoritative_snapshot for record in records],
         now=observation_now,
         stale_after_sec=stale_active_threshold_sec(),
     )
@@ -2673,7 +2810,7 @@ def aggregate(
         record
         for record, health in zip(records, health_classes)
         if health in {"active-no-score", "stale"}
-        and not has_scoring_checkpoint(record.state)
+        and not record.authoritative_snapshot.has_scoring_checkpoint
     ]
     active_no_score_pending = [
         r for r in active_no_score_checkpoint
@@ -2691,7 +2828,10 @@ def aggregate(
     ]
     pass_count = classes.count("pass")
     pass_records = [r for r, cls in zip(records, classes) if cls == "pass"]
-    forced = [r for r in records if r.state.get("passes") and r.state.get("passes_forced")]
+    forced = [
+        r for r in records
+        if r.authoritative_snapshot.passes and r.state.get("passes_forced")
+    ]
     consumed_force_receipts: set[tuple[str, str]] = set()
     forced_autonomous_suspect = [
         r for r in forced
@@ -2704,12 +2844,18 @@ def aggregate(
     forced_approved_verified = [r for r in forced if r not in forced_autonomous_suspect]
     ungated = [
         r for r in records
-        if r.state.get("passes")
+        if r.authoritative_snapshot.passes
         and latest_scored_entry(r.state) is None
         and not r.state.get("passes_forced")
         and not r.state.get("force_reason")
     ]
-    activity_timing = summarize_activity_states([record.state for record in records])
+    activity_timing = summarize_activity_states(
+        [record.state for record in records],
+        phases=[record.authoritative_snapshot.phase for record in records],
+        session_roles=[
+            record.authoritative_snapshot.session_role for record in records
+        ],
+    )
     slow = [
         r for r in records
         if (duration_sec(r.state) or 0) >= slow_threshold_sec
@@ -2721,7 +2867,10 @@ def aggregate(
             "priority": "P1",
             "coverage_ratio": coverage,
             "slow_session_count": len(slow),
-            "updated_at": max((str(r.state.get("updated_at") or "") for r in slow), default=""),
+            "updated_at": max(
+                (str(r.authoritative_snapshot.updated_at or "") for r in slow),
+                default="",
+            ),
         })
     low_score_pass = [
         r for r in pass_records
@@ -2859,6 +3008,7 @@ def aggregate(
 
     return {
         "total_sessions": len(records),
+        "state_read_error_count": len(state_read_errors),
         "invalid_worktree_archives": invalid_worktree_archives,
         "invalid_worktree_archive_count": len(invalid_worktree_archives),
         "pass_count": pass_count,
@@ -2886,7 +3036,11 @@ def aggregate(
         "iteration_recovery": reduce_iteration_recovery([record.state for record in records]),
         "command_outcome_defects": command_outcome_defects,
         "artifact_coverage": summarize_artifact_coverage(
-            [record.state for record in records]
+            [record.state for record in records],
+            terminal_outcomes=[
+                record.authoritative_snapshot.terminal_outcome
+                for record in records
+            ],
         ),
         "terminal_count": pass_rate_summary["terminal_count"],
         "non_terminal_count": pass_rate_summary["non_terminal_count"],
@@ -3022,7 +3176,11 @@ def aggregate(
         "specialist_invocation_gap_count": len(specialist_invocation_gaps),
         "specialist_invocation_gap_breakdown": bucket_counts(
             [
-                StateRecord(record.path, {**record.state, "_gap_skill": skill})
+                StateRecord(
+                    path=record.path,
+                    state={**record.state, "_gap_skill": skill},
+                    authoritative_snapshot=record.authoritative_snapshot,
+                )
                 for record in specialist_invocation_gaps
                 for skill in specialist_invocation_gap_skills(record)
             ],
@@ -3099,7 +3257,8 @@ def session_line(record: StateRecord) -> str:
         mission = mission[:87] + "..."
     return (
         f"- `{state.get('session_id') or record.path.stem}` "
-        f"({project_name(state)}, {state.get('agent') or 'unknown'}, {classify(state)}, "
+        f"({project_name(state)}, {state.get('agent') or 'unknown'}, "
+        f"{record.authoritative_snapshot.classification}, "
         f"{fmt_minutes(duration)}, score {fmt_float(entry.get('composite'))}{progress_text}): {mission}"
     )
 
@@ -3127,7 +3286,7 @@ def finding_record_evidence(record: StateRecord, **extra: Any) -> dict[str, Any]
         "session_id": state.get("session_id") or record.path.stem,
         "mission_id": state.get("mission_id") or "",
         "path": str(record.path),
-        "updated_at": state.get("updated_at") or "",
+        "updated_at": record.authoritative_snapshot.updated_at or "",
         **extra,
     }
 
@@ -3320,6 +3479,7 @@ def render_markdown(
         "## Summary",
         "",
         f"- total sessions: {stats['total_sessions']}",
+        f"- unreadable session states: {stats.get('state_read_error_count', 0)}",
         f"- review lineage raw / projected: {review_lineage['raw_record_count']} / {review_lineage['projected_record_count']}",
         f"- correlation resolvability (direct / parent-embedded / unresolved): {correlation_lineage['direct_count']} / {correlation_lineage['parent_embedded_count']} / {correlation_lineage['unresolved_count']} (coverage {fmt_float(correlation_lineage['resolvable_ratio'] * 100 if correlation_lineage['resolvable_ratio'] is not None else None, 1)}%)",
         f"- current finding cutoff: {stats['current_since'] or '(not set; all findings are treated as current)'}",
@@ -3862,6 +4022,7 @@ def main(argv: list[str] | None = None) -> int:
         current_since,
         invalid_worktree_archives,
         observation_now,
+        list(document.get("state_read_errors") or []),
     )
     stats["archive_compaction"] = {
         "view": "forensic" if args.forensic else "materialized",

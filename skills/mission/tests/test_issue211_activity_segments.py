@@ -59,8 +59,11 @@ def _base_state(project: Path, **overrides) -> dict:
 
 
 def _write_state(project: Path, **overrides) -> Path:
-    path = _state_path(project)
-    path.write_text(json.dumps(_base_state(project, **overrides)), encoding="utf-8")
+    state = _base_state(project, **overrides)
+    session_id = state.get("session_id", "test")
+    path = project / ".mission-state" / "sessions" / f"{session_id}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state), encoding="utf-8")
     return path
 
 
@@ -768,7 +771,7 @@ def test_activity_summary_rejects_malformed_rollup_values_and_reports_inconsiste
             "activity_duration_totals_sec": {
                 "active": 10.0,
                 "future-kind": 20.0,
-                "idle": float("nan"),
+                    "idle": "malformed",
             },
             "phase_activity_duration_totals_sec": {
                 "executing": {"active": 9.0},
@@ -787,6 +790,33 @@ def test_activity_summary_rejects_malformed_rollup_values_and_reports_inconsiste
     assert timing["activity_duration_totals_sec"] == {"active": 10.0}
     assert timing["invalid_segment_count"] >= 4
     assert timing["totals_consistent"] is False
+
+
+def test_activity_summary_quarantines_nan_serialized_rollup_values(
+    tmp_path, run_cli
+):
+    _write_state(
+        tmp_path,
+        activity_rollup={
+            "observed_total_sec": 10.0,
+            "closed_segment_count": 1,
+            "activity_duration_totals_sec": {"idle": float("nan")},
+            "phase_activity_duration_totals_sec": {
+                "executing": {"idle": float("nan")}
+            },
+            "wait_reason_totals_sec": {},
+        },
+    )
+
+    result = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "NaN" not in result.stdout
+    payload = json.loads(result.stdout)
+    assert payload["state_read_error_count"] == 0
+    assert payload["total_sessions"] == 1
+    assert payload["activity_timing"]["invalid_segment_count"] >= 1
+    assert payload["activity_timing"]["totals_consistent"] is False
 
 
 def test_activity_summary_rejects_overflowing_json_numbers_without_crashing(
@@ -1333,7 +1363,7 @@ def test_rollup_reason_count_and_gap_anomalies_are_counted(tmp_path, run_cli):
                 "external-wait": {"future-reason": 10.0}
             },
         },
-        activity_unobserved_gap_sec=float("nan"),
+        activity_unobserved_gap_sec="malformed",
     )
 
     result = run_cli("stats", "--root", str(tmp_path), "--json", cwd=tmp_path)

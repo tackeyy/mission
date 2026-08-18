@@ -56,7 +56,7 @@ from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import NamedTuple, NoReturn, Protocol
+from typing import NamedTuple, NoReturn, Optional, Protocol
 
 LIB_DIR = Path(__file__).resolve().parents[1] / "lib"
 if str(LIB_DIR) not in sys.path:
@@ -74,7 +74,6 @@ from mission_common import (  # noqa: E402
     derive_terminal_outcome,
     duration_sec as _duration_sec,
     parse_iso_datetime,
-    state_dedupe_rank,
     state_identity,
     summarize_pass_rate_population,
     state_age_details as _state_age_details,
@@ -194,17 +193,30 @@ from mission_persistence.repository_binding import (  # noqa: E402
     RepositorySelectionError,
     select_legacy_repository,
 )
+from mission_persistence.authoritative_reader import (  # noqa: E402
+    AuthoritativeSnapshot,
+    authoritative_snapshot_from_document,
+    expected_session_id_for_live_path,
+    is_live_session_path,
+    read_authoritative_snapshot,
+    read_legacy_compatibility_snapshot,
+    summarize_authoritative_pass_rate_population,
+)
 from worktree_archive import (  # noqa: E402
     STATE_ARCHIVE_GENERATION_SCHEMA,
     STATE_ARCHIVE_POINTER_SCHEMA,
+    WorktreeArchiveValidation,
     read_state_archive_file_bytes,
     read_state_archive_compaction,
+    read_validated_archive_authoritative_snapshot,
+    read_verified_content_addressed_evidence,
     read_verified_review_input_evidence,
     state_archive_content_digest,
     valid_review_perspective,
     validated_archive_evidence_reader,
     validate_worktree_archive_bundle,
     worktree_archive_lineage_references,
+    worktree_archive_typed_score_bindings,
 )
 from state_snapshot import SnapshotError, consume_snapshot_document  # noqa: E402
 from provider_eligibility import (  # noqa: E402
@@ -335,6 +347,21 @@ class UnsupportedSchemaVersionError(ValueError):
     """The reader only accepts legacy-missing or supported schema versions."""
 
 
+class AuthoritativeStateRecord(dict):
+    """Compatibility mapping that retains its typed authoritative projection."""
+
+    def __init__(self, snapshot: AuthoritativeSnapshot, document: dict) -> None:
+        super().__init__(document)
+        self.authoritative_snapshot = snapshot
+
+
+def _authoritative_snapshot_for_state(state: dict) -> AuthoritativeSnapshot:
+    snapshot = getattr(state, "authoritative_snapshot", None)
+    if snapshot is not None:
+        return snapshot
+    return authoritative_snapshot_from_document(state)
+
+
 def _validate_schema_version(data: dict) -> int | None:
     version = data.get("schema_version", _SCHEMA_VERSION_MISSING)
     try:
@@ -352,6 +379,83 @@ def _load_state_json(sf: Path) -> dict:
     data = json.loads(sf.read_text())
     _validate_schema_version(data)
     return data
+
+
+def _load_authoritative_state(
+    sf: Path,
+    archive_validation: Optional[WorktreeArchiveValidation] = None,
+    *,
+    legacy_compatibility: bool = False,
+    allow_missing_schema_session_mismatch: bool = False,
+) -> tuple[AuthoritativeSnapshot, dict]:
+    expected_session_id = expected_session_id_for_live_path(sf)
+    try:
+        if archive_validation is None:
+            archive_validation = _validated_archive_for_state_path(sf)
+        if archive_validation is not None:
+            snapshot = read_validated_archive_authoritative_snapshot(
+                archive_validation
+            )
+        else:
+            snapshot = read_authoritative_snapshot(
+                sf, expected_session_id=expected_session_id
+            )
+    except Exception as original_error:
+        if legacy_compatibility and archive_validation is None:
+            try:
+                snapshot = read_legacy_compatibility_snapshot(
+                    sf,
+                    expected_session_id=expected_session_id,
+                    allow_missing_schema_session_mismatch=(
+                        allow_missing_schema_session_mismatch
+                    ),
+                )
+            except MissionStateDecodeError as exc:
+                if exc.code in {
+                    "schema-version-type", "unsupported-schema-version"
+                }:
+                    raise UnsupportedSchemaVersionError(str(exc)) from exc
+                raise original_error
+            except Exception:
+                raise original_error
+        elif isinstance(original_error, MissionStateDecodeError):
+            if original_error.code in {
+                "schema-version-type", "unsupported-schema-version"
+            }:
+                raise UnsupportedSchemaVersionError(
+                    str(original_error)
+                ) from original_error
+            raise
+        else:
+            raise
+    return snapshot, snapshot.document_copy()
+
+
+def _validated_archive_for_state_path(sf: Path):
+    """Bind a non-live generation path back to its validated bundle only."""
+
+    path = Path(sf)
+    parts = path.parts
+    for index, part in enumerate(parts):
+        if (
+            part == ".mission-state"
+            and index + 2 < len(parts)
+            and parts[index + 1] == "archive"
+            and parts[index + 2].startswith("worktree-")
+        ):
+            bundle = Path(*parts[: index + 3])
+            validation = validate_worktree_archive_bundle(bundle)
+            if validation.status != "valid":
+                return None
+            resolved = path.resolve(strict=False)
+            bound_paths = tuple(
+                candidate.resolve(strict=False)
+                for candidate in validation.state_paths
+            )
+            if bound_paths != (resolved,):
+                raise ValueError("validated archive state path is not manifest-bound")
+            return validation
+    return None
 
 
 def _reject_legacy_repository_selection(
@@ -741,7 +845,12 @@ _PRUNE_DIRS = frozenset({
 })
 
 
-def _iter_state_files(root: Path, *, include_archive: bool = False):
+def _iter_state_files(
+    root: Path,
+    *,
+    include_archive: bool = False,
+    archive_validations: Optional[dict[Path, WorktreeArchiveValidation]] = None,
+):
     """root 配下の全 state ファイルを列挙 (legacy state.json + multi-session sessions/*.json)。
 
     os.walk で node_modules/.git 等の巨大ツリーをプルーニングするため、~/dev のような
@@ -778,7 +887,12 @@ def _iter_state_files(root: Path, *, include_archive: bool = False):
                         if validation.status == "invalid":
                             continue
                         if validation.status == "valid":
-                            yield from validation.state_paths
+                            for state_path in validation.state_paths:
+                                if archive_validations is not None:
+                                    archive_validations[
+                                        state_path.resolve(strict=False)
+                                    ] = validation
+                                yield state_path
                             continue
                         worktree_root = validation.root
                         yield from sorted(worktree_root.glob("*.json"))
@@ -6023,8 +6137,17 @@ def _archive_history_path(kind: str, iteration: int, mission8: str, index: int, 
     return Path("archive") / "history" / f"iter-{iteration}-{mission8}-{kind}-{index}{suffix}"
 
 
-def _collect_worktree_archive_specs(cwd: Path, state_file_path: Path, data: dict) -> list[dict]:
+def _collect_worktree_archive_specs(
+    cwd: Path,
+    state_file_path: Path,
+    data: dict,
+    authoritative: Optional[AuthoritativeSnapshot] = None,
+) -> list[dict]:
     """Collect only current-session evidence references explicitly allowlisted by the state schema."""
+    if authoritative is None:
+        authoritative = read_authoritative_snapshot(
+            state_file_path, expected_session_id=state_file_path.stem
+        )
     session_id = str(data.get("session_id") or "").strip()
     mission_id = str(data.get("mission_id") or "").strip()
     iteration = data.get("iteration")
@@ -6032,10 +6155,31 @@ def _collect_worktree_archive_specs(cwd: Path, state_file_path: Path, data: dict
         raise WorktreeArchiveError("session_id and mission_id are required")
     if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < 0:
         raise WorktreeArchiveError("iteration must be a non-negative integer")
-    if data.get("loop_active") is True:
+    if authoritative.loop_active:
         raise WorktreeArchiveError("active session cannot be archived; mark pass or halt first")
 
     specs: list[dict] = []
+    try:
+        typed_score_bindings = worktree_archive_typed_score_bindings(data)
+    except ValueError as exc:
+        raise WorktreeArchiveError("typed score evidence binding is invalid") from exc
+
+    def typed_score_reference(
+        kind: str, item_iteration: int, normalized_reference: str
+    ) -> Optional[tuple[dict, str]]:
+        matches = [
+            binding for binding in typed_score_bindings
+            if binding.evidence_kind == kind
+            and binding.iteration == item_iteration
+            and binding.source_reference == normalized_reference
+        ]
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise WorktreeArchiveError(
+                f"content-addressed evidence reference is ambiguous: {kind}"
+            )
+        return matches[0].reference, matches[0].expected_kind
 
     def add(kind: str, reference: str, archive_path: Path, item_iteration: int | None = None) -> None:
         source, normalized_reference = _archive_source_file(cwd, reference, kind)
@@ -6062,9 +6206,32 @@ def _collect_worktree_archive_specs(cwd: Path, state_file_path: Path, data: dict
                 )
             except ValueError as exc:
                 raise WorktreeArchiveError("review input evidence integrity mismatch") from exc
+        typed_reference = typed_score_reference(
+            kind, effective_iteration, normalized_reference
+        )
+        if typed_reference is not None:
+            reference_document, expected_kind = typed_reference
+            try:
+                spec["verified_content"] = read_verified_content_addressed_evidence(
+                    cwd, reference_document, expected_kind=expected_kind
+                )
+            except ValueError as exc:
+                raise WorktreeArchiveError(
+                    f"content-addressed evidence integrity mismatch: {kind}"
+                ) from exc
         specs.append(spec)
 
-    add("state", str(state_file_path), Path("sessions") / f"{_sanitize_sid(session_id)}.json")
+    state_source, state_reference = _archive_source_file(
+        cwd, str(state_file_path), "state"
+    )
+    specs.append({
+        "evidence_kind": "state",
+        "iteration": iteration,
+        "source": state_source,
+        "source_reference": state_reference,
+        "archive_path": Path("sessions") / f"{_sanitize_sid(session_id)}.json",
+        "verified_content": authoritative.state_bytes,
+    })
 
     assumptions_path = data.get("assumptions_path")
     if assumptions_path:
@@ -6094,7 +6261,7 @@ def _collect_worktree_archive_specs(cwd: Path, state_file_path: Path, data: dict
             )
 
     history = [entry for entry in (data.get("score_history") or []) if isinstance(entry, dict)]
-    if data.get("passes") is True and not history and not data.get("force_approved_by_user"):
+    if authoritative.passes and not history and not data.get("force_approved_by_user"):
         raise WorktreeArchiveError("required evidence reference is missing: scoring")
     last_by_iteration: dict[int, int] = {}
     for index, entry in enumerate(history):
@@ -6107,7 +6274,16 @@ def _collect_worktree_archive_specs(cwd: Path, state_file_path: Path, data: dict
         if not isinstance(entry_iteration, int) or isinstance(entry_iteration, bool) or entry_iteration < 0:
             raise WorktreeArchiveError("score_history iteration must be a non-negative integer")
         scoring_reference = str(entry.get("scoring_evidence_path") or "").strip()
-        if data.get("passes") is True and not scoring_reference:
+        provenance = (
+            entry.get("score_provenance")
+            if isinstance(entry.get("score_provenance"), dict)
+            else {}
+        )
+        if (
+            authoritative.passes
+            and not scoring_reference
+            and not isinstance(provenance.get("scoring_evidence_ref"), dict)
+        ):
             raise WorktreeArchiveError(f"required evidence reference is missing: scoring iteration {entry_iteration}")
         if scoring_reference:
             suffix = Path(scoring_reference).suffix or ".json"
@@ -6119,7 +6295,11 @@ def _collect_worktree_archive_specs(cwd: Path, state_file_path: Path, data: dict
             add("scoring", scoring_reference, scoring_path, entry_iteration)
 
         reviews_reference = str(entry.get("findings_evidence_path") or "").strip()
-        if entry.get("score_source") == "scoring-json" and not reviews_reference:
+        if (
+            entry.get("score_source") == "scoring-json"
+            and not reviews_reference
+            and not isinstance(provenance.get("review_evidence_ref"), dict)
+        ):
             raise WorktreeArchiveError(f"required evidence reference is missing: reviews iteration {entry_iteration}")
         if reviews_reference:
             suffix = Path(reviews_reference).suffix or ".json"
@@ -6550,11 +6730,22 @@ def cmd_archive_worktree(args):
     bundle = archive_root / _worktree_bundle_name(cwd)
     staging: Path | None = None
     try:
+        authoritative, data = _load_authoritative_state(sf)
+        _validate_specialist_public_state(data)
+        if authoritative.loop_active:
+            raise WorktreeArchiveError(
+                "active session cannot be archived; mark pass or halt first"
+            )
+        source_lock = (
+            contextlib.nullcontext()
+            if authoritative.schema_origin.value == "v5"
+            else StateLock(lock_file(cwd))
+        )
         with StateLock(lock_file(destination_root)):
-            with StateLock(lock_file(cwd)):
-                data = json.loads(sf.read_text(encoding="utf-8"))
-                _validate_specialist_public_state(data)
-                specs = _collect_worktree_archive_specs(cwd, sf, data)
+            with source_lock:
+                specs = _collect_worktree_archive_specs(
+                    cwd, sf, data, authoritative=authoritative
+                )
                 if args.dry_run:
                     result = {
                         "ok": True,
@@ -8969,23 +9160,27 @@ def _context_manifest_generated(data: dict, iteration: int) -> bool:
     )
 
 
-def _derive_next_action(data: dict) -> dict:
+def _derive_next_action(
+    data: dict,
+    authoritative: Optional[AuthoritativeSnapshot] = None,
+) -> dict:
     """ADR-002 Stage 3 (G-3): state から次の 1 手を決定論的に導出する。
 
     ハーネス非依存の進行ガイド。Stop hook が使えない環境 (Codex 等) や
     compaction 後の復元で、散文指示に依存せず「state を読めば次手が自明」にする。
     分岐は SKILL.md の Phase 0-7 と同じ決定木を機械化したもの。
     """
-    terminal_outcome = derive_terminal_outcome(data)
+    snapshot = authoritative or authoritative_snapshot_from_document(data)
+    terminal_outcome = snapshot.terminal_outcome
     if terminal_outcome == "completed_evidence":
         return {
             "next_action": "report-terminal",
             "summary": "証拠提出で正常終了した mission。最終報告では evidence 提出の完了を伝え、passes=true は主張しない",
             "command_hint": "mission-state.py specialists summary",
         }
-    halt_reason = data.get("halt_reason") or ""
+    halt_reason = snapshot.halt_reason
     if halt_reason:
-        halt_category = data.get("halt_category")
+        halt_category = snapshot.halt_category
         legacy_stale = _is_legacy_stale_halt(halt_category, halt_reason)
         if halt_category == "stale" or legacy_stale:
             recovery_summary = "stale/orphan halt は resume で安全に再開する"
@@ -9003,26 +9198,26 @@ def _derive_next_action(data: dict) -> dict:
             "summary": f"halted: {halt_reason}。blocker と次アクションをユーザーに報告する。{recovery_summary}",
             "command_hint": recovery_hint,
         }
-    if data.get("passes") is True:
+    if snapshot.passes:
         return {
             "next_action": "report-complete",
             "summary": "mission は合格済み。最終報告 (成果物パス・検証結果・specialist summary) を出して終了する",
             "command_hint": "mission-state.py specialists summary",
         }
-    if data.get("awaiting_user"):
+    if snapshot.awaiting_user:
         return {
             "next_action": "await-user",
             "summary": "ユーザー回答待ち (awaiting_user=true)。回答を得るまで不可逆操作に進まない",
             "command_hint": "",
         }
-    if data.get("loop_active") is False:
+    if not snapshot.loop_active:
         return {
             "next_action": "resume",
             "summary": "loop_active=false だが未合格・halt 理由なし。refresh-pid で再活性化してループを再開する",
             "command_hint": "mission-state.py refresh-pid",
         }
-    phase = data.get("phase") or "planning"
-    iteration = data.get("iteration", 1) or 1
+    phase = snapshot.phase or "planning"
+    iteration = snapshot.iteration or 1
     reviewer_count = data.get("reviewer_count", 2) or 2
     effective_reviewer_count = reviewer_count
     if iteration >= 2 and data.get("critic_has_new_scope") is False:
@@ -9268,13 +9463,14 @@ def cmd_next(args):
             "command_hint": 'mission-state.py init "<ミッション記述>" --complexity <Simple|Standard|Complex|Critical>',
         }, ensure_ascii=False))
         return
-    with StateLock(lock_file(cwd)):
-        try:
-            data = _load_state_json(sf)
-        except UnsupportedSchemaVersionError as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
-            sys.exit(2)
-    out = _derive_next_action(data)
+    try:
+        snapshot, data = _load_authoritative_state(
+            sf, legacy_compatibility=True
+        )
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
+    out = _derive_next_action(data, authoritative=snapshot)
     # #238 (S6): 時間予算の消費率を advisory として常に添付する。
     # exceeded 時のみ、spawn 系の高コスト手を consider-halt へ差し替え、
     # 成果物確定 + partial-done halt を促す (予算切れ全損の防止)。
@@ -9299,11 +9495,11 @@ def cmd_next(args):
         )
     out.setdefault("details", {})
     out.update({
-        "phase": data.get("phase"),
-        "iteration": data.get("iteration"),
-        "session_id": data.get("session_id"),
-        "loop_active": data.get("loop_active"),
-        "passes": data.get("passes"),
+        "phase": snapshot.phase,
+        "iteration": snapshot.iteration,
+        "session_id": snapshot.session_id,
+        "loop_active": snapshot.loop_active,
+        "passes": snapshot.passes,
         "stagnation_count": data.get("stagnation_count", 0) or 0,
     })
     print(json.dumps(out, ensure_ascii=False))
@@ -9327,6 +9523,170 @@ def _stale_halt_seconds() -> int:
     return stale_halt_sec
 
 
+def _stop_verdict_pending(sessions_dir: Path, project_root: Path) -> tuple[str, str]:
+    entries = []
+    digest_documents = []
+    seen_groups = set()
+    for candidate in sorted(sessions_dir.glob("*.json")):
+        if candidate.name.endswith(".group.json"):
+            continue
+        pending, document = _load_authoritative_state(candidate)
+        if not pending.loop_active or pending.passes or pending.halt_reason:
+            continue
+        if pending.project_root:
+            try:
+                if Path(pending.project_root).resolve() != project_root.resolve():
+                    continue
+            except (OSError, RuntimeError):
+                continue
+        resolved_session_id = pending.session_id or candidate.stem
+        digest_documents.append({
+            "session_id": resolved_session_id,
+            "issue_ref": pending.issue_ref or "",
+            "logical_group_id": pending.logical_group_id or "",
+            "phase": pending.phase,
+            "owner_session_id": pending.owner_session_id or "",
+            "lease_id": pending.lease_id or "",
+            "fencing_epoch": pending.fencing_epoch or 0,
+            "lease_expires_at": pending.lease_expires_at or "",
+        })
+        if pending.logical_group_id:
+            if pending.logical_group_id in seen_groups:
+                continue
+            seen_groups.add(pending.logical_group_id)
+            entries.append("group:%s(incomplete)" % pending.logical_group_id)
+        else:
+            label = resolved_session_id
+            if pending.issue_ref:
+                label += "(#%s)" % pending.issue_ref
+            entries.append(label)
+    shown = entries[:5]
+    if len(entries) > 5:
+        shown.append("...")
+    digest_input = "".join(
+        json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+        for item in digest_documents
+    )
+    digest = hashlib.sha256(digest_input.encode("utf-8")).hexdigest() if digest_input else ""
+    return ", ".join(shown), digest
+
+
+def cmd_stop_verdict(args):
+    """Resolve one session into the versioned Stop-hook decision contract."""
+    sf = Path(args.state_file)
+    if not sf.is_absolute():
+        sf = (Path.cwd() / sf).resolve()
+    try:
+        snapshot, document = _load_authoritative_state(sf)
+        project_root = Path(args.cwd).resolve() if args.cwd else sf.parents[2].resolve()
+        if snapshot.project_root and Path(snapshot.project_root).resolve() != project_root:
+            decision = "skip"
+            reason = "project-root-mismatch"
+        elif snapshot.passes:
+            decision = "skip"
+            reason = "passes-true"
+        elif snapshot.halt_category == "evidence-submitted":
+            decision = "skip"
+            reason = "evidence-submitted"
+        elif snapshot.halt_reason:
+            decision = "skip"
+            reason = "halt-reason"
+        elif not snapshot.loop_active:
+            decision = "skip"
+            reason = "inactive"
+        else:
+            decision = "block"
+            reason = "active-unfinished"
+
+        lease = snapshot.lease
+        hook_session_id = args.hook_session_id or ""
+        if decision == "block" and hook_session_id:
+            if sf.stem == hook_session_id:
+                if lease is not None and lease.owner_session_id != hook_session_id:
+                    decision, reason = "skip", "lease-owner-mismatch"
+            elif args.hook_session_id_from_pid and lease is None:
+                if snapshot.pid is None or snapshot.pid != args.hook_pid:
+                    decision, reason = "skip", "pid-owner-mismatch"
+            else:
+                decision, reason = "skip", "session-owner-mismatch"
+
+        orphan_pid = None
+        if (
+            decision == "block"
+            and not hook_session_id
+            and lease is None
+            and snapshot.pid is not None
+            and snapshot.pid > 0
+        ):
+            try:
+                os.kill(snapshot.pid, 0)
+            except OSError:
+                orphan_pid = snapshot.pid
+                decision, reason = "skip", "orphan-pid"
+
+        lease_unexpired = False
+        if lease is not None:
+            expiry = parse_iso_datetime(lease.lease_expires_at)
+            if expiry is not None:
+                now = datetime.now(timezone.utc)
+                if expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=timezone.utc)
+                lease_unexpired = expiry > now
+
+        last_score = snapshot.last_score
+        if last_score is None:
+            last_score = "n/a"
+        pending_breakdown, pending_digest = _stop_verdict_pending(sf.parent, project_root)
+        session_id = snapshot.session_id or sf.stem
+        session_label = session_id + ("(#%s)" % snapshot.issue_ref if snapshot.issue_ref else "")
+        planning_warn = ""
+        planning_warn_iterations = args.planning_warn_iterations
+        if len(snapshot.score_history) == 0 and snapshot.iteration >= planning_warn_iterations:
+            planning_warn = (
+                "[WARN: push-score 未実行の疑い (iter=%s, score_history 空, phase=%s)。"
+                "mission-state.py get で state を確認し、push-score 未実行なら push-score を実行してください] "
+            ) % (snapshot.iteration, snapshot.phase)
+        display_reason = (
+            "/mission skill アクティブ・未達 (session=%s, 未達一覧=[%s], iter=%s, "
+            "last_score=%s, threshold=%s)。 state.json の passes=true か halt_reason を立てるまで"
+            "ループを継続。 ミッション: %s"
+        ) % (
+            session_label,
+            pending_breakdown,
+            snapshot.iteration,
+            last_score,
+            snapshot.threshold,
+            snapshot.mission[:200],
+        )
+        outcome_kind = {
+            "passes-true": "completed-pass",
+            "halt-reason": "halted",
+            "evidence-submitted": "completed-evidence",
+        }.get(reason, "expected-gate")
+        print(json.dumps({
+            "schema": "mission-stop-verdict/1",
+            "decision": decision,
+            "reason": reason,
+            "outcome_kind": outcome_kind,
+            "display_reason": display_reason,
+            "planning_warning": planning_warn,
+            "session_id": session_id,
+            "pending_digest": pending_digest,
+            "lease_present": lease is not None,
+            "lease_unexpired": lease_unexpired,
+            "awaiting_user": snapshot.awaiting_user,
+            "orphan_pid": orphan_pid,
+        }, ensure_ascii=False))
+    except Exception as exc:
+        print(json.dumps({
+            "schema": "mission-stop-verdict/1",
+            "decision": "block",
+            "reason": "authoritative-state-unreadable",
+            "error": str(exc),
+        }, ensure_ascii=False), file=sys.stderr)
+        raise SystemExit(2) from exc
+
+
 def cmd_freshness(args):
     """Read-only freshness verdict for stop-hook gating."""
     sf = Path(args.state_file)
@@ -9337,16 +9697,22 @@ def cmd_freshness(args):
     except IndexError as exc:
         print(json.dumps({"ok": False, "error": "state file path is unsafe"}, ensure_ascii=False), file=sys.stderr)
         raise SystemExit(2) from exc
-    if not sf.exists():
-        print(json.dumps({"ok": False, "error": "state file not found"}, ensure_ascii=False), file=sys.stderr)
-        raise SystemExit(2)
-    with StateLock(lock_file(root)):
-        try:
-            data = json.loads(sf.read_text())
-        except json.JSONDecodeError as exc:
-            print(json.dumps({"ok": False, "error": "state file JSON is invalid"}, ensure_ascii=False), file=sys.stderr)
-            raise SystemExit(2) from exc
-    details = _state_age_details(data)
+    try:
+        snapshot, _data = _load_authoritative_state(sf)
+    except Exception as exc:
+        print(json.dumps({"ok": False, "error": "state file is invalid"}, ensure_ascii=False), file=sys.stderr)
+        raise SystemExit(2) from exc
+    details = {"timestamp_field": None, "age_sec": None}
+    for field, value in (
+        ("heartbeat_at", snapshot.heartbeat_at),
+        ("last_progress_at", snapshot.last_progress_at),
+        ("last_activity_at", snapshot.last_activity_at),
+        ("updated_at", snapshot.updated_at),
+    ):
+        if not value:
+            continue
+        details = _state_age_details({field: value})
+        break
     age_sec = details["age_sec"]
     if age_sec is None:
         verdict = "fresh"
@@ -14868,29 +15234,36 @@ def cmd_list(args):
             continue
         for sf in _iter_state_files(root):
             try:
-                data = json.loads(sf.read_text())
-                project_root = data.get("project_root") or str(_project_root_of(sf))
+                snapshot, document = _load_authoritative_state(
+                    sf,
+                    legacy_compatibility=True,
+                    allow_missing_schema_session_mismatch=True,
+                )
+                project_root = snapshot.project_root or str(_project_root_of(sf))
                 results.append({
                     "project_root": project_root,
-                    "loop_active": data.get("loop_active"),
-                    "passes": data.get("passes"),
-                    "halt_reason": data.get("halt_reason"),
-                    "iteration": data.get("iteration"),
-                    "pid": data.get("pid"),
-                    "session_id": data.get("session_id"),
-                    "agent": data.get("agent"),
-                    "mission_id": data.get("mission_id"),
-                    "mission": (data.get("mission") or "")[:80],
-                    "updated_at": data.get("updated_at"),
+                    "loop_active": snapshot.loop_active,
+                    "passes": snapshot.passes,
+                    "halt_reason": snapshot.halt_reason,
+                    "iteration": snapshot.iteration,
+                    "pid": snapshot.pid,
+                    "session_id": snapshot.session_id,
+                    "agent": document.get("agent"),
+                    "mission_id": document.get("mission_id"),
+                    "mission": snapshot.mission[:80],
+                    "updated_at": snapshot.updated_at,
                 })
             except Exception as e:
                 results.append({"path": str(sf), "error": str(e)})
     print(json.dumps(results, indent=2, ensure_ascii=False))
 
 
-def _lane_report_wall_clock_sec(state: dict) -> float:
+def _lane_report_wall_clock_sec(
+    state: dict, snapshot: AuthoritativeSnapshot | None = None
+) -> float:
+    authoritative = snapshot or _authoritative_snapshot_for_state(state)
     started = parse_iso_datetime(state.get("started_at"))
-    updated = parse_iso_datetime(state.get("updated_at"))
+    updated = parse_iso_datetime(authoritative.updated_at)
     if not started or not updated:
         return 0.0
     try:
@@ -14901,8 +15274,7 @@ def _lane_report_wall_clock_sec(state: dict) -> float:
 
 
 def _lane_report_session_role(state: dict) -> str:
-    role = state.get("session_role")
-    return role if isinstance(role, str) and role else "implementer"
+    return _authoritative_snapshot_for_state(state).session_role
 
 
 def _lane_report_root_run_id(state: dict):
@@ -14915,8 +15287,11 @@ def _lane_report_session_entry(
     *,
     slo_minutes: int | None,
 ) -> dict:
-    summary = summarize_activity_states([state])
-    role = _lane_report_session_role(state)
+    snapshot = _authoritative_snapshot_for_state(state)
+    summary = summarize_activity_states(
+        [state], phases=[snapshot.phase], session_roles=[snapshot.session_role]
+    )
+    role = snapshot.session_role
     role_summary = summary.get("role_summaries", {}).get(role, {})
     wait_totals = role_summary.get("wait_totals_sec") if isinstance(role_summary, dict) else {}
     wait_totals = wait_totals if isinstance(wait_totals, dict) else {}
@@ -14933,17 +15308,17 @@ def _lane_report_session_entry(
         if isinstance(active, (int, float)) and not isinstance(active, bool) and active >= 0:
             observed_active_sec = float(active)
     entry = {
-        "session_id": state.get("session_id"),
+        "session_id": snapshot.session_id,
         "session_role": role,
-        "phase": state.get("phase"),
-        "wall_clock_sec": _lane_report_wall_clock_sec(state),
+        "phase": snapshot.phase,
+        "wall_clock_sec": _lane_report_wall_clock_sec(state, snapshot),
         "observed_active_sec": observed_active_sec,
         "wait_totals_sec": normalized_wait_totals,
         "unobserved_gap_sec": float(summary.get("unobserved_gap_sec") or 0.0),
         "wait_total_sec": wait_total_sec,
     }
     if slo_minutes is not None:
-        terminal = state.get("phase") in {"done", "halted"} or state.get("loop_active") is False
+        terminal = snapshot.phase in {"done", "halted"} or not snapshot.loop_active
         entry["slo_breached"] = bool(
             role == "implementer"
             and terminal
@@ -14986,25 +15361,46 @@ def cmd_lane_report(args):
             if sf.parent.name != "sessions":
                 continue
             try:
-                data = json.loads(sf.read_text())
-            except Exception:
+                snapshot, document = _load_authoritative_state(
+                    sf,
+                    legacy_compatibility=True,
+                    allow_missing_schema_session_mismatch=True,
+                )
+            except Exception as exc:
+                if is_live_session_path(sf):
+                    print(
+                        "ERROR: authoritative live session is unreadable: %s" % sf,
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
                 continue
-            if not _is_mission_state_record(data):
+            if not _is_mission_state_record(document):
                 continue
-            states.append(data)
+            states.append(AuthoritativeStateRecord(snapshot, document))
     if not states:
         print("ERROR: lane-report requires at least one mission state", file=sys.stderr)
         sys.exit(1)
-    overall = summarize_activity_states(states)
+    lane_snapshots = [_authoritative_snapshot_for_state(state) for state in states]
+    overall = summarize_activity_states(
+        states,
+        phases=[snapshot.phase for snapshot in lane_snapshots],
+        session_roles=[snapshot.session_role for snapshot in lane_snapshots],
+    )
+    ordered_states = sorted(
+        states,
+        key=lambda item: str(
+            _authoritative_snapshot_for_state(item).session_id or ""
+        ),
+    )
     entries = [
         _lane_report_session_entry(
             state,
             slo_minutes=getattr(args, "slo_minutes", None),
         )
-        for state in sorted(states, key=lambda item: str(item.get("session_id") or ""))
+        for state in ordered_states
     ]
     groups: dict[object, list[dict]] = {}
-    for state, entry in zip(sorted(states, key=lambda item: str(item.get("session_id") or "")), entries):
+    for state, entry in zip(ordered_states, entries):
         groups.setdefault(_lane_report_root_run_id(state), []).append(entry)
     grouped_entries = [
         _lane_report_group_entry(
@@ -15069,8 +15465,11 @@ def _parse_date_to_iso_prefix(s: str | None) -> str | None:
     return s[:10]
 
 
-def _matches_period(state: dict, since: str | None, until: str | None) -> bool:
-    updated = (state.get("updated_at") or "")[:10]
+def _matches_period(document: dict, since: str | None, until: str | None) -> bool:
+    snapshot = getattr(document, "authoritative_snapshot", None)
+    if snapshot is None:
+        snapshot = authoritative_snapshot_from_document(document)
+    updated = (snapshot.updated_at or "")[:10]
     if not updated:
         return True  # 日時不明は除外しない (warn は将来)
     if since and updated < since:
@@ -15132,23 +15531,50 @@ def _reviewer_output_stats(states: list[dict]) -> dict:
     }
 
 
-def _collect_states(root: Path) -> list[dict]:
+def _state_read_error(path: Path) -> dict[str, str]:
+    """Return stable aggregate metadata without exposing reader internals."""
+    return {
+        "path": str(path),
+        "reason": "authoritative-state-unreadable",
+    }
+
+
+def _collect_states(
+    root: Path, *, state_read_errors: Optional[list[dict[str, str]]] = None
+) -> list[dict]:
     """root 配下を再帰的にスキャンして state を収集 (現役 + archive、stats 用)。
 
     glob パターンは _iter_state_files に集約 (重複していた 3 つの glob を統合)。
     """
     states = []
-    for sf in _iter_state_files(root, include_archive=True):
+    archive_validations: dict[Path, WorktreeArchiveValidation] = {}
+    for sf in _iter_state_files(
+        root,
+        include_archive=True,
+        archive_validations=archive_validations,
+    ):
         try:
-            state = _load_state_json(sf)
+            snapshot, document = _load_authoritative_state(
+                sf,
+                archive_validation=archive_validations.get(
+                    sf.resolve(strict=False)
+                ),
+                legacy_compatibility=True,
+                allow_missing_schema_session_mismatch=True,
+            )
         except UnsupportedSchemaVersionError:
             raise
         except Exception:
+            if is_live_session_path(sf):
+                if state_read_errors is not None:
+                    state_read_errors.append(_state_read_error(sf))
+                continue
             continue
-        if not _is_mission_state_record(state):
+        if not _is_mission_state_record(document):
             continue
-        state["_mission_source_path"] = str(sf)
-        states.append(state)
+        record = AuthoritativeStateRecord(snapshot, document)
+        record["_mission_source_path"] = str(sf)
+        states.append(record)
     return states
 
 
@@ -15177,7 +15603,9 @@ def _discover_project_roots(root: Path) -> list[Path]:
     return discovered
 
 
-def _collect_learning_brief_states(roots: list[Path]) -> list[dict]:
+def _collect_learning_brief_states(
+    roots: list[Path], *, state_read_errors: Optional[list[dict[str, str]]] = None
+) -> list[dict]:
     """Collect readable session states plus archived terminal generations."""
     states: list[dict] = []
     project_roots: list[Path] = []
@@ -15185,7 +15613,9 @@ def _collect_learning_brief_states(roots: list[Path]) -> list[dict]:
     for root in roots:
         if not root.exists():
             continue
-        states.extend(_collect_states(root))
+        states.extend(
+            _collect_states(root, state_read_errors=state_read_errors)
+        )
         for project_root in _discover_project_roots(root):
             key = str(project_root)
             if key in seen_projects:
@@ -15235,8 +15665,8 @@ def _dedupe_states(states: list[dict]) -> tuple[list[dict], int]:
     deduped = [
         min(
             group,
-            key=lambda state: state_dedupe_rank(
-                state, str(state.get("_mission_source_path") or "")
+            key=lambda state: _authoritative_snapshot_for_state(state).dedupe_rank(
+                str(state.get("_mission_source_path") or "")
             ),
         )
         for group in groups.values()
@@ -15264,10 +15694,13 @@ def _latest_composite(history: list) -> float | None:
 def _build_agent_summary(states: list[dict], classes: list[str] | None = None) -> dict:
     """agent 別 (claude-code/codex/cli/unknown) に total/pass/halt/incomplete を集計する。
 
-    classes (各 state の _classify 結果) を渡すと再計算を避ける (_aggregate と共有)。
+    classes (各 snapshot の分類) を渡すと再計算を避ける (_aggregate と共有)。
     """
     if classes is None:
-        classes = [_classify(s) for s in states]
+        classes = [
+            _authoritative_snapshot_for_state(state).classification
+            for state in states
+        ]
     by_agent: dict = {}
     for s, cls in zip(states, classes):
         ag = s.get("agent") or "unknown"
@@ -15374,9 +15807,12 @@ def _artifact_lint_counts(states: list[dict]) -> dict:
 
 def _score_provenance_counts(states: list[dict]) -> dict[str, int]:
     counts = {"verified": 0, "legacy-unverifiable": 0, "invalid": 0}
-    for state in states:
-        terminal = not bool(state.get("loop_active"))
-        source_path = state.get("_mission_source_path")
+    for document in states:
+        snapshot = getattr(document, "authoritative_snapshot", None)
+        if snapshot is None:
+            snapshot = authoritative_snapshot_from_document(document)
+        terminal = not snapshot.loop_active
+        source_path = document.get("_mission_source_path")
         project_root = project_root_from_state_path(source_path)
         reader = None
         if isinstance(source_path, str):
@@ -15386,12 +15822,12 @@ def _score_provenance_counts(states: list[dict]) -> dict[str, int]:
                 index = parts.index(".mission-state")
                 if index + 2 < len(parts) and parts[index + 1] == "archive" and parts[index + 2].startswith("worktree-"):
                     validation = validate_worktree_archive_bundle(Path(*parts[:index + 3]))
-                    persisted_state = {key: value for key, value in state.items() if key != "_mission_source_path"}
+                    persisted_state = {key: value for key, value in document.items() if key != "_mission_source_path"}
                     if validation.status == "valid" and validation.state == persisted_state:
                         reader = validated_archive_evidence_reader(validation)
-        for entry in state.get("score_history") or []:
+        for entry in document.get("score_history") or []:
             counts[classify_score_provenance(
-                entry, terminal=terminal, project_root=project_root, state=state,
+                entry, terminal=terminal, project_root=project_root, state=document,
                 evidence_reader=reader,
             )] += 1
     return counts
@@ -15438,17 +15874,19 @@ def _command_outcome_counts(states: list[dict]) -> dict[str, int]:
 
 def _aggregate(
     states: list[dict], duplicate_state_group_count: int = 0,
-    *, observation_now: datetime | None = None,
+    *, observation_now: datetime | None = None, state_read_error_count: int = 0,
 ) -> dict:
     n = len(states)
-    pass_rate_summary = summarize_pass_rate_population(
-        states,
+    snapshots = [_authoritative_snapshot_for_state(state) for state in states]
+    pass_rate_summary = summarize_authoritative_pass_rate_population(
+        snapshots,
         now=observation_now,
         stale_after_sec=_stale_active_seconds(),
     )
     if n == 0:
         return {
             "total_sessions": 0, "pass_count": 0, "halt_count": 0,
+            "state_read_error_count": state_read_error_count,
             "duplicate_state_group_count": duplicate_state_group_count,
             "incomplete_count": 0, "abandoned_count": 0,
             "active_count": 0, "active_no_score_count": 0, "stale_count": 0,
@@ -15481,7 +15919,9 @@ def _aggregate(
             "by_halt_category": {},
             "parallel_review_counts": {"true": 0, "false": 0, "unknown": 0},
             "artifact_lint_counts": _artifact_lint_counts([]),
-            "artifact_coverage": summarize_artifact_coverage([]),
+            "artifact_coverage": summarize_artifact_coverage(
+                [], terminal_outcomes=[]
+            ),
             "bounded_context_counts": {
                 "expected_bounded": 0,
                 "manifest_generated": 0,
@@ -15490,27 +15930,32 @@ def _aggregate(
             "reviewer_output_stats": _reviewer_output_stats([]),
             "score_provenance_counts": _score_provenance_counts([]),
             "command_outcome_counts": summarize_command_outcomes([]),
-            "activity_timing": summarize_activity_states([]),
+            "activity_timing": summarize_activity_states(
+                [], phases=[], session_roles=[]
+            ),
             "planning_provider_kpis": reduce_planning_provider_kpis([], population_kind="observed"),
             "failure_ledger_counts": failure_ledger_counts([]),
             "iteration_recovery": reduce_iteration_recovery([]),
         }
-    # _classify を 1 回だけ評価 (旧実装は pass/halt/incomplete で 3N 回呼んでいた)
-    classes = [_classify(s) for s in states]
+    # AuthoritativeSnapshot の分類を集計全体で共有する。
+    classes = [snapshot.classification for snapshot in snapshots]
     pass_count = classes.count("pass")
     halt_count = pass_rate_summary["halt_count"]
     incomplete_count = pass_rate_summary["incomplete_count"]
     abandoned_count = pass_rate_summary["abandoned_count"]
     # 改善1: force-pass (品質ゲート未通過の合格) を集計し可視化する
-    forced_pass_count = sum(1 for s in states if s.get("passes") and s.get("passes_forced"))
+    forced_pass_count = sum(
+        1 for state, snapshot in zip(states, snapshots)
+        if snapshot.passes and state.get("passes_forced")
+    )
     # 採点エントリ無しで合格 = 品質ゲート未通過 (set 直叩き or 旧版)。
     # force-pass (理由記録あり) は除外し、無記録バイパスのみ数える。
     ungated_pass_count = sum(
-        1 for s in states
-        if s.get("passes")
-        and _latest_composite(s.get("score_history", [])) is None
-        and not s.get("passes_forced")
-        and not s.get("force_reason")  # 旧版 force-pass (passes_forced 未記録) も除外
+        1 for state, snapshot in zip(states, snapshots)
+        if snapshot.passes
+        and _latest_composite(state.get("score_history", [])) is None
+        and not state.get("passes_forced")
+        and not state.get("force_reason")  # 旧版 force-pass (passes_forced 未記録) も除外
     )
     # #338: reviewer 並列実行の観測集計 (last_parallel_execution 記録済み session のみ)
     parallel_review_counts = {"true": 0, "false": 0, "unknown": 0}
@@ -15556,13 +16001,18 @@ def _aggregate(
     by_cli_version = _build_breakdown(states, classes, lambda s: s.get("cli_version") or "unknown")
     by_halt_category = _build_halt_category_breakdown(states, classes)  # #190
     phase_totals = _phase_duration_totals(states)
-    activity_timing = summarize_activity_states(states)
+    activity_timing = summarize_activity_states(
+        states,
+        phases=[snapshot.phase for snapshot in snapshots],
+        session_roles=[snapshot.session_role for snapshot in snapshots],
+    )
     iteration_histogram: dict = {}
     for _it in iterations:
         _k = str(_it) if isinstance(_it, int) and _it <= 3 else ("4+" if isinstance(_it, int) else "unknown")
         iteration_histogram[_k] = iteration_histogram.get(_k, 0) + 1
     return {
         "total_sessions": n,
+        "state_read_error_count": state_read_error_count,
         "duplicate_state_group_count": duplicate_state_group_count,
         "pass_count": pass_count,
         "halt_count": halt_count,
@@ -15594,7 +16044,12 @@ def _aggregate(
         "forced_pass_count": forced_pass_count,
         "parallel_review_counts": parallel_review_counts,
         "artifact_lint_counts": _artifact_lint_counts(states),
-        "artifact_coverage": summarize_artifact_coverage(states),
+        "artifact_coverage": summarize_artifact_coverage(
+            states,
+            terminal_outcomes=[
+                snapshot.artifact_terminal_outcome for snapshot in snapshots
+            ],
+        ),
         "bounded_context_counts": bounded_context_counts,
         "reviewer_output_stats": _reviewer_output_stats(states),
         "score_provenance_counts": _score_provenance_counts(states),
@@ -15652,6 +16107,7 @@ def _format_text(stats: dict, since: str | None, until: str | None) -> str:
         f"=== /mission stats ({period}) ===",
         f"roots:                    {roots}",
         f"total_sessions:           {n}",
+        f"state_read_errors:        {stats.get('state_read_error_count', 0)}",
         f"duplicate_state_groups:   {stats.get('duplicate_state_group_count', 0)}",
         f"raw_pass_rate:            {_rate_detail(stats, 'raw')}",
         f"completed_pass_rate:      {_rate_detail(stats, 'completed')}",
@@ -15778,6 +16234,7 @@ def cmd_stats(args):
     since = _parse_date_to_iso_prefix(args.since)
     until = _parse_date_to_iso_prefix(args.until)
     all_states = []
+    state_read_errors: list[dict[str, str]] = []
     observation_now = None
     if args.snapshot:
         try:
@@ -15799,18 +16256,24 @@ def cmd_stats(args):
             if "command_outcome_observation" in item:
                 state["_command_outcome_observation"] = item["command_outcome_observation"]
             all_states.append(state)
+        state_read_errors = list(document.get("state_read_errors") or [])
     else:
         try:
             for r in roots:
                 if r.exists():
-                    all_states.extend(_collect_states(r))
+                    all_states.extend(
+                        _collect_states(r, state_read_errors=state_read_errors)
+                    )
         except UnsupportedSchemaVersionError as exc:
             print(f"ERROR: invalid state snapshot: {exc}", file=sys.stderr)
             raise SystemExit(2)
     filtered = [s for s in all_states if _matches_period(s, since, until)]
     deduped, duplicate_state_group_count = _dedupe_states(filtered)
     stats = _aggregate(
-        deduped, duplicate_state_group_count, observation_now=observation_now
+        deduped,
+        duplicate_state_group_count,
+        observation_now=observation_now,
+        state_read_error_count=len(state_read_errors),
     )
     stats["roots"] = [str(root) for root in roots]
     if args.json:
@@ -15823,8 +16286,11 @@ def cmd_learning_brief(args):
     """Read-only failure-ledger learning brief across session and archive state roots."""
     requested_roots = [Path(root) for root in args.root] if args.root else None
     roots = requested_roots or _learning_brief_default_roots(Path.cwd())
+    state_read_errors: list[dict[str, str]] = []
     try:
-        states = _collect_learning_brief_states(roots)
+        states = _collect_learning_brief_states(
+            roots, state_read_errors=state_read_errors
+        )
         brief = summarize_learning_brief(
             states,
             weak_phase=getattr(args, "weak_phase", None),
@@ -15833,6 +16299,7 @@ def cmd_learning_brief(args):
     except LearningContractError as exc:
         print(f"ERROR: learning brief: {exc}", file=sys.stderr)
         raise SystemExit(2)
+    brief["state_read_error_count"] = len(state_read_errors)
     if args.json:
         print(json.dumps(brief, indent=2, ensure_ascii=False))
         return
@@ -15842,8 +16309,8 @@ def cmd_learning_brief(args):
         )
         for rule in brief["rules"]
     ]
-    if lines:
-        print("\n".join(lines))
+    lines.insert(0, "state_read_error_count=%s" % len(state_read_errors))
+    print("\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
@@ -16437,6 +16904,17 @@ def _build_parser():
 
     p_next = sub.add_parser("next", help="ADR-002 Stage 3: state から次の 1 手を JSON で返す (read-only。Codex/compaction 復帰時の進行ガイド)")
     p_next.set_defaults(func=cmd_next)
+    p_stop_verdict = sub.add_parser(
+        "stop-verdict", help="authoritative session state の Stop-hook verdict を返す (read-only)"
+    )
+    p_stop_verdict.add_argument("--state-file", required=True)
+    p_stop_verdict.add_argument("--json", action="store_true")
+    p_stop_verdict.add_argument("--cwd", default=None)
+    p_stop_verdict.add_argument("--hook-session-id", default=None)
+    p_stop_verdict.add_argument("--hook-pid", type=int, default=None)
+    p_stop_verdict.add_argument("--hook-session-id-from-pid", action="store_true")
+    p_stop_verdict.add_argument("--planning-warn-iterations", type=int, default=3)
+    p_stop_verdict.set_defaults(func=cmd_stop_verdict)
     p_freshness = sub.add_parser("freshness", help="state の freshness 判定を JSON で返す (read-only)")
     p_freshness.add_argument("--state-file", required=True, help="判定対象の session state JSON")
     p_freshness.set_defaults(func=cmd_freshness)
