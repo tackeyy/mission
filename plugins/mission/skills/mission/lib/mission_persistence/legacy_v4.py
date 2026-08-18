@@ -121,7 +121,7 @@ class LegacyV4Repository:
                     allow_nan=False,
                 ).encode("utf-8")
                 state = decode_mission_state(source)
-            except Exception as exc:
+            except (TypeError, ValueError, UnicodeError) as exc:
                 raise FencedCommitError(
                     getattr(exc, "code", "record-invalid"),
                     "legacy state cannot be decoded",
@@ -167,7 +167,7 @@ class LegacyV4Repository:
             ).encode("utf-8")
             try:
                 state = decode_mission_state(source)
-            except Exception as exc:
+            except (TypeError, ValueError, UnicodeError) as exc:
                 raise FencedCommitError(
                     getattr(exc, "code", "record-invalid"),
                     "legacy state cannot be decoded",

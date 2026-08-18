@@ -46,6 +46,7 @@ from mission_application.ports import (
     CommitResult,
     ExecutionRequest,
     RepositoryExecutionResult,
+    VerifiedBlobSetView,
 )
 
 from .local_uow import (
@@ -290,7 +291,7 @@ def compute_intent_digest(
     lease_owner_session_id: str,
     operation_id: str,
     command: FrozenJsonObject,
-    blobs: VerifiedBlobSet,
+    blobs: VerifiedBlobSetView,
 ) -> str:
     """Return the canonical digest of command meaning and captured evidence."""
     session_id = _session_id(session_id)
@@ -307,8 +308,6 @@ def compute_intent_digest(
         ) from exc
     if normalized_command != command:
         raise FencedCommitError("request-invalid", "command is mutable or has duplicate keys")
-    if not isinstance(blobs, VerifiedBlobSet):
-        raise FencedCommitError("request-invalid", "blobs must be a VerifiedBlobSet")
     try:
         validate_verified_blob_set(blobs)
     except LocalUnitOfWorkError as exc:

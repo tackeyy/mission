@@ -47,8 +47,8 @@ class ExecutionRequest:
     lease_owner_session_id: str
     command: FrozenJsonObject
     # Structural typing keeps the application port independent of a concrete
-    # persistence module.  Runtime trust still comes from the strict
-    # ``compute_intent_digest``/verified-blob validation at repository entry.
+    # persistence module.  This is a static view only: repository entry still
+    # requires the concrete ``VerifiedBlobSet`` via strict digest validation.
     blobs: VerifiedBlobSetView
     operation_id: str
     intent_digest: str
