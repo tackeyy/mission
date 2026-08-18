@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import contextlib
 import hashlib
 import ast
@@ -27,6 +27,7 @@ from mission_application.ports import (  # noqa: E402
     LegacyMissionRepository,
     MissionRepository,
     RecoverableUnitOfWork,
+    VerifiedBlobView,
     VerifiedBlobSetView,
 )
 from mission_kernel.commands import (  # noqa: E402
@@ -43,6 +44,7 @@ from mission_persistence.fenced_commit import (  # noqa: E402
     AdmittedSnapshot,
     AuditMetadata,
     CommitResult,
+    FencedCommitError,
     ExecutionRequest,
     LocalFencedRepository,
     compute_intent_digest,
@@ -459,9 +461,78 @@ def test_common_repository_protocol_separates_legacy_transaction_capability(tmp_
 
 def test_execution_request_blob_type_is_a_persistence_independent_protocol():
     annotations = get_type_hints(ExecutionRequest)
+    digest_annotations = get_type_hints(compute_intent_digest)
+    blob_annotations = get_type_hints(VerifiedBlobSetView)
 
     assert annotations["blobs"] is VerifiedBlobSetView
-    assert {"blobs"}.issubset(VerifiedBlobSetView.__protocol_attrs__)
+    assert digest_annotations["blobs"] is VerifiedBlobSetView
+    assert set(blob_annotations) == {"blobs"}
+    assert getattr(blob_annotations["blobs"], "__origin__", None) is tuple
+    assert getattr(blob_annotations["blobs"], "__args__", ()) == (VerifiedBlobView, Ellipsis)
+
+
+@dataclass(frozen=True)
+class _ProtocolOnlyBlobSetView:
+    blobs: tuple[VerifiedBlob, ...]
+
+
+def test_compute_intent_digest_rejects_protocol_only_blob_view():
+    content = b'{"schema":"mission-state/1","session_id":"test"}'
+    binding = BlobBinding(
+        blob_id="protocol-only-blob",
+        kind="cli-output",
+        relative_path="evidence/mission-state.json",
+        digest="sha256:" + hashlib.sha256(content).hexdigest(),
+        size=len(content),
+    )
+    structural_view = _ProtocolOnlyBlobSetView((VerifiedBlob(binding, content),))
+
+    with pytest.raises(FencedCommitError, match="blobs are not immutable and verified"):
+        compute_intent_digest(
+            session_id="test",
+            lease_owner_session_id="test",
+            operation_id="protocol-only-operation",
+            command=decode_json_object(
+                b'{"schema":"mission-command-intent/1","type":"bootstrap"}'
+            ),
+            blobs=structural_view,  # type: ignore[arg-type]
+        )
+
+
+def test_legacy_v4_read_propagates_structural_bugs(monkeypatch, tmp_path):
+    from mission_persistence import legacy_v4 as legacy_v4_module
+
+    state_path, state_bytes = generate_cli_state_bytes(tmp_path / "legacy-structural-bug")
+    document = json.loads(state_bytes)
+    admitted_at = datetime.fromisoformat(
+        document["lease_expires_at"].replace("Z", "+00:00")
+    ) - timedelta(seconds=900)
+    repository = LegacyV4Repository(
+        lock=contextlib.nullcontext,
+        read_state=lambda: json.loads(state_path.read_bytes()),
+        write_state=lambda _value: None,
+        backup_state=lambda: None,
+        clock=lambda: admitted_at,
+    )
+
+    monkeypatch.setattr(
+        legacy_v4_module,
+        "decode_mission_state",
+        lambda _source: (_ for _ in ()).throw(RecursionError("structural bug")),
+    )
+
+    with pytest.raises(RecursionError, match="structural bug"):
+        repository.read("test")
+
+    command = MarkHalt(HaltCategory.OTHER, "structural bug stop")
+    request = _request(
+        "structural-bug-operation",
+        document["lease_id"],
+        typed_command=command,
+        event_types=("mission-halted",),
+    )
+    with pytest.raises(RecursionError, match="structural bug"):
+        repository.execute(request)
 
 
 def test_a1_a5_application_modules_have_no_persistence_or_direct_writer_dependency():
