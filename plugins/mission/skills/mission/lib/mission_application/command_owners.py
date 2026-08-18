@@ -144,7 +144,6 @@ C2_DIRECT_WRITE_FUNCTIONS = frozenset()
 NON_SESSION_DIRECT_CALL_FUNCTIONS = frozenset(
     {
         "cmd_archive_worktree",
-        "cmd_codex_preflight",
         "cmd_resolve_archive",
         "cmd_specialists_consent",
     }
