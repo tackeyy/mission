@@ -14327,7 +14327,11 @@ def cmd_aggregate_reviews(args):
         evidence_path = state_dir(cwd) / "archive" / f"iter-{args.iteration}-{mission8}-reviews-{evidence_digest[7:23]}.json"
         evidence_ref_path = str(evidence_path.relative_to(cwd))
 
-        out_path = Path(args.out) if args.out else Path("/tmp") / f"mission-scorer-iter-{args.iteration}-{mission8}.json"
+        out_path = (
+            Path(args.out)
+            if args.out
+            else state_dir(cwd) / "tmp" / f"mission-scorer-iter-{args.iteration}-{mission8}.json"
+        )
         if _same_publish_target(out_path, evidence_path):
             raise CommandOutcomeExit(2, "invalid-input")
         payload = {
@@ -17850,7 +17854,7 @@ def _build_parser():
     p_agg.add_argument("--input-ref", action="append", default=[], dest="input_refs",
                        help="review-import が返した state-local review evidence path。複数指定可")
     p_agg.add_argument("--out", default=None,
-                       help="出力する push-score 互換 scoring JSON パス。未指定なら /tmp/mission-scorer-iter-N-<mission8>.json")
+                       help="出力する push-score 互換 scoring JSON パス。未指定なら .mission-state/tmp/mission-scorer-iter-N-<mission8>.json")
     p_agg.add_argument("--json", action="store_true", help="結果を JSON で出力")
     p_agg.add_argument("--min-reviewers", type=int, default=None, dest="min_reviewers",
                        help="#240: 最低 reviewer 数。不足なら exit 2 (合意偽装防止)")
@@ -17871,7 +17875,7 @@ def _build_parser():
     p_rf.add_argument("--input-ref", action="append", default=[], dest="input_refs",
                       help="review-import が返した state-local review evidence path。複数指定可")
     p_rf.add_argument("--out", default=None,
-                      help="scoring JSON の出力パス。未指定なら /tmp/mission-scorer-iter-N-<mission8>.json")
+                      help="scoring JSON の出力パス。未指定なら .mission-state/tmp/mission-scorer-iter-N-<mission8>.json")
     p_rf.add_argument("--min-reviewers", type=int, default=None, dest="min_reviewers",
                       help="#240: 最低 reviewer 数。不足なら exit 2 (score は push されない)")
     p_rf.add_argument("--reviewer-window", action="append", default=[], dest="reviewer_windows",
