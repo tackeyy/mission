@@ -15,6 +15,11 @@ import sys
 
 import pytest
 
+from skills.mission.tests.conftest import (
+    canonical_review,
+    write_canonical_review_aggregate,
+)
+
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MISSION_ROOT = REPO_ROOT / "skills" / "mission"
@@ -38,6 +43,7 @@ from mission_persistence.fenced_commit import (  # noqa: E402
     compute_intent_digest,
 )
 from mission_persistence.local_uow import VerifiedBlobSet  # noqa: E402
+from mission_persistence.legacy_v4 import V5CompatibilityRepository  # noqa: E402
 from mission_persistence.repository_binding import (  # noqa: E402
     RepositorySelectionError,
     require_legacy_session,
@@ -242,7 +248,7 @@ def _genesis_request(
 
 
 def test_t3_new_v5_session_completes_the_full_cli_lifecycle(tmp_path, run_cli):
-    """T3 is intentionally first: a cutover is useful only when closeout completes."""
+    """Time is intentionally fixed; cross-TTL coverage belongs to T13."""
     _init_v5(run_cli, tmp_path)
     commands = [
         ("set", "planning_policy_version=0"),
@@ -288,6 +294,73 @@ def test_t3_new_v5_session_completes_the_full_cli_lifecycle(tmp_path, run_cli):
     assert final_state["loop_active"] is False
     assert final_state["phase"] == "done"
     assert _head(tmp_path)["schema"] == "mission-head/1"
+
+
+@pytest.mark.parametrize("repository_format", ("v4", "v5"))
+def test_push_score_uses_the_format_pinned_repository(
+    tmp_path,
+    run_cli,
+    repository_format,
+):
+    session_id = "push-score-%s" % repository_format
+    initialized = run_cli(
+        "init",
+        "Issue 542 push-score repository coverage",
+        "--complexity",
+        "Simple",
+        "--force-mission",
+        cwd=tmp_path,
+        env_extra=_env(session_id),
+        init_format=repository_format,
+    )
+    assert initialized.returncode == 0, initialized.stderr
+    items = {
+        "mission_achievement": 4.6,
+        "accuracy": 4.4,
+        "completeness": 4.2,
+        "usability": 4.0,
+    }
+    _path, review_ref, claim = write_canonical_review_aggregate(
+        tmp_path,
+        [canonical_review(items, perspective="push-score")],
+        iteration=1,
+        name_prefix="push-score",
+    )
+    scoring = tmp_path / "scoring.json"
+    scoring.write_text(
+        json.dumps(
+            {
+                "items": claim["items"],
+                "open_high": claim["open_high"],
+                "review_agreement": claim["review_agreement"],
+                "agreement_detail": claim["agreement_detail"],
+                "score_provenance": {
+                    "score_source": "scoring-json",
+                    "review_evidence_ref": review_ref,
+                    "revision_scope": review_ref["revision_scope"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    pushed = run_cli(
+        "push-score",
+        "--iteration",
+        "1",
+        "--scoring-json",
+        str(scoring),
+        cwd=tmp_path,
+        env_extra=_env(session_id),
+    )
+
+    assert pushed.returncode == 0, (pushed.stdout, pushed.stderr)
+    state = _state(tmp_path, session_id)
+    assert state["score_history"][0]["items"] == claim["items"]
+    if repository_format == "v5":
+        assert _head(tmp_path, session_id)["schema"] == "mission-head/1"
+    else:
+        assert "schema" not in _head(tmp_path, session_id)
 
 
 def test_v5_takeover_emits_carrier_for_the_next_independent_process(
@@ -343,6 +416,40 @@ def test_v5_takeover_emits_carrier_for_the_next_independent_process(
     assert _state(tmp_path)["complexity"] == "Simple"
 
 
+def test_v5_review_import_without_the_active_lease_is_diagnosed(
+    tmp_path,
+    run_cli,
+):
+    session_id = "review-import-lease"
+    _init_v5(run_cli, tmp_path, session_id=session_id)
+    review = _review(
+        tmp_path / "tokenless-review.json",
+        "tokenless",
+        (4.3, 4.2, 4.1, 4.0),
+    )
+    before = _state(tmp_path, session_id)
+
+    rejected = run_cli(
+        "review-import",
+        "--iteration",
+        "1",
+        "--input",
+        str(review),
+        cwd=tmp_path,
+        env_extra={
+            "MISSION_SESSION_ID": session_id,
+            "MISSION_STATE_NOW": "2026-08-18T00:00:01Z",
+        },
+    )
+
+    assert rejected.returncode == 2, (rejected.stdout, rejected.stderr)
+    assert rejected.stderr.startswith(
+        "ERROR: lease held by %s until " % session_id
+    )
+    assert "MISSION_LEASE_ID" in rejected.stderr
+    assert _state(tmp_path, session_id) == before
+
+
 def test_t1_new_init_creates_v5_head_commit_generation_and_object(tmp_path, run_cli):
     _init_v5(run_cli, tmp_path)
 
@@ -375,6 +482,48 @@ def test_t2_existing_v4_session_stays_on_v4_writer(tmp_path, run_cli, state_dir)
     assert not list((state_dir / "commits").glob("*.json"))
 
 
+def test_cleanup_stale_detects_and_halts_an_expired_v5_session(tmp_path, run_cli):
+    _init_v5(run_cli, tmp_path, session_id="stale-v5")
+    cleanup_environment = {
+        "MISSION_SESSION_ID": "janitor",
+        "MISSION_STATE_NOW": "2026-08-18T00:16:00Z",
+    }
+
+    detected = run_cli(
+        "cleanup-stale",
+        "--root",
+        str(tmp_path),
+        cwd=tmp_path,
+        env_extra=cleanup_environment,
+    )
+
+    assert detected.returncode == 0, detected.stderr
+    detection = json.loads(detected.stdout)
+    assert [entry["reason"] for entry in detection["would_halt"]] == [
+        "expired-session-lease"
+    ]
+    assert detection["errors"] == []
+
+    halted = run_cli(
+        "cleanup-stale",
+        "--root",
+        str(tmp_path),
+        "--execute",
+        cwd=tmp_path,
+        env_extra=cleanup_environment,
+    )
+
+    assert halted.returncode == 0, halted.stderr
+    result = json.loads(halted.stdout)
+    assert [entry["reason"] for entry in result["halted"]] == [
+        "expired-session-lease"
+    ], result
+    assert result["errors"] == []
+    state = _state(tmp_path, "stale-v5")
+    assert state["loop_active"] is False
+    assert state["halt_category"] == "stale"
+
+
 def test_t4_reinit_of_v5_session_is_rejected(tmp_path, run_cli):
     _init_v5(run_cli, tmp_path)
     before = (tmp_path / ".mission-state" / "sessions" / "test.json").read_bytes()
@@ -387,6 +536,50 @@ def test_t4_reinit_of_v5_session_is_rejected(tmp_path, run_cli):
     assert second.returncode == 2
     assert "session-already-initialized" in second.stderr
     assert (tmp_path / ".mission-state" / "sessions" / "test.json").read_bytes() == before
+
+
+def test_unclassified_fenced_error_is_translated_without_a_traceback(tmp_path):
+    script = r'''
+import importlib.util
+import sys
+
+path = sys.argv[1]
+spec = importlib.util.spec_from_file_location("mission_state_fenced_fallback", path)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+class Args:
+    cmd = "set"
+    command_outcome_tracking = False
+
+    @staticmethod
+    def func(_args):
+        raise module.FencedCommitError(
+            "initial-state-required",
+            "authoritative initial state is required",
+        )
+
+class Parser:
+    @staticmethod
+    def parse_args():
+        return Args()
+
+module._build_parser = lambda: Parser()
+module.main()
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(MISSION_STATE_PY)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert result.stderr == "ERROR: authoritative initial state is required\n"
+    assert "Traceback" not in result.stderr
 
 
 def test_t5_real_process_crash_after_genesis_head_replays_original_result(tmp_path):
@@ -413,7 +606,9 @@ repository.initialize(_genesis_request(), state_bytes=_genesis_state_bytes())
 raise AssertionError("fault point was not reached")
 '''
     environment = dict(os.environ)
-    environment["PYTHONPATH"] = os.pathsep.join((str(LIB_DIR), str(Path(__file__).parent)))
+    environment["PYTHONPATH"] = os.pathsep.join(
+        (str(REPO_ROOT), str(LIB_DIR), str(Path(__file__).parent))
+    )
     crashed = subprocess.run(
         [sys.executable, "-c", script, str(repository_root)],
         cwd=tmp_path,
@@ -501,6 +696,26 @@ def test_t7_initialize_is_only_genesis_route_and_stage_execute_still_reject(tmp_
     assert executed.rejection_code == "initial-state-required"
 
 
+def test_v5_compatibility_load_requires_an_active_transaction(tmp_path):
+    repository = LocalFencedRepository(
+        tmp_path / ".mission-state",
+        clock=lambda: datetime(2026, 8, 18, tzinfo=timezone.utc),
+    )
+    repository.initialize(_genesis_request(), state_bytes=_genesis_state_bytes())
+    compatibility = V5CompatibilityRepository(
+        repository=repository,
+        session_id="test",
+        lease_owner_session_id="test",
+        presented_lease_id="test-lease",
+    )
+
+    with pytest.raises(FencedCommitError) as rejected:
+        compatibility.load()
+
+    assert rejected.value.code == "request-invalid"
+    assert rejected.value.detail == "v5 load requires an active transaction"
+
+
 def test_t8_v5_session_has_one_writer_and_stays_format_pinned(tmp_path, run_cli):
     _init_v5(run_cli, tmp_path)
     for value in ("Standard", "Complex"):
@@ -523,7 +738,7 @@ def test_t9_v4_reader_rejects_new_v5_head_fail_closed(tmp_path, run_cli):
 
 
 def test_t10_one_default_change_rolls_new_init_back_to_v4_but_reads_existing_v5(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, run_cli,
 ):
     module = _load_mission_state_module("mission_state_issue542_rollback")
     monkeypatch.chdir(tmp_path)
@@ -550,6 +765,16 @@ def test_t10_one_default_change_rolls_new_init_back_to_v4_but_reads_existing_v5(
 
     assert "schema" not in _head(tmp_path, "v4-after-rollback")
     assert _state(tmp_path, "v5-existing")["mission"] == "existing v5"
+    existing_v5 = run_cli(
+        "get",
+        "--field",
+        "mission",
+        cwd=tmp_path,
+        env_extra={"MISSION_SESSION_ID": "v5-existing"},
+        init_format="v4",
+    )
+    assert existing_v5.returncode == 0, existing_v5.stderr
+    assert json.loads(existing_v5.stdout) == "existing v5"
 
 
 def test_t11_mixed_root_supports_stats_audit_list_and_next(tmp_path, run_cli, state_dir):

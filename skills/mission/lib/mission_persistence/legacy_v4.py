@@ -350,15 +350,18 @@ class V5CompatibilityRepository:
         self._lease_committed = lease_committed
         self._format_guard = format_guard
         self._admitted: AdmittedSnapshot | None = None
+        self._transaction_active = False
 
     @contextlib.contextmanager
     def transaction(self):
-        if self._admitted is not None:
+        if self._transaction_active:
             raise FencedCommitError("request-invalid", "nested v5 transaction")
+        self._transaction_active = True
         try:
             yield
         finally:
             self._admitted = None
+            self._transaction_active = False
 
     def _request(self) -> ExecutionRequest:
         operation_id = "compat:" + secrets.token_hex(16)
@@ -391,6 +394,13 @@ class V5CompatibilityRepository:
         )
 
     def load(self) -> dict:
+        if not self._transaction_active:
+            raise FencedCommitError(
+                "request-invalid",
+                "v5 load requires an active transaction",
+            )
+        if self._admitted is not None:
+            raise FencedCommitError("request-invalid", "v5 transaction already loaded")
         if self._format_guard is not None:
             self._format_guard()
         admitted = self._repository.begin(self._request())

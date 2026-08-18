@@ -161,6 +161,50 @@ def test_aggregate_reviews_accepts_matching_min_reviewers(tmp_path, monkeypatch)
     assert "items" in output
 
 
+def test_aggregate_reviews_rechecks_critic_scope_inside_transaction(
+    tmp_path,
+    monkeypatch,
+):
+    """A stale preflight read cannot bypass the iteration-2 critic gate."""
+    monkeypatch.setenv("MISSION_SESSION_ID", TEST_SID)
+    state_file = _make_state(
+        tmp_path,
+        iteration=2,
+        reviewer_count=1,
+        phase="reviewing",
+        critic_has_new_scope=False,
+    )
+    review = _write_review_json(
+        tmp_path / "r1.json",
+        perspective="A",
+        iteration=2,
+    )
+    original_loader = MS._load_review_json
+
+    def load_after_scope_drift(path, iteration):
+        current = json.loads(state_file.read_text(encoding="utf-8"))
+        current.pop("critic_has_new_scope")
+        state_file.write_text(json.dumps(current), encoding="utf-8")
+        return original_loader(path, iteration)
+
+    monkeypatch.setattr(MS, "_load_review_json", load_after_scope_drift)
+    args = type("Args", (), {
+        "iteration": 2,
+        "input": [str(review)],
+        "out": str(tmp_path / "out.json"),
+        "json": True,
+        "min_reviewers": 1,
+        "reviewer_windows": [],
+    })()
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(MS.CommandOutcomeExit) as rejected:
+        MS.cmd_aggregate_reviews(args)
+
+    assert rejected.value.code == 2
+    assert not (tmp_path / "out.json").exists()
+
+
 # --- 6. set critic_has_new_scope ---
 
 def test_set_critic_has_new_scope(tmp_path, monkeypatch):

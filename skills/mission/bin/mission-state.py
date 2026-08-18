@@ -1585,7 +1585,9 @@ def _reject_fenced_lease_for_cli(error: FencedCommitError) -> NoReturn:
         "lease-rejected",
         "stale-fencing-token",
     }:
-        raise error
+        detail = error.detail.strip() if isinstance(error.detail, str) else ""
+        print("ERROR: %s" % (detail or error.code), file=sys.stderr)
+        raise CommandOutcomeExit(2, "invalid-input")
     state = {}
     try:
         _snapshot, state = _load_authoritative_state(resolve_state_file(Path.cwd()))
@@ -14022,6 +14024,41 @@ def cmd_aggregate_reviews(args):
     )
     with repository.transaction():
         data = repository.load()
+        # The preflight read above is intentionally advisory only. Re-run all
+        # state-dependent reviewer gates against the transaction-bound state so
+        # a concurrent critic-scope or reviewer-policy update cannot be
+        # bypassed by a stale read.
+        if args.iteration >= 2 and data.get("critic_has_new_scope") is None:
+            print(
+                "ERROR: iteration >= 2 の集計には critic_has_new_scope の記録が必要です (#326)。"
+                " critic の実行計画テーブルから判定し、"
+                "`mission-state.py set critic_has_new_scope='false'` (全ステップが既存 finding id のみ)"
+                " または `'true'` (new を含む) を実行してから再集計してください。",
+                file=sys.stderr,
+            )
+            raise CommandOutcomeExit(2, "expected-gate")
+        if min_reviewers is not None and len(reviews) < min_reviewers:
+            shortage_guidance = build_guidance(
+                "review-finalize",
+                "min-reviewers",
+                {
+                    "iteration": args.iteration,
+                    "reviewer_count": data.get("reviewer_count"),
+                    "latest_review_input_ref": input_refs[0] if input_refs else None,
+                },
+            )
+            print(
+                f"ERROR: reviewer 数不足 (期待 {min_reviewers} 名, 実際 {len(reviews)} 名)。"
+                " reviewer を追加してやり直してください。",
+                file=sys.stderr,
+            )
+            for line in shortage_guidance:
+                print(line, file=sys.stderr)
+            raise CommandOutcomeExit(
+                2,
+                "expected-gate",
+                guidance=shortage_guidance,
+            )
         if input_refs:
             try:
                 current_imported_refs = [
@@ -15229,17 +15266,20 @@ def _terminalize_state_file(
     require_dead_pid: bool = False,
     require_expired_lease: bool = False,
 ) -> bool:
-    """Re-read and revalidate under lock before a bulk terminal write."""
-    with StateLock(lock_file(proj)):
-        latest = json.loads(sf.read_text())
+    """Re-read and revalidate inside the format-pinned write transaction."""
+
+    class StaleCleanupPreconditionChanged(Exception):
+        pass
+
+    def validate_latest(latest: dict, *, expired_lease_admitted: bool) -> None:
         if not latest.get("loop_active") or latest.get("passes") or latest.get("halt_reason"):
-            return False
+            raise StaleCleanupPreconditionChanged
         if expected_pid is not None and latest.get("pid") != expected_pid:
-            return False
+            raise StaleCleanupPreconditionChanged
         if require_missing_root:
             stored_root = latest.get("project_root", "")
             if not stored_root or Path(stored_root).exists():
-                return False
+                raise StaleCleanupPreconditionChanged
         if require_stale_no_score:
             age_sec = _state_age_since_update_sec(latest)
             if (
@@ -15247,60 +15287,128 @@ def _terminalize_state_file(
                 or latest.get("awaiting_user")
                 or age_sec is not None and age_sec < _stale_active_seconds()
             ):
-                return False
+                raise StaleCleanupPreconditionChanged
         if require_dead_pid:
             try:
                 if _pid_is_agent(int(latest.get("pid") or 0)):
-                    return False
+                    raise StaleCleanupPreconditionChanged
             except (TypeError, ValueError):
                 pass
-        if require_expired_lease and not _expired_lease_without_heartbeat(latest)[0]:
-            return False
-        now = iso_now()
-        sampled = _parse_iso_datetime(now)
-        updated = _parse_iso_datetime(latest.get("updated_at"))
-        if sampled and updated and sampled < updated:
-            now = str(latest["updated_at"])
+        if (
+            require_expired_lease
+            and not expired_lease_admitted
+            and not _expired_lease_without_heartbeat(latest)[0]
+        ):
+            raise StaleCleanupPreconditionChanged
 
-        def terminalize_without_phase(data: dict, at: str, trusted: bool) -> None:
-            if category == "stale":
-                _accrue_phase_for_terminal_control(
-                    data,
-                    data.get("phase"),
-                    at,
-                    trusted_boundary=trusted,
-                )
-                data["phase_started_at"] = at
-            close_activity_for_terminal(
+    class ValidatingJanitorRepository:
+        def __init__(self, repository, *, expired_lease_admitted: bool) -> None:
+            self._repository = repository
+            self._expired_lease_admitted = expired_lease_admitted
+
+        def transaction(self):
+            return self._repository.transaction()
+
+        def load(self):
+            latest = self._repository.load()
+            validate_latest(
+                latest,
+                expired_lease_admitted=self._expired_lease_admitted,
+            )
+            return latest
+
+        def execute(self, state, mutation=None, transition=None):
+            return self._repository.execute(state, mutation, transition)
+
+        def save(self, state, **kwargs) -> None:
+            self._repository.save(state, **kwargs)
+
+    def terminalize_without_phase(data: dict, at: str, trusted: bool) -> None:
+        if category == "stale":
+            _accrue_phase_for_terminal_control(
                 data,
+                data.get("phase"),
                 at,
                 trusted_boundary=trusted,
             )
-
-        def write_terminal_state(data: dict, *, administrative: bool = False) -> None:
-            _validate_specialist_public_state(data)
-            # Janitor CAS deliberately bypasses owner-token acquisition; it
-            # publishes the already revalidated terminal state under this lock.
-            _atomic_write(sf, lambda f: json.dump(data, f, indent=2, ensure_ascii=False))
-
-        repository = _select_legacy_repository_for_cli(
-            str(latest.get("session_id") or sf.stem),
-            sf,
-            lambda format_guard: LegacyV4Repository(
-                lock=contextlib.nullcontext,
-                read_state=lambda: copy.deepcopy(latest),
-                write_state=write_terminal_state,
-                backup_state=lambda: backup_state(sf),
-                remove_from_aggregate=(
-                    (lambda: _remove_from_aggregate_strict(proj, sf.stem))
-                    if sf.parent.name == "sessions"
-                    else None
-                ),
-                format_guard=format_guard,
-            ),
+            data["phase_started_at"] = at
+        close_activity_for_terminal(
+            data,
+            at,
+            trusted_boundary=trusted,
         )
+
+    def nondecreasing_terminal_time(latest: dict, sampled: str) -> str:
+        sampled_at = _parse_iso_datetime(sampled)
+        updated_at = _parse_iso_datetime(latest.get("updated_at"))
+        if sampled_at and updated_at and sampled_at < updated_at:
+            return str(latest["updated_at"])
+        return sampled
+
+    def write_terminal_state(data: dict, *, administrative: bool = False) -> None:
+        _validate_specialist_public_state(data)
+        # Legacy janitor CAS deliberately bypasses owner-token acquisition;
+        # the state was revalidated under StateLock by the repository.
+        _atomic_write(sf, lambda f: json.dump(data, f, indent=2, ensure_ascii=False))
+
+    _selection_snapshot, selection_state = _load_authoritative_state(
+        sf,
+        legacy_compatibility=True,
+        allow_missing_schema_session_mismatch=True,
+    )
+    loaded_session_id = selection_state.get("session_id")
+    selected_session_id = (
+        loaded_session_id
+        if isinstance(loaded_session_id, str) and loaded_session_id
+        else sf.stem
+    )
+    repository = _select_repository_for_cli(
+        selected_session_id,
+        sf,
+        lambda format_guard: LegacyV4Repository(
+            lock=lambda: StateLock(lock_file(proj)),
+            read_state=lambda: json.loads(sf.read_text(encoding="utf-8")),
+            write_state=write_terminal_state,
+            backup_state=lambda: backup_state(sf),
+            remove_from_aggregate=(
+                (lambda: _remove_from_aggregate_strict(proj, sf.stem))
+                if sf.parent.name == "sessions"
+                else None
+            ),
+            format_guard=format_guard,
+        ),
+        lambda format_guard: V5CompatibilityRepository(
+            repository=LocalFencedRepository(
+                state_dir(proj),
+                clock=_lease_now,
+                lease_ttl_seconds=_lease_ttl_seconds(),
+            ),
+            session_id=selected_session_id,
+            lease_owner_session_id=resolve_session_id(),
+            # A janitor never reuses the stale writer's token. Expiry is
+            # admitted as a fenced takeover by the v5 repository itself.
+            presented_lease_id=None,
+            remove_from_aggregate=(
+                (lambda: _remove_from_aggregate_strict(proj, sf.stem))
+                if sf.parent.name == "sessions"
+                else None
+            ),
+            format_guard=format_guard,
+        ),
+    )
+    now = iso_now()
+    try:
         result = run_mark_halt(
-            repository,
+            ValidatingJanitorRepository(
+                repository,
+                # v5 begin() has already fenced the expired lease with a
+                # tokenless takeover. Its projected state contains the renewed
+                # pending lease, so repeating the old-expiry predicate here
+                # would reject every valid janitor write.
+                expired_lease_admitted=isinstance(
+                    repository, V5CompatibilityRepository
+                ),
+            ),
             MarkHaltRequest(
                 reason=reason,
                 category=category,
@@ -15312,14 +15420,18 @@ def _terminalize_state_file(
                 transition_phase=_transition_phase,
                 goal_dispatch_fields=_goal_dispatch_route_fields,
                 terminalize_without_phase=terminalize_without_phase,
+                effective_at=nondecreasing_terminal_time,
             ),
         )
-        if result.aggregate_error is not None:
-            print(
-                f"WARNING: aggregate index update failed: {result.aggregate_error}",
-                file=sys.stderr,
-            )
-        return True
+    except StaleCleanupPreconditionChanged:
+        return False
+
+    if result.aggregate_error is not None:
+        print(
+            f"WARNING: aggregate index update failed: {result.aggregate_error}",
+            file=sys.stderr,
+        )
+    return True
 
 
 def _expired_lease_without_heartbeat(data: dict) -> tuple[bool, str]:
@@ -15361,7 +15473,11 @@ def cmd_cleanup_stale(args):
             continue
         for sf in _iter_state_files(root):
             try:
-                data = _read_legacy_json_file(sf)
+                _snapshot, data = _load_authoritative_state(
+                    sf,
+                    legacy_compatibility=True,
+                    allow_missing_schema_session_mismatch=True,
+                )
                 if not data.get("loop_active"):
                     continue
                 if data.get("passes") or data.get("halt_reason"):

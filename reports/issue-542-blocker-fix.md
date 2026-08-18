@@ -48,21 +48,43 @@ boundary into the established v4 diagnostic shape.
 - Direct token-free checks for `refresh-pid` and `mark-halt` now preserve the
   same v4/v5 exit and stderr contract. Other compatibility mutations share the
   same centralized v5 lease rejection translator.
-- `cleanup-stale` is not an `internal-error` case. Its bulk scanner still reads
-  session files as legacy documents, so active and expired v5 heads currently
-  produce empty result arrays and leave the session active. The existing stale
-  cleanup tests exercise legacy fixtures only. This remains the documented C2
-  ownership-migration scope in #543 rather than a C1 diagnostic change.
+- Iteration 2 closes the `cleanup-stale` gap completely. The bulk scanner now
+  reads both v4 and v5 through the authoritative reader, while execution uses a
+  format-pinned repository transaction. A v5 janitor presents no stale writer
+  token: the repository admits only an expired-lease takeover, then the command
+  revalidates the remaining stale predicates before publishing the halt.
+
+## Iteration 2 review findings
+
+- A-1: v5 `cleanup-stale` dry-run detection and `--execute` halt are both
+  covered. Before the fix, the new test observed an empty `would_halt` array.
+- B-1: unclassified fenced commit errors now produce `ERROR: <detail>` and
+  exit 2 without a traceback or an internal-error downgrade. Before the fix,
+  the injected CLI process exited 1.
+- B-2: iteration-2 critic scope and minimum-reviewer gates are rechecked after
+  the transaction-bound load. Before the fix, an injected scope change bypassed
+  the gate and published aggregate output.
+- C-1: valid provenance-bound `push-score` is exercised through both v4 and v5
+  format-pinned repositories.
+- A-2: v5 compatibility `load()` rejects calls outside an active transaction
+  before repository admission. Before the fix, the call succeeded and retained
+  an admitted request.
+- C-2: token-free v5 `review-import` during a live lease is explicitly covered
+  at exit 2 with the established lease diagnostic and no state change.
+- C-3: rollback coverage now reads the pre-existing v5 session through a fresh
+  CLI `get` subprocess.
+- C-4: T3 documents its intentionally fixed clock and assigns cross-TTL
+  coverage to T13.
 
 ## Scope audit
 
-The fixed core paths are `get`, `set`, `resume`, and the already-authoritative
-`next`. The existing full-lifecycle test also invokes each lifecycle command as
-a separate subprocess.
+The fixed core paths are `get`, `set`, `resume`, `cleanup-stale`, and the
+already-authoritative `next`. The existing full-lifecycle test also invokes
+each lifecycle command as a separate subprocess.
 
 Static inspection found direct session-file reads in commands outside the C1
 owner set, including specialist/provider administration, progress display,
-startup preflight, context manifest, bulk stale cleanup, and bulk halt paths.
+startup preflight, context manifest, and bulk halt paths.
 The design plan explicitly assigns complete ownership migration for those
 commands to #543 (C2), so this blocker fix does not broaden into that migration.
 Dynamic sampling confirmed that startup preflight currently returns an internal
@@ -87,3 +109,13 @@ recorded as residual #543 work, not as working C1 paths.
   `4064 passed in 320.40s`, failed 0.
 - Independent checker: accepted after T13 was strengthened to cover explicit
   stale halt recovery and stable v4/v5 resume-output equivalence.
+- Iteration 2 targeted gates: issue #542 and critic-race coverage `37 passed`;
+  cleanup regressions `53 passed`; hygiene, neutral vocabulary, and Python 3.9
+  coverage `67 passed`.
+- Iteration 2 manual v5 cleanup: dry-run reported one
+  `expired-session-lease` in `would_halt`; execute reported it in `halted`;
+  independent `get` returned `loop_active=false` and `halt_category=stale`.
+- Iteration 2 independent checker: accepted after one Low test-fidelity finding
+  was fixed by running the rollback `get` subprocess with the v4 default.
+- Iteration 2 required full suite with `-n 4 --dist loadfile`:
+  `4073 passed in 325.24s`, failed 0.
