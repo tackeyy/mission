@@ -372,6 +372,39 @@ def test_planning_adopt_core_strategy_gate_preserved(run_cli, tmp_path):
     assert _head(tmp_path, session_id) == after_patch
 
 
+def test_planning_adopt_core_v5_rejects_stale_fencing_token(run_cli, tmp_path):
+    """v5 セッションで stale な fencing token（MISSION_LEASE_ID 不一致）を adopt-core が拒否すること。
+
+    Batch 1 executor-handoff の同種テスト (test_executor_handoff_v5_rejects_stale_fencing_token)
+    と同じパターンで adopt-core が repository 経由になったことで同様の保護を得ていることを確認する。
+    """
+    session_id = "batch3-adopt-fencing"
+    _init_v5(run_cli, tmp_path, session_id)
+    plan = _write_plan(tmp_path, "plan-fence.json")
+    before = _head(tmp_path, session_id)
+
+    # MISSION_LEASE_ID が一致しない（stale / wrong）→ lease 拒否
+    stale_env = {
+        "MISSION_SESSION_ID": session_id,
+        "MISSION_LEASE_ID": "wrong-lease-id",
+        "MISSION_OPERATION_ID": "adopt-stale-fence-op",
+    }
+    rejected = run_cli(
+        "planning",
+        "adopt-core",
+        "--input",
+        str(plan),
+        "--source-id",
+        "stale-fence-source",
+        cwd=tmp_path,
+        env_extra=stale_env,
+    )
+
+    assert rejected.returncode == 2
+    assert "lease" in rejected.stderr.lower()
+    assert _head(tmp_path, session_id) == before
+
+
 # ---------------------------------------------------------------------------
 # tests: planning promote-provider-plan
 # ---------------------------------------------------------------------------
@@ -578,6 +611,65 @@ def test_manual_score_capture_v5_intent_collision_rejected(run_cli, tmp_path):
         str(output_file_b),
         cwd=tmp_path,
         env_extra=_env(session_id, operation_id="manual-collision-id"),
+    )
+    assert collision.returncode == 2
+    assert "operation ID has a different intent" in collision.stderr
+    assert _head(tmp_path, session_id) == committed
+
+
+def test_manual_score_capture_v5_different_input_same_operation_id_is_collision(
+    run_cli, tmp_path
+):
+    """同一 operation_id で異なる input（input_digest が変わる）は操作インテント衝突として拒否されること (M-3)。
+
+    M-3 の修正前は同じ operation_id + 異なる input が replay fast-path を通り抜け、
+    存在しない archive ref から誤った ok:true を返すおそれがあった。
+    input_digest を operation_arguments に含めることで intent collision が検出される。
+    """
+    session_id = "batch3-manual-input-coll"
+    _init_v5(run_cli, tmp_path, session_id)
+    _v5_patch_session_state(
+        tmp_path, session_id, lambda d: d.update({"iteration": 1, "phase": "scoring"})
+    )
+    state = _public_state(run_cli, tmp_path, session_id)
+    mission_id = state.get("mission_id") or "unknown"
+
+    payload_a = _make_manual_score_payload(session_id, mission_id, iteration=1)
+    payload_b = dict(payload_a)
+    # Change one score to produce a different input_digest
+    payload_b["items"] = {**payload_a["items"], "accuracy": 3.0}
+    payload_b["composite"] = round(
+        sum([payload_b["items"][k] for k in ("mission_achievement", "accuracy", "completeness", "usability")]) / 4, 2
+    )
+    payload_b["min_item"] = min(payload_b["items"].values())
+
+    input_file_a = tmp_path / "manual-input-coll-a.json"
+    input_file_a.write_text(json.dumps(payload_a), encoding="utf-8")
+    input_file_b = tmp_path / "manual-input-coll-b.json"
+    input_file_b.write_text(json.dumps(payload_b), encoding="utf-8")
+    output_file = tmp_path / "scoring-input-coll.json"
+
+    first = run_cli(
+        "manual-score-capture",
+        "--input",
+        str(input_file_a),
+        "--out",
+        str(output_file),
+        cwd=tmp_path,
+        env_extra=_env(session_id, operation_id="manual-input-coll-id"),
+    )
+    assert first.returncode == 0, first.stderr
+    committed = _head(tmp_path, session_id)
+
+    # Same operation_id but different input content → intent collision (M-3)
+    collision = run_cli(
+        "manual-score-capture",
+        "--input",
+        str(input_file_b),
+        "--out",
+        str(output_file),
+        cwd=tmp_path,
+        env_extra=_env(session_id, operation_id="manual-input-coll-id"),
     )
     assert collision.returncode == 2
     assert "operation ID has a different intent" in collision.stderr

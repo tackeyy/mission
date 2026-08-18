@@ -5815,12 +5815,21 @@ def cmd_prepare_provider_invocation(args):
         if getattr(_repo_prepare, "operation_replayed", False):
             # Reconstruct preflight from state for output
             preflights = data.get("provider_preflights") or {}
+            # Prefer exact match by operation_id to avoid returning a different
+            # preflight when the same session has multiple prepare operations.
             _cached_preflight_id = next(
                 (pid for pid, ptr in preflights.items()
-                 if isinstance(ptr, dict) and ptr.get("status") in {"awaiting-approval", "approved", "consuming", "consumed"}
-                 and ptr.get("invocation_id", "").startswith("inv_")),
+                 if isinstance(ptr, dict) and ptr.get("operation_id") == _op_id_prepare),
                 None,
             )
+            if _cached_preflight_id is None:
+                # Backwards-compatible fallback for pointers that predate operation_id recording
+                _cached_preflight_id = next(
+                    (pid for pid, ptr in preflights.items()
+                     if isinstance(ptr, dict) and ptr.get("status") in {"awaiting-approval", "approved", "consuming", "consumed"}
+                     and ptr.get("invocation_id", "").startswith("inv_")),
+                    None,
+                )
             if _cached_preflight_id:
                 _ptr = preflights[_cached_preflight_id]
                 preflight = {
@@ -5853,6 +5862,7 @@ def cmd_prepare_provider_invocation(args):
                 "outbound_context_digest": preflight["outbound_context_digest"],
                 "invocation_id": preflight["invocation_id"], "status": "awaiting-approval",
                 "execution_context": preflight["outbound_packet"]["execution_context"],
+                "operation_id": _op_id_prepare,
             }
             data.setdefault("provider_preflights", {})[preflight["preflight_id"]] = pointer
             data["updated_at"] = iso_now()
@@ -11836,7 +11846,7 @@ def cmd_manual_score_capture(args):
         inspected = inspect_repository_bytes(target_bytes, expected_session_id=session_id)
         target_digest = "sha256:" + hashlib.sha256(target_bytes).hexdigest()
         caller_operation_id, operation_arguments = _compatibility_operation_arguments(
-            {"out": args.out},
+            {"out": args.out, "input_digest": "sha256:" + hashlib.sha256(content).hexdigest()},
             target_digest=target_digest,
             require_caller=inspected.format is RepositoryFormat.V5,
         )
@@ -13681,6 +13691,11 @@ def cmd_plan_import(args):
     )
     with _repo_planimp.transaction(), _PublishedFilesTransaction() as published_files:
         data = _repo_planimp.load()
+        replayed_planimp = getattr(_repo_planimp, "operation_replayed", False)
+        if replayed_planimp:
+            _existing_ref = (data.get("provider_plan_imports") or {}).get(args.invocation_id)
+            print(json.dumps({"ok": True, "plan_import": _existing_ref}, indent=2 if args.json else None, ensure_ascii=False))
+            return
         lease_decision = _enforce_session_lease_for_write(sf, data)
         invocation = invocation_by_id(data, args.invocation_id)
         if data.get("planning_policy_version") == 1 and data.get("planning_strategy") == "provider-primary":
@@ -13755,7 +13770,6 @@ def cmd_plan_import(args):
                      "candidate_path": str(candidate_file.path.relative_to(cwd)), "candidate_digest": canonical_digest,
                      "invocation_id": args.invocation_id, "preflight_id": preflight_id, "generation": generation}
         data.setdefault("provider_plan_imports", {})[args.invocation_id] = reference
-        data["updated_at"] = iso_now()
         _verify_published_file(raw_file); _verify_published_file(candidate_file)
         data["updated_at"] = iso_now()
         _repo_planimp.save(stamp_metadata(data, cwd))

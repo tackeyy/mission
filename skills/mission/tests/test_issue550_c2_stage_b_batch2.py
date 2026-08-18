@@ -1115,26 +1115,320 @@ def test_specialists_reconcile_invocation_v5_requires_operation_id(run_cli, tmp_
 # ---------------------------------------------------------------------------
 
 
+def _plan_contract() -> dict:
+    return {
+        "envelope_schema": "mission-provider-result/1",
+        "artifact_schema": "mission-plan/1",
+        "cardinality": "exactly-one",
+        "required_capability_class": "deep-planning",
+        "required_capability_variant": "portable-v1",
+        "require_exact_variant": True,
+    }
+
+
+def _plan_document_body() -> dict:
+    return {
+        "objective": "bounded",
+        "scope": {"resources": [], "actions": [{"type": "analyze", "effect_class": "reversible"}]},
+        "assumptions": [{"id": "a", "statement": "s", "validation": "v"}],
+        "steps": [{"id": "s", "action": "analyze", "inputs": [], "outputs": [], "depends_on": [],
+                   "acceptance_checks": ["observable"], "risk": "low", "rollback": "none"}],
+        "global_acceptance": ["done"],
+        "stop_conditions": ["blocked"],
+    }
+
+
+def _make_plan_registry(root: Path, *, provider_id: str = "planimp-provider") -> Path:
+    """Create a registry with a deep-planning provider that has a result_contract."""
+    commands = root / "commands"
+    commands.mkdir(exist_ok=True)
+    cmd = commands / f"{provider_id}-cmd"
+    cmd.write_text("#!/bin/sh\ncat >/dev/null\necho '{}'\n", encoding="utf-8")
+    cmd.chmod(0o700)
+    registry = root / f"registry-{provider_id}.json"
+    registry.write_text(
+        json.dumps({
+            "schema": "mission-specialist-registry/2",
+            "specialists_v2": [{
+                "provider_id": provider_id,
+                "role": "deep-planning",
+                "skill": provider_id,
+                "kind": "command",
+                "command": f"{provider_id}-cmd",
+                "args": [], "env": {},
+                "task_profiles": ["architecture"],
+                "phases": ["planning"],
+                "activation": {"min_complexity": "Complex", "auto_select_if": ["complexity"]},
+                "result_contract": _plan_contract(),
+            }],
+        }),
+        encoding="utf-8",
+    )
+    return registry.resolve()
+
+
+def _setup_v5_plan_import(run_cli, root: Path, session_id: str, *, provider_id: str = "planimp-provider"):
+    """Set up a v5 session fully ready for specialists plan-import.
+
+    Returns (registry, invocation_id, result_doc, cmd_env) where cmd_env
+    includes PATH so the provider command is found.
+    """
+    registry = _make_plan_registry(root, provider_id=provider_id)
+    commands = root / "commands"
+
+    _init_v5(run_cli, root, session_id)
+
+    # Recommend to record specialist_registry_projection in state.
+    rec_env = {**_env(session_id, operation_id="planimp-setup-rec"),
+               "PATH": f"{commands}{os.pathsep}{os.environ.get('PATH', '')}"}
+    rec = run_cli(
+        "specialists", "recommend",
+        "--no-default-skill-roots",
+        "--task", "Review architecture",
+        "--registry", str(registry),
+        "--complexity", "Complex",
+        "--record-state",
+        "--json",
+        cwd=root, env_extra=rec_env,
+    )
+    assert rec.returncode == 0, rec.stderr
+
+    # In v5, candidates are returned in stdout (not committed to session state).
+    rec_out = json.loads(rec.stdout)
+    candidates = rec_out.get("specialists_candidates") or []
+    assert candidates, f"no candidates after recommend: {rec.stdout}"
+    candidate = dict(candidates[0])
+    selection_id = (rec_out.get("specialists_decision") or {}).get("selection_id") or "sel-planimp"
+    candidate["selection_id"] = selection_id
+    candidate["eligibility_selection_source"] = "automatic"
+
+    invocation_id = "inv_" + "c" * 32
+    preflight_id = "pf_planimp_setup"
+
+    private = root / ".mission-state" / "private-preflights"
+    private.mkdir(exist_ok=True)
+    packet = private / f"{preflight_id}.json"
+    packet.write_text("packet-content", encoding="utf-8")
+    outbound = "sha256:" + hashlib.sha256(packet.read_bytes()).hexdigest()
+
+    receipts_dir = root / ".mission-state" / "private-receipts"
+    receipts_dir.mkdir(exist_ok=True)
+    receipt_file = receipts_dir / f"{preflight_id}.json"
+    receipt_file.write_text("receipt-content", encoding="utf-8")
+    receipt_digest = "sha256:" + hashlib.sha256(receipt_file.read_bytes()).hexdigest()
+
+    def _patcher(data: dict) -> None:
+        data["iteration"] = 1
+        data["phase"] = "planning"
+        data["specialists_selected"] = [candidate]
+        data["specialists_decision"] = {
+            "policy": "auto", "action": "select",
+            "prompted_user": False, "decision": "selected",
+            "selection_id": selection_id,
+        }
+        data["specialist_invocations"] = [{
+            "invocation_id": invocation_id,
+            "iteration": 1,
+            "phase": "planning",
+            "role": "deep-planning",
+            "skill": provider_id,
+            "mode": "command-provider",
+            "status": "completed",
+            "lifecycle_state": "terminal",
+            "timestamp": "2026-01-01T00:00:00Z",
+        }]
+        data["provider_preflights"] = {
+            preflight_id: {
+                "invocation_id": invocation_id,
+                "consumed_invocation_id": invocation_id,
+                "outbound_packet_digest": outbound,
+                "status": "consumed",
+                "artifact_path": str(packet.relative_to(root / ".mission-state")),
+                "receipt": {
+                    "artifact_path": str(receipt_file.relative_to(root / ".mission-state")),
+                    "digest": receipt_digest,
+                },
+            }
+        }
+
+    _v5_patch_session_state(root, session_id, _patcher)
+
+    binding = {
+        "invocation_id": invocation_id,
+        "preflight_id": preflight_id,
+        "outbound_packet_digest": outbound,
+        "selection_id": selection_id,
+        "selection_source": "automatic",
+        "iteration": 1,
+    }
+    result_doc = {
+        "schema": "mission-provider-result/1",
+        "binding": binding,
+        "capability_attestation": {
+            "requested_class": "deep-planning",
+            "effective_class": "deep-planning",
+            "requested_variant": "portable-v1",
+            "effective_variant": "portable-v1",
+        },
+        "artifacts": [{"schema": "mission-plan/1", "document": _plan_document_body()}],
+    }
+
+    cmd_env = {**_env(session_id),
+               "PATH": f"{commands}{os.pathsep}{os.environ.get('PATH', '')}"}
+    return registry, invocation_id, result_doc, cmd_env
+
+
 def test_specialists_plan_import_v5_requires_operation_id(run_cli, tmp_path):
     """plan-import が v5 で MISSION_OPERATION_ID を必須とすること。"""
     session_id = "batch2-plan-import-noid"
-    _init_v5(run_cli, tmp_path, session_id)
+    registry, invocation_id, result_doc, cmd_env = _setup_v5_plan_import(
+        run_cli, tmp_path, session_id
+    )
+    source = tmp_path / "plan-noid-result.json"
+    source.write_text(json.dumps(result_doc), encoding="utf-8")
     before = _head(tmp_path, session_id)
 
     result = run_cli(
         "specialists",
         "plan-import",
         "--invocation-id",
-        "inv_" + "a" * 32,
+        invocation_id,
+        "--input",
+        str(source),
+        "--registry",
+        str(tmp_path / f"registry-planimp-provider.json"),
+        cwd=tmp_path,
+        env_extra={k: v for k, v in cmd_env.items() if k != "MISSION_OPERATION_ID"},
+    )
+    assert result.returncode == 2
+    assert "MISSION_OPERATION_ID" in result.stderr
+    assert _head(tmp_path, session_id) == before
+
+
+def test_specialists_plan_import_v5_preserves_head_and_replays(run_cli, tmp_path):
+    """plan-import が v5 で冪等にリプレイされ head が進まないこと (M-1 replay fast-path)。
+
+    Lease を失効させた後に同じ operation_id でリトライしても成功することを確認する。
+    Without M-1, the lease check fires on retry and returns exit code 2.
+    """
+    session_id = "batch2-plan-import-replay"
+    registry, invocation_id, result_doc, cmd_env = _setup_v5_plan_import(
+        run_cli, tmp_path, session_id
+    )
+    source = tmp_path / "plan-replay-result.json"
+    source.write_text(json.dumps(result_doc), encoding="utf-8")
+    op_env = {**cmd_env, "MISSION_OPERATION_ID": "planimp-replay-op-1"}
+
+    first = run_cli(
+        "specialists", "plan-import",
+        "--invocation-id", invocation_id,
+        "--input", str(source),
+        "--registry", str(registry),
+        "--json",
+        cwd=tmp_path, env_extra=op_env,
+    )
+    assert first.returncode == 0, first.stderr
+    out = json.loads(first.stdout)
+    assert out["ok"] is True
+    assert isinstance(out["plan_import"], dict)
+    committed = _head(tmp_path, session_id)
+    assert committed["generation"] > 0
+
+    # Modify the invocation status so that domain validation would fail on a
+    # fresh (non-replay) execution.  Without M-1, the replay path falls through
+    # to the invocation check and exits 2.  With M-1, the fast-path fires before
+    # domain validation and returns the stored result.
+    def _invalidate_invocation(data: dict) -> None:
+        for inv in data.get("specialist_invocations") or []:
+            if inv.get("invocation_id") == invocation_id:
+                inv["status"] = "started"
+                inv["lifecycle_state"] = "invoked"
+                break
+
+    _v5_patch_session_state(tmp_path, session_id, _invalidate_invocation)
+    # The patch itself advances the head; capture the new generation as baseline.
+    after_invalidation = _head(tmp_path, session_id)
+
+    replay = run_cli(
+        "specialists", "plan-import",
+        "--invocation-id", invocation_id,
+        "--input", str(source),
+        "--registry", str(registry),
+        "--json",
+        cwd=tmp_path, env_extra=op_env,
+    )
+    assert replay.returncode == 0, replay.stderr
+    replay_out = json.loads(replay.stdout)
+    assert replay_out["ok"] is True
+    assert replay_out["plan_import"] == out["plan_import"]
+    # Head must not advance beyond the invalidation patch.
+    assert _head(tmp_path, session_id)["generation"] == after_invalidation["generation"]
+
+
+def test_specialists_plan_import_v5_intent_collision_rejected(run_cli, tmp_path):
+    """plan-import が同一 operation_id で異なる invocation_id を弾くこと。"""
+    session_id = "batch2-plan-import-collision"
+    registry, invocation_id, result_doc, cmd_env = _setup_v5_plan_import(
+        run_cli, tmp_path, session_id
+    )
+    source = tmp_path / "plan-collision-result.json"
+    source.write_text(json.dumps(result_doc), encoding="utf-8")
+    op_env = {**cmd_env, "MISSION_OPERATION_ID": "planimp-collision-op"}
+
+    first = run_cli(
+        "specialists", "plan-import",
+        "--invocation-id", invocation_id,
+        "--input", str(source),
+        "--registry", str(registry),
+        cwd=tmp_path, env_extra=op_env,
+    )
+    assert first.returncode == 0, first.stderr
+    committed = _head(tmp_path, session_id)
+
+    # Same operation_id but different invocation_id → intent collision
+    collision = run_cli(
+        "specialists", "plan-import",
+        "--invocation-id", "inv_" + "d" * 32,
+        "--input", str(source),
+        "--registry", str(registry),
+        cwd=tmp_path, env_extra=op_env,
+    )
+    assert collision.returncode == 2
+    assert "operation ID has a different intent" in collision.stderr
+    assert _head(tmp_path, session_id) == committed
+
+
+def test_specialists_plan_import_retained_v4_unchanged(legacy_run_cli, tmp_path):
+    """v4（retained）セッションで plan-import が v4 挙動のまま動くこと。"""
+    # v4 has no MISSION_OPERATION_ID requirement; operation_id is not required
+    result = legacy_run_cli(
+        "init",
+        "retained v4 plan-import",
+        "--complexity",
+        "Complex",
+        "--force-mission",
+        cwd=tmp_path,
+        env_extra={"MISSION_SESSION_ID": "batch2-planimp-v4",
+                   "MISSION_LEASE_ID": "batch2-planimp-v4-lease"},
+    )
+    assert result.returncode == 0, result.stderr
+
+    # Without MISSION_OPERATION_ID, v4 should not raise an error early on invocation_id check
+    # It will fail on domain validation (invocation-not-found) but not on operation_id missing
+    result = legacy_run_cli(
+        "specialists",
+        "plan-import",
+        "--invocation-id",
+        "inv_" + "e" * 32,
         "--input",
         str(tmp_path / "nonexistent.json"),
         cwd=tmp_path,
-        env_extra=_env(session_id),  # no operation_id
+        env_extra={"MISSION_SESSION_ID": "batch2-planimp-v4",
+                   "MISSION_LEASE_ID": "batch2-planimp-v4-lease"},
     )
     assert result.returncode == 2
-    # Either operation_id required or the state guard catches it first
-    # The key assertion: head did not advance (state not mutated)
-    assert _head(tmp_path, session_id) == before
+    # v4 should NOT require MISSION_OPERATION_ID
+    assert "MISSION_OPERATION_ID" not in result.stderr
 
 
 # ---------------------------------------------------------------------------
