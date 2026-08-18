@@ -96,13 +96,25 @@ def _leaf_parser_commands(parser, prefix=()):
     return commands
 
 
-def forbidden_calls_in_reachable(entry_names, *, tree=None):
+def forbidden_calls_in_reachable(
+    entry_names,
+    *,
+    tree=None,
+    allowed_call_sites=ALLOWED_NON_C2_CALL_SITES,
+    include_call_sites=False,
+):
     """Find statically reachable forbidden calls, including local callables.
 
     All nested functions, closures, and methods are indexed.  Attribute calls
     are resolved conservatively by their final method name, so a local class
-    method is followed without attempting type inference.  ``getattr`` and
-    other dynamic dispatch remain outside what a static AST guard can prove.
+    method is followed without attempting type inference.  The guard is
+    fail-closed when a forbidden callable is lexically reachable through a
+    container subscript, a Call-wrapped alias, or a comprehension binding.
+
+    Static AST analysis cannot prove targets selected by ``getattr`` or other
+    runtime dispatch, code produced by ``eval``/``exec``, or the implementation
+    of an imported callable whose body is outside the analyzed tree.  Writes
+    hidden exclusively behind those boundaries are not detected.
     """
 
     if tree is None:
@@ -111,15 +123,23 @@ def forbidden_calls_in_reachable(entry_names, *, tree=None):
     module_functions = {}
     module_classes = {}
     module_aliases = {}
+    module_call_values = {}
+    module_container_values = {}
+    module_expression_values = {}
     local_functions = {}
     local_classes = {}
     local_aliases = {}
     local_attribute_aliases = {}
+    local_call_values = {}
+    local_container_values = {}
+    local_expression_values = {}
     local_lambdas = {}
+    local_parameters = {}
     parent_functions = {}
     methods_by_name = {}
     class_initializers = {}
     classes_by_name = {}
+    function_decorators = {}
     qualified_names = {}
 
     class DefinitionCollector(ast.NodeVisitor):
@@ -148,6 +168,19 @@ def forbidden_calls_in_reachable(entry_names, *, tree=None):
                     node.name, []
                 ).append(node)
             qualified_names[id(node)] = qualified_name
+            function_decorators[id(node)] = list(node.decorator_list)
+            local_parameters[id(node)] = {
+                argument.arg
+                for argument in (
+                    *node.args.posonlyargs,
+                    *node.args.args,
+                    *node.args.kwonlyargs,
+                )
+            }
+            if node.args.vararg is not None:
+                local_parameters[id(node)].add(node.args.vararg.arg)
+            if node.args.kwarg is not None:
+                local_parameters[id(node)].add(node.args.kwarg.arg)
             self.function_stack.append(node)
             self.scope_stack.append(("function", qualified_name))
             for statement in node.body:
@@ -181,64 +214,159 @@ def forbidden_calls_in_reachable(entry_names, *, tree=None):
                 self.visit(statement)
             self.scope_stack.pop()
 
-        def visit_Assign(self, node):
+        def _binding_pairs(self, target, value):
+            if isinstance(target, ast.Name):
+                return [(target.id, value)]
+            if isinstance(target, ast.Starred):
+                return self._binding_pairs(target.value, value)
+            if isinstance(target, (ast.List, ast.Tuple)):
+                if (
+                    isinstance(value, (ast.List, ast.Tuple))
+                    and len(target.elts) == len(value.elts)
+                ):
+                    return [
+                        pair
+                        for child_target, child_value in zip(
+                            target.elts, value.elts
+                        )
+                        for pair in self._binding_pairs(
+                            child_target, child_value
+                        )
+                    ]
+                return [
+                    pair
+                    for child_target in target.elts
+                    for pair in self._binding_pairs(child_target, value)
+                ]
+            return []
+
+        def _record_local_binding(self, owner, name, value):
+            if isinstance(value, ast.Lambda):
+                local_lambdas.setdefault(owner, {}).setdefault(
+                    name, []
+                ).append(value)
+            elif isinstance(value, ast.Name):
+                local_aliases.setdefault(owner, {}).setdefault(name, []).append(
+                    value.id
+                )
+            elif isinstance(value, ast.Attribute):
+                local_attribute_aliases.setdefault(owner, {}).setdefault(
+                    name, []
+                ).append(value.attr)
+            elif isinstance(value, (ast.Dict, ast.List, ast.Set, ast.Tuple)):
+                local_container_values.setdefault(owner, {}).setdefault(
+                    name, []
+                ).append(value)
+            elif isinstance(value, ast.Call):
+                local_call_values.setdefault(owner, {}).setdefault(
+                    name, []
+                ).append(value)
+            else:
+                local_expression_values.setdefault(owner, {}).setdefault(
+                    name, []
+                ).append(value)
+
+        def _record_module_binding(self, name, value):
+            if isinstance(value, ast.Name):
+                module_aliases.setdefault(name, []).append(value.id)
+            elif isinstance(value, (ast.Dict, ast.List, ast.Set, ast.Tuple)):
+                module_container_values.setdefault(name, []).append(value)
+            elif isinstance(value, ast.Call):
+                module_call_values.setdefault(name, []).append(value)
+            else:
+                module_expression_values.setdefault(name, []).append(value)
+
+        def _record_bindings(self, target, value):
+            if value is None:
+                return
+            for name, bound_value in self._binding_pairs(target, value):
+                self._record_binding(name, bound_value)
+
+        def _record_binding(self, name, bound_value):
             if self.function_stack:
-                owner = id(self.function_stack[-1])
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        if isinstance(node.value, ast.Lambda):
-                            local_lambdas.setdefault(owner, {}).setdefault(
-                                target.id, []
-                            ).append(node.value)
-                        elif isinstance(node.value, ast.Name):
-                            local_aliases.setdefault(owner, {}).setdefault(
-                                target.id, []
-                            ).append(node.value.id)
-                        elif isinstance(node.value, ast.Attribute):
-                            local_attribute_aliases.setdefault(
-                                owner, {}
-                            ).setdefault(target.id, []).append(node.value.attr)
-            elif not self.scope_stack and isinstance(node.value, ast.Name):
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        module_aliases.setdefault(target.id, []).append(
-                            node.value.id
+                self._record_local_binding(
+                    id(self.function_stack[-1]), name, bound_value
+                )
+            elif not self.scope_stack:
+                self._record_module_binding(name, bound_value)
+
+        def _record_iter_bindings(self, target, iterable):
+            pairs = None
+            if (
+                isinstance(target, (ast.List, ast.Tuple))
+                and isinstance(iterable, (ast.List, ast.Set, ast.Tuple))
+                and all(
+                    isinstance(row, (ast.List, ast.Tuple))
+                    and len(row.elts) == len(target.elts)
+                    for row in iterable.elts
+                )
+            ):
+                pairs = [
+                    pair
+                    for row in iterable.elts
+                    for child_target, child_value in zip(
+                        target.elts, row.elts
+                    )
+                    for pair in self._binding_pairs(
+                        child_target, child_value
+                    )
+                ]
+            if pairs is None:
+                pairs = self._binding_pairs(target, iterable)
+            for name, bound_value in pairs:
+                self._record_binding(name, bound_value)
+
+        def _root_name(self, expression):
+            current = expression
+            while isinstance(current, (ast.Attribute, ast.Subscript)):
+                current = current.value
+            return current.id if isinstance(current, ast.Name) else None
+
+        def visit_Assign(self, node):
+            for target in node.targets:
+                self._record_bindings(target, node.value)
+                if isinstance(target, (ast.Attribute, ast.Subscript)):
+                    root_name = self._root_name(target)
+                    if root_name is not None:
+                        self._record_bindings(
+                            ast.Name(id=root_name, ctx=ast.Store()), node.value
                         )
             self.generic_visit(node)
 
         def visit_AnnAssign(self, node):
-            if self.function_stack and isinstance(node.target, ast.Name):
-                owner = id(self.function_stack[-1])
-                if isinstance(node.value, ast.Lambda):
-                    local_lambdas.setdefault(owner, {}).setdefault(
-                        node.target.id, []
-                    ).append(node.value)
-                elif isinstance(node.value, ast.Name):
-                    local_aliases.setdefault(owner, {}).setdefault(
-                        node.target.id, []
-                    ).append(node.value.id)
-                elif isinstance(node.value, ast.Attribute):
-                    local_attribute_aliases.setdefault(owner, {}).setdefault(
-                        node.target.id, []
-                    ).append(node.value.attr)
+            self._record_bindings(node.target, node.value)
             self.generic_visit(node)
 
         def visit_NamedExpr(self, node):
-            if self.function_stack and isinstance(node.target, ast.Name):
-                owner = id(self.function_stack[-1])
-                if isinstance(node.value, ast.Lambda):
-                    local_lambdas.setdefault(owner, {}).setdefault(
-                        node.target.id, []
-                    ).append(node.value)
-                elif isinstance(node.value, ast.Name):
-                    local_aliases.setdefault(owner, {}).setdefault(
-                        node.target.id, []
-                    ).append(node.value.id)
-                elif isinstance(node.value, ast.Attribute):
-                    local_attribute_aliases.setdefault(owner, {}).setdefault(
-                        node.target.id, []
-                    ).append(node.value.attr)
+            self._record_bindings(node.target, node.value)
             self.generic_visit(node)
+
+        def visit_AugAssign(self, node):
+            root_name = self._root_name(node.target)
+            if root_name is not None:
+                self._record_bindings(
+                    ast.Name(id=root_name, ctx=ast.Store()), node.value
+                )
+            self.generic_visit(node)
+
+        def visit_For(self, node):
+            self._record_iter_bindings(node.target, node.iter)
+            self.generic_visit(node)
+
+        def visit_AsyncFor(self, node):
+            self._record_iter_bindings(node.target, node.iter)
+            self.generic_visit(node)
+
+        def visit_With(self, node):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    self._record_bindings(
+                        item.optional_vars, item.context_expr
+                    )
+            self.generic_visit(node)
+
+        def visit_AsyncWith(self, node):
+            self.visit_With(node)
 
         def visit_Lambda(self, node):
             if self.function_stack:
@@ -252,10 +380,32 @@ def forbidden_calls_in_reachable(entry_names, *, tree=None):
     class DirectCallVisitor(ast.NodeVisitor):
         def __init__(self):
             self.calls = []
+            self.comprehension_taint_sources = {}
+            self._comprehension_bindings = []
 
         def visit_Call(self, node):
             self.calls.append(node)
+            if (
+                self._comprehension_bindings
+                and isinstance(node.func, ast.Name)
+                and node.func.id in self._comprehension_bindings[-1]
+            ):
+                self.comprehension_taint_sources.setdefault(id(node), []).extend(
+                    self._comprehension_bindings[-1][node.func.id]
+                )
             self.generic_visit(node)
+
+        def visit_GeneratorExp(self, node):
+            self._visit_comprehension(node.generators, [node.elt])
+
+        def visit_ListComp(self, node):
+            self._visit_comprehension(node.generators, [node.elt])
+
+        def visit_SetComp(self, node):
+            self._visit_comprehension(node.generators, [node.elt])
+
+        def visit_DictComp(self, node):
+            self._visit_comprehension(node.generators, [node.key, node.value])
 
         def visit_FunctionDef(self, node):
             self._visit_definition_expressions(node)
@@ -288,6 +438,64 @@ def forbidden_calls_in_reachable(entry_names, *, tree=None):
             for default in node.args.kw_defaults:
                 if default is not None:
                     self.visit(default)
+
+        def _visit_comprehension(self, generators, result_expressions):
+            bindings = (
+                dict(self._comprehension_bindings[-1])
+                if self._comprehension_bindings
+                else {}
+            )
+            for generator in generators:
+                self._comprehension_bindings.append(dict(bindings))
+                self.visit(generator.iter)
+                self._comprehension_bindings.pop()
+                bindings.update(
+                    self._target_bindings(
+                        generator.target,
+                        self._binding_sources(generator.iter, bindings),
+                    )
+                )
+                self._comprehension_bindings.append(dict(bindings))
+                for condition in generator.ifs:
+                    self.visit(condition)
+                self._comprehension_bindings.pop()
+            self._comprehension_bindings.append(bindings)
+            for expression in result_expressions:
+                self.visit(expression)
+            self._comprehension_bindings.pop()
+
+        def _binding_sources(self, expression, bindings):
+            if isinstance(expression, ast.Name) and expression.id in bindings:
+                return bindings[expression.id]
+            return [expression]
+
+        def _target_bindings(self, target, sources):
+            if isinstance(target, ast.Name):
+                return {target.id: sources}
+            if isinstance(target, (ast.List, ast.Tuple)):
+                bindings = {}
+                for index, element in enumerate(target.elts):
+                    positional_sources = []
+                    for source in sources:
+                        if isinstance(source, (ast.List, ast.Set, ast.Tuple)):
+                            rows = source.elts
+                        else:
+                            rows = [source]
+                        for row in rows:
+                            if (
+                                isinstance(row, (ast.List, ast.Tuple))
+                                and index < len(row.elts)
+                            ):
+                                positional_sources.append(row.elts[index])
+                            else:
+                                positional_sources.append(source)
+                    bindings.update(
+                        self._target_bindings(element, positional_sources)
+                    )
+                return bindings
+            if isinstance(target, ast.Starred):
+                return self._target_bindings(target.value, sources)
+            return {}
 
     def resolve_attribute_callable(called_name):
         return [
@@ -337,6 +545,8 @@ def forbidden_calls_in_reachable(entry_names, *, tree=None):
                 matches.extend(resolve_attribute_callable(attribute_alias))
             if matches or aliases or attribute_aliases:
                 return matches
+            if called_name in local_parameters.get(owner, ()):
+                return matches
             current = parent_functions.get(id(current))
         module_function = module_functions.get(called_name)
         if module_function is not None:
@@ -356,7 +566,13 @@ def forbidden_calls_in_reachable(entry_names, *, tree=None):
                 )
         return matches
 
-    def resolve_forbidden_aliases(function, called_name, resolving=frozenset()):
+    def resolve_forbidden_aliases(
+        function,
+        called_name,
+        resolving=frozenset(),
+        *,
+        follow_call_returns=True,
+    ):
         if called_name in FORBIDDEN_SESSION_WRITER_CALLS:
             return {called_name}
         current = function
@@ -366,8 +582,21 @@ def forbidden_calls_in_reachable(entry_names, *, tree=None):
             attribute_aliases = local_attribute_aliases.get(owner, {}).get(
                 called_name, ()
             )
+            container_values = local_container_values.get(owner, {}).get(
+                called_name, ()
+            )
+            call_values = local_call_values.get(owner, {}).get(called_name, ())
+            expression_values = local_expression_values.get(owner, {}).get(
+                called_name, ()
+            )
             alias_key = (owner, called_name)
-            if aliases or attribute_aliases:
+            if (
+                aliases
+                or attribute_aliases
+                or container_values
+                or call_values
+                or expression_values
+            ):
                 forbidden = {
                     attribute_alias
                     for attribute_alias in attribute_aliases
@@ -380,9 +609,39 @@ def forbidden_calls_in_reachable(entry_names, *, tree=None):
                                 current,
                                 alias,
                                 resolving | {alias_key},
+                                follow_call_returns=follow_call_returns,
+                            )
+                        )
+                    for container in container_values:
+                        forbidden.update(
+                            forbidden_callables_in_taint_source(
+                                current,
+                                container,
+                                resolving | {alias_key},
+                                follow_call_returns=follow_call_returns,
+                            )
+                        )
+                    for call_value in call_values:
+                        forbidden.update(
+                            forbidden_callables_in_taint_source(
+                                current,
+                                call_value,
+                                resolving | {alias_key},
+                                follow_call_returns=follow_call_returns,
+                            )
+                        )
+                    for expression_value in expression_values:
+                        forbidden.update(
+                            forbidden_callables_in_taint_source(
+                                current,
+                                expression_value,
+                                resolving | {alias_key},
+                                follow_call_returns=follow_call_returns,
                             )
                         )
                 return forbidden
+            if called_name in local_parameters.get(owner, ()):
+                return set()
             current = parent_functions.get(id(current))
         alias_key = (None, called_name)
         if alias_key in resolving:
@@ -394,19 +653,41 @@ def forbidden_calls_in_reachable(entry_names, *, tree=None):
                     function,
                     alias,
                     resolving | {alias_key},
+                    follow_call_returns=follow_call_returns,
+                )
+            )
+        for container in module_container_values.get(called_name, ()):
+            forbidden.update(
+                forbidden_callables_in_taint_source(
+                    function,
+                    container,
+                    resolving | {alias_key},
+                    follow_call_returns=follow_call_returns,
+                )
+            )
+        for call_value in module_call_values.get(called_name, ()):
+            forbidden.update(
+                forbidden_callables_in_taint_source(
+                    function,
+                    call_value,
+                    resolving | {alias_key},
+                    follow_call_returns=follow_call_returns,
+                )
+            )
+        for expression_value in module_expression_values.get(called_name, ()):
+            forbidden.update(
+                forbidden_callables_in_taint_source(
+                    function,
+                    expression_value,
+                    resolving | {alias_key},
+                    follow_call_returns=follow_call_returns,
                 )
             )
         return forbidden
 
-    def returned_callables(function, resolving_returns=frozenset()):
-        if id(function) in resolving_returns:
-            return [], set()
+    def returned_expressions(function):
         if isinstance(function, ast.Lambda):
-            return resolve_callable_expression(
-                function,
-                function.body,
-                resolving_returns | {id(function)},
-            )
+            return [function.body]
 
         class ReturnVisitor(ast.NodeVisitor):
             def __init__(self):
@@ -431,9 +712,63 @@ def forbidden_calls_in_reachable(entry_names, *, tree=None):
         visitor = ReturnVisitor()
         for statement in function.body:
             visitor.visit(statement)
+        return visitor.values
+
+    def forbidden_callables_in_taint_source(
+        function,
+        expression,
+        resolving,
+        *,
+        follow_call_returns=True,
+    ):
+        if isinstance(expression, ast.Name):
+            return resolve_forbidden_aliases(
+                function,
+                expression.id,
+                resolving,
+                follow_call_returns=follow_call_returns,
+            )
+        if isinstance(expression, ast.Attribute):
+            return (
+                {expression.attr}
+                if expression.attr in FORBIDDEN_SESSION_WRITER_CALLS
+                else set()
+            )
+        forbidden = set()
+        for child in ast.iter_child_nodes(expression):
+            forbidden.update(
+                forbidden_callables_in_taint_source(
+                    function,
+                    child,
+                    resolving,
+                    follow_call_returns=follow_call_returns,
+                )
+            )
+        if isinstance(expression, ast.Call) and follow_call_returns:
+            factories, _blocked = resolve_callable_expression(
+                function, expression.func
+            )
+            for factory in factories:
+                return_key = ("taint-return", id(factory))
+                if return_key in resolving:
+                    continue
+                for returned in returned_expressions(factory):
+                    forbidden.update(
+                        forbidden_callables_in_taint_source(
+                            factory,
+                            returned,
+                            resolving | {return_key},
+                            follow_call_returns=follow_call_returns,
+                        )
+                    )
+        return forbidden
+
+    def returned_callables(function, resolving_returns=frozenset()):
+        if id(function) in resolving_returns:
+            return [], set()
         callables = []
         forbidden = set()
-        for value in visitor.values:
+        for value in returned_expressions(function):
             found, blocked = resolve_callable_expression(
                 function,
                 value,
@@ -445,34 +780,66 @@ def forbidden_calls_in_reachable(entry_names, *, tree=None):
 
     def resolve_callable_expression(function, expression, resolving_returns=frozenset()):
         if isinstance(expression, ast.Name):
-            return (
-                resolve_named_callable(function, expression.id),
-                resolve_forbidden_aliases(function, expression.id),
-            )
+            callables = resolve_named_callable(function, expression.id)
+            forbidden = resolve_forbidden_aliases(function, expression.id)
+            for callable_node in callables:
+                for decorator in function_decorators.get(id(callable_node), ()):
+                    forbidden.update(
+                        forbidden_callables_in_taint_source(
+                            function, decorator, frozenset()
+                        )
+                    )
+            return callables, forbidden
         if isinstance(expression, ast.Attribute):
             forbidden = (
                 {expression.attr}
                 if expression.attr in FORBIDDEN_SESSION_WRITER_CALLS
                 else set()
             )
-            return resolve_attribute_callable(expression.attr), forbidden
+            callables = resolve_attribute_callable(expression.attr)
+            for callable_node in callables:
+                for decorator in function_decorators.get(id(callable_node), ()):
+                    forbidden.update(
+                        forbidden_callables_in_taint_source(
+                            function, decorator, frozenset()
+                        )
+                    )
+            return callables, forbidden
         if isinstance(expression, ast.Lambda):
             return [expression], set()
         if isinstance(expression, ast.NamedExpr):
             return resolve_callable_expression(
                 function, expression.value, resolving_returns
             )
+        if isinstance(expression, ast.Subscript):
+            return [], forbidden_callables_in_taint_source(
+                function, expression.value, frozenset()
+            )
         if isinstance(expression, ast.Call):
             factories, forbidden = resolve_callable_expression(
                 function, expression.func, resolving_returns
             )
+            for argument in expression.args:
+                forbidden.update(
+                    forbidden_callables_in_taint_source(
+                        function, argument, frozenset()
+                    )
+                )
+            for keyword in expression.keywords:
+                forbidden.update(
+                    forbidden_callables_in_taint_source(
+                        function, keyword.value, frozenset()
+                    )
+                )
             returned = []
             for factory in factories:
                 found, blocked = returned_callables(factory, resolving_returns)
                 returned.extend(found)
                 forbidden.update(blocked)
             return returned, forbidden
-        return [], set()
+        return [], forbidden_callables_in_taint_source(
+            function, expression, frozenset()
+        )
 
     called_parameter_cache = {}
 
@@ -488,19 +855,46 @@ def forbidden_calls_in_reachable(entry_names, *, tree=None):
                 *function.args.kwonlyargs,
             )
         }
+        if function.args.vararg is not None:
+            parameters.add(function.args.vararg.arg)
+        if function.args.kwarg is not None:
+            parameters.add(function.args.kwarg.arg)
         visitor = DirectCallVisitor()
         if isinstance(function, ast.Lambda):
             visitor.visit(function.body)
         else:
             for statement in function.body:
                 visitor.visit(statement)
-        called = {
-            call.func.id
-            for call in visitor.calls
-            if isinstance(call.func, ast.Name) and call.func.id in parameters
-        }
+        called = set()
+        for call in visitor.calls:
+            root = call.func
+            while isinstance(root, ast.Subscript):
+                root = root.value
+            if isinstance(root, ast.Name) and root.id in parameters:
+                called.add(root.id)
         called_parameter_cache[id(function)] = called
         return called
+
+    def parameter_defaults(function):
+        positional = [*function.args.posonlyargs, *function.args.args]
+        defaults = {
+            parameter.arg: default
+            for parameter, default in zip(
+                positional[-len(function.args.defaults) :],
+                function.args.defaults,
+            )
+        }
+        defaults.update(
+            {
+                parameter.arg: default
+                for parameter, default in zip(
+                    function.args.kwonlyargs,
+                    function.args.kw_defaults,
+                )
+                if default is not None
+            }
+        )
+        return defaults
 
     def forbidden_callback_arguments(caller, call, callee):
         called_parameters = directly_called_parameters(callee)
@@ -514,8 +908,17 @@ def forbidden_calls_in_reachable(entry_names, *, tree=None):
         ):
             positional = positional[1:]
         forbidden = set()
+        supplied_parameters = set()
         for parameter, argument in zip(positional, call.args):
             if parameter.arg in called_parameters:
+                supplied_parameters.add(parameter.arg)
+                _targets, blocked = resolve_callable_expression(caller, argument)
+                forbidden.update(blocked)
+        if (
+            callee.args.vararg is not None
+            and callee.args.vararg.arg in called_parameters
+        ):
+            for argument in call.args[len(positional) :]:
                 _targets, blocked = resolve_callable_expression(caller, argument)
                 forbidden.update(blocked)
         keyword_parameters = {
@@ -523,14 +926,46 @@ def forbidden_calls_in_reachable(entry_names, *, tree=None):
             for argument in (*callee.args.args, *callee.args.kwonlyargs)
         }
         for keyword in call.keywords:
+            if keyword.arg is None:
+                if called_parameters:
+                    _targets, blocked = resolve_callable_expression(
+                        caller, keyword.value
+                    )
+                    forbidden.update(blocked)
+                if isinstance(keyword.value, ast.Dict):
+                    supplied_parameters.update(
+                        key.value
+                        for key in keyword.value.keys
+                        if isinstance(key, ast.Constant)
+                        and isinstance(key.value, str)
+                        and key.value in called_parameters
+                    )
+                continue
             if (
                 keyword.arg in keyword_parameters
                 and keyword.arg in called_parameters
+            ):
+                supplied_parameters.add(keyword.arg)
+                _targets, blocked = resolve_callable_expression(
+                    caller, keyword.value
+                )
+                forbidden.update(blocked)
+            elif (
+                callee.args.kwarg is not None
+                and callee.args.kwarg.arg in called_parameters
             ):
                 _targets, blocked = resolve_callable_expression(
                     caller, keyword.value
                 )
                 forbidden.update(blocked)
+        for parameter_name in called_parameters - supplied_parameters:
+            default = parameter_defaults(callee).get(parameter_name)
+            if default is not None:
+                forbidden.update(
+                    forbidden_callables_in_taint_source(
+                        callee, default, frozenset()
+                    )
+                )
         return forbidden
 
     violations = set()
@@ -556,6 +991,31 @@ def forbidden_calls_in_reachable(entry_names, *, tree=None):
                 called_functions, forbidden_names = resolve_callable_expression(
                     function, call.func
                 )
+                if (
+                    isinstance(call.func, ast.Attribute)
+                    and call.func.attr
+                    in {"add", "append", "extend", "insert", "setdefault", "update"}
+                ):
+                    for argument in (
+                        *call.args,
+                        *(keyword.value for keyword in call.keywords),
+                    ):
+                        forbidden_names.update(
+                            forbidden_callables_in_taint_source(
+                                function,
+                                argument,
+                                frozenset(),
+                                follow_call_returns=False,
+                            )
+                        )
+                for taint_source in visitor.comprehension_taint_sources.get(
+                    id(call), ()
+                ):
+                    forbidden_names.update(
+                        forbidden_callables_in_taint_source(
+                            function, taint_source, frozenset()
+                        )
+                    )
                 for called_function in called_functions:
                     forbidden_names.update(
                         forbidden_callback_arguments(
@@ -566,8 +1026,13 @@ def forbidden_calls_in_reachable(entry_names, *, tree=None):
                     )
                 for forbidden_name in forbidden_names:
                     call_site = (entry_name, function_name, forbidden_name)
-                    if call_site not in ALLOWED_NON_C2_CALL_SITES:
-                        violations.add((entry_name, forbidden_name, call.lineno))
+                    if call_site not in allowed_call_sites:
+                        violation = (
+                            call_site
+                            if include_call_sites
+                            else (entry_name, forbidden_name, call.lineno)
+                        )
+                        violations.add(violation)
                 pending.extend(called_functions)
     return sorted(violations)
 
@@ -634,7 +1099,7 @@ def cmd_supersede_reviews():
     _review_lineage_transaction()
 
 def _review_lineage_transaction():
-    locks.StateLock()
+    StateLock()
 """
     )
 
@@ -780,6 +1245,83 @@ def cmd_supersede_reviews():
     ]
 
 
+def test_forbidden_call_inventory_rejects_dict_subscript_writer():
+    tree = ast.parse(
+        """
+def cmd_supersede_reviews():
+    writers = {"write": atomic_write_json}
+    writers["write"]()
+"""
+    )
+
+    assert forbidden_calls_in_reachable({"cmd_supersede_reviews"}, tree=tree) == [
+        ("cmd_supersede_reviews", "atomic_write_json", 4)
+    ]
+
+
+def test_forbidden_call_inventory_rejects_list_subscript_writer():
+    tree = ast.parse(
+        """
+def cmd_supersede_reviews():
+    writers = [StateLock]
+    writers[0]()
+"""
+    )
+
+    assert forbidden_calls_in_reachable({"cmd_supersede_reviews"}, tree=tree) == [
+        ("cmd_supersede_reviews", "StateLock", 4)
+    ]
+
+
+def test_forbidden_call_inventory_rejects_nested_subscript_writer():
+    tree = ast.parse(
+        """
+def cmd_supersede_reviews():
+    writers = {"write": [atomic_write_json]}
+    writers["write"][0]()
+"""
+    )
+
+    assert forbidden_calls_in_reachable({"cmd_supersede_reviews"}, tree=tree) == [
+        ("cmd_supersede_reviews", "atomic_write_json", 4)
+    ]
+
+
+def test_forbidden_call_inventory_rejects_helper_returned_container_writer():
+    tree = ast.parse(
+        """
+def make_writers():
+    return [atomic_write_json]
+
+def cmd_supersede_reviews():
+    make_writers()[0]()
+"""
+    )
+
+    assert forbidden_calls_in_reachable({"cmd_supersede_reviews"}, tree=tree) == [
+        ("cmd_supersede_reviews", "atomic_write_json", 6)
+    ]
+
+
+def test_forbidden_call_inventory_rejects_container_mutation_writers():
+    tree = ast.parse(
+        """
+def cmd_supersede_reviews():
+    writers = {}
+    writers["write"] = atomic_write_json
+    writers["write"]()
+    lock_factories = []
+    lock_factories.append(StateLock)
+    lock_factories[0]()
+"""
+    )
+
+    assert forbidden_calls_in_reachable({"cmd_supersede_reviews"}, tree=tree) == [
+        ("cmd_supersede_reviews", "StateLock", 7),
+        ("cmd_supersede_reviews", "atomic_write_json", 5),
+    ]
+
+
 def test_forbidden_call_inventory_checks_lambda_defaults():
     tree = ast.parse(
         """
@@ -810,6 +1352,266 @@ def cmd_supersede_reviews():
     assert forbidden_calls_in_reachable({"cmd_supersede_reviews"}, tree=tree) == [
         ("cmd_supersede_reviews", "atomic_write_json", 4)
     ]
+
+
+def test_forbidden_call_inventory_rejects_module_call_wrapped_writer():
+    tree = ast.parse(
+        """
+def identity(callable_value):
+    return callable_value
+
+safe_writer = identity(atomic_write_json)
+
+def cmd_supersede_reviews():
+    safe_writer()
+"""
+    )
+
+    assert forbidden_calls_in_reachable({"cmd_supersede_reviews"}, tree=tree) == [
+        ("cmd_supersede_reviews", "atomic_write_json", 8)
+    ]
+
+
+def test_forbidden_call_inventory_rejects_local_call_wrapped_writer():
+    tree = ast.parse(
+        """
+def cmd_supersede_reviews():
+    safe_writer = functools.partial(atomic_write_json, {})
+    safe_writer()
+"""
+    )
+
+    assert forbidden_calls_in_reachable({"cmd_supersede_reviews"}, tree=tree) == [
+        ("cmd_supersede_reviews", "atomic_write_json", 4)
+    ]
+
+
+def test_forbidden_call_inventory_rejects_annotated_taint_sources():
+    tree = ast.parse(
+        """
+def cmd_supersede_reviews():
+    writers: list = [atomic_write_json]
+    writers[0]()
+    safe_writer: object = functools.partial(StateLock)
+    safe_writer()
+"""
+    )
+
+    assert forbidden_calls_in_reachable({"cmd_supersede_reviews"}, tree=tree) == [
+        ("cmd_supersede_reviews", "StateLock", 6),
+        ("cmd_supersede_reviews", "atomic_write_json", 4),
+    ]
+
+
+def test_forbidden_call_inventory_rejects_tainted_callable_defaults():
+    tree = ast.parse(
+        """
+def invoke_container(writers=[atomic_write_json]):
+    writers[0]()
+
+def invoke_call_alias(writer=identity(StateLock)):
+    writer()
+
+def cmd_supersede_reviews():
+    invoke_container()
+    invoke_call_alias()
+"""
+    )
+
+    assert forbidden_calls_in_reachable({"cmd_supersede_reviews"}, tree=tree) == [
+        ("cmd_supersede_reviews", "StateLock", 10),
+        ("cmd_supersede_reviews", "atomic_write_json", 9),
+    ]
+
+
+def test_forbidden_call_inventory_respects_safe_parameter_shadowing():
+    tree = ast.parse(
+        """
+def cmd_supersede_reviews():
+    writer = atomic_write_json
+    def invoke(writer=print):
+        writer()
+    invoke(print)
+"""
+    )
+
+    assert forbidden_calls_in_reachable({"cmd_supersede_reviews"}, tree=tree) == []
+
+
+def test_forbidden_call_inventory_rejects_variadic_callback_forwarding():
+    tree = ast.parse(
+        """
+def invoke_args(*writers):
+    writers[0]()
+
+def invoke_kwargs(**writers):
+    writers["write"]()
+
+def invoke_named(writer):
+    writer()
+
+def cmd_supersede_reviews():
+    invoke_args(atomic_write_json)
+    invoke_kwargs(write=StateLock)
+    invoke_named(**{"writer": atomic_write_json})
+"""
+    )
+
+    assert forbidden_calls_in_reachable({"cmd_supersede_reviews"}, tree=tree) == [
+        ("cmd_supersede_reviews", "StateLock", 13),
+        ("cmd_supersede_reviews", "atomic_write_json", 12),
+        ("cmd_supersede_reviews", "atomic_write_json", 14),
+    ]
+
+
+def test_forbidden_call_inventory_rejects_loop_and_context_bindings():
+    tree = ast.parse(
+        """
+def cmd_supersede_reviews():
+    for writer in [atomic_write_json]:
+        writer()
+    with contextlib.nullcontext(StateLock) as lock_factory:
+        lock_factory()
+"""
+    )
+
+    assert forbidden_calls_in_reachable({"cmd_supersede_reviews"}, tree=tree) == [
+        ("cmd_supersede_reviews", "StateLock", 6),
+        ("cmd_supersede_reviews", "atomic_write_json", 4),
+    ]
+
+
+def test_forbidden_call_inventory_rejects_direct_call_wrapped_writer():
+    tree = ast.parse(
+        """
+def identity(callable_value):
+    return callable_value
+
+def cmd_supersede_reviews():
+    identity(atomic_write_json)()
+"""
+    )
+
+    assert forbidden_calls_in_reachable({"cmd_supersede_reviews"}, tree=tree) == [
+        ("cmd_supersede_reviews", "atomic_write_json", 6)
+    ]
+
+
+def test_forbidden_call_inventory_rejects_call_wrapped_decorator():
+    tree = ast.parse(
+        """
+def identity(callable_value):
+    return callable_value
+
+@identity(atomic_write_json)
+def safe_writer():
+    pass
+
+def cmd_supersede_reviews():
+    safe_writer()
+"""
+    )
+
+    assert forbidden_calls_in_reachable({"cmd_supersede_reviews"}, tree=tree) == [
+        ("cmd_supersede_reviews", "atomic_write_json", 10)
+    ]
+
+
+def test_forbidden_call_inventory_rejects_unresolved_tainted_expressions():
+    tree = ast.parse(
+        """
+def safe_writer():
+    pass
+
+def cmd_supersede_reviews(flag):
+    selected = atomic_write_json if flag else safe_writer
+    selected()
+    (atomic_write_json if flag else safe_writer)()
+    fallback = flag and safe_writer or atomic_write_json
+    fallback()
+"""
+    )
+
+    assert forbidden_calls_in_reachable({"cmd_supersede_reviews"}, tree=tree) == [
+        ("cmd_supersede_reviews", "atomic_write_json", 7),
+        ("cmd_supersede_reviews", "atomic_write_json", 8),
+        ("cmd_supersede_reviews", "atomic_write_json", 10),
+    ]
+
+
+def test_forbidden_call_inventory_rejects_comprehension_bound_writer():
+    tree = ast.parse(
+        """
+def cmd_supersede_reviews():
+    list(writer() for writer in [atomic_write_json])
+"""
+    )
+
+    assert forbidden_calls_in_reachable({"cmd_supersede_reviews"}, tree=tree) == [
+        ("cmd_supersede_reviews", "atomic_write_json", 3)
+    ]
+
+
+def test_forbidden_call_inventory_does_not_leak_comprehension_taint():
+    tree = ast.parse(
+        """
+def safe_writer():
+    pass
+
+def cmd_supersede_reviews():
+    writer = safe_writer
+    list(value for writer in [atomic_write_json] for value in [1])
+    writer()
+"""
+    )
+
+    assert forbidden_calls_in_reachable({"cmd_supersede_reviews"}, tree=tree) == []
+
+
+def test_forbidden_call_inventory_follows_comprehension_binding_chain():
+    tree = ast.parse(
+        """
+def cmd_supersede_reviews():
+    list(writer() for group in [[atomic_write_json]] for writer in group)
+"""
+    )
+
+    assert forbidden_calls_in_reachable({"cmd_supersede_reviews"}, tree=tree) == [
+        ("cmd_supersede_reviews", "atomic_write_json", 3)
+    ]
+
+
+def test_forbidden_call_inventory_tracks_positional_destructuring():
+    assignment_tree = ast.parse(
+        """
+def cmd_supersede_reviews():
+    unused, writer = (print, atomic_write_json)
+    writer()
+"""
+    )
+    safe_comprehension_tree = ast.parse(
+        """
+def cmd_supersede_reviews():
+    list(writer() for writer, unused in [(print, atomic_write_json)])
+"""
+    )
+    safe_for_tree = ast.parse(
+        """
+def cmd_supersede_reviews():
+    for unused, writer in [(atomic_write_json, print)]:
+        writer()
+"""
+    )
+
+    assert forbidden_calls_in_reachable(
+        {"cmd_supersede_reviews"}, tree=assignment_tree
+    ) == [("cmd_supersede_reviews", "atomic_write_json", 4)]
+    assert forbidden_calls_in_reachable(
+        {"cmd_supersede_reviews"}, tree=safe_comprehension_tree
+    ) == []
+    assert forbidden_calls_in_reachable(
+        {"cmd_supersede_reviews"}, tree=safe_for_tree
+    ) == []
 
 
 def test_forbidden_call_inventory_follows_nested_class_constructor():
@@ -1001,6 +1803,27 @@ def test_direct_legacy_call_inventory_has_no_silent_parser_adapter_gap():
     }
 
     assert discovered == C2_DIRECT_WRITE_FUNCTIONS | NON_SESSION_DIRECT_CALL_FUNCTIONS
+
+
+def test_direct_legacy_call_allowlist_has_no_stale_entries():
+    source = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    entry_names = {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and (node.name.startswith("cmd_") or node.name.startswith("_cmd_"))
+    }
+    unallowlisted_call_sites = set(
+        forbidden_calls_in_reachable(
+            entry_names,
+            tree=tree,
+            allowed_call_sites=frozenset(),
+            include_call_sites=True,
+        )
+    )
+
+    assert ALLOWED_NON_C2_CALL_SITES - unallowlisted_call_sites == set()
 
 
 def test_a1_registry_has_one_owner_for_every_lifecycle_command():
