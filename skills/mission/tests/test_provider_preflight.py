@@ -21,6 +21,12 @@ from provider_preflight import (  # noqa: E402
     validate_receipt,
     verify_live_packet,
 )
+
+
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Provider preflight mutation commands remain v4-owned until #543."""
+    return legacy_run_cli
 from planning_provider_metrics import reduce_planning_provider_kpis  # noqa: E402
 
 

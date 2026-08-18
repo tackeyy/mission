@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -167,11 +168,65 @@ def _init_cli_state(
         "--artifact-applicability",
         "not-applicable",
     )
+    _materialize_legacy_init_fixture(root, cleanup_v5=True)
     return _read_cli_state(root)
 
 
+def _materialize_legacy_init_fixture(
+    root: Path,
+    *,
+    session_ids: tuple[str, ...] | None = None,
+    cleanup_v5: bool = False,
+) -> None:
+    """Convert a successful production init into an explicit legacy fixture."""
+
+    # Most pre-C1 fixture consumers intentionally exercise the retained v4
+    # repository path.  Production ``init`` now creates a v5 container, so
+    # resolve its verified payload and materialize that payload as an explicit
+    # legacy fixture before those compatibility scenarios continue.
+    from mission_persistence.fenced_commit import LocalFencedRepository
+    from mission_persistence.repository_binding import (
+        RepositoryFormat,
+        RepositorySelectionError,
+        inspect_repository_bytes,
+    )
+
+    repository_root = root / ".mission-state"
+    sessions = repository_root / "sessions"
+    if not sessions.is_dir():
+        return
+    repository = LocalFencedRepository(repository_root)
+    converted = False
+    candidates = (
+        [sessions / (session_id + ".json") for session_id in session_ids]
+        if session_ids is not None
+        else list(sessions.glob("*.json"))
+    )
+    for session_path in candidates:
+        if not session_path.exists():
+            continue
+        try:
+            inspection = inspect_repository_bytes(
+                session_path.read_bytes(), expected_session_id=session_path.stem
+            )
+        except (OSError, RepositorySelectionError):
+            # A successful legacy re-init leaves a v4 document here already;
+            # malformed-state tests also intentionally exercise this path.
+            continue
+        if inspection.format is not RepositoryFormat.V5:
+            continue
+        state_bytes = repository.read(session_path.stem).state_bytes
+        session_path.write_bytes(state_bytes)
+        converted = True
+    if converted and cleanup_v5:
+        # Leave a genuine flat-v4 fixture, not an impossible v4 head with
+        # orphaned v5 tombstones that could affect a later init in the case.
+        for name in ("commits", "generations", "objects", "operations", "transactions"):
+            shutil.rmtree(repository_root / name, ignore_errors=True)
+
+
 def generate_cli_state_bytes(root: Path, *, role: str = "implementer") -> tuple[Path, bytes]:
-    """Return the exact state bytes emitted by the production CLI ``init`` writer."""
+    """Return an explicit v4 compatibility fixture using the current init payload."""
     _init_cli_state(root, role=role)
     state_path = root / ".mission-state" / "sessions" / "test.json"
     return state_path, state_path.read_bytes()
@@ -283,6 +338,8 @@ def generate_cli_state_corpus(root: Path) -> dict[str, object]:
 
     def provider_cli(*arguments, cwd, check=False, env_extra=None):
         result = _run_cli(Path(cwd), *arguments, env_extra=env_extra)
+        if arguments and arguments[0] == "init" and result.returncode == 0:
+            _materialize_legacy_init_fixture(Path(cwd))
         if check:
             result.check_returncode()
         return result

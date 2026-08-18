@@ -241,6 +241,28 @@ def run_cli(tmp_path):
 
 
 @pytest.fixture
+def legacy_run_cli(run_cli):
+    """Run a command against an explicitly materialized retained-v4 session."""
+
+    def _run(*args, **kwargs):
+        result = run_cli(*args, **kwargs)
+        if args and args[0] == "init" and result.returncode == 0:
+            from .mission_state_fixture_corpus import _materialize_legacy_init_fixture
+
+            cwd = Path(kwargs.get("cwd") or Path.cwd())
+            env_extra = kwargs.get("env_extra") or {}
+            session_id = env_extra.get("MISSION_SESSION_ID")
+            _materialize_legacy_init_fixture(
+                cwd,
+                session_ids=(session_id,) if session_id else None,
+                cleanup_v5=True,
+            )
+        return result
+
+    return _run
+
+
+@pytest.fixture
 def prepare_approved_invocation(run_cli):
     """Prepare and host-approve a command provider for canonical invocation tests."""
     def _prepare(*, cwd, provider, iteration, phase, env_extra=None, registry=None,

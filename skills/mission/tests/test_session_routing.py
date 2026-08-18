@@ -1,6 +1,14 @@
 """multi-session で全 cmd_* が sessions/<sid>.json にルーティングされ legacy を汚さない (§10 解消)."""
 import json
 
+import pytest
+
+
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """The pre-C1 routing matrix characterizes retained-v4 command owners."""
+    return legacy_run_cli
+
 
 _ITEMS = '{"mission_achievement":4.5,"accuracy":4.5,"completeness":4.5,"usability":4.5,"reviewer_consensus":4.5}'
 

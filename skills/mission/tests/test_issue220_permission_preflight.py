@@ -12,6 +12,12 @@ MISSION_STATE_PY = Path(__file__).resolve().parent.parent / "bin" / "mission-sta
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Permission-preflight command ownership remains v4-scoped until #543."""
+    return legacy_run_cli
+
+
 def _load_state_module():
     spec = importlib.util.spec_from_file_location(
         "mission_state_issue220", MISSION_STATE_PY
@@ -144,8 +150,8 @@ def test_init_runs_permission_preflight_before_returning_success(
         module.cmd_init(args)
 
     assert exc.value.code == 2
-    state = json.loads(
-        (tmp_path / ".mission-state" / "sessions" / "test.json").read_text()
+    _snapshot, state = module._load_authoritative_state(
+        tmp_path / ".mission-state" / "sessions" / "test.json"
     )
     assert state["halt_category"] == "blocked-external"
     assert state["loop_active"] is False
@@ -231,10 +237,11 @@ def test_init_emits_structured_fallback_when_first_state_write_fails(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("MISSION_SESSION_ID", "test")
 
-    def deny_state_write(_path, _data):
+    def deny_state_write(_self, _request, *, state_bytes):
+        del state_bytes
         raise PermissionError("denied")
 
-    monkeypatch.setattr(module, "atomic_write_json", deny_state_write)
+    monkeypatch.setattr(module.LocalFencedRepository, "initialize", deny_state_write)
     args = SimpleNamespace(
         mission="permission preflight",
         complexity="Standard",
@@ -276,17 +283,11 @@ def test_permission_preflight_emits_fallback_when_state_lock_write_fails(
     module.cmd_init(args)
     capsys.readouterr()
 
-    class DeniedStateLock:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
-        def __enter__(self):
-            raise PermissionError("denied")
-
-        def __exit__(self, *_args):
-            return False
-
-    monkeypatch.setattr(module, "StateLock", DeniedStateLock)
+    monkeypatch.setattr(
+        module,
+        "_load_authoritative_state",
+        lambda _path: (_ for _ in ()).throw(PermissionError("denied")),
+    )
 
     with pytest.raises(SystemExit) as exc:
         module.cmd_permission_preflight(SimpleNamespace(json=True))

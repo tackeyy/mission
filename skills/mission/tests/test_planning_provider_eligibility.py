@@ -20,6 +20,12 @@ from provider_eligibility import (  # noqa: E402
     normalize_selection_source,
     parse_v2_registry,
 )
+
+
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Provider eligibility command paths remain retained-v4 until #543."""
+    return legacy_run_cli
 from provider_public_contract import (  # noqa: E402
     SpecialistPublicContractError,
     validate_specialist_public_state,

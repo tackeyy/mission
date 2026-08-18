@@ -14,6 +14,7 @@ import pytest
 
 from .mission_state_fixture_corpus import (
     _checked_cli as _production_checked_cli,
+    _materialize_legacy_init_fixture,
     _run_cli as _production_run_cli,
     _write_core_plan,
     canonical_json_bytes,
@@ -521,6 +522,7 @@ def test_policy_v1_advance_with_plan_to_executing_matches_real_cli_bytes(tmp_pat
         "Standard",
         env_extra={"MISSION_STATE_NOW": executing_at},
     )
+    _materialize_legacy_init_fixture(tmp_path)
     _production_checked_cli(
         tmp_path,
         "planning",
@@ -1071,6 +1073,7 @@ def test_mark_halt_remains_available_for_malformed_legacy_v4_state(
         env_extra={"MISSION_STATE_NOW": now},
     )
     assert initialized.returncode == 0, initialized.stderr
+    _materialize_legacy_init_fixture(tmp_path)
     state_path = tmp_path / ".mission-state" / "sessions" / "test.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
     if case_id == "partial-lease":

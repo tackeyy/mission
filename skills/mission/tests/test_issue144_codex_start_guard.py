@@ -6,9 +6,17 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MISSION_STATE_PY = REPO_ROOT / "skills" / "mission" / "bin" / "mission-state.py"
+
+
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """codex-preflight remains a retained-v4 command owned by #543."""
+    return legacy_run_cli
 
 
 def _load_mission_state():

@@ -4,11 +4,24 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+
+from mission_persistence.authoritative_reader import read_authoritative_snapshot
+
+
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """This pre-C1 module characterizes the retained v4 activity contract."""
+    return legacy_run_cli
 
 
 def _read(tmp_path):
-    return json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
+    path = tmp_path / ".mission-state" / "sessions" / "test.json"
+    return read_authoritative_snapshot(
+        path, expected_session_id="test"
+    ).document_copy()
 
 
 def test_init_opens_the_planning_activity_by_default(run_cli, tmp_path):

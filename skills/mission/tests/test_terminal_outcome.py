@@ -12,6 +12,12 @@ import sys
 import pytest
 
 
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Terminal admin command matrix remains retained-v4 until #543."""
+    return legacy_run_cli
+
+
 def _load_common():
     path = Path(__file__).resolve().parents[1] / "lib" / "mission_common.py"
     spec = importlib.util.spec_from_file_location("mission_common_terminal_outcome", path)

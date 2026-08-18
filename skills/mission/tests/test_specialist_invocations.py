@@ -13,6 +13,12 @@ import pytest
 from provider_eligibility import evaluate_provider_eligibility, value_digest
 
 
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Specialist invocation ownership remains on retained v4 until #543."""
+    return legacy_run_cli
+
+
 def _json_result(result):
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)

@@ -66,6 +66,18 @@ cmd_init
 - `select_legacy_repository` の `v5_factory` を `reject_v5` スタブから**実 v5 repository** へ差し替える
 - **rollback**: init default を v4 に戻す 1 箇所の変更で v4 に戻せる構造にし、その手順を docs に書く。既に作られた v5 session は v5 のまま（rollback しても壊れない）
 
+### 3.1 Rollback 手順
+
+新規 session の writer default は `skills/mission/bin/mission-state.py` の
+`NEW_SESSION_REPOSITORY_FORMAT = RepositoryFormat.V5` だけで決まる。緊急
+rollback はこの 1 箇所を `RepositoryFormat.LEGACY_V4` に変更し、通常の
+distribution sync / Python 3.9 / test gate を通して配布する。
+
+この変更は新規 `init` だけに作用する。session path に既に
+`mission-head/1` がある場合は常に format-pinned v5 repository が選択されるため、
+rollback 後も既存 v5 session の read / mutation は継続する。既存 v5 head を
+v4 payload で上書きしたり、v4 へ物理変換したりしない。
+
 ## 4. フルライフサイクル成立の範囲
 
 新規 v5 session で **init → set → advance → activity → mark-halt / review-import → review-finalize → mark-passes → closeout** が回ること。
@@ -88,6 +100,7 @@ A1 の 12 コマンドは既に repository 経由なので、`FormatPinnedReposi
 | T10 | rollback（init default を v4 へ）で新規は v4 に戻り、既存 v5 は読める |
 | T11 | 混在 root（v4 session と v5 session が同居）で stats/audit/list/next が正しく動く |
 | T12 | D1 distribution / Python 3.9 gate が新規モジュールを覆う |
+| T13 | v4/v5 の両方で、独立 CLI process の `init → get → set → resume` が同じ公開 state 契約を保つ |
 
 ## 6. 受け入れ条件
 
@@ -97,7 +110,7 @@ A1 の 12 コマンドは既に repository 経由なので、`FormatPinnedReposi
 - [ ] rollback が init default に限定され文書化されている（T10）
 - [ ] 安全 gate が同等以上（fenced lease / strict validation / content-addressed evidence / 機械的 pass gate）
 - [ ] crash + 同一 operation ID retry が元結果を返す（T5/T6）
-- [ ] T1-T12 が Green、フルスイート green
+- [ ] T1-T13 が Green、フルスイート green
 
 ## 7. リスクと対策
 

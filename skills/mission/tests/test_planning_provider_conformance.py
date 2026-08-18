@@ -11,6 +11,12 @@ sys.path.insert(0, str(LIB_DIR))
 from planning_provider_metrics import reduce_planning_provider_kpis
 
 
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Provider conformance mutations remain retained-v4 owned."""
+    return legacy_run_cli
+
+
 CONFORMANCE_CASES = [
     ("simple-floor", {"planning_policy_version": 1, "complexity": "Simple", "planning_strategy": "core"}, lambda t: t["eligible_complex_planning_selection"]["denominator"] == 0),
     ("unknown-floor", {"planning_policy_version": 1, "complexity": "Unknown", "planning_strategy": "core"}, lambda t: t["eligible_complex_planning_selection"]["denominator"] == 0),

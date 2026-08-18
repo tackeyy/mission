@@ -10,6 +10,12 @@ sys.path.insert(0, str(LIB_DIR))
 from planning_lifecycle import derive_planning_lifecycle
 
 
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Provider lifecycle commands are outside C1 and remain v4-owned (#543)."""
+    return legacy_run_cli
+
+
 def _canonical_core_state(tmp_path):
     state_file = tmp_path / ".mission-state" / "sessions" / "test.json"
     state = __import__("json").loads(state_file.read_text())

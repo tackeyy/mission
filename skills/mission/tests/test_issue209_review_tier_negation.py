@@ -16,6 +16,12 @@ import pytest
 
 
 MISSION_STATE_PY = Path(__file__).resolve().parent.parent / "bin" / "mission-state.py"
+
+
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Review-tier audit commands remain retained-v4 owned until #543."""
+    return legacy_run_cli
 _MODULE = None
 
 

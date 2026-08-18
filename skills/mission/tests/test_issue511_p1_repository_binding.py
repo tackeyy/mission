@@ -53,7 +53,10 @@ from mission_persistence.local_uow import (  # noqa: E402
     VerifiedBlobSet,
 )
 from mission_persistence.legacy_v4 import LegacyV4Repository  # noqa: E402
-from mission_state_fixture_corpus import generate_cli_state_bytes  # noqa: E402
+from mission_state_fixture_corpus import (  # noqa: E402
+    _run_cli as _run_raw_cli,
+    generate_cli_state_bytes,
+)
 
 
 def _load_mission_state_module(name: str):
@@ -614,21 +617,26 @@ def test_selector_recognizes_an_existing_v5_head_without_an_environment_flag(tmp
     assert selected.repository == "v5-repository"
 
 
-def test_legacy_set_rejects_v5_head_with_fail_closed_reason(run_cli, tmp_path):
-    _repository, repository_root, _lease_id = _seed_repository(tmp_path)
-    state_path = repository_root / "sessions" / "test.json"
-    before = state_path.read_bytes()
+def test_set_routes_v5_head_through_cutover_repository(tmp_path):
+    initialized = _run_raw_cli(
+        tmp_path,
+        "init",
+        "v5 set route",
+        "--artifact-applicability",
+        "not-applicable",
+    )
+    assert initialized.returncode == 0, initialized.stderr
+    state_path = tmp_path / ".mission-state" / "sessions" / "test.json"
 
-    result = run_cli(
+    result = _run_raw_cli(
+        tmp_path,
         "set",
         "compatibility_probe=1",
-        cwd=repository_root.parent,
     )
 
-    assert result.returncode != 0
-    assert "repository-format-v5-requires-uow" in result.stderr
+    assert result.returncode == 0, result.stderr
     assert "internal-error" not in result.stdout
-    assert state_path.read_bytes() == before
+    assert json.loads(state_path.read_bytes())["schema"] == "mission-head/1"
 
 
 def test_cli_repository_rejection_cannot_return_when_translator_is_injected(

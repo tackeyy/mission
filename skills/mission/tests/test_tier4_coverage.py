@@ -14,6 +14,12 @@ MISSION_STATE_PY = Path(__file__).resolve().parent.parent / "bin" / "mission-sta
 HOOK = Path(__file__).resolve().parents[3] / "scripts" / "mission-stop-guard.sh"
 
 
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Tier4 admin commands outside the C1 lifecycle retain v4 ownership."""
+    return legacy_run_cli
+
+
 def _load():
     spec = importlib.util.spec_from_file_location("mission_state_mod_t4", MISSION_STATE_PY)
     mod = importlib.util.module_from_spec(spec)

@@ -16,6 +16,14 @@ activity coverage が 9.96% に留まり、速度改善の根拠が作れない�
 """
 import json
 
+import pytest
+
+
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Detailed direct-byte advance characterization remains retained-v4."""
+    return legacy_run_cli
+
 
 def _read(tmp_path):
     return json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())

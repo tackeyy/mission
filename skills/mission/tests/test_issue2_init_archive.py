@@ -10,6 +10,12 @@ import pytest
 MISSION_STATE_PY = Path(__file__).resolve().parent.parent / "bin" / "mission-state.py"
 
 
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Mission-change re-init/archive is a retained v1-v4 contract."""
+    return legacy_run_cli
+
+
 def _load_state_module():
     spec = importlib.util.spec_from_file_location("mission_state_issue302", MISSION_STATE_PY)
     module = importlib.util.module_from_spec(spec)
@@ -282,8 +288,8 @@ def test_init_no_archive_on_resume_same_mission(tmp_path, run_cli):
     assert not archives, f"resume なのに archive が作られた: {archives}"
 
 
-def test_init_quarantines_corrupt_session_json_on_mission_change(tmp_path, run_cli):
-    """破損 session JSON があっても init は成功し、破損ファイルを退避する。"""
+def test_init_rejects_corrupt_session_json_without_format_downgrade(tmp_path, run_cli):
+    """破損 session は v5 head か判別不能なので再 init で上書きしない。"""
     sid = "corrupt-sess"
     r1 = run_cli("init", "first mission before corruption", cwd=tmp_path,
                  env_extra={"MISSION_SESSION_ID": sid})
@@ -294,8 +300,8 @@ def test_init_quarantines_corrupt_session_json_on_mission_change(tmp_path, run_c
     r2 = run_cli("init", "second mission after corruption", cwd=tmp_path,
                  env_extra={"MISSION_SESSION_ID": sid})
 
-    assert r2.returncode == 0, r2.stderr
-    assert "WARNING" in r2.stderr
+    assert r2.returncode == 2
+    assert "repository-format-invalid" in r2.stderr
     quarantined = list(sf.parent.glob(f"{sid}.json.corrupt-*"))
-    assert quarantined, "破損 session JSON が .corrupt-* に退避されていない"
-    assert json.loads(sf.read_text())["mission"] == "second mission after corruption"
+    assert not quarantined
+    assert sf.read_text() == "{ broken ]["

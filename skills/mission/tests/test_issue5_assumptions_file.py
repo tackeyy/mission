@@ -2,6 +2,14 @@
 import json
 from pathlib import Path
 
+import pytest
+
+
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """The same-session resume contract is retained only for v1-v4 sessions."""
+    return legacy_run_cli
+
 
 def test_init_creates_assumptions_file(tmp_path, run_cli):
     """init 後に assumptions_path のファイルが存在する。"""

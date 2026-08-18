@@ -16,6 +16,14 @@ mission-state.py が自力で計測できる予算は時間 (started_at から�
 
 ゲート意味論 (threshold / open_high / agreement / evidence) は変更しない。
 """
+
+import pytest
+
+
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Budget-pressure next ownership remains retained-v4 until #543."""
+    return legacy_run_cli
 import json
 
 

@@ -18,10 +18,19 @@ Contract under test:
 import json
 from pathlib import Path
 
+from mission_persistence.authoritative_reader import read_authoritative_snapshot
+
 
 def _sessions(tmp_path):
     d = tmp_path / ".mission-state" / "sessions"
     return sorted(p for p in d.glob("*.json") if "assumptions" not in p.name) if d.is_dir() else []
+
+
+def _state(tmp_path):
+    path = _sessions(tmp_path)[0]
+    return read_authoritative_snapshot(
+        path, expected_session_id=path.stem
+    ).document_copy()
 
 
 def _init_unknown(run_cli, tmp_path, *extra):
@@ -35,7 +44,7 @@ def test_set_simple_routes_and_halts(run_cli, tmp_path):
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
     assert out.get("route") == "goal", "set がコマンド層で routing verdict を返すべき"
-    state = json.loads(_sessions(tmp_path)[0].read_text())
+    state = _state(tmp_path)
     assert state["loop_active"] is False
     assert state["halt_category"] == "routed-goal"
 
@@ -44,7 +53,7 @@ def test_set_simple_with_issue_ref_keeps_loop(run_cli, tmp_path):
     run_cli("init", "typo を1箇所直す", "--issue-ref", "418", cwd=tmp_path, check=True)
     r = run_cli("set", "complexity=Simple", cwd=tmp_path)
     assert r.returncode == 0, r.stderr
-    state = json.loads(_sessions(tmp_path)[0].read_text())
+    state = _state(tmp_path)
     assert state["loop_active"] is True
 
 
@@ -52,7 +61,7 @@ def test_set_simple_with_force_mission_keeps_loop(run_cli, tmp_path):
     run_cli("init", "typo を1箇所直す", "--force-mission", cwd=tmp_path, check=True)
     r = run_cli("set", "complexity=Simple", cwd=tmp_path)
     assert r.returncode == 0, r.stderr
-    state = json.loads(_sessions(tmp_path)[0].read_text())
+    state = _state(tmp_path)
     assert state["loop_active"] is True
 
 
@@ -60,7 +69,7 @@ def test_set_simple_checker_role_keeps_loop(run_cli, tmp_path):
     run_cli("init", "PR review", "--role", "checker", cwd=tmp_path, check=True)
     r = run_cli("set", "complexity=Simple", cwd=tmp_path)
     assert r.returncode == 0, r.stderr
-    state = json.loads(_sessions(tmp_path)[0].read_text())
+    state = _state(tmp_path)
     assert state["loop_active"] is True
 
 
@@ -68,7 +77,7 @@ def test_set_simple_with_signals_keeps_loop(run_cli, tmp_path):
     run_cli("init", "deploy the hotfix to production", cwd=tmp_path, check=True)
     r = run_cli("set", "complexity=Simple", cwd=tmp_path)
     assert r.returncode == 0, r.stderr
-    state = json.loads(_sessions(tmp_path)[0].read_text())
+    state = _state(tmp_path)
     assert state["loop_active"] is True, "不可逆シグナルありは routing しない"
 
 
@@ -76,7 +85,7 @@ def test_set_simple_user_tier_keeps_loop(run_cli, tmp_path):
     run_cli("init", "typo を1箇所直す", "--review-tier", "light", cwd=tmp_path, check=True)
     r = run_cli("set", "complexity=Simple", cwd=tmp_path)
     assert r.returncode == 0, r.stderr
-    state = json.loads(_sessions(tmp_path)[0].read_text())
+    state = _state(tmp_path)
     assert state["loop_active"] is True
 
 
@@ -84,7 +93,7 @@ def test_set_standard_keeps_loop(run_cli, tmp_path):
     _init_unknown(run_cli, tmp_path)
     r = run_cli("set", "complexity=Standard", cwd=tmp_path)
     assert r.returncode == 0, r.stderr
-    state = json.loads(_sessions(tmp_path)[0].read_text())
+    state = _state(tmp_path)
     assert state["loop_active"] is True
 
 

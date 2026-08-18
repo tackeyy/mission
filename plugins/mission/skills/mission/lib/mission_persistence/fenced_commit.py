@@ -191,6 +191,18 @@ class PrepareRecord:
 
 
 @dataclass(frozen=True)
+class _RecoveryResolution:
+    base_generation: int
+    disposition: str
+    head_digest: Optional[str]
+    intent_digest: str
+    operation_id: str
+    session_id: str
+    target_generation: int
+    transaction_id: str
+
+
+@dataclass(frozen=True)
 class PendingLease:
     action: str
     base: Union[LegacyAbsentLease, FencedLease]
@@ -810,6 +822,83 @@ def _parse_prepare(content: bytes, filename: str) -> PrepareRecord:
     )
 
 
+def _parse_recovery_resolution(
+    content: bytes,
+    *,
+    transaction_filename: Optional[str] = None,
+) -> _RecoveryResolution:
+    document = _decode_record(content, limit=MAX_OPERATION_BYTES)
+    _exact(
+        document,
+        {
+            "base_generation",
+            "disposition",
+            "head_digest",
+            "intent_digest",
+            "operation_id",
+            "schema",
+            "session_id",
+            "target_generation",
+            "transaction_id",
+        },
+        "recovery resolution",
+    )
+    if document["schema"] != "mission-recovery/1":
+        raise FencedCommitError(
+            "record-invalid", "recovery resolution schema differs"
+        )
+    transaction_id = document["transaction_id"]
+    if (
+        not isinstance(transaction_id, str)
+        or _TRANSACTION_RE.fullmatch(transaction_id) is None
+    ):
+        raise FencedCommitError(
+            "record-invalid", "recovery transaction ID is invalid"
+        )
+    if (
+        transaction_filename is not None
+        and transaction_filename != transaction_id + ".json"
+    ):
+        raise FencedCommitError(
+            "record-invalid", "recovery resolution filename differs"
+        )
+    base_generation = _integer(
+        document["base_generation"],
+        "recovery.base_generation",
+    )
+    target_generation = _integer(
+        document["target_generation"],
+        "recovery.target_generation",
+        positive=True,
+    )
+    if target_generation != base_generation + 1:
+        raise FencedCommitError(
+            "record-invalid", "recovery generation is not N+1"
+        )
+    disposition = document["disposition"]
+    if disposition not in {"rolled-back", "finalized"}:
+        raise FencedCommitError(
+            "record-invalid", "recovery disposition differs"
+        )
+    head_digest = document["head_digest"]
+    if head_digest is not None:
+        head_digest = _digest(head_digest, "recovery.head_digest")
+    return _RecoveryResolution(
+        base_generation=base_generation,
+        disposition=disposition,
+        head_digest=head_digest,
+        intent_digest=_digest(
+            document["intent_digest"], "recovery.intent_digest"
+        ),
+        operation_id=_token(
+            document["operation_id"], "recovery.operation_id"
+        ),
+        session_id=_session_id(document["session_id"]),
+        target_generation=target_generation,
+        transaction_id=transaction_id,
+    )
+
+
 def _result_document(result: CommitResult) -> dict:
     return {
         "commit_digest": result.commit_digest,
@@ -1177,6 +1266,9 @@ class LocalFencedRepository:
             self.root / "transactions" / "projections",
             self.root / "transactions" / "quarantine",
             self.root / "transactions" / "resolved",
+            self.root / "transactions" / "resolved-operations",
+            self.root / "transactions" / "resolved-operations" / "finalized",
+            self.root / "transactions" / "resolved-operations" / "rolled-back",
             self.root / "objects",
             self.root / "generations",
             self.root / "commits",
@@ -1613,7 +1705,168 @@ class LocalFencedRepository:
             raise FencedCommitError("lineage-mismatch", "operation result commit differs")
         return result
 
-    def _check_resolved_operation(self, request: ExecutionRequest) -> None:
+    def _resolved_operation_path(
+        self,
+        session_id: str,
+        operation_id: str,
+        disposition: str = "finalized",
+    ) -> Path:
+        if disposition not in {"rolled-back", "finalized"}:
+            raise FencedCommitError(
+                "recovery-ambiguous", "recovery index disposition is invalid"
+            )
+        return (
+            self.root
+            / "transactions"
+            / "resolved-operations"
+            / disposition
+            / self._operation_path(session_id, operation_id).name
+        )
+
+    def _resolution_index_document(
+        self,
+        resolution: _RecoveryResolution,
+    ) -> dict:
+        return {
+            "disposition": resolution.disposition,
+            "intent_digest": resolution.intent_digest,
+            "operation_id": resolution.operation_id,
+            "schema": "mission-recovery-operation/1",
+            "session_id": resolution.session_id,
+        }
+
+    def _parse_resolution_index(
+        self,
+        content: bytes,
+        *,
+        disposition: str,
+        filename: str,
+    ) -> tuple[str, str, str]:
+        document = _decode_record(content, limit=MAX_OPERATION_BYTES)
+        _exact(
+            document,
+            {
+                "disposition",
+                "intent_digest",
+                "operation_id",
+                "schema",
+                "session_id",
+            },
+            "recovery operation index",
+        )
+        if document["schema"] != "mission-recovery-operation/1":
+            raise FencedCommitError(
+                "record-invalid", "recovery operation index schema differs"
+            )
+        if document["disposition"] != disposition:
+            raise FencedCommitError(
+                "record-invalid", "recovery operation index disposition differs"
+            )
+        session_id = _session_id(document["session_id"])
+        operation_id = _token(
+            document["operation_id"], "recovery.operation_id"
+        )
+        intent_digest = _digest(
+            document["intent_digest"], "recovery.intent_digest"
+        )
+        if (
+            self._resolved_operation_path(
+                session_id,
+                operation_id,
+                disposition,
+            ).name
+            != filename
+        ):
+            raise FencedCommitError(
+                "record-invalid", "recovery operation index filename differs"
+            )
+        return session_id, operation_id, intent_digest
+
+    def _publish_resolution_index_unlocked(
+        self,
+        resolution: _RecoveryResolution,
+    ) -> None:
+        content = _canonical_bytes(
+            self._resolution_index_document(resolution),
+            limit=MAX_OPERATION_BYTES,
+        )
+        self._publish_named_immutable(
+            self._resolved_operation_path(
+                resolution.session_id,
+                resolution.operation_id,
+                resolution.disposition,
+            ),
+            content,
+            limit=MAX_OPERATION_BYTES,
+            collision_code="recovery-ambiguous",
+        )
+
+    def _ensure_resolution_index_unlocked(self) -> None:
+        ready_content = _canonical_bytes(
+            {"schema": "mission-recovery-operation-index/1"},
+            limit=MAX_OPERATION_BYTES,
+        )
+        ready_path = (
+            self.root
+            / "transactions"
+            / "resolved-operations"
+            / ".ready-v1.json"
+        )
+        with self._pinned_directory(
+            "transactions", "resolved-operations"
+        ) as pinned:
+            current = self._read_pinned_file(
+                pinned,
+                ready_path.name,
+                limit=MAX_OPERATION_BYTES,
+                allow_missing=True,
+            )
+        if current is not None:
+            if current != ready_content:
+                raise FencedCommitError(
+                    "recovery-ambiguous", "recovery operation index marker differs"
+                )
+            return
+
+        for disposition in ("finalized", "rolled-back"):
+            with self._pinned_directory(
+                "transactions", "resolved-operations", disposition
+            ) as pinned:
+                try:
+                    entries = sorted(os.listdir(pinned.descriptor))
+                except OSError as exc:
+                    raise FencedCommitError(
+                        "recovery-ambiguous",
+                        "recovery operation index cannot be inspected",
+                    ) from exc
+                self._verify_pinned_directory(pinned)
+                for name in entries:
+                    if (
+                        not name.endswith(".json")
+                        or _DIGEST_RE.fullmatch("sha256:" + name[:-5]) is None
+                    ):
+                        raise FencedCommitError(
+                            "recovery-ambiguous",
+                            "recovery operation index filename is invalid",
+                        )
+                    content = self._read_pinned_file(
+                        pinned,
+                        name,
+                        limit=MAX_OPERATION_BYTES,
+                    )
+                    assert content is not None
+                    try:
+                        self._parse_resolution_index(
+                            content,
+                            disposition=disposition,
+                            filename=name,
+                        )
+                    except FencedCommitError as exc:
+                        raise FencedCommitError(
+                            "recovery-ambiguous",
+                            "recovery operation index is malformed",
+                        ) from exc
+
         with self._pinned_directory("transactions", "resolved") as pinned:
             try:
                 entries = sorted(os.listdir(pinned.descriptor))
@@ -1637,92 +1890,88 @@ class LocalFencedRepository:
                 )
                 assert content is not None
                 try:
-                    document = _decode_record(content, limit=MAX_OPERATION_BYTES)
-                    _exact(
-                        document,
-                        {
-                            "base_generation",
-                            "disposition",
-                            "head_digest",
-                            "intent_digest",
-                            "operation_id",
-                            "schema",
-                            "session_id",
-                            "target_generation",
-                            "transaction_id",
-                        },
-                        "recovery resolution",
-                    )
-                    if document["schema"] != "mission-recovery/1":
-                        raise FencedCommitError(
-                            "record-invalid", "recovery resolution schema differs"
-                        )
-                    transaction_id = document["transaction_id"]
-                    if transaction_id != name[:-5]:
-                        raise FencedCommitError(
-                            "record-invalid", "recovery resolution filename differs"
-                        )
-                    base_generation = _integer(
-                        document["base_generation"],
-                        "recovery.base_generation",
-                    )
-                    target_generation = _integer(
-                        document["target_generation"],
-                        "recovery.target_generation",
-                        positive=True,
-                    )
-                    if target_generation != base_generation + 1:
-                        raise FencedCommitError(
-                            "record-invalid", "recovery generation is not N+1"
-                        )
-                    disposition = document["disposition"]
-                    if disposition not in {"rolled-back", "finalized"}:
-                        raise FencedCommitError(
-                            "record-invalid", "recovery disposition differs"
-                        )
-                    head_digest = document["head_digest"]
-                    if head_digest is not None:
-                        _digest(head_digest, "recovery.head_digest")
-                    session_id = _session_id(document["session_id"])
-                    operation_id = _token(
-                        document["operation_id"], "recovery.operation_id"
-                    )
-                    intent_digest = _digest(
-                        document["intent_digest"], "recovery.intent_digest"
+                    resolution = _parse_recovery_resolution(
+                        content,
+                        transaction_filename=name,
                     )
                 except FencedCommitError as exc:
                     raise FencedCommitError(
                         "recovery-ambiguous", "resolved transaction record is malformed"
                     ) from exc
-                if (
-                    session_id != request.session_id
-                    or operation_id != request.operation_id
-                ):
-                    continue
-                if intent_digest != request.intent_digest:
-                    raise FencedCommitError(
-                        "operation-intent-collision",
-                        "rolled-back operation ID has a different intent",
-                    )
-                if disposition == "finalized":
-                    raise FencedCommitError(
-                        "recovery-ambiguous",
-                        "finalized transaction is missing its operation tombstone",
-                    )
+                self._publish_resolution_index_unlocked(resolution)
 
-    def _reject_open_prepare(self, session_id: str) -> None:
+        self._publish_named_immutable(
+            ready_path,
+            ready_content,
+            limit=MAX_OPERATION_BYTES,
+            collision_code="recovery-ambiguous",
+        )
+
+    def _check_resolved_operation(self, request: ExecutionRequest) -> None:
+        self._ensure_resolution_index_unlocked()
+        found = {}
+        for disposition in ("rolled-back", "finalized"):
+            path = self._resolved_operation_path(
+                request.session_id,
+                request.operation_id,
+                disposition,
+            )
+            with self._pinned_directory(
+                "transactions", "resolved-operations", disposition
+            ) as pinned:
+                content = self._read_pinned_file(
+                    pinned,
+                    path.name,
+                    limit=MAX_OPERATION_BYTES,
+                    allow_missing=True,
+                )
+            if content is None:
+                continue
+            try:
+                session_id, operation_id, intent_digest = self._parse_resolution_index(
+                    content,
+                    disposition=disposition,
+                    filename=path.name,
+                )
+            except FencedCommitError as exc:
+                raise FencedCommitError(
+                    "recovery-ambiguous", "recovery operation index is malformed"
+                ) from exc
+            if (
+                session_id != request.session_id
+                or operation_id != request.operation_id
+            ):
+                raise FencedCommitError(
+                    "recovery-ambiguous", "recovery operation index identity differs"
+                )
+            found[disposition] = intent_digest
+        if any(
+            intent_digest != request.intent_digest
+            for intent_digest in found.values()
+        ):
+            raise FencedCommitError(
+                "operation-intent-collision",
+                "resolved operation ID has a different intent",
+            )
+        if "finalized" in found:
+            raise FencedCommitError(
+                "recovery-ambiguous",
+                "finalized transaction is missing its operation tombstone",
+            )
+
+    def _reject_open_prepare(self) -> None:
         with self._pinned_directory("transactions", "prepared") as pinned:
             try:
                 entries = os.listdir(pinned.descriptor)
             except OSError as exc:
                 raise FencedCommitError(
-                    "recovery-required", "prepare directory cannot be inspected"
+                    "recovery-ambiguous", "prepare directory cannot be inspected"
                 ) from exc
             self._verify_pinned_directory(pinned)
             if entries:
                 raise FencedCommitError(
-                    "recovery-required",
-                    "the repository has a durable prepare requiring U3 recovery",
+                    "recovery-ambiguous",
+                    "the repository has an unexpected durable prepare",
                 )
 
     def begin(self, request: ExecutionRequest) -> Union[AdmittedSnapshot, CommitResult]:
@@ -1758,6 +2007,33 @@ class LocalFencedRepository:
             pending = admit_lease(request, base_lease, self.clock(), self.lease_ttl_seconds)
             precondition = CommitPrecondition(base_generation, head_digest, pending.digest)
             return AdmittedSnapshot(request, base, pending, base_generation + 1, precondition)
+
+    def initialize(
+        self,
+        request: ExecutionRequest,
+        *,
+        state_bytes: bytes,
+    ) -> CommitResult:
+        """Publish the sole admitted genesis path for a v5 session.
+
+        Genesis deliberately accepts validated v4 projection bytes.  The v5
+        authority is the head/commit/generation/object lineage; later typed
+        transitions retain the existing canonical encoding rules.
+        """
+        admitted = self.begin(request)
+        if isinstance(admitted, CommitResult):
+            return admitted
+        if admitted.base is not None:
+            raise FencedCommitError(
+                "session-already-initialized",
+                "the v5 session already has an authoritative head",
+            )
+        prepared = self._stage_persistence(
+            admitted,
+            state_bytes=state_bytes,
+            effects=(),
+        )
+        return self.commit(prepared, prepared.precondition)
 
     def stage(
         self,
@@ -2491,7 +2767,13 @@ class LocalFencedRepository:
                 ) from exc
             self._verify_pinned_directory(pinned)
         for name in entries:
-            if name in {"prepared", "projections", "quarantine", "resolved"}:
+            if name in {
+                "prepared",
+                "projections",
+                "quarantine",
+                "resolved",
+                "resolved-operations",
+            }:
                 continue
             if not name.startswith(".stage-") or _TRANSACTION_RE.fullmatch(
                 name.removeprefix(".stage-")
@@ -2636,6 +2918,12 @@ class LocalFencedRepository:
             limit=MAX_OPERATION_BYTES,
             collision_code="recovery-ambiguous",
         )
+        resolution = _parse_recovery_resolution(
+            content,
+            transaction_filename=prepare.transaction_id + ".json",
+        )
+        self._ensure_resolution_index_unlocked()
+        self._publish_resolution_index_unlocked(resolution)
 
     def _resolution_exists_unlocked(
         self,
@@ -3707,7 +3995,7 @@ class LocalFencedRepository:
             raise FencedCommitError("precondition-mismatch", "commit precondition is not stage-bound")
         if precondition.pending_lease_digest != prepared.admitted.pending_lease.digest:
             raise FencedCommitError("precondition-mismatch", "pending lease digest differs")
-        self._reject_open_prepare(prepared.admitted.request.session_id)
+        self._reject_open_prepare()
         existing = self._lookup_operation(prepared.admitted.request)
         if existing is not None:
             return existing

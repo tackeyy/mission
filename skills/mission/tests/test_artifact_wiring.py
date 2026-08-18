@@ -5,6 +5,12 @@ import os
 import pytest
 
 
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Detailed artifact command wiring remains retained-v4 owned."""
+    return legacy_run_cli
+
+
 def _write_review(path):
     path.write_text(
         json.dumps(

@@ -5,12 +5,20 @@ Phase C は state を sessions/<sid>.json に分離したが assumptions_path �
 """
 import json
 
+from mission_persistence.authoritative_reader import read_authoritative_snapshot
+
+
+def _state(root, session_id):
+    path = root / ".mission-state" / "sessions" / (session_id + ".json")
+    snapshot = read_authoritative_snapshot(path, expected_session_id=session_id)
+    return json.loads(snapshot.state_bytes)
+
 
 def test_multi_session_init_separates_assumptions_path(tmp_path, run_cli):
     r = run_cli("init", "H3 session mission",
                 cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "sess-aaa"})
     assert r.returncode == 0, f"stderr: {r.stderr}"
-    s = json.loads((tmp_path / ".mission-state" / "sessions" / "sess-aaa.json").read_text())
+    s = _state(tmp_path, "sess-aaa")
     assert s["assumptions_path"] == ".mission-state/sessions/sess-aaa-assumptions.md"
 
 
@@ -19,8 +27,7 @@ def test_multi_session_two_sessions_do_not_share_assumptions(tmp_path, run_cli):
             cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "sess-one"})
     run_cli("init", "H3 shared mission",
             cwd=tmp_path, env_extra={"MISSION_SESSION_ID": "sess-two"})
-    s1 = json.loads((tmp_path / ".mission-state" / "sessions" / "sess-one.json").read_text())
-    s2 = json.loads((tmp_path / ".mission-state" / "sessions" / "sess-two.json").read_text())
+    s1 = _state(tmp_path, "sess-one")
+    s2 = _state(tmp_path, "sess-two")
     assert s1["assumptions_path"] != s2["assumptions_path"]
-
 

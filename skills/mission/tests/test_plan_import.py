@@ -14,6 +14,12 @@ sys.path.insert(0, str(LIB_DIR))
 from specialist_accounting import candidate_accounting_report
 
 
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Plan-import ownership remains retained-v4 until #543."""
+    return legacy_run_cli
+
+
 def _contract():
     return {"envelope_schema": "mission-provider-result/1", "artifact_schema": "mission-plan/1", "cardinality": "exactly-one", "required_capability_class": "deep-planning", "required_capability_variant": "portable-v1", "require_exact_variant": True}
 

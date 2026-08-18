@@ -7,9 +7,17 @@ import subprocess
 import sys
 import time
 
+import pytest
+
 
 
 MISSION_STATE_PY = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
+
+
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Provider application commands remain on the retained-v4 owner path."""
+    return legacy_run_cli
 
 
 def _prepare_command_provider(run_cli, tmp_path, *, phase="planning", max_calls=None):

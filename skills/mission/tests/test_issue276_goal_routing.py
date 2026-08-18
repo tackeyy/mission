@@ -14,6 +14,14 @@ discriminating-v2 (品質同点・mission 5.4x) と実運用 95% iter1 素通し
 import json
 from pathlib import Path
 
+import pytest
+
+
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Detailed goal-routing state assertions retain the v4 writer."""
+    return legacy_run_cli
+
 
 def _sessions(tmp_path) -> list:
     d = tmp_path / ".mission-state" / "sessions"

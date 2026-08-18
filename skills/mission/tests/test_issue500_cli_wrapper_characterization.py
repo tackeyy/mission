@@ -15,6 +15,12 @@ import pytest
 MISSION_STATE_PY = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
 
 
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """K1 wrapper characterization remains explicitly retained-v4."""
+    return legacy_run_cli
+
+
 def _load_state_module(name: str):
     spec = importlib.util.spec_from_file_location(name, MISSION_STATE_PY)
     module = importlib.util.module_from_spec(spec)

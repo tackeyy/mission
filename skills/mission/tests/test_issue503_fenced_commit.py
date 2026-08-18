@@ -18,6 +18,7 @@ import pytest
 from mission_kernel.json_codec import decode_json_object, encode_json_object
 
 from .mission_state_fixture_corpus import (
+    _checked_cli,
     _run_cli_with_clock,
     generate_cli_state_bytes,
 )
@@ -690,7 +691,8 @@ def test_stage_rejects_strict_state_attacks_derived_from_cli_bytes(tmp_path, att
     elif attack == "invalid-utf8":
         attacked = actual[:-1] + b"\xff}"
     elif attack == "non-finite":
-        attacked = actual.replace(b'"threshold": 4.0', b'"threshold": NaN', 1)
+        attacked = actual.replace(b'"threshold":4.0', b'"threshold":NaN', 1)
+        assert attacked != actual
     else:
         attacked = actual + b" " * (4 * 1024 * 1024 + 1 - len(actual))
 
@@ -832,14 +834,28 @@ def test_head_replacement_is_the_crash_authority_boundary(tmp_path, fault_point)
     assert not list((repository / "transactions" / "prepared").glob("*.json"))
 
 
-def test_production_init_remains_v4_and_does_not_import_u2_repository(tmp_path):
-    state_path, state_bytes = generate_cli_state_bytes(tmp_path / "cli")
-    entrypoint = state_path.parents[2]
+def test_production_init_uses_v5_container_with_v4_payload(tmp_path):
+    entrypoint = tmp_path / "cli"
+    entrypoint.mkdir()
+    _checked_cli(
+        entrypoint,
+        "init",
+        "production v5 init",
+        "--artifact-applicability",
+        "not-applicable",
+    )
+    state_path = entrypoint / ".mission-state" / "sessions" / "test.json"
     mission_state_py = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
+    head = json.loads(state_path.read_bytes())
 
+    from mission_persistence.fenced_commit import LocalFencedRepository
+
+    state_bytes = LocalFencedRepository(entrypoint / ".mission-state").read("test").state_bytes
+
+    assert head["schema"] == "mission-head/1"
     assert json.loads(state_bytes)["schema_version"] == 4
-    assert "fenced_commit" not in mission_state_py.read_text(encoding="utf-8")
-    assert not (entrypoint / ".mission-state" / "commits").exists()
+    assert "LocalFencedRepository" in mission_state_py.read_text(encoding="utf-8")
+    assert (entrypoint / ".mission-state" / "commits").is_dir()
 
 
 def test_lock_symlink_is_rejected_without_chmod_or_follow(tmp_path):
@@ -1132,8 +1148,8 @@ def test_u2_private_persistence_seam_is_not_exported_from_package_root():
         assert not hasattr(mission_persistence, name)
 
 
-def test_production_entrypoints_do_not_import_u2_private_persistence_seam():
-    """H1: U2 remains unreachable until P1 installs the typed boundary."""
+def test_only_cutover_entrypoint_imports_v5_persistence_seam():
+    """C1 routes mission-state through v5 without widening other entrypoints."""
     repository = Path(__file__).resolve().parents[3]
     forbidden_imports = {
         "mission_persistence.fenced_commit",
@@ -1153,7 +1169,10 @@ def test_production_entrypoints_do_not_import_u2_private_persistence_seam():
                 elif isinstance(node, ast.ImportFrom):
                     imported.add(node.module or "")
                     imported.update(alias.name for alias in node.names)
-            assert forbidden_imports.isdisjoint(imported), path
+            if path == repository / "skills" / "mission" / "bin" / "mission-state.py":
+                assert "LocalFencedRepository" in imported
+            else:
+                assert forbidden_imports.isdisjoint(imported), path
 
 
 @pytest.mark.parametrize(

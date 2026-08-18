@@ -10,6 +10,12 @@ import pytest
 MISSION_STATE_PATH = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
 
 
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Goal dispatch commands remain retained-v4 owned until #543."""
+    return legacy_run_cli
+
+
 def _load_mission_state():
     spec = importlib.util.spec_from_file_location("mission_state_issue355", MISSION_STATE_PATH)
     module = importlib.util.module_from_spec(spec)

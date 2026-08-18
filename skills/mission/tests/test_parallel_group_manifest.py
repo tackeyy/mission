@@ -6,6 +6,14 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
+
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Parallel group admin commands remain v4-owned until #543."""
+    return legacy_run_cli
+
 
 def _manifest_path(root, group_id):
     return root / ".mission-state" / "sessions" / f"{group_id}.group.json"
