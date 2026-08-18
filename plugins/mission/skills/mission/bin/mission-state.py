@@ -13608,11 +13608,82 @@ def cmd_planning_reselect(args):
 
 
 def _cmd_executor_handoff(args, operation: str):
-    cwd = Path.cwd(); sf = resolve_state_file(cwd)
-    with StateLock(lock_file(cwd)):
-        data = json.loads(sf.read_text(encoding="utf-8"))
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    session_id = sf.stem
+    command_name = {
+        "begin": "executor-handoff-begin",
+        "verify": "executor-handoff-verify-step",
+        "record": "executor-handoff-record-step",
+        "complete": "executor-handoff-complete",
+    }[operation]
+    command_arguments = {
+        "begin": {},
+        "verify": {"step_id": getattr(args, "step_id", None)},
+        "record": {
+            "result": getattr(args, "result", None),
+            "step_id": getattr(args, "step_id", None),
+        },
+        "complete": {},
+    }[operation]
+    try:
+        target_bytes = sf.read_bytes()
+        inspected = inspect_repository_bytes(
+            target_bytes,
+            expected_session_id=session_id,
+        )
+        target_digest = "sha256:" + hashlib.sha256(target_bytes).hexdigest()
+        caller_operation_id, operation_arguments = _compatibility_operation_arguments(
+            command_arguments,
+            target_digest=target_digest,
+            require_caller=inspected.format is RepositoryFormat.V5,
+        )
+        operation_id, operation_command = _canonical_compatibility_operation(
+            session_id,
+            command_name,
+            operation_arguments,
+            caller_operation_id=caller_operation_id,
+        )
+    except (OSError, RepositorySelectionError, ValueError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+    repository = _legacy_lifecycle_repository(
+        cwd,
+        sf,
+        stamp=True,
+        strict_read=True,
+        session_id=session_id,
+        operation_id=operation_id,
+        operation_command=operation_command,
+        operation_command_type=command_name,
+    )
+    with repository.transaction():
+        data = repository.load()
         handoff = data.get("executor_handoff")
         plan = data.get("canonical_plan")
+        if getattr(repository, "operation_replayed", False):
+            if (
+                isinstance(handoff, dict)
+                and handoff.get("status") == "rejected"
+                and isinstance(handoff.get("rejected_reason"), str)
+            ):
+                print(
+                    "ERROR: executor handoff rejected: "
+                    + handoff["rejected_reason"],
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            print(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "operation": operation,
+                        "executor_handoff": handoff,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return
         try:
             if not isinstance(handoff, dict) or not isinstance(plan, dict):
                 raise PlanningLifecycleError("executor-handoff-missing")
@@ -13655,10 +13726,13 @@ def _cmd_executor_handoff(args, operation: str):
             # Identity mutation is terminal; a duplicate begin or invalid step
             # request is merely rejected and leaves a resumable handoff intact.
             if isinstance(handoff, dict) and operation in {"begin", "verify"} and str(exc).startswith("canonical-"):
-                handoff["status"] = "rejected"; handoff["rejected_reason"] = str(exc)
-                data["updated_at"] = iso_now(); backup_state(sf); atomic_write_json(sf, stamp_metadata(data, cwd))
+                handoff["status"] = "rejected"
+                handoff["rejected_reason"] = str(exc)
+                data["updated_at"] = iso_now()
+                repository.save(data)
             print(f"ERROR: executor handoff rejected: {exc}", file=sys.stderr); sys.exit(2)
-        data["updated_at"] = iso_now(); backup_state(sf); atomic_write_json(sf, stamp_metadata(data, cwd))
+        data["updated_at"] = iso_now()
+        repository.save(data)
     print(json.dumps({"ok": True, "operation": operation, "executor_handoff": handoff}, ensure_ascii=False))
 
 

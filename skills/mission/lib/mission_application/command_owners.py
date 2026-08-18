@@ -109,6 +109,10 @@ COMMAND_OWNER_REGISTRY = {
 
 C2_REPOSITORY_COMMANDS = frozenset(
     {
+        "executor-handoff begin",
+        "executor-handoff complete",
+        "executor-handoff record-step",
+        "executor-handoff verify-step",
         "planning reselect",
         "supersede-reviews",
     }
@@ -119,10 +123,6 @@ C2_REPOSITORY_COMMANDS = frozenset(
 # Keeping every remaining Stage B command here makes migration gaps explicit.
 C2_DIRECT_WRITE_ALLOWLIST = frozenset(
     {
-        "executor-handoff begin",
-        "executor-handoff complete",
-        "executor-handoff record-step",
-        "executor-handoff verify-step",
         "manual-score-capture",
         "planning adopt-core",
         "planning promote-provider-plan",
@@ -144,11 +144,6 @@ C2_DIRECT_WRITE_ALLOWLIST = frozenset(
 # new direct writers.
 C2_DIRECT_WRITE_FUNCTIONS = frozenset(
     {
-        "_cmd_executor_handoff",
-        "cmd_executor_handoff_begin",
-        "cmd_executor_handoff_complete",
-        "cmd_executor_handoff_record",
-        "cmd_executor_handoff_verify",
         "cmd_invoke_command_provider",
         "cmd_log_specialist_invocation",
         "cmd_manual_score_capture",

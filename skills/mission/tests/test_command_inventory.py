@@ -1743,7 +1743,7 @@ def test_all_parser_commands_have_exactly_one_declared_owner():
     assert all(isinstance(owner, str) and owner for owner in COMMAND_OWNER_REGISTRY.values())
 
 
-def test_c2_stage_a_and_direct_write_allowlist_are_closed_and_disjoint():
+def test_c2_repository_and_direct_write_inventories_are_closed_and_disjoint():
     from mission_application.command_owners import (
         C2_DIRECT_WRITE_ALLOWLIST,
         C2_REPOSITORY_COMMANDS,
@@ -1751,14 +1751,17 @@ def test_c2_stage_a_and_direct_write_allowlist_are_closed_and_disjoint():
     )
 
     assert C2_REPOSITORY_COMMANDS == frozenset(
-        {"planning reselect", "supersede-reviews"}
-    )
-    assert C2_DIRECT_WRITE_ALLOWLIST == frozenset(
         {
             "executor-handoff begin",
             "executor-handoff complete",
             "executor-handoff record-step",
             "executor-handoff verify-step",
+            "planning reselect",
+            "supersede-reviews",
+        }
+    )
+    assert C2_DIRECT_WRITE_ALLOWLIST == frozenset(
+        {
             "manual-score-capture",
             "planning adopt-core",
             "planning promote-provider-plan",
@@ -1779,7 +1782,14 @@ def test_c2_stage_a_and_direct_write_allowlist_are_closed_and_disjoint():
 
 
 def test_c2_repository_commands_have_no_direct_legacy_session_writer_calls():
-    target_names = {"cmd_planning_reselect", "cmd_supersede_reviews"}
+    target_names = {
+        "cmd_executor_handoff_begin",
+        "cmd_executor_handoff_complete",
+        "cmd_executor_handoff_record",
+        "cmd_executor_handoff_verify",
+        "cmd_planning_reselect",
+        "cmd_supersede_reviews",
+    }
 
     assert forbidden_calls_in_reachable(target_names) == []
 
