@@ -137,7 +137,10 @@ def test_supersede_reviews_terminals_only_old_generation_and_keeps_raw_records(r
     assert current.returncode == 0, current.stderr
 
     result = run_cli("supersede-reviews", "--group", "issue-385", cwd=tmp_path,
-                     env_extra={"MISSION_SESSION_ID": "current"})
+                     env_extra={
+                         "MISSION_SESSION_ID": "current",
+                         "MISSION_OPERATION_ID": "supersede-issue-385",
+                     })
 
     assert result.returncode == 0, result.stderr
     old_state = json.loads((tmp_path / ".mission-state" / "sessions" / "old.json").read_text())

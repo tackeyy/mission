@@ -339,6 +339,9 @@ class V5CompatibilityRepository:
         remove_from_aggregate: Callable[[], None] | None = None,
         lease_committed: Callable[[PendingLease, dict], None] | None = None,
         format_guard: Callable[[], object] | None = None,
+        operation_id: str | None = None,
+        operation_command: object | None = None,
+        operation_command_type: str | None = None,
     ) -> None:
         self._repository = repository
         self._session_id = session_id
@@ -349,7 +352,15 @@ class V5CompatibilityRepository:
         self._remove_from_aggregate = remove_from_aggregate
         self._lease_committed = lease_committed
         self._format_guard = format_guard
+        if (operation_id is None) != (operation_command is None):
+            raise ValueError("operation id and command must be supplied together")
+        if operation_id is not None and not operation_command_type:
+            raise ValueError("operation command type is required")
+        self._operation_id = operation_id
+        self._operation_command = operation_command
+        self._operation_command_type = operation_command_type
         self._admitted: AdmittedSnapshot | None = None
+        self._replayed: CommitResult | None = None
         self._transaction_active = False
 
     @contextlib.contextmanager
@@ -361,20 +372,24 @@ class V5CompatibilityRepository:
             yield
         finally:
             self._admitted = None
+            self._replayed = None
             self._transaction_active = False
 
     def _request(self) -> ExecutionRequest:
-        operation_id = "compat:" + secrets.token_hex(16)
-        command = decode_json_object(
-            json.dumps(
-                {
-                    "schema": "mission-command-intent/1",
-                    "type": "compatibility-mutation",
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        )
+        operation_id = self._operation_id or "compat:" + secrets.token_hex(16)
+        command = self._operation_command
+        if command is None:
+            command = decode_json_object(
+                json.dumps(
+                    {
+                        "schema": "mission-command-intent/1",
+                        "type": "compatibility-mutation",
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+        command_type = self._operation_command_type or "compatibility-mutation"
         blobs = VerifiedBlobSet(())
         return ExecutionRequest(
             session_id=self._session_id,
@@ -390,8 +405,12 @@ class V5CompatibilityRepository:
                 blobs=blobs,
             ),
             presented_lease_id=self._presented_lease_id,
-            audit=AuditMetadata("compatibility-mutation", ()),
+            audit=AuditMetadata(command_type, ()),
         )
+
+    @property
+    def operation_replayed(self) -> bool:
+        return self._replayed is not None
 
     def load(self) -> dict:
         if not self._transaction_active:
@@ -405,7 +424,9 @@ class V5CompatibilityRepository:
             self._format_guard()
         admitted = self._repository.begin(self._request())
         if isinstance(admitted, CommitResult):
-            raise FencedCommitError("operation-invalid", "fresh operation replayed")
+            snapshot = self._repository.read(self._session_id)
+            self._replayed = admitted
+            return json.loads(project_legacy_document(snapshot.state))
         if admitted.base is None:
             raise FencedCommitError("initial-state-required", "v5 head is missing")
         self._admitted = admitted
@@ -437,6 +458,8 @@ class V5CompatibilityRepository:
         del backup, administrative
         if self._format_guard is not None:
             self._format_guard()
+        if self._replayed is not None:
+            return
         admitted = self._admitted
         if admitted is None:
             raise FencedCommitError("request-invalid", "v5 transaction was not loaded")
