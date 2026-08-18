@@ -112,9 +112,12 @@ def forbidden_calls_in_reachable(
     container subscript, a Call-wrapped alias, or a comprehension binding.
 
     Static AST analysis cannot prove targets selected by ``getattr`` or other
-    runtime dispatch, code produced by ``eval``/``exec``, or the implementation
-    of an imported callable whose body is outside the analyzed tree.  Writes
-    hidden exclusively behind those boundaries are not detected.
+    runtime dispatch, code produced by ``eval``/``exec``, the implementation
+    of an imported callable whose body is outside the analyzed tree, or
+    class-body attribute assignments resolved through attribute calls (for
+    example, ``class C: fn = atomic_write_json; C.fn()``), because class
+    namespaces are not tracked.  Writes hidden exclusively behind those
+    boundaries are not detected.
     """
 
     if tree is None:
