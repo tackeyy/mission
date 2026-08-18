@@ -2,9 +2,10 @@
 
 Status: **implementation contract**
 
-Scope: migration plan Section 8 U2 only. Crash recovery (U3), garbage
-collection (U4), production routing, and the v5 default are outside this
-contract.
+Scope: migration plan Section 8 U2. The original contract predated crash
+recovery (U3), but the admission and error-code descriptions below reflect the
+current U3-integrated repository. Garbage collection (U4), production routing,
+and the v5 default remain outside this contract.
 
 ## 1. Conclusion
 
@@ -40,10 +41,11 @@ repository lock immediately before any durable prepare or public publication:
 Only exact `N -> N + 1` is accepted. A rejection before durable prepare
 publication publishes no generation, commit, operation record, head, or
 compatibility projection. A lease expiry detected after prepare or immutable
-publication retains the prepare and any already-published immutable orphan,
-publishes no head or operation record, and globally blocks later U2 writes for
-U3 recovery. A cleanup failure before prepare is surfaced rather than reported
-as rejection or replay success.
+publication retains the prepare and any already-published immutable orphan and
+publishes no head or operation record. A later `begin()` must complete U3
+recovery before admission can continue; ambiguity or incomplete verified
+cleanup remains fail-closed. A cleanup failure before prepare is surfaced rather
+than reported as rejection or replay success.
 
 ## 2. Sources and decision provenance
 
@@ -105,9 +107,9 @@ These choices are new and require owner review.
 7. recomputing a pending lease with its original admission time, followed by a
    commit-start validity check and another validity check immediately before
    head replacement;
-8. treating any non-empty `transactions/prepared/` directory as a repository-
-   global write block in U2, without parsing, classifying, or recovering the
-   retained record; only U3 may relax this after full transaction validation;
+8. treating any non-empty `transactions/prepared/` directory as a U2
+   commit-start block; the current integrated `begin()` delegates it to U3 and
+   proceeds only after full transaction validation and successful recovery;
 9. deleting the exact prepare record only after head, operation record, and
    result validation have completed successfully;
 10. using a canonical immutable JSON object for `ExecutionRequest.command`, but
@@ -484,9 +486,10 @@ It does not contain `committed_at`. U2 has no compatibility projection, so
 rather than pretending U3 recovery exists. The record is bound to the staged
 manifest before publication and is at most `MAX_PREPARE_BYTES`. Its parser also
 enforces at most 64 unique effects and an aggregate effect size of at most
-16 MiB. U2 does not use a shallow parse of this record to decide whether another
-session may write: the mere presence of any directory entry under
-`transactions/prepared/` is a global block.
+16 MiB. U2 does not use a shallow parse of this record to authorize another
+write. The current `begin()` delegates a retained entry to U3, which validates
+the complete transaction before rollback or finalization; admission cannot
+continue while that recovery is ambiguous or blocked.
 
 ### 6.6 `mission-operation/1`
 
@@ -583,13 +586,16 @@ blobs, token, or clock from environment variables.
 
 Under the state lock:
 
-1. inspect `transactions/prepared/` without parsing its contents and reject the
-   write globally if it contains any entry, irrespective of filename, schema,
-   content, or claimed session; do not classify or recover it in U2;
-2. strictly lookup the operation record by the canonical session-local
-   `mission-operation-key/1` filename;
-3. return its exact `CommitResult` when operation ID and intent both match;
-4. reject operation-ID reuse when intent differs;
+1. inspect `transactions/prepared/`; if it contains an entry, call U3
+   `_recover_unlocked(request.session_id)` before admission, otherwise check for
+   an operation replay and recover any verifiable orphan private stages;
+2. after recovery, strictly lookup the operation record again by the canonical
+   session-local `mission-operation-key/1` filename;
+3. return its exact `CommitResult` when operation ID and intent both match, or
+   reject operation-ID reuse when intent differs;
+4. check the resolved-operation index so a rolled-back intent may retry, while
+   an intent collision or finalized transaction missing its operation record
+   fails closed;
 5. strictly read the current head/commit/generation/state, or model exact genesis
    as generation 0 with absent head digest;
 6. calculate one pending acquire/renew/takeover decision using the injected UTC
@@ -666,8 +672,8 @@ registry entry is invalidated when a pre-prepare rejection or replay discards
 the stage; cleanup failure still invalidates the capability before surfacing
 `stage-cleanup-failed`. After all preconditions pass, commit atomically consumes
 the one-shot registry authority before durable prepare publication. A later
-post-prepare fault is governed by the durable prepare/global U3 block and is
-never promoted or retried through this process-local registry.
+post-prepare fault is governed by durable U3 recovery and is never promoted or
+retried through this process-local registry.
 
 ### 7.4 `commit(prepared, precondition)` fenced CAS
 
@@ -739,10 +745,18 @@ A fault, CAS change, or expiry before step 8 leaves the base head authoritative.
 If it occurs after step 2, the durable prepare and any already-published
 generation/commit remain immutable recovery roots or orphans; they are not
 rolled back or reported as success. A fault after step 8 leaves the target head
-authoritative. U2 does not repair or classify retained prepare records: any
-remaining directory entry
-globally blocks subsequent writes until U3 performs full transaction, stage,
-generation, state, effects, and lineage validation.
+authoritative. The U2 commit path does not itself repair or classify retained
+prepare records. In the current U3-integrated repository, `begin()` checks
+`transactions/prepared/` before admission and calls `_recover_unlocked()` when
+an entry exists. A single verifiable prepare is rolled back or finalized after
+full transaction, stage, generation, state, effects, projection, and lineage
+validation; admission then continues. U3-specific inability to inspect, order,
+or classify recovery state fails closed with `recovery-ambiguous`; lower-level
+strict readers, validators, and exact record removal retain their own stable
+code families, including `record-invalid`, `record-missing`,
+`record-write-failed`, `lineage-mismatch`, `repository-changed`, and
+`projection-invalid`. Selected verified private-stage or projection cleanup and
+restoration failures use `recovery-blocked`.
 
 ## 8. Exact rejection ownership
 
@@ -769,7 +783,9 @@ generation, state, effects, and lineage validation.
 | duplicate key, UTF-8, finite number, trailing data, canonical mismatch | K1 JSON codec / U2 record codec | existing K1 code or `record-not-canonical` |
 | symlink/FIFO/hard link/identity/size swap | K1/U1 readers plus U2 descriptor-pinned lock/reader/publisher | existing strict-read/U1 code or `repository-invalid`, `repository-changed`, `record-invalid` |
 | head/commit/generation/state digest, size, path, or generation mismatch | authoritative U2 reader | `lineage-mismatch` |
-| any entry in `transactions/prepared/` | U2 admission | `recovery-required`; fail closed globally without parsing |
+| prepared entry found before admission | `begin()` -> U3 `_recover_unlocked()` | recover and continue when the durable transaction is fully verifiable; U3-specific ordering or classification ambiguity is `recovery-ambiguous`, while lower-level validators retain their codes |
+| prepared entry appears after admission but before commit publication | U2 commit-start `_reject_open_prepare()` | `recovery-ambiguous`; the commit must not race an unresolved durable transaction |
+| selected verified private-stage or projection cleanup/restoration failure | U3 recovery cleanup | `recovery-blocked`; lower-level exact read/remove/write failures retain codes such as `lineage-mismatch` or `record-write-failed` |
 
 Lease rejection occurs in `begin`, before staging or any projection/publication.
 Stale CAS and expiry at the commit-start sample occur before prepare
@@ -778,8 +794,8 @@ and fsynced before the `before-head-replace` callback. Only after that callback
 does U2 perform the mandatory fresh CAS and clock/lease check immediately before
 `os.replace`. A head change or lease expiry during temporary write, fsync, hook,
 or hook-induced delay therefore fails after prepare/immutable publication but
-before head authority changes; head and operation remain unchanged and the
-retained prepare globally blocks writes.
+before head authority changes; head and operation remain unchanged and a later
+write must complete U3 recovery before admission can continue.
 Strict authoritative read rejects the complete snapshot; it never falls back to
 a filename, empty state, or legacy interpretation of the head record.
 
@@ -817,12 +833,14 @@ The implementation tests start with actual CLI-produced state bytes and cover:
    and timestamp creation, during head temporary write/fsync, and inside the
    `before-head-replace` hook. The hook is observed only after the temporary is
    durable; a hook-induced competing head change or expiry is caught by the
-   post-hook fresh CAS/clock checks, leaving head/operation unchanged, retaining
-   prepare, and blocking every session (High 5);
-9. each of a valid-looking prepare for another session, malformed JSON, valid
-   shallow schema with broken lineage, unexpected filename, and unrelated
-   directory entry causes the same repository-global `recovery-required`
-   without content-based classification (High 6);
+   post-hook fresh CAS/clock checks, leaving head/operation unchanged and
+   retaining a prepare that must be recovered before the next admission
+   (High 5);
+9. a single fully verifiable prepare is recovered before admission, while a
+   prepare for another session, malformed JSON, shallow-valid data with broken
+   lineage, an unexpected filename, multiple prepares, or unrelated transaction
+   residue fails closed as `recovery-ambiguous`; a known disposition whose
+   verified cleanup cannot complete fails as `recovery-blocked` (High 6);
 10. strict malformed head/commit/state attacks and immutable collisions;
 11. same operation/intent result replay and different-intent collision, plus the
     same operation ID used independently by two sessions through distinct
@@ -837,10 +855,10 @@ The implementation tests start with actual CLI-produced state bytes and cover:
 14. injected short writes and failures of file fsync, immutable link, temporary
     unlink, head replace, and the directory fsync after head replace, in addition
     to faults immediately before and after head replacement; assertions
-    distinguish the authoritative base/target head, operation publication,
-    retained prepare, and global block. Medium 4 identified missing test
-    coverage rather than an implementation defect, so this test also passes the
-    reviewed pre-fix implementation;
+    distinguish the authoritative base/target head, operation publication, and
+    retained prepare that must be recovered before admission. Medium 4
+    identified missing test coverage rather than an implementation defect, so
+    this test also passes the reviewed pre-fix implementation;
 15. commit/audit schema absence of lease token, command body, raw provider
     fields, and free-form lease retirement reasons;
 16. production `init` still emits v4 and no CLI imports the U2 repository;
@@ -857,12 +875,15 @@ isolated seam's production unreachability. Medium 4 closes a test-coverage gap,
 not an implementation defect; both gates are therefore expected to pass the
 reviewed pre-fix implementation.
 
-## 10. Explicit non-scope
+## 10. Original Issue #503 non-scope and remaining boundaries
 
-- No prepare-record recovery or roll-forward/rollback state machine (U3).
+- Issue #503 itself did not implement prepare-record recovery or a
+  roll-forward/rollback state machine; later U3 work added both and the current
+  behavior is described in Sections 7-9.
 - No generation, commit, operation, or prepare garbage collection (U4).
-- No compatibility projection is written; prepare `projections` is exactly
-  empty.
+- The original Issue #503 implementation wrote no compatibility projection and
+  required prepare `projections` to be empty; later projection and U3 recovery
+  work superseded that historical restriction.
 - No production command selects or creates this repository.
 - The U2 bytes-oriented stage is a private persistence seam, not the ADR-005
   Section 5 UnitOfWork. Production routing to it remains prohibited until K2
@@ -909,9 +930,9 @@ This document corrects the contract itself:
    fresh post-hook CAS and clock/lease checks immediately before `os.replace`
    prevent hook delay, temporary-file I/O, or a competing writer from crossing
    the authority boundary;
-7. every retained prepare entry globally blocks U2 writes. Session-specific
-   classification is deferred until U3 can validate the complete recovery
-   transaction rather than trusting a shallow parser;
+7. every retained prepare entry blocks the U2 commit-start gate, while current
+   admission invokes U3 and proceeds only after complete recovery transaction
+   validation rather than trusting a shallow parser;
 8. U1's 16 MiB effect aggregate is rechecked at every prepare, commit, manifest,
    and authoritative-reader boundary;
 9. failed pre-prepare stage cleanup is a visible `stage-cleanup-failed`, never a
@@ -924,7 +945,7 @@ This document corrects the contract itself:
 
 The migration plan intentionally did not specify the exact schemas, limits,
 layout, CAS comparison, lease timing rule, or rejection ownership; Sections
-3-8 fix those delegated choices. U3 recovery behavior and U4 retention values
-remain intentionally unresolved because they are explicitly outside Issue #503.
-Production v5 routing also remains disabled, and no existing U1 API signature or
-behavior is changed.
+3-8 fix those delegated choices. Later U3 work is reflected here only where it
+changes admission and error-code behavior; U4 retention values remain outside
+Issue #503. Production v5 routing also remains disabled, and no existing U1 API
+signature or behavior is changed.

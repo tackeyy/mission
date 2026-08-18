@@ -1005,6 +1005,76 @@ def test_open_prepare_rejection_has_no_session_parameter_and_is_ambiguous(tmp_pa
     assert blocked.value.code == "recovery-ambiguous"
 
 
+def test_resolution_index_none_read_fails_closed_as_recovery_ambiguous(
+    tmp_path,
+    monkeypatch,
+):
+    from mission_persistence.fenced_commit import FencedCommitError, LocalFencedRepository
+
+    repository = tmp_path / "repository" / ".mission-state"
+    local = LocalFencedRepository(repository)
+    local.recover("test")
+    entry = (
+        repository
+        / "transactions"
+        / "resolved-operations"
+        / "finalized"
+        / ("a" * 64 + ".json")
+    )
+    entry.write_bytes(b"{}")
+    original_read = local._read_pinned_file
+
+    def return_none_for_required_index_entry(pinned, name, *, limit, allow_missing=False):
+        if name == entry.name and not allow_missing:
+            return None
+        return original_read(
+            pinned,
+            name,
+            limit=limit,
+            allow_missing=allow_missing,
+        )
+
+    monkeypatch.setattr(local, "_read_pinned_file", return_none_for_required_index_entry)
+
+    with local._lock():
+        with pytest.raises(FencedCommitError) as blocked:
+            local._ensure_resolution_index_unlocked()
+
+    assert blocked.value.code == "recovery-ambiguous"
+
+
+def test_resolved_transaction_none_read_fails_closed_as_recovery_ambiguous(
+    tmp_path,
+    monkeypatch,
+):
+    from mission_persistence.fenced_commit import FencedCommitError, LocalFencedRepository
+
+    repository = tmp_path / "repository" / ".mission-state"
+    local = LocalFencedRepository(repository)
+    local.recover("test")
+    entry = repository / "transactions" / "resolved" / ("a" * 32 + ".json")
+    entry.write_bytes(b"{}")
+    original_read = local._read_pinned_file
+
+    def return_none_for_required_resolution(pinned, name, *, limit, allow_missing=False):
+        if name == entry.name and not allow_missing:
+            return None
+        return original_read(
+            pinned,
+            name,
+            limit=limit,
+            allow_missing=allow_missing,
+        )
+
+    monkeypatch.setattr(local, "_read_pinned_file", return_none_for_required_resolution)
+
+    with local._lock():
+        with pytest.raises(FencedCommitError) as blocked:
+            local._ensure_resolution_index_unlocked()
+
+    assert blocked.value.code == "recovery-ambiguous"
+
+
 def test_target_cleanup_resumes_after_private_after_link_is_removed(tmp_path):
     local, repository, clock, _state_path, base_bytes, _result = _commit_cli_init(tmp_path)
     clock_text = clock.current.strftime("%Y-%m-%dT%H:%M:%SZ")
