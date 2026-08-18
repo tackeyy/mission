@@ -7,6 +7,14 @@ both conditions visible to the orchestrator.
 
 import json
 
+import pytest
+
+
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """codex-preflight ownership remains on the retained-v4 path until #543."""
+    return legacy_run_cli
+
 
 def _no_skew_env(tmp_path):
     """#186: MISSION_CLAUDE_HOME / CODEX_HOME を隔離し、実行マシンの実際の plugin cache

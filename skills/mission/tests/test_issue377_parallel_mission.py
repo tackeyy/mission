@@ -68,13 +68,20 @@ def _run_state(args, cwd, *, session_id, lease_id="test-lease", env_extra=None):
     base_env["MISSION_REQUIRE_SCORING_EVIDENCE"] = "0"
     if env_extra:
         base_env.update(env_extra)
-    return subprocess.run(
+    result = subprocess.run(
         ["python3", str(MISSION_STATE_PY), *args],
         cwd=str(cwd),
         capture_output=True,
         text=True,
         env=base_env,
     )
+    if args and args[0] == "init" and result.returncode == 0:
+        from .mission_state_fixture_corpus import _materialize_legacy_init_fixture
+
+        _materialize_legacy_init_fixture(
+            Path(cwd), session_ids=(session_id,), cleanup_v5=True
+        )
+    return result
 
 
 def _get_lease(r) -> str:

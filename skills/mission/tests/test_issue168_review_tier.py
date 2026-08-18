@@ -20,6 +20,12 @@ from pathlib import Path
 
 import pytest
 
+
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Detailed review-tier compatibility remains a retained-v4 contract."""
+    return legacy_run_cli
+
 # --- in-process import of derive_review_tier (pure function) ---
 
 MISSION_STATE_PY = Path(__file__).resolve().parent.parent / "bin" / "mission-state.py"

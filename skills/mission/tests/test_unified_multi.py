@@ -1,8 +1,16 @@
 """multi-session 完全統一の保証テスト (legacy 廃止後の不変条件)."""
 import json
 
+import pytest
+
 
 _ITEMS = '{"mission_achievement":4.5,"accuracy":4.5,"completeness":4.5,"usability":4.5,"reviewer_consensus":4.5}'
+
+
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """This pre-C1 command-routing matrix remains an explicit v4 fixture."""
+    return legacy_run_cli
 
 
 def test_init_ignores_legacy_state_json(tmp_path, run_cli):

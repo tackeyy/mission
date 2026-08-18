@@ -1,6 +1,14 @@
 """S3-files: init --files による active session のファイル集合重複 WARN テスト."""
 import json
 
+import pytest
+
+
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Same-session init resume is a retained v1-v4 contract."""
+    return legacy_run_cli
+
 
 def _state(tmp_path, sid="test"):
     return json.loads((tmp_path / ".mission-state" / "sessions" / f"{sid}.json").read_text())

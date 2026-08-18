@@ -69,7 +69,11 @@ def test_stable_wrapper_delegates_to_canonical_mission_state_cli(tmp_path):
 
     assert result.returncode == 0, result.stderr
     state_path = tmp_path / ".mission-state" / "sessions" / "wrapper-test.json"
-    state = json.loads(state_path.read_text(encoding="utf-8"))
+    from mission_persistence.authoritative_reader import read_authoritative_snapshot
+
+    state = read_authoritative_snapshot(
+        state_path, expected_session_id="wrapper-test"
+    ).document_copy()
     assert state["mission"] == "wrapper smoke"
 
 

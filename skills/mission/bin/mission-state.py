@@ -139,6 +139,7 @@ from mission_application.lifecycle import (  # noqa: E402
     set_fields as run_set_fields,
     update_project_root as run_update_project_root,
 )
+from mission_application.ports import AuditMetadata, ExecutionRequest  # noqa: E402
 from mission_application.review import (  # noqa: E402
     MarkPassRequest,
     MarkPassServices,
@@ -188,11 +189,21 @@ from mission_application.runtime_guard import (  # noqa: E402
 from mission_persistence.legacy_v4 import (  # noqa: E402
     LegacyV4InitializerRepository,
     LegacyV4Repository,
+    V5CompatibilityRepository,
 )
 from mission_persistence.repository_binding import (  # noqa: E402
+    RepositoryFormat,
     RepositorySelectionError,
+    inspect_repository_bytes,
     select_legacy_repository,
+    select_repository,
 )
+from mission_persistence.fenced_commit import (  # noqa: E402
+    FencedCommitError,
+    LocalFencedRepository,
+    compute_intent_digest,
+)
+from mission_persistence.local_uow import VerifiedBlobSet  # noqa: E402
 from mission_persistence.authoritative_reader import (  # noqa: E402
     AuthoritativeSnapshot,
     authoritative_snapshot_from_document,
@@ -339,6 +350,7 @@ from mission_kernel.versions import read_schema_version as _read_schema_version 
 from mission_persistence.strict_reader import read_stable_bytes as _read_stable_bytes  # noqa: E402
 
 SCHEMA_VERSION = 4  # v4: structured scoring provenance is mandatory for new sessions
+NEW_SESSION_REPOSITORY_FORMAT = RepositoryFormat.V5
 GOAL_DISPATCH_MODES = {"inline", "host-native"}
 _SCHEMA_VERSION_MISSING = object()
 
@@ -493,6 +505,39 @@ def _select_legacy_repository_for_cli(session_id, sf, legacy_factory):
 
     try:
         return select_legacy_repository(session_id, sf, bind_cli_guard)
+    except RepositorySelectionError as error:
+        _reject_legacy_repository_selection(Path(sf), error)
+        raise AssertionError("repository rejection translator returned")
+
+
+def _select_repository_for_cli(
+    session_id,
+    sf,
+    legacy_factory,
+    v5_factory,
+):
+    """Bind a retained v4/v5 selector to the CLI error contract."""
+
+    def bind_cli_guard(factory):
+        def build(format_guard):
+            def cli_format_guard():
+                try:
+                    return format_guard()
+                except RepositorySelectionError as error:
+                    _reject_legacy_repository_selection(Path(sf), error)
+                    raise AssertionError("repository rejection translator returned")
+
+            return factory(cli_format_guard)
+
+        return build
+
+    try:
+        return select_repository(
+            session_id,
+            sf,
+            bind_cli_guard(legacy_factory),
+            bind_cli_guard(v5_factory),
+        )
     except RepositorySelectionError as error:
         _reject_legacy_repository_selection(Path(sf), error)
         raise AssertionError("repository rejection translator returned")
@@ -1532,6 +1577,64 @@ def _enforce_session_lease_for_write(path: Path, data: dict) -> LeaseDecision | 
     return decision
 
 
+_FENCED_CLI_EXPECTED_GATE_CODES = frozenset({
+    "head-cas-mismatch",
+    "lease-precondition-changed",
+    "lease-rejected",
+    "lease-token-required",
+    "projection-precondition-changed",
+    "session-already-initialized",
+    "stale-fencing-token",
+})
+_FENCED_CLI_INVALID_INPUT_CODES = frozenset({
+    "operation-intent-collision",
+    "session-not-found",
+})
+
+
+def _fenced_cli_outcome_kind(error_code: str) -> str:
+    if error_code in _FENCED_CLI_EXPECTED_GATE_CODES:
+        return "expected-gate"
+    if error_code in _FENCED_CLI_INVALID_INPUT_CODES:
+        return "invalid-input"
+    return "internal-error"
+
+
+def _reject_fenced_lease_for_cli(error: FencedCommitError) -> NoReturn:
+    """Translate v5 lease admission failures to the established v4 CLI shape."""
+
+    if error.code not in {
+        "lease-token-required",
+        "lease-rejected",
+        "stale-fencing-token",
+    }:
+        detail = error.detail.strip() if isinstance(error.detail, str) else ""
+        print("ERROR: %s" % (detail or error.code), file=sys.stderr)
+        raise CommandOutcomeExit(2, _fenced_cli_outcome_kind(error.code))
+    state = {}
+    try:
+        _snapshot, state = _load_authoritative_state(resolve_state_file(Path.cwd()))
+    except (OSError, ValueError, FencedCommitError):
+        pass
+    owner = state.get("owner_session_id")
+    expiry = state.get("lease_expires_at")
+    if isinstance(owner, str) and owner and isinstance(expiry, str) and expiry:
+        detail = "lease held by %s until %s" % (owner, expiry)
+        if error.code == "stale-fencing-token":
+            detail += " (stale fencing token)"
+    else:
+        detail = error.code
+    print("ERROR: %s" % detail, file=sys.stderr)
+    guidance = build_guidance(
+        "lease",
+        "lease-rejected",
+        _guidance_context_for_state(state),
+    )
+    for line in guidance:
+        print(line, file=sys.stderr)
+    raise CommandOutcomeExit(2, "expected-gate", guidance=guidance)
+
+
 def _emit_lease_carrier(data: dict, decision: LeaseDecision | None) -> None:
     """Expose a newly issued token only after its state publish succeeds."""
     if decision is None or decision.action not in {"acquired", "taken-over"}:
@@ -1548,6 +1651,17 @@ def _emit_lease_carrier(data: dict, decision: LeaseDecision | None) -> None:
         LEASE_CARRIER_PREFIX + json.dumps(carrier, ensure_ascii=False, separators=(",", ":")),
         file=sys.stderr,
     )
+
+
+def _record_committed_v5_lease(path: Path, data: dict, pending_lease) -> None:
+    """Publish a v5 lease only after its generation commit succeeds."""
+    decision = LeaseDecision(
+        pending_lease.action,
+        pending_lease.target.lease_id,
+        pending_lease.target.fencing_epoch,
+    )
+    _PROCESS_LEASE_IDS[str(path.resolve())] = decision.lease_id
+    _emit_lease_carrier(data, decision)
 
 
 def atomic_write_json(
@@ -7498,7 +7612,17 @@ def cmd_log_specialist_invocation(args):
 
 
 
-def _initialize_legacy_v4(args, *, write_state):
+def _read_init_peer_state(path: Path) -> dict:
+    """Read a peer across v1-v5, retaining bounded legacy warning fixtures."""
+
+    try:
+        _snapshot, document = _load_authoritative_state(path)
+        return document
+    except (OSError, ValueError, FencedCommitError):
+        return _read_legacy_json_file(path)
+
+
+def _initialize_legacy_v4(args, *, write_state, lock_state: bool = True):
     cwd = Path.cwd()
     goal_dispatch = _resolve_goal_dispatch(
         args.mission,
@@ -7606,7 +7730,7 @@ def _initialize_legacy_v4(args, *, write_state):
     if _issue_ref_key:
         for sf_other in _iter_state_files(cwd):
             try:
-                other = _read_legacy_json_file(sf_other)
+                other = _read_init_peer_state(sf_other)
             except Exception:
                 continue
             # 同一セッションの resume では自分自身の旧 state を誤検出しないよう sid 除外
@@ -7713,7 +7837,12 @@ def _initialize_legacy_v4(args, *, write_state):
     except (OSError, WorktreeArchiveError):
         _exit_init_write_failure(cwd, sf_target)
     agg = aggregate_file(cwd)
-    with _guarded_init_state_lock(cwd, sf_target):
+    init_lock = (
+        _guarded_init_state_lock(cwd, sf_target)
+        if lock_state
+        else contextlib.nullcontext()
+    )
+    with init_lock:
         existing_agg = {}
         if agg.exists():
             try:
@@ -7845,8 +7974,8 @@ def _initialize_legacy_v4(args, *, write_state):
             prior_generations = []
             for state_path in _iter_state_files(cwd):
                 try:
-                    prior = _read_legacy_json_file(state_path)
-                except (OSError, json.JSONDecodeError):
+                    prior = _read_init_peer_state(state_path)
+                except (OSError, ValueError, FencedCommitError):
                     continue
                 if prior.get("review_group_id") != initial["review_group_id"]:
                     continue
@@ -7878,15 +8007,149 @@ def _initialize_legacy_v4(args, *, write_state):
     }))
 
 
-def cmd_init(args):
-    """Adapt init arguments to the A1 v4 compatibility repository."""
-    run_initialize(
-        LegacyV4InitializerRepository(
-            initialize_state=_initialize_legacy_v4,
-            write_state=atomic_write_json,
-        ),
-        InitRequest(arguments=args),
+def _canonical_init_command(args) -> tuple[object, bytes]:
+    """Return the stable command intent used to identify one init request."""
+    argument_names = (
+        "artifact_applicability",
+        "base_sha",
+        "budget_minutes",
+        "child_run_id",
+        "complexity",
+        "files",
+        "force_mission",
+        "goal_dispatch",
+        "head_sha",
+        "host_run_id",
+        "issue_ref",
+        "logical_group_id",
+        "max_iter",
+        "mission",
+        "parent_run_id",
+        "review_group_id",
+        "review_perspective",
+        "review_tier",
+        "root_run_id",
+        "session_role",
+        "threshold",
     )
+    document = {
+        "arguments": {name: getattr(args, name, None) for name in argument_names},
+        "schema": "mission-command-intent/1",
+        "type": "init",
+    }
+    source = json.dumps(
+        document,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return _decode_strict_json_object(source), source
+
+
+def _initialize_v5_state(args, path: Path, initial: dict) -> None:
+    """Commit the v4-shaped bootstrap payload through the v5 genesis API."""
+    session_id = str(initial["session_id"])
+    presented_lease_id = os.environ.get("MISSION_LEASE_ID") or _new_lease_id()
+    now = _lease_now()
+    initial["owner_session_id"] = session_id
+    initial["lease_id"] = presented_lease_id
+    initial["fencing_epoch"] = 1
+    initial["lease_expires_at"] = _lease_expiry(now)
+    initial["last_activity_at"] = iso_now()
+    state_bytes = json.dumps(
+        initial,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    command, command_bytes = _canonical_init_command(args)
+    operation_digest = hashlib.sha256(
+        session_id.encode("utf-8") + b"\x00" + command_bytes
+    ).hexdigest()
+    operation_id = "init:" + operation_digest
+    blobs = VerifiedBlobSet(())
+    request = ExecutionRequest(
+        session_id=session_id,
+        lease_owner_session_id=session_id,
+        command=command,
+        blobs=blobs,
+        operation_id=operation_id,
+        intent_digest=compute_intent_digest(
+            session_id=session_id,
+            lease_owner_session_id=session_id,
+            operation_id=operation_id,
+            command=command,
+            blobs=blobs,
+        ),
+        presented_lease_id=presented_lease_id,
+        audit=AuditMetadata("init", ()),
+    )
+    repository = LocalFencedRepository(
+        path.parent.parent,
+        # Freeze genesis admission and payload construction to the same
+        # instant.  Crossing a wall-clock second between them would otherwise
+        # produce a different pending lease expiry and reject the payload.
+        clock=lambda: now,
+        lease_ttl_seconds=_lease_ttl_seconds(),
+    )
+    try:
+        repository.initialize(request, state_bytes=state_bytes)
+    except OSError:
+        _exit_init_write_failure(Path.cwd(), path)
+    except FencedCommitError as error:
+        print(f"ERROR: {error.code}: {error.detail}", file=sys.stderr)
+        raise SystemExit(2) from error
+    decision = LeaseDecision("acquired", presented_lease_id, 1)
+    _PROCESS_LEASE_IDS[str(path.resolve())] = presented_lease_id
+    _emit_lease_carrier(initial, decision)
+
+
+def cmd_init(args):
+    """Create a v5 session by default while retaining existing v1-v4 writers."""
+    cwd = Path.cwd()
+    sf = session_file(cwd, resolve_session_id())
+    if sf.exists():
+        try:
+            source = _read_stable_bytes(sf, limit=4 * 1024 * 1024)
+            inspected = inspect_repository_bytes(
+                source,
+                expected_session_id=sf.stem,
+            )
+        except (OSError, RepositorySelectionError) as error:
+            print(f"ERROR: repository-format-invalid: {error}", file=sys.stderr)
+            raise SystemExit(2) from error
+        if inspected.format is RepositoryFormat.V5:
+            print("ERROR: session-already-initialized", file=sys.stderr)
+            raise SystemExit(2)
+        selected_format = RepositoryFormat.LEGACY_V4
+    else:
+        selected_format = NEW_SESSION_REPOSITORY_FORMAT
+
+    if selected_format is RepositoryFormat.LEGACY_V4:
+        run_initialize(
+            LegacyV4InitializerRepository(
+                initialize_state=_initialize_legacy_v4,
+                write_state=atomic_write_json,
+            ),
+            InitRequest(arguments=args),
+        )
+        return
+    _initialize_new_v5_session(args, cwd)
+
+
+def _initialize_new_v5_session(args, cwd: Path) -> None:
+    """Serialize the complete genesis interval across session IDs."""
+
+    # Another process must not mistake a live private stage for crash residue;
+    # the same boundary also protects aggregate and review-generation choices.
+    with StateLock(state_dir(cwd) / ".init.lock"):
+        _initialize_legacy_v4(
+            args,
+            write_state=lambda path, state: _initialize_v5_state(args, path, state),
+            lock_state=False,
+        )
 
 
 def cmd_pregate(args):
@@ -8680,13 +8943,15 @@ def cmd_get(args):
     if not sf.exists():
         print(json.dumps({"ok": False, "error": "state.json not found"}))
         sys.exit(1)
-    with StateLock(lock_file(cwd)):
-        try:
-            data = _load_state_json(sf)
-            _validate_specialist_public_state(data)
-        except UnsupportedSchemaVersionError as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
-            sys.exit(2)
+    try:
+        _snapshot, data = _load_authoritative_state(
+            sf,
+            legacy_compatibility=True,
+        )
+        _validate_specialist_public_state(data)
+    except UnsupportedSchemaVersionError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
     if args.field:
         print(json.dumps(data.get(args.field)))
     else:
@@ -8809,8 +9074,9 @@ def _legacy_lifecycle_repository(
             else:
                 atomic_write_json(sf, proposed)
 
-    return _select_legacy_repository_for_cli(
-        session_id or sf.stem,
+    selected_session_id = session_id or sf.stem
+    return _select_repository_for_cli(
+        selected_session_id,
         sf,
         lambda format_guard: LegacyV4Repository(
             lock=lambda: StateLock(lock_file(cwd)),
@@ -8819,6 +9085,30 @@ def _legacy_lifecycle_repository(
             backup_state=guarded_backup,
             add_to_aggregate=lambda: _add_to_aggregate_strict(cwd, sf.stem),
             remove_from_aggregate=lambda: _remove_from_aggregate_strict(cwd, sf.stem),
+            format_guard=format_guard,
+        ),
+        lambda format_guard: V5CompatibilityRepository(
+            repository=LocalFencedRepository(
+                state_dir(cwd),
+                clock=_lease_now,
+                lease_ttl_seconds=_lease_ttl_seconds(),
+            ),
+            session_id=selected_session_id,
+            lease_owner_session_id=resolve_session_id(),
+            presented_lease_id=(
+                os.environ.get("MISSION_LEASE_ID")
+                or _PROCESS_LEASE_IDS.get(str(sf.resolve()))
+            ),
+            prepare_state=(
+                (lambda state: stamp_metadata(state, cwd))
+                if stamp
+                else (lambda state: state)
+            ),
+            add_to_aggregate=lambda: _add_to_aggregate_strict(cwd, sf.stem),
+            remove_from_aggregate=lambda: _remove_from_aggregate_strict(cwd, sf.stem),
+            lease_committed=lambda pending, state: _record_committed_v5_lease(
+                sf, state, pending
+            ),
             format_guard=format_guard,
         ),
     )
@@ -9968,9 +10258,17 @@ def _permission_preflight(cwd: Path) -> dict:
             "probes": [],
         }
     try:
-        with StateLock(lock_file(cwd)):
-            data = json.loads(sf.read_text(encoding="utf-8"))
-    except OSError:
+        _snapshot, data = _load_authoritative_state(sf)
+    except (OSError, ValueError, FencedCommitError):
+        # Preserve the established v1-v4 schema diagnostic instead of
+        # collapsing malformed version fields into a permission failure.
+        try:
+            legacy_candidate = _read_legacy_json_file(sf)
+            _validate_schema_version(legacy_candidate)
+        except UnsupportedSchemaVersionError:
+            raise
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
         reason = (
             "Phase 0 permission preflight failed before task execution: "
             "state write unavailable"
@@ -12813,9 +13111,15 @@ def cmd_review_import(args):
     digest = "sha256:" + hashlib.sha256(content).hexdigest()
     outcome = _command_outcome(args, "review-import", "ok")
     mission8 = "unknown"
-    with StateLock(lock_file(cwd)), _PublishedFilesTransaction() as published_files:
-        data = json.loads(sf.read_text())
-        lease_decision = _enforce_session_lease_for_write(sf, data)
+    repository = _legacy_lifecycle_repository(
+        cwd,
+        sf,
+        stamp=True,
+        strict_read=True,
+        lease_reason="review-import",
+    )
+    with repository.transaction(), _PublishedFilesTransaction() as published_files:
+        data = repository.load()
         mission8 = str(data.get("mission_id") or "unknown")[:8]
         archive_name = f"iter-{args.iteration}-{mission8}-review-input-{digest[7:23]}.json"
         try:
@@ -12845,11 +13149,8 @@ def cmd_review_import(args):
         data["review_evidence_refs"] = (retained + [reference])[-128:]
         _append_command_outcome(data, outcome)
         data["updated_at"] = iso_now()
-        backup_state(sf)
         _verify_published_file(evidence_publish)
-        atomic_write_json(
-            sf, stamp_metadata(data, cwd), lease_decision=lease_decision,
-        )
+        repository.save(data)
     print(json.dumps({
         "ok": True,
         "outcome_kind": "ok",
@@ -13556,15 +13857,16 @@ def cmd_aggregate_reviews(args):
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
+    try:
+        _source_snapshot, source_state = _load_authoritative_state(sf)
+    except Exception as exc:
+        print(f"ERROR: authoritative state is unavailable: {exc}", file=sys.stderr)
+        sys.exit(2)
     # #326: critic scope 記録の hard gate。#309 の guidance 層は next を呼ばない
     # orchestrator に bypass される実測 (disc-v3) があるため、集計側で fail-closed に
     # 強制する。escape hatch は作らない (#240 の合意偽装防止と同思想)。
     if args.iteration >= 2:
-        try:
-            _gate_state = json.loads(sf.read_text())
-        except (OSError, json.JSONDecodeError):
-            _gate_state = {}
-        if _gate_state.get("critic_has_new_scope") is None:
+        if source_state.get("critic_has_new_scope") is None:
             print(
                 "ERROR: iteration >= 2 の集計には critic_has_new_scope の記録が必要です (#326)。"
                 " critic の実行計画テーブルから判定し、"
@@ -13582,7 +13884,6 @@ def cmd_aggregate_reviews(args):
     imported_refs: list[dict] = []
     if input_refs:
         try:
-            source_state = json.loads(sf.read_text())
             for reference_path in input_refs:
                 review, metric, reference = _load_imported_review(
                     cwd, source_state, reference_path, args.iteration
@@ -13612,11 +13913,7 @@ def cmd_aggregate_reviews(args):
 
     min_reviewers = getattr(args, "min_reviewers", None)
     if min_reviewers is not None and len(reviews) < min_reviewers:
-        state_reviewer_count = None
-        try:
-            state_reviewer_count = json.loads(sf.read_text()).get("reviewer_count")
-        except (OSError, json.JSONDecodeError):
-            state_reviewer_count = None
+        state_reviewer_count = source_state.get("reviewer_count")
         shortage_guidance = build_guidance(
             "review-finalize",
             "min-reviewers",
@@ -13741,8 +14038,65 @@ def cmd_aggregate_reviews(args):
             file=sys.stderr,
         )
 
-    with StateLock(lock_file(cwd)):
-        data = json.loads(sf.read_text())
+    repository = _legacy_lifecycle_repository(
+        cwd,
+        sf,
+        stamp=True,
+        strict_read=True,
+        lease_reason="aggregate-reviews",
+    )
+    with repository.transaction():
+        data = repository.load()
+        # The preflight read above is intentionally advisory only. Re-run all
+        # state-dependent reviewer gates against the transaction-bound state so
+        # a concurrent critic-scope or reviewer-policy update cannot be
+        # bypassed by a stale read.
+        if args.iteration >= 2 and data.get("critic_has_new_scope") is None:
+            print(
+                "ERROR: iteration >= 2 の集計には critic_has_new_scope の記録が必要です (#326)。"
+                " critic の実行計画テーブルから判定し、"
+                "`mission-state.py set critic_has_new_scope='false'` (全ステップが既存 finding id のみ)"
+                " または `'true'` (new を含む) を実行してから再集計してください。",
+                file=sys.stderr,
+            )
+            raise CommandOutcomeExit(2, "expected-gate")
+        if min_reviewers is not None and len(reviews) < min_reviewers:
+            shortage_guidance = build_guidance(
+                "review-finalize",
+                "min-reviewers",
+                {
+                    "iteration": args.iteration,
+                    "reviewer_count": data.get("reviewer_count"),
+                    "latest_review_input_ref": input_refs[0] if input_refs else None,
+                },
+            )
+            print(
+                f"ERROR: reviewer 数不足 (期待 {min_reviewers} 名, 実際 {len(reviews)} 名)。"
+                " reviewer を追加してやり直してください。",
+                file=sys.stderr,
+            )
+            for line in shortage_guidance:
+                print(line, file=sys.stderr)
+            raise CommandOutcomeExit(
+                2,
+                "expected-gate",
+                guidance=shortage_guidance,
+            )
+        if input_refs:
+            try:
+                current_imported_refs = [
+                    _load_imported_review(cwd, data, path, args.iteration)[2]
+                    for path in input_refs
+                ]
+            except (OSError, ValueError) as exc:
+                print(f"ERROR: review import reference rejected: {exc}", file=sys.stderr)
+                sys.exit(2)
+            if current_imported_refs != imported_refs:
+                print(
+                    "ERROR: review import references changed during aggregation",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
         try:
             review_lineage = _current_review_lineage(cwd, data, revision_scope)
         except ValueError as exc:
@@ -13755,8 +14109,7 @@ def cmd_aggregate_reviews(args):
             invalidate_artifact_lint_observation(data)
             data["artifact_lint_status"] = "invalid"
             data["updated_at"] = iso_now()
-            backup_state(sf)
-            atomic_write_json(sf, stamp_metadata(data, cwd))
+            repository.save(data)
             print(f"ERROR: {exc}", file=sys.stderr)
             sys.exit(2)
         if artifact_lint_status not in {"clean", "findings"}:
@@ -13869,7 +14222,7 @@ def cmd_aggregate_reviews(args):
             )
             _verify_published_file(archive_publish)
             _verify_published_file(out_publish)
-            atomic_write_json(sf, data)
+            repository.save(data)
         except BaseException as exc:
             recovery_error: PublishedRollbackRecoveryError | None = None
             if out_publish is not None:
@@ -14084,14 +14437,16 @@ def cmd_push_score(args):
         _reject_on_score_item_mismatch(args, items)
     _reject_normalized_scale(items)
 
-    with StateLock(lock_file(cwd)), _PublishedFilesTransaction() as published_files:
-        try:
-            data = _load_state_json(sf)
-        except UnsupportedSchemaVersionError as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
-            sys.exit(2)
+    repository = _legacy_lifecycle_repository(
+        cwd,
+        sf,
+        stamp=True,
+        strict_read=True,
+        lease_reason="push-score",
+    )
+    with repository.transaction(), _PublishedFilesTransaction() as published_files:
+        data = repository.load()
         _reject_active_provider_mutation(data, "push-score")
-        lease_decision = _enforce_session_lease_for_write(sf, data)
         _validate_consensus_policy(data, items)
         try:
             provenance = _validate_provenance(
@@ -14192,11 +14547,9 @@ def cmd_push_score(args):
         data["updated_at"] = now
         # A successful provenance-bearing score is the only migration path.
         data["schema_version"] = SCHEMA_VERSION
-        data = stamp_metadata(data, cwd)
-        backup_state(sf)
         if args.scoring_json:
             _verify_published_file(scoring_publish)
-        atomic_write_json(sf, data, lease_decision=lease_decision)
+        repository.save(data)
 
     if args.scoring_json:
         archived_to = scoring_json_archived_to  # StateLock 内で archive 済み (dangling path 防止)
@@ -14223,10 +14576,10 @@ def cmd_review_finalize(args):
     sf = resolve_state_file(cwd)
     if sf.exists():
         try:
-            with StateLock(lock_file(cwd)):
-                _require_score_resubmit_reason(
-                    json.loads(sf.read_text()), args.iteration, args.resubmit_reason,
-                )
+            _snapshot, current = _load_authoritative_state(sf)
+            _require_score_resubmit_reason(
+                current, args.iteration, args.resubmit_reason,
+            )
         except SystemExit as error:
             _emit_finalize_failure(args, "", error, site="resubmit")
             raise error
@@ -14289,6 +14642,24 @@ def cmd_closeout(args):
     gate 未達なら mark-passes の exit code を保ち、next 相当の guidance を
     JSON で返す。state は mark-passes が exit 前に書き込まないため不変。
     """
+    sf = resolve_state_file(Path.cwd())
+    if sf.exists():
+        _snapshot, current = _load_authoritative_state(sf)
+        if current.get("passes") is True:
+            next_stdout = io.StringIO()
+            with contextlib.redirect_stdout(next_stdout):
+                cmd_next(argparse.Namespace())
+            print(json.dumps({
+                "ok": True,
+                "mark_passes": {
+                    "ok": True,
+                    "passes": True,
+                    "forced": bool(current.get("passes_forced")),
+                    "already_passed": True,
+                },
+                "next": json.loads(next_stdout.getvalue()),
+            }, ensure_ascii=False, indent=2))
+            return
     mp_args = argparse.Namespace(force=False, reason=None, approved_by_user=False)
     mp_stdout = io.StringIO()
     try:
@@ -14918,17 +15289,20 @@ def _terminalize_state_file(
     require_dead_pid: bool = False,
     require_expired_lease: bool = False,
 ) -> bool:
-    """Re-read and revalidate under lock before a bulk terminal write."""
-    with StateLock(lock_file(proj)):
-        latest = json.loads(sf.read_text())
+    """Re-read and revalidate inside the format-pinned write transaction."""
+
+    class StaleCleanupPreconditionChanged(Exception):
+        pass
+
+    def validate_latest(latest: dict, *, expired_lease_admitted: bool) -> None:
         if not latest.get("loop_active") or latest.get("passes") or latest.get("halt_reason"):
-            return False
+            raise StaleCleanupPreconditionChanged
         if expected_pid is not None and latest.get("pid") != expected_pid:
-            return False
+            raise StaleCleanupPreconditionChanged
         if require_missing_root:
             stored_root = latest.get("project_root", "")
             if not stored_root or Path(stored_root).exists():
-                return False
+                raise StaleCleanupPreconditionChanged
         if require_stale_no_score:
             age_sec = _state_age_since_update_sec(latest)
             if (
@@ -14936,60 +15310,128 @@ def _terminalize_state_file(
                 or latest.get("awaiting_user")
                 or age_sec is not None and age_sec < _stale_active_seconds()
             ):
-                return False
+                raise StaleCleanupPreconditionChanged
         if require_dead_pid:
             try:
                 if _pid_is_agent(int(latest.get("pid") or 0)):
-                    return False
+                    raise StaleCleanupPreconditionChanged
             except (TypeError, ValueError):
                 pass
-        if require_expired_lease and not _expired_lease_without_heartbeat(latest)[0]:
-            return False
-        now = iso_now()
-        sampled = _parse_iso_datetime(now)
-        updated = _parse_iso_datetime(latest.get("updated_at"))
-        if sampled and updated and sampled < updated:
-            now = str(latest["updated_at"])
+        if (
+            require_expired_lease
+            and not expired_lease_admitted
+            and not _expired_lease_without_heartbeat(latest)[0]
+        ):
+            raise StaleCleanupPreconditionChanged
 
-        def terminalize_without_phase(data: dict, at: str, trusted: bool) -> None:
-            if category == "stale":
-                _accrue_phase_for_terminal_control(
-                    data,
-                    data.get("phase"),
-                    at,
-                    trusted_boundary=trusted,
-                )
-                data["phase_started_at"] = at
-            close_activity_for_terminal(
+    class ValidatingJanitorRepository:
+        def __init__(self, repository, *, expired_lease_admitted: bool) -> None:
+            self._repository = repository
+            self._expired_lease_admitted = expired_lease_admitted
+
+        def transaction(self):
+            return self._repository.transaction()
+
+        def load(self):
+            latest = self._repository.load()
+            validate_latest(
+                latest,
+                expired_lease_admitted=self._expired_lease_admitted,
+            )
+            return latest
+
+        def execute(self, state, mutation=None, transition=None):
+            return self._repository.execute(state, mutation, transition)
+
+        def save(self, state, **kwargs) -> None:
+            self._repository.save(state, **kwargs)
+
+    def terminalize_without_phase(data: dict, at: str, trusted: bool) -> None:
+        if category == "stale":
+            _accrue_phase_for_terminal_control(
                 data,
+                data.get("phase"),
                 at,
                 trusted_boundary=trusted,
             )
-
-        def write_terminal_state(data: dict, *, administrative: bool = False) -> None:
-            _validate_specialist_public_state(data)
-            # Janitor CAS deliberately bypasses owner-token acquisition; it
-            # publishes the already revalidated terminal state under this lock.
-            _atomic_write(sf, lambda f: json.dump(data, f, indent=2, ensure_ascii=False))
-
-        repository = _select_legacy_repository_for_cli(
-            str(latest.get("session_id") or sf.stem),
-            sf,
-            lambda format_guard: LegacyV4Repository(
-                lock=contextlib.nullcontext,
-                read_state=lambda: copy.deepcopy(latest),
-                write_state=write_terminal_state,
-                backup_state=lambda: backup_state(sf),
-                remove_from_aggregate=(
-                    (lambda: _remove_from_aggregate_strict(proj, sf.stem))
-                    if sf.parent.name == "sessions"
-                    else None
-                ),
-                format_guard=format_guard,
-            ),
+            data["phase_started_at"] = at
+        close_activity_for_terminal(
+            data,
+            at,
+            trusted_boundary=trusted,
         )
+
+    def nondecreasing_terminal_time(latest: dict, sampled: str) -> str:
+        sampled_at = _parse_iso_datetime(sampled)
+        updated_at = _parse_iso_datetime(latest.get("updated_at"))
+        if sampled_at and updated_at and sampled_at < updated_at:
+            return str(latest["updated_at"])
+        return sampled
+
+    def write_terminal_state(data: dict, *, administrative: bool = False) -> None:
+        _validate_specialist_public_state(data)
+        # Legacy janitor CAS deliberately bypasses owner-token acquisition;
+        # the state was revalidated under StateLock by the repository.
+        _atomic_write(sf, lambda f: json.dump(data, f, indent=2, ensure_ascii=False))
+
+    _selection_snapshot, selection_state = _load_authoritative_state(
+        sf,
+        legacy_compatibility=True,
+        allow_missing_schema_session_mismatch=True,
+    )
+    loaded_session_id = selection_state.get("session_id")
+    selected_session_id = (
+        loaded_session_id
+        if isinstance(loaded_session_id, str) and loaded_session_id
+        else sf.stem
+    )
+    repository = _select_repository_for_cli(
+        selected_session_id,
+        sf,
+        lambda format_guard: LegacyV4Repository(
+            lock=lambda: StateLock(lock_file(proj)),
+            read_state=lambda: json.loads(sf.read_text(encoding="utf-8")),
+            write_state=write_terminal_state,
+            backup_state=lambda: backup_state(sf),
+            remove_from_aggregate=(
+                (lambda: _remove_from_aggregate_strict(proj, sf.stem))
+                if sf.parent.name == "sessions"
+                else None
+            ),
+            format_guard=format_guard,
+        ),
+        lambda format_guard: V5CompatibilityRepository(
+            repository=LocalFencedRepository(
+                state_dir(proj),
+                clock=_lease_now,
+                lease_ttl_seconds=_lease_ttl_seconds(),
+            ),
+            session_id=selected_session_id,
+            lease_owner_session_id=resolve_session_id(),
+            # A janitor never reuses the stale writer's token. Expiry is
+            # admitted as a fenced takeover by the v5 repository itself.
+            presented_lease_id=None,
+            remove_from_aggregate=(
+                (lambda: _remove_from_aggregate_strict(proj, sf.stem))
+                if sf.parent.name == "sessions"
+                else None
+            ),
+            format_guard=format_guard,
+        ),
+    )
+    now = iso_now()
+    try:
         result = run_mark_halt(
-            repository,
+            ValidatingJanitorRepository(
+                repository,
+                # v5 begin() has already fenced the expired lease with a
+                # tokenless takeover. Its projected state contains the renewed
+                # pending lease, so repeating the old-expiry predicate here
+                # would reject every valid janitor write.
+                expired_lease_admitted=isinstance(
+                    repository, V5CompatibilityRepository
+                ),
+            ),
             MarkHaltRequest(
                 reason=reason,
                 category=category,
@@ -15001,14 +15443,18 @@ def _terminalize_state_file(
                 transition_phase=_transition_phase,
                 goal_dispatch_fields=_goal_dispatch_route_fields,
                 terminalize_without_phase=terminalize_without_phase,
+                effective_at=nondecreasing_terminal_time,
             ),
         )
-        if result.aggregate_error is not None:
-            print(
-                f"WARNING: aggregate index update failed: {result.aggregate_error}",
-                file=sys.stderr,
-            )
-        return True
+    except StaleCleanupPreconditionChanged:
+        return False
+
+    if result.aggregate_error is not None:
+        print(
+            f"WARNING: aggregate index update failed: {result.aggregate_error}",
+            file=sys.stderr,
+        )
+    return True
 
 
 def _expired_lease_without_heartbeat(data: dict) -> tuple[bool, str]:
@@ -15050,7 +15496,11 @@ def cmd_cleanup_stale(args):
             continue
         for sf in _iter_state_files(root):
             try:
-                data = _read_legacy_json_file(sf)
+                _snapshot, data = _load_authoritative_state(
+                    sf,
+                    legacy_compatibility=True,
+                    allow_missing_schema_session_mismatch=True,
+                )
                 if not data.get("loop_active"):
                     continue
                 if data.get("passes") or data.get("halt_reason"):
@@ -15067,17 +15517,28 @@ def cmd_cleanup_stale(args):
                         continue
                     proj = _project_root_of(sf)
                     if args.execute:
-                        halted = _terminalize_state_file(
-                            sf,
-                            proj,
-                            reason=(
-                                "stale: session lease expired without activity heartbeat "
-                                "(cleanup-stale)"
-                            ),
-                            category="stale",
-                            set_terminal_phase=True,
-                            require_expired_lease=True,
-                        )
+                        try:
+                            halted = _terminalize_state_file(
+                                sf,
+                                proj,
+                                reason=(
+                                    "stale: session lease expired without activity heartbeat "
+                                    "(cleanup-stale)"
+                                ),
+                                category="stale",
+                                set_terminal_phase=True,
+                                require_expired_lease=True,
+                            )
+                        except FencedCommitError as error:
+                            if error.code != "lease-rejected":
+                                raise
+                            results["skipped"].append({
+                                "path": str(sf),
+                                "reason": "lease-rejected",
+                                "owner_session_id": data.get("owner_session_id"),
+                                "lease_expires_at": data.get("lease_expires_at"),
+                            })
+                            continue
                         if halted:
                             results["halted"].append({
                                 "path": str(sf),
@@ -17509,6 +17970,8 @@ def main():
         except UnsupportedSchemaVersionError as error:
             print(f"ERROR: {error}", file=sys.stderr)
             raise SystemExit(2)
+        except FencedCommitError as error:
+            _reject_fenced_lease_for_cli(error)
     except SystemExit as error:
         code = error.code if isinstance(error.code, int) else 1
         if (

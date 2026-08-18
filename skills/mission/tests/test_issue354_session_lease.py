@@ -12,6 +12,12 @@ import pytest
 
 
 MISSION_STATE_PY = Path(__file__).resolve().parent.parent / "bin" / "mission-state.py"
+
+
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Existing lease matrix remains v4; C1 adds raw-v5 takeover coverage."""
+    return legacy_run_cli
 SPEC = importlib.util.spec_from_file_location("mission_state_issue354", MISSION_STATE_PY)
 MISSION_STATE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None

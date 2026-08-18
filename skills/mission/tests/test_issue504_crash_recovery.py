@@ -1260,6 +1260,7 @@ def test_recovery_primitive_has_no_domain_transition_or_production_route():
         *(Path(__file__).resolve().parents[3] / "scripts").glob("*.py"),
     ]
     assert all(
-        "mission_persistence.fenced_commit" not in path.read_text(encoding="utf-8")
+        path.name == "mission-state.py"
+        or "mission_persistence.fenced_commit" not in path.read_text(encoding="utf-8")
         for path in production_sources
     )

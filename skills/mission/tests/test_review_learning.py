@@ -22,6 +22,12 @@ from review_learning import (
 )
 
 
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Cross-session learning materialization remains retained-v4 owned."""
+    return legacy_run_cli
+
+
 def _review(*, iteration=1, perspective="A", learning=True):
     finding = {
         "id": f"{perspective}-1", "severity": "Medium", "axis": "accuracy",

@@ -19,6 +19,12 @@ AUTHORITY_FIELDS = {
 MISSION_STATE_PY = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
 
 
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """A5 permission backup/race characterization remains v4-owned until #543."""
+    return legacy_run_cli
+
+
 def _load_state_module():
     spec = importlib.util.spec_from_file_location("mission_state_issue510", MISSION_STATE_PY)
     module = importlib.util.module_from_spec(spec)

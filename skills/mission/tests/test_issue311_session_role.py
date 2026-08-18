@@ -17,6 +17,8 @@ import json
 import importlib.util
 from pathlib import Path
 
+from mission_persistence.authoritative_reader import read_authoritative_snapshot
+
 
 def _load(name: str, rel: str):
     path = Path(__file__).resolve().parents[1] / rel
@@ -34,19 +36,26 @@ def _sessions(tmp_path):
     return sorted(d.glob("*.json")) if d.is_dir() else []
 
 
+def _session_state(tmp_path):
+    path = _sessions(tmp_path)[0]
+    return read_authoritative_snapshot(
+        path, expected_session_id=path.stem
+    ).document_copy()
+
+
 # ===== 1. init --role =====
 
 def test_init_role_checker_stored(run_cli, tmp_path):
     r = run_cli("init", "PR #100 を独立レビュー", "--complexity", "Standard",
                 "--role", "checker", cwd=tmp_path)
     assert r.returncode == 0, r.stderr
-    state = json.loads(_sessions(tmp_path)[0].read_text())
+    state = _session_state(tmp_path)
     assert state["session_role"] == "checker"
 
 
 def test_init_role_default_implementer(run_cli, tmp_path):
     run_cli("init", "some mission", "--complexity", "Standard", cwd=tmp_path, check=True)
-    state = json.loads(_sessions(tmp_path)[0].read_text())
+    state = _session_state(tmp_path)
     assert state["session_role"] == "implementer"
 
 
@@ -67,7 +76,7 @@ def test_mark_halt_accepts_evidence_submitted(run_cli, tmp_path):
     r = run_cli("mark-halt", "--reason", "証拠提出完了",
                 "--category", "evidence-submitted", cwd=tmp_path)
     assert r.returncode == 0, r.stderr
-    state = json.loads(_sessions(tmp_path)[0].read_text())
+    state = _session_state(tmp_path)
     assert state["halt_category"] == "evidence-submitted"
 
 

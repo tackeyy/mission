@@ -202,3 +202,27 @@ def select_legacy_repository(
         v5_factory=reject_v5,
     )
     return selector.select().repository
+
+
+def select_repository(
+    session_id: str,
+    session_path: Path | str,
+    legacy_factory: Callable[[Callable[[], object]], RepositoryT],
+    v5_factory: Callable[[Callable[[], object]], RepositoryT],
+) -> RepositoryT:
+    """Construct exactly one retained, format-matching repository."""
+
+    selector: FormatPinnedRepositorySelector[RepositoryT] | None = None
+
+    def guard() -> object:
+        if selector is None:
+            raise RepositorySelectionError("repository-selector-unbound")
+        return selector.select()
+
+    selector = FormatPinnedRepositorySelector(
+        session_id=session_id,
+        session_path=session_path,
+        legacy_factory=lambda: legacy_factory(guard),
+        v5_factory=lambda: v5_factory(guard),
+    )
+    return selector.select().repository

@@ -3,7 +3,15 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
+
 MISSION_STATE_PY = Path(__file__).resolve().parent.parent / "bin" / "mission-state.py"
+
+
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Cleanup/archive session ownership remains v4-scoped until #543."""
+    return legacy_run_cli
 
 
 def _load():

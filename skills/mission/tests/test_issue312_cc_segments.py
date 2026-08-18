@@ -18,6 +18,12 @@ def _load():
 MS = _load()
 
 
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Direct legacy planning-policy mutation remains outside C1 (#543)."""
+    return legacy_run_cli
+
+
 def _sessions(tmp_path):
     directory = tmp_path / ".mission-state" / "sessions"
     return sorted(directory.glob("*.json")) if directory.is_dir() else []

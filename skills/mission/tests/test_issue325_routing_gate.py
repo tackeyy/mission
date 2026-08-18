@@ -121,7 +121,11 @@ def test_init_force_mission_recorded(run_cli, tmp_path):
     run_cli("init", "typo を1箇所直す", "--complexity", "Simple",
             "--force-mission", cwd=tmp_path, check=True)
     sf = sorted((tmp_path / ".mission-state" / "sessions").glob("*.json"))[0]
-    state = json.loads(sf.read_text())
+    from mission_persistence.authoritative_reader import read_authoritative_snapshot
+
+    state = read_authoritative_snapshot(
+        sf, expected_session_id=sf.stem
+    ).document_copy()
     assert state.get("force_mission") is True
 
 

@@ -18,13 +18,23 @@ def _run(args, cwd, env_extra=None):
         base_env["MISSION_SESSION_ID"] = "test"
     if env_extra:
         base_env.update(env_extra)
-    return subprocess.run(
+    result = subprocess.run(
         [sys.executable, str(MISSION_STATE_PY), *args],
         cwd=str(cwd),
         capture_output=True,
         text=True,
         env=base_env,
     )
+    if args and args[0] == "init" and result.returncode == 0:
+        from .mission_state_fixture_corpus import _materialize_legacy_init_fixture
+
+        session_id = base_env.get("MISSION_SESSION_ID")
+        _materialize_legacy_init_fixture(
+            Path(cwd),
+            session_ids=(session_id,) if session_id else None,
+            cleanup_v5=True,
+        )
+    return result
 
 
 def _read(path):

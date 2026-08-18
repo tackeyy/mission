@@ -12,6 +12,14 @@ reviewer_count 明示、loop_active と同時の halt_reason 空化による F-4
 """
 import json
 
+import pytest
+
+
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """The pre-C1 set guard matrix characterizes retained-v4 state bytes."""
+    return legacy_run_cli
+
 
 def _read(tmp_path):
     return json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())

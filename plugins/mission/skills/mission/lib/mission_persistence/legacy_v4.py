@@ -3,23 +3,32 @@
 from __future__ import annotations
 
 import copy
+import contextlib
 import json
+import secrets
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Callable, ContextManager, Iterable
 
 from mission_application.artifact import EvidenceDecision, EvidenceEffect, validate_evidence_effect
-from mission_application.ports import AggregateIndexError
+from mission_application.ports import AggregateIndexError, AuditMetadata
+from mission_kernel.json_codec import decode_json_object
 from mission_kernel import MissionState, decode_mission_state, project_legacy_document
 from mission_kernel.transitions import Decision, bind_transition_effects, decide
 
 from .fenced_commit import (
+    AdmittedSnapshot,
+    CommitResult,
     ExecutionRequest,
     FencedCommitError,
+    LocalFencedRepository,
+    PendingLease,
     RepositoryExecutionResult,
     admit_lease,
+    compute_intent_digest,
     validate_execution_request,
 )
+from .local_uow import VerifiedBlobSet
 
 
 @dataclass(frozen=True)
@@ -308,3 +317,157 @@ class LegacyV4Repository:
                     bind_published(decision, published)
                 self.save(decision.state, backup=backup)
             return decision
+
+
+class V5CompatibilityRepository:
+    """Run extracted compatibility reducers on one format-pinned v5 UoW.
+
+    The reducer still receives the v4-shaped projection expected by the A1-A5
+    application seams, but publication is a single v5 generation.  No legacy
+    session file or backup is written.
+    """
+
+    def __init__(
+        self,
+        *,
+        repository: LocalFencedRepository,
+        session_id: str,
+        lease_owner_session_id: str,
+        presented_lease_id: str | None,
+        prepare_state: Callable[[dict], dict] | None = None,
+        add_to_aggregate: Callable[[], None] | None = None,
+        remove_from_aggregate: Callable[[], None] | None = None,
+        lease_committed: Callable[[PendingLease, dict], None] | None = None,
+        format_guard: Callable[[], object] | None = None,
+    ) -> None:
+        self._repository = repository
+        self._session_id = session_id
+        self._lease_owner_session_id = lease_owner_session_id
+        self._presented_lease_id = presented_lease_id
+        self._prepare_state = prepare_state or (lambda state: state)
+        self._add_to_aggregate = add_to_aggregate
+        self._remove_from_aggregate = remove_from_aggregate
+        self._lease_committed = lease_committed
+        self._format_guard = format_guard
+        self._admitted: AdmittedSnapshot | None = None
+        self._transaction_active = False
+
+    @contextlib.contextmanager
+    def transaction(self):
+        if self._transaction_active:
+            raise FencedCommitError("request-invalid", "nested v5 transaction")
+        self._transaction_active = True
+        try:
+            yield
+        finally:
+            self._admitted = None
+            self._transaction_active = False
+
+    def _request(self) -> ExecutionRequest:
+        operation_id = "compat:" + secrets.token_hex(16)
+        command = decode_json_object(
+            json.dumps(
+                {
+                    "schema": "mission-command-intent/1",
+                    "type": "compatibility-mutation",
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        blobs = VerifiedBlobSet(())
+        return ExecutionRequest(
+            session_id=self._session_id,
+            lease_owner_session_id=self._lease_owner_session_id,
+            command=command,
+            blobs=blobs,
+            operation_id=operation_id,
+            intent_digest=compute_intent_digest(
+                session_id=self._session_id,
+                lease_owner_session_id=self._lease_owner_session_id,
+                operation_id=operation_id,
+                command=command,
+                blobs=blobs,
+            ),
+            presented_lease_id=self._presented_lease_id,
+            audit=AuditMetadata("compatibility-mutation", ()),
+        )
+
+    def load(self) -> dict:
+        if not self._transaction_active:
+            raise FencedCommitError(
+                "request-invalid",
+                "v5 load requires an active transaction",
+            )
+        if self._admitted is not None:
+            raise FencedCommitError("request-invalid", "v5 transaction already loaded")
+        if self._format_guard is not None:
+            self._format_guard()
+        admitted = self._repository.begin(self._request())
+        if isinstance(admitted, CommitResult):
+            raise FencedCommitError("operation-invalid", "fresh operation replayed")
+        if admitted.base is None:
+            raise FencedCommitError("initial-state-required", "v5 head is missing")
+        self._admitted = admitted
+        admitted_state = replace(
+            admitted.base.state,
+            lease=admitted.pending_lease.target,
+            snapshot_provenance=None,
+        )
+        return json.loads(project_legacy_document(admitted_state))
+
+    def read(self, session_id: str):
+        return self._repository.read(session_id)
+
+    def execute(self, state, mutation=None, transition=None):
+        if isinstance(state, ExecutionRequest):
+            return self._repository.execute(state)
+        proposed = copy.deepcopy(state)
+        mutation(proposed)
+        return proposed
+
+    def save(
+        self,
+        state: dict,
+        *,
+        backup: bool = True,
+        administrative: bool = False,
+        aggregate_action: str | None = None,
+    ) -> None:
+        del backup, administrative
+        if self._format_guard is not None:
+            self._format_guard()
+        admitted = self._admitted
+        if admitted is None:
+            raise FencedCommitError("request-invalid", "v5 transaction was not loaded")
+        proposed = self._prepare_state(copy.deepcopy(state))
+        state_bytes = json.dumps(
+            proposed,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        prepared = self._repository._stage_persistence(
+            admitted,
+            state_bytes=state_bytes,
+            effects=(),
+        )
+        self._repository.commit(prepared, prepared.precondition)
+        self._admitted = None
+        if self._lease_committed is not None:
+            self._lease_committed(admitted.pending_lease, proposed)
+        callback = {
+            None: None,
+            "add": self._add_to_aggregate,
+            "remove": self._remove_from_aggregate,
+        }.get(aggregate_action)
+        if aggregate_action not in {None, "add", "remove"}:
+            raise ValueError("unknown aggregate action")
+        if callback is not None:
+            try:
+                callback()
+            except Exception as exc:
+                raise AggregateIndexError(str(exc)) from exc
+
+    validate_effects = staticmethod(LegacyV4Repository.validate_effects)

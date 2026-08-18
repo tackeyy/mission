@@ -138,6 +138,11 @@ class LegacyMissionRepository(MissionRepository, Protocol):
 class RecoverableUnitOfWork(MissionRepository, Protocol):
     """Stronger v5 repository protocol; legacy v4 must not claim this type."""
 
+    def initialize(
+        self, request: ExecutionRequest, *, state_bytes: bytes
+    ) -> CommitResult:
+        ...
+
     def begin(self, request: ExecutionRequest) -> object:
         ...
 

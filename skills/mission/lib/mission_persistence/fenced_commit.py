@@ -2007,6 +2007,33 @@ class LocalFencedRepository:
             precondition = CommitPrecondition(base_generation, head_digest, pending.digest)
             return AdmittedSnapshot(request, base, pending, base_generation + 1, precondition)
 
+    def initialize(
+        self,
+        request: ExecutionRequest,
+        *,
+        state_bytes: bytes,
+    ) -> CommitResult:
+        """Publish the sole admitted genesis path for a v5 session.
+
+        Genesis deliberately accepts validated v4 projection bytes.  The v5
+        authority is the head/commit/generation/object lineage; later typed
+        transitions retain the existing canonical encoding rules.
+        """
+        admitted = self.begin(request)
+        if isinstance(admitted, CommitResult):
+            return admitted
+        if admitted.base is not None:
+            raise FencedCommitError(
+                "session-already-initialized",
+                "the v5 session already has an authoritative head",
+            )
+        prepared = self._stage_persistence(
+            admitted,
+            state_bytes=state_bytes,
+            effects=(),
+        )
+        return self.commit(prepared, prepared.precondition)
+
     def stage(
         self,
         admitted: AdmittedSnapshot,

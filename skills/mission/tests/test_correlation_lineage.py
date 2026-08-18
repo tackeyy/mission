@@ -7,7 +7,15 @@ import os
 import subprocess
 import sys
 
+import pytest
+
 from .conftest import MISSION_STATE_PY
+
+
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Supersede/correlation admin commands remain v4-owned until #543."""
+    return legacy_run_cli
 
 
 ITEMS = {
@@ -95,7 +103,14 @@ def test_init_allocates_unique_review_generations_under_one_project_lock(tmp_pat
         ))
     results = [process.communicate() for process in processes]
     assert all(process.returncode == 0 for process in processes), results
-    states = [json.loads(path.read_text()) for path in (tmp_path / ".mission-state" / "sessions").glob("*.json")]
+    from mission_persistence.authoritative_reader import read_authoritative_snapshot
+
+    states = [
+        read_authoritative_snapshot(
+            path, expected_session_id=path.stem
+        ).document_copy()
+        for path in (tmp_path / ".mission-state" / "sessions").glob("*.json")
+    ]
     generations = sorted(state["review_generation"] for state in states)
     assert generations == list(range(1, 9))
     assert sum(state["review_generation"] == max(generations) and state["loop_active"] for state in states) == 1

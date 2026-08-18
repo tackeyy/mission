@@ -8,6 +8,12 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Core-plan adoption commands remain retained-v4 owned until #543."""
+    return legacy_run_cli
+
+
 def _document(*, objective="bounded core plan"):
     return {
         "objective": objective,

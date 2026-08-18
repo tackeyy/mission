@@ -5,6 +5,12 @@ import json
 import pytest
 
 
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Specialist checkpoint commands remain retained-v4 owned until #543."""
+    return legacy_run_cli
+
+
 
 def _read_state(root):
     return json.loads(

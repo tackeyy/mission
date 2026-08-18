@@ -5,9 +5,13 @@
 """
 import json
 
+from mission_persistence.authoritative_reader import read_authoritative_snapshot
+
 
 def _read(tmp_path):
-    return json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
+    path = tmp_path / ".mission-state" / "sessions" / "test.json"
+    snapshot = read_authoritative_snapshot(path, expected_session_id="test")
+    return json.loads(snapshot.state_bytes)
 
 
 def test_init_with_complexity_sets_field(run_cli, tmp_path):

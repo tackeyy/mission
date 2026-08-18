@@ -15,6 +15,12 @@ from skills.mission.lib.pregate_cache import subject_digest as compute_subject_d
 _TEST_NOW = datetime.now(timezone.utc)
 
 
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Pregate cache mutation ownership remains retained-v4 until #543."""
+    return legacy_run_cli
+
+
 def _cache_dir(root: Path) -> Path:
     return root / ".mission-state" / "pregate"
 

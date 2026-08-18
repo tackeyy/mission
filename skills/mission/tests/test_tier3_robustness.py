@@ -11,6 +11,12 @@ MISSION_STATE_PY = Path(__file__).resolve().parent.parent / "bin" / "mission-sta
 LEASE_FIELDS = ("owner_session_id", "lease_id", "fencing_epoch", "lease_expires_at")
 
 
+@pytest.fixture
+def run_cli(legacy_run_cli):
+    """Tier3 admin command races remain retained-v4 owned until #543."""
+    return legacy_run_cli
+
+
 def _make_legacy_state(path):
     data = json.loads(path.read_text())
     for key in LEASE_FIELDS:
