@@ -57,6 +57,35 @@ def test_cleanup_empty_removes_empty_dir(tmp_path, run_cli):
     assert not (tmp_path / ".mission-state").exists()
 
 
+def test_cleanup_empty_removes_state_with_only_tmp_artifacts(tmp_path, run_cli):
+    tmp_dir = tmp_path / ".mission-state" / "tmp"
+    tmp_dir.mkdir(parents=True)
+    (tmp_dir / "mission-scorer-iter-1-abc12345.json").write_text("{}")
+
+    r = run_cli("cleanup-empty", str(tmp_path), cwd=tmp_path)
+
+    assert json.loads(r.stdout)["action"] == "removed"
+    assert not (tmp_path / ".mission-state").exists()
+
+
+def test_cleanup_empty_keeps_tmp_when_other_state_remains(tmp_path, run_cli):
+    state_dir = tmp_path / ".mission-state"
+    tmp_dir = state_dir / "tmp"
+    sessions_dir = state_dir / "sessions"
+    tmp_dir.mkdir(parents=True)
+    sessions_dir.mkdir()
+    artifact = tmp_dir / "mission-scorer-iter-1-abc12345.json"
+    session = sessions_dir / "active.json"
+    artifact.write_text("{}")
+    session.write_text("{}")
+
+    r = run_cli("cleanup-empty", str(tmp_path), cwd=tmp_path)
+
+    assert json.loads(r.stdout)["action"] == "skipped"
+    assert artifact.exists()
+    assert session.exists()
+
+
 def test_cleanup_empty_nothing_when_absent(tmp_path, run_cli):
     r = run_cli("cleanup-empty", str(tmp_path), cwd=tmp_path)
     assert json.loads(r.stdout)["action"] == "nothing"

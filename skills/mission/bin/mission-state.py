@@ -15641,12 +15641,21 @@ def cmd_update_project_root(args):
 
 
 def cmd_cleanup_empty(args):
-    """A-3: 空 .mission-state/ ディレクトリを rmdir."""
+    """A-3: 空または一時 artifact のみの .mission-state/ を削除."""
     target = Path(args.path).resolve() / ".mission-state"
     if not target.exists():
         print(json.dumps({"ok": True, "action": "nothing", "path": str(target)}))
         return
     contents = list(target.iterdir())
+    if (
+        len(contents) == 1
+        and not target.is_symlink()
+        and contents[0].name == "tmp"
+        and contents[0].is_dir()
+        and not contents[0].is_symlink()
+    ):
+        shutil.rmtree(contents[0])
+        contents = []
     if not contents:
         target.rmdir()
         print(json.dumps({"ok": True, "action": "removed", "path": str(target)}))

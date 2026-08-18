@@ -76,7 +76,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score \
     --min-item <最低項目スコア (items min を 0.1 超で上回らないこと)> \
     --items '{"mission_achievement": 4.0, "accuracy": 3.5, "completeness": 4.2, "usability": 3.8}' \
     --open-high <未解決High件数> \
-    --scoring-output /tmp/mission-scorer-iter-<N>-<mission_id先頭8>.md \
+    --scoring-output .mission-state/tmp/mission-scorer-iter-<N>-<mission_id先頭8>.md \
     [--resubmit-reason "<同一 iteration 再 push 時のみ必須>"] \
     [--notes "<任意のメモ>"]
 

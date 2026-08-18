@@ -34,6 +34,7 @@ def _review(path: Path) -> Path:
             "usability": 4.2,
         },
         "findings": [],
+        "same_score_note": None,
         "notes": "review",
     }))
     return path
@@ -104,5 +105,6 @@ def test_output_publish_rejects_same_size_file_replacement(tmp_path, monkeypatch
         module._publish_output_transaction(output, content)
 
     assert replaced is True
+    # Publication failure rolls back its own link; the competing replacement remains.
     assert output.read_bytes() == content
     assert os.stat(output).st_size == len(content)
