@@ -262,6 +262,9 @@ def test_core_adoption_does_not_publish_before_foreign_lease_rejection(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("MISSION_SESSION_ID", "test")
     monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    # v5 requires a caller-supplied operation ID; set one so the function
+    # reaches the transaction (and the lease check) rather than exiting early.
+    monkeypatch.setenv("MISSION_OPERATION_ID", "foreign-lease-test-op")
     monkeypatch.setattr(module, "_publish_output_transaction", record_publish)
 
     with pytest.raises(module.CommandOutcomeExit) as excinfo:

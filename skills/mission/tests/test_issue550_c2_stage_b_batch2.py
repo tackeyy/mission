@@ -1165,17 +1165,12 @@ def test_surrounding_commands_work_after_batch2_migration(run_cli, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_batch2_allowlist_is_exactly_three_commands():
-    """Batch 2 完了後 C2_DIRECT_WRITE_ALLOWLIST は 3 件のみ。"""
+def test_batch2_allowlist_post_batch3_is_empty():
+    """Batch 3 完了後 C2_DIRECT_WRITE_ALLOWLIST は空（Batch 2 完了時点では 3 件だったが、
+    Batch 3 (#550) で残り 3 件が移行されたため frozenset() になった）。"""
     from mission_application.command_owners import C2_DIRECT_WRITE_ALLOWLIST
 
-    assert C2_DIRECT_WRITE_ALLOWLIST == frozenset(
-        {
-            "manual-score-capture",
-            "planning adopt-core",
-            "planning promote-provider-plan",
-        }
-    )
+    assert C2_DIRECT_WRITE_ALLOWLIST == frozenset()
 
 
 def test_batch2_repository_commands_includes_all_8_specialists():

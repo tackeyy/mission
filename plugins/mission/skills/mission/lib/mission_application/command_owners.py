@@ -124,31 +124,21 @@ C2_REPOSITORY_COMMANDS = frozenset(
         "specialists invoke-prepared",
         "specialists reconcile-invocation",
         "specialists plan-import",
-    }
-)
-
-
-# These commands still own session-state mutations that bypass the repository.
-C2_DIRECT_WRITE_ALLOWLIST = frozenset(
-    {
-        "manual-score-capture",
+        # Batch 3: planning authority + scoring authority
         "planning adopt-core",
         "planning promote-provider-plan",
+        "manual-score-capture",
     }
 )
 
 
-# Parser adapters and their shared dispatch helper that can reach a direct
-# legacy session writer or lock.  The static inventory test follows
-# module-level helper calls; migration removes names instead of silently adding
-# new direct writers.
-C2_DIRECT_WRITE_FUNCTIONS = frozenset(
-    {
-        "cmd_manual_score_capture",
-        "cmd_planning_adopt_core",
-        "cmd_planning_promote_provider_plan",
-    }
-)
+# All mutating commands are now repository-owned.  The allowlist is empty.
+C2_DIRECT_WRITE_ALLOWLIST = frozenset()
+
+
+# Parser adapters that can reach a direct legacy session writer or lock.
+# Migration is complete; no cmd_* functions write directly.
+C2_DIRECT_WRITE_FUNCTIONS = frozenset()
 
 
 NON_SESSION_DIRECT_CALL_FUNCTIONS = frozenset(

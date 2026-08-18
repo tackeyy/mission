@@ -11823,9 +11823,47 @@ def cmd_manual_score_capture(args):
     except (ValueError, UnicodeDecodeError, json.JSONDecodeError, _DuplicateReviewJsonKey) as exc:
         print(f"ERROR: manual score input: {exc}", file=sys.stderr)
         sys.exit(2)
-    with StateLock(lock_file(cwd)), _PublishedFilesTransaction() as published_files:
-        data = json.loads(sf.read_text(encoding="utf-8"))
-        lease_decision = _enforce_session_lease_for_write(sf, data)
+    session_id = sf.stem
+    try:
+        target_bytes = sf.read_bytes()
+        inspected = inspect_repository_bytes(target_bytes, expected_session_id=session_id)
+        target_digest = "sha256:" + hashlib.sha256(target_bytes).hexdigest()
+        caller_operation_id, operation_arguments = _compatibility_operation_arguments(
+            {"out": args.out},
+            target_digest=target_digest,
+            require_caller=inspected.format is RepositoryFormat.V5,
+        )
+        operation_id, operation_command = _canonical_compatibility_operation(
+            session_id, "manual-score-capture", operation_arguments,
+            caller_operation_id=caller_operation_id,
+        )
+    except (OSError, RepositorySelectionError, ValueError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+    repository = _legacy_lifecycle_repository(
+        cwd, sf, stamp=True, strict_read=True, session_id=session_id,
+        operation_id=operation_id, operation_command=operation_command,
+        operation_command_type="manual-score-capture",
+    )
+    with repository.transaction(), _PublishedFilesTransaction() as published_files:
+        data = repository.load()
+        replayed = getattr(repository, "operation_replayed", False)
+        if replayed:
+            replay_digest = hashlib.sha256(content).hexdigest()
+            replay_mission8 = str(data.get("mission_id") or "unknown")[:8]
+            replay_iteration = payload.get("iteration")
+            replay_archive_name = f"iter-{replay_iteration}-{replay_mission8}-manual-{replay_digest[:16]}.json"
+            replay_archive = state_dir(cwd) / "archive" / replay_archive_name
+            replay_ref = legacy_manual_score_ref(typed_manual_score_ref({
+                "kind": "manual-score",
+                "path": str(replay_archive.relative_to(cwd)),
+                "digest": "sha256:" + replay_digest,
+                "generation": replay_digest[:16],
+                "revision_scope": payload["revision_scope"],
+            }))
+            print(json.dumps({"ok": True, "scoring_json": args.out, "manual_evidence_ref": replay_ref}, ensure_ascii=False))
+            return
+        _enforce_session_lease_for_write(sf, data)
         entry = {
             "iteration": payload.get("iteration"), "items": payload.get("items"),
             "composite": payload.get("composite"), "min_item": payload.get("min_item"),
@@ -11881,10 +11919,9 @@ def cmd_manual_score_capture(args):
             print(f"ERROR: manual scoring output rejected: {exc}", file=sys.stderr)
             sys.exit(2)
         data["updated_at"] = iso_now()
-        backup_state(sf)
         _verify_published_file(archive_publish)
         _verify_published_file(output_publish)
-        atomic_write_json(sf, stamp_metadata(data, cwd), lease_decision=lease_decision)
+        repository.save(data)
     print(json.dumps({"ok": True, "scoring_json": str(out), "manual_evidence_ref": ref}, ensure_ascii=False))
 
 
@@ -13765,10 +13802,35 @@ def cmd_planning_adopt_core(args):
         document = _validate_document(_strict_plan_load(raw), workspace=cwd)
     except PlanContractError as exc:
         _provider_gate(str(exc))
-
-    with StateLock(lock_file(cwd)), _PublishedFilesTransaction() as published_files:
-        data = json.loads(sf.read_text(encoding="utf-8"))
-        lease_decision = _enforce_session_lease_for_write(sf, data)
+    session_id = sf.stem
+    try:
+        target_bytes = sf.read_bytes()
+        inspected = inspect_repository_bytes(target_bytes, expected_session_id=session_id)
+        target_digest = "sha256:" + hashlib.sha256(target_bytes).hexdigest()
+        caller_operation_id, operation_arguments = _compatibility_operation_arguments(
+            {"source_id": args.source_id},
+            target_digest=target_digest,
+            require_caller=inspected.format is RepositoryFormat.V5,
+        )
+        operation_id, operation_command = _canonical_compatibility_operation(
+            session_id, "planning-adopt-core", operation_arguments,
+            caller_operation_id=caller_operation_id,
+        )
+    except (OSError, RepositorySelectionError, ValueError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+    repository = _legacy_lifecycle_repository(
+        cwd, sf, stamp=True, strict_read=True, session_id=session_id,
+        operation_id=operation_id, operation_command=operation_command,
+        operation_command_type="planning-adopt-core",
+    )
+    with repository.transaction(), _PublishedFilesTransaction() as published_files:
+        data = repository.load()
+        replayed = getattr(repository, "operation_replayed", False)
+        if replayed:
+            print(json.dumps({"ok": True, "canonical_plan": data.get("canonical_plan")}, indent=2 if args.json else None, ensure_ascii=False))
+            return
+        _enforce_session_lease_for_write(sf, data)
         if data.get("planning_policy_version") != 1 or data.get("phase") != "planning":
             _provider_gate("planning-policy-not-active")
         if data.get("planning_strategy") not in {None, "core"}:
@@ -13856,17 +13918,43 @@ def cmd_planning_adopt_core(args):
         data["planning_source_records"] = records
         data["updated_at"] = iso_now()
         _verify_published_file(candidate_file)
-        backup_state(sf)
-        atomic_write_json(sf, stamp_metadata(data, cwd), lease_decision=lease_decision)
+        repository.save(data)
     print(json.dumps({"ok": True, "canonical_plan": plan}, indent=2 if args.json else None, ensure_ascii=False))
 
 
 def cmd_planning_promote_provider_plan(args):
     """Promote only a #397-validated provider candidate to canonical authority."""
-    cwd = Path.cwd(); sf = resolve_state_file(cwd)
-    with StateLock(lock_file(cwd)):
-        data = json.loads(sf.read_text(encoding="utf-8"))
-        lease_decision = _enforce_session_lease_for_write(sf, data)
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    session_id = sf.stem
+    try:
+        target_bytes = sf.read_bytes()
+        inspected = inspect_repository_bytes(target_bytes, expected_session_id=session_id)
+        target_digest = "sha256:" + hashlib.sha256(target_bytes).hexdigest()
+        caller_operation_id, operation_arguments = _compatibility_operation_arguments(
+            {"invocation_id": args.invocation_id},
+            target_digest=target_digest,
+            require_caller=inspected.format is RepositoryFormat.V5,
+        )
+        operation_id, operation_command = _canonical_compatibility_operation(
+            session_id, "planning-promote-provider-plan", operation_arguments,
+            caller_operation_id=caller_operation_id,
+        )
+    except (OSError, RepositorySelectionError, ValueError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+    repository = _legacy_lifecycle_repository(
+        cwd, sf, stamp=True, strict_read=True, session_id=session_id,
+        operation_id=operation_id, operation_command=operation_command,
+        operation_command_type="planning-promote-provider-plan",
+    )
+    with repository.transaction():
+        data = repository.load()
+        replayed = getattr(repository, "operation_replayed", False)
+        if replayed:
+            print(json.dumps({"ok": True, "canonical_plan": data.get("canonical_plan")}, ensure_ascii=False))
+            return
+        _enforce_session_lease_for_write(sf, data)
         if data.get("planning_policy_version") != 1 or data.get("phase") != "planning":
             _provider_gate("planning-policy-not-active")
         if data.get("planning_strategy") != "provider-primary":
@@ -13901,7 +13989,8 @@ def cmd_planning_promote_provider_plan(args):
         data.setdefault("planning_source_records", {})[f"provider:{args.invocation_id}"] = {
             key: plan[key] for key in ("generation", "source", "source_id", "selection_source", "iteration")
         }
-        data["updated_at"] = iso_now(); backup_state(sf); atomic_write_json(sf, stamp_metadata(data, cwd), lease_decision=lease_decision)
+        data["updated_at"] = iso_now()
+        repository.save(data)
     print(json.dumps({"ok": True, "canonical_plan": plan}, ensure_ascii=False))
 
 

@@ -1767,15 +1767,13 @@ def test_c2_repository_and_direct_write_inventories_are_closed_and_disjoint():
             "specialists invoke-prepared",
             "specialists reconcile-invocation",
             "specialists plan-import",
-        }
-    )
-    assert C2_DIRECT_WRITE_ALLOWLIST == frozenset(
-        {
-            "manual-score-capture",
+            # Batch 3
             "planning adopt-core",
             "planning promote-provider-plan",
+            "manual-score-capture",
         }
     )
+    assert C2_DIRECT_WRITE_ALLOWLIST == frozenset()
     assert C2_REPOSITORY_COMMANDS.isdisjoint(C2_DIRECT_WRITE_ALLOWLIST)
     assert C2_REPOSITORY_COMMANDS | C2_DIRECT_WRITE_ALLOWLIST <= set(
         COMMAND_OWNER_REGISTRY
@@ -1798,6 +1796,10 @@ def test_c2_repository_commands_have_no_direct_legacy_session_writer_calls():
         "cmd_invoke_command_provider",
         "cmd_reconcile_provider_invocation",
         "cmd_plan_import",
+        # Batch 3
+        "cmd_planning_adopt_core",
+        "cmd_planning_promote_provider_plan",
+        "cmd_manual_score_capture",
     }
 
     assert forbidden_calls_in_reachable(target_names) == []
@@ -1846,6 +1848,21 @@ def test_direct_legacy_call_allowlist_has_no_stale_entries():
     )
 
     assert ALLOWED_NON_C2_CALL_SITES - unallowlisted_call_sites == set()
+
+
+def test_c2_direct_write_allowlist_is_empty():
+    """Enforce that the C2 migration is complete: no mutating command bypasses the repository.
+
+    This test is the mechanical guarantee that every mutating command goes through
+    the repository.  If a future change adds an entry to C2_DIRECT_WRITE_ALLOWLIST,
+    CI turns Red here before the regression reaches production.
+    """
+    from mission_application.command_owners import C2_DIRECT_WRITE_ALLOWLIST
+
+    assert C2_DIRECT_WRITE_ALLOWLIST == frozenset(), (
+        "C2_DIRECT_WRITE_ALLOWLIST must remain empty after Batch 3 migration. "
+        f"Found: {C2_DIRECT_WRITE_ALLOWLIST!r}"
+    )
 
 
 def test_a1_registry_has_one_owner_for_every_lifecycle_command():
