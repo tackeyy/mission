@@ -836,6 +836,175 @@ def test_kill_during_post_resolution_projection_cleanup_is_resumable(tmp_path):
     assert not list((repository / "transactions" / "projections").iterdir())
 
 
+@pytest.mark.parametrize(
+    "fault_point",
+    (
+        "after-operation-publish",
+        "after-lineage-verify",
+        "after-resolution-marker",
+    ),
+)
+def test_post_head_fault_with_projection_rolls_forward_idempotently(
+    tmp_path,
+    fault_point,
+):
+    local, repository, clock, _state_path, base_bytes, _result = _commit_cli_init(tmp_path)
+    clock_text = clock.current.strftime("%Y-%m-%dT%H:%M:%SZ")
+    target_bytes = _cli_mutation_from_bytes(
+        tmp_path / "actual-cli-target",
+        base_bytes,
+        lease_id="fixture-lease",
+        now=clock_text,
+        phase="reviewing",
+    )
+    target_path = tmp_path / "actual-cli-target-state.json"
+    target_path.write_bytes(target_bytes)
+    projection = repository.parent / "compatibility" / "state.json"
+    projection.parent.mkdir(parents=True)
+    projection.write_bytes(base_bytes)
+
+    killed = _kill_during_commit(
+        repository,
+        target_path,
+        clock_text=clock_text,
+        fault_point=fault_point,
+        projection_source=target_path,
+        projection_relative_path="compatibility/state.json",
+    )
+
+    assert killed.returncode == 91, killed.stderr
+    assert local.read("test").state_bytes == target_bytes
+    assert projection.read_bytes() == target_bytes
+    published_identity = _projection_identity(projection)
+    operation_path = local._operation_path("test", "operation-crash-recovery")
+    assert operation_path.exists()
+    resolved_operations = {
+        json.loads(path.read_bytes())["operation_id"]
+        for path in (repository / "transactions" / "resolved").glob("*.json")
+    }
+    assert ("operation-crash-recovery" in resolved_operations) == (
+        fault_point == "after-resolution-marker"
+    )
+    projection.unlink()
+
+    first = local.recover("test")
+    all_after_first = _all_regular_files(repository)
+    second = local.recover("test")
+
+    assert first == second
+    assert projection.read_bytes() == target_bytes
+    assert _projection_identity(projection) == published_identity
+    assert operation_path.exists()
+    assert all_after_first == _all_regular_files(repository)
+    assert not list((repository / "transactions" / "prepared").glob("*.json"))
+    assert not list((repository / "transactions" / "projections").iterdir())
+
+
+def test_resolved_operation_lookup_uses_index_without_scanning_history(
+    tmp_path,
+    monkeypatch,
+):
+    import mission_persistence.fenced_commit as fenced_commit
+
+    local, repository, _clock, _state_path, _base_bytes, _result = _commit_cli_init(tmp_path)
+    resolved = repository / "transactions" / "resolved"
+    index_path = local._resolved_operation_path("test", "operation-init")
+
+    assert next(resolved.glob("*.json")).exists()
+    assert index_path.exists()
+    resolved_identity = (resolved.stat().st_dev, resolved.stat().st_ino)
+    real_listdir = os.listdir
+
+    def reject_resolved_scan(path):
+        if isinstance(path, int):
+            metadata = os.fstat(path)
+            if (metadata.st_dev, metadata.st_ino) == resolved_identity:
+                raise AssertionError("resolved history was scanned")
+        return real_listdir(path)
+
+    monkeypatch.setattr(fenced_commit.os, "listdir", reject_resolved_scan)
+
+    admitted = local.begin(
+        _request(
+            operation_id="operation-after-index",
+            lease_id="fixture-lease",
+            argv=("set", "phase=reviewing"),
+        )
+    )
+
+    assert admitted.request.operation_id == "operation-after-index"
+
+
+def test_legacy_resolved_marker_is_migrated_to_operation_index(tmp_path):
+    from mission_persistence.fenced_commit import FencedCommitError
+
+    local, repository, clock, _state_path, base_bytes, _result = _commit_cli_init(tmp_path)
+    clock_text = clock.current.strftime("%Y-%m-%dT%H:%M:%SZ")
+    target_bytes = _cli_mutation_from_bytes(
+        tmp_path / "legacy-resolution-target",
+        base_bytes,
+        lease_id="fixture-lease",
+        now=clock_text,
+        phase="reviewing",
+    )
+    target_path = tmp_path / "legacy-resolution-target.json"
+    target_path.write_bytes(target_bytes)
+    killed = _kill_during_commit(
+        repository,
+        target_path,
+        clock_text=clock_text,
+        fault_point="after-prepare",
+    )
+    assert killed.returncode == 91, killed.stderr
+    local.recover("test")
+
+    legacy_marker = next(
+        path
+        for path in (repository / "transactions" / "resolved").glob("*.json")
+        if json.loads(path.read_bytes())["operation_id"] == "operation-crash-recovery"
+    )
+    index_root = repository / "transactions" / "resolved-operations"
+    for path in index_root.rglob("*"):
+        if path.is_file():
+            path.unlink()
+    index_path = local._resolved_operation_path(
+        "test",
+        "operation-crash-recovery",
+        "rolled-back",
+    )
+    assert legacy_marker.exists()
+    assert not index_path.exists()
+
+    with pytest.raises(FencedCommitError) as collision:
+        local.begin(
+            _request(
+                operation_id="operation-crash-recovery",
+                lease_id="fixture-lease",
+                argv=("set", "phase=scoring"),
+            )
+        )
+
+    assert collision.value.code == "operation-intent-collision"
+    assert legacy_marker.exists()
+    assert index_path.exists()
+
+
+def test_open_prepare_rejection_has_no_session_parameter_and_is_ambiguous(tmp_path):
+    from mission_persistence.fenced_commit import FencedCommitError, LocalFencedRepository
+
+    repository = tmp_path / "repository" / ".mission-state"
+    local = LocalFencedRepository(repository)
+    local.recover("test")
+    prepare = repository / "transactions" / "prepared" / ("a" * 32 + ".json")
+    prepare.write_bytes(b"{}")
+
+    with local._lock():
+        with pytest.raises(FencedCommitError) as blocked:
+            local._reject_open_prepare()
+
+    assert blocked.value.code == "recovery-ambiguous"
+
+
 def test_target_cleanup_resumes_after_private_after_link_is_removed(tmp_path):
     local, repository, clock, _state_path, base_bytes, _result = _commit_cli_init(tmp_path)
     clock_text = clock.current.strftime("%Y-%m-%dT%H:%M:%SZ")
