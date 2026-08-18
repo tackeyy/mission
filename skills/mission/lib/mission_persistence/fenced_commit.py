@@ -1853,7 +1853,11 @@ class LocalFencedRepository:
                         name,
                         limit=MAX_OPERATION_BYTES,
                     )
-                    assert content is not None
+                    if content is None:
+                        raise FencedCommitError(
+                            "recovery-ambiguous",
+                            "recovery operation index entry is missing",
+                        )
                     try:
                         self._parse_resolution_index(
                             content,
@@ -1887,7 +1891,11 @@ class LocalFencedRepository:
                     name,
                     limit=MAX_OPERATION_BYTES,
                 )
-                assert content is not None
+                if content is None:
+                    raise FencedCommitError(
+                        "recovery-ambiguous",
+                        "resolved transaction entry is missing",
+                    )
                 try:
                     resolution = _parse_recovery_resolution(
                         content,
