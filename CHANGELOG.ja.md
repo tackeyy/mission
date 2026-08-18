@@ -9,6 +9,50 @@
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-08-18
+
+Wave 3 では Typed Mission Kernel と UnitOfWork の基盤を導入しつつ、新規 session は schema v4 のまま維持します。versioned aggregate / decoder、private staging と fenced CAS、crash recovery、generation GC、統合 transition table、そしてその上に載る repository / authoritative reader の結合を段階的に入れました。
+
+- feat: authoritative state consumer を versioned reader へ移行し、読取側が段階的な state format 変化に追従できるようにしました。live の v4 session cutover は変えていません (#541)。
+
+- docs: P1 と C1 の migration boundary を同期し、文書上の handoff を現在の実装分割に合わせました (#540)。
+
+- feat: repository を format-pinned storage と v5 UnitOfWork contract に束縛し、既存 session の互換を保ったまま段階移行の土台を入れました (#538)。
+
+- refactor: runtime guard の observation writer を独立した境界へ抽出し、観測出力を guard の周辺処理から分離しました (#537)。
+
+- refactor: artifact / progress / context evidence を専用 use case へ抽出し、これらの evidence 経路を高位の orchestration から切り分けました (#536)。
+
+- refactor: plan / handoff / provider evidence を authority を移さずに専用 use case へ抽出しました (#535)。
+
+- refactor: review / score / pass の authority boundary を抽出し、decision gate を明示的で追いやすい形にしました (#534)。
+
+- refactor: lifecycle use case を v4 互換 repository boundary へ抽出し、内部構造を進めながら既存 session の可読性を保ちました (#532)。
+
+- test: reference 保護の物理確認と error boundary への例外変換を追加し、failure boundary を観測可能にしました (#533)。
+
+- feat: reference-safe な generation garbage collection を追加し、古い generation を削除しても reference 保護を弱めないようにしました (#531)。
+
+- test: pregate テストを clock injection で日付非依存にし、release 検証がカレンダーに左右されないようにしました (#530)。
+
+- feat: UnitOfWork の deterministic な crash recovery を追加し、中断された write が部分 state を残さず再開できるようにしました (#527)。
+
+- refactor: transition と next の処理を単一の transition table に統合し、重複した遷移ロジックを減らしました (#526)。
+
+- docs: ADR-005 §3 / §5 を K2 の guidance authority 判断に合わせて改訂し、文書上の decision boundary を実装と揃えました (#525)。
+
+- docs: K2 の guidance authority 判断を transition layer で確定し、実装契約を明確にしました (#522)。
+
+- feat: fenced generation CAS と immutable commit/head record を追加し、同時 generation 更新で shared state が壊れないようにしました (#524)。
+
+- feat: UnitOfWork の private staging と immutable generation 公開を追加し、state を見える前に準備できるようにしました (#521)。
+
+- feat: versioned MissionState aggregate と v1-v4 decoder を導入し、段階移行中も legacy session を読み続けられるようにしました (#520)。
+
+- docs(design): versioned aggregate と decoder 経路の K1 実装設計を確定しました (#519)。
+
+- test: scaling 検証を load-independent な計測へ変更し、テスト環境ではなく system の挙動を測るようにしました (#518)。
+
 ## [2.6.0] - 2026-08-14
 
 - test: schema v1-v4 の golden snapshot を既知 version まで揃え、未知 schema version は validation で fail-closed にしました (#483)。
@@ -461,6 +505,7 @@
 - 状態ルーティング・スコアゲート・hook 挙動をカバーする Python テストスイート。
 - GitHub Actions CI（`push` / `pull_request` / `workflow_dispatch`）。pytest と ShellCheck を実行。
 
+[2.7.0]: https://github.com/tackeyy/mission/releases/tag/v2.7.0
 [2.6.0]: https://github.com/tackeyy/mission/releases/tag/v2.6.0
 [2.5.0]: https://github.com/tackeyy/mission/releases/tag/v2.5.0
 [2.4.0]: https://github.com/tackeyy/mission/releases/tag/v2.4.0

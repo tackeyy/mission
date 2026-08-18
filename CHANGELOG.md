@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-08-18
+
+Wave 3 introduces the Typed Mission Kernel and UnitOfWork foundation while keeping new sessions on schema v4. It stages the internal migration through the versioned aggregate/decoder, private staging and fenced CAS, crash recovery, generation GC, the unified transition table, and the repository and authoritative-reader bindings layered above them.
+
+- feat: move the authoritative state consumer to a versioned reader so readers follow the staged state-format evolution without changing the live v4 session cutover (#541).
+
+- docs: synchronize the P1 and C1 migration boundaries so the documented handoff matches the current implementation split (#540).
+
+- feat: bind the repository to format-pinned storage and the v5 UnitOfWork contract, laying the foundation for the staged internal migration while keeping existing sessions compatible (#538).
+
+- refactor: extract the runtime guard observation writer into its own boundary, which isolates observation emission from the surrounding guard flow (#537).
+
+- refactor: extract artifact, progress, and context evidence handling into dedicated use cases so those evidence paths are managed separately from higher-level orchestration (#536).
+
+- refactor: extract plan, handoff, and provider evidence handling into dedicated use cases without moving authority across boundaries (#535).
+
+- refactor: extract review, score, and pass authority boundaries so the decision gates are explicit and easier to reason about (#534).
+
+- refactor: extract the lifecycle use case into a v4-compatible repository boundary, preserving existing session readability while the internal structure moves forward (#532).
+
+- test: add physical verification for reference protection and exception-to-error-boundary conversion so the failure boundary stays observable (#533).
+
+- feat: add reference-safe generation garbage collection so stale generations can be removed without weakening reference protection (#531).
+
+- test: make pregate tests date-independent with clock injection so release verification no longer depends on the calendar (#530).
+
+- feat: add deterministic crash recovery for UnitOfWork so interrupted writes can resume safely instead of leaving partial state behind (#527).
+
+- refactor: collapse transition and next handling into a single transition table, reducing duplicated state-transition logic (#526).
+
+- docs: revise ADR-005 §3 and §5 to match the K2 guidance-authority decision, keeping the documented decision boundary aligned with the code path (#525).
+
+- docs: confirm the K2 guidance-authority decision for the transition layer so the implementation contract is explicit (#522).
+
+- feat: add fenced generation CAS and immutable commit/head records to prevent concurrent generation races from mutating shared state (#524).
+
+- feat: add private staging and immutable generation publication for UnitOfWork so state is prepared before it becomes visible (#521).
+
+- feat: introduce a versioned MissionState aggregate and v1-v4 decoder so legacy sessions remain readable during the staged migration (#520).
+
+- docs(design): finalize the K1 implementation design for the versioned aggregate and decoder path (#519).
+
+- test: change the scaling verification to load-independent measurement so the check reflects the system rather than the test environment (#518).
+
 ## [2.6.0] - 2026-08-14
 
 - test: schema v1-v4 golden snapshots now cover the known versions, and unknown schema versions fail closed during validation (#483).
@@ -461,6 +505,7 @@ First public release.
 - Python test suite covering state routing, scoring gates, and hook behavior.
 - GitHub Actions CI (`push`, `pull_request`, `workflow_dispatch`) with pytest and ShellCheck.
 
+[2.7.0]: https://github.com/tackeyy/mission/releases/tag/v2.7.0
 [2.6.0]: https://github.com/tackeyy/mission/releases/tag/v2.6.0
 [2.5.0]: https://github.com/tackeyy/mission/releases/tag/v2.5.0
 [2.4.0]: https://github.com/tackeyy/mission/releases/tag/v2.4.0
