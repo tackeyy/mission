@@ -59,7 +59,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py closeout
 
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score \
     --iteration <N> \
-    --scoring-json /tmp/mission-scorer-iter-<N>-<mission_id先頭8>.json \
+    --scoring-json .mission-state/tmp/mission-scorer-iter-<N>-<mission_id先頭8>.json \
     --open-high <未解決High件数>
 # JSON 形式: {"items": {"mission_achievement": 4.0, "accuracy": 3.5, "completeness": 4.2, "usability": 3.8}, "review_agreement": 4.5, "notes": "<任意>", "open_high": 0}
 # items は4軸だけで、review_agreement は composite/min に含めない独立フィールド。
@@ -76,7 +76,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py push-score \
     --min-item <最低項目スコア (items min を 0.1 超で上回らないこと)> \
     --items '{"mission_achievement": 4.0, "accuracy": 3.5, "completeness": 4.2, "usability": 3.8}' \
     --open-high <未解決High件数> \
-    --scoring-output /tmp/mission-scorer-iter-<N>-<mission_id先頭8>.md \
+    --scoring-output .mission-state/tmp/mission-scorer-iter-<N>-<mission_id先頭8>.md \
     [--resubmit-reason "<同一 iteration 再 push 時のみ必須>"] \
     [--notes "<任意のメモ>"]
 
