@@ -228,9 +228,13 @@ def test_recommend_record_state_persists_selection_metadata(run_cli, tmp_path):
         "--json",
         ),
         cwd=tmp_path,
+        env_extra={"MISSION_OPERATION_ID": "op-recommend-record-state"},
     )
     data = _json_result(r)
-    state = json.loads((tmp_path / ".mission-state" / "sessions" / "test.json").read_text())
+    # Read back through the authoritative reader: under v5 the session file is a
+    # head record and the recorded selection lives in the repository, so reading
+    # sessions/test.json directly would no longer observe it.
+    state = _json_result(run_cli("get", cwd=tmp_path, check=True))
     assert state["task_profile"] == data["task_profile"]
     assert state["specialists_candidates"] == data["specialists_candidates"]
     assert state["specialists_selected"] == data["specialists_selected"]

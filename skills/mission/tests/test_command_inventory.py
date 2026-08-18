@@ -1758,6 +1758,15 @@ def test_c2_repository_and_direct_write_inventories_are_closed_and_disjoint():
             "executor-handoff verify-step",
             "planning reselect",
             "supersede-reviews",
+            # Batch 2
+            "specialists recommend",
+            "specialists log-invocation",
+            "specialists verify-approval",
+            "specialists prepare-invocation",
+            "specialists invoke-command",
+            "specialists invoke-prepared",
+            "specialists reconcile-invocation",
+            "specialists plan-import",
         }
     )
     assert C2_DIRECT_WRITE_ALLOWLIST == frozenset(
@@ -1765,14 +1774,6 @@ def test_c2_repository_and_direct_write_inventories_are_closed_and_disjoint():
             "manual-score-capture",
             "planning adopt-core",
             "planning promote-provider-plan",
-            "specialists invoke-command",
-            "specialists invoke-prepared",
-            "specialists log-invocation",
-            "specialists plan-import",
-            "specialists prepare-invocation",
-            "specialists recommend",
-            "specialists reconcile-invocation",
-            "specialists verify-approval",
         }
     )
     assert C2_REPOSITORY_COMMANDS.isdisjoint(C2_DIRECT_WRITE_ALLOWLIST)
@@ -1789,6 +1790,14 @@ def test_c2_repository_commands_have_no_direct_legacy_session_writer_calls():
         "cmd_executor_handoff_verify",
         "cmd_planning_reselect",
         "cmd_supersede_reviews",
+        # Batch 2
+        "cmd_specialists",
+        "cmd_log_specialist_invocation",
+        "cmd_verify_provider_approval",
+        "cmd_prepare_provider_invocation",
+        "cmd_invoke_command_provider",
+        "cmd_reconcile_provider_invocation",
+        "cmd_plan_import",
     }
 
     assert forbidden_calls_in_reachable(target_names) == []

@@ -115,25 +115,25 @@ C2_REPOSITORY_COMMANDS = frozenset(
         "executor-handoff verify-step",
         "planning reselect",
         "supersede-reviews",
+        # Batch 2: specialists 8 commands
+        "specialists recommend",
+        "specialists log-invocation",
+        "specialists verify-approval",
+        "specialists prepare-invocation",
+        "specialists invoke-command",
+        "specialists invoke-prepared",
+        "specialists reconcile-invocation",
+        "specialists plan-import",
     }
 )
 
 
 # These commands still own session-state mutations that bypass the repository.
-# Keeping every remaining Stage B command here makes migration gaps explicit.
 C2_DIRECT_WRITE_ALLOWLIST = frozenset(
     {
         "manual-score-capture",
         "planning adopt-core",
         "planning promote-provider-plan",
-        "specialists invoke-command",
-        "specialists invoke-prepared",
-        "specialists log-invocation",
-        "specialists plan-import",
-        "specialists prepare-invocation",
-        "specialists recommend",
-        "specialists reconcile-invocation",
-        "specialists verify-approval",
     }
 )
 
@@ -144,16 +144,9 @@ C2_DIRECT_WRITE_ALLOWLIST = frozenset(
 # new direct writers.
 C2_DIRECT_WRITE_FUNCTIONS = frozenset(
     {
-        "cmd_invoke_command_provider",
-        "cmd_log_specialist_invocation",
         "cmd_manual_score_capture",
-        "cmd_plan_import",
         "cmd_planning_adopt_core",
         "cmd_planning_promote_provider_plan",
-        "cmd_prepare_provider_invocation",
-        "cmd_reconcile_provider_invocation",
-        "cmd_specialists",
-        "cmd_verify_provider_approval",
     }
 )
 
