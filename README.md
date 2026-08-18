@@ -240,7 +240,7 @@ installed cache path and keep `CLAUDE_PLUGIN_ROOT` as a compatibility alias for
 the current model-visible command text:
 
 ```bash
-export MISSION_PLUGIN_ROOT="${CODEX_HOME:-$HOME/.codex}/plugins/cache/mission-marketplace/mission/2.7.0"
+export MISSION_PLUGIN_ROOT="${CODEX_HOME:-$HOME/.codex}/plugins/cache/mission-marketplace/mission/2.8.0"
 export CLAUDE_PLUGIN_ROOT="$MISSION_PLUGIN_ROOT"
 ```
 
@@ -322,18 +322,18 @@ Additional project-specific testing guidance is in
 
 ## Verified Behavior
 
-E2E verification was re-run on 2026-08-18 with Claude Code 2.1.222 against
-mission 2.7.0, installing the plugin from the local marketplace into an isolated
+E2E verification was re-run on 2026-08-19 with Claude Code 2.1.226 against
+mission 2.8.0, installing the plugin from the local marketplace into an isolated
 `CLAUDE_CONFIG_DIR`.
 
 Verified:
 
 - `claude plugin validate` accepts the marketplace manifest
-- `claude plugin install mission@mission-marketplace` installs 2.7.0 and reports it as enabled
+- `claude plugin install mission@mission-marketplace` installs 2.8.0 and reports it as enabled
 - `claude plugin details mission` lists six skills and one Stop hook at roughly 149 always-on tokens
-- The installed cache resolves to `<config>/plugins/cache/mission-marketplace/mission/2.7.0`, matching the documented `MISSION_PLUGIN_ROOT` example
+- The installed cache resolves to `<config>/plugins/cache/mission-marketplace/mission/2.8.0`, matching the documented `MISSION_PLUGIN_ROOT` example
 - `mission-state.py` from the installed cache creates `.mission-state/sessions/*.json` and passes its permission preflight
-- The Python test suite passes (`make test`: 3244 passed, `make test-e2e`: 3 passed)
+- The Python test suite passes (`make test`: 4209 passed, `make test-e2e`: 3 passed)
 
 Unqualified subskill name resolution during execution was verified in the
 earlier 2026-06-14 run with Claude Code 2.1.177 and was not re-checked in this
