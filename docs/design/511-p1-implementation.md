@@ -11,10 +11,10 @@ the production CLI.
   effects)`. That is the private U2 seam called out by the owner comment on
   Issue #511; bytes supplied there have not been proven to come from a sealed
   kernel `Transition`.
-- A1-A5 application use cases already name the `MissionRepository` port, but
-  the compatibility port is expressed as independent `load`, `execute`, and
-  `save` calls. Repository construction is repeated at CLI call sites and is
-  always legacy-specific.
+- The closed K2 commands can use the common `MissionRepository` port. A1-A5
+  compatibility mutations that have no closed K2 command still use the
+  narrower legacy `load`, callback `execute`, and `save` capability. Repository
+  construction is repeated at CLI call sites and is always legacy-specific.
 - No production command creates a v5 head. Existing v5 tests build isolated
   repositories directly.
 
@@ -43,11 +43,16 @@ the production CLI.
    environment-variable writer switch and never dual-writes.
 4. Route the A1-A5 CLI repository factories through the selector's legacy
    assertion now. This preserves exact v4 bytes while preventing an existing
-   v5 head from accidentally reaching a legacy writer. Production v5 creation
-   remains outside this Issue; isolated fixtures exercise the v5 binding.
-5. Add a static ownership inventory for the A1-A5 routed command set and cover
-   the new modules with recursive distribution, Python 3.9 parsing, mirror,
-   and artifact-hygiene gates.
+   v5 head from accidentally reaching a legacy writer. This is a runtime
+   format guard, not application-use-case integration with the common port.
+5. Add retained-selector runtime tests for the legacy factories and cover the
+   new modules with recursive distribution, Python 3.9 parsing, mirror, and
+   artifact-hygiene gates.
+
+Application connection for all five closed K2 commands, the complete v4/v5
+matrix, route ownership inventory, and every remaining compatibility mutation
+(including activity, generic set, and permission timing/activity projection)
+are mandatory C1 work in #513 before production v5 creation.
 
 ## Red to Green sequence
 
