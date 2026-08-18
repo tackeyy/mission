@@ -1600,7 +1600,11 @@ def _fenced_cli_outcome_kind(error_code: str) -> str:
     return "internal-error"
 
 
-def _reject_fenced_lease_for_cli(error: FencedCommitError) -> NoReturn:
+def _reject_fenced_lease_for_cli(
+    error: FencedCommitError,
+    *,
+    state_path: Optional[Path] = None,
+) -> NoReturn:
     """Translate v5 lease admission failures to the established v4 CLI shape."""
 
     if error.code not in {
@@ -1613,7 +1617,8 @@ def _reject_fenced_lease_for_cli(error: FencedCommitError) -> NoReturn:
         raise CommandOutcomeExit(2, _fenced_cli_outcome_kind(error.code))
     state = {}
     try:
-        _snapshot, state = _load_authoritative_state(resolve_state_file(Path.cwd()))
+        target_path = state_path or resolve_state_file(Path.cwd())
+        _snapshot, state = _load_authoritative_state(target_path)
     except (OSError, ValueError, FencedCommitError):
         pass
     owner = state.get("owner_session_id")
@@ -15060,8 +15065,9 @@ def _supersede_reviews_locked(args, cwd: Path):
 
     A mixed v4/v5 group can remain detectably inconsistent after a
     mid-publication failure: committed v5 generations are durable while
-    committed v4 generations are rolled back.  The caller must retry once
-    with the same MISSION_OPERATION_ID to converge the group.
+    committed v4 generations are rolled back.  When recovery must finalize a
+    durable v5 prepare, the caller retries with the same MISSION_OPERATION_ID;
+    a retained v4-only retry can converge under a new operation ID.
     """
 
     group = args.group
@@ -15199,8 +15205,7 @@ def _supersede_reviews_locked(args, cwd: Path):
             try:
                 committed = repository.read(target_session_id)
             except FencedCommitError as error:
-                print(f"ERROR: {error}", file=sys.stderr)
-                sys.exit(2)
+                _reject_fenced_lease_for_cli(error, state_path=state_path)
             # A crash after head publication leaves this terminal projection
             # plus a durable prepare.  The same caller operation must enter
             # begin() once more so repository recovery can finalize it.  A
@@ -15221,15 +15226,18 @@ def _supersede_reviews_locked(args, cwd: Path):
     try:
         # Admit every per-session fence before publishing the first generation.
         for generation, state_path, role, _session_id, repository in repositories:
-            with repository.transaction():
-                state = repository.load()
-                if (
-                    state.get("review_group_id") != group
-                    or state.get("review_generation") != generation
-                    or (role == "current") != (generation == current_generation)
-                ):
-                    raise ValueError("review group changed during supersede preflight")
-    except (OSError, ValueError, FencedCommitError) as error:
+            try:
+                with repository.transaction():
+                    state = repository.load()
+                    if (
+                        state.get("review_group_id") != group
+                        or state.get("review_generation") != generation
+                        or (role == "current") != (generation == current_generation)
+                    ):
+                        raise ValueError("review group changed during supersede preflight")
+            except FencedCommitError as error:
+                _reject_fenced_lease_for_cli(error, state_path=state_path)
+    except (OSError, ValueError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         sys.exit(2)
 
@@ -15243,11 +15251,13 @@ def _supersede_reviews_locked(args, cwd: Path):
         for _, state_path, state, _, _ in members
     }
     committed_legacy = []
+    failed_state_path = None
     try:
         # Old generations publish first.  A crash-safe retry replays completed
         # operations and continues forward; the current generation publishes
         # its supersedes index only after every old generation is terminal.
         for generation, state_path, role, _session_id, repository in repositories:
+            failed_state_path = state_path
             with repository.transaction():
                 state = repository.load()
                 if getattr(repository, "operation_replayed", False):
@@ -15312,6 +15322,8 @@ def _supersede_reviews_locked(args, cwd: Path):
                 + "; ".join(rollback_errors),
                 file=sys.stderr,
             )
+        elif isinstance(error, FencedCommitError) and failed_state_path is not None:
+            _reject_fenced_lease_for_cli(error, state_path=failed_state_path)
         else:
             print(
                 f"ERROR: supersede transaction was rolled back: {error}",

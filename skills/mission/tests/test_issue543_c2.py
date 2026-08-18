@@ -248,7 +248,7 @@ def test_planning_reselect_v5_requires_a_caller_stable_operation_id(
     assert _head(tmp_path, "planning") == before
 
 
-def test_stage_b_planning_adopt_core_fails_closed_for_a_v5_session(
+def test_planning_adopt_core_fails_closed_when_not_in_planning_phase(
     run_cli, tmp_path
 ):
     environment = _env("stage-b-observation", "stage-b-observation-lease")
@@ -262,6 +262,7 @@ def test_stage_b_planning_adopt_core_fails_closed_for_a_v5_session(
     )
     assert initialized.returncode == 0, initialized.stderr
     before = _head(tmp_path, "stage-b-observation")
+    assert before["schema"] == "mission-head/1"
     plan = tmp_path / "stage-b-plan.json"
     plan.write_text(
         json.dumps(
@@ -312,7 +313,6 @@ def test_stage_b_planning_adopt_core_fails_closed_for_a_v5_session(
     assert observed.returncode != 0
     assert "planning-policy-not-active" in observed.stderr
     assert _head(tmp_path, "stage-b-observation") == before
-    assert before["schema"] == "mission-head/1"
 
 
 def test_planning_reselect_preserves_retained_v4_behavior(
@@ -777,6 +777,7 @@ def test_supersede_reviews_serializes_discovery_with_separate_process_init(
         ready_path=init_ready,
     )
     _wait_for_lock_attempt(concurrent_init, init_ready)
+    assert concurrent_init.poll() is None
     release_locked_body.set()
     supersede_thread.join(timeout=10)
     assert not supersede_thread.is_alive()
@@ -868,6 +869,7 @@ def test_supersede_reviews_serializes_discovery_with_review_lineage_set(
         ready_path=set_ready,
     )
     _wait_for_lock_attempt(concurrent_set, set_ready)
+    assert concurrent_set.poll() is None
     release_locked_body.set()
     supersede_thread.join(timeout=10)
     assert not supersede_thread.is_alive()
@@ -958,6 +960,7 @@ def test_supersede_reviews_serializes_with_terminal_review_refresh_pid(
         ready_path=refresh_ready,
     )
     _wait_for_lock_attempt(concurrent_refresh, refresh_ready)
+    assert concurrent_refresh.poll() is None
     release_locked_body.set()
     supersede_thread.join(timeout=10)
     assert not supersede_thread.is_alive()
@@ -986,6 +989,7 @@ def test_supersede_reviews_rejects_a_live_old_v5_lease_without_any_write(
         session_id: _head(tmp_path, session_id)
         for session_id in ("old-live", "current-live")
     }
+    old_state = _state(run_cli, tmp_path, "old-live", "old-live-lease")
 
     rejected = run_cli(
         "supersede-reviews",
@@ -999,7 +1003,10 @@ def test_supersede_reviews_rejects_a_live_old_v5_lease_without_any_write(
     )
 
     assert rejected.returncode == 2
-    assert "lease" in rejected.stderr
+    assert (
+        "lease held by old-live until "
+        + old_state["lease_expires_at"]
+    ) in rejected.stderr
     assert {
         session_id: _head(tmp_path, session_id)
         for session_id in ("old-live", "current-live")
