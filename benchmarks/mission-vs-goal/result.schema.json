@@ -133,7 +133,8 @@
         "label_hidden_human",
         "automated_heuristic_not_blind_human",
         "automated_heuristic_form_stripped_not_blind_human",
-        "automated_heuristic_form_stripped_gradient_v2_not_blind_human"
+        "automated_heuristic_form_stripped_gradient_v2_not_blind_human",
+        "automated_heuristic_form_stripped_gradient_v2_not_blind_human_regex_v3"
       ]
     },
     "validator_fraction": {

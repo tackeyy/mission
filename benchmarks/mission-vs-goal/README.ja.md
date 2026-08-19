@@ -80,6 +80,8 @@ structure-credit の循環を除去します。strip 前の score は過去 reco
 `automated_heuristic_form_stripped_not_blind_human` になります — 自動 score は
 screen であり、blind human judgement ではありません。
 
+**測定定義変更（2026-08-19, #558）:** `tasks.tail.json` の quality marker パターンを、単純な部分文字列マッチから、spec 値と実装値（または drift/violation 語）の近接を要求する regex パターンへ書き換えました。marker を持つ run の `quality_score_method` は末尾が `_regex_v3` になります。この変更以前の run とスコアは**比較できません**。
+
 ## Protocol
 
 1. clean checkout または isolated worktree から開始する。

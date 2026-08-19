@@ -16,6 +16,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import statistics
 import subprocess
@@ -123,12 +124,33 @@ def quality_marker_names(task: dict) -> list[str]:
     return names
 
 
-def quality_marker_patterns(marker: str | dict) -> list[str]:
+def quality_marker_patterns(marker: str | dict) -> "list[tuple[str, str]]":
+    """Return list of (pattern_lowercased, match_type) tuples.
+
+    match_type is taken from the marker dict's ``match_type`` field, defaulting
+    to ``"substr"``.  Only ``"substr"`` and ``"regex"`` are valid; any other
+    value raises :class:`ValueError`.  For ``"regex"``, the pattern is compiled
+    at call time so an invalid regex raises immediately.
+    """
     if isinstance(marker, dict):
-        values = marker.get("patterns") or [marker["name"]]
+        raw_values = marker.get("patterns") or [marker["name"]]
+        match_type = marker.get("match_type", "substr")
     else:
-        values = [marker]
-    return [str(value).lower() for value in values]
+        raw_values = [marker]
+        match_type = "substr"
+
+    if match_type not in ("substr", "regex"):
+        raise ValueError(
+            f"Invalid match_type {match_type!r}; must be 'substr' or 'regex'."
+        )
+
+    result: list[tuple[str, str]] = []
+    for value in raw_values:
+        pat = str(value).lower()
+        if match_type == "regex":
+            re.compile(pat, re.DOTALL)  # raises re.error for invalid patterns
+        result.append((pat, match_type))
+    return result
 
 
 def strip_form(text: str) -> str:
@@ -164,6 +186,13 @@ def strip_form(text: str) -> str:
     return "\n".join(kept)
 
 
+def _marker_hit(pattern: str, match_type: str, lowered: str) -> bool:
+    """Return True if the pattern matches the lowered text."""
+    if match_type == "regex":
+        return bool(re.search(pattern, lowered, re.DOTALL))
+    return pattern in lowered
+
+
 def evaluate_quality_markers(text: str, task: dict) -> dict:
     markers = task.get("quality_markers", [])
     lowered = text.lower()
@@ -172,7 +201,7 @@ def evaluate_quality_markers(text: str, task: dict) -> dict:
     for marker in markers:
         name = str(marker["name"] if isinstance(marker, dict) else marker)
         patterns = quality_marker_patterns(marker)
-        if any(pattern in lowered for pattern in patterns):
+        if any(_marker_hit(pat, mt, lowered) for pat, mt in patterns):
             matched.append(name)
         else:
             missing.append(name)
@@ -181,7 +210,7 @@ def evaluate_quality_markers(text: str, task: dict) -> dict:
     for marker in task.get("forbidden_markers", []):
         name = str(marker["name"] if isinstance(marker, dict) else marker)
         patterns = quality_marker_patterns(marker)
-        if any(pattern in lowered for pattern in patterns):
+        if any(_marker_hit(pat, mt, lowered) for pat, mt in patterns):
             forbidden_matched.append(name)
 
     total = len(markers)
@@ -915,7 +944,7 @@ def evaluate_run(
         # #247: markered task は gradient v2、marker-less は legacy 二値の意味を保つ。
         # method 文字列で新旧 record を機械的に区別できる。
         "quality_score_method": (
-            "automated_heuristic_form_stripped_gradient_v2_not_blind_human"
+            "automated_heuristic_form_stripped_gradient_v2_not_blind_human_regex_v3"
             if has_markers
             else "automated_heuristic_form_stripped_not_blind_human"
         ),
