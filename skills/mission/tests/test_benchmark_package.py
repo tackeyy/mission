@@ -1,4 +1,5 @@
 import json
+import re
 import importlib.util
 from pathlib import Path
 
@@ -998,9 +999,20 @@ def test_mission_vs_goal_measured_reports_are_honest_about_paired_runs():
     tail_tasks = json.loads((BENCHMARK_DIR / "tasks.tail.json").read_text(encoding="utf-8"))
     config_drift = next(t for t in tail_tasks["tasks"] if t["id"] == "tail-config-spec-drift")
     health_marker = next(m for m in config_drift["quality_markers"] if m["name"] == "Drift: health interval 75s")
-    # patterns were rewritten to regex in #558; check representative content
-    assert any("75" in p for p in health_marker["patterns"])
+    # #558 で regex 化した。literal 断片の pin は意味を失うため、
+    # 元の guard の意図 (表記ゆれを取りこぼさない) を挙動で検証する。
     assert health_marker.get("match_type") == "regex"
+    _hit = lambda text: any(  # noqa: E731
+        re.search(pat, text.lower(), re.DOTALL) for pat in health_marker["patterns"]
+    )
+    for variant in (
+        "health check interval: spec 15s, runbook seconds=75",
+        "health interval | 15 | 75 |",
+        "health-check interval drift (15s spec vs `75` in runbook)",
+    ):
+        assert _hit(variant), f"health interval marker missed variant: {variant}"
+    # 値が片方しかない記述は同定になっていないので一致してはならない。
+    assert not _hit("health check interval is 75 seconds")
 
     # --- Pattern-Fix Validation Smoke (2026-07-10) ---
     smoke_v2_results_path = BENCHMARK_DIR / "results" / "2026-07-10-claude-goal-vs-mission-tail-smoke-v2.jsonl"
