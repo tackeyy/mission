@@ -4,8 +4,10 @@ VENV_PYTHON := $(VENV)/bin/python
 REQUIREMENTS := .github/requirements-ci.txt
 REQUIREMENTS_STAMP := $(VENV)/.requirements-ci.stamp
 PYTEST_TARGETS ?= skills/mission
+SHARD_INDEX ?= 1
+SHARD_TOTAL ?= 1
 
-.PHONY: test-smoke test test-e2e
+.PHONY: test-smoke test test-shard test-e2e
 
 $(VENV_PYTHON):
 	$(PYTHON) -m venv $(VENV)
@@ -22,6 +24,13 @@ test-smoke:
 test: $(REQUIREMENTS_STAMP)
 	$(VENV_PYTHON) -m pytest -q -n auto --dist loadfile $(PYTEST_TARGETS)
 	@printf '{"schema":"mission-test-report/1","tree_sha":"%s","tier":"full","test_manifest":["skills/mission"]}\n' "$$(git rev-parse 'HEAD^{tree}')"
+
+test-shard: $(REQUIREMENTS_STAMP)
+	@set -eu; \
+	targets="$$($(PYTHON) scripts/ci_shard_targets.py --index $(SHARD_INDEX) --total $(SHARD_TOTAL) --targets "$(PYTEST_TARGETS)")"; \
+	test -n "$$targets"; \
+	$(VENV_PYTHON) -m pytest -q -n auto --dist loadfile $$targets
+	@printf '{"schema":"mission-test-report/1","tree_sha":"%s","tier":"shard","shard":"%s/%s","test_manifest":["skills/mission"]}\n' "$$(git rev-parse 'HEAD^{tree}')" "$(SHARD_INDEX)" "$(SHARD_TOTAL)"
 
 test-e2e: $(REQUIREMENTS_STAMP)
 	$(VENV_PYTHON) -m pytest -q -n auto --dist loadfile skills/mission -k 'e2e or operational'
