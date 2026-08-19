@@ -288,6 +288,9 @@ python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
   - `marker_saturated: true`: 両 arm の全スコア付き record が 1.0 に達している。
     天井効果が働いているため、**arm 間の品質差を測定できない**。
     コスト・時間の相対比較は引き続き有効。この run を品質優劣の根拠に使わない。
+  - `measurement_valid_reason: "no_discrimination"`: 全スコア付き record が
+    同一値で、かつ 1.0 ではない。天井が移動しただけであり、
+    arm 間の品質差は依然として測定できない。
   - スコア付き record がゼロ（全件 blocked 等）。品質比較は不可能。
 
 `measurement_valid` が false のとき、runner は JSON summary より前に

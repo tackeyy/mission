@@ -310,6 +310,9 @@ The summary JSON produced by each run includes a `measurement_valid` field.
     between arms**. Cost and time comparisons remain valid for relative
     comparison. Do not use this run to conclude that one arm is better or worse
     than the other on quality.
+  - `measurement_valid_reason: "no_discrimination"`: every scored record shared
+    the same marker value without being at 1.0. The ceiling merely moved; the run
+    still cannot discriminate quality between arms.
   - No scored records were produced (e.g., all records were blocked before
     scoring). Quality comparison is not possible.
 

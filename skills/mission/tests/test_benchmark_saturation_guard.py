@@ -270,3 +270,45 @@ def test_real_data_tail_v280_r2_measurement_invalid():
     assert len(warnings) > 0, "Expected non-empty warnings for saturated run"
     warning_text = "\n".join(warnings)
     assert "NOT valid" in warning_text or "not valid" in warning_text.lower()
+
+
+# ---------------------------------------------------------------------------
+# 弁別ゼロ: 満点でなくても全レコード同値なら測定は無効
+# ---------------------------------------------------------------------------
+
+def test_uniform_non_perfect_scores_are_reported_as_no_discrimination():
+    """全レコードが同じ値なら、その値が 1.0 でなくても品質差は測れない。
+
+    飽和 (全件 1.0) だけを検知すると、天井が 0.8 に移動した場合を
+    見逃す。#557 が問題にしているのは「弁別できないこと」であり、
+    「値が 1.0 であること」ではない。
+    """
+    records = [
+        _record("claude_code_goal_command", marker=0.8, task_id="t1"),
+        _record("claude_code_goal_command", marker=0.8, task_id="t2"),
+        _record("mission", marker=0.8, task_id="t1"),
+        _record("mission", marker=0.8, task_id="t2"),
+    ]
+    summary = _summarize(records)
+
+    assert summary["marker_saturated"] is False
+    assert summary["measurement_valid"] is False
+    assert summary["measurement_valid_reason"] == "no_discrimination"
+    assert summary["marker_score_delta_vs_goal"] == 0.0
+    assert summary["arms"]["mission"]["marker_score_distinct_values"] == 1
+    assert MODULE.summary_warnings(summary), "warning must be emitted"
+
+
+def test_varied_scores_remain_valid_with_discrimination():
+    """値がばらついていれば measurement_valid は true のまま。"""
+    records = [
+        _record("claude_code_goal_command", marker=0.6, task_id="t1"),
+        _record("claude_code_goal_command", marker=0.8, task_id="t2"),
+        _record("mission", marker=0.8, task_id="t1"),
+        _record("mission", marker=1.0, task_id="t2"),
+    ]
+    summary = _summarize(records)
+
+    assert summary["measurement_valid"] is True
+    assert summary["measurement_valid_reason"] == "ok"
+    assert MODULE.summary_warnings(summary) == []

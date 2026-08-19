@@ -1413,6 +1413,11 @@ def summarize(
     elif marker_saturated:
         measurement_valid = False
         measurement_valid_reason = "marker_saturated"
+    elif len({r["quality_marker_score"] for r in all_scored}) == 1:
+        # 天井が 1.0 から移動しただけの場合を取りこぼさない。#557 が問題に
+        # しているのは弁別できないことであり、値が満点であることではない。
+        measurement_valid = False
+        measurement_valid_reason = "no_discrimination"
     else:
         measurement_valid = True
         measurement_valid_reason = "ok"
@@ -1602,6 +1607,12 @@ def summary_warnings(summary: dict) -> list[str]:
                 "WARNING: quality markers are saturated (all records scored 1.0). This run cannot\n"
                 "discriminate quality between arms. Cost/time comparisons remain valid; quality\n"
                 "comparison is NOT valid. See issue #557."
+            )
+        elif reason == "no_discrimination":
+            warnings.append(
+                "WARNING: every record scored the same marker value, so the metric cannot\n"
+                "discriminate quality between arms even though it is not at the 1.0 ceiling.\n"
+                "Cost/time comparisons remain valid; quality comparison is NOT valid. See issue #557."
             )
         elif reason == "no scored records":
             warnings.append(
