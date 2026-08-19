@@ -1,0 +1,183 @@
+{
+  "arms": {
+    "claude_code_goal_command": {
+      "api_spend_limit_records": 0,
+      "average_elapsed_minutes": 1.72,
+      "average_evidence_completeness": 5.0,
+      "average_intervention_count": 0.0,
+      "average_quality_marker_score": 1.0,
+      "average_quality_score": 5.0,
+      "blocked_records": 0,
+      "budget_blocked_records": 0,
+      "comparable_average_elapsed_minutes": 1.72,
+      "comparable_average_quality_score": 5.0,
+      "comparable_completion_rate": 1.0,
+      "comparable_cost_usd_mean": 0.9369,
+      "comparable_records": 5,
+      "comparable_validator_pass_rate": 1.0,
+      "completion_rate": 1.0,
+      "cost_usd_mean": 0.9369,
+      "cost_usd_total": 4.6847,
+      "evidence_only_records": 0,
+      "marker_score_variance": 0.0,
+      "permission_degraded_records": 5,
+      "records": 5,
+      "routed_records": 0,
+      "validator_pass_rate": 1.0
+    },
+    "mission": {
+      "api_spend_limit_records": 0,
+      "average_elapsed_minutes": 19.94,
+      "average_evidence_completeness": 5.0,
+      "average_intervention_count": 0.0,
+      "average_quality_marker_score": 1.0,
+      "average_quality_score": 5.0,
+      "blocked_records": 0,
+      "budget_blocked_records": 0,
+      "comparable_average_elapsed_minutes": 19.94,
+      "comparable_average_quality_score": 5.0,
+      "comparable_completion_rate": 1.0,
+      "comparable_cost_usd_mean": 9.7502,
+      "comparable_records": 5,
+      "comparable_validator_pass_rate": 1.0,
+      "completion_rate": 1.0,
+      "cost_usd_mean": 9.7502,
+      "cost_usd_total": 48.751,
+      "evidence_only_records": 0,
+      "marker_score_variance": 0.0,
+      "permission_degraded_records": 5,
+      "records": 5,
+      "routed_records": 0,
+      "validator_pass_rate": 1.0
+    }
+  },
+  "benchmark_kpi": {
+    "coverage": {
+      "eligible": 0,
+      "observed": 0,
+      "ratio": null
+    },
+    "defects": {
+      "event_attempts": 0,
+      "expected_gate_events": 0,
+      "retry_attempts": 0,
+      "unique_root_events": 0
+    },
+    "duration_minutes": {
+      "blocked_censored_records": 0,
+      "included_records": 10,
+      "invalid_records": 0,
+      "noncompleted_excluded_records": 0,
+      "p50": 7.2,
+      "p90": 25.108999999999998,
+      "tail": 29.6
+    },
+    "measurement_observations": {
+      "activity_coverage": {
+        "denominator": 0,
+        "not_applicable_records": 5,
+        "numerator": 0,
+        "observed_records": 0,
+        "rate": null,
+        "status": "unavailable",
+        "unavailable_records": 5
+      },
+      "artifact_observation_coverage": {
+        "denominator": 0,
+        "not_applicable_records": 5,
+        "numerator": 0,
+        "observed_records": 0,
+        "rate": null,
+        "status": "unavailable",
+        "unavailable_records": 5
+      },
+      "expected_gate_retry_count": {
+        "count": 0,
+        "not_applicable_records": 5,
+        "observed_records": 5,
+        "status": "observed",
+        "unavailable_records": 0
+      },
+      "force_pass_rate": {
+        "denominator": 0,
+        "not_applicable_records": 5,
+        "numerator": 0,
+        "observed_records": 0,
+        "rate": null,
+        "status": "unavailable",
+        "unavailable_records": 5
+      },
+      "group_closeout_completeness": {
+        "not_applicable_records": 5,
+        "observed_records": 0,
+        "status": "unavailable",
+        "unavailable_records": 5,
+        "value": null
+      },
+      "reviewer_freshness": {
+        "denominator": 0,
+        "not_applicable_records": 5,
+        "numerator": 0,
+        "observed_records": 0,
+        "rate": null,
+        "status": "unavailable",
+        "unavailable_records": 5
+      },
+      "structured_score_provenance": {
+        "denominator": 0,
+        "not_applicable_records": 5,
+        "numerator": 0,
+        "observed_records": 0,
+        "rate": null,
+        "status": "unavailable",
+        "unavailable_records": 5
+      }
+    },
+    "planning_provider_kpi": {
+      "schema": "mission-planning-provider-kpi/1",
+      "status": "deferred"
+    },
+    "schema": "mission-benchmark-kpi/1",
+    "score_buckets": {
+      "below_pass": 0,
+      "invalid": 0,
+      "pass_but_below_target": 0,
+      "target_met": 10
+    },
+    "tier_context": {
+      "unclassified": 10
+    }
+  },
+  "diff_review_measurement_gate": {
+    "context_manifest_expected_iterations": 0,
+    "context_manifest_fallback_iterations": 0,
+    "context_manifest_generated_iterations": 0,
+    "iter2_eligible_records": 0,
+    "iter2_record_cost_usd_mean": null,
+    "iter2_record_cost_usd_total": null,
+    "mission_loop_not_initialized_records": 0,
+    "permission_degraded_records": 10
+  },
+  "expected_records": 10,
+  "limitations": [
+    "Claude Code print mode smoke; does not fully exercise multi-turn interactive /goal persistence.",
+    "Quality and evidence scores are automated heuristic scores, not blind human review.",
+    "Blocked records are excluded from comparable quality-marker aggregates.",
+    "WARNING: permission-mode degradation detected in one or more records; acceptEdits was forced to default (see #268). Cross-run comparability is affected."
+  ],
+  "mission_profile": "full",
+  "records": 10,
+  "repeats": 1,
+  "run_id": "2026-08-19-tail-v280-r2",
+  "selected_task_ids": [
+    "tail-config-spec-drift",
+    "tail-incident-log-triage",
+    "tail-bilingual-release-drift",
+    "tail-metrics-reconciliation",
+    "tail-dependency-upgrade-impact"
+  ],
+  "starting_commit": "f8a4b983b6d0e49e58d8cc530f5eb93bf97ed70e",
+  "stopped_early": false,
+  "task_cohort": "tail",
+  "task_file": "benchmarks/mission-vs-goal/tasks.tail.json"
+}
