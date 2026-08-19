@@ -6,7 +6,7 @@ Does NOT modify results/ or artifacts/ directories.
 Usage:
     python judge_quality_markers.py \\
         --run-id 2026-08-19-tail-v280-r2 \\
-        --model-id claude-3-5-sonnet-20241022 \\
+        --model-id <model-id> \\
         [--artifacts-dir benchmarks/mission-vs-goal/artifacts] \\
         [--out judge_results/<run-id>.jsonl] \\
         [--tasks-file benchmarks/mission-vs-goal/tasks.tail.json] \\
@@ -22,9 +22,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+
+JUDGE_TIMEOUT_SECONDS = 120
 
 
 # ---------------------------------------------------------------------------
@@ -362,29 +366,47 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _real_judge(prompt: str, model_id: str) -> Dict[str, Any]:
-    """Real judge implementation using the Anthropic SDK.
+    """Default judge: headless agent CLI, matching how the benchmark runs arms.
 
-    Separated from CLI logic so tests can inject a dummy.
+    Deliberately shells out to the same CLI the benchmark itself uses rather
+    than binding a vendor SDK: no API key handling, no provider dependency in
+    this repository, and the model is whatever ``--model-id`` names. Separated
+    from CLI logic so tests inject a dummy instead.
     """
-    try:
-        import anthropic  # type: ignore[import-untyped]
-    except ImportError as exc:
-        raise RuntimeError(
-            "anthropic SDK not installed. Install it or use --dry-run."
-        ) from exc
-
-    client = anthropic.Anthropic()
-    response = client.messages.create(
-        model=model_id,
-        max_tokens=256,
-        messages=[{"role": "user", "content": prompt}],
+    command = [
+        "claude",
+        "-p",
+        "--output-format",
+        "json",
+        "--model",
+        model_id,
+        "--allowedTools",
+        "",
+        prompt,
+    ]
+    completed = subprocess.run(
+        command, capture_output=True, text=True, timeout=JUDGE_TIMEOUT_SECONDS
     )
-    text = response.content[0].text.strip()
-    # Extract JSON from the response
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "judge CLI exited {}: {}".format(
+                completed.returncode, completed.stderr.strip()[:200]
+            )
+        )
+    try:
+        envelope = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            "judge CLI did not return JSON: {}".format(completed.stdout[:120])
+        ) from exc
+    text = envelope.get("result") if isinstance(envelope, dict) else None
+    if not isinstance(text, str):
+        raise ValueError("judge CLI envelope has no string 'result' field")
+    text = text.strip()
     start = text.find("{")
     end = text.rfind("}") + 1
     if start == -1 or end == 0:
-        raise ValueError(f"No JSON found in judge response: {text[:120]}")
+        raise ValueError("No JSON found in judge response: {}".format(text[:120]))
     return json.loads(text[start:end])
 
 
