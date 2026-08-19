@@ -20,6 +20,18 @@ The full and E2E tiers create `.venv-ci` from the pinned
 `.github/requirements-ci.txt`. Each target prints a `mission-test-report/1`
 line containing the exact Git tree SHA and executed test manifest.
 
+CI splits the same suite across independent runners because the workload is
+CPU-bound. Reproduce one CI shard locally:
+
+```bash
+make test-shard SHARD_INDEX=1 SHARD_TOTAL=4
+```
+
+`scripts/ci_shard_targets.py` performs the split. It is deterministic,
+exhaustive, and disjoint: every tracked test file belongs to exactly one shard.
+It exits non-zero when a shard selects nothing, so a broken split fails the
+build instead of silently running fewer tests.
+
 Run a specific test file:
 
 ```bash
