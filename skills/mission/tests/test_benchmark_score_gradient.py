@@ -76,7 +76,7 @@ def test_gradient_method_string_distinguishes_new_records(tmp_path):
     module = _load("run_claude_goal_vs_mission.py")
     out = _evaluate(tmp_path, module, COMMON + "alpha finding beta finding\n")
     assert out["quality_score_method"] == (
-        "automated_heuristic_form_stripped_gradient_v2_not_blind_human"
+        "automated_heuristic_form_stripped_gradient_v2_not_blind_human_regex_v3"
     )
 
 
@@ -134,6 +134,9 @@ def test_paired_runner_gate_is_also_symmetric(tmp_path):
     assert "Goal" in goal["missing_arm_specific_headings"]
     assert goal["missing_headings"] == []
     assert goal["human_quality_score"] == 5.0
+    # #558: regex 照合は official runner にだけ入った。paired runner は従来どおり
+    # substring 照合なので、method 文字列も v2 のまま分岐するのが正しい
+    # (同じラベルのまま照合方式だけ変えると母集団の意味が壊れる)。
     assert goal["quality_score_method"] == (
         "automated_heuristic_form_stripped_gradient_v2_not_blind_human"
     )

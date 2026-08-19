@@ -91,6 +91,13 @@ structure-credit circularity that favored mission-shaped artifacts in the
 `automated_heuristic_form_stripped_not_blind_human` — the automated score is a
 screen, not a blind human judgement.
 
+**Measurement definition change (2026-08-19, #558):** `tasks.tail.json` quality
+marker patterns were rewritten from simple substring matches to regex patterns that
+require both the spec value and the implementation value (or a drift/violation word)
+near each other. The `quality_score_method` for marker-bearing runs now ends in
+`_regex_v3`. Scores from runs before this change are **not comparable** to scores
+after it.
+
 ## Protocol
 
 1. Start from a clean checkout or isolated worktree.
@@ -297,6 +304,36 @@ python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
 | 3 | Partially satisfies the prompt but misses a meaningful requirement or leaves weak evidence. |
 | 2 | Produces some useful work, but the validator or core acceptance criteria fail. |
 | 1 | Does not produce a usable result or stops in an unresolved state. |
+
+## Measurement Validity
+
+The summary JSON produced by each run includes a `measurement_valid` field.
+
+- **`measurement_valid: true`** — quality marker scores varied across records;
+  quality comparison between arms is meaningful.
+- **`measurement_valid: false`** — one of two conditions holds:
+  - `marker_saturated: true`: every scored record across both arms reached 1.0.
+    All scoring ceiling effects are active; the run **cannot discriminate quality
+    between arms**. Cost and time comparisons remain valid for relative
+    comparison. Do not use this run to conclude that one arm is better or worse
+    than the other on quality.
+  - `measurement_valid_reason: "no_discrimination"`: every scored record shared
+    the same marker value without being at 1.0. The ceiling merely moved; the run
+    still cannot discriminate quality between arms.
+  - No scored records were produced (e.g., all records were blocked before
+    scoring). Quality comparison is not possible.
+
+When `measurement_valid` is false, the runner prints a warning on stdout before
+the JSON summary.
+
+### Notes on `total_cost_usd`
+
+`total_cost_usd` in each record and arm aggregate is an API-equivalent estimate
+reported by the agent runtime, **not a billed amount**. Under subscription
+(OAuth) execution no per-token charge is incurred; the consumed resource is the
+plan rate limit. Use these values for relative comparison between arms, not as
+an absolute spend figure. `--max-budget-usd` is a cutoff threshold applied to
+this estimated value, not a billing cap.
 
 ## Marketing Guardrails
 
