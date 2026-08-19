@@ -595,6 +595,113 @@ def run_name_for(task_id: str, arm: str, run_index: int, repeats: int) -> str:
     return f"{task_id}-{arm}"
 
 
+def extract_process_quality(worktree: Path) -> tuple[dict | None, str | None]:
+    """#560 Step A: archive の reviews/scoring JSON から process quality を fail-open で収集する。
+
+    ファイルが無い・壊れている場合は (None, error_reason) を返す。
+    Severity が不明な値は literal 文字列キーとして by_severity に追加する（クラッシュしない）。
+    """
+    archive = worktree / ".mission-state" / "archive"
+    if not archive.is_dir():
+        return None, "archive_dir_missing"
+
+    iter_pattern = re.compile(r"^iter-(\d+)-")
+
+    def parse_iter(name: str) -> int | None:
+        m = iter_pattern.match(name)
+        return int(m.group(1)) if m else None
+
+    # Gather reviews files grouped by iteration number
+    reviews_by_iter: dict[int, list[Path]] = {}
+    scoring_by_iter: dict[int, list[Path]] = {}
+    try:
+        for child in archive.iterdir():
+            if not child.is_file() or not child.suffix == ".json":
+                continue
+            n = parse_iter(child.name)
+            if n is None:
+                continue
+            if "-reviews-" in child.name:
+                reviews_by_iter.setdefault(n, []).append(child)
+            elif "-scoring-" in child.name:
+                scoring_by_iter.setdefault(n, []).append(child)
+    except OSError as exc:
+        return None, f"archive_list_error:{type(exc).__name__}"
+
+    if not reviews_by_iter:
+        return None, "archive_reviews_missing"
+
+    sorted_iters = sorted(reviews_by_iter)
+    findings_total = 0
+    # High/Medium/Low は常に存在させる (消費側の KeyError を防ぐ)。
+    # 未知の severity は literal キーとして追加される。
+    by_severity: dict[str, int] = {"High": 0, "Medium": 0, "Low": 0}
+    reviewer_count_observed = 0
+
+    for n in sorted_iters:
+        for path in reviews_by_iter[n]:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+                return None, f"archive_reviews_unreadable:{type(exc).__name__}"
+            if not isinstance(payload, dict):
+                return None, "archive_reviews_not_object"
+            inputs = payload.get("inputs")
+            if not isinstance(inputs, list):
+                continue
+            reviewer_count_observed = max(reviewer_count_observed, len(inputs))
+            for inp in inputs:
+                if not isinstance(inp, dict):
+                    continue
+                findings = inp.get("findings")
+                if not isinstance(findings, list):
+                    continue
+                for finding in findings:
+                    if not isinstance(finding, dict):
+                        continue
+                    findings_total += 1
+                    sev = finding.get("severity")
+                    key = sev if isinstance(sev, str) else "__unknown__"
+                    by_severity[key] = by_severity.get(key, 0) + 1
+
+    def _read_composite(n: int) -> tuple[float | None, int | None]:
+        paths = scoring_by_iter.get(n, [])
+        for path in paths:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            for key in ("composite", "binding", "_meta"):
+                val = payload.get(key)
+                if key == "binding" and isinstance(val, dict):
+                    val = val.get("composite")
+                elif key == "_meta" and isinstance(val, dict):
+                    val = val.get("computed_composite")
+                if isinstance(val, (int, float)) and not isinstance(val, bool):
+                    open_high = payload.get("open_high")
+                    oh = open_high if isinstance(open_high, int) and not isinstance(open_high, bool) else None
+                    return float(val), oh
+        return None, None
+
+    first_iter = sorted_iters[0]
+    last_iter = sorted_iters[-1]
+    composite_first, open_high_first = _read_composite(first_iter)
+    composite_final, open_high_final = _read_composite(last_iter)
+
+    return {
+        "review_findings_total": findings_total,
+        "review_findings_by_severity": by_severity,
+        "review_iterations_observed": len(sorted_iters),
+        "composite_first": composite_first,
+        "composite_final": composite_final,
+        "reviewer_count_observed": reviewer_count_observed,
+        "open_high_first": open_high_first,
+        "open_high_final": open_high_final,
+    }, None
+
+
 def extract_mission_state_fields(worktree: Path) -> tuple[dict, str | None]:
     """#250: mission arm 実行後の state から tier/iteration 等を fail-open で抽出する。
 
@@ -611,7 +718,18 @@ def extract_mission_state_fields(worktree: Path) -> tuple[dict, str | None]:
         "mission_evidence_only": None,  # #341: evidence-submitted halt = true (gated loop 未実行)
         "measurement_observations": unavailable_measurement_observations(),
         "diff_review_observations": None,
+        "process_quality": None,
+        "process_quality_error": None,
     }
+    # process_quality は session state の可読性と独立に収集する (#560)。
+    # session が読めない早期 return 経路でも archive は存在しうるため、先に収集する。
+    try:
+        pq, pq_err = extract_process_quality(worktree)
+        fields["process_quality"] = pq
+        fields["process_quality_error"] = pq_err
+    except Exception as exc:  # noqa: BLE001 — never abort the run
+        fields["process_quality"] = None
+        fields["process_quality_error"] = f"process_quality_exception:{type(exc).__name__}"
     sessions = worktree / ".mission-state" / "sessions"
     candidates = sorted(sessions.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True) if sessions.is_dir() else []
     legacy = worktree / ".mission-state" / "state.json"
@@ -1087,6 +1205,8 @@ def run_one(
                 "mission_evidence_only": None,
                 "measurement_observations": unavailable_measurement_observations(status="not-applicable"),
                 "diff_review_observations": unavailable_diff_review_observations(),
+                "process_quality": None,
+                "process_quality_error": None,
             },
             None,
         )
@@ -1430,6 +1550,11 @@ def summarize(
             "WARNING: one or more records were blocked by max_budget_usd; "
             "review per-arm burn rate before interpreting cost or completion results."
         )
+    limitations.append(
+        "total_cost_usd is an API-equivalent estimate reported by the agent runtime, not a billed amount. "
+        "Under subscription (OAuth) execution no per-token charge is incurred; the consumed resource is the "
+        "plan rate limit. Use these values for relative comparison between arms, not as an absolute spend figure."
+    )
     if spend_limit_record is not None:
         limitations.append(
             "WARNING: API spend limit affected one or more records; affected records are "
@@ -1439,6 +1564,51 @@ def summarize(
             limitations.append(
                 f"run stopped early: api_spend_limit at record {spend_limit_record}/{expected_records}"
             )
+
+    # --- Saturation guard (#563) ---
+    def _scored(items: list[dict]) -> list[dict]:
+        return [r for r in items if r.get("quality_marker_score") is not None]
+
+    all_scored = _scored(records)
+    marker_saturated = bool(all_scored) and all(r["quality_marker_score"] >= 1.0 for r in all_scored)
+    marker_saturation_detail = {
+        arm: {r.get("task_id", "unknown"): r["quality_marker_score"] for r in _scored(items) if r["quality_marker_score"] >= 1.0}
+        for arm, items in by_arm.items()
+    }
+    measurement_valid: bool
+    measurement_valid_reason: str
+    if not all_scored:
+        measurement_valid = False
+        measurement_valid_reason = "no scored records"
+    elif marker_saturated:
+        measurement_valid = False
+        measurement_valid_reason = "marker_saturated"
+    elif len({r["quality_marker_score"] for r in all_scored}) == 1:
+        # 天井が 1.0 から移動しただけの場合を取りこぼさない。#557 が問題に
+        # しているのは弁別できないことであり、値が満点であることではない。
+        measurement_valid = False
+        measurement_valid_reason = "no_discrimination"
+    else:
+        measurement_valid = True
+        measurement_valid_reason = "ok"
+
+    def _arm_mean(arm: str) -> float | None:
+        vals = [r["quality_marker_score"] for r in _scored(by_arm.get(arm, [])) ]
+        return round(sum(vals) / len(vals), 4) if vals else None
+
+    goal_mean = _arm_mean("claude_code_goal_command")
+    mission_mean = _arm_mean("mission")
+    marker_score_delta_vs_goal: float | None = (
+        round(mission_mean - goal_mean, 4)
+        if mission_mean is not None and goal_mean is not None
+        else None
+    )
+    marker_score_ratio_vs_goal: float | None = (
+        round(mission_mean / goal_mean, 4)
+        if mission_mean is not None and goal_mean is not None and goal_mean != 0
+        else None
+    )
+    # --- end saturation guard ---
 
     iteration_rows = [
         iteration
@@ -1506,6 +1676,12 @@ def summarize(
         "expected_records": expected_records,
         "stopped_early": stopped_early,
         "limitations": limitations,
+        "marker_saturated": marker_saturated,
+        "marker_saturation_detail": marker_saturation_detail,
+        "measurement_valid": measurement_valid,
+        "measurement_valid_reason": measurement_valid_reason,
+        "marker_score_delta_vs_goal": marker_score_delta_vs_goal,
+        "marker_score_ratio_vs_goal": marker_score_ratio_vs_goal,
         "diff_review_measurement_gate": diff_review_measurement_gate,
         "benchmark_kpi": summarize_benchmark_kpi(records),
         "arms": {
@@ -1566,6 +1742,16 @@ def summarize(
                 ),
                 # #249: 反復時の分散とコスト集計 (blocked/failed の全損コストも含む)。
                 "marker_score_variance": _marker_variance(items),
+                # #563: 飽和検知 / 分散可視化
+                "marker_score_min": (
+                    min(r["quality_marker_score"] for r in _scored(items))
+                    if _scored(items) else None
+                ),
+                "marker_score_max": (
+                    max(r["quality_marker_score"] for r in _scored(items))
+                    if _scored(items) else None
+                ),
+                "marker_score_distinct_values": len({r["quality_marker_score"] for r in _scored(items)}),
                 "cost_usd_total": round(sum(_cost_values(items)), 4) if _cost_values(items) else None,
                 "cost_usd_mean": (
                     round(sum(_cost_values(items)) / len(_cost_values(items)), 4)
@@ -1576,6 +1762,38 @@ def summarize(
             for arm, items in by_arm.items()
         },
     }
+
+
+def summary_warnings(summary: dict) -> list[str]:
+    """Return warning lines for the given summary dict.
+
+    Designed for extension: issue #565 can append additional warning lines here.
+    Callers should print each returned line before other summary output.
+    """
+    warnings: list[str] = []
+    if not summary.get("measurement_valid", True):
+        reason = summary.get("measurement_valid_reason", "")
+        if reason == "marker_saturated":
+            warnings.append(
+                "WARNING: quality markers are saturated (all records scored 1.0). This run cannot\n"
+                "discriminate quality between arms. Cost/time comparisons remain valid; quality\n"
+                "comparison is NOT valid. See issue #557."
+            )
+        elif reason == "no_discrimination":
+            warnings.append(
+                "WARNING: every record scored the same marker value, so the metric cannot\n"
+                "discriminate quality between arms even though it is not at the 1.0 ceiling.\n"
+                "Cost/time comparisons remain valid; quality comparison is NOT valid. See issue #557."
+            )
+        elif reason == "no scored records":
+            warnings.append(
+                "WARNING: no scored records found. Quality comparison is NOT valid."
+            )
+        else:
+            warnings.append(
+                f"WARNING: measurement_valid is false (reason: {reason}). Quality comparison is NOT valid."
+            )
+    return warnings
 
 
 def main() -> int:
@@ -1739,6 +1957,8 @@ def main() -> int:
         mission_threshold=args.mission_threshold,
     )
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    for warning in summary_warnings(summary):
+        print(warning)
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
