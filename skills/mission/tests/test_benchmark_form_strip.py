@@ -117,7 +117,7 @@ def test_evaluate_run_scores_markers_on_stripped_body(tmp_path):
     # 構造だけでは中位スコアに届かない。
     assert heading_only["human_quality_score"] == 2.0
     assert heading_only["quality_score_method"] == (
-        "automated_heuristic_form_stripped_gradient_v2_not_blind_human"
+        "automated_heuristic_form_stripped_gradient_v2_not_blind_human_regex_v3"
     )
 
     # Body coverage: the phrase appears in prose and earns the marker.
