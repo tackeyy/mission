@@ -278,6 +278,30 @@ python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
 | 2 | 一部有用な作業はあるが、validator または core acceptance criteria が fail している。 |
 | 1 | usable result がない、または未解決状態で停止している。 |
 
+## 測定有効性（Measurement Validity）
+
+各 run が出力する summary JSON には `measurement_valid` フィールドが含まれる。
+
+- **`measurement_valid: true`** — 品質 marker スコアが record 間でばらついており、
+  arm 間の品質比較が意味を持つ。
+- **`measurement_valid: false`** — 次のどちらかの条件が成立している:
+  - `marker_saturated: true`: 両 arm の全スコア付き record が 1.0 に達している。
+    天井効果が働いているため、**arm 間の品質差を測定できない**。
+    コスト・時間の相対比較は引き続き有効。この run を品質優劣の根拠に使わない。
+  - スコア付き record がゼロ（全件 blocked 等）。品質比較は不可能。
+
+`measurement_valid` が false のとき、runner は JSON summary より前に
+stdout へ警告行を出力する。
+
+### `total_cost_usd` について
+
+record および arm 集計の `total_cost_usd` は、エージェント runtime が報告する
+**API 換算の推定値であり、請求額ではない**。
+subscription（OAuth）実行では per-token 課金は発生せず、消費するリソースは
+プランのレートリミットである。
+各 arm の相対比較には使えるが、絶対的な支出額として扱わない。
+`--max-budget-usd` はこの推定値に対する上限閾値であり、請求キャップではない。
+
 ## Marketing Guardrails
 
 raw evidence がそろった後に使ってよい表現:
