@@ -91,6 +91,13 @@ structure-credit circularity that favored mission-shaped artifacts in the
 `automated_heuristic_form_stripped_not_blind_human` — the automated score is a
 screen, not a blind human judgement.
 
+**Measurement definition change (2026-08-19, #558):** `tasks.tail.json` quality
+marker patterns were rewritten from simple substring matches to regex patterns that
+require both the spec value and the implementation value (or a drift/violation word)
+near each other. The `quality_score_method` for marker-bearing runs now ends in
+`_regex_v3`. Scores from runs before this change are **not comparable** to scores
+after it.
+
 ## Protocol
 
 1. Start from a clean checkout or isolated worktree.
