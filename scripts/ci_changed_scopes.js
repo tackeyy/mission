@@ -34,12 +34,10 @@ function classifyChangedFiles({ eventName, files }) {
   const safeFiles = Array.isArray(files) ? files : [];
   const failSafeFull = eventName !== "pull_request" || safeFiles.length === 0;
   const docsOnly = !failSafeFull && safeFiles.every(isDocsOnlyFile);
-  const shell = failSafeFull || safeFiles.some((file) => file.startsWith(".github/workflows/") || file === ".github/dependabot.yml" || file.endsWith(".sh"));
 
   return {
     python: true,
     pythonTargets: docsOnly ? FAST_PATH_TARGETS : FULL_PATH_TARGETS,
-    shell,
     docsOnly,
     runAll: failSafeFull,
   };
