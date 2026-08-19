@@ -35,18 +35,87 @@
       "hypothesis": "A review loop should help recall cross-file drifts that a single pass tends to miss after finding the first few obvious ones; this is a hypothesis to test, not a result.",
       "first_pass_failure_design": "Ten spec keys spread across three downstream docs; two candidates are consistent only after unit (ticks-to-seconds) or aggregate (per-replica-to-total) conversion; one violation is a policy constraint (a flag that must stay false) rather than a numeric mismatch; single-pass audits typically stop after the obvious numeric drifts.",
       "quality_markers": [
-        { "name": "Drift: request timeout 27000", "patterns": ["27000", "27,000"] },
-        { "name": "Drift: retry count 6 in runbook", "patterns": ["up to 6", "6 times", "6 retries", "retries: 6"] },
-        { "name": "Drift: constant-interval backoff", "patterns": ["constant-interval", "constant interval"] },
-        { "name": "Drift: queue depth 1250", "patterns": ["1250", "1,250"] },
-        { "name": "Drift: TLS floor 1.2 in runbook", "patterns": ["tls 1.2", "tls floor to 1.2", "floor to 1.2", "tls_min_version: 1.2", "1.2 vs 1.3", "1.3 vs 1.2"] },
-        { "name": "Drift: health interval 75s", "patterns": ["75 seconds", "75s", "= 75", ": 75", "75 vs 15", "15 vs 75", "seconds=75", "(75", "75`"] },
-        { "name": "Violation: legacy auth enabled", "patterns": ["legacy"] }
+        {
+          "name": "Drift: request timeout 27000",
+          "match_type": "regex",
+          "patterns": [
+            "3000.{0,60}27000|27000.{0,60}3000"
+          ]
+        },
+        {
+          "name": "Drift: retry count 6 in runbook",
+          "match_type": "regex",
+          "patterns": [
+            "max_retries.{0,60}(3.{0,20}6|6.{0,20}3)"
+          ]
+        },
+        {
+          "name": "Drift: constant-interval backoff",
+          "match_type": "regex",
+          "patterns": [
+            "(drift|mismatch|spec|violat|contradict).{0,200}constant.interval|constant.interval.{0,200}(drift|mismatch|spec|violat|contradict)"
+          ]
+        },
+        {
+          "name": "Drift: queue depth 1250",
+          "match_type": "regex",
+          "patterns": [
+            "10000.{0,60}1250|1250.{0,60}10000"
+          ]
+        },
+        {
+          "name": "Drift: TLS floor 1.2 in runbook",
+          "match_type": "regex",
+          "patterns": [
+            "1\\.3.{0,100}1\\.2|1\\.2.{0,100}1\\.3"
+          ]
+        },
+        {
+          "name": "Drift: health interval 75s",
+          "match_type": "regex",
+          "patterns": [
+            "health.{0,40}interval.{0,60}(15.{0,30}75|75.{0,30}15)"
+          ]
+        },
+        {
+          "name": "Violation: legacy auth enabled",
+          "match_type": "regex",
+          "patterns": [
+            "legacy.{0,80}(false.{0,30}true|true.{0,30}false)"
+          ]
+        }
       ],
       "forbidden_markers": [
-        { "name": "False claim: idle timeout", "patterns": ["fix idle_timeout", "fix the idle timeout", "idle_timeout must be corrected", "correct the idle_timeout", "change idle_timeout_ticks", "set idle_timeout_ticks to"] },
-        { "name": "False claim: log level", "patterns": ["fix log_level", "fix the log level", "log_level must be corrected", "correct the log_level", "change log_level"] },
-        { "name": "False claim: pool size", "patterns": ["fix db_pool", "correct the pool size", "db_pool_size_per_replica must be corrected", "change db_pool_size_per_replica", "reduce db_pool_size_per_replica"] }
+        {
+          "name": "False claim: idle timeout",
+          "patterns": [
+            "fix idle_timeout",
+            "fix the idle timeout",
+            "idle_timeout must be corrected",
+            "correct the idle_timeout",
+            "change idle_timeout_ticks",
+            "set idle_timeout_ticks to"
+          ]
+        },
+        {
+          "name": "False claim: log level",
+          "patterns": [
+            "fix log_level",
+            "fix the log level",
+            "log_level must be corrected",
+            "correct the log_level",
+            "change log_level"
+          ]
+        },
+        {
+          "name": "False claim: pool size",
+          "patterns": [
+            "correct the pool size",
+            "db_pool_size_per_replica must be corrected",
+            "change db_pool_size_per_replica",
+            "reduce db_pool_size_per_replica"
+          ]
+        }
       ]
     },
     {
@@ -67,16 +136,72 @@
       "hypothesis": "A review loop should help keep multiple independent causes alive instead of stopping at the first plausible one; this is a hypothesis to test, not a result.",
       "first_pass_failure_design": "Three independent causes (certificate expiry, a concurrency rollout exhausting a fixed DB pool, and a locking maintenance job moved into peak traffic) overlap in one 45-minute window, while the loudest social signal in the notes blames an unrelated static-asset deploy; premature single-root-cause narratives are the expected first-pass failure.",
       "quality_markers": [
-        { "name": "Cause: certificate expiry", "patterns": ["certificate has expired", "cert expir", "certificate expir", "payments-gw.internal"] },
-        { "name": "Cause: concurrency rollout", "patterns": ["worker_concurrency", "8 -> 16", "8 to 16", "concurrency"] },
-        { "name": "Cause: reindex lock contention", "patterns": ["nightly-reindex", "reindex", "lock wait"] },
-        { "name": "Fix: certificate renewal", "patterns": ["renew", "rotate", "reissue"] },
-        { "name": "Fix: concurrency revert or pool resize", "patterns": ["revert", "roll back", "rollback", "reduce concurrency", "pool size"] },
-        { "name": "Fix: reschedule or de-conflict the job", "patterns": ["reschedule", "04:00", "defer", "pause", "off-peak", "online mode", "lock-free"] }
+        {
+          "name": "Cause: certificate expiry",
+          "match_type": "regex",
+          "patterns": [
+            "(cause|contribut|causal).{0,200}(cert|certificate).{0,80}expir"
+          ]
+        },
+        {
+          "name": "Cause: concurrency rollout",
+          "match_type": "regex",
+          "patterns": [
+            "(cause|contribut|causal).{0,200}worker_concurrency"
+          ]
+        },
+        {
+          "name": "Cause: reindex lock contention",
+          "match_type": "regex",
+          "patterns": [
+            "(cause|contribut|causal).{0,200}(reindex|lock.wait)"
+          ]
+        },
+        {
+          "name": "Fix: certificate renewal",
+          "match_type": "regex",
+          "patterns": [
+            "(renew|rotate|reissue|replace).{0,120}(cert|payments.gw)|(cert|payments.gw).{0,120}(renew|rotate|reissue|replace)"
+          ]
+        },
+        {
+          "name": "Fix: concurrency revert or pool resize",
+          "match_type": "regex",
+          "patterns": [
+            "worker_concurrency.{0,240}(revert|rollback|roll .{0,40}back|back to|resize|reduce|lower|restore)|(revert|rollback|roll .{0,40}back|resize|reduce|lower|restore).{0,240}worker_concurrency"
+          ]
+        },
+        {
+          "name": "Fix: reschedule or de-conflict the job",
+          "match_type": "regex",
+          "patterns": [
+            "(nightly.reindex|reindex).{0,240}(reschedul|move|de.conflict|off.peak|window|defer|stagger)|(reschedul|de.conflict|off.peak|defer|stagger).{0,240}(nightly.reindex|reindex)"
+          ]
+        }
       ],
       "forbidden_markers": [
-        { "name": "False cause: assets-web deploy", "patterns": ["assets-web caused", "assets-web is the root cause", "assets-web release is the root cause", "root cause: assets-web", "assets-web is a root cause", "assets-web is causal"] },
-        { "name": "False cause: clock skew", "patterns": ["clock skew caused", "clock skew is the root cause", "clock skew is a root cause", "root cause: clock skew", "fix the clock skew", "fix clock skew"] }
+        {
+          "name": "False cause: assets-web deploy",
+          "patterns": [
+            "assets-web caused",
+            "assets-web is the root cause",
+            "assets-web release is the root cause",
+            "root cause: assets-web",
+            "assets-web is a root cause",
+            "assets-web is causal"
+          ]
+        },
+        {
+          "name": "False cause: clock skew",
+          "patterns": [
+            "clock skew caused",
+            "clock skew is the root cause",
+            "clock skew is a root cause",
+            "root cause: clock skew",
+            "fix the clock skew",
+            "fix clock skew"
+          ]
+        }
       ]
     },
     {
@@ -96,15 +221,63 @@
       "hypothesis": "A review loop should help catch omission-type drift (a missing safety sentence), which single passes tend to miss because nothing on the Japanese side draws attention to it; this is a hypothesis to test, not a result.",
       "first_pass_failure_design": "Five drifts across strengthened qualifiers, an inflated test count, a release-stage upgrade, and one silent omission of a safety sentence; two reworded-but-equivalent claims punish checklist-style diffing without semantic comparison. Omissions have no anchor text on the target side and are the designed first-pass miss.",
       "quality_markers": [
-        { "name": "Overclaim: 18% or more", "patterns": ["18%以上", "at least 18", "18% or more", "≥18", ">= 18"] },
-        { "name": "Overclaim: unconditional recovery", "patterns": ["必ず", "guarantee", "unconditionally"] },
-        { "name": "Numeric drift: test count 500", "patterns": ["500"] },
-        { "name": "Stage drift: 正式版 vs beta", "patterns": ["正式版", "beta"] },
-        { "name": "Omission: manual approval sentence", "patterns": ["manual approval", "手動承認", "irreversible", "不可逆"] }
+        {
+          "name": "Overclaim: 18% or more",
+          "match_type": "regex",
+          "patterns": [
+            "(overclaim|drift|divergent).{0,200}(18%.{0,10}以上)|(18%.{0,10}以上).{0,100}(overclaim|drift|divergent)"
+          ]
+        },
+        {
+          "name": "Overclaim: unconditional recovery",
+          "match_type": "regex",
+          "patterns": [
+            "(overclaim|drift|divergent|not guaranteed).{0,200}(必ず|guarantee)|(必ず|guarantee).{0,200}(overclaim|drift|divergent)"
+          ]
+        },
+        {
+          "name": "Numeric drift: test count 500",
+          "match_type": "regex",
+          "patterns": [
+            "(drift|divergent|numeric|overclaim|incorrect|wrong).{0,200}500|(500).{0,200}(drift|divergent|numeric|overclaim|incorrect|402)"
+          ]
+        },
+        {
+          "name": "Stage drift: 正式版 vs beta",
+          "match_type": "regex",
+          "patterns": [
+            "(drift|stage.drift|divergent).{0,200}(正式版|beta)|正式版.{0,200}(beta|stage|drift|divergent)"
+          ]
+        },
+        {
+          "name": "Omission: manual approval sentence",
+          "match_type": "regex",
+          "patterns": [
+            "(omission|omitted|missing|absent).{0,200}(manual.approv|irreversible|手動承認|不可逆)|(manual.approv|irreversible|手動承認|不可逆).{0,200}(omission|omitted|missing|absent)"
+          ]
+        }
       ],
       "forbidden_markers": [
-        { "name": "False drift: telemetry claim", "patterns": ["fix the telemetry claim", "correct the telemetry claim", "telemetry claim must be corrected", "テレメトリーの主張を修正", "テレメトリーの記述を修正"] },
-        { "name": "False drift: CLI workflow claim", "patterns": ["fix the cli workflow claim", "correct the cli workflow claim", "cli workflow claim must be corrected", "cliワークフローの主張を修正", "cliワークフローの記述を修正"] }
+        {
+          "name": "False drift: telemetry claim",
+          "patterns": [
+            "fix the telemetry claim",
+            "correct the telemetry claim",
+            "telemetry claim must be corrected",
+            "テレメトリーの主張を修正する",
+            "テレメトリーの記述を修正する"
+          ]
+        },
+        {
+          "name": "False drift: CLI workflow claim",
+          "patterns": [
+            "fix the cli workflow claim",
+            "correct the cli workflow claim",
+            "cli workflow claim must be corrected",
+            "cliワークフローの主張を修正",
+            "cliワークフローの記述を修正"
+          ]
+        }
       ]
     },
     {
@@ -124,15 +297,67 @@
       "hypothesis": "A review loop should help force actual recomputation instead of plausibility checking; this is a hypothesis to test, not a result.",
       "first_pass_failure_design": "Seven claims of which four are wrong in different ways (transposed digits in a 13-row sum, a ratio rounded up to a marketing multiple, a percentage on the wrong base, an average understated) and one hides a single-week regression behind an 'every single week' universal; three correct claims create false-positive pressure. Verifying all of them requires 13-row arithmetic that plausibility-style reading skips.",
       "quality_markers": [
-        { "name": "Correction: signups 4,217", "patterns": ["4217", "4,217"] },
-        { "name": "Correction: latency ratio ~1.9x", "patterns": ["1.9", "1.88", "1.87"] },
-        { "name": "Catch: week-9 regression", "patterns": ["week 9", "week-9", "w9", "week nine"] },
-        { "name": "Correction: tickets -29%", "patterns": ["29%", "29 %", "29.0", "0.29"] },
-        { "name": "Correction: infra cost 1,450", "patterns": ["1450", "1,450"] }
+        {
+          "name": "Correction: signups 4,217",
+          "match_type": "regex",
+          "patterns": [
+            "(total|signups?|sum|recomputed|corrected).{0,100}4[,.]?217|4[,.]?217.{0,100}(total|signups?|sum|recomputed|corrected)"
+          ]
+        },
+        {
+          "name": "Correction: latency ratio ~1.9x",
+          "match_type": "regex",
+          "patterns": [
+            "(ratio|improved|improvement|p95|latency).{0,100}1\\.8[78]|1\\.8[78].{0,100}(ratio|improved|improvement|p95|latency)"
+          ]
+        },
+        {
+          "name": "Catch: week-9 regression",
+          "match_type": "regex",
+          "patterns": [
+            "(regression|regress|exception|worse).{0,100}week.{0,10}9|week.{0,10}9.{0,100}(regression|regress|exception|worse)"
+          ]
+        },
+        {
+          "name": "Correction: tickets -29%",
+          "match_type": "regex",
+          "patterns": [
+            "tickets.{0,100}29\\.?0?%|29\\.?0?%.{0,100}tickets"
+          ]
+        },
+        {
+          "name": "Correction: infra cost 1,450",
+          "match_type": "regex",
+          "patterns": [
+            "(average|mean|avg).{0,80}1[,.]?450|1[,.]?450.{0,80}(average|mean|avg)"
+          ]
+        }
       ],
       "forbidden_markers": [
-        { "name": "False flag: active users claim", "patterns": ["active users claim is wrong", "active user claim is wrong", "active users figure is incorrect", "correct the active users", "15% is incorrect", "15% is wrong", "9,430 is wrong", "9430 is wrong"] },
-        { "name": "False flag: uptime claim", "patterns": ["uptime claim is wrong", "uptime figure is incorrect", "99.95 is wrong", "99.95% is incorrect", "correct the uptime", "uptime is overstated"] }
+        {
+          "name": "False flag: active users claim",
+          "patterns": [
+            "active users claim is wrong",
+            "active user claim is wrong",
+            "active users figure is incorrect",
+            "correct the active users",
+            "15% is incorrect",
+            "the 15% is wrong",
+            "9,430 is wrong",
+            "9430 is wrong"
+          ]
+        },
+        {
+          "name": "False flag: uptime claim",
+          "patterns": [
+            "uptime claim is wrong",
+            "uptime figure is incorrect",
+            "99.95 is wrong",
+            "99.95% is incorrect",
+            "correct the uptime",
+            "uptime is overstated"
+          ]
+        }
       ]
     },
     {
@@ -152,15 +377,64 @@
       "hypothesis": "A review loop should help complete the cross-product of changelog entries and call sites, where single passes tend to stop after the first two or three obvious hits; this is a hypothesis to test, not a result.",
       "first_pass_failure_design": "Ten changelog entries of which four are breaking-and-used, one carries a silent behavior change (wire-format default) plus an ordering constraint, and two look breaking but are cleared by the inventory (zero call sites; explicit timeouts everywhere). The silent default change and the ordering constraint are the designed first-pass misses.",
       "quality_markers": [
-        { "name": "Impact: strict parseConfig vs flush_interval", "patterns": ["flush_interval"] },
-        { "name": "Impact: onRetry signature at retry-metrics", "patterns": ["retry-metrics", "onretry", "on_retry", "(context)"] },
-        { "name": "Impact: msgpack consumer vs JSON default", "patterns": ["msgpack"] },
-        { "name": "Impact: async drain at shutdown-hook", "patterns": ["drain", "shutdown-hook"] },
-        { "name": "Constraint: codec pin before first publish", "patterns": ["codec pin", "pin a codec", "before the first publish", "before first publish"] }
+        {
+          "name": "Impact: strict parseConfig vs flush_interval",
+          "match_type": "regex",
+          "patterns": [
+            "flush_interval.{0,240}(configkeyerror|raise|throw|reject|break|fail)|(configkeyerror|raise|throw|reject).{0,240}flush_interval"
+          ]
+        },
+        {
+          "name": "Impact: onRetry signature at retry-metrics",
+          "match_type": "regex",
+          "patterns": [
+            "retry-metrics.{0,240}(no longer invoked|not invoked|silent|break|impact|stop|lost|zero|fail|degrade)|(no longer invoked|not invoked|silent|break|impact|degrade).{0,240}retry-metrics"
+          ]
+        },
+        {
+          "name": "Impact: msgpack consumer vs JSON default",
+          "match_type": "regex",
+          "patterns": [
+            "edge-cache.{0,240}(json|wire.format|break|mismatch|incompat)|(json|wire.format|incompat).{0,240}edge-cache"
+          ]
+        },
+        {
+          "name": "Impact: async drain at shutdown-hook",
+          "match_type": "regex",
+          "patterns": [
+            "shutdown.hook.{0,240}(unawaited|not awaited|await|promise|premature|drop|lost|may exit|exit before)|(unawaited|not awaited|premature|may exit|exit before).{0,240}shutdown.hook"
+          ]
+        },
+        {
+          "name": "Constraint: codec pin before first publish",
+          "match_type": "regex",
+          "patterns": [
+            "(codec.pin|pin.{0,20}codec).{0,240}(before|order|precede|sequenc)|(before|order|precede|sequenc).{0,240}(codec.pin|pin.{0,20}codec)"
+          ]
+        }
       ],
       "forbidden_markers": [
-        { "name": "False impact: warnOnce", "patterns": ["warnonce is affected", "warnonce breaks", "warnonce must be migrated", "migrate warnonce", "warnonce requires migration"] },
-        { "name": "False impact: connect timeout", "patterns": ["connect calls break", "connect() calls break", "connect timeout breaks", "must update connect(", "update every connect", "connect() requires migration"] }
+        {
+          "name": "False impact: warnOnce",
+          "patterns": [
+            "warnonce is affected",
+            "warnonce breaks",
+            "warnonce must be migrated",
+            "migrate warnonce",
+            "warnonce requires migration"
+          ]
+        },
+        {
+          "name": "False impact: connect timeout",
+          "patterns": [
+            "connect calls break",
+            "connect() calls break",
+            "connect timeout breaks",
+            "must update connect(",
+            "update every connect",
+            "connect() requires migration"
+          ]
+        }
       ]
     }
   ]

@@ -80,6 +80,13 @@ def evaluate_quality_markers(text: str, task: dict) -> dict:
     matched = 0
     missing: list[str] = []
     for marker in markers:
+        if isinstance(marker, dict) and "patterns" in marker and "text" not in marker:
+            raise ValueError(
+                f"Marker {marker.get('name', '?')!r} has 'patterns' but no 'text' key. "
+                "run_paired_pilot.py uses marker.get('text', '') for matching; passing a "
+                "patterns-style marker silently scores 0. Use run_claude_goal_vs_mission.py "
+                "for regex/patterns-based marker cohorts."
+            )
         needle = marker if isinstance(marker, str) else marker.get("text", "")
         if needle and needle in text:
             matched += 1
