@@ -599,7 +599,7 @@ def _specialist_selection_checkpoint_error(data: dict) -> str | None:
 # が manifest 間の一致は既に保証しているため、ここでは manifest との一致のみ追加で固定する)。
 # 実行時に manifest ファイルを読みに行かない設計: plugin cache 配布・symlink 配布・単一ファイル
 # 実行のいずれでも `.claude-plugin/plugin.json` への相対パスが安定しないため。
-MISSION_CLI_VERSION = "2.7.0"
+MISSION_CLI_VERSION = "2.8.0"
 
 # Tier5: スコア/反復のマジックナンバーを単一定義 (散在防止・閾値変更を1箇所に集約)
 DEFAULT_THRESHOLD = 4.0     # 合格 composite 閾値 (init --threshold 未指定時 / mark-passes fallback)

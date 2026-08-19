@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.0] - 2026-08-19
+
+Wave 3 completes the Typed Mission Kernel migration. New sessions now start on schema v5, and every mutating command goes through the repository boundary, so no command writes session state directly. A static inventory keeps that property enforced in CI.
+
+- refactor: route the remaining mutating commands through the repository and empty the direct-write allowlist, so every mutating command now belongs to the owner registry and no command writes session state outside the repository boundary (#555).
+
+- fix: return a proper preflight result for sealed v5 state instead of an internal error (#554).
+
+- docs: synchronize the U2 contract error-code documentation with the current implementation, removing an error code the implementation no longer emits (#553).
+
+- fix: isolate the default aggregate output per project so parallel test workers no longer collide on a shared temporary path, removing an intermittent CI failure (#552).
+
+- refactor: route the highest-risk mutating commands through the repository and add the command owner registry with a static direct-write inventory (#551).
+
+- feat: add the genesis commit API and cut new sessions over to schema v5 (#549).
+
 ## [2.7.0] - 2026-08-18
 
 Wave 3 introduces the Typed Mission Kernel and UnitOfWork foundation while keeping new sessions on schema v4. It stages the internal migration through the versioned aggregate/decoder, private staging and fenced CAS, crash recovery, generation GC, the unified transition table, and the repository and authoritative-reader bindings layered above them.
@@ -505,6 +521,7 @@ First public release.
 - Python test suite covering state routing, scoring gates, and hook behavior.
 - GitHub Actions CI (`push`, `pull_request`, `workflow_dispatch`) with pytest and ShellCheck.
 
+[2.8.0]: https://github.com/tackeyy/mission/releases/tag/v2.8.0
 [2.7.0]: https://github.com/tackeyy/mission/releases/tag/v2.7.0
 [2.6.0]: https://github.com/tackeyy/mission/releases/tag/v2.6.0
 [2.5.0]: https://github.com/tackeyy/mission/releases/tag/v2.5.0

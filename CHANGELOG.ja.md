@@ -9,6 +9,22 @@
 
 ## [Unreleased]
 
+## [2.8.0] - 2026-08-19
+
+Wave 3 の Typed Mission Kernel 移行が完了した。新規セッションは schema v5 で開始し、すべての mutating command が repository 境界を経由するため、session state を直接書き込むコマンドは存在しない。この性質は静的 inventory によって CI で強制される。
+
+- refactor: 残る mutating command を repository 経由へ移行し direct-write allowlist を空にした。これにより全 mutating command が owner registry に属し、repository 境界の外で session state を書き込むコマンドは存在しなくなった (#555)。
+
+- fix: sealed 状態の v5 state に対して internal error ではなく正しい preflight 結果を返すよう修正した (#554)。
+
+- docs: U2 contract の error-code 記述を現行実装へ同期し、実装が発行しなくなった error code を除去した (#553)。
+
+- fix: aggregate の既定出力をプロジェクト単位で分離し、並列テストワーカーが共有一時パスで衝突しないようにした。これにより断続的な CI 失敗を解消した (#552)。
+
+- refactor: 最も高リスクな mutating command を repository 経由へ移行し、command owner registry と直接 write の静的 inventory を追加した (#551)。
+
+- feat: ジェネシス commit API を追加し、新規セッションを schema v5 へ切り替えた (#549)。
+
 ## [2.7.0] - 2026-08-18
 
 Wave 3 では Typed Mission Kernel と UnitOfWork の基盤を導入しつつ、新規 session は schema v4 のまま維持します。versioned aggregate / decoder、private staging と fenced CAS、crash recovery、generation GC、統合 transition table、そしてその上に載る repository / authoritative reader の結合を段階的に入れました。
@@ -505,6 +521,7 @@ Wave 3 では Typed Mission Kernel と UnitOfWork の基盤を導入しつつ、
 - 状態ルーティング・スコアゲート・hook 挙動をカバーする Python テストスイート。
 - GitHub Actions CI（`push` / `pull_request` / `workflow_dispatch`）。pytest と ShellCheck を実行。
 
+[2.8.0]: https://github.com/tackeyy/mission/releases/tag/v2.8.0
 [2.7.0]: https://github.com/tackeyy/mission/releases/tag/v2.7.0
 [2.6.0]: https://github.com/tackeyy/mission/releases/tag/v2.6.0
 [2.5.0]: https://github.com/tackeyy/mission/releases/tag/v2.5.0
