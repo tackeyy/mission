@@ -110,24 +110,35 @@ class TestFixtureVerbatimDoesNotEarnFullScore:
 
 class TestKnownGoodArtifactsStillScoreAboveFloor:
     def test_known_good_artifacts_still_score_above_floor(self):
+        """正解 artifact は書き換え後も高スコアを維持する。
+
+        **両 arm を対象にする**。mission arm だけを較正対象にすると、
+        パターンが mission の言い回しへ過学習し、同じ欠陥を正しく指摘した
+        goal artifact を false negative にしても気づけない (実際に起きた)。
+        測定は arm-blind でなければならない。
+        """
         runner = _load_runner()
         tasks = _load_tasks()["tasks"]
         failures = []
+        checked = 0
         for task in tasks:
-            artifact_path = ARTIFACTS_BASE / f"{task['id']}-mission" / "artifact.md"
-            if not artifact_path.exists():
-                continue
-            text = artifact_path.read_text(encoding="utf-8")
-            result = runner.evaluate_quality_markers(text, task)
-            score = result["quality_marker_score"]
-            if score is None:
-                continue
-            if score < 0.6:
-                failures.append(
-                    f"{task['id']}: score={score} "
-                    f"(matched={result['quality_markers_matched']}, "
-                    f"missing={result['quality_markers_missing']})"
-                )
+            for arm_suffix in ("-mission", "-claude_code_goal_command"):
+                artifact_path = ARTIFACTS_BASE / f"{task['id']}{arm_suffix}" / "artifact.md"
+                if not artifact_path.exists():
+                    continue
+                text = artifact_path.read_text(encoding="utf-8")
+                # 本番と同じ前処理を通す (run_one は strip_form 後に採点する)。
+                result = runner.evaluate_quality_markers(runner.strip_form(text), task)
+                score = result["quality_marker_score"]
+                if score is None:
+                    continue
+                checked += 1
+                if score < 0.6:
+                    failures.append(
+                        f"{task['id']}{arm_suffix}: score={score} "
+                        f"(missing={result['quality_markers_missing']})"
+                    )
+        assert checked >= 10, f"expected both arms of 5 tasks, checked only {checked}"
         assert not failures, (
             "Known-good artifact scored < 0.6 for:\n"
             + "\n".join(failures)

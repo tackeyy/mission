@@ -161,21 +161,21 @@
           "name": "Fix: certificate renewal",
           "match_type": "regex",
           "patterns": [
-            "(smallest.safe|remediat).{0,150}(renew|rotate|reissue).{0,80}(cert|payments.gw)"
+            "(renew|rotate|reissue|replace).{0,120}(cert|payments.gw)|(cert|payments.gw).{0,120}(renew|rotate|reissue|replace)"
           ]
         },
         {
           "name": "Fix: concurrency revert or pool resize",
           "match_type": "regex",
           "patterns": [
-            "(revert|rollback|roll.back).{0,100}worker_concurrency"
+            "worker_concurrency.{0,240}(revert|rollback|roll .{0,40}back|back to|resize|reduce|lower|restore)|(revert|rollback|roll .{0,40}back|resize|reduce|lower|restore).{0,240}worker_concurrency"
           ]
         },
         {
           "name": "Fix: reschedule or de-conflict the job",
           "match_type": "regex",
           "patterns": [
-            "(remediat).{0,100}nightly.reindex|nightly.reindex.{0,100}(remediat)"
+            "(nightly.reindex|reindex).{0,240}(reschedul|move|de.conflict|off.peak|window|defer|stagger)|(reschedul|de.conflict|off.peak|defer|stagger).{0,240}(nightly.reindex|reindex)"
           ]
         }
       ],
@@ -381,35 +381,35 @@
           "name": "Impact: strict parseConfig vs flush_interval",
           "match_type": "regex",
           "patterns": [
-            "(impact|breaking|affect|configkeyerror).{0,200}flush_interval|flush_interval.{0,200}(impact|breaking|affect|configkeyerror|raise)"
+            "flush_interval.{0,240}(configkeyerror|raise|throw|reject|break|fail)|(configkeyerror|raise|throw|reject).{0,240}flush_interval"
           ]
         },
         {
           "name": "Impact: onRetry signature at retry-metrics",
           "match_type": "regex",
           "patterns": [
-            "onretry.{0,150}impact|impact.{0,150}onretry"
+            "retry-metrics.{0,240}(no longer invoked|not invoked|silent|break|impact|stop|lost|zero|fail|degrade)|(no longer invoked|not invoked|silent|break|impact|degrade).{0,240}retry-metrics"
           ]
         },
         {
           "name": "Impact: msgpack consumer vs JSON default",
           "match_type": "regex",
           "patterns": [
-            "(impact|decode.error|json.bytes).{0,200}msgpack|msgpack.{0,200}(impact|decode.error|json.bytes)"
+            "edge-cache.{0,240}(json|wire.format|break|mismatch|incompat)|(json|wire.format|incompat).{0,240}edge-cache"
           ]
         },
         {
           "name": "Impact: async drain at shutdown-hook",
           "match_type": "regex",
           "patterns": [
-            "(impact|f4|drop.{0,20}items|items.{0,20}drop).{0,200}drain|drain.{0,200}(impact|f4|items.{0,20}drop)"
+            "shutdown.hook.{0,240}(unawaited|not awaited|await|promise|premature|drop|lost|may exit|exit before)|(unawaited|not awaited|premature|may exit|exit before).{0,240}shutdown.hook"
           ]
         },
         {
           "name": "Constraint: codec pin before first publish",
           "match_type": "regex",
           "patterns": [
-            "(constraint).{0,200}(codec.pin|pin.a.codec)|(codec.pin|pin.a.codec).{0,200}constraint"
+            "(codec.pin|pin.{0,20}codec).{0,240}(before|order|precede|sequenc)|(before|order|precede|sequenc).{0,240}(codec.pin|pin.{0,20}codec)"
           ]
         }
       ],
