@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import importlib.util
 import json
 import os
@@ -50,14 +51,40 @@ def _load_mission_state_module(name: str):
     return module
 
 
-def _env(session_id: str, lease_id: str, *, ttl: int | None = None):
+def _env(
+    session_id: str,
+    lease_id: str,
+    *,
+    ttl: int | None = None,
+    now: str | None = None,
+):
     values = {
         "MISSION_SESSION_ID": session_id,
         "MISSION_LEASE_ID": lease_id,
     }
     if ttl is not None:
         values["MISSION_LEASE_TTL_SECONDS"] = str(ttl)
+    if now is not None:
+        values["MISSION_STATE_NOW"] = now
     return values
+
+
+def _clock():
+    """リース期限切れを壁時計ではなく論理時刻で再現するための時刻列を返す (#579).
+
+    以前は ttl=1 秒 + time.sleep(1.1) で期限切れを作っていたが、CPU 競合下では
+    操作を実行するセッション自身のリースが操作中に切れ、fenced commit が
+    "pending target lease expired" で落ちる確率的失敗を起こしていた。
+    MISSION_STATE_NOW で now を進めれば、リースは既定 TTL のまま論理的にだけ
+    期限切れになり、実行時間に依存しなくなる。
+    """
+    base = datetime.now(timezone.utc).replace(microsecond=0)
+
+    def at(minutes: int) -> str:
+        moment = base + timedelta(minutes=minutes)
+        return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    return at
 
 
 def _head(root, session_id: str):
@@ -681,12 +708,13 @@ def test_supersede_reviews_skips_already_terminal_v5_generations(
         "--review-group-id",
         "successive-wave-group",
     ]
-    first_environment = _env("wave-1", "wave-1-lease", ttl=1)
-    second_environment = _env("wave-2", "wave-2-lease", ttl=1)
-    third_environment = _env("wave-3", "wave-3-lease")
+    at = _clock()
+    first_environment = _env("wave-1", "wave-1-lease", now=at(0))
+    second_environment = _env("wave-2", "wave-2-lease", now=at(0))
+    third_environment = _env("wave-3", "wave-3-lease", now=at(20))
     assert run_cli(*common, cwd=tmp_path, env_extra=first_environment).returncode == 0
     assert run_cli(*common, cwd=tmp_path, env_extra=second_environment).returncode == 0
-    time.sleep(1.1)
+    # 既定 TTL は 15 分。20 分進めて wave-1 のリースを論理的に期限切れにする。
     first_supersede = run_cli(
         "supersede-reviews",
         "--group",
@@ -694,13 +722,14 @@ def test_supersede_reviews_skips_already_terminal_v5_generations(
         cwd=tmp_path,
         env_extra={
             **second_environment,
+            "MISSION_STATE_NOW": at(20),
             "MISSION_OPERATION_ID": "supersede-successive-wave-1",
         },
     )
     assert first_supersede.returncode == 0, first_supersede.stderr
     assert run_cli(*common, cwd=tmp_path, env_extra=third_environment).returncode == 0
-    time.sleep(1.1)
 
+    # さらに 20 分進めて wave-2 のリースを期限切れにする。
     second_supersede = run_cli(
         "supersede-reviews",
         "--group",
@@ -708,6 +737,7 @@ def test_supersede_reviews_skips_already_terminal_v5_generations(
         cwd=tmp_path,
         env_extra={
             **third_environment,
+            "MISSION_STATE_NOW": at(40),
             "MISSION_OPERATION_ID": "supersede-successive-wave-2",
         },
     )
@@ -735,13 +765,15 @@ def test_supersede_reviews_serializes_discovery_with_separate_process_init(
         "--review-group-id",
         "concurrent-wave-group",
     ]
-    old_environment = _env("concurrent-old", "concurrent-old-lease", ttl=1)
+    at = _clock()
+    old_environment = _env("concurrent-old", "concurrent-old-lease", now=at(0))
     current_environment = _env(
-        "concurrent-current", "concurrent-current-lease", ttl=1
+        "concurrent-current", "concurrent-current-lease", now=at(0)
     )
     assert run_cli(*common, cwd=tmp_path, env_extra=old_environment).returncode == 0
     assert run_cli(*common, cwd=tmp_path, env_extra=current_environment).returncode == 0
-    time.sleep(1.1)
+    # 既定 TTL は 15 分。20 分進めて concurrent-old のリースを論理的に期限切れにする。
+    late = at(20)
 
     module = _load_mission_state_module("mission_state_issue543_group_lock")
     entered_locked_body = threading.Event()
@@ -756,7 +788,7 @@ def test_supersede_reviews_serializes_discovery_with_separate_process_init(
     monkeypatch.setattr(module, "_supersede_reviews_locked", paused_locked_body)
     monkeypatch.chdir(tmp_path)
     for key, value in {
-        **_env("concurrent-current", "concurrent-current-lease"),
+        **_env("concurrent-current", "concurrent-current-lease", now=late),
         "MISSION_OPERATION_ID": "supersede-concurrent-wave-1",
     }.items():
         monkeypatch.setenv(key, value)
@@ -816,11 +848,12 @@ def test_supersede_reviews_serializes_discovery_with_review_lineage_set(
         "--review-group-id",
         "set-race-group",
     ]
-    old_environment = _env("set-race-old", "set-race-old-lease", ttl=1)
+    at = _clock()
+    old_environment = _env("set-race-old", "set-race-old-lease", now=at(0))
     current_environment = _env(
-        "set-race-current", "set-race-current-lease", ttl=1
+        "set-race-current", "set-race-current-lease", now=at(0)
     )
-    joiner_environment = _env("set-race-joiner", "set-race-joiner-lease")
+    joiner_environment = _env("set-race-joiner", "set-race-joiner-lease", now=at(0))
     assert run_cli(*common, cwd=tmp_path, env_extra=old_environment).returncode == 0
     assert run_cli(*common, cwd=tmp_path, env_extra=current_environment).returncode == 0
     assert run_cli(
@@ -831,7 +864,8 @@ def test_supersede_reviews_serializes_discovery_with_review_lineage_set(
         cwd=tmp_path,
         env_extra=joiner_environment,
     ).returncode == 0
-    time.sleep(1.1)
+    # 既定 TTL は 15 分。20 分進めて set-race-old のリースを論理的に期限切れにする。
+    late = at(20)
 
     module = _load_mission_state_module("mission_state_issue543_set_group_lock")
     entered_locked_body = threading.Event()
@@ -846,7 +880,7 @@ def test_supersede_reviews_serializes_discovery_with_review_lineage_set(
     monkeypatch.setattr(module, "_supersede_reviews_locked", paused_locked_body)
     monkeypatch.chdir(tmp_path)
     for key, value in {
-        **_env("set-race-current", "set-race-current-lease"),
+        **_env("set-race-current", "set-race-current-lease", now=late),
         "MISSION_OPERATION_ID": "supersede-set-race-group",
     }.items():
         monkeypatch.setenv(key, value)
@@ -905,12 +939,13 @@ def test_supersede_reviews_serializes_with_terminal_review_refresh_pid(
         "--review-group-id",
         "refresh-race-group",
     ]
-    first_environment = _env("refresh-race-1", "refresh-race-1-lease", ttl=1)
-    second_environment = _env("refresh-race-2", "refresh-race-2-lease", ttl=1)
-    third_environment = _env("refresh-race-3", "refresh-race-3-lease")
+    at = _clock()
+    first_environment = _env("refresh-race-1", "refresh-race-1-lease", now=at(0))
+    second_environment = _env("refresh-race-2", "refresh-race-2-lease", now=at(0))
+    third_environment = _env("refresh-race-3", "refresh-race-3-lease", now=at(20))
     assert run_cli(*common, cwd=tmp_path, env_extra=first_environment).returncode == 0
     assert run_cli(*common, cwd=tmp_path, env_extra=second_environment).returncode == 0
-    time.sleep(1.1)
+    # 既定 TTL は 15 分。20 分進めて refresh-race-1 のリースを論理的に期限切れにする。
     first_supersede = run_cli(
         "supersede-reviews",
         "--group",
@@ -918,12 +953,14 @@ def test_supersede_reviews_serializes_with_terminal_review_refresh_pid(
         cwd=tmp_path,
         env_extra={
             **second_environment,
+            "MISSION_STATE_NOW": at(20),
             "MISSION_OPERATION_ID": "supersede-refresh-race-1",
         },
     )
     assert first_supersede.returncode == 0, first_supersede.stderr
     assert run_cli(*common, cwd=tmp_path, env_extra=third_environment).returncode == 0
-    time.sleep(1.1)
+    # さらに 20 分進めて refresh-race-2 のリースを期限切れにする。
+    late = at(40)
 
     module = _load_mission_state_module("mission_state_issue543_refresh_group_lock")
     entered_locked_body = threading.Event()
@@ -939,6 +976,7 @@ def test_supersede_reviews_serializes_with_terminal_review_refresh_pid(
     monkeypatch.chdir(tmp_path)
     for key, value in {
         **third_environment,
+        "MISSION_STATE_NOW": late,
         "MISSION_OPERATION_ID": "supersede-refresh-race-2",
     }.items():
         monkeypatch.setenv(key, value)
@@ -964,6 +1002,7 @@ def test_supersede_reviews_serializes_with_terminal_review_refresh_pid(
     }
     child_environment["MISSION_SESSION_ID"] = "refresh-race-1"
     child_environment["MISSION_FORCE_PID_IS_AGENT"] = "1"
+    child_environment["MISSION_STATE_NOW"] = late
     refresh_ready = tmp_path / "concurrent-refresh-lock-ready"
     concurrent_refresh = _start_lock_ready_cli(
         ["refresh-pid", "--force"],
