@@ -248,6 +248,7 @@ def build_prompt(
     mission_max_iter: int | None = None,
     mission_profile: str = "full",
     mission_budget_minutes: float | None = None,
+    mission_threshold: float | None = None,
     extra_rules: list[str] | tuple[str, ...] = (),
 ) -> str:
     cohort_rules = "".join(f"- {rule}\n" for rule in extra_rules)
@@ -314,6 +315,21 @@ Quality benchmark profile:
     budget_flag = (
         f" --budget-minutes {mission_budget_minutes}" if mission_budget_minutes is not None else ""
     )
+    # #566: pass threshold。CLI 指定がタスク定義より優先する (mission_max_iter と同規約)。
+    # threshold は測定条件そのもので、誤指定に気づかないまま 30 セル回すのは高くつく。
+    # budget-minutes と違い mission 側の検証に委ねず、ここで fail-fast させる。
+    effective_threshold = (
+        mission_threshold if mission_threshold is not None else task.get("mission_threshold")
+    )
+    threshold_flag = ""
+    if effective_threshold is not None:
+        if not isinstance(effective_threshold, (int, float)) or isinstance(effective_threshold, bool):
+            raise ValueError(f"mission_threshold must be a number, got {effective_threshold!r}")
+        if not math.isfinite(effective_threshold) or effective_threshold <= 0:
+            raise ValueError(
+                f"mission_threshold must be a positive finite number, got {effective_threshold!r}"
+            )
+        threshold_flag = f" --threshold {effective_threshold}"
     fail_first_protocol = ""
     if task.get("fail_first") is True:
         fail_first_protocol = """
@@ -322,7 +338,7 @@ Fail-first measurement protocol:
 - Do not run mark-passes in iteration 1; the reviewer must record the missing coverage as a High finding.
 - Iteration 2 must resolve that finding before a passing decision and preserve evidence that distinguishes both iterations.
 """
-    return f"""/mission Complete the controlled benchmark artifact at `{output_rel}` with auditable mission-style evidence. --max-iter {mission_max_iter}{budget_flag}
+    return f"""/mission Complete the controlled benchmark artifact at `{output_rel}` with auditable mission-style evidence. --max-iter {mission_max_iter}{budget_flag}{threshold_flag}
 
 {common}
 Arm: mission
@@ -956,6 +972,7 @@ def run_one(
     arm_order: int,
     model_id: str,
     mission_budget_minutes: float | None = None,
+    mission_threshold: float | None = None,
     hidden_paths: list[str] | None = None,
     extra_rules: list[str] | tuple[str, ...] = (),
     run_index: int = 1,
@@ -976,6 +993,7 @@ def run_one(
         mission_max_iter=mission_max_iter,
         mission_profile=mission_profile,
         mission_budget_minutes=mission_budget_minutes,
+        mission_threshold=mission_threshold,
         extra_rules=extra_rules,
     )
     artifact_dir = ARTIFACTS_DIR / run_id / run_name
@@ -1068,6 +1086,7 @@ def run_one(
         f"claude_total_cost_usd={claude_result.get('total_cost_usd') if isinstance(claude_result, dict) else None}",
         f"quality_score_method={evaluation['quality_score_method']}",
         f"mission_profile={mission_profile if arm == 'mission' else None}",
+        f"mission_threshold={mission_threshold if arm == 'mission' else None}",
         "print_mode_smoke=true",
     ]
     if sanitized:
@@ -1114,6 +1133,7 @@ def run_one(
         "max_budget_usd_effective": effective_max_budget_usd,
         "burn_rate_usd_per_min": burn_rate_usd_per_min,
         "mission_profile": mission_profile if arm == "mission" else None,
+        "mission_threshold": mission_threshold if arm == "mission" else None,
         "started_at": started,
         "completed_at": completed,
         "starting_commit": starting_commit,
@@ -1336,6 +1356,7 @@ def summarize(
     stopped_early: bool = False,
     mission_profile: str = "full",
     repeats: int = 1,
+    mission_threshold: float | None = None,
 ) -> dict:
     by_arm: dict[str, list[dict]] = {arm: [r for r in records if r["arm"] == arm] for arm in ARMS}
     task_cohort = tasks_path.stem.removeprefix("tasks.")
@@ -1449,6 +1470,7 @@ def summarize(
         "task_cohort": task_cohort,
         "selected_task_ids": [task["id"] for task in tasks],
         "mission_profile": mission_profile,
+        "mission_threshold": mission_threshold,
         "starting_commit": starting_commit,
         "records": len(records),
         "repeats": repeats,
@@ -1576,6 +1598,14 @@ def main() -> int:
         " budget pressure による graceful partial-done halt を有効化する。",
     )
     parser.add_argument(
+        "--mission-threshold",
+        type=float,
+        default=None,
+        help="#566: /mission へ --threshold として渡す pass threshold。"
+        " 未指定なら /mission の既定 (4.0) に委ねる。タスク定義の"
+        " mission_threshold より CLI 指定が優先する。",
+    )
+    parser.add_argument(
         "--mission-profile",
         choices=MISSION_PROFILES,
         default="full",
@@ -1629,6 +1659,7 @@ def main() -> int:
             arm_order,
             args.model_id,
             mission_budget_minutes=args.mission_budget_minutes,
+            mission_threshold=args.mission_threshold,
             hidden_paths=task_data.get("hidden_paths"),
             extra_rules=task_data.get("prompt_rules", ()),
             run_index=run_index,
@@ -1676,6 +1707,7 @@ def main() -> int:
         stopped_early=stopped_early,
         mission_profile=args.mission_profile,
         repeats=args.repeats,
+        mission_threshold=args.mission_threshold,
     )
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
