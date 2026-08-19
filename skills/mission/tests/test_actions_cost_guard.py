@@ -95,6 +95,17 @@ def test_shard_selection_is_exhaustive_disjoint_and_fail_closed():
     assert 'test -n "$$targets"' in makefile
 
 
+def test_docs_only_fast_path_never_produces_an_empty_shard():
+    """fast path のファイル数が SHARD_TOTAL を下回るとシャードが空になり CI が落ちる。
+
+    空シャードは fail-closed で正しく落ちるが、docs-only PR が理由なく通らなくなる。
+    fast path を縮小する変更をこのテストで検出する。
+    """
+    scopes = (ROOT / "scripts" / "ci_changed_scopes.js").read_text(encoding="utf-8")
+    fast_path = re.search(r"const FAST_PATH_TARGETS = \[(.*?)\]", scopes, re.DOTALL).group(1)
+    assert len(re.findall(r'"[^"]+\.py"', fast_path)) >= SHARD_TOTAL
+
+
 def test_repository_wide_python_suite_runs_for_every_pr():
     assert "const decision = classifyChangedFiles({" in CI
     assert "core.setOutput('python_targets', decision.pythonTargets);" in CI

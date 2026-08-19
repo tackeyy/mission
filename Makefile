@@ -25,6 +25,10 @@ test: $(REQUIREMENTS_STAMP)
 	$(VENV_PYTHON) -m pytest -q -n auto --dist loadfile $(PYTEST_TARGETS)
 	@printf '{"schema":"mission-test-report/1","tree_sha":"%s","tier":"full","test_manifest":["skills/mission"]}\n' "$$(git rev-parse 'HEAD^{tree}')"
 
+# POSIX sh では「変数代入の右辺のコマンド置換が失敗した」場合に set -e が発火しない。
+# 分割スクリプトが非 0 で終了しても targets="" の代入自体は成功してしまうため、
+# 直後の test -n が唯一の防壁になる（これが無いと引数なし pytest へ退化する）。
+# この test -n は test_actions_cost_guard.py が固定しており、除去すると CI が落ちる。
 test-shard: $(REQUIREMENTS_STAMP)
 	@set -eu; \
 	targets="$$($(PYTHON) scripts/ci_shard_targets.py --index $(SHARD_INDEX) --total $(SHARD_TOTAL) --targets "$(PYTEST_TARGETS)")"; \
