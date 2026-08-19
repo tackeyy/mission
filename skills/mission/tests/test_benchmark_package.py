@@ -998,9 +998,9 @@ def test_mission_vs_goal_measured_reports_are_honest_about_paired_runs():
     tail_tasks = json.loads((BENCHMARK_DIR / "tasks.tail.json").read_text(encoding="utf-8"))
     config_drift = next(t for t in tail_tasks["tasks"] if t["id"] == "tail-config-spec-drift")
     health_marker = next(m for m in config_drift["quality_markers"] if m["name"] == "Drift: health interval 75s")
-    assert "seconds=75" in health_marker["patterns"]
-    assert "(75" in health_marker["patterns"]
-    assert "75`" in health_marker["patterns"]
+    # patterns were rewritten to regex in #558; check representative content
+    assert any("75" in p for p in health_marker["patterns"])
+    assert health_marker.get("match_type") == "regex"
 
     # --- Pattern-Fix Validation Smoke (2026-07-10) ---
     smoke_v2_results_path = BENCHMARK_DIR / "results" / "2026-07-10-claude-goal-vs-mission-tail-smoke-v2.jsonl"
