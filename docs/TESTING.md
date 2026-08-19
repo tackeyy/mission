@@ -24,7 +24,7 @@ CI splits the same suite across independent runners because the workload is
 CPU-bound. Reproduce one CI shard locally:
 
 ```bash
-make test-shard SHARD_INDEX=1 SHARD_TOTAL=4
+make test-shard SHARD_INDEX=1 SHARD_TOTAL=6
 ```
 
 `scripts/ci_shard_targets.py` performs the split. It is deterministic,

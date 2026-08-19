@@ -17,7 +17,7 @@ JOB_CONTRACT = {
     "quality": {"runs-on": "ubuntu-latest", "timeout-minutes": 5},
 }
 REQUIRED_STATUS_CHECK = "quality"
-SHARD_TOTAL = 4
+SHARD_TOTAL = 6
 
 
 def _job_names():
