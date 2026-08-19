@@ -1409,6 +1409,11 @@ def summarize(
             "WARNING: one or more records were blocked by max_budget_usd; "
             "review per-arm burn rate before interpreting cost or completion results."
         )
+    limitations.append(
+        "total_cost_usd is an API-equivalent estimate reported by the agent runtime, not a billed amount. "
+        "Under subscription (OAuth) execution no per-token charge is incurred; the consumed resource is the "
+        "plan rate limit. Use these values for relative comparison between arms, not as an absolute spend figure."
+    )
     if spend_limit_record is not None:
         limitations.append(
             "WARNING: API spend limit affected one or more records; affected records are "
@@ -1418,6 +1423,51 @@ def summarize(
             limitations.append(
                 f"run stopped early: api_spend_limit at record {spend_limit_record}/{expected_records}"
             )
+
+    # --- Saturation guard (#563) ---
+    def _scored(items: list[dict]) -> list[dict]:
+        return [r for r in items if r.get("quality_marker_score") is not None]
+
+    all_scored = _scored(records)
+    marker_saturated = bool(all_scored) and all(r["quality_marker_score"] >= 1.0 for r in all_scored)
+    marker_saturation_detail = {
+        arm: {r.get("task_id", "unknown"): r["quality_marker_score"] for r in _scored(items) if r["quality_marker_score"] >= 1.0}
+        for arm, items in by_arm.items()
+    }
+    measurement_valid: bool
+    measurement_valid_reason: str
+    if not all_scored:
+        measurement_valid = False
+        measurement_valid_reason = "no scored records"
+    elif marker_saturated:
+        measurement_valid = False
+        measurement_valid_reason = "marker_saturated"
+    elif len({r["quality_marker_score"] for r in all_scored}) == 1:
+        # 天井が 1.0 から移動しただけの場合を取りこぼさない。#557 が問題に
+        # しているのは弁別できないことであり、値が満点であることではない。
+        measurement_valid = False
+        measurement_valid_reason = "no_discrimination"
+    else:
+        measurement_valid = True
+        measurement_valid_reason = "ok"
+
+    def _arm_mean(arm: str) -> float | None:
+        vals = [r["quality_marker_score"] for r in _scored(by_arm.get(arm, [])) ]
+        return round(sum(vals) / len(vals), 4) if vals else None
+
+    goal_mean = _arm_mean("claude_code_goal_command")
+    mission_mean = _arm_mean("mission")
+    marker_score_delta_vs_goal: float | None = (
+        round(mission_mean - goal_mean, 4)
+        if mission_mean is not None and goal_mean is not None
+        else None
+    )
+    marker_score_ratio_vs_goal: float | None = (
+        round(mission_mean / goal_mean, 4)
+        if mission_mean is not None and goal_mean is not None and goal_mean != 0
+        else None
+    )
+    # --- end saturation guard ---
 
     iteration_rows = [
         iteration
@@ -1484,6 +1534,12 @@ def summarize(
         "expected_records": expected_records,
         "stopped_early": stopped_early,
         "limitations": limitations,
+        "marker_saturated": marker_saturated,
+        "marker_saturation_detail": marker_saturation_detail,
+        "measurement_valid": measurement_valid,
+        "measurement_valid_reason": measurement_valid_reason,
+        "marker_score_delta_vs_goal": marker_score_delta_vs_goal,
+        "marker_score_ratio_vs_goal": marker_score_ratio_vs_goal,
         "diff_review_measurement_gate": diff_review_measurement_gate,
         "benchmark_kpi": summarize_benchmark_kpi(records),
         "arms": {
@@ -1544,6 +1600,16 @@ def summarize(
                 ),
                 # #249: 反復時の分散とコスト集計 (blocked/failed の全損コストも含む)。
                 "marker_score_variance": _marker_variance(items),
+                # #563: 飽和検知 / 分散可視化
+                "marker_score_min": (
+                    min(r["quality_marker_score"] for r in _scored(items))
+                    if _scored(items) else None
+                ),
+                "marker_score_max": (
+                    max(r["quality_marker_score"] for r in _scored(items))
+                    if _scored(items) else None
+                ),
+                "marker_score_distinct_values": len({r["quality_marker_score"] for r in _scored(items)}),
                 "cost_usd_total": round(sum(_cost_values(items)), 4) if _cost_values(items) else None,
                 "cost_usd_mean": (
                     round(sum(_cost_values(items)) / len(_cost_values(items)), 4)
@@ -1554,6 +1620,38 @@ def summarize(
             for arm, items in by_arm.items()
         },
     }
+
+
+def summary_warnings(summary: dict) -> list[str]:
+    """Return warning lines for the given summary dict.
+
+    Designed for extension: issue #565 can append additional warning lines here.
+    Callers should print each returned line before other summary output.
+    """
+    warnings: list[str] = []
+    if not summary.get("measurement_valid", True):
+        reason = summary.get("measurement_valid_reason", "")
+        if reason == "marker_saturated":
+            warnings.append(
+                "WARNING: quality markers are saturated (all records scored 1.0). This run cannot\n"
+                "discriminate quality between arms. Cost/time comparisons remain valid; quality\n"
+                "comparison is NOT valid. See issue #557."
+            )
+        elif reason == "no_discrimination":
+            warnings.append(
+                "WARNING: every record scored the same marker value, so the metric cannot\n"
+                "discriminate quality between arms even though it is not at the 1.0 ceiling.\n"
+                "Cost/time comparisons remain valid; quality comparison is NOT valid. See issue #557."
+            )
+        elif reason == "no scored records":
+            warnings.append(
+                "WARNING: no scored records found. Quality comparison is NOT valid."
+            )
+        else:
+            warnings.append(
+                f"WARNING: measurement_valid is false (reason: {reason}). Quality comparison is NOT valid."
+            )
+    return warnings
 
 
 def main() -> int:
@@ -1707,6 +1805,8 @@ def main() -> int:
         repeats=args.repeats,
     )
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    for warning in summary_warnings(summary):
+        print(warning)
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
