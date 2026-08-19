@@ -3,7 +3,9 @@
 TDD: RED step written first (before regex rewrite of cohort JSON files).
 Tests verify:
 1. Fixture verbatim copy does NOT earn score >= 0.5 (cohorts: discriminating, openworld, portfolio)
-2. Known-good past artifacts still score >= 0.6 (discriminating and openworld where artifacts exist)
+2. Known-good past artifacts still score >= 0.6 across ALL available run directories and both
+   arms (including repeat variants), for discriminating, openworld, and portfolio cohorts.
+   Asserts minimum cell count so the test fails if artifact directories are unexpectedly missing.
 3. No pattern in cohort task files is <= 12 characters
 4. All cohort task patterns use match_type: "regex"
 """
@@ -18,6 +20,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 BENCH_DIR = REPO_ROOT / "benchmarks" / "mission-vs-goal"
+ARTIFACTS_DIR = BENCH_DIR / "artifacts"
 RUNNER_PATH = BENCH_DIR / "run_claude_goal_vs_mission.py"
 
 TASKS_DISCRIMINATING = BENCH_DIR / "tasks.discriminating.json"
@@ -52,6 +55,42 @@ def _load_cohort_tasks():
             if task.get("fixtures"):
                 results.append((task, artifacts_base))
     return results
+
+
+def _load_all_cohort_tasks_by_id() -> dict[str, dict]:
+    """Return {task_id: task_dict} for all cohort tasks across all three cohort files."""
+    tasks: dict[str, dict] = {}
+    for path in [TASKS_DISCRIMINATING, TASKS_OPENWORLD, TASKS_PORTFOLIO]:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for task in data["tasks"]:
+            tasks[task["id"]] = task
+    return tasks
+
+
+def _discover_artifact_cells(
+    task_ids: set[str],
+) -> list[tuple[str, str, str, Path]]:
+    """Scan artifacts directory and return (run, task_id, arm, artifact_path) for every
+    artifact.md whose parent directory name matches <task_id>-<arm>."""
+    cells = []
+    if not ARTIFACTS_DIR.is_dir():
+        return cells
+    for run_dir in sorted(ARTIFACTS_DIR.iterdir()):
+        if not run_dir.is_dir():
+            continue
+        for subdir in sorted(run_dir.iterdir()):
+            if not subdir.is_dir():
+                continue
+            artifact_path = subdir / "artifact.md"
+            if not artifact_path.exists():
+                continue
+            name = subdir.name
+            for tid in task_ids:
+                if name.startswith(tid + "-"):
+                    arm = name[len(tid) + 1 :]
+                    cells.append((run_dir.name, tid, arm, artifact_path))
+                    break
+    return cells
 
 
 def _concatenate_fixtures(task: dict) -> str:
@@ -120,40 +159,43 @@ class TestCohortFixtureVerbatimDoesNotEarnFullScore:
 
 
 class TestCohortKnownGoodArtifactsStillScoreAboveFloor:
-    """Both arms of past discriminating and openworld runs must still score >= 0.6.
+    """All cohort artifacts across every available run must score >= 0.6.
 
-    RED before JSON rewrite: new regex patterns are not yet in the task files.
-    GREEN after rewrite: all available artifacts score >= 0.6.
+    Covers discriminating, openworld, and portfolio across ALL available run
+    directories and both arms including repeat variants (-rep1, -rep2, -rep3).
+    Asserts minimum cell count so the test fails if run directories are missing.
     """
 
     def test_known_good_artifacts_score_above_floor(self):
         runner = _load_runner()
-        cohort_tasks = _load_cohort_tasks()
+        all_tasks = _load_all_cohort_tasks_by_id()
+        task_ids = set(all_tasks.keys())
+        cells = _discover_artifact_cells(task_ids)
 
-        failures = []
+        failures: list[str] = []
         checked = 0
-        for task, artifacts_base in cohort_tasks:
-            if artifacts_base is None:
+        for run, tid, arm, artifact_path in cells:
+            task = all_tasks[tid]
+            text = artifact_path.read_text(encoding="utf-8")
+            result = runner.evaluate_quality_markers(runner.strip_form(text), task)
+            score = result["quality_marker_score"]
+            if score is None:
                 continue
-            for arm_suffix in ("-mission", "-claude_code_goal_command"):
-                artifact_path = artifacts_base / f"{task['id']}{arm_suffix}" / "artifact.md"
-                if not artifact_path.exists():
-                    continue
-                text = artifact_path.read_text(encoding="utf-8")
-                result = runner.evaluate_quality_markers(runner.strip_form(text), task)
-                score = result["quality_marker_score"]
-                if score is None:
-                    continue
-                checked += 1
-                if score < 0.6:
-                    failures.append(
-                        f"{task['id']}{arm_suffix}: score={score:.3f} "
-                        f"(missing={result['quality_markers_missing']})"
-                    )
+            checked += 1
+            if score < 0.6:
+                failures.append(
+                    f"{run}/{tid}-{arm}: score={score:.3f} "
+                    f"(missing={result['quality_markers_missing'][:2]})"
+                )
 
-        # discriminating (5 tasks) + openworld (3 tasks) = 8 tasks, up to 2 arms each → ≥ 8 checks
-        assert checked >= 8, (
-            f"Expected at least 8 artifact checks (discriminating + openworld), got {checked}"
+        # Minimum cell count:
+        #   discriminating v2 (5 tasks × 2 arms) = 10
+        #   openworld v1 (3 tasks × 2 arms) = 6
+        #   portfolio (multiple runs × tasks × arms) = 100+
+        # Total across all available runs must be at least 100.
+        assert checked >= 100, (
+            f"Expected at least 100 artifact cells across all cohort runs, got {checked}. "
+            "Did a run directory go missing?"
         )
         assert not failures, (
             "Known-good artifact scored < 0.6 for:\n" + "\n".join(failures)
