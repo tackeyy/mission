@@ -88,32 +88,24 @@
       "forbidden_markers": [
         {
           "name": "False claim: idle timeout",
+          "match_type": "regex",
           "patterns": [
-            "fix idle_timeout",
-            "fix the idle timeout",
-            "idle_timeout must be corrected",
-            "correct the idle_timeout",
-            "change idle_timeout_ticks",
-            "set idle_timeout_ticks to"
+            "idle_timeout[_a-z]*.{0,150}(mismatch|is.incorrect|not.equivalent|不一致|要修正)"
           ]
         },
         {
           "name": "False claim: log level",
+          "match_type": "regex",
           "patterns": [
-            "fix log_level",
-            "fix the log level",
-            "log_level must be corrected",
-            "correct the log_level",
-            "change log_level"
+            "log_level[_a-z]*.{0,150}(mismatch|is.incorrect|not.equivalent|不一致|要修正)"
           ]
         },
         {
           "name": "False claim: pool size",
+          "match_type": "regex",
           "patterns": [
-            "correct the pool size",
-            "db_pool_size_per_replica must be corrected",
-            "change db_pool_size_per_replica",
-            "reduce db_pool_size_per_replica"
+            "db_pool_size[_a-z]*.{0,150}(mismatch|is.incorrect|not.equivalent|不一致|要修正)",
+            "pool.size.{0,150}(mismatch|is.incorrect|not.per.replica)"
           ]
         }
       ]
@@ -182,24 +174,18 @@
       "forbidden_markers": [
         {
           "name": "False cause: assets-web deploy",
+          "match_type": "regex",
           "patterns": [
-            "assets-web caused",
-            "assets-web is the root cause",
-            "assets-web release is the root cause",
-            "root cause: assets-web",
-            "assets-web is a root cause",
-            "assets-web is causal"
+            "assets.web.{0,300}(root.cause|remediat|confirmed.cause)",
+            "(root.cause|remediat).{0,300}assets.web"
           ]
         },
         {
           "name": "False cause: clock skew",
+          "match_type": "regex",
           "patterns": [
-            "clock skew caused",
-            "clock skew is the root cause",
-            "clock skew is a root cause",
-            "root cause: clock skew",
-            "fix the clock skew",
-            "fix clock skew"
+            "clock.skew.{0,300}(root.cause|remediat|confirmed.cause)",
+            "(root.cause|remediat).{0,300}clock.skew"
           ]
         }
       ]
@@ -260,22 +246,19 @@
       "forbidden_markers": [
         {
           "name": "False drift: telemetry claim",
+          "match_type": "regex",
           "patterns": [
-            "fix the telemetry claim",
-            "correct the telemetry claim",
-            "telemetry claim must be corrected",
-            "テレメトリーの主張を修正する",
-            "テレメトリーの記述を修正する"
+            "telemetr.{0,150}overclaim",
+            "overclaim.{0,150}telemetr",
+            "テレメトリ.{0,150}(不一致|overclaim)"
           ]
         },
         {
           "name": "False drift: CLI workflow claim",
+          "match_type": "regex",
           "patterns": [
-            "fix the cli workflow claim",
-            "correct the cli workflow claim",
-            "cli workflow claim must be corrected",
-            "cliワークフローの主張を修正",
-            "cliワークフローの記述を修正"
+            "cli.work.{0,150}overclaim",
+            "cli.ワークフロー.{0,150}不一致"
           ]
         }
       ]
@@ -336,26 +319,22 @@
       "forbidden_markers": [
         {
           "name": "False flag: active users claim",
+          "match_type": "regex",
           "patterns": [
-            "active users claim is wrong",
-            "active user claim is wrong",
-            "active users figure is incorrect",
-            "correct the active users",
-            "15% is incorrect",
-            "the 15% is wrong",
-            "9,430 is wrong",
-            "9430 is wrong"
+            "active.user.{0,150}is.incorrect",
+            "active.user.{0,150}is.wrong",
+            "is.incorrect.{0,150}active.user",
+            "active.user.{0,150}inaccurate"
           ]
         },
         {
           "name": "False flag: uptime claim",
+          "match_type": "regex",
           "patterns": [
-            "uptime claim is wrong",
-            "uptime figure is incorrect",
-            "99.95 is wrong",
-            "99.95% is incorrect",
-            "correct the uptime",
-            "uptime is overstated"
+            "uptime.{0,150}is.incorrect",
+            "uptime.{0,150}is.wrong",
+            "is.incorrect.{0,150}uptime",
+            "uptime.{0,150}inaccurate"
           ]
         }
       ]
@@ -416,23 +395,18 @@
       "forbidden_markers": [
         {
           "name": "False impact: warnOnce",
+          "match_type": "regex",
           "patterns": [
-            "warnonce is affected",
-            "warnonce breaks",
-            "warnonce must be migrated",
-            "migrate warnonce",
-            "warnonce requires migration"
+            "warnonce.{0,300}(requires.migration|migration.required|must.be.migrated|confirmed.impact)",
+            "(requires.migration|migration.required).{0,300}warnonce"
           ]
         },
         {
           "name": "False impact: connect timeout",
+          "match_type": "regex",
           "patterns": [
-            "connect calls break",
-            "connect() calls break",
-            "connect timeout breaks",
-            "must update connect(",
-            "update every connect",
-            "connect() requires migration"
+            "connect.{0,30}timeout.{0,300}(requires.migration|migration.required|must.be.updated|calls.will.break)",
+            "(requires.migration|migration.required).{0,300}connect.{0,30}timeout"
           ]
         }
       ]
