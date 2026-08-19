@@ -16,6 +16,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import statistics
 import subprocess
@@ -560,9 +561,7 @@ def extract_process_quality(worktree: Path) -> tuple[dict | None, str | None]:
     if not archive.is_dir():
         return None, "archive_dir_missing"
 
-    import re as _re
-
-    iter_pattern = _re.compile(r"^iter-(\d+)-")
+    iter_pattern = re.compile(r"^iter-(\d+)-")
 
     def parse_iter(name: str) -> int | None:
         m = iter_pattern.match(name)
@@ -590,7 +589,9 @@ def extract_process_quality(worktree: Path) -> tuple[dict | None, str | None]:
 
     sorted_iters = sorted(reviews_by_iter)
     findings_total = 0
-    by_severity: dict[str, int] = {}
+    # High/Medium/Low は常に存在させる (消費側の KeyError を防ぐ)。
+    # 未知の severity は literal キーとして追加される。
+    by_severity: dict[str, int] = {"High": 0, "Medium": 0, "Low": 0}
     reviewer_count_observed = 0
 
     for n in sorted_iters:
@@ -676,6 +677,15 @@ def extract_mission_state_fields(worktree: Path) -> tuple[dict, str | None]:
         "process_quality": None,
         "process_quality_error": None,
     }
+    # process_quality は session state の可読性と独立に収集する (#560)。
+    # session が読めない早期 return 経路でも archive は存在しうるため、先に収集する。
+    try:
+        pq, pq_err = extract_process_quality(worktree)
+        fields["process_quality"] = pq
+        fields["process_quality_error"] = pq_err
+    except Exception as exc:  # noqa: BLE001 — never abort the run
+        fields["process_quality"] = None
+        fields["process_quality_error"] = f"process_quality_exception:{type(exc).__name__}"
     sessions = worktree / ".mission-state" / "sessions"
     candidates = sorted(sessions.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True) if sessions.is_dir() else []
     legacy = worktree / ".mission-state" / "state.json"
@@ -703,13 +713,6 @@ def extract_mission_state_fields(worktree: Path) -> tuple[dict, str | None]:
     fields["mission_evidence_only"] = halt_category == "evidence-submitted"  # #341
     fields["measurement_observations"] = extract_measurement_observations(state)
     fields["diff_review_observations"] = extract_diff_review_observations(worktree, state)
-    try:
-        pq, pq_err = extract_process_quality(worktree)
-        fields["process_quality"] = pq
-        fields["process_quality_error"] = pq_err
-    except Exception as exc:  # noqa: BLE001 — never abort the run
-        fields["process_quality"] = None
-        fields["process_quality_error"] = f"process_quality_exception:{type(exc).__name__}"
     return fields, None
 
 

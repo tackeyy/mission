@@ -246,3 +246,40 @@ def test_missing_scoring_file(tmp_path):
     assert pq["composite_final"] is None
     assert pq["open_high_first"] is None
     assert pq["open_high_final"] is None
+
+
+# ---------------------------------------------------------------------------
+# 消費側が KeyError にならないこと: High/Medium/Low は常に存在する
+# ---------------------------------------------------------------------------
+
+def test_severity_buckets_always_present_even_when_empty(tmp_path):
+    _write_archive(tmp_path, 1, _make_reviews(1, []), _make_scoring(1, 4.5))
+    pq, err = extract_process_quality(tmp_path)
+    assert err is None
+    assert pq["review_findings_total"] == 0
+    for severity in ("High", "Medium", "Low"):
+        assert pq["review_findings_by_severity"][severity] == 0
+
+
+# ---------------------------------------------------------------------------
+# session state が読めなくても archive からの収集は独立に成立する
+# ---------------------------------------------------------------------------
+
+def test_process_quality_harvested_when_session_state_missing(tmp_path):
+    """sessions/ が無い早期 return 経路でも process_quality が埋まる。
+
+    session が読めないことと archive が無いことは別事象であり、
+    後者だけを process_quality_error として申告できなければ
+    goal arm (常に null) と区別がつかなくなる。
+    """
+    _write_archive(tmp_path, 1, _make_reviews(1, [
+        {"id": "f1", "severity": "High", "axis": "completeness", "summary": "s"},
+    ]), _make_scoring(1, 4.1, open_high=1))
+
+    fields, state_err = MODULE.extract_mission_state_fields(tmp_path)
+
+    assert state_err == "mission_state_missing"
+    assert fields["process_quality_error"] is None
+    assert fields["process_quality"]["review_findings_total"] == 1
+    assert fields["process_quality"]["review_findings_by_severity"]["High"] == 1
+    assert fields["process_quality"]["open_high_first"] == 1
