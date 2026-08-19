@@ -148,12 +148,20 @@ def test_extract_mission_state_picks_newest_session(tmp_path):
 def test_extract_mission_state_fail_open_on_missing_or_corrupt(tmp_path):
     module = _load("run_claude_goal_vs_mission.py")
 
+    # process_quality_error は観測値ではなく診断情報であり、fail-open 時に
+    # 「なぜ収集できなかったか」を残すのが #560 の要件。値フィールドの
+    # None 検査からは除外する (process_quality 本体は None であること)。
+    _diagnostic_keys = {"measurement_observations", "process_quality_error"}
+
     def assert_fail_open(fields):
-        assert all(value is None for key, value in fields.items() if key != "measurement_observations")
+        assert all(value is None for key, value in fields.items() if key not in _diagnostic_keys)
         assert all(
             value == {"status": "unavailable", "value": None}
             for value in fields["measurement_observations"].values()
         )
+        # 収集不能の理由は必ず記録される (握りつぶさない)。
+        assert fields["process_quality"] is None
+        assert isinstance(fields["process_quality_error"], str)
 
     fields, note = module.extract_mission_state_fields(tmp_path)  # state なし
     assert_fail_open(fields)
