@@ -16,12 +16,41 @@ concurrency:
     && github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
+env:
+  # Wall-clock is dominated by the Python suite, which is CPU-bound: the same
+  # work takes ~344s on 10 cores locally but ~1019s on a CI runner. Splitting it
+  # across independent runners shortens feedback almost linearly.
+  SHARD_TOTAL: '4'
+
 jobs:
-  quality:
-    name: Quality
+  # ShellCheck costs ~0s, so it runs unconditionally and in parallel with the
+  # test shards: a shell-only mistake surfaces in seconds instead of minutes.
+  shell:
+    name: Shell
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Verify runner ShellCheck
+        run: shellcheck --version
+
+      - name: Lint shell scripts
+        run: shellcheck scripts/mission-stop-guard.sh plugins/mission/scripts/mission-stop-guard.sh scripts/sync-codex-plugin-wrapper.sh scripts/mission-local-authoring-sync.sh
+
+  test:
+    name: Test ${{ matrix.shard }}
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      # Every shard reports independently: one red shard must not hide the
+      # failures in the others, or the next iteration needs another full run.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -56,12 +85,9 @@ jobs:
             // The Python suite must remain fail-safe: docs/results-only PRs use
             // a smaller guard set, but any ambiguity, code change, or non-PR
             // event falls back to the full tracked-tree suite.
-            core.setOutput('python', decision.python ? 'true' : 'false');
             core.setOutput('python_targets', decision.pythonTargets);
-            core.setOutput('shell', decision.shell ? 'true' : 'false');
 
       - name: Set up Python
-        if: steps.changes.outputs.python == 'true'
         uses: actions/setup-python@v7
         with:
           python-version: '3.12'
@@ -69,13 +95,30 @@ jobs:
           cache-dependency-path: .github/requirements-ci.txt
 
       - name: Run Python tests
-        if: steps.changes.outputs.python == 'true'
-        run: make test PYTHON=python PYTEST_TARGETS="${{ steps.changes.outputs.python_targets }}"
+        run: make test-shard PYTHON=python SHARD_INDEX=${{ matrix.shard }} SHARD_TOTAL=${{ env.SHARD_TOTAL }} PYTEST_TARGETS="${{ steps.changes.outputs.python_targets }}"
 
-      - name: Verify runner ShellCheck
-        if: steps.changes.outputs.shell == 'true'
-        run: shellcheck --version
-
-      - name: Lint shell scripts
-        if: steps.changes.outputs.shell == 'true'
-        run: shellcheck scripts/mission-stop-guard.sh plugins/mission/scripts/mission-stop-guard.sh scripts/sync-codex-plugin-wrapper.sh scripts/mission-local-authoring-sync.sh
+  # Single required status check. Fail-closed: anything other than an explicit
+  # success in every upstream job (failure, cancellation, or a skip caused by a
+  # broken condition) fails this job, so no gate can be silently dropped.
+  quality:
+    name: Quality
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    needs: [shell, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every gate to have succeeded
+        env:
+          SHELL_RESULT: ${{ needs.shell.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          set -eu
+          echo "shell=${SHELL_RESULT} test=${TEST_RESULT}"
+          failed=0
+          for entry in "shell=${SHELL_RESULT}" "test=${TEST_RESULT}"; do
+            if [ "${entry#*=}" != "success" ]; then
+              echo "::error::gate ${entry%%=*} did not succeed (${entry#*=})"
+              failed=1
+            fi
+          done
+          exit "${failed}"
