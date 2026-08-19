@@ -34,12 +34,40 @@
       "hypothesis": "Open-world discovery — no closed list of expected findings is given to the solver; it must independently identify which constants diverge. A review loop should help by cross-referencing each service against the canonical defaults systematically; this is a hypothesis to test, not a result.",
       "first_pass_failure_design": "Three files define timeout constants for two services and a shared canonical. The worker's CONNECT_TIMEOUT_MS is 6500 vs the canonical 4000, which is the real divergence. READ_TIMEOUT_MS matches across all three (9000). A single-pass reader who only spot-checks one constant or one service may miss the divergence, especially when both files look superficially similar.",
       "quality_markers": [
-        { "name": "Divergence: worker CONNECT_TIMEOUT_MS 6500 vs 4000", "patterns": ["6500", "6,500"] },
-        { "name": "Canonical reference: CONNECT_TIMEOUT_MS 4000", "patterns": ["4000", "4,000"] },
-        { "name": "Compliant: gateway matches canonical", "patterns": ["gateway"] }
+        {
+          "name": "Divergence: worker CONNECT_TIMEOUT_MS 6500 vs 4000",
+          "match_type": "regex",
+          "patterns": [
+            "6500.{0,80}(4000|canonical|diverge|vs.{0,20}4000)|connect_timeout.{0,50}6500.{0,50}(diverge|vs|4000)"
+          ]
+        },
+        {
+          "name": "Canonical reference: CONNECT_TIMEOUT_MS 4000",
+          "match_type": "regex",
+          "patterns": [
+            "connect_timeout.{0,50}4000.{0,50}(canonical|default|shared.{0,20}default)|4000.{0,50}(canonical|shared.{0,20}default)"
+          ]
+        },
+        {
+          "name": "Compliant: gateway matches canonical",
+          "match_type": "regex",
+          "patterns": [
+            "gateway.{0,100}(compliant|matches.{0,20}canonical|no.{0,10}diverge|complies|consistent)"
+          ]
+        }
       ],
       "forbidden_markers": [
-        { "name": "False divergence: READ_TIMEOUT_MS", "patterns": ["read_timeout_ms diverge", "read_timeout_ms differs", "read_timeout_ms is wrong", "read_timeout_ms mismatch", "fix read_timeout", "correct read_timeout"] }
+        {
+          "name": "False divergence: READ_TIMEOUT_MS",
+          "patterns": [
+            "read_timeout_ms diverge",
+            "read_timeout_ms differs",
+            "read_timeout_ms is wrong",
+            "read_timeout_ms mismatch",
+            "fix read_timeout",
+            "correct read_timeout"
+          ]
+        }
       ]
     },
     {
@@ -60,12 +88,42 @@
       "hypothesis": "Open-world discovery — the solver must identify contradictions without a pre-enumerated list. The decoy '6 tries' in the runbook tests whether the solver reads carefully enough to see it is actually consistent (6 tries = 1 initial + 5 retries = spec's retry limit of 5). A review loop should help by forcing re-examination of each claim against the source of truth; this is a hypothesis to test, not a result.",
       "first_pass_failure_design": "Three documents define checkout service parameters. The real contradiction is latency SLO: spec says 200ms but impl guide says 250ms. The runbook says '6 tries' which looks like a contradiction with the spec's 'retry limit: 5', but the runbook explains this includes the initial attempt (6 tries = 1 initial + 5 retries). A hasty reader who pattern-matches numbers will flag the decoy; a careful reader sees it is consistent.",
       "quality_markers": [
-        { "name": "Contradiction: latency SLO 250ms vs 200ms", "patterns": ["250", "250 ms"] },
-        { "name": "Source of truth: spec says 200ms", "patterns": ["200 ms", "200ms"] },
-        { "name": "Contradicting document: impl guide", "patterns": ["impl", "implementation guide"] }
+        {
+          "name": "Contradiction: latency SLO 250ms vs 200ms",
+          "match_type": "regex",
+          "patterns": [
+            "latency.{0,30}250.{0,50}(200|contradiction|vs|contradict|spec)|250.{0,30}(ms|ms\\b).{0,60}(200|contradict|vs.{0,20}spec)"
+          ]
+        },
+        {
+          "name": "Source of truth: spec says 200ms",
+          "match_type": "regex",
+          "patterns": [
+            "spec.{0,50}200|200.{0,50}(spec|source.of.truth|doc.a|product.spec)"
+          ]
+        },
+        {
+          "name": "Contradicting document: impl guide",
+          "match_type": "regex",
+          "patterns": [
+            "(impl.guide|implementation.guide).{0,100}(contradict|250|incorrect|wrong|vs|conflict)"
+          ]
+        }
       ],
       "forbidden_markers": [
-        { "name": "False contradiction: 6 tries vs retry limit 5", "patterns": ["6 tries contradicts", "6 tries is wrong", "retry limit is 6", "change 6 to 5", "fix the retry", "correct the retry count", "runbook contradicts the spec on retries", "runbook retry count is wrong"] }
+        {
+          "name": "False contradiction: 6 tries vs retry limit 5",
+          "patterns": [
+            "6 tries contradicts",
+            "6 tries is wrong",
+            "retry limit is 6",
+            "change 6 to 5",
+            "fix the retry",
+            "correct the retry count",
+            "runbook contradicts the spec on retries",
+            "runbook retry count is wrong"
+          ]
+        }
       ]
     },
     {
@@ -84,13 +142,54 @@
       "hypothesis": "Open-world root cause analysis — the solver must follow the evidence chain without knowing the answer in advance. The log is designed so the first plausible cause (serializer deploy) is wrong; a review loop should help by forcing re-evaluation after all evidence is read; this is a hypothesis to test, not a result.",
       "first_pass_failure_design": "A chronological incident log where the serializer deploy at 01:05 is the obvious suspect (it touched the failing request path), but rolling it back at 01:31 does not help. Connection pool saturation started at 01:02 (before the deploy). The definitive evidence at 02:45 shows a runaway migration job holding an exclusive lock is the real root cause. A single-pass reader who stops at the first plausible cause misses the later evidence.",
       "quality_markers": [
-        { "name": "Root cause: migration job", "patterns": ["migration job", "migration"] },
-        { "name": "Evidence: exclusive lock on orders table", "patterns": ["exclusive lock", "orders table", "orders"] },
-        { "name": "Evidence: pool saturation before deploy", "patterns": ["01:02", "before the deploy", "before any code", "before the 01:05"] },
-        { "name": "Ruled out: serializer rollback did not help", "patterns": ["rollback", "did not help", "not the cause", "not the root cause"] }
+        {
+          "name": "Root cause: migration job",
+          "match_type": "regex",
+          "patterns": [
+            "root.cause.{0,50}(confirmed|definitive|actual).{0,50}migration",
+            "(確定|確認済み).{0,100}migration.{0,10}job",
+            "根本原因.{0,100}(確定|confirmed|migration)"
+          ]
+        },
+        {
+          "name": "Evidence: exclusive lock on orders table",
+          "match_type": "regex",
+          "patterns": [
+            "confirmed.{0,100}exclusive.lock",
+            "(確定|根本原因).{0,100}exclusive.lock",
+            "exclusive.lock.{0,80}(root.cause|confirmed.cause|actual.cause)"
+          ]
+        },
+        {
+          "name": "Evidence: pool saturation predated deploy",
+          "match_type": "regex",
+          "patterns": [
+            "pool.{0,50}saturat.{0,150}predated?",
+            "pool.saturat.{0,100}independent.corrobor",
+            "saturat.{0,200}(predated?|独立した.{0,20}証拠|独立.*証拠)"
+          ]
+        },
+        {
+          "name": "Ruled out: serializer rollback did not help",
+          "match_type": "regex",
+          "patterns": [
+            "(rollback|serializer).{0,100}overturned",
+            "初期仮説.{0,100}(誤り|覆|overturn|wrong|incorrect|rejected)",
+            "(hypothesis|仮説).{0,100}(overturned|overturn|ruled.out|was.wrong)"
+          ]
+        }
       ],
       "forbidden_markers": [
-        { "name": "False root cause: serializer deploy", "patterns": ["serializer is the root cause", "serializer caused", "root cause is the serializer", "root cause: serializer", "the serializer deploy caused"] }
+        {
+          "name": "False root cause: serializer deploy",
+          "patterns": [
+            "serializer is the root cause",
+            "serializer caused",
+            "root cause is the serializer",
+            "root cause: serializer",
+            "the serializer deploy caused"
+          ]
+        }
       ]
     }
   ]
