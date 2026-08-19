@@ -12,3 +12,6 @@ output/
 
 # mission スキルの孤立タイムスタンプ
 .orphaned_at
+
+# ベンチ内部 state のローカル保全アーカイブ（機械生成物・git 管理外）
+.bench-archive/
