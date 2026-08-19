@@ -550,6 +550,113 @@ def run_name_for(task_id: str, arm: str, run_index: int, repeats: int) -> str:
     return f"{task_id}-{arm}"
 
 
+def extract_process_quality(worktree: Path) -> tuple[dict | None, str | None]:
+    """#560 Step A: archive の reviews/scoring JSON から process quality を fail-open で収集する。
+
+    ファイルが無い・壊れている場合は (None, error_reason) を返す。
+    Severity が不明な値は literal 文字列キーとして by_severity に追加する（クラッシュしない）。
+    """
+    archive = worktree / ".mission-state" / "archive"
+    if not archive.is_dir():
+        return None, "archive_dir_missing"
+
+    import re as _re
+
+    iter_pattern = _re.compile(r"^iter-(\d+)-")
+
+    def parse_iter(name: str) -> int | None:
+        m = iter_pattern.match(name)
+        return int(m.group(1)) if m else None
+
+    # Gather reviews files grouped by iteration number
+    reviews_by_iter: dict[int, list[Path]] = {}
+    scoring_by_iter: dict[int, list[Path]] = {}
+    try:
+        for child in archive.iterdir():
+            if not child.is_file() or not child.suffix == ".json":
+                continue
+            n = parse_iter(child.name)
+            if n is None:
+                continue
+            if "-reviews-" in child.name:
+                reviews_by_iter.setdefault(n, []).append(child)
+            elif "-scoring-" in child.name:
+                scoring_by_iter.setdefault(n, []).append(child)
+    except OSError as exc:
+        return None, f"archive_list_error:{type(exc).__name__}"
+
+    if not reviews_by_iter:
+        return None, "archive_reviews_missing"
+
+    sorted_iters = sorted(reviews_by_iter)
+    findings_total = 0
+    by_severity: dict[str, int] = {}
+    reviewer_count_observed = 0
+
+    for n in sorted_iters:
+        for path in reviews_by_iter[n]:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+                return None, f"archive_reviews_unreadable:{type(exc).__name__}"
+            if not isinstance(payload, dict):
+                return None, "archive_reviews_not_object"
+            inputs = payload.get("inputs")
+            if not isinstance(inputs, list):
+                continue
+            reviewer_count_observed = max(reviewer_count_observed, len(inputs))
+            for inp in inputs:
+                if not isinstance(inp, dict):
+                    continue
+                findings = inp.get("findings")
+                if not isinstance(findings, list):
+                    continue
+                for finding in findings:
+                    if not isinstance(finding, dict):
+                        continue
+                    findings_total += 1
+                    sev = finding.get("severity")
+                    key = sev if isinstance(sev, str) else "__unknown__"
+                    by_severity[key] = by_severity.get(key, 0) + 1
+
+    def _read_composite(n: int) -> tuple[float | None, int | None]:
+        paths = scoring_by_iter.get(n, [])
+        for path in paths:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            for key in ("composite", "binding", "_meta"):
+                val = payload.get(key)
+                if key == "binding" and isinstance(val, dict):
+                    val = val.get("composite")
+                elif key == "_meta" and isinstance(val, dict):
+                    val = val.get("computed_composite")
+                if isinstance(val, (int, float)) and not isinstance(val, bool):
+                    open_high = payload.get("open_high")
+                    oh = open_high if isinstance(open_high, int) and not isinstance(open_high, bool) else None
+                    return float(val), oh
+        return None, None
+
+    first_iter = sorted_iters[0]
+    last_iter = sorted_iters[-1]
+    composite_first, open_high_first = _read_composite(first_iter)
+    composite_final, open_high_final = _read_composite(last_iter)
+
+    return {
+        "review_findings_total": findings_total,
+        "review_findings_by_severity": by_severity,
+        "review_iterations_observed": len(sorted_iters),
+        "composite_first": composite_first,
+        "composite_final": composite_final,
+        "reviewer_count_observed": reviewer_count_observed,
+        "open_high_first": open_high_first,
+        "open_high_final": open_high_final,
+    }, None
+
+
 def extract_mission_state_fields(worktree: Path) -> tuple[dict, str | None]:
     """#250: mission arm 実行後の state から tier/iteration 等を fail-open で抽出する。
 
@@ -566,6 +673,8 @@ def extract_mission_state_fields(worktree: Path) -> tuple[dict, str | None]:
         "mission_evidence_only": None,  # #341: evidence-submitted halt = true (gated loop 未実行)
         "measurement_observations": unavailable_measurement_observations(),
         "diff_review_observations": None,
+        "process_quality": None,
+        "process_quality_error": None,
     }
     sessions = worktree / ".mission-state" / "sessions"
     candidates = sorted(sessions.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True) if sessions.is_dir() else []
@@ -594,6 +703,13 @@ def extract_mission_state_fields(worktree: Path) -> tuple[dict, str | None]:
     fields["mission_evidence_only"] = halt_category == "evidence-submitted"  # #341
     fields["measurement_observations"] = extract_measurement_observations(state)
     fields["diff_review_observations"] = extract_diff_review_observations(worktree, state)
+    try:
+        pq, pq_err = extract_process_quality(worktree)
+        fields["process_quality"] = pq
+        fields["process_quality_error"] = pq_err
+    except Exception as exc:  # noqa: BLE001 — never abort the run
+        fields["process_quality"] = None
+        fields["process_quality_error"] = f"process_quality_exception:{type(exc).__name__}"
     return fields, None
 
 
@@ -1040,6 +1156,8 @@ def run_one(
                 "mission_evidence_only": None,
                 "measurement_observations": unavailable_measurement_observations(status="not-applicable"),
                 "diff_review_observations": unavailable_diff_review_observations(),
+                "process_quality": None,
+                "process_quality_error": None,
             },
             None,
         )
