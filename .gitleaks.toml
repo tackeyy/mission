@@ -1,0 +1,15 @@
+# gitleaks 設定。既定ルールを維持したうえで、生成物ディレクトリだけ除外する。
+#
+# テスト fixture の除外は**この設定ではなく行単位の `gitleaks:allow`** で行う。
+# ファイル全体を allowlist に入れると、後から同じファイルへ本物が混入しても
+# 検出されなくなるため。
+[extend]
+useDefault = true
+
+[allowlist]
+description = "git 管理外の生成物 (バイトコード・テストキャッシュ)"
+paths = [
+  '''__pycache__/''',
+  '''\.pytest_cache/''',
+  '''\.venv-ci/''',
+]

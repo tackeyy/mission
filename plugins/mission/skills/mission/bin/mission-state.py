@@ -5091,6 +5091,55 @@ def _find_provider(data: dict, provider_id: str) -> dict | None:
     return None
 
 
+# provider が出す credential は二形態ある。`key=value` の形と、CLI が地の文へ
+# そのまま流す裸のトークン ("Using sk-... to authenticate")。後者は key 名を
+# 伴わないため、値の形そのものから判定するしかない。
+#
+# 判定は prefix + 最小長で行う。長さを外すと `sk not a key` のような通常文まで
+# 潰して証跡を壊すため、各 provider が実際に発行する下限に合わせている。
+#
+# 既知の未カバー: prefix を持たない形式は原理的に拾えない。Azure OpenAI の
+# API key (32 桁 hex) が代表例で、通常の hex 文字列と区別できないため、拾おうと
+# すると commit SHA・ダイジェスト・ID を巻き込んで証跡を壊す。prefix なし形式は
+# `key=value` 側のパターンでのみ捕捉される。
+_BARE_CREDENTIAL_RE = re.compile(
+    r"""(?x)
+    (?:
+        \bsk-ant-[A-Za-z0-9_-]{24,}
+      | \bsk-or-v1-[A-Za-z0-9]{32,}
+      | \bsk-proj-[A-Za-z0-9_-]{32,}
+      | \bxai-[A-Za-z0-9]{40,}
+      | \bxox[abposr]-[A-Za-z0-9-]{12,}
+      | \bxapp-[0-9]-[A-Za-z0-9-]{20,}
+      | \bnpm_[A-Za-z0-9]{30,}
+      | \bdckr_pat_[A-Za-z0-9_-]{20,}
+      | \b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}
+      | \bgithub_pat_[A-Za-z0-9_]{50,}
+      | \bglpat-[A-Za-z0-9_-]{20,}
+      | \bAIza[0-9A-Za-z_-]{35,}
+      | \bGOCSPX-[A-Za-z0-9_-]{20,}
+      | \bntn_[A-Za-z0-9]{40,}
+      | \bsecret_[A-Za-z0-9]{40,}
+      | \bsbp_[a-f0-9]{40,}
+      | \b(?:AKIA|ASIA)[0-9A-Z]{16}\b
+      | \b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{20,}
+      | \beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}
+    )
+    """
+)
+
+# PEM は改行を跨ぐので行単位では捕まらない。marker から marker までを丸ごと落とす。
+#
+# END marker は任意にしてある。provider の出力は切り詰められることがあり、その
+# 場合 BEGIN だけが残って本体が続く。対を必須にすると、まさに異常系で鍵が素通り
+# する。END が無ければ本文の終端まで落とす。
+_PEM_BLOCK_RE = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r"(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*)",
+    re.DOTALL,
+)
+
+
 def _redact_provider_output(text: str) -> str:
     patterns = [
         re.compile(r"(?i)\b(api[_-]?key|token|secret|password)\s*[:=]\s*([^\s]+)"),
@@ -5099,6 +5148,8 @@ def _redact_provider_output(text: str) -> str:
     redacted = text
     for pattern in patterns:
         redacted = pattern.sub(lambda m: f"{m.group(1)}=[REDACTED]", redacted)
+    redacted = _PEM_BLOCK_RE.sub("[REDACTED]", redacted)
+    redacted = _BARE_CREDENTIAL_RE.sub("[REDACTED]", redacted)
     return redact_local_locators(redacted)
 
 
