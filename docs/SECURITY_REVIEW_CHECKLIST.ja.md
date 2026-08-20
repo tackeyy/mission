@@ -31,10 +31,13 @@ distribution release 前と定期棚卸しで使う、再現可能なレビュ�
 - [ ] default branch の branch protection: force push / 削除の禁止、admin へも適用、
       required status check あり。
 - [ ] 使っていない面（Wiki / Discussions / Projects）は無効化する。未レビューの
-      コンテンツが溜まる場所を残さない。
+      コンテンツが溜まる場所を残さない。フィールド名は REST 形（`has_wiki` /
+      `has_projects` / `has_discussions`）を使う。GraphQL 形の綴りは
+      `gh api repos/...` では `null` を返し、**何を聞いても「無効」に見える**。
 
 ```bash
-gh api repos/:owner/:repo --jq '{visibility,hasWikiEnabled,security_and_analysis}'
+gh api repos/:owner/:repo --jq \
+  '{visibility,has_wiki,has_discussions,has_projects,security_and_analysis}'
 gh api repos/:owner/:repo/private-vulnerability-reporting
 gh api repos/:owner/:repo/branches/main/protection --jq \
   '{force:.allow_force_pushes.enabled,del:.allow_deletions.enabled,admins:.enforce_admins.enabled}'
@@ -42,7 +45,12 @@ gh api repos/:owner/:repo/branches/main/protection --jq \
 
 ## B. 作業ツリーと git 履歴の秘匿情報
 
-- [ ] `gitleaks` が作業ツリー・全履歴の両方でゼロ件。
+- [ ] `gitleaks` が作業ツリー・全履歴の両方でゼロ件。ゼロはゼロの意味でなければ
+      ならない。本リポジトリは redaction テストに credential 形の fixture を持つが、
+      それらはファイル単位ではなく**行単位**の `gitleaks:allow` で除外してあり、
+      同じファイルへ本物が混入すれば検出される。`.gitleaks.toml` が除外するのは
+      git 管理外の生成物ディレクトリだけ。検出を説明で片付けたくなったら、行単位で
+      黙らせるか直すかのどちらかにする。持ち越さない。
 - [ ] gitleaks が拾わない provider prefix を別途確認する（Anthropic / OpenAI /
       OpenRouter / xAI / Slack / GitHub / Google / Notion / Resend / Supabase /
       AWS / PEM 秘密鍵 / JWT）。
@@ -107,9 +115,17 @@ Issue を delete するか GitHub Support に編集履歴の purge を依頼し�
       元の blob を永久に公開したままにする。
 
 パス redaction は `skills/mission/lib/provider_public_contract.py` の
-`redact_local_locators()` が担う。`test_artifact_hygiene.py` は tracked ファイル
-全体に対して、実在アカウント名を含む home path がないこと、個人 memory store の
-出力が artifact に固定されていないことを強制する。
+`redact_local_locators()` が担う。
+
+自動チェックがどこまで届くかを正確に把握する。`test_artifact_hygiene.py` の 2 つの
+検査は**射程が異なる**。
+
+- home path の検査は tracked ファイル全体を読む
+- 個人 memory dump の検査は `.jsonl` のみを読み、固定の marker 集合と照合する。
+  `.md` に貼られた memory dump は通過する
+
+本節の他の項目（session 識別子、`rollout-*` パス、他リポジトリの Issue 番号、
+メールアドレス）には**自動チェックが存在しない**。diff を読むこと。
 
 3 つのガードが 3 つの異なる軸を担当しており、互いに取り違えやすい。3 つとも動作して
 いること、生成物を受け取るディレクトリを新設した場合はその配下も対象になっていることを
@@ -157,7 +173,9 @@ git grep -nE "(^|[^a-zA-Z_.])(eval|exec)\(" -- '*.py' ':!*/tests/*'
 - [ ] fork のコードを実行する workflow に repository の Actions secrets が
       渡っていない。
 - [ ] 第三者 action を可変な tag ではなく commit SHA で pin している。
-- [ ] Python 等の依存を厳密なバージョンで pin している。
+- [ ] Python 等の依存を厳密なバージョンで pin している。**バージョン固定は完全性
+      ではない**。同一バージョンが再公開されうる。本番へ届く依存はハッシュ照合
+      (`pip install --require-hashes`) と脆弱性検査 (`pip-audit`) まで行う。
 - [ ] Dependabot の version updates **と** security updates が両方有効。
 - [ ] 集約 gate job が fail-closed。上流 job の skip / cancel を success として
       通さない。

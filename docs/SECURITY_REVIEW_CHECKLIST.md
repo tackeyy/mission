@@ -31,10 +31,14 @@ the review.
 - [ ] Branch protection on the default branch: force pushes and deletions blocked,
       admin enforcement on, required status check present.
 - [ ] Unused surfaces are disabled (Wiki, Discussions, Projects) so they cannot
-      accumulate unreviewed content.
+      accumulate unreviewed content. Use the REST field names (`has_wiki`,
+      `has_projects`, `has_discussions`) — the GraphQL spellings return `null`
+      through `gh api repos/...` and silently answer "not enabled" for
+      everything.
 
 ```bash
-gh api repos/:owner/:repo --jq '{visibility,hasWikiEnabled,security_and_analysis}'
+gh api repos/:owner/:repo --jq \
+  '{visibility,has_wiki,has_discussions,has_projects,security_and_analysis}'
 gh api repos/:owner/:repo/private-vulnerability-reporting
 gh api repos/:owner/:repo/branches/main/protection --jq \
   '{force:.allow_force_pushes.enabled,del:.allow_deletions.enabled,admins:.enforce_admins.enabled}'
@@ -43,6 +47,12 @@ gh api repos/:owner/:repo/branches/main/protection --jq \
 ## B. Secrets in the working tree and in git history
 
 - [ ] `gitleaks` reports zero findings for both the working tree and full history.
+      Zero has to mean zero: this repository keeps credential-shaped fixtures in
+      the redaction tests, and those are excluded **per line** with
+      `gitleaks:allow` rather than by allowlisting the file, so a real secret
+      landing in the same file is still reported. `.gitleaks.toml` excludes only
+      untracked build directories. If you find yourself explaining away a
+      finding, silence it at the line or fix it — do not carry it forward.
 - [ ] Provider-prefix patterns not covered by gitleaks are checked separately
       (Anthropic, OpenAI, OpenRouter, xAI, Slack, GitHub, Google, Notion, Resend,
       Supabase, AWS, PEM private keys, JWT).
@@ -106,9 +116,18 @@ current tree and history.
       follow-up commit leaves the original blob public forever.
 
 `redact_local_locators()` in `skills/mission/lib/provider_public_contract.py`
-performs the path redaction. `test_artifact_hygiene.py` enforces, across every
-tracked file, that no real account name appears in a home path and that no
-personal memory store output is pinned into an artifact.
+performs the path redaction.
+
+Know exactly how far each automated check reaches, because the two checks in
+`test_artifact_hygiene.py` do **not** have the same scope:
+
+- the home-path check reads every tracked file;
+- the personal-memory-dump check reads `.jsonl` files only, and matches a fixed
+  set of markers. A memory dump pasted into a `.md` file passes.
+
+The other items in this section — session identifiers, `rollout-*` paths, third
+party issue numbers, email addresses — have no automated check at all. Read the
+diff.
 
 Three guards cover three distinct axes, and each is easy to mistake for the
 others. Confirm all three still run, and that a new generated-content directory
@@ -156,7 +175,10 @@ git grep -nE "(^|[^a-zA-Z_.])(eval|exec)\(" -- '*.py' ':!*/tests/*'
 - [ ] `pull_request_target` is not used for workflows that check out PR code.
 - [ ] No repository Actions secrets are exposed to workflows that run fork code.
 - [ ] Third-party actions are pinned to a commit SHA, not a mutable tag.
-- [ ] Python and other dependencies are pinned to exact versions.
+- [ ] Python and other dependencies are pinned to exact versions. Pinning a
+      version is not integrity: a version can be re-published. For dependencies
+      that reach production, verify hashes (`pip install --require-hashes`) and
+      run a vulnerability check (`pip-audit`).
 - [ ] Dependabot version updates **and** security updates are enabled.
 - [ ] The aggregate gate job is fail-closed: a skipped or cancelled upstream job
       fails the gate rather than passing it.
