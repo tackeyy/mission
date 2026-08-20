@@ -61,21 +61,46 @@ def test_discrimination_marker_density():
         assert len(task["forbidden_markers"]) >= 1, task["id"]
 
 
+# #562 で quality_markers は regex 化された。パターン文字列そのものを本文として
+# 使う旧方式は成立しない (regex は自分自身にマッチしない) ため、各タスクの
+# 「正しい発見を 1 件だけ述べた最小テキスト」を明示的に持つ。
+# forbidden_markers は substr のままなので decoy はリテラルを連結すればよい。
+_CLEAN_FINDING_TEXT = {
+    "disc-config-sprawl": "auth session_ttl_sec shows an undocumented divergence from the platform default.",
+    "disc-release-ledger": "mig-2207 is applied in the ops log but missing from the migration index.",
+    "disc-contract-drift": "client-go sends x-signature-v2 instead of the spec header x-sig.",
+    "disc-metrics-reconcile": "finance revenue 48,210 is overstated because refunded orders are not excluded.",
+    "disc-policy-exceptions": "req-02 is a violation: the approver role had expired.",
+}
+
+
 def test_planted_defect_marker_is_strictly_lower_than_clean_without_saturation():
-    """A planted false finding lowers marker score; neither synthetic arm saturates."""
+    """decoy を finding として述べると score が下がり、どちらも飽和しない。
+
+    旧実装は `marker["patterns"][0]` を本文として連結していたが、#562 の
+    regex 化でパターン文字列は本文として意味を持たなくなった。意図
+    (誤主張は減点される / 合成テキストは満点にならない) はそのまま、
+    実際の文章で再表現する。
+    """
     runner = _runner()
     for task in _data()["tasks"]:
+        clean_text = _CLEAN_FINDING_TEXT[task["id"]]
         marker_name = task["planted_defect_marker"]
-        quality = task["quality_markers"][0]
-        clean_bonus = task["quality_markers"][1]
-        defect = next(marker for marker in task["forbidden_markers"] if marker["name"] == marker_name)
-        clean = runner.evaluate_quality_markers(
-            f"{quality['patterns'][0]} {clean_bonus['patterns'][0]}", task,
+        defect = next(
+            marker for marker in task["forbidden_markers"] if marker["name"] == marker_name
         )
-        planted = runner.evaluate_quality_markers(
-            f"{quality['patterns'][0]} {defect['patterns'][0]}", task,
-        )
+        planted_text = f"{clean_text} {defect['patterns'][0]}."
+
+        clean = runner.evaluate_quality_markers(clean_text, task)
+        planted = runner.evaluate_quality_markers(planted_text, task)
+
+        # 前提: clean テキストは実際に正しい発見を 1 件拾えている
+        assert clean["quality_markers_matched"], task["id"]
+        assert clean["forbidden_markers_matched"] == [], task["id"]
+        # decoy を述べた側だけが減点される
+        assert planted["forbidden_markers_matched"] == [marker_name], task["id"]
         assert planted["quality_marker_score"] < clean["quality_marker_score"], task["id"]
+        # 合成テキストはごく一部の marker しか満たさないので満点にならない
         assert clean["quality_marker_score"] < 1.0, task["id"]
         assert planted["quality_marker_score"] < 1.0, task["id"]
 
@@ -98,18 +123,35 @@ def test_fixtures_exist_and_referenced():
             assert rel in task["prompt"], f"{task['id']}: fixture not in prompt {rel}"
 
 
+def _subject_tokens(name: str) -> list:
+    """marker 名から主題トークン (識別子・数値) を抜き出す。"""
+    import re as _re
+
+    tokens = _re.findall(r"[A-Za-z_][A-Za-z0-9_-]{3,}|[0-9][0-9,\.]{2,}", name.lower())
+    return [t.rstrip(".,") for t in tokens]
+
+
 def test_quality_marker_patterns_discoverable_in_fixtures():
-    """各 quality_marker は最低 1 pattern が fixture 本文に実在する (答えの実在保証)."""
+    """marker の**主題**が fixture 本文に実在すること (答えの実在保証)。
+
+    #562 で marker は regex 化され、判定語 (violation / diverge 等) は
+    **解析者が書く語**であって fixture には無い。「パターンが fixture の
+    部分文字列であること」を要求すると、fixture 丸写しで満点という
+    #557 の元の欠陥に戻ってしまうため、主題の存在確認へ意味論を変更する。
+    """
+    generic = {"violation", "drift", "mismatch", "cause", "impact", "claim", "false"}
     for task in _data()["tasks"]:
         corpus = "".join(
             (REPO_ROOT / rel).read_text(encoding="utf-8").lower()
             for rel in task["fixtures"]
         )
         for marker in task["quality_markers"]:
-            patterns = [p.lower() for p in marker["patterns"]]
-            assert any(p in corpus for p in patterns), (
-                f"{task['id']}: marker '{marker['name']}' の pattern が fixture に無い"
-            )
+            tokens = [t for t in _subject_tokens(marker["name"]) if t not in generic]
+            assert tokens, (
+                f"{task['id']}: marker '{marker['name']}' に主題トークンが無い")
+            assert any(t in corpus for t in tokens), (
+                f"{task['id']}: marker '{marker['name']}' の主題が fixture に無い "
+                f"(tokens={tokens})")
 
 
 def test_no_trivially_short_patterns():
