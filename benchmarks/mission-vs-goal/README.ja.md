@@ -307,6 +307,21 @@ subscription（OAuth）実行では per-token 課金は発生せず、消費す�
 各 arm の相対比較には使えるが、絶対的な支出額として扱わない。
 `--max-budget-usd` はこの推定値に対する上限閾値であり、請求キャップではない。
 
+## 推奨 `--repeats` 設定
+
+| 用途 | 推奨設定 | 備考 |
+|---|---|---|
+| **比較 run**（優劣を結論づける） | `--repeats 3` 以上 | 統計的な有効性に必要 |
+| **探索 / スモーク run** | `--repeats 1` でも可 | 優劣の結論には **使わないこと** |
+
+**`--repeats 3` が必要な理由**: 2026-08-19 の tail cohort 実測
+（v2.7.0 対 v2.8.0、同一タスク・同一 fixture）でタスク別の時間比が
+**0.51x〜1.97x** に散らばった。1 サンプルでは ~2x 未満の差はノイズと
+区別できない。セルあたり 3 反復以上なければ優劣を主張できない。
+
+`repeats_observed <= 1` のとき、runner は stdout に警告を出力し、
+summary JSON に `statistical_confidence: "single-sample"` を記録する。
+
 ## Marketing Guardrails
 
 raw evidence がそろった後に使ってよい表現:

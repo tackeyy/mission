@@ -127,14 +127,18 @@ def test_warnings_present_when_saturated():
 
 
 def test_warnings_empty_when_valid():
-    """summary_warnings returns empty list when measurement_valid is true."""
+    """summary_warnings returns no saturation warning when measurement_valid is true."""
     records = [
         _record("claude_code_goal_command", marker=0.7),
         _record("mission", marker=0.9),
     ]
     summary = _summarize(records)
     warnings = MODULE.summary_warnings(summary)
-    assert warnings == []
+    # No saturation-specific warning; a single-sample warning (#565) may appear
+    # because these records have repeats_observed=1.
+    text = "\n".join(warnings)
+    assert "saturated" not in text.lower()
+    assert "NOT valid" not in text
 
 
 def test_warning_text_matches_issue_wording():
@@ -311,4 +315,8 @@ def test_varied_scores_remain_valid_with_discrimination():
 
     assert summary["measurement_valid"] is True
     assert summary["measurement_valid_reason"] == "ok"
-    assert MODULE.summary_warnings(summary) == []
+    # No saturation-specific warning; a single-sample warning (#565) may appear
+    # when repeats_observed=1, which is expected for n=1 inputs.
+    text = "\n".join(MODULE.summary_warnings(summary))
+    assert "saturated" not in text.lower()
+    assert "NOT valid" not in text

@@ -1520,6 +1520,35 @@ def summarize(
     def _cost_values(items: list[dict]) -> list[float]:
         return [r["total_cost_usd"] for r in items if isinstance(r.get("total_cost_usd"), (int, float))]
 
+    def _elapsed_values(items: list[dict]) -> list[float]:
+        return [r["elapsed_minutes"] for r in items if isinstance(r.get("elapsed_minutes"), (int, float))]
+
+    def _percentile(vals: list[float], p: int) -> float | None:
+        """Nearest-rank percentile. p in [1, 100].
+
+        Method: rank = ceil(p/100 * n), clamped to [1, n]. For n=1 the single
+        value is returned for any p. Empty list returns None.
+        This avoids the n>=2 requirement of statistics.quantiles.
+
+        Nearest-rank returns an observed value, never an interpolated one.
+        Consequence for n=2: p50 is the LOWER observation (ceil(0.5*2)=1), not
+        the midpoint. Runs with statistical_confidence="low" therefore carry a
+        downward-biased p50 by construction; read p50 there as the first order
+        statistic, not as a median. Interpolation is deliberately avoided so
+        every reported percentile corresponds to a real observation.
+        """
+        if not vals:
+            return None
+        s = sorted(vals)
+        rank = max(1, math.ceil(p / 100 * len(s)))
+        return round(s[rank - 1], 6)
+
+    def _stdev(vals: list[float]) -> float | None:
+        """Sample standard deviation. Returns None for n < 2."""
+        if len(vals) < 2:
+            return None
+        return round(statistics.stdev(vals), 6)
+
     def _comp(items: list[dict]) -> list[dict]:
         # #261: comparable_attempt=False (無効 record) を除いた集計対象
         return [r for r in items if r.get("comparable_attempt", True)]
@@ -1663,6 +1692,29 @@ def summarize(
         ),
     }
 
+    # #565: repeats_observed — count records per (arm, task_id) cell and report
+    # the minimum observed count across all cells. If cells disagree (e.g. some
+    # tasks ran 3 times and others ran 1 time), the minimum is the conservative
+    # choice: the statistical guarantees hold only for the lowest-coverage cell.
+    # When there are no records, repeats_observed is 0.
+    def _repeats_observed(recs: list[dict]) -> int:
+        if not recs:
+            return 0
+        cell_counts: dict[tuple, int] = {}
+        for r in recs:
+            cell = (r.get("arm", ""), r.get("task_id", ""))
+            cell_counts[cell] = cell_counts.get(cell, 0) + 1
+        return min(cell_counts.values())
+
+    repeats_observed = _repeats_observed(records)
+
+    def _statistical_confidence(n: int) -> str:
+        if n <= 1:
+            return "single-sample"
+        if n == 2:
+            return "low"
+        return "adequate"
+
     return {
         "run_id": run_id,
         "task_file": str(tasks_path.relative_to(REPO_ROOT)),
@@ -1673,6 +1725,8 @@ def summarize(
         "starting_commit": starting_commit,
         "records": len(records),
         "repeats": repeats,
+        "repeats_observed": repeats_observed,
+        "statistical_confidence": _statistical_confidence(repeats_observed),
         "expected_records": expected_records,
         "stopped_early": stopped_early,
         "limitations": limitations,
@@ -1758,6 +1812,25 @@ def summarize(
                     if _cost_values(items)
                     else None
                 ),
+                # #565: percentiles and stdev. Nearest-rank method; n=1 returns
+                # the single value rather than raising.
+                "elapsed_minutes_p50": _percentile(_elapsed_values(items), 50),
+                "elapsed_minutes_p90": _percentile(_elapsed_values(items), 90),
+                "elapsed_minutes_stdev": _stdev(_elapsed_values(items)),
+                "cost_usd_p50": _percentile(_cost_values(items), 50),
+                "cost_usd_p90": _percentile(_cost_values(items), 90),
+                "cost_usd_stdev": _stdev(_cost_values(items)),
+                "marker_score_p50": _percentile(
+                    [r["quality_marker_score"] for r in _scored(items)], 50
+                ),
+                # 品質の裾は p50 より p90 の方が診断的 (両 arm の中央値が並んでも
+                # 裾が違えば差が出る)。
+                "marker_score_p90": _percentile(
+                    [r["quality_marker_score"] for r in _scored(items)], 90
+                ),
+                "marker_score_stdev": _stdev(
+                    [r["quality_marker_score"] for r in _scored(items)]
+                ),
             }
             for arm, items in by_arm.items()
         },
@@ -1793,6 +1866,13 @@ def summary_warnings(summary: dict) -> list[str]:
             warnings.append(
                 f"WARNING: measurement_valid is false (reason: {reason}). Quality comparison is NOT valid."
             )
+    # #565: single-sample warning
+    if summary.get("repeats_observed", 1) <= 1:
+        warnings.append(
+            "WARNING: single-sample run (repeats=1). Per-task variance in past runs reached\n"
+            "0.51x-1.97x, so differences below ~2x are not distinguishable from noise.\n"
+            "Use --repeats 3 or more for comparative conclusions. See issue #557."
+        )
     return warnings
 
 
