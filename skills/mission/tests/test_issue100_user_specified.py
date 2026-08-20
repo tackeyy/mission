@@ -1,6 +1,6 @@
 """Issue #100: ミッション本文でスキルを名指し指定しても ask-user に倒れ、log-invocation が reject される.
 
-実測 (2026-07-02 social-foundry 監査 mission / Critical / 9観点スキル明示指定):
+実測 (2026-07-02 project-d 監査 mission / Critical / 9観点スキル明示指定):
 recommend が high-risk task profile で decision: ask-user に倒れ、初回 log-invocation 8件が
 `--selection-source confirmed-user` 不足で全滅した。ミッション本文でのスキル明示指定は
 実質 confirmed-user なので、`recommend --user-specified` で selected として直接記録する。

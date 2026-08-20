@@ -29,11 +29,13 @@ _BANNED_HASHES = frozenset({
     "6b905c825ebff86a",
 })
 
-# 禁止語を部分に含むが、無関係で正当な複合語。ここを許可しておかないと偽陽性が
-# 大量に出て、本物の検出がノイズに埋没する (実測: 自プロジェクト名で 25 件)。
-_ALLOWED_COMPOUND_HASHES = frozenset({
-    "9a345efb9475bea5",  # 自プロジェクト名
-})
+# 禁止語を部分に含むが、無関係で正当な複合語を逃がすための例外。空でも機構は
+# 残す: 将来 "禁止ベンダー語を部分に含むだけの正当な語" が現れたときの受け皿。
+#
+# 以前はここに実在プロジェクト名の hash が 1 件入っていた。その名前を tracked
+# ファイルから除去した (#588 系のレビュー) ため不要になり、あわせて外した。残す
+# と「禁止ベンダー語を含む名前を使っている」という事実自体の開示になる。
+_ALLOWED_COMPOUND_HASHES = frozenset()
 
 # ASCII 英数字・アンダースコア・ハイフンの連なりを 1 チャンクとして切り出す。
 # 日本語との境界を \b / \w に頼らないのが要点: Python の \w は Unicode 単語文字を
@@ -48,7 +50,7 @@ def _h(token):
     return hashlib.sha256(token.encode()).hexdigest()[:16]
 
 
-def _banned_tokens(line, banned=_BANNED_HASHES):
+def _banned_tokens(line, banned=_BANNED_HASHES, allowed=_ALLOWED_COMPOUND_HASHES):
     """行から禁止語トークンを拾う。見つからなければ空リスト。"""
     found = []
     for chunk in _CHUNK_RE.findall(line):
@@ -65,7 +67,7 @@ def _banned_tokens(line, banned=_BANNED_HASHES):
                 neighbours.append(f"{parts[i - 1]}-{part}")
             if i + 1 < len(parts):
                 neighbours.append(f"{part}-{parts[i + 1]}")
-            if any(_h(n) in _ALLOWED_COMPOUND_HASHES for n in neighbours):
+            if any(_h(n) in allowed for n in neighbours):
                 continue
             found.append(part)
     return found
@@ -109,14 +111,26 @@ def test_ignores_substrings():
         assert not _banned_tokens(sample, _FIXTURE), f"偽陽性: {sample}"
 
 
-def test_allows_own_project_compound():
-    """自プロジェクト名は禁止語を部分に含むが正当。"""
+_FIXTURE_ALLOWED = frozenset({"a20e11a50541e956"})  # sha256('zzallow-zzsynthetic')[:16]
+
+
+def test_allows_compound_on_the_allowlist():
+    """禁止語を部分に含んでも、複合語が許可されていれば通す。
+
+    実在名を使わず合成語で検証する。実在名を書くと、テストファイル自体が
+    「何を伏せているか」の開示になる (禁止語を平文で持たないのと同じ理由)。
+    """
     for sample in (
-        "social-foundry Epic #463 のスコア推移",
-        "~/dev/social-foundry/.worktrees/ 配下",
-        "social-foundry-email-hook-release ブランチ",  # 派生した長い複合語
+        "zzallow-zzsynthetic のスコア推移",
+        "~/dev/zzallow-zzsynthetic/.worktrees/ 配下",
+        "zzallow-zzsynthetic-email-hook-release ブランチ",  # 派生した長い複合語
     ):
-        assert not _banned_tokens(sample), f"偽陽性: {sample}"
+        assert not _banned_tokens(sample, _FIXTURE, _FIXTURE_ALLOWED), f"偽陽性: {sample}"
+
+
+def test_allowlist_does_not_rescue_the_bare_token():
+    """複合語の許可は、禁止語単独の出現までは救わない。"""
+    assert _banned_tokens("zzsynthetic 単独の言及", _FIXTURE, _FIXTURE_ALLOWED)
 
 
 # ---- リポジトリ横断の不変条件 (これが CI ゲート本体) ----
