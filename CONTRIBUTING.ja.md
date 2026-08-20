@@ -118,17 +118,27 @@ transcript・ログ・コマンド出力を Issue / Pull Request / コミット�
 - 他リポジトリに属する名称・Issue 番号・機能説明
 
 **あとから編集しても露出は取り消せません。** GitHub は Issue / Pull Request 本文の編集前
-リビジョンを保持し、public repository では誰でも API から読めます。一度投稿した secret を
+リビジョンを保持し、public repository では GitHub アカウントを持つ者なら誰でも API から
+読めます。一度投稿した secret を
 消す手段は、Issue / Pull Request 自体を削除するか、GitHub Support に編集履歴の purge を
 依頼するかの 2 つだけです。いずれにせよ credential の rotate は必要です。
 
 だから redaction は投稿の**前**でなければなりません。push protection が守るのは git 側だけで、
 Issue に何を入力するかは見えません。
 
-コミットされるファイルは CI ガードが検査します
-(`skills/mission/tests/test_artifact_hygiene.py`、`test_vendor_fingerprint.py`、
-`test_private_project_names.py`)。Issue / Pull Request 本文は対象外であり、原理的に対象に
-できません。この経路は規律でしか守れません。
+消しすぎないでください。匿名化済みの placeholder (`<user>` / `[REDACTED]`) や CI runner の
+パス (`/home/runner/work/…`) は構造上公開情報であり、誰かのマシンについて何も明かしません。
+これらを消すと再現可能な証跡を失うだけで、得るものがありません。
+
+コミットされるファイルは CI ガードが検査します。
+
+- `skills/mission/tests/test_artifact_hygiene.py`
+- `skills/mission/tests/test_vendor_fingerprint.py`
+- `skills/mission/tests/test_private_project_names.py`
+
+Issue / Pull Request 本文は対象外であり、原理的に対象にできません。この経路は規律でしか
+守れません。各ガードの射程を含む監査手順の全体は
+[docs/SECURITY_REVIEW_CHECKLIST.ja.md](docs/SECURITY_REVIEW_CHECKLIST.ja.md) を参照してください。
 
 ## Security
 

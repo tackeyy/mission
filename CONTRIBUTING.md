@@ -120,17 +120,27 @@ request, or a file you intend to commit, remove:
 
 **Editing afterwards does not undo the exposure.** GitHub keeps the pre-edit
 revision of every issue and pull request body, and on a public repository anyone
-can read it through the API. Once a secret is posted, the only ways to remove it
+with a GitHub account can read it through the API. Once a secret is posted, the only ways to remove it
 are deleting the issue or pull request outright, or asking GitHub Support to
 purge the edit history — and the credential must be rotated regardless.
 
 This is why redaction has to happen *before* posting. Push protection guards the
 git side only; it cannot see what you type into an issue.
 
-Committed files are covered by CI guards
-(`skills/mission/tests/test_artifact_hygiene.py`,
-`test_vendor_fingerprint.py`, `test_private_project_names.py`). Issue and pull
-request bodies are not, and cannot be — that path is discipline only.
+Do not over-redact either: anonymised placeholders (`<user>`, `[REDACTED]`) and
+CI runner paths (`/home/runner/work/…`) are public by construction and carry no
+information about anyone's machine. Stripping them costs you a reproducible
+trace and buys nothing.
+
+Committed files are covered by CI guards:
+
+- `skills/mission/tests/test_artifact_hygiene.py`
+- `skills/mission/tests/test_vendor_fingerprint.py`
+- `skills/mission/tests/test_private_project_names.py`
+
+Issue and pull request bodies are not, and cannot be — that path is discipline
+only. For the full audit procedure, including what each guard does and does not
+reach, see [docs/SECURITY_REVIEW_CHECKLIST.md](docs/SECURITY_REVIEW_CHECKLIST.md).
 
 ## Security
 
