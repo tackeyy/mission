@@ -298,6 +298,14 @@ python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
 `measurement_valid` が false のとき、runner は JSON summary より前に
 stdout へ警告行を出力する。
 
+### `marker_score_variance` と `marker_score_stdev` の違い
+
+`marker_score_variance` は**母分散**（`statistics.pvariance`、分母 `n`）、
+`marker_score_stdev` は**標本標準偏差**（`statistics.stdev`、分母 `n-1`）である。
+両者は平方根の関係にない（`sqrt(marker_score_variance) != marker_score_stdev`。
+n=3 で約 22% 乖離）。過去 run の解析を壊さないため定義は変更していないので、
+一方から他方を導出せず、各フィールドをそれぞれの定義どおりに読むこと。
+
 ### `total_cost_usd` について
 
 record および arm 集計の `total_cost_usd` は、エージェント runtime が報告する

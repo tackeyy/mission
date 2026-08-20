@@ -326,6 +326,16 @@ The summary JSON produced by each run includes a `measurement_valid` field.
 When `measurement_valid` is false, the runner prints a warning on stdout before
 the JSON summary.
 
+### Note on `marker_score_variance` vs `marker_score_stdev`
+
+`marker_score_variance` is the **population** variance (`statistics.pvariance`,
+denominator `n`); `marker_score_stdev` is the **sample** standard deviation
+(`statistics.stdev`, denominator `n-1`). They are not related by a square root:
+`sqrt(marker_score_variance) != marker_score_stdev` (roughly 22% apart at n=3).
+Both are retained with their original definitions so historical runs stay
+analysable; read each field by its own definition rather than deriving one from
+the other.
+
 ### Notes on `total_cost_usd`
 
 `total_cost_usd` in each record and arm aggregate is an API-equivalent estimate
