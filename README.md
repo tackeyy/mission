@@ -4,173 +4,244 @@
   <img src="docs/assets/hero.png" alt="mission — quality-gated autonomous mission loop" width="760">
 </p>
 
-
 **English** | [Japanese](README.ja.md)
 
 `mission` is an OSS loop-engineering plugin for Claude Code and Codex. It keeps
-agentic work moving until a recorded plan, reviewer evidence, aggregated score,
-and state gate say the mission is actually done.
-
-It plans, executes, collects `mission-review/1` reviewer output, aggregates that
-review evidence into `push-score --scoring-json`, and iterates until the
-configured threshold is reached. A Stop hook keeps the loop from ending early
-while an active mission is still below the passing gate.
+agentic work moving until a recorded plan, reviewer evidence, an aggregated
+score, and a state gate say the mission is actually done.
 
 > Prompt engineering tells an agent what to do. Loop engineering defines how the
 > agent keeps working until the job is actually done.
 
-Use `mission` when the problem is not "what prompt should I write?" but "how do I
-stop an agent from declaring success before the work passes a quality gate?"
+**The problem it solves is stopping too early** — not writing a better prompt.
 
-## Loop Engineering
+---
 
-`mission` is a quality-gated loop for multi-step agent work:
+## When to use `mission`
+
+- Multi-step work where a single pass can ship something that *looks* finished:
+  silent coverage gaps, summaries that do not reconcile with their own detail,
+  sections promised in the text but never written.
+- Irreversible production actions that must not run without human approval.
+- Work spanning multiple sessions or context resets that needs resumable,
+  auditable state.
+- Environments where the *evidence for why the work was allowed to stop* is part
+  of the deliverable.
+
+## When **not** to use `mission`
+
+- **You want a higher-quality artifact on average.** No quality advantage has
+  been demonstrated. Measured cost is **5.4x wall-clock time and 4.9x notional
+  spend** against a goal-only baseline. If your work resembles the 95% that
+  passes the gate unchanged, a single careful pass gives you the same artifact
+  faster.
+- **Your task is simple and self-contained.** `mission` routes such work to the
+  host's goal contract itself and does not even create mission state.
+- **You want a PR-review bot, a development methodology, or a prompt replay
+  loop.** Other tools do those better; see [Alternatives](#alternatives).
+
+---
+
+## How it works
 
 ```text
-plan -> execute -> review -> aggregate score -> iterate
+plan -> execute -> verify -> review -> aggregate score -> iterate
 ```
 
-It is designed for the loop-engineering moment: recurring agent systems,
-workflows, skills, plugins, and sub-agents are becoming the unit of leverage, but
-a loop still needs a deterministic way to decide when it may stop. `mission`
-provides that completion gate with `.mission-state`, reviewer JSON,
-`aggregate-reviews`, findings evidence, and threshold-based pass/fail state.
+`mission` records a plan, executes it, records executed verification results,
+collects structured reviewer output (`mission-review/1`), aggregates it into a
+four-axis score with `aggregate-reviews`, records it with
+`push-score --scoring-json`, and repeats until `mark-passes`
+accepts the state or a halt condition fires. A Stop hook prevents the session
+from ending while an active mission is still below the gate.
 
-For public launch positioning, GitHub topics, and a comparison against `/goal`,
-`ralph-loop`, and Superpowers, see
-[`docs/LOOP_ENGINEERING.md`](docs/LOOP_ENGINEERING.md).
+The pass gate is explicit:
 
-For a marketing-safe 10-task pilot protocol comparing `mission` with a
-goal-only baseline, see
-[`benchmarks/mission-vs-goal/README.md`](benchmarks/mission-vs-goal/README.md).
+```text
+passes = findings_evidence_path exists
+  AND evidence_high_count == open_high
+  AND max_agreement_delta <= 1.5
+  AND composite_score >= threshold
+  AND min(scored_items) >= 3.5
+  AND open_high == 0
+```
 
-For anonymized production case studies of what the review gate actually
-catches (and where it is just cost), see
-[`docs/CASE_STUDIES.md`](docs/CASE_STUDIES.md).
+For simple, low-risk, non-issue-bound work, `init` returns a routing verdict to
+the host's goal contract and creates no state. Complexity, risk signals, and
+`--issue-ref` decide this; `--force-mission` overrides it.
 
-For the local-first artifact contract and CLI, see
-[`docs/MISSION_ARTIFACTS.md`](docs/MISSION_ARTIFACTS.md). Artifact support is
-implemented as a local Markdown artifact with explicit opt-in publish evidence.
+---
 
-## Features
+## What the evidence shows
 
-- Mission orchestration skill: `skills/mission`
-- Five supporting skills: planner, executor, reviewer, critic, and scorer
-- State management CLI for `.mission-state` sessions
-- Deterministic four-axis `aggregate-reviews` scoring from reviewer JSON, with
-  High-finding evidence and independent review-agreement gates before `mark-passes`; explicitly supplied manual scores use a typed, content-addressed capture route
-- Pre-gate evaluation cache: `pregate record` / `pregate check` skips repeated
-  evaluation for the same Issue and subject digest by reusing recorded evidence
-- Evidence handoff: `handoff publish` / `handoff await` / `handoff verify` passes evidence
-  between sessions without relying on ad hoc file sharing
-- Merge queue: `queue enqueue` / `queue status` / `queue next` / `queue verify` / `queue mark` keeps
-  parallel missions on the same state root from merging against a mismatched base
-- Lane report and SLO checks: `lane-report --slo-minutes` compares elapsed time
-  with the SLO and breaks waiting time down by kind
-- Failure ledger and learning brief: reviewer `general_fix_rule` entries are
-  accumulated, then `learning brief` feeds the most repetitive items into the
-  planner and executor without injecting them into reviewers
-- Iteration recovery stats: `stats` / audit `iteration_recovery` summarize the
-  first-to-last score delta, iteration count, and fix-completion rate after gate rejections
-- Optional implementation delegation: if the registry has an implementation
-  provider, implementation-step diff generation can be delegated to a headless
-  coding agent while validation, review, and pass judgment stay in core
-- Local-first mission artifact CLI for auditable completion evidence
-  ([contract](docs/MISSION_ARTIFACTS.md))
-- Multi-session state isolation for Claude Code and Codex
-- `mission-state.py resume` for compaction/resume recovery ordering
-- Stop hook that blocks premature completion while a mission is still active
-- Optional specialist registry and beginner presets for domain evidence providers ([design](skills/mission/refs/specialist-registry.md))
-- Python test suite covering state routing, review aggregation, scoring gates,
-  artifact gates, and hook behavior
+This section separates what is **reproducible by you** from what is **operational
+evidence from the maintainer's own repositories**. Read the limitations.
 
-## Competitive Positioning
+### Reproducible: paired benchmark vs a goal-only baseline
 
-`mission` is positioned as a **quality-gated autonomous mission completion**
-orchestrator. It is not trying to be a full software-development methodology,
-a PR review bot, or a generic prompt replay loop. The core promise is narrower:
-keep a multi-step mission moving until a recorded state, review loop, and score
-gate say the work is good enough to stop.
+Protocol and raw data: [`benchmarks/mission-vs-goal/README.md`](benchmarks/mission-vs-goal/README.md).
 
-Research snapshot: 2026-06-15. Sources checked include the local Claude Code
-official marketplace cache, the local Codex `openai-curated` plugin cache,
-the Anthropic
-[`claude-plugins-official`](https://github.com/anthropics/claude-plugins-official)
-repository, [Claude Code `/goal` docs](https://code.claude.com/docs/en/goal),
-[OpenAI Codex plugin docs](https://developers.openai.com/codex/plugins/build),
-and public competitor READMEs.
+| Measure | Result | Reading |
+|---|---|---|
+| Completion rate | goal 94.5% / mission 96.6% | Near parity. N is too small for a superiority claim. |
+| Declared done but failed the validator | 0/120 goal, 0/114 mission | **No recorded case where the baseline failed and `mission` saved it.** |
+| Wall-clock time | mission **5.4x** | Real cost, clean-condition measurement. |
+| Notional spend | mission **4.9x** | Relative only. Under subscription execution there is no per-token charge; the consumed resource is the plan rate limit. |
+| Second-iteration rate | 5.6% of mission runs | The review loop changes the artifact in a small minority of runs. |
+| Quality | **not validly measured** | See below. |
 
-| Product / plugin | Surface | Relationship | What overlaps | How `mission` differs |
-|---|---|---|---|---|
-| [`/goal`](https://code.claude.com/docs/en/goal) | Claude Code | Most important official direct competitor | Sets a completion condition and evaluates after each turn until the condition is met | `/goal` is a lightweight session-scoped completion condition. Its evaluator judges the evidence shown in the conversation. `mission` is a more structured mission-completion layer with supporting skills, persistent `.mission-state`, score history, review/critic loops, and threshold gates. |
-| [`ralph-loop`](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/ralph-loop) | Claude Code | Closest direct competitor on Claude Code | Stop hook powered iteration until completion | `ralph-loop` re-runs a prompt until a completion promise or max iteration is reached. `mission` decomposes work into plan, execution, peer review, scoring, critic feedback, persistent session state, and threshold-gated completion. |
-| [`Superpowers`](https://github.com/obra/superpowers) | Claude Code, Codex, and other agents | Strongest cross-agent competitor | Planning, TDD, debugging, review, and delivery workflows | Superpowers is a broad development methodology. `mission` is a focused completion loop for any mission, including docs, research, release prep, and non-feature work, with explicit scoring and state gates. |
-| [`feature-dev`](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/feature-dev) | Claude Code | Adjacent workflow competitor | Structured discovery, architecture, implementation, and quality review | Feature-dev is optimized for new feature delivery. `mission` is broader and can orchestrate arbitrary project outcomes without requiring a feature-development shape. |
-| [`code-review`](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/code-review) / `pr-review-toolkit` | Claude Code | Adjacent quality competitor | Multi-agent review, confidence scoring, test and quality review | These tools review PRs or code changes. `mission` uses review as one phase, then loops through fixes and re-scoring until the whole mission passes. |
-| `github`, `coderabbit`, `circleci`, `codex-security`, `plugin-eval` | Codex | Specialist adjacent plugins | PR, review, CI, security, or plugin evaluation tasks | These are useful downstream tools inside a mission. They do not provide the top-level mission state machine, cross-iteration score history, or Stop hook completion guard. |
+**On quality, the honest statement is "not measured", not "tied".** The
+benchmark's quality-marker scoring is structurally broken: a bare list of the
+right keywords scores a perfect 1.00, while correct paraphrases — and correct
+answers written in Japanese — score 0. Three independent reviews concluded that
+regex co-occurrence cannot measure whether reasoning happened. **Do not cite the
+current marker scores as evidence in either direction.** The replacement is
+tracked in the repository's open issues.
 
-The intended positioning is:
+### Operational: 451 scored production missions
 
-- **Compared with `ralph-loop`**: adds plan, execution, review, and scoring structure on top of a prompt-iteration loop.
-- **Compared with Claude `/goal`**: heavier than the official lightweight
-  completion condition, but includes state, review, scoring, and improvement
-  loops.
-- **Compared with Superpowers**: narrower and lighter than a complete
-  development methodology.
-- **Compared with review or CI plugins**: an orchestrator that can call review,
-  test, and release work as phases, then decide whether the overall mission is
-  actually complete.
+Anonymized cases: [`docs/CASE_STUDIES.md`](docs/CASE_STUDIES.md).
+**These come from the maintainer's private repositories and cannot be reproduced
+from this repository.** They are disclosed with that limitation stated.
 
-Use `mission` when the main risk is **stopping too early**: unclear multi-step
-work, quality drift across iterations, compaction/resume, or tasks where the
-agent needs an auditable "why can I stop now?" gate.
+| Measure | Value | Reading |
+|---|---:|---|
+| Passed the gate at iteration 1 | 427 / 451 (95%) | For most work the loop is a pass-through: review cost, no change. |
+| Scored below the gate at iteration 1 | 24 (5%) | The tail where the gate binds. |
+| Multi-iteration missions | 44 | |
+| — composite improved | 27 | e.g. 2.80 -> 4.20, 0.96 -> 4.80. |
+| — composite unchanged | 15 | **Honest negative**: cost with no measured gain. |
+| Halted for human approval | 7 | Production DB migrations, publishing a security audit, a production API cap change. |
 
-| Choose this | When |
+**The distribution matters more than the average.** The gate earns its cost in a
+minority tail, not by raising the mean.
+
+### What this project does not claim
+
+- That `mission` produces higher-quality artifacts on average.
+- That `mission` completes work a goal-only baseline cannot. No such case is
+  recorded.
+- That the 5% tail rate transfers to your workload.
+- That the current benchmark quality numbers mean anything.
+
+These claims will be made only if and when pre-registered criteria are met
+against a scoring method that can actually detect the difference.
+
+### Cost control
+
+To reduce review overhead for the 95% that passes unchanged, `mission` derives a
+`review_tier` (light / standard / full) at init from complexity and mission text.
+Light tier runs one reviewer instead of three and limits specialists to
+`required: true` providers. **Gate semantics — threshold, open High findings,
+agreement delta, halt conditions — are unchanged regardless of tier.**
+The cost reduction effect has not yet been measured in production.
+
+### Verified behavior
+
+Dated verification snapshots, so a reader can tell how fresh each claim is.
+
+- 2026-08-14: 3244 passed — full suite at the time of that snapshot. Run `make test` for the current count.
+- Artifact support is implemented as a local Markdown artifact with explicit
+  opt-in publish evidence; see [`docs/MISSION_ARTIFACTS.md`](docs/MISSION_ARTIFACTS.md).
+
+---
+
+## Security posture
+
+### Implemented
+
+- **Fail-closed Stop hook** — the session cannot end while an active mission is
+  below the pass gate.
+- **Lease / fencing with TTL** — mutating commands require a valid lease; stale
+  and concurrent writes are rejected.
+- **Irreversible-action halt gate** — irreversible operations halt pending
+  explicit human approval; the reason is recorded verbatim in state.
+- **Typed force-pass approval** — bypassing the gate requires a typed,
+  content-addressed approval. Reviewer-aggregate evidence cannot be reused as a
+  force-pass justification.
+- **Provenance binding** — reviewer evidence and scores are sha256
+  content-addressed, so a score cannot be re-pointed at different evidence.
+- **Audit trail** — `scripts/mission-audit.py` classifies force-pass,
+  specialist-provenance, and lease risks across recorded state (JSON/Markdown).
+- **Permission preflight** — required permissions are checked at init and
+  reported before work begins.
+
+### Known gaps
+
+These are open gaps, not planned features. Evaluate them before adopting
+`mission` for high-stakes workflows. See [`SECURITY.md`](SECURITY.md).
+
+- **No tamper-evidence signature on archived reviewer JSON.** Provenance binding
+  protects evidence-to-score linkage, but archived review files carry no
+  signature; filesystem-level tampering after archival is not detectable.
+- **No identity binding for external specialist providers.** Invocations are
+  recorded, but the executing provider's identity is not cryptographically bound
+  to its output.
+- **No blast-radius limits.** There is no enforced cap on how many files a
+  mission may modify or which paths it may write.
+- **Reviewers are not required to execute verification.** Verification tooling is
+  available to reviewers, but reading-only review is possible. Executed
+  verification results are now recorded separately so this can be measured.
+
+### How it fails safe
+
+| Condition | Behaviour |
 |---|---|
-| `mission` | You need an auditable completion gate for a multi-step outcome, especially across iterations, compaction, or mixed research/docs/code work. |
-| Claude Code `/goal` | You want a built-in Claude Code mechanism for a lightweight run-until condition inside one session. |
-| `ralph-loop` | You want a Claude Code loop that re-runs one prompt until a literal completion promise is emitted. |
-| `Superpowers` | You want a broad coding-agent methodology with brainstorming, planning, TDD, debugging, review, and branch delivery practices. |
-| Review / CI / security plugins | You need a specialist check for one part of the workflow, and another orchestrator or human will decide overall completion. |
+| Stale or expired lease | Mutating command is rejected; state is not written. |
+| Missing scoring evidence | `push-score` rejects the submission. |
+| Score below the gate | Stop hook blocks session end; the loop continues. |
+| Irreversible action detected | Halt fires and records the reason; work stays incomplete until a human resumes. |
+| Unknown goal-dispatch configuration | Falls back to inline guidance without changing routing gates. |
+| Offline or missing remote during local-authoring sync | Stops without stale fallback and without rewriting local work. |
+| Force-pass without typed approval | Rejected. |
 
-### What the measured evidence shows
+---
 
-- In every completed paired run to date, official `/goal` and `mission` tied on completion, validator, and marker metrics. In the latest clean measurement (2026-07-23 discriminating cohort, N=5, permission-mode contamination guard verified, same model on both arms) `mission` cost roughly 5.4x the wall-clock time and 4.9x the notional API spend (5.8x / 7.4x on the 2026-07-07 planted-defect tail cohort). Do not adopt `mission` expecting a higher-quality artifact on self-contained tasks; see [`benchmarks/mission-vs-goal/report.md`](benchmarks/mission-vs-goal/report.md).
-- Across 451 scored production missions, 95% passed the quality gate at iteration 1 unchanged. The measured value concentrated in the ~5% tail the gate forced to iterate (first-iteration factual errors, runtime UI bugs, and security-relevant gaps that green toolchains missed) and in 7 halts that stopped irreversible production actions pending approval; see [`docs/CASE_STUDIES.md`](docs/CASE_STUDIES.md).
+## Reproducing the evidence
 
-To reduce review overhead for the 95% pass-through majority, `mission` derives a `review_tier` (light/standard/full) at init time from complexity and mission text. Light tier runs one reviewer instead of three and limits specialist selection to `required: true` providers. Gate semantics — threshold, open High findings, agreement delta, halt conditions — are unchanged regardless of tier. The cost reduction effect has not yet been measured in production.
+Every command below is run from the repository root.
 
-Simple-task adaptive routing keeps portable inline completion as its default, while `--goal-dispatch host-native` or a version-1 `.mission/routing.yml` can select the current host's native goal guidance. Unknown hosts and invalid configuration fail safe to inline without changing routing gates; see the [goal dispatch provider design](skills/mission/refs/goal-dispatch-provider.md).
+```bash
+# 1. Full test suite, identical to CI
+make test
 
-For retrospective audits, `scripts/mission-audit.py --current-since <date-or-ISO-timestamp>` classifies every detected risk by the state's `updated_at`. One shared parser handles date and ISO bounds for `--since`, `--until`, and `--current-since`; the current cutoff is inclusive and normalized to UTC, while missing or invalid timestamps remain current as a safe default. JSON and Markdown report current P0/P1/P2 findings before historical risks while retaining both, including force-pass and specialist-provenance findings. JSON keeps canonical period evidence lists and compact count/index views by code. With no cutoff, all findings remain current for backward-compatible all-period reporting. This reporting scope does not change pass severity, force approval, or required-specialist result gates.
+# 2. Paired benchmark against the goal-only baseline.
+#    NOTE: --max-budget-usd is a cutoff threshold on an estimated value,
+#    not a billing cap. Under subscription execution the consumed resource
+#    is your plan rate limit.
+python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
+  --starting-commit "$(git rev-parse HEAD)" \
+  --tasks-file benchmarks/mission-vs-goal/tasks.tail.json \
+  --run-id "$(date +%Y-%m-%d)-your-run" \
+  --model-id <your-model-id> \
+  --limit-tasks 5 \
+  --repeats 3 \
+  --stop-on-blocked
 
-Pick `mission` for the auditable completion gate, tail insurance on open-world work, irreversible-action governance, and resumable state — not for an average quality lift.
+# 3. Audit mission state you have produced yourself
+python3 scripts/mission-audit.py --root <path-to-your-project> --json
+```
 
-Benchmark claims should use the pilot protocol in
-[`benchmarks/mission-vs-goal/`](benchmarks/mission-vs-goal/) and avoid general
-"smarter than `/goal`" language unless the raw paired results support a narrower
-workflow claim.
+Comparative conclusions need `--repeats 3` or more: measured per-task variance
+reached 0.51x-1.97x, so smaller differences are not distinguishable from noise.
+The runner prints a warning and marks the summary when a run cannot support a
+quality conclusion.
 
-## Repository Layout
+---
 
-| Path | Purpose |
+## Alternatives
+
+| Choose | When |
 |---|---|
-| `skills/mission/` | Main orchestrator skill, state CLI, references, and tests |
-| `skills/mission-planner/` | Planning subskill |
-| `skills/mission-executor/` | Execution subskill |
-| `skills/mission-reviewer/` | Peer-review subskill |
-| `skills/mission-critic/` | Iteration-improvement subskill |
-| `skills/mission-scorer/` | Fallback prose-to-JSON converter for reviewer output |
-| `docs/` | Design and operations documentation |
-| `benchmarks/` | Mission-vs-goal pilot measurements |
-| `scripts/mission-local-authoring-sync.sh` | Fail-closed latest-main bootstrap for Git-backed local authoring |
-| `scripts/ci_changed_scopes.js` | CI changed-scope detector |
-| `scripts/mission-stop-guard.sh` | Stop hook used to keep active missions running |
-| `claude-hooks/hooks.json` | Claude Code Stop hook declaration |
-| `.claude-plugin/` | Claude Code plugin metadata and marketplace manifest |
-| `.codex-plugin/` | Codex plugin metadata |
-| `.agents/plugins/` | Codex local marketplace metadata |
-| `plugins/mission/` | Codex marketplace plugin wrapper |
+| `mission` | You need an auditable completion gate, governance over irreversible actions, or resumable state, and the main risk is stopping too early. |
+| Claude Code `/goal` | A lightweight run-until condition inside one session. No state machine, no reviewer loop. |
+| `ralph-loop` | Re-run one prompt until a completion promise appears. Simpler, no scoring. |
+| Superpowers | A broad coding-agent methodology: brainstorming, TDD, debugging, delivery. |
+| Review / CI plugins | A specialist check on one part of the workflow; something else decides overall completion. |
+
+Detailed comparison: [`docs/LOOP_ENGINEERING.md`](docs/LOOP_ENGINEERING.md).
+
+---
 
 ## Installation
 
@@ -303,41 +374,46 @@ separator, for example `~/workspace:~/dev` on macOS/Linux.
 ## Testing
 
 ```bash
-make test-smoke  # no-install syntax/import check
-make test        # CI-identical full suite in .venv-ci
-make test-e2e    # slow operational scenarios
+make test-smoke   # syntax/import check, no install required
+make test         # CI-identical full suite
+make test-shard   # one CI shard
 ```
 
-Each target prints a `mission-test-report/1` JSON line with the exact Git tree
-SHA, tier, and test manifest. `make test` creates `.venv-ci` and installs the
-pinned `.github/requirements-ci.txt`; CI invokes the same target. Both
-`make test` and `make test-e2e` run pytest with `-n auto --dist loadfile`, and
-docs-only diffs can take the CI fast path selected by
-`scripts/ci_changed_scopes.js`.
+## Repository Layout
 
-Historical local verification snapshot: `2026-08-14: 3244 passed`.
+| Path | Purpose |
+|---|---|
+| `skills/mission/` | Main orchestrator skill, state CLI, references, and tests |
+| `skills/mission-planner/` | Planning subskill |
+| `skills/mission-executor/` | Execution subskill |
+| `skills/mission-reviewer/` | Peer-review subskill |
+| `skills/mission-critic/` | Iteration-improvement subskill |
+| `skills/mission-scorer/` | Fallback prose-to-JSON converter for reviewer output |
+| `docs/` | Design and operations documentation |
+| `benchmarks/` | Mission-vs-goal pilot measurements |
+| `scripts/mission-local-authoring-sync.sh` | Fail-closed latest-main bootstrap for Git-backed local authoring |
+| `scripts/ci_changed_scopes.js` | CI changed-scope detector |
+| `scripts/mission-stop-guard.sh` | Stop hook used to keep active missions running |
+| `claude-hooks/hooks.json` | Claude Code Stop hook declaration |
+| `.claude-plugin/` | Claude Code plugin metadata and marketplace manifest |
+| `.codex-plugin/` | Codex plugin metadata |
+| `.agents/plugins/` | Codex local marketplace metadata |
+| `plugins/mission/` | Codex marketplace plugin wrapper |
 
-Additional project-specific testing guidance is in
-[`docs/TESTING.md`](docs/TESTING.md).
+## Documentation
 
-## Verified Behavior
-
-E2E verification was re-run on 2026-08-19 with Claude Code 2.1.226 against
-mission 2.8.0, installing the plugin from the local marketplace into an isolated
-`CLAUDE_CONFIG_DIR`.
-
-Verified:
-
-- `claude plugin validate` accepts the marketplace manifest
-- `claude plugin install mission@mission-marketplace` installs 2.8.0 and reports it as enabled
-- `claude plugin details mission` lists six skills and one Stop hook at roughly 149 always-on tokens
-- The installed cache resolves to `<config>/plugins/cache/mission-marketplace/mission/2.8.0`, matching the documented `MISSION_PLUGIN_ROOT` example
-- `mission-state.py` from the installed cache creates `.mission-state/sessions/*.json` and passes its permission preflight
-- The Python test suite passes (`make test`: 4209 passed, `make test-e2e`: 3 passed)
-
-Unqualified subskill name resolution during execution was verified in the
-earlier 2026-06-14 run with Claude Code 2.1.177 and was not re-checked in this
-headless run.
+| Path | Purpose |
+|---|---|
+| [`skills/mission/SKILL.md`](skills/mission/SKILL.md) | Execution protocol |
+| [`docs/LOOP_ENGINEERING.md`](docs/LOOP_ENGINEERING.md) | Positioning and comparison |
+| [`docs/CASE_STUDIES.md`](docs/CASE_STUDIES.md) | Operational evidence (not independently reproducible) |
+| [`benchmarks/mission-vs-goal/`](benchmarks/mission-vs-goal/) | Reproducible benchmark protocol and raw data |
+| [`docs/MISSION_ARTIFACTS.md`](docs/MISSION_ARTIFACTS.md) | Local-first artifact contract |
+| [`docs/PASS_RATE_METRICS.md`](docs/PASS_RATE_METRICS.md) | Pass-rate and audit metric schema |
+| [`docs/STATE_SNAPSHOTS.md`](docs/STATE_SNAPSHOTS.md) | Audit/stats state snapshots |
+| [`docs/DISTRIBUTION.md`](docs/DISTRIBUTION.md) | Distribution and packaging |
+| [`SECURITY.md`](SECURITY.md) | Security policy and reporting |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Contribution guidelines |
 
 ## Contributing
 
@@ -357,4 +433,4 @@ feedback as contributions.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [`LICENSE`](LICENSE).
