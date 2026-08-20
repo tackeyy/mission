@@ -21,11 +21,18 @@ env:
   # work takes ~344s on 10 cores locally but ~1019s on a CI runner. Splitting it
   # across independent runners shortens feedback almost linearly.
   #
-  # 6 is where three constraints meet: the slowest shard keeps shrinking
-  # (measured 369s at 4 -> ~291s at 6), the docs-only fast path has exactly 6
-  # files so no shard can come up empty, and 8 jobs per run stays inside the
-  # 20-concurrent-job cap for all but the rare three-runs-at-once window
-  # (measured 3.4% of the time).
+  # 6 is where three constraints meet:
+  #
+  # 1. The slowest shard keeps shrinking: measured 369s at 4 shards, 250s at 6.
+  #    Going further still helps but the marginal gain halves at every step.
+  # 2. The docs-only fast path lists exactly 6 files, so 6 is the largest split
+  #    that cannot leave a shard empty. The margin here is zero by construction;
+  #    test_docs_only_fast_path_never_produces_an_empty_shard is the tripwire.
+  # 3. Concurrency: peak is shell + shards = 7 jobs per run (quality is gated
+  #    behind needs, so it never overlaps them). Two runs at once stay inside
+  #    the 20-concurrent-job cap; three do not - but three-at-once was measured
+  #    at 3.4% of the time, and that threshold is identical at 8 shards, so the
+  #    cap is not what stops us from going higher. Constraint 2 is.
   SHARD_TOTAL: '6'
 
 jobs:
