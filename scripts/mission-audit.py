@@ -28,6 +28,10 @@ MISSION_LIB = REPO_ROOT / "skills" / "mission" / "lib"
 if str(MISSION_LIB) not in sys.path:
     sys.path.insert(0, str(MISSION_LIB))
 
+from mission_gate_outcome import (  # noqa: E402
+    false_negative_summary,
+    summarize_states,
+)
 from mission_common import (  # noqa: E402
     HALT_CATEGORIES,
     PREPARATION_ONLY_MARKERS,
@@ -4040,6 +4044,12 @@ def main(argv: list[str] | None = None) -> int:
         else {key: correlation_lineage[key] for key in (
             "record_count", "direct_count", "parent_embedded_count", "unresolved_count", "resolvable_ratio",
         )}
+    )
+    # #593 B-3: gate 精度 (FP/FN)。判定は mission_gate_outcome に委譲し、
+    # 監査本体のロジックには関与しない (記録・集計のみ)。
+    stats["gate_outcome"] = summarize_states([record.state for record in records])
+    stats["gate_outcome"]["false_negative"] = false_negative_summary(
+        [record.state for record in records]
     )
     attach_finding_model(stats, args.min_pass_rate, current_since)
     rows = finding_rows(stats, args.min_pass_rate)
