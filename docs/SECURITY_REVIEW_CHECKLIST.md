@@ -94,7 +94,8 @@ and rotate the credential regardless.
 Agent transcripts leak the operator's machine and unrelated work. Check both the
 current tree and history.
 
-- [ ] No absolute home paths (`/Users/<name>/`, `/home/<name>/`).
+- [ ] No absolute home paths carrying a real account name. Anonymised
+      placeholders (`<user>`, `runner`) are allowed.
 - [ ] No agent session identifiers or private memory paths
       (`.codex/memories`, `.codex/sessions`, `rollout-*`, `.claude/projects/`).
 - [ ] No names, issue numbers, or feature descriptions belonging to **other**
@@ -105,9 +106,15 @@ current tree and history.
       follow-up commit leaves the original blob public forever.
 
 `redact_local_locators()` in `skills/mission/lib/provider_public_contract.py`
-performs the path redaction. `test_doc_consistency.py` enforces the absence of
-home paths in distributed `refs/*.md`; extend equivalent coverage to any new
-directory that receives generated content.
+performs the path redaction. `test_artifact_hygiene.py` enforces, across every
+tracked file, that no real account name appears in a home path and that no
+personal memory store output is pinned into an artifact.
+
+Note what these guards do **not** cover: the names of other repositories.
+`test_vendor_fingerprint.py` targets vendor terminology, and its
+`_ALLOWED_COMPOUND_HASHES` deliberately admits project names that merely contain
+a banned vendor token. Private repository names therefore pass unflagged, and
+must be caught by review.
 
 ## E. Generated artifacts committed to the repository
 

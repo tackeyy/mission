@@ -95,7 +95,8 @@ Issue を delete するか GitHub Support に編集履歴の purge を依頼し�
 エージェントのトランスクリプトは、実行者のマシンと無関係な作業内容を漏らす。
 現在のツリーと履歴の両方を確認する。
 
-- [ ] 絶対 home パス（`/Users/<name>/`、`/home/<name>/`）がない。
+- [ ] 実在アカウント名を含む絶対 home パスがない。匿名化済みの placeholder
+      (`<user>` / `runner` 等) は許可される。
 - [ ] エージェントの session 識別子・プライベート memory パスがない
       （`.codex/memories`、`.codex/sessions`、`rollout-*`、`.claude/projects/`）。
 - [ ] **他の** repository / 事業に属する名称・Issue 番号・機能説明がない。
@@ -106,9 +107,15 @@ Issue を delete するか GitHub Support に編集履歴の purge を依頼し�
       元の blob を永久に公開したままにする。
 
 パス redaction は `skills/mission/lib/provider_public_contract.py` の
-`redact_local_locators()` が担う。`test_doc_consistency.py` は配布される
-`refs/*.md` に home パスがないことを強制している。生成物を受け取るディレクトリを
-新設したら、同等のガードを必ずそこにも広げる。
+`redact_local_locators()` が担う。`test_artifact_hygiene.py` は tracked ファイル
+全体に対して、実在アカウント名を含む home path がないこと、個人 memory store の
+出力が artifact に固定されていないことを強制する。
+
+これらのガードが**カバーしない**範囲に注意する。他リポジトリの名称は対象外である。
+`test_vendor_fingerprint.py` はベンダー用語を対象としており、その
+`_ALLOWED_COMPOUND_HASHES` は「禁止ベンダー語を部分に含むだけの自プロジェクト名」を
+意図的に通す。したがってプライベート repository 名は検出されず、レビューで拾う必要が
+ある。
 
 ## E. リポジトリにコミットする生成物
 
