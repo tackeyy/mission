@@ -124,8 +124,11 @@ minority tail, not by raising the mean.
 - That the 5% tail rate transfers to your workload.
 - That the current benchmark quality numbers mean anything.
 
-These claims will be made only if and when pre-registered criteria are met
-against a scoring method that can actually detect the difference.
+These claims will be made only if and when **pre-registered criteria** are met
+against a scoring method that can actually detect the difference. The criteria
+are fixed in advance of data collection in
+[`docs/PRE_REGISTRATION.md`](docs/PRE_REGISTRATION.md), so they cannot be tuned
+after seeing results. Only data obtained after that file was merged counts.
 
 ### Cost control
 
