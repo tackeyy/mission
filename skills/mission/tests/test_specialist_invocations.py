@@ -569,6 +569,118 @@ def test_provider_output_redactor_covers_every_private_locator_separator(private
     assert "[REDACTED_PATH]" in redacted
 
 
+# provider の stdout/stderr は state と成果物へ転記される。`key=value` の形を
+# とらない裸のトークン (CLI が "Using sk-... " のように出す等) が素通りすると、
+# 一度の実行ミスで credential が公開リポジトリの artifact に固定される。
+#
+# fixture は実形式を模した合成値。値はすべて反復文字で、どの provider でも
+# 実在しない。ただし形が本物なので secret scanner が反応する。行単位の
+# `gitleaks:allow` で個別に除外している (ファイル全体の allowlist にすると、
+# 後から同じファイルへ本物が混入しても検出されなくなる)。
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "sk-ant-api03-" + "A" * 80,
+        "sk-or-v1-" + "b" * 64,
+        "xai-" + "C" * 80,
+        "xoxb-1234567890-1234567890123-" + "d" * 24,  # gitleaks:allow
+        "ghp_" + "E" * 36,
+        "github_pat_" + "F" * 22 + "_" + "g" * 59,
+        "AIza" + "H" * 35,
+        "GOCSPX-" + "i" * 28,
+        "ntn_" + "J" * 46,
+        "sbp_" + "0123456789abcdef" * 2 + "01234567",
+        "AKIA" + "K" * 16,
+        "sk_live_" + "L" * 24,
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0." + "M" * 43,  # gitleaks:allow
+    ],
+)
+def test_provider_output_redactor_removes_bare_credential_tokens(secret):
+    module = _load_mission_state_module("mission_state_bare_token_redactor")
+
+    redacted = module._redact_provider_output(f"provider said: {secret} done")
+
+    assert secret not in redacted, "裸のトークンが素通りしている"
+    assert "[REDACTED]" in redacted
+
+
+def test_provider_output_redactor_leaves_pem_body_out_of_the_output():
+    module = _load_mission_state_module("mission_state_pem_redactor")
+    pem = "-----BEGIN PRIVATE KEY-----\nMIIBVgIBADANBg\n-----END PRIVATE KEY-----"  # gitleaks:allow
+
+    redacted = module._redact_provider_output(f"leaked:\n{pem}")
+
+    assert "MIIBVgIBADANBg" not in redacted
+    assert "[REDACTED]" in redacted
+
+
+def test_provider_output_redactor_handles_unterminated_pem_block():
+    """END marker を欠く PEM も落とす。
+
+    provider の出力は切り詰められることがあり、その場合 BEGIN だけが残って
+    本体が続く。対を要求すると、まさに異常系で鍵が素通りする。
+    """
+    module = _load_mission_state_module("mission_state_unterminated_pem")
+    truncated = "-----BEGIN PRIVATE KEY-----\nMIIBVgIBADANBg\n"  # gitleaks:allow
+
+    redacted = module._redact_provider_output(f"leaked:\n{truncated}")
+
+    assert "MIIBVgIBADANBg" not in redacted
+    assert "[REDACTED]" in redacted
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "xapp-1-A0123456789-1234567890123-" + "a" * 64,  # Slack app-level, gitleaks:allow
+        "npm_" + "b" * 36,
+        "dckr_pat_" + "c" * 36,
+    ],
+)
+def test_provider_output_redactor_covers_additional_provider_prefixes(secret):
+    module = _load_mission_state_module("mission_state_more_prefixes")
+
+    redacted = module._redact_provider_output(f"provider said: {secret}")
+
+    assert secret not in redacted
+    assert "[REDACTED]" in redacted
+
+
+def test_provider_output_redactor_requires_a_token_boundary():
+    """語の途中に prefix が現れただけの文字列を潰さない（偽陽性の抑制）。"""
+    module = _load_mission_state_module("mission_state_token_boundary")
+    text = "package mysk-antenna-utils is unrelated"
+
+    assert module._redact_provider_output(text) == text
+
+
+def test_provider_output_redactor_removes_an_overlong_google_key_entirely():
+    """固定長で切ると、規格より長い値の末尾が残る。"""
+    module = _load_mission_state_module("mission_state_overlong_google_key")
+    overlong = "AIza" + "H" * 40
+
+    redacted = module._redact_provider_output(f"key={overlong}")
+
+    assert "H" not in redacted
+
+
+@pytest.mark.parametrize(
+    "benign",
+    [
+        "score 4.31 で pass",
+        "commit 3d3c42e5aac5ba805825da76410c181273ba90b1 を検証",
+        "docs/VERSIONING.md を更新",
+        "mission-state.py advance --to reviewing",
+        "sk not a key",
+    ],
+)
+def test_provider_output_redactor_keeps_benign_text_intact(benign):
+    """過剰 redaction は証跡を壊す。通常の実行ログは素通しでなければならない。"""
+    module = _load_mission_state_module("mission_state_benign_redactor")
+
+    assert module._redact_provider_output(benign) == benign
+
+
 def test_log_invocation_rolls_back_staged_archive_when_state_publish_fails(
     state_dir, tmp_path, monkeypatch
 ):
