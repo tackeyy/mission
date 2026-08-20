@@ -110,11 +110,18 @@ performs the path redaction. `test_artifact_hygiene.py` enforces, across every
 tracked file, that no real account name appears in a home path and that no
 personal memory store output is pinned into an artifact.
 
-Note what these guards do **not** cover: the names of other repositories.
-`test_vendor_fingerprint.py` targets vendor terminology, and its
-`_ALLOWED_COMPOUND_HASHES` deliberately admits project names that merely contain
-a banned vendor token. Private repository names therefore pass unflagged, and
-must be caught by review.
+Three guards cover three distinct axes, and each is easy to mistake for the
+others. Confirm all three still run, and that a new generated-content directory
+is inside their scope:
+
+| Guard | Axis |
+|---|---|
+| `test_artifact_hygiene.py` | home paths carrying a real account name; personal memory store output |
+| `test_vendor_fingerprint.py` | vendor terminology |
+| `test_private_project_names.py` | names of other (private) repositories |
+
+All three read `git ls-files`, so they assert only that **`HEAD` is clean**. They
+say nothing about blobs still reachable in history — see section B.
 
 ## E. Generated artifacts committed to the repository
 

@@ -111,11 +111,18 @@ Issue を delete するか GitHub Support に編集履歴の purge を依頼し�
 全体に対して、実在アカウント名を含む home path がないこと、個人 memory store の
 出力が artifact に固定されていないことを強制する。
 
-これらのガードが**カバーしない**範囲に注意する。他リポジトリの名称は対象外である。
-`test_vendor_fingerprint.py` はベンダー用語を対象としており、その
-`_ALLOWED_COMPOUND_HASHES` は「禁止ベンダー語を部分に含むだけの自プロジェクト名」を
-意図的に通す。したがってプライベート repository 名は検出されず、レビューで拾う必要が
-ある。
+3 つのガードが 3 つの異なる軸を担当しており、互いに取り違えやすい。3 つとも動作して
+いること、生成物を受け取るディレクトリを新設した場合はその配下も対象になっていることを
+確認する。
+
+| ガード | 軸 |
+|---|---|
+| `test_artifact_hygiene.py` | 実在アカウント名を含む home path・個人 memory store 出力 |
+| `test_vendor_fingerprint.py` | ベンダー用語 |
+| `test_private_project_names.py` | 他の（非公開）repository 名 |
+
+3 つとも `git ls-files` を読むため、保証するのは **`HEAD` がクリーンであること**だけ
+である。履歴に残る blob については何も言わない（B 節を参照）。
 
 ## E. リポジトリにコミットする生成物
 
