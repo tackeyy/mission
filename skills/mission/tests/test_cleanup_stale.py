@@ -122,7 +122,7 @@ def test_halt_all_sets_phase_halted(tmp_path, run_cli, monkeypatch):
 def test_update_project_root_updates_state(tmp_path, run_cli):
     """P2-1(a): update-project-root --path <new> が exit0 で state.project_root を更新する.
 
-    実例 cc-48c91727: project_root=/dev/ccbattle が存在せず orphan 判定され続けた
+    実例 cc-48c91727: project_root=/dev/project-c が存在せず orphan 判定され続けた
     → update-project-root で正しいパスに更新すれば rescue できる。
     """
     import json
@@ -137,7 +137,7 @@ def test_update_project_root_updates_state(tmp_path, run_cli):
 def test_cleanup_stale_detects_nonexistent_project_root(tmp_path, run_cli):
     """P2-1(b): project_root が存在しないパスの loop_active=true state を would_halt に含める.
 
-    実例 cc-48c91727: project_root=/dev/ccbattle 不存在 → pid チェックだけでは取りこぼす。
+    実例 cc-48c91727: project_root=/dev/project-c 不存在 → pid チェックだけでは取りこぼす。
     MISSION_FORCE_PID_IS_AGENT=1 で _pid_is_agent=True を強制固定し、
     「alive agent であっても project_root 不存在なら孤児扱い」の実装を真に検証する。
     (旧実装は pid=os.getpid() かつ agent CLI でないことで偶然 would_halt に入っていたが、

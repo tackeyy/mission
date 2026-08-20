@@ -33,6 +33,10 @@ publish a security advisory or release note after the issue is resolved.
 
 ## Scope
 
+Maintainers audit this repository against
+[docs/SECURITY_REVIEW_CHECKLIST.md](docs/SECURITY_REVIEW_CHECKLIST.md) before each
+distribution release and quarterly.
+
 Security-sensitive areas include:
 
 - Stop hook command execution

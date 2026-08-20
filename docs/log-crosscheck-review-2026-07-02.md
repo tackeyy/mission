@@ -28,7 +28,7 @@
 1. **品質ループはほぼ「1周の儀式」になっている** — iteration≥2 到達は精読 100 sessions 中 10 件（10%）。全 220 スコアエントリの 96.8% が閾値 4.0 以上、71.4% が 4.4〜4.7 に密集。改善ループが起動するのは初回スコア 3.9 以下の場合のみ（実績 2.7%）。
 2. **レビュー本文なしの自動生成スコアの方が高い** — `generated=true`（push-score フォールバック生成、本文なし）22 件の平均 4.54 > 本文ありの 4.41。エビデンスとスコアが逆相関気味という、自己採点インフレの直接証拠。
 3. **specialist pipeline は名目化** — 呼び出し記録 192 件中 74% が `skipped`、100 sessions 中 82 件で `specialists_selected=[]`。最多 mode は `fallback-core`（93 件）＝orchestrator 自身が review を兼務。Maker-Checker の独立性が実態として存在しない。
-4. **state 書き込みに 2 ルートが並存** — CLI 経由（archive に session_id 付き正規配置）と LLM 直書き（`.mission-state/` ルートに散乱、命名 3 系統、session_id 紐付けなし）。散乱ファイルは 3 プロジェクトで 42 件 + social-foundry で 34 件。
+4. **state 書き込みに 2 ルートが並存** — CLI 経由（archive に session_id 付き正規配置）と LLM 直書き（`.mission-state/` ルートに散乱、命名 3 系統、session_id 紐付けなし）。散乱ファイルは 3 プロジェクトで 42 件 + project-d で 34 件。
 5. **実行の 84% は Codex**（codex 357 / claude-code 67 / unknown 2）なのに、ループ強制の要である Stop hook は Claude Code 前提。
 6. **修正 → ガード追加 → それでも漏れる、のループが監査自体を肥大させている** — audit.json のトップレベルキーは 80 超、finding タイプ 12 種。cutoff 6/28 以降（#78〜#101 適用後）でも candidate-only 11 件、selection checkpoint 欠落継続、low-score-pass 20 件、slow 21 件が新規発生。
 
@@ -46,7 +46,7 @@
 
 ### L-2. iteration 意味論の崩壊（High）
 
-- social-foundry Epic #463: 5 iterations でスコアが 4.44→4.38→4.28→4.30→4.22 と**微減しながら** pass。iteration が「品質改善のリトライ」ではなく「子 issue の進捗カウンタ」として流用されている。
+- project-d Epic #463: 5 iterations でスコアが 4.44→4.38→4.28→4.30→4.22 と**微減しながら** pass。iteration が「品質改善のリトライ」ではなく「子 issue の進捗カウンタ」として流用されている。
 - この流用が起きると score_history・stagnation・early-stop の全セマンティクスが壊れるが、現行スキーマはこれを表現も禁止もできない。
 
 ### L-3. specialist accounting の「会計は揃ったが実態がない」問題（High）
@@ -57,13 +57,13 @@
 ### L-4. 成果物書き込みの二重ルート（Med-High）
 
 - 正規ルート: `push-score --scoring-output` → `archive/iter-N-<mid8>-scoring.md`（`<!-- mission-meta: session_id=... -->` ヘッダー付き）。
-- 非正規ルート: LLM が `.mission-state/` ルートへ直接 Write。42 件（mission 7 / navibot 11 / workspace 24）+ social-foundry 34 件（issue-comment-*.md 20 件、issue-bodies/ 等）。命名は `iter-1-<slug>-scoring.md` / `mission-scorer-iter-1-<slug>.md` 等 3 系統が乱立し、session_id 紐付けなし。同一内容が root と archive に重複する例もある（workspace `iter-1-06251ffb-scoring.md`）。
+- 非正規ルート: LLM が `.mission-state/` ルートへ直接 Write。42 件（mission 7 / project-b 11 / workspace 24）+ project-d 34 件（issue-comment-*.md 20 件、issue-bodies/ 等）。命名は `iter-1-<slug>-scoring.md` / `mission-scorer-iter-1-<slug>.md` 等 3 系統が乱立し、session_id 紐付けなし。同一内容が root と archive に重複する例もある（workspace `iter-1-06251ffb-scoring.md`）。
 - `.mission-state/` が「gitに出ない便利なスクラッチパッド」として学習されており、**state ディレクトリの意味論（監査可能な実行記録）が侵食**されている。audit/stats はルート散乱ファイルを一切拾わない。
 - `aggregate.json` は 3 プロジェクトとも `{"active_sessions": [], "updated_at": ...}` のみの空骸で、設計意図（集計）を果たしていない。
 
 ### L-5. project identity の断片化（Med-High）
 
-- audit の by_project に `followers-x-profile-links`、`thread-mode-ux`（実体は social-foundry の `.worktrees/` 配下）や `ecstatic-chebyshev-b577df`（自動生成 worktree 名）が独立プロジェクトとして多数並ぶ。
+- audit の by_project に `followers-x-profile-links`、`thread-mode-ux`（実体は project-d の `.worktrees/` 配下）や `ecstatic-chebyshev-b577df`（自動生成 worktree 名）が独立プロジェクトとして多数並ぶ。
 - 1 worktree = 1 project 扱いのため、(a) プロジェクト横断の集計が断片化、(b) cross-session の重複検出（ADR-002 の issue_ref が狙う機能）が worktree を跨ぐと成立しない、(c) worktree 削除で state ごと消える既知問題（P3-2）と併せ、**「mission の識別子体系に canonical project の概念がない」**ことが根因。
 
 ### L-6. スキーマバージョンの形骸化（Med）
@@ -80,7 +80,7 @@
 
 ### L-8. 複雑度に対する儀式コストの逆転（Med）
 
-- zeimu-ai: `git rebase && push` 相当の作業（4 分）に planning/review/scoring の全儀式 + スコア 4.95。wedgeai 投稿分析（6 分）: reviewer 3 名招集、specialist 3 名全 skip。
+- project-g: `git rebase && push` 相当の作業（4 分）に planning/review/scoring の全儀式 + スコア 4.95。project-f 投稿分析（6 分）: reviewer 3 名招集、specialist 3 名全 skip。
 - Simple 複雑度で reviewer_count=1 への縮小は効いているが、**「mission を使わない」という選択肢がフローに存在しない**。median 548s vs mean 2789s のロングテール分布は、軽タスクへの過剰適用と重タスクの混在を示す。
 
 ### L-9. Codex 主戦場とガード設計の乖離（High）
