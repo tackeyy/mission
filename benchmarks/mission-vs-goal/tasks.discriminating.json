@@ -439,14 +439,16 @@
           "name": "Violation REQ-02: approver role expired",
           "match_type": "regex",
           "patterns": [
-            "req-02.{0,100}(violat|expir|ilyes.{0,30}(expir|invalid|no.{0,10}longer))"
+            "req-02.{0,140}(violat|expir|no longer valid|invalid)",
+            "(approver|roster).{0,140}(expir|no longer valid|invalid).{0,80}req-02"
           ]
         },
         {
           "name": "REQ-02 roster evidence: validity ended 2026-05-31",
           "match_type": "regex",
           "patterns": [
-            "ilyes.{0,100}2026-05-31|2026-05-31.{0,100}(req-02|ilyes|expir|violat)"
+            "(req-02|approver|roster|ilyes).{0,140}2026-05-31",
+            "2026-05-31.{0,140}(req-02|approver|roster|ilyes|expir|violat)"
           ]
         },
         {
@@ -467,7 +469,8 @@
           "name": "Retroactivity clause citation 4.3",
           "match_type": "regex",
           "patterns": [
-            "section.{0,10}4\\.3.{0,100}(req-06|cited|violation|retro)|4\\.3.{0,50}(cit|cited.{0,10}for|applies.to)"
+            "4\\.3.{0,160}(req-06|retroact|violat|forbidden)",
+            "(req-06|retroact|violat).{0,160}4\\.3"
           ]
         },
         {

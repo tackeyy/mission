@@ -292,3 +292,44 @@ class TestCohortMarkersUseRegex:
             "Markers without match_type='regex' found in fixture tasks:\n"
             + "\n".join(non_regex)
         )
+
+
+# ---------------------------------------------------------------------------
+# 単一 marker の破損・過学習を検出する (レビュー指摘 FINDING 6)
+# ---------------------------------------------------------------------------
+
+def test_every_marker_matches_at_least_one_known_good_artifact():
+    """**marker 単位**で、実 artifact のどれか 1 つには一致すること。
+
+    タスク単位の floor (score >= 0.6) は、marker が複数あると
+    1 本壊れていても他が埋め合わせて素通りする。実際に #557 で繰り返された
+    欠陥は「個別パターンの過学習」であり、タスク単位の閾値では検出できない。
+
+    どの正解 artifact にも一致しない marker は、
+    (a) パターンが壊れている、(b) 誰も達成できない要求をしている、
+    のいずれかであり、どちらも測定として無効なので落とす。
+    """
+    runner = _load_runner()
+    tasks = {t["id"]: t for t, _ in _load_cohort_tasks()}
+    cells = _discover_artifact_cells(list(tasks))
+    assert cells, "expected artifact cells to be discovered"
+
+    hit = {}
+    for _run, tid, _arm, path in cells:
+        task = tasks[tid]
+        text = runner.strip_form(path.read_text(encoding="utf-8", errors="ignore"))
+        result = runner.evaluate_quality_markers(text, task)
+        for name in result["quality_markers_matched"]:
+            hit.setdefault(tid, set()).add(name)
+
+    orphans = []
+    covered_tasks = {tid for _r, tid, _a, _p in cells}
+    for tid in sorted(covered_tasks):
+        for marker in tasks[tid]["quality_markers"]:
+            if marker["name"] not in hit.get(tid, set()):
+                orphans.append(f"{tid} / {marker['name']}: patterns={marker['patterns']}")
+
+    assert not orphans, (
+        "どの正解 artifact にも一致しない marker がある "
+        "(パターン破損または過学習の疑い):\n" + "\n".join(orphans)
+    )
