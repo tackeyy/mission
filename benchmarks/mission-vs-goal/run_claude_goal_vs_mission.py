@@ -1388,6 +1388,13 @@ def summarize(
         Method: rank = ceil(p/100 * n), clamped to [1, n]. For n=1 the single
         value is returned for any p. Empty list returns None.
         This avoids the n>=2 requirement of statistics.quantiles.
+
+        Nearest-rank returns an observed value, never an interpolated one.
+        Consequence for n=2: p50 is the LOWER observation (ceil(0.5*2)=1), not
+        the midpoint. Runs with statistical_confidence="low" therefore carry a
+        downward-biased p50 by construction; read p50 there as the first order
+        statistic, not as a median. Interpolation is deliberately avoided so
+        every reported percentile corresponds to a real observation.
         """
         if not vals:
             return None
@@ -1673,6 +1680,11 @@ def summarize(
                 "cost_usd_stdev": _stdev(_cost_values(items)),
                 "marker_score_p50": _percentile(
                     [r["quality_marker_score"] for r in _scored(items)], 50
+                ),
+                # 品質の裾は p50 より p90 の方が診断的 (両 arm の中央値が並んでも
+                # 裾が違えば差が出る)。
+                "marker_score_p90": _percentile(
+                    [r["quality_marker_score"] for r in _scored(items)], 90
                 ),
                 "marker_score_stdev": _stdev(
                     [r["quality_marker_score"] for r in _scored(items)]

@@ -406,3 +406,37 @@ def test_real_data_tail_v280_r2_single_sample():
     warnings = MODULE.summary_warnings(summary)
     text = "\n".join(warnings)
     assert "single-sample" in text, f"Expected n=1 warning, got: {warnings}"
+
+
+# ---------------------------------------------------------------------------
+# レビュー指摘 (Fable 5): p90 の欠落と n=2 の nearest-rank 挙動
+# ---------------------------------------------------------------------------
+
+def test_marker_score_p90_is_reported():
+    """品質の裾は p50 より p90 の方が診断的なので必ず出す。"""
+    records = [
+        _record("mission", marker=0.2, task_id="t1"),
+        _record("mission", marker=0.9, task_id="t2"),
+        _record("mission", marker=1.0, task_id="t3"),
+        _record("claude_code_goal_command", marker=0.5, task_id="t1"),
+    ]
+    summary = _summarize(records)
+    arm = summary["arms"]["mission"]
+    assert arm["marker_score_p50"] == 0.9
+    assert arm["marker_score_p90"] == 1.0
+
+
+def test_nearest_rank_p50_with_two_samples_is_the_lower_observation():
+    """n=2 の p50 は中点ではなく下側の実測値になる (nearest-rank の帰結)。
+
+    補間しない方針なので、報告される percentile は必ず実測値に対応する。
+    statistical_confidence="low" の run で p50 を中央値として読むと
+    下方バイアスがかかるため、挙動をテストで固定して文書化と整合させる。
+    """
+    records = [
+        _record("mission", marker=0.4, task_id="t1"),
+        _record("mission", marker=0.8, task_id="t1"),
+    ]
+    summary = _summarize(records)
+    assert summary["arms"]["mission"]["marker_score_p50"] == 0.4
+    assert summary["statistical_confidence"] == "low"
