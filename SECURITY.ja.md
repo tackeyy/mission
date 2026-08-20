@@ -30,6 +30,11 @@ maintainer が報告を triage し、必要に応じて修正を準備します�
 
 ## 対象領域
 
+メンテナは distribution release 前と四半期ごとに
+[docs/SECURITY_REVIEW_CHECKLIST.ja.md](docs/SECURITY_REVIEW_CHECKLIST.ja.md)
+に沿って本リポジトリを監査する。
+
+
 security-sensitive な領域:
 
 - Stop hook の command execution
