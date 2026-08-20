@@ -1,151 +1,226 @@
-# mission — 自律ミッション達成オーケストレータ
+# mission
 
 <p align="center">
-  <img src="docs/assets/hero.png" alt="mission — 品質ゲート付き自律ミッションループ" width="760">
+  <img src="docs/assets/hero.png" alt="mission — quality-gated autonomous mission loop" width="760">
 </p>
-
 
 [English](README.md) | **日本語**
 
-`mission` は、Claude Code / Codex 向けの OSS loop engineering プラグインです。
-計画、`mission-review/1` のレビュー証跡、集計済みスコア、state gate が「本当に完了した」と判断するまで、agentic work を進め続けます。
+`mission` は Claude Code と Codex 向けの OSS ループエンジニアリングプラグインである。
+記録された計画・レビュー証拠・集計スコア・state ゲートが「本当に完了した」と示すまで、
+エージェントの作業を継続させる。
 
-計画、実行、`mission-review/1` レビュー出力の収集、`push-score --scoring-json` への集計を合格閾値に達するまで反復し、Stop hook が早期終了を抑止します。
+> プロンプトエンジニアリングはエージェントに何をするかを伝える。
+> ループエンジニアリングはエージェントが本当に終わるまでどう働き続けるかを定義する。
 
-> Prompt engineering は「AI に何を頼むか」。
-> Loop engineering は「AI が完了まで進み続ける仕組みをどう設計するか」。
+**解決するのは「早すぎる完了宣言」であって、より良いプロンプトの書き方ではない。**
 
-`mission` が解く問いは「どんな prompt を書くか」ではなく、
-**AI が品質ゲートを通る前に成功宣言して止まるのをどう防ぐか**です。
+---
 
-## Loop Engineering
+## `mission` を使う場面
 
-`mission` は、複数ステップの agent work を品質ゲート付きで回す loop です。
+- 単発のパスが「一見終わっているもの」を出しうる複数ステップの作業。網羅の黙殺、
+  明細と一致しない要約、本文で約束したのに書かれていない節、など。
+- 人間の承認なしに実行してはならない不可逆な本番操作。
+- セッションやコンテキストのリセットをまたぐ作業で、再開可能かつ監査可能な state が要るもの。
+- **なぜ停止してよいかの証拠**自体が成果物の一部である環境。
+
+## `mission` を使うべきでない場面
+
+- **平均的な品質向上を期待している場合。** 品質優位は実証されていない。実測コストは
+  goal ベースラインに対し **時間 5.4 倍・想定支出 4.9 倍**。ゲートを素通りする 95% に
+  似た作業なら、単発の丁寧な 1 パスが同じ成果物をより速く出す。
+- **タスクが単純で自己完結している場合。** `mission` 自身がそうした作業をホストの
+  goal 契約へルーティングし、mission state すら作らない。
+- **PR レビュー bot・開発方法論・プロンプト再実行ループが欲しい場合。**
+  それらは他ツールの方が適している（[代替](#代替) を参照）。
+
+---
+
+## 動作原理
 
 ```text
-plan -> execute -> review -> aggregate score -> iterate
+plan -> execute -> verify -> review -> aggregate score -> iterate
 ```
 
-recurring agent system、workflow、skills、plugins、sub-agent が実務の leverage になり始める一方で、
-loop には「いつ止まってよいか」を決める仕組みが必要です。`mission` は `.mission-state`、
-reviewer JSON、`aggregate-reviews`、findings evidence、threshold-based pass/fail state で、その完了ゲートを提供します。
+計画を記録し、実行し、**実行された検証結果**を記録し、構造化レビュー出力
+（`mission-review/1`）を収集し、`aggregate-reviews` で 4 軸スコアへ集計し、
+`push-score --scoring-json` で記録し、`mark-passes` が state を受理するか
+halt 条件が発火するまで繰り返す。
+Stop hook は、アクティブなミッションがゲート未達の間セッションの終了を阻止する。
 
-public launch positioning、GitHub topics、`/goal` / `ralph-loop` / Superpowers との比較は
-[`docs/LOOP_ENGINEERING.md`](docs/LOOP_ENGINEERING.md) を参照してください。
+pass ゲートは明示的である。
 
-`mission` と goal-only baseline をマーケティング利用してよい粒度で比較する
-10 タスク pilot protocol は
-[`benchmarks/mission-vs-goal/README.ja.md`](benchmarks/mission-vs-goal/README.ja.md)
-を参照してください。
+```text
+passes = findings_evidence_path exists
+  AND evidence_high_count == open_high
+  AND max_agreement_delta <= 1.5
+  AND composite_score >= threshold
+  AND min(scored_items) >= 3.5
+  AND open_high == 0
+```
 
-レビューゲートが実際に何を捕まえたか（そしてどこでは単なるコストか）の
-匿名化済み本番ケーススタディは
-[`docs/CASE_STUDIES.ja.md`](docs/CASE_STUDIES.ja.md) を参照してください。
+単純・低リスクかつ `--issue-ref` を伴わない作業では、`init` がホストの goal 契約への
+ルーティング判定を返し、state を作らない。複雑度・リスクシグナル・`--issue-ref` が
+これを決め、`--force-mission` で上書きできる。
 
-local-first artifact contract と CLI は
-[`docs/MISSION_ARTIFACTS.ja.md`](docs/MISSION_ARTIFACTS.ja.md)
-を参照してください。artifact support は local Markdown artifact と明示 opt-in の publish evidence として実装されています。
+---
 
-## 特徴
+## 証拠が示すこと
 
-- メインオーケストレータ: `skills/mission`
-- 5 つのサブスキル: planner / executor / reviewer / critic / scorer
-- `.mission-state` セッションを扱う state 管理 CLI
-- reviewer JSON から4軸の採点 payload を決定論的に作る `aggregate-reviews` と、High finding evidence / 独立した review agreement の合格ゲート。明示的な手動採点は typed かつ content-addressed な capture 経路を使う
-- pre-gate の評価キャッシュ: `pregate record` / `pregate check` で同じ Issue と subject digest の再評価を省き、記録済み evidence を再利用する
-- evidence handoff: `handoff publish` / `handoff await` / `handoff verify` でセッション間に証跡を受け渡し、場当たり的なファイル共有に頼らない
-- merge queue: `queue enqueue` / `queue status` / `queue next` / `queue verify` / `queue mark` で、同じ state root 上の並列 mission が不一致 base のまま merge するのを防ぐ
-- lane report と SLO 判定: `lane-report --slo-minutes` で経過時間を SLO と突き合わせ、待機種別ごとの内訳を出す
-- failure ledger と learning brief: reviewer の `general_fix_rule` を蓄積し、`learning brief` で反復回数の多い項目を planner / executor に注入する。ただし reviewer には注入せず、採点の独立性を保つ
-- 反復回復の統計: `stats` / audit の `iteration_recovery` で、gate reject 後の初回→最終スコア差、反復回数、修正完了率を集計する
-- 実装委譲（任意）: registry に implementation provider があれば、実装ステップの diff 生成を headless coding agent に委譲できる。検証・レビュー・pass 判定は core が保持する（[設計](skills/mission/refs/implementation-delegation.md)）
-- completion evidence を監査可能にする local-first mission artifact CLI（[契約](docs/MISSION_ARTIFACTS.ja.md)）
-- Claude Code / Codex の複数セッション分離
-- compaction/resume 復帰順序を統合する `mission-state.py resume`
-- 未達ミッションの早期終了を防ぐ Stop hook
-- ドメイン別 evidence provider を選ぶ任意 specialist registry と beginner presets（[設計](skills/mission/refs/specialist-registry.md)）
-- state routing、review aggregation、scoring gate、artifact gate、hook 挙動を検証する Python テスト
+このセクションは **あなたが再現できるもの** と **メンテナ自身のリポジトリでの運用証拠** を
+分けて示す。限界も併記する。
 
-## 競合ポジショニング
+### 再現可能: goal ベースラインとのペア比較ベンチマーク
 
-`mission` は **品質ゲート付きの自律ミッション達成オーケストレータ** として位置づけます。
-完全なソフトウェア開発方法論、PR レビュー bot、単純な prompt replay loop を目指すものではありません。
-中核価値はより狭く、複数ステップのミッションについて、state、レビュー、スコアリングのゲートが
-「止まってよい」と判断するまで進め続けることです。
+手順と生データ: [`benchmarks/mission-vs-goal/README.ja.md`](benchmarks/mission-vs-goal/README.ja.md)
 
-調査時点: 2026-06-15。調査対象は、ローカルの Claude Code official marketplace cache、
-ローカルの Codex `openai-curated` plugin cache、Anthropic
-[`claude-plugins-official`](https://github.com/anthropics/claude-plugins-official)
-repository、[Claude Code `/goal` docs](https://code.claude.com/docs/ja/goal)、
-[OpenAI Codex plugin docs](https://developers.openai.com/codex/plugins/build)、
-公開 competitor README です。
+| 測定 | 結果 | 読み方 |
+|---|---|---|
+| 完了率 | goal 94.5% / mission 96.6% | ほぼ同等。優位性を主張できる N ではない |
+| 完了宣言したが validator 未達 | 0/120 goal, 0/114 mission | **ベースラインが失敗し `mission` が救った事例は記録上ゼロ** |
+| 実時間 | mission **5.4 倍** | 実コスト。クリーン条件での測定 |
+| 想定支出 | mission **4.9 倍** | 相対比較のみ。サブスクリプション実行では従量課金は発生せず、消費するのはプランのレート制限 |
+| 2 回目の反復が起きた割合 | mission run の 5.6% | レビューループが成果物を変えるのは少数の run に限られる |
+| 品質 | **有効に測定できていない** | 下記参照 |
 
-| Product / plugin | Surface | 関係 | 重なる領域 | `mission` との差分 |
-|---|---|---|---|---|
-| [`/goal`](https://code.claude.com/docs/ja/goal) | Claude Code | 公式の最重要直接競合 | completion condition を設定し、各ターン後に評価して条件達成まで継続 | `/goal` はセッションスコープの軽量な継続条件で、評価器は会話上に示された証拠を見て達成可否を判断します。`mission` は複数サブスキル、永続 `.mission-state`、score history、review/critic loop、threshold gate を持つ、より構造化されたミッション完遂 layer です。 |
-| [`ralph-loop`](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/ralph-loop) | Claude Code | Claude Code 上の最も近い直接競合 | Stop hook で完了まで iteration を継続 | `ralph-loop` は prompt を completion promise または max iteration まで再投入します。`mission` は計画、実行、ピアレビュー、スコアリング、critic feedback、永続 session state、threshold gate で完了判断します。 |
-| [`Superpowers`](https://github.com/obra/superpowers) | Claude Code, Codex, other agents | cross-agent の最有力競合 | planning、TDD、debugging、review、delivery workflow | Superpowers は広い開発方法論です。`mission` は docs、research、release prep、feature 以外の作業も含む任意ミッションの完遂 loop に絞り、明示的な scoring と state gate を持ちます。 |
-| [`feature-dev`](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/feature-dev) | Claude Code | 隣接 workflow 競合 | discovery、architecture、implementation、quality review | feature-dev は新機能開発に最適化されています。`mission` は feature development 形状に限定せず、任意の project outcome を扱います。 |
-| [`code-review`](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/code-review) / `pr-review-toolkit` | Claude Code | 隣接 quality 競合 | multi-agent review、confidence scoring、test / quality review | これらは PR や code change のレビューが主目的です。`mission` は review を 1 phase として使い、その後の修正と再採点まで loop します。 |
-| `github`, `coderabbit`, `circleci`, `codex-security`, `plugin-eval` | Codex | 専門領域の隣接 plugin | PR、review、CI、security、plugin evaluation | `mission` の中で使える下流 tool です。top-level の mission state machine、iteration ごとの score history、Stop hook completion guard は提供しません。 |
+**品質について正直な記述は「同点」ではなく「測れていない」である。**
+ベンチマークの品質 marker 採点は構造的に壊れている。正しい語を並べただけの文字列が
+満点 1.00 を取り、正しい言い換えは — そして日本語で書かれた正解は — 0 点になる。
+3 つの独立レビューが、正規表現の共起では推論の有無を測れないと結論した。
+**現在の marker スコアを、どちらの方向にも証拠として引用してはならない。**
+置き換えはリポジトリの open issue で追跡している。
 
-意図する打ち出しは以下です。
+### 運用: 本番 451 ミッション
 
-- **`ralph-loop` と比べて**: prompt 再投入ループに plan / 実行 / レビュー / 採点を加えて構造化している
-- **Claude `/goal` と比べて**: 公式の軽量 completion condition より重いが、state、レビュー、採点、改善 loop を含む
-- **Superpowers と比べて**: 完全な開発方法論より狭く軽量
-- **review / CI plugin と比べて**: review、test、release を phase として呼び出し、ミッション全体の完了可否を判断する orchestrator
+匿名化した事例: [`docs/CASE_STUDIES.md`](docs/CASE_STUDIES.md)
+**これらはメンテナの非公開リポジトリ由来であり、本リポジトリから再現できない。**
+その限界を明示した上で開示している。
 
-`mission` が最も向いているのは、**早く止まりすぎることが主なリスク** の作業です。
-曖昧な複数ステップ作業、iteration 間の品質劣化、compaction/resume をまたぐ作業、
-あるいは agent が「なぜ今止まってよいのか」を監査可能に説明する必要がある作業に使います。
+| 測定 | 値 | 読み方 |
+|---|---:|---|
+| iteration 1 でゲート通過 | 427 / 451 (95%) | 大半の作業でループは素通り。レビューコストだけかかり何も変わらない |
+| iteration 1 でゲート未達 | 24 (5%) | ゲートが刺さるテール |
+| 複数 iteration のミッション | 44 | |
+| — composite が改善 | 27 | 例: 2.80 → 4.20、0.96 → 4.80 |
+| — composite が不変 | 15 | **正直な負の結果**: コストだけかかり測定可能な改善なし |
+| 人間承認のため halt | 7 | 本番 DB マイグレーション、セキュリティ監査の公開、本番 API 上限変更 |
 
-| 選ぶもの | 向いている場面 |
+**平均より分布が重要である。** ゲートは平均を押し上げることではなく、少数のテールで
+コストに見合う。
+
+### 本プロジェクトが主張しないこと
+
+- `mission` が平均的により高品質な成果物を作ること
+- goal ベースラインでは完遂できない作業を `mission` が完遂できること。該当する記録は存在しない
+- 5% というテール率があなたのワークロードにも当てはまること
+- 現在のベンチマーク品質数値に意味があること
+
+これらは、差を実際に検出できる採点方式に対して事前登録した基準を満たした場合にのみ主張する。
+
+### コスト制御
+
+素通りする 95% のレビュー負荷を下げるため、`mission` は init 時に complexity と
+ミッション記述から `review_tier`（light / standard / full）を導出する。light tier は
+reviewer を 3 名ではなく 1 名にし、specialist を `required: true` のものへ限定する。
+**ゲート意味論（threshold・open High findings・agreement delta・halt 条件）は
+tier によらず不変である。**
+コスト削減の効果は本番ではまだ計測されていません。
+
+### 検証済み事項
+
+各主張の鮮度が読み手に分かるよう、日付付きのスナップショットで示す。
+
+- 2026-08-14: 3244 passed — その時点でのフルスイート。現在の件数は `make test` で確認する
+- Artifact support は明示的な opt-in の公開証跡を伴うローカル Markdown artifact として
+  実装されている（[`docs/MISSION_ARTIFACTS.ja.md`](docs/MISSION_ARTIFACTS.ja.md)）
+
+---
+
+## セキュリティ
+
+### 実装済み
+
+- **fail-closed な Stop hook** — アクティブなミッションがゲート未達の間セッションを終了できない
+- **TTL 付き lease / fencing** — 変更系コマンドは有効な lease を要求し、古い書き込みと並行書き込みを拒否する
+- **不可逆操作の halt ゲート** — 不可逆操作は人間の明示承認まで halt する。理由は verbatim で state に記録される
+- **typed force-pass 承認** — ゲートの迂回には typed かつ content-addressed な承認が必要。レビュー集計証拠を force-pass の根拠に流用できない
+- **provenance binding** — レビュー証拠とスコアは sha256 で content-addressed され、スコアを別の証拠へ差し替えられない
+- **監査証跡** — `scripts/mission-audit.py` が force-pass・specialist provenance・lease のリスクを記録済み state 全体から分類する（JSON / Markdown）
+- **permission preflight** — 必要権限を init 時に検査し、作業開始前に報告する
+
+### 既知のギャップ
+
+以下は開いているギャップであり、予定された機能ではない。重要なワークフローへ採用する前に
+評価すること。[`SECURITY.md`](SECURITY.md) も参照。
+
+- **アーカイブされたレビュー JSON に改ざん検知の署名がない。** provenance binding は
+  証拠とスコアの結び付きを守るが、アーカイブ後のファイルシステムレベルの改ざんは検出できない
+- **外部 specialist provider の identity binding がない。** 呼び出しは記録されるが、
+  実行した provider の identity が出力へ暗号学的に束縛されていない
+- **blast-radius の制限がない。** ミッションが変更できるファイル数や書き込めるパスに
+  強制的な上限がない
+- **reviewer に検証の実行義務がない。** 検証ツールは reviewer に与えられているが、
+  読むだけのレビューも成立する。実行された検証結果は別途記録されるようになったので、
+  この点は測定できる
+
+### 安全側への倒れ方
+
+| 条件 | 挙動 |
 |---|---|
-| `mission` | 複数ステップの outcome に監査可能な completion gate が必要。特に iteration、compaction、research/docs/code 混在作業をまたぐ場合。 |
-| Claude Code `/goal` | Claude Code 標準機能として、単一セッション内で検証可能な終了条件まで軽量に走らせたい場合。 |
-| `ralph-loop` | Claude Code で、prompt を literal な completion promise が出るまで再投入する loop がほしい場合。 |
-| `Superpowers` | brainstorming、planning、TDD、debugging、review、branch delivery まで含む広い coding-agent 方法論がほしい場合。 |
-| review / CI / security plugin | workflow の一部分だけを専門的に検査し、全体の完了判断は別の orchestrator または人間が行う場合。 |
+| lease が古い / 期限切れ | 変更系コマンドを拒否し、state を書かない |
+| 採点証拠の欠落 | `push-score` が提出を拒否する |
+| ゲート未達のスコア | Stop hook がセッション終了を阻止し、ループを継続する |
+| 不可逆操作の検出 | halt が発火し理由を記録。人間が再開するまで作業は未完了のまま |
+| goal-dispatch 設定が不明 | ルーティングゲートを変えずに inline へ fail-safe |
+| local-authoring sync 時にオフライン / remote 不在 | 古い内容へ fallback せず、ローカル作業も書き換えずに停止する |
+| typed 承認なしの force-pass | 拒否する |
 
-### 実測エビデンスが示すこと
+---
 
-- これまでに完了した全ての paired run で、公式 `/goal` と `mission` は completion / validator / marker 指標で同点でした。最新のクリーン測定（2026-07-23 discriminating cohort、N=5、permission-mode 汚染ガード検証済み、両 arm 同一モデル）では `mission` は wall-clock で約 5.4 倍、名目 API 費用で約 4.9 倍です（planted-defect tail cohort 2026-07-07 では 5.8 倍 / 7.4 倍）。自己完結型のタスクで平均品質の向上を期待して `mission` を採用しないでください。詳細は [`benchmarks/mission-vs-goal/report.ja.md`](benchmarks/mission-vs-goal/report.ja.md)。
-- 451 件の scored 本番ミッションでは、95% が iteration 1 のまま品質ゲートを通過しました。計測された価値は、ゲートが反復を強制した約 5% のテール（初回の事実誤認・実行時 UI バグ・緑のツールチェーンが見逃したセキュリティ関連ギャップ）と、不可逆な本番操作を承認待ちで停止した 7 件の halt に集中しています。詳細は [`docs/CASE_STUDIES.ja.md`](docs/CASE_STUDIES.ja.md)。
+## 証拠の再現手順
 
-95% のパススルー多数のレビューオーバーヘッドを削減するため、`mission` は init 時に complexity とミッション記述から `review_tier`（light/standard/full）を導出します。light tier は reviewer を 3 名から 1 名に絞り、specialist の auto-select を `required: true` のみに限定します。ゲート意味論（threshold・open High findings・agreement delta・halt 条件）は tier によらず不変です。コスト削減効果は本番環境ではまだ計測されていません。
+以下はすべてリポジトリルートで実行する。
 
-Simple task の adaptive routing は portable な inline 完遂を既定とし、`--goal-dispatch host-native` または version 1 の `.mission/routing.yml` で現在ホストの native goal guidance を選択できます。host 不明・設定不正時は routing gate を変えず inline へ fail-safe します。詳細は [goal dispatch provider 設計](skills/mission/refs/goal-dispatch-provider.md) を参照してください。
+```bash
+# 1. CI と同一のフルテストスイート
+make test
 
-実行後の監査では、`scripts/mission-audit.py --current-since <日付またはISO timestamp>` が検出済みriskを stateの `updated_at` で分類します。`--since` / `--until` / `--current-since`の日付・ISO boundは一つの共通parserで扱い、current cutoffはUTCへ正規化した上で同値をcurrentとし、timestamp欠落・不正は安全側のcurrentに残します。JSON/Markdownはforced passとspecialist provenanceを含むcurrent P0/P1/P2をhistorical riskより先に表示し、両方を保持します。JSONはperiod別evidence listを基準とし、code別viewはcompactなcount/indexです。cutoff未指定時は全findingをcurrentとする従来の全期間表示です。このreport scopeはseverity、force approval gate、required specialist result gateを変更しません。
+# 2. goal ベースラインとのペア比較ベンチマーク
+#    注意: --max-budget-usd は請求上限ではなく、推定値に対する打ち切り閾値である。
+#    サブスクリプション実行では消費するのはプランのレート制限。
+python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
+  --starting-commit "$(git rev-parse HEAD)" \
+  --tasks-file benchmarks/mission-vs-goal/tasks.tail.json \
+  --run-id "$(date +%Y-%m-%d)-your-run" \
+  --model-id <your-model-id> \
+  --limit-tasks 5 \
+  --repeats 3 \
+  --stop-on-blocked
 
-`mission` を選ぶ理由は、監査可能な completion gate、open-world な作業でのテール保険、不可逆操作のガバナンス、resume 可能な state です — 平均品質の向上ではありません。
+# 3. 自分で生成した mission state を監査する
+python3 scripts/mission-audit.py --root <path-to-your-project> --json
+```
 
-ベンチマーク由来の主張は
-[`benchmarks/mission-vs-goal/`](benchmarks/mission-vs-goal/) の pilot protocol
-に沿って、sample size、task mix、validator、raw result を明示してください。
-`/goal` より「賢い」といった一般化した表現ではなく、workflow 上の差分として記述します。
+比較目的の結論には `--repeats 3` 以上が要る。実測されたタスク別分散は 0.51〜1.97 倍に達し、
+それ未満の差はノイズと区別できない。品質の結論を支えられない run では、ランナーが警告を出し
+summary にその旨を記録する。
 
-## 構成
+---
 
-| パス | 役割 |
+## 代替
+
+| 選ぶもの | 場面 |
 |---|---|
-| `skills/mission/` | オーケストレータ本体、state CLI、参照ドキュメント、テスト |
-| `skills/mission-planner/` | 計画立案サブスキル |
-| `skills/mission-executor/` | 実行サブスキル |
-| `skills/mission-reviewer/` | ピアレビューサブスキル |
-| `skills/mission-critic/` | 改善案立案サブスキル |
-| `skills/mission-scorer/` | reviewer output を JSON 化するフォールバック変換器 |
-| `docs/` | 設計・運用ドキュメント |
-| `benchmarks/` | mission vs goal のパイロット計測 |
-| `scripts/mission-local-authoring-sync.sh` | Git-backed local authoring を最新 mainへ揃える fail-closed bootstrap |
-| `scripts/ci_changed_scopes.js` | CI の変更スコープ判定 |
-| `scripts/mission-stop-guard.sh` | ループ継続を強制する Stop hook |
-| `claude-hooks/hooks.json` | Claude Code 用 Stop hook 宣言 |
-| `.claude-plugin/` | `plugin.json` / `marketplace.json` |
-| `.codex-plugin/` | Codex plugin metadata |
-| `.agents/plugins/` | Codex local marketplace metadata |
-| `plugins/mission/` | Codex marketplace plugin wrapper |
+| `mission` | 監査可能な完了ゲート、不可逆操作のガバナンス、再開可能な state が要り、主なリスクが「早すぎる停止」である場合 |
+| Claude Code `/goal` | 単一セッション内の軽量な run-until 条件。state machine もレビューループもない |
+| `ralph-loop` | 完了宣言が出るまで 1 つのプロンプトを再実行する。より単純でスコアリングなし |
+| Superpowers | ブレインストーミング・TDD・デバッグ・デリバリーを含む広範な開発方法論 |
+| レビュー / CI プラグイン | ワークフローの一部を検査する専門ツール。全体の完了判定は別が担う |
+
+詳細な比較: [`docs/LOOP_ENGINEERING.md`](docs/LOOP_ENGINEERING.md)
+
+---
 
 ## インストール
 
@@ -249,39 +324,45 @@ Stop hook の stale-state 警告は macOS では BSD `date`、Linux では GNU `
 ## テスト
 
 ```bash
-make test-smoke  # install 不要の syntax/import 確認
-make test        # .venv-ci で CI と同一の全テスト
-make test-e2e    # slow operational scenario
+make test-smoke   # 構文・import チェック。インストール不要
+make test         # CI と同一のフルスイート
+make test-shard   # CI シャード 1 本
 ```
 
-各 target は exact Git tree SHA、tier、test manifest を
-`mission-test-report/1` JSON で出力します。`make test` は `.venv-ci`
-を作成し、pinned された `.github/requirements-ci.txt` を使います。`make test` と
-`make test-e2e` は `pytest-xdist` の `-n auto --dist loadfile` で並列実行され、docs だけの差分は
-`scripts/ci_changed_scopes.js` が判定する CI fast path に乗れます。
+## 構成
 
-ローカル検証スナップショット:
+| パス | 役割 |
+|---|---|
+| `skills/mission/` | オーケストレータ本体、state CLI、参照ドキュメント、テスト |
+| `skills/mission-planner/` | 計画立案サブスキル |
+| `skills/mission-executor/` | 実行サブスキル |
+| `skills/mission-reviewer/` | ピアレビューサブスキル |
+| `skills/mission-critic/` | 改善案立案サブスキル |
+| `skills/mission-scorer/` | reviewer output を JSON 化するフォールバック変換器 |
+| `docs/` | 設計・運用ドキュメント |
+| `benchmarks/` | mission vs goal のパイロット計測 |
+| `scripts/mission-local-authoring-sync.sh` | Git-backed local authoring を最新 mainへ揃える fail-closed bootstrap |
+| `scripts/ci_changed_scopes.js` | CI の変更スコープ判定 |
+| `scripts/mission-stop-guard.sh` | ループ継続を強制する Stop hook |
+| `claude-hooks/hooks.json` | Claude Code 用 Stop hook 宣言 |
+| `.claude-plugin/` | `plugin.json` / `marketplace.json` |
+| `.codex-plugin/` | Codex plugin metadata |
+| `.agents/plugins/` | Codex local marketplace metadata |
+| `plugins/mission/` | Codex marketplace plugin wrapper |
 
-```text
-2026-08-14: 3244 passed
-```
+## ドキュメント
 
-詳細は [`docs/TESTING.md`](docs/TESTING.md) を参照してください。
-
-## E2E 検証済み事項
-
-2026-08-19、Claude Code 2.1.226、隔離 `CLAUDE_CONFIG_DIR` に mission 2.8.0 を
-ローカル marketplace から正式 install し、以下を再確認しました。
-
-- `claude plugin validate` が marketplace manifest を受理する
-- `claude plugin install mission@mission-marketplace` が 2.8.0 を install し enabled になる
-- `claude plugin details mission` に 6 スキルと Stop hook 1 件が並び、常時コストは約 149 tok
-- install 先 cache が `<config>/plugins/cache/mission-marketplace/mission/2.8.0` に解決し、README の `MISSION_PLUGIN_ROOT` 例と一致する
-- install 済み cache の `mission-state.py` が `.mission-state/sessions/*.json` を生成し、permission preflight を通過する
-- Python テストが通る（`make test`: 4209 passed、`make test-e2e`: 3 passed）
-
-`mission-reviewer` などの非修飾サブスキル名の実行時解決は、2026-06-14（Claude Code
-2.1.177）の検証で確認済みで、今回の headless 実行では再確認していません。
+| パス | 内容 |
+|---|---|
+| [`skills/mission/SKILL.md`](skills/mission/SKILL.md) | 実行プロトコル |
+| [`docs/LOOP_ENGINEERING.md`](docs/LOOP_ENGINEERING.md) | ポジショニングと比較 |
+| [`docs/CASE_STUDIES.ja.md`](docs/CASE_STUDIES.ja.md) | 運用証拠（独立再現は不可） |
+| [`benchmarks/mission-vs-goal/`](benchmarks/mission-vs-goal/) | 再現可能なベンチマーク手順と生データ |
+| [`docs/MISSION_ARTIFACTS.ja.md`](docs/MISSION_ARTIFACTS.ja.md) | ローカルファーストな artifact 契約 |
+| [`docs/PASS_RATE_METRICS.ja.md`](docs/PASS_RATE_METRICS.ja.md) | pass rate と監査指標のスキーマ |
+| [`docs/DISTRIBUTION.ja.md`](docs/DISTRIBUTION.ja.md) | 配布とパッケージング |
+| [`SECURITY.md`](SECURITY.md) | セキュリティポリシーと報告 |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | コントリビューションガイド |
 
 ## コントリビューション
 
@@ -300,4 +381,4 @@ Issue や Pull Request を歓迎します。作業前に [CONTRIBUTING.ja.md](CO
 
 ## ライセンス
 
-MIT。詳細は [LICENSE](LICENSE) を参照してください。
+MIT。[`LICENSE`](LICENSE) を参照。
