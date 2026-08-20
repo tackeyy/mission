@@ -277,6 +277,7 @@ def build_prompt(
     mission_max_iter: int | None = None,
     mission_profile: str = "full",
     mission_budget_minutes: float | None = None,
+    mission_threshold: float | None = None,
     extra_rules: list[str] | tuple[str, ...] = (),
 ) -> str:
     cohort_rules = "".join(f"- {rule}\n" for rule in extra_rules)
@@ -343,6 +344,21 @@ Quality benchmark profile:
     budget_flag = (
         f" --budget-minutes {mission_budget_minutes}" if mission_budget_minutes is not None else ""
     )
+    # #566: pass threshold。CLI 指定がタスク定義より優先する (mission_max_iter と同規約)。
+    # threshold は測定条件そのもので、誤指定に気づかないまま 30 セル回すのは高くつく。
+    # budget-minutes と違い mission 側の検証に委ねず、ここで fail-fast させる。
+    effective_threshold = (
+        mission_threshold if mission_threshold is not None else task.get("mission_threshold")
+    )
+    threshold_flag = ""
+    if effective_threshold is not None:
+        if not isinstance(effective_threshold, (int, float)) or isinstance(effective_threshold, bool):
+            raise ValueError(f"mission_threshold must be a number, got {effective_threshold!r}")
+        if not math.isfinite(effective_threshold) or effective_threshold <= 0:
+            raise ValueError(
+                f"mission_threshold must be a positive finite number, got {effective_threshold!r}"
+            )
+        threshold_flag = f" --threshold {effective_threshold}"
     fail_first_protocol = ""
     if task.get("fail_first") is True:
         fail_first_protocol = """
@@ -351,7 +367,7 @@ Fail-first measurement protocol:
 - Do not run mark-passes in iteration 1; the reviewer must record the missing coverage as a High finding.
 - Iteration 2 must resolve that finding before a passing decision and preserve evidence that distinguishes both iterations.
 """
-    return f"""/mission Complete the controlled benchmark artifact at `{output_rel}` with auditable mission-style evidence. --max-iter {mission_max_iter}{budget_flag}
+    return f"""/mission Complete the controlled benchmark artifact at `{output_rel}` with auditable mission-style evidence. --max-iter {mission_max_iter}{budget_flag}{threshold_flag}
 
 {common}
 Arm: mission
@@ -632,7 +648,8 @@ def extract_process_quality(worktree: Path) -> tuple[dict | None, str | None]:
                 return None, "archive_reviews_not_object"
             inputs = payload.get("inputs")
             if not isinstance(inputs, list):
-                continue
+                # 0 件の正常な run と区別できなくなるため握りつぶさない (#585 B)。
+                return None, "archive_reviews_inputs_not_list"
             reviewer_count_observed = max(reviewer_count_observed, len(inputs))
             for inp in inputs:
                 if not isinstance(inp, dict):
@@ -1103,6 +1120,7 @@ def run_one(
     arm_order: int,
     model_id: str,
     mission_budget_minutes: float | None = None,
+    mission_threshold: float | None = None,
     hidden_paths: list[str] | None = None,
     extra_rules: list[str] | tuple[str, ...] = (),
     run_index: int = 1,
@@ -1123,6 +1141,7 @@ def run_one(
         mission_max_iter=mission_max_iter,
         mission_profile=mission_profile,
         mission_budget_minutes=mission_budget_minutes,
+        mission_threshold=mission_threshold,
         extra_rules=extra_rules,
     )
     artifact_dir = ARTIFACTS_DIR / run_id / run_name
@@ -1217,6 +1236,7 @@ def run_one(
         f"claude_total_cost_usd={claude_result.get('total_cost_usd') if isinstance(claude_result, dict) else None}",
         f"quality_score_method={evaluation['quality_score_method']}",
         f"mission_profile={mission_profile if arm == 'mission' else None}",
+        f"mission_threshold={mission_threshold if arm == 'mission' else None}",
         "print_mode_smoke=true",
     ]
     if sanitized:
@@ -1263,6 +1283,7 @@ def run_one(
         "max_budget_usd_effective": effective_max_budget_usd,
         "burn_rate_usd_per_min": burn_rate_usd_per_min,
         "mission_profile": mission_profile if arm == "mission" else None,
+        "mission_threshold": mission_threshold if arm == "mission" else None,
         "started_at": started,
         "completed_at": completed,
         "starting_commit": starting_commit,
@@ -1485,7 +1506,18 @@ def summarize(
     stopped_early: bool = False,
     mission_profile: str = "full",
     repeats: int = 1,
+    mission_threshold: float | None = None,
 ) -> dict:
+    # #585 A: CLI 未指定でもタスク定義由来の threshold を実効値として記録する。
+    # 記録が欠けると「どの pass gate で測ったか」を事後に復元できない。
+    if mission_threshold is None:
+        task_thresholds = {
+            task.get("mission_threshold")
+            for task in tasks
+            if task.get("mission_threshold") is not None
+        }
+        if len(task_thresholds) == 1:
+            mission_threshold = task_thresholds.pop()
     by_arm: dict[str, list[dict]] = {arm: [r for r in records if r["arm"] == arm] for arm in ARMS}
     task_cohort = tasks_path.stem.removeprefix("tasks.")
 
@@ -1498,6 +1530,44 @@ def summarize(
 
     def _cost_values(items: list[dict]) -> list[float]:
         return [r["total_cost_usd"] for r in items if isinstance(r.get("total_cost_usd"), (int, float))]
+
+    def _elapsed_values(items: list[dict]) -> list[float]:
+        return [r["elapsed_minutes"] for r in items if isinstance(r.get("elapsed_minutes"), (int, float))]
+
+    def _percentile(vals: list[float], p: int) -> float | None:
+        """Nearest-rank percentile. p in [1, 100].
+
+        Method: rank = ceil(p/100 * n), clamped to [1, n]. For n=1 the single
+        value is returned for any p. Empty list returns None.
+        This avoids the n>=2 requirement of statistics.quantiles.
+
+        Nearest-rank returns an observed value, never an interpolated one.
+        Consequence for n=2: p50 is the LOWER observation (ceil(0.5*2)=1), not
+        the midpoint. Runs with statistical_confidence="low" therefore carry a
+        downward-biased p50 by construction; read p50 there as the first order
+        statistic, not as a median. Interpolation is deliberately avoided so
+        every reported percentile corresponds to a real observation.
+        """
+        if not vals:
+            return None
+        s = sorted(vals)
+        rank = max(1, math.ceil(p / 100 * len(s)))
+        return round(s[rank - 1], 6)
+
+    def _stdev(vals: list[float]) -> float | None:
+        """Sample standard deviation. Returns None for n < 2.
+
+        NOTE: this is the SAMPLE stdev (statistics.stdev, n-1 denominator),
+        while the pre-existing ``marker_score_variance`` field is the
+        POPULATION variance (statistics.pvariance, n denominator). They are
+        therefore not related by a square root: sqrt(marker_score_variance)
+        != marker_score_stdev (about 22% apart at n=3). Both are kept as-is
+        because renaming or redefining ``marker_score_variance`` would break
+        analysis of historical runs; read each field by its own definition.
+        """
+        if len(vals) < 2:
+            return None
+        return round(statistics.stdev(vals), 6)
 
     def _comp(items: list[dict]) -> list[dict]:
         # #261: comparable_attempt=False (無効 record) を除いた集計対象
@@ -1587,6 +1657,29 @@ def summarize(
         if mission_mean is not None and goal_mean is not None and goal_mean != 0
         else None
     )
+    # #585 C: arm 感応度。同一タスクで両 arm のスコアが異なるセル数を数える。
+    # measurement_valid とは分離する: 「差なし」は正当な結論であり、測定失敗
+    # として握りつぶすと #557 が定めた 3 分類のうち「差なし」を表現できなくなる。
+    # 一方で「指標が arm の違いに一切感応していない」疑いは別途見えている必要がある。
+    def _scores_by_task(arm: str) -> dict:
+        out: dict = {}
+        for r in _scored(by_arm.get(arm, [])):
+            out.setdefault(r.get("task_id"), []).append(r["quality_marker_score"])
+        return out
+
+    _goal_by_task = _scores_by_task("claude_code_goal_command")
+    _mission_by_task = _scores_by_task("mission")
+    _shared_tasks = set(_goal_by_task) & set(_mission_by_task)
+    if _shared_tasks:
+        marker_score_arm_sensitivity = sum(
+            1
+            for task_id in _shared_tasks
+            if (sum(_goal_by_task[task_id]) / len(_goal_by_task[task_id]))
+            != (sum(_mission_by_task[task_id]) / len(_mission_by_task[task_id]))
+        )
+    else:
+        # 比較できるセル対が無いので感応度を主張しない。
+        marker_score_arm_sensitivity = None
     # --- end saturation guard ---
 
     iteration_rows = [
@@ -1642,15 +1735,41 @@ def summarize(
         ),
     }
 
+    # #565: repeats_observed — count records per (arm, task_id) cell and report
+    # the minimum observed count across all cells. If cells disagree (e.g. some
+    # tasks ran 3 times and others ran 1 time), the minimum is the conservative
+    # choice: the statistical guarantees hold only for the lowest-coverage cell.
+    # When there are no records, repeats_observed is 0.
+    def _repeats_observed(recs: list[dict]) -> int:
+        if not recs:
+            return 0
+        cell_counts: dict[tuple, int] = {}
+        for r in recs:
+            cell = (r.get("arm", ""), r.get("task_id", ""))
+            cell_counts[cell] = cell_counts.get(cell, 0) + 1
+        return min(cell_counts.values())
+
+    repeats_observed = _repeats_observed(records)
+
+    def _statistical_confidence(n: int) -> str:
+        if n <= 1:
+            return "single-sample"
+        if n == 2:
+            return "low"
+        return "adequate"
+
     return {
         "run_id": run_id,
         "task_file": str(tasks_path.relative_to(REPO_ROOT)),
         "task_cohort": task_cohort,
         "selected_task_ids": [task["id"] for task in tasks],
         "mission_profile": mission_profile,
+        "mission_threshold": mission_threshold,
         "starting_commit": starting_commit,
         "records": len(records),
         "repeats": repeats,
+        "repeats_observed": repeats_observed,
+        "statistical_confidence": _statistical_confidence(repeats_observed),
         "expected_records": expected_records,
         "stopped_early": stopped_early,
         "limitations": limitations,
@@ -1658,6 +1777,7 @@ def summarize(
         "marker_saturation_detail": marker_saturation_detail,
         "measurement_valid": measurement_valid,
         "measurement_valid_reason": measurement_valid_reason,
+        "marker_score_arm_sensitivity": marker_score_arm_sensitivity,
         "marker_score_delta_vs_goal": marker_score_delta_vs_goal,
         "marker_score_ratio_vs_goal": marker_score_ratio_vs_goal,
         "diff_review_measurement_gate": diff_review_measurement_gate,
@@ -1736,6 +1856,25 @@ def summarize(
                     if _cost_values(items)
                     else None
                 ),
+                # #565: percentiles and stdev. Nearest-rank method; n=1 returns
+                # the single value rather than raising.
+                "elapsed_minutes_p50": _percentile(_elapsed_values(items), 50),
+                "elapsed_minutes_p90": _percentile(_elapsed_values(items), 90),
+                "elapsed_minutes_stdev": _stdev(_elapsed_values(items)),
+                "cost_usd_p50": _percentile(_cost_values(items), 50),
+                "cost_usd_p90": _percentile(_cost_values(items), 90),
+                "cost_usd_stdev": _stdev(_cost_values(items)),
+                "marker_score_p50": _percentile(
+                    [r["quality_marker_score"] for r in _scored(items)], 50
+                ),
+                # 品質の裾は p50 より p90 の方が診断的 (両 arm の中央値が並んでも
+                # 裾が違えば差が出る)。
+                "marker_score_p90": _percentile(
+                    [r["quality_marker_score"] for r in _scored(items)], 90
+                ),
+                "marker_score_stdev": _stdev(
+                    [r["quality_marker_score"] for r in _scored(items)]
+                ),
             }
             for arm, items in by_arm.items()
         },
@@ -1771,6 +1910,22 @@ def summary_warnings(summary: dict) -> list[str]:
             warnings.append(
                 f"WARNING: measurement_valid is false (reason: {reason}). Quality comparison is NOT valid."
             )
+    # #585 C: arm 感応度ゼロの警告 (measurement_valid とは独立)
+    if summary.get("marker_score_arm_sensitivity") == 0:
+        warnings.append(
+            "WARNING: zero arm sensitivity - every task scored identically for both arms.\n"
+            "The measurement is valid (this is a real no-difference result), but the metric\n"
+            "showed no responsiveness to the arm at all in this run, so it may simply be\n"
+            "unable to separate them. See issue #557."
+        )
+
+    # #565: single-sample warning
+    if summary.get("repeats_observed", 1) <= 1:
+        warnings.append(
+            "WARNING: single-sample run (repeats=1). Per-task variance in past runs reached\n"
+            "0.51x-1.97x, so differences below ~2x are not distinguishable from noise.\n"
+            "Use --repeats 3 or more for comparative conclusions. See issue #557."
+        )
     return warnings
 
 
@@ -1821,6 +1976,14 @@ def main() -> int:
         default=None,
         help="#238: /mission へ --budget-minutes として渡す時間予算 (分)。"
         " budget pressure による graceful partial-done halt を有効化する。",
+    )
+    parser.add_argument(
+        "--mission-threshold",
+        type=float,
+        default=None,
+        help="#566: /mission へ --threshold として渡す pass threshold。"
+        " 未指定なら /mission の既定 (4.0) に委ねる。タスク定義の"
+        " mission_threshold より CLI 指定が優先する。",
     )
     parser.add_argument(
         "--mission-profile",
@@ -1876,6 +2039,7 @@ def main() -> int:
             arm_order,
             args.model_id,
             mission_budget_minutes=args.mission_budget_minutes,
+            mission_threshold=args.mission_threshold,
             hidden_paths=task_data.get("hidden_paths"),
             extra_rules=task_data.get("prompt_rules", ()),
             run_index=run_index,
@@ -1923,6 +2087,7 @@ def main() -> int:
         stopped_early=stopped_early,
         mission_profile=args.mission_profile,
         repeats=args.repeats,
+        mission_threshold=args.mission_threshold,
     )
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     for warning in summary_warnings(summary):

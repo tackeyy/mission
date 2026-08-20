@@ -22,7 +22,7 @@ CI はこのテスト群が CPU バウンドであるため、複数の runner �
 CI の 1 シャードをローカルで再現するには次を実行します。
 
 ```bash
-make test-shard SHARD_INDEX=1 SHARD_TOTAL=4
+make test-shard SHARD_INDEX=1 SHARD_TOTAL=6
 ```
 
 分割は `scripts/ci_shard_targets.py` が行います。決定的・網羅的・排他的で、

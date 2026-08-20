@@ -298,6 +298,14 @@ python3 benchmarks/mission-vs-goal/run_claude_goal_vs_mission.py \
 `measurement_valid` が false のとき、runner は JSON summary より前に
 stdout へ警告行を出力する。
 
+### `marker_score_variance` と `marker_score_stdev` の違い
+
+`marker_score_variance` は**母分散**（`statistics.pvariance`、分母 `n`）、
+`marker_score_stdev` は**標本標準偏差**（`statistics.stdev`、分母 `n-1`）である。
+両者は平方根の関係にない（`sqrt(marker_score_variance) != marker_score_stdev`。
+n=3 で約 22% 乖離）。過去 run の解析を壊さないため定義は変更していないので、
+一方から他方を導出せず、各フィールドをそれぞれの定義どおりに読むこと。
+
 ### `total_cost_usd` について
 
 record および arm 集計の `total_cost_usd` は、エージェント runtime が報告する
@@ -306,6 +314,21 @@ subscription（OAuth）実行では per-token 課金は発生せず、消費す�
 プランのレートリミットである。
 各 arm の相対比較には使えるが、絶対的な支出額として扱わない。
 `--max-budget-usd` はこの推定値に対する上限閾値であり、請求キャップではない。
+
+## 推奨 `--repeats` 設定
+
+| 用途 | 推奨設定 | 備考 |
+|---|---|---|
+| **比較 run**（優劣を結論づける） | `--repeats 3` 以上 | 統計的な有効性に必要 |
+| **探索 / スモーク run** | `--repeats 1` でも可 | 優劣の結論には **使わないこと** |
+
+**`--repeats 3` が必要な理由**: 2026-08-19 の tail cohort 実測
+（v2.7.0 対 v2.8.0、同一タスク・同一 fixture）でタスク別の時間比が
+**0.51x〜1.97x** に散らばった。1 サンプルでは ~2x 未満の差はノイズと
+区別できない。セルあたり 3 反復以上なければ優劣を主張できない。
+
+`repeats_observed <= 1` のとき、runner は stdout に警告を出力し、
+summary JSON に `statistical_confidence: "single-sample"` を記録する。
 
 ## Marketing Guardrails
 

@@ -326,6 +326,16 @@ The summary JSON produced by each run includes a `measurement_valid` field.
 When `measurement_valid` is false, the runner prints a warning on stdout before
 the JSON summary.
 
+### Note on `marker_score_variance` vs `marker_score_stdev`
+
+`marker_score_variance` is the **population** variance (`statistics.pvariance`,
+denominator `n`); `marker_score_stdev` is the **sample** standard deviation
+(`statistics.stdev`, denominator `n-1`). They are not related by a square root:
+`sqrt(marker_score_variance) != marker_score_stdev` (roughly 22% apart at n=3).
+Both are retained with their original definitions so historical runs stay
+analysable; read each field by its own definition rather than deriving one from
+the other.
+
 ### Notes on `total_cost_usd`
 
 `total_cost_usd` in each record and arm aggregate is an API-equivalent estimate
@@ -334,6 +344,21 @@ reported by the agent runtime, **not a billed amount**. Under subscription
 plan rate limit. Use these values for relative comparison between arms, not as
 an absolute spend figure. `--max-budget-usd` is a cutoff threshold applied to
 this estimated value, not a billing cap.
+
+## Recommended `--repeats` Setting
+
+| Use case | Recommended setting | Notes |
+|---|---|---|
+| **Comparative run** (claiming superiority) | `--repeats 3` or more | Required for statistical validity |
+| **Exploratory / smoke run** | `--repeats 1` acceptable | Must **not** be used to conclude superiority |
+
+**Why `--repeats 3`?** Measured per-task variance in the 2026-08-19 tail cohort
+(v2.7.0 vs v2.8.0, same tasks and fixtures) reached **0.51x–1.97x** across tasks.
+Differences below ~2x are indistinguishable from noise with a single sample.
+Three or more repeats per cell are needed before claiming directional superiority.
+
+When `repeats_observed <= 1`, the runner emits a warning on stdout and sets
+`statistical_confidence: "single-sample"` in the summary JSON.
 
 ## Marketing Guardrails
 
