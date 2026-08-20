@@ -18,6 +18,10 @@ sha256 の先頭 16 桁で照合する。語を追加するには:
     python3 -c "import hashlib;print(hashlib.sha256(b'<語(小文字)>').hexdigest()[:16])"
 
 を実行し、出力を _BANNED_HASHES に足す。
+
+エントリ数は placeholder の種類数と一致しない。同じプロジェクトが複数の表記
+(`-` 区切りと `_` 区切り等) で現れる場合、表記ごとに hash が要るが、置換先の
+placeholder は 1 つだからである。
 """
 import hashlib
 import re
