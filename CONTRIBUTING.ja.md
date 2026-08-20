@@ -100,6 +100,45 @@ Pull Request 前に確認してください。
 - ユーザー向け挙動の変更に README または refs の更新がある
 - 挙動変更にテストを追加または更新した
 - orchestration rule の変更理由を PR description に明記した
+- PR description へ貼るエージェント出力を redaction した (下記参照)
+
+## エージェント出力の redaction
+
+本リポジトリの Issue・Pull Request・コミットされる成果物には、**エージェントの実行ログ**が
+頻繁に含まれます。実行ログはエージェントが読んだものをそのまま含みます。絶対パス、環境情報、
+無関係な非公開作業、場合によっては credential まで入ります。貼る前に消してください。あとから
+ではありません。
+
+transcript・ログ・コマンド出力を Issue / Pull Request / コミット対象のファイルへ貼る前に、
+次を除去してください。
+
+- あらゆる credential。トークンに見えるだけの値も含む
+- 実在アカウント名を含む絶対 home パス (`/Users/<user>/…`)
+- エージェントの session 識別子・プライベート memory store のパス
+- 他リポジトリに属する名称・Issue 番号・機能説明
+
+**あとから編集しても露出は取り消せません。** GitHub は Issue / Pull Request 本文の編集前
+リビジョンを保持し、public repository では GitHub アカウントを持つ者なら誰でも API から
+読めます。一度投稿した secret を
+消す手段は、Issue / Pull Request 自体を削除するか、GitHub Support に編集履歴の purge を
+依頼するかの 2 つだけです。いずれにせよ credential の rotate は必要です。
+
+だから redaction は投稿の**前**でなければなりません。push protection が守るのは git 側だけで、
+Issue に何を入力するかは見えません。
+
+消しすぎないでください。匿名化済みの placeholder (`<user>` / `[REDACTED]`) や CI runner の
+パス (`/home/runner/work/…`) は構造上公開情報であり、誰かのマシンについて何も明かしません。
+これらを消すと再現可能な証跡を失うだけで、得るものがありません。
+
+コミットされるファイルは CI ガードが検査します。
+
+- `skills/mission/tests/test_artifact_hygiene.py`
+- `skills/mission/tests/test_vendor_fingerprint.py`
+- `skills/mission/tests/test_private_project_names.py`
+
+Issue / Pull Request 本文は対象外であり、原理的に対象にできません。この経路は規律でしか
+守れません。各ガードの射程を含む監査手順の全体は
+[docs/SECURITY_REVIEW_CHECKLIST.ja.md](docs/SECURITY_REVIEW_CHECKLIST.ja.md) を参照してください。
 
 ## Security
 
