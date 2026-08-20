@@ -15232,6 +15232,10 @@ def cmd_push_score(args):
             entry["notes"] = args.notes
         # Issue #3: open_high を保存 (mark-passes gate で参照)
         entry["open_high"] = getattr(args, "open_high", 0)
+        # #593 B-1: 採点対象 artifact の digest。gate の判定には使わない (記録のみ)。
+        _digest, _digest_status = _artifact_digest_for_iteration(cwd, data)
+        entry["artifact_digest"] = _digest
+        entry["artifact_digest_status"] = _digest_status
         if args.scoring_json:
             if scoring_payload.get("findings_evidence_path") is not None:
                 entry["findings_evidence_path"] = scoring_payload["findings_evidence_path"]
@@ -15304,6 +15308,39 @@ def cmd_push_score(args):
     if archived_to:
         result["archived_to"] = archived_to
     print(json.dumps(result, ensure_ascii=False))
+
+
+def _artifact_digest_for_iteration(cwd: Path, state: dict) -> tuple[str | None, str]:
+    """#593 B-1: 採点対象 artifact の sha256 を返す (digest, status)。
+
+    iteration ごとに記録することで `digest[N] != digest[N+1]` から
+    「反復して成果物が実際に変わったか」を判定できる。これがないと
+    「ゲートの誤検知 (弾いたが直すものが無い)」と「修正の失敗 (直したが
+    改善しない)」を区別できず、gate 精度を測れない。
+
+    本文は保存しない (サイズ・機密)。digest のみ。
+    収集不能でも例外にせず、**理由を必ず返す** (null + 理由 null にすると
+    「未設定」と「読めなかった」が区別できなくなる)。
+    """
+    try:
+        path_text, _canonical = artifact_path_from_state(state)
+    except Exception as exc:  # noqa: BLE001 — 記録は本流を止めない
+        return None, f"error:{type(exc).__name__}"
+    if not isinstance(path_text, str) or not path_text.strip():
+        return None, "not-configured"
+    try:
+        target = Path(path_text)
+        if not target.is_absolute():
+            target = cwd / target
+        if not target.exists():
+            return None, "missing"
+        if not target.is_file():
+            return None, "not-a-file"
+        return "sha256:" + hashlib.sha256(target.read_bytes()).hexdigest(), "ok"
+    except OSError as exc:
+        return None, f"unreadable:{type(exc).__name__}"
+    except Exception as exc:  # noqa: BLE001
+        return None, f"error:{type(exc).__name__}"
 
 
 def cmd_review_finalize(args):
