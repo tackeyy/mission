@@ -45,16 +45,39 @@ def test_fixtures_exist_and_referenced():
             assert rel in task["prompt"], f"{task['id']}: {rel} not in prompt"
 
 
+def _subject_tokens(name: str) -> list[str]:
+    """marker 名から主題トークン (識別子・数値) を抜き出す。"""
+    import re as _re
+
+    tokens = _re.findall(r"[A-Za-z_][A-Za-z0-9_-]{3,}|[0-9][0-9,\.]{2,}", name.lower())
+    return [t.rstrip(".,") for t in tokens]
+
+
 def test_markers_discoverable_in_fixtures():
+    """marker の**主題**が fixture 内に存在すること (タスクが解答可能であること)。
+
+    #562 で marker は regex 化され、判定語 (violation / diverge 等) は
+    **解析者が書く語**であって fixture には無い。したがって「パターン全体が
+    fixture の部分文字列であること」はもはや要求できない。要求すると
+    「fixture 丸写しで満点」という #562 が塞いだ欠陥に戻ってしまう。
+
+    ここで検証したいのは「fixture に存在しないものを marker が要求していない」
+    ことなので、marker 名の主題トークンが fixture に現れることを確認する。
+    """
+    generic = {"violation", "drift", "mismatch", "cause", "impact", "claim", "false"}
     for task in _data()["tasks"]:
         corpus = "".join(
             (REPO_ROOT / rel).read_text(encoding="utf-8").lower()
             for rel in task["fixtures"]
         )
         for marker in task["quality_markers"]:
-            patterns = [p.lower() for p in marker["patterns"]]
-            assert any(p in corpus for p in patterns), (
-                f"{task['id']}: marker '{marker['name']}' の pattern が fixture に無い")
+            tokens = [t for t in _subject_tokens(marker["name"]) if t not in generic]
+            assert tokens, (
+                f"{task['id']}: marker '{marker['name']}' に主題トークンが無く、"
+                "fixture 由来かを検証できない")
+            assert any(t in corpus for t in tokens), (
+                f"{task['id']}: marker '{marker['name']}' の主題が fixture に無い "
+                f"(tokens={tokens})")
 
 
 def test_simple_tasks_have_no_fail_first():

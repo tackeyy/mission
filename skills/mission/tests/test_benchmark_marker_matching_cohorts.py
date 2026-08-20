@@ -116,6 +116,40 @@ def _all_marker_patterns(task: dict) -> list[tuple[str, str, str]]:
 
 
 # ---------------------------------------------------------------------------
+# 丸写し判定を適用できないタスク（設計上の限界。#562 で明示的に記録する）
+#
+# openworld-incremental-reveal の fixture (incident-log.md) は末尾で
+# 「The root cause is the runaway migration job holding the exclusive lock,
+#  not the serializer deploy.」と**結論そのものを断定して終わる**。
+# したがって「丸写し」と「分析」は marker recall では原理的に区別できない
+# (正しい artifact が満たすパターンは、fixture 自身も満たす)。
+#
+# ここで無理に低スコアへ落とすには、特定の artifact だけが使う語彙
+# (confirmed / predated / overturned 等) を要求するしかなく、それは
+# #558 で実害を出した「片寄った較正による偽シグナル」そのものになる。
+# 実際その方式は既存の canary テスト
+# (test_benchmark_openworld_cohort.py の正解テキスト) を Red にした。
+#
+# よって本タスクは丸写し判定の対象外とし、理由を下の test で機械的に固定する。
+UNMARKABLE_BY_RECALL = {"openworld-incremental-reveal"}
+
+
+def test_unmarkable_exception_is_justified_by_fixture_content():
+    """例外の根拠 (fixture が結論を断定している) を機械的に固定する。
+
+    fixture が変わって結論を述べなくなったら、この test が落ちて
+    例外を見直す契機になる。例外を「書いたまま忘れる」ことを防ぐ。
+    """
+    tasks = {t["id"]: t for t, _ in _load_cohort_tasks()}
+    for task_id in UNMARKABLE_BY_RECALL:
+        task = tasks[task_id]
+        corpus = _concatenate_fixtures(task).lower()
+        assert "the root cause is the runaway migration job" in corpus, (
+            f"{task_id}: fixture がもはや結論を断定していない。"
+            "丸写し判定の対象外とする根拠が消えたので例外を見直すこと"
+        )
+
+
 # Test 1: fixture verbatim copy does NOT earn score >= 0.5
 # ---------------------------------------------------------------------------
 
@@ -135,6 +169,8 @@ class TestCohortFixtureVerbatimDoesNotEarnFullScore:
 
         failures = []
         for task, _ in cohort_tasks:
+            if task["id"] in UNMARKABLE_BY_RECALL:
+                continue
             fixture_text = _concatenate_fixtures(task)
             if not fixture_text.strip():
                 continue

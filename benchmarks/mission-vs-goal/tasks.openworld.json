@@ -146,36 +146,32 @@
           "name": "Root cause: migration job",
           "match_type": "regex",
           "patterns": [
-            "root.cause.{0,50}(confirmed|definitive|actual).{0,50}migration",
-            "(確定|確認済み).{0,100}migration.{0,10}job",
-            "根本原因.{0,100}(確定|confirmed|migration)"
+            "(root.cause|根本原因).{0,140}migration",
+            "migration.{0,140}(root.cause|根本原因)"
           ]
         },
         {
           "name": "Evidence: exclusive lock on orders table",
           "match_type": "regex",
           "patterns": [
-            "confirmed.{0,100}exclusive.lock",
-            "(確定|根本原因).{0,100}exclusive.lock",
-            "exclusive.lock.{0,80}(root.cause|confirmed.cause|actual.cause)"
+            "exclusive.lock.{0,140}orders",
+            "orders.{0,140}exclusive.lock"
           ]
         },
         {
           "name": "Evidence: pool saturation predated deploy",
           "match_type": "regex",
           "patterns": [
-            "pool.{0,50}saturat.{0,150}predated?",
-            "pool.saturat.{0,100}independent.corrobor",
-            "saturat.{0,200}(predated?|独立した.{0,20}証拠|独立.*証拠)"
+            "saturat.{0,200}(01:02|before .{0,30}deploy|predated?|deploy より前|前に)",
+            "(01:02|predated?).{0,200}saturat"
           ]
         },
         {
           "name": "Ruled out: serializer rollback did not help",
           "match_type": "regex",
           "patterns": [
-            "(rollback|serializer).{0,100}overturned",
-            "初期仮説.{0,100}(誤り|覆|overturn|wrong|incorrect|rejected)",
-            "(hypothesis|仮説).{0,100}(overturned|overturn|ruled.out|was.wrong)"
+            "(rollback|serializer).{0,160}(did not help|not the cause|ruled.out|overturned|覆|誤り|棄却)",
+            "(did not help|not the cause|ruled.out|overturned).{0,160}(rollback|serializer)"
           ]
         }
       ],
