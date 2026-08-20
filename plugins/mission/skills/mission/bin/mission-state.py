@@ -16152,7 +16152,7 @@ def cmd_update_project_root(args):
 
     project_root が不存在になった state (ディレクトリ移動・rename 等で発生) は
     cleanup-stale に孤児扱いされ続ける。このコマンドで正しいパスに更新することで
-    rescue できる (実例: cc-48c91727, project_root=/dev/ccbattle 不存在)。
+    rescue できる (実例: cc-48c91727, project_root=/dev/project-c 不存在)。
     state.json が存在するディレクトリの cwd で実行すること。
     legacy state.json も sessions/<sid>.json も両方対応する。
     """

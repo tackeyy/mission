@@ -41,7 +41,7 @@ SKILL.md 本文の token 節約のため、日付付き改修注記と実測デ�
 
 ## P4: 並列処理強化 (2026-06-12)
 直近 6 ラン (6/10-6/12) の transcript 実測レビューに基づく 4 改修:
-- **実測知見**: Reviewer 並列は機能 (listco iter1: 3 名 2.7/11.5/13.1 分並走、直列なら 27 分 → 13 分)。弱点は (1) executor fan-out の 2 体ペアバリア (BMR クロール 19 バッチ約 2 時間 10 分)、(2) Reviewer ハング無検知 (ma_navi ランで ConnectionRefused 50 分ハング → レビューフェーズ 73 分)、(3) 復旧後の直列化逸脱、(4)「単一メッセージ N 名並列」が 6 ラン中 0 回実行
+- **実測知見**: Reviewer 並列は機能 (listco iter1: 3 名 2.7/11.5/13.1 分並走、直列なら 27 分 → 13 分)。弱点は (1) executor fan-out の 2 体ペアバリア (BMR クロール 19 バッチ約 2 時間 10 分)、(2) Reviewer ハング無検知 (project-e ランで ConnectionRefused 50 分ハング → レビューフェーズ 73 分)、(3) 復旧後の直列化逸脱、(4)「単一メッセージ N 名並列」が 6 ラン中 0 回実行
 - **P4-A**: mission-executor に並列 fan-out 指針 (ローリングウィンドウ・W=4-6/2-3 のタスク種別分岐)
 - **P4-B**: claude-config.md の Background Agent 並列上限を条件分岐化 (軽量読解系 4-6 並列可)。実測: 軽量 Explore 6 体単一メッセージ起動で全完了 51 秒・stall なし (2026-06-12)
 - **P4-C**: Reviewer watchdog (15 分無応答で再 spawn) + リトライ後の並列維持を gotchas §1 に明文化
@@ -75,7 +75,7 @@ SKILL.md 本文の token 節約のため、日付付き改修注記と実測デ�
 
 この節は廃止済み legacy single-state 時代の履歴であり、現役機能ではない。現行は `sessions/<sid>.json` に完全統一され、`_is_foreign_live_owner` / `--force-override` / `MISSION_MULTI_SESSION` は存在しない。
 
-**背景**: 同一プロジェクトで Claude と Codex が multi-session 未使用で /mission を起動し、`.mission-state/state.json` を奪い合う実害を確認 (smart-social, Claude のミッションが Codex の init に上書き・archive 退避された)。`cmd_init` に「別 owner の live state を守るガード」が欠如していたのが根因。
+**背景**: 同一プロジェクトで Claude と Codex が multi-session 未使用で /mission を起動し、`.mission-state/state.json` を奪い合う実害を確認 (project-a, Claude のミッションが Codex の init に上書き・archive 退避された)。`cmd_init` に「別 owner の live state を守るガード」が欠如していたのが根因。
 
 **改修**:
 - `bin/mission-state.py`: 純粋関数 `_is_foreign_live_owner(existing, current_pid, pid_is_agent)` を新設。`cmd_init` の legacy ブロックで、既存 state が別の生きているエージェント (pid 判定) 所有の進行中ミッションなら **exit 3** で停止 (`--force-override` で上書き可)。exit 2 (mission_id 不一致) も force-override で突破可能に。
@@ -99,7 +99,7 @@ Claude Code/Codex のいずれでも複数ミッションを安全に並列実�
 
 ### multi-session: 完了済み legacy の自動 multi 移行 (2026-06-13 追補)
 
-`is_multi_session` が「legacy `state.json` があれば常に legacy 継続」だったため、**完了済み (passes=true) の legacy state が残っているだけで Claude Code/Codex の並列が無効化される**問題 (smart-social 実機検証で発覚: 完了済み GitHub Actions ミッションの state.json が残り、Claude Code/Codex 起動が sessions/ に分離されなかった)。進行中 (`loop_active` かつ passes/halt なし) の legacy のみ後方互換で継続し、完了/中断済みは multi 移行可に修正。読めない legacy は安全側で継続。
+`is_multi_session` が「legacy `state.json` があれば常に legacy 継続」だったため、**完了済み (passes=true) の legacy state が残っているだけで Claude Code/Codex の並列が無効化される**問題 (project-a 実機検証で発覚: 完了済み GitHub Actions ミッションの state.json が残り、Claude Code/Codex 起動が sessions/ に分離されなかった)。進行中 (`loop_active` かつ passes/halt なし) の legacy のみ後方互換で継続し、完了/中断済みは multi 移行可に修正。読めない legacy は安全側で継続。
 
 ## legacy single-state 廃止・multi-session 完全統一 (2026-06-13)
 
