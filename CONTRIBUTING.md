@@ -101,6 +101,36 @@ Before opening a pull request:
 - Update README or reference docs for user-visible behavior
 - Add or update tests for behavior changes
 - Explain any orchestration-rule changes clearly in the PR description
+- Redact agent output before pasting it into the PR description (see below)
+
+## Redacting Agent Output
+
+Issues, pull requests, and committed artifacts in this repository frequently
+carry **agent execution logs**. Those logs contain whatever the agent happened to
+read: absolute paths, environment details, unrelated private work, and sometimes
+credentials. Redact before you paste, not after.
+
+Before pasting any transcript, log, or command output into an issue, a pull
+request, or a file you intend to commit, remove:
+
+- credentials of any kind, including values that merely look like a token
+- absolute home paths carrying a real account name (`/Users/<user>/…`)
+- agent session identifiers and private memory store paths
+- names, issue numbers, and feature descriptions belonging to other repositories
+
+**Editing afterwards does not undo the exposure.** GitHub keeps the pre-edit
+revision of every issue and pull request body, and on a public repository anyone
+can read it through the API. Once a secret is posted, the only ways to remove it
+are deleting the issue or pull request outright, or asking GitHub Support to
+purge the edit history — and the credential must be rotated regardless.
+
+This is why redaction has to happen *before* posting. Push protection guards the
+git side only; it cannot see what you type into an issue.
+
+Committed files are covered by CI guards
+(`skills/mission/tests/test_artifact_hygiene.py`,
+`test_vendor_fingerprint.py`, `test_private_project_names.py`). Issue and pull
+request bodies are not, and cannot be — that path is discipline only.
 
 ## Security
 
