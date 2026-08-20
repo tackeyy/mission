@@ -132,20 +132,55 @@ def summarize_states(states):
 
 
 def false_negative_summary(states):
-    """#593 B-4: false negative の測定枠。
+    """#593 B-4 / #594 A: false negative を verification 結果で客観的に数える。
 
-    FN (欠陥があるのに iteration 1 で通過した) は ground truth が無いため
-    現時点では測れない。#592 A の verification フェーズが入れば
-    「review は通したが verification が失敗を検出した」ケースが客観ラベルに
-    なる。**測れないものを測ったことにしない。**
+    FN = 「gate は通したのに verification は失敗した」= 見逃し。
+    verification (#594 A) が入るまでは ground truth が無く測れないため、
+    その場合は `unmeasurable` を返す。**推定で埋めない。**
+
+    `not-run` を「欠陥なし」と混同しない。検証していないことは
+    合格の証拠にならない。
     """
+    measurable = []
+    false_negatives = []
+    considered = 0
+    for state in states:
+        considered += 1
+        if not isinstance(state, dict):
+            continue
+        history = state.get("verification_history")
+        if not isinstance(history, list):
+            continue
+        latest = None
+        for entry in history:
+            if isinstance(entry, dict) and entry.get("status") in ("passed", "failed"):
+                latest = entry
+        if latest is None:
+            # not-run しか無い / 空 は「測れない」であって「欠陥なし」ではない
+            continue
+        measurable.append(state)
+        if state.get("passes") is True and latest.get("status") == "failed":
+            false_negatives.append(state.get("mission"))
+
+    if not measurable:
+        return {
+            "status": "unmeasurable",
+            "count": None,
+            "reason": (
+                "false negatives need an objective label; record verification "
+                "results (#594 A) so 'review passed but verification failed' "
+                "can be counted"
+            ),
+            "missions_considered": considered,
+            "missions_with_verification": 0,
+            "false_negative_rate": None,
+        }
     return {
-        "status": "unmeasurable",
-        "count": None,
-        "reason": (
-            "false negatives need an objective label; wire the verification "
-            "phase (#592 A) so 'review passed but verification failed' can be "
-            "counted, then report it here"
-        ),
-        "missions_considered": sum(1 for _ in states),
+        "status": "measured",
+        "count": len(false_negatives),
+        "missions": false_negatives,
+        "missions_considered": considered,
+        "missions_with_verification": len(measurable),
+        "false_negative_rate": len(false_negatives) / len(measurable),
+        "reason": None,
     }
