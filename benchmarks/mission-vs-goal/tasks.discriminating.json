@@ -3,8 +3,13 @@
   "version": 1,
   "cohort": "discriminating",
   "task_count": 5,
-  "arms": ["claude_code_goal_command", "mission"],
-  "hidden_paths": ["benchmarks/mission-vs-goal/tasks.discriminating.json"],
+  "arms": [
+    "claude_code_goal_command",
+    "mission"
+  ],
+  "hidden_paths": [
+    "benchmarks/mission-vs-goal/tasks.discriminating.json"
+  ],
   "prompt_rules": [
     "Do not open, read, grep, or list anything under `benchmarks/mission-vs-goal/` except the fixture files named in this prompt and your own output file. Benchmark metadata (task definitions, scoring configuration, answer keys) is out of bounds.",
     "For every confirmed finding, quote the exact identifier or value from the fixture as evidence.",
@@ -34,20 +39,108 @@
       "first_pass_failure_design": "36 constant-service cells across five files. Six real violations are spread so no two services share the same violated constant, and three plausible-looking documented overrides invite false positives. Exhaustive-coverage requirement makes partial audits detectable by reviewers.",
       "planted_defect_marker": "False violation: documented billing timeout override",
       "quality_markers": [
-        {"name": "Violation: auth SESSION_TTL_SEC 7200 vs 3600", "patterns": ["7200", "7,200"]},
-        {"name": "Violation: auth TLS_MIN_VERSION TLSv1.1 vs TLSv1.2", "patterns": ["tlsv1.1", "tls 1.1", "tls_min_version 1.1"]},
-        {"name": "Violation: billing IDEMPOTENCY_WINDOW_SEC 86400 vs 600", "patterns": ["86400", "86,400"]},
-        {"name": "Violation: search DB_POOL_SIZE 128 vs 64", "patterns": ["128"]},
-        {"name": "Violation: search LOG_RETENTION_DAYS 45 vs 30", "patterns": ["45 day", "retention_days: 45", "retention_days 45", "retention_days = 45", "| 45"]},
-        {"name": "Violation: notify BATCH_WINDOW_MS 250 vs 500", "patterns": ["250"]},
-        {"name": "Rejected override: billing CONNECT_TIMEOUT_MS 12000 (PLAT-482)", "patterns": ["plat-482"]},
-        {"name": "Rejected override: search CACHE_TTL_SEC 30 (PLAT-511)", "patterns": ["plat-511"]},
-        {"name": "Rejected override: notify REQUEST_RETRY_MAX 2 (PLAT-390)", "patterns": ["plat-390"]}
+        {
+          "name": "Violation: auth SESSION_TTL_SEC 7200 vs 3600",
+          "match_type": "regex",
+          "patterns": [
+            "session_ttl.{0,100}(diverge|undocumented|\\bv\\b|violation|mismatch|drift|non.compli)",
+            "(3[,\\s]?600.{0,30}7[,\\s]?200|7[,\\s]?200.{0,30}3[,\\s]?600).{0,80}(diverge|undocumented|\\bv\\b|violation|mismatch)"
+          ]
+        },
+        {
+          "name": "Violation: auth TLS_MIN_VERSION TLSv1.1 vs TLSv1.2",
+          "match_type": "regex",
+          "patterns": [
+            "tls.{0,20}1\\.1.{0,80}(diverge|undocumented|\\bv\\b|violation|mismatch|drift|non.compli)",
+            "(tlsv1\\.2.{0,30}tlsv1\\.1|tlsv1\\.1.{0,30}tlsv1\\.2).{0,80}(diverge|undocumented|\\bv\\b|violation|mismatch)"
+          ]
+        },
+        {
+          "name": "Violation: billing IDEMPOTENCY_WINDOW_SEC 86400 vs 600",
+          "match_type": "regex",
+          "patterns": [
+            "idempotency.{0,60}(600.{0,30}86[,\\s]?400|86[,\\s]?400.{0,30}600).{0,80}(diverge|undocumented|\\bv\\b|violation|mismatch)",
+            "86[,\\s]?400.{0,80}(diverge|undocumented|\\bv\\b|violation|mismatch)"
+          ]
+        },
+        {
+          "name": "Violation: search DB_POOL_SIZE 128 vs 64",
+          "match_type": "regex",
+          "patterns": [
+            "db_pool.{0,30}(64.{0,30}128|128.{0,30}64).{0,80}(diverge|undocumented|\\bv\\b|violation|mismatch)",
+            "128.{0,80}(diverge|undocumented|\\bv\\b|violation|mismatch)"
+          ]
+        },
+        {
+          "name": "Violation: search LOG_RETENTION_DAYS 45 vs 30",
+          "match_type": "regex",
+          "patterns": [
+            "log_retention.{0,30}(30.{0,20}45|45.{0,20}30).{0,80}(diverge|undocumented|\\bv\\b|violation|mismatch)",
+            "retention.{0,30}45.{0,80}(diverge|undocumented|\\bv\\b|violation|mismatch)"
+          ]
+        },
+        {
+          "name": "Violation: notify BATCH_WINDOW_MS 250 vs 500",
+          "match_type": "regex",
+          "patterns": [
+            "batch_window.{0,30}(500.{0,20}250|250.{0,20}500).{0,80}(diverge|undocumented|\\bv\\b|violation|mismatch)",
+            "250.{0,80}(diverge|undocumented|\\bv\\b|violation|mismatch).{0,50}(500|batch)"
+          ]
+        },
+        {
+          "name": "Rejected override: billing CONNECT_TIMEOUT_MS 12000 (PLAT-482)",
+          "match_type": "regex",
+          "patterns": [
+            "plat-482.{0,200}(rejected|non.finding|meets|approved|documented|complian)",
+            "connect_timeout.{0,60}12000.{0,100}plat-482",
+            "(approved|documented|complian).{0,50}plat-482"
+          ]
+        },
+        {
+          "name": "Rejected override: search CACHE_TTL_SEC 30 (PLAT-511)",
+          "match_type": "regex",
+          "patterns": [
+            "plat-511.{0,100}(rejected|non.finding|meets|approved|documented|complian)",
+            "(approved|documented|complian).{0,50}plat-511"
+          ]
+        },
+        {
+          "name": "Rejected override: notify REQUEST_RETRY_MAX 2 (PLAT-390)",
+          "match_type": "regex",
+          "patterns": [
+            "plat-390.{0,100}(rejected|non.finding|meets|approved|documented|complian)",
+            "(approved|documented|complian).{0,50}plat-390"
+          ]
+        }
       ],
       "forbidden_markers": [
-        {"name": "False violation: documented billing timeout override", "patterns": ["connect_timeout_ms is a violation", "connect_timeout_ms violates", "billing timeout is an undocumented", "fix connect_timeout_ms"]},
-        {"name": "False violation: documented search cache override", "patterns": ["cache_ttl_sec is a violation", "cache_ttl_sec violates", "cache_ttl is an undocumented", "fix cache_ttl_sec"]},
-        {"name": "False violation: documented notify retry override", "patterns": ["request_retry_max is a violation", "request_retry_max violates", "notify retry is an undocumented", "fix request_retry_max"]}
+        {
+          "name": "False violation: documented billing timeout override",
+          "patterns": [
+            "connect_timeout_ms is a violation",
+            "connect_timeout_ms violates",
+            "billing timeout is an undocumented",
+            "fix connect_timeout_ms"
+          ]
+        },
+        {
+          "name": "False violation: documented search cache override",
+          "patterns": [
+            "cache_ttl_sec is a violation",
+            "cache_ttl_sec violates",
+            "cache_ttl is an undocumented",
+            "fix cache_ttl_sec"
+          ]
+        },
+        {
+          "name": "False violation: documented notify retry override",
+          "patterns": [
+            "request_retry_max is a violation",
+            "request_retry_max violates",
+            "notify retry is an undocumented",
+            "fix request_retry_max"
+          ]
+        }
       ]
     },
     {
@@ -72,17 +165,75 @@
       "first_pass_failure_design": "Five documents with overlapping but not identical identifier sets. Each inconsistency is only visible when two specific documents are compared on one identifier; no single document reveals any finding. A renumbering decoy (RFC-77) explains the apparent 2.30.x gap.",
       "planted_defect_marker": "False finding: 2.30.x gap flagged as missing release",
       "quality_markers": [
-        {"name": "MIG-2207 applied in ops log but missing from migration index", "patterns": ["mig-2207"]},
-        {"name": "Hotfix 2.31.4 known only from SUP-1189, absent from changelog", "patterns": ["sup-1189"]},
-        {"name": "Zero-downtime claim for 2.32.0 contradicted by OUT-88", "patterns": ["out-88"]},
-        {"name": "CVE-2026-4417 marked fixed but manifest pins vulnerable 1.8.3", "patterns": ["cve-2026-4417"]},
-        {"name": "Vulnerable pin evidence fastcsv 1.8.3", "patterns": ["1.8.3"]},
-        {"name": "2.32.1 rolled back in ops log but still listed GA", "patterns": ["2.32.1"]},
-        {"name": "SUP-1204 fastcsv license change not reflected in notices", "patterns": ["sup-1204"]},
-        {"name": "Rejected: 2.30.x gap explained by RFC-77 renumbering", "patterns": ["rfc-77"]}
+        {
+          "name": "MIG-2207 applied in ops log but missing from migration index",
+          "match_type": "regex",
+          "patterns": [
+            "mig-2207.{0,100}(missing|absent|not.{0,10}in|not.{0,10}registered)"
+          ]
+        },
+        {
+          "name": "Hotfix 2.31.4 known only from SUP-1189, absent from changelog",
+          "match_type": "regex",
+          "patterns": [
+            "sup-1189.{0,100}(2\\.31\\.4|hotfix|only|absent)"
+          ]
+        },
+        {
+          "name": "Zero-downtime claim for 2.32.0 contradicted by OUT-88",
+          "match_type": "regex",
+          "patterns": [
+            "out-88.{0,200}zero.{0,5}downtime|zero.{0,5}downtime.{0,200}out-88",
+            "out-88.{0,100}(contradict|discrepan|false|incorrect)"
+          ]
+        },
+        {
+          "name": "CVE-2026-4417 marked fixed but manifest pins vulnerable 1.8.3",
+          "match_type": "regex",
+          "patterns": [
+            "cve-2026-4417.{0,100}(1\\.8\\.3|pin|vulnerable)"
+          ]
+        },
+        {
+          "name": "Vulnerable pin evidence fastcsv 1.8.3",
+          "match_type": "regex",
+          "patterns": [
+            "fastcsv.{0,20}1\\.8\\.3.{0,100}(1\\.9\\.0|threshold|remediat|cve)",
+            "1\\.8\\.3.{0,200}(1\\.9\\.0|threshold|remediat)"
+          ]
+        },
+        {
+          "name": "2.32.1 rolled back in ops log but still listed GA",
+          "match_type": "regex",
+          "patterns": [
+            "2\\.32\\.1.{0,200}(still.{0,20}(ga|listed|current)|rollback)|rollback.{0,100}2\\.32\\.1"
+          ]
+        },
+        {
+          "name": "SUP-1204 fastcsv license change not reflected in notices",
+          "match_type": "regex",
+          "patterns": [
+            "sup-1204.{0,100}(license|notice|fastcsv|busl)"
+          ]
+        },
+        {
+          "name": "Rejected: 2.30.x gap explained by RFC-77 renumbering",
+          "match_type": "regex",
+          "patterns": [
+            "(rejected|non.finding|not.a.finding).{0,200}rfc-77"
+          ]
+        }
       ],
       "forbidden_markers": [
-        {"name": "False finding: 2.30.x gap flagged as missing release", "patterns": ["2.30 is missing", "missing release 2.30", "2.30.x was skipped in error", "unexplained gap 2.30"]}
+        {
+          "name": "False finding: 2.30.x gap flagged as missing release",
+          "patterns": [
+            "2.30 is missing",
+            "missing release 2.30",
+            "2.30.x was skipped in error",
+            "unexplained gap 2.30"
+          ]
+        }
       ]
     },
     {
@@ -106,17 +257,75 @@
       "first_pass_failure_design": "Each client contains one to two breaking drifts of different kinds (header name, enum spelling, unit semantics, idempotency, missing required header), so pattern-matching one drift type across clients misses the others. Two permitted differences look like violations until the extension clause is read.",
       "planted_defect_marker": "False drift: X-Trace-Id flagged as breaking",
       "quality_markers": [
-        {"name": "client-go sends X-Signature-V2 instead of spec X-Sig", "patterns": ["x-signature-v2"]},
-        {"name": "client-go retries non-idempotent POST /v2/transfers", "patterns": ["/v2/transfers"]},
-        {"name": "client-py enum spelling canceled vs spec cancelled", "patterns": ["canceled"]},
-        {"name": "client-py omits required Idempotency-Key header", "patterns": ["idempotency-key"]},
-        {"name": "client-js reads expires_at as seconds; spec is epoch_ms", "patterns": ["epoch_ms"]},
-        {"name": "Rejected: X-Trace-Id permitted by extension clause", "patterns": ["x-trace-id"]},
-        {"name": "Rejected: lowercase headers permitted by case-insensitivity clause", "patterns": ["case-insensitive", "case insensitive"]}
+        {
+          "name": "client-go sends X-Signature-V2 instead of spec X-Sig",
+          "match_type": "regex",
+          "patterns": [
+            "x-signature-v2.{0,100}(x-sig\\b|instead|vs|drift|wrong|mismatch)"
+          ]
+        },
+        {
+          "name": "client-go retries non-idempotent POST /v2/transfers",
+          "match_type": "regex",
+          "patterns": [
+            "(client.go|go.client).{0,200}retries?.{0,80}/v2/transfers"
+          ]
+        },
+        {
+          "name": "client-py enum spelling canceled vs spec cancelled",
+          "match_type": "regex",
+          "patterns": [
+            "canceled.{0,100}(cancelled|spec|vs|drift|violat|mismatch)"
+          ]
+        },
+        {
+          "name": "client-py omits required Idempotency-Key header",
+          "match_type": "regex",
+          "patterns": [
+            "idempotency.key.{0,200}(breaking|violat|non.complian)",
+            "(omit|omits|absent|missing).{0,60}idempotency.key"
+          ]
+        },
+        {
+          "name": "client-js reads expires_at as seconds; spec is epoch_ms",
+          "match_type": "regex",
+          "patterns": [
+            "client.?js.{0,200}(violat|breaking|bug|drift|wrong|incorrect|error)"
+          ]
+        },
+        {
+          "name": "Rejected: X-Trace-Id permitted by extension clause",
+          "match_type": "regex",
+          "patterns": [
+            "x-trace-id.{0,100}(rejected|extension|permitted|non.finding)"
+          ]
+        },
+        {
+          "name": "Rejected: lowercase headers permitted by case-insensitivity clause",
+          "match_type": "regex",
+          "patterns": [
+            "(case.insensitiv|rfc.9110).{0,100}(rejected|permitted|lowercase|non.finding)"
+          ]
+        }
       ],
       "forbidden_markers": [
-        {"name": "False drift: X-Trace-Id flagged as breaking", "patterns": ["x-trace-id is a breaking", "x-trace-id violates", "remove x-trace-id", "x-trace-id is not allowed"]},
-        {"name": "False drift: header casing flagged as breaking", "patterns": ["lowercase headers violate", "header casing is a breaking", "must match header case"]}
+        {
+          "name": "False drift: X-Trace-Id flagged as breaking",
+          "patterns": [
+            "x-trace-id is a breaking",
+            "x-trace-id violates",
+            "remove x-trace-id",
+            "x-trace-id is not allowed"
+          ]
+        },
+        {
+          "name": "False drift: header casing flagged as breaking",
+          "patterns": [
+            "lowercase headers violate",
+            "header casing is a breaking",
+            "must match header case"
+          ]
+        }
       ]
     },
     {
@@ -140,16 +349,70 @@
       "first_pass_failure_design": "The same metric appears with different values in different documents, and each discrepancy has a different mechanical cause. Spotting a difference is easy; attributing all four causes correctly requires reading every derivation note. A formatting decoy (thousands separator) is explained in a footnote.",
       "planted_defect_marker": "False discrepancy: thousands-separator formatting decoy",
       "quality_markers": [
-        {"name": "Revenue 48,210 double-counts refunds vs ledger 45,930", "patterns": ["48,210", "48210"]},
-        {"name": "Ledger revenue reference 45,930", "patterns": ["45,930", "45930"]},
-        {"name": "DAU 12,404 uses UTC cutoff vs ledger JST 11,987", "patterns": ["12,404", "12404"]},
-        {"name": "Ledger DAU reference 11,987", "patterns": ["11,987", "11987"]},
-        {"name": "Conversion 3.4% uses sessions denominator; per-user is 2.6%", "patterns": ["2.6%", "2.6 %"]},
-        {"name": "Board deck uses stale FX rate 148.2 vs period rate 155.7", "patterns": ["148.2"]},
-        {"name": "Period FX rate reference 155.7", "patterns": ["155.7"]}
+        {
+          "name": "Revenue 48,210 double-counts refunds vs ledger 45,930",
+          "match_type": "regex",
+          "patterns": [
+            "48[,\\s]?210.{0,200}(discrepan|mismatch|incorrect|overstated|overcount|refunded.orders.not.excluded|not.filter.refund|filter.refund.flag|query.does.not.filter)",
+            "48[,\\s]?210.{0,100}45[,\\s]?930.{0,50}(discrepan|mismatch|wrong|net|vs)",
+            "45[,\\s]?930.{0,50}48[,\\s]?210.{0,200}(refunded|not.excluded|wrong|discrepan)"
+          ]
+        },
+        {
+          "name": "Ledger revenue reference 45,930",
+          "match_type": "regex",
+          "patterns": [
+            "45[,\\s]?930.{0,300}(net.of.refund|after.refund|exclud.{0,10}refund|correct.{0,20}figure|refunded.orders.not.excluded|query.does.not.filter)",
+            "(authoritative|correct.{0,5}value|source.of.truth|reference.value).{0,100}45[,\\s]?930"
+          ]
+        },
+        {
+          "name": "DAU 12,404 uses UTC cutoff vs ledger JST 11,987",
+          "match_type": "regex",
+          "patterns": [
+            "12[,\\s]?404.{0,100}(11[,\\s]?987|utc|jst|cut.off|discrepan|mismatch)"
+          ]
+        },
+        {
+          "name": "Ledger DAU reference 11,987",
+          "match_type": "regex",
+          "patterns": [
+            "11[,\\s]?987.{0,80}(jst.{0,30}(correct|true|auth)|utc.{0,50}jst|correct.{0,20}dau|timezone.cutoff.mismatch)",
+            "(jst.{0,20}correct|correct.{0,20}jst|utc.{0,50}jst|timezone.cutoff.mismatch).{0,100}11[,\\s]?987"
+          ]
+        },
+        {
+          "name": "Conversion 3.4% uses sessions denominator; per-user is 2.6%",
+          "match_type": "regex",
+          "patterns": [
+            "2\\.6.{0,50}(3\\.4|per.user|denominator)|3\\.4.{0,50}2\\.6.{0,50}(per.user|session|denominator)"
+          ]
+        },
+        {
+          "name": "Board deck uses stale FX rate 148.2 vs period rate 155.7",
+          "match_type": "regex",
+          "patterns": [
+            "148\\.2.{0,200}(stale|155\\.7|outdated|wrong|incorrect|discrepan)"
+          ]
+        },
+        {
+          "name": "Period FX rate reference 155.7",
+          "match_type": "regex",
+          "patterns": [
+            "155\\.7.{0,100}(period|canonical|correct|authoritative|vs|correct.rate|actual.rate)|period.{0,50}(rate.{0,20}155|fx.{0,30}155\\.7)",
+            "155\\.7.{0,100}(correct|actual|period|authoritative|vs.{0,10}148)"
+          ]
+        }
       ],
       "forbidden_markers": [
-        {"name": "False discrepancy: thousands-separator formatting decoy", "patterns": ["separator is a discrepancy", "formatting mismatch is a finding", "45 930 differs from 45,930"]}
+        {
+          "name": "False discrepancy: thousands-separator formatting decoy",
+          "patterns": [
+            "separator is a discrepancy",
+            "formatting mismatch is a finding",
+            "45 930 differs from 45,930"
+          ]
+        }
       ]
     },
     {
@@ -172,19 +435,94 @@
       "first_pass_failure_design": "The roster's role validity dates and the policy's emergency/delegation clauses are each needed for exactly one verdict; skipping either file flips at least one verdict. Wrong verdicts on the three valid-but-suspicious requests are penalized as forbidden markers.",
       "planted_defect_marker": "False violation: REQ-01 emergency clause missed",
       "quality_markers": [
-        {"name": "Violation REQ-02: approver role expired", "patterns": ["req-02"]},
-        {"name": "REQ-02 roster evidence: validity ended 2026-05-31", "patterns": ["2026-05-31"]},
-        {"name": "Violation REQ-05: scope exceeds two-dataset cap", "patterns": ["req-05"]},
-        {"name": "Violation REQ-06: retroactive approval forbidden by section 4.3", "patterns": ["req-06"]},
-        {"name": "Retroactivity clause citation 4.3", "patterns": ["4.3"]},
-        {"name": "Verdict coverage REQ-01 (emergency clause compliant)", "patterns": ["req-01"]},
-        {"name": "Verdict coverage REQ-03", "patterns": ["req-03"]},
-        {"name": "Verdict coverage REQ-04 (delegation clause compliant)", "patterns": ["req-04"]}
+        {
+          "name": "Violation REQ-02: approver role expired",
+          "match_type": "regex",
+          "patterns": [
+            "req-02.{0,140}(violat|expir|no longer valid|invalid)",
+            "(approver|roster).{0,140}(expir|no longer valid|invalid).{0,80}req-02"
+          ]
+        },
+        {
+          "name": "REQ-02 roster evidence: validity ended 2026-05-31",
+          "match_type": "regex",
+          "patterns": [
+            "(req-02|approver|roster|ilyes).{0,140}2026-05-31",
+            "2026-05-31.{0,140}(req-02|approver|roster|ilyes|expir|violat)"
+          ]
+        },
+        {
+          "name": "Violation REQ-05: scope exceeds two-dataset cap",
+          "match_type": "regex",
+          "patterns": [
+            "req-05.{0,100}(violat|exceeds|three.{0,10}dataset|scope.{0,20}exceed|dataset.cap|more.than.two)"
+          ]
+        },
+        {
+          "name": "Violation REQ-06: retroactive approval forbidden by section 4.3",
+          "match_type": "regex",
+          "patterns": [
+            "req-06.{0,100}(violat|retro|forbidden|4\\.3)"
+          ]
+        },
+        {
+          "name": "Retroactivity clause citation 4.3",
+          "match_type": "regex",
+          "patterns": [
+            "4\\.3.{0,160}(req-06|retroact|violat|forbidden)",
+            "(req-06|retroact|violat).{0,160}4\\.3"
+          ]
+        },
+        {
+          "name": "Verdict coverage REQ-01 (emergency clause compliant)",
+          "match_type": "regex",
+          "patterns": [
+            "req-01.{0,100}(complian|emergency|sev.?1.{0,30}complian|verdict)"
+          ]
+        },
+        {
+          "name": "Verdict coverage REQ-03",
+          "match_type": "regex",
+          "patterns": [
+            "req-03.{0,100}(complian|verdict|approved.{0,30}before|within.cap|two.dataset)"
+          ]
+        },
+        {
+          "name": "Verdict coverage REQ-04 (delegation clause compliant)",
+          "match_type": "regex",
+          "patterns": [
+            "req-04.{0,100}(complian|delegation|cross.team|duval.{0,30}complian)"
+          ]
+        }
       ],
       "forbidden_markers": [
-        {"name": "False violation: REQ-01 emergency clause missed", "patterns": ["req-01: violation", "req-01 is a violation", "req-01 violates", "req-01 non-compliant"]},
-        {"name": "False violation: REQ-03 flagged", "patterns": ["req-03: violation", "req-03 is a violation", "req-03 violates", "req-03 non-compliant"]},
-        {"name": "False violation: REQ-04 delegation clause missed", "patterns": ["req-04: violation", "req-04 is a violation", "req-04 violates", "req-04 non-compliant"]}
+        {
+          "name": "False violation: REQ-01 emergency clause missed",
+          "patterns": [
+            "req-01: violation",
+            "req-01 is a violation",
+            "req-01 violates",
+            "req-01 non-compliant"
+          ]
+        },
+        {
+          "name": "False violation: REQ-03 flagged",
+          "patterns": [
+            "req-03: violation",
+            "req-03 is a violation",
+            "req-03 violates",
+            "req-03 non-compliant"
+          ]
+        },
+        {
+          "name": "False violation: REQ-04 delegation clause missed",
+          "patterns": [
+            "req-04: violation",
+            "req-04 is a violation",
+            "req-04 violates",
+            "req-04 non-compliant"
+          ]
+        }
       ]
     }
   ]

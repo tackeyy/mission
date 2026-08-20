@@ -35,20 +35,26 @@
       "quality_markers": [
         {
           "name": "Dangling ref CFG_B027_LIMIT_MS",
+          "match_type": "regex",
           "patterns": [
-            "cfg_b027_limit_ms"
+            "cfg_b027_limit_ms.{0,100}(dangling|missing|not.{0,10}(found|in.registry|defined)|undefined|unknown)",
+            "cfg_b027_limit_ms.{0,100}(存在しない|見つかり|\\bno\\b)"
           ]
         },
         {
           "name": "Dangling ref CFG_Q084_TTLX",
+          "match_type": "regex",
           "patterns": [
-            "cfg_q084_ttlx"
+            "cfg_q084_ttlx.{0,100}(dangling|missing|not.{0,10}(found|in.registry|defined)|undefined|unknown)",
+            "cfg_q084_ttlx.{0,100}(存在しない|見つかり|\\bno\\b)"
           ]
         },
         {
           "name": "Dangling ref CFG_ZZ999_RATE",
+          "match_type": "regex",
           "patterns": [
-            "cfg_zz999_rate"
+            "cfg_zz999_rate.{0,100}(dangling|missing|not.{0,10}(found|in.registry|defined)|undefined|unknown)",
+            "cfg_zz999_rate.{0,100}(存在しない|見つかり|\\bno\\b)"
           ]
         }
       ],
@@ -72,32 +78,42 @@
       "quality_markers": [
         {
           "name": "A-only SKU-1093",
+          "match_type": "regex",
           "patterns": [
-            "sku-1093"
+            "sku-1093.{0,100}(a.only|list.?a|only.in.a|not.in.b|missing.from.b)",
+            "(a.only|list.a.only|only.in.a|not.in.b).{0,100}sku-1093"
           ]
         },
         {
           "name": "A-only SKU-1177",
+          "match_type": "regex",
           "patterns": [
-            "sku-1177"
+            "sku-1177.{0,100}(a.only|list.?a|only.in.a|not.in.b)",
+            "(a.only|list.a.only|only.in.a|not.in.b).{0,100}sku-1177"
           ]
         },
         {
           "name": "A-only SKU-9001",
+          "match_type": "regex",
           "patterns": [
-            "sku-9001"
+            "sku-9001.{0,100}(a.only|list.?a|only.in.a|not.in.b)",
+            "(a.only|list.a.only|only.in.a|not.in.b).{0,100}sku-9001"
           ]
         },
         {
           "name": "B-only SKU-8002",
+          "match_type": "regex",
           "patterns": [
-            "sku-8002"
+            "sku-8002.{0,100}(b.only|list.?b|only.in.b|not.in.a)",
+            "(b.only|list.b.only|only.in.b|not.in.a).{0,100}sku-8002"
           ]
         },
         {
           "name": "B-only SKU-8107",
+          "match_type": "regex",
           "patterns": [
-            "sku-8107"
+            "sku-8107.{0,100}(b.only|list.?b|only.in.b|not.in.a)",
+            "(b.only|list.b.only|only.in.b|not.in.a).{0,100}sku-8107"
           ]
         }
       ],
@@ -121,38 +137,47 @@
       "quality_markers": [
         {
           "name": "Conflict MTG-9101 x MTG-108",
+          "match_type": "regex",
           "patterns": [
-            "mtg-9101"
+            "mtg-9101.{0,100}(conflict|overlap|clash|collision|mtg-108)"
           ]
         },
         {
           "name": "Conflict partner MTG-108",
+          "match_type": "regex",
           "patterns": [
-            "mtg-108"
+            "mtg-108.{0,100}(conflict|overlap|clash|collision|mtg-9101)",
+            "(conflict|overlap|clash).{0,100}mtg-108"
           ]
         },
         {
           "name": "Conflict MTG-9202 x MTG-118",
+          "match_type": "regex",
           "patterns": [
-            "mtg-9202"
+            "mtg-9202.{0,100}(conflict|overlap|clash|collision|mtg-118)"
           ]
         },
         {
           "name": "Conflict partner MTG-118",
+          "match_type": "regex",
           "patterns": [
-            "mtg-118"
+            "mtg-118.{0,100}(conflict|overlap|clash|collision|mtg-9202)",
+            "(conflict|overlap|clash).{0,100}mtg-118"
           ]
         },
         {
           "name": "Conflict MTG-9303 x MTG-135",
+          "match_type": "regex",
           "patterns": [
-            "mtg-9303"
+            "mtg-9303.{0,100}(conflict|overlap|clash|collision|mtg-135)"
           ]
         },
         {
           "name": "Conflict partner MTG-135",
+          "match_type": "regex",
           "patterns": [
-            "mtg-135"
+            "mtg-135.{0,100}(conflict|overlap|clash|collision|mtg-9303)",
+            "(conflict|overlap|clash).{0,100}mtg-135"
           ]
         }
       ],
@@ -177,20 +202,24 @@
       "quality_markers": [
         {
           "name": "enum spelling canceled vs cancelled",
+          "match_type": "regex",
           "patterns": [
-            "canceled"
+            "canceled.{0,100}(cancelled|spec|vs|drift|violat|mismatch)"
           ]
         },
         {
           "name": "missing required Idempotency-Key",
+          "match_type": "regex",
           "patterns": [
-            "idempotency-key"
+            "idempotency.key.{0,200}(breaking|violat|non.complian)",
+            "(omit|omits|absent|missing).{0,60}idempotency.key"
           ]
         },
         {
           "name": "Rejected: X-Trace-Id permitted",
+          "match_type": "regex",
           "patterns": [
-            "x-trace-id"
+            "x-trace-id.{0,100}(rejected|extension|permitted|non.finding)"
           ]
         }
       ],
@@ -224,23 +253,30 @@
       "first_pass_failure_design": "The cause (unfiltered refund flag) is stated in derivation notes, not in the numbers.",
       "quality_markers": [
         {
-          "name": "finance revenue 48,210",
+          "name": "finance revenue 48,210 vs ledger 45,930",
+          "match_type": "regex",
           "patterns": [
-            "48,210",
-            "48210"
+            "差異.{0,30}48[,\\s]?210|48[,\\s]?210.{0,30}差異",
+            "48[,\\s]?210.{0,150}45[,\\s]?930",
+            "45[,\\s]?930.{0,80}48[,\\s]?210"
           ]
         },
         {
-          "name": "ledger revenue 45,930",
+          "name": "ledger revenue 45,930 is correct figure",
+          "match_type": "regex",
           "patterns": [
-            "45,930",
-            "45930"
+            "correct.{0,100}45[,\\s]?930|45[,\\s]?930.{0,100}correct",
+            "source.of.truth.{0,80}45[,\\s]?930|45[,\\s]?930.{0,80}source.of.truth",
+            "(authoritative|canonical).{0,100}45[,\\s]?930",
+            "data.ledger.{0,50}45[,\\s]?930|45[,\\s]?930.{0,50}data.ledger"
           ]
         },
         {
-          "name": "cause: refunds not filtered",
+          "name": "cause: refunds not filtered from finance report",
+          "match_type": "regex",
           "patterns": [
-            "refund"
+            "(cause|discrepan|reason).{0,200}refund.{0,100}(not.filter|not.exclu)",
+            "refund.{0,100}(not.filter|not.exclu).{0,200}(cause|discrepan|reason|overcoun|overstate)"
           ]
         }
       ],
@@ -266,26 +302,33 @@
       "quality_markers": [
         {
           "name": "Verdict REQ-01 (emergency clause compliant)",
+          "match_type": "regex",
           "patterns": [
-            "req-01"
+            "req-01.{0,200}(complian|emergency.clause|sev.?1.{0,30}complian|verdict.{0,30}complian)",
+            "verdict.{0,50}complian.{0,100}(4\\.2|emergency.clause|clause.4\\.2|sev.?1)"
           ]
         },
         {
           "name": "Violation REQ-02 approver role expired",
+          "match_type": "regex",
           "patterns": [
-            "req-02"
+            "req-02.{0,200}(violat|expir|ilyes.{0,30}(expir|invalid|no.{0,10}longer))",
+            "verdict.{0,30}(non.compli|violat).{0,100}(ilyes|data.steward.{0,20}expir)"
           ]
         },
         {
           "name": "roster evidence 2026-05-31",
+          "match_type": "regex",
           "patterns": [
-            "2026-05-31"
+            "ilyes.{0,100}2026-05-31|2026-05-31.{0,100}(req-02|ilyes|expir|violat)"
           ]
         },
         {
           "name": "Verdict REQ-03",
+          "match_type": "regex",
           "patterns": [
-            "req-03"
+            "req-03.{0,200}(complian|verdict.{0,30}complian|approved.{0,30}before|within.cap|two.dataset)",
+            "verdict.{0,50}complian.{0,100}(sato|m\\.sato|3\\.1|two.dataset|duval)"
           ]
         }
       ],
@@ -333,64 +376,75 @@
       "quality_markers": [
         {
           "name": "Violation: auth SESSION_TTL_SEC 7200 vs 3600",
+          "match_type": "regex",
           "patterns": [
-            "7200",
-            "7,200"
+            "session_ttl.{0,100}(diverge|undocumented|\\bv\\b|violation|mismatch|drift|non.compli)",
+            "(3[,\\s]?600.{0,30}7[,\\s]?200|7[,\\s]?200.{0,30}3[,\\s]?600).{0,80}(diverge|undocumented|\\bv\\b|violation|mismatch)"
           ]
         },
         {
           "name": "Violation: auth TLS_MIN_VERSION TLSv1.1 vs TLSv1.2",
+          "match_type": "regex",
           "patterns": [
-            "tlsv1.1",
-            "tls 1.1",
-            "tls_min_version 1.1"
+            "tls.{0,20}1\\.1.{0,80}(diverge|undocumented|\\bv\\b|violation|mismatch|drift|non.compli)",
+            "(tlsv1\\.2.{0,30}tlsv1\\.1|tlsv1\\.1.{0,30}tlsv1\\.2).{0,80}(diverge|undocumented|\\bv\\b|violation|mismatch)"
           ]
         },
         {
           "name": "Violation: billing IDEMPOTENCY_WINDOW_SEC 86400 vs 600",
+          "match_type": "regex",
           "patterns": [
-            "86400",
-            "86,400"
+            "idempotency.{0,60}(600.{0,30}86[,\\s]?400|86[,\\s]?400.{0,30}600).{0,80}(diverge|undocumented|\\bv\\b|violation|mismatch)",
+            "86[,\\s]?400.{0,80}(diverge|undocumented|\\bv\\b|violation|mismatch)"
           ]
         },
         {
           "name": "Violation: search DB_POOL_SIZE 128 vs 64",
+          "match_type": "regex",
           "patterns": [
-            "128"
+            "db_pool.{0,30}(64.{0,30}128|128.{0,30}64).{0,80}(diverge|undocumented|\\bv\\b|violation|mismatch)",
+            "128.{0,80}(diverge|undocumented|\\bv\\b|violation|mismatch)"
           ]
         },
         {
           "name": "Violation: search LOG_RETENTION_DAYS 45 vs 30",
+          "match_type": "regex",
           "patterns": [
-            "45 day",
-            "retention_days: 45",
-            "retention_days 45",
-            "retention_days = 45",
-            "| 45"
+            "log_retention.{0,30}(30.{0,20}45|45.{0,20}30).{0,80}(diverge|undocumented|\\bv\\b|violation|mismatch)",
+            "retention.{0,30}45.{0,80}(diverge|undocumented|\\bv\\b|violation|mismatch)"
           ]
         },
         {
           "name": "Violation: notify BATCH_WINDOW_MS 250 vs 500",
+          "match_type": "regex",
           "patterns": [
-            "250"
+            "batch_window.{0,30}(500.{0,20}250|250.{0,20}500).{0,80}(diverge|undocumented|\\bv\\b|violation|mismatch)",
+            "250.{0,80}(diverge|undocumented|\\bv\\b|violation|mismatch).{0,50}(500|batch)"
           ]
         },
         {
           "name": "Rejected override: billing CONNECT_TIMEOUT_MS 12000 (PLAT-482)",
+          "match_type": "regex",
           "patterns": [
-            "plat-482"
+            "plat-482.{0,200}(rejected|non.finding|meets|approved|documented|complian)",
+            "connect_timeout.{0,60}12000.{0,100}plat-482",
+            "(approved|documented|complian).{0,50}plat-482"
           ]
         },
         {
           "name": "Rejected override: search CACHE_TTL_SEC 30 (PLAT-511)",
+          "match_type": "regex",
           "patterns": [
-            "plat-511"
+            "plat-511.{0,100}(rejected|non.finding|meets|approved|documented|complian)",
+            "(approved|documented|complian).{0,50}plat-511"
           ]
         },
         {
           "name": "Rejected override: notify REQUEST_RETRY_MAX 2 (PLAT-390)",
+          "match_type": "regex",
           "patterns": [
-            "plat-390"
+            "plat-390.{0,100}(rejected|non.finding|meets|approved|documented|complian)",
+            "(approved|documented|complian).{0,50}plat-390"
           ]
         }
       ],
@@ -446,51 +500,61 @@
       "first_pass_failure_design": "Seven inconsistencies spread over five documents; a renumbering decoy (RFC-77) explains the apparent 2.30.x gap.",
       "quality_markers": [
         {
-          "name": "MIG-2207 applied but missing from index",
+          "name": "MIG-2207 applied in ops log but missing from migration index",
+          "match_type": "regex",
           "patterns": [
-            "mig-2207"
+            "mig-2207.{0,100}(missing|absent|not.{0,10}in|not.{0,10}registered)"
           ]
         },
         {
-          "name": "Hotfix 2.31.4 known only from SUP-1189",
+          "name": "Hotfix 2.31.4 known only from SUP-1189, absent from changelog",
+          "match_type": "regex",
           "patterns": [
-            "sup-1189"
+            "sup-1189.{0,100}(2\\.31\\.4|hotfix|only|absent)"
           ]
         },
         {
-          "name": "Zero-downtime claim contradicted by OUT-88",
+          "name": "Zero-downtime claim for 2.32.0 contradicted by OUT-88",
+          "match_type": "regex",
           "patterns": [
-            "out-88"
+            "out-88.{0,200}zero.{0,5}downtime|zero.{0,5}downtime.{0,200}out-88",
+            "out-88.{0,100}(contradict|discrepan|false|incorrect)"
           ]
         },
         {
-          "name": "CVE-2026-4417 fixed but manifest pins 1.8.3",
+          "name": "CVE-2026-4417 marked fixed but manifest pins vulnerable 1.8.3",
+          "match_type": "regex",
           "patterns": [
-            "cve-2026-4417"
+            "cve-2026-4417.{0,100}(1\\.8\\.3|pin|vulnerable)"
           ]
         },
         {
           "name": "Vulnerable pin evidence fastcsv 1.8.3",
+          "match_type": "regex",
           "patterns": [
-            "1.8.3"
+            "fastcsv.{0,20}1\\.8\\.3.{0,100}(1\\.9\\.0|threshold|remediat|cve)",
+            "1\\.8\\.3.{0,200}(1\\.9\\.0|threshold|remediat)"
           ]
         },
         {
-          "name": "2.32.1 rolled back but still listed GA",
+          "name": "2.32.1 rolled back in ops log but still listed GA",
+          "match_type": "regex",
           "patterns": [
-            "2.32.1"
+            "2\\.32\\.1.{0,200}(still.{0,20}(ga|listed|current)|rollback)|rollback.{0,100}2\\.32\\.1"
           ]
         },
         {
-          "name": "SUP-1204 license change not in notices",
+          "name": "SUP-1204 fastcsv license change not reflected in notices",
+          "match_type": "regex",
           "patterns": [
-            "sup-1204"
+            "sup-1204.{0,100}(license|notice|fastcsv|busl)"
           ]
         },
         {
-          "name": "Rejected: 2.30.x gap explained by RFC-77",
+          "name": "Rejected: 2.30.x gap explained by RFC-77 renumbering",
+          "match_type": "regex",
           "patterns": [
-            "rfc-77"
+            "(rejected|non.finding|not.a.finding).{0,200}rfc-77"
           ]
         }
       ],

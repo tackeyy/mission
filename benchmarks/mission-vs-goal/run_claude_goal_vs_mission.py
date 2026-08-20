@@ -648,7 +648,8 @@ def extract_process_quality(worktree: Path) -> tuple[dict | None, str | None]:
                 return None, "archive_reviews_not_object"
             inputs = payload.get("inputs")
             if not isinstance(inputs, list):
-                continue
+                # 0 件の正常な run と区別できなくなるため握りつぶさない (#585 B)。
+                return None, "archive_reviews_inputs_not_list"
             reviewer_count_observed = max(reviewer_count_observed, len(inputs))
             for inp in inputs:
                 if not isinstance(inp, dict):
@@ -1507,6 +1508,16 @@ def summarize(
     repeats: int = 1,
     mission_threshold: float | None = None,
 ) -> dict:
+    # #585 A: CLI 未指定でもタスク定義由来の threshold を実効値として記録する。
+    # 記録が欠けると「どの pass gate で測ったか」を事後に復元できない。
+    if mission_threshold is None:
+        task_thresholds = {
+            task.get("mission_threshold")
+            for task in tasks
+            if task.get("mission_threshold") is not None
+        }
+        if len(task_thresholds) == 1:
+            mission_threshold = task_thresholds.pop()
     by_arm: dict[str, list[dict]] = {arm: [r for r in records if r["arm"] == arm] for arm in ARMS}
     task_cohort = tasks_path.stem.removeprefix("tasks.")
 
@@ -1544,7 +1555,16 @@ def summarize(
         return round(s[rank - 1], 6)
 
     def _stdev(vals: list[float]) -> float | None:
-        """Sample standard deviation. Returns None for n < 2."""
+        """Sample standard deviation. Returns None for n < 2.
+
+        NOTE: this is the SAMPLE stdev (statistics.stdev, n-1 denominator),
+        while the pre-existing ``marker_score_variance`` field is the
+        POPULATION variance (statistics.pvariance, n denominator). They are
+        therefore not related by a square root: sqrt(marker_score_variance)
+        != marker_score_stdev (about 22% apart at n=3). Both are kept as-is
+        because renaming or redefining ``marker_score_variance`` would break
+        analysis of historical runs; read each field by its own definition.
+        """
         if len(vals) < 2:
             return None
         return round(statistics.stdev(vals), 6)
@@ -1637,6 +1657,29 @@ def summarize(
         if mission_mean is not None and goal_mean is not None and goal_mean != 0
         else None
     )
+    # #585 C: arm 感応度。同一タスクで両 arm のスコアが異なるセル数を数える。
+    # measurement_valid とは分離する: 「差なし」は正当な結論であり、測定失敗
+    # として握りつぶすと #557 が定めた 3 分類のうち「差なし」を表現できなくなる。
+    # 一方で「指標が arm の違いに一切感応していない」疑いは別途見えている必要がある。
+    def _scores_by_task(arm: str) -> dict:
+        out: dict = {}
+        for r in _scored(by_arm.get(arm, [])):
+            out.setdefault(r.get("task_id"), []).append(r["quality_marker_score"])
+        return out
+
+    _goal_by_task = _scores_by_task("claude_code_goal_command")
+    _mission_by_task = _scores_by_task("mission")
+    _shared_tasks = set(_goal_by_task) & set(_mission_by_task)
+    if _shared_tasks:
+        marker_score_arm_sensitivity = sum(
+            1
+            for task_id in _shared_tasks
+            if (sum(_goal_by_task[task_id]) / len(_goal_by_task[task_id]))
+            != (sum(_mission_by_task[task_id]) / len(_mission_by_task[task_id]))
+        )
+    else:
+        # 比較できるセル対が無いので感応度を主張しない。
+        marker_score_arm_sensitivity = None
     # --- end saturation guard ---
 
     iteration_rows = [
@@ -1734,6 +1777,7 @@ def summarize(
         "marker_saturation_detail": marker_saturation_detail,
         "measurement_valid": measurement_valid,
         "measurement_valid_reason": measurement_valid_reason,
+        "marker_score_arm_sensitivity": marker_score_arm_sensitivity,
         "marker_score_delta_vs_goal": marker_score_delta_vs_goal,
         "marker_score_ratio_vs_goal": marker_score_ratio_vs_goal,
         "diff_review_measurement_gate": diff_review_measurement_gate,
@@ -1866,6 +1910,15 @@ def summary_warnings(summary: dict) -> list[str]:
             warnings.append(
                 f"WARNING: measurement_valid is false (reason: {reason}). Quality comparison is NOT valid."
             )
+    # #585 C: arm 感応度ゼロの警告 (measurement_valid とは独立)
+    if summary.get("marker_score_arm_sensitivity") == 0:
+        warnings.append(
+            "WARNING: zero arm sensitivity - every task scored identically for both arms.\n"
+            "The measurement is valid (this is a real no-difference result), but the metric\n"
+            "showed no responsiveness to the arm at all in this run, so it may simply be\n"
+            "unable to separate them. See issue #557."
+        )
+
     # #565: single-sample warning
     if summary.get("repeats_observed", 1) <= 1:
         warnings.append(
