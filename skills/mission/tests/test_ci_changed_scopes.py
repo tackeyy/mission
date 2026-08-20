@@ -59,7 +59,6 @@ def test_docs_only_pr_uses_guard_fast_path():
     assert result["docsOnly"] is True
     assert result["python"] is True
     assert result["pythonTargets"] == " ".join(FAST_PATH_TARGETS)
-    assert result["shell"] is False
 
 
 def test_code_change_pr_falls_back_to_full_suite():
@@ -68,16 +67,14 @@ def test_code_change_pr_falls_back_to_full_suite():
     assert result["runAll"] is False
     assert result["docsOnly"] is False
     assert result["pythonTargets"] == "skills/mission"
-    assert result["shell"] is False
 
 
-def test_workflow_change_forces_full_suite_and_shellcheck():
+def test_workflow_change_forces_full_suite():
     result = _classify(event_name="pull_request", files=_fixture("workflow_change.json"))
 
     assert result["runAll"] is False
     assert result["docsOnly"] is False
     assert result["pythonTargets"] == "skills/mission"
-    assert result["shell"] is True
 
 
 def test_merge_group_event_stays_on_full_suite_even_for_docs_only_changes():
@@ -86,7 +83,6 @@ def test_merge_group_event_stays_on_full_suite_even_for_docs_only_changes():
     assert result["runAll"] is True
     assert result["docsOnly"] is False
     assert result["pythonTargets"] == "skills/mission"
-    assert result["shell"] is True
 
 
 def test_empty_or_invalid_file_list_fails_safe_to_full_suite():
@@ -95,7 +91,6 @@ def test_empty_or_invalid_file_list_fails_safe_to_full_suite():
     assert result["runAll"] is True
     assert result["docsOnly"] is False
     assert result["pythonTargets"] == "skills/mission"
-    assert result["shell"] is True
 
 
 def test_fast_path_targets_exist_and_cover_repo_wide_guards():

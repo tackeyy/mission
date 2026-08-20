@@ -18,6 +18,18 @@ full / E2E tier は pinned された `.github/requirements-ci.txt` から
 `.venv-ci` を作ります。各 target は exact Git tree SHA と実行 test manifest を
 `mission-test-report/1` JSON で出力します。
 
+CI はこのテスト群が CPU バウンドであるため、複数の runner へ分割して実行します。
+CI の 1 シャードをローカルで再現するには次を実行します。
+
+```bash
+make test-shard SHARD_INDEX=1 SHARD_TOTAL=6
+```
+
+分割は `scripts/ci_shard_targets.py` が行います。決定的・網羅的・排他的で、
+追跡下のテストファイルは必ずどれか 1 つのシャードに属します。シャードが 1 件も
+選ばなかった場合は非 0 で終了するため、分割の破綻はテスト減少ではなくビルド失敗
+として表面化します。
+
 特定ファイル:
 
 ```bash

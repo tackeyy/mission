@@ -16,12 +16,54 @@ concurrency:
     && github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
+env:
+  # Wall-clock is dominated by the Python suite, which is CPU-bound: the same
+  # work takes ~344s on 10 cores locally but ~1019s on a CI runner. Splitting it
+  # across independent runners shortens feedback almost linearly.
+  #
+  # 6 is where three constraints meet:
+  #
+  # 1. The slowest shard keeps shrinking: measured 369s at 4 shards, 250s at 6.
+  #    Going further still helps but the marginal gain halves at every step.
+  # 2. The docs-only fast path lists exactly 6 files, so 6 is the largest split
+  #    that cannot leave a shard empty. The margin here is zero by construction;
+  #    test_docs_only_fast_path_never_produces_an_empty_shard is the tripwire.
+  # 3. Concurrency: peak is shell + shards = 7 jobs per run (quality is gated
+  #    behind needs, so it never overlaps them). Two runs at once stay inside
+  #    the 20-concurrent-job cap; three do not - but three-at-once was measured
+  #    at 3.4% of the time, and that threshold is identical at 8 shards, so the
+  #    cap is not what stops us from going higher. Constraint 2 is.
+  SHARD_TOTAL: '6'
+
 jobs:
-  quality:
-    name: Quality
+  # ShellCheck costs ~0s, so it runs unconditionally and in parallel with the
+  # test shards: a shell-only mistake surfaces in seconds instead of minutes.
+  shell:
+    name: Shell
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Verify runner ShellCheck
+        run: shellcheck --version
+
+      - name: Lint shell scripts
+        run: shellcheck scripts/mission-stop-guard.sh plugins/mission/scripts/mission-stop-guard.sh scripts/sync-codex-plugin-wrapper.sh scripts/mission-local-authoring-sync.sh
+
+  test:
+    name: Test ${{ matrix.shard }}
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      # Every shard reports independently: one red shard must not hide the
+      # failures in the others, or the next iteration needs another full run.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -56,12 +98,9 @@ jobs:
             // The Python suite must remain fail-safe: docs/results-only PRs use
             // a smaller guard set, but any ambiguity, code change, or non-PR
             // event falls back to the full tracked-tree suite.
-            core.setOutput('python', decision.python ? 'true' : 'false');
             core.setOutput('python_targets', decision.pythonTargets);
-            core.setOutput('shell', decision.shell ? 'true' : 'false');
 
       - name: Set up Python
-        if: steps.changes.outputs.python == 'true'
         uses: actions/setup-python@v7
         with:
           python-version: '3.12'
@@ -69,13 +108,30 @@ jobs:
           cache-dependency-path: .github/requirements-ci.txt
 
       - name: Run Python tests
-        if: steps.changes.outputs.python == 'true'
-        run: make test PYTHON=python PYTEST_TARGETS="${{ steps.changes.outputs.python_targets }}"
+        run: make test-shard PYTHON=python SHARD_INDEX=${{ matrix.shard }} SHARD_TOTAL=${{ env.SHARD_TOTAL }} PYTEST_TARGETS="${{ steps.changes.outputs.python_targets }}"
 
-      - name: Verify runner ShellCheck
-        if: steps.changes.outputs.shell == 'true'
-        run: shellcheck --version
-
-      - name: Lint shell scripts
-        if: steps.changes.outputs.shell == 'true'
-        run: shellcheck scripts/mission-stop-guard.sh plugins/mission/scripts/mission-stop-guard.sh scripts/sync-codex-plugin-wrapper.sh scripts/mission-local-authoring-sync.sh
+  # Single required status check. Fail-closed: anything other than an explicit
+  # success in every upstream job (failure, cancellation, or a skip caused by a
+  # broken condition) fails this job, so no gate can be silently dropped.
+  quality:
+    name: Quality
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    needs: [shell, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every gate to have succeeded
+        env:
+          SHELL_RESULT: ${{ needs.shell.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          set -eu
+          echo "shell=${SHELL_RESULT} test=${TEST_RESULT}"
+          failed=0
+          for entry in "shell=${SHELL_RESULT}" "test=${TEST_RESULT}"; do
+            if [ "${entry#*=}" != "success" ]; then
+              echo "::error::gate ${entry%%=*} did not succeed (${entry#*=})"
+              failed=1
+            fi
+          done
+          exit "${failed}"

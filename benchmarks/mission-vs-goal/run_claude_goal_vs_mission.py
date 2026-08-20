@@ -277,6 +277,7 @@ def build_prompt(
     mission_max_iter: int | None = None,
     mission_profile: str = "full",
     mission_budget_minutes: float | None = None,
+    mission_threshold: float | None = None,
     extra_rules: list[str] | tuple[str, ...] = (),
 ) -> str:
     cohort_rules = "".join(f"- {rule}\n" for rule in extra_rules)
@@ -343,6 +344,21 @@ Quality benchmark profile:
     budget_flag = (
         f" --budget-minutes {mission_budget_minutes}" if mission_budget_minutes is not None else ""
     )
+    # #566: pass threshold。CLI 指定がタスク定義より優先する (mission_max_iter と同規約)。
+    # threshold は測定条件そのもので、誤指定に気づかないまま 30 セル回すのは高くつく。
+    # budget-minutes と違い mission 側の検証に委ねず、ここで fail-fast させる。
+    effective_threshold = (
+        mission_threshold if mission_threshold is not None else task.get("mission_threshold")
+    )
+    threshold_flag = ""
+    if effective_threshold is not None:
+        if not isinstance(effective_threshold, (int, float)) or isinstance(effective_threshold, bool):
+            raise ValueError(f"mission_threshold must be a number, got {effective_threshold!r}")
+        if not math.isfinite(effective_threshold) or effective_threshold <= 0:
+            raise ValueError(
+                f"mission_threshold must be a positive finite number, got {effective_threshold!r}"
+            )
+        threshold_flag = f" --threshold {effective_threshold}"
     fail_first_protocol = ""
     if task.get("fail_first") is True:
         fail_first_protocol = """
@@ -351,7 +367,7 @@ Fail-first measurement protocol:
 - Do not run mark-passes in iteration 1; the reviewer must record the missing coverage as a High finding.
 - Iteration 2 must resolve that finding before a passing decision and preserve evidence that distinguishes both iterations.
 """
-    return f"""/mission Complete the controlled benchmark artifact at `{output_rel}` with auditable mission-style evidence. --max-iter {mission_max_iter}{budget_flag}
+    return f"""/mission Complete the controlled benchmark artifact at `{output_rel}` with auditable mission-style evidence. --max-iter {mission_max_iter}{budget_flag}{threshold_flag}
 
 {common}
 Arm: mission
@@ -579,6 +595,113 @@ def run_name_for(task_id: str, arm: str, run_index: int, repeats: int) -> str:
     return f"{task_id}-{arm}"
 
 
+def extract_process_quality(worktree: Path) -> tuple[dict | None, str | None]:
+    """#560 Step A: archive の reviews/scoring JSON から process quality を fail-open で収集する。
+
+    ファイルが無い・壊れている場合は (None, error_reason) を返す。
+    Severity が不明な値は literal 文字列キーとして by_severity に追加する（クラッシュしない）。
+    """
+    archive = worktree / ".mission-state" / "archive"
+    if not archive.is_dir():
+        return None, "archive_dir_missing"
+
+    iter_pattern = re.compile(r"^iter-(\d+)-")
+
+    def parse_iter(name: str) -> int | None:
+        m = iter_pattern.match(name)
+        return int(m.group(1)) if m else None
+
+    # Gather reviews files grouped by iteration number
+    reviews_by_iter: dict[int, list[Path]] = {}
+    scoring_by_iter: dict[int, list[Path]] = {}
+    try:
+        for child in archive.iterdir():
+            if not child.is_file() or not child.suffix == ".json":
+                continue
+            n = parse_iter(child.name)
+            if n is None:
+                continue
+            if "-reviews-" in child.name:
+                reviews_by_iter.setdefault(n, []).append(child)
+            elif "-scoring-" in child.name:
+                scoring_by_iter.setdefault(n, []).append(child)
+    except OSError as exc:
+        return None, f"archive_list_error:{type(exc).__name__}"
+
+    if not reviews_by_iter:
+        return None, "archive_reviews_missing"
+
+    sorted_iters = sorted(reviews_by_iter)
+    findings_total = 0
+    # High/Medium/Low は常に存在させる (消費側の KeyError を防ぐ)。
+    # 未知の severity は literal キーとして追加される。
+    by_severity: dict[str, int] = {"High": 0, "Medium": 0, "Low": 0}
+    reviewer_count_observed = 0
+
+    for n in sorted_iters:
+        for path in reviews_by_iter[n]:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+                return None, f"archive_reviews_unreadable:{type(exc).__name__}"
+            if not isinstance(payload, dict):
+                return None, "archive_reviews_not_object"
+            inputs = payload.get("inputs")
+            if not isinstance(inputs, list):
+                continue
+            reviewer_count_observed = max(reviewer_count_observed, len(inputs))
+            for inp in inputs:
+                if not isinstance(inp, dict):
+                    continue
+                findings = inp.get("findings")
+                if not isinstance(findings, list):
+                    continue
+                for finding in findings:
+                    if not isinstance(finding, dict):
+                        continue
+                    findings_total += 1
+                    sev = finding.get("severity")
+                    key = sev if isinstance(sev, str) else "__unknown__"
+                    by_severity[key] = by_severity.get(key, 0) + 1
+
+    def _read_composite(n: int) -> tuple[float | None, int | None]:
+        paths = scoring_by_iter.get(n, [])
+        for path in paths:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            for key in ("composite", "binding", "_meta"):
+                val = payload.get(key)
+                if key == "binding" and isinstance(val, dict):
+                    val = val.get("composite")
+                elif key == "_meta" and isinstance(val, dict):
+                    val = val.get("computed_composite")
+                if isinstance(val, (int, float)) and not isinstance(val, bool):
+                    open_high = payload.get("open_high")
+                    oh = open_high if isinstance(open_high, int) and not isinstance(open_high, bool) else None
+                    return float(val), oh
+        return None, None
+
+    first_iter = sorted_iters[0]
+    last_iter = sorted_iters[-1]
+    composite_first, open_high_first = _read_composite(first_iter)
+    composite_final, open_high_final = _read_composite(last_iter)
+
+    return {
+        "review_findings_total": findings_total,
+        "review_findings_by_severity": by_severity,
+        "review_iterations_observed": len(sorted_iters),
+        "composite_first": composite_first,
+        "composite_final": composite_final,
+        "reviewer_count_observed": reviewer_count_observed,
+        "open_high_first": open_high_first,
+        "open_high_final": open_high_final,
+    }, None
+
+
 def extract_mission_state_fields(worktree: Path) -> tuple[dict, str | None]:
     """#250: mission arm 実行後の state から tier/iteration 等を fail-open で抽出する。
 
@@ -595,7 +718,18 @@ def extract_mission_state_fields(worktree: Path) -> tuple[dict, str | None]:
         "mission_evidence_only": None,  # #341: evidence-submitted halt = true (gated loop 未実行)
         "measurement_observations": unavailable_measurement_observations(),
         "diff_review_observations": None,
+        "process_quality": None,
+        "process_quality_error": None,
     }
+    # process_quality は session state の可読性と独立に収集する (#560)。
+    # session が読めない早期 return 経路でも archive は存在しうるため、先に収集する。
+    try:
+        pq, pq_err = extract_process_quality(worktree)
+        fields["process_quality"] = pq
+        fields["process_quality_error"] = pq_err
+    except Exception as exc:  # noqa: BLE001 — never abort the run
+        fields["process_quality"] = None
+        fields["process_quality_error"] = f"process_quality_exception:{type(exc).__name__}"
     sessions = worktree / ".mission-state" / "sessions"
     candidates = sorted(sessions.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True) if sessions.is_dir() else []
     legacy = worktree / ".mission-state" / "state.json"
@@ -985,6 +1119,7 @@ def run_one(
     arm_order: int,
     model_id: str,
     mission_budget_minutes: float | None = None,
+    mission_threshold: float | None = None,
     hidden_paths: list[str] | None = None,
     extra_rules: list[str] | tuple[str, ...] = (),
     run_index: int = 1,
@@ -1005,6 +1140,7 @@ def run_one(
         mission_max_iter=mission_max_iter,
         mission_profile=mission_profile,
         mission_budget_minutes=mission_budget_minutes,
+        mission_threshold=mission_threshold,
         extra_rules=extra_rules,
     )
     artifact_dir = ARTIFACTS_DIR / run_id / run_name
@@ -1069,6 +1205,8 @@ def run_one(
                 "mission_evidence_only": None,
                 "measurement_observations": unavailable_measurement_observations(status="not-applicable"),
                 "diff_review_observations": unavailable_diff_review_observations(),
+                "process_quality": None,
+                "process_quality_error": None,
             },
             None,
         )
@@ -1097,6 +1235,7 @@ def run_one(
         f"claude_total_cost_usd={claude_result.get('total_cost_usd') if isinstance(claude_result, dict) else None}",
         f"quality_score_method={evaluation['quality_score_method']}",
         f"mission_profile={mission_profile if arm == 'mission' else None}",
+        f"mission_threshold={mission_threshold if arm == 'mission' else None}",
         "print_mode_smoke=true",
     ]
     if sanitized:
@@ -1143,6 +1282,7 @@ def run_one(
         "max_budget_usd_effective": effective_max_budget_usd,
         "burn_rate_usd_per_min": burn_rate_usd_per_min,
         "mission_profile": mission_profile if arm == "mission" else None,
+        "mission_threshold": mission_threshold if arm == "mission" else None,
         "started_at": started,
         "completed_at": completed,
         "starting_commit": starting_commit,
@@ -1365,6 +1505,7 @@ def summarize(
     stopped_early: bool = False,
     mission_profile: str = "full",
     repeats: int = 1,
+    mission_threshold: float | None = None,
 ) -> dict:
     by_arm: dict[str, list[dict]] = {arm: [r for r in records if r["arm"] == arm] for arm in ARMS}
     task_cohort = tasks_path.stem.removeprefix("tasks.")
@@ -1580,6 +1721,7 @@ def summarize(
         "task_cohort": task_cohort,
         "selected_task_ids": [task["id"] for task in tasks],
         "mission_profile": mission_profile,
+        "mission_threshold": mission_threshold,
         "starting_commit": starting_commit,
         "records": len(records),
         "repeats": repeats,
@@ -1783,6 +1925,14 @@ def main() -> int:
         " budget pressure による graceful partial-done halt を有効化する。",
     )
     parser.add_argument(
+        "--mission-threshold",
+        type=float,
+        default=None,
+        help="#566: /mission へ --threshold として渡す pass threshold。"
+        " 未指定なら /mission の既定 (4.0) に委ねる。タスク定義の"
+        " mission_threshold より CLI 指定が優先する。",
+    )
+    parser.add_argument(
         "--mission-profile",
         choices=MISSION_PROFILES,
         default="full",
@@ -1836,6 +1986,7 @@ def main() -> int:
             arm_order,
             args.model_id,
             mission_budget_minutes=args.mission_budget_minutes,
+            mission_threshold=args.mission_threshold,
             hidden_paths=task_data.get("hidden_paths"),
             extra_rules=task_data.get("prompt_rules", ()),
             run_index=run_index,
@@ -1883,6 +2034,7 @@ def main() -> int:
         stopped_early=stopped_early,
         mission_profile=args.mission_profile,
         repeats=args.repeats,
+        mission_threshold=args.mission_threshold,
     )
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     for warning in summary_warnings(summary):
