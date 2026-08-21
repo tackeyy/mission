@@ -1,0 +1,168 @@
+{
+  "schema": "mission-benchmark-answer-key/1",
+  "note": "Machine-checkable answer keys for structured-findings scoring (#587). `location`/`key` identify the finding and `actual` must match for it to count. `evidence` lists the fixture files required to establish the defect: a defect is detectable only if every listed file is readable. This is what makes the degraded arm in the sensitivity check (#598) deterministic. Decoys look suspicious but are compliant; reporting one as a finding costs precision.",
+  "tasks": {
+    "tail-config-spec-drift": {
+      "defects": [
+        {
+          "location": "impl-alpha.md",
+          "key": "request_timeout_ms",
+          "expected": "3000",
+          "actual": "27000",
+          "evidence": [
+            "spec.md",
+            "impl-alpha.md"
+          ]
+        },
+        {
+          "location": "impl-alpha.md",
+          "key": "queue_max_depth",
+          "expected": "10000",
+          "actual": "1250",
+          "evidence": [
+            "spec.md",
+            "impl-alpha.md"
+          ]
+        },
+        {
+          "location": "impl-alpha.md",
+          "key": "enable_legacy_auth",
+          "expected": "false",
+          "actual": "true",
+          "evidence": [
+            "spec.md",
+            "impl-alpha.md"
+          ]
+        },
+        {
+          "location": "impl-beta.md",
+          "key": "retry_backoff",
+          "expected": "exponential",
+          "actual": "constant-interval",
+          "evidence": [
+            "spec.md",
+            "impl-beta.md"
+          ]
+        },
+        {
+          "location": "impl-beta.md",
+          "key": "health_check_interval_s",
+          "expected": "15",
+          "actual": "75",
+          "evidence": [
+            "spec.md",
+            "impl-beta.md"
+          ]
+        },
+        {
+          "location": "runbook.md",
+          "key": "max_retries",
+          "expected": "3",
+          "actual": "6",
+          "evidence": [
+            "spec.md",
+            "runbook.md"
+          ]
+        },
+        {
+          "location": "runbook.md",
+          "key": "tls_min_version",
+          "expected": "1.3",
+          "actual": "1.2",
+          "evidence": [
+            "spec.md",
+            "runbook.md"
+          ]
+        }
+      ],
+      "decoys": [
+        {
+          "location": "impl-beta.md",
+          "key": "idle_timeout_s",
+          "note": "5400 ticks at 60 ticks/s equals the specified 90s; compliant after unit conversion",
+          "evidence": []
+        },
+        {
+          "location": "runbook.md",
+          "key": "log_level",
+          "note": "INFO matches the spec default; casing differs only",
+          "evidence": []
+        },
+        {
+          "location": "runbook.md",
+          "key": "db_pool_size_per_replica",
+          "note": "64 total across two replicas equals the specified 32 per replica",
+          "evidence": []
+        }
+      ]
+    },
+    "tail-metrics-reconciliation": {
+      "defects": [
+        {
+          "location": "quarterly-summary.md",
+          "key": "total_signups",
+          "expected": "4217",
+          "actual": "4127",
+          "evidence": [
+            "quarterly-summary.md",
+            "weekly-metrics.md"
+          ]
+        },
+        {
+          "location": "quarterly-summary.md",
+          "key": "p95_improvement_factor",
+          "expected": "1.88",
+          "actual": "3",
+          "evidence": [
+            "quarterly-summary.md",
+            "weekly-metrics.md"
+          ]
+        },
+        {
+          "location": "quarterly-summary.md",
+          "key": "p95_improved_every_week",
+          "expected": "false",
+          "actual": "true",
+          "evidence": [
+            "quarterly-summary.md",
+            "weekly-metrics.md"
+          ]
+        },
+        {
+          "location": "quarterly-summary.md",
+          "key": "support_ticket_reduction_pct",
+          "expected": "29",
+          "actual": "42",
+          "evidence": [
+            "quarterly-summary.md",
+            "weekly-metrics.md"
+          ]
+        },
+        {
+          "location": "quarterly-summary.md",
+          "key": "avg_weekly_infra_cost_usd",
+          "expected": "1450",
+          "actual": "1300",
+          "evidence": [
+            "quarterly-summary.md",
+            "weekly-metrics.md"
+          ]
+        }
+      ],
+      "decoys": [
+        {
+          "location": "quarterly-summary.md",
+          "key": "active_user_growth_pct",
+          "note": "8200 -> 9430 is exactly 15.0%; the claim is correct",
+          "evidence": []
+        },
+        {
+          "location": "quarterly-summary.md",
+          "key": "quarterly_uptime_pct",
+          "note": "99.95% matches the status page export stated in the source table",
+          "evidence": []
+        }
+      ]
+    }
+  }
+}
