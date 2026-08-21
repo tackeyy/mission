@@ -163,3 +163,100 @@ def test_wrong_actual_value_does_not_count_as_found():
     rows = [_row("impl-alpha.md", "request_timeout_ms", "3000", "9999", "drift")]
     result = score_findings(_block(rows), ANSWER_KEY)
     assert result["recall"] == 0.0
+
+
+# --- 実 run で検出した欠陥の回帰 (#587 パイロット) -----------------------------
+
+def test_thousands_separators_do_not_break_matching():
+    """`4,127` と `4127` を別物と扱わない。
+
+    実 run で、実質的に完全正解の artifact が f1=0.0 になった。桁区切りの
+    有無だけで不一致になっていた。正しい答えを書式の理由で 0 点にしない。
+    """
+    key = {"defects": [{"location": "s.md", "key": "total_signups",
+                        "expected": "4217", "actual": "4127"}], "decoys": []}
+    table = ("| location | key | expected | actual | verdict |\n|---|---|---|---|---|\n"
+             "| s.md | total_signups | 4,217 | 4,127 | drift |\n")
+    assert score_findings(table, key)["recall"] == 1.0
+
+
+def test_value_matching_ignores_case_and_surrounding_whitespace():
+    key = {"defects": [{"location": "s.md", "key": "backoff",
+                        "expected": "exponential", "actual": "constant-interval"}], "decoys": []}
+    table = ("| location | key | expected | actual | verdict |\n|---|---|---|---|---|\n"
+             "| s.md | backoff | Exponential |  Constant-Interval  | drift |\n")
+    assert score_findings(table, key)["recall"] == 1.0
+
+
+def test_key_matching_is_insensitive_to_punctuation_and_case():
+    """`Total Signups` と `total_signups` を別物と扱わない。"""
+    key = {"defects": [{"location": "s.md", "key": "total_signups",
+                        "expected": "4217", "actual": "4127"}], "decoys": []}
+    table = ("| location | key | expected | actual | verdict |\n|---|---|---|---|---|\n"
+             "| s.md | Total Signups | 4217 | 4127 | drift |\n")
+    assert score_findings(table, key)["recall"] == 1.0
+
+
+def test_genuinely_different_values_still_fail_to_match():
+    """正規化は緩めても、値が本当に違えば一致させない。"""
+    key = {"defects": [{"location": "s.md", "key": "total_signups",
+                        "expected": "4217", "actual": "4127"}], "decoys": []}
+    table = ("| location | key | expected | actual | verdict |\n|---|---|---|---|---|\n"
+             "| s.md | total_signups | 4217 | 9999 | drift |\n")
+    assert score_findings(table, key)["recall"] == 0.0
+
+
+# --- 値の一致は「表記」ではなく「実質」で見る (パイロット第2の発見) -----------
+
+def _key(actual, expected="x"):
+    return {"defects": [{"location": "s.md", "key": "k",
+                         "expected": expected, "actual": actual}], "decoys": []}
+
+
+def _tbl(actual, expected="x"):
+    return ("| location | key | expected | actual | verdict |\n|---|---|---|---|---|\n"
+            f"| s.md | k | {expected} | {actual} | drift |\n")
+
+
+@pytest.mark.parametrize("reported,truth", [
+    ("42%", "42"),
+    ("about USD 1,300", "1300"),
+    ("3x", "3"),
+    ("99.95%", "99.95"),
+])
+def test_numeric_values_match_regardless_of_units_and_separators(reported, truth):
+    """単位や記号の違いで正解を落とさない。
+
+    実 run で、7 項目すべてを正しく判定した artifact が recall 0.2 になった。
+    `42%` と `42` を別物と扱っていたため。測っているのは判定であって表記ではない。
+    """
+    assert score_findings(_tbl(reported), _key(truth))["recall"] == 1.0
+
+
+def test_numerically_different_values_still_fail():
+    assert score_findings(_tbl("9999"), _key("4127"))["recall"] == 0.0
+
+
+def test_textual_values_match_by_containment():
+    """自由記述の値は包含で一致させる。"""
+    truth = "improved every single week"
+    assert score_findings(_tbl('"improved every single week"'), _key(truth))["recall"] == 1.0
+
+
+def test_unrelated_text_does_not_match():
+    assert score_findings(_tbl("something else entirely"), _key("improved every single week"))["recall"] == 0.0
+
+
+def test_marking_everything_as_drift_does_not_reach_full_score():
+    """撃ちまくりが満点にならないこと (判定だけを見ると全部 drift が有利になる)。"""
+    key = {"defects": [{"location": "s.md", "key": "a", "expected": "1", "actual": "2"}],
+           "decoys": [{"location": "s.md", "key": "b", "note": "compliant"},
+                      {"location": "s.md", "key": "c", "note": "compliant"}]}
+    table = ("| location | key | expected | actual | verdict |\n|---|---|---|---|---|\n"
+             "| s.md | a | 1 | 2 | drift |\n"
+             "| s.md | b | 1 | 1 | drift |\n"
+             "| s.md | c | 1 | 1 | drift |\n")
+    result = score_findings(table, key)
+    assert result["recall"] == 1.0
+    assert result["precision"] < 0.5
+    assert result["f1"] < 0.7
