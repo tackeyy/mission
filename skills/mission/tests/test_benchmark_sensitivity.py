@@ -219,3 +219,34 @@ def test_answer_key_values_are_reportable_wordings():
                     f"{task_id}: {defect['key']}.{field} is a bare boolean; "
                     "use the wording an artifact would actually report"
                 )
+
+
+def test_answer_key_references_point_at_real_fixture_files():
+    """location / evidence が実在するファイルを指すこと。
+
+    存在しないファイル名を書くと、劣化 arm の到達可能性計算が破綻し、
+    感度検証が意味を失う。
+    """
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parents[3]
+    bench = root / "benchmarks" / "mission-vs-goal"
+    payload = json.loads((bench / "answer-keys" / "tail.json").read_text(encoding="utf-8"))
+    for task_id, entry in payload["tasks"].items():
+        fixture_dir = bench / "fixtures" / "tail" / task_id.replace("tail-", "")
+        assert fixture_dir.is_dir(), f"{task_id}: fixture dir missing"
+        available = {path.name for path in fixture_dir.iterdir()}
+        for item in entry["defects"] + entry.get("decoys", []):
+            assert item["location"] in available, f"{task_id}: {item['location']} not a fixture"
+            for name in item.get("evidence", []):
+                assert name in available, f"{task_id}: evidence {name} not a fixture"
+
+
+def test_every_tail_task_has_an_answer_key():
+    """判定 run の対象タスクすべてに正解キーがあること。"""
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parents[3]
+    bench = root / "benchmarks" / "mission-vs-goal"
+    tasks = json.loads((bench / "tasks.tail.json").read_text(encoding="utf-8"))["tasks"]
+    keys = json.loads((bench / "answer-keys" / "tail.json").read_text(encoding="utf-8"))["tasks"]
+    missing = [task["id"] for task in tasks if task["id"] not in keys]
+    assert not missing, f"tasks without an answer key: {missing}"

@@ -163,6 +163,197 @@
           "evidence": []
         }
       ]
+    },
+    "tail-incident-log-triage": {
+      "defects": [
+        {
+          "location": "incident-log.md",
+          "key": "cause_certificate_expiry",
+          "expected": "causal",
+          "actual": "payments-gw.internal certificate has expired",
+          "evidence": [
+            "incident-log.md",
+            "change-history.md"
+          ]
+        },
+        {
+          "location": "change-history.md",
+          "key": "cause_worker_concurrency_rollout",
+          "expected": "causal",
+          "actual": "worker_concurrency raised 8 to 16 while DB pool stayed at 40",
+          "evidence": [
+            "incident-log.md",
+            "change-history.md"
+          ]
+        },
+        {
+          "location": "change-history.md",
+          "key": "cause_nightly_reindex_lock_contention",
+          "expected": "causal",
+          "actual": "nightly-reindex takes table locks on orders at 02:00 during peak",
+          "evidence": [
+            "incident-log.md",
+            "change-history.md",
+            "oncall-notes.md"
+          ]
+        }
+      ],
+      "decoys": [
+        {
+          "location": "change-history.md",
+          "key": "assets_web_deploy",
+          "note": "static asset bundle only; no API, config or schema change",
+          "evidence": [
+            "change-history.md"
+          ]
+        },
+        {
+          "location": "incident-log.md",
+          "key": "clock_skew",
+          "note": "recurring every night without customer impact per on-call notes",
+          "evidence": [
+            "incident-log.md",
+            "oncall-notes.md"
+          ]
+        }
+      ]
+    },
+    "tail-bilingual-release-drift": {
+      "defects": [
+        {
+          "location": "announcement.ja.md",
+          "key": "latency_improvement_claim",
+          "expected": "18% in one internal pilot, not a general claim",
+          "actual": "18%以上改善",
+          "evidence": [
+            "announcement.en.md",
+            "announcement.ja.md"
+          ]
+        },
+        {
+          "location": "announcement.ja.md",
+          "key": "resume_guarantee_claim",
+          "expected": "succeeded in test scenarios; not guaranteed under every failure mode",
+          "actual": "必ず自動で復旧します",
+          "evidence": [
+            "announcement.en.md",
+            "announcement.ja.md"
+          ]
+        },
+        {
+          "location": "announcement.ja.md",
+          "key": "automated_test_count",
+          "expected": "402",
+          "actual": "500以上",
+          "evidence": [
+            "announcement.en.md",
+            "announcement.ja.md"
+          ]
+        },
+        {
+          "location": "announcement.ja.md",
+          "key": "manual_approval_sentence_omitted",
+          "expected": "irreversible actions require manual approval",
+          "actual": "omitted from the Japanese version",
+          "evidence": [
+            "announcement.en.md",
+            "announcement.ja.md"
+          ]
+        }
+      ],
+      "decoys": [
+        {
+          "location": "announcement.ja.md",
+          "key": "telemetry_claim",
+          "note": "both versions state no telemetry is collected; equivalent",
+          "evidence": [
+            "announcement.en.md",
+            "announcement.ja.md"
+          ]
+        },
+        {
+          "location": "announcement.ja.md",
+          "key": "cli_workflow_claim",
+          "note": "both versions state it works with existing CLI workflows; equivalent",
+          "evidence": [
+            "announcement.en.md",
+            "announcement.ja.md"
+          ]
+        }
+      ]
+    },
+    "tail-dependency-upgrade-impact": {
+      "defects": [
+        {
+          "location": "usage-inventory.md",
+          "key": "ingest_loader_parseconfig",
+          "expected": "strict parseConfig raises ConfigKeyError",
+          "actual": "config still contains the deprecated flush_interval key",
+          "evidence": [
+            "upgrade-changelog.md",
+            "usage-inventory.md"
+          ]
+        },
+        {
+          "location": "usage-inventory.md",
+          "key": "dispatch_retry_metrics_onretry",
+          "expected": "single (context) object",
+          "actual": "two-argument callback no longer invoked",
+          "evidence": [
+            "upgrade-changelog.md",
+            "usage-inventory.md"
+          ]
+        },
+        {
+          "location": "usage-inventory.md",
+          "key": "edge_cache_consumer_encoding",
+          "expected": "msgpack via an explicit codec pin",
+          "actual": "no codec pin is set; publish now defaults to JSON",
+          "evidence": [
+            "upgrade-changelog.md",
+            "usage-inventory.md"
+          ]
+        },
+        {
+          "location": "usage-inventory.md",
+          "key": "shutdown_hook_queue_drain",
+          "expected": "awaited",
+          "actual": "called synchronously before process exit",
+          "evidence": [
+            "upgrade-changelog.md",
+            "usage-inventory.md"
+          ]
+        }
+      ],
+      "decoys": [
+        {
+          "location": "usage-inventory.md",
+          "key": "logging_warnonce",
+          "note": "grep returned zero warnOnce call sites; removal is not an impact",
+          "evidence": [
+            "upgrade-changelog.md",
+            "usage-inventory.md"
+          ]
+        },
+        {
+          "location": "usage-inventory.md",
+          "key": "bootstrap_connect_timeout",
+          "note": "every connect() call site passes an explicit timeout, so the default change does not apply",
+          "evidence": [
+            "upgrade-changelog.md",
+            "usage-inventory.md"
+          ]
+        },
+        {
+          "location": "usage-inventory.md",
+          "key": "billing_exporter_queue_peek",
+          "note": "Queue.peek() is a new API and not yet used; planned only",
+          "evidence": [
+            "upgrade-changelog.md",
+            "usage-inventory.md"
+          ]
+        }
+      ]
     }
   }
 }
