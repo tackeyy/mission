@@ -8,11 +8,22 @@
 useDefault = true
 
 [[allowlists]]
-description = "git 管理外の生成物 (バイトコード・テストキャッシュ)"
+description = "git 管理外の作業領域・生成物 (バイトコード・テストキャッシュ・worktree)"
+# 各パターンは `(^|/)` で境界を固定する。これがないとパス途中の部分一致で
+# `src/my__pycache__/` や `lib/my.venv-ci/` のような**無関係なディレクトリまで
+# 除外**されてしまう (実測で確認)。除外は「意図したディレクトリ名そのもの」に
+# 限る。
 paths = [
-  '''__pycache__/''',
-  '''\.pytest_cache/''',
-  '''\.venv-ci/''',
+  '''(^|/)__pycache__/''',
+  '''(^|/)\.pytest_cache/''',
+  '''(^|/)\.venv-ci/''',
+  # 並行作業用の worktree。gitignore 対象でリポジトリの内容ではないが、
+  # `gitleaks dir` はファイルシステムを見るため走査対象に入ってしまう。
+  # 中身は「別ブランチの tracked ファイルの複製」か「未追跡のローカル作業物」の
+  # どちらかで、前者は本体ツリーの走査が、後者は commit 時の走査が担当する。
+  # 除外しないと、他ブランチが持つ既知の誤検知が本体の走査結果に混ざり、
+  # 「ゼロはゼロの意味」という前提が壊れる。
+  '''(^|/)\.worktrees/''',
 ]
 
 # generic-api-key は JSON の `"key": "<値>"` 構造に反応する。benchmark の answer key
