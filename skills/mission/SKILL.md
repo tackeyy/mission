@@ -146,6 +146,8 @@ passes = findings_evidence_path exists
 
 early-stop: iter1 で threshold 到達かつ `open_high == 0` なら原則 pass。続行できるのは composite 4.0-4.3、Medium 3 件以上、1 iter で確実に解消可能、`iteration < max_iter` の全条件を満たす時だけ。
 
+`mark-passes` は上記のうち客観判定できる 3 条件 (composite band / Medium 件数 / `iteration < max_iter`) の評価結果を `early_stop_evaluation` として state に記録する (記録のみ。`passes` 式は不変)。3 条件が揃っているのに停止する場合は `mark-passes --early-stop-rationale "<1 iter で解消できない理由>"` を付け、判断根拠を証跡に残す。
+
 Stop hook が無効な環境でも、Phase 6 直後に `next` と state 再取得で `loop_active` / `passes` / `halt_reason` を自分で確認する。
 
 ## Trigger 1 / Trigger 2

@@ -309,6 +309,9 @@ class MarkPassServices:
     write_terminal_outcome: Callable[[dict], None]
     optional_unclosed_skills: Callable[[dict], list[str]]
     selection_id: Callable[[dict], object]
+    # #568: early-stop の継続条件の評価結果を返す観測子。gate 判定には使わない
+    # (記録のみ)。未配線の adapter では None を許し、記録を省略する。
+    early_stop_evaluation: Callable[[dict, dict | None, str], dict | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -489,6 +492,12 @@ def mark_pass(
                 "selection_id": services.selection_id(data),
                 "recorded_at": request.at,
             }
+        # #568: 「なぜ iter N で継続しなかったか」を事後監査できるようにする。
+        # decide() の後に置き、pass gate の入力にしない (記録のみ)。
+        if not request.force and services.early_stop_evaluation is not None:
+            evaluation = services.early_stop_evaluation(data, latest, request.at)
+            if evaluation is not None:
+                proposed["early_stop_evaluation"] = evaluation
         repository.save(proposed, aggregate_action="remove")
         unclosed = [] if request.force else services.optional_unclosed_skills(proposed)
     return MarkPassResult(
