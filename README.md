@@ -88,15 +88,29 @@ Protocol and raw data: [`benchmarks/mission-vs-goal/README.md`](benchmarks/missi
 | Wall-clock time | mission **5.4x** | Real cost, clean-condition measurement. |
 | Notional spend | mission **4.9x** | Relative only. Under subscription execution there is no per-token charge; the consumed resource is the plan rate limit. |
 | Second-iteration rate | 5.6% of mission runs | The review loop changes the artifact in a small minority of runs. |
-| Quality | **not validly measured** | See below. |
+| Finding quality (F1) | goal 0.858 / mission 0.873 — **no difference** | Mean per-task delta +0.015 against a pre-registered threshold of +0.10, with one task where `mission` scored lower. |
 
-**On quality, the honest statement is "not measured", not "tied".** The
-benchmark's quality-marker scoring is structurally broken: a bare list of the
-right keywords scores a perfect 1.00, while correct paraphrases — and correct
-answers written in Japanese — score 0. Three independent reviews concluded that
-regex co-occurrence cannot measure whether reasoning happened. **Do not cite the
-current marker scores as evidence in either direction.** The replacement is
-tracked in the repository's open issues.
+**On quality the result is now measured, and it is a no-difference result.**
+
+The earlier regex marker scoring was structurally broken — a bare list of the
+right keywords scored a perfect 1.00 while correct paraphrases, and correct
+answers written in Japanese, scored 0. It has been replaced by structured
+findings scoring: both arms emit a machine-checkable table of
+`location / key / expected / actual / verdict` rows which is matched against an
+answer key. Formatting, wording and language no longer affect the score;
+asserting a compliant item as a defect costs precision.
+
+**The instrument was validated before the comparison was run.** A deliberately
+degraded arm — allowed to read only the summary, with the detail table needed to
+verify any claim withheld — was separated by 1.00 against a pre-registered
+threshold of 0.15. That is why the null result above is a measured
+no-difference and not a failure to measure.
+
+Criteria were fixed in advance in
+[`docs/PRE_REGISTRATION.md`](docs/PRE_REGISTRATION.md); three of them were not
+met, so the quality-superiority claim stays withheld. Raw per-cell data,
+the instrument validation, and the disclosed limitations are in
+[`benchmarks/mission-vs-goal/results/`](benchmarks/mission-vs-goal/results/).
 
 ### Operational: 451 scored production missions
 
@@ -118,7 +132,8 @@ minority tail, not by raising the mean.
 
 ### What this project does not claim
 
-- That `mission` produces higher-quality artifacts on average.
+- That `mission` produces higher-quality artifacts on average. This was
+  measured with a validated instrument and no difference was found.
 - That `mission` completes work a goal-only baseline cannot. No such case is
   recorded.
 - That the 5% tail rate transfers to your workload.

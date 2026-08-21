@@ -1,0 +1,330 @@
+{
+  "schema": "mission-benchmark-verdict/1",
+  "date": "2026-08-21",
+  "run_id": "2026-08-21-verdict-tail-v1",
+  "cohort": "tail",
+  "cells": 30,
+  "pairs": 15,
+  "scoring_method": "structured_findings_exact_match_v1",
+  "pre_registration": "docs/PRE_REGISTRATION.md",
+  "instrument_validation": {
+    "source": "results/2026-08-21-sensitivity-check.json",
+    "separation": 1.0,
+    "threshold": 0.15,
+    "passes": true,
+    "note": "re-verified after the scorer fixes described below"
+  },
+  "gates": {
+    "measurement_valid": true,
+    "marker_score_arm_sensitivity": 1,
+    "statistical_confidence": "adequate",
+    "pairs_required": 30,
+    "pairs_observed": 15
+  },
+  "tasks": {
+    "tail-bilingual-release-drift": {
+      "goal_mean_f1": 0.7407,
+      "mission_mean_f1": 0.6667,
+      "delta": -0.0741,
+      "goal_cells": [
+        {
+          "cell": "tail-bilingual-release-drift-claude_code_goal_command-rep1",
+          "f1": 0.888888888888889,
+          "recall": 1.0,
+          "precision": 0.8,
+          "false_positives": [
+            "announcement.ja.md:release_stage_claim"
+          ]
+        },
+        {
+          "cell": "tail-bilingual-release-drift-claude_code_goal_command-rep2",
+          "f1": 0.6666666666666665,
+          "recall": 0.75,
+          "precision": 0.6,
+          "false_positives": [
+            "announcement.ja.md:manual_approval_sentence_omitted",
+            "announcement.ja.md:release_stage_claim"
+          ]
+        },
+        {
+          "cell": "tail-bilingual-release-drift-claude_code_goal_command-rep3",
+          "f1": 0.6666666666666665,
+          "recall": 0.75,
+          "precision": 0.6,
+          "false_positives": [
+            "announcement.ja.md:manual_approval_sentence_omitted",
+            "announcement.ja.md:release_stage_claim"
+          ]
+        }
+      ],
+      "mission_cells": [
+        {
+          "cell": "tail-bilingual-release-drift-mission-rep1",
+          "f1": 0.6666666666666665,
+          "recall": 0.75,
+          "precision": 0.6,
+          "false_positives": [
+            "announcement.ja.md:manual_approval_sentence_omitted",
+            "announcement.ja.md:release_stage_claim"
+          ]
+        },
+        {
+          "cell": "tail-bilingual-release-drift-mission-rep2",
+          "f1": 0.6666666666666665,
+          "recall": 0.75,
+          "precision": 0.6,
+          "false_positives": [
+            "announcement.ja.md:manual_approval_sentence_omitted",
+            "announcement.ja.md:release_stage_claim"
+          ]
+        },
+        {
+          "cell": "tail-bilingual-release-drift-mission-rep3",
+          "f1": 0.6666666666666665,
+          "recall": 0.75,
+          "precision": 0.6,
+          "false_positives": [
+            "announcement.ja.md:manual_approval_sentence_omitted",
+            "announcement.ja.md:release_stage_claim"
+          ]
+        }
+      ]
+    },
+    "tail-config-spec-drift": {
+      "goal_mean_f1": 1.0,
+      "mission_mean_f1": 1.0,
+      "delta": 0.0,
+      "goal_cells": [
+        {
+          "cell": "tail-config-spec-drift-claude_code_goal_command-rep1",
+          "f1": 1.0,
+          "recall": 1.0,
+          "precision": 1.0,
+          "false_positives": []
+        },
+        {
+          "cell": "tail-config-spec-drift-claude_code_goal_command-rep2",
+          "f1": 1.0,
+          "recall": 1.0,
+          "precision": 1.0,
+          "false_positives": []
+        },
+        {
+          "cell": "tail-config-spec-drift-claude_code_goal_command-rep3",
+          "f1": 1.0,
+          "recall": 1.0,
+          "precision": 1.0,
+          "false_positives": []
+        }
+      ],
+      "mission_cells": [
+        {
+          "cell": "tail-config-spec-drift-mission-rep1",
+          "f1": 1.0,
+          "recall": 1.0,
+          "precision": 1.0,
+          "false_positives": []
+        },
+        {
+          "cell": "tail-config-spec-drift-mission-rep2",
+          "f1": 1.0,
+          "recall": 1.0,
+          "precision": 1.0,
+          "false_positives": []
+        },
+        {
+          "cell": "tail-config-spec-drift-mission-rep3",
+          "f1": 1.0,
+          "recall": 1.0,
+          "precision": 1.0,
+          "false_positives": []
+        }
+      ]
+    },
+    "tail-dependency-upgrade-impact": {
+      "goal_mean_f1": 0.75,
+      "mission_mean_f1": 0.8333,
+      "delta": 0.0833,
+      "goal_cells": [
+        {
+          "cell": "tail-dependency-upgrade-impact-claude_code_goal_command-rep1",
+          "f1": 0.75,
+          "recall": 0.75,
+          "precision": 0.75,
+          "false_positives": [
+            "usage-inventory.md:edge_cache_consumer_encoding"
+          ]
+        },
+        {
+          "cell": "tail-dependency-upgrade-impact-claude_code_goal_command-rep2",
+          "f1": 0.75,
+          "recall": 0.75,
+          "precision": 0.75,
+          "false_positives": [
+            "usage-inventory.md:edge_cache_consumer_encoding"
+          ]
+        },
+        {
+          "cell": "tail-dependency-upgrade-impact-claude_code_goal_command-rep3",
+          "f1": 0.75,
+          "recall": 0.75,
+          "precision": 0.75,
+          "false_positives": [
+            "usage-inventory.md:edge_cache_consumer_encoding"
+          ]
+        }
+      ],
+      "mission_cells": [
+        {
+          "cell": "tail-dependency-upgrade-impact-mission-rep1",
+          "f1": 0.75,
+          "recall": 0.75,
+          "precision": 0.75,
+          "false_positives": [
+            "usage-inventory.md:edge_cache_consumer_encoding"
+          ]
+        },
+        {
+          "cell": "tail-dependency-upgrade-impact-mission-rep2",
+          "f1": 1.0,
+          "recall": 1.0,
+          "precision": 1.0,
+          "false_positives": []
+        },
+        {
+          "cell": "tail-dependency-upgrade-impact-mission-rep3",
+          "f1": 0.75,
+          "recall": 0.75,
+          "precision": 0.75,
+          "false_positives": [
+            "usage-inventory.md:dispatch_retry_metrics_onretry"
+          ]
+        }
+      ]
+    },
+    "tail-incident-log-triage": {
+      "goal_mean_f1": 1.0,
+      "mission_mean_f1": 1.0,
+      "delta": 0.0,
+      "goal_cells": [
+        {
+          "cell": "tail-incident-log-triage-claude_code_goal_command-rep1",
+          "f1": 1.0,
+          "recall": 1.0,
+          "precision": 1.0,
+          "false_positives": []
+        },
+        {
+          "cell": "tail-incident-log-triage-claude_code_goal_command-rep2",
+          "f1": 1.0,
+          "recall": 1.0,
+          "precision": 1.0,
+          "false_positives": []
+        },
+        {
+          "cell": "tail-incident-log-triage-claude_code_goal_command-rep3",
+          "f1": 1.0,
+          "recall": 1.0,
+          "precision": 1.0,
+          "false_positives": []
+        }
+      ],
+      "mission_cells": [
+        {
+          "cell": "tail-incident-log-triage-mission-rep1",
+          "f1": 1.0,
+          "recall": 1.0,
+          "precision": 1.0,
+          "false_positives": []
+        },
+        {
+          "cell": "tail-incident-log-triage-mission-rep2",
+          "f1": 1.0,
+          "recall": 1.0,
+          "precision": 1.0,
+          "false_positives": []
+        },
+        {
+          "cell": "tail-incident-log-triage-mission-rep3",
+          "f1": 1.0,
+          "recall": 1.0,
+          "precision": 1.0,
+          "false_positives": []
+        }
+      ]
+    },
+    "tail-metrics-reconciliation": {
+      "goal_mean_f1": 0.8,
+      "mission_mean_f1": 0.8667,
+      "delta": 0.0667,
+      "goal_cells": [
+        {
+          "cell": "tail-metrics-reconciliation-claude_code_goal_command-rep1",
+          "f1": 0.8000000000000002,
+          "recall": 0.8,
+          "precision": 0.8,
+          "false_positives": [
+            "quarterly-summary.md:p95_improved_every_week"
+          ]
+        },
+        {
+          "cell": "tail-metrics-reconciliation-claude_code_goal_command-rep2",
+          "f1": 0.8000000000000002,
+          "recall": 0.8,
+          "precision": 0.8,
+          "false_positives": [
+            "quarterly-summary.md:p95_improved_every_week"
+          ]
+        },
+        {
+          "cell": "tail-metrics-reconciliation-claude_code_goal_command-rep3",
+          "f1": 0.8000000000000002,
+          "recall": 0.8,
+          "precision": 0.8,
+          "false_positives": [
+            "quarterly-summary.md:p95_improved_every_week"
+          ]
+        }
+      ],
+      "mission_cells": [
+        {
+          "cell": "tail-metrics-reconciliation-mission-rep1",
+          "f1": 0.8000000000000002,
+          "recall": 0.8,
+          "precision": 0.8,
+          "false_positives": [
+            "quarterly-summary.md:p95_improved_every_week"
+          ]
+        },
+        {
+          "cell": "tail-metrics-reconciliation-mission-rep2",
+          "f1": 0.8000000000000002,
+          "recall": 0.8,
+          "precision": 0.8,
+          "false_positives": [
+            "quarterly-summary.md:p95_improved_every_week"
+          ]
+        },
+        {
+          "cell": "tail-metrics-reconciliation-mission-rep3",
+          "f1": 1.0,
+          "recall": 1.0,
+          "precision": 1.0,
+          "false_positives": []
+        }
+      ]
+    }
+  },
+  "mean_f1_delta_mission_minus_goal": 0.0152,
+  "reversal_tasks": [
+    "tail-bilingual-release-drift"
+  ],
+  "verdict": "no-difference",
+  "verdict_statement": "Under this cohort, this model, and this scoring method, mission and the goal-only baseline are indistinguishable on finding quality: mean F1 delta +0.0152 against a pre-registered threshold of +0.10, with one task where mission scored lower. The instrument was validated first (it separates a deliberately degraded arm by 1.00), so this is a measured no-difference result, not a failure to measure. The quality-superiority claim stays withheld.",
+  "limitations": [
+    "pairs_observed 15 is below the pre-registered 30; the delta is far from the threshold so more pairs would not change the verdict, but the sample is smaller than pre-registered and this is disclosed rather than reported as met",
+    "the scorer was fixed four times during this work, the last time after the judgement run had been executed; the fixes corrected correct artifacts that scored zero, and the sensitivity check was re-verified after the final fix",
+    "the findings-table format changes the task from open discovery to adjudicating a declared checklist, which lowers discovery difficulty; both arms receive the identical checklist",
+    "cost was not the subject of this run; the previously measured 5.4x time and 4.9x spend still stand"
+  ]
+}
