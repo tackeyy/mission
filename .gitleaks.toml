@@ -1,15 +1,38 @@
-# gitleaks 設定。既定ルールを維持したうえで、生成物ディレクトリだけ除外する。
+# gitleaks 設定。既定ルールを維持したうえで、範囲を限定した除外だけを置く。
 #
 # テスト fixture の除外は**この設定ではなく行単位の `gitleaks:allow`** で行う。
 # ファイル全体を allowlist に入れると、後から同じファイルへ本物が混入しても
-# 検出されなくなるため。
+# 検出されなくなるため。ここに書くのは、行単位の注釈を置けない形式 (JSON など)
+# に限る。
 [extend]
 useDefault = true
 
-[allowlist]
+[[allowlists]]
 description = "git 管理外の生成物 (バイトコード・テストキャッシュ)"
 paths = [
   '''__pycache__/''',
   '''\.pytest_cache/''',
   '''\.venv-ci/''',
 ]
+
+# generic-api-key は JSON の `"key": "<値>"` 構造に反応する。benchmark の answer key
+# は評価指標の識別子を `key` フィールドに持つため、毎回誤検知が出る。誤検知を放置
+# すると「どうせいつもの件」と流され、本物が出たときに気づけなくなるため、
+# **値の形まで限定して**抑制する。
+#
+# 抑制条件は「lowercase snake_case の識別子であること」。実 credential は大小混在・
+# 記号・高エントロピーを含むためこの形に該当しない。同じファイルへ本物が混入すれば
+# 従来どおり検出される。
+#
+# JSON はコメントを書けないため行単位の `gitleaks:allow` が使えず、設定側で抑制
+# するしかない。その代わり path・rule・値の形の 3 つで範囲を絞っている。
+[[allowlists]]
+description = "benchmark answer key の指標識別子 (generic-api-key の誤検知)"
+# condition の既定は OR。本設定では targetRules が generic-api-key に絞っているため
+# 現状 AND の有無で挙動は変わらないが、将来 targetRules を外す改訂が入ったときに
+# 「path 一致だけでファイル全体が除外される」状態へ落ちないよう明示しておく。
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = ['''benchmarks/mission-vs-goal/answer-keys/.*\.json$''']
+regexTarget = "secret"
+regexes = ['''^[a-z][a-z0-9_]{2,48}$''']
