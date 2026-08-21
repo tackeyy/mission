@@ -50,9 +50,14 @@ gh api repos/:owner/:repo/branches/main/protection --jq \
       Zero has to mean zero: this repository keeps credential-shaped fixtures in
       the redaction tests, and those are excluded **per line** with
       `gitleaks:allow` rather than by allowlisting the file, so a real secret
-      landing in the same file is still reported. `.gitleaks.toml` excludes only
-      untracked build directories. If you find yourself explaining away a
-      finding, silence it at the line or fix it — do not carry it forward.
+      landing in the same file is still reported. `.gitleaks.toml` carries two
+      kinds of exclusion: untracked build directories, and — for formats such as
+      JSON that cannot hold a comment — an entry scoped by path, rule, and the
+      *shape of the value*. Read those entries before trusting a zero. Their
+      scope is pinned by `test_gitleaks_allowlist_scope.py`, which fails if the
+      value pattern widens far enough to swallow a credential shape. If you find
+      yourself explaining away a finding, silence it at the line or fix it — do
+      not carry it forward.
 - [ ] Provider-prefix patterns not covered by gitleaks are checked separately
       (Anthropic, OpenAI, OpenRouter, xAI, Slack, GitHub, Google, Notion, Resend,
       Supabase, AWS, PEM private keys, JWT).

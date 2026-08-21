@@ -1,15 +1,43 @@
-# gitleaks 設定。既定ルールを維持したうえで、生成物ディレクトリだけ除外する。
+# gitleaks 設定。既定ルールを維持したうえで、範囲を限定した除外だけを置く。
 #
 # テスト fixture の除外は**この設定ではなく行単位の `gitleaks:allow`** で行う。
 # ファイル全体を allowlist に入れると、後から同じファイルへ本物が混入しても
-# 検出されなくなるため。
+# 検出されなくなるため。ここに書くのは、行単位の注釈を置けない形式 (JSON など)
+# に限る。
 [extend]
 useDefault = true
 
-[allowlist]
+[[allowlists]]
 description = "git 管理外の生成物 (バイトコード・テストキャッシュ)"
 paths = [
   '''__pycache__/''',
   '''\.pytest_cache/''',
   '''\.venv-ci/''',
 ]
+
+# generic-api-key は JSON の `"key": "<値>"` 構造に反応する。benchmark の answer key
+# は評価指標の識別子を `key` フィールドに持つため、毎回誤検知が出る。誤検知を放置
+# すると「どうせいつもの件」と流され、本物が出たときに気づけなくなるため、
+# **値の形まで限定して**抑制する。
+#
+# JSON はコメントを書けないため行単位の `gitleaks:allow` が使えず、設定側で抑制
+# するしかない。その代わり path・rule・値の形の 3 つで範囲を絞っている。
+#
+# 値の条件は「**アンダースコア区切りを含む** lowercase snake_case」。単なる
+# `^[a-z][a-z0-9_]{2,48}$` では不十分で、32 桁 hex・40 桁 hex・小文字 Base32 が
+# すべて該当してしまう (MD5 / SHA1 / TOTP シークレット等の形)。区切りを必須に
+# することでこれらを除外している。実際の answer key は 35 値すべてが区切りを含む。
+#
+# 検証は test_gitleaks_allowlist_scope.py が固定する。正規表現を緩める改訂は
+# そこで落ちる。
+[[allowlists]]
+description = "benchmark answer key の指標識別子 (generic-api-key の誤検知)"
+# condition の既定は OR。既定のままだと path 一致だけでファイル全体が除外され、
+# 同ファイルへ混入した本物まで見逃す。AND を明示する。
+condition = "AND"
+targetRules = ["generic-api-key"]
+# 先頭を `^` で固定する。未アンカーだと `not-benchmarks/...` のような別ディレクトリ
+# にも一致してしまう。
+paths = ['''^benchmarks/mission-vs-goal/answer-keys/[^/]*\.json$''']
+regexTarget = "secret"
+regexes = ['''^[a-z][a-z0-9]*(_[a-z0-9]+)+$''']
