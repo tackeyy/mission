@@ -163,3 +163,44 @@ def test_wrong_actual_value_does_not_count_as_found():
     rows = [_row("impl-alpha.md", "request_timeout_ms", "3000", "9999", "drift")]
     result = score_findings(_block(rows), ANSWER_KEY)
     assert result["recall"] == 0.0
+
+
+# --- 実 run で検出した欠陥の回帰 (#587 パイロット) -----------------------------
+
+def test_thousands_separators_do_not_break_matching():
+    """`4,127` と `4127` を別物と扱わない。
+
+    実 run で、実質的に完全正解の artifact が f1=0.0 になった。桁区切りの
+    有無だけで不一致になっていた。正しい答えを書式の理由で 0 点にしない。
+    """
+    key = {"defects": [{"location": "s.md", "key": "total_signups",
+                        "expected": "4217", "actual": "4127"}], "decoys": []}
+    table = ("| location | key | expected | actual | verdict |\n|---|---|---|---|---|\n"
+             "| s.md | total_signups | 4,217 | 4,127 | drift |\n")
+    assert score_findings(table, key)["recall"] == 1.0
+
+
+def test_value_matching_ignores_case_and_surrounding_whitespace():
+    key = {"defects": [{"location": "s.md", "key": "backoff",
+                        "expected": "exponential", "actual": "constant-interval"}], "decoys": []}
+    table = ("| location | key | expected | actual | verdict |\n|---|---|---|---|---|\n"
+             "| s.md | backoff | Exponential |  Constant-Interval  | drift |\n")
+    assert score_findings(table, key)["recall"] == 1.0
+
+
+def test_key_matching_is_insensitive_to_punctuation_and_case():
+    """`Total Signups` と `total_signups` を別物と扱わない。"""
+    key = {"defects": [{"location": "s.md", "key": "total_signups",
+                        "expected": "4217", "actual": "4127"}], "decoys": []}
+    table = ("| location | key | expected | actual | verdict |\n|---|---|---|---|---|\n"
+             "| s.md | Total Signups | 4217 | 4127 | drift |\n")
+    assert score_findings(table, key)["recall"] == 1.0
+
+
+def test_genuinely_different_values_still_fail_to_match():
+    """正規化は緩めても、値が本当に違えば一致させない。"""
+    key = {"defects": [{"location": "s.md", "key": "total_signups",
+                        "expected": "4217", "actual": "4127"}], "decoys": []}
+    table = ("| location | key | expected | actual | verdict |\n|---|---|---|---|---|\n"
+             "| s.md | total_signups | 4217 | 9999 | drift |\n")
+    assert score_findings(table, key)["recall"] == 0.0

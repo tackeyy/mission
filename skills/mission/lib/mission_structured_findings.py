@@ -89,8 +89,30 @@ def parse_findings_block(text):
     return rows
 
 
+def _normalize_key(text):
+    """key を比較用に正規化する。
+
+    `Total Signups` と `total_signups` を別物と扱わない。実 run で、実質的に
+    完全正解の artifact が識別子の書き方だけで 0 点になった。正しい答えを
+    書式の理由で落とさない。
+    """
+    return re.sub(r"[^a-z0-9]+", "", str(text).lower())
+
+
+def _normalize_value(text):
+    """値を比較用に正規化する。
+
+    桁区切り (`4,127` と `4127`)・前後の空白・大文字小文字だけの違いで
+    不一致にしない。**値そのものが違えば一致させない**（正規化するのは
+    表記であって数値ではない）。
+    """
+    lowered = str(text).strip().lower()
+    without_separators = re.sub(r"(?<=\d),(?=\d{3}\b)", "", lowered)
+    return re.sub(r"\s+", " ", without_separators).strip()
+
+
 def _identity(location, key):
-    return f"{location}:{key}"
+    return f"{_normalize_key(location)}:{_normalize_key(key)}"
 
 
 def score_findings(text, answer_key):
@@ -105,7 +127,12 @@ def score_findings(text, answer_key):
     rows = parse_findings_block(text)
 
     defects = {
-        _identity(d["location"], d["key"]): str(d.get("actual", ""))
+        _identity(d["location"], d["key"]): _normalize_value(d.get("actual", ""))
+        for d in (answer_key.get("defects") or [])
+    }
+    # 報告用に元の表記を保持する (正規化した識別子は人が読めないため)。
+    display = {
+        _identity(d["location"], d["key"]): f"{d['location']}:{d['key']}"
         for d in (answer_key.get("defects") or [])
     }
     decoys = {
@@ -117,8 +144,9 @@ def score_findings(text, answer_key):
     rejected = set()
     for row in rows:
         identity = _identity(row["location"], row["key"])
+        display.setdefault(identity, f"{row['location']}:{row['key']}")
         if row["verdict"] == VERDICT_FINDING:
-            claimed[identity] = row["actual"]
+            claimed[identity] = _normalize_value(row["actual"])
         else:
             rejected.add(identity)
 
@@ -126,7 +154,9 @@ def score_findings(text, answer_key):
         identity for identity, actual in claimed.items()
         if identity in defects and actual == defects[identity]
     }
-    false_positives = sorted(identity for identity in claimed if identity not in found)
+    false_positives = sorted(
+        display.get(identity, identity) for identity in claimed if identity not in found
+    )
 
     recall = len(found) / len(defects) if defects else None
     precision = (len(found) / len(claimed)) if claimed else (None if not defects else 0.0)
@@ -142,7 +172,7 @@ def score_findings(text, answer_key):
         "recall": recall,
         "precision": precision,
         "f1": f1,
-        "found": sorted(found),
+        "found": sorted(display.get(identity, identity) for identity in found),
         "false_positives": false_positives,
         "decoys_correctly_rejected": len(rejected & decoys),
         "scoring_method": "structured_findings_exact_match_v1",

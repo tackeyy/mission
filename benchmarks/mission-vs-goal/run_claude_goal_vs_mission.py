@@ -129,6 +129,28 @@ Machine-checkable findings block (required):
 """
 
 
+def build_adjudication_checklist(answer_key) -> str:
+    """#587: 評価すべき項目を宣言する。**判定は漏らさない。**
+
+    エージェントに正解キーの識別子を推測させると、実質的に正しい成果物が
+    書式の理由で 0 点になる (実 run で観測)。何を評価するかはタスクが示し、
+    **その判定 (drift か no-finding か) を問う**のが測りたいことである。
+
+    defect と decoy を混ぜて安定順序で並べる。defect を先に並べると順序が
+    そのまま答えになるため。
+    """
+    items = []
+    for entry in (answer_key.get("defects") or []) + (answer_key.get("decoys") or []):
+        items.append((str(entry["location"]), str(entry["key"])))
+    lines = "\n".join(f"- {location} / {key}" for location, key in sorted(set(items)))
+    return (
+        "\nItems to adjudicate (one findings row each, in any order):\n"
+        f"{lines}\n"
+        "- Use exactly these location and key strings in the table so the rows "
+        "can be matched mechanically.\n"
+    )
+
+
 def load_task_answer_key(task_id: str):
     """#587: タスクの正解キーを返す。無ければ None (採点対象外)。"""
     for path in sorted(ANSWER_KEY_DIR.glob("*.json")) if ANSWER_KEY_DIR.is_dir() else []:
@@ -336,7 +358,12 @@ def build_prompt(
     degraded_readable_fixtures: list[str] | tuple[str, ...] | None = None,
 ) -> str:
     cohort_rules = "".join(f"- {rule}\n" for rule in extra_rules)
-    findings_block = FINDINGS_TABLE_INSTRUCTION if require_findings_table else ""
+    findings_block = ""
+    if require_findings_table:
+        findings_block = FINDINGS_TABLE_INSTRUCTION
+        _answer_key = load_task_answer_key(task["id"])
+        if _answer_key:
+            findings_block += build_adjudication_checklist(_answer_key)
     degraded_block = ""
     if degraded_readable_fixtures:
         sys.path.insert(0, str(REPO_ROOT / "skills" / "mission" / "lib"))

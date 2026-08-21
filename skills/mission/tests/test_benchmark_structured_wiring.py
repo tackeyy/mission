@@ -89,3 +89,50 @@ def test_answer_keys_resolve_for_configured_tail_tasks():
     key = module.load_task_answer_key("tail-config-spec-drift")
     assert key is not None and len(key["defects"]) == 7
     assert module.load_task_answer_key("tail-does-not-exist") is None
+
+
+# --- 評価項目リストの宣言 (実 run で検出した設計欠陥) --------------------------
+
+def test_prompt_declares_the_items_to_adjudicate():
+    """エージェントに識別子を推測させない。
+
+    実 run で、実質的に完全正解の artifact が f1=0.0 になった。key を自由記述
+    で書いたため正解キーの識別子と一致しなかった。何を評価すべきかは
+    タスクが宣言し、**その判定 (drift か no-finding か) を問う**のが正しい。
+    """
+    module = _runner()
+    key = {"defects": [{"location": "spec.md", "key": "request_timeout_ms",
+                        "expected": "3000", "actual": "27000"}],
+           "decoys": [{"location": "spec.md", "key": "idle_timeout_s", "note": "compliant"}]}
+    checklist = module.build_adjudication_checklist(key)
+    assert "request_timeout_ms" in checklist
+    assert "idle_timeout_s" in checklist
+
+
+def test_checklist_does_not_reveal_which_items_are_defects():
+    """判定そのものを漏らさない。項目は挙げるが答えは書かない。"""
+    module = _runner()
+    key = {"defects": [{"location": "spec.md", "key": "a", "expected": "1", "actual": "2"}],
+           "decoys": [{"location": "spec.md", "key": "b", "note": "compliant because X"}]}
+    checklist = module.build_adjudication_checklist(key)
+    for leaked in ("drift", "defect", "compliant because X", "expected", "actual"):
+        assert leaked not in checklist.lower(), f"checklist leaks {leaked!r}"
+
+
+def test_checklist_ordering_is_stable_and_not_grouped_by_verdict():
+    """defect を先に並べると順序が答えになる。"""
+    module = _runner()
+    key = {"defects": [{"location": "s.md", "key": "zzz", "expected": "1", "actual": "2"}],
+           "decoys": [{"location": "s.md", "key": "aaa", "note": "n"}]}
+    checklist = module.build_adjudication_checklist(key)
+    assert checklist.index("aaa") < checklist.index("zzz")
+
+
+def test_prompt_includes_checklist_when_answer_key_exists():
+    module = _runner()
+    prompt = module.build_prompt(
+        {"id": "tail-config-spec-drift", "category": "c", "prompt": "p", "validator": "v"},
+        "mission", "out.md", require_findings_table=True,
+    )
+    assert "request_timeout_ms" in prompt
+    assert "idle_timeout_s" in prompt
