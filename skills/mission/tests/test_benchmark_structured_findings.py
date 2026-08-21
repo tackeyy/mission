@@ -260,3 +260,31 @@ def test_marking_everything_as_drift_does_not_reach_full_score():
     assert result["recall"] == 1.0
     assert result["precision"] < 0.5
     assert result["f1"] < 0.7
+
+
+# --- 散文の値はトークン重複で照合する (判定 run 第4の発見) --------------------
+
+def test_prose_values_match_on_distinctive_tokens():
+    """言い回しの差で正解を落とさない。
+
+    判定 run で、欠陥 4 件すべてを drift、decoy 3 件すべてを no-finding と
+    **完全に正しく判定した** artifact が f1=0.000 になった。正解キーの散文
+    `config still contains the deprecated flush_interval key` に対し、artifact が
+    `Config file still contains the deprecated flush_interval key` と書いたためである。
+    """
+    truth = "config still contains the deprecated flush_interval key"
+    reported = ('"Config file still contains the deprecated `flush_interval` key '
+                'kept \\"for reference\\"." -> raises `ConfigKeyError`')
+    assert score_findings(_tbl(reported), _key(truth))["recall"] == 1.0
+
+
+def test_prose_values_do_not_match_on_unrelated_text():
+    truth = "config still contains the deprecated flush_interval key"
+    assert score_findings(_tbl("the logger was removed in v3"), _key(truth))["recall"] == 0.0
+
+
+def test_prose_match_requires_the_distinctive_identifier():
+    """一般語だけの重複で一致させない。識別子が要る。"""
+    truth = "config still contains the deprecated flush_interval key"
+    reported = "the config still contains the deprecated key"  # flush_interval が無い
+    assert score_findings(_tbl(reported), _key(truth))["recall"] == 0.0

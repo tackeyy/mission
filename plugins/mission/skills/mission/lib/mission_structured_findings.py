@@ -132,10 +132,28 @@ def _values_match(reported, truth):
     reported_n, truth_n = _numbers(reported), _numbers(truth)
     if truth_n:
         return bool(reported_n) and truth_n[0] in reported_n
-    a, b = _normalize_value(reported).strip('"\''), _normalize_value(truth).strip('"\'')
+    a, b = _normalize_value(reported), _normalize_value(truth)
     if not a or not b:
         return a == b
-    return a in b or b in a
+    if a in b or b in a:
+        return True
+    # 散文はトークン重複で照合する。言い回しの差で正解を落とさないが、
+    # **識別子 (アンダースコア入り・長い語) は必須**にして一般語の重複だけで
+    # 一致させない。判定 run で、完全に正しく判定した artifact が
+    # 「config still contains」対「config file still contains」の差で
+    # f1=0.000 になった。
+    def tokens(text):
+        return {t for t in re.findall(r"[a-z0-9_]{3,}", text)}
+
+    truth_tokens = tokens(b)
+    if not truth_tokens:
+        return False
+    reported_tokens = tokens(a)
+    identifiers = {t for t in truth_tokens if "_" in t or len(t) >= 8}
+    if identifiers and not identifiers <= reported_tokens:
+        return False
+    overlap = len(truth_tokens & reported_tokens) / len(truth_tokens)
+    return overlap >= 0.6
 
 
 def _identity(location, key):
