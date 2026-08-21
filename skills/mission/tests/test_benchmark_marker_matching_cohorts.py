@@ -116,38 +116,60 @@ def _all_marker_patterns(task: dict) -> list[tuple[str, str, str]]:
 
 
 # ---------------------------------------------------------------------------
-# 丸写し判定を適用できないタスク（設計上の限界。#562 で明示的に記録する）
+# 丸写し判定を適用できないタスク（設計上の限界。#562 / #587 で記録する）
 #
-# openworld-incremental-reveal の fixture (incident-log.md) は末尾で
-# 「The root cause is the runaway migration job holding the exclusive lock,
-#  not the serializer deploy.」と**結論そのものを断定して終わる**。
-# したがって「丸写し」と「分析」は marker recall では原理的に区別できない
-# (正しい artifact が満たすパターンは、fixture 自身も満たす)。
+# openworld-incremental-reveal はインシデントログを読んで根本原因を導くタスクで、
+# marker 4 本のうち 3 本が「ログが報告している証拠」の引き写しである。ログの
+# 複製は当然そのログが報告する証拠を含むため、**証拠 marker は丸写しでも一致
+# する**。これは marker の書き方の問題ではなく、タスクの性質である。
 #
-# ここで無理に低スコアへ落とすには、特定の artifact だけが使う語彙
-# (confirmed / predated / overturned 等) を要求するしかなく、それは
-# #558 で実害を出した「片寄った較正による偽シグナル」そのものになる。
-# 実際その方式は既存の canary テスト
-# (test_benchmark_openworld_cohort.py の正解テキスト) を Red にした。
+# 分析を測っているのは残り 1 本（根本原因の帰属）だけであり、こちらは丸写しでは
+# 成立しない。下の 2 つの test がその性質を機械的に固定する。
 #
-# よって本タスクは丸写し判定の対象外とし、理由を下の test で機械的に固定する。
+# 以前は fixture 末尾が結論そのものを断定しており、丸写しで 4/4 一致していた。
+# その結論文は削除済み（丸写し 1.00 → 0.75）。ここからさらに下げるには証拠
+# marker に「因果の帰属」を要求する正規表現を足すしかないが、それは #558 /
+# #559 / #562 で 3 周した軍拡競争へ戻ることになる。**構造化 findings 照合
+# (#587) が本来の解**であり、本 test 群はそれまでの限界の記録である。
 UNMARKABLE_BY_RECALL = {"openworld-incremental-reveal"}
 
+#: 丸写しでは成立してはならない「分析を測る marker」。
+ANALYSIS_MARKERS = {"openworld-incremental-reveal": "Root cause: migration job"}
 
-def test_unmarkable_exception_is_justified_by_fixture_content():
-    """例外の根拠 (fixture が結論を断定している) を機械的に固定する。
 
-    fixture が変わって結論を述べなくなったら、この test が落ちて
-    例外を見直す契機になる。例外を「書いたまま忘れる」ことを防ぐ。
+def test_analysis_marker_is_not_satisfiable_by_fixture_copy():
+    """例外タスクでも、**分析を測る marker は丸写しで一致してはならない**。
+
+    証拠 marker が引き写しで一致することは許容するが、根本原因の帰属まで
+    丸写しで取れるなら、そのタスクは品質を一切測っていない。
+    fixture が再び結論を述べるようになればこの test が落ちる。
     """
+    runner = _load_runner()
+    tasks = {t["id"]: t for t, _ in _load_cohort_tasks()}
+    for task_id, marker_name in ANALYSIS_MARKERS.items():
+        task = tasks[task_id]
+        result = runner.evaluate_quality_markers(_concatenate_fixtures(task), task)
+        assert marker_name in result["quality_markers_missing"], (
+            f"{task_id}: 分析 marker '{marker_name}' が fixture 丸写しで一致している。"
+            "このタスクは品質を測っていない"
+        )
+
+
+def test_unmarkable_exception_stays_bounded():
+    """例外タスクの丸写しスコアが 1.0 へ戻っていないこと。
+
+    例外を「書いたまま忘れる」ことを防ぐ。
+    """
+    runner = _load_runner()
     tasks = {t["id"]: t for t, _ in _load_cohort_tasks()}
     for task_id in UNMARKABLE_BY_RECALL:
         task = tasks[task_id]
-        corpus = _concatenate_fixtures(task).lower()
-        assert "the root cause is the runaway migration job" in corpus, (
-            f"{task_id}: fixture がもはや結論を断定していない。"
-            "丸写し判定の対象外とする根拠が消えたので例外を見直すこと"
-        )
+        score = runner.evaluate_quality_markers(
+            _concatenate_fixtures(task), task
+        )["quality_marker_score"]
+        assert score < 1.0, f"{task_id}: 丸写しが満点に戻っている (score={score})"
+
+
 
 
 # Test 1: fixture verbatim copy does NOT earn score >= 0.5
