@@ -113,6 +113,59 @@ def select_tasks(task_data: dict, limit_tasks: int, task_ids: str | None = None)
     return [by_id[task_id] for task_id in requested]
 
 
+ANSWER_KEY_DIR = BENCH_DIR / "answer-keys"
+
+FINDINGS_TABLE_INSTRUCTION = """
+Machine-checkable findings block (required):
+- In addition to the prose, include exactly one markdown table with this header:
+  | location | key | expected | actual | verdict |
+- One row per item you evaluated. `location` is the fixture file name, `key` is
+  the identifier or claim under test, `expected` is the value the source of
+  truth requires, `actual` is the value you observed.
+- `verdict` must be exactly `drift` (you assert a defect) or `no-finding`
+  (you evaluated it and it is compliant). No other value is accepted.
+- Rows you assert as `drift` that are actually compliant count against you, so
+  do not report an item unless the evidence supports it.
+"""
+
+
+def load_task_answer_key(task_id: str):
+    """#587: タスクの正解キーを返す。無ければ None (採点対象外)。"""
+    for path in sorted(ANSWER_KEY_DIR.glob("*.json")) if ANSWER_KEY_DIR.is_dir() else []:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        entry = (payload.get("tasks") or {}).get(task_id)
+        if entry:
+            return {"defects": entry.get("defects") or [], "decoys": entry.get("decoys") or []}
+    return None
+
+
+def evaluate_structured_findings(text: str, answer_key):
+    """#587: 構造化 findings 照合で採点する。
+
+    正解キーが無いタスクは採点対象外なので None を返す (0 点にしない)。
+    findings 表が無い場合は f1=None + 理由を返す。「表が無い」と「探して
+    何も見つけられなかった」を混同しない。
+    """
+    if not answer_key:
+        return None
+    sys.path.insert(0, str(REPO_ROOT / "skills" / "mission" / "lib"))
+    from mission_structured_findings import FindingsFormatError, score_findings
+
+    try:
+        return {**score_findings(text, answer_key), "structured_findings_error": None}
+    except FindingsFormatError as exc:
+        return {
+            "f1": None, "recall": None, "precision": None,
+            "rows_reported": 0, "found": [], "false_positives": [],
+            "decoys_correctly_rejected": 0,
+            "scoring_method": "structured_findings_exact_match_v1",
+            "structured_findings_error": str(exc),
+        }
+
+
 def quality_marker_names(task: dict) -> list[str]:
     markers = task.get("quality_markers", [])
     names: list[str] = []
@@ -279,8 +332,17 @@ def build_prompt(
     mission_budget_minutes: float | None = None,
     mission_threshold: float | None = None,
     extra_rules: list[str] | tuple[str, ...] = (),
+    require_findings_table: bool = False,
+    degraded_readable_fixtures: list[str] | tuple[str, ...] | None = None,
 ) -> str:
     cohort_rules = "".join(f"- {rule}\n" for rule in extra_rules)
+    findings_block = FINDINGS_TABLE_INSTRUCTION if require_findings_table else ""
+    degraded_block = ""
+    if degraded_readable_fixtures:
+        sys.path.insert(0, str(REPO_ROOT / "skills" / "mission" / "lib"))
+        from mission_sensitivity import build_degraded_prompt_suffix
+
+        degraded_block = build_degraded_prompt_suffix(list(degraded_readable_fixtures))
     common = f"""You are executing one controlled local benchmark run.
 
 Rules:
@@ -294,7 +356,7 @@ Task id: {task["id"]}
 Task category: {task["category"]}
 Task prompt: {task["prompt"]}
 Task validator: {task["validator"]}
-"""
+{findings_block}{degraded_block}"""
     marker_names = quality_marker_names(task)
     if marker_names and not task.get("markers_hidden"):
         # Tail-cohort tasks set markers_hidden: their markers are planted-defect
@@ -1032,6 +1094,8 @@ def evaluate_run(
     # F-2: markers are scored against the form-stripped body, so template
     # structure earns no marker credit. The unstripped score is kept as
     # quality_marker_score_raw for comparability with pre-F-2 records.
+    # #587: 既存 marker 採点は削除せず併記する (新旧の相関を観測するため)。
+    structured = evaluate_structured_findings(text, load_task_answer_key(task["id"]))
     marker_eval = evaluate_quality_markers(strip_form(text), task)
     marker_eval_raw = evaluate_quality_markers(text, task)
     if not validator_pass:
@@ -1062,6 +1126,7 @@ def evaluate_run(
         "human_quality_score": quality_score,
         # #247: markered task は gradient v2、marker-less は legacy 二値の意味を保つ。
         # method 文字列で新旧 record を機械的に区別できる。
+        "structured_findings": structured,
         "quality_score_method": (
             "automated_heuristic_form_stripped_gradient_v2_not_blind_human_regex_v3"
             if has_markers
@@ -1121,6 +1186,8 @@ def run_one(
     model_id: str,
     mission_budget_minutes: float | None = None,
     mission_threshold: float | None = None,
+    require_findings_table: bool = False,
+    degraded_readable_fixtures: list[str] | tuple[str, ...] | None = None,
     hidden_paths: list[str] | None = None,
     extra_rules: list[str] | tuple[str, ...] = (),
     run_index: int = 1,
@@ -1143,6 +1210,8 @@ def run_one(
         mission_budget_minutes=mission_budget_minutes,
         mission_threshold=mission_threshold,
         extra_rules=extra_rules,
+        require_findings_table=require_findings_table,
+        degraded_readable_fixtures=degraded_readable_fixtures,
     )
     artifact_dir = ARTIFACTS_DIR / run_id / run_name
     stdout_path = artifact_dir / "claude-result.json"
@@ -1295,6 +1364,7 @@ def run_one(
         "validator_pass": evaluation["validator_pass"],
         "human_quality_score": evaluation["human_quality_score"],
         "quality_score_method": evaluation["quality_score_method"],
+        "structured_findings": evaluation.get("structured_findings"),
         "quality_marker_score": evaluation["quality_marker_score"],
         "quality_marker_score_raw": evaluation["quality_marker_score_raw"],
         "quality_marker_recall": evaluation["quality_marker_recall"],
@@ -1978,6 +2048,16 @@ def main() -> int:
         " budget pressure による graceful partial-done halt を有効化する。",
     )
     parser.add_argument(
+        "--require-findings-table",
+        action="store_true",
+        help="#587: 両 arm に機械可読な findings 表を要求し、構造化採点を行う",
+    )
+    parser.add_argument(
+        "--degraded-readable-fixtures",
+        default=None,
+        help="#598 感度検証: 劣化 arm が読める fixture をカンマ区切りで指定する",
+    )
+    parser.add_argument(
         "--mission-threshold",
         type=float,
         default=None,
@@ -2040,6 +2120,11 @@ def main() -> int:
             args.model_id,
             mission_budget_minutes=args.mission_budget_minutes,
             mission_threshold=args.mission_threshold,
+            require_findings_table=args.require_findings_table,
+            degraded_readable_fixtures=(
+                [p.strip() for p in args.degraded_readable_fixtures.split(",") if p.strip()]
+                if args.degraded_readable_fixtures else None
+            ),
             hidden_paths=task_data.get("hidden_paths"),
             extra_rules=task_data.get("prompt_rules", ()),
             run_index=run_index,
