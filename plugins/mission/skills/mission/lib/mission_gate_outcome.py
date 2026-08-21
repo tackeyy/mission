@@ -19,9 +19,21 @@ CHANGED_NO_GAIN = "changed-no-gain"
 NO_CHANGE = "no-change"
 UNKNOWN = "unknown"
 
+# 推定による分類であることを示す接尾辞。digest ベースの実測と**混ぜない**。
+# 信頼度の違う数字を同じ箱に入れると集計値の意味が壊れる。
+INFERRED_SUFFIX = "-inferred"
+
 # mission 単位の代表値を決めるときの優先順位。
 # 1 度でも改善していればそのミッションでは gate が働いたと扱う。
-_OUTCOME_PRIORITY = (IMPROVED, CHANGED_NO_GAIN, NO_CHANGE, UNKNOWN)
+_OUTCOME_PRIORITY = (
+    IMPROVED,
+    CHANGED_NO_GAIN,
+    NO_CHANGE,
+    IMPROVED + INFERRED_SUFFIX,
+    CHANGED_NO_GAIN + INFERRED_SUFFIX,
+    NO_CHANGE + INFERRED_SUFFIX,
+    UNKNOWN,
+)
 
 
 def _composite(entry):
@@ -36,6 +48,25 @@ def _digest(entry):
     return value if isinstance(value, str) and value else None
 
 
+def _head_sha(entry):
+    """git の head_sha を返す。作業変化の**代理指標**であり digest ではない。
+
+    artifact_digest は #593 以降の run にしか無い。commit を伴う mission なら
+    iteration 間の head_sha 変化が「作業が実際に変わったか」の代理になる。
+    git 以外の revision_scope は代理指標として使わない。
+    """
+    if not isinstance(entry, dict):
+        return None
+    scope = entry.get("revision_scope")
+    if not isinstance(scope, dict):
+        provenance = entry.get("score_provenance")
+        scope = provenance.get("revision_scope") if isinstance(provenance, dict) else None
+    if not isinstance(scope, dict) or scope.get("kind") != "git":
+        return None
+    value = scope.get("head_sha")
+    return value if isinstance(value, str) and value else None
+
+
 def classify_transition(previous, current):
     """iteration N -> N+1 を 1 件分類する。
 
@@ -44,15 +75,21 @@ def classify_transition(previous, current):
     """
     prev_digest, curr_digest = _digest(previous), _digest(current)
     prev_score, curr_score = _composite(previous), _composite(current)
-    if prev_digest is None or curr_digest is None:
-        return UNKNOWN
     if prev_score is None or curr_score is None:
         return UNKNOWN
+    suffix = ""
+    if prev_digest is None or curr_digest is None:
+        # digest が無い過去 state は head_sha で遡及推定する。
+        # 実測より弱い根拠なので、必ず -inferred を付けて区別する。
+        prev_digest, curr_digest = _head_sha(previous), _head_sha(current)
+        if prev_digest is None or curr_digest is None:
+            return UNKNOWN
+        suffix = INFERRED_SUFFIX
     if prev_digest == curr_digest:
         # 成果物が変わっていない。スコアだけ動いていても採点のばらつきで
         # あって修正の成果ではないため、改善として数えない。
-        return NO_CHANGE
-    return IMPROVED if curr_score > prev_score else CHANGED_NO_GAIN
+        return NO_CHANGE + suffix
+    return (IMPROVED if curr_score > prev_score else CHANGED_NO_GAIN) + suffix
 
 
 def _history(state):
@@ -91,43 +128,72 @@ def summarize_states(states):
     FP 率の母数は **ゲートが発火した (=反復した) ミッション** であり、
     全ミッションではない。素通りしたミッションを母数に入れると率が薄まり、
     ゲート精度の指標にならない。
+
+    digest による実測と head_sha による遡及推定は **別の箱に集計する**
+    (`inferred` キー)。信頼度の違う数字を混ぜると集計値の意味が壊れる。
     """
-    counts = {IMPROVED: 0, CHANGED_NO_GAIN: 0, NO_CHANGE: 0, UNKNOWN: 0}
+    def _blank_counts():
+        return {IMPROVED: 0, CHANGED_NO_GAIN: 0, NO_CHANGE: 0, UNKNOWN: 0}
+
+    counts = _blank_counts()
+    inferred_counts = _blank_counts()
     false_positive_candidates = []
+    inferred_false_positive_candidates = []
     missions_total = 0
     missions_multi_iteration = 0
+    inferred_multi_iteration = 0
 
     for state in states:
         missions_total += 1
         result = classify_state(state)
         if not result["transitions"]:
             continue
-        missions_multi_iteration += 1
         outcome = result["mission_outcome"]
+        mission_name = state.get("mission") if isinstance(state, dict) else None
+        if isinstance(outcome, str) and outcome.endswith(INFERRED_SUFFIX):
+            base = outcome[: -len(INFERRED_SUFFIX)]
+            inferred_multi_iteration += 1
+            if base in inferred_counts:
+                inferred_counts[base] += 1
+            if base == NO_CHANGE:
+                inferred_false_positive_candidates.append({
+                    "mission": mission_name, "transitions": result["transitions"],
+                })
+            continue
+        missions_multi_iteration += 1
         if outcome in counts:
             counts[outcome] += 1
         if outcome == NO_CHANGE:
             false_positive_candidates.append({
-                "mission": (state.get("mission") if isinstance(state, dict) else None),
-                "transitions": result["transitions"],
+                "mission": mission_name, "transitions": result["transitions"],
             })
 
-    # FP 率の母数は「判定できたミッション」に限る。unknown だけの母集団で
-    # 0.0 を返すと「FP なし」に読めるが実際は「判定できない」であり、
-    # 意味のない数字を意味ありげに出すことになる。
-    missions_classifiable = missions_multi_iteration - counts[UNKNOWN]
-    rate = (
-        counts[NO_CHANGE] / missions_classifiable
-        if missions_classifiable
-        else None
-    )
+    def _rate(bucket_counts, multi):
+        # FP 率の母数は「判定できたミッション」に限る。unknown だけの母集団で
+        # 0.0 を返すと「FP なし」に読めるが実際は「判定できない」であり、
+        # 意味のない数字を意味ありげに出すことになる。
+        classifiable = multi - bucket_counts[UNKNOWN]
+        return classifiable, (bucket_counts[NO_CHANGE] / classifiable if classifiable else None)
+
+    classifiable, rate = _rate(counts, missions_multi_iteration)
+    inferred_classifiable, inferred_rate = _rate(inferred_counts, inferred_multi_iteration)
+
     return {
         "missions_total": missions_total,
         "missions_multi_iteration": missions_multi_iteration,
-        "missions_classifiable": missions_classifiable,
+        "missions_classifiable": classifiable,
         "counts": counts,
         "false_positive_candidates": false_positive_candidates,
         "false_positive_rate": rate,
+        # 遡及推定 (head_sha ベース)。実測より弱い根拠なので分離して報告する。
+        "inferred": {
+            "basis": "revision_scope.head_sha change between iterations",
+            "missions_multi_iteration": inferred_multi_iteration,
+            "missions_classifiable": inferred_classifiable,
+            "counts": inferred_counts,
+            "false_positive_candidates": inferred_false_positive_candidates,
+            "false_positive_rate": inferred_rate,
+        },
     }
 
 
