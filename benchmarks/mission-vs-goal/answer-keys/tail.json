@@ -121,8 +121,8 @@
         {
           "location": "quarterly-summary.md",
           "key": "p95_improved_every_week",
-          "expected": "false",
-          "actual": "true",
+          "expected": "not monotonic; week 8 380 rises to week 9 410",
+          "actual": "improved every single week",
           "evidence": [
             "quarterly-summary.md",
             "weekly-metrics.md"

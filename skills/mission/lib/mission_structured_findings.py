@@ -111,6 +111,33 @@ def _normalize_value(text):
     return re.sub(r"\s+", " ", without_separators).strip()
 
 
+_NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def _numbers(text):
+    return _NUMBER.findall(_normalize_value(text))
+
+
+def _values_match(reported, truth):
+    """報告値が正解値と**実質的に**一致するか。
+
+    実 run で、7 項目すべてを正しく判定した artifact が recall 0.2 になった。
+    `42%` と `42`、`about USD 1,300` と `1300` を別物と扱っていたためである。
+    **測っているのは判定であって表記ではない。**
+
+    - 両側に数値があれば数値で比較する (単位・記号・桁区切りを無視)
+    - 数値が無ければ正規化した文字列の包含で比較する
+    - 値そのものが違えば一致させない
+    """
+    reported_n, truth_n = _numbers(reported), _numbers(truth)
+    if truth_n:
+        return bool(reported_n) and truth_n[0] in reported_n
+    a, b = _normalize_value(reported).strip('"\''), _normalize_value(truth).strip('"\'')
+    if not a or not b:
+        return a == b
+    return a in b or b in a
+
+
 def _identity(location, key):
     return f"{_normalize_key(location)}:{_normalize_key(key)}"
 
@@ -152,7 +179,7 @@ def score_findings(text, answer_key):
 
     found = {
         identity for identity, actual in claimed.items()
-        if identity in defects and actual == defects[identity]
+        if identity in defects and _values_match(actual, defects[identity])
     }
     false_positives = sorted(
         display.get(identity, identity) for identity in claimed if identity not in found

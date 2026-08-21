@@ -191,3 +191,31 @@ def test_planned_degradation_removes_most_defects():
             f"{task_id}: degraded arm can still reach {ceiling:.0%} of defects; "
             "this degradation would not test the instrument"
         )
+
+
+def test_answer_key_values_are_reportable_wordings():
+    """正解キーの値は、artifact が実際に書く表記であること。
+
+    実 run で `actual: "true"` としていた項目 (真偽の主張) が、正しく判定した
+    artifact を誤検出扱いしていた。artifact は主張の文言を書くため、正解キー
+    側も照合可能な表記にしておく必要がある。
+
+    fixture に実在する設定値としての true/false は対象外。artifact もその
+    リテラルを書くので照合できる。
+    """
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parents[3]
+    payload = json.loads(
+        (root / "benchmarks" / "mission-vs-goal" / "answer-keys" / "tail.json").read_text(encoding="utf-8")
+    )
+    for task_id, entry in payload["tasks"].items():
+        for defect in entry["defects"]:
+            # 設定値としての true/false は fixture に literal で存在するので許す。
+            # 判定を真偽で表した項目 (key が動詞句) だけを禁じる。
+            if not any(token in defect["key"] for token in ("_is_", "_was_", "improved", "monotonic")):
+                continue
+            for field in ("expected", "actual"):
+                assert str(defect[field]).strip().lower() not in ("true", "false"), (
+                    f"{task_id}: {defect['key']}.{field} is a bare boolean; "
+                    "use the wording an artifact would actually report"
+                )
