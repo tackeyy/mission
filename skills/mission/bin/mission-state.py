@@ -15343,6 +15343,94 @@ def _artifact_digest_for_iteration(cwd: Path, state: dict) -> tuple[str | None, 
         return None, f"error:{type(exc).__name__}"
 
 
+VERIFICATION_PASSED = "passed"
+VERIFICATION_FAILED = "failed"
+VERIFICATION_NOT_RUN = "not-run"
+
+
+def _normalize_verification_checks(payload):
+    """#594 A: verification payload を検証して checks を正規化する。
+
+    `ok` の無い check を「合格」と解釈しない (検証していないことと合格を
+    混同すると、gate の入力そのものが嘘になる)。
+    """
+    if not isinstance(payload, dict):
+        raise SystemExit("verification payload must be a JSON object")
+    checks = payload.get("checks")
+    if checks is None:
+        checks = []
+    if not isinstance(checks, list):
+        raise SystemExit("verification payload: checks must be a list")
+    normalized = []
+    for index, check in enumerate(checks):
+        if not isinstance(check, dict):
+            raise SystemExit(f"verification checks[{index}] must be an object")
+        if not isinstance(check.get("ok"), bool):
+            raise SystemExit(
+                f"verification checks[{index}] requires an explicit boolean 'ok'"
+            )
+        name = check.get("name")
+        detail = check.get("detail")
+        normalized.append({
+            "name": str(name) if isinstance(name, str) and name else f"check-{index}",
+            "ok": check["ok"],
+            "detail": str(detail) if isinstance(detail, str) else None,
+        })
+    return normalized
+
+
+def cmd_verification_record(args):
+    """#594 A: executor 完了後・reviewer 起動前の検証結果を記録する。
+
+    reviewer は読むだけでは executor と同じ盲点に落ちる。テスト実行・存在
+    確認・再計算は**モデルの意見ではなく事実**であり、真の独立性を生む。
+
+    **gate の式は変更しない。** 記録はゲートの入力を増やすものであり、
+    検証が失敗しても本コマンドは mission を止めない (判断は reviewer と
+    gate に委ねる)。
+    """
+    raw = sys.stdin.read() if getattr(args, "stdin", False) else Path(args.input).read_text(encoding="utf-8")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"verification payload is not valid JSON: {exc}")
+    checks = _normalize_verification_checks(payload)
+    failed = [check for check in checks if not check["ok"]]
+    if not checks:
+        status = VERIFICATION_NOT_RUN
+    elif failed:
+        status = VERIFICATION_FAILED
+    else:
+        status = VERIFICATION_PASSED
+
+    cwd = Path.cwd()
+    sf = resolve_state_file(cwd)
+    if not sf.exists():
+        print("ERROR: state file が見つかりません。先に init してください。", file=sys.stderr)
+        sys.exit(1)
+    now = iso_now()
+    entry = {
+        "iteration": args.iteration,
+        "status": status,
+        "checks": checks,
+        "failed_count": len(failed),
+        "recorded_at": now,
+    }
+    repository = _legacy_lifecycle_repository(
+        cwd, sf, stamp=True, strict_read=True, lease_reason="verification-record",
+    )
+    with repository.transaction():
+        data = repository.load()
+        history = data.get("verification_history")
+        if not isinstance(history, list):
+            history = []
+        history.append(entry)
+        data["verification_history"] = history
+        data["updated_at"] = now
+        repository.save(data)
+    print(json.dumps({"ok": True, "verification": entry}, ensure_ascii=False, indent=2))
+
+
 def cmd_review_finalize(args):
     """#283: aggregate-reviews → push-score を 1 コマンドで実行する (Phase 5 transactional).
 
@@ -18542,6 +18630,18 @@ def _build_parser():
     p_manifest.add_argument("--out", required=True,
                             help="出力 manifest JSON パス")
     p_manifest.set_defaults(func=cmd_context_manifest)
+
+    p_verify = sub.add_parser(
+        "verification",
+        help="#594: executor 完了後・reviewer 起動前の検証結果を記録する",
+    )
+    verify_sub = p_verify.add_subparsers(dest="verification_command", required=True)
+    p_verify_record = verify_sub.add_parser("record", help="検証結果を state へ記録")
+    p_verify_record.add_argument("--iteration", type=int, required=True)
+    verify_source = p_verify_record.add_mutually_exclusive_group(required=True)
+    verify_source.add_argument("--stdin", action="store_true", help="stdin から JSON を読む")
+    verify_source.add_argument("--input", default=None, help="JSON ファイルパス")
+    p_verify_record.set_defaults(func=cmd_verification_record)
 
     p_halt = sub.add_parser("mark-halt", help="halt_reason を立てて停止")
     p_halt.add_argument("--reason", required=True)
