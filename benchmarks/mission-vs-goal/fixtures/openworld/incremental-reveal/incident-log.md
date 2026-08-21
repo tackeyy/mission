@@ -30,5 +30,3 @@ any code shipped. This points away from the deploy entirely.
 The database team confirms a runaway migration job started at 01:00 that held an
 exclusive lock on the `orders` table and exhausted the connection pool. Killing
 the migration job at 02:44 restores the success rate to 99.4% within one minute.
-The root cause is the runaway migration job holding the exclusive lock, not the
-serializer deploy. The `02:45` entry is the final arbiter.
