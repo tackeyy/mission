@@ -113,3 +113,46 @@ def test_allowlist_paths_do_not_span_directories():
         assert not compiled.search(
             "benchmarks/mission-vs-goal/answer-keys/nested/deeper/secret.json"
         ), f"想定より深い階層に一致する: {path_re}"
+
+
+# ---- 生成物・作業領域の除外 ----
+def _artifact_allowlist_paths():
+    """`regexTarget` を持たない (= path だけで除外する) allowlist の paths。"""
+    import tomllib as _tomllib
+    with CONFIG.open("rb") as fh:
+        config = _tomllib.load(fh)
+    return [
+        p
+        for entry in config.get("allowlists", [])
+        if "regexTarget" not in entry
+        for p in entry.get("paths", [])
+    ]
+
+
+def test_untracked_work_areas_are_excluded_from_filesystem_scans():
+    """`gitleaks dir` はファイルシステムを見るため、gitignore 対象も走査する。
+
+    並行作業用の worktree を除外しないと、別ブランチが持つ既知の誤検知が本体の
+    走査結果に混ざる。チェックリストが要求する「ゼロはゼロの意味」が、他ブランチの
+    状態次第で崩れることになる。
+    """
+    patterns = _artifact_allowlist_paths()
+    required = ["__pycache__", "pytest_cache", "venv-ci", "worktrees"]
+    joined = " ".join(patterns)
+    missing = [name for name in required if name not in joined]
+    assert not missing, (
+        "git 管理外の作業領域が除外リストから外れている: " + ", ".join(missing)
+    )
+
+
+def test_work_area_exclusion_does_not_swallow_the_real_tree():
+    """除外は作業領域に限る。本体ツリーのパスまで巻き込んではいけない。"""
+    compiled = [re.compile(p) for p in _artifact_allowlist_paths()]
+    for path in (
+        "skills/mission/bin/mission-state.py",
+        "benchmarks/mission-vs-goal/answer-keys/tail.json",
+        "docs/SECURITY_REVIEW_CHECKLIST.md",
+    ):
+        assert not any(c.search(path) for c in compiled), (
+            f"本体ツリーのパスが除外対象になっている: {path}"
+        )
