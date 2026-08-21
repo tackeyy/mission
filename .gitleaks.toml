@@ -20,19 +20,24 @@ paths = [
 # すると「どうせいつもの件」と流され、本物が出たときに気づけなくなるため、
 # **値の形まで限定して**抑制する。
 #
-# 抑制条件は「lowercase snake_case の識別子であること」。実 credential は大小混在・
-# 記号・高エントロピーを含むためこの形に該当しない。同じファイルへ本物が混入すれば
-# 従来どおり検出される。
-#
 # JSON はコメントを書けないため行単位の `gitleaks:allow` が使えず、設定側で抑制
 # するしかない。その代わり path・rule・値の形の 3 つで範囲を絞っている。
+#
+# 値の条件は「**アンダースコア区切りを含む** lowercase snake_case」。単なる
+# `^[a-z][a-z0-9_]{2,48}$` では不十分で、32 桁 hex・40 桁 hex・小文字 Base32 が
+# すべて該当してしまう (MD5 / SHA1 / TOTP シークレット等の形)。区切りを必須に
+# することでこれらを除外している。実際の answer key は 35 値すべてが区切りを含む。
+#
+# 検証は test_gitleaks_allowlist_scope.py が固定する。正規表現を緩める改訂は
+# そこで落ちる。
 [[allowlists]]
 description = "benchmark answer key の指標識別子 (generic-api-key の誤検知)"
-# condition の既定は OR。本設定では targetRules が generic-api-key に絞っているため
-# 現状 AND の有無で挙動は変わらないが、将来 targetRules を外す改訂が入ったときに
-# 「path 一致だけでファイル全体が除外される」状態へ落ちないよう明示しておく。
+# condition の既定は OR。既定のままだと path 一致だけでファイル全体が除外され、
+# 同ファイルへ混入した本物まで見逃す。AND を明示する。
 condition = "AND"
 targetRules = ["generic-api-key"]
-paths = ['''benchmarks/mission-vs-goal/answer-keys/.*\.json$''']
+# 先頭を `^` で固定する。未アンカーだと `not-benchmarks/...` のような別ディレクトリ
+# にも一致してしまう。
+paths = ['''^benchmarks/mission-vs-goal/answer-keys/[^/]*\.json$''']
 regexTarget = "secret"
-regexes = ['''^[a-z][a-z0-9_]{2,48}$''']
+regexes = ['''^[a-z][a-z0-9]*(_[a-z0-9]+)+$''']

@@ -48,9 +48,12 @@ gh api repos/:owner/:repo/branches/main/protection --jq \
 - [ ] `gitleaks` が作業ツリー・全履歴の両方でゼロ件。ゼロはゼロの意味でなければ
       ならない。本リポジトリは redaction テストに credential 形の fixture を持つが、
       それらはファイル単位ではなく**行単位**の `gitleaks:allow` で除外してあり、
-      同じファイルへ本物が混入すれば検出される。`.gitleaks.toml` が除外するのは
-      git 管理外の生成物ディレクトリだけ。検出を説明で片付けたくなったら、行単位で
-      黙らせるか直すかのどちらかにする。持ち越さない。
+      同じファイルへ本物が混入すれば検出される。`.gitleaks.toml` の除外は 2 種類ある。
+      git 管理外の生成物ディレクトリと、JSON のようにコメントを書けない形式に対する
+      「path・rule・**値の形**」で絞った除外である。ゼロを信じる前にその定義を読む。
+      範囲は `test_gitleaks_allowlist_scope.py` が固定しており、値のパターンが
+      credential の形を飲み込むほど緩めば落ちる。検出を説明で片付けたくなったら、
+      行単位で黙らせるか直すかのどちらかにする。持ち越さない。
 - [ ] gitleaks が拾わない provider prefix を別途確認する（Anthropic / OpenAI /
       OpenRouter / xAI / Slack / GitHub / Google / Notion / Resend / Supabase /
       AWS / PEM 秘密鍵 / JWT）。
