@@ -44,6 +44,7 @@ COMMAND_OWNER_REGISTRY = {
         "context-manifest",
         "progress clear",
         "progress update",
+        "verification record",
     ),
     **_owned(
         "A4.specialist-planning",
