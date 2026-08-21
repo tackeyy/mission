@@ -156,8 +156,12 @@ def state_dir(tmp_path):
 
 
 @pytest.fixture
-def run_cli(tmp_path):
-    """mission-state.py をサブプロセスで呼ぶ helper.
+def raw_run_cli(tmp_path):
+    """mission-state.py をサブプロセスで呼ぶ helper (legacy 変換なしの素の runner).
+
+    #582: ``run_cli`` は test module 側で legacy runner に override されることが
+    あるため、legacy の破壊的 cleanup を避けたい case はこの名前を直接要求する。
+    この名前は conftest だけが定義し、override しない。
 
     env isolation (2026-06-10): 既定で MISSION_* prefix の変数を
     継承環境から除去し、env_extra による明示注入のみ許す。外部セッションの
@@ -241,11 +245,18 @@ def run_cli(tmp_path):
 
 
 @pytest.fixture
-def legacy_run_cli(run_cli):
+def run_cli(raw_run_cli):
+    """Default CLI runner. Test modules may override this with a legacy runner."""
+
+    return raw_run_cli
+
+
+@pytest.fixture
+def legacy_run_cli(raw_run_cli):
     """Run a command against an explicitly materialized retained-v4 session."""
 
     def _run(*args, **kwargs):
-        result = run_cli(*args, **kwargs)
+        result = raw_run_cli(*args, **kwargs)
         if args and args[0] == "init" and result.returncode == 0:
             from .mission_state_fixture_corpus import _materialize_legacy_init_fixture
 

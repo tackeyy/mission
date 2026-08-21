@@ -70,13 +70,19 @@ def test_aggregate_removes_on_halt(tmp_path, run_cli):
     assert agg2["active_sessions"] == ["B"]
 
 
-def test_concurrent_init_all_in_aggregate(tmp_path, run_cli):
-    """3セッション同時 init (threading) で StateLock により全 sid が aggregate に登録される."""
+def test_concurrent_init_all_in_aggregate(tmp_path, raw_run_cli):
+    """3セッション同時 init (threading) で StateLock により全 sid が aggregate に登録される.
+
+    #582: この case だけ module の legacy runner を使わない。legacy runner は
+    init 成功ごとに共有 repository の v5 コンテナを rmtree するため、並行 init の
+    最中に他 thread の pin/ensure-layout を壊す (test 側の hazard であり実装の
+    race ではない)。aggregate 登録の検証に v4 materialize は不要。
+    """
     import threading
     errors = []
 
     def _init(sid):
-        r = run_cli("init", f"mission-{sid}", "--complexity", "Standard",
+        r = raw_run_cli("init", f"mission-{sid}", "--complexity", "Standard",
                     cwd=tmp_path, env_extra={"MISSION_SESSION_ID": sid})
         if r.returncode != 0:
             errors.append(r.stderr)
