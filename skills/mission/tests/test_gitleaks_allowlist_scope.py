@@ -156,3 +156,37 @@ def test_work_area_exclusion_does_not_swallow_the_real_tree():
         assert not any(c.search(path) for c in compiled), (
             f"本体ツリーのパスが除外対象になっている: {path}"
         )
+
+
+def test_work_area_exclusion_matches_only_whole_directory_names():
+    """部分一致で無関係なディレクトリを巻き込まない。
+
+    境界を固定しないと `.worktrees/` が `src/my.worktrees/` にも一致する。
+    ディレクトリ名を「含む」だけの無関係なパスが、黙って走査対象から外れる。
+    """
+    compiled = [re.compile(p) for p in _artifact_allowlist_paths()]
+    for path in (
+        "src/my__pycache__/module.py",
+        "app/not.pytest_cache/data.json",
+        "lib/my.venv-ci/config.toml",
+        "src/my.worktrees/secrets.json",
+        "vendor/pycache/x.py",
+    ):
+        assert not any(c.search(path) for c in compiled), (
+            f"ディレクトリ名を含むだけの無関係なパスが除外されている: {path}"
+        )
+
+
+def test_work_area_exclusion_still_matches_the_intended_directories():
+    """締めた結果、本来の除外対象まで外れていないか。"""
+    compiled = [re.compile(p) for p in _artifact_allowlist_paths()]
+    for path in (
+        "__pycache__/module.pyc",
+        "skills/mission/__pycache__/module.pyc",
+        ".pytest_cache/v/cache/nodeids",
+        ".venv-ci/lib/python3.12/site-packages/x.py",
+        ".worktrees/issue-1/benchmarks/x.json",
+    ):
+        assert any(c.search(path) for c in compiled), (
+            f"除外されるべき作業領域が外れている: {path}"
+        )
