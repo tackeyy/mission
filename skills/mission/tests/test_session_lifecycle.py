@@ -1,5 +1,6 @@
 """P2: multi-session の list/cleanup/aggregate ライフサイクル (並列実行の状態管理)."""
 import importlib.util
+import inspect
 import json
 from pathlib import Path
 
@@ -95,3 +96,16 @@ def test_concurrent_init_all_in_aggregate(tmp_path, raw_run_cli):
     assert not errors, errors
     agg = json.loads((tmp_path / ".mission-state" / "aggregate.json").read_text())
     assert set(agg["active_sessions"]) == {"X", "Y", "Z"}
+
+
+def test_concurrent_case_never_uses_the_legacy_runner():
+    """#582 の hazard を再導入させないための機械ガード。
+
+    legacy runner は init が成功するたびに共有 repository の v5 コンテナを
+    repository 単位で rmtree する。並行 init を駆動すると他 thread の
+    pin を壊すため、この case を module の ``run_cli`` (= legacy) へ
+    戻してはならない。戻されたとき、flaky として現れる前にここで落ちる。
+    """
+    parameters = inspect.signature(test_concurrent_init_all_in_aggregate).parameters
+    assert "raw_run_cli" in parameters, "並行 init は素の runner で駆動すること"
+    assert "run_cli" not in parameters, "module の run_cli は legacy runner であり並行実行できない"
