@@ -14879,12 +14879,17 @@ def cmd_aggregate_reviews(args):
             file=sys.stderr,
         )
 
+    # #612: archive / scoring JSON の公開より前に lease を検証する (lease-first)。
+    # 従来は公開後の repository.save() で初めて admission が走り、拒否時は
+    # rollback で回収していたが、#475 の契約は「検証前に公開しない」であり
+    # 「公開しても回収する」ではない。plan-import (#498) と同じ修正パターン。
     repository = _legacy_lifecycle_repository(
         cwd,
         sf,
         stamp=True,
         strict_read=True,
         lease_reason="aggregate-reviews",
+        pre_admit_lease=True,
     )
     with repository.transaction():
         data = repository.load()
