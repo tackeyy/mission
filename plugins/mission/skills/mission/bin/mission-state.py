@@ -132,6 +132,8 @@ from mission_application.lifecycle import (  # noqa: E402
     activity_end as run_activity_end,
     activity_start as run_activity_start,
     advance as run_advance,
+    extension_fields_decision as _extension_fields_decision,
+    monotonic_halt_decision as _monotonic_halt_decision,
     initialize as run_initialize,
     mark_halt as run_mark_halt,
     reactivate as run_reactivate,
@@ -16087,31 +16089,52 @@ def _supersede_reviews_locked(args, cwd: Path):
                     or state.get("review_generation") != generation
                 ):
                     raise ValueError("review state changed during supersede")
+                # 批1-b (#618): 完了隣接の terminalization は kernel decision を
+                # gate とし、#630 の claims 検証つき execute を通す。current の
+                # supersedes index も generic 書き込みとして kernel の閉集合
+                # フィールド権限で審査する。
                 if role == "superseded":
-                    state.update(
-                        {
-                            "passes": False,
-                            "loop_active": False,
-                            "halt_reason": "superseded by a replacement run",
-                            "halt_category": "stale",
-                        }
+                    decision = _monotonic_halt_decision(
+                        state, "stale", "superseded by a replacement run"
                     )
-                    _transition_phase(
-                        state,
-                        "halted",
-                        now,
-                        terminal_trusted_boundary=True,
-                    )
-                    _write_terminal_outcome(state)
                 else:
-                    state["supersedes"] = superseded
-                state["updated_at"] = now
+                    decision = _extension_fields_decision(
+                        state, {"supersedes": superseded}
+                    )
+                if not decision.accepted:
+                    assert decision.rejection is not None
+                    raise ValueError(
+                        "supersede rejected by kernel: " + decision.rejection.code
+                    )
+
+                def mutate(proposed, role=role):
+                    if role == "superseded":
+                        proposed.update(
+                            {
+                                "passes": False,
+                                "loop_active": False,
+                                "halt_reason": "superseded by a replacement run",
+                                "halt_category": "stale",
+                            }
+                        )
+                        _transition_phase(
+                            proposed,
+                            "halted",
+                            now,
+                            terminal_trusted_boundary=True,
+                        )
+                        _write_terminal_outcome(proposed)
+                    else:
+                        proposed["supersedes"] = superseded
+                    proposed["updated_at"] = now
+
+                proposed = repository.execute(state, mutate, decision.transition)
                 path_key = str(state_path.resolve())
                 if role == "superseded":
                     _SUPERSEDE_TERMINAL_PATHS.add(path_key)
                 try:
                     repository.save(
-                        state,
+                        proposed,
                         backup=False,
                         administrative=True,
                     )
