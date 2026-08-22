@@ -350,6 +350,11 @@ from mission_kernel.json_codec import (  # noqa: E402
     thaw_json_object as _thaw_strict_json_object,
 )
 from mission_kernel.versions import read_schema_version as _read_schema_version  # noqa: E402
+from mission_persistence.administrative import (  # noqa: E402
+    AdministrativeCommitError,
+    administrative_commit,
+    restore_record as restore_administrative_record,
+)
 from mission_persistence.strict_reader import read_stable_bytes as _read_stable_bytes  # noqa: E402
 
 SCHEMA_VERSION = 4  # v4: structured scoring provenance is mandatory for new sessions
@@ -18384,64 +18389,77 @@ def cmd_resolve_archive(args):
 
     archive_generation: str | None = None
     with StateLock(lock):
-        original_target = target.read_bytes()
-        data = json.loads(original_target.decode("utf-8"))
+        # resolution_decided_at は lock 取得後に確定する (lock 競合待ちの間の
+        # 時刻を audit 証跡へ混入させない。Checker 指摘の反映)
+        now = iso_now()
 
-        # #318: --frozen-snapshot フラグが指定された場合、live session の terminal 性を確認する
-        if frozen_snapshot:
-            session_id = str(data.get("session_id") or "").strip()
-            if session_id:
-                live_path = target_state_root / "sessions" / f"{session_id}.json"
-                if live_path.exists():
-                    try:
-                        live_data = json.loads(live_path.read_text(encoding="utf-8"))
-                        if live_data.get("loop_active") is True:
+        def validate(data: dict) -> None:
+            # #318: --frozen-snapshot フラグが指定された場合、live session の terminal 性を確認する
+            if frozen_snapshot:
+                session_id = str(data.get("session_id") or "").strip()
+                if session_id:
+                    live_path = target_state_root / "sessions" / f"{session_id}.json"
+                    if live_path.exists():
+                        try:
+                            live_data = json.loads(live_path.read_text(encoding="utf-8"))
+                            if live_data.get("loop_active") is True:
+                                print(
+                                    f"ERROR: live session {session_id!r} は loop_active=true のまま稼働中です; "
+                                    "--frozen-snapshot であっても active な live session がある間は resolution を付与できません",
+                                    file=sys.stderr,
+                                )
+                                sys.exit(2)
+                        except (OSError, json.JSONDecodeError) as exc:
                             print(
-                                f"ERROR: live session {session_id!r} は loop_active=true のまま稼働中です; "
-                                "--frozen-snapshot であっても active な live session がある間は resolution を付与できません",
+                                f"ERROR: live session ファイルの読み取りに失敗しました: {exc}",
                                 file=sys.stderr,
                             )
                             sys.exit(2)
-                    except (OSError, json.JSONDecodeError) as exc:
-                        print(
-                            f"ERROR: live session ファイルの読み取りに失敗しました: {exc}",
-                            file=sys.stderr,
-                        )
-                        sys.exit(2)
+            # record の検証
+            _validate_resolve_archive_record(
+                data, cwd, allow_active_snapshot=frozen_snapshot
+            )
 
-        # record の検証
-        _validate_resolve_archive_record(data, cwd, allow_active_snapshot=frozen_snapshot)
+        def mutate(data: dict) -> None:
+            # 既存の resolution を history へ append (audit trail 保持)
+            if data.get("resolution_status"):
+                prev = {"resolution_status": data["resolution_status"]}
+                if data.get("resolution_decided_at"):
+                    prev["resolution_decided_at"] = data["resolution_decided_at"]
+                if data.get("resolution_owner_issue"):
+                    prev["resolution_owner_issue"] = data["resolution_owner_issue"]
+                if data.get("resolution_evidence_url"):
+                    prev["resolution_evidence_url"] = data["resolution_evidence_url"]
+                if data.get("resolution_note"):
+                    prev["resolution_note"] = data["resolution_note"]
+                data.setdefault("resolution_history", []).append(prev)
 
-        now = iso_now()
+            # resolution metadata を設定し、v3 の明示 outcome だけを同じ transition 内で整合させる。
+            # outcome を持たない legacy record には追加しない。
+            data["resolution_status"] = args.status
+            if "terminal_outcome" in data:
+                _write_terminal_outcome(data)
+            data["resolution_decided_at"] = now
+            if args.owner_issue is not None:
+                data["resolution_owner_issue"] = args.owner_issue
+            if args.evidence_url is not None:
+                data["resolution_evidence_url"] = args.evidence_url
+            if args.note is not None:
+                data["resolution_note"] = args.note
 
-        # 既存の resolution を history へ append (audit trail 保持)
-        if data.get("resolution_status"):
-            prev = {"resolution_status": data["resolution_status"]}
-            if data.get("resolution_decided_at"):
-                prev["resolution_decided_at"] = data["resolution_decided_at"]
-            if data.get("resolution_owner_issue"):
-                prev["resolution_owner_issue"] = data["resolution_owner_issue"]
-            if data.get("resolution_evidence_url"):
-                prev["resolution_evidence_url"] = data["resolution_evidence_url"]
-            if data.get("resolution_note"):
-                prev["resolution_note"] = data["resolution_note"]
-            data.setdefault("resolution_history", []).append(prev)
-
-        # resolution metadata を設定し、v3 の明示 outcome だけを同じ transition 内で整合させる。
-        # outcome を持たない legacy record には追加しない。
-        data["resolution_status"] = args.status
-        if "terminal_outcome" in data:
-            _write_terminal_outcome(data)
-        data["resolution_decided_at"] = now
-        if args.owner_issue is not None:
-            data["resolution_owner_issue"] = args.owner_issue
-        if args.evidence_url is not None:
-            data["resolution_evidence_url"] = args.evidence_url
-        if args.note is not None:
-            data["resolution_note"] = args.note
-
-        # #310: resolution 付与は管理系 janitor 書き込みのため last_activity_at を刻まない
-        atomic_write_json(target, data, administrative=True)
+        # U5-1 (#635): identity 検証つき read → validation → atomic publish を
+        # administrative commit protocol に委譲する。#310 の administrative
+        # 書き込み (last_activity_at 非付与) は writer 参照ごと protocol へ渡す。
+        try:
+            captured, data = administrative_commit(
+                target,
+                validate=validate,
+                mutate=mutate,
+                write_document=atomic_write_json,
+            )
+        except AdministrativeCommitError as exc:
+            print(f"ERROR: administrative commit failed: {exc}", file=sys.stderr)
+            sys.exit(2)
         if canonical is not None:
             try:
                 archive_generation = _publish_state_archive_compaction(
@@ -18452,7 +18470,15 @@ def cmd_resolve_archive(args):
                     args.retention_generations,
                 )
             except (OSError, ValueError, WorktreeArchiveError) as exc:
-                atomic_write_bytes(target, original_target)
+                try:
+                    restore_administrative_record(captured, atomic_write_bytes)
+                except AdministrativeCommitError as rollback_error:
+                    print(
+                        "ERROR: state archive compaction failed and rollback "
+                        f"failed: {exc}; {rollback_error}",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
                 print(f"ERROR: state archive compaction failed: {exc}", file=sys.stderr)
                 sys.exit(2)
 
