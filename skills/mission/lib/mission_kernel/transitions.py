@@ -577,6 +577,35 @@ def is_transition_bound_to(
     return registered[1] == state and registered[2] == command
 
 
+# Completion-adjacent control fields whose transition claims the persistence
+# layer can verify today.  halt_reason / halt_category / terminal_outcome are
+# excluded until the mark-halt decision is made on the real state instead of a
+# synthetic monotonic view (批2-a-2), because the compatibility writer
+# legitimately persists values the synthetic decision cannot see.
+_CLAIMABLE_CONTROL_FIELDS = ("phase", "loop_active", "passes")
+
+
+def transition_control_claims(transition: object) -> dict[str, object]:
+    """Return the sealed transition's claimed completion-adjacent changes.
+
+    A claim is a control field whose value differs between the decision's
+    input state and ``new_state``.  Only claims are returned, so fields the
+    command does not change stay under the compatibility writer's authority
+    until their batch replaces the dict mutation entirely.
+    """
+    if not is_sealed_transition(transition):
+        raise TransitionTableError("invalid-transition-claim")
+    assert isinstance(transition, Transition)
+    registered = _ISSUED_TRANSITIONS[id(transition)]
+    before = registered[1].control
+    after = transition.new_state.control
+    claims: dict[str, object] = {}
+    for field_name in _CLAIMABLE_CONTROL_FIELDS:
+        if getattr(before, field_name) != getattr(after, field_name):
+            claims[field_name] = getattr(after, field_name)
+    return claims
+
+
 def bind_transition_effects(
     transition: Transition,
     effects: tuple[object, ...],

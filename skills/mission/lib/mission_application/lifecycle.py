@@ -582,7 +582,14 @@ def mark_halt(
             proposed["terminal_outcome"] = outcome
             proposed["updated_at"] = effective_at
 
-        proposed = repository.execute(state, mutate, decision.transition)
+        # set_terminal_phase=False（janitor の orphan 経路）は kernel の主張
+        # (phase→halted) から意図的に逸脱する soft-terminal のため、transition
+        # を渡さず gate-only に留める（批2-a-1 #630。実 state 化は批2-a-2）。
+        proposed = repository.execute(
+            state,
+            mutate,
+            decision.transition if request.set_terminal_phase else None,
+        )
         aggregate_error = None
         try:
             repository.save(proposed, aggregate_action="remove")
