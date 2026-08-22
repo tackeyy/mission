@@ -1046,7 +1046,12 @@ def _set_foreign_lease(state_dir):
 def test_aggregate_reviews_rejects_foreign_lease_before_publishing_any_evidence(
     state_dir, run_cli, tmp_path,
 ):
-    """#612: foreign lease は archive / 出力を一度も公開せずに拒否される."""
+    """#612: foreign lease は archive / 出力を一度も公開せずに拒否される.
+
+    注意: この end-to-end テスト単体では「公開前拒否」と「公開後 rollback による
+    回収」を区別できない (rollback 成功時も bytes は不変になる)。契約の核心は
+    下の probe テストが固定しており、両方を維持すること。
+    """
     review = _review(tmp_path, "lease-review.json", perspective="quality")
     out = tmp_path / "score.json"
     state_path = _set_foreign_lease(state_dir)
