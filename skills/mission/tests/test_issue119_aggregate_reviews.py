@@ -1025,3 +1025,80 @@ def test_aggregate_reviews_rejects_overall_impression_same_score(state_dir, run_
 
     assert r.returncode == 2
     assert "全採点 reviewer" in r.stderr
+
+
+# ===== #612: lease-first (公開前に lease を検証する) =====
+
+
+def _set_foreign_lease(state_dir):
+    state_path = state_dir / "sessions" / "test.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state.update({
+        "owner_session_id": "foreign",
+        "lease_id": "foreign-lease",
+        "fencing_epoch": 7,
+        "lease_expires_at": "2099-01-01T00:00:00Z",
+    })
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    return state_path
+
+
+def test_aggregate_reviews_rejects_foreign_lease_before_publishing_any_evidence(
+    state_dir, run_cli, tmp_path,
+):
+    """#612: foreign lease は archive / 出力を一度も公開せずに拒否される.
+
+    注意: この end-to-end テスト単体では「公開前拒否」と「公開後 rollback による
+    回収」を区別できない (rollback 成功時も bytes は不変になる)。契約の核心は
+    下の probe テストが固定しており、両方を維持すること。
+    """
+    review = _review(tmp_path, "lease-review.json", perspective="quality")
+    out = tmp_path / "score.json"
+    state_path = _set_foreign_lease(state_dir)
+    state_before = state_path.read_bytes()
+    archive_before = _archive_bytes(state_dir)
+
+    result = run_cli(
+        "aggregate-reviews", "--iteration", "1", "--input", str(review),
+        "--out", str(out), "--json", cwd=state_dir.parent,
+    )
+
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "lease" in result.stderr.lower()
+    assert state_path.read_bytes() == state_before
+    assert _archive_bytes(state_dir) == archive_before
+    assert not out.exists()
+
+
+def test_aggregate_reviews_does_not_publish_before_foreign_lease_rejection(
+    state_dir, tmp_path, monkeypatch, capsys,
+):
+    """#612: rollback による回収ではなく、公開関数が一度も呼ばれないこと。
+
+    #475 の契約は「lease/CAS 検証前に外部可視 file を公開しない」であり、
+    「公開しても最後に回収する」ではない。公開関数へ到達した時点で違反。
+    """
+    module = _load_mission_state()
+    monkeypatch.chdir(state_dir.parent)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    review = _review(tmp_path, "lease-probe.json", perspective="quality")
+    out = tmp_path / "score.json"
+    _set_foreign_lease(state_dir)
+
+    def record_review_publish(*args, **kwargs):
+        raise AssertionError("aggregate-reviews must reject foreign lease before archive publish")
+
+    def record_output_publish(*args, **kwargs):
+        raise AssertionError("aggregate-reviews must reject foreign lease before output publish")
+
+    monkeypatch.setattr(module, "_publish_review_archive_transaction", record_review_publish)
+    monkeypatch.setattr(module, "_publish_output_transaction", record_output_publish)
+
+    with pytest.raises(SystemExit) as stopped:
+        module.cmd_aggregate_reviews(_aggregate_args(review, out))
+
+    captured = capsys.readouterr()
+    assert stopped.value.code == 2
+    assert "lease" in captured.err.lower()
+    assert not out.exists()
