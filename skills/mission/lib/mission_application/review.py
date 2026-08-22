@@ -494,8 +494,20 @@ def mark_pass(
             }
         # #568: 「なぜ iter N で継続しなかったか」を事後監査できるようにする。
         # decide() の後に置き、pass gate の入力にしない (記録のみ)。
+        #
+        # 観測子の失敗が gate を巻き添えにしてはならない。例外は握り潰さず、
+        # 「観測に失敗した」ことを state に記録して pass 判定は続行する
+        # (記録の欠落と観測の失敗を区別できるようにする)。
         if not request.force and services.early_stop_evaluation is not None:
-            evaluation = services.early_stop_evaluation(data, latest, request.at)
+            try:
+                evaluation = services.early_stop_evaluation(data, latest, request.at)
+            except Exception as exc:  # noqa: BLE001 - observation must not abort the gate
+                evaluation = {
+                    "decision": "stop",
+                    "status": "observation-failed",
+                    "error": type(exc).__name__,
+                    "recorded_at": request.at,
+                }
             if evaluation is not None:
                 proposed["early_stop_evaluation"] = evaluation
         repository.save(proposed, aggregate_action="remove")

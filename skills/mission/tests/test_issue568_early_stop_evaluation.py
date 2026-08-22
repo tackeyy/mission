@@ -8,6 +8,7 @@ SKILL.md の early-stop 規律は「composite 4.0-4.3 / Medium 3 件以上 /
 本テストは提案1 (記録のみ) を固定する。gate 意味論は変更しない。
 """
 import json
+import os
 
 from skills.mission.tests.conftest import canonical_review, write_canonical_review_aggregate
 
@@ -210,3 +211,90 @@ def test_recording_does_not_gate_a_continuation_candidate(state_dir, run_cli, re
     assert state["passes"] is True
     assert state["loop_active"] is False
     assert state["early_stop_evaluation"]["continuation_conditions_met"] is True
+
+
+def _load_cli_module():
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location(
+        "gs_early_stop",
+        Path(__file__).resolve().parent.parent / "bin" / "mission-state.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_band_boundaries_are_inclusive(tmp_path):
+    """SKILL.md の "composite 4.0-4.3" は両端を含む。境界を実装から固定する."""
+    module = _load_cli_module()
+
+    def band(composite):
+        evaluation = module._early_stop_evaluation(
+            tmp_path, {"iteration": 1, "max_iter": 2}, {"composite": composite},
+            "2026-08-22T00:00:00Z", None,
+        )
+        return evaluation["composite_in_band"]
+
+    assert band(4.0) is True, "下端 4.0 は band に含む"
+    assert band(4.3) is True, "上端 4.3 は band に含む"
+    assert band(3.99) is False
+    assert band(4.31) is False
+
+
+def test_non_finite_composite_is_not_in_band(tmp_path):
+    """NaN / Infinity を band 内と誤判定しない."""
+    module = _load_cli_module()
+    for composite in (float("nan"), float("inf"), float("-inf")):
+        evaluation = module._early_stop_evaluation(
+            tmp_path, {"iteration": 1, "max_iter": 2}, {"composite": composite},
+            "2026-08-22T00:00:00Z", None,
+        )
+        assert evaluation["composite_in_band"] is False, composite
+        assert evaluation["continuation_conditions_met"] is False
+
+
+def test_observation_failure_never_aborts_the_gate(state_dir, run_cli, read_state, tmp_path):
+    """観測子が例外を投げても pass 判定は続行し、失敗は沈黙せず記録される."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    _set_state(state_dir, read_state, max_iter=2, iteration=1)
+    _push_score_with_findings(run_cli, state_dir, composite=4.25, medium_count=3)
+
+    # 観測子だけを確実に失敗させる (repo 既定の launcher 方式)。
+    launcher = tmp_path / "raise_launcher.py"
+    launcher.write_text(
+        "import importlib.util, sys\n"
+        "path = sys.argv[1]\n"
+        "spec = importlib.util.spec_from_file_location('ms_raise', path)\n"
+        "module = importlib.util.module_from_spec(spec)\n"
+        "sys.modules[spec.name] = module\n"
+        "spec.loader.exec_module(module)\n"
+        "def _boom(*a, **k):\n"
+        "    raise MemoryError('observation blew up')\n"
+        "module._early_stop_evaluation = _boom\n"
+        "sys.argv = [path] + sys.argv[2:]\n"
+        "module.main()\n"
+    )
+    mission_state_py = Path(__file__).resolve().parent.parent / "bin" / "mission-state.py"
+    environment = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith("MISSION_") and key not in {"CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"}
+    }
+    environment["MISSION_SESSION_ID"] = "test"
+    environment["MISSION_LEASE_ID"] = "test-lease"
+    result = subprocess.run(
+        [sys.executable, str(launcher), str(mission_state_py), "mark-passes"],
+        cwd=str(state_dir.parent), capture_output=True, text=True, env=environment,
+    )
+
+    assert result.returncode == 0, f"観測子の失敗が gate を止めてはならない: {result.stderr}"
+    state = read_state(state_dir)
+    assert state["passes"] is True
+    assert state["loop_active"] is False
+    # 沈黙させない: 記録が無いのか観測に失敗したのかを区別できること。
+    assert state["early_stop_evaluation"]["status"] == "observation-failed"
+    assert state["early_stop_evaluation"]["error"] == "MemoryError"
