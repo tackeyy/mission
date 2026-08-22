@@ -18388,8 +18388,10 @@ def cmd_resolve_archive(args):
             sys.exit(2)
 
     archive_generation: str | None = None
-    now = iso_now()
     with StateLock(lock):
+        # resolution_decided_at は lock 取得後に確定する (lock 競合待ちの間の
+        # 時刻を audit 証跡へ混入させない。Checker 指摘の反映)
+        now = iso_now()
 
         def validate(data: dict) -> None:
             # #318: --frozen-snapshot フラグが指定された場合、live session の terminal 性を確認する
