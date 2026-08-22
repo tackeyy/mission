@@ -51,7 +51,86 @@ class MarkPass:
     specialist_gate_satisfied: bool = False
 
 
-Command = Union[AdvancePhase, MarkHalt, MarkPass, Reactivate, ResumeStale]
+@dataclass(frozen=True)
+class SetExtensionFields:
+    """Request generic extension-property writes outside dedicated authority.
+
+    The closed field classification below is the kernel's authority: keys owned
+    by a dedicated lifecycle, lease, progress, scoring, or evidence command are
+    rejected by the reducer, so the generic command can never bypass the
+    command that owns a state transition or its audit trail (#617 批1-a).
+    """
+
+    fields: FrozenJsonObject
+
+
+# Fields whose value is fixed at genesis or owned by the pass gate; a generic
+# write would forge identity or completion evidence.  ``init`` recomputes
+# mission identity, and pass-gate facts only move through their own commands.
+GENERIC_SET_FROZEN_FIELDS = frozenset(
+    {
+        "mission",
+        "mission_id",
+        "passes",
+        "passes_forced",
+        "force_reason",
+        "score_history",
+        "failure_ledger",
+        "threshold",
+        "schema_version",
+        "session_role",
+        "terminal_outcome",
+        "artifact_applicability",
+        "artifact",
+        "artifact_path",
+        "artifact_lint",
+        "artifact_lint_identity",
+        "artifact_lint_status",
+        "project_root",
+        "started_at",
+        "created_at_session",
+        "reactivation_history",
+    }
+)
+
+
+# Fields whose authority belongs to a dedicated lifecycle, lease, progress, or
+# scoring command.  Generic ``set`` remains available for extension properties
+# such as complexity and bounded orchestration observations, but cannot bypass
+# the command that owns a state transition or its audit trail.
+GENERIC_SET_DEDICATED_FIELDS = frozenset(
+    {
+        "phase",
+        "phase_started_at",
+        "phase_durations_sec",
+        "activity_current",
+        "activity_segments",
+        "activity_rollup",
+        "activity_last_event_at",
+        "activity_last_event_phase",
+        "activity_anomaly_counts",
+        "activity_unobserved_gap_sec",
+        "activity_unobserved_gap_reasons_sec",
+        "pid",
+        "pid_source",
+        "loop_active",
+        "halt_reason",
+        "halt_category",
+        "resume_target_phase",
+        "owner_session_id",
+        "lease_id",
+        "fencing_epoch",
+        "lease_expires_at",
+        "lease_history",
+        "last_activity_at",
+        "updated_at",
+    }
+)
+
+
+Command = Union[
+    AdvancePhase, MarkHalt, MarkPass, Reactivate, ResumeStale, SetExtensionFields
+]
 
 
 _COMMAND_TYPES = {
@@ -60,6 +139,7 @@ _COMMAND_TYPES = {
     MarkPass: "mark-pass",
     Reactivate: "reactivate",
     ResumeStale: "resume-stale",
+    SetExtensionFields: "set-extension-fields",
 }
 
 

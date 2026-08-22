@@ -22,11 +22,15 @@ from artifact_contract import invalidate_artifact_lint_observation
 from mission_kernel.codec_v4 import decode_mission_state
 from mission_common import derive_terminal_outcome
 from mission_kernel.commands import (
+    GENERIC_SET_DEDICATED_FIELDS,
+    GENERIC_SET_FROZEN_FIELDS,
     AdvancePhase,
     MarkHalt,
     Reactivate as ReactivateCommand,
     ResumeStale,
+    SetExtensionFields,
 )
+from mission_kernel.json_codec import freeze_json_value
 from mission_kernel.model import HaltCategory, Phase, PreparedHandoff
 from mission_kernel.transitions import Decision, decide
 from .ports import AggregateIndexError, LegacyMissionRepository, MissionInitializer
@@ -48,38 +52,9 @@ LIFECYCLE_COMMAND_OWNERS = {
 }
 
 
-# Fields whose authority belongs to a dedicated lifecycle, lease, progress, or
-# scoring command.  Generic ``set`` remains available for extension properties
-# such as complexity and bounded orchestration observations, but cannot bypass
-# the command that owns a state transition or its audit trail.
-DEDICATED_SET_FIELDS = frozenset(
-    {
-        "phase",
-        "phase_started_at",
-        "phase_durations_sec",
-        "activity_current",
-        "activity_segments",
-        "activity_rollup",
-        "activity_last_event_at",
-        "activity_last_event_phase",
-        "activity_anomaly_counts",
-        "activity_unobserved_gap_sec",
-        "activity_unobserved_gap_reasons_sec",
-        "pid",
-        "pid_source",
-        "loop_active",
-        "halt_reason",
-        "halt_category",
-        "resume_target_phase",
-        "owner_session_id",
-        "lease_id",
-        "fencing_epoch",
-        "lease_expires_at",
-        "lease_history",
-        "last_activity_at",
-        "updated_at",
-    }
-)
+# The closed field classification for generic ``set`` is kernel authority
+# (#617 批1-a); this module re-exports it for the CLI adapters.
+DEDICATED_SET_FIELDS = GENERIC_SET_DEDICATED_FIELDS
 
 
 @dataclass(frozen=True)
@@ -968,6 +943,80 @@ def set_fields(
                 state=state,
             )
 
+        # The adapter-level checks above own the guided v4 error messages; the
+        # closed kernel decision below is the fail-closed authority for the
+        # same field classification (#617 批1-a).
+        parsed_fields: dict[str, object] = {}
+        for item in request.kvs:
+            if "=" not in item:
+                raise LifecycleFailure(
+                    "key=value 形式で指定してください: " + item,
+                    reason="key-value-format",
+                    outcome_kind="invalid-input",
+                )
+            key, _separator, value = item.partition("=")
+            if key in services.frozen_fields:
+                raise LifecycleFailure(
+                    "`%s` は set で変更不可。新しい mission は `init` を使用してください "
+                    "(mission_id が再計算されます)。" % key,
+                    reason="frozen-field",
+                )
+            if key == "review_tier":
+                if value not in services.reviewer_count_by_tier:
+                    raise LifecycleFailure(
+                        "review_tier の値 '%s' は無効です。有効値: %s"
+                        % (value, list(services.reviewer_count_by_tier)),
+                        reason="review-tier-invalid",
+                        outcome_kind="invalid-input",
+                    )
+                parsed_fields[key] = value
+                continue
+            try:
+                parsed_fields[key] = json.loads(value)
+            except json.JSONDecodeError:
+                parsed_fields[key] = value
+        try:
+            command_fields = freeze_json_value(parsed_fields)
+        except ValueError as error:
+            raise LifecycleFailure(
+                "set fields payload is invalid: %s" % error,
+                reason="invalid-set-fields",
+                outcome_kind="invalid-input",
+            ) from error
+        try:
+            typed_state = _typed_state(state)
+        except (TypeError, ValueError, UnicodeError) as error:
+            raise LifecycleFailure(
+                "set requires a decodable session state: %s" % error,
+                reason="state-undecodable",
+                state=state,
+            ) from error
+        set_decision = decide(typed_state, SetExtensionFields(command_fields))
+        if not set_decision.accepted:
+            assert set_decision.rejection is not None
+            code = set_decision.rejection.code
+            if code == "frozen-field":
+                field = sorted(explicit_keys & GENERIC_SET_FROZEN_FIELDS)[0]
+                raise LifecycleFailure(
+                    "`%s` は set で変更不可。新しい mission は `init` を使用してください "
+                    "(mission_id が再計算されます)。" % field,
+                    reason="frozen-field",
+                )
+            if code == "dedicated-field":
+                field = sorted(explicit_keys & GENERIC_SET_DEDICATED_FIELDS)[0]
+                raise LifecycleFailure(
+                    "`%s` は set で変更不可。専用commandを使用してください。" % field,
+                    reason="dedicated-field",
+                    guided=True,
+                    state=state,
+                )
+            raise LifecycleFailure(
+                "set fields payload is invalid: " + code,
+                reason=code,
+                outcome_kind="invalid-input",
+                state=state,
+            )
+
         routed_verdict_holder = [None]
         decision_holder = [None]
 
@@ -1052,12 +1101,6 @@ def set_fields(
                         outcome_kind="invalid-input",
                     )
                 key, _separator, value = item.partition("=")
-                if key in services.frozen_fields:
-                    raise LifecycleFailure(
-                        "`%s` は set で変更不可。新しい mission は `init` を使用してください "
-                        "(mission_id が再計算されます)。" % key,
-                        reason="frozen-field",
-                    )
                 if key == "review_tier":
                     if value not in services.reviewer_count_by_tier:
                         raise LifecycleFailure(
@@ -1129,9 +1172,9 @@ def set_fields(
             services.ensure_phase_timing(proposed, request.at)
             proposed["updated_at"] = request.at
 
-        proposed = repository.execute(state, mutate)
+        proposed = repository.execute(state, mutate, set_decision.transition)
         routed_verdict = routed_verdict_holder[0]
-        decision = decision_holder[0]
+        decision = decision_holder[0] or set_decision
         aggregate_action = (
             "remove"
             if routed_verdict is not None

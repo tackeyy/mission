@@ -8,11 +8,22 @@ import re
 import weakref
 from typing import Any, Callable, Optional, Type
 
-from .commands import AdvancePhase, Command, MarkHalt, MarkPass, Reactivate, ResumeStale
+from .commands import (
+    GENERIC_SET_DEDICATED_FIELDS,
+    GENERIC_SET_FROZEN_FIELDS,
+    AdvancePhase,
+    Command,
+    MarkHalt,
+    MarkPass,
+    Reactivate,
+    ResumeStale,
+    SetExtensionFields,
+)
 from .model import (
     AbsentHandoff,
     AbsentPlan,
     BoundScore,
+    FrozenJsonObject,
     HaltCategory,
     MissionControl,
     MissionState,
@@ -385,6 +396,45 @@ def _mark_pass(state: MissionState, raw_command: object) -> Transition:
     )
 
 
+def _set_extension_fields(state: MissionState, raw_command: object) -> Transition:
+    """Merge generic extension properties under the closed field authority.
+
+    Administrative property writes remain legal in halted states (parity with
+    the v4 ``set`` adapter), so this reducer deliberately does not require an
+    active control.  Completion-adjacent authority is protected by the closed
+    frozen/dedicated field classification instead.
+    """
+    command = raw_command
+    assert isinstance(command, SetExtensionFields)
+    fields = command.fields
+    if not isinstance(fields, FrozenJsonObject) or not fields.items:
+        raise _Rejected("invalid-set-fields")
+    keys = [key for key, _value in fields.items]
+    if (
+        any(not isinstance(key, str) or not key for key in keys)
+        or len(set(keys)) != len(keys)
+    ):
+        raise _Rejected("invalid-set-fields")
+    requested = set(keys)
+    if requested & GENERIC_SET_FROZEN_FIELDS:
+        raise _Rejected("frozen-field")
+    if requested & GENERIC_SET_DEDICATED_FIELDS:
+        raise _Rejected("dedicated-field")
+    extensions = dict(state.extensions.items)
+    extensions.update(fields.items)
+    changes: dict[str, Any] = {
+        "extensions": FrozenJsonObject(tuple(extensions.items()))
+    }
+    if state.legacy_passthrough is not None:
+        document = dict(state.legacy_passthrough.items)
+        document.update(fields.items)
+        changes["legacy_passthrough"] = FrozenJsonObject(tuple(document.items()))
+    return Transition(
+        _unbound_state(state, **changes),
+        (KernelEvent("extension-fields-set"),),
+    )
+
+
 def _command_type_guard(expected: Type[object]) -> Callable[[MissionState, object], bool]:
     def guard(_state: MissionState, command: object) -> bool:
         return isinstance(command, expected)
@@ -442,6 +492,12 @@ TRANSITION_TABLE = build_transition_table(
             ResumeStale,
             _command_type_guard(ResumeStale),
             _resume_stale,
+        ),
+        TransitionRule(
+            "set-extension-fields",
+            SetExtensionFields,
+            _command_type_guard(SetExtensionFields),
+            _set_extension_fields,
         ),
         *guidance_transition_rules(),
     )
