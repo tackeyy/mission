@@ -340,6 +340,7 @@ from merge_queue import (  # noqa: E402
     status as status_merge_queue,
     verify as verify_merge_queue,
 )
+from mission_kernel.commands import GENERIC_SET_FROZEN_FIELDS  # noqa: E402
 from mission_kernel.errors import MissionStateDecodeError, StrictReadError  # noqa: E402
 from mission_kernel.json_codec import (  # noqa: E402
     _reject_duplicate_json_pairs,
@@ -10900,29 +10901,8 @@ def cmd_permission_preflight(args):
 
 
 # Issue #2: set で変更禁止のフィールド (mission_id 整合性維持のため)
-FROZEN_FIELDS = {
-    "mission",  # 変更したいなら init を使う (mission_id が再計算される)
-    "mission_id",
-    "passes",
-    "passes_forced",
-    "force_reason",
-    "score_history",
-    "failure_ledger",
-    "threshold",
-    "schema_version",
-    "session_role",
-    "terminal_outcome",
-    "artifact_applicability",
-    "artifact",
-    "artifact_path",
-    "artifact_lint",
-    "artifact_lint_identity",
-    "artifact_lint_status",
-    "project_root",
-    "started_at",
-    "created_at_session",
-    "reactivation_history",  # 承認監査は reactivate の append-only 記録
-}
+# 分類の正典は kernel (mission_kernel.commands の閉集合)。#617 批1-a で移管。
+FROZEN_FIELDS = GENERIC_SET_FROZEN_FIELDS
 
 
 _REVIEW_LINEAGE_SET_FIELDS = frozenset({"review_generation", "review_group_id"})

@@ -291,6 +291,7 @@ def test_decide_and_guidance_share_one_named_transition_table():
         "mark-pass",
         "reactivate",
         "resume-stale",
+        "set-extension-fields",  # #617 批1-a
     }
     assert "advance-phase" in {rule.rule_id for rule in primary_rules}
     assert "aggregate-reviews" in {rule.rule_id for rule in primary_rules}
