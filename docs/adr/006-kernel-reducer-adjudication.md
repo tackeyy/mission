@@ -46,8 +46,8 @@ reason from promises the code does not keep.
    these writers have none.
 4. **The host adapter is not thin.** `mission-state.py` still holds about
    19.3k lines, 525 functions, and the largest business-logic spans
-   (`_build_parser` 724, `cmd_invoke_command_provider` 487,
-   `cmd_aggregate_reviews` 435). ADR-005's direction is correct and the C1
+   (approximately: `_build_parser` 724, `cmd_invoke_command_provider` 487,
+   `cmd_aggregate_reviews` 435 lines). ADR-005's direction is correct and the C1
    dependency inversion is complete, but "thin" has not been reached.
 
 Cost premise for this adjudication: agent execution is subscription-priced, so
@@ -64,8 +64,9 @@ in the application layer and becomes the single authority for every judgment
 the hook needs: session selection, staleness, lease expiry, orphan detection,
 and which follow-up command (if any) is warranted. The shell hook is reduced
 to (a) rendering the decision and (b) invoking exactly the CLI command the
-decision names, chosen from a closed list recorded in this ADR's tracking
-issues (`mark-halt`, `cleanup-stale --execute`, `stop-guard-observe`). The
+decision names, chosen from a closed list whose canonical copy lives in the
+tracking issue for this ADR (at adjudication time: `mark-halt`,
+`cleanup-stale --execute`, `stop-guard-observe`). The
 hook must not compute thresholds, compare timestamps, or choose between
 commands on its own. A guard test pins that the hook script contains no
 judgment logic beyond decision dispatch.
