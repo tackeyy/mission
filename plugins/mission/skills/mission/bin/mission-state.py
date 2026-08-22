@@ -12105,6 +12105,109 @@ def _count_high_findings_in_evidence(cwd: Path, path_text: str) -> int:
     return high
 
 
+def _count_medium_findings_in_evidence(cwd: Path, path_text: str) -> int | None:
+    """Return the Medium finding count of one findings evidence file.
+
+    #568: observation only.  Unlike the High counter this never exits: a
+    missing or malformed evidence file must not change the pass gate, so the
+    caller records ``None`` instead of a fabricated count.
+    """
+    try:
+        path = _resolve_recorded_path(cwd, path_text)
+    except (SystemExit, ValueError, OSError):
+        return None
+    if not (path.exists() and path.is_file()):
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        return None
+    inputs = payload.get("inputs")
+    if not isinstance(inputs, list):
+        return None
+    medium = 0
+    for review in inputs:
+        if not isinstance(review, dict):
+            return None
+        findings = review.get("findings") or []
+        if not isinstance(findings, list):
+            return None
+        medium += sum(
+            1
+            for finding in findings
+            if isinstance(finding, dict) and finding.get("severity") == "Medium"
+        )
+    return medium
+
+
+# #568: SKILL.md「終了判定」の early-stop 継続条件。composite の band は
+# [EARLY_STOP_BAND_LOW, EARLY_STOP_BAND_HIGH]、Medium は
+# EARLY_STOP_MEDIUM_MIN 件以上を継続候補とする。
+EARLY_STOP_BAND_LOW = 4.0
+EARLY_STOP_BAND_HIGH = 4.3
+EARLY_STOP_MEDIUM_MIN = 3
+
+
+def _early_stop_evaluation(
+    cwd: Path, data: dict, latest: dict | None, at: str, rationale: str | None
+) -> dict | None:
+    """Record why the loop stopped at this iteration (#568, observation only).
+
+    The pass gate does not consider any of these values.  They exist so that a
+    later audit can tell an intentional early stop from an unnoticed one.
+    """
+    if not isinstance(latest, dict):
+        return None
+    composite = latest.get("composite")
+    if isinstance(composite, bool) or not isinstance(composite, (int, float)):
+        composite = None
+    else:
+        composite = float(composite)
+    composite_in_band = (
+        composite is not None
+        and EARLY_STOP_BAND_LOW <= composite <= EARLY_STOP_BAND_HIGH
+    )
+
+    evidence_path = latest.get("findings_evidence_path")
+    medium_count = (
+        _count_medium_findings_in_evidence(cwd, evidence_path)
+        if isinstance(evidence_path, str) and evidence_path
+        else None
+    )
+
+    iteration = data.get("iteration")
+    if isinstance(iteration, bool) or not isinstance(iteration, int):
+        iteration = None
+    max_iter = data.get("max_iter")
+    if isinstance(max_iter, bool) or not isinstance(max_iter, int):
+        max_iter = None
+    # max_iter=None は「上限なし (stagnation 停止モード)」であり、継続余地は残る。
+    iteration_lt_max = max_iter is None or (iteration is not None and iteration < max_iter)
+
+    rationale = (rationale or "").strip() or None
+    return {
+        "composite": composite,
+        "composite_in_band": composite_in_band,
+        "medium_count": medium_count,
+        "medium_count_source": "findings-evidence" if medium_count is not None else "unavailable",
+        "iteration": iteration,
+        "max_iter": max_iter,
+        "iteration_lt_max": iteration_lt_max,
+        "continuation_conditions_met": bool(
+            composite_in_band
+            and medium_count is not None
+            and medium_count >= EARLY_STOP_MEDIUM_MIN
+            and iteration_lt_max
+        ),
+        # 「1 iter で確実に解消可能か」は機械判定できない。宣言がある場合だけ
+        # 「解消可能ではないと判断して停止した」ことを記録する。
+        "resolvable_in_one_iter": False if rationale else None,
+        "rationale": rationale,
+        "decision": "stop",
+        "recorded_at": at,
+    }
+
+
 def _validate_findings_evidence_gate(cwd: Path, latest: dict) -> None:
     source = latest.get("score_source")
     if source != "scoring-json":
@@ -15731,6 +15834,9 @@ def cmd_mark_passes(args):
                 write_terminal_outcome=_write_terminal_outcome,
                 optional_unclosed_skills=_unclosed_optional_specialist_skills,
                 selection_id=_current_selection_id,
+                early_stop_evaluation=lambda data, latest, at: _early_stop_evaluation(
+                    cwd, data, latest, at, getattr(args, "early_stop_rationale", None)
+                ),
             ),
         )
     except ReviewFailure as error:
@@ -18532,6 +18638,11 @@ def _build_parser():
                         choices=sorted(_PROVENANCE_REASON_CODES))
     p_pass.add_argument("--approval-verifier", default=None,
                         help="configured approval verifier provider (neutral-test is test-only)")
+    p_pass.add_argument(
+        "--early-stop-rationale",
+        default=None,
+        help="#568: early-stop の継続条件が揃っていても停止する場合の理由 (記録のみ。gate は変えない)",
+    )
     p_pass.set_defaults(func=cmd_mark_passes)
 
     p_score = sub.add_parser("push-score", help="score_history に採点結果を append (orchestrator が Phase 5 直後に呼ぶ)")

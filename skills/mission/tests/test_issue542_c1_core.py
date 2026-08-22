@@ -294,6 +294,12 @@ def test_t3_new_v5_session_completes_the_full_cli_lifecycle(tmp_path, run_cli):
     assert final_state["loop_active"] is False
     assert final_state["phase"] == "done"
     assert _head(tmp_path)["schema"] == "mission-head/1"
+    # #568: mark-passes が書く観測フィールドが v5 セッションでも往復すること。
+    # closeout はこの後段で state を読み直しており、上の assert 群がその読み直しに
+    # 成功したことを示す。将来 payload が flat v5 へ移ったとき、この tripwire が
+    # codec の allowlist 不足を沈黙ではなく失敗として顕在化させる。
+    assert "early_stop_evaluation" in final_state
+    assert final_state["early_stop_evaluation"]["decision"] == "stop"
 
 
 @pytest.mark.parametrize("repository_format", ("v4", "v5"))
