@@ -14,7 +14,14 @@ from mission_application.artifact import EvidenceDecision, EvidenceEffect, valid
 from mission_application.ports import AggregateIndexError, AuditMetadata
 from mission_kernel.json_codec import decode_json_object
 from mission_kernel import MissionState, decode_mission_state, project_legacy_document
-from mission_kernel.transitions import Decision, bind_transition_effects, decide
+from mission_kernel.model import Phase
+from mission_kernel.transitions import (
+    Decision,
+    TransitionTableError,
+    bind_transition_effects,
+    decide,
+    transition_control_claims,
+)
 
 from .fenced_commit import (
     AdmittedSnapshot,
@@ -29,6 +36,40 @@ from .fenced_commit import (
     validate_execution_request,
 )
 from .local_uow import VerifiedBlobSet
+
+
+def _verify_transition_claims(transition: object, proposed: dict) -> None:
+    """Fail closed when the compatibility mutation diverges from the decision.
+
+    The typed transition remains the authority decision while the A1
+    compatibility reducer stays the writer for timing, lease, and passthrough
+    fields (批2-a-1).  What this verifies is the transition's *claims*: every
+    completion-adjacent control change the kernel decided must appear
+    identically in the proposed document.  Unclaimed fields stay under the
+    compatibility writer's authority until 批2-a-2 / 批2-a-3 remove the dict
+    mutations entirely.
+    """
+    try:
+        claims = transition_control_claims(transition)
+    except TransitionTableError as exc:
+        raise FencedCommitError(
+            "transition-unsealed",
+            "execute requires a transition issued by the canonical decision table",
+        ) from exc
+    for field_name, value in claims.items():
+        if isinstance(value, Phase):
+            matches = proposed.get(field_name) == value.value
+        elif isinstance(value, bool):
+            actual = proposed.get(field_name, False)
+            matches = type(actual) is bool and actual is value
+        else:
+            matches = proposed.get(field_name) == value
+        if not matches:
+            raise FencedCommitError(
+                "transition-divergence",
+                "compatibility mutation diverges from the decided transition"
+                " on %s" % field_name,
+            )
 
 
 @dataclass(frozen=True)
@@ -142,8 +183,12 @@ class LegacyV4Repository:
         # compatibility reducer remains the writer for legacy timing, lease,
         # and passthrough fields.  Projecting the canonical state here would
         # pre-apply the phase and lose the legacy reducer's duration boundary.
+        # A supplied transition therefore acts as a fail-closed equivalence
+        # check on its claimed completion-adjacent changes (批2-a-1 #630).
         proposed = copy.deepcopy(state)
         mutation(proposed)
+        if transition is not None:
+            _verify_transition_claims(transition, proposed)
         return proposed
 
     def _execute_request(
@@ -445,6 +490,8 @@ class V5CompatibilityRepository:
             return self._repository.execute(state)
         proposed = copy.deepcopy(state)
         mutation(proposed)
+        if transition is not None:
+            _verify_transition_claims(transition, proposed)
         return proposed
 
     def save(
