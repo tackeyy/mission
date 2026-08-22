@@ -57,6 +57,46 @@ LIFECYCLE_COMMAND_OWNERS = {
 DEDICATED_SET_FIELDS = GENERIC_SET_DEDICATED_FIELDS
 
 
+def monotonic_halt_decision(raw_state: dict, category: str, reason: str) -> Decision:
+    """Decide a monotonic (synthetic-view) halt for janitor-style terminalization.
+
+    Adapters that terminalize other sessions' possibly degraded legacy
+    documents (supersede-reviews) use this gate: the synthetic view keeps the
+    emergency halt decidable on malformed v1-v4 documents, while the claims
+    verification in ``repository.execute`` still pins the written phase /
+    loop_active to the kernel's decision (批2-a-1 #630).
+    """
+    try:
+        halt_category = HaltCategory(category)
+    except ValueError as error:
+        raise LifecycleFailure(
+            "unknown halt category: %r" % (category,),
+            reason="unknown-halt-category",
+            outcome_kind="invalid-input",
+        ) from error
+    return decide(_mark_halt_decision_state(raw_state), MarkHalt(halt_category, reason))
+
+
+def extension_fields_decision(raw_state: dict, fields: dict) -> Decision:
+    """Decide a generic extension write under the kernel's closed field authority.
+
+    The synthetic monotonic view is reused so administrative adapters can gate
+    property writes on documents that predate typed validation; the kernel's
+    frozen / dedicated field classification still applies unchanged.
+    """
+    try:
+        frozen_fields = freeze_json_value(fields)
+    except ValueError as error:
+        raise LifecycleFailure(
+            "set fields payload is invalid: %s" % error,
+            reason="invalid-set-fields",
+            outcome_kind="invalid-input",
+        ) from error
+    return decide(
+        _mark_halt_decision_state(raw_state), SetExtensionFields(frozen_fields)
+    )
+
+
 @dataclass(frozen=True)
 class InitRequest:
     arguments: object
