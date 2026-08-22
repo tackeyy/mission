@@ -221,6 +221,11 @@ def _materialize_legacy_init_fixture(
     if converted and cleanup_v5:
         # Leave a genuine flat-v4 fixture, not an impossible v4 head with
         # orphaned v5 tombstones that could affect a later init in the case.
+        #
+        # #582: this removal is repository-wide, not session-scoped.  A caller
+        # that runs it while another ``init`` is still executing against the
+        # same root destroys that writer's pinned container mid-flight.  Never
+        # drive this from concurrent callers; use ``raw_run_cli`` instead.
         for name in ("commits", "generations", "objects", "operations", "transactions"):
             shutil.rmtree(repository_root / name, ignore_errors=True)
 

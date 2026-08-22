@@ -2,6 +2,7 @@ const FAST_PATH_TARGETS = [
   "skills/mission/tests/test_artifact_hygiene.py",
   "skills/mission/tests/test_vendor_fingerprint.py",
   "skills/mission/tests/test_private_project_names.py",
+  "skills/mission/tests/test_gitleaks_allowlist_scope.py",
   "skills/mission/tests/test_plugins_in_sync.py",
   "skills/mission/tests/test_codex_wrapper_sync.py",
   "skills/mission/tests/test_actions_cost_guard.py",
