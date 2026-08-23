@@ -178,6 +178,11 @@ def test_mark_pass_validate_services_are_called_in_the_recorded_order(tmp_path):
     [
         (lambda state: state.pop("score_history"), "score-required"),
         (lambda state: state.update({"passes": True}), "terminal-state"),
+        # provenance を落とすと typed score が BoundScore ではなくなる
+        (
+            lambda state: state["score_history"][-1].pop("score_provenance", None),
+            "authoritative-score-required",
+        ),
         (lambda state: state["score_history"][-1].update({"open_high": 1}), "open-high-findings"),
         (lambda state: state["score_history"][-1].update({"composite": 3.0}), "composite-below-threshold"),
         (lambda state: state["score_history"][-1].update({"min_item": 3.0}), "minimum-item-below-threshold"),
@@ -315,6 +320,37 @@ def test_advance_sends_the_accepted_transition_to_execute(tmp_path):
     assert repository.execute_calls[0][2] is result.decision.transition
 
 
+@pytest.mark.parametrize("phase", ("done", "halted"))
+def test_advance_rejection_paths_are_unchanged_for_terminal_phase(tmp_path, phase):
+    from mission_application.lifecycle import AdvanceRequest, AdvanceServices, LifecycleFailure, advance
+
+    repository = _RecordingRepository(_review_state(tmp_path))
+    cli = _load_cli_module("issue632_advance_terminal_rejection")
+    with pytest.raises(LifecycleFailure) as raised:
+        advance(
+            repository,
+            AdvanceRequest(phase, "active:work", "2030-08-23T00:00:00Z", None, None, None, None),
+            AdvanceServices(lambda _state, _op: None, lambda _state: None, cli.capture_artifact_identity, cli._transition_phase),
+        )
+    assert raised.value.reason == "terminal-phase"
+
+
+def test_advance_rejection_paths_are_unchanged_for_artifact_pending(tmp_path):
+    from mission_application.lifecycle import AdvanceRequest, AdvanceServices, LifecycleFailure, advance
+
+    state = _review_state(tmp_path)
+    state.update({"phase": "executing", "artifact_applicability": "pending"})
+    repository = _RecordingRepository(state)
+    cli = _load_cli_module("issue632_advance_pending_rejection")
+    with pytest.raises(LifecycleFailure) as raised:
+        advance(
+            repository,
+            AdvanceRequest("reviewing", "active:review", "2030-08-23T00:00:00Z", None, None, None, None),
+            AdvanceServices(lambda _state, _op: None, lambda _state: None, cli.capture_artifact_identity, cli._transition_phase),
+        )
+    assert raised.value.reason == "artifact-applicability-pending"
+
+
 @pytest.mark.parametrize(
     "decision_error",
     [
@@ -373,7 +409,7 @@ def _in_memory_repository(state, *, saved):
     return LegacyV4Repository(
         lock=contextlib.nullcontext,
         read_state=lambda: copy.deepcopy(state),
-        write_state=lambda document: saved.update(copy.deepcopy(document)),
+        write_state=lambda document, **_kwargs: saved.update(copy.deepcopy(document)),
         backup_state=lambda: None,
         add_to_aggregate=lambda: None,
         remove_from_aggregate=lambda: None,
@@ -542,10 +578,74 @@ def _path_set_fields(_tmp_path, saved):
     return result.decision
 
 
+def _path_advance(tmp_path, saved):
+    from mission_application.lifecycle import AdvanceRequest, AdvanceServices, advance
+
+    document = _review_state(tmp_path)
+    document["phase"] = "executing"
+    document["artifact_applicability"] = "not-applicable"
+    cli = _load_cli_module("issue632_property_advance")
+    repository = _in_memory_repository(document, saved=saved)
+    result = advance(
+        repository,
+        AdvanceRequest(
+            phase="reviewing",
+            activity="active:review",
+            at="2030-08-23T01:00:00Z",
+            detail=None,
+            artifact_applicability=None,
+            artifact_path=None,
+            producer_run_id=None,
+        ),
+        AdvanceServices(
+            reject_active_provider_mutation=lambda _state, _operation: None,
+            prepare_handoff=lambda _state: None,
+            capture_artifact=cli.capture_artifact_identity,
+            transition_phase=cli._transition_phase,
+        ),
+    )
+    return result.decision
+
+
+def _path_supersede(_tmp_path, saved):
+    """supersede-reviews 相当（monotonic halt gate + execute）の永続化経路。"""
+    from mission_application.lifecycle import monotonic_halt_decision
+
+    document = _active_document(review_group_id="issue632", review_generation=1)
+    saved_holder = saved
+    repository = _in_memory_repository(document, saved=saved_holder)
+    with repository.transaction():
+        state = repository.load()
+        decision = monotonic_halt_decision(
+            state, "stale", "superseded by a replacement run"
+        )
+        cli = _load_cli_module("issue632_property_supersede")
+
+        def mutate(proposed):
+            proposed.update(
+                {
+                    "passes": False,
+                    "loop_active": False,
+                    "halt_reason": "superseded by a replacement run",
+                    "halt_category": "stale",
+                }
+            )
+            cli._transition_phase(
+                proposed, "halted", "2030-08-23T01:00:00Z", terminal_trusted_boundary=True
+            )
+            cli._write_terminal_outcome(proposed)
+
+        proposed = repository.execute(state, mutate, decision.transition)
+        repository.save(proposed, backup=False, administrative=True)
+    return decision
+
+
 @pytest.mark.parametrize(
     "path",
     (
         _path_mark_pass,
+        _path_advance,
+        _path_supersede,
         _path_mark_halt,
         _path_reactivate,
         _path_resume_stale,
@@ -554,6 +654,8 @@ def _path_set_fields(_tmp_path, saved):
     ),
     ids=(
         "mark-pass",
+        "advance",
+        "supersede-reviews",
         "mark-halt",
         "reactivate",
         "resume-stale",
@@ -580,3 +682,118 @@ def test_saved_document_matches_decided_claims_for_every_transition_path(tmp_pat
             assert saved.get(field_name) is None
         else:
             assert saved.get(field_name) == expected, field_name
+
+
+# --- V5 経路: commit された head が claims と一致し aggregate は 1 回だけ ---
+
+
+class _FakeFencedRepository:
+    """Minimal fenced backend for the V5 compatibility seam.
+
+    実 ``LocalFencedRepository`` は lease/generation の実ファイルを要求するため、
+    本テストでは commit 契約（stage → commit → aggregate）だけを観測できる薄い
+    fake を使う。検証対象は ``V5CompatibilityRepository`` の execute/save 側で
+    あり、fenced backend 自体は #542 系のテストが担保している。
+    """
+
+    def __init__(self, state):
+        self._state = state
+        self.commits = []
+
+    def begin(self, _request):
+        import types
+
+        return types.SimpleNamespace(
+            base=types.SimpleNamespace(state=self._state),
+            pending_lease=types.SimpleNamespace(target=self._state.lease),
+        )
+
+    def _stage_persistence(self, _admitted, *, state_bytes, effects):
+        import types
+
+        assert effects == ()
+        return types.SimpleNamespace(precondition=object(), state_bytes=state_bytes)
+
+    def commit(self, prepared, precondition):
+        assert precondition is prepared.precondition
+        self.commits.append(__import__("json").loads(prepared.state_bytes))
+
+
+def _v5_repository(tmp_path, *, calls, prepare_state=None):
+    from mission_kernel.codec_v4 import decode_mission_state
+    from mission_persistence.legacy_v4 import V5CompatibilityRepository
+
+    document = _review_state(tmp_path)
+    source = __import__("json").dumps(
+        document, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    backend = _FakeFencedRepository(decode_mission_state(source))
+    repository = V5CompatibilityRepository(
+        repository=backend,
+        session_id=document.get("session_id") or "issue632-v5",
+        lease_owner_session_id=document.get("session_id") or "issue632-v5",
+        presented_lease_id=None,
+        prepare_state=prepare_state,
+        remove_from_aggregate=lambda: calls.append("remove"),
+    )
+    return repository, backend
+
+
+def test_mark_pass_on_v5_repository_commits_claims_and_aggregate_once(tmp_path):
+    from mission_application.review import MarkPassRequest, mark_pass
+    from mission_kernel.model import Phase
+    from mission_kernel.transitions import transition_control_claims
+
+    calls: list = []
+    repository, backend = _v5_repository(tmp_path, calls=calls)
+    result = mark_pass(
+        repository,
+        MarkPassRequest(False, None, False, "", "2030-08-23T02:00:00Z"),
+        _pass_services(_load_cli_module("issue632_v5_pass")),
+    )
+
+    assert result.decision.accepted is True
+    assert len(backend.commits) == 1
+    committed = backend.commits[0]
+    for field_name, value in transition_control_claims(result.decision.transition).items():
+        expected = value.value if isinstance(value, Phase) else value
+        expected = getattr(expected, "value", expected)
+        assert committed.get(field_name) == expected, field_name
+    # aggregate remove は commit の後に 1 回だけ
+    assert calls == ["remove"]
+
+
+def test_mark_pass_on_v5_repository_rejects_claim_violation_without_commit(tmp_path):
+    from mission_application.review import MarkPassRequest, MarkPassServices, mark_pass
+    from mission_persistence.fenced_commit import FencedCommitError
+
+    calls: list = []
+    repository, backend = _v5_repository(tmp_path, calls=calls)
+    cli = _load_cli_module("issue632_v5_violation")
+
+    def diverging_transition_phase(proposed, _phase, at, **_kwargs):
+        # kernel の決定 (done) と矛盾する第三の値を書く compatibility writer
+        proposed["phase"] = "reviewing"
+        proposed["phase_started_at"] = at
+
+    services = MarkPassServices(
+        verify_force_approval=lambda _data: {},
+        validate_force_terminal=lambda _data, _verification: None,
+        validate_score_evidence=lambda _data, _latest: None,
+        validate_artifact_gate=lambda _data: None,
+        validate_specialist_gate=lambda _data, _waiver: None,
+        transition_phase=diverging_transition_phase,
+        write_terminal_outcome=cli._write_terminal_outcome,
+        optional_unclosed_skills=lambda _data: [],
+        selection_id=lambda _data: None,
+    )
+    with pytest.raises(FencedCommitError) as failure:
+        mark_pass(
+            repository,
+            MarkPassRequest(False, None, False, "", "2030-08-23T02:00:00Z"),
+            services,
+        )
+
+    assert failure.value.code == "transition-divergence"
+    assert backend.commits == []
+    assert calls == []

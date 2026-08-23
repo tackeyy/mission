@@ -15853,6 +15853,17 @@ def cmd_mark_passes(args):
     except ArtifactContractError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         sys.exit(2)
+    except FencedCommitError as error:
+        # 批2-a-3 (#632): mark-passes が execute 経由になり kernel invariant
+        # 違反が到達し得る。他 command と同じ構造化報告へ揃える（運用系の
+        # lease 診断は従来どおり下の ValueError 経路へ委ねる）
+        if error.code not in {"transition-divergence", "transition-unsealed"}:
+            raise
+        print(
+            f"ERROR: internal-invariant: {error.code}: {error.detail}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     except (MissionStateDecodeError, UnsupportedSchemaVersionError, ValueError) as error:
         prefix = "force approval: " if force else ""
         print(f"ERROR: {prefix}{error}", file=sys.stderr)
