@@ -191,19 +191,33 @@ from mission_application.planning import (  # noqa: E402
 )
 from mission_application.runtime_guard import (  # noqa: E402
     CleanupStaleExecuteCommand,
+    FreshnessEvidence,
+    GuardCommandReceipt,
+    GuardContinuation,
+    GuardDecision,
+    GuardEvidence,
+    GuardFindingKind,
+    GuardHaltCategory,
     GuardCommandKind,
     GuardRequest,
     GuardSessionFact,
+    HookReply,
+    LeaseEvidence,
+    LeaseStatus,
     MarkHaltCommand,
     NoCommand,
+    OrphanEvidence,
     PermissionHaltRejected,
     PermissionObservationRequest,
     PermissionProbe,
+    SessionSelection,
+    SessionSelectionReason,
     StopGuardObserveCommand,
     StopObservationRequest,
     decide_stop_guard,
     observe_stop_guard,
     record_permission_observation,
+    resolve_guard_command_receipt,
 )
 from mission_persistence.legacy_v4 import (  # noqa: E402
     LegacyV4InitializerRepository,
@@ -10505,7 +10519,7 @@ def _guard_root_request(hook_input: object) -> GuardRequest:
             hook_pid = parsed_pid if parsed_pid > 0 else None
         except ValueError:
             hook_pid = None
-    elif not any(
+    elif not override and not any(
         os.environ.get(name)
         for name in (
             "MISSION_SESSION_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID"
@@ -10702,6 +10716,176 @@ def _guard_decision_payload(decision) -> dict:
     }
 
 
+def _guard_decision_from_payload(payload: object) -> GuardDecision:
+    """Decode only the typed decision emitted by this adapter for a receipt."""
+    if not isinstance(payload, dict) or payload.get("schema") != "mission-stop-verdict/1":
+        raise ValueError("guard-prior-decision-invalid")
+    try:
+        selection_payload = payload["selection"]
+        evidence_payload = payload["evidence"]
+        command_payload = payload["command"]
+        continuation_payload = payload["continuation"]
+        reply_payload = payload["reply"]
+        if not all(
+            isinstance(item, dict)
+            for item in (
+                selection_payload,
+                evidence_payload,
+                command_payload,
+                continuation_payload,
+                reply_payload,
+            )
+        ):
+            raise ValueError
+
+        freshness_payload = evidence_payload.get("freshness")
+        freshness = None
+        if freshness_payload is not None:
+            if not isinstance(freshness_payload, dict):
+                raise ValueError
+            freshness = FreshnessEvidence(
+                timestamp_field=freshness_payload.get("timestamp_field"),
+                timestamp_value=freshness_payload.get("timestamp_value"),
+                observed_at=freshness_payload["observed_at"],
+                age_sec=freshness_payload.get("age_sec"),
+                warn_after_sec=freshness_payload["warn_after_sec"],
+                halt_after_sec=freshness_payload["halt_after_sec"],
+            )
+        lease_payload = evidence_payload["lease"]
+        orphan_payload = evidence_payload["orphan"]
+        if not isinstance(lease_payload, dict) or not isinstance(orphan_payload, dict):
+            raise ValueError
+        evidence = GuardEvidence(
+            freshness=freshness,
+            awaiting_user=evidence_payload["awaiting_user"],
+            lease=LeaseEvidence(
+                LeaseStatus(lease_payload["status"]),
+                lease_payload.get("expires_at"),
+                lease_payload["observed_at"],
+            ),
+            orphan=OrphanEvidence(
+                orphan_payload.get("pid"),
+                orphan_payload.get("pid_alive"),
+                orphan_payload["check_applicable"],
+            ),
+            planning_warn_iterations=evidence_payload[
+                "planning_warn_iterations"
+            ],
+            pending_digest=evidence_payload["pending_digest"],
+        )
+
+        command_kind = GuardCommandKind(command_payload["kind"])
+        if command_kind is GuardCommandKind.NONE:
+            command = NoCommand()
+        elif command_kind is GuardCommandKind.MARK_HALT:
+            command = MarkHaltCommand(
+                cwd=command_payload["cwd"],
+                session_id=command_payload["session_id"],
+                reason=command_payload["reason"],
+                category=GuardHaltCategory(command_payload["category"]),
+                origin=GuardFindingKind(command_payload["origin"]),
+            )
+        elif command_kind is GuardCommandKind.CLEANUP_STALE:
+            command = CleanupStaleExecuteCommand(
+                root=command_payload["root"],
+                expected_state_file=command_payload["expected_state_file"],
+                execute=command_payload["execute"],
+            )
+        else:
+            command = StopGuardObserveCommand(
+                session_id=command_payload["session_id"],
+                digest=command_payload["digest"],
+                now_epoch=command_payload["now_epoch"],
+                ttl_seconds=command_payload["ttl_seconds"],
+                attempt=command_payload["attempt"],
+                max_attempts=command_payload["max_attempts"],
+            )
+
+        return GuardDecision(
+            decision_id=payload["decision_id"],
+            host_decision=payload["decision"],
+            reason_code=payload["reason"],
+            outcome_kind=payload["outcome_kind"],
+            selection=SessionSelection(
+                state_file=selection_payload.get("state_file"),
+                session_id=selection_payload.get("session_id"),
+                reason=SessionSelectionReason(selection_payload["reason"]),
+                considered_state_files=tuple(
+                    selection_payload["considered_state_files"]
+                ),
+            ),
+            finding=GuardFindingKind(payload["finding"]),
+            evidence=evidence,
+            command=command,
+            continuation=GuardContinuation(
+                project_root=continuation_payload["project_root"],
+                hook_session_id=continuation_payload.get("hook_session_id"),
+                hook_session_id_source=continuation_payload[
+                    "hook_session_id_source"
+                ],
+                hook_pid=continuation_payload.get("hook_pid"),
+                processed_orphan_state_files=tuple(
+                    continuation_payload["processed_orphan_state_files"]
+                ),
+            ),
+            reply=HookReply(
+                emit=reply_payload["emit"],
+                decision=reply_payload["decision"],
+                reason=reply_payload["reason"],
+                outcome_kind=reply_payload["outcome_kind"],
+            ),
+            display_reason=payload["display_reason"],
+            planning_warning=payload["planning_warning"],
+            session_id=payload["session_id"],
+            pending_digest=payload["pending_digest"],
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("guard-prior-decision-invalid") from exc
+
+
+def _guard_receipt_decision(args, hook_input: object) -> GuardDecision:
+    if (
+        args.prior_decision_fd is None
+        or args.receipt_stdout_fd is None
+        or args.receipt_kind is None
+        or args.receipt_exit_code is None
+    ):
+        raise ValueError("guard-receipt-incomplete")
+    with os.fdopen(args.prior_decision_fd, "r", encoding="utf-8") as stream:
+        prior = _guard_decision_from_payload(json.load(stream))
+    with os.fdopen(args.receipt_stdout_fd, "r", encoding="utf-8") as stream:
+        command_stdout = stream.read()
+    receipt = GuardCommandReceipt(
+        decision_id=prior.decision_id,
+        kind=GuardCommandKind(args.receipt_kind),
+        exit_code=args.receipt_exit_code,
+        stdout=command_stdout,
+    )
+    resolved = resolve_guard_command_receipt(prior, receipt)
+    if resolved.reason_code != "orphan-processed":
+        return resolved
+    request = _guard_root_request(hook_input)
+    return decide_stop_guard(GuardRequest(
+        project_root=request.project_root,
+        stop_hook_active=request.stop_hook_active,
+        mission_session_id=request.mission_session_id,
+        claude_session_id=request.claude_session_id,
+        codex_thread_id=request.codex_thread_id,
+        hook_pid=request.hook_pid,
+        candidates=request.candidates,
+        observed_at=request.observed_at,
+        observed_epoch=request.observed_epoch,
+        stale_halt_seconds_raw=request.stale_halt_seconds_raw,
+        planning_warn_iterations_raw=request.planning_warn_iterations_raw,
+        observe_ttl_seconds_raw=request.observe_ttl_seconds_raw,
+        pending_breakdown=request.pending_breakdown,
+        pending_digest=request.pending_digest,
+        processed_orphan_state_files=(
+            resolved.continuation.processed_orphan_state_files
+        ),
+    ))
+
+
 def cmd_stop_verdict(args):
     """Resolve one state or one hook root into the typed Stop decision."""
     if args.hook_input is not None:
@@ -10709,7 +10893,10 @@ def cmd_stop_verdict(args):
             if args.hook_input != "-":
                 raise ValueError("guard-hook-input-must-be-stdin")
             hook_input = json.loads(sys.stdin.read())
-            decision = decide_stop_guard(_guard_root_request(hook_input))
+            if args.prior_decision_fd is None:
+                decision = decide_stop_guard(_guard_root_request(hook_input))
+            else:
+                decision = _guard_receipt_decision(args, hook_input)
             print(json.dumps(_guard_decision_payload(decision), ensure_ascii=False))
             return
         except Exception as exc:
@@ -19024,6 +19211,18 @@ def _build_parser():
     p_stop_verdict.add_argument("--hook-pid", type=int, default=None)
     p_stop_verdict.add_argument("--hook-session-id-from-pid", action="store_true")
     p_stop_verdict.add_argument("--planning-warn-iterations", type=int, default=3)
+    p_stop_verdict.add_argument("--prior-decision-fd", type=int, default=None)
+    p_stop_verdict.add_argument("--receipt-stdout-fd", type=int, default=None)
+    p_stop_verdict.add_argument(
+        "--receipt-kind",
+        choices=[
+            item.value
+            for item in GuardCommandKind
+            if item is not GuardCommandKind.NONE
+        ],
+        default=None,
+    )
+    p_stop_verdict.add_argument("--receipt-exit-code", type=int, default=None)
     p_stop_verdict.set_defaults(func=cmd_stop_verdict)
     p_freshness = sub.add_parser("freshness", help="state の freshness 判定を JSON で返す (read-only)")
     p_freshness.add_argument("--state-file", required=True, help="判定対象の session state JSON")

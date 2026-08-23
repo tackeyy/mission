@@ -323,7 +323,7 @@ session_id は `MISSION_SESSION_ID` 未指定なら `cc-`/`cx-`/`pid-<N>` から
 
 **assumptions の分離 (H3, 2026-06-10)**: multi-session init は `assumptions_path` を `.mission-state/sessions/<session_id>-assumptions.md` に自動設定する。並走セッションが `.mission-state/assumptions.md` を共有して相互上書きする事故 (2026-06-10 workspace で実害確認) を防ぐため、orchestrator は **必ず state.json の `assumptions_path` を読んでそのパスに書く** こと (固定パス直書き禁止)。
 
-- Stop hook (`mission-stop-guard.sh`) は `sessions/*.json` を自動的にイテレートし、session ID で自 state を選ぶ。PID は lease のない legacy state の診断・fallback に限る。
+- Stop hook の session 選択、freshness、lease、`awaiting_user`、orphan、表示 mode の判断は application 層の typed `GuardDecision` が一元管理する。`mission-stop-guard.sh` は raw hook input を Python に渡し、decision を decode して `none` / `mark-halt` / `cleanup-stale --execute` / `stop-guard-observe` の閉じた command set を発火し、receipt を Python に返すだけである。PID は lease のない legacy state の診断・fallback に限る。
 - `cleanup-stale` は lease 付き state では「lease 期限切れ、かつ期限後の activity heartbeat なし」を一次条件にする。`--execute` と Stop hook の auto-halt は StateLock 内で同条件を再検証する janitor CAS を共有し、renew/takeover 済みなら halt を拒否する。janitor は state の token を通常 writer として再利用しない。lease のない legacy state だけが従来の PID 判定を使う。
 
 ### Phase C: 管理コマンド
@@ -393,7 +393,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py \
 
 - **lease の独立**: 各論理セッションの `init` は独立した `lease_id` を生成する。後続の mutating command (`push-score`, `mark-passes` 等) には **自セッションの LEASE_ID を渡す**。別セッションの LEASE_ID を渡すと fencing 違反で exit 2。
 - **closeout の独立**: `push-score` と `mark-passes` はセッションごとに実行する。片方の `mark-passes` は他方の state に影響しない。
-- **stop-guard の挙動**: 各論理セッションの Stop hook は自 session_id にマッチする state だけをブロック対象にする。片方が `mark-passes` (passes=true) になると、そちらのブロックは解除される。初回、unfinished set / phase / lease の変化時、または既定 600 秒の TTL 経過時だけ session_id / issue_ref の詳細内訳を表示する。同じ digest が続く間は blocker category と次の 1 command だけを含む 1 行 heartbeat に圧縮する。
+- **stop-guard の挙動**: 各論理セッションの Stop hook は自 session_id にマッチする state だけをブロック対象にする。片方が `mark-passes` (passes=true) になると、そちらのブロックは解除される。初回、unfinished set / phase / lease の変化時、または既定 600 秒の TTL 経過時だけ session_id / issue_ref の詳細内訳を表示する。同じ digest が続く間は blocker category と次の 1 command だけを含む 1 行 heartbeat に圧縮する。command の stdout と exit status は receipt として Python に戻され、cleanup 対象、retry、detail/heartbeat、失敗時 block を shell が再判断しない。
 - **group closeout**: `parallel-closeout` は missing/waiting/running child、重複 issue_ref、manifest 外の late child、active lease が 1 件でもあれば manifest を変更せず exit 2。成功時は child の artifact / activity / review provenance coverage と pass/halt outcome を manifest に保存する。
 - **重複 init 警告**: 同一 issue_ref を複数の論理セッションが init すると `WARNING [S3]` が stderr に出る (ブロックはしない)。company-os 側 claim protocol と二重の防壁として機能する。
 - **assumptions の分離**: 各セッションの `assumptions_path` は `sessions/<sid>-assumptions.md` に自動設定される。固定パスに直書きしない。
@@ -555,7 +555,7 @@ meta/non-operation の証明は context 全体が `review/analyze/document/inspe
 
 - `stagnation_count` は `push-score` が自動更新する。初回 push または composite が 0.1 以上改善した場合は 0、改善幅が `0 <= delta < 0.1` の場合は +1、スコア低下時は 0 に戻す。orchestrator が `set stagnation_count=...` で手動補正しない。
 - Trigger 1 などで人間確認待ちに入る場合は `mission-state.py set awaiting_user=true` を先に記録する。Stop hook は `awaiting_user=true` の session を stale auto-halt 対象から除外する。再開時は `awaiting_user=false` に戻してから作業を続ける。
-- Stop hook が bash/jq で直接書く `orphan:` / `stale:` halt は macOS portable lock の制約上、`aggregate.json` から即時除去しない。次回 `cleanup-stale --root "$(pwd)" --execute` または `refresh-pid` の再活性化で遅延回収するのが正式仕様。
+- Stop hook の typed decision が発火する `orphan:` / `stale:` halt は既存 CLI writer を経由する。`aggregate.json` の回収挙動は各 CLI command の契約に従い、shell は state や aggregate を直接更新しない。
 
 ## スコア項目キーの正規化 (H2) / scoring archive 命名 (H1) — 2026-06-10
 

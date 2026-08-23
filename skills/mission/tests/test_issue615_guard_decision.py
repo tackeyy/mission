@@ -652,7 +652,17 @@ def analyze_guard_shell(source: str) -> list[Violation]:
     if "jq -n" in source:
         violations.append(Violation("jq-construction", source))
     for line in source.splitlines():
-        if re.search(r"\bjq\b", line) and "$GUARD_DECISION" not in line:
+        dependency_probe = line.strip() == "if ! command -v jq >/dev/null 2>&1; then"
+        dependency_error = line.strip() == (
+            "printf '%s\\n' '{\"decision\":\"block\",\"reason\":\"mission Stop guard "
+            "requires jq; state verdict is unavailable\",\"outcome_kind\":\"expected-gate\"}'"
+        )
+        if (
+            re.search(r"\bjq\b", line)
+            and "$GUARD_DECISION" not in line
+            and not dependency_probe
+            and not dependency_error
+        ):
             violations.append(Violation("jq-input-not-guard-decision", line))
         if re.search(r"\bjq\b", line) and re.search(
             r"\.(?:loop_active|passes|halt_reason|updated_at|heartbeat_at|lease_|awaiting_user|orphan_pid)",
