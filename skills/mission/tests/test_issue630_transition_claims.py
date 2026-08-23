@@ -63,14 +63,18 @@ class _RecordingRepository:
 
 
 def test_transition_control_claims_returns_completion_adjacent_delta(tmp_path):
-    from mission_kernel.model import Phase
+    from mission_kernel.model import HaltCategory, Phase
     from mission_kernel.transitions import transition_control_claims
 
     state = _decoded_state(tmp_path)
     transition = _halt_transition(state)
     claims = transition_control_claims(transition)
 
-    assert claims == {"phase": Phase.HALTED, "loop_active": False}
+    assert claims == {
+        "phase": Phase.HALTED,
+        "loop_active": False,
+        "halt_category": HaltCategory.BLOCKED_EXTERNAL,
+    }
 
 
 def test_transition_control_claims_is_empty_for_extension_writes(tmp_path):
@@ -135,7 +139,9 @@ def test_execute_rejects_mutation_diverging_from_the_claims(tmp_path):
     document = {"phase": "planning", "loop_active": True, "passes": False}
 
     def mutate(proposed):
-        # 主張された phase 遷移を書かない compatibility writer は divergence。
+        # 主張と矛盾する値を書く compatibility writer は divergence
+        # (書かない場合は #631 の apply 化により transition 値が補完される)。
+        proposed["phase"] = "reviewing"
         proposed["loop_active"] = False
 
     with pytest.raises(FencedCommitError) as failure:
@@ -196,6 +202,7 @@ def test_v5_compatibility_execute_enforces_the_same_claims(tmp_path):
     )
 
     def diverging(proposed):
+        proposed["phase"] = "reviewing"  # kernel の決定 (halted) と矛盾する値
         proposed["loop_active"] = False
 
     with pytest.raises(FencedCommitError) as failure:

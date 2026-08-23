@@ -569,7 +569,27 @@ def mark_halt(
         # the persisted compatibility contract.
         semantic_reason = request.reason.strip() or "legacy-empty-reason"
         command = MarkHalt(HaltCategory(request.category), semantic_reason)
-        decision = decide(_mark_halt_decision_state(state), command)
+        # 批2-a-2 (#631): decode 可能かつ active な state は実 state で decide
+        # する（claims の halt_category / role 依存 outcome が実 state に基づく）。
+        # terminal / 劣化 doc は monotonic view へ fallback し（冪等 emergency
+        # halt の保証）、その場合は gate-only（transition 非送付）。
+        real_state = None
+        try:
+            candidate = _typed_state(state)
+        except (TypeError, ValueError, UnicodeError):
+            candidate = None
+        if (
+            candidate is not None
+            and candidate.control.phase not in {Phase.DONE, Phase.HALTED}
+            and candidate.control.passes is False
+            and not candidate.control.halt_reason
+            and candidate.terminal_outcome is None
+        ):
+            real_state = candidate
+        decision = decide(
+            real_state if real_state is not None else _mark_halt_decision_state(state),
+            command,
+        )
         if not decision.accepted:
             assert decision.rejection is not None
             raise LifecycleFailure(
@@ -623,12 +643,15 @@ def mark_halt(
             proposed["updated_at"] = effective_at
 
         # set_terminal_phase=False（janitor の orphan 経路）は kernel の主張
-        # (phase→halted) から意図的に逸脱する soft-terminal のため、transition
-        # を渡さず gate-only に留める（批2-a-1 #630。実 state 化は批2-a-2）。
+        # (phase→halted) から意図的に逸脱する soft-terminal のため kernel 対象外
+        # （gate-only）と確定する（批2-a-2 #631）。monotonic fallback（terminal /
+        # 劣化 doc）も synthetic 入力由来の claims を適用しないため gate-only。
         proposed = repository.execute(
             state,
             mutate,
-            decision.transition if request.set_terminal_phase else None,
+            decision.transition
+            if (real_state is not None and request.set_terminal_phase)
+            else None,
         )
         aggregate_error = None
         try:
