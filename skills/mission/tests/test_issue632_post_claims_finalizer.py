@@ -474,6 +474,8 @@ _ENVIRONMENT_DERIVED_FIELDS = frozenset(
         "last_activity_at",
         "lease_expires_at",
         "phase_durations_sec",
+        "pid",
+        "pid_source",
         "project_root",
         "root_run_id",
         "score_history",
