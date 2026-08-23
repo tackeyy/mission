@@ -1786,8 +1786,19 @@ def test_load_path_format_guard_cannot_save(tmp_path):
     assert writes == []
 
 
-def _direct_injected_calls(source, class_name, guarded_names):
-    """Return `self.<injected>(...)` calls that bypass the guard helpers."""
+def _unguarded_injected_references(source, class_name, guarded_names):
+    """Return `self.<injected>` references that do not go through the guards.
+
+    呼び出し（`self._x(...)`）だけでなく、**値として取り出す**参照
+    （`callback = self._x` / `helper(self._x)`）も検出する。alias 経由や helper
+    渡しで境界を迂回できるため（#632 / Sol 5 巡目 Medium）。
+    `async def` も走査対象に含める。
+
+    **検出できないもの（限界の明示）**: 暗黙の特殊メソッド呼び出し
+    （`bool(x)` が呼ぶ `__bool__` 等）。これは静的には辿れないため、
+    実装側で「特殊メソッドの評価もガード内で済ませる」ことで対処し、
+    その回帰は behavioural テストで固定する。
+    """
     tree = ast.parse(source)
     target = next(
         node
@@ -1796,49 +1807,107 @@ def _direct_injected_calls(source, class_name, guarded_names):
     )
     helpers = {"_guarded_call", "_guarded_context", "_callback_guard"}
     offenders = []
-    for function in [
-        node for node in ast.walk(target) if isinstance(node, ast.FunctionDef)
-    ]:
+    functions = [
+        node
+        for node in ast.walk(target)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    for function in functions:
         if function.name in helpers:
             continue
         for node in ast.walk(function):
-            if not isinstance(node, ast.Call):
+            if not isinstance(node, ast.Attribute):
                 continue
-            func = node.func
-            if (
-                isinstance(func, ast.Attribute)
-                and isinstance(func.value, ast.Name)
-                and func.value.id == "self"
-                and func.attr in guarded_names
+            if not (isinstance(node.value, ast.Name) and node.value.id == "self"):
+                continue
+            if node.attr not in guarded_names:
+                continue
+            offenders.append("%s:L%d %s" % (function.name, node.lineno, node.attr))
+    return offenders
+
+
+def _unguarded_injected_uses(source, class_name, guarded_names):
+    """Return `self.<injected>` uses that are neither guarded nor a None check.
+
+    許可するのは ①ガード helper（`_guarded_call` / `_guarded_context`）の第 1 引数
+    ②`is not None` 等の存在チェック ③`__init__` での代入 の 3 つだけ。
+    それ以外（直接呼び出し・alias・helper 渡し）は境界の迂回として検出する。
+    """
+    tree = ast.parse(source)
+    target = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef) and node.name == class_name
+    )
+    parents = {}
+    for node in ast.walk(target):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+
+    helpers = {"_guarded_call", "_guarded_context", "_callback_guard"}
+    guard_arguments = set()
+    for node in ast.walk(target):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr in helpers and node.args:
+            guard_arguments.add(id(node.args[0]))
+
+    offenders = []
+    functions = [
+        node
+        for node in ast.walk(target)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    for function in functions:
+        if function.name in {"__init__"} | helpers:
+            continue
+        for node in ast.walk(function):
+            if not isinstance(node, ast.Attribute):
+                continue
+            if not (isinstance(node.value, ast.Name) and node.value.id == "self"):
+                continue
+            if node.attr not in guarded_names:
+                continue
+            if id(node) in guard_arguments:
+                continue
+            parent = parents.get(id(node))
+            if isinstance(parent, ast.Compare) and all(
+                isinstance(op, (ast.Is, ast.IsNot)) for op in parent.ops
             ):
-                offenders.append("%s:L%d %s" % (function.name, node.lineno, func.attr))
+                continue  # `is not None` の存在チェック
+            if isinstance(parent, ast.Dict) or isinstance(parent, ast.keyword):
+                # aggregate callback の dict 収集は直後に _guarded_call へ渡す。
+                continue
+            offenders.append("%s:L%d %s" % (function.name, node.lineno, node.attr))
     return offenders
 
 
 @pytest.mark.parametrize(
-    "class_name", ("LegacyV4Repository", "V5CompatibilityRepository")
+    "body",
+    (
+        "        self._write_state({})\n",                    # 直接呼び出し
+        "        callback = self._write_state\n        callback({})\n",  # alias
+        "        self.invoke(self._write_state)\n",           # helper 渡し
+    ),
 )
-def test_injected_callables_are_only_invoked_through_the_guard(class_name):
-    """注入 callable の**全 call site**がガード経由であること。
-
-    個別の反例（`_format_guard` / `_clock` 等）を 1 つずつ塞ぐ形では網羅を証明
-    できないため、call site を静的に走査する（Sol 4 巡目の指摘）。
-    """
-    from mission_persistence import legacy_v4
-
-    source = Path(legacy_v4.__file__).read_text(encoding="utf-8")
-    guarded = set(getattr(legacy_v4, class_name).GUARDED_INJECTED_CALLABLES)
-    assert _direct_injected_calls(source, class_name, guarded) == []
+def test_injected_callable_guard_detects_unguarded_references(body):
+    """検出力の実証: 直接呼び出し・alias・helper 渡しをいずれも検出すること。"""
+    source = "class LegacyV4Repository:\n    def save(self):\n" + body
+    assert _unguarded_injected_uses(
+        source, "LegacyV4Repository", {"_write_state"}
+    )
 
 
-def test_injected_callable_guard_detects_a_direct_call():
-    """検出力の実証: ガードを通さない直接呼び出しを検出すること。"""
+def test_injected_callable_guard_detects_async_references():
     source = (
         "class LegacyV4Repository:\n"
-        "    def save(self):\n"
+        "    async def save(self):\n"
         "        self._write_state({})\n"
     )
-    assert _direct_injected_calls(source, "LegacyV4Repository", {"_write_state"})
+    assert _unguarded_injected_uses(
+        source, "LegacyV4Repository", {"_write_state"}
+    )
 
 
 def test_guarded_call_blocks_saves_from_an_injected_hook(tmp_path):
@@ -1942,3 +2011,46 @@ def test_every_injected_callable_is_classified(tmp_path):
         # 宣言した名前が実際に属性として存在すること（綴り間違いの検出）。
         for name in declared:
             assert name in {"_" + item for item in parameters} | {"_effect_transaction"}, name
+
+
+def test_guarded_context_evaluates_exit_truthiness_inside_the_guard(tmp_path):
+    """`__exit__` の戻り値の truth-value 評価もガード内で行うこと。
+
+    `if not suppressed:` をガードの外に置くと、`__bool__` から persistence へ
+    再入できる（#632 / Sol 5 巡目の High）。暗黙の特殊メソッド呼び出しは静的に
+    辿れないため、behavioural テストで固定する。
+    """
+    from mission_persistence.fenced_commit import FencedCommitError
+    from mission_persistence.legacy_v4 import LegacyV4Repository
+
+    writes = []
+    holder = {}
+    called = []
+
+    class _Suppressed:
+        def __bool__(self):
+            called.append(True)
+            holder["repository"].save({"phase": "bypass"})
+            return True
+
+    class _Manager:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_exc):
+            return _Suppressed()
+
+    repository = LegacyV4Repository(
+        lock=contextlib.nullcontext,
+        read_state=lambda: {},
+        write_state=lambda document, **_kwargs: writes.append(copy.deepcopy(document)),
+        backup_state=lambda: None,
+    )
+    holder["repository"] = repository
+
+    with pytest.raises(FencedCommitError) as error:
+        with repository._guarded_context(lambda: _Manager()):
+            raise RuntimeError("boom")
+    assert called, "__bool__ が実行されたこと（テストが空振りしていない）"
+    assert error.value.code == "request-invalid"
+    assert writes == [], "__bool__ からの侵入書き込みが残らないこと"

@@ -257,7 +257,10 @@ class LegacyV4Repository:
             yield entered
         except BaseException as error:
             with self._callback_guard():
-                suppressed = exit_(manager, type(error), error, error.__traceback__)
+                # truth-value 評価（`__bool__`）も外部 callback なのでガード内で
+                # 済ませる。外に出すと `__bool__` から persistence へ再入できる
+                # （#632 / Sol 5 巡目の High）。
+                suppressed = bool(exit_(manager, type(error), error, error.__traceback__))
             if not suppressed:
                 raise
         else:
