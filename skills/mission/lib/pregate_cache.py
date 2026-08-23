@@ -134,18 +134,41 @@ def _load_json_bytes(data: bytes) -> dict[str, Any]:
     return document
 
 
-def _read_regular_file(path: Path) -> bytes:
+def _record_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _capture_regular_file(
+    path: Path, *, missing_ok: bool = False
+) -> tuple[bytes | None, tuple[int, ...] | None]:
     try:
         metadata = path.lstat()
     except FileNotFoundError as exc:
+        if missing_ok:
+            return None, None
         raise PregateCacheError("pregate file is missing") from exc
     if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode) or metadata.st_nlink != 1:
         raise PregateCacheError("pregate file is unsafe")
     flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(os.fspath(path), flags)
+    try:
+        fd = os.open(os.fspath(path), flags)
+    except OSError as exc:
+        raise PregateCacheError("pregate file is unreadable") from exc
     try:
         initial = os.fstat(fd)
-        if not stat.S_ISREG(initial.st_mode) or initial.st_nlink != 1:
+        if (
+            not stat.S_ISREG(initial.st_mode)
+            or initial.st_nlink != 1
+            or _record_identity(initial) != _record_identity(metadata)
+        ):
             raise PregateCacheError("pregate file is unsafe")
         remaining = initial.st_size
         chunks: list[bytes] = []
@@ -158,13 +181,23 @@ def _read_regular_file(path: Path) -> bytes:
         if os.read(fd, 1):
             raise PregateCacheError("pregate file changed while being read")
         after = os.fstat(fd)
-        if after.st_size != initial.st_size or after.st_ino != initial.st_ino or after.st_dev != initial.st_dev:
+        named_after = path.lstat()
+        if (
+            _record_identity(after) != _record_identity(initial)
+            or _record_identity(named_after) != _record_identity(initial)
+        ):
             raise PregateCacheError("pregate file changed while being read")
-        return b"".join(chunks)
+        return b"".join(chunks), _record_identity(initial)
     except OSError as exc:
         raise PregateCacheError("pregate file is unreadable") from exc
     finally:
         os.close(fd)
+
+
+def _read_regular_file(path: Path) -> bytes:
+    payload, _identity = _capture_regular_file(path)
+    assert payload is not None
+    return payload
 
 
 def _validate_envelope(document: dict[str, Any], *, path: Path) -> dict[str, Any]:
@@ -270,21 +303,45 @@ def record(cwd: Path, evaluation: Any, *, issue_ref: Any) -> dict[str, Any]:
     lock_fd = _lock_file(root)
     temp_path: Path | None = None
     try:
+        current_payload, expected_identity = _capture_regular_file(
+            final_path, missing_ok=True
+        )
+        if current_payload is not None:
+            _validate_envelope(_load_json_bytes(current_payload), path=final_path)
         data = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         with tempfile.NamedTemporaryFile("wb", delete=False, dir=root, prefix=_TMP_PREFIX, suffix=".json") as tmp:
             temp_path = Path(tmp.name)
             tmp.write(data)
             tmp.flush()
             os.fsync(tmp.fileno())
-        os.replace(temp_path, final_path)
+        if expected_identity is None:
+            try:
+                os.link(temp_path, final_path, follow_symlinks=False)
+            except FileExistsError as exc:
+                raise PregateCacheError("pregate record appeared before publish") from exc
+            temp_path.unlink()
+            temp_path = None
+        else:
+            try:
+                current_identity = _record_identity(final_path.lstat())
+            except OSError as exc:
+                raise PregateCacheError("pregate record changed before publish") from exc
+            if current_identity != expected_identity:
+                raise PregateCacheError("pregate record changed before publish")
+            os.replace(temp_path, final_path)
+            temp_path = None
         _fsync_directory(root)
         return {"path": str(final_path), "subject_digest": record["subject_digest"]}
-    except Exception:
+    except Exception as exc:
         if temp_path is not None:
             try:
                 temp_path.unlink()
             except FileNotFoundError:
                 pass
+        if isinstance(exc, PregateCacheError):
+            raise
+        if isinstance(exc, OSError):
+            raise PregateCacheError("pregate publish failed") from exc
         raise
     finally:
         os.close(lock_fd)
