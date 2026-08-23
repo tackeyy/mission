@@ -167,3 +167,31 @@ mechanism is stricter than two unverified halves.
 Rejected: every exception list of this kind in this repository's history
 (artifact publish, plan-import, aggregate-reviews) eventually produced a
 lease-first violation. Protocols scale; exemptions accumulate.
+
+## Addendum (2026-08-23): 批2-b の issued-transition registry 包含性判定
+
+Batch 2 の「persistence-layer decide-replay が process-global
+issued-transition registry を包含すると確認できた場合に削除する」という条件は、批2-b の実測では
+成立しなかった。これは ADR-006 の意思決定を変更するものではなく、Decision 2 に記録した条件分岐の
+結果を確定するものである。Consequences に記した二つの enforcement mechanism の一本化も、この条件が
+成立するまで実施しない。
+
+違反クラスごとの責務は次のとおり異なる。
+
+- **入力 provenance 違反:** 正規出力と値が同じ偽造 `Transition`、または異なる state / command から
+  同じ出力へ収束する transition のすり替えは、registry が object identity と exact input binding で
+  拒否する。decide-replay は `new_state` / `events` の値だけを比較するため、これらを識別できない。
+- **発行後の出力 drift:** 発行後に `new_state` / `events` が変更された transition は、decide-replay が
+  admitted state / typed command から再計算した結果との差として拒否する。registry の identity / input
+  binding だけでは field の変更を検出しない。
+- **legacy claims の境界違反:** compatibility writer が扱う control claims の `before` は、registry が
+  保持する入力 state を基準にする。出力だけを再計算する decide-replay からは、同一出力へ収束した元の
+  state を復元できず、この責務を代替できない。
+
+したがって registry と decide-replay は重複ではなく、それぞれ入力 provenance と出力再計算を担う。
+registry を削除できるのは、(1) 全 production 経路で caller-supplied transition を廃止し、repository が
+transaction 内の exact input から decision を生成して直接 stage すること、かつ (2) legacy claims の
+`before` 依存を廃止するか、同一 transaction の明示的な input state へ移すこと、の両方を満たした後に
+限る。それまでは fail-closed で registry を保持する。
+
+詳細: [#622 `_ISSUED_TRANSITIONS` registry 包含性の実測精査](../design/622-registry-subsumption.md)
