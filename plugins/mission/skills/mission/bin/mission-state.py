@@ -182,6 +182,7 @@ from mission_application.planning import (  # noqa: E402
     verify_handoff_binding,
 )
 from mission_application.runtime_guard import (  # noqa: E402
+    PermissionHaltRejected,
     PermissionObservationRequest,
     PermissionProbe,
     StopObservationRequest,
@@ -10870,6 +10871,11 @@ def _permission_preflight(cwd: Path) -> dict:
     }
 
 
+def _exit_internal_invariant(code: str, detail: str) -> None:
+    print("ERROR: internal-invariant: %s: %s" % (code, detail), file=sys.stderr)
+    raise SystemExit(2)
+
+
 def _record_permission_probe_observation(
     cwd: Path,
     sf: Path,
@@ -10907,7 +10913,14 @@ def _record_permission_probe_observation(
 
 def cmd_permission_preflight(args):
     """Verify that Phase 0 can persist state and assumptions evidence."""
-    result = _permission_preflight(Path.cwd())
+    try:
+        result = _permission_preflight(Path.cwd())
+    except PermissionHaltRejected as error:
+        _exit_internal_invariant(error.code, str(error))
+    except FencedCommitError as error:
+        if error.code not in {"transition-divergence", "transition-unsealed"}:
+            raise
+        _exit_internal_invariant(error.code, error.detail)
     print(json.dumps(result, indent=2 if getattr(args, "json", False) else None))
     if not result["ok"]:
         sys.exit(2)

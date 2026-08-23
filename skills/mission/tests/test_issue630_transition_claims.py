@@ -63,7 +63,7 @@ class _RecordingRepository:
 
 
 def test_transition_control_claims_returns_completion_adjacent_delta(tmp_path):
-    from mission_kernel.model import HaltCategory, Phase
+    from mission_kernel.model import HaltCategory, Phase, TerminalOutcome
     from mission_kernel.transitions import transition_control_claims
 
     state = _decoded_state(tmp_path)
@@ -74,6 +74,7 @@ def test_transition_control_claims_returns_completion_adjacent_delta(tmp_path):
         "phase": Phase.HALTED,
         "loop_active": False,
         "halt_category": HaltCategory.BLOCKED_EXTERNAL,
+        "terminal_outcome": TerminalOutcome.BLOCKED_EXTERNAL,
     }
 
 

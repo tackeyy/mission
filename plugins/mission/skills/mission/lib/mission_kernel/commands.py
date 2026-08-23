@@ -21,6 +21,7 @@ class AdvancePhase:
 class MarkHalt:
     category: HaltCategory
     reason: str
+    superseded: bool = False
 
 
 @dataclass(frozen=True)

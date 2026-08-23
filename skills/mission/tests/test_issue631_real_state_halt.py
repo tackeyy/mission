@@ -36,6 +36,11 @@ class _RecordingRepository:
         self.executed_transition = transition
         proposed = copy.deepcopy(state)
         mutation(proposed)
+        if transition is not None:
+            from mission_kernel.transitions import transition_control_claims
+
+            for field_name, value in transition_control_claims(transition).items():
+                proposed[field_name] = value.value if hasattr(value, "value") else value
         self._executed = copy.deepcopy(proposed)
         return proposed
 
@@ -108,7 +113,7 @@ def test_mark_halt_decides_on_the_real_state_when_active():
 
 
 def test_mark_halt_claims_include_halt_category():
-    from mission_kernel.model import HaltCategory, Phase
+    from mission_kernel.model import HaltCategory, Phase, TerminalOutcome
     from mission_kernel.transitions import transition_control_claims
 
     repository = _RecordingRepository(_active_state())
@@ -119,6 +124,7 @@ def test_mark_halt_claims_include_halt_category():
         "phase": Phase.HALTED,
         "loop_active": False,
         "halt_category": HaltCategory.BLOCKED_EXTERNAL,
+        "terminal_outcome": TerminalOutcome.BLOCKED_EXTERNAL,
     }
     assert repository.saved["halt_category"] == "blocked-external"
 
@@ -259,8 +265,8 @@ def test_permission_invariant_failures_are_not_swallowed():
 
         transition = None
 
-    original = runtime_guard.monotonic_halt_decision
-    runtime_guard.monotonic_halt_decision = lambda *_a, **_k: _Rejected()
+    original = runtime_guard.decide
+    runtime_guard.decide = lambda *_a, **_k: _Rejected()
     try:
         with pytest.raises(RuntimeError):
             record_permission_observation(
@@ -271,4 +277,4 @@ def test_permission_invariant_failures_are_not_swallowed():
                 ),
             )
     finally:
-        runtime_guard.monotonic_halt_decision = original
+        runtime_guard.decide = original
