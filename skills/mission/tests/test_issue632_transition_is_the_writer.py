@@ -610,16 +610,30 @@ def _path_advance(tmp_path, saved):
 
 
 def _path_supersede(_tmp_path, saved):
-    """supersede-reviews 相当（monotonic halt gate + execute）の永続化経路。"""
-    from mission_application.lifecycle import monotonic_halt_decision
+    """supersede-reviews の active real-state transition 永続化経路。"""
+    from mission_application.lifecycle import real_terminalizable_state
+    from mission_common import is_supersede_marked
+    from mission_kernel.commands import MarkHalt
+    from mission_kernel.model import HaltCategory
+    from mission_kernel.transitions import decide
 
     document = _active_document(review_group_id="issue632", review_generation=1)
     saved_holder = saved
     repository = _in_memory_repository(document, saved=saved_holder)
     with repository.transaction():
         state = repository.load()
-        decision = monotonic_halt_decision(
-            state, "stale", "superseded by a replacement run"
+        decision_state = real_terminalizable_state(state)
+        assert decision_state is not None
+        reason = "superseded by a replacement run"
+        decision = decide(
+            decision_state,
+            MarkHalt(
+                HaltCategory.STALE,
+                reason,
+                superseded=is_supersede_marked(
+                    state.get("resolution_status"), reason
+                ),
+            ),
         )
         cli = _load_cli_module("issue632_property_supersede")
 

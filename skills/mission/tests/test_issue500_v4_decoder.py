@@ -163,7 +163,12 @@ def test_issue483_golden_corpus_uses_literal_expected_control_and_preserves_sour
         if label == "v4":
             assert isinstance(decoded.scores[0], LegacyScore)
         assert hashlib.sha256(source).digest() == source_hash
-        assert json.loads(project_legacy_document(decoded).decode("utf-8")) == payload
+        expected_projection = dict(payload)
+        expected_projection.setdefault("terminal_outcome", expected[label][0])
+        assert (
+            json.loads(project_legacy_document(decoded).decode("utf-8"))
+            == expected_projection
+        )
 
 
 def test_empty_legacy_document_uses_design_defaults_and_halted_incomplete_phase():
@@ -256,7 +261,9 @@ def test_v4_sparse_score_projection_preserves_writer_bytes_without_iteration_inj
 
     projected = project_legacy_document(decode_mission_state(source))
 
-    assert projected == source
+    assert projected == canonical_json_bytes(
+        {**payload, "terminal_outcome": "incomplete"}
+    )
 
 
 def test_legacy_passthrough_is_deeply_immutable():
