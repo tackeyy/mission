@@ -43,6 +43,18 @@ def _same_identity(first: os.stat_result, second: os.stat_result) -> bool:
     )
 
 
+def _file_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
 def _verify_directory_identity(directory_fd: int, named_parent: Path) -> None:
     """Prove that a held directory descriptor is still the named sidecar parent."""
     try:
@@ -161,14 +173,16 @@ def _safe_sidecar(directory: Path, sid_token: str) -> Path:
     return path
 
 
-def _read_regular_at(directory_fd: int, name: str, *, missing_ok: bool = False) -> bytes | None:
+def _read_regular_at(
+    directory_fd: int, name: str, *, missing_ok: bool = False
+) -> tuple[bytes | None, tuple[int, ...] | None]:
     """Read one bounded sidecar through the already-verified parent descriptor."""
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         fd = os.open(name, flags, dir_fd=directory_fd)
     except FileNotFoundError:
         if missing_ok:
-            return None
+            return None, None
         raise OutcomeStoreError("command outcome telemetry is unavailable")
     except OSError as exc:
         raise OutcomeStoreError("command outcome telemetry is unavailable") from exc
@@ -177,7 +191,7 @@ def _read_regular_at(directory_fd: int, name: str, *, missing_ok: bool = False) 
         if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1 or opened.st_size > 256 * 1024:
             raise OutcomeStoreError("command outcome telemetry is unsafe")
         named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-        if not _same_identity(opened, named):
+        if _file_identity(opened) != _file_identity(named):
             raise OutcomeStoreError("command outcome telemetry changed while being read")
         chunks: list[bytes] = []
         remaining = opened.st_size
@@ -191,9 +205,12 @@ def _read_regular_at(directory_fd: int, name: str, *, missing_ok: bool = False) 
             raise OutcomeStoreError("command outcome telemetry changed while being read")
         after = os.fstat(fd)
         named_after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-        if not _same_identity(opened, after) or not _same_identity(after, named_after):
+        if (
+            _file_identity(opened) != _file_identity(after)
+            or _file_identity(after) != _file_identity(named_after)
+        ):
             raise OutcomeStoreError("command outcome telemetry changed while being read")
-        return b"".join(chunks)
+        return b"".join(chunks), _file_identity(opened)
     except OSError as exc:
         raise OutcomeStoreError("command outcome telemetry is unavailable") from exc
     finally:
@@ -285,7 +302,11 @@ class _Lock:
 
 
 def _atomic_json_at(
-    directory_fd: int, name: str, document: dict[str, Any], named_parent: Path,
+    directory_fd: int,
+    name: str,
+    document: dict[str, Any],
+    named_parent: Path,
+    expected_identity: tuple[int, ...] | None,
 ) -> None:
     """Publish JSON atomically without resolving the sidecar parent pathname."""
     payload = json.dumps(
@@ -327,8 +348,41 @@ def _atomic_json_at(
         if current.st_size != len(payload) or not _same_identity(initial, current) or not _same_identity(current, named):
             raise OutcomeStoreError("command outcome telemetry temporary file changed")
         _verify_directory_identity(directory_fd, named_parent)
-        os.replace(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
-        temporary = ""
+        if expected_identity is None:
+            try:
+                os.link(
+                    temporary,
+                    name,
+                    src_dir_fd=directory_fd,
+                    dst_dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+            except FileExistsError as exc:
+                raise OutcomeStoreError(
+                    "command outcome telemetry appeared before publish"
+                ) from exc
+            os.unlink(temporary, dir_fd=directory_fd)
+            temporary = ""
+        else:
+            try:
+                destination = os.stat(
+                    name, dir_fd=directory_fd, follow_symlinks=False
+                )
+            except OSError as exc:
+                raise OutcomeStoreError(
+                    "command outcome telemetry changed before publish"
+                ) from exc
+            if _file_identity(destination) != expected_identity:
+                raise OutcomeStoreError(
+                    "command outcome telemetry changed before publish"
+                )
+            os.replace(
+                temporary,
+                name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            temporary = ""
         published = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
         if not _same_identity(current, published):
             raise OutcomeStoreError("command outcome telemetry publish changed")
@@ -359,12 +413,15 @@ def append_sidecar(state_directory: Path, sid_token: str, record: dict[str, Any]
         _verify_directory_identity(directory_fd, path.parent)
         with _Lock(path.with_suffix(".lock"), parent_fd=directory_fd):
             _verify_directory_identity(directory_fd, path.parent)
-            payload = _read_regular_at(directory_fd, path.name, missing_ok=True)
+            payload, expected_identity = _read_regular_at(
+                directory_fd, path.name, missing_ok=True
+            )
             records = _decode_document(payload) if payload is not None else []
             _atomic_json_at(
                 directory_fd, path.name,
                 {"schema": SCHEMA, "records": (records + [validated])[-LIMIT:]},
                 path.parent,
+                expected_identity,
             )
     finally:
         os.close(directory_fd)
@@ -394,7 +451,9 @@ def iter_records(state: dict[str, Any], state_directory: Path, sid_token: str) -
         directory_fd = _open_sidecar_directory(state_directory, create=False)
         if directory_fd is not None:
             _verify_directory_identity(directory_fd, path.parent)
-            payload = _read_regular_at(directory_fd, path.name, missing_ok=True)
+            payload, _identity = _read_regular_at(
+                directory_fd, path.name, missing_ok=True
+            )
             if payload is not None:
                 records.extend(_decode_document(payload))
     except OutcomeStoreError:

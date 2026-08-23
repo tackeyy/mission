@@ -209,22 +209,32 @@ def publish(cwd: Path, topic: str, payload: Any, *, producer_session: str | None
         }
         if envelope["producer_session"] == "":
             envelope["producer_session"] = os.environ.get("MISSION_SESSION_ID", "") or os.environ.get("CODEX_THREAD_ID", "") or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+        final_path = topic_dir / f"{seq}-{digest.removeprefix('sha256:')[:8]}.json"
+        envelope = _validate_envelope(envelope, path=final_path)
         data = json.dumps(envelope, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         with tempfile.NamedTemporaryFile("wb", delete=False, dir=topic_dir, prefix=_TMP_PREFIX, suffix=".json") as tmp:
             temp_path = Path(tmp.name)
             tmp.write(data)
             tmp.flush()
             os.fsync(tmp.fileno())
-        final_path = topic_dir / f"{seq}-{digest.removeprefix('sha256:')[:8]}.json"
-        os.replace(temp_path, final_path)
+        try:
+            os.link(temp_path, final_path, follow_symlinks=False)
+        except FileExistsError as exc:
+            raise EvidenceHandoffError("handoff destination appeared before publish") from exc
+        temp_path.unlink()
+        temp_path = None
         _fsync_directory(topic_dir)
         return {"path": str(final_path), "seq": seq, "payload_digest": digest}
-    except Exception:
+    except Exception as exc:
         if temp_path is not None:
             try:
                 temp_path.unlink()
             except FileNotFoundError:
                 pass
+        if isinstance(exc, EvidenceHandoffError):
+            raise
+        if isinstance(exc, OSError):
+            raise EvidenceHandoffError("handoff publish failed") from exc
         raise
     finally:
         os.close(lock_fd)
