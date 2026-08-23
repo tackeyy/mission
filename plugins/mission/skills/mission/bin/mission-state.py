@@ -10992,6 +10992,10 @@ def _set_fields_with_repository(args, cwd: Path, sf: Path):
         print(f"ERROR: {error}", file=sys.stderr)
         sys.exit(2)
     except FencedCommitError as error:
+        # 運用系 (lease 競合等) は既存の CLI 診断経路へ委ねる。構造化するのは
+        # kernel invariant 違反のみ (批2-a-2 #631)
+        if error.code not in {"transition-divergence", "transition-unsealed"}:
+            raise
         print(
             f"ERROR: internal-invariant: {error.code}: {error.detail}",
             file=sys.stderr,
@@ -16218,6 +16222,10 @@ def cmd_mark_halt(args):
         print(f"ERROR: {error.message}", file=sys.stderr)
         sys.exit(2)
     except FencedCommitError as error:
+        # 運用系 (lease 競合等) は既存の CLI 診断経路へ委ねる。構造化するのは
+        # kernel invariant 違反のみ (批2-a-2 #631)
+        if error.code not in {"transition-divergence", "transition-unsealed"}:
+            raise
         print(
             f"ERROR: internal-invariant: {error.code}: {error.detail}",
             file=sys.stderr,
@@ -16277,6 +16285,10 @@ def _reactivate_with_repository(args, cwd: Path, sf: Path, approved_reason: str)
         print(f"ERROR: {message}", file=sys.stderr)
         sys.exit(2)
     except FencedCommitError as error:
+        # 運用系 (lease 競合等) は既存の CLI 診断経路へ委ねる。構造化するのは
+        # kernel invariant 違反のみ (批2-a-2 #631)
+        if error.code not in {"transition-divergence", "transition-unsealed"}:
+            raise
         print(
             f"ERROR: internal-invariant: {error.code}: {error.detail}",
             file=sys.stderr,
@@ -16365,6 +16377,10 @@ def _refresh_pid_with_repository(args, cwd: Path, sf: Path, new_pid: int):
         print(f"ERROR: {message}", file=sys.stderr)
         sys.exit(2)
     except FencedCommitError as error:
+        # 運用系 (lease 競合等) は既存の CLI 診断経路へ委ねる。構造化するのは
+        # kernel invariant 違反のみ (批2-a-2 #631)
+        if error.code not in {"transition-divergence", "transition-unsealed"}:
+            raise
         print(
             f"ERROR: internal-invariant: {error.code}: {error.detail}",
             file=sys.stderr,
