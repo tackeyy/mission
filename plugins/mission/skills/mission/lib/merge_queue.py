@@ -114,10 +114,26 @@ def _fsync_directory(path: Path) -> None:
         os.close(fd)
 
 
-def _read_regular_file(path: Path) -> bytes:
+def _record_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _capture_regular_file(
+    path: Path, *, missing_ok: bool = False
+) -> tuple[bytes | None, tuple[int, ...] | None]:
     try:
         metadata = path.lstat()
     except FileNotFoundError as exc:
+        if missing_ok:
+            return None, None
         raise MergeQueueError("merge queue file is missing") from exc
     if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode) or metadata.st_nlink != 1:
         raise MergeQueueError("merge queue file is unsafe")
@@ -128,7 +144,11 @@ def _read_regular_file(path: Path) -> bytes:
         raise MergeQueueError("merge queue file is unreadable") from exc
     try:
         opened = os.fstat(fd)
-        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or _record_identity(opened) != _record_identity(metadata)
+        ):
             raise MergeQueueError("merge queue file is unsafe")
         remaining = opened.st_size
         chunks: list[bytes] = []
@@ -141,13 +161,23 @@ def _read_regular_file(path: Path) -> bytes:
         if os.read(fd, 1):
             raise MergeQueueError("merge queue file changed while being read")
         after = os.fstat(fd)
-        if after.st_size != opened.st_size or after.st_ino != opened.st_ino or after.st_dev != opened.st_dev:
+        named_after = path.lstat()
+        if (
+            _record_identity(after) != _record_identity(opened)
+            or _record_identity(named_after) != _record_identity(opened)
+        ):
             raise MergeQueueError("merge queue file changed while being read")
-        return b"".join(chunks)
+        return b"".join(chunks), _record_identity(opened)
     except OSError as exc:
         raise MergeQueueError("merge queue file is unreadable") from exc
     finally:
         os.close(fd)
+
+
+def _read_regular_file(path: Path) -> bytes:
+    payload, _identity = _capture_regular_file(path)
+    assert payload is not None
+    return payload
 
 
 def _load_json_bytes(data: bytes) -> dict[str, Any]:
@@ -239,11 +269,12 @@ def _validate_queue(document: dict[str, Any]) -> dict[str, Any]:
     return {"schema": SCHEMA, "entries": normalized}
 
 
-def _load_queue(cwd: Path) -> dict[str, Any]:
+def _load_queue(cwd: Path) -> tuple[dict[str, Any], tuple[int, ...] | None]:
     path = _queue_path(cwd)
-    if not path.exists():
-        return {"schema": SCHEMA, "entries": []}
-    return _validate_queue(_load_json_bytes(_read_regular_file(path)))
+    payload, identity = _capture_regular_file(path, missing_ok=True)
+    if payload is None:
+        return {"schema": SCHEMA, "entries": []}, None
+    return _validate_queue(_load_json_bytes(payload)), identity
 
 
 def _queue_digest(entry: dict[str, Any], now: datetime) -> str:
@@ -264,27 +295,49 @@ def _queue_digest(entry: dict[str, Any], now: datetime) -> str:
     return hashlib.sha256(canonical).hexdigest()[:16]
 
 
-def _write_queue_unlocked(cwd: Path, queue: dict[str, Any]) -> Path:
+def _write_queue_unlocked(
+    cwd: Path, queue: dict[str, Any], expected_identity: tuple[int, ...] | None
+) -> Path:
     """Atomic write of the queue document. Caller must hold the queue lock."""
     path = _queue_path(cwd)
     root = path.parent
     temp_path: Path | None = None
     try:
-        data = json.dumps(queue, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        proposed = _validate_queue(queue)
+        data = json.dumps(proposed, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         with tempfile.NamedTemporaryFile("wb", delete=False, dir=root, prefix=_TMP_PREFIX, suffix=".json") as tmp:
             temp_path = Path(tmp.name)
             tmp.write(data)
             tmp.flush()
             os.fsync(tmp.fileno())
-        os.replace(temp_path, path)
+        if expected_identity is None:
+            try:
+                os.link(temp_path, path, follow_symlinks=False)
+            except FileExistsError as exc:
+                raise MergeQueueError("merge queue appeared before publish") from exc
+            temp_path.unlink()
+            temp_path = None
+        else:
+            try:
+                current_identity = _record_identity(path.lstat())
+            except OSError as exc:
+                raise MergeQueueError("merge queue changed before publish") from exc
+            if current_identity != expected_identity:
+                raise MergeQueueError("merge queue changed before publish")
+            os.replace(temp_path, path)
+            temp_path = None
         _fsync_directory(root)
         return path
-    except Exception:
+    except Exception as exc:
         if temp_path is not None:
             try:
                 temp_path.unlink()
             except FileNotFoundError:
                 pass
+        if isinstance(exc, MergeQueueError):
+            raise
+        if isinstance(exc, OSError):
+            raise MergeQueueError("merge queue publish failed") from exc
         raise
 
 
@@ -297,14 +350,14 @@ def _locked_queue_update(cwd: Path, mutate):
     root = _ensure_mission_state_dir(cwd)
     lock_fd = _lock_file(root)
     try:
-        queue = _load_queue(cwd)
+        queue, expected_identity = _load_queue(cwd)
         outcome = mutate(queue)
         if isinstance(outcome, tuple):
             result, should_write = outcome
         else:
             result, should_write = outcome, True
         if should_write:
-            _write_queue_unlocked(cwd, queue)
+            _write_queue_unlocked(cwd, queue, expected_identity)
         return result
     finally:
         os.close(lock_fd)
@@ -465,12 +518,12 @@ def enqueue(
 
 
 def status(cwd: Path) -> dict[str, Any]:
-    queue = _load_queue(cwd)
+    queue, _identity = _load_queue(cwd)
     return {"status": "ok", "entries": queue["entries"]}
 
 
 def next_candidate(cwd: Path) -> dict[str, Any]:
-    queue = _load_queue(cwd)
+    queue, _identity = _load_queue(cwd)
     candidates = _candidate_entries(queue)
     if not candidates:
         result: dict[str, Any] = {"status": "empty"}
