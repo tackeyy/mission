@@ -461,16 +461,19 @@ def _transition_paths():
     }
 
 
-# CLI fixture corpus を使う 2 経路 (_path_mark_pass / _path_advance) だけは、
-# 実行時刻・実行ホスト由来の field が golden 採取時と一致しない。完了隣接 field は
-# 1 つも含まれないため、比較から除外しても本 PR の検出力は落ちない。
+# 実行時刻・実行ホスト・実行環境に由来する field は golden 採取時と一致しない
+# （CI と開発機でも異なる）。完了隣接 field は 1 つも含まれないため、比較から
+# 除外しても本 PR の検出力は落ちない。fixture 側では採取環境の値が漏れないよう
+# これらを placeholder へ差し替えてある。
 _ENVIRONMENT_DERIVED_FIELDS = frozenset(
     {
         "activity_rollup",
         "activity_segments",
         "command_outcomes",
         "created_at_session",
+        "goal_dispatch_host",
         "host_run_id",
+        "hostname",
         "last_activity_at",
         "lease_expires_at",
         "phase_durations_sec",
@@ -486,6 +489,16 @@ _ENVIRONMENT_DERIVED_FIELDS = frozenset(
 
 _CLAIMABLE_FIELDS = ("phase", "passes", "loop_active", "halt_category", "terminal_outcome")
 
+_ENVIRONMENT_PLACEHOLDER = "<environment-derived>"
+
+
+def _strip_environment(document):
+    return {
+        key: value
+        for key, value in document.items()
+        if key not in _ENVIRONMENT_DERIVED_FIELDS
+    }
+
 
 @pytest.mark.parametrize("path_name", sorted(_MAIN_SAVED_DOCUMENTS))
 def test_saved_document_matches_main_on_every_transition_path(tmp_path, path_name):
@@ -497,6 +510,10 @@ def test_saved_document_matches_main_on_every_transition_path(tmp_path, path_nam
     assert "__error__" not in golden, "golden fixture captured a driver failure"
     assert set(saved) == set(golden), "key 集合が現行 main と一致すること"
 
+    for key in _ENVIRONMENT_DERIVED_FIELDS & set(golden):
+        assert golden[key] == _ENVIRONMENT_PLACEHOLDER, (
+            "環境由来 field は fixture 側で placeholder 化しておくこと: %s" % key
+        )
     differing = {key for key in golden if saved[key] != golden[key]}
     assert differing <= _ENVIRONMENT_DERIVED_FIELDS, (
         "環境由来以外の field が現行 main と食い違っている: %s" % sorted(differing)
@@ -1035,8 +1052,14 @@ def test_set_fields_matches_main_for_calls_warnings_and_saves(tmp_path, label, k
     assert calls == golden["calls"]
     assert list(result.warnings) == golden["warnings"]
     normalized = [
-        [saved, sorted(kwargs.items(), key=str)] if isinstance(saved, dict) else [saved, []]
+        [_strip_environment(saved), sorted(kwargs.items(), key=str)]
+        if isinstance(saved, dict)
+        else [saved, []]
         for saved, kwargs in saves
     ]
-    assert json.loads(json.dumps(normalized, default=str)) == golden["saves"]
+    expected = [
+        [_strip_environment(saved), kwargs] if isinstance(saved, dict) else [saved, kwargs]
+        for saved, kwargs in golden["saves"]
+    ]
+    assert json.loads(json.dumps(normalized, default=str)) == expected
     assert json.loads(json.dumps(result.routed_verdict, default=str)) == golden["routed"]

@@ -1,1 +1,128 @@
-{"dupe": {"calls": ["reject", "derive_review_tier", "derive_review_tier", "ensure_phase_timing"], "routed": null, "saves": [[{"complexity": "Critical", "halt_reason": "", "iteration": 1, "loop_active": true, "mission": "issue632 property mission", "passes": false, "phase": "planning", "review_tier": "light", "review_tier_source": "user", "reviewer_count": 1, "schema_version": 4, "session_role": "implementer", "updated_at": "2030-08-23T01:00:00Z"}, []]], "warnings": ["WARNING [#168]: review_tier='light' は auto 導出値 'standard' より低いです。 ゲート意味論 (threshold/open_high/findings evidence/halt) は変わりません。", "WARNING [#168]: review_tier='light' は auto 導出値 'full' より低いです。 ゲート意味論 (threshold/open_high/findings evidence/halt) は変わりません。"]}, "order": {"calls": ["reject", "derive_review_tier", "ensure_phase_timing"], "routed": null, "saves": [[{"complexity": "Critical", "halt_reason": "", "iteration": 1, "loop_active": true, "mission": "issue632 property mission", "passes": false, "phase": "planning", "review_tier": "light", "review_tier_source": "user", "reviewer_count": 1, "schema_version": 4, "session_role": "implementer", "updated_at": "2030-08-23T01:00:00Z"}, []]], "warnings": ["WARNING [#168]: review_tier='light' は auto 導出値 'full' より低いです。 ゲート意味論 (threshold/open_high/findings evidence/halt) は変わりません。"]}, "route": {"calls": ["reject", "derive_review_tier_decision", "goal_dispatch_fields", "goal_dispatch_guidance", "ensure_phase_timing"], "routed": {"complexity": "Simple", "goal_dispatch_effective": "inline", "goal_dispatch_host": "claude-code", "goal_dispatch_requested": "inline", "goal_dispatch_source": "default:inline", "guidance": "", "ok": true, "reason": "Simple complexity with no irreversible/security signals (#330)", "route": "goal"}, "saves": [[{"activity_anomaly_counts": {"invalid-phase-terminal": 1}, "activity_current": null, "complexity": "Simple", "goal_dispatch_effective": "inline", "goal_dispatch_host": "claude-code", "halt_category": "routed-goal", "halt_reason": "routed-to-goal (#330: Simple + リスクシグナルなし)", "iteration": 1, "loop_active": false, "mission": "issue632 property mission", "passes": false, "phase": "halted", "phase_durations_sec": {}, "phase_started_at": "2030-08-23T01:00:00Z", "review_tier": "light", "review_tier_signal_details": [], "review_tier_signals": [], "review_tier_source": "auto", "reviewer_count": 1, "schema_version": 4, "session_role": "implementer", "terminal_outcome": "routed_elsewhere", "updated_at": "2030-08-23T01:00:00Z"}, [["administrative", true]]], ["aggregate-remove", []]], "warnings": []}}
+{
+  "dupe": {
+    "calls": [
+      "reject",
+      "derive_review_tier",
+      "derive_review_tier",
+      "ensure_phase_timing"
+    ],
+    "routed": null,
+    "saves": [
+      [
+        {
+          "complexity": "Critical",
+          "halt_reason": "",
+          "iteration": 1,
+          "loop_active": true,
+          "mission": "issue632 property mission",
+          "passes": false,
+          "phase": "planning",
+          "review_tier": "light",
+          "review_tier_source": "user",
+          "reviewer_count": 1,
+          "schema_version": 4,
+          "session_role": "implementer",
+          "updated_at": "2030-08-23T01:00:00Z"
+        },
+        []
+      ]
+    ],
+    "warnings": [
+      "WARNING [#168]: review_tier='light' は auto 導出値 'standard' より低いです。 ゲート意味論 (threshold/open_high/findings evidence/halt) は変わりません。",
+      "WARNING [#168]: review_tier='light' は auto 導出値 'full' より低いです。 ゲート意味論 (threshold/open_high/findings evidence/halt) は変わりません。"
+    ]
+  },
+  "order": {
+    "calls": [
+      "reject",
+      "derive_review_tier",
+      "ensure_phase_timing"
+    ],
+    "routed": null,
+    "saves": [
+      [
+        {
+          "complexity": "Critical",
+          "halt_reason": "",
+          "iteration": 1,
+          "loop_active": true,
+          "mission": "issue632 property mission",
+          "passes": false,
+          "phase": "planning",
+          "review_tier": "light",
+          "review_tier_source": "user",
+          "reviewer_count": 1,
+          "schema_version": 4,
+          "session_role": "implementer",
+          "updated_at": "2030-08-23T01:00:00Z"
+        },
+        []
+      ]
+    ],
+    "warnings": [
+      "WARNING [#168]: review_tier='light' は auto 導出値 'full' より低いです。 ゲート意味論 (threshold/open_high/findings evidence/halt) は変わりません。"
+    ]
+  },
+  "route": {
+    "calls": [
+      "reject",
+      "derive_review_tier_decision",
+      "goal_dispatch_fields",
+      "goal_dispatch_guidance",
+      "ensure_phase_timing"
+    ],
+    "routed": {
+      "complexity": "Simple",
+      "goal_dispatch_effective": "inline",
+      "goal_dispatch_host": "claude-code",
+      "goal_dispatch_requested": "inline",
+      "goal_dispatch_source": "default:inline",
+      "guidance": "",
+      "ok": true,
+      "reason": "Simple complexity with no irreversible/security signals (#330)",
+      "route": "goal"
+    },
+    "saves": [
+      [
+        {
+          "activity_anomaly_counts": {
+            "invalid-phase-terminal": 1
+          },
+          "activity_current": null,
+          "complexity": "Simple",
+          "goal_dispatch_effective": "inline",
+          "goal_dispatch_host": "<environment-derived>",
+          "halt_category": "routed-goal",
+          "halt_reason": "routed-to-goal (#330: Simple + リスクシグナルなし)",
+          "iteration": 1,
+          "loop_active": false,
+          "mission": "issue632 property mission",
+          "passes": false,
+          "phase": "halted",
+          "phase_durations_sec": "<environment-derived>",
+          "phase_started_at": "2030-08-23T01:00:00Z",
+          "review_tier": "light",
+          "review_tier_signal_details": [],
+          "review_tier_signals": [],
+          "review_tier_source": "auto",
+          "reviewer_count": 1,
+          "schema_version": 4,
+          "session_role": "implementer",
+          "terminal_outcome": "routed_elsewhere",
+          "updated_at": "2030-08-23T01:00:00Z"
+        },
+        [
+          [
+            "administrative",
+            true
+          ]
+        ]
+      ],
+      [
+        "aggregate-remove",
+        []
+      ]
+    ],
+    "warnings": []
+  }
+}
