@@ -1750,3 +1750,195 @@ def test_v5_reentrant_typed_request_from_finalize_is_rejected(tmp_path):
         )
     assert error.value.code == "request-invalid"
     assert backend.execute_calls == []
+
+
+# --- 注入 callable の信頼境界（Sol high 4 巡目の High / Medium・実再現あり） ---
+
+
+def test_load_path_format_guard_cannot_save(tmp_path):
+    """`load()` 経路の `_format_guard` からの保存も拒否すること。
+
+    決定より前に走る hook からの侵入書き込みは、後段の検証を素通りする。
+    """
+    from mission_persistence.fenced_commit import FencedCommitError
+    from mission_persistence.legacy_v4 import LegacyV4Repository
+
+    writes = []
+    holder = {}
+    called = []
+
+    def format_guard():
+        called.append(True)
+        holder["repository"].save({"phase": "halted"})
+
+    repository = LegacyV4Repository(
+        lock=contextlib.nullcontext,
+        read_state=lambda: {"phase": "planning", "loop_active": True},
+        write_state=lambda document, **_kwargs: writes.append(copy.deepcopy(document)),
+        backup_state=lambda: None,
+        format_guard=format_guard,
+    )
+    holder["repository"] = repository
+    with pytest.raises(FencedCommitError) as error:
+        repository.load()
+    assert called, "format_guard が実行されたこと"
+    assert error.value.code == "request-invalid"
+    assert writes == []
+
+
+def _direct_injected_calls(source, class_name, guarded_names):
+    """Return `self.<injected>(...)` calls that bypass the guard helpers."""
+    tree = ast.parse(source)
+    target = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef) and node.name == class_name
+    )
+    helpers = {"_guarded_call", "_guarded_context", "_callback_guard"}
+    offenders = []
+    for function in [
+        node for node in ast.walk(target) if isinstance(node, ast.FunctionDef)
+    ]:
+        if function.name in helpers:
+            continue
+        for node in ast.walk(function):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if (
+                isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "self"
+                and func.attr in guarded_names
+            ):
+                offenders.append("%s:L%d %s" % (function.name, node.lineno, func.attr))
+    return offenders
+
+
+@pytest.mark.parametrize(
+    "class_name", ("LegacyV4Repository", "V5CompatibilityRepository")
+)
+def test_injected_callables_are_only_invoked_through_the_guard(class_name):
+    """注入 callable の**全 call site**がガード経由であること。
+
+    個別の反例（`_format_guard` / `_clock` 等）を 1 つずつ塞ぐ形では網羅を証明
+    できないため、call site を静的に走査する（Sol 4 巡目の指摘）。
+    """
+    from mission_persistence import legacy_v4
+
+    source = Path(legacy_v4.__file__).read_text(encoding="utf-8")
+    guarded = set(getattr(legacy_v4, class_name).GUARDED_INJECTED_CALLABLES)
+    assert _direct_injected_calls(source, class_name, guarded) == []
+
+
+def test_injected_callable_guard_detects_a_direct_call():
+    """検出力の実証: ガードを通さない直接呼び出しを検出すること。"""
+    source = (
+        "class LegacyV4Repository:\n"
+        "    def save(self):\n"
+        "        self._write_state({})\n"
+    )
+    assert _direct_injected_calls(source, "LegacyV4Repository", {"_write_state"})
+
+
+def test_guarded_call_blocks_saves_from_an_injected_hook(tmp_path):
+    """`_guarded_call` 経由で走る hook は persistence へ再入できないこと。"""
+    from mission_persistence.fenced_commit import FencedCommitError
+    from mission_persistence.legacy_v4 import LegacyV4Repository
+
+    writes = []
+    holder = {}
+    repository = LegacyV4Repository(
+        lock=contextlib.nullcontext,
+        read_state=lambda: {"phase": "planning", "loop_active": True},
+        write_state=lambda document, **_kwargs: writes.append(copy.deepcopy(document)),
+        backup_state=lambda: None,
+    )
+    holder["repository"] = repository
+
+    def hook():
+        holder["repository"].save({"phase": "halted"})
+
+    with pytest.raises(FencedCommitError) as error:
+        repository._guarded_call(hook)
+    assert error.value.code == "request-invalid"
+    assert writes == []
+
+
+def test_guarded_context_uses_the_type_level_special_methods(tmp_path):
+    """`with` 文と同じく特殊メソッドを型から `__enter__` 前に取得すること。
+
+    instance の `__exit__` を `__enter__` の中で差し替えても、通常の `with` と同じ
+    ように**型側の `__exit__`** が走り、例外が suppress されないことを固定する。
+    """
+    from mission_persistence.legacy_v4 import LegacyV4Repository
+
+    calls = []
+
+    class _Manager:
+        def __enter__(self):
+            # instance 属性で __exit__ を差し替える（通常の with では無効）
+            self.__dict__["__exit__"] = lambda *_a: calls.append("instance") or True
+            return object()
+
+        def __exit__(self, *_exc):
+            calls.append("type")
+            return False
+
+    repository = LegacyV4Repository(
+        lock=contextlib.nullcontext,
+        read_state=lambda: {},
+        write_state=lambda *_a, **_k: None,
+        backup_state=lambda: None,
+    )
+    with pytest.raises(RuntimeError):
+        with repository._guarded_context(lambda: _Manager()):
+            raise RuntimeError("boom")
+    assert calls == ["type"], "型側の __exit__ が走り例外が suppress されないこと"
+
+
+def test_every_injected_callable_is_classified(tmp_path):
+    """注入 callable の分類が網羅されていること（新しい hook は分類漏れで落ちる）。
+
+    個別の反例頼みで入口網羅性を主張しないための機械チェック（Sol 4 巡目の指摘）。
+    `__init__` が受け取る callable 引数はすべて
+    `GUARDED_INJECTED_CALLABLES` か、下記の per-call 分類のどちらかに属さなければならない。
+    """
+    import inspect
+
+    from mission_persistence.legacy_v4 import (
+        LegacyV4Repository,
+        V5CompatibilityRepository,
+    )
+
+    # per-call で渡され、呼び出し時点でガードしている callable。
+    per_call_guarded = {"mutation", "finalize", "decide", "bind_published", "effect_transaction"}
+    # callable だが境界の対象外にしているもの（理由つき）。
+    not_callables = {
+        "repository",       # v5 backend（callable ではなく object）
+        "session_id",
+        "lease_owner_session_id",
+        "presented_lease_id",
+        "operation_id",
+        "operation_command",
+        "operation_command_type",
+        "lease_ttl_seconds",
+    }
+
+    for cls in (LegacyV4Repository, V5CompatibilityRepository):
+        declared = set(cls.GUARDED_INJECTED_CALLABLES)
+        parameters = set(inspect.signature(cls.__init__).parameters) - {"self"}
+        unclassified = {
+            name
+            for name in parameters
+            if name not in not_callables
+            and "_" + name not in declared
+            and name not in per_call_guarded
+        }
+        assert unclassified == set(), (
+            "%s: 分類されていない注入 callable がある: %s"
+            % (cls.__name__, sorted(unclassified))
+        )
+        # 宣言した名前が実際に属性として存在すること（綴り間違いの検出）。
+        for name in declared:
+            assert name in {"_" + item for item in parameters} | {"_effect_transaction"}, name

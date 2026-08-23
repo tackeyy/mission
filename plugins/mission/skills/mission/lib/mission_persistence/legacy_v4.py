@@ -186,26 +186,49 @@ class LegacyV4Repository:
         # その後の不正 save が未検証で通る（#632 の Sol 指摘）。深さで数える。
         self._transaction_depth += 1
         try:
-            with self._lock():
+            with self._guarded_context(self._lock):
                 yield
         finally:
             self._transaction_depth -= 1
             if self._transaction_depth == 0:
                 self._pending.clear()
 
+
+    # 外部から注入される callable の信頼境界（#632 / Sol 4 巡目）。
+    #
+    # ``decision`` / ``pre-decision`` の 2 分類は persistence への再入を許さない。
+    # ``primitive`` は「呼ばれた時点で決定が確定しており、再入させても検証を
+    # 迂回できない」ものだけを置く。分類の網羅は inventory テストが固定する。
+    GUARDED_INJECTED_CALLABLES = (
+        "_format_guard",
+        "_clock",
+        "_read_state",
+        "_backup_state",
+        "_write_state",
+        "_add_to_aggregate",
+        "_remove_from_aggregate",
+        "_lock",
+        "_effect_transaction",
+    )
+
     @contextlib.contextmanager
     def _callback_guard(self):
         """Reject persistence entry points while a caller callback is running.
 
-        直接の ``save()`` だけを塞ぐと、typed request や effect callback という
-        別の実行入口から同じ不変条件を迂回できる（#632 の Sol 指摘）。callback
-        実行中は ``execute`` / ``save`` の双方を拒否する。
+        直接の ``save()`` だけを塞ぐと、typed request や effect callback、注入 hook
+        という別の実行入口から同じ不変条件を迂回できる（#632 の Sol 指摘）。
+        callback 実行中は ``execute`` / ``save`` / ``execute_effects`` を拒否する。
         """
         self._executing += 1
         try:
             yield
         finally:
             self._executing -= 1
+
+    def _guarded_call(self, callback, *args, **kwargs):
+        """Run one injected callable inside the re-entrancy boundary."""
+        with self._callback_guard():
+            return callback(*args, **kwargs)
 
     def _reject_reentrant_entry(self, operation: str) -> None:
         if self._executing:
@@ -215,32 +238,36 @@ class LegacyV4Repository:
             )
 
     @contextlib.contextmanager
-    def _guarded_effect_transaction(self, factory, effects):
-        """Hold the re-entrancy guard across the effect manager's own callbacks.
+    def _guarded_context(self, factory, *args):
+        """Hold the guard across a caller-supplied context manager's own hooks.
 
-        factory / ``__enter__`` / ``__exit__`` は呼び出し側が渡す外部 callback で
-        あり、そこから persistence へ再入すると検証前の書き込みを作れる。本文
-        （内部の ``save``）はガードの外で実行しなければならないため、enter と exit
-        だけを個別に囲む（#632 の Sol 指摘）。
+        factory / ``__enter__`` / ``__exit__`` は外部 callback なので囲む。本文
+        （内部の ``save`` 等）はガードの外で実行しなければならないため、enter と
+        exit だけを個別に囲む。特殊メソッドは ``with`` 文と同じく **型から
+        ``__enter__`` 実行前に取得**し、instance 差し替えで意味論が変わらないように
+        する（#632 / Sol 4 巡目 Medium）。
         """
         with self._callback_guard():
-            manager = factory(effects)
-            entered = manager.__enter__()
+            manager = factory(*args)
+            manager_type = type(manager)
+            enter = manager_type.__enter__
+            exit_ = manager_type.__exit__
+            entered = enter(manager)
         try:
             yield entered
         except BaseException as error:
             with self._callback_guard():
-                suppressed = manager.__exit__(type(error), error, error.__traceback__)
+                suppressed = exit_(manager, type(error), error, error.__traceback__)
             if not suppressed:
                 raise
         else:
             with self._callback_guard():
-                manager.__exit__(None, None, None)
+                exit_(manager, None, None, None)
 
     def load(self) -> dict:
         if self._format_guard is not None:
-            self._format_guard()
-        return self._read_state()
+            self._guarded_call(self._format_guard)
+        return self._guarded_call(self._read_state)
 
     def read(self, session_id: str) -> LegacyRepositorySnapshot:
         """Read one legacy session through the common typed repository port."""
@@ -329,7 +356,7 @@ class LegacyV4Repository:
             pending = admit_lease(
                 request,
                 state.lease,
-                self._clock(),
+                self._guarded_call(self._clock),
                 self._lease_ttl_seconds,
             )
             admitted_state = replace(
@@ -390,7 +417,7 @@ class LegacyV4Repository:
                     for blob in request.blobs.blobs
                 )
                 closed = self.validate_effects(effects)
-                with self._guarded_effect_transaction(self._effect_transaction, closed):
+                with self._guarded_context(self._effect_transaction, closed):
                     self.save(proposed)
             else:
                 self.save(proposed)
@@ -409,22 +436,21 @@ class LegacyV4Repository:
     ) -> None:
         self._reject_reentrant_entry("save")
         if self._format_guard is not None:
-            with self._callback_guard():
-                self._format_guard()
+            self._guarded_call(self._format_guard)
         if self._pending:
             pending = next((item for item in self._pending if item.document is state), None)
             if pending is None:
                 raise FencedCommitError("transition-divergence", "save target is not a decided document")
             _verify_transition_claims(state, pending.claims, "save diverges from the decided transition")
         if backup:
-            self._backup_state()
+            self._guarded_call(self._backup_state)
         # Preserve the legacy writer call shape.  Several callers replace the
         # writer with a one-argument fault injector; the administrative flag
         # was only ever supplied for the routed-goal path.
         if administrative:
-            self._write_state(state, administrative=True)
+            self._guarded_call(self._write_state, state, administrative=True)
         else:
-            self._write_state(state)
+            self._guarded_call(self._write_state, state)
         callback = {
             None: None,
             "add": self._add_to_aggregate,
@@ -435,7 +461,7 @@ class LegacyV4Repository:
         if callback is None:
             return
         try:
-            callback()
+            self._guarded_call(callback)
         except Exception as exc:
             raise AggregateIndexError(str(exc)) from exc
 
@@ -473,7 +499,7 @@ class LegacyV4Repository:
             if not isinstance(decision, EvidenceDecision) or not isinstance(decision.state, dict):
                 raise ValueError("effect-decision-invalid")
             effects = self.validate_effects(decision.effects)
-            with self._guarded_effect_transaction(effect_transaction, effects) as published:
+            with self._guarded_context(effect_transaction, effects) as published:
                 if bind_published is not None:
                     with self._callback_guard():
                         bind_published(decision, published)
@@ -540,19 +566,30 @@ class V5CompatibilityRepository:
             self._pending.clear()
             self._transaction_active = False
 
+
+    # 外部から注入される callable の信頼境界（#632 / Sol 4 巡目）。分類の網羅は
+    # inventory テストが固定する。
+    GUARDED_INJECTED_CALLABLES = (
+        "_format_guard",
+        "_prepare_state",
+        "_add_to_aggregate",
+        "_remove_from_aggregate",
+        "_lease_committed",
+    )
+
     @contextlib.contextmanager
     def _callback_guard(self):
-        """Reject persistence entry points while a caller callback is running.
-
-        直接の ``save()`` だけを塞ぐと、typed request や effect callback という
-        別の実行入口から同じ不変条件を迂回できる（#632 の Sol 指摘）。callback
-        実行中は ``execute`` / ``save`` の双方を拒否する。
-        """
+        """Reject persistence entry points while a caller callback is running."""
         self._executing += 1
         try:
             yield
         finally:
             self._executing -= 1
+
+    def _guarded_call(self, callback, *args, **kwargs):
+        """Run one injected callable inside the re-entrancy boundary."""
+        with self._callback_guard():
+            return callback(*args, **kwargs)
 
     def _reject_reentrant_entry(self, operation: str) -> None:
         if self._executing:
@@ -560,7 +597,6 @@ class V5CompatibilityRepository:
                 "request-invalid",
                 "%s is not allowed while a decision is being executed" % operation,
             )
-
 
     def _request(self) -> ExecutionRequest:
         operation_id = self._operation_id or "compat:" + secrets.token_hex(16)
@@ -608,7 +644,7 @@ class V5CompatibilityRepository:
         if self._admitted is not None:
             raise FencedCommitError("request-invalid", "v5 transaction already loaded")
         if self._format_guard is not None:
-            self._format_guard()
+            self._guarded_call(self._format_guard)
         admitted = self._repository.begin(self._request())
         if isinstance(admitted, CommitResult):
             snapshot = self._repository.read(self._session_id)
@@ -657,13 +693,11 @@ class V5CompatibilityRepository:
         del backup, administrative
         self._reject_reentrant_entry("save")
         if self._format_guard is not None:
-            with self._callback_guard():
-                self._format_guard()
+            self._guarded_call(self._format_guard)
         pending = next((item for item in self._pending if item.document is state), None)
         if self._pending and pending is None:
             raise FencedCommitError("transition-divergence", "save target is not a decided document")
-        with self._callback_guard():
-            proposed = self._prepare_state(copy.deepcopy(state))
+        proposed = self._guarded_call(self._prepare_state, copy.deepcopy(state))
         if pending is not None:
             _verify_transition_claims(proposed, pending.claims, "save diverges from the decided transition")
         if self._replayed is not None:
@@ -686,7 +720,7 @@ class V5CompatibilityRepository:
         self._repository.commit(prepared, prepared.precondition)
         self._admitted = None
         if self._lease_committed is not None:
-            self._lease_committed(admitted.pending_lease, proposed)
+            self._guarded_call(self._lease_committed, admitted.pending_lease, proposed)
         callback = {
             None: None,
             "add": self._add_to_aggregate,
@@ -696,7 +730,7 @@ class V5CompatibilityRepository:
             raise ValueError("unknown aggregate action")
         if callback is not None:
             try:
-                callback()
+                self._guarded_call(callback)
             except Exception as exc:
                 raise AggregateIndexError(str(exc)) from exc
 
