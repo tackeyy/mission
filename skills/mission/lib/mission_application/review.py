@@ -306,7 +306,6 @@ class MarkPassServices:
     validate_artifact_gate: Callable[[dict], None]
     validate_specialist_gate: Callable[[dict, str], None]
     transition_phase: Callable[[dict, str, str], None]
-    write_terminal_outcome: Callable[[dict], None]
     optional_unclosed_skills: Callable[[dict], list[str]]
     selection_id: Callable[[dict], object]
     # #568: early-stop の継続条件の評価結果を返す観測子。gate 判定には使わない

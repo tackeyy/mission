@@ -386,20 +386,41 @@ def _mark_halt_decision_state(raw_state: dict):
     )
 
 
-def real_terminalizable_state(document: dict):
-    """Return a decoded active state suitable as the source of halt claims."""
+# ``real_terminalizable_state`` が claims の根拠を返さない理由。呼び出し元は
+# どちらでも gate-only へ落ちるが、"undecodable" は想定外であり観測できる必要が
+# ある（"terminal" は冪等な emergency halt の正常経路）。
+TERMINALIZABLE_ACTIVE = "active"
+TERMINALIZABLE_TERMINAL = "terminal"
+TERMINALIZABLE_UNDECODABLE = "undecodable"
+
+
+def diagnose_terminalizable_state(document: dict) -> str:
+    """Classify why a document can or cannot supply halt claims."""
     try:
         candidate = _typed_state(document)
     except (TypeError, ValueError, UnicodeError):
-        return None
+        return TERMINALIZABLE_UNDECODABLE
     if (
         candidate.control.phase not in {Phase.DONE, Phase.HALTED}
         and candidate.control.passes is False
         and not candidate.control.halt_reason
         and candidate.terminal_outcome is None
     ):
-        return candidate
-    return None
+        return TERMINALIZABLE_ACTIVE
+    return TERMINALIZABLE_TERMINAL
+
+
+def real_terminalizable_state(document: dict):
+    """Return a decoded active state suitable as the source of halt claims.
+
+    ``None`` means the caller must fall back to the synthetic monotonic view and
+    send no transition.  Use :func:`diagnose_terminalizable_state` when the
+    caller needs to distinguish an already-terminal document (the idempotent
+    emergency-halt path) from an undecodable one (unexpected degradation).
+    """
+    if diagnose_terminalizable_state(document) != TERMINALIZABLE_ACTIVE:
+        return None
+    return _typed_state(document)
 
 
 def _advance_decision(

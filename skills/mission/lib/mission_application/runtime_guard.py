@@ -15,7 +15,12 @@ from activity_segments import (
     WAIT_KINDS,
 )
 
-from .lifecycle import _mark_halt_decision_state, real_terminalizable_state
+from .lifecycle import (
+    TERMINALIZABLE_ACTIVE,
+    _mark_halt_decision_state,
+    diagnose_terminalizable_state,
+    real_terminalizable_state,
+)
 from mission_common import is_supersede_marked
 from mission_kernel.commands import MarkHalt
 from mission_kernel.model import HaltCategory
@@ -143,6 +148,9 @@ class PermissionObservationResult:
     halt_category: str | None = None
     terminal_outcome: str | None = None
     decision: object | None = None
+    # 批2-a-3 (#632): claims の根拠に実 state を使えたか。"undecodable" は
+    # 想定外の劣化であり、呼び出し元が観測できるようにする（state には書かない）。
+    claim_source: str | None = None
 
 
 class PermissionHaltRejected(RuntimeError):
@@ -428,7 +436,8 @@ def record_permission_observation(
         # decision を gate とし、#630 の claims 検証つき execute を通す。他 A5
         # observation writer と同じく synthetic monotonic view で decidable を
         # 維持する（劣化 doc でも preflight halt を書けなくしない）。
-        real_state = real_terminalizable_state(state)
+        diagnosis = diagnose_terminalizable_state(state)
+        real_state = real_terminalizable_state(state) if diagnosis == TERMINALIZABLE_ACTIVE else None
         decision = decide(
             real_state if real_state is not None else _mark_halt_decision_state(state),
             MarkHalt(
@@ -475,4 +484,5 @@ def record_permission_observation(
         halt_category=proposed.get("halt_category"),
         terminal_outcome=proposed.get("terminal_outcome"),
         decision=decision,
+        claim_source=diagnosis,
     )

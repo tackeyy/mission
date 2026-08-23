@@ -1833,11 +1833,20 @@ def _exit_init_write_failure(cwd: Path, sf: Path | None = None) -> None:
         "Phase 0 permission preflight failed before task execution: "
         "state write unavailable"
     )
-    halt_recorded = (
-        _record_permission_preflight_halt(cwd, sf, reason)
-        if sf is not None and sf.exists()
-        else False
-    )
+    try:
+        halt_recorded = (
+            _record_permission_preflight_halt(cwd, sf, reason)
+            if sf is not None and sf.exists()
+            else False
+        )
+    except PermissionHaltRejected as error:
+        # 批2-a-3 (#632): kernel invariant 違反を OSError 経路の traceback に
+        # 落とさない。他 command と同じ構造化報告へ揃える
+        _exit_internal_invariant(error.code, str(error))
+    except FencedCommitError as error:
+        if error.code not in {"transition-divergence", "transition-unsealed"}:
+            raise
+        _exit_internal_invariant(error.code, error.detail)
     print(json.dumps({
         "ok": False,
         "halt_recorded": halt_recorded,
@@ -10908,6 +10917,15 @@ def _record_permission_probe_observation(
             PermissionObservationRequest(probes=probes, observed_at=iso_now()),
             transition_phase=_transition_phase,
         )
+        if result.claim_source == "undecodable":
+            # 批2-a-3 (#632): 劣化 doc への gate-only 降格は正常な terminal
+            # （冪等 halt）と区別できないと障害調査で追えない。state には
+            # 書かず stderr にだけ残す（保存 document の互換性を壊さない）。
+            print(
+                "WARNING: permission halt fell back to the synthetic view "
+                "because the session document could not be decoded",
+                file=sys.stderr,
+            )
         if result.halt_recorded:
             with contextlib.suppress(OSError):
                 _remove_from_aggregate(cwd, sf.stem)
@@ -15865,7 +15883,6 @@ def cmd_mark_passes(args):
                 validate_artifact_gate=lambda data: _validate_pass_artifact_gate(cwd, data),
                 validate_specialist_gate=_validate_pass_specialist_gate,
                 transition_phase=_transition_phase,
-                write_terminal_outcome=_write_terminal_outcome,
                 optional_unclosed_skills=_unclosed_optional_specialist_skills,
                 selection_id=_current_selection_id,
                 early_stop_evaluation=lambda data, latest, at: _early_stop_evaluation(

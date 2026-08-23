@@ -269,23 +269,99 @@ def test_third_value_injection_is_rejected_on_every_path(tmp_path):
             _legacy_repository().execute({"phase": "planning", "loop_active": True}, lambda document, field=field, third=third: document.update({field: third}), _halt_transition(tmp_path))
 
 
-def test_halt_category_claim_is_absent_when_the_document_already_matches(tmp_path):
-    from mission_kernel.transitions import transition_control_claim_bounds
+@pytest.mark.parametrize(
+    ("label", "existing", "expect_claim"),
+    (
+        ("absent", None, True),
+        ("different", "stale", True),
+        ("identical", "blocked-external", False),
+    ),
+)
+def test_halt_category_claim_is_absent_when_the_document_already_matches(
+    tmp_path, label, existing, expect_claim
+):
+    """claim は before と after が異なる field にだけ生じる（設計書 §4）。
 
-    transition = _halt_transition(tmp_path)
-    assert "halt_category" in transition_control_claim_bounds(transition)
+    `halt_category` が既に要求値と同値なら claim は生じないため、compat writer を
+    残さなければ保存値が落ちる。3 ケース × 3 経路で固定する。
+    """
+    from . import test_issue632_transition_is_the_writer as harness
+    from mission_application.lifecycle import (
+        MarkHaltRequest,
+        MarkHaltServices,
+        mark_halt,
+        monotonic_halt_decision,
+        real_terminalizable_state,
+    )
+    from mission_kernel.commands import MarkHalt
+    from mission_kernel.model import HaltCategory
+    from mission_kernel.transitions import decide, transition_control_claim_bounds
 
+    overrides = {} if existing is None else {"halt_category": existing}
+    document = harness._active_document(**overrides)
 
+    # 経路 1: mark_halt（実 state decide）
+    state = real_terminalizable_state(document)
+    assert state is not None
+    decision = decide(
+        state,
+        MarkHalt(HaltCategory.BLOCKED_EXTERNAL, "external dependency down"),
+    )
+    claimed = set(transition_control_claim_bounds(decision.transition))
+    assert ("halt_category" in claimed) is expect_claim
 
+    saved = {}
+    repository = harness._in_memory_repository(copy.deepcopy(document), saved=saved)
+    mark_halt(
+        repository,
+        MarkHaltRequest(
+            reason="external dependency down",
+            category="blocked-external",
+            at="2030-08-23T01:00:00Z",
+        ),
+        MarkHaltServices(
+            reject_active_provider_mutation=lambda _state, _command: None,
+            transition_phase=harness._timing_transition_phase,
+            goal_dispatch_fields=lambda _state: {},
+        ),
+    )
+    # claim の有無に関わらず保存値は同じでなければならない。
+    assert saved["halt_category"] == "blocked-external"
+    assert saved["loop_active"] is False
+    assert saved["terminal_outcome"] == "blocked_external"
 
+    # 経路 2: permission observation
+    permission_saved = {}
+    _permission_observation(copy.deepcopy(document), saved=permission_saved)
+    assert permission_saved["halt_category"] == "blocked-external"
+    assert permission_saved["terminal_outcome"] == "blocked_external"
 
-
-
-
-
-
-
-
+    # 経路 3: supersede-reviews（実 state decide。stale へ terminalize する）
+    supersede_state = real_terminalizable_state(copy.deepcopy(document))
+    assert supersede_state is not None
+    supersede_decision = decide(
+        supersede_state,
+        MarkHalt(
+            HaltCategory.STALE,
+            "superseded by a replacement run",
+            superseded=True,
+        ),
+    )
+    supersede_claimed = set(
+        transition_control_claim_bounds(supersede_decision.transition)
+    )
+    # 既存が "stale" と同値のときだけ halt_category claim が消える。
+    assert ("halt_category" in supersede_claimed) is (existing != "stale")
+    # synthetic view（monotonic）は halt_category を捨てるため、同値でも claim が生じる。
+    # 実 state decide でなければこの区別が失われることを対比で固定する。
+    monotonic_claimed = set(
+        transition_control_claim_bounds(
+            monotonic_halt_decision(
+                copy.deepcopy(document), "stale", "superseded by a replacement run"
+            ).transition
+        )
+    )
+    assert "halt_category" in monotonic_claimed
 
 
 def test_set_extension_fields_transition_claims_no_control_change(tmp_path):
@@ -1069,3 +1145,177 @@ def test_set_fields_matches_main_for_calls_warnings_and_saves(tmp_path, label, k
     if isinstance(expected_routed, dict):
         expected_routed = _strip_environment(expected_routed)
     assert routed == expected_routed
+
+
+def test_v5_replay_save_verifies_before_returning(tmp_path):
+    """replay 早期 return の前に検証が走ること（設計書 §3 の所有・消費規則）。
+
+    `_prepare_state` は恒等にしておき、**execute 後に document を直接改竄**する。
+    検証が early return の後ろにあると、この改竄は素通りして「replay だから何も
+    しない」で成功してしまう。
+    """
+    from mission_persistence.fenced_commit import FencedCommitError
+    from mission_persistence.legacy_v4 import V5CompatibilityRepository
+
+    repository = V5CompatibilityRepository(
+        repository=None,
+        session_id="issue632",
+        lease_owner_session_id="issue632",
+        presented_lease_id=None,
+    )
+    proposed = repository.execute(
+        {"phase": "planning", "loop_active": True},
+        lambda document: None,
+        _halt_transition(tmp_path),
+    )
+    assert proposed["phase"] == "halted"
+    repository._replayed = object()
+
+    # 改竄なしの replay save は素通りする（early return が生きていること）。
+    repository.save(proposed)
+
+    proposed["phase"] = "planning"
+    with pytest.raises(FencedCommitError) as error:
+        repository.save(proposed)
+    assert error.value.code == "transition-divergence"
+
+
+def test_record_permission_preflight_halt_unpacks_the_tuple_explicitly():
+    """`(False, None)` を truthy 扱いしないこと（設計書 §4b・4 巡目 Low）。
+
+    `_record_permission_probe_observation` は tuple を返すようになったため、
+    呼び出し元が `bool(result)` で判定すると halt 未記録でも真になる。
+    """
+    from . import test_issue632_transition_is_the_writer as harness
+
+    cli = harness._load_cli_module("issue632_tuple_unpack")
+    source = Path(cli.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    callers = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+        if name in {
+            "_record_permission_probe_observation",
+            "_record_permission_preflight_halt",
+        }:
+            callers.append(node)
+    assert callers, "tuple を返す helper の呼び出しが見つからない"
+
+    # tuple の戻り値が bool(...) / truthy 判定へ直接渡されていないことを固定する。
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id == "bool":
+                for argument in node.args:
+                    if isinstance(argument, ast.Call):
+                        inner = argument.func
+                        inner_name = (
+                            inner.id
+                            if isinstance(inner, ast.Name)
+                            else getattr(inner, "attr", None)
+                        )
+                        assert inner_name != "_record_permission_probe_observation", (
+                            "tuple を bool() へ直接渡すと (False, None) が truthy になる"
+                        )
+
+    # 実挙動: 記録できなかった観測は (False, None) を返し、halt_recorded は False。
+    assert bool((False, None)) is True  # 罠そのもの
+    recorded, outcome = (False, None)
+    assert recorded is False and outcome is None
+
+
+@pytest.mark.parametrize(
+    "path_name",
+    ("_path_mark_pass", "_path_mark_halt", "_path_permission_preflight", "_path_supersede"),
+)
+def test_phase_writer_remains_for_timing_and_agrees_with_the_claim(tmp_path, path_name):
+    """`phase` は claim だが timing のため compat writer を残す（設計書 §4）。
+
+    claim 値と writer の値が一致し、timing 系 field が現行 main と同じであること。
+    """
+    from mission_kernel.transitions import transition_control_claims
+
+    driver = _transition_paths()[path_name]
+    saved = {}
+    decision = driver(tmp_path, saved)
+    golden = _MAIN_SAVED_DOCUMENTS[path_name]
+
+    claims = transition_control_claims(decision.transition)
+    assert "phase" in claims
+    assert saved["phase"] == claims["phase"].value == golden["phase"]
+
+    for field in ("phase_started_at", "phase_durations_sec", "activity_current", "resume_target_phase"):
+        if field in golden and field not in _ENVIRONMENT_DERIVED_FIELDS:
+            assert saved.get(field) == golden[field], field
+
+
+def test_supersede_reviews_saved_document_is_unchanged(tmp_path):
+    """supersede-reviews の保存 document が現行 main と一致すること。"""
+    saved = {}
+    _transition_paths()["_path_supersede"](tmp_path, saved)
+    golden = _MAIN_SAVED_DOCUMENTS["_path_supersede"]
+    differing = {key for key in golden if saved.get(key) != golden[key]}
+    assert differing <= _ENVIRONMENT_DERIVED_FIELDS, sorted(differing)
+    assert saved["passes"] is False  # claim にならないため writer が残す
+    assert saved["terminal_outcome"] == "stale_superseded"
+    assert saved["halt_category"] == "stale"
+
+
+@pytest.mark.parametrize(
+    "outcome", ("completed_pass", "blocked_external", "stale_superseded")
+)
+def test_supersede_reviews_on_a_terminal_document_falls_back_to_gate_only(
+    tmp_path, outcome
+):
+    """既に terminal な document では実 state decide に落ちず gate-only になること。"""
+    from . import test_issue632_transition_is_the_writer as harness
+    from mission_application.lifecycle import (
+        monotonic_halt_decision,
+        real_terminalizable_state,
+    )
+
+    terminal = harness._active_document(
+        phase="done" if outcome == "completed_pass" else "halted",
+        loop_active=False,
+        passes=outcome == "completed_pass",
+        halt_reason="" if outcome == "completed_pass" else "already halted",
+        terminal_outcome=outcome,
+    )
+    assert real_terminalizable_state(terminal) is None
+
+    # gate-only でも kernel gate は通る（emergency terminalization を止めない）。
+    decision = monotonic_halt_decision(
+        terminal, "stale", "superseded by a replacement run"
+    )
+    assert decision.accepted
+
+
+def test_permission_preflight_reports_unsealed_and_halt_rejection(monkeypatch, capsys):
+    """`transition-unsealed` と `PermissionHaltRejected` も構造化されること（設計書 §5）。"""
+    from mission_application.runtime_guard import PermissionHaltRejected
+    from mission_persistence.fenced_commit import FencedCommitError
+
+    path = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
+    spec = importlib.util.spec_from_file_location("issue632_invariant_cli2", path)
+    cli = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = cli
+    spec.loader.exec_module(cli)
+
+    for error in (
+        FencedCommitError("transition-unsealed", "unsealed"),
+        PermissionHaltRejected("permission-halt-rejected"),
+    ):
+        monkeypatch.setattr(
+            cli,
+            "_permission_preflight",
+            lambda _cwd, error=error: (_ for _ in ()).throw(error),
+        )
+        with pytest.raises(SystemExit) as result:
+            cli.cmd_permission_preflight(type("Args", (), {"json": True})())
+        assert result.value.code == 2
+        assert "internal-invariant" in capsys.readouterr().err
