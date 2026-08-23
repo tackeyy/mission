@@ -473,43 +473,45 @@ def mark_pass(
             reason = decision.rejection.code if decision.rejection else "pass-rejected"
             raise ReviewFailure(_pass_rejection_message(reason, data, latest), reason=reason)
 
-        proposed = copy.deepcopy(data)
-        proposed["passes"] = True
-        proposed["loop_active"] = False
-        proposed["passes_forced"] = request.force
-        services.transition_phase(proposed, "done", request.at)
-        services.write_terminal_outcome(proposed)
-        proposed["updated_at"] = request.at
-        if request.force:
-            proposed["force_reason"] = request.reason
-            proposed["force_approved_by_user"] = request.approved_by_user
-            proposed["force_approval"] = verification
-            services.validate_force_terminal(proposed, verification)
-            proposed["force_approval"]["consumed"] = True
-        elif request.specialist_waiver:
-            proposed["specialist_waiver"] = {
-                "reason": request.specialist_waiver,
-                "selection_id": services.selection_id(data),
-                "recorded_at": request.at,
-            }
-        # #568: 「なぜ iter N で継続しなかったか」を事後監査できるようにする。
-        # decide() の後に置き、pass gate の入力にしない (記録のみ)。
-        #
-        # 観測子の失敗が gate を巻き添えにしてはならない。例外は握り潰さず、
-        # 「観測に失敗した」ことを state に記録して pass 判定は続行する
-        # (記録の欠落と観測の失敗を区別できるようにする)。
-        if not request.force and services.early_stop_evaluation is not None:
-            try:
-                evaluation = services.early_stop_evaluation(data, latest, request.at)
-            except Exception as exc:  # noqa: BLE001 - observation must not abort the gate
-                evaluation = {
-                    "decision": "stop",
-                    "status": "observation-failed",
-                    "error": type(exc).__name__,
+        def mutate(proposed: dict) -> None:
+            proposed["passes"] = True
+            proposed["loop_active"] = False
+            proposed["passes_forced"] = request.force
+            services.transition_phase(proposed, "done", request.at)
+            services.write_terminal_outcome(proposed)
+            proposed["updated_at"] = request.at
+            if request.force:
+                proposed["force_reason"] = request.reason
+                proposed["force_approved_by_user"] = request.approved_by_user
+                proposed["force_approval"] = verification
+                services.validate_force_terminal(proposed, verification)
+                proposed["force_approval"]["consumed"] = True
+            elif request.specialist_waiver:
+                proposed["specialist_waiver"] = {
+                    "reason": request.specialist_waiver,
+                    "selection_id": services.selection_id(data),
                     "recorded_at": request.at,
                 }
-            if evaluation is not None:
-                proposed["early_stop_evaluation"] = evaluation
+            # #568: 「なぜ iter N で継続しなかったか」を事後監査できるようにする。
+            # decide() の後に置き、pass gate の入力にしない (記録のみ)。
+            #
+            # 観測子の失敗が gate を巻き添えにしてはならない。例外は握り潰さず、
+            # 「観測に失敗した」ことを state に記録して pass 判定は続行する
+            # (記録の欠落と観測の失敗を区別できるようにする)。
+            if not request.force and services.early_stop_evaluation is not None:
+                try:
+                    evaluation = services.early_stop_evaluation(data, latest, request.at)
+                except Exception as exc:  # noqa: BLE001 - observation must not abort the gate
+                    evaluation = {
+                        "decision": "stop",
+                        "status": "observation-failed",
+                        "error": type(exc).__name__,
+                        "recorded_at": request.at,
+                    }
+                if evaluation is not None:
+                    proposed["early_stop_evaluation"] = evaluation
+
+        proposed = repository.execute(data, mutate, decision.transition)
         repository.save(proposed, aggregate_action="remove")
         unclosed = [] if request.force else services.optional_unclosed_skills(proposed)
     return MarkPassResult(

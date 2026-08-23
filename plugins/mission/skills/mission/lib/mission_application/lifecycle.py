@@ -458,6 +458,13 @@ def advance(
                 )
             prepared_handoff = services.prepare_handoff(state)
         decision = None
+        candidate = None
+        deferred_error = None
+        if is_phase_change:
+            try:
+                candidate = _advance_decision(state, request, prepared_handoff)
+            except Exception as error:  # noqa: BLE001 - preserve legacy mutation ordering
+                deferred_error = error
 
         def mutate(proposed: dict) -> None:
             if prepared_handoff is not None:
@@ -522,14 +529,19 @@ def advance(
             )
             proposed["updated_at"] = request.at
 
-        proposed = repository.execute(state, mutate)
+        proposed = repository.execute(
+            state,
+            mutate,
+            candidate.transition if (candidate is not None and candidate.accepted) else None,
+        )
         if is_phase_change:
+            if deferred_error is not None:
+                raise deferred_error
             # The v4 reducer owns compatibility gates and their exact error
             # ordering.  K2 is authoritative for transitions represented by
             # its closed subset; legacy skip-ahead transitions remain on the
             # compatibility path until their production switch is planned.
-            candidate = _advance_decision(state, request, prepared_handoff)
-            if candidate.accepted:
+            if candidate is not None and candidate.accepted:
                 decision = candidate
             elif (
                 state.get("phase") == "executing"
@@ -539,7 +551,10 @@ def advance(
                 and state.get("phase") != "executing"
                 and state.get("planning_policy_version") == 1
             ):
-                assert candidate.rejection is not None
+                if candidate is None:
+                    raise RuntimeError("advance decision was neither available nor deferred")
+                if candidate.rejection is None:
+                    raise RuntimeError("rejected advance decision has no rejection")
                 raise LifecycleFailure(
                     "phase transition rejected: " + candidate.rejection.code,
                     reason=candidate.rejection.code,
