@@ -1792,20 +1792,25 @@ def _validated_assumptions_probe_path(cwd: Path, raw_path: str) -> Path:
     return candidate
 
 
-def _record_permission_preflight_halt(cwd: Path, sf: Path, reason: str) -> bool:
-    """Route init's best-effort fallback through the same closed A5 writer."""
+def _record_permission_preflight_halt(
+    cwd: Path, sf: Path, reason: str
+) -> tuple[bool, str | None]:
+    """Route init's best-effort fallback through the same closed A5 writer.
+
+    批2-a-3 (#632): 保存された terminal outcome をそのまま返す。捨てて固定値を
+    出力すると、supersede-marked state で保存値と CLI 出力の authority が割れる。
+    """
     expected = (
         "Phase 0 permission preflight failed before task execution: "
         "state write unavailable"
     )
     if reason != expected:
-        return False
-    halt_recorded, _terminal_outcome = _record_permission_probe_observation(
+        return False, None
+    return _record_permission_probe_observation(
         cwd,
         sf,
         (PermissionProbe("state", "denied", "write-unavailable"),),
     )
-    return halt_recorded
 
 
 def _exit_init_evidence_write_failure(target: str) -> None:
@@ -1834,10 +1839,10 @@ def _exit_init_write_failure(cwd: Path, sf: Path | None = None) -> None:
         "state write unavailable"
     )
     try:
-        halt_recorded = (
+        halt_recorded, persisted_outcome = (
             _record_permission_preflight_halt(cwd, sf, reason)
             if sf is not None and sf.exists()
-            else False
+            else (False, None)
         )
     except PermissionHaltRejected as error:
         # 批2-a-3 (#632): kernel invariant 違反を OSError 経路の traceback に
@@ -1851,7 +1856,9 @@ def _exit_init_write_failure(cwd: Path, sf: Path | None = None) -> None:
         "ok": False,
         "halt_recorded": halt_recorded,
         "halt_category": "blocked-external",
-        "terminal_outcome": "blocked_external",
+        "terminal_outcome": (
+            persisted_outcome if halt_recorded and persisted_outcome else "blocked_external"
+        ),
         "halt_reason": reason,
         "probes": [
             {"target": "state", "ok": False, "error": "write-unavailable"}

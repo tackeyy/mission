@@ -177,14 +177,21 @@ class LegacyV4Repository:
         self._effect_transaction = effect_transaction
         self._format_guard = format_guard
         self._pending: list[_PendingDecision] = []
+        self._executing = 0
+        self._transaction_depth = 0
 
     @contextlib.contextmanager
     def transaction(self):
+        # ネストした transaction の finally が外側の pending まで消すと、
+        # その後の不正 save が未検証で通る（#632 の Sol 指摘）。深さで数える。
+        self._transaction_depth += 1
         try:
             with self._lock():
                 yield
         finally:
-            self._pending.clear()
+            self._transaction_depth -= 1
+            if self._transaction_depth == 0:
+                self._pending.clear()
 
     def load(self) -> dict:
         if self._format_guard is not None:
@@ -233,14 +240,20 @@ class LegacyV4Repository:
         # with writer divergence failing closed (批2-a-1 #630 / 批2-a-2 #631).
         if finalize is not None and transition is None:
             raise FencedCommitError("request-invalid", "finalize requires a transition")
+        # 再入した save() は claims が未登録の隙を突いて検証を迂回できるため、
+        # mutation / finalize の実行中は保存を明示的に拒否する（#632 の Sol 指摘）。
         proposed = copy.deepcopy(state)
-        mutation(proposed)
-        if transition is not None:
-            claims = _apply_transition_claims(transition, proposed)
-            if finalize is not None:
-                finalize(proposed)
-            _verify_transition_claims(proposed, claims, "finalizer diverges from the decided transition")
-            self._pending.append(_PendingDecision(proposed, claims))
+        self._executing += 1
+        try:
+            mutation(proposed)
+            if transition is not None:
+                claims = _apply_transition_claims(transition, proposed)
+                if finalize is not None:
+                    finalize(proposed)
+                _verify_transition_claims(proposed, claims, "finalizer diverges from the decided transition")
+                self._pending.append(_PendingDecision(proposed, claims))
+        finally:
+            self._executing -= 1
         return proposed
 
     def _execute_request(
@@ -354,6 +367,11 @@ class LegacyV4Repository:
     ) -> None:
         if self._format_guard is not None:
             self._format_guard()
+        if self._executing:
+            raise FencedCommitError(
+                "request-invalid",
+                "save is not allowed while a decision is being executed",
+            )
         if self._pending:
             pending = next((item for item in self._pending if item.document is state), None)
             if pending is None:
@@ -465,6 +483,7 @@ class V5CompatibilityRepository:
         self._replayed: CommitResult | None = None
         self._transaction_active = False
         self._pending: list[_PendingDecision] = []
+        self._executing = 0
 
     @contextlib.contextmanager
     def transaction(self):
@@ -549,14 +568,20 @@ class V5CompatibilityRepository:
             return self._repository.execute(state)
         if finalize is not None and transition is None:
             raise FencedCommitError("request-invalid", "finalize requires a transition")
+        # 再入した save() は claims が未登録の隙を突いて検証を迂回できるため、
+        # mutation / finalize の実行中は保存を明示的に拒否する（#632 の Sol 指摘）。
         proposed = copy.deepcopy(state)
-        mutation(proposed)
-        if transition is not None:
-            claims = _apply_transition_claims(transition, proposed)
-            if finalize is not None:
-                finalize(proposed)
-            _verify_transition_claims(proposed, claims, "finalizer diverges from the decided transition")
-            self._pending.append(_PendingDecision(proposed, claims))
+        self._executing += 1
+        try:
+            mutation(proposed)
+            if transition is not None:
+                claims = _apply_transition_claims(transition, proposed)
+                if finalize is not None:
+                    finalize(proposed)
+                _verify_transition_claims(proposed, claims, "finalizer diverges from the decided transition")
+                self._pending.append(_PendingDecision(proposed, claims))
+        finally:
+            self._executing -= 1
         return proposed
 
     def save(
@@ -570,6 +595,11 @@ class V5CompatibilityRepository:
         del backup, administrative
         if self._format_guard is not None:
             self._format_guard()
+        if self._executing:
+            raise FencedCommitError(
+                "request-invalid",
+                "save is not allowed while a decision is being executed",
+            )
         pending = next((item for item in self._pending if item.document is state), None)
         if self._pending and pending is None:
             raise FencedCommitError("transition-divergence", "save target is not a decided document")

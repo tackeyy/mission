@@ -178,34 +178,46 @@ def test_failed_finalize_leaves_no_pending_claims(tmp_path):
 
 
 
-def test_mark_halt_saved_document_is_unchanged_for_every_category(tmp_path):
+_MAIN_HALT_MATRIX = json.loads(
+    (Path(__file__).resolve().parent / "fixtures" / "issue632_main_halt_matrix.json").read_text(
+        encoding="utf-8"
+    )
+)
+
+
+@pytest.mark.parametrize("key", sorted(_MAIN_HALT_MATRIX))
+def test_mark_halt_saved_document_is_unchanged_for_every_category(tmp_path, key):
+    """HaltCategory 9 種 × SessionRole 5 種 = 45 組で保存 document が main と一致すること。
+
+    claim field だけでなく **全 key/value** を現行 main の実測値と比較する
+    （claim 化と writer 削除が 1 field でも保存結果を動かしたら落ちる）。
+    """
     from . import test_issue631_real_state_halt as corpus
-    from mission_kernel.model import HaltCategory, SessionRole
     from mission_kernel.transitions import transition_control_claims
     from mission_application.lifecycle import MarkHaltRequest, MarkHaltServices, mark_halt
 
-    for category in HaltCategory:
-        for role in SessionRole:
-            saved = {}
-            state = corpus._active_state(session_role=role.value)
-            repository = _legacy_repository(writes=[])
-            repository._read_state = lambda state=state: copy.deepcopy(state)
-            repository._write_state = lambda document, **_kwargs: saved.update(copy.deepcopy(document))
-            result = mark_halt(
-                repository,
-                MarkHaltRequest("blocked", category.value, "2030-08-23T00:00:00Z", True),
-                MarkHaltServices(
-                    lambda *_args: None,
-                    lambda document, phase, _at, **_kwargs: document.update({"phase": phase}),
-                    lambda _state: {
-                        "goal_dispatch_effective": True,
-                        "goal_dispatch_host": "test-host",
-                    },
-                ),
-            )
-            assert result.decision.accepted
-            for field, value in transition_control_claims(result.decision.transition).items():
-                assert saved[field] == getattr(value, "value", value)
+    category, role = key.split("|")
+    saved = {}
+    state = corpus._active_state(session_role=role)
+    repository = _legacy_repository(writes=[])
+    repository._read_state = lambda state=state: copy.deepcopy(state)
+    repository._write_state = lambda document, **_kwargs: saved.update(copy.deepcopy(document))
+    result = mark_halt(
+        repository,
+        MarkHaltRequest("blocked", category, "2030-08-23T00:00:00Z", True),
+        MarkHaltServices(
+            lambda *_args: None,
+            lambda document, phase, _at, **_kwargs: document.update({"phase": phase}),
+            lambda _state: {
+                "goal_dispatch_effective": True,
+                "goal_dispatch_host": "test-host",
+            },
+        ),
+    )
+    assert result.decision.accepted
+    assert saved == _MAIN_HALT_MATRIX[key]
+    for field, value in transition_control_claims(result.decision.transition).items():
+        assert saved[field] == getattr(value, "value", value)
 
 
 def test_supersede_marker_is_propagated_from_every_markhalt_construction_site():
@@ -567,6 +579,11 @@ _CLAIMABLE_FIELDS = ("phase", "passes", "loop_active", "halt_category", "termina
 
 _ENVIRONMENT_PLACEHOLDER = "<environment-derived>"
 
+# 環境由来の除外を許すのは CLI fixture corpus を使う 2 経路だけ。残り 6 経路は
+# `_active_document()` から組み立てる決定的な入力なので、**全 key/value の完全一致**
+# を要求する（除外を広く取りすぎて timing writer の回帰を見逃さないため）。
+_CORPUS_BACKED_PATHS = frozenset({"_path_mark_pass", "_path_advance"})
+
 
 def _strip_environment(document):
     return {
@@ -586,13 +603,22 @@ def test_saved_document_matches_main_on_every_transition_path(tmp_path, path_nam
     assert "__error__" not in golden, "golden fixture captured a driver failure"
     assert set(saved) == set(golden), "key 集合が現行 main と一致すること"
 
-    for key in _ENVIRONMENT_DERIVED_FIELDS & set(golden):
-        assert golden[key] == _ENVIRONMENT_PLACEHOLDER, (
-            "環境由来 field は fixture 側で placeholder 化しておくこと: %s" % key
-        )
+    if path_name in _CORPUS_BACKED_PATHS:
+        for key in _ENVIRONMENT_DERIVED_FIELDS & set(golden):
+            assert golden[key] == _ENVIRONMENT_PLACEHOLDER, (
+                "環境由来 field は fixture 側で placeholder 化しておくこと: %s" % key
+            )
+    else:
+        # 決定的 6 経路は placeholder を使わない（完全一致を要求する）。
+        assert _ENVIRONMENT_PLACEHOLDER not in golden.values()
     differing = {key for key in golden if saved[key] != golden[key]}
-    assert differing <= _ENVIRONMENT_DERIVED_FIELDS, (
-        "環境由来以外の field が現行 main と食い違っている: %s" % sorted(differing)
+    allowed = (
+        _ENVIRONMENT_DERIVED_FIELDS
+        if path_name in _CORPUS_BACKED_PATHS
+        else frozenset()
+    )
+    assert differing <= allowed, (
+        "現行 main と食い違っている field: %s" % sorted(differing)
     )
     # 完了隣接 field は環境由来の除外に一切かからない（検出力の担保）。
     assert not (_ENVIRONMENT_DERIVED_FIELDS & set(_CLAIMABLE_FIELDS))
@@ -881,9 +907,20 @@ def test_permission_observation_result_is_derived_from_the_saved_document(tmp_pa
     assert result.halt_category == saved["halt_category"]
 
 
-@pytest.mark.parametrize(
-    "outcome", ("completed_pass", "blocked_external", "stale_superseded")
+_ALL_TERMINAL_OUTCOMES = (
+    "awaiting_approval",
+    "blocked_external",
+    "completed_evidence",
+    "completed_pass",
+    "failed",
+    "incomplete",
+    "routed_elsewhere",
+    "stale_superseded",
+    "user_aborted",
 )
+
+
+@pytest.mark.parametrize("outcome", _ALL_TERMINAL_OUTCOMES)
 def test_permission_observation_on_a_terminal_document_falls_back_to_gate_only(
     tmp_path, outcome
 ):
@@ -1265,9 +1302,7 @@ def test_supersede_reviews_saved_document_is_unchanged(tmp_path):
     assert saved["halt_category"] == "stale"
 
 
-@pytest.mark.parametrize(
-    "outcome", ("completed_pass", "blocked_external", "stale_superseded")
-)
+@pytest.mark.parametrize("outcome", _ALL_TERMINAL_OUTCOMES)
 def test_supersede_reviews_on_a_terminal_document_falls_back_to_gate_only(
     tmp_path, outcome
 ):
@@ -1319,3 +1354,94 @@ def test_permission_preflight_reports_unsealed_and_halt_rejection(monkeypatch, c
             cli.cmd_permission_preflight(type("Args", (), {"json": True})())
         assert result.value.code == 2
         assert "internal-invariant" in capsys.readouterr().err
+
+
+# --- 再入と nested transaction（Sol high レビューの High 指摘・実再現あり） ---
+
+
+def test_reentrant_save_from_finalize_is_rejected_before_any_write(tmp_path):
+    """finalize からの再入 save は claims 未登録の隙を突けるため拒否する。
+
+    修正前は「未検証のまま実書き込み → その後に transition-divergence」となり、
+    エラーにはなるが不正状態が永続化されていた（fail-closed でない）。
+    """
+    from mission_persistence.fenced_commit import FencedCommitError
+
+    writes = []
+    repository = _legacy_repository(writes=writes)
+    transition = _halt_transition(tmp_path)
+
+    def finalize(document):
+        document["phase"] = "reviewing"  # claimed field を改竄したうえで
+        repository.save(document)        # 検証前に保存を試みる
+
+    with repository.transaction():
+        with pytest.raises(FencedCommitError) as error:
+            repository.execute(
+                {"phase": "planning", "loop_active": True},
+                lambda document: None,
+                transition,
+                finalize,
+            )
+    assert error.value.code == "request-invalid"
+    assert writes == [], "検証前の書き込みが 1 件も発生しないこと"
+
+
+def test_reentrant_save_from_mutation_is_rejected_before_any_write(tmp_path):
+    from mission_persistence.fenced_commit import FencedCommitError
+
+    writes = []
+    repository = _legacy_repository(writes=writes)
+
+    def mutate(document):
+        document["phase"] = "reviewing"
+        repository.save(document)
+
+    with repository.transaction():
+        with pytest.raises(FencedCommitError) as error:
+            repository.execute(
+                {"phase": "planning", "loop_active": True},
+                mutate,
+                _halt_transition(tmp_path),
+            )
+    assert error.value.code == "request-invalid"
+    assert writes == []
+
+
+def test_nested_transaction_does_not_clear_the_outer_pending_claims(tmp_path):
+    """内側 transaction の finally が外側の pending を消さないこと。
+
+    消えると、その後の不正 save が未検証で通ってしまう。
+    """
+    from mission_persistence.fenced_commit import FencedCommitError
+
+    writes = []
+    repository = _legacy_repository(writes=writes)
+    with repository.transaction():
+        proposed = repository.execute(
+            {"phase": "planning", "loop_active": True},
+            lambda document: None,
+            _halt_transition(tmp_path),
+        )
+        with repository.transaction():
+            pass  # 内側 transaction を抜けても pending は生き続ける
+        proposed["phase"] = "reviewing"
+        with pytest.raises(FencedCommitError) as error:
+            repository.save(proposed)
+    assert error.value.code == "transition-divergence"
+    assert writes == []
+
+
+def test_pending_claims_are_cleared_when_the_outermost_transaction_exits(tmp_path):
+    writes = []
+    repository = _legacy_repository(writes=writes)
+    with repository.transaction():
+        with repository.transaction():
+            repository.execute(
+                {"phase": "planning", "loop_active": True},
+                lambda document: None,
+                _halt_transition(tmp_path),
+            )
+    with repository.transaction():
+        repository.save({"phase": "planning", "loop_active": True})
+    assert len(writes) == 1

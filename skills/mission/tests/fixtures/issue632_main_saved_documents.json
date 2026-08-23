@@ -269,8 +269,14 @@
       "reason": "resumed-implementation",
       "started_at": "2030-08-23T01:00:00Z"
     },
-    "activity_rollup": "<environment-derived>",
-    "activity_segments": "<environment-derived>",
+    "activity_rollup": {
+      "activity_duration_totals_sec": {},
+      "closed_segment_count": 0,
+      "observed_total_sec": 0.0,
+      "phase_activity_duration_totals_sec": {},
+      "wait_reason_totals_sec": {}
+    },
+    "activity_segments": [],
     "halt_reason": "",
     "iteration": 1,
     "loop_active": true,
@@ -302,8 +308,14 @@
       "reason": "planning",
       "started_at": "2030-08-23T01:00:00Z"
     },
-    "activity_rollup": "<environment-derived>",
-    "activity_segments": "<environment-derived>",
+    "activity_rollup": {
+      "activity_duration_totals_sec": {},
+      "closed_segment_count": 0,
+      "observed_total_sec": 0.0,
+      "phase_activity_duration_totals_sec": {},
+      "wait_reason_totals_sec": {}
+    },
+    "activity_segments": [],
     "halt_reason": "",
     "iteration": 1,
     "loop_active": true,
@@ -311,7 +323,7 @@
     "passes": false,
     "phase": "planning",
     "phase_started_at": "2030-08-23T01:00:00Z",
-    "pid": "<environment-derived>",
+    "pid": 424243,
     "schema_version": 4,
     "session_role": "implementer",
     "updated_at": "2030-08-23T01:00:00Z"
@@ -340,7 +352,7 @@
     "mission": "issue632 property mission",
     "passes": false,
     "phase": "halted",
-    "phase_durations_sec": "<environment-derived>",
+    "phase_durations_sec": {},
     "phase_started_at": "2030-08-23T01:00:00Z",
     "resume_target_phase": "executing",
     "review_generation": 1,
