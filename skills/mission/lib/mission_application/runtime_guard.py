@@ -420,10 +420,14 @@ def record_permission_observation(
         # 維持する（劣化 doc でも preflight halt を書けなくしない）。
         decision = monotonic_halt_decision(state, "blocked-external", reason)
         if not decision.accepted:
-            assert decision.rejection is not None
-            raise ValueError(
-                "permission-halt-rejected: " + decision.rejection.code
+            # kernel invariant 違反は呼び出し元の ValueError 吸収（運用系の
+            # 縮退経路）に混ぜず、fail-open を防ぐ（批2-a-2 #631）
+            code = (
+                decision.rejection.code
+                if decision.rejection is not None
+                else "rejection-unclosed"
             )
+            raise RuntimeError("permission-halt-rejected: " + code)
 
         def mutate(proposed: dict) -> None:
             proposed["halt_reason"] = reason

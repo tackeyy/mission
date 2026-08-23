@@ -14,13 +14,15 @@ from mission_application.artifact import EvidenceDecision, EvidenceEffect, valid
 from mission_application.ports import AggregateIndexError, AuditMetadata
 from mission_kernel.json_codec import decode_json_object
 from mission_kernel import MissionState, decode_mission_state, project_legacy_document
+from enum import Enum
+
 from mission_kernel.model import Phase
 from mission_kernel.transitions import (
     Decision,
     TransitionTableError,
     bind_transition_effects,
     decide,
-    transition_control_claims,
+    transition_control_claim_bounds,
 )
 
 from .fenced_commit import (
@@ -38,38 +40,55 @@ from .fenced_commit import (
 from .local_uow import VerifiedBlobSet
 
 
-def _verify_transition_claims(transition: object, proposed: dict) -> None:
-    """Fail closed when the compatibility mutation diverges from the decision.
+_CLAIM_ABSENT = object()
 
-    The typed transition remains the authority decision while the A1
-    compatibility reducer stays the writer for timing, lease, and passthrough
-    fields (批2-a-1).  What this verifies is the transition's *claims*: every
-    completion-adjacent control change the kernel decided must appear
-    identically in the proposed document.  Unclaimed fields stay under the
-    compatibility writer's authority until 批2-a-2 / 批2-a-3 remove the dict
+
+def _apply_transition_claims(transition: object, proposed: dict) -> None:
+    """Apply the decided completion-adjacent claims as the persisted values.
+
+    批2-a-2 (#631): the transition's claimed values are what get persisted —
+    a claim fills a field the compatibility writer omitted and overwrites an
+    equal value it wrote, while a writer that produced a *different* value
+    indicates re-implementation drift and fails closed.  Unclaimed fields
+    (timing, lease, passthrough, raw halt_reason) stay under the
+    compatibility writer's authority until 批2-a-3 removes the dict
     mutations entirely.
     """
     try:
-        claims = transition_control_claims(transition)
+        bounds = transition_control_claim_bounds(transition)
     except TransitionTableError as exc:
         raise FencedCommitError(
             "transition-unsealed",
             "execute requires a transition issued by the canonical decision table",
         ) from exc
-    for field_name, value in claims.items():
-        if isinstance(value, Phase):
-            matches = proposed.get(field_name) == value.value
-        elif isinstance(value, bool):
-            actual = proposed.get(field_name, False)
-            matches = type(actual) is bool and actual is value
-        else:
-            matches = proposed.get(field_name) == value
-        if not matches:
+
+    def _projected(value: object) -> object:
+        return value.value if isinstance(value, Enum) else value
+
+    def _matches(current: object, expected: object) -> bool:
+        if expected is None:
+            return current is None or current is _CLAIM_ABSENT
+        if isinstance(expected, bool):
+            return type(current) is bool and current is expected
+        return current == expected
+
+    for field_name, (before, after) in bounds.items():
+        current = proposed.get(field_name, _CLAIM_ABSENT)
+        expected = _projected(after)
+        # 許容されるのは「決定後の値を書いた writer」か「触っていない writer
+        # （決定前の値のまま）」だけ。第三の値は再実装 drift として fail-closed。
+        if not _matches(current, expected) and not _matches(
+            current, _projected(before)
+        ):
             raise FencedCommitError(
                 "transition-divergence",
                 "compatibility mutation diverges from the decided transition"
                 " on %s" % field_name,
             )
+        if expected is None:
+            proposed.pop(field_name, None)
+        else:
+            proposed[field_name] = expected
 
 
 @dataclass(frozen=True)
@@ -183,12 +202,12 @@ class LegacyV4Repository:
         # compatibility reducer remains the writer for legacy timing, lease,
         # and passthrough fields.  Projecting the canonical state here would
         # pre-apply the phase and lose the legacy reducer's duration boundary.
-        # A supplied transition therefore acts as a fail-closed equivalence
-        # check on its claimed completion-adjacent changes (批2-a-1 #630).
+        # A supplied transition's claims are applied as the persisted values,
+        # with writer divergence failing closed (批2-a-1 #630 / 批2-a-2 #631).
         proposed = copy.deepcopy(state)
         mutation(proposed)
         if transition is not None:
-            _verify_transition_claims(transition, proposed)
+            _apply_transition_claims(transition, proposed)
         return proposed
 
     def _execute_request(
@@ -491,7 +510,7 @@ class V5CompatibilityRepository:
         proposed = copy.deepcopy(state)
         mutation(proposed)
         if transition is not None:
-            _verify_transition_claims(transition, proposed)
+            _apply_transition_claims(transition, proposed)
         return proposed
 
     def save(

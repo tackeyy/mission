@@ -15,7 +15,7 @@ import pytest
 
 def test_monotonic_halt_decision_accepts_stale_supersede():
     from mission_application.lifecycle import monotonic_halt_decision
-    from mission_kernel.model import Phase
+    from mission_kernel.model import HaltCategory, Phase
     from mission_kernel.transitions import transition_control_claims
 
     decision = monotonic_halt_decision(
@@ -25,7 +25,11 @@ def test_monotonic_halt_decision_accepts_stale_supersede():
     assert decision.accepted is True
     assert decision.rule_id == "mark-halt"
     claims = transition_control_claims(decision.transition)
-    assert claims == {"phase": Phase.HALTED, "loop_active": False}
+    assert claims == {
+        "phase": Phase.HALTED,
+        "loop_active": False,
+        "halt_category": HaltCategory.STALE,
+    }
 
 
 def test_monotonic_halt_decision_rejects_unknown_category():

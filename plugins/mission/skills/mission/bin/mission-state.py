@@ -10895,6 +10895,12 @@ def _record_permission_probe_observation(
         return result.halt_recorded
     except UnsupportedSchemaVersionError:
         raise
+    except FencedCommitError as error:
+        # lease 競合等の運用系は従来どおり False（halt 未記録）へ縮退するが、
+        # kernel invariant 違反は吸収しない（fail-open 防止・批2-a-2 #631）
+        if error.code in {"transition-divergence", "transition-unsealed"}:
+            raise
+        return False
     except (OSError, ValueError):
         return False
 
@@ -10984,6 +10990,16 @@ def _set_fields_with_repository(args, cwd: Path, sf: Path):
         sys.exit(2 if error.reason != "key-value-format" else 1)
     except (ActivityTimingError, ArtifactContractError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
+        sys.exit(2)
+    except FencedCommitError as error:
+        # 運用系 (lease 競合等) は既存の CLI 診断経路へ委ねる。構造化するのは
+        # kernel invariant 違反のみ (批2-a-2 #631)
+        if error.code not in {"transition-divergence", "transition-unsealed"}:
+            raise
+        print(
+            f"ERROR: internal-invariant: {error.code}: {error.detail}",
+            file=sys.stderr,
+        )
         sys.exit(2)
     for warning in result.warnings:
         print(warning, file=sys.stderr)
@@ -16205,6 +16221,16 @@ def cmd_mark_halt(args):
     except LifecycleFailure as error:
         print(f"ERROR: {error.message}", file=sys.stderr)
         sys.exit(2)
+    except FencedCommitError as error:
+        # 運用系 (lease 競合等) は既存の CLI 診断経路へ委ねる。構造化するのは
+        # kernel invariant 違反のみ (批2-a-2 #631)
+        if error.code not in {"transition-divergence", "transition-unsealed"}:
+            raise
+        print(
+            f"ERROR: internal-invariant: {error.code}: {error.detail}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     if result.aggregate_error is not None:
         print(
             f"WARNING: aggregate index update failed: {result.aggregate_error}",
@@ -16257,6 +16283,16 @@ def _reactivate_with_repository(args, cwd: Path, sf: Path, approved_reason: str)
     except (LifecycleFailure, ActivityTimingError) as error:
         message = error.message if isinstance(error, LifecycleFailure) else str(error)
         print(f"ERROR: {message}", file=sys.stderr)
+        sys.exit(2)
+    except FencedCommitError as error:
+        # 運用系 (lease 競合等) は既存の CLI 診断経路へ委ねる。構造化するのは
+        # kernel invariant 違反のみ (批2-a-2 #631)
+        if error.code not in {"transition-divergence", "transition-unsealed"}:
+            raise
+        print(
+            f"ERROR: internal-invariant: {error.code}: {error.detail}",
+            file=sys.stderr,
+        )
         sys.exit(2)
     if result.aggregate_error is not None:
         print(
@@ -16339,6 +16375,16 @@ def _refresh_pid_with_repository(args, cwd: Path, sf: Path, new_pid: int):
     except (LifecycleFailure, ActivityTimingError) as error:
         message = error.message if isinstance(error, LifecycleFailure) else str(error)
         print(f"ERROR: {message}", file=sys.stderr)
+        sys.exit(2)
+    except FencedCommitError as error:
+        # 運用系 (lease 競合等) は既存の CLI 診断経路へ委ねる。構造化するのは
+        # kernel invariant 違反のみ (批2-a-2 #631)
+        if error.code not in {"transition-divergence", "transition-unsealed"}:
+            raise
+        print(
+            f"ERROR: internal-invariant: {error.code}: {error.detail}",
+            file=sys.stderr,
+        )
         sys.exit(2)
     if result.aggregate_error is not None:
         print(
