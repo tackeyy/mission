@@ -193,6 +193,27 @@ class LegacyV4Repository:
             if self._transaction_depth == 0:
                 self._pending.clear()
 
+    @contextlib.contextmanager
+    def _callback_guard(self):
+        """Reject persistence entry points while a caller callback is running.
+
+        直接の ``save()`` だけを塞ぐと、typed request や effect callback という
+        別の実行入口から同じ不変条件を迂回できる（#632 の Sol 指摘）。callback
+        実行中は ``execute`` / ``save`` の双方を拒否する。
+        """
+        self._executing += 1
+        try:
+            yield
+        finally:
+            self._executing -= 1
+
+    def _reject_reentrant_entry(self, operation: str) -> None:
+        if self._executing:
+            raise FencedCommitError(
+                "request-invalid",
+                "%s is not allowed while a decision is being executed" % operation,
+            )
+
     def load(self) -> dict:
         if self._format_guard is not None:
             self._format_guard()
@@ -226,6 +247,7 @@ class LegacyV4Repository:
 
     def execute(self, state, mutation=None, transition=None, finalize=None):
         """Return the proposed v4 document without performing any I/O."""
+        self._reject_reentrant_entry("execute")
         if isinstance(state, ExecutionRequest):
             if mutation is not None or transition is not None or finalize is not None:
                 raise FencedCommitError(
@@ -243,8 +265,7 @@ class LegacyV4Repository:
         # 再入した save() は claims が未登録の隙を突いて検証を迂回できるため、
         # mutation / finalize の実行中は保存を明示的に拒否する（#632 の Sol 指摘）。
         proposed = copy.deepcopy(state)
-        self._executing += 1
-        try:
+        with self._callback_guard():
             mutation(proposed)
             if transition is not None:
                 claims = _apply_transition_claims(transition, proposed)
@@ -252,8 +273,6 @@ class LegacyV4Repository:
                     finalize(proposed)
                 _verify_transition_claims(proposed, claims, "finalizer diverges from the decided transition")
                 self._pending.append(_PendingDecision(proposed, claims))
-        finally:
-            self._executing -= 1
         return proposed
 
     def _execute_request(
@@ -428,13 +447,15 @@ class LegacyV4Repository:
         """
         with self.transaction():
             current = self.load()
-            decision = decide(copy.deepcopy(current))
+            with self._callback_guard():
+                decision = decide(copy.deepcopy(current))
             if not isinstance(decision, EvidenceDecision) or not isinstance(decision.state, dict):
                 raise ValueError("effect-decision-invalid")
             effects = self.validate_effects(decision.effects)
             with effect_transaction(effects) as published:
                 if bind_published is not None:
-                    bind_published(decision, published)
+                    with self._callback_guard():
+                        bind_published(decision, published)
                 self.save(decision.state, backup=backup)
             return decision
 
@@ -497,6 +518,28 @@ class V5CompatibilityRepository:
             self._replayed = None
             self._pending.clear()
             self._transaction_active = False
+
+    @contextlib.contextmanager
+    def _callback_guard(self):
+        """Reject persistence entry points while a caller callback is running.
+
+        直接の ``save()`` だけを塞ぐと、typed request や effect callback という
+        別の実行入口から同じ不変条件を迂回できる（#632 の Sol 指摘）。callback
+        実行中は ``execute`` / ``save`` の双方を拒否する。
+        """
+        self._executing += 1
+        try:
+            yield
+        finally:
+            self._executing -= 1
+
+    def _reject_reentrant_entry(self, operation: str) -> None:
+        if self._executing:
+            raise FencedCommitError(
+                "request-invalid",
+                "%s is not allowed while a decision is being executed" % operation,
+            )
+
 
     def _request(self) -> ExecutionRequest:
         operation_id = self._operation_id or "compat:" + secrets.token_hex(16)
@@ -564,6 +607,7 @@ class V5CompatibilityRepository:
         return self._repository.read(session_id)
 
     def execute(self, state, mutation=None, transition=None, finalize=None):
+        self._reject_reentrant_entry("execute")
         if isinstance(state, ExecutionRequest):
             return self._repository.execute(state)
         if finalize is not None and transition is None:
@@ -571,8 +615,7 @@ class V5CompatibilityRepository:
         # 再入した save() は claims が未登録の隙を突いて検証を迂回できるため、
         # mutation / finalize の実行中は保存を明示的に拒否する（#632 の Sol 指摘）。
         proposed = copy.deepcopy(state)
-        self._executing += 1
-        try:
+        with self._callback_guard():
             mutation(proposed)
             if transition is not None:
                 claims = _apply_transition_claims(transition, proposed)
@@ -580,8 +623,6 @@ class V5CompatibilityRepository:
                     finalize(proposed)
                 _verify_transition_claims(proposed, claims, "finalizer diverges from the decided transition")
                 self._pending.append(_PendingDecision(proposed, claims))
-        finally:
-            self._executing -= 1
         return proposed
 
     def save(

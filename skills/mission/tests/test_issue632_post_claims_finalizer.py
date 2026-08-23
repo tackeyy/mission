@@ -1522,3 +1522,73 @@ def test_init_reports_internal_invariant_without_traceback(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "internal-invariant: permission-halt-rejected" in captured.err
     assert captured.out == "", "invariant 違反では fallback JSON を出さない"
+
+
+def test_reentrant_typed_request_from_finalize_is_rejected(tmp_path):
+    """typed request 経路も再入を拒否すること（Sol 指摘の High 1）。
+
+    `save()` だけを塞ぐと、`execute(ExecutionRequest)` という別の実行入口から
+    「外側の command は失敗したのに state は更新済み」を作れる。
+    """
+    from mission_persistence.fenced_commit import ExecutionRequest, FencedCommitError
+
+    writes = []
+    repository = _legacy_repository(writes=writes)
+    attempted = []
+
+    def finalize(document):
+        attempted.append(True)
+        # typed request を再入実行しようとする（下位 repository は stage→commit する）
+        repository.execute(object.__new__(ExecutionRequest))
+
+    with repository.transaction():
+        with pytest.raises(FencedCommitError) as error:
+            repository.execute(
+                {"phase": "planning", "loop_active": True},
+                lambda document: None,
+                _halt_transition(tmp_path),
+                finalize,
+            )
+    assert attempted, "finalize が実行されていること（テストが空振りしていない）"
+    assert error.value.code == "request-invalid"
+    assert writes == []
+
+
+def test_execute_effects_callbacks_cannot_save_before_verification(tmp_path):
+    """`execute_effects` の callback からの保存を拒否すること（Sol 指摘の High 2）。
+
+    修正前は `decide` / `bind_published` 実行中に `_executing` が立たず、
+    callback が実書き込みしたうえで後段の検証が失敗しても書き込みが残っていた。
+    """
+    import contextlib as _contextlib
+
+    from mission_application.artifact import EvidenceDecision
+    from mission_persistence.fenced_commit import FencedCommitError
+
+    for callback_name in ("decide", "bind_published"):
+        writes = []
+        repository = _legacy_repository(writes=writes)
+        called = []
+
+        def decide(document, callback_name=callback_name, repository=repository, called=called):
+            called.append("decide")
+            if callback_name == "decide":
+                repository.save({"phase": "halted"})
+            return EvidenceDecision({"phase": "halted"}, (), {})
+
+        def bind_published(
+            decision, published, callback_name=callback_name, repository=repository, called=called
+        ):
+            called.append("bind_published")
+            if callback_name == "bind_published":
+                repository.save({"phase": "halted"})
+
+        with pytest.raises(FencedCommitError) as error:
+            repository.execute_effects(
+                decide,
+                effect_transaction=lambda _effects: _contextlib.nullcontext(object()),
+                bind_published=bind_published,
+            )
+        assert callback_name in called, "対象 callback が実行されていること"
+        assert error.value.code == "request-invalid"
+        assert writes == [], "callback からの書き込みが 1 件も残らないこと"
