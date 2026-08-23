@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix: isolate unsafe legacy specialist records as typed audit read errors so cross-project audits continue without copying unsafe state into snapshots (#648).
+
 ## [2.8.0] - 2026-08-19
 
 Wave 3 completes the Typed Mission Kernel migration. New sessions now start on schema v5, and every mutating command goes through the repository boundary, so no command writes session state directly. A static inventory keeps that property enforced in CI.

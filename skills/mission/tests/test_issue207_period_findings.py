@@ -310,7 +310,7 @@ def test_checkpoint_and_unselected_provenance_use_updated_at_cutoff(tmp_path: Pa
 def test_all_finding_specs_are_registry_wired_and_priority_sorted(tmp_path: Path):
     audit = _load_audit_module()
 
-    assert len(audit.FINDING_SPECS) == 23
+    assert len(audit.FINDING_SPECS) == 24
     assert all(spec.source_key for spec in audit.FINDING_SPECS.values())
     assert all(spec.source_kind for spec in audit.FINDING_SPECS.values())
     assert all(spec.item_summary for spec in audit.FINDING_SPECS.values())
@@ -407,6 +407,7 @@ def test_all_registry_aggregate_summaries_preserve_specific_meaning():
         "min_pass_rate_pct": 95.0,
     }
     expected = {
+        "unsafe-legacy-specialist-record": "isolated unsafe legacy specialist records: 2",
         "invalid-worktree-archive": "2 worktree archive bundles have an invalid pointer, generation, or manifest",
         "ungated-pass": "2 current pass sessions bypassed scoring gate",
         "forced-pass": "2 current sessions used force pass",

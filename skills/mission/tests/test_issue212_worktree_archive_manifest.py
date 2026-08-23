@@ -727,7 +727,7 @@ def test_archive_worktree_refuses_unsafe_legacy_specialist_state(run_cli, tmp_pa
     assert not list((destination / ".mission-state" / "archive").glob("worktree-*"))
 
 
-def test_audit_snapshot_refuses_unsafe_legacy_specialist_state(tmp_path):
+def test_audit_snapshot_isolates_unsafe_legacy_specialist_state(tmp_path):
     worktree, _destination = _make_completed_worktree(tmp_path)
     state_file = worktree / ".mission-state" / "sessions" / f"{SESSION_ID}.json"
     state = json.loads(state_file.read_text(encoding="utf-8"))
@@ -759,14 +759,118 @@ def test_audit_snapshot_refuses_unsafe_legacy_specialist_state(tmp_path):
         check=False,
     )
 
-    assert result.returncode == 2
+    assert result.returncode == 0, result.stderr
     assert "Traceback" not in result.stderr
     assert private_marker not in result.stdout
     assert private_marker not in result.stderr
+    assert snapshot.exists()
+    assert private_marker not in snapshot.read_text(encoding="utf-8")
+
     data = json.loads(result.stdout)
-    assert data["reason_code"] == "unsafe-legacy-specialist-record"
-    assert data["field_path"] == "/specialists_candidates/0/command"
-    assert not snapshot.exists()
+    assert data["total_sessions"] == 0
+    assert data["state_read_error_count"] == 1
+    assert data["current_finding_code_counts"] == {
+        "unsafe-legacy-specialist-record": 1,
+    }
+    assert data["findings"] == [{
+        "priority": "P1",
+        "code": "unsafe-legacy-specialist-record",
+        "summary": "isolated unsafe legacy specialist records: 1",
+    }]
+
+    document = json.loads(snapshot.read_text(encoding="utf-8"))
+    assert document["records"] == []
+    assert document["state_read_errors"] == [
+        {
+            "path": str(state_file),
+            "reason": "unsafe-legacy-specialist-record",
+        }
+    ]
+
+
+def test_audit_keeps_safe_records_when_unsafe_legacy_state_is_isolated(tmp_path):
+    worktree, _destination = _make_completed_worktree(tmp_path)
+    unsafe_file = worktree / ".mission-state" / "sessions" / f"{SESSION_ID}.json"
+    safe_state = json.loads(unsafe_file.read_text(encoding="utf-8"))
+    safe_state.update({"session_id": "session-safe", "mission_id": "safe-cafebabe"})
+    _write(
+        unsafe_file.with_name("session-safe.json"),
+        json.dumps(safe_state, indent=2) + "\n",
+    )
+
+    private_marker = str(tmp_path / "private-temp" / "legacy-audit-provider")
+    unsafe_state = json.loads(unsafe_file.read_text(encoding="utf-8"))
+    unsafe_state["specialists_candidates"] = [{
+        "provider_id": "legacy-command-provider",
+        "kind": "command",
+        "command": private_marker,
+    }]
+    unsafe_file.write_text(json.dumps(unsafe_state, indent=2), encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root", str(worktree),
+            "--json",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert private_marker not in result.stdout
+    assert private_marker not in result.stderr
+    data = json.loads(result.stdout)
+    assert data["total_sessions"] == 1
+    assert data["pass_count"] == 1
+    assert data["state_read_error_count"] == 1
+
+
+def test_privacy_audit_does_not_publish_unsafe_legacy_path_or_value(tmp_path):
+    worktree, _destination = _make_completed_worktree(tmp_path)
+    state_file = worktree / ".mission-state" / "sessions" / f"{SESSION_ID}.json"
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    private_marker = str(tmp_path / "private-temp" / "legacy-audit-provider")
+    state["specialists_candidates"] = [{
+        "provider_id": "legacy-command-provider",
+        "kind": "command",
+        "command": private_marker,
+    }]
+    state_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MISSION_AUDIT_PY),
+            "--root", str(worktree),
+            "--json",
+            "--privacy",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["state_read_error_count"] == 1
+    snapshot = (
+        worktree
+        / ".mission-state"
+        / "audit-snapshots"
+        / f"{data['snapshot_id']}.json"
+    )
+    persisted = snapshot.read_text(encoding="utf-8")
+    assert str(worktree) not in persisted
+    assert private_marker not in persisted
+    document = json.loads(persisted)
+    assert document["records"] == []
+    assert document["state_read_errors"] == [{
+        "path": f"root-1/.mission-state/sessions/{SESSION_ID}.json",
+        "reason": "unsafe-legacy-specialist-record",
+    }]
 
 
 def test_audit_snapshot_consumer_refuses_unsafe_specialist_record(

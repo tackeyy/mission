@@ -480,7 +480,10 @@ def _validate_snapshot_collections(document: dict[str, Any]) -> None:
             not isinstance(item, dict)
             or set(item) != {"path", "reason"}
             or not _is_safe_path_text(item.get("path"), absolute=not privacy)
-            or item.get("reason") != "authoritative-state-unreadable"
+            or item.get("reason") not in {
+                "authoritative-state-unreadable",
+                "unsafe-legacy-specialist-record",
+            }
         ):
             raise SnapshotError("snapshot state read error item is invalid")
     if (

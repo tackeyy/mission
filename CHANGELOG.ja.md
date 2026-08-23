@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+- fix: unsafeなlegacy specialist recordを型付きaudit read errorとして隔離し、unsafe stateをsnapshotへコピーせず横断監査を継続できるようにした（#648）。
+
 ## [2.8.0] - 2026-08-19
 
 Wave 3 の Typed Mission Kernel 移行が完了した。新規セッションは schema v5 で開始し、すべての mutating command が repository 境界を経由するため、session state を直接書き込むコマンドは存在しない。この性質は静的 inventory によって CI で強制される。
