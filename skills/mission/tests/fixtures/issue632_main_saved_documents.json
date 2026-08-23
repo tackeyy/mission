@@ -1,0 +1,659 @@
+{
+  "_path_advance": {
+    "activity_current": {
+      "iteration": 2,
+      "kind": "active",
+      "phase": "reviewing",
+      "reason": "review",
+      "started_at": "2030-08-23T01:00:00Z"
+    },
+    "activity_rollup": {
+      "activity_duration_totals_sec": {
+        "active": 126211204.0
+      },
+      "closed_segment_count": 2,
+      "observed_total_sec": 126211204.0,
+      "phase_activity_duration_totals_sec": {
+        "planning": {
+          "active": 1.0
+        },
+        "scoring": {
+          "active": 126211203.0
+        }
+      },
+      "wait_reason_totals_sec": {}
+    },
+    "activity_segments": [
+      {
+        "duration_sec": 1.0,
+        "ended_at": "2026-08-23T06:19:57Z",
+        "iteration": 1,
+        "kind": "active",
+        "phase": "planning",
+        "reason": "planning",
+        "started_at": "2026-08-23T06:19:56Z"
+      },
+      {
+        "duration_sec": 126211203.0,
+        "ended_at": "2030-08-23T01:00:00Z",
+        "iteration": 1,
+        "kind": "active",
+        "phase": "scoring",
+        "reason": "planning",
+        "started_at": "2026-08-23T06:19:57Z"
+      }
+    ],
+    "activity_unobserved_gap_reasons_sec": {},
+    "activity_unobserved_gap_sec": 0.0,
+    "agent": "cli",
+    "artifact_applicability": "not-applicable",
+    "artifact_lint_status": "skipped",
+    "assumptions_path": ".mission-state/sessions/test-assumptions.md",
+    "base_sha": null,
+    "budget_minutes": null,
+    "child_run_id": null,
+    "cli_version": "2.8.0",
+    "command_outcomes": [
+      {
+        "attempt": 1,
+        "command": "review-import",
+        "event_id": "6915f460476ce1ea9388fde093a97a84",
+        "outcome_kind": "ok",
+        "root_event_id": "6915f460476ce1ea9388fde093a97a84"
+      },
+      {
+        "attempt": 1,
+        "command": "review-import",
+        "event_id": "598be01dfa2fe744129299e036e9b4ab",
+        "outcome_kind": "ok",
+        "root_event_id": "598be01dfa2fe744129299e036e9b4ab"
+      },
+      {
+        "attempt": 1,
+        "command": "aggregate-reviews",
+        "event_id": "f7f4a7808b07004fa4bc40ff74da5719",
+        "outcome_kind": "ok",
+        "root_event_id": "f7f4a7808b07004fa4bc40ff74da5719"
+      }
+    ],
+    "complexity": "Standard",
+    "created_at_session": "2026-08-23T06:19:56Z",
+    "decisions": [],
+    "failure_ledger": {
+      "patterns": [],
+      "schema": "mission-failure-ledger/1"
+    },
+    "fencing_epoch": 1,
+    "goal_dispatch_requested": "inline",
+    "goal_dispatch_source": "default:inline",
+    "halt_reason": "",
+    "head_sha": null,
+    "host_run_id": "mission-local-2a5996036d2fbfaf29d7e843731d2136",
+    "hostname": "YusukenoMac-mini.local",
+    "issue_ref": null,
+    "issue_ref_key": null,
+    "iteration": 1,
+    "last_activity_at": "2026-08-23T06:19:57Z",
+    "last_parallel_execution": true,
+    "lease_expires_at": "2026-08-23T06:34:57Z",
+    "lease_id": "fixture-lease",
+    "logical_group_id": null,
+    "loop_active": true,
+    "max_iter": 3,
+    "mission": "Issue 500 CLI corpus",
+    "mission_id": "5c608c702eb8e4e7",
+    "owner_session_id": "test",
+    "parent_run_id": null,
+    "passes": false,
+    "phase": "reviewing",
+    "phase_durations_sec": {
+      "executing": 126211203.0,
+      "planning": 1.0
+    },
+    "phase_started_at": "2030-08-23T01:00:00Z",
+    "pid": 26483,
+    "pid_source": "agent",
+    "planned_files": [],
+    "planning_policy_version": 1,
+    "project_root": "/private/var/folders/rr/pprw74t55s57c6tjd8rmcs2m0000gn/T/tmphcon7wxr/reviews",
+    "review_evidence_refs": [
+      {
+        "digest": "sha256:a8279ef913b7767eb6a2847d83aea7284c2ced216511a1987e9b1a1b94cffba9",
+        "iteration": 1,
+        "kind": "review-input",
+        "path": ".mission-state/archive/iter-1-5c608c70-review-input-a8279ef913b7767e.json",
+        "perspective": "correctness",
+        "size": 225
+      },
+      {
+        "digest": "sha256:222bcdb00f7864e2dd20da2435531d02af5076d4a32f52e2af487d54d5294f73",
+        "iteration": 1,
+        "kind": "review-input",
+        "path": ".mission-state/archive/iter-1-5c608c70-review-input-222bcdb00f7864e2.json",
+        "perspective": "operability",
+        "size": 225
+      }
+    ],
+    "review_generation": null,
+    "review_group_id": null,
+    "review_perspective": null,
+    "review_tier": "standard",
+    "review_tier_signal_details": [],
+    "review_tier_signals": [],
+    "review_tier_source": "auto",
+    "reviewer_count": 2,
+    "reviewer_output_records": [
+      {
+        "iteration": 1,
+        "json_bytes": 225,
+        "perspective": "correctness",
+        "prose_bytes": 0,
+        "prose_ratio": 0
+      },
+      {
+        "iteration": 1,
+        "json_bytes": 225,
+        "perspective": "operability",
+        "prose_bytes": 0,
+        "prose_ratio": 0
+      }
+    ],
+    "root_run_id": "mission-local-2a5996036d2fbfaf29d7e843731d2136",
+    "schema_version": 4,
+    "score_history": [
+      {
+        "agreement_detail": {
+          "accuracy": {
+            "delta": 0.0,
+            "max": 4.5,
+            "min": 4.5
+          },
+          "completeness": {
+            "delta": 0.0,
+            "max": 4.5,
+            "min": 4.5
+          },
+          "mission_achievement": {
+            "delta": 0.0,
+            "max": 4.5,
+            "min": 4.5
+          },
+          "usability": {
+            "delta": 0.0,
+            "max": 4.5,
+            "min": 4.5
+          }
+        },
+        "artifact_digest": null,
+        "artifact_digest_status": "not-configured",
+        "composite": 4.5,
+        "findings_evidence_path": ".mission-state/archive/iter-1-5c608c70-reviews-b50bace570a83346.json",
+        "items": {
+          "accuracy": 4.5,
+          "completeness": 4.5,
+          "mission_achievement": 4.5,
+          "usability": 4.5
+        },
+        "iteration": 1,
+        "min_item": 4.5,
+        "notes": "aggregate-reviews: 2 scoring reviewer(s), 0 findings-only reviewer(s)",
+        "open_high": 0,
+        "review_agreement": 5.0,
+        "review_evidence_ref": {
+          "digest": "sha256:b50bace570a83346e710dfbedf369bcebf97f26638dca5ebd767e5f90ac9c101",
+          "generation": "b50bace570a83346",
+          "kind": "review-aggregate",
+          "path": ".mission-state/archive/iter-1-5c608c70-reviews-b50bace570a83346.json",
+          "revision_scope": {
+            "kind": "not-applicable",
+            "reason_code": "non-git"
+          }
+        },
+        "revision_scope": {
+          "kind": "not-applicable",
+          "reason_code": "non-git"
+        },
+        "score_provenance": {
+          "review_evidence_ref": {
+            "digest": "sha256:b50bace570a83346e710dfbedf369bcebf97f26638dca5ebd767e5f90ac9c101",
+            "generation": "b50bace570a83346",
+            "kind": "review-aggregate",
+            "path": ".mission-state/archive/iter-1-5c608c70-reviews-b50bace570a83346.json",
+            "revision_scope": {
+              "kind": "not-applicable",
+              "reason_code": "non-git"
+            }
+          },
+          "revision_scope": {
+            "kind": "not-applicable",
+            "reason_code": "non-git"
+          },
+          "score_source": "scoring-json",
+          "scoring_evidence_ref": {
+            "digest": "sha256:8e032d4c95930c49d3f0601d860bbe8c1f764ffb14eeb282d812e6bc46d49647",
+            "kind": "scoring-artifact",
+            "path": ".mission-state/archive/iter-1-5c608c70-scoring-8e032d4c95930c49.json"
+          }
+        },
+        "score_source": "scoring-json",
+        "scoring_evidence_path": ".mission-state/archive/iter-1-5c608c70-scoring-8e032d4c95930c49.json",
+        "timestamp": "2026-08-23T06:19:57Z"
+      }
+    ],
+    "session_id": "test",
+    "session_role": "implementer",
+    "specialist_invocations": [],
+    "specialists_candidates": [],
+    "specialists_decision": {
+      "action": "continue-core",
+      "decision": "none",
+      "lifecycle_state": "terminal",
+      "policy": "checkpoint",
+      "prompted_user": false,
+      "reason": "specialist selection has not been evaluated",
+      "reason_code": "pending-evaluation",
+      "selection_id": "sel_166ffefa65797f0f6a1daf495d033328"
+    },
+    "specialists_mode": "auto",
+    "specialists_selected": [],
+    "specialists_unavailable": [],
+    "stagnation_count": 0,
+    "started_at": "2026-08-23T06:19:56Z",
+    "subtasks": [],
+    "supersedes": [],
+    "task_profile": {},
+    "threshold": 4.0,
+    "updated_at": "2030-08-23T01:00:00Z"
+  },
+  "_path_mark_halt": {
+    "halt_category": "blocked-external",
+    "halt_reason": "external dependency down",
+    "iteration": 1,
+    "loop_active": false,
+    "mission": "issue632 property mission",
+    "passes": false,
+    "phase": "halted",
+    "phase_started_at": "2030-08-23T01:00:00Z",
+    "schema_version": 4,
+    "session_role": "implementer",
+    "terminal_outcome": "blocked_external",
+    "updated_at": "2030-08-23T01:00:00Z"
+  },
+  "_path_mark_pass": {
+    "activity_current": null,
+    "activity_rollup": {
+      "activity_duration_totals_sec": {
+        "active": 126211204.0
+      },
+      "closed_segment_count": 2,
+      "observed_total_sec": 126211204.0,
+      "phase_activity_duration_totals_sec": {
+        "planning": {
+          "active": 1.0
+        },
+        "scoring": {
+          "active": 126211203.0
+        }
+      },
+      "wait_reason_totals_sec": {}
+    },
+    "activity_segments": [
+      {
+        "duration_sec": 1.0,
+        "ended_at": "2026-08-23T06:19:57Z",
+        "iteration": 1,
+        "kind": "active",
+        "phase": "planning",
+        "reason": "planning",
+        "started_at": "2026-08-23T06:19:56Z"
+      },
+      {
+        "duration_sec": 126211203.0,
+        "ended_at": "2030-08-23T01:00:00Z",
+        "iteration": 1,
+        "kind": "active",
+        "phase": "scoring",
+        "reason": "planning",
+        "started_at": "2026-08-23T06:19:57Z"
+      }
+    ],
+    "activity_unobserved_gap_reasons_sec": {},
+    "activity_unobserved_gap_sec": 0.0,
+    "agent": "cli",
+    "artifact_applicability": "not-applicable",
+    "artifact_lint_status": "skipped",
+    "assumptions_path": ".mission-state/sessions/test-assumptions.md",
+    "base_sha": null,
+    "budget_minutes": null,
+    "child_run_id": null,
+    "cli_version": "2.8.0",
+    "command_outcomes": [
+      {
+        "attempt": 1,
+        "command": "review-import",
+        "event_id": "6915f460476ce1ea9388fde093a97a84",
+        "outcome_kind": "ok",
+        "root_event_id": "6915f460476ce1ea9388fde093a97a84"
+      },
+      {
+        "attempt": 1,
+        "command": "review-import",
+        "event_id": "598be01dfa2fe744129299e036e9b4ab",
+        "outcome_kind": "ok",
+        "root_event_id": "598be01dfa2fe744129299e036e9b4ab"
+      },
+      {
+        "attempt": 1,
+        "command": "aggregate-reviews",
+        "event_id": "f7f4a7808b07004fa4bc40ff74da5719",
+        "outcome_kind": "ok",
+        "root_event_id": "f7f4a7808b07004fa4bc40ff74da5719"
+      }
+    ],
+    "complexity": "Standard",
+    "created_at_session": "2026-08-23T06:19:56Z",
+    "decisions": [],
+    "failure_ledger": {
+      "patterns": [],
+      "schema": "mission-failure-ledger/1"
+    },
+    "fencing_epoch": 1,
+    "goal_dispatch_requested": "inline",
+    "goal_dispatch_source": "default:inline",
+    "halt_reason": "",
+    "head_sha": null,
+    "host_run_id": "mission-local-2a5996036d2fbfaf29d7e843731d2136",
+    "hostname": "YusukenoMac-mini.local",
+    "issue_ref": null,
+    "issue_ref_key": null,
+    "iteration": 1,
+    "last_activity_at": "2026-08-23T06:19:57Z",
+    "last_parallel_execution": true,
+    "lease_expires_at": "2026-08-23T06:34:57Z",
+    "lease_id": "fixture-lease",
+    "logical_group_id": null,
+    "loop_active": false,
+    "max_iter": 3,
+    "mission": "Issue 500 CLI corpus",
+    "mission_id": "5c608c702eb8e4e7",
+    "owner_session_id": "test",
+    "parent_run_id": null,
+    "passes": true,
+    "passes_forced": false,
+    "phase": "done",
+    "phase_durations_sec": {
+      "planning": 1.0,
+      "scoring": 126211203.0
+    },
+    "phase_started_at": "2030-08-23T01:00:00Z",
+    "pid": 26483,
+    "pid_source": "agent",
+    "planned_files": [],
+    "planning_policy_version": 1,
+    "project_root": "/private/var/folders/rr/pprw74t55s57c6tjd8rmcs2m0000gn/T/tmphcon7wxr/reviews",
+    "review_evidence_refs": [
+      {
+        "digest": "sha256:a8279ef913b7767eb6a2847d83aea7284c2ced216511a1987e9b1a1b94cffba9",
+        "iteration": 1,
+        "kind": "review-input",
+        "path": ".mission-state/archive/iter-1-5c608c70-review-input-a8279ef913b7767e.json",
+        "perspective": "correctness",
+        "size": 225
+      },
+      {
+        "digest": "sha256:222bcdb00f7864e2dd20da2435531d02af5076d4a32f52e2af487d54d5294f73",
+        "iteration": 1,
+        "kind": "review-input",
+        "path": ".mission-state/archive/iter-1-5c608c70-review-input-222bcdb00f7864e2.json",
+        "perspective": "operability",
+        "size": 225
+      }
+    ],
+    "review_generation": null,
+    "review_group_id": null,
+    "review_perspective": null,
+    "review_tier": "standard",
+    "review_tier_signal_details": [],
+    "review_tier_signals": [],
+    "review_tier_source": "auto",
+    "reviewer_count": 2,
+    "reviewer_output_records": [
+      {
+        "iteration": 1,
+        "json_bytes": 225,
+        "perspective": "correctness",
+        "prose_bytes": 0,
+        "prose_ratio": 0
+      },
+      {
+        "iteration": 1,
+        "json_bytes": 225,
+        "perspective": "operability",
+        "prose_bytes": 0,
+        "prose_ratio": 0
+      }
+    ],
+    "root_run_id": "mission-local-2a5996036d2fbfaf29d7e843731d2136",
+    "schema_version": 4,
+    "score_history": [
+      {
+        "agreement_detail": {
+          "accuracy": {
+            "delta": 0.0,
+            "max": 4.5,
+            "min": 4.5
+          },
+          "completeness": {
+            "delta": 0.0,
+            "max": 4.5,
+            "min": 4.5
+          },
+          "mission_achievement": {
+            "delta": 0.0,
+            "max": 4.5,
+            "min": 4.5
+          },
+          "usability": {
+            "delta": 0.0,
+            "max": 4.5,
+            "min": 4.5
+          }
+        },
+        "artifact_digest": null,
+        "artifact_digest_status": "not-configured",
+        "composite": 4.5,
+        "findings_evidence_path": ".mission-state/archive/iter-1-5c608c70-reviews-b50bace570a83346.json",
+        "items": {
+          "accuracy": 4.5,
+          "completeness": 4.5,
+          "mission_achievement": 4.5,
+          "usability": 4.5
+        },
+        "iteration": 1,
+        "min_item": 4.5,
+        "notes": "aggregate-reviews: 2 scoring reviewer(s), 0 findings-only reviewer(s)",
+        "open_high": 0,
+        "review_agreement": 5.0,
+        "review_evidence_ref": {
+          "digest": "sha256:b50bace570a83346e710dfbedf369bcebf97f26638dca5ebd767e5f90ac9c101",
+          "generation": "b50bace570a83346",
+          "kind": "review-aggregate",
+          "path": ".mission-state/archive/iter-1-5c608c70-reviews-b50bace570a83346.json",
+          "revision_scope": {
+            "kind": "not-applicable",
+            "reason_code": "non-git"
+          }
+        },
+        "revision_scope": {
+          "kind": "not-applicable",
+          "reason_code": "non-git"
+        },
+        "score_provenance": {
+          "review_evidence_ref": {
+            "digest": "sha256:b50bace570a83346e710dfbedf369bcebf97f26638dca5ebd767e5f90ac9c101",
+            "generation": "b50bace570a83346",
+            "kind": "review-aggregate",
+            "path": ".mission-state/archive/iter-1-5c608c70-reviews-b50bace570a83346.json",
+            "revision_scope": {
+              "kind": "not-applicable",
+              "reason_code": "non-git"
+            }
+          },
+          "revision_scope": {
+            "kind": "not-applicable",
+            "reason_code": "non-git"
+          },
+          "score_source": "scoring-json",
+          "scoring_evidence_ref": {
+            "digest": "sha256:8e032d4c95930c49d3f0601d860bbe8c1f764ffb14eeb282d812e6bc46d49647",
+            "kind": "scoring-artifact",
+            "path": ".mission-state/archive/iter-1-5c608c70-scoring-8e032d4c95930c49.json"
+          }
+        },
+        "score_source": "scoring-json",
+        "scoring_evidence_path": ".mission-state/archive/iter-1-5c608c70-scoring-8e032d4c95930c49.json",
+        "timestamp": "2026-08-23T06:19:57Z"
+      }
+    ],
+    "session_id": "test",
+    "session_role": "implementer",
+    "specialist_invocations": [],
+    "specialists_candidates": [],
+    "specialists_decision": {
+      "action": "continue-core",
+      "decision": "none",
+      "lifecycle_state": "terminal",
+      "policy": "checkpoint",
+      "prompted_user": false,
+      "reason": "specialist selection has not been evaluated",
+      "reason_code": "pending-evaluation",
+      "selection_id": "sel_166ffefa65797f0f6a1daf495d033328"
+    },
+    "specialists_mode": "auto",
+    "specialists_selected": [],
+    "specialists_unavailable": [],
+    "stagnation_count": 0,
+    "started_at": "2026-08-23T06:19:56Z",
+    "subtasks": [],
+    "supersedes": [],
+    "task_profile": {},
+    "terminal_outcome": "completed_pass",
+    "threshold": 4.0,
+    "updated_at": "2030-08-23T01:00:00Z"
+  },
+  "_path_permission_preflight": {
+    "halt_category": "blocked-external",
+    "halt_reason": "Phase 0 permission preflight failed before task execution: state write unavailable",
+    "iteration": 1,
+    "loop_active": false,
+    "mission": "issue632 property mission",
+    "passes": false,
+    "phase": "halted",
+    "schema_version": 4,
+    "session_role": "implementer",
+    "terminal_outcome": "blocked_external",
+    "updated_at": "2030-08-23T01:00:00Z"
+  },
+  "_path_reactivate": {
+    "activity_current": {
+      "detail": "unblocked by the provider",
+      "iteration": 2,
+      "kind": "active",
+      "phase": "planning",
+      "reason": "resumed-implementation",
+      "started_at": "2030-08-23T01:00:00Z"
+    },
+    "activity_rollup": {
+      "activity_duration_totals_sec": {},
+      "closed_segment_count": 0,
+      "observed_total_sec": 0.0,
+      "phase_activity_duration_totals_sec": {},
+      "wait_reason_totals_sec": {}
+    },
+    "activity_segments": [],
+    "halt_reason": "",
+    "iteration": 1,
+    "loop_active": true,
+    "mission": "issue632 property mission",
+    "passes": false,
+    "phase": "planning",
+    "phase_started_at": "2030-08-23T01:00:00Z",
+    "reactivation_history": [
+      {
+        "approved_by_user": true,
+        "approved_reason": "unblocked by the provider",
+        "previous_halt_category": "blocked-external",
+        "previous_halt_reason": "blocked externally",
+        "previous_phase": "halted",
+        "target_phase": "planning",
+        "timestamp": "2030-08-23T01:00:00Z"
+      }
+    ],
+    "schema_version": 4,
+    "session_role": "implementer",
+    "updated_at": "2030-08-23T01:00:00Z"
+  },
+  "_path_resume_stale": {
+    "activity_current": {
+      "iteration": 2,
+      "kind": "active",
+      "origin": "phase-default",
+      "phase": "planning",
+      "reason": "planning",
+      "started_at": "2030-08-23T01:00:00Z"
+    },
+    "activity_rollup": {
+      "activity_duration_totals_sec": {},
+      "closed_segment_count": 0,
+      "observed_total_sec": 0.0,
+      "phase_activity_duration_totals_sec": {},
+      "wait_reason_totals_sec": {}
+    },
+    "activity_segments": [],
+    "halt_reason": "",
+    "iteration": 1,
+    "loop_active": true,
+    "mission": "issue632 property mission",
+    "passes": false,
+    "phase": "planning",
+    "phase_started_at": "2030-08-23T01:00:00Z",
+    "pid": 424243,
+    "schema_version": 4,
+    "session_role": "implementer",
+    "updated_at": "2030-08-23T01:00:00Z"
+  },
+  "_path_set_fields": {
+    "custom_note": "kept",
+    "halt_reason": "",
+    "iteration": 1,
+    "loop_active": true,
+    "mission": "issue632 property mission",
+    "passes": false,
+    "phase": "executing",
+    "schema_version": 4,
+    "session_role": "implementer",
+    "updated_at": "2030-08-23T01:00:00Z"
+  },
+  "_path_supersede": {
+    "activity_anomaly_counts": {
+      "invalid-phase-terminal": 1
+    },
+    "activity_current": null,
+    "halt_category": "stale",
+    "halt_reason": "superseded by a replacement run",
+    "iteration": 1,
+    "loop_active": false,
+    "mission": "issue632 property mission",
+    "passes": false,
+    "phase": "halted",
+    "phase_durations_sec": {},
+    "phase_started_at": "2030-08-23T01:00:00Z",
+    "resume_target_phase": "executing",
+    "review_generation": 1,
+    "review_group_id": "issue632",
+    "schema_version": 4,
+    "session_role": "implementer",
+    "terminal_outcome": "stale_superseded",
+    "updated_at": "2030-08-23T00:00:00Z"
+  }
+}
