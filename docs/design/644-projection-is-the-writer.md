@@ -1,5 +1,17 @@
 # #644 transition.new_state 射影 writer 設計
 
+**第 2 版（Fable 5 異系統レビュー 1 巡反映）**
+
+| 指摘 | 第 2 版での対応 |
+|---|---|
+| H1 | §4.3 で `_executing` → `_callback_depth` の対象を `LegacyV4Repository` / `V5CompatibilityRepository` の両方と明記。 |
+| M1 | §2.4 に supersede-reviews production 経路の実コード行と、synthetic state が gate-only である確認結果を追記。 |
+| M2 | §5.1 のデフォルトを PR1（golden + projector）/ PR2（typed payload + atomic cutover）の二分割へ反転。 |
+| M3 | §4.5 に `stamp_metadata` の全 field と条件、59 leaf との実効書込み非重複を行番号付きで追記。 |
+| L1 | §3.4 の supersede-reviews に `activity_anomaly_counts` を含む activity payload を追記。 |
+| L2 | §6.1 条件 2 に corpus-backed 比較の clock 同一性前提を追記。 |
+| L3 | §5.2 に `LegacyCommandExecutionResult` の戻り値を使う application caller を追記。 |
+
 ## 1. 目的・結論
 
 Issue #644（批2-a-4）では、kernel が完成させた `transition.new_state` を
@@ -226,6 +238,16 @@ accepted transition を synthetic state から永続化しない。
 | 空 `lease_history` | B-projector | legacy passthrough に元 key があるか history が非空の場合だけ出力する。元 key がなく空 tuple の場合は追加しない。 |
 | supersede の `mission`, `iteration`, review lineage | A-input | decode 可能な active document では実 typed state から decide する。synthetic decision は gate-only に限定し、transition を repository へ渡さない。 |
 
+supersede-reviews の production 経路は、transaction 内で `repository.load()` した document を診断し
+（`skills/mission/bin/mission-state.py:16161-16177`）、active の場合に
+`real_terminalizable_state(state)` を呼ぶ（同 `:16185-16189`）。その実 state を `decide()` の入力にし、
+accepted transition を repository へ渡す（同 `:16190-16206`）。terminal / 復号不能の場合だけ
+`_mark_halt_decision_state(state)` の synthetic state で monotonic gate を評価するが、
+`transition = None` に固定される（同 `:16190-16201`）。後続は load 済みの実 document を mutation / save
+しており（同 `:16219-16248`）、synthetic state 自体を永続化する production 経路はない。
+したがって supersede-reviews の identity / review lineage 差分は production バグではなく、比較 driver 固有の
+A-input とする裁定を維持する。
+
 ## 3. typed 互換 payload と kernel reducer
 
 ### 3.1 採用案
@@ -307,7 +329,7 @@ application が別 state の transition を差し込む事故を同時に防ぐ�
 | resume-stale | `ResumeStale` | `at`, `new_pid`, activity/timing payload | pid 型、target と `resume_target_phase`、stale state を照合し、terminal field removalを含める。 |
 | set | `SetExtensionFields` | `at`, derived compatibility payload | explicit kv は既存 `fields`、`updated_at` と review-tier/goal-route 由来の互換 field は payload。goal-route の場合は `MarkHalt` command を使う。 |
 | permission observation | `MarkHalt` | `observed_at`, permission timing payload | `_PERMISSION_TRANSITION_FIELDS` の closed subset と shape を kernel で検証。probe は application の evidence であり state payload には入れない。 |
-| supersede-reviews | `MarkHalt` / `SetExtensionFields` | `at`, terminal timing payload / `supersedes` | superseded active state は実 state で `MarkHalt`。current generation は `SetExtensionFields({supersedes})`。terminal/undecodable は gate-only。 |
+| supersede-reviews | `MarkHalt` / `SetExtensionFields` | `at`, terminal timing payload、`activity_anomaly_counts` を含む activity payload / `supersedes` | superseded active state は実 state で `MarkHalt`。current generation は `SetExtensionFields({supersedes})`。terminal/undecodable は gate-only。 |
 
 ### 3.5 kernel の純粋性と #622
 
@@ -394,7 +416,8 @@ write 前後に caller が transition や mutable dict を差し替える窓が�
 
 一方、`mutation` / `finalize` の実行を囲む branch と、それらからの再入を検証するテストは削除する。
 guard は「repository に注入された I/O callback から repository entry point へ再入させない」という
-単一責務に縮小し、`_executing` は `_callback_depth` のような実態を表す名前へ変更する。
+単一責務に縮小し、`LegacyV4Repository` と `V5CompatibilityRepository` の両クラスで
+`_executing` を `_callback_depth` のような実態を表す名前へ変更する。
 
 ### 4.4 finalizer と force pass
 
@@ -419,6 +442,29 @@ pass gate の threshold / open_high / findings evidence / agreement / artifact /
 射影を唯一の writer にするとこの後置き変更は許可できない。stamp が変更する field を transaction 内で先に採取し、
 command compatibility payload へ含める。`_prepare_state` は identity 関数へ固定した後に constructor 引数ごと削除する。
 
+実コード上、`stamp_metadata` が欠損時に書く候補 field は次の 9 個である
+（`skills/mission/bin/mission-state.py:1944-1960`）。
+
+| field | 現行の書込み条件 |
+|---|---|
+| `schema_version` | key 欠損時に `SCHEMA_VERSION` を `setdefault` |
+| `project_root` | key 欠損時に解決済み cwd を `setdefault` |
+| `pid` | key 欠損時だけ `find_agent_pid()` の結果を書込む |
+| `pid_source` | `pid` 欠損 branch で `pid` と同時に書込む |
+| `hostname` | key 欠損時に hostname を `setdefault` |
+| `session_id` | key 欠損時だけ `resolve_session_id()` の結果を書込む |
+| `agent` | key 欠損時だけ `resolve_agent()` の結果を書込む |
+| `created_at_session` | key 欠損時に `iso_now()` を `setdefault` |
+| `cli_version` | key 欠損時に `MISSION_CLI_VERSION` を `setdefault` |
+
+v5 repository にはこの関数が `_prepare_state` として注入されている
+（同 `:9608-9611`）。59 leaf の A-payload / B-projector field と候補キーを比較すると、
+B-projector との交差はなく、名前上の交差は A-payload の `pid` 1 個だけである。ただし
+ResumeStale の `pid` は source に存在し、command の `new_pid` 反映後も key が存在するため、
+`stamp_metadata` の欠損時 branch は実行されない。残る 8 field は59 leafの A-payload / B-projector と
+名前上も交差しない。したがって projection を対象とする実効書込み集合では重複せず、metadata payload は
+既存 key を上書きしない set-if-absent 契約、ResumeStale の `pid` は専用 `new_pid` の authority として分離する。
+
 v5 path は `transition.new_state` から生成した bytes を直接 stage し、application が作った別 dict を stage しない。
 v4/v5 の両 repository で同じ transition と projection を使うことを回帰テストで固定する。
 
@@ -426,25 +472,26 @@ v4/v5 の両 repository で同じ transition と projection を使うことを�
 
 ### 5.1 PR 分割の裁定
 
-**経路ごとの PR 分割は採らず、#644 の 1 PR にまとめる。** ただし commit は次の Red→Green 単位に分ける。
+**デフォルトは次の二分割とする。** #632 第二段は今回より小さい変更でも異系統レビューに 8 巡を要したため、
+projector の独立欠陥を先に閉じ、typed payload と repository 契約変更のレビュー面積を分離する。
 
-1. 8 経路の `current saved == checked-in golden` と
-   `current saved == project(new_state)` の failing comparison を追加する。
-2. projector の `halt_category` / `terminal_outcome` / empty `lease_history` を修正する。
-3. `CompatibilityPayload` と command ごとの validator / reducer を追加する。
-4. mark-pass / advance / mark-halt / permission observation を移す。
-5. reactivate / resume-stale / set / supersede-reviews を移す。
-6. repository 内 decide の一段 `execute(command, ...)` に切り替え、mutation / finalizer / claims / pending を削除する。
-7. non-transition / gate-only caller を callback なしの `save(document)` へ機械的に移す。
-8. source/plugin mirror と full regression を通す。
+1. **PR1: golden + projector 修正**
+   - 8 経路の `current saved == checked-in golden` と
+     `current saved == project(new_state)` の failing comparison を追加する。
+   - projector の `halt_category` / `terminal_outcome` / empty `lease_history` を修正する。
+   - callback / repository 契約は維持したまま、projector 単独の golden を green にする。
+2. **PR2: typed payload + atomic cutover**
+   - `CompatibilityPayload` と command ごとの validator / reducer を追加する。
+   - 8 経路すべてを repository 内 decide の一段 `execute(command, ...)` へ一括切替する。
+   - mutation / finalizer / claims / pending を削除し、non-transition / gate-only caller を callback なしの
+     `save(document)` へ機械的に移す。
+   - source/plugin mirror と full regression を通す。
 
-理由は、port signature、`_pending`、v5 compatibility、projector precedence が全経路で共有されるためである。
-経路別 PR にすると中間 PR が旧 callback と新射影の二重契約を持ち、claims と pending を削除できない。
-1 PR 内の論理 commit なら、各 Red/Green の証跡を保ちながら最終 head だけを review できる。
+port signature、`_pending`、v5 compatibility は全経路で共有されるため、PR2 の内部を経路単位には分割しない。
+経路別 PR にすると中間 PR が旧 callback と新射影の二重契約を持ち、claims と pending を削除できないためである。
 
-途中で PR を分ける必要が生じた場合の唯一の安全な境界は、PR 1 を「golden tests と projector の
-独立欠陥修正（callback 維持）」、PR 2 を「typed payload と 8 経路の atomic cutover」にする二分割である。
-経路単位の段階移行は行わない。
+レビュー進捗が良好で、PR1 の projector 修正と PR2 の atomic cutover を同一 head で扱う方が明確だと
+Checker と合意できた場合に限り、1 PR 統合を最適化として選べる。その場合も上記二境界を論理 commit で維持する。
 
 ### 5.2 変更対象
 
@@ -462,6 +509,13 @@ v4/v5 の両 repository で同じ transition と projection を使うことを�
 - `skills/mission/tests/test_issue644_projection_is_the_writer.py`（新規）
 - 必要な既存 regression tests / fixtures
 
+`LegacyCommandExecutionResult` への戻り値変更に伴い、8 経路で legacy overload の返り値を現在
+`proposed` dict として使用している caller も変更対象に含める。具体的には
+`lifecycle.py:592,731,881,984,1347`、`review.py:518-524`、`runtime_guard.py:477-485` の各使用箇所で、
+保存 projection は result の defensive copy、decision は result の typed field から取得する。
+Batch 3 未移行の `lifecycle.py:326,342,1016` はこの result の caller にはせず、§4.1 のとおり完成 document を
+`save(document)` する経路へ移す。
+
 配布 mirror は同じ相対 path を `plugins/mission/skills/mission/**` に同期する。
 設計時点で上記 9 production file はすべて source/plugin byte-identical である。
 
@@ -472,7 +526,8 @@ v4/v5 の両 repository で同じ transition と projection を使うことを�
 1. 8 driver それぞれで現行保存 document が checked-in golden と一致する。
 2. 8 driver それぞれで `project_legacy_document(decision.transition.new_state)` が同じ golden と
    全 key/value 一致する。corpus-backed 2 経路の環境由来 field は同一実行内の current-vs-projection を比較し、
-   fixture placeholder へは逃がさない。
+   fixture placeholder へは逃がさない。この比較では command の `at` 値と、現行 mutation 内で呼ばれる clock が
+   同一結果を返すよう固定し、clock の差を projection 差分として数えない。
 3. canonical JSON bytes も一致する。
 4. 59 leaf のうち一つを改変した合成 fixture が必ず失敗する。
 5. 元 document に key がなくても non-None の `halt_category` / `terminal_outcome` を挿入する。
