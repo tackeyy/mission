@@ -454,17 +454,17 @@ class LegacyV4Repository:
             self._guarded_call(self._write_state, state, administrative=True)
         else:
             self._guarded_call(self._write_state, state)
-        callback = {
-            None: None,
-            "add": self._add_to_aggregate,
-            "remove": self._remove_from_aggregate,
-        }.get(aggregate_action)
         if aggregate_action not in {None, "add", "remove"}:
             raise ValueError("unknown aggregate action")
-        if callback is None:
+        if aggregate_action is None:
             return
+        # attribute を guard の第 1 引数へ直接渡す（dict 収集の alias を作ると
+        # 静的な境界検査が per-variable の追跡を要求されるため。Sol 7 巡目）。
         try:
-            self._guarded_call(callback)
+            if aggregate_action == "add":
+                self._guarded_call(self._add_to_aggregate)
+            else:
+                self._guarded_call(self._remove_from_aggregate)
         except Exception as exc:
             raise AggregateIndexError(str(exc)) from exc
 
@@ -724,16 +724,14 @@ class V5CompatibilityRepository:
         self._admitted = None
         if self._lease_committed is not None:
             self._guarded_call(self._lease_committed, admitted.pending_lease, proposed)
-        callback = {
-            None: None,
-            "add": self._add_to_aggregate,
-            "remove": self._remove_from_aggregate,
-        }.get(aggregate_action)
         if aggregate_action not in {None, "add", "remove"}:
             raise ValueError("unknown aggregate action")
-        if callback is not None:
+        if aggregate_action is not None:
             try:
-                self._guarded_call(callback)
+                if aggregate_action == "add":
+                    self._guarded_call(self._add_to_aggregate)
+                else:
+                    self._guarded_call(self._remove_from_aggregate)
             except Exception as exc:
                 raise AggregateIndexError(str(exc)) from exc
 

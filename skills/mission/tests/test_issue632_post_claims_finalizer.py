@@ -1790,10 +1790,10 @@ def _unguarded_injected_uses(source, class_name, guarded_names):
     """Return `self.<injected>` uses that are neither guarded nor a None check.
 
     許可するのは ①**`self.`**`_guarded_call` / `_guarded_context` の第 1 引数
-    ②`is not None` 等の存在チェック ③`__init__` での代入
-    ④dict 収集（**同じ関数が `self._guarded_call(<変数>)` で起動する場合のみ**）の 4 つ。
-    guard helper の receiver が `self` 以外（`other._guarded_call(...)`）は許可しない
-    （Sol 6 巡目 Medium）。
+    ②`is not None` 等の存在チェック ③`__init__` での代入 の 3 つ**だけ**。
+    dict 収集・alias・keyword 渡し・他 receiver はすべて検出する
+    （per-variable 追跡が要る許可規則は緩みの温床になるため、実装側を
+    「attribute を guard の第 1 引数へ直接渡す」形に揃えた。Sol 6・7 巡目）。
     """
     tree = ast.parse(source)
     target = next(
@@ -1817,7 +1817,6 @@ def _unguarded_injected_uses(source, class_name, guarded_names):
             for child in ast.iter_child_nodes(node):
                 parents[id(child)] = node
         guard_arguments = set()
-        invokes_guarded_variable = False
         for node in ast.walk(function):
             if not isinstance(node, ast.Call):
                 continue
@@ -1830,8 +1829,6 @@ def _unguarded_injected_uses(source, class_name, guarded_names):
             ):
                 if node.args:
                     guard_arguments.add(id(node.args[0]))
-                if node.args and isinstance(node.args[0], ast.Name):
-                    invokes_guarded_variable = True
         for node in ast.walk(function):
             if not isinstance(node, ast.Attribute):
                 continue
@@ -1846,10 +1843,6 @@ def _unguarded_injected_uses(source, class_name, guarded_names):
                 isinstance(op, (ast.Is, ast.IsNot)) for op in parent.ops
             ):
                 continue  # `is not None` の存在チェック
-            if isinstance(parent, ast.Dict) and invokes_guarded_variable:
-                # dict 収集は、同じ関数が self._guarded_call(<変数>) で
-                # 起動する場合に限って許可する。
-                continue
             offenders.append("%s:L%d %s" % (function.name, node.lineno, node.attr))
     return offenders
 
@@ -1891,6 +1884,8 @@ def test_injected_callable_guard_detects_unguarded_references(body):
     (
         # dict alias: dict に収集するが self._guarded_call(<変数>) を呼ばない
         "        handlers = {\"add\": self._write_state}\n        handlers[\"add\"]({})\n",
+        # 無関係な guarded_call が同じ関数にあっても dict 収集は許可されない（Sol 7 巡目）
+        "        handlers = {\"add\": self._write_state}\n        self._guarded_call(noop)\n        handlers[\"add\"]({})\n",
         # keyword helper 渡し
         "        self.invoke(callback=self._write_state)\n",
         # receiver が self でない guard helper
