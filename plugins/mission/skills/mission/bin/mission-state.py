@@ -73,6 +73,7 @@ from mission_common import (  # noqa: E402
     opaque_token,
     derive_terminal_outcome,
     duration_sec as _duration_sec,
+    is_supersede_marked,
     parse_iso_datetime,
     state_identity,
     summarize_pass_rate_population,

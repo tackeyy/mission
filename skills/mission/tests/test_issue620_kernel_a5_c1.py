@@ -35,10 +35,18 @@ class _RecordingRepository:
     def load(self):
         return copy.deepcopy(self._before)
 
-    def execute(self, state, mutation, transition=None):
+    def execute(self, state, mutation, transition=None, finalize=None):
+        from mission_persistence.legacy_v4 import _apply_transition_claims
+
         self.executed_transition = transition
         proposed = copy.deepcopy(state)
         mutation(proposed)
+        # 批2-a-3 (#632): 実 repository は mutation の後に claims を適用する。
+        # double が適用しないと「writer を消した field」が落ちて偽陽性になる。
+        if transition is not None:
+            _apply_transition_claims(transition, proposed)
+        if finalize is not None:
+            finalize(proposed)
         self._executed = copy.deepcopy(proposed)
         return proposed
 
