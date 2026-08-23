@@ -214,6 +214,29 @@ class LegacyV4Repository:
                 "%s is not allowed while a decision is being executed" % operation,
             )
 
+    @contextlib.contextmanager
+    def _guarded_effect_transaction(self, factory, effects):
+        """Hold the re-entrancy guard across the effect manager's own callbacks.
+
+        factory / ``__enter__`` / ``__exit__`` は呼び出し側が渡す外部 callback で
+        あり、そこから persistence へ再入すると検証前の書き込みを作れる。本文
+        （内部の ``save``）はガードの外で実行しなければならないため、enter と exit
+        だけを個別に囲む（#632 の Sol 指摘）。
+        """
+        with self._callback_guard():
+            manager = factory(effects)
+            entered = manager.__enter__()
+        try:
+            yield entered
+        except BaseException as error:
+            with self._callback_guard():
+                suppressed = manager.__exit__(type(error), error, error.__traceback__)
+            if not suppressed:
+                raise
+        else:
+            with self._callback_guard():
+                manager.__exit__(None, None, None)
+
     def load(self) -> dict:
         if self._format_guard is not None:
             self._format_guard()
@@ -367,7 +390,7 @@ class LegacyV4Repository:
                     for blob in request.blobs.blobs
                 )
                 closed = self.validate_effects(effects)
-                with self._effect_transaction(closed):
+                with self._guarded_effect_transaction(self._effect_transaction, closed):
                     self.save(proposed)
             else:
                 self.save(proposed)
@@ -384,13 +407,10 @@ class LegacyV4Repository:
         administrative: bool = False,
         aggregate_action: str | None = None,
     ) -> None:
+        self._reject_reentrant_entry("save")
         if self._format_guard is not None:
-            self._format_guard()
-        if self._executing:
-            raise FencedCommitError(
-                "request-invalid",
-                "save is not allowed while a decision is being executed",
-            )
+            with self._callback_guard():
+                self._format_guard()
         if self._pending:
             pending = next((item for item in self._pending if item.document is state), None)
             if pending is None:
@@ -445,6 +465,7 @@ class LegacyV4Repository:
         context therefore sees no request after a rejected lease or decision,
         and rolls published files back if binding or state save fails.
         """
+        self._reject_reentrant_entry("execute_effects")
         with self.transaction():
             current = self.load()
             with self._callback_guard():
@@ -452,7 +473,7 @@ class LegacyV4Repository:
             if not isinstance(decision, EvidenceDecision) or not isinstance(decision.state, dict):
                 raise ValueError("effect-decision-invalid")
             effects = self.validate_effects(decision.effects)
-            with effect_transaction(effects) as published:
+            with self._guarded_effect_transaction(effect_transaction, effects) as published:
                 if bind_published is not None:
                     with self._callback_guard():
                         bind_published(decision, published)
@@ -634,17 +655,15 @@ class V5CompatibilityRepository:
         aggregate_action: str | None = None,
     ) -> None:
         del backup, administrative
+        self._reject_reentrant_entry("save")
         if self._format_guard is not None:
-            self._format_guard()
-        if self._executing:
-            raise FencedCommitError(
-                "request-invalid",
-                "save is not allowed while a decision is being executed",
-            )
+            with self._callback_guard():
+                self._format_guard()
         pending = next((item for item in self._pending if item.document is state), None)
         if self._pending and pending is None:
             raise FencedCommitError("transition-divergence", "save target is not a decided document")
-        proposed = self._prepare_state(copy.deepcopy(state))
+        with self._callback_guard():
+            proposed = self._prepare_state(copy.deepcopy(state))
         if pending is not None:
             _verify_transition_claims(proposed, pending.claims, "save diverges from the decided transition")
         if self._replayed is not None:

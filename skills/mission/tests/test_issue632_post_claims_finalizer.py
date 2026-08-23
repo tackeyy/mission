@@ -1592,3 +1592,161 @@ def test_execute_effects_callbacks_cannot_save_before_verification(tmp_path):
         assert callback_name in called, "対象 callback が実行されていること"
         assert error.value.code == "request-invalid"
         assert writes == [], "callback からの書き込みが 1 件も残らないこと"
+
+
+# --- 外部 callback 境界の網羅（Sol high 3 巡目の High 2 件・実再現あり） ---
+
+
+def _effect_manager(on_enter=None, on_exit=None):
+    import contextlib as _contextlib
+
+    class _Manager:
+        def __enter__(self):
+            if on_enter is not None:
+                on_enter()
+            return object()
+
+        def __exit__(self, *_exc):
+            if on_exit is not None:
+                on_exit()
+            return False
+
+    del _contextlib
+    return _Manager()
+
+
+@pytest.mark.parametrize("hook", ("factory", "enter", "exit"))
+def test_effect_transaction_callbacks_cannot_save(tmp_path, hook):
+    """effect transaction の factory / __enter__ / __exit__ からの保存を拒否すること。
+
+    本文（内部の `save`）はガードの外で動く必要があるため、enter と exit だけを
+    個別に囲む実装になっている。3 つの hook すべてを固定する。
+    """
+    from mission_application.artifact import EvidenceDecision
+    from mission_persistence.fenced_commit import FencedCommitError
+
+    writes = []
+    repository = _legacy_repository(writes=writes)
+    called = []
+
+    def intrude(label):
+        called.append(label)
+        repository.save({"phase": "halted"})
+
+    def factory(effects):
+        if hook == "factory":
+            intrude("factory")
+        return _effect_manager(
+            on_enter=(lambda: intrude("enter")) if hook == "enter" else None,
+            on_exit=(lambda: intrude("exit")) if hook == "exit" else None,
+        )
+
+    with pytest.raises(FencedCommitError) as error:
+        repository.execute_effects(
+            lambda document: EvidenceDecision({"phase": "halted"}, (), {}),
+            effect_transaction=factory,
+            bind_published=None,
+        )
+    assert called == [hook], "対象 hook が 1 回だけ走ったこと"
+    assert error.value.code == "request-invalid"
+    # factory / __enter__ は正当な内部 save より前に走るので書き込みはゼロ。
+    # __exit__ は正当な save の後なので、その 1 件だけが残り侵入は拒否される。
+    assert writes == ([{"phase": "halted"}] if hook == "exit" else [])
+
+
+def test_reentrant_execute_effects_from_finalize_is_rejected(tmp_path):
+    """finalize から `execute_effects` を再入すると副作用の前に拒否されること。"""
+    from mission_application.artifact import EvidenceDecision
+    from mission_persistence.fenced_commit import FencedCommitError
+
+    writes = []
+    repository = _legacy_repository(writes=writes)
+    side_effects = []
+
+    def finalize(document):
+        repository.execute_effects(
+            lambda _document: EvidenceDecision({"phase": "halted"}, (), {}),
+            effect_transaction=lambda effects: _effect_manager(
+                on_enter=lambda: side_effects.append("enter")
+            ),
+        )
+
+    with repository.transaction():
+        with pytest.raises(FencedCommitError) as error:
+            repository.execute(
+                {"phase": "planning", "loop_active": True},
+                lambda document: None,
+                _halt_transition(tmp_path),
+                finalize,
+            )
+    assert error.value.code == "request-invalid"
+    assert side_effects == [], "context manager の副作用も走らないこと"
+    assert writes == []
+
+
+def _v5_repository_with_fake_backend(*, prepare_state=None):
+    from mission_persistence.legacy_v4 import V5CompatibilityRepository
+
+    class _Backend:
+        def __init__(self):
+            self.execute_calls = []
+
+        def execute(self, request):
+            self.execute_calls.append(request)
+            return object()
+
+    backend = _Backend()
+    repository = V5CompatibilityRepository(
+        repository=backend,
+        session_id="issue632",
+        lease_owner_session_id="issue632",
+        presented_lease_id=None,
+        prepare_state=prepare_state,
+    )
+    return repository, backend
+
+
+def test_v5_prepare_state_cannot_reenter_typed_execution(tmp_path):
+    """V5 の `_prepare_state` から typed execution へ再入できないこと。"""
+    from mission_persistence.fenced_commit import ExecutionRequest, FencedCommitError
+
+    holder = {}
+
+    def prepare_state(document):
+        holder["called"] = True
+        holder["repository"].execute(object.__new__(ExecutionRequest))
+        return document
+
+    repository, backend = _v5_repository_with_fake_backend(prepare_state=prepare_state)
+    holder["repository"] = repository
+    proposed = repository.execute(
+        {"phase": "planning", "loop_active": True},
+        lambda document: None,
+        _halt_transition(tmp_path),
+    )
+    repository._replayed = object()
+    with pytest.raises(FencedCommitError) as error:
+        repository.save(proposed)
+    assert holder.get("called"), "prepare_state が実行されたこと"
+    assert error.value.code == "request-invalid"
+    assert backend.execute_calls == [], "下位 repository が 1 度も呼ばれないこと"
+
+
+def test_v5_reentrant_typed_request_from_finalize_is_rejected(tmp_path):
+    """V5 でも finalize からの typed request 再入を拒否すること（V4 と同じ契約）。"""
+    from mission_persistence.fenced_commit import ExecutionRequest, FencedCommitError
+
+    repository, backend = _v5_repository_with_fake_backend()
+
+    def finalize(document):
+        repository.execute(object.__new__(ExecutionRequest))
+
+    with pytest.raises(FencedCommitError) as error:
+        repository.execute(
+            {"phase": "planning", "loop_active": True},
+            lambda document: None,
+            _halt_transition(tmp_path),
+            finalize,
+        )
+    assert error.value.code == "request-invalid"
+    assert backend.execute_calls == []
