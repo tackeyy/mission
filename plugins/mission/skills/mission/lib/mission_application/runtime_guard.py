@@ -15,6 +15,7 @@ from activity_segments import (
     WAIT_KINDS,
 )
 
+from .lifecycle import monotonic_halt_decision
 from .ports import LegacyMissionRepository
 
 
@@ -137,6 +138,7 @@ class PermissionObservationResult:
     halt_reason: str | None = None
     halt_category: str | None = None
     terminal_outcome: str | None = None
+    decision: object | None = None
 
 
 def _bounded_token(value: object, *, maximum: int = 256) -> bool:
@@ -412,6 +414,16 @@ def record_permission_observation(
     reason = _permission_reason(failed)
     with repository.transaction():
         state = repository.load()
+        # 批1-d (#620): 固定の fail-closed 帰結 (blocked-external halt) も kernel
+        # decision を gate とし、#630 の claims 検証つき execute を通す。他 A5
+        # observation writer と同じく synthetic monotonic view で decidable を
+        # 維持する（劣化 doc でも preflight halt を書けなくしない）。
+        decision = monotonic_halt_decision(state, "blocked-external", reason)
+        if not decision.accepted:
+            assert decision.rejection is not None
+            raise ValueError(
+                "permission-halt-rejected: " + decision.rejection.code
+            )
 
         def mutate(proposed: dict) -> None:
             proposed["halt_reason"] = reason
@@ -426,7 +438,7 @@ def record_permission_observation(
             proposed["terminal_outcome"] = "blocked_external"
             proposed["updated_at"] = request.observed_at
 
-        proposed = repository.execute(state, mutate)
+        proposed = repository.execute(state, mutate, decision.transition)
         repository.save(proposed)
     return PermissionObservationResult(
         False,
@@ -435,4 +447,5 @@ def record_permission_observation(
         halt_reason=reason,
         halt_category="blocked-external",
         terminal_outcome="blocked_external",
+        decision=decision,
     )
