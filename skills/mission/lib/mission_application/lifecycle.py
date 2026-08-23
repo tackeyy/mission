@@ -289,6 +289,19 @@ class SetFieldsResult:
     aggregate_error: str | None
 
 
+@dataclass(frozen=True)
+class _GoalRoutePlan:
+    decision: Decision
+    verdict: dict
+
+
+@dataclass(frozen=True)
+class _SetFieldsPlan:
+    document: dict
+    warnings: tuple[str, ...]
+    route: _GoalRoutePlan | None
+
+
 def activity_start(repository: LegacyMissionRepository, request: ActivityStartRequest) -> ActivityResult:
     with repository.transaction():
         state = repository.load()
@@ -1153,6 +1166,10 @@ def set_fields(
                 MarkHalt(
                     HaltCategory.ROUTED_GOAL,
                     "routed-to-goal (#330: Simple + リスクシグナルなし)",
+                    superseded=is_supersede_marked(
+                        proposed.get("resolution_status"),
+                        "routed-to-goal (#330: Simple + リスクシグナルなし)",
+                    ),
                 ),
             )
             if not decision.accepted:
@@ -1280,9 +1297,26 @@ def set_fields(
             services.ensure_phase_timing(proposed, request.at)
             proposed["updated_at"] = request.at
 
-        proposed = repository.execute(state, mutate, set_decision.transition)
-        routed_verdict = routed_verdict_holder[0]
-        decision = decision_holder[0] or set_decision
+        # Build the compatibility projection exactly once.  The reducer calls
+        # injected services while forming this shadow, never from execute's
+        # mutation callback; duplicate key ordering therefore remains intact.
+        shadow = copy.deepcopy(state)
+        mutate(shadow)
+        route = (
+            _GoalRoutePlan(decision_holder[0], routed_verdict_holder[0])
+            if decision_holder[0] is not None
+            else None
+        )
+        plan = _SetFieldsPlan(shadow, tuple(warnings), route)
+
+        def apply_plan(proposed: dict) -> None:
+            proposed.clear()
+            proposed.update(plan.document)
+
+        transition = plan.route.decision.transition if plan.route is not None else set_decision.transition
+        proposed = repository.execute(state, apply_plan, transition)
+        routed_verdict = plan.route.verdict if plan.route is not None else None
+        decision = plan.route.decision if plan.route is not None else set_decision
         aggregate_action = (
             "remove"
             if routed_verdict is not None
@@ -1305,6 +1339,6 @@ def set_fields(
     return SetFieldsResult(
         routed_verdict,
         decision,
-        tuple(warnings),
+        plan.warnings,
         aggregate_error,
     )

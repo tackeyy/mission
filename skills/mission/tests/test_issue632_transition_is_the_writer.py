@@ -48,10 +48,16 @@ class _RecordingRepository:
     def load(self):
         return copy.deepcopy(self.state)
 
-    def execute(self, state, mutation, transition=None):
-        self.execute_calls.append((state, mutation, transition))
+    def execute(self, state, mutation, transition=None, finalize=None):
+        from mission_persistence.legacy_v4 import _apply_transition_claims
+
+        self.execute_calls.append((state, mutation, transition, finalize))
         proposed = copy.deepcopy(state)
         mutation(proposed)
+        if transition is not None:
+            _apply_transition_claims(transition, proposed)
+        if finalize is not None:
+            finalize(proposed)
         return proposed
 
     def save(self, state, **_kwargs):
