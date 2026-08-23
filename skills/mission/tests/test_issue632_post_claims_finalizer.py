@@ -1786,52 +1786,14 @@ def test_load_path_format_guard_cannot_save(tmp_path):
     assert writes == []
 
 
-def _unguarded_injected_references(source, class_name, guarded_names):
-    """Return `self.<injected>` references that do not go through the guards.
-
-    呼び出し（`self._x(...)`）だけでなく、**値として取り出す**参照
-    （`callback = self._x` / `helper(self._x)`）も検出する。alias 経由や helper
-    渡しで境界を迂回できるため（#632 / Sol 5 巡目 Medium）。
-    `async def` も走査対象に含める。
-
-    **検出できないもの（限界の明示）**: 暗黙の特殊メソッド呼び出し
-    （`bool(x)` が呼ぶ `__bool__` 等）。これは静的には辿れないため、
-    実装側で「特殊メソッドの評価もガード内で済ませる」ことで対処し、
-    その回帰は behavioural テストで固定する。
-    """
-    tree = ast.parse(source)
-    target = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ClassDef) and node.name == class_name
-    )
-    helpers = {"_guarded_call", "_guarded_context", "_callback_guard"}
-    offenders = []
-    functions = [
-        node
-        for node in ast.walk(target)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    ]
-    for function in functions:
-        if function.name in helpers:
-            continue
-        for node in ast.walk(function):
-            if not isinstance(node, ast.Attribute):
-                continue
-            if not (isinstance(node.value, ast.Name) and node.value.id == "self"):
-                continue
-            if node.attr not in guarded_names:
-                continue
-            offenders.append("%s:L%d %s" % (function.name, node.lineno, node.attr))
-    return offenders
-
-
 def _unguarded_injected_uses(source, class_name, guarded_names):
     """Return `self.<injected>` uses that are neither guarded nor a None check.
 
-    許可するのは ①ガード helper（`_guarded_call` / `_guarded_context`）の第 1 引数
-    ②`is not None` 等の存在チェック ③`__init__` での代入 の 3 つだけ。
-    それ以外（直接呼び出し・alias・helper 渡し）は境界の迂回として検出する。
+    許可するのは ①**`self.`**`_guarded_call` / `_guarded_context` の第 1 引数
+    ②`is not None` 等の存在チェック ③`__init__` での代入
+    ④dict 収集（**同じ関数が `self._guarded_call(<変数>)` で起動する場合のみ**）の 4 つ。
+    guard helper の receiver が `self` 以外（`other._guarded_call(...)`）は許可しない
+    （Sol 6 巡目 Medium）。
     """
     tree = ast.parse(source)
     target = next(
@@ -1839,29 +1801,37 @@ def _unguarded_injected_uses(source, class_name, guarded_names):
         for node in ast.walk(tree)
         if isinstance(node, ast.ClassDef) and node.name == class_name
     )
-    parents = {}
-    for node in ast.walk(target):
-        for child in ast.iter_child_nodes(node):
-            parents[id(child)] = node
-
     helpers = {"_guarded_call", "_guarded_context", "_callback_guard"}
-    guard_arguments = set()
-    for node in ast.walk(target):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        if isinstance(func, ast.Attribute) and func.attr in helpers and node.args:
-            guard_arguments.add(id(node.args[0]))
 
-    offenders = []
     functions = [
         node
         for node in ast.walk(target)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     ]
+    offenders = []
     for function in functions:
         if function.name in {"__init__"} | helpers:
             continue
+        parents = {}
+        for node in ast.walk(function):
+            for child in ast.iter_child_nodes(node):
+                parents[id(child)] = node
+        guard_arguments = set()
+        invokes_guarded_variable = False
+        for node in ast.walk(function):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if (
+                isinstance(func, ast.Attribute)
+                and func.attr in helpers
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "self"  # receiver は self に限る
+            ):
+                if node.args:
+                    guard_arguments.add(id(node.args[0]))
+                if node.args and isinstance(node.args[0], ast.Name):
+                    invokes_guarded_variable = True
         for node in ast.walk(function):
             if not isinstance(node, ast.Attribute):
                 continue
@@ -1876,11 +1846,28 @@ def _unguarded_injected_uses(source, class_name, guarded_names):
                 isinstance(op, (ast.Is, ast.IsNot)) for op in parent.ops
             ):
                 continue  # `is not None` の存在チェック
-            if isinstance(parent, ast.Dict) or isinstance(parent, ast.keyword):
-                # aggregate callback の dict 収集は直後に _guarded_call へ渡す。
+            if isinstance(parent, ast.Dict) and invokes_guarded_variable:
+                # dict 収集は、同じ関数が self._guarded_call(<変数>) で
+                # 起動する場合に限って許可する。
                 continue
             offenders.append("%s:L%d %s" % (function.name, node.lineno, node.attr))
     return offenders
+
+
+@pytest.mark.parametrize(
+    "class_name", ("LegacyV4Repository", "V5CompatibilityRepository")
+)
+def test_injected_callables_are_only_referenced_through_the_guard(class_name):
+    """**実ソース**の注入 callable 参照がすべてガード経由であること。
+
+    合成コードの検出力テストだけでは実装の退行を検出できない（Sol 6 巡目で
+    この配線が欠けていたことが検出された）。
+    """
+    from mission_persistence import legacy_v4
+
+    source = Path(legacy_v4.__file__).read_text(encoding="utf-8")
+    guarded = set(getattr(legacy_v4, class_name).GUARDED_INJECTED_CALLABLES)
+    assert _unguarded_injected_uses(source, class_name, guarded) == []
 
 
 @pytest.mark.parametrize(
@@ -1894,6 +1881,25 @@ def _unguarded_injected_uses(source, class_name, guarded_names):
 def test_injected_callable_guard_detects_unguarded_references(body):
     """検出力の実証: 直接呼び出し・alias・helper 渡しをいずれも検出すること。"""
     source = "class LegacyV4Repository:\n    def save(self):\n" + body
+    assert _unguarded_injected_uses(
+        source, "LegacyV4Repository", {"_write_state"}
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        # dict alias: dict に収集するが self._guarded_call(<変数>) を呼ばない
+        "        handlers = {\"add\": self._write_state}\n        handlers[\"add\"]({})\n",
+        # keyword helper 渡し
+        "        self.invoke(callback=self._write_state)\n",
+        # receiver が self でない guard helper
+        "        other._guarded_call(self._write_state)\n",
+    ),
+)
+def test_injected_callable_guard_detects_indirect_bypasses(body):
+    """Sol 6 巡目の反例 3 種（dict alias / keyword / 他 receiver）を検出すること。"""
+    source = "class LegacyV4Repository:\n    def save(self, other):\n" + body
     assert _unguarded_injected_uses(
         source, "LegacyV4Repository", {"_write_state"}
     )
