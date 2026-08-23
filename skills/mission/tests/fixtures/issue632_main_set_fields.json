@@ -74,7 +74,7 @@
     "routed": {
       "complexity": "Simple",
       "goal_dispatch_effective": "inline",
-      "goal_dispatch_host": "claude-code",
+      "goal_dispatch_host": "<environment-derived>",
       "goal_dispatch_requested": "inline",
       "goal_dispatch_source": "default:inline",
       "guidance": "",

@@ -1062,4 +1062,10 @@ def test_set_fields_matches_main_for_calls_warnings_and_saves(tmp_path, label, k
         for saved, kwargs in golden["saves"]
     ]
     assert json.loads(json.dumps(normalized, default=str)) == expected
-    assert json.loads(json.dumps(result.routed_verdict, default=str)) == golden["routed"]
+    routed = json.loads(json.dumps(result.routed_verdict, default=str))
+    if isinstance(routed, dict):
+        routed = _strip_environment(routed)
+    expected_routed = golden["routed"]
+    if isinstance(expected_routed, dict):
+        expected_routed = _strip_environment(expected_routed)
+    assert routed == expected_routed
