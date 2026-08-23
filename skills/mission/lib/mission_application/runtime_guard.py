@@ -15,7 +15,16 @@ from activity_segments import (
     WAIT_KINDS,
 )
 
-from .lifecycle import monotonic_halt_decision
+from .lifecycle import (
+    TERMINALIZABLE_ACTIVE,
+    _mark_halt_decision_state,
+    diagnose_terminalizable_state,
+    real_terminalizable_state,
+)
+from mission_common import is_supersede_marked
+from mission_kernel.commands import MarkHalt
+from mission_kernel.model import HaltCategory
+from mission_kernel.transitions import decide, transition_control_claim_bounds
 from .ports import LegacyMissionRepository
 
 
@@ -139,6 +148,15 @@ class PermissionObservationResult:
     halt_category: str | None = None
     terminal_outcome: str | None = None
     decision: object | None = None
+    # 批2-a-3 (#632): claims の根拠に実 state を使えたか。"undecodable" は
+    # 想定外の劣化であり、呼び出し元が観測できるようにする（state には書かない）。
+    claim_source: str | None = None
+
+
+class PermissionHaltRejected(RuntimeError):
+    def __init__(self, code: str):
+        super().__init__("permission-halt-rejected: " + code)
+        self.code = code
 
 
 def _bounded_token(value: object, *, maximum: int = 256) -> bool:
@@ -418,7 +436,16 @@ def record_permission_observation(
         # decision を gate とし、#630 の claims 検証つき execute を通す。他 A5
         # observation writer と同じく synthetic monotonic view で decidable を
         # 維持する（劣化 doc でも preflight halt を書けなくしない）。
-        decision = monotonic_halt_decision(state, "blocked-external", reason)
+        diagnosis = diagnose_terminalizable_state(state)
+        real_state = real_terminalizable_state(state) if diagnosis == TERMINALIZABLE_ACTIVE else None
+        decision = decide(
+            real_state if real_state is not None else _mark_halt_decision_state(state),
+            MarkHalt(
+                HaltCategory.BLOCKED_EXTERNAL,
+                reason,
+                superseded=is_supersede_marked(state.get("resolution_status"), reason),
+            ),
+        )
         if not decision.accepted:
             # kernel invariant 違反は呼び出し元の ValueError 吸収（運用系の
             # 縮退経路）に混ぜず、fail-open を防ぐ（批2-a-2 #631）
@@ -427,29 +454,35 @@ def record_permission_observation(
                 if decision.rejection is not None
                 else "rejection-unclosed"
             )
-            raise RuntimeError("permission-halt-rejected: " + code)
+            raise PermissionHaltRejected(code)
+        transition = decision.transition if real_state is not None else None
+        claimed = set(transition_control_claim_bounds(transition)) if transition is not None else set()
 
         def mutate(proposed: dict) -> None:
             proposed["halt_reason"] = reason
-            proposed["halt_category"] = "blocked-external"
-            proposed["loop_active"] = False
+            if "halt_category" not in claimed:
+                proposed["halt_category"] = "blocked-external"
+            if "loop_active" not in claimed:
+                proposed["loop_active"] = False
             if transition_phase is None:
                 proposed["phase"] = "halted"
             else:
                 _closed_permission_transition(
                     proposed, transition_phase, request.observed_at
                 )
-            proposed["terminal_outcome"] = "blocked_external"
+            if "terminal_outcome" not in claimed:
+                proposed["terminal_outcome"] = "blocked_external"
             proposed["updated_at"] = request.observed_at
 
-        proposed = repository.execute(state, mutate, decision.transition)
+        proposed = repository.execute(state, mutate, transition)
         repository.save(proposed)
     return PermissionObservationResult(
         False,
         True,
         probes,
         halt_reason=reason,
-        halt_category="blocked-external",
-        terminal_outcome="blocked_external",
+        halt_category=proposed.get("halt_category"),
+        terminal_outcome=proposed.get("terminal_outcome"),
         decision=decision,
+        claim_source=diagnosis,
     )

@@ -8,6 +8,8 @@ import re
 import weakref
 from typing import Any, Callable, Optional, Type
 
+from mission_common import terminal_outcome_for_halt
+
 from .commands import (
     GENERIC_SET_DEDICATED_FIELDS,
     GENERIC_SET_FROZEN_FIELDS,
@@ -202,25 +204,6 @@ def _advance(state: MissionState, raw_command: object) -> Transition:
     )
 
 
-def _halt_outcome(category: HaltCategory, role: SessionRole) -> TerminalOutcome:
-    if category is HaltCategory.EVIDENCE_SUBMITTED:
-        return (
-            TerminalOutcome.COMPLETED_EVIDENCE
-            if role in {SessionRole.CHECKER, SessionRole.PLANNING, SessionRole.ANALYZE}
-            else TerminalOutcome.INCOMPLETE
-        )
-    return {
-        HaltCategory.PARTIAL_DONE: TerminalOutcome.INCOMPLETE,
-        HaltCategory.BLOCKED_EXTERNAL: TerminalOutcome.BLOCKED_EXTERNAL,
-        HaltCategory.AWAITING_APPROVAL: TerminalOutcome.AWAITING_APPROVAL,
-        HaltCategory.STALE: TerminalOutcome.STALE_SUPERSEDED,
-        HaltCategory.STAGNATION: TerminalOutcome.FAILED,
-        HaltCategory.OTHER: TerminalOutcome.FAILED,
-        HaltCategory.USER_ABORT: TerminalOutcome.USER_ABORTED,
-        HaltCategory.ROUTED_GOAL: TerminalOutcome.ROUTED_ELSEWHERE,
-    }[category]
-
-
 def _reason(value: object) -> str:
     if not isinstance(value, str) or not value.strip() or value != value.strip() or len(value) > 2048:
         raise _Rejected("invalid-reason")
@@ -230,11 +213,19 @@ def _reason(value: object) -> str:
 def _mark_halt(state: MissionState, raw_command: object) -> Transition:
     command = raw_command
     assert isinstance(command, MarkHalt)
+    if type(command.superseded) is not bool:
+        raise _Rejected("invalid-supersede-marker")
     control = _active_control(state)
     if not isinstance(command.category, HaltCategory):
         raise _Rejected("unknown-halt-category")
     reason = _reason(command.reason)
-    outcome = _halt_outcome(command.category, control.session_role)
+    outcome = TerminalOutcome(
+        terminal_outcome_for_halt(
+            command.category.value,
+            control.session_role.value,
+            superseded=command.superseded,
+        )
+    )
     new_control = replace(
         control,
         phase=Phase.HALTED,
@@ -580,12 +571,15 @@ def is_transition_bound_to(
 # Completion-adjacent control fields whose transition claims the persistence
 # layer can verify and apply today.  Two exclusions remain deliberate:
 # halt_reason — the kernel receives the stripped semantic reason while the
-# compatibility contract persists the raw legacy value; terminal_outcome —
-# ``derive_terminal_outcome`` carries legacy reason-precedence rules (a
-# supersede-form reason forces stale_superseded regardless of category) that
-# can legitimately diverge from the kernel's category mapping.  Unifying the
-# two derivations is 批2-a-3 scope.
-_CLAIMABLE_CONTROL_FIELDS = ("phase", "loop_active", "passes", "halt_category")
+# compatibility contract persists the raw legacy value.  terminal_outcome is
+# shared with the legacy derivation, so it is also claimable in this stage.
+_CLAIMABLE_CONTROL_FIELDS = (
+    "phase",
+    "loop_active",
+    "passes",
+    "halt_category",
+    "terminal_outcome",
+)
 
 
 def transition_control_claim_bounds(

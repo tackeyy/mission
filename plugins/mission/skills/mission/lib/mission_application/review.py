@@ -18,7 +18,7 @@ from mission_kernel.model import (
     NotApplicableRevisionScope,
     ReviewInputRef,
 )
-from mission_kernel.transitions import Decision, decide
+from mission_kernel.transitions import Decision, decide, transition_control_claim_bounds
 from scoring_provenance import reduce_review_aggregate as _canonical_review_reduction
 
 from .ports import LegacyMissionRepository
@@ -306,7 +306,6 @@ class MarkPassServices:
     validate_artifact_gate: Callable[[dict], None]
     validate_specialist_gate: Callable[[dict, str], None]
     transition_phase: Callable[[dict, str, str], None]
-    write_terminal_outcome: Callable[[dict], None]
     optional_unclosed_skills: Callable[[dict], list[str]]
     selection_id: Callable[[dict], object]
     # #568: early-stop の継続条件の評価結果を返す観測子。gate 判定には使わない
@@ -472,20 +471,20 @@ def mark_pass(
         if not decision.accepted or decision.transition is None:
             reason = decision.rejection.code if decision.rejection else "pass-rejected"
             raise ReviewFailure(_pass_rejection_message(reason, data, latest), reason=reason)
+        claimed = set(transition_control_claim_bounds(decision.transition))
 
         def mutate(proposed: dict) -> None:
-            proposed["passes"] = True
-            proposed["loop_active"] = False
+            if "passes" not in claimed:
+                proposed["passes"] = True
+            if "loop_active" not in claimed:
+                proposed["loop_active"] = False
             proposed["passes_forced"] = request.force
             services.transition_phase(proposed, "done", request.at)
-            services.write_terminal_outcome(proposed)
             proposed["updated_at"] = request.at
             if request.force:
                 proposed["force_reason"] = request.reason
                 proposed["force_approved_by_user"] = request.approved_by_user
                 proposed["force_approval"] = verification
-                services.validate_force_terminal(proposed, verification)
-                proposed["force_approval"]["consumed"] = True
             elif request.specialist_waiver:
                 proposed["specialist_waiver"] = {
                     "reason": request.specialist_waiver,
@@ -511,7 +510,16 @@ def mark_pass(
                 if evaluation is not None:
                     proposed["early_stop_evaluation"] = evaluation
 
-        proposed = repository.execute(data, mutate, decision.transition)
+        def finalize(proposed: dict) -> None:
+            if request.force:
+                services.validate_force_terminal(proposed, verification)
+                proposed["force_approval"]["consumed"] = True
+
+        proposed = (
+            repository.execute(data, mutate, decision.transition, finalize)
+            if request.force
+            else repository.execute(data, mutate, decision.transition)
+        )
         repository.save(proposed, aggregate_action="remove")
         unclosed = [] if request.force else services.optional_unclosed_skills(proposed)
     return MarkPassResult(

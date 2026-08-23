@@ -51,6 +51,10 @@ TERMINAL_OUTCOMES = (
     "routed_elsewhere",
 )
 EVIDENCE_COMPLETION_ROLES = {"checker", "planning", "analyze"}
+_SUPERSEDE_REASONS = {
+    "superseded by a replacement run",
+    "superseded by replacement run",
+}
 _CORRELATION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
@@ -71,34 +75,23 @@ def correlation_id(value: Any | None = None) -> str:
         raise ValueError("correlation ID must be a non-empty opaque token")
 
 
-def _derive_control_terminal_outcome(state: dict[str, Any]) -> str | None:
-    if state.get("passes") is True:
-        if state.get("loop_active") is False and not state.get("halt_reason"):
-            return "completed_pass"
-        return "failed"
-    if state.get("loop_active") is True:
-        return "failed" if state.get("halt_reason") else None
-    if not state.get("halt_reason"):
-        return "incomplete"
-    category = state.get("halt_category")
-    reason = str(state.get("halt_reason") or "").strip().lower()
-    resolution_status = str(state.get("resolution_status") or "").strip().lower()
-    if "halt_category" in state and not isinstance(category, str):
-        return "failed"
-    if (
-        resolution_status == "superseded"
-        or reason in {
-            "superseded by a replacement run",
-            "superseded by replacement run",
-        }
-    ):
-        return "stale_superseded"
-    if category not in HALT_CATEGORIES and reason.startswith(("orphan:", "stale:")):
+def is_supersede_marked(resolution_status: object, halt_reason: object) -> bool:
+    """Return whether legacy supersede markers take terminal-outcome priority."""
+    status = str(resolution_status or "").strip().lower()
+    reason = str(halt_reason or "").strip().lower()
+    return status == "superseded" or reason in _SUPERSEDE_REASONS
+
+
+def terminal_outcome_for_halt(
+    category: str, session_role: str, *, superseded: bool
+) -> str:
+    """Return the one terminal-outcome mapping for a valid halt command."""
+    if superseded:
         return "stale_superseded"
     if category == "evidence-submitted":
         return (
             "completed_evidence"
-            if session_role(state) in EVIDENCE_COMPLETION_ROLES
+            if session_role in EVIDENCE_COMPLETION_ROLES
             else "incomplete"
         )
     return {
@@ -111,6 +104,34 @@ def _derive_control_terminal_outcome(state: dict[str, Any]) -> str | None:
         "user-abort": "user_aborted",
         "routed-goal": "routed_elsewhere",
     }.get(category, "failed")
+
+
+def _derive_control_terminal_outcome(state: dict[str, Any]) -> str | None:
+    if state.get("passes") is True:
+        if state.get("loop_active") is False and not state.get("halt_reason"):
+            return "completed_pass"
+        return "failed"
+    if state.get("loop_active") is True:
+        return "failed" if state.get("halt_reason") else None
+    if not state.get("halt_reason"):
+        return "incomplete"
+    category = state.get("halt_category")
+    reason = str(state.get("halt_reason") or "").strip().lower()
+    if "halt_category" in state and not isinstance(category, str):
+        return "failed"
+    if is_supersede_marked(state.get("resolution_status"), state.get("halt_reason")):
+        return terminal_outcome_for_halt(
+            category,
+            session_role(state),
+            superseded=True,
+        )
+    if category not in HALT_CATEGORIES and reason.startswith(("orphan:", "stale:")):
+        return "stale_superseded"
+    return terminal_outcome_for_halt(
+        category,
+        session_role(state),
+        superseded=False,
+    )
 
 
 def derive_terminal_outcome(state: dict[str, Any]) -> str | None:

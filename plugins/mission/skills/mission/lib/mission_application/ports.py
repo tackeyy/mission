@@ -110,7 +110,9 @@ class LegacyMissionRepository(MissionRepository, Protocol):
         ...
 
     @overload
-    def execute(self, state: dict, mutation: Callable[[dict], None], transition=None) -> dict:
+    def execute(
+        self, state: dict, mutation: Callable[[dict], None], transition=None, finalize=None
+    ) -> dict:
         ...
 
     @overload
@@ -120,7 +122,7 @@ class LegacyMissionRepository(MissionRepository, Protocol):
     ) -> RepositoryExecutionResult:
         ...
 
-    def execute(self, state, mutation=None, transition=None):
+    def execute(self, state, mutation=None, transition=None, finalize=None):
         ...
 
     def save(

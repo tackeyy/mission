@@ -73,6 +73,7 @@ from mission_common import (  # noqa: E402
     opaque_token,
     derive_terminal_outcome,
     duration_sec as _duration_sec,
+    is_supersede_marked,
     parse_iso_datetime,
     state_identity,
     summarize_pass_rate_population,
@@ -133,14 +134,21 @@ from mission_application.lifecycle import (  # noqa: E402
     activity_start as run_activity_start,
     advance as run_advance,
     extension_fields_decision as _extension_fields_decision,
-    monotonic_halt_decision as _monotonic_halt_decision,
+    _mark_halt_decision_state,
     initialize as run_initialize,
     mark_halt as run_mark_halt,
     reactivate as run_reactivate,
     refresh_pid as run_refresh_pid,
     set_fields as run_set_fields,
+    TERMINALIZABLE_ACTIVE,
+    TERMINALIZABLE_UNDECODABLE,
+    diagnose_terminalizable_state,
+    real_terminalizable_state,
     update_project_root as run_update_project_root,
 )
+from mission_kernel.commands import MarkHalt  # noqa: E402
+from mission_kernel.model import HaltCategory  # noqa: E402
+from mission_kernel.transitions import decide, transition_control_claim_bounds  # noqa: E402
 from mission_application.ports import AuditMetadata, ExecutionRequest  # noqa: E402
 from mission_application.review import (  # noqa: E402
     MarkPassRequest,
@@ -182,6 +190,7 @@ from mission_application.planning import (  # noqa: E402
     verify_handoff_binding,
 )
 from mission_application.runtime_guard import (  # noqa: E402
+    PermissionHaltRejected,
     PermissionObservationRequest,
     PermissionProbe,
     StopObservationRequest,
@@ -1786,14 +1795,20 @@ def _validated_assumptions_probe_path(cwd: Path, raw_path: str) -> Path:
     return candidate
 
 
-def _record_permission_preflight_halt(cwd: Path, sf: Path, reason: str) -> bool:
-    """Route init's best-effort fallback through the same closed A5 writer."""
+def _record_permission_preflight_halt(
+    cwd: Path, sf: Path, reason: str
+) -> tuple[bool, str | None]:
+    """Route init's best-effort fallback through the same closed A5 writer.
+
+    批2-a-3 (#632): 保存された terminal outcome をそのまま返す。捨てて固定値を
+    出力すると、supersede-marked state で保存値と CLI 出力の authority が割れる。
+    """
     expected = (
         "Phase 0 permission preflight failed before task execution: "
         "state write unavailable"
     )
     if reason != expected:
-        return False
+        return False, None
     return _record_permission_probe_observation(
         cwd,
         sf,
@@ -1826,16 +1841,27 @@ def _exit_init_write_failure(cwd: Path, sf: Path | None = None) -> None:
         "Phase 0 permission preflight failed before task execution: "
         "state write unavailable"
     )
-    halt_recorded = bool(
-        sf is not None
-        and sf.exists()
-        and _record_permission_preflight_halt(cwd, sf, reason)
-    )
+    try:
+        halt_recorded, persisted_outcome = (
+            _record_permission_preflight_halt(cwd, sf, reason)
+            if sf is not None and sf.exists()
+            else (False, None)
+        )
+    except PermissionHaltRejected as error:
+        # 批2-a-3 (#632): kernel invariant 違反を OSError 経路の traceback に
+        # 落とさない。他 command と同じ構造化報告へ揃える
+        _exit_internal_invariant(error.code, str(error))
+    except FencedCommitError as error:
+        if error.code not in {"transition-divergence", "transition-unsealed"}:
+            raise
+        _exit_internal_invariant(error.code, error.detail)
     print(json.dumps({
         "ok": False,
         "halt_recorded": halt_recorded,
         "halt_category": "blocked-external",
-        "terminal_outcome": "blocked_external",
+        "terminal_outcome": (
+            persisted_outcome if halt_recorded and persisted_outcome else "blocked_external"
+        ),
         "halt_reason": reason,
         "probes": [
             {"target": "state", "ok": False, "error": "write-unavailable"}
@@ -8398,7 +8424,14 @@ def _initialize_legacy_v4(args, *, write_state, lock_state: bool = True):
             existing_agg["active_sessions"].append(sid)
         existing_agg["updated_at"] = iso_now()
         atomic_write_json(agg, existing_agg)
-    permission_preflight = _permission_preflight(cwd)
+    try:
+        permission_preflight = _permission_preflight(cwd)
+    except PermissionHaltRejected as error:
+        _exit_internal_invariant(error.code, str(error))
+    except FencedCommitError as error:
+        if error.code not in {"transition-divergence", "transition-unsealed"}:
+            raise
+        _exit_internal_invariant(error.code, error.detail)
     if not permission_preflight["ok"]:
         print(json.dumps(permission_preflight, ensure_ascii=False))
         sys.exit(2)
@@ -10772,7 +10805,7 @@ def _permission_preflight(cwd: Path) -> dict:
             "Phase 0 permission preflight failed before task execution: "
             "assumptions path missing"
         )
-        observed = _record_permission_probe_observation(
+        observed, terminal_outcome = _record_permission_probe_observation(
             cwd,
             sf,
             (
@@ -10784,7 +10817,7 @@ def _permission_preflight(cwd: Path) -> dict:
             "ok": False,
             "halt_recorded": observed,
             "halt_category": "blocked-external",
-            "terminal_outcome": "blocked_external",
+            "terminal_outcome": terminal_outcome if observed else "blocked_external",
             "halt_reason": reason,
             "error": "assumptions-path-missing",
             "probes": [],
@@ -10799,7 +10832,7 @@ def _permission_preflight(cwd: Path) -> dict:
             "Phase 0 permission preflight failed before task execution: "
             "assumptions evidence path is invalid"
         )
-        observed = _record_permission_probe_observation(
+        observed, terminal_outcome = _record_permission_probe_observation(
             cwd,
             sf,
             (
@@ -10811,7 +10844,7 @@ def _permission_preflight(cwd: Path) -> dict:
             "ok": False,
             "halt_recorded": observed,
             "halt_category": "blocked-external",
-            "terminal_outcome": "blocked_external",
+            "terminal_outcome": terminal_outcome if observed else "blocked_external",
             "halt_reason": reason,
             "probes": [
                 {
@@ -10842,20 +10875,20 @@ def _permission_preflight(cwd: Path) -> dict:
                 PermissionProbe(item["target"], "allowed", None)
                 for item in probes[:-1]
             ) + (PermissionProbe(target, "denied", "write-unavailable"),)
-            halt_recorded = _record_permission_probe_observation(
+            halt_recorded, terminal_outcome = _record_permission_probe_observation(
                 cwd, sf, observations
             )
             return {
                 "ok": False,
                 "halt_recorded": halt_recorded,
                 "halt_category": "blocked-external",
-                "terminal_outcome": "blocked_external",
+                "terminal_outcome": terminal_outcome if halt_recorded else "blocked_external",
                 "halt_reason": reason,
                 "probes": probes,
             }
         probes.append({"target": target, "ok": True})
 
-    _record_permission_probe_observation(
+    _halt_recorded, _terminal_outcome = _record_permission_probe_observation(
         cwd,
         sf,
         tuple(
@@ -10870,11 +10903,16 @@ def _permission_preflight(cwd: Path) -> dict:
     }
 
 
+def _exit_internal_invariant(code: str, detail: str) -> None:
+    print("ERROR: internal-invariant: %s: %s" % (code, detail), file=sys.stderr)
+    raise SystemExit(2)
+
+
 def _record_permission_probe_observation(
     cwd: Path,
     sf: Path,
     probes: tuple[PermissionProbe, ...],
-) -> bool:
+) -> tuple[bool, str | None]:
     """Persist only the fixed A5 consequence of a closed permission result."""
     try:
         result = record_permission_observation(
@@ -10889,10 +10927,19 @@ def _record_permission_probe_observation(
             PermissionObservationRequest(probes=probes, observed_at=iso_now()),
             transition_phase=_transition_phase,
         )
+        if result.claim_source == "undecodable":
+            # 批2-a-3 (#632): 劣化 doc への gate-only 降格は正常な terminal
+            # （冪等 halt）と区別できないと障害調査で追えない。state には
+            # 書かず stderr にだけ残す（保存 document の互換性を壊さない）。
+            print(
+                "WARNING: permission halt fell back to the synthetic view "
+                "because the session document could not be decoded",
+                file=sys.stderr,
+            )
         if result.halt_recorded:
             with contextlib.suppress(OSError):
                 _remove_from_aggregate(cwd, sf.stem)
-        return result.halt_recorded
+        return result.halt_recorded, result.terminal_outcome
     except UnsupportedSchemaVersionError:
         raise
     except FencedCommitError as error:
@@ -10900,14 +10947,21 @@ def _record_permission_probe_observation(
         # kernel invariant 違反は吸収しない（fail-open 防止・批2-a-2 #631）
         if error.code in {"transition-divergence", "transition-unsealed"}:
             raise
-        return False
+        return False, None
     except (OSError, ValueError):
-        return False
+        return False, None
 
 
 def cmd_permission_preflight(args):
     """Verify that Phase 0 can persist state and assumptions evidence."""
-    result = _permission_preflight(Path.cwd())
+    try:
+        result = _permission_preflight(Path.cwd())
+    except PermissionHaltRejected as error:
+        _exit_internal_invariant(error.code, str(error))
+    except FencedCommitError as error:
+        if error.code not in {"transition-divergence", "transition-unsealed"}:
+            raise
+        _exit_internal_invariant(error.code, error.detail)
     print(json.dumps(result, indent=2 if getattr(args, "json", False) else None))
     if not result["ok"]:
         sys.exit(2)
@@ -15839,7 +15893,6 @@ def cmd_mark_passes(args):
                 validate_artifact_gate=lambda data: _validate_pass_artifact_gate(cwd, data),
                 validate_specialist_gate=_validate_pass_specialist_gate,
                 transition_phase=_transition_phase,
-                write_terminal_outcome=_write_terminal_outcome,
                 optional_unclosed_skills=_unclosed_optional_specialist_skills,
                 selection_id=_current_selection_id,
                 early_stop_evaluation=lambda data, latest, at: _early_stop_evaluation(
@@ -16121,41 +16174,69 @@ def _supersede_reviews_locked(args, cwd: Path):
                 # supersedes index も generic 書き込みとして kernel の閉集合
                 # フィールド権限で審査する。
                 if role == "superseded":
-                    decision = _monotonic_halt_decision(
-                        state, "stale", "superseded by a replacement run"
+                    supersede_diagnosis = diagnose_terminalizable_state(state)
+                    if supersede_diagnosis == TERMINALIZABLE_UNDECODABLE:
+                        print(
+                            "WARNING: supersede terminalization fell back to the "
+                            "synthetic view because %s could not be decoded"
+                            % state_path.name,
+                            file=sys.stderr,
+                        )
+                    real_state = (
+                        real_terminalizable_state(state)
+                        if supersede_diagnosis == TERMINALIZABLE_ACTIVE
+                        else None
                     )
+                    decision = decide(
+                        real_state if real_state is not None else _mark_halt_decision_state(state),
+                        MarkHalt(
+                            HaltCategory.STALE,
+                            "superseded by a replacement run",
+                            superseded=is_supersede_marked(
+                                state.get("resolution_status"),
+                                "superseded by a replacement run",
+                            ),
+                        ),
+                    )
+                    transition = decision.transition if real_state is not None else None
                 else:
                     decision = _extension_fields_decision(
                         state, {"supersedes": superseded}
                     )
+                    transition = decision.transition
                 if not decision.accepted:
                     assert decision.rejection is not None
                     raise ValueError(
                         "supersede rejected by kernel: " + decision.rejection.code
                     )
 
-                def mutate(proposed, role=role):
+                claimed = (
+                    set(transition_control_claim_bounds(transition))
+                    if transition is not None
+                    else set()
+                )
+
+                def mutate(proposed, role=role, claimed=claimed):
                     if role == "superseded":
-                        proposed.update(
-                            {
-                                "passes": False,
-                                "loop_active": False,
-                                "halt_reason": "superseded by a replacement run",
-                                "halt_category": "stale",
-                            }
-                        )
+                        proposed["passes"] = False
+                        if "loop_active" not in claimed:
+                            proposed["loop_active"] = False
+                        proposed["halt_reason"] = "superseded by a replacement run"
+                        if "halt_category" not in claimed:
+                            proposed["halt_category"] = "stale"
                         _transition_phase(
                             proposed,
                             "halted",
                             now,
                             terminal_trusted_boundary=True,
                         )
-                        _write_terminal_outcome(proposed)
+                        if "terminal_outcome" not in claimed:
+                            _write_terminal_outcome(proposed)
                     else:
                         proposed["supersedes"] = superseded
                     proposed["updated_at"] = now
 
-                proposed = repository.execute(state, mutate, decision.transition)
+                proposed = repository.execute(state, mutate, transition)
                 path_key = str(state_path.resolve())
                 if role == "superseded":
                     _SUPERSEDE_TERMINAL_PATHS.add(path_key)
@@ -16242,6 +16323,14 @@ def cmd_mark_halt(args):
             file=sys.stderr,
         )
         sys.exit(2)
+    if result.claim_source == TERMINALIZABLE_UNDECODABLE:
+        # 批2-a-3 (#632): 復号不能 doc への gate-only 降格は正常な terminal
+        # （冪等 halt）と区別できないと障害調査で追えない。state には書かない。
+        print(
+            "WARNING: halt fell back to the synthetic view because the session "
+            "document could not be decoded (transition claims were not applied)",
+            file=sys.stderr,
+        )
     if result.aggregate_error is not None:
         print(
             f"WARNING: aggregate index update failed: {result.aggregate_error}",

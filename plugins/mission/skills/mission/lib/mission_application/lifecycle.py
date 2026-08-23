@@ -20,7 +20,7 @@ from activity_segments import (
 )
 from artifact_contract import invalidate_artifact_lint_observation
 from mission_kernel.codec_v4 import decode_mission_state
-from mission_common import derive_terminal_outcome
+from mission_common import derive_terminal_outcome, is_supersede_marked
 from mission_kernel.commands import (
     GENERIC_SET_DEDICATED_FIELDS,
     GENERIC_SET_FROZEN_FIELDS,
@@ -32,7 +32,7 @@ from mission_kernel.commands import (
 )
 from mission_kernel.json_codec import freeze_json_value
 from mission_kernel.model import HaltCategory, Phase, PreparedHandoff
-from mission_kernel.transitions import Decision, decide
+from mission_kernel.transitions import Decision, decide, transition_control_claim_bounds
 from .ports import AggregateIndexError, LegacyMissionRepository, MissionInitializer
 
 
@@ -74,7 +74,14 @@ def monotonic_halt_decision(raw_state: dict, category: str, reason: str) -> Deci
             reason="unknown-halt-category",
             outcome_kind="invalid-input",
         ) from error
-    return decide(_mark_halt_decision_state(raw_state), MarkHalt(halt_category, reason))
+    return decide(
+        _mark_halt_decision_state(raw_state),
+        MarkHalt(
+            halt_category,
+            reason,
+            superseded=is_supersede_marked(raw_state.get("resolution_status"), reason),
+        ),
+    )
 
 
 def extension_fields_decision(raw_state: dict, fields: dict) -> Decision:
@@ -198,6 +205,9 @@ class MarkHaltResult:
     halt_category: str
     decision: Decision
     aggregate_error: str | None
+    # 批2-a-3 (#632): claims の根拠に実 state を使えたか。"undecodable" は想定外の
+    # 劣化であり、gate-only 降格が無音にならないよう呼び出し元へ伝える。
+    claim_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -282,6 +292,19 @@ class SetFieldsResult:
     aggregate_error: str | None
 
 
+@dataclass(frozen=True)
+class _GoalRoutePlan:
+    decision: Decision
+    verdict: dict
+
+
+@dataclass(frozen=True)
+class _SetFieldsPlan:
+    document: dict
+    warnings: tuple[str, ...]
+    route: _GoalRoutePlan | None
+
+
 def activity_start(repository: LegacyMissionRepository, request: ActivityStartRequest) -> ActivityResult:
     with repository.transaction():
         state = repository.load()
@@ -364,6 +387,43 @@ def _mark_halt_decision_state(raw_state: dict):
             "session_role": "implementer",
         }
     )
+
+
+# ``real_terminalizable_state`` が claims の根拠を返さない理由。呼び出し元は
+# どちらでも gate-only へ落ちるが、"undecodable" は想定外であり観測できる必要が
+# ある（"terminal" は冪等な emergency halt の正常経路）。
+TERMINALIZABLE_ACTIVE = "active"
+TERMINALIZABLE_TERMINAL = "terminal"
+TERMINALIZABLE_UNDECODABLE = "undecodable"
+
+
+def diagnose_terminalizable_state(document: dict) -> str:
+    """Classify why a document can or cannot supply halt claims."""
+    try:
+        candidate = _typed_state(document)
+    except (TypeError, ValueError, UnicodeError):
+        return TERMINALIZABLE_UNDECODABLE
+    if (
+        candidate.control.phase not in {Phase.DONE, Phase.HALTED}
+        and candidate.control.passes is False
+        and not candidate.control.halt_reason
+        and candidate.terminal_outcome is None
+    ):
+        return TERMINALIZABLE_ACTIVE
+    return TERMINALIZABLE_TERMINAL
+
+
+def real_terminalizable_state(document: dict):
+    """Return a decoded active state suitable as the source of halt claims.
+
+    ``None`` means the caller must fall back to the synthetic monotonic view and
+    send no transition.  Use :func:`diagnose_terminalizable_state` when the
+    caller needs to distinguish an already-terminal document (the idempotent
+    emergency-halt path) from an undecodable one (unexpected degradation).
+    """
+    if diagnose_terminalizable_state(document) != TERMINALIZABLE_ACTIVE:
+        return None
+    return _typed_state(document)
 
 
 def _advance_decision(
@@ -583,24 +643,21 @@ def mark_halt(
         # K2 receives the semantic reason, while the raw legacy value remains
         # the persisted compatibility contract.
         semantic_reason = request.reason.strip() or "legacy-empty-reason"
-        command = MarkHalt(HaltCategory(request.category), semantic_reason)
+        command = MarkHalt(
+            HaltCategory(request.category),
+            semantic_reason,
+            superseded=is_supersede_marked(state.get("resolution_status"), request.reason),
+        )
         # 批2-a-2 (#631): decode 可能かつ active な state は実 state で decide
         # する（claims の halt_category / role 依存 outcome が実 state に基づく）。
         # terminal / 劣化 doc は monotonic view へ fallback し（冪等 emergency
         # halt の保証）、その場合は gate-only（transition 非送付）。
-        real_state = None
-        try:
-            candidate = _typed_state(state)
-        except (TypeError, ValueError, UnicodeError):
-            candidate = None
-        if (
-            candidate is not None
-            and candidate.control.phase not in {Phase.DONE, Phase.HALTED}
-            and candidate.control.passes is False
-            and not candidate.control.halt_reason
-            and candidate.terminal_outcome is None
-        ):
-            real_state = candidate
+        diagnosis = diagnose_terminalizable_state(state)
+        real_state = (
+            real_terminalizable_state(state)
+            if diagnosis == TERMINALIZABLE_ACTIVE
+            else None
+        )
         decision = decide(
             real_state if real_state is not None else _mark_halt_decision_state(state),
             command,
@@ -612,13 +669,22 @@ def mark_halt(
                 reason=decision.rejection.code,
                 state=state,
             )
+        # Empty legacy reasons are normalized only for the kernel gate; their
+        # raw persisted value remains empty and therefore retains the historic
+        # incomplete outcome.  They cannot carry a terminal-outcome claim.
+        transition = decision.transition if (
+            real_state is not None and request.set_terminal_phase and request.reason.strip()
+        ) else None
+        claimed = set(transition_control_claim_bounds(transition)) if transition is not None else set()
 
         def mutate(proposed: dict) -> None:
             if request.category == "awaiting-approval":
                 record_activity_event(proposed, "awaiting-approval", effective_at)
             proposed["halt_reason"] = request.reason
-            proposed["halt_category"] = request.category
-            proposed["loop_active"] = False
+            if "halt_category" not in claimed:
+                proposed["halt_category"] = request.category
+            if "loop_active" not in claimed:
+                proposed["loop_active"] = False
             if request.category == "routed-goal":
                 dispatch = services.goal_dispatch_fields(proposed)
                 proposed["goal_dispatch_effective"] = dispatch["goal_dispatch_effective"]
@@ -647,14 +713,15 @@ def mark_halt(
                     "terminal phase compatibility reducer is unavailable",
                     reason="terminal-reducer-missing",
                 )
-            proposed.pop("terminal_outcome", None)
-            outcome = derive_terminal_outcome(proposed)
-            if outcome is None:
-                raise LifecycleFailure(
-                    "terminal transition did not produce a terminal outcome",
-                    reason="terminal-outcome-missing",
-                )
-            proposed["terminal_outcome"] = outcome
+            if "terminal_outcome" not in claimed:
+                proposed.pop("terminal_outcome", None)
+                outcome = derive_terminal_outcome(proposed)
+                if outcome is None:
+                    raise LifecycleFailure(
+                        "terminal transition did not produce a terminal outcome",
+                        reason="terminal-outcome-missing",
+                    )
+                proposed["terminal_outcome"] = outcome
             proposed["updated_at"] = effective_at
 
         # set_terminal_phase=False（janitor の orphan 経路）は kernel の主張
@@ -664,9 +731,7 @@ def mark_halt(
         proposed = repository.execute(
             state,
             mutate,
-            decision.transition
-            if (real_state is not None and request.set_terminal_phase)
-            else None,
+            transition,
         )
         aggregate_error = None
         try:
@@ -678,6 +743,7 @@ def mark_halt(
         request.category,
         decision,
         aggregate_error,
+        claim_source=diagnosis,
     )
 
 
@@ -1130,6 +1196,10 @@ def set_fields(
                 MarkHalt(
                     HaltCategory.ROUTED_GOAL,
                     "routed-to-goal (#330: Simple + リスクシグナルなし)",
+                    superseded=is_supersede_marked(
+                        proposed.get("resolution_status"),
+                        "routed-to-goal (#330: Simple + リスクシグナルなし)",
+                    ),
                 ),
             )
             if not decision.accepted:
@@ -1257,9 +1327,26 @@ def set_fields(
             services.ensure_phase_timing(proposed, request.at)
             proposed["updated_at"] = request.at
 
-        proposed = repository.execute(state, mutate, set_decision.transition)
-        routed_verdict = routed_verdict_holder[0]
-        decision = decision_holder[0] or set_decision
+        # Build the compatibility projection exactly once.  The reducer calls
+        # injected services while forming this shadow, never from execute's
+        # mutation callback; duplicate key ordering therefore remains intact.
+        shadow = copy.deepcopy(state)
+        mutate(shadow)
+        route = (
+            _GoalRoutePlan(decision_holder[0], routed_verdict_holder[0])
+            if decision_holder[0] is not None
+            else None
+        )
+        plan = _SetFieldsPlan(shadow, tuple(warnings), route)
+
+        def apply_plan(proposed: dict) -> None:
+            proposed.clear()
+            proposed.update(plan.document)
+
+        transition = plan.route.decision.transition if plan.route is not None else set_decision.transition
+        proposed = repository.execute(state, apply_plan, transition)
+        routed_verdict = plan.route.verdict if plan.route is not None else None
+        decision = plan.route.decision if plan.route is not None else set_decision
         aggregate_action = (
             "remove"
             if routed_verdict is not None
@@ -1282,6 +1369,6 @@ def set_fields(
     return SetFieldsResult(
         routed_verdict,
         decision,
-        tuple(warnings),
+        plan.warnings,
         aggregate_error,
     )

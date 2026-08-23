@@ -48,10 +48,16 @@ class _RecordingRepository:
     def load(self):
         return copy.deepcopy(self.state)
 
-    def execute(self, state, mutation, transition=None):
-        self.execute_calls.append((state, mutation, transition))
+    def execute(self, state, mutation, transition=None, finalize=None):
+        from mission_persistence.legacy_v4 import _apply_transition_claims
+
+        self.execute_calls.append((state, mutation, transition, finalize))
         proposed = copy.deepcopy(state)
         mutation(proposed)
+        if transition is not None:
+            _apply_transition_claims(transition, proposed)
+        if finalize is not None:
+            finalize(proposed)
         return proposed
 
     def save(self, state, **_kwargs):
@@ -68,7 +74,6 @@ def _pass_services(cli):
         validate_artifact_gate=lambda _data: None,
         validate_specialist_gate=lambda _data, _waiver: None,
         transition_phase=cli._transition_phase,
-        write_terminal_outcome=cli._write_terminal_outcome,
         optional_unclosed_skills=lambda _data: [],
         selection_id=lambda _data: None,
     )
@@ -132,7 +137,6 @@ def test_mark_pass_force_path_preserves_approval_binding(tmp_path):
         validate_artifact_gate=services.validate_artifact_gate,
         validate_specialist_gate=services.validate_specialist_gate,
         transition_phase=services.transition_phase,
-        write_terminal_outcome=services.write_terminal_outcome,
         optional_unclosed_skills=services.optional_unclosed_skills,
         selection_id=services.selection_id,
     )
@@ -160,7 +164,6 @@ def test_mark_pass_validate_services_are_called_in_the_recorded_order(tmp_path):
         validate_score_evidence=lambda _data, _latest: calls.append("score"),
         validate_specialist_gate=lambda _data, _waiver: calls.append("specialist"),
         transition_phase=cli._transition_phase,
-        write_terminal_outcome=cli._write_terminal_outcome,
         optional_unclosed_skills=lambda _data: [],
         selection_id=lambda _data: None,
     )
@@ -222,7 +225,6 @@ def test_mark_pass_artifact_and_force_approval_rejections_do_not_save(tmp_path):
         validate_artifact_gate=lambda _data: (_ for _ in ()).throw(ValueError("artifact blocked")),
         validate_specialist_gate=services.validate_specialist_gate,
         transition_phase=services.transition_phase,
-        write_terminal_outcome=services.write_terminal_outcome,
         optional_unclosed_skills=services.optional_unclosed_skills,
         selection_id=services.selection_id,
     )
@@ -783,7 +785,6 @@ def test_mark_pass_on_v5_repository_rejects_claim_violation_without_commit(tmp_p
         validate_artifact_gate=lambda _data: None,
         validate_specialist_gate=lambda _data, _waiver: None,
         transition_phase=diverging_transition_phase,
-        write_terminal_outcome=cli._write_terminal_outcome,
         optional_unclosed_skills=lambda _data: [],
         selection_id=lambda _data: None,
     )

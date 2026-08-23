@@ -43,7 +43,25 @@ from .local_uow import VerifiedBlobSet
 _CLAIM_ABSENT = object()
 
 
-def _apply_transition_claims(transition: object, proposed: dict) -> None:
+@dataclass
+class _PendingDecision:
+    document: dict
+    claims: dict[str, object]
+
+
+def _verify_transition_claims(document: dict, claims: dict[str, object], detail: str) -> None:
+    for field_name, expected in claims.items():
+        if expected is None:
+            matches = field_name not in document
+        elif isinstance(expected, bool):
+            matches = type(document.get(field_name)) is bool and document[field_name] is expected
+        else:
+            matches = document.get(field_name, _CLAIM_ABSENT) == expected
+        if not matches:
+            raise FencedCommitError("transition-divergence", "%s on %s" % (detail, field_name))
+
+
+def _apply_transition_claims(transition: object, proposed: dict) -> dict[str, object]:
     """Apply the decided completion-adjacent claims as the persisted values.
 
     批2-a-2 (#631): the transition's claimed values are what get persisted —
@@ -72,6 +90,7 @@ def _apply_transition_claims(transition: object, proposed: dict) -> None:
             return type(current) is bool and current is expected
         return current == expected
 
+    claims = {}
     for field_name, (before, after) in bounds.items():
         current = proposed.get(field_name, _CLAIM_ABSENT)
         expected = _projected(after)
@@ -89,6 +108,8 @@ def _apply_transition_claims(transition: object, proposed: dict) -> None:
             proposed.pop(field_name, None)
         else:
             proposed[field_name] = expected
+        claims[field_name] = expected
+    return claims
 
 
 @dataclass(frozen=True)
@@ -155,14 +176,101 @@ class LegacyV4Repository:
         self._lease_ttl_seconds = lease_ttl_seconds
         self._effect_transaction = effect_transaction
         self._format_guard = format_guard
+        self._pending: list[_PendingDecision] = []
+        self._executing = 0
+        self._transaction_depth = 0
 
-    def transaction(self) -> ContextManager[object]:
-        return self._lock()
+    @contextlib.contextmanager
+    def transaction(self):
+        # ネストした transaction の finally が外側の pending まで消すと、
+        # その後の不正 save が未検証で通る（#632 の Sol 指摘）。深さで数える。
+        self._transaction_depth += 1
+        try:
+            with self._guarded_context(self._lock):
+                yield
+        finally:
+            self._transaction_depth -= 1
+            if self._transaction_depth == 0:
+                self._pending.clear()
+
+
+    # 外部から注入される callable の信頼境界（#632 / Sol 4 巡目）。
+    #
+    # ``decision`` / ``pre-decision`` の 2 分類は persistence への再入を許さない。
+    # ``primitive`` は「呼ばれた時点で決定が確定しており、再入させても検証を
+    # 迂回できない」ものだけを置く。分類の網羅は inventory テストが固定する。
+    GUARDED_INJECTED_CALLABLES = (
+        "_format_guard",
+        "_clock",
+        "_read_state",
+        "_backup_state",
+        "_write_state",
+        "_add_to_aggregate",
+        "_remove_from_aggregate",
+        "_lock",
+        "_effect_transaction",
+    )
+
+    @contextlib.contextmanager
+    def _callback_guard(self):
+        """Reject persistence entry points while a caller callback is running.
+
+        直接の ``save()`` だけを塞ぐと、typed request や effect callback、注入 hook
+        という別の実行入口から同じ不変条件を迂回できる（#632 の Sol 指摘）。
+        callback 実行中は ``execute`` / ``save`` / ``execute_effects`` を拒否する。
+        """
+        self._executing += 1
+        try:
+            yield
+        finally:
+            self._executing -= 1
+
+    def _guarded_call(self, callback, *args, **kwargs):
+        """Run one injected callable inside the re-entrancy boundary."""
+        with self._callback_guard():
+            return callback(*args, **kwargs)
+
+    def _reject_reentrant_entry(self, operation: str) -> None:
+        if self._executing:
+            raise FencedCommitError(
+                "request-invalid",
+                "%s is not allowed while a decision is being executed" % operation,
+            )
+
+    @contextlib.contextmanager
+    def _guarded_context(self, factory, *args):
+        """Hold the guard across a caller-supplied context manager's own hooks.
+
+        factory / ``__enter__`` / ``__exit__`` は外部 callback なので囲む。本文
+        （内部の ``save`` 等）はガードの外で実行しなければならないため、enter と
+        exit だけを個別に囲む。特殊メソッドは ``with`` 文と同じく **型から
+        ``__enter__`` 実行前に取得**し、instance 差し替えで意味論が変わらないように
+        する（#632 / Sol 4 巡目 Medium）。
+        """
+        with self._callback_guard():
+            manager = factory(*args)
+            manager_type = type(manager)
+            enter = manager_type.__enter__
+            exit_ = manager_type.__exit__
+            entered = enter(manager)
+        try:
+            yield entered
+        except BaseException as error:
+            with self._callback_guard():
+                # truth-value 評価（`__bool__`）も外部 callback なのでガード内で
+                # 済ませる。外に出すと `__bool__` から persistence へ再入できる
+                # （#632 / Sol 5 巡目の High）。
+                suppressed = bool(exit_(manager, type(error), error, error.__traceback__))
+            if not suppressed:
+                raise
+        else:
+            with self._callback_guard():
+                exit_(manager, None, None, None)
 
     def load(self) -> dict:
         if self._format_guard is not None:
-            self._format_guard()
-        return self._read_state()
+            self._guarded_call(self._format_guard)
+        return self._guarded_call(self._read_state)
 
     def read(self, session_id: str) -> LegacyRepositorySnapshot:
         """Read one legacy session through the common typed repository port."""
@@ -190,10 +298,11 @@ class LegacyV4Repository:
                 raise FencedCommitError("lineage-mismatch", "legacy session differs")
             return LegacyRepositorySnapshot(state=state, state_bytes=source)
 
-    def execute(self, state, mutation=None, transition=None):
+    def execute(self, state, mutation=None, transition=None, finalize=None):
         """Return the proposed v4 document without performing any I/O."""
+        self._reject_reentrant_entry("execute")
         if isinstance(state, ExecutionRequest):
-            if mutation is not None or transition is not None:
+            if mutation is not None or transition is not None or finalize is not None:
                 raise FencedCommitError(
                     "request-invalid", "typed execution does not accept a decision callback"
                 )
@@ -204,10 +313,19 @@ class LegacyV4Repository:
         # pre-apply the phase and lose the legacy reducer's duration boundary.
         # A supplied transition's claims are applied as the persisted values,
         # with writer divergence failing closed (批2-a-1 #630 / 批2-a-2 #631).
+        if finalize is not None and transition is None:
+            raise FencedCommitError("request-invalid", "finalize requires a transition")
+        # 再入した save() は claims が未登録の隙を突いて検証を迂回できるため、
+        # mutation / finalize の実行中は保存を明示的に拒否する（#632 の Sol 指摘）。
         proposed = copy.deepcopy(state)
-        mutation(proposed)
-        if transition is not None:
-            _apply_transition_claims(transition, proposed)
+        with self._callback_guard():
+            mutation(proposed)
+            if transition is not None:
+                claims = _apply_transition_claims(transition, proposed)
+                if finalize is not None:
+                    finalize(proposed)
+                _verify_transition_claims(proposed, claims, "finalizer diverges from the decided transition")
+                self._pending.append(_PendingDecision(proposed, claims))
         return proposed
 
     def _execute_request(
@@ -241,7 +359,7 @@ class LegacyV4Repository:
             pending = admit_lease(
                 request,
                 state.lease,
-                self._clock(),
+                self._guarded_call(self._clock),
                 self._lease_ttl_seconds,
             )
             admitted_state = replace(
@@ -302,7 +420,7 @@ class LegacyV4Repository:
                     for blob in request.blobs.blobs
                 )
                 closed = self.validate_effects(effects)
-                with self._effect_transaction(closed):
+                with self._guarded_context(self._effect_transaction, closed):
                     self.save(proposed)
             else:
                 self.save(proposed)
@@ -319,28 +437,34 @@ class LegacyV4Repository:
         administrative: bool = False,
         aggregate_action: str | None = None,
     ) -> None:
+        self._reject_reentrant_entry("save")
         if self._format_guard is not None:
-            self._format_guard()
+            self._guarded_call(self._format_guard)
+        if self._pending:
+            pending = next((item for item in self._pending if item.document is state), None)
+            if pending is None:
+                raise FencedCommitError("transition-divergence", "save target is not a decided document")
+            _verify_transition_claims(state, pending.claims, "save diverges from the decided transition")
         if backup:
-            self._backup_state()
+            self._guarded_call(self._backup_state)
         # Preserve the legacy writer call shape.  Several callers replace the
         # writer with a one-argument fault injector; the administrative flag
         # was only ever supplied for the routed-goal path.
         if administrative:
-            self._write_state(state, administrative=True)
+            self._guarded_call(self._write_state, state, administrative=True)
         else:
-            self._write_state(state)
-        callback = {
-            None: None,
-            "add": self._add_to_aggregate,
-            "remove": self._remove_from_aggregate,
-        }.get(aggregate_action)
+            self._guarded_call(self._write_state, state)
         if aggregate_action not in {None, "add", "remove"}:
             raise ValueError("unknown aggregate action")
-        if callback is None:
+        if aggregate_action is None:
             return
+        # attribute を guard の第 1 引数へ直接渡す（dict 収集の alias を作ると
+        # 静的な境界検査が per-variable の追跡を要求されるため。Sol 7 巡目）。
         try:
-            callback()
+            if aggregate_action == "add":
+                self._guarded_call(self._add_to_aggregate)
+            else:
+                self._guarded_call(self._remove_from_aggregate)
         except Exception as exc:
             raise AggregateIndexError(str(exc)) from exc
 
@@ -370,15 +494,18 @@ class LegacyV4Repository:
         context therefore sees no request after a rejected lease or decision,
         and rolls published files back if binding or state save fails.
         """
+        self._reject_reentrant_entry("execute_effects")
         with self.transaction():
             current = self.load()
-            decision = decide(copy.deepcopy(current))
+            with self._callback_guard():
+                decision = decide(copy.deepcopy(current))
             if not isinstance(decision, EvidenceDecision) or not isinstance(decision.state, dict):
                 raise ValueError("effect-decision-invalid")
             effects = self.validate_effects(decision.effects)
-            with effect_transaction(effects) as published:
+            with self._guarded_context(effect_transaction, effects) as published:
                 if bind_published is not None:
-                    bind_published(decision, published)
+                    with self._callback_guard():
+                        bind_published(decision, published)
                 self.save(decision.state, backup=backup)
             return decision
 
@@ -426,6 +553,8 @@ class V5CompatibilityRepository:
         self._admitted: AdmittedSnapshot | None = None
         self._replayed: CommitResult | None = None
         self._transaction_active = False
+        self._pending: list[_PendingDecision] = []
+        self._executing = 0
 
     @contextlib.contextmanager
     def transaction(self):
@@ -437,7 +566,40 @@ class V5CompatibilityRepository:
         finally:
             self._admitted = None
             self._replayed = None
+            self._pending.clear()
             self._transaction_active = False
+
+
+    # 外部から注入される callable の信頼境界（#632 / Sol 4 巡目）。分類の網羅は
+    # inventory テストが固定する。
+    GUARDED_INJECTED_CALLABLES = (
+        "_format_guard",
+        "_prepare_state",
+        "_add_to_aggregate",
+        "_remove_from_aggregate",
+        "_lease_committed",
+    )
+
+    @contextlib.contextmanager
+    def _callback_guard(self):
+        """Reject persistence entry points while a caller callback is running."""
+        self._executing += 1
+        try:
+            yield
+        finally:
+            self._executing -= 1
+
+    def _guarded_call(self, callback, *args, **kwargs):
+        """Run one injected callable inside the re-entrancy boundary."""
+        with self._callback_guard():
+            return callback(*args, **kwargs)
+
+    def _reject_reentrant_entry(self, operation: str) -> None:
+        if self._executing:
+            raise FencedCommitError(
+                "request-invalid",
+                "%s is not allowed while a decision is being executed" % operation,
+            )
 
     def _request(self) -> ExecutionRequest:
         operation_id = self._operation_id or "compat:" + secrets.token_hex(16)
@@ -485,7 +647,7 @@ class V5CompatibilityRepository:
         if self._admitted is not None:
             raise FencedCommitError("request-invalid", "v5 transaction already loaded")
         if self._format_guard is not None:
-            self._format_guard()
+            self._guarded_call(self._format_guard)
         admitted = self._repository.begin(self._request())
         if isinstance(admitted, CommitResult):
             snapshot = self._repository.read(self._session_id)
@@ -504,13 +666,23 @@ class V5CompatibilityRepository:
     def read(self, session_id: str):
         return self._repository.read(session_id)
 
-    def execute(self, state, mutation=None, transition=None):
+    def execute(self, state, mutation=None, transition=None, finalize=None):
+        self._reject_reentrant_entry("execute")
         if isinstance(state, ExecutionRequest):
             return self._repository.execute(state)
+        if finalize is not None and transition is None:
+            raise FencedCommitError("request-invalid", "finalize requires a transition")
+        # 再入した save() は claims が未登録の隙を突いて検証を迂回できるため、
+        # mutation / finalize の実行中は保存を明示的に拒否する（#632 の Sol 指摘）。
         proposed = copy.deepcopy(state)
-        mutation(proposed)
-        if transition is not None:
-            _apply_transition_claims(transition, proposed)
+        with self._callback_guard():
+            mutation(proposed)
+            if transition is not None:
+                claims = _apply_transition_claims(transition, proposed)
+                if finalize is not None:
+                    finalize(proposed)
+                _verify_transition_claims(proposed, claims, "finalizer diverges from the decided transition")
+                self._pending.append(_PendingDecision(proposed, claims))
         return proposed
 
     def save(
@@ -522,14 +694,20 @@ class V5CompatibilityRepository:
         aggregate_action: str | None = None,
     ) -> None:
         del backup, administrative
+        self._reject_reentrant_entry("save")
         if self._format_guard is not None:
-            self._format_guard()
+            self._guarded_call(self._format_guard)
+        pending = next((item for item in self._pending if item.document is state), None)
+        if self._pending and pending is None:
+            raise FencedCommitError("transition-divergence", "save target is not a decided document")
+        proposed = self._guarded_call(self._prepare_state, copy.deepcopy(state))
+        if pending is not None:
+            _verify_transition_claims(proposed, pending.claims, "save diverges from the decided transition")
         if self._replayed is not None:
             return
         admitted = self._admitted
         if admitted is None:
             raise FencedCommitError("request-invalid", "v5 transaction was not loaded")
-        proposed = self._prepare_state(copy.deepcopy(state))
         state_bytes = json.dumps(
             proposed,
             ensure_ascii=False,
@@ -545,17 +723,15 @@ class V5CompatibilityRepository:
         self._repository.commit(prepared, prepared.precondition)
         self._admitted = None
         if self._lease_committed is not None:
-            self._lease_committed(admitted.pending_lease, proposed)
-        callback = {
-            None: None,
-            "add": self._add_to_aggregate,
-            "remove": self._remove_from_aggregate,
-        }.get(aggregate_action)
+            self._guarded_call(self._lease_committed, admitted.pending_lease, proposed)
         if aggregate_action not in {None, "add", "remove"}:
             raise ValueError("unknown aggregate action")
-        if callback is not None:
+        if aggregate_action is not None:
             try:
-                callback()
+                if aggregate_action == "add":
+                    self._guarded_call(self._add_to_aggregate)
+                else:
+                    self._guarded_call(self._remove_from_aggregate)
             except Exception as exc:
                 raise AggregateIndexError(str(exc)) from exc
 
