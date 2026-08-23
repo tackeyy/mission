@@ -717,3 +717,324 @@ def test_force_approval_binding_holds_with_the_real_validator(tmp_path):
     assert saved["passes"] is True
     assert saved["terminal_outcome"] == "completed_pass"
     assert saved["force_approval"]["consumed"] is True
+
+
+# --- permission observation（設計書 §2b / §4 / §4b） ---
+
+
+def _permission_observation(document, *, saved):
+    from . import test_issue632_transition_is_the_writer as harness
+    from mission_application.runtime_guard import (
+        PermissionObservationRequest,
+        PermissionProbe,
+        record_permission_observation,
+    )
+
+    repository = harness._in_memory_repository(document, saved=saved)
+    return record_permission_observation(
+        repository,
+        PermissionObservationRequest(
+            probes=(PermissionProbe("state", "denied", "write-unavailable"),),
+            observed_at="2030-08-23T01:00:00Z",
+        ),
+    )
+
+
+def test_permission_observation_saved_document_is_unchanged(tmp_path):
+    """通常 active state は従来どおり blocked_external を保存する."""
+    from . import test_issue632_transition_is_the_writer as harness
+
+    saved = {}
+    result = _permission_observation(harness._active_document(), saved=saved)
+    assert saved["terminal_outcome"] == "blocked_external"
+    assert saved["halt_category"] == "blocked-external"
+    assert saved["loop_active"] is False
+    assert result.terminal_outcome == "blocked_external"
+    assert saved == _MAIN_SAVED_DOCUMENTS["_path_permission_preflight"]
+
+
+def test_permission_observation_on_supersede_marked_state_returns_the_persisted_outcome(
+    tmp_path,
+):
+    """(A) の先行規則が kernel でも成立し、保存値・claim・戻り値が一致する."""
+    from . import test_issue632_transition_is_the_writer as harness
+    from mission_kernel.transitions import transition_control_claims
+
+    saved = {}
+    result = _permission_observation(
+        harness._active_document(resolution_status="superseded"), saved=saved
+    )
+    claims = transition_control_claims(result.decision.transition)
+    assert claims["terminal_outcome"].value == "stale_superseded"
+    assert saved["terminal_outcome"] == "stale_superseded"
+    assert result.terminal_outcome == "stale_superseded"
+
+    # 現行 main は明示 blocked_external を書くため復号値と矛盾していた。解消を固定する。
+    from mission_common import derive_terminal_outcome
+
+    assert derive_terminal_outcome(saved) == "stale_superseded"
+
+
+def test_permission_observation_result_is_derived_from_the_saved_document(tmp_path):
+    from . import test_issue632_transition_is_the_writer as harness
+
+    saved = {}
+    result = _permission_observation(
+        harness._active_document(resolution_status="superseded"), saved=saved
+    )
+    assert result.terminal_outcome == saved["terminal_outcome"]
+    assert result.halt_category == saved["halt_category"]
+
+
+@pytest.mark.parametrize(
+    "outcome", ("completed_pass", "blocked_external", "stale_superseded")
+)
+def test_permission_observation_on_a_terminal_document_falls_back_to_gate_only(
+    tmp_path, outcome
+):
+    """既に terminal な document では transition を送らず、従来の compat 書き込みが残る."""
+    from . import test_issue632_transition_is_the_writer as harness
+
+    terminal = harness._active_document(
+        phase="done" if outcome == "completed_pass" else "halted",
+        loop_active=False,
+        passes=outcome == "completed_pass",
+        halt_reason="" if outcome == "completed_pass" else "already halted",
+        terminal_outcome=outcome,
+    )
+    saved = {}
+    result = _permission_observation(copy.deepcopy(terminal), saved=saved)
+    assert result.decision.transition is not None  # gate としては通っている
+    # gate-only 経路では compat writer が固定値を書く（現行 main と同じ）。
+    assert saved["terminal_outcome"] == "blocked_external"
+    assert saved["halt_category"] == "blocked-external"
+    assert saved["loop_active"] is False
+
+
+# --- mark_halt の gate-only 経路（設計書 §4） ---
+
+
+def test_mark_halt_gate_only_paths_still_write_compatibility_fields(tmp_path):
+    from . import test_issue632_transition_is_the_writer as harness
+    from mission_application.lifecycle import (
+        MarkHaltRequest,
+        MarkHaltServices,
+        mark_halt,
+    )
+
+    saved = {}
+    repository = harness._in_memory_repository(harness._active_document(), saved=saved)
+    result = mark_halt(
+        repository,
+        MarkHaltRequest(
+            reason="janitor orphan",
+            category="stale",
+            at="2030-08-23T01:00:00Z",
+            set_terminal_phase=False,
+        ),
+        MarkHaltServices(
+            reject_active_provider_mutation=lambda _state, _command: None,
+            transition_phase=harness._timing_transition_phase,
+            goal_dispatch_fields=lambda _state: {},
+            terminalize_without_phase=lambda proposed, at, _stale: proposed.update(
+                {"terminalized_at": at}
+            ),
+        ),
+    )
+    # set_terminal_phase=False は kernel の主張から意図的に逸脱する soft-terminal。
+    assert saved["halt_category"] == "stale"
+    assert saved["loop_active"] is False
+    assert saved["terminal_outcome"] == "stale_superseded"
+    assert saved["phase"] == "executing"
+    assert result.decision.accepted
+
+
+# --- goal-route（設計書 §2 の `_SetFieldsPlan`） ---
+
+
+def _goal_route_services(cli, *, calls, guidance=None, tier=None):
+    from mission_application.lifecycle import SetFieldsServices
+
+    def _record(name, value):
+        calls.append(name)
+        return value
+
+    return SetFieldsServices(
+        frozen_fields=frozenset(cli.FROZEN_FIELDS),
+        reject_active_provider_mutation=lambda _state, _command: calls.append(
+            "reject_active_provider_mutation"
+        ),
+        normalize_phase=cli._normalize_set_phase_value,
+        transition_phase=cli._transition_phase,
+        ensure_phase_timing=lambda _state, _at: calls.append("ensure_phase_timing"),
+        derive_review_tier=lambda *args: _record(
+            "derive_review_tier", tier or cli.derive_review_tier(*args)
+        ),
+        derive_review_tier_decision=lambda *args: _record(
+            "derive_review_tier_decision", cli.derive_review_tier_decision(*args)
+        ),
+        reviewer_count_by_tier=dict(cli.TIER_REVIEWER_COUNT),
+        goal_dispatch_fields=lambda state: _record(
+            "goal_dispatch_fields", cli._goal_dispatch_route_fields(state)
+        ),
+        goal_dispatch_guidance=lambda _dispatch, _prefix: _record(
+            "goal_dispatch_guidance", guidance if guidance is not None else ""
+        ),
+    )
+
+
+def _route_document():
+    from . import test_issue632_transition_is_the_writer as harness
+
+    return harness._active_document(phase="planning", iteration=1)
+
+
+def _run_set_fields(document, kvs, services, *, saves):
+    from mission_application.lifecycle import SetFieldsRequest, set_fields
+    from mission_persistence.legacy_v4 import LegacyV4Repository
+
+    repository = LegacyV4Repository(
+        lock=contextlib.nullcontext,
+        read_state=lambda: copy.deepcopy(document),
+        write_state=lambda proposed, **kwargs: saves.append(
+            (copy.deepcopy(proposed), kwargs)
+        ),
+        backup_state=lambda: None,
+        add_to_aggregate=lambda: saves.append(("aggregate-add", {})),
+        remove_from_aggregate=lambda: saves.append(("aggregate-remove", {})),
+    )
+    return set_fields(
+        repository,
+        SetFieldsRequest(kvs=kvs, at="2030-08-23T01:00:00Z"),
+        services,
+    )
+
+
+def test_goal_route_sends_its_markhalt_transition(tmp_path):
+    from . import test_issue632_transition_is_the_writer as harness
+    from mission_kernel.commands import MarkHalt
+    from mission_kernel.transitions import transition_control_claims
+
+    cli = harness._load_cli_module("issue632_goal_route")
+    calls, saves = [], []
+    result = _run_set_fields(
+        _route_document(), ("complexity=Simple",), _goal_route_services(cli, calls=calls), saves=saves
+    )
+
+    assert result.routed_verdict is not None
+    assert result.routed_verdict["route"] == "goal"
+    assert isinstance(result.decision.transition.new_state.control.halt_category.value, str)
+    claims = transition_control_claims(result.decision.transition)
+    assert claims["terminal_outcome"].value == "routed_elsewhere"
+
+    document = next(saved for saved, _kwargs in saves if isinstance(saved, dict))
+    assert document["terminal_outcome"] == "routed_elsewhere"
+    assert document["halt_category"] == "routed-goal"
+    assert document["loop_active"] is False
+
+
+def test_goal_route_specific_services_are_called_once_per_plan(tmp_path):
+    from . import test_issue632_transition_is_the_writer as harness
+
+    cli = harness._load_cli_module("issue632_goal_route_once")
+    calls, saves = [], []
+    _run_set_fields(
+        _route_document(), ("complexity=Simple",), _goal_route_services(cli, calls=calls), saves=saves
+    )
+    assert calls.count("goal_dispatch_fields") == 1
+    assert calls.count("goal_dispatch_guidance") == 1
+    assert calls.count("ensure_phase_timing") == 1
+
+
+def test_goal_route_preserves_administrative_flag_and_aggregate_action(tmp_path):
+    from . import test_issue632_transition_is_the_writer as harness
+
+    cli = harness._load_cli_module("issue632_goal_route_admin")
+    calls, saves = [], []
+    _run_set_fields(
+        _route_document(), ("complexity=Simple",), _goal_route_services(cli, calls=calls), saves=saves
+    )
+    write = next((saved, kwargs) for saved, kwargs in saves if isinstance(saved, dict))
+    assert write[1].get("administrative") is True
+    assert ("aggregate-remove", {}) in saves
+
+
+@pytest.mark.parametrize(
+    ("kvs", "reason"),
+    (
+        (("no-separator",), "key-value-format"),
+        (("review_tier=bogus",), "review-tier-invalid"),
+    ),
+)
+def test_set_fields_error_precedence_is_unchanged(tmp_path, kvs, reason):
+    from . import test_issue632_transition_is_the_writer as harness
+    from mission_application.lifecycle import LifecycleFailure
+
+    cli = harness._load_cli_module("issue632_set_errors")
+    calls, saves = [], []
+    with pytest.raises(LifecycleFailure) as error:
+        _run_set_fields(
+            _route_document(), kvs, _goal_route_services(cli, calls=calls), saves=saves
+        )
+    assert error.value.reason == reason
+    assert saves == [], "拒否時は保存しない"
+
+
+def test_set_fields_service_call_sequence_is_unchanged_for_duplicate_keys(tmp_path):
+    """重複 key の service 呼び出し回数は現行どおり（plan 化で 1 回に潰さない）."""
+    from . import test_issue632_transition_is_the_writer as harness
+
+    cli = harness._load_cli_module("issue632_set_duplicates")
+    calls, saves = [], []
+    _run_set_fields(
+        _route_document(),
+        ("review_tier=light", "complexity=Critical", "review_tier=light"),
+        _goal_route_services(cli, calls=calls),
+        saves=saves,
+    )
+    # `review_tier` の出現ごとに derive_review_tier が呼ばれる現行挙動を固定する。
+    assert calls.count("derive_review_tier") == 2
+    assert calls.count("derive_review_tier_decision") == 0
+
+
+# set_fields は plan 化で service 呼び出し列・warning・保存 document が変わり得るため、
+# main `ba5a87c` で同じ 3 シナリオを実行した結果を golden として固定する。
+_MAIN_SET_FIELDS = json.loads(
+    (Path(__file__).resolve().parent / "fixtures" / "issue632_main_set_fields.json").read_text(
+        encoding="utf-8"
+    )
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "kvs"),
+    (
+        ("route", ("complexity=Simple",)),
+        ("dupe", ("review_tier=light", "complexity=Critical", "review_tier=light")),
+        ("order", ("complexity=Critical", "review_tier=light")),
+    ),
+)
+def test_set_fields_matches_main_for_calls_warnings_and_saves(tmp_path, label, kvs):
+    from . import test_issue632_transition_is_the_writer as harness
+
+    cli = harness._load_cli_module("issue632_set_golden_" + label)
+    calls, saves = [], []
+    services = _goal_route_services(cli, calls=calls)
+    # golden 側は reject_active_provider_mutation を "reject" として記録している。
+    from dataclasses import replace as _replace
+
+    services = _replace(
+        services,
+        reject_active_provider_mutation=lambda _state, _command: calls.append("reject"),
+    )
+    result = _run_set_fields(_route_document(), kvs, services, saves=saves)
+
+    golden = _MAIN_SET_FIELDS[label]
+    assert calls == golden["calls"]
+    assert list(result.warnings) == golden["warnings"]
+    normalized = [
+        [saved, sorted(kwargs.items(), key=str)] if isinstance(saved, dict) else [saved, []]
+        for saved, kwargs in saves
+    ]
+    assert json.loads(json.dumps(normalized, default=str)) == golden["saves"]
+    assert json.loads(json.dumps(result.routed_verdict, default=str)) == golden["routed"]
