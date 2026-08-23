@@ -156,6 +156,12 @@ WORKTREE_ARCHIVE_POINTER_SCHEMA = "mission-worktree-current/1"
 _MANIFEST_VALIDATION_CACHE: dict[tuple[str, str, str, str], tuple[str, list[dict[str, Any]]]] = {}
 
 FINDING_SPECS = {
+    "unsafe-legacy-specialist-record": FindingSpec(
+        "unsafe-legacy-specialist-record", "P1",
+        "unsafe_legacy_specialist_records", "item",
+        "unsafe legacy specialist record was isolated from the audit snapshot",
+        "isolated unsafe legacy specialist records: {count}",
+    ),
     "invalid-worktree-archive": FindingSpec(
         "invalid-worktree-archive", "P1", "invalid_worktree_archives", "item",
         "invalid worktree archive pointer, generation, or manifest",
@@ -1195,7 +1201,16 @@ def load_records(
                 state = authoritative_snapshot.document_copy()
             if not is_mission_state(state):
                 continue
-            validate_specialist_public_state(state)
+            try:
+                validate_specialist_public_state(state)
+            except SpecialistPublicContractError:
+                if state_read_errors is None:
+                    raise
+                state_read_errors.append({
+                    "path": str(path),
+                    "reason": "unsafe-legacy-specialist-record",
+                })
+                continue
             records.append(
                 StateRecord(
                     path=path,
@@ -2770,6 +2785,14 @@ def aggregate(
 ) -> dict[str, Any]:
     invalid_worktree_archives = invalid_worktree_archives or []
     state_read_errors = state_read_errors or []
+    unsafe_legacy_specialist_records = [
+        {
+            "reason": "unsafe-legacy-specialist-record",
+            "updated_at": "",
+        }
+        for item in state_read_errors
+        if item.get("reason") == "unsafe-legacy-specialist-record"
+    ]
     planning_provider_kpis = reduce_planning_provider_kpis(
         [record.state for record in records], population_kind="observed"
     )
@@ -3013,6 +3036,7 @@ def aggregate(
     return {
         "total_sessions": len(records),
         "state_read_error_count": len(state_read_errors),
+        "unsafe_legacy_specialist_records": unsafe_legacy_specialist_records,
         "invalid_worktree_archives": invalid_worktree_archives,
         "invalid_worktree_archive_count": len(invalid_worktree_archives),
         "pass_count": pass_count,
