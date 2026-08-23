@@ -140,6 +140,9 @@ from mission_application.lifecycle import (  # noqa: E402
     reactivate as run_reactivate,
     refresh_pid as run_refresh_pid,
     set_fields as run_set_fields,
+    TERMINALIZABLE_ACTIVE,
+    TERMINALIZABLE_UNDECODABLE,
+    diagnose_terminalizable_state,
     real_terminalizable_state,
     update_project_root as run_update_project_root,
 )
@@ -16171,7 +16174,19 @@ def _supersede_reviews_locked(args, cwd: Path):
                 # supersedes index も generic 書き込みとして kernel の閉集合
                 # フィールド権限で審査する。
                 if role == "superseded":
-                    real_state = real_terminalizable_state(state)
+                    supersede_diagnosis = diagnose_terminalizable_state(state)
+                    if supersede_diagnosis == TERMINALIZABLE_UNDECODABLE:
+                        print(
+                            "WARNING: supersede terminalization fell back to the "
+                            "synthetic view because %s could not be decoded"
+                            % state_path.name,
+                            file=sys.stderr,
+                        )
+                    real_state = (
+                        real_terminalizable_state(state)
+                        if supersede_diagnosis == TERMINALIZABLE_ACTIVE
+                        else None
+                    )
                     decision = decide(
                         real_state if real_state is not None else _mark_halt_decision_state(state),
                         MarkHalt(
@@ -16308,6 +16323,14 @@ def cmd_mark_halt(args):
             file=sys.stderr,
         )
         sys.exit(2)
+    if result.claim_source == TERMINALIZABLE_UNDECODABLE:
+        # 批2-a-3 (#632): 復号不能 doc への gate-only 降格は正常な terminal
+        # （冪等 halt）と区別できないと障害調査で追えない。state には書かない。
+        print(
+            "WARNING: halt fell back to the synthetic view because the session "
+            "document could not be decoded (transition claims were not applied)",
+            file=sys.stderr,
+        )
     if result.aggregate_error is not None:
         print(
             f"WARNING: aggregate index update failed: {result.aggregate_error}",

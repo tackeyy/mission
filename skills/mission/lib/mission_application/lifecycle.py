@@ -205,6 +205,9 @@ class MarkHaltResult:
     halt_category: str
     decision: Decision
     aggregate_error: str | None
+    # 批2-a-3 (#632): claims の根拠に実 state を使えたか。"undecodable" は想定外の
+    # 劣化であり、gate-only 降格が無音にならないよう呼び出し元へ伝える。
+    claim_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -649,7 +652,12 @@ def mark_halt(
         # する（claims の halt_category / role 依存 outcome が実 state に基づく）。
         # terminal / 劣化 doc は monotonic view へ fallback し（冪等 emergency
         # halt の保証）、その場合は gate-only（transition 非送付）。
-        real_state = real_terminalizable_state(state)
+        diagnosis = diagnose_terminalizable_state(state)
+        real_state = (
+            real_terminalizable_state(state)
+            if diagnosis == TERMINALIZABLE_ACTIVE
+            else None
+        )
         decision = decide(
             real_state if real_state is not None else _mark_halt_decision_state(state),
             command,
@@ -735,6 +743,7 @@ def mark_halt(
         request.category,
         decision,
         aggregate_error,
+        claim_source=diagnosis,
     )
 
 

@@ -1218,51 +1218,59 @@ def test_v5_replay_save_verifies_before_returning(tmp_path):
 
 
 def test_record_permission_preflight_halt_unpacks_the_tuple_explicitly():
-    """`(False, None)` を truthy 扱いしないこと（設計書 §4b・4 巡目 Low）。
+    """tuple を返す helper の戻り値が必ず tuple unpack で受け取られること。
 
-    `_record_permission_probe_observation` は tuple を返すようになったため、
-    呼び出し元が `bool(result)` で判定すると halt 未記録でも真になる。
+    `bool(func())` だけでなく `if func():` も `(False, None)` を truthy にする。
+    否定的な allowlist では後者を見逃すため、**呼び出しの親が 2 要素の tuple
+    unpack 代入であること**を肯定的に固定する（設計書 §4b / 4 巡目 Low）。
     """
     from . import test_issue632_transition_is_the_writer as harness
 
     cli = harness._load_cli_module("issue632_tuple_unpack")
-    source = Path(cli.__file__).read_text(encoding="utf-8")
-    tree = ast.parse(source)
+    tree = ast.parse(Path(cli.__file__).read_text(encoding="utf-8"))
 
+    parents = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+
+    tuple_helpers = {
+        "_record_permission_probe_observation",
+        "_record_permission_preflight_halt",
+    }
     callers = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
         name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
-        if name in {
-            "_record_permission_probe_observation",
-            "_record_permission_preflight_halt",
-        }:
-            callers.append(node)
+        if name in tuple_helpers:
+            callers.append((name, node))
     assert callers, "tuple を返す helper の呼び出しが見つからない"
 
-    # tuple の戻り値が bool(...) / truthy 判定へ直接渡されていないことを固定する。
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            func = node.func
-            if isinstance(func, ast.Name) and func.id == "bool":
-                for argument in node.args:
-                    if isinstance(argument, ast.Call):
-                        inner = argument.func
-                        inner_name = (
-                            inner.id
-                            if isinstance(inner, ast.Name)
-                            else getattr(inner, "attr", None)
-                        )
-                        assert inner_name != "_record_permission_probe_observation", (
-                            "tuple を bool() へ直接渡すと (False, None) が truthy になる"
-                        )
+    for name, call in callers:
+        # 呼び出しは代入の右辺（条件式でラップされる場合はその親）にある。
+        node = call
+        while True:
+            parent = parents.get(id(node))
+            assert parent is not None, "%s: 代入の外で使われている" % name
+            if isinstance(parent, ast.Assign):
+                target = parent.targets[0]
+                assert isinstance(target, ast.Tuple) and len(target.elts) == 2, (
+                    "%s: 2 要素の tuple unpack で受け取ること" % name
+                )
+                break
+            if isinstance(parent, ast.Return):
+                # tuple をそのまま返す pass-through は truthy 判定を作らない。
+                break
+            assert isinstance(parent, (ast.IfExp, ast.Tuple, ast.Starred)), (
+                "%s: 戻り値が %s に渡されている（tuple unpack で受け取ること）"
+                % (name, type(parent).__name__)
+            )
+            node = parent
 
-    # 実挙動: 記録できなかった観測は (False, None) を返し、halt_recorded は False。
-    assert bool((False, None)) is True  # 罠そのもの
-    recorded, outcome = (False, None)
-    assert recorded is False and outcome is None
+    # 罠そのものを記録する: tuple は常に truthy。
+    assert bool((False, None)) is True
 
 
 @pytest.mark.parametrize(
@@ -1327,6 +1335,43 @@ def test_supersede_reviews_on_a_terminal_document_falls_back_to_gate_only(
         terminal, "stale", "superseded by a replacement run"
     )
     assert decision.accepted
+
+
+def test_supersede_reviews_saves_gate_only_values_through_the_real_cli(
+    legacy_run_cli, tmp_path
+):
+    """既に terminal な世代へ supersede-reviews を再実行しても保存値が壊れないこと。
+
+    述語と decide だけでなく、**実 CLI 経由の保存結果**で gate-only 経路を固定する
+    （transition 非送付なので compat writer の値がそのまま残る）。
+    """
+    common = [
+        "init", "review issue", "--force-mission",
+        "--review-group-id", "issue-632-gate-only",
+    ]
+    for sid in ("old", "current"):
+        result = legacy_run_cli(
+            *common, cwd=tmp_path, env_extra={"MISSION_SESSION_ID": sid}
+        )
+        assert result.returncode == 0, result.stderr
+
+    sessions = tmp_path / ".mission-state" / "sessions"
+    for attempt in (1, 2):
+        result = legacy_run_cli(
+            "supersede-reviews", "--group", "issue-632-gate-only", cwd=tmp_path,
+            env_extra={
+                "MISSION_SESSION_ID": "current",
+                "MISSION_OPERATION_ID": "supersede-632-%d" % attempt,
+            },
+        )
+        assert result.returncode == 0, result.stderr
+        old_state = json.loads((sessions / "old.json").read_text())
+        # 1 回目は実 state decide（claims 適用）、2 回目は既に terminal なので
+        # gate-only。どちらでも保存値は同じでなければならない。
+        assert old_state["terminal_outcome"] == "stale_superseded"
+        assert old_state["halt_category"] == "stale"
+        assert old_state["loop_active"] is False
+        assert old_state["passes"] is False
 
 
 def test_permission_preflight_reports_unsealed_and_halt_rejection(monkeypatch, capsys):
@@ -1445,3 +1490,35 @@ def test_pending_claims_are_cleared_when_the_outermost_transaction_exits(tmp_pat
     with repository.transaction():
         repository.save({"phase": "planning", "loop_active": True})
     assert len(writes) == 1
+
+
+def test_init_reports_internal_invariant_without_traceback(monkeypatch, capsys):
+    """`cmd_init` 経路でも kernel invariant 違反が構造化されること（設計書 §5）。
+
+    `_exit_init_write_failure` は `except OSError` の中から呼ばれるため、
+    `PermissionHaltRejected` が抜けると traceback になる（修正前の挙動）。
+    """
+    from mission_application.runtime_guard import PermissionHaltRejected
+
+    path = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
+    spec = importlib.util.spec_from_file_location("issue632_init_invariant", path)
+    cli = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = cli
+    spec.loader.exec_module(cli)
+
+    state_file = Path(".mission-state") / "sessions" / "test.json"
+    monkeypatch.setattr(Path, "exists", lambda _self: True)
+    monkeypatch.setattr(
+        cli,
+        "_record_permission_preflight_halt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            PermissionHaltRejected("permission-halt-rejected")
+        ),
+    )
+    with pytest.raises(SystemExit) as result:
+        cli._exit_init_write_failure(Path("."), state_file)
+    assert result.value.code == 2
+    captured = capsys.readouterr()
+    assert "internal-invariant: permission-halt-rejected" in captured.err
+    assert captured.out == "", "invariant 違反では fallback JSON を出さない"
