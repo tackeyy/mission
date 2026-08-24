@@ -1,5 +1,6 @@
 """iter2 リファクタ: 共通 search_roots ヘルパー + 抽出関数の直接単体テスト (2026-06-13)."""
 import importlib.util
+import sys
 import json
 from pathlib import Path
 
@@ -73,10 +74,27 @@ def test_archive_scoring_output_agent_none_normalized(tmp_path):
     assert "agent=unknown" in Path(dst).read_text(encoding="utf-8")
 
 
+def _agent_summary(states, classes=None):
+    """#626 PR2 で projection 層へ移動した実装を、移動後の場所から解決する。
+
+    旧 adapter 実装は classes を内部で `_classify` していたため、旧テストの
+    呼び出し形（states のみ / precomputed classes）を両方受ける。
+    """
+    sys.path.insert(0, str(MISSION_STATE_PY.parent.parent / "lib"))
+    try:
+        from mission_common import classify_state
+        from mission_projection.stats import _build_agent_summary
+    finally:
+        sys.path.pop(0)
+    if classes is None:
+        classes = [classify_state(state) for state in states]
+    return _build_agent_summary(states, classes)
+
+
 def test_build_agent_summary_empty():
     """空リストは空 dict."""
     m = _load()
-    assert m._build_agent_summary([]) == {}
+    assert _agent_summary([]) == {}
 
 
 def test_build_agent_summary_counts_by_agent_and_class():
@@ -88,7 +106,7 @@ def test_build_agent_summary_counts_by_agent_and_class():
         {"agent": "codex", "passes": False, "loop_active": True},
         {"passes": True},  # agent 欠落 → unknown
     ]
-    bs = m._build_agent_summary(states)
+    bs = _agent_summary(states)
     assert bs["claude-code"]["total"] == 2
     assert bs["claude-code"]["pass"] == 1
     assert bs["claude-code"]["halt"] == 1
@@ -161,8 +179,8 @@ def test_build_agent_summary_accepts_precomputed_classes():
     m = _load()
     states = [{"agent": "cli", "passes": True}, {"agent": "cli", "halt_reason": "x"}]
     classes = [m._classify(s) for s in states]
-    with_classes = m._build_agent_summary(states, classes)
-    without = m._build_agent_summary(states)
+    with_classes = _agent_summary(states, classes)
+    without = _agent_summary(states)
     assert with_classes == without
     assert with_classes["cli"]["total"] == 2
     assert with_classes["cli"]["pass"] == 1
