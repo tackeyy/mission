@@ -204,10 +204,11 @@ def test_plan_import_does_not_publish_before_foreign_lease_rejection(monkeypatch
 
 
 def test_uncontracted_exit_zero_is_terminal_but_not_applied_required_evidence():
-    spec = importlib.util.spec_from_file_location("mission_state_unvalidated_evidence", MISSION_STATE_PY)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None; spec.loader.exec_module(module)
-    status, _ = module._classify_command_provider_result({}, 0, "substantive output", "")
+    # #626: 分類は adapter から application 層へ移動した。adapter 経由で
+    # private を掴むと境界を跨いだ re-export が必要になるため、所有者から直接 import する。
+    from mission_application.command_provider import _classify_command_provider_result
+
+    status, _ = _classify_command_provider_result({}, 0, "substantive output", "")
     assert status == "unvalidated-evidence"
     report = candidate_accounting_report({
         "specialists_candidates": [{"skill": "portable-provider", "role": "planning", "required": True}],

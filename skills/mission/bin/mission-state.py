@@ -228,7 +228,6 @@ from mission_application.command_provider import (  # noqa: E402
     ProviderPolicyServices as CommandProviderPolicyServices,
     StateEffectsServices as CommandProviderStateEffectsServices,
     WorkspaceServices as CommandProviderWorkspaceServices,
-    _classify_command_provider_result,
     invoke_command_provider,
 )
 from mission_application.runtime_guard import (  # noqa: E402

@@ -469,7 +469,7 @@ def test_cli_call_path_uses_a4_dispatch_and_terminal_decisions():
     )
 
     assert "intent_decision = record_dispatch_intent(" in use_case
-    assert "**current_entry, **intent_decision," in use_case
+    assert "entry = {**current_entry, **intent_decision," in use_case
     assert "terminal = decide_provider_terminal_result(" in use_case
     assert "status, reason = terminal.status, terminal.reason" in use_case
 
