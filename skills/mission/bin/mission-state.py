@@ -146,6 +146,12 @@ from mission_application.lifecycle import (  # noqa: E402
     real_terminalizable_state,
     update_project_root as run_update_project_root,
 )
+from mission_application.next_action import (  # noqa: E402
+    NextActionRequest,
+    NextActionServices,
+    _unclosed_optional_specialist_skills,
+    derive_next_action as run_derive_next_action,
+)
 from mission_kernel.commands import MarkHalt  # noqa: E402
 from mission_kernel.model import HaltCategory  # noqa: E402
 from mission_kernel.transitions import decide, transition_control_claim_bounds  # noqa: E402
@@ -2254,23 +2260,6 @@ def _write_terminal_outcome(data: dict) -> None:
     if outcome is None:
         raise ValueError("terminal transition did not produce a terminal outcome")
     data["terminal_outcome"] = outcome
-
-
-def _halt_category_for_confirmation(value) -> str:
-    """Normalize a persisted category for approval matching without mutating audit data."""
-    if isinstance(value, str) and value in HALT_CATEGORIES:
-        return value
-    return "unknown"
-
-
-def _is_legacy_stale_halt(category, reason) -> bool:
-    """Recognize pre-category stale/orphan state consistently across all recovery paths."""
-    category_is_legacy = category is None or category == "" or category == "unknown"
-    return (
-        category_is_legacy
-        and isinstance(reason, str)
-        and reason.startswith(("orphan:", "stale:"))
-    )
 
 
 # M7 (2026-06-10): SKILL.md Phase 1 の複雑度→Reviewer 数マッピング
@@ -9795,41 +9784,6 @@ def cmd_advance(args):
     )
 
 
-def _happy_path_sequence(
-    phase: str,
-    reviewer_count: int,
-    *,
-    plan_mode: str = "subagent",
-    adopt_core: bool = False,
-) -> list[str]:
-    """#339: 現 phase から closeout までの happy-path コマンド列.
-
-    ゲート失敗 (exit 2) がない限り、orchestrator はこの列を `next` の再呼び出し
-    なしで連続実行してよい (ターン圧縮)。ゲート失敗時のみ next を再参照する。
-    portfolio-v4 実測: mission 19-31 turns vs goal 5 — 毎ターンの context 再処理が
-    時間比とトークン比の乖離 (10-15x vs 4x) の主因。
-    """
-    plan_step = (
-        "plan を artifact に記載 (inline #339)"
-        if plan_mode == "inline"
-        else "Skill: mission-planner"
-    )
-    steps = [
-        plan_step,
-        "mission-state.py advance --phase executing --activity active:implementation",
-        "Skill: mission-executor",
-        "mission-state.py advance --phase reviewing --activity reviewer-wait:review-response",
-        f"Skill: mission-reviewer x{reviewer_count} (1 message, parallel)",
-        "mission-state.py review-import --iteration <i> --stdin (reviewer ごとに実行し review_evidence_ref.path を保持)",
-        f"mission-state.py review-finalize --iteration <i> --input-ref <review_evidence_ref.path> (全 reviewer 分を反復) --min-reviewers {reviewer_count}",
-        "mission-state.py closeout",
-    ]
-    if adopt_core and phase == "planning":
-        steps.insert(1, "mission-state.py planning adopt-core --input <plan.json>")
-    start = {"planning": 0, "executing": 2, "reviewing": 4}[phase]
-    return steps[start:]
-
-
 def _trusted_canonical_plan_binding(data: dict, plan: dict) -> dict:
     """Resolve plan lineage from state-owned producer evidence, never CLI input."""
     source = plan.get("source")
@@ -9870,26 +9824,6 @@ def _require_current_primary_planning_binding(data: dict, provider_id: str | Non
     if len(matches) != 1 or (provider_id is not None and matches[0].get("provider_id") != provider_id):
         _provider_gate("planning-primary-binding-mismatch")
     return matches[0]
-
-
-def _native_review_handoff_hint(
-    iteration: int | str,
-    reviewer_count: int | str,
-    *,
-    resubmit: bool = False,
-) -> str:
-    """Return staged native commands without temp files or shell composition."""
-    resubmit_hint = (
-        ' --resubmit-reason "retry with review evidence"' if resubmit else ""
-    )
-    return (
-        f"Step 1 (reviewer ごと): mission-state.py review-import --iteration {iteration} "
-        "--stdin; 返却 JSON の review_evidence_ref.path を保持する。 "
-        f"Step 2: mission-state.py review-finalize --iteration {iteration} "
-        "--input-ref <review_evidence_ref.path> (全 reviewer 分だけ --input-ref を反復) "
-        f"--min-reviewers {reviewer_count}{resubmit_hint}。 "
-        "Step 3: mission-state.py mark-passes。"
-    )
 
 
 def _expected_context_mode(data: dict, iteration: int) -> str:
@@ -9955,292 +9889,18 @@ def _derive_next_action(
     data: dict,
     authoritative: Optional[AuthoritativeSnapshot] = None,
 ) -> dict:
-    """ADR-002 Stage 3 (G-3): state から次の 1 手を決定論的に導出する。
-
-    ハーネス非依存の進行ガイド。Stop hook が使えない環境 (Codex 等) や
-    compaction 後の復元で、散文指示に依存せず「state を読めば次手が自明」にする。
-    分岐は SKILL.md の Phase 0-7 と同じ決定木を機械化したもの。
-    """
+    """Preserve the legacy callable name as a thin application facade."""
     snapshot = authoritative or authoritative_snapshot_from_document(data)
-    terminal_outcome = snapshot.terminal_outcome
-    if terminal_outcome == "completed_evidence":
-        return {
-            "next_action": "report-terminal",
-            "summary": "証拠提出で正常終了した mission。最終報告では evidence 提出の完了を伝え、passes=true は主張しない",
-            "command_hint": "mission-state.py specialists summary",
-        }
-    halt_reason = snapshot.halt_reason
-    if halt_reason:
-        halt_category = snapshot.halt_category
-        legacy_stale = _is_legacy_stale_halt(halt_category, halt_reason)
-        if halt_category == "stale" or legacy_stale:
-            recovery_summary = "stale/orphan halt は resume で安全に再開する"
-            recovery_hint = "mission-state.py resume"
-        else:
-            expected_category = _halt_category_for_confirmation(halt_category)
-            recovery_summary = "手動 halt は対象操作と state 再活性化の明示承認後に reactivate する"
-            recovery_hint = (
-                "mission-state.py reactivate --approved-by-user "
-                f"--expected-category {expected_category} "
-                '--reason "<ユーザーが承認した再開理由>"'
-            )
-        return {
-            "next_action": "report-blocker",
-            "summary": f"halted: {halt_reason}。blocker と次アクションをユーザーに報告する。{recovery_summary}",
-            "command_hint": recovery_hint,
-        }
-    if snapshot.passes:
-        return {
-            "next_action": "report-complete",
-            "summary": "mission は合格済み。最終報告 (成果物パス・検証結果・specialist summary) を出して終了する",
-            "command_hint": "mission-state.py specialists summary",
-        }
-    if snapshot.awaiting_user:
-        return {
-            "next_action": "await-user",
-            "summary": "ユーザー回答待ち (awaiting_user=true)。回答を得るまで不可逆操作に進まない",
-            "command_hint": "",
-        }
-    if not snapshot.loop_active:
-        return {
-            "next_action": "resume",
-            "summary": "loop_active=false だが未合格・halt 理由なし。refresh-pid で再活性化してループを再開する",
-            "command_hint": "mission-state.py refresh-pid",
-        }
-    phase = snapshot.phase or "planning"
-    iteration = snapshot.iteration or 1
-    reviewer_count = data.get("reviewer_count", 2) or 2
-    effective_reviewer_count = reviewer_count
-    if iteration >= 2 and data.get("critic_has_new_scope") is False:
-        effective_reviewer_count = min(reviewer_count, 2)
-    pregate_warning = _pregate_verdict_warning(data.get("pregate"))
-
-    def _planning_summary(summary: str) -> str:
-        if not pregate_warning:
-            return summary
-        return f"{summary} {pregate_warning.removeprefix('WARNING: ')}"
-
-    stagnation = data.get("stagnation_count", 0) or 0
-    # 通常経路では push-score が phase=scoring へ遷移させるため stagnation>=3 と
-    # phase=reviewing は共起しないが、手動 `set stagnation_count=N` は許可された操作。
-    # 走行中のレビューを中断させないよう reviewing だけは phase 分岐を優先する。
-    if stagnation >= 3 and phase != "reviewing":
-        return {
-            "next_action": "consider-halt",
-            "summary": f"stagnation_count={stagnation} (3 連続でスコア停滞)。アプローチを変えても改善しない場合は mark-halt で停止し状況を報告する",
-            "command_hint": 'mission-state.py mark-halt --reason "<停滞理由>"',
-        }
-    # #325: adaptive routing の next 駆動ゲート。init 引数経路 (#276) を通らず
-    # 「init → set complexity=Simple」で確定したケースを補足する。portfolio-v1 で
-    # Simple 3 tasks 全てが routing を素通りしてフルループが走った実測に基づく。
-    if (
-        phase == "planning"
-        and iteration <= 1
-        and data.get("complexity") == "Simple"
-        and not data.get("review_tier_signals")
-        and data.get("review_tier_source") != "user"
-        and not data.get("issue_ref")
-        and not data.get("force_mission")
-        and (data.get("session_role") or "implementer") == "implementer"
-        and not (data.get("score_history") or [])
-    ):
-        dispatch_fields = _goal_dispatch_route_fields(data)
-        dispatch_guidance = _goal_dispatch_guidance(dispatch_fields)
-        return {
-            "next_action": "route-to-goal",
-            "summary": (
-                f"Simple + リスクシグナルなし: {dispatch_guidance}"
-                "state を routed-goal で閉じ (pass-rate 対象外)、最終報告に routing を明記する。"
-                "mission 機構が必要なら --force-mission で再 init (#325)"
-            ),
-            "command_hint": (
-                "mission-state.py mark-halt --reason 'routed-to-goal (#325)' "
-                f"--category routed-goal → {dispatch_guidance}"
-            ),
-            "details": {"complexity": "Simple", "route": "goal", **dispatch_fields},
-        }
-    if phase == "planning":
-        lifecycle = derive_planning_lifecycle(data)
-        if lifecycle["mode"] == "policy-v1":
-            action = lifecycle.get("next_action")
-            if action == "reconcile-provider-invocation":
-                running = next(
-                    record for record in data.get("specialist_invocations") or []
-                    if isinstance(record, dict) and record.get("phase") == "planning"
-                    and record.get("iteration") == iteration and record.get("status") == "running"
-                )
-                return {
-                    "next_action": action,
-                    "summary": "running planning provider must be reconciled before any new planning action",
-                    "command_hint": f"mission-state.py specialists reconcile-invocation --invocation-id {running['invocation_id']} --status <completed|failed|abandoned-unknown> --evidence <ref> --expected-fencing-epoch <epoch>",
-                }
-            if action and action != "run-planner":
-                hints = {
-                    "prepare-planning-provider": "mission-state.py specialists prepare-invocation ...",
-                    "await-planning-approval": "mission-state.py specialists verify-approval --preflight-id <id> --evidence-ref <ref> --approval-verifier <id>",
-                    "invoke-planning-provider": "mission-state.py specialists invoke-prepared --provider <provider> --preflight-id <id> --iteration <i> --phase planning",
-                    "import-planning-result": "mission-state.py specialists plan-import --input <result> --invocation-id <id>",
-                    "promote-canonical-plan": "mission-state.py planning promote-provider-plan --invocation-id <id>",
-                    "run-planner-with-evidence": "Skill: mission-planner (provider evidence is advisory only)",
-                    "run-executor": "mission-state.py advance --phase executing --activity active:implementation",
-                    "halt-required-planning-provider": "mission-state.py mark-halt --category required-planning-provider --reason <reason>",
-                    "run-planner": "Skill: mission-planner",
-                }
-                return {
-                    "next_action": action,
-                    "summary": _planning_summary("policy v1 returns exactly one gated planning action"),
-                    "command_hint": hints[action],
-                    "details": {"planning_policy_version": 1, **({"degraded": True} if lifecycle.get("degraded") else {})},
-                }
-        core_adoption_required = (
-            data.get("planning_policy_version") == 1
-            and data.get("planning_strategy") in {None, "core"}
-            and data.get("planning_provider_required") is not True
-        )
-        adoption_hint = (
-            " → mission-state.py planning adopt-core --input <plan.json>"
-            if core_adoption_required
-            else ""
-        )
-        # #339: Standard iteration 1 は planner subagent を省略し orchestrator inline 計画。
-        # portfolio-v4 実測: 時間比 (6.9-14.5x) > トークン比 (4.0-4.7x) の差分はターン数
-        # (mission 19-31 turns vs goal 5) — subagent spin-up 1 回の削減がそのまま効く。
-        # Complex / full tier / iteration>=2 は従来どおり mission-planner を使う。
-        if (
-            data.get("complexity") == "Standard"
-            and iteration <= 1
-            and (data.get("review_tier") or "standard") != "full"
-        ):
-            summary = _planning_summary(
-                (
-                    f"iteration {iteration} (Standard): mission-planner を起動せず、この turn 内で "
-                    "bounded plan (steps + 依存関係 + 完了条件) を artifact に書く (#339)。"
-                    "計画の成果物要件は subagent 経路と同一"
-                )
-            )
-            return {
-                "next_action": "plan-inline",
-                "summary": summary,
-                "command_hint": (
-                    f"plan を artifact に記載{adoption_hint}"
-                    " → mission-state.py advance --phase executing --activity active:implementation"
-                ),
-                "details": {"plan_mode": "inline"},
-                "command_sequence": _happy_path_sequence(
-                    "planning",
-                    effective_reviewer_count,
-                    plan_mode="inline",
-                    adopt_core=core_adoption_required,
-                ),
-            }
-        return {
-            "next_action": "run-planner",
-            "summary": _planning_summary(
-                f"iteration {iteration}: mission-planner を起動して計画を立てる "
-                "(完了後 advance --phase executing)"
-            ),
-            "command_hint": (
-                f"Skill: mission-planner{adoption_hint}"
-                " → mission-state.py advance --phase executing --activity active:implementation"
-            ),
-            "command_sequence": _happy_path_sequence(
-                "planning",
-                effective_reviewer_count,
-                plan_mode="subagent",
-                adopt_core=core_adoption_required,
-            ),
-        }
-    if phase == "executing":
-        return {
-            "next_action": "run-executor",
-            "summary": (
-                f"iteration {iteration}: mission-executor で計画を実行する "
-                "(完了後 advance --phase reviewing。10分超は progress update)"
-            ),
-            "command_hint": "Skill: mission-executor → mission-state.py advance --phase reviewing --activity reviewer-wait:review-response",
-            "command_sequence": _happy_path_sequence("executing", effective_reviewer_count),
-        }
-    if phase == "reviewing":
-        # #309 (F4): iter>=2 で critic_has_new_scope 未設定なら run-reviewers を返さない。
-        # 実運用監査 (2026-08-01) で設定 0/115 件 — prose (SKILL.md #258) では実行されない
-        # ため、guidance 層で機械的に強制する。安全側デフォルト (未設定=full) は維持しつつ、
-        # 未設定のまま review へ進む経路を塞ぎ #240/#241 を発火可能にする。
-        if iteration >= 2 and data.get("critic_has_new_scope") is None:
-            return {
-                "next_action": "record-critic-scope",
-                "summary": (
-                    f"iteration {iteration}: reviewer 起動前に critic の実行計画テーブルから "
-                    "scope 判定を state へ記録する。全ステップの対応 finding が既存 finding id "
-                    "のみなら false、new を含むなら true (#309)"
-                ),
-                "command_hint": "mission-state.py set critic_has_new_scope='false'  # または 'true'",
-                "details": {"iteration": iteration},
-            }
-        # #241: bounded context — iteration >= 2 かつ新規 scope なしなら bounded mode
-        context_mode = _expected_context_mode(data, iteration)
-        return {
-            "next_action": "run-reviewers",
-            "summary": f"iteration {iteration}: mission-reviewer を {effective_reviewer_count} 名、単一メッセージで並列起動する (直列起動は規律違反。直列は Standard で約 2-3 分の無駄を実測 #338)",
-            "command_hint": f"Skill: mission-reviewer x{effective_reviewer_count} (1 message)",
-            "details": {"reviewer_count": effective_reviewer_count, "context_mode": context_mode, "parallel_spawn_required": True},
-            "command_sequence": _happy_path_sequence("reviewing", effective_reviewer_count),
-        }
-    # phase == scoring / done / その他: 現 iteration の有効スコア有無で分岐
-    history = data.get("score_history") or []
-    scored_current = [
-        h for h in history
-        if isinstance(h, dict) and h.get("iteration") == iteration and _is_valid_composite(h.get("composite"))
-    ]
-    if scored_current:
-        latest = scored_current[-1]
-        # #187: score entry はあるが findings evidence がない (scoring-json 経路なのに
-        # findings_evidence_path 欠落) 場合、mark-passes は _validate_findings_evidence_gate で
-        # exit 2 になる。実運用で、この状態から Codex agent が --force に逃げた実害があったため、
-        # next の時点で「force ではなく aggregate-reviews をやり直す」ことを明示する。
-        missing_findings_evidence = (
-            latest.get("score_source") == "scoring-json"
-            and not latest.get("findings_evidence_path")
-        )
-        if missing_findings_evidence:
-            # review 由来のレビュー結果: #189 の unclosed specialist 情報もここで併記する
-            # (aggregate-reviews のリトライ待ちの間も next の details から欠落させない)。
-            unclosed_during_retry = _unclosed_optional_specialist_skills(data)
-            return {
-                "next_action": "aggregate-reviews",
-                "summary": (
-                    f"iteration {iteration}: 直前の push-score に findings evidence "
-                    "(findings_evidence_path) がありません。このまま mark-passes を呼んでも "
-                    "exit 2 になります。--force は使わず aggregate-reviews からやり直してください。"
-                ),
-                "command_hint": (
-                    _native_review_handoff_hint(
-                        iteration, effective_reviewer_count, resubmit=True,
-                    )
-                    + " mission-scorer fallback を使った場合も、その mission-review/1 出力を Step 1 に渡す。"
-                ),
-                "details": {
-                    "missing_findings_evidence": True,
-                    **({"unclosed_specialists": unclosed_during_retry} if unclosed_during_retry else {}),
-                },
-            }
-        unclosed = _unclosed_optional_specialist_skills(data)  # #189
-        return {
-            "next_action": "mark-passes",
-            "summary": f"iteration {iteration} の採点は記録済み。mark-passes で threshold gate 判定する (reject なら mission-critic → 次 iteration)",
-            "command_hint": "mission-state.py mark-passes",
-            "details": {"unclosed_specialists": unclosed} if unclosed else {},
-        }
-    return {
-        "next_action": "aggregate-reviews",
-        "summary": (
-            f"iteration {iteration}: reviewer の mission-review/1 JSON を review-import --stdin で"
-            " state-owned evidence にし、review-finalize --input-ref で集計・記録する。"
-            "--force は使わない。"
+    return run_derive_next_action(
+        NextActionRequest(document=data, authoritative=snapshot),
+        NextActionServices(
+            pregate_warning=_pregate_verdict_warning,
+            goal_dispatch_fields=_goal_dispatch_route_fields,
+            goal_dispatch_guidance=_goal_dispatch_guidance,
+            expected_context_mode=_expected_context_mode,
+            valid_composite=_is_valid_composite,
         ),
-        "command_hint": _native_review_handoff_hint(
-            iteration, effective_reviewer_count,
-        ),
-    }
+    )
 
 
 def cmd_next(args):
@@ -16130,28 +15790,6 @@ def cmd_closeout(args):
         "mark_passes": json.loads(mp_stdout.getvalue()),
         "next": json.loads(next_stdout.getvalue()),
     }, ensure_ascii=False, indent=2))
-
-
-def _unclosed_optional_specialist_skills(data: dict) -> list[str]:
-    """#189: `specialists_selected` に明示選定された specialist で、invocation 終端ログ
-    (skipped/unavailable/failed/completed 等、どのステータスでもよい) が一件もないものを検出する。
-
-    `explicitly_selected_specialist_skills` (specialists_selected のみ) を使う点が重要:
-    `selected_specialist_skills` (共有関数。specialists_phase_plan の providers も含む) を
-    使うと、phase_plan にしか登場しない specialist を誤って「未クローズ」と WARN する
-    偽陽性になる (mission-audit.py の specialist_invocation_gap_skills と同じ理由で除外)。
-
-    非 --force 経路では required specialist は cmd_mark_passes の
-    accounting_required/result_required gate がこのコードに到達する前に exit 2 で止めるため、
-    ここに残るのは常に optional。ただし --force はこれらの gate を丸ごと skip するため、
-    --force 経路では required specialist も unclosed になり得る — 呼び出し側 (cmd_mark_passes)
-    は --force 時にこの WARN 自体を出さないことで「optional のため」という文言の誤りを避ける。
-    hard gate ではなく WARN (mark-passes 自体は成功させる) — optional specialist の
-    graceful degradation を維持しつつ、クローズアウト漏れを可視化する (#189)。
-    """
-    selected = _accounting_selected_specialist_skills(data)
-    terminal = _accounting_terminal_invoked_specialist_skills(data)
-    return sorted(selected - terminal)
 
 
 def _verify_force_pass_approval(data: dict, args, cwd: Path) -> dict:
