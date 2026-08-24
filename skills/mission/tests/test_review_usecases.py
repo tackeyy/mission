@@ -136,15 +136,37 @@ def test_unverified_score_cannot_produce_pass_transition(scored_state):
 def test_force_pass_requires_pinned_approval_and_keeps_artifact_gate(
     scored_state, approval_verified, artifact_satisfied, accepted, reason
 ):
-    from mission_kernel.commands import MarkPass
+    import json
+
+    from mission_kernel import project_legacy_document
+    from mission_kernel.commands import CompatibilityPayload, MarkPass
     from mission_kernel.transitions import decide
+    from scoring_provenance import terminal_state_digest
 
     state = scored_state
+    terminal = json.loads(project_legacy_document(state))
+    terminal.update(
+        passes=True,
+        loop_active=False,
+        passes_forced=True,
+        terminal_outcome="completed_pass",
+    )
     command = MarkPass(
         force=True,
         force_approval_verified=approval_verified,
         artifact_gate_satisfied=artifact_satisfied,
         specialist_gate_satisfied=False,
+        compatibility=CompatibilityPayload(
+            {
+                "passes_forced": True,
+                "force_approval": {
+                    "request": {
+                        "terminal_object_digest": terminal_state_digest(terminal)
+                    },
+                    "consumed": True,
+                },
+            }
+        ),
     )
 
     decision = decide(state, command)

@@ -22,7 +22,7 @@ def _canonical_core_state(tmp_path):
     plan = tmp_path / ".mission-state" / "plans" / "canonical.json"; plan.parent.mkdir(exist_ok=True)
     payload = {"schema": "mission-plan/1", "steps": [{"id": "s1", "depends_on": []}, {"id": "s2", "depends_on": ["s1"]}]}
     raw = __import__("json").dumps(payload, sort_keys=True, separators=(",", ":")).encode(); plan.write_bytes(raw)
-    binding = {"generation": 1, "source": "core", "source_id": "planner-1", "selection_source": "automatic", "iteration": 1}
+    binding = {"generation": 1, "source": "core", "source_id": "planner-1", "selection_source": "automatic", "iteration": state["iteration"]}
     state["canonical_plan"] = {"path": str(plan.relative_to(tmp_path)), "digest": "sha256:" + __import__("hashlib").sha256(raw).hexdigest(), **binding}
     state["planning_source_records"] = {"core:planner-1": binding}
     state_file.write_text(__import__("json").dumps(state))

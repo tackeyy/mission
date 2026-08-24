@@ -750,7 +750,9 @@ def _plan_json(plan: PlanRecord) -> dict[str, Any]:
 
 def _handoff_json(handoff: Any) -> dict[str, Any]:
     value = {
-        "schema": handoff.schema,
+        # The typed command uses the canonical handoff union name while this
+        # projector emits the established v4 compatibility wire name.
+        "schema": "mission-executor-handoff/1",
         "handoff_id": handoff.handoff_id,
         "plan_path": handoff.plan.path,
         "plan_digest": handoff.plan.digest,
@@ -897,13 +899,23 @@ def project_legacy_document(state: MissionState) -> bytes:
     if isinstance(state.plan, AbsentPlan):
         document.pop("canonical_plan", None)
     else:
-        document["canonical_plan"] = _plan_json(state.plan)
+        projected_plan = _plan_json(state.plan)
+        existing_plan = document.get("canonical_plan")
+        if state.schema_origin is not SchemaOrigin.V5 and isinstance(existing_plan, dict):
+            presence_preserved = dict(existing_plan)
+            for key in set(existing_plan) & set(projected_plan):
+                presence_preserved[key] = projected_plan[key]
+            projected_plan = presence_preserved
+        document["canonical_plan"] = projected_plan
     if isinstance(state.handoff, AbsentHandoff):
         document.pop("executor_handoff", None)
     else:
         document["executor_handoff"] = _handoff_json(state.handoff)
     input_refs = [reference for reference in state.reviews if isinstance(reference, ReviewInputRef)]
-    if input_refs or "review_evidence_refs" in document:
+    if (
+        state.schema_origin is SchemaOrigin.V5
+        or "review_evidence_refs" not in document
+    ) and input_refs:
         document["review_evidence_refs"] = [
             {
                 "kind": "review-input",
@@ -915,7 +927,12 @@ def project_legacy_document(state: MissionState) -> bytes:
             }
             for reference in input_refs
         ]
-    if state.scores or "score_history" in document:
+    elif state.schema_origin is SchemaOrigin.V5 and "review_evidence_refs" in document:
+        document["review_evidence_refs"] = []
+    raw_scores = ()
+    if state.schema_origin is not SchemaOrigin.V5 and "score_history" in document:
+        raw_scores, _raw_aggregates = _decode_legacy_scores(document)
+    if state.schema_origin is SchemaOrigin.V5 or state.scores != raw_scores:
         projected_scores = [_legacy_score_json(score) for score in state.scores]
         if state.schema_origin is SchemaOrigin.V5:
             for score in projected_scores:

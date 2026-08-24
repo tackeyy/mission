@@ -25,27 +25,35 @@ class _RecordingRepository:
         self._before = copy.deepcopy(before)
         self.executed_transition = "unset"
         self.saved = None
+        from mission_persistence.legacy_v4 import LegacyV4Repository
+
+        self._repository = LegacyV4Repository(
+            lock=contextlib.nullcontext,
+            read_state=lambda: copy.deepcopy(self._before),
+            write_state=lambda state, **_kwargs: setattr(self, "saved", copy.deepcopy(state)),
+            backup_state=lambda: None,
+            add_to_aggregate=lambda: None,
+            remove_from_aggregate=lambda: None,
+        )
 
     def transaction(self):
-        return contextlib.nullcontext()
+        return self._repository.transaction()
 
     def load(self):
-        return copy.deepcopy(self._before)
+        return self._repository.load()
 
-    def execute(self, state, mutation, transition=None):
-        self.executed_transition = transition
-        proposed = copy.deepcopy(state)
-        mutation(proposed)
-        if transition is not None:
-            from mission_kernel.transitions import transition_control_claims
-
-            for field_name, value in transition_control_claims(transition).items():
-                proposed[field_name] = value.value if hasattr(value, "value") else value
-        self._executed = copy.deepcopy(proposed)
-        return proposed
+    def execute(self, command, **kwargs):
+        result = self._repository.execute(command, **kwargs)
+        self.executed_transition = result.decision.transition
+        return result
 
     def save(self, state, *, backup=True, administrative=False, aggregate_action=None):
-        self.saved = copy.deepcopy(state)
+        self._repository.save(
+            state,
+            backup=backup,
+            administrative=administrative,
+            aggregate_action=aggregate_action,
+        )
 
 
 def _active_state(**overrides) -> dict:
@@ -112,20 +120,17 @@ def test_mark_halt_decides_on_the_real_state_when_active():
     assert repository.executed_transition is result.decision.transition
 
 
-def test_mark_halt_claims_include_halt_category():
+def test_mark_halt_new_state_includes_halt_category():
     from mission_kernel.model import HaltCategory, Phase, TerminalOutcome
-    from mission_kernel.transitions import transition_control_claims
 
     repository = _RecordingRepository(_active_state())
     result = _run_mark_halt(repository)
 
-    claims = transition_control_claims(result.decision.transition)
-    assert claims == {
-        "phase": Phase.HALTED,
-        "loop_active": False,
-        "halt_category": HaltCategory.BLOCKED_EXTERNAL,
-        "terminal_outcome": TerminalOutcome.BLOCKED_EXTERNAL,
-    }
+    control = result.decision.transition.new_state.control
+    assert control.phase is Phase.HALTED
+    assert control.loop_active is False
+    assert control.halt_category is HaltCategory.BLOCKED_EXTERNAL
+    assert control.terminal_outcome is TerminalOutcome.BLOCKED_EXTERNAL
     assert repository.saved["halt_category"] == "blocked-external"
 
 
@@ -143,7 +148,7 @@ def test_mark_halt_on_terminal_state_falls_back_to_gate_only():
     result = _run_mark_halt(repository, reason="halt again")
 
     assert result.decision.accepted is True
-    assert repository.executed_transition is None
+    assert repository.executed_transition == "unset"
     assert repository.saved["halt_reason"] == "halt again"
     assert repository.saved["phase"] == "halted"
 
@@ -156,66 +161,9 @@ def test_mark_halt_on_undecodable_state_falls_back_to_gate_only():
     result = _run_mark_halt(repository)
 
     assert result.decision.accepted is True
-    assert repository.executed_transition is None
+    assert repository.executed_transition == "unset"
     assert repository.saved["phase"] == "halted"
     assert repository.saved["halt_category"] == "blocked-external"
-
-
-def test_execute_applies_claimed_values_when_writer_omits_them(tmp_path):
-    """apply 化: writer が claimed field を書かなくても transition 値が永続値になる。"""
-    from mission_kernel import decode_snapshot
-    from mission_kernel.commands import MarkHalt
-    from mission_kernel.model import HaltCategory
-    from mission_kernel.transitions import decide
-    from mission_persistence.legacy_v4 import LegacyV4Repository
-
-    _path, source = generate_cli_state_bytes(tmp_path.resolve())
-    typed = decode_snapshot(source).state
-    decision = decide(typed, MarkHalt(HaltCategory.BLOCKED_EXTERNAL, "blocked"))
-    assert decision.accepted is True
-
-    repository = LegacyV4Repository(
-        lock=contextlib.nullcontext,
-        read_state=lambda: {},
-        write_state=lambda _state: None,
-        backup_state=lambda: None,
-    )
-    document = {"phase": "planning", "loop_active": True, "passes": False}
-
-    def mutate(proposed):
-        proposed["halt_reason"] = "blocked"  # claimed fields は書かない
-
-    proposed = repository.execute(document, mutate, decision.transition)
-    assert proposed["phase"] == "halted"
-    assert proposed["loop_active"] is False
-    assert proposed["halt_category"] == "blocked-external"
-
-
-def test_execute_rejects_writer_that_contradicts_a_claim(tmp_path):
-    from mission_kernel import decode_snapshot
-    from mission_kernel.commands import MarkHalt
-    from mission_kernel.model import HaltCategory
-    from mission_kernel.transitions import decide
-    from mission_persistence.fenced_commit import FencedCommitError
-    from mission_persistence.legacy_v4 import LegacyV4Repository
-
-    _path, source = generate_cli_state_bytes(tmp_path.resolve())
-    typed = decode_snapshot(source).state
-    decision = decide(typed, MarkHalt(HaltCategory.BLOCKED_EXTERNAL, "blocked"))
-
-    repository = LegacyV4Repository(
-        lock=contextlib.nullcontext,
-        read_state=lambda: {},
-        write_state=lambda _state: None,
-        backup_state=lambda: None,
-    )
-
-    def mutate(proposed):
-        proposed["phase"] = "reviewing"  # kernel の決定 (halted) と矛盾する値
-
-    with pytest.raises(FencedCommitError) as failure:
-        repository.execute({"phase": "planning", "loop_active": True}, mutate, decision.transition)
-    assert failure.value.code == "transition-divergence"
 
 
 def test_cli_reports_fenced_commit_error_as_internal_invariant(monkeypatch, capsys):

@@ -28,30 +28,34 @@ class _RecordingRepository:
         self._before = copy.deepcopy(before)
         self.executed_transition = "unset"
         self.saved = None
+        from mission_persistence.legacy_v4 import LegacyV4Repository
+
+        self._repository = LegacyV4Repository(
+            lock=contextlib.nullcontext,
+            read_state=lambda: copy.deepcopy(self._before),
+            write_state=lambda state: setattr(self, "saved", copy.deepcopy(state)),
+            backup_state=lambda: None,
+            remove_from_aggregate=lambda: None,
+        )
 
     def transaction(self):
-        return contextlib.nullcontext()
+        return self._repository.transaction()
 
     def load(self):
-        return copy.deepcopy(self._before)
+        return self._repository.load()
 
-    def execute(self, state, mutation, transition=None, finalize=None):
-        from mission_persistence.legacy_v4 import _apply_transition_claims
-
-        self.executed_transition = transition
-        proposed = copy.deepcopy(state)
-        mutation(proposed)
-        # 批2-a-3 (#632): 実 repository は mutation の後に claims を適用する。
-        # double が適用しないと「writer を消した field」が落ちて偽陽性になる。
-        if transition is not None:
-            _apply_transition_claims(transition, proposed)
-        if finalize is not None:
-            finalize(proposed)
-        self._executed = copy.deepcopy(proposed)
-        return proposed
+    def execute(self, command, **kwargs):
+        result = self._repository.execute(command, **kwargs)
+        self.executed_transition = result.decision.transition
+        return result
 
     def save(self, state, *, backup=True, administrative=False, aggregate_action=None):
-        self.saved = copy.deepcopy(state)
+        self._repository.save(
+            state,
+            backup=backup,
+            administrative=administrative,
+            aggregate_action=aggregate_action,
+        )
 
 
 def _active_state() -> dict:
@@ -121,10 +125,12 @@ def test_permission_allowed_observation_has_no_decision():
     assert repository.saved is None
 
 
-def test_permission_halt_claims_hold_through_real_repository():
-    """#630 の claims 検証が有効な実 repository で halt が成立する end-to-end。"""
+def test_permission_halt_projection_holds_through_real_repository():
+    """permission halt の decided projection が実 repository 保存と一致する。"""
+    import json
+
     from mission_application.runtime_guard import record_permission_observation
-    from mission_kernel.transitions import transition_control_claims
+    from mission_kernel import project_legacy_document
     from mission_persistence.legacy_v4 import LegacyV4Repository
 
     before = _active_state()
@@ -134,13 +140,11 @@ def test_permission_halt_claims_hold_through_real_repository():
         read_state=lambda: copy.deepcopy(before),
         write_state=lambda state: saved.update(copy.deepcopy(state)),
         backup_state=lambda: None,
+        remove_from_aggregate=lambda: None,
     )
     result = record_permission_observation(repository, _denied_request())
 
-    claims = transition_control_claims(result.decision.transition)
-    for field, value in claims.items():
-        expected = value.value if field == "phase" else value
-        assert saved.get(field, False) == expected
+    assert saved == json.loads(project_legacy_document(result.decision.transition.new_state))
 
 
 # --- 降格 3 command の no-write ガード（批1-c #619 と同型の静的固定） ---

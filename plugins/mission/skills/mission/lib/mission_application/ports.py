@@ -13,6 +13,10 @@ from mission_kernel.transitions import Decision
 class AggregateIndexError(RuntimeError):
     """The authoritative write succeeded but its rebuildable index did not."""
 
+    def __init__(self, message: str, *, execution: object | None = None) -> None:
+        super().__init__(message)
+        self.execution = execution
+
 
 @dataclass(frozen=True)
 class AuditMetadata:
@@ -72,6 +76,18 @@ class RepositoryExecutionResult:
     rejection_code: Optional[str]
 
 
+@dataclass(frozen=True)
+class LegacyCommandExecutionResult:
+    """Closed legacy command result with a defensive saved projection."""
+
+    decision: Decision
+    _projection: FrozenJsonObject
+
+    @property
+    def projection(self) -> dict:
+        return self._projection.thaw()
+
+
 class MissionInitializer(Protocol):
     """Persistence boundary for the legacy v4 bootstrap transaction."""
 
@@ -111,8 +127,13 @@ class LegacyMissionRepository(MissionRepository, Protocol):
 
     @overload
     def execute(
-        self, state: dict, mutation: Callable[[dict], None], transition=None, finalize=None
-    ) -> dict:
+        self,
+        command: Command,
+        *,
+        backup: bool = True,
+        administrative: bool = False,
+        aggregate_action: str | None = None,
+    ) -> LegacyCommandExecutionResult:
         ...
 
     @overload
@@ -122,7 +143,14 @@ class LegacyMissionRepository(MissionRepository, Protocol):
     ) -> RepositoryExecutionResult:
         ...
 
-    def execute(self, state, mutation=None, transition=None, finalize=None):
+    def execute(
+        self,
+        command,
+        *,
+        backup=True,
+        administrative=False,
+        aggregate_action=None,
+    ):
         ...
 
     def save(

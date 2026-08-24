@@ -32,25 +32,28 @@ _FIXED_HOSTNAME = "fixture-host"
 
 
 class _MutationBoundaryRepository:
-    """Test port enforcing that only ``execute`` may mutate loaded state."""
+    """Use the production atomic command boundary with an in-memory writer."""
 
     def __init__(self, before, write_state):
-        self._before = copy.deepcopy(before)
-        self._write_state = write_state
-        self._executed = None
+        from mission_persistence.legacy_v4 import LegacyV4Repository
+
+        self._repository = LegacyV4Repository(
+            lock=contextlib.nullcontext,
+            read_state=lambda: copy.deepcopy(before),
+            write_state=write_state,
+            backup_state=lambda: None,
+            add_to_aggregate=lambda: None,
+            remove_from_aggregate=lambda: None,
+        )
 
     def transaction(self):
-        return contextlib.nullcontext()
+        return self._repository.transaction()
 
     def load(self):
-        return copy.deepcopy(self._before)
+        return self._repository.load()
 
-    def execute(self, state, mutation, transition=None):
-        assert state == self._before
-        proposed = copy.deepcopy(state)
-        mutation(proposed)
-        self._executed = copy.deepcopy(proposed)
-        return proposed
+    def execute(self, command, **kwargs):
+        return self._repository.execute(command, **kwargs)
 
     def save(
         self,
@@ -60,8 +63,12 @@ class _MutationBoundaryRepository:
         administrative=False,
         aggregate_action=None,
     ):
-        assert state == self._executed
-        self._write_state(state, administrative=administrative)
+        self._repository.save(
+            state,
+            backup=backup,
+            administrative=administrative,
+            aggregate_action=aggregate_action,
+        )
 
 
 def _load_cli_module(name):
@@ -624,6 +631,7 @@ def test_mark_halt_result_bytes_equal_real_cli_bytes_and_kernel_accepts(tmp_path
 
 def test_mark_halt_reports_aggregate_failure_after_session_write(tmp_path):
     from mission_application.lifecycle import MarkHaltRequest, MarkHaltServices, mark_halt
+    from mission_kernel import project_legacy_document
     from mission_persistence.legacy_v4 import LegacyV4Repository
 
     cli = _load_cli_module("issue506_mark_halt_aggregate_failure")
@@ -654,6 +662,9 @@ def test_mark_halt_reports_aggregate_failure_after_session_write(tmp_path):
     assert result.aggregate_error == "aggregate index is unavailable"
     assert saved["phase"] == "halted"
     assert saved["loop_active"] is False
+    assert saved == json.loads(
+        project_legacy_document(result.decision.transition.new_state)
+    )
 
 
 def test_reactivate_result_bytes_equal_real_cli_bytes_and_kernel_accepts(tmp_path):
@@ -697,6 +708,43 @@ def test_reactivate_result_bytes_equal_real_cli_bytes_and_kernel_accepts(tmp_pat
     assert result_bytes == legacy_bytes
 
 
+def test_reactivate_reports_post_commit_aggregate_failure_with_exact_decision(tmp_path):
+    from mission_application.lifecycle import ReactivateRequest, reactivate
+    from mission_kernel import project_legacy_document
+    from mission_persistence.legacy_v4 import LegacyV4Repository
+
+    reactivated_at = "2026-08-16T04:02:04Z"
+    before = _golden_state("reactivate", tmp_path, index=1)
+    saved = {}
+
+    def fail_aggregate():
+        raise OSError("aggregate index is unavailable")
+
+    repository = LegacyV4Repository(
+        lock=contextlib.nullcontext,
+        read_state=lambda: copy.deepcopy(before),
+        write_state=lambda state: saved.update(copy.deepcopy(state)),
+        backup_state=lambda: None,
+        add_to_aggregate=fail_aggregate,
+    )
+    result = reactivate(
+        repository,
+        ReactivateRequest(
+            approved_by_user=True,
+            reason="approval was recorded",
+            expected_category="awaiting-approval",
+            phase="planning",
+            at=reactivated_at,
+        ),
+    )
+
+    assert result.aggregate_error == "aggregate index is unavailable"
+    assert result.decision.accepted is True
+    assert saved == json.loads(
+        project_legacy_document(result.decision.transition.new_state)
+    )
+
+
 def test_refresh_pid_result_bytes_equal_real_cli_bytes(tmp_path):
     from mission_application.lifecycle import RefreshPidRequest, RefreshPidServices, refresh_pid
 
@@ -734,6 +782,55 @@ def test_refresh_pid_result_bytes_equal_real_cli_bytes(tmp_path):
     assert result.new_pid == legacy_output["new_pid"]
     assert result.reactivated is False
     assert result_bytes == legacy_bytes
+
+
+def test_refresh_pid_reports_post_commit_aggregate_failure_with_exact_decision(tmp_path):
+    from mission_application.lifecycle import RefreshPidRequest, RefreshPidServices, refresh_pid
+    from mission_kernel import project_legacy_document
+    from mission_persistence.legacy_v4 import LegacyV4Repository
+
+    cli = _load_cli_module("issue506_refresh_pid_aggregate_failure")
+    now = "2026-08-16T05:01:03Z"
+    before = _golden_state("aggregate_failure", tmp_path)
+    before.update(
+        {
+            "phase": "halted",
+            "loop_active": False,
+            "halt_reason": "stale: prior owner disappeared",
+            "halt_category": "stale",
+            "terminal_outcome": "stale_superseded",
+            "resume_target_phase": "planning",
+            "pid": 4100,
+        }
+    )
+    saved = {}
+
+    def fail_aggregate():
+        raise OSError("aggregate index is unavailable")
+
+    repository = LegacyV4Repository(
+        lock=contextlib.nullcontext,
+        read_state=lambda: copy.deepcopy(before),
+        write_state=lambda state: saved.update(copy.deepcopy(state)),
+        backup_state=lambda: None,
+        add_to_aggregate=fail_aggregate,
+    )
+    result = refresh_pid(
+        repository,
+        RefreshPidRequest(new_pid=4200, force=True, reactivate=True, at=now),
+        RefreshPidServices(
+            lease_fields_present=cli._lease_fields_present,
+            pid_is_agent=cli._pid_is_agent,
+            resume_phase_timing=cli._resume_phase_timing,
+        ),
+    )
+
+    assert result.reactivated is True
+    assert result.aggregate_error == "aggregate index is unavailable"
+    assert result.decision.accepted is True
+    assert saved == json.loads(
+        project_legacy_document(result.decision.transition.new_state)
+    )
 
 
 def test_refresh_pid_closes_resume_activity_inside_repository_execute(tmp_path):
@@ -801,6 +898,50 @@ def test_routed_goal_set_mutates_only_inside_repository_execute(tmp_path):
     assert saved["phase"] == "halted"
     assert saved["halt_category"] == "routed-goal"
     assert saved["updated_at"] == now
+
+
+def test_routed_goal_set_reports_post_commit_aggregate_failure_with_exact_decision(tmp_path):
+    from mission_application.lifecycle import SetFieldsRequest, SetFieldsServices, set_fields
+    from mission_kernel import project_legacy_document
+    from mission_persistence.legacy_v4 import LegacyV4Repository
+
+    cli = _load_cli_module("issue506_routed_goal_set_aggregate_failure")
+    now = "2026-08-16T09:07:09Z"
+    before = _golden_state("set_narrowing", tmp_path, index=0)
+    saved = {}
+
+    def fail_aggregate():
+        raise OSError("aggregate index is unavailable")
+
+    repository = LegacyV4Repository(
+        lock=contextlib.nullcontext,
+        read_state=lambda: copy.deepcopy(before),
+        write_state=lambda state, **_kwargs: saved.update(copy.deepcopy(state)),
+        backup_state=lambda: None,
+        remove_from_aggregate=fail_aggregate,
+    )
+    result = set_fields(
+        repository,
+        SetFieldsRequest(kvs=("complexity=Simple",), at=now),
+        SetFieldsServices(
+            frozen_fields=frozenset(cli.FROZEN_FIELDS),
+            reject_active_provider_mutation=cli._reject_active_provider_mutation,
+            normalize_phase=cli._normalize_set_phase_value,
+            transition_phase=cli._transition_phase,
+            ensure_phase_timing=cli._ensure_phase_timing,
+            derive_review_tier=cli.derive_review_tier,
+            derive_review_tier_decision=cli.derive_review_tier_decision,
+            reviewer_count_by_tier=dict(cli.TIER_REVIEWER_COUNT),
+            goal_dispatch_fields=cli._goal_dispatch_route_fields,
+            goal_dispatch_guidance=cli._goal_dispatch_guidance,
+        ),
+    )
+
+    assert result.aggregate_error == "aggregate index is unavailable"
+    assert result.decision.accepted is True
+    assert saved == json.loads(
+        project_legacy_document(result.decision.transition.new_state)
+    )
 
 
 def test_update_project_root_result_bytes_equal_real_cli_bytes(tmp_path):
@@ -943,29 +1084,25 @@ def test_reactivate_without_approval_rejects_with_exact_bytes_unchanged(tmp_path
     )
 
 
-def test_legacy_repository_execute_is_pure_and_does_not_call_io_ports():
+def test_legacy_repository_command_execute_performs_one_atomic_write():
+    from mission_kernel.commands import MarkHalt
+    from mission_kernel.model import HaltCategory
     from mission_persistence.legacy_v4 import LegacyV4Repository
 
-    def unexpected_io(*_args, **_kwargs):
-        raise AssertionError("execute called an I/O port")
-
+    writes = []
     repository = LegacyV4Repository(
-        lock=unexpected_io,
-        read_state=unexpected_io,
-        write_state=unexpected_io,
-        backup_state=unexpected_io,
-        add_to_aggregate=unexpected_io,
-        remove_from_aggregate=unexpected_io,
-    )
-    source = {"phase": "planning", "custom": {"preserved": True}}
-
-    result = repository.execute(
-        source,
-        lambda proposed: proposed.update({"phase": "executing"}),
+        lock=contextlib.nullcontext,
+        read_state=lambda: {"phase": "planning", "loop_active": True},
+        write_state=lambda state: writes.append(copy.deepcopy(state)),
+        backup_state=lambda: None,
     )
 
-    assert source["phase"] == "planning"
-    assert result == {"phase": "executing", "custom": {"preserved": True}}
+    with repository.transaction():
+        repository.load()
+        result = repository.execute(MarkHalt(HaltCategory.OTHER, "stopped"))
+
+    assert result.decision.accepted is True
+    assert writes == [result.projection]
 
 
 def test_real_cli_reports_corrupt_aggregate_after_session_write(tmp_path):

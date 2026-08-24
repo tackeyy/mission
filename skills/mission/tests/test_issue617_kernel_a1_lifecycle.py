@@ -49,22 +49,35 @@ class _RecordingRepository:
         self._before = copy.deepcopy(before)
         self.executed_transition = "unset"
         self.saved = None
+        from mission_persistence.legacy_v4 import LegacyV4Repository
+
+        self._repository = LegacyV4Repository(
+            lock=contextlib.nullcontext,
+            read_state=lambda: copy.deepcopy(self._before),
+            write_state=lambda state, **_kwargs: setattr(self, "saved", copy.deepcopy(state)),
+            backup_state=lambda: None,
+            add_to_aggregate=lambda: None,
+            remove_from_aggregate=lambda: None,
+        )
 
     def transaction(self):
-        return contextlib.nullcontext()
+        return self._repository.transaction()
 
     def load(self):
-        return copy.deepcopy(self._before)
+        return self._repository.load()
 
-    def execute(self, state, mutation, transition=None):
-        self.executed_transition = transition
-        proposed = copy.deepcopy(state)
-        mutation(proposed)
-        self._executed = copy.deepcopy(proposed)
-        return proposed
+    def execute(self, command, **kwargs):
+        result = self._repository.execute(command, **kwargs)
+        self.executed_transition = result.decision.transition
+        return result
 
     def save(self, state, *, backup=True, administrative=False, aggregate_action=None):
-        self.saved = copy.deepcopy(state)
+        self._repository.save(
+            state,
+            backup=backup,
+            administrative=administrative,
+            aggregate_action=aggregate_action,
+        )
 
 
 def _active_legacy_state() -> dict:

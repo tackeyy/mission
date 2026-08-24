@@ -12,9 +12,34 @@ from .model import HaltCategory, Phase, PreparedHandoff
 
 
 @dataclass(frozen=True)
+class CompatibilityPayload:
+    """Deeply immutable legacy observations accepted by one kernel command."""
+
+    upserts: FrozenJsonObject = FrozenJsonObject(())
+    removals: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        upserts = self.upserts
+        if not isinstance(upserts, FrozenJsonObject):
+            upserts = freeze_json_value(upserts)
+        if not isinstance(upserts, FrozenJsonObject):
+            raise TypeError("compatibility-upserts-invalid")
+        removals = self.removals
+        if type(removals) is not tuple:
+            removals = tuple(removals)
+        object.__setattr__(self, "upserts", upserts)
+        object.__setattr__(self, "removals", removals)
+
+
+EMPTY_COMPATIBILITY_PAYLOAD = CompatibilityPayload()
+
+
+@dataclass(frozen=True)
 class AdvancePhase:
     target: Phase
     prepared_handoff: Optional[PreparedHandoff] = None
+    at: Optional[str] = None
+    compatibility: CompatibilityPayload = EMPTY_COMPATIBILITY_PAYLOAD
 
 
 @dataclass(frozen=True)
@@ -22,6 +47,11 @@ class MarkHalt:
     category: HaltCategory
     reason: str
     superseded: bool = False
+    at: Optional[str] = None
+    legacy_reason: Optional[str] = None
+    compatibility: CompatibilityPayload = EMPTY_COMPATIBILITY_PAYLOAD
+    extension_fields: FrozenJsonObject = FrozenJsonObject(())
+    permission_observation: bool = False
 
 
 @dataclass(frozen=True)
@@ -30,11 +60,16 @@ class Reactivate:
     reason: str
     approved_by_user: bool
     target: Phase
+    at: Optional[str] = None
+    compatibility: CompatibilityPayload = EMPTY_COMPATIBILITY_PAYLOAD
 
 
 @dataclass(frozen=True)
 class ResumeStale:
     target: Phase
+    new_pid: Optional[int] = None
+    at: Optional[str] = None
+    compatibility: CompatibilityPayload = EMPTY_COMPATIBILITY_PAYLOAD
 
 
 @dataclass(frozen=True)
@@ -50,6 +85,9 @@ class MarkPass:
     force_approval_verified: bool = False
     artifact_gate_satisfied: bool = False
     specialist_gate_satisfied: bool = False
+    verified_score_index: Optional[int] = None
+    at: Optional[str] = None
+    compatibility: CompatibilityPayload = EMPTY_COMPATIBILITY_PAYLOAD
 
 
 @dataclass(frozen=True)
@@ -63,6 +101,8 @@ class SetExtensionFields:
     """
 
     fields: FrozenJsonObject
+    at: Optional[str] = None
+    compatibility: CompatibilityPayload = EMPTY_COMPATIBILITY_PAYLOAD
 
 
 # Fields whose value is fixed at genesis or owned by the pass gate; a generic

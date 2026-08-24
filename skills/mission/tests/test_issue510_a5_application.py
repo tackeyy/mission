@@ -55,22 +55,31 @@ class MissionRepository:
         self.state = copy.deepcopy(state)
         self.saved = None
         self.failure = failure
+        from mission_persistence.legacy_v4 import LegacyV4Repository
 
-    def transaction(self):
-        return nullcontext()
+        self._repository = LegacyV4Repository(
+            lock=nullcontext,
+            read_state=lambda: copy.deepcopy(self.state),
+            write_state=self._write,
+            backup_state=lambda: None,
+        )
 
-    def load(self):
-        return copy.deepcopy(self.state)
-
-    def execute(self, state, mutation, transition=None):
-        proposed = copy.deepcopy(state)
-        mutation(proposed)
-        return proposed
-
-    def save(self, state, **kwargs):
+    def _write(self, state, **_kwargs):
         if self.failure:
             raise ValueError(self.failure)
         self.saved = copy.deepcopy(state)
+
+    def transaction(self):
+        return self._repository.transaction()
+
+    def load(self):
+        return self._repository.load()
+
+    def execute(self, command, **kwargs):
+        return self._repository.execute(command, **kwargs)
+
+    def save(self, state, **kwargs):
+        self._repository.save(state, **kwargs)
 
 
 def _previous():

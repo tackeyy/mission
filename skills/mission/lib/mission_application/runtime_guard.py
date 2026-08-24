@@ -28,8 +28,13 @@ from .lifecycle import (
 from mission_common import parse_iso_datetime, is_supersede_marked
 from mission_kernel.commands import MarkHalt
 from mission_kernel.model import HaltCategory
-from mission_kernel.transitions import decide, transition_control_claim_bounds
-from .ports import AggregateIndexError, LegacyMissionRepository
+from mission_kernel.transitions import decide
+from .ports import (
+    AggregateIndexError,
+    LegacyCommandExecutionResult,
+    LegacyMissionRepository,
+)
+from .compatibility import compatibility_delta
 
 
 RUNTIME_GUARD_COMMAND_OWNERS = {
@@ -1305,13 +1310,57 @@ def record_permission_observation(
         # 維持する（劣化 doc でも preflight halt を書けなくしない）。
         diagnosis = diagnose_terminalizable_state(state)
         real_state = real_terminalizable_state(state) if diagnosis == TERMINALIZABLE_ACTIVE else None
-        decision = decide(
-            real_state if real_state is not None else _mark_halt_decision_state(state),
-            MarkHalt(
+        use_transition = real_state is not None
+
+        def mutate(proposed: dict) -> None:
+            proposed["halt_reason"] = reason
+            proposed["halt_category"] = "blocked-external"
+            proposed["loop_active"] = False
+            if transition_phase is None:
+                proposed["phase"] = "halted"
+            else:
+                _closed_permission_transition(
+                    proposed, transition_phase, request.observed_at
+                )
+            proposed["terminal_outcome"] = "blocked_external"
+            proposed["updated_at"] = request.observed_at
+
+        proposed = copy.deepcopy(state)
+        mutate(proposed)
+        if use_transition:
+            command = MarkHalt(
                 HaltCategory.BLOCKED_EXTERNAL,
                 reason,
-                superseded=is_supersede_marked(state.get("resolution_status"), reason),
-            ),
+                superseded=is_supersede_marked(
+                    state.get("resolution_status"), reason
+                ),
+                at=request.observed_at,
+                legacy_reason=reason,
+                compatibility=compatibility_delta(
+                    state,
+                    proposed,
+                    exclude={
+                        "phase",
+                        "loop_active",
+                        "halt_reason",
+                        "halt_category",
+                        "terminal_outcome",
+                        "updated_at",
+                    },
+                ),
+                permission_observation=True,
+            )
+        else:
+            command = MarkHalt(
+                HaltCategory.BLOCKED_EXTERNAL,
+                reason,
+                superseded=is_supersede_marked(
+                    state.get("resolution_status"), reason
+                ),
+            )
+        decision = decide(
+            real_state if real_state is not None else _mark_halt_decision_state(state),
+            command,
         )
         if not decision.accepted:
             # kernel invariant 違反は呼び出し元の ValueError 吸収（運用系の
@@ -1322,33 +1371,28 @@ def record_permission_observation(
                 else "rejection-unclosed"
             )
             raise PermissionHaltRejected(code)
-        transition = decision.transition if real_state is not None else None
-        claimed = set(transition_control_claim_bounds(transition)) if transition is not None else set()
 
-        def mutate(proposed: dict) -> None:
-            proposed["halt_reason"] = reason
-            if "halt_category" not in claimed:
-                proposed["halt_category"] = "blocked-external"
-            if "loop_active" not in claimed:
-                proposed["loop_active"] = False
-            if transition_phase is None:
-                proposed["phase"] = "halted"
-            else:
-                _closed_permission_transition(
-                    proposed, transition_phase, request.observed_at
-                )
-            if "terminal_outcome" not in claimed:
-                proposed["terminal_outcome"] = "blocked_external"
-            proposed["updated_at"] = request.observed_at
-
-        proposed = repository.execute(state, mutate, transition)
         try:
-            repository.save(proposed, aggregate_action="remove")
-        except AggregateIndexError:
+            if use_transition:
+                execution = repository.execute(command, aggregate_action="remove")
+                decision = execution.decision
+                if not decision.accepted:
+                    code = (
+                        decision.rejection.code
+                        if decision.rejection is not None
+                        else "rejection-unclosed"
+                    )
+                    raise PermissionHaltRejected(code)
+                proposed = execution.projection
+            else:
+                repository.save(proposed, aggregate_action="remove")
+        except AggregateIndexError as error:
             # The authority is already halted.  Preserve permission-preflight's
             # historical success result while the durable intent records the
             # derived-index repair that remains pending.
-            pass
+            if isinstance(error.execution, LegacyCommandExecutionResult):
+                decision = error.execution.decision
+                proposed = error.execution.projection
     return PermissionObservationResult(
         False,
         True,
