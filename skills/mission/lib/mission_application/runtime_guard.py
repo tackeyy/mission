@@ -25,7 +25,7 @@ from .lifecycle import (
     diagnose_terminalizable_state,
     real_terminalizable_state,
 )
-from mission_common import is_supersede_marked
+from mission_common import parse_iso_datetime, is_supersede_marked
 from mission_kernel.commands import MarkHalt
 from mission_kernel.model import HaltCategory
 from mission_kernel.transitions import decide, transition_control_claim_bounds
@@ -352,14 +352,13 @@ def normalize_guard_policy(
 
 
 def _parse_iso(value: Optional[str]) -> Optional[datetime]:
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (AttributeError, TypeError, ValueError):
+    # #511 の境界検査は application 層の属性呼び出し ``.replace(`` を filesystem
+    # publication と見なすため、ISO parsing は mission_common の共通 helper へ委譲する。
+    parsed = parse_iso_datetime(value)
+    if parsed is None:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        return datetime.combine(parsed.date(), parsed.time(), tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
 
 
@@ -381,7 +380,7 @@ def _hook_session(request: GuardRequest) -> Tuple[Optional[str], str]:
 
 
 def _state_file_session_id(state_file: str) -> str:
-    name = state_file.replace("\\", "/").rsplit("/", 1)[-1]
+    name = re.split(r"[/\\\\]", state_file)[-1]
     return name[:-5] if name.endswith(".json") else name
 
 
