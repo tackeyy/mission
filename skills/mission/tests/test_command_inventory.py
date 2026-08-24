@@ -62,8 +62,6 @@ ALLOWED_NON_C2_CALL_SITES = {
     # rebuildable aggregate index, and the second only locks review-lineage
     # serialization.  Their C2 exemption is therefore safe even when the C2
     # entry reaches them; each permitted entry is still listed explicitly.
-    ("cmd_init", "_remove_from_aggregate", "atomic_write_json"),
-    ("cmd_permission_preflight", "_remove_from_aggregate", "atomic_write_json"),
     ("cmd_reactivate", "_review_lineage_transaction", "StateLock"),
     ("cmd_refresh_pid", "_review_lineage_transaction", "StateLock"),
     ("cmd_set", "_review_lineage_transaction", "StateLock"),

@@ -103,6 +103,7 @@ COMMAND_OWNER_REGISTRY = {
         "queue next",
         "queue status",
         "queue verify",
+        "repair-aggregate-index",
         "resolve-archive",
     ),
 }

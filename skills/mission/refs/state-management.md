@@ -316,7 +316,7 @@ halted duplicate を明示解決するときは `resolve-archive --status supers
 - **常に multi (2026-06-13 legacy 完全廃止)**: `is_multi_session`/`MISSION_MULTI_SESSION` は撤廃。全 `cmd_*` が常に `sessions/<sid>.json` を使う。既存 legacy `state.json` は読まれず無害に残る (手動 `mission-migrate.py` で sessions/ へ移行可)。
 - **session_id (`resolve_session_id`)**: `MISSION_SESSION_ID` > `cc-<CLAUDE_CODE_SESSION_ID>` > `cx-<CODEX_THREAD_ID>` > `pid-<N>`。Claude Code/Codex の ID は安定 (resume・PID 再利用に強い)。ファイル名と session_id フィールドが一致。
 - **fenced session lease**: mutating command は StateLock 内で `{owner_session_id, lease_id, fencing_epoch, lease_expires_at}` を CAS 検証し、既定 15 分の TTL を renew する。read-only の `get` / `next` は renew しない。`init` の JSON は `lease_id` / `fencing_epoch` / `lease_expires_at` を返し、同じ `MISSION_LEASE_ID` を後続 mutating command へ必ず渡す。同一 session ID / PID fallback でも token 未提示は exit 2。lease のない legacy state を token なしで初回更新した場合、atomic publish 成功後に stderr へ `MISSION_LEASE_CARRIER=<mission-lease-carrier/1 JSON>` を1行出力する。consumer はその `lease_id` を次の独立 process に明示的に渡し、state から暗黙取得しない。期限内の foreign writer は exit 2、期限切れ takeover は PID を参照せず epoch+1 と `lease_history` を記録する。renew は clock rollback 時も既存 expiry を短縮しない。
-- **aggregate.json**: init で `active_sessions` に追加、mark-passes/mark-halt で除去。`cmd_list`/`cleanup-stale`/`halt --all` は `sessions/*.json` も走査する。
+- **aggregate.json**: init で `active_sessions` に追加、mark-passes/mark-halt で除去。legacy V4/V5 save は authority 更新前に `.mission-state/aggregate-index-intents/` へ durable intent を公開し、authority → index の順に更新してから intent を削除する。途中終了時は次の mutating save が authoritative session state から membership を再判定して自動回収する。`cmd_list`/`cleanup-stale`/`halt --all` は `sessions/*.json` も走査する。
 - **migrate**: `mission-migrate.py` は loop_active=true の進行中 state を拒否 (`--force` で override)。
 
 session_id は `MISSION_SESSION_ID` 未指定なら `cc-`/`cx-`/`pid-<N>` から自動採番される (上記 resolve_session_id 順)。状態は `.mission-state/sessions/<session_id>.json`、active 一覧は `.mission-state/aggregate.json` に保存される。
@@ -341,6 +341,12 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py cleanup-stale 
 
 # 実際に halt 実行 (--execute 明示が必要)
 python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py cleanup-stale --root "$(pwd)" --execute
+
+# aggregate index と authoritative session state の差分を検査（既定は read-only）
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py repair-aggregate-index
+
+# 破損・欠損 index を authority から再構築し、pending intent を回収
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-state.py repair-aggregate-index --execute
 ```
 
 ⚠️ `cleanup-stale --execute` は他 Claude セッションで進行中のミッションも halt する可能性がある。`--root "$(pwd)"` で対象を絞り、事前に dry-run で `would_halt` を確認すること。

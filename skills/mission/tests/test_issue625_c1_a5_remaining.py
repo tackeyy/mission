@@ -268,6 +268,9 @@ def test_scoped_owner_inventory_is_c1_thirteen_and_a5_one():
         "parallel-init",
         "permission-preflight",
         "resolve-archive",
+        # U5-2 (#636) が追加した明示修復 command。#625 の批割り実測（14 leaf path）
+        # の後に生まれた C1 writer で、#636 側の fault injection が挙動を固定する。
+        "repair-aggregate-index",
     }
     remaining = {
         path

@@ -211,11 +211,7 @@ def _atomic_write_callers() -> dict[str, set[str]]:
 # 直接 atomic_write_* を呼んでよい writer の閉リスト (U5-1 棚卸し)。
 # 追加は administrative commit protocol (mission_persistence.administrative)
 # を通すか、U5 の設計審査を経ること。
-# 既知除外: _legacy_lifecycle_repository.write_state / _add_to_aggregate 系の
-# aggregate index 更新は U5-2 (#636) で復旧設計へ移行するまで残置。
 ALLOWED_DIRECT_ATOMIC_WRITERS = {
-    "_add_to_aggregate",
-    "_add_to_aggregate_strict",
     "_atomic_write_archive_pointer",
     "_build_worktree_archive_staging",
     "_commit_specialist_state_with_archive",
@@ -224,8 +220,6 @@ ALLOWED_DIRECT_ATOMIC_WRITERS = {
     "_legacy_lifecycle_repository",
     "_publish_preflight_pointer_transaction",
     "_publish_state_archive_compaction",
-    "_remove_from_aggregate",
-    "_remove_from_aggregate_strict",
     "backup_state",
     "cmd_specialists_consent",
     "cmd_verify_provider_approval",

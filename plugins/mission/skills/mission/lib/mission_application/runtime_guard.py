@@ -29,7 +29,7 @@ from mission_common import parse_iso_datetime, is_supersede_marked
 from mission_kernel.commands import MarkHalt
 from mission_kernel.model import HaltCategory
 from mission_kernel.transitions import decide, transition_control_claim_bounds
-from .ports import LegacyMissionRepository
+from .ports import AggregateIndexError, LegacyMissionRepository
 
 
 RUNTIME_GUARD_COMMAND_OWNERS = {
@@ -1342,7 +1342,13 @@ def record_permission_observation(
             proposed["updated_at"] = request.observed_at
 
         proposed = repository.execute(state, mutate, transition)
-        repository.save(proposed)
+        try:
+            repository.save(proposed, aggregate_action="remove")
+        except AggregateIndexError:
+            # The authority is already halted.  Preserve permission-preflight's
+            # historical success result while the durable intent records the
+            # derived-index repair that remains pending.
+            pass
     return PermissionObservationResult(
         False,
         True,

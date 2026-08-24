@@ -4,8 +4,8 @@ ADR-006 rejects the category "administrative writer without a protocol": every
 separate-aggregate write must provide, at minimum, an identity-checked read,
 validation, an atomic publish, and a defined failure outcome.  This module
 owns that minimal protocol for janitor-style record mutations
-(resolve-archive).  The legacy save's aggregate index update is tracked
-separately (U5-2) and remains a known exclusion until it migrates.
+(resolve-archive).  Legacy V4/V5 saves use the separate durable-intent
+protocol in ``aggregate_index`` for their rebuildable aggregate index.
 """
 
 from __future__ import annotations
