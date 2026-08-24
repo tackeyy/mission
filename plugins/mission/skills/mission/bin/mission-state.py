@@ -10791,7 +10791,7 @@ def _guard_decision_from_payload(payload: object) -> GuardDecision:
                 expected_state_file=command_payload["expected_state_file"],
                 execute=command_payload["execute"],
             )
-        else:
+        elif command_kind is GuardCommandKind.STOP_GUARD_OBSERVE:
             command = StopGuardObserveCommand(
                 session_id=command_payload["session_id"],
                 digest=command_payload["digest"],
@@ -10799,6 +10799,11 @@ def _guard_decision_from_payload(payload: object) -> GuardDecision:
                 ttl_seconds=command_payload["ttl_seconds"],
                 attempt=command_payload["attempt"],
                 max_attempts=command_payload["max_attempts"],
+            )
+        else:
+            # 未知の command kind を暗黙に observe へ縮退させない（closed set の維持）
+            raise ValueError(
+                "guard-command-unknown-kind-%s" % getattr(command_kind, "value", command_kind)
             )
 
         return GuardDecision(

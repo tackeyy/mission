@@ -50,7 +50,8 @@ while :; do
     mark-halt)
       if ! COMMAND_CWD=$(printf '%s' "$GUARD_DECISION" | jq -er '.command.cwd') ||
          ! COMMAND_SESSION_ID=$(printf '%s' "$GUARD_DECISION" | jq -er '.command.session_id') ||
-         ! COMMAND_REASON=$(printf '%s' "$GUARD_DECISION" | jq -er '.command.reason'); then
+         ! COMMAND_REASON=$(printf '%s' "$GUARD_DECISION" | jq -er '.command.reason') ||
+         ! COMMAND_CATEGORY=$(printf '%s' "$GUARD_DECISION" | jq -er '.command.category'); then
         printf '%s\n' '{"decision":"block","reason":"mission Stop guard decision is invalid","outcome_kind":"expected-gate"}'
         exit 0
       fi
@@ -58,7 +59,7 @@ while :; do
       COMMAND_STDOUT=$(
         cd "$COMMAND_CWD" 2>/dev/null &&
         MISSION_SESSION_ID="$COMMAND_SESSION_ID" python3 "$MISSION_STATE_PY" mark-halt \
-          --reason "$COMMAND_REASON" --category stale
+          --reason "$COMMAND_REASON" --category "$COMMAND_CATEGORY"
       )
       COMMAND_EXIT_CODE=$?
       set -e
