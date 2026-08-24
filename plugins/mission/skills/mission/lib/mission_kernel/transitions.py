@@ -16,6 +16,7 @@ from .commands import (
     ClearProgress,
     CompatibilityPayload,
     ContextManifestEffectClaim,
+    DeclineSpecialistSelection,
     GENERIC_SET_DEDICATED_FIELDS,
     GENERIC_SET_FROZEN_FIELDS,
     AdvancePhase,
@@ -947,6 +948,42 @@ def _set_extension_fields(state: MissionState, raw_command: object) -> Transitio
     )
 
 
+def _decline_specialist_selection(
+    state: MissionState, raw_command: object
+) -> Transition:
+    command = raw_command
+    assert isinstance(command, DeclineSpecialistSelection)
+    _active_control(state)
+    document = _artifact_document(state)
+    checkpoint = document.get("specialists_decision")
+    if not isinstance(checkpoint, dict):
+        raise _Rejected("specialist-selection-checkpoint-invalid")
+    if checkpoint.get("selection_id") != command.selection_id:
+        raise _Rejected("specialist-selection-id-mismatch")
+    if (
+        checkpoint.get("decision") != "none"
+        or checkpoint.get("lifecycle_state") != "candidate"
+        or checkpoint.get("reason_code") != "awaiting-confirmation"
+    ):
+        raise _Rejected("specialist-selection-not-declinable")
+    document["specialists_decision"] = {
+        **checkpoint,
+        "action": "continue-core",
+        "decision": "declined",
+        "reason": command.reason.strip(),
+        "reason_code": "orchestrator-declined",
+        "prompted_user": False,
+        "lifecycle_state": "terminal",
+    }
+    document["specialists_mode"] = "manual"
+    if command.at is not None:
+        document["updated_at"] = command.at
+    return Transition(
+        _with_artifact_document(state, document),
+        (KernelEvent("specialist-selection-declined"),),
+    )
+
+
 def _artifact_document(state: MissionState) -> dict:
     if state.legacy_passthrough is None:
         raise _Rejected("artifact-v4-state-required")
@@ -1285,6 +1322,12 @@ TRANSITION_TABLE = build_transition_table(
             ResumeStale,
             _command_type_guard(ResumeStale),
             _resume_stale,
+        ),
+        TransitionRule(
+            "specialist-selection-decline",
+            DeclineSpecialistSelection,
+            _command_type_guard(DeclineSpecialistSelection),
+            _decline_specialist_selection,
         ),
         TransitionRule(
             "set-extension-fields",
