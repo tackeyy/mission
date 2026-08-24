@@ -111,6 +111,107 @@ def extension_fields_decision(raw_state: dict, fields: dict) -> Decision:
     )
 
 
+def repository_metadata(
+    enabled: bool,
+    stamp_metadata: Callable[[dict, object], dict],
+    context: object,
+) -> dict:
+    """Build repository metadata outside the CLI adapter."""
+    return stamp_metadata({}, context) if enabled else {}
+
+
+@dataclass(frozen=True)
+class SupersedeReviewWriteRequest:
+    role: str
+    superseded: tuple[str, ...]
+    at: str
+    real_state_available: bool
+
+
+@dataclass(frozen=True)
+class SupersedeReviewWrite:
+    command: MarkHalt | SetExtensionFields
+    preflight_decision: Decision | None
+    direct_save: bool
+
+
+def prepare_supersede_review_write(
+    raw_state: dict,
+    proposed_state: dict,
+    request: SupersedeReviewWriteRequest,
+) -> SupersedeReviewWrite:
+    """Prepare the typed write for one supersede-review group member."""
+    if request.role == "current":
+        command = SetExtensionFields(
+            freeze_json_value({"supersedes": list(request.superseded)}),
+            at=request.at,
+        )
+        return SupersedeReviewWrite(command, None, False)
+    if request.role != "superseded":
+        raise LifecycleFailure(
+            "unknown supersede review role: %r" % (request.role,),
+            reason="unknown-supersede-review-role",
+            outcome_kind="invalid-input",
+        )
+
+    reason = "superseded by a replacement run"
+    command = MarkHalt(
+        HaltCategory.STALE,
+        reason,
+        superseded=is_supersede_marked(
+            raw_state.get("resolution_status"),
+            reason,
+        ),
+    )
+    if not request.real_state_available:
+        decision = decide(_mark_halt_decision_state(raw_state), command)
+        if not decision.accepted:
+            assert decision.rejection is not None
+            raise LifecycleFailure(
+                "supersede rejected by kernel: " + decision.rejection.code,
+                reason=decision.rejection.code,
+            )
+        return SupersedeReviewWrite(
+            command,
+            decision,
+            True,
+        )
+    return SupersedeReviewWrite(
+        replace(
+            command,
+            at=request.at,
+            legacy_reason=reason,
+            compatibility=compatibility_delta(
+                raw_state,
+                proposed_state,
+                exclude={
+                    "phase",
+                    "passes",
+                    "loop_active",
+                    "halt_reason",
+                    "halt_category",
+                    "terminal_outcome",
+                    "updated_at",
+                },
+            ),
+        ),
+        None,
+        False,
+    )
+
+
+def supersede_review_projection(execution: LegacyCommandExecutionResult) -> dict:
+    """Require an accepted supersede command and expose its projection."""
+    decision = execution.decision
+    if not decision.accepted:
+        assert decision.rejection is not None
+        raise LifecycleFailure(
+            "supersede rejected by kernel: " + decision.rejection.code,
+            reason=decision.rejection.code,
+        )
+    return execution.projection
+
+
 @dataclass(frozen=True)
 class InitRequest:
     arguments: object
