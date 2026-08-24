@@ -659,6 +659,22 @@ def test_specialists_consent_rejects_session_file_without_changing_session_bytes
     assert session.read_bytes() == original
 
 
+def test_specialists_consent_path_resolution_failure_is_fail_closed(run_cli, tmp_path):
+    result = run_cli(
+        "specialists",
+        "consent",
+        "--provider",
+        "portable-provider",
+        "--consent-file",
+        "~__mission_user_that_does_not_exist__/provider-consent.json",
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 2
+    assert result.stderr.startswith("ERROR: ")
+    assert "Traceback" not in result.stderr
+
+
 def test_provider_consent_path_policy_rejects_session_aggregate_parts():
     import pytest
 

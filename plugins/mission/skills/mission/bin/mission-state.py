@@ -4752,11 +4752,11 @@ def cmd_specialists(args):
 
 
 def cmd_specialists_consent(args):
-    default_path = _default_consent_file()
-    resolved = (
-        Path(args.consent_file) if args.consent_file else default_path
-    ).expanduser().resolve(strict=False)
     try:
+        default_path = _default_consent_file()
+        resolved = (
+            Path(args.consent_file) if args.consent_file else default_path
+        ).expanduser().resolve(strict=False)
         provider, _validated_parts = validate_provider_consent_request(
             ProviderConsentRequest(
                 provider=args.provider,
@@ -4765,17 +4765,16 @@ def cmd_specialists_consent(args):
                 ),
             )
         )
-    except RuntimeGuardFailure as exc:
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
     path = resolved
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {}
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            data = {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        data = {}
     providers = data.setdefault("providers", {})
     providers[provider] = {"granted_at": iso_now()}
     atomic_write_json(path, data)
