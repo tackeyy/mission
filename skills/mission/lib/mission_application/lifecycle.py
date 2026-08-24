@@ -129,27 +129,6 @@ def repository_metadata(
     return stamp_metadata({}, context) if enabled else {}
 
 
-def initialization_operation_id(session_id: str, command_bytes: bytes) -> str:
-    """Derive the deterministic v5 genesis operation identity."""
-    payload = session_id.encode("utf-8") + b"\x00" + command_bytes
-    return "init:" + hashlib.sha256(payload).hexdigest()
-
-
-def should_route_init_to_goal(
-    initial: dict,
-    arguments: object,
-    user_tier: object,
-) -> bool:
-    """Decide whether an ordinary Simple init should use goal dispatch."""
-    return (
-        initial.get("complexity") == "Simple"
-        and not getattr(arguments, "force_mission", False)
-        and not user_tier
-        and not initial.get("review_tier_signals")
-        and not getattr(arguments, "issue_ref", None)
-    )
-
-
 @dataclass(frozen=True)
 class SupersedeReviewWriteRequest:
     role: str

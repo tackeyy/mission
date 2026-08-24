@@ -107,19 +107,19 @@ def test_init_adapter_policy_helpers_are_pure_and_preserve_current_contract():
     expected = "init:" + hashlib.sha256(
         b"portable-session\x00" + command_bytes
     ).hexdigest()
-    assert initialization_operation_id("portable-session", command_bytes) == expected
+    assert (
+        initialization_operation_id("portable-session", command_bytes, None) == expected
+    )
+    # #655: terminal restart は同じ genesis 入力でも別 operation identity を得る。
+    restarted = initialization_operation_id(
+        "portable-session", command_bytes, "sha256:" + "0" * 64
+    )
+    assert restarted != expected
 
-    simple = {
-        "complexity": "Simple",
-        "review_tier_signals": [],
-    }
-    args = type(
-        "InitArguments",
-        (),
-        {"force_mission": False, "issue_ref": None},
-    )()
-    assert should_route_init_to_goal(simple, args, None) is True
-    assert should_route_init_to_goal(simple, args, "Full") is False
+    routed = dict(complexity="Simple", force_mission=False, new_mission=False,
+                  review_tier_signals=[], issue_ref=None)
+    assert should_route_init_to_goal(user_tier=None, **routed) is True
+    assert should_route_init_to_goal(user_tier="Full", **routed) is False
 
 
 def test_handoff_operations_are_closed_typed_kernel_commands():
