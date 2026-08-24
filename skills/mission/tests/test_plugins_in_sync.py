@@ -229,7 +229,6 @@ SYNC_PAIRS = [
 MISSION_STATE_DISTRIBUTION_MARKERS = [
     "specialist accounting required before pass",
     "PREPARATION_ONLY_MARKERS",
-    "_classify_command_provider_result",
 ]
 
 COMMAND_OUTCOME_SYNC_PAIR = (
