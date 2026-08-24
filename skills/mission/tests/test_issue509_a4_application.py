@@ -459,12 +459,25 @@ def test_strict_backend_uses_the_same_closed_receipt_validator(monkeypatch):
 
 
 def test_cli_call_path_uses_a4_dispatch_and_terminal_decisions():
-    source = (Path(__file__).resolve().parents[1] / "bin" / "mission-state.py").read_text(encoding="utf-8")
+    # #626: この呼び出し経路は adapter から application 層 (command_provider) へ
+    # 移動した。守るべき不変条件は「A4 dispatch と terminal decision を経由すること」
+    # であり、その所在ではないため、移動先で同じ 4 点を確認し、adapter が
+    # そこへ委譲していることを併せて固定する。
+    lib = Path(__file__).resolve().parents[1] / "lib"
+    use_case = (lib / "mission_application" / "command_provider.py").read_text(
+        encoding="utf-8"
+    )
 
-    assert "intent_decision = record_dispatch_intent(" in source
-    assert "entry = {**current_entry, **intent_decision," in source
-    assert "terminal = decide_provider_terminal_result(" in source
-    assert "status, reason = terminal.status, terminal.reason" in source
+    assert "intent_decision = record_dispatch_intent(" in use_case
+    assert "**current_entry, **intent_decision," in use_case
+    assert "terminal = decide_provider_terminal_result(" in use_case
+    assert "status, reason = terminal.status, terminal.reason" in use_case
+
+    adapter = (
+        Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
+    ).read_text(encoding="utf-8")
+    assert "from mission_application.command_provider import" in adapter
+    assert "result = invoke_command_provider(" in adapter
 
 
 def test_provider_plan_import_does_not_expose_an_injectable_parser():
