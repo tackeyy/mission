@@ -596,8 +596,8 @@ issue 起票 → worktree feature ブランチ → PR (本文に `Closes #N` を
 - `init --issue-ref <owner/repo#N>` で issue を state に記録する (S3 重複 WARN も兼ねる)。
 - PR 作成時、本文に `Closes #N` を必ず入れる (N は issue 番号)。これによりマージで issue が自動クローズされる。
 - Phase 7 のマージ前に PR 本文へ `Closes #N` が含まれることを確認し、欠けていれば `gh pr edit <PR番号> --body` で追記してからマージする。
-- 単独 mission の既定マージは `gh pr merge --auto --squash` とし、base が動いて auto-merge が発火しない場合は `gh api repos/{owner}/{repo}/pulls/{n}/update-branch` で機械的に base 統合して待つ。
-- 個人リポジトリでは GitHub Merge Queue を使わない。queue 相当の順序制御が必要なときは `.mission-state/merge-queue.json` と `update-branch` を使って直列化する。
+- 単独 mission の merge は `gate-and-merge <PR>` だけを入口とする。`gh pr merge` や update-branch を直接呼ばない。
+- 個人リポジトリでは GitHub Merge Queue を使わない。queue 相当の順序制御が必要なときは `.mission-state/merge-queue.json` と `gate-and-merge` を使って直列化する。
 - これは reject しない補助規律 (issue 連携がないミッションには影響しない・後方互換)。
 
 ## Merge queue
@@ -606,15 +606,16 @@ issue 起票 → worktree feature ブランチ → PR (本文に `Closes #N` を
 
 - 登録: `queue enqueue --issue-ref <ref> --pr-ref <ref> [--from-state] [--head-sha <sha> --base-sha <sha>] [--depends-on <csv>] [--session <sid>]`
 - 次候補: `queue next --json`
-- 直前検証: `queue verify --queue-id <id> --current-base-sha <sha>`
+- 直前検証と merge 委譲: `queue verify --queue-id <id> --current-base-sha <sha>`
 - 状態更新: `queue mark --queue-id <id> --status merged|invalidated|superseded [--reason <text>]`
 
 運用:
 
 - `--from-state` は呼び出し session の `score_history` 最新 entry から `revision_scope.base_sha/head_sha` を自動導出する。明示 `--head-sha/--base-sha` と併用した場合、食い違えば exit 2 で止まり、手動転記ミスを検出する。
 - `score_history` が空、または最新 entry に `revision_scope` が無い場合は exit 2 とし、手動指定 fallback を案内する。
-- enqueue 後は `queue next` で自分の entry が返ることを確認し、merge 直前に live base sha で `queue verify` を通す。
+- enqueue 後は `queue next` で自分の entry が返ることを確認し、merge 直前に live base sha で `queue verify` を通す。成功後は `queue verify` → `gate-and-merge <PR> --expected-head-sha <head_sha> --expected-base-sha <accepted_base_sha>` の順に委譲し、2 SHA には verify 結果の `entry.head_sha` / `entry.accepted_base_sha` を渡す。merge の実行主体はこの共通コマンドだけにする。
 - `verify` が exit 2 なら、その entry は invalidated なので base 統合 → refreeze (`--head-sha` を更新して再 enqueue) → fresh review → 再登録の順でやり直す。
+- 共通ゲートの read-back 成功後だけ `queue mark --queue-id <id> --status merged` を実行する。ゲート失敗時は mark しない。
 - `depends_on` に列挙した issue_ref_key が `merged` になるまで、後続 entry は `queue next` に出ない。
 - 単独 mission は従来どおり queue を使わなくてよい。
 - [worktree での init 配置規律 (#454)](#worktree-での-init-配置規律-454)
@@ -651,10 +652,26 @@ issue 起票 → worktree feature ブランチ → PR (本文に `Closes #N` を
 
 ### マージコマンドの選び方
 
-- 既存リポジトリの慣習を尊重: `gh pr list --state merged --limit 5 --json mergeCommit,title` で過去マージ方式 (squash / merge / rebase) を推定
-- 不明なら `--squash` をデフォルトに
-- CI pending 中なら `--auto` フラグで完了待ち
-- 推奨形: `gh pr merge <N> --repo <owner/repo> --squash --auto --delete-branch`
+- merge の入口は `gate-and-merge <PR>` の 1 本だけ。コマンドは repo lease を処理全体で保持し、`origin/main` を fetch、scratch worktree で PR head と統合、既存 `scripts/ci_changed_scopes.js` が選ぶ全スイートまたは docs-only fast path を `make test` で実行、main と head を再照合してから `gh pr merge --match-head-commit <sha> --squash` を呼び、結果を read-back する。
+- コンフリクト、fetch/解析失敗、suite red、base/head 移動、merge/read-back 不一致はすべて fail-closed とし、非 0 で停止する。コンフリクト時は手動統合 → refreeze → fresh review 後に最初から再実行する。
+- queue を使う構成は `queue verify` → `gate-and-merge <PR> --expected-head-sha <head_sha> --expected-base-sha <accepted_base_sha>` の順に委譲し、使わない構成は `gate-and-merge <PR>` を直接呼ぶ。独立 merge script や `gh pr merge` 直呼びを併置しない。
+
+本ゲートが保証するのは次の 1 点に限る。
+
+> **最終 fetch で確認した base / head の組に対して全スイートを通し、既知のエージェント merge 経路を直列化する。**
+
+保証しないもの:
+
+- **「merge の瞬間まで fresh」ではない。** `gh pr merge --match-head-commit` は head sha のみを
+  固定し、base sha の compare-and-swap を提供しない。手順 5 と 6 の間に main が動く窓は
+  ローカルスクリプトでは閉じられない。サーバー側で原子的に保証するには `strict: true` か
+  merge queue が必要で、いずれも本 repo では採れない
+- **GitHub UI からの直接 merge は迂回できる。** 本ゲートはエージェント merge 経路に対する強制であり、
+  人手の UI merge は規律で担保する。実測では直近 30 件のうち 29 件が `gh pr merge` 経路
+  （残り 1 件は経路未確認）で、現状の運用実態では致命的でない
+- **3 本以上の同時干渉**は扱わない。main は直列なので順に 1 本ずつ検出される。
+
+既存の exact-head / refreeze 規律は変更しない。本ゲートの統合テスト済み tree は fresh review の代替ではない。
 
 ## 修正履歴
 

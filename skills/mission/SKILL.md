@@ -35,7 +35,7 @@ allowed-tools:
 7. `halt_reason` が空でなければ完了報告語彙は禁止し、先頭を `⏸️ 中断 / 未完了` にする。`mark-passes --force --approved-by-user` はユーザーが明示的に override を指示した場合のみ (#185: `--approved-by-user` は自律実行禁止のフラグであり、orchestrator が自己判断で付けてはならない)。schema v4 の force はこれに加え、opaque な `sha256:` evidence ref、role、期限内 timestamp、allowlisted reason code を host verifier が typed verified envelope で検証しなければならない。trust root は `$XDG_CONFIG_HOME/mission/approval-verifiers.json`（または `~/.config/mission/...`）の標準 user registry `/2` のみで、project registry は許可しない。唯一の登録形式は verifier id、`entry_point`、`distribution`、`version`、`source_digest` を持つ `mission-approval-verifier-registry/2` である。parent は runtime metadata と source を pin し、child は同じ pin を再照合してから load/callback を5秒以内に実行する。shell command、URL、任意 module/file、secret、絶対 path は拒否し state に保存しない。portable CLI は verifier を同梱しないため fail-closed とする。
 8. M6: Medium 以上の指摘を orchestrator がインライン修正したら、自己検証だけで合格にしない。差分 Reviewer 1 名の再確認を経てから scoring / pass 判定へ進む。
 9. 質問は溜めて仮置きする。即時質問は Trigger 1 の不可逆操作と、Trigger 2 の中断条件だけ。
-10. PR がある場合は pass 後に Phase 7 を実行する。自動 merge は明示 opt-in、CI/テスト pass、`gh pr checks` 1 件以上、禁止ルールなしの全条件を満たす時だけ。
+10. PR がある場合は pass 後に Phase 7 を実行する。自動 merge は明示 opt-in、CI/テスト pass、`gh pr checks` 1 件以上、禁止ルールなしの全条件を満たし、必ず共通 `gate-and-merge <PR>` を通す時だけ。
 11. `init` は planning activity を自動開始する。phase 境界では atomic な `advance --phase <phase>` を優先し、必要な時だけ `--activity <kind>:<reason>` で既定値を上書きする。原因不明の時間を推測分類しない。終端 phase は open segment を自動で閉じる。
 12. 相互依存のない tool 呼び出し (複数ファイルの Read、独立した照合の Bash、Reviewer N 名の spawn) は単一メッセージで並列発行し、逐次実行で turn を積み増さない (#284)。依存関係がある操作 (state 書き込み → 再取得、review JSON 保存 → review-finalize) は従来どおり順次。
 13. context 規律 (#285): state 全文を cat/echo せず、値は `get --field` と `next`/`resume` の JSON だけを読む。reviewer の mission-review/1 JSON は保存とパス受け渡しのみで orchestrator が全文を再読・転記しない (検証は `review-finalize` が行う)。refs/*.md は必要時のみ Read し、読み終えた大型ファイルの再読を避ける。
@@ -164,7 +164,24 @@ Stop hook が無効な環境でも、Phase 6 直後に `next` と state 再取�
 
 ## Phase 7
 
-Pass 後に PR がある場合だけ実行する。自動 merge 条件は、CI/テスト pass、明示 opt-in、`gh pr checks` 1 件以上、draft/CODEOWNERS/branch protection/禁止文言などの NG なし。自由記述の「merge してよい」は許可根拠にしない。並列 mission で同一 state root に複数 active implementer がいる場合は、merge 前に `queue enqueue` (`--from-state` で state 由来の sha 自動導出も可) → `queue next` → `queue verify` → `queue mark --status merged` を通し、`verify` が exit 2 なら base 統合 → refreeze → fresh review → 再 enqueue でやり直す。詳細判定は `refs/state-management.md`。
+Pass 後に PR がある場合だけ実行する。自動 merge 条件は、CI/テスト pass、明示 opt-in、`gh pr checks` 1 件以上、draft/CODEOWNERS/branch protection/禁止文言などの NG なし。自由記述の「merge してよい」は許可根拠にしない。単独 mission は `gate-and-merge <PR>` を直接呼ぶ。並列 mission で同一 state root に複数 active implementer がいる場合は、`queue enqueue` (`--from-state` で state 由来の sha 自動導出も可) → `queue next` → `queue verify` → `gate-and-merge <PR> --expected-head-sha <head_sha> --expected-base-sha <accepted_base_sha>` の順に進み、2 SHA には verify 結果の `entry.head_sha` / `entry.accepted_base_sha` を渡す。read-back 成功後だけ `queue mark --status merged` を実行する。`verify` が exit 2 なら base 統合 → refreeze → fresh review → 再 enqueue でやり直す。`gh pr merge` を直接呼ぶ経路は使わない。詳細判定は `refs/state-management.md`。
+
+本ゲートが保証するのは次の 1 点に限る。
+
+> **最終 fetch で確認した base / head の組に対して全スイートを通し、既知のエージェント merge 経路を直列化する。**
+
+保証しないもの:
+
+- **「merge の瞬間まで fresh」ではない。** `gh pr merge --match-head-commit` は head sha のみを
+  固定し、base sha の compare-and-swap を提供しない。手順 5 と 6 の間に main が動く窓は
+  ローカルスクリプトでは閉じられない。サーバー側で原子的に保証するには `strict: true` か
+  merge queue が必要で、いずれも本 repo では採れない
+- **GitHub UI からの直接 merge は迂回できる。** 本ゲートはエージェント merge 経路に対する強制であり、
+  人手の UI merge は規律で担保する。実測では直近 30 件のうち 29 件が `gh pr merge` 経路
+  （残り 1 件は経路未確認）で、現状の運用実態では致命的でない
+- **3 本以上の同時干渉**は扱わない。main は直列なので順に 1 本ずつ検出される。
+
+既存の exact-head / refreeze 規律は変更しない。base 移動時は accepted を無効とし、base 統合 → refreeze → CI green → fresh review を再取得する。統合テスト済み tree は fresh review の代替ではない。
 
 通常 PR merge は distribution release ではない。version bump を伴う distribution release は `docs/VERSIONING.md` と release checklist に従い、remote tag と GitHub Release を確認する。
 

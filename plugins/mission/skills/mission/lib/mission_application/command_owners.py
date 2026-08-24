@@ -107,6 +107,10 @@ COMMAND_OWNER_REGISTRY = {
         "repair-aggregate-index",
         "resolve-archive",
     ),
+    **_owned(
+        "C1.external-merge",
+        "gate-and-merge",
+    ),
 }
 
 
