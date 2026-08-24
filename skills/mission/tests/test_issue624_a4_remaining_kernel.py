@@ -1409,3 +1409,49 @@ def test_recommend_dry_run_does_not_create_or_mutate_session_state(run_cli, tmp_
 
     assert result.returncode == 0, result.stderr
     assert not (tmp_path / ".mission-state").exists()
+
+
+def test_handoff_rejects_duplicate_begin_duplicate_step_and_incomplete_complete():
+    """設計書の必須 reject パス 3 件を kernel 遷移で直接固定する（Checker M-1）。
+
+    旧 `decide_executor_handoff` 経路のテストは kernel 化後の production パスに
+    到達しないため、遷移関数そのものへの回帰テストとして置く。
+    """
+    from mission_kernel import decode_mission_state
+    from mission_kernel.commands import (
+        BeginExecutorHandoff,
+        CompleteExecutorHandoff,
+        RecordExecutorStep,
+    )
+    from mission_kernel.transitions import decide
+
+    state = decode_mission_state(json.dumps(_handoff_document()).encode("utf-8"))
+    plan = _plan_observation()
+
+    begun = decide(state, BeginExecutorHandoff("2030-01-01T00:00:01Z", plan))
+    assert begun.accepted is True
+    consuming = begun.transition.new_state
+
+    duplicate_begin = decide(
+        consuming, BeginExecutorHandoff("2030-01-01T00:00:02Z", plan)
+    )
+    assert duplicate_begin.accepted is False
+    assert duplicate_begin.rejection.code == "executor-handoff-not-prepared"
+
+    first = decide(
+        consuming, RecordExecutorStep("2030-01-01T00:00:03Z", "step-1", "ok", plan)
+    )
+    assert first.accepted is True
+    one_step = first.transition.new_state
+
+    duplicate_step = decide(
+        one_step, RecordExecutorStep("2030-01-01T00:00:04Z", "step-1", "ok", plan)
+    )
+    assert duplicate_step.accepted is False
+    assert duplicate_step.rejection.code == "executor-step-already-recorded"
+
+    incomplete = decide(
+        one_step, CompleteExecutorHandoff("2030-01-01T00:00:05Z", plan)
+    )
+    assert incomplete.accepted is False
+    assert incomplete.rejection.code == "executor-handoff-incomplete"

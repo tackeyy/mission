@@ -202,7 +202,6 @@ from mission_application.planning import (  # noqa: E402
     ExecutorHandoffFacts,
     ExecutorHandoffRequest,
     executor_handoff_response,
-    decide_executor_handoff,
     prepare_executor_handoff,
     prepare_executor_handoff_rejection,
     prepare_specialist_recommendation,
