@@ -285,8 +285,11 @@ def test_v4_state_failure_attempts_immediate_intent_recovery_without_masking_err
 
 
 def test_permission_halt_preserves_success_after_post_commit_index_failure():
+    import json
+
     from mission_application.ports import AggregateIndexError
     from mission_application.runtime_guard import record_permission_observation
+    from mission_kernel import project_legacy_document
     from .test_issue620_kernel_a5_c1 import (
         _RecordingRepository,
         _active_state,
@@ -294,21 +297,9 @@ def test_permission_halt_preserves_success_after_post_commit_index_failure():
     )
 
     class FailingIndexRepository(_RecordingRepository):
-        def save(
-            self,
-            state,
-            *,
-            backup=True,
-            administrative=False,
-            aggregate_action=None,
-        ):
-            super().save(
-                state,
-                backup=backup,
-                administrative=administrative,
-                aggregate_action=aggregate_action,
-            )
-            assert aggregate_action == "remove"
+        def execute(self, command, **kwargs):
+            assert kwargs.get("aggregate_action") == "remove"
+            super().execute(command, **kwargs)
             raise AggregateIndexError("index remains recoverable")
 
     repository = FailingIndexRepository(_active_state())
@@ -316,6 +307,9 @@ def test_permission_halt_preserves_success_after_post_commit_index_failure():
 
     assert result.halt_recorded is True
     assert repository.saved["loop_active"] is False
+    assert repository.saved == json.loads(
+        project_legacy_document(result.decision.transition.new_state)
+    )
 
 
 def test_v4_coordinator_preserves_every_saved_key_and_value(tmp_path):

@@ -22,6 +22,7 @@ from artifact_contract import invalidate_artifact_lint_observation
 from mission_kernel.codec_v4 import decode_mission_state
 from mission_common import derive_terminal_outcome, is_supersede_marked
 from mission_kernel.commands import (
+    CompatibilityPayload,
     GENERIC_SET_DEDICATED_FIELDS,
     GENERIC_SET_FROZEN_FIELDS,
     AdvancePhase,
@@ -32,8 +33,14 @@ from mission_kernel.commands import (
 )
 from mission_kernel.json_codec import freeze_json_value
 from mission_kernel.model import HaltCategory, Phase, PreparedHandoff
-from mission_kernel.transitions import Decision, decide, transition_control_claim_bounds
-from .ports import AggregateIndexError, LegacyMissionRepository, MissionInitializer
+from mission_kernel.transitions import Decision, decide
+from .compatibility import compatibility_delta
+from .ports import (
+    AggregateIndexError,
+    LegacyCommandExecutionResult,
+    LegacyMissionRepository,
+    MissionInitializer,
+)
 
 
 LIFECYCLE_COMMAND_OWNERS = {
@@ -323,7 +330,8 @@ def activity_start(repository: LegacyMissionRepository, request: ActivityStartRe
                 proposed["updated_at"] = request.at
 
         changed_holder = [False]
-        proposed = repository.execute(state, mutate)
+        proposed = copy.deepcopy(state)
+        mutate(proposed)
         if changed_holder[0]:
             repository.save(proposed)
     return ActivityResult(changed_holder[0], proposed.get("activity_current"))
@@ -339,7 +347,8 @@ def activity_end(repository: LegacyMissionRepository, request: ActivityEndReques
                 proposed["updated_at"] = request.at
 
         changed_holder = [False]
-        proposed = repository.execute(state, mutate)
+        proposed = copy.deepcopy(state)
+        mutate(proposed)
         if changed_holder[0]:
             repository.save(proposed)
     return ActivityResult(changed_holder[0], proposed.get("activity_current"))
@@ -426,12 +435,11 @@ def real_terminalizable_state(document: dict):
     return _typed_state(document)
 
 
-def _advance_decision(
+def _advance_command(
     state: dict,
     request: AdvanceRequest,
     prepared_handoff: dict | None,
-) -> Decision:
-    typed = _typed_state(state)
+) -> AdvancePhase:
     prepared = None
     if prepared_handoff is not None:
         candidate = copy.deepcopy(state)
@@ -452,7 +460,7 @@ def _advance_decision(
         # Legacy v4 persists ``mission-executor-handoff/1`` while the K2
         # canonical command intentionally names the general handoff union.
         prepared = replace(decoded_candidate.handoff, schema="mission-handoff/1")
-    return decide(typed, AdvancePhase(Phase(request.phase), prepared))
+    return AdvancePhase(Phase(request.phase), prepared, at=request.at)
 
 
 def advance(
@@ -518,11 +526,11 @@ def advance(
                 )
             prepared_handoff = services.prepare_handoff(state)
         decision = None
-        candidate = None
+        command = None
         deferred_error = None
         if is_phase_change:
             try:
-                candidate = _advance_decision(state, request, prepared_handoff)
+                command = _advance_command(state, request, prepared_handoff)
             except Exception as error:  # noqa: BLE001 - preserve legacy mutation ordering
                 deferred_error = error
 
@@ -589,20 +597,25 @@ def advance(
             )
             proposed["updated_at"] = request.at
 
-        proposed = repository.execute(
-            state,
-            mutate,
-            candidate.transition if (candidate is not None and candidate.accepted) else None,
-        )
+        proposed = copy.deepcopy(state)
+        mutate(proposed)
         if is_phase_change:
             if deferred_error is not None:
                 raise deferred_error
-            # The v4 reducer owns compatibility gates and their exact error
-            # ordering.  K2 is authoritative for transitions represented by
-            # its closed subset; legacy skip-ahead transitions remain on the
-            # compatibility path until their production switch is planned.
-            if candidate is not None and candidate.accepted:
-                decision = candidate
+            if command is None:
+                raise RuntimeError("advance command was neither available nor deferred")
+            command = replace(
+                command,
+                compatibility=compatibility_delta(
+                    state,
+                    proposed,
+                    exclude={"phase", "executor_handoff", "updated_at"},
+                ),
+            )
+            execution = repository.execute(command)
+            if execution.decision.accepted:
+                decision = execution.decision
+                proposed = execution.projection
             elif (
                 state.get("phase") == "executing"
                 and request.phase == "reviewing"
@@ -611,16 +624,17 @@ def advance(
                 and state.get("phase") != "executing"
                 and state.get("planning_policy_version") == 1
             ):
-                if candidate is None:
-                    raise RuntimeError("advance decision was neither available nor deferred")
-                if candidate.rejection is None:
+                if execution.decision.rejection is None:
                     raise RuntimeError("rejected advance decision has no rejection")
                 raise LifecycleFailure(
-                    "phase transition rejected: " + candidate.rejection.code,
-                    reason=candidate.rejection.code,
+                    "phase transition rejected: " + execution.decision.rejection.code,
+                    reason=execution.decision.rejection.code,
                     state=state,
                 )
-        repository.save(proposed)
+            else:
+                repository.save(proposed)
+        else:
+            repository.save(proposed)
     return AdvanceResult(
         proposed.get("phase"), proposed.get("activity_current"), decision
     )
@@ -672,19 +686,15 @@ def mark_halt(
         # Empty legacy reasons are normalized only for the kernel gate; their
         # raw persisted value remains empty and therefore retains the historic
         # incomplete outcome.  They cannot carry a terminal-outcome claim.
-        transition = decision.transition if (
+        use_transition = (
             real_state is not None and request.set_terminal_phase and request.reason.strip()
-        ) else None
-        claimed = set(transition_control_claim_bounds(transition)) if transition is not None else set()
-
+        )
         def mutate(proposed: dict) -> None:
             if request.category == "awaiting-approval":
                 record_activity_event(proposed, "awaiting-approval", effective_at)
             proposed["halt_reason"] = request.reason
-            if "halt_category" not in claimed:
-                proposed["halt_category"] = request.category
-            if "loop_active" not in claimed:
-                proposed["loop_active"] = False
+            proposed["halt_category"] = request.category
+            proposed["loop_active"] = False
             if request.category == "routed-goal":
                 dispatch = services.goal_dispatch_fields(proposed)
                 proposed["goal_dispatch_effective"] = dispatch["goal_dispatch_effective"]
@@ -713,30 +723,60 @@ def mark_halt(
                     "terminal phase compatibility reducer is unavailable",
                     reason="terminal-reducer-missing",
                 )
-            if "terminal_outcome" not in claimed:
-                proposed.pop("terminal_outcome", None)
-                outcome = derive_terminal_outcome(proposed)
-                if outcome is None:
-                    raise LifecycleFailure(
-                        "terminal transition did not produce a terminal outcome",
-                        reason="terminal-outcome-missing",
-                    )
-                proposed["terminal_outcome"] = outcome
+            proposed.pop("terminal_outcome", None)
+            outcome = derive_terminal_outcome(proposed)
+            if outcome is None:
+                raise LifecycleFailure(
+                    "terminal transition did not produce a terminal outcome",
+                    reason="terminal-outcome-missing",
+                )
+            proposed["terminal_outcome"] = outcome
             proposed["updated_at"] = effective_at
 
         # set_terminal_phase=False（janitor の orphan 経路）は kernel の主張
         # (phase→halted) から意図的に逸脱する soft-terminal のため kernel 対象外
         # （gate-only）と確定する（批2-a-2 #631）。monotonic fallback（terminal /
         # 劣化 doc）も synthetic 入力由来の claims を適用しないため gate-only。
-        proposed = repository.execute(
-            state,
-            mutate,
-            transition,
-        )
+        proposed = copy.deepcopy(state)
+        mutate(proposed)
+        if use_transition:
+            command = replace(
+                command,
+                at=effective_at,
+                legacy_reason=request.reason,
+                compatibility=compatibility_delta(
+                    state,
+                    proposed,
+                    exclude={
+                        "phase",
+                        "loop_active",
+                        "halt_reason",
+                        "halt_category",
+                        "terminal_outcome",
+                        "updated_at",
+                    },
+                ),
+            )
+            decision = decide(real_state, command)
+            if not decision.accepted:
+                assert decision.rejection is not None
+                raise LifecycleFailure(
+                    "halt rejected: " + decision.rejection.code,
+                    reason=decision.rejection.code,
+                    state=state,
+                )
         aggregate_error = None
         try:
-            repository.save(proposed, aggregate_action="remove")
+            if use_transition:
+                execution = repository.execute(command, aggregate_action="remove")
+                decision = execution.decision
+                proposed = execution.projection
+            else:
+                repository.save(proposed, aggregate_action="remove")
         except AggregateIndexError as error:
+            if isinstance(error.execution, LegacyCommandExecutionResult):
+                decision = error.execution.decision
+                proposed = error.execution.projection
             aggregate_error = str(error)
     return MarkHaltResult(
         request.reason,
@@ -825,22 +865,13 @@ def reactivate(
                 outcome_kind="invalid-input",
                 state=state,
             ) from error
-        decision = decide(
-            _typed_state(decision_state),
-            ReactivateCommand(
-                expected_category,
-                request.reason,
-                request.approved_by_user,
-                target,
-            ),
+        command = ReactivateCommand(
+            expected_category,
+            request.reason,
+            request.approved_by_user,
+            target,
+            at=request.at,
         )
-        if not decision.accepted:
-            assert decision.rejection is not None
-            raise LifecycleFailure(
-                "reactivate rejected: " + decision.rejection.code,
-                reason=decision.rejection.code,
-                state=state,
-            )
         history = state.get("reactivation_history")
         if history is not None and not isinstance(history, list):
             raise LifecycleFailure(
@@ -878,11 +909,47 @@ def reactivate(
             proposed.setdefault("reactivation_history", []).append(audit)
             proposed["updated_at"] = request.at
 
-        proposed = repository.execute(state, mutate, decision.transition)
+        proposed = copy.deepcopy(state)
+        mutate(proposed)
+        command = replace(
+            command,
+            compatibility=compatibility_delta(
+                state,
+                proposed,
+                exclude={
+                    "phase",
+                    "loop_active",
+                    "halt_reason",
+                    "halt_category",
+                    "terminal_outcome",
+                    "updated_at",
+                },
+            ),
+        )
+        decision = decide(_typed_state(decision_state), command)
+        if not decision.accepted:
+            assert decision.rejection is not None
+            raise LifecycleFailure(
+                "reactivate rejected: " + decision.rejection.code,
+                reason=decision.rejection.code,
+                state=state,
+            )
         aggregate_error = None
         try:
-            repository.save(proposed, aggregate_action="add")
+            execution = repository.execute(command, aggregate_action="add")
+            decision = execution.decision
+            if not decision.accepted:
+                assert decision.rejection is not None
+                raise LifecycleFailure(
+                    "reactivate rejected: " + decision.rejection.code,
+                    reason=decision.rejection.code,
+                    state=state,
+                )
+            proposed = execution.projection
         except AggregateIndexError as error:
+            if isinstance(error.execution, LegacyCommandExecutionResult):
+                decision = error.execution.decision
+                proposed = error.execution.projection
             aggregate_error = str(error)
     return ReactivateResult(audit, decision, aggregate_error)
 
@@ -933,6 +1000,7 @@ def refresh_pid(
         )
         restored_phase = reactivated and state.get("phase") == "halted"
         decision = None
+        command = None
         if reactivated:
             target_phase = resume_target if restored_phase else state.get("phase")
             if target_phase not in valid_targets:
@@ -941,22 +1009,11 @@ def refresh_pid(
                     reason="invalid-reactivation-target",
                     state=state,
                 )
-            decision_state = copy.deepcopy(state)
-            decision_state["phase"] = "halted"
-            decision_state["loop_active"] = False
-            decision_state["halt_category"] = "stale"
-            decision_state["terminal_outcome"] = "stale_superseded"
-            decision = decide(
-                _typed_state(decision_state),
-                ResumeStale(Phase(target_phase)),
+            command = ResumeStale(
+                Phase(target_phase),
+                new_pid=request.new_pid,
+                at=request.at,
             )
-            if not decision.accepted:
-                assert decision.rejection is not None
-                raise LifecycleFailure(
-                    "stale resume rejected: " + decision.rejection.code,
-                    reason=decision.rejection.code,
-                    state=state,
-                )
 
         def mutate(proposed: dict) -> None:
             proposed.clear()
@@ -981,14 +1038,56 @@ def refresh_pid(
                 start_phase_default_activity(proposed, request.at)
             proposed["updated_at"] = request.at
 
-        proposed = repository.execute(state, mutate, decision.transition if decision else None)
+        proposed = copy.deepcopy(state)
+        mutate(proposed)
         aggregate_error = None
         try:
-            repository.save(
-                proposed,
-                aggregate_action="add" if reactivated else None,
-            )
+            if command is not None:
+                command = replace(
+                    command,
+                    compatibility=compatibility_delta(
+                        state,
+                        proposed,
+                        exclude={
+                            "phase",
+                            "loop_active",
+                            "halt_reason",
+                            "halt_category",
+                            "terminal_outcome",
+                            "pid",
+                            "updated_at",
+                        },
+                    ),
+                )
+                decision_state = copy.deepcopy(state)
+                decision_state["phase"] = "halted"
+                decision_state["loop_active"] = False
+                decision_state["halt_category"] = "stale"
+                decision_state["terminal_outcome"] = "stale_superseded"
+                decision = decide(_typed_state(decision_state), command)
+                if not decision.accepted:
+                    assert decision.rejection is not None
+                    raise LifecycleFailure(
+                        "stale resume rejected: " + decision.rejection.code,
+                        reason=decision.rejection.code,
+                        state=state,
+                    )
+                execution = repository.execute(command, aggregate_action="add")
+                decision = execution.decision
+                if not decision.accepted:
+                    assert decision.rejection is not None
+                    raise LifecycleFailure(
+                        "stale resume rejected: " + decision.rejection.code,
+                        reason=decision.rejection.code,
+                        state=state,
+                    )
+                proposed = execution.projection
+            else:
+                repository.save(proposed)
         except AggregateIndexError as error:
+            if isinstance(error.execution, LegacyCommandExecutionResult):
+                decision = error.execution.decision
+                proposed = error.execution.projection
             aggregate_error = str(error)
     return RefreshPidResult(
         old_pid,
@@ -1013,7 +1112,8 @@ def update_project_root(
             proposed["project_root"] = request.new_root
             proposed["updated_at"] = request.at
 
-        proposed = repository.execute(state, mutate)
+        proposed = copy.deepcopy(state)
+        mutate(proposed)
         repository.save(proposed)
     return UpdateProjectRootResult(old_root, request.new_root)
 
@@ -1339,14 +1439,80 @@ def set_fields(
         )
         plan = _SetFieldsPlan(shadow, tuple(warnings), route)
 
-        def apply_plan(proposed: dict) -> None:
-            proposed.clear()
-            proposed.update(plan.document)
-
-        transition = plan.route.decision.transition if plan.route is not None else set_decision.transition
-        proposed = repository.execute(state, apply_plan, transition)
         routed_verdict = plan.route.verdict if plan.route is not None else None
-        decision = plan.route.decision if plan.route is not None else set_decision
+        compatibility_keys = {
+            "phase_started_at",
+            "phase_durations_sec",
+            "resume_target_phase",
+            "activity_current",
+            "activity_segments",
+            "activity_rollup",
+            "activity_last_event_at",
+            "activity_last_event_phase",
+            "activity_anomaly_counts",
+            "activity_unobserved_gap_sec",
+            "activity_unobserved_gap_reasons_sec",
+            "goal_dispatch_effective",
+            "goal_dispatch_host",
+            "goal_dispatch_fallback_reason",
+        }
+        authority_keys = {
+            "phase",
+            "passes",
+            "loop_active",
+            "halt_reason",
+            "halt_category",
+            "terminal_outcome",
+            "updated_at",
+        }
+        extension_values = copy.deepcopy(parsed_fields)
+        extension_values.update(
+            {
+                key: copy.deepcopy(plan.document[key])
+                for key in sorted(set(state) | set(plan.document))
+                if key in plan.document
+                and key not in compatibility_keys
+                and key not in authority_keys
+                and state.get(key, object()) != plan.document[key]
+            }
+        )
+        frozen_extensions = freeze_json_value(extension_values)
+        if plan.route is not None:
+            command = MarkHalt(
+                HaltCategory.ROUTED_GOAL,
+                "routed-to-goal (#330: Simple + リスクシグナルなし)",
+                superseded=is_supersede_marked(
+                    plan.document.get("resolution_status"),
+                    "routed-to-goal (#330: Simple + リスクシグナルなし)",
+                ),
+                at=request.at,
+                legacy_reason="routed-to-goal (#330: Simple + リスクシグナルなし)",
+                compatibility=compatibility_delta(
+                    state,
+                    plan.document,
+                    exclude=authority_keys | set(extension_values),
+                ),
+                extension_fields=frozen_extensions,
+            )
+        else:
+            command = SetExtensionFields(
+                frozen_extensions,
+                at=request.at,
+                compatibility=compatibility_delta(
+                    state,
+                    plan.document,
+                    exclude=authority_keys | set(extension_values),
+                ),
+            )
+        decision = decide(typed_state, command)
+        if not decision.accepted:
+            assert decision.rejection is not None
+            raise LifecycleFailure(
+                "set fields payload is invalid: " + decision.rejection.code,
+                reason=decision.rejection.code,
+                outcome_kind="invalid-input",
+                state=state,
+            )
         aggregate_action = (
             "remove"
             if routed_verdict is not None
@@ -1359,12 +1525,25 @@ def set_fields(
         )
         aggregate_error = None
         try:
-            repository.save(
-                proposed,
+            execution = repository.execute(
+                command,
                 administrative=routed_verdict is not None,
                 aggregate_action=aggregate_action,
             )
+            decision = execution.decision
+            if not decision.accepted:
+                assert decision.rejection is not None
+                raise LifecycleFailure(
+                    "set fields payload is invalid: " + decision.rejection.code,
+                    reason=decision.rejection.code,
+                    outcome_kind="invalid-input",
+                    state=state,
+                )
+            proposed = execution.projection
         except AggregateIndexError as error:
+            if isinstance(error.execution, LegacyCommandExecutionResult):
+                decision = error.execution.decision
+                proposed = error.execution.projection
             aggregate_error = str(error)
     return SetFieldsResult(
         routed_verdict,

@@ -1,4 +1,4 @@
-"""Issue #632: post-claims finalizer and terminal outcome unification."""
+"""Issue #632/#644: terminal outcome and atomic projection regressions."""
 
 from __future__ import annotations
 
@@ -13,21 +13,6 @@ from pathlib import Path
 import pytest
 
 from .mission_state_fixture_corpus import generate_cli_state_bytes
-
-
-def _halt_transition(tmp_path):
-    from mission_kernel import decode_snapshot
-    from mission_kernel.commands import MarkHalt
-    from mission_kernel.model import HaltCategory
-    from mission_kernel.transitions import decide
-
-    _path, source = generate_cli_state_bytes(tmp_path.resolve())
-    decision = decide(
-        decode_snapshot(source).state,
-        MarkHalt(HaltCategory.BLOCKED_EXTERNAL, "blocked"),
-    )
-    assert decision.accepted and decision.transition is not None
-    return decision.transition
 
 
 def _legacy_repository(*, writes=None):
@@ -73,104 +58,6 @@ def test_markhalt_rejects_a_non_bool_supersede_marker(tmp_path):
     assert decision.rejection.code == "invalid-supersede-marker"
 
 
-def test_execute_calls_finalize_after_claims(tmp_path):
-    from mission_kernel import decode_snapshot
-    from mission_kernel.commands import MarkHalt
-    from mission_kernel.model import HaltCategory
-    from mission_kernel.transitions import decide
-    from mission_persistence.legacy_v4 import LegacyV4Repository
-    from .mission_state_fixture_corpus import generate_cli_state_bytes
-    import contextlib
-
-    _path, source = generate_cli_state_bytes(tmp_path.resolve())
-    transition = decide(
-        decode_snapshot(source).state, MarkHalt(HaltCategory.BLOCKED_EXTERNAL, "blocked")
-    ).transition
-    repository = LegacyV4Repository(lock=contextlib.nullcontext, read_state=lambda: {}, write_state=lambda state: None, backup_state=lambda: None)
-    result = repository.execute(
-        {"phase": "planning", "loop_active": True, "passes": False},
-        lambda document: None,
-        transition,
-        lambda document: document.update({"finalized": document["terminal_outcome"]}),
-    )
-    assert result["finalized"] == "blocked_external"
-
-
-def test_finalize_cannot_overwrite_claimed_fields(tmp_path):
-    from mission_persistence.fenced_commit import FencedCommitError
-
-    with pytest.raises(FencedCommitError, match="finalizer diverges") as error:
-        _legacy_repository().execute(
-            {"phase": "planning", "loop_active": True},
-            lambda document: None,
-            _halt_transition(tmp_path),
-            lambda document: document.update({"phase": "reviewing"}),
-        )
-    assert error.value.code == "transition-divergence"
-
-
-def test_prepare_state_cannot_change_claimed_fields_before_serialization(tmp_path):
-    from mission_persistence.fenced_commit import FencedCommitError
-    from mission_persistence.legacy_v4 import V5CompatibilityRepository
-
-    repository = V5CompatibilityRepository(
-        repository=None,
-        session_id="issue632",
-        lease_owner_session_id="issue632",
-        presented_lease_id=None,
-        prepare_state=lambda document: dict(document, phase="reviewing"),
-    )
-    proposed = repository.execute(
-        {"phase": "planning", "loop_active": True}, lambda document: None,
-        _halt_transition(tmp_path),
-    )
-    # _replayed makes save return before backend admission; verification must
-    # nevertheless happen before that early return.
-    repository._replayed = object()
-    with pytest.raises(FencedCommitError) as error:
-        repository.save(proposed)
-    assert error.value.code == "transition-divergence"
-
-
-def test_saving_a_document_other_than_the_executed_one_is_rejected(tmp_path):
-    from mission_persistence.fenced_commit import FencedCommitError
-
-    repository = _legacy_repository()
-    with repository.transaction():
-        repository.execute({"phase": "planning", "loop_active": True}, lambda document: None, _halt_transition(tmp_path))
-        with pytest.raises(FencedCommitError, match="save target") as error:
-            repository.save({"phase": "halted", "loop_active": False})
-    assert error.value.code == "transition-divergence"
-
-
-def test_second_save_of_the_same_document_is_verified_again(tmp_path):
-    from mission_persistence.fenced_commit import FencedCommitError
-
-    writes = []
-    repository = _legacy_repository(writes=writes)
-    with repository.transaction():
-        proposed = repository.execute({"phase": "planning", "loop_active": True}, lambda document: None, _halt_transition(tmp_path))
-        repository.save(proposed)
-        proposed["phase"] = "reviewing"
-        with pytest.raises(FencedCommitError) as error:
-            repository.save(proposed)
-    assert len(writes) == 1
-    assert error.value.code == "transition-divergence"
-
-
-def test_failed_finalize_leaves_no_pending_claims(tmp_path):
-    from mission_persistence.fenced_commit import FencedCommitError
-
-    repository = _legacy_repository()
-    with pytest.raises(FencedCommitError):
-        repository.execute({"phase": "planning", "loop_active": True}, lambda document: None, _halt_transition(tmp_path), lambda document: document.update({"phase": "reviewing"}))
-    assert repository._pending == []
-
-
-
-
-
-
 # The following assertions deliberately reuse the first-stage behavioral
 # corpus.  This file owns the finalizer/lifecycle and static-boundary tests;
 # the corpus owns the expensive eight-path and compatibility permutations.
@@ -193,7 +80,6 @@ def test_mark_halt_saved_document_is_unchanged_for_every_category(tmp_path, key)
     （claim 化と writer 削除が 1 field でも保存結果を動かしたら落ちる）。
     """
     from . import test_issue631_real_state_halt as corpus
-    from mission_kernel.transitions import transition_control_claims
     from mission_application.lifecycle import MarkHaltRequest, MarkHaltServices, mark_halt
 
     category, role = key.split("|")
@@ -216,8 +102,11 @@ def test_mark_halt_saved_document_is_unchanged_for_every_category(tmp_path, key)
     )
     assert result.decision.accepted
     assert saved == _MAIN_HALT_MATRIX[key]
-    for field, value in transition_control_claims(result.decision.transition).items():
-        assert saved[field] == getattr(value, "value", value)
+    control = result.decision.transition.new_state.control
+    assert saved["phase"] == control.phase.value
+    assert saved["loop_active"] is control.loop_active
+    assert saved["halt_category"] == control.halt_category.value
+    assert saved["terminal_outcome"] == control.terminal_outcome.value
 
 
 def test_supersede_marker_is_propagated_from_every_markhalt_construction_site():
@@ -260,144 +149,6 @@ def test_kernel_and_legacy_derivations_agree_for_every_category_and_role(tmp_pat
 
 
 
-def test_third_value_injection_is_rejected_on_every_path(tmp_path):
-    # The repository invariant is path-independent: every transition path
-    # reaches execute(), which rejects a value neither before nor after.
-    from mission_persistence.fenced_commit import FencedCommitError
-
-    from mission_kernel.transitions import transition_control_claim_bounds
-
-    bounds = transition_control_claim_bounds(_halt_transition(tmp_path))
-    thirds = {
-        "phase": "reviewing",
-        "loop_active": "not-a-bool",
-        "halt_category": "stale",
-        "terminal_outcome": "completed_pass",
-    }
-    for field, third in thirds.items():
-        before, after = bounds[field]
-        assert third not in {getattr(before, "value", before), getattr(after, "value", after)}
-        with pytest.raises(FencedCommitError):
-            _legacy_repository().execute({"phase": "planning", "loop_active": True}, lambda document, field=field, third=third: document.update({field: third}), _halt_transition(tmp_path))
-
-
-@pytest.mark.parametrize(
-    ("label", "existing", "expect_claim"),
-    (
-        ("absent", None, True),
-        ("different", "stale", True),
-        ("identical", "blocked-external", False),
-    ),
-)
-def test_halt_category_claim_is_absent_when_the_document_already_matches(
-    tmp_path, label, existing, expect_claim
-):
-    """claim は before と after が異なる field にだけ生じる（設計書 §4）。
-
-    `halt_category` が既に要求値と同値なら claim は生じないため、compat writer を
-    残さなければ保存値が落ちる。3 ケース × 3 経路で固定する。
-    """
-    from . import test_issue632_transition_is_the_writer as harness
-    from mission_application.lifecycle import (
-        MarkHaltRequest,
-        MarkHaltServices,
-        mark_halt,
-        monotonic_halt_decision,
-        real_terminalizable_state,
-    )
-    from mission_kernel.commands import MarkHalt
-    from mission_kernel.model import HaltCategory
-    from mission_kernel.transitions import decide, transition_control_claim_bounds
-
-    overrides = {} if existing is None else {"halt_category": existing}
-    document = harness._active_document(**overrides)
-
-    # 経路 1: mark_halt（実 state decide）
-    state = real_terminalizable_state(document)
-    assert state is not None
-    decision = decide(
-        state,
-        MarkHalt(HaltCategory.BLOCKED_EXTERNAL, "external dependency down"),
-    )
-    claimed = set(transition_control_claim_bounds(decision.transition))
-    assert ("halt_category" in claimed) is expect_claim
-
-    saved = {}
-    repository = harness._in_memory_repository(copy.deepcopy(document), saved=saved)
-    mark_halt(
-        repository,
-        MarkHaltRequest(
-            reason="external dependency down",
-            category="blocked-external",
-            at="2030-08-23T01:00:00Z",
-        ),
-        MarkHaltServices(
-            reject_active_provider_mutation=lambda _state, _command: None,
-            transition_phase=harness._timing_transition_phase,
-            goal_dispatch_fields=lambda _state: {},
-        ),
-    )
-    # claim の有無に関わらず保存値は同じでなければならない。
-    assert saved["halt_category"] == "blocked-external"
-    assert saved["loop_active"] is False
-    assert saved["terminal_outcome"] == "blocked_external"
-
-    # 経路 2: permission observation
-    permission_saved = {}
-    _permission_observation(copy.deepcopy(document), saved=permission_saved)
-    assert permission_saved["halt_category"] == "blocked-external"
-    assert permission_saved["terminal_outcome"] == "blocked_external"
-
-    # 経路 3: supersede-reviews（実 state decide。stale へ terminalize する）
-    supersede_state = real_terminalizable_state(copy.deepcopy(document))
-    assert supersede_state is not None
-    supersede_decision = decide(
-        supersede_state,
-        MarkHalt(
-            HaltCategory.STALE,
-            "superseded by a replacement run",
-            superseded=True,
-        ),
-    )
-    supersede_claimed = set(
-        transition_control_claim_bounds(supersede_decision.transition)
-    )
-    # 既存が "stale" と同値のときだけ halt_category claim が消える。
-    assert ("halt_category" in supersede_claimed) is (existing != "stale")
-    # synthetic view（monotonic）は halt_category を捨てるため、同値でも claim が生じる。
-    # 実 state decide でなければこの区別が失われることを対比で固定する。
-    monotonic_claimed = set(
-        transition_control_claim_bounds(
-            monotonic_halt_decision(
-                copy.deepcopy(document), "stale", "superseded by a replacement run"
-            ).transition
-        )
-    )
-    assert "halt_category" in monotonic_claimed
-
-
-def test_set_extension_fields_transition_claims_no_control_change(tmp_path):
-    from mission_kernel.commands import SetExtensionFields
-    from mission_kernel.json_codec import freeze_json_value
-    from mission_kernel.transitions import decide, transition_control_claim_bounds
-    from mission_kernel import decode_snapshot
-
-    _path, source = generate_cli_state_bytes(tmp_path.resolve())
-    decision = decide(decode_snapshot(source).state, SetExtensionFields(freeze_json_value({"custom": "value"})))
-    assert transition_control_claim_bounds(decision.transition) == {}
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 def test_permission_preflight_and_init_report_internal_invariant_without_traceback(monkeypatch, capsys):
     from mission_persistence.fenced_commit import FencedCommitError
@@ -415,16 +166,7 @@ def test_permission_preflight_and_init_report_internal_invariant_without_traceba
     assert "internal-invariant: transition-divergence" in capsys.readouterr().err
 
 
-# --- acceptance condition 11: structural guard for post-claim closures ---
-
 _SOURCE_ROOT = Path(__file__).resolve().parents[1]
-_CLOSURE_SPECS = (
-    ("mark_pass", _SOURCE_ROOT / "lib" / "mission_application" / "review.py", {"passes", "loop_active", "terminal_outcome"}),
-    ("mark_halt", _SOURCE_ROOT / "lib" / "mission_application" / "lifecycle.py", {"loop_active", "halt_category", "terminal_outcome"}),
-    ("record_permission_observation", _SOURCE_ROOT / "lib" / "mission_application" / "runtime_guard.py", {"loop_active", "halt_category", "terminal_outcome"}),
-    ("_supersede_reviews_locked", _SOURCE_ROOT / "bin" / "mission-state.py", {"loop_active", "halt_category", "terminal_outcome"}),
-)
-_INDIRECT_WRITERS = frozenset({"_write_terminal_outcome", "write_terminal_outcome"})
 
 
 def _name_of_call(node):
@@ -435,95 +177,12 @@ def _name_of_call(node):
     return ""
 
 
-def _literal_strings(node):
-    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
-        return {item.value for item in node.elts if isinstance(item, ast.Constant) and isinstance(item.value, str)}
-    if isinstance(node, ast.Dict):
-        return {key.value for key in node.keys if isinstance(key, ast.Constant) and isinstance(key.value, str)}
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return {node.value}
-    return set()
-
-
-def _guarded_by_claim(node, parents, field):
-    current = node
-    while id(current) in parents:
-        parent = parents[id(current)]
-        if isinstance(parent, ast.If) and isinstance(parent.test, ast.Compare):
-            test = parent.test
-            if (len(test.ops) == 1 and isinstance(test.ops[0], ast.NotIn)
-                    and isinstance(test.left, ast.Constant) and test.left.value == field
-                    and len(test.comparators) == 1 and isinstance(test.comparators[0], ast.Name)
-                    and test.comparators[0].id == "claimed"):
-                return True
-        current = parent
-    return False
-
-
-def find_unguarded_claim_writes(function, forbidden):
-    """Find direct and indirect compatibility writes outside their claim guard."""
-    parents = {id(child): parent for parent in ast.walk(function) for child in ast.iter_child_nodes(parent)}
-    violations = []
-    for node in ast.walk(function):
-        fields = set()
-        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            for target in targets:
-                if isinstance(target, ast.Subscript):
-                    fields |= _literal_strings(target.slice)
-        elif isinstance(node, ast.Delete):
-            for target in node.targets:
-                if isinstance(target, ast.Subscript):
-                    fields |= _literal_strings(target.slice)
-        elif isinstance(node, ast.Call):
-            name = _name_of_call(node)
-            if name in _INDIRECT_WRITERS:
-                fields.add("terminal_outcome")
-            elif name in {"update", "setdefault", "pop"}:
-                fields |= _literal_strings(node.args[0]) if node.args else set()
-        for field in fields & forbidden:
-            if not _guarded_by_claim(node, parents, field):
-                violations.append("L%s: unguarded write to %r" % (node.lineno, field))
-    return violations
-
-
 def _function_from_source(source, name):
     tree = ast.parse(source)
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == name:
             return node
     raise AssertionError("function not found: " + name)
-
-
-def _mutation_closure(function):
-    """Return the compatibility ``mutate`` closure, not its enclosing use case."""
-    closures = [
-        node for node in ast.walk(function)
-        if isinstance(node, ast.FunctionDef) and node.name == "mutate" and node is not function
-    ]
-    assert len(closures) == 1, "expected exactly one mutate closure"
-    return closures[0]
-
-
-@pytest.mark.parametrize(("name", "path", "forbidden"), _CLOSURE_SPECS)
-def test_post_claim_closures_have_no_unguarded_claim_writes(name, path, forbidden):
-    function = _function_from_source(path.read_text(encoding="utf-8"), name)
-    closure = _mutation_closure(function)
-    assert find_unguarded_claim_writes(closure, forbidden) == []
-
-
-def test_claim_write_guard_detects_direct_assignment_fixture():
-    function = _function_from_source(
-        "def mutate(proposed, claimed):\n    proposed['loop_active'] = False\n", "mutate"
-    )
-    assert find_unguarded_claim_writes(function, {"loop_active"})
-
-
-def test_claim_write_guard_detects_indirect_writer_fixture():
-    function = _function_from_source(
-        "def mutate(proposed, claimed):\n    _write_terminal_outcome(proposed)\n", "mutate"
-    )
-    assert find_unguarded_claim_writes(function, {"terminal_outcome"})
 
 
 # --- 保存 document の全 key/value 一致（現行 main の保存結果を golden として固定） ---
@@ -629,14 +288,11 @@ def test_saved_document_matches_main_on_every_transition_path(tmp_path, path_nam
 
 
 @pytest.mark.parametrize("path_name", sorted(_MAIN_SAVED_DOCUMENTS))
-def test_saved_document_matches_the_decided_claims_on_every_transition_path(
+def test_saved_document_matches_the_decided_projection_on_every_transition_path(
     tmp_path, path_name
 ):
-    """claim された field は保存値と一致し、claim の無い field は claim 判定に現れない。"""
-    from mission_kernel.transitions import (
-        transition_control_claim_bounds,
-        transition_control_claims,
-    )
+    """accepted transition の projection が実保存 document と一致する。"""
+    from mission_kernel import project_legacy_document
 
     driver = _transition_paths()[path_name]
     saved = {}
@@ -644,15 +300,8 @@ def test_saved_document_matches_the_decided_claims_on_every_transition_path(
     if decision is None or getattr(decision, "transition", None) is None:
         pytest.skip("this path intentionally sends no transition")
 
-    bounds = transition_control_claim_bounds(decision.transition)
-    for field, after in transition_control_claims(decision.transition).items():
-        expected = after.value if hasattr(after, "value") else after
-        before = bounds[field][0]
-        assert before != after, "claim は before と after が異なる field にだけ生じる"
-        if expected is None:
-            assert field not in saved
-        else:
-            assert saved[field] == expected
+    projected = json.loads(project_legacy_document(decision.transition.new_state))
+    assert projected == saved
 
 
 def test_golden_comparison_detects_a_claim_regression(tmp_path):
@@ -665,93 +314,6 @@ def test_golden_comparison_detects_a_claim_regression(tmp_path):
     assert saved != tampered
 
 
-# --- finalizer の契約（設計書 §3） ---
-
-
-def test_finalize_cannot_reintroduce_a_removed_field(tmp_path):
-    """after=None の claim は「field 不在」。finalizer が明示 None を戻したら fail-closed."""
-    from mission_kernel import decode_snapshot
-    from mission_kernel.commands import Reactivate
-    from mission_kernel.model import HaltCategory, Phase
-    from mission_kernel.transitions import decide, transition_control_claims
-    from mission_persistence.fenced_commit import FencedCommitError
-
-    halted = {
-        "schema_version": 4,
-        "mission": "issue632 finalize",
-        "phase": "halted",
-        "iteration": 1,
-        "loop_active": False,
-        "passes": False,
-        "halt_reason": "external dependency down",
-        "halt_category": "blocked-external",
-        "terminal_outcome": "blocked_external",
-        "session_role": "implementer",
-        "updated_at": "2030-08-23T00:00:00Z",
-    }
-    state = decode_snapshot(
-        json.dumps(halted, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    ).state
-    decision = decide(
-        state,
-        Reactivate(
-            HaltCategory.BLOCKED_EXTERNAL,
-            "operator restarted the run",
-            True,
-            Phase.EXECUTING,
-        ),
-    )
-    assert decision.accepted and decision.transition is not None
-    assert transition_control_claims(decision.transition)["terminal_outcome"] is None
-
-    def mutate(document):
-        document.pop("terminal_outcome", None)
-        document["halt_reason"] = ""
-        document["loop_active"] = True
-        document["phase"] = "executing"
-        document.pop("halt_category", None)
-
-    repository = _legacy_repository()
-    with pytest.raises(FencedCommitError) as error:
-        repository.execute(
-            copy.deepcopy(halted),
-            mutate,
-            decision.transition,
-            lambda document: document.update({"terminal_outcome": None}),
-        )
-    assert error.value.code == "transition-divergence"
-
-
-def test_finalize_requires_a_transition(tmp_path):
-    from mission_persistence.fenced_commit import FencedCommitError
-
-    repository = _legacy_repository()
-    with pytest.raises(FencedCommitError) as error:
-        repository.execute(
-            {"phase": "planning", "loop_active": True, "passes": False},
-            lambda document: None,
-            None,
-            lambda document: None,
-        )
-    assert error.value.code == "request-invalid"
-
-
-def test_execute_without_save_does_not_leak_claims_into_the_next_transaction(tmp_path):
-    """transaction を抜けたら pending は破棄され、次の無関係な save は素通りする."""
-    writes = []
-    repository = _legacy_repository(writes=writes)
-    transition = _halt_transition(tmp_path)
-    with repository.transaction():
-        repository.execute(
-            {"phase": "planning", "loop_active": True, "passes": False},
-            lambda document: None,
-            transition,
-        )
-    with repository.transaction():
-        repository.save({"phase": "planning", "loop_active": True, "passes": False})
-    assert len(writes) == 1
-
-
 # --- mark_pass の force 経路（設計書 §4・受け入れ条件 5） ---
 
 
@@ -760,9 +322,20 @@ def _force_pass(tmp_path, harness, cli, *, verification, validate):
     from mission_application.review import MarkPassRequest, mark_pass
 
     saved = {}
-    repository = harness._in_memory_repository(
-        harness._review_state(tmp_path), saved=saved
-    )
+    source = harness._review_state(tmp_path)
+    verification = copy.deepcopy(verification)
+    if verification.get("request", {}).get("terminal_object_digest") == "placeholder":
+        terminal = copy.deepcopy(source)
+        terminal.update(
+            passes=True,
+            loop_active=False,
+            passes_forced=True,
+            terminal_outcome="completed_pass",
+        )
+        verification["request"]["terminal_object_digest"] = cli.terminal_state_digest(
+            terminal
+        )
+    repository = harness._in_memory_repository(source, saved=saved)
     mark_pass(
         repository,
         MarkPassRequest(True, "forced for the test", True, "", "2030-08-23T01:00:00Z"),
@@ -775,8 +348,8 @@ def _force_pass(tmp_path, harness, cli, *, verification, validate):
     return saved
 
 
-def test_force_validation_runs_against_the_post_claims_document(tmp_path):
-    """検出力: 突合は claims 適用後の document で行われ、適用前だと digest が一致しない."""
+def test_force_validation_runs_against_the_completed_projection(tmp_path):
+    """検出力: 突合は完成 new_state で行われ、適用前だと digest が一致しない。"""
     from . import test_issue632_transition_is_the_writer as harness
 
     cli = harness._load_cli_module("issue632_force_digest")
@@ -796,7 +369,7 @@ def test_force_validation_runs_against_the_post_claims_document(tmp_path):
         validate=_spy,
     )
 
-    # finalizer は claims 適用後に走る。
+    # application と kernel は同じ完成 terminal projection を束縛する。
     assert observed["passes"] is True
     assert observed["loop_active"] is False
     assert observed["terminal_outcome"] == "completed_pass"
@@ -804,14 +377,14 @@ def test_force_validation_runs_against_the_post_claims_document(tmp_path):
     assert saved["force_approval"]["consumed"] is True
 
     # 同じ突合を claims 適用前（passes / terminal_outcome 未設定）で行うと不一致になる。
-    pre_claims = copy.deepcopy(saved)
-    pre_claims.pop("passes", None)
-    pre_claims.pop("terminal_outcome", None)
-    assert cli.terminal_state_digest(pre_claims) != observed["digest"]
+    incomplete = copy.deepcopy(saved)
+    incomplete.pop("passes", None)
+    incomplete.pop("terminal_outcome", None)
+    assert cli.terminal_state_digest(incomplete) != observed["digest"]
 
 
 def test_force_approval_binding_holds_with_the_real_validator(tmp_path):
-    """実物の `_validate_force_pass_terminal` が post-claims document で成立する."""
+    """実物の `_validate_force_pass_terminal` が完成 projection で成立する。"""
     from . import test_issue632_transition_is_the_writer as harness
 
     cli = harness._load_cli_module("issue632_force_real")
@@ -879,14 +452,14 @@ def test_permission_observation_on_supersede_marked_state_returns_the_persisted_
 ):
     """(A) の先行規則が kernel でも成立し、保存値・claim・戻り値が一致する."""
     from . import test_issue632_transition_is_the_writer as harness
-    from mission_kernel.transitions import transition_control_claims
-
     saved = {}
     result = _permission_observation(
         harness._active_document(resolution_status="superseded"), saved=saved
     )
-    claims = transition_control_claims(result.decision.transition)
-    assert claims["terminal_outcome"].value == "stale_superseded"
+    assert (
+        result.decision.transition.new_state.control.terminal_outcome.value
+        == "stale_superseded"
+    )
     assert saved["terminal_outcome"] == "stale_superseded"
     assert result.terminal_outcome == "stale_superseded"
 
@@ -1045,7 +618,6 @@ def _run_set_fields(document, kvs, services, *, saves):
 def test_goal_route_sends_its_markhalt_transition(tmp_path):
     from . import test_issue632_transition_is_the_writer as harness
     from mission_kernel.commands import MarkHalt
-    from mission_kernel.transitions import transition_control_claims
 
     cli = harness._load_cli_module("issue632_goal_route")
     calls, saves = [], []
@@ -1056,8 +628,10 @@ def test_goal_route_sends_its_markhalt_transition(tmp_path):
     assert result.routed_verdict is not None
     assert result.routed_verdict["route"] == "goal"
     assert isinstance(result.decision.transition.new_state.control.halt_category.value, str)
-    claims = transition_control_claims(result.decision.transition)
-    assert claims["terminal_outcome"].value == "routed_elsewhere"
+    assert (
+        result.decision.transition.new_state.control.terminal_outcome.value
+        == "routed_elsewhere"
+    )
 
     document = next(saved for saved, _kwargs in saves if isinstance(saved, dict))
     assert document["terminal_outcome"] == "routed_elsewhere"
@@ -1184,39 +758,6 @@ def test_set_fields_matches_main_for_calls_warnings_and_saves(tmp_path, label, k
     assert routed == expected_routed
 
 
-def test_v5_replay_save_verifies_before_returning(tmp_path):
-    """replay 早期 return の前に検証が走ること（設計書 §3 の所有・消費規則）。
-
-    `_prepare_state` は恒等にしておき、**execute 後に document を直接改竄**する。
-    検証が early return の後ろにあると、この改竄は素通りして「replay だから何も
-    しない」で成功してしまう。
-    """
-    from mission_persistence.fenced_commit import FencedCommitError
-    from mission_persistence.legacy_v4 import V5CompatibilityRepository
-
-    repository = V5CompatibilityRepository(
-        repository=None,
-        session_id="issue632",
-        lease_owner_session_id="issue632",
-        presented_lease_id=None,
-    )
-    proposed = repository.execute(
-        {"phase": "planning", "loop_active": True},
-        lambda document: None,
-        _halt_transition(tmp_path),
-    )
-    assert proposed["phase"] == "halted"
-    repository._replayed = object()
-
-    # 改竄なしの replay save は素通りする（early return が生きていること）。
-    repository.save(proposed)
-
-    proposed["phase"] = "planning"
-    with pytest.raises(FencedCommitError) as error:
-        repository.save(proposed)
-    assert error.value.code == "transition-divergence"
-
-
 def test_record_permission_preflight_halt_unpacks_the_tuple_explicitly():
     """tuple を返す helper の戻り値が必ず tuple unpack で受け取られること。
 
@@ -1277,21 +818,18 @@ def test_record_permission_preflight_halt_unpacks_the_tuple_explicitly():
     "path_name",
     ("_path_mark_pass", "_path_mark_halt", "_path_permission_preflight", "_path_supersede"),
 )
-def test_phase_writer_remains_for_timing_and_agrees_with_the_claim(tmp_path, path_name):
-    """`phase` は claim だが timing のため compat writer を残す（設計書 §4）。
-
-    claim 値と writer の値が一致し、timing 系 field が現行 main と同じであること。
-    """
-    from mission_kernel.transitions import transition_control_claims
-
+def test_phase_and_timing_are_owned_by_the_decided_projection(tmp_path, path_name):
+    """canonical phase と compatibility timing が同じ new_state から保存される。"""
     driver = _transition_paths()[path_name]
     saved = {}
     decision = driver(tmp_path, saved)
     golden = _MAIN_SAVED_DOCUMENTS[path_name]
 
-    claims = transition_control_claims(decision.transition)
-    assert "phase" in claims
-    assert saved["phase"] == claims["phase"].value == golden["phase"]
+    assert (
+        saved["phase"]
+        == decision.transition.new_state.control.phase.value
+        == golden["phase"]
+    )
 
     for field in ("phase_started_at", "phase_durations_sec", "activity_current", "resume_target_phase"):
         if field in golden and field not in _ENVIRONMENT_DERIVED_FIELDS:
@@ -1404,94 +942,6 @@ def test_permission_preflight_reports_unsealed_and_halt_rejection(monkeypatch, c
 # --- 再入と nested transaction（Sol high レビューの High 指摘・実再現あり） ---
 
 
-def test_reentrant_save_from_finalize_is_rejected_before_any_write(tmp_path):
-    """finalize からの再入 save は claims 未登録の隙を突けるため拒否する。
-
-    修正前は「未検証のまま実書き込み → その後に transition-divergence」となり、
-    エラーにはなるが不正状態が永続化されていた（fail-closed でない）。
-    """
-    from mission_persistence.fenced_commit import FencedCommitError
-
-    writes = []
-    repository = _legacy_repository(writes=writes)
-    transition = _halt_transition(tmp_path)
-
-    def finalize(document):
-        document["phase"] = "reviewing"  # claimed field を改竄したうえで
-        repository.save(document)        # 検証前に保存を試みる
-
-    with repository.transaction():
-        with pytest.raises(FencedCommitError) as error:
-            repository.execute(
-                {"phase": "planning", "loop_active": True},
-                lambda document: None,
-                transition,
-                finalize,
-            )
-    assert error.value.code == "request-invalid"
-    assert writes == [], "検証前の書き込みが 1 件も発生しないこと"
-
-
-def test_reentrant_save_from_mutation_is_rejected_before_any_write(tmp_path):
-    from mission_persistence.fenced_commit import FencedCommitError
-
-    writes = []
-    repository = _legacy_repository(writes=writes)
-
-    def mutate(document):
-        document["phase"] = "reviewing"
-        repository.save(document)
-
-    with repository.transaction():
-        with pytest.raises(FencedCommitError) as error:
-            repository.execute(
-                {"phase": "planning", "loop_active": True},
-                mutate,
-                _halt_transition(tmp_path),
-            )
-    assert error.value.code == "request-invalid"
-    assert writes == []
-
-
-def test_nested_transaction_does_not_clear_the_outer_pending_claims(tmp_path):
-    """内側 transaction の finally が外側の pending を消さないこと。
-
-    消えると、その後の不正 save が未検証で通ってしまう。
-    """
-    from mission_persistence.fenced_commit import FencedCommitError
-
-    writes = []
-    repository = _legacy_repository(writes=writes)
-    with repository.transaction():
-        proposed = repository.execute(
-            {"phase": "planning", "loop_active": True},
-            lambda document: None,
-            _halt_transition(tmp_path),
-        )
-        with repository.transaction():
-            pass  # 内側 transaction を抜けても pending は生き続ける
-        proposed["phase"] = "reviewing"
-        with pytest.raises(FencedCommitError) as error:
-            repository.save(proposed)
-    assert error.value.code == "transition-divergence"
-    assert writes == []
-
-
-def test_pending_claims_are_cleared_when_the_outermost_transaction_exits(tmp_path):
-    writes = []
-    repository = _legacy_repository(writes=writes)
-    with repository.transaction():
-        with repository.transaction():
-            repository.execute(
-                {"phase": "planning", "loop_active": True},
-                lambda document: None,
-                _halt_transition(tmp_path),
-            )
-    with repository.transaction():
-        repository.save({"phase": "planning", "loop_active": True})
-    assert len(writes) == 1
-
-
 def test_init_reports_internal_invariant_without_traceback(monkeypatch, capsys):
     """`cmd_init` 経路でも kernel invariant 違反が構造化されること（設計書 §5）。
 
@@ -1522,36 +972,6 @@ def test_init_reports_internal_invariant_without_traceback(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "internal-invariant: permission-halt-rejected" in captured.err
     assert captured.out == "", "invariant 違反では fallback JSON を出さない"
-
-
-def test_reentrant_typed_request_from_finalize_is_rejected(tmp_path):
-    """typed request 経路も再入を拒否すること（Sol 指摘の High 1）。
-
-    `save()` だけを塞ぐと、`execute(ExecutionRequest)` という別の実行入口から
-    「外側の command は失敗したのに state は更新済み」を作れる。
-    """
-    from mission_persistence.fenced_commit import ExecutionRequest, FencedCommitError
-
-    writes = []
-    repository = _legacy_repository(writes=writes)
-    attempted = []
-
-    def finalize(document):
-        attempted.append(True)
-        # typed request を再入実行しようとする（下位 repository は stage→commit する）
-        repository.execute(object.__new__(ExecutionRequest))
-
-    with repository.transaction():
-        with pytest.raises(FencedCommitError) as error:
-            repository.execute(
-                {"phase": "planning", "loop_active": True},
-                lambda document: None,
-                _halt_transition(tmp_path),
-                finalize,
-            )
-    assert attempted, "finalize が実行されていること（テストが空振りしていない）"
-    assert error.value.code == "request-invalid"
-    assert writes == []
 
 
 def test_execute_effects_callbacks_cannot_save_before_verification(tmp_path):
@@ -1652,104 +1072,6 @@ def test_effect_transaction_callbacks_cannot_save(tmp_path, hook):
     # factory / __enter__ は正当な内部 save より前に走るので書き込みはゼロ。
     # __exit__ は正当な save の後なので、その 1 件だけが残り侵入は拒否される。
     assert writes == ([{"phase": "halted"}] if hook == "exit" else [])
-
-
-def test_reentrant_execute_effects_from_finalize_is_rejected(tmp_path):
-    """finalize から `execute_effects` を再入すると副作用の前に拒否されること。"""
-    from mission_application.artifact import EvidenceDecision
-    from mission_persistence.fenced_commit import FencedCommitError
-
-    writes = []
-    repository = _legacy_repository(writes=writes)
-    side_effects = []
-
-    def finalize(document):
-        repository.execute_effects(
-            lambda _document: EvidenceDecision({"phase": "halted"}, (), {}),
-            effect_transaction=lambda effects: _effect_manager(
-                on_enter=lambda: side_effects.append("enter")
-            ),
-        )
-
-    with repository.transaction():
-        with pytest.raises(FencedCommitError) as error:
-            repository.execute(
-                {"phase": "planning", "loop_active": True},
-                lambda document: None,
-                _halt_transition(tmp_path),
-                finalize,
-            )
-    assert error.value.code == "request-invalid"
-    assert side_effects == [], "context manager の副作用も走らないこと"
-    assert writes == []
-
-
-def _v5_repository_with_fake_backend(*, prepare_state=None):
-    from mission_persistence.legacy_v4 import V5CompatibilityRepository
-
-    class _Backend:
-        def __init__(self):
-            self.execute_calls = []
-
-        def execute(self, request):
-            self.execute_calls.append(request)
-            return object()
-
-    backend = _Backend()
-    repository = V5CompatibilityRepository(
-        repository=backend,
-        session_id="issue632",
-        lease_owner_session_id="issue632",
-        presented_lease_id=None,
-        prepare_state=prepare_state,
-    )
-    return repository, backend
-
-
-def test_v5_prepare_state_cannot_reenter_typed_execution(tmp_path):
-    """V5 の `_prepare_state` から typed execution へ再入できないこと。"""
-    from mission_persistence.fenced_commit import ExecutionRequest, FencedCommitError
-
-    holder = {}
-
-    def prepare_state(document):
-        holder["called"] = True
-        holder["repository"].execute(object.__new__(ExecutionRequest))
-        return document
-
-    repository, backend = _v5_repository_with_fake_backend(prepare_state=prepare_state)
-    holder["repository"] = repository
-    proposed = repository.execute(
-        {"phase": "planning", "loop_active": True},
-        lambda document: None,
-        _halt_transition(tmp_path),
-    )
-    repository._replayed = object()
-    with pytest.raises(FencedCommitError) as error:
-        repository.save(proposed)
-    assert holder.get("called"), "prepare_state が実行されたこと"
-    assert error.value.code == "request-invalid"
-    assert backend.execute_calls == [], "下位 repository が 1 度も呼ばれないこと"
-
-
-def test_v5_reentrant_typed_request_from_finalize_is_rejected(tmp_path):
-    """V5 でも finalize からの typed request 再入を拒否すること（V4 と同じ契約）。"""
-    from mission_persistence.fenced_commit import ExecutionRequest, FencedCommitError
-
-    repository, backend = _v5_repository_with_fake_backend()
-
-    def finalize(document):
-        repository.execute(object.__new__(ExecutionRequest))
-
-    with pytest.raises(FencedCommitError) as error:
-        repository.execute(
-            {"phase": "planning", "loop_active": True},
-            lambda document: None,
-            _halt_transition(tmp_path),
-            finalize,
-        )
-    assert error.value.code == "request-invalid"
-    assert backend.execute_calls == []
 
 
 # --- 注入 callable の信頼境界（Sol high 4 巡目の High / Medium・実再現あり） ---
@@ -1982,7 +1304,7 @@ def test_every_injected_callable_is_classified(tmp_path):
     )
 
     # per-call で渡され、呼び出し時点でガードしている callable。
-    per_call_guarded = {"mutation", "finalize", "decide", "bind_published", "effect_transaction"}
+    per_call_guarded = {"decide", "bind_published", "effect_transaction"}
     # callable だが境界の対象外にしているもの（理由つき）。
     not_callables = {
         "repository",       # v5 backend（callable ではなく object）
@@ -1991,9 +1313,10 @@ def test_every_injected_callable_is_classified(tmp_path):
         "presented_lease_id",
         "operation_id",
         "operation_command",
-        "operation_command_type",
-        "lease_ttl_seconds",
-    }
+            "operation_command_type",
+            "lease_ttl_seconds",
+            "metadata",
+        }
 
     for cls in (LegacyV4Repository, V5CompatibilityRepository):
         declared = set(cls.GUARDED_INJECTED_CALLABLES)

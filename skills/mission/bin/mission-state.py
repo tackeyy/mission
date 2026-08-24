@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from bisect import bisect_left, bisect_right
 import copy
 import contextlib
@@ -133,7 +134,6 @@ from mission_application.lifecycle import (  # noqa: E402
     activity_end as run_activity_end,
     activity_start as run_activity_start,
     advance as run_advance,
-    extension_fields_decision as _extension_fields_decision,
     _mark_halt_decision_state,
     initialize as run_initialize,
     mark_halt as run_mark_halt,
@@ -152,9 +152,11 @@ from mission_application.next_action import (  # noqa: E402
     _unclosed_optional_specialist_skills,
     derive_next_action as run_derive_next_action,
 )
-from mission_kernel.commands import MarkHalt  # noqa: E402
+from mission_kernel.commands import MarkHalt, SetExtensionFields  # noqa: E402
+from mission_kernel.json_codec import freeze_json_value  # noqa: E402
 from mission_kernel.model import HaltCategory  # noqa: E402
-from mission_kernel.transitions import decide, transition_control_claim_bounds  # noqa: E402
+from mission_kernel.transitions import decide  # noqa: E402
+from mission_application.compatibility import compatibility_delta  # noqa: E402
 from mission_application.ports import AuditMetadata, ExecutionRequest  # noqa: E402
 from mission_application.review import (  # noqa: E402
     MarkPassRequest,
@@ -9579,11 +9581,7 @@ def _legacy_lifecycle_repository(
                 if presented_lease_id is _PRESENTED_LEASE_UNSET
                 else presented_lease_id
             ),
-            prepare_state=(
-                (lambda state: stamp_metadata(state, cwd))
-                if stamp
-                else (lambda state: state)
-            ),
+            metadata=stamp_metadata({}, cwd) if stamp else {},
             aggregate_recover=coordinator.recover,
             aggregate_prepare=coordinator.prepare,
             aggregate_finalize=coordinator.finalize,
@@ -16235,65 +16233,93 @@ def _supersede_reviews_locked(args, cwd: Path):
                         if supersede_diagnosis == TERMINALIZABLE_ACTIVE
                         else None
                     )
-                    decision = decide(
-                        real_state if real_state is not None else _mark_halt_decision_state(state),
-                        MarkHalt(
-                            HaltCategory.STALE,
+                    command = MarkHalt(
+                        HaltCategory.STALE,
+                        "superseded by a replacement run",
+                        superseded=is_supersede_marked(
+                            state.get("resolution_status"),
                             "superseded by a replacement run",
-                            superseded=is_supersede_marked(
-                                state.get("resolution_status"),
-                                "superseded by a replacement run",
-                            ),
                         ),
                     )
-                    transition = decision.transition if real_state is not None else None
-                else:
-                    decision = _extension_fields_decision(
-                        state, {"supersedes": superseded}
+                    decision = (
+                        decide(_mark_halt_decision_state(state), command)
+                        if real_state is None
+                        else None
                     )
-                    transition = decision.transition
-                if not decision.accepted:
+                else:
+                    command = SetExtensionFields(
+                        freeze_json_value({"supersedes": superseded}),
+                        at=now,
+                    )
+                    decision = None
+                if decision is not None and not decision.accepted:
                     assert decision.rejection is not None
                     raise ValueError(
                         "supersede rejected by kernel: " + decision.rejection.code
                     )
 
-                claimed = (
-                    set(transition_control_claim_bounds(transition))
-                    if transition is not None
-                    else set()
-                )
-
-                def mutate(proposed, role=role, claimed=claimed):
+                def mutate(proposed, role=role):
                     if role == "superseded":
                         proposed["passes"] = False
-                        if "loop_active" not in claimed:
-                            proposed["loop_active"] = False
+                        proposed["loop_active"] = False
                         proposed["halt_reason"] = "superseded by a replacement run"
-                        if "halt_category" not in claimed:
-                            proposed["halt_category"] = "stale"
+                        proposed["halt_category"] = "stale"
                         _transition_phase(
                             proposed,
                             "halted",
                             now,
                             terminal_trusted_boundary=True,
                         )
-                        if "terminal_outcome" not in claimed:
-                            _write_terminal_outcome(proposed)
+                        _write_terminal_outcome(proposed)
                     else:
                         proposed["supersedes"] = superseded
                     proposed["updated_at"] = now
 
-                proposed = repository.execute(state, mutate, transition)
+                proposed = copy.deepcopy(state)
+                mutate(proposed)
                 path_key = str(state_path.resolve())
                 if role == "superseded":
                     _SUPERSEDE_TERMINAL_PATHS.add(path_key)
                 try:
-                    repository.save(
-                        proposed,
-                        backup=False,
-                        administrative=True,
-                    )
+                    if role == "superseded" and real_state is None:
+                        repository.save(
+                            proposed,
+                            backup=False,
+                            administrative=True,
+                        )
+                    else:
+                        if role == "superseded":
+                            command = replace(
+                                command,
+                                at=now,
+                                legacy_reason="superseded by a replacement run",
+                                compatibility=compatibility_delta(
+                                    state,
+                                    proposed,
+                                    exclude={
+                                        "phase",
+                                        "passes",
+                                        "loop_active",
+                                        "halt_reason",
+                                        "halt_category",
+                                        "terminal_outcome",
+                                        "updated_at",
+                                    },
+                                ),
+                            )
+                        execution = repository.execute(
+                            command,
+                            backup=False,
+                            administrative=True,
+                        )
+                        decision = execution.decision
+                        if not decision.accepted:
+                            assert decision.rejection is not None
+                            raise ValueError(
+                                "supersede rejected by kernel: "
+                                + decision.rejection.code
+                            )
+                        proposed = execution.projection
                     if isinstance(repository, LegacyV4Repository):
                         committed_legacy.append((state_path, role, repository))
                 finally:
@@ -16760,8 +16786,8 @@ def _terminalize_state_file(
             )
             return latest
 
-        def execute(self, state, mutation=None, transition=None):
-            return self._repository.execute(state, mutation, transition)
+        def execute(self, command, **kwargs):
+            return self._repository.execute(command, **kwargs)
 
         def save(self, state, **kwargs) -> None:
             self._repository.save(state, **kwargs)

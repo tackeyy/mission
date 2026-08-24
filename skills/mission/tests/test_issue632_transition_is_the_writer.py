@@ -41,27 +41,30 @@ class _RecordingRepository:
         self.state = copy.deepcopy(state)
         self.execute_calls = []
         self.saved = None
+        from mission_persistence.legacy_v4 import LegacyV4Repository
+
+        self._repository = LegacyV4Repository(
+            lock=contextlib.nullcontext,
+            read_state=lambda: copy.deepcopy(self.state),
+            write_state=lambda state, **_kwargs: setattr(self, "saved", copy.deepcopy(state)),
+            backup_state=lambda: None,
+            add_to_aggregate=lambda: None,
+            remove_from_aggregate=lambda: None,
+        )
 
     def transaction(self):
-        return contextlib.nullcontext()
+        return self._repository.transaction()
 
     def load(self):
-        return copy.deepcopy(self.state)
+        return self._repository.load()
 
-    def execute(self, state, mutation, transition=None, finalize=None):
-        from mission_persistence.legacy_v4 import _apply_transition_claims
-
-        self.execute_calls.append((state, mutation, transition, finalize))
-        proposed = copy.deepcopy(state)
-        mutation(proposed)
-        if transition is not None:
-            _apply_transition_claims(transition, proposed)
-        if finalize is not None:
-            finalize(proposed)
-        return proposed
+    def execute(self, command, **kwargs):
+        result = self._repository.execute(command, **kwargs)
+        self.execute_calls.append(result.decision.transition)
+        return result
 
     def save(self, state, **_kwargs):
-        self.saved = copy.deepcopy(state)
+        self._repository.save(state, **_kwargs)
 
 
 def _pass_services(cli):
@@ -101,7 +104,7 @@ def test_mark_pass_persists_through_repository_execute(tmp_path):
     )
 
     assert len(repository.execute_calls) == 1
-    assert repository.execute_calls[0][2] is result.decision.transition
+    assert repository.execute_calls[0] is result.decision.transition
 
 
 def test_mark_pass_saved_document_is_unchanged(tmp_path):
@@ -128,8 +131,19 @@ def test_mark_pass_force_path_preserves_approval_binding(tmp_path):
     state = _review_state(tmp_path)
     repository = _RecordingRepository(state)
     called = []
-    services = _pass_services(_load_cli_module("issue632_force_binding"))
-    verification = {"consumed": False, "request": {"terminal_object_digest": "test"}}
+    cli = _load_cli_module("issue632_force_binding")
+    services = _pass_services(cli)
+    terminal = copy.deepcopy(state)
+    terminal.update(
+        passes=True,
+        loop_active=False,
+        passes_forced=True,
+        terminal_outcome="completed_pass",
+    )
+    verification = {
+        "consumed": False,
+        "request": {"terminal_object_digest": cli.terminal_state_digest(terminal)},
+    }
     services = services.__class__(
         verify_force_approval=lambda _data: verification,
         validate_force_terminal=lambda data, received: called.append((data, received)),
@@ -287,7 +301,7 @@ def test_advance_compatibility_success_paths_send_no_transition(
         ),
     )
     assert result.decision is None
-    assert repository.execute_calls[0][2] is None
+    assert all(transition is None for transition in repository.execute_calls)
 
 
 def test_advance_sends_the_accepted_transition_to_execute(tmp_path):
@@ -319,7 +333,7 @@ def test_advance_sends_the_accepted_transition_to_execute(tmp_path):
     )
 
     assert result.decision is not None and result.decision.accepted is True
-    assert repository.execute_calls[0][2] is result.decision.transition
+    assert repository.execute_calls[0] is result.decision.transition
 
 
 @pytest.mark.parametrize("phase", ("done", "halted"))
@@ -377,7 +391,7 @@ def test_advance_defers_non_lifecycle_decision_errors_until_after_mutation(
     def raise_decision_error(*_args):
         raise decision_error
 
-    monkeypatch.setattr(lifecycle, "_advance_decision", raise_decision_error)
+    monkeypatch.setattr(lifecycle, "_advance_command", raise_decision_error)
     with pytest.raises(LifecycleFailure) as raised:
         lifecycle.advance(
             repository,
@@ -612,6 +626,7 @@ def _path_advance(tmp_path, saved):
 def _path_supersede(_tmp_path, saved):
     """supersede-reviews の active real-state transition 永続化経路。"""
     from mission_application.lifecycle import real_terminalizable_state
+    from mission_application.compatibility import compatibility_delta
     from mission_common import is_supersede_marked
     from mission_kernel.commands import MarkHalt
     from mission_kernel.model import HaltCategory
@@ -625,16 +640,6 @@ def _path_supersede(_tmp_path, saved):
         decision_state = real_terminalizable_state(state)
         assert decision_state is not None
         reason = "superseded by a replacement run"
-        decision = decide(
-            decision_state,
-            MarkHalt(
-                HaltCategory.STALE,
-                reason,
-                superseded=is_supersede_marked(
-                    state.get("resolution_status"), reason
-                ),
-            ),
-        )
         cli = _load_cli_module("issue632_property_supersede")
 
         def mutate(proposed):
@@ -651,9 +656,34 @@ def _path_supersede(_tmp_path, saved):
             )
             cli._write_terminal_outcome(proposed)
 
-        proposed = repository.execute(state, mutate, decision.transition)
-        repository.save(proposed, backup=False, administrative=True)
-    return decision
+        proposed = copy.deepcopy(state)
+        mutate(proposed)
+        command = MarkHalt(
+            HaltCategory.STALE,
+            reason,
+            superseded=is_supersede_marked(
+                state.get("resolution_status"), reason
+            ),
+            at=state.get("updated_at"),
+            legacy_reason=reason,
+            compatibility=compatibility_delta(
+                state,
+                proposed,
+                exclude={
+                    "phase",
+                    "passes",
+                    "loop_active",
+                    "halt_reason",
+                    "halt_category",
+                    "terminal_outcome",
+                    "updated_at",
+                },
+            ),
+        )
+        execution = repository.execute(
+            command, backup=False, administrative=True
+        )
+        return execution.decision
 
 
 @pytest.mark.parametrize(
@@ -679,25 +709,18 @@ def _path_supersede(_tmp_path, saved):
         "set-fields",
     ),
 )
-def test_saved_document_matches_decided_claims_for_every_transition_path(tmp_path, path):
-    """decide() が主張した完了隣接値が、そのまま保存 document の値になる。"""
-    from mission_kernel.model import Phase
-    from mission_kernel.transitions import transition_control_claims
+def test_saved_document_matches_decided_projection_for_every_transition_path(tmp_path, path):
+    """decide() が作った projection がそのまま保存 document になる。"""
+    import json
+
+    from mission_kernel import project_legacy_document
 
     saved: dict = {}
     decision = path(tmp_path, saved)
 
     assert decision is not None and decision.accepted is True
     assert saved, "every transition path must persist a document"
-    claims = transition_control_claims(decision.transition)
-    for field_name, value in claims.items():
-        expected = value.value if isinstance(value, (Phase, )) else value
-        if hasattr(expected, "value"):
-            expected = expected.value
-        if expected is None:
-            assert saved.get(field_name) is None
-        else:
-            assert saved.get(field_name) == expected, field_name
+    assert saved == json.loads(project_legacy_document(decision.transition.new_state))
 
 
 # --- V5 経路: commit された head が claims と一致し aggregate は 1 回だけ ---
@@ -735,11 +758,11 @@ class _FakeFencedRepository:
         self.commits.append(__import__("json").loads(prepared.state_bytes))
 
 
-def _v5_repository(tmp_path, *, calls, prepare_state=None):
+def _v5_repository(tmp_path, *, calls, metadata=None, document=None):
     from mission_kernel.codec_v4 import decode_mission_state
     from mission_persistence.legacy_v4 import V5CompatibilityRepository
 
-    document = _review_state(tmp_path)
+    document = _review_state(tmp_path) if document is None else copy.deepcopy(document)
     source = __import__("json").dumps(
         document, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
@@ -749,16 +772,17 @@ def _v5_repository(tmp_path, *, calls, prepare_state=None):
         session_id=document.get("session_id") or "issue632-v5",
         lease_owner_session_id=document.get("session_id") or "issue632-v5",
         presented_lease_id=None,
-        prepare_state=prepare_state,
+        metadata=metadata,
         remove_from_aggregate=lambda: calls.append("remove"),
     )
     return repository, backend
 
 
-def test_mark_pass_on_v5_repository_commits_claims_and_aggregate_once(tmp_path):
+def test_mark_pass_on_v5_repository_commits_projection_and_aggregate_once(tmp_path):
+    import json
+
     from mission_application.review import MarkPassRequest, mark_pass
-    from mission_kernel.model import Phase
-    from mission_kernel.transitions import transition_control_claims
+    from mission_kernel import project_legacy_document
 
     calls: list = []
     repository, backend = _v5_repository(tmp_path, calls=calls)
@@ -771,17 +795,54 @@ def test_mark_pass_on_v5_repository_commits_claims_and_aggregate_once(tmp_path):
     assert result.decision.accepted is True
     assert len(backend.commits) == 1
     committed = backend.commits[0]
-    for field_name, value in transition_control_claims(result.decision.transition).items():
-        expected = value.value if isinstance(value, Phase) else value
-        expected = getattr(expected, "value", expected)
-        assert committed.get(field_name) == expected, field_name
+    assert committed == json.loads(project_legacy_document(result.decision.transition.new_state))
     # aggregate remove は commit の後に 1 回だけ
     assert calls == ["remove"]
 
 
-def test_mark_pass_on_v5_repository_rejects_claim_violation_without_commit(tmp_path):
+def test_v5_metadata_is_in_the_command_projection_and_pid_is_not_overwritten(tmp_path):
+    import json
+
+    from mission_application.review import MarkPassRequest, mark_pass
+    from mission_kernel import project_legacy_document
+
+    calls: list = []
+    document = _review_state(tmp_path)
+    document.pop("hostname")
+    document.pop("cli_version")
+    repository, backend = _v5_repository(
+        tmp_path,
+        calls=calls,
+        document=document,
+        metadata={
+            "hostname": "metadata-host",
+            "cli_version": "metadata-cli",
+            "pid": 999999,
+        },
+    )
+    with repository.transaction():
+        loaded = repository.load()
+    original_pid = loaded["pid"]
+
+    result = mark_pass(
+        repository,
+        MarkPassRequest(False, None, False, "", "2030-08-23T02:00:00Z"),
+        _pass_services(_load_cli_module("issue644_v5_metadata")),
+    )
+
+    committed = backend.commits[0]
+    projected = json.loads(project_legacy_document(result.decision.transition.new_state))
+    assert committed == projected
+    passthrough = result.decision.transition.new_state.legacy_passthrough.thaw()
+    assert passthrough["hostname"] == "metadata-host"
+    assert passthrough["cli_version"] == "metadata-cli"
+    assert committed["hostname"] == "metadata-host"
+    assert committed["cli_version"] == "metadata-cli"
+    assert committed["pid"] == original_pid
+
+
+def test_mark_pass_on_v5_repository_ignores_shadow_control_divergence(tmp_path):
     from mission_application.review import MarkPassRequest, MarkPassServices, mark_pass
-    from mission_persistence.fenced_commit import FencedCommitError
 
     calls: list = []
     repository, backend = _v5_repository(tmp_path, calls=calls)
@@ -802,13 +863,12 @@ def test_mark_pass_on_v5_repository_rejects_claim_violation_without_commit(tmp_p
         optional_unclosed_skills=lambda _data: [],
         selection_id=lambda _data: None,
     )
-    with pytest.raises(FencedCommitError) as failure:
-        mark_pass(
-            repository,
-            MarkPassRequest(False, None, False, "", "2030-08-23T02:00:00Z"),
-            services,
-        )
+    result = mark_pass(
+        repository,
+        MarkPassRequest(False, None, False, "", "2030-08-23T02:00:00Z"),
+        services,
+    )
 
-    assert failure.value.code == "transition-divergence"
-    assert backend.commits == []
-    assert calls == []
+    assert result.decision.accepted is True
+    assert backend.commits[0]["phase"] == "done"
+    assert calls == ["remove"]

@@ -16,7 +16,6 @@ import pytest
 def test_monotonic_halt_decision_accepts_stale_supersede():
     from mission_application.lifecycle import monotonic_halt_decision
     from mission_kernel.model import HaltCategory, Phase, TerminalOutcome
-    from mission_kernel.transitions import transition_control_claims
 
     decision = monotonic_halt_decision(
         {"phase": "reviewing"}, "stale", "superseded by a replacement run"
@@ -24,14 +23,11 @@ def test_monotonic_halt_decision_accepts_stale_supersede():
 
     assert decision.accepted is True
     assert decision.rule_id == "mark-halt"
-    claims = transition_control_claims(decision.transition)
-    # 批2-a-3 (#632): terminal_outcome も claim になった。
-    assert claims == {
-        "phase": Phase.HALTED,
-        "loop_active": False,
-        "halt_category": HaltCategory.STALE,
-        "terminal_outcome": TerminalOutcome.STALE_SUPERSEDED,
-    }
+    control = decision.transition.new_state.control
+    assert control.phase is Phase.HALTED
+    assert control.loop_active is False
+    assert control.halt_category is HaltCategory.STALE
+    assert control.terminal_outcome is TerminalOutcome.STALE_SUPERSEDED
 
 
 def test_monotonic_halt_decision_rejects_unknown_category():

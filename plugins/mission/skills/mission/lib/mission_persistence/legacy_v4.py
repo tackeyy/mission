@@ -11,18 +11,28 @@ from datetime import datetime, timezone
 from typing import Callable, ContextManager, Iterable
 
 from mission_application.artifact import EvidenceDecision, EvidenceEffect, validate_evidence_effect
-from mission_application.ports import AggregateIndexError, AuditMetadata
+from mission_application.ports import (
+    AggregateIndexError,
+    AuditMetadata,
+    LegacyCommandExecutionResult,
+)
+from mission_kernel.commands import (
+    AdvancePhase,
+    CompatibilityPayload,
+    MarkPass,
+    Reactivate,
+    ResumeStale,
+    kernel_command_type,
+)
 from mission_kernel.json_codec import decode_json_object
 from mission_kernel import MissionState, decode_mission_state, project_legacy_document
-from enum import Enum
 
-from mission_kernel.model import Phase
+from mission_kernel.model import BoundScore, FrozenJsonObject, HaltCategory, Phase
+from mission_kernel.json_codec import freeze_json_value
 from mission_kernel.transitions import (
     Decision,
-    TransitionTableError,
     bind_transition_effects,
     decide,
-    transition_control_claim_bounds,
 )
 
 from .fenced_commit import (
@@ -40,76 +50,107 @@ from .fenced_commit import (
 from .local_uow import VerifiedBlobSet
 
 
-_CLAIM_ABSENT = object()
-
-
-@dataclass
-class _PendingDecision:
-    document: dict
-    claims: dict[str, object]
-
-
-def _verify_transition_claims(document: dict, claims: dict[str, object], detail: str) -> None:
-    for field_name, expected in claims.items():
-        if expected is None:
-            matches = field_name not in document
-        elif isinstance(expected, bool):
-            matches = type(document.get(field_name)) is bool and document[field_name] is expected
-        else:
-            matches = document.get(field_name, _CLAIM_ABSENT) == expected
-        if not matches:
-            raise FencedCommitError("transition-divergence", "%s on %s" % (detail, field_name))
-
-
-def _apply_transition_claims(transition: object, proposed: dict) -> dict[str, object]:
-    """Apply the decided completion-adjacent claims as the persisted values.
-
-    批2-a-2 (#631): the transition's claimed values are what get persisted —
-    a claim fills a field the compatibility writer omitted and overwrites an
-    equal value it wrote, while a writer that produced a *different* value
-    indicates re-implementation drift and fails closed.  Unclaimed fields
-    (timing, lease, passthrough, raw halt_reason) stay under the
-    compatibility writer's authority until 批2-a-3 removes the dict
-    mutations entirely.
-    """
+def _legacy_command_state(document: dict, command: object) -> MissionState:
+    """Build the narrow decision view bound to the exact loaded document."""
+    compatible = copy.deepcopy(document)
+    normalize_reactivation_category = False
+    plan = compatible.get("canonical_plan")
+    if isinstance(plan, dict):
+        plan.setdefault("schema", "mission-plan/1")
+        plan.setdefault("source_digest", plan.get("digest"))
+        plan.setdefault(
+            "validated_at",
+            compatible.get("updated_at") or compatible.get("started_at"),
+        )
+    if isinstance(command, Reactivate):
+        raw_category = compatible.get("halt_category")
+        if raw_category not in {item.value for item in HaltCategory}:
+            if command.expected_category is not HaltCategory.OTHER:
+                raise FencedCommitError(
+                    "decision-input-invalid", "legacy halt category does not match command"
+                )
+            normalize_reactivation_category = True
+            compatible.pop("halt_category", None)
+    if isinstance(command, ResumeStale):
+        reason = compatible.get("halt_reason")
+        category = compatible.get("halt_category")
+        legacy_stale = (
+            category in (None, "", "unknown")
+            and isinstance(reason, str)
+            and reason.startswith(("orphan:", "stale:"))
+        )
+        if category != "stale" and not legacy_stale:
+            raise FencedCommitError(
+                "decision-input-invalid", "legacy state is not stale"
+            )
+        compatible["phase"] = "halted"
+        compatible["loop_active"] = False
+        compatible["halt_category"] = "stale"
+        compatible["terminal_outcome"] = "stale_superseded"
     try:
-        bounds = transition_control_claim_bounds(transition)
-    except TransitionTableError as exc:
+        source = json.dumps(
+            compatible,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        state = decode_mission_state(source)
+        passthrough = freeze_json_value(document)
+        assert isinstance(passthrough, FrozenJsonObject)
+        if normalize_reactivation_category:
+            state = replace(
+                state,
+                control=replace(
+                    state.control, halt_category=HaltCategory.OTHER
+                ),
+                legacy_passthrough=passthrough,
+            )
+        else:
+            state = replace(state, legacy_passthrough=passthrough)
+        return state
+    except (TypeError, ValueError, UnicodeError) as exc:
         raise FencedCommitError(
-            "transition-unsealed",
-            "execute requires a transition issued by the canonical decision table",
+            getattr(exc, "code", "record-invalid"),
+            "legacy state cannot be decoded",
         ) from exc
 
-    def _projected(value: object) -> object:
-        return value.value if isinstance(value, Enum) else value
 
-    def _matches(current: object, expected: object) -> bool:
-        if expected is None:
-            return current is None or current is _CLAIM_ABSENT
-        if isinstance(expected, bool):
-            return type(current) is bool and current is expected
-        return current == expected
+_METADATA_FIELDS = frozenset(
+    {
+        "schema_version",
+        "project_root",
+        "pid",
+        "pid_source",
+        "hostname",
+        "session_id",
+        "agent",
+        "created_at_session",
+        "cli_version",
+    }
+)
 
-    claims = {}
-    for field_name, (before, after) in bounds.items():
-        current = proposed.get(field_name, _CLAIM_ABSENT)
-        expected = _projected(after)
-        # 許容されるのは「決定後の値を書いた writer」か「触っていない writer
-        # （決定前の値のまま）」だけ。第三の値は再実装 drift として fail-closed。
-        if not _matches(current, expected) and not _matches(
-            current, _projected(before)
-        ):
-            raise FencedCommitError(
-                "transition-divergence",
-                "compatibility mutation diverges from the decided transition"
-                " on %s" % field_name,
-            )
-        if expected is None:
-            proposed.pop(field_name, None)
-        else:
-            proposed[field_name] = expected
-        claims[field_name] = expected
-    return claims
+
+def _command_with_missing_metadata(
+    command: object,
+    document: dict,
+    metadata: dict,
+) -> object:
+    if not metadata:
+        return command
+    if set(metadata) - _METADATA_FIELDS:
+        raise FencedCommitError("request-invalid", "metadata field is not closed")
+    compatibility = command.compatibility
+    if not isinstance(compatibility, CompatibilityPayload):
+        raise FencedCommitError("request-invalid", "command compatibility is invalid")
+    upserts = compatibility.upserts.thaw()
+    for key, value in metadata.items():
+        if key not in document:
+            upserts[key] = copy.deepcopy(value)
+    return replace(
+        command,
+        compatibility=CompatibilityPayload(upserts, compatibility.removals),
+    )
 
 
 @dataclass(frozen=True)
@@ -142,7 +183,7 @@ class LegacyV4InitializerRepository:
 
 
 class LegacyV4Repository:
-    """Coordinate legacy load/save while keeping ``execute`` pure.
+    """Atomically decide, project, and persist typed legacy commands.
 
     The injected persistence functions preserve the existing CLI's StateLock,
     atomic writer, backup, and fenced-lease behavior without making the
@@ -191,22 +232,24 @@ class LegacyV4Repository:
         self._lease_ttl_seconds = lease_ttl_seconds
         self._effect_transaction = effect_transaction
         self._format_guard = format_guard
-        self._pending: list[_PendingDecision] = []
-        self._executing = 0
+        self._callback_depth = 0
         self._transaction_depth = 0
+        self._loaded_document: dict | None = None
 
     @contextlib.contextmanager
     def transaction(self):
-        # ネストした transaction の finally が外側の pending まで消すと、
-        # その後の不正 save が未検証で通る（#632 の Sol 指摘）。深さで数える。
+        # Nested callers share one exact loaded document until the outermost
+        # transaction exits; only the outer boundary clears that snapshot.
         self._transaction_depth += 1
+        if self._transaction_depth == 1:
+            self._loaded_document = None
         try:
             with self._guarded_context(self._lock):
                 yield
         finally:
             self._transaction_depth -= 1
             if self._transaction_depth == 0:
-                self._pending.clear()
+                self._loaded_document = None
 
 
     # 外部から注入される callable の信頼境界（#632 / Sol 4 巡目）。
@@ -237,11 +280,11 @@ class LegacyV4Repository:
         という別の実行入口から同じ不変条件を迂回できる（#632 の Sol 指摘）。
         callback 実行中は ``execute`` / ``save`` / ``execute_effects`` を拒否する。
         """
-        self._executing += 1
+        self._callback_depth += 1
         try:
             yield
         finally:
-            self._executing -= 1
+            self._callback_depth -= 1
 
     def _guarded_call(self, callback, *args, **kwargs):
         """Run one injected callable inside the re-entrancy boundary."""
@@ -249,7 +292,7 @@ class LegacyV4Repository:
             return callback(*args, **kwargs)
 
     def _reject_reentrant_entry(self, operation: str) -> None:
-        if self._executing:
+        if self._callback_depth:
             raise FencedCommitError(
                 "request-invalid",
                 "%s is not allowed while a decision is being executed" % operation,
@@ -288,7 +331,11 @@ class LegacyV4Repository:
     def load(self) -> dict:
         if self._format_guard is not None:
             self._guarded_call(self._format_guard)
-        return self._guarded_call(self._read_state)
+        document = self._guarded_call(self._read_state)
+        if not isinstance(document, dict):
+            return document
+        self._loaded_document = copy.deepcopy(document)
+        return copy.deepcopy(document)
 
     def read(self, session_id: str) -> LegacyRepositorySnapshot:
         """Read one legacy session through the common typed repository port."""
@@ -316,35 +363,52 @@ class LegacyV4Repository:
                 raise FencedCommitError("lineage-mismatch", "legacy session differs")
             return LegacyRepositorySnapshot(state=state, state_bytes=source)
 
-    def execute(self, state, mutation=None, transition=None, finalize=None):
-        """Return the proposed v4 document without performing any I/O."""
+    def execute(
+        self,
+        command,
+        *,
+        backup=True,
+        administrative=False,
+        aggregate_action=None,
+    ):
+        """Decide, project, and persist one legacy command atomically."""
         self._reject_reentrant_entry("execute")
-        if isinstance(state, ExecutionRequest):
-            if mutation is not None or transition is not None or finalize is not None:
-                raise FencedCommitError(
-                    "request-invalid", "typed execution does not accept a decision callback"
-                )
-            return self._execute_request(state)
-        # The typed transition is the authority decision, while the A1
-        # compatibility reducer remains the writer for legacy timing, lease,
-        # and passthrough fields.  Projecting the canonical state here would
-        # pre-apply the phase and lose the legacy reducer's duration boundary.
-        # A supplied transition's claims are applied as the persisted values,
-        # with writer divergence failing closed (批2-a-1 #630 / 批2-a-2 #631).
-        if finalize is not None and transition is None:
-            raise FencedCommitError("request-invalid", "finalize requires a transition")
-        # 再入した save() は claims が未登録の隙を突いて検証を迂回できるため、
-        # mutation / finalize の実行中は保存を明示的に拒否する（#632 の Sol 指摘）。
-        proposed = copy.deepcopy(state)
-        with self._callback_guard():
-            mutation(proposed)
-            if transition is not None:
-                claims = _apply_transition_claims(transition, proposed)
-                if finalize is not None:
-                    finalize(proposed)
-                _verify_transition_claims(proposed, claims, "finalizer diverges from the decided transition")
-                self._pending.append(_PendingDecision(proposed, claims))
-        return proposed
+        if isinstance(command, ExecutionRequest):
+            return self._execute_request(command)
+        try:
+            kernel_command_type(command)
+        except TypeError as exc:
+            raise FencedCommitError("request-invalid", "typed command is required") from exc
+        if self._transaction_depth <= 0 or self._loaded_document is None:
+            raise FencedCommitError(
+                "request-invalid", "legacy command execute requires one active loaded transaction"
+            )
+        state = _legacy_command_state(self._loaded_document, command)
+        decision = decide(state, command)
+        if not isinstance(decision, Decision):
+            raise FencedCommitError("decision-invalid", "decision result type is invalid")
+        if not decision.accepted:
+            if decision.transition is not None or decision.rejection is None:
+                raise FencedCommitError("decision-invalid", "rejected decision is not closed")
+            frozen = freeze_json_value(self._loaded_document)
+            assert isinstance(frozen, FrozenJsonObject)
+            return LegacyCommandExecutionResult(decision, frozen)
+        if decision.transition is None or decision.rejection is not None:
+            raise FencedCommitError("decision-invalid", "accepted decision is not closed")
+        proposed = json.loads(project_legacy_document(decision.transition.new_state))
+        frozen = freeze_json_value(proposed)
+        assert isinstance(frozen, FrozenJsonObject)
+        result = LegacyCommandExecutionResult(decision, frozen)
+        try:
+            self.save(
+                proposed,
+                backup=backup,
+                administrative=administrative,
+                aggregate_action=aggregate_action,
+            )
+        except AggregateIndexError as exc:
+            raise AggregateIndexError(str(exc), execution=result) from exc
+        return result
 
     def _execute_request(
         self,
@@ -460,11 +524,6 @@ class LegacyV4Repository:
             raise ValueError("unknown aggregate action")
         if self._format_guard is not None:
             self._guarded_call(self._format_guard)
-        if self._pending:
-            pending = next((item for item in self._pending if item.document is state), None)
-            if pending is None:
-                raise FencedCommitError("transition-divergence", "save target is not a decided document")
-            _verify_transition_claims(state, pending.claims, "save diverges from the decided transition")
         prepared_intent = None
         if self._aggregate_recover is not None:
             self._guarded_call(self._aggregate_recover)
@@ -562,7 +621,7 @@ class V5CompatibilityRepository:
         session_id: str,
         lease_owner_session_id: str,
         presented_lease_id: str | None,
-        prepare_state: Callable[[dict], dict] | None = None,
+        metadata: dict | None = None,
         add_to_aggregate: Callable[[], None] | None = None,
         remove_from_aggregate: Callable[[], None] | None = None,
         aggregate_recover: Callable[[], None] | None = None,
@@ -578,7 +637,18 @@ class V5CompatibilityRepository:
         self._session_id = session_id
         self._lease_owner_session_id = lease_owner_session_id
         self._presented_lease_id = presented_lease_id
-        self._prepare_state = prepare_state or (lambda state: state)
+        if metadata is not None and not isinstance(metadata, dict):
+            raise ValueError("metadata is not an object")
+        metadata_value = metadata or {}
+        if set(metadata_value) - _METADATA_FIELDS:
+            raise ValueError("metadata field is not closed")
+        try:
+            frozen_metadata = freeze_json_value(metadata_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("metadata is not strict JSON") from exc
+        if not isinstance(frozen_metadata, FrozenJsonObject):
+            raise ValueError("metadata is not an object")
+        self._metadata = frozen_metadata.thaw()
         self._add_to_aggregate = add_to_aggregate
         self._remove_from_aggregate = remove_from_aggregate
         self._aggregate_recover = aggregate_recover
@@ -605,8 +675,8 @@ class V5CompatibilityRepository:
         self._admitted: AdmittedSnapshot | None = None
         self._replayed: CommitResult | None = None
         self._transaction_active = False
-        self._pending: list[_PendingDecision] = []
-        self._executing = 0
+        self._callback_depth = 0
+        self._loaded_document: dict | None = None
 
     @contextlib.contextmanager
     def transaction(self):
@@ -618,7 +688,7 @@ class V5CompatibilityRepository:
         finally:
             self._admitted = None
             self._replayed = None
-            self._pending.clear()
+            self._loaded_document = None
             self._transaction_active = False
 
 
@@ -626,7 +696,6 @@ class V5CompatibilityRepository:
     # inventory テストが固定する。
     GUARDED_INJECTED_CALLABLES = (
         "_format_guard",
-        "_prepare_state",
         "_add_to_aggregate",
         "_remove_from_aggregate",
         "_aggregate_recover",
@@ -638,11 +707,11 @@ class V5CompatibilityRepository:
     @contextlib.contextmanager
     def _callback_guard(self):
         """Reject persistence entry points while a caller callback is running."""
-        self._executing += 1
+        self._callback_depth += 1
         try:
             yield
         finally:
-            self._executing -= 1
+            self._callback_depth -= 1
 
     def _guarded_call(self, callback, *args, **kwargs):
         """Run one injected callable inside the re-entrancy boundary."""
@@ -650,7 +719,7 @@ class V5CompatibilityRepository:
             return callback(*args, **kwargs)
 
     def _reject_reentrant_entry(self, operation: str) -> None:
-        if self._executing:
+        if self._callback_depth:
             raise FencedCommitError(
                 "request-invalid",
                 "%s is not allowed while a decision is being executed" % operation,
@@ -707,7 +776,9 @@ class V5CompatibilityRepository:
         if isinstance(admitted, CommitResult):
             snapshot = self._repository.read(self._session_id)
             self._replayed = admitted
-            return json.loads(project_legacy_document(snapshot.state))
+            document = json.loads(project_legacy_document(snapshot.state))
+            self._loaded_document = copy.deepcopy(document)
+            return copy.deepcopy(document)
         if admitted.base is None:
             raise FencedCommitError("initial-state-required", "v5 head is missing")
         self._admitted = admitted
@@ -716,29 +787,59 @@ class V5CompatibilityRepository:
             lease=admitted.pending_lease.target,
             snapshot_provenance=None,
         )
-        return json.loads(project_legacy_document(admitted_state))
+        document = json.loads(project_legacy_document(admitted_state))
+        self._loaded_document = copy.deepcopy(document)
+        return copy.deepcopy(document)
 
     def read(self, session_id: str):
         return self._repository.read(session_id)
 
-    def execute(self, state, mutation=None, transition=None, finalize=None):
+    def execute(
+        self,
+        command,
+        *,
+        backup=True,
+        administrative=False,
+        aggregate_action=None,
+    ):
+        del backup
         self._reject_reentrant_entry("execute")
-        if isinstance(state, ExecutionRequest):
-            return self._repository.execute(state)
-        if finalize is not None and transition is None:
-            raise FencedCommitError("request-invalid", "finalize requires a transition")
-        # 再入した save() は claims が未登録の隙を突いて検証を迂回できるため、
-        # mutation / finalize の実行中は保存を明示的に拒否する（#632 の Sol 指摘）。
-        proposed = copy.deepcopy(state)
-        with self._callback_guard():
-            mutation(proposed)
-            if transition is not None:
-                claims = _apply_transition_claims(transition, proposed)
-                if finalize is not None:
-                    finalize(proposed)
-                _verify_transition_claims(proposed, claims, "finalizer diverges from the decided transition")
-                self._pending.append(_PendingDecision(proposed, claims))
-        return proposed
+        if isinstance(command, ExecutionRequest):
+            return self._repository.execute(command)
+        try:
+            kernel_command_type(command)
+        except TypeError as exc:
+            raise FencedCommitError("request-invalid", "typed command is required") from exc
+        if not self._transaction_active or self._loaded_document is None:
+            raise FencedCommitError(
+                "request-invalid", "v5 command execute requires one active loaded transaction"
+            )
+        command = _command_with_missing_metadata(
+            command, self._loaded_document, self._metadata
+        )
+        state = _legacy_command_state(self._loaded_document, command)
+        decision = decide(state, command)
+        if not decision.accepted:
+            if decision.transition is not None or decision.rejection is None:
+                raise FencedCommitError("decision-invalid", "rejected decision is not closed")
+            frozen = freeze_json_value(self._loaded_document)
+            assert isinstance(frozen, FrozenJsonObject)
+            return LegacyCommandExecutionResult(decision, frozen)
+        if decision.transition is None or decision.rejection is not None:
+            raise FencedCommitError("decision-invalid", "accepted decision is not closed")
+        proposed = json.loads(project_legacy_document(decision.transition.new_state))
+        frozen = freeze_json_value(proposed)
+        assert isinstance(frozen, FrozenJsonObject)
+        result = LegacyCommandExecutionResult(decision, frozen)
+        try:
+            self.save(
+                proposed,
+                administrative=administrative,
+                aggregate_action=aggregate_action,
+            )
+        except AggregateIndexError as exc:
+            raise AggregateIndexError(str(exc), execution=result) from exc
+        return result
 
     def save(
         self,
@@ -754,12 +855,9 @@ class V5CompatibilityRepository:
             raise ValueError("unknown aggregate action")
         if self._format_guard is not None:
             self._guarded_call(self._format_guard)
-        pending = next((item for item in self._pending if item.document is state), None)
-        if self._pending and pending is None:
-            raise FencedCommitError("transition-divergence", "save target is not a decided document")
-        proposed = self._guarded_call(self._prepare_state, copy.deepcopy(state))
-        if pending is not None:
-            _verify_transition_claims(proposed, pending.claims, "save diverges from the decided transition")
+        proposed = copy.deepcopy(state)
+        for key, value in self._metadata.items():
+            proposed.setdefault(key, copy.deepcopy(value))
         if self._replayed is not None:
             return
         admitted = self._admitted
