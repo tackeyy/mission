@@ -879,11 +879,17 @@ def project_legacy_document(state: MissionState) -> bytes:
     for key, value in (
         ("max_iter", control.max_iter),
         ("threshold", control.threshold),
-        ("halt_category", None if control.halt_category is None else control.halt_category.value),
-        ("terminal_outcome", None if state.terminal_outcome is None else state.terminal_outcome.value),
     ):
         if key not in document:
             continue
+        if value is None:
+            document.pop(key, None)
+        else:
+            document[key] = value
+    for key, value in (
+        ("halt_category", None if control.halt_category is None else control.halt_category.value),
+        ("terminal_outcome", None if state.terminal_outcome is None else state.terminal_outcome.value),
+    ):
         if value is None:
             document.pop(key, None)
         else:
@@ -925,16 +931,18 @@ def project_legacy_document(state: MissionState) -> bytes:
                 "lease_id": state.lease.lease_id,
                 "fencing_epoch": state.lease.fencing_epoch,
                 "lease_expires_at": state.lease.lease_expires_at,
-                "lease_history": [
-                    {
-                        "owner_session_id": item.owner_session_id,
-                        "lease_id": item.lease_id,
-                        "fencing_epoch": item.fencing_epoch,
-                        "reason": item.reason,
-                        "at": item.at,
-                    }
-                    for item in state.lease.lease_history
-                ],
             }
         )
+        lease_history = [
+            {
+                "owner_session_id": item.owner_session_id,
+                "lease_id": item.lease_id,
+                "fencing_epoch": item.fencing_epoch,
+                "reason": item.reason,
+                "at": item.at,
+            }
+            for item in state.lease.lease_history
+        ]
+        if lease_history or "lease_history" in document:
+            document["lease_history"] = lease_history
     return encode_json_object(_freeze_object(document))
