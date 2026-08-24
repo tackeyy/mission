@@ -95,6 +95,17 @@ class MissionInitializer(Protocol):
         ...
 
 
+@runtime_checkable
+class MissionReinitializer(MissionInitializer, Protocol):
+    """Explicit terminal-session reinitialization boundary."""
+
+    def current_mission(self) -> object:
+        ...
+
+    def start_new_mission(self, arguments: object, current: object) -> None:
+        ...
+
+
 class RepositoryReadResult(Protocol):
     """Minimum canonical read view shared by compatibility and v5 storage."""
 
