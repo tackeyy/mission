@@ -65,6 +65,9 @@ def is_terminal_invocation(record: Mapping[str, Any]) -> bool:
     )
 
 
+_PENDING_REASON_CODES = frozenset({"pending-evaluation", "awaiting-confirmation"})
+
+
 def validate_selection_checkpoint(
     checkpoint: Mapping[str, Any], *, allow_pending: bool = False
 ) -> None:
@@ -78,7 +81,10 @@ def validate_selection_checkpoint(
     if not isinstance(reason_code, str) or not reason_code.strip():
         raise SpecialistLifecycleError("selection reason_code is required")
     lifecycle_state = checkpoint.get("lifecycle_state")
-    if allow_pending and decision == "none" and reason_code == "pending-evaluation":
+    # ``allow_pending`` は「記録時点ではまだ決着していない」ことを許す。first-use
+    # confirmation 待ちも決着前の正当な中間状態であり、記録できなければ gate 自体が
+    # 成立しない。pass 判定側は allow_pending=False のまま terminal を要求する。
+    if allow_pending and decision == "none" and reason_code in _PENDING_REASON_CODES:
         if lifecycle_state not in {"candidate", "terminal"}:
             raise SpecialistLifecycleError("pending selection must be candidate or terminal")
         return

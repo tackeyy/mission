@@ -1754,6 +1754,7 @@ def test_c2_repository_and_direct_write_inventories_are_closed_and_disjoint():
             "planning reselect",
             "supersede-reviews",
             # Batch 2
+            "specialists decline",
             "specialists recommend",
             "specialists log-invocation",
             "specialists verify-approval",
@@ -1784,6 +1785,7 @@ def test_c2_repository_commands_have_no_direct_legacy_session_writer_calls():
         "cmd_planning_reselect",
         "cmd_supersede_reviews",
         # Batch 2
+        "cmd_specialists_decline",
         "cmd_specialists",
         "cmd_log_specialist_invocation",
         "cmd_verify_provider_approval",

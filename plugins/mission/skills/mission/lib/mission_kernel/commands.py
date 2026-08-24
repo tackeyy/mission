@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields, is_dataclass
 from enum import Enum
+import re
 from typing import Optional, Union
 
 from .json_codec import decode_json_object, encode_json_object, freeze_json_value
@@ -105,6 +106,29 @@ class SetExtensionFields:
     fields: FrozenJsonObject
     at: Optional[str] = None
     compatibility: CompatibilityPayload = EMPTY_COMPATIBILITY_PAYLOAD
+
+
+@dataclass(frozen=True)
+class DeclineSpecialistSelection:
+    """Terminate the current candidate checkpoint with an explicit decision."""
+
+    selection_id: str
+    reason: str
+    at: Optional[str] = None
+    compatibility: CompatibilityPayload = EMPTY_COMPATIBILITY_PAYLOAD
+
+    def __post_init__(self) -> None:
+        if type(self.selection_id) is not str or re.fullmatch(
+            r"sel_[0-9a-f]{32}", self.selection_id
+        ) is None:
+            raise TypeError("specialist-selection-id-invalid")
+        if (
+            not isinstance(self.reason, str)
+            or not self.reason.strip()
+            or len(self.reason) > 1024
+            or any(ord(char) < 32 or ord(char) == 127 for char in self.reason)
+        ):
+            raise TypeError("specialist-decline-reason-invalid")
 
 
 @dataclass(frozen=True)
@@ -358,6 +382,7 @@ Command = Union[
     ClearProgress,
     BeginExecutorHandoff,
     CompleteExecutorHandoff,
+    DeclineSpecialistSelection,
     ExportArtifact,
     GenerateContextManifest,
     InitializeArtifact,
@@ -383,6 +408,7 @@ _COMMAND_TYPES = {
     ClearProgress: "clear-progress",
     BeginExecutorHandoff: "executor-handoff-begin",
     CompleteExecutorHandoff: "executor-handoff-complete",
+    DeclineSpecialistSelection: "decline-specialist-selection",
     ExportArtifact: "export-artifact",
     GenerateContextManifest: "generate-context-manifest",
     InitializeArtifact: "initialize-artifact",

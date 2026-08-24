@@ -56,6 +56,7 @@ COMMAND_OWNER_REGISTRY = {
         "planning promote-provider-plan",
         "planning reselect",
         "specialists consent",
+        "specialists decline",
         "specialists invoke-command",
         "specialists invoke-prepared",
         "specialists log-invocation",
@@ -117,7 +118,8 @@ C2_REPOSITORY_COMMANDS = frozenset(
         "executor-handoff verify-step",
         "planning reselect",
         "supersede-reviews",
-        # Batch 2: specialists 8 commands
+        # Batch 2 specialists plus later repository-owned selection decisions
+        "specialists decline",
         "specialists recommend",
         "specialists log-invocation",
         "specialists verify-approval",

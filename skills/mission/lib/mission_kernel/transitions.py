@@ -18,6 +18,7 @@ from .commands import (
     ClearProgress,
     CompatibilityPayload,
     ContextManifestEffectClaim,
+    DeclineSpecialistSelection,
     GENERIC_SET_DEDICATED_FIELDS,
     GENERIC_SET_FROZEN_FIELDS,
     AdvancePhase,
@@ -1022,6 +1023,60 @@ def _set_extension_fields(state: MissionState, raw_command: object) -> Transitio
     )
 
 
+def _decline_specialist_selection(
+    state: MissionState, raw_command: object
+) -> Transition:
+    command = raw_command
+    assert isinstance(command, DeclineSpecialistSelection)
+    _active_control(state)
+    document = _artifact_document(state)
+    checkpoint = document.get("specialists_decision")
+    if not isinstance(checkpoint, dict):
+        raise _Rejected("specialist-selection-checkpoint-invalid")
+    if checkpoint.get("selection_id") != command.selection_id:
+        raise _Rejected("specialist-selection-id-mismatch")
+    if (
+        checkpoint.get("decision") != "none"
+        or checkpoint.get("lifecycle_state") != "candidate"
+        or checkpoint.get("reason_code") != "awaiting-confirmation"
+    ):
+        raise _Rejected("specialist-selection-not-declinable")
+    declined = {
+        **checkpoint,
+        "action": "continue-core",
+        "decision": "declined",
+        "reason": command.reason.strip(),
+        "reason_code": "orchestrator-declined",
+        "prompted_user": False,
+        "lifecycle_state": "terminal",
+    }
+    document["specialists_decision"] = declined
+    document["specialists_mode"] = "manual"
+    if command.at is not None:
+        document["updated_at"] = command.at
+    # #624 で specialists_decision は typed A4 projection 側が権威になった。
+    # legacy document だけを書くと projection に上書きされて無効化される。
+    frozen_decision = freeze_json_value(declined)
+    if not isinstance(frozen_decision, FrozenJsonObject):
+        raise _Rejected("specialist-selection-checkpoint-invalid")
+    next_state = _with_artifact_document(state, document)
+    next_state = _unbound_state(
+        next_state,
+        a4=replace(
+            next_state.a4,
+            specialist_selection=replace(
+                next_state.a4.specialist_selection,
+                decision=frozen_decision,
+                mode="manual",
+            ),
+        ),
+    )
+    return Transition(
+        next_state,
+        (KernelEvent("specialist-selection-declined"),),
+    )
+
+
 def _artifact_document(state: MissionState) -> dict:
     if state.legacy_passthrough is None:
         raise _Rejected("artifact-v4-state-required")
@@ -1857,6 +1912,12 @@ TRANSITION_TABLE = build_transition_table(
             ResumeStale,
             _command_type_guard(ResumeStale),
             _resume_stale,
+        ),
+        TransitionRule(
+            "specialist-selection-decline",
+            DeclineSpecialistSelection,
+            _command_type_guard(DeclineSpecialistSelection),
+            _decline_specialist_selection,
         ),
         TransitionRule(
             "set-extension-fields",
