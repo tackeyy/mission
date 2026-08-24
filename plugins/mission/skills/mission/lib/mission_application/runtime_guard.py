@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib.metadata
 import json
 import math
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Callable, ContextManager, Optional, Protocol, Tuple, Union
 
 from activity_segments import (
@@ -43,12 +45,31 @@ RUNTIME_GUARD_COMMAND_OWNERS = {
 }
 
 
+class RuntimeGuardFailure(ValueError):
+    """A fail-closed runtime-guard request rejection."""
+
+
 def validate_provider_consent_path_parts(parts: tuple[str, ...]) -> None:
     """Apply the consent-path policy to adapter-resolved path facts."""
     if type(parts) is not tuple or any(type(part) is not str for part in parts):
         raise ValueError("provider-consent-session-path-forbidden")
     if any(part.casefold() == ".mission-state" for part in parts):
         raise ValueError("provider-consent-session-path-forbidden")
+
+
+def resolve_provider_consent_path(
+    consent_file: object,
+    default_path: Path,
+) -> Path:
+    """Resolve and validate the separate provider-consent aggregate path."""
+    try:
+        path = (Path(consent_file) if consent_file else default_path).expanduser().resolve(
+            strict=False
+        )
+        validate_provider_consent_path_parts(tuple(path.parts))
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise RuntimeGuardFailure(str(exc)) from exc
+    return path
 
 
 def validate_registered_entry_point_distribution(
@@ -100,6 +121,57 @@ def validate_registered_entry_point_distribution(
         or distribution_version != configured_version
     ):
         raise ValueError("approval verifier distribution identity mismatch")
+
+
+def validate_registered_approval_entry_point_distribution(
+    entry_point: object,
+    configured_item: object,
+    *,
+    group: str,
+    distribution_for: Optional[Callable[[str], object]] = None,
+) -> None:
+    """Observe host metadata and apply the closed distribution policy."""
+    invalid = "approval verifier distribution identity mismatch"
+    try:
+        entry_point_name = getattr(entry_point, "name")
+        entry_point_value = getattr(entry_point, "value")
+        attached_distribution = getattr(entry_point, "dist", None)
+        distribution = attached_distribution
+        if distribution is None:
+            resolver = (
+                importlib.metadata.distribution
+                if distribution_for is None
+                else distribution_for
+            )
+            distribution = resolver(configured_item["distribution"])
+        metadata = getattr(distribution, "metadata")
+        distribution_name = metadata.get("Name")
+        distribution_version = getattr(distribution, "version")
+        owned_entry_points = tuple(
+            (getattr(item, "group"), getattr(item, "name"), getattr(item, "value"))
+            for item in getattr(distribution, "entry_points")
+        )
+        configured_distribution = configured_item["distribution"]
+        configured_version = configured_item["version"]
+        validate_registered_entry_point_distribution(
+            entry_point_name=entry_point_name,
+            entry_point_value=entry_point_value,
+            has_attached_distribution=attached_distribution is not None,
+            distribution_name=distribution_name,
+            distribution_version=distribution_version,
+            owned_entry_points=owned_entry_points,
+            configured_distribution=configured_distribution,
+            configured_version=configured_version,
+            group=group,
+        )
+    except (
+        AttributeError,
+        OSError,
+        TypeError,
+        ValueError,
+        importlib.metadata.PackageNotFoundError,
+    ) as exc:
+        raise ValueError(invalid) from exc
 
 STOP_GUARD_SCHEMA = "mission-stop-guard/1"
 _STOP_KEYS = frozenset(

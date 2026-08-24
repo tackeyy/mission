@@ -653,6 +653,30 @@ def test_provider_consent_path_policy_rejects_session_aggregate_parts():
         validate_provider_consent_path_parts((LazyText(".mission-state"),))
 
 
+def test_provider_consent_path_resolution_is_owned_by_application(tmp_path):
+    import pytest
+
+    from mission_application.runtime_guard import (
+        RuntimeGuardFailure,
+        resolve_provider_consent_path,
+    )
+
+    default_path = tmp_path / "default" / "provider-consent.json"
+    explicit_path = tmp_path / "explicit" / "provider-consent.json"
+    assert resolve_provider_consent_path(None, default_path) == default_path.resolve()
+    assert (
+        resolve_provider_consent_path(str(explicit_path), default_path)
+        == explicit_path.resolve()
+    )
+
+    forbidden = tmp_path / ".mission-state" / "sessions" / "session.json"
+    with pytest.raises(
+        RuntimeGuardFailure,
+        match="provider-consent-session-path-forbidden",
+    ):
+        resolve_provider_consent_path(str(forbidden), default_path)
+
+
 def test_approval_verifier_distribution_without_dist_requires_one_owned_tuple():
     import inspect
     import pytest
@@ -710,6 +734,46 @@ def test_approval_verifier_distribution_without_dist_requires_one_owned_tuple():
         validate_registered_entry_point_distribution(
             **{**facts, "distribution_name": LazyText("portable-verifiers")}
         )
+
+
+def test_approval_verifier_distribution_observation_is_owned_by_application():
+    from mission_application.runtime_guard import (
+        validate_registered_approval_entry_point_distribution,
+    )
+
+    class EntryPoint:
+        name = "portable-verifier"
+        value = "portable.module:verify"
+        dist = None
+
+    class Distribution:
+        metadata = {"Name": "portable-verifiers"}
+        version = "1.2.3"
+        entry_points = (
+            type(
+                "OwnedEntryPoint",
+                (),
+                {
+                    "group": "mission.approval_verifiers",
+                    "name": "portable-verifier",
+                    "value": "portable.module:verify",
+                },
+            )(),
+        )
+
+    requested = []
+
+    def distribution_for(name):
+        requested.append(name)
+        return Distribution()
+
+    validate_registered_approval_entry_point_distribution(
+        EntryPoint(),
+        {"distribution": "portable-verifiers", "version": "1.2.3"},
+        group="mission.approval_verifiers",
+        distribution_for=distribution_for,
+    )
+    assert requested == ["portable-verifiers"]
 
 
 def test_closed_canonical_drift_rejection_preserves_prior_begin_lineage():
