@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -398,3 +399,77 @@ def test_current_scan_rejects_new_strict_code_and_stale_headroom():
         "count mismatch" in error
         for error in guard._baseline_mismatch_errors(stale, reduced)
     )
+
+
+def _git(repo: Path, *arguments: str) -> str:
+    result = subprocess.run(
+        ["git", *arguments],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def test_git_show_reads_a_synthetic_commit_without_using_the_worktree(tmp_path):
+    guard = _load_guard_module()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.name", "Mission Test")
+    _git(repo, "config", "user.email", "mission-test@example.invalid")
+    tracked = repo / "nested" / "baseline.jsonl"
+    tracked.parent.mkdir(parents=True)
+    tracked.write_text("recorded\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "synthetic baseline")
+    commit = _git(repo, "rev-parse", "HEAD")
+    tracked.write_text("dirty worktree\n", encoding="utf-8")
+
+    assert guard._git_show(repo, commit, Path("nested/baseline.jsonl")) == "recorded\n"
+    assert guard._git_show(repo, commit, Path("missing.jsonl")) is None
+
+
+def test_load_base_baseline_uses_recorded_or_bootstrap_source_commit(tmp_path):
+    guard = _load_guard_module()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.name", "Mission Test")
+    _git(repo, "config", "user.email", "mission-test@example.invalid")
+    source = (
+        "def cmd_bootstrap(args):\n"
+        "    if args.enabled:\n"
+        "        print(args.enabled)\n"
+    )
+    source_path = repo / guard.SOURCE_PATH
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text(source, encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "synthetic source")
+    source_commit = _git(repo, "rev-parse", "HEAD")
+
+    bootstrap, bootstrap_kind = guard.load_base_baseline(repo, source_commit)
+
+    assert bootstrap_kind == "bootstrap-source-scan"
+    assert bootstrap == guard.baseline_from_violations(
+        guard.scan_source(source, path=guard.SOURCE_PATH.as_posix())
+    )
+
+    baseline = {
+        (guard.SOURCE_PATH.as_posix(), "cmd_bootstrap"): {"control.branch": 1}
+    }
+    baseline_path = repo / guard.BASELINE_PATH
+    baseline_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline_path.write_text(guard.dump_baseline(baseline), encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "synthetic recorded baseline")
+    baseline_commit = _git(repo, "rev-parse", "HEAD")
+
+    recorded, recorded_kind = guard.load_base_baseline(repo, baseline_commit)
+
+    assert recorded_kind == "recorded-baseline"
+    assert recorded == baseline
+    with pytest.raises(guard.BaselineError, match="base SHA"):
+        guard.load_base_baseline(repo, "not-a-sha")
