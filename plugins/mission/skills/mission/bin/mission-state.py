@@ -18416,9 +18416,8 @@ def cmd_resolve_archive(args):
     print(json.dumps(result, indent=2 if args.json else None, ensure_ascii=False))
 
 
-def _build_parser():
-    parser = argparse.ArgumentParser(description="/mission skill state manager")
-    sub = parser.add_subparsers(dest="cmd", required=True)
+def _add_initialization_parsers(subparsers) -> None:
+    sub = subparsers
 
     p_init = sub.add_parser("init", help="新規ミッションで state.json を初期化")
     p_init.add_argument(
@@ -18479,6 +18478,10 @@ def _build_parser():
     p_parallel_closeout.add_argument("--group-id", required=True)
     p_parallel_closeout.set_defaults(func=cmd_parallel_closeout)
 
+
+def _add_queue_parsers(subparsers) -> None:
+    sub = subparsers
+
     p_pregate = sub.add_parser("pregate", help="pre-gate evaluation cache sidecar")
     p_pregate_sub = p_pregate.add_subparsers(dest="pregate_cmd", required=True)
     p_pregate_record = p_pregate_sub.add_parser("record", help="record a pregate evaluation")
@@ -18521,6 +18524,17 @@ def _build_parser():
     p_queue_mark.add_argument("--reason", default=None)
     p_queue_mark.set_defaults(func=cmd_queue)
 
+
+# ``GuardCommandKind`` へメンバーが増えたら choices も追随させる。明示列挙に
+# するとその追随が静かに失われるため、導出を残したまま関数外へ置く。
+_RECEIPT_KIND_CHOICES = [
+    item.value for item in GuardCommandKind if item is not GuardCommandKind.NONE
+]
+
+
+def _add_hook_parsers(subparsers) -> None:
+    sub = subparsers
+
     p_stop_guard = sub.add_parser(
         "stop-guard-observe",
         help="record one digest-based stop-hook block observation",
@@ -18552,11 +18566,7 @@ def _build_parser():
     p_stop_verdict.add_argument("--receipt-stdout-fd", type=int, default=None)
     p_stop_verdict.add_argument(
         "--receipt-kind",
-        choices=[
-            item.value
-            for item in GuardCommandKind
-            if item is not GuardCommandKind.NONE
-        ],
+        choices=_RECEIPT_KIND_CHOICES,
         default=None,
     )
     p_stop_verdict.add_argument("--receipt-exit-code", type=int, default=None)
@@ -18581,6 +18591,10 @@ def _build_parser():
     p_permission.add_argument("--json", action="store_true", help="診断結果を JSON で出力")
     p_permission.set_defaults(func=cmd_permission_preflight)
 
+
+def _add_state_access_parsers(subparsers) -> None:
+    sub = subparsers
+
     p_get = sub.add_parser("get", help="state.json の値取得")
     p_get.add_argument("--field", default=None)
     p_get.set_defaults(func=cmd_get)
@@ -18590,6 +18604,10 @@ def _build_parser():
     p_set.add_argument("--json", action="store_true", help="失敗時に機械可読 outcome を出力")
     _add_command_lineage_arguments(p_set)
     p_set.set_defaults(func=cmd_set, command_outcome_tracking=True)
+
+
+def _add_review_parsers(subparsers) -> None:
+    sub = subparsers
 
     p_pass = sub.add_parser("mark-passes", help="threshold gate を満たすとき passes=true, loop_active=false (--force には --reason --approved-by-user --approval-evidence-ref --approved-actor --approved-at --reason-code --approval-verifier が全て必須)")
     p_pass.add_argument("--force", action="store_true",
@@ -18726,6 +18744,10 @@ def _build_parser():
     verify_source.add_argument("--input", default=None, help="JSON ファイルパス")
     p_verify_record.set_defaults(func=cmd_verification_record)
 
+
+def _add_lifecycle_parsers(subparsers) -> None:
+    sub = subparsers
+
     p_halt = sub.add_parser("mark-halt", help="halt_reason を立てて停止")
     p_halt.add_argument("--reason", required=True)
     p_halt.add_argument("--category", default=None,
@@ -18819,6 +18841,10 @@ def _build_parser():
     p_halt2.add_argument("--root", default=None, help="--all と併用時のみ有効。指定 root 配下のみ halt (省略時は MISSION_SEARCH_ROOTS、未設定なら cwd)")
     p_halt2.set_defaults(func=cmd_halt)
 
+
+def _add_reporting_parsers(subparsers) -> None:
+    sub = subparsers
+
     p_stats = sub.add_parser("stats", help="全プロジェクトの /mission セッションを横断集計 (read-only)")
     p_stats.add_argument("--root", action="append", default=None, help="スキャン対象ルート。複数回指定可 (デフォルト: MISSION_SEARCH_ROOTS、未設定なら cwd)")
     p_stats.add_argument("--since", default=None, help="期間下限 (YYYY-MM-DD, updated_at で比較)")
@@ -18870,6 +18896,10 @@ def _build_parser():
     _add_command_lineage_arguments(p_advance)
     p_advance.set_defaults(func=cmd_advance, command_outcome_tracking=True)
 
+
+def _add_activity_parsers(subparsers) -> None:
+    sub = subparsers
+
     p_activity = sub.add_parser("activity", help="#211: phase 内の active/wait/idle segment を記録")
     activity_sub = p_activity.add_subparsers(dest="activity_cmd", required=True)
     p_activity_start = activity_sub.add_parser("start", help="activity segment を開始し、開いている前 segment を閉じる")
@@ -18906,6 +18936,10 @@ def _build_parser():
     p_progress_clear = progress_sub.add_parser("clear", help="progress checkpoint を削除")
     p_progress_clear.add_argument("--json", action="store_true", help="JSON 形式で出力")
     p_progress_clear.set_defaults(func=cmd_progress_clear)
+
+
+def _add_artifact_parsers(subparsers) -> None:
+    sub = subparsers
 
     p_artifact = sub.add_parser("artifact", help="local mission artifact を作成・更新・export/publish 証跡化")
     artifact_sub = p_artifact.add_subparsers(dest="artifact_cmd", required=True)
@@ -18944,6 +18978,10 @@ def _build_parser():
     p_artifact_publish.add_argument("--approval-text", default=None)
     p_artifact_publish.add_argument("--json", action="store_true", help="JSON 形式で出力")
     p_artifact_publish.set_defaults(func=cmd_artifact_publish)
+
+
+def _add_specialists_parsers(subparsers) -> None:
+    sub = subparsers
 
     p_spec = sub.add_parser("specialists", help="specialist skill の discovery / recommend / state 記録")
     spec_sub = p_spec.add_subparsers(dest="specialists_cmd", required=True)
@@ -19066,50 +19104,6 @@ def _build_parser():
     p_plan_import.add_argument("--json", action="store_true")
     p_plan_import.set_defaults(func=cmd_plan_import, command_outcome_tracking=True)
 
-    p_planning = sub.add_parser("planning", help="policy v1 planning lifecycle transitions")
-    planning_sub = p_planning.add_subparsers(dest="planning_cmd", required=True)
-    p_adopt_core = planning_sub.add_parser("adopt-core", help="validate and adopt one core planning document")
-    p_adopt_core.add_argument("--input", required=True, help="canonical mission-plan/1 document regular file")
-    p_adopt_core.add_argument("--source-id", default=None, help="bounded source generation identifier")
-    p_adopt_core.add_argument("--json", action="store_true")
-    p_adopt_core.set_defaults(func=cmd_planning_adopt_core, command_outcome_tracking=True)
-    p_promote = planning_sub.add_parser("promote-provider-plan", help="promote one validated primary provider candidate")
-    p_promote.add_argument("--invocation-id", required=True)
-    p_promote.set_defaults(func=cmd_planning_promote_provider_plan, command_outcome_tracking=True)
-    p_reselect = planning_sub.add_parser("reselect", help="explicitly migrate active legacy planning state without raw copy")
-    p_reselect.set_defaults(func=cmd_planning_reselect, command_outcome_tracking=True)
-
-    p_handoff = sub.add_parser("executor-handoff", help="consume a prepared canonical executor handoff")
-    handoff_sub = p_handoff.add_subparsers(dest="executor_handoff_cmd", required=True)
-    p_begin = handoff_sub.add_parser("begin", help="atomically begin one prepared handoff")
-    p_begin.set_defaults(func=cmd_executor_handoff_begin, command_outcome_tracking=True)
-    p_verify_step = handoff_sub.add_parser("verify-step", help="revalidate plan before a step")
-    p_verify_step.add_argument("--step-id", required=True)
-    p_verify_step.set_defaults(func=cmd_executor_handoff_verify, command_outcome_tracking=True)
-    p_record_step = handoff_sub.add_parser("record-step", help="record one verified completed step")
-    p_record_step.add_argument("--step-id", required=True)
-    p_record_step.add_argument("--result", required=True, choices=["ok", "partial", "failed"])
-    p_record_step.set_defaults(func=cmd_executor_handoff_record, command_outcome_tracking=True)
-    p_complete = handoff_sub.add_parser("complete", help="consume handoff after all canonical steps")
-    p_complete.set_defaults(func=cmd_executor_handoff_complete, command_outcome_tracking=True)
-
-    p_handoff = sub.add_parser("handoff", help="local evidence handoff sidecar contract")
-    handoff_cli = p_handoff.add_subparsers(dest="handoff_cmd", required=True)
-    p_handoff_publish = handoff_cli.add_parser("publish", help="atomic write one evidence handoff envelope")
-    p_handoff_publish.add_argument("--topic", required=True)
-    p_handoff_publish.add_argument("--input", required=True, help="payload JSON regular file or '-' for stdin")
-    p_handoff_publish.add_argument("--producer-session", default=None)
-    p_handoff_publish.set_defaults(func=cmd_handoff_publish)
-    p_handoff_await = handoff_cli.add_parser("await", help="block until one newer evidence handoff exists")
-    p_handoff_await.add_argument("--topic", required=True)
-    p_handoff_await.add_argument("--after-seq", type=int, default=0)
-    p_handoff_await.add_argument("--timeout-sec", type=int, default=600)
-    p_handoff_await.set_defaults(func=cmd_handoff_await)
-    p_handoff_verify = handoff_cli.add_parser("verify", help="recompute and compare one handoff digest")
-    p_handoff_verify.add_argument("--path", required=True)
-    p_handoff_verify.add_argument("--expect-digest", default=None)
-    p_handoff_verify.set_defaults(func=cmd_handoff_verify)
-
     p_verify_approval = spec_sub.add_parser(
         "verify-approval", help="host-trusted verifierのevidenceからper-invocation receiptを生成する"
     )
@@ -19131,6 +19125,66 @@ def _build_parser():
     p_reconcile.add_argument("--expected-fencing-epoch", required=True, type=int)
     p_reconcile.add_argument("--json", action="store_true")
     p_reconcile.set_defaults(func=cmd_reconcile_provider_invocation, command_outcome_tracking=True)
+
+
+def _add_planning_parsers(subparsers) -> None:
+    sub = subparsers
+
+    p_planning = sub.add_parser("planning", help="policy v1 planning lifecycle transitions")
+    planning_sub = p_planning.add_subparsers(dest="planning_cmd", required=True)
+    p_adopt_core = planning_sub.add_parser("adopt-core", help="validate and adopt one core planning document")
+    p_adopt_core.add_argument("--input", required=True, help="canonical mission-plan/1 document regular file")
+    p_adopt_core.add_argument("--source-id", default=None, help="bounded source generation identifier")
+    p_adopt_core.add_argument("--json", action="store_true")
+    p_adopt_core.set_defaults(func=cmd_planning_adopt_core, command_outcome_tracking=True)
+    p_promote = planning_sub.add_parser("promote-provider-plan", help="promote one validated primary provider candidate")
+    p_promote.add_argument("--invocation-id", required=True)
+    p_promote.set_defaults(func=cmd_planning_promote_provider_plan, command_outcome_tracking=True)
+    p_reselect = planning_sub.add_parser("reselect", help="explicitly migrate active legacy planning state without raw copy")
+    p_reselect.set_defaults(func=cmd_planning_reselect, command_outcome_tracking=True)
+
+
+def _add_executor_handoff_parsers(subparsers) -> None:
+    sub = subparsers
+
+    p_handoff = sub.add_parser("executor-handoff", help="consume a prepared canonical executor handoff")
+    handoff_sub = p_handoff.add_subparsers(dest="executor_handoff_cmd", required=True)
+    p_begin = handoff_sub.add_parser("begin", help="atomically begin one prepared handoff")
+    p_begin.set_defaults(func=cmd_executor_handoff_begin, command_outcome_tracking=True)
+    p_verify_step = handoff_sub.add_parser("verify-step", help="revalidate plan before a step")
+    p_verify_step.add_argument("--step-id", required=True)
+    p_verify_step.set_defaults(func=cmd_executor_handoff_verify, command_outcome_tracking=True)
+    p_record_step = handoff_sub.add_parser("record-step", help="record one verified completed step")
+    p_record_step.add_argument("--step-id", required=True)
+    p_record_step.add_argument("--result", required=True, choices=["ok", "partial", "failed"])
+    p_record_step.set_defaults(func=cmd_executor_handoff_record, command_outcome_tracking=True)
+    p_complete = handoff_sub.add_parser("complete", help="consume handoff after all canonical steps")
+    p_complete.set_defaults(func=cmd_executor_handoff_complete, command_outcome_tracking=True)
+
+
+def _add_evidence_handoff_parsers(subparsers) -> None:
+    sub = subparsers
+
+    p_handoff = sub.add_parser("handoff", help="local evidence handoff sidecar contract")
+    handoff_cli = p_handoff.add_subparsers(dest="handoff_cmd", required=True)
+    p_handoff_publish = handoff_cli.add_parser("publish", help="atomic write one evidence handoff envelope")
+    p_handoff_publish.add_argument("--topic", required=True)
+    p_handoff_publish.add_argument("--input", required=True, help="payload JSON regular file or '-' for stdin")
+    p_handoff_publish.add_argument("--producer-session", default=None)
+    p_handoff_publish.set_defaults(func=cmd_handoff_publish)
+    p_handoff_await = handoff_cli.add_parser("await", help="block until one newer evidence handoff exists")
+    p_handoff_await.add_argument("--topic", required=True)
+    p_handoff_await.add_argument("--after-seq", type=int, default=0)
+    p_handoff_await.add_argument("--timeout-sec", type=int, default=600)
+    p_handoff_await.set_defaults(func=cmd_handoff_await)
+    p_handoff_verify = handoff_cli.add_parser("verify", help="recompute and compare one handoff digest")
+    p_handoff_verify.add_argument("--path", required=True)
+    p_handoff_verify.add_argument("--expect-digest", default=None)
+    p_handoff_verify.set_defaults(func=cmd_handoff_verify)
+
+
+def _add_archive_resolution_parsers(subparsers) -> None:
+    sub = subparsers
 
     p_resolve = sub.add_parser(
         "resolve-archive",
@@ -19178,6 +19232,24 @@ def _build_parser():
     )
     p_resolve.set_defaults(func=cmd_resolve_archive)
 
+
+def _build_parser():
+    parser = argparse.ArgumentParser(description="/mission skill state manager")
+    subparsers = parser.add_subparsers(dest="cmd", required=True)
+    _add_initialization_parsers(subparsers)
+    _add_queue_parsers(subparsers)
+    _add_hook_parsers(subparsers)
+    _add_state_access_parsers(subparsers)
+    _add_review_parsers(subparsers)
+    _add_lifecycle_parsers(subparsers)
+    _add_reporting_parsers(subparsers)
+    _add_activity_parsers(subparsers)
+    _add_artifact_parsers(subparsers)
+    _add_specialists_parsers(subparsers)
+    _add_planning_parsers(subparsers)
+    _add_executor_handoff_parsers(subparsers)
+    _add_evidence_handoff_parsers(subparsers)
+    _add_archive_resolution_parsers(subparsers)
     return parser
 
 

@@ -25,7 +25,6 @@
 {"path":"skills/mission/bin/mission-state.py","function":"_authoritative_snapshot_for_state","rules":{"call.non-allowlisted":1,"control.branch":1,"logic.compare":1}}
 {"path":"skills/mission/bin/mission-state.py","function":"_bounded_purpose_required","rules":{"call.non-allowlisted":3,"control.branch":1,"logic.arithmetic":1,"logic.boolean":1,"logic.compare":1}}
 {"path":"skills/mission/bin/mission-state.py","function":"_budget_pressure","rules":{"call.non-allowlisted":12,"control.branch":8,"io.direct":2,"logic.arithmetic":9,"logic.boolean":3,"logic.business-container":1,"logic.compare":6,"logic.threshold-literal":6,"state.raw-access":2,"time.policy":1}}
-{"path":"skills/mission/bin/mission-state.py","function":"_build_parser","rules":{"logic.compare":1,"logic.comprehension":1}}
 {"path":"skills/mission/bin/mission-state.py","function":"_build_worktree_archive_staging","rules":{"call.non-allowlisted":18,"control.branch":3,"control.loop":1,"io.direct":2,"logic.arithmetic":2,"logic.business-container":4,"logic.compare":3,"state.mutation":2,"state.raw-access":7}}
 {"path":"skills/mission/bin/mission-state.py","function":"_candidate_profiles","rules":{"call.non-allowlisted":3,"control.branch":1,"logic.boolean":1}}
 {"path":"skills/mission/bin/mission-state.py","function":"_candidate_source_rank","rules":{"call.non-allowlisted":6,"control.branch":5,"logic.boolean":1,"logic.threshold-literal":6}}
