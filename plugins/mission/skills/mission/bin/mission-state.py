@@ -65,9 +65,7 @@ if str(LIB_DIR) not in sys.path:
 from mission_common import (  # noqa: E402
     HALT_CATEGORIES,
     PREPARATION_ONLY_MARKERS,
-    SESSION_ROLES,
     SPECIALIST_SELECTION_CHECKPOINT_REQUIRED_AT,
-    TERMINAL_OUTCOMES,
     classify_state as _classify,
     correlation_id,
     opaque_token,
@@ -152,6 +150,10 @@ from mission_application.next_action import (  # noqa: E402
     NextActionServices,
     _unclosed_optional_specialist_skills,
     derive_next_action as run_derive_next_action,
+)
+from mission_projection.stats import (  # noqa: E402
+    StatsProjectionInput,
+    project_stats,
 )
 from mission_application.ports import AuditMetadata, ExecutionRequest  # noqa: E402
 from mission_application.review import (  # noqa: E402
@@ -362,7 +364,6 @@ from command_outcomes import (  # noqa: E402
     append_state_record as append_command_outcome_state,
     iter_records as iter_command_outcome_records,
     observe_state_only as observe_state_command_outcomes,
-    summarize as summarize_command_outcomes,
     summarize_sessions as summarize_command_outcome_sessions,
     validate_observation as validate_command_outcome_observation,
     valid_identifier as _valid_command_outcome_identifier,
@@ -17222,58 +17223,6 @@ def _matches_period(document: dict, since: str | None, until: str | None) -> boo
     return True
 
 
-def _median(xs: list) -> float | None:
-    """外れ値に頑健な中央値。空なら None."""
-    if not xs:
-        return None
-    s = sorted(xs)
-    m = len(s) // 2
-    return s[m] if len(s) % 2 else (s[m - 1] + s[m]) / 2
-
-
-def _nearest_rank_percentile(values: list[int], percentile: float) -> int | None:
-    """Return an observed integer using the nearest-rank percentile method."""
-    if not values:
-        return None
-    ordered = sorted(values)
-    rank = max(1, math.ceil(percentile * len(ordered)))
-    return ordered[rank - 1]
-
-
-def _reviewer_output_stats(states: list[dict]) -> dict:
-    """Aggregate valid per-reviewer output observations across session states."""
-    records = []
-    for state in states:
-        state_records = state.get("reviewer_output_records", [])
-        if not isinstance(state_records, list):
-            continue
-        for record in state_records:
-            if not isinstance(record, dict):
-                continue
-            prose_bytes = record.get("prose_bytes")
-            prose_ratio = record.get("prose_ratio")
-            if (
-                not isinstance(prose_bytes, int)
-                or isinstance(prose_bytes, bool)
-                or prose_bytes < 0
-                or not isinstance(prose_ratio, (int, float))
-                or isinstance(prose_ratio, bool)
-                or not 0 <= float(prose_ratio) <= 1
-            ):
-                continue
-            records.append((prose_bytes, float(prose_ratio)))
-    prose_values = [prose_bytes for prose_bytes, _ratio in records]
-    return {
-        "records": len(records),
-        "oversize_warns": sum(
-            1 for prose_bytes, prose_ratio in records
-            if prose_bytes > REVIEW_PROSE_BYTES_WARN or prose_ratio > REVIEW_PROSE_RATIO_WARN
-        ),
-        "prose_bytes_p50": _nearest_rank_percentile(prose_values, 0.5),
-        "prose_bytes_p90": _nearest_rank_percentile(prose_values, 0.9),
-    }
-
-
 def _state_read_error(path: Path) -> dict[str, str]:
     """Return stable aggregate metadata without exposing reader internals."""
     return {
@@ -17422,132 +17371,6 @@ def _is_valid_composite(c) -> bool:
     return _finite_score(c)
 
 
-def _latest_composite(history: list) -> float | None:
-    """score_history から有効な composite を持つ直近エントリの composite を返す.
-
-    末尾に進捗ノート (composite 欠損) が混入していても直近の採点値を拾う。
-    """
-    for entry in reversed(history):
-        c = entry.get("composite")
-        if _is_valid_composite(c):
-            return c
-    return None
-
-
-def _build_agent_summary(states: list[dict], classes: list[str] | None = None) -> dict:
-    """agent 別 (claude-code/codex/cli/unknown) に total/pass/halt/incomplete を集計する。
-
-    classes (各 snapshot の分類) を渡すと再計算を避ける (_aggregate と共有)。
-    """
-    if classes is None:
-        classes = [
-            _authoritative_snapshot_for_state(state).classification
-            for state in states
-        ]
-    by_agent: dict = {}
-    for s, cls in zip(states, classes):
-        ag = s.get("agent") or "unknown"
-        b = by_agent.setdefault(ag, {"total": 0, "pass": 0, "halt": 0, "incomplete": 0, "abandoned": 0})
-        b["total"] += 1
-        b[cls] += 1
-    return by_agent
-
-
-def _build_breakdown(states: list[dict], classes: list[str], keyfn) -> dict:
-    """任意キー (project/complexity) 別に total/pass/halt/incomplete/abandoned を集計する."""
-    out: dict = {}
-    for s, cls in zip(states, classes):
-        k = keyfn(s) or "unknown"
-        b = out.setdefault(k, {"total": 0, "pass": 0, "halt": 0, "incomplete": 0, "abandoned": 0})
-        b["total"] += 1
-        b[cls] = b.get(cls, 0) + 1
-    return out
-
-
-def _build_halt_category_breakdown(states: list[dict], classes: list[str]) -> dict:
-    """#190: halt したセッションを halt_category 別に集計する (completed 風の自由文 halt と
-    障害 halt を区別可能にする)。halt_category 未記録の historical state は 'unknown' に落ちる。"""
-    out: dict = {}
-    for s, cls in zip(states, classes):
-        if cls != "halt":
-            continue
-        if "halt_category" not in s or s.get("halt_category") == "":
-            cat = "unknown"
-        elif isinstance(s.get("halt_category"), str):
-            cat = s["halt_category"]
-        else:
-            cat = json.dumps(
-                s.get("halt_category"),
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-        out[cat] = out.get(cat, 0) + 1
-    return dict(sorted(out.items()))
-
-
-def _build_iteration_by_key(states: list[dict], keyfn) -> dict:
-    """任意キー別に iteration ヒストグラムをネストして返す。
-
-    バケット規則は iteration_histogram と同じ:
-      iteration 0-3 → そのまま文字列、4 以上 → "4+"、非整数 → "unknown"
-    """
-    out: dict = {}
-    for s in states:
-        k = keyfn(s) or "unknown"
-        it = s.get("iteration", 0)
-        if isinstance(it, int) and it <= 3:
-            bucket = str(it)
-        elif isinstance(it, int):
-            bucket = "4+"
-        else:
-            bucket = "unknown"
-        tier_hist = out.setdefault(k, {})
-        tier_hist[bucket] = tier_hist.get(bucket, 0) + 1
-    return out
-
-
-def _phase_duration_totals(states: list[dict]) -> dict:
-    totals: dict = {}
-    for state in states:
-        durations = state.get("phase_durations_sec")
-        if not isinstance(durations, dict):
-            continue
-        for phase, sec in durations.items():
-            if not isinstance(phase, str):
-                continue
-            value = _finite_nonnegative_phase_seconds(sec)
-            if value is None:
-                continue
-            updated = _finite_nonnegative_phase_seconds(totals.get(phase, 0.0) + value)
-            if updated is not None:
-                totals[phase] = updated
-    return dict(sorted(totals.items()))
-
-
-def _artifact_lint_counts(states: list[dict]) -> dict:
-    counts = {
-        "empty_section": 0,
-        "stub_forward_reference": 0,
-        "clean": 0,
-    }
-    for state in states:
-        lint = state.get("artifact_lint")
-        if not isinstance(lint, list):
-            continue
-        if not lint:
-            counts["clean"] += 1
-            continue
-        for finding in lint:
-            if not isinstance(finding, dict):
-                continue
-            if finding.get("kind") == "empty-section":
-                counts["empty_section"] += 1
-            elif finding.get("kind") == "stub-forward-reference":
-                counts["stub_forward_reference"] += 1
-    return counts
-
-
 def _score_provenance_counts(states: list[dict]) -> dict[str, int]:
     counts = {"verified": 0, "legacy-unverifiable": 0, "invalid": 0}
     for document in states:
@@ -17619,207 +17442,51 @@ def _aggregate(
     states: list[dict], duplicate_state_group_count: int = 0,
     *, observation_now: datetime | None = None, state_read_error_count: int = 0,
 ) -> dict:
-    n = len(states)
     snapshots = [_authoritative_snapshot_for_state(state) for state in states]
     pass_rate_summary = summarize_authoritative_pass_rate_population(
         snapshots,
         now=observation_now,
         stale_after_sec=_stale_active_seconds(),
     )
-    if n == 0:
-        return {
-            "total_sessions": 0, "pass_count": 0, "halt_count": 0,
-            "state_read_error_count": state_read_error_count,
-            "duplicate_state_group_count": duplicate_state_group_count,
-            "incomplete_count": 0, "abandoned_count": 0,
-            "active_count": 0, "active_no_score_count": 0, "stale_count": 0,
-            "raw_pass_rate_numerator": 0, "raw_pass_rate_denominator": 0,
-            "raw_pass_rate": None,
-            "completed_pass_rate_numerator": 0, "completed_pass_rate_denominator": 0,
-            "completed_pass_rate": None,
-            "terminal_outcome_counts": {name: 0 for name in TERMINAL_OUTCOMES},
-            "terminal_count": 0, "non_terminal_count": 0,
-            "role_counts": {name: 0 for name in SESSION_ROLES},
-            "implementer_pass_rate_numerator": 0,
-            "implementer_pass_rate_denominator": 0,
-            "implementer_pass_rate": None,
-            "evidence_completion_rate_numerator": 0,
-            "evidence_completion_rate_denominator": 0,
-            "evidence_completion_rate": None,
-            # Deprecated compatibility aliases: stats historically reported raw quality.
-            "pass_rate_numerator": 0, "pass_rate_denominator": 0, "pass_rate": None,
-            "forced_pass_count": 0, "forced_pass_rate": None,
-            "ungated_pass_count": 0, "ungated_pass_rate": None,
-            "avg_iterations": None, "avg_final_composite": None,
-            "avg_session_duration_sec": None,
-            "median_session_duration_sec": None,
-            "phase_duration_totals_sec": {},
-            "phase_duration_avg_sec": {},
-            "by_agent": {},
-            "by_project": {}, "by_complexity": {}, "iteration_histogram": {},
-            "by_review_tier": {}, "iteration_by_review_tier": {},
-            "by_cli_version": {},
-            "by_halt_category": {},
-            "parallel_review_counts": {"true": 0, "false": 0, "unknown": 0},
-            "artifact_lint_counts": _artifact_lint_counts([]),
-            "artifact_coverage": summarize_artifact_coverage(
-                [], terminal_outcomes=[]
-            ),
-            "bounded_context_counts": {
-                "expected_bounded": 0,
-                "manifest_generated": 0,
-                "fallback_full": 0,
-            },
-            "reviewer_output_stats": _reviewer_output_stats([]),
-            "score_provenance_counts": _score_provenance_counts([]),
-            "command_outcome_counts": summarize_command_outcomes([]),
-            "activity_timing": summarize_activity_states(
-                [], phases=[], session_roles=[]
-            ),
-            "planning_provider_kpis": reduce_planning_provider_kpis([], population_kind="observed"),
-            "failure_ledger_counts": failure_ledger_counts([]),
-            "iteration_recovery": reduce_iteration_recovery([]),
-        }
-    # AuthoritativeSnapshot の分類を集計全体で共有する。
-    classes = [snapshot.classification for snapshot in snapshots]
-    pass_count = classes.count("pass")
-    halt_count = pass_rate_summary["halt_count"]
-    incomplete_count = pass_rate_summary["incomplete_count"]
-    abandoned_count = pass_rate_summary["abandoned_count"]
-    # 改善1: force-pass (品質ゲート未通過の合格) を集計し可視化する
-    forced_pass_count = sum(
-        1 for state, snapshot in zip(states, snapshots)
-        if snapshot.passes and state.get("passes_forced")
-    )
-    # 採点エントリ無しで合格 = 品質ゲート未通過 (set 直叩き or 旧版)。
-    # force-pass (理由記録あり) は除外し、無記録バイパスのみ数える。
-    ungated_pass_count = sum(
-        1 for state, snapshot in zip(states, snapshots)
-        if snapshot.passes
-        and _latest_composite(state.get("score_history", [])) is None
-        and not state.get("passes_forced")
-        and not state.get("force_reason")  # 旧版 force-pass (passes_forced 未記録) も除外
-    )
-    # #338: reviewer 並列実行の観測集計 (last_parallel_execution 記録済み session のみ)
-    parallel_review_counts = {"true": 0, "false": 0, "unknown": 0}
-    for s in states:
-        lpe = s.get("last_parallel_execution")
-        if lpe is True:
-            parallel_review_counts["true"] += 1
-        elif lpe is False:
-            parallel_review_counts["false"] += 1
-        elif lpe == "unknown":
-            parallel_review_counts["unknown"] += 1
-    bounded_context_counts = {
-        "expected_bounded": 0,
-        "manifest_generated": 0,
-        "fallback_full": 0,
-    }
-    for state in states:
-        iteration = state.get("iteration", 1)
-        expected_bounded = (
-            isinstance(iteration, int)
-            and _expected_context_mode(state, iteration) == "bounded"
-        )
-        generated = _context_manifest_generated(state, iteration)
-        if expected_bounded:
-            bounded_context_counts["expected_bounded"] += 1
-        if generated:
-            bounded_context_counts["manifest_generated"] += 1
-        if expected_bounded and not generated:
-            bounded_context_counts["fallback_full"] += 1
-    iterations = [s.get("iteration", 0) for s in states]
-    # 改善3b: composite を持つ直近エントリを final とする (末尾の進捗ノート混入に耐える)
-    finals = [c for c in (_latest_composite(s.get("score_history", [])) for s in states) if c is not None]
     durations = [d for d in (_duration_sec(s) for s in states) if d is not None and d >= 0]
-    # #2 (2026-06-13): agent 別の成績内訳 (起動元ごとの PASS 率可視化)。classes を共有して再計算回避。
-    by_agent = _build_agent_summary(states, classes)
-    # #6 (2026-06-15): project/complexity 別内訳と iteration ヒストグラム
-    by_project = _build_breakdown(states, classes, lambda s: os.path.basename((s.get("project_root") or "unknown").rstrip("/")) or "unknown")
-    by_complexity = _build_breakdown(states, classes, lambda s: s.get("complexity") or "Unknown")
-    # #180: review_tier 別内訳 (旧 state で review_tier フィールドなし → "unknown")
-    by_review_tier = _build_breakdown(states, classes, lambda s: s.get("review_tier") or "unknown")
-    iteration_by_review_tier = _build_iteration_by_key(states, lambda s: s.get("review_tier") or "unknown")
-    # #186: cli_version 別内訳 (旧 state で cli_version フィールドなし → "unknown")
-    by_cli_version = _build_breakdown(states, classes, lambda s: s.get("cli_version") or "unknown")
-    by_halt_category = _build_halt_category_breakdown(states, classes)  # #190
-    phase_totals = _phase_duration_totals(states)
-    activity_timing = summarize_activity_states(
-        states,
-        phases=[snapshot.phase for snapshot in snapshots],
-        session_roles=[snapshot.session_role for snapshot in snapshots],
+    bounded_context_observations = [
+        (
+            isinstance(state.get("iteration", 1), int)
+            and _expected_context_mode(state, state.get("iteration", 1))
+            == "bounded",
+            _context_manifest_generated(state, state.get("iteration", 1)),
+        )
+        for state in states
+    ]
+    return project_stats(
+        StatsProjectionInput(
+            states=states,
+            snapshots=snapshots,
+            pass_rate_summary=pass_rate_summary,
+            duplicate_state_group_count=duplicate_state_group_count,
+            state_read_error_count=state_read_error_count,
+            bounded_context_observations=bounded_context_observations,
+            score_provenance_counts=_score_provenance_counts(states),
+            command_outcome_counts=_command_outcome_counts(states),
+            duration_observations=durations,
+            artifact_coverage=summarize_artifact_coverage(
+                states,
+                terminal_outcomes=[
+                    snapshot.artifact_terminal_outcome for snapshot in snapshots
+                ],
+            ),
+            activity_timing=summarize_activity_states(
+                states,
+                phases=[snapshot.phase for snapshot in snapshots],
+                session_roles=[snapshot.session_role for snapshot in snapshots],
+            ),
+            planning_provider_kpis=reduce_planning_provider_kpis(
+                states, population_kind="observed"
+            ),
+            failure_ledger_counts=failure_ledger_counts(states),
+            iteration_recovery=reduce_iteration_recovery(states),
+        )
     )
-    iteration_histogram: dict = {}
-    for _it in iterations:
-        _k = str(_it) if isinstance(_it, int) and _it <= 3 else ("4+" if isinstance(_it, int) else "unknown")
-        iteration_histogram[_k] = iteration_histogram.get(_k, 0) + 1
-    return {
-        "total_sessions": n,
-        "state_read_error_count": state_read_error_count,
-        "duplicate_state_group_count": duplicate_state_group_count,
-        "pass_count": pass_count,
-        "halt_count": halt_count,
-        "incomplete_count": incomplete_count,
-        "abandoned_count": abandoned_count,
-        "active_count": pass_rate_summary["active_count"],
-        "active_no_score_count": pass_rate_summary["active_no_score_count"],
-        "stale_count": pass_rate_summary["stale_count"],
-        "raw_pass_rate_numerator": pass_rate_summary["raw_pass_rate_numerator"],
-        "raw_pass_rate_denominator": pass_rate_summary["raw_pass_rate_denominator"],
-        "raw_pass_rate": pass_rate_summary["raw_pass_rate"],
-        "completed_pass_rate_numerator": pass_rate_summary["completed_pass_rate_numerator"],
-        "completed_pass_rate_denominator": pass_rate_summary["completed_pass_rate_denominator"],
-        "completed_pass_rate": pass_rate_summary["completed_pass_rate"],
-        "terminal_outcome_counts": pass_rate_summary["terminal_outcome_counts"],
-        "terminal_count": pass_rate_summary["terminal_count"],
-        "non_terminal_count": pass_rate_summary["non_terminal_count"],
-        "role_counts": pass_rate_summary["role_counts"],
-        "implementer_pass_rate_numerator": pass_rate_summary["implementer_pass_rate_numerator"],
-        "implementer_pass_rate_denominator": pass_rate_summary["implementer_pass_rate_denominator"],
-        "implementer_pass_rate": pass_rate_summary["implementer_pass_rate"],
-        "evidence_completion_rate_numerator": pass_rate_summary["evidence_completion_rate_numerator"],
-        "evidence_completion_rate_denominator": pass_rate_summary["evidence_completion_rate_denominator"],
-        "evidence_completion_rate": pass_rate_summary["evidence_completion_rate"],
-        # Deprecated compatibility aliases: stats historically reported raw quality.
-        "pass_rate_numerator": pass_rate_summary["raw_pass_rate_numerator"],
-        "pass_rate_denominator": pass_rate_summary["raw_pass_rate_denominator"],
-        "pass_rate": pass_rate_summary["raw_pass_rate"],
-        "forced_pass_count": forced_pass_count,
-        "parallel_review_counts": parallel_review_counts,
-        "artifact_lint_counts": _artifact_lint_counts(states),
-        "artifact_coverage": summarize_artifact_coverage(
-            states,
-            terminal_outcomes=[
-                snapshot.artifact_terminal_outcome for snapshot in snapshots
-            ],
-        ),
-        "bounded_context_counts": bounded_context_counts,
-        "reviewer_output_stats": _reviewer_output_stats(states),
-        "score_provenance_counts": _score_provenance_counts(states),
-        "command_outcome_counts": _command_outcome_counts(states),
-        "forced_pass_rate": forced_pass_count / pass_count if pass_count else None,
-        "ungated_pass_count": ungated_pass_count,
-        "ungated_pass_rate": ungated_pass_count / pass_count if pass_count else None,
-        "avg_iterations": sum(iterations) / n,
-        "avg_final_composite": sum(finals) / len(finals) if finals else None,
-        "avg_session_duration_sec": sum(durations) / len(durations) if durations else None,
-        # median は放置/resume 跨ぎの外れ値に頑健 (avg は max 8000min 級の忘れ session で歪む)
-        "median_session_duration_sec": _median(durations),
-        "phase_duration_totals_sec": phase_totals,
-        "phase_duration_avg_sec": {phase: total / n for phase, total in phase_totals.items()},
-        "by_agent": by_agent,
-        "by_project": by_project,
-        "by_complexity": by_complexity,
-        "iteration_histogram": iteration_histogram,
-        "by_review_tier": by_review_tier,
-        "iteration_by_review_tier": iteration_by_review_tier,
-        "by_cli_version": by_cli_version,
-        "by_halt_category": by_halt_category,
-        "activity_timing": activity_timing,
-        "planning_provider_kpis": reduce_planning_provider_kpis(states, population_kind="observed"),
-        "failure_ledger_counts": failure_ledger_counts(states),
-        "iteration_recovery": reduce_iteration_recovery(states),
-    }
 
 
 def _pct_detail(rate) -> str:
