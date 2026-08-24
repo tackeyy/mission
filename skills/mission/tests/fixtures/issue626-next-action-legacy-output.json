@@ -1,0 +1,335 @@
+{
+  "corpus.guidance_branches.awaiting_user": {
+    "command_hint": "",
+    "next_action": "await-user",
+    "summary": "ユーザー回答待ち (awaiting_user=true)。回答を得るまで不可逆操作に進まない"
+  },
+  "corpus.guidance_branches.critic_scope": {
+    "command_hint": "mission-state.py set critic_has_new_scope='false'  # または 'true'",
+    "details": {
+      "iteration": 2
+    },
+    "next_action": "record-critic-scope",
+    "summary": "iteration 2: reviewer 起動前に critic の実行計画テーブルから scope 判定を state へ記録する。全ステップの対応 finding が既存 finding id のみなら false、new を含むなら true (#309)"
+  },
+  "corpus.guidance_branches.inactive": {
+    "command_hint": "mission-state.py refresh-pid",
+    "next_action": "resume",
+    "summary": "loop_active=false だが未合格・halt 理由なし。refresh-pid で再活性化してループを再開する"
+  },
+  "corpus.guidance_branches.iteration_zero_scoring": {
+    "command_hint": "Step 1 (reviewer ごと): mission-state.py review-import --iteration 1 --stdin; 返却 JSON の review_evidence_ref.path を保持する。 Step 2: mission-state.py review-finalize --iteration 1 --input-ref <review_evidence_ref.path> (全 reviewer 分だけ --input-ref を反復) --min-reviewers 2。 Step 3: mission-state.py mark-passes。",
+    "next_action": "aggregate-reviews",
+    "summary": "iteration 1: reviewer の mission-review/1 JSON を review-import --stdin で state-owned evidence にし、review-finalize --input-ref で集計・記録する。--force は使わない。"
+  },
+  "corpus.guidance_branches.provider_primary_binding_missing": {
+    "command_hint": "plan を artifact に記載 → mission-state.py advance --phase executing --activity active:implementation",
+    "command_sequence": [
+      "plan を artifact に記載 (inline #339)",
+      "mission-state.py advance --phase executing --activity active:implementation",
+      "Skill: mission-executor",
+      "mission-state.py advance --phase reviewing --activity reviewer-wait:review-response",
+      "Skill: mission-reviewer x2 (1 message, parallel)",
+      "mission-state.py review-import --iteration <i> --stdin (reviewer ごとに実行し review_evidence_ref.path を保持)",
+      "mission-state.py review-finalize --iteration <i> --input-ref <review_evidence_ref.path> (全 reviewer 分を反復) --min-reviewers 2",
+      "mission-state.py closeout"
+    ],
+    "details": {
+      "plan_mode": "inline"
+    },
+    "next_action": "plan-inline",
+    "summary": "iteration 1 (Standard): mission-planner を起動せず、この turn 内で bounded plan (steps + 依存関係 + 完了条件) を artifact に書く (#339)。計画の成果物要件は subagent 経路と同一"
+  },
+  "corpus.guidance_branches.simple_goal_route": {
+    "command_hint": "mission-state.py mark-halt --reason 'routed-to-goal (#325)' --category routed-goal → goal 契約の 5 見出し (Goal / Result / Evidence / Assumptions / Stop Condition) でタスクを直接完遂し、最終報告に goal へルーティングした旨を明記する。mission の pass は主張しない。mission 機構が必要なら --force-mission で再 init する。",
+    "details": {
+      "complexity": "Simple",
+      "goal_dispatch_effective": "inline",
+      "goal_dispatch_host": "unknown",
+      "goal_dispatch_requested": "inline",
+      "goal_dispatch_source": "default:inline",
+      "route": "goal"
+    },
+    "next_action": "route-to-goal",
+    "summary": "Simple + リスクシグナルなし: goal 契約の 5 見出し (Goal / Result / Evidence / Assumptions / Stop Condition) でタスクを直接完遂し、最終報告に goal へルーティングした旨を明記する。mission の pass は主張しない。mission 機構が必要なら --force-mission で再 init する。state を routed-goal で閉じ (pass-rate 対象外)、最終報告に routing を明記する。mission 機構が必要なら --force-mission で再 init (#325)"
+  },
+  "corpus.guidance_branches.simple_host_observation": {
+    "command_hint": "mission-state.py mark-halt --reason 'routed-to-goal (#325)' --category routed-goal → goal 契約の 5 見出し (Goal / Result / Evidence / Assumptions / Stop Condition) でタスクを直接完遂し、最終報告に goal へルーティングした旨を明記する。mission の pass は主張しない。mission 機構が必要なら --force-mission で再 init する。",
+    "details": {
+      "complexity": "Simple",
+      "goal_dispatch_effective": "inline",
+      "goal_dispatch_fallback_reason": "host-native unavailable: host detection returned unknown",
+      "goal_dispatch_host": "unknown",
+      "goal_dispatch_requested": "host-native",
+      "goal_dispatch_source": "mission-instruction",
+      "route": "goal"
+    },
+    "next_action": "route-to-goal",
+    "summary": "Simple + リスクシグナルなし: goal 契約の 5 見出し (Goal / Result / Evidence / Assumptions / Stop Condition) でタスクを直接完遂し、最終報告に goal へルーティングした旨を明記する。mission の pass は主張しない。mission 機構が必要なら --force-mission で再 init する。state を routed-goal で閉じ (pass-rate 対象外)、最終報告に routing を明記する。mission 機構が必要なら --force-mission で再 init (#325)"
+  },
+  "corpus.guidance_branches.stagnation": {
+    "command_hint": "mission-state.py mark-halt --reason \"<停滞理由>\"",
+    "next_action": "consider-halt",
+    "summary": "stagnation_count=3 (3 連続でスコア停滞)。アプローチを変えても改善しない場合は mark-halt で停止し状況を報告する"
+  },
+  "corpus.handoff_consumed": {
+    "command_hint": "Skill: mission-executor → mission-state.py advance --phase reviewing --activity reviewer-wait:review-response",
+    "command_sequence": [
+      "Skill: mission-executor",
+      "mission-state.py advance --phase reviewing --activity reviewer-wait:review-response",
+      "Skill: mission-reviewer x2 (1 message, parallel)",
+      "mission-state.py review-import --iteration <i> --stdin (reviewer ごとに実行し review_evidence_ref.path を保持)",
+      "mission-state.py review-finalize --iteration <i> --input-ref <review_evidence_ref.path> (全 reviewer 分を反復) --min-reviewers 2",
+      "mission-state.py closeout"
+    ],
+    "next_action": "run-executor",
+    "summary": "iteration 1: mission-executor で計画を実行する (完了後 advance --phase reviewing。10分超は progress update)"
+  },
+  "corpus.handoff_consuming": {
+    "command_hint": "Skill: mission-executor → mission-state.py advance --phase reviewing --activity reviewer-wait:review-response",
+    "command_sequence": [
+      "Skill: mission-executor",
+      "mission-state.py advance --phase reviewing --activity reviewer-wait:review-response",
+      "Skill: mission-reviewer x2 (1 message, parallel)",
+      "mission-state.py review-import --iteration <i> --stdin (reviewer ごとに実行し review_evidence_ref.path を保持)",
+      "mission-state.py review-finalize --iteration <i> --input-ref <review_evidence_ref.path> (全 reviewer 分を反復) --min-reviewers 2",
+      "mission-state.py closeout"
+    ],
+    "next_action": "run-executor",
+    "summary": "iteration 1: mission-executor で計画を実行する (完了後 advance --phase reviewing。10分超は progress update)"
+  },
+  "corpus.handoff_prepared": {
+    "command_hint": "Skill: mission-executor → mission-state.py advance --phase reviewing --activity reviewer-wait:review-response",
+    "command_sequence": [
+      "Skill: mission-executor",
+      "mission-state.py advance --phase reviewing --activity reviewer-wait:review-response",
+      "Skill: mission-reviewer x2 (1 message, parallel)",
+      "mission-state.py review-import --iteration <i> --stdin (reviewer ごとに実行し review_evidence_ref.path を保持)",
+      "mission-state.py review-finalize --iteration <i> --input-ref <review_evidence_ref.path> (全 reviewer 分を反復) --min-reviewers 2",
+      "mission-state.py closeout"
+    ],
+    "next_action": "run-executor",
+    "summary": "iteration 1: mission-executor で計画を実行する (完了後 advance --phase reviewing。10分超は progress update)"
+  },
+  "corpus.handoff_rejected": {
+    "command_hint": "Skill: mission-executor → mission-state.py advance --phase reviewing --activity reviewer-wait:review-response",
+    "command_sequence": [
+      "Skill: mission-executor",
+      "mission-state.py advance --phase reviewing --activity reviewer-wait:review-response",
+      "Skill: mission-reviewer x2 (1 message, parallel)",
+      "mission-state.py review-import --iteration <i> --stdin (reviewer ごとに実行し review_evidence_ref.path を保持)",
+      "mission-state.py review-finalize --iteration <i> --input-ref <review_evidence_ref.path> (全 reviewer 分を反復) --min-reviewers 2",
+      "mission-state.py closeout"
+    ],
+    "next_action": "run-executor",
+    "summary": "iteration 1: mission-executor で計画を実行する (完了後 advance --phase reviewing。10分超は progress update)"
+  },
+  "corpus.lease_acquired": {
+    "command_hint": "plan を artifact に記載 → mission-state.py planning adopt-core --input <plan.json> → mission-state.py advance --phase executing --activity active:implementation",
+    "command_sequence": [
+      "plan を artifact に記載 (inline #339)",
+      "mission-state.py planning adopt-core --input <plan.json>",
+      "mission-state.py advance --phase executing --activity active:implementation",
+      "Skill: mission-executor",
+      "mission-state.py advance --phase reviewing --activity reviewer-wait:review-response",
+      "Skill: mission-reviewer x2 (1 message, parallel)",
+      "mission-state.py review-import --iteration <i> --stdin (reviewer ごとに実行し review_evidence_ref.path を保持)",
+      "mission-state.py review-finalize --iteration <i> --input-ref <review_evidence_ref.path> (全 reviewer 分を反復) --min-reviewers 2",
+      "mission-state.py closeout"
+    ],
+    "details": {
+      "plan_mode": "inline"
+    },
+    "next_action": "plan-inline",
+    "summary": "iteration 1 (Standard): mission-planner を起動せず、この turn 内で bounded plan (steps + 依存関係 + 完了条件) を artifact に書く (#339)。計画の成果物要件は subagent 経路と同一"
+  },
+  "corpus.lease_taken_over": {
+    "command_hint": "Skill: mission-reviewer x2 (1 message)",
+    "command_sequence": [
+      "Skill: mission-reviewer x2 (1 message, parallel)",
+      "mission-state.py review-import --iteration <i> --stdin (reviewer ごとに実行し review_evidence_ref.path を保持)",
+      "mission-state.py review-finalize --iteration <i> --input-ref <review_evidence_ref.path> (全 reviewer 分を反復) --min-reviewers 2",
+      "mission-state.py closeout"
+    ],
+    "details": {
+      "context_mode": "full",
+      "parallel_spawn_required": true,
+      "reviewer_count": 2
+    },
+    "next_action": "run-reviewers",
+    "summary": "iteration 1: mission-reviewer を 2 名、単一メッセージで並列起動する (直列起動は規律違反。直列は Standard で約 2-3 分の無駄を実測 #338)"
+  },
+  "corpus.manual_import_bound_score": {
+    "command_hint": "mission-state.py mark-passes",
+    "details": {},
+    "next_action": "mark-passes",
+    "summary": "iteration 1 の採点は記録済み。mark-passes で threshold gate 判定する (reject なら mission-critic → 次 iteration)"
+  },
+  "corpus.phases.done": {
+    "command_hint": "Step 1 (reviewer ごと): mission-state.py review-import --iteration 1 --stdin; 返却 JSON の review_evidence_ref.path を保持する。 Step 2: mission-state.py review-finalize --iteration 1 --input-ref <review_evidence_ref.path> (全 reviewer 分だけ --input-ref を反復) --min-reviewers 2。 Step 3: mission-state.py mark-passes。",
+    "next_action": "aggregate-reviews",
+    "summary": "iteration 1: reviewer の mission-review/1 JSON を review-import --stdin で state-owned evidence にし、review-finalize --input-ref で集計・記録する。--force は使わない。"
+  },
+  "corpus.phases.executing": {
+    "command_hint": "Skill: mission-executor → mission-state.py advance --phase reviewing --activity reviewer-wait:review-response",
+    "command_sequence": [
+      "Skill: mission-executor",
+      "mission-state.py advance --phase reviewing --activity reviewer-wait:review-response",
+      "Skill: mission-reviewer x2 (1 message, parallel)",
+      "mission-state.py review-import --iteration <i> --stdin (reviewer ごとに実行し review_evidence_ref.path を保持)",
+      "mission-state.py review-finalize --iteration <i> --input-ref <review_evidence_ref.path> (全 reviewer 分を反復) --min-reviewers 2",
+      "mission-state.py closeout"
+    ],
+    "next_action": "run-executor",
+    "summary": "iteration 1: mission-executor で計画を実行する (完了後 advance --phase reviewing。10分超は progress update)"
+  },
+  "corpus.phases.halted": {
+    "command_hint": "Step 1 (reviewer ごと): mission-state.py review-import --iteration 1 --stdin; 返却 JSON の review_evidence_ref.path を保持する。 Step 2: mission-state.py review-finalize --iteration 1 --input-ref <review_evidence_ref.path> (全 reviewer 分だけ --input-ref を反復) --min-reviewers 2。 Step 3: mission-state.py mark-passes。",
+    "next_action": "aggregate-reviews",
+    "summary": "iteration 1: reviewer の mission-review/1 JSON を review-import --stdin で state-owned evidence にし、review-finalize --input-ref で集計・記録する。--force は使わない。"
+  },
+  "corpus.phases.planning": {
+    "command_hint": "plan を artifact に記載 → mission-state.py planning adopt-core --input <plan.json> → mission-state.py advance --phase executing --activity active:implementation",
+    "command_sequence": [
+      "plan を artifact に記載 (inline #339)",
+      "mission-state.py planning adopt-core --input <plan.json>",
+      "mission-state.py advance --phase executing --activity active:implementation",
+      "Skill: mission-executor",
+      "mission-state.py advance --phase reviewing --activity reviewer-wait:review-response",
+      "Skill: mission-reviewer x2 (1 message, parallel)",
+      "mission-state.py review-import --iteration <i> --stdin (reviewer ごとに実行し review_evidence_ref.path を保持)",
+      "mission-state.py review-finalize --iteration <i> --input-ref <review_evidence_ref.path> (全 reviewer 分を反復) --min-reviewers 2",
+      "mission-state.py closeout"
+    ],
+    "details": {
+      "plan_mode": "inline"
+    },
+    "next_action": "plan-inline",
+    "summary": "iteration 1 (Standard): mission-planner を起動せず、この turn 内で bounded plan (steps + 依存関係 + 完了条件) を artifact に書く (#339)。計画の成果物要件は subagent 経路と同一"
+  },
+  "corpus.phases.reviewing": {
+    "command_hint": "Skill: mission-reviewer x2 (1 message)",
+    "command_sequence": [
+      "Skill: mission-reviewer x2 (1 message, parallel)",
+      "mission-state.py review-import --iteration <i> --stdin (reviewer ごとに実行し review_evidence_ref.path を保持)",
+      "mission-state.py review-finalize --iteration <i> --input-ref <review_evidence_ref.path> (全 reviewer 分を反復) --min-reviewers 2",
+      "mission-state.py closeout"
+    ],
+    "details": {
+      "context_mode": "full",
+      "parallel_spawn_required": true,
+      "reviewer_count": 2
+    },
+    "next_action": "run-reviewers",
+    "summary": "iteration 1: mission-reviewer を 2 名、単一メッセージで並列起動する (直列起動は規律違反。直列は Standard で約 2-3 分の無駄を実測 #338)"
+  },
+  "corpus.phases.scoring": {
+    "command_hint": "Step 1 (reviewer ごと): mission-state.py review-import --iteration 1 --stdin; 返却 JSON の review_evidence_ref.path を保持する。 Step 2: mission-state.py review-finalize --iteration 1 --input-ref <review_evidence_ref.path> (全 reviewer 分だけ --input-ref を反復) --min-reviewers 2。 Step 3: mission-state.py mark-passes。",
+    "next_action": "aggregate-reviews",
+    "summary": "iteration 1: reviewer の mission-review/1 JSON を review-import --stdin で state-owned evidence にし、review-finalize --input-ref で集計・記録する。--force は使わない。"
+  },
+  "corpus.provider_plan": {
+    "command_hint": "mission-state.py advance --phase executing --activity active:implementation",
+    "details": {
+      "planning_policy_version": 1
+    },
+    "next_action": "run-executor",
+    "summary": "policy v1 returns exactly one gated planning action"
+  },
+  "corpus.provider_plan_imported": {
+    "command_hint": "mission-state.py planning promote-provider-plan --invocation-id <id>",
+    "details": {
+      "planning_policy_version": 1
+    },
+    "next_action": "promote-canonical-plan",
+    "summary": "policy v1 returns exactly one gated planning action"
+  },
+  "corpus.provider_result_ready": {
+    "command_hint": "mission-state.py specialists plan-import --input <result> --invocation-id <id>",
+    "details": {
+      "planning_policy_version": 1
+    },
+    "next_action": "import-planning-result",
+    "summary": "policy v1 returns exactly one gated planning action"
+  },
+  "corpus.review_aggregate_and_bound_score": {
+    "command_hint": "mission-state.py mark-passes",
+    "details": {},
+    "next_action": "mark-passes",
+    "summary": "iteration 1 の採点は記録済み。mark-passes で threshold gate 判定する (reject なら mission-critic → 次 iteration)"
+  },
+  "corpus.review_input": {
+    "command_hint": "plan を artifact に記載 → mission-state.py planning adopt-core --input <plan.json> → mission-state.py advance --phase executing --activity active:implementation",
+    "command_sequence": [
+      "plan を artifact に記載 (inline #339)",
+      "mission-state.py planning adopt-core --input <plan.json>",
+      "mission-state.py advance --phase executing --activity active:implementation",
+      "Skill: mission-executor",
+      "mission-state.py advance --phase reviewing --activity reviewer-wait:review-response",
+      "Skill: mission-reviewer x2 (1 message, parallel)",
+      "mission-state.py review-import --iteration <i> --stdin (reviewer ごとに実行し review_evidence_ref.path を保持)",
+      "mission-state.py review-finalize --iteration <i> --input-ref <review_evidence_ref.path> (全 reviewer 分を反復) --min-reviewers 2",
+      "mission-state.py closeout"
+    ],
+    "details": {
+      "plan_mode": "inline"
+    },
+    "next_action": "plan-inline",
+    "summary": "iteration 1 (Standard): mission-planner を起動せず、この turn 内で bounded plan (steps + 依存関係 + 完了条件) を artifact に書く (#339)。計画の成果物要件は subagent 経路と同一"
+  },
+  "corpus.specialist_rejected_scoring": {
+    "command_hint": "mission-state.py mark-passes",
+    "details": {
+      "unclosed_specialists": [
+        "fixture-specialist"
+      ]
+    },
+    "next_action": "mark-passes",
+    "summary": "iteration 1 の採点は記録済み。mark-passes で threshold gate 判定する (reject なら mission-critic → 次 iteration)"
+  },
+  "corpus.terminal_outcomes.awaiting_approval": {
+    "command_hint": "mission-state.py reactivate --approved-by-user --expected-category awaiting-approval --reason \"<ユーザーが承認した再開理由>\"",
+    "next_action": "report-blocker",
+    "summary": "halted: fixture awaiting_approval。blocker と次アクションをユーザーに報告する。手動 halt は対象操作と state 再活性化の明示承認後に reactivate する"
+  },
+  "corpus.terminal_outcomes.blocked_external": {
+    "command_hint": "mission-state.py reactivate --approved-by-user --expected-category blocked-external --reason \"<ユーザーが承認した再開理由>\"",
+    "next_action": "report-blocker",
+    "summary": "halted: fixture blocked_external。blocker と次アクションをユーザーに報告する。手動 halt は対象操作と state 再活性化の明示承認後に reactivate する"
+  },
+  "corpus.terminal_outcomes.completed_evidence": {
+    "command_hint": "mission-state.py specialists summary",
+    "next_action": "report-terminal",
+    "summary": "証拠提出で正常終了した mission。最終報告では evidence 提出の完了を伝え、passes=true は主張しない"
+  },
+  "corpus.terminal_outcomes.completed_pass": {
+    "command_hint": "mission-state.py specialists summary",
+    "next_action": "report-complete",
+    "summary": "mission は合格済み。最終報告 (成果物パス・検証結果・specialist summary) を出して終了する"
+  },
+  "corpus.terminal_outcomes.failed": {
+    "command_hint": "mission-state.py reactivate --approved-by-user --expected-category stagnation --reason \"<ユーザーが承認した再開理由>\"",
+    "next_action": "report-blocker",
+    "summary": "halted: fixture failed。blocker と次アクションをユーザーに報告する。手動 halt は対象操作と state 再活性化の明示承認後に reactivate する"
+  },
+  "corpus.terminal_outcomes.incomplete": {
+    "command_hint": "mission-state.py reactivate --approved-by-user --expected-category partial-done --reason \"<ユーザーが承認した再開理由>\"",
+    "next_action": "report-blocker",
+    "summary": "halted: fixture incomplete。blocker と次アクションをユーザーに報告する。手動 halt は対象操作と state 再活性化の明示承認後に reactivate する"
+  },
+  "corpus.terminal_outcomes.routed_elsewhere": {
+    "command_hint": "mission-state.py reactivate --approved-by-user --expected-category routed-goal --reason \"<ユーザーが承認した再開理由>\"",
+    "next_action": "report-blocker",
+    "summary": "halted: fixture routed_elsewhere。blocker と次アクションをユーザーに報告する。手動 halt は対象操作と state 再活性化の明示承認後に reactivate する"
+  },
+  "corpus.terminal_outcomes.stale_superseded": {
+    "command_hint": "mission-state.py resume",
+    "next_action": "report-blocker",
+    "summary": "halted: fixture stale_superseded。blocker と次アクションをユーザーに報告する。stale/orphan halt は resume で安全に再開する"
+  },
+  "corpus.terminal_outcomes.user_aborted": {
+    "command_hint": "mission-state.py reactivate --approved-by-user --expected-category user-abort --reason \"<ユーザーが承認した再開理由>\"",
+    "next_action": "report-blocker",
+    "summary": "halted: fixture user_aborted。blocker と次アクションをユーザーに報告する。手動 halt は対象操作と state 再活性化の明示承認後に reactivate する"
+  }
+}
