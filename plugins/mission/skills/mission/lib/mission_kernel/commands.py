@@ -117,7 +117,9 @@ class DeclineSpecialistSelection:
     compatibility: CompatibilityPayload = EMPTY_COMPATIBILITY_PAYLOAD
 
     def __post_init__(self) -> None:
-        if re.fullmatch(r"sel_[0-9a-f]{32}", self.selection_id) is None:
+        if type(self.selection_id) is not str or re.fullmatch(
+            r"sel_[0-9a-f]{32}", self.selection_id
+        ) is None:
             raise TypeError("specialist-selection-id-invalid")
         if (
             not isinstance(self.reason, str)

@@ -103,6 +103,62 @@ def test_consented_confirmation_provider_can_finish_as_terminal_none(run_cli, tm
     assert checkpoint["confirmation_resolved"] is True
 
 
+def test_risk_only_confirmation_provider_is_gated_then_falls_through(run_cli, tmp_path):
+    """The risk flag alone must gate on consent, then resume ordinary selection.
+
+    `confirm: true` short-circuits the remaining selection policy with an
+    explicit ``consented-confirmation`` decision once consent exists. The risk
+    flag alone must gate the same way while unconsented, but must not inherit
+    that short-circuit afterwards: the provider still has to pass availability
+    and tie-break handling. Pinning both halves keeps the fall-through branch
+    from silently acquiring the short-circuit later.
+    """
+    _write_confirmation_registry(tmp_path)
+    registry = tmp_path / ".mission" / "specialists.yml"
+    parsed = json.loads(registry.read_text(encoding="utf-8"))
+    for entry in parsed["specialists"]:
+        entry.pop("confirm", None)
+    registry.write_text(json.dumps(parsed), encoding="utf-8")
+    consent_file = tmp_path / "provider-consent.json"
+    run_cli("init", "selection checkpoint", "--complexity", "Standard", cwd=tmp_path, check=True)
+
+    unconsented = _recommend(run_cli, tmp_path, consent_file)
+    assert unconsented.returncode == 0, unconsented.stderr
+    blocked = _read_state(tmp_path)["specialists_decision"]
+    assert blocked["reason_code"] == "awaiting-confirmation"
+    assert blocked["lifecycle_state"] == "candidate"
+
+    run_cli(
+        "specialists",
+        "consent",
+        "--provider",
+        "external-review-provider",
+        "--consent-file",
+        str(consent_file),
+        cwd=tmp_path,
+        check=True,
+    )
+
+    result = _recommend(run_cli, tmp_path, consent_file)
+
+    assert result.returncode == 0, result.stderr
+    checkpoint = _read_state(tmp_path)["specialists_decision"]
+    # consent が反映され、以降は通常の選定パイプラインが provider を選ぶ。
+    assert checkpoint["lifecycle_state"] == "selected"
+    assert checkpoint["reason_code"] != "awaiting-confirmation"
+    # fall-through 経路なので short-circuit 専用の marker は付かない。
+    assert "confirmation_resolved" not in checkpoint
+
+
+def test_decline_rejects_non_string_selection_id_with_control_code():
+    from mission_kernel.commands import DeclineSpecialistSelection
+
+    for invalid in (None, 42, b"sel_" + b"0" * 32, ["sel_" + "0" * 32]):
+        with pytest.raises(TypeError) as caught:
+            DeclineSpecialistSelection(selection_id=invalid, reason="not used")
+        assert str(caught.value) == "specialist-selection-id-invalid"
+
+
 def test_unconsented_confirmation_provider_remains_candidate(run_cli, tmp_path):
     _write_confirmation_registry(tmp_path)
     consent_file = tmp_path / "provider-consent.json"
@@ -132,7 +188,6 @@ def test_decline_transitions_current_candidate_to_terminal_declined(run_cli, tmp
         selection_id,
         "--reason",
         "core reviewers are sufficient for this mission",
-        "--json",
         cwd=tmp_path,
     )
 
@@ -195,7 +250,7 @@ def test_decline_executes_through_v5_repository(raw_run_cli, tmp_path):
         "specialists", "decline",
         "--selection-id", selection_id,
         "--reason", "core reviewers are sufficient for this mission",
-        "--json", cwd=tmp_path,
+        cwd=tmp_path,
         env_extra={"MISSION_OPERATION_ID": "op-issue659-decline"},
     )
 

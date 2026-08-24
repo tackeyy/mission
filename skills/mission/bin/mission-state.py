@@ -18869,7 +18869,6 @@ def _build_parser():
     p_decline.add_argument("--selection-id", required=True,
                            help="現在の checkpoint と一致する selection_id")
     p_decline.add_argument("--reason", required=True, help="今回利用しない理由")
-    p_decline.add_argument("--json", action="store_true", help="JSON 形式で出力")
     p_decline.set_defaults(func=cmd_specialists_decline)
 
     p_account = spec_sub.add_parser("accounting", help="available candidate の未処理 decision trail を確認")
