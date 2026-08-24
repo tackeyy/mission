@@ -171,18 +171,27 @@ from mission_application.artifact import (  # noqa: E402
     ArtifactInitRequest,
     ArtifactPublishRequest,
     ArtifactRenderRequest,
-    EvidenceDecision,
     EvidenceEffect,
     EvidenceFailure,
-    context_manifest as decide_context_manifest,
-    progress_clear as decide_progress_clear,
-    progress_update as decide_progress_update,
     run_artifact_append,
     run_artifact_export,
     run_artifact_init,
     run_artifact_publish,
     run_artifact_render,
-    verify_published_artifact_effects,
+)
+from mission_application.evidence import (  # noqa: E402
+    ContextManifestRequest,
+    ProgressClearRequest,
+    ProgressUpdateRequest,
+    VerificationRecordRequest,
+    evidence_publication_paths,
+    normalize_verification_checks,
+    run_context_manifest,
+    run_progress_clear,
+    run_progress_update,
+    run_verification_record,
+    validate_context_iteration_override,
+    verify_published_evidence_effects,
 )
 from mission_application.planning import (  # noqa: E402
     PlanningFailure,
@@ -7444,10 +7453,6 @@ def _artifact_profile_coverage(cwd: Path, data: dict) -> dict:
     }
 
 
-def _evidence_effect_path(cwd: Path, effect: EvidenceEffect) -> Path:
-    return _resolve_evidence_output_path(cwd, effect.target)
-
-
 def _resolve_evidence_output_path(cwd: Path, path_text: str) -> Path:
     """Resolve parent directories without following the final output entry."""
     path = Path(path_text).expanduser()
@@ -7492,7 +7497,9 @@ def _legacy_evidence_repository(cwd: Path, sf: Path, *, stamp: bool) -> LegacyV4
             read_state=read_state,
             write_state=write_state,
             backup_state=lambda: backup_state(sf),
-            effect_transaction=lambda effects: _publish_evidence_effects(cwd, effects),
+            effect_transaction=lambda effects, prepared=None: _publish_evidence_effects(
+                cwd, effects, prepared
+            ),
             aggregate_recover=aggregate.recover,
             aggregate_prepare=aggregate.prepare,
             aggregate_finalize=aggregate.finalize,
@@ -7505,58 +7512,38 @@ def _legacy_evidence_repository(cwd: Path, sf: Path, *, stamp: bool) -> LegacyV4
 def _publish_evidence_effects(
     cwd: Path,
     effects: tuple[EvidenceEffect, ...],
-    *,
-    path_overrides: Optional[dict[str, Path]] = None,
+    prepared: object = None,
 ):
     """Publish already-bound bytes as one rollback-capable v4 file set."""
+    publication_paths = evidence_publication_paths(prepared, effects)
     with _PublishedFilesTransaction() as transaction:
         published = []
-        for effect in effects:
-            target = (path_overrides or {}).get(effect.kind)
-            target = target if target is not None else _evidence_effect_path(cwd, effect)
+        for effect, publication_path in zip(effects, publication_paths):
             item = transaction.add(
-                _publish_output_transaction(target, effect.content)
+                _publish_output_transaction(
+                    _resolve_evidence_output_path(cwd, publication_path), effect.content
+                )
             )
             published.append(item)
-        _bind_artifact_publication(
-            cwd, effects, published, path_overrides=path_overrides
-        )
+        _bind_artifact_publication(cwd, effects, publication_paths, published)
         yield effects
 
 
 def _bind_artifact_publication(
     cwd: Path,
     effects: tuple[EvidenceEffect, ...],
+    publication_paths: tuple[str, ...],
     published: object,
-    *,
-    path_overrides: Optional[dict[str, Path]] = None,
 ) -> None:
     """Verify published artifact bytes; the legacy name is kept for ratchet history."""
-    verify_published_artifact_effects(
+    verify_published_evidence_effects(
         cwd,
         effects,
+        publication_paths,
         published,
         capture_artifact_identity,
         _state_relative_path,
         _verify_published_file,
-        path_overrides,
-    )
-
-
-def _run_evidence_decision(
-    cwd: Path,
-    sf: Path,
-    decide,
-    *,
-    stamp: bool,
-    path_overrides: dict[str, Path] | None = None,
-) -> EvidenceDecision:
-    repository = _legacy_evidence_repository(cwd, sf, stamp=stamp)
-    return repository.execute_effects(
-        decide,
-        effect_transaction=lambda effects: _publish_evidence_effects(
-            cwd, effects, path_overrides=path_overrides
-        ),
     )
 
 
@@ -7705,32 +7692,25 @@ def cmd_progress_update(args):
         print("ERROR: --total/--completed must satisfy 0 <= completed <= total", file=sys.stderr)
         sys.exit(2)
     try:
-        decision = _run_evidence_decision(
-            cwd,
-            sf,
-            lambda data: (
-                decide_progress_update(
-                    data,
-                    now=iso_now(),
-                    total=total,
-                    completed=completed,
-                    batch_size=args.batch_size,
-                    last_unit=args.last_unit,
-                    artifact_path=args.artifact,
-                    iteration=(args.iteration if args.iteration is not None else data.get("iteration", 0)),
-                    evidence_path=_progress_archive_path(
-                        cwd,
-                        data,
-                        args.iteration if args.iteration is not None else data.get("iteration", 0),
-                    ),
-                )
+        result = run_progress_update(
+            ProgressUpdateRequest(
+                now=iso_now(),
+                total=total,
+                completed=completed,
+                batch_size=args.batch_size,
+                last_unit=args.last_unit,
+                artifact_path=args.artifact,
+                iteration=args.iteration,
+                evidence_path=lambda data, iteration: _progress_archive_path(
+                    cwd, data, iteration
+                ),
             ),
-            stamp=True,
+            _legacy_evidence_repository(cwd, sf, stamp=True),
         )
     except EvidenceFailure as exc:
         print(f"ERROR: {exc.code}", file=sys.stderr)
         sys.exit(2)
-    print(json.dumps({"ok": True, **decision.result}, indent=2 if args.json else None, ensure_ascii=False))
+    print(json.dumps({"ok": True, **result}, indent=2 if args.json else None, ensure_ascii=False))
 
 
 def cmd_progress_get(args):
@@ -7756,11 +7736,9 @@ def cmd_progress_clear(args):
         print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
         sys.exit(1)
     try:
-        _run_evidence_decision(
-            cwd,
-            sf,
-            lambda data: decide_progress_clear(data, now=iso_now()),
-            stamp=True,
+        run_progress_clear(
+            ProgressClearRequest(now=iso_now()),
+            _legacy_evidence_repository(cwd, sf, stamp=True),
         )
     except EvidenceFailure as exc:
         print(f"ERROR: {exc.code}", file=sys.stderr)
@@ -15249,33 +15227,29 @@ def cmd_context_manifest(args):
     if not sf.exists():
         print("ERROR: state.json が見つかりません。", file=sys.stderr)
         sys.exit(1)
-    data = json.loads(sf.read_text())
-    iteration = args.iteration if args.iteration is not None else data.get("iteration", 1)
-    if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < 1:
+    out = Path(args.out)
+    try:
+        validate_context_iteration_override(args.iteration)
+    except EvidenceFailure:
         print("ERROR: --iteration は 1 以上で指定してください", file=sys.stderr)
         sys.exit(2)
-    out = Path(args.out)
     if not out.name or out.name in {".", ".."}:
         print("ERROR: context output filename is invalid", file=sys.stderr)
         sys.exit(2)
+    _resolve_evidence_output_path(cwd, str(out))
     try:
-        decision = _run_evidence_decision(
-            cwd,
-            sf,
-            lambda current: decide_context_manifest(
-                current,
+        result = run_context_manifest(
+            ContextManifestRequest(
                 now=iso_now(),
-                iteration=iteration,
-                output_path=str(out),
-                effect_target=out.name,
+                iteration=args.iteration,
+                publication_path=str(out),
             ),
-            stamp=False,
-            path_overrides={"context-manifest": out},
+            _legacy_evidence_repository(cwd, sf, stamp=False),
         )
     except EvidenceFailure as exc:
         print(f"ERROR: {exc.code}", file=sys.stderr)
         sys.exit(2)
-    print(json.dumps({"ok": True, **decision.result}, ensure_ascii=False))
+    print(json.dumps({"ok": True, **result}, ensure_ascii=False))
 
 
 def cmd_push_score(args):
@@ -15514,42 +15488,6 @@ def _artifact_digest_for_iteration(cwd: Path, state: dict) -> tuple[str | None, 
         return None, f"error:{type(exc).__name__}"
 
 
-VERIFICATION_PASSED = "passed"
-VERIFICATION_FAILED = "failed"
-VERIFICATION_NOT_RUN = "not-run"
-
-
-def _normalize_verification_checks(payload):
-    """#594 A: verification payload を検証して checks を正規化する。
-
-    `ok` の無い check を「合格」と解釈しない (検証していないことと合格を
-    混同すると、gate の入力そのものが嘘になる)。
-    """
-    if not isinstance(payload, dict):
-        raise SystemExit("verification payload must be a JSON object")
-    checks = payload.get("checks")
-    if checks is None:
-        checks = []
-    if not isinstance(checks, list):
-        raise SystemExit("verification payload: checks must be a list")
-    normalized = []
-    for index, check in enumerate(checks):
-        if not isinstance(check, dict):
-            raise SystemExit(f"verification checks[{index}] must be an object")
-        if not isinstance(check.get("ok"), bool):
-            raise SystemExit(
-                f"verification checks[{index}] requires an explicit boolean 'ok'"
-            )
-        name = check.get("name")
-        detail = check.get("detail")
-        normalized.append({
-            "name": str(name) if isinstance(name, str) and name else f"check-{index}",
-            "ok": check["ok"],
-            "detail": str(detail) if isinstance(detail, str) else None,
-        })
-    return normalized
-
-
 def cmd_verification_record(args):
     """#594 A: executor 完了後・reviewer 起動前の検証結果を記録する。
 
@@ -15565,41 +15503,26 @@ def cmd_verification_record(args):
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise SystemExit(f"verification payload is not valid JSON: {exc}")
-    checks = _normalize_verification_checks(payload)
-    failed = [check for check in checks if not check["ok"]]
-    if not checks:
-        status = VERIFICATION_NOT_RUN
-    elif failed:
-        status = VERIFICATION_FAILED
-    else:
-        status = VERIFICATION_PASSED
+    try:
+        checks = normalize_verification_checks(payload)
+    except EvidenceFailure as exc:
+        raise SystemExit(exc.code) from exc
 
     cwd = Path.cwd()
     sf = resolve_state_file(cwd)
     if not sf.exists():
         print("ERROR: state file が見つかりません。先に init してください。", file=sys.stderr)
         sys.exit(1)
-    now = iso_now()
-    entry = {
-        "iteration": args.iteration,
-        "status": status,
-        "checks": checks,
-        "failed_count": len(failed),
-        "recorded_at": now,
-    }
-    repository = _legacy_lifecycle_repository(
-        cwd, sf, stamp=True, strict_read=True, lease_reason="verification-record",
-    )
-    with repository.transaction():
-        data = repository.load()
-        history = data.get("verification_history")
-        if not isinstance(history, list):
-            history = []
-        history.append(entry)
-        data["verification_history"] = history
-        data["updated_at"] = now
-        repository.save(data)
-    print(json.dumps({"ok": True, "verification": entry}, ensure_ascii=False, indent=2))
+    try:
+        result = run_verification_record(
+            VerificationRecordRequest(
+                now=iso_now(), iteration=args.iteration, checks=checks
+            ),
+            _legacy_evidence_repository(cwd, sf, stamp=True),
+        )
+    except EvidenceFailure as exc:
+        raise SystemExit(exc.code) from exc
+    print(json.dumps({"ok": True, **result}, ensure_ascii=False, indent=2))
 
 
 def cmd_review_finalize(args):

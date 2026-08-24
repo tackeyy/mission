@@ -730,24 +730,6 @@ def artifact_publish(
     return EvidenceDecision(proposed, prepared.effects, prepared.result)
 
 
-def _progress_bytes(state: dict, progress: dict, iteration: int) -> bytes:
-    lines = [
-        f"<!-- mission-progress-meta: session_id={state.get('session_id')} mission_id={state.get('mission_id')} iteration={iteration} updated_at={progress.get('updated_at')} -->",
-        "",
-        "# Mission Progress Checkpoint",
-        "",
-        f"- kind: {progress.get('kind')}",
-        f"- total: {progress.get('total')}",
-        f"- completed: {progress.get('completed')}",
-        f"- remaining: {progress.get('remaining')}",
-        f"- batch_size: {progress.get('batch_size')}",
-        f"- last_unit: {progress.get('last_unit') or ''}",
-        f"- artifact_path: {progress.get('artifact_path') or ''}",
-        "",
-    ]
-    return "\n".join(lines).encode("utf-8")
-
-
 def progress_update(
     state: object,
     *,
@@ -760,43 +742,37 @@ def progress_update(
     iteration: object,
     evidence_path: object,
 ) -> EvidenceDecision:
-    proposed = _state(state)
-    at = _timestamp(now)
-    if type(total) is not int or type(completed) is not int or total < 0 or not 0 <= completed <= total:
-        raise EvidenceFailure("progress-bounds-invalid")
-    if type(iteration) is not int or iteration < 0:
-        raise EvidenceFailure("progress-iteration-invalid")
-    if batch_size is not None and (type(batch_size) is not int or batch_size < 0):
-        raise EvidenceFailure("progress-batch-size-invalid")
-    for optional, code in (
-        (last_unit, "progress-last-unit-invalid"),
-        (artifact_path, "progress-artifact-path-invalid"),
-    ):
-        if optional is not None:
-            _text(optional, code)
-    target = _relative_target(evidence_path, "progress-evidence-path-invalid")
-    progress = {
-        "kind": "batch",
-        "total": total,
-        "completed": completed,
-        "remaining": total - completed,
-        "batch_size": batch_size,
-        "last_unit": last_unit,
-        "artifact_path": artifact_path,
-        "updated_at": at,
-        "evidence_path": target,
-    }
-    effect = make_evidence_effect("progress", target, _progress_bytes(proposed, progress, iteration))
-    proposed["progress"] = progress
-    proposed["updated_at"] = at
-    return EvidenceDecision(proposed, (effect,), {"progress": copy.deepcopy(progress)})
+    from mission_application.evidence import prepare_progress_update
+    from mission_kernel.evidence import EvidenceRuleError, apply_progress_update
+
+    prepared = prepare_progress_update(
+        _state(state),
+        now=now,
+        total=total,
+        completed=completed,
+        batch_size=batch_size,
+        last_unit=last_unit,
+        artifact_path=artifact_path,
+        iteration=iteration,
+        evidence_path=evidence_path,
+    )
+    try:
+        proposed, _content = apply_progress_update(state, prepared.command)
+    except EvidenceRuleError as exc:
+        raise EvidenceFailure(exc.code) from exc
+    return EvidenceDecision(proposed, prepared.effects, prepared.result)
 
 
 def progress_clear(state: object, *, now: object) -> EvidenceDecision:
-    proposed = _state(state)
-    proposed.pop("progress", None)
-    proposed["updated_at"] = _timestamp(now)
-    return EvidenceDecision(proposed, (), {})
+    from mission_application.evidence import prepare_progress_clear
+    from mission_kernel.evidence import EvidenceRuleError, apply_progress_clear
+
+    prepared = prepare_progress_clear(_state(state), now=now)
+    try:
+        proposed = apply_progress_clear(state, prepared.command)
+    except EvidenceRuleError as exc:
+        raise EvidenceFailure(exc.code) from exc
+    return EvidenceDecision(proposed, prepared.effects, prepared.result)
 
 
 def context_manifest(
@@ -807,42 +783,38 @@ def context_manifest(
     output_path: object,
     effect_target: object | None = None,
 ) -> EvidenceDecision:
-    proposed = _state(state)
-    at = _timestamp(now)
-    if type(iteration) is not int or iteration < 1:
-        raise EvidenceFailure("context-iteration-invalid")
-    target = _text(output_path, "context-output-path-invalid")
-    publication_target = _relative_target(
-        effect_target if effect_target is not None else target,
-        "context-effect-target-invalid",
+    from mission_application.evidence import prepare_context_manifest
+    from mission_kernel.commands import ContextManifestEffectClaim, GenerateContextManifest
+    from mission_kernel.evidence import EvidenceRuleError, apply_context_manifest
+
+    prepared = prepare_context_manifest(
+        _state(state),
+        now=now,
+        iteration=iteration,
+        publication_path=output_path,
     )
-    prior_findings: list[dict] = []
-    history = proposed.get("score_history")
-    if history is not None and not isinstance(history, list):
-        raise EvidenceFailure("context-score-history-invalid")
-    for entry in history or []:
-        if not isinstance(entry, Mapping):
-            continue
-        findings = entry.get("findings_summary", [])
-        if not isinstance(findings, list):
-            raise EvidenceFailure("context-findings-invalid")
-        prior_findings.extend(copy.deepcopy(item) for item in findings if isinstance(item, Mapping))
-    manifest = {
-        "schema": "mission-context-manifest/1",
-        "iteration": iteration,
-        "mission_goal": proposed.get("mission", ""),
-        "mission_id": proposed.get("mission_id", ""),
-        "assumptions_path": proposed.get("assumptions_path", ""),
-        "prior_findings": prior_findings,
-    }
-    content = json.dumps(manifest, indent=2, ensure_ascii=False).encode("utf-8")
-    effect = make_evidence_effect("context-manifest", publication_target, content)
-    records = proposed.get("context_manifests")
-    records = copy.deepcopy(records) if isinstance(records, Mapping) else {}
-    records[str(iteration)] = {"path": target, "digest": effect.digest, "generated_at": at}
-    proposed["context_manifests"] = records
-    return EvidenceDecision(
-        proposed,
-        (effect,),
-        {"path": target, "digest": effect.digest, "findings_count": len(prior_findings)},
-    )
+    if effect_target is not None and effect_target != prepared.effects[0].target:
+        effect = make_evidence_effect(
+            "context-manifest", effect_target, prepared.effects[0].content
+        )
+        command = GenerateContextManifest(
+            now,
+            iteration,
+            ContextManifestEffectClaim(
+                effect.kind,
+                effect.target,
+                output_path,
+                effect.digest,
+                effect.size,
+            ),
+        )
+        prepared = prepared.__class__(command, (effect,), prepared.result)
+    try:
+        proposed, _content, findings_count = apply_context_manifest(
+            state, prepared.command
+        )
+    except EvidenceRuleError as exc:
+        raise EvidenceFailure(exc.code) from exc
+    result = copy.deepcopy(prepared.result)
+    result["findings_count"] = findings_count
+    return EvidenceDecision(proposed, prepared.effects, result)

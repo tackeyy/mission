@@ -16,6 +16,7 @@ from mission_application.artifact import (
     PreparedArtifactOperation,
     validate_evidence_effect,
 )
+from mission_application.evidence import PreparedEvidenceOperation
 from mission_application.ports import (
     AggregateIndexError,
     AuditMetadata,
@@ -624,14 +625,50 @@ class LegacyV4Repository:
         | None = None,
         backup: bool = True,
     ) -> tuple[PreparedArtifactOperation, LegacyCommandExecutionResult]:
-        """Prepare, decide, publish, verify, and project one artifact command."""
-        self._reject_reentrant_entry("execute_transition_effects")
+        """Artifact compatibility wrapper over the shared evidence core."""
+
+        def publish(_prepared, effects):
+            # 明示引数のみをここで包む。省略時の fallback（self._effect_transaction）
+            # は shared core の guarded 分岐に任せ、注入 callable の alias を作らない
+            # （#626 の境界検査は alias 経由の参照も検出する）。
+            assert effect_transaction is not None
+            return effect_transaction(effects)
+
+        def verify(_prepared, effects, published):
+            if verify_published is not None:
+                return verify_published(effects, published)
+            if published != effects:
+                raise ValueError("published-artifact-effect-binding-invalid")
+
+        return self.execute_evidence_transition_effects(
+            prepare,
+            operation_type=PreparedArtifactOperation,
+            operation_error="artifact-operation-invalid",
+            effect_transaction=publish if effect_transaction is not None else None,
+            verify_published=verify,
+            backup=backup,
+        )
+
+    def execute_evidence_transition_effects(
+        self,
+        prepare: Callable[[dict], object],
+        *,
+        operation_type: type = PreparedEvidenceOperation,
+        operation_error: str = "evidence-operation-invalid",
+        effect_transaction: Callable[[object, tuple[EvidenceEffect, ...]], ContextManager[object]]
+        | None = None,
+        verify_published: Callable[[object, tuple[EvidenceEffect, ...], object], None]
+        | None = None,
+        backup: bool = True,
+    ) -> tuple[object, LegacyCommandExecutionResult]:
+        """Prepare, decide, publish, verify, and project one typed evidence command."""
+        self._reject_reentrant_entry("execute_evidence_transition_effects")
         with self.transaction():
             current = self.load()
             with self._callback_guard():
                 prepared = prepare(copy.deepcopy(current))
-            if not isinstance(prepared, PreparedArtifactOperation):
-                raise ValueError("artifact-operation-invalid")
+            if not isinstance(prepared, operation_type):
+                raise ValueError(operation_error)
             state = _legacy_command_state(current, prepared.command)
             decision = decide(state, prepared.command)
             if not isinstance(decision, Decision):
@@ -660,20 +697,22 @@ class LegacyV4Repository:
             assert isinstance(frozen, FrozenJsonObject)
             execution = LegacyCommandExecutionResult(bound_decision, frozen)
             if effects:
-                if effect_transaction is not None:
-                    publication = self._guarded_context(effect_transaction, effects)
-                else:
+                if effect_transaction is None:
                     if self._effect_transaction is None:
-                        raise ValueError("artifact-effect-transaction-missing")
+                        raise ValueError("evidence-effect-transaction-missing")
                     publication = self._guarded_context(
-                        self._effect_transaction, effects
+                        self._effect_transaction, effects, prepared
+                    )
+                else:
+                    publication = self._guarded_context(
+                        effect_transaction, prepared, effects
                     )
                 with publication as published:
                     if verify_published is not None:
                         with self._callback_guard():
-                            verify_published(effects, published)
+                            verify_published(prepared, effects, published)
                     elif published != effects:
-                        raise ValueError("published-artifact-effect-binding-invalid")
+                        raise ValueError("published-evidence-effect-binding-invalid")
                     self.save(proposed, backup=backup)
             else:
                 self.save(proposed, backup=backup)
