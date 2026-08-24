@@ -117,6 +117,8 @@ def _reviewer_output_stats(states: Sequence[Mapping[str, object]]) -> dict:
 
 
 def _latest_composite(history: object) -> float | None:
+    if not isinstance(history, (list, tuple)):
+        return None
     for entry in reversed(history):
         composite = entry.get("composite")
         if _finite_score(composite):

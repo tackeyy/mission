@@ -307,6 +307,12 @@ def test_projection_module_has_no_io_or_outer_layer_imports():
             "os",
             "pathlib",
             "subprocess",
+            "datetime",
+            "time",
+            "sys",
+            "socket",
+            "http",
+            "urllib",
             "mission_adapter",
             "mission_persistence",
         )
