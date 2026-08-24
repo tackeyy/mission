@@ -9,6 +9,7 @@ from typing import Optional, Union
 from .json_codec import decode_json_object, encode_json_object, freeze_json_value
 from .model import FrozenJsonObject
 from .model import HaltCategory, Phase, PreparedHandoff
+from .artifact import ArtifactEffectClaim
 
 
 @dataclass(frozen=True)
@@ -105,6 +106,52 @@ class SetExtensionFields:
     compatibility: CompatibilityPayload = EMPTY_COMPATIBILITY_PAYLOAD
 
 
+@dataclass(frozen=True)
+class InitializeArtifact:
+    at: str
+    path: str
+    format: str
+    title: str
+    redaction_status: str
+    required_for_pass: bool
+    effect: ArtifactEffectClaim
+
+
+@dataclass(frozen=True)
+class AppendArtifactBlock:
+    at: str
+    section: str
+    content: str
+    source: Optional[str]
+    label: Optional[str]
+
+
+@dataclass(frozen=True)
+class RenderArtifact:
+    at: str
+    redaction_status: Optional[str]
+    effect: ArtifactEffectClaim
+
+
+@dataclass(frozen=True)
+class ExportArtifact:
+    at: str
+    destination: str
+    redaction_status: str
+    artifact_effect: ArtifactEffectClaim
+    export_effect: ArtifactEffectClaim
+
+
+@dataclass(frozen=True)
+class RecordArtifactPublication:
+    at: str
+    provider: str
+    destination: Optional[str]
+    approval_text: str
+    confirmed: bool
+    effect: ArtifactEffectClaim
+
+
 # Fields whose value is fixed at genesis or owned by the pass gate; a generic
 # write would forge identity or completion evidence.  ``init`` recomputes
 # mission identity, and pass-gate facts only move through their own commands.
@@ -170,15 +217,30 @@ GENERIC_SET_DEDICATED_FIELDS = frozenset(
 
 
 Command = Union[
-    AdvancePhase, MarkHalt, MarkPass, Reactivate, ResumeStale, SetExtensionFields
+    AdvancePhase,
+    AppendArtifactBlock,
+    ExportArtifact,
+    InitializeArtifact,
+    MarkHalt,
+    MarkPass,
+    Reactivate,
+    RecordArtifactPublication,
+    RenderArtifact,
+    ResumeStale,
+    SetExtensionFields,
 ]
 
 
 _COMMAND_TYPES = {
     AdvancePhase: "advance-phase",
+    AppendArtifactBlock: "append-artifact-block",
+    ExportArtifact: "export-artifact",
+    InitializeArtifact: "initialize-artifact",
     MarkHalt: "mark-halt",
     MarkPass: "mark-pass",
     Reactivate: "reactivate",
+    RecordArtifactPublication: "record-artifact-publication",
+    RenderArtifact: "render-artifact",
     ResumeStale: "resume-stale",
     SetExtensionFields: "set-extension-fields",
 }

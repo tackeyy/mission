@@ -16,13 +16,27 @@ from .commands import (
     GENERIC_SET_DEDICATED_FIELDS,
     GENERIC_SET_FROZEN_FIELDS,
     AdvancePhase,
+    AppendArtifactBlock,
     Command,
+    ExportArtifact,
+    InitializeArtifact,
     MarkHalt,
     MarkPass,
     Reactivate,
+    RecordArtifactPublication,
+    RenderArtifact,
     ResumeStale,
     SetExtensionFields,
 )
+from .artifact import (
+    ArtifactRuleError,
+    append_artifact_block_document,
+    export_artifact_document,
+    initialize_artifact_document,
+    record_artifact_publication_document,
+    render_artifact_document,
+)
+from .json_codec import freeze_json_value
 from .model import (
     AbsentHandoff,
     AbsentPlan,
@@ -919,6 +933,130 @@ def _set_extension_fields(state: MissionState, raw_command: object) -> Transitio
     )
 
 
+def _artifact_document(state: MissionState) -> dict:
+    if state.legacy_passthrough is None:
+        raise _Rejected("artifact-v4-state-required")
+    return state.legacy_passthrough.thaw()
+
+
+def _with_artifact_document(state: MissionState, document: dict) -> MissionState:
+    frozen = freeze_json_value(document)
+    if not isinstance(frozen, FrozenJsonObject):
+        raise _Rejected("artifact-state-invalid")
+    return _unbound_state(state, legacy_passthrough=frozen)
+
+
+def _artifact_transition(
+    state: MissionState,
+    project: Callable[[dict], dict],
+    *,
+    event: str,
+    effects: tuple[object, ...],
+) -> Transition:
+    try:
+        document = project(_artifact_document(state))
+    except ArtifactRuleError as rejected:
+        raise _Rejected(rejected.code)
+    return Transition(
+        _with_artifact_document(state, document),
+        (KernelEvent(event),),
+        effects,
+    )
+
+
+def _initialize_artifact(state: MissionState, raw_command: object) -> Transition:
+    command = raw_command
+    assert isinstance(command, InitializeArtifact)
+    return _artifact_transition(
+        state,
+        lambda document: initialize_artifact_document(
+            document,
+            at=command.at,
+            path=command.path,
+            format=command.format,
+            title=command.title,
+            redaction_status=command.redaction_status,
+            required_for_pass=command.required_for_pass,
+            effect=command.effect,
+        ),
+        event="artifact-initialized",
+        effects=(command.effect,),
+    )
+
+
+def _append_artifact_block(state: MissionState, raw_command: object) -> Transition:
+    command = raw_command
+    assert isinstance(command, AppendArtifactBlock)
+    return _artifact_transition(
+        state,
+        lambda document: append_artifact_block_document(
+            document,
+            at=command.at,
+            section=command.section,
+            content=command.content,
+            source=command.source,
+            label=command.label,
+        ),
+        event="artifact-block-appended",
+        effects=(),
+    )
+
+
+def _render_artifact(state: MissionState, raw_command: object) -> Transition:
+    command = raw_command
+    assert isinstance(command, RenderArtifact)
+    return _artifact_transition(
+        state,
+        lambda document: render_artifact_document(
+            document,
+            at=command.at,
+            redaction_status=command.redaction_status,
+            effect=command.effect,
+        ),
+        event="artifact-rendered",
+        effects=(command.effect,),
+    )
+
+
+def _export_artifact(state: MissionState, raw_command: object) -> Transition:
+    command = raw_command
+    assert isinstance(command, ExportArtifact)
+    return _artifact_transition(
+        state,
+        lambda document: export_artifact_document(
+            document,
+            at=command.at,
+            destination=command.destination,
+            redaction_status=command.redaction_status,
+            artifact_effect=command.artifact_effect,
+            export_effect=command.export_effect,
+        ),
+        event="artifact-exported",
+        effects=(command.artifact_effect, command.export_effect),
+    )
+
+
+def _record_artifact_publication(
+    state: MissionState, raw_command: object
+) -> Transition:
+    command = raw_command
+    assert isinstance(command, RecordArtifactPublication)
+    return _artifact_transition(
+        state,
+        lambda document: record_artifact_publication_document(
+            document,
+            at=command.at,
+            provider=command.provider,
+            destination=command.destination,
+            approval_text=command.approval_text,
+            confirmed=command.confirmed,
+            effect=command.effect,
+        ),
+        event="artifact-publication-recorded",
+        effects=(command.effect,),
+    )
+
+
 def _command_type_guard(expected: Type[object]) -> Callable[[MissionState, object], bool]:
     def guard(_state: MissionState, command: object) -> bool:
         return isinstance(command, expected)
@@ -948,6 +1086,36 @@ TRANSITION_TABLE = build_transition_table(
                 ("A4.plan-handoff", "PreparedPlanHandoff", "AdvancePhase"),
                 ("A4.executor-handoff", "ExecutionObservation", "AdvancePhase"),
             ),
+        ),
+        TransitionRule(
+            "artifact-initialize",
+            InitializeArtifact,
+            _command_type_guard(InitializeArtifact),
+            _initialize_artifact,
+        ),
+        TransitionRule(
+            "artifact-append-block",
+            AppendArtifactBlock,
+            _command_type_guard(AppendArtifactBlock),
+            _append_artifact_block,
+        ),
+        TransitionRule(
+            "artifact-render",
+            RenderArtifact,
+            _command_type_guard(RenderArtifact),
+            _render_artifact,
+        ),
+        TransitionRule(
+            "artifact-export",
+            ExportArtifact,
+            _command_type_guard(ExportArtifact),
+            _export_artifact,
+        ),
+        TransitionRule(
+            "artifact-record-publication",
+            RecordArtifactPublication,
+            _command_type_guard(RecordArtifactPublication),
+            _record_artifact_publication,
         ),
         TransitionRule(
             "mark-halt",
@@ -1069,6 +1237,25 @@ def bind_transition_effects(
     if not is_sealed_transition(transition) or type(effects) is not tuple:
         raise TransitionTableError("invalid-transition-effect-binding")
     registered = _ISSUED_TRANSITIONS[id(transition)]
+    command = registered[2]
+    claims: tuple[object, ...] | None = None
+    if isinstance(command, (InitializeArtifact, RenderArtifact, RecordArtifactPublication)):
+        claims = (command.effect,)
+    elif isinstance(command, AppendArtifactBlock):
+        claims = ()
+    elif isinstance(command, ExportArtifact):
+        claims = (command.artifact_effect, command.export_effect)
+    if claims is not None and (
+        len(effects) != len(claims)
+        or any(
+            not all(
+                getattr(effect, field_name, None) == getattr(claim, field_name)
+                for field_name in ("kind", "target", "digest", "size")
+            )
+            for claim, effect in zip(claims, effects)
+        )
+    ):
+        raise TransitionTableError("invalid-transition-effect-binding")
     bound = Transition(transition.new_state, transition.events, effects)
     _register_transition(bound, registered[1], registered[2])
     return bound

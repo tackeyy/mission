@@ -166,17 +166,23 @@ from mission_application.review import (  # noqa: E402
     typed_review_input_ref,
 )
 from mission_application.artifact import (  # noqa: E402
+    ArtifactAppendRequest,
+    ArtifactExportRequest,
+    ArtifactInitRequest,
+    ArtifactPublishRequest,
+    ArtifactRenderRequest,
     EvidenceDecision,
     EvidenceEffect,
     EvidenceFailure,
-    artifact_append as decide_artifact_append,
-    artifact_export as decide_artifact_export,
-    artifact_init as decide_artifact_init,
-    artifact_publish as decide_artifact_publish,
-    artifact_render as decide_artifact_render,
     context_manifest as decide_context_manifest,
     progress_clear as decide_progress_clear,
     progress_update as decide_progress_update,
+    run_artifact_append,
+    run_artifact_export,
+    run_artifact_init,
+    run_artifact_publish,
+    run_artifact_render,
+    verify_published_artifact_effects,
 )
 from mission_application.planning import (  # noqa: E402
     PlanningFailure,
@@ -7401,37 +7407,6 @@ def _score_gate_summary(data: dict) -> str:
     )
 
 
-def _write_artifact(
-    cwd: Path,
-    published_files: _PublishedFilesTransaction,
-    data: dict,
-    artifact: dict,
-    *,
-    path: Path | None = None,
-) -> Path:
-    path_text = artifact.get("path")
-    path = path or (
-        _resolve_project_output_path(cwd, path_text)
-        if path_text
-        else _artifact_path(cwd, data.get("session_id") or resolve_session_id())
-    )
-    content = _render_artifact_markdown(data, artifact).encode("utf-8")
-    return published_files.add(
-        _publish_output_transaction(path, content)
-    ).path
-
-
-def _refresh_artifact_identity(cwd: Path, data: dict, artifact: dict, path: Path) -> None:
-    identity, _ = capture_artifact_identity(
-        cwd,
-        _state_relative_path(cwd, str(path)),
-        str(data.get("session_id") or resolve_session_id()),
-    )
-    invalidate_artifact_lint_observation(data)
-    artifact.update(identity)
-    data["artifact_applicability"] = "producing"
-
-
 def _artifact_gate_error(data: dict, cwd: Path) -> str | None:
     artifact = _artifact_state(data)
     if not artifact.get("required_for_pass"):
@@ -7531,7 +7506,7 @@ def _publish_evidence_effects(
     cwd: Path,
     effects: tuple[EvidenceEffect, ...],
     *,
-    path_overrides: dict[str, Path] | None = None,
+    path_overrides: Optional[dict[str, Path]] = None,
 ):
     """Publish already-bound bytes as one rollback-capable v4 file set."""
     with _PublishedFilesTransaction() as transaction:
@@ -7542,27 +7517,30 @@ def _publish_evidence_effects(
             item = transaction.add(
                 _publish_output_transaction(target, effect.content)
             )
-            _verify_published_file(item)
             published.append(item)
-        yield tuple(published)
+        _bind_artifact_publication(
+            cwd, effects, published, path_overrides=path_overrides
+        )
+        yield effects
 
 
 def _bind_artifact_publication(
     cwd: Path,
-    decision: EvidenceDecision,
+    effects: tuple[EvidenceEffect, ...],
     published: object,
+    *,
+    path_overrides: Optional[dict[str, Path]] = None,
 ) -> None:
-    items = tuple(published) if isinstance(published, (tuple, list)) else ()
-    artifact = decision.state.get("artifact")
-    if not isinstance(artifact, dict):
-        return
-    for effect, item in zip(decision.effects, items):
-        if effect.kind != "artifact":
-            continue
-        _refresh_artifact_identity(cwd, decision.state, artifact, item.path)
-        if "artifact" in decision.result:
-            decision.result["artifact"] = copy.deepcopy(artifact)
-        return
+    """Verify published artifact bytes; the legacy name is kept for ratchet history."""
+    verify_published_artifact_effects(
+        cwd,
+        effects,
+        published,
+        capture_artifact_identity,
+        _state_relative_path,
+        _verify_published_file,
+        path_overrides,
+    )
 
 
 def _run_evidence_decision(
@@ -7571,7 +7549,6 @@ def _run_evidence_decision(
     decide,
     *,
     stamp: bool,
-    bind_artifact: bool = False,
     path_overrides: dict[str, Path] | None = None,
 ) -> EvidenceDecision:
     repository = _legacy_evidence_repository(cwd, sf, stamp=stamp)
@@ -7579,11 +7556,6 @@ def _run_evidence_decision(
         decide,
         effect_transaction=lambda effects: _publish_evidence_effects(
             cwd, effects, path_overrides=path_overrides
-        ),
-        bind_published=(
-            (lambda decision, published: _bind_artifact_publication(cwd, decision, published))
-            if bind_artifact
-            else None
         ),
     )
 
@@ -7599,29 +7571,26 @@ def cmd_artifact_init(args):
         sys.exit(2)
     now = iso_now()
     try:
-        decision = _run_evidence_decision(
-            cwd,
-            sf,
-            lambda data: decide_artifact_init(
-                data,
-                now=now,
-                artifact_path=_state_relative_path(
-                    cwd,
-                    str(_artifact_path(cwd, data.get("session_id") or resolve_session_id())),
-                ),
-                format=args.format,
-                title=args.title or data.get("mission") or "Mission Artifact",
-                redaction_status=args.redaction_status,
-                required_for_pass=bool(args.required_for_pass),
-                render=lambda state, artifact: _render_artifact_markdown(state, artifact).encode("utf-8"),
+        request = ArtifactInitRequest(
+            now=now,
+            artifact_path=_state_relative_path(
+                cwd,
+                str(_artifact_path(cwd, sf.stem)),
             ),
-            stamp=True,
-            bind_artifact=True,
+            format=args.format,
+            title=args.title,
+            redaction_status=args.redaction_status,
+            required_for_pass=bool(args.required_for_pass),
+        )
+        result = run_artifact_init(
+            request,
+            _legacy_evidence_repository(cwd, sf, stamp=False),
+            _render_artifact_markdown,
         )
     except EvidenceFailure as exc:
         print(f"ERROR: {exc.code}", file=sys.stderr)
         sys.exit(2)
-    print(json.dumps({"ok": True, **decision.result}, indent=2 if args.json else None, ensure_ascii=False))
+    print(json.dumps({"ok": True, **result}, indent=2 if args.json else None, ensure_ascii=False))
 
 
 def cmd_artifact_append(args):
@@ -7633,23 +7602,14 @@ def cmd_artifact_append(args):
     section = _validate_artifact_section(args.section)
     content, source = _read_artifact_input(args)
     try:
-        decision = _run_evidence_decision(
-            cwd,
-            sf,
-            lambda data: decide_artifact_append(
-                data,
-                now=iso_now(),
-                section=section,
-                content=content,
-                source=source,
-                label=args.label,
-            ),
-            stamp=True,
+        result = run_artifact_append(
+            ArtifactAppendRequest(iso_now(), section, content, source, args.label),
+            _legacy_evidence_repository(cwd, sf, stamp=False),
         )
     except EvidenceFailure as exc:
         print(f"ERROR: {exc.code}", file=sys.stderr)
         sys.exit(2)
-    print(json.dumps({"ok": True, **decision.result}, indent=2 if args.json else None, ensure_ascii=False))
+    print(json.dumps({"ok": True, **result}, indent=2 if args.json else None, ensure_ascii=False))
 
 
 def cmd_artifact_render(args):
@@ -7659,22 +7619,15 @@ def cmd_artifact_render(args):
         print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
         sys.exit(1)
     try:
-        decision = _run_evidence_decision(
-            cwd,
-            sf,
-            lambda data: decide_artifact_render(
-                data,
-                now=iso_now(),
-                redaction_status=args.redaction_status,
-                render=lambda state, artifact: _render_artifact_markdown(state, artifact).encode("utf-8"),
-            ),
-            stamp=True,
-            bind_artifact=True,
+        result = run_artifact_render(
+            ArtifactRenderRequest(iso_now(), args.redaction_status),
+            _legacy_evidence_repository(cwd, sf, stamp=False),
+            _render_artifact_markdown,
         )
     except EvidenceFailure as exc:
         print(f"ERROR: {exc.code}", file=sys.stderr)
         sys.exit(2)
-    print(json.dumps({"ok": True, **decision.result}, indent=2 if args.json else None, ensure_ascii=False))
+    print(json.dumps({"ok": True, **result}, indent=2 if args.json else None, ensure_ascii=False))
 
 
 def cmd_artifact_export(args):
@@ -7688,23 +7641,15 @@ def cmd_artifact_export(args):
         sys.exit(2)
     destination = _state_relative_path(cwd, str(_resolve_evidence_output_path(cwd, args.to)))
     try:
-        decision = _run_evidence_decision(
-            cwd,
-            sf,
-            lambda data: decide_artifact_export(
-                data,
-                now=iso_now(),
-                destination=destination,
-                redaction_status=args.redaction_status,
-                render=lambda state, artifact: _render_artifact_markdown(state, artifact).encode("utf-8"),
-            ),
-            stamp=True,
-            bind_artifact=True,
+        result = run_artifact_export(
+            ArtifactExportRequest(iso_now(), destination, args.redaction_status),
+            _legacy_evidence_repository(cwd, sf, stamp=False),
+            _render_artifact_markdown,
         )
     except EvidenceFailure as exc:
         print(f"ERROR: {exc.code}", file=sys.stderr)
         sys.exit(2)
-    print(json.dumps({"ok": True, **decision.result}, indent=2 if args.json else None, ensure_ascii=False))
+    print(json.dumps({"ok": True, **result}, indent=2 if args.json else None, ensure_ascii=False))
 
 
 def cmd_artifact_publish(args):
@@ -7724,24 +7669,21 @@ def cmd_artifact_publish(args):
         )
         sys.exit(2)
     try:
-        decision = _run_evidence_decision(
-            cwd,
-            sf,
-            lambda data: decide_artifact_publish(
-                data,
-                now=iso_now(),
-                provider=args.provider,
-                destination=args.destination,
-                approval_text=args.approval_text,
-                render=lambda state, artifact: _render_artifact_markdown(state, artifact).encode("utf-8"),
+        result = run_artifact_publish(
+            ArtifactPublishRequest(
+                iso_now(),
+                args.provider,
+                args.destination,
+                args.approval_text,
+                args.require_confirm,
             ),
-            stamp=True,
-            bind_artifact=True,
+            _legacy_evidence_repository(cwd, sf, stamp=False),
+            _render_artifact_markdown,
         )
     except EvidenceFailure as exc:
         print(f"ERROR: {exc.code}", file=sys.stderr)
         sys.exit(2)
-    print(json.dumps({"ok": True, **decision.result}, indent=2 if args.json else None, ensure_ascii=False))
+    print(json.dumps({"ok": True, **result}, indent=2 if args.json else None, ensure_ascii=False))
 
 
 def _progress_archive_path(cwd: Path, data: dict, iteration: int) -> str:

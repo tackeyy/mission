@@ -62,11 +62,11 @@ def _set_foreign_lease(state_dir):
 def _forbid_artifact_write(module, monkeypatch):
     calls = []
 
-    def fail_write_artifact(*args, **kwargs):
+    def fail_publish_output(*args, **kwargs):
         calls.append((args, kwargs))
         raise AssertionError("artifact publication must not start before lease validation")
 
-    monkeypatch.setattr(module, "_write_artifact", fail_write_artifact)
+    monkeypatch.setattr(module, "_publish_output_transaction", fail_publish_output)
     return calls
 
 
@@ -146,6 +146,30 @@ def test_artifact_export_rejects_foreign_lease_without_mutating_artifact_file(
     assert "lease" in result.stderr.lower()
     assert artifact_path.read_bytes() == artifact_before
     assert not export_path.exists()
+    assert state_path.read_bytes() == state_before
+
+
+def test_artifact_append_rejects_foreign_lease_without_mutating_state(
+    state_dir, run_cli
+):
+    root = state_dir.parent
+    assert run_cli("artifact", "init", "--json", cwd=root).returncode == 0
+    state_path = _set_foreign_lease(state_dir)
+    state_before = state_path.read_bytes()
+
+    result = run_cli(
+        "artifact",
+        "append",
+        "--section",
+        "evidence",
+        "--text",
+        "must not be appended",
+        "--json",
+        cwd=root,
+    )
+
+    assert result.returncode == 2
+    assert "lease" in result.stderr.lower()
     assert state_path.read_bytes() == state_before
 
 
@@ -300,7 +324,7 @@ def test_artifact_init_rolls_back_when_identity_refresh_fails(state_dir, tmp_pat
     def fail_refresh(*_args, **_kwargs):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(module, "_refresh_artifact_identity", fail_refresh)
+    monkeypatch.setattr(module, "_bind_artifact_publication", fail_refresh)
 
     with pytest.raises(RuntimeError, match="boom"):
         module.cmd_artifact_init(argparse.Namespace(
@@ -333,7 +357,7 @@ def test_artifact_render_rolls_back_when_identity_refresh_fails(state_dir, monke
     def fail_refresh(*_args, **_kwargs):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(module, "_refresh_artifact_identity", fail_refresh)
+    monkeypatch.setattr(module, "_bind_artifact_publication", fail_refresh)
 
     with pytest.raises(RuntimeError, match="boom"):
         module.cmd_artifact_render(argparse.Namespace(
@@ -368,7 +392,7 @@ def test_artifact_export_rolls_back_when_identity_refresh_fails(state_dir, monke
     def fail_refresh(*_args, **_kwargs):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(module, "_refresh_artifact_identity", fail_refresh)
+    monkeypatch.setattr(module, "_bind_artifact_publication", fail_refresh)
 
     with pytest.raises(RuntimeError, match="boom"):
         module.cmd_artifact_export(argparse.Namespace(
@@ -379,6 +403,92 @@ def test_artifact_export_rolls_back_when_identity_refresh_fails(state_dir, monke
 
     assert artifact_path.read_bytes() == artifact_before
     assert not export_path.exists()
+
+
+@pytest.mark.parametrize("fail_on", (1, 2))
+def test_artifact_export_rolls_back_when_either_effect_publish_fails(
+    state_dir, monkeypatch, fail_on
+):
+    module = _state_module()
+    root = state_dir.parent
+    monkeypatch.chdir(root)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    module.cmd_artifact_init(argparse.Namespace(
+        format="markdown", title="Artifact Smoke", required_for_pass=True,
+        redaction_status="unchecked", json=True,
+    ))
+    module.cmd_artifact_render(argparse.Namespace(
+        redaction_status="reviewed", json=True,
+    ))
+    artifact_path = _artifact_path(root)
+    export_path = _export_path(root)
+    state_path = state_dir / "sessions" / "test.json"
+    artifact_before = artifact_path.read_bytes()
+    state_before = state_path.read_bytes()
+    original_publish = module._publish_output_transaction
+    calls = 0
+
+    def fail_selected_publish(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == fail_on:
+            raise RuntimeError("publish-failed")
+        return original_publish(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_publish_output_transaction", fail_selected_publish)
+
+    with pytest.raises(RuntimeError, match="publish-failed"):
+        module.cmd_artifact_export(argparse.Namespace(
+            to="docs/generated-artifact-smoke.md",
+            redaction_status="reviewed",
+            json=True,
+        ))
+
+    assert artifact_path.read_bytes() == artifact_before
+    assert not export_path.exists()
+    assert state_path.read_bytes() == state_before
+
+
+def test_artifact_export_rolls_back_both_effects_when_state_save_fails(
+    state_dir, monkeypatch
+):
+    module = _state_module()
+    root = state_dir.parent
+    monkeypatch.chdir(root)
+    monkeypatch.setenv("MISSION_SESSION_ID", "test")
+    monkeypatch.setenv("MISSION_LEASE_ID", "test-lease")
+    module.cmd_artifact_init(argparse.Namespace(
+        format="markdown", title="Artifact Smoke", required_for_pass=True,
+        redaction_status="unchecked", json=True,
+    ))
+    module.cmd_artifact_render(argparse.Namespace(
+        redaction_status="reviewed", json=True,
+    ))
+    artifact_path = _artifact_path(root)
+    export_path = _export_path(root)
+    state_path = state_dir / "sessions" / "test.json"
+    artifact_before = artifact_path.read_bytes()
+    state_before = state_path.read_bytes()
+
+    monkeypatch.setattr(
+        module,
+        "atomic_write_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("state-save-failed")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="state-save-failed"):
+        module.cmd_artifact_export(argparse.Namespace(
+            to="docs/generated-artifact-smoke.md",
+            redaction_status="reviewed",
+            json=True,
+        ))
+
+    assert artifact_path.read_bytes() == artifact_before
+    assert not export_path.exists()
+    assert state_path.read_bytes() == state_before
 
 
 def test_artifact_init_append_render_and_export(state_dir, run_cli, read_state):
