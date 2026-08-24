@@ -195,3 +195,13 @@ transaction 内の exact input から decision を生成して直接 stage す�
 限る。それまでは fail-closed で registry を保持する。
 
 詳細: [#622 `_ISSUED_TRANSITIONS` registry 包含性の実測精査](../design/622-registry-subsumption.md)
+
+## Implementation note (2026-08-24): U5-2 recoverable aggregate index
+
+Decision 3 の ordered write を #636 で実装した。legacy V4/V5 save は session ごとの
+durable intent を authority 更新前に公開し、`authority → aggregate.json → intent 削除`
+の順で完了する。途中終了後の recovery は intent に記録された add/remove を盲目的に
+再生せず、format-pinned な authoritative session state から現在の membership を再判定する。
+これにより authority commit 後の index failure という既存の外部契約を保ったまま、未記録の
+不整合窓をなくす。破損 index は自動回収では fail-closed とし、
+`repair-aggregate-index --execute` だけが全 authority 検証後に再構築する。

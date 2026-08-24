@@ -158,6 +158,9 @@ class LegacyV4Repository:
         backup_state: Callable[[], None],
         add_to_aggregate: Callable[[], None] | None = None,
         remove_from_aggregate: Callable[[], None] | None = None,
+        aggregate_recover: Callable[[], None] | None = None,
+        aggregate_prepare: Callable[[str], object] | None = None,
+        aggregate_finalize: Callable[[object], None] | None = None,
         clock: Callable[[], datetime] | None = None,
         lease_ttl_seconds: int = 15 * 60,
         effect_transaction: Callable[
@@ -172,6 +175,18 @@ class LegacyV4Repository:
         self._backup_state = backup_state
         self._add_to_aggregate = add_to_aggregate
         self._remove_from_aggregate = remove_from_aggregate
+        self._aggregate_recover = aggregate_recover
+        self._aggregate_prepare = aggregate_prepare
+        self._aggregate_finalize = aggregate_finalize
+        aggregate_callbacks = (
+            aggregate_recover,
+            aggregate_prepare,
+            aggregate_finalize,
+        )
+        if any(item is not None for item in aggregate_callbacks) and not all(
+            callable(item) for item in aggregate_callbacks
+        ):
+            raise ValueError("aggregate coordinator callbacks must be supplied together")
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._lease_ttl_seconds = lease_ttl_seconds
         self._effect_transaction = effect_transaction
@@ -207,6 +222,9 @@ class LegacyV4Repository:
         "_write_state",
         "_add_to_aggregate",
         "_remove_from_aggregate",
+        "_aggregate_recover",
+        "_aggregate_prepare",
+        "_aggregate_finalize",
         "_lock",
         "_effect_transaction",
     )
@@ -438,6 +456,8 @@ class LegacyV4Repository:
         aggregate_action: str | None = None,
     ) -> None:
         self._reject_reentrant_entry("save")
+        if aggregate_action not in {None, "add", "remove"}:
+            raise ValueError("unknown aggregate action")
         if self._format_guard is not None:
             self._guarded_call(self._format_guard)
         if self._pending:
@@ -445,18 +465,35 @@ class LegacyV4Repository:
             if pending is None:
                 raise FencedCommitError("transition-divergence", "save target is not a decided document")
             _verify_transition_claims(state, pending.claims, "save diverges from the decided transition")
-        if backup:
-            self._guarded_call(self._backup_state)
-        # Preserve the legacy writer call shape.  Several callers replace the
-        # writer with a one-argument fault injector; the administrative flag
-        # was only ever supplied for the routed-goal path.
-        if administrative:
-            self._guarded_call(self._write_state, state, administrative=True)
-        else:
-            self._guarded_call(self._write_state, state)
-        if aggregate_action not in {None, "add", "remove"}:
-            raise ValueError("unknown aggregate action")
+        prepared_intent = None
+        if self._aggregate_recover is not None:
+            self._guarded_call(self._aggregate_recover)
+        if aggregate_action is not None and self._aggregate_prepare is not None:
+            prepared_intent = self._guarded_call(
+                self._aggregate_prepare, aggregate_action
+            )
+        try:
+            if backup:
+                self._guarded_call(self._backup_state)
+            # Preserve the legacy writer call shape.  Several callers replace the
+            # writer with a one-argument fault injector; the administrative flag
+            # was only ever supplied for the routed-goal path.
+            if administrative:
+                self._guarded_call(self._write_state, state, administrative=True)
+            else:
+                self._guarded_call(self._write_state, state)
+        except BaseException:
+            if prepared_intent is not None and self._aggregate_recover is not None:
+                with contextlib.suppress(Exception):
+                    self._guarded_call(self._aggregate_recover)
+            raise
         if aggregate_action is None:
+            return
+        if prepared_intent is not None:
+            try:
+                self._guarded_call(self._aggregate_finalize, prepared_intent)
+            except Exception as exc:
+                raise AggregateIndexError(str(exc)) from exc
             return
         # attribute を guard の第 1 引数へ直接渡す（dict 収集の alias を作ると
         # 静的な境界検査が per-variable の追跡を要求されるため。Sol 7 巡目）。
@@ -528,6 +565,9 @@ class V5CompatibilityRepository:
         prepare_state: Callable[[dict], dict] | None = None,
         add_to_aggregate: Callable[[], None] | None = None,
         remove_from_aggregate: Callable[[], None] | None = None,
+        aggregate_recover: Callable[[], None] | None = None,
+        aggregate_prepare: Callable[[str], object] | None = None,
+        aggregate_finalize: Callable[[object], None] | None = None,
         lease_committed: Callable[[PendingLease, dict], None] | None = None,
         format_guard: Callable[[], object] | None = None,
         operation_id: str | None = None,
@@ -541,6 +581,18 @@ class V5CompatibilityRepository:
         self._prepare_state = prepare_state or (lambda state: state)
         self._add_to_aggregate = add_to_aggregate
         self._remove_from_aggregate = remove_from_aggregate
+        self._aggregate_recover = aggregate_recover
+        self._aggregate_prepare = aggregate_prepare
+        self._aggregate_finalize = aggregate_finalize
+        aggregate_callbacks = (
+            aggregate_recover,
+            aggregate_prepare,
+            aggregate_finalize,
+        )
+        if any(item is not None for item in aggregate_callbacks) and not all(
+            callable(item) for item in aggregate_callbacks
+        ):
+            raise ValueError("aggregate coordinator callbacks must be supplied together")
         self._lease_committed = lease_committed
         self._format_guard = format_guard
         if (operation_id is None) != (operation_command is None):
@@ -577,6 +629,9 @@ class V5CompatibilityRepository:
         "_prepare_state",
         "_add_to_aggregate",
         "_remove_from_aggregate",
+        "_aggregate_recover",
+        "_aggregate_prepare",
+        "_aggregate_finalize",
         "_lease_committed",
     )
 
@@ -695,6 +750,8 @@ class V5CompatibilityRepository:
     ) -> None:
         del backup, administrative
         self._reject_reentrant_entry("save")
+        if aggregate_action not in {None, "add", "remove"}:
+            raise ValueError("unknown aggregate action")
         if self._format_guard is not None:
             self._guarded_call(self._format_guard)
         pending = next((item for item in self._pending if item.document is state), None)
@@ -715,18 +772,37 @@ class V5CompatibilityRepository:
             separators=(",", ":"),
             allow_nan=False,
         ).encode("utf-8")
-        prepared = self._repository._stage_persistence(
-            admitted,
-            state_bytes=state_bytes,
-            effects=(),
-        )
-        self._repository.commit(prepared, prepared.precondition)
-        self._admitted = None
-        if self._lease_committed is not None:
-            self._guarded_call(self._lease_committed, admitted.pending_lease, proposed)
-        if aggregate_action not in {None, "add", "remove"}:
-            raise ValueError("unknown aggregate action")
+        prepared_intent = None
+        if self._aggregate_recover is not None:
+            self._guarded_call(self._aggregate_recover)
+        if aggregate_action is not None and self._aggregate_prepare is not None:
+            prepared_intent = self._guarded_call(
+                self._aggregate_prepare, aggregate_action
+            )
+        try:
+            prepared = self._repository._stage_persistence(
+                admitted,
+                state_bytes=state_bytes,
+                effects=(),
+            )
+            self._repository.commit(prepared, prepared.precondition)
+            self._admitted = None
+            if self._lease_committed is not None:
+                self._guarded_call(
+                    self._lease_committed, admitted.pending_lease, proposed
+                )
+        except BaseException:
+            if prepared_intent is not None and self._aggregate_recover is not None:
+                with contextlib.suppress(Exception):
+                    self._guarded_call(self._aggregate_recover)
+            raise
         if aggregate_action is not None:
+            if prepared_intent is not None:
+                try:
+                    self._guarded_call(self._aggregate_finalize, prepared_intent)
+                except Exception as exc:
+                    raise AggregateIndexError(str(exc)) from exc
+                return
             try:
                 if aggregate_action == "add":
                     self._guarded_call(self._add_to_aggregate)

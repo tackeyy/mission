@@ -2,8 +2,10 @@
 
 ## Status
 
-Proposed. Investigation and design only; no production code is changed by this
-document. The measured base is `main` at `ba5a87c`.
+Implemented on the #636 worktree against `main` at `148fa94`. The original
+investigation measurements in this document were taken at `ba5a87c`; the
+implementation preserves the protocol decision while adapting the insertion
+points to the post-#645 guarded callback boundary.
 
 ## 1. Decision summary
 
@@ -211,6 +213,12 @@ releases its own repository lock internally
 (`skills/mission/lib/mission_persistence/fenced_commit.py:4200-4203`), so the
 dedicated common boundary is required by the mixed-format path.
 
+Each save also holds a per-session advisory inflight lock from durable intent
+publication through reconciliation. A concurrent recovery skips a busy session
+instead of consuming the live save's pre-authority intent; process death
+releases the advisory lock while leaving the durable intent for the next
+recovery. This lock does not change the authority-before-index lock order.
+
 Membership is recovered from authority, not from the requested action:
 `active := loop_active is True and passes is not True and halt_reason is empty`.
 Those are the same control fields used by the active-session cleanup filter
@@ -295,9 +303,10 @@ change.
 |---|---|
 | `skills/mission/lib/mission_persistence/aggregate_index.py` | New intent schema, safe capture/validation, ordered prepare/finalize, recovery, and rebuild protocol. |
 | `plugins/mission/skills/mission/lib/mission_persistence/aggregate_index.py` | Byte-identical plugin mirror. |
-| `skills/mission/lib/mission_persistence/legacy_v4.py` | Invoke prepare before V4 write/V5 commit; finalize after authority; recover on transaction entry; preserve `save` signature and error type. Current insertion points are `skills/mission/lib/mission_persistence/legacy_v4.py:314-345` and `skills/mission/lib/mission_persistence/legacy_v4.py:516-560`. |
+| `skills/mission/lib/mission_persistence/legacy_v4.py` | Invoke prepare before V4 write/V5 commit; finalize after authority; recover on transaction entry; preserve `save` signature and error type. Implemented save boundaries are `skills/mission/lib/mission_persistence/legacy_v4.py:450-506` and `skills/mission/lib/mission_persistence/legacy_v4.py:743-811`. |
 | `plugins/mission/skills/mission/lib/mission_persistence/legacy_v4.py` | Byte-identical plugin mirror. |
-| `skills/mission/bin/mission-state.py` | Construct the coordinator, replace production direct add/remove helpers, and add check/execute repair adapter. Current injection is `skills/mission/bin/mission-state.py:9544-9588`. |
+| `skills/mission/lib/mission_application/runtime_guard.py` and plugin mirror | Route permission-preflight terminalization through `aggregate_action="remove"`; preserve its historical success result when post-authority index publication raises `AggregateIndexError`. |
+| `skills/mission/bin/mission-state.py` | Construct the coordinator, replace production direct add/remove helpers, and add check/execute repair adapter. Implemented repository injection is `skills/mission/bin/mission-state.py:9530-9582`. |
 | `plugins/mission/skills/mission/bin/mission-state.py` | Byte-identical plugin mirror. |
 | `skills/mission/tests/test_issue636_recoverable_aggregate_index.py` | New Red→Green protocol, fault-injection, concurrency, recovery, repair, and mirror tests. |
 | `skills/mission/tests/test_issue635_admin_commit_protocol.py` | Remove the four U5-2 direct-writer exclusions and assert production lifecycle wiring uses the protocol. Current exclusion is `skills/mission/tests/test_issue635_admin_commit_protocol.py:211-240`. |
@@ -314,12 +323,14 @@ types is required.
 1. V4 and V5 parameterized call-order tests assert intent prepare precedes the
    authoritative write/commit and index finalize follows it.
 2. Freeze current-main output for every `aggregate_action` producer: halt,
-   reactivate, refresh-pid reactivation, routed set, loop-active set, and
-   mark-passes. The producer inventory is evidenced at
+   reactivate, refresh-pid reactivation, routed set, loop-active set,
+   permission-preflight terminalization, and mark-passes. The producer
+   inventory is evidenced at
    `skills/mission/lib/mission_application/lifecycle.py:671-675`,
    `skills/mission/lib/mission_application/lifecycle.py:815-820`,
    `skills/mission/lib/mission_application/lifecycle.py:918-926`,
-   `skills/mission/lib/mission_application/lifecycle.py:1263-1281`, and
+   `skills/mission/lib/mission_application/lifecycle.py:1263-1281`,
+   `skills/mission/lib/mission_application/runtime_guard.py:421-484`, and
    `skills/mission/lib/mission_application/review.py:514-515`.
 3. Assert V4 and V5 authority output has the exact same recursively compared
    key set and value for the same captured input, independently of index/intent

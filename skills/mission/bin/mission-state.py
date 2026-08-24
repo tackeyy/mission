@@ -224,6 +224,7 @@ from mission_persistence.legacy_v4 import (  # noqa: E402
     LegacyV4Repository,
     V5CompatibilityRepository,
 )
+from mission_persistence.aggregate_index import RecoverableAggregateIndex  # noqa: E402
 from mission_persistence.repository_binding import (  # noqa: E402
     RepositoryFormat,
     RepositorySelectionError,
@@ -921,6 +922,16 @@ def aggregate_file(cwd: Path) -> Path:
     return state_dir(cwd) / "aggregate.json"
 
 
+def cmd_repair_aggregate_index(args) -> None:
+    """Check or explicitly rebuild the derived aggregate index from authority."""
+    coordinator = RecoverableAggregateIndex(
+        state_dir(Path.cwd()),
+        clock=lambda: parse_iso_datetime(iso_now()) or datetime.now(timezone.utc),
+    )
+    result = coordinator.repair(execute=bool(args.execute))
+    print(json.dumps(result, ensure_ascii=False))
+
+
 # os.walk スキャン時にプルーニングする巨大・無関係ツリー (この内側に mission state は作られない)。
 _PRUNE_DIRS = frozenset({
     "node_modules", ".git", ".venv", "venv", "__pycache__",
@@ -1038,75 +1049,6 @@ def _project_root_of(sf: Path) -> Path:
     if sf.name == "state.json" and sf.parent.name == ".mission-state":
         return sf.parent.parent
     raise ValueError(f"unsupported mission state path: {sf}")
-
-
-def _add_to_aggregate(cwd: Path, sid: str) -> None:
-    """active_sessions に sid を追加 (重複なし)。呼び出し元が StateLock を保持する前提。
-    壊れた aggregate.json は空扱いで復旧 (F-6 と同じ堅牢性)。"""
-    agg = aggregate_file(cwd)
-    data = {}
-    if agg.exists():
-        try:
-            data = json.loads(agg.read_text())
-        except Exception:
-            data = {}
-    sids = data.setdefault("active_sessions", [])
-    if sid not in sids:
-        sids.append(sid)
-        data["updated_at"] = iso_now()
-        atomic_write_json(agg, data)
-
-
-def _remove_from_aggregate(cwd: Path, sid: str) -> None:
-    """multi-session 完了/halt 時に aggregate.json の active_sessions から sid を除去 (dead entry 防止)."""
-    agg = aggregate_file(cwd)
-    if not agg.exists():
-        return
-    try:
-        data = json.loads(agg.read_text())
-    except Exception:
-        return
-    sids = data.get("active_sessions", [])
-    if sid in sids:
-        sids.remove(sid)
-        data["active_sessions"] = sids
-        data["updated_at"] = iso_now()
-        atomic_write_json(agg, data)
-
-
-def _load_aggregate_for_lifecycle(cwd: Path) -> tuple[Path, dict]:
-    """Load the rebuildable index strictly for A1 post-session updates."""
-    agg = aggregate_file(cwd)
-    if not agg.exists():
-        return agg, {}
-    data = _read_legacy_json_file(agg)
-    if not isinstance(data, dict):
-        raise ValueError("aggregate index must be an object")
-    sessions = data.get("active_sessions", [])
-    if not isinstance(sessions, list) or any(
-        not isinstance(value, str) for value in sessions
-    ):
-        raise ValueError("aggregate active_sessions must be a string array")
-    return agg, data
-
-
-def _add_to_aggregate_strict(cwd: Path, sid: str) -> None:
-    agg, data = _load_aggregate_for_lifecycle(cwd)
-    sessions = data.setdefault("active_sessions", [])
-    if sid not in sessions:
-        sessions.append(sid)
-        data["updated_at"] = iso_now()
-        atomic_write_json(agg, data)
-
-
-def _remove_from_aggregate_strict(cwd: Path, sid: str) -> None:
-    agg, data = _load_aggregate_for_lifecycle(cwd)
-    sessions = data.get("active_sessions", [])
-    if sid in sessions:
-        sessions.remove(sid)
-        data["active_sessions"] = sessions
-        data["updated_at"] = iso_now()
-        atomic_write_json(agg, data)
 
 
 def lock_file(cwd: Path) -> Path:
@@ -7564,6 +7506,12 @@ def _resolve_evidence_output_path(cwd: Path, path_text: str) -> Path:
 def _legacy_evidence_repository(cwd: Path, sf: Path, *, stamp: bool) -> LegacyV4Repository:
     """Bind A3 decisions to the current fenced v4 state transaction."""
     lease: dict[str, object] = {}
+    aggregate = RecoverableAggregateIndex(
+        state_dir(cwd),
+        session_id=sf.stem,
+        authority_format="legacy-v4",
+        clock=lambda: parse_iso_datetime(iso_now()) or datetime.now(timezone.utc),
+    )
 
     def read_state() -> dict:
         data = json.loads(sf.read_text(encoding="utf-8"))
@@ -7583,6 +7531,9 @@ def _legacy_evidence_repository(cwd: Path, sf: Path, *, stamp: bool) -> LegacyV4
             write_state=write_state,
             backup_state=lambda: backup_state(sf),
             effect_transaction=lambda effects: _publish_evidence_effects(cwd, effects),
+            aggregate_recover=aggregate.recover,
+            aggregate_prepare=aggregate.prepare,
+            aggregate_finalize=aggregate.finalize,
             format_guard=format_guard,
         ),
     )
@@ -9597,19 +9548,31 @@ def _legacy_lifecycle_repository(
                 atomic_write_json(sf, proposed)
 
     selected_session_id = session_id or sf.stem
-    return _select_repository_for_cli(
-        selected_session_id,
-        sf,
-        lambda format_guard: LegacyV4Repository(
+
+    def aggregate_coordinator(authority_format: str) -> RecoverableAggregateIndex:
+        return RecoverableAggregateIndex(
+            state_dir(cwd),
+            session_id=selected_session_id,
+            authority_format=authority_format,
+            clock=lambda: parse_iso_datetime(iso_now()) or datetime.now(timezone.utc),
+        )
+
+    def legacy_factory(format_guard):
+        coordinator = aggregate_coordinator("legacy-v4")
+        return LegacyV4Repository(
             lock=lambda: StateLock(lock_file(cwd)),
             read_state=read_state,
             write_state=write_state,
             backup_state=guarded_backup,
-            add_to_aggregate=lambda: _add_to_aggregate_strict(cwd, sf.stem),
-            remove_from_aggregate=lambda: _remove_from_aggregate_strict(cwd, sf.stem),
+            aggregate_recover=coordinator.recover,
+            aggregate_prepare=coordinator.prepare,
+            aggregate_finalize=coordinator.finalize,
             format_guard=format_guard,
-        ),
-        lambda format_guard: V5CompatibilityRepository(
+        )
+
+    def v5_factory(format_guard):
+        coordinator = aggregate_coordinator("v5")
+        return V5CompatibilityRepository(
             repository=LocalFencedRepository(
                 state_dir(cwd),
                 clock=_lease_now,
@@ -9632,8 +9595,9 @@ def _legacy_lifecycle_repository(
                 if stamp
                 else (lambda state: state)
             ),
-            add_to_aggregate=lambda: _add_to_aggregate_strict(cwd, sf.stem),
-            remove_from_aggregate=lambda: _remove_from_aggregate_strict(cwd, sf.stem),
+            aggregate_recover=coordinator.recover,
+            aggregate_prepare=coordinator.prepare,
+            aggregate_finalize=coordinator.finalize,
             lease_committed=lambda pending, state: _record_committed_v5_lease(
                 sf, state, pending
             ),
@@ -9641,7 +9605,13 @@ def _legacy_lifecycle_repository(
             operation_id=operation_id,
             operation_command=operation_command,
             operation_command_type=operation_command_type,
-        ),
+        )
+
+    return _select_repository_for_cli(
+        selected_session_id,
+        sf,
+        legacy_factory,
+        v5_factory,
     )
 
 
@@ -11379,9 +11349,6 @@ def _record_permission_probe_observation(
                 "because the session document could not be decoded",
                 file=sys.stderr,
             )
-        if result.halt_recorded:
-            with contextlib.suppress(OSError):
-                _remove_from_aggregate(cwd, sf.stem)
         return result.halt_recorded, result.terminal_outcome
     except UnsupportedSchemaVersionError:
         raise
@@ -17200,22 +17167,31 @@ def _terminalize_state_file(
         if isinstance(loaded_session_id, str) and loaded_session_id
         else sf.stem
     )
-    repository = _select_repository_for_cli(
-        selected_session_id,
-        sf,
-        lambda format_guard: LegacyV4Repository(
+
+    def janitor_coordinator(authority_format: str) -> RecoverableAggregateIndex:
+        return RecoverableAggregateIndex(
+            state_dir(proj),
+            session_id=selected_session_id,
+            authority_format=authority_format,
+            clock=lambda: parse_iso_datetime(iso_now()) or datetime.now(timezone.utc),
+        )
+
+    def legacy_janitor_factory(format_guard):
+        coordinator = janitor_coordinator("legacy-v4")
+        return LegacyV4Repository(
             lock=lambda: StateLock(lock_file(proj)),
             read_state=lambda: json.loads(sf.read_text(encoding="utf-8")),
             write_state=write_terminal_state,
             backup_state=lambda: backup_state(sf),
-            remove_from_aggregate=(
-                (lambda: _remove_from_aggregate_strict(proj, sf.stem))
-                if sf.parent.name == "sessions"
-                else None
-            ),
+            aggregate_recover=coordinator.recover,
+            aggregate_prepare=coordinator.prepare,
+            aggregate_finalize=coordinator.finalize,
             format_guard=format_guard,
-        ),
-        lambda format_guard: V5CompatibilityRepository(
+        )
+
+    def v5_janitor_factory(format_guard):
+        coordinator = janitor_coordinator("v5")
+        return V5CompatibilityRepository(
             repository=LocalFencedRepository(
                 state_dir(proj),
                 clock=_lease_now,
@@ -17226,13 +17202,17 @@ def _terminalize_state_file(
             # A janitor never reuses the stale writer's token. Expiry is
             # admitted as a fenced takeover by the v5 repository itself.
             presented_lease_id=None,
-            remove_from_aggregate=(
-                (lambda: _remove_from_aggregate_strict(proj, sf.stem))
-                if sf.parent.name == "sessions"
-                else None
-            ),
+            aggregate_recover=coordinator.recover,
+            aggregate_prepare=coordinator.prepare,
+            aggregate_finalize=coordinator.finalize,
             format_guard=format_guard,
-        ),
+        )
+
+    repository = _select_repository_for_cli(
+        selected_session_id,
+        sf,
+        legacy_janitor_factory,
+        v5_janitor_factory,
     )
     now = iso_now()
     try:
@@ -19456,6 +19436,17 @@ def _build_parser():
     p_clean2.add_argument("--execute", action="store_true", help="実際に halt 実行 (デフォルトは dry-run)")
     p_clean2.add_argument("--root", default=None, help="探索ルート (デフォルト: MISSION_SEARCH_ROOTS、未設定なら cwd)")
     p_clean2.set_defaults(func=cmd_cleanup_stale)
+
+    p_repair_aggregate = sub.add_parser(
+        "repair-aggregate-index",
+        help="authoritative session state から aggregate index を検査・明示修復",
+    )
+    p_repair_aggregate.add_argument(
+        "--execute",
+        action="store_true",
+        help="検査だけでなく aggregate index の再構築と pending intent 回収を実行",
+    )
+    p_repair_aggregate.set_defaults(func=cmd_repair_aggregate_index)
 
     p_list = sub.add_parser("list", help="全プロジェクトの active state.json 一覧")
     p_list.set_defaults(func=cmd_list)
