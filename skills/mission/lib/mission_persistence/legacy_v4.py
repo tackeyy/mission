@@ -821,6 +821,8 @@ class V5CompatibilityRepository:
         )
         state = _legacy_command_state(self._loaded_document, command)
         decision = decide(state, command)
+        if not isinstance(decision, Decision):
+            raise FencedCommitError("decision-invalid", "decision result type is invalid")
         if not decision.accepted:
             if decision.transition is not None or decision.rejection is None:
                 raise FencedCommitError("decision-invalid", "rejected decision is not closed")
