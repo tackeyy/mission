@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import importlib.metadata
 import json
 import math
-from pathlib import Path
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -45,49 +43,61 @@ RUNTIME_GUARD_COMMAND_OWNERS = {
 }
 
 
-def validate_provider_consent_path(path: Path, *, cwd: Optional[Path] = None) -> Path:
-    """Reject consent sidecars that could alias the session aggregate."""
-    resolved = path.expanduser().resolve(strict=False)
-    root = (cwd if cwd is not None else Path.cwd()).resolve(strict=False)
-    try:
-        relative = resolved.relative_to(root)
-    except ValueError:
-        relative = resolved
-    if ".mission-state" in relative.parts:
+def validate_provider_consent_path_parts(parts: tuple[str, ...]) -> None:
+    """Apply the consent-path policy to adapter-resolved path facts."""
+    if type(parts) is not tuple or any(type(part) is not str for part in parts):
         raise ValueError("provider-consent-session-path-forbidden")
-    return resolved
+    if any(part.casefold() == ".mission-state" for part in parts):
+        raise ValueError("provider-consent-session-path-forbidden")
 
 
 def validate_registered_entry_point_distribution(
-    entry_point: object,
-    configured_item: dict,
     *,
+    entry_point_name: str,
+    entry_point_value: str,
+    has_attached_distribution: bool,
+    distribution_name: str,
+    distribution_version: str,
+    owned_entry_points: tuple[tuple[str, str, str], ...],
+    configured_distribution: str,
+    configured_version: str,
     group: str,
 ) -> None:
-    """Bind an entry point to its configured distribution on Python 3.9+.
-
-    Python 3.9's grouped entry-point mapping exposes entries without ``.dist``.
-    In that case, the configured distribution must independently contain the
-    same group/name/value tuple before its metadata is accepted.
-    """
-    distribution = getattr(entry_point, "dist", None)
-    if distribution is None:
-        try:
-            distribution = importlib.metadata.distribution(configured_item["distribution"])
-        except importlib.metadata.PackageNotFoundError as exc:
-            raise ValueError("approval verifier distribution identity mismatch") from exc
-        owned = [
-            item for item in distribution.entry_points
-            if item.group == group
-            and item.name == getattr(entry_point, "name", None)
-            and item.value == getattr(entry_point, "value", None)
-        ]
-        if len(owned) != 1:
-            raise ValueError("approval verifier distribution identity mismatch")
+    """Validate adapter-observed entry point and distribution facts only."""
+    invalid = "approval verifier distribution identity mismatch"
     if (
-        str(distribution.metadata.get("Name") or "").lower()
-        != configured_item["distribution"].lower()
-        or str(distribution.version) != configured_item["version"]
+        type(entry_point_name) is not str
+        or not entry_point_name
+        or type(entry_point_value) is not str
+        or not entry_point_value
+        or type(has_attached_distribution) is not bool
+        or type(distribution_name) is not str
+        or not distribution_name
+        or type(distribution_version) is not str
+        or not distribution_version
+        or type(configured_distribution) is not str
+        or not configured_distribution
+        or type(configured_version) is not str
+        or not configured_version
+        or type(group) is not str
+        or not group
+        or type(owned_entry_points) is not tuple
+        or any(
+            type(item) is not tuple
+            or len(item) != 3
+            or any(type(value) is not str for value in item)
+            for item in owned_entry_points
+        )
+    ):
+        raise ValueError(invalid)
+    if not has_attached_distribution and sum(
+        item == (group, entry_point_name, entry_point_value)
+        for item in owned_entry_points
+    ) != 1:
+        raise ValueError(invalid)
+    if (
+        distribution_name.lower() != configured_distribution.lower()
+        or distribution_version != configured_version
     ):
         raise ValueError("approval verifier distribution identity mismatch")
 

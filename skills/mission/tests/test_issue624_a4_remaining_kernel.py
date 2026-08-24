@@ -223,6 +223,134 @@ def test_v4_codec_rejects_malformed_current_handoff_decision_only():
         decode_mission_state(json.dumps(document).encode("utf-8"))
 
 
+def test_planning_advance_rejects_historical_handoff_id_collision_without_mutation():
+    from mission_kernel import decode_mission_state, project_legacy_document
+    from mission_kernel.commands import AdvancePhase
+    from mission_kernel.model import Phase, PreparedHandoff
+    from mission_kernel.transitions import decide
+
+    historical = {
+        "handoff_id": "handoff_" + "a" * 32,
+        "plan_digest": _digest(),
+        "plan_generation": 4,
+        "plan_source": "provider",
+        "source_id": "inv_" + "1" * 32,
+        "selection_source": "automatic",
+        "iteration": 2,
+        "step_id": "step-1",
+        "result": "ok",
+    }
+    document = _handoff_document(decisions=[historical])
+    document.pop("executor_handoff")
+    document["phase"] = "planning"
+    source = json.dumps(document, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    state = decode_mission_state(source)
+    command = AdvancePhase(
+        Phase.EXECUTING,
+        PreparedHandoff(
+            "mission-handoff/1",
+            historical["handoff_id"],
+            state.plan,
+            ("step-1", "step-2"),
+        ),
+    )
+
+    rejected = decide(state, command)
+
+    assert rejected.accepted is False
+    assert rejected.transition is None
+    assert rejected.rejection.code == "handoff-id-collision"
+    assert state.legacy_passthrough.thaw() == document
+    assert source == json.dumps(document, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+    accepted = decide(
+        state,
+        AdvancePhase(
+            Phase.EXECUTING,
+            PreparedHandoff(
+                "mission-handoff/1", "handoff_distinct", state.plan, ("step-1", "step-2")
+            ),
+        ),
+    )
+    assert accepted.accepted is True
+    assert json.loads(project_legacy_document(accepted.transition.new_state))["decisions"] == [
+        historical
+    ]
+
+
+def test_v5_planning_advance_rejects_historical_handoff_id_collision():
+    from mission_kernel import decode_snapshot
+    from mission_kernel.commands import AdvancePhase
+    from mission_kernel.model import Phase, PreparedHandoff
+    from mission_kernel.transitions import decide
+
+    from .mission_state_fixture_corpus import canonical_json_bytes, current_v5_open_state
+
+    historical = {"handoff_id": "handoff-v5-historical", "step_id": "old-step"}
+    payload = current_v5_open_state()
+    payload["handoff"] = {"kind": "absent"}
+    payload["extensions"]["decisions"] = [historical]
+    source = canonical_json_bytes(payload)
+    snapshot = decode_snapshot(source)
+    state = snapshot.state
+
+    rejected = decide(
+        state,
+        AdvancePhase(
+            Phase.EXECUTING,
+            PreparedHandoff(
+                "mission-handoff/1", "handoff-v5-historical", state.plan, ("s1", "s2")
+            ),
+        ),
+    )
+
+    assert rejected.accepted is False
+    assert rejected.transition is None
+    assert rejected.rejection.code == "handoff-id-collision"
+    assert source == canonical_json_bytes(payload)
+
+    accepted = decide(
+        state,
+        AdvancePhase(
+            Phase.EXECUTING,
+            PreparedHandoff("mission-handoff/1", "handoff-v5-distinct", state.plan, ("s1", "s2")),
+        ),
+    )
+    assert accepted.accepted is True
+    assert accepted.transition.new_state.extensions.thaw()["decisions"] == [historical]
+
+
+def test_set_extension_fields_syncs_a4_projection_for_v4_and_v5():
+    from mission_kernel import decode_mission_state, decode_snapshot, project_legacy_document
+    from mission_kernel.codec_v5 import encode_v5_state
+    from mission_kernel.commands import SetExtensionFields
+    from mission_kernel.json_codec import freeze_json_value
+    from mission_kernel.transitions import decide
+
+    from .mission_state_fixture_corpus import canonical_json_bytes, current_v5_open_state
+
+    fields = freeze_json_value({"specialists_mode": "manual", "planning_policy_version": 0})
+    assert fields is not None
+    v4 = decode_mission_state(json.dumps(_handoff_document()).encode("utf-8"))
+    v4_result = decide(v4, SetExtensionFields(fields))
+    assert v4_result.accepted is True
+    assert v4_result.transition.new_state.a4.specialist_selection.mode == "manual"
+    assert v4_result.transition.new_state.a4.specialist_selection.planning_policy_version == 0
+    projected_v4 = json.loads(project_legacy_document(v4_result.transition.new_state))
+    assert projected_v4["specialists_mode"] == "manual"
+    assert projected_v4["planning_policy_version"] == 0
+
+    payload = current_v5_open_state()
+    snapshot = decode_snapshot(canonical_json_bytes(payload))
+    v5_result = decide(snapshot.state, SetExtensionFields(fields))
+    assert v5_result.accepted is True
+    assert v5_result.transition.new_state.a4.specialist_selection.mode == "manual"
+    assert v5_result.transition.new_state.a4.specialist_selection.planning_policy_version == 0
+    encoded_v5 = json.loads(encode_v5_state(v5_result.transition.new_state, snapshot.guidance))
+    assert encoded_v5["extensions"]["specialists_mode"] == "manual"
+    assert encoded_v5["extensions"]["planning_policy_version"] == 0
+
+
 def test_handoff_reducers_preserve_lineage_and_current_non_durable_verify_order():
     from mission_kernel import decode_mission_state
     from mission_kernel.commands import (
@@ -491,74 +619,96 @@ def test_specialists_consent_rejects_session_file_without_changing_session_bytes
     assert "provider-consent-session-path-forbidden" in result.stderr
     assert session.read_bytes() == original
 
+    case_variant = Path(str(session).replace(".mission-state", ".MISSION-STATE"))
+    variant_result = run_cli(
+        "specialists",
+        "consent",
+        "--provider",
+        "portable-provider",
+        "--consent-file",
+        str(case_variant),
+        cwd=tmp_path,
+    )
+    assert variant_result.returncode == 2
+    assert "provider-consent-session-path-forbidden" in variant_result.stderr
+    assert session.read_bytes() == original
 
-def test_provider_consent_path_rejects_other_project_session_aggregate(tmp_path):
+
+def test_provider_consent_path_policy_rejects_session_aggregate_parts():
     import pytest
 
-    from mission_application.runtime_guard import validate_provider_consent_path
+    from mission_application.runtime_guard import validate_provider_consent_path_parts
 
-    other_session = (
-        tmp_path.parent
-        / "other-project"
-        / ".mission-state"
-        / "sessions"
-        / "session.json"
-    )
+    for marker in (".mission-state", ".MISSION-STATE", ".Mission-State"):
+        with pytest.raises(ValueError, match="provider-consent-session-path-forbidden"):
+            validate_provider_consent_path_parts(
+                ("other-project", marker, "sessions", "session.json")
+            )
+
+    class LazyText(str):
+        def casefold(self):
+            raise AssertionError("application must not invoke subclass behavior")
+
     with pytest.raises(ValueError, match="provider-consent-session-path-forbidden"):
-        validate_provider_consent_path(other_session, cwd=tmp_path)
+        validate_provider_consent_path_parts((LazyText(".mission-state"),))
 
 
-def test_approval_verifier_distribution_without_dist_requires_one_owned_tuple(
-    monkeypatch,
-):
-    import importlib.metadata
+def test_approval_verifier_distribution_without_dist_requires_one_owned_tuple():
+    import inspect
     import pytest
 
     from mission_application.runtime_guard import (
         validate_registered_entry_point_distribution,
     )
 
-    class EntryPoint:
-        dist = None
-        name = "portable-verifier"
-        value = "portable.module:verify"
-
-    class OwnedEntryPoint:
-        group = "mission.approval_verifiers"
-        name = "portable-verifier"
-        value = "portable.module:verify"
-
-    class Distribution:
-        metadata = {"Name": "portable-verifiers"}
-        version = "1.2.3"
-        entry_points = [OwnedEntryPoint()]
-
-    configured = {"distribution": "portable-verifiers", "version": "1.2.3"}
-    monkeypatch.setattr(importlib.metadata, "distribution", lambda _name: Distribution())
+    facts = {
+        "entry_point_name": "portable-verifier",
+        "entry_point_value": "portable.module:verify",
+        "has_attached_distribution": False,
+        "distribution_name": "portable-verifiers",
+        "distribution_version": "1.2.3",
+        "owned_entry_points": (
+            ("mission.approval_verifiers", "portable-verifier", "portable.module:verify"),
+        ),
+        "configured_distribution": "portable-verifiers",
+        "configured_version": "1.2.3",
+        "group": "mission.approval_verifiers",
+    }
+    assert tuple(inspect.signature(validate_registered_entry_point_distribution).parameters) == tuple(facts)
     validate_registered_entry_point_distribution(
-        EntryPoint(), configured, group="mission.approval_verifiers"
+        **facts,
     )
 
-    class MismatchDistribution(Distribution):
-        entry_points = []
-
-    monkeypatch.setattr(
-        importlib.metadata, "distribution", lambda _name: MismatchDistribution()
-    )
     with pytest.raises(ValueError, match="approval verifier distribution identity mismatch"):
         validate_registered_entry_point_distribution(
-            EntryPoint(), configured, group="mission.approval_verifiers"
+            **{**facts, "owned_entry_points": ()},
         )
 
-    class DuplicateDistribution(Distribution):
-        entry_points = [OwnedEntryPoint(), OwnedEntryPoint()]
-
-    monkeypatch.setattr(
-        importlib.metadata, "distribution", lambda _name: DuplicateDistribution()
-    )
     with pytest.raises(ValueError, match="approval verifier distribution identity mismatch"):
         validate_registered_entry_point_distribution(
-            EntryPoint(), configured, group="mission.approval_verifiers"
+            **{
+                **facts,
+                "owned_entry_points": facts["owned_entry_points"] * 2,
+            },
+        )
+
+    class IoSentinel:
+        def __getattribute__(self, _name):
+            raise AssertionError("application must not inspect provider objects")
+
+    with pytest.raises(TypeError):
+        validate_registered_entry_point_distribution(IoSentinel())
+
+    class LazyText(str):
+        def lower(self):
+            raise AssertionError("application must not invoke subclass behavior")
+
+        def __eq__(self, _other):
+            raise AssertionError("application must not invoke subclass behavior")
+
+    with pytest.raises(ValueError, match="approval verifier distribution identity mismatch"):
+        validate_registered_entry_point_distribution(
+            **{**facts, "distribution_name": LazyText("portable-verifiers")}
         )
 
 

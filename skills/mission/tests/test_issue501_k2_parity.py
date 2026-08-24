@@ -293,6 +293,11 @@ def test_decide_and_guidance_share_one_named_transition_table():
         "artifact-record-publication",
         "artifact-render",
         "context-manifest-generate",
+        "executor-handoff-begin",
+        "executor-handoff-complete",
+        "executor-handoff-record-step",
+        "executor-handoff-reject-canonical-drift",
+        "executor-handoff-verify-step",
         "progress-clear",
         "progress-update",
         "verification-record",
@@ -301,6 +306,7 @@ def test_decide_and_guidance_share_one_named_transition_table():
         "reactivate",
         "resume-stale",
         "set-extension-fields",  # #617 批1-a
+        "specialists-record-recommendation",
     }
     assert "advance-phase" in {rule.rule_id for rule in primary_rules}
     assert "aggregate-reviews" in {rule.rule_id for rule in primary_rules}

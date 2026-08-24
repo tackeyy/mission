@@ -34,6 +34,7 @@ from mission_kernel.commands import (
 from mission_kernel.json_codec import freeze_json_value
 from mission_kernel.model import HaltCategory, Phase, PreparedHandoff
 from mission_kernel.transitions import Decision, decide
+from provider_public_contract import SpecialistPublicContractError
 from .compatibility import compatibility_delta
 from .ports import (
     AggregateIndexError,
@@ -1326,6 +1327,11 @@ def set_fields(
             ) from error
         try:
             typed_state = _typed_state(state)
+        except SpecialistPublicContractError:
+            # Preserve the established structured CLI rejection for unsafe
+            # legacy provider records.  Typed A4 decode now reaches this gate
+            # before the adapter-level validator, but must not erase its path.
+            raise
         except (TypeError, ValueError, UnicodeError) as error:
             raise LifecycleFailure(
                 "set requires a decodable session state: %s" % error,

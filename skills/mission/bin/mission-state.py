@@ -242,7 +242,7 @@ from mission_application.runtime_guard import (  # noqa: E402
     observe_stop_guard,
     record_permission_observation,
     resolve_guard_command_receipt,
-    validate_provider_consent_path,
+    validate_provider_consent_path_parts,
     validate_registered_entry_point_distribution,
 )
 from mission_persistence.legacy_v4 import (  # noqa: E402
@@ -4751,9 +4751,12 @@ def cmd_specialists_consent(args):
         print("ERROR: --provider is required", file=sys.stderr)
         sys.exit(2)
     try:
-        path = validate_provider_consent_path(
-            Path(args.consent_file) if args.consent_file else _default_consent_file()
-        )
+        path = (
+            Path(args.consent_file)
+            if args.consent_file
+            else _default_consent_file()
+        ).expanduser().resolve(strict=False)
+        validate_provider_consent_path_parts(tuple(path.parts))
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
@@ -11529,6 +11532,48 @@ def _run_strict_provider_backend(descriptor: dict, packet: bytes) -> dict:
     return result
 
 
+def _validate_registered_approval_entry_point_distribution(
+    entry_point: object, configured_item: dict, *, group: str
+) -> None:
+    """Perform host metadata lookup, then apply the pure application policy."""
+    invalid = "approval verifier distribution identity mismatch"
+    try:
+        entry_point_name = getattr(entry_point, "name")
+        entry_point_value = getattr(entry_point, "value")
+        attached_distribution = getattr(entry_point, "dist", None)
+        distribution = attached_distribution
+        if distribution is None:
+            distribution = importlib.metadata.distribution(configured_item["distribution"])
+        metadata = getattr(distribution, "metadata")
+        distribution_name = metadata.get("Name")
+        distribution_version = getattr(distribution, "version")
+        owned_entry_points = tuple(
+            (getattr(item, "group"), getattr(item, "name"), getattr(item, "value"))
+            for item in getattr(distribution, "entry_points")
+        )
+        configured_distribution = configured_item["distribution"]
+        configured_version = configured_item["version"]
+        validate_registered_entry_point_distribution(
+            entry_point_name=entry_point_name,
+            entry_point_value=entry_point_value,
+            has_attached_distribution=attached_distribution is not None,
+            distribution_name=distribution_name,
+            distribution_version=distribution_version,
+            owned_entry_points=owned_entry_points,
+            configured_distribution=configured_distribution,
+            configured_version=configured_version,
+            group=group,
+        )
+    except (
+        AttributeError,
+        OSError,
+        TypeError,
+        ValueError,
+        importlib.metadata.PackageNotFoundError,
+    ) as exc:
+        raise ValueError(invalid) from exc
+
+
 def _configured_approval_entry_point(cwd: Path, verifier_name: str):
     """Return a pinned, non-executable verifier descriptor for a child to load."""
     xdg = os.environ.get("XDG_CONFIG_HOME")
@@ -11554,7 +11599,7 @@ def _configured_approval_entry_point(cwd: Path, verifier_name: str):
     if len(matches) != 1:
         raise ValueError("approval verifier entry point is not installed")
     entry_point = matches[0]
-    validate_registered_entry_point_distribution(
+    _validate_registered_approval_entry_point_distribution(
         entry_point,
         configured_item,
         group=_APPROVAL_VERIFIER_ENTRY_POINT_GROUP,
@@ -11598,7 +11643,7 @@ def _approval_verifier_child(verifier, request: dict, channel) -> None:
             if len(matches) != 1:
                 raise ValueError("approval verifier entry point is not installed")
             entry_point = matches[0]
-            validate_registered_entry_point_distribution(
+            _validate_registered_approval_entry_point_distribution(
                 entry_point,
                 verifier,
                 group=_APPROVAL_VERIFIER_ENTRY_POINT_GROUP,

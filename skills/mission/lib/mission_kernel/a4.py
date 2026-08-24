@@ -144,7 +144,12 @@ def _validate_specialist_public_projection(document: Mapping[str, object]) -> No
     try:
         validate_specialist_public_state(probe)
     except SpecialistPublicContractError as exc:
-        raise A4ProjectionError("specialist-selection-invalid") from exc
+        # A malformed collection is an A4 decode failure.  A nested unsafe
+        # provider record must retain its structured public-contract path for
+        # the legacy adapter's safe error translation.
+        if exc.field_path.count("/") == 1:
+            raise A4ProjectionError("specialist-selection-invalid") from exc
+        raise
 
 
 def _frozen_object(value: object, code: str) -> FrozenJsonObject:
@@ -184,7 +189,7 @@ def _decode_specialist_selection(
     if len(active_ids) != len(set(active_ids)):
         raise A4ProjectionError("specialist-invocations-invalid")
     policy = document.get("planning_policy_version")
-    if policy is not None and (type(policy) is not int or policy < 1):
+    if policy is not None and (type(policy) is not int or policy not in {0, 1}):
         raise A4ProjectionError("specialist-selection-invalid")
     mode = document.get("specialists_mode")
     strategy = document.get("planning_strategy")
@@ -398,10 +403,15 @@ def decode_v4_a4_projection(document: Mapping[str, object], handoff: object) -> 
     raw_decisions = document.get("decisions", [])
     if not isinstance(raw_decisions, list):
         raise A4ProjectionError("executor-handoff-decisions-invalid")
-    current = tuple(
-        _decision(item)
-        for item in raw_decisions
-        if isinstance(item, Mapping) and item.get("handoff_id") == handoff_id
+    current = (
+        ()
+        if handoff_id is None
+        else tuple(
+            _decision(item)
+            for item in raw_decisions
+            if isinstance(item, Mapping)
+            and item.get("handoff_id") == handoff_id
+        )
     )
     if len({item.step_id for item in current}) != len(current):
         raise A4ProjectionError("executor-handoff-decisions-invalid")
@@ -432,11 +442,16 @@ def project_v4_a4(
     existing = document.get("decisions", [])
     if not isinstance(existing, list):
         raise A4ProjectionError("executor-handoff-decisions-invalid")
-    historical = [
-        item
-        for item in existing
-        if not isinstance(item, Mapping) or item.get("handoff_id") != handoff_id
-    ]
+    historical = (
+        list(existing)
+        if handoff_id is None
+        else [
+            item
+            for item in existing
+            if not isinstance(item, Mapping)
+            or item.get("handoff_id") != handoff_id
+        ]
+    )
     current = [_decision_json(item) for item in projection.current_handoff_decisions]
     if historical or current or "decisions" in document:
         document["decisions"] = [*historical, *current]

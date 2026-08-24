@@ -9,7 +9,7 @@ import math
 from pathlib import Path
 import re
 import weakref
-from typing import Any, Callable, Optional, Type
+from typing import Any, Callable, Mapping, Optional, Type
 
 from mission_common import terminal_outcome_for_halt
 from plan_contract import PlanContractError, canonical_plan_bytes
@@ -59,9 +59,11 @@ from .a4 import (
     ExecutorStepDecision,
     SpecialistRecommendationProjection,
     SpecialistSelectionProjection,
+    decode_v4_a4_projection,
     validate_specialist_recommendation_projection,
     validate_specialist_recommendation_shape,
 )
+from provider_public_contract import SpecialistPublicContractError
 from .artifact import (
     ArtifactRuleError,
     append_artifact_block_document,
@@ -101,8 +103,45 @@ class _Rejected(ValueError):
         self.code = code
 
 
+_A4_OWNED_LEGACY_FIELDS = frozenset(
+    {
+        "decisions",
+        "task_profile",
+        "specialist_registry_projection",
+        "specialists_decision",
+        "planning_provider_binding",
+        "specialists_candidates",
+        "specialists_selected",
+        "specialists_unavailable",
+        "specialists_ineligible",
+        "specialists_phase_plan",
+        "specialist_invocations",
+        "specialists_mode",
+        "planning_policy_version",
+        "planning_strategy",
+        "planning_contract_digest",
+    }
+)
+
+
 def _unbound_state(state: MissionState, **changes: Any) -> MissionState:
     return replace(state, snapshot_provenance=None, **changes)
+
+
+def _a4_authority_document(state: MissionState) -> dict[str, object]:
+    return (
+        state.legacy_passthrough.thaw()
+        if state.legacy_passthrough is not None
+        else state.extensions.thaw()
+    )
+
+
+def _sync_a4_projection(state: MissionState) -> MissionState:
+    try:
+        projection = decode_v4_a4_projection(_a4_authority_document(state), state.handoff)
+    except A4ProjectionError as exc:
+        raise _Rejected(exc.code) from exc
+    return _unbound_state(state, a4=projection)
 
 
 @dataclass(frozen=True)
@@ -567,7 +606,10 @@ def _apply_compatibility(
         for key in removals:
             document.pop(key, None)
         changes["legacy_passthrough"] = FrozenJsonObject(tuple(document.items()))
-    return _unbound_state(state, **changes)
+    next_state = _unbound_state(state, **changes)
+    if requested & _A4_OWNED_LEGACY_FIELDS:
+        next_state = _sync_a4_projection(next_state)
+    return next_state
 
 
 def _merge_extension_fields(
@@ -605,7 +647,10 @@ def _merge_extension_fields(
         document = dict(state.legacy_passthrough.items)
         document.update(fields.items)
         changes["legacy_passthrough"] = FrozenJsonObject(tuple(document.items()))
-    return _unbound_state(state, **changes)
+    next_state = _unbound_state(state, **changes)
+    if requested & _A4_OWNED_LEGACY_FIELDS:
+        next_state = _sync_a4_projection(next_state)
+    return next_state
 
 
 def _advance(state: MissionState, raw_command: object) -> Transition:
@@ -643,6 +688,13 @@ def _advance(state: MissionState, raw_command: object) -> Transition:
             )
         ):
             raise _Rejected("invalid-prepared-handoff")
+        historical_decisions = _a4_authority_document(state).get("decisions", [])
+        if any(
+            isinstance(item, Mapping)
+            and item.get("handoff_id") == command.prepared_handoff.handoff_id
+            for item in historical_decisions
+        ):
+            raise _Rejected("handoff-id-collision")
         new_handoff = command.prepared_handoff
     elif command.prepared_handoff is not None:
         raise _Rejected("unexpected-prepared-handoff")
@@ -1539,7 +1591,6 @@ def _record_specialist_recommendation(
             or isinstance(command.expected_complexity, str)
         )
         or type(command.expected_iteration) is not int
-        or command.expected_iteration != state.control.iteration
         or not isinstance(state.a4, A4Projection)
         or state.legacy_passthrough is None
     ):
@@ -1549,7 +1600,10 @@ def _record_specialist_recommendation(
     except A4ProjectionError as exc:
         raise _Rejected(exc.code) from exc
     document = state.legacy_passthrough.thaw()
-    if document.get("complexity") != command.expected_complexity:
+    if (
+        command.expected_iteration != state.control.iteration
+        or document.get("complexity") != command.expected_complexity
+    ):
         raise _Rejected("specialist-recommendation-context-mismatch")
     current = state.a4.specialist_selection
     if current.active_provider_invocation_ids:
@@ -1568,6 +1622,8 @@ def _record_specialist_recommendation(
         validate_specialist_recommendation_projection(projection)
     except A4ProjectionError as exc:
         raise _Rejected(exc.code) from exc
+    except SpecialistPublicContractError as exc:
+        raise _Rejected("specialist-selection-invalid") from exc
     selection_id = decision.get("selection_id")
     if not isinstance(selection_id, str) or not selection_id:
         raise _Rejected("specialist-recommendation-selection-invalid")
