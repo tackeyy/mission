@@ -567,6 +567,8 @@ def _decode_v5_object(document: Mapping[str, Any]) -> MissionState:
         for index, value in enumerate(_list(document["scores"], "$.scores"))
     )
     extensions = _freeze_object(_object(document["extensions"], "$.extensions"))
+    from .codec_v4 import _decode_a4_projection
+
     return MissionState(
         schema_origin=SchemaOrigin.V5,
         identity=identity,
@@ -579,6 +581,7 @@ def _decode_v5_object(document: Mapping[str, Any]) -> MissionState:
         lease=_decode_lease(document),
         extensions=extensions,
         legacy_passthrough=None,
+        a4=_decode_a4_projection(extensions.thaw(), handoff, "$.extensions"),
     )
 
 
@@ -715,6 +718,7 @@ def _lease_json(lease: FencedLease) -> dict[str, Any]:
 
 def _state_payload(state: MissionState, guidance: Any) -> dict[str, Any]:
     from .guidance import guidance_payload
+    from .a4 import project_v4_a4
 
     if isinstance(state.plan, AbsentPlan):
         plan = {"kind": "absent"}
@@ -724,6 +728,12 @@ def _state_payload(state: MissionState, guidance: Any) -> dict[str, Any]:
         raise _fail("invalid-value", "$.findings", "v5 requires materialized findings")
     if not isinstance(state.lease, FencedLease):
         raise _fail("unknown-variant", "$.lease.kind", "v5 requires fenced lease")
+    extensions = state.extensions.thaw()
+    project_v4_a4(
+        extensions,
+        state.a4,
+        state.handoff,
+    )
     return {
         "schema_version": 5,
         "identity": {
@@ -752,7 +762,7 @@ def _state_payload(state: MissionState, guidance: Any) -> dict[str, Any]:
         "scores": [_score_json(score) for score in state.scores],
         "lease": _lease_json(state.lease),
         "guidance": guidance_payload(guidance),
-        "extensions": state.extensions.thaw(),
+        "extensions": extensions,
     }
 
 

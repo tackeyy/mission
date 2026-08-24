@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 from mission_common import derive_terminal_outcome
 
+from .a4 import A4ProjectionError, decode_v4_a4_projection
 from .errors import MissionStateDecodeError
 from .json_codec import (
     decode_json_object,
@@ -683,12 +684,20 @@ def _decode_v4_object(document: Mapping[str, Any], frozen: FrozenJsonObject) -> 
         lease=_decode_legacy_lease(document),
         extensions=FrozenJsonObject(()),
         legacy_passthrough=frozen,
+        a4=_decode_a4_projection(document, handoff, "$.a4"),
     )
 
 
 def _decode_v4_state(source: bytes) -> MissionState:
     frozen = decode_json_object(source)
     return _decode_v4_object(thaw_json_object(frozen), frozen)
+
+
+def _decode_a4_projection(document: Mapping[str, object], handoff: object, path: str):
+    try:
+        return decode_v4_a4_projection(document, handoff)
+    except A4ProjectionError as exc:
+        raise _fail("invalid-value", path, exc.code) from exc
 
 
 def decode_mission_state(source: bytes) -> MissionState:
@@ -851,6 +860,8 @@ def _legacy_score_json(score: Score) -> dict[str, Any]:
 
 
 def project_legacy_document(state: MissionState) -> bytes:
+    from .a4 import project_v4_a4
+
     if state.legacy_passthrough is None:
         raise _fail("invalid-value", "$", "legacy passthrough is unavailable")
     document = state.legacy_passthrough.thaw()
@@ -911,6 +922,7 @@ def project_legacy_document(state: MissionState) -> bytes:
         document.pop("executor_handoff", None)
     else:
         document["executor_handoff"] = _handoff_json(state.handoff)
+    project_v4_a4(document, state.a4, state.handoff)
     input_refs = [reference for reference in state.reviews if isinstance(reference, ReviewInputRef)]
     if (
         state.schema_origin is SchemaOrigin.V5

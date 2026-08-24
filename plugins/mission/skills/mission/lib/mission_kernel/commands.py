@@ -10,6 +10,7 @@ from .json_codec import decode_json_object, encode_json_object, freeze_json_valu
 from .model import FrozenJsonObject
 from .model import HaltCategory, Phase, PreparedHandoff
 from .artifact import ArtifactEffectClaim
+from .a4 import SpecialistRecommendationProjection
 
 
 @dataclass(frozen=True)
@@ -207,6 +208,83 @@ class RecordVerification:
     checks: tuple[VerificationCheck, ...]
 
 
+@dataclass(frozen=True)
+class CanonicalPlanObservation:
+    path: str
+    digest: str
+    generation: int
+    source: str
+    source_id: str
+    selection_source: str
+    iteration: int
+    ordered_step_ids: tuple[str, ...]
+    dependencies: tuple[tuple[str, tuple[str, ...]], ...]
+    raw: bytes
+
+
+@dataclass(frozen=True)
+class BeginExecutorHandoff:
+    at: str
+    plan: CanonicalPlanObservation
+
+
+@dataclass(frozen=True)
+class VerifyExecutorStep:
+    at: str
+    step_id: str
+    plan: CanonicalPlanObservation
+
+
+@dataclass(frozen=True)
+class RecordExecutorStep:
+    at: str
+    step_id: str
+    result: str
+    plan: CanonicalPlanObservation
+
+
+@dataclass(frozen=True)
+class CompleteExecutorHandoff:
+    at: str
+    plan: CanonicalPlanObservation
+
+
+class CanonicalPlanRejectionCode(str, Enum):
+    PATH_INVALID = "canonical-plan-path-invalid"
+    FILE_INVALID = "canonical-plan-file-invalid"
+    DIGEST_DRIFT = "canonical-plan-digest-drift"
+    JSON_INVALID = "canonical-plan-json-invalid"
+    NOT_CANONICAL = "canonical-plan-not-canonical"
+    SCHEMA_INVALID = "canonical-plan-schema-invalid"
+    STEPS_INVALID = "canonical-plan-steps-invalid"
+    STEP_IDS_INVALID = "canonical-plan-step-ids-invalid"
+    GENERATION_MISMATCH = "canonical-plan-generation-mismatch"
+    SOURCE_MISMATCH = "canonical-plan-source-mismatch"
+    SOURCE_ID_MISMATCH = "canonical-plan-source_id-mismatch"
+    SELECTION_SOURCE_MISMATCH = "canonical-plan-selection_source-mismatch"
+    ITERATION_MISMATCH = "canonical-plan-iteration-mismatch"
+    PROVIDER_IMPORT_MISSING = "canonical-plan-provider-import-missing"
+    PROVIDER_CANDIDATE_MISMATCH = "canonical-plan-provider-candidate-mismatch"
+    PROVIDER_INVOCATION_MISMATCH = "canonical-plan-provider-invocation-mismatch"
+    PROVIDER_SOURCE_DIGEST_MISMATCH = "canonical-plan-provider-source-digest-mismatch"
+    SOURCE_RECORD_MISSING = "canonical-plan-source-record-missing"
+
+
+@dataclass(frozen=True)
+class RejectExecutorHandoff:
+    at: str
+    attempted_operation: str
+    reason_code: CanonicalPlanRejectionCode
+
+
+@dataclass(frozen=True)
+class RecordSpecialistRecommendation:
+    at: str
+    expected_complexity: Optional[str]
+    expected_iteration: int
+    projection: SpecialistRecommendationProjection
+
+
 # Fields whose value is fixed at genesis or owned by the pass gate; a generic
 # write would forge identity or completion evidence.  ``init`` recomputes
 # mission identity, and pass-gate facts only move through their own commands.
@@ -278,6 +356,8 @@ Command = Union[
     AdvancePhase,
     AppendArtifactBlock,
     ClearProgress,
+    BeginExecutorHandoff,
+    CompleteExecutorHandoff,
     ExportArtifact,
     GenerateContextManifest,
     InitializeArtifact,
@@ -286,10 +366,14 @@ Command = Union[
     Reactivate,
     RecordArtifactPublication,
     RecordVerification,
+    RecordExecutorStep,
+    RecordSpecialistRecommendation,
+    RejectExecutorHandoff,
     RenderArtifact,
     ResumeStale,
     SetExtensionFields,
     UpdateProgress,
+    VerifyExecutorStep,
 ]
 
 
@@ -297,6 +381,8 @@ _COMMAND_TYPES = {
     AdvancePhase: "advance-phase",
     AppendArtifactBlock: "append-artifact-block",
     ClearProgress: "clear-progress",
+    BeginExecutorHandoff: "executor-handoff-begin",
+    CompleteExecutorHandoff: "executor-handoff-complete",
     ExportArtifact: "export-artifact",
     GenerateContextManifest: "generate-context-manifest",
     InitializeArtifact: "initialize-artifact",
@@ -305,10 +391,14 @@ _COMMAND_TYPES = {
     Reactivate: "reactivate",
     RecordArtifactPublication: "record-artifact-publication",
     RecordVerification: "record-verification",
+    RecordExecutorStep: "executor-handoff-record-step",
+    RecordSpecialistRecommendation: "specialists-record-recommendation",
+    RejectExecutorHandoff: "executor-handoff-reject-canonical-drift",
     RenderArtifact: "render-artifact",
     ResumeStale: "resume-stale",
     SetExtensionFields: "set-extension-fields",
     UpdateProgress: "update-progress",
+    VerifyExecutorStep: "executor-handoff-verify-step",
 }
 
 

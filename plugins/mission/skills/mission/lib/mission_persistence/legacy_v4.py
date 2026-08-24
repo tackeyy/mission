@@ -21,6 +21,7 @@ from mission_application.ports import (
     AggregateIndexError,
     AuditMetadata,
     LegacyCommandExecutionResult,
+    PreparedTransitionOperation,
 )
 from mission_kernel.commands import (
     AdvancePhase,
@@ -148,6 +149,8 @@ def _command_with_missing_metadata(
         return command
     if set(metadata) - _METADATA_FIELDS:
         raise FencedCommitError("request-invalid", "metadata field is not closed")
+    if not hasattr(command, "compatibility"):
+        return command
     compatibility = command.compatibility
     if not isinstance(compatibility, CompatibilityPayload):
         raise FencedCommitError("request-invalid", "command compatibility is invalid")
@@ -615,7 +618,9 @@ class LegacyV4Repository:
 
     def execute_transition_effects(
         self,
-        prepare: Callable[[dict], PreparedArtifactOperation],
+        prepare: Callable[
+            [dict], PreparedArtifactOperation | PreparedTransitionOperation
+        ],
         *,
         effect_transaction: Callable[
             [tuple[EvidenceEffect, ...]], ContextManager[object]
@@ -624,8 +629,11 @@ class LegacyV4Repository:
         verify_published: Callable[[tuple[EvidenceEffect, ...], object], None]
         | None = None,
         backup: bool = True,
-    ) -> tuple[PreparedArtifactOperation, LegacyCommandExecutionResult]:
-        """Artifact compatibility wrapper over the shared evidence core."""
+    ) -> tuple[
+        PreparedArtifactOperation | PreparedTransitionOperation,
+        LegacyCommandExecutionResult,
+    ]:
+        """Compatibility wrapper over the shared typed evidence core."""
 
         def publish(_prepared, effects):
             # 明示引数のみをここで包む。省略時の fallback（self._effect_transaction）
@@ -642,8 +650,8 @@ class LegacyV4Repository:
 
         return self.execute_evidence_transition_effects(
             prepare,
-            operation_type=PreparedArtifactOperation,
-            operation_error="artifact-operation-invalid",
+            operation_type=(PreparedArtifactOperation, PreparedTransitionOperation),
+            operation_error="transition-operation-invalid",
             effect_transaction=publish if effect_transaction is not None else None,
             verify_published=verify,
             backup=backup,
@@ -1023,5 +1031,45 @@ class V5CompatibilityRepository:
                     self._guarded_call(self._remove_from_aggregate)
             except Exception as exc:
                 raise AggregateIndexError(str(exc)) from exc
+
+    def execute_transition_effects(
+        self,
+        prepare: Callable[
+            [dict], PreparedArtifactOperation | PreparedTransitionOperation
+        ],
+        *,
+        effect_transaction: object | None = None,
+        verify_published: object | None = None,
+        backup: bool = True,
+    ) -> tuple[
+        PreparedArtifactOperation | PreparedTransitionOperation,
+        LegacyCommandExecutionResult,
+    ]:
+        """Reuse the typed transition executor for effect-free v5 commands."""
+        del effect_transaction, verify_published, backup
+        self._reject_reentrant_entry("execute_transition_effects")
+        with self.transaction():
+            current = self.load()
+            with self._callback_guard():
+                prepared = prepare(copy.deepcopy(current))
+            if not isinstance(
+                prepared, (PreparedArtifactOperation, PreparedTransitionOperation)
+            ):
+                raise ValueError("transition-operation-invalid")
+            effects = self.validate_effects(prepared.effects)
+            if effects:
+                raise ValueError("v5-transition-effects-not-supported")
+            if self.operation_replayed:
+                frozen = freeze_json_value(current)
+                assert isinstance(frozen, FrozenJsonObject)
+                return prepared, LegacyCommandExecutionResult(
+                    None, frozen, replayed=True
+                )
+            execution = self.execute(prepared.command)
+            if not isinstance(execution, LegacyCommandExecutionResult):
+                raise FencedCommitError(
+                    "decision-invalid", "typed transition result is invalid"
+                )
+            return prepared, execution
 
     validate_effects = staticmethod(LegacyV4Repository.validate_effects)

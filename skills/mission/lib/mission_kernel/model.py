@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 import re
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
+
+if TYPE_CHECKING:
+    from .a4 import A4Projection
 
 
 class SchemaOrigin(str, Enum):
@@ -480,6 +483,7 @@ class MissionState:
     lease: Lease
     extensions: FrozenJsonObject
     legacy_passthrough: Optional[FrozenJsonObject]
+    a4: "A4Projection" = field(default_factory=lambda: _empty_a4_projection())
     snapshot_provenance: Optional[SnapshotProvenance] = None
     _snapshot_binding: Optional[object] = field(
         default=None, init=False, repr=False, compare=False
@@ -488,6 +492,12 @@ class MissionState:
     @property
     def terminal_outcome(self) -> Optional[TerminalOutcome]:
         return self.control.terminal_outcome
+
+
+def _empty_a4_projection() -> "A4Projection":
+    from .a4 import EMPTY_A4_PROJECTION
+
+    return EMPTY_A4_PROJECTION
 
 
 def thaw_json_value(value: FrozenJsonValue) -> object:

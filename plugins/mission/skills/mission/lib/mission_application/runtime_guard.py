@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib.metadata
 import json
 import math
+from pathlib import Path
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -41,6 +43,53 @@ RUNTIME_GUARD_COMMAND_OWNERS = {
     "permission-preflight": "A5.runtime-guard",
     "stop-guard-observe": "A5.runtime-guard",
 }
+
+
+def validate_provider_consent_path(path: Path, *, cwd: Optional[Path] = None) -> Path:
+    """Reject consent sidecars that could alias the session aggregate."""
+    resolved = path.expanduser().resolve(strict=False)
+    root = (cwd if cwd is not None else Path.cwd()).resolve(strict=False)
+    try:
+        relative = resolved.relative_to(root)
+    except ValueError:
+        relative = resolved
+    if ".mission-state" in relative.parts:
+        raise ValueError("provider-consent-session-path-forbidden")
+    return resolved
+
+
+def validate_registered_entry_point_distribution(
+    entry_point: object,
+    configured_item: dict,
+    *,
+    group: str,
+) -> None:
+    """Bind an entry point to its configured distribution on Python 3.9+.
+
+    Python 3.9's grouped entry-point mapping exposes entries without ``.dist``.
+    In that case, the configured distribution must independently contain the
+    same group/name/value tuple before its metadata is accepted.
+    """
+    distribution = getattr(entry_point, "dist", None)
+    if distribution is None:
+        try:
+            distribution = importlib.metadata.distribution(configured_item["distribution"])
+        except importlib.metadata.PackageNotFoundError as exc:
+            raise ValueError("approval verifier distribution identity mismatch") from exc
+        owned = [
+            item for item in distribution.entry_points
+            if item.group == group
+            and item.name == getattr(entry_point, "name", None)
+            and item.value == getattr(entry_point, "value", None)
+        ]
+        if len(owned) != 1:
+            raise ValueError("approval verifier distribution identity mismatch")
+    if (
+        str(distribution.metadata.get("Name") or "").lower()
+        != configured_item["distribution"].lower()
+        or str(distribution.version) != configured_item["version"]
+    ):
+        raise ValueError("approval verifier distribution identity mismatch")
 
 STOP_GUARD_SCHEMA = "mission-stop-guard/1"
 _STOP_KEYS = frozenset(
