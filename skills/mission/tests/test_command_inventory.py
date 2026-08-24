@@ -55,9 +55,6 @@ FORBIDDEN_SESSION_WRITER_CALLS = {"StateLock", "atomic_write_json"}
 ALLOWED_NON_C2_CALL_SITES = {
     # C1-owned initialization writes and locks.  These exemptions are scoped
     # to cmd_init so another entry cannot inherit them by calling the helper.
-    ("cmd_init", "_guarded_init_state_lock", "StateLock"),
-    ("cmd_init", "_initialize_legacy_v4", "atomic_write_json"),
-    ("cmd_init", "_initialize_new_v5_session", "StateLock"),
     # These helpers never write session state: the first only maintains the
     # rebuildable aggregate index, and the second only locks review-lineage
     # serialization.  Their C2 exemption is therefore safe even when the C2
