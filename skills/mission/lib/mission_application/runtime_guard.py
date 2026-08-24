@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import importlib.metadata
 import json
 import math
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
-from pathlib import Path
 from typing import Callable, ContextManager, Optional, Protocol, Tuple, Union
 
 from activity_segments import (
@@ -49,6 +47,21 @@ class RuntimeGuardFailure(ValueError):
     """A fail-closed runtime-guard request rejection."""
 
 
+@dataclass(frozen=True)
+class ResolvedProviderConsentPathObservation:
+    """The one adapter-resolved representation used for policy and I/O."""
+
+    parts: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ProviderConsentRequest:
+    """Pure consent policy input with adapter-resolved path facts."""
+
+    provider: object
+    resolved_path: ResolvedProviderConsentPathObservation
+
+
 def validate_provider_consent_path_parts(parts: tuple[str, ...]) -> None:
     """Apply the consent-path policy to adapter-resolved path facts."""
     if type(parts) is not tuple or any(type(part) is not str for part in parts):
@@ -58,18 +71,40 @@ def validate_provider_consent_path_parts(parts: tuple[str, ...]) -> None:
 
 
 def resolve_provider_consent_path(
-    consent_file: object,
-    default_path: Path,
-) -> Path:
-    """Resolve and validate the separate provider-consent aggregate path."""
+    resolved: ResolvedProviderConsentPathObservation,
+) -> tuple[str, ...]:
+    """Validate and return the exact path representation used by the adapter."""
     try:
-        path = (Path(consent_file) if consent_file else default_path).expanduser().resolve(
-            strict=False
-        )
-        validate_provider_consent_path_parts(tuple(path.parts))
+        if type(resolved) is not ResolvedProviderConsentPathObservation:
+            raise ValueError("provider-consent-path-resolution-invalid")
+        validate_provider_consent_path_parts(resolved.parts)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise RuntimeGuardFailure(str(exc)) from exc
-    return path
+    return resolved.parts
+
+
+def validate_provider_consent_request(
+    request: ProviderConsentRequest,
+) -> tuple[str, tuple[str, ...]]:
+    """Normalize the provider and validate the exact path used for consent I/O."""
+    if type(request) is not ProviderConsentRequest or type(request.provider) is not str:
+        raise RuntimeGuardFailure("--provider is required")
+    provider = request.provider.strip()
+    if not provider:
+        raise RuntimeGuardFailure("--provider is required")
+    return provider, resolve_provider_consent_path(request.resolved_path)
+
+
+@dataclass(frozen=True)
+class RegisteredEntryPointDistributionObservation:
+    """Adapter-observed entry point and distribution facts."""
+
+    entry_point_name: str
+    entry_point_value: str
+    has_attached_distribution: bool
+    distribution_name: str
+    distribution_version: str
+    owned_entry_points: tuple[tuple[str, str, str], ...]
 
 
 def validate_registered_entry_point_distribution(
@@ -124,53 +159,31 @@ def validate_registered_entry_point_distribution(
 
 
 def validate_registered_approval_entry_point_distribution(
-    entry_point: object,
+    observed: RegisteredEntryPointDistributionObservation,
     configured_item: object,
     *,
     group: str,
-    distribution_for: Optional[Callable[[str], object]] = None,
 ) -> None:
-    """Observe host metadata and apply the closed distribution policy."""
+    """Apply closed policy to adapter-observed distribution facts."""
     invalid = "approval verifier distribution identity mismatch"
     try:
-        entry_point_name = getattr(entry_point, "name")
-        entry_point_value = getattr(entry_point, "value")
-        attached_distribution = getattr(entry_point, "dist", None)
-        distribution = attached_distribution
-        if distribution is None:
-            resolver = (
-                importlib.metadata.distribution
-                if distribution_for is None
-                else distribution_for
-            )
-            distribution = resolver(configured_item["distribution"])
-        metadata = getattr(distribution, "metadata")
-        distribution_name = metadata.get("Name")
-        distribution_version = getattr(distribution, "version")
-        owned_entry_points = tuple(
-            (getattr(item, "group"), getattr(item, "name"), getattr(item, "value"))
-            for item in getattr(distribution, "entry_points")
-        )
-        configured_distribution = configured_item["distribution"]
-        configured_version = configured_item["version"]
+        if (
+            type(observed) is not RegisteredEntryPointDistributionObservation
+            or type(configured_item) is not dict
+        ):
+            raise ValueError(invalid)
         validate_registered_entry_point_distribution(
-            entry_point_name=entry_point_name,
-            entry_point_value=entry_point_value,
-            has_attached_distribution=attached_distribution is not None,
-            distribution_name=distribution_name,
-            distribution_version=distribution_version,
-            owned_entry_points=owned_entry_points,
-            configured_distribution=configured_distribution,
-            configured_version=configured_version,
+            entry_point_name=observed.entry_point_name,
+            entry_point_value=observed.entry_point_value,
+            has_attached_distribution=observed.has_attached_distribution,
+            distribution_name=observed.distribution_name,
+            distribution_version=observed.distribution_version,
+            owned_entry_points=observed.owned_entry_points,
+            configured_distribution=configured_item["distribution"],
+            configured_version=configured_item["version"],
             group=group,
         )
-    except (
-        AttributeError,
-        OSError,
-        TypeError,
-        ValueError,
-        importlib.metadata.PackageNotFoundError,
-    ) as exc:
+    except (AttributeError, OSError, TypeError, ValueError) as exc:
         raise ValueError(invalid) from exc
 
 STOP_GUARD_SCHEMA = "mission-stop-guard/1"

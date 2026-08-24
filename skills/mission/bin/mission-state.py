@@ -131,6 +131,7 @@ from mission_application.lifecycle import (  # noqa: E402
     activity_end as run_activity_end,
     activity_start as run_activity_start,
     advance as run_advance,
+    initialization_operation_id,
     initialize as run_initialize,
     mark_halt as run_mark_halt,
     prepare_supersede_review_write,
@@ -142,6 +143,7 @@ from mission_application.lifecycle import (  # noqa: E402
     diagnose_terminalizable_state,
     real_terminalizable_state,
     repository_metadata,
+    should_route_init_to_goal,
     supersede_review_projection,
     update_project_root as run_update_project_root,
 )
@@ -234,6 +236,9 @@ from mission_application.runtime_guard import (  # noqa: E402
     PermissionHaltRejected,
     PermissionObservationRequest,
     PermissionProbe,
+    ProviderConsentRequest,
+    RegisteredEntryPointDistributionObservation,
+    ResolvedProviderConsentPathObservation,
     SessionSelection,
     SessionSelectionReason,
     StopGuardObserveCommand,
@@ -242,8 +247,8 @@ from mission_application.runtime_guard import (  # noqa: E402
     decide_stop_guard,
     observe_stop_guard,
     record_permission_observation,
-    resolve_provider_consent_path,
     resolve_guard_command_receipt,
+    validate_provider_consent_request,
     validate_registered_approval_entry_point_distribution,
 )
 from mission_persistence.legacy_v4 import (  # noqa: E402
@@ -4747,16 +4752,23 @@ def cmd_specialists(args):
 
 
 def cmd_specialists_consent(args):
-    provider = args.provider.strip()
-    if not provider:
-        print("ERROR: --provider is required", file=sys.stderr)
-        sys.exit(2)
     default_path = _default_consent_file()
+    resolved = (
+        Path(args.consent_file) if args.consent_file else default_path
+    ).expanduser().resolve(strict=False)
     try:
-        path = resolve_provider_consent_path(args.consent_file, default_path)
+        provider, _validated_parts = validate_provider_consent_request(
+            ProviderConsentRequest(
+                provider=args.provider,
+                resolved_path=ResolvedProviderConsentPathObservation(
+                    parts=tuple(resolved.parts)
+                ),
+            )
+        )
     except RuntimeGuardFailure as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
+    path = resolved
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {}
     if path.exists():
@@ -8160,13 +8172,7 @@ def _initialize_legacy_v4(args, *, write_state, lock_state: bool = True):
     # #304: --issue-ref 付き (Issue-bound = 統治要求) は routing 対象外。company-os 等の
     # wrapper は init 直後の strict preflight で active state を要求するため、
     # routed (state 不生成) だと mandatory halt の事故経路になる。
-    if (
-        initial.get("complexity") == "Simple"
-        and not getattr(args, "force_mission", False)
-        and not _user_tier
-        and not initial.get("review_tier_signals")
-        and not getattr(args, "issue_ref", None)
-    ):
+    if should_route_init_to_goal(initial, args, _user_tier):
         dispatch_fields = _goal_dispatch_route_fields(initial)
         print(json.dumps({
             "route": "goal",
@@ -8427,10 +8433,7 @@ def _initialize_v5_state(args, path: Path, initial: dict) -> None:
         allow_nan=False,
     ).encode("utf-8")
     command, command_bytes = _canonical_init_command(args)
-    operation_digest = hashlib.sha256(
-        session_id.encode("utf-8") + b"\x00" + command_bytes
-    ).hexdigest()
-    operation_id = "init:" + operation_digest
+    operation_id = initialization_operation_id(session_id, command_bytes)
     blobs = VerifiedBlobSet(())
     request = ExecutionRequest(
         session_id=session_id,
@@ -8485,11 +8488,6 @@ def cmd_init(args):
         if inspected.format is RepositoryFormat.V5:
             print("ERROR: session-already-initialized", file=sys.stderr)
             raise SystemExit(2)
-        selected_format = RepositoryFormat.LEGACY_V4
-    else:
-        selected_format = NEW_SESSION_REPOSITORY_FORMAT
-
-    if selected_format is RepositoryFormat.LEGACY_V4:
         run_initialize(
             LegacyV4InitializerRepository(
                 initialize_state=_initialize_legacy_v4,
@@ -11554,8 +11552,37 @@ def _configured_approval_entry_point(cwd: Path, verifier_name: str):
     if len(matches) != 1:
         raise ValueError("approval verifier entry point is not installed")
     entry_point = matches[0]
+    try:
+        attached_distribution = entry_point.dist
+        distribution = attached_distribution
+        if distribution is None:
+            distribution = importlib.metadata.distribution(
+                configured_item["distribution"]
+            )
+        observed_distribution = RegisteredEntryPointDistributionObservation(
+            entry_point_name=entry_point.name,
+            entry_point_value=entry_point.value,
+            has_attached_distribution=attached_distribution is not None,
+            distribution_name=distribution.metadata["Name"],
+            distribution_version=distribution.version,
+            owned_entry_points=tuple(
+                map(
+                    lambda item: (item.group, item.name, item.value),
+                    distribution.entry_points,
+                )
+            ),
+        )
+    except (
+        AttributeError,
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+        importlib.metadata.PackageNotFoundError,
+    ) as exc:
+        raise ValueError("approval verifier distribution identity mismatch") from exc
     validate_registered_approval_entry_point_distribution(
-        entry_point,
+        observed_distribution,
         configured_item,
         group=_APPROVAL_VERIFIER_ENTRY_POINT_GROUP,
     )
@@ -11598,8 +11625,27 @@ def _approval_verifier_child(verifier, request: dict, channel) -> None:
             if len(matches) != 1:
                 raise ValueError("approval verifier entry point is not installed")
             entry_point = matches[0]
+            attached_distribution = entry_point.dist
+            distribution = attached_distribution
+            if distribution is None:
+                distribution = importlib.metadata.distribution(
+                    verifier["distribution"]
+                )
+            observed_distribution = RegisteredEntryPointDistributionObservation(
+                entry_point_name=entry_point.name,
+                entry_point_value=entry_point.value,
+                has_attached_distribution=attached_distribution is not None,
+                distribution_name=distribution.metadata["Name"],
+                distribution_version=distribution.version,
+                owned_entry_points=tuple(
+                    map(
+                        lambda item: (item.group, item.name, item.value),
+                        distribution.entry_points,
+                    )
+                ),
+            )
             validate_registered_approval_entry_point_distribution(
-                entry_point,
+                observed_distribution,
                 verifier,
                 group=_APPROVAL_VERIFIER_ENTRY_POINT_GROUP,
             )

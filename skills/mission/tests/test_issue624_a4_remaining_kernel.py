@@ -97,6 +97,31 @@ def _plan_observation():
     )
 
 
+def test_init_adapter_policy_helpers_are_pure_and_preserve_current_contract():
+    from mission_application.lifecycle import (
+        initialization_operation_id,
+        should_route_init_to_goal,
+    )
+
+    command_bytes = b'{"kind":"init"}'
+    expected = "init:" + hashlib.sha256(
+        b"portable-session\x00" + command_bytes
+    ).hexdigest()
+    assert initialization_operation_id("portable-session", command_bytes) == expected
+
+    simple = {
+        "complexity": "Simple",
+        "review_tier_signals": [],
+    }
+    args = type(
+        "InitArguments",
+        (),
+        {"force_mission": False, "issue_ref": None},
+    )()
+    assert should_route_init_to_goal(simple, args, None) is True
+    assert should_route_init_to_goal(simple, args, "Full") is False
+
+
 def test_handoff_operations_are_closed_typed_kernel_commands():
     from mission_kernel.commands import (
         BeginExecutorHandoff,
@@ -653,28 +678,61 @@ def test_provider_consent_path_policy_rejects_session_aggregate_parts():
         validate_provider_consent_path_parts((LazyText(".mission-state"),))
 
 
-def test_provider_consent_path_resolution_is_owned_by_application(tmp_path):
+def test_provider_consent_path_resolution_uses_one_validated_representation(tmp_path):
     import pytest
 
     from mission_application.runtime_guard import (
+        ProviderConsentRequest,
+        ResolvedProviderConsentPathObservation,
         RuntimeGuardFailure,
         resolve_provider_consent_path,
+        validate_provider_consent_request,
     )
 
     default_path = tmp_path / "default" / "provider-consent.json"
     explicit_path = tmp_path / "explicit" / "provider-consent.json"
-    assert resolve_provider_consent_path(None, default_path) == default_path.resolve()
-    assert (
-        resolve_provider_consent_path(str(explicit_path), default_path)
-        == explicit_path.resolve()
+    assert resolve_provider_consent_path(
+        ResolvedProviderConsentPathObservation(parts=tuple(default_path.resolve().parts))
+    ) == tuple(default_path.resolve().parts)
+    assert resolve_provider_consent_path(
+        ResolvedProviderConsentPathObservation(parts=tuple(explicit_path.resolve().parts))
+    ) == tuple(explicit_path.resolve().parts)
+
+    provider, parts = validate_provider_consent_request(
+        ProviderConsentRequest(
+            provider="  portable-provider  ",
+            resolved_path=ResolvedProviderConsentPathObservation(
+                parts=tuple(explicit_path.resolve().parts)
+            ),
+        )
     )
+    assert provider == "portable-provider"
+    assert parts == tuple(explicit_path.resolve().parts)
+
+    with pytest.raises(RuntimeGuardFailure, match="--provider is required"):
+        validate_provider_consent_request(
+            ProviderConsentRequest(
+                provider="  ",
+                resolved_path=ResolvedProviderConsentPathObservation(
+                    parts=tuple(explicit_path.resolve().parts)
+                ),
+            )
+        )
+
+    with pytest.raises(TypeError):
+        resolve_provider_consent_path(
+            ResolvedProviderConsentPathObservation(parts=("safe",)),
+            resolved_path="/forged/path",
+        )
 
     forbidden = tmp_path / ".mission-state" / "sessions" / "session.json"
     with pytest.raises(
         RuntimeGuardFailure,
         match="provider-consent-session-path-forbidden",
     ):
-        resolve_provider_consent_path(str(forbidden), default_path)
+        resolve_provider_consent_path(
+            ResolvedProviderConsentPathObservation(parts=tuple(forbidden.resolve().parts))
+        )
 
 
 def test_approval_verifier_distribution_without_dist_requires_one_owned_tuple():
@@ -736,44 +794,45 @@ def test_approval_verifier_distribution_without_dist_requires_one_owned_tuple():
         )
 
 
-def test_approval_verifier_distribution_observation_is_owned_by_application():
+def test_approval_verifier_distribution_observation_cannot_override_expectations():
+    import pytest
+
     from mission_application.runtime_guard import (
+        RegisteredEntryPointDistributionObservation,
         validate_registered_approval_entry_point_distribution,
     )
 
-    class EntryPoint:
-        name = "portable-verifier"
-        value = "portable.module:verify"
-        dist = None
-
-    class Distribution:
-        metadata = {"Name": "portable-verifiers"}
-        version = "1.2.3"
-        entry_points = (
-            type(
-                "OwnedEntryPoint",
-                (),
-                {
-                    "group": "mission.approval_verifiers",
-                    "name": "portable-verifier",
-                    "value": "portable.module:verify",
-                },
-            )(),
-        )
-
-    requested = []
-
-    def distribution_for(name):
-        requested.append(name)
-        return Distribution()
-
-    validate_registered_approval_entry_point_distribution(
-        EntryPoint(),
-        {"distribution": "portable-verifiers", "version": "1.2.3"},
-        group="mission.approval_verifiers",
-        distribution_for=distribution_for,
+    observed = RegisteredEntryPointDistributionObservation(
+        entry_point_name="portable-verifier",
+        entry_point_value="portable.module:verify",
+        has_attached_distribution=False,
+        distribution_name="portable-verifiers",
+        distribution_version="1.2.3",
+        owned_entry_points=(
+            (
+                "mission.approval_verifiers",
+                "portable-verifier",
+                "portable.module:verify",
+            ),
+        ),
     )
-    assert requested == ["portable-verifiers"]
+
+    configured_item = {
+        "distribution": "portable-verifiers",
+        "version": "1.2.3",
+    }
+    validate_registered_approval_entry_point_distribution(
+        observed,
+        configured_item,
+        group="mission.approval_verifiers",
+    )
+
+    with pytest.raises(ValueError, match="distribution identity mismatch"):
+        validate_registered_approval_entry_point_distribution(
+            observed,
+            {"distribution": "forged-distribution", "version": "1.2.3"},
+            group="mission.approval_verifiers",
+        )
 
 
 def test_closed_canonical_drift_rejection_preserves_prior_begin_lineage():
