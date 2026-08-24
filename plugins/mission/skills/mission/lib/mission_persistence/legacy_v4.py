@@ -626,12 +626,13 @@ class LegacyV4Repository:
         backup: bool = True,
     ) -> tuple[PreparedArtifactOperation, LegacyCommandExecutionResult]:
         """Artifact compatibility wrapper over the shared evidence core."""
-        publisher = effect_transaction or self._effect_transaction
 
         def publish(_prepared, effects):
-            if publisher is None:
-                raise ValueError("artifact-effect-transaction-missing")
-            return publisher(effects)
+            # 明示引数のみをここで包む。省略時の fallback（self._effect_transaction）
+            # は shared core の guarded 分岐に任せ、注入 callable の alias を作らない
+            # （#626 の境界検査は alias 経由の参照も検出する）。
+            assert effect_transaction is not None
+            return effect_transaction(effects)
 
         def verify(_prepared, effects, published):
             if verify_published is not None:
@@ -643,7 +644,7 @@ class LegacyV4Repository:
             prepare,
             operation_type=PreparedArtifactOperation,
             operation_error="artifact-operation-invalid",
-            effect_transaction=publish,
+            effect_transaction=publish if effect_transaction is not None else None,
             verify_published=verify,
             backup=backup,
         )
