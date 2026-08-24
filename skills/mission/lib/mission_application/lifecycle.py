@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 from dataclasses import dataclass, replace
 from typing import Callable
 
@@ -21,7 +22,12 @@ from activity_segments import (
 )
 from artifact_contract import invalidate_artifact_lint_observation
 from mission_kernel.codec_v4 import decode_mission_state
-from mission_common import derive_terminal_outcome, is_supersede_marked
+from mission_common import (
+    correlation_id,
+    derive_terminal_outcome,
+    is_supersede_marked,
+    opaque_token,
+)
 from mission_kernel.commands import (
     CompatibilityPayload,
     GENERIC_SET_DEDICATED_FIELDS,
@@ -42,6 +48,7 @@ from .ports import (
     LegacyCommandExecutionResult,
     LegacyMissionRepository,
     MissionInitializer,
+    MissionReinitializer,
 )
 
 
@@ -238,15 +245,222 @@ def supersede_review_projection(execution: LegacyCommandExecutionResult) -> dict
 @dataclass(frozen=True)
 class InitRequest:
     arguments: object
+    new_mission: bool = False
 
 
-def initialize(repository: MissionInitializer, request: InitRequest) -> None:
+@dataclass(frozen=True)
+class InitServices:
+    repository_factory: Callable[..., MissionInitializer]
+    repository_arguments: tuple[object, ...]
+
+
+@dataclass(frozen=True)
+class _CallbackInitializer:
+    callback: Callable[[object, object], None]
+    context: object
+
+    def initialize(self, arguments: object) -> None:
+        self.callback(arguments, self.context)
+
+
+def select_new_session_initializer(
+    selected_format: object,
+    legacy_format: object,
+    legacy_repository: MissionInitializer,
+    new_session_callback: Callable[[object, object], None],
+    context: object,
+) -> MissionInitializer:
+    """Select the retained legacy initializer or the default v5 callback."""
+    if selected_format == legacy_format:
+        return legacy_repository
+    return _CallbackInitializer(new_session_callback, context)
+
+
+def initialize_v5_repository(
+    repository: object,
+    request: object,
+    state_bytes: bytes,
+    terminal_reinitialization_head_digest: str | None,
+) -> None:
+    """Preserve the genesis call contract; opt into reinitialization explicitly."""
+    if terminal_reinitialization_head_digest is None:
+        repository.initialize(request, state_bytes=state_bytes)
+        return
+    repository.initialize(
+        request,
+        state_bytes=state_bytes,
+        terminal_reinitialization_head_digest=terminal_reinitialization_head_digest,
+    )
+
+
+def bind_reinitialized_mission_identity(
+    initial: dict, terminal_head_digest: str | None
+) -> dict:
+    """Bind a restart generation without changing ordinary init bytes."""
+    if terminal_head_digest is None:
+        return initial
+    mission = str(initial.get("mission") or "")
+    initial["mission_id"] = hashlib.sha256(
+        (mission + "\x00" + terminal_head_digest).encode("utf-8")
+    ).hexdigest()[:16]
+    return initial
+
+
+def initialization_operation_id(
+    session_id: str,
+    command_bytes: bytes,
+    terminal_head_digest: str | None,
+) -> str:
+    """Keep genesis idempotency while separating each terminal restart head."""
+    payload = session_id.encode("utf-8") + b"\x00" + command_bytes
+    if terminal_head_digest is not None:
+        payload += b"\x00new-mission\x00" + terminal_head_digest.encode("ascii")
+    return "init:" + hashlib.sha256(payload).hexdigest()
+
+
+def record_reinitialization_commit(
+    arguments: object, terminal_head_digest: str | None
+) -> None:
+    """Expose the authoritative restart commit point to the coordinating UOW."""
+    if terminal_head_digest is not None:
+        setattr(arguments, "_new_mission_authority_committed", True)
+
+
+def reinitialized_assumptions_path(
+    session_id: str, terminal_head_digest: str | None
+) -> str:
+    """Select an isolated assumptions record for each explicit restart."""
+    if terminal_head_digest is None:
+        return f".mission-state/sessions/{session_id}-assumptions.md"
+    generation_token = hashlib.sha256(
+        terminal_head_digest.encode("ascii")
+    ).hexdigest()[:16]
+    return (
+        f".mission-state/sessions/{session_id}-restart-"
+        f"{generation_token}-assumptions.md"
+    )
+
+
+def should_route_init_to_goal(
+    *,
+    complexity: object,
+    force_mission: bool,
+    new_mission: bool,
+    user_tier: object,
+    review_tier_signals: object,
+    issue_ref: object,
+) -> bool:
+    """Keep explicit restarts in mission while preserving ordinary routing."""
+    return (
+        complexity == "Simple"
+        and not force_mission
+        and not new_mission
+        and not user_tier
+        and not review_tier_signals
+        and not issue_ref
+    )
+
+
+def validate_new_mission_arguments(arguments: object) -> None:
+    """Reject parser-valid but semantically invalid restart input before archive."""
+    raw_budget = getattr(arguments, "budget_minutes", None)
+    if raw_budget is not None:
+        try:
+            budget = float(raw_budget)
+        except (TypeError, ValueError):
+            budget = math.nan
+        if not math.isfinite(budget) or budget <= 0:
+            raise LifecycleFailure(
+                "new mission rejected: --budget-minutes must be a positive finite "
+                f"number; received {raw_budget!r}",
+                reason="new-mission-budget-invalid",
+            )
+    threshold = getattr(arguments, "threshold", None)
+    if threshold is not None and not math.isfinite(float(threshold)):
+        raise LifecycleFailure(
+            "new mission rejected: --threshold must be finite",
+            reason="new-mission-threshold-invalid",
+        )
+    try:
+        host_run_id = correlation_id(getattr(arguments, "host_run_id", None))
+        correlation_id(getattr(arguments, "root_run_id", None) or host_run_id)
+        for name in ("parent_run_id", "child_run_id"):
+            value = getattr(arguments, name, None)
+            if value:
+                correlation_id(value)
+        for name in ("logical_group_id", "review_group_id"):
+            value = getattr(arguments, name, None)
+            if value is not None:
+                opaque_token(value)
+    except ValueError as error:
+        raise LifecycleFailure(
+            f"new mission rejected: {error}",
+            reason="new-mission-identifier-invalid",
+        ) from error
+
+
+def initialize(
+    repository: MissionInitializer | InitServices, request: InitRequest
+) -> None:
     """Create or resume a session through the v4 repository boundary.
 
     New-session v5 selection remains P1 scope, so A1 deliberately preserves
     the complete v4 initializer behind this application boundary.
     """
-    repository.initialize(request.arguments)
+    setattr(
+        request.arguments,
+        "_new_mission_assumptions_path",
+        getattr(request.arguments, "_new_mission_assumptions_path", None),
+    )
+    if isinstance(repository, InitServices):
+        repository = repository.repository_factory(*repository.repository_arguments)
+    if not request.new_mission:
+        repository.initialize(request.arguments)
+        return
+    if not isinstance(repository, MissionReinitializer):
+        raise LifecycleFailure(
+            "new mission rejected: --new-mission requires an existing terminal V5 "
+            "session; use reactivate to continue the retained legacy session or "
+            "mark-halt to close it, then migrate it before retrying",
+            reason="new-mission-v5-required",
+        )
+    validate_new_mission_arguments(request.arguments)
+
+    try:
+        current = repository.current_mission()
+    except (OSError, TypeError, UnicodeError, ValueError) as error:
+        raise LifecycleFailure(
+            "new mission rejected: session document is undecodable; repair or restore "
+            "the authoritative session repository before retrying --new-mission",
+            reason="new-mission-session-undecodable",
+        ) from error
+    document = current.document_copy()
+    diagnosis = diagnose_terminalizable_state(document)
+    if diagnosis == TERMINALIZABLE_UNDECODABLE:
+        raise LifecycleFailure(
+            "new mission rejected: session document is undecodable; repair or restore "
+            "the authoritative session repository before retrying --new-mission",
+            reason="new-mission-session-undecodable",
+        )
+    if real_terminalizable_state(document) is not None:
+        raise LifecycleFailure(
+            "new mission rejected: session is active; continue/reactivate the current "
+            "mission or close it with mark-halt before retrying --new-mission",
+            reason="new-mission-session-active",
+        )
+    outcome = derive_terminal_outcome(document)
+    if (
+        diagnosis != TERMINALIZABLE_TERMINAL
+        or document.get("loop_active") is not False
+        or outcome is None
+        or (outcome == "incomplete" and not document.get("terminal_outcome"))
+    ):
+        raise LifecycleFailure(
+            "new mission rejected: session is not terminal; use reactivate to continue "
+            "or mark-halt to close it before retrying --new-mission",
+            reason="new-mission-session-nonterminal",
+        )
+    repository.start_new_mission(request.arguments, current)
 
 
 @dataclass(frozen=True)
