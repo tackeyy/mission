@@ -436,7 +436,7 @@ def _validate_reactivation_audit(state: MissionState, command: Reactivate) -> No
         else None
     )
     if state.legacy_passthrough is not None:
-        passthrough = dict(state.legacy_passthrough.items)
+        passthrough = state.legacy_passthrough.thaw()
         raw_previous = passthrough.get("reactivation_history", [])
         if not isinstance(raw_previous, list):
             raise _Rejected("reactivation-audit-invalid")

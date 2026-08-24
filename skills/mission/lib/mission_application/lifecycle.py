@@ -845,15 +845,11 @@ def reactivate(
                 reason="halt-category-mismatch",
                 state=state,
             )
-        decision_state = state
         decision_category = normalized_category
         if normalized_category == "unknown":
             # Pre-K2 states may contain an absent or malformed category.  The
             # audited v4 compatibility path confirms it as ``unknown`` while
             # the closed kernel sees the conservative generic halt variant.
-            decision_state = copy.deepcopy(state)
-            decision_state["halt_category"] = HaltCategory.OTHER.value
-            decision_state["terminal_outcome"] = "failed"
             decision_category = HaltCategory.OTHER.value
         try:
             expected_category = HaltCategory(decision_category)
@@ -926,14 +922,7 @@ def reactivate(
                 },
             ),
         )
-        decision = decide(_typed_state(decision_state), command)
-        if not decision.accepted:
-            assert decision.rejection is not None
-            raise LifecycleFailure(
-                "reactivate rejected: " + decision.rejection.code,
-                reason=decision.rejection.code,
-                state=state,
-            )
+        decision = None
         aggregate_error = None
         try:
             execution = repository.execute(command, aggregate_action="add")

@@ -33,7 +33,7 @@ def _public_state(run_cli, root: Path, session_id: str) -> dict:
     return json.loads(result.stdout)
 
 
-def _prepare_handoff(run_cli, root: Path, session_id: str) -> None:
+def _prepare_handoff(run_cli, root: Path, session_id: str) -> Path:
     initialized = run_cli(
         "init",
         "C2 Stage B executor handoff",
@@ -46,65 +46,72 @@ def _prepare_handoff(run_cli, root: Path, session_id: str) -> None:
         env_extra=_env(session_id),
     )
     assert initialized.returncode == 0, initialized.stderr
-    iteration = _public_state(run_cli, root, session_id)["iteration"]
     plan_path = root / ".mission-state" / "plans" / (session_id + ".json")
     plan_path.parent.mkdir(exist_ok=True)
     plan_payload = {
-        "schema": "mission-plan/1",
-        "steps": [
-            {"depends_on": [], "id": "s1"},
-            {"depends_on": ["s1"], "id": "s2"},
+        "objective": "exercise the executor handoff lifecycle",
+        "scope": {
+            "resources": [],
+            "actions": [{"type": "analyze", "effect_class": "reversible"}],
+        },
+        "assumptions": [
+            {
+                "id": "isolated-fixture",
+                "statement": "the test workspace is isolated",
+                "validation": "use the pytest temporary directory",
+            }
         ],
+        "steps": [
+            {
+                "id": "s1",
+                "action": "analyze",
+                "inputs": [],
+                "outputs": ["finding"],
+                "depends_on": [],
+                "acceptance_checks": ["the first step is recorded"],
+                "risk": "low",
+                "rollback": "none",
+            },
+            {
+                "id": "s2",
+                "action": "write",
+                "inputs": ["finding"],
+                "outputs": ["result"],
+                "depends_on": ["s1"],
+                "acceptance_checks": ["the second step follows the first"],
+                "risk": "low",
+                "rollback": "remove the isolated fixture",
+            },
+        ],
+        "global_acceptance": ["the handoff is consumed in dependency order"],
+        "stop_conditions": ["the lifecycle rejects a bound operation"],
     }
     plan_bytes = json.dumps(
         plan_payload, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     plan_path.write_bytes(plan_bytes)
-    binding = {
-        "generation": 1,
-        "iteration": iteration,
-        "selection_source": "automatic",
-        "source": "core",
-        "source_id": "batch1-fixture",
-    }
-    plan = {
-        **binding,
-        "digest": "sha256:" + hashlib.sha256(plan_bytes).hexdigest(),
-        "path": str(plan_path.relative_to(root)),
-        "schema": "mission-plan/1",
-        "source_digest": "sha256:" + hashlib.sha256(plan_bytes).hexdigest(),
-        "validated_at": "2026-08-18T00:00:00Z",
-    }
-    handoff = {
-        "handoff_id": "handoff_" + session_id,
-        "iteration": iteration,
-        "plan_digest": plan["digest"],
-        "plan_generation": plan["generation"],
-        "plan_path": plan["path"],
-        "plan_source": plan["source"],
-        "schema": "mission-executor-handoff/1",
-        "selection_source": plan["selection_source"],
-        "source_id": plan["source_id"],
-        "status": "prepared",
-        "step_ids": ["s1", "s2"],
-    }
-    configured = run_cli(
-        "set",
-        "planning_policy_version=1",
-        "canonical_plan=" + json.dumps(plan, sort_keys=True, separators=(",", ":")),
-        "executor_handoff="
-        + json.dumps(handoff, sort_keys=True, separators=(",", ":")),
-        "planning_source_records="
-        + json.dumps(
-            {"core:batch1-fixture": binding},
-            sort_keys=True,
-            separators=(",", ":"),
-        ),
+    adopted = run_cli(
+        "planning",
+        "adopt-core",
+        "--input",
+        str(plan_path),
+        "--source-id",
+        "batch1-fixture",
         cwd=root,
-        env_extra=_env(session_id),
+        env_extra=_env(session_id, operation_id=session_id + "-adopt-core"),
     )
-    assert configured.returncode == 0, configured.stderr
-    assert _public_state(run_cli, root, session_id)["executor_handoff"]["status"] == "prepared"
+    assert adopted.returncode == 0, adopted.stderr
+    advanced = run_cli(
+        "advance",
+        "--phase",
+        "executing",
+        cwd=root,
+        env_extra=_env(session_id, operation_id=session_id + "-advance"),
+    )
+    assert advanced.returncode == 0, advanced.stderr
+    public = _public_state(run_cli, root, session_id)
+    assert public["executor_handoff"]["status"] == "prepared"
+    return root / public["canonical_plan"]["path"]
 
 
 def _run_operation(run_cli, root: Path, session_id: str, operation_id: str, *command: str):
@@ -142,6 +149,7 @@ def test_executor_handoff_real_cli_preserves_v5_heads_replays_and_domain_order(
     session_id = "batch1-flow"
     _prepare_handoff(run_cli, tmp_path, session_id)
     assert _head(tmp_path, session_id)["schema"] == "mission-head/1"
+    expected_phase = _public_state(run_cli, tmp_path, session_id)["phase"]
 
     commands = [
         ("begin-1", ("begin",)),
@@ -234,7 +242,7 @@ def test_executor_handoff_real_cli_preserves_v5_heads_replays_and_domain_order(
         "get", "--field", "phase", cwd=tmp_path, env_extra=_env(session_id)
     )
     assert phase.returncode == 0, phase.stderr
-    assert json.loads(phase.stdout) == "planning"
+    assert json.loads(phase.stdout) == expected_phase
     updated = run_cli(
         "set", "batch1_probe=true", cwd=tmp_path, env_extra=_env(session_id)
     )
@@ -386,8 +394,7 @@ def test_executor_handoff_v5_canonical_drift_rejection_replays_fail_closed(
     run_cli, tmp_path
 ):
     session_id = "batch1-drift"
-    _prepare_handoff(run_cli, tmp_path, session_id)
-    plan_path = tmp_path / ".mission-state" / "plans" / (session_id + ".json")
+    plan_path = _prepare_handoff(run_cli, tmp_path, session_id)
     plan_path.write_text('{"schema":"mission-plan/1","steps":[]}', encoding="utf-8")
     before = _head(tmp_path, session_id)
 

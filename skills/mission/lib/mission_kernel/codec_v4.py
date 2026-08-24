@@ -929,12 +929,14 @@ def project_legacy_document(state: MissionState) -> bytes:
         ]
     elif state.schema_origin is SchemaOrigin.V5 and "review_evidence_refs" in document:
         document["review_evidence_refs"] = []
-    if state.schema_origin is SchemaOrigin.V5 and (
-        state.scores or "score_history" in document
-    ):
+    raw_scores = ()
+    if state.schema_origin is not SchemaOrigin.V5 and "score_history" in document:
+        raw_scores, _raw_aggregates = _decode_legacy_scores(document)
+    if state.schema_origin is SchemaOrigin.V5 or state.scores != raw_scores:
         projected_scores = [_legacy_score_json(score) for score in state.scores]
-        for score in projected_scores:
-            score.setdefault("iteration", control.iteration)
+        if state.schema_origin is SchemaOrigin.V5:
+            for score in projected_scores:
+                score.setdefault("iteration", control.iteration)
         document["score_history"] = projected_scores
     if isinstance(state.lease, LegacyAbsentLease):
         for key in ("owner_session_id", "lease_id", "fencing_epoch", "lease_expires_at", "lease_history"):

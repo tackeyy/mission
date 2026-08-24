@@ -64,7 +64,9 @@ def _legacy_command_state(document: dict, command: object) -> MissionState:
         )
     if isinstance(command, Reactivate):
         raw_category = compatible.get("halt_category")
-        if raw_category not in {item.value for item in HaltCategory}:
+        if not isinstance(raw_category, str) or raw_category not in {
+            item.value for item in HaltCategory
+        }:
             if command.expected_category is not HaltCategory.OTHER:
                 raise FencedCommitError(
                     "decision-input-invalid", "legacy halt category does not match command"
