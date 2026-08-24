@@ -2020,6 +2020,7 @@ class LocalFencedRepository:
         request: ExecutionRequest,
         *,
         state_bytes: bytes,
+        terminal_reinitialization_head_digest: Optional[str] = None,
     ) -> CommitResult:
         """Publish the sole admitted genesis path for a v5 session.
 
@@ -2031,9 +2032,36 @@ class LocalFencedRepository:
         if isinstance(admitted, CommitResult):
             return admitted
         if admitted.base is not None:
+            if terminal_reinitialization_head_digest is None:
+                raise FencedCommitError(
+                    "session-already-initialized",
+                    "the v5 session already has an authoritative head",
+                )
+            if admitted.base.result.head_digest != terminal_reinitialization_head_digest:
+                raise FencedCommitError(
+                    "head-cas-mismatch",
+                    "terminal session changed after new mission admission",
+                )
+            try:
+                target_state = decode_mission_state(state_bytes)
+                state_bytes = project_legacy_document(
+                    replace(
+                        target_state,
+                        lease=admitted.pending_lease.target,
+                        snapshot_provenance=None,
+                    )
+                )
+            except FencedCommitError:
+                raise
+            except Exception as exc:
+                raise FencedCommitError(
+                    getattr(exc, "code", "record-invalid"),
+                    "new mission state is invalid",
+                ) from exc
+        elif terminal_reinitialization_head_digest is not None:
             raise FencedCommitError(
-                "session-already-initialized",
-                "the v5 session already has an authoritative head",
+                "head-cas-mismatch",
+                "terminal session disappeared after new mission admission",
             )
         prepared = self._stage_persistence(
             admitted,

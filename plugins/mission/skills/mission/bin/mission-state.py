@@ -118,6 +118,7 @@ from mission_application.lifecycle import (  # noqa: E402
     AdvanceRequest,
     AdvanceServices,
     InitRequest,
+    InitServices,
     LifecycleFailure,
     MarkHaltRequest,
     MarkHaltServices,
@@ -131,9 +132,13 @@ from mission_application.lifecycle import (  # noqa: E402
     activity_end as run_activity_end,
     activity_start as run_activity_start,
     advance as run_advance,
+    bind_reinitialized_mission_identity,
     initialize as run_initialize,
+    initialization_operation_id,
+    initialize_v5_repository as run_initialize_v5_repository,
     mark_halt as run_mark_halt,
     prepare_supersede_review_write,
+    record_reinitialization_commit,
     reactivate as run_reactivate,
     refresh_pid as run_refresh_pid,
     set_fields as run_set_fields,
@@ -142,6 +147,8 @@ from mission_application.lifecycle import (  # noqa: E402
     diagnose_terminalizable_state,
     real_terminalizable_state,
     repository_metadata,
+    select_new_session_initializer,
+    should_route_init_to_goal,
     supersede_review_projection,
     update_project_root as run_update_project_root,
 )
@@ -151,6 +158,7 @@ from mission_application.next_action import (  # noqa: E402
     _unclosed_optional_specialist_skills,
     derive_next_action as run_derive_next_action,
 )
+from mission_adapter.rendering import repository_format_error  # noqa: E402
 from mission_projection.stats import (  # noqa: E402
     StatsProjectionInput,
     project_stats,
@@ -258,6 +266,7 @@ from mission_persistence.fenced_commit import (  # noqa: E402
     LocalFencedRepository,
     compute_intent_digest,
 )
+from mission_persistence.reinitialization import V5MissionReinitializer  # noqa: E402
 from mission_persistence.local_uow import VerifiedBlobSet  # noqa: E402
 from mission_persistence.authoritative_reader import (  # noqa: E402
     AuthoritativeSnapshot,
@@ -8120,12 +8129,13 @@ def _initialize_legacy_v4(args, *, write_state, lock_state: bool = True):
     # #304: --issue-ref 付き (Issue-bound = 統治要求) は routing 対象外。company-os 等の
     # wrapper は init 直後の strict preflight で active state を要求するため、
     # routed (state 不生成) だと mandatory halt の事故経路になる。
-    if (
-        initial.get("complexity") == "Simple"
-        and not getattr(args, "force_mission", False)
-        and not _user_tier
-        and not initial.get("review_tier_signals")
-        and not getattr(args, "issue_ref", None)
+    if should_route_init_to_goal(
+        complexity=initial.get("complexity"),
+        force_mission=getattr(args, "force_mission", False),
+        new_mission=getattr(args, "new_mission", False),
+        user_tier=_user_tier,
+        review_tier_signals=initial.get("review_tier_signals"),
+        issue_ref=getattr(args, "issue_ref", None),
     ):
         dispatch_fields = _goal_dispatch_route_fields(initial)
         print(json.dumps({
@@ -8143,7 +8153,10 @@ def _initialize_legacy_v4(args, *, write_state, lock_state: bool = True):
     # multi-session 完全統一 (2026-06-13): 常に sessions/<sid>.json に書く。
     # 各セッションは独立 sid を持つため奪い合いは起きない (同一 sid 再 init は本人の上書き=resume)。
     sid = initial["session_id"]
-    initial["assumptions_path"] = f".mission-state/sessions/{sid}-assumptions.md"
+    initial["assumptions_path"] = (
+        args._new_mission_assumptions_path
+        or f".mission-state/sessions/{sid}-assumptions.md"
+    )
     sdir = session_dir(cwd)
     sf_target = session_file(cwd, sid)
     try:
@@ -8379,6 +8392,10 @@ def _initialize_v5_state(args, path: Path, initial: dict) -> None:
     initial["fencing_epoch"] = 1
     initial["lease_expires_at"] = _lease_expiry(now)
     initial["last_activity_at"] = iso_now()
+    terminal_head_digest = getattr(
+        args, "_new_mission_expected_head_digest", None
+    )
+    initial = bind_reinitialized_mission_identity(initial, terminal_head_digest)
     state_bytes = json.dumps(
         initial,
         ensure_ascii=False,
@@ -8387,10 +8404,9 @@ def _initialize_v5_state(args, path: Path, initial: dict) -> None:
         allow_nan=False,
     ).encode("utf-8")
     command, command_bytes = _canonical_init_command(args)
-    operation_digest = hashlib.sha256(
-        session_id.encode("utf-8") + b"\x00" + command_bytes
-    ).hexdigest()
-    operation_id = "init:" + operation_digest
+    operation_id = initialization_operation_id(
+        session_id, command_bytes, terminal_head_digest
+    )
     blobs = VerifiedBlobSet(())
     request = ExecutionRequest(
         session_id=session_id,
@@ -8417,12 +8433,18 @@ def _initialize_v5_state(args, path: Path, initial: dict) -> None:
         lease_ttl_seconds=_lease_ttl_seconds(),
     )
     try:
-        repository.initialize(request, state_bytes=state_bytes)
+        run_initialize_v5_repository(
+            repository,
+            request,
+            state_bytes,
+            terminal_head_digest,
+        )
     except OSError:
         _exit_init_write_failure(Path.cwd(), path)
     except FencedCommitError as error:
         print(f"ERROR: {error.code}: {error.detail}", file=sys.stderr)
         raise SystemExit(2) from error
+    record_reinitialization_commit(args, terminal_head_digest)
     decision = LeaseDecision("acquired", presented_lease_id, 1)
     _PROCESS_LEASE_IDS[str(path.resolve())] = presented_lease_id
     _emit_lease_carrier(initial, decision)
@@ -8440,25 +8462,52 @@ def cmd_init(args):
                 expected_session_id=sf.stem,
             )
         except (OSError, RepositorySelectionError) as error:
-            print(f"ERROR: repository-format-invalid: {error}", file=sys.stderr)
+            print(
+                repository_format_error(
+                    error, getattr(args, "new_mission", False)
+                ),
+                file=sys.stderr,
+            )
             raise SystemExit(2) from error
         if inspected.format is RepositoryFormat.V5:
-            print("ERROR: session-already-initialized", file=sys.stderr)
-            raise SystemExit(2)
-        selected_format = RepositoryFormat.LEGACY_V4
-    else:
-        selected_format = NEW_SESSION_REPOSITORY_FORMAT
-
-    if selected_format is RepositoryFormat.LEGACY_V4:
-        run_initialize(
-            LegacyV4InitializerRepository(
+            repository = InitServices(
+                repository_factory=V5MissionReinitializer,
+                repository_arguments=(
+                    cwd,
+                    sf,
+                    _initialize_new_v5_session,
+                ),
+            )
+        else:
+            repository = LegacyV4InitializerRepository(
                 initialize_state=_initialize_legacy_v4,
                 write_state=atomic_write_json,
+            )
+    else:
+        repository = InitServices(
+            repository_factory=select_new_session_initializer,
+            repository_arguments=(
+                NEW_SESSION_REPOSITORY_FORMAT,
+                RepositoryFormat.LEGACY_V4,
+                LegacyV4InitializerRepository(
+                    initialize_state=_initialize_legacy_v4,
+                    write_state=atomic_write_json,
+                ),
+                _initialize_new_v5_session,
+                cwd,
             ),
-            InitRequest(arguments=args),
         )
-        return
-    _initialize_new_v5_session(args, cwd)
+    try:
+        run_initialize(
+            repository,
+            InitRequest(
+                arguments=args,
+                new_mission=getattr(args, "new_mission", False),
+            ),
+        )
+    except LifecycleFailure as error:
+        print(f"ERROR: {error.message}", file=sys.stderr)
+        raise SystemExit(2) from error
 
 
 def _initialize_new_v5_session(args, cwd: Path) -> None:
@@ -18228,6 +18277,11 @@ def _build_parser():
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_init = sub.add_parser("init", help="新規ミッションで state.json を初期化")
+    p_init.add_argument(
+        "--new-mission",
+        action="store_true",
+        help="終端済みの同一 session を immutable generation へ退避して新しい mission を開始",
+    )
     p_init.add_argument("--complexity", choices=["Simple", "Standard", "Complex", "Critical"], default=None,
                         help="Phase 1 の複雑度判定結果。指定すると reviewer_count も自動設定 (Simple:1/Standard:2/Complex:3/Critical:3)。未指定は Unknown のまま WARN")
     p_init.add_argument("mission", help="ミッション記述")
@@ -18268,7 +18322,7 @@ def _build_parser():
     p_init.add_argument("--review-perspective", default=None)
     p_init.add_argument("--base-sha", default=None)
     p_init.add_argument("--head-sha", default=None)
-    p_init.set_defaults(func=cmd_init)
+    p_init.set_defaults(func=cmd_init, _new_mission_assumptions_path=None)
 
     p_parallel_init = sub.add_parser("parallel-init", help="create a versioned parallel child manifest")
     p_parallel_init.add_argument("--group-id", required=True)
