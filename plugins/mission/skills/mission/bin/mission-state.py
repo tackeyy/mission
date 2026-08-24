@@ -221,6 +221,16 @@ from mission_application.planning import (  # noqa: E402
     validate_provider_plan_import,
     verify_handoff_binding,
 )
+from mission_application.command_provider import (  # noqa: E402
+    CommandProviderFailure,
+    CommandProviderRequest,
+    ExecutionServices as CommandProviderExecutionServices,
+    ProviderPolicyServices as CommandProviderPolicyServices,
+    StateEffectsServices as CommandProviderStateEffectsServices,
+    WorkspaceServices as CommandProviderWorkspaceServices,
+    _classify_command_provider_result,
+    invoke_command_provider,
+)
 from mission_application.runtime_guard import (  # noqa: E402
     CleanupStaleExecuteCommand,
     FreshnessEvidence,
@@ -5245,66 +5255,6 @@ def _redact_provider_output(text: str) -> str:
     return redact_local_locators(redacted)
 
 
-def _non_template_text_length(text: str, forbidden_markers: list[str]) -> int:
-    cleaned = text
-    for marker in forbidden_markers:
-        cleaned = cleaned.replace(marker, "")
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    return len(cleaned)
-
-
-def _contract_exit_codes(contract: dict, key: str) -> set[int]:
-    codes = contract.get(key) or []
-    if isinstance(codes, (str, int)):
-        codes = [codes]
-    result: set[int] = set()
-    for value in codes:
-        try:
-            result.add(int(value))
-        except (TypeError, ValueError):
-            continue
-    return result
-
-
-def _classify_command_provider_result(provider: dict, exit_code: int | None,
-                                      stdout: str, stderr: str) -> tuple[str, str | None]:
-    explicit_contract = provider.get("result_contract") if isinstance(provider.get("result_contract"), dict) else {}
-    contract = _merge_result_contract({}, explicit_contract)
-    combined = "\n".join([stdout or "", stderr or ""])
-    awaiting_markers = [str(v) for v in contract.get("awaiting_input_markers") or []]
-    awaiting_hits = [marker for marker in awaiting_markers if marker and marker in combined]
-    if awaiting_hits:
-        return "awaiting-input", f"command provider awaiting input: {', '.join(awaiting_hits[:3])}"
-    awaiting_exit_codes = _contract_exit_codes(contract, "awaiting_input_exit_codes")
-    if exit_code in awaiting_exit_codes:
-        return "awaiting-input", f"command provider awaiting input after exit code {exit_code}"
-    if exit_code != 0:
-        return "failed", f"command provider exited with status {exit_code}"
-    forbidden_markers = [str(v) for v in contract.get("forbidden_markers") or PREPARATION_ONLY_MARKERS]
-    marker_hits = [marker for marker in forbidden_markers if marker and marker in combined]
-    try:
-        min_chars = int(contract.get("min_non_template_chars") or 0)
-    except (TypeError, ValueError):
-        min_chars = 0
-    non_template_len = _non_template_text_length(combined, forbidden_markers)
-    if marker_hits:
-        return "prepared", f"command provider returned preparation-only evidence: {', '.join(marker_hits[:3])}"
-    if not explicit_contract:
-        return "unvalidated-evidence", "command provider has no explicit result contract"
-    if min_chars and non_template_len < min_chars:
-        return "prepared", f"command provider evidence below result_contract.min_non_template_chars ({non_template_len} < {min_chars})"
-    return "completed", None
-
-
-def _provider_timeout(provider: dict, override: int | None) -> int:
-    value = override if override is not None else provider.get("timeout", 120)
-    if value is None:
-        value = 120
-    if type(value) is not int or not 1 <= value <= 86400:
-        raise SpecialistPublicContractError("/specialist_invocations/pending/timeout")
-    return value
-
-
 def _selected_specialist_skills(data: dict) -> set[str]:
     return {
         str(item.get("skill"))
@@ -6018,492 +5968,86 @@ def cmd_prepare_provider_invocation(args):
 
 
 def cmd_invoke_command_provider(args):
-    cwd = Path.cwd()
-    sf = resolve_state_file(cwd)
-    if not sf.exists():
-        print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
-        sys.exit(1)
-    # Repository setup (before any state reads to enable MISSION_OPERATION_ID check for v5)
-    session_id = sf.stem
-    _command_name_invoke = "specialists-invoke-command"
-    _preflight_id_invoke = getattr(args, "preflight_id", None)
-    _command_arguments_invoke = {
-        "provider": str(args.provider),
-        "iteration": int(args.iteration),
-        "phase": str(args.phase),
-        "preflight_id": str(_preflight_id_invoke) if _preflight_id_invoke else "",
-    }
+    request = CommandProviderRequest(
+        provider_id=args.provider,
+        iteration=args.iteration,
+        phase=args.phase,
+        specialists_cmd=getattr(args, "specialists_cmd", None),
+        preflight_id=getattr(args, "preflight_id", None),
+        selection_source=getattr(args, "selection_source", None),
+        timeout_override=getattr(args, "timeout", None),
+        input_file=getattr(args, "input_file", None),
+        execution_isolator=getattr(args, "execution_isolator", None),
+        registry=getattr(args, "registry", None),
+        json_output=bool(getattr(args, "json", False)),
+        event_id=getattr(args, "event_id", None),
+        root_event_id=getattr(args, "root_event_id", None),
+        raw_attempt=getattr(args, "attempt", ...),
+        retry_of=getattr(args, "retry_of", None),
+    )
+    workspace = CommandProviderWorkspaceServices(
+        current_directory=Path.cwd,
+        resolve_state_file=resolve_state_file,
+        path_exists=Path.exists,
+        read_bytes=Path.read_bytes,
+        read_text=Path.read_text,
+        inspect_repository_bytes=inspect_repository_bytes,
+        v5_format=RepositoryFormat.V5,
+    )
+    provider_policy = CommandProviderPolicyServices(
+        find_provider=_find_provider,
+        provider_gate=_provider_gate,
+        validate_specialist_public_state=_validate_specialist_public_state,
+        verified_preflight_packet=_verified_preflight_packet,
+        confirmed_selection_required=_confirmed_selection_required,
+        require_current_provider_application=_require_current_provider_application,
+        reject_unbounded_orchestrator_execution=_reject_unbounded_orchestrator_execution,
+        current_selection_id=_current_selection_id,
+        reject_active_provider_mutation=_reject_active_provider_mutation,
+        enforce_session_lease_for_write=_enforce_session_lease_for_write,
+        resolve_session_id=resolve_session_id,
+        invocation_by_id=invocation_by_id,
+        validate_invocation_transition=validate_invocation_transition,
+        specialist_lifecycle_error=SpecialistLifecycleError,
+        applied_statuses=APPLIED_SPECIALIST_INVOCATION_STATUSES,
+    )
+    state_effects = CommandProviderStateEffectsServices(
+        compatibility_operation_arguments=_compatibility_operation_arguments,
+        canonical_compatibility_operation=_canonical_compatibility_operation,
+        repository_factory=_legacy_lifecycle_repository,
+        prepare_specialist_invocation_state=_prepare_specialist_invocation_state,
+        record_activity_event=record_activity_event,
+        replace_provider_invocation=_replace_provider_invocation,
+        command_outcome=_command_outcome,
+        end_activity_segment=end_activity_segment,
+        stamp_metadata=stamp_metadata,
+        add_selected_specialist_metadata=_add_selected_specialist_metadata,
+        append_command_outcome=_append_command_outcome,
+        commit_specialist_state_with_save=_commit_specialist_state_with_save,
+    )
+    execution = CommandProviderExecutionServices(
+        base_environment=os.environ,
+        command_available=_command_is_available,
+        strict_dispatch=_dispatch_provider_execution,
+        configured_execution_isolator=_configured_execution_isolator,
+        strict_backend=_run_strict_provider_backend,
+        Popen=subprocess.Popen,
+        PIPE=subprocess.PIPE,
+        TimeoutExpired=subprocess.TimeoutExpired,
+        redact=_redact_provider_output,
+        value_digest=provider_value_digest,
+        clock=iso_now,
+        json_loads=json.loads,
+        provider_preflight_error=ProviderPreflightError,
+    )
     try:
-        _target_bytes_invoke = sf.read_bytes()
-        _inspected_invoke = inspect_repository_bytes(_target_bytes_invoke, expected_session_id=session_id)
-        _target_digest_invoke = "sha256:" + hashlib.sha256(_target_bytes_invoke).hexdigest()
-        _caller_op_invoke, _op_args_invoke = _compatibility_operation_arguments(
-            _command_arguments_invoke, target_digest=_target_digest_invoke,
-            require_caller=_inspected_invoke.format is RepositoryFormat.V5,
+        result = invoke_command_provider(
+            request, workspace, provider_policy, state_effects, execution
         )
-        _op_id_invoke, _op_cmd_invoke = _canonical_compatibility_operation(
-            session_id, _command_name_invoke, _op_args_invoke,
-            caller_operation_id=_caller_op_invoke,
-        )
-    except (OSError, RepositorySelectionError, ValueError) as _err_invoke:
-        print(f"ERROR: {_err_invoke}", file=sys.stderr)
-        sys.exit(2)
-
-    def _make_repo_invoke(suffix):
-        return _legacy_lifecycle_repository(
-            cwd, sf, stamp=True, strict_read=True, session_id=session_id,
-            operation_id=_op_id_invoke + suffix,
-            operation_command=_op_cmd_invoke,
-            operation_command_type=_command_name_invoke,
-        )
-
-    # Pre-validate (read-only, before any locks)
-    # For v5 sessions sf is the HEAD file which has no session data; load the
-    # actual session state through a read-only repository transaction.
-    if _inspected_invoke.format is RepositoryFormat.V5:
-        _preread_repo = _make_repo_invoke(":v5-preread")
-        with _preread_repo.transaction():
-            data = _preread_repo.load()
-    else:
-        data = json.loads(sf.read_text())
-    _validate_specialist_public_state(data)
-    provider = _find_provider(data, args.provider)
-    if not provider:
-        print(f"ERROR: provider not found in mission state: {args.provider}", file=sys.stderr)
-        sys.exit(2)
-    if provider.get("kind") != "command":
-        print(f"ERROR: provider is not kind=command: {args.provider}", file=sys.stderr)
-        sys.exit(2)
-    if getattr(args, "specialists_cmd", None) != "invoke-prepared" and getattr(args, "preflight_id", None):
-        _provider_gate("use-invoke-prepared")
-    # #396: any command provider is an external-risk invocation until a
-    # verified per-invocation preflight/receipt proves otherwise.  Keep this
-    # guard before reservation, state mutation, and subprocess creation.
-    if not getattr(args, "preflight_id", None):
-        _provider_gate("preflight-required")
-    # For invoke-prepared with a consumed preflight: the preflight was already used
-    # by a previous call. Skip full validation here — Section 2 will detect
-    # operation_replayed and short-circuit without re-dispatching. Pass the raw
-    # pointer through so entry construction can read outbound_packet_digest.
-    _pf_preflights_raw = data.get("provider_preflights") or {}
-    _pf_pointer_raw = _pf_preflights_raw.get(args.preflight_id) if isinstance(_pf_preflights_raw, dict) else None
-    _pf_consumed_replay = (
-        getattr(args, "specialists_cmd", None) == "invoke-prepared"
-        and isinstance(_pf_pointer_raw, dict)
-        and _pf_pointer_raw.get("status") == "consumed"
-    )
-    if _pf_consumed_replay:
-        pointer, packet = _pf_pointer_raw, b""
-    else:
-        pointer, packet = _verified_preflight_packet(cwd, data, provider, args)
-    if _confirmed_selection_required(data, provider.get("skill") or provider.get("role"), "completed") and not args.selection_source:
-        print(
-            "ERROR: specialists_decision requested user confirmation; pass --selection-source confirmed-user "
-            "when invoking an applied command provider after confirmation.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    _require_current_provider_application(
-        data,
-        provider,
-        requested_phase=args.phase,
-        requested_iteration=args.iteration,
-        application_kind="preflight",
-        selection_source=args.selection_source,
-        cwd=cwd,
-        registry_args=args,
-    )
-    _reject_unbounded_orchestrator_execution(data, provider.get("skill") or provider.get("role"), args.phase)
-
-    now = iso_now()
-    entry = {
-        "invocation_id": pointer["invocation_id"],
-        "provider_id": provider.get("provider_id"),
-        "iteration": args.iteration,
-        "phase": args.phase,
-        "role": provider.get("role"),
-        "skill": provider.get("skill") or provider.get("role"),
-        "mode": "command-provider",
-        "status": "reserved",
-        "lifecycle_state": "reserved",
-        "timestamp": now,
-        "transitioned_at": now,
-        "reserved_at": now,
-        "provider_kind": "command",
-        "input_outbound_packet_digest": pointer["outbound_packet_digest"],
-        **{
-            field: data.get(field)
-            for field in ("host_run_id", "root_run_id", "parent_run_id", "child_run_id", "logical_group_id")
-            if data.get(field) is not None
-        },
-    }
-    selection_id = _current_selection_id(data)
-    if selection_id:
-        entry["selection_id"] = selection_id
-    timeout = _provider_timeout(provider, args.timeout)
-    entry["timeout"] = timeout
-
-    # ── Section 1: Reservation ──
-    _repo_invoke_reserve = _make_repo_invoke(":reserve")
-    with _repo_invoke_reserve.transaction():
-        dispatch_state = _repo_invoke_reserve.load()
-        if not getattr(_repo_invoke_reserve, "operation_replayed", False):
-            _validate_specialist_public_state(dispatch_state)
-            _reject_active_provider_mutation(dispatch_state, "invoke-command")
-            lease_decision = _enforce_session_lease_for_write(sf, dispatch_state)
-            provider = _require_current_provider_application(
-                dispatch_state,
-                _find_provider(dispatch_state, args.provider),
-                requested_phase=args.phase,
-                requested_iteration=args.iteration,
-                application_kind="preflight",
-                selection_source=args.selection_source,
-                invocation_id=entry["invocation_id"],
-                cwd=cwd,
-                registry_args=args,
-            )
-            entry["application_context_digest"] = provider.pop("_application_context_digest")
-            entry["reservation_owner_session_id"] = str(dispatch_state.get("owner_session_id") or resolve_session_id())
-            entry["fencing_epoch"] = int(dispatch_state.get("fencing_epoch") or lease_decision.fencing_epoch)
-            # The preflight ID is single-use and already bound to the immutable
-            # outbound packet, so it is the caller-stable operation identity for
-            # the non-rollbackable provider dispatch saga.
-            entry["operation_id"] = args.preflight_id
-            entry["outbound_packet_digest"] = pointer["outbound_packet_digest"]
-            dispatch_state, entry, _ = _prepare_specialist_invocation_state(
-                dispatch_state,
-                entry,
-                cwd=cwd,
-                iteration=args.iteration,
-                evidence_planned=True,
-            )
-            preflight_pointer = (dispatch_state.get("provider_preflights") or {}).get(args.preflight_id)
-            if not isinstance(preflight_pointer, dict):
-                _provider_gate("approval-required")
-            elif preflight_pointer.get("status") == "consumed":
-                _provider_gate("receipt-replayed")
-            elif preflight_pointer.get("status") != "approved":
-                _provider_gate("approval-required")
-            preflight_pointer["status"] = "consuming"
-            preflight_pointer["consuming_invocation_id"] = entry["invocation_id"]
-            record_activity_event(dispatch_state, "specialist", now)
-            dispatch_state["updated_at"] = now
-            _repo_invoke_reserve.save(dispatch_state)
-        else:
-            # Get invocation_id from cached state
-            for _inv in (dispatch_state.get("specialist_invocations") or []):
-                if isinstance(_inv, dict) and _inv.get("input_outbound_packet_digest") == pointer["outbound_packet_digest"]:
-                    entry.update({k: v for k, v in _inv.items() if k not in entry or k in ("invocation_id", "fencing_epoch", "reservation_owner_session_id", "application_context_digest", "operation_id", "outbound_packet_digest")})
-                    break
-
-    # ── Section 2: Dispatch intent (idempotency gate — if replayed, skip external dispatch) ──
-    running_at = iso_now()
-    _repo_invoke_dispatch = _make_repo_invoke(":dispatch")
-    already_dispatched = False
-    with _repo_invoke_dispatch.transaction():
-        dispatch_state = _repo_invoke_dispatch.load()
-        if getattr(_repo_invoke_dispatch, "operation_replayed", False):
-            already_dispatched = True
-        else:
-            _validate_specialist_public_state(dispatch_state)
-            current_entry = dict(invocation_by_id(dispatch_state, entry["invocation_id"]))
-            provider = _require_current_provider_application(
-                dispatch_state,
-                _find_provider(dispatch_state, args.provider),
-                requested_phase=args.phase,
-                requested_iteration=args.iteration,
-                application_kind="preflight",
-                selection_source=args.selection_source,
-                invocation_id=entry["invocation_id"],
-                cwd=cwd,
-                registry_args=args,
-            )
-            # Re-snapshot payload inputs after the reservation lock acquisition;
-            # no byte validated before this point is eligible for subprocess stdin.
-            preflight_pointer, packet = _verified_preflight_packet(
-                cwd, dispatch_state, provider, args, consuming_invocation_id=entry["invocation_id"]
-            )
-            if provider.pop("_application_context_digest") != current_entry.get("application_context_digest"):
-                rejected = {**current_entry, "status": "rejected", "lifecycle_state": "terminal",
-                            "reason_code": "application-context-drift", "completed_at": running_at,
-                            "transitioned_at": running_at}
-                validate_invocation_transition(current_entry, rejected)
-                _replace_provider_invocation(dispatch_state, rejected)
-                dispatch_state["updated_at"] = running_at
-                _repo_invoke_dispatch.save(dispatch_state)
-                print("ERROR: provider-ineligible: application-context-drift", file=sys.stderr)
-                raise SystemExit(2)
-            try:
-                intent_decision = record_dispatch_intent(
-                    [],
-                    {
-                        "invocation_id": entry["invocation_id"],
-                        "operation_id": entry["operation_id"],
-                        "outbound_packet_digest": entry["outbound_packet_digest"],
-                        "iteration": entry["iteration"],
-                        "fencing_epoch": entry["fencing_epoch"],
-                    },
-                )
-            except PlanningFailure as exc:
-                _provider_gate(exc.code)
-            # This is the durable pre-spawn commit.  A process crash after it but
-            # before a receipt remains deliberately unknowable and must never be
-            # retried automatically by reconciliation.
-            entry = {**current_entry, **intent_decision,
-                     "dispatch_intent_at": running_at, "transitioned_at": running_at}
-            validate_invocation_transition(current_entry, entry)
-            _replace_provider_invocation(dispatch_state, entry)
-            dispatch_state["updated_at"] = running_at
-            _repo_invoke_dispatch.save(dispatch_state)
-
-    # If dispatch was already committed (idempotent replay), skip external call
-    if already_dispatched:
-        # Return result from state
-        _final_state = json.loads(sf.read_text())
-        _cached_inv = next(
-            (inv for inv in (_final_state.get("specialist_invocations") or [])
-             if isinstance(inv, dict) and inv.get("invocation_id") == entry["invocation_id"]),
-            entry,
-        )
-        _outcome = _command_outcome(args, "specialists-invoke-command",
-                                    "ok" if _cached_inv.get("status") == "completed" else "external")
-        result = {"ok": _cached_inv.get("status") == "completed",
-                  "outcome_kind": _outcome["outcome_kind"], "outcome": _outcome, "entry": _cached_inv}
-        print(json.dumps(result, indent=2 if args.json else None, ensure_ascii=False))
-        return
-
-    command = provider.get("command")
-    argv = [command, *[str(a) for a in provider.get("args") or []]]
-    command_env = os.environ.copy()
-    command_env.update(_string_map(provider.get("env")))
-    execution_context = preflight_pointer.get("execution_context") if isinstance(preflight_pointer, dict) else None
-    strict_result = None
-    if isinstance(execution_context, dict) and execution_context.get("isolation") == "strict":
-        try:
-            strict_result = _dispatch_provider_execution(
-                execution_context, packet,
-                lambda _: (_ for _ in ()).throw(ProviderPreflightError("isolator-unavailable")),
-                lambda attestation, _policy, exact_packet: _run_strict_provider_backend(
-                    _configured_execution_isolator(cwd, args.execution_isolator), exact_packet
-                ) if args.execution_isolator else (_ for _ in ()).throw(ProviderPreflightError("isolator-unavailable")),
-            )
-        except (ProviderPreflightError, ValueError, OSError):
-            _provider_gate("isolator-unavailable")
-    elif not _command_is_available(command):
-        completed_at = iso_now()
-        failed = {**entry, "status": "failed-before-start", "lifecycle_state": "terminal",
-                  "transitioned_at": completed_at, "completed_at": completed_at,
-                  "reason_code": "command-unavailable",
-                  "proven_no_dispatch": True,
-                  "reason": f"command provider is not available: {command}"}
-        _repo_invoke_prefail = _make_repo_invoke(":prefail")
-        with _repo_invoke_prefail.transaction():
-            dispatch_state = _repo_invoke_prefail.load()
-            if not getattr(_repo_invoke_prefail, "operation_replayed", False):
-                current_entry = invocation_by_id(dispatch_state, entry["invocation_id"])
-                validate_invocation_transition(current_entry, failed)
-                _replace_provider_invocation(dispatch_state, failed)
-                dispatch_state["updated_at"] = completed_at
-                _repo_invoke_prefail.save(dispatch_state)
-        print(json.dumps({"ok": False, "outcome_kind": "external", "entry": failed}, ensure_ascii=False))
-        return
-    spawn_failed_reason = None
-    if strict_result is not None:
-        # A strict backend is still external work.  Its return value becomes
-        # usable only after it supplies a closed, identity-bearing receipt and
-        # that receipt is committed against the pre-spawn intent.
-        try:
-            strict_receipt = strict_result["receipt"]
-        except (KeyError, TypeError):
-            _provider_gate("strict-receipt-invalid")
-        _repo_invoke_receipt = _make_repo_invoke(":receipt")
-        with _repo_invoke_receipt.transaction():
-            dispatch_state = _repo_invoke_receipt.load()
-            if not getattr(_repo_invoke_receipt, "operation_replayed", False):
-                current_entry = dict(invocation_by_id(dispatch_state, entry["invocation_id"]))
-                try:
-                    receipt_state = record_provider_receipt(
-                        [current_entry],
-                        {
-                            "invocation_id": entry["invocation_id"],
-                            "operation_id": entry["operation_id"],
-                            "outbound_packet_digest": entry["outbound_packet_digest"],
-                            "iteration": entry["iteration"],
-                            "fencing_epoch": entry["fencing_epoch"],
-                        },
-                        strict_receipt,
-                    )
-                except PlanningFailure as exc:
-                    _provider_gate(exc.code)
-                current_entry.update({
-                    "provider_receipt": receipt_state["provider_receipt"],
-                    "status": "running", "lifecycle_state": "running",
-                    "running_at": iso_now(), "started_at": running_at,
-                    "heartbeat_at": iso_now(), "transitioned_at": iso_now(),
-                })
-                validate_invocation_transition(entry, current_entry)
-                _replace_provider_invocation(dispatch_state, current_entry)
-                dispatch_state["updated_at"] = iso_now()
-                _repo_invoke_receipt.save(dispatch_state)
-                entry = current_entry
-        exit_code = strict_result["returncode"]
-        stdout = _redact_provider_output(str(strict_result.get("stdout") or ""))
-        stderr = _redact_provider_output(str(strict_result.get("stderr") or ""))
-    else:
-        try:
-            process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=command_env)
-        except OSError as exc:
-            spawn_failed_reason = "spawn-failed"; exit_code = None; stdout = ""; stderr = _redact_provider_output(str(exc))
-            completed_at = iso_now()
-            entry.update({"status": "failed-before-start", "lifecycle_state": "terminal", "transitioned_at": completed_at,
-                          "completed_at": completed_at, "reason_code": "spawn-failed",
-                          "proven_no_dispatch": True})
-        else:
-            entry["child_pid"] = process.pid
-            entry["process_identity_digest"] = provider_value_digest({"invocation_id": entry["invocation_id"], "pid": process.pid, "running_at": running_at})
-            _repo_invoke_proc = _make_repo_invoke(":proc")
-            with _repo_invoke_proc.transaction():
-                dispatch_state = _repo_invoke_proc.load()
-                if not getattr(_repo_invoke_proc, "operation_replayed", False):
-                    current_entry = dict(invocation_by_id(dispatch_state, entry["invocation_id"]))
-                    if current_entry.get("status") != "dispatch-unknown":
-                        process.terminate(); process.wait(timeout=5)
-                        print("ERROR: provider-ineligible: invocation-not-dispatch-unknown", file=sys.stderr); raise SystemExit(2)
-                    try:
-                        receipt_state = record_provider_receipt(
-                            [current_entry],
-                            {
-                                "invocation_id": entry["invocation_id"],
-                                "operation_id": entry["operation_id"],
-                                "outbound_packet_digest": entry["outbound_packet_digest"],
-                                "iteration": entry["iteration"],
-                                "fencing_epoch": entry["fencing_epoch"],
-                            },
-                            {"kind": "process", "identity": entry["process_identity_digest"]},
-                        )
-                    except PlanningFailure as exc:
-                        process.terminate(); process.wait(timeout=5)
-                        _provider_gate(exc.code)
-                    current_entry.update({
-                        "child_pid": entry["child_pid"],
-                        "process_identity_digest": entry["process_identity_digest"],
-                        "provider_receipt": receipt_state["provider_receipt"],
-                        "status": receipt_state["status"],
-                        "lifecycle_state": receipt_state["lifecycle_state"],
-                        "running_at": iso_now(), "started_at": running_at,
-                        "heartbeat_at": iso_now(), "transitioned_at": iso_now(),
-                    })
-                    validate_invocation_transition(entry, current_entry)
-                    _replace_provider_invocation(dispatch_state, current_entry)
-                    dispatch_state["updated_at"] = iso_now()
-                    _repo_invoke_proc.save(dispatch_state)
-                    entry = current_entry
-            try:
-                raw_stdout, raw_stderr = process.communicate(input=packet, timeout=timeout)
-            except subprocess.TimeoutExpired:
-                process.kill(); raw_stdout, raw_stderr = process.communicate(); raw_stderr = (raw_stderr or b"") + b"\ncommand provider timed out"
-            exit_code = process.returncode
-            stdout = _redact_provider_output((raw_stdout or b"").decode("utf-8", errors="replace"))
-            stderr = _redact_provider_output((raw_stderr or b"").decode("utf-8", errors="replace"))
-
-    if spawn_failed_reason:
-        status, reason = "failed-before-start", stderr
-    else:
-        evidence_status, reason = _classify_command_provider_result(provider, exit_code, stdout, stderr)
-        try:
-            terminal = decide_provider_terminal_result(
-                exit_code=exit_code, evidence_status=evidence_status, reason=reason
-            )
-        except PlanningFailure as exc:
-            _provider_gate(exc.code)
-        status, reason = terminal.status, terminal.reason
-    outcome = _command_outcome(
-        args, "specialists-invoke-command",
-        "ok" if status == "completed" else "external",
-    )
-    completed_at = iso_now()
-    entry.update({
-        "status": status,
-        "lifecycle_state": "terminal",
-        "transitioned_at": completed_at,
-        "completed_at": completed_at,
-        "exit_code": exit_code,
-    })
-    if reason:
-        entry["reason"] = reason
-    evidence = (
-        "# Command Provider Evidence\n\n"
-        f"- provider: {entry['skill']}\n"
-        f"- role: {entry['role']}\n"
-        f"- command: {_redact_provider_output(json.dumps(argv, ensure_ascii=False))}\n"
-        f"- exit_code: {exit_code}\n\n"
-        "## Stdout\n\n"
-        f"```text\n{stdout}\n```\n\n"
-        "## Stderr\n\n"
-        f"```text\n{stderr}\n```\n"
-    )
-    _repo_invoke_result = _make_repo_invoke(":result")
-    with _repo_invoke_result.transaction():
-        data = _repo_invoke_result.load()
-        if not getattr(_repo_invoke_result, "operation_replayed", False):
-            _validate_specialist_public_state(data)
-            _require_current_provider_application(
-                data,
-                _find_provider(data, args.provider),
-                requested_phase=args.phase,
-                requested_iteration=args.iteration,
-                application_kind="result-import",
-                selection_source=args.selection_source,
-                invocation_id=entry["invocation_id"],
-                cwd=cwd,
-                registry_args=args,
-            )
-            current = data.get("activity_current")
-            if (
-                isinstance(current, dict)
-                and current.get("kind") == "external-wait"
-                and current.get("reason") == "external-command"
-                and current.get("started_at") == now
-            ):
-                end_activity_segment(data, completed_at)
-            data["updated_at"] = completed_at
-            data = stamp_metadata(data, cwd)
-            applied_selection_source = (
-                args.selection_source
-                if status in APPLIED_SPECIALIST_INVOCATION_STATUSES
-                else None
-            )
-            if applied_selection_source:
-                entry["selection_source"] = applied_selection_source
-            try:
-                current_entry = invocation_by_id(data, entry["invocation_id"])
-                validate_invocation_transition(current_entry, entry)
-            except SpecialistLifecycleError as exc:
-                print(f"ERROR: command invocation checkpoint is invalid: {exc}", file=sys.stderr)
-                sys.exit(2)
-            selected_entry = None
-            if applied_selection_source:
-                selected_entry = _add_selected_specialist_metadata(
-                    data, entry, applied_selection_source, completed_at, provider, reason
-                )
-            for index, item in enumerate(data["specialist_invocations"]):
-                if item.get("invocation_id") == entry["invocation_id"]:
-                    data["specialist_invocations"][index] = entry
-                    break
-            preflight_pointer = (data.get("provider_preflights") or {}).get(args.preflight_id)
-            if isinstance(preflight_pointer, dict) and preflight_pointer.get("status") == "consuming":
-                preflight_pointer["status"] = "consumed"
-                preflight_pointer["consumed_invocation_id"] = entry["invocation_id"]
-            _validate_specialist_public_state(data)
-            _append_command_outcome(data, outcome)
-            _commit_specialist_state_with_save(
-                cwd, data, entry, args.iteration, evidence,
-                save_state=_repo_invoke_result.save,
-            )
-    result = {"ok": status == "completed", "outcome_kind": outcome["outcome_kind"], "outcome": outcome, "entry": entry}
-    if selected_entry:
-        result["selected_entry"] = selected_entry
-    print(json.dumps(result, indent=2 if args.json else None, ensure_ascii=False))
+    except CommandProviderFailure as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(exc.exit_code)
+    print(result.rendered)
 def _process_identity_is_live(entry: dict) -> bool:
     pid = entry.get("child_pid")
     if type(pid) is not int or pid < 1:
