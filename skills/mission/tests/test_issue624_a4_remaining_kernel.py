@@ -686,6 +686,11 @@ def test_provider_consent_path_policy_rejects_session_aggregate_parts():
                 ("other-project", marker, "sessions", "session.json")
             )
 
+    # 実 Path.parts は必ず非空。空 tuple を「検証済み」として通さない。
+    for degenerate in ((), (b"root",), ["root"], "root"):
+        with pytest.raises(ValueError, match="provider-consent-session-path-forbidden"):
+            validate_provider_consent_path_parts(degenerate)
+
     class LazyText(str):
         def casefold(self):
             raise AssertionError("application must not invoke subclass behavior")

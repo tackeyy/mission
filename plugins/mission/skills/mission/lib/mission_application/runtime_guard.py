@@ -64,7 +64,11 @@ class ProviderConsentRequest:
 
 def validate_provider_consent_path_parts(parts: tuple[str, ...]) -> None:
     """Apply the consent-path policy to adapter-resolved path facts."""
-    if type(parts) is not tuple or any(type(part) is not str for part in parts):
+    if (
+        type(parts) is not tuple
+        or not parts
+        or any(type(part) is not str for part in parts)
+    ):
         raise ValueError("provider-consent-session-path-forbidden")
     if any(part.casefold() == ".mission-state" for part in parts):
         raise ValueError("provider-consent-session-path-forbidden")
