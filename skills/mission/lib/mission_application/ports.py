@@ -80,12 +80,26 @@ class RepositoryExecutionResult:
 class LegacyCommandExecutionResult:
     """Closed legacy command result with a defensive saved projection."""
 
-    decision: Decision
+    decision: Optional[Decision]
     _projection: FrozenJsonObject
+    replayed: bool = False
+
+    def __post_init__(self) -> None:
+        if self.replayed != (self.decision is None):
+            raise ValueError("legacy-command-replay-result-invalid")
 
     @property
     def projection(self) -> dict:
         return self._projection.thaw()
+
+
+@dataclass(frozen=True)
+class PreparedTransitionOperation:
+    """Typed command, inert effects, and adapter response without proposed state."""
+
+    command: Command
+    effects: tuple[object, ...]
+    result: dict
 
 
 class MissionInitializer(Protocol):

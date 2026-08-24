@@ -639,8 +639,8 @@ def test_malformed_present_legacy_guidance_field_does_not_use_absent_default(tmp
 @pytest.mark.parametrize(
     ("field", "value", "path"),
     [
-        ("specialists_selected", False, "$.specialists_selected"),
-        ("specialist_invocations", 0, "$.specialist_invocations"),
+        ("specialists_selected", False, "$.a4"),
+        ("specialist_invocations", 0, "$.a4"),
         ("provider_plan_imports", "", "$.provider_plan_imports"),
         ("issue_ref", "x" * 4097, "$.issue_ref"),
         ("review_tier", "", "$.review_tier"),

@@ -209,7 +209,10 @@ from mission_application.planning import (  # noqa: E402
     decide_provider_terminal_result,
     ExecutorHandoffFacts,
     ExecutorHandoffRequest,
-    decide_executor_handoff,
+    executor_handoff_response,
+    prepare_executor_handoff,
+    prepare_executor_handoff_rejection,
+    prepare_specialist_recommendation,
     record_dispatch_intent,
     record_provider_receipt,
     reconcile_dispatch_unknown,
@@ -239,14 +242,20 @@ from mission_application.runtime_guard import (  # noqa: E402
     PermissionHaltRejected,
     PermissionObservationRequest,
     PermissionProbe,
+    ProviderConsentRequest,
+    RegisteredEntryPointDistributionObservation,
+    ResolvedProviderConsentPathObservation,
     SessionSelection,
     SessionSelectionReason,
     StopGuardObserveCommand,
     StopObservationRequest,
+    RuntimeGuardFailure,
     decide_stop_guard,
     observe_stop_guard,
     record_permission_observation,
     resolve_guard_command_receipt,
+    validate_provider_consent_request,
+    validate_registered_approval_entry_point_distribution,
 )
 from mission_application.specialist_selection import (  # noqa: E402
     SpecialistDeclineRequest,
@@ -4665,58 +4674,87 @@ def cmd_specialists(args):
             operation_id=_op_id_recommend, operation_command=_op_cmd_recommend,
             operation_command_type=_command_name_recommend,
         )
-        with _repo_recommend.transaction():
-            data = _repo_recommend.load()
-            if not getattr(_repo_recommend, "operation_replayed", False):
-                _reject_active_provider_mutation(data, "specialists-recommend")
-                _validate_specialist_public_state(data)
-                # For v5 sessions, state_iteration_snapshot and effective_complexity
-                # may be None (HEAD file has no iteration/complexity at top level);
-                # fall back to repository-loaded values so the check is not
-                # trivially false for a legitimate replay.
-                _eff_iter_snap = (
-                    state_iteration_snapshot
-                    if state_iteration_snapshot is not None
-                    else data.get("iteration")
+        recommend_at = iso_now()
+        recommendation_context = {}
+
+        def prepare_recommendation(data):
+            _validate_specialist_public_state(data)
+            # A v5 HEAD does not expose these values. Bind the command to the
+            # repository-loaded projection while retaining the caller snapshot
+            # when one was observable before admission.
+            expected_iteration = (
+                state_iteration_snapshot
+                if state_iteration_snapshot is not None
+                else data.get("iteration")
+            )
+            expected_complexity = (
+                effective_complexity
+                if effective_complexity is not None
+                else data.get("complexity")
+            )
+            recommendation_context.update(
+                {
+                    "state_complexity": data.get("complexity"),
+                    "state_iteration": data.get("iteration"),
+                    "expected_complexity": expected_complexity,
+                    "expected_iteration": expected_iteration,
+                }
+            )
+            return prepare_specialist_recommendation(
+                data,
+                at=recommend_at,
+                expected_complexity=expected_complexity,
+                expected_iteration=expected_iteration,
+                result=result,
+            )
+
+        try:
+            _prepared_recommend, _execution_recommend = (
+                _repo_recommend.execute_transition_effects(
+                    prepare_recommendation
                 )
-                _eff_complexity_snap = (
-                    effective_complexity
-                    if effective_complexity is not None
-                    else data.get("complexity")
+            )
+        except (FencedCommitError, OSError, PlanningFailure, ValueError) as exc:
+            print(f"ERROR: specialist recommendation rejected: {exc}", file=sys.stderr)
+            sys.exit(2)
+        _recommend_decision = _execution_recommend.decision
+        if _recommend_decision is not None and not _recommend_decision.accepted:
+            _recommend_rejection = _recommend_decision.rejection
+            _recommend_reason = (
+                _recommend_rejection.code
+                if _recommend_rejection is not None
+                else "specialist-recommendation-rejected"
+            )
+            if _recommend_reason == "provider-invocation-active":
+                print(
+                    "ERROR: provider-invocation-active: specialists-recommend "
+                    "is fenced until the active invocation becomes terminal",
+                    file=sys.stderr,
                 )
-                if (
-                    data.get("complexity") != _eff_complexity_snap
-                    or data.get("iteration") != _eff_iter_snap
-                ):
-                    _reject_specialist_state_context_mismatch(
-                        args,
-                        state_complexity=data.get("complexity"),
-                        state_iteration=data.get("iteration"),
-                        observed_complexity=_eff_complexity_snap,
-                        observed_iteration=_eff_iter_snap,
-                    )
-                data["task_profile"] = task_profile
-                data["specialists_candidates"] = public_candidates
-                data["specialists_selected"] = public_selected
-                data["specialists_unavailable"] = public_unavailable
-                data["specialists_ineligible"] = public_ineligible
-                data["specialist_registry_projection"] = registry_projection
-                data["specialists_decision"] = decision
-                data["specialists_phase_plan"] = phase_plan
-                planning_selected = next((item for item in public_selected if item.get("planning_mode") in {"advisory", "primary"}), None)
-                if planning_selected:
-                    data["planning_strategy"] = "provider-" + planning_selected["planning_mode"]
-                    data["planning_contract_digest"] = planning_selected["planning_contract_digest"]
-                    data["planning_provider_binding"] = {
-                        key: planning_selected[key]
-                        for key in ("provider_id", "selection_id", "planning_contract_digest")
-                    }
-                elif data.get("planning_policy_version") == 1:
-                    data["planning_strategy"] = "core"
-                    data.pop("planning_provider_binding", None)
-                data["specialists_mode"] = "interactive" if decision.get("prompted_user") else "auto"
-                data["updated_at"] = iso_now()
-                _repo_recommend.save(data)
+                _active_error = CommandOutcomeExit(2, "expected-gate")
+                _active_error.provider_reason_code = _recommend_reason
+                raise _active_error
+            if _recommend_reason == "specialist-recommendation-context-mismatch":
+                _reject_specialist_state_context_mismatch(
+                    args,
+                    state_complexity=recommendation_context.get(
+                        "state_complexity"
+                    ),
+                    state_iteration=recommendation_context.get(
+                        "state_iteration"
+                    ),
+                    observed_complexity=recommendation_context.get(
+                        "expected_complexity"
+                    ),
+                    observed_iteration=recommendation_context.get(
+                        "expected_iteration"
+                    ),
+                )
+            print(
+                f"ERROR: specialist recommendation rejected: {_recommend_reason}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
 
     if getattr(args, "json", False):
         print(json.dumps(result, indent=2, ensure_ascii=False))
@@ -4728,18 +4766,29 @@ def cmd_specialists(args):
 
 
 def cmd_specialists_consent(args):
-    provider = args.provider.strip()
-    if not provider:
-        print("ERROR: --provider is required", file=sys.stderr)
+    try:
+        default_path = _default_consent_file()
+        resolved = (
+            Path(args.consent_file) if args.consent_file else default_path
+        ).expanduser().resolve(strict=False)
+        provider, _validated_parts = validate_provider_consent_request(
+            ProviderConsentRequest(
+                provider=args.provider,
+                resolved_path=ResolvedProviderConsentPathObservation(
+                    parts=tuple(resolved.parts)
+                ),
+            )
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
-    path = Path(args.consent_file).expanduser() if args.consent_file else _default_consent_file()
+    path = resolved
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {}
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            data = {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        data = {}
     providers = data.setdefault("providers", {})
     providers[provider] = {"granted_at": iso_now()}
     atomic_write_json(path, data)
@@ -11596,11 +11645,40 @@ def _configured_approval_entry_point(cwd: Path, verifier_name: str):
     if len(matches) != 1:
         raise ValueError("approval verifier entry point is not installed")
     entry_point = matches[0]
-    distribution = getattr(entry_point, "dist", None)
-    if (distribution is None
-            or str(distribution.metadata.get("Name") or "").lower() != configured_item["distribution"].lower()
-            or str(distribution.version) != configured_item["version"]):
-        raise ValueError("approval verifier distribution identity mismatch")
+    try:
+        attached_distribution = entry_point.dist
+        distribution = attached_distribution
+        if distribution is None:
+            distribution = importlib.metadata.distribution(
+                configured_item["distribution"]
+            )
+        observed_distribution = RegisteredEntryPointDistributionObservation(
+            entry_point_name=entry_point.name,
+            entry_point_value=entry_point.value,
+            has_attached_distribution=attached_distribution is not None,
+            distribution_name=distribution.metadata["Name"],
+            distribution_version=distribution.version,
+            owned_entry_points=tuple(
+                map(
+                    lambda item: (item.group, item.name, item.value),
+                    distribution.entry_points,
+                )
+            ),
+        )
+    except (
+        AttributeError,
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+        importlib.metadata.PackageNotFoundError,
+    ) as exc:
+        raise ValueError("approval verifier distribution identity mismatch") from exc
+    validate_registered_approval_entry_point_distribution(
+        observed_distribution,
+        configured_item,
+        group=_APPROVAL_VERIFIER_ENTRY_POINT_GROUP,
+    )
     module_name = getattr(entry_point, "module", "")
     if not isinstance(module_name, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", module_name):
         raise ValueError("approval verifier entry point is invalid")
@@ -11640,11 +11718,30 @@ def _approval_verifier_child(verifier, request: dict, channel) -> None:
             if len(matches) != 1:
                 raise ValueError("approval verifier entry point is not installed")
             entry_point = matches[0]
-            distribution = getattr(entry_point, "dist", None)
-            if (distribution is None
-                    or str(distribution.metadata.get("Name") or "").lower() != verifier["distribution"].lower()
-                    or str(distribution.version) != verifier["version"]):
-                raise ValueError("approval verifier distribution identity mismatch")
+            attached_distribution = entry_point.dist
+            distribution = attached_distribution
+            if distribution is None:
+                distribution = importlib.metadata.distribution(
+                    verifier["distribution"]
+                )
+            observed_distribution = RegisteredEntryPointDistributionObservation(
+                entry_point_name=entry_point.name,
+                entry_point_value=entry_point.value,
+                has_attached_distribution=attached_distribution is not None,
+                distribution_name=distribution.metadata["Name"],
+                distribution_version=distribution.version,
+                owned_entry_points=tuple(
+                    map(
+                        lambda item: (item.group, item.name, item.value),
+                        distribution.entry_points,
+                    )
+                ),
+            )
+            validate_registered_approval_entry_point_distribution(
+                observed_distribution,
+                verifier,
+                group=_APPROVAL_VERIFIER_ENTRY_POINT_GROUP,
+            )
             module_name = getattr(entry_point, "module", "")
             if (module_name != verifier["module"]
                     or getattr(entry_point, "value", None) != verifier["entry_point_value"]):
@@ -14405,83 +14502,97 @@ def _cmd_executor_handoff(args, operation: str):
         operation_command=operation_command,
         operation_command_type=command_name,
     )
-    with repository.transaction():
-        data = repository.load()
+    at = iso_now()
+
+    def prepare(data):
         handoff = data.get("executor_handoff")
         plan = data.get("canonical_plan")
-        if getattr(repository, "operation_replayed", False):
-            if (
-                isinstance(handoff, dict)
-                and handoff.get("status") == "rejected"
-                and isinstance(handoff.get("rejected_reason"), str)
-            ):
-                print(
-                    "ERROR: executor handoff rejected: "
-                    + handoff["rejected_reason"],
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-            print(
-                json.dumps(
-                    {
-                        "ok": True,
-                        "operation": operation,
-                        "executor_handoff": handoff,
-                    },
-                    ensure_ascii=False,
-                )
-            )
-            return
         try:
             if not isinstance(handoff, dict) or not isinstance(plan, dict):
                 raise PlanningLifecycleError("executor-handoff-missing")
-            expected = _trusted_canonical_plan_binding(data, plan)
-            _raw, steps = canonical_plan_identity(cwd, plan, expected=expected, reader=_read_strict_review_file)
-            verify_handoff_binding(
-                handoff,
-                plan_path=plan.get("path"), plan_digest=plan.get("digest"),
-                plan_generation=plan.get("generation"), plan_source=plan.get("source"),
-                source_id=plan.get("source_id"), selection_source=plan.get("selection_source"),
-                # v4 handoffs bind the active session iteration (the value
-                # that is recorded with each executor decision), not a
-                # separately persisted legacy plan iteration.
-                iteration=data.get("iteration"), step_ids=steps,
-            )
-            document = json.loads(_raw)
-            dependencies = {
-                item["id"]: tuple(item.get("depends_on", []))
-                for item in document["steps"] if isinstance(item, dict) and isinstance(item.get("id"), str)
-            }
-            result = decide_executor_handoff(
-                handoff, data.get("decisions") or [],
+            def replay_facts():
+                replay_steps = list(handoff.get("step_ids", []))
+                return replay_steps, dict.fromkeys(replay_steps, ()), b""
+
+            def fresh_facts():
+                expected = _trusted_canonical_plan_binding(data, plan)
+                raw, steps = canonical_plan_identity(
+                    cwd,
+                    plan,
+                    expected=expected,
+                    reader=_read_strict_review_file,
+                )
+                verify_handoff_binding(
+                    handoff,
+                    plan_path=plan.get("path"),
+                    plan_digest=plan.get("digest"),
+                    plan_generation=plan.get("generation"),
+                    plan_source=plan.get("source"),
+                    source_id=plan.get("source_id"),
+                    selection_source=plan.get("selection_source"),
+                    iteration=data.get("iteration"),
+                    step_ids=steps,
+                )
+                document = json.loads(raw)
+                dependencies = {
+                    item["id"]: tuple(item.get("depends_on", []))
+                    for item in document["steps"]
+                    if isinstance(item, dict)
+                    and isinstance(item.get("id"), str)
+                }
+                return steps, dependencies, raw
+
+            steps, dependencies, raw = {
+                True: replay_facts,
+                False: fresh_facts,
+            }[bool(getattr(repository, "operation_replayed", False))]()
+            return prepare_executor_handoff(
+                data,
                 ExecutorHandoffRequest(
-                    operation=operation, at=iso_now(),
-                    step_id=getattr(args, "step_id", None), result=getattr(args, "result", None),
+                    operation=operation,
+                    at=at,
+                    step_id=getattr(args, "step_id", None),
+                    result=getattr(args, "result", None),
                 ),
                 ExecutorHandoffFacts(
-                    plan_path=plan.get("path"), plan_digest=plan.get("digest"),
-                    plan_generation=plan.get("generation"), plan_source=plan.get("source"),
-                    source_id=plan.get("source_id"), selection_source=plan.get("selection_source"),
-                    iteration=data.get("iteration"), step_ids=tuple(steps), dependencies=dependencies,
+                    plan_path=plan.get("path"),
+                    plan_digest=plan.get("digest"),
+                    plan_generation=plan.get("generation"),
+                    plan_source=plan.get("source"),
+                    source_id=plan.get("source_id"),
+                    selection_source=plan.get("selection_source"),
+                    iteration=data.get("iteration"),
+                    step_ids=tuple(steps),
+                    dependencies=dependencies,
                     decision_iteration=plan.get("iteration"),
+                    raw=raw,
                 ),
             )
-            handoff = result.handoff
-            data["executor_handoff"] = handoff
-            if result.appended_decision is not None:
-                data.setdefault("decisions", []).append(result.appended_decision)
         except (OSError, PlanningFailure, ValueError, PlanningLifecycleError) as exc:
-            # Identity mutation is terminal; a duplicate begin or invalid step
-            # request is merely rejected and leaves a resumable handoff intact.
-            if isinstance(handoff, dict) and operation in {"begin", "verify"} and str(exc).startswith("canonical-"):
-                handoff["status"] = "rejected"
-                handoff["rejected_reason"] = str(exc)
-                data["updated_at"] = iso_now()
-                repository.save(data)
-            print(f"ERROR: executor handoff rejected: {exc}", file=sys.stderr); sys.exit(2)
-        data["updated_at"] = iso_now()
-        repository.save(data)
-    print(json.dumps({"ok": True, "operation": operation, "executor_handoff": handoff}, ensure_ascii=False))
+            if operation in {"begin", "verify"} and str(exc).startswith(
+                "canonical-"
+            ):
+                return prepare_executor_handoff_rejection(
+                    data,
+                    at=at,
+                    attempted_operation=operation,
+                    reason_code=str(exc),
+                )
+            raise
+
+    try:
+        prepared, execution = repository.execute_transition_effects(prepare)
+        response = executor_handoff_response(prepared, execution)
+    except (
+        FencedCommitError,
+        OSError,
+        PlanningFailure,
+        ValueError,
+        PlanningLifecycleError,
+    ) as exc:
+        print(f"ERROR: executor handoff rejected: {exc}", file=sys.stderr)
+        sys.exit(2)
+    print(json.dumps(response, ensure_ascii=False))
 
 
 def cmd_executor_handoff_begin(args): _cmd_executor_handoff(args, "begin")

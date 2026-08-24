@@ -19,6 +19,24 @@ from provider_receipt_contract import (
     validate_closed_provider_receipt as _validate_closed_provider_receipt,
     validate_fencing_epoch as _validate_fencing_epoch,
 )
+from mission_application.ports import (
+    LegacyCommandExecutionResult,
+    PreparedTransitionOperation,
+)
+from mission_kernel.commands import (
+    BeginExecutorHandoff,
+    CanonicalPlanObservation,
+    CanonicalPlanRejectionCode,
+    CompleteExecutorHandoff,
+    RecordExecutorStep,
+    RecordSpecialistRecommendation,
+    RejectExecutorHandoff,
+    VerifyExecutorStep,
+)
+from mission_kernel.a4 import (
+    A4ProjectionError,
+    specialist_recommendation_projection,
+)
 
 
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -188,12 +206,167 @@ class ExecutorHandoffFacts:
     step_ids: tuple[str, ...]
     dependencies: Mapping[str, tuple[str, ...]]
     decision_iteration: object
+    raw: bytes = b""
 
 
 @dataclass(frozen=True)
 class ExecutorHandoffResult:
     handoff: dict
     appended_decision: dict | None
+
+
+def prepare_executor_handoff(
+    state: object,
+    request: object,
+    facts: object,
+) -> PreparedTransitionOperation:
+    """Prepare one typed handoff command from adapter-verified plan facts."""
+    if not isinstance(state, Mapping):
+        raise PlanningFailure("executor-handoff-state-invalid")
+    if not isinstance(request, ExecutorHandoffRequest) or not isinstance(
+        facts, ExecutorHandoffFacts
+    ):
+        raise PlanningFailure("executor-handoff-request-invalid")
+    if set(facts.dependencies) != set(facts.step_ids):
+        raise PlanningFailure("executor-handoff-dependencies-invalid")
+    try:
+        dependencies = tuple(
+            (step_id, tuple(facts.dependencies[step_id]))
+            for step_id in facts.step_ids
+        )
+    except (KeyError, TypeError) as exc:
+        raise PlanningFailure("executor-handoff-dependencies-invalid") from exc
+    observation = CanonicalPlanObservation(
+        path=facts.plan_path,
+        digest=facts.plan_digest,
+        generation=facts.plan_generation,
+        source=facts.plan_source,
+        source_id=facts.source_id,
+        selection_source=facts.selection_source,
+        iteration=facts.iteration,
+        ordered_step_ids=facts.step_ids,
+        dependencies=dependencies,
+        raw=facts.raw,
+    )
+    commands = {
+        "begin": lambda: BeginExecutorHandoff(request.at, observation),
+        "verify": lambda: VerifyExecutorStep(
+            request.at, request.step_id, observation
+        ),
+        "record": lambda: RecordExecutorStep(
+            request.at, request.step_id, request.result, observation
+        ),
+        "complete": lambda: CompleteExecutorHandoff(request.at, observation),
+    }
+    factory = commands.get(request.operation)
+    if factory is None:
+        raise PlanningFailure("executor-handoff-request-invalid")
+    return PreparedTransitionOperation(
+        command=factory(),
+        effects=(),
+        result={"operation": request.operation},
+    )
+
+
+def prepare_executor_handoff_rejection(
+    state: object,
+    *,
+    at: object,
+    attempted_operation: object,
+    reason_code: object,
+) -> PreparedTransitionOperation:
+    """Prepare the closed begin/verify canonical-drift transition."""
+    if not isinstance(state, Mapping) or not isinstance(at, str) or not at:
+        raise PlanningFailure("executor-handoff-rejection-invalid")
+    attempted = {
+        "begin": "begin",
+        "verify": "verify-step",
+    }.get(attempted_operation)
+    try:
+        reason = CanonicalPlanRejectionCode(reason_code)
+    except (TypeError, ValueError) as exc:
+        raise PlanningFailure("executor-handoff-rejection-invalid") from exc
+    if attempted is None:
+        raise PlanningFailure("executor-handoff-rejection-invalid")
+    return PreparedTransitionOperation(
+        command=RejectExecutorHandoff(at, attempted, reason),
+        effects=(),
+        result={
+            "operation": attempted_operation,
+            "rejection": reason.value,
+        },
+    )
+
+
+def executor_handoff_response(
+    prepared: object,
+    execution: object,
+) -> dict:
+    """Close one executor result into the stable CLI response or rejection."""
+    if not isinstance(prepared, PreparedTransitionOperation) or not isinstance(
+        execution, LegacyCommandExecutionResult
+    ):
+        raise PlanningFailure("executor-handoff-execution-invalid")
+    decision = execution.decision
+    if decision is not None and not decision.accepted:
+        reason = decision.rejection
+        raise PlanningFailure(
+            reason.code
+            if reason is not None
+            else "executor-handoff-transition-rejected"
+        )
+    projection = execution.projection
+    handoff = projection.get("executor_handoff")
+    rejection = prepared.result.get("rejection")
+    if rejection is None and execution.replayed and isinstance(handoff, Mapping):
+        rejection = handoff.get("rejected_reason")
+    if isinstance(rejection, str):
+        raise PlanningFailure(rejection)
+    operation = prepared.result.get("operation")
+    if operation not in {"begin", "verify", "record", "complete"}:
+        raise PlanningFailure("executor-handoff-execution-invalid")
+    return {
+        "ok": True,
+        "operation": operation,
+        "executor_handoff": handoff,
+    }
+
+
+def prepare_specialist_recommendation(
+    state: object,
+    *,
+    at: object,
+    expected_complexity: object,
+    expected_iteration: object,
+    result: object,
+) -> PreparedTransitionOperation:
+    """Prepare a selection-only checkpoint for the shared typed executor."""
+    if (
+        not isinstance(state, Mapping)
+        or not isinstance(at, str)
+        or not at
+        or (
+            expected_complexity is not None
+            and not isinstance(expected_complexity, str)
+        )
+        or type(expected_iteration) is not int
+        or expected_iteration < 0
+    ):
+        raise PlanningFailure("specialist-recommendation-invalid")
+    try:
+        projection = specialist_recommendation_projection(result)
+    except A4ProjectionError as exc:
+        raise PlanningFailure(exc.code) from exc
+    return PreparedTransitionOperation(
+        command=RecordSpecialistRecommendation(
+            at,
+            expected_complexity,
+            expected_iteration,
+            projection,
+        ),
+        effects=(),
+        result={},
+    )
 
 
 def typed_plan_binding(value: object) -> PlanBinding:

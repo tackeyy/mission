@@ -42,6 +42,154 @@ RUNTIME_GUARD_COMMAND_OWNERS = {
     "stop-guard-observe": "A5.runtime-guard",
 }
 
+
+class RuntimeGuardFailure(ValueError):
+    """A fail-closed runtime-guard request rejection."""
+
+
+@dataclass(frozen=True)
+class ResolvedProviderConsentPathObservation:
+    """The one adapter-resolved representation used for policy and I/O."""
+
+    parts: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ProviderConsentRequest:
+    """Pure consent policy input with adapter-resolved path facts."""
+
+    provider: object
+    resolved_path: ResolvedProviderConsentPathObservation
+
+
+def validate_provider_consent_path_parts(parts: tuple[str, ...]) -> None:
+    """Apply the consent-path policy to adapter-resolved path facts."""
+    if (
+        type(parts) is not tuple
+        or not parts
+        or any(type(part) is not str for part in parts)
+    ):
+        raise ValueError("provider-consent-session-path-forbidden")
+    if any(part.casefold() == ".mission-state" for part in parts):
+        raise ValueError("provider-consent-session-path-forbidden")
+
+
+def resolve_provider_consent_path(
+    resolved: ResolvedProviderConsentPathObservation,
+) -> tuple[str, ...]:
+    """Validate and return the exact path representation used by the adapter."""
+    try:
+        if type(resolved) is not ResolvedProviderConsentPathObservation:
+            raise ValueError("provider-consent-path-resolution-invalid")
+        validate_provider_consent_path_parts(resolved.parts)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise RuntimeGuardFailure(str(exc)) from exc
+    return resolved.parts
+
+
+def validate_provider_consent_request(
+    request: ProviderConsentRequest,
+) -> tuple[str, tuple[str, ...]]:
+    """Normalize the provider and validate the exact path used for consent I/O."""
+    if type(request) is not ProviderConsentRequest or type(request.provider) is not str:
+        raise RuntimeGuardFailure("--provider is required")
+    provider = request.provider.strip()
+    if not provider:
+        raise RuntimeGuardFailure("--provider is required")
+    return provider, resolve_provider_consent_path(request.resolved_path)
+
+
+@dataclass(frozen=True)
+class RegisteredEntryPointDistributionObservation:
+    """Adapter-observed entry point and distribution facts."""
+
+    entry_point_name: str
+    entry_point_value: str
+    has_attached_distribution: bool
+    distribution_name: str
+    distribution_version: str
+    owned_entry_points: tuple[tuple[str, str, str], ...]
+
+
+def validate_registered_entry_point_distribution(
+    *,
+    entry_point_name: str,
+    entry_point_value: str,
+    has_attached_distribution: bool,
+    distribution_name: str,
+    distribution_version: str,
+    owned_entry_points: tuple[tuple[str, str, str], ...],
+    configured_distribution: str,
+    configured_version: str,
+    group: str,
+) -> None:
+    """Validate adapter-observed entry point and distribution facts only."""
+    invalid = "approval verifier distribution identity mismatch"
+    if (
+        type(entry_point_name) is not str
+        or not entry_point_name
+        or type(entry_point_value) is not str
+        or not entry_point_value
+        or type(has_attached_distribution) is not bool
+        or type(distribution_name) is not str
+        or not distribution_name
+        or type(distribution_version) is not str
+        or not distribution_version
+        or type(configured_distribution) is not str
+        or not configured_distribution
+        or type(configured_version) is not str
+        or not configured_version
+        or type(group) is not str
+        or not group
+        or type(owned_entry_points) is not tuple
+        or any(
+            type(item) is not tuple
+            or len(item) != 3
+            or any(type(value) is not str for value in item)
+            for item in owned_entry_points
+        )
+    ):
+        raise ValueError(invalid)
+    if not has_attached_distribution and sum(
+        item == (group, entry_point_name, entry_point_value)
+        for item in owned_entry_points
+    ) != 1:
+        raise ValueError(invalid)
+    if (
+        distribution_name.lower() != configured_distribution.lower()
+        or distribution_version != configured_version
+    ):
+        raise ValueError("approval verifier distribution identity mismatch")
+
+
+def validate_registered_approval_entry_point_distribution(
+    observed: RegisteredEntryPointDistributionObservation,
+    configured_item: object,
+    *,
+    group: str,
+) -> None:
+    """Apply closed policy to adapter-observed distribution facts."""
+    invalid = "approval verifier distribution identity mismatch"
+    try:
+        if (
+            type(observed) is not RegisteredEntryPointDistributionObservation
+            or type(configured_item) is not dict
+        ):
+            raise ValueError(invalid)
+        validate_registered_entry_point_distribution(
+            entry_point_name=observed.entry_point_name,
+            entry_point_value=observed.entry_point_value,
+            has_attached_distribution=observed.has_attached_distribution,
+            distribution_name=observed.distribution_name,
+            distribution_version=observed.distribution_version,
+            owned_entry_points=observed.owned_entry_points,
+            configured_distribution=configured_item["distribution"],
+            configured_version=configured_item["version"],
+            group=group,
+        )
+    except (AttributeError, OSError, TypeError, ValueError) as exc:
+        raise ValueError(invalid) from exc
+
 STOP_GUARD_SCHEMA = "mission-stop-guard/1"
 _STOP_KEYS = frozenset(
     {

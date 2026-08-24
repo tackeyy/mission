@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+import hashlib
 import json
 import math
 from pathlib import Path
 import re
 import weakref
-from typing import Any, Callable, Optional, Type
+from typing import Any, Callable, Mapping, Optional, Type
 
 from mission_common import terminal_outcome_for_halt
+from plan_contract import PlanContractError, canonical_plan_bytes
 
 from .commands import (
     ClearProgress,
@@ -21,7 +23,11 @@ from .commands import (
     GENERIC_SET_FROZEN_FIELDS,
     AdvancePhase,
     AppendArtifactBlock,
+    BeginExecutorHandoff,
+    CanonicalPlanObservation,
+    CanonicalPlanRejectionCode,
     Command,
+    CompleteExecutorHandoff,
     ExportArtifact,
     GenerateContextManifest,
     InitializeArtifact,
@@ -29,12 +35,16 @@ from .commands import (
     MarkPass,
     Reactivate,
     RecordArtifactPublication,
+    RecordExecutorStep,
+    RecordSpecialistRecommendation,
     RecordVerification,
+    RejectExecutorHandoff,
     RenderArtifact,
     ResumeStale,
     SetExtensionFields,
     ProgressEffectClaim,
     UpdateProgress,
+    VerifyExecutorStep,
 )
 from .evidence import (
     EvidenceRuleError,
@@ -43,6 +53,18 @@ from .evidence import (
     apply_progress_update,
     apply_verification_record,
 )
+
+from .a4 import (
+    A4ProjectionError,
+    A4Projection,
+    ExecutorStepDecision,
+    SpecialistRecommendationProjection,
+    SpecialistSelectionProjection,
+    decode_v4_a4_projection,
+    validate_specialist_recommendation_projection,
+    validate_specialist_recommendation_shape,
+)
+from provider_public_contract import SpecialistPublicContractError
 from .artifact import (
     ArtifactRuleError,
     append_artifact_block_document,
@@ -56,12 +78,15 @@ from .model import (
     AbsentHandoff,
     AbsentPlan,
     BoundScore,
+    ConsumedHandoff,
+    ConsumingHandoff,
     FrozenJsonObject,
     HaltCategory,
     MissionControl,
     MissionState,
     Phase,
     PreparedHandoff,
+    RejectedHandoff,
     SessionRole,
     TerminalOutcome,
 )
@@ -79,8 +104,45 @@ class _Rejected(ValueError):
         self.code = code
 
 
+_A4_OWNED_LEGACY_FIELDS = frozenset(
+    {
+        "decisions",
+        "task_profile",
+        "specialist_registry_projection",
+        "specialists_decision",
+        "planning_provider_binding",
+        "specialists_candidates",
+        "specialists_selected",
+        "specialists_unavailable",
+        "specialists_ineligible",
+        "specialists_phase_plan",
+        "specialist_invocations",
+        "specialists_mode",
+        "planning_policy_version",
+        "planning_strategy",
+        "planning_contract_digest",
+    }
+)
+
+
 def _unbound_state(state: MissionState, **changes: Any) -> MissionState:
     return replace(state, snapshot_provenance=None, **changes)
+
+
+def _a4_authority_document(state: MissionState) -> dict[str, object]:
+    return (
+        state.legacy_passthrough.thaw()
+        if state.legacy_passthrough is not None
+        else state.extensions.thaw()
+    )
+
+
+def _sync_a4_projection(state: MissionState) -> MissionState:
+    try:
+        projection = decode_v4_a4_projection(_a4_authority_document(state), state.handoff)
+    except A4ProjectionError as exc:
+        raise _Rejected(exc.code) from exc
+    return _unbound_state(state, a4=projection)
 
 
 @dataclass(frozen=True)
@@ -545,7 +607,10 @@ def _apply_compatibility(
         for key in removals:
             document.pop(key, None)
         changes["legacy_passthrough"] = FrozenJsonObject(tuple(document.items()))
-    return _unbound_state(state, **changes)
+    next_state = _unbound_state(state, **changes)
+    if requested & _A4_OWNED_LEGACY_FIELDS:
+        next_state = _sync_a4_projection(next_state)
+    return next_state
 
 
 def _merge_extension_fields(
@@ -583,7 +648,10 @@ def _merge_extension_fields(
         document = dict(state.legacy_passthrough.items)
         document.update(fields.items)
         changes["legacy_passthrough"] = FrozenJsonObject(tuple(document.items()))
-    return _unbound_state(state, **changes)
+    next_state = _unbound_state(state, **changes)
+    if requested & _A4_OWNED_LEGACY_FIELDS:
+        next_state = _sync_a4_projection(next_state)
+    return next_state
 
 
 def _advance(state: MissionState, raw_command: object) -> Transition:
@@ -621,6 +689,13 @@ def _advance(state: MissionState, raw_command: object) -> Transition:
             )
         ):
             raise _Rejected("invalid-prepared-handoff")
+        historical_decisions = _a4_authority_document(state).get("decisions", [])
+        if any(
+            isinstance(item, Mapping)
+            and item.get("handoff_id") == command.prepared_handoff.handoff_id
+            for item in historical_decisions
+        ):
+            raise _Rejected("handoff-id-collision")
         new_handoff = command.prepared_handoff
     elif command.prepared_handoff is not None:
         raise _Rejected("unexpected-prepared-handoff")
@@ -966,7 +1041,7 @@ def _decline_specialist_selection(
         or checkpoint.get("reason_code") != "awaiting-confirmation"
     ):
         raise _Rejected("specialist-selection-not-declinable")
-    document["specialists_decision"] = {
+    declined = {
         **checkpoint,
         "action": "continue-core",
         "decision": "declined",
@@ -975,11 +1050,29 @@ def _decline_specialist_selection(
         "prompted_user": False,
         "lifecycle_state": "terminal",
     }
+    document["specialists_decision"] = declined
     document["specialists_mode"] = "manual"
     if command.at is not None:
         document["updated_at"] = command.at
+    # #624 で specialists_decision は typed A4 projection 側が権威になった。
+    # legacy document だけを書くと projection に上書きされて無効化される。
+    frozen_decision = freeze_json_value(declined)
+    if not isinstance(frozen_decision, FrozenJsonObject):
+        raise _Rejected("specialist-selection-checkpoint-invalid")
+    next_state = _with_artifact_document(state, document)
+    next_state = _unbound_state(
+        next_state,
+        a4=replace(
+            next_state.a4,
+            specialist_selection=replace(
+                next_state.a4.specialist_selection,
+                decision=frozen_decision,
+                mode="manual",
+            ),
+        ),
+    )
     return Transition(
-        _with_artifact_document(state, document),
+        next_state,
         (KernelEvent("specialist-selection-declined"),),
     )
 
@@ -1211,6 +1304,467 @@ def _record_verification(state: MissionState, raw_command: object) -> Transition
     )
 
 
+def _handoff_command_facts(
+    state: MissionState, observation: object
+) -> tuple[object, dict[str, tuple[str, ...]]]:
+    if not isinstance(observation, CanonicalPlanObservation):
+        raise _Rejected("canonical-plan-observation-invalid")
+    if (
+        not isinstance(observation.path, str)
+        or not observation.path
+        or not isinstance(observation.digest, str)
+        or not observation.digest
+        or type(observation.generation) is not int
+        or observation.generation < 1
+        or observation.source not in {"core", "provider"}
+        or not isinstance(observation.source_id, str)
+        or not observation.source_id
+        or not isinstance(observation.selection_source, str)
+        or not observation.selection_source
+        or type(observation.iteration) is not int
+        or observation.iteration < 0
+        or type(observation.ordered_step_ids) is not tuple
+        or not observation.ordered_step_ids
+        or any(
+            not isinstance(step, str) or not step
+            for step in observation.ordered_step_ids
+        )
+        or len(set(observation.ordered_step_ids))
+        != len(observation.ordered_step_ids)
+        or type(observation.dependencies) is not tuple
+        or not isinstance(observation.raw, bytes)
+    ):
+        raise _Rejected("canonical-plan-observation-invalid")
+    handoff = state.handoff
+    if not isinstance(handoff, (PreparedHandoff, ConsumingHandoff)):
+        raise _Rejected("executor-handoff-not-active")
+    plan = state.plan
+    source = getattr(getattr(plan, "source", None), "value", None)
+    if (
+        getattr(plan, "path", None) != observation.path
+        or getattr(plan, "digest", None) != observation.digest
+        or getattr(plan, "generation", None) != observation.generation
+        or source != observation.source
+        or getattr(plan, "source_id", None) != observation.source_id
+        or getattr(plan, "selection_source", None)
+        != observation.selection_source
+        or getattr(plan, "iteration", None) != observation.iteration
+        or observation.iteration != state.control.iteration
+        or handoff.plan != plan
+        or handoff.ordered_step_ids != observation.ordered_step_ids
+    ):
+        raise _Rejected("executor-handoff-plan-drift")
+    for item in observation.dependencies:
+        if (
+            not isinstance(item, tuple)
+            or len(item) != 2
+            or not isinstance(item[0], str)
+            or type(item[1]) is not tuple
+            or any(not isinstance(value, str) for value in item[1])
+        ):
+            raise _Rejected("executor-handoff-dependencies-invalid")
+    try:
+        actual_digest = "sha256:" + hashlib.sha256(observation.raw).hexdigest()
+        payload = json.loads(observation.raw.decode("utf-8"))
+        if canonical_plan_bytes(payload) != observation.raw:
+            raise ValueError("noncanonical")
+    except (UnicodeDecodeError, json.JSONDecodeError, PlanContractError, ValueError):
+        raise _Rejected("executor-handoff-plan-drift") from None
+    if (
+        actual_digest != observation.digest
+        or not isinstance(payload, dict)
+        or payload.get("schema") != "mission-plan/1"
+        or not isinstance(payload.get("steps"), list)
+        or not payload["steps"]
+    ):
+        raise _Rejected("executor-handoff-plan-drift")
+    derived_ids: list[str] = []
+    derived_dependencies: list[tuple[str, tuple[str, ...]]] = []
+    for item in payload["steps"]:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("id"), str)
+            or not item["id"]
+            or not isinstance(item.get("depends_on"), list)
+            or any(not isinstance(value, str) or not value for value in item["depends_on"])
+        ):
+            raise _Rejected("executor-handoff-plan-drift")
+        derived_ids.append(item["id"])
+        derived_dependencies.append((item["id"], tuple(item["depends_on"])))
+    if len(set(derived_ids)) != len(derived_ids):
+        raise _Rejected("executor-handoff-plan-drift")
+    known_derived = set(derived_ids)
+    if any(
+        len(set(values)) != len(values)
+        or any(value not in known_derived for value in values)
+        for _, values in derived_dependencies
+    ):
+        raise _Rejected("executor-handoff-plan-drift")
+    if (
+        tuple(derived_ids) != observation.ordered_step_ids
+        or tuple(derived_dependencies) != observation.dependencies
+    ):
+        raise _Rejected("executor-handoff-plan-drift")
+    dependency_keys = tuple(
+        item[0]
+        for item in observation.dependencies
+        if isinstance(item, tuple) and len(item) == 2
+    )
+    if (
+        len(dependency_keys) != len(observation.dependencies)
+        or dependency_keys != observation.ordered_step_ids
+    ):
+        raise _Rejected("executor-handoff-dependencies-invalid")
+    dependencies: dict[str, tuple[str, ...]] = {}
+    known = set(observation.ordered_step_ids)
+    for step_id, values in observation.dependencies:
+        if (
+            type(values) is not tuple
+            or any(
+                not isinstance(value, str) or value not in known
+                for value in values
+            )
+            or len(set(values)) != len(values)
+        ):
+            raise _Rejected("executor-handoff-dependencies-invalid")
+        dependencies[step_id] = values
+    if not isinstance(state.a4, A4Projection):
+        raise _Rejected("a4-projection-invalid")
+    for item in state.a4.current_handoff_decisions:
+        if (
+            item.handoff_id != handoff.handoff_id
+            or item.plan_digest != observation.digest
+            or item.plan_generation != observation.generation
+            or item.plan_source != observation.source
+            or item.source_id != observation.source_id
+            or item.selection_source != observation.selection_source
+            or item.iteration != observation.iteration
+            or item.step_id not in known
+            or item.result not in {"ok", "partial", "failed"}
+        ):
+            raise _Rejected("executor-handoff-decisions-invalid")
+    completed = [item.step_id for item in state.a4.current_handoff_decisions]
+    if len(completed) != len(set(completed)):
+        raise _Rejected("executor-handoff-decisions-invalid")
+    return handoff, dependencies
+
+
+def _handoff_state(
+    state: MissionState,
+    *,
+    at: object,
+    handoff: Optional[object] = None,
+    decisions: Optional[tuple[ExecutorStepDecision, ...]] = None,
+) -> MissionState:
+    if not isinstance(at, str) or not at:
+        raise _Rejected("executor-handoff-request-invalid")
+    if state.legacy_passthrough is None:
+        raise _Rejected("executor-handoff-v4-projection-required")
+    document = state.legacy_passthrough.thaw()
+    document["updated_at"] = at
+    frozen = freeze_json_value(document)
+    if not isinstance(frozen, FrozenJsonObject):
+        raise _Rejected("executor-handoff-state-invalid")
+    a4 = state.a4
+    assert isinstance(a4, A4Projection)
+    if decisions is not None:
+        a4 = replace(a4, current_handoff_decisions=decisions)
+    return _unbound_state(
+        state,
+        handoff=state.handoff if handoff is None else handoff,
+        a4=a4,
+        legacy_passthrough=frozen,
+    )
+
+
+def _begin_executor_handoff(
+    state: MissionState, raw_command: object
+) -> Transition:
+    command = raw_command
+    assert isinstance(command, BeginExecutorHandoff)
+    handoff, _dependencies = _handoff_command_facts(state, command.plan)
+    if not isinstance(handoff, PreparedHandoff):
+        raise _Rejected("executor-handoff-not-prepared")
+    consuming = ConsumingHandoff(
+        handoff.schema,
+        handoff.handoff_id,
+        handoff.plan,
+        handoff.ordered_step_ids,
+        command.at,
+    )
+    return Transition(
+        _handoff_state(state, at=command.at, handoff=consuming),
+        (KernelEvent("executor-handoff-begun"),),
+    )
+
+
+def _verify_executor_step(
+    state: MissionState, raw_command: object
+) -> Transition:
+    command = raw_command
+    assert isinstance(command, VerifyExecutorStep)
+    handoff, _dependencies = _handoff_command_facts(state, command.plan)
+    if command.step_id not in handoff.ordered_step_ids:
+        raise _Rejected("executor-step-not-member")
+    return Transition(
+        _handoff_state(state, at=command.at),
+        (KernelEvent("executor-step-revalidated"),),
+    )
+
+
+def _record_executor_step(
+    state: MissionState, raw_command: object
+) -> Transition:
+    command = raw_command
+    assert isinstance(command, RecordExecutorStep)
+    handoff, dependencies = _handoff_command_facts(state, command.plan)
+    if command.step_id not in handoff.ordered_step_ids:
+        raise _Rejected("executor-step-not-member")
+    completed = {item.step_id for item in state.a4.current_handoff_decisions}
+    if command.step_id in completed:
+        raise _Rejected("executor-step-already-recorded")
+    if any(
+        dependency not in completed
+        for dependency in dependencies[command.step_id]
+    ):
+        raise _Rejected("executor-step-dependency-incomplete")
+    if command.result not in {"ok", "partial", "failed"}:
+        raise _Rejected("executor-step-result-invalid")
+    appended = ExecutorStepDecision(
+        handoff_id=handoff.handoff_id,
+        plan_digest=command.plan.digest,
+        plan_generation=command.plan.generation,
+        plan_source=command.plan.source,
+        source_id=command.plan.source_id,
+        selection_source=command.plan.selection_source,
+        iteration=command.plan.iteration,
+        step_id=command.step_id,
+        result=command.result,
+    )
+    return Transition(
+        _handoff_state(
+            state,
+            at=command.at,
+            decisions=(*state.a4.current_handoff_decisions, appended),
+        ),
+        (KernelEvent("executor-step-recorded"),),
+    )
+
+
+def _complete_executor_handoff(
+    state: MissionState, raw_command: object
+) -> Transition:
+    command = raw_command
+    assert isinstance(command, CompleteExecutorHandoff)
+    handoff, _dependencies = _handoff_command_facts(state, command.plan)
+    if not isinstance(handoff, ConsumingHandoff):
+        raise _Rejected("executor-handoff-not-consuming")
+    completed = {item.step_id for item in state.a4.current_handoff_decisions}
+    if completed != set(handoff.ordered_step_ids):
+        raise _Rejected("executor-handoff-incomplete")
+    consumed = ConsumedHandoff(
+        handoff.schema,
+        handoff.handoff_id,
+        handoff.plan,
+        handoff.ordered_step_ids,
+        handoff.begun_at,
+        command.at,
+    )
+    return Transition(
+        _handoff_state(state, at=command.at, handoff=consumed),
+        (KernelEvent("executor-handoff-consumed"),),
+    )
+
+
+def _reject_executor_handoff(
+    state: MissionState, raw_command: object
+) -> Transition:
+    command = raw_command
+    assert isinstance(command, RejectExecutorHandoff)
+    handoff = state.handoff
+    if isinstance(handoff, AbsentHandoff):
+        raise _Rejected("executor-handoff-missing")
+    if (
+        command.attempted_operation not in {"begin", "verify-step"}
+        or not isinstance(command.reason_code, CanonicalPlanRejectionCode)
+    ):
+        raise _Rejected("executor-handoff-rejection-invalid")
+    rejected = RejectedHandoff(
+        handoff.schema,
+        handoff.handoff_id,
+        handoff.plan,
+        handoff.ordered_step_ids,
+        command.reason_code.value,
+        getattr(handoff, "begun_at", None),
+    )
+    return Transition(
+        _handoff_state(state, at=command.at, handoff=rejected),
+        (KernelEvent("executor-handoff-rejected"),),
+    )
+
+
+_SPECIALIST_AUTHORITY_FIELDS = frozenset(
+    {
+        "phase",
+        "passes",
+        "loop_active",
+        "halt_reason",
+        "halt_category",
+        "terminal_outcome",
+        "score_history",
+        "review_result",
+        "review_findings",
+        "provider_output",
+        "final_report",
+    }
+)
+
+
+def _specialist_record(
+    value: object, *, allowed_authority: frozenset[str] = frozenset()
+) -> dict:
+    if not isinstance(value, FrozenJsonObject):
+        raise _Rejected("specialist-recommendation-invalid")
+    record = value.thaw()
+    if set(record) & (_SPECIALIST_AUTHORITY_FIELDS - allowed_authority):
+        raise _Rejected("specialist-recommendation-authority-invalid")
+    return record
+
+
+def _record_specialist_recommendation(
+    state: MissionState, raw_command: object
+) -> Transition:
+    command = raw_command
+    assert isinstance(command, RecordSpecialistRecommendation)
+    projection = command.projection
+    if (
+        not isinstance(projection, SpecialistRecommendationProjection)
+        or not isinstance(command.at, str)
+        or not command.at
+        or not (
+            command.expected_complexity is None
+            or isinstance(command.expected_complexity, str)
+        )
+        or type(command.expected_iteration) is not int
+        or not isinstance(state.a4, A4Projection)
+        or state.legacy_passthrough is None
+    ):
+        raise _Rejected("specialist-recommendation-invalid")
+    try:
+        validate_specialist_recommendation_shape(projection)
+    except A4ProjectionError as exc:
+        raise _Rejected(exc.code) from exc
+    document = state.legacy_passthrough.thaw()
+    if (
+        command.expected_iteration != state.control.iteration
+        or document.get("complexity") != command.expected_complexity
+    ):
+        raise _Rejected("specialist-recommendation-context-mismatch")
+    current = state.a4.specialist_selection
+    if current.active_provider_invocation_ids:
+        raise _Rejected("provider-invocation-active")
+    task_profile = _specialist_record(projection.task_profile)
+    candidates = [_specialist_record(item) for item in projection.candidates]
+    selected = [_specialist_record(item) for item in projection.selected]
+    unavailable = [_specialist_record(item) for item in projection.unavailable]
+    ineligible = [_specialist_record(item) for item in projection.ineligible]
+    decision = _specialist_record(projection.decision)
+    phase_plan = [
+        _specialist_record(item, allowed_authority=frozenset({"phase"}))
+        for item in projection.phase_plan
+    ]
+    try:
+        validate_specialist_recommendation_projection(projection)
+    except A4ProjectionError as exc:
+        raise _Rejected(exc.code) from exc
+    except SpecialistPublicContractError as exc:
+        raise _Rejected("specialist-selection-invalid") from exc
+    selection_id = decision.get("selection_id")
+    if not isinstance(selection_id, str) or not selection_id:
+        raise _Rejected("specialist-recommendation-selection-invalid")
+    if any(
+        item.get("selection_id") != selection_id
+        for item in (*candidates, *selected, *unavailable)
+    ):
+        raise _Rejected("specialist-recommendation-selection-invalid")
+    candidate_identities = {
+        (item.get("provider_id"), item.get("skill")) for item in candidates
+    }
+    if any(
+        (item.get("provider_id"), item.get("skill"))
+        not in candidate_identities
+        for item in (*selected, *unavailable)
+    ):
+        raise _Rejected("specialist-recommendation-selection-invalid")
+    decision_kind = decision.get("decision")
+    if (decision_kind == "selected") != bool(selected):
+        raise _Rejected("specialist-recommendation-selection-invalid")
+    planning = next(
+        (
+            item
+            for item in selected
+            if item.get("planning_mode") in {"advisory", "primary"}
+        ),
+        None,
+    )
+    strategy = current.planning_strategy
+    contract_digest = current.planning_contract_digest
+    binding = current.planning_provider_binding
+    if planning is not None:
+        provider_id = planning.get("provider_id")
+        planning_digest = planning.get("planning_contract_digest")
+        if (
+            not isinstance(provider_id, str)
+            or not provider_id
+            or not isinstance(planning_digest, str)
+            or not planning_digest
+        ):
+            raise _Rejected("specialist-recommendation-planning-invalid")
+        strategy = "provider-" + planning["planning_mode"]
+        contract_digest = planning_digest
+        frozen_binding = freeze_json_value(
+            {
+                "provider_id": provider_id,
+                "selection_id": selection_id,
+                "planning_contract_digest": planning_digest,
+            }
+        )
+        assert isinstance(frozen_binding, FrozenJsonObject)
+        binding = frozen_binding
+    elif current.planning_policy_version == 1:
+        strategy = "core"
+        binding = None
+    next_selection = SpecialistSelectionProjection(
+        task_profile=projection.task_profile,
+        candidates=projection.candidates,
+        selected=projection.selected,
+        unavailable=projection.unavailable,
+        ineligible=projection.ineligible,
+        registry_projection=projection.registry_projection,
+        decision=projection.decision,
+        phase_plan=projection.phase_plan,
+        mode=projection.mode,
+        active_provider_invocation_ids=current.active_provider_invocation_ids,
+        planning_policy_version=current.planning_policy_version,
+        planning_strategy=strategy,
+        planning_contract_digest=contract_digest,
+        planning_provider_binding=binding,
+    )
+    document["updated_at"] = command.at
+    frozen = freeze_json_value(document)
+    if not isinstance(frozen, FrozenJsonObject):
+        raise _Rejected("specialist-recommendation-invalid")
+    next_state = _unbound_state(
+        state,
+        a4=replace(state.a4, specialist_selection=next_selection),
+        legacy_passthrough=frozen,
+    )
+    return Transition(
+        next_state,
+        (KernelEvent("specialist-recommendation-recorded"),),
+    )
+
+
 def _command_type_guard(expected: Type[object]) -> Callable[[MissionState, object], bool]:
     def guard(_state: MissionState, command: object) -> bool:
         return isinstance(command, expected)
@@ -1294,6 +1848,42 @@ TRANSITION_TABLE = build_transition_table(
             RecordVerification,
             _command_type_guard(RecordVerification),
             _record_verification,
+        ),
+        TransitionRule(
+            "executor-handoff-begin",
+            BeginExecutorHandoff,
+            _command_type_guard(BeginExecutorHandoff),
+            _begin_executor_handoff,
+        ),
+        TransitionRule(
+            "executor-handoff-verify-step",
+            VerifyExecutorStep,
+            _command_type_guard(VerifyExecutorStep),
+            _verify_executor_step,
+        ),
+        TransitionRule(
+            "executor-handoff-record-step",
+            RecordExecutorStep,
+            _command_type_guard(RecordExecutorStep),
+            _record_executor_step,
+        ),
+        TransitionRule(
+            "executor-handoff-complete",
+            CompleteExecutorHandoff,
+            _command_type_guard(CompleteExecutorHandoff),
+            _complete_executor_handoff,
+        ),
+        TransitionRule(
+            "executor-handoff-reject-canonical-drift",
+            RejectExecutorHandoff,
+            _command_type_guard(RejectExecutorHandoff),
+            _reject_executor_handoff,
+        ),
+        TransitionRule(
+            "specialists-record-recommendation",
+            RecordSpecialistRecommendation,
+            _command_type_guard(RecordSpecialistRecommendation),
+            _record_specialist_recommendation,
         ),
         TransitionRule(
             "mark-halt",

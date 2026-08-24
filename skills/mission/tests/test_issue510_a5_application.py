@@ -595,4 +595,4 @@ def test_runtime_guard_application_has_no_filesystem_or_process_io():
         for node in tree.body
         if isinstance(node, ast.ImportFrom) and node.module
     )
-    assert roots.isdisjoint({"os", "pathlib", "subprocess", "sys"})
+    assert roots.isdisjoint({"importlib", "os", "pathlib", "subprocess", "sys"})

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 from pathlib import Path
 import subprocess
@@ -378,6 +379,36 @@ def test_repository_scan_matches_the_headroom_free_baseline_exactly():
     assert scanned == recorded
     assert guard.dump_baseline(recorded) == BASELINE_PATH.read_text(encoding="utf-8")
     assert ("skills/mission/bin/mission-state.py", "_derive_next_action") not in recorded
+
+
+def test_runtime_guard_host_observation_stays_in_scanned_top_level_functions():
+    guard = _load_guard_module()
+    source = (REPO_ROOT / "skills" / "mission" / "bin" / "mission-state.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+    top_level_function_node_ids = {
+        id(item)
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        for item in ast.walk(node)
+    }
+    sensitive_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and (
+            (guard._root_name(node.func) == "Path" and node.func.attr == "home")
+            or (
+                guard._root_name(node.func) == "importlib"
+                and node.func.attr in {"distribution", "entry_points"}
+            )
+        )
+    ]
+
+    assert sensitive_calls
+    assert all(id(call) in top_level_function_node_ids for call in sensitive_calls)
 
 
 def test_current_scan_rejects_new_strict_code_and_stale_headroom():
