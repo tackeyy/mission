@@ -10,7 +10,12 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Callable, ContextManager, Iterable
 
-from mission_application.artifact import EvidenceDecision, EvidenceEffect, validate_evidence_effect
+from mission_application.artifact import (
+    EvidenceDecision,
+    EvidenceEffect,
+    PreparedArtifactOperation,
+    validate_evidence_effect,
+)
 from mission_application.ports import (
     AggregateIndexError,
     AuditMetadata,
@@ -606,6 +611,73 @@ class LegacyV4Repository:
                         bind_published(decision, published)
                 self.save(decision.state, backup=backup)
             return decision
+
+    def execute_transition_effects(
+        self,
+        prepare: Callable[[dict], PreparedArtifactOperation],
+        *,
+        effect_transaction: Callable[
+            [tuple[EvidenceEffect, ...]], ContextManager[object]
+        ]
+        | None = None,
+        verify_published: Callable[[tuple[EvidenceEffect, ...], object], None]
+        | None = None,
+        backup: bool = True,
+    ) -> tuple[PreparedArtifactOperation, LegacyCommandExecutionResult]:
+        """Prepare, decide, publish, verify, and project one artifact command."""
+        self._reject_reentrant_entry("execute_transition_effects")
+        with self.transaction():
+            current = self.load()
+            with self._callback_guard():
+                prepared = prepare(copy.deepcopy(current))
+            if not isinstance(prepared, PreparedArtifactOperation):
+                raise ValueError("artifact-operation-invalid")
+            state = _legacy_command_state(current, prepared.command)
+            decision = decide(state, prepared.command)
+            if not isinstance(decision, Decision):
+                raise FencedCommitError(
+                    "decision-invalid", "decision result type is invalid"
+                )
+            if not decision.accepted:
+                if decision.transition is not None or decision.rejection is None:
+                    raise FencedCommitError(
+                        "decision-invalid", "rejected decision is not closed"
+                    )
+                frozen_current = freeze_json_value(current)
+                assert isinstance(frozen_current, FrozenJsonObject)
+                return prepared, LegacyCommandExecutionResult(
+                    decision, frozen_current
+                )
+            if decision.transition is None or decision.rejection is not None:
+                raise FencedCommitError(
+                    "decision-invalid", "accepted decision is not closed"
+                )
+            effects = self.validate_effects(prepared.effects)
+            transition = bind_transition_effects(decision.transition, effects)
+            bound_decision = replace(decision, transition=transition)
+            proposed = json.loads(project_legacy_document(transition.new_state))
+            frozen = freeze_json_value(proposed)
+            assert isinstance(frozen, FrozenJsonObject)
+            execution = LegacyCommandExecutionResult(bound_decision, frozen)
+            if effects:
+                if effect_transaction is not None:
+                    publication = self._guarded_context(effect_transaction, effects)
+                else:
+                    if self._effect_transaction is None:
+                        raise ValueError("artifact-effect-transaction-missing")
+                    publication = self._guarded_context(
+                        self._effect_transaction, effects
+                    )
+                with publication as published:
+                    if verify_published is not None:
+                        with self._callback_guard():
+                            verify_published(effects, published)
+                    elif published != effects:
+                        raise ValueError("published-artifact-effect-binding-invalid")
+                    self.save(proposed, backup=backup)
+            else:
+                self.save(proposed, backup=backup)
+            return prepared, execution
 
 
 class V5CompatibilityRepository:

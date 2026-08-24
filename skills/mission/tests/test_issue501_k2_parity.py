@@ -287,6 +287,11 @@ def test_decide_and_guidance_share_one_named_transition_table():
     assert all(callable(rule.guidance_guard) for rule in primary_rules)
     assert {rule.rule_id for rule in TRANSITION_TABLE if rule.reducer is not None} == {
         "advance-phase",
+        "artifact-append-block",
+        "artifact-export",
+        "artifact-initialize",
+        "artifact-record-publication",
+        "artifact-render",
         "mark-halt",
         "mark-pass",
         "reactivate",

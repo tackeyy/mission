@@ -14,14 +14,26 @@ import json
 import re
 from typing import Callable, Mapping
 
+from mission_kernel.artifact import (
+    ArtifactEffectClaim,
+    ArtifactRuleError,
+    append_artifact_block_document,
+    export_artifact_document,
+    initialize_artifact_document,
+    record_artifact_publication_document,
+    render_artifact_document,
+)
+from mission_kernel.commands import (
+    AppendArtifactBlock,
+    Command,
+    ExportArtifact,
+    InitializeArtifact,
+    RecordArtifactPublication,
+    RenderArtifact,
+)
+
 
 MAX_EVIDENCE_BYTES = 4 * 1024 * 1024
-ARTIFACT_REDACTION_STATUSES = frozenset(
-    {"unchecked", "checked", "reviewed", "not-needed"}
-)
-ARTIFACT_SECTIONS = frozenset(
-    {"mission", "plan", "execution", "evidence", "review", "score_gate", "assumptions", "follow_ups"}
-)
 _EFFECT_KIND = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
@@ -52,6 +64,200 @@ class EvidenceDecision:
     state: dict
     effects: tuple[EvidenceEffect, ...]
     result: dict
+
+
+@dataclass(frozen=True)
+class PreparedArtifactOperation:
+    """Typed artifact command plus inert bytes and CLI response payload."""
+
+    command: Command
+    effects: tuple[EvidenceEffect, ...]
+    result: dict
+
+
+@dataclass(frozen=True)
+class ArtifactInitRequest:
+    now: object
+    artifact_path: object
+    format: object
+    title: object
+    redaction_status: object
+    required_for_pass: object
+
+
+@dataclass(frozen=True)
+class ArtifactAppendRequest:
+    now: object
+    section: object
+    content: object
+    source: object
+    label: object
+
+
+@dataclass(frozen=True)
+class ArtifactRenderRequest:
+    now: object
+    redaction_status: object
+
+
+@dataclass(frozen=True)
+class ArtifactExportRequest:
+    now: object
+    destination: object
+    redaction_status: object
+
+
+@dataclass(frozen=True)
+class ArtifactPublishRequest:
+    now: object
+    provider: object
+    destination: object
+    approval_text: object
+    confirmed: object
+
+
+def execute_artifact_operation(
+    repository: object,
+    prepare: Callable[[dict], PreparedArtifactOperation],
+) -> dict:
+    """Execute one prepared artifact operation through its repository port."""
+    execute = getattr(repository, "execute_transition_effects", None)
+    if not callable(execute):
+        raise EvidenceFailure("artifact-repository-invalid")
+    prepared, execution = execute(prepare)
+    decision = getattr(execution, "decision", None)
+    if decision is None or decision.accepted is not True:
+        rejection = getattr(decision, "rejection", None)
+        raise EvidenceFailure(
+            getattr(rejection, "code", "artifact-transition-rejected")
+        )
+    projection = execution.projection
+    payload = copy.deepcopy(prepared.result)
+    if "artifact" in payload and payload["artifact"] != projection.get("artifact"):
+        raise EvidenceFailure("artifact-projection-mismatch")
+    return payload
+
+
+def _artifact_render_bytes(
+    render_text: Callable[[dict, dict], str]
+) -> Callable[[dict, dict], bytes]:
+    return lambda state, artifact: render_text(state, artifact).encode("utf-8")
+
+
+def run_artifact_init(
+    request: ArtifactInitRequest,
+    repository: object,
+    render_text: Callable[[dict, dict], str],
+) -> dict:
+    return execute_artifact_operation(
+        repository,
+        lambda state: prepare_artifact_init(
+            state,
+            now=request.now,
+            artifact_path=request.artifact_path,
+            format=request.format,
+            title=request.title or state.get("mission") or "Mission Artifact",
+            redaction_status=request.redaction_status,
+            required_for_pass=request.required_for_pass,
+            render=_artifact_render_bytes(render_text),
+        ),
+    )
+
+
+def run_artifact_append(request: ArtifactAppendRequest, repository: object) -> dict:
+    return execute_artifact_operation(
+        repository,
+        lambda state: prepare_artifact_append(
+            state,
+            now=request.now,
+            section=request.section,
+            content=request.content,
+            source=request.source,
+            label=request.label,
+        ),
+    )
+
+
+def run_artifact_render(
+    request: ArtifactRenderRequest,
+    repository: object,
+    render_text: Callable[[dict, dict], str],
+) -> dict:
+    return execute_artifact_operation(
+        repository,
+        lambda state: prepare_artifact_render(
+            state,
+            now=request.now,
+            redaction_status=request.redaction_status,
+            render=_artifact_render_bytes(render_text),
+        ),
+    )
+
+
+def run_artifact_export(
+    request: ArtifactExportRequest,
+    repository: object,
+    render_text: Callable[[dict, dict], str],
+) -> dict:
+    return execute_artifact_operation(
+        repository,
+        lambda state: prepare_artifact_export(
+            state,
+            now=request.now,
+            destination=request.destination,
+            redaction_status=request.redaction_status,
+            render=_artifact_render_bytes(render_text),
+        ),
+    )
+
+
+def run_artifact_publish(
+    request: ArtifactPublishRequest,
+    repository: object,
+    render_text: Callable[[dict, dict], str],
+) -> dict:
+    return execute_artifact_operation(
+        repository,
+        lambda state: prepare_artifact_publish(
+            state,
+            now=request.now,
+            provider=request.provider,
+            destination=request.destination,
+            approval_text=request.approval_text,
+            confirmed=request.confirmed,
+            render=_artifact_render_bytes(render_text),
+        ),
+    )
+
+
+def verify_published_artifact_effects(
+    cwd: object,
+    effects: tuple[EvidenceEffect, ...],
+    published: object,
+    capture: Callable[[object, str, str], tuple[dict, bytes]],
+    relative_path: Callable[[object, str], str],
+    verify_object: Callable[[object], None],
+    path_overrides: Mapping[str, object] | None = None,
+) -> None:
+    """Validate actual path/content identity without mutating decided state."""
+    items = tuple(published) if isinstance(published, (tuple, list)) else ()
+    if len(items) != len(effects):
+        raise ValueError("published artifact effect count changed")
+    for effect, item in zip(effects, items):
+        verify_object(item)
+        actual_target = relative_path(cwd, str(item.path))
+        expected_target = effect.target
+        override = (path_overrides or {}).get(effect.kind)
+        if override is not None:
+            expected_target = relative_path(cwd, str(override))
+        identity, payload = capture(cwd, actual_target, "artifact-effect-verifier")
+        if (
+            actual_target != expected_target
+            or identity.get("digest") != effect.digest.removeprefix("sha256:")
+            or identity.get("size") != effect.size
+            or payload != effect.content
+        ):
+            raise ValueError("published artifact effect identity changed")
 
 
 def _text(value: object, code: str, *, allow_empty: bool = False) -> str:
@@ -136,21 +342,235 @@ def _render_effect(
     return make_evidence_effect("artifact", artifact.get("path"), content)
 
 
-def _bind_artifact_identity(state: dict, artifact: dict, effect: EvidenceEffect) -> None:
-    artifact.update(
-        {
-            "path": effect.target,
-            "digest": effect.digest.removeprefix("sha256:"),
-            "size": effect.size,
-            "producer_run_id": str(state.get("session_id") or "").strip(),
-        }
+def _effect_claim(effect: EvidenceEffect) -> ArtifactEffectClaim:
+    return ArtifactEffectClaim(
+        kind=effect.kind,
+        target=effect.target,
+        digest=effect.digest,
+        size=effect.size,
     )
-    if not artifact["producer_run_id"]:
-        raise EvidenceFailure("artifact-producer-invalid")
-    for key in ("artifact_lint", "artifact_lint_status", "artifact_lint_identity"):
-        state.pop(key, None)
-    state["artifact_applicability"] = "producing"
-    state["artifact"] = artifact
+
+
+def _translate_artifact_rule(call: Callable[[], dict]) -> dict:
+    try:
+        return call()
+    except ArtifactRuleError as exc:
+        raise EvidenceFailure(exc.code) from exc
+
+
+def prepare_artifact_init(
+    state: object,
+    *,
+    now: object,
+    artifact_path: object,
+    format: object,
+    title: object,
+    redaction_status: object,
+    required_for_pass: object,
+    render: Callable[[dict, dict], bytes],
+) -> PreparedArtifactOperation:
+    original = _state(state)
+    provisional = _translate_artifact_rule(
+        lambda: initialize_artifact_document(
+            original,
+            at=now,
+            path=artifact_path,
+            format=format,
+            title=title,
+            redaction_status=redaction_status,
+            required_for_pass=required_for_pass,
+            effect=None,
+        )
+    )
+    effect = _render_effect(provisional, _artifact(provisional), render)
+    claim = _effect_claim(effect)
+    command = InitializeArtifact(
+        at=now,
+        path=artifact_path,
+        format=format,
+        title=title,
+        redaction_status=redaction_status,
+        required_for_pass=required_for_pass,
+        effect=claim,
+    )
+    final = _translate_artifact_rule(
+        lambda: initialize_artifact_document(
+            original,
+            at=command.at,
+            path=command.path,
+            format=command.format,
+            title=command.title,
+            redaction_status=command.redaction_status,
+            required_for_pass=command.required_for_pass,
+            effect=command.effect,
+        )
+    )
+    return PreparedArtifactOperation(
+        command,
+        (effect,),
+        {"artifact": copy.deepcopy(final["artifact"])},
+    )
+
+
+def prepare_artifact_append(
+    state: object,
+    *,
+    now: object,
+    section: object,
+    content: object,
+    source: object,
+    label: object,
+) -> PreparedArtifactOperation:
+    original = _state(state)
+    command = AppendArtifactBlock(now, section, content, source, label)
+    final = _translate_artifact_rule(
+        lambda: append_artifact_block_document(
+            original,
+            at=command.at,
+            section=command.section,
+            content=command.content,
+            source=command.source,
+            label=command.label,
+        )
+    )
+    block = final["artifact"]["blocks"][-1]
+    return PreparedArtifactOperation(
+        command,
+        (),
+        {"section": command.section, "block": copy.deepcopy(block)},
+    )
+
+
+def prepare_artifact_render(
+    state: object,
+    *,
+    now: object,
+    redaction_status: object,
+    render: Callable[[dict, dict], bytes],
+) -> PreparedArtifactOperation:
+    original = _state(state)
+    provisional = _translate_artifact_rule(
+        lambda: render_artifact_document(
+            original, at=now, redaction_status=redaction_status, effect=None
+        )
+    )
+    effect = _render_effect(provisional, _artifact(provisional), render)
+    command = RenderArtifact(now, redaction_status, _effect_claim(effect))
+    final = _translate_artifact_rule(
+        lambda: render_artifact_document(
+            original,
+            at=command.at,
+            redaction_status=command.redaction_status,
+            effect=command.effect,
+        )
+    )
+    return PreparedArtifactOperation(
+        command,
+        (effect,),
+        {"path": effect.target, "artifact": copy.deepcopy(final["artifact"])},
+    )
+
+
+def prepare_artifact_export(
+    state: object,
+    *,
+    now: object,
+    destination: object,
+    redaction_status: object,
+    render: Callable[[dict, dict], bytes],
+) -> PreparedArtifactOperation:
+    original = _state(state)
+    provisional = _translate_artifact_rule(
+        lambda: export_artifact_document(
+            original,
+            at=now,
+            destination=destination,
+            redaction_status=redaction_status,
+            artifact_effect=None,
+            export_effect=None,
+        )
+    )
+    source_effect = _render_effect(provisional, _artifact(provisional), render)
+    export_effect = make_evidence_effect(
+        "artifact-export", destination, source_effect.content
+    )
+    command = ExportArtifact(
+        now,
+        destination,
+        redaction_status,
+        _effect_claim(source_effect),
+        _effect_claim(export_effect),
+    )
+    final = _translate_artifact_rule(
+        lambda: export_artifact_document(
+            original,
+            at=command.at,
+            destination=command.destination,
+            redaction_status=command.redaction_status,
+            artifact_effect=command.artifact_effect,
+            export_effect=command.export_effect,
+        )
+    )
+    return PreparedArtifactOperation(
+        command,
+        (source_effect, export_effect),
+        {
+            "export": copy.deepcopy(final["artifact"]["exports"][-1]),
+            "artifact": copy.deepcopy(final["artifact"]),
+        },
+    )
+
+
+def prepare_artifact_publish(
+    state: object,
+    *,
+    now: object,
+    provider: object,
+    destination: object,
+    approval_text: object,
+    confirmed: object,
+    render: Callable[[dict, dict], bytes],
+) -> PreparedArtifactOperation:
+    original = _state(state)
+    provisional = _translate_artifact_rule(
+        lambda: record_artifact_publication_document(
+            original,
+            at=now,
+            provider=provider,
+            destination=destination,
+            approval_text=approval_text,
+            confirmed=confirmed,
+            effect=None,
+        )
+    )
+    effect = _render_effect(provisional, _artifact(provisional), render)
+    command = RecordArtifactPublication(
+        now,
+        provider,
+        destination,
+        approval_text,
+        confirmed,
+        _effect_claim(effect),
+    )
+    final = _translate_artifact_rule(
+        lambda: record_artifact_publication_document(
+            original,
+            at=command.at,
+            provider=command.provider,
+            destination=command.destination,
+            approval_text=command.approval_text,
+            confirmed=command.confirmed,
+            effect=command.effect,
+        )
+    )
+    return PreparedArtifactOperation(
+        command,
+        (effect,),
+        {
+            "publish_event": copy.deepcopy(final["artifact"]["publish_events"][-1]),
+            "artifact": copy.deepcopy(final["artifact"]),
+        },
+    )
 
 
 def artifact_init(
@@ -164,36 +584,31 @@ def artifact_init(
     required_for_pass: object,
     render: Callable[[dict, dict], bytes],
 ) -> EvidenceDecision:
-    proposed = _state(state)
-    at = _timestamp(now)
-    path = _relative_target(artifact_path, "artifact-path-invalid")
-    if not isinstance(format, str) or not format:
-        raise EvidenceFailure("artifact-format-invalid")
-    if not isinstance(title, str) or not title:
-        raise EvidenceFailure("artifact-title-invalid")
-    if redaction_status not in ARTIFACT_REDACTION_STATUSES:
-        raise EvidenceFailure("artifact-redaction-invalid")
-    if type(required_for_pass) is not bool:
-        raise EvidenceFailure("artifact-required-invalid")
-    artifact = {
-        "status": "draft",
-        "format": format,
-        "title": title,
-        "path": path,
-        "exports": [],
-        "publish_events": [],
-        "redaction_status": redaction_status,
-        "required_for_pass": required_for_pass,
-        "blocks": [],
-        "created_at": at,
-        "updated_at": at,
-    }
-    proposed["artifact"] = artifact
-    proposed["artifact_applicability"] = "producing"
-    proposed["updated_at"] = at
-    effect = _render_effect(proposed, artifact, render)
-    _bind_artifact_identity(proposed, artifact, effect)
-    return EvidenceDecision(proposed, (effect,), {"artifact": copy.deepcopy(artifact)})
+    prepared = prepare_artifact_init(
+        state,
+        now=now,
+        artifact_path=artifact_path,
+        format=format,
+        title=title,
+        redaction_status=redaction_status,
+        required_for_pass=required_for_pass,
+        render=render,
+    )
+    command = prepared.command
+    assert isinstance(command, InitializeArtifact)
+    proposed = _translate_artifact_rule(
+        lambda: initialize_artifact_document(
+            state,
+            at=command.at,
+            path=command.path,
+            format=command.format,
+            title=command.title,
+            redaction_status=command.redaction_status,
+            required_for_pass=command.required_for_pass,
+            effect=command.effect,
+        )
+    )
+    return EvidenceDecision(proposed, prepared.effects, prepared.result)
 
 
 def artifact_append(
@@ -205,37 +620,27 @@ def artifact_append(
     source: object,
     label: object,
 ) -> EvidenceDecision:
-    proposed = _state(state)
-    artifact = _artifact(proposed)
-    at = _timestamp(now)
-    if section not in ARTIFACT_SECTIONS:
-        raise EvidenceFailure("artifact-section-invalid")
-    if not isinstance(content, str):
-        raise EvidenceFailure("artifact-content-invalid")
-    block = {"section": section, "content": content.rstrip(), "timestamp": at}
-    if source:
-        block["source"] = _text(source, "artifact-source-invalid")
-    elif source not in (None, ""):
-        raise EvidenceFailure("artifact-source-invalid")
-    if label:
-        block["label"] = _text(label, "artifact-label-invalid")
-    elif label not in (None, ""):
-        raise EvidenceFailure("artifact-label-invalid")
-    blocks = artifact.get("blocks")
-    if not isinstance(blocks, list):
-        raise EvidenceFailure("artifact-blocks-invalid")
-    blocks.append(block)
-    artifact["status"] = "draft"
-    artifact.pop("digest", None)
-    artifact.pop("size", None)
-    artifact["updated_at"] = at
-    for key in ("artifact_lint", "artifact_lint_status", "artifact_lint_identity"):
-        proposed.pop(key, None)
-    proposed["artifact"] = artifact
-    proposed["updated_at"] = at
-    return EvidenceDecision(
-        proposed, (), {"section": section, "block": copy.deepcopy(block)}
+    prepared = prepare_artifact_append(
+        state,
+        now=now,
+        section=section,
+        content=content,
+        source=source,
+        label=label,
     )
+    command = prepared.command
+    assert isinstance(command, AppendArtifactBlock)
+    proposed = _translate_artifact_rule(
+        lambda: append_artifact_block_document(
+            state,
+            at=command.at,
+            section=command.section,
+            content=command.content,
+            source=command.source,
+            label=command.label,
+        )
+    )
+    return EvidenceDecision(proposed, prepared.effects, prepared.result)
 
 
 def artifact_render(
@@ -245,25 +650,20 @@ def artifact_render(
     redaction_status: object,
     render: Callable[[dict, dict], bytes],
 ) -> EvidenceDecision:
-    proposed = _state(state)
-    artifact = _artifact(proposed)
-    at = _timestamp(now)
-    if redaction_status is not None:
-        if redaction_status not in ARTIFACT_REDACTION_STATUSES:
-            raise EvidenceFailure("artifact-redaction-invalid")
-        artifact["redaction_status"] = redaction_status
-    artifact["status"] = "rendered"
-    artifact["last_rendered_at"] = at
-    artifact["updated_at"] = at
-    proposed["artifact"] = artifact
-    proposed["updated_at"] = at
-    effect = _render_effect(proposed, artifact, render)
-    _bind_artifact_identity(proposed, artifact, effect)
-    return EvidenceDecision(
-        proposed,
-        (effect,),
-        {"path": effect.target, "artifact": copy.deepcopy(artifact)},
+    prepared = prepare_artifact_render(
+        state, now=now, redaction_status=redaction_status, render=render
     )
+    command = prepared.command
+    assert isinstance(command, RenderArtifact)
+    proposed = _translate_artifact_rule(
+        lambda: render_artifact_document(
+            state,
+            at=command.at,
+            redaction_status=command.redaction_status,
+            effect=command.effect,
+        )
+    )
+    return EvidenceDecision(proposed, prepared.effects, prepared.result)
 
 
 def artifact_export(
@@ -274,32 +674,26 @@ def artifact_export(
     redaction_status: object,
     render: Callable[[dict, dict], bytes],
 ) -> EvidenceDecision:
-    proposed = _state(state)
-    artifact = _artifact(proposed)
-    at = _timestamp(now)
-    dst = _relative_target(destination, "artifact-export-path-invalid")
-    if redaction_status not in ARTIFACT_REDACTION_STATUSES - {"unchecked"}:
-        raise EvidenceFailure("artifact-export-redaction-invalid")
-    artifact["redaction_status"] = redaction_status
-    artifact["status"] = "exported"
-    artifact["last_rendered_at"] = at
-    artifact["updated_at"] = at
-    proposed["artifact"] = artifact
-    proposed["updated_at"] = at
-    source_effect = _render_effect(proposed, artifact, render)
-    _bind_artifact_identity(proposed, artifact, source_effect)
-    export_effect = make_evidence_effect("artifact-export", dst, source_effect.content)
-    export_entry = {"path": dst, "timestamp": at, "redaction_status": redaction_status}
-    exports = artifact.get("exports")
-    if not isinstance(exports, list):
-        raise EvidenceFailure("artifact-exports-invalid")
-    exports.append(export_entry)
-    proposed["artifact"] = artifact
-    return EvidenceDecision(
-        proposed,
-        (source_effect, export_effect),
-        {"export": copy.deepcopy(export_entry), "artifact": copy.deepcopy(artifact)},
+    prepared = prepare_artifact_export(
+        state,
+        now=now,
+        destination=destination,
+        redaction_status=redaction_status,
+        render=render,
     )
+    command = prepared.command
+    assert isinstance(command, ExportArtifact)
+    proposed = _translate_artifact_rule(
+        lambda: export_artifact_document(
+            state,
+            at=command.at,
+            destination=command.destination,
+            redaction_status=command.redaction_status,
+            artifact_effect=command.artifact_effect,
+            export_effect=command.export_effect,
+        )
+    )
+    return EvidenceDecision(proposed, prepared.effects, prepared.result)
 
 
 def artifact_publish(
@@ -311,41 +705,29 @@ def artifact_publish(
     approval_text: object,
     render: Callable[[dict, dict], bytes],
 ) -> EvidenceDecision:
-    proposed = _state(state)
-    artifact = _artifact(proposed)
-    at = _timestamp(now)
-    provider_text = _text(provider, "artifact-provider-invalid")
-    approval = _text(approval_text, "artifact-approval-invalid")
-    if artifact.get("redaction_status") == "unchecked":
-        raise EvidenceFailure("artifact-publish-redaction-invalid")
-    has_destination = isinstance(destination, str) and bool(destination)
-    if destination not in (None, "") and not has_destination:
-        raise EvidenceFailure("artifact-destination-invalid")
-    event = {
-        "provider": provider_text,
-        "timestamp": at,
-        "approval_text": approval,
-        "status": "published" if has_destination else "publish-prepared",
-    }
-    if has_destination:
-        event["destination"] = _text(destination, "artifact-destination-invalid")
-    events = artifact.get("publish_events")
-    if not isinstance(events, list):
-        raise EvidenceFailure("artifact-publish-events-invalid")
-    events.append(event)
-    artifact["status"] = event["status"]
-    artifact["updated_at"] = at
-    proposed["artifact"] = artifact
-    proposed["updated_at"] = at
-    effect = _render_effect(proposed, artifact, render)
-    _bind_artifact_identity(proposed, artifact, effect)
-    event["artifact_path"] = effect.target
-    proposed["artifact"] = artifact
-    return EvidenceDecision(
-        proposed,
-        (effect,),
-        {"publish_event": copy.deepcopy(event), "artifact": copy.deepcopy(artifact)},
+    prepared = prepare_artifact_publish(
+        state,
+        now=now,
+        provider=provider,
+        destination=destination,
+        approval_text=approval_text,
+        confirmed=True,
+        render=render,
     )
+    command = prepared.command
+    assert isinstance(command, RecordArtifactPublication)
+    proposed = _translate_artifact_rule(
+        lambda: record_artifact_publication_document(
+            state,
+            at=command.at,
+            provider=command.provider,
+            destination=command.destination,
+            approval_text=command.approval_text,
+            confirmed=command.confirmed,
+            effect=command.effect,
+        )
+    )
+    return EvidenceDecision(proposed, prepared.effects, prepared.result)
 
 
 def _progress_bytes(state: dict, progress: dict, iteration: int) -> bytes:
