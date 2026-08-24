@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 import json
 import math
+from pathlib import Path
 import re
 import weakref
 from typing import Any, Callable, Optional, Type
@@ -12,21 +13,34 @@ from typing import Any, Callable, Optional, Type
 from mission_common import terminal_outcome_for_halt
 
 from .commands import (
+    ClearProgress,
     CompatibilityPayload,
+    ContextManifestEffectClaim,
     GENERIC_SET_DEDICATED_FIELDS,
     GENERIC_SET_FROZEN_FIELDS,
     AdvancePhase,
     AppendArtifactBlock,
     Command,
     ExportArtifact,
+    GenerateContextManifest,
     InitializeArtifact,
     MarkHalt,
     MarkPass,
     Reactivate,
     RecordArtifactPublication,
+    RecordVerification,
     RenderArtifact,
     ResumeStale,
     SetExtensionFields,
+    ProgressEffectClaim,
+    UpdateProgress,
+)
+from .evidence import (
+    EvidenceRuleError,
+    apply_context_manifest,
+    apply_progress_clear,
+    apply_progress_update,
+    apply_verification_record,
 )
 from .artifact import (
     ArtifactRuleError,
@@ -1057,6 +1071,109 @@ def _record_artifact_publication(
     )
 
 
+def _evidence_document(state: MissionState) -> dict:
+    if state.legacy_passthrough is None:
+        raise _Rejected("evidence-v4-state-required")
+    return state.legacy_passthrough.thaw()
+
+
+def _with_evidence_document(state: MissionState, document: dict) -> MissionState:
+    frozen = freeze_json_value(document)
+    if not isinstance(frozen, FrozenJsonObject):
+        raise _Rejected("evidence-state-invalid")
+    return _unbound_state(state, legacy_passthrough=frozen)
+
+
+def _claim_identity_matches(claim: object, content: bytes) -> bool:
+    import hashlib
+
+    return (
+        isinstance(getattr(claim, "kind", None), str)
+        and isinstance(getattr(claim, "target", None), str)
+        and type(getattr(claim, "size", None)) is int
+        and claim.size == len(content)
+        and claim.digest == "sha256:" + hashlib.sha256(content).hexdigest()
+    )
+
+
+def _update_progress(state: MissionState, raw_command: object) -> Transition:
+    command = raw_command
+    assert isinstance(command, UpdateProgress)
+    if type(command.effect) is not ProgressEffectClaim or command.effect.kind != "progress":
+        raise _Rejected("progress-effect-claim-invalid")
+    try:
+        document, content = apply_progress_update(_evidence_document(state), command)
+    except EvidenceRuleError as rejected:
+        raise _Rejected(rejected.code)
+    if not _claim_identity_matches(command.effect, content):
+        raise _Rejected("progress-effect-claim-invalid")
+    return Transition(
+        _with_evidence_document(state, document),
+        (KernelEvent("progress-checkpoint-updated"),),
+        (command.effect,),
+    )
+
+
+def _clear_progress(state: MissionState, raw_command: object) -> Transition:
+    command = raw_command
+    assert isinstance(command, ClearProgress)
+    try:
+        document = apply_progress_clear(_evidence_document(state), command)
+    except EvidenceRuleError as rejected:
+        raise _Rejected(rejected.code)
+    return Transition(
+        _with_evidence_document(state, document),
+        (KernelEvent("progress-checkpoint-cleared"),),
+    )
+
+
+def _generate_context_manifest(
+    state: MissionState, raw_command: object
+) -> Transition:
+    command = raw_command
+    assert isinstance(command, GenerateContextManifest)
+    claim = command.effect
+    if (
+        type(claim) is not ContextManifestEffectClaim
+        or claim.kind != "context-manifest"
+        or not isinstance(claim.publication_path, str)
+        or Path(claim.publication_path).name != claim.target
+    ):
+        raise _Rejected("context-effect-claim-invalid")
+    try:
+        document, content, _count = apply_context_manifest(
+            _evidence_document(state), command
+        )
+    except EvidenceRuleError as rejected:
+        raise _Rejected(rejected.code)
+    if (
+        document["context_manifests"][str(command.iteration)]["digest"]
+        != claim.digest
+        or not _claim_identity_matches(claim, content)
+    ):
+        raise _Rejected("context-effect-claim-invalid")
+    return Transition(
+        _with_evidence_document(state, document),
+        (KernelEvent("context-manifest-recorded"),),
+        (claim,),
+    )
+
+
+def _record_verification(state: MissionState, raw_command: object) -> Transition:
+    command = raw_command
+    assert isinstance(command, RecordVerification)
+    try:
+        document, entry = apply_verification_record(
+            _evidence_document(state), command
+        )
+    except EvidenceRuleError as rejected:
+        raise _Rejected(rejected.code)
+    return Transition(
+        _with_evidence_document(state, document),
+        (KernelEvent("verification-recorded"),),
+    )
+
+
 def _command_type_guard(expected: Type[object]) -> Callable[[MissionState, object], bool]:
     def guard(_state: MissionState, command: object) -> bool:
         return isinstance(command, expected)
@@ -1116,6 +1233,30 @@ TRANSITION_TABLE = build_transition_table(
             RecordArtifactPublication,
             _command_type_guard(RecordArtifactPublication),
             _record_artifact_publication,
+        ),
+        TransitionRule(
+            "progress-update",
+            UpdateProgress,
+            _command_type_guard(UpdateProgress),
+            _update_progress,
+        ),
+        TransitionRule(
+            "progress-clear",
+            ClearProgress,
+            _command_type_guard(ClearProgress),
+            _clear_progress,
+        ),
+        TransitionRule(
+            "context-manifest-generate",
+            GenerateContextManifest,
+            _command_type_guard(GenerateContextManifest),
+            _generate_context_manifest,
+        ),
+        TransitionRule(
+            "verification-record",
+            RecordVerification,
+            _command_type_guard(RecordVerification),
+            _record_verification,
         ),
         TransitionRule(
             "mark-halt",
@@ -1245,6 +1386,10 @@ def bind_transition_effects(
         claims = ()
     elif isinstance(command, ExportArtifact):
         claims = (command.artifact_effect, command.export_effect)
+    elif isinstance(command, (UpdateProgress, GenerateContextManifest)):
+        claims = (command.effect,)
+    elif isinstance(command, (ClearProgress, RecordVerification)):
+        claims = ()
     if claims is not None and (
         len(effects) != len(claims)
         or any(

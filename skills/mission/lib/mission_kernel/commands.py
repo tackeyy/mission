@@ -152,6 +152,61 @@ class RecordArtifactPublication:
     effect: ArtifactEffectClaim
 
 
+@dataclass(frozen=True)
+class VerificationCheck:
+    name: str
+    ok: bool
+    detail: Optional[str]
+
+
+@dataclass(frozen=True)
+class ProgressEffectClaim:
+    kind: str
+    target: str
+    digest: str
+    size: int
+
+
+@dataclass(frozen=True)
+class ContextManifestEffectClaim:
+    kind: str
+    target: str
+    publication_path: str
+    digest: str
+    size: int
+
+
+@dataclass(frozen=True)
+class UpdateProgress:
+    at: str
+    total: int
+    completed: int
+    batch_size: Optional[int]
+    last_unit: Optional[str]
+    artifact_path: Optional[str]
+    iteration: int
+    effect: ProgressEffectClaim
+
+
+@dataclass(frozen=True)
+class ClearProgress:
+    at: str
+
+
+@dataclass(frozen=True)
+class GenerateContextManifest:
+    at: str
+    iteration: int
+    effect: ContextManifestEffectClaim
+
+
+@dataclass(frozen=True)
+class RecordVerification:
+    at: str
+    iteration: int
+    checks: tuple[VerificationCheck, ...]
+
+
 # Fields whose value is fixed at genesis or owned by the pass gate; a generic
 # write would forge identity or completion evidence.  ``init`` recomputes
 # mission identity, and pass-gate facts only move through their own commands.
@@ -212,6 +267,9 @@ GENERIC_SET_DEDICATED_FIELDS = frozenset(
         "lease_history",
         "last_activity_at",
         "updated_at",
+        "progress",
+        "context_manifests",
+        "verification_history",
     }
 )
 
@@ -219,30 +277,38 @@ GENERIC_SET_DEDICATED_FIELDS = frozenset(
 Command = Union[
     AdvancePhase,
     AppendArtifactBlock,
+    ClearProgress,
     ExportArtifact,
+    GenerateContextManifest,
     InitializeArtifact,
     MarkHalt,
     MarkPass,
     Reactivate,
     RecordArtifactPublication,
+    RecordVerification,
     RenderArtifact,
     ResumeStale,
     SetExtensionFields,
+    UpdateProgress,
 ]
 
 
 _COMMAND_TYPES = {
     AdvancePhase: "advance-phase",
     AppendArtifactBlock: "append-artifact-block",
+    ClearProgress: "clear-progress",
     ExportArtifact: "export-artifact",
+    GenerateContextManifest: "generate-context-manifest",
     InitializeArtifact: "initialize-artifact",
     MarkHalt: "mark-halt",
     MarkPass: "mark-pass",
     Reactivate: "reactivate",
     RecordArtifactPublication: "record-artifact-publication",
+    RecordVerification: "record-verification",
     RenderArtifact: "render-artifact",
     ResumeStale: "resume-stale",
     SetExtensionFields: "set-extension-fields",
+    UpdateProgress: "update-progress",
 }
 
 
