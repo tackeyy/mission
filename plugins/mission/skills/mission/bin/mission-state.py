@@ -18527,9 +18527,9 @@ def _add_queue_parsers(subparsers) -> None:
 
 # ``GuardCommandKind`` へメンバーが増えたら choices も追随させる。明示列挙に
 # するとその追随が静かに失われるため、導出を残したまま関数外へ置く。
-_RECEIPT_KIND_CHOICES = [
+_RECEIPT_KIND_CHOICES = tuple(
     item.value for item in GuardCommandKind if item is not GuardCommandKind.NONE
-]
+)
 
 
 def _add_hook_parsers(subparsers) -> None:
