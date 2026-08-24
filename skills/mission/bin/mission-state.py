@@ -248,6 +248,13 @@ from mission_application.runtime_guard import (  # noqa: E402
     record_permission_observation,
     resolve_guard_command_receipt,
 )
+from mission_application.specialist_selection import (  # noqa: E402
+    SpecialistDeclineRequest,
+    SpecialistDeclineServices,
+    SpecialistSelectionFailure,
+    decline_specialist_selection,
+    resolve_provider_confirmation,
+)
 from mission_persistence.legacy_v4 import (  # noqa: E402
     LegacyV4InitializerRepository,
     LegacyV4Repository,
@@ -4292,7 +4299,7 @@ def rank_specialist_candidates(task_profile: dict, registry_candidates: list[dic
         if c.get("required"):
             base += 0.05
         provider_id = _provider_id(c)
-        needs_first_use = bool(c.get("risk", {}).get("first_use_confirmation")) and provider_id not in consented
+        confirmation = resolve_provider_confirmation(c, provider_id, consented, first_use)
         score = min(0.99, round(base * float(task_profile.get("confidence", 0.5)), 3))
         ranked.append({
             **c,
@@ -4300,7 +4307,11 @@ def rank_specialist_candidates(task_profile: dict, registry_candidates: list[dic
             "installed": bool(installed_info),
             "available": bool(installed_info),
             "status": "available" if installed_info else "missing",
-            "first_use": skill in first_use or provider_id in first_use or needs_first_use,
+            "first_use": confirmation.first_use,
+            # ``confirm`` is the legacy spelling of first-use confirmation.
+            # The consent-aware ``first_use`` projection above is authoritative.
+            "confirm": False,
+            "_confirmation_decision": confirmation.decision,
             "reason": (
                 "complexity activation match"
                 if "complexity" in eligibility["matched_conditions"]
@@ -4356,13 +4367,9 @@ def decide_specialists(task_profile: dict, candidates: list[dict],
             "reason": f"required specialist is missing: {required_missing[0]['skill']}",
             "prompted_user": True,
         }
-    if top.get("first_use") or top.get("confirm"):
-        return {
-            "policy": "first-use",
-            "action": "ask-user",
-            "reason": f"specialist requires first-use confirmation: {top['skill']}",
-            "prompted_user": True,
-        }
+    confirmation_decision = top.get("_confirmation_decision")
+    if confirmation_decision:
+        return confirmation_decision
     if not top.get("installed") and top.get("kind") == "command":
         return {
             "policy": "provider-unavailable",
@@ -4738,6 +4745,32 @@ def cmd_specialists_consent(args):
     atomic_write_json(path, data)
     result = {"ok": True, "provider": provider, "consent_file": str(path)}
     print(json.dumps(result, indent=2 if getattr(args, "json", False) else None, ensure_ascii=False))
+
+
+def cmd_specialists_decline(args):
+    try:
+        result = decline_specialist_selection(
+            SpecialistDeclineRequest(
+                selection_id=args.selection_id,
+                reason=args.reason,
+            ),
+            SpecialistDeclineServices(
+                cwd=Path.cwd,
+                resolve_state_file=resolve_state_file,
+                read_bytes=Path.read_bytes,
+                inspect_repository_bytes=inspect_repository_bytes,
+                sha256=hashlib.sha256,
+                compatibility_operation_arguments=_compatibility_operation_arguments,
+                canonical_compatibility_operation=_canonical_compatibility_operation,
+                repository_factory=_legacy_lifecycle_repository,
+                repository_format_v5=RepositoryFormat.V5,
+                clock=iso_now,
+            ),
+        )
+    except SpecialistSelectionFailure as error:
+        sys.stderr.write(f"ERROR: {error.code}\n")
+        sys.exit(2)
+    print(json.dumps(result, ensure_ascii=False))
 
 
 def cmd_specialists_accounting(args):
@@ -18831,6 +18864,13 @@ def _build_parser():
                            help="consent allowlist JSON (default: ~/.config/mission/provider-consent.json)")
     p_consent.add_argument("--json", action="store_true", help="JSON 形式で出力")
     p_consent.set_defaults(func=cmd_specialists_consent)
+
+    p_decline = spec_sub.add_parser("decline", help="現在の specialist 候補を明示的に辞退")
+    p_decline.add_argument("--selection-id", required=True,
+                           help="現在の checkpoint と一致する selection_id")
+    p_decline.add_argument("--reason", required=True, help="今回利用しない理由")
+    p_decline.add_argument("--json", action="store_true", help="JSON 形式で出力")
+    p_decline.set_defaults(func=cmd_specialists_decline)
 
     p_account = spec_sub.add_parser("accounting", help="available candidate の未処理 decision trail を確認")
     p_account.add_argument("--json", action="store_true", help="JSON 形式で出力")

@@ -289,7 +289,17 @@ python3 skills/mission/bin/mission-state.py specialists consent \
 
 Consent is stored in `~/.config/mission/provider-consent.json` by default. Tests and isolated runs can pass `--consent-file <path>`.
 
-This consent records provider first-use only. It must not be treated as blanket approval for external-send, browser-session-material reuse, or paid quota. Those scopes should be described in the mission confirmation text and, when not approved, represented as `awaiting-input` rather than hidden success or generic failure.
+This consent records provider first-use only. A later `specialists recommend --record-state` reads the allowlist, so a consented provider does not remain in `awaiting-confirmation`; when selection policy still leaves it unselected, the checkpoint is terminal `decision: none`. Consent must not be treated as blanket approval for external-send, browser-session-material reuse, or paid quota. Those scopes should be described in the mission confirmation text and, when not approved, represented as `awaiting-input` rather than hidden success or generic failure.
+
+When the current mission will not use an awaiting-confirmation candidate, record that decision explicitly instead of editing state:
+
+```bash
+python3 skills/mission/bin/mission-state.py specialists decline \
+  --selection-id <current-selection-id> \
+  --reason "core reviewers are sufficient for this mission"
+```
+
+The command accepts only the current checkpoint identity and records `decision: declined` with a terminal lifecycle. A stale selection identity is rejected without changing state.
 
 If Phase 1 ended with `specialists_decision.action: ask-user`, an applied invocation for a not-yet-selected candidate must include `--selection-source confirmed-user` after the user confirms it:
 
