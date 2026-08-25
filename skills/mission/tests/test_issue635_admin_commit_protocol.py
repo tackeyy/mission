@@ -215,7 +215,6 @@ ALLOWED_DIRECT_ATOMIC_WRITERS = {
     "_atomic_write_archive_pointer",
     "_build_worktree_archive_staging",
     "_commit_specialist_state_with_archive",
-    "_initialize_legacy_v4",
     "_legacy_evidence_repository",
     "_legacy_lifecycle_repository",
     "_publish_preflight_pointer_transaction",
@@ -226,12 +225,71 @@ ALLOWED_DIRECT_ATOMIC_WRITERS = {
 }
 
 
+# `write_state=` として注入されうる書き込み実装の閉じた集合。
+#
+# なぜ `ALLOWED_DIRECT_ATOMIC_WRITERS` だけでは足りないか:
+# thin adapter 抽出 (#626) で書き込みが injected callable 経由になると、
+# `atomic_write_json(...)` という**呼び出し**が adapter から消える。
+# 名前ベースの AST 走査はそこで書き込みを見失うため、直接呼び出しの
+# inventory だけを維持していると、抽出が進むにつれてガードが静かに空洞化する。
+#
+# そこで「誰が atomic_write_json を呼ぶか」ではなく
+# 「state writer として何を束縛できるか」を固定する。注入元は adapter に残るため、
+# 抽出が進んでもこの inventory は縮まない。
+ALLOWED_STATE_WRITER_INJECTIONS = {
+    # 連鎖の根。cmd_init が本物の atomic writer を注入する。
+    ("cmd_init", "atomic_write_json"),
+    # 受け取った writer をそのまま下流へ渡すだけの中継。
+    ("_initialize_legacy_v4", "write_state"),
+    ("_legacy_evidence_repository", "write_state"),
+    ("_legacy_lifecycle_repository", "write_state"),
+    # v5 / terminal は専用経路を持つ。
+    (
+        "_initialize_new_v5_session",
+        "lambda path, state: _initialize_v5_state(args, path, state)",
+    ),
+    ("_terminalize_state_file", "write_terminal_state"),
+}
+
+
+def _state_writer_injections() -> set[tuple[str, str]]:
+    """`write_state=<expr>` の束縛を (囲む top-level 関数, 式) で列挙する。"""
+    tree = ast.parse(MISSION_STATE_SOURCE.read_text(encoding="utf-8"))
+    found: set[tuple[str, str]] = set()
+
+    class Visitor(ast.NodeVisitor):
+        def __init__(self):
+            self.stack: list[str] = []
+
+        def visit_FunctionDef(self, node):
+            self.stack.append(node.name)
+            self.generic_visit(node)
+            self.stack.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Call(self, node):
+            for kw in node.keywords:
+                if kw.arg == "write_state":
+                    where = self.stack[0] if self.stack else "<module>"
+                    found.add((where, ast.unparse(kw.value)))
+            self.generic_visit(node)
+
+    Visitor().visit(tree)
+    return found
+
+
 def test_direct_atomic_writers_are_a_closed_inventory():
     callers = set(_atomic_write_callers())
     assert "cmd_resolve_archive" not in callers, (
         "resolve-archive は administrative commit protocol 経由で書くこと"
     )
     assert callers == ALLOWED_DIRECT_ATOMIC_WRITERS
+
+
+def test_state_writer_injections_are_a_closed_inventory():
+    """注入される state writer を固定する（抽出でガードが空洞化しないように）。"""
+    assert _state_writer_injections() == ALLOWED_STATE_WRITER_INJECTIONS
 
 
 def _write_halted_record(path: Path, session_id: str) -> None:
