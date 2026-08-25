@@ -68,6 +68,22 @@ class TypedScoreEvidenceBinding:
     expected_kind: str
 
 
+def resolve_repo_artifact_reference(cwd: object, reference: str) -> str:
+    """Return the exact repository-relative path later passed to the Git reader."""
+    candidate = Path(reference).expanduser()
+    if not candidate.is_absolute():
+        return reference
+    try:
+        relative = candidate.resolve(strict=False).relative_to(
+            Path(cwd).resolve(strict=False)
+        )
+    except ValueError as exc:
+        raise ValueError(
+            f"required evidence is outside .mission-state: artifact: {reference}"
+        ) from exc
+    return relative.as_posix()
+
+
 def _invalid(bundle: Path, root: Path, reason: str, generation: str | None = None):
     return WorktreeArchiveValidation("invalid", root, generation, reason)
 
