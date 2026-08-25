@@ -10,6 +10,8 @@ from io import StringIO
 import json
 from pathlib import Path
 from types import SimpleNamespace
+import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -42,6 +44,14 @@ def _mission_state_module():
     return module
 
 
+def _sanitized_env() -> dict:
+    """Drop inherited pytest configuration so fixture suites are self-contained."""
+    env = dict(os.environ)
+    for name in ("PYTEST_ADDOPTS", "PYTEST_CURRENT_TEST", "PYTEST_PLUGINS", "PYTHONPATH"):
+        env.pop(name, None)
+    return env
+
+
 def _run(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(
         list(args),
@@ -49,6 +59,7 @@ def _run(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
         capture_output=True,
         text=True,
         check=check,
+        env=_sanitized_env(),
     )
 
 
@@ -61,8 +72,12 @@ def _commit(repo: Path, message: str) -> str:
 def _write_fixture_scaffolding(repo: Path) -> None:
     (repo / "scripts").mkdir()
     shutil.copyfile(CI_SCOPE_HELPER, repo / "scripts" / "ci_changed_scopes.js")
+    # CI の別 interpreter 環境でも同じ結果になるよう、fixture の suite は現在の
+    # interpreter を絶対パスで固定し、外側の pytest 設定を継承しない。
     (repo / "Makefile").write_text(
-        "test:\n\tpython3 -m pytest -q\n",
+        "test:\n\t{} -m pytest -q -p no:cacheprovider --rootdir . .\n".format(
+            shlex.quote(sys.executable)
+        ),
         encoding="utf-8",
     )
 
@@ -203,8 +218,58 @@ class ScriptedOperations:
         self.merges.append((pr_ref, expected_head_sha))
 
 
+def _historical_incident_is_reachable() -> bool:
+    """CI は shallow checkout なので、実 SHA が届く環境かを先に確かめる。"""
+    for sha in (HISTORICAL_HEAD, HISTORICAL_BASE):
+        probe = _run(REPO_ROOT, "git", "cat-file", "-e", sha + "^{commit}", check=False)
+        if probe.returncode != 0:
+            return False
+    return True
+
+
+def test_real_git_conflict_fixture_fails_at_step_three(tmp_path):
+    """AC1 の常時版: 実 git のコンフリクトを step 3 が落とすことを環境非依存で固定する。
+
+    実履歴の再現は shallow checkout では動かせないため、同じ conflict 経路を
+    合成 fixture で必ず 1 回通す。scripted な fake ではなく実 git を使う。
+    """
+    gate = _gate_module()
+    repo = tmp_path / "conflict"
+    _init_repo(repo)
+    (repo / "module.py").write_text("def value():\n    return 0\n", encoding="utf-8")
+    (repo / "test_initial.py").write_text(
+        "from module import value\n\ndef test_value():\n    assert value() == 0\n",
+        encoding="utf-8",
+    )
+    _commit(repo, "initial")
+
+    _run(repo, "git", "switch", "-q", "-c", "feature")
+    (repo / "module.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    head_sha = _commit(repo, "feature")
+
+    _run(repo, "git", "switch", "-q", "main")
+    (repo / "module.py").write_text("def value():\n    return 2\n", encoding="utf-8")
+    base_sha = _commit(repo, "main change")
+
+    operations = gate.SubprocessGateOperations(repo)
+    with pytest.raises(gate.IntegrationGateError) as captured:
+        operations.integrate_and_test(head_sha, base_sha, lambda _message: None)
+
+    assert captured.value.step == 3
+    assert captured.value.reason == "merge-conflict"
+    assert "手動統合してから再実行" in str(captured.value)
+
+
 def test_real_issue660_and_issue662_history_fails_on_merge_conflict(tmp_path):
     """AC1: the only observed incident must exercise the conflict failure path."""
+    if not _historical_incident_is_reachable():
+        pytest.skip(
+            "shallow checkout: {} / {} が届かないため実履歴の再現は行わない。"
+            "同じ conflict 経路は "
+            "test_real_git_conflict_fixture_fails_at_step_three が常時固定する。".format(
+                HISTORICAL_HEAD, HISTORICAL_BASE
+            )
+        )
     gate = _gate_module()
     clone = tmp_path / "history"
     _run(tmp_path, "git", "clone", "-q", "--no-hardlinks", str(REPO_ROOT), str(clone))
