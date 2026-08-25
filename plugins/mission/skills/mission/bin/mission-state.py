@@ -428,6 +428,13 @@ from merge_queue import (  # noqa: E402
     status as status_merge_queue,
     verify as verify_merge_queue,
 )
+from integration_gate import execute_gate_and_merge  # noqa: E402
+from mission_application.integration_gate import (  # noqa: E402
+    IntegrationGateFailure,
+    IntegrationGateRequest,
+    IntegrationGateServices,
+    run_integration_gate,
+)
 from mission_kernel.commands import GENERIC_SET_FROZEN_FIELDS  # noqa: E402
 from mission_kernel.errors import MissionStateDecodeError, StrictReadError  # noqa: E402
 from mission_kernel.json_codec import (  # noqa: E402
@@ -8248,6 +8255,24 @@ def cmd_queue(args):
             )
         sys.exit(2)
     print(json.dumps(result, indent=2 if getattr(args, "json", False) else None, ensure_ascii=False))
+
+
+def cmd_gate_and_merge(args):
+    request = IntegrationGateRequest(
+        repository_root=".",
+        pr_ref=str(args.pr),
+        expected_head_sha=args.expected_head_sha,
+        expected_base_sha=args.expected_base_sha,
+    )
+    try:
+        result = run_integration_gate(
+            request,
+            IntegrationGateServices(execute=execute_gate_and_merge),
+        )
+    except IntegrationGateFailure as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
 
 PARALLEL_GROUP_SCHEMA = "mission-parallel-group/1"
@@ -18039,6 +18064,23 @@ def _add_queue_parsers(subparsers) -> None:
     p_pregate_digest = p_pregate_sub.add_parser("digest", help="compute a canonical pregate subject digest")
     p_pregate_digest.add_argument("--input", required=True, help="snapshot JSON file path or - for stdin")
     p_pregate_digest.set_defaults(func=cmd_pregate)
+
+    p_gate_merge = sub.add_parser(
+        "gate-and-merge",
+        help="test the freshly integrated PR tree and merge only after final base/head checks",
+    )
+    p_gate_merge.add_argument("pr")
+    p_gate_merge.add_argument(
+        "--expected-head-sha",
+        default=None,
+        help="queue-verified PR head sha; mismatch fails closed",
+    )
+    p_gate_merge.add_argument(
+        "--expected-base-sha",
+        default=None,
+        help="queue-verified accepted base sha; mismatch fails closed",
+    )
+    p_gate_merge.set_defaults(func=cmd_gate_and_merge)
 
     p_queue = sub.add_parser("queue", help="merge queue sidecar")
     p_queue_sub = p_queue.add_subparsers(dest="queue_cmd", required=True)
