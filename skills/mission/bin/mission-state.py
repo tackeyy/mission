@@ -240,6 +240,11 @@ from mission_application.review_aggregation import (  # noqa: E402
     ReviewAggregationServices,
     run_aggregate_reviews,
 )
+from mission_application.legacy_initialization import (  # noqa: E402
+    LegacyV4InitializationRequest,
+    LegacyV4InitializationServices,
+    run_initialize_legacy_v4,
+)
 from mission_application.worktree_archive_specs import (  # noqa: E402
     WorktreeArchiveSpecsRequest,
     WorktreeArchiveSpecsServices,
@@ -7382,399 +7387,96 @@ def _read_init_peer_state(path: Path) -> dict:
 
 
 def _initialize_legacy_v4(args, *, write_state, lock_state: bool = True):
-    cwd = Path.cwd()
-    goal_dispatch = _resolve_goal_dispatch(
-        args.mission,
-        getattr(args, "goal_dispatch", None),
-        cwd,
-    )
-    try:
-        mission_state_root = _ensure_regular_directory_path(cwd, (".mission-state",))
-        mission_state_root.mkdir(parents=True, exist_ok=True)
-    except (OSError, WorktreeArchiveError):
-        _exit_init_write_failure(cwd)
-    planned_files = _parse_files_arg(getattr(args, "files", None))
-    now = iso_now()
-    try:
-        host_run_id = correlation_id(getattr(args, "host_run_id", None))
-        root_run_id = correlation_id(getattr(args, "root_run_id", None) or host_run_id)
-        parent_run_id = correlation_id(args.parent_run_id) if getattr(args, "parent_run_id", None) else None
-        child_run_id = correlation_id(args.child_run_id) if getattr(args, "child_run_id", None) else None
-        logical_group_id = opaque_token(args.logical_group_id) if getattr(args, "logical_group_id", None) is not None else None
-        review_group_id = opaque_token(args.review_group_id) if getattr(args, "review_group_id", None) is not None else None
-    except ValueError as error:
-        print(f"ERROR: {error}", file=sys.stderr)
-        sys.exit(2)
-
-    initial = {
-        "mission": args.mission,
-        "mission_id": mission_id(args.mission),
-        "host_run_id": host_run_id,
-        "root_run_id": root_run_id,
-        "parent_run_id": parent_run_id,
-        "child_run_id": child_run_id,
-        "logical_group_id": logical_group_id,
-        "review_group_id": review_group_id,
-        "review_generation": 1 if review_group_id else None,
-        "review_perspective": getattr(args, "review_perspective", None),
-        "base_sha": getattr(args, "base_sha", None),
-        "head_sha": getattr(args, "head_sha", None),
-        "supersedes": [],
-        "goal_dispatch_requested": goal_dispatch["mode"],
-        "goal_dispatch_source": goal_dispatch["source"],
-        **(
-            {"goal_dispatch_resolution_fallback_reason": goal_dispatch["fallback_reason"]}
-            if goal_dispatch.get("fallback_reason")
-            else {}
-        ),
-        "session_role": getattr(args, "session_role", None) or "implementer",  # #311
-        **({"force_mission": True} if getattr(args, "force_mission", False) else {}),  # #325
-        "subtasks": [],
-        "complexity": "Unknown",
-        "reviewer_count": 2,
-        "task_profile": {},
-        "artifact_applicability": getattr(args, "artifact_applicability", "pending"),
-        "specialists_mode": "auto",
-        "specialists_candidates": [],
-        "specialists_selected": [],
-        "specialists_unavailable": [],
-        "specialists_decision": _new_specialist_selection_checkpoint(),
-        "specialist_invocations": [],
-        # New sessions opt into the explicit provider-planning lifecycle.  A
-        # same-mission init below preserves absence for legacy sessions.
-        "planning_policy_version": 1,
-        # M-audit-2 (2026-06-11): 未指定は 3 (98 セッション実測で iter>3 の ROI 低下)。
-        # 0 は「上限なし (stagnation 停止モード)」として None を保持する。
-        "max_iter": (DEFAULT_MAX_ITER if args.max_iter is None else (None if args.max_iter == 0 else args.max_iter)),
-        # #238 (S6): 時間予算 (分)。mission-state.py が自力計測できる唯一の予算軸。
-        # None = 予算宣言なし。next が budget_pressure を導出する。
-        "budget_minutes": _validated_budget_minutes(getattr(args, "budget_minutes", None)),
-        "threshold": args.threshold,
-        "iteration": 0,
-        "phase": "planning",
-        "score_history": [],
-        "stagnation_count": 0,
-        "decisions": [],
-        "loop_active": True,
-        "passes": False,
-        "halt_reason": "",
-        "assumptions_path": ".mission-state/assumptions.md",
-        "started_at": now,
-        "updated_at": now,
-        "phase_started_at": now,
-        "phase_durations_sec": {},
-        "activity_current": None,
-        "activity_segments": [],
-        "activity_rollup": {
-            "observed_total_sec": 0.0,
-            "closed_segment_count": 0,
-            "activity_duration_totals_sec": {},
-            "phase_activity_duration_totals_sec": {},
-            "wait_reason_totals_sec": {},
-        },
-        "activity_unobserved_gap_sec": 0.0,
-        "activity_unobserved_gap_reasons_sec": {},
-        # S3: issue_ref (未指定 None)。issue_ref_key は #295 の比較用正規化キー。
-        "issue_ref": getattr(args, "issue_ref", None),
-        "issue_ref_key": _normalize_issue_ref(getattr(args, "issue_ref", None)),
-        # S3-files: 同一 project の file-set overlap WARN 用 (未指定は空 list)
-        "planned_files": planned_files,
-    }
-    start_phase_default_activity(initial, now)
-    # S3: 同プロジェクト内の active session で同一 issue_ref があれば WARN (reject しない)
-    # #295: 形式差 (裸番号 / #番号 / host:owner/repo#番号 / URL) を正規化キーで同一視する
-    _issue_ref = getattr(args, "issue_ref", None)
-    _issue_ref_key = _normalize_issue_ref(_issue_ref)
-    _cur_sid = resolve_session_id()
-    if _issue_ref_key:
-        for sf_other in _iter_state_files(cwd):
-            try:
-                other = _read_init_peer_state(sf_other)
-            except Exception:
-                continue
-            # 同一セッションの resume では自分自身の旧 state を誤検出しないよう sid 除外
-            if other.get("session_id") == _cur_sid:
-                continue
-            # 旧 state に issue_ref_key が無い場合は生値から正規化 (後方互換)
-            _other_key = other.get("issue_ref_key") or _normalize_issue_ref(other.get("issue_ref"))
-            if _other_key != _issue_ref_key:
-                continue
-            # #296: 正常完了 (passes=True) は重複リスクなし。active に限らず halt 中の
-            # 未完了 session も対象にする (near-miss は halt 中の session を見逃して発生した)。
-            if other.get("passes") is True:
-                continue
-            if other.get("loop_active"):
-                _state_label = "active"
-            else:
-                # halt / 非稼働。stale 閾値超は引き継ぎ可能な放棄 claim として注記する。
-                _age = _state_age_since_update_sec(other)
-                _stale = _age is not None and _age >= _stale_active_seconds()
-                _state_label = "halted/stale" if _stale else "halted"
-            _hint = " stale の場合は claim を引き継げます。" if "stale" in _state_label else ""
-            print(
-                f"WARNING [S3]: issue_ref='{_issue_ref}' を持つ未完了 session が既に存在します"
-                f" (session_id={other.get('session_id', '?')}, 状態={_state_label})。"
-                f"重複作業の可能性を確認してください。{_hint}",
-                file=sys.stderr,
-            )
-            break  # 1件見つかれば十分
-    _warn_s3_file_overlap(cwd, planned_files, _cur_sid)
-    # M7 (2026-06-10): complexity を init 時に指定可能に。未指定は WARN (後方互換で Unknown 維持)
-    if getattr(args, "complexity", None):
-        initial["complexity"] = args.complexity
-        initial["reviewer_count"] = COMPLEXITY_REVIEWER_COUNT[args.complexity]
-    else:
-        print(
-            "WARNING: --complexity 未指定のため 'Unknown' のままです。"
-            " Phase 1 判定後に `mission-state.py set complexity=<Simple|Standard|Complex|Critical> reviewer_count=<N>` で必ず更新してください。",
-            file=sys.stderr,
-        )
-    # Issue #168: review_tier の導出・保存
-    _user_tier = getattr(args, "review_tier", None)
-    if _user_tier:
-        # ユーザー明示指定
-        initial["review_tier"] = _user_tier
-        initial["review_tier_source"] = "user"
-        initial["review_tier_signals"] = []
-        initial["review_tier_signal_details"] = []
-    else:
-        # auto 導出: mission 記述と complexity、task_profile の risk を使用
-        # (init 時点では task_profile は空 dict のため risk は参照しない)
-        _auto_decision = derive_review_tier_decision(
-            args.mission,
-            initial.get("complexity"),
-        )
-        initial["review_tier"] = _auto_decision["tier"]
-        initial["review_tier_source"] = "auto"
-        initial["review_tier_signals"] = _auto_decision["signals"]
-        initial["review_tier_signal_details"] = _auto_decision["signal_details"]
-    # reviewer_count は review_tier から設定 (COMPLEXITY_REVIEWER_COUNT と同値になる設計)
-    initial["reviewer_count"] = TIER_REVIEWER_COUNT[initial["review_tier"]]
-    _pregate = _pregate_state_reference(cwd, getattr(args, "issue_ref", None))
-    if _pregate is not None:
-        initial["pregate"] = _pregate
-        _pregate_warning = _pregate_verdict_warning(_pregate)
-        if _pregate_warning:
-            print(_pregate_warning, file=sys.stderr)
-
-    # #276: adaptive routing — Simple + リスクシグナルなし + 強制なしは goal へ。
-    # discriminating-v2 (品質同点・mission 5.4x 時間/4.9x コスト) と実運用 95% の
-    # iter1 素通しに基づく。session state を作らないため pass-score 統計を汚さず、
-    # mission の pass も主張しない。シグナル付き Simple は安全側で mission 維持。
-    # #304: --issue-ref 付き (Issue-bound = 統治要求) は routing 対象外。company-os 等の
-    # wrapper は init 直後の strict preflight で active state を要求するため、
-    # routed (state 不生成) だと mandatory halt の事故経路になる。
-    if should_route_init_to_goal(
-        complexity=initial.get("complexity"),
+    request = LegacyV4InitializationRequest(
+        mission=args.mission,
+        goal_dispatch=getattr(args, "goal_dispatch", None),
+        files=getattr(args, "files", None),
+        host_run_id=getattr(args, "host_run_id", None),
+        root_run_id=getattr(args, "root_run_id", None),
+        parent_run_id=getattr(args, "parent_run_id", None),
+        child_run_id=getattr(args, "child_run_id", None),
+        logical_group_id=getattr(args, "logical_group_id", None),
+        review_group_id=getattr(args, "review_group_id", None),
+        review_perspective=getattr(args, "review_perspective", None),
+        base_sha=getattr(args, "base_sha", None),
+        head_sha=getattr(args, "head_sha", None),
+        session_role=getattr(args, "session_role", None),
         force_mission=getattr(args, "force_mission", False),
-        new_mission=getattr(args, "new_mission", False),
-        user_tier=_user_tier,
-        review_tier_signals=initial.get("review_tier_signals"),
+        artifact_applicability=getattr(args, "artifact_applicability", "pending"),
+        max_iter=args.max_iter,
+        budget_minutes=getattr(args, "budget_minutes", None),
+        threshold=args.threshold,
         issue_ref=getattr(args, "issue_ref", None),
-    ):
-        dispatch_fields = _goal_dispatch_route_fields(initial)
-        print(json.dumps({
-            "route": "goal",
-            "complexity": "Simple",
-            "mission_id": initial["mission_id"],
-            "reason": "Simple complexity with no irreversible/security signals (#276)",
-            "guidance": _goal_dispatch_guidance(dispatch_fields, "mission ループを起動しない。"),
-            **dispatch_fields,
-        }, ensure_ascii=False, indent=2))
-        return
-
-    initial = stamp_metadata(initial, cwd)
-
-    # multi-session 完全統一 (2026-06-13): 常に sessions/<sid>.json に書く。
-    # 各セッションは独立 sid を持つため奪い合いは起きない (同一 sid 再 init は本人の上書き=resume)。
-    sid = initial["session_id"]
-    initial["assumptions_path"] = (
-        args._new_mission_assumptions_path
-        or f".mission-state/sessions/{sid}-assumptions.md"
+        complexity=getattr(args, "complexity", None),
+        review_tier=getattr(args, "review_tier", None),
+        new_mission=getattr(args, "new_mission", False),
+        new_mission_assumptions_path=args._new_mission_assumptions_path,
+        lock_state=lock_state,
     )
-    sdir = session_dir(cwd)
-    sf_target = session_file(cwd, sid)
-    try:
-        _ensure_regular_directory_path(cwd, (".mission-state", "sessions"))
-        sdir.mkdir(parents=True, exist_ok=True)
-    except (OSError, WorktreeArchiveError):
-        _exit_init_write_failure(cwd, sf_target)
-    agg = aggregate_file(cwd)
-    init_lock = (
-        _guarded_init_state_lock(cwd, sf_target)
-        if lock_state
-        else contextlib.nullcontext()
+    services = LegacyV4InitializationServices(
+        current_directory=Path.cwd,
+        resolve_goal_dispatch=_resolve_goal_dispatch,
+        ensure_regular_directory_path=_ensure_regular_directory_path,
+        parse_files_arg=_parse_files_arg,
+        clock=iso_now,
+        correlation_id=correlation_id,
+        opaque_token=opaque_token,
+        mission_id=mission_id,
+        new_specialist_selection_checkpoint=_new_specialist_selection_checkpoint,
+        validated_budget_minutes=_validated_budget_minutes,
+        normalize_issue_ref=_normalize_issue_ref,
+        start_phase_default_activity=start_phase_default_activity,
+        resolve_session_id=resolve_session_id,
+        iter_state_files=_iter_state_files,
+        read_init_peer_state=_read_init_peer_state,
+        state_age_since_update_sec=_state_age_since_update_sec,
+        stale_active_seconds=_stale_active_seconds,
+        warn_s3_file_overlap=_warn_s3_file_overlap,
+        derive_review_tier_decision=derive_review_tier_decision,
+        pregate_state_reference=_pregate_state_reference,
+        pregate_verdict_warning=_pregate_verdict_warning,
+        should_route_init_to_goal=should_route_init_to_goal,
+        goal_dispatch_route_fields=_goal_dispatch_route_fields,
+        goal_dispatch_guidance=_goal_dispatch_guidance,
+        stamp_metadata=stamp_metadata,
+        session_dir=session_dir,
+        session_file=session_file,
+        aggregate_file=aggregate_file,
+        guarded_init_state_lock=_guarded_init_state_lock,
+        nullcontext=contextlib.nullcontext,
+        read_legacy_json_file=_read_legacy_json_file,
+        validate_specialist_public_state=_validate_specialist_public_state,
+        atomic_write_bytes=atomic_write_bytes,
+        validated_assumptions_probe_path=_validated_assumptions_probe_path,
+        close_activity_for_resume=close_activity_for_resume,
+        resume_phase_timing=_resume_phase_timing,
+        datetime=datetime,
+        timezone=timezone,
+        move=shutil.move,
+        time=time,
+        atomic_write_text=atomic_write_text,
+        backup_state=backup_state,
+        atomic_write_json=atomic_write_json,
+        permission_preflight=_permission_preflight,
+        write_state=write_state,
+        exit_init_write_failure=_exit_init_write_failure,
+        exit_init_evidence_write_failure=_exit_init_evidence_write_failure,
+        exit_internal_invariant=_exit_internal_invariant,
+        printer=print,
+        stderr=sys.stderr,
+        system_exit=sys.exit,
+        json_dumps=json.dumps,
+        default_max_iter=DEFAULT_MAX_ITER,
+        complexity_reviewer_count=COMPLEXITY_REVIEWER_COUNT,
+        tier_reviewer_count=TIER_REVIEWER_COUNT,
+        worktree_archive_error=WorktreeArchiveError,
+        activity_timing_error=ActivityTimingError,
+        specialist_public_contract_error=SpecialistPublicContractError,
+        json_decode_error=json.JSONDecodeError,
+        fenced_commit_error=FencedCommitError,
+        permission_halt_rejected=PermissionHaltRejected,
     )
-    with init_lock:
-        existing_agg = {}
-        if agg.exists():
-            try:
-                existing_agg = _read_legacy_json_file(agg)
-            except json.JSONDecodeError:
-                existing_agg = {}  # F-6: 壊れた aggregate は空扱いで復旧 (init を落とさない)
-        # Issue #2: 既存 sf_target が別 mission_id を持つ場合、上書き前に archive に退避する。
-        # 同一 mission_id (= resume) の場合は退避不要。
-        if sf_target.exists():
-            existing_mid = ""
-            try:
-                existing_data = _read_legacy_json_file(sf_target)
-                _validate_specialist_public_state(existing_data)
-                existing_mid = existing_data.get("mission_id", "")
-                new_mid = initial.get("mission_id", "")
-                if existing_mid and new_mid and existing_mid != new_mid:
-                    try:
-                        archive_dir = _ensure_regular_directory_path(
-                            cwd, (".mission-state", "archive")
-                        )
-                        archive_dir.mkdir(parents=True, exist_ok=True)
-                    except (OSError, WorktreeArchiveError) as e:
-                        print(f"ERROR: archive destination is unsafe: {e}", file=sys.stderr)
-                        sys.exit(2)
-                    old_mid8 = existing_mid[:8] if len(existing_mid) >= 8 else existing_mid
-                    archive_dest = archive_dir / f"state-{sid}-{old_mid8}.json"
-                    try:
-                        atomic_write_bytes(archive_dest, sf_target.read_bytes())
-                    except OSError:
-                        _exit_init_evidence_write_failure("archive")
-                    old_assumptions_path = existing_data.get("assumptions_path")
-                    if old_assumptions_path:
-                        try:
-                            old_assumptions = _validated_assumptions_probe_path(
-                                cwd, str(old_assumptions_path)
-                            )
-                        except FileNotFoundError:
-                            old_assumptions = None
-                        except (OSError, ValueError) as e:
-                            print(
-                                f"ERROR: 旧ミッション assumptions の退避対象が不正です: {e}",
-                                file=sys.stderr,
-                            )
-                            sys.exit(2)
-                        if old_assumptions is not None:
-                            assumptions_archive = archive_dir / (
-                                f"state-{sid}-{old_mid8}-assumptions.md"
-                            )
-                            try:
-                                atomic_write_bytes(
-                                    assumptions_archive, old_assumptions.read_bytes()
-                                )
-                            except OSError:
-                                _exit_init_evidence_write_failure("archive")
-                    initial["assumptions_path"] = (
-                        f".mission-state/sessions/{sid}-{new_mid[:8]}-"
-                        f"{time.time_ns()}-assumptions.md"
-                    )
-                elif existing_mid and existing_mid == new_mid:
-                    if "planning_policy_version" not in existing_data:
-                        initial.pop("planning_policy_version", None)
-                    else:
-                        initial["planning_policy_version"] = existing_data["planning_policy_version"]
-                    existing_assumptions_path = existing_data.get("assumptions_path")
-                    if existing_assumptions_path:
-                        initial["assumptions_path"] = existing_assumptions_path
-                    # #211: same-mission init is a resume boundary. Preserve the
-                    # bounded activity rollup and close an open segment only up
-                    # to the last observed state update; never infer the crash gap.
-                    current = existing_data.get("activity_current")
-                    if not (
-                        isinstance(current, dict) and current.get("started_at") == now
-                    ):
-                        close_activity_for_resume(existing_data, now)
-                    _resume_phase_timing(existing_data, now)
-                    for key in (
-                        "activity_current",
-                        "activity_segments",
-                        "activity_rollup",
-                        "activity_unobserved_gap_sec",
-                        "activity_unobserved_gap_reasons_sec",
-                        "activity_anomaly_counts",
-                        "phase_durations_sec",
-                        "phase",
-                        "phase_started_at",
-                        "pregate",
-                    ):
-                        if key in existing_data:
-                            initial[key] = existing_data[key]
-                    # resume 後も、より新しい pregate 評価があればそちらを優先する
-                    if _pregate is not None:
-                        initial["pregate"] = _pregate
-                    if initial.get("loop_active") is not False and not initial.get("activity_current"):
-                        start_phase_default_activity(initial, now)
-            except ActivityTimingError as e:
-                print(f"ERROR: existing mission timing is invalid: {e}", file=sys.stderr)
-                sys.exit(2)
-            except SpecialistPublicContractError:
-                raise
-            except json.JSONDecodeError as e:
-                quarantine_suffix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-                quarantine = sf_target.with_name(f"{sf_target.name}.corrupt-{quarantine_suffix}")
-                try:
-                    shutil.move(str(sf_target), str(quarantine))
-                    print(
-                        f"WARNING: 破損した session JSON を退避しました: {quarantine} ({e})",
-                        file=sys.stderr,
-                    )
-                except Exception as move_error:
-                    print(
-                        f"WARNING: 破損した session JSON の退避に失敗しました。上書きで復旧します: {move_error}",
-                        file=sys.stderr,
-                    )
-            except Exception as e:
-                print(f"WARNING: 旧ミッション (id={existing_mid[:8]}) のアーカイブに失敗。履歴消失の可能性: {e}", file=sys.stderr)
-        assumptions_file = cwd / initial["assumptions_path"]
-        try:
-            if assumptions_file.exists():
-                _validated_assumptions_probe_path(
-                    cwd, str(initial["assumptions_path"])
-                )
-            else:
-                atomic_write_text(assumptions_file, "# Assumption Registry\n")
-        except (OSError, ValueError):
-            _exit_init_evidence_write_failure("assumptions")
-        # Allocate generations under the same project lock as publication.  A
-        # pre-lock max+1 scan lets concurrent sessions choose one generation.
-        if initial["review_group_id"]:
-            prior_generations = []
-            for state_path in _iter_state_files(cwd):
-                try:
-                    prior = _read_init_peer_state(state_path)
-                except (OSError, ValueError, FencedCommitError):
-                    continue
-                if prior.get("review_group_id") != initial["review_group_id"]:
-                    continue
-                generation = prior.get("review_generation")
-                if isinstance(generation, int) and not isinstance(generation, bool) and generation > 0:
-                    prior_generations.append(generation)
-            initial["review_generation"] = max(prior_generations, default=0) + 1
-        backup_state(sf_target)
-        write_state(sf_target, initial)
-        existing_agg.setdefault("active_sessions", [])
-        if sid not in existing_agg["active_sessions"]:
-            existing_agg["active_sessions"].append(sid)
-        existing_agg["updated_at"] = iso_now()
-        atomic_write_json(agg, existing_agg)
-    try:
-        permission_preflight = _permission_preflight(cwd)
-    except PermissionHaltRejected as error:
-        _exit_internal_invariant(error.code, str(error))
-    except FencedCommitError as error:
-        if error.code not in {"transition-divergence", "transition-unsealed"}:
-            raise
-        _exit_internal_invariant(error.code, error.detail)
-    if not permission_preflight["ok"]:
-        print(json.dumps(permission_preflight, ensure_ascii=False))
-        sys.exit(2)
-    print(json.dumps({
-        "ok": True,
-        "mode": "multi-session",
-        "session_file": str(sf_target),
-        "session_id": sid,
-        "mission_id": initial["mission_id"],
-        "lease_id": initial["lease_id"],
-        "fencing_epoch": initial["fencing_epoch"],
-        "lease_expires_at": initial["lease_expires_at"],
-        "permission_preflight": "passed",
-    }))
+    run_initialize_legacy_v4(request, services)
 
 
 def _canonical_init_command(args) -> tuple[object, bytes]:
