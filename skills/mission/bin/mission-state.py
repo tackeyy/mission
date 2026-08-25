@@ -230,6 +230,11 @@ from mission_application.command_provider import (  # noqa: E402
     WorkspaceServices as CommandProviderWorkspaceServices,
     invoke_command_provider,
 )
+from mission_application.review_aggregation import (  # noqa: E402
+    ReviewAggregationRequest,
+    ReviewAggregationServices,
+    run_aggregate_reviews,
+)
 from mission_application.runtime_guard import (  # noqa: E402
     CleanupStaleExecuteCommand,
     FreshnessEvidence,
@@ -14485,446 +14490,68 @@ def _lint_state_artifact(cwd: Path, data: dict) -> tuple[list[dict], str]:
 
 
 def cmd_aggregate_reviews(args):
-    """Aggregate mission-review/1 reviewer JSON into push-score compatible scoring JSON."""
-    cwd = Path.cwd()
-    sf = resolve_state_file(cwd)
-    if not sf.exists():
-        print("ERROR: state.json が見つかりません。先に `init` してください。", file=sys.stderr)
-        sys.exit(1)
-    if args.iteration < 1:
-        print("ERROR: --iteration は 1 以上で指定してください", file=sys.stderr)
-        sys.exit(2)
-    outcome = _command_outcome(args, "aggregate-reviews", "ok")
-    try:
-        revision_scope = _revision_scope_from_args(args)
-        _validate_revision_scope(cwd, revision_scope)
-    except ValueError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        sys.exit(2)
-    try:
-        _source_snapshot, source_state = _load_authoritative_state(sf)
-    except Exception as exc:
-        print(f"ERROR: authoritative state is unavailable: {exc}", file=sys.stderr)
-        sys.exit(2)
-    # #326: critic scope 記録の hard gate。#309 の guidance 層は next を呼ばない
-    # orchestrator に bypass される実測 (disc-v3) があるため、集計側で fail-closed に
-    # 強制する。escape hatch は作らない (#240 の合意偽装防止と同思想)。
-    if args.iteration >= 2:
-        if source_state.get("critic_has_new_scope") is None:
-            print(
-                "ERROR: iteration >= 2 の集計には critic_has_new_scope の記録が必要です (#326)。"
-                " critic の実行計画テーブルから判定し、"
-                "`mission-state.py set critic_has_new_scope='false'` (全ステップが既存 finding id のみ)"
-                " または `'true'` (new を含む) を実行してから再集計してください。",
-                file=sys.stderr,
-            )
-            raise CommandOutcomeExit(2, "expected-gate")
-    input_paths = getattr(args, "input", None) or []
-    input_refs = getattr(args, "input_refs", None) or []
-    if not input_paths and not input_refs:
-        print("ERROR: --input または --input-ref を少なくとも 1 件指定してください", file=sys.stderr)
-        sys.exit(2)
-    loaded_reviews = [_load_review_json(path, args.iteration) for path in input_paths]
-    imported_refs: list[dict] = []
-    if input_refs:
-        try:
-            for reference_path in input_refs:
-                review, metric, reference = _load_imported_review(
-                    cwd, source_state, reference_path, args.iteration
-                )
-                loaded_reviews.append((review, metric))
-                imported_refs.append(reference)
-        except (OSError, json.JSONDecodeError, ValueError) as exc:
-            print(f"ERROR: review import reference rejected: {exc}", file=sys.stderr)
-            sys.exit(2)
-    reviews = [review for review, _metric in loaded_reviews]
-    reviewer_output_metrics = [
-        {"perspective": review["perspective"], **metric}
-        for review, metric in loaded_reviews
-    ]
-    for metric in reviewer_output_metrics:
-        if (
-            metric["prose_bytes"] > REVIEW_PROSE_BYTES_WARN
-            or metric["prose_ratio"] > REVIEW_PROSE_RATIO_WARN
-        ):
-            print(
-                "WARN #353: reviewer output exceeds bounded template guidance "
-                f"(perspective={metric['perspective']}, "
-                f"prose_bytes={metric['prose_bytes']}, "
-                f"prose_ratio={metric['prose_ratio']:.3f})",
-                file=sys.stderr,
-            )
-
-    min_reviewers = getattr(args, "min_reviewers", None)
-    if min_reviewers is not None and len(reviews) < min_reviewers:
-        state_reviewer_count = source_state.get("reviewer_count")
-        shortage_guidance = build_guidance(
-            "review-finalize",
-            "min-reviewers",
-            {
-                "iteration": args.iteration,
-                "reviewer_count": state_reviewer_count,
-                "latest_review_input_ref": input_refs[0] if input_refs else None,
-            },
-        )
-        print(
-            f"ERROR: reviewer 数不足 (期待 {min_reviewers} 名, 実際 {len(reviews)} 名)。"
-            " reviewer を追加してやり直してください。",
-            file=sys.stderr,
-        )
-        for line in shortage_guidance:
-            print(line, file=sys.stderr)
-        raise CommandOutcomeExit(2, "expected-gate", guidance=shortage_guidance)
-
-    scoring_reviews = [r for r in reviews if r.get("scores") is not None]
-    if not scoring_reviews:
-        print("ERROR: 採点対象 reviewer がありません (scores:null の検証専任のみ)", file=sys.stderr)
-        sys.exit(2)
-
-    adjusted_scores = []
-    cap_log = []
-    excluded = []
-    for review in scoring_reviews:
-        values = [float(review["scores"][key]) for key in REVIEW_SCORE_KEYS]
-        same_score_note = str(review.get("same_score_note") or "")
-        if len(set(values)) == 1 and ("全体印象" in same_score_note or "overall impression" in same_score_note.lower()):
-            excluded.append({"perspective": review["perspective"], "reason": "same-score overall-impression note"})
-            continue
-        adjusted, caps = _apply_reviewer_caps(review)
-        adjusted_scores.append({"perspective": review["perspective"], "scores": adjusted})
-        cap_log.extend(caps)
-    if not adjusted_scores:
-        print("ERROR: 全採点 reviewer が除外されました (Reviewer 独立性に疑念)", file=sys.stderr)
-        raise CommandOutcomeExit(2, "expected-gate")
-
-    axis_values = {
-        axis: [entry["scores"][axis] for entry in adjusted_scores]
-        for axis in REVIEW_SCORE_KEYS
-    }
-    items = {
-        axis: round(sum(values) / len(values), 2)
-        for axis, values in axis_values.items()
-    }
-    agreement_detail = {
-        axis: {
-            "min": round(min(values), 2),
-            "max": round(max(values), 2),
-            "delta": round(max(values) - min(values), 2),
-        }
-        for axis, values in axis_values.items()
-    }
-    review_agreement = None
-    if len(adjusted_scores) >= 2:
-        max_delta = max(detail["delta"] for detail in agreement_detail.values())
-        review_agreement = _consensus_score(max_delta)
-    open_high = sum(
-        1
-        for review in reviews
-        for finding in review.get("findings", [])
-        if finding.get("severity") == "High"
+    request = ReviewAggregationRequest(
+        iteration=args.iteration, raw_input=getattr(args, "input", None),
+        raw_input_refs=getattr(args, "input_refs", None), out=getattr(args, "out", None), min_reviewers=getattr(args, "min_reviewers", None),
+        raw_reviewer_windows=getattr(args, "reviewer_windows", None), record_outcome=getattr(args, "record_outcome", True),
+        json=getattr(args, "json", False), base_sha=getattr(args, "base_sha", None), head_sha=getattr(args, "head_sha", None),
+        event_id=getattr(args, "event_id", None), root_event_id=getattr(args, "root_event_id", None), raw_attempt=getattr(args, "attempt", ...), retry_of=getattr(args, "retry_of", None),
     )
-    # The archive claim is authored by the same pure reducer that later
-    # validates the untrusted archive.  Keep the surrounding observability
-    # fields, but do not let this writer become a second scoring authority.
-    try:
-        reduced = reduce_reviews_to_score(
-            reviews,
-            expected_iteration=args.iteration,
-        )
-    except (ReviewFailure, ValueError) as exc:
-        print(f"ERROR: review aggregate inputs are invalid: {exc}", file=sys.stderr)
-        sys.exit(2)
-    derived_score = {
-        "items": reduced.items,
-        "composite": reduced.composite,
-        "min_item": reduced.min_item,
-        "open_high": reduced.open_high,
-        "review_agreement": reduced.review_agreement,
-        "agreement_detail": reduced.agreement_detail,
-    }
-    items = reduced.items
-    open_high = reduced.open_high
-    review_agreement = reduced.review_agreement
-    agreement_detail = reduced.agreement_detail
-
-    # #282/#350: reviewer 並列実行の観測。2 名以上では全 reviewer の
-    # self-report を fail-closed で要求し、実行形態そのものは gate しない。
-    valid_perspectives = {review["perspective"] for review in reviews}
-    reviewer_windows = _parse_reviewer_windows(
-        getattr(args, "reviewer_windows", []) or [], valid_perspectives
+    services = ReviewAggregationServices(
+        current_directory=Path.cwd,
+        resolve_state_file=resolve_state_file,
+        path_exists=Path.exists,
+        load_authoritative_state=_load_authoritative_state,
+        command_outcome=_command_outcome,
+        revision_scope_from_args=_revision_scope_from_args,
+        validate_revision_scope=_validate_revision_scope,
+        load_review_json=_load_review_json,
+        load_imported_review=_load_imported_review,
+        printer=print,
+        stderr=sys.stderr,
+        system_exit=SystemExit,
+        build_guidance=build_guidance,
+        apply_reviewer_caps=_apply_reviewer_caps,
+        reduce_reviews_to_score=reduce_reviews_to_score,
+        consensus_score=_consensus_score,
+        review_failure=ReviewFailure,
+        review_score_keys=REVIEW_SCORE_KEYS,
+        parse_reviewer_windows=_parse_reviewer_windows,
+        observe_parallel_execution=_observe_parallel_execution,
+        record_command_outcome_only=_record_command_outcome_only,
+        emit_json_command_failure=_emit_json_command_failure,
+        command_outcome_emission_target=args,
+        review_prose_bytes_warn=REVIEW_PROSE_BYTES_WARN,
+        review_prose_ratio_warn=REVIEW_PROSE_RATIO_WARN,
+        legacy_lifecycle_repository=_legacy_lifecycle_repository,
+        current_review_lineage=_current_review_lineage,
+        validate_artifact_state_consistency=validate_artifact_state_consistency,
+        lint_state_artifact=_lint_state_artifact,
+        artifact_contract_error=ArtifactContractError,
+        invalidate_artifact_lint_observation=invalidate_artifact_lint_observation,
+        clock=iso_now,
+        canonical_artifact_identity_snapshot=canonical_artifact_identity_snapshot,
+        end_activity_segment=end_activity_segment,
+        transition_phase=_transition_phase,
+        record_activity_event=record_activity_event,
+        append_command_outcome=_append_command_outcome,
+        expected_context_mode=_expected_context_mode,
+        context_manifest_generated=_context_manifest_generated,
+        json_dumps=json.dumps,
+        sha256=hashlib.sha256,
+        state_dir=state_dir,
+        path_from_string=Path,
+        same_publish_target=_same_publish_target,
+        command_outcome_exit=CommandOutcomeExit,
+        published_file=_PublishedFile,
+        publish_review_archive_transaction=_publish_review_archive_transaction,
+        publish_output_transaction=_publish_output_transaction,
+        verify_published_file=_verify_published_file,
+        rollback_published_file=_rollback_published_file,
+        published_rollback_recovery_error=PublishedRollbackRecoveryError,
+        close_published_file=_close_published_file,
     )
-    if len(reviews) >= 2:
-        reported_perspectives = {window["perspective"] for window in reviewer_windows}
-        missing_perspectives = sorted(valid_perspectives - reported_perspectives)
-        if missing_perspectives:
-            gate_outcome = _command_outcome(args, "aggregate-reviews", "expected-gate")
-            if getattr(args, "record_outcome", True):
-                _record_command_outcome_only(cwd, gate_outcome)
-            _emit_json_command_failure(args, gate_outcome)
-            print(
-                "ERROR: reviewer window の報告が不足しています。"
-                f"不足 perspective: {', '.join(missing_perspectives)}。"
-                "報告書式: --reviewer-window <perspective>=<start>..<end>。"
-                "#350: 並列実行の検証可能性のため必須",
-                file=sys.stderr,
-            )
-            raise CommandOutcomeExit(2, "expected-gate")
-    parallel_execution = _observe_parallel_execution(reviewer_windows)
-    reviewer_windows_public = [
-        {k: v for k, v in window.items() if not k.startswith("_")}
-        for window in reviewer_windows
-    ]
-    if parallel_execution is False:
-        print(
-            "WARN: reviewer が直列実行されています (実行時間帯の重なりなし)。"
-            "Claude Code では Reviewer を単一メッセージで並列起動してください (#282)。"
-            "この warn は観測のみで集計・gate には影響しません。",
-            file=sys.stderr,
-        )
-
-    # #612: archive / scoring JSON の公開より前に lease を検証する (lease-first)。
-    # 従来は公開後の repository.save() で初めて admission が走り、拒否時は
-    # rollback で回収していたが、#475 の契約は「検証前に公開しない」であり
-    # 「公開しても回収する」ではない。plan-import (#498) と同じ修正パターン。
-    repository = _legacy_lifecycle_repository(
-        cwd,
-        sf,
-        stamp=True,
-        strict_read=True,
-        lease_reason="aggregate-reviews",
-        pre_admit_lease=True,
-    )
-    with repository.transaction():
-        data = repository.load()
-        # The preflight read above is intentionally advisory only. Re-run all
-        # state-dependent reviewer gates against the transaction-bound state so
-        # a concurrent critic-scope or reviewer-policy update cannot be
-        # bypassed by a stale read.
-        if args.iteration >= 2 and data.get("critic_has_new_scope") is None:
-            print(
-                "ERROR: iteration >= 2 の集計には critic_has_new_scope の記録が必要です (#326)。"
-                " critic の実行計画テーブルから判定し、"
-                "`mission-state.py set critic_has_new_scope='false'` (全ステップが既存 finding id のみ)"
-                " または `'true'` (new を含む) を実行してから再集計してください。",
-                file=sys.stderr,
-            )
-            raise CommandOutcomeExit(2, "expected-gate")
-        if min_reviewers is not None and len(reviews) < min_reviewers:
-            shortage_guidance = build_guidance(
-                "review-finalize",
-                "min-reviewers",
-                {
-                    "iteration": args.iteration,
-                    "reviewer_count": data.get("reviewer_count"),
-                    "latest_review_input_ref": input_refs[0] if input_refs else None,
-                },
-            )
-            print(
-                f"ERROR: reviewer 数不足 (期待 {min_reviewers} 名, 実際 {len(reviews)} 名)。"
-                " reviewer を追加してやり直してください。",
-                file=sys.stderr,
-            )
-            for line in shortage_guidance:
-                print(line, file=sys.stderr)
-            raise CommandOutcomeExit(
-                2,
-                "expected-gate",
-                guidance=shortage_guidance,
-            )
-        if input_refs:
-            try:
-                current_imported_refs = [
-                    _load_imported_review(cwd, data, path, args.iteration)[2]
-                    for path in input_refs
-                ]
-            except (OSError, ValueError) as exc:
-                print(f"ERROR: review import reference rejected: {exc}", file=sys.stderr)
-                sys.exit(2)
-            if current_imported_refs != imported_refs:
-                print(
-                    "ERROR: review import references changed during aggregation",
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-        try:
-            review_lineage = _current_review_lineage(cwd, data, revision_scope)
-        except ValueError as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
-            sys.exit(2)
-        try:
-            validate_artifact_state_consistency(data, require_resolved=True)
-            artifact_lint, artifact_lint_status = _lint_state_artifact(cwd, data)
-        except ArtifactContractError as exc:
-            invalidate_artifact_lint_observation(data)
-            data["artifact_lint_status"] = "invalid"
-            data["updated_at"] = iso_now()
-            repository.save(data)
-            print(f"ERROR: {exc}", file=sys.stderr)
-            sys.exit(2)
-        if artifact_lint_status not in {"clean", "findings"}:
-            data.pop("artifact_lint", None)
-        else:
-            data["artifact_lint"] = artifact_lint
-        data["artifact_lint_status"] = artifact_lint_status
-        identity_snapshot = canonical_artifact_identity_snapshot(data)
-        if artifact_lint_status in {"clean", "findings"} and identity_snapshot:
-            data["artifact_lint_identity"] = identity_snapshot
-        else:
-            data.pop("artifact_lint_identity", None)
-        for finding in artifact_lint:
-            print(
-                "WARN #351: artifact lint: "
-                f"{finding['kind']} at {finding['heading']}",
-                file=sys.stderr,
-            )
-        # #338: 観測結果を state へ永続化し stats で横断集計可能にする (gate 不変)
-        data["last_parallel_execution"] = parallel_execution
-        if data.get("phase") == "reviewing":
-            now = iso_now()
-            if isinstance(data.get("activity_current"), dict):
-                end_activity_segment(data, now)
-            _transition_phase(data, "scoring", now)
-            record_activity_event(data, "review-aggregate", now)
-            data["updated_at"] = now
-        prior_metrics = [
-            record for record in data.get("reviewer_output_records", [])
-            if isinstance(record, dict) and record.get("iteration") != args.iteration
-        ]
-        data["reviewer_output_records"] = prior_metrics + [
-            {"iteration": args.iteration, **metric}
-            for metric in reviewer_output_metrics
-        ]
-        if getattr(args, "record_outcome", True):
-            _append_command_outcome(data, outcome)
-        context_mode_expected = _expected_context_mode(data, args.iteration)
-        context_manifest_generated = _context_manifest_generated(data, args.iteration)
-        if context_mode_expected == "bounded" and not context_manifest_generated:
-            print(
-                "WARN #352: bounded context expected but no manifest generated",
-                file=sys.stderr,
-            )
-        mission8 = (data.get("mission_id") or "unknown")[:8]
-        evidence = {
-            "schema": "mission-review-aggregate/1",
-            "iteration": args.iteration,
-            "inputs": reviews,
-            "input_refs": imported_refs,
-            "scoring_perspectives": [entry["perspective"] for entry in adjusted_scores],
-            "excluded": excluded,
-            "cap_log": cap_log,
-            "agreement_detail": agreement_detail,
-            "open_high": open_high,
-            "reviewer_windows": reviewer_windows_public,
-            "parallel_execution": parallel_execution,
-            "artifact_lint": artifact_lint,
-            "artifact_lint_status": artifact_lint_status,
-            "context_mode_expected": context_mode_expected,
-            "context_manifest_generated": context_manifest_generated,
-            "reviewer_output_metrics": reviewer_output_metrics,
-            # This is the authoritative, deterministic derivation from the
-            # archived review inputs. push-score and mark-passes compare every
-            # decision value to it; a digest alone is not semantic binding.
-            "score_claim": {
-                "iteration": args.iteration, **derived_score,
-            },
-        }
-        evidence_content = (json.dumps(evidence, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-        evidence_digest = "sha256:" + hashlib.sha256(evidence_content).hexdigest()
-        evidence_path = state_dir(cwd) / "archive" / f"iter-{args.iteration}-{mission8}-reviews-{evidence_digest[7:23]}.json"
-        evidence_ref_path = str(evidence_path.relative_to(cwd))
-
-        out_path = (
-            Path(args.out)
-            if args.out
-            else state_dir(cwd) / "tmp" / f"mission-scorer-iter-{args.iteration}-{mission8}.json"
-        )
-        if _same_publish_target(out_path, evidence_path):
-            raise CommandOutcomeExit(2, "invalid-input")
-        payload = {
-            "items": items,
-            "notes": f"aggregate-reviews: {len(adjusted_scores)} scoring reviewer(s), {len(reviews) - len(scoring_reviews)} findings-only reviewer(s)",
-            "open_high": open_high,
-            "findings_evidence_path": evidence_ref_path,
-            "review_agreement": review_agreement,
-            "agreement_detail": agreement_detail,
-            "score_provenance": {
-                "score_source": "scoring-json",
-                "review_evidence_ref": {
-                    "kind": "review-aggregate", "path": evidence_ref_path,
-                    "digest": evidence_digest,
-                    "generation": evidence_digest[7:23],
-                    "revision_scope": revision_scope,
-                    **(review_lineage or {}),
-                },
-                "revision_scope": revision_scope,
-            },
-        }
-        payload_content = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-        archive_publish: _PublishedFile | None = None
-        out_publish: _PublishedFile | None = None
-        try:
-            archive_publish = _publish_review_archive_transaction(
-                cwd, evidence_path.name, evidence_content,
-            )
-            if archive_publish.path != evidence_path:
-                raise ValueError("review aggregate archive path mismatch")
-            out_publish = _publish_output_transaction(
-                out_path,
-                payload_content,
-                forbidden_targets=((archive_publish.directory_identity, archive_publish.path.name),),
-            )
-            _verify_published_file(archive_publish)
-            _verify_published_file(out_publish)
-            repository.save(data)
-        except BaseException as exc:
-            recovery_error: PublishedRollbackRecoveryError | None = None
-            if out_publish is not None:
-                try:
-                    _rollback_published_file(out_publish)
-                except PublishedRollbackRecoveryError as rollback_error:
-                    recovery_error = rollback_error
-                except ValueError as rollback_error:
-                    print(f"ERROR: aggregate output rollback rejected: {rollback_error}", file=sys.stderr)
-                out_publish = None
-            if archive_publish is not None:
-                try:
-                    _rollback_published_file(archive_publish)
-                except PublishedRollbackRecoveryError as rollback_error:
-                    if recovery_error is None:
-                        recovery_error = rollback_error
-                except ValueError as rollback_error:
-                    print(f"ERROR: aggregate archive rollback rejected: {rollback_error}", file=sys.stderr)
-                archive_publish = None
-            if recovery_error is not None:
-                raise recovery_error from exc
-            if isinstance(exc, ValueError):
-                print(f"ERROR: aggregate output rejected: {exc}", file=sys.stderr)
-                raise CommandOutcomeExit(2, "invalid-input") from exc
-            raise
-        finally:
-            if out_publish is not None:
-                _close_published_file(out_publish)
-            if archive_publish is not None:
-                _close_published_file(archive_publish)
-
-    result = {
-        "ok": True,
-        "outcome_kind": "ok",
-        "outcome": outcome,
-        "out": str(out_path),
-        "findings_evidence_path": str(evidence_path),
-        "open_high": open_high,
-        "items": items,
-        "review_agreement": review_agreement,
-        "parallel_execution": parallel_execution,
-        "artifact_lint": artifact_lint,
-        "artifact_lint_status": artifact_lint_status,
-    }
-    if args.json:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-    else:
-        print(str(out_path))
-
+    print(run_aggregate_reviews(request, services).rendered)
 
 def _reject_on_score_item_mismatch(args, items: dict) -> None:
     """Reject (exit 2) when self-reported scores INFLATE above the item scores (#122).
