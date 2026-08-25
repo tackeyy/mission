@@ -200,7 +200,7 @@ class ScriptedOperations:
         self._assert_leased()
         return next(self.base_shas)
 
-    def read_pull_request(self, _pr_ref):
+    def read_pull_request(self, _pr_ref, step=6):
         self._assert_leased()
         return self.snapshots.pop(0)
 
@@ -225,6 +225,23 @@ def _historical_incident_is_reachable() -> bool:
         if probe.returncode != 0:
             return False
     return True
+
+
+def test_pull_request_read_failure_reports_the_calling_step(tmp_path):
+    """診断の手順番号は呼び出し位置に従う（統合前の失敗を step 6 と誤報しない）。"""
+    gate = _gate_module()
+    repo = tmp_path / "diagnostics"
+    _init_repo(repo)
+    (repo / "module.py").write_text("def value():\n    return 0\n", encoding="utf-8")
+    _commit(repo, "initial")
+    operations = gate.SubprocessGateOperations(repo)
+
+    # 存在しない PR 番号は `gh pr view` が非 0 で返る。
+    for step in (3, 6, 7):
+        with pytest.raises(gate.IntegrationGateError) as captured:
+            operations.read_pull_request("99999999", step=step)
+        assert captured.value.step == step
+        assert captured.value.reason == "pull-request-read-failed"
 
 
 def test_real_git_conflict_fixture_fails_at_step_three(tmp_path):

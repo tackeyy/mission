@@ -179,6 +179,9 @@ Pass 後に PR がある場合だけ実行する。自動 merge 条件は、CI/�
 - **GitHub UI からの直接 merge は迂回できる。** 本ゲートはエージェント merge 経路に対する強制であり、
   人手の UI merge は規律で担保する。実測では直近 30 件のうち 29 件が `gh pr merge` 経路
   （残り 1 件は経路未確認）で、現状の運用実態では致命的でない
+- **直列化は同一ホスト内に限る。** lease は `fcntl.flock` によるファイルロックであり、
+  同じマシン上のプロセス間でしか効かない。複数ホストから同時に `gate-and-merge` を
+  呼んだ場合は直列化されない。
 - **3 本以上の同時干渉**は扱わない。main は直列なので順に 1 本ずつ検出される。
 
 既存の exact-head / refreeze 規律は変更しない。base 移動時は accepted を無効とし、base 統合 → refreeze → CI green → fresh review を再取得する。統合テスト済み tree は fresh review の代替ではない。

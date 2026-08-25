@@ -129,9 +129,9 @@ class SubprocessGateOperations:
             raise IntegrationGateError(2, "base-observation-failed", "origin/main sha is invalid")
         return value
 
-    def read_pull_request(self, pr_ref: str) -> PullRequestSnapshot:
+    def read_pull_request(self, pr_ref: str, step: int = 6) -> PullRequestSnapshot:
         result = self._checked(
-            6,
+            step,
             "pull-request-read-failed",
             (
                 "gh",
@@ -155,9 +155,9 @@ class SubprocessGateOperations:
                 merge_commit_sha=merge_sha,
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise IntegrationGateError(6, "pull-request-read-failed", "pull request response is invalid") from exc
+            raise IntegrationGateError(step, "pull-request-read-failed", "pull request response is invalid") from exc
         if _SHA_RE.fullmatch(snapshot.head_sha) is None:
-            raise IntegrationGateError(6, "pull-request-read-failed", "pull request head sha is invalid")
+            raise IntegrationGateError(step, "pull-request-read-failed", "pull request head sha is invalid")
         return snapshot
 
     def fetch_pull_request_head(self, snapshot: PullRequestSnapshot) -> None:

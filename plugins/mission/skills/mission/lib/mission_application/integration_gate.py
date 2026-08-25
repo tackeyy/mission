@@ -37,7 +37,7 @@ class GateRuntimeServices:
     lease: Callable[[], ContextManager[None]]
     fetch_main: Callable[[], None]
     current_base_sha: Callable[[], str]
-    read_pull_request: Callable[[str], PullRequestSnapshot]
+    read_pull_request: Callable[..., PullRequestSnapshot]
     fetch_pull_request_head: Callable[[PullRequestSnapshot], None]
     integrate_and_test: Callable[
         [str, str, Callable[[str], None]],
@@ -112,7 +112,7 @@ def run_gate_and_merge(
                 "accepted-base-moved",
                 "origin/main differs from the queue-verified accepted base",
             )
-        initial = services.read_pull_request(pr_ref)
+        initial = services.read_pull_request(pr_ref, step=3)
         _require_open_main(
             initial,
             expected_number=expected_number,
@@ -133,7 +133,7 @@ def run_gate_and_merge(
         logger("base_sha(step=5)={}".format(base_after))
         if base_after != base_before:
             raise IntegrationGateFailure(5, "base-moved", "origin/main moved; restart from step 2")
-        latest = services.read_pull_request(pr_ref)
+        latest = services.read_pull_request(pr_ref, step=6)
         _require_open_main(
             latest,
             expected_number=expected_number,
@@ -143,7 +143,7 @@ def run_gate_and_merge(
         if latest.head_sha != initial.head_sha:
             raise IntegrationGateFailure(6, "head-changed", "pull request head changed; restart the gate")
         services.merge_pull_request(pr_ref, initial.head_sha)
-        merged = services.read_pull_request(pr_ref)
+        merged = services.read_pull_request(pr_ref, step=7)
         if (
             merged.number != expected_number
             or merged.base_ref_name != "main"
