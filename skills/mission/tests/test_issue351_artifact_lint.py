@@ -25,7 +25,17 @@ SPEC.loader.exec_module(MISSION_STATE)
 
 # FIFO open can block forever if no reader arrives; 1s stays tight while
 # still leaving enough room for the expected fast skip path.
-FIFO_ARTIFACT_TIMEOUT_SECONDS = 1
+# artifact に FIFO を渡したとき「読もうとして永久ブロックしないこと」を確認するための予算。
+#
+# 検知したい失敗は**無限ブロック**であって「少し遅い」ではない。FIFO を読みに行けば
+# writer がいないので完走しないため、予算は「遅い実行機でも完走する」値であれば足りる。
+#
+# 旧値 1 秒は CI で破綻した（2026-08-26: 1.005s / margin -0.005s で fail、再実行で green）。
+# 実測ではローカル 0.44〜0.48 秒で、その大半は subprocess の起動時間。予算 1 秒では
+# 遅い実行機に対する余裕が約 2 倍しかなく、負荷次第で境界を越える。
+#
+# 5 秒ならローカル比で約 10 倍の余裕があり、ブロック時は完走しないので検出力は変わらない。
+FIFO_ARTIFACT_TIMEOUT_SECONDS = 5
 _ABSOLUTE_PATH_RE = re.compile(r"(?<!\w)/(?:[^\s\"']+)")
 _CURRENT_USER = getpass.getuser()
 # home prefix はリテラルで書くと artifact hygiene の走査に引っかかるため組み立てる
@@ -525,7 +535,9 @@ def test_fifo_timeout_diagnostic_redacts_environment_specific_details(
 
     message = str(exc_info.value)
     assert "after " in message
-    assert "budget=1.000s" in message
+    # 予算値はリテラルで固定しない（本テストの目的は環境依存情報の伏字化であり、
+    # 予算の値ではない）。定数を変えたときにここが道連れで落ちないようにする。
+    assert f"budget={FIFO_ARTIFACT_TIMEOUT_SECONDS:.3f}s" in message
     assert "margin=" in message
     assert "child=terminated by SIGKILL" in message
     assert "traceback" in message
