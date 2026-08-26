@@ -235,6 +235,14 @@ from mission_application.command_provider import (  # noqa: E402
     WorkspaceServices as CommandProviderWorkspaceServices,
     invoke_command_provider,
 )
+from mission_application.plan_import import (  # noqa: E402
+    PlanImportFailure,
+    PlanImportPolicyServices,
+    PlanImportRequest,
+    PlanImportStateEffectsServices,
+    PlanImportWorkspaceServices,
+    run_plan_import,
+)
 from mission_application.review_aggregation import (  # noqa: E402
     ReviewAggregationRequest,
     ReviewAggregationServices,
@@ -13106,126 +13114,56 @@ def cmd_review_import(args):
 
 def cmd_plan_import(args):
     """Validate one provider result and atomically publish only an inert plan candidate."""
-    cwd = Path.cwd()
-    sf = resolve_state_file(cwd)
-    if not sf.exists():
-        _provider_gate("state-missing")
-    if not re.fullmatch(r"inv_[0-9a-f]{32}", args.invocation_id):
-        _provider_gate("invocation-id-invalid")
-    try:
-        raw = _read_strict_review_file(Path(args.input))
-    except ValueError:
-        _provider_gate("plan-input-unreadable")
-    session_id = sf.stem
-    _command_name_planimp = "specialists-plan-import"
-    _command_arguments_planimp = {
-        "invocation_id": str(args.invocation_id),
-    }
-    try:
-        _target_bytes_planimp = sf.read_bytes()
-        _inspected_planimp = inspect_repository_bytes(_target_bytes_planimp, expected_session_id=session_id)
-        _target_digest_planimp = "sha256:" + hashlib.sha256(_target_bytes_planimp).hexdigest()
-        _caller_op_planimp, _op_args_planimp = _compatibility_operation_arguments(
-            _command_arguments_planimp, target_digest=_target_digest_planimp,
-            require_caller=_inspected_planimp.format is RepositoryFormat.V5,
-        )
-        _op_id_planimp, _op_cmd_planimp = _canonical_compatibility_operation(
-            session_id, _command_name_planimp, _op_args_planimp,
-            caller_operation_id=_caller_op_planimp,
-        )
-    except (OSError, RepositorySelectionError, ValueError) as _err_planimp:
-        print(f"ERROR: {_err_planimp}", file=sys.stderr)
-        sys.exit(2)
-    _repo_planimp = _legacy_lifecycle_repository(
-        cwd, sf, stamp=True, strict_read=True, session_id=session_id,
-        operation_id=_op_id_planimp, operation_command=_op_cmd_planimp,
-        operation_command_type=_command_name_planimp,
+    request = PlanImportRequest(
+        input_path=args.input,
+        invocation_id=args.invocation_id,
+        registry=getattr(args, "registry", None),
+        json_output=bool(getattr(args, "json", False)),
     )
-    with _repo_planimp.transaction(), _PublishedFilesTransaction() as published_files:
-        data = _repo_planimp.load()
-        replayed_planimp = getattr(_repo_planimp, "operation_replayed", False)
-        if replayed_planimp:
-            _existing_ref = (data.get("provider_plan_imports") or {}).get(args.invocation_id)
-            print(json.dumps({"ok": True, "plan_import": _existing_ref}, indent=2 if args.json else None, ensure_ascii=False))
-            return
-        lease_decision = _enforce_session_lease_for_write(sf, data)
-        invocation = invocation_by_id(data, args.invocation_id)
-        if data.get("planning_policy_version") == 1 and data.get("planning_strategy") == "provider-primary":
-            _require_current_primary_planning_binding(data)
-        if not isinstance(invocation, dict):
-            _provider_gate("invocation-not-found")
-        if (invocation.get("iteration") != data.get("iteration") or invocation.get("phase") != "planning"
-                or invocation.get("status") != "completed" or invocation.get("lifecycle_state") != "terminal"):
-            _provider_gate("invocation-not-current-completed-plan")
-        provider = _find_provider(data, str(invocation.get("skill") or invocation.get("role") or ""))
-        current = _require_current_provider_application(
-            data, provider, requested_phase="planning", requested_iteration=data.get("iteration"),
-            application_kind="result-import", selection_source=invocation.get("selection_source"),
-            invocation_id=args.invocation_id, cwd=cwd, registry_args=args,
-        )
-        contract = current.get("result_contract") if isinstance(current.get("result_contract"), dict) else {}
-        if not contract:
-            _provider_gate("missing-structured-result-contract")
-        pointers = data.get("provider_preflights") if isinstance(data.get("provider_preflights"), dict) else {}
-        matches = [(key, value) for key, value in pointers.items() if isinstance(value, dict) and value.get("invocation_id") == args.invocation_id]
-        if len(matches) != 1:
-            _provider_gate("preflight-binding-missing")
-        preflight_id, pointer = matches[0]
-        if pointer.get("status") != "consumed" or pointer.get("consumed_invocation_id") != args.invocation_id:
-            _provider_gate("preflight-not-consumed")
-        artifact_path = pointer.get("artifact_path")
-        receipt = pointer.get("receipt") if isinstance(pointer.get("receipt"), dict) else {}
-        receipt_path, receipt_digest = receipt.get("artifact_path"), receipt.get("digest")
-        try:
-            for relative in (artifact_path, receipt_path):
-                if not isinstance(relative, str) or not relative or Path(relative).is_absolute() or ".." in Path(relative).parts: raise ValueError
-            if not isinstance(receipt_digest, str) or _SHA256_REF_RE.fullmatch(receipt_digest) is None: raise ValueError
-            packet_bytes = _read_strict_review_file(state_dir(cwd) / artifact_path)
-            if "sha256:" + hashlib.sha256(packet_bytes).hexdigest() != pointer.get("outbound_packet_digest"): raise ValueError
-            receipt_bytes = _read_strict_review_file(state_dir(cwd) / receipt_path)
-            if "sha256:" + hashlib.sha256(receipt_bytes).hexdigest() != receipt_digest: raise ValueError
-        except ValueError:
-            _provider_gate("consumed-preflight-evidence-invalid")
-        expected = {"invocation_id": args.invocation_id, "preflight_id": preflight_id,
-                    "outbound_packet_digest": pointer.get("outbound_packet_digest"),
-                    "selection_id": current.get("selection_id"),
-                    "selection_source": current.get("eligibility_selection_source") or "automatic",
-                    "iteration": data.get("iteration")}
-        try:
-            parsed = validate_provider_plan_import(
-                raw, expected_binding=expected, result_contract=contract,
-                workspace=cwd,
-            )
-        except PlanningFailure as exc:
-            _provider_gate(exc.code)
-        digest = parsed["raw_result_digest"]
-        metadata = {
-            "authority": {"owner": "mission", "may_write_state": False, "may_decide_review": False, "may_decide_score": False, "may_decide_completion": False},
-            "provenance": {"provider_id": current.get("provider_id"), "registry_entry_digest": current.get("registry_entry_digest"), "selection_id": expected["selection_id"], "selection_source": expected["selection_source"], "invocation_id": args.invocation_id, "iteration": expected["iteration"], "input_outbound_packet_digest": expected["outbound_packet_digest"], "raw_result_digest": digest},
-            "capability_verification": {"selection_verified": True, "class_exact_match": True, "variant_exact_match": True},
-        }
-        candidate = {"schema": "mission-plan/1", **parsed["document"], "mission_metadata": metadata}
-        canonical = canonical_plan_bytes(candidate)
-        canonical_digest = "sha256:" + hashlib.sha256(canonical).hexdigest()
-        mission8 = str(data.get("mission_id") or "unknown")[:8]
-        raw_name = f"plan-result-{mission8}-{digest[7:23]}.json"
-        raw_file = published_files.add(_publish_review_archive_transaction(cwd, raw_name, raw))
-        candidate_path = state_dir(cwd) / "plans" / f"{canonical_digest[7:23]}.json"
-        candidate_file = published_files.add(_publish_output_transaction(candidate_path, canonical))
-        previous = (data.get("provider_plan_imports") or {}).get(args.invocation_id)
-        generation = (previous.get("generation", 0) if isinstance(previous, dict) and previous.get("candidate_digest") != canonical_digest else 0)
-        if not generation:
-            generation = (previous.get("generation", 0) if isinstance(previous, dict) else 0) or 1
-        else:
-            generation += 1
-        reference = {"raw_result_path": str(raw_file.path.relative_to(cwd)), "raw_result_digest": digest,
-                     "candidate_path": str(candidate_file.path.relative_to(cwd)), "candidate_digest": canonical_digest,
-                     "invocation_id": args.invocation_id, "preflight_id": preflight_id, "generation": generation}
-        data.setdefault("provider_plan_imports", {})[args.invocation_id] = reference
-        _verify_published_file(raw_file); _verify_published_file(candidate_file)
-        data["updated_at"] = iso_now()
-        _repo_planimp.save(stamp_metadata(data, cwd))
-    print(json.dumps({"ok": True, "plan_import": reference}, indent=2 if args.json else None, ensure_ascii=False))
+    workspace = PlanImportWorkspaceServices(
+        current_directory=Path.cwd,
+        resolve_state_file=resolve_state_file,
+        path_exists=Path.exists,
+        path_from_string=Path,
+        read_strict_file=_read_strict_review_file,
+        read_bytes=Path.read_bytes,
+        inspect_repository_bytes=inspect_repository_bytes,
+        v5_format=RepositoryFormat.V5,
+        state_dir=state_dir,
+        join_path=Path.__truediv__,
+        path_is_absolute=Path.is_absolute,
+        path_parts=lambda path: path.parts,
+        relative_path=Path.relative_to,
+    )
+    policy = PlanImportPolicyServices(
+        provider_gate=_provider_gate,
+        enforce_session_lease_for_write=_enforce_session_lease_for_write,
+        invocation_by_id=invocation_by_id,
+        find_provider=_find_provider,
+        require_current_provider_application=_require_current_provider_application,
+        require_current_primary_planning_binding=_require_current_primary_planning_binding,
+        validate_provider_plan_import=validate_provider_plan_import,
+        planning_failure=PlanningFailure,
+        sha256_reference_match=_SHA256_REF_RE.fullmatch,
+    )
+    state_effects = PlanImportStateEffectsServices(
+        compatibility_operation_arguments=_compatibility_operation_arguments,
+        canonical_compatibility_operation=_canonical_compatibility_operation,
+        repository_factory=_legacy_lifecycle_repository,
+        published_files_transaction=_PublishedFilesTransaction,
+        publish_review_archive_transaction=_publish_review_archive_transaction,
+        publish_output_transaction=_publish_output_transaction,
+        verify_published_file=_verify_published_file,
+        canonical_plan_bytes=canonical_plan_bytes,
+        stamp_metadata=stamp_metadata,
+        clock=iso_now,
+    )
+    try:
+        result = run_plan_import(request, workspace, policy, state_effects)
+    except PlanImportFailure as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(exc.exit_code)
+    print(result.rendered)
 
 
 def _read_core_plan_input(source: Path) -> bytes:
