@@ -14982,11 +14982,7 @@ def cmd_cleanup_stale(args):
         lease_fields_present=_lease_fields_present,
         expired_lease_without_heartbeat=_expired_lease_without_heartbeat,
         project_root_of=_project_root_of,
-        terminalize_state_file=(
-            lambda *call_args, **call_kwargs: _terminalize_state_file(
-                *call_args, **call_kwargs
-            )
-        ),
+        terminalize_state_file=_terminalize_state_file,
         fenced_commit_error=FencedCommitError,
         pid_is_agent=_pid_is_agent,
         state_age_since_update_sec=_state_age_since_update_sec,

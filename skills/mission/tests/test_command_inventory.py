@@ -40,7 +40,7 @@ COMMAND_APPLICATION_ROUTES = {
     "cmd_activity_end": "run_activity_end",
     "cmd_activity_start": "run_activity_start",
     "cmd_advance": "run_advance",
-    "cmd_cleanup_stale": "run_mark_halt",
+    "cmd_cleanup_stale": "run_cleanup_stale",
     "cmd_halt": "run_mark_halt",
     "cmd_init": "run_initialize",
     "cmd_mark_halt": "run_mark_halt",
