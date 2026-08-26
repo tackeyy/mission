@@ -248,6 +248,12 @@ from mission_application.review_aggregation import (  # noqa: E402
     ReviewAggregationServices,
     run_aggregate_reviews,
 )
+from mission_application.supersede_reviews import (  # noqa: E402
+    SupersedeReviewsFailure,
+    SupersedeReviewsRequest,
+    SupersedeReviewsServices,
+    run_supersede_reviews,
+)
 from mission_application.stats_formatting import (  # noqa: E402
     StatsTextRequest,
     format_stats_text,
@@ -14337,315 +14343,43 @@ def cmd_supersede_reviews(args):
 
 
 def _supersede_reviews_locked(args, cwd: Path):
-    """Publish one review group in generation order.
+    """Publish one review group through the application boundary."""
 
-    A mixed v4/v5 group can remain detectably inconsistent after a
-    mid-publication failure: committed v5 generations are durable while
-    committed v4 generations are rolled back.  When recovery must finalize a
-    durable v5 prepare, the caller retries with the same MISSION_OPERATION_ID;
-    a retained v4-only retry can converge under a new operation ID.
-    """
-
-    group = args.group
-    if not isinstance(group, str) or not group or "\x00" in group:
-        print("ERROR: review group is invalid", file=sys.stderr)
-        sys.exit(2)
-
-    def capture(path):
-        metadata = path.lstat()
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or path.parent != session_dir(cwd):
-            raise ValueError("review state path is unsafe")
-        payload = path.read_bytes()
-        return payload, (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_nlink,
-                         metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns)
-
-    def unchanged(path, identity, payload):
-        current_payload, current_identity = capture(path)
-        return current_identity == identity and current_payload == payload
-
-    members = []
+    request = SupersedeReviewsRequest(group=args.group, cwd=cwd)
+    services = SupersedeReviewsServices(
+        iter_state_files=_iter_state_files,
+        session_directory=session_dir,
+        path_lstat=Path.lstat,
+        path_read_bytes=Path.read_bytes,
+        path_resolve=Path.resolve,
+        is_regular_mode=stat.S_ISREG,
+        load_authoritative_state=_load_authoritative_state,
+        inspect_repository_bytes=inspect_repository_bytes,
+        v5_format=RepositoryFormat.V5,
+        repository_selection_error=RepositorySelectionError,
+        compatibility_operation_arguments=_compatibility_operation_arguments,
+        canonical_compatibility_operation=_canonical_compatibility_operation,
+        repository_factory=_legacy_lifecycle_repository,
+        resolve_session_id=resolve_session_id,
+        presented_lease_unset=_PRESENTED_LEASE_UNSET,
+        v5_repository_type=V5CompatibilityRepository,
+        legacy_repository_type=LegacyV4Repository,
+        fenced_error=FencedCommitError,
+        command_outcome_exit=CommandOutcomeExit,
+        reject_fenced_lease=_reject_fenced_lease_for_cli,
+        clock=iso_now,
+        transition_phase=_transition_phase,
+        write_terminal_outcome=_write_terminal_outcome,
+        terminal_paths=_SUPERSEDE_TERMINAL_PATHS,
+        printer=print,
+        stderr=sys.stderr,
+    )
     try:
-        for state_path in _iter_state_files(cwd):
-            payload, identity = capture(state_path)
-            _snapshot, state = _load_authoritative_state(
-                state_path,
-                legacy_compatibility=True,
-            )
-            if state.get("review_group_id") != group:
-                continue
-            generation = state.get("review_generation")
-            if (
-                not isinstance(generation, int)
-                or isinstance(generation, bool)
-                or generation < 1
-            ):
-                raise ValueError("review group has an invalid generation")
-            members.append((generation, state_path, state, payload, identity))
-    except (OSError, json.JSONDecodeError, ValueError) as error:
+        result = run_supersede_reviews(request, services)
+    except SupersedeReviewsFailure as error:
         print(f"ERROR: {error}", file=sys.stderr)
         sys.exit(2)
-    if not members:
-        print("ERROR: review group was not found", file=sys.stderr)
-        sys.exit(2)
-    current_generation = max(item[0] for item in members)
-    current = [item for item in members if item[0] == current_generation]
-    if len(current) != 1:
-        print("ERROR: review group has no single current generation", file=sys.stderr)
-        sys.exit(2)
-    targets = [item for item in members if item[0] < current_generation]
-    if not all(
-        unchanged(path, identity, payload)
-        for _, path, _, payload, identity in members
-    ):
-        print("ERROR: review group changed during supersede preflight", file=sys.stderr)
-        sys.exit(2)
-
-    group_target = json.dumps(
-        [
-            {
-                "digest": "sha256:" + hashlib.sha256(payload).hexdigest(),
-                "session_id": state.get("session_id") or state_path.stem,
-            }
-            for _, state_path, state, payload, _ in sorted(
-                members,
-                key=lambda item: (item[0], item[1].name),
-            )
-        ],
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    group_target_digest = "sha256:" + hashlib.sha256(group_target).hexdigest()
-    try:
-        requires_caller_operation = any(
-            inspect_repository_bytes(
-                payload,
-                expected_session_id=state.get("session_id") or state_path.stem,
-            ).format
-            is RepositoryFormat.V5
-            for _, state_path, state, payload, _ in members
-        )
-    except RepositorySelectionError as error:
-        print(f"ERROR: {error}", file=sys.stderr)
-        sys.exit(2)
-
-    current_path = current[0][1]
-    caller_session_id = resolve_session_id()
-    repositories = []
-    for generation, state_path, state, payload, identity in targets + current:
-        role = "current" if state_path == current_path else "superseded"
-        target_session_id = state.get("session_id") or state_path.stem
-        already_superseded = role == "superseded" and (
-            state.get("terminal_outcome") == "stale_superseded"
-            and state.get("passes") is False
-            and state.get("loop_active") is False
-            and state.get("halt_category") == "stale"
-        )
-        try:
-            caller_operation_id, operation_arguments = _compatibility_operation_arguments(
-                {
-                    "current_generation": current_generation,
-                    "group": group,
-                    "role": role,
-                },
-                target_digest=group_target_digest,
-                require_caller=requires_caller_operation,
-            )
-            operation_id, operation_command = _canonical_compatibility_operation(
-                target_session_id,
-                "supersede-reviews",
-                operation_arguments,
-                caller_operation_id=caller_operation_id,
-            )
-        except ValueError as error:
-            print(f"ERROR: {error}", file=sys.stderr)
-            sys.exit(2)
-        repository = _legacy_lifecycle_repository(
-            cwd,
-            state_path,
-            stamp=False,
-            strict_read=True,
-            session_id=target_session_id,
-            operation_id=operation_id,
-            operation_command=operation_command,
-            operation_command_type="supersede-reviews",
-            lease_owner_session_id=caller_session_id,
-            presented_lease_id=(
-                _PRESENTED_LEASE_UNSET
-                if role == "current"
-                else None
-            ),
-        )
-        if already_superseded:
-            if not isinstance(repository, V5CompatibilityRepository):
-                continue
-            try:
-                committed = repository.read(target_session_id)
-            except FencedCommitError as error:
-                _reject_fenced_lease_for_cli(error, state_path=state_path)
-            # A crash after head publication leaves this terminal projection
-            # plus a durable prepare.  The same caller operation must enter
-            # begin() once more so repository recovery can finalize it.  A
-            # later review wave has a different operation and safely skips an
-            # already terminal generation without reacquiring its live lease.
-            if committed.commit.operation_id != operation_id:
-                continue
-        repositories.append(
-            (
-                generation,
-                state_path,
-                role,
-                target_session_id,
-                repository,
-            )
-        )
-
-    try:
-        # Admit every per-session fence before publishing the first generation.
-        for generation, state_path, role, _session_id, repository in repositories:
-            try:
-                with repository.transaction():
-                    state = repository.load()
-                    if (
-                        state.get("review_group_id") != group
-                        or state.get("review_generation") != generation
-                        or (role == "current") != (generation == current_generation)
-                    ):
-                        raise ValueError("review group changed during supersede preflight")
-            except FencedCommitError as error:
-                _reject_fenced_lease_for_cli(error, state_path=state_path)
-    except (OSError, ValueError) as error:
-        print(f"ERROR: {error}", file=sys.stderr)
-        sys.exit(2)
-
-    now = iso_now()
-    superseded = [
-        state.get("session_id") or state_path.stem
-        for _, state_path, state, _, _ in targets
-    ]
-    original_states = {
-        str(state_path.resolve()): copy.deepcopy(state)
-        for _, state_path, state, _, _ in members
-    }
-    committed_legacy = []
-    failed_state_path = None
-    try:
-        # Old generations publish first.  A crash-safe retry replays completed
-        # operations and continues forward; the current generation publishes
-        # its supersedes index only after every old generation is terminal.
-        for generation, state_path, role, _session_id, repository in repositories:
-            failed_state_path = state_path
-            with repository.transaction():
-                state = repository.load()
-                if getattr(repository, "operation_replayed", False):
-                    continue
-                if (
-                    state.get("review_group_id") != group
-                    or state.get("review_generation") != generation
-                ):
-                    raise ValueError("review state changed during supersede")
-                # 批1-b (#618): 完了隣接の terminalization は kernel decision を
-                # gate とし、#630 の claims 検証つき execute を通す。current の
-                # supersedes index も generic 書き込みとして kernel の閉集合
-                # フィールド権限で審査する。
-                real_state = None
-                if role == "superseded":
-                    supersede_diagnosis = diagnose_terminalizable_state(state)
-                    if supersede_diagnosis == TERMINALIZABLE_UNDECODABLE:
-                        print(
-                            "WARNING: supersede terminalization fell back to the "
-                            "synthetic view because %s could not be decoded"
-                            % state_path.name,
-                            file=sys.stderr,
-                        )
-                    real_state = (
-                        real_terminalizable_state(state)
-                        if supersede_diagnosis == TERMINALIZABLE_ACTIVE
-                        else None
-                    )
-
-                def mutate(proposed, role=role):
-                    if role == "superseded":
-                        proposed["passes"] = False
-                        proposed["loop_active"] = False
-                        proposed["halt_reason"] = "superseded by a replacement run"
-                        proposed["halt_category"] = "stale"
-                        _transition_phase(
-                            proposed,
-                            "halted",
-                            now,
-                            terminal_trusted_boundary=True,
-                        )
-                        _write_terminal_outcome(proposed)
-                    else:
-                        proposed["supersedes"] = superseded
-                    proposed["updated_at"] = now
-
-                proposed = copy.deepcopy(state)
-                mutate(proposed)
-                prepared = prepare_supersede_review_write(
-                    state,
-                    proposed,
-                    SupersedeReviewWriteRequest(
-                        role=role,
-                        superseded=tuple(superseded),
-                        at=now,
-                        real_state_available=real_state is not None,
-                    ),
-                )
-                path_key = str(state_path.resolve())
-                if role == "superseded":
-                    _SUPERSEDE_TERMINAL_PATHS.add(path_key)
-                try:
-                    if prepared.direct_save:
-                        repository.save(
-                            proposed,
-                            backup=False,
-                            administrative=True,
-                        )
-                    else:
-                        proposed = supersede_review_projection(
-                            repository.execute(
-                                prepared.command,
-                                backup=False,
-                                administrative=True,
-                            )
-                        )
-                    if isinstance(repository, LegacyV4Repository):
-                        committed_legacy.append((state_path, role, repository))
-                finally:
-                    _SUPERSEDE_TERMINAL_PATHS.discard(path_key)
-    except (OSError, ValueError, CommandOutcomeExit, FencedCommitError) as error:
-        rollback_errors = []
-        for state_path, role, repository in reversed(committed_legacy):
-            path_key = str(state_path.resolve())
-            if role == "superseded":
-                _SUPERSEDE_TERMINAL_PATHS.add(path_key)
-            try:
-                with repository.transaction():
-                    repository.save(
-                        copy.deepcopy(original_states[path_key]),
-                        backup=False,
-                        administrative=True,
-                    )
-            except (OSError, ValueError, FencedCommitError) as rollback_error:
-                rollback_errors.append(str(rollback_error))
-            finally:
-                _SUPERSEDE_TERMINAL_PATHS.discard(path_key)
-        if rollback_errors:
-            print(
-                "ERROR: supersede transaction rollback failed: "
-                + "; ".join(rollback_errors),
-                file=sys.stderr,
-            )
-        elif isinstance(error, FencedCommitError) and failed_state_path is not None:
-            _reject_fenced_lease_for_cli(error, state_path=failed_state_path)
-        else:
-            print(
-                f"ERROR: supersede transaction was rolled back: {error}",
-                file=sys.stderr,
-            )
-        sys.exit(2)
-    print(json.dumps({"ok": True, "group": group, "current_generation": current_generation, "superseded": superseded}))
+    print(result.rendered)
 
 
 def cmd_mark_halt(args):
