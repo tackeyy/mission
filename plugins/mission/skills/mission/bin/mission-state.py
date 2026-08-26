@@ -258,6 +258,11 @@ from mission_application.stats_formatting import (  # noqa: E402
     StatsTextRequest,
     format_stats_text,
 )
+from mission_application.stale_cleanup import (  # noqa: E402
+    CleanupStaleRequest,
+    CleanupStaleServices,
+    run_cleanup_stale,
+)
 from mission_application.legacy_initialization import (  # noqa: E402
     LegacyV4InitializationRequest,
     LegacyV4InitializationServices,
@@ -14964,209 +14969,33 @@ def _expired_lease_without_heartbeat(data: dict) -> tuple[bool, str]:
 
 
 def cmd_cleanup_stale(args):
-    """C-4: dead-PID の active state.json を orphan として halt (要 --execute).
-
-    SAFETY: デフォルトは dry-run。--execute を明示しないと halt しない。
-    """
-    if getattr(args, "root", None):
-        search_roots = [Path(args.root)]
-    else:
-        search_roots = _default_search_roots()
-    results = {"halted": [], "would_halt": [], "skipped": [], "errors": [], "warnings": [], "dry_run": not args.execute}
-    _pid_sessions: dict[int, list[str]] = {}  # #314: 重複 PID 検出
-    for root in search_roots:
-        if not root.exists():
-            continue
-        for sf in _iter_state_files(root):
-            try:
-                _snapshot, data = _load_authoritative_state(
-                    sf,
-                    legacy_compatibility=True,
-                    allow_missing_schema_session_mismatch=True,
-                )
-                if not data.get("loop_active"):
-                    continue
-                if data.get("passes") or data.get("halt_reason"):
-                    continue
-                if _lease_fields_present(data):
-                    lease_stale, lease_reason = _expired_lease_without_heartbeat(data)
-                    if not lease_stale:
-                        results["skipped"].append({
-                            "path": str(sf),
-                            "reason": lease_reason,
-                            "owner_session_id": data.get("owner_session_id"),
-                            "lease_expires_at": data.get("lease_expires_at"),
-                        })
-                        continue
-                    proj = _project_root_of(sf)
-                    if args.execute:
-                        try:
-                            halted = _terminalize_state_file(
-                                sf,
-                                proj,
-                                reason=(
-                                    "stale: session lease expired without activity heartbeat "
-                                    "(cleanup-stale)"
-                                ),
-                                category="stale",
-                                set_terminal_phase=True,
-                                require_expired_lease=True,
-                            )
-                        except FencedCommitError as error:
-                            if error.code != "lease-rejected":
-                                raise
-                            results["skipped"].append({
-                                "path": str(sf),
-                                "reason": "lease-rejected",
-                                "owner_session_id": data.get("owner_session_id"),
-                                "lease_expires_at": data.get("lease_expires_at"),
-                            })
-                            continue
-                        if halted:
-                            results["halted"].append({
-                                "path": str(sf),
-                                "reason": lease_reason,
-                                "owner_session_id": data.get("owner_session_id"),
-                            })
-                    else:
-                        results["would_halt"].append({
-                            "path": str(sf),
-                            "reason": lease_reason,
-                            "owner_session_id": data.get("owner_session_id"),
-                            "mission": (data.get("mission") or "")[:80],
-                        })
-                    continue
-                pid = data.get("pid")
-                if not pid:
-                    results["skipped"].append({"path": str(sf), "reason": "no pid"})
-                    continue
-                try:
-                    _pid_sessions.setdefault(int(pid), []).append(sf.stem)  # #314
-                except (TypeError, ValueError):
-                    pass
-                # alive check: PID が生きていて かつ agent CLI プロセスである場合のみ skip。
-                # raw os.kill(pid,0) だけだと PID が別プロセスに再利用された orphan を
-                # 「alive」と誤判定して永久放置する (P3-4a, 2026-06-10 検査で発見)
-                try:
-                    if _pid_is_agent(int(pid)):
-                        # P2-1(b): alive agent でも project_root が恒久不在なら孤児扱い。
-                        # 「alive なので skip」の保護は一時的なマウント外れ等の保護のためだが、
-                        # project_root パスそのものが存在しない場合は「恒久不在」として扱う。
-                        # update-project-root コマンドで正しいパスに更新することで救済可能。
-                        stored_root = data.get("project_root", "")
-                        if stored_root and not Path(stored_root).exists():
-                            halt_reason = (
-                                f"orphan: project_root not found ({stored_root})"
-                                " / update-project-root で救済可能"
-                            )
-                            proj = _project_root_of(sf)
-                            if args.execute:
-                                halted = _terminalize_state_file(
-                                    sf, proj, reason=halt_reason, category="stale",
-                                    set_terminal_phase=False,
-                                    expected_pid=pid, require_missing_root=True,
-                                )
-                                if halted:
-                                    results["halted"].append({"path": str(sf), "pid": pid})
-                            else:
-                                results["would_halt"].append({"path": str(sf), "pid": pid, "mission": (data.get("mission") or "")[:80]})
-                        else:
-                            age_sec = _state_age_since_update_sec(data)
-                            stale_threshold = _stale_active_seconds()
-                            # #314: checker 系 role は設計上 score を書かないため、
-                            # live-pid no-score 判定から除外する (shared-PID false-stale の主因)。
-                            # dead PID になれば従来どおり orphan 経路で回収される。
-                            _role = data.get("session_role") or "implementer"
-                            if _role != "implementer" and not data.get("score_history"):
-                                results["skipped"].append({
-                                    "path": str(sf),
-                                    "reason": "checker-role-no-score-by-design",
-                                    "pid": pid,
-                                    "session_role": _role,
-                                    "age_sec": age_sec,
-                                })
-                            elif not data.get("score_history") and (age_sec is None or age_sec >= stale_threshold):
-                                halt_reason = (
-                                    "stale: active no-score checkpoint exceeded "
-                                    f"{stale_threshold}s with live agent pid {pid} (cleanup-stale)"
-                                )
-                                proj = _project_root_of(sf)
-                                if args.execute:
-                                    halted = _terminalize_state_file(
-                                        sf, proj, reason=halt_reason, category="stale",
-                                        set_terminal_phase=True,
-                                        expected_pid=pid, require_stale_no_score=True,
-                                    )
-                                    if halted:
-                                        results["halted"].append({"path": str(sf), "pid": pid, "reason": "stale-active-no-score", "age_sec": age_sec})
-                                else:
-                                    results["would_halt"].append({
-                                        "path": str(sf),
-                                        "pid": pid,
-                                        "reason": "stale-active-no-score",
-                                        "age_sec": age_sec,
-                                        "mission": (data.get("mission") or "")[:80],
-                                    })
-                            else:
-                                results["skipped"].append({"path": str(sf), "reason": f"pid {pid} alive (agent)", "age_sec": age_sec})
-                    else:
-                        # #239: pid_source=fallback の場合は PID 消滅を即 orphan 扱いにせず
-                        # age + heartbeat/updated_at の複合条件で判定 (false stale 止血)
-                        pid_source = data.get("pid_source", "agent")
-                        if pid_source == "fallback":
-                            age_sec = _state_age_since_update_sec(data)
-                            stale_threshold = _stale_active_seconds()
-                            if age_sec is not None and age_sec < stale_threshold:
-                                results["skipped"].append({
-                                    "path": str(sf),
-                                    "reason": "fallback-pid-unobserved",
-                                    "pid": pid,
-                                    "age_sec": age_sec,
-                                })
-                            else:
-                                proj = _project_root_of(sf)
-                                halt_reason = (
-                                    f"stale: fallback pid {pid} dead, age {age_sec}s >= "
-                                    f"{stale_threshold}s threshold (cleanup-stale)"
-                                )
-                                if args.execute:
-                                    halted = _terminalize_state_file(
-                                        sf, proj, reason=halt_reason,
-                                        category="stale", set_terminal_phase=True,
-                                        expected_pid=pid,
-                                    )
-                                    if halted:
-                                        results["halted"].append({"path": str(sf), "pid": pid, "reason": "fallback-stale"})
-                                else:
-                                    results["would_halt"].append({"path": str(sf), "pid": pid, "reason": "fallback-stale", "mission": (data.get("mission") or "")[:80]})
-                        else:
-                            proj = _project_root_of(sf)
-                            if args.execute:
-                                halted = _terminalize_state_file(
-                                    sf, proj,
-                                    reason=f"orphan: pid {pid} dead or reused (cleanup-stale)",
-                                    category="stale", set_terminal_phase=False,
-                                    expected_pid=pid, require_dead_pid=True,
-                                )
-                                if halted:
-                                    results["halted"].append({"path": str(sf), "pid": pid, "reason": "orphan-dead-or-reused"})
-                            else:
-                                results["would_halt"].append({"path": str(sf), "pid": pid, "mission": (data.get("mission") or "")[:80]})
-                except Exception as e:
-                    results["errors"].append({"path": str(sf), "error": str(e)})
-            except Exception as e:
-                results["errors"].append({"path": str(sf), "error": str(e)})
-    # #314: 同一 PID を複数 active session が共有している場合の可観測性 warning
-    for _pid, _sids in sorted(_pid_sessions.items()):
-        if len(_sids) > 1:
-            results["warnings"].append({
-                "kind": "duplicate-pid",
-                "pid": _pid,
-                "sessions": _sids,
-                "note": "複数 session が同一 PID を共有 (親プロセス管理下の並列 mission)。"
-                        " stale 判定は last_activity_at ベースで行われる (#310/#314)",
-            })
-    print(json.dumps(results, indent=2, ensure_ascii=False))
+    request = CleanupStaleRequest(
+        root=getattr(args, "root", None),
+        execute=args.execute,
+    )
+    services = CleanupStaleServices(
+        default_search_roots=_default_search_roots,
+        path_from_string=Path,
+        path_exists=Path.exists,
+        iter_state_files=_iter_state_files,
+        load_authoritative_state=_load_authoritative_state,
+        lease_fields_present=_lease_fields_present,
+        expired_lease_without_heartbeat=_expired_lease_without_heartbeat,
+        project_root_of=_project_root_of,
+        terminalize_state_file=(
+            lambda *call_args, **call_kwargs: _terminalize_state_file(
+                *call_args, **call_kwargs
+            )
+        ),
+        fenced_commit_error=FencedCommitError,
+        pid_is_agent=_pid_is_agent,
+        state_age_since_update_sec=_state_age_since_update_sec,
+        stale_active_seconds=_stale_active_seconds,
+        path_stem=archive_path_stem,
+        path_to_string=str,
+    )
+    result = run_cleanup_stale(request, services)
+    print(result.rendered)
 
 
 def cmd_list(args):
