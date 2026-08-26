@@ -262,6 +262,14 @@ from mission_application.worktree_archive_specs import (  # noqa: E402
     WorktreeArchiveSpecsServices,
     collect_worktree_archive_specs,
 )
+from mission_application.specialist_registry_discovery import (  # noqa: E402
+    SpecialistRegistryDiscoveryRequest,
+    SpecialistRegistryDiscoveryServices,
+    discover_specialist_registry_candidates,
+    portable_provider_identifier as _portable_provider_identifier,
+    provider_id as _provider_id,
+    safe_provider_reference as _safe_provider_reference,
+)
 from mission_application.runtime_guard import (  # noqa: E402
     CleanupStaleExecuteCommand,
     FreshnessEvidence,
@@ -3259,46 +3267,6 @@ def _registry_arg_paths(value) -> list[Path]:
     return paths
 
 
-def _load_registry_candidates(raw: bytes, source: str) -> list[dict]:
-    candidates = []
-    try:
-        items = _parse_specialist_registry_text(raw.decode("utf-8"))
-    except UnicodeError:
-        items = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        candidate = dict(item)
-        candidate["source"] = source
-        candidate["registry_version"] = 1
-        if "activation" in candidate or "disabled" in candidate:
-            candidate["_registry_error"] = "mixed-registry-version"
-        candidate["registry_entry_digest"] = registry_entry_digest(candidate)
-        candidates.append(candidate)
-    return candidates
-
-
-def _load_v2_registry_candidates(raw: bytes, source: str) -> tuple[list[dict], list[dict]]:
-    try:
-        items = parse_v2_registry_json(raw.decode("utf-8"))
-    except (UnicodeError, RegistryContractError) as error:
-        return [], [{
-            "provider_id": "<registry>",
-            "source": source,
-            "reason_code": getattr(error, "code", "invalid-registry-contract"),
-            "detail": str(error),
-        }]
-    candidates = []
-    for item in items:
-        candidate = dict(item)
-        candidate["source"] = source
-        candidate["registry_version"] = 2
-        candidate["_v2_auto_use_present"] = "auto_use" in item
-        candidate["registry_entry_digest"] = registry_entry_digest(candidate)
-        candidates.append(candidate)
-    return candidates, []
-
-
 def _portable_registry_identity(path: Path) -> str:
     resolved = Path(os.path.abspath(os.fspath(path.expanduser())))
     for anchor, label in (
@@ -3430,70 +3398,6 @@ def _read_registry_input(
     return record, raw, physical_identity, None
 
 
-def _resolve_registry_precedence(
-    candidates: list[dict], diagnostics: list[dict]
-) -> tuple[list[dict], list[dict]]:
-    ordered = sorted(
-        candidates,
-        key=lambda item: (
-            int(item.get("_precedence_tier", 99)),
-            int(item.get("_input_order", 0)),
-            str(item.get("_input_identity") or ""),
-            int(item.get("_candidate_order", 0)),
-        ),
-    )
-    conflict_groups: dict[tuple, list[dict]] = {}
-    for item in ordered:
-        identity = _provider_id(item)
-        tier = int(item.get("_precedence_tier", 99))
-        explicit_subrank = int(item.get("_input_order", 0)) if tier in {0, 1} else 0
-        conflict_groups.setdefault((tier, explicit_subrank, identity), []).append(item)
-
-    conflicted = {
-        key for key, items in conflict_groups.items()
-        if key[2] and len(items) > 1
-    }
-    resolved: list[dict] = []
-    decided: set[str] = set()
-    for item in ordered:
-        identity = _provider_id(item)
-        if not identity or identity in decided:
-            continue
-        tier = int(item.get("_precedence_tier", 99))
-        explicit_subrank = int(item.get("_input_order", 0)) if tier in {0, 1} else 0
-        group_key = (tier, explicit_subrank, identity)
-        decided.add(identity)
-        if group_key in conflicted:
-            diagnostics.append({
-                "provider_id": _safe_provider_reference(identity),
-                "source": item.get("source"),
-                "reason_code": "same-tier-identity-conflict",
-                "registry_entry_digest": item.get("registry_entry_digest"),
-            })
-            resolved.append({**item, "enabled": False, "_projection_state": "conflict"})
-            continue
-        if item.get("disabled") is True or item.get("enabled") is False:
-            projection_state = (
-                "tombstone"
-                if item.get("registry_version") == 2 and item.get("disabled") is True
-                else "disabled"
-            )
-            diagnostics.append({
-                "provider_id": _safe_provider_reference(identity),
-                "source": item.get("source"),
-                "reason_code": "provider-disabled",
-                "registry_entry_digest": item.get("registry_entry_digest"),
-            })
-            resolved.append({
-                **item,
-                "enabled": False,
-                "_projection_state": projection_state,
-            })
-            continue
-        resolved.append(item)
-    return resolved, diagnostics
-
-
 def _discover_specialist_registry_candidates(args) -> tuple[list[dict], list[dict], dict]:
     """Discover registry candidates in deterministic precedence order.
 
@@ -3501,275 +3405,33 @@ def _discover_specialist_registry_candidates(args) -> tuple[list[dict], list[dic
     skill/plugin manifests. Built-in presets are appended later by the ranker so
     registry-level `enabled: false` entries can suppress lower-precedence defaults.
     """
-    candidates: list[dict] = []
-    diagnostics: list[dict] = []
-    inputs: list[dict] = []
-    invalid_barriers: list[dict] = []
-
-    def register(
-        path: Path,
-        source: str,
-        kind: str,
-        version: int,
-        tier: int,
-        order: int,
-        detection_error: RegistryContractError | None = None,
-        snapshot: tuple[
-            dict,
-            bytes | None,
-            tuple[int, int] | None,
-            RegistryContractError | None,
-        ] | None = None,
-    ):
-        record, raw, _physical_identity, snapshot_error = snapshot or _read_registry_input(
-            path, source, kind, version, tier, order
-        )
-        record.update({
-            "source": source,
-            "kind": kind,
-            "version": version,
-            "precedence_tier": tier,
-            "order": order,
-        })
-        inputs.append(record)
-        if record["status"] == "missing":
-            return record
-        if snapshot_error is not None:
-            loaded, invalid = [], [{
-                "provider_id": "<registry>",
-                "source": source,
-                "reason_code": snapshot_error.code,
-                "detail": str(snapshot_error),
-            }]
-        elif detection_error is not None:
-            loaded, invalid = [], [{
-                "provider_id": "<registry>",
-                "source": source,
-                "reason_code": detection_error.code,
-                "detail": str(detection_error),
-            }]
-        elif raw is not None and version == 2:
-            loaded, invalid = _load_v2_registry_candidates(raw, source)
-        elif raw is not None:
-            try:
-                loaded, invalid = _load_registry_candidates(raw, source), []
-            except RegistryContractError as error:
-                loaded, invalid = [], [{
-                    "provider_id": "<registry>",
-                    "source": source,
-                    "reason_code": error.code,
-                }]
-        else:
-            loaded, invalid = [], []
-        if invalid:
-            record["status"] = "invalid"
-            barrier = {
-                "source": source,
-                "canonical_identity": record["canonical_identity"],
-                "content_digest": record["content_digest"],
-                "kind": kind,
-                "precedence_tier": tier,
-                "order": order,
-            }
-            invalid_barriers.append(barrier)
-            diagnostics.extend({**item, "registry_input": barrier} for item in invalid)
-        for candidate_order, candidate in enumerate(loaded):
-            candidate["_precedence_tier"] = tier
-            candidate["_input_order"] = order
-            candidate["_input_identity"] = record["canonical_identity"]
-            candidate["_candidate_order"] = candidate_order
-            candidates.append(candidate)
-        return record
-
-    explicit: list[
-        tuple[
-            Path,
-            int,
-            int,
-            RegistryContractError | None,
-            tuple[
-                dict,
-                bytes | None,
-                tuple[int, int] | None,
-                RegistryContractError | None,
-            ],
-            tuple[int, int] | None,
-        ]
-    ] = []
-    for order, path in enumerate(_registry_arg_paths(getattr(args, "registry", None))):
-        source = _registry_source(path, "explicit")
-        snapshot = _read_registry_input(path, source, "explicit", 0, 99, order)
-        raw_bytes = snapshot[1]
-        if snapshot[3] is not None:
-            version = 2
-            detection_error = snapshot[3]
-        else:
-            try:
-                raw = raw_bytes.decode("utf-8") if raw_bytes is not None else ""
-                version = detect_registry_version(raw)
-                detection_error = None
-            except UnicodeError as error:
-                version = 2
-                detection_error = RegistryContractError("invalid-registry-contract", str(error))
-            except RegistryContractError as error:
-                version = 2
-                detection_error = error
-        physical_identity = snapshot[2]
-        explicit.append((path, version, order, detection_error, snapshot, physical_identity))
-    duplicate_explicit = {
-        identity
-        for identity in {item[5] for item in explicit if item[5] is not None}
-        if sum(item[5] == identity for item in explicit) > 1
-    }
-    for path, version, order, detection_error, snapshot, physical_identity in sorted(
-        explicit, key=lambda item: (-item[1], item[2])
-    ):
-        if physical_identity in duplicate_explicit:
-            detection_error = RegistryContractError("duplicate-registry-input")
-        register(
-            path,
-            snapshot[0]["source"],
-            "explicit",
-            version,
-            0 if version == 2 else 1,
-            order,
-            detection_error,
-            snapshot,
-        )
-
-    project_v2 = Path.cwd() / ".mission" / "specialists-v2.yml"
-    register(project_v2, "project:.mission/specialists-v2.yml", "project", 2, 2, 0)
-
-    project_registry = Path.cwd() / ".mission" / "specialists.yml"
-    register(project_registry, "project:.mission/specialists.yml", "project", 1, 3, 0)
-
-    if not getattr(args, "no_default_skill_roots", False):
-        user_v2 = Path.home() / ".config" / "mission" / "specialists-v2.yml"
-        register(user_v2, "user:~/.config/mission/specialists-v2.yml", "user", 2, 4, 0)
-        user_registry = Path.home() / ".config" / "mission" / "specialists.yml"
-        register(user_registry, "user:~/.config/mission/specialists.yml", "user", 1, 5, 0)
-
-    for root_order, root in enumerate(_skill_roots(args)):
-        if not root.is_dir():
-            continue
-        v2_manifests = sorted(root.glob("*/mission-specialist-v2.yml"))
-        v1_manifests = sorted(root.glob("*/mission-specialist.yml"))
-        inventory = []
-        for manifest_order, manifest in enumerate(v2_manifests):
-            record = register(
-                manifest,
-                _registry_source(manifest, "installed"),
-                "installed",
-                2,
-                6,
-                manifest_order,
-            )
-            inventory.append({
-                "identity": record["canonical_identity"],
-                "digest": record["content_digest"],
-            })
-        for manifest_order, manifest in enumerate(v1_manifests):
-            record = register(
-                manifest,
-                _registry_source(manifest, "installed"),
-                "installed",
-                1,
-                7,
-                manifest_order,
-            )
-            inventory.append({
-                "identity": record["canonical_identity"],
-                "digest": record["content_digest"],
-            })
-        inputs.append({
-            "kind": "skill-root",
-            "source": _registry_source(root, "skill-root"),
-            "canonical_identity": _portable_registry_identity(root),
-            "version": 0,
-            "precedence_tier": 6,
-            "order": root_order,
-            "status": "present",
-            "content_digest": provider_value_digest(inventory),
-        })
-
-    active_barrier = None
-    if invalid_barriers:
-        active_barrier = min(
-            invalid_barriers,
-            key=lambda item: (
-                int(item["precedence_tier"]),
-                int(item["order"]) if item["kind"] == "explicit" else -1,
-            ),
-        )
-
-        def is_higher_than_barrier(candidate: dict) -> bool:
-            candidate_tier = int(candidate.get("_precedence_tier", 99))
-            barrier_tier = int(active_barrier["precedence_tier"])
-            if candidate_tier != barrier_tier:
-                return candidate_tier < barrier_tier
-            return (
-                active_barrier["kind"] == "explicit"
-                and int(candidate.get("_input_order", 0)) < int(active_barrier["order"])
-            )
-
-        candidates = [candidate for candidate in candidates if is_higher_than_barrier(candidate)]
-
-    resolved, diagnostics = _resolve_registry_precedence(candidates, diagnostics)
-    if active_barrier is not None:
-        resolved.append({
-            "_blocks_builtin_candidates": True,
-            "_projection_state": "invalid-input-barrier",
-            "source": active_barrier["source"],
-            "_precedence_tier": active_barrier["precedence_tier"],
-            "_input_order": active_barrier["order"],
-        })
-    effective = [
-        {
-            "provider_id": _safe_provider_reference(_provider_id(candidate)),
-            "source": candidate.get("source"),
-            "registry_version": candidate.get("registry_version"),
-            "registry_entry_digest": candidate.get("registry_entry_digest"),
-            "projection_state": candidate.get("_projection_state", "eligible"),
-        }
-        for candidate in resolved
-        if _provider_id(candidate)
-    ]
-    if active_barrier is not None:
-        effective.append({
-            "provider_id": "<registry>",
-            "source": active_barrier["source"],
-            "projection_state": "invalid-input-barrier",
-            "content_digest": active_barrier["content_digest"],
-        })
-    ordered_inputs = sorted(
-        inputs,
-        key=lambda item: (
-            int(item.get("precedence_tier", 99)),
-            int(item.get("order", 0)),
-            str(item.get("canonical_identity") or ""),
-        ),
+    request = SpecialistRegistryDiscoveryRequest(
+        raw_registry=getattr(args, "registry", None),
+        no_default_skill_roots=getattr(args, "no_default_skill_roots", False),
+        skills_dir=getattr(args, "skills_dir", None),
     )
-    ordered_barriers = sorted(
-        invalid_barriers,
-        key=lambda item: (
-            int(item.get("precedence_tier", 99)),
-            int(item.get("order", 0)),
-            str(item.get("canonical_identity") or ""),
-        ),
+    services = SpecialistRegistryDiscoveryServices(
+        path_from_string=Path,
+        path_expanduser=Path.expanduser,
+        current_directory=Path.cwd,
+        home_directory=Path.home,
+        join_path=Path.joinpath,
+        path_is_directory=Path.is_dir,
+        path_glob=Path.glob,
+        environment_get=os.environ.get,
+        path_separator=os.pathsep,
+        registry_source=_registry_source,
+        read_registry_input=_read_registry_input,
+        detect_registry_version=detect_registry_version,
+        contract_error=RegistryContractError,
+        registry_contract_error=RegistryContractError,
+        parse_v1_registry=_parse_specialist_registry_text,
+        parse_v2_registry=parse_v2_registry_json,
+        registry_entry_digest=registry_entry_digest,
+        portable_registry_identity=_portable_registry_identity,
+        value_digest=provider_value_digest,
     )
-    projection_payload = {
-        "schema": "mission-specialist-registry-projection/1",
-        "ordered_inputs": ordered_inputs,
-        "precedence_barriers": ordered_barriers,
-        "effective_entries": effective,
-    }
-    projection = {
-        **projection_payload,
-        "effective_projection_digest": provider_value_digest(projection_payload),
-    }
-    for candidate in resolved:
-        candidate["registry_projection_digest"] = projection["effective_projection_digest"]
-    return resolved, diagnostics, projection
+    return discover_specialist_registry_candidates(request, services)
 
 
 def _skill_roots(args) -> list[Path]:
@@ -3862,17 +3524,6 @@ def _candidate_profiles(candidate: dict) -> list[str]:
     return list(profiles)
 
 
-def _provider_id(candidate: dict) -> str:
-    return str(
-        candidate.get("provider_id")
-        or candidate.get("skill")
-        or candidate.get("role")
-        or candidate.get("name")
-        or candidate.get("command")
-        or ""
-    )
-
-
 def _disable_keys(candidate: dict) -> set[str]:
     if candidate.get("registry_version") == 2:
         provider_id = _provider_id(candidate)
@@ -3936,11 +3587,6 @@ def _command_is_available(command: str | None) -> bool:
     return shutil.which(command) is not None
 
 
-def _portable_provider_identifier(value: object) -> bool:
-    text = str(value or "")
-    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", text))
-
-
 def _classify_non_portable_execution_config(candidate: dict) -> str | None:
     if any(
         not _portable_provider_identifier(candidate.get(field))
@@ -3960,16 +3606,6 @@ def _classify_non_portable_execution_config(candidate: dict) -> str | None:
     if candidate.get("env"):
         return "environment-values"
     return None
-
-
-def _safe_provider_reference(identity: object) -> str:
-    canonical_identity = str(identity or "")
-    if re.fullmatch(r"provider:sha256:[0-9a-f]{64}", canonical_identity):
-        return canonical_identity
-    if _portable_provider_identifier(canonical_identity):
-        return canonical_identity
-    digest = hashlib.sha256(canonical_identity.encode("utf-8")).hexdigest()
-    return f"provider:sha256:{digest}"
 
 
 def _public_specialist_record(record: dict) -> dict:
