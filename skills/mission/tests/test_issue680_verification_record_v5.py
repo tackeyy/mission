@@ -293,6 +293,46 @@ def test_v5_evidence_operation_with_effects_is_rejected():
         repository.execute_evidence_transition_effects(lambda _state: prepared)
 
 
+def test_v5_effect_claim_without_prepared_effects_is_rejected_before_commit():
+    from .test_issue632_transition_is_the_writer import _FakeFencedRepository
+    from mission_application.evidence import prepare_context_manifest
+    from mission_kernel import decode_mission_state
+    from mission_kernel.transitions import TransitionTableError
+    from mission_persistence.legacy_v4 import V5CompatibilityRepository
+
+    current = {
+        "phase": "executing",
+        "loop_active": True,
+        "session_id": "portable",
+        "score_history": [],
+    }
+    prepared = replace(
+        prepare_context_manifest(
+            current,
+            now="2030-01-01T00:00:01Z",
+            iteration=1,
+            publication_path=".mission-state/context/manifest.json",
+        ),
+        effects=(),
+    )
+    backend = _FakeFencedRepository(
+        decode_mission_state(json.dumps(current).encode("utf-8"))
+    )
+    repository = V5CompatibilityRepository(
+        repository=backend,
+        session_id="portable",
+        lease_owner_session_id="portable",
+        presented_lease_id=None,
+    )
+
+    with pytest.raises(
+        TransitionTableError, match="invalid-transition-effect-binding"
+    ):
+        repository.execute_evidence_transition_effects(lambda _state: prepared)
+
+    assert backend.commits == []
+
+
 def test_v5_evidence_replay_matches_transition_replay_semantics():
     current = {
         "phase": "executing",

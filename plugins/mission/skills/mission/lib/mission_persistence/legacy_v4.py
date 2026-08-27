@@ -1046,31 +1046,15 @@ class V5CompatibilityRepository:
         LegacyCommandExecutionResult,
     ]:
         """Reuse the typed transition executor for effect-free v5 commands."""
-        del effect_transaction, verify_published, backup
-        self._reject_reentrant_entry("execute_transition_effects")
-        with self.transaction():
-            current = self.load()
-            with self._callback_guard():
-                prepared = prepare(copy.deepcopy(current))
-            if not isinstance(
-                prepared, (PreparedArtifactOperation, PreparedTransitionOperation)
-            ):
-                raise ValueError("transition-operation-invalid")
-            effects = self.validate_effects(prepared.effects)
-            if effects:
-                raise ValueError("v5-transition-effects-not-supported")
-            if self.operation_replayed:
-                frozen = freeze_json_value(current)
-                assert isinstance(frozen, FrozenJsonObject)
-                return prepared, LegacyCommandExecutionResult(
-                    None, frozen, replayed=True
-                )
-            execution = self.execute(prepared.command)
-            if not isinstance(execution, LegacyCommandExecutionResult):
-                raise FencedCommitError(
-                    "decision-invalid", "typed transition result is invalid"
-                )
-            return prepared, execution
+        return self.execute_evidence_transition_effects(
+            prepare,
+            operation_type=(PreparedArtifactOperation, PreparedTransitionOperation),
+            operation_error="transition-operation-invalid",
+            effects_error="v5-transition-effects-not-supported",
+            effect_transaction=effect_transaction,
+            verify_published=verify_published,
+            backup=backup,
+        )
 
     def execute_evidence_transition_effects(
         self,
@@ -1078,6 +1062,7 @@ class V5CompatibilityRepository:
         *,
         operation_type: type = PreparedEvidenceOperation,
         operation_error: str = "evidence-operation-invalid",
+        effects_error: str = "v5-evidence-effects-not-supported",
         effect_transaction: object | None = None,
         verify_published: object | None = None,
         backup: bool = True,
@@ -1100,13 +1085,19 @@ class V5CompatibilityRepository:
                 raise ValueError(operation_error)
             effects = self.validate_effects(prepared.effects)
             if effects:
-                raise ValueError("v5-evidence-effects-not-supported")
+                raise ValueError(effects_error)
             if self.operation_replayed:
                 frozen = freeze_json_value(current)
                 assert isinstance(frozen, FrozenJsonObject)
                 return prepared, LegacyCommandExecutionResult(
                     None, frozen, replayed=True
                 )
+            # A replay commits nothing, so the effect claim is only worth
+            # checking on the path that is about to publish a generation.
+            state = _legacy_command_state(current, prepared.command)
+            decision = decide(state, prepared.command)
+            if decision.transition is not None:
+                bind_transition_effects(decision.transition, effects)
             execution = self.execute(prepared.command)
             if not isinstance(execution, LegacyCommandExecutionResult):
                 raise FencedCommitError(
