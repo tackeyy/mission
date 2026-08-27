@@ -1046,30 +1046,67 @@ class V5CompatibilityRepository:
         LegacyCommandExecutionResult,
     ]:
         """Reuse the typed transition executor for effect-free v5 commands."""
+        return self.execute_evidence_transition_effects(
+            prepare,
+            operation_type=(PreparedArtifactOperation, PreparedTransitionOperation),
+            operation_error="transition-operation-invalid",
+            effects_error="v5-transition-effects-not-supported",
+            entry_label="execute_transition_effects",
+            result_error_detail="typed transition result is invalid",
+            effect_transaction=effect_transaction,
+            verify_published=verify_published,
+            backup=backup,
+        )
+
+    def execute_evidence_transition_effects(
+        self,
+        prepare: Callable[[dict], object],
+        *,
+        operation_type: type = PreparedEvidenceOperation,
+        operation_error: str = "evidence-operation-invalid",
+        effects_error: str = "v5-evidence-effects-not-supported",
+        entry_label: str = "execute_evidence_transition_effects",
+        result_error_detail: str = "typed evidence result is invalid",
+        effect_transaction: object | None = None,
+        verify_published: object | None = None,
+        backup: bool = True,
+    ) -> tuple[object, LegacyCommandExecutionResult]:
+        """Run an effect-free evidence command on the v5 fenced repository.
+
+        RecordVerification produces no file effects, so the same effect-free
+        path used by execute_transition_effects is safe here.  Evidence
+        operations that do carry file effects (UpdateProgress,
+        GenerateContextManifest) are rejected until a v5 publication path
+        is implemented (#680 scope: verification record only).
+        """
         del effect_transaction, verify_published, backup
-        self._reject_reentrant_entry("execute_transition_effects")
+        # entry_label and result_error_detail keep each delegating caller's
+        # diagnostics identical to the pre-delegation implementation.
+        self._reject_reentrant_entry(entry_label)
         with self.transaction():
             current = self.load()
             with self._callback_guard():
                 prepared = prepare(copy.deepcopy(current))
-            if not isinstance(
-                prepared, (PreparedArtifactOperation, PreparedTransitionOperation)
-            ):
-                raise ValueError("transition-operation-invalid")
+            if not isinstance(prepared, operation_type):
+                raise ValueError(operation_error)
             effects = self.validate_effects(prepared.effects)
             if effects:
-                raise ValueError("v5-transition-effects-not-supported")
+                raise ValueError(effects_error)
             if self.operation_replayed:
                 frozen = freeze_json_value(current)
                 assert isinstance(frozen, FrozenJsonObject)
                 return prepared, LegacyCommandExecutionResult(
                     None, frozen, replayed=True
                 )
+            # A replay commits nothing, so the effect claim is only worth
+            # checking on the path that is about to publish a generation.
+            state = _legacy_command_state(current, prepared.command)
+            decision = decide(state, prepared.command)
+            if decision.transition is not None:
+                bind_transition_effects(decision.transition, effects)
             execution = self.execute(prepared.command)
             if not isinstance(execution, LegacyCommandExecutionResult):
-                raise FencedCommitError(
-                    "decision-invalid", "typed transition result is invalid"
-                )
+                raise FencedCommitError("decision-invalid", result_error_detail)
             return prepared, execution
 
     validate_effects = staticmethod(LegacyV4Repository.validate_effects)

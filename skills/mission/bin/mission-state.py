@@ -13996,7 +13996,9 @@ def cmd_verification_record(args):
             VerificationRecordRequest(
                 now=iso_now(), iteration=args.iteration, checks=checks
             ),
-            _legacy_evidence_repository(cwd, sf, stamp=True),
+            _legacy_lifecycle_repository(
+                cwd, sf, stamp=True, pre_admit_lease=True
+            ),
         )
     except EvidenceFailure as exc:
         raise SystemExit(exc.code) from exc
