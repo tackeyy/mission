@@ -1051,6 +1051,8 @@ class V5CompatibilityRepository:
             operation_type=(PreparedArtifactOperation, PreparedTransitionOperation),
             operation_error="transition-operation-invalid",
             effects_error="v5-transition-effects-not-supported",
+            entry_label="execute_transition_effects",
+            result_error_detail="typed transition result is invalid",
             effect_transaction=effect_transaction,
             verify_published=verify_published,
             backup=backup,
@@ -1063,6 +1065,8 @@ class V5CompatibilityRepository:
         operation_type: type = PreparedEvidenceOperation,
         operation_error: str = "evidence-operation-invalid",
         effects_error: str = "v5-evidence-effects-not-supported",
+        entry_label: str = "execute_evidence_transition_effects",
+        result_error_detail: str = "typed evidence result is invalid",
         effect_transaction: object | None = None,
         verify_published: object | None = None,
         backup: bool = True,
@@ -1076,7 +1080,9 @@ class V5CompatibilityRepository:
         is implemented (#680 scope: verification record only).
         """
         del effect_transaction, verify_published, backup
-        self._reject_reentrant_entry("execute_evidence_transition_effects")
+        # entry_label and result_error_detail keep each delegating caller's
+        # diagnostics identical to the pre-delegation implementation.
+        self._reject_reentrant_entry(entry_label)
         with self.transaction():
             current = self.load()
             with self._callback_guard():
@@ -1100,9 +1106,7 @@ class V5CompatibilityRepository:
                 bind_transition_effects(decision.transition, effects)
             execution = self.execute(prepared.command)
             if not isinstance(execution, LegacyCommandExecutionResult):
-                raise FencedCommitError(
-                    "decision-invalid", "typed evidence result is invalid"
-                )
+                raise FencedCommitError("decision-invalid", result_error_detail)
             return prepared, execution
 
     validate_effects = staticmethod(LegacyV4Repository.validate_effects)
