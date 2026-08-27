@@ -1072,4 +1072,46 @@ class V5CompatibilityRepository:
                 )
             return prepared, execution
 
+    def execute_evidence_transition_effects(
+        self,
+        prepare: Callable[[dict], object],
+        *,
+        operation_type: type = PreparedEvidenceOperation,
+        operation_error: str = "evidence-operation-invalid",
+        effect_transaction: object | None = None,
+        verify_published: object | None = None,
+        backup: bool = True,
+    ) -> tuple[object, LegacyCommandExecutionResult]:
+        """Run an effect-free evidence command on the v5 fenced repository.
+
+        RecordVerification produces no file effects, so the same effect-free
+        path used by execute_transition_effects is safe here.  Evidence
+        operations that do carry file effects (UpdateProgress,
+        GenerateContextManifest) are rejected until a v5 publication path
+        is implemented (#680 scope: verification record only).
+        """
+        del effect_transaction, verify_published, backup
+        self._reject_reentrant_entry("execute_evidence_transition_effects")
+        with self.transaction():
+            current = self.load()
+            with self._callback_guard():
+                prepared = prepare(copy.deepcopy(current))
+            if not isinstance(prepared, operation_type):
+                raise ValueError(operation_error)
+            effects = self.validate_effects(prepared.effects)
+            if effects:
+                raise ValueError("v5-evidence-effects-not-supported")
+            if self.operation_replayed:
+                frozen = freeze_json_value(current)
+                assert isinstance(frozen, FrozenJsonObject)
+                return prepared, LegacyCommandExecutionResult(
+                    None, frozen, replayed=True
+                )
+            execution = self.execute(prepared.command)
+            if not isinstance(execution, LegacyCommandExecutionResult):
+                raise FencedCommitError(
+                    "decision-invalid", "typed evidence result is invalid"
+                )
+            return prepared, execution
+
     validate_effects = staticmethod(LegacyV4Repository.validate_effects)
