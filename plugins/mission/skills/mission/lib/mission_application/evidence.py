@@ -24,6 +24,7 @@ from mission_kernel.evidence import (
     project_verification_entry,
 )
 from .artifact import EvidenceEffect, EvidenceFailure, make_evidence_effect
+from .ports import LegacyCommandExecutionResult
 
 
 @dataclass(frozen=True)
@@ -101,6 +102,12 @@ def prepare_verification_record_operation(
         target_digest=target_digest,
         require_caller=False,
     )
+    if caller_operation_id is None:
+        # Without a caller-supplied id the repository keeps minting a fresh
+        # identity per invocation.  Deriving one from the pre-state digest
+        # would make two concurrent runs share an identity and replay each
+        # other, so replay stays opt-in through MISSION_OPERATION_ID.
+        return PreparedVerificationRecord(checks, None, None)
     operation_id, operation_command = canonical_operation(
         path.stem,
         "verification-record",
@@ -115,9 +122,11 @@ def execute_evidence_operation(repository: object, prepare) -> dict:
     if not callable(execute):
         raise EvidenceFailure("evidence-repository-invalid")
     prepared, execution = execute(prepare)
-    decision = getattr(execution, "decision", None)
+    if not isinstance(execution, LegacyCommandExecutionResult):
+        raise EvidenceFailure("evidence-execution-result-invalid")
+    decision = execution.decision
     if decision is None:
-        if not getattr(execution, "replayed", False):
+        if not execution.replayed:
             raise EvidenceFailure("evidence-transition-rejected")
     elif decision.accepted is not True:
         rejection = getattr(decision, "rejection", None)

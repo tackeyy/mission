@@ -73,49 +73,113 @@ def test_verification_record_replay_returns_the_original_result_once(tmp_path, r
     ]
 
 
-def test_replay_keeps_verification_projection_validation():
-    from mission_application.artifact import EvidenceFailure
-    from mission_application.evidence import VerificationRecordRequest, run_verification_record
+def _closed_result(projection, *, decision=None, replayed=True):
+    from mission_application.ports import LegacyCommandExecutionResult
+    from mission_kernel.json_codec import freeze_json_value
+
+    return LegacyCommandExecutionResult(decision, freeze_json_value(projection), replayed)
+
+
+def _request():
+    from mission_application.evidence import VerificationRecordRequest
     from mission_kernel.commands import VerificationCheck
 
-    request = VerificationRecordRequest(
+    return VerificationRecordRequest(
         now="2030-01-01T00:00:00Z",
         iteration=1,
         checks=(VerificationCheck("tests", True, "1 passed"),),
     )
+
+
+def test_replay_keeps_verification_projection_validation():
+    """A replay must still be checked against the state it claims to have written."""
+    from mission_application.artifact import EvidenceFailure
+    from mission_application.evidence import run_verification_record
+
     current = {"phase": "executing", "loop_active": True, "session_id": "test"}
 
     def replay(prepare):
-        return prepare(current), SimpleNamespace(
-            decision=None,
-            replayed=True,
-            projection={"verification_history": []},
-        )
+        return prepare(current), _closed_result({"verification_history": []})
 
     repository = SimpleNamespace(execute_evidence_transition_effects=replay)
     with pytest.raises(EvidenceFailure, match="verification-projection-mismatch"):
-        run_verification_record(request, repository)
+        run_verification_record(_request(), repository)
 
 
-def test_non_replay_without_decision_remains_rejected():
+def test_foreign_execution_result_is_rejected():
+    """Only the closed result type may claim a replay (#685 review)."""
     from mission_application.artifact import EvidenceFailure
-    from mission_application.evidence import VerificationRecordRequest, run_verification_record
-    from mission_kernel.commands import VerificationCheck
+    from mission_application.evidence import run_verification_record
 
-    request = VerificationRecordRequest(
-        now="2030-01-01T00:00:00Z",
-        iteration=1,
-        checks=(VerificationCheck("tests", True, "1 passed"),),
-    )
     current = {"phase": "executing", "loop_active": True, "session_id": "test"}
 
-    def invalid(prepare):
+    def foreign(prepare):
         return prepare(current), SimpleNamespace(
-            decision=None,
-            replayed=False,
-            projection={"verification_history": []},
+            decision=None, replayed=True, projection={"verification_history": []}
         )
 
-    repository = SimpleNamespace(execute_evidence_transition_effects=invalid)
-    with pytest.raises(EvidenceFailure, match="evidence-transition-rejected"):
-        run_verification_record(request, repository)
+    repository = SimpleNamespace(execute_evidence_transition_effects=foreign)
+    with pytest.raises(EvidenceFailure, match="evidence-execution-result-invalid"):
+        run_verification_record(_request(), repository)
+
+
+def test_closed_result_forbids_a_missing_decision_without_replay():
+    """decision=None without replayed=True is unconstructible, not merely rejected."""
+    with pytest.raises(ValueError, match="legacy-command-replay-result-invalid"):
+        _closed_result({"verification_history": []}, replayed=False)
+
+
+def test_replay_keeps_progress_projection_validation():
+    """The replay branch must validate progress projections too (#685 review)."""
+    from mission_application.artifact import EvidenceFailure
+    from mission_application.evidence import ProgressUpdateRequest, run_progress_update
+
+    current = {"phase": "executing", "loop_active": True, "session_id": "test"}
+
+    def replay(prepare):
+        return prepare(current), _closed_result({"progress": {"note": "other"}})
+
+    repository = SimpleNamespace(execute_evidence_transition_effects=replay)
+    with pytest.raises(EvidenceFailure, match="progress-projection-mismatch"):
+        run_progress_update(
+            ProgressUpdateRequest(
+                now="2030-01-01T00:00:00Z",
+                total=10,
+                completed=1,
+                batch_size=1,
+                last_unit="unit",
+                artifact_path="artifact.md",
+                iteration=1,
+                evidence_path="evidence.json",
+            ),
+            repository,
+        )
+
+
+def test_replay_keeps_context_projection_validation():
+    """The replay branch must validate context manifest projections too."""
+    from mission_application.artifact import EvidenceFailure
+    from mission_application.evidence import ContextManifestRequest, run_context_manifest
+
+    current = {
+        "phase": "reviewing",
+        "loop_active": True,
+        "session_id": "test",
+        "mission": "m",
+        "mission_id": "mid",
+        "assumptions_path": "a.md",
+    }
+
+    def replay(prepare):
+        return prepare(current), _closed_result({"context_manifests": {}})
+
+    repository = SimpleNamespace(execute_evidence_transition_effects=replay)
+    with pytest.raises(EvidenceFailure, match="context-projection-mismatch"):
+        run_context_manifest(
+            ContextManifestRequest(
+                now="2030-01-01T00:00:00Z",
+                iteration=1,
+                publication_path="manifest.json",
+            ),
+            repository,
+        )
