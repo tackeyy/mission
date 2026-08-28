@@ -202,6 +202,15 @@ class ContextManifestEffectClaim:
 
 
 @dataclass(frozen=True)
+class ClaimsLedgerEffectClaim:
+    kind: str
+    target: str
+    publication_path: str
+    digest: str
+    size: int
+
+
+@dataclass(frozen=True)
 class UpdateProgress:
     at: str
     total: int
@@ -223,6 +232,14 @@ class GenerateContextManifest:
     at: str
     iteration: int
     effect: ContextManifestEffectClaim
+
+
+@dataclass(frozen=True)
+class GenerateClaimsLedger:
+    at: str
+    iteration: int
+    doc_digest: str
+    effect: ClaimsLedgerEffectClaim
 
 
 @dataclass(frozen=True)
@@ -372,6 +389,7 @@ GENERIC_SET_DEDICATED_FIELDS = frozenset(
         "updated_at",
         "progress",
         "context_manifests",
+        "claims_ledgers",
         "verification_history",
     }
 )
@@ -386,6 +404,7 @@ Command = Union[
     DeclineSpecialistSelection,
     ExportArtifact,
     GenerateContextManifest,
+    GenerateClaimsLedger,
     InitializeArtifact,
     MarkHalt,
     MarkPass,
@@ -412,6 +431,7 @@ _COMMAND_TYPES = {
     DeclineSpecialistSelection: "decline-specialist-selection",
     ExportArtifact: "export-artifact",
     GenerateContextManifest: "generate-context-manifest",
+    GenerateClaimsLedger: "generate-claims-ledger",
     InitializeArtifact: "initialize-artifact",
     MarkHalt: "mark-halt",
     MarkPass: "mark-pass",

@@ -195,6 +195,8 @@ from mission_application.artifact import (  # noqa: E402
     run_artifact_render,
 )
 from mission_application.evidence import (  # noqa: E402
+    ClaimsLedgerCliRequest,
+    ClaimsLedgerCliServices,
     ContextManifestRequest,
     ProgressClearRequest,
     ProgressUpdateRequest,
@@ -202,6 +204,7 @@ from mission_application.evidence import (  # noqa: E402
     evidence_publication_paths,
     normalize_verification_payload,
     run_context_manifest,
+    render_claims_ledger_cli,
     run_progress_clear,
     run_progress_update,
     run_verification_record,
@@ -14005,6 +14008,20 @@ def cmd_verification_record(args):
     print(json.dumps({"ok": True, **result}, ensure_ascii=False, indent=2))
 
 
+_CLAIMS_LEDGER_CLI_SERVICES = ClaimsLedgerCliServices(
+    resolve_state_file, _resolve_evidence_output_path, _legacy_evidence_repository,
+)
+
+
+def cmd_verification_claims(args):
+    try:
+        rendered = render_claims_ledger_cli(args, _CLAIMS_LEDGER_CLI_SERVICES)
+    except EvidenceFailure as exc:
+        print(f"ERROR: {exc.code}", file=sys.stderr)
+        sys.exit(2)
+    print(rendered)
+
+
 def cmd_review_finalize(args):
     """#283: aggregate-reviews → push-score を 1 コマンドで実行する (Phase 5 transactional).
 
@@ -16461,6 +16478,11 @@ def _add_review_parsers(subparsers) -> None:
     verify_source.add_argument("--stdin", action="store_true", help="stdin から JSON を読む")
     verify_source.add_argument("--input", default=None, help="JSON ファイルパス")
     p_verify_record.set_defaults(func=cmd_verification_record)
+    p_verify_claims = verify_sub.add_parser("claims", help="implementation claim ledger を生成")
+    p_verify_claims.add_argument("--iteration", type=int, required=True)
+    p_verify_claims.add_argument("--doc-digest", required=True)
+    p_verify_claims.add_argument("--out", required=True)
+    p_verify_claims.set_defaults(func=cmd_verification_claims)
 
 
 def _add_lifecycle_parsers(subparsers) -> None:
