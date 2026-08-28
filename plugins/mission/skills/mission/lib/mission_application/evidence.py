@@ -136,9 +136,14 @@ def execute_evidence_operation(repository: object, prepare) -> dict:
     projection = execution.projection
     command = prepared.command
     payload = copy.deepcopy(prepared.result)
+    replayed = execution.replayed
     if isinstance(command, UpdateProgress):
-        if payload.get("progress") != projection.get("progress"):
+        if not _record_matches(
+            projection.get("progress"), payload.get("progress"), replayed, ("updated_at",)
+        ):
             raise EvidenceFailure("progress-projection-mismatch")
+        if replayed:
+            payload["progress"] = copy.deepcopy(projection.get("progress"))
     elif isinstance(command, ClearProgress):
         if "progress" in projection:
             raise EvidenceFailure("progress-projection-mismatch")
@@ -153,11 +158,34 @@ def execute_evidence_operation(repository: object, prepare) -> dict:
             raise EvidenceFailure("context-projection-mismatch")
     elif isinstance(command, RecordVerification):
         history = projection.get("verification_history")
-        if not isinstance(history, list) or not history or history[-1] != payload.get(
-            "verification"
+        if not isinstance(history, list) or not history:
+            raise EvidenceFailure("verification-projection-mismatch")
+        if not _record_matches(
+            history[-1], payload.get("verification"), replayed, ("recorded_at",)
         ):
             raise EvidenceFailure("verification-projection-mismatch")
+        if replayed:
+            payload["verification"] = copy.deepcopy(history[-1])
     return payload
+
+
+def _record_matches(
+    stored: object, expected: object, replayed: bool, volatile: tuple[str, ...]
+) -> bool:
+    """Compare a stored record with the one this invocation would have written.
+
+    A replay re-derives clock-sourced fields from the current time, so those
+    fields are compared only on the first execution; the stored record stays
+    authoritative for them.  Every other field must match either way, so a
+    replay that would have produced different content is still rejected.
+    """
+    if not replayed:
+        return stored == expected
+    if not isinstance(stored, dict) or not isinstance(expected, dict):
+        return False
+    return {key: value for key, value in stored.items() if key not in volatile} == {
+        key: value for key, value in expected.items() if key not in volatile
+    }
 
 
 def evidence_publication_paths(

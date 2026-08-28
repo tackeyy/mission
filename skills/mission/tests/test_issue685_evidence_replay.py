@@ -183,3 +183,60 @@ def test_replay_keeps_context_projection_validation():
             ),
             repository,
         )
+
+
+def test_replay_succeeds_when_the_clock_advances_between_attempts(tmp_path, run_cli):
+    """A crash retry happens later than the first attempt (#685 review).
+
+    `recorded_at` is re-derived from the current clock, so a strict comparison
+    against the freshly prepared payload would reject every retry that crosses
+    a second boundary.
+    """
+    env = {**_v5_env(tmp_path), "MISSION_OPERATION_ID": "issue-685-clock"}
+    _init_v5(run_cli, tmp_path, env)
+    payload = json.dumps(
+        {
+            "schema": "mission-verification/1",
+            "checks": [{"name": "tests", "ok": True, "detail": "1 passed"}],
+        }
+    )
+    first = run_cli(
+        "verification", "record", "--iteration", "1", "--stdin",
+        cwd=tmp_path, input_text=payload, env_extra=env,
+    )
+    later = {**env, "MISSION_STATE_NOW": "2030-01-01T00:05:00Z"}
+    second = run_cli(
+        "verification", "record", "--iteration", "1", "--stdin",
+        cwd=tmp_path, input_text=payload, env_extra=later,
+    )
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    # The stored record stays authoritative for the clock-sourced field.
+    assert json.loads(second.stdout) == json.loads(first.stdout)
+    state = _authoritative_state(tmp_path)
+    assert state["verification_history"] == [json.loads(first.stdout)["verification"]]
+
+
+def test_replay_still_rejects_a_different_payload(tmp_path, run_cli):
+    """Ignoring the clock field must not let a different record pass as a replay."""
+    env = {**_v5_env(tmp_path), "MISSION_OPERATION_ID": "issue-685-divergent"}
+    _init_v5(run_cli, tmp_path, env)
+    first = run_cli(
+        "verification", "record", "--iteration", "1", "--stdin",
+        cwd=tmp_path,
+        input_text=json.dumps(
+            {"schema": "mission-verification/1", "checks": [{"name": "tests", "ok": True}]}
+        ),
+        env_extra=env,
+    )
+    assert first.returncode == 0, first.stderr
+    second = run_cli(
+        "verification", "record", "--iteration", "1", "--stdin",
+        cwd=tmp_path,
+        input_text=json.dumps(
+            {"schema": "mission-verification/1", "checks": [{"name": "tests", "ok": False}]}
+        ),
+        env_extra=env,
+    )
+    assert second.returncode != 0
