@@ -183,6 +183,14 @@ def _record_matches(
         return stored == expected
     if not isinstance(stored, dict) or not isinstance(expected, dict):
         return False
+    for key in volatile:
+        if key not in expected:
+            continue
+        # Only the value may differ: a missing or malformed clock field in the
+        # stored record is a corrupt record, not a replay.
+        stored_value = stored.get(key)
+        if not isinstance(stored_value, str) or not stored_value:
+            return False
     return {key: value for key, value in stored.items() if key not in volatile} == {
         key: value for key, value in expected.items() if key not in volatile
     }

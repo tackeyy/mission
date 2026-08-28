@@ -240,3 +240,37 @@ def test_replay_still_rejects_a_different_payload(tmp_path, run_cli):
         env_extra=env,
     )
     assert second.returncode != 0
+
+
+def test_replay_rejects_a_stored_record_without_a_clock_field():
+    """A missing or malformed clock field is a corrupt record, not a replay."""
+    from mission_application.artifact import EvidenceFailure
+    from mission_application.evidence import run_verification_record
+
+    current = {"phase": "executing", "loop_active": True, "session_id": "test"}
+
+    def replay(prepare):
+        prepared = prepare(current)
+        stored = dict(prepared.result["verification"])
+        stored.pop("recorded_at")
+        return prepared, _closed_result({"verification_history": [stored]})
+
+    repository = SimpleNamespace(execute_evidence_transition_effects=replay)
+    with pytest.raises(EvidenceFailure, match="verification-projection-mismatch"):
+        run_verification_record(_request(), repository)
+
+
+def test_replay_rejects_a_stored_record_with_an_empty_clock_field():
+    from mission_application.artifact import EvidenceFailure
+    from mission_application.evidence import run_verification_record
+
+    current = {"phase": "executing", "loop_active": True, "session_id": "test"}
+
+    def replay(prepare):
+        prepared = prepare(current)
+        stored = {**prepared.result["verification"], "recorded_at": ""}
+        return prepared, _closed_result({"verification_history": [stored]})
+
+    repository = SimpleNamespace(execute_evidence_transition_effects=replay)
+    with pytest.raises(EvidenceFailure, match="verification-projection-mismatch"):
+        run_verification_record(_request(), repository)
