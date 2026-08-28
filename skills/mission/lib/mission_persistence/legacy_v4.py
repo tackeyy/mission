@@ -1089,14 +1089,14 @@ class V5CompatibilityRepository:
         self._reject_reentrant_entry(entry_label)
         if effect_transaction is not None:
             raise ValueError(
-                "effect_transaction is not supported by the v5 evidence executor"
+                f"effect_transaction={effect_transaction!r} is not supported by the v5 executor"
             )
         if verify_published is not None:
             raise ValueError(
-                "verify_published is not supported by the v5 evidence executor"
+                f"verify_published={verify_published!r} is not supported by the v5 executor"
             )
         if backup is not True:
-            raise ValueError("backup=False is not supported by the v5 evidence executor")
+            raise ValueError(f"backup={backup!r} is not supported by the v5 executor")
         with self.transaction():
             current = self.load()
             with self._callback_guard():
