@@ -1078,11 +1078,25 @@ class V5CompatibilityRepository:
         operations that do carry file effects (UpdateProgress,
         GenerateContextManifest) are rejected until a v5 publication path
         is implemented (#680 scope: verification record only).
+
+        The retained v4 lifecycle route likewise assumes effect-free commands:
+        if an evidence command with effects is added there,
+        _legacy_lifecycle_repository must first wire effect_transaction into
+        its legacy_factory before that command can use the v4 route.
         """
-        del effect_transaction, verify_published, backup
         # entry_label and result_error_detail keep each delegating caller's
         # diagnostics identical to the pre-delegation implementation.
         self._reject_reentrant_entry(entry_label)
+        if effect_transaction is not None:
+            raise ValueError(
+                "effect_transaction is not supported by the v5 evidence executor"
+            )
+        if verify_published is not None:
+            raise ValueError(
+                "verify_published is not supported by the v5 evidence executor"
+            )
+        if backup is not True:
+            raise ValueError("backup=False is not supported by the v5 evidence executor")
         with self.transaction():
             current = self.load()
             with self._callback_guard():

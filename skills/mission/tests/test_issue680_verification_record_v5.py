@@ -357,3 +357,109 @@ def test_v5_evidence_replay_matches_transition_replay_semantics():
     assert execution.replayed is True
     assert execution.decision is None
     assert execution.projection == current
+
+
+@pytest.mark.parametrize(
+    ("unsupported_argument", "unsupported_value"),
+    (
+        ("effect_transaction", object()),
+        ("verify_published", object()),
+        ("backup", False),
+    ),
+)
+def test_v5_evidence_executor_rejects_unsupported_arguments_before_prepare(
+    unsupported_argument, unsupported_value
+):
+    current = {"phase": "executing", "loop_active": True, "session_id": "portable"}
+    repository = _in_memory_v5_repository(current, replayed=True)
+
+    def prepare(_state):
+        raise AssertionError("unsupported arguments must be rejected before prepare")
+
+    with pytest.raises(ValueError, match=unsupported_argument):
+        repository.execute_evidence_transition_effects(
+            prepare, **{unsupported_argument: unsupported_value}
+        )
+
+
+@pytest.mark.parametrize(
+    ("unsupported_argument", "unsupported_value"),
+    (
+        ("effect_transaction", object()),
+        ("verify_published", object()),
+        ("backup", False),
+    ),
+)
+def test_v5_evidence_executor_reentrancy_fence_precedes_argument_validation(
+    unsupported_argument, unsupported_value
+):
+    from mission_persistence.fenced_commit import FencedCommitError
+
+    current = {"phase": "executing", "loop_active": True, "session_id": "portable"}
+    repository = _in_memory_v5_repository(current)
+    repository._callback_depth = 1
+
+    with pytest.raises(FencedCommitError) as error:
+        repository.execute_evidence_transition_effects(
+            _prepared_verification,
+            **{unsupported_argument: unsupported_value},
+        )
+
+    assert error.value.code == "request-invalid"
+
+
+def test_v5_delegating_transition_preserves_distinct_invalid_result_detail():
+    from mission_application.ports import PreparedTransitionOperation
+    from mission_persistence.fenced_commit import FencedCommitError
+
+    current = {"phase": "executing", "loop_active": True, "session_id": "portable"}
+    evidence = _prepared_verification(current)
+    transition = PreparedTransitionOperation(evidence.command, (), {})
+
+    def invalid_result_detail(call):
+        repository = _in_memory_v5_repository(current)
+        repository.execute = lambda _command: object()
+        with pytest.raises(FencedCommitError) as error:
+            call(repository)
+        assert error.value.code == "decision-invalid"
+        return error.value.detail
+
+    evidence_detail = invalid_result_detail(
+        lambda repository: repository.execute_evidence_transition_effects(
+            lambda _state: evidence
+        )
+    )
+    transition_detail = invalid_result_detail(
+        lambda repository: repository.execute_transition_effects(
+            lambda _state: transition
+        )
+    )
+
+    assert transition_detail != evidence_detail
+
+
+def test_v5_delegating_transition_preserves_distinct_reentrancy_detail():
+    from mission_persistence.fenced_commit import FencedCommitError
+
+    current = {"phase": "executing", "loop_active": True, "session_id": "portable"}
+
+    def reentrancy_detail(entry):
+        repository = _in_memory_v5_repository(current)
+        repository._callback_depth = 1
+        with pytest.raises(FencedCommitError) as error:
+            entry(repository)
+        assert error.value.code == "request-invalid"
+        return error.value.detail
+
+    evidence_detail = reentrancy_detail(
+        lambda repository: repository.execute_evidence_transition_effects(
+            _prepared_verification
+        )
+    )
+    transition_detail = reentrancy_detail(
+        lambda repository: repository.execute_transition_effects(
+            _prepared_verification
+        )
+    )
+
+    assert transition_detail != evidence_detail
