@@ -1184,9 +1184,12 @@ class V5CompatibilityRepository:
                     with self._callback_guard():
                         if verify_published is not None:
                             verify_published(prepared, effects, published)
+                            binding_valid = True
                         else:
-                            binding_valid = published == effects
-                    if verify_published is None and not binding_valid:
+                            # bool() is evaluated here as well: a foreign
+                            # __eq__ or __bool__ must not re-enter persistence.
+                            binding_valid = bool(published == effects)
+                    if not binding_valid:
                         raise ValueError("published-evidence-effect-binding-invalid")
                     execution = self.execute(prepared.command)
             else:

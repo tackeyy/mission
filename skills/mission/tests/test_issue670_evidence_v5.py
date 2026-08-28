@@ -156,3 +156,49 @@ def test_v5_publication_closes_the_transaction_on_success():
     with repository._guarded_context(publisher, (), None):
         pass
     assert closed == [True]
+
+
+def test_publication_binding_truth_value_cannot_reenter_persistence():
+    """`__eq__` and `__bool__` both run inside the re-entrancy guard (#670 review)."""
+    import contextlib
+
+    import pytest
+
+    from mission_application.artifact import make_evidence_effect
+    from mission_persistence.legacy_v4 import V5CompatibilityRepository
+
+    observed = {}
+
+    class _Truth:
+        def __init__(self, repository):
+            self._repository = repository
+
+        def __bool__(self):
+            observed["bool_depth"] = self._repository._callback_depth
+            return True
+
+    class _Published:
+        def __init__(self, repository):
+            self._repository = repository
+
+        def __eq__(self, other):
+            observed["eq_depth"] = self._repository._callback_depth
+            return _Truth(self._repository)
+
+    repository = V5CompatibilityRepository.__new__(V5CompatibilityRepository)
+    repository._callback_depth = 0
+    effects = (make_evidence_effect("evidence", "evidence.json", b"{}"),)
+
+    def publisher(_effects, _prepared=None):
+        @contextlib.contextmanager
+        def _managed():
+            yield _Published(repository)
+
+        return _managed()
+
+    with repository._guarded_context(publisher, effects, None) as published:
+        with repository._callback_guard():
+            binding_valid = bool(published == effects)
+    assert binding_valid is True
+    assert observed["eq_depth"] >= 1
+    assert observed["bool_depth"] >= 1
