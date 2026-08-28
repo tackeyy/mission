@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 
 from mission_kernel.commands import (
@@ -22,7 +23,6 @@ from mission_kernel.evidence import (
     project_progress_update,
     project_verification_entry,
 )
-
 from .artifact import EvidenceEffect, EvidenceFailure, make_evidence_effect
 
 
@@ -66,13 +66,60 @@ class VerificationRecordRequest:
     checks: object
 
 
+@dataclass(frozen=True)
+class PreparedVerificationRecord:
+    """Validated checks plus the caller-stable retry identity for one record."""
+
+    checks: object
+    operation_id: str
+    operation_command: object
+
+
+def prepare_verification_record_operation(
+    payload: object,
+    *,
+    iteration: object,
+    state_path: object,
+    compatibility_arguments,
+    canonical_operation,
+) -> PreparedVerificationRecord:
+    """Bind one verification payload to a caller-stable operation identity.
+
+    Without a stable operation id the repository mints a fresh one per
+    invocation, so a crash retry appends a second record instead of replaying
+    the first (#685).
+    """
+    checks = normalize_verification_checks(payload)
+    path = Path(state_path)
+    try:
+        state_bytes = path.read_bytes()
+    except OSError as error:
+        raise EvidenceFailure("verification-state-read-failed") from error
+    target_digest = "sha256:" + hashlib.sha256(state_bytes).hexdigest()
+    caller_operation_id, arguments = compatibility_arguments(
+        {"iteration": iteration},
+        target_digest=target_digest,
+        require_caller=False,
+    )
+    operation_id, operation_command = canonical_operation(
+        path.stem,
+        "verification-record",
+        arguments,
+        caller_operation_id=caller_operation_id,
+    )
+    return PreparedVerificationRecord(checks, operation_id, operation_command)
+
+
 def execute_evidence_operation(repository: object, prepare) -> dict:
     execute = getattr(repository, "execute_evidence_transition_effects", None)
     if not callable(execute):
         raise EvidenceFailure("evidence-repository-invalid")
     prepared, execution = execute(prepare)
     decision = getattr(execution, "decision", None)
-    if decision is None or decision.accepted is not True:
+    if decision is None:
+        if not getattr(execution, "replayed", False):
+            raise EvidenceFailure("evidence-transition-rejected")
+    elif decision.accepted is not True:
         rejection = getattr(decision, "rejection", None)
         raise EvidenceFailure(
             getattr(rejection, "code", "evidence-transition-rejected")

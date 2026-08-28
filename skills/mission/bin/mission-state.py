@@ -200,7 +200,7 @@ from mission_application.evidence import (  # noqa: E402
     ProgressUpdateRequest,
     VerificationRecordRequest,
     evidence_publication_paths,
-    normalize_verification_checks,
+    prepare_verification_record_operation,
     run_context_manifest,
     run_progress_clear,
     run_progress_update,
@@ -13981,23 +13981,29 @@ def cmd_verification_record(args):
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise SystemExit(f"verification payload is not valid JSON: {exc}")
-    try:
-        checks = normalize_verification_checks(payload)
-    except EvidenceFailure as exc:
-        raise SystemExit(exc.code) from exc
-
     cwd = Path.cwd()
     sf = resolve_state_file(cwd)
     if not sf.exists():
         print("ERROR: state file が見つかりません。先に init してください。", file=sys.stderr)
         sys.exit(1)
     try:
+        prepared = prepare_verification_record_operation(
+            payload,
+            iteration=args.iteration,
+            state_path=sf,
+            compatibility_arguments=_compatibility_operation_arguments,
+            canonical_operation=_canonical_compatibility_operation,
+        )
         result = run_verification_record(
             VerificationRecordRequest(
-                now=iso_now(), iteration=args.iteration, checks=checks
+                now=iso_now(), iteration=args.iteration, checks=prepared.checks
             ),
             _legacy_lifecycle_repository(
-                cwd, sf, stamp=True, pre_admit_lease=True
+                cwd, sf, stamp=True, pre_admit_lease=True,
+                session_id=sf.stem,
+                operation_id=prepared.operation_id,
+                operation_command=prepared.operation_command,
+                operation_command_type="verification-record",
             ),
         )
     except EvidenceFailure as exc:
