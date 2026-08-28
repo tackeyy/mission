@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, replace
 import hashlib
+import json
+import subprocess
+from dataclasses import dataclass, replace
 from pathlib import Path
+from datetime import datetime, timezone
 
 from mission_kernel.commands import (
+    ClaimsLedgerEffectClaim,
+    GenerateClaimsLedger,
     ClearProgress,
     Command,
     ContextManifestEffectClaim,
@@ -17,6 +22,8 @@ from mission_kernel.commands import (
     UpdateProgress,
     VerificationCheck,
 )
+from .claims_ledger import parse_claim_detail
+from .claims_ledger import project_claims_ledger
 from mission_kernel.evidence import (
     EvidenceRuleError,
     project_context_manifest,
@@ -128,6 +135,42 @@ def prepare_verification_record_operation(
     )
     return PreparedVerificationRecord(checks, operation_id, operation_command, kind)
 
+class ClaimsLedgerRequest:
+    now: object
+    iteration: object
+    doc_digest: object
+    publication_path: object
+    git: object
+
+
+@dataclass(frozen=True)
+class ClaimsLedgerCliRequest:
+    cwd: Path
+    iteration: object
+    doc_digest: object
+    output_path: object
+
+
+@dataclass(frozen=True)
+class ClaimsLedgerCliServices:
+    resolve_state_file: object
+    resolve_output_path: object
+    repository: object
+
+
+class ClaimsLedgerGit:
+    def __init__(self, cwd: Path):
+        self.cwd = cwd
+
+    def _git(self, *args: str) -> str:
+        return subprocess.run(["git", *args], cwd=self.cwd, capture_output=True, text=True, check=True).stdout.strip()
+
+    def head_commit(self) -> str:
+        return self._git("rev-parse", "HEAD")
+
+    def blob_at(self, commit: str, path: str) -> str:
+        return self._git("rev-parse", f"{commit}:{path}")
+
 
 def execute_evidence_operation(repository: object, prepare) -> dict:
     execute = getattr(repository, "execute_evidence_transition_effects", None)
@@ -191,6 +234,10 @@ def execute_evidence_operation(repository: object, prepare) -> dict:
             raise EvidenceFailure("verification-projection-mismatch")
         if replayed:
             payload["verification"] = copy.deepcopy(record)
+    elif isinstance(command, GenerateClaimsLedger):
+        record = (projection.get("claims_ledgers") or {}).get(str(command.iteration))
+        if not isinstance(record, dict) or record.get("digest") != payload.get("digest"):
+            raise EvidenceFailure("claims-ledger-projection-mismatch")
     return payload
 
 
@@ -247,7 +294,7 @@ def evidence_publication_paths(
 ) -> tuple[str, ...]:
     """Return publication destinations solely from immutable command claims."""
     command = getattr(prepared, "command", None)
-    if isinstance(command, GenerateContextManifest):
+    if isinstance(command, (GenerateContextManifest, GenerateClaimsLedger)):
         if len(effects) != 1 or command.effect.target != effects[0].target:
             raise EvidenceFailure("context-effect-claim-invalid")
         return (command.effect.publication_path,)
@@ -348,6 +395,42 @@ def run_verification_record(
             kind=request.kind,
         ),
     )
+
+
+def run_claims_ledger(request: ClaimsLedgerRequest, repository: object) -> dict:
+    return execute_evidence_operation(
+        repository,
+        lambda state: prepare_claims_ledger(
+            state, now=request.now, iteration=request.iteration,
+            doc_digest=request.doc_digest, publication_path=request.publication_path,
+            git=request.git,
+        ),
+    )
+
+
+def run_claims_ledger_cli(request: ClaimsLedgerCliRequest, services: ClaimsLedgerCliServices) -> dict:
+    state_file = services.resolve_state_file(request.cwd)
+    if not state_file.exists():
+        raise EvidenceFailure("state-file-missing")
+    output = Path(str(request.output_path))
+    if not output.name or output.name in {".", ".."}:
+        raise EvidenceFailure("claims-ledger-output-invalid")
+    services.resolve_output_path(request.cwd, str(output))
+    return run_claims_ledger(
+        ClaimsLedgerRequest(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), request.iteration, request.doc_digest, str(output), ClaimsLedgerGit(request.cwd)),
+        services.repository(request.cwd, state_file, stamp=False),
+    )
+
+
+def render_claims_ledger_cli(args: object, services: ClaimsLedgerCliServices) -> str:
+    """Adapt parsed CLI values without letting the adapter own policy or I/O."""
+    result = run_claims_ledger_cli(
+        ClaimsLedgerCliRequest(
+            Path.cwd(), getattr(args, "iteration"), getattr(args, "doc_digest"), getattr(args, "out")
+        ),
+        services,
+    )
+    return json.dumps({"ok": True, **result}, ensure_ascii=False, indent=2)
 
 
 def _translate(call):
@@ -474,6 +557,14 @@ def normalize_verification_checks(payload: object) -> tuple[VerificationCheck, .
             raise EvidenceFailure("verification-check-ok-invalid")
         name = check.get("name")
         detail = check.get("detail")
+        name = check.get("name")
+        if isinstance(name, str) and name.startswith("implementation-verified:"):
+            if not name[len("implementation-verified:"):]:
+                raise EvidenceFailure("implementation-claim-name-invalid")
+            try:
+                parse_claim_detail(detail)
+            except ValueError as exc:
+                raise EvidenceFailure("implementation-claim-detail-invalid") from exc
         normalized.append(
             VerificationCheck(
                 name if isinstance(name, str) and name else f"check-{index}",
@@ -519,3 +610,22 @@ def prepare_verification_record(
         {"verification": copy.deepcopy(entry)},
         volatile_fields=("recorded_at",),
     )
+
+
+def prepare_claims_ledger(
+    state: object, *, now: object, iteration: object, doc_digest: object,
+    publication_path: object, git: object,
+) -> PreparedEvidenceOperation:
+    if not isinstance(state, dict):
+        raise EvidenceFailure("state-invalid")
+    try:
+        ledger = project_claims_ledger(state, iteration=iteration, doc_digest=doc_digest, git=git)
+    except ValueError as exc:
+        raise EvidenceFailure(str(exc)) from exc
+    content = json.dumps(ledger, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    effect = make_evidence_effect("claims-ledger", Path(str(publication_path)).name, content)
+    command = GenerateClaimsLedger(
+        now, iteration, doc_digest,
+        ClaimsLedgerEffectClaim(effect.kind, effect.target, str(publication_path), effect.digest, effect.size),
+    )
+    return PreparedEvidenceOperation(command, (effect,), {"ledger": copy.deepcopy(ledger), "digest": effect.digest})
