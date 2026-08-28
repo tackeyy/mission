@@ -64,6 +64,7 @@ class VerificationRecordRequest:
     now: object
     iteration: object
     checks: object
+    kind: object = "execution"
 
 
 def execute_evidence_operation(repository: object, prepare) -> dict:
@@ -207,6 +208,7 @@ def run_verification_record(
             now=request.now,
             iteration=request.iteration,
             checks=request.checks,
+            kind=request.kind,
         ),
     )
 
@@ -341,6 +343,17 @@ def normalize_verification_checks(payload: object) -> tuple[VerificationCheck, .
     return tuple(normalized)
 
 
+def normalize_verification_payload(
+    payload: object,
+) -> tuple[str, tuple[VerificationCheck, ...]]:
+    if not isinstance(payload, dict):
+        raise EvidenceFailure("verification-payload-invalid")
+    kind = payload.get("kind", "execution")
+    if kind not in ("execution", "implementation-read"):
+        raise EvidenceFailure("verification-kind-invalid")
+    return kind, normalize_verification_checks(payload)
+
+
 def validate_context_iteration_override(value: object) -> None:
     """Validate an explicit CLI override while allowing state-derived defaults."""
     if value is not None and (type(value) is not int or value < 1):
@@ -353,10 +366,11 @@ def prepare_verification_record(
     now: object,
     iteration: object,
     checks: object,
+    kind: object = "execution",
 ) -> PreparedEvidenceOperation:
     if not isinstance(state, dict):
         raise EvidenceFailure("state-invalid")
-    command = RecordVerification(now, iteration, checks)
+    command = RecordVerification(now, iteration, checks, kind)
     entry = _translate(lambda: project_verification_entry(command))
     return PreparedEvidenceOperation(
         command, (), {"verification": copy.deepcopy(entry)}

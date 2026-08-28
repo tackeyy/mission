@@ -228,6 +228,7 @@ def test_four_evidence_reducers_own_only_their_observation_fields():
     assert final["verification_history"] == [
         {
             "iteration": -1,
+            "kind": "execution",
             "status": "failed",
             "checks": [
                 {"name": "tests", "ok": True, "detail": "12 passed"},

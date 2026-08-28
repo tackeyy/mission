@@ -200,7 +200,7 @@ from mission_application.evidence import (  # noqa: E402
     ProgressUpdateRequest,
     VerificationRecordRequest,
     evidence_publication_paths,
-    normalize_verification_checks,
+    normalize_verification_payload,
     run_context_manifest,
     run_progress_clear,
     run_progress_update,
@@ -13982,7 +13982,7 @@ def cmd_verification_record(args):
     except json.JSONDecodeError as exc:
         raise SystemExit(f"verification payload is not valid JSON: {exc}")
     try:
-        checks = normalize_verification_checks(payload)
+        kind, checks = normalize_verification_payload(payload)
     except EvidenceFailure as exc:
         raise SystemExit(exc.code) from exc
 
@@ -13994,7 +13994,7 @@ def cmd_verification_record(args):
     try:
         result = run_verification_record(
             VerificationRecordRequest(
-                now=iso_now(), iteration=args.iteration, checks=checks
+                now=iso_now(), iteration=args.iteration, checks=checks, kind=kind
             ),
             _legacy_lifecycle_repository(
                 cwd, sf, stamp=True, pre_admit_lease=True
