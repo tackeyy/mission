@@ -219,6 +219,11 @@ class LegacyV4Repository:
             [tuple[EvidenceEffect, ...]], ContextManager[object]
         ]
         | None = None,
+        effect_publisher: Callable[
+            [object, tuple[EvidenceEffect, ...], object], ContextManager[object]
+        ]
+        | None = None,
+        effect_context: object = None,
         format_guard: Callable[[], object] | None = None,
     ) -> None:
         self._lock = lock
@@ -241,7 +246,14 @@ class LegacyV4Repository:
             raise ValueError("aggregate coordinator callbacks must be supplied together")
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._lease_ttl_seconds = lease_ttl_seconds
-        self._effect_transaction = effect_transaction
+        if effect_transaction is not None and effect_publisher is not None:
+            raise ValueError("effect transaction configuration is ambiguous")
+        if effect_publisher is not None:
+            self._effect_transaction = lambda effects, prepared=None: effect_publisher(
+                effect_context, effects, prepared
+            )
+        else:
+            self._effect_transaction = effect_transaction
         self._format_guard = format_guard
         self._callback_depth = 0
         self._transaction_depth = 0
@@ -748,6 +760,15 @@ class V5CompatibilityRepository:
         aggregate_recover: Callable[[], None] | None = None,
         aggregate_prepare: Callable[[str], object] | None = None,
         aggregate_finalize: Callable[[object], None] | None = None,
+        effect_transaction: Callable[
+            [tuple[EvidenceEffect, ...], object], ContextManager[object]
+        ]
+        | None = None,
+        effect_publisher: Callable[
+            [object, tuple[EvidenceEffect, ...], object], ContextManager[object]
+        ]
+        | None = None,
+        effect_context: object = None,
         lease_committed: Callable[[PendingLease, dict], None] | None = None,
         format_guard: Callable[[], object] | None = None,
         operation_id: str | None = None,
@@ -775,6 +796,14 @@ class V5CompatibilityRepository:
         self._aggregate_recover = aggregate_recover
         self._aggregate_prepare = aggregate_prepare
         self._aggregate_finalize = aggregate_finalize
+        if effect_transaction is not None and effect_publisher is not None:
+            raise ValueError("effect transaction configuration is ambiguous")
+        if effect_publisher is not None:
+            self._effect_transaction = lambda effects, prepared=None: effect_publisher(
+                effect_context, effects, prepared
+            )
+        else:
+            self._effect_transaction = effect_transaction
         aggregate_callbacks = (
             aggregate_recover,
             aggregate_prepare,
@@ -822,6 +851,7 @@ class V5CompatibilityRepository:
         "_aggregate_recover",
         "_aggregate_prepare",
         "_aggregate_finalize",
+        "_effect_transaction",
         "_lease_committed",
     )
 
@@ -845,6 +875,28 @@ class V5CompatibilityRepository:
                 "request-invalid",
                 "%s is not allowed while a decision is being executed" % operation,
             )
+
+    @contextlib.contextmanager
+    def _guarded_context(self, factory, *args):
+        """Run one injected publication context outside the commit boundary."""
+        with self._callback_guard():
+            manager = factory(*args)
+            manager_type = type(manager)
+            enter = manager_type.__enter__
+            exit_ = manager_type.__exit__
+            entered = enter(manager)
+        try:
+            yield entered
+        except BaseException as error:
+            with self._callback_guard():
+                suppressed = bool(
+                    exit_(manager, type(error), error, error.__traceback__)
+                )
+            if not suppressed:
+                raise
+        else:
+            with self._callback_guard():
+                exit_(manager, None, None, None)
 
     def _request(self) -> ExecutionRequest:
         operation_id = self._operation_id or "compat:" + secrets.token_hex(16)
@@ -1071,19 +1123,7 @@ class V5CompatibilityRepository:
         verify_published: object | None = None,
         backup: bool = True,
     ) -> tuple[object, LegacyCommandExecutionResult]:
-        """Run an effect-free evidence command on the v5 fenced repository.
-
-        RecordVerification produces no file effects, so the same effect-free
-        path used by execute_transition_effects is safe here.  Evidence
-        operations that do carry file effects (UpdateProgress,
-        GenerateContextManifest) are rejected until a v5 publication path
-        is implemented (#680 scope: verification record only).
-
-        The retained v4 lifecycle route likewise assumes effect-free commands:
-        if an evidence command with effects is added there,
-        _legacy_lifecycle_repository must first wire effect_transaction into
-        its legacy_factory before that command can use the v4 route.
-        """
+        """Prepare, publish, and commit one typed evidence command on v5."""
         # entry_label and result_error_detail keep each delegating caller's
         # diagnostics identical to the pre-delegation implementation.
         self._reject_reentrant_entry(entry_label)
@@ -1104,8 +1144,6 @@ class V5CompatibilityRepository:
             if not isinstance(prepared, operation_type):
                 raise ValueError(operation_error)
             effects = self.validate_effects(prepared.effects)
-            if effects:
-                raise ValueError(effects_error)
             if self.operation_replayed:
                 frozen = freeze_json_value(current)
                 assert isinstance(frozen, FrozenJsonObject)
@@ -1116,9 +1154,39 @@ class V5CompatibilityRepository:
             # checking on the path that is about to publish a generation.
             state = _legacy_command_state(current, prepared.command)
             decision = decide(state, prepared.command)
+            if not isinstance(decision, Decision):
+                raise FencedCommitError(
+                    "decision-invalid", "decision result type is invalid"
+                )
+            if not decision.accepted:
+                if decision.transition is not None or decision.rejection is None:
+                    raise FencedCommitError(
+                        "decision-invalid", "rejected decision is not closed"
+                    )
+                frozen_current = freeze_json_value(current)
+                assert isinstance(frozen_current, FrozenJsonObject)
+                return prepared, LegacyCommandExecutionResult(
+                    decision, frozen_current
+                )
+            if decision.transition is None or decision.rejection is not None:
+                raise FencedCommitError(
+                    "decision-invalid", "accepted decision is not closed"
+                )
             if decision.transition is not None:
                 bind_transition_effects(decision.transition, effects)
-            execution = self.execute(prepared.command)
+            if effects:
+                publisher = effect_transaction or self._effect_transaction
+                if publisher is None:
+                    raise ValueError("evidence-effect-transaction-missing")
+                with self._guarded_context(publisher, effects, prepared) as published:
+                    if verify_published is not None:
+                        with self._callback_guard():
+                            verify_published(prepared, effects, published)
+                    elif published != effects:
+                        raise ValueError("published-evidence-effect-binding-invalid")
+                    execution = self.execute(prepared.command)
+            else:
+                execution = self.execute(prepared.command)
             if not isinstance(execution, LegacyCommandExecutionResult):
                 raise FencedCommitError("decision-invalid", result_error_detail)
             return prepared, execution

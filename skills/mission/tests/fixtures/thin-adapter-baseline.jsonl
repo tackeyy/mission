@@ -133,7 +133,6 @@
 {"path":"skills/mission/bin/mission-state.py","function":"_lease_now","rules":{"call.non-allowlisted":5,"control.branch":2,"io.direct":1,"logic.compare":2,"time.policy":1}}
 {"path":"skills/mission/bin/mission-state.py","function":"_lease_ttl_seconds","rules":{"call.non-allowlisted":2,"control.branch":2,"io.direct":1,"logic.compare":1,"logic.threshold-literal":1}}
 {"path":"skills/mission/bin/mission-state.py","function":"_lease_write_reason","rules":{"call.non-allowlisted":1,"logic.arithmetic":1}}
-{"path":"skills/mission/bin/mission-state.py","function":"_legacy_evidence_repository","rules":{"call.non-allowlisted":16,"control.branch":1,"io.direct":1,"logic.boolean":1,"logic.business-container":1,"time.policy":1}}
 {"path":"skills/mission/bin/mission-state.py","function":"_legacy_lifecycle_repository","rules":{"call.non-allowlisted":56,"control.branch":18,"io.direct":5,"logic.arithmetic":9,"logic.boolean":6,"logic.compare":10,"logic.comprehension":1,"logic.threshold-literal":18,"time.policy":1}}
 {"path":"skills/mission/bin/mission-state.py","function":"_lint_state_artifact","rules":{"call.non-allowlisted":23,"control.branch":10,"logic.arithmetic":4,"logic.boolean":1,"logic.business-container":1,"logic.compare":5,"state.raw-access":6}}
 {"path":"skills/mission/bin/mission-state.py","function":"_load_authoritative_state","rules":{"call.non-allowlisted":11,"control.branch":6,"logic.boolean":1,"logic.business-container":2,"logic.compare":5}}
@@ -301,7 +300,6 @@
 {"path":"skills/mission/bin/mission-state.py","function":"_score_provenance_counts","rules":{"call.non-allowlisted":12,"control.branch":5,"control.loop":2,"logic.arithmetic":5,"logic.boolean":3,"logic.business-container":2,"logic.compare":7,"logic.comprehension":1,"logic.threshold-literal":8,"state.raw-access":2}}
 {"path":"skills/mission/bin/mission-state.py","function":"_scoring_archive_path","rules":{"call.non-allowlisted":3,"io.direct":1,"logic.arithmetic":2,"logic.boolean":1,"logic.threshold-literal":1,"state.raw-access":1}}
 {"path":"skills/mission/bin/mission-state.py","function":"_scoring_metadata_header","rules":{"call.non-allowlisted":3,"logic.boolean":1,"state.raw-access":3}}
-{"path":"skills/mission/bin/mission-state.py","function":"_select_legacy_repository_for_cli","rules":{"call.non-allowlisted":9}}
 {"path":"skills/mission/bin/mission-state.py","function":"_select_repository_for_cli","rules":{"call.non-allowlisted":11}}
 {"path":"skills/mission/bin/mission-state.py","function":"_selected_specialist_skills","rules":{"call.non-allowlisted":4,"logic.boolean":2,"logic.business-container":1,"logic.comprehension":1,"state.raw-access":1}}
 {"path":"skills/mission/bin/mission-state.py","function":"_selection_from_decision","rules":{"call.non-allowlisted":9,"control.branch":2,"logic.arithmetic":1,"logic.boolean":4,"logic.business-container":2,"logic.compare":3,"logic.comprehension":2,"logic.threshold-literal":1}}
