@@ -13,11 +13,19 @@ fi
 
 INPUT=$(cat)
 
+# mission-state.py の起動には Python のインタプリタ起動と import が含まれ、
+# cold start では数秒かかる。実測で 5 秒を超えることがあり、その場合 guard は
+# 判定材料を得られないまま block へ倒れて Stop のたびに止まり続ける。
+# 上限は「遅いだけの正常な起動」を殺さず、「本当に固まった呼び出し」は
+# 切れる幅にする。環境変数で上書きできるようにし、計測結果に応じて
+# 調整できる余地を残す。
+MISSION_STATE_TIMEOUT="${MISSION_STATE_TIMEOUT:-30}"
+
 _mission_state_bounded() {
   if command -v timeout >/dev/null 2>&1; then
-    timeout 5 python3 "$MISSION_STATE_PY" "$@"
+    timeout "$MISSION_STATE_TIMEOUT" python3 "$MISSION_STATE_PY" "$@"
   elif command -v perl >/dev/null 2>&1; then
-    perl -e 'alarm shift; exec @ARGV' 5 python3 "$MISSION_STATE_PY" "$@"
+    perl -e 'alarm shift; exec @ARGV' "$MISSION_STATE_TIMEOUT" python3 "$MISSION_STATE_PY" "$@"
   else
     python3 "$MISSION_STATE_PY" "$@"
   fi
