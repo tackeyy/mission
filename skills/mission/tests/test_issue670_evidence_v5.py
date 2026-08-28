@@ -158,14 +158,39 @@ def test_v5_publication_closes_the_transaction_on_success():
     assert closed == [True]
 
 
-def test_publication_binding_truth_value_cannot_reenter_persistence():
-    """`__eq__` and `__bool__` both run inside the re-entrancy guard (#670 review)."""
+def test_publication_binding_truth_value_cannot_reenter_persistence(tmp_path, run_cli):
+    """`__eq__` and `__bool__` both run inside the production guard (#670 review).
+
+    The probe goes through `execute_evidence_transition_effects` so moving the
+    truth-value evaluation back outside the guard fails this test.
+    """
     import contextlib
+    import importlib.util
+    import os
+    from pathlib import Path
 
-    import pytest
+    from mission_application.evidence import ContextManifestRequest, prepare_context_manifest
 
-    from mission_application.artifact import make_evidence_effect
-    from mission_persistence.legacy_v4 import V5CompatibilityRepository
+    base_env = _v5_env(tmp_path)
+    init = run_cli(
+        "init", "v5 guard probe", "--complexity", "Standard",
+        cwd=tmp_path, env_extra=base_env, check=True,
+    )
+    lease = json.loads(
+        [line for line in init.stderr.splitlines() if "MISSION_LEASE_CARRIER=" in line][-1]
+        .split("MISSION_LEASE_CARRIER=", 1)[1]
+    )
+    env = {
+        **base_env,
+        "MISSION_SESSION_ID": "test",
+        "MISSION_LEASE_ID": lease["lease_id"],
+    }
+    spec = importlib.util.spec_from_file_location(
+        "mission_state_guard_probe",
+        Path(__file__).resolve().parent.parent / "bin" / "mission-state.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
 
     observed = {}
 
@@ -185,20 +210,42 @@ def test_publication_binding_truth_value_cannot_reenter_persistence():
             observed["eq_depth"] = self._repository._callback_depth
             return _Truth(self._repository)
 
-    repository = V5CompatibilityRepository.__new__(V5CompatibilityRepository)
-    repository._callback_depth = 0
-    effects = (make_evidence_effect("evidence", "evidence.json", b"{}"),)
+    previous = os.getcwd()
+    previous_env = {key: os.environ.get(key) for key in env}
+    os.chdir(tmp_path)
+    os.environ.update(env)
+    try:
+        state_file = module.resolve_state_file(Path.cwd())
+        repository = module._legacy_lifecycle_repository(
+            Path.cwd(), state_file, stamp=True, pre_admit_lease=True
+        )
 
-    def publisher(_effects, _prepared=None):
-        @contextlib.contextmanager
-        def _managed():
-            yield _Published(repository)
+        def publisher(_effects, _prepared=None):
+            @contextlib.contextmanager
+            def _managed():
+                yield _Published(repository)
 
-        return _managed()
+            return _managed()
 
-    with repository._guarded_context(publisher, effects, None) as published:
-        with repository._callback_guard():
-            binding_valid = bool(published == effects)
-    assert binding_valid is True
+        def prepare(state):
+            return prepare_context_manifest(
+                state,
+                now="2030-01-01T00:00:00Z",
+                iteration=1,
+                publication_path="reports/guard.json",
+            )
+
+        # The v5 executor only accepts its own injected publisher, so the probe
+        # replaces that binding rather than passing one in.
+        repository._effect_transaction = publisher
+        repository.execute_evidence_transition_effects(prepare)
+    finally:
+        os.chdir(previous)
+        for key, value in previous_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
     assert observed["eq_depth"] >= 1
     assert observed["bool_depth"] >= 1
