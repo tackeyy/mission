@@ -90,3 +90,69 @@ def test_v5_artifact_and_progress_commands_publish_and_update_state(tmp_path, ru
         )
 
     assert (tmp_path / "reports" / "artifact.md").exists()
+
+
+def test_v5_publication_rolls_back_when_the_commit_fails():
+    """An exception after publication must remove the published file (#670 review).
+
+    The remaining exposure is a hard process kill between publication and
+    commit, which the v4 route shares; it is tracked separately.
+    """
+    import pytest
+
+    from mission_kernel.json_codec import freeze_json_value
+    from mission_persistence.legacy_v4 import V5CompatibilityRepository
+
+    published_paths = []
+
+    class _Boom(RuntimeError):
+        pass
+
+    def publisher(effects, prepared=None):
+        import contextlib
+
+        @contextlib.contextmanager
+        def _managed():
+            published_paths.append("published")
+            try:
+                yield effects
+            except BaseException:
+                published_paths.remove("published")
+                raise
+
+        return _managed()
+
+    repository = V5CompatibilityRepository.__new__(V5CompatibilityRepository)
+    repository._callback_depth = 0
+    repository._effect_transaction = publisher
+
+    from mission_application.artifact import make_evidence_effect
+
+    effects = (make_evidence_effect("evidence", "evidence.json", b"{}"),)
+    with pytest.raises(_Boom):
+        with repository._guarded_context(publisher, effects, None):
+            raise _Boom("commit failed")
+    assert published_paths == []
+
+
+def test_v5_publication_closes_the_transaction_on_success():
+    """The publication context closes normally when nothing raises."""
+    import contextlib
+
+    from mission_persistence.legacy_v4 import V5CompatibilityRepository
+
+    closed = []
+
+    def publisher(effects, prepared=None):
+        @contextlib.contextmanager
+        def _managed():
+            yield effects
+            closed.append(True)
+
+        return _managed()
+
+    repository = V5CompatibilityRepository.__new__(V5CompatibilityRepository)
+    repository._callback_depth = 0
+    with repository._guarded_context(publisher, (), None):
+        pass
+    assert closed == [True]

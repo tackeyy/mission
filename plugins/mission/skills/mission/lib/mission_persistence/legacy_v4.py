@@ -1179,10 +1179,14 @@ class V5CompatibilityRepository:
                 if publisher is None:
                     raise ValueError("evidence-effect-transaction-missing")
                 with self._guarded_context(publisher, effects, prepared) as published:
-                    if verify_published is not None:
-                        with self._callback_guard():
+                    # The comparison itself can re-enter through a foreign
+                    # __ne__, so it runs under the same guard as the callback.
+                    with self._callback_guard():
+                        if verify_published is not None:
                             verify_published(prepared, effects, published)
-                    elif published != effects:
+                        else:
+                            binding_valid = published == effects
+                    if verify_published is None and not binding_valid:
                         raise ValueError("published-evidence-effect-binding-invalid")
                     execution = self.execute(prepared.command)
             else:
