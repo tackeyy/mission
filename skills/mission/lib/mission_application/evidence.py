@@ -135,6 +135,8 @@ def prepare_verification_record_operation(
     )
     return PreparedVerificationRecord(checks, operation_id, operation_command, kind)
 
+
+@dataclass(frozen=True)
 class ClaimsLedgerRequest:
     now: object
     iteration: object

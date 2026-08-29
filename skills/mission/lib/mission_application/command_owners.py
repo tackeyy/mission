@@ -44,6 +44,7 @@ COMMAND_OWNER_REGISTRY = {
         "context-manifest",
         "progress clear",
         "progress update",
+        "verification claims",
         "verification record",
     ),
     **_owned(
