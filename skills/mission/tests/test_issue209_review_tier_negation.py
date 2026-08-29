@@ -71,36 +71,40 @@ def _counted_decision(
     return cost, decision
 
 
-def _min_elapsed_decision(mission: str, *, repeat: int = 3) -> float:
-    """Return the fastest of ``repeat` runs.
+def _min_cpu_decision(mission: str, *, repeat: int = 2) -> float:
+    """Return the smallest CPU time observed over ``repeat`` runs.
 
-    絶対の壁時間を成功条件にすると、負荷が乗っただけで落ちる（#703）。ここで
-    守りたいのは「入力長に対して超線形に伸びないこと」であり、それは 2 つの入力長の
-    **比**で表せる。比なら負荷は両者に等しく乗るため打ち消し合う。
+    壁時間を成功条件にすると、負荷が乗っただけで落ちる（#703）。守りたい性質は
+    「入力長に対して超線形に伸びないこと」であり、これは計算量の話なので
+    **CPU 時間**で測るのが正しい。他プロセスに CPU を奪われて待たされた時間は
+    ``process_time`` に計上されないため、負荷の影響をそもそも受けない。
 
-    さらに、スケジューリングや GC による揺れは所要時間を**増やす方向にしか働かない**
-    ため、最小値は真の所要時間に対する頑健な推定量になる。
+    残る揺れ（GC、キャッシュ）は CPU 時間を**増やす方向にしか働かない**ため、
+    最小値が真のコストに対する頑健な推定量になる。
     """
     best = None
     for _ in range(repeat):
-        started = time.perf_counter()
+        started = time.process_time()
         _decision(mission)
-        elapsed = time.perf_counter() - started
-        best = elapsed if best is None else min(best, elapsed)
+        used = time.process_time() - started
+        best = used if best is None else min(best, used)
     return best
 
 
-def _assert_scales_below_quadratic(build_mission, *, small=1_000, large=4_000):
-    """入力を 4 倍にしても所要時間が 8 倍未満であることを確認する。
+# 入力を 4 倍にしたときの許容比。線形なら約 4 倍、二次なら約 16 倍なので中間に置く。
+# 実測（CPU 時間・アイドル）は adversarial 3.69x / repeated 4.36x / dense 3.88x で、
+# いずれもほぼ線形。閾値 8 倍は真値に対して約 2 倍の余裕がある。
+_SUPERLINEAR_RATIO_LIMIT = 8
 
-    線形なら約 4 倍、二次なら約 16 倍。閾値 8 はその中間に置く。
-    """
-    small_elapsed = _min_elapsed_decision(build_mission(small))
-    large_elapsed = _min_elapsed_decision(build_mission(large))
-    ratio = large_elapsed / small_elapsed if small_elapsed > 0 else float("inf")
-    assert large_elapsed < small_elapsed * 8, (
-        f"superlinear growth: small({small})={small_elapsed:.4f}s "
-        f"large({large})={large_elapsed:.4f}s ratio={ratio:.2f}x (limit=8x)"
+
+def _assert_scales_below_quadratic(build_mission, *, small=1_000, large=4_000):
+    small_cpu = _min_cpu_decision(build_mission(small))
+    large_cpu = _min_cpu_decision(build_mission(large))
+    ratio = large_cpu / small_cpu if small_cpu > 0 else float("inf")
+    assert large_cpu < small_cpu * _SUPERLINEAR_RATIO_LIMIT, (
+        f"superlinear growth: small({small})={small_cpu:.4f}s "
+        f"large({large})={large_cpu:.4f}s ratio={ratio:.2f}x "
+        f"(limit={_SUPERLINEAR_RATIO_LIMIT}x)"
     )
 
 
@@ -1188,7 +1192,12 @@ def test_adversarial_long_mission_detector_rejects_quadratic_cost(monkeypatch):
 
     def quadratic(*args, **kwargs):
         mission_text = args[0]
-        time.sleep((len(mission_text) / 20_000.0) ** 2 * 0.02)
+        # CPU 時間で測っているため、注入する負荷も CPU を実際に使う必要がある
+        # （sleep は process_time に計上されず、検出力の実証にならない）。
+        units = int((len(mission_text) / 25.0) ** 2)
+        total = 0
+        for value in range(units):
+            total += value
         return original(*args, **kwargs)
 
     monkeypatch.setattr(module, "_actual_operation_signal_detail", quadratic)
