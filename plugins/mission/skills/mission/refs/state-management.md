@@ -652,8 +652,8 @@ issue 起票 → worktree feature ブランチ → PR (本文に `Closes #N` を
 
 ### マージコマンドの選び方
 
-- merge の入口は `gate-and-merge <PR>` の 1 本だけ。コマンドは repo lease を処理全体で保持し、`origin/main` を fetch、scratch worktree で PR head と統合、既存 `scripts/ci_changed_scopes.js` が選ぶ全スイートまたは docs-only fast path を `make test` で実行、main と head を再照合してから `gh pr merge --match-head-commit <sha> --squash` を呼び、結果を read-back する。
-- コンフリクト、fetch/解析失敗、suite red、base/head 移動、merge/read-back 不一致はすべて fail-closed とし、非 0 で停止する。コンフリクト時は手動統合 → refreeze → fresh review 後に最初から再実行する。
+- merge の入口は `gate-and-merge <PR>` の 1 本だけ。コマンドは repo lease を処理全体で保持し、`origin` から repository identity と default branch を解決（`git ls-remote --symref origin HEAD`）、その default branch を fetch、scratch worktree で PR head と統合、既存 `scripts/ci_changed_scopes.js` が選ぶ全スイートまたは docs-only fast path を `make test` で実行、default branch と head を再照合してから `gh pr merge --match-head-commit <sha> --squash` を呼び、結果を read-back する。
+- コンフリクト、fetch/解析失敗、suite red、base/head 移動、default branch や origin identity の移動、merge/read-back 不一致はすべて fail-closed とし、非 0 で停止する。コンフリクト時は手動統合 → refreeze → fresh review 後に最初から再実行する。
 - queue を使う構成は `queue verify` → `gate-and-merge <PR> --expected-head-sha <head_sha> --expected-base-sha <accepted_base_sha>` の順に委譲し、使わない構成は `gate-and-merge <PR>` を直接呼ぶ。独立 merge script や `gh pr merge` 直呼びを併置しない。
 
 本ゲートが保証するのは次の 1 点に限る。
