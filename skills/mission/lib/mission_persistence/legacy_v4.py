@@ -246,12 +246,12 @@ class LegacyV4Repository:
             raise ValueError("aggregate coordinator callbacks must be supplied together")
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._lease_ttl_seconds = lease_ttl_seconds
+        self._effect_publisher = effect_publisher
+        self._effect_context = effect_context
         if effect_transaction is not None and effect_publisher is not None:
             raise ValueError("effect transaction configuration is ambiguous")
         if effect_publisher is not None:
-            self._effect_transaction = lambda effects, prepared=None: effect_publisher(
-                effect_context, effects, prepared
-            )
+            self._effect_transaction = self._effect_transaction_from_publisher
         else:
             self._effect_transaction = effect_transaction
         self._format_guard = format_guard
@@ -292,6 +292,7 @@ class LegacyV4Repository:
         "_aggregate_prepare",
         "_aggregate_finalize",
         "_lock",
+        "_effect_publisher",
         "_effect_transaction",
     )
 
@@ -313,6 +314,16 @@ class LegacyV4Repository:
         """Run one injected callable inside the re-entrancy boundary."""
         with self._callback_guard():
             return callback(*args, **kwargs)
+
+    def _effect_transaction_from_publisher(
+        self, effects: tuple[EvidenceEffect, ...], prepared: object = None
+    ) -> ContextManager[object]:
+        """Bind the publisher's opaque context without hiding its guard contract."""
+        if self._effect_publisher is None:
+            raise ValueError("evidence-effect-transaction-missing")
+        return self._guarded_call(
+            self._effect_publisher, self._effect_context, effects, prepared
+        )
 
     def _reject_reentrant_entry(self, operation: str) -> None:
         if self._callback_depth:
@@ -796,12 +807,12 @@ class V5CompatibilityRepository:
         self._aggregate_recover = aggregate_recover
         self._aggregate_prepare = aggregate_prepare
         self._aggregate_finalize = aggregate_finalize
+        self._effect_publisher = effect_publisher
+        self._effect_context = effect_context
         if effect_transaction is not None and effect_publisher is not None:
             raise ValueError("effect transaction configuration is ambiguous")
         if effect_publisher is not None:
-            self._effect_transaction = lambda effects, prepared=None: effect_publisher(
-                effect_context, effects, prepared
-            )
+            self._effect_transaction = self._effect_transaction_from_publisher
         else:
             self._effect_transaction = effect_transaction
         aggregate_callbacks = (
@@ -851,6 +862,7 @@ class V5CompatibilityRepository:
         "_aggregate_recover",
         "_aggregate_prepare",
         "_aggregate_finalize",
+        "_effect_publisher",
         "_effect_transaction",
         "_lease_committed",
     )
@@ -868,6 +880,16 @@ class V5CompatibilityRepository:
         """Run one injected callable inside the re-entrancy boundary."""
         with self._callback_guard():
             return callback(*args, **kwargs)
+
+    def _effect_transaction_from_publisher(
+        self, effects: tuple[EvidenceEffect, ...], prepared: object = None
+    ) -> ContextManager[object]:
+        """Bind the publisher's opaque context without hiding its guard contract."""
+        if self._effect_publisher is None:
+            raise ValueError("evidence-effect-transaction-missing")
+        return self._guarded_call(
+            self._effect_publisher, self._effect_context, effects, prepared
+        )
 
     def _reject_reentrant_entry(self, operation: str) -> None:
         if self._callback_depth:
@@ -1173,10 +1195,17 @@ class V5CompatibilityRepository:
             if decision.transition is not None:
                 bind_transition_effects(decision.transition, effects)
             if effects:
-                publisher = effect_transaction or self._effect_transaction
-                if publisher is None:
-                    raise ValueError("evidence-effect-transaction-missing")
-                with self._guarded_context(publisher, effects, prepared) as published:
+                if effect_transaction is None:
+                    if self._effect_transaction is None:
+                        raise ValueError("evidence-effect-transaction-missing")
+                    publication = self._guarded_context(
+                        self._effect_transaction, effects, prepared
+                    )
+                else:
+                    publication = self._guarded_context(
+                        effect_transaction, effects, prepared
+                    )
+                with publication as published:
                     # The comparison itself can re-enter through a foreign
                     # __ne__, so it runs under the same guard as the callback.
                     with self._callback_guard():
