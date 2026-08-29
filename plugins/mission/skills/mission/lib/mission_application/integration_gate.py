@@ -145,6 +145,15 @@ def run_gate_and_merge(
         services.fetch_pull_request_head(initial)
         observation = services.integrate_and_test(initial.head_sha, base_before, logger)
         logger("test_scope={} test_targets={}".format(observation.scope, observation.targets))
+        # git 操作は可変な remote 名 `origin` を使うため、identity を再解決して
+        # 初回値との一致を要求する。これをしないと「fetch は B・gh は A」が成立する。
+        identity_after = services.resolve_origin_identity()
+        if identity_after != identity:
+            raise IntegrationGateFailure(
+                5,
+                "origin-identity-moved",
+                "origin repository identity changed; restart the gate",
+            )
         default_branch_after = services.resolve_default_branch()
         if default_branch_after != default_branch:
             raise IntegrationGateFailure(

@@ -45,6 +45,13 @@ class RecordingOperations:
 
     def resolve_origin_identity(self):
         self.calls.append(("identity",))
+        if isinstance(self.identity, list):
+            if not self.identity:
+                raise gate.IntegrationGateError(2, "origin-identity-moved", "exhausted")
+            value = self.identity.pop(0)
+            if isinstance(value, Exception):
+                raise value
+            return value
         return self.identity
 
     def resolve_default_branch(self):
@@ -179,6 +186,9 @@ def test_origin_identity_is_host_qualified(url, expected):
     "not-a-url",
     "",
     "git@github.com:acme.git",
+    "git@github.com:../widgets.git",
+    "git@github.com:acme/...git",
+    "https://github.com/./widgets.git",
 ])
 def test_origin_identity_rejects_unsupported_remotes(url):
     with pytest.raises(gate.IntegrationGateError):
@@ -205,6 +215,11 @@ def test_symref_parsing_extracts_branch_name(output, expected):
     "ref: refs/heads/release\tNOT_HEAD\n" + BASE_SHA + "\tHEAD\n",
     # 余分な行が混ざる
     "ref: refs/heads/main\tHEAD\n" + BASE_SHA + "\tHEAD\nunexpected\n",
+    # 異なる SHA 行が複数ある（HEAD が一意に定まらない）
+    "ref: refs/heads/main\tHEAD\n" + BASE_SHA + "\tHEAD\n" + HEAD_SHA + "\tHEAD\n",
+    # 空白が混入した malformed 行
+    "ref: refs/heads/main\t HEAD\n" + BASE_SHA + "\tHEAD\n",
+    "ref: refs/heads/main\tHEAD\n " + BASE_SHA + "\tHEAD\n",
 ])
 def test_symref_parsing_rejects_unexpected_output(output):
     with pytest.raises(gate.IntegrationGateError):
@@ -361,3 +376,27 @@ def test_gh_calls_reuse_the_first_resolved_identity(tmp_path):
     operations.merge_pull_request("1", HEAD_SHA)
     # 初回の 1 回だけ。gh 呼び出しごとに再解決しない
     assert len(resolutions) == 1
+
+
+def test_origin_identity_drift_is_rejected_by_the_full_gate():
+    """実ゲート経路で origin が A→B と動いたら止まる。
+
+    resolver を直接 2 回呼ぶテストだけでは、ゲートが 1 回しか解決しない場合の
+    「fetch は B・gh は A のまま完走」を捕捉できない。
+    """
+    operations = RecordingOperations(
+        default_branch="master",
+        identity=["github.com/acme/widgets", "github.com/evil/widgets"],
+    )
+    with pytest.raises(application.IntegrationGateFailure) as excinfo:
+        run(operations)
+    assert excinfo.value.reason == "origin-identity-moved"
+    assert not any(call[0] == "merge" for call in operations.calls)
+
+
+def test_identity_is_revalidated_after_integration():
+    """identity の再検証が step 5 相当（統合テストの後）で行われる。"""
+    operations = RecordingOperations(default_branch="master")
+    run(operations)
+    identity_calls = [i for i, call in enumerate(operations.calls) if call[0] == "identity"]
+    assert len(identity_calls) == 2, operations.calls

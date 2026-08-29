@@ -72,7 +72,11 @@ def parse_origin_identity(url: str) -> str:
     match = _ORIGIN_RE.match(url.strip())
     if match is None:
         raise IntegrationGateError(2, "origin-identity-failed", "origin url is not a supported github remote")
-    return "github.com/{}/{}".format(match.group("owner"), match.group("repo"))
+    owner, repo = match.group("owner"), match.group("repo")
+    # `..` や `.` は path traversal 形になるため owner/repo として受理しない
+    if owner in {".", ".."} or repo in {".", ".."}:
+        raise IntegrationGateError(2, "origin-identity-failed", "origin url has an invalid path segment")
+    return "github.com/{}/{}".format(owner, repo)
 
 
 def validate_default_branch_name(name: object) -> str:
@@ -110,26 +114,28 @@ def parse_symref_output(output: object) -> str:
     # 緩く読むと `ref: refs/heads/release\tNOT_HEAD` のような出力で
     # 非 default branch を default と誤認しうる。
     refs = []
-    sha_seen = False
-    for line in output.splitlines():
-        if not line.strip():
+    shas = set()
+    for line in output.split("\n"):
+        if line == "":
             continue
         if line.startswith("ref: "):
             parts = line[len("ref: "):].split("\t")
-            if len(parts) != 2 or parts[1].strip() != "HEAD":
+            # 空白の混入を許すと malformed 行を通すため strip せず厳密一致で見る
+            if len(parts) != 2 or parts[1] != "HEAD":
                 raise IntegrationGateError(
                     2, "default-branch-resolution-failed", "symref line is malformed"
                 )
-            refs.append(parts[0].strip())
+            refs.append(parts[0])
             continue
         parts = line.split("\t")
-        if len(parts) == 2 and _SHA_RE.fullmatch(parts[0].strip()) and parts[1].strip() == "HEAD":
-            sha_seen = True
+        if len(parts) == 2 and _SHA_RE.fullmatch(parts[0]) and parts[1] == "HEAD":
+            shas.add(parts[0])
             continue
         raise IntegrationGateError(
             2, "default-branch-resolution-failed", "symref output has unexpected content"
         )
-    if len(refs) != 1 or not sha_seen:
+    # 異なる SHA 行が複数ある出力は HEAD が一意に定まらないため拒否する
+    if len(refs) != 1 or len(shas) != 1:
         raise IntegrationGateError(2, "default-branch-resolution-failed", "symref output is not a single ref")
     ref = refs[0]
     if not ref.startswith("refs/heads/"):
