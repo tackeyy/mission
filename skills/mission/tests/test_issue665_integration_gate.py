@@ -87,6 +87,9 @@ def _init_repo(repo: Path) -> None:
     _run(repo, "git", "init", "-q", "-b", "main")
     _run(repo, "git", "config", "user.email", "fixture@example.invalid")
     _run(repo, "git", "config", "user.name", "Fixture")
+    # #698: gh 呼び出しは origin 由来の host 修飾 identity を要求するため、
+    # fixture にも解決可能な origin を持たせる（ネットワークには出ない）。
+    _run(repo, "git", "remote", "add", "origin", "git@github.com:fixture/mission.git")
     _write_fixture_scaffolding(repo)
 
 
@@ -619,6 +622,8 @@ def test_fetch_view_head_and_merge_commands_are_runner_injected(tmp_path):
             return gate.CommandResult(0, open_payload, "")
         if command == ("git", "rev-parse", "FETCH_HEAD"):
             return gate.CommandResult(0, HEAD_SHA + "\n", "")
+        if command[:3] == ("git", "remote", "get-url"):
+            return gate.CommandResult(0, "git@github.com:fixture/mission.git\n", "")
         return gate.CommandResult(0, "", "")
 
     operations = gate.SubprocessGateOperations(tmp_path, runner=runner)
@@ -629,15 +634,21 @@ def test_fetch_view_head_and_merge_commands_are_runner_injected(tmp_path):
 
     assert ("git", "fetch", "--prune", "origin", "main") in commands
     assert ("git", "fetch", "origin", "refs/pull/665/head") in commands
+    # #698: gh 呼び出しは origin 由来の host 修飾 identity へ pin される
     assert (
         "gh",
         "pr",
         "merge",
         "665",
+        "--repo",
+        "github.com/fixture/mission",
         "--squash",
         "--match-head-commit",
         HEAD_SHA,
     ) in commands
+    gh_commands = [command for command in commands if command[0] == "gh"]
+    assert gh_commands, "gh を 1 度も呼んでいない"
+    assert all("--repo" in command for command in gh_commands)
 
 
 def test_docs_only_scope_delegates_to_existing_ci_selector(tmp_path):

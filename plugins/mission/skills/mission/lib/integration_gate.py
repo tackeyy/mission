@@ -43,6 +43,38 @@ class CommandResult:
 IntegrationGateError = IntegrationGateFailure
 
 
+_SCP_ORIGIN_RE = re.compile(r"^(?:[^@/]+@)?(?P<host>[^:/@]+):(?P<path>.+)$")
+_URL_ORIGIN_RE = re.compile(r"^(?P<scheme>https?|ssh|git)://(?:[^@/]+@)?(?P<host>[^:/]+)(?::\d+)?/(?P<path>.+)$")
+
+
+def _parse_origin_identity(url: str) -> Optional[str]:
+    """origin URL から `<host>/<owner>/<name>` を導出する。解析できなければ None。
+
+    対応する形式は scp 風 (`git@host:owner/name(.git)`) と
+    URL 形式 (`https|ssh|git://host/owner/name(.git)`) のみ。
+    `file://` やローカルパスは forge の identity を持たないため拒否する。
+    """
+    if not isinstance(url, str):
+        return None
+    url = url.strip()
+    if not url:
+        return None
+    match = _URL_ORIGIN_RE.match(url) or _SCP_ORIGIN_RE.match(url)
+    if match is None:
+        return None
+    host = match.group("host").strip()
+    path = match.group("path").strip().strip("/")
+    if path.endswith(".git"):
+        path = path[: -len(".git")]
+    segments = [segment for segment in path.split("/") if segment]
+    # owner/name の 2 段ちょうどだけを受け入れる。深い path は identity が一意でない
+    if not host or len(segments) != 2:
+        return None
+    if any(character in host for character in " \t") or "." not in host:
+        return None
+    return "{}/{}/{}".format(host, segments[0], segments[1])
+
+
 def _local_runner(arguments: Iterable[str], cwd: Path) -> CommandResult:
     completed = subprocess.run(
         list(arguments),
@@ -67,6 +99,7 @@ class SubprocessGateOperations:
         self.repository_root = Path(repository_root).resolve()
         self.runner = runner or _local_runner
         self.node_binary = node_binary
+        self._repository_identity: Optional[str] = None
 
     def _run(self, arguments: Iterable[str], *, cwd: Optional[Path] = None) -> CommandResult:
         return self.runner(tuple(arguments), cwd or self.repository_root)
@@ -87,6 +120,29 @@ class SubprocessGateOperations:
             suffix = ": " + detail if detail else ""
             raise IntegrationGateError(step, reason, reason + suffix)
         return result
+
+    def repository_identity(self) -> str:
+        """origin の URL から host 修飾した owner/name を導出する。
+
+        gh の `--repo` は `GH_REPO` に優先するが、**host 修飾しないと `GH_HOST` の
+        差し替えを防げない**（実測 2026-08-29: `GH_HOST=example.invalid` 下で
+        `--repo owner/name` は別ホストへ接続を試み、`--repo github.com/owner/name`
+        は正しく解決される）。そのため identity は必ず `<host>/<owner>/<name>` で持つ。
+        """
+        if self._repository_identity is not None:
+            return self._repository_identity
+        result = self._run(("git", "remote", "get-url", "origin"))
+        if result.returncode != 0:
+            raise IntegrationGateError(
+                1, "origin-identity-unresolved", "origin remote url is unavailable"
+            )
+        identity = _parse_origin_identity(result.stdout.strip())
+        if identity is None:
+            raise IntegrationGateError(
+                1, "origin-identity-unresolved", "origin remote url is not a supported forge url"
+            )
+        self._repository_identity = identity
+        return identity
 
     @contextmanager
     def lease(self):
@@ -138,6 +194,8 @@ class SubprocessGateOperations:
                 "pr",
                 "view",
                 str(pr_ref),
+                "--repo",
+                self.repository_identity(),
                 "--json",
                 "number,headRefOid,baseRefName,state,mergedAt,mergeCommit",
             ),
@@ -272,6 +330,8 @@ class SubprocessGateOperations:
                 "pr",
                 "merge",
                 str(pr_ref),
+                "--repo",
+                self.repository_identity(),
                 "--squash",
                 "--match-head-commit",
                 expected_head_sha,
