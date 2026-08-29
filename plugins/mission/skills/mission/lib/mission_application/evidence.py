@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 from pathlib import Path
 
@@ -23,6 +23,7 @@ from mission_kernel.evidence import (
     project_progress_update,
     project_verification_entry,
 )
+from mission_kernel.json_codec import encode_json_value, freeze_json_value
 from .artifact import EvidenceEffect, EvidenceFailure, make_evidence_effect
 from .ports import LegacyCommandExecutionResult
 
@@ -34,6 +35,7 @@ class PreparedEvidenceOperation:
     command: Command
     effects: tuple[EvidenceEffect, ...]
     result: dict
+    volatile_fields: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -72,8 +74,17 @@ class PreparedVerificationRecord:
     """Validated checks plus the caller-stable retry identity for one record."""
 
     checks: object
-    operation_id: str
-    operation_command: object
+    operation_id: str | None
+    operation_command: object | None
+
+
+def _verification_checks_digest(checks: tuple[VerificationCheck, ...]) -> str:
+    normalized = [
+        {"detail": check.detail, "name": check.name, "ok": check.ok}
+        for check in checks
+    ]
+    content = encode_json_value(freeze_json_value(normalized))
+    return "sha256:" + hashlib.sha256(content).hexdigest()
 
 
 def prepare_verification_record_operation(
@@ -92,14 +103,12 @@ def prepare_verification_record_operation(
     """
     checks = normalize_verification_checks(payload)
     path = Path(state_path)
-    try:
-        state_bytes = path.read_bytes()
-    except OSError as error:
-        raise EvidenceFailure("verification-state-read-failed") from error
-    target_digest = "sha256:" + hashlib.sha256(state_bytes).hexdigest()
     caller_operation_id, arguments = compatibility_arguments(
-        {"iteration": iteration},
-        target_digest=target_digest,
+        {
+            "checks_digest": _verification_checks_digest(checks),
+            "iteration": iteration,
+        },
+        target_digest="",
         require_caller=False,
     )
     if caller_operation_id is None:
@@ -139,7 +148,8 @@ def execute_evidence_operation(repository: object, prepare) -> dict:
     replayed = execution.replayed
     if isinstance(command, UpdateProgress):
         if not _record_matches(
-            projection.get("progress"), payload.get("progress"), replayed, ("updated_at",)
+            projection.get("progress"), payload.get("progress"), replayed, prepared,
+            projection,
         ):
             raise EvidenceFailure("progress-projection-mismatch")
         if replayed:
@@ -156,21 +166,37 @@ def execute_evidence_operation(repository: object, prepare) -> dict:
             for key, value in (("path", "path"), ("digest", "digest"))
         ):
             raise EvidenceFailure("context-projection-mismatch")
+        # path and digest are content-addressed and this record has no
+        # clock-derived field, so the projected values need no store authority.
     elif isinstance(command, RecordVerification):
         history = projection.get("verification_history")
         if not isinstance(history, list) or not history:
             raise EvidenceFailure("verification-projection-mismatch")
-        if not _record_matches(
-            history[-1], payload.get("verification"), replayed, ("recorded_at",)
-        ):
+        expected = payload.get("verification")
+        if replayed:
+            matches = [
+                record
+                for record in history
+                if _record_matches(record, expected, True, prepared, projection)
+            ]
+            if len(matches) != 1:
+                raise EvidenceFailure("verification-projection-mismatch")
+            record = matches[0]
+        else:
+            record = history[-1]
+        if not _record_matches(record, expected, replayed, prepared, projection):
             raise EvidenceFailure("verification-projection-mismatch")
         if replayed:
-            payload["verification"] = copy.deepcopy(history[-1])
+            payload["verification"] = copy.deepcopy(record)
     return payload
 
 
 def _record_matches(
-    stored: object, expected: object, replayed: bool, volatile: tuple[str, ...]
+    stored: object,
+    expected: object,
+    replayed: bool,
+    prepared: PreparedEvidenceOperation,
+    state: object,
 ) -> bool:
     """Compare a stored record with the one this invocation would have written.
 
@@ -183,17 +209,34 @@ def _record_matches(
         return stored == expected
     if not isinstance(stored, dict) or not isinstance(expected, dict):
         return False
-    for key in volatile:
-        if key not in expected:
-            continue
-        # Only the value may differ: a missing or malformed clock field in the
-        # stored record is a corrupt record, not a replay.
-        stored_value = stored.get(key)
-        if not isinstance(stored_value, str) or not stored_value:
-            return False
+    volatile = prepared.volatile_fields
+    try:
+        validated = _project_stored_replay_record(prepared, state, stored)
+    except EvidenceRuleError:
+        return False
+    if validated is not None and validated != stored:
+        return False
     return {key: value for key, value in stored.items() if key not in volatile} == {
         key: value for key, value in expected.items() if key not in volatile
     }
+
+
+def _project_stored_replay_record(
+    prepared: PreparedEvidenceOperation, state: object, stored: dict
+) -> dict | None:
+    """Revalidate store-authoritative fields through their kernel projector."""
+    volatile = prepared.volatile_fields
+    if not volatile:
+        return None
+    if len(volatile) != 1 or volatile[0] not in stored:
+        raise EvidenceRuleError("evidence-volatile-field-invalid")
+    command = replace(prepared.command, at=stored[volatile[0]])
+    if isinstance(command, UpdateProgress):
+        projected, _content = project_progress_update(state, command)
+        return projected
+    if isinstance(command, RecordVerification):
+        return project_verification_entry(command)
+    raise EvidenceRuleError("evidence-volatile-command-invalid")
 
 
 def evidence_publication_paths(
@@ -354,7 +397,10 @@ def prepare_progress_update(
     if verified != progress or verified_content != content:
         raise EvidenceFailure("progress-projection-mismatch")
     return PreparedEvidenceOperation(
-        command, (effect,), {"progress": copy.deepcopy(progress)}
+        command,
+        (effect,),
+        {"progress": copy.deepcopy(progress)},
+        volatile_fields=("updated_at",),
     )
 
 
@@ -364,7 +410,7 @@ def prepare_progress_clear(
     if not isinstance(state, dict):
         raise EvidenceFailure("state-invalid")
     command = ClearProgress(now)
-    return PreparedEvidenceOperation(command, (), {})
+    return PreparedEvidenceOperation(command, (), {}, volatile_fields=())
 
 
 def prepare_context_manifest(
@@ -404,6 +450,7 @@ def prepare_context_manifest(
             "digest": claim.digest,
             "findings_count": findings_count,
         },
+        volatile_fields=(),
     )
 
 
@@ -451,5 +498,8 @@ def prepare_verification_record(
     command = RecordVerification(now, iteration, checks)
     entry = _translate(lambda: project_verification_entry(command))
     return PreparedEvidenceOperation(
-        command, (), {"verification": copy.deepcopy(entry)}
+        command,
+        (),
+        {"verification": copy.deepcopy(entry)},
+        volatile_fields=("recorded_at",),
     )

@@ -1,6 +1,7 @@
 """#685: evidence 操作は同一 operation ID の replay を成功として返す。"""
 
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -73,6 +74,31 @@ def test_verification_record_replay_returns_the_original_result_once(tmp_path, r
     ]
 
 
+def test_verification_record_without_operation_id_appends_each_call(tmp_path, run_cli):
+    """Replay remains opt-in; caller-less verification records are all retained."""
+    env = _v5_env(tmp_path)
+    _init_v5(run_cli, tmp_path, env)
+    payload = json.dumps(
+        {
+            "schema": "mission-verification/1",
+            "checks": [{"name": "tests", "ok": True}],
+        }
+    )
+
+    first = run_cli(
+        "verification", "record", "--iteration", "1", "--stdin",
+        cwd=tmp_path, input_text=payload, env_extra=env,
+    )
+    second = run_cli(
+        "verification", "record", "--iteration", "1", "--stdin",
+        cwd=tmp_path, input_text=payload, env_extra=env,
+    )
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert len(_authoritative_state(tmp_path)["verification_history"]) == 2
+
+
 def _closed_result(projection, *, decision=None, replayed=True):
     from mission_application.ports import LegacyCommandExecutionResult
     from mission_kernel.json_codec import freeze_json_value
@@ -89,6 +115,87 @@ def _request():
         iteration=1,
         checks=(VerificationCheck("tests", True, "1 passed"),),
     )
+
+
+def test_verification_operation_identity_does_not_read_state_bytes(tmp_path):
+    """Caller identity is content-bound without application-layer file I/O."""
+    from mission_application.evidence import prepare_verification_record_operation
+
+    captured = {}
+
+    def compatibility(arguments, *, target_digest, require_caller):
+        captured["arguments"] = arguments
+        captured["target_digest"] = target_digest
+        captured["require_caller"] = require_caller
+        return "issue-685-no-read", arguments
+
+    def canonical(session_id, command_type, arguments, *, caller_operation_id):
+        captured["session_id"] = session_id
+        captured["command_type"] = command_type
+        captured["caller_operation_id"] = caller_operation_id
+        return caller_operation_id, arguments
+
+    prepared = prepare_verification_record_operation(
+        {"checks": [{"name": "tests", "ok": True}]},
+        iteration=1,
+        state_path=tmp_path / "missing.json",
+        compatibility_arguments=compatibility,
+        canonical_operation=canonical,
+    )
+
+    assert prepared.operation_id == "issue-685-no-read"
+    assert captured["arguments"]["iteration"] == 1
+    assert captured["arguments"]["checks_digest"].startswith("sha256:")
+    assert captured["target_digest"] == ""
+    assert captured["require_caller"] is False
+
+
+def test_prepared_operations_declare_their_volatile_fields():
+    from mission_application.evidence import (
+        prepare_context_manifest,
+        prepare_progress_clear,
+        prepare_progress_update,
+        prepare_verification_record,
+    )
+    from mission_kernel.commands import VerificationCheck
+
+    state = {
+        "phase": "reviewing",
+        "loop_active": True,
+        "session_id": "test",
+        "mission": "m",
+        "mission_id": "mid",
+        "assumptions_path": "a.md",
+    }
+    progress = prepare_progress_update(
+        state,
+        now="2030-01-01T00:00:00Z",
+        total=1,
+        completed=0,
+        batch_size=1,
+        last_unit=None,
+        artifact_path=None,
+        iteration=1,
+        evidence_path="progress.json",
+    )
+    clear = prepare_progress_clear(state, now="2030-01-01T00:00:00Z")
+    context = prepare_context_manifest(
+        state,
+        now="2030-01-01T00:00:00Z",
+        iteration=1,
+        publication_path="manifest.json",
+    )
+    verification = prepare_verification_record(
+        state,
+        now="2030-01-01T00:00:00Z",
+        iteration=1,
+        checks=(VerificationCheck("tests", True, None),),
+    )
+
+    assert progress.volatile_fields == ("updated_at",)
+    assert clear.volatile_fields == ()
+    assert context.volatile_fields == ()
+    assert verification.volatile_fields == ("recorded_at",)
 
 
 def test_replay_keeps_verification_projection_validation():
@@ -185,6 +292,56 @@ def test_replay_keeps_context_projection_validation():
         )
 
 
+def test_context_manifest_replay_returns_once_with_operation_id(monkeypatch):
+    """A repeated context operation returns the one content-addressed record."""
+    from mission_application.evidence import ContextManifestRequest, run_context_manifest
+    from mission_application.ports import LegacyCommandExecutionResult
+    from mission_kernel.json_codec import freeze_json_value
+    from mission_kernel.transitions import Decision
+
+    monkeypatch.setenv("MISSION_OPERATION_ID", "issue-685-context")
+    state = {
+        "phase": "reviewing",
+        "loop_active": True,
+        "session_id": "test",
+        "mission": "m",
+        "mission_id": "mid",
+        "assumptions_path": "a.md",
+    }
+    completed = set()
+
+    def execute(prepare):
+        prepared = prepare(state)
+        operation_id = os.environ["MISSION_OPERATION_ID"]
+        if operation_id in completed:
+            return prepared, _closed_result(state)
+        completed.add(operation_id)
+        state["context_manifests"] = {
+            "1": {
+                "path": prepared.result["path"],
+                "digest": prepared.result["digest"],
+                "generated_at": prepared.command.at,
+            }
+        }
+        accepted = Decision(True, None, None)
+        return prepared, LegacyCommandExecutionResult(
+            accepted, freeze_json_value(state)
+        )
+
+    repository = SimpleNamespace(execute_evidence_transition_effects=execute)
+    request = ContextManifestRequest(
+        now="2030-01-01T00:00:00Z",
+        iteration=1,
+        publication_path="manifest.json",
+    )
+
+    first = run_context_manifest(request, repository)
+    second = run_context_manifest(request, repository)
+
+    assert second == first
+    assert len(state["context_manifests"]) == 1
+
+
 def test_replay_succeeds_when_the_clock_advances_between_attempts(tmp_path, run_cli):
     """A crash retry happens later than the first attempt (#685 review).
 
@@ -218,6 +375,59 @@ def test_replay_succeeds_when_the_clock_advances_between_attempts(tmp_path, run_
     assert state["verification_history"] == [json.loads(first.stdout)["verification"]]
 
 
+def test_replay_finds_the_matching_verification_before_the_latest_record():
+    """An intervening record must not replace the replay's stored result."""
+    from mission_application.evidence import run_verification_record
+
+    current = {"phase": "executing", "loop_active": True, "session_id": "test"}
+
+    def replay(prepare):
+        prepared = prepare(current)
+        matching = {
+            **prepared.result["verification"],
+            "recorded_at": "2029-12-31T23:59:00Z",
+        }
+        latest = {
+            **matching,
+            "checks": [{"name": "other", "ok": False, "detail": None}],
+            "failed_count": 1,
+            "status": "failed",
+            "recorded_at": "2029-12-31T23:59:30Z",
+        }
+        return prepared, _closed_result(
+            {"verification_history": [matching, latest]}
+        )
+
+    result = run_verification_record(
+        _request(), SimpleNamespace(execute_evidence_transition_effects=replay)
+    )
+
+    assert result["verification"]["recorded_at"] == "2029-12-31T23:59:00Z"
+
+
+def test_replay_rejects_an_ambiguous_matching_verification_history():
+    """Content equality without a unique stored record is fail-closed."""
+    from mission_application.artifact import EvidenceFailure
+    from mission_application.evidence import run_verification_record
+
+    current = {"phase": "executing", "loop_active": True, "session_id": "test"}
+
+    def replay(prepare):
+        prepared = prepare(current)
+        first = {
+            **prepared.result["verification"],
+            "recorded_at": "2029-12-31T23:59:00Z",
+        }
+        second = {**first, "recorded_at": "2029-12-31T23:59:30Z"}
+        return prepared, _closed_result(
+            {"verification_history": [first, second]}
+        )
+
+    repository = SimpleNamespace(execute_evidence_transition_effects=replay)
+    with pytest.raises(EvidenceFailure, match="verification-projection-mismatch"):
+        run_verification_record(_request(), repository)
+
+
 def test_replay_still_rejects_a_different_payload(tmp_path, run_cli):
     """Ignoring the clock field must not let a different record pass as a replay."""
     env = {**_v5_env(tmp_path), "MISSION_OPERATION_ID": "issue-685-divergent"}
@@ -240,6 +450,45 @@ def test_replay_still_rejects_a_different_payload(tmp_path, run_cli):
         env_extra=env,
     )
     assert second.returncode != 0
+    assert "operation ID has a different intent" in second.stderr
+
+
+def test_same_operation_id_rejects_different_checks_after_an_intervening_record(
+    tmp_path, run_cli
+):
+    """The retry key is bound to normalized checks, not the latest record."""
+    base_env = _v5_env(tmp_path)
+    operation_a = {**base_env, "MISSION_OPERATION_ID": "issue-685-content-a"}
+    operation_b = {**base_env, "MISSION_OPERATION_ID": "issue-685-content-b"}
+    _init_v5(run_cli, tmp_path, operation_a)
+
+    def record(name, ok, env):
+        return run_cli(
+            "verification",
+            "record",
+            "--iteration",
+            "1",
+            "--stdin",
+            cwd=tmp_path,
+            input_text=json.dumps(
+                {
+                    "schema": "mission-verification/1",
+                    "checks": [{"name": name, "ok": ok}],
+                }
+            ),
+            env_extra=env,
+        )
+
+    first = record("A", True, operation_a)
+    intervening = record("B", False, operation_b)
+    collision = record("A", False, operation_a)
+
+    assert first.returncode == 0, first.stderr
+    assert intervening.returncode == 0, intervening.stderr
+    assert collision.returncode != 0
+    assert "operation ID has a different intent" in collision.stderr
+    history = _authoritative_state(tmp_path)["verification_history"]
+    assert [entry["checks"][0]["name"] for entry in history] == ["A", "B"]
 
 
 def test_replay_rejects_a_stored_record_without_a_clock_field():
@@ -269,6 +518,23 @@ def test_replay_rejects_a_stored_record_with_an_empty_clock_field():
     def replay(prepare):
         prepared = prepare(current)
         stored = {**prepared.result["verification"], "recorded_at": ""}
+        return prepared, _closed_result({"verification_history": [stored]})
+
+    repository = SimpleNamespace(execute_evidence_transition_effects=replay)
+    with pytest.raises(EvidenceFailure, match="verification-projection-mismatch"):
+        run_verification_record(_request(), repository)
+
+
+def test_replay_rejects_a_stored_record_with_a_nul_clock_field():
+    """Replay clock validation is exactly the kernel projection contract."""
+    from mission_application.artifact import EvidenceFailure
+    from mission_application.evidence import run_verification_record
+
+    current = {"phase": "executing", "loop_active": True, "session_id": "test"}
+
+    def replay(prepare):
+        prepared = prepare(current)
+        stored = {**prepared.result["verification"], "recorded_at": "bad\x00clock"}
         return prepared, _closed_result({"verification_history": [stored]})
 
     repository = SimpleNamespace(execute_evidence_transition_effects=replay)
