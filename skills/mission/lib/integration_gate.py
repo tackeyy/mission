@@ -92,12 +92,13 @@ def _parse_origin_identity(url: str) -> Optional[str]:
     path = path.strip()
     if any(character in path for character in "?#@ \t"):
         return None
-    path = path.strip("/")
     if path.endswith(".git"):
         path = path[: -len(".git")]
-    segments = [segment for segment in path.split("/") if segment]
+    # 先頭・末尾・連続スラッシュを畳み込まない。畳み込むと `//o/n` `o//n` `/o/n` が
+    # すべて同じ identity になり、別エンドポイントを同一視してしまう。
+    segments = path.split("/")
     # owner/name の 2 段ちょうどだけを受け入れる。深い path は identity が一意でない
-    if len(segments) != 2:
+    if len(segments) != 2 or not all(segments):
         return None
     owner, name = segments
     if ".." in owner or ".." in name:

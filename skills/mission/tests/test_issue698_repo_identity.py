@@ -142,6 +142,32 @@ class TestIdentityIsFailClosed:
             ops.repository_identity()
         assert excinfo.value.reason == "origin-identity-unresolved"
 
+    @pytest.mark.parametrize(
+        "url",
+        [
+            # 連続・先頭・末尾のスラッシュを畳み込まない。
+            # 畳み込むと別 URL が同一 identity になり fail-closed が崩れる。
+            "https://github.com//tackeyy/mission",
+            "https://github.com/tackeyy//mission",
+            "https://github.com/tackeyy/mission/",
+            "https://github.com//tackeyy//mission//",
+            "git@github.com:/tackeyy/mission.git",
+            "git@github.com://tackeyy/mission.git",
+            "git@github.com:tackeyy//mission.git",
+            "git@github.com:tackeyy/mission/.git",
+        ],
+    )
+    def test_rejects_slash_folding(self, url):
+        """空 segment を捨てて 2 要素に畳み込まない。
+
+        `//o/n` `o//n` `/o/n` がすべて `host/o/n` になると、
+        別のエンドポイントを同一視することになる。
+        """
+        ops, _ = _ops(url)
+        with pytest.raises(gate.IntegrationGateError) as excinfo:
+            ops.repository_identity()
+        assert excinfo.value.reason == "origin-identity-unresolved"
+
     def test_rejects_control_characters(self):
         ops, _ = _ops("https://github.com/tackeyy/mis\x01sion")
         with pytest.raises(gate.IntegrationGateError):
