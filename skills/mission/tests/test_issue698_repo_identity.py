@@ -82,6 +82,109 @@ class TestOriginIdentity:
         assert len(lookups) == 1
 
 
+class TestIdentityIsFailClosed:
+    """異系統レビュー(High)で受理と判明した入力を fail-closed へ倒す。
+
+    port を黙って捨てると別エンドポイントの identity を同一とみなす。
+    owner/name に `..`・制御文字・`@`・`?`・`#` を通すと、gh 側がほぼそのまま
+    扱うため identity 固定の意味が失われる。
+    """
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            # port を黙って破棄しない（別エンドポイントを同一視しない）
+            "https://github.com:8443/tackeyy/mission.git",
+            "ssh://git@github.com:2222/tackeyy/mission.git",
+            # owner / name に使えない文字
+            "https://github.com/tack..eyy/mission",
+            "https://github.com/tackeyy/mis..sion",
+            "https://github.com/tackeyy/mission?x=1",
+            "https://github.com/tackeyy/mission#frag",
+            "https://github.com/tack@eyy/mission",
+            "https://github.com/tackeyy/mis sion",
+            # host が不正
+            "https://exa mple.com/tackeyy/mission",
+            "https://../tackeyy/mission",
+        ],
+    )
+    def test_rejects_unsafe_identity_components(self, url):
+        ops, _ = _ops(url)
+        with pytest.raises(gate.IntegrationGateError) as excinfo:
+            ops.repository_identity()
+        assert excinfo.value.reason == "origin-identity-unresolved"
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            # owner は英数で始まり英数で終わる（先頭・末尾のハイフンを許さない）
+            "https://github.com/-lead/mission",
+            "https://github.com/trail-/mission",
+            # owner / name の文字集合外。上の明示拒否リストには載っていない文字を選ぶ
+            "https://github.com/tack~eyy/mission",
+            "https://github.com/tackeyy/mis~sion",
+            "https://github.com/tackeyy/mis+sion",
+            "https://github.com/tackeyy/mis%20sion",
+            "https://github.com/tack:eyy/mission",
+            # name が単独のドット
+            "https://github.com/tackeyy/.",
+        ],
+    )
+    def test_rejects_characters_outside_the_allowed_set(self, url):
+        """文字集合の検証それ自体に検出力があることを固定する。
+
+        `..` や空白・`@` は別の検査でも落ちるため、**この検査だけが落とす入力**を選ぶ。
+        （変異テストで、文字集合検証を外しても他の検査が拾ってしまい
+        気付けなかったため追加した）
+        """
+        ops, _ = _ops(url)
+        with pytest.raises(gate.IntegrationGateError) as excinfo:
+            ops.repository_identity()
+        assert excinfo.value.reason == "origin-identity-unresolved"
+
+    def test_rejects_control_characters(self):
+        ops, _ = _ops("https://github.com/tackeyy/mis\x01sion")
+        with pytest.raises(gate.IntegrationGateError):
+            ops.repository_identity()
+
+    def test_host_is_normalised_to_lower_case(self):
+        ops, _ = _ops("https://GitHub.COM/tackeyy/mission.git")
+        assert ops.repository_identity() == "github.com/tackeyy/mission"
+
+    def test_accepts_legitimate_dots_and_dashes(self):
+        ops, _ = _ops("https://github.com/my-org/my.repo_name-1.git")
+        assert ops.repository_identity() == "github.com/my-org/my.repo_name-1"
+
+
+class TestIdentityResolvedBeforeAnyRemoteUse:
+    """lease 取得直後に identity を確定する。
+
+    遅延解決だと、lease 取得後・最初の PR 読取前に走る fetch の間に
+    origin を差し替えられる窓が残る（異系統レビュー Medium）。
+    """
+
+    def test_lease_resolves_identity_before_yielding(self, tmp_path):
+        calls: list = []
+
+        def runner(arguments, cwd):
+            argv = tuple(arguments)
+            calls.append(argv)
+            if argv[:3] == ("git", "remote", "get-url"):
+                return gate.CommandResult(0, "git@github.com:tackeyy/mission.git\n", "")
+            if argv[:2] == ("git", "rev-parse"):
+                return gate.CommandResult(0, str(common) + "\n", "")
+            return gate.CommandResult(0, "", "")
+
+        common = tmp_path / ".git"
+        common.mkdir()
+        ops = gate.SubprocessGateOperations(tmp_path, runner=runner)
+        with ops.lease():
+            inside = list(calls)
+        assert any(c[:3] == ("git", "remote", "get-url") for c in inside), (
+            "lease の内側へ入る前に identity が確定していない"
+        )
+
+
 class TestGhCallsArePinned:
     def _pr_payload(self) -> str:
         return (

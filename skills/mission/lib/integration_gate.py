@@ -44,35 +44,69 @@ IntegrationGateError = IntegrationGateFailure
 
 
 _SCP_ORIGIN_RE = re.compile(r"^(?:[^@/]+@)?(?P<host>[^:/@]+):(?P<path>.+)$")
-_URL_ORIGIN_RE = re.compile(r"^(?P<scheme>https?|ssh|git)://(?:[^@/]+@)?(?P<host>[^:/]+)(?::\d+)?/(?P<path>.+)$")
+_URL_ORIGIN_RE = re.compile(r"^(?P<scheme>https?|ssh|git)://(?:[^@/]+@)?(?P<hostport>[^/]+)/(?P<path>.+)$")
+# forge の host。ラベルは英数と - のみで、- で始まらず終わらない。最低 1 つのドットを要求する
+_HOST_RE = re.compile(r"^(?=.{1,253}$)(?!-)[a-z0-9-]+(?<!-)(?:\.(?!-)[a-z0-9-]+(?<!-))+$")
+# owner / repository 名。GitHub が受ける文字集合に限定し、`..` は別途拒否する
+_OWNER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$")
+_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def _parse_origin_identity(url: str) -> Optional[str]:
     """origin URL から `<host>/<owner>/<name>` を導出する。解析できなければ None。
 
-    対応する形式は scp 風 (`git@host:owner/name(.git)`) と
-    URL 形式 (`https|ssh|git://host/owner/name(.git)`) のみ。
-    `file://` やローカルパスは forge の identity を持たないため拒否する。
+    **fail-closed**: 少しでも曖昧な入力は拒否する。ここで通した文字列は
+    `gh --repo` へそのまま渡り、gh 側もほぼ素通しで扱うため、
+    受理範囲の緩さがそのまま identity 固定の穴になる。
+
+    - port 付き URL は**黙って捨てず拒否する**（別エンドポイントを同一視しないため）
+    - `..` / 制御文字 / 空白 / `@` / `?` / `#` を含む owner・name は拒否する
+    - host は小文字へ正規化し、ドットを含むドメイン形のみ受理する
+    - 対応形式は scp 風と `https|ssh|git://` のみ。`file://` やローカルパスは拒否する
     """
     if not isinstance(url, str):
         return None
     url = url.strip()
-    if not url:
+    if not url or any(character < " " or character == "\x7f" for character in url):
         return None
-    match = _URL_ORIGIN_RE.match(url) or _SCP_ORIGIN_RE.match(url)
-    if match is None:
+
+    match = _URL_ORIGIN_RE.match(url)
+    if match is not None:
+        hostport = match.group("hostport")
+        # port を黙って破棄しない。付いていたら別エンドポイントとして拒否する
+        if ":" in hostport:
+            return None
+        host = hostport
+        path = match.group("path")
+    else:
+        match = _SCP_ORIGIN_RE.match(url)
+        if match is None:
+            return None
+        host = match.group("host")
+        path = match.group("path")
+
+    host = host.strip().lower()
+    if _HOST_RE.match(host) is None:
         return None
-    host = match.group("host").strip()
-    path = match.group("path").strip().strip("/")
+
+    path = path.strip()
+    if any(character in path for character in "?#@ \t"):
+        return None
+    path = path.strip("/")
     if path.endswith(".git"):
         path = path[: -len(".git")]
     segments = [segment for segment in path.split("/") if segment]
     # owner/name の 2 段ちょうどだけを受け入れる。深い path は identity が一意でない
-    if not host or len(segments) != 2:
+    if len(segments) != 2:
         return None
-    if any(character in host for character in " \t") or "." not in host:
+    owner, name = segments
+    if ".." in owner or ".." in name:
         return None
-    return "{}/{}/{}".format(host, segments[0], segments[1])
+    if _OWNER_RE.match(owner) is None or _NAME_RE.match(name) is None:
+        return None
+    if name in {".", ".."}:
+        return None
+    return "{}/{}/{}".format(host, owner, name)
 
 
 def _local_runner(arguments: Iterable[str], cwd: Path) -> CommandResult:
@@ -167,6 +201,10 @@ class SubprocessGateOperations:
                 os.close(descriptor)
             raise IntegrationGateError(1, "lease-failed", "repository lease acquisition failed") from exc
         try:
+            # lease の内側へ入る前に identity を確定する。遅延解決だと、
+            # lease 取得後・最初の PR 読取前に走る fetch の間に origin を
+            # 差し替えられる窓が残る。
+            self.repository_identity()
             yield
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
