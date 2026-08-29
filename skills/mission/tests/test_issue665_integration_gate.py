@@ -190,11 +190,20 @@ class ScriptedOperations:
     def _assert_leased(self):
         assert self.lease_active
 
-    def fetch_main(self):
+    def resolve_origin_identity(self):
         self._assert_leased()
+        return "github.com/acme/mission"
+
+    def resolve_default_branch(self):
+        self._assert_leased()
+        return "main"
+
+    def fetch_base(self, default_branch):
+        self._assert_leased()
+        assert default_branch == "main"
         self.fetches += 1
         if self.fetch_failure and self.fetches == 1:
-            raise self.gate.IntegrationGateError(2, "fetch-failed", "origin/main fetch failed")
+            raise self.gate.IntegrationGateError(2, "fetch-failed", "base fetch failed")
 
     def current_base_sha(self):
         self._assert_leased()
@@ -234,6 +243,9 @@ def test_pull_request_read_failure_reports_the_calling_step(tmp_path):
     _init_repo(repo)
     (repo / "module.py").write_text("def value():\n    return 0\n", encoding="utf-8")
     _commit(repo, "initial")
+    # #698: gh の操作先は origin 由来の identity へ固定されるため、
+    # PR 読み取りの手順番号を検査するには origin が解決できる必要がある。
+    _run(repo, "git", "remote", "add", "origin", "git@github.com:acme/mission.git")
     operations = gate.SubprocessGateOperations(repo)
 
     # 存在しない PR 番号は `gh pr view` が非 0 で返る。
@@ -619,21 +631,38 @@ def test_fetch_view_head_and_merge_commands_are_runner_injected(tmp_path):
             return gate.CommandResult(0, open_payload, "")
         if command == ("git", "rev-parse", "FETCH_HEAD"):
             return gate.CommandResult(0, HEAD_SHA + "\n", "")
+        if command == ("git", "remote", "get-url", "origin"):
+            return gate.CommandResult(0, "git@github.com:acme/mission.git\n", "")
         return gate.CommandResult(0, "", "")
 
     operations = gate.SubprocessGateOperations(tmp_path, runner=runner)
-    operations.fetch_main()
+    operations.fetch_base("main")
     snapshot = operations.read_pull_request("665")
     operations.fetch_pull_request_head(snapshot)
     operations.merge_pull_request("665", HEAD_SHA)
 
-    assert ("git", "fetch", "--prune", "origin", "main") in commands
+    # #698: 完全修飾で固定の私有 ref へ fetch する
+    assert (
+        "git",
+        "fetch",
+        "--prune",
+        "origin",
+        "+refs/heads/main:refs/mission-gate/base",
+    ) in commands
+    # #698: gh の操作先を origin 由来の host 修飾 identity へ固定する
+    assert all(
+        "--repo" in command and "github.com/acme/mission" in command
+        for command in commands
+        if command[:2] == ("gh", "pr")
+    )
     assert ("git", "fetch", "origin", "refs/pull/665/head") in commands
     assert (
         "gh",
         "pr",
         "merge",
         "665",
+        "--repo",
+        "github.com/acme/mission",
         "--squash",
         "--match-head-commit",
         HEAD_SHA,

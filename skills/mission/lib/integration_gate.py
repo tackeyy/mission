@@ -54,6 +54,71 @@ def _local_runner(arguments: Iterable[str], cwd: Path) -> CommandResult:
     return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 
 
+_BRANCH_UNSAFE = ("@{", "..", "\\", "~", "^", ":", "?", "*", "[", " ")
+_ORIGIN_RE = re.compile(
+    r"^(?:git@github\.com:|ssh://git@github\.com/|https://github\.com/)"
+    r"(?P<owner>[A-Za-z0-9._-]+)/(?P<repo>[A-Za-z0-9._-]+?)(?:\.git)?/?$"
+)
+
+
+def parse_origin_identity(url: str) -> str:
+    """origin の URL から host 修飾つき identity を作る。
+
+    gh は GH_REPO / GH_HOST でローカル解決を上書きできるため、fetch 元 (origin) と
+    gh の操作先を同一 identity へ固定する。host まで含めるのは GH_HOST 対策。
+    """
+    if not isinstance(url, str):
+        raise IntegrationGateError(2, "origin-identity-failed", "origin url is not a string")
+    match = _ORIGIN_RE.match(url.strip())
+    if match is None:
+        raise IntegrationGateError(2, "origin-identity-failed", "origin url is not a supported github remote")
+    return "github.com/{}/{}".format(match.group("owner"), match.group("repo"))
+
+
+def validate_default_branch_name(name: object) -> str:
+    """default branch 名として安全に使える短縮名だけを通す。
+
+    `git check-ref-format --branch` は `@{-1}` を exit 0 で通すため使わない
+    (実測: --branch は @{-n} を「以前 checkout した branch」として展開する)。
+    完全修飾した refs/heads/<name> を通常モードで検証する。
+    branch `HEAD` は check-ref-format を通るが refs/remotes/origin/HEAD と衝突するため拒否する。
+    """
+    if not isinstance(name, str) or not name or name == "HEAD":
+        raise IntegrationGateError(2, "default-branch-resolution-failed", "default branch name is invalid")
+    # refs/heads/main のような完全修飾形は短縮名として渡されると解決がずれるため拒否する
+    if name.startswith("refs/"):
+        raise IntegrationGateError(2, "default-branch-resolution-failed", "default branch name is invalid")
+    if name.startswith("-") or name.startswith("/") or name.endswith("/"):
+        raise IntegrationGateError(2, "default-branch-resolution-failed", "default branch name is invalid")
+    if any(token in name for token in _BRANCH_UNSAFE):
+        raise IntegrationGateError(2, "default-branch-resolution-failed", "default branch name is invalid")
+    probe = subprocess.run(
+        ("git", "check-ref-format", "refs/heads/{}".format(name)),
+        capture_output=True,
+        text=True,
+    )
+    if probe.returncode != 0:
+        raise IntegrationGateError(2, "default-branch-resolution-failed", "default branch name is invalid")
+    return name
+
+
+def parse_symref_output(output: object) -> str:
+    """`git ls-remote --symref origin HEAD` の出力から default branch 名を取り出す。"""
+    if not isinstance(output, str):
+        raise IntegrationGateError(2, "default-branch-resolution-failed", "symref output is not a string")
+    refs = [
+        line.split("\t", 1)[0][len("ref: "):].strip()
+        for line in output.splitlines()
+        if line.startswith("ref: ")
+    ]
+    if len(refs) != 1:
+        raise IntegrationGateError(2, "default-branch-resolution-failed", "symref output is not a single ref")
+    ref = refs[0]
+    if not ref.startswith("refs/heads/"):
+        raise IntegrationGateError(2, "default-branch-resolution-failed", "symref target is not a branch")
+    return validate_default_branch_name(ref[len("refs/heads/"):])
+
+
 class SubprocessGateOperations:
     """Git and process adapter; all external commands are runner-injectable."""
 
@@ -116,17 +181,52 @@ class SubprocessGateOperations:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
             os.close(descriptor)
 
-    def fetch_main(self) -> None:
-        self._checked(2, "fetch-failed", ("git", "fetch", "--prune", "origin", "main"))
+    def _identity(self) -> str:
+        cached = getattr(self, "_origin_identity", None)
+        if cached is None:
+            cached = self.resolve_origin_identity()
+            self._origin_identity = cached
+        return cached
+
+    def resolve_origin_identity(self) -> str:
+        url = self._checked(
+            2,
+            "origin-identity-failed",
+            ("git", "remote", "get-url", "origin"),
+        ).stdout.strip()
+        return parse_origin_identity(url)
+
+    def resolve_default_branch(self) -> str:
+        output = self._checked(
+            2,
+            "default-branch-resolution-failed",
+            ("git", "ls-remote", "--symref", "origin", "HEAD"),
+        ).stdout
+        return parse_symref_output(output)
+
+    def fetch_base(self, default_branch: str) -> None:
+        # 完全修飾で固定の私有 ref へ書く。短縮名を渡すと refs/heads/main という名の
+        # branch 等で解決がずれ、refs/remotes/origin/HEAD とも衝突しうる。
+        self._checked(
+            2,
+            "fetch-failed",
+            (
+                "git",
+                "fetch",
+                "--prune",
+                "origin",
+                "+refs/heads/{}:refs/mission-gate/base".format(default_branch),
+            ),
+        )
 
     def current_base_sha(self) -> str:
         value = self._checked(
             2,
             "base-observation-failed",
-            ("git", "rev-parse", "origin/main"),
+            ("git", "rev-parse", "--verify", "refs/mission-gate/base^{commit}"),
         ).stdout.strip()
         if _SHA_RE.fullmatch(value) is None:
-            raise IntegrationGateError(2, "base-observation-failed", "origin/main sha is invalid")
+            raise IntegrationGateError(2, "base-observation-failed", "base sha is invalid")
         return value
 
     def read_pull_request(self, pr_ref: str, step: int = 6) -> PullRequestSnapshot:
@@ -138,6 +238,8 @@ class SubprocessGateOperations:
                 "pr",
                 "view",
                 str(pr_ref),
+                "--repo",
+                self._identity(),
                 "--json",
                 "number,headRefOid,baseRefName,state,mergedAt,mergeCommit",
             ),
@@ -272,6 +374,8 @@ class SubprocessGateOperations:
                 "pr",
                 "merge",
                 str(pr_ref),
+                "--repo",
+                self._identity(),
                 "--squash",
                 "--match-head-commit",
                 expected_head_sha,
@@ -290,7 +394,9 @@ def gate_and_merge(
         pr_ref,
         GateRuntimeServices(
             lease=operations.lease,
-            fetch_main=operations.fetch_main,
+            resolve_origin_identity=operations.resolve_origin_identity,
+            resolve_default_branch=operations.resolve_default_branch,
+            fetch_base=operations.fetch_base,
             current_base_sha=operations.current_base_sha,
             read_pull_request=operations.read_pull_request,
             fetch_pull_request_head=operations.fetch_pull_request_head,
