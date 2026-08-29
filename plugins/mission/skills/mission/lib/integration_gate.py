@@ -230,6 +230,11 @@ class SubprocessGateOperations:
             # 以後の git 操作は remote 名ではなくこの URL を直接使う。
             # 名前 `origin` を使い続けると、検査と fetch の間に remote を
             # 差し替えられる TOCTOU が残るため。
+            #
+            # 限界: URL 直指定でも `url.<base>.insteadOf` による書き換えは残る。
+            # ただしその設定を書ける主体は、本 gate の実装や `git` 実行ファイル
+            # 自体も書き換えられる（= runtime 侵害）ため、本 gate の脅威モデル外とする。
+            # 詳細は #701。
             self._origin_url = url
             return identity
         if identity != cached:

@@ -217,6 +217,8 @@ def test_symref_parsing_extracts_branch_name(output, expected):
     "ref: refs/heads/main\tHEAD\n" + BASE_SHA + "\tHEAD\nunexpected\n",
     # 異なる SHA 行が複数ある（HEAD が一意に定まらない）
     "ref: refs/heads/main\tHEAD\n" + BASE_SHA + "\tHEAD\n" + HEAD_SHA + "\tHEAD\n",
+    # 同一 SHA 行の重複（HEAD を一意に定めない）
+    "ref: refs/heads/main\tHEAD\n" + BASE_SHA + "\tHEAD\n" + BASE_SHA + "\tHEAD\n",
     # 空白が混入した malformed 行
     "ref: refs/heads/main\t HEAD\n" + BASE_SHA + "\tHEAD\n",
     "ref: refs/heads/main\tHEAD\n " + BASE_SHA + "\tHEAD\n",
