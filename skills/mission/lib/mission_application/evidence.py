@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -29,8 +30,9 @@ from mission_kernel.evidence import (
     project_progress_update,
     project_verification_entry,
 )
-
+from mission_kernel.json_codec import encode_json_value, freeze_json_value
 from .artifact import EvidenceEffect, EvidenceFailure, make_evidence_effect
+from .ports import LegacyCommandExecutionResult
 
 
 @dataclass(frozen=True)
@@ -40,6 +42,7 @@ class PreparedEvidenceOperation:
     command: Command
     effects: tuple[EvidenceEffect, ...]
     result: dict
+    volatile_fields: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -72,6 +75,65 @@ class VerificationRecordRequest:
     iteration: object
     checks: object
     kind: object = "execution"
+
+
+@dataclass(frozen=True)
+class PreparedVerificationRecord:
+    """Validated checks plus the caller-stable retry identity for one record."""
+
+    checks: object
+    operation_id: str | None
+    operation_command: object | None
+    kind: str = "execution"
+
+
+def _verification_checks_digest(checks: tuple[VerificationCheck, ...]) -> str:
+    normalized = [
+        {"detail": check.detail, "name": check.name, "ok": check.ok}
+        for check in checks
+    ]
+    content = encode_json_value(freeze_json_value(normalized))
+    return "sha256:" + hashlib.sha256(content).hexdigest()
+
+
+def prepare_verification_record_operation(
+    payload: object,
+    *,
+    iteration: object,
+    state_path: object,
+    compatibility_arguments,
+    canonical_operation,
+) -> PreparedVerificationRecord:
+    """Bind one verification payload to a caller-stable operation identity.
+
+    Without a stable operation id the repository mints a fresh one per
+    invocation, so a crash retry appends a second record instead of replaying
+    the first (#685).
+    """
+    kind, checks = normalize_verification_payload(payload)
+    path = Path(state_path)
+    caller_operation_id, arguments = compatibility_arguments(
+        {
+            "checks_digest": _verification_checks_digest(checks),
+            "iteration": iteration,
+            "kind": kind,
+        },
+        target_digest="",
+        require_caller=False,
+    )
+    if caller_operation_id is None:
+        # Without a caller-supplied id the repository keeps minting a fresh
+        # identity per invocation.  Deriving one from the pre-state digest
+        # would make two concurrent runs share an identity and replay each
+        # other, so replay stays opt-in through MISSION_OPERATION_ID.
+        return PreparedVerificationRecord(checks, None, None, kind)
+    operation_id, operation_command = canonical_operation(
+        path.stem,
+        "verification-record",
+        arguments,
+        caller_operation_id=caller_operation_id,
+    )
+    return PreparedVerificationRecord(checks, operation_id, operation_command, kind)
 
 
 @dataclass(frozen=True)
@@ -117,8 +179,13 @@ def execute_evidence_operation(repository: object, prepare) -> dict:
     if not callable(execute):
         raise EvidenceFailure("evidence-repository-invalid")
     prepared, execution = execute(prepare)
-    decision = getattr(execution, "decision", None)
-    if decision is None or decision.accepted is not True:
+    if not isinstance(execution, LegacyCommandExecutionResult):
+        raise EvidenceFailure("evidence-execution-result-invalid")
+    decision = execution.decision
+    if decision is None:
+        if not execution.replayed:
+            raise EvidenceFailure("evidence-transition-rejected")
+    elif decision.accepted is not True:
         rejection = getattr(decision, "rejection", None)
         raise EvidenceFailure(
             getattr(rejection, "code", "evidence-transition-rejected")
@@ -126,9 +193,15 @@ def execute_evidence_operation(repository: object, prepare) -> dict:
     projection = execution.projection
     command = prepared.command
     payload = copy.deepcopy(prepared.result)
+    replayed = execution.replayed
     if isinstance(command, UpdateProgress):
-        if payload.get("progress") != projection.get("progress"):
+        if not _record_matches(
+            projection.get("progress"), payload.get("progress"), replayed, prepared,
+            projection,
+        ):
             raise EvidenceFailure("progress-projection-mismatch")
+        if replayed:
+            payload["progress"] = copy.deepcopy(projection.get("progress"))
     elif isinstance(command, ClearProgress):
         if "progress" in projection:
             raise EvidenceFailure("progress-projection-mismatch")
@@ -141,17 +214,81 @@ def execute_evidence_operation(repository: object, prepare) -> dict:
             for key, value in (("path", "path"), ("digest", "digest"))
         ):
             raise EvidenceFailure("context-projection-mismatch")
+        # path and digest are content-addressed and this record has no
+        # clock-derived field, so the projected values need no store authority.
     elif isinstance(command, RecordVerification):
         history = projection.get("verification_history")
-        if not isinstance(history, list) or not history or history[-1] != payload.get(
-            "verification"
-        ):
+        if not isinstance(history, list) or not history:
             raise EvidenceFailure("verification-projection-mismatch")
+        expected = payload.get("verification")
+        if replayed:
+            matches = [
+                record
+                for record in history
+                if _record_matches(record, expected, True, prepared, projection)
+            ]
+            if len(matches) != 1:
+                raise EvidenceFailure("verification-projection-mismatch")
+            record = matches[0]
+        else:
+            record = history[-1]
+        if not _record_matches(record, expected, replayed, prepared, projection):
+            raise EvidenceFailure("verification-projection-mismatch")
+        if replayed:
+            payload["verification"] = copy.deepcopy(record)
     elif isinstance(command, GenerateClaimsLedger):
         record = (projection.get("claims_ledgers") or {}).get(str(command.iteration))
         if not isinstance(record, dict) or record.get("digest") != payload.get("digest"):
             raise EvidenceFailure("claims-ledger-projection-mismatch")
     return payload
+
+
+def _record_matches(
+    stored: object,
+    expected: object,
+    replayed: bool,
+    prepared: PreparedEvidenceOperation,
+    state: object,
+) -> bool:
+    """Compare a stored record with the one this invocation would have written.
+
+    A replay re-derives clock-sourced fields from the current time, so those
+    fields are compared only on the first execution; the stored record stays
+    authoritative for them.  Every other field must match either way, so a
+    replay that would have produced different content is still rejected.
+    """
+    if not replayed:
+        return stored == expected
+    if not isinstance(stored, dict) or not isinstance(expected, dict):
+        return False
+    volatile = prepared.volatile_fields
+    try:
+        validated = _project_stored_replay_record(prepared, state, stored)
+    except EvidenceRuleError:
+        return False
+    if validated is not None and validated != stored:
+        return False
+    return {key: value for key, value in stored.items() if key not in volatile} == {
+        key: value for key, value in expected.items() if key not in volatile
+    }
+
+
+def _project_stored_replay_record(
+    prepared: PreparedEvidenceOperation, state: object, stored: dict
+) -> dict | None:
+    """Revalidate store-authoritative fields through their kernel projector."""
+    volatile = prepared.volatile_fields
+    if not volatile:
+        return None
+    if len(volatile) != 1 or volatile[0] not in stored:
+        raise EvidenceRuleError("evidence-volatile-field-invalid")
+    command = replace(prepared.command, at=stored[volatile[0]])
+    if isinstance(command, UpdateProgress):
+        projected, _content = project_progress_update(state, command)
+        return projected
+    if isinstance(command, RecordVerification):
+        return project_verification_entry(command)
+    raise EvidenceRuleError("evidence-volatile-command-invalid")
 
 
 def evidence_publication_paths(
@@ -349,7 +486,10 @@ def prepare_progress_update(
     if verified != progress or verified_content != content:
         raise EvidenceFailure("progress-projection-mismatch")
     return PreparedEvidenceOperation(
-        command, (effect,), {"progress": copy.deepcopy(progress)}
+        command,
+        (effect,),
+        {"progress": copy.deepcopy(progress)},
+        volatile_fields=("updated_at",),
     )
 
 
@@ -359,7 +499,7 @@ def prepare_progress_clear(
     if not isinstance(state, dict):
         raise EvidenceFailure("state-invalid")
     command = ClearProgress(now)
-    return PreparedEvidenceOperation(command, (), {})
+    return PreparedEvidenceOperation(command, (), {}, volatile_fields=())
 
 
 def prepare_context_manifest(
@@ -399,6 +539,7 @@ def prepare_context_manifest(
             "digest": claim.digest,
             "findings_count": findings_count,
         },
+        volatile_fields=(),
     )
 
 
@@ -466,7 +607,10 @@ def prepare_verification_record(
     command = RecordVerification(now, iteration, checks, kind)
     entry = _translate(lambda: project_verification_entry(command))
     return PreparedEvidenceOperation(
-        command, (), {"verification": copy.deepcopy(entry)}
+        command,
+        (),
+        {"verification": copy.deepcopy(entry)},
+        volatile_fields=("recorded_at",),
     )
 
 
