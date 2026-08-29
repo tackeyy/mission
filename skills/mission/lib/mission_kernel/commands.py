@@ -230,6 +230,7 @@ class RecordVerification:
     at: str
     iteration: int
     checks: tuple[VerificationCheck, ...]
+    kind: str = "execution"
 
 
 @dataclass(frozen=True)

@@ -219,7 +219,11 @@ def false_negative_summary(states):
             continue
         latest = None
         for entry in history:
-            if isinstance(entry, dict) and entry.get("status") in ("passed", "failed"):
+            if (
+                isinstance(entry, dict)
+                and entry.get("kind", "execution") == "execution"
+                and entry.get("status") in ("passed", "failed")
+            ):
                 latest = entry
         if latest is None:
             # not-run しか無い / 空 は「測れない」であって「欠陥なし」ではない

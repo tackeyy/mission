@@ -67,6 +67,7 @@ class VerificationRecordRequest:
     now: object
     iteration: object
     checks: object
+    kind: object = "execution"
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,7 @@ class PreparedVerificationRecord:
     checks: object
     operation_id: str | None
     operation_command: object | None
+    kind: str = "execution"
 
 
 def _verification_checks_digest(checks: tuple[VerificationCheck, ...]) -> str:
@@ -101,12 +103,13 @@ def prepare_verification_record_operation(
     invocation, so a crash retry appends a second record instead of replaying
     the first (#685).
     """
-    checks = normalize_verification_checks(payload)
+    kind, checks = normalize_verification_payload(payload)
     path = Path(state_path)
     caller_operation_id, arguments = compatibility_arguments(
         {
             "checks_digest": _verification_checks_digest(checks),
             "iteration": iteration,
+            "kind": kind,
         },
         target_digest="",
         require_caller=False,
@@ -116,14 +119,14 @@ def prepare_verification_record_operation(
         # identity per invocation.  Deriving one from the pre-state digest
         # would make two concurrent runs share an identity and replay each
         # other, so replay stays opt-in through MISSION_OPERATION_ID.
-        return PreparedVerificationRecord(checks, None, None)
+        return PreparedVerificationRecord(checks, None, None, kind)
     operation_id, operation_command = canonical_operation(
         path.stem,
         "verification-record",
         arguments,
         caller_operation_id=caller_operation_id,
     )
-    return PreparedVerificationRecord(checks, operation_id, operation_command)
+    return PreparedVerificationRecord(checks, operation_id, operation_command, kind)
 
 
 def execute_evidence_operation(repository: object, prepare) -> dict:
@@ -342,6 +345,7 @@ def run_verification_record(
             now=request.now,
             iteration=request.iteration,
             checks=request.checks,
+            kind=request.kind,
         ),
     )
 
@@ -480,6 +484,17 @@ def normalize_verification_checks(payload: object) -> tuple[VerificationCheck, .
     return tuple(normalized)
 
 
+def normalize_verification_payload(
+    payload: object,
+) -> tuple[str, tuple[VerificationCheck, ...]]:
+    if not isinstance(payload, dict):
+        raise EvidenceFailure("verification-payload-invalid")
+    kind = payload.get("kind", "execution")
+    if kind not in ("execution", "implementation-read"):
+        raise EvidenceFailure("verification-kind-invalid")
+    return kind, normalize_verification_checks(payload)
+
+
 def validate_context_iteration_override(value: object) -> None:
     """Validate an explicit CLI override while allowing state-derived defaults."""
     if value is not None and (type(value) is not int or value < 1):
@@ -492,10 +507,11 @@ def prepare_verification_record(
     now: object,
     iteration: object,
     checks: object,
+    kind: object = "execution",
 ) -> PreparedEvidenceOperation:
     if not isinstance(state, dict):
         raise EvidenceFailure("state-invalid")
-    command = RecordVerification(now, iteration, checks)
+    command = RecordVerification(now, iteration, checks, kind)
     entry = _translate(lambda: project_verification_entry(command))
     return PreparedEvidenceOperation(
         command,

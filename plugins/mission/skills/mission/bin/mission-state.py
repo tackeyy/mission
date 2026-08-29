@@ -13999,7 +13999,10 @@ def cmd_verification_record(args):
         )
         result = run_verification_record(
             VerificationRecordRequest(
-                now=iso_now(), iteration=args.iteration, checks=prepared.checks
+                now=iso_now(),
+                iteration=args.iteration,
+                checks=prepared.checks,
+                kind=prepared.kind,
             ),
             _legacy_lifecycle_repository(
                 cwd, sf, stamp=True, pre_admit_lease=True,

@@ -186,6 +186,8 @@ def project_verification_entry(command: RecordVerification) -> dict:
         raise EvidenceRuleError("verification-iteration-invalid")
     if type(command.checks) is not tuple:
         raise EvidenceRuleError("verification-checks-invalid")
+    if command.kind not in ("execution", "implementation-read"):
+        raise EvidenceRuleError("verification-kind-invalid")
     checks = []
     for check in command.checks:
         if type(check) is not VerificationCheck:
@@ -197,10 +199,18 @@ def project_verification_entry(command: RecordVerification) -> dict:
         if check.detail is not None and not isinstance(check.detail, str):
             raise EvidenceRuleError("verification-check-detail-invalid")
         checks.append({"name": check.name, "ok": check.ok, "detail": check.detail})
+    implementation_checks = [
+        check["name"].startswith("implementation-verified:") for check in checks
+    ]
+    if command.kind == "implementation-read" and not all(implementation_checks):
+        raise EvidenceRuleError("verification-kind-check-mismatch")
+    if command.kind == "execution" and any(implementation_checks):
+        raise EvidenceRuleError("verification-kind-check-mismatch")
     failed_count = sum(1 for check in checks if not check["ok"])
     status = "not-run" if not checks else "failed" if failed_count else "passed"
     return {
         "iteration": command.iteration,
+        "kind": command.kind,
         "status": status,
         "checks": checks,
         "failed_count": failed_count,
