@@ -100,8 +100,18 @@ _SUPERLINEAR_RATIO_LIMIT = 8
 def _assert_scales_below_quadratic(build_mission, *, small=1_000, large=4_000):
     small_cpu = _min_cpu_decision(build_mission(small))
     large_cpu = _min_cpu_decision(build_mission(large))
-    ratio = large_cpu / small_cpu if small_cpu > 0 else float("inf")
-    assert large_cpu < small_cpu * _SUPERLINEAR_RATIO_LIMIT, (
+
+    # 基準側が計測分解能に埋もれていると比が意味を持たない。黙って通すと検査が
+    # 空洞化し、黙って落とすと実装が正しくても失敗する。どちらでもなく、
+    # 「入力が小さすぎて測れない」ことを明示して落とす（テスト設計の問題として扱う）。
+    floor = time.get_clock_info("process_time").resolution * 10
+    assert small_cpu > floor, (
+        f"baseline is below measurement resolution: small({small})={small_cpu:.6f}s "
+        f"floor={floor:.6f}s — increase the small input size"
+    )
+
+    ratio = large_cpu / small_cpu
+    assert ratio < _SUPERLINEAR_RATIO_LIMIT, (
         f"superlinear growth: small({small})={small_cpu:.4f}s "
         f"large({large})={large_cpu:.4f}s ratio={ratio:.2f}x "
         f"(limit={_SUPERLINEAR_RATIO_LIMIT}x)"
@@ -1181,11 +1191,34 @@ def test_adversarial_long_mission_is_evaluated_without_regex_blowup():
     _assert_scales_below_quadratic(_adversarial_long_mission)
 
 
+def test_scaling_check_reports_an_unmeasurable_baseline_instead_of_failing_blindly(
+    monkeypatch,
+):
+    """基準側が測れないとき、比の判定へ進まないことを固定する。
+
+    比の分母が 0 だと `large < small * 8` は `large < 0` になり、実装が線形でも
+    必ず落ちる。「超線形を検出した」と誤って報告しないよう、原因を名指しする。
+    """
+    import sys
+
+    module = sys.modules[__name__]
+    measurements = iter([0.0, 0.5])
+    monkeypatch.setattr(module, "_min_cpu_decision", lambda *a, **k: next(measurements))
+
+    with pytest.raises(AssertionError, match="below measurement resolution"):
+        _assert_scales_below_quadratic(lambda count: "deploy. " * count)
+
+
 def test_adversarial_long_mission_detector_rejects_quadratic_cost(monkeypatch):
     """検査の検出力を実証する。
 
     候補評価に入力長の二乗に比例する負荷を注入すると、スケーリング検査が
     確実に落ちることを確認する。落ちなければ、この検査は何も守っていない。
+
+    この detector は ``_actual_operation_signal_detail`` を差し替える。
+    ``test_repeated_keyword_context_lookup_scales_below_quadratic`` と
+    ``test_dense_global_markers_and_prior_candidates_scale_below_quadratic`` も
+    同じ関数を経由するため、3 つの検査の検出力はここで一括して担保される。
     """
     module = _load_module()
     original = module._actual_operation_signal_detail
