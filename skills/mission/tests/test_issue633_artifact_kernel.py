@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, replace
 from contextlib import contextmanager
+import hashlib
 import json
 
 import pytest
@@ -673,10 +674,12 @@ def test_export_effects_bind_in_order_and_duplicate_targets_close_before_publish
         LegacyV4Repository.validate_effects(duplicate)
 
 
-def test_artifact_command_keeps_current_v5_head_rejected(tmp_path, run_cli):
+def test_artifact_init_updates_current_v5_state_and_preserves_head(tmp_path, run_cli):
+    from mission_persistence.authoritative_reader import read_authoritative_snapshot
+
     initialized = run_cli(
         "init",
-        "Keep artifact activation on v4",
+        "Initialize artifact on v5",
         "--complexity",
         "Simple",
         "--force-mission",
@@ -686,13 +689,50 @@ def test_artifact_command_keeps_current_v5_head_rejected(tmp_path, run_cli):
     )
     assert initialized.returncode == 0, initialized.stderr
     session_path = tmp_path / ".mission-state" / "sessions" / "test.json"
-    before = session_path.read_bytes()
+    before_head = json.loads(session_path.read_text(encoding="utf-8"))
 
-    result = run_cli("artifact", "init", "--json", cwd=tmp_path)
+    result = run_cli(
+        "artifact", "init", "--title", "V5 Artifact", "--json", cwd=tmp_path
+    )
 
-    assert result.returncode == 2
-    assert "v5" in result.stderr.lower()
-    assert session_path.read_bytes() == before
-    assert not (
-        tmp_path / ".mission-state" / "artifacts" / "test" / "mission-artifact.md"
-    ).exists()
+    assert result.returncode == 0, result.stderr
+    state = read_authoritative_snapshot(
+        session_path, expected_session_id="test"
+    ).document_copy()
+    artifact = state["artifact"]
+    contract_fields = {
+        key: artifact[key]
+        for key in (
+            "status",
+            "format",
+            "title",
+            "path",
+            "exports",
+            "publish_events",
+            "redaction_status",
+            "required_for_pass",
+            "blocks",
+        )
+    }
+    assert contract_fields == {
+        "status": "draft",
+        "format": "markdown",
+        "title": "V5 Artifact",
+        "path": ".mission-state/artifacts/test/mission-artifact.md",
+        "exports": [],
+        "publish_events": [],
+        "redaction_status": "unchecked",
+        "required_for_pass": False,
+        "blocks": [],
+    }
+    artifact_path = tmp_path / artifact["path"]
+    assert artifact_path.is_file()
+    artifact_bytes = artifact_path.read_bytes()
+    assert "V5 Artifact" in artifact_bytes.decode("utf-8")
+    assert artifact["digest"] == hashlib.sha256(artifact_bytes).hexdigest()
+    assert artifact["size"] == len(artifact_bytes)
+    assert artifact["producer_run_id"] == "test"
+    assert artifact["created_at"] == artifact["updated_at"]
+    after_head = json.loads(session_path.read_text(encoding="utf-8"))
+    assert after_head["schema"] == "mission-head/1"
+    assert after_head["generation"] == before_head["generation"] + 1

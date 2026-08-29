@@ -1313,10 +1313,11 @@ def test_every_injected_callable_is_classified(tmp_path):
         "presented_lease_id",
         "operation_id",
         "operation_command",
-            "operation_command_type",
-            "lease_ttl_seconds",
-            "metadata",
-        }
+        "operation_command_type",
+        "lease_ttl_seconds",
+        "metadata",
+        "effect_context",  # opaque object value passed to the publisher; never invoked
+    }
 
     for cls in (LegacyV4Repository, V5CompatibilityRepository):
         declared = set(cls.GUARDED_INJECTED_CALLABLES)
