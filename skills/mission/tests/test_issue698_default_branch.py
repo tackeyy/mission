@@ -187,7 +187,7 @@ def test_origin_identity_rejects_unsupported_remotes(url):
 
 @pytest.mark.parametrize("output,expected", [
     ("ref: refs/heads/master\tHEAD\n" + BASE_SHA + "\tHEAD\n", "master"),
-    ("ref: refs/heads/main\tHEAD\n", "main"),
+    ("ref: refs/heads/main\tHEAD\n" + BASE_SHA + "\tHEAD\n", "main"),
 ])
 def test_symref_parsing_extracts_branch_name(output, expected):
     assert gate.parse_symref_output(output) == expected
@@ -197,8 +197,14 @@ def test_symref_parsing_extracts_branch_name(output, expected):
     "",
     BASE_SHA + "\tHEAD\n",
     "ref: refs/tags/v1\tHEAD\n",
-    "ref: refs/heads/a\tHEAD\nref: refs/heads/b\tHEAD\n",
+    "ref: refs/heads/a\tHEAD\n" + BASE_SHA + "\tHEAD\nref: refs/heads/b\tHEAD\n",
     "garbage",
+    # SHA 行が無い（malformed）
+    "ref: refs/heads/main\tHEAD\n",
+    # HEAD 以外を指す symref を default と誤認しない
+    "ref: refs/heads/release\tNOT_HEAD\n" + BASE_SHA + "\tHEAD\n",
+    # 余分な行が混ざる
+    "ref: refs/heads/main\tHEAD\n" + BASE_SHA + "\tHEAD\nunexpected\n",
 ])
 def test_symref_parsing_rejects_unexpected_output(output):
     with pytest.raises(gate.IntegrationGateError):
@@ -304,3 +310,54 @@ def test_post_step_six_retarget_is_detected_only_at_readback():
     assert excinfo.value.reason == "merge-readback-failed"
     # merge 自体は実行されてしまう（予防できていない）ことを固定する
     assert any(call[0] == "merge" for call in operations.calls)
+
+
+def test_origin_identity_drift_during_the_gate_is_rejected(tmp_path):
+    """初回解決の後に origin が差し替わったら fail-closed にする。
+
+    固定しないと「ログ上の repository は A、実際の gh 操作先は B」が成立してしまう。
+    """
+    urls = iter([
+        "git@github.com:acme/widgets.git\n",
+        "git@github.com:evil/widgets.git\n",
+    ])
+    commands = []
+
+    def runner(arguments, _cwd):
+        command = tuple(arguments)
+        commands.append(command)
+        if command == ("git", "remote", "get-url", "origin"):
+            return gate.CommandResult(0, next(urls), "")
+        return gate.CommandResult(0, "", "")
+
+    operations = gate.SubprocessGateOperations(tmp_path, runner=runner)
+    assert operations.resolve_origin_identity() == "github.com/acme/widgets"
+    with pytest.raises(gate.IntegrationGateError) as excinfo:
+        operations.resolve_origin_identity()
+    assert excinfo.value.reason == "origin-identity-moved"
+
+
+def test_gh_calls_reuse_the_first_resolved_identity(tmp_path):
+    """gh 呼び出しは初回 identity を再利用し、origin を再解決しない。"""
+    resolutions = []
+    payload = (
+        '{"number":1,"headRefOid":"' + HEAD_SHA + '","baseRefName":"master",'
+        '"state":"OPEN","mergedAt":null,"mergeCommit":null}'
+    )
+
+    def runner(arguments, _cwd):
+        command = tuple(arguments)
+        if command == ("git", "remote", "get-url", "origin"):
+            resolutions.append(command)
+            return gate.CommandResult(0, "git@github.com:acme/widgets.git\n", "")
+        if command[:3] == ("gh", "pr", "view"):
+            assert command[command.index("--repo") + 1] == "github.com/acme/widgets"
+            return gate.CommandResult(0, payload, "")
+        return gate.CommandResult(0, "", "")
+
+    operations = gate.SubprocessGateOperations(tmp_path, runner=runner)
+    operations.resolve_origin_identity()
+    operations.read_pull_request("1")
+    operations.merge_pull_request("1", HEAD_SHA)
+    # 初回の 1 回だけ。gh 呼び出しごとに再解決しない
+    assert len(resolutions) == 1

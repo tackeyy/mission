@@ -106,12 +106,30 @@ def parse_symref_output(output: object) -> str:
     """`git ls-remote --symref origin HEAD` の出力から default branch 名を取り出す。"""
     if not isinstance(output, str):
         raise IntegrationGateError(2, "default-branch-resolution-failed", "symref output is not a string")
-    refs = [
-        line.split("\t", 1)[0][len("ref: "):].strip()
-        for line in output.splitlines()
-        if line.startswith("ref: ")
-    ]
-    if len(refs) != 1:
+    # `ref: <target>\tHEAD` の形と、対応する `<40hex>\tHEAD` 行の両方を要求する。
+    # 緩く読むと `ref: refs/heads/release\tNOT_HEAD` のような出力で
+    # 非 default branch を default と誤認しうる。
+    refs = []
+    sha_seen = False
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        if line.startswith("ref: "):
+            parts = line[len("ref: "):].split("\t")
+            if len(parts) != 2 or parts[1].strip() != "HEAD":
+                raise IntegrationGateError(
+                    2, "default-branch-resolution-failed", "symref line is malformed"
+                )
+            refs.append(parts[0].strip())
+            continue
+        parts = line.split("\t")
+        if len(parts) == 2 and _SHA_RE.fullmatch(parts[0].strip()) and parts[1].strip() == "HEAD":
+            sha_seen = True
+            continue
+        raise IntegrationGateError(
+            2, "default-branch-resolution-failed", "symref output has unexpected content"
+        )
+    if len(refs) != 1 or not sha_seen:
         raise IntegrationGateError(2, "default-branch-resolution-failed", "symref output is not a single ref")
     ref = refs[0]
     if not ref.startswith("refs/heads/"):
@@ -182,19 +200,35 @@ class SubprocessGateOperations:
             os.close(descriptor)
 
     def _identity(self) -> str:
+        """初回に解決した identity を返す。未解決なら解決して固定する。"""
         cached = getattr(self, "_origin_identity", None)
         if cached is None:
-            cached = self.resolve_origin_identity()
-            self._origin_identity = cached
+            return self.resolve_origin_identity()
         return cached
 
     def resolve_origin_identity(self) -> str:
+        """origin の identity を解決し、初回値へ固定する。
+
+        初回解決の後に origin が差し替わると、ログ上の repository と実際の gh 操作先が
+        乖離しうる。2 回目以降は初回値と一致することを要求し、違えば fail-closed にする。
+        """
         url = self._checked(
             2,
             "origin-identity-failed",
             ("git", "remote", "get-url", "origin"),
         ).stdout.strip()
-        return parse_origin_identity(url)
+        identity = parse_origin_identity(url)
+        cached = getattr(self, "_origin_identity", None)
+        if cached is None:
+            self._origin_identity = identity
+            return identity
+        if identity != cached:
+            raise IntegrationGateError(
+                2,
+                "origin-identity-moved",
+                "origin repository identity changed during the gate",
+            )
+        return cached
 
     def resolve_default_branch(self) -> str:
         output = self._checked(
