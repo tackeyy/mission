@@ -641,12 +641,12 @@ def test_fetch_view_head_and_merge_commands_are_runner_injected(tmp_path):
     operations.fetch_pull_request_head(snapshot)
     operations.merge_pull_request("665", HEAD_SHA)
 
-    # #698: 完全修飾で固定の私有 ref へ fetch する
+    # #698: 完全修飾で固定の私有 ref へ fetch する。
+    # remote 名ではなく検証済み URL を直接渡す（名前は検査後に差し替えられうる）
     assert (
         "git",
         "fetch",
-        "--prune",
-        "origin",
+        "git@github.com:acme/mission.git",
         "+refs/heads/main:refs/mission-gate/base",
     ) in commands
     # #698: gh の操作先を origin 由来の host 修飾 identity へ固定する
@@ -655,7 +655,7 @@ def test_fetch_view_head_and_merge_commands_are_runner_injected(tmp_path):
         for command in commands
         if command[:2] == ("gh", "pr")
     )
-    assert ("git", "fetch", "origin", "refs/pull/665/head") in commands
+    assert ("git", "fetch", "git@github.com:acme/mission.git", "refs/pull/665/head") in commands
     assert (
         "gh",
         "pr",

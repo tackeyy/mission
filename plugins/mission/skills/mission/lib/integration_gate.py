@@ -114,7 +114,7 @@ def parse_symref_output(output: object) -> str:
     # 緩く読むと `ref: refs/heads/release\tNOT_HEAD` のような出力で
     # 非 default branch を default と誤認しうる。
     refs = []
-    shas = set()
+    shas = []
     for line in output.split("\n"):
         if line == "":
             continue
@@ -129,12 +129,12 @@ def parse_symref_output(output: object) -> str:
             continue
         parts = line.split("\t")
         if len(parts) == 2 and _SHA_RE.fullmatch(parts[0]) and parts[1] == "HEAD":
-            shas.add(parts[0])
+            shas.append(parts[0])
             continue
         raise IntegrationGateError(
             2, "default-branch-resolution-failed", "symref output has unexpected content"
         )
-    # 異なる SHA 行が複数ある出力は HEAD が一意に定まらないため拒否する
+    # SHA 行はちょうど 1 行を要求する（重複行も HEAD を一意に定めない）
     if len(refs) != 1 or len(shas) != 1:
         raise IntegrationGateError(2, "default-branch-resolution-failed", "symref output is not a single ref")
     ref = refs[0]
@@ -227,6 +227,10 @@ class SubprocessGateOperations:
         cached = getattr(self, "_origin_identity", None)
         if cached is None:
             self._origin_identity = identity
+            # 以後の git 操作は remote 名ではなくこの URL を直接使う。
+            # 名前 `origin` を使い続けると、検査と fetch の間に remote を
+            # 差し替えられる TOCTOU が残るため。
+            self._origin_url = url
             return identity
         if identity != cached:
             raise IntegrationGateError(
@@ -236,11 +240,19 @@ class SubprocessGateOperations:
             )
         return cached
 
+    def _origin_url_pinned(self) -> str:
+        """検証済みの origin URL を返す。未解決なら解決してから返す。"""
+        url = getattr(self, "_origin_url", None)
+        if url is None:
+            self.resolve_origin_identity()
+            url = getattr(self, "_origin_url")
+        return url
+
     def resolve_default_branch(self) -> str:
         output = self._checked(
             2,
             "default-branch-resolution-failed",
-            ("git", "ls-remote", "--symref", "origin", "HEAD"),
+            ("git", "ls-remote", "--symref", self._origin_url_pinned(), "HEAD"),
         ).stdout
         return parse_symref_output(output)
 
@@ -253,8 +265,7 @@ class SubprocessGateOperations:
             (
                 "git",
                 "fetch",
-                "--prune",
-                "origin",
+                self._origin_url_pinned(),
                 "+refs/heads/{}:refs/mission-gate/base".format(default_branch),
             ),
         )
@@ -306,7 +317,7 @@ class SubprocessGateOperations:
         self._checked(
             3,
             "head-fetch-failed",
-            ("git", "fetch", "origin", "refs/pull/{}/head".format(snapshot.number)),
+            ("git", "fetch", self._origin_url_pinned(), "refs/pull/{}/head".format(snapshot.number)),
         )
         fetched = self._checked(
             3,

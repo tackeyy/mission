@@ -273,7 +273,10 @@ def test_origin_identity_failure_stops_before_any_gh_call(tmp_path):
 
 def test_default_branch_resolution_failure_is_reported(tmp_path):
     def runner(arguments, _cwd):
-        if tuple(arguments)[:3] == ("git", "ls-remote", "--symref"):
+        command = tuple(arguments)
+        if command == ("git", "remote", "get-url", "origin"):
+            return gate.CommandResult(0, "git@github.com:acme/widgets.git\n", "")
+        if command[:3] == ("git", "ls-remote", "--symref"):
             return gate.CommandResult(1, "", "network down")
         return gate.CommandResult(0, "", "")
 
@@ -287,17 +290,20 @@ def test_base_fetch_uses_fully_qualified_private_ref(tmp_path):
     commands = []
 
     def runner(arguments, _cwd):
-        commands.append(tuple(arguments))
+        command = tuple(arguments)
+        commands.append(command)
+        if command == ("git", "remote", "get-url", "origin"):
+            return gate.CommandResult(0, "git@github.com:acme/widgets.git\n", "")
         return gate.CommandResult(0, BASE_SHA + "\n", "")
 
     operations = gate.SubprocessGateOperations(tmp_path, runner=runner)
     operations.fetch_base("master")
     assert operations.current_base_sha() == BASE_SHA
+    # remote 名ではなく検証済み URL を直接渡す（名前は差し替えられうる）
     assert (
         "git",
         "fetch",
-        "--prune",
-        "origin",
+        "git@github.com:acme/widgets.git",
         "+refs/heads/master:refs/mission-gate/base",
     ) in commands
     assert (
@@ -400,3 +406,46 @@ def test_identity_is_revalidated_after_integration():
     run(operations)
     identity_calls = [i for i, call in enumerate(operations.calls) if call[0] == "identity"]
     assert len(identity_calls) == 2, operations.calls
+
+
+def test_git_operations_never_use_the_mutable_remote_name(tmp_path):
+    """git 操作は remote 名 `origin` を使わない。
+
+    名前を使うと「identity を検査した後・fetch する前」に remote を差し替えられる
+    TOCTOU が残る。検証済み URL を直接渡すことで、この窓ごと閉じる。
+    """
+    commands = []
+    payload = (
+        '{"number":1,"headRefOid":"' + HEAD_SHA + '","baseRefName":"master",'
+        '"state":"OPEN","mergedAt":null,"mergeCommit":null}'
+    )
+    symref = "ref: refs/heads/master\tHEAD\n" + BASE_SHA + "\tHEAD\n"
+
+    def runner(arguments, _cwd):
+        command = tuple(arguments)
+        commands.append(command)
+        if command == ("git", "remote", "get-url", "origin"):
+            return gate.CommandResult(0, "git@github.com:acme/widgets.git\n", "")
+        if command[:3] == ("git", "ls-remote", "--symref"):
+            return gate.CommandResult(0, symref, "")
+        if command[:3] == ("gh", "pr", "view"):
+            return gate.CommandResult(0, payload, "")
+        if command == ("git", "rev-parse", "FETCH_HEAD"):
+            return gate.CommandResult(0, HEAD_SHA + "\n", "")
+        return gate.CommandResult(0, BASE_SHA + "\n", "")
+
+    operations = gate.SubprocessGateOperations(tmp_path, runner=runner)
+    operations.resolve_origin_identity()
+    operations.resolve_default_branch()
+    operations.fetch_base("master")
+    snapshot = operations.read_pull_request("1")
+    operations.fetch_pull_request_head(snapshot)
+
+    remote_ops = [
+        command for command in commands
+        if command[:2] in {("git", "fetch"), ("git", "ls-remote")}
+    ]
+    assert remote_ops
+    for command in remote_ops:
+        assert "origin" not in command, command
+        assert "git@github.com:acme/widgets.git" in command, command
