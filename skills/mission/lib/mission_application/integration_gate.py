@@ -35,7 +35,9 @@ class IntegrationObservation:
 @dataclass(frozen=True)
 class GateRuntimeServices:
     lease: Callable[[], ContextManager[None]]
-    fetch_main: Callable[[], None]
+    resolve_origin_identity: Callable[[], str]
+    resolve_default_branch: Callable[[], str]
+    fetch_base: Callable[[str], None]
     current_base_sha: Callable[[], str]
     read_pull_request: Callable[..., PullRequestSnapshot]
     fetch_pull_request_head: Callable[[PullRequestSnapshot], None]
@@ -67,16 +69,23 @@ def _valid_sha(value: str) -> bool:
     )
 
 
-def _require_open_main(
+def _require_open_base(
     snapshot: PullRequestSnapshot,
     *,
     expected_number: int,
+    default_branch: str,
     step: int,
     reason: str,
 ) -> None:
+    """PR が「default branch を base に持つ open な PR」であることを要求する。
+
+    default_branch は PR の申告値ではなく origin から解決した値である。PR 由来値を
+    信じると、queue の accepted_base_sha と同じ SHA を指す非 default branch へ
+    retarget することで別 branch へ merge できてしまう (queue は SHA しか持たない)。
+    """
     if (
         snapshot.number != expected_number
-        or snapshot.base_ref_name != "main"
+        or snapshot.base_ref_name != default_branch
         or snapshot.state != "OPEN"
         or not _valid_sha(snapshot.head_sha)
     ):
@@ -103,7 +112,14 @@ def run_gate_and_merge(
     expected_number = int(pr_ref)
     with services.lease():
         logger("lease=acquired")
-        services.fetch_main()
+        # origin と gh の操作先を同一 identity へ固定する。GH_REPO / GH_HOST が
+        # ローカル解決を上書きできるため、fetch 元と PR 操作先が乖離しうる。
+        identity = services.resolve_origin_identity()
+        logger("repository={}".format(identity))
+        # base は PR の申告値ではなく origin から解決する (retarget 対策)
+        default_branch = services.resolve_default_branch()
+        logger("default_branch={} source=ls-remote-symref".format(default_branch))
+        services.fetch_base(default_branch)
         base_before = services.current_base_sha()
         logger("base_sha(step=2)={}".format(base_before))
         if expected_base_sha is not None and base_before != expected_base_sha:
@@ -113,9 +129,10 @@ def run_gate_and_merge(
                 "origin/main differs from the queue-verified accepted base",
             )
         initial = services.read_pull_request(pr_ref, step=3)
-        _require_open_main(
+        _require_open_base(
             initial,
             expected_number=expected_number,
+            default_branch=default_branch,
             step=3,
             reason="pull-request-not-mergeable",
         )
@@ -128,15 +145,32 @@ def run_gate_and_merge(
         services.fetch_pull_request_head(initial)
         observation = services.integrate_and_test(initial.head_sha, base_before, logger)
         logger("test_scope={} test_targets={}".format(observation.scope, observation.targets))
-        services.fetch_main()
+        # git 操作は可変な remote 名 `origin` を使うため、identity を再解決して
+        # 初回値との一致を要求する。これをしないと「fetch は B・gh は A」が成立する。
+        identity_after = services.resolve_origin_identity()
+        if identity_after != identity:
+            raise IntegrationGateFailure(
+                5,
+                "origin-identity-moved",
+                "origin repository identity changed; restart the gate",
+            )
+        default_branch_after = services.resolve_default_branch()
+        if default_branch_after != default_branch:
+            raise IntegrationGateFailure(
+                5,
+                "default-branch-moved",
+                "repository default branch changed; restart the gate",
+            )
+        services.fetch_base(default_branch)
         base_after = services.current_base_sha()
         logger("base_sha(step=5)={}".format(base_after))
         if base_after != base_before:
             raise IntegrationGateFailure(5, "base-moved", "origin/main moved; restart from step 2")
         latest = services.read_pull_request(pr_ref, step=6)
-        _require_open_main(
+        _require_open_base(
             latest,
             expected_number=expected_number,
+            default_branch=default_branch,
             step=6,
             reason="pull-request-changed",
         )
@@ -146,7 +180,7 @@ def run_gate_and_merge(
         merged = services.read_pull_request(pr_ref, step=7)
         if (
             merged.number != expected_number
-            or merged.base_ref_name != "main"
+            or merged.base_ref_name != default_branch
             or merged.state != "MERGED"
             or not merged.merged_at
             or not _valid_sha(merged.head_sha)
