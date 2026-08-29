@@ -6606,9 +6606,8 @@ def _legacy_evidence_repository(cwd: Path, sf: Path, *, stamp: bool) -> LegacyV4
             read_state=read_state,
             write_state=write_state,
             backup_state=lambda: backup_state(sf),
-            effect_transaction=lambda effects, prepared=None: _publish_evidence_effects(
-                cwd, effects, prepared
-            ),
+            effect_publisher=_publish_evidence_effects,
+            effect_context=cwd,
             aggregate_recover=aggregate.recover,
             aggregate_prepare=aggregate.prepare,
             aggregate_finalize=aggregate.finalize,
@@ -6680,7 +6679,7 @@ def cmd_artifact_init(args):
         )
         result = run_artifact_init(
             request,
-            _legacy_evidence_repository(cwd, sf, stamp=False),
+            _legacy_lifecycle_repository(cwd, sf, stamp=False, pre_admit_lease=True),
             _render_artifact_markdown,
         )
     except EvidenceFailure as exc:
@@ -6700,7 +6699,7 @@ def cmd_artifact_append(args):
     try:
         result = run_artifact_append(
             ArtifactAppendRequest(iso_now(), section, content, source, args.label),
-            _legacy_evidence_repository(cwd, sf, stamp=False),
+            _legacy_lifecycle_repository(cwd, sf, stamp=False, pre_admit_lease=True),
         )
     except EvidenceFailure as exc:
         print(f"ERROR: {exc.code}", file=sys.stderr)
@@ -6717,7 +6716,7 @@ def cmd_artifact_render(args):
     try:
         result = run_artifact_render(
             ArtifactRenderRequest(iso_now(), args.redaction_status),
-            _legacy_evidence_repository(cwd, sf, stamp=False),
+            _legacy_lifecycle_repository(cwd, sf, stamp=False, pre_admit_lease=True),
             _render_artifact_markdown,
         )
     except EvidenceFailure as exc:
@@ -6739,7 +6738,7 @@ def cmd_artifact_export(args):
     try:
         result = run_artifact_export(
             ArtifactExportRequest(iso_now(), destination, args.redaction_status),
-            _legacy_evidence_repository(cwd, sf, stamp=False),
+            _legacy_lifecycle_repository(cwd, sf, stamp=False, pre_admit_lease=True),
             _render_artifact_markdown,
         )
     except EvidenceFailure as exc:
@@ -6773,7 +6772,7 @@ def cmd_artifact_publish(args):
                 args.approval_text,
                 args.require_confirm,
             ),
-            _legacy_evidence_repository(cwd, sf, stamp=False),
+            _legacy_lifecycle_repository(cwd, sf, stamp=False, pre_admit_lease=True),
             _render_artifact_markdown,
         )
     except EvidenceFailure as exc:
@@ -6814,7 +6813,7 @@ def cmd_progress_update(args):
                     cwd, data, iteration
                 ),
             ),
-            _legacy_evidence_repository(cwd, sf, stamp=True),
+            _legacy_lifecycle_repository(cwd, sf, stamp=True, pre_admit_lease=True),
         )
     except EvidenceFailure as exc:
         print(f"ERROR: {exc.code}", file=sys.stderr)
@@ -6847,7 +6846,7 @@ def cmd_progress_clear(args):
     try:
         run_progress_clear(
             ProgressClearRequest(now=iso_now()),
-            _legacy_evidence_repository(cwd, sf, stamp=True),
+            _legacy_lifecycle_repository(cwd, sf, stamp=True, pre_admit_lease=True),
         )
     except EvidenceFailure as exc:
         print(f"ERROR: {exc.code}", file=sys.stderr)
@@ -8335,6 +8334,8 @@ def _legacy_lifecycle_repository(
             read_state=read_state,
             write_state=write_state,
             backup_state=guarded_backup,
+            effect_publisher=_publish_evidence_effects,
+            effect_context=cwd,
             aggregate_recover=coordinator.recover,
             aggregate_prepare=coordinator.prepare,
             aggregate_finalize=coordinator.finalize,
@@ -8362,6 +8363,8 @@ def _legacy_lifecycle_repository(
                 else presented_lease_id
             ),
             metadata=repository_metadata(stamp, stamp_metadata, cwd),
+            effect_publisher=_publish_evidence_effects,
+            effect_context=cwd,
             aggregate_recover=coordinator.recover,
             aggregate_prepare=coordinator.prepare,
             aggregate_finalize=coordinator.finalize,
@@ -13722,7 +13725,7 @@ def cmd_context_manifest(args):
                 iteration=args.iteration,
                 publication_path=str(out),
             ),
-            _legacy_evidence_repository(cwd, sf, stamp=False),
+            _legacy_lifecycle_repository(cwd, sf, stamp=False, pre_admit_lease=True),
         )
     except EvidenceFailure as exc:
         print(f"ERROR: {exc.code}", file=sys.stderr)

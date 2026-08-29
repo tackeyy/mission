@@ -159,19 +159,20 @@ def test_v4_verification_record_unchanged(tmp_path, legacy_run_cli):
         assert after.get(key) == before.get(key)
 
 
-def test_v5_context_manifest_still_requires_uow(tmp_path, run_cli):
+def test_v5_context_manifest_uses_lifecycle_repository(tmp_path, run_cli):
     env = _init_v5(run_cli, tmp_path, mission="v5 context mission")
     result = run_cli(
         "context-manifest",
+        "--iteration",
+        "1",
         "--out",
         ".mission-state/context-manifest.json",
         cwd=tmp_path,
         env_extra=env,
     )
 
-    assert result.returncode != 0
-    assert "repository-format-v5-requires-uow" in result.stderr
-    assert "v5-evidence-effects-not-supported" not in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / ".mission-state" / "context-manifest.json").exists()
 
 
 @pytest.mark.parametrize("repository_format", ["v4", "v5"])
@@ -279,7 +280,7 @@ def _prepared_verification(state):
     )
 
 
-def test_v5_evidence_operation_with_effects_is_rejected():
+def test_v5_evidence_operation_rejects_unbound_effect_claim_before_publish():
     from mission_application.artifact import make_evidence_effect
 
     current = {"phase": "executing", "loop_active": True, "session_id": "portable"}
@@ -289,7 +290,7 @@ def test_v5_evidence_operation_with_effects_is_rejected():
         effects=(make_evidence_effect("evidence", "evidence.json", b"{}"),),
     )
 
-    with pytest.raises(ValueError, match="v5-evidence-effects-not-supported"):
+    with pytest.raises(ValueError, match="invalid-transition-effect-binding"):
         repository.execute_evidence_transition_effects(lambda _state: prepared)
 
 
