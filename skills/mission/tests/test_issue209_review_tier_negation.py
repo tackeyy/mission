@@ -71,6 +71,39 @@ def _counted_decision(
     return cost, decision
 
 
+def _min_elapsed_decision(mission: str, *, repeat: int = 3) -> float:
+    """Return the fastest of ``repeat` runs.
+
+    絶対の壁時間を成功条件にすると、負荷が乗っただけで落ちる（#703）。ここで
+    守りたいのは「入力長に対して超線形に伸びないこと」であり、それは 2 つの入力長の
+    **比**で表せる。比なら負荷は両者に等しく乗るため打ち消し合う。
+
+    さらに、スケジューリングや GC による揺れは所要時間を**増やす方向にしか働かない**
+    ため、最小値は真の所要時間に対する頑健な推定量になる。
+    """
+    best = None
+    for _ in range(repeat):
+        started = time.perf_counter()
+        _decision(mission)
+        elapsed = time.perf_counter() - started
+        best = elapsed if best is None else min(best, elapsed)
+    return best
+
+
+def _assert_scales_below_quadratic(build_mission, *, small=1_000, large=4_000):
+    """入力を 4 倍にしても所要時間が 8 倍未満であることを確認する。
+
+    線形なら約 4 倍、二次なら約 16 倍。閾値 8 はその中間に置く。
+    """
+    small_elapsed = _min_elapsed_decision(build_mission(small))
+    large_elapsed = _min_elapsed_decision(build_mission(large))
+    ratio = large_elapsed / small_elapsed if small_elapsed > 0 else float("inf")
+    assert large_elapsed < small_elapsed * 8, (
+        f"superlinear growth: small({small})={small_elapsed:.4f}s "
+        f"large({large})={large_elapsed:.4f}s ratio={ratio:.2f}x (limit=8x)"
+    )
+
+
 def _assert_dense_no_boundary_context_analysis_scales_below_quadratic(
     *, cost_per_call=None
 ) -> None:
@@ -1135,30 +1168,41 @@ def test_legacy_state_without_details_supports_set_next_and_get(run_cli, state_d
     assert updated["review_tier_signal_details"]
 
 
+def _adversarial_long_mission(count: int) -> str:
+    return ("ordinary planning context; " * count) + "do not deploy"
+
+
 def test_adversarial_long_mission_is_evaluated_without_regex_blowup():
-    mission = ("ordinary planning context; " * 8_000) + "do not deploy"
+    assert _decision(_adversarial_long_mission(8_000))["tier"] == "light"
+    _assert_scales_below_quadratic(_adversarial_long_mission)
 
-    started = time.perf_counter()
-    decision = _decision(mission)
-    elapsed = time.perf_counter() - started
 
-    assert decision["tier"] == "light"
-    assert elapsed < 2.0
+def test_adversarial_long_mission_detector_rejects_quadratic_cost(monkeypatch):
+    """検査の検出力を実証する。
+
+    候補評価に入力長の二乗に比例する負荷を注入すると、スケーリング検査が
+    確実に落ちることを確認する。落ちなければ、この検査は何も守っていない。
+    """
+    module = _load_module()
+    original = module._actual_operation_signal_detail
+
+    def quadratic(*args, **kwargs):
+        mission_text = args[0]
+        time.sleep((len(mission_text) / 20_000.0) ** 2 * 0.02)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_actual_operation_signal_detail", quadratic)
+
+    with pytest.raises(AssertionError, match="superlinear growth"):
+        _assert_scales_below_quadratic(_adversarial_long_mission)
 
 
 def test_repeated_keyword_context_lookup_scales_below_quadratic():
-    def elapsed_for(count: int) -> tuple[float, dict]:
-        started = time.perf_counter()
-        decision = _decision("deploy. " * count)
-        return time.perf_counter() - started, decision
-
-    small_elapsed, _ = elapsed_for(1_000)
-    large_elapsed, large = elapsed_for(4_000)
-
+    large = _decision("deploy. " * 4_000)
     deploy_details = [item for item in _details(large) if item["keyword"] == "deploy"]
     assert len(deploy_details) == 4_000
-    assert large_elapsed < 2.5
-    assert large_elapsed < (small_elapsed * 8) + 0.05
+
+    _assert_scales_below_quadratic(lambda count: "deploy. " * count)
 
 
 def test_dense_no_boundary_context_analysis_scales_below_quadratic():
@@ -1172,16 +1216,16 @@ def test_dense_no_boundary_context_analysis_detector_rejects_quadratic_cost():
         )
 
 
-def test_dense_global_markers_and_prior_candidates_scale_below_quadratic():
-    mission = ("review deploy procedure. " * 4_000) + (
-        "Actual operations will not be performed. " * 4_000
+def _dense_global_markers_mission(count: int) -> str:
+    return ("review deploy procedure. " * count) + (
+        "Actual operations will not be performed. " * count
     )
 
-    started = time.perf_counter()
-    decision = _decision(mission)
-    elapsed = time.perf_counter() - started
 
+def test_dense_global_markers_and_prior_candidates_scale_below_quadratic():
+    decision = _decision(_dense_global_markers_mission(4_000))
     deploy_details = [item for item in _details(decision) if item["keyword"] == "deploy"]
     assert decision["tier"] == "light"
     assert len(deploy_details) == 4_000
-    assert elapsed < 2.5
+
+    _assert_scales_below_quadratic(_dense_global_markers_mission)
