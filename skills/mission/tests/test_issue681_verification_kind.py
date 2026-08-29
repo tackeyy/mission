@@ -23,7 +23,27 @@ def _record(run_cli, state_dir, *, kind=None, checks, iteration=1):
     )
 
 
+def _claim_detail():
+    """A claim detail that satisfies the grammar added for the ledger."""
+    return json.dumps(
+        {
+            "repo": "self",
+            "path": "skills/mission/lib/mission_kernel/evidence.py",
+            "start": 1,
+            "end": 2,
+            "commit": "a" * 40,
+            "blob": "b" * 40,
+            "doc_digest": "sha256:" + "c" * 64,
+            "claim": "documented behavior",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 def _check(name, ok=True):
+    if name.startswith(IMPLEMENTATION_PREFIX):
+        return {"name": name, "ok": ok, "detail": _claim_detail()}
     return {"name": name, "ok": ok, "detail": "evidence"}
 
 

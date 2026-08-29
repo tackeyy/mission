@@ -18,6 +18,7 @@ from .commands import (
     ClearProgress,
     CompatibilityPayload,
     ContextManifestEffectClaim,
+    ClaimsLedgerEffectClaim,
     DeclineSpecialistSelection,
     GENERIC_SET_DEDICATED_FIELDS,
     GENERIC_SET_FROZEN_FIELDS,
@@ -30,6 +31,7 @@ from .commands import (
     CompleteExecutorHandoff,
     ExportArtifact,
     GenerateContextManifest,
+    GenerateClaimsLedger,
     InitializeArtifact,
     MarkHalt,
     MarkPass,
@@ -49,6 +51,7 @@ from .commands import (
 from .evidence import (
     EvidenceRuleError,
     apply_context_manifest,
+    apply_claims_ledger,
     apply_progress_clear,
     apply_progress_update,
     apply_verification_record,
@@ -1304,6 +1307,23 @@ def _record_verification(state: MissionState, raw_command: object) -> Transition
     )
 
 
+def _generate_claims_ledger(state: MissionState, raw_command: object) -> Transition:
+    command = raw_command
+    assert isinstance(command, GenerateClaimsLedger)
+    claim = command.effect
+    if type(claim) is not ClaimsLedgerEffectClaim or claim.kind != "claims-ledger":
+        raise _Rejected("claims-ledger-effect-claim-invalid")
+    try:
+        document = apply_claims_ledger(_evidence_document(state), command)
+    except EvidenceRuleError as rejected:
+        raise _Rejected(rejected.code)
+    # The adapter verifies actual bytes before committing state. The kernel owns
+    # the closed descriptor and cannot derive a Git-backed ledger itself.
+    if type(claim.size) is not int or claim.size < 0 or not isinstance(claim.digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", claim.digest):
+        raise _Rejected("claims-ledger-effect-claim-invalid")
+    return Transition(_with_evidence_document(state, document), (KernelEvent("claims-ledger-recorded"),), (claim,))
+
+
 def _handoff_command_facts(
     state: MissionState, observation: object
 ) -> tuple[object, dict[str, tuple[str, ...]]]:
@@ -1850,6 +1870,12 @@ TRANSITION_TABLE = build_transition_table(
             _record_verification,
         ),
         TransitionRule(
+            "claims-ledger-generate",
+            GenerateClaimsLedger,
+            _command_type_guard(GenerateClaimsLedger),
+            _generate_claims_ledger,
+        ),
+        TransitionRule(
             "executor-handoff-begin",
             BeginExecutorHandoff,
             _command_type_guard(BeginExecutorHandoff),
@@ -2019,7 +2045,7 @@ def bind_transition_effects(
         claims = ()
     elif isinstance(command, ExportArtifact):
         claims = (command.artifact_effect, command.export_effect)
-    elif isinstance(command, (UpdateProgress, GenerateContextManifest)):
+    elif isinstance(command, (UpdateProgress, GenerateContextManifest, GenerateClaimsLedger)):
         claims = (command.effect,)
     elif isinstance(command, (ClearProgress, RecordVerification)):
         claims = ()

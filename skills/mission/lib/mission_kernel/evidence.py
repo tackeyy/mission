@@ -11,6 +11,7 @@ from pathlib import Path
 from .commands import (
     ClearProgress,
     GenerateContextManifest,
+    GenerateClaimsLedger,
     RecordVerification,
     UpdateProgress,
     VerificationCheck,
@@ -178,6 +179,24 @@ def apply_context_manifest(
     records[str(command.iteration)] = record
     document["context_manifests"] = records
     return document, content, findings_count
+
+
+def apply_claims_ledger(state: Mapping[str, object], command: GenerateClaimsLedger) -> dict:
+    timestamp = _text(command.at, "timestamp-invalid")
+    if type(command.iteration) is not int or command.iteration < 1:
+        raise EvidenceRuleError("claims-ledger-iteration-invalid")
+    if not isinstance(command.doc_digest, str) or not __import__("re").fullmatch(r"sha256:[0-9a-f]{64}", command.doc_digest):
+        raise EvidenceRuleError("claims-ledger-doc-digest-invalid")
+    claim = command.effect
+    if not isinstance(claim.publication_path, str) or not claim.publication_path or Path(claim.publication_path).name != claim.target:
+        raise EvidenceRuleError("claims-ledger-effect-claim-invalid")
+    document = copy.deepcopy(dict(state))
+    records = document.get("claims_ledgers")
+    records = copy.deepcopy(records) if isinstance(records, Mapping) else {}
+    records[str(command.iteration)] = {"path": claim.publication_path, "digest": claim.digest,
+                                        "doc_digest": command.doc_digest, "generated_at": timestamp}
+    document["claims_ledgers"] = records
+    return document
 
 
 def project_verification_entry(command: RecordVerification) -> dict:

@@ -292,6 +292,7 @@ def test_decide_and_guidance_share_one_named_transition_table():
         "artifact-initialize",
         "artifact-record-publication",
         "artifact-render",
+        "claims-ledger-generate",
         "context-manifest-generate",
         "executor-handoff-begin",
         "executor-handoff-complete",
