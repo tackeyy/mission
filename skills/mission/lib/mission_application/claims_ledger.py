@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from collections.abc import Mapping
+from pathlib import Path
 
 
 CLAIM_PREFIX = "implementation-verified:"
@@ -95,3 +97,64 @@ def project_claims_ledger(state: object, *, iteration: object, doc_digest: objec
     entries.sort(key=lambda item: item["claim_id"])
     return {"schema": LEDGER_SCHEMA, "iteration": iteration, "doc_digest": doc_digest,
             "head_commit": head, "entries": entries, "stale_count": stale_count}
+
+
+def unverified_claim_ids(
+    ledger_path: object,
+    state: object,
+    *,
+    iteration: object,
+    doc_digest: object,
+    head_commit: object,
+    claim_ids: object,
+) -> list[str]:
+    """Return every expected claim that is not verified by a matching ledger."""
+    expected = _claim_ids(claim_ids)
+    try:
+        content = Path(ledger_path).read_bytes()
+        ledger = json.loads(content)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return expected
+    if not _ledger_matches(
+        ledger, state, content, iteration=iteration, doc_digest=doc_digest,
+        head_commit=head_commit,
+    ):
+        return expected
+    statuses = {
+        entry.get("claim_id"): entry.get("status")
+        for entry in ledger["entries"]
+        if isinstance(entry, Mapping) and isinstance(entry.get("claim_id"), str)
+    }
+    candidates = expected + [claim_id for claim_id in statuses if claim_id not in expected]
+    return [claim_id for claim_id in candidates if statuses.get(claim_id) != "verified"]
+
+
+def _claim_ids(value: object) -> list[str]:
+    if not isinstance(value, (list, tuple)) or not all(isinstance(item, str) and item for item in value):
+        raise ValueError("claims-ledger-claim-ids-invalid")
+    return list(dict.fromkeys(value))
+
+
+def _ledger_matches(
+    ledger: object,
+    state: object,
+    content: bytes,
+    *,
+    iteration: object,
+    doc_digest: object,
+    head_commit: object,
+) -> bool:
+    if not isinstance(ledger, Mapping) or not isinstance(state, Mapping):
+        return False
+    records = state.get("claims_ledgers")
+    record = records.get(str(iteration)) if isinstance(records, Mapping) else None
+    digest = "sha256:" + hashlib.sha256(content).hexdigest()
+    return (
+        isinstance(record, Mapping)
+        and record.get("digest") == digest
+        and ledger.get("schema") == LEDGER_SCHEMA
+        and ledger.get("iteration") == iteration
+        and ledger.get("doc_digest") == doc_digest
+        and ledger.get("head_commit") == head_commit
+        and isinstance(ledger.get("entries"), list)
+    )

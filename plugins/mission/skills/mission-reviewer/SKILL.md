@@ -18,6 +18,9 @@ allowed-tools: Read, Grep, Glob, Bash(git diff:*), Bash(git log:*), Bash(git sta
 - 計画ステップと実行ログ
 - Executor の「指示明瞭度フィードバック」(不明瞭点 / 裁量補完 / 再試行) ※観点D 評価用
 - 過去スコア履歴（自己一貫性チェック用）
+- claims ledger パス (#681、実装に言及する文書のレビュー時): args に ledger パスが渡された場合、文書が実装に言及する箇所を必ず列挙し、各箇所へ claim-id を対応付ける。ledger の content digest を state 記録と、schema (`mission-claims-ledger/1`)・iteration・document digest・HEAD を対象と照合する。読み取り不能またはいずれかの不一致では、列挙した全 claim を未検証として扱い、full context へ逃がして「指摘なし」にしない
+  - `verified` 以外（`mismatch` / `conflicted` / 欠落）の claim は、axis `accuracy` の Medium finding として起票する。`mismatch` の内容に応じて High とする判断は reviewer の裁量である
+  - Medium が 1 件でもある軸は `skills/mission/bin/mission-state.py` の `_cap_for_findings` により 4.0 に cap される。これは意図した効果であり、`passes` の式は変更しない
 - context manifest パス (#241、diff レビュー時のみ): args に `mission-context-manifest/1` JSON のパスが渡された場合、manifest (mission goal / prior findings) と指定 diff を一次スコープとしてレビューし、リポジトリ全体の走査を省く。manifest が読めない・スキーマ不一致の場合は通常どおり全成果物をレビューする (fail-safe)。スコープ縮小は探索範囲のみで、採点基準・Step 0 のテスト実行義務は不変
   - manifest を正常に受領して bounded review を実行した場合、review JSON の `notes` 自由記述に `context: bounded` を明記する (#352)
 
