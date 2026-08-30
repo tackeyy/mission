@@ -64,11 +64,18 @@ def test_missing_node_falls_back_to_the_full_suite(tmp_path):
     assert targets == ""
 
 
-def test_node_that_exits_non_zero_with_a_real_error_fails_closed(tmp_path):
-    """A helper that ran and failed is an error, not an absent convention."""
-    gate, instance = _gate(
-        tmp_path, returncode=1, stdout="", stderr="TypeError: classifyChangedFiles is not a function"
-    )
+@pytest.mark.parametrize("returncode,stdout,stderr", [
+    # A helper that ran and threw is an error, not an absent convention.
+    (1, "", "TypeError: classifyChangedFiles is not a function"),
+    # The helper itself hit a missing file.  Matching that text would turn a
+    # broken classifier into a silent full run, so only exit 127 counts.
+    (1, "", "Error: ENOENT: no such file or directory, open './missing.json'"),
+    # Killed before writing anything, but not a missing interpreter.
+    (143, "", ""),
+])
+def test_present_helper_that_fails_never_falls_back(tmp_path, returncode, stdout, stderr):
+    """Only the shell's command-not-found signal may be read as absence."""
+    gate, instance = _gate(tmp_path, returncode=returncode, stdout=stdout, stderr=stderr)
     tree = tmp_path / "tree"
     (tree / "scripts").mkdir(parents=True)
     (tree / "scripts" / "ci_changed_scopes.js").write_text("module.exports = {};\n", encoding="utf-8")
@@ -77,6 +84,36 @@ def test_node_that_exits_non_zero_with_a_real_error_fails_closed(tmp_path):
         instance._classify_scope(["module.py"], tree)
 
     assert captured.value.reason == "scope-selection-failed"
+
+
+def test_command_not_found_exit_falls_back(tmp_path):
+    """Exit 127 is the POSIX signal that the command could not be executed."""
+    gate, instance = _gate(
+        tmp_path, returncode=127, stderr="bash: node: command not found"
+    )
+    tree = tmp_path / "tree"
+    (tree / "scripts").mkdir(parents=True)
+    (tree / "scripts" / "ci_changed_scopes.js").write_text("module.exports = {};\n", encoding="utf-8")
+
+    scope, targets = instance._classify_scope(["module.py"], tree)
+
+    assert (scope, targets) == ("full", "")
+
+
+def test_non_executable_interpreter_fails_closed(tmp_path):
+    """A present but non-executable interpreter is a misconfiguration, not absence."""
+    gate = _gate_module()
+
+    def _raise_permission(*_args, **_kwargs):
+        raise PermissionError(13, "Permission denied: 'node'")
+
+    instance = gate.SubprocessGateOperations(tmp_path, runner=_raise_permission)
+    tree = tmp_path / "tree"
+    (tree / "scripts").mkdir(parents=True)
+    (tree / "scripts" / "ci_changed_scopes.js").write_text("module.exports = {};\n", encoding="utf-8")
+
+    with pytest.raises(PermissionError):
+        instance._classify_scope(["module.py"], tree)
 
 
 def test_present_helper_that_answers_badly_still_fails_closed(tmp_path):

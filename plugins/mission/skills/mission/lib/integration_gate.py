@@ -26,6 +26,8 @@ from mission_application.integration_gate import (
 
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_COMMAND_NOT_FOUND_EXIT = 127
+
 _SCOPE_SCRIPT = """
 const helper = require(process.argv[1]);
 const input = JSON.parse(process.argv[2]);
@@ -362,10 +364,15 @@ class SubprocessGateOperations:
             result = self._run(
                 (self.node_binary, "-e", _SCOPE_SCRIPT, str(helper), payload),
             )
-        except (FileNotFoundError, NotADirectoryError, PermissionError):
+        except (FileNotFoundError, NotADirectoryError):
             # The interpreter is absent.  That is the same class of absence as a
             # missing helper: the target repository does not carry this
             # convention, so it must not be locked out of the merge procedure.
+            #
+            # PermissionError is deliberately NOT caught.  A present but
+            # non-executable interpreter is a misconfiguration, and the design
+            # rule for this gate is that "could not determine" never becomes
+            # "safe" (docs/design/665-integration-gate.md).
             return self._full_scope_fallback("node-unavailable", logger)
         if result.returncode != 0:
             if self._node_is_unavailable(result):
@@ -385,12 +392,18 @@ class SubprocessGateOperations:
 
     @staticmethod
     def _node_is_unavailable(result: CommandResult) -> bool:
-        """Tell a missing interpreter apart from a helper that ran and failed."""
+        """Tell a missing interpreter apart from a helper that ran and failed.
+
+        Only the shell's own "command not found" signal counts.  Matching the
+        text of any filesystem error would also swallow a helper that ran and
+        then failed on its own missing file, turning a broken classifier into a
+        silent full run.  Exit code 127 is the POSIX convention for a command
+        that could not be executed at all.
+        """
+        if result.returncode != _COMMAND_NOT_FOUND_EXIT:
+            return False
         text = "{}\n{}".format(result.stdout or "", result.stderr or "").lower()
-        return not text.strip() or any(
-            marker in text
-            for marker in ("command not found", "no such file or directory", "enoent")
-        )
+        return not text.strip() or "command not found" in text
 
     def _full_scope_fallback(
         self, reason: str, logger: Optional[Callable[[str], None]]
