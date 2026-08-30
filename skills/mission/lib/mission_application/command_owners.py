@@ -110,6 +110,7 @@ COMMAND_OWNER_REGISTRY = {
     ),
     **_owned(
         "C1.external-merge",
+        "changeset-digest",
         "gate-and-merge",
     ),
 }
