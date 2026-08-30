@@ -35,31 +35,67 @@ FAILING_ITEMS = {
 }
 
 
-_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
-_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
-_ARCHIVE_NAME_RE = re.compile(r"-[0-9a-f]{16}\.json")
+# The values that differ between the two arms by construction, named by the
+# path at which they appear.  Naming *where* rather than *what shape* is
+# deliberate: a shape-based rule ("anything that looks like a timestamp") also
+# erases a new key that happens to hold a timestamp, so a leak encoded in that
+# shape would pass unnoticed.  A path-based rule leaves every new key visible.
+_ARM_SPECIFIC_PATHS = frozenset({
+    ("timestamp",),
+    ("artifact_digest",),
+    ("findings_evidence_path",),
+    ("scoring_evidence_path",),
+    ("review_evidence_ref", "path"),
+    ("review_evidence_ref", "digest"),
+    ("review_evidence_ref", "generation"),
+    ("score_provenance", "review_evidence_ref", "path"),
+    ("score_provenance", "review_evidence_ref", "digest"),
+    ("score_provenance", "review_evidence_ref", "generation"),
+    ("score_provenance", "scoring_evidence_ref", "path"),
+    ("score_provenance", "scoring_evidence_ref", "digest"),
+    ("score_provenance", "scoring_evidence_ref", "generation"),
+    # Inside the scoring artifact, which is compared separately.
+    ("_meta", "timestamp"),
+    ("binding", "review_evidence_ref", "path"),
+    ("binding", "review_evidence_ref", "digest"),
+    ("binding", "review_evidence_ref", "generation"),
+})
 
 
-def _normalize(value, repo: Path):
+def _normalize(value, repo: Path, path: tuple = ()):
     """Erase the differences that come from running two arms side by side.
 
-    Each arm has its own directory and runs a moment apart, so paths, digests
-    and timestamps differ by construction.  Everything else that differs does
-    so because of the ledger, which is what these tests are looking for.
+    Each arm has its own directory and runs a moment apart, so the values named
+    in ``_ARM_SPECIFIC_PATHS`` differ regardless of any ledger.  Everything
+    else that differs does so because of the ledger, which is what these tests
+    are looking for.
 
-    Erasing digests is safe here because the bytes they name are compared
-    directly (see the artifact comparison below): a digest cannot change while
-    the content it names stays equal.
+    **Only the listed paths are erased.**  An earlier version matched on the
+    shape of the value instead (anything resembling a digest or a timestamp),
+    and a mutation that encoded ledger state in one of those shapes passed
+    undetected: the normalizer erased the very difference it was meant to
+    expose.  Naming the paths keeps every new key under comparison, so adding
+    one that carries ledger state fails the test rather than hiding in a
+    familiar-looking format.
+
+    Erasing the listed digests is safe because the bytes they name are compared
+    directly (see ``_scoring_artifact``): a digest cannot change while the
+    content it names stays equal.
     """
     if isinstance(value, dict):
-        return {key: _normalize(item, repo) for key, item in value.items()}
+        return {
+            key: _normalize(item, repo, path + (key,))
+            for key, item in value.items()
+        }
     if isinstance(value, list):
-        return [_normalize(item, repo) for item in value]
+        return [_normalize(item, repo, path) for item in value]
+    if path in _ARM_SPECIFIC_PATHS:
+        return "<ARM-SPECIFIC>"
     if isinstance(value, str):
-        text = value.replace(str(repo), "<REPO>")
-        text = _DIGEST_RE.sub("sha256:<DIGEST>", text)
-        text = _TIMESTAMP_RE.sub("<TIMESTAMP>", text)
-        return _ARCHIVE_NAME_RE.sub("-<GENERATION>.json", text)
+        # Paths are erased wherever they appear: an arm's directory leaks into
+        # values that are otherwise identical, and it never carries ledger
+        # state because both arms are prepared the same way.
+        return value.replace(str(repo), "<REPO>")
     return value
 
 
@@ -191,14 +227,16 @@ def test_claims_ledger_is_not_part_of_the_gate_input(legacy_run_cli, read_state,
     # leak that travels inside it, so normalize the arm-specific parts instead
     # and compare what remains.
     for key in recorded[False]:
-        assert _normalize(recorded[True][key], repos[True]) == _normalize(
-            recorded[False][key], repos[False]
+        assert _normalize(recorded[True][key], repos[True], (key,)) == _normalize(
+            recorded[False][key], repos[False], (key,)
         ), f"the recorded value of {key} changed because a ledger existed"
 
     # The digests above were normalized away, so compare the bytes they name.
     # This is where a leak into the scoring artifact itself would surface.
-    assert _normalize(_scoring_artifact(repos[True], recorded[True]), repos[True]) == (
-        _normalize(_scoring_artifact(repos[False], recorded[False]), repos[False])
+    assert _normalize(
+        _scoring_artifact(repos[True], recorded[True]), repos[True]
+    ) == _normalize(
+        _scoring_artifact(repos[False], recorded[False]), repos[False]
     ), "the scoring artifact changed because a ledger existed"
 
 
