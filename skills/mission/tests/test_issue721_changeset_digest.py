@@ -111,13 +111,25 @@ class TestFailClosedConditions:
         assert excinfo.value.reason == "changeset-digest-mismatch"
         assert operations.merges == []
 
-    def test_unspecified_digest_stops_before_any_work(self):
-        """未指定を通すと、渡さないだけで検証を迂回できる。"""
+    def test_unspecified_digest_does_not_relax_anything(self):
+        """digest は任意。渡さなければ緩和が適用されないだけで、gate の既存要求は残る。
+
+        参照実装 (company-os verify-exact-head.mjs) と同じ意味論。全 merge に digest を
+        課すと、実装者は「引数を埋める最も自然な方法」＝実行時に計算する方法を選び、
+        gate の観測値と同じ計算から出た値を渡すことになる。**常に一致するので検証は
+        空回りし、儀式だけが残る。** 渡す行為に意味を持たせるため任意にする。
+        """
         operations = RecordingOperations()
-        with pytest.raises(application.IntegrationGateFailure) as excinfo:
-            run(operations, expected_changeset_digest=None)
-        assert excinfo.value.reason == "changeset-digest-unspecified"
-        assert operations.merges == []
+        result = run(operations, expected_changeset_digest=None)
+        assert result["status"] == "merged"
+        # 観測値は検査の有無にかかわらず記録する（後から何を merge したか追える）
+        assert result["changeset_digest"] == DIGEST
+
+    def test_unobtainable_digest_is_tolerated_when_none_was_reviewed(self):
+        """digest を渡していない以上、観測できなくても止める根拠がない。"""
+        operations = RecordingOperations(digest="")
+        result = run(operations, expected_changeset_digest=None)
+        assert result["status"] == "merged"
 
     @pytest.mark.parametrize(
         "digest",
@@ -150,7 +162,7 @@ class TestFailClosedConditions:
 
 
 class TestOrdering:
-    def test_unspecified_digest_is_rejected_before_the_lease(self):
+    def test_malformed_digest_is_rejected_before_the_lease(self):
         """引数の不備で lease を取らない。取ると他セッションを無用に待たせる。"""
         acquired = []
 
@@ -161,7 +173,7 @@ class TestOrdering:
                 yield
 
         with pytest.raises(application.IntegrationGateFailure):
-            run(Watching(), expected_changeset_digest=None)
+            run(Watching(), expected_changeset_digest="not-a-digest")
         assert acquired == []
 
     def test_digest_is_logged_for_later_audit(self):

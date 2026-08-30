@@ -131,9 +131,21 @@ gate-and-merge <pr>:
 **不一致・算出不能・未指定のいずれでも非 0 終了する。** とくに未指定を通さないのは、
 digest を渡さないだけで検証を迂回できてしまうため。
 
-producer 側は `mission-state.py changeset-digest --base-sha <sha> --head-sha <sha>` で
-同じ実装を通して digest を得る。手元で `git diff | shasum` を組み立てると、ローカルの
-diff 設定次第で別の値になり、恒常的な不一致になる。
+**digest は任意引数である。** 渡さなければ緩和が適用されないだけで、gate の既存要求
+（base 不動・head 不動・統合ツリーでの全スイート）はそのまま残る。参照実装
+(company-os `verify-exact-head.mjs`) と同じ意味論で、「渡さないと止まる」ではなく
+「渡さないと厳しい側に倒れる」。
+
+**必須にしてはならない。** 全 merge に digest を課すと、実装者は「引数を埋める最も
+自然な方法」を選ぶ。それは実行時に `git diff` して sha256 を取ることであり、gate が
+観測する値と同じ計算から出るため**常に一致する。悪意なく、検証が空回りする実装が
+既定になる。**
+
+したがって **digest は Checker の報告から転記する。gate の実行時に計算して渡しては
+ならない。** producer が事前に値を得るときは
+`mission-state.py changeset-digest --base-sha <sha> --head-sha <sha>` を使い、
+レビュー依頼の時点で Checker へ渡す。手元で `git diff | shasum` を組み立てると、
+ローカルの diff 設定次第で別の値になり、恒常的な不一致になる。
 
 ### 上の「exact-head / refreeze 規律との整合」との関係
 

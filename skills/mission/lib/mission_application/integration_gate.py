@@ -153,14 +153,12 @@ def run_gate_and_merge(
         raise IntegrationGateFailure(1, "invalid-expected-head", "expected head sha is invalid")
     if expected_base_sha is not None and not _valid_sha(expected_base_sha):
         raise IntegrationGateFailure(1, "invalid-expected-base", "expected base sha is invalid")
-    # digest は省略を許さない。省略を通すと「渡さない」だけで検証を迂回できる。
-    if expected_changeset_digest is None:
-        raise IntegrationGateFailure(
-            1,
-            "changeset-digest-unspecified",
-            "reviewed changeset digest is required; pass --reviewed-changeset-digest",
-        )
-    if not _valid_changeset_digest(expected_changeset_digest):
+    # digest は任意。渡さない場合は緩和が適用されず、既存の厳格な要求（base 不動・
+    # head 不動）がそのまま残る。参照実装 (company-os verify-exact-head.mjs) と同じ
+    # 意味論で、「渡さないと止まる」ではなく「渡さないと厳しい側に倒れる」。
+    if expected_changeset_digest is not None and not _valid_changeset_digest(
+        expected_changeset_digest
+    ):
         raise IntegrationGateFailure(
             1,
             "invalid-expected-changeset-digest",
@@ -202,21 +200,22 @@ def run_gate_and_merge(
         services.fetch_pull_request_head(initial)
         observation = services.integrate_and_test(initial.head_sha, base_before, logger)
         logger("test_scope={} test_targets={}".format(observation.scope, observation.targets))
-        # 算出不能を「検査不要」に読み替えない。digest が取れない統合ツリーは、
-        # レビュー時の変更集合と一致することを示せていない。
-        if not _valid_changeset_digest(observation.changeset_digest):
-            raise IntegrationGateFailure(
-                4,
-                "changeset-digest-unavailable",
-                "integrated changeset digest could not be observed",
-            )
         logger("changeset_digest={}".format(observation.changeset_digest))
-        if observation.changeset_digest != expected_changeset_digest:
-            raise IntegrationGateFailure(
-                4,
-                "changeset-digest-mismatch",
-                "changeset differs from the reviewed one; re-review before merging",
-            )
+        if expected_changeset_digest is not None:
+            # 算出不能を「検査不要」に読み替えない。digest を渡した以上、一致を
+            # 証明できない統合ツリーで merge してはならない。
+            if not _valid_changeset_digest(observation.changeset_digest):
+                raise IntegrationGateFailure(
+                    4,
+                    "changeset-digest-unavailable",
+                    "integrated changeset digest could not be observed",
+                )
+            if observation.changeset_digest != expected_changeset_digest:
+                raise IntegrationGateFailure(
+                    4,
+                    "changeset-digest-mismatch",
+                    "changeset differs from the reviewed one; re-review before merging",
+                )
         # git 操作は可変な remote 名 `origin` を使うため、identity を再解決して
         # 初回値との一致を要求する。これをしないと「fetch は B・gh は A」が成立する。
         identity_after = services.resolve_origin_identity()

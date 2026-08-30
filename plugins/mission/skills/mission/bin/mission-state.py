@@ -16271,7 +16271,12 @@ def _add_queue_parsers(subparsers) -> None:
     p_gate_merge.add_argument(
         "--reviewed-changeset-digest",
         default=None,
-        help="digest of the reviewed changeset; omission and mismatch both fail closed",
+        help=(
+            "digest of the reviewed changeset, transcribed from the Checker report. "
+            "Never compute it at merge time: a value derived from the same diff the "
+            "gate observes always matches, so the check does nothing. Omit it to keep "
+            "the existing strict requirements instead."
+        ),
     )
     p_gate_merge.set_defaults(func=cmd_gate_and_merge)
 
