@@ -501,6 +501,19 @@ class SubprocessGateOperations:
                 "changeset-digest-failed",
                 "changeset diff for the digest could not be produced",
             )
+        # 空の変更集合で digest を成立させない。sha256("") は書式として妥当な値になり、
+        # 「digest が一致した」が「変更集合を確認した」を意味しないケースを作る。
+        #
+        # 判定は decode も trim もせず、hash にかけるのと同じ生の bytes に対して行う。
+        # 実在の `git diff` 出力は必ず非空白の header を含むため trim しても結果は
+        # 変わらないが、**判定対象と hash 対象を同じものに保つ**ことで、片方だけが
+        # 加工される余地を残さない。
+        if len(result.stdout) == 0:
+            raise IntegrationGateError(
+                4,
+                "changeset-empty",
+                "changeset is empty; there is nothing for a review to have covered",
+            )
         return compute_changeset_digest(result.stdout)
 
     def _cleanup_worktree(self, scratch_parent: Path, tree: Path, registered: bool) -> bool:
