@@ -84,6 +84,9 @@ _DIGEST_GIT_CONFIG = (
     "-c", "diff.mnemonicPrefix=false",
     "-c", "diff.algorithm=myers",
     "-c", "diff.renames=true",
+    # 既定 400 のまま放置すると、ローカル設定が違うホストで rename 検出の打ち切りが
+    # 変わり、同一の変更集合でも digest が動く
+    "-c", "diff.renameLimit=400",
     "-c", "diff.external=",
     "-c", "diff.wsErrorHighlight=none",
 )

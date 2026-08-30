@@ -293,6 +293,7 @@ class TestDetectionPower:
             ("diff.mnemonicPrefix", "true"),
             ("core.quotepath", "true"),
             ("diff.algorithm", "histogram"),
+            ("diff.renameLimit", "1"),
         ],
     )
     def test_local_diff_configuration_does_not_move_the_digest(self, diverged, setting):
