@@ -336,18 +336,43 @@ class SubprocessGateOperations:
         self,
         changed_files: Iterable[str],
         integrated_tree: Path,
+        logger: Optional[Callable[[str], None]] = None,
     ) -> tuple[str, str]:
+        """Select the suite scope, falling back to the full suite when unclassifiable.
+
+        The helper is this repository's convention, not a contract every target
+        repository accepts.  Treating its absence as a hard failure locked such
+        repositories out of the merge procedure entirely (#697), which pushed
+        callers toward the direct ``gh pr merge`` detour that Phase 7 forbids.
+
+        Absence falls back to the full suite, which is the safe direction: it
+        runs more than necessary, never less.  A helper that *is* present but
+        answers incorrectly still fails closed, so a broken classifier is not
+        silently downgraded into a full run.
+        """
         helper = integrated_tree / "scripts" / "ci_changed_scopes.js"
+        if not helper.is_file():
+            return self._full_scope_fallback("helper-missing", logger)
         payload = json.dumps(
             {"eventName": "pull_request", "files": list(changed_files)},
             ensure_ascii=False,
             separators=(",", ":"),
         )
-        result = self._checked(
-            4,
-            "scope-selection-failed",
-            (self.node_binary, "-e", _SCOPE_SCRIPT, str(helper), payload),
-        )
+        try:
+            result = self._run(
+                (self.node_binary, "-e", _SCOPE_SCRIPT, str(helper), payload),
+            )
+        except (FileNotFoundError, NotADirectoryError, PermissionError):
+            # The interpreter is absent.  That is the same class of absence as a
+            # missing helper: the target repository does not carry this
+            # convention, so it must not be locked out of the merge procedure.
+            return self._full_scope_fallback("node-unavailable", logger)
+        if result.returncode != 0:
+            if self._node_is_unavailable(result):
+                return self._full_scope_fallback("node-unavailable", logger)
+            raise IntegrationGateError(
+                4, "scope-selection-failed", "scope selector exited non-zero"
+            )
         try:
             decision = json.loads(result.stdout)
             targets = decision["pythonTargets"]
@@ -357,6 +382,28 @@ class SubprocessGateOperations:
         if not isinstance(targets, str) or not targets.strip() or not isinstance(docs_only, bool):
             raise IntegrationGateError(4, "scope-selection-failed", "scope selector response is invalid")
         return ("docs-only" if docs_only else "full"), targets
+
+    @staticmethod
+    def _node_is_unavailable(result: CommandResult) -> bool:
+        """Tell a missing interpreter apart from a helper that ran and failed."""
+        text = "{}\n{}".format(result.stdout or "", result.stderr or "").lower()
+        return not text.strip() or any(
+            marker in text
+            for marker in ("command not found", "no such file or directory", "enoent")
+        )
+
+    def _full_scope_fallback(
+        self, reason: str, logger: Optional[Callable[[str], None]]
+    ) -> tuple[str, str]:
+        """Run everything the target repository's own ``make test`` defines.
+
+        An empty target string means the caller omits ``PYTEST_TARGETS``, so the
+        repository's Makefile decides what "everything" is.  A silent fallback
+        would hide which suite actually ran, so the reason is always logged.
+        """
+        if logger is not None:
+            logger("scope_fallback={}".format(reason))
+        return "full", ""
 
     def _cleanup_worktree(self, scratch_parent: Path, tree: Path, registered: bool) -> bool:
         deregistered = True
@@ -405,9 +452,13 @@ class SubprocessGateOperations:
             scope, targets = self._classify_scope(
                 (item for item in changed if item),
                 tree,
+                logger,
             )
-            logger("test_scope={} test_targets={}".format(scope, targets))
-            suite = self._run(("make", "test", "PYTEST_TARGETS={}".format(targets)), cwd=tree)
+            logger("test_scope={} test_targets={}".format(scope, targets or "<repository default>"))
+            suite_command = ("make", "test")
+            if targets:
+                suite_command += ("PYTEST_TARGETS={}".format(targets),)
+            suite = self._run(suite_command, cwd=tree)
             if suite.returncode != 0:
                 logger("suite_exit={}".format(suite.returncode))
                 raise IntegrationGateError(4, "suite-failed", "integrated tree suite failed")
