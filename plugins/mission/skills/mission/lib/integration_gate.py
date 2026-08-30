@@ -394,16 +394,24 @@ class SubprocessGateOperations:
     def _node_is_unavailable(result: CommandResult) -> bool:
         """Tell a missing interpreter apart from a helper that ran and failed.
 
-        Only the shell's own "command not found" signal counts.  Matching the
-        text of any filesystem error would also swallow a helper that ran and
-        then failed on its own missing file, turning a broken classifier into a
-        silent full run.  Exit code 127 is the POSIX convention for a command
-        that could not be executed at all.
+        Two signals must agree.  Exit code 127 is the POSIX convention for a
+        command that could not be executed at all, and an empty stdout means
+        no classifier ever wrote its answer.  A helper that ran writes JSON to
+        stdout, so stdout is the observable that distinguishes "never started"
+        from "started and failed".
+
+        The shell's message is deliberately NOT matched.  It is localized --
+        a Japanese shell says the equivalent of "command not found" in
+        Japanese -- so matching English text would make the decision depend on
+        the operator's locale.  Matching any filesystem error text would be
+        worse still: it would also swallow a helper that ran and then failed on
+        its own missing file, turning a broken classifier into a silent full
+        run.
         """
-        if result.returncode != _COMMAND_NOT_FOUND_EXIT:
-            return False
-        text = "{}\n{}".format(result.stdout or "", result.stderr or "").lower()
-        return not text.strip() or "command not found" in text
+        return (
+            result.returncode == _COMMAND_NOT_FOUND_EXIT
+            and not (result.stdout or "").strip()
+        )
 
     def _full_scope_fallback(
         self, reason: str, logger: Optional[Callable[[str], None]]
