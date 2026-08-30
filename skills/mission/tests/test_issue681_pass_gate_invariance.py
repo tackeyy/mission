@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from pathlib import Path
 
 import pytest
 
@@ -31,6 +33,42 @@ FAILING_ITEMS = {
     "completeness": 3.2,
     "usability": 3.1,
 }
+
+
+_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
+_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+_ARCHIVE_NAME_RE = re.compile(r"-[0-9a-f]{16}\.json")
+
+
+def _normalize(value, repo: Path):
+    """Erase the differences that come from running two arms side by side.
+
+    Each arm has its own directory and runs a moment apart, so paths, digests
+    and timestamps differ by construction.  Everything else that differs does
+    so because of the ledger, which is what these tests are looking for.
+
+    Erasing digests is safe here because the bytes they name are compared
+    directly (see the artifact comparison below): a digest cannot change while
+    the content it names stays equal.
+    """
+    if isinstance(value, dict):
+        return {key: _normalize(item, repo) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_normalize(item, repo) for item in value]
+    if isinstance(value, str):
+        text = value.replace(str(repo), "<REPO>")
+        text = _DIGEST_RE.sub("sha256:<DIGEST>", text)
+        text = _TIMESTAMP_RE.sub("<TIMESTAMP>", text)
+        return _ARCHIVE_NAME_RE.sub("-<GENERATION>.json", text)
+    return value
+
+
+def _scoring_artifact(repo: Path, entry: dict) -> dict:
+    """Read the bytes that the recorded scoring digest names."""
+    ref = (entry.get("score_provenance") or {}).get("scoring_evidence_ref") or {}
+    path = ref.get("path")
+    assert isinstance(path, str) and path, "the score has no scoring evidence reference"
+    return json.loads((repo / path).read_text(encoding="utf-8"))
 
 
 def _claim_detail(path: str) -> str:
@@ -131,6 +169,7 @@ def test_claims_ledger_is_not_part_of_the_gate_input(legacy_run_cli, read_state,
     let it through.
     """
     recorded = {}
+    repos = {}
     for with_ledger in (False, True):
         repo = tmp_path / ("keys-with" if with_ledger else "keys-without")
         _prepare(repo, legacy_run_cli, with_ledger=with_ledger, items=PASSING_ITEMS)
@@ -138,6 +177,7 @@ def test_claims_ledger_is_not_part_of_the_gate_input(legacy_run_cli, read_state,
         state = read_state(repo / ".mission-state")
         assert bool(state.get("claims_ledgers")) is with_ledger
         recorded[with_ledger] = state["score_history"][-1]
+        repos[with_ledger] = repo
 
     # The key set must not gain a field, whatever it is named.
     assert set(recorded[True]) == set(recorded[False]), (
@@ -146,24 +186,20 @@ def test_claims_ledger_is_not_part_of_the_gate_input(legacy_run_cli, read_state,
     for key in ("composite", "open_high", "min_item"):
         assert key in recorded[False], f"{key} is missing from the recorded score"
 
-    # Compare every remaining value, not a chosen subset.  A leak that adds the
-    # same key to both arms with different values passes a key-set check and a
-    # subset check alike; only comparing what is left catches it.
-    #
-    # The exclusions below differ between the arms by construction, not because
-    # of the ledger: each arm runs in its own directory and at its own moment.
-    arm_specific = {
-        "timestamp",                # wall clock
-        "findings_evidence_path",   # embeds the per-arm directory
-        "score_provenance",         # carries evidence paths and their digests
-        "artifact_digest",          # digest of the per-arm artifact
-        "artifact_digest_status",
-        "scoring_evidence_path",     # embeds the per-arm directory
-    }
-    for key in set(recorded[False]) - arm_specific:
-        assert recorded[True][key] == recorded[False][key], (
-            f"the recorded value of {key} changed because a ledger existed"
-        )
+    # Compare every value, including the nested ones.  Excluding a whole
+    # subtree (as an earlier version excluded ``score_provenance``) hides any
+    # leak that travels inside it, so normalize the arm-specific parts instead
+    # and compare what remains.
+    for key in recorded[False]:
+        assert _normalize(recorded[True][key], repos[True]) == _normalize(
+            recorded[False][key], repos[False]
+        ), f"the recorded value of {key} changed because a ledger existed"
+
+    # The digests above were normalized away, so compare the bytes they name.
+    # This is where a leak into the scoring artifact itself would surface.
+    assert _normalize(_scoring_artifact(repos[True], recorded[True]), repos[True]) == (
+        _normalize(_scoring_artifact(repos[False], recorded[False]), repos[False])
+    ), "the scoring artifact changed because a ledger existed"
 
 
 def test_ledger_digest_is_recorded_outside_the_score_history(legacy_run_cli, read_state, tmp_path):
