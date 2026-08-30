@@ -626,25 +626,69 @@ def test_hook_does_not_autohalt_awaiting_user_state(tmp_path):
     assert st["halt_reason"] == ""
 
 
-def test_hook_lsof_timeout_falls_back_to_input_cwd(tmp_path):
-    """#94: slow lsof で hook 全体が固まらず、input .cwd へ降下して block する。"""
+# #714: hook が固まらないことの検証は、壁時間ではなく観測可能な事実で行う。
+# 旧 `test_hook_lsof_timeout_falls_back_to_input_cwd` は fake `lsof` を置いて hook 全体を
+# `timeout=4` で走らせていたが、実測（2026-08-30）で **fake lsof は一度も起動されない**
+# ことが判明した。cwd 探索は `mission-state.py stop-verdict` へ移っており、hook は lsof を
+# 呼ばない。残っていたのは「hook 全体が 4 秒以内に終わる」という壁時間 assert だけで、
+# 負荷が高いと mission-state.py の起動がそれを超えて落ちていた。
+#
+# `docs/design/516-scaling-load-independent.md` の方針に従い、実時間依存の成功条件を
+# 置かず、hang 保護そのものを制御された遅延で検証する。無限ブロックの検出には
+# `docs/design/480-fifo-timeout-diagnostics.md` と同じ watchdog を使う。
+STOP_HOOK_BLOCK_WATCHDOG_SECONDS = 60
+
+
+def test_hook_falls_back_to_input_cwd_when_process_discovery_is_unavailable(tmp_path):
+    """#94 / #714: 外部プロセス探索が使えなくても input .cwd で state を読み block する。"""
     fake_bin = tmp_path / "fake-bin"
     fake_bin.mkdir()
+    # 探索経路をすべて潰す。lsof は現在の hook では呼ばれないが、将来 hook が再び
+    # 呼ぶようになった場合に固まらないことを保証するため置いたままにする。
     (fake_bin / "ps").write_text("#!/usr/bin/env bash\nprintf 'codex\\n'\n")
     (fake_bin / "readlink").write_text("#!/usr/bin/env bash\nexit 1\n")
-    (fake_bin / "lsof").write_text("#!/usr/bin/env bash\nsleep 5\n")
-    (fake_bin / "ps").chmod(0o755)
-    (fake_bin / "readlink").chmod(0o755)
-    (fake_bin / "lsof").chmod(0o755)
+    (fake_bin / "lsof").write_text("#!/usr/bin/env bash\nexit 1\n")
+    for name in ("ps", "readlink", "lsof"):
+        (fake_bin / name).chmod(0o755)
     _write_session(tmp_path, "cc-slow")
 
     r = _run_hook_with_input(
         tmp_path,
         {"PATH": f"{fake_bin}:{os.environ['PATH']}", "CLAUDE_CODE_SESSION_ID": "slow"},
-        timeout=4,
+        timeout=STOP_HOOK_BLOCK_WATCHDOG_SECONDS,
     )
 
+    # 成功条件は所要時間ではなく「input .cwd 配下の state を読んで block したこと」。
+    # tmp_path 配下にしか session を置いていないため、block が返った時点で
+    # input .cwd が使われたことが確定する。
     assert "block" in r.stdout, r.stdout
+
+
+def test_hook_bounds_a_hung_state_call_and_blocks(tmp_path):
+    """#714: state 呼び出しが返らなくても hook は有限時間で block を返す。
+
+    実際の負荷ではなく `MISSION_STATE_TIMEOUT` を短く固定した制御された hang で検証する。
+    負荷に左右されないため、並列フルスイートでも結果が変わらない。
+    """
+    hung = tmp_path / "hung-mission-state.py"
+    hung.write_text("import time\ntime.sleep(600)\n")
+    _write_session(tmp_path, "cc-hung")
+
+    r = _run_hook_with_input(
+        tmp_path,
+        {
+            "CLAUDE_CODE_SESSION_ID": "hung",
+            "MISSION_STATE_PY": str(hung),
+            "MISSION_STATE_TIMEOUT": "1",
+        },
+        timeout=STOP_HOOK_BLOCK_WATCHDOG_SECONDS,
+    )
+
+    assert r.returncode == 0, r.stderr
+    payload = json.loads(r.stdout)
+    assert payload["decision"] == "block"
+    # 判定材料が無いまま通過させない（fail-closed）
+    assert "unavailable" in payload["reason"]
 
 
 def test_hook_no_warn_on_fresh_state(tmp_path):
