@@ -15,12 +15,17 @@ top-level import に費やされる分をどれだけ削れるか」を判断す
 
 使い方:
 
+    # 0. suite 全体の CPU を測る（report の分母。改善の前後で同じ手順を使う）
+    #    壁時間ではなく user + sys を合算する
+    /usr/bin/time -p pytest -q -n auto --dist loadfile skills/mission
+    #    出力の user と sys を足した値を後段の --suite-cpu へ渡す
+
     # 1. 呼び出し回数を集める (pytest plugin として)
     PYTHONPATH=scripts CLI_TELEMETRY_DIR=/tmp/counts \\
       pytest -q -n auto --dist loadfile -p cli_startup_telemetry skills/mission
 
     # 2. 1 回あたりの CPU を分解して測る
-    python3 scripts/cli_startup_telemetry.py microbench --json > /tmp/micro.json
+    python3 scripts/cli_startup_telemetry.py microbench > /tmp/micro.json
 
     # 3. 停止ゲートを判定する
     python3 scripts/cli_startup_telemetry.py report \\
@@ -34,9 +39,9 @@ import contextlib
 import json
 import os
 import resource
+import platform
 import subprocess
 import sys
-import time
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -259,6 +264,13 @@ def microbench(*, repeat: int = 5) -> dict[str, Any]:
     return {
         "schema": "mission-cli-startup-microbench/1",
         "repeat": repeat,
+        # 改善の前後を「同一条件」で比べるには、環境が一致していることを
+        # 後から確認できる必要がある。
+        "env": {
+            "python": platform.python_version(),
+            "machine": platform.machine(),
+            "system": platform.system(),
+        },
         "cpu_seconds": {
             "interpreter_start": interpreter,
             "top_level_import": max(imported - interpreter, 0.0),
@@ -349,7 +361,6 @@ def main(argv: list[str] | None = None) -> int:
 
     bench = sub.add_parser("microbench", help="1 回あたりの CPU を分解して測る")
     bench.add_argument("--repeat", type=int, default=5)
-    bench.add_argument("--json", action="store_true")
 
     agg = sub.add_parser("aggregate", help="worker 別の集計ファイルを合算する")
     agg.add_argument("--counts-dir", required=True)

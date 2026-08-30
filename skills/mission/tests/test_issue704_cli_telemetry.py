@@ -193,10 +193,31 @@ def test_microbench_reports_every_stage(tmp_path):
     result = TELEMETRY.microbench(repeat=2)
 
     assert result["schema"] == "mission-cli-startup-microbench/1"
-    for stage in ("interpreter_start", "top_level_import", "parser_build", "handler_help"):
+    for stage in ("interpreter_start", "top_level_import", "parser_build",
+                  "handler_help", "prefork_child"):
         assert stage in result["cpu_seconds"], stage
         assert result["cpu_seconds"][stage] >= 0
     assert result["repeat"] == 2
+
+
+def test_microbench_would_notice_a_dead_measurement():
+    """計測器が壊れて 0 を返し続けた場合に気づけることを確認する。
+
+    `>= 0` だけでは、計測が完全に失敗して全段 0 になっても通ってしまう。
+    Python を 1 プロセス起動すれば必ず CPU を使うので、その下限を固定する。
+    """
+    result = TELEMETRY.microbench(repeat=3)
+
+    assert result["cpu_seconds"]["interpreter_start"] > 0.001
+    assert result["cpu_seconds"]["top_level_import"] > 0.001
+
+
+def test_microbench_records_the_environment_for_comparability():
+    """改善の前後を同一条件で比べるには、環境が一致していることの確認が要る。"""
+    result = TELEMETRY.microbench(repeat=2)
+
+    assert set(result["env"]) == {"python", "machine", "system"}
+    assert result["env"]["python"]
 
 
 def test_microbench_removable_is_import_minus_fork_not_the_help_proxy():
