@@ -52,10 +52,18 @@ def test_approval_verifier_timeout_kills_a_term_ignoring_callback_within_bound(m
     module = _load_state_module()
     monkeypatch.setattr(module, "_APPROVAL_VERIFIER_TIMEOUT_SEC", 0.05)
     monkeypatch.setattr(module, "_APPROVAL_VERIFIER_TERMINATE_GRACE_SEC", 0.05)
+    # 検出したいのは「親が hang して返らない」ことであり、実行の速さではない。
+    # 設定値 0.1 秒に対し境界 1 秒は余裕が 10 倍しかなく、負荷が乗るだけで落ちうる
+    # （#703: 同じ形の予算が 2 度破綻している）。hang だけを捕える値へ広げる。
+    _HANG_WATCHDOG_SECONDS = 60
     started = time.monotonic()
     with pytest.raises(ValueError, match="timed out"):
         module._run_approval_verifier(_ignore_term_and_hang, {})
-    assert time.monotonic() - started < 1
+    elapsed = time.monotonic() - started
+    assert elapsed < _HANG_WATCHDOG_SECONDS, (
+        f"parent did not return: elapsed={elapsed:.3f}s "
+        f"watchdog={_HANG_WATCHDOG_SECONDS}s"
+    )
 
 
 def test_terminal_state_projection_binds_gate_relevant_fields_only():
