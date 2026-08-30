@@ -75,6 +75,10 @@ def _prepare_command_provider(run_cli, tmp_path, *, phase="planning", max_calls=
     return marker, env
 
 
+# 子 CLI プロセスの完了・状態遷移を待つ watchdog（性能 SLA ではない・#703）
+_PUBLISH_WATCHDOG_SECONDS = 60
+
+
 def _state_path(root):
     return root / ".mission-state" / "sessions" / "test.json"
 
@@ -267,7 +271,11 @@ def test_running_invocation_fences_state_mutation_until_terminal(
         env=process_env,
     )
     state_path = _state_path(tmp_path)
-    deadline = time.monotonic() + 5
+    # 子 CLI プロセスが running 状態を publish するまで待つ。CLI 起動だけで
+    # アイドル 0.5 秒・10 並列負荷下では 5 秒を超えうるため、予算 5 秒では
+    # 実装が正しくても落ちる（#703: 同じ余裕 10 倍の予算が実際に破綻した）。
+    # ここで検出したいのは「publish されない」ことだけなので watchdog へ広げる。
+    deadline = time.monotonic() + _PUBLISH_WATCHDOG_SECONDS
     while time.monotonic() < deadline:
         state = json.loads(state_path.read_text(encoding="utf-8"))
         if state.get("specialist_invocations") and state["specialist_invocations"][0]["status"] == "running":
@@ -281,7 +289,7 @@ def test_running_invocation_fences_state_mutation_until_terminal(
     assert mutation.returncode == 2
     assert "provider-invocation-active" in mutation.stderr
     release.touch()
-    stdout, stderr = process.communicate(timeout=5)
+    stdout, stderr = process.communicate(timeout=_PUBLISH_WATCHDOG_SECONDS)
     assert process.returncode == 0, (stdout, stderr)
     state = json.loads(state_path.read_text(encoding="utf-8"))
     invocation = state["specialist_invocations"][0]
