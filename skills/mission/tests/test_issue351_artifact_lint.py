@@ -23,19 +23,22 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(MISSION_STATE)
 
 
-# FIFO open can block forever if no reader arrives; 1s stays tight while
-# still leaving enough room for the expected fast skip path.
-# artifact に FIFO を渡したとき「読もうとして永久ブロックしないこと」を確認するための予算。
+# artifact に FIFO を渡したとき「読もうとして永久ブロックしないこと」を確認するための watchdog。
 #
 # 検知したい失敗は**無限ブロック**であって「少し遅い」ではない。FIFO を読みに行けば
-# writer がいないので完走しないため、予算は「遅い実行機でも完走する」値であれば足りる。
+# writer がいないので完走しないため、watchdog は「無限ブロックだけを捕える」値でよく、
+# 実行が速いことを要求してはならない（それは性能 SLA であって本テストの関心事ではない）。
 #
-# 旧値 1 秒は CI で破綻した（2026-08-26: 1.005s / margin -0.005s で fail、再実行で green）。
-# 実測ではローカル 0.44〜0.48 秒で、その大半は subprocess の起動時間。予算 1 秒では
-# 遅い実行機に対する余裕が約 2 倍しかなく、負荷次第で境界を越える。
+# 値を締めると負荷で破綻することが 2 度実証されている。
+#   - 1 秒: 2026-08-26 の CI で 1.005s / margin -0.005s により fail、再実行で green
+#   - 5 秒: 2026-08-29 の full suite で 5.025s の TimeoutExpired により fail。
+#           そのときの stderr には既に "WARN #351: artifact lint skipped" が出ており、
+#           実装は正しく skip 済みで、単に完了が遅かっただけだった
 #
-# 5 秒ならローカル比で約 10 倍の余裕があり、ブロック時は完走しないので検出力は変わらない。
-FIFO_ARTIFACT_TIMEOUT_SECONDS = 5
+# アイドル時の実測は 0.44〜0.48 秒で、大半は subprocess の起動時間。10 並列の負荷下では
+# 約 11 倍に膨らむ。60 秒はアイドル比で約 130 倍の余裕があり、無限ブロック時は
+# そもそも完走しないため検出力は落ちない。
+FIFO_ARTIFACT_BLOCK_WATCHDOG_SECONDS = 60
 _ABSOLUTE_PATH_RE = re.compile(r"(?<!\w)/(?:[^\s\"']+)")
 _CURRENT_USER = getpass.getuser()
 # home prefix はリテラルで書くと artifact hygiene の走査に引っかかるため組み立てる
@@ -82,28 +85,22 @@ def _describe_child_state(returncode):
     return f"exited {returncode}"
 
 
-def _format_fifo_timeout_diagnostic(*, elapsed, stderr, returncode):
-    margin = FIFO_ARTIFACT_TIMEOUT_SECONDS - elapsed
+def _format_fifo_timeout_diagnostic(*, elapsed, stderr, returncode, watchdog):
     return (
-        "FIFO aggregate-reviews timed out "
-        f"after {elapsed:.3f}s (budget={FIFO_ARTIFACT_TIMEOUT_SECONDS:.3f}s, "
-        f"margin={margin:.3f}s); "
+        "FIFO aggregate-reviews never finished: it was still running "
+        f"after {elapsed:.3f}s (watchdog={watchdog:.3f}s); "
         f"child={_describe_child_state(returncode)}; "
         f"stderr={_redact_timeout_diagnostic(stderr)}"
     )
 
 
-def _run_fifo_aggregate_reviews(*, cwd, env, review):
-    command = [
-        sys.executable,
-        str(MISSION_STATE_PY),
-        "aggregate-reviews",
-        "--iteration",
-        "1",
-        "--input",
-        str(review),
-        "--json",
-    ]
+def _run_under_block_watchdog(command, *, cwd, env, watchdog):
+    """Run ``command`` and fail only if it never finishes.
+
+    The watchdog detects a child that blocks forever. It deliberately does not
+    assert that the child is fast: execution speed is a performance SLA, not the
+    property these tests verify.
+    """
     started = time.perf_counter()
     process = subprocess.Popen(
         command,
@@ -114,7 +111,7 @@ def _run_fifo_aggregate_reviews(*, cwd, env, review):
         env=env,
     )
     try:
-        stdout, stderr = process.communicate(timeout=FIFO_ARTIFACT_TIMEOUT_SECONDS)
+        stdout, stderr = process.communicate(timeout=watchdog)
     except subprocess.TimeoutExpired as exc:
         elapsed = time.perf_counter() - started
         process.kill()
@@ -125,6 +122,7 @@ def _run_fifo_aggregate_reviews(*, cwd, env, review):
                 elapsed=elapsed,
                 stderr=stderr,
                 returncode=process.returncode,
+                watchdog=watchdog,
             )
         ) from exc
     elapsed = time.perf_counter() - started
@@ -134,6 +132,58 @@ def _run_fifo_aggregate_reviews(*, cwd, env, review):
         stderr=stderr,
         elapsed=elapsed,
     )
+
+
+def _run_fifo_aggregate_reviews(
+    *, cwd, env, review, watchdog=FIFO_ARTIFACT_BLOCK_WATCHDOG_SECONDS
+):
+    command = [
+        sys.executable,
+        str(MISSION_STATE_PY),
+        "aggregate-reviews",
+        "--iteration",
+        "1",
+        "--input",
+        str(review),
+        "--json",
+    ]
+    return _run_under_block_watchdog(command, cwd=cwd, env=env, watchdog=watchdog)
+
+
+def test_block_watchdog_detects_a_child_that_never_finishes(tmp_path):
+    """検査自体の検出力を実証する。
+
+    watchdog を緩めた結果「何も検出できない検査」になっていないことを、
+    決して終わらない子プロセスを与えて確認する。子は watchdog より遥かに長く
+    眠るため、負荷が重いほど watchdog は確実に発火する（安全側に倒れる）。
+    """
+    never_finishes = [sys.executable, "-c", "import time; time.sleep(3600)"]
+
+    with pytest.raises(AssertionError) as excinfo:
+        _run_under_block_watchdog(
+            never_finishes, cwd=tmp_path, env=dict(os.environ), watchdog=1.0
+        )
+
+    message = str(excinfo.value)
+    assert "never finished" in message
+    assert "watchdog=1.000s" in message
+    assert "terminated by SIGKILL" in message
+
+
+def test_block_watchdog_accepts_a_slow_child_that_finishes(tmp_path):
+    """watchdog が「遅いだけ」を失敗にしないことを固定する。
+
+    watchdog 予算のうち無視できない割合を使う子でも、完走する限り成功とする。
+    これが崩れると、性能 SLA が再び成功条件へ混入する。
+    """
+    slow_but_finishes = [sys.executable, "-c", "import time; time.sleep(0.5)"]
+
+    result = _run_under_block_watchdog(
+        slow_but_finishes, cwd=tmp_path, env=dict(os.environ), watchdog=1.0
+    )
+
+    assert result.returncode == 0
+    assert result.elapsed >= 0.5
 
 
 def test_empty_sections_at_supported_heading_levels_are_detected():
@@ -478,15 +528,10 @@ def test_aggregate_fifo_artifact_skips_without_blocking_and_clears_stale_lint(
         review=review,
     )
 
-    assert result.elapsed < FIFO_ARTIFACT_TIMEOUT_SECONDS, (
-        f"elapsed={result.elapsed:.3f}s "
-        f"budget={FIFO_ARTIFACT_TIMEOUT_SECONDS:.3f}s "
-        f"margin={FIFO_ARTIFACT_TIMEOUT_SECONDS - result.elapsed:.3f}s"
-    )
+    # 実行時間そのものは成功条件にしない。無限ブロックは watchdog が捕える。
     diagnostic_context = (
         f"elapsed={result.elapsed:.3f}s "
-        f"budget={FIFO_ARTIFACT_TIMEOUT_SECONDS:.3f}s "
-        f"margin={FIFO_ARTIFACT_TIMEOUT_SECONDS - result.elapsed:.3f}s "
+        f"watchdog={FIFO_ARTIFACT_BLOCK_WATCHDOG_SECONDS:.3f}s "
         f"stderr={_redact_timeout_diagnostic(result.stderr)}"
     )
     assert result.returncode == 0, diagnostic_context
@@ -513,7 +558,7 @@ def test_fifo_timeout_diagnostic_redacts_environment_specific_details(
             if timeout is not None:
                 raise subprocess.TimeoutExpired(
                     cmd=["python", "aggregate-reviews"],
-                    timeout=FIFO_ARTIFACT_TIMEOUT_SECONDS,
+                    timeout=FIFO_ARTIFACT_BLOCK_WATCHDOG_SECONDS,
                     stderr=(
                         f"traceback {_HOME_PREFIX}{_CURRENT_USER}/mission "
                         f"user={_CURRENT_USER}"
@@ -535,10 +580,10 @@ def test_fifo_timeout_diagnostic_redacts_environment_specific_details(
 
     message = str(exc_info.value)
     assert "after " in message
-    # 予算値はリテラルで固定しない（本テストの目的は環境依存情報の伏字化であり、
-    # 予算の値ではない）。定数を変えたときにここが道連れで落ちないようにする。
-    assert f"budget={FIFO_ARTIFACT_TIMEOUT_SECONDS:.3f}s" in message
-    assert "margin=" in message
+    # watchdog 値はリテラルで固定しない（本テストの目的は環境依存情報の伏字化であり、
+    # watchdog の値ではない）。定数を変えたときにここが道連れで落ちないようにする。
+    assert f"watchdog={FIFO_ARTIFACT_BLOCK_WATCHDOG_SECONDS:.3f}s" in message
+    assert "never finished" in message
     assert "child=terminated by SIGKILL" in message
     assert "traceback" in message
     assert _HOME_PREFIX not in message
