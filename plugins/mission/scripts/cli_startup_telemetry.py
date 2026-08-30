@@ -56,12 +56,23 @@ class TelemetryError(RuntimeError):
 # --- 呼び出しの分類 -------------------------------------------------------
 
 
+# ``-c`` / ``-m`` は後続を「実行対象」として奪うため、これらが現れた時点で
+# そのプロセスはスクリプトを実行していない。値を取る他のオプションは読み飛ばす。
+_INTERPRETER_TERMINATORS = {"-c", "-m"}
+_INTERPRETER_VALUE_OPTIONS = {"-X", "-W", "--check-hash-based-pycs"}
+
+
 def classify_invocation(argv: Any) -> str | None:
-    """``mission-state.py`` の呼び出しならサブコマンド名を、他は ``None`` を返す。
+    """``mission-state.py`` を**スクリプトとして起動**したときだけ分類する。
 
     サブコマンドが無い呼び出し (``--help`` 等) は ``<no-subcommand>`` として
     区別する。落とすと「計測されなかった」のか「サブコマンドが無かった」のか
     分からなくなる。
+
+    ファイル名の一致だけで判定してはならない。``git diff <path>`` のように
+    別コマンドの**引数**としてパスが現れるだけの呼び出しまで計上してしまい、
+    回数が水増しされる。この回数は #702 の停止ゲートの一次入力なので、
+    水増しはそのまま誤った意思決定になる。
     """
     if isinstance(argv, (str, bytes)) or not isinstance(argv, Iterable):
         return None
@@ -69,15 +80,42 @@ def classify_invocation(argv: Any) -> str | None:
         parts = [os.fsdecode(item) for item in argv]
     except (TypeError, ValueError):
         return None
+    if not parts:
+        return None
 
-    for index, part in enumerate(parts):
-        if Path(part).name != MISSION_STATE_PY.name:
-            continue
-        for candidate in parts[index + 1:]:
+    # 直接実行 (`./mission-state.py init`) はそれ自体が argv[0] になる。
+    if Path(parts[0]).name == MISSION_STATE_PY.name:
+        for candidate in parts[1:]:
             if not candidate.startswith("-"):
                 return candidate
         return NO_SUBCOMMAND
-    return None
+
+    # それ以外は Python インタープリタ経由の起動だけを対象にする。`cat <path>` の
+    # ように別コマンドの引数としてパスが現れるものを除くための条件。
+    if not Path(parts[0]).name.startswith("python"):
+        return None
+
+    index = 1
+    while index < len(parts):
+        part = parts[index]
+        if part in _INTERPRETER_TERMINATORS:
+            return None
+        if part in _INTERPRETER_VALUE_OPTIONS:
+            index += 2
+            continue
+        if part.startswith("-") and part != "-":
+            index += 1
+            continue
+        break
+    else:
+        return None
+
+    if Path(parts[index]).name != MISSION_STATE_PY.name:
+        return None
+    for candidate in parts[index + 1:]:
+        if not candidate.startswith("-"):
+            return candidate
+    return NO_SUBCOMMAND
 
 
 class InvocationCounter:
@@ -138,7 +176,13 @@ def aggregate_counts(directory: Path) -> dict[str, int]:
         if not isinstance(payload, dict):
             raise TelemetryError(f"unreadable counter file: {path}")
         for command, count in payload.items():
-            totals[command] = totals.get(command, 0) + int(count)
+            # 形式が正しくても値が壊れていれば止める。素通しすると int() の
+            # ValueError がそのまま traceback になり fail-closed が成立しない。
+            if isinstance(count, bool) or not isinstance(count, int):
+                raise TelemetryError(
+                    f"non-integer count in {path}: {command}={count!r}"
+                )
+            totals[command] = totals.get(command, 0) + count
     return totals
 
 

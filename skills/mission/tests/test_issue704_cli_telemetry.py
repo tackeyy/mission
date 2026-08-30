@@ -57,6 +57,31 @@ def test_non_mission_state_subprocess_is_not_counted():
     assert TELEMETRY.classify_invocation([sys.executable, "-c", "pass"]) is None
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        # 別コマンドの引数としてパスが現れるだけ。CLI は起動していない
+        ["git", "diff", "HEAD", "skills/mission/bin/mission-state.py"],
+        ["cat", "skills/mission/bin/mission-state.py"],
+        ["grep", "-n", "def main", "skills/mission/bin/mission-state.py"],
+        # python は起動しているが実行対象は -c のコード。パスはただの引数
+        [sys.executable, "-c", "pass", "skills/mission/bin/mission-state.py"],
+    ],
+)
+def test_path_appearing_as_a_mere_argument_is_not_counted(argv):
+    """スクリプトとして起動されたときだけ数える。
+
+    名前一致だけで判定すると、CLI を起動していない subprocess まで計上され、
+    呼び出し回数が水増しされる。この回数は #702 の停止ゲートの一次入力なので、
+    水増しはそのまま誤った意思決定になる。
+    """
+    assert TELEMETRY.classify_invocation(argv) is None
+
+
+def test_module_invocation_is_not_mistaken_for_the_script():
+    assert TELEMETRY.classify_invocation([sys.executable, "-m", "pytest"]) is None
+
+
 def test_non_sequence_argv_is_ignored_without_raising():
     assert TELEMETRY.classify_invocation("mission-state.py init") is None
     assert TELEMETRY.classify_invocation(None) is None
@@ -133,6 +158,32 @@ def test_aggregate_rejects_a_malformed_worker_file(tmp_path):
 
     with pytest.raises(TELEMETRY.TelemetryError, match="unreadable counter file"):
         TELEMETRY.aggregate_counts(tmp_path)
+
+
+@pytest.mark.parametrize("value", ["not-an-int", None, [1], {"a": 1}, 1.5])
+def test_aggregate_rejects_a_non_integer_count(tmp_path, value):
+    """JSON として正しくても値が壊れていれば止める。
+
+    形式の検査だけでは足りない。ここを素通しすると int() の ValueError が
+    そのまま traceback になり、CLI の fail-closed が成立しなくなる。
+    """
+    (tmp_path / "w1.json").write_text(json.dumps({"init": value}))
+
+    with pytest.raises(TELEMETRY.TelemetryError, match="non-integer count"):
+        TELEMETRY.aggregate_counts(tmp_path)
+
+
+def test_cli_reports_a_non_integer_count_instead_of_raising(tmp_path):
+    (tmp_path / "w1.json").write_text(json.dumps({"init": "not-an-int"}))
+
+    result = subprocess.run(
+        [sys.executable, str(TELEMETRY_PY), "aggregate", "--counts-dir", str(tmp_path)],
+        capture_output=True, text=True,
+    )
+
+    assert result.returncode != 0
+    assert "non-integer count" in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 # --- CPU 分解 -------------------------------------------------------------
