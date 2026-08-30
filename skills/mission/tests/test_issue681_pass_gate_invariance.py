@@ -59,10 +59,10 @@ def _record_claims_ledger(repo, legacy_run_cli) -> None:
     assert result.returncode == 0, result.stderr + result.stdout
 
 
-def _push_score(repo, legacy_run_cli, items) -> None:
+def _push_score(repo, legacy_run_cli, items, *, high_count=0) -> None:
     evidence_path, ref, claim = write_canonical_review_aggregate(
         repo,
-        [canonical_review(items, perspective="A", high_count=0)],
+        [canonical_review(items, perspective="A", high_count=high_count)],
         name_prefix="pass-gate-invariance",
     )
     payload = {
@@ -85,7 +85,7 @@ def _push_score(repo, legacy_run_cli, items) -> None:
     ).returncode == 0
 
 
-def _prepare(repo, legacy_run_cli, *, with_ledger: bool, items) -> None:
+def _prepare(repo, legacy_run_cli, *, with_ledger: bool, items, high_count=0) -> None:
     repo.mkdir(parents=True, exist_ok=True)
     assert legacy_run_cli("init", "pass gate invariance", cwd=repo).returncode == 0
     # The artifact contract is a separate gate input; resolve it so the
@@ -96,7 +96,7 @@ def _prepare(repo, legacy_run_cli, *, with_ledger: bool, items) -> None:
     ).returncode == 0
     if with_ledger:
         _record_claims_ledger(repo, legacy_run_cli)
-    _push_score(repo, legacy_run_cli, items)
+    _push_score(repo, legacy_run_cli, items, high_count=high_count)
 
 
 @pytest.mark.parametrize("items,expected_returncode", [
@@ -123,16 +123,47 @@ def test_mark_passes_outcome_is_identical_with_and_without_a_claims_ledger(
 
 
 def test_claims_ledger_is_not_part_of_the_gate_input(legacy_run_cli, read_state, tmp_path):
-    """A ledger recorded after a passing score must not change the recorded gate values."""
-    repo = tmp_path / "gate-input"
-    _prepare(repo, legacy_run_cli, with_ledger=True, items=PASSING_ITEMS)
-    latest = read_state(repo / ".mission-state")["score_history"][-1]
+    """The recorded score must be byte-identical whether or not a ledger exists.
 
-    for field in ("composite", "open_high", "min_item"):
-        assert field in latest, f"{field} is missing from the recorded score"
-    assert not [key for key in latest if "claim" in key], (
-        "the recorded score must not carry claims ledger state"
+    Comparing whole key sets rather than a name pattern is deliberate: a leak
+    named ``ledger_present`` or ``review_evidence_applied`` carries the same
+    state without containing the substring "claim", so a pattern check would
+    let it through.
+    """
+    recorded = {}
+    for with_ledger in (False, True):
+        repo = tmp_path / ("keys-with" if with_ledger else "keys-without")
+        _prepare(repo, legacy_run_cli, with_ledger=with_ledger, items=PASSING_ITEMS)
+        assert legacy_run_cli("mark-passes", cwd=repo).returncode == 0
+        state = read_state(repo / ".mission-state")
+        assert bool(state.get("claims_ledgers")) is with_ledger
+        recorded[with_ledger] = state["score_history"][-1]
+
+    # The key set must not gain a field, whatever it is named.
+    assert set(recorded[True]) == set(recorded[False]), (
+        "the recorded score gained or lost a field because a ledger existed"
     )
+    for key in ("composite", "open_high", "min_item"):
+        assert key in recorded[False], f"{key} is missing from the recorded score"
+
+    # Compare every remaining value, not a chosen subset.  A leak that adds the
+    # same key to both arms with different values passes a key-set check and a
+    # subset check alike; only comparing what is left catches it.
+    #
+    # The exclusions below differ between the arms by construction, not because
+    # of the ledger: each arm runs in its own directory and at its own moment.
+    arm_specific = {
+        "timestamp",                # wall clock
+        "findings_evidence_path",   # embeds the per-arm directory
+        "score_provenance",         # carries evidence paths and their digests
+        "artifact_digest",          # digest of the per-arm artifact
+        "artifact_digest_status",
+        "scoring_evidence_path",     # embeds the per-arm directory
+    }
+    for key in set(recorded[False]) - arm_specific:
+        assert recorded[True][key] == recorded[False][key], (
+            f"the recorded value of {key} changed because a ledger existed"
+        )
 
 
 def test_ledger_digest_is_recorded_outside_the_score_history(legacy_run_cli, read_state, tmp_path):
@@ -145,3 +176,27 @@ def test_ledger_digest_is_recorded_outside_the_score_history(legacy_run_cli, rea
     expected = "sha256:" + hashlib.sha256((repo / "ledger.json").read_bytes()).hexdigest()
     assert record["digest"] == expected
     assert "claims_ledgers" not in state["score_history"][-1]
+
+
+def test_open_high_gate_is_unchanged_by_a_claims_ledger(legacy_run_cli, read_state, tmp_path):
+    """The open_high rejection path must also ignore the ledger.
+
+    The other cases all score with ``high_count=0``, so they exercise the
+    composite and min_item gates but never the open_high one.  A change that
+    routed ledger state into the open_high check would pass all of them.
+    """
+    outcomes = {}
+    for with_ledger in (False, True):
+        repo = tmp_path / ("high-with" if with_ledger else "high-without")
+        _prepare(
+            repo, legacy_run_cli, with_ledger=with_ledger,
+            items=PASSING_ITEMS, high_count=1,
+        )
+        result = legacy_run_cli("mark-passes", cwd=repo)
+        state = read_state(repo / ".mission-state")
+        assert bool(state.get("claims_ledgers")) is with_ledger
+        outcomes[with_ledger] = (result.returncode, state["passes"])
+
+    # An open High must reject regardless of the ledger.
+    assert outcomes[False] == (2, False)
+    assert outcomes[True] == outcomes[False]

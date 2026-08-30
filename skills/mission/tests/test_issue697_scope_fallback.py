@@ -86,11 +86,16 @@ def test_present_helper_that_fails_never_falls_back(tmp_path, returncode, stdout
     assert captured.value.reason == "scope-selection-failed"
 
 
-def test_command_not_found_exit_falls_back(tmp_path):
-    """Exit 127 is the POSIX signal that the command could not be executed."""
-    gate, instance = _gate(
-        tmp_path, returncode=127, stderr="bash: node: command not found"
-    )
+@pytest.mark.parametrize("stderr", [
+    "bash: node: command not found",
+    # A Japanese shell says it in Japanese.  The decision must not depend on
+    # which locale the operator happens to run under.
+    "bash: node: \u30b3\u30de\u30f3\u30c9\u304c\u898b\u3064\u304b\u308a\u307e\u305b\u3093",
+    "",
+])
+def test_command_not_found_exit_falls_back(tmp_path, stderr):
+    """Exit 127 with no classifier output means the command never ran."""
+    gate, instance = _gate(tmp_path, returncode=127, stderr=stderr)
     tree = tmp_path / "tree"
     (tree / "scripts").mkdir(parents=True)
     (tree / "scripts" / "ci_changed_scopes.js").write_text("module.exports = {};\n", encoding="utf-8")
@@ -155,3 +160,20 @@ def test_fallback_reason_is_logged(tmp_path):
     joined = "\n".join(messages)
     assert "scope_fallback=" in joined
     assert "helper-missing" in joined
+
+
+def test_exit_127_with_classifier_output_still_fails_closed(tmp_path):
+    """A helper that answered and then exited 127 did run, so it is not absent."""
+    gate, instance = _gate(
+        tmp_path,
+        returncode=127,
+        stdout='{"pythonTargets": "skills/mission", "docsOnly": false}',
+    )
+    tree = tmp_path / "tree"
+    (tree / "scripts").mkdir(parents=True)
+    (tree / "scripts" / "ci_changed_scopes.js").write_text("module.exports = {};\n", encoding="utf-8")
+
+    with pytest.raises(gate.IntegrationGateError) as captured:
+        instance._classify_scope(["module.py"], tree)
+
+    assert captured.value.reason == "scope-selection-failed"
