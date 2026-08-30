@@ -483,11 +483,14 @@ from merge_queue import (  # noqa: E402
     status as status_merge_queue,
     verify as verify_merge_queue,
 )
-from integration_gate import execute_gate_and_merge  # noqa: E402
+from integration_gate import execute_changeset_digest, execute_gate_and_merge  # noqa: E402
 from mission_application.integration_gate import (  # noqa: E402
+    ChangesetDigestRequest,
+    ChangesetDigestServices,
     IntegrationGateFailure,
     IntegrationGateRequest,
     IntegrationGateServices,
+    run_changeset_digest,
     run_integration_gate,
 )
 from mission_kernel.commands import GENERIC_SET_FROZEN_FIELDS  # noqa: E402
@@ -7423,12 +7426,35 @@ def cmd_queue(args):
     print(json.dumps(result, indent=2 if getattr(args, "json", False) else None, ensure_ascii=False))
 
 
+def cmd_changeset_digest(args):
+    """レビュー対象の変更集合 digest を算出して表示する (read-only)。
+
+    merge 側と同じ実装を通す。producer が手元で `git diff | shasum` を組み立てると
+    diff 設定の差で別の値が出て、恒常的な不一致になる。
+    """
+    request = ChangesetDigestRequest(
+        repository_root=".",
+        base_sha=args.base_sha,
+        head_sha=args.head_sha,
+    )
+    try:
+        result = run_changeset_digest(
+            request,
+            ChangesetDigestServices(execute=execute_changeset_digest),
+        )
+    except IntegrationGateFailure as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+
+
 def cmd_gate_and_merge(args):
     request = IntegrationGateRequest(
         repository_root=".",
         pr_ref=str(args.pr),
         expected_head_sha=args.expected_head_sha,
         expected_base_sha=args.expected_base_sha,
+        expected_changeset_digest=args.reviewed_changeset_digest,
     )
     try:
         result = run_integration_gate(
@@ -16242,7 +16268,20 @@ def _add_queue_parsers(subparsers) -> None:
         default=None,
         help="queue-verified accepted base sha; mismatch fails closed",
     )
+    p_gate_merge.add_argument(
+        "--reviewed-changeset-digest",
+        default=None,
+        help="digest of the reviewed changeset; omission and mismatch both fail closed",
+    )
     p_gate_merge.set_defaults(func=cmd_gate_and_merge)
+
+    p_changeset_digest = sub.add_parser(
+        "changeset-digest",
+        help="compute the reviewed changeset digest for a base/head pair (read-only)",
+    )
+    p_changeset_digest.add_argument("--base-sha", required=True)
+    p_changeset_digest.add_argument("--head-sha", required=True)
+    p_changeset_digest.set_defaults(func=cmd_changeset_digest)
 
     p_queue = sub.add_parser("queue", help="merge queue sidecar")
     p_queue_sub = p_queue.add_subparsers(dest="queue_cmd", required=True)

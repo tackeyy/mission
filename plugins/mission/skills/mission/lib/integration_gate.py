@@ -17,6 +17,7 @@ import tempfile
 from typing import Callable, Dict, Iterable, Optional, TextIO
 
 from mission_application.integration_gate import (
+    compute_changeset_digest,
     GateRuntimeServices,
     IntegrationGateFailure,
     IntegrationObservation,
@@ -42,6 +43,14 @@ class CommandResult:
     stderr: str = ""
 
 
+@dataclass(frozen=True)
+class BinaryCommandResult:
+    """digest 算出用。パッチ本文を decode せず bytes のまま扱う。"""
+
+    returncode: int
+    stdout: bytes = b""
+
+
 IntegrationGateError = IntegrationGateFailure
 
 
@@ -54,6 +63,54 @@ def _local_runner(arguments: Iterable[str], cwd: Path) -> CommandResult:
         check=False,
     )
     return CommandResult(completed.returncode, completed.stdout, completed.stderr)
+
+
+def _local_binary_runner(arguments: Iterable[str], cwd: Path) -> "BinaryCommandResult":
+    completed = subprocess.run(
+        list(arguments),
+        cwd=str(cwd),
+        capture_output=True,
+        check=False,
+    )
+    return BinaryCommandResult(completed.returncode, completed.stdout)
+
+
+# 変更集合 digest を算出する diff は、ローカル設定に左右されてはならない。設定次第で
+# 同じ変更集合が別の digest になると、レビュー側と merge 側で不一致が常態化し、
+# 運用が「不一致を無視する」方向へ倒れる。差分の見た目を決める設定を明示的に固定する。
+_DIGEST_GIT_CONFIG = (
+    "-c", "core.quotepath=false",
+    "-c", "diff.noprefix=false",
+    "-c", "diff.mnemonicPrefix=false",
+    "-c", "diff.algorithm=myers",
+    "-c", "diff.renames=true",
+    "-c", "diff.external=",
+    "-c", "diff.wsErrorHighlight=none",
+)
+_DIGEST_DIFF_FLAGS = (
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--binary",
+    "--full-index",
+    "--find-renames",
+)
+
+
+def changeset_diff_command(base_sha: str, head_sha: str) -> tuple:
+    """digest 算出に使う git コマンドを組み立てる。
+
+    範囲は三点（`base...head`）。merge-base からの差分なので、base が進んでも
+    head の分岐点が動かない限り同じ変更集合を指す。これが「base が動いても
+    accepted を維持できる」根拠そのものであり、二点差分に変えてはならない。
+    """
+    return (
+        ("git",)
+        + _DIGEST_GIT_CONFIG
+        + ("diff",)
+        + _DIGEST_DIFF_FLAGS
+        + ("{}...{}".format(base_sha, head_sha),)
+    )
 
 
 _BRANCH_UNSAFE = ("@{", "..", "\\", "~", "^", ":", "?", "*", "[", " ")
@@ -153,10 +210,12 @@ class SubprocessGateOperations:
         repository_root: Path,
         *,
         runner: Optional[Callable[[Iterable[str], Path], CommandResult]] = None,
+        binary_runner: Optional[Callable[[Iterable[str], Path], BinaryCommandResult]] = None,
         node_binary: str = "node",
     ):
         self.repository_root = Path(repository_root).resolve()
         self.runner = runner or _local_runner
+        self.binary_runner = binary_runner or _local_binary_runner
         self.node_binary = node_binary
 
     def _run(self, arguments: Iterable[str], *, cwd: Optional[Path] = None) -> CommandResult:
@@ -418,6 +477,21 @@ class SubprocessGateOperations:
             logger("scope_fallback={}".format(reason))
         return "full", ""
 
+    def observe_changeset_digest(self, base_sha: str, head_sha: str, cwd: Path) -> str:
+        """統合ツリー上で `git diff <merge-base>...<head>` の digest を観測する。
+
+        算出できなければ digest を返さず fail-closed で止める。空文字や既定値を
+        返すと、上位が「検査した」と誤認する。
+        """
+        result = self.binary_runner(changeset_diff_command(base_sha, head_sha), cwd)
+        if result.returncode != 0:
+            raise IntegrationGateError(
+                4,
+                "changeset-digest-failed",
+                "changeset diff for the digest could not be produced",
+            )
+        return compute_changeset_digest(result.stdout)
+
     def _cleanup_worktree(self, scratch_parent: Path, tree: Path, registered: bool) -> bool:
         deregistered = True
         if registered:
@@ -468,6 +542,7 @@ class SubprocessGateOperations:
                 logger,
             )
             logger("test_scope={} test_targets={}".format(scope, targets or "<repository default>"))
+            changeset_digest = self.observe_changeset_digest(base_sha, head_sha, tree)
             suite_command = ("make", "test")
             if targets:
                 suite_command += ("PYTEST_TARGETS={}".format(targets),)
@@ -476,7 +551,7 @@ class SubprocessGateOperations:
                 logger("suite_exit={}".format(suite.returncode))
                 raise IntegrationGateError(4, "suite-failed", "integrated tree suite failed")
             logger("suite_exit=0")
-            observation = IntegrationObservation(scope, targets, tree_sha)
+            observation = IntegrationObservation(scope, targets, tree_sha, changeset_digest)
         except BaseException:
             if not self._cleanup_worktree(scratch_parent, tree, registered):
                 logger("scratch_cleanup=failed")
@@ -509,6 +584,7 @@ def gate_and_merge(
     logger: Callable[[str], None],
     expected_head_sha: Optional[str] = None,
     expected_base_sha: Optional[str] = None,
+    expected_changeset_digest: Optional[str] = None,
 ) -> Dict[str, object]:
     return run_gate_and_merge(
         pr_ref,
@@ -526,7 +602,18 @@ def gate_and_merge(
         logger,
         expected_head_sha,
         expected_base_sha,
+        expected_changeset_digest,
     )
+
+
+def execute_changeset_digest(
+    repository_root: str,
+    base_sha: str,
+    head_sha: str,
+) -> Dict[str, object]:
+    root = Path(repository_root)
+    digest = SubprocessGateOperations(root).observe_changeset_digest(base_sha, head_sha, root)
+    return {"changeset_digest": digest}
 
 
 def execute_gate_and_merge(
@@ -534,6 +621,7 @@ def execute_gate_and_merge(
     pr_ref: str,
     expected_head_sha: Optional[str] = None,
     expected_base_sha: Optional[str] = None,
+    expected_changeset_digest: Optional[str] = None,
 ) -> Dict[str, object]:
     return gate_and_merge(
         pr_ref,
@@ -541,6 +629,7 @@ def execute_gate_and_merge(
         print,
         expected_head_sha,
         expected_base_sha,
+        expected_changeset_digest,
     )
 
 
@@ -553,6 +642,7 @@ def execute_gate_and_merge_cli(
     stderr: Optional[TextIO] = None,
     expected_head_sha: Optional[str] = None,
     expected_base_sha: Optional[str] = None,
+    expected_changeset_digest: Optional[str] = None,
 ) -> Dict[str, object]:
     output = stdout or sys.stdout
     errors = stderr or sys.stderr
@@ -564,6 +654,7 @@ def execute_gate_and_merge_cli(
             lambda message: print(message, file=output),
             expected_head_sha,
             expected_base_sha,
+            expected_changeset_digest,
         )
     except IntegrationGateError as exc:
         print(
