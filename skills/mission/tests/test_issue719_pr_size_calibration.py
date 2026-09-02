@@ -19,6 +19,7 @@ entry added to one and not the other -- fails here.
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
@@ -162,6 +163,47 @@ def test_the_script_names_the_band_it_lands_in():
     assert verdict(module.ACCOUNTABILITY_THRESHOLD - 1) == "ok"
     assert verdict(module.ACCOUNTABILITY_THRESHOLD + 1) == "explain"
     assert verdict(module.SPLIT_REQUIRED_THRESHOLD + 1) == "split-required"
+
+
+def test_the_cli_refuses_a_truncated_file_list():
+    """`gh pr view --json files` caps at 100 with no way to page.
+
+    A list of exactly that length is indistinguishable from a truncated one, so
+    reporting a number from it would be reporting a number that may be wrong.
+    The calibration set contains such a PR (#605, 194 files).
+    """
+    module = _load_script()
+
+    def fake_run(*args, **kwargs):
+        class Result:
+            stdout = json.dumps({"files": [
+                {"path": f"f{i}.py", "additions": 1, "deletions": 0}
+                for i in range(module._GH_FILES_PAGE_SIZE)
+            ]})
+        return Result()
+
+    original = module.subprocess.run
+    module.subprocess.run = fake_run
+    try:
+        with pytest.raises(SystemExit) as captured:
+            module._files_for_pr("605", "tackeyy/mission")
+    finally:
+        module.subprocess.run = original
+
+    assert "truncated" in str(captured.value)
+
+
+def test_the_documented_measurement_avoids_the_capped_api():
+    """The rules have to say which method produced the numbers.
+
+    Both methods were used at different points and they disagree; recording
+    only the values would leave no way to tell which one a future re-measure
+    should reproduce.
+    """
+    section = _documented_section()
+
+    assert "git log --first-parent" in section
+    assert "files(first: 100)" in section
 
 
 def test_the_cli_runs_on_a_diff():

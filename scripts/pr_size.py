@@ -58,8 +58,8 @@ GENERATED_PATTERNS = (
 )
 
 # Round numbers chosen near p65 and p85 of the last 100 merged PRs, measured
-# with the exclusions above.  The measured values are 580.3 / 607.4 (p65, two
-# methods) and 1,349.0 (p85); see AGENTS.md.
+# with the exclusions above.  The measured values are 608.0 (p65) and 1,349.0
+# (p85); see AGENTS.md.
 ACCOUNTABILITY_THRESHOLD = 600
 SPLIT_REQUIRED_THRESHOLD = 1400
 
@@ -146,6 +146,13 @@ def measure(files) -> dict:
     }
 
 
+# `gh pr view --json files` asks for `files(first: 100)` and gives no way to
+# page, so a PR with more than 100 changed files comes back silently truncated.
+# The calibration set contains one (#605, 194 files), which is how this was
+# found.  A short list is trustworthy; a list of exactly this length is not.
+_GH_FILES_PAGE_SIZE = 100
+
+
 def _files_for_pr(pr: str, repo: str):
     result = subprocess.run(
         ["gh", "pr", "view", pr, "--repo", repo, "--json", "files"],
@@ -153,7 +160,18 @@ def _files_for_pr(pr: str, repo: str):
         text=True,
         check=True,
     )
-    return json.loads(result.stdout).get("files") or []
+    files = json.loads(result.stdout).get("files") or []
+    if len(files) >= _GH_FILES_PAGE_SIZE:
+        raise SystemExit(
+            "gh returned {} files, which is its page limit -- the list may be "
+            "truncated and the measurement would be wrong.  Measure this PR "
+            "locally instead:\n"
+            "  git fetch origin pull/{}/head && "
+            "python3 scripts/pr_size.py --base origin/main --head FETCH_HEAD".format(
+                len(files), pr
+            )
+        )
+    return files
 
 
 def _files_for_range(base: str, head: str):

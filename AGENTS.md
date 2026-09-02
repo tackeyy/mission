@@ -32,7 +32,7 @@ This repository is OSS. Keep public behavior portable across users, machines, an
 
 The shared PR-size rule ships pre-calibration defaults of 400 and 1,000 lines and
 asks each repository to replace them with its own p65 and p85. Uncalibrated,
-**51 of the last 100 merged PRs exceed 400 and 22 exceed 1,000** — a rule that
+**54 of the last 100 merged PRs exceed 400 and 22 exceed 1,000** — a rule that
 fires on a fifth of all work stops being read.
 
 **Measure reviewed area, not raw diff.** `plugins/mission/skills/` and
@@ -40,14 +40,37 @@ fires on a fifth of all work stops being read.
 `scripts/`, enforced by `test_plugins_in_sync.py` and
 `test_codex_wrapper_sync.py` — **except under `__pycache__` and
 `.pytest_cache`, which those tests skip.** Paths under those directories are
-counted as reviewed area, since nothing holds them identical to a source. A reviewer reads that content once. Counting it
-twice inflates every PR that touches the skill: **19% of the diff at the median
-and 40% at p85.**
+counted as reviewed area, since nothing holds them identical to a source.
 
 **The rest of `plugins/mission/` is not a copy.** Its `CHANGELOG.md`,
 `CHANGELOG.ja.md`, and `.codex-plugin/plugin.json` carry their own content and
 are reviewed like anything else. Excluding the whole directory would have
 quietly exempted them.
+
+### How the distribution was measured
+
+`main` is squash-merged, so each first-parent commit is one merged PR. The
+calibration walks the last 100 of them and diffs each against its parent:
+
+```bash
+git log --first-parent --no-merges -n 100 --format=%H origin/main
+git diff --numstat <sha>^ <sha>
+```
+
+| | p50 | p65 | p75 | p85 | p90 |
+|---|---|---|---|---|---|
+| Reviewed lines | 417 | **608** | 789 | **1,349** | 2,690 |
+
+**The GitHub API was not used for this.** `gh pr view --json files` requests
+`files(first: 100)` with no way to page, so any PR with more than 100 changed
+files comes back truncated — and the set contains one (#605, 194 files). An
+earlier measurement through that path reported p65 580.3, which was wrong for
+that reason. `scripts/pr_size.py --pr` now refuses to report a number when the
+list reaches that limit.
+
+The earlier 60-PR sample in #719 gave much higher values (p65 1,119 / p85 3,844);
+widening the sample and excluding the mirror both moved the distribution down,
+so **the 60-PR figures are not used.**
 
 ### Thresholds
 
@@ -56,27 +79,9 @@ quietly exempted them.
 | Accountability (p65) | **600** | State in the PR body why it is not split. Does not block |
 | Split required (p85) | **1,400** | Split, or record an exception and the reason it applies |
 
-**Two measurements informed these numbers, and they do not agree exactly.**
-
-| Method | p65 | p85 |
-|---|---|---|
-| GitHub API, last 100 merged PRs (`gh pr view --json files`) | 580.3 | 1349.0 |
-| Local first-parent walk, 100 merges (#546–#737, `git diff`) | 607.4 | 1349.0 |
-
-They measure different things: the API reports each PR's `base...head` diff,
-while the first-parent walk reports what each merge commit brought in.
-
-**The thresholds are judgment, not a formula.** 600 sits between the two p65
-estimates; 1,400 is above the p85 both methods agree on (1,349). Round numbers
-were chosen so the values stay readable and stable, rather than tracking a
-figure that shifts with the measurement method.
-
-At these values, 35 of the last 100 merged PRs need an explanation and 14 need
-splitting or an exception.
-
-The earlier 60-PR sample in #719 gave much higher values (p65 1,119 / p85 3,844);
-widening the sample and excluding the mirror both moved the distribution down,
-so **the 60-PR figures were not stable and are not used.**
+**The thresholds are judgment, not a formula.** They are round numbers near the
+measured p65 and p85, chosen so the values stay readable. At them, 37 of the
+last 100 merged PRs need an explanation and 14 need splitting or an exception.
 
 ### Generated-artifact allowlist
 
