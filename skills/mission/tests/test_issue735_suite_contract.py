@@ -487,21 +487,24 @@ def test_the_suite_actually_writes_to_the_path_the_gate_named(tmp_path):
     not the suite.
     """
     report_path = tmp_path / "report.json"
-    environment = dict(os.environ)
-    environment[gate.SUITE_REPORT_ENV] = str(report_path)
 
-    result = subprocess.run(
-        ["make", "test",
+    # Go through the runner the gate actually uses, and through
+    # run_declared_suite, rather than calling subprocess directly.  Driving
+    # subprocess here would test the Makefile while leaving the path the gate
+    # takes -- runner, environment handling, report lookup -- unexercised.
+    executed = gate.run_declared_suite(
+        ("make", "test",
          "PYTEST_TARGETS=skills/mission/tests/test_issue735_suite_contract.py"
-         "::test_a_valid_contract_returns_its_command"],
-        cwd=REPO_ROOT, env=environment, capture_output=True, text=True,
+         "::test_a_valid_contract_returns_its_command"),
+        runner=gate._local_runner,
+        cwd=REPO_ROOT,
+        report_path=report_path,
+        expected_tree_sha=subprocess.run(
+            ["git", "write-tree"],
+            cwd=REPO_ROOT, capture_output=True, text=True, check=True,
+        ).stdout.strip(),
+        step=4,
     )
 
-    assert result.returncode == 0, result.stderr[-2000:]
-    assert report_path.exists(), (
-        "the suite ran but wrote no report where the gate would look"
-    )
-    document = json.loads(report_path.read_text(encoding="utf-8"))
-    assert gate.require_suite_report(
-        document, expected_tree_sha=document["tree_sha"], step=4
-    ) >= 1
+    assert executed >= 1
+    assert report_path.exists()
