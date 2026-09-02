@@ -465,14 +465,15 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-migrate.py --execute --
 | `stagnation` | 3 回停滞した | 停滞の原因（同じ指摘の再発・設計の未確定）を解消してから `reactivate --approved-by-user --expected-category stagnation --reason "<解消内容>"` |
 | `user-abort` | ユーザーが中止を指示した | ユーザーの再開指示を受けてから `reactivate --approved-by-user --expected-category user-abort --reason "<再開指示>"` |
 | `stale` | lease 失効・dead PID を自動検出して閉じた | **`reactivate` は使えない。** `resume` を使う（`refresh-pid` → `cleanup-empty` → `cleanup-stale` → `next` を 1 コマンドで行う） |
-| `other` | 上記に当てはまらない | 理由を読んで判断し、人手 halt なら `reactivate --approved-by-user --expected-category other --reason "<再開理由>"`、自動検出なら `resume` |
+| `other` | 上記に当てはまらない | 理由を読んで判断し、`reactivate --approved-by-user --expected-category other --reason "<再開理由>"` を使う。**`resume` では復帰しない**（`resume` が戻すのは `stale` と legacy の null/unknown だけ） |
 
 **`stale` を踏みやすい条件を知っておく。** lease TTL は 15 分で、mutating command でしか
 renew されない。外部プロセス（別 CLI のレビュー等）を待つ間隔が TTL を超えると、
 `activity start` で heartbeat を打っていても自動 halt される。長い待ちに入る前に
 mutating command を挟むか、`resume` で復帰する前提で進める。
 
-**`reactivate` が拒否するのは `stale` だけである。** 上の表で「通常は復帰しない」と
+**`resume` が復帰させるのは `stale`（と legacy の null/unknown）だけである。**
+他の category は `reactivate` を使う。逆に **`reactivate` が拒否するのは `stale` だけである。** 上の表で「通常は復帰しない」と
 書いた 2 つも、コマンド自体は成功する。**復帰しないのは設計判断であって、
 機械的な制限ではない。**
 

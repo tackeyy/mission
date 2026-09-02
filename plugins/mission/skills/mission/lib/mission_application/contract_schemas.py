@@ -37,9 +37,14 @@ def _review_contract_schema(score_keys, severities) -> dict:
                 "0..1 is rejected as a normalized scale, because a normalized "
                 "score silently reads as a near-zero raw one"
             ),
-            "learning": (
-                "when present, validated by the review learning contract: "
-                "cause, general_fix_rule and weak_phase on each finding"
+            "learning_schema": (
+                "opt-in marker for the learning contract.  Without it, no "
+                "finding may carry a learning field; any other key starting "
+                "with learning_ is rejected outright"
+            ),
+            "findings[].cause / general_fix_rule / weak_phase": (
+                "the learning fields.  Allowed only when learning_schema is "
+                "present, and then validated by the learning contract"
             ),
             "same_score_note": (
                 "required when all four scores are equal; states why the "

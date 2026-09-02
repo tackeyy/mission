@@ -210,6 +210,10 @@ def test_no_field_the_review_validator_requires_is_missing_from_the_schema():
         ), "resource-missing-access"),
         (lambda d: d["steps"][0].pop("acceptance_checks"), "step-missing-checks"),
         (lambda d: d["steps"][0].update({"depends_on": ["nope"]}), "unknown-dependency"),
+        (lambda d: d["scope"]["resources"].append(
+            {"type": "path", "identifier": "x", "access": "read",
+             "constraints": [1]}
+        ), "constraints-element-not-a-string"),
     ],
 )
 def test_the_plan_validator_enforces_what_the_schema_describes(mutate, label, tmp_path):
@@ -237,6 +241,9 @@ def test_the_plan_validator_enforces_what_the_schema_describes(mutate, label, tm
         (lambda p: p["findings"].append(dict(p["findings"][0])), "duplicate-finding-id"),
         (lambda p: p["findings"][0].update({"id": "B-1"}), "id-without-perspective-prefix"),
         (lambda p: p.update({"scores": {k: 0.9 for k in p["scores"]}}), "normalized-scale"),
+        (lambda p: p["scores"].update({"accuracy": 50.0}), "score-above-the-scale"),
+        (lambda p: p["findings"][0].update({"cause": "x"}), "learning-field-without-marker"),
+        (lambda p: p.update({"learning_extra": 1}), "unknown-learning-key"),
     ],
 )
 def test_the_review_validator_enforces_what_the_schema_describes(mutate, label):
