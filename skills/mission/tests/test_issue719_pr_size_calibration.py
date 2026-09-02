@@ -6,9 +6,11 @@ last 100 merged PRs exceed the accountability threshold and 22 exceed the
 "must split" one -- a rule that fires on a fifth of all work stops being read.
 
 Calibrating requires deciding what counts as reviewed area, and this repository
-has one large mechanical contributor: `plugins/mission/` is a byte-identical
-copy of `skills/mission/`, enforced by test_plugins_in_sync.py.  A human reviews
-that content once, not twice.
+has one large mechanical contributor: the `skills/` and `scripts/` subtrees
+under `plugins/mission/` are held identical to their sources by
+test_plugins_in_sync.py and test_codex_wrapper_sync.py.  A human reviews that
+content once, not twice.  The rest of `plugins/mission/` is not a copy, and
+neither are the cache directories those tests skip.
 
 These tests bind the documented numbers to the script that computes them, so a
 threshold changed in prose without changing the measurement -- or an allowlist

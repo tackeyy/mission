@@ -38,7 +38,9 @@ fires on a fifth of all work stops being read.
 **Measure reviewed area, not raw diff.** `plugins/mission/skills/` and
 `plugins/mission/scripts/` are byte-identical copies of `skills/` and
 `scripts/`, enforced by `test_plugins_in_sync.py` and
-`test_codex_wrapper_sync.py`. A reviewer reads that content once. Counting it
+`test_codex_wrapper_sync.py` — **except under `__pycache__` and
+`.pytest_cache`, which those tests skip.** Paths under those directories are
+counted as reviewed area, since nothing holds them identical to a source. A reviewer reads that content once. Counting it
 twice inflates every PR that touches the skill: **19% of the diff at the median
 and 40% at p85.**
 
@@ -54,10 +56,7 @@ quietly exempted them.
 | Accountability (p65) | **600** | State in the PR body why it is not split. Does not block |
 | Split required (p85) | **1,400** | Split, or record an exception and the reason it applies |
 
-At these values, 35 of the last 100 merged PRs need an explanation and 14 need
-splitting or an exception.
-
-**Two measurements support these numbers, and they do not agree exactly.**
+**Two measurements informed these numbers, and they do not agree exactly.**
 
 | Method | p65 | p85 |
 |---|---|---|
@@ -65,15 +64,15 @@ splitting or an exception.
 | Local first-parent walk, 100 merges (#546–#737, `git diff`) | 607.4 | 1349.0 |
 
 They measure different things: the API reports each PR's `base...head` diff,
-while the first-parent walk reports what each merge commit brought in. **p85
-agrees; p65 differs by about 5%.**
+while the first-parent walk reports what each merge commit brought in.
 
-**The thresholds are the two p65/p85 estimates rounded to the nearest hundred**
-(580.3 and 607.4 → 600; 1349.0 → 1400 for both). 600 therefore sits just below
-the local p65 and just above the API one. **Rounding to a shared, readable
-number was chosen over tracking a figure that moves with the measurement
-method** — the 27-line gap between the two estimates is smaller than the noise
-from adding or removing a single PR from the sample.
+**The thresholds are judgment, not a formula.** 600 sits between the two p65
+estimates; 1,400 is above the p85 both methods agree on (1,349). Round numbers
+were chosen so the values stay readable and stable, rather than tracking a
+figure that shifts with the measurement method.
+
+At these values, 35 of the last 100 merged PRs need an explanation and 14 need
+splitting or an exception.
 
 The earlier 60-PR sample in #719 gave much higher values (p65 1,119 / p85 3,844);
 widening the sample and excluding the mirror both moved the distribution down,
@@ -87,6 +86,9 @@ already under review:
 
 - `plugins/mission/skills/**` — held byte-identical by `test_plugins_in_sync.py`
 - `plugins/mission/scripts/**` — held byte-identical by `test_codex_wrapper_sync.py`
+
+Both sync tests skip `__pycache__` and `.pytest_cache`, so paths under those are
+not excluded here.
 - `benchmarks/*/artifacts/**` — recorded benchmark output
 - `*.lock`
 - `package-lock.json`
