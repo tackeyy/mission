@@ -303,6 +303,36 @@ class TestDetectionPower:
         _git(repo, "config", setting[0], setting[1])
         assert _digest(repo, base, head) == before
 
+    def test_empty_changeset_does_not_produce_a_digest(self, diverged):
+        """#731: 空の変更集合で digest を成立させない。
+
+        `sha256("")` は書式として妥当な 64 桁小文字 hex になる。そのまま返すと
+        **「digest が一致した」が「レビューされた変更集合を確認した」を意味しない**
+        ケースが生まれ、機構の主張が「変更集合が空である場合を除いて」という
+        但し書きを暗黙に持つ。但し書きを暗黙に持つ検査は次に読む人が気づけない。
+        """
+        repo, base, _head = diverged
+        _git(repo, "checkout", "-q", "-b", "empty-only", base)
+        _git(repo, "commit", "-q", "--allow-empty", "-m", "no content change")
+        empty_head = _git(repo, "rev-parse", "HEAD")
+
+        with pytest.raises(application.IntegrationGateFailure) as excinfo:
+            _digest(repo, base, empty_head)
+        assert excinfo.value.reason == "changeset-empty"
+
+    def test_empty_changeset_failure_is_distinct_from_unobtainable(self, diverged):
+        """算出不能（revision が無い）と、算出できたが空、を混同しない。"""
+        repo, base, _head = diverged
+        _git(repo, "checkout", "-q", "-b", "empty-only-2", base)
+        _git(repo, "commit", "-q", "--allow-empty", "-m", "no content change")
+        empty_head = _git(repo, "rev-parse", "HEAD")
+
+        with pytest.raises(application.IntegrationGateFailure) as empty:
+            _digest(repo, base, empty_head)
+        with pytest.raises(application.IntegrationGateFailure) as unknown:
+            _digest(repo, "0" * 40, empty_head)
+        assert empty.value.reason != unknown.value.reason
+
     def test_digest_is_unobtainable_for_an_unknown_revision(self, diverged):
         """算出不能は静かに通さず fail-closed で止める。"""
         repo, _base, head = diverged
