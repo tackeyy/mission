@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix: require the base commit that git resolved to match the `baseRefOid` the API reports, so `url.<base>.insteadOf` rewriting the gate's git resolution to another repository is detected before any test runs or merge happens. `gh` addresses the repository by its verified identity and is not subject to git's rewriting rules, which makes the two observations independent. A disagreement is then split by re-fetching: if git's own view moved this is reported as the existing `base-moved`, so a base that simply moved is not reported as a resolution problem -- it is now caught at step 3 instead of after the suite has run. An observation that cannot be compared stops the gate under its own reason rather than being read as "nothing to check" (#701).
 - fix: derive `findings_summary` in `push-score` from the digest-verified review aggregate so bounded context manifests actually carry the previous iteration's findings. Nothing wrote that field before, so `prior_findings` was always empty in production while synthetic-state tests kept it green. Manifests now also report `prior_findings_status` (`no-history` / `complete` / `partial`) so an empty list is no longer indistinguishable from a missing producer. The pass gate is unchanged (#690).
 
 - fix: isolate unsafe legacy specialist records as typed audit read errors so cross-project audits continue without copying unsafe state into snapshots (#648).

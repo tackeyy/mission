@@ -24,6 +24,10 @@ class PullRequestSnapshot:
     state: str
     merged_at: Optional[str]
     merge_commit_sha: Optional[str]
+    # #701: the base branch tip as the API reports it.  git's view of the same
+    # branch is resolved through url.<base>.insteadOf and can therefore point
+    # at a different repository; this one cannot.
+    base_ref_oid: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -139,6 +143,52 @@ def _require_open_base(
         )
 
 
+def _require_agreeing_base(
+    snapshot: "PullRequestSnapshot",
+    base_sha: str,
+    services: "GateRuntimeServices",
+    default_branch: str,
+    *,
+    step: int,
+) -> None:
+    """Require git's base observation to match the one the API reports (#701).
+
+    ``url.<base>.insteadOf`` rewrites where git resolves a URL to, so a
+    verified URL is not by itself a verified destination.  ``gh`` addresses the
+    repository by its verified identity and is not subject to those rules, so
+    the two observations are independent.  A rewrite makes them disagree.
+
+    A disagreement has two possible causes, and they need different answers.
+    The base may simply have moved, which the gate already reports as
+    ``base-moved``; or git may be resolving somewhere else.  Re-fetching tells
+    them apart: if git's own view moved, this was movement, and reporting it as
+    a rewriting problem would send the operator after a security ghost.
+
+    An observation that cannot be compared -- absent, or not a sha -- is not
+    treated as "nothing to check".  It stops the gate under its own reason, so
+    that a missing check is distinguishable from a failed one.
+    """
+    if not isinstance(snapshot.base_ref_oid, str) or not _valid_sha(snapshot.base_ref_oid):
+        raise IntegrationGateFailure(
+            step,
+            "base-observation-unusable",
+            "pull request base observation is missing or unusable",
+        )
+    if snapshot.base_ref_oid == base_sha:
+        return
+    services.fetch_base(default_branch)
+    if services.current_base_sha() != base_sha:
+        raise IntegrationGateFailure(
+            step, "base-moved", "origin/main moved; restart from step 2"
+        )
+    raise IntegrationGateFailure(
+        step,
+        "base-observation-disagrees",
+        "git and the API report different base commits while git's own view is "
+        "stable; check url.insteadOf rewriting",
+    )
+
+
 def run_gate_and_merge(
     pr_ref: str,
     services: GateRuntimeServices,
@@ -191,6 +241,7 @@ def run_gate_and_merge(
             step=3,
             reason="pull-request-not-mergeable",
         )
+        _require_agreeing_base(initial, base_before, services, default_branch, step=3)
         if expected_head_sha is not None and initial.head_sha != expected_head_sha:
             raise IntegrationGateFailure(
                 3,
@@ -245,6 +296,7 @@ def run_gate_and_merge(
             step=6,
             reason="pull-request-changed",
         )
+        _require_agreeing_base(latest, base_after, services, default_branch_after, step=6)
         if latest.head_sha != initial.head_sha:
             raise IntegrationGateFailure(6, "head-changed", "pull request head changed; restart the gate")
         services.merge_pull_request(pr_ref, initial.head_sha)
