@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+- feat: `planning adopt-core` と `review-import` の入力契約を `mission-state.py schema --contract <name>` で参照できるようにし、halt category ごとの復帰手順を文書化した。どちらの契約もフィールドを 1 つずつ検証して最初の問題で拒否するため、契約を知るには文書を何度も提出して拒否理由を読むしかなかった。公開した記述は検証実装とテストで結び付けており、必須と書いた項目を検証が強制していない場合や enum が drift した場合はテストが落ちる（#683）。
+
 - fix: unsafeなlegacy specialist recordを型付きaudit read errorとして隔離し、unsafe stateをsnapshotへコピーせず横断監査を継続できるようにした（#648）。
 
 ## [2.8.0] - 2026-08-19

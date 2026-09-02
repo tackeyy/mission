@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- feat: publish the `planning adopt-core` and `review-import` input contracts through `mission-state.py schema --contract <name>`, and document a recovery step for every halt category. Both contracts validated field by field and rejected on the first problem, so the only way to learn them was to submit a document repeatedly and read the rejections. Tests bind each published description to its validator, so a field listed as required that the validator does not enforce -- or an enum that has drifted -- fails the suite (#683).
+
 - fix: isolate unsafe legacy specialist records as typed audit read errors so cross-project audits continue without copying unsafe state into snapshots (#648).
 
 ## [2.8.0] - 2026-08-19

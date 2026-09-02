@@ -63,7 +63,10 @@ mission-state.py closeout
 mission-state.py mark-passes
 mission-state.py mark-halt --reason "<reason>"
 mission-state.py reactivate --approved-by-user --expected-category awaiting-approval --reason "<user-approved reason>"
+mission-state.py schema --contract planning-adopt-core|review-import
 ```
+
+`schema` は `planning adopt-core` / `review-import` の入力契約（必須フィールド・enum・規則）を出力する (#683)。エラーを 1 つずつ踏んで契約を学ぶ必要はない。**halt category ごとの復帰手順**は `refs/state-management.md` の「halt category ごとの復帰手順」節にある。`reactivate` が使えるのは人手で止めた category だけで、自動検出された `stale` は `resume` を使う。
 
 `init` は artifact contract を `pending` で開始する。executor の実行契約確定後、遅くとも executing → reviewing の atomic `advance` で、生成ありなら repository-relative path と producer run id を `producing` として渡し、生成対象外なら `--artifact-applicability not-applicable` を渡す。`pending` のまま review へ進めない。local artifact を管理する mission は `artifact init --required-for-pass` → `artifact append` → `artifact render --redaction-status reviewed` を使う。specialist は `specialists recommend --record-state`、完了前は `specialists accounting --json` と `specialists summary --json` で未処理候補を確認する。詳細は `refs/state-management.md`。
 

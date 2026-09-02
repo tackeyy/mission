@@ -63,6 +63,66 @@ def _validate_path(identifier: object, workspace: Path):
     if (workspace / path).exists() and target != (workspace / path).absolute() and not str(target).startswith(str(workspace.resolve()) + os.sep):
         raise PlanContractError("path-symlink-escape")
 
+# #683: the contract was only discoverable by submitting a document and reading
+# the rejection.  Publishing it creates a second place the rules live, so the
+# tests bind this description to `_validate_document`: a field listed here that
+# the validator does not enforce, or an enum that has drifted, fails the suite.
+_CONTRACT_SCHEMA = {
+    "schema": "mission-contract-schema/1",
+    "contract": "planning-adopt-core",
+    "required": [
+        "objective",
+        "scope",
+        "assumptions",
+        "steps",
+        "global_acceptance",
+        "stop_conditions",
+    ],
+    "fields": {
+        "objective": "non-empty string",
+        "scope.resources[]": "objects with type, identifier, access, constraints[]",
+        "scope.actions[]": "objects with type and effect_class",
+        "assumptions[]": "objects with non-empty id, statement, validation",
+        "steps[]": (
+            "objects with id, action, inputs[], outputs[], depends_on[], "
+            "non-empty acceptance_checks[], risk, rollback"
+        ),
+        "global_acceptance": "non-empty list of non-empty strings",
+        "stop_conditions": "non-empty list of non-empty strings",
+    },
+    "enums": {
+        "scope.resources[].type": sorted(RESOURCE_TYPES),
+        "scope.actions[].type": sorted(ACTION_TYPES),
+        "scope.actions[].effect_class": sorted(EFFECT_CLASSES),
+        "steps[].action": sorted(ACTION_TYPES),
+    },
+    "rules": [
+        "step ids are unique and depends_on may only name existing ids",
+        "the dependency graph must be acyclic",
+        "a step whose risk is irreversible or external needs a rollback, and "
+        "stop_conditions must be non-empty",
+        "every irreversible or external effect_class in scope.actions needs at "
+        "least one step with the matching risk and a non-empty rollback",
+        "path resources must stay inside the workspace; uri resources must be "
+        "http or https with a host",
+        "documents may not carry mission authority fields: "
+        + ", ".join(sorted(RESERVED_DOCUMENT_FIELDS)),
+    ],
+}
+
+
+def contract_schema() -> dict:
+    """Return the published input contract for ``planning adopt-core`` (#683)."""
+    import copy as _copy
+
+    return _copy.deepcopy(_CONTRACT_SCHEMA)
+
+
+def validate_plan_document(doc: object, workspace: Path):
+    """Validate a plan document directly, without the transport envelope."""
+    return _validate_document(doc, workspace)
+
+
 def _validate_document(doc: object, workspace: Path):
     if not isinstance(doc, dict): raise PlanContractError("plan-document-invalid")
     def has_reserved(value):

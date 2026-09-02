@@ -449,6 +449,33 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-migrate.py --execute --
 
 ---
 
+## halt category ごとの復帰手順
+
+`halt_reason` が入ると `loop_active` は false になる。**復帰の手順は category ごとに違う。**
+`reactivate` が使えるのは人手で止めた category だけで、自動検出された `stale` には使えない
+（エラーメッセージが `resume` を案内する）。
+
+| category | 意味 | 復帰手順 |
+|---|---|---|
+| `blocked-external` | 権限・API key・外部サービス停止で進めない | 阻害要因を解消してから `reactivate --approved-by-user --expected-category blocked-external --reason "<解消内容>"` |
+| `awaiting-approval` | 人間の承認待ちで止めた | **承認を得てから** `reactivate --approved-by-user --expected-category awaiting-approval --reason "<承認内容>"`。承認なしに再活性化しない |
+| `partial-done` | 実行可能な範囲は完遂したが全体未達 | 残りに着手できる状況になってから `reactivate --approved-by-user --expected-category partial-done --reason "<再開理由>"` |
+| `evidence-submitted` | Checker 系 role の正常終了 | **復帰しない。** 設計どおりの終端で、実装者側の mission とは別セッション |
+| `routed-goal` | adaptive routing で goal 契約へ流した | **復帰しない。** state を持たない経路であり、goal 契約で直接完遂する |
+| `stagnation` | 3 回停滞した | 停滞の原因（同じ指摘の再発・設計の未確定）を解消してから `reactivate --approved-by-user --expected-category stagnation --reason "<解消内容>"` |
+| `user-abort` | ユーザーが中止を指示した | ユーザーの再開指示を受けてから `reactivate --approved-by-user --expected-category user-abort --reason "<再開指示>"` |
+| `stale` | lease 失効・dead PID を自動検出して閉じた | **`reactivate` は使えない。** `resume` を使う（`refresh-pid` → `cleanup-empty` → `cleanup-stale` → `next` を 1 コマンドで行う） |
+| `other` | 上記に当てはまらない | 理由を読んで判断し、人手 halt なら `reactivate --expected-category other`、自動検出なら `resume` |
+
+**`stale` を踏みやすい条件を知っておく。** lease TTL は 15 分で、mutating command でしか
+renew されない。外部プロセス（別 CLI のレビュー等）を待つ間隔が TTL を超えると、
+`activity start` で heartbeat を打っていても自動 halt される。長い待ちに入る前に
+mutating command を挟むか、`resume` で復帰する前提で進める。
+
+**`--expected-category` は現在値と一致していなければならない。** 一致しない場合は
+拒否される（別の理由で止まった state を取り違えて再開しないため）。現在値は
+`get --field halt_category` で確認する。
+
 ## phase フィールドの更新セマンティクス (M4, 2026-06-10 / 2026-06-25)
 
 mission-state.py は開始・採点・終了の境界で `phase` を自動設定する。orchestrator は、実作業やレビューに入る境界を `advance --phase ... --activity ...` で明示する。generic `set` によるphase、stale復帰先、activity reducer所有fieldの変更は#506以降拒否される。

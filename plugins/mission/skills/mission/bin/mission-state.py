@@ -246,6 +246,10 @@ from mission_application.plan_import import (  # noqa: E402
     PlanImportWorkspaceServices,
     run_plan_import,
 )
+from mission_application.contract_schemas import (  # noqa: E402
+    render_contract_schema,
+    review_contract_schema,
+)
 from mission_application.review_aggregation import (  # noqa: E402
     ReviewAggregationRequest,
     ReviewAggregationServices,
@@ -12508,6 +12512,11 @@ def _parse_strict_review_bytes(content: bytes, expected_iteration: int) -> dict:
     return payload
 
 
+def cmd_schema(args):
+    """Print an input contract so callers need not discover it via rejections."""
+    print(render_contract_schema(args.contract))
+
+
 def _validate_review_payload(payload: object, expected_iteration: int) -> None:
     """Validate the shared mission-review/1 contract without mutating state."""
     if (
@@ -16426,6 +16435,11 @@ def _add_review_parsers(subparsers) -> None:
     )
     p_pass.set_defaults(func=cmd_mark_passes)
 
+    p_schema = sub.add_parser("schema", help="入力契約のスキーマを出力する (#683)")
+    p_schema.add_argument("--contract", required=True,
+                          choices=("planning-adopt-core", "review-import"),
+                          help="出力する契約")
+    p_schema.set_defaults(func=cmd_schema)
     p_score = sub.add_parser("push-score", help="score_history に採点結果を append (orchestrator が Phase 5 直後に呼ぶ)")
     p_score.add_argument("--iteration", type=int, required=True)
     p_score.add_argument("--composite", type=float, default=None,
