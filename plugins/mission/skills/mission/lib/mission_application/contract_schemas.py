@@ -19,9 +19,9 @@ def _review_contract_schema(score_keys, severities) -> dict:
     return {
         "schema": "mission-contract-schema/1",
         "contract": "review-import",
-        "required": ["iteration", "perspective", "scores", "findings"],
+        "required": ["schema", "iteration", "perspective", "scores", "findings"],
         "fields": {
-            "schema": 'must be "mission-review/1" when present',
+            "schema": 'must be exactly "mission-review/1"',
             "iteration": "int matching the --iteration argument",
             "perspective": "non-empty trimmed string; prefixes every finding id",
             "scores": (
