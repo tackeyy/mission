@@ -103,3 +103,59 @@
 同じ扱いを `test_score_provenance.py` の hang 検出（`_HANG_WATCHDOG_SECONDS`）と `test_provider_application_guard.py` の子プロセス待ち（`_PUBLISH_WATCHDOG_SECONDS`）にも適用した。いずれも子 CLI プロセスの起動コストを含む予算で、余裕が実証済み破綻値と同程度だったもの。
 
 **据え置いたもの**: 余裕 20 倍の 10 秒予算（`test_issue543_c2.py`）と、同一プロセス内で待つ `threading.Event.wait`。後者は子 CLI の起動コストを含まないため、実証された失敗モードに当たらない。
+
+## 実測値の取得元（#720）
+
+本文が引用する数値の取得元を記録する。**特定できなかったものは削除せず UNKNOWN と明記する。**
+消すと「そんな主張は無かった」ことになり、後から検証しようとした読み手が根拠の不在に
+気づけない。
+
+### 「2026-08-26: 予算 1 秒に対し 1.005 秒（margin -0.005s）で CI が fail、再実行で green」
+
+**UNKNOWN（CI run を特定できない）。**
+
+2026-08-30 に次を実行して探した。
+
+```
+gh run list --repo tackeyy/mission --limit 400 \
+  --json databaseId,createdAt,headBranch,conclusion
+```
+
+- 2026-08-25〜2026-08-27 の窓に `conclusion=failure` の run は 1 件も無い
+- branch 名が `fifo` / `351` / `480` / `703` / `710` を含む run は 5 件あり、**すべて success**
+  （`fix/351-fifo-budget` は `32977139340` の 1 run のみで、attempt 1 が success。
+  再実行の痕跡である attempt 2 も無い）
+
+したがって **「CI が fail」という帰属自体が裏づけられない。** ローカルの full suite での
+失敗を CI と書いた可能性がある。`margin -0.005s` という値の出どころも同様に未確認。
+
+### 「2026-08-29: 予算 5 秒でも full suite で 5.025 秒の `TimeoutExpired` により fail」
+
+**UNKNOWN（CI run は存在しない見込み）。** 本文自身が「full suite」と書いており、これは
+統合ゲートがローカルで回す全スイートを指す。ローカル実行のため CI run ID は原理的に
+存在せず、実行ログも保持していない。同日の CI 失敗 run（`33250795173`）の失敗内容は
+`test_command_inventory` と `test_issue681_claims_ledger` であって、本件ではない。
+
+### 「アイドル実測 0.44〜0.48 秒に対し約 130 倍」
+
+**算術は整合。実測値は再現条件のみ記録する。**
+
+`60 / 0.46 ≈ 130` は整合する（`FIFO_ARTIFACT_BLOCK_WATCHDOG_SECONDS = 60`）。
+
+引用元の 0.44〜0.48 秒そのものは取得条件が記録されていないため再現できない。
+参考として、2026-08-30 にアイドル状態の macOS で次を 3 回実行した結果は
+**0.32 / 0.33 / 0.32 秒**だった。
+
+```
+python3 -m pytest \
+  "skills/mission/tests/test_issue351_artifact_lint.py::test_aggregate_fifo_artifact_skips_without_blocking_and_clears_stale_lint" \
+  -q --durations=1
+```
+
+**この値は上限であって同じ量ではない。** pytest の呼び出し時間には fixture の準備が
+含まれ、本文が言う「子 CLI の所要時間」（テスト内部の `result.elapsed`）より大きい。
+`result.elapsed` は失敗時の診断文字列にしか出ないため、成功実行からは観測できない。
+
+### 「10 並列負荷下では約 11 倍に膨らむ実測」
+
+**UNKNOWN。** 並列数・負荷の作り方・測定対象が記録されておらず、再現手順を復元できない。
