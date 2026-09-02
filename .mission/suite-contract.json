@@ -1,0 +1,4 @@
+{
+  "schema": "mission-suite-contract/1",
+  "full_suite_command": ["make", "test"]
+}

@@ -223,9 +223,6 @@ SUITE_REPORT_SCHEMA = "mission-suite-report/1"
 # rule would have to mean the same thing to every runner a repository might
 # declare; every runner already inherits the environment.
 SUITE_REPORT_ENV = "MISSION_SUITE_REPORT"
-# Larger than any suite this gate will plausibly run, and small enough that a
-# fabricated count stands out.  The repository's own suite is ~5,500 tests.
-MAX_EXECUTED_TESTS = 10_000_000
 
 
 def load_suite_contract(operations, *, base_sha: str, step: int) -> dict:
@@ -242,8 +239,10 @@ def load_suite_contract(operations, *, base_sha: str, step: int) -> dict:
     had -- a PR can delete tests -- and closing it would need a reporter the
     base side trusts to observe the count itself.
 
-    What this does close is the case the gate could not see at all: a suite that
-    never ran, exiting zero.
+    What this does close is narrower still: a run that exits zero **without
+    producing a valid report**.  A runner that executes nothing but writes a
+    well-formed report claiming one test still passes -- the report is a
+    self-declaration, and nothing here observes the run independently.
     """
     raw = operations.read_base_file(base_sha, SUITE_CONTRACT_PATH)
     if raw is None:
@@ -313,10 +312,11 @@ def require_suite_report(document: object, *, expected_tree_sha: str, step: int)
     if document.get("status") != "complete":
         raise unusable("suite report does not record a completed run")
     executed = document.get("executed")
-    if type(executed) is not int or executed <= 0 or executed > MAX_EXECUTED_TESTS:
-        # An upper bound matters as much as the lower one: JSON carries integers
-        # of any size, and a count no run could produce is not evidence of a run.
-        raise unusable("suite report does not record a plausible executed count")
+    if type(executed) is not int or executed <= 0:
+        # No upper bound: the contract does not set one, and inventing a ceiling
+        # would reject a legitimately larger suite without making a forged count
+        # any harder -- the count is self-declared either way.
+        raise unusable("suite report does not record any executed test")
     return executed
 
 

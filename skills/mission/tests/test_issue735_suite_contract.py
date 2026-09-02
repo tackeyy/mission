@@ -152,8 +152,10 @@ def test_the_contract_is_read_from_the_base_not_the_integrated_tree():
     It does not pin what that command does.  A PR can change the `Makefile` it
     invokes, or the tests, and report truthfully on a hollowed-out suite --
     the same boundary the gate has always had, since a PR can delete tests.
-    What this closes is the case the gate could not see at all: a suite that
-    never ran, exiting zero.
+
+    What this closes is narrower still: a run that exits zero without producing
+    a valid report.  A runner that executes nothing but writes a well-formed
+    report claiming one test still passes.
     """
     reads = []
 
@@ -302,15 +304,18 @@ def test_a_dangling_symlink_is_unreadable_not_absent(tmp_path):
     "executed,label",
     [
         (float("inf"), "infinity"),
-        (10 ** 400, "beyond-any-real-run"),
         (True, "bool-is-not-a-count"),
     ],
-    ids=["infinity", "absurd", "bool"],
+    ids=["infinity", "bool"],
 )
-def test_a_count_that_cannot_be_a_real_run_is_rejected(executed, label):
+def test_a_count_that_is_not_a_count_is_rejected(executed, label):
     """`1e999` parses as `inf` rather than raising, so the count check is where
     it has to be caught.  `True` is an int in Python and would otherwise pass
     as a count of one.
+
+    A large integer is not rejected: the contract sets no ceiling, and adding
+    one would turn away a legitimately larger suite without making a forged
+    count any harder.
     """
     document = _report(TREE)
     document["executed"] = executed
@@ -355,3 +360,75 @@ def test_the_real_runner_accepts_the_environment_the_gate_passes():
 def test_the_operations_object_can_read_a_file_from_the_base():
     """The base read is a real capability, not something only a fake provides."""
     assert hasattr(gate.SubprocessGateOperations, "read_base_file")
+
+
+def test_a_fabricated_report_is_accepted_and_that_is_documented():
+    """State the limit as a test, so it cannot quietly be forgotten.
+
+    The count is self-declared.  A runner that executes nothing and writes a
+    well-formed report passes, and the docstrings say so.  Recording it here
+    keeps the claim from drifting back to something stronger than the code.
+    """
+    # A report no run backs still passes.  That is the limit, not a defect.
+    assert gate.require_suite_report(
+        _report(TREE, executed=1), expected_tree_sha=TREE, step=4
+    ) == 1
+
+    # And the code has to say so, so the claim cannot drift back to a stronger
+    # one than the implementation supports.
+    assert "self-declaration" in (gate.load_suite_contract.__doc__ or "")
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def test_this_repository_declares_a_contract_the_gate_would_accept():
+    """The gate reads the contract from the base, so it has to land first.
+
+    Wiring the gate before the base carries a contract would fail every PR --
+    including the one adding it.  This repository declares its own here so the
+    call-site change can follow.
+    """
+    document = json.loads(
+        (REPO_ROOT / CONTRACT_PATH).read_text(encoding="utf-8")
+    )
+
+    assert gate.require_suite_contract(document, step=4) == ("make", "test")
+
+
+def test_the_suite_writes_a_report_the_gate_would_accept(tmp_path):
+    """The declared command has to produce what the contract promises."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "write_suite_report", REPO_ROOT / "scripts" / "write_suite_report.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        '<testsuites><testsuite>'
+        '<testcase name="a"/><testcase name="b"><skipped/></testcase>'
+        '<testcase name="c"/></testsuite></testsuites>',
+        encoding="utf-8",
+    )
+    out = tmp_path / "report.json"
+
+    module.main(["--junit", str(junit), "--out", str(out)])
+    document = json.loads(out.read_text(encoding="utf-8"))
+
+    # Skipped cases are excluded: a suite that skips everything has exercised
+    # nothing, and counting skips would let it look like it had.
+    assert document["executed"] == 2
+    assert gate.require_suite_report(
+        document, expected_tree_sha=document["tree_sha"], step=4
+    ) == 2
+
+
+def test_the_makefile_passes_the_report_path_through_to_the_writer():
+    """Without this the contract is declared but nothing honours it."""
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+
+    assert gate.SUITE_REPORT_ENV in makefile
+    assert "write_suite_report.py" in makefile
