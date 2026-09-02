@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+- fix: git が解決した base commit と、API が報告する `baseRefOid` の一致を要求するようにした。`url.<base>.insteadOf` がゲートの git 解決先を別 repository へ書き換えている場合、テスト実行前・merge 前に検出される。`gh` は検証済み identity で repository を指し git の書き換え規則の影響を受けないため、両者は独立した観測になる。比較できない観測は「検査不要」と読み替えず、ゲートを停止する（#701）。
+
 - fix: unsafeなlegacy specialist recordを型付きaudit read errorとして隔離し、unsafe stateをsnapshotへコピーせず横断監査を継続できるようにした（#648）。
 
 ## [2.8.0] - 2026-08-19

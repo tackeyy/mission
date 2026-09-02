@@ -175,9 +175,9 @@ class ScriptedOperations:
         self.merges = []
         self.lease_active = False
         self.snapshots = [
-            gate.PullRequestSnapshot(665, HEAD_SHA, "main", "OPEN", None, None),
-            gate.PullRequestSnapshot(665, HEAD_SHA, "main", "OPEN", None, None),
-            gate.PullRequestSnapshot(665, HEAD_SHA, "main", "MERGED", "2026-08-25T00:00:00Z", MERGE_SHA),
+            gate.PullRequestSnapshot(665, HEAD_SHA, "main", "OPEN", None, None, OLD_BASE),
+            gate.PullRequestSnapshot(665, HEAD_SHA, "main", "OPEN", None, None, OLD_BASE),
+            gate.PullRequestSnapshot(665, HEAD_SHA, "main", "MERGED", "2026-08-25T00:00:00Z", MERGE_SHA, OLD_BASE),
         ]
 
     @contextmanager
@@ -603,6 +603,7 @@ def test_pr_base_and_state_are_rechecked_before_merge():
         "OPEN",
         None,
         None,
+        OLD_BASE,
     )
 
     with pytest.raises(gate.IntegrationGateError) as captured:
@@ -624,6 +625,7 @@ def test_merge_readback_must_confirm_main_and_expected_head():
         "MERGED",
         "2026-08-25T00:00:00Z",
         MERGE_SHA,
+        OLD_BASE,
     )
 
     with pytest.raises(gate.IntegrationGateError) as captured:

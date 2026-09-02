@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix: require the base commit that git resolved to match the `baseRefOid` the API reports, so `url.<base>.insteadOf` rewriting the gate's git resolution to another repository is detected before any test runs or merge happens. `gh` addresses the repository by its verified identity and is not subject to git's rewriting rules, which makes the two observations independent. An observation that cannot be compared stops the gate rather than being read as "nothing to check" (#701).
+
 - fix: isolate unsafe legacy specialist records as typed audit read errors so cross-project audits continue without copying unsafe state into snapshots (#648).
 
 ## [2.8.0] - 2026-08-19

@@ -90,6 +90,15 @@ gate-and-merge <pr>:
   **この経路の閉じ方は #722 で設計中**であり、それまでは helper を持つリポジトリでのみ
   上の保証が成り立つ
 
+- **git 設定による解決先の書き換えを完全には閉じない。** `url.<base>.insteadOf` は git の
+  解決先を透過的に書き換えるため、検証済み URL を渡すだけでは行き先を固定しきれない（#701）。
+  ゲートは **`gh` が報告する `baseRefOid` と、git が解決した base sha の一致を要求**して
+  この書き換えを検出する。`gh` は検証済み identity で API を叩き git の書き換え規則の影響を
+  受けないため、両者は独立した観測になる。**ただし同一 sha を持つミラーへの書き換えは
+  検出しない**（内容は sha で content-addressed に同一なので実害はない）。また
+  `remote.origin.proxy` / `uploadpack` / `tagOpt` 等の remote 固有設定は URL 直指定では
+  継承されない。現 checkout は `url` / `fetch` のみのため影響しないが、非標準認証や proxy を
+  使う環境では互換性リスクが残る
 - **「merge の瞬間まで fresh」ではない。** `gh pr merge --match-head-commit` は head sha のみを
   固定し、base sha の compare-and-swap を提供しない。手順 5 と 6 の間に main が動く窓は
   ローカルスクリプトでは閉じられない。サーバー側で原子的に保証するには `strict: true` か
