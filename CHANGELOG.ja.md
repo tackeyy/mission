@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+- fix: `push-score` が digest 検証済みの review aggregate から `findings_summary` を導出するようにし、bounded context manifest が前 iteration の指摘を実際に運ぶようにした。従来はこの field を書く実装が無く、production では `prior_findings` が常に空だったが、合成 state のテストが green を維持していた。manifest には `prior_findings_status`（`no-history` / `complete` / `partial`）を追加し、空リストと供給元の不在を区別できるようにした。pass gate は不変（#690）。
+
 - fix: unsafeなlegacy specialist recordを型付きaudit read errorとして隔離し、unsafe stateをsnapshotへコピーせず横断監査を継続できるようにした（#648）。
 
 ## [2.8.0] - 2026-08-19

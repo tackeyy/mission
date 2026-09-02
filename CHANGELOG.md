@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- fix: derive `findings_summary` in `push-score` from the digest-verified review aggregate so bounded context manifests actually carry the previous iteration's findings. Nothing wrote that field before, so `prior_findings` was always empty in production while synthetic-state tests kept it green. Manifests now also report `prior_findings_status` (`no-history` / `complete` / `partial`) so an empty list is no longer indistinguishable from a missing producer. The pass gate is unchanged (#690).
+
 - fix: isolate unsafe legacy specialist records as typed audit read errors so cross-project audits continue without copying unsafe state into snapshots (#648).
 
 ## [2.8.0] - 2026-08-19
