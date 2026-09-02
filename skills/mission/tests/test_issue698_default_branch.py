@@ -22,6 +22,7 @@ from mission_application import integration_gate as application  # noqa: E402
 HEAD_SHA = "a" * 40
 BASE_SHA = "b" * 40
 MERGE_SHA = "c" * 40
+FAKE_DIGEST = "f" * 64
 
 
 class RecordingOperations:
@@ -76,7 +77,7 @@ class RecordingOperations:
         pass
 
     def integrate_and_test(self, head_sha, base_sha, logger):
-        return application.IntegrationObservation("full", "all", "d" * 40)
+        return application.IntegrationObservation("full", "all", "d" * 40, FAKE_DIGEST)
 
     def merge_pull_request(self, pr_ref, expected_head_sha):
         self.calls.append(("merge", pr_ref, expected_head_sha))
@@ -97,6 +98,7 @@ def run(operations, logs=None):
             merge_pull_request=operations.merge_pull_request,
         ),
         (logs.append if logs is not None else (lambda _m: None)),
+        expected_changeset_digest=FAKE_DIGEST,
     )
 
 

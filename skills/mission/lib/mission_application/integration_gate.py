@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from typing import Callable, ContextManager, Dict, Optional
 
 
@@ -30,6 +31,7 @@ class IntegrationObservation:
     scope: str
     targets: str
     tree_sha: str
+    changeset_digest: str
 
 
 @dataclass(frozen=True)
@@ -54,11 +56,52 @@ class IntegrationGateRequest:
     pr_ref: str
     expected_head_sha: Optional[str] = None
     expected_base_sha: Optional[str] = None
+    expected_changeset_digest: Optional[str] = None
 
 
 @dataclass(frozen=True)
 class IntegrationGateServices:
-    execute: Callable[[str, str, Optional[str], Optional[str]], Dict[str, object]]
+    execute: Callable[
+        [str, str, Optional[str], Optional[str], Optional[str]],
+        Dict[str, object],
+    ]
+
+
+@dataclass(frozen=True)
+class ChangesetDigestRequest:
+    repository_root: str
+    base_sha: str
+    head_sha: str
+
+
+@dataclass(frozen=True)
+class ChangesetDigestServices:
+    execute: Callable[[str, str, str], Dict[str, object]]
+
+
+def _valid_changeset_digest(value: object) -> bool:
+    """sha256 の小文字 16 進 64 桁だけを受理する。
+
+    大文字・前後空白・短長を許すと、同じ変更集合が複数の表記を持つ。表記が割れると
+    「一致しなかったのは表記のせいか、変更が動いたのか」を区別できなくなり、
+    運用側が不一致を握り潰す方向へ倒れる。
+    """
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def compute_changeset_digest(patch: bytes) -> str:
+    """`git diff <merge-base>...<head>` のパッチ本文から digest を導出する。
+
+    入力は decode しない生の bytes。decode を挟むと、不正な符号列の置換や改行変換で
+    同じ変更集合が別の digest になりうる。
+    """
+    if not isinstance(patch, (bytes, bytearray)):
+        raise TypeError("changeset patch must be bytes")
+    return hashlib.sha256(bytes(patch)).hexdigest()
 
 
 def _valid_sha(value: str) -> bool:
@@ -102,6 +145,7 @@ def run_gate_and_merge(
     logger: Callable[[str], None],
     expected_head_sha: Optional[str] = None,
     expected_base_sha: Optional[str] = None,
+    expected_changeset_digest: Optional[str] = None,
 ) -> Dict[str, object]:
     if not isinstance(pr_ref, str) or not pr_ref.isdigit() or int(pr_ref) <= 0:
         raise IntegrationGateFailure(1, "invalid-pr-ref", "pull request reference must be a positive number")
@@ -109,6 +153,17 @@ def run_gate_and_merge(
         raise IntegrationGateFailure(1, "invalid-expected-head", "expected head sha is invalid")
     if expected_base_sha is not None and not _valid_sha(expected_base_sha):
         raise IntegrationGateFailure(1, "invalid-expected-base", "expected base sha is invalid")
+    # digest は任意。渡さない場合は緩和が適用されず、既存の厳格な要求（base 不動・
+    # head 不動）がそのまま残る。参照実装 (company-os verify-exact-head.mjs) と同じ
+    # 意味論で、「渡さないと止まる」ではなく「渡さないと厳しい側に倒れる」。
+    if expected_changeset_digest is not None and not _valid_changeset_digest(
+        expected_changeset_digest
+    ):
+        raise IntegrationGateFailure(
+            1,
+            "invalid-expected-changeset-digest",
+            "reviewed changeset digest is not a lowercase sha256 hex digest",
+        )
     expected_number = int(pr_ref)
     with services.lease():
         logger("lease=acquired")
@@ -145,6 +200,22 @@ def run_gate_and_merge(
         services.fetch_pull_request_head(initial)
         observation = services.integrate_and_test(initial.head_sha, base_before, logger)
         logger("test_scope={} test_targets={}".format(observation.scope, observation.targets))
+        logger("changeset_digest={}".format(observation.changeset_digest))
+        if expected_changeset_digest is not None:
+            # 算出不能を「検査不要」に読み替えない。digest を渡した以上、一致を
+            # 証明できない統合ツリーで merge してはならない。
+            if not _valid_changeset_digest(observation.changeset_digest):
+                raise IntegrationGateFailure(
+                    4,
+                    "changeset-digest-unavailable",
+                    "integrated changeset digest could not be observed",
+                )
+            if observation.changeset_digest != expected_changeset_digest:
+                raise IntegrationGateFailure(
+                    4,
+                    "changeset-digest-mismatch",
+                    "changeset differs from the reviewed one; re-review before merging",
+                )
         # git 操作は可変な remote 名 `origin` を使うため、identity を再解決して
         # 初回値との一致を要求する。これをしないと「fetch は B・gh は A」が成立する。
         identity_after = services.resolve_origin_identity()
@@ -201,8 +272,20 @@ def run_gate_and_merge(
             "tested_tree_sha": observation.tree_sha,
             "test_scope": observation.scope,
             "test_targets": observation.targets,
+            "changeset_digest": observation.changeset_digest,
             "merge_commit_sha": merged.merge_commit_sha,
         }
+
+
+def run_changeset_digest(
+    request: ChangesetDigestRequest,
+    services: ChangesetDigestServices,
+) -> Dict[str, object]:
+    return services.execute(
+        request.repository_root,
+        request.base_sha,
+        request.head_sha,
+    )
 
 
 def run_integration_gate(
@@ -214,4 +297,5 @@ def run_integration_gate(
         request.pr_ref,
         request.expected_head_sha,
         request.expected_base_sha,
+        request.expected_changeset_digest,
     )
