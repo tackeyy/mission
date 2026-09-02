@@ -20,6 +20,7 @@ output would accept an echoed line or a stale file left by an earlier run.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -472,3 +473,35 @@ def test_the_makefile_passes_the_report_path_through_to_the_writer():
 
     assert gate.SUITE_REPORT_ENV in makefile
     assert "write_suite_report.py" in makefile
+
+
+def test_the_suite_actually_writes_to_the_path_the_gate_named(tmp_path):
+    """Run the declared command and look for the file at the named path.
+
+    Reading the Makefile only shows the variable appears somewhere in it.  A
+    writer told to put the report anywhere else -- the JUnit path, a fixed
+    name -- leaves that check passing and the gate finding nothing.  The only
+    way to know is to run it and look where the gate would look.
+
+    A one-test target keeps this to a few seconds; the point is the wiring,
+    not the suite.
+    """
+    report_path = tmp_path / "report.json"
+    environment = dict(os.environ)
+    environment[gate.SUITE_REPORT_ENV] = str(report_path)
+
+    result = subprocess.run(
+        ["make", "test",
+         "PYTEST_TARGETS=skills/mission/tests/test_issue735_suite_contract.py"
+         "::test_a_valid_contract_returns_its_command"],
+        cwd=REPO_ROOT, env=environment, capture_output=True, text=True,
+    )
+
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert report_path.exists(), (
+        "the suite ran but wrote no report where the gate would look"
+    )
+    document = json.loads(report_path.read_text(encoding="utf-8"))
+    assert gate.require_suite_report(
+        document, expected_tree_sha=document["tree_sha"], step=4
+    ) >= 1
