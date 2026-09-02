@@ -250,6 +250,9 @@ from mission_application.contract_schemas import (  # noqa: E402
     render_contract_schema,
     review_contract_schema,
 )
+from mission_application.findings_summary import (  # noqa: E402
+    findings_summary_fields,
+)
 from mission_application.review_aggregation import (  # noqa: E402
     ReviewAggregationRequest,
     ReviewAggregationServices,
@@ -10982,13 +10985,15 @@ def cmd_manual_score_capture(args):
     print(json.dumps({"ok": True, "scoring_json": str(out), "manual_evidence_ref": ref}, ensure_ascii=False))
 
 
-def _revalidate_score_provenance(cwd: Path, entry: dict, data: dict, *, require_scoring_artifact: bool = True) -> None:
+def _revalidate_score_provenance(
+    cwd: Path, entry: dict, data: dict, *, require_scoring_artifact: bool = True
+) -> Optional[dict]:
     """Re-check immutable evidence at the pass boundary; never trust a saved digest alone."""
     # A live pass is always a new decision.  Historical schema versions are
     # display compatibility only and must never relax its evidence boundary.
     provenance = _validate_provenance(entry.get("score_provenance"), require=True)
     if provenance is None:
-        return
+        return None
     is_manual = provenance["score_source"] == "manual-import"
     ref = provenance["manual_evidence_ref"] if is_manual else provenance["review_evidence_ref"]
     _validate_revision_scope(cwd, provenance["revision_scope"])
@@ -11013,7 +11018,7 @@ def _revalidate_score_provenance(cwd: Path, entry: dict, data: dict, *, require_
             score_bytes = _read_bounded_review_evidence(cwd, score_ref.get("path"))
             if "sha256:" + hashlib.sha256(score_bytes).hexdigest() != score_ref["digest"]:
                 raise ValueError("scoring evidence digest mismatch")
-        return
+        return None
     if not isinstance(parsed, dict) or parsed.get("schema") != "mission-review-aggregate/1":
         raise ValueError("review evidence has invalid schema")
     try:
@@ -11058,6 +11063,10 @@ def _revalidate_score_provenance(cwd: Path, entry: dict, data: dict, *, require_
         }
         if artifact.get("schema") != "mission-scoring-artifact/1" or binding != expected:
             raise ValueError("scoring evidence binding mismatch")
+    # #690: hand back the archive this call just proved.  Deriving the findings
+    # here instead would run the projection from mark-passes too, letting an
+    # observation-only feature add rejection conditions to the pass gate.
+    return parsed
 
 
 def _resolve_recorded_path(cwd: Path, path_text: str) -> Path:
@@ -13864,9 +13873,10 @@ def cmd_push_score(args):
         except ValueError as exc:
             print(f"ERROR: provenance: {exc}", file=sys.stderr)
             sys.exit(2)
+        verified_archive = None
         if provenance is not None:
             try:
-                _revalidate_score_provenance(cwd, {
+                verified_archive = _revalidate_score_provenance(cwd, {
                     "iteration": args.iteration, "items": items,
                     "composite": args.composite, "min_item": args.min_item,
                     "open_high": args.open_high,
@@ -13889,6 +13899,10 @@ def cmd_push_score(args):
             "min_item": args.min_item,
             "items": items,
             "timestamp": now,
+            # #690: bounded context manifests read these.  The source marker is
+            # what lets a manifest tell "this iteration had no findings" apart
+            # from "this entry predates the producer".
+            **findings_summary_fields(verified_archive),
         }
         if resubmit_reason:
             entry["resubmit_reason"] = resubmit_reason

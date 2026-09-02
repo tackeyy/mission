@@ -91,15 +91,23 @@ def test_context_manifest_contains_mission_goal(tmp_path, monkeypatch):
 
 
 def test_context_manifest_contains_prior_findings(tmp_path, monkeypatch):
-    """score_history の findings が manifest に含まれる."""
+    """score_history の findings が manifest に含まれる.
+
+    findings の形は push-score が review aggregate から射影したもの (#690)。
+    reviewer が実際に出すのは ``summary`` であり ``title`` ではない。
+    この経路を production 側から通す検査は test_issue690_prior_findings.py にある。
+    """
     monkeypatch.setenv("MISSION_SESSION_ID", TEST_SID)
     history = [
         {
             "iteration": 1,
             "composite": 3.5,
+            "findings_summary_source": "review-aggregate",
             "findings_summary": [
-                {"id": "F-001", "severity": "High", "title": "型安全性の欠如"},
-                {"id": "F-002", "severity": "Medium", "title": "エラーハンドリング不足"},
+                {"id": "F-001", "severity": "High", "axis": "accuracy",
+                 "summary": "型安全性の欠如"},
+                {"id": "F-002", "severity": "Medium", "axis": "completeness",
+                 "summary": "エラーハンドリング不足"},
             ],
         }
     ]

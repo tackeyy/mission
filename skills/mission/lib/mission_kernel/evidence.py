@@ -119,6 +119,41 @@ def apply_progress_clear(
     return document
 
 
+# #690: the only value push-score writes.  Comparing against it -- rather
+# than testing the marker for truthiness -- is what keeps a forged or legacy
+# marker from claiming that the projection behind it is trustworthy.
+FINDINGS_SUMMARY_SOURCE = "review-aggregate"
+
+
+# The severities the projection can emit.  Restated here rather than imported
+# so the kernel keeps deciding on its own inputs, and so a value the projection
+# never writes cannot claim that the entry behind it is complete.
+PRIOR_FINDING_SEVERITIES = frozenset({"High", "Medium", "Low"})
+
+# The projection always emits an axis, because the archive validator requires
+# one.  A finding without a usable axis therefore did not come from the
+# producer, whatever the source marker says.
+PRIOR_FINDING_AXES = frozenset(
+    {"mission_achievement", "accuracy", "completeness", "usability"}
+)
+
+
+def _is_usable_prior_finding(item: object) -> bool:
+    """Whether one projected finding is one the producer could have written.
+
+    The conditions mirror what the projection emits, which in turn mirrors what
+    the archive validator accepts.  Requiring more here would report ``partial``
+    for entries the producer legitimately wrote (#690).
+    """
+    if not isinstance(item, Mapping):
+        return False
+    return (
+        isinstance(item.get("id"), str)
+        and item.get("severity") in PRIOR_FINDING_SEVERITIES
+        and item.get("axis") in PRIOR_FINDING_AXES
+    )
+
+
 def project_context_manifest(
     state: Mapping[str, object],
     *,
@@ -136,17 +171,35 @@ def project_context_manifest(
     history = state.get("score_history")
     if history is not None and not isinstance(history, list):
         raise EvidenceRuleError("context-score-history-invalid")
-    for entry in history or []:
-        if not isinstance(entry, Mapping):
-            continue
-        findings = entry.get("findings_summary", [])
-        if not isinstance(findings, list):
+    entries = [entry for entry in history or [] if isinstance(entry, Mapping)]
+    supplied = 0
+    for entry in entries:
+        raw = entry.get("findings_summary")
+        if raw is not None and not isinstance(raw, list):
             raise EvidenceRuleError("context-findings-invalid")
+        findings = raw if isinstance(raw, list) else []
+        # #690: "supplied" has to mean the projection is usable, not merely
+        # that something is present.  A marker alone would let any truthy
+        # value, a missing list, or an unusable element promote the manifest to
+        # "complete" -- and "complete" is what tells a reviewer it may narrow
+        # its search.  Anything short of the shape this projection writes falls
+        # back to "partial", which claims nothing.
+        supplied += (
+            entry.get("findings_summary_source") == FINDINGS_SUMMARY_SOURCE
+            and isinstance(raw, list)
+            and all(_is_usable_prior_finding(item) for item in raw)
+        )
         prior_findings.extend(
             copy.deepcopy(dict(item))
             for item in findings
             if isinstance(item, Mapping)
         )
+    if not entries:
+        status = "no-history"
+    elif supplied == len(entries):
+        status = "complete"
+    else:
+        status = "partial"
     manifest = {
         "schema": "mission-context-manifest/1",
         "iteration": iteration,
@@ -154,6 +207,10 @@ def project_context_manifest(
         "mission_id": state.get("mission_id", ""),
         "assumptions_path": state.get("assumptions_path", ""),
         "prior_findings": prior_findings,
+        # "no-history" means nothing has been scored yet; "partial" means at
+        # least one entry carries no producer marker, so an empty list here is
+        # not evidence that the reviewers found nothing.
+        "prior_findings_status": status,
     }
     content = json.dumps(manifest, indent=2, ensure_ascii=False).encode("utf-8")
     record = {
