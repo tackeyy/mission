@@ -7,6 +7,9 @@ const FAST_PATH_TARGETS = [
   "skills/mission/tests/test_codex_wrapper_sync.py",
   "skills/mission/tests/test_actions_cost_guard.py",
   "skills/mission/tests/test_doc_consistency.py",
+  // #719: the PR-size calibration lives in AGENTS.md, so a docs-only change can
+  // silently drift it away from scripts/pr_size.py unless this runs on that path.
+  "skills/mission/tests/test_issue719_pr_size_calibration.py",
 ].join(" ");
 
 const FULL_PATH_TARGETS = "skills/mission";
