@@ -119,6 +119,14 @@ def test_the_mirror_is_excluded_and_the_source_is_not():
         ("skills/mission/tests/__snapshots__/x.snap", True),
         ("docs/design/665-integration-gate.md", False),
         ("plugins-not-a-mirror/file.py", False),
+        # The sync tests skip cache directories, so nothing holds these
+        # identical to a source.  Exempting them would hide a force-added file
+        # from both the comparison and the measurement.
+        ("plugins/mission/skills/__pycache__/x.txt", False),
+        ("plugins/mission/scripts/.pytest_cache/x.txt", False),
+        # Git allows leading and trailing spaces; those are different files.
+        (" plugins/mission/skills/x.py", False),
+        ("docs/package-lock.json ", False),
     ],
 )
 def test_generated_classification(path, expected):

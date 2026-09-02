@@ -66,9 +66,14 @@ splitting or an exception.
 
 They measure different things: the API reports each PR's `base...head` diff,
 while the first-parent walk reports what each merge commit brought in. **p85
-agrees; p65 differs by about 5%.** The thresholds are round numbers above both
-p65 estimates and above the shared p85, so **neither method changes which
-values to pick.**
+agrees; p65 differs by about 5%.**
+
+**The thresholds are the two p65/p85 estimates rounded to the nearest hundred**
+(580.3 and 607.4 → 600; 1349.0 → 1400 for both). 600 therefore sits just below
+the local p65 and just above the API one. **Rounding to a shared, readable
+number was chosen over tracking a figure that moves with the measurement
+method** — the 27-line gap between the two estimates is smaller than the noise
+from adding or removing a single PR from the sample.
 
 The earlier 60-PR sample in #719 gave much higher values (p65 1,119 / p85 3,844);
 widening the sample and excluding the mirror both moved the distribution down,
@@ -76,8 +81,9 @@ so **the 60-PR figures were not stable and are not used.**
 
 ### Generated-artifact allowlist
 
-Excluded from reviewed area. **Each entry names a path a test holds identical to
-its source** — that is the criterion for being on this list:
+Excluded from reviewed area. The first two entries name paths **a test holds
+identical to their source**; the rest are files produced by a tool from inputs
+already under review:
 
 - `plugins/mission/skills/**` — held byte-identical by `test_plugins_in_sync.py`
 - `plugins/mission/scripts/**` — held byte-identical by `test_codex_wrapper_sync.py`

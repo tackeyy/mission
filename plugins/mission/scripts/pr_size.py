@@ -5,10 +5,15 @@ The shared PR-size rule asks each repository to calibrate its thresholds to its
 own distribution, because the pre-calibration defaults (400 / 1,000) fire on
 half of the work here and stop being read.
 
-What makes this repository's raw diff misleading is `plugins/mission/`: it is a
-byte-identical copy of `skills/mission/`, and `test_plugins_in_sync.py` fails if
-the two drift.  A reviewer reads that content once.  Counting it twice inflates
-every PR that touches the skill, by 19% at the median and 40% at p85.
+What makes this repository's raw diff misleading is the distribution copy under
+`plugins/mission/`: its `skills/` and `scripts/` subtrees are held identical to
+their sources by `test_plugins_in_sync.py` and `test_codex_wrapper_sync.py`.  A
+reviewer reads that content once.  Counting it twice inflates every PR that
+touches the skill, by 19% at the median and 40% at p85.
+
+The rest of `plugins/mission/` is not a copy -- it carries its own CHANGELOGs
+and plugin manifest -- so the allowlist names the two subtrees, not the
+directory.
 
 The thresholds below are p65 and p85 of the last 100 merged PRs measured this
 way.  They are documented in AGENTS.md, and the tests fail if the two disagree.
@@ -54,6 +59,10 @@ ACCOUNTABILITY_THRESHOLD = 600
 SPLIT_REQUIRED_THRESHOLD = 1400
 
 
+# Directories both sync tests skip when building their inventories.
+_UNCOMPARED_DIRECTORIES = frozenset({"__pycache__", ".pytest_cache"})
+
+
 def _matches(path: str, pattern: str) -> bool:
     """Match a pattern against a path, treating "/" as a real separator.
 
@@ -82,8 +91,19 @@ def _match_parts(path_parts, pattern_parts) -> bool:
 
 
 def is_generated(path: str) -> bool:
-    """Whether one changed path is mechanically derived."""
-    normalized = str(path).strip()
+    """Whether one changed path is mechanically derived.
+
+    The path is used exactly as given.  Leading and trailing spaces are legal
+    in a Git path, so trimming them would let `" plugins/mission/skills/x.py"`
+    -- a different file -- be excluded as if it were the mirrored one.
+    """
+    normalized = str(path)
+    # Cache directories are excluded from the sync tests' inventory, so nothing
+    # holds a file under one identical to a source.  Treating such a path as
+    # generated would exempt it from review while no test compares it -- a file
+    # force-added there would be invisible to both.  Count it as reviewed area.
+    if any(part in _UNCOMPARED_DIRECTORIES for part in normalized.split("/")):
+        return False
     for pattern in GENERATED_PATTERNS:
         if "/" not in pattern:
             # A bare pattern applies to the file name at any depth.
