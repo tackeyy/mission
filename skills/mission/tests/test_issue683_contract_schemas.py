@@ -296,6 +296,79 @@ def test_the_normalized_scale_rejection_includes_its_upper_boundary():
         MS._validate_review_payload(payload, 1)
 
 
+# Each id the schema calls test-bound maps to the test that holds it.  The test
+# below fails if the schema lists an id with no test, or if a test here names an
+# id the schema does not publish -- so neither side can drift alone.
+PLAN_BINDINGS = {
+    "required-fields": "test_every_documented_plan_field_is_actually_required",
+    "enums": "test_the_published_enums_match_the_implementation",
+    "resource-identifier-whitespace":
+        "test_the_plan_validator_enforces_what_the_schema_describes",
+    "resource-access-required":
+        "test_the_plan_validator_enforces_what_the_schema_describes",
+    "constraints-element-type":
+        "test_the_plan_validator_enforces_what_the_schema_describes",
+    "step-acceptance-checks-required":
+        "test_the_plan_validator_enforces_what_the_schema_describes",
+    "dependency-must-exist":
+        "test_the_plan_validator_enforces_what_the_schema_describes",
+}
+
+REVIEW_BINDINGS = {
+    "required-fields": "test_every_documented_review_field_is_actually_required",
+    "enums": "test_the_published_enums_match_the_implementation",
+    "finding-id-perspective-prefix":
+        "test_the_review_validator_enforces_what_the_schema_describes",
+    "finding-id-uniqueness":
+        "test_the_review_validator_enforces_what_the_schema_describes",
+    "evidence-required-for-high-and-medium":
+        "test_the_review_validator_enforces_what_the_schema_describes",
+    "finding-axis-required":
+        "test_the_review_validator_enforces_what_the_schema_describes",
+    "score-range": "test_the_review_validator_enforces_what_the_schema_describes",
+    "normalized-scale-rejected":
+        "test_the_normalized_scale_rejection_includes_its_upper_boundary",
+    "learning-schema-marker":
+        "test_an_unrecognised_learning_schema_is_rejected_as_such",
+    "unknown-learning-key":
+        "test_the_review_validator_enforces_what_the_schema_describes",
+}
+
+
+def test_every_test_bound_proposition_names_a_test_that_exists():
+    """The schema may only claim a binding the suite actually provides.
+
+    Publishing `fields` and `rules` describes the validator; claiming they are
+    all held by tests would be a stronger statement than the suite supports.
+    `test_bound` is the narrower claim, and this keeps it true.
+    """
+    from plan_contract import contract_schema
+
+    module = sys.modules[__name__]
+
+    for schema, bindings, label in (
+        (contract_schema(), PLAN_BINDINGS, "plan"),
+        (MS.review_contract_schema(), REVIEW_BINDINGS, "review"),
+    ):
+        assert set(schema["test_bound"]) == set(bindings), label
+        for proposition, test_name in bindings.items():
+            assert hasattr(module, test_name), f"{label}:{proposition} -> {test_name}"
+
+
+def test_fields_and_rules_are_documentation_not_a_binding_claim():
+    """State the limit, so the document cannot be read as more than it is."""
+    from plan_contract import _CONTRACT_SCHEMA
+    from mission_application import contract_schemas
+
+    for source in (
+        (ROOT / "lib" / "plan_contract.py").read_text(encoding="utf-8"),
+        (ROOT / "lib" / "mission_application" / "contract_schemas.py").read_text(
+            encoding="utf-8"
+        ),
+    ):
+        assert "documentation" in source
+
+
 def test_the_published_enums_match_the_implementation():
     """Enum values are restated for readers; a drifted copy is worse than none.
 

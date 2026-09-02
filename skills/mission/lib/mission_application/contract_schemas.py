@@ -56,6 +56,21 @@ def _review_contract_schema(score_keys, severities) -> dict:
             "findings[].severity": sorted(severities),
             "scores": list(score_keys),
         },
+        # See the note on the plan contract: `fields` and `rules` describe the
+        # validator, but only these ids have a test that fails when the check
+        # is removed.
+        "test_bound": [
+            "required-fields",
+            "enums",
+            "finding-id-perspective-prefix",
+            "finding-id-uniqueness",
+            "evidence-required-for-high-and-medium",
+            "finding-axis-required",
+            "score-range",
+            "normalized-scale-rejected",
+            "learning-schema-marker",
+            "unknown-learning-key",
+        ],
         "rules": [
             "finding ids are unique within one review",
             "every finding carries an axis from the enum, not only a severity",

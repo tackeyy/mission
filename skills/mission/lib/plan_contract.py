@@ -100,6 +100,19 @@ _CONTRACT_SCHEMA = {
         "scope.actions[].effect_class": sorted(EFFECT_CLASSES),
         "steps[].action": sorted(ACTION_TYPES),
     },
+    # Which propositions the suite actually holds.  `fields` and `rules` below
+    # are documentation: they describe the validator, but only the ids listed
+    # here have a test that fails when the corresponding check is removed.
+    # Publishing without this distinction claims a binding the tests do not have.
+    "test_bound": [
+        "required-fields",
+        "enums",
+        "resource-identifier-whitespace",
+        "resource-access-required",
+        "constraints-element-type",
+        "step-acceptance-checks-required",
+        "dependency-must-exist",
+    ],
     "rules": [
         "step ids are unique and depends_on may only name existing ids",
         "the dependency graph must be acyclic",
