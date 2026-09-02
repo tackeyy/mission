@@ -12,7 +12,9 @@ state and archive cannot disagree, because state is computed from the archive.
 """
 from __future__ import annotations
 
-FINDINGS_SUMMARY_SOURCE = "review-aggregate"
+# The kernel projection compares the stored marker against this exact value, so
+# the two must not drift.  Import it rather than restating it here.
+from mission_kernel.evidence import FINDINGS_SUMMARY_SOURCE
 
 
 def derive_findings_summary(aggregate: object) -> list[dict[str, object]]:

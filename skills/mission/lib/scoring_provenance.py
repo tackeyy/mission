@@ -326,8 +326,11 @@ def project_findings_summary(inputs: object) -> list[dict[str, object]]:
     They are the reviewer's working material for that iteration; carrying them
     into state would grow every later read of the session for no consumer.
     """
-    if not isinstance(inputs, list):
-        raise ValueError("review aggregate inputs must be a list")
+    # Mirror reduce_review_aggregate's contract rather than leaning on the fact
+    # that it currently runs first: a helper that only holds while its caller
+    # guards it stops holding the moment someone calls it from elsewhere.
+    if not isinstance(inputs, list) or not inputs:
+        raise ValueError("review aggregate inputs must be a non-empty list")
     projected: list[dict[str, object]] = []
     for review in inputs:
         if not isinstance(review, dict):
@@ -339,11 +342,16 @@ def project_findings_summary(inputs: object) -> list[dict[str, object]]:
             if not isinstance(finding, dict):
                 raise ValueError("review aggregate finding must be an object")
             identifier, severity, axis = finding.get("id"), finding.get("severity"), finding.get("axis")
-            if (not isinstance(identifier, str) or severity not in REVIEW_SEVERITIES
+            if (not isinstance(identifier, str) or not identifier
+                    or severity not in REVIEW_SEVERITIES
                     or axis not in REVIEW_SCORE_KEYS):
                 raise ValueError("review aggregate finding is invalid")
             item: dict[str, object] = {"id": identifier, "severity": severity, "axis": axis}
             summary = finding.get("summary")
+            # Absent is fine -- the field is optional.  Present but not a string
+            # is a malformed archive, and dropping it silently would hide that.
+            if summary is not None and not isinstance(summary, str):
+                raise ValueError("review aggregate finding summary must be a string")
             if isinstance(summary, str) and summary.strip():
                 item["summary"] = summary.strip()[:MAX_FINDING_SUMMARY_CHARS]
             projected.append(item)

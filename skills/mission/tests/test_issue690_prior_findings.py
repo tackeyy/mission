@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from skills.mission.tests.conftest import canonical_review, write_canonical_review_aggregate
 
 
@@ -162,6 +164,85 @@ def test_context_manifest_status_partial_for_entry_without_a_producer(
 
     assert manifest["prior_findings_status"] == "partial"
     assert manifest["prior_findings"] == []
+
+
+def _corrupt_latest_entry(state_dir, mutate):
+    state_file = state_dir / "sessions" / "test.json"
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    mutate(state["score_history"][-1])
+    state_file.write_text(json.dumps(state), encoding="utf-8")
+
+
+def _set_source(value):
+    def mutate(entry):
+        entry["findings_summary_source"] = value
+    return mutate
+
+
+def test_context_manifest_rejects_a_source_marker_it_did_not_write(
+    state_dir, run_cli, tmp_path
+):
+    """Only the canonical marker counts; any other truthy value is not a producer."""
+    _push(state_dir, run_cli, tmp_path, [MEDIUM_FINDING])
+    _corrupt_latest_entry(state_dir, _set_source("payload-forged"))
+
+    assert _manifest(state_dir, run_cli, tmp_path)["prior_findings_status"] == "partial"
+
+
+def test_context_manifest_is_partial_when_the_marker_has_no_summary_beside_it(
+    state_dir, run_cli, tmp_path
+):
+    """A marker without the field it vouches for is not a supplied entry."""
+    _push(state_dir, run_cli, tmp_path, [MEDIUM_FINDING])
+    _corrupt_latest_entry(state_dir, lambda entry: entry.pop("findings_summary"))
+
+    manifest = _manifest(state_dir, run_cli, tmp_path)
+
+    assert manifest["prior_findings_status"] == "partial"
+    assert manifest["prior_findings"] == []
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        [1],
+        [{"severity": "Medium", "axis": "accuracy"}],
+        [{"id": "A-1", "axis": "accuracy"}],
+        [{"id": 1, "severity": "Medium", "axis": "accuracy"}],
+    ],
+    ids=["not-a-mapping", "missing-id", "missing-severity", "id-not-a-string"],
+)
+def test_context_manifest_is_partial_when_a_projected_finding_is_malformed(
+    state_dir, run_cli, tmp_path, summary
+):
+    """complete must mean the projection is usable, not merely present."""
+    _push(state_dir, run_cli, tmp_path, [MEDIUM_FINDING])
+
+    def mutate(entry):
+        entry["findings_summary"] = summary
+
+    _corrupt_latest_entry(state_dir, mutate)
+
+    assert _manifest(state_dir, run_cli, tmp_path)["prior_findings_status"] == "partial"
+
+
+def test_projection_rejects_input_the_review_contract_would_not_produce():
+    """The helper validates on its own; it does not lean on its current caller."""
+    from scoring_provenance import project_findings_summary
+
+    valid = {"findings": [{"id": "A-1", "severity": "Medium", "axis": "accuracy"}]}
+    assert project_findings_summary([valid]) == [
+        {"id": "A-1", "severity": "Medium", "axis": "accuracy"}
+    ]
+
+    with pytest.raises(ValueError):
+        project_findings_summary([])
+    with pytest.raises(ValueError):
+        project_findings_summary([{"findings": [{"id": "", "severity": "Medium", "axis": "accuracy"}]}])
+    with pytest.raises(ValueError):
+        project_findings_summary(
+            [{"findings": [{"id": "A-1", "severity": "Medium", "axis": "accuracy", "summary": 1}]}]
+        )
 
 
 def test_findings_summary_does_not_change_the_pass_gate(

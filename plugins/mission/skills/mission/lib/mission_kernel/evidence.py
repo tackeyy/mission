@@ -119,6 +119,23 @@ def apply_progress_clear(
     return document
 
 
+# #690: the only value push-score writes.  Comparing against it -- rather
+# than testing the marker for truthiness -- is what keeps a forged or legacy
+# marker from claiming that the projection behind it is trustworthy.
+FINDINGS_SUMMARY_SOURCE = "review-aggregate"
+
+
+def _is_usable_prior_finding(item: object) -> bool:
+    """Whether one projected finding carries what a reviewer needs to act."""
+    return (
+        isinstance(item, Mapping)
+        and isinstance(item.get("id"), str)
+        and bool(item.get("id"))
+        and isinstance(item.get("severity"), str)
+        and bool(item.get("severity"))
+    )
+
+
 def project_context_manifest(
     state: Mapping[str, object],
     *,
@@ -139,14 +156,21 @@ def project_context_manifest(
     entries = [entry for entry in history or [] if isinstance(entry, Mapping)]
     supplied = 0
     for entry in entries:
-        findings = entry.get("findings_summary", [])
-        if not isinstance(findings, list):
+        raw = entry.get("findings_summary")
+        if raw is not None and not isinstance(raw, list):
             raise EvidenceRuleError("context-findings-invalid")
-        # #690: an entry counts as supplied only when the producer marked it.
-        # Without the marker an empty list is indistinguishable from an entry
-        # written before anything wrote the field at all.
-        if entry.get("findings_summary_source"):
-            supplied += 1
+        findings = raw if isinstance(raw, list) else []
+        # #690: "supplied" has to mean the projection is usable, not merely
+        # that something is present.  A marker alone would let any truthy
+        # value, a missing list, or an unusable element promote the manifest to
+        # "complete" -- and "complete" is what tells a reviewer it may narrow
+        # its search.  Anything short of the shape this projection writes falls
+        # back to "partial", which claims nothing.
+        supplied += (
+            entry.get("findings_summary_source") == FINDINGS_SUMMARY_SOURCE
+            and isinstance(raw, list)
+            and all(_is_usable_prior_finding(item) for item in raw)
+        )
         prior_findings.extend(
             copy.deepcopy(dict(item))
             for item in findings
