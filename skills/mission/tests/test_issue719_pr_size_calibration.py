@@ -46,14 +46,41 @@ def _documented_section() -> str:
 
 
 def test_the_documented_thresholds_match_the_script():
-    """Prose and measurement must not drift apart."""
+    """Prose and measurement must not drift apart.
+
+    Checking that each constant appears somewhere in the section is not enough:
+    the section is full of numbers, so an unrelated one can satisfy it, and the
+    two thresholds can be swapped without anything noticing.  Parse the row the
+    number belongs to.
+    """
     module = _load_script()
     section = _documented_section()
 
-    numbers = {int(value.replace(",", "")) for value in re.findall(r"\b([\d,]{3,})\b", section)}
+    rows = dict(
+        (label.strip(), int(value.replace(",", "").replace("**", "").strip()))
+        for label, value in re.findall(
+            r"^\| ([^|]*\(p\d+\)[^|]*) \| ([^|]+) \|", section, re.MULTILINE
+        )
+    )
+    assert len(rows) == 2, rows
 
-    assert module.ACCOUNTABILITY_THRESHOLD in numbers
-    assert module.SPLIT_REQUIRED_THRESHOLD in numbers
+    accountability = next(v for k, v in rows.items() if "p65" in k)
+    split_required = next(v for k, v in rows.items() if "p85" in k)
+
+    assert accountability == module.ACCOUNTABILITY_THRESHOLD
+    assert split_required == module.SPLIT_REQUIRED_THRESHOLD
+    # Swapping them would keep both numbers present but invert the rule.
+    assert module.ACCOUNTABILITY_THRESHOLD < module.SPLIT_REQUIRED_THRESHOLD
+
+
+def test_the_calibration_test_runs_on_a_docs_only_change():
+    """AGENTS.md alone takes the docs-only fast path in CI.
+
+    The thresholds live there, so without this the drift check would never run
+    on the very change most likely to cause drift.
+    """
+    scopes = (REPO_ROOT / "scripts" / "ci_changed_scopes.js").read_text(encoding="utf-8")
+    assert "test_issue719_pr_size_calibration.py" in scopes
 
 
 def test_the_documented_allowlist_matches_the_script():

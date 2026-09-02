@@ -27,8 +27,22 @@ import sys
 # Widening this list is how a threshold gets evaded, which is why the shared
 # rule treats changes to it as a security concern and why the tests require it
 # to match the list documented in AGENTS.md exactly.
+# Mechanically derived paths.  A human does not review these separately, so
+# they do not count toward reviewed area.
+#
+# The list names only what a test enforces as a copy:
+# `plugins/mission/skills/**` and `plugins/mission/scripts/**` are held
+# byte-identical by test_plugins_in_sync.py and test_codex_wrapper_sync.py.
+# The rest of `plugins/mission/` is NOT a copy -- it carries its own CHANGELOGs
+# and plugin manifest, which are content a human reads.  Excluding the whole
+# directory would have quietly exempted those.
+#
+# Widening this list is how a threshold gets evaded, which is why the shared
+# rule treats changes to it as a security concern and why the tests require it
+# to match the list documented in AGENTS.md exactly.
 GENERATED_PATTERNS = (
-    "plugins/mission/**",
+    "plugins/mission/skills/**",
+    "plugins/mission/scripts/**",
     "benchmarks/*/artifacts/**",
     "*.lock",
     "package-lock.json",
@@ -40,16 +54,43 @@ ACCOUNTABILITY_THRESHOLD = 600
 SPLIT_REQUIRED_THRESHOLD = 1400
 
 
+def _matches(path: str, pattern: str) -> bool:
+    """Match a pattern against a path, treating "/" as a real separator.
+
+    ``fnmatch`` does not: its ``*`` spans separators, so ``benchmarks/*/artifacts/**``
+    would also match ``benchmarks/a/b/artifacts/x``.  For an allowlist whose
+    widening is a security concern, over-matching is the dangerous direction.
+    """
+    path_parts = [part for part in path.split("/") if part]
+    pattern_parts = pattern.split("/")
+    return _match_parts(path_parts, pattern_parts)
+
+
+def _match_parts(path_parts, pattern_parts) -> bool:
+    if not pattern_parts:
+        return not path_parts
+    head, rest = pattern_parts[0], pattern_parts[1:]
+    if head == "**":
+        # "**" is only meaningful as a trailing segment here; it stands for one
+        # or more remaining segments.
+        return bool(path_parts) and not rest
+    if not path_parts:
+        return False
+    if not fnmatch.fnmatchcase(path_parts[0], head):
+        return False
+    return _match_parts(path_parts[1:], rest)
+
+
 def is_generated(path: str) -> bool:
     """Whether one changed path is mechanically derived."""
+    normalized = str(path).strip()
     for pattern in GENERATED_PATTERNS:
-        if fnmatch.fnmatch(path, pattern):
-            return True
-        # fnmatch treats "**" as a plain glob, so a trailing "/**" needs the
-        # prefix form to match nested paths.
-        if pattern.endswith("/**") and (
-            path == pattern[:-3] or fnmatch.fnmatch(path, pattern[:-1])
-        ):
+        if "/" not in pattern:
+            # A bare pattern applies to the file name at any depth.
+            if fnmatch.fnmatchcase(normalized.rsplit("/", 1)[-1], pattern):
+                return True
+            continue
+        if _matches(normalized, pattern):
             return True
     return False
 

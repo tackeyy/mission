@@ -35,10 +35,17 @@ asks each repository to replace them with its own p65 and p85. Uncalibrated,
 **51 of the last 100 merged PRs exceed 400 and 22 exceed 1,000** — a rule that
 fires on a fifth of all work stops being read.
 
-**Measure reviewed area, not raw diff.** `plugins/mission/` is a byte-identical
-copy of `skills/mission/`, enforced by `test_plugins_in_sync.py`. A reviewer
-reads that content once. Counting it twice inflates every PR that touches the
-skill: **19% of the diff at the median and 40% at p85.**
+**Measure reviewed area, not raw diff.** `plugins/mission/skills/` and
+`plugins/mission/scripts/` are byte-identical copies of `skills/` and
+`scripts/`, enforced by `test_plugins_in_sync.py` and
+`test_codex_wrapper_sync.py`. A reviewer reads that content once. Counting it
+twice inflates every PR that touches the skill: **19% of the diff at the median
+and 40% at p85.**
+
+**The rest of `plugins/mission/` is not a copy.** Its `CHANGELOG.md`,
+`CHANGELOG.ja.md`, and `.codex-plugin/plugin.json` carry their own content and
+are reviewed like anything else. Excluding the whole directory would have
+quietly exempted them.
 
 ### Thresholds
 
@@ -47,16 +54,33 @@ skill: **19% of the diff at the median and 40% at p85.**
 | Accountability (p65) | **600** | State in the PR body why it is not split. Does not block |
 | Split required (p85) | **1,400** | Split, or record an exception and the reason it applies |
 
-Measured over the last 100 merged PRs with the exclusions below. The earlier
-60-PR sample in #719 gave much higher values (p65 1,119 / p85 3,844); widening
-the sample and excluding the mirror both moved the distribution down, so **the
-60-PR figures were not stable and are not used.**
+At these values, 35 of the last 100 merged PRs need an explanation and 14 need
+splitting or an exception.
+
+**Two measurements support these numbers, and they do not agree exactly.**
+
+| Method | p65 | p85 |
+|---|---|---|
+| GitHub API, last 100 merged PRs (`gh pr view --json files`) | 580.3 | 1349.0 |
+| Local first-parent walk, 100 merges (#546–#737, `git diff`) | 607.4 | 1349.0 |
+
+They measure different things: the API reports each PR's `base...head` diff,
+while the first-parent walk reports what each merge commit brought in. **p85
+agrees; p65 differs by about 5%.** The thresholds are round numbers above both
+p65 estimates and above the shared p85, so **neither method changes which
+values to pick.**
+
+The earlier 60-PR sample in #719 gave much higher values (p65 1,119 / p85 3,844);
+widening the sample and excluding the mirror both moved the distribution down,
+so **the 60-PR figures were not stable and are not used.**
 
 ### Generated-artifact allowlist
 
-Excluded from reviewed area because they are mechanically derived:
+Excluded from reviewed area. **Each entry names a path a test holds identical to
+its source** — that is the criterion for being on this list:
 
-- `plugins/mission/**` — byte-identical mirror of `skills/mission/`
+- `plugins/mission/skills/**` — held byte-identical by `test_plugins_in_sync.py`
+- `plugins/mission/scripts/**` — held byte-identical by `test_codex_wrapper_sync.py`
 - `benchmarks/*/artifacts/**` — recorded benchmark output
 - `*.lock`
 - `package-lock.json`
@@ -64,7 +88,8 @@ Excluded from reviewed area because they are mechanically derived:
 
 **Changing this list is a security concern**, not housekeeping: adding a path is
 how a threshold gets evaded. `scripts/pr_size.py` holds the same list and the
-tests fail if the two disagree.
+tests fail if the two disagree. Matching treats `/` as a real separator, so
+`benchmarks/*/artifacts/**` does not also cover `benchmarks/a/b/artifacts/`.
 
 ### Large PRs here are already split
 
@@ -73,6 +98,10 @@ The four largest merged PRs are the residue of splitting, not unsplit work:
 #660 as one numbered sub-item. Kernel migrations have an irreducible unit — a
 command family moves together or the intermediate state breaks. **The thresholds
 exist to catch work that was never divided, not to re-divide what already was.**
+
+**This is evidence of splitting, not proof that further splitting is
+impossible.** Titles and bodies show the series; whether each residue could be
+cut again was not independently verified.
 
 ### How to check
 
