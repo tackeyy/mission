@@ -39,10 +39,11 @@ class RecordingOperations:
         self.default_branch = default_branch
         self.merges = []
         self.snapshots = [
-            gate.PullRequestSnapshot(1, HEAD_SHA, default_branch, "OPEN", None, None),
-            gate.PullRequestSnapshot(1, HEAD_SHA, default_branch, "OPEN", None, None),
+            gate.PullRequestSnapshot(1, HEAD_SHA, default_branch, "OPEN", None, None, BASE_SHA),
+            gate.PullRequestSnapshot(1, HEAD_SHA, default_branch, "OPEN", None, None, BASE_SHA),
             gate.PullRequestSnapshot(
-                1, HEAD_SHA, default_branch, "MERGED", "2026-08-30T00:00:00Z", MERGE_SHA
+                1, HEAD_SHA, default_branch, "MERGED", "2026-08-30T00:00:00Z", MERGE_SHA,
+                BASE_SHA,
             ),
         ]
 

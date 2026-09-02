@@ -35,9 +35,9 @@ class RecordingOperations:
         self.base_shas = iter(base_shas or [BASE_SHA, BASE_SHA])
         self.calls = []
         self.snapshots = list(snapshots or [
-            gate.PullRequestSnapshot(1, HEAD_SHA, default_branch, "OPEN", None, None),
-            gate.PullRequestSnapshot(1, HEAD_SHA, default_branch, "OPEN", None, None),
-            gate.PullRequestSnapshot(1, HEAD_SHA, default_branch, "MERGED", "2026-08-29T00:00:00Z", MERGE_SHA),
+            gate.PullRequestSnapshot(1, HEAD_SHA, default_branch, "OPEN", None, None, BASE_SHA),
+            gate.PullRequestSnapshot(1, HEAD_SHA, default_branch, "OPEN", None, None, BASE_SHA),
+            gate.PullRequestSnapshot(1, HEAD_SHA, default_branch, "MERGED", "2026-08-29T00:00:00Z", MERGE_SHA, BASE_SHA),
         ])
 
     @contextmanager
@@ -119,9 +119,9 @@ def test_main_repository_still_completes_the_gate():
 def test_non_default_base_is_rejected_even_when_base_sha_matches():
     """v1 設計の High: accepted SHA が一致していても非 default branch は拒否する。"""
     operations = RecordingOperations(default_branch="master", snapshots=[
-        gate.PullRequestSnapshot(1, HEAD_SHA, "release/v2", "OPEN", None, None),
-        gate.PullRequestSnapshot(1, HEAD_SHA, "release/v2", "OPEN", None, None),
-        gate.PullRequestSnapshot(1, HEAD_SHA, "release/v2", "MERGED", "2026-08-29T00:00:00Z", MERGE_SHA),
+        gate.PullRequestSnapshot(1, HEAD_SHA, "release/v2", "OPEN", None, None, BASE_SHA),
+        gate.PullRequestSnapshot(1, HEAD_SHA, "release/v2", "OPEN", None, None, BASE_SHA),
+        gate.PullRequestSnapshot(1, HEAD_SHA, "release/v2", "MERGED", "2026-08-29T00:00:00Z", MERGE_SHA, BASE_SHA),
     ])
     with pytest.raises(application.IntegrationGateFailure) as excinfo:
         run(operations)
@@ -325,10 +325,10 @@ def test_post_step_six_retarget_is_detected_only_at_readback():
     (SKILL.md の「保証しないもの」に既出)。本変更はこの窓を広げも狭めもしない。
     """
     operations = RecordingOperations(default_branch="master", snapshots=[
-        gate.PullRequestSnapshot(1, HEAD_SHA, "master", "OPEN", None, None),
-        gate.PullRequestSnapshot(1, HEAD_SHA, "master", "OPEN", None, None),
+        gate.PullRequestSnapshot(1, HEAD_SHA, "master", "OPEN", None, None, BASE_SHA),
+        gate.PullRequestSnapshot(1, HEAD_SHA, "master", "OPEN", None, None, BASE_SHA),
         # merge 後の read-back で初めて base の差し替えが露見する
-        gate.PullRequestSnapshot(1, HEAD_SHA, "release/v2", "MERGED", "2026-08-29T00:00:00Z", MERGE_SHA),
+        gate.PullRequestSnapshot(1, HEAD_SHA, "release/v2", "MERGED", "2026-08-29T00:00:00Z", MERGE_SHA, BASE_SHA),
     ])
     with pytest.raises(application.IntegrationGateFailure) as excinfo:
         run(operations)
