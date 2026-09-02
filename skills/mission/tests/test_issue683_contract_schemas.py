@@ -301,7 +301,7 @@ def test_the_normalized_scale_rejection_includes_its_upper_boundary():
 # id the schema does not publish -- so neither side can drift alone.
 PLAN_BINDINGS = {
     "required-fields": "test_every_documented_plan_field_is_actually_required",
-    "enums": "test_the_published_enums_match_the_implementation",
+    "enums": "test_the_plan_validator_rejects_values_outside_the_published_enums",
     "resource-identifier-whitespace":
         "test_the_plan_validator_enforces_what_the_schema_describes",
     "resource-access-required":
@@ -316,7 +316,7 @@ PLAN_BINDINGS = {
 
 REVIEW_BINDINGS = {
     "required-fields": "test_every_documented_review_field_is_actually_required",
-    "enums": "test_the_published_enums_match_the_implementation",
+    "enums": "test_the_review_validator_rejects_values_outside_the_published_enums",
     "finding-id-perspective-prefix":
         "test_the_review_validator_enforces_what_the_schema_describes",
     "finding-id-uniqueness":
@@ -355,18 +355,70 @@ def test_every_test_bound_proposition_names_a_test_that_exists():
             assert hasattr(module, test_name), f"{label}:{proposition} -> {test_name}"
 
 
-def test_fields_and_rules_are_documentation_not_a_binding_claim():
-    """State the limit, so the document cannot be read as more than it is."""
-    from plan_contract import _CONTRACT_SCHEMA
-    from mission_application import contract_schemas
+def test_the_limit_reaches_the_reader_not_only_the_source():
+    """A note only in a comment does not reach whoever runs the command.
 
-    for source in (
-        (ROOT / "lib" / "plan_contract.py").read_text(encoding="utf-8"),
-        (ROOT / "lib" / "mission_application" / "contract_schemas.py").read_text(
-            encoding="utf-8"
-        ),
+    The published document is what a caller sees; if the limit lives only
+    beside the code, the output still reads as "all of this is checked".
+    """
+    from plan_contract import contract_schema
+
+    for schema, label in (
+        (contract_schema(), "plan"),
+        (MS.review_contract_schema(), "review"),
     ):
-        assert "documentation" in source
+        note = schema.get("binding_note", "")
+        assert "test_bound" in note, label
+        assert "describe the validator" in note, label
+
+
+@pytest.mark.parametrize(
+    "mutate,label",
+    [
+        (lambda d: d["steps"][0].update({"action": "not-an-action"}), "step-action"),
+        (lambda d: d["scope"]["actions"].append(
+            {"type": "not-a-type", "effect_class": "reversible"}
+        ), "action-type"),
+        (lambda d: d["scope"]["actions"].append(
+            {"type": "analyze", "effect_class": "not-a-class"}
+        ), "effect-class"),
+        (lambda d: d["scope"]["resources"].append(
+            {"type": "not-a-type", "identifier": "x", "access": "read",
+             "constraints": []}
+        ), "resource-type"),
+    ],
+)
+def test_the_plan_validator_rejects_values_outside_the_published_enums(mutate, label, tmp_path):
+    """Comparing the published enum to the constant is not enough.
+
+    Both can name the same values while the validator never consults them.  The
+    binding this claims is that a value outside the set is rejected, so that is
+    what has to be checked.
+    """
+    from plan_contract import PlanContractError, validate_plan_document
+
+    document = _plan_document()
+    mutate(document)
+
+    with pytest.raises(PlanContractError):
+        validate_plan_document(document, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "mutate,label",
+    [
+        (lambda p: p["findings"][0].update({"severity": "Critical"}), "severity"),
+        (lambda p: p["findings"][0].update({"axis": "not-an-axis"}), "axis"),
+        (lambda p: p.update({"scores": {"only": 4.0}}), "score-axes"),
+    ],
+)
+def test_the_review_validator_rejects_values_outside_the_published_enums(mutate, label):
+    """Same for the review contract."""
+    payload = _review_payload()
+    mutate(payload)
+
+    with pytest.raises(ValueError):
+        MS._validate_review_payload(payload, 1)
 
 
 def test_the_published_enums_match_the_implementation():

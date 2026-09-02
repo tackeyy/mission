@@ -4,10 +4,13 @@
 field and reject on the first problem, so the only way to learn the contract was
 to submit a document and read the rejection.
 
-Publishing the contract creates a second place the same rules live.  The tests
-bind each description to its validator: a field listed as required that the
-validator does not enforce, or an enum that has drifted from the implementation,
-fails the suite.  The description is documentation, never the check itself.
+Publishing the contract creates a second place the same rules live.  The
+`test_bound` list names the propositions a test actually holds -- an id with no
+test, or an enum whose values the validator does not enforce, fails the suite.
+
+`fields` and `rules` describe the validator without that guarantee.  Claiming
+otherwise would be the same mistake this exists to prevent: a description
+asserting more than the implementation supports.
 """
 from __future__ import annotations
 
@@ -59,6 +62,10 @@ def _review_contract_schema(score_keys, severities) -> dict:
         # See the note on the plan contract: `fields` and `rules` describe the
         # validator, but only these ids have a test that fails when the check
         # is removed.
+        "binding_note": (
+            "fields and rules describe the validator.  Only the ids in test_bound "
+            "have a test that fails when the corresponding check is removed."
+        ),
         "test_bound": [
             "required-fields",
             "enums",

@@ -104,6 +104,10 @@ _CONTRACT_SCHEMA = {
     # are documentation: they describe the validator, but only the ids listed
     # here have a test that fails when the corresponding check is removed.
     # Publishing without this distinction claims a binding the tests do not have.
+    "binding_note": (
+        "fields and rules describe the validator.  Only the ids in test_bound "
+        "have a test that fails when the corresponding check is removed."
+    ),
     "test_bound": [
         "required-fields",
         "enums",
