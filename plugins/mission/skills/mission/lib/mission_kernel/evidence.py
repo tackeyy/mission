@@ -136,17 +136,28 @@ def project_context_manifest(
     history = state.get("score_history")
     if history is not None and not isinstance(history, list):
         raise EvidenceRuleError("context-score-history-invalid")
-    for entry in history or []:
-        if not isinstance(entry, Mapping):
-            continue
+    entries = [entry for entry in history or [] if isinstance(entry, Mapping)]
+    supplied = 0
+    for entry in entries:
         findings = entry.get("findings_summary", [])
         if not isinstance(findings, list):
             raise EvidenceRuleError("context-findings-invalid")
+        # #690: an entry counts as supplied only when the producer marked it.
+        # Without the marker an empty list is indistinguishable from an entry
+        # written before anything wrote the field at all.
+        if entry.get("findings_summary_source"):
+            supplied += 1
         prior_findings.extend(
             copy.deepcopy(dict(item))
             for item in findings
             if isinstance(item, Mapping)
         )
+    if not entries:
+        status = "no-history"
+    elif supplied == len(entries):
+        status = "complete"
+    else:
+        status = "partial"
     manifest = {
         "schema": "mission-context-manifest/1",
         "iteration": iteration,
@@ -154,6 +165,10 @@ def project_context_manifest(
         "mission_id": state.get("mission_id", ""),
         "assumptions_path": state.get("assumptions_path", ""),
         "prior_findings": prior_findings,
+        # "no-history" means nothing has been scored yet; "partial" means at
+        # least one entry carries no producer marker, so an empty list here is
+        # not evidence that the reviewers found nothing.
+        "prior_findings_status": status,
     }
     content = json.dumps(manifest, indent=2, ensure_ascii=False).encode("utf-8")
     record = {

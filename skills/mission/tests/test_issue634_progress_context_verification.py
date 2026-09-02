@@ -182,6 +182,9 @@ def test_four_evidence_reducers_own_only_their_observation_fields():
         "mission_id": "abcdef0123456789",
         "assumptions_path": ".mission-state/assumptions.md",
         "prior_findings": [{"id": "F-1", "severity": "Medium"}],
+        # #690: the entry carries no producer marker, so the manifest reports
+        # "partial" rather than letting the projection read as "nothing found".
+        "prior_findings_status": "partial",
     }
     manifest_bytes = json.dumps(manifest, indent=2, ensure_ascii=False).encode("utf-8")
     context_claim = ContextManifestEffectClaim(
