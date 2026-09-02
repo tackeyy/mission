@@ -361,7 +361,10 @@ class SubprocessGateOperations:
                 "--repo",
                 self._identity(),
                 "--json",
-                "number,headRefOid,baseRefName,state,mergedAt,mergeCommit",
+                # #701: baseRefOid is the API's own view of the base branch tip.
+                # git resolves the same branch through url.<base>.insteadOf, so
+                # requiring the two to agree is what pins the destination.
+                "number,headRefOid,baseRefName,baseRefOid,state,mergedAt,mergeCommit",
             ),
         )
         try:
@@ -375,6 +378,7 @@ class SubprocessGateOperations:
                 state=str(payload["state"]),
                 merged_at=payload.get("mergedAt"),
                 merge_commit_sha=merge_sha,
+                base_ref_oid=payload.get("baseRefOid"),
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise IntegrationGateError(step, "pull-request-read-failed", "pull request response is invalid") from exc
