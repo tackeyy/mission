@@ -7,16 +7,18 @@ half of the work here and stop being read.
 
 What makes this repository's raw diff misleading is the distribution copy under
 `plugins/mission/`: its `skills/` and `scripts/` subtrees are held identical to
-their sources by `test_plugins_in_sync.py` and `test_codex_wrapper_sync.py`.  A
-reviewer reads that content once.  Counting it twice inflates every PR that
+their sources by `test_plugins_in_sync.py` and `test_codex_wrapper_sync.py` --
+outside `__pycache__` and `.pytest_cache`, which those tests skip.  A reviewer
+reads that content once.  Counting it twice inflates every PR that
 touches the skill, by 19% at the median and 40% at p85.
 
 The rest of `plugins/mission/` is not a copy -- it carries its own CHANGELOGs
 and plugin manifest -- so the allowlist names the two subtrees, not the
 directory.
 
-The thresholds below are p65 and p85 of the last 100 merged PRs measured this
-way.  They are documented in AGENTS.md, and the tests fail if the two disagree.
+The thresholds below are round numbers chosen near p65 and p85 of the last 100
+merged PRs measured this way; they are not those percentiles.  AGENTS.md records
+both measurements and the choice, and the tests fail if the two disagree.
 """
 from __future__ import annotations
 
@@ -37,7 +39,8 @@ import sys
 #
 # The list names only what a test enforces as a copy:
 # `plugins/mission/skills/**` and `plugins/mission/scripts/**` are held
-# byte-identical by test_plugins_in_sync.py and test_codex_wrapper_sync.py.
+# byte-identical by test_plugins_in_sync.py and test_codex_wrapper_sync.py,
+# outside the cache directories those tests skip.
 # The rest of `plugins/mission/` is NOT a copy -- it carries its own CHANGELOGs
 # and plugin manifest, which are content a human reads.  Excluding the whole
 # directory would have quietly exempted those.
@@ -54,7 +57,9 @@ GENERATED_PATTERNS = (
     "*.snap",
 )
 
-# p65 and p85 of the last 100 merged PRs, measured with the exclusions above.
+# Round numbers chosen near p65 and p85 of the last 100 merged PRs, measured
+# with the exclusions above.  The measured values are 580.3 / 607.4 (p65, two
+# methods) and 1,349.0 (p85); see AGENTS.md.
 ACCOUNTABILITY_THRESHOLD = 600
 SPLIT_REQUIRED_THRESHOLD = 1400
 

@@ -9,7 +9,7 @@
 
 ## [Unreleased]
 
-- chore: PR 面積の閾値を本 repo の実測へ較正し（説明責任 600 / 分割必須 1,400。直近 merged 100 本の p65 と p85）、生成物 allowlist を定めた。`plugins/mission/` の `skills/` と `scripts/` は source と byte-identical に保たれており（同期テストが除外する cache ディレクトリを除く）、数えると skill を触る全 PR が水増しされる（中央値で diff の 19%、p85 で 40%）。`scripts/pr_size.py` が reviewed area を計算し、閾値と allowlist が AGENTS.md と drift するとテストが落ちる。この検査は自己申告で CI には配線していない（#719）。
+- chore: PR 面積の閾値を本 repo の実測へ較正し（説明責任 600 / 分割必須 1,400。直近 merged 100 本の p65 / p85 そのものではなく、その近傍で選んだ丸め値）、生成物 allowlist を定めた。`plugins/mission/` の `skills/` と `scripts/` は source と byte-identical に保たれており（同期テストが除外する cache ディレクトリを除く）、数えると skill を触る全 PR が水増しされる（中央値で diff の 19%、p85 で 40%）。`scripts/pr_size.py` が reviewed area を計算し、閾値と allowlist が AGENTS.md と drift するとテストが落ちる。この検査は自己申告で CI には配線していない（#719）。
 - fix: git が解決した base commit と、API が報告する `baseRefOid` の一致を要求するようにした。`url.<base>.insteadOf` がゲートの git 解決先を別 repository へ書き換えている場合、テスト実行前・merge 前に検出される。`gh` は検証済み identity で repository を指し git の書き換え規則の影響を受けないため、両者は独立した観測になる。不一致は再 fetch で切り分け、git 自身の観測が動いていれば既存の `base-moved` を返す。正当な base 移動を書き換えとして報告しない一方、検出はスイート実行後ではなく step 3 で行われるようになる。比較できない観測は「検査不要」と読み替えず、専用の理由でゲートを停止する（#701）。
 - fix: `push-score` が digest 検証済みの review aggregate から `findings_summary` を導出するようにし、bounded context manifest が前 iteration の指摘を実際に運ぶようにした。従来はこの field を書く実装が無く、production では `prior_findings` が常に空だったが、合成 state のテストが green を維持していた。manifest には `prior_findings_status`（`no-history` / `complete` / `partial`）を追加し、空リストと供給元の不在を区別できるようにした。pass gate は不変（#690）。
 
