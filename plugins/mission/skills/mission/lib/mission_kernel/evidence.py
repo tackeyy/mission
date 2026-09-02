@@ -125,14 +125,21 @@ def apply_progress_clear(
 FINDINGS_SUMMARY_SOURCE = "review-aggregate"
 
 
+# The severities the projection can emit.  Restated here rather than imported
+# so the kernel keeps deciding on its own inputs, and so a value the projection
+# never writes cannot claim that the entry behind it is complete.
+PRIOR_FINDING_SEVERITIES = frozenset({"High", "Medium", "Low"})
+
+
 def _is_usable_prior_finding(item: object) -> bool:
     """Whether one projected finding carries what a reviewer needs to act."""
+    if not isinstance(item, Mapping):
+        return False
+    identifier = item.get("id")
     return (
-        isinstance(item, Mapping)
-        and isinstance(item.get("id"), str)
-        and bool(item.get("id"))
-        and isinstance(item.get("severity"), str)
-        and bool(item.get("severity"))
+        isinstance(identifier, str)
+        and bool(identifier.strip())
+        and item.get("severity") in PRIOR_FINDING_SEVERITIES
     )
 
 

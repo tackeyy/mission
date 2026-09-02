@@ -347,11 +347,10 @@ def project_findings_summary(inputs: object) -> list[dict[str, object]]:
                     or axis not in REVIEW_SCORE_KEYS):
                 raise ValueError("review aggregate finding is invalid")
             item: dict[str, object] = {"id": identifier, "severity": severity, "axis": axis}
+            # The review contract does not constrain `summary`, so an archive
+            # carrying a non-string here is legal.  Omit what cannot be shown to
+            # a reviewer rather than rejecting an archive the writer accepts.
             summary = finding.get("summary")
-            # Absent is fine -- the field is optional.  Present but not a string
-            # is a malformed archive, and dropping it silently would hide that.
-            if summary is not None and not isinstance(summary, str):
-                raise ValueError("review aggregate finding summary must be a string")
             if isinstance(summary, str) and summary.strip():
                 item["summary"] = summary.strip()[:MAX_FINDING_SUMMARY_CHARS]
             projected.append(item)

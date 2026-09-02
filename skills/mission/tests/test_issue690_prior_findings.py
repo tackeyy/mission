@@ -14,6 +14,7 @@ so a missing producer fails here rather than passing unnoticed.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -239,10 +240,101 @@ def test_projection_rejects_input_the_review_contract_would_not_produce():
         project_findings_summary([])
     with pytest.raises(ValueError):
         project_findings_summary([{"findings": [{"id": "", "severity": "Medium", "axis": "accuracy"}]}])
-    with pytest.raises(ValueError):
-        project_findings_summary(
-            [{"findings": [{"id": "A-1", "severity": "Medium", "axis": "accuracy", "summary": 1}]}]
-        )
+
+
+def test_the_gate_path_returns_the_archive_rather_than_a_projection():
+    """Pin the separation itself, not only its current user-visible effect.
+
+    The pass gate calls ``_revalidate_score_provenance`` too.  Today the
+    projection happens to raise on nothing a legal archive contains, so running
+    it there would be harmless -- but that is a property of the projection's
+    current strictness, not of the gate.  Anything tightened later would leak
+    straight into the gate.  Requiring the archive back is what keeps the
+    projection on the write path.
+    """
+    import importlib.util
+    import inspect
+
+    path = Path(__file__).resolve().parents[1] / "bin" / "mission-state.py"
+    spec = importlib.util.spec_from_file_location("mission_state_690", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    source = inspect.getsource(module._revalidate_score_provenance)
+
+    assert "findings_summary" not in source
+    assert "project_findings" not in source
+    assert source.rstrip().endswith("return parsed")
+
+
+def test_the_kernel_and_the_projection_agree_on_what_a_severity_is():
+    """The kernel restates the severity set to stay pure; catch it drifting."""
+    from scoring_provenance import REVIEW_SEVERITIES
+    from mission_kernel.evidence import PRIOR_FINDING_SEVERITIES
+
+    assert set(PRIOR_FINDING_SEVERITIES) == set(REVIEW_SEVERITIES)
+
+
+NON_STRING_SUMMARY_FINDING = {
+    "id": "A-1",
+    "severity": "Medium",
+    "axis": "accuracy",
+    # The review contract never constrains `summary`, so an archive carrying a
+    # non-string here is legal.  Collecting it must not become a new reason to
+    # reject the archive -- neither when writing the score nor at the gate.
+    "summary": 1,
+    "evidence": "lib/x.py:10 -- 引用",
+}
+
+
+def test_an_archive_the_review_contract_accepts_is_not_rejected_here(
+    state_dir, run_cli, read_state, tmp_path
+):
+    """Collecting observation data must not narrow what push-score accepts."""
+    _push(state_dir, run_cli, tmp_path, [NON_STRING_SUMMARY_FINDING])
+
+    latest = read_state(state_dir)["score_history"][-1]
+    assert latest["findings_summary"] == [
+        {"id": "A-1", "severity": "Medium", "axis": "accuracy"}
+    ]
+
+
+def test_the_pass_gate_does_not_run_the_projection(
+    state_dir, run_cli, read_state, tmp_path
+):
+    """mark-passes re-validates the archive; it must gain no new rejection.
+
+    The projection is a write-path concern.  Running it from the gate would let
+    an observation-only feature decide whether a mission passes.
+    """
+    _push(state_dir, run_cli, tmp_path, [NON_STRING_SUMMARY_FINDING])
+
+    result = run_cli("mark-passes", cwd=state_dir.parent)
+
+    assert result.returncode == 0, result.stderr
+    assert read_state(state_dir)["passes"] is True
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        [{"id": " ", "severity": "Medium", "axis": "accuracy"}],
+        [{"id": "A-1", "severity": "not-a-severity", "axis": "accuracy"}],
+    ],
+    ids=["blank-id", "unknown-severity"],
+)
+def test_context_manifest_is_partial_for_a_finding_it_could_not_have_written(
+    state_dir, run_cli, tmp_path, summary
+):
+    """Values the projection never emits do not get to claim completeness."""
+    _push(state_dir, run_cli, tmp_path, [MEDIUM_FINDING])
+
+    def mutate(entry):
+        entry["findings_summary"] = summary
+
+    _corrupt_latest_entry(state_dir, mutate)
+
+    assert _manifest(state_dir, run_cli, tmp_path)["prior_findings_status"] == "partial"
 
 
 def test_findings_summary_does_not_change_the_pass_gate(

@@ -247,7 +247,6 @@ from mission_application.plan_import import (  # noqa: E402
     run_plan_import,
 )
 from mission_application.findings_summary import (  # noqa: E402
-    derive_findings_summary,
     findings_summary_fields,
 )
 from mission_application.review_aggregation import (  # noqa: E402
@@ -10984,7 +10983,7 @@ def cmd_manual_score_capture(args):
 
 def _revalidate_score_provenance(
     cwd: Path, entry: dict, data: dict, *, require_scoring_artifact: bool = True
-) -> Optional[list]:
+) -> Optional[dict]:
     """Re-check immutable evidence at the pass boundary; never trust a saved digest alone."""
     # A live pass is always a new decision.  Historical schema versions are
     # display compatibility only and must never relax its evidence boundary.
@@ -11060,11 +11059,10 @@ def _revalidate_score_provenance(
         }
         if artifact.get("schema") != "mission-scoring-artifact/1" or binding != expected:
             raise ValueError("scoring evidence binding mismatch")
-    # #690: the archive just proved its digest and re-derived the score claim.
-    # Project the findings from that same verified content so state and archive
-    # cannot disagree; copying the aggregate-time payload would reintroduce a
-    # second producer that nothing checks.
-    return derive_findings_summary(parsed)
+    # #690: hand back the archive this call just proved.  Deriving the findings
+    # here instead would run the projection from mark-passes too, letting an
+    # observation-only feature add rejection conditions to the pass gate.
+    return parsed
 
 
 def _resolve_recorded_path(cwd: Path, path_text: str) -> Path:
@@ -13866,10 +13864,10 @@ def cmd_push_score(args):
         except ValueError as exc:
             print(f"ERROR: provenance: {exc}", file=sys.stderr)
             sys.exit(2)
-        derived_findings = None
+        verified_archive = None
         if provenance is not None:
             try:
-                derived_findings = _revalidate_score_provenance(cwd, {
+                verified_archive = _revalidate_score_provenance(cwd, {
                     "iteration": args.iteration, "items": items,
                     "composite": args.composite, "min_item": args.min_item,
                     "open_high": args.open_high,
@@ -13895,7 +13893,7 @@ def cmd_push_score(args):
             # #690: bounded context manifests read these.  The source marker is
             # what lets a manifest tell "this iteration had no findings" apart
             # from "this entry predates the producer".
-            **findings_summary_fields(derived_findings),
+            **findings_summary_fields(verified_archive),
         }
         if resubmit_reason:
             entry["resubmit_reason"] = resubmit_reason

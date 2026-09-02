@@ -17,28 +17,25 @@ from __future__ import annotations
 from mission_kernel.evidence import FINDINGS_SUMMARY_SOURCE
 
 
-def derive_findings_summary(aggregate: object) -> list[dict[str, object]]:
-    """Project the findings of one verified ``mission-review-aggregate/1``."""
+def findings_summary_fields(aggregate: object) -> dict[str, object]:
+    """Return the score_history fields projected from a verified aggregate.
+
+    ``None`` means there is no review aggregate behind this entry (a manual
+    score import), so it contributes no fields at all.  An empty list, by
+    contrast, is a real observation: the reviewers raised nothing that
+    iteration.  The source marker is what lets the manifest tell those apart.
+
+    Only ``push-score`` calls this.  Keeping it off the ``mark-passes`` path is
+    deliberate: this data is observation, and observation must not be able to
+    decide whether a mission passes.
+    """
     from scoring_provenance import project_findings_summary
 
+    if aggregate is None:
+        return {}
     if not isinstance(aggregate, dict):
         raise ValueError("review aggregate must be an object")
-    return project_findings_summary(aggregate.get("inputs"))
-
-
-def findings_summary_fields(summary: object) -> dict[str, object]:
-    """Return the score_history fields for a derived summary.
-
-    ``None`` means the entry has no review aggregate behind it (a manual score
-    import), so it contributes no fields at all.  An empty list, by contrast,
-    is a real observation: the reviewers raised nothing that iteration.  The
-    source marker is what lets the manifest tell those two apart later.
-    """
-    if summary is None:
-        return {}
-    if not isinstance(summary, list):
-        raise ValueError("findings summary must be a list")
     return {
-        "findings_summary": summary,
+        "findings_summary": project_findings_summary(aggregate.get("inputs")),
         "findings_summary_source": FINDINGS_SUMMARY_SOURCE,
     }
