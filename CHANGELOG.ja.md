@@ -9,6 +9,8 @@
 
 ## [Unreleased]
 
+- chore: PR 面積の閾値を本 repo の実測へ較正し（説明責任 600 / 分割必須 1,400。直近 merged 100 本の p65 と p85）、生成物 allowlist を定めた。`plugins/mission/` は `skills/mission/` の byte-identical ミラーであり、数えると skill を触る全 PR が水増しされる（中央値で diff の 19%、p85 で 40%）。`scripts/pr_size.py` が reviewed area を計算し、閾値と allowlist が AGENTS.md と drift するとテストが落ちる。この検査は自己申告で CI には配線していない（#719）。
+
 - fix: unsafeなlegacy specialist recordを型付きaudit read errorとして隔離し、unsafe stateをsnapshotへコピーせず横断監査を継続できるようにした（#648）。
 
 ## [2.8.0] - 2026-08-19

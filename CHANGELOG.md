@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- chore: calibrate the PR-size thresholds to this repository (600 accountability / 1,400 split-required, p65 and p85 of the last 100 merged PRs) and define the generated-artifact allowlist. `plugins/mission/` is a byte-identical mirror of `skills/mission/`, so counting it inflates every PR that touches the skill -- 19% of the diff at the median and 40% at p85. `scripts/pr_size.py` computes the reviewed area, and the tests fail if its thresholds or allowlist drift from AGENTS.md. The check is self-reported and not wired into CI (#719).
+
 - fix: isolate unsafe legacy specialist records as typed audit read errors so cross-project audits continue without copying unsafe state into snapshots (#648).
 
 ## [2.8.0] - 2026-08-19

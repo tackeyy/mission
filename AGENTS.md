@@ -28,6 +28,63 @@ This repository is OSS. Keep public behavior portable across users, machines, an
 - External specialists are evidence providers only. `mission` owns state, scoring, pass/fail gates, and final reporting.
 - Broad orchestrator skills must be bounded to a single evidence artifact such as a plan, review, or synthesis note. Do not nest a second autonomous completion loop inside `/mission`.
 
+## PR Size Calibration
+
+The shared PR-size rule ships pre-calibration defaults of 400 and 1,000 lines and
+asks each repository to replace them with its own p65 and p85. Uncalibrated,
+**51 of the last 100 merged PRs exceed 400 and 22 exceed 1,000** — a rule that
+fires on a fifth of all work stops being read.
+
+**Measure reviewed area, not raw diff.** `plugins/mission/` is a byte-identical
+copy of `skills/mission/`, enforced by `test_plugins_in_sync.py`. A reviewer
+reads that content once. Counting it twice inflates every PR that touches the
+skill: **19% of the diff at the median and 40% at p85.**
+
+### Thresholds
+
+| Threshold | Lines | Requirement |
+|---|---|---|
+| Accountability (p65) | **600** | State in the PR body why it is not split. Does not block |
+| Split required (p85) | **1,400** | Split, or record an exception and the reason it applies |
+
+Measured over the last 100 merged PRs with the exclusions below. The earlier
+60-PR sample in #719 gave much higher values (p65 1,119 / p85 3,844); widening
+the sample and excluding the mirror both moved the distribution down, so **the
+60-PR figures were not stable and are not used.**
+
+### Generated-artifact allowlist
+
+Excluded from reviewed area because they are mechanically derived:
+
+- `plugins/mission/**` — byte-identical mirror of `skills/mission/`
+- `benchmarks/*/artifacts/**` — recorded benchmark output
+- `*.lock`
+- `package-lock.json`
+- `*.snap`
+
+**Changing this list is a security concern**, not housekeeping: adding a path is
+how a threshold gets evaded. `scripts/pr_size.py` holds the same list and the
+tests fail if the two disagree.
+
+### Large PRs here are already split
+
+The four largest merged PRs are the residue of splitting, not unsplit work:
+#555 landed as three domain batches, #654 as "PR2/2", #645 as a second stage,
+#660 as one numbered sub-item. Kernel migrations have an irreducible unit — a
+command family moves together or the intermediate state breaks. **The thresholds
+exist to catch work that was never divided, not to re-divide what already was.**
+
+### How to check
+
+```bash
+python3 scripts/pr_size.py --pr <number>      # against GitHub
+python3 scripts/pr_size.py --base origin/main # against a local range
+```
+
+**This check is not enforced by CI.** It is self-reported (自己申告): run the
+script and put the number in the PR body when you land in the accountability
+band or above. Wiring it into CI is not implemented.
+
 ## Distribution Release Rule
 
 - A version bump is not a completed distribution release until the matching `vX.Y.Z` git tag exists on the remote and the GitHub Release for that tag exists.
