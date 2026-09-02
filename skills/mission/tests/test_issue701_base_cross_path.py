@@ -16,6 +16,7 @@ between the two observations fails there regardless.
 """
 from __future__ import annotations
 
+import json
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -32,6 +33,7 @@ HEAD_SHA = "a" * 40
 BASE_SHA = "b" * 40
 MERGE_SHA = "c" * 40
 REWRITTEN_BASE_SHA = "e" * 40
+MOVED_BASE_SHA = "9" * 40
 FAKE_DIGEST = "f" * 64
 
 
@@ -43,7 +45,7 @@ def _snapshot(state="OPEN", *, base_ref_oid=BASE_SHA, merged_at=None, merge_sha=
 
 class RecordingOperations:
     def __init__(self, *, base_shas=None, snapshots=None):
-        self.base_shas = iter(base_shas or [BASE_SHA, BASE_SHA])
+        self.base_shas = iter(base_shas or [BASE_SHA] * 6)
         self.calls = []
         self.snapshots = list(snapshots or [
             _snapshot(),
@@ -74,6 +76,7 @@ class RecordingOperations:
         pass
 
     def integrate_and_test(self, head_sha, base_sha, logger):
+        self.calls.append(("integrate_and_test", head_sha, base_sha))
         return application.IntegrationObservation("full", "all", "d" * 40, FAKE_DIGEST)
 
     def merge_pull_request(self, pr_ref, expected_head_sha):
@@ -107,16 +110,43 @@ def test_agreeing_observations_complete_the_gate():
 
 
 def test_rewritten_git_resolution_is_rejected_before_the_tests_run():
-    """git reaching another repository shows up as a base the API does not report."""
-    operations = RecordingOperations(
-        base_shas=[REWRITTEN_BASE_SHA, REWRITTEN_BASE_SHA]
-    )
+    """git reaching another repository shows up as a base the API does not report.
+
+    The re-fetch shows git's own view is stable, so this is a rewrite rather
+    than the base moving.
+    """
+    operations = RecordingOperations(base_shas=[REWRITTEN_BASE_SHA] * 6)
 
     with pytest.raises(application.IntegrationGateFailure) as excinfo:
         run(operations)
 
     assert excinfo.value.step == 3
     assert excinfo.value.reason == "base-observation-disagrees"
+    # The check has to land before the suite runs; otherwise the gate spends a
+    # full suite on a tree fetched from somewhere it did not verify.
+    assert not any(call[0] == "integrate_and_test" for call in operations.calls)
+    assert not any(call[0] == "merge" for call in operations.calls)
+
+
+def test_a_base_that_actually_moved_keeps_its_existing_failure_reason():
+    """Movement is not a rewrite, and must not be reported as one.
+
+    Reporting a moved base as a resolution problem would send the operator
+    after a security question that is not there.
+    """
+    operations = RecordingOperations(
+        base_shas=[BASE_SHA, MOVED_BASE_SHA, MOVED_BASE_SHA, MOVED_BASE_SHA],
+        snapshots=[
+            _snapshot(base_ref_oid=MOVED_BASE_SHA),
+            _snapshot(base_ref_oid=MOVED_BASE_SHA),
+            _snapshot("MERGED", merged_at="2026-09-02T00:00:00Z", merge_sha=MERGE_SHA),
+        ],
+    )
+
+    with pytest.raises(application.IntegrationGateFailure) as excinfo:
+        run(operations)
+
+    assert excinfo.value.reason == "base-moved"
     assert not any(call[0] == "merge" for call in operations.calls)
 
 
@@ -141,7 +171,11 @@ def test_disagreement_appearing_before_the_merge_is_rejected():
     ["absent", "empty", "not-hex", "uppercase", "too-short"],
 )
 def test_an_unusable_api_observation_stops_the_gate(value):
-    """An observation we cannot compare is not an observation; never merge on it."""
+    """An observation we cannot compare is not an observation; never merge on it.
+
+    It carries its own reason so that "the check could not run" stays
+    distinguishable from "the check ran and disagreed".
+    """
     operations = RecordingOperations(snapshots=[
         _snapshot(base_ref_oid=value),
         _snapshot(),
@@ -151,5 +185,41 @@ def test_an_unusable_api_observation_stops_the_gate(value):
     with pytest.raises(application.IntegrationGateFailure) as excinfo:
         run(operations)
 
-    assert excinfo.value.reason == "base-observation-disagrees"
+    assert excinfo.value.step == 3
+    assert excinfo.value.reason == "base-observation-unusable"
+    assert not any(call[0] == "integrate_and_test" for call in operations.calls)
     assert not any(call[0] == "merge" for call in operations.calls)
+
+
+def test_the_adapter_asks_the_api_for_the_base_it_compares():
+    """Without this, dropping baseRefOid from the query changes nothing visible.
+
+    The application layer only sees the snapshot, so a query that never
+    requests the field would leave every application-level test passing while
+    the comparison silently had nothing to compare.
+    """
+    recorded = []
+
+    def runner(arguments, cwd):
+        arguments = tuple(arguments)
+        recorded.append(arguments)
+        if "config" in arguments or "remote" in arguments:
+            return gate.CommandResult(0, "https://github.com/acme/widgets.git", "")
+        payload = json.dumps({
+            "number": 1,
+            "headRefOid": HEAD_SHA,
+            "baseRefName": "main",
+            "baseRefOid": BASE_SHA,
+            "state": "OPEN",
+            "mergedAt": None,
+            "mergeCommit": None,
+        })
+        return gate.CommandResult(0, payload, "")
+
+    operations = gate.SubprocessGateOperations(Path("."), runner=runner)
+    snapshot = operations.read_pull_request("1", step=3)
+
+    query = next(args for args in recorded if "--json" in args)
+    fields = query[query.index("--json") + 1].split(",")
+    assert "baseRefOid" in fields
+    assert snapshot.base_ref_oid == BASE_SHA
