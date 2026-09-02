@@ -34,6 +34,8 @@ BASE_SHA = "b" * 40
 MERGE_SHA = "c" * 40
 REWRITTEN_BASE_SHA = "e" * 40
 MOVED_BASE_SHA = "9" * 40
+RELEASE_TIP_SHA = "7" * 40
+UNKNOWN_BRANCH_TIP_SHA = "8" * 40
 FAKE_DIGEST = "f" * 64
 
 
@@ -54,9 +56,16 @@ class RecordingOperations:
     """
 
     def __init__(self, *, remote_schedule=None, snapshots=None):
-        # Values the remote takes on successive fetches.  The last one repeats.
         self.default_branch = "main"
-        self.remote_schedule = list(remote_schedule or [BASE_SHA])
+        # Tips per branch.  Real git fetches whichever branch it is told to and
+        # writes that tip into the gate's private ref, so a wrong branch does
+        # not leave the ref stale -- it fills it with the wrong commit.  A fake
+        # that ignored non-default branches would make that mistake invisible.
+        # The last value of a schedule repeats.
+        self.branch_tips = {
+            self.default_branch: list(remote_schedule or [BASE_SHA]),
+            "release": [RELEASE_TIP_SHA],
+        }
         self.fetched_base = None
         self.calls = []
         self.snapshots = list(snapshots or [
@@ -77,16 +86,8 @@ class RecordingOperations:
 
     def fetch_base(self, branch):
         self.calls.append(("fetch_base", branch))
-        # Real git fetches the branch it is told to.  Asking for a different
-        # one would not update the ref the gate reads, so the fake must not
-        # update it either -- otherwise passing the wrong branch is invisible.
-        if branch != self.default_branch:
-            return
-        self.fetched_base = (
-            self.remote_schedule.pop(0)
-            if len(self.remote_schedule) > 1
-            else self.remote_schedule[0]
-        )
+        schedule = self.branch_tips.setdefault(branch, [UNKNOWN_BRANCH_TIP_SHA])
+        self.fetched_base = schedule.pop(0) if len(schedule) > 1 else schedule[0]
 
     def current_base_sha(self):
         if self.fetched_base is None:
@@ -106,6 +107,19 @@ class RecordingOperations:
 
     def merge_pull_request(self, pr_ref, expected_head_sha):
         self.calls.append(("merge", pr_ref, expected_head_sha))
+
+
+def _assert_only_the_default_branch_was_fetched(operations):
+    """The outcome alone cannot catch a wrong branch.
+
+    Fetching `release` fills the gate's ref with release's tip, which differs
+    from the base and so still produces `base-moved` -- the same verdict the
+    correct code produces.  The branch has to be asserted directly.
+    """
+    fetched = [branch for kind, branch in
+               ((c[0], c[1]) for c in operations.calls if c[0] == "fetch_base")]
+    assert fetched, "the gate never fetched the base"
+    assert set(fetched) == {operations.default_branch}, fetched
 
 
 def run(operations):
@@ -132,6 +146,7 @@ def test_agreeing_observations_complete_the_gate():
     operations = RecordingOperations()
 
     assert run(operations)["status"] == "merged"
+    _assert_only_the_default_branch_was_fetched(operations)
 
 
 def test_rewritten_git_resolution_is_rejected_before_the_tests_run():
@@ -179,6 +194,7 @@ def test_a_base_that_actually_moved_keeps_its_existing_failure_reason():
     kinds = [call[0] for call in operations.calls]
     assert kinds.count("fetch_base") >= 2
     assert kinds.index("current_base_sha") < len(kinds) - 1
+    _assert_only_the_default_branch_was_fetched(operations)
 
 
 def test_disagreement_appearing_before_the_merge_is_rejected():
@@ -219,6 +235,7 @@ def test_a_base_that_moves_before_the_merge_keeps_its_existing_failure_reason():
     assert excinfo.value.step == 6
     assert excinfo.value.reason == "base-moved"
     assert not any(call[0] == "merge" for call in operations.calls)
+    _assert_only_the_default_branch_was_fetched(operations)
 
 
 @pytest.mark.parametrize(
