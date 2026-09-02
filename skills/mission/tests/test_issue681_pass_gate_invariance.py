@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from pathlib import Path
 
 import pytest
@@ -53,7 +52,6 @@ _ARM_SPECIFIC_PATHS = frozenset({
     ("score_provenance", "review_evidence_ref", "generation"),
     ("score_provenance", "scoring_evidence_ref", "path"),
     ("score_provenance", "scoring_evidence_ref", "digest"),
-    ("score_provenance", "scoring_evidence_ref", "generation"),
     # Inside the scoring artifact, which is compared separately.
     ("_meta", "timestamp"),
     ("binding", "review_evidence_ref", "path"),
