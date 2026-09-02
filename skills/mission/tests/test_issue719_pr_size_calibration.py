@@ -1,7 +1,7 @@
 """Issue #719: the PR-size thresholds are calibrated to this repository.
 
 The shared rule sets 400 / 1,000 lines as pre-calibration defaults and tells
-each repository to replace them with its own p65 / p85.  Uncalibrated, 51 of the
+each repository to replace them with its own p65 / p85.  Uncalibrated, 54 of the
 last 100 merged PRs exceed the accountability threshold and 22 exceed the
 "must split" one -- a rule that fires on a fifth of all work stops being read.
 

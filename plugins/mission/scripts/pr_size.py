@@ -10,7 +10,7 @@ What makes this repository's raw diff misleading is the distribution copy under
 their sources by `test_plugins_in_sync.py` and `test_codex_wrapper_sync.py` --
 outside `__pycache__` and `.pytest_cache`, which those tests skip.  A reviewer
 reads that content once.  Counting it twice inflates every PR that
-touches the skill, by 19% at the median and 40% at p85.
+touches the skill, by 20% at the median and 40% at p85.
 
 The rest of `plugins/mission/` is not a copy -- it carries its own CHANGELOGs
 and plugin manifest -- so the allowlist names the two subtrees, not the
