@@ -318,12 +318,13 @@ def test_the_three_layers_agree_on_what_an_id_is(identifier):
         )
 
 
-def test_the_kernel_and_the_projection_agree_on_what_a_severity_is():
-    """The kernel restates the severity set to stay pure; catch it drifting."""
-    from scoring_provenance import REVIEW_SEVERITIES
-    from mission_kernel.evidence import PRIOR_FINDING_SEVERITIES
+def test_the_kernel_and_the_projection_agree_on_the_enums():
+    """The kernel restates both sets to stay pure; catch either drifting."""
+    from scoring_provenance import REVIEW_SCORE_KEYS, REVIEW_SEVERITIES
+    from mission_kernel.evidence import PRIOR_FINDING_AXES, PRIOR_FINDING_SEVERITIES
 
     assert set(PRIOR_FINDING_SEVERITIES) == set(REVIEW_SEVERITIES)
+    assert set(PRIOR_FINDING_AXES) == set(REVIEW_SCORE_KEYS)
 
 
 NON_STRING_SUMMARY_FINDING = {
@@ -370,8 +371,10 @@ def test_the_pass_gate_does_not_run_the_projection(
     "summary",
     [
         [{"id": "A-1", "severity": "not-a-severity", "axis": "accuracy"}],
+        [{"id": "A-1", "severity": "Medium"}],
+        [{"id": "A-1", "severity": "Medium", "axis": "not-an-axis"}],
     ],
-    ids=["unknown-severity"],
+    ids=["unknown-severity", "missing-axis", "unknown-axis"],
 )
 def test_context_manifest_is_partial_for_a_finding_it_could_not_have_written(
     state_dir, run_cli, tmp_path, summary

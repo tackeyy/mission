@@ -130,6 +130,13 @@ FINDINGS_SUMMARY_SOURCE = "review-aggregate"
 # never writes cannot claim that the entry behind it is complete.
 PRIOR_FINDING_SEVERITIES = frozenset({"High", "Medium", "Low"})
 
+# The projection always emits an axis, because the archive validator requires
+# one.  A finding without a usable axis therefore did not come from the
+# producer, whatever the source marker says.
+PRIOR_FINDING_AXES = frozenset(
+    {"mission_achievement", "accuracy", "completeness", "usability"}
+)
+
 
 def _is_usable_prior_finding(item: object) -> bool:
     """Whether one projected finding is one the producer could have written.
@@ -143,6 +150,7 @@ def _is_usable_prior_finding(item: object) -> bool:
     return (
         isinstance(item.get("id"), str)
         and item.get("severity") in PRIOR_FINDING_SEVERITIES
+        and item.get("axis") in PRIOR_FINDING_AXES
     )
 
 
