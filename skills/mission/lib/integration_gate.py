@@ -409,10 +409,12 @@ class SubprocessGateOperations:
         repositories out of the merge procedure entirely (#697), which pushed
         callers toward the direct ``gh pr merge`` detour that Phase 7 forbids.
 
-        Absence falls back to the full suite, which is the safe direction: it
-        runs more than necessary, never less.  A helper that *is* present but
-        answers incorrectly still fails closed, so a broken classifier is not
-        silently downgraded into a full run.
+        Absence falls back to the full suite.  **That is a fallback, not a
+        guarantee of wider coverage**: what "full" runs is decided by the
+        target repository's own ``make test``, which may run fewer tests than
+        the helper would have selected -- or none at all (#722).  A helper that
+        *is* present but answers incorrectly still fails closed, so a broken
+        classifier is not silently downgraded into a full run.
         """
         helper = integrated_tree / "scripts" / "ci_changed_scopes.js"
         if not helper.is_file():
@@ -483,6 +485,13 @@ class SubprocessGateOperations:
         An empty target string means the caller omits ``PYTEST_TARGETS``, so the
         repository's Makefile decides what "everything" is.  A silent fallback
         would hide which suite actually ran, so the reason is always logged.
+
+        **This does not guarantee that more tests run -- or that any run at
+        all.**  The gate only reads the exit code of ``make test``; a target
+        that executes nothing still exits 0 and the gate proceeds.  Closing
+        that path needs a contract the target repository declares, which is
+        being designed in #722.  Until then the gate's stated guarantee holds
+        only for repositories that carry the scope helper.
         """
         if logger is not None:
             logger("scope_fallback={}".format(reason))
