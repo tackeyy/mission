@@ -238,8 +238,6 @@ def test_projection_rejects_input_the_review_contract_would_not_produce():
 
     with pytest.raises(ValueError):
         project_findings_summary([])
-    with pytest.raises(ValueError):
-        project_findings_summary([{"findings": [{"id": "", "severity": "Medium", "axis": "accuracy"}]}])
 
 
 def test_the_gate_path_returns_the_archive_rather_than_a_projection():
@@ -265,6 +263,59 @@ def test_the_gate_path_returns_the_archive_rather_than_a_projection():
     assert "findings_summary" not in source
     assert "project_findings" not in source
     assert source.rstrip().endswith("return parsed")
+
+
+@pytest.mark.parametrize(
+    "identifier",
+    ["A-1", "", " ", "x"],
+    ids=["normal", "empty", "blank", "no-prefix"],
+)
+def test_the_three_layers_agree_on_what_an_id_is(identifier):
+    """The archive validator decides; the projection and kernel must follow.
+
+    These three ran different id rules.  A blank id passed the archive
+    re-validation, was projected, and then counted as unusable -- so an entry
+    the producer legitimately wrote reported ``partial``.  An empty id went the
+    other way: it passed re-validation but the projection rejected it, which
+    made ``push-score`` refuse an archive it used to accept.
+
+    Neither direction is acceptable, and the fix is not to pick the strictest
+    rule: the archive validator runs on the pass-gate path, so tightening it
+    would add rejections there.  It is the authority, and the other two follow.
+    """
+    from scoring_provenance import project_findings_summary, reduce_review_aggregate
+    from mission_kernel.evidence import _is_usable_prior_finding
+
+    review = {
+        "schema": "mission-review/1",
+        "perspective": "A",
+        "iteration": 1,
+        "scores": dict(ITEMS),
+        "findings": [{"id": identifier, "severity": "Medium", "axis": "accuracy"}],
+        "same_score_note": None,
+    }
+
+    try:
+        reduce_review_aggregate([review], expected_iteration=1)
+    except ValueError:
+        archive_accepts = False
+    else:
+        archive_accepts = True
+
+    try:
+        projected = project_findings_summary([review])
+    except ValueError:
+        projection_accepts = False
+    else:
+        projection_accepts = True
+
+    assert projection_accepts == archive_accepts, (
+        "the projection must accept exactly what the archive validator accepts"
+    )
+    if archive_accepts:
+        assert all(_is_usable_prior_finding(item) for item in projected), (
+            "the kernel must treat everything the projection emits as usable"
+        )
 
 
 def test_the_kernel_and_the_projection_agree_on_what_a_severity_is():
@@ -318,10 +369,9 @@ def test_the_pass_gate_does_not_run_the_projection(
 @pytest.mark.parametrize(
     "summary",
     [
-        [{"id": " ", "severity": "Medium", "axis": "accuracy"}],
         [{"id": "A-1", "severity": "not-a-severity", "axis": "accuracy"}],
     ],
-    ids=["blank-id", "unknown-severity"],
+    ids=["unknown-severity"],
 )
 def test_context_manifest_is_partial_for_a_finding_it_could_not_have_written(
     state_dir, run_cli, tmp_path, summary

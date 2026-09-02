@@ -132,13 +132,16 @@ PRIOR_FINDING_SEVERITIES = frozenset({"High", "Medium", "Low"})
 
 
 def _is_usable_prior_finding(item: object) -> bool:
-    """Whether one projected finding carries what a reviewer needs to act."""
+    """Whether one projected finding is one the producer could have written.
+
+    The conditions mirror what the projection emits, which in turn mirrors what
+    the archive validator accepts.  Requiring more here would report ``partial``
+    for entries the producer legitimately wrote (#690).
+    """
     if not isinstance(item, Mapping):
         return False
-    identifier = item.get("id")
     return (
-        isinstance(identifier, str)
-        and bool(identifier.strip())
+        isinstance(item.get("id"), str)
         and item.get("severity") in PRIOR_FINDING_SEVERITIES
     )
 

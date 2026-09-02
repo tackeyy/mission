@@ -342,7 +342,12 @@ def project_findings_summary(inputs: object) -> list[dict[str, object]]:
             if not isinstance(finding, dict):
                 raise ValueError("review aggregate finding must be an object")
             identifier, severity, axis = finding.get("id"), finding.get("severity"), finding.get("axis")
-            if (not isinstance(identifier, str) or not identifier
+            # Accept exactly what reduce_review_aggregate accepts.  That
+            # validator also runs on the pass-gate path, so it is the authority:
+            # a stricter rule here would make push-score refuse archives the
+            # gate still accepts, and a looser one would emit findings the
+            # kernel then treats as unusable (#690).
+            if (not isinstance(identifier, str)
                     or severity not in REVIEW_SEVERITIES
                     or axis not in REVIEW_SCORE_KEYS):
                 raise ValueError("review aggregate finding is invalid")
