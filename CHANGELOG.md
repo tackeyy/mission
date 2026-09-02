@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - chore: calibrate the PR-size thresholds to this repository (600 accountability / 1,400 split-required, p65 and p85 of the last 100 merged PRs) and define the generated-artifact allowlist. `plugins/mission/` is a byte-identical mirror of `skills/mission/`, so counting it inflates every PR that touches the skill -- 19% of the diff at the median and 40% at p85. `scripts/pr_size.py` computes the reviewed area, and the tests fail if its thresholds or allowlist drift from AGENTS.md. The check is self-reported and not wired into CI (#719).
+- fix: derive `findings_summary` in `push-score` from the digest-verified review aggregate so bounded context manifests actually carry the previous iteration's findings. Nothing wrote that field before, so `prior_findings` was always empty in production while synthetic-state tests kept it green. Manifests now also report `prior_findings_status` (`no-history` / `complete` / `partial`) so an empty list is no longer indistinguishable from a missing producer. The pass gate is unchanged (#690).
 
 - fix: isolate unsafe legacy specialist records as typed audit read errors so cross-project audits continue without copying unsafe state into snapshots (#648).
 

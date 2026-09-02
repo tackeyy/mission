@@ -310,6 +310,58 @@ def _consensus_score(max_delta: float) -> float:
     return 1.0
 
 
+MAX_FINDING_SUMMARY_CHARS = 400
+
+
+def project_findings_summary(inputs: object) -> list[dict[str, object]]:
+    """Project the archived review findings down to what a later reviewer needs.
+
+    The caller must pass the ``inputs`` of an aggregate whose digest it has
+    already verified.  Deriving here rather than copying the aggregate-time
+    payload keeps one producer of the value: the archive is the record, and
+    ``push-score`` re-derives from it in the same step that re-derives the
+    score claim (#690).
+
+    ``evidence`` / ``recommendation`` and the learning fields are dropped.
+    They are the reviewer's working material for that iteration; carrying them
+    into state would grow every later read of the session for no consumer.
+    """
+    # Mirror reduce_review_aggregate's contract rather than leaning on the fact
+    # that it currently runs first: a helper that only holds while its caller
+    # guards it stops holding the moment someone calls it from elsewhere.
+    if not isinstance(inputs, list) or not inputs:
+        raise ValueError("review aggregate inputs must be a non-empty list")
+    projected: list[dict[str, object]] = []
+    for review in inputs:
+        if not isinstance(review, dict):
+            raise ValueError("review aggregate input must be an object")
+        findings = review.get("findings")
+        if not isinstance(findings, list):
+            raise ValueError("review aggregate findings must be a list")
+        for finding in findings:
+            if not isinstance(finding, dict):
+                raise ValueError("review aggregate finding must be an object")
+            identifier, severity, axis = finding.get("id"), finding.get("severity"), finding.get("axis")
+            # Accept exactly what reduce_review_aggregate accepts.  That
+            # validator also runs on the pass-gate path, so it is the authority:
+            # a stricter rule here would make push-score refuse archives the
+            # gate still accepts, and a looser one would emit findings the
+            # kernel then treats as unusable (#690).
+            if (not isinstance(identifier, str)
+                    or severity not in REVIEW_SEVERITIES
+                    or axis not in REVIEW_SCORE_KEYS):
+                raise ValueError("review aggregate finding is invalid")
+            item: dict[str, object] = {"id": identifier, "severity": severity, "axis": axis}
+            # The review contract does not constrain `summary`, so an archive
+            # carrying a non-string here is legal.  Omit what cannot be shown to
+            # a reviewer rather than rejecting an archive the writer accepts.
+            summary = finding.get("summary")
+            if isinstance(summary, str) and summary.strip():
+                item["summary"] = summary.strip()[:MAX_FINDING_SUMMARY_CHARS]
+            projected.append(item)
+    return projected
+
+
 def reduce_review_aggregate(inputs: object, *, expected_iteration: int | None = None) -> dict[str, object]:
     """Re-derive every score gate field from archived review inputs.
 

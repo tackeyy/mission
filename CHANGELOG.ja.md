@@ -10,6 +10,7 @@
 ## [Unreleased]
 
 - chore: PR 面積の閾値を本 repo の実測へ較正し（説明責任 600 / 分割必須 1,400。直近 merged 100 本の p65 と p85）、生成物 allowlist を定めた。`plugins/mission/` は `skills/mission/` の byte-identical ミラーであり、数えると skill を触る全 PR が水増しされる（中央値で diff の 19%、p85 で 40%）。`scripts/pr_size.py` が reviewed area を計算し、閾値と allowlist が AGENTS.md と drift するとテストが落ちる。この検査は自己申告で CI には配線していない（#719）。
+- fix: `push-score` が digest 検証済みの review aggregate から `findings_summary` を導出するようにし、bounded context manifest が前 iteration の指摘を実際に運ぶようにした。従来はこの field を書く実装が無く、production では `prior_findings` が常に空だったが、合成 state のテストが green を維持していた。manifest には `prior_findings_status`（`no-history` / `complete` / `partial`）を追加し、空リストと供給元の不在を区別できるようにした。pass gate は不変（#690）。
 
 - fix: unsafeなlegacy specialist recordを型付きaudit read errorとして隔離し、unsafe stateをsnapshotへコピーせず横断監査を継続できるようにした（#648）。
 
