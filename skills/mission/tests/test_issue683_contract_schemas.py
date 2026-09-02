@@ -214,6 +214,15 @@ def test_no_field_the_review_validator_requires_is_missing_from_the_schema():
             {"type": "path", "identifier": "x", "access": "read",
              "constraints": [1]}
         ), "constraints-element-not-a-string"),
+        # The whitespace rule covers every non-path, non-uri type, not just one.
+        (lambda d: d["scope"]["resources"].append(
+            {"type": "dataset", "identifier": "has space", "access": "read",
+             "constraints": []}
+        ), "dataset-identifier-whitespace"),
+        (lambda d: d["scope"]["resources"].append(
+            {"type": "other", "identifier": "has space", "access": "read",
+             "constraints": []}
+        ), "other-identifier-whitespace"),
     ],
 )
 def test_the_plan_validator_enforces_what_the_schema_describes(mutate, label, tmp_path):
@@ -244,6 +253,9 @@ def test_the_plan_validator_enforces_what_the_schema_describes(mutate, label, tm
         (lambda p: p["scores"].update({"accuracy": 50.0}), "score-above-the-scale"),
         (lambda p: p["findings"][0].update({"cause": "x"}), "learning-field-without-marker"),
         (lambda p: p.update({"learning_extra": 1}), "unknown-learning-key"),
+        # Boundaries, not just the middle of the range: a rule stated as 0..5
+        # is not held by a check that accepts -50 or rejects 1.0.
+        (lambda p: p["scores"].update({"accuracy": -50.0}), "score-below-the-scale"),
     ],
 )
 def test_the_review_validator_enforces_what_the_schema_describes(mutate, label):
@@ -252,6 +264,35 @@ def test_the_review_validator_enforces_what_the_schema_describes(mutate, label):
     mutate(payload)
 
     with pytest.raises(ValueError):
+        MS._validate_review_payload(payload, 1)
+
+
+def test_an_unrecognised_learning_schema_is_rejected_as_such():
+    """Assert where it fails, not merely that it does.
+
+    A payload naming an unknown schema also trips the per-finding learning
+    checks, so `pytest.raises(ValueError)` alone passes even when the marker
+    check is gone.  The message is what distinguishes the two.
+    """
+    payload = _review_payload()
+    payload["learning_schema"] = "not-a-known-schema"
+
+    with pytest.raises(ValueError, match="learning_schema"):
+        MS._validate_review_payload(payload, 1)
+
+
+def test_the_normalized_scale_rejection_includes_its_upper_boundary():
+    """`0..1` has to mean 0..1 inclusive.
+
+    A check written as `< 1.0` would accept an all-1.0 payload -- a normalized
+    scale that reads as a near-minimum raw one, which is exactly what this
+    rejection exists to catch.
+    """
+    payload = _review_payload()
+    payload["scores"] = {axis: 1.0 for axis in payload["scores"]}
+    payload["same_score_note"] = "all axes scored the same"
+
+    with pytest.raises(ValueError, match="normalized"):
         MS._validate_review_payload(payload, 1)
 
 
