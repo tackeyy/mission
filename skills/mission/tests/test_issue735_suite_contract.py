@@ -20,6 +20,7 @@ output would accept an echoed line or a stale file left by an earlier run.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -421,9 +422,48 @@ def test_the_suite_writes_a_report_the_gate_would_accept(tmp_path):
     # Skipped cases are excluded: a suite that skips everything has exercised
     # nothing, and counting skips would let it look like it had.
     assert document["executed"] == 2
+
+    # The expected sha comes from the same command the gate uses, not from the
+    # report itself.  Taking it from the report would make this pass whatever
+    # the writer recorded -- including a tree the gate would reject.
+    expected = subprocess.run(
+        ["git", "write-tree"],
+        cwd=REPO_ROOT, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert document["tree_sha"] == expected
     assert gate.require_suite_report(
-        document, expected_tree_sha=document["tree_sha"], step=4
+        document, expected_tree_sha=expected, step=4
     ) == 2
+
+
+def test_the_writer_records_the_tree_the_gate_observes():
+    """The gate integrates without committing and reads the index.
+
+    `HEAD^{tree}` is the committed tree; they differ exactly when the gate is
+    doing its job, so recording the wrong one would fail every honest report.
+    """
+    import ast
+
+    source = (REPO_ROOT / "scripts" / "write_suite_report.py").read_text(
+        encoding="utf-8"
+    )
+    # Look at the literals the code actually runs, not at prose: the comment
+    # explaining the distinction names both, and matching on text would either
+    # forbid the explanation or accept the wrong command inside one.
+    literals = {
+        node.value
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        and not _is_docstring_or_comment_text(node.value)
+    }
+
+    assert "write-tree" in literals
+    assert "HEAD^{tree}" not in literals
+
+
+def _is_docstring_or_comment_text(value: str) -> bool:
+    """Whether a string literal is prose rather than an argument."""
+    return "\n" in value or len(value) > 60
 
 
 def test_the_makefile_passes_the_report_path_through_to_the_writer():

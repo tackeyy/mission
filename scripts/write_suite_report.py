@@ -40,8 +40,12 @@ def main(argv=None) -> int:
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args(argv)
 
+    # `git write-tree`, not `HEAD^{tree}`: the gate integrates the PR into the
+    # base **without committing** and observes the index, so the two differ
+    # exactly when it matters.  Recording the committed tree would make every
+    # honest report fail the gate's binding check.
     tree_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD^{tree}"],
+        ["git", "write-tree"],
         capture_output=True, text=True, check=True,
     ).stdout.strip()
 
