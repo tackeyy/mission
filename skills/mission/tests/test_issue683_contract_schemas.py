@@ -198,6 +198,56 @@ def test_no_field_the_review_validator_requires_is_missing_from_the_schema():
             assert field in published, f"{field} is enforced but not published"
 
 
+@pytest.mark.parametrize(
+    "mutate,label",
+    [
+        (lambda d: d["scope"]["resources"].append(
+            {"type": "record", "identifier": "has space", "access": "read",
+             "constraints": []}
+        ), "resource-identifier-whitespace"),
+        (lambda d: d["scope"]["resources"].append(
+            {"type": "path", "identifier": "x", "constraints": []}
+        ), "resource-missing-access"),
+        (lambda d: d["steps"][0].pop("acceptance_checks"), "step-missing-checks"),
+        (lambda d: d["steps"][0].update({"depends_on": ["nope"]}), "unknown-dependency"),
+    ],
+)
+def test_the_plan_validator_enforces_what_the_schema_describes(mutate, label, tmp_path):
+    """The schema describes per-field rules, not only which keys are required.
+
+    Removing whole keys leaves those rules untested: a validator could stop
+    checking `access` or the identifier's whitespace and every key-level test
+    would still pass.  Each case here corresponds to a sentence in the
+    published `fields` or `rules`.
+    """
+    from plan_contract import PlanContractError, validate_plan_document
+
+    document = _plan_document()
+    mutate(document)
+
+    with pytest.raises(PlanContractError):
+        validate_plan_document(document, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "mutate,label",
+    [
+        (lambda p: p["findings"][0].pop("evidence"), "medium-without-evidence"),
+        (lambda p: p["findings"][0].pop("axis"), "finding-without-axis"),
+        (lambda p: p["findings"].append(dict(p["findings"][0])), "duplicate-finding-id"),
+        (lambda p: p["findings"][0].update({"id": "B-1"}), "id-without-perspective-prefix"),
+        (lambda p: p.update({"scores": {k: 0.9 for k in p["scores"]}}), "normalized-scale"),
+    ],
+)
+def test_the_review_validator_enforces_what_the_schema_describes(mutate, label):
+    """Same for the review contract."""
+    payload = _review_payload()
+    mutate(payload)
+
+    with pytest.raises(ValueError):
+        MS._validate_review_payload(payload, 1)
+
+
 def test_the_published_enums_match_the_implementation():
     """Enum values are restated for readers; a drifted copy is worse than none.
 

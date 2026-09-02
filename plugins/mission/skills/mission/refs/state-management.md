@@ -461,11 +461,11 @@ python3 ${CLAUDE_PLUGIN_ROOT}/skills/mission/bin/mission-migrate.py --execute --
 | `awaiting-approval` | 人間の承認待ちで止めた | **承認を得てから** `reactivate --approved-by-user --expected-category awaiting-approval --reason "<承認内容>"`。承認なしに再活性化しない |
 | `partial-done` | 実行可能な範囲は完遂したが全体未達 | 残りに着手できる状況になってから `reactivate --approved-by-user --expected-category partial-done --reason "<再開理由>"` |
 | `evidence-submitted` | Checker 系 role の正常終了 | **通常は復帰しない**（設計どおりの終端。実装者側の mission とは別セッション）。再開が要る場合は `reactivate --approved-by-user --expected-category evidence-submitted --reason "<再開理由>"` が使える |
-| `routed-goal` | adaptive routing で goal 契約へ流した | **通常は復帰しない**（goal 契約で直接完遂する）。mission 機構が要ると判明した場合は `reactivate --approved-by-user --expected-category routed-goal --reason "<理由>"` または `--force-mission` で再 init する |
+| `routed-goal` | adaptive routing で goal 契約へ流した | **通常は復帰しない**（goal 契約で直接完遂する）。mission 機構が要ると判明した場合は `reactivate --approved-by-user --expected-category routed-goal --reason "<理由>"` を使う。終端済みの v5 state から作り直す場合は `init --force-mission --new-mission` が要る |
 | `stagnation` | 3 回停滞した | 停滞の原因（同じ指摘の再発・設計の未確定）を解消してから `reactivate --approved-by-user --expected-category stagnation --reason "<解消内容>"` |
 | `user-abort` | ユーザーが中止を指示した | ユーザーの再開指示を受けてから `reactivate --approved-by-user --expected-category user-abort --reason "<再開指示>"` |
 | `stale` | lease 失効・dead PID を自動検出して閉じた | **`reactivate` は使えない。** `resume` を使う（`refresh-pid` → `cleanup-empty` → `cleanup-stale` → `next` を 1 コマンドで行う） |
-| `other` | 上記に当てはまらない | 理由を読んで判断し、人手 halt なら `reactivate --expected-category other`、自動検出なら `resume` |
+| `other` | 上記に当てはまらない | 理由を読んで判断し、人手 halt なら `reactivate --approved-by-user --expected-category other --reason "<再開理由>"`、自動検出なら `resume` |
 
 **`stale` を踏みやすい条件を知っておく。** lease TTL は 15 分で、mutating command でしか
 renew されない。外部プロセス（別 CLI のレビュー等）を待つ間隔が TTL を超えると、

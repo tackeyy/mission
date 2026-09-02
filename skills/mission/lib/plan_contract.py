@@ -80,7 +80,11 @@ _CONTRACT_SCHEMA = {
     ],
     "fields": {
         "objective": "non-empty string",
-        "scope.resources[]": "objects with type, identifier, access, constraints[]",
+        "scope.resources[]": (
+            "objects with type, identifier, access, constraints[] (all strings). "
+            "record / dataset / other identifiers must be non-empty and contain "
+            "no whitespace"
+        ),
         "scope.actions[]": "objects with type and effect_class",
         "assumptions[]": "objects with non-empty id, statement, validation",
         "steps[]": (

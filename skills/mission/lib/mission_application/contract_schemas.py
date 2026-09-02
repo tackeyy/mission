@@ -32,6 +32,15 @@ def _review_contract_schema(score_keys, severities) -> dict:
             "findings[].severity": "one of the severity enum",
             "findings[].axis": "one of the four axes",
             "findings[].evidence": "required and non-empty for High and Medium",
+            "scores[*]": (
+                "finite number in 0..5.  A payload whose four axes all fall in "
+                "0..1 is rejected as a normalized scale, because a normalized "
+                "score silently reads as a near-zero raw one"
+            ),
+            "learning": (
+                "when present, validated by the review learning contract: "
+                "cause, general_fix_rule and weak_phase on each finding"
+            ),
             "same_score_note": (
                 "required when all four scores are equal; states why the "
                 "reviewer scored them the same"
@@ -44,6 +53,7 @@ def _review_contract_schema(score_keys, severities) -> dict:
         },
         "rules": [
             "finding ids are unique within one review",
+            "every finding carries an axis from the enum, not only a severity",
             "scores may be null only for a findings-only reviewer",
             "learning fields are validated by the review learning contract",
         ],
