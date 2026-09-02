@@ -54,13 +54,23 @@ class BinaryCommandResult:
 IntegrationGateError = IntegrationGateFailure
 
 
-def _local_runner(arguments: Iterable[str], cwd: Path) -> CommandResult:
+def _local_runner(arguments: Iterable[str], cwd: Path, env: Optional[dict] = None) -> CommandResult:
+    """Run a command, optionally adding variables to the inherited environment.
+
+    `env` extends what the process already has rather than replacing it: a
+    declared suite needs PATH and the rest of its environment to work at all.
+    """
+    environment = None
+    if env:
+        environment = dict(os.environ)
+        environment.update(env)
     completed = subprocess.run(
         list(arguments),
         cwd=str(cwd),
         capture_output=True,
         text=True,
         check=False,
+        env=environment,
     )
     return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 
@@ -213,6 +223,9 @@ SUITE_REPORT_SCHEMA = "mission-suite-report/1"
 # rule would have to mean the same thing to every runner a repository might
 # declare; every runner already inherits the environment.
 SUITE_REPORT_ENV = "MISSION_SUITE_REPORT"
+# Larger than any suite this gate will plausibly run, and small enough that a
+# fabricated count stands out.  The repository's own suite is ~5,500 tests.
+MAX_EXECUTED_TESTS = 10_000_000
 
 
 def load_suite_contract(operations, *, base_sha: str, step: int) -> dict:
@@ -220,8 +233,17 @@ def load_suite_contract(operations, *, base_sha: str, step: int) -> dict:
 
     Not from the integrated tree: a PR that could rewrite the contract could
     point it at a command that runs nothing and pass itself.  Reading the base
-    means a PR is always tested under the contract that was already merged, so
-    weakening it takes its own reviewable merge.
+    means the *command* is the one that was already merged.
+
+    **That is the whole of what this pins.**  The contract fixes which command
+    runs, not what that command does.  A PR can still change the `Makefile` the
+    command invokes, or the tests themselves, and produce a truthful report for
+    a suite it has hollowed out.  This is the same boundary the gate has always
+    had -- a PR can delete tests -- and closing it would need a reporter the
+    base side trusts to observe the count itself.
+
+    What this does close is the case the gate could not see at all: a suite that
+    never ran, exiting zero.
     """
     raw = operations.read_base_file(base_sha, SUITE_CONTRACT_PATH)
     if raw is None:
@@ -291,12 +313,15 @@ def require_suite_report(document: object, *, expected_tree_sha: str, step: int)
     if document.get("status") != "complete":
         raise unusable("suite report does not record a completed run")
     executed = document.get("executed")
-    if type(executed) is not int or executed <= 0:
-        raise unusable("suite report does not record any executed test")
+    if type(executed) is not int or executed <= 0 or executed > MAX_EXECUTED_TESTS:
+        # An upper bound matters as much as the lower one: JSON carries integers
+        # of any size, and a count no run could produce is not evidence of a run.
+        raise unusable("suite report does not record a plausible executed count")
     return executed
 
 
-def run_declared_suite(command, *, runner, cwd, report_path, expected_tree_sha, step):
+def run_declared_suite(command, *, runner, cwd, report_path, expected_tree_sha, step,
+                       logger=None):
     """Run the declared full suite and require evidence that it ran (#735).
 
     A non-zero exit is still reported as ``suite-failed``: this adds a
@@ -304,8 +329,21 @@ def run_declared_suite(command, *, runner, cwd, report_path, expected_tree_sha, 
     longer enough on its own -- a suite that runs nothing also exits zero, and
     that is the hole this closes.
     """
+    report_path = Path(report_path)
+    # A file already there proves nothing about the run about to happen.  A
+    # runner that does nothing and exits 0, next to a leftover report, would
+    # otherwise satisfy every field check.
+    if report_path.exists() or report_path.is_symlink():
+        raise IntegrationGateError(
+            step,
+            "suite-report-unusable",
+            "a suite report already exists before the run; the gate cannot tell "
+            "it apart from one this run produced",
+        )
     result = runner(tuple(command), cwd, env={SUITE_REPORT_ENV: str(report_path)})
     if result.returncode != 0:
+        if logger is not None:
+            logger("suite_exit={}".format(result.returncode))
         raise IntegrationGateError(step, "suite-failed", "integrated tree suite failed")
     return require_suite_report(
         read_suite_report(report_path), expected_tree_sha=expected_tree_sha, step=step
@@ -321,11 +359,15 @@ def read_suite_report(path):
     it is never mistaken for the former.
     """
     path = Path(path)
-    if not path.exists():
+    # `exists()` follows symlinks, so a dangling one would read as "no report"
+    # -- collapsing the two cases this is meant to keep apart.
+    if not path.exists() and not path.is_symlink():
         return None
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        # ValueError covers numbers Python cannot represent; letting it escape
+        # would surface as an internal error rather than an unusable report.
         raise IntegrationGateError(
             4, "suite-report-unusable", "suite report could not be read"
         ) from error
@@ -474,6 +516,17 @@ class SubprocessGateOperations:
         if _SHA_RE.fullmatch(value) is None:
             raise IntegrationGateError(2, "base-observation-failed", "base sha is invalid")
         return value
+
+    def read_base_file(self, base_sha: str, path: str) -> Optional[str]:
+        """Read one file as it exists in the base commit (#735).
+
+        Returns None when the base has no such file, so the caller can tell
+        "not declared" apart from "declared but unreadable".
+        """
+        result = self._run(("git", "show", "{}:{}".format(base_sha, path)))
+        if result.returncode != 0:
+            return None
+        return result.stdout
 
     def read_pull_request(self, pr_ref: str, step: int = 6) -> PullRequestSnapshot:
         result = self._checked(

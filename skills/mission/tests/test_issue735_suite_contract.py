@@ -147,8 +147,13 @@ def test_an_unparseable_report_is_not_read_as_absent(tmp_path):
 def test_the_contract_is_read_from_the_base_not_the_integrated_tree():
     """A PR that could rewrite the contract could point it at `true`.
 
-    Reading the base means a PR is always tested under the contract that was
-    already merged, so weakening it takes a separate, reviewable merge.
+    Reading the base pins **which command runs** to the one already merged.
+
+    It does not pin what that command does.  A PR can change the `Makefile` it
+    invokes, or the tests, and report truthfully on a hollowed-out suite --
+    the same boundary the gate has always had, since a PR can delete tests.
+    What this closes is the case the gate could not see at all: a suite that
+    never ran, exiting zero.
     """
     reads = []
 
@@ -252,3 +257,101 @@ def test_a_failing_suite_still_reports_as_a_failing_suite(tmp_path):
         )
 
     assert captured.value.reason == "suite-failed"
+
+
+def test_a_report_left_by_an_earlier_run_is_not_accepted(tmp_path):
+    """A file already there proves nothing about the run about to happen.
+
+    A runner that does nothing and exits 0, next to a leftover report, would
+    otherwise satisfy every field check.
+    """
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps(_report(TREE, executed=12)), encoding="utf-8")
+
+    def runner(command, cwd, env=None):
+        return gate.CommandResult(0, "", "")
+
+    with pytest.raises(gate.IntegrationGateError) as captured:
+        gate.run_declared_suite(
+            ("make", "test"),
+            runner=runner,
+            cwd=tmp_path,
+            report_path=report_path,
+            expected_tree_sha=TREE,
+            step=4,
+        )
+
+    assert captured.value.reason == "suite-report-unusable"
+
+
+def test_a_dangling_symlink_is_unreadable_not_absent(tmp_path):
+    """`exists()` follows links, so a broken one reads as "no report".
+
+    That collapses the two cases this is supposed to keep apart.
+    """
+    report_path = tmp_path / "report.json"
+    report_path.symlink_to(tmp_path / "gone.json")
+
+    with pytest.raises(gate.IntegrationGateError) as captured:
+        gate.read_suite_report(report_path)
+
+    assert captured.value.reason == "suite-report-unusable"
+
+
+@pytest.mark.parametrize(
+    "executed,label",
+    [
+        (float("inf"), "infinity"),
+        (10 ** 400, "beyond-any-real-run"),
+        (True, "bool-is-not-a-count"),
+    ],
+    ids=["infinity", "absurd", "bool"],
+)
+def test_a_count_that_cannot_be_a_real_run_is_rejected(executed, label):
+    """`1e999` parses as `inf` rather than raising, so the count check is where
+    it has to be caught.  `True` is an int in Python and would otherwise pass
+    as a count of one.
+    """
+    document = _report(TREE)
+    document["executed"] = executed
+
+    with pytest.raises(gate.IntegrationGateError) as captured:
+        gate.require_suite_report(document, expected_tree_sha=TREE, step=4)
+
+    assert captured.value.reason == "suite-report-unusable"
+
+
+def test_a_failing_suite_keeps_its_exit_code_in_the_log(tmp_path):
+    """The existing `suite_exit=<actual>` line is how a failure is diagnosed."""
+    logged = []
+
+    def runner(command, cwd, env=None):
+        return gate.CommandResult(3, "", "boom")
+
+    with pytest.raises(gate.IntegrationGateError):
+        gate.run_declared_suite(
+            ("make", "test"),
+            runner=runner,
+            cwd=tmp_path,
+            report_path=tmp_path / "report.json",
+            expected_tree_sha=TREE,
+            step=4,
+            logger=logged.append,
+        )
+
+    assert "suite_exit=3" in logged
+
+
+def test_the_real_runner_accepts_the_environment_the_gate_passes():
+    """The fake would happily accept a keyword the real one does not.
+
+    Without this, the wiring compiles in tests and raises TypeError in the gate.
+    """
+    import inspect
+
+    assert "env" in inspect.signature(gate._local_runner).parameters
+
+
+def test_the_operations_object_can_read_a_file_from_the_base():
+    """The base read is a real capability, not something only a fake provides."""
+    assert hasattr(gate.SubprocessGateOperations, "read_base_file")
