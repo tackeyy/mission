@@ -55,6 +55,7 @@ class RecordingOperations:
 
     def __init__(self, *, remote_schedule=None, snapshots=None):
         # Values the remote takes on successive fetches.  The last one repeats.
+        self.default_branch = "main"
         self.remote_schedule = list(remote_schedule or [BASE_SHA])
         self.fetched_base = None
         self.calls = []
@@ -76,6 +77,11 @@ class RecordingOperations:
 
     def fetch_base(self, branch):
         self.calls.append(("fetch_base", branch))
+        # Real git fetches the branch it is told to.  Asking for a different
+        # one would not update the ref the gate reads, so the fake must not
+        # update it either -- otherwise passing the wrong branch is invisible.
+        if branch != self.default_branch:
+            return
         self.fetched_base = (
             self.remote_schedule.pop(0)
             if len(self.remote_schedule) > 1
@@ -188,6 +194,30 @@ def test_disagreement_appearing_before_the_merge_is_rejected():
 
     assert excinfo.value.step == 6
     assert excinfo.value.reason == "base-observation-disagrees"
+    assert not any(call[0] == "merge" for call in operations.calls)
+
+
+def test_a_base_that_moves_before_the_merge_keeps_its_existing_failure_reason():
+    """The same split has to work at step 6, not only at step 3.
+
+    Without a re-fetch here, a base that moved between step 5 and the merge
+    read is reported as a resolution problem.  Covering only step 3 leaves that
+    half of the contract unverified.
+    """
+    operations = RecordingOperations(
+        remote_schedule=[BASE_SHA, BASE_SHA, MOVED_BASE_SHA],
+        snapshots=[
+            _snapshot(),
+            _snapshot(base_ref_oid=MOVED_BASE_SHA),
+            _snapshot("MERGED", merged_at="2026-09-02T00:00:00Z", merge_sha=MERGE_SHA),
+        ],
+    )
+
+    with pytest.raises(application.IntegrationGateFailure) as excinfo:
+        run(operations)
+
+    assert excinfo.value.step == 6
+    assert excinfo.value.reason == "base-moved"
     assert not any(call[0] == "merge" for call in operations.calls)
 
 
