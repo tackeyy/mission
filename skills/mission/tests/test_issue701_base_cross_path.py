@@ -44,8 +44,19 @@ def _snapshot(state="OPEN", *, base_ref_oid=BASE_SHA, merged_at=None, merge_sha=
 
 
 class RecordingOperations:
-    def __init__(self, *, base_shas=None, snapshots=None):
-        self.base_shas = iter(base_shas or [BASE_SHA] * 6)
+    """A fake where fetching is what makes a new base observable.
+
+    The earlier version handed out base shas from an iterator regardless of
+    whether ``fetch_base`` had been called, so removing the implementation's
+    re-fetch changed nothing the tests could see.  Modelling the remote and the
+    fetched ref separately is what makes the re-fetch observable: without it,
+    ``current_base_sha`` keeps returning the stale value.
+    """
+
+    def __init__(self, *, remote_schedule=None, snapshots=None):
+        # Values the remote takes on successive fetches.  The last one repeats.
+        self.remote_schedule = list(remote_schedule or [BASE_SHA])
+        self.fetched_base = None
         self.calls = []
         self.snapshots = list(snapshots or [
             _snapshot(),
@@ -65,9 +76,17 @@ class RecordingOperations:
 
     def fetch_base(self, branch):
         self.calls.append(("fetch_base", branch))
+        self.fetched_base = (
+            self.remote_schedule.pop(0)
+            if len(self.remote_schedule) > 1
+            else self.remote_schedule[0]
+        )
 
     def current_base_sha(self):
-        return next(self.base_shas)
+        if self.fetched_base is None:
+            raise AssertionError("current_base_sha read before any fetch_base")
+        self.calls.append(("current_base_sha", self.fetched_base))
+        return self.fetched_base
 
     def read_pull_request(self, pr_ref, step=6):
         return self.snapshots.pop(0)
@@ -115,7 +134,7 @@ def test_rewritten_git_resolution_is_rejected_before_the_tests_run():
     The re-fetch shows git's own view is stable, so this is a rewrite rather
     than the base moving.
     """
-    operations = RecordingOperations(base_shas=[REWRITTEN_BASE_SHA] * 6)
+    operations = RecordingOperations(remote_schedule=[REWRITTEN_BASE_SHA])
 
     with pytest.raises(application.IntegrationGateFailure) as excinfo:
         run(operations)
@@ -135,7 +154,7 @@ def test_a_base_that_actually_moved_keeps_its_existing_failure_reason():
     after a security question that is not there.
     """
     operations = RecordingOperations(
-        base_shas=[BASE_SHA, MOVED_BASE_SHA, MOVED_BASE_SHA, MOVED_BASE_SHA],
+        remote_schedule=[BASE_SHA, MOVED_BASE_SHA],
         snapshots=[
             _snapshot(base_ref_oid=MOVED_BASE_SHA),
             _snapshot(base_ref_oid=MOVED_BASE_SHA),
@@ -148,6 +167,12 @@ def test_a_base_that_actually_moved_keeps_its_existing_failure_reason():
 
     assert excinfo.value.reason == "base-moved"
     assert not any(call[0] == "merge" for call in operations.calls)
+    # The verdict must come from a fresh observation, not the one already held.
+    # Without the re-fetch the stale value still matches and this reports a
+    # rewriting problem instead.
+    kinds = [call[0] for call in operations.calls]
+    assert kinds.count("fetch_base") >= 2
+    assert kinds.index("current_base_sha") < len(kinds) - 1
 
 
 def test_disagreement_appearing_before_the_merge_is_rejected():
