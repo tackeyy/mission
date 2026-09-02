@@ -23,6 +23,7 @@ allowed-tools: Read, Grep, Glob, Bash(git diff:*), Bash(git log:*), Bash(git sta
   - Medium が 1 件でもある軸は `skills/mission/bin/mission-state.py` の `_cap_for_findings` により 4.0 に cap される。これは意図した効果であり、`passes` の式は変更しない
 - context manifest パス (#241、diff レビュー時のみ): args に `mission-context-manifest/1` JSON のパスが渡された場合、manifest (mission goal / prior findings) と指定 diff を一次スコープとしてレビューし、リポジトリ全体の走査を省く。manifest が読めない・スキーマ不一致の場合は通常どおり全成果物をレビューする (fail-safe)。スコープ縮小は探索範囲のみで、採点基準・Step 0 のテスト実行義務は不変
   - manifest を正常に受領して bounded review を実行した場合、review JSON の `notes` 自由記述に `context: bounded` を明記する (#352)
+  - `prior_findings` が空でも「前回は指摘なし」とは限らない。判断には `prior_findings_status` を見る (#690)。`complete` なら空は「指摘が無かった」を意味するが、`no-history` は未採点、`partial` は供給元を持たない entry が混ざっている状態であり、**いずれも前回指摘の不在を示さない**。`complete` 以外では前回指摘が無いものとして扱わず、diff の探索範囲を狭めない
 
 ## 行動指針
 
