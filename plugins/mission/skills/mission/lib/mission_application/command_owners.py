@@ -82,6 +82,7 @@ COMMAND_OWNER_REGISTRY = {
         "list",
         "next",
         "progress get",
+        "schema",
         "specialists accounting",
         "specialists summary",
         "stats",
