@@ -122,3 +122,45 @@ def test_unknown_origin_is_refused_rather_than_defaulted():
 
     with pytest.raises(EvidencePublicationError):
         blob_origin_of({"blob_id": "evidence:x", "origin": "derived"})
+
+
+PERSISTED_RECORD_SCHEMAS = {
+    "mission-commit": "carries effects",
+    "mission-prepare": "carries effects and projections",
+    "mission-generation": "carries blobs",
+    "mission-intent": "digests blob bindings",
+    "mission-operation": "records the replay result",
+    "mission-recovery": "reconstructs a prepare",
+    "mission-recovery-operation": "reconstructs an operation",
+}
+UNVERSIONED_BY_BLOB_SHAPE = {
+    "mission-prepared-binding": "binds stage identity, not blob content",
+    "mission-operation-key": "derives a filename from session and operation only",
+    "mission-head": "refers to a commit and a generation, holds no effects",
+    "mission-recovery-operation-index": "marks the index as ready, holds no payload",
+}
+
+
+def _fenced_commit_source():
+    from pathlib import Path
+
+    import mission_persistence.fenced_commit as module
+
+    return Path(module.__file__).read_text(encoding="utf-8")
+
+
+def test_every_persisted_schema_is_classified():
+    import re
+
+    source = _fenced_commit_source()
+    found = {match.group(1) for match in re.finditer(r'"(mission-[a-z-]+)/\d+"', source)}
+    classified = set(PERSISTED_RECORD_SCHEMAS) | set(UNVERSIONED_BY_BLOB_SHAPE)
+    assert found == classified, (
+        "a persisted record schema appeared or disappeared; classify it before "
+        "changing the blob shape: " + repr(found ^ classified)
+    )
+
+
+def test_records_outside_the_blob_shape_are_named_with_a_reason():
+    for name, reason in UNVERSIONED_BY_BLOB_SHAPE.items():
+        assert reason and name not in PERSISTED_RECORD_SCHEMAS
