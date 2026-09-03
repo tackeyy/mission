@@ -429,3 +429,50 @@ def test_retry_budget_refuses_an_attempt_outside_the_budget():
     for attempt in (0, -1, 4):
         with pytest.raises(EvidencePublicationError):
             next_attempt(attempt)
+
+
+OPERATION_V1_KEYS = frozenset(
+    {"commit_digest", "intent_digest", "operation_id", "result", "schema", "session_id"}
+)
+OPERATION_V2_KEYS = OPERATION_V1_KEYS | {"materialization"}
+
+
+def test_operation_record_key_sets_are_declared_per_version():
+    from mission_application.evidence_publication import operation_record_keys
+
+    assert operation_record_keys(1) == OPERATION_V1_KEYS
+    assert operation_record_keys(2) == OPERATION_V2_KEYS
+
+
+def test_operation_v2_adds_exactly_one_key():
+    from mission_application.evidence_publication import operation_record_keys
+
+    assert operation_record_keys(2) - operation_record_keys(1) == {"materialization"}
+
+
+def test_operation_record_keys_refuse_an_unknown_version():
+    from mission_application.evidence_publication import operation_record_keys
+
+    for version in (0, 3, "2"):
+        with pytest.raises(EvidencePublicationError):
+            operation_record_keys(version)
+
+
+def test_the_reader_still_names_the_version_one_key_set():
+    """The v1 key set is a fact about records already on disk, not a choice.
+
+    If the persisted shape ever stops matching it, an older record becomes
+    unreadable, so the two have to be compared rather than assumed.
+    """
+    import re
+    from pathlib import Path
+
+    import mission_persistence.fenced_commit as module
+
+    source = Path(module.__file__).read_text(encoding="utf-8")
+    block = re.search(
+        r'\{"commit_digest",[^}]*\},\s*\n\s*"operation",', source, re.MULTILINE
+    )
+    assert block, "the operation reader no longer declares its key set inline"
+    named = set(re.findall(r'"([a-z_]+)"', block.group(0))) - {"operation"}
+    assert named == OPERATION_V1_KEYS

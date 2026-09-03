@@ -286,3 +286,35 @@ def next_attempt(attempt: int) -> int:
             "base-retry-exhausted", "the base moved on every attempt; nothing was published"
         )
     return attempt + 1
+
+
+OPERATION_RECORD_KEYS = {
+    1: frozenset(
+        {"commit_digest", "intent_digest", "operation_id", "result", "schema", "session_id"}
+    ),
+    2: frozenset(
+        {
+            "commit_digest",
+            "intent_digest",
+            "materialization",
+            "operation_id",
+            "result",
+            "schema",
+            "session_id",
+        }
+    ),
+}
+
+
+def operation_record_keys(version: int) -> frozenset:
+    """Return the exact key set one generation of the operation record holds.
+
+    The reader compares keys exactly, so a record gains a field only by
+    gaining a version.  Writing the new field into a v1 record would make
+    every existing reader refuse it.
+    """
+    if type(version) is not int or version not in OPERATION_RECORD_KEYS:
+        raise EvidencePublicationError(
+            "record-invalid", "operation record version is not recognised"
+        )
+    return OPERATION_RECORD_KEYS[version]
