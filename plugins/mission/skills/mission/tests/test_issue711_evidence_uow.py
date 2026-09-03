@@ -307,3 +307,72 @@ def test_materialization_binding_refuses_an_unknown_origin():
             base_generation=1,
             state_digest="sha256:" + "b" * 64,
         )
+
+
+def _materialization(paths, digest_byte="0", generation=1):
+    from mission_application.evidence_publication import materialization_binding
+
+    return materialization_binding(
+        bindings=tuple(_binding(path, "generated", digest_byte) for path in paths),
+        base_head_digest="sha256:" + "a" * 64,
+        base_generation=generation,
+        state_digest="sha256:" + "b" * 64,
+    )
+
+
+def test_replay_accepts_a_commit_that_holds_the_same_bytes():
+    from mission_application.evidence_publication import assert_replay_materializes
+
+    assert_replay_materializes(
+        recorded=_materialization(["build/manifest.json"]),
+        prepared=_materialization(["build/manifest.json"]),
+    )
+
+
+def test_replay_refuses_a_commit_whose_content_differs():
+    from mission_application.evidence_publication import assert_replay_materializes
+
+    with pytest.raises(EvidencePublicationError) as excinfo:
+        assert_replay_materializes(
+            recorded=_materialization(["build/manifest.json"], "0"),
+            prepared=_materialization(["build/manifest.json"], "1"),
+        )
+    assert excinfo.value.code == "replay-materialization-mismatch"
+
+
+def test_replay_refuses_a_commit_that_wrote_a_different_path():
+    from mission_application.evidence_publication import assert_replay_materializes
+
+    with pytest.raises(EvidencePublicationError):
+        assert_replay_materializes(
+            recorded=_materialization(["build/manifest.json"]),
+            prepared=_materialization(["build/other.json"]),
+        )
+
+
+def test_replay_refuses_a_commit_that_wrote_a_different_number_of_blobs():
+    from mission_application.evidence_publication import assert_replay_materializes
+
+    with pytest.raises(EvidencePublicationError):
+        assert_replay_materializes(
+            recorded=_materialization(["build/a.json", "build/b.json"]),
+            prepared=_materialization(["build/a.json"]),
+        )
+
+
+def test_replay_compares_content_and_not_the_base_it_ran_against():
+    from mission_application.evidence_publication import assert_replay_materializes
+
+    assert_replay_materializes(
+        recorded=_materialization(["build/manifest.json"], generation=3),
+        prepared=_materialization(["build/manifest.json"], generation=9),
+    )
+
+
+def test_replay_refuses_a_record_without_a_materialization():
+    from mission_application.evidence_publication import assert_replay_materializes
+
+    with pytest.raises(EvidencePublicationError):
+        assert_replay_materializes(
+            recorded=None, prepared=_materialization(["build/manifest.json"])
+        )

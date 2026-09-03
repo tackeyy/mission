@@ -224,3 +224,25 @@ def materialization_binding(
         "blobs": generated,
         "state_digest": state_digest,
     }
+
+
+def assert_replay_materializes(*, recorded, prepared: dict) -> None:
+    """Refuse a replay whose commit does not hold what this run prepared.
+
+    A replay means the same operation already committed.  It does not mean it
+    committed the same bytes: without this check a re-run that would have
+    written different content returns success while its content never lands.
+
+    Only the blobs take part.  The base a run saw is allowed to differ,
+    because the whole point of a replay is that the base has moved on.
+    """
+    if not isinstance(recorded, dict):
+        raise EvidencePublicationError(
+            "replay-materialization-mismatch",
+            "the recorded operation carries no materialization to compare",
+        )
+    if recorded.get("blobs") != prepared.get("blobs"):
+        raise EvidencePublicationError(
+            "replay-materialization-mismatch",
+            "the recorded commit does not hold the prepared content",
+        )
