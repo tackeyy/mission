@@ -476,3 +476,70 @@ def test_the_reader_still_names_the_version_one_key_set():
     assert block, "the operation reader no longer declares its key set inline"
     named = set(re.findall(r'"([a-z_]+)"', block.group(0))) - {"operation"}
     assert named == OPERATION_V1_KEYS
+
+
+def _operation_document(version, materialization=None):
+    document = {
+        "commit_digest": "sha256:" + "c" * 64,
+        "intent_digest": "sha256:" + "d" * 64,
+        "operation_id": "op-1",
+        "result": {},
+        "schema": "mission-operation/%d" % version,
+        "session_id": "s-1",
+    }
+    if version == 2:
+        document["materialization"] = materialization or _materialization(["build/x.json"])
+    return document
+
+
+def test_operation_reader_accepts_a_version_one_record():
+    from mission_application.evidence_publication import read_operation_record
+
+    parsed = read_operation_record(_operation_document(1))
+    assert parsed["version"] == 1 and parsed["materialization"] is None
+
+
+def test_operation_reader_accepts_a_version_two_record():
+    from mission_application.evidence_publication import read_operation_record
+
+    parsed = read_operation_record(_operation_document(2))
+    assert parsed["version"] == 2 and parsed["materialization"] is not None
+
+
+def test_operation_reader_refuses_a_version_one_record_carrying_materialization():
+    from mission_application.evidence_publication import read_operation_record
+
+    document = _operation_document(1)
+    document["materialization"] = _materialization(["build/x.json"])
+    with pytest.raises(EvidencePublicationError):
+        read_operation_record(document)
+
+
+def test_operation_reader_refuses_a_version_two_record_without_materialization():
+    from mission_application.evidence_publication import read_operation_record
+
+    document = _operation_document(2)
+    del document["materialization"]
+    with pytest.raises(EvidencePublicationError):
+        read_operation_record(document)
+
+
+def test_operation_reader_refuses_an_extra_key_in_either_version():
+    from mission_application.evidence_publication import read_operation_record
+
+    for version in (1, 2):
+        document = dict(_operation_document(version), surprise=True)
+        with pytest.raises(EvidencePublicationError):
+            read_operation_record(document)
+
+
+def test_a_version_one_replay_is_not_asked_to_prove_its_content():
+    """A record written before materialization existed cannot carry it.
+
+    Refusing those replays would make every mission that ran before this
+    change unable to resume, so the check applies from version two onward.
+    """
+    from mission_application.evidence_publication import replay_requires_materialization
+
+    assert replay_requires_materialization(1) is False
+    assert replay_requires_materialization(2) is True

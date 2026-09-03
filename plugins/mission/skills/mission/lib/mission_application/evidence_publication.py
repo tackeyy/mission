@@ -318,3 +318,41 @@ def operation_record_keys(version: int) -> frozenset:
             "record-invalid", "operation record version is not recognised"
         )
     return OPERATION_RECORD_KEYS[version]
+
+
+def read_operation_record(document: dict) -> dict:
+    """Parse one operation record of either generation.
+
+    The key set is checked exactly against the generation the record names,
+    so a v1 record that somehow carries a materialization is refused rather
+    than read as a v2: a record whose shape and version disagree was not
+    written by anything this code understands.
+    """
+    version = record_version(document, "mission-operation")
+    expected = operation_record_keys(version)
+    present = frozenset(document)
+    if present != expected:
+        raise EvidencePublicationError(
+            "record-invalid",
+            "operation record keys differ from version %d: %r" % (
+                version, sorted(present ^ expected)
+            ),
+        )
+    return {
+        "version": version,
+        "materialization": document["materialization"] if version >= 2 else None,
+    }
+
+
+def replay_requires_materialization(version: int) -> bool:
+    """Say whether one replay has to prove it holds the prepared content.
+
+    Records written before the field existed cannot carry it.  Demanding it
+    of them would strand every mission that ran before this change, so the
+    obligation starts with the generation that has somewhere to put it.
+    """
+    if type(version) is not int or version not in KNOWN_RECORD_VERSIONS:
+        raise EvidencePublicationError(
+            "record-invalid", "operation record version is not recognised"
+        )
+    return expects_materialization(version)
