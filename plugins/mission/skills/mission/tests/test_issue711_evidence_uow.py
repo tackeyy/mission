@@ -458,24 +458,19 @@ def test_operation_record_keys_refuse_an_unknown_version():
             operation_record_keys(version)
 
 
-def test_the_reader_still_names_the_version_one_key_set():
-    """The v1 key set is a fact about records already on disk, not a choice.
+def test_the_repository_no_longer_parses_the_operation_record_itself():
+    """The repository must delegate, or the shared rules never run.
 
-    If the persisted shape ever stops matching it, an older record becomes
-    unreadable, so the two have to be compared rather than assumed.
+    Replacing the delegating call with a constant left every pre-existing
+    test green, so the absence of a second parser is worth holding.
     """
-    import re
     from pathlib import Path
 
     import mission_persistence.fenced_commit as module
 
     source = Path(module.__file__).read_text(encoding="utf-8")
-    block = re.search(
-        r'\{"commit_digest",[^}]*\},\s*\n\s*"operation",', source, re.MULTILINE
-    )
-    assert block, "the operation reader no longer declares its key set inline"
-    named = set(re.findall(r'"([a-z_]+)"', block.group(0))) - {"operation"}
-    assert named == OPERATION_V1_KEYS
+    assert "read_operation_record(document)" in source
+    assert 'if document["schema"] != "mission-operation/1"' not in source
 
 
 def _operation_document(version, materialization=None):
@@ -543,3 +538,56 @@ def test_a_version_one_replay_is_not_asked_to_prove_its_content():
 
     assert replay_requires_materialization(1) is False
     assert replay_requires_materialization(2) is True
+
+
+def test_a_corrupted_operation_record_is_refused_when_the_replay_reads_it(tmp_path):
+    """Exercise the reader on the path that actually reaches it.
+
+    An earlier version of this test drove the CLI twice and asserted a
+    non-zero exit.  That exit came from ``session-already-initialized``,
+    which is raised before the operation record is ever opened, so the test
+    passed while the parser was replaced by a constant.  Reaching the reader
+    needs a genuine replay: the same operation id presented again to a
+    repository that already committed it.
+    """
+    import json
+
+    from mission_persistence.fenced_commit import CommitResult, FencedCommitError
+
+    from .test_issue503_fenced_commit import _commit_cli_init, _request
+
+    local, repository, _clock, _state_path, state_document_bytes, _result = _commit_cli_init(
+        tmp_path
+    )
+    lease_id = json.loads(state_document_bytes.decode("utf-8"))["lease_id"]
+    same_request = _request(
+        operation_id="operation-init",
+        lease_id=lease_id,
+        argv=("init", "Issue 500 CLI corpus"),
+        command_type="init",
+        event_types=("mission-initialized",),
+    )
+
+    assert isinstance(local.begin(same_request), CommitResult), (
+        "the fixture is expected to replay before the record is corrupted"
+    )
+
+    operations = sorted((repository / "operations").glob("*.json"))
+    assert len(operations) == 1
+    document = json.loads(operations[0].read_text(encoding="utf-8"))
+    document["schema"] = "mission-operation/9"
+    operations[0].write_bytes(
+        json.dumps(
+            document,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    )
+
+    with pytest.raises(FencedCommitError) as excinfo:
+        local.begin(same_request)
+    assert excinfo.value.code == "record-invalid", (
+        "the record has to fail the schema check, not the canonical-form check"
+    )
