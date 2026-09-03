@@ -64,3 +64,48 @@ def derive_blob_id(canonical_path: str) -> str:
         )
     digest = hashlib.sha256(canonical_path.encode("utf-8")).hexdigest()
     return BLOB_ID_PREFIX + digest
+
+
+BLOB_ORIGINS = frozenset({"captured", "generated"})
+LEGACY_BLOB_ORIGIN = "captured"
+SEMANTIC_CLAIM_FIELDS = ("kind", "target", "publication_path")
+
+
+def project_semantic_claim(claim: dict) -> dict:
+    """Return the part of one effect claim that decides which operation this is.
+
+    ``digest`` and ``size`` describe what the operation produced, not what it
+    was asked to do, so a retry that materializes the same request must not
+    look like a different operation because the bytes moved.
+    """
+    if not isinstance(claim, dict):
+        raise EvidencePublicationError("effect-claim-invalid", "effect claim must be a mapping")
+    missing = [name for name in SEMANTIC_CLAIM_FIELDS if name not in claim]
+    if missing:
+        raise EvidencePublicationError(
+            "effect-claim-invalid", "effect claim is missing " + ", ".join(missing)
+        )
+    canonical = canonical_publication_path(claim["publication_path"])
+    if claim["target"] != PurePosixPath(canonical).name:
+        raise EvidencePublicationError(
+            "effect-claim-invalid", "effect target is not the publication basename"
+        )
+    return {name: claim[name] for name in SEMANTIC_CLAIM_FIELDS}
+
+
+def blob_origin_of(record: dict) -> str:
+    """Return the origin one persisted blob record carries.
+
+    Records written before this field existed only ever held captured input,
+    so their absence is a known value rather than an unknown one.  An origin
+    that is present but unrecognised is refused instead: defaulting it would
+    silently reclassify a blob the writer meant to distinguish.
+    """
+    if not isinstance(record, dict):
+        raise EvidencePublicationError("blob-origin-invalid", "blob record must be a mapping")
+    if "origin" not in record:
+        return LEGACY_BLOB_ORIGIN
+    origin = record["origin"]
+    if origin not in BLOB_ORIGINS:
+        raise EvidencePublicationError("blob-origin-invalid", "blob origin is not recognised")
+    return origin

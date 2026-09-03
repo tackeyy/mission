@@ -52,3 +52,73 @@ def test_blob_id_matches_the_binding_identifier_grammar():
 def test_blob_id_rejects_a_path_that_is_not_canonical():
     with pytest.raises(EvidencePublicationError):
         derive_blob_id(".mission-state/manifest.json")
+
+
+def _claim_fields():
+    return {
+        "kind": "context-manifest",
+        "target": "manifest.json",
+        "publication_path": "build/manifest.json",
+        "digest": "sha256:" + "0" * 64,
+        "size": 12,
+    }
+
+
+def test_semantic_claim_keeps_only_what_decides_the_operation():
+    from mission_application.evidence_publication import project_semantic_claim
+
+    assert project_semantic_claim(_claim_fields()) == {
+        "kind": "context-manifest",
+        "target": "manifest.json",
+        "publication_path": "build/manifest.json",
+    }
+
+
+def test_semantic_claim_drops_the_generated_content_fields():
+    from mission_application.evidence_publication import project_semantic_claim
+
+    projected = project_semantic_claim(_claim_fields())
+    assert "digest" not in projected and "size" not in projected
+
+
+def test_semantic_claim_is_stable_when_only_the_content_changes():
+    from mission_application.evidence_publication import project_semantic_claim
+
+    first = _claim_fields()
+    second = dict(first, digest="sha256:" + "1" * 64, size=999)
+    assert project_semantic_claim(first) == project_semantic_claim(second)
+
+
+def test_semantic_claim_changes_when_the_destination_changes():
+    from mission_application.evidence_publication import project_semantic_claim
+
+    first = _claim_fields()
+    second = dict(first, publication_path="build/other.json", target="other.json")
+    assert project_semantic_claim(first) != project_semantic_claim(second)
+
+
+def test_semantic_claim_rejects_a_claim_whose_target_is_not_the_basename():
+    from mission_application.evidence_publication import project_semantic_claim
+
+    with pytest.raises(EvidencePublicationError):
+        project_semantic_claim(dict(_claim_fields(), target="mismatch.json"))
+
+
+def test_blob_origin_values_are_closed():
+    from mission_application.evidence_publication import BLOB_ORIGINS
+
+    assert BLOB_ORIGINS == frozenset({"captured", "generated"})
+
+
+def test_legacy_records_default_to_captured():
+    from mission_application.evidence_publication import blob_origin_of
+
+    assert blob_origin_of({"blob_id": "evidence:x"}) == "captured"
+    assert blob_origin_of({"blob_id": "evidence:x", "origin": "generated"}) == "generated"
+
+
+def test_unknown_origin_is_refused_rather_than_defaulted():
+    from mission_application.evidence_publication import blob_origin_of
+
+    with pytest.raises(EvidencePublicationError):
+        blob_origin_of({"blob_id": "evidence:x", "origin": "derived"})
