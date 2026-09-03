@@ -109,3 +109,44 @@ def blob_origin_of(record: dict) -> str:
     if origin not in BLOB_ORIGINS:
         raise EvidencePublicationError("blob-origin-invalid", "blob origin is not recognised")
     return origin
+
+
+KNOWN_RECORD_VERSIONS = (1, 2)
+MATERIALIZATION_RECORD_VERSION = 2
+
+
+def record_version(document: dict, record_name: str) -> int:
+    """Return which generation of one persisted record this document is.
+
+    The blob shape changes between generations, so every reader has to know
+    which one it holds before it looks for a field.  Deciding this from the
+    code path that produced the read would be wrong: a v4 repository keeps no
+    operation record at all, and the records that do exist were written by an
+    older v5.
+    """
+    if not isinstance(document, dict):
+        raise EvidencePublicationError("record-invalid", "record must be a mapping")
+    schema = document.get("schema")
+    if not isinstance(schema, str):
+        raise EvidencePublicationError("record-invalid", "record schema is not a string")
+    name, separator, version_text = schema.rpartition("/")
+    if not separator or name != record_name:
+        raise EvidencePublicationError(
+            "record-invalid", "record schema is not " + record_name
+        )
+    try:
+        version = int(version_text)
+    except ValueError:
+        raise EvidencePublicationError(
+            "record-invalid", "record schema version is not an integer"
+        ) from None
+    if version not in KNOWN_RECORD_VERSIONS:
+        raise EvidencePublicationError(
+            "record-invalid", "record schema version is not recognised"
+        )
+    return version
+
+
+def expects_materialization(version: int) -> bool:
+    """Say whether one record generation carries the materialization binding."""
+    return version >= MATERIALIZATION_RECORD_VERSION

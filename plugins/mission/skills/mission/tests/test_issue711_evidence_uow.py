@@ -164,3 +164,40 @@ def test_every_persisted_schema_is_classified():
 def test_records_outside_the_blob_shape_are_named_with_a_reason():
     for name, reason in UNVERSIONED_BY_BLOB_SHAPE.items():
         assert reason and name not in PERSISTED_RECORD_SCHEMAS
+
+
+def test_record_version_accepts_both_generations():
+    from mission_application.evidence_publication import record_version
+
+    assert record_version({"schema": "mission-commit/1"}, "mission-commit") == 1
+    assert record_version({"schema": "mission-commit/2"}, "mission-commit") == 2
+
+
+def test_record_version_refuses_another_record_name():
+    from mission_application.evidence_publication import record_version
+
+    with pytest.raises(EvidencePublicationError):
+        record_version({"schema": "mission-prepare/1"}, "mission-commit")
+
+
+def test_record_version_refuses_an_unknown_generation():
+    from mission_application.evidence_publication import record_version
+
+    for schema in ("mission-commit/0", "mission-commit/3", "mission-commit"):
+        with pytest.raises(EvidencePublicationError):
+            record_version({"schema": schema}, "mission-commit")
+
+
+def test_record_version_refuses_a_missing_or_non_string_schema():
+    from mission_application.evidence_publication import record_version
+
+    for document in ({}, {"schema": 2}, {"schema": None}):
+        with pytest.raises(EvidencePublicationError):
+            record_version(document, "mission-commit")
+
+
+def test_version_one_records_carry_no_materialization():
+    from mission_application.evidence_publication import expects_materialization
+
+    assert expects_materialization(1) is False
+    assert expects_materialization(2) is True
