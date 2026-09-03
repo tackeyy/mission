@@ -246,3 +246,43 @@ def assert_replay_materializes(*, recorded, prepared: dict) -> None:
             "replay-materialization-mismatch",
             "the recorded commit does not hold the prepared content",
         )
+
+
+MAX_BASE_RETRIES = 3
+BASE_IDENTIFIERS = ("base_head_digest", "base_generation")
+
+
+def base_agrees(*, observed: dict, admitted: dict) -> bool:
+    """Say whether the base this run prepared against is the admitted one.
+
+    Both identifiers have to match.  Either one alone can repeat across a
+    move -- a generation is only unique within a lineage, and a head digest
+    says nothing about how far the lineage has advanced -- so a single
+    agreement is not evidence that the base held still.
+    """
+    for side in (observed, admitted):
+        if not isinstance(side, dict):
+            raise EvidencePublicationError("base-invalid", "base must be a mapping")
+        missing = [name for name in BASE_IDENTIFIERS if name not in side]
+        if missing:
+            raise EvidencePublicationError(
+                "base-invalid", "base is missing " + ", ".join(missing)
+            )
+    return all(observed[name] == admitted[name] for name in BASE_IDENTIFIERS)
+
+
+def next_attempt(attempt: int) -> int:
+    """Return the next attempt number, or refuse to keep going.
+
+    Running out of attempts ends the operation without publishing.  Falling
+    through to a publish would place a file against a base nobody confirmed.
+    """
+    if type(attempt) is not int or not 1 <= attempt <= MAX_BASE_RETRIES:
+        raise EvidencePublicationError(
+            "base-retry-invalid", "attempt is outside the retry budget"
+        )
+    if attempt == MAX_BASE_RETRIES:
+        raise EvidencePublicationError(
+            "base-retry-exhausted", "the base moved on every attempt; nothing was published"
+        )
+    return attempt + 1

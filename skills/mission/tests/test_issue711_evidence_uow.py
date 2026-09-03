@@ -376,3 +376,56 @@ def test_replay_refuses_a_record_without_a_materialization():
         assert_replay_materializes(
             recorded=None, prepared=_materialization(["build/manifest.json"])
         )
+
+
+def _base(head_byte="a", generation=1):
+    return {"base_head_digest": "sha256:" + head_byte * 64, "base_generation": generation}
+
+
+def test_base_agrees_when_both_identifiers_match():
+    from mission_application.evidence_publication import base_agrees
+
+    assert base_agrees(observed=_base(), admitted=_base()) is True
+
+
+def test_base_disagrees_when_only_the_head_digest_moved():
+    from mission_application.evidence_publication import base_agrees
+
+    assert base_agrees(observed=_base("a"), admitted=_base("c")) is False
+
+
+def test_base_disagrees_when_only_the_generation_moved():
+    from mission_application.evidence_publication import base_agrees
+
+    assert base_agrees(observed=_base(generation=1), admitted=_base(generation=2)) is False
+
+
+def test_base_comparison_refuses_a_missing_identifier():
+    from mission_application.evidence_publication import base_agrees
+
+    with pytest.raises(EvidencePublicationError):
+        base_agrees(observed={"base_generation": 1}, admitted=_base())
+
+
+def test_retry_budget_allows_three_attempts():
+    from mission_application.evidence_publication import MAX_BASE_RETRIES, next_attempt
+
+    assert MAX_BASE_RETRIES == 3
+    assert next_attempt(1) == 2
+    assert next_attempt(2) == 3
+
+
+def test_retry_budget_stops_rather_than_publishing():
+    from mission_application.evidence_publication import next_attempt
+
+    with pytest.raises(EvidencePublicationError) as excinfo:
+        next_attempt(3)
+    assert excinfo.value.code == "base-retry-exhausted"
+
+
+def test_retry_budget_refuses_an_attempt_outside_the_budget():
+    from mission_application.evidence_publication import next_attempt
+
+    for attempt in (0, -1, 4):
+        with pytest.raises(EvidencePublicationError):
+            next_attempt(attempt)
