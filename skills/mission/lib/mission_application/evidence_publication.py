@@ -5,6 +5,7 @@ publication path と blob id は intent / generation / prepare / commit の各
 この 1 箇所に置き、呼び出し側で再導出しない。
 """
 import hashlib
+import json
 from pathlib import PurePosixPath
 
 REPOSITORY_ROOT_NAME = ".mission-state"
@@ -150,3 +151,76 @@ def record_version(document: dict, record_name: str) -> int:
 def expects_materialization(version: int) -> bool:
     """Say whether one record generation carries the materialization binding."""
     return version >= MATERIALIZATION_RECORD_VERSION
+
+
+SEMANTIC_INTENT_SCHEMA = "mission-intent/2"
+BINDING_FIELDS = ("blob_id", "digest", "kind", "relative_path", "size")
+
+
+def _canonical(value: dict) -> bytes:
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+
+
+def _partition_bindings(bindings) -> tuple[list, list]:
+    captured, generated = [], []
+    for record in bindings:
+        origin = blob_origin_of(record)
+        missing = [name for name in BINDING_FIELDS if name not in record]
+        if missing:
+            raise EvidencePublicationError(
+                "blob-binding-invalid", "binding is missing " + ", ".join(missing)
+            )
+        projected = {name: record[name] for name in BINDING_FIELDS}
+        (generated if origin == "generated" else captured).append(projected)
+    key = lambda item: item["blob_id"]
+    return sorted(captured, key=key), sorted(generated, key=key)
+
+
+def semantic_intent_digest(inputs: dict) -> str:
+    """Return the digest of what the caller asked for, not of what came out.
+
+    Generated bindings are left out on purpose: their digests only exist once
+    the operation has run, so including them would make the same request look
+    like a different operation every time its output moved.  Captured input
+    stays in, because a different input is a different request.
+    """
+    captured, _generated = _partition_bindings(inputs["bindings"])
+    return "sha256:" + hashlib.sha256(
+        _canonical(
+            {
+                "blobs": captured,
+                "command": inputs["command"],
+                "lease_owner_session_id": inputs["lease_owner_session_id"],
+                "operation_id": inputs["operation_id"],
+                "schema": SEMANTIC_INTENT_SCHEMA,
+                "session_id": inputs["session_id"],
+            }
+        )
+    ).hexdigest()
+
+
+def materialization_binding(
+    *,
+    bindings,
+    base_head_digest: str,
+    base_generation: int,
+    state_digest: str,
+) -> dict:
+    """Return what this run actually produced, against the base it saw.
+
+    Kept apart from the semantic digest so a replay can check that the commit
+    it is about to return holds the same bytes this run just prepared.
+    """
+    _captured, generated = _partition_bindings(bindings)
+    if type(base_generation) is not int:
+        raise EvidencePublicationError(
+            "materialization-invalid", "base generation is not an integer"
+        )
+    return {
+        "base_generation": base_generation,
+        "base_head_digest": base_head_digest,
+        "blobs": generated,
+        "state_digest": state_digest,
+    }

@@ -201,3 +201,109 @@ def test_version_one_records_carry_no_materialization():
 
     assert expects_materialization(1) is False
     assert expects_materialization(2) is True
+
+
+def _binding(path, origin, digest_byte="0"):
+    return {
+        "blob_id": "evidence:" + hashlib.sha256(path.encode("utf-8")).hexdigest(),
+        "digest": "sha256:" + digest_byte * 64,
+        "kind": "context-manifest",
+        "origin": origin,
+        "relative_path": path,
+        "size": 12,
+    }
+
+
+def _intent_inputs(bindings=None):
+    return {
+        "session_id": "s-1",
+        "lease_owner_session_id": "s-1",
+        "operation_id": "op-1",
+        "command": {"schema": "mission-command-intent/1", "type": "context-manifest"},
+        "bindings": bindings if bindings is not None else (),
+    }
+
+
+def test_semantic_intent_ignores_generated_bindings():
+    from mission_application.evidence_publication import semantic_intent_digest
+
+    without = semantic_intent_digest(_intent_inputs())
+    with_generated = semantic_intent_digest(
+        _intent_inputs((_binding("build/manifest.json", "generated"),))
+    )
+    assert without == with_generated
+
+
+def test_semantic_intent_depends_on_captured_bindings():
+    from mission_application.evidence_publication import semantic_intent_digest
+
+    without = semantic_intent_digest(_intent_inputs())
+    with_captured = semantic_intent_digest(
+        _intent_inputs((_binding("input/source.json", "captured"),))
+    )
+    assert without != with_captured
+
+
+def test_semantic_intent_is_stable_when_generated_content_changes():
+    from mission_application.evidence_publication import semantic_intent_digest
+
+    first = semantic_intent_digest(
+        _intent_inputs((_binding("build/manifest.json", "generated", "0"),))
+    )
+    second = semantic_intent_digest(
+        _intent_inputs((_binding("build/manifest.json", "generated", "1"),))
+    )
+    assert first == second
+
+
+def test_semantic_intent_changes_when_the_command_changes():
+    from mission_application.evidence_publication import semantic_intent_digest
+
+    other = _intent_inputs()
+    other["command"] = {"schema": "mission-command-intent/1", "type": "claims-ledger"}
+    assert semantic_intent_digest(_intent_inputs()) != semantic_intent_digest(other)
+
+
+def test_materialization_binding_holds_only_generated_bindings():
+    from mission_application.evidence_publication import materialization_binding
+
+    bound = materialization_binding(
+        bindings=(
+            _binding("build/manifest.json", "generated"),
+            _binding("input/source.json", "captured"),
+        ),
+        base_head_digest="sha256:" + "a" * 64,
+        base_generation=7,
+        state_digest="sha256:" + "b" * 64,
+    )
+    assert [item["relative_path"] for item in bound["blobs"]] == ["build/manifest.json"]
+    assert bound["base_generation"] == 7
+
+
+def test_materialization_binding_orders_blobs_by_identifier():
+    from mission_application.evidence_publication import materialization_binding
+
+    bindings = (
+        _binding("build/zzz.json", "generated"),
+        _binding("build/aaa.json", "generated"),
+    )
+    bound = materialization_binding(
+        bindings=bindings,
+        base_head_digest="sha256:" + "a" * 64,
+        base_generation=1,
+        state_digest="sha256:" + "b" * 64,
+    )
+    identifiers = [item["blob_id"] for item in bound["blobs"]]
+    assert identifiers == sorted(identifiers)
+
+
+def test_materialization_binding_refuses_an_unknown_origin():
+    from mission_application.evidence_publication import materialization_binding
+
+    with pytest.raises(EvidencePublicationError):
+        materialization_binding(
+            bindings=(_binding("build/manifest.json", "derived"),),
+            base_head_digest="sha256:" + "a" * 64,
+            base_generation=1,
+            state_digest="sha256:" + "b" * 64,
+        )
