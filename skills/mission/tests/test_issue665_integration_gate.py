@@ -781,3 +781,93 @@ def test_queue_workflow_delegates_to_the_same_gate_command():
     )
     assert invocation in skill
     assert invocation in state_management
+
+
+def test_the_gate_runs_the_command_the_base_declares_not_a_hardcoded_one(tmp_path):
+    """Change the base's contract and the gate has to follow it.
+
+    Checking the call site for the right function names cannot see whether the
+    contract's value is used: a call that reads the contract and then runs
+    `make test` anyway passes such a check.  Declaring a different command and
+    watching for it is what pins the behaviour.
+    """
+    gate = _gate_module()
+    repo = tmp_path / "declared"
+    _init_repo(repo)
+    (repo / "test_initial.py").write_text(
+        "def test_fixture():\n    assert True\n", encoding="utf-8"
+    )
+    # A second target, identical except for its name.  The gate must pick this
+    # one because the base says so, not the conventional `make test`.
+    makefile = (repo / "Makefile").read_text(encoding="utf-8")
+    (repo / "Makefile").write_text(
+        makefile + makefile.replace("test:", "declared-suite:", 1), encoding="utf-8"
+    )
+    (repo / ".mission" / "suite-contract.json").write_text(
+        json.dumps({
+            "schema": "mission-suite-contract/1",
+            "full_suite_command": ["make", "declared-suite"],
+        }) + "\n",
+        encoding="utf-8",
+    )
+    _commit(repo, "initial")
+    _run(repo, "git", "switch", "-q", "-c", "feature")
+    (repo / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    head_sha = _commit(repo, "feature")
+    _run(repo, "git", "switch", "-q", "main")
+    base_sha = _run(repo, "git", "rev-parse", "HEAD").stdout.strip()
+
+    commands = []
+
+    def runner(command, cwd, env=None):
+        commands.append(tuple(command))
+        return gate._local_runner(command, cwd, env)
+
+    gate.SubprocessGateOperations(repo, runner=runner).integrate_and_test(
+        head_sha, base_sha, lambda _message: None
+    )
+
+    suite_calls = [c for c in commands if c and c[0] == "make"]
+    assert suite_calls, commands
+    assert all(c[1] == "declared-suite" for c in suite_calls), suite_calls
+
+
+def test_the_gate_reads_the_contract_from_the_base_not_the_head(tmp_path):
+    """A contract added only on the branch must not take effect.
+
+    Otherwise a PR could declare its own command -- including one that runs
+    nothing -- and satisfy the gate with it.
+    """
+    gate = _gate_module()
+    repo = tmp_path / "head-contract"
+    _init_repo(repo)
+    (repo / "test_initial.py").write_text(
+        "def test_fixture():\n    assert True\n", encoding="utf-8"
+    )
+    _commit(repo, "initial")
+    _run(repo, "git", "switch", "-q", "-c", "feature")
+    # The branch rewrites the contract to a command that runs nothing.
+    (repo / ".mission" / "suite-contract.json").write_text(
+        json.dumps({
+            "schema": "mission-suite-contract/1",
+            "full_suite_command": ["true"],
+        }) + "\n",
+        encoding="utf-8",
+    )
+    head_sha = _commit(repo, "weaken the contract")
+    _run(repo, "git", "switch", "-q", "main")
+    base_sha = _run(repo, "git", "rev-parse", "HEAD").stdout.strip()
+
+    commands = []
+
+    def runner(command, cwd, env=None):
+        commands.append(tuple(command))
+        return gate._local_runner(command, cwd, env)
+
+    gate.SubprocessGateOperations(repo, runner=runner).integrate_and_test(
+        head_sha, base_sha, lambda _message: None
+    )
+
+    # The base's command ran; the branch's did not replace it.
+    assert any(c[:2] == ("make", "test") for c in commands), commands
+    assert not any(c == ("true",) for c in commands), commands
