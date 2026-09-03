@@ -389,8 +389,18 @@ class SubprocessGateOperations:
         self.binary_runner = binary_runner or _local_binary_runner
         self.node_binary = node_binary
 
-    def _run(self, arguments: Iterable[str], *, cwd: Optional[Path] = None) -> CommandResult:
-        return self.runner(tuple(arguments), cwd or self.repository_root)
+    def _run(self, arguments: Iterable[str], *, cwd: Optional[Path] = None,
+             env: Optional[dict] = None) -> CommandResult:
+        target = cwd or self.repository_root
+        if env is None:
+            return self.runner(tuple(arguments), target)
+        # Only pass `env` when there is something to pass: a runner that does
+        # not accept it stays usable for every other call.
+        return self.runner(tuple(arguments), target, env=env)
+
+    def _suite_runner(self, arguments, cwd, env=None) -> CommandResult:
+        """Adapt the gate's runner to run_declared_suite's calling convention."""
+        return self._run(arguments, cwd=cwd, env=env)
 
     def _checked(
         self,
@@ -759,14 +769,24 @@ class SubprocessGateOperations:
             )
             logger("test_scope={} test_targets={}".format(scope, targets or "<repository default>"))
             changeset_digest = self.observe_changeset_digest(base_sha, head_sha, tree)
-            suite_command = ("make", "test")
+            # The suite command comes from the base's contract, not from here:
+            # a PR that could choose the command could choose one that runs
+            # nothing (#735).
+            contract = load_suite_contract(self, base_sha=base_sha, step=4)
+            suite_command = require_suite_contract(contract, step=4)
             if targets:
                 suite_command += ("PYTEST_TARGETS={}".format(targets),)
-            suite = self._run(suite_command, cwd=tree)
-            if suite.returncode != 0:
-                logger("suite_exit={}".format(suite.returncode))
-                raise IntegrationGateError(4, "suite-failed", "integrated tree suite failed")
-            logger("suite_exit=0")
+            report_path = Path(tree) / ".mission-gate-suite-report.json"
+            executed = run_declared_suite(
+                suite_command,
+                runner=self._suite_runner,
+                cwd=tree,
+                report_path=report_path,
+                expected_tree_sha=tree_sha,
+                step=4,
+                logger=logger,
+            )
+            logger("suite_exit=0 suite_executed={}".format(executed))
             observation = IntegrationObservation(scope, targets, tree_sha, changeset_digest)
         except BaseException:
             if not self._cleanup_worktree(scratch_parent, tree, registered):

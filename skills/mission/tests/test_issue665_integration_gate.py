@@ -76,9 +76,40 @@ def _write_fixture_scaffolding(repo: Path) -> None:
     shutil.copyfile(CI_SCOPE_HELPER, repo / "scripts" / "ci_changed_scopes.js")
     # CI の別 interpreter 環境でも同じ結果になるよう、fixture の suite は現在の
     # interpreter を絶対パスで固定し、外側の pytest 設定を継承しない。
+    # #735: the gate reads the suite command from the base's contract and
+    # requires evidence that the suite ran, so the fixture declares one and
+    # writes a report.  Without both, every integration here fails closed --
+    # which is the point of the change, but it has to be modelled here too.
+    (repo / ".mission").mkdir()
+    (repo / ".mission" / "suite-contract.json").write_text(
+        json.dumps({
+            "schema": "mission-suite-contract/1",
+            "full_suite_command": ["make", "test"],
+        }) + "\n",
+        encoding="utf-8",
+    )
+    # A separate script rather than a Makefile one-liner: quoting a multi-line
+    # program through make and the shell is where this breaks silently.
+    (repo / "scripts" / "fixture_suite_report.py").write_text(
+        "import json, os, subprocess, xml.etree.ElementTree as ET\n"
+        "root = ET.parse('.mission-gate-junit.xml').getroot()\n"
+        "suites = [root] if root.tag == 'testsuite' else root.findall('testsuite')\n"
+        "executed = sum(1 for s in suites for c in s.findall('testcase')\n"
+        "               if c.find('skipped') is None)\n"
+        "tree = subprocess.run(['git', 'write-tree'], capture_output=True,\n"
+        "                      text=True, check=True).stdout.strip()\n"
+        "path = os.environ.get('MISSION_SUITE_REPORT')\n"
+        "if path:\n"
+        "    open(path, 'w').write(json.dumps({'schema': 'mission-suite-report/1',\n"
+        "        'tree_sha': tree, 'executed': executed, 'status': 'complete'}))\n",
+        encoding="utf-8",
+    )
     (repo / "Makefile").write_text(
-        "test:\n\t{} -m pytest -q -p no:cacheprovider --rootdir . .\n".format(
-            shlex.quote(sys.executable)
+        "test:\n"
+        "\t{python} -m pytest -q -p no:cacheprovider --rootdir . "
+        "--junit-xml=.mission-gate-junit.xml .\n"
+        "\t{python} scripts/fixture_suite_report.py\n".format(
+            python=shlex.quote(sys.executable)
         ),
         encoding="utf-8",
     )
@@ -344,11 +375,11 @@ def test_scratch_deregistration_failure_stops_before_merge(tmp_path):
     gate = _gate_module()
     repo, head_sha, base_sha = _integration_fixture(tmp_path, regression=False)
 
-    def runner(arguments, cwd):
+    def runner(arguments, cwd, env=None):
         command = tuple(arguments)
         if command[:3] == ("git", "worktree", "remove"):
             return gate.CommandResult(1, "", "deregister failed")
-        return gate._local_runner(command, cwd)
+        return gate._local_runner(command, cwd, env)
 
     operations = gate.SubprocessGateOperations(repo, runner=runner)
 
@@ -363,11 +394,11 @@ def test_cleanup_failure_is_logged_when_preserving_an_earlier_failure(tmp_path):
     repo, head_sha, base_sha = _integration_fixture(tmp_path, regression=True)
     messages = []
 
-    def runner(arguments, cwd):
+    def runner(arguments, cwd, env=None):
         command = tuple(arguments)
         if command[:3] == ("git", "worktree", "remove"):
             return gate.CommandResult(1, "", "deregister failed")
-        return gate._local_runner(command, cwd)
+        return gate._local_runner(command, cwd, env)
 
     operations = gate.SubprocessGateOperations(repo, runner=runner)
 
@@ -650,7 +681,7 @@ def test_fetch_view_head_and_merge_commands_are_runner_injected(tmp_path):
         }
     )
 
-    def runner(arguments, _cwd):
+    def runner(arguments, _cwd, env=None):
         command = tuple(arguments)
         commands.append(command)
         if command[:3] == ("gh", "pr", "view"):
@@ -714,9 +745,11 @@ def test_docs_only_scope_delegates_to_existing_ci_selector(tmp_path):
 
     commands = []
 
-    def runner(arguments, cwd):
+    def runner(arguments, cwd, env=None):
         commands.append(tuple(arguments))
-        return gate._local_runner(arguments, cwd)
+        # Pass `env` through: dropping it means the suite never learns where to
+        # write its report, and the gate then reports it as absent.
+        return gate._local_runner(arguments, cwd, env)
 
     observation = gate.SubprocessGateOperations(repo, runner=runner).integrate_and_test(
         head_sha, base_sha, lambda _message: None
