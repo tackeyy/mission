@@ -48,6 +48,7 @@ class RecordingOperations:
         self.digest = digest
         self.default_branch = default_branch
         self.merges = []
+        self.lease_entries = 0
         self.snapshots = [
             gate.PullRequestSnapshot(1, HEAD_SHA, default_branch, "OPEN", None, None, BASE_SHA),
             gate.PullRequestSnapshot(1, HEAD_SHA, default_branch, "OPEN", None, None, BASE_SHA),
@@ -59,6 +60,9 @@ class RecordingOperations:
 
     @contextmanager
     def lease(self):
+        # 検査が lease の外で終わることを固定するための spy。記録しないと、検査を
+        # lease の内側へ移しても全テストが通ってしまう。
+        self.lease_entries += 1
         yield
 
     def resolve_origin_identity(self):
@@ -137,6 +141,92 @@ class TestPairing:
         assert excinfo.value.reason == "reviewed-changeset-digest-missing"
         assert excinfo.value.step == 1
         assert operations.merges == []
+
+
+class TestValidationHappensBeforeTheLease:
+    """不正な入力は merge 経路へ入る前に落とす。
+
+    lease は他セッターとの排他であり、取得したまま失敗すると、その間ほかの gate が
+    待たされる。**入力の形式だけで判定できるものを、資源を取ってから判定しない。**
+    """
+
+    @pytest.mark.parametrize(
+        ("kwargs", "reason"),
+        [
+            (
+                {"expected_changeset_digest": "not-a-digest", "claimed_digest_source": "nope"},
+                "invalid-expected-changeset-digest",
+            ),
+            (
+                {"expected_changeset_digest": DIGEST, "claimed_digest_source": "nope"},
+                "invalid-claimed-digest-source",
+            ),
+            (
+                {"expected_changeset_digest": DIGEST},
+                "claimed-digest-source-missing",
+            ),
+            (
+                {"claimed_digest_source": "checker-comment"},
+                "reviewed-changeset-digest-missing",
+            ),
+        ],
+    )
+    def test_invalid_input_fails_at_step_one_without_taking_the_lease(self, kwargs, reason):
+        operations = RecordingOperations()
+        with pytest.raises(application.IntegrationGateFailure) as excinfo:
+            run(operations, **kwargs)
+        assert (excinfo.value.step, excinfo.value.reason) == (1, reason)
+        assert operations.lease_entries == 0
+        assert operations.merges == []
+
+    def test_valid_input_does_take_the_lease(self):
+        """通るべきものが通ることも固定する。これが無いと、何でも落とす実装でも緑になる。"""
+        operations = RecordingOperations()
+        run(
+            operations,
+            expected_changeset_digest=DIGEST,
+            claimed_digest_source="checker-comment",
+        )
+        assert operations.lease_entries == 1
+
+
+class TestPortContract:
+    """port の arity は入力によって変わらない。
+
+    申告が無いときだけ 5 引数で呼ぶ互換経路を作ると、port の実装者はどちらの契約へ
+    合わせるか決められず、**壊れ方が入力依存になる**。6 引数固定を契約として固定する。
+    """
+
+    def _run_with_port(self, request):
+        seen = {}
+
+        def execute(*args):
+            seen["args"] = args
+            return {"status": "merged"}
+
+        application.run_integration_gate(
+            request, application.IntegrationGateServices(execute=execute)
+        )
+        return seen["args"]
+
+    def test_port_receives_six_arguments_without_a_claim(self):
+        args = self._run_with_port(
+            application.IntegrationGateRequest(repository_root=".", pr_ref="1")
+        )
+        assert len(args) == 6
+        assert args[5] is None
+
+    def test_port_receives_the_claim_when_present(self):
+        args = self._run_with_port(
+            application.IntegrationGateRequest(
+                repository_root=".",
+                pr_ref="1",
+                expected_changeset_digest=DIGEST,
+                claimed_digest_source="argv-manual",
+            )
+        )
+        assert len(args) == 6
+        assert args[4:] == (DIGEST, "argv-manual")
 
 
 class TestClaimVocabulary:
