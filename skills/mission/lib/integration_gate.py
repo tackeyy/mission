@@ -54,13 +54,23 @@ class BinaryCommandResult:
 IntegrationGateError = IntegrationGateFailure
 
 
-def _local_runner(arguments: Iterable[str], cwd: Path) -> CommandResult:
+def _local_runner(arguments: Iterable[str], cwd: Path, env: Optional[dict] = None) -> CommandResult:
+    """Run a command, optionally adding variables to the inherited environment.
+
+    `env` extends what the process already has rather than replacing it: a
+    declared suite needs PATH and the rest of its environment to work at all.
+    """
+    environment = None
+    if env:
+        environment = dict(os.environ)
+        environment.update(env)
     completed = subprocess.run(
         list(arguments),
         cwd=str(cwd),
         capture_output=True,
         text=True,
         check=False,
+        env=environment,
     )
     return CommandResult(completed.returncode, completed.stdout, completed.stderr)
 
@@ -205,6 +215,166 @@ def parse_symref_output(output: object) -> str:
     return validate_default_branch_name(ref[len("refs/heads/"):])
 
 
+SUITE_CONTRACT_PATH = ".mission/suite-contract.json"
+SUITE_CONTRACT_SCHEMA = "mission-suite-contract/1"
+SUITE_REPORT_SCHEMA = "mission-suite-report/1"
+# The gate tells the suite where to write through the environment rather than
+# through argv.  An argv placeholder would need a substitution rule, and that
+# rule would have to mean the same thing to every runner a repository might
+# declare; every runner already inherits the environment.
+SUITE_REPORT_ENV = "MISSION_SUITE_REPORT"
+
+
+def load_suite_contract(operations, *, base_sha: str, step: int) -> dict:
+    """Read the suite contract from the base commit (#735).
+
+    Not from the integrated tree: a PR that could rewrite the contract could
+    point it at a command that runs nothing and pass itself.  Reading the base
+    means the *command* is the one that was already merged.
+
+    **That is the whole of what this pins.**  The contract fixes which command
+    runs, not what that command does.  A PR can still change the `Makefile` the
+    command invokes, or the tests themselves, and produce a truthful report for
+    a suite it has hollowed out.  This is the same boundary the gate has always
+    had -- a PR can delete tests -- and closing it would need a reporter the
+    base side trusts to observe the count itself.
+
+    What this does close is narrower still: a run that exits zero **without
+    producing a valid report**.  A runner that executes nothing but writes a
+    well-formed report claiming one test still passes -- the report is a
+    self-declaration, and nothing here observes the run independently.
+    """
+    raw = operations.read_base_file(base_sha, SUITE_CONTRACT_PATH)
+    if raw is None:
+        raise IntegrationGateError(
+            step,
+            "suite-contract-missing",
+            "no {} in the base.  Declare the full suite there and merge it "
+            "first -- the gate cannot show a suite ran without one.".format(
+                SUITE_CONTRACT_PATH
+            ),
+        )
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as error:
+        raise IntegrationGateError(
+            step, "suite-contract-invalid", "suite contract is not valid JSON"
+        ) from error
+
+
+def require_suite_contract(document: object, *, step: int) -> tuple:
+    """Return the declared full-suite command, or stop the gate (#735).
+
+    The gate can only check `make test`'s exit code, and a repository whose
+    suite runs nothing still exits 0.  The declaration is what lets the gate
+    require evidence of execution instead.
+
+    The command is argv, not a shell string: a string would be split by
+    whatever runs it, so the same declaration could mean different things in
+    different environments.
+    """
+    if document is None:
+        raise IntegrationGateError(
+            step,
+            "suite-contract-missing",
+            "no {} in the base; declare the full suite before using the gate".format(
+                SUITE_CONTRACT_PATH
+            ),
+        )
+    if not isinstance(document, dict) or document.get("schema") != SUITE_CONTRACT_SCHEMA:
+        raise IntegrationGateError(step, "suite-contract-invalid", "suite contract schema is invalid")
+    command = document.get("full_suite_command")
+    if (not isinstance(command, (list, tuple)) or not command
+            or not all(isinstance(item, str) and item for item in command)):
+        raise IntegrationGateError(
+            step, "suite-contract-invalid", "full_suite_command must be a non-empty argv list"
+        )
+    return tuple(command)
+
+
+def require_suite_report(document: object, *, expected_tree_sha: str, step: int) -> int:
+    """Return the executed test count, or stop the gate (#735).
+
+    Zero is the case this exists for, but it is not the only one: a run that
+    died halfway can still write a positive count, and a report bound to a
+    different tree says nothing about the tree that is about to merge.
+    """
+    def unusable(detail: str):
+        return IntegrationGateError(step, "suite-report-unusable", detail)
+
+    if not isinstance(document, dict) or document.get("schema") != SUITE_REPORT_SCHEMA:
+        raise unusable("suite report is absent or has an invalid schema")
+    tree_sha = document.get("tree_sha")
+    if not isinstance(tree_sha, str) or _SHA_RE.fullmatch(tree_sha) is None:
+        raise unusable("suite report tree sha is invalid")
+    if tree_sha != expected_tree_sha:
+        raise unusable("suite report is bound to a different tree")
+    if document.get("status") != "complete":
+        raise unusable("suite report does not record a completed run")
+    executed = document.get("executed")
+    if type(executed) is not int or executed <= 0:
+        # No upper bound: the contract does not set one, and inventing a ceiling
+        # would reject a legitimately larger suite without making a forged count
+        # any harder -- the count is self-declared either way.
+        raise unusable("suite report does not record any executed test")
+    return executed
+
+
+def run_declared_suite(command, *, runner, cwd, report_path, expected_tree_sha, step,
+                       logger=None, env=None):
+    """Run the declared full suite and require evidence that it ran (#735).
+
+    A non-zero exit is still reported as ``suite-failed``: this adds a
+    requirement, it does not replace the existing one.  A zero exit is no
+    longer enough on its own -- a suite that runs nothing also exits zero, and
+    that is the hole this closes.
+    """
+    report_path = Path(report_path)
+    # A file already there proves nothing about the run about to happen.  A
+    # runner that does nothing and exits 0, next to a leftover report, would
+    # otherwise satisfy every field check.
+    if report_path.exists() or report_path.is_symlink():
+        raise IntegrationGateError(
+            step,
+            "suite-report-unusable",
+            "a suite report already exists before the run; the gate cannot tell "
+            "it apart from one this run produced",
+        )
+    suite_env = dict(env or {})
+    suite_env[SUITE_REPORT_ENV] = str(report_path)
+    result = runner(tuple(command), cwd, env=suite_env)
+    if result.returncode != 0:
+        if logger is not None:
+            logger("suite_exit={}".format(result.returncode))
+        raise IntegrationGateError(step, "suite-failed", "integrated tree suite failed")
+    return require_suite_report(
+        read_suite_report(report_path), expected_tree_sha=expected_tree_sha, step=step
+    )
+
+
+def read_suite_report(path):
+    """Read the report from the path the gate named.
+
+    Absent is distinct from unreadable: a missing file means the suite wrote
+    nothing, while a malformed one means the gate cannot tell what happened.
+    Only the first is returned as ``None``; the second stops the gate here so
+    it is never mistaken for the former.
+    """
+    path = Path(path)
+    # `exists()` follows symlinks, so a dangling one would read as "no report"
+    # -- collapsing the two cases this is meant to keep apart.
+    if not path.exists() and not path.is_symlink():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        # ValueError covers numbers Python cannot represent; letting it escape
+        # would surface as an internal error rather than an unusable report.
+        raise IntegrationGateError(
+            4, "suite-report-unusable", "suite report could not be read"
+        ) from error
+
+
 class SubprocessGateOperations:
     """Git and process adapter; all external commands are runner-injectable."""
 
@@ -221,8 +391,18 @@ class SubprocessGateOperations:
         self.binary_runner = binary_runner or _local_binary_runner
         self.node_binary = node_binary
 
-    def _run(self, arguments: Iterable[str], *, cwd: Optional[Path] = None) -> CommandResult:
-        return self.runner(tuple(arguments), cwd or self.repository_root)
+    def _run(self, arguments: Iterable[str], *, cwd: Optional[Path] = None,
+             env: Optional[dict] = None) -> CommandResult:
+        target = cwd or self.repository_root
+        if env is None:
+            return self.runner(tuple(arguments), target)
+        # Only pass `env` when there is something to pass: a runner that does
+        # not accept it stays usable for every other call.
+        return self.runner(tuple(arguments), target, env=env)
+
+    def _suite_runner(self, arguments, cwd, env=None) -> CommandResult:
+        """Adapt the gate's runner to run_declared_suite's calling convention."""
+        return self._run(arguments, cwd=cwd, env=env)
 
     def _checked(
         self,
@@ -348,6 +528,17 @@ class SubprocessGateOperations:
         if _SHA_RE.fullmatch(value) is None:
             raise IntegrationGateError(2, "base-observation-failed", "base sha is invalid")
         return value
+
+    def read_base_file(self, base_sha: str, path: str) -> Optional[str]:
+        """Read one file as it exists in the base commit (#735).
+
+        Returns None when the base has no such file, so the caller can tell
+        "not declared" apart from "declared but unreadable".
+        """
+        result = self._run(("git", "show", "{}:{}".format(base_sha, path)))
+        if result.returncode != 0:
+            return None
+        return result.stdout
 
     def read_pull_request(self, pr_ref: str, step: int = 6) -> PullRequestSnapshot:
         result = self._checked(
@@ -580,14 +771,28 @@ class SubprocessGateOperations:
             )
             logger("test_scope={} test_targets={}".format(scope, targets or "<repository default>"))
             changeset_digest = self.observe_changeset_digest(base_sha, head_sha, tree)
-            suite_command = ("make", "test")
-            if targets:
-                suite_command += ("PYTEST_TARGETS={}".format(targets),)
-            suite = self._run(suite_command, cwd=tree)
-            if suite.returncode != 0:
-                logger("suite_exit={}".format(suite.returncode))
-                raise IntegrationGateError(4, "suite-failed", "integrated tree suite failed")
-            logger("suite_exit=0")
+            # The suite command comes from the base's contract, not from here:
+            # a PR that could choose the command could choose one that runs
+            # nothing (#735).
+            contract = load_suite_contract(self, base_sha=base_sha, step=4)
+            suite_command = require_suite_contract(contract, step=4)
+            # The scope goes through the environment, not the argument list:
+            # appending "PYTEST_TARGETS=..." only means anything to make, and
+            # any other declared command would receive it as an extra
+            # positional argument and do something else.
+            suite_env = {"PYTEST_TARGETS": targets} if targets else None
+            report_path = Path(tree) / ".mission-gate-suite-report.json"
+            executed = run_declared_suite(
+                suite_command,
+                runner=self._suite_runner,
+                cwd=tree,
+                report_path=report_path,
+                expected_tree_sha=tree_sha,
+                step=4,
+                logger=logger,
+                env=suite_env,
+            )
+            logger("suite_exit=0 suite_executed={}".format(executed))
             observation = IntegrationObservation(scope, targets, tree_sha, changeset_digest)
         except BaseException:
             if not self._cleanup_worktree(scratch_parent, tree, registered):
