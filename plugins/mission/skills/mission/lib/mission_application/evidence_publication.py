@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 from pathlib import PurePosixPath
+from typing import Optional
 
 REPOSITORY_ROOT_NAME = ".mission-state"
 BLOB_ID_PREFIX = "evidence:"
@@ -82,7 +83,10 @@ SEMANTIC_CLAIM_FIELDS = ("kind", "target", "publication_path")
 
 
 def project_semantic_claim(
-    claim: dict, *, repository_root_name: str = REPOSITORY_ROOT_NAME
+    claim: dict,
+    *,
+    repository_root_name: str = REPOSITORY_ROOT_NAME,
+    expects_publication_path: Optional[bool] = None,
 ) -> dict:
     """Return the part of one effect claim that decides which operation this is.
 
@@ -99,9 +103,17 @@ def project_semantic_claim(
         )
     projected = {name: claim[name] for name in REQUIRED_CLAIM_FIELDS}
     # Artifact and progress claims name a target without naming where it is
-    # published; only the evidence claims carry a path.  Demanding one of all
-    # of them refused five of the seven command types that declare an effect.
-    if "publication_path" in claim:
+    # published; only the evidence claims carry a path.  Which of the two a
+    # claim is comes from its command, not from whether the field happens to
+    # be there: treating it as optional for everyone means it is required for
+    # no one.
+    present = "publication_path" in claim
+    if expects_publication_path is not None and present != expects_publication_path:
+        raise EvidencePublicationError(
+            "effect-claim-invalid",
+            "effect claim %s a publication path" % ("must name" if not present else "must not name"),
+        )
+    if present:
         canonical = canonical_publication_path(
             claim["publication_path"], repository_root_name=repository_root_name
         )
@@ -183,21 +195,25 @@ def _partition_bindings(
             raise EvidencePublicationError(
                 "blob-binding-invalid", "binding is missing " + ", ".join(missing)
             )
+        canonical = canonical_publication_path(
+            record["relative_path"], repository_root_name=repository_root_name
+        )
         if record["blob_id"] != derive_blob_id(
-            canonical_publication_path(
-                record["relative_path"], repository_root_name=repository_root_name
-            ),
-            repository_root_name=repository_root_name,
+            canonical, repository_root_name=repository_root_name
         ):
             raise EvidencePublicationError(
                 "blob-binding-invalid", "blob id does not match its publication path"
             )
         projected = {name: record[name] for name in BINDING_FIELDS}
+        projected["relative_path"] = canonical
         (generated if origin == "generated" else captured).append(projected)
     key = lambda item: item["blob_id"]
     return sorted(captured, key=key), sorted(generated, key=key)
 
 
+PATH_BEARING_COMMAND_TYPES = frozenset(
+    {"generate-claims-ledger", "generate-context-manifest"}
+)
 EFFECT_FIELDS_BY_COMMAND_TYPE = {
     "export-artifact": ("artifact_effect", "export_effect"),
     "generate-claims-ledger": ("effect",),
@@ -238,7 +254,9 @@ def project_semantic_command(
                 "command-invalid", "encoded command is missing " + field
             )
         projected_value[field] = project_semantic_claim(
-            value[field], repository_root_name=repository_root_name
+            value[field],
+            repository_root_name=repository_root_name,
+            expects_publication_path=command.get("type") in PATH_BEARING_COMMAND_TYPES,
         )
     return dict(command, value=projected_value)
 
@@ -292,6 +310,16 @@ def materialization_binding(
         raise EvidencePublicationError(
             "materialization-invalid", "base generation is not an integer"
         )
+    # The writer refuses what the reader refuses.  Producing a record that
+    # cannot be read back leaves a replay with nothing to compare against.
+    for name, candidate in (
+        ("base head digest", base_head_digest),
+        ("state digest", state_digest),
+    ):
+        if not isinstance(candidate, str) or not DIGEST_PATTERN.fullmatch(candidate):
+            raise EvidencePublicationError(
+                "materialization-invalid", name + " is invalid"
+            )
     return {
         "base_generation": base_generation,
         "base_head_digest": base_head_digest,

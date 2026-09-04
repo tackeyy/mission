@@ -470,7 +470,7 @@ def test_the_repository_no_longer_parses_the_operation_record_itself():
     import mission_persistence.fenced_commit as module
 
     source = Path(module.__file__).read_text(encoding="utf-8")
-    assert "read_operation_record(document)" in source
+    assert "read_operation_record(document, repository_root_name=" in source
     assert 'if document["schema"] != "mission-operation/1"' not in source
 
 
@@ -869,7 +869,6 @@ def test_semantic_command_projects_both_effects_of_an_export():
     claim = {
         "digest": "sha256:" + "0" * 64,
         "kind": "artifact",
-        "publication_path": "build/a.json",
         "size": 5,
         "target": "a.json",
     }
@@ -1047,3 +1046,93 @@ def test_materialization_refuses_null_base_and_state_digests():
     for field in ("base_head_digest", "state_digest"):
         with pytest.raises(EvidencePublicationError):
             read_materialization(dict(complete, **{field: None}))
+
+
+PATH_BEARING_COMMAND_TYPES = ("generate-context-manifest", "generate-claims-ledger")
+
+
+@pytest.mark.parametrize("command_type", PATH_BEARING_COMMAND_TYPES)
+def test_a_command_that_must_name_a_path_is_refused_without_one(command_type):
+    """Optional everywhere is the same as required nowhere.
+
+    The evidence commands publish to a path they declare; dropping it has to
+    fail for them even though the artifact and progress claims never carry
+    one.
+    """
+    from mission_application.evidence_publication import project_semantic_command
+
+    document = _real_command(command_type)
+    stripped = json.loads(json.dumps(document))
+    del stripped["value"]["effect"]["publication_path"]
+    with pytest.raises(EvidencePublicationError):
+        project_semantic_command(stripped)
+
+
+@pytest.mark.parametrize("command_type", ["initialize-artifact", "update-progress"])
+def test_a_command_that_never_names_a_path_is_refused_with_one(command_type):
+    from mission_application.evidence_publication import project_semantic_command
+
+    document = json.loads(json.dumps(_real_command(command_type)))
+    document["value"]["effect"]["publication_path"] = "build/x.json"
+    with pytest.raises(EvidencePublicationError):
+        project_semantic_command(document)
+
+
+def test_the_writer_cannot_produce_what_the_reader_refuses():
+    """A round trip has to hold, or a record is written that cannot be read."""
+    from mission_application.evidence_publication import (
+        materialization_binding,
+        read_materialization,
+    )
+
+    for absent in ("base_head_digest", "state_digest"):
+        with pytest.raises(EvidencePublicationError):
+            materialization_binding(
+                bindings=(_binding("build/x.json", "generated"),),
+                base_head_digest=None if absent == "base_head_digest" else "sha256:" + "a" * 64,
+                base_generation=1,
+                state_digest=None if absent == "state_digest" else "sha256:" + "b" * 64,
+            )
+
+    written = materialization_binding(
+        bindings=(_binding("build/x.json", "generated"),),
+        base_head_digest="sha256:" + "a" * 64,
+        base_generation=1,
+        state_digest="sha256:" + "b" * 64,
+    )
+    assert read_materialization(written) == written
+
+
+def test_a_non_canonical_path_does_not_survive_the_round_trip():
+    """`build//x.json` used to be accepted going out and coming back in."""
+    from mission_application.evidence_publication import (
+        derive_blob_id,
+        materialization_binding,
+        read_materialization,
+    )
+
+    binding = {
+        "blob_id": derive_blob_id("build/x.json"),
+        "digest": "sha256:" + "0" * 64,
+        "kind": "context-manifest",
+        "origin": "generated",
+        "relative_path": "build//x.json",
+        "size": 12,
+    }
+    written = materialization_binding(
+        bindings=(binding,),
+        base_head_digest="sha256:" + "a" * 64,
+        base_generation=1,
+        state_digest="sha256:" + "b" * 64,
+    )
+    assert written["blobs"][0]["relative_path"] == "build/x.json"
+    assert read_materialization(written) == written
+
+
+def test_the_repository_passes_its_own_root_name_to_the_reader():
+    from pathlib import Path
+
+    import mission_persistence.fenced_commit as module
+
+    source = Path(module.__file__).read_text(encoding="utf-8")
+    assert "read_operation_record(document, repository_root_name=self.root.name)" in source

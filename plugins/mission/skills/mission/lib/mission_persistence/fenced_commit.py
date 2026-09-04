@@ -1694,7 +1694,7 @@ class LocalFencedRepository:
             # execution order changes.  The call still has to happen here,
             # because it is what refuses a record whose shape and generation
             # disagree before the replay returns it.
-            read_operation_record(document)
+            read_operation_record(document, repository_root_name=self.root.name)
         except EvidencePublicationError as exc:
             raise FencedCommitError("record-invalid", exc.detail) from exc
         operation_id = _token(document["operation_id"], "operation.operation_id")
