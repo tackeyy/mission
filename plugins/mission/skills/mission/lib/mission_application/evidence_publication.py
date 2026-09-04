@@ -184,28 +184,60 @@ def _canonical(value: dict) -> bytes:
     ).encode("utf-8")
 
 
+def _canonical_binding(
+    record: dict, *, repository_root_name: str = REPOSITORY_ROOT_NAME
+) -> dict:
+    """Return one binding in the single form this module accepts.
+
+    Normalisation and the identifier check belong together: the identifier is
+    derived from the canonical path, so a caller that checks one without the
+    other can accept a record whose path and id disagree.  Keeping the rule
+    in two places is exactly how the writer and the reader drifted apart.
+    """
+    if not isinstance(record, dict):
+        raise EvidencePublicationError(
+            "blob-binding-invalid", "blob binding is not an object"
+        )
+    missing = [name for name in BINDING_FIELDS if name not in record]
+    if missing:
+        raise EvidencePublicationError(
+            "blob-binding-invalid", "binding is missing " + ", ".join(missing)
+        )
+    if not isinstance(record["relative_path"], str):
+        raise EvidencePublicationError(
+            "blob-binding-invalid", "blob path is not a string"
+        )
+    canonical = canonical_publication_path(
+        record["relative_path"], repository_root_name=repository_root_name
+    )
+    if record["blob_id"] != derive_blob_id(
+        canonical, repository_root_name=repository_root_name
+    ):
+        raise EvidencePublicationError(
+            "blob-binding-invalid", "blob id does not match its publication path"
+        )
+    if not isinstance(record["digest"], str) or not DIGEST_PATTERN.fullmatch(
+        record["digest"]
+    ):
+        raise EvidencePublicationError("blob-binding-invalid", "blob digest is invalid")
+    if not isinstance(record["kind"], str) or not record["kind"]:
+        raise EvidencePublicationError("blob-binding-invalid", "blob kind is invalid")
+    if type(record["size"]) is not int or record["size"] < 0:
+        raise EvidencePublicationError("blob-binding-invalid", "blob size is invalid")
+    projected = {name: record[name] for name in BINDING_FIELDS}
+    projected["relative_path"] = canonical
+    return projected
+
+
 def _partition_bindings(
     bindings, *, repository_root_name: str = REPOSITORY_ROOT_NAME
 ) -> tuple[list, list]:
     captured, generated = [], []
     for record in bindings:
         origin = blob_origin_of(record)
-        missing = [name for name in BINDING_FIELDS if name not in record]
-        if missing:
-            raise EvidencePublicationError(
-                "blob-binding-invalid", "binding is missing " + ", ".join(missing)
-            )
-        canonical = canonical_publication_path(
-            record["relative_path"], repository_root_name=repository_root_name
+        projected = _canonical_binding(
+            record, repository_root_name=repository_root_name
         )
-        if record["blob_id"] != derive_blob_id(
-            canonical, repository_root_name=repository_root_name
-        ):
-            raise EvidencePublicationError(
-                "blob-binding-invalid", "blob id does not match its publication path"
-            )
-        projected = {name: record[name] for name in BINDING_FIELDS}
-        projected["relative_path"] = canonical
         (generated if origin == "generated" else captured).append(projected)
     key = lambda item: item["blob_id"]
     return sorted(captured, key=key), sorted(generated, key=key)
@@ -421,44 +453,6 @@ def operation_record_keys(version: int) -> frozenset:
 MATERIALIZATION_FIELDS = ("base_generation", "base_head_digest", "blobs", "state_digest")
 DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
 
-
-def _check_materialized_binding(
-    binding: dict, *, repository_root_name: str = REPOSITORY_ROOT_NAME
-) -> None:
-    """Check what each field of one persisted binding holds, not that it exists.
-
-    A record whose fields are all present but null satisfies a shape check
-    while carrying nothing the replay comparison can rest on.
-    """
-    if not isinstance(binding["relative_path"], str):
-        raise EvidencePublicationError(
-            "materialization-invalid", "materialized blob path is not a string"
-        )
-    canonical = canonical_publication_path(
-        binding["relative_path"], repository_root_name=repository_root_name
-    )
-    if binding["blob_id"] != derive_blob_id(
-        canonical, repository_root_name=repository_root_name
-    ):
-        raise EvidencePublicationError(
-            "materialization-invalid", "materialized blob id does not match its path"
-        )
-    if not isinstance(binding["digest"], str) or not DIGEST_PATTERN.fullmatch(
-        binding["digest"]
-    ):
-        raise EvidencePublicationError(
-            "materialization-invalid", "materialized blob digest is invalid"
-        )
-    if not isinstance(binding["kind"], str) or not binding["kind"]:
-        raise EvidencePublicationError(
-            "materialization-invalid", "materialized blob kind is invalid"
-        )
-    if type(binding["size"]) is not int or binding["size"] < 0:
-        raise EvidencePublicationError(
-            "materialization-invalid", "materialized blob size is invalid"
-        )
-
-
 def read_materialization(
     value, *, repository_root_name: str = REPOSITORY_ROOT_NAME
 ) -> dict:
@@ -482,17 +476,10 @@ def read_materialization(
         raise EvidencePublicationError(
             "materialization-invalid", "materialization names no generated blob"
         )
-    for binding in blobs:
-        if not isinstance(binding, dict):
-            raise EvidencePublicationError(
-                "materialization-invalid", "materialized blob is not an object"
-            )
-        absent = [name for name in BINDING_FIELDS if name not in binding]
-        if absent:
-            raise EvidencePublicationError(
-                "materialization-invalid", "materialized blob is missing " + ", ".join(absent)
-            )
-        _check_materialized_binding(binding, repository_root_name=repository_root_name)
+    normalized = [
+        _canonical_binding(binding, repository_root_name=repository_root_name)
+        for binding in blobs
+    ]
     for field in ("base_head_digest", "state_digest"):
         candidate = value[field]
         if not isinstance(candidate, str) or not DIGEST_PATTERN.fullmatch(candidate):
@@ -503,7 +490,7 @@ def read_materialization(
         raise EvidencePublicationError(
             "materialization-invalid", "materialization base generation is not an integer"
         )
-    return value
+    return dict(value, blobs=normalized)
 
 
 def read_operation_record(

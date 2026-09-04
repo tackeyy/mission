@@ -1189,3 +1189,54 @@ def test_the_writer_refuses_a_binding_set_with_nothing_generated():
             base_generation=1,
             state_digest="sha256:" + "b" * 64,
         )
+
+
+def test_the_reader_normalizes_a_path_the_writer_never_produced():
+    """Records are not always written by this writer.
+
+    The round-trip test cannot reach this: the writer normalizes first, so
+    the reader is only ever handed canonical paths there.  A record edited on
+    disk, or written by an older build, arrives without that guarantee.
+    """
+    from mission_application.evidence_publication import (
+        derive_blob_id,
+        read_materialization,
+    )
+
+    record = {
+        "base_generation": 1,
+        "base_head_digest": "sha256:" + "a" * 64,
+        "blobs": [
+            {
+                "blob_id": derive_blob_id("build/x.json"),
+                "digest": "sha256:" + "0" * 64,
+                "kind": "context-manifest",
+                "relative_path": "build//x.json",
+                "size": 12,
+            }
+        ],
+        "state_digest": "sha256:" + "b" * 64,
+    }
+    assert read_materialization(record)["blobs"][0]["relative_path"] == "build/x.json"
+
+
+def test_derive_blob_id_refuses_a_non_canonical_path_directly():
+    """`.mission-state/...` fails an earlier check, so it proves nothing here."""
+    from mission_application.evidence_publication import derive_blob_id
+
+    with pytest.raises(EvidencePublicationError) as excinfo:
+        derive_blob_id("build//x.json")
+    assert "canonical" in excinfo.value.detail
+
+
+def test_one_function_decides_what_a_binding_is():
+    """The same rule in two places is how the writer and reader drifted."""
+    from pathlib import Path
+
+    import mission_application.evidence_publication as module
+
+    source = Path(module.__file__).read_text(encoding="utf-8")
+    # Defined once, called by both the partition and the reader.
+    assert source.count("def _canonical_binding(") == 1
+    assert source.count("_canonical_binding(\n") == 2
+    assert "_check_materialized_binding" not in source
