@@ -292,7 +292,9 @@ from mission_application.specialist_registry_discovery import (  # noqa: E402
     safe_provider_reference as _safe_provider_reference,
 )
 from mission_application.guard_timeout import (  # noqa: E402
+    DEADLINE_ENV_VAR,
     bounded_by_guard_timeout,
+    resolve_deadline,
 )
 from mission_application.runtime_guard import (  # noqa: E402
     CleanupStaleExecuteCommand,
@@ -8142,6 +8144,7 @@ class _LegacyStopObservationRepository:
         _write_stop_guard_state(self.store, session_id, document, expected_identity)
 
 
+@bounded_by_guard_timeout
 def cmd_stop_guard_observe(args):
     """Adapt one closed block observation to the A5 use case."""
     try:
@@ -9364,7 +9367,11 @@ def cmd_stop_verdict(args):
                 decision = decide_stop_guard(_guard_root_request(hook_input))
             else:
                 decision = _guard_receipt_decision(args, hook_input)
-            print(json.dumps(_guard_decision_payload(decision), ensure_ascii=False))
+            payload = _guard_decision_payload(decision)
+            # The hook copies this string into the environment of the calls that
+            # follow, so the whole loop shares one deadline (#742 D3').
+            payload["guard_deadline"] = "{:.3f}".format(resolve_deadline())
+            print(json.dumps(payload, ensure_ascii=False))
             return
         except Exception as exc:
             print(json.dumps({
@@ -14483,6 +14490,7 @@ def _supersede_reviews_locked(args, cwd: Path):
     print(result.rendered)
 
 
+@bounded_by_guard_timeout
 def cmd_mark_halt(args):
     cwd = Path.cwd()
     sf = resolve_state_file(cwd)
@@ -15064,6 +15072,7 @@ def _expired_lease_without_heartbeat(data: dict) -> tuple[bool, str]:
     return True, "expired-session-lease"
 
 
+@bounded_by_guard_timeout
 def cmd_cleanup_stale(args):
     request = CleanupStaleRequest(
         root=getattr(args, "root", None),

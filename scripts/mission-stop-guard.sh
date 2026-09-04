@@ -54,6 +54,19 @@ if ! GUARD_DECISION=$(printf '%s' "$INPUT" | _mission_state_bounded stop-verdict
   exit 0
 fi
 
+# 予算は hook 全体で 1 つ（#742 D3'）。呼び出しごとに上限を張り直すと、ループの回数だけ
+# 予算が増えてホスト側の期限を超え、出力ごと破棄されて block の理由が残らない。
+#
+# 期限を決めるのは stop-verdict 側で、ここはその文字列を環境へ移すだけである。
+# hook は時刻を読まず算術もしない。#615 の検査はそれらを policy 判断として拒否する
+# （検査はソースの文字列一致なので、コメントに書いただけでも発火する）。
+#
+# 取り出しに失敗しても hook を止めない。判定が壊れている場合の応答は既存の経路が持ち
+# （不正な判定は次段で block になる）、ここで `set -e` に落とすと **block そのものが
+# 出力されなくなる**。期限が空なら後続の呼び出しが自前で確立する。
+MISSION_GUARD_DEADLINE=$(printf '%s' "$GUARD_DECISION" | jq -r '.guard_deadline // empty' 2>/dev/null || true)
+export MISSION_GUARD_DEADLINE
+
 while :; do
   if ! COMMAND_KIND=$(printf '%s' "$GUARD_DECISION" | jq -er '.command.kind'); then
     printf '%s\n' '{"decision":"block","reason":"mission Stop guard decision is invalid","outcome_kind":"expected-gate"}'
@@ -84,7 +97,7 @@ while :; do
       set +e
       COMMAND_STDOUT=$(
         cd "$COMMAND_CWD" 2>/dev/null &&
-        MISSION_SESSION_ID="$COMMAND_SESSION_ID" python3 "$MISSION_STATE_PY" mark-halt \
+        MISSION_SESSION_ID="$COMMAND_SESSION_ID" _mission_state_bounded mark-halt \
           --reason "$COMMAND_REASON" --category "$COMMAND_CATEGORY"
       )
       COMMAND_EXIT_CODE=$?
@@ -98,7 +111,7 @@ while :; do
       set +e
       COMMAND_STDOUT=$(
         cd "$COMMAND_ROOT" 2>/dev/null &&
-        python3 "$MISSION_STATE_PY" cleanup-stale --root "$COMMAND_ROOT" --execute
+        _mission_state_bounded cleanup-stale --root "$COMMAND_ROOT" --execute
       )
       COMMAND_EXIT_CODE=$?
       set -e
@@ -115,7 +128,7 @@ while :; do
       set +e
       COMMAND_STDOUT=$(
         cd "$COMMAND_CWD" 2>/dev/null &&
-        python3 "$MISSION_STATE_PY" stop-guard-observe \
+        _mission_state_bounded stop-guard-observe \
           --session-id "$COMMAND_SESSION_ID" --digest "$COMMAND_DIGEST" \
           --now-epoch "$COMMAND_NOW" --ttl-seconds "$COMMAND_TTL" 2>/dev/null
       )

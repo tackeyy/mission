@@ -30,9 +30,12 @@ STATE_PY = REPO_ROOT / "skills" / "mission" / "bin" / "mission-state.py"
 sys.path.insert(0, str(LIB_ROOT))
 
 from mission_application.guard_timeout import (  # noqa: E402
+    DEADLINE_ENV_VAR,
     DEFAULT_GUARD_TIMEOUT_SECONDS,
     GuardTimeout,
     guard_time_limit,
+    remaining_budget,
+    resolve_deadline,
     resolve_guard_timeout,
 )
 
@@ -342,3 +345,104 @@ class TestTheLimitIsAppliedTwice:
         assert proc.stdout.strip(), "the guard must still emit a decision"
         payload = json.loads(proc.stdout.strip().splitlines()[-1])
         assert payload["decision"] in {"block", "approve"}
+
+
+class TestTheBudgetIsForTheWholeHook:
+    """D3': one deadline for the hook, not one limit per call.
+
+    The hook loops: stop-verdict -> side-effect command -> stop-verdict. A per-call
+    limit is re-armed each time, so N calls cost N times the limit and the host's own
+    timeout cuts first -- discarding the output, and with it the reason for the block.
+    """
+
+    def test_a_carried_deadline_is_honoured_rather_than_re_established(self):
+        """The second and third calls must inherit the first call's deadline."""
+        now = 1_000_000.0
+        carried = now + 3.0
+        env = {DEADLINE_ENV_VAR: "{:.3f}".format(carried)}
+        assert resolve_deadline(env, now=now) == pytest.approx(carried)
+
+    def test_a_missing_deadline_establishes_one_from_the_budget(self):
+        now = 1_000_000.0
+        env = {"MISSION_STATE_TIMEOUT": "5"}
+        assert resolve_deadline(env, now=now) == pytest.approx(now + 5.0)
+
+    def test_a_deadline_further_out_than_a_fresh_budget_is_rejected(self):
+        """Otherwise the environment could hand the hook an unlimited budget."""
+        now = 1_000_000.0
+        env = {DEADLINE_ENV_VAR: "{:.3f}".format(now + 600.0)}
+        assert resolve_deadline(env, now=now) == pytest.approx(
+            now + DEFAULT_GUARD_TIMEOUT_SECONDS
+        )
+
+    @pytest.mark.parametrize("raw", ["", "abc", "not-a-number"])
+    def test_an_unusable_deadline_falls_back_to_a_fresh_budget(self, raw):
+        now = 1_000_000.0
+        assert resolve_deadline({DEADLINE_ENV_VAR: raw}, now=now) == pytest.approx(
+            now + DEFAULT_GUARD_TIMEOUT_SECONDS
+        )
+
+    def test_remaining_budget_goes_negative_once_the_deadline_passes(self):
+        now = 1_000_000.0
+        assert remaining_budget(now + 2.0, now=now) == pytest.approx(2.0)
+        assert remaining_budget(now - 1.0, now=now) == pytest.approx(-1.0)
+
+    def test_three_calls_share_one_budget(self):
+        """The loop's total must not exceed the budget, however many calls it makes."""
+        now = 1_000_000.0
+        env = {"MISSION_STATE_TIMEOUT": "8"}
+        first = resolve_deadline(env, now=now)
+        carried = {DEADLINE_ENV_VAR: "{:.3f}".format(first)}
+        # 3 seconds into the hook, the second call sees 5 seconds left -- not 8.
+        assert remaining_budget(
+            resolve_deadline(carried, now=now + 3.0), now=now + 3.0
+        ) == pytest.approx(5.0)
+        # 7 seconds in, the third call sees 1 second, and the total is still 8.
+        assert remaining_budget(
+            resolve_deadline(carried, now=now + 7.0), now=now + 7.0
+        ) == pytest.approx(1.0)
+
+
+class TestSideEffectCommandsAreInsideTheBudget:
+    """D3': the side-effect commands must not sit outside the budget.
+
+    They used to be unbounded on both layers: the hook called `python3` directly rather
+    than through the bounded helper, and the decorator was applied to `cmd_stop_verdict`
+    alone.
+    """
+
+    def test_the_hook_routes_every_call_through_the_bounded_helper(self):
+        source = GUARD_SH.read_text(encoding="utf-8")
+        body = source.split("_mission_state_bounded() {", 1)[1]
+        after_helper = body.split("}", 1)[1]
+        assert 'python3 "$MISSION_STATE_PY"' not in after_helper, (
+            "a direct python3 call bypasses the budget"
+        )
+
+    def test_the_hook_carries_the_deadline_to_later_calls(self):
+        source = GUARD_SH.read_text(encoding="utf-8")
+        assert "MISSION_GUARD_DEADLINE" in source
+        assert "export MISSION_GUARD_DEADLINE" in source
+        assert "guard_deadline" in source, "the deadline comes from the verdict output"
+
+    def test_extracting_the_deadline_cannot_swallow_the_block(self):
+        """A broken verdict must still produce a block, not an empty stdout.
+
+        The extraction runs under `set -e`, so a jq parse error on malformed JSON would
+        abort the hook before anything is printed -- turning a fail-closed path into
+        silence. The existing contract (#714 and the malformed-JSON cases in
+        test_stop_hook.py) requires the block to survive.
+        """
+        source = GUARD_SH.read_text(encoding="utf-8")
+        line = [l for l in source.splitlines() if "guard_deadline" in l and "jq" in l]
+        assert line, "the deadline is extracted with jq"
+        assert "|| true" in line[0], "a parse error must not abort the hook"
+
+    @pytest.mark.parametrize(
+        "command", ["cmd_stop_verdict", "cmd_mark_halt", "cmd_cleanup_stale",
+                    "cmd_stop_guard_observe"]
+    )
+    def test_every_hook_command_carries_the_limit(self, command):
+        source = STATE_PY.read_text(encoding="utf-8")
+        marker = "@bounded_by_guard_timeout\ndef {}(args):".format(command)
+        assert marker in source, "{} is outside the budget".format(command)

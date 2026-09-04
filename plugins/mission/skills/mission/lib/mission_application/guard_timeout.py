@@ -56,7 +56,7 @@ def resolve_guard_timeout(raw: Optional[object]) -> int:
 
 
 @contextmanager
-def guard_time_limit(seconds: int) -> Iterator[None]:
+def guard_time_limit(seconds: float) -> Iterator[None]:
     """Bound the enclosed block, restoring the previous handler on the way out.
 
     On platforms without ``SIGALRM`` the block runs unbounded here. What remains is
@@ -109,6 +109,43 @@ _T = TypeVar("_T")
 
 TIMEOUT_ENV_VAR = "MISSION_STATE_TIMEOUT"
 
+# The hook runs a loop: stop-verdict -> side-effect command -> stop-verdict (three calls
+# in the normal case, per #730). A per-call limit does not bound that loop -- it is
+# re-armed on every call, so N calls cost N times the limit and the host's own timeout
+# cuts first, discarding the output and with it the reason for the block.
+#
+# So the budget is an absolute deadline established once and carried across calls. The
+# hook cannot compute it: #615 forbids arithmetic and `date +%s` there. Instead the
+# first call reports the deadline it established, and the hook copies that string into
+# the environment of the calls that follow -- copying, not computing.
+DEADLINE_ENV_VAR = "MISSION_GUARD_DEADLINE"
+
+
+def resolve_deadline(env: Optional[dict] = None, *, now: Optional[float] = None) -> float:
+    """Return the absolute deadline for the whole hook, establishing it if needed.
+
+    Uses wall-clock time, not `monotonic`, because the value crosses process
+    boundaries. Over a budget of a few seconds the difference does not matter.
+    """
+    source = os.environ if env is None else env
+    current = time.time() if now is None else now
+    raw = source.get(DEADLINE_ENV_VAR)
+    if raw:
+        try:
+            carried = float(raw)
+        except (TypeError, ValueError):
+            carried = None
+        # A deadline further out than a fresh budget would be an escalation, not a
+        # carry-over: reject it rather than honouring whatever the environment held.
+        if carried is not None and carried <= current + DEFAULT_GUARD_TIMEOUT_SECONDS:
+            return carried
+    return current + resolve_guard_timeout(source.get(TIMEOUT_ENV_VAR))
+
+
+def remaining_budget(deadline: float, *, now: Optional[float] = None) -> float:
+    """Seconds left before the hook's deadline. Zero or less means exhausted."""
+    return deadline - (time.time() if now is None else now)
+
 
 def bounded_by_guard_timeout(func: Callable[..., _T]) -> Callable[..., _T]:
     """Apply the guard's own limit around a command, where the platform allows it.
@@ -122,7 +159,10 @@ def bounded_by_guard_timeout(func: Callable[..., _T]) -> Callable[..., _T]:
 
     @functools.wraps(func)
     def _wrapper(*args: object, **kwargs: object) -> _T:
-        with guard_time_limit(resolve_guard_timeout(os.environ.get(TIMEOUT_ENV_VAR))):
+        left = remaining_budget(resolve_deadline())
+        if left <= 0:
+            raise GuardTimeout("stop guard budget is exhausted")
+        with guard_time_limit(left):
             return func(*args, **kwargs)
 
     return _wrapper
