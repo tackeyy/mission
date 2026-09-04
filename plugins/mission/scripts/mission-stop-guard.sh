@@ -24,12 +24,17 @@ INPUT=$(cat)
 # hook が返らないと Stop が永久に止まる（#742 D2）。呼び出し先が自分に上限を
 # 掛けるようになったため、下の `else` はもう無制限ではない。
 #
-# 値の検証は正の整数のパターン一致だけで行い、数値比較（-gt 等）は使わない。
-# #615 は hook を judgment-free と定めており、`analyze_guard_shell` が数値比較を
-# policy 判断として拒否する。既定と解釈の正典は `resolve_guard_timeout` にある。
+# 受理する値を literal で列挙する。#615 が hook の数値比較（-gt 等）を policy 判断
+# として拒否するため範囲では書けず、また `resolve_guard_timeout` と**同じ入力に同じ
+# 答えを返す**必要がある。範囲と clamp で書くと両側の解釈がずれる（`9` を shell が
+# 通して Python が 8 に丸める、`01` を Python だけが 1 と読む、など）。
+#
+# 上限が 8 なのはホスト側の hook timeout が 10 秒だからで、それを超える値を受けると
+# ホストが先に切って guard の block が出ない。
 MISSION_STATE_TIMEOUT="${MISSION_STATE_TIMEOUT:-8}"
 case "$MISSION_STATE_TIMEOUT" in
-  ''|*[!0-9]*|0*) MISSION_STATE_TIMEOUT=8 ;;
+  1|2|3|4|5|6|7|8) ;;
+  *) MISSION_STATE_TIMEOUT=8 ;;
 esac
 # 内側の上限が同じ値を見られるようにする。
 export MISSION_STATE_TIMEOUT

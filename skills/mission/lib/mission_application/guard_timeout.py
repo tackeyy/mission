@@ -4,8 +4,12 @@ The shell adapter used to bound `mission-state.py` with `timeout`, falling back 
 `perl -e 'alarm ...'`, and running the command **unbounded** when neither existed.
 A host without both commands could therefore hang the Stop hook forever.
 
-D2 moves the limit into the command itself, so it holds regardless of what the host
-provides. D3 fixes the value handling: only positive integers are honoured and every
+D2 moves the limit into the command itself, so it no longer depends on `timeout` or
+`perl` being installed. It is **not** unconditional: without ``SIGALRM`` there is no
+in-process mechanism to interrupt the call, and what remains is the shell adapter's
+external limit or, failing that, the host's own hook timeout.
+
+D3 fixes the value handling: only the values both sides accept are honoured, and every
 other value falls back to the default rather than becoming a failure of its own.
 """
 
@@ -14,6 +18,7 @@ from __future__ import annotations
 import functools
 import os
 import signal
+import time
 from contextlib import contextmanager
 from typing import Callable, Iterator, Optional, TypeVar
 
@@ -21,11 +26,16 @@ from typing import Callable, Iterator, Optional, TypeVar
 # guard's own limit has to stay inside that budget, or the host cuts first and the
 # guard never gets to emit its block -- the host discards the output instead.
 #
-# So this value is both the default *and* the ceiling: a larger override is clamped
-# rather than honoured. Smaller overrides are honoured (tests use 1).
+# So this value is both the default *and* the ceiling. A larger override is not
+# clamped but rejected outright, because the shell adapter has to reach the same
+# verdict for the same input and cannot clamp without numeric comparison (#615).
 DEFAULT_GUARD_TIMEOUT_SECONDS = 8
 
-_ASCII_DIGITS = frozenset("0123456789")
+# The shell adapter validates the same value with a `case` pattern, and #615 forbids
+# numeric comparison there. So the accepted set is spelled out literally on both sides
+# rather than expressed as a range -- a range would need `-le`, and two different
+# formulations would drift apart. Anything outside this set falls back to the default.
+_ACCEPTED = frozenset({"1", "2", "3", "4", "5", "6", "7", "8"})
 
 
 class GuardTimeout(Exception):
@@ -38,21 +48,11 @@ def resolve_guard_timeout(raw: Optional[object]) -> int:
     A bad value is not an error: the guard still has to produce a verdict, and
     refusing to run because the environment held ``"8s"`` would block every Stop.
     """
-    if raw is None:
+    # No `.strip()`: the shell's `case` does not strip either, and a value only one
+    # side accepts is exactly the drift this set is meant to prevent.
+    if str(raw) not in _ACCEPTED:
         return DEFAULT_GUARD_TIMEOUT_SECONDS
-    text = str(raw).strip()
-    # `str.isdigit()` accepts non-ASCII digits (e.g. Arabic-Indic "٨"), which `int()`
-    # then parses into a value the operator never wrote. Restrict to ASCII.
-    if not text or not set(text) <= _ASCII_DIGITS:
-        return DEFAULT_GUARD_TIMEOUT_SECONDS
-    value = int(text)
-    # Zero would disable the alarm outright (`alarm 0` cancels it), which is the very
-    # unbounded state D2 removes. Treat it as unusable, not as "no limit".
-    if value <= 0:
-        return DEFAULT_GUARD_TIMEOUT_SECONDS
-    # Clamp rather than honour: a value above the host's own hook timeout would let the
-    # host cut first, and D3 puts the guard's limit inside the host's budget.
-    return min(value, DEFAULT_GUARD_TIMEOUT_SECONDS)
+    return int(str(raw))
 
 
 @contextmanager
@@ -68,20 +68,31 @@ def guard_time_limit(seconds: int) -> Iterator[None]:
         yield
         return
 
+    # An outer limit may already be running -- the shell adapter's `perl -e 'alarm N'`
+    # sets one, and it is inherited across `exec`. Reading it costs the alarm, so it is
+    # cancelled here and accounted for below.
+    inherited = signal.alarm(0)
+    # Never extend a deadline that already exists. Setting `seconds` outright would let
+    # a 5s inner limit override a 1s outer one, and the outer deadline would be lost for
+    # the whole call -- the two limits would not be independent.
+    effective = min(seconds, inherited) if inherited else seconds
+
     def _expire(_signum: int, _frame: object) -> None:
-        raise GuardTimeout("stop verdict exceeded {}s".format(seconds))
+        raise GuardTimeout("stop verdict exceeded {}s".format(effective))
 
     previous = signal.signal(signal.SIGALRM, _expire)
-    # `alarm()` returns what was left of any alarm it replaces. Restoring the handler
-    # without restoring that remainder would silently cancel an outer limit.
-    remaining = signal.alarm(seconds)
+    started = time.monotonic()
+    signal.alarm(effective)
     try:
         yield
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, previous)
-        if remaining:
-            signal.alarm(remaining)
+        if inherited:
+            # Hand the outer deadline back, minus what this block consumed. `alarm(0)`
+            # would cancel it, so a floor of 1 keeps it armed rather than dropping it.
+            elapsed = int(time.monotonic() - started)
+            signal.alarm(max(1, inherited - elapsed))
 
 
 _T = TypeVar("_T")

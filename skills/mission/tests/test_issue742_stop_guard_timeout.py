@@ -49,13 +49,18 @@ class TestResolveGuardTimeout:
     def test_default_is_eight_seconds(self):
         assert DEFAULT_GUARD_TIMEOUT_SECONDS == 8
 
-    @pytest.mark.parametrize("raw", ["1", "8", " 8 ", "08", "2"])
-    def test_positive_integers_within_the_ceiling_are_honoured(self, raw):
-        assert resolve_guard_timeout(raw) == int(raw.strip())
+    @pytest.mark.parametrize("raw", ["1", "2", "5", "8"])
+    def test_the_accepted_values_are_honoured(self, raw):
+        assert resolve_guard_timeout(raw) == int(raw)
 
     @pytest.mark.parametrize("raw", ["9", "30", "600"])
-    def test_a_value_above_the_ceiling_is_clamped(self, raw):
+    def test_a_value_above_the_ceiling_falls_back(self, raw):
         """Honouring it would let the host's 10s cut first, and the block never lands."""
+        assert resolve_guard_timeout(raw) == DEFAULT_GUARD_TIMEOUT_SECONDS
+
+    @pytest.mark.parametrize("raw", ["08", "01", " 8 ", "8 "])
+    def test_forms_the_shell_cannot_accept_fall_back_here_too(self, raw):
+        """The two validations must agree on every input, not just the obvious ones."""
         assert resolve_guard_timeout(raw) == DEFAULT_GUARD_TIMEOUT_SECONDS
 
     @pytest.mark.parametrize(
@@ -105,6 +110,30 @@ class TestGuardTimeLimit:
             with guard_time_limit(2):
                 pass
             assert signal.alarm(0) > 0, "the outer alarm must survive the inner limit"
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, signal.SIG_DFL)
+
+    def test_a_shorter_outer_alarm_is_not_overridden(self):
+        """The shell's `perl -e 'alarm N'` is inherited across exec.
+
+        Setting the inner limit outright would replace it: a 5s inner limit would let a
+        2s body run to completion under a 1s outer deadline, and the outer limit would
+        be lost for the whole call. The two limits have to stay independent.
+        """
+        fired = []
+        try:
+            signal.signal(signal.SIGALRM, lambda *_: fired.append(time.monotonic()))
+            signal.alarm(1)          # the outer limit, as perl would set it
+            started = time.monotonic()
+            with pytest.raises(GuardTimeout):
+                with guard_time_limit(5):   # asking for longer than the outer deadline
+                    time.sleep(4)
+            elapsed = time.monotonic() - started
+            assert elapsed < 3, (
+                "the inner limit must not extend the outer deadline "
+                "(took {:.1f}s)".format(elapsed)
+            )
         finally:
             signal.alarm(0)
             signal.signal(signal.SIGALRM, signal.SIG_DFL)
@@ -175,7 +204,7 @@ class TestTheLimitIsAppliedTwice:
             r"(?:\[\[?|\btest\b)[^\n]*(?:-lt|-le|-gt|-ge)\b", source
         )
 
-    @pytest.mark.parametrize("raw", ["abc", "0", "-5", "", "8s"])
+    @pytest.mark.parametrize("raw", ["abc", "0", "-5", "", "8s", "9", "600", "08", "01"])
     def test_a_bad_value_never_reaches_the_external_limit(self, raw):
         """`timeout abc ...` fails outright, so the fallback has to happen first."""
         script = GUARD_SH.read_text(encoding="utf-8")
@@ -196,15 +225,16 @@ class TestTheLimitIsAppliedTwice:
         script = GUARD_SH.read_text(encoding="utf-8")
         block = script.split('MISSION_STATE_TIMEOUT="${MISSION_STATE_TIMEOUT:-8}"', 1)[1]
         block = block.split("export MISSION_STATE_TIMEOUT", 1)[0]
-        probe = (
-            'MISSION_STATE_TIMEOUT="5"\n'
-            + 'MISSION_STATE_TIMEOUT="${MISSION_STATE_TIMEOUT:-8}"\n'
-            + block
-            + '\nprintf %s "$MISSION_STATE_TIMEOUT"\n'
-        )
-        result = subprocess.run(["/bin/bash", "-c", probe], capture_output=True, text=True)
-        assert result.stdout == "5"
-        assert resolve_guard_timeout("5") == 5
+        for value in ("1", "5", "8"):
+            probe = (
+                'MISSION_STATE_TIMEOUT="{}"\n'.format(value)
+                + 'MISSION_STATE_TIMEOUT="${MISSION_STATE_TIMEOUT:-8}"\n'
+                + block
+                + '\nprintf %s "$MISSION_STATE_TIMEOUT"\n'
+            )
+            result = subprocess.run(["/bin/bash", "-c", probe], capture_output=True, text=True)
+            assert result.stdout == value
+            assert resolve_guard_timeout(value) == int(value)
 
     def test_bounded_without_timeout_and_without_perl(self, tmp_path):
         """D2: the inner limit covers the environment the outer one cannot."""
