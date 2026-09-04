@@ -637,3 +637,85 @@ def test_the_application_refuses_the_repository_subtree_it_was_handed(tmp_path):
             publication_path=str(tmp_path / ".mission-state" / "manifest.json"),
             project_root=tmp_path,
         )
+
+
+def test_the_migration_hint_reaches_the_caller(raw_run_cli, tmp_path):
+    """The message is the only place this change reaches a runbook.
+
+    The helper builds a detail naming a path that would work, but the
+    application replaced it with a bare code, so the CLI printed nothing the
+    caller could act on.
+    """
+    started = raw_run_cli("init", "p", "--complexity", "Standard")
+    assert started.returncode == 0, started.stderr
+
+    refused = raw_run_cli(
+        "context-manifest",
+        "--iteration",
+        "1",
+        "--out",
+        ".mission-state/context/manifest.json",
+    )
+    assert refused.returncode == 2
+    assert "outside" in refused.stderr, refused.stderr
+    assert "context/manifest.json" in refused.stderr, refused.stderr
+
+
+def test_the_read_reports_the_base_it_saw(tmp_path):
+    """Prepare runs against a base; admit has to check it is still that one."""
+    from mission_persistence.legacy_v4 import V5CompatibilityRepository
+
+    repository = V5CompatibilityRepository(
+        repository=_v5_repository(tmp_path),
+        session_id="test",
+        lease_owner_session_id="test",
+        presented_lease_id="fixture-lease",
+    )
+    with repository.transaction():
+        repository.read_snapshot()
+        observed = repository.observed_base()
+    assert set(observed) == {"base_head_digest", "base_generation"}
+    assert isinstance(observed["base_generation"], int)
+    assert observed["base_head_digest"].startswith("sha256:")
+
+
+def test_the_executor_refuses_an_admission_against_a_moved_base(tmp_path):
+    """A base that moved between read and admit invalidates what prepare made.
+
+    Without this the run admits against one base while its content was
+    prepared against another, and nothing notices.
+    """
+    from mission_persistence.evidence_order import EvidenceOrderError
+    from mission_persistence.legacy_v4 import V5CompatibilityRepository
+
+    class _Moved(V5CompatibilityRepository):
+        def observed_base(self):
+            base = super().observed_base()
+            return dict(base, base_generation=base["base_generation"] + 99)
+
+    repository = _Moved(
+        repository=_v5_repository(tmp_path),
+        session_id="test",
+        lease_owner_session_id="test",
+        presented_lease_id="fixture-lease",
+    )
+
+    def _prepare(state):
+        from mission_application.evidence import PreparedEvidenceOperation
+
+        return PreparedEvidenceOperation(_context_command(), (_effect(),), {})
+
+    with pytest.raises(EvidenceOrderError) as excinfo:
+        repository.execute_evidence_transition_effects(_prepare)
+    assert "base" in excinfo.value.detail
+
+
+def test_the_retry_budget_is_the_shared_one():
+    """The gate must not grow a second copy of the retry rule."""
+    from pathlib import Path
+
+    import mission_persistence.legacy_v4 as module
+
+    source = Path(module.__file__).read_text(encoding="utf-8")
+    assert "base_agrees(" in source
+    assert "MAX_BASE_RETRIES" not in source, "the budget belongs to one module"

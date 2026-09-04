@@ -536,7 +536,11 @@ def prepare_context_manifest(
     try:
         publication_path = relative_publication_path(project_root, publication_path)
     except EvidencePublicationError as exc:
-        raise EvidenceFailure("context-publication-path-invalid") from exc
+        # Carry the detail: it names a path that would work, and the caller
+        # whose command just stopped working has no other way to learn it.
+        raise EvidenceFailure(
+            "context-publication-path-invalid: " + exc.detail
+        ) from exc
     target = Path(publication_path).name
     effect = make_evidence_effect("context-manifest", target, content)
     claim = ContextManifestEffectClaim(

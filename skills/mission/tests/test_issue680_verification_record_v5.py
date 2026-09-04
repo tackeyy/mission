@@ -256,6 +256,13 @@ def _in_memory_v5_repository(current, *, replayed=False):
 
     repository = object.__new__(V5CompatibilityRepository)
     repository._callback_depth = 0
+    # #711: the executor reads the base before it admits, so the double has to
+    # carry what that read observed.
+    repository._admitted = None
+    repository._observed_base = {
+        "base_head_digest": "sha256:" + "0" * 64,
+        "base_generation": 0,
+    }
     repository._replayed = object() if replayed else None
 
     @contextmanager

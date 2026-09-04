@@ -744,7 +744,11 @@ class _FakeFencedRepository:
         # answers the same state it would admit.
         import types
 
-        return types.SimpleNamespace(state=self._state)
+        return types.SimpleNamespace(
+            state=self._state,
+            head_digest="sha256:" + "0" * 64,
+            head=types.SimpleNamespace(generation=0),
+        )
 
     def begin(self, _request):
         import types
@@ -757,6 +761,11 @@ class _FakeFencedRepository:
             # #711: the stage takes its effects from the admission, so the
             # fake has to carry the request the real snapshot holds.
             request=types.SimpleNamespace(blobs=VerifiedBlobSet(())),
+            # #711: the executor compares the base it read against the one it
+            # admitted, so the fake carries the same precondition shape.
+            precondition=types.SimpleNamespace(
+                base_head_digest="sha256:" + "0" * 64, base_generation=0
+            ),
         )
 
     def _stage_persistence(self, _admitted, *, state_bytes, effects):

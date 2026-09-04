@@ -184,3 +184,10 @@ class OrderedEvidenceRun:
 
     def stopped_at(self) -> str | None:
         return self._entered[-1] if self._entered else None
+
+
+def base_agrees(*, observed: dict, admitted: dict) -> bool:
+    """Re-export the shared base comparison so the gate keeps one copy."""
+    from mission_application.evidence_publication import base_agrees as _shared
+
+    return _shared(observed=observed, admitted=admitted)

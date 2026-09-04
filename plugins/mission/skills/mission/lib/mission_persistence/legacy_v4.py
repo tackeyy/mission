@@ -10,7 +10,11 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Callable, ContextManager, Iterable
 
-from mission_persistence.evidence_order import blob_set_from_effects
+from mission_persistence.evidence_order import (
+    EvidenceOrderError,
+    base_agrees,
+    blob_set_from_effects,
+)
 from mission_application.artifact import (
     EvidenceDecision,
     EvidenceEffect,
@@ -835,6 +839,7 @@ class V5CompatibilityRepository:
         self._operation_command = operation_command
         self._operation_command_type = operation_command_type
         self._admitted: AdmittedSnapshot | None = None
+        self._observed_base: dict | None = None
         self._replayed: CommitResult | None = None
         self._transaction_active = False
         self._callback_depth = 0
@@ -980,7 +985,22 @@ class V5CompatibilityRepository:
                 "v5 snapshot read requires an active transaction",
             )
         snapshot = self._repository.read(self._session_id)
+        # Keep what identifies the base this read saw.  Prepare runs against
+        # it, so the admission has to be able to check it is still the same
+        # one; discarding it here is what left the contract unenforced.
+        self._observed_base = {
+            "base_head_digest": snapshot.head_digest,
+            "base_generation": snapshot.head.generation,
+        }
         return json.loads(project_legacy_document(snapshot.state))
+
+    def observed_base(self) -> dict:
+        """Return the base identifiers the last snapshot read observed."""
+        if self._observed_base is None:
+            raise FencedCommitError(
+                "request-invalid", "no snapshot has been read in this transaction"
+            )
+        return dict(self._observed_base)
 
     def load(self, *, blobs: VerifiedBlobSet | None = None) -> dict:
         if not self._transaction_active:
@@ -1210,7 +1230,23 @@ class V5CompatibilityRepository:
             blobs = blob_set_from_effects(
                 effects, prepared.command, repository_root_name=root
             )
+            observed = self.observed_base()
             current = self.load(blobs=blobs)
+            admitted = self._admitted
+            if admitted is not None and not base_agrees(
+                observed=observed,
+                admitted={
+                    "base_head_digest": admitted.precondition.base_head_digest,
+                    "base_generation": admitted.precondition.base_generation,
+                },
+            ):
+                # What prepare produced was built against a base that has since
+                # moved.  Publishing it would record content for a state nobody
+                # observed together.
+                raise EvidenceOrderError(
+                    "the base moved between the read and the admission; "
+                    "nothing was published"
+                )
             if self.operation_replayed:
                 frozen = freeze_json_value(current)
                 assert isinstance(frozen, FrozenJsonObject)
