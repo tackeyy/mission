@@ -262,6 +262,9 @@ def _in_memory_v5_repository(current, *, replayed=False):
 
     repository.transaction = transaction
     repository.load = lambda: current
+    # #711: the executor reads before it admits, so the double has to model
+    # both.  Returning the same document keeps what these tests observe.
+    repository.read_snapshot = lambda: current
     repository.execute = lambda _command: (_ for _ in ()).throw(
         AssertionError("rejected or replayed evidence must not execute")
     )

@@ -1004,6 +1004,9 @@ def test_v5_transition_executor_returns_committed_projection_on_replay():
 
     repository.transaction = transaction
     repository.load = lambda: current
+    # #711: the executor reads before it admits, so the double has to model
+    # both.  Returning the same document keeps what these tests observe.
+    repository.read_snapshot = lambda: current
     repository.execute = lambda _command: (_ for _ in ()).throw(
         AssertionError("replay must not decide or commit again")
     )

@@ -739,6 +739,13 @@ class _FakeFencedRepository:
         self._state = state
         self.commits = []
 
+    def read(self, _session_id):
+        # #711: the compatibility seam reads before it admits, so the fake
+        # answers the same state it would admit.
+        import types
+
+        return types.SimpleNamespace(state=self._state)
+
     def begin(self, _request):
         import types
 
