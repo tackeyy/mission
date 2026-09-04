@@ -1689,7 +1689,12 @@ class LocalFencedRepository:
             return None
         document = _decode_record(content, limit=MAX_OPERATION_BYTES)
         try:
-            parsed_operation = read_operation_record(document)
+            # The parsed generation is not compared against a prepared
+            # materialization yet: nothing prepares before ``begin`` until the
+            # execution order changes.  The call still has to happen here,
+            # because it is what refuses a record whose shape and generation
+            # disagree before the replay returns it.
+            read_operation_record(document)
         except EvidencePublicationError as exc:
             raise FencedCommitError("record-invalid", exc.detail) from exc
         operation_id = _token(document["operation_id"], "operation.operation_id")

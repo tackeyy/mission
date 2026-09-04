@@ -26,7 +26,7 @@ def test_canonical_path_rejects_the_repository_root_subtree():
 
 
 def test_canonical_path_rejects_traversal_and_empty_segments():
-    for candidate in ("../outside.json", "build/../../outside.json", "build//x.json"):
+    for candidate in ("../outside.json", "build/../../outside.json", "x.json/.."):
         with pytest.raises(EvidencePublicationError):
             canonical_publication_path(candidate)
 
@@ -591,3 +591,215 @@ def test_a_corrupted_operation_record_is_refused_when_the_replay_reads_it(tmp_pa
     assert excinfo.value.code == "record-invalid", (
         "the record has to fail the schema check, not the canonical-form check"
     )
+
+
+def test_record_version_refuses_a_padded_version_number():
+    """The reader it replaced compared the schema string exactly.
+
+    Parsing the tail as an integer accepts `/01`, which the old exact
+    comparison refused, so a record no writer of ours produced would replay.
+    """
+    from mission_application.evidence_publication import record_version
+
+    for schema in ("mission-commit/01", "mission-commit/+1", "mission-commit/1 "):
+        with pytest.raises(EvidencePublicationError):
+            record_version({"schema": schema}, "mission-commit")
+
+
+def test_canonical_path_uses_the_repository_root_it_is_given():
+    """The unit of work refuses its own root by name, not by a fixed string."""
+    from mission_application.evidence_publication import canonical_publication_path
+
+    assert canonical_publication_path(
+        ".mission-state/x.json", repository_root_name="other-root"
+    ) == ".mission-state/x.json"
+    with pytest.raises(EvidencePublicationError):
+        canonical_publication_path("other-root/x.json", repository_root_name="other-root")
+
+
+def test_canonical_path_collapses_what_the_projection_collapses():
+    """`a//b` reaches the projection as `a/b`, so it has to survive here too."""
+    from mission_application.evidence_publication import canonical_publication_path
+
+    assert canonical_publication_path("build//manifest.json") == "build/manifest.json"
+
+
+def test_semantic_claim_returns_the_canonical_publication_path():
+    from mission_application.evidence_publication import project_semantic_claim
+
+    projected = project_semantic_claim(
+        dict(_claim_fields(), publication_path="build//manifest.json")
+    )
+    assert projected["publication_path"] == "build/manifest.json"
+
+
+def test_operation_reader_refuses_a_materialization_that_is_not_a_binding():
+    """Parsing a field without checking it leaves the replay unguarded.
+
+    A record whose materialization is null, a string, or an object missing
+    its parts still reached the replay and succeeded, because nothing looked
+    inside it.
+    """
+    from mission_application.evidence_publication import read_operation_record
+
+    for broken in (None, "materialized", [], {}, {"blobs": []}, {"blobs": "x"}):
+        document = _operation_document(2)
+        document["materialization"] = broken
+        with pytest.raises(EvidencePublicationError):
+            read_operation_record(document)
+
+
+def test_operation_reader_accepts_a_well_formed_materialization():
+    from mission_application.evidence_publication import read_operation_record
+
+    parsed = read_operation_record(_operation_document(2))
+    assert parsed["materialization"]["blobs"]
+
+
+def test_materialization_must_name_every_part():
+    from mission_application.evidence_publication import read_materialization
+
+    complete = _materialization(["build/x.json"])
+    for absent in ("base_generation", "base_head_digest", "blobs", "state_digest"):
+        partial = {k: v for k, v in complete.items() if k != absent}
+        with pytest.raises(EvidencePublicationError):
+            read_materialization(partial)
+
+
+def test_materialization_requires_at_least_one_generated_blob():
+    """An empty blob list would make every replay comparison trivially agree."""
+    from mission_application.evidence_publication import read_materialization
+
+    with pytest.raises(EvidencePublicationError) as excinfo:
+        read_materialization(dict(_materialization(["build/x.json"]), blobs=[]))
+    assert excinfo.value.code == "materialization-invalid"
+
+
+def test_a_broken_materialization_is_refused_when_the_replay_reads_it(tmp_path):
+    """The shape check has to run on the path the repository takes.
+
+    A materialization that is null or empty used to reach the replay and
+    succeed, so this drives the same genuine replay as the schema case.
+    """
+    import json
+
+    from mission_persistence.fenced_commit import CommitResult, FencedCommitError
+
+    from .test_issue503_fenced_commit import _commit_cli_init, _request
+
+    local, repository, _clock, _state_path, state_bytes, _result = _commit_cli_init(tmp_path)
+    lease_id = json.loads(state_bytes.decode("utf-8"))["lease_id"]
+    same_request = _request(
+        operation_id="operation-init",
+        lease_id=lease_id,
+        argv=("init", "Issue 500 CLI corpus"),
+        command_type="init",
+        event_types=("mission-initialized",),
+    )
+    assert isinstance(local.begin(same_request), CommitResult)
+
+    operations = sorted((repository / "operations").glob("*.json"))
+    document = json.loads(operations[0].read_text(encoding="utf-8"))
+    document["schema"] = "mission-operation/2"
+    # Every part is present so the record fails on the empty blob list alone,
+    # not on a missing field: the point is that an empty list cannot stand in
+    # for content the replay is supposed to prove.
+    document["materialization"] = {
+        "base_generation": 1,
+        "base_head_digest": "sha256:" + "a" * 64,
+        "blobs": [],
+        "state_digest": "sha256:" + "b" * 64,
+    }
+    operations[0].write_bytes(
+        json.dumps(
+            document,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    )
+
+    with pytest.raises(FencedCommitError) as excinfo:
+        local.begin(same_request)
+    assert excinfo.value.code == "record-invalid"
+
+
+def _production_command(digest_byte="0", size=12):
+    """Build the document production actually encodes, not a simplified stand-in.
+
+    An earlier version of these tests used a hand-written command whose only
+    fields were a schema and a type.  Nothing about the effect appeared in
+    it, so the semantic digest looked stable while the real encoding carried
+    the effect digest and size and changed with every byte produced.
+    """
+    from mission_kernel.commands import (
+        ContextManifestEffectClaim,
+        GenerateContextManifest,
+        encode_kernel_command,
+    )
+    from mission_kernel.json_codec import thaw_json_object
+
+    claim = ContextManifestEffectClaim(
+        "context-manifest",
+        "manifest.json",
+        "build/manifest.json",
+        "sha256:" + digest_byte * 64,
+        size,
+    )
+    return thaw_json_object(
+        encode_kernel_command(GenerateContextManifest("2026-01-01T00:00:00Z", 1, claim))
+    )
+
+
+def test_the_production_command_really_carries_the_generated_content():
+    """Hold the premise these projection tests rest on."""
+    encoded = repr(_production_command())
+    assert "sha256:" + "0" * 64 in encoded and "12" in encoded
+
+
+def test_semantic_command_is_stable_when_only_generated_content_changes():
+    from mission_application.evidence_publication import project_semantic_command
+
+    first = project_semantic_command(_production_command("0", 12))
+    second = project_semantic_command(_production_command("1", 999))
+    assert first == second
+
+
+def test_semantic_command_still_changes_with_the_destination():
+    from mission_application.evidence_publication import project_semantic_command
+
+    from mission_kernel.commands import (
+        ContextManifestEffectClaim,
+        GenerateContextManifest,
+        encode_kernel_command,
+    )
+    from mission_kernel.json_codec import thaw_json_object
+
+    claim = ContextManifestEffectClaim(
+        "context-manifest", "other.json", "build/other.json", "sha256:" + "0" * 64, 12
+    )
+    elsewhere = thaw_json_object(
+        encode_kernel_command(GenerateContextManifest("2026-01-01T00:00:00Z", 1, claim))
+    )
+    assert project_semantic_command(_production_command()) != project_semantic_command(
+        elsewhere
+    )
+
+
+def test_semantic_command_keeps_the_rest_of_the_command():
+    from mission_application.evidence_publication import project_semantic_command
+
+    projected = project_semantic_command(_production_command())
+    assert projected["type"] and projected["value"]["iteration"] == 1
+
+
+def test_semantic_intent_over_the_production_command_ignores_generated_bytes():
+    from mission_application.evidence_publication import semantic_intent_digest
+
+    def digest_for(byte, size):
+        inputs = _intent_inputs((_binding("build/manifest.json", "generated", byte),))
+        inputs["command"] = _production_command(byte, size)
+        return semantic_intent_digest(inputs)
+
+    assert digest_for("0", 12) == digest_for("1", 999)

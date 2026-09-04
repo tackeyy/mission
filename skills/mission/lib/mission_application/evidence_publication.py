@@ -4,6 +4,8 @@ publication path と blob id は intent / generation / prepare / commit の各
 レコードへ永続化される。式が動くと既存レコードを読めなくなるため、導出は
 この 1 箇所に置き、呼び出し側で再導出しない。
 """
+
+from __future__ import annotations
 import hashlib
 import json
 from pathlib import PurePosixPath
@@ -21,7 +23,9 @@ class EvidencePublicationError(Exception):
         self.detail = detail
 
 
-def canonical_publication_path(relative_path: str) -> str:
+def canonical_publication_path(
+    relative_path: str, *, repository_root_name: str = REPOSITORY_ROOT_NAME
+) -> str:
     """Return the one canonical form both the claim and the binding carry.
 
     The unit of work resolves projections against the project root and
@@ -42,11 +46,7 @@ def canonical_publication_path(relative_path: str) -> str:
         raise EvidencePublicationError(
             "publication-path-invalid", "publication path has an empty or relative segment"
         )
-    if relative_path.count("//"):
-        raise EvidencePublicationError(
-            "publication-path-invalid", "publication path has an empty segment"
-        )
-    if parts[0] == REPOSITORY_ROOT_NAME:
+    if parts[0] == repository_root_name:
         raise EvidencePublicationError(
             "publication-path-invalid", "publication path is inside the repository root"
         )
@@ -91,7 +91,9 @@ def project_semantic_claim(claim: dict) -> dict:
         raise EvidencePublicationError(
             "effect-claim-invalid", "effect target is not the publication basename"
         )
-    return {name: claim[name] for name in SEMANTIC_CLAIM_FIELDS}
+    projected = {name: claim[name] for name in SEMANTIC_CLAIM_FIELDS}
+    projected["publication_path"] = canonical
+    return projected
 
 
 def blob_origin_of(record: dict) -> str:
@@ -130,22 +132,12 @@ def record_version(document: dict, record_name: str) -> int:
     schema = document.get("schema")
     if not isinstance(schema, str):
         raise EvidencePublicationError("record-invalid", "record schema is not a string")
-    name, separator, version_text = schema.rpartition("/")
-    if not separator or name != record_name:
-        raise EvidencePublicationError(
-            "record-invalid", "record schema is not " + record_name
-        )
-    try:
-        version = int(version_text)
-    except ValueError:
-        raise EvidencePublicationError(
-            "record-invalid", "record schema version is not an integer"
-        ) from None
-    if version not in KNOWN_RECORD_VERSIONS:
-        raise EvidencePublicationError(
-            "record-invalid", "record schema version is not recognised"
-        )
-    return version
+    for version in KNOWN_RECORD_VERSIONS:
+        if schema == "%s/%d" % (record_name, version):
+            return version
+    raise EvidencePublicationError(
+        "record-invalid", "record schema is not a recognised generation of " + record_name
+    )
 
 
 def expects_materialization(version: int) -> bool:
@@ -178,6 +170,26 @@ def _partition_bindings(bindings) -> tuple[list, list]:
     return sorted(captured, key=key), sorted(generated, key=key)
 
 
+CLAIM_FIELDS = ("digest", "kind", "publication_path", "size", "target")
+
+
+def project_semantic_command(command):
+    """Return the command with every effect claim reduced to its meaning.
+
+    The encoded command carries the claim whole, so the digest and the size
+    of the produced file sit inside it.  Leaving them there would defeat the
+    separation entirely: the intent would still move whenever the bytes did,
+    which is the thing the split exists to prevent.
+    """
+    if isinstance(command, dict):
+        if all(name in command for name in CLAIM_FIELDS):
+            return project_semantic_claim(command)
+        return {key: project_semantic_command(value) for key, value in command.items()}
+    if isinstance(command, (list, tuple)):
+        return [project_semantic_command(item) for item in command]
+    return command
+
+
 def semantic_intent_digest(inputs: dict) -> str:
     """Return the digest of what the caller asked for, not of what came out.
 
@@ -191,7 +203,7 @@ def semantic_intent_digest(inputs: dict) -> str:
         _canonical(
             {
                 "blobs": captured,
-                "command": inputs["command"],
+                "command": project_semantic_command(inputs["command"]),
                 "lease_owner_session_id": inputs["lease_owner_session_id"],
                 "operation_id": inputs["operation_id"],
                 "schema": SEMANTIC_INTENT_SCHEMA,
@@ -320,6 +332,47 @@ def operation_record_keys(version: int) -> frozenset:
     return OPERATION_RECORD_KEYS[version]
 
 
+MATERIALIZATION_FIELDS = ("base_generation", "base_head_digest", "blobs", "state_digest")
+
+
+def read_materialization(value) -> dict:
+    """Parse and check one materialization binding.
+
+    Reading the field without looking inside it leaves the replay comparison
+    with nothing to compare: a null, a string, or an empty blob list all
+    agree with whatever the current run prepared.
+    """
+    if not isinstance(value, dict):
+        raise EvidencePublicationError(
+            "materialization-invalid", "materialization is not an object"
+        )
+    missing = [name for name in MATERIALIZATION_FIELDS if name not in value]
+    if missing:
+        raise EvidencePublicationError(
+            "materialization-invalid", "materialization is missing " + ", ".join(missing)
+        )
+    blobs = value["blobs"]
+    if not isinstance(blobs, list) or not blobs:
+        raise EvidencePublicationError(
+            "materialization-invalid", "materialization names no generated blob"
+        )
+    for binding in blobs:
+        if not isinstance(binding, dict):
+            raise EvidencePublicationError(
+                "materialization-invalid", "materialized blob is not an object"
+            )
+        absent = [name for name in BINDING_FIELDS if name not in binding]
+        if absent:
+            raise EvidencePublicationError(
+                "materialization-invalid", "materialized blob is missing " + ", ".join(absent)
+            )
+    if type(value["base_generation"]) is not int:
+        raise EvidencePublicationError(
+            "materialization-invalid", "materialization base generation is not an integer"
+        )
+    return value
+
+
 def read_operation_record(document: dict) -> dict:
     """Parse one operation record of either generation.
 
@@ -340,7 +393,9 @@ def read_operation_record(document: dict) -> dict:
         )
     return {
         "version": version,
-        "materialization": document["materialization"] if version >= 2 else None,
+        "materialization": (
+            read_materialization(document["materialization"]) if version >= 2 else None
+        ),
     }
 
 
