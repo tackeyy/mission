@@ -526,3 +526,50 @@ def test_the_gate_runs_the_declared_suite_instead_of_a_hardcoded_command():
     assert "run_declared_suite" in source
     # The old path must be gone, not merely bypassed.
     assert '("make", "test")' not in source
+
+
+def test_the_declared_command_reaches_the_runner_unchanged():
+    """Scope narrowing must not rewrite the command the base declared.
+
+    Appending `PYTEST_TARGETS=...` as an argument only means anything to
+    `make`.  A contract that declares any other command would receive an
+    extra positional argument, which changes what it does.
+    """
+    import integration_gate as gate
+
+    seen = {}
+
+    def _runner(arguments, cwd, env=None):
+        seen["arguments"] = arguments
+        seen["env"] = env
+        raise _StopBeforeReport()
+
+    with pytest.raises(_StopBeforeReport):
+        gate.run_declared_suite(
+            ("pytest", "-q"),
+            runner=_runner,
+            cwd=".",
+            report_path="/nonexistent/report.json",
+            expected_tree_sha="0" * 40,
+            step=4,
+            env={"PYTEST_TARGETS": "skills/mission/tests/test_x.py"},
+        )
+
+    assert seen["arguments"] == ("pytest", "-q")
+    assert seen["env"]["PYTEST_TARGETS"] == "skills/mission/tests/test_x.py"
+    assert gate.SUITE_REPORT_ENV in seen["env"]
+
+
+class _StopBeforeReport(Exception):
+    """End the run once the runner has been observed."""
+
+
+def test_the_gate_passes_its_scope_through_the_environment():
+    """Hold the call the gate makes, not only what `run_declared_suite` accepts."""
+    from pathlib import Path
+
+    import integration_gate as gate
+
+    source = Path(gate.__file__).read_text(encoding="utf-8")
+    assert 'suite_command += ("PYTEST_TARGETS=' not in source
+    assert 'suite_env = {"PYTEST_TARGETS": targets}' in source

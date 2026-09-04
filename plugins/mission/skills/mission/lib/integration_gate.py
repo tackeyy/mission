@@ -321,7 +321,7 @@ def require_suite_report(document: object, *, expected_tree_sha: str, step: int)
 
 
 def run_declared_suite(command, *, runner, cwd, report_path, expected_tree_sha, step,
-                       logger=None):
+                       logger=None, env=None):
     """Run the declared full suite and require evidence that it ran (#735).
 
     A non-zero exit is still reported as ``suite-failed``: this adds a
@@ -340,7 +340,9 @@ def run_declared_suite(command, *, runner, cwd, report_path, expected_tree_sha, 
             "a suite report already exists before the run; the gate cannot tell "
             "it apart from one this run produced",
         )
-    result = runner(tuple(command), cwd, env={SUITE_REPORT_ENV: str(report_path)})
+    suite_env = dict(env or {})
+    suite_env[SUITE_REPORT_ENV] = str(report_path)
+    result = runner(tuple(command), cwd, env=suite_env)
     if result.returncode != 0:
         if logger is not None:
             logger("suite_exit={}".format(result.returncode))
@@ -774,8 +776,11 @@ class SubprocessGateOperations:
             # nothing (#735).
             contract = load_suite_contract(self, base_sha=base_sha, step=4)
             suite_command = require_suite_contract(contract, step=4)
-            if targets:
-                suite_command += ("PYTEST_TARGETS={}".format(targets),)
+            # The scope goes through the environment, not the argument list:
+            # appending "PYTEST_TARGETS=..." only means anything to make, and
+            # any other declared command would receive it as an extra
+            # positional argument and do something else.
+            suite_env = {"PYTEST_TARGETS": targets} if targets else None
             report_path = Path(tree) / ".mission-gate-suite-report.json"
             executed = run_declared_suite(
                 suite_command,
@@ -785,6 +790,7 @@ class SubprocessGateOperations:
                 expected_tree_sha=tree_sha,
                 step=4,
                 logger=logger,
+                env=suite_env,
             )
             logger("suite_exit=0 suite_executed={}".format(executed))
             observation = IntegrationObservation(scope, targets, tree_sha, changeset_digest)
