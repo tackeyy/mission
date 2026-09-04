@@ -306,20 +306,9 @@ def materialization_binding(
     _captured, generated = _partition_bindings(
         bindings, repository_root_name=repository_root_name
     )
-    if type(base_generation) is not int:
-        raise EvidencePublicationError(
-            "materialization-invalid", "base generation is not an integer"
-        )
-    # The writer refuses what the reader refuses.  Producing a record that
-    # cannot be read back leaves a replay with nothing to compare against.
-    for name, candidate in (
-        ("base head digest", base_head_digest),
-        ("state digest", state_digest),
-    ):
-        if not isinstance(candidate, str) or not DIGEST_PATTERN.fullmatch(candidate):
-            raise EvidencePublicationError(
-                "materialization-invalid", name + " is invalid"
-            )
+    # Nothing is checked here.  The reader below is the one place that
+    # decides what a materialization may hold; repeating any of it would put
+    # the same rule in two places, which is how the two drifted apart before.
     # Run the reader over what was just built.  Keeping the two checks apart
     # is how this drifted: the writer produced null digests, empty kinds,
     # negative sizes and empty blob sets that the reader then refused, so a

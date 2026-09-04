@@ -1087,9 +1087,14 @@ def test_a_command_that_never_names_a_path_is_refused_with_one(command_type):
 
     for field in EFFECT_FIELDS_BY_COMMAND_TYPE[command_type]:
         document = json.loads(json.dumps(_real_command(command_type)))
-        document["value"][field]["publication_path"] = "build/x.json"
-        with pytest.raises(EvidencePublicationError):
+        claim = document["value"][field]
+        # The path has to agree with the claim's own target, or the basename
+        # check refuses it first and this test passes without ever reaching
+        # the one it is written for.
+        claim["publication_path"] = "build/" + claim["target"]
+        with pytest.raises(EvidencePublicationError) as excinfo:
             project_semantic_command(document)
+        assert "must not name" in excinfo.value.detail
 
 
 def test_the_writer_cannot_produce_what_the_reader_refuses():
