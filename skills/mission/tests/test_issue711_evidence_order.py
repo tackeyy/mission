@@ -339,3 +339,48 @@ def test_admitting_after_a_snapshot_read_still_works(tmp_path):
         after = repository.load()
         assert after == before
         assert repository._admitted is not None
+
+
+def test_the_evidence_executor_prepares_before_it_admits(tmp_path):
+    """Hold the order the whole stage exists to change.
+
+    Recording which repository calls happened, and in which order, is the
+    only way to see this: both orders produce the same document, so a test
+    that only checks the result passes either way.
+    """
+    from mission_persistence.legacy_v4 import (
+        PreparedEvidenceOperation,
+        V5CompatibilityRepository,
+    )
+
+    order = []
+
+    class _Watched(V5CompatibilityRepository):
+        def read_snapshot(self):
+            order.append("read")
+            return super().read_snapshot()
+
+        def load(self):
+            order.append("admit")
+            return super().load()
+
+    repository = _Watched(
+        repository=_v5_repository(tmp_path),
+        session_id="test",
+        lease_owner_session_id="test",
+        presented_lease_id="fixture-lease",
+    )
+
+    def _prepare(state):
+        order.append("prepare")
+        raise _StopAfterPrepare()
+
+    with pytest.raises(_StopAfterPrepare):
+        repository.execute_evidence_transition_effects(_prepare)
+
+    assert order.index("read") < order.index("prepare"), order
+    assert "admit" not in order[: order.index("prepare")], order
+
+
+class _StopAfterPrepare(Exception):
+    """End the run once the order under test has been observed."""

@@ -1182,12 +1182,18 @@ class V5CompatibilityRepository:
         if backup is not True:
             raise ValueError(f"backup={backup!r} is not supported by the v5 executor")
         with self.transaction():
-            current = self.load()
+            # A' order: read without admitting, prepare, then admit.  The
+            # admission used to happen inside ``load`` before prepare had run,
+            # so the request carried no blobs and the published files stayed
+            # outside the unit of work.  Reading first also keeps the caller's
+            # prepare callback behind the lease check rather than after it.
+            snapshot = self.read_snapshot()
             with self._callback_guard():
-                prepared = prepare(copy.deepcopy(current))
+                prepared = prepare(copy.deepcopy(snapshot))
             if not isinstance(prepared, operation_type):
                 raise ValueError(operation_error)
             effects = self.validate_effects(prepared.effects)
+            current = self.load()
             if self.operation_replayed:
                 frozen = freeze_json_value(current)
                 assert isinstance(frozen, FrozenJsonObject)
