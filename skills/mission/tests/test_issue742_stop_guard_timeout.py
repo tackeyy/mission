@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import os
 import signal
 import subprocess
@@ -128,51 +129,32 @@ class TestStopVerdictAppliesTheLimit:
         assert payload["schema"] == "mission-stop-verdict/1"
 
 
-class TestShellAdapterNoLongerDependsOnExternalCommands:
-    """D2: the shell path must not have an unbounded branch."""
+class TestShellAdapterHoldsNoPolicy:
+    """D2 + #615: the hook dispatches; it does not interpret the value or bound it."""
 
-    def test_every_branch_lets_the_command_apply_its_own_limit(self):
-        """D2 does not remove the `else`; it makes that branch bounded from inside.
+    def test_the_hook_no_longer_depends_on_timeout_or_perl(self):
+        """Their absence used to be a hole; the command now bounds itself."""
+        source = GUARD_SH.read_text(encoding="utf-8")
+        assert "command -v timeout" not in source
+        assert "perl -e" not in source
 
-        The command reads the limit from the environment, so the shell has to export
-        it. Without the export, the `else` branch would be unbounded again.
+    def test_the_hook_does_not_interpret_the_limit(self):
+        """#615 keeps the hook judgment-free: validating the value is a judgment.
+
+        Two independent validations would also drift apart, and then the two
+        limits would disagree on the same input.
         """
         source = GUARD_SH.read_text(encoding="utf-8")
-        assert "export MISSION_STATE_TIMEOUT" in source
-
-    def test_a_bad_value_never_reaches_the_external_limit(self):
-        """`timeout abc ...` fails; D3 requires falling back before that point."""
-        source = GUARD_SH.read_text(encoding="utf-8")
-        validation = source.split("MISSION_STATE_TIMEOUT:-8}", 1)[1].split("export", 1)[0]
-        assert "*[!0-9]*" in validation
-        assert "-gt 0" in validation
-
-    @pytest.mark.parametrize("raw,expected", [("abc", "8"), ("0", "8"), ("-5", "8"), ("12", "12")])
-    def test_the_shell_validation_matches_the_python_resolver(self, raw, expected):
-        """Both sides must agree, or the two limits disagree on the same input."""
-        script = GUARD_SH.read_text(encoding="utf-8")
-        block = script.split("MISSION_STATE_TIMEOUT=\"${MISSION_STATE_TIMEOUT:-8}\"", 1)[1]
-        block = block.split("export MISSION_STATE_TIMEOUT", 1)[0]
-        probe = (
-            'MISSION_STATE_TIMEOUT="{}"\n'.format(raw)
-            + 'MISSION_STATE_TIMEOUT="${MISSION_STATE_TIMEOUT:-8}"\n'
-            + block
-            + '\nprintf %s "$MISSION_STATE_TIMEOUT"\n'
-        )
-        result = subprocess.run(["/bin/bash", "-c", probe], capture_output=True, text=True)
-        assert result.stdout == expected
-        assert str(resolve_guard_timeout(raw)) == expected
-
-    def test_the_default_is_eight_seconds(self):
-        source = GUARD_SH.read_text(encoding="utf-8")
-        assert "MISSION_STATE_TIMEOUT:-8}" in source
+        assert "MISSION_STATE_TIMEOUT:-" not in source, "the default belongs to the resolver"
+        assert not re.search(
+            r"(?:\[\[?|\btest\b)[^\n]*(?:-lt|-le|-gt|-ge)\b", source
+        ), "numeric comparison is a policy decision (#615)"
 
     def test_bounded_without_timeout_and_without_perl(self, tmp_path):
         """Give the script a PATH that has neither command and confirm it returns."""
         fake_bin = tmp_path / "bin"
         fake_bin.mkdir()
-        needed = ("python3", "jq", "cat", "sed", "printf", "env", "uname", "date")
-        for name in needed:
+        for name in ("python3", "jq", "cat", "sed", "printf", "env", "uname", "date"):
             found = subprocess.run(
                 ["/usr/bin/env", "which", name], capture_output=True, text=True
             ).stdout.strip()

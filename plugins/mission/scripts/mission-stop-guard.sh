@@ -13,22 +13,19 @@ fi
 
 INPUT=$(cat)
 
-# mission-state.py の起動には Python のインタプリタ起動と import が含まれ、
-# cold start では数秒かかる。実測で 5 秒を超えることがあり、その場合 guard は
-# 判定材料を得られないまま block へ倒れて Stop のたびに止まり続ける。
-# 上限は「遅いだけの正常な起動」を殺さず、「本当に固まった呼び出し」は
-# 切れる幅にする。環境変数で上書きできるようにし、計測結果に応じて
-# 調整できる余地を残す。
-MISSION_STATE_TIMEOUT="${MISSION_STATE_TIMEOUT:-30}"
-
+# 上限は `stop-verdict` 自身が掛ける（mission_application/guard_timeout.py）。
+# hook 側は値を解釈しない: #615 が hook を judgment-free と定めており、
+# `MISSION_STATE_TIMEOUT` の検証と既定は判断であって dispatch ではない。
+#
+# 以前はここで `timeout` / `perl` を使い、どちらも無ければ**上限なしで実行**
+# していた。その環境では hook が返らないと Stop が永久に止まる（#742 D2）。
+# いまは呼び出し先が自分に上限を掛けるため、外部コマンドの有無は穴にならない。
+#
+# さらに外側の上限はホスト側の hook timeout が持つ。#742 D3 で「ホスト側の値を
+# 契約とし、guard の上限はその内側に置く」と決めているため、ここで二重に
+# 掛ける必要はない。
 _mission_state_bounded() {
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "$MISSION_STATE_TIMEOUT" python3 "$MISSION_STATE_PY" "$@"
-  elif command -v perl >/dev/null 2>&1; then
-    perl -e 'alarm shift; exec @ARGV' "$MISSION_STATE_TIMEOUT" python3 "$MISSION_STATE_PY" "$@"
-  else
-    python3 "$MISSION_STATE_PY" "$@"
-  fi
+  python3 "$MISSION_STATE_PY" "$@"
 }
 
 if ! GUARD_DECISION=$(printf '%s' "$INPUT" | _mission_state_bounded stop-verdict --hook-input - --json); then
