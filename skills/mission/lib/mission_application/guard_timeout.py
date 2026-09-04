@@ -17,9 +17,12 @@ import signal
 from contextlib import contextmanager
 from typing import Callable, Iterator, Optional, TypeVar
 
-# The host bounds the whole hook at 10 seconds (`settings.json`). The guard's own
-# limit sits inside that budget so the guard, not the host, decides what happens when
-# the verdict is slow: the host discards the output, while the guard emits a block.
+# The host bounds the whole hook at 10 seconds (`claude-hooks/hooks.json`). The
+# guard's own limit has to stay inside that budget, or the host cuts first and the
+# guard never gets to emit its block -- the host discards the output instead.
+#
+# So this value is both the default *and* the ceiling: a larger override is clamped
+# rather than honoured. Smaller overrides are honoured (tests use 1).
 DEFAULT_GUARD_TIMEOUT_SECONDS = 8
 
 _ASCII_DIGITS = frozenset("0123456789")
@@ -47,16 +50,19 @@ def resolve_guard_timeout(raw: Optional[object]) -> int:
     # unbounded state D2 removes. Treat it as unusable, not as "no limit".
     if value <= 0:
         return DEFAULT_GUARD_TIMEOUT_SECONDS
-    return value
+    # Clamp rather than honour: a value above the host's own hook timeout would let the
+    # host cut first, and D3 puts the guard's limit inside the host's budget.
+    return min(value, DEFAULT_GUARD_TIMEOUT_SECONDS)
 
 
 @contextmanager
 def guard_time_limit(seconds: int) -> Iterator[None]:
     """Bound the enclosed block, restoring the previous handler on the way out.
 
-    On platforms without ``SIGALRM`` the block runs unbounded, because there is no
-    in-process mechanism to interrupt it; the shell adapter's external limit is the
-    remaining defence there.
+    On platforms without ``SIGALRM`` the block runs unbounded here. What remains is
+    the shell adapter's ``timeout`` / ``perl`` branch, and -- where neither exists --
+    only the host's own hook timeout. That gap is inherent to the platform, not
+    something this function papers over.
     """
     if not hasattr(signal, "SIGALRM"):
         yield
@@ -66,12 +72,16 @@ def guard_time_limit(seconds: int) -> Iterator[None]:
         raise GuardTimeout("stop verdict exceeded {}s".format(seconds))
 
     previous = signal.signal(signal.SIGALRM, _expire)
-    signal.alarm(seconds)
+    # `alarm()` returns what was left of any alarm it replaces. Restoring the handler
+    # without restoring that remainder would silently cancel an outer limit.
+    remaining = signal.alarm(seconds)
     try:
         yield
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, previous)
+        if remaining:
+            signal.alarm(remaining)
 
 
 _T = TypeVar("_T")

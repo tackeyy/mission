@@ -13,19 +13,35 @@ fi
 
 INPUT=$(cat)
 
-# 上限は `stop-verdict` 自身が掛ける（mission_application/guard_timeout.py）。
-# hook 側は値を解釈しない: #615 が hook を judgment-free と定めており、
-# `MISSION_STATE_TIMEOUT` の検証と既定は判断であって dispatch ではない。
+# 上限は二重に掛ける。どちらか一方では穴が残る。
 #
-# 以前はここで `timeout` / `perl` を使い、どちらも無ければ**上限なしで実行**
-# していた。その環境では hook が返らないと Stop が永久に止まる（#742 D2）。
-# いまは呼び出し先が自分に上限を掛けるため、外部コマンドの有無は穴にならない。
+# 外側（ここ）: #714 は `MISSION_STATE_PY` を差し替えた hang でも hook が有限時間で
+# block を返すことを要求する。差し替え先は guard 側の上限を持たないため、
+# **外側の上限が無いとこの契約を満たせない**。
 #
-# さらに外側の上限はホスト側の hook timeout が持つ。#742 D3 で「ホスト側の値を
-# 契約とし、guard の上限はその内側に置く」と決めているため、ここで二重に
-# 掛ける必要はない。
+# 内側（stop-verdict 自身・mission_application/guard_timeout.py）: 以前はここで
+# `timeout` / `perl` の**どちらも無ければ上限なしで実行**していた。その環境では
+# hook が返らないと Stop が永久に止まる（#742 D2）。呼び出し先が自分に上限を
+# 掛けるようになったため、下の `else` はもう無制限ではない。
+#
+# 値の検証は正の整数のパターン一致だけで行い、数値比較（-gt 等）は使わない。
+# #615 は hook を judgment-free と定めており、`analyze_guard_shell` が数値比較を
+# policy 判断として拒否する。既定と解釈の正典は `resolve_guard_timeout` にある。
+MISSION_STATE_TIMEOUT="${MISSION_STATE_TIMEOUT:-8}"
+case "$MISSION_STATE_TIMEOUT" in
+  ''|*[!0-9]*|0*) MISSION_STATE_TIMEOUT=8 ;;
+esac
+# 内側の上限が同じ値を見られるようにする。
+export MISSION_STATE_TIMEOUT
+
 _mission_state_bounded() {
-  python3 "$MISSION_STATE_PY" "$@"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$MISSION_STATE_TIMEOUT" python3 "$MISSION_STATE_PY" "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'alarm shift; exec @ARGV' "$MISSION_STATE_TIMEOUT" python3 "$MISSION_STATE_PY" "$@"
+  else
+    python3 "$MISSION_STATE_PY" "$@"
+  fi
 }
 
 if ! GUARD_DECISION=$(printf '%s' "$INPUT" | _mission_state_bounded stop-verdict --hook-input - --json); then

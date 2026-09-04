@@ -49,13 +49,20 @@ class TestResolveGuardTimeout:
     def test_default_is_eight_seconds(self):
         assert DEFAULT_GUARD_TIMEOUT_SECONDS == 8
 
-    @pytest.mark.parametrize("raw", ["1", "8", "30", " 12 ", "08"])
-    def test_positive_integers_are_honoured(self, raw):
+    @pytest.mark.parametrize("raw", ["1", "8", " 8 ", "08", "2"])
+    def test_positive_integers_within_the_ceiling_are_honoured(self, raw):
         assert resolve_guard_timeout(raw) == int(raw.strip())
+
+    @pytest.mark.parametrize("raw", ["9", "30", "600"])
+    def test_a_value_above_the_ceiling_is_clamped(self, raw):
+        """Honouring it would let the host's 10s cut first, and the block never lands."""
+        assert resolve_guard_timeout(raw) == DEFAULT_GUARD_TIMEOUT_SECONDS
 
     @pytest.mark.parametrize(
         "raw",
-        [None, "", "   ", "-1", "abc", "8.0", "8s", "1e3", "+8", "٨"],
+        # `٢` (Arabic-Indic 2), not `٨`: `int("٨")` is 8, which equals the default, so
+        # weakening the check to `str.isdigit()` would still pass the assertion.
+        [None, "", "   ", "-1", "abc", "8.0", "8s", "1e3", "+8", "٢"],
     )
     def test_everything_else_falls_back_to_the_default(self, raw):
         assert resolve_guard_timeout(raw) == DEFAULT_GUARD_TIMEOUT_SECONDS
@@ -89,6 +96,18 @@ class TestGuardTimeLimit:
             pass
         assert signal.getsignal(signal.SIGALRM) is sentinel
         assert signal.alarm(0) == 0
+
+    def test_an_outer_alarm_keeps_its_remaining_time(self):
+        """Restoring only the handler would silently cancel a limit set further out."""
+        try:
+            signal.signal(signal.SIGALRM, lambda *_: None)
+            signal.alarm(30)
+            with guard_time_limit(2):
+                pass
+            assert signal.alarm(0) > 0, "the outer alarm must survive the inner limit"
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, signal.SIG_DFL)
 
     def test_clears_the_alarm_even_when_the_body_raises(self):
         with pytest.raises(ValueError):
@@ -129,29 +148,66 @@ class TestStopVerdictAppliesTheLimit:
         assert payload["schema"] == "mission-stop-verdict/1"
 
 
-class TestShellAdapterHoldsNoPolicy:
-    """D2 + #615: the hook dispatches; it does not interpret the value or bound it."""
+class TestTheLimitIsAppliedTwice:
+    """Neither limit alone closes the hole; the PR keeps both."""
 
-    def test_the_hook_no_longer_depends_on_timeout_or_perl(self):
-        """Their absence used to be a hole; the command now bounds itself."""
-        source = GUARD_SH.read_text(encoding="utf-8")
-        assert "command -v timeout" not in source
-        assert "perl -e" not in source
+    def test_the_outer_limit_survives_because_714_needs_it(self):
+        """#714 hangs a substituted `MISSION_STATE_PY`, which has no inner limit.
 
-    def test_the_hook_does_not_interpret_the_limit(self):
-        """#615 keeps the hook judgment-free: validating the value is a judgment.
-
-        Two independent validations would also drift apart, and then the two
-        limits would disagree on the same input.
+        Removing the outer limit would satisfy #742 on this repo's own command while
+        breaking the contract for any other command the hook is pointed at.
         """
         source = GUARD_SH.read_text(encoding="utf-8")
-        assert "MISSION_STATE_TIMEOUT:-" not in source, "the default belongs to the resolver"
+        assert "command -v timeout" in source
+        assert "perl -e" in source
+
+    def test_the_fallback_branch_is_no_longer_unbounded(self):
+        """The `else` used to run unbounded; now the command bounds itself (#742 D2)."""
+        state_source = STATE_PY.read_text(encoding="utf-8")
+        assert "@bounded_by_guard_timeout" in state_source, (
+            "the else branch relies on the command applying its own limit"
+        )
+
+    def test_the_hook_holds_no_numeric_judgment(self):
+        """#615: `analyze_guard_shell` rejects numeric comparison as a policy decision."""
+        source = GUARD_SH.read_text(encoding="utf-8")
         assert not re.search(
             r"(?:\[\[?|\btest\b)[^\n]*(?:-lt|-le|-gt|-ge)\b", source
-        ), "numeric comparison is a policy decision (#615)"
+        )
+
+    @pytest.mark.parametrize("raw", ["abc", "0", "-5", "", "8s"])
+    def test_a_bad_value_never_reaches_the_external_limit(self, raw):
+        """`timeout abc ...` fails outright, so the fallback has to happen first."""
+        script = GUARD_SH.read_text(encoding="utf-8")
+        block = script.split('MISSION_STATE_TIMEOUT="${MISSION_STATE_TIMEOUT:-8}"', 1)[1]
+        block = block.split("export MISSION_STATE_TIMEOUT", 1)[0]
+        probe = (
+            'MISSION_STATE_TIMEOUT="{}"\n'.format(raw)
+            + 'MISSION_STATE_TIMEOUT="${MISSION_STATE_TIMEOUT:-8}"\n'
+            + block
+            + '\nprintf %s "$MISSION_STATE_TIMEOUT"\n'
+        )
+        result = subprocess.run(["/bin/bash", "-c", probe], capture_output=True, text=True)
+        assert result.stdout == "8"
+        assert resolve_guard_timeout(raw) == DEFAULT_GUARD_TIMEOUT_SECONDS
+
+    def test_both_sides_bound_a_valid_value(self):
+        """A value both sides accept must not be silently replaced by either."""
+        script = GUARD_SH.read_text(encoding="utf-8")
+        block = script.split('MISSION_STATE_TIMEOUT="${MISSION_STATE_TIMEOUT:-8}"', 1)[1]
+        block = block.split("export MISSION_STATE_TIMEOUT", 1)[0]
+        probe = (
+            'MISSION_STATE_TIMEOUT="5"\n'
+            + 'MISSION_STATE_TIMEOUT="${MISSION_STATE_TIMEOUT:-8}"\n'
+            + block
+            + '\nprintf %s "$MISSION_STATE_TIMEOUT"\n'
+        )
+        result = subprocess.run(["/bin/bash", "-c", probe], capture_output=True, text=True)
+        assert result.stdout == "5"
+        assert resolve_guard_timeout("5") == 5
 
     def test_bounded_without_timeout_and_without_perl(self, tmp_path):
-        """Give the script a PATH that has neither command and confirm it returns."""
+        """D2: the inner limit covers the environment the outer one cannot."""
         fake_bin = tmp_path / "bin"
         fake_bin.mkdir()
         for name in ("python3", "jq", "cat", "sed", "printf", "env", "uname", "date"):
