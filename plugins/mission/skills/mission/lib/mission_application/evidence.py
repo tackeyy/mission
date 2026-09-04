@@ -539,7 +539,7 @@ def prepare_context_manifest(
         # Carry the detail: it names a path that would work, and the caller
         # whose command just stopped working has no other way to learn it.
         raise EvidenceFailure(
-            "context-publication-path-invalid: " + exc.detail
+            "context-publication-path-invalid", exc.detail
         ) from exc
     target = Path(publication_path).name
     effect = make_evidence_effect("context-manifest", target, content)

@@ -13776,7 +13776,7 @@ def cmd_context_manifest(args):
             _legacy_lifecycle_repository(cwd, sf, stamp=False, pre_admit_lease=True),
         )
     except EvidenceFailure as exc:
-        print(f"ERROR: {exc.code}", file=sys.stderr)
+        print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
     print(json.dumps({"ok": True, **result}, ensure_ascii=False))
 

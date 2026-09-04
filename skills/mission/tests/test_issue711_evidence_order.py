@@ -719,3 +719,13 @@ def test_the_retry_budget_is_the_shared_one():
     source = Path(module.__file__).read_text(encoding="utf-8")
     assert "base_agrees(" in source
     assert "MAX_BASE_RETRIES" not in source, "the budget belongs to one module"
+
+
+def test_the_failure_keeps_its_code_stable_and_its_detail_apart():
+    """Callers branch on `code`; joining the detail made it unmatchable."""
+    from mission_application.artifact import EvidenceFailure
+
+    failure = EvidenceFailure("context-publication-path-invalid", "choose x")
+    assert failure.code == "context-publication-path-invalid"
+    assert failure.detail == "choose x"
+    assert "choose x" in str(failure)
