@@ -492,6 +492,7 @@ from merge_queue import (  # noqa: E402
 )
 from integration_gate import execute_changeset_digest, execute_gate_and_merge  # noqa: E402
 from mission_application.integration_gate import (  # noqa: E402
+    CLAIMED_DIGEST_SOURCES,
     ChangesetDigestRequest,
     ChangesetDigestServices,
     IntegrationGateFailure,
@@ -7462,6 +7463,7 @@ def cmd_gate_and_merge(args):
         expected_head_sha=args.expected_head_sha,
         expected_base_sha=args.expected_base_sha,
         expected_changeset_digest=args.reviewed_changeset_digest,
+        claimed_digest_source=args.claimed_digest_source,
     )
     try:
         result = run_integration_gate(
@@ -16299,6 +16301,17 @@ def _add_queue_parsers(subparsers) -> None:
             "Never compute it at merge time: a value derived from the same diff the "
             "gate observes always matches, so the check does nothing. Omit it to keep "
             "the existing strict requirements instead."
+        ),
+    )
+    p_gate_merge.add_argument(
+        "--claimed-digest-source",
+        default=None,
+        choices=list(CLAIMED_DIGEST_SOURCES),
+        help=(
+            "where the reviewed changeset digest was claimed to come from. Required "
+            "together with --reviewed-changeset-digest, and rejected without it. This "
+            "records the claim, not the origin: the gate cannot tell a transcribed "
+            "digest from one the producer computed at merge time."
         ),
     )
     p_gate_merge.set_defaults(func=cmd_gate_and_merge)

@@ -61,12 +61,13 @@ class IntegrationGateRequest:
     expected_head_sha: Optional[str] = None
     expected_base_sha: Optional[str] = None
     expected_changeset_digest: Optional[str] = None
+    claimed_digest_source: Optional[str] = None
 
 
 @dataclass(frozen=True)
 class IntegrationGateServices:
     execute: Callable[
-        [str, str, Optional[str], Optional[str], Optional[str]],
+        [str, str, Optional[str], Optional[str], Optional[str], Optional[str]],
         Dict[str, object],
     ]
 
@@ -95,6 +96,18 @@ def _valid_changeset_digest(value: object) -> bool:
         and len(value) == 64
         and all(character in "0123456789abcdef" for character in value)
     )
+
+
+CLAIMED_DIGEST_SOURCES = ("checker-comment", "argv-manual")
+
+
+def _valid_claimed_digest_source(value: object) -> bool:
+    """申告値は閉じた列挙だけを受理する。
+
+    未知の値を通すと、記録の意味が呼び出し側ごとに変わる。表記揺れ (大文字・前後空白) も
+    受理しない。後から集計するとき、同じ申告が複数の表記へ割れると数えられなくなる。
+    """
+    return value in CLAIMED_DIGEST_SOURCES
 
 
 def compute_changeset_digest(patch: bytes) -> str:
@@ -196,6 +209,7 @@ def run_gate_and_merge(
     expected_head_sha: Optional[str] = None,
     expected_base_sha: Optional[str] = None,
     expected_changeset_digest: Optional[str] = None,
+    claimed_digest_source: Optional[str] = None,
 ) -> Dict[str, object]:
     if not isinstance(pr_ref, str) or not pr_ref.isdigit() or int(pr_ref) <= 0:
         raise IntegrationGateFailure(1, "invalid-pr-ref", "pull request reference must be a positive number")
@@ -213,6 +227,34 @@ def run_gate_and_merge(
             1,
             "invalid-expected-changeset-digest",
             "reviewed changeset digest is not a lowercase sha256 hex digest",
+        )
+    # 申告と digest は双方向で対になる。片方だけを許すと、申告のない digest が
+    # 記録なしで通るか、検証していない merge に出所だけが付く。どちらも、後から
+    # 「この digest はどこから来たか」を読む側に誤った手掛かりを残す。
+    #
+    # **gate が記録するのは出所ではなく出所の申告である。** producer が自算した値へ
+    # `checker-comment` と申告することは可能で、gate はそれを検出しない (#727)。
+    if claimed_digest_source is not None and not _valid_claimed_digest_source(
+        claimed_digest_source
+    ):
+        raise IntegrationGateFailure(
+            1,
+            "invalid-claimed-digest-source",
+            "claimed digest source must be one of: {}".format(
+                ", ".join(CLAIMED_DIGEST_SOURCES)
+            ),
+        )
+    if expected_changeset_digest is not None and claimed_digest_source is None:
+        raise IntegrationGateFailure(
+            1,
+            "claimed-digest-source-missing",
+            "a reviewed changeset digest requires the source it was claimed to come from",
+        )
+    if claimed_digest_source is not None and expected_changeset_digest is None:
+        raise IntegrationGateFailure(
+            1,
+            "reviewed-changeset-digest-missing",
+            "a claimed digest source requires the reviewed changeset digest it describes",
         )
     expected_number = int(pr_ref)
     with services.lease():
@@ -325,6 +367,9 @@ def run_gate_and_merge(
             "test_scope": observation.scope,
             "test_targets": observation.targets,
             "changeset_digest": observation.changeset_digest,
+            # 申告が無かったことも記録する。キーごと落とすと、申告できない古い
+            # 呼び出しと「申告せずに通した merge」を後から区別できない。
+            "claimed_digest_source": claimed_digest_source,
             "merge_commit_sha": merged.merge_commit_sha,
         }
 
@@ -350,4 +395,5 @@ def run_integration_gate(
         request.expected_head_sha,
         request.expected_base_sha,
         request.expected_changeset_digest,
+        request.claimed_digest_source,
     )

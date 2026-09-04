@@ -622,6 +622,7 @@ def gate_and_merge(
     expected_head_sha: Optional[str] = None,
     expected_base_sha: Optional[str] = None,
     expected_changeset_digest: Optional[str] = None,
+    claimed_digest_source: Optional[str] = None,
 ) -> Dict[str, object]:
     return run_gate_and_merge(
         pr_ref,
@@ -640,6 +641,7 @@ def gate_and_merge(
         expected_head_sha,
         expected_base_sha,
         expected_changeset_digest,
+        claimed_digest_source,
     )
 
 
@@ -659,6 +661,7 @@ def execute_gate_and_merge(
     expected_head_sha: Optional[str] = None,
     expected_base_sha: Optional[str] = None,
     expected_changeset_digest: Optional[str] = None,
+    claimed_digest_source: Optional[str] = None,
 ) -> Dict[str, object]:
     return gate_and_merge(
         pr_ref,
@@ -667,6 +670,7 @@ def execute_gate_and_merge(
         expected_head_sha,
         expected_base_sha,
         expected_changeset_digest,
+        claimed_digest_source,
     )
 
 
@@ -680,6 +684,7 @@ def execute_gate_and_merge_cli(
     expected_head_sha: Optional[str] = None,
     expected_base_sha: Optional[str] = None,
     expected_changeset_digest: Optional[str] = None,
+    claimed_digest_source: Optional[str] = None,
 ) -> Dict[str, object]:
     output = stdout or sys.stdout
     errors = stderr or sys.stderr
@@ -692,6 +697,7 @@ def execute_gate_and_merge_cli(
             expected_head_sha,
             expected_base_sha,
             expected_changeset_digest,
+            claimed_digest_source,
         )
     except IntegrationGateError as exc:
         print(
