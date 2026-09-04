@@ -1,7 +1,9 @@
 """Issue #742: the Stop guard bounds itself instead of depending on external commands.
 
 D2: `stop-verdict` applies its own limit, so hosts without `timeout` and without
-`perl` are still bounded.
+`perl` are still bounded -- on platforms that have `SIGALRM`. Where they do not, the
+shell adapter's external limit, or failing that the host's hook timeout, is what
+remains; the inner limit is not unconditional.
 D3: `MISSION_STATE_TIMEOUT` accepts positive integers only and falls back to the
 default (8 seconds) for anything else, without turning a bad value into a block.
 """
@@ -81,8 +83,12 @@ class TestResolveGuardTimeout:
         assert resolve_guard_timeout("nonsense") == DEFAULT_GUARD_TIMEOUT_SECONDS
 
 
+HAS_SIGALRM = hasattr(signal, "SIGALRM")
+
+
+@pytest.mark.skipif(not HAS_SIGALRM, reason="the in-process limit needs SIGALRM")
 class TestGuardTimeLimit:
-    """D2: the limit is applied in-process."""
+    """D2: the limit is applied in-process, where the platform provides SIGALRM."""
 
     def test_raises_when_the_body_exceeds_the_limit(self):
         started = time.monotonic()
@@ -110,6 +116,45 @@ class TestGuardTimeLimit:
             with guard_time_limit(2):
                 pass
             assert signal.alarm(0) > 0, "the outer alarm must survive the inner limit"
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, signal.SIG_DFL)
+
+    def test_the_outer_deadline_is_not_extended_by_the_inner_block(self):
+        """Restoring "what is left" as whole seconds grants more time than remained.
+
+        `int()` drops the fraction and a floor of 1 re-arms an expired deadline, so the
+        outer alarm fires late. Measured against the deadline, not the remainder.
+        """
+        fired = []
+        try:
+            signal.signal(signal.SIGALRM, lambda *_: fired.append(time.monotonic()))
+            armed = time.monotonic()
+            signal.alarm(2)                  # outer deadline: armed + 2.0
+            with guard_time_limit(5):        # inner asks for longer
+                time.sleep(0.8)
+            while not fired and time.monotonic() - armed < 4:
+                time.sleep(0.02)
+            assert fired, "the outer alarm must still fire"
+            overshoot = fired[0] - (armed + 2.0)
+            assert overshoot < 0.3, (
+                "the outer deadline moved by {:.3f}s; it must not be extended".format(
+                    overshoot
+                )
+            )
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, signal.SIG_DFL)
+
+    def test_an_expired_outer_deadline_is_not_re_armed(self):
+        """If the block outlives the outer deadline, there is nothing left to restore."""
+        try:
+            signal.signal(signal.SIGALRM, lambda *_: None)
+            signal.alarm(1)
+            with pytest.raises(GuardTimeout):
+                with guard_time_limit(5):
+                    time.sleep(3)
+            assert signal.alarm(0) == 0, "an expired deadline must not be re-armed"
         finally:
             signal.alarm(0)
             signal.signal(signal.SIGALRM, signal.SIG_DFL)
@@ -145,6 +190,7 @@ class TestGuardTimeLimit:
         assert signal.alarm(0) == 0
 
 
+@pytest.mark.skipif(not HAS_SIGALRM, reason="the in-process limit needs SIGALRM")
 class TestStopVerdictAppliesTheLimit:
     """The limit reaches the CLI command, not only the helper."""
 

@@ -9345,8 +9345,10 @@ def _guard_receipt_decision(args, hook_input: object) -> GuardDecision:
 def cmd_stop_verdict(args):
     """Resolve one state or one hook root into the typed Stop decision.
 
-    The decorator bounds this command with the guard's own limit (#742 D2), so a
-    host without `timeout` and without `perl` cannot leave the Stop hook hanging.
+    The decorator applies the guard's own limit (#742 D2), which covers hosts that
+    have neither `timeout` nor `perl`. On a platform without `SIGALRM` that inner
+    limit does not apply, and the shell adapter's external limit -- or, failing that,
+    the host's own hook timeout -- is what remains.
     """
     if args.hook_input is not None:
         try:

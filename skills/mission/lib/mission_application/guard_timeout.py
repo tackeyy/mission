@@ -72,6 +72,10 @@ def guard_time_limit(seconds: int) -> Iterator[None]:
     # sets one, and it is inherited across `exec`. Reading it costs the alarm, so it is
     # cancelled here and accounted for below.
     inherited = signal.alarm(0)
+    # Hold the outer limit as an absolute deadline. Restoring "what is left" as a whole
+    # number of seconds extends it twice over: `int()` drops the fraction, and a floor of
+    # 1 re-arms a deadline that has already passed.
+    deadline = time.monotonic() + inherited if inherited else None
     # Never extend a deadline that already exists. Setting `seconds` outright would let
     # a 5s inner limit override a 1s outer one, and the outer deadline would be lost for
     # the whole call -- the two limits would not be independent.
@@ -81,18 +85,19 @@ def guard_time_limit(seconds: int) -> Iterator[None]:
         raise GuardTimeout("stop verdict exceeded {}s".format(effective))
 
     previous = signal.signal(signal.SIGALRM, _expire)
-    started = time.monotonic()
     signal.alarm(effective)
     try:
         yield
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGALRM, previous)
-        if inherited:
-            # Hand the outer deadline back, minus what this block consumed. `alarm(0)`
-            # would cancel it, so a floor of 1 keeps it armed rather than dropping it.
-            elapsed = int(time.monotonic() - started)
-            signal.alarm(max(1, inherited - elapsed))
+        if deadline is not None:
+            left = deadline - time.monotonic()
+            # Already past it: leave the alarm cancelled rather than granting more time.
+            if left > 0:
+                # `setitimer` takes a float, so sub-second remainders survive; `alarm()`
+                # would have to round, and rounding up is an extension.
+                signal.setitimer(signal.ITIMER_REAL, left)
 
 
 _T = TypeVar("_T")
@@ -101,10 +106,13 @@ TIMEOUT_ENV_VAR = "MISSION_STATE_TIMEOUT"
 
 
 def bounded_by_guard_timeout(func: Callable[..., _T]) -> Callable[..., _T]:
-    """Apply the guard's own limit around a command.
+    """Apply the guard's own limit around a command, where the platform allows it.
 
     Written as a decorator so the command body keeps its shape: the adapter states
     that the command is bounded, and the mechanism stays in this module.
+
+    **This is not an unconditional bound.** Without ``SIGALRM`` the wrapped call runs
+    unbounded here -- see :func:`guard_time_limit` for what covers that case.
     """
 
     @functools.wraps(func)
