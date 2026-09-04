@@ -146,6 +146,33 @@ class TestGuardTimeLimit:
             signal.alarm(0)
             signal.signal(signal.SIGALRM, signal.SIG_DFL)
 
+    def test_entering_late_does_not_grant_the_rounded_up_remainder(self):
+        """The real path enters the context *after* the outer limit was armed.
+
+        `alarm(0)` reports the remainder rounded up to whole seconds, so a call entering
+        0.4s into a 2s outer limit reads 2s and pushes the deadline out by that much.
+        Reading it with `getitimer` keeps the fraction. Arming and entering at the same
+        instant hides this, which is why the sleep below is the point of the test.
+        """
+        fired = []
+        try:
+            signal.signal(signal.SIGALRM, lambda *_: fired.append(time.monotonic()))
+            armed = time.monotonic()
+            signal.setitimer(signal.ITIMER_REAL, 2.0)
+            time.sleep(0.4)                      # enter late, as the real path does
+            with guard_time_limit(5):
+                time.sleep(0.3)
+            while not fired and time.monotonic() - armed < 4:
+                time.sleep(0.02)
+            assert fired, "the outer alarm must still fire"
+            overshoot = fired[0] - (armed + 2.0)
+            assert overshoot < 0.15, (
+                "entering 0.4s late pushed the deadline out by {:.3f}s".format(overshoot)
+            )
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, signal.SIG_DFL)
+
     def test_an_expired_outer_deadline_is_not_re_armed(self):
         """If the block outlives the outer deadline, there is nothing left to restore."""
         try:
@@ -154,7 +181,8 @@ class TestGuardTimeLimit:
             with pytest.raises(GuardTimeout):
                 with guard_time_limit(5):
                     time.sleep(3)
-            assert signal.alarm(0) == 0, "an expired deadline must not be re-armed"
+            left, _ = signal.getitimer(signal.ITIMER_REAL)
+            assert left == 0, "an expired deadline must not be re-armed"
         finally:
             signal.alarm(0)
             signal.signal(signal.SIGALRM, signal.SIG_DFL)

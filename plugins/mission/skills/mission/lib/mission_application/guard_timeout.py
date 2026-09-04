@@ -71,25 +71,30 @@ def guard_time_limit(seconds: int) -> Iterator[None]:
     # An outer limit may already be running -- the shell adapter's `perl -e 'alarm N'`
     # sets one, and it is inherited across `exec`. Reading it costs the alarm, so it is
     # cancelled here and accounted for below.
-    inherited = signal.alarm(0)
-    # Hold the outer limit as an absolute deadline. Restoring "what is left" as a whole
-    # number of seconds extends it twice over: `int()` drops the fraction, and a floor of
-    # 1 re-arms a deadline that has already passed.
+    # `alarm(0)` reports the remainder rounded **up** to whole seconds, so reading an
+    # outer limit through it grants extra time: a real call entering 0.2s after `perl`
+    # armed 2s reads 2s, not 1.8s. `getitimer` returns the true float remainder.
+    inherited, _interval = signal.getitimer(signal.ITIMER_REAL)
+    signal.setitimer(signal.ITIMER_REAL, 0)
+    # Hold the outer limit as an absolute deadline rather than as "seconds left", so the
+    # time spent inside this block is charged against it.
     deadline = time.monotonic() + inherited if inherited else None
     # Never extend a deadline that already exists. Setting `seconds` outright would let
     # a 5s inner limit override a 1s outer one, and the outer deadline would be lost for
     # the whole call -- the two limits would not be independent.
-    effective = min(seconds, inherited) if inherited else seconds
+    effective = min(float(seconds), inherited) if inherited else float(seconds)
 
     def _expire(_signum: int, _frame: object) -> None:
         raise GuardTimeout("stop verdict exceeded {}s".format(effective))
 
     previous = signal.signal(signal.SIGALRM, _expire)
-    signal.alarm(effective)
+    # `setitimer` throughout, never `alarm`: mixing them means the sub-second precision
+    # obtained above is thrown away again on the way in or out.
+    signal.setitimer(signal.ITIMER_REAL, effective)
     try:
         yield
     finally:
-        signal.alarm(0)
+        signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous)
         if deadline is not None:
             left = deadline - time.monotonic()
