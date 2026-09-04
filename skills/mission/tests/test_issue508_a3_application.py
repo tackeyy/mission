@@ -337,7 +337,7 @@ def test_context_manifest_is_bound_evidence_without_authority_mutation():
         {"findings_summary": [{"id": "f1", "severity": "Medium"}]}
     ]
     result = context_manifest(
-        state, now=NOW, iteration=1, output_path=".mission-state/context.json",
+        state, now=NOW, iteration=1, output_path="evidence/context.json",
     )
 
     assert result.effects[0].kind == "context-manifest"

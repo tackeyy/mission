@@ -495,6 +495,7 @@ from merge_queue import (  # noqa: E402
 )
 from integration_gate import execute_changeset_digest, execute_gate_and_merge  # noqa: E402
 from mission_application.integration_gate import (  # noqa: E402
+    CLAIMED_DIGEST_SOURCES,
     ChangesetDigestRequest,
     ChangesetDigestServices,
     IntegrationGateFailure,
@@ -7465,6 +7466,7 @@ def cmd_gate_and_merge(args):
         expected_head_sha=args.expected_head_sha,
         expected_base_sha=args.expected_base_sha,
         expected_changeset_digest=args.reviewed_changeset_digest,
+        claimed_digest_source=args.claimed_digest_source,
     )
     try:
         result = run_integration_gate(
@@ -7472,7 +7474,10 @@ def cmd_gate_and_merge(args):
             IntegrationGateServices(execute=execute_gate_and_merge),
         )
     except IntegrationGateFailure as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        # step と reason を出す。message だけだと、どの手順のどの検査で落ちたかを
+        # 呼び出し側が機械的に判別できず、失敗の分類が文面の一致に依存する。
+        # infra 側の CLI 経路 (`execute_gate_and_merge_cli`) と同じ書式に揃える。
+        print(f"ERROR: step={exc.step} reason={exc.reason}: {exc}", file=sys.stderr)
         sys.exit(2)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
@@ -13781,11 +13786,12 @@ def cmd_context_manifest(args):
                 now=iso_now(),
                 iteration=args.iteration,
                 publication_path=str(out),
+                project_root=cwd,
             ),
             _legacy_lifecycle_repository(cwd, sf, stamp=False, pre_admit_lease=True),
         )
     except EvidenceFailure as exc:
-        print(f"ERROR: {exc.code}", file=sys.stderr)
+        print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
     print(json.dumps({"ok": True, **result}, ensure_ascii=False))
 
@@ -16309,6 +16315,17 @@ def _add_queue_parsers(subparsers) -> None:
             "Never compute it at merge time: a value derived from the same diff the "
             "gate observes always matches, so the check does nothing. Omit it to keep "
             "the existing strict requirements instead."
+        ),
+    )
+    p_gate_merge.add_argument(
+        "--claimed-digest-source",
+        default=None,
+        choices=list(CLAIMED_DIGEST_SOURCES),
+        help=(
+            "where the reviewed changeset digest was claimed to come from. Required "
+            "together with --reviewed-changeset-digest, and rejected without it. This "
+            "records the claim, not the origin: the gate cannot tell a transcribed "
+            "digest from one the producer computed at merge time."
         ),
     )
     p_gate_merge.set_defaults(func=cmd_gate_and_merge)

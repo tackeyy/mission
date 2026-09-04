@@ -77,6 +77,8 @@ class RecordingOperations:
 
 
 def run(operations, *, expected_changeset_digest=DIGEST, logs=None):
+    # #727: 申告は digest と対になる。digest を渡す case だけ申告を添える。
+    claimed_digest_source = "checker-comment" if expected_changeset_digest else None
     return application.run_gate_and_merge(
         "1",
         application.GateRuntimeServices(
@@ -92,6 +94,7 @@ def run(operations, *, expected_changeset_digest=DIGEST, logs=None):
         ),
         (logs.append if logs is not None else (lambda _message: None)),
         expected_changeset_digest=expected_changeset_digest,
+        claimed_digest_source=claimed_digest_source,
     )
 
 

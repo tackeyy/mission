@@ -21,8 +21,19 @@ test-smoke:
 	bash -n scripts/mission-stop-guard.sh
 	@printf '{"schema":"mission-test-report/1","tree_sha":"%s","tier":"smoke","test_manifest":["skills/mission/bin/mission-state.py","scripts/mission-audit.py","scripts/mission-stop-guard.sh"]}\n' "$$(git rev-parse 'HEAD^{tree}')"
 
+# MISSION_SUITE_REPORT is set by the integration gate (#735).  When present the
+# suite writes a report there recording how many tests actually ran, because an
+# exit code alone cannot distinguish a passing suite from one that ran nothing.
+# The count comes from the JUnit XML rather than from parsing pytest's output.
 test: $(REQUIREMENTS_STAMP)
-	$(VENV_PYTHON) -m pytest -q -n auto --dist loadfile $(PYTEST_TARGETS)
+	@set -eu; \
+	if [ -n "$${MISSION_SUITE_REPORT:-}" ]; then \
+	  junit="$$(dirname "$$MISSION_SUITE_REPORT")/mission-suite-junit.xml"; \
+	  $(VENV_PYTHON) -m pytest -q -n auto --dist loadfile --junit-xml="$$junit" $(PYTEST_TARGETS); \
+	  $(PYTHON) scripts/write_suite_report.py --junit "$$junit" --out "$$MISSION_SUITE_REPORT"; \
+	else \
+	  $(VENV_PYTHON) -m pytest -q -n auto --dist loadfile $(PYTEST_TARGETS); \
+	fi
 	@printf '{"schema":"mission-test-report/1","tree_sha":"%s","tier":"full","test_manifest":["skills/mission"]}\n' "$$(git rev-parse 'HEAD^{tree}')"
 
 # POSIX sh では「変数代入の右辺のコマンド置換が失敗した」場合に set -e が発火しない。

@@ -76,9 +76,40 @@ def _write_fixture_scaffolding(repo: Path) -> None:
     shutil.copyfile(CI_SCOPE_HELPER, repo / "scripts" / "ci_changed_scopes.js")
     # CI の別 interpreter 環境でも同じ結果になるよう、fixture の suite は現在の
     # interpreter を絶対パスで固定し、外側の pytest 設定を継承しない。
+    # #735: the gate reads the suite command from the base's contract and
+    # requires evidence that the suite ran, so the fixture declares one and
+    # writes a report.  Without both, every integration here fails closed --
+    # which is the point of the change, but it has to be modelled here too.
+    (repo / ".mission").mkdir()
+    (repo / ".mission" / "suite-contract.json").write_text(
+        json.dumps({
+            "schema": "mission-suite-contract/1",
+            "full_suite_command": ["make", "test"],
+        }) + "\n",
+        encoding="utf-8",
+    )
+    # A separate script rather than a Makefile one-liner: quoting a multi-line
+    # program through make and the shell is where this breaks silently.
+    (repo / "scripts" / "fixture_suite_report.py").write_text(
+        "import json, os, subprocess, xml.etree.ElementTree as ET\n"
+        "root = ET.parse('.mission-gate-junit.xml').getroot()\n"
+        "suites = [root] if root.tag == 'testsuite' else root.findall('testsuite')\n"
+        "executed = sum(1 for s in suites for c in s.findall('testcase')\n"
+        "               if c.find('skipped') is None)\n"
+        "tree = subprocess.run(['git', 'write-tree'], capture_output=True,\n"
+        "                      text=True, check=True).stdout.strip()\n"
+        "path = os.environ.get('MISSION_SUITE_REPORT')\n"
+        "if path:\n"
+        "    open(path, 'w').write(json.dumps({'schema': 'mission-suite-report/1',\n"
+        "        'tree_sha': tree, 'executed': executed, 'status': 'complete'}))\n",
+        encoding="utf-8",
+    )
     (repo / "Makefile").write_text(
-        "test:\n\t{} -m pytest -q -p no:cacheprovider --rootdir . .\n".format(
-            shlex.quote(sys.executable)
+        "test:\n"
+        "\t{python} -m pytest -q -p no:cacheprovider --rootdir . "
+        "--junit-xml=.mission-gate-junit.xml .\n"
+        "\t{python} scripts/fixture_suite_report.py\n".format(
+            python=shlex.quote(sys.executable)
         ),
         encoding="utf-8",
     )
@@ -344,11 +375,11 @@ def test_scratch_deregistration_failure_stops_before_merge(tmp_path):
     gate = _gate_module()
     repo, head_sha, base_sha = _integration_fixture(tmp_path, regression=False)
 
-    def runner(arguments, cwd):
+    def runner(arguments, cwd, env=None):
         command = tuple(arguments)
         if command[:3] == ("git", "worktree", "remove"):
             return gate.CommandResult(1, "", "deregister failed")
-        return gate._local_runner(command, cwd)
+        return gate._local_runner(command, cwd, env)
 
     operations = gate.SubprocessGateOperations(repo, runner=runner)
 
@@ -363,11 +394,11 @@ def test_cleanup_failure_is_logged_when_preserving_an_earlier_failure(tmp_path):
     repo, head_sha, base_sha = _integration_fixture(tmp_path, regression=True)
     messages = []
 
-    def runner(arguments, cwd):
+    def runner(arguments, cwd, env=None):
         command = tuple(arguments)
         if command[:3] == ("git", "worktree", "remove"):
             return gate.CommandResult(1, "", "deregister failed")
-        return gate._local_runner(command, cwd)
+        return gate._local_runner(command, cwd, env)
 
     operations = gate.SubprocessGateOperations(repo, runner=runner)
 
@@ -418,6 +449,7 @@ def test_same_base_race_allows_first_merge_and_stops_second_at_final_fetch():
                 ConcurrentOperations(role),
                 lambda _message: None,
                 expected_changeset_digest=FAKE_DIGEST,
+                claimed_digest_source="checker-comment",
             )
             return "merged"
         except gate.IntegrationGateError as exc:
@@ -505,6 +537,7 @@ def test_public_gate_command_maps_typed_failure_to_exit_two(monkeypatch):
                 expected_head_sha=None,
                 expected_base_sha=None,
                 reviewed_changeset_digest=None,
+                claimed_digest_source=None,
             )
         )
 
@@ -544,7 +577,11 @@ def test_logs_include_test_scope_and_both_base_observations():
     messages = []
 
     result = gate.gate_and_merge(
-        "665", operations, messages.append, expected_changeset_digest=FAKE_DIGEST
+        "665",
+        operations,
+        messages.append,
+        expected_changeset_digest=FAKE_DIGEST,
+        claimed_digest_source="checker-comment",
     )
 
     output = "\n".join(messages)
@@ -568,6 +605,7 @@ def test_non_numeric_pr_reference_is_rejected_before_repository_effects():
             operations,
             lambda _message: None,
             expected_changeset_digest=FAKE_DIGEST,
+            claimed_digest_source="checker-comment",
         )
 
     assert captured.value.reason == "invalid-pr-ref"
@@ -587,6 +625,7 @@ def test_queue_accepted_base_is_rejected_if_main_moved_before_gate():
             expected_head_sha=HEAD_SHA,
             expected_base_sha=OLD_BASE,
             expected_changeset_digest=FAKE_DIGEST,
+            claimed_digest_source="checker-comment",
         )
 
     assert captured.value.reason == "accepted-base-moved"
@@ -608,7 +647,11 @@ def test_pr_base_and_state_are_rechecked_before_merge():
 
     with pytest.raises(gate.IntegrationGateError) as captured:
         gate.gate_and_merge(
-            "665", operations, lambda _message: None, expected_changeset_digest=FAKE_DIGEST
+            "665",
+            operations,
+            lambda _message: None,
+            expected_changeset_digest=FAKE_DIGEST,
+            claimed_digest_source="checker-comment",
         )
 
     assert captured.value.reason == "pull-request-changed"
@@ -630,7 +673,11 @@ def test_merge_readback_must_confirm_main_and_expected_head():
 
     with pytest.raises(gate.IntegrationGateError) as captured:
         gate.gate_and_merge(
-            "665", operations, lambda _message: None, expected_changeset_digest=FAKE_DIGEST
+            "665",
+            operations,
+            lambda _message: None,
+            expected_changeset_digest=FAKE_DIGEST,
+            claimed_digest_source="checker-comment",
         )
 
     assert captured.value.reason == "merge-readback-failed"
@@ -650,7 +697,7 @@ def test_fetch_view_head_and_merge_commands_are_runner_injected(tmp_path):
         }
     )
 
-    def runner(arguments, _cwd):
+    def runner(arguments, _cwd, env=None):
         command = tuple(arguments)
         commands.append(command)
         if command[:3] == ("gh", "pr", "view"):
@@ -714,9 +761,11 @@ def test_docs_only_scope_delegates_to_existing_ci_selector(tmp_path):
 
     commands = []
 
-    def runner(arguments, cwd):
-        commands.append(tuple(arguments))
-        return gate._local_runner(arguments, cwd)
+    def runner(arguments, cwd, env=None):
+        commands.append((tuple(arguments), dict(env or {})))
+        # Pass `env` through: dropping it means the suite never learns where to
+        # write its report, and the gate then reports it as absent.
+        return gate._local_runner(arguments, cwd, env)
 
     observation = gate.SubprocessGateOperations(repo, runner=runner).integrate_and_test(
         head_sha, base_sha, lambda _message: None
@@ -733,7 +782,17 @@ def test_docs_only_scope_delegates_to_existing_ci_selector(tmp_path):
     )
     assert observation.scope == "docs-only"
     assert observation.targets == helper["pythonTargets"]
-    assert ("make", "test", "PYTEST_TARGETS={}".format(helper["pythonTargets"])) in commands
+    # #735: the scope travels in the environment.  Appending it to the argument
+    # list only means anything to make, and a contract declaring any other
+    # command would receive it as an extra positional argument.
+    suite_calls = [
+        (arguments, env)
+        for arguments, env in commands
+        if arguments[:2] == ("make", "test")
+    ]
+    assert suite_calls, commands
+    assert suite_calls[0][0] == ("make", "test")
+    assert suite_calls[0][1]["PYTEST_TARGETS"] == helper["pythonTargets"]
 
 
 def test_queue_workflow_delegates_to_the_same_gate_command():
@@ -748,3 +807,93 @@ def test_queue_workflow_delegates_to_the_same_gate_command():
     )
     assert invocation in skill
     assert invocation in state_management
+
+
+def test_the_gate_runs_the_command_the_base_declares_not_a_hardcoded_one(tmp_path):
+    """Change the base's contract and the gate has to follow it.
+
+    Checking the call site for the right function names cannot see whether the
+    contract's value is used: a call that reads the contract and then runs
+    `make test` anyway passes such a check.  Declaring a different command and
+    watching for it is what pins the behaviour.
+    """
+    gate = _gate_module()
+    repo = tmp_path / "declared"
+    _init_repo(repo)
+    (repo / "test_initial.py").write_text(
+        "def test_fixture():\n    assert True\n", encoding="utf-8"
+    )
+    # A second target, identical except for its name.  The gate must pick this
+    # one because the base says so, not the conventional `make test`.
+    makefile = (repo / "Makefile").read_text(encoding="utf-8")
+    (repo / "Makefile").write_text(
+        makefile + makefile.replace("test:", "declared-suite:", 1), encoding="utf-8"
+    )
+    (repo / ".mission" / "suite-contract.json").write_text(
+        json.dumps({
+            "schema": "mission-suite-contract/1",
+            "full_suite_command": ["make", "declared-suite"],
+        }) + "\n",
+        encoding="utf-8",
+    )
+    _commit(repo, "initial")
+    _run(repo, "git", "switch", "-q", "-c", "feature")
+    (repo / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    head_sha = _commit(repo, "feature")
+    _run(repo, "git", "switch", "-q", "main")
+    base_sha = _run(repo, "git", "rev-parse", "HEAD").stdout.strip()
+
+    commands = []
+
+    def runner(command, cwd, env=None):
+        commands.append(tuple(command))
+        return gate._local_runner(command, cwd, env)
+
+    gate.SubprocessGateOperations(repo, runner=runner).integrate_and_test(
+        head_sha, base_sha, lambda _message: None
+    )
+
+    suite_calls = [c for c in commands if c and c[0] == "make"]
+    assert suite_calls, commands
+    assert all(c[1] == "declared-suite" for c in suite_calls), suite_calls
+
+
+def test_the_gate_reads_the_contract_from_the_base_not_the_head(tmp_path):
+    """A contract added only on the branch must not take effect.
+
+    Otherwise a PR could declare its own command -- including one that runs
+    nothing -- and satisfy the gate with it.
+    """
+    gate = _gate_module()
+    repo = tmp_path / "head-contract"
+    _init_repo(repo)
+    (repo / "test_initial.py").write_text(
+        "def test_fixture():\n    assert True\n", encoding="utf-8"
+    )
+    _commit(repo, "initial")
+    _run(repo, "git", "switch", "-q", "-c", "feature")
+    # The branch rewrites the contract to a command that runs nothing.
+    (repo / ".mission" / "suite-contract.json").write_text(
+        json.dumps({
+            "schema": "mission-suite-contract/1",
+            "full_suite_command": ["true"],
+        }) + "\n",
+        encoding="utf-8",
+    )
+    head_sha = _commit(repo, "weaken the contract")
+    _run(repo, "git", "switch", "-q", "main")
+    base_sha = _run(repo, "git", "rev-parse", "HEAD").stdout.strip()
+
+    commands = []
+
+    def runner(command, cwd, env=None):
+        commands.append(tuple(command))
+        return gate._local_runner(command, cwd, env)
+
+    gate.SubprocessGateOperations(repo, runner=runner).integrate_and_test(
+        head_sha, base_sha, lambda _message: None
+    )
+
+    # The base's command ran; the branch's did not replace it.
+    assert any(c[:2] == ("make", "test") for c in commands), commands
+    assert not any(c == ("true",) for c in commands), commands

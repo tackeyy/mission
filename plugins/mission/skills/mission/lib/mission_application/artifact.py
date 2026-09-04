@@ -39,11 +39,17 @@ _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 
 class EvidenceFailure(ValueError):
-    """A stable fail-closed A3 validation error."""
+    """A stable fail-closed A3 validation error.
 
-    def __init__(self, code: str) -> None:
-        super().__init__(code)
+    ``code`` stays stable so callers can branch on it.  ``detail`` carries
+    what a human needs and never joins the code: concatenating the two made
+    the code unmatchable for anything that compared it.
+    """
+
+    def __init__(self, code: str, detail: str = "") -> None:
+        super().__init__(code if not detail else code + ": " + detail)
         self.code = code
+        self.detail = detail
 
 
 @dataclass(frozen=True)

@@ -10,6 +10,11 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from datetime import datetime, timezone
 
+from mission_application.evidence_publication import (
+    EvidencePublicationError,
+    canonical_publication_path,
+    relative_publication_path,
+)
 from mission_kernel.commands import (
     ClaimsLedgerEffectClaim,
     GenerateClaimsLedger,
@@ -67,6 +72,9 @@ class ContextManifestRequest:
     now: object
     iteration: object
     publication_path: object
+    # The publication path arrives as the caller typed it, so the project it
+    # is relative to has to travel with it rather than be assumed.
+    project_root: object = None
 
 
 @dataclass(frozen=True)
@@ -380,6 +388,7 @@ def run_context_manifest(
                 else state.get("iteration", 1)
             ),
             publication_path=request.publication_path,
+            project_root=request.project_root,
         ),
     )
 
@@ -508,6 +517,7 @@ def prepare_context_manifest(
     now: object,
     iteration: object,
     publication_path: object,
+    project_root: object = None,
 ) -> PreparedEvidenceOperation:
     if not isinstance(state, dict):
         raise EvidenceFailure("state-invalid")
@@ -519,6 +529,18 @@ def prepare_context_manifest(
             at=now,
         )
     )
+    # #711: the evidence is published as a projection of the repository, so
+    # it cannot land inside the repository it is recorded in.  Refusing here
+    # keeps the rule with the rest of the publication contract instead of
+    # spreading a second copy into the adapter.
+    try:
+        publication_path = relative_publication_path(project_root, publication_path)
+    except EvidencePublicationError as exc:
+        # Carry the detail: it names a path that would work, and the caller
+        # whose command just stopped working has no other way to learn it.
+        raise EvidenceFailure(
+            "context-publication-path-invalid", exc.detail
+        ) from exc
     target = Path(publication_path).name
     effect = make_evidence_effect("context-manifest", target, content)
     claim = ContextManifestEffectClaim(
