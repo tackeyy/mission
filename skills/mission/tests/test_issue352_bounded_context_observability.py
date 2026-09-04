@@ -93,7 +93,9 @@ def test_generated_manifest_is_recorded_and_aggregate_observes_bounded(
             }
         },
     )
-    manifest_path = state_dir / "context-manifest-iter2.json"
+    # #711: evidence is published as a projection of the repository, so it
+    # cannot land inside the repository's own subtree.
+    manifest_path = state_dir.parent / "context-manifest-iter2.json"
 
     generated = run_cli(
         "context-manifest",
@@ -106,7 +108,10 @@ def test_generated_manifest_is_recorded_and_aggregate_observes_bounded(
     state = json.loads((state_dir / "sessions" / "test.json").read_text(encoding="utf-8"))
     observation = state["context_manifests"]["2"]
     expected_digest = "sha256:" + hashlib.sha256(manifest_path.read_bytes()).hexdigest()
-    assert observation["path"] == str(manifest_path)
+    # #711: the recorded path is the canonical project-relative form, not the
+    # string the caller typed.  A projection target is relative to the project,
+    # and the record has to name the same thing the generation holds.
+    assert observation["path"] == "context-manifest-iter2.json"
     assert observation["digest"] == expected_digest
     assert observation["generated_at"].endswith("Z")
     assert state["context_manifests"]["1"]["path"] == "previous.json"

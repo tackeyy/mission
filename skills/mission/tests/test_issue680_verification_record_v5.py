@@ -166,13 +166,15 @@ def test_v5_context_manifest_uses_lifecycle_repository(tmp_path, run_cli):
         "--iteration",
         "1",
         "--out",
-        ".mission-state/context-manifest.json",
+        "context-manifest.json",
         cwd=tmp_path,
         env_extra=env,
     )
 
     assert result.returncode == 0, result.stderr
-    assert (tmp_path / ".mission-state" / "context-manifest.json").exists()
+    # #711: evidence is published as a projection of the repository, so it
+    # cannot land inside the repository's own subtree.
+    assert (tmp_path / "context-manifest.json").exists()
 
 
 @pytest.mark.parametrize("repository_format", ["v4", "v5"])
@@ -254,6 +256,13 @@ def _in_memory_v5_repository(current, *, replayed=False):
 
     repository = object.__new__(V5CompatibilityRepository)
     repository._callback_depth = 0
+    # #711: the executor reads the base before it admits, so the double has to
+    # carry what that read observed.
+    repository._admitted = None
+    repository._observed_base = {
+        "base_head_digest": "sha256:" + "0" * 64,
+        "base_generation": 0,
+    }
     repository._replayed = object() if replayed else None
 
     @contextmanager
@@ -261,7 +270,11 @@ def _in_memory_v5_repository(current, *, replayed=False):
         yield
 
     repository.transaction = transaction
-    repository.load = lambda: current
+    # #711: the executor now admits with the blobs prepare produced.
+    repository.load = lambda **_kwargs: current
+    # #711: the executor reads before it admits, so the double has to model
+    # both.  Returning the same document keeps what these tests observe.
+    repository.read_snapshot = lambda: current
     repository.execute = lambda _command: (_ for _ in ()).throw(
         AssertionError("rejected or replayed evidence must not execute")
     )
@@ -312,7 +325,7 @@ def test_v5_effect_claim_without_prepared_effects_is_rejected_before_commit():
             current,
             now="2030-01-01T00:00:01Z",
             iteration=1,
-            publication_path=".mission-state/context/manifest.json",
+            publication_path="evidence/context/manifest.json",
         ),
         effects=(),
     )

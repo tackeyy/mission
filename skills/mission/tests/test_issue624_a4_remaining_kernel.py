@@ -995,6 +995,13 @@ def test_v5_transition_executor_returns_committed_projection_on_replay():
 
     repository = object.__new__(V5CompatibilityRepository)
     repository._callback_depth = 0
+    # #711: the executor reads the base before it admits, so the double has to
+    # carry what that read observed.
+    repository._admitted = None
+    repository._observed_base = {
+        "base_head_digest": "sha256:" + "0" * 64,
+        "base_generation": 0,
+    }
     repository._replayed = object()
     current = _handoff_document(status="consuming")
 
@@ -1003,7 +1010,11 @@ def test_v5_transition_executor_returns_committed_projection_on_replay():
         yield
 
     repository.transaction = transaction
-    repository.load = lambda: current
+    # #711: the executor now admits with the blobs prepare produced.
+    repository.load = lambda **_kwargs: current
+    # #711: the executor reads before it admits, so the double has to model
+    # both.  Returning the same document keeps what these tests observe.
+    repository.read_snapshot = lambda: current
     repository.execute = lambda _command: (_ for _ in ()).throw(
         AssertionError("replay must not decide or commit again")
     )

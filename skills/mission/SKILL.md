@@ -130,7 +130,7 @@ Reviewer が 2 名以上の場合、`aggregate-reviews` (`review-finalize` 経�
 
 **差分レビュー (#240)**: iter2+ の前 iter 指摘修正では、`next` の `details.reviewer_count` に従う (`critic_has_new_scope=false` なら state が独立 2 名へ削減する。1 名化は agreement 検証が失われるため禁止)。args に High/Medium 指摘、修正コミット、全 diff 再レビュー不要、採点は絶対評価、Low 残存で 5.0 禁止を明記する。`review-finalize` (または `aggregate-reviews`) は `next` の command_hint が示す `--min-reviewers N` を必ず付け、reviewer 数不足の集計を exit 2 で拒否させる。`new` がある追加スコープ (`critic_has_new_scope=true`) は planner 後にフルレビューへ戻る。
 
-**bounded context (#241)**: `next` の `details.context_mode` が `"bounded"` のとき、`mission-state.py context-manifest --iteration <N> --out .mission-state/context-manifest-iter<N>.json` を生成し、reviewer args に manifest パス・対象 diff (修正コミット範囲)・High/Medium 指摘を渡す。reviewer は manifest + diff を一次スコープとしてレビューし、full history 走査を省く。manifest 生成が失敗した場合 (exit 非0 / ファイル不在) は full context に fallback して従来どおり進める (fail-safe)。`context_mode == "full"` では何もしない。
+**bounded context (#241)**: `next` の `details.context_mode` が `"bounded"` のとき、`mission-state.py context-manifest --iteration <N> --out context-manifest-iter<N>.json` を生成し、reviewer args に manifest パス・対象 diff (修正コミット範囲)・High/Medium 指摘を渡す。reviewer は manifest + diff を一次スコープとしてレビューし、full history 走査を省く。manifest 生成が失敗した場合 (exit 非0 / ファイル不在) は full context に fallback して従来どおり進める (fail-safe)。`context_mode == "full"` では何もしない。
 
 **Simple インライン**: Simple は executor を spawn せず orchestrator が直接実行してよい。Medium 以上の指摘修正は M6 に従う。
 

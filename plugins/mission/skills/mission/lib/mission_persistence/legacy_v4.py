@@ -10,6 +10,11 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Callable, ContextManager, Iterable
 
+from mission_persistence.evidence_order import (
+    EvidenceOrderError,
+    base_agrees,
+    blob_set_from_effects,
+)
 from mission_application.artifact import (
     EvidenceDecision,
     EvidenceEffect,
@@ -834,6 +839,7 @@ class V5CompatibilityRepository:
         self._operation_command = operation_command
         self._operation_command_type = operation_command_type
         self._admitted: AdmittedSnapshot | None = None
+        self._observed_base: dict | None = None
         self._replayed: CommitResult | None = None
         self._transaction_active = False
         self._callback_depth = 0
@@ -920,7 +926,13 @@ class V5CompatibilityRepository:
             with self._callback_guard():
                 exit_(manager, None, None, None)
 
-    def _request(self) -> ExecutionRequest:
+    def _request(self, *, blobs: VerifiedBlobSet | None = None) -> ExecutionRequest:
+        """Build the admission request, carrying the blobs the caller decided.
+
+        The blob set used to be fixed here, so no caller could supply one and
+        the evidence path had nothing to admit its output with.  It stays
+        optional because every other path genuinely has nothing to give.
+        """
         operation_id = self._operation_id or "compat:" + secrets.token_hex(16)
         command = self._operation_command
         if command is None:
@@ -935,7 +947,8 @@ class V5CompatibilityRepository:
                 ).encode("utf-8")
             )
         command_type = self._operation_command_type or "compatibility-mutation"
-        blobs = VerifiedBlobSet(())
+        if blobs is None:
+            blobs = VerifiedBlobSet(())
         return ExecutionRequest(
             session_id=self._session_id,
             lease_owner_session_id=self._lease_owner_session_id,
@@ -957,7 +970,39 @@ class V5CompatibilityRepository:
     def operation_replayed(self) -> bool:
         return self._replayed is not None
 
-    def load(self) -> dict:
+    def read_snapshot(self) -> dict:
+        """Return the current document without admitting the transaction.
+
+        Prepare runs a caller-supplied callback that needs the current state.
+        Admitting first would run that callback after this session had taken
+        the lease, so a foreign lease could not be refused before caller code
+        ran.  Reading has no side effect, so it is not a one-shot and does not
+        consume the admission it precedes.
+        """
+        if not self._transaction_active:
+            raise FencedCommitError(
+                "request-invalid",
+                "v5 snapshot read requires an active transaction",
+            )
+        snapshot = self._repository.read(self._session_id)
+        # Keep what identifies the base this read saw.  Prepare runs against
+        # it, so the admission has to be able to check it is still the same
+        # one; discarding it here is what left the contract unenforced.
+        self._observed_base = {
+            "base_head_digest": snapshot.head_digest,
+            "base_generation": snapshot.head.generation,
+        }
+        return json.loads(project_legacy_document(snapshot.state))
+
+    def observed_base(self) -> dict:
+        """Return the base identifiers the last snapshot read observed."""
+        if self._observed_base is None:
+            raise FencedCommitError(
+                "request-invalid", "no snapshot has been read in this transaction"
+            )
+        return dict(self._observed_base)
+
+    def load(self, *, blobs: VerifiedBlobSet | None = None) -> dict:
         if not self._transaction_active:
             raise FencedCommitError(
                 "request-invalid",
@@ -967,7 +1012,7 @@ class V5CompatibilityRepository:
             raise FencedCommitError("request-invalid", "v5 transaction already loaded")
         if self._format_guard is not None:
             self._guarded_call(self._format_guard)
-        admitted = self._repository.begin(self._request())
+        admitted = self._repository.begin(self._request(blobs=blobs))
         if isinstance(admitted, CommitResult):
             snapshot = self._repository.read(self._session_id)
             self._replayed = admitted
@@ -1075,10 +1120,14 @@ class V5CompatibilityRepository:
                 self._aggregate_prepare, aggregate_action
             )
         try:
+            # The stage compares its effects against the blobs the admission
+            # carries, so an empty tuple is only right while the admission is
+            # empty too.  Taking them from the admission keeps the two sides
+            # from being decided in different places.
             prepared = self._repository._stage_persistence(
                 admitted,
                 state_bytes=state_bytes,
-                effects=(),
+                effects=tuple(blob.binding for blob in admitted.request.blobs.blobs),
             )
             self._repository.commit(prepared, prepared.precondition)
             self._admitted = None
@@ -1158,12 +1207,46 @@ class V5CompatibilityRepository:
         if backup is not True:
             raise ValueError(f"backup={backup!r} is not supported by the v5 executor")
         with self.transaction():
-            current = self.load()
+            # A' order: read without admitting, prepare, then admit.  The
+            # admission used to happen inside ``load`` before prepare had run,
+            # so the request carried no blobs and the published files stayed
+            # outside the unit of work.  Reading first also keeps the caller's
+            # prepare callback behind the lease check rather than after it.
+            snapshot = self.read_snapshot()
             with self._callback_guard():
-                prepared = prepare(copy.deepcopy(current))
+                prepared = prepare(copy.deepcopy(snapshot))
             if not isinstance(prepared, operation_type):
                 raise ValueError(operation_error)
             effects = self.validate_effects(prepared.effects)
+            # The admission carries what prepare produced.  This is the whole
+            # point of the reordering: with an empty blob set the published
+            # files stayed outside the generation the commit records.
+            # The root name is read defensively: not every repository this
+            # seam runs against exposes one, and a missing name means the
+            # default, not a failure.
+            root = getattr(
+                getattr(getattr(self, "_repository", None), "root", None), "name", None
+            )
+            blobs = blob_set_from_effects(
+                effects, prepared.command, repository_root_name=root
+            )
+            observed = self.observed_base()
+            current = self.load(blobs=blobs)
+            admitted = self._admitted
+            if admitted is not None and not base_agrees(
+                observed=observed,
+                admitted={
+                    "base_head_digest": admitted.precondition.base_head_digest,
+                    "base_generation": admitted.precondition.base_generation,
+                },
+            ):
+                # What prepare produced was built against a base that has since
+                # moved.  Publishing it would record content for a state nobody
+                # observed together.
+                raise EvidenceOrderError(
+                    "the base moved between the read and the admission; "
+                    "nothing was published"
+                )
             if self.operation_replayed:
                 frozen = freeze_json_value(current)
                 assert isinstance(frozen, FrozenJsonObject)
@@ -1193,7 +1276,13 @@ class V5CompatibilityRepository:
                     "decision-invalid", "accepted decision is not closed"
                 )
             if decision.transition is not None:
-                bind_transition_effects(decision.transition, effects)
+                # The transition must hold the very bindings the blob set
+                # carries: ``stage`` compares the two for equality, so a
+                # separate object would be refused however equal it looked.
+                bind_transition_effects(
+                    decision.transition,
+                    tuple(blob.binding for blob in blobs.blobs) or effects,
+                )
             if effects:
                 if effect_transaction is None:
                     if self._effect_transaction is None:
