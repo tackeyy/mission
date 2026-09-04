@@ -964,6 +964,23 @@ class V5CompatibilityRepository:
     def operation_replayed(self) -> bool:
         return self._replayed is not None
 
+    def read_snapshot(self) -> dict:
+        """Return the current document without admitting the transaction.
+
+        Prepare runs a caller-supplied callback that needs the current state.
+        Admitting first would run that callback after this session had taken
+        the lease, so a foreign lease could not be refused before caller code
+        ran.  Reading has no side effect, so it is not a one-shot and does not
+        consume the admission it precedes.
+        """
+        if not self._transaction_active:
+            raise FencedCommitError(
+                "request-invalid",
+                "v5 snapshot read requires an active transaction",
+            )
+        snapshot = self._repository.read(self._session_id)
+        return json.loads(project_legacy_document(snapshot.state))
+
     def load(self) -> dict:
         if not self._transaction_active:
             raise FencedCommitError(

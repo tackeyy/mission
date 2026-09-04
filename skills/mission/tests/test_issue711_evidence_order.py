@@ -274,3 +274,68 @@ def test_the_intent_digest_follows_the_blobs(tmp_path):
     assert repository._request().intent_digest != repository._request(
         blobs=filled
     ).intent_digest
+
+
+def test_the_snapshot_read_does_not_admit_the_transaction(tmp_path):
+    """The repository must expose a read that leaves the lease untaken."""
+    from mission_persistence.legacy_v4 import V5CompatibilityRepository
+
+    repository = V5CompatibilityRepository(
+        repository=_v5_repository(tmp_path),
+        session_id="test",
+        lease_owner_session_id="test",
+        presented_lease_id="fixture-lease",
+    )
+    with repository.transaction():
+        document = repository.read_snapshot()
+        assert isinstance(document, dict) and document
+        # `load` refuses a second admission, so an untaken lease is what lets
+        # the real admission still happen after prepare has run.
+        assert repository._admitted is None
+        assert repository.operation_replayed is False
+
+
+def test_reading_the_snapshot_twice_is_allowed(tmp_path):
+    """Reading has no side effect, so it cannot be a one-shot."""
+    from mission_persistence.legacy_v4 import V5CompatibilityRepository
+
+    repository = V5CompatibilityRepository(
+        repository=_v5_repository(tmp_path),
+        session_id="test",
+        lease_owner_session_id="test",
+        presented_lease_id="fixture-lease",
+    )
+    with repository.transaction():
+        assert repository.read_snapshot() == repository.read_snapshot()
+
+
+def test_the_snapshot_read_requires_an_active_transaction(tmp_path):
+    from mission_persistence.fenced_commit import FencedCommitError
+    from mission_persistence.legacy_v4 import V5CompatibilityRepository
+
+    repository = V5CompatibilityRepository(
+        repository=_v5_repository(tmp_path),
+        session_id="test",
+        lease_owner_session_id="test",
+        presented_lease_id="fixture-lease",
+    )
+    with pytest.raises(FencedCommitError) as excinfo:
+        repository.read_snapshot()
+    assert "transaction" in excinfo.value.detail
+
+
+def test_admitting_after_a_snapshot_read_still_works(tmp_path):
+    """The read must not consume the admission it precedes."""
+    from mission_persistence.legacy_v4 import V5CompatibilityRepository
+
+    repository = V5CompatibilityRepository(
+        repository=_v5_repository(tmp_path),
+        session_id="test",
+        lease_owner_session_id="test",
+        presented_lease_id="fixture-lease",
+    )
+    with repository.transaction():
+        before = repository.read_snapshot()
+        after = repository.load()
+        assert after == before
+        assert repository._admitted is not None
