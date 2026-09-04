@@ -184,3 +184,93 @@ def test_the_run_records_the_order_the_repository_saw():
     assert repository.calls == ["read", "begin"]
     assert run.completed() is True
     assert EVIDENCE_STEPS.index("prepare") < EVIDENCE_STEPS.index("begin")
+
+
+def _v5_repository(tmp_path):
+    """Build the repository production uses, not a stand-in."""
+    from .test_issue503_fenced_commit import _commit_cli_init
+
+    local, _repository, _clock, _state_path, _state_bytes, _result = _commit_cli_init(
+        tmp_path
+    )
+    return local
+
+
+def test_the_request_carries_the_blobs_it_is_given(tmp_path):
+    """`_request` fixed an empty blob set, so no caller could supply one."""
+    from mission_persistence.fenced_commit import VerifiedBlobSet
+    from mission_persistence.legacy_v4 import V5CompatibilityRepository
+
+    repository = V5CompatibilityRepository(
+        repository=_v5_repository(tmp_path),
+        session_id="test",
+        lease_owner_session_id="test",
+        presented_lease_id="fixture-lease",
+    )
+    from mission_persistence.local_uow import BlobBinding, VerifiedBlob
+
+    content = b"{}"
+    import hashlib
+
+    binding = BlobBinding(
+        blob_id="evidence:" + hashlib.sha256(b"build/x.json").hexdigest(),
+        kind="context-manifest",
+        relative_path="build/x.json",
+        digest="sha256:" + hashlib.sha256(content).hexdigest(),
+        size=len(content),
+    )
+    filled = VerifiedBlobSet((VerifiedBlob(binding, content),))
+    assert repository._request(blobs=filled).blobs == filled
+
+
+def test_the_request_still_defaults_to_an_empty_blob_set(tmp_path):
+    """Every path but the evidence one has no blobs to give."""
+    from mission_persistence.fenced_commit import VerifiedBlobSet
+    from mission_persistence.legacy_v4 import V5CompatibilityRepository
+
+    repository = V5CompatibilityRepository(
+        repository=_v5_repository(tmp_path),
+        session_id="test",
+        lease_owner_session_id="test",
+        presented_lease_id="fixture-lease",
+    )
+    assert repository._request().blobs == VerifiedBlobSet(())
+
+
+def test_the_intent_digest_follows_the_blobs(tmp_path):
+    """A different blob set is a different request, not the same one."""
+    from mission_persistence.fenced_commit import VerifiedBlobSet
+    from mission_persistence.legacy_v4 import V5CompatibilityRepository
+    from mission_persistence.local_uow import BlobBinding, VerifiedBlob
+
+    from mission_kernel.json_codec import decode_json_object
+
+    # The operation id is random when it is not pinned, so two requests would
+    # differ whatever the blobs did.  Pinning it leaves the blob set as the
+    # only thing that can move the digest.
+    command = decode_json_object(
+        b'{"schema":"mission-command-intent/1","type":"compatibility-mutation"}'
+    )
+    repository = V5CompatibilityRepository(
+        repository=_v5_repository(tmp_path),
+        session_id="test",
+        lease_owner_session_id="test",
+        presented_lease_id="fixture-lease",
+        operation_id="fixed-operation",
+        operation_command=command,
+        operation_command_type="compatibility-mutation",
+    )
+    content = b"{}"
+    import hashlib
+
+    binding = BlobBinding(
+        blob_id="evidence:" + hashlib.sha256(b"build/x.json").hexdigest(),
+        kind="context-manifest",
+        relative_path="build/x.json",
+        digest="sha256:" + hashlib.sha256(content).hexdigest(),
+        size=len(content),
+    )
+    filled = VerifiedBlobSet((VerifiedBlob(binding, content),))
+    assert repository._request().intent_digest != repository._request(
+        blobs=filled
+    ).intent_digest

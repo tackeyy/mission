@@ -920,7 +920,13 @@ class V5CompatibilityRepository:
             with self._callback_guard():
                 exit_(manager, None, None, None)
 
-    def _request(self) -> ExecutionRequest:
+    def _request(self, *, blobs: VerifiedBlobSet | None = None) -> ExecutionRequest:
+        """Build the admission request, carrying the blobs the caller decided.
+
+        The blob set used to be fixed here, so no caller could supply one and
+        the evidence path had nothing to admit its output with.  It stays
+        optional because every other path genuinely has nothing to give.
+        """
         operation_id = self._operation_id or "compat:" + secrets.token_hex(16)
         command = self._operation_command
         if command is None:
@@ -935,7 +941,8 @@ class V5CompatibilityRepository:
                 ).encode("utf-8")
             )
         command_type = self._operation_command_type or "compatibility-mutation"
-        blobs = VerifiedBlobSet(())
+        if blobs is None:
+            blobs = VerifiedBlobSet(())
         return ExecutionRequest(
             session_id=self._session_id,
             lease_owner_session_id=self._lease_owner_session_id,
