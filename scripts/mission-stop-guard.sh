@@ -19,8 +19,21 @@ INPUT=$(cat)
 # 上限は「遅いだけの正常な起動」を殺さず、「本当に固まった呼び出し」は
 # 切れる幅にする。環境変数で上書きできるようにし、計測結果に応じて
 # 調整できる余地を残す。
-MISSION_STATE_TIMEOUT="${MISSION_STATE_TIMEOUT:-30}"
+# D3 (#742): the host bounds the whole hook at 10 seconds, so the guard's own limit
+# sits inside that budget. Only positive integers are honoured; anything else falls
+# back to the default rather than being passed to `timeout` as a bad argument.
+MISSION_STATE_TIMEOUT="${MISSION_STATE_TIMEOUT:-8}"
+case "$MISSION_STATE_TIMEOUT" in
+  ''|*[!0-9]*) MISSION_STATE_TIMEOUT=8 ;;
+  *) [ "$MISSION_STATE_TIMEOUT" -gt 0 ] || MISSION_STATE_TIMEOUT=8 ;;
+esac
+# The command applies the same limit to itself (D2), so it has to see the value.
+export MISSION_STATE_TIMEOUT
 
+# D2 (#742): `stop-verdict` bounds itself (see mission_application/guard_timeout.py),
+# so no branch here is unbounded. `timeout` / `perl` are kept as a second, outer limit
+# for the case where the interpreter never reaches its own alarm (e.g. it hangs before
+# the handler is installed). Their absence is no longer a hole.
 _mission_state_bounded() {
   if command -v timeout >/dev/null 2>&1; then
     timeout "$MISSION_STATE_TIMEOUT" python3 "$MISSION_STATE_PY" "$@"

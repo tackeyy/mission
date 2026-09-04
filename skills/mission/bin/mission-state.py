@@ -291,6 +291,9 @@ from mission_application.specialist_registry_discovery import (  # noqa: E402
     provider_id as _provider_id,
     safe_provider_reference as _safe_provider_reference,
 )
+from mission_application.guard_timeout import (  # noqa: E402
+    bounded_by_guard_timeout,
+)
 from mission_application.runtime_guard import (  # noqa: E402
     CleanupStaleExecuteCommand,
     FreshnessEvidence,
@@ -9338,8 +9341,13 @@ def _guard_receipt_decision(args, hook_input: object) -> GuardDecision:
     ))
 
 
+@bounded_by_guard_timeout
 def cmd_stop_verdict(args):
-    """Resolve one state or one hook root into the typed Stop decision."""
+    """Resolve one state or one hook root into the typed Stop decision.
+
+    The decorator bounds this command with the guard's own limit (#742 D2), so a
+    host without `timeout` and without `perl` cannot leave the Stop hook hanging.
+    """
     if args.hook_input is not None:
         try:
             if args.hook_input != "-":
