@@ -1021,14 +1021,27 @@ def test_every_declared_command_type_projects(command_type):
         assert "digest" not in claim and "size" not in claim
         assert claim["kind"] and claim["target"]
 
+PATH_BEARING_COMMAND_TYPES = ("generate-context-manifest", "generate-claims-ledger")
+NON_PATH_COMMAND_TYPES = (
+    "export-artifact",
+    "initialize-artifact",
+    "record-artifact-publication",
+    "render-artifact",
+    "update-progress",
+)
 
-@pytest.mark.parametrize("command_type", ["initialize-artifact", "update-progress"])
+
+
+@pytest.mark.parametrize("command_type", NON_PATH_COMMAND_TYPES)
 def test_a_claim_without_a_publication_path_still_projects(command_type):
-    from mission_application.evidence_publication import project_semantic_command
+    from mission_application.evidence_publication import (
+        EFFECT_FIELDS_BY_COMMAND_TYPE,
+        project_semantic_command,
+    )
 
     projected = project_semantic_command(_real_command(command_type))
-    field = "effect"
-    assert "publication_path" not in projected["value"][field]
+    for field in EFFECT_FIELDS_BY_COMMAND_TYPE[command_type]:
+        assert "publication_path" not in projected["value"][field]
 
 
 def test_partition_refuses_a_binding_whose_identifier_does_not_match_its_path():
@@ -1048,8 +1061,6 @@ def test_materialization_refuses_null_base_and_state_digests():
             read_materialization(dict(complete, **{field: None}))
 
 
-PATH_BEARING_COMMAND_TYPES = ("generate-context-manifest", "generate-claims-ledger")
-
 
 @pytest.mark.parametrize("command_type", PATH_BEARING_COMMAND_TYPES)
 def test_a_command_that_must_name_a_path_is_refused_without_one(command_type):
@@ -1068,14 +1079,17 @@ def test_a_command_that_must_name_a_path_is_refused_without_one(command_type):
         project_semantic_command(stripped)
 
 
-@pytest.mark.parametrize("command_type", ["initialize-artifact", "update-progress"])
+@pytest.mark.parametrize("command_type", NON_PATH_COMMAND_TYPES)
 def test_a_command_that_never_names_a_path_is_refused_with_one(command_type):
     from mission_application.evidence_publication import project_semantic_command
 
-    document = json.loads(json.dumps(_real_command(command_type)))
-    document["value"]["effect"]["publication_path"] = "build/x.json"
-    with pytest.raises(EvidencePublicationError):
-        project_semantic_command(document)
+    from mission_application.evidence_publication import EFFECT_FIELDS_BY_COMMAND_TYPE
+
+    for field in EFFECT_FIELDS_BY_COMMAND_TYPE[command_type]:
+        document = json.loads(json.dumps(_real_command(command_type)))
+        document["value"][field]["publication_path"] = "build/x.json"
+        with pytest.raises(EvidencePublicationError):
+            project_semantic_command(document)
 
 
 def test_the_writer_cannot_produce_what_the_reader_refuses():
@@ -1136,3 +1150,37 @@ def test_the_repository_passes_its_own_root_name_to_the_reader():
 
     source = Path(module.__file__).read_text(encoding="utf-8")
     assert "read_operation_record(document, repository_root_name=self.root.name)" in source
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        {"digest": None},
+        {"kind": ""},
+        {"size": -1},
+    ],
+)
+def test_the_writer_refuses_each_binding_the_reader_refuses(broken):
+    """Whatever the reader rejects, the writer must reject first."""
+    from mission_application.evidence_publication import materialization_binding
+
+    binding = dict(_binding("build/x.json", "generated"), **broken)
+    with pytest.raises(EvidencePublicationError):
+        materialization_binding(
+            bindings=(binding,),
+            base_head_digest="sha256:" + "a" * 64,
+            base_generation=1,
+            state_digest="sha256:" + "b" * 64,
+        )
+
+
+def test_the_writer_refuses_a_binding_set_with_nothing_generated():
+    from mission_application.evidence_publication import materialization_binding
+
+    with pytest.raises(EvidencePublicationError):
+        materialization_binding(
+            bindings=(_binding("input/source.json", "captured"),),
+            base_head_digest="sha256:" + "a" * 64,
+            base_generation=1,
+            state_digest="sha256:" + "b" * 64,
+        )

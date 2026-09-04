@@ -320,12 +320,19 @@ def materialization_binding(
             raise EvidencePublicationError(
                 "materialization-invalid", name + " is invalid"
             )
-    return {
-        "base_generation": base_generation,
-        "base_head_digest": base_head_digest,
-        "blobs": generated,
-        "state_digest": state_digest,
-    }
+    # Run the reader over what was just built.  Keeping the two checks apart
+    # is how this drifted: the writer produced null digests, empty kinds,
+    # negative sizes and empty blob sets that the reader then refused, so a
+    # record could be written that nothing could read back.
+    return read_materialization(
+        {
+            "base_generation": base_generation,
+            "base_head_digest": base_head_digest,
+            "blobs": generated,
+            "state_digest": state_digest,
+        },
+        repository_root_name=repository_root_name,
+    )
 
 
 def assert_replay_materializes(*, recorded, prepared: dict) -> None:
