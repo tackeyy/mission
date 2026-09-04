@@ -746,7 +746,7 @@ def test_docs_only_scope_delegates_to_existing_ci_selector(tmp_path):
     commands = []
 
     def runner(arguments, cwd, env=None):
-        commands.append(tuple(arguments))
+        commands.append((tuple(arguments), dict(env or {})))
         # Pass `env` through: dropping it means the suite never learns where to
         # write its report, and the gate then reports it as absent.
         return gate._local_runner(arguments, cwd, env)
@@ -766,7 +766,17 @@ def test_docs_only_scope_delegates_to_existing_ci_selector(tmp_path):
     )
     assert observation.scope == "docs-only"
     assert observation.targets == helper["pythonTargets"]
-    assert ("make", "test", "PYTEST_TARGETS={}".format(helper["pythonTargets"])) in commands
+    # #735: the scope travels in the environment.  Appending it to the argument
+    # list only means anything to make, and a contract declaring any other
+    # command would receive it as an extra positional argument.
+    suite_calls = [
+        (arguments, env)
+        for arguments, env in commands
+        if arguments[:2] == ("make", "test")
+    ]
+    assert suite_calls, commands
+    assert suite_calls[0][0] == ("make", "test")
+    assert suite_calls[0][1]["PYTEST_TARGETS"] == helper["pythonTargets"]
 
 
 def test_queue_workflow_delegates_to_the_same_gate_command():
