@@ -32,7 +32,7 @@ def test_evidence_commands_are_frozen_and_have_unique_canonical_types():
     context_claim = ContextManifestEffectClaim(
         "context-manifest",
         "manifest.json",
-        ".mission-state/context/manifest.json",
+        "evidence/context/manifest.json",
         "sha256:" + "b" * 64,
         13,
     )
@@ -174,7 +174,7 @@ def test_four_evidence_reducers_own_only_their_observation_fields():
     assert "progress" not in cleared_document
     assert cleared_document["updated_at"] == "2030-01-02T03:05:05Z"
 
-    publication_path = ".mission-state/context/manifest.json"
+    publication_path = "evidence/context/manifest.json"
     manifest = {
         "schema": "mission-context-manifest/1",
         "iteration": 2,
@@ -288,7 +288,7 @@ def test_application_prepares_four_typed_evidence_operations_without_state_outpu
             state,
             now=at,
             iteration=1,
-            publication_path=".mission-state/context/manifest.json",
+            publication_path="evidence/context/manifest.json",
         ),
         prepare_verification_record(
             state,
@@ -310,7 +310,7 @@ def test_application_prepares_four_typed_evidence_operations_without_state_outpu
     assert [len(item.effects) for item in prepared] == [1, 0, 1, 0]
     assert prepared[0].command.effect.digest == prepared[0].effects[0].digest
     assert prepared[2].command.effect.publication_path == (
-        ".mission-state/context/manifest.json"
+        "evidence/context/manifest.json"
     )
     assert prepared[2].command.effect.target == "manifest.json"
     assert prepared[3].result["verification"]["status"] == "passed"
@@ -471,7 +471,7 @@ def test_evidence_effect_binding_rejects_every_descriptor_mismatch(
             document,
             now="2030-01-02T03:04:05Z",
             iteration=1,
-            publication_path=".mission-state/context/manifest.json",
+            publication_path="evidence/context/manifest.json",
         )
     )
     state = decode_mission_state(json.dumps(document).encode("utf-8"))
@@ -501,7 +501,7 @@ def test_context_claim_binds_state_path_and_publication_basename_before_effects(
         document,
         now="2030-01-02T03:04:05Z",
         iteration=1,
-        publication_path=".mission-state/context/manifest.json",
+        publication_path="evidence/context/manifest.json",
     )
     command = replace(
         prepared.command,
@@ -614,7 +614,7 @@ def test_malformed_legacy_score_history_is_rejected_before_context_publication_o
                 state,
                 now="2030-01-02T03:04:05Z",
                 iteration=1,
-                publication_path=".mission-state/context/manifest.json",
+                publication_path="evidence/context/manifest.json",
             ),
             effect_transaction=publish,
         )
@@ -666,7 +666,7 @@ def test_foreign_lease_rejects_before_typed_evidence_publication(operation):
             state,
             now="2030-01-02T03:04:05Z",
             iteration=1,
-            publication_path=".mission-state/context/manifest.json",
+            publication_path="evidence/context/manifest.json",
         )
 
     with pytest.raises(ValueError, match="foreign-lease"):
@@ -735,7 +735,7 @@ def test_typed_evidence_publication_rolls_back_when_state_save_fails(operation):
             document,
             now="2030-01-02T03:04:05Z",
             iteration=1,
-            publication_path=".mission-state/context/manifest.json",
+            publication_path="evidence/context/manifest.json",
         )
 
     with pytest.raises(RuntimeError, match="save-failed"):
@@ -798,7 +798,7 @@ def test_context_publication_failure_never_commits_state_or_output(failure):
                 document,
                 now="2030-01-02T03:04:05Z",
                 iteration=1,
-                publication_path=".mission-state/context/manifest.json",
+                publication_path="evidence/context/manifest.json",
             ),
             effect_transaction=publish,
             verify_published=verify,
