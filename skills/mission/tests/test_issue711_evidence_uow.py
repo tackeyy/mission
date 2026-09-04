@@ -5,6 +5,7 @@
 ため、式が動くと既存レコードを読めなくなる。
 """
 import hashlib
+import json
 
 import pytest
 
@@ -803,3 +804,153 @@ def test_semantic_intent_over_the_production_command_ignores_generated_bytes():
         return semantic_intent_digest(inputs)
 
     assert digest_for("0", 12) == digest_for("1", 999)
+
+
+def test_semantic_command_does_not_guess_from_shape():
+    """Two different commands must not collapse onto one intent.
+
+    Recognising an effect claim by "it has these five keys" reaches any
+    look-alike object a command happens to carry, so a command whose real
+    payload contains such an object loses that payload from its intent.
+    """
+    from mission_application.evidence_publication import project_semantic_command
+
+    look_alike = {
+        "digest": "sha256:" + "0" * 64,
+        "kind": "context-manifest",
+        "publication_path": "build/manifest.json",
+        "size": 12,
+        "target": "manifest.json",
+    }
+    first = {
+        "schema": "mission-kernel-command/1",
+        "type": "set-extension-fields",
+        "value": {"fields": dict(look_alike)},
+    }
+    second = {
+        "schema": "mission-kernel-command/1",
+        "type": "set-extension-fields",
+        "value": {"fields": dict(look_alike, size=999)},
+    }
+    assert project_semantic_command(first) != project_semantic_command(second)
+
+
+def test_semantic_command_covers_every_command_that_declares_an_effect():
+    """The projection is keyed by command type, so the table has to be complete."""
+    import dataclasses
+
+    from mission_kernel import commands as kernel_commands
+    from mission_application.evidence_publication import EFFECT_FIELDS_BY_COMMAND_TYPE
+
+    declared = {}
+    for name in dir(kernel_commands):
+        candidate = getattr(kernel_commands, name)
+        if not (isinstance(candidate, type) and dataclasses.is_dataclass(candidate)):
+            continue
+        fields = tuple(
+            field.name
+            for field in dataclasses.fields(candidate)
+            if field.name.endswith("effect")
+        )
+        if not fields:
+            continue
+        instance = candidate.__new__(candidate)
+        try:
+            command_type = kernel_commands.kernel_command_type(instance)
+        except TypeError:
+            continue
+        declared[command_type] = fields
+    assert EFFECT_FIELDS_BY_COMMAND_TYPE == declared
+
+
+def test_semantic_command_projects_both_effects_of_an_export():
+    from mission_application.evidence_publication import project_semantic_command
+
+    claim = {
+        "digest": "sha256:" + "0" * 64,
+        "kind": "artifact",
+        "publication_path": "build/a.json",
+        "size": 5,
+        "target": "a.json",
+    }
+    document = {
+        "schema": "mission-kernel-command/1",
+        "type": "export-artifact",
+        "value": {"artifact_effect": dict(claim), "export_effect": dict(claim)},
+    }
+    projected = project_semantic_command(document)
+    for field in ("artifact_effect", "export_effect"):
+        assert "digest" not in projected["value"][field]
+
+
+def test_materialization_checks_the_value_of_each_binding_field():
+    """Present-but-null fields used to satisfy the shape check."""
+    from mission_application.evidence_publication import read_materialization
+
+    complete = _materialization(["build/x.json"])
+    for field in ("blob_id", "digest", "kind", "relative_path", "size"):
+        broken = json.loads(json.dumps(complete))
+        broken["blobs"][0][field] = None
+        with pytest.raises(EvidencePublicationError):
+            read_materialization(broken)
+
+
+def test_materialization_checks_the_binding_container_type():
+    from mission_application.evidence_publication import read_materialization
+
+    broken = _materialization(["build/x.json"])
+    with pytest.raises(EvidencePublicationError):
+        read_materialization(dict(broken, blobs=[["not", "a", "mapping"]]))
+
+
+def test_materialization_checks_the_base_generation_type():
+    from mission_application.evidence_publication import read_materialization
+
+    broken = _materialization(["build/x.json"])
+    with pytest.raises(EvidencePublicationError):
+        read_materialization(dict(broken, base_generation="1"))
+
+
+def test_the_repository_root_name_reaches_every_entry_point():
+    """A root name honoured by one function and ignored by the next is worse
+    than none: the same path is accepted here and refused there.
+    """
+    from mission_application.evidence_publication import (
+        derive_blob_id,
+        project_semantic_claim,
+        semantic_intent_digest,
+    )
+
+    root = "other-root"
+    inside = "other-root/manifest.json"
+
+    with pytest.raises(EvidencePublicationError):
+        derive_blob_id(inside, repository_root_name=root)
+    with pytest.raises(EvidencePublicationError):
+        project_semantic_claim(
+            {
+                "kind": "context-manifest",
+                "target": "manifest.json",
+                "publication_path": inside,
+                "digest": "sha256:" + "0" * 64,
+                "size": 12,
+            },
+            repository_root_name=root,
+        )
+    with pytest.raises(EvidencePublicationError):
+        semantic_intent_digest(
+            _intent_inputs((_binding(inside, "captured"),)), repository_root_name=root
+        )
+
+
+def test_the_default_root_name_still_applies_when_none_is_given():
+    from mission_application.evidence_publication import derive_blob_id
+
+    with pytest.raises(EvidencePublicationError):
+        derive_blob_id(".mission-state/manifest.json")
+
+
+def test_a_path_named_after_another_root_is_ordinary_here():
+    from mission_application.evidence_publication import derive_blob_id
+
+    assert derive_blob_id(".mission-state/x.json", repository_root_name="other-root")

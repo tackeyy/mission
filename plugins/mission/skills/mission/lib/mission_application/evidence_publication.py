@@ -8,6 +8,7 @@ publication path と blob id は intent / generation / prepare / commit の各
 from __future__ import annotations
 import hashlib
 import json
+import re
 from pathlib import PurePosixPath
 
 REPOSITORY_ROOT_NAME = ".mission-state"
@@ -53,13 +54,20 @@ def canonical_publication_path(
     return "/".join(parts)
 
 
-def derive_blob_id(canonical_path: str) -> str:
+def derive_blob_id(
+    canonical_path: str, *, repository_root_name: str = REPOSITORY_ROOT_NAME
+) -> str:
     """Return the blob identifier bound to one canonical publication path.
 
     Nothing but the path takes part: a timestamp or an iteration would make
     the identifier differ between the prepare and the retry that follows it.
     """
-    if canonical_publication_path(canonical_path) != canonical_path:
+    if (
+        canonical_publication_path(
+            canonical_path, repository_root_name=repository_root_name
+        )
+        != canonical_path
+    ):
         raise EvidencePublicationError(
             "publication-path-invalid", "blob id requires the canonical publication path"
         )
@@ -72,7 +80,9 @@ LEGACY_BLOB_ORIGIN = "captured"
 SEMANTIC_CLAIM_FIELDS = ("kind", "target", "publication_path")
 
 
-def project_semantic_claim(claim: dict) -> dict:
+def project_semantic_claim(
+    claim: dict, *, repository_root_name: str = REPOSITORY_ROOT_NAME
+) -> dict:
     """Return the part of one effect claim that decides which operation this is.
 
     ``digest`` and ``size`` describe what the operation produced, not what it
@@ -86,7 +96,9 @@ def project_semantic_claim(claim: dict) -> dict:
         raise EvidencePublicationError(
             "effect-claim-invalid", "effect claim is missing " + ", ".join(missing)
         )
-    canonical = canonical_publication_path(claim["publication_path"])
+    canonical = canonical_publication_path(
+        claim["publication_path"], repository_root_name=repository_root_name
+    )
     if claim["target"] != PurePosixPath(canonical).name:
         raise EvidencePublicationError(
             "effect-claim-invalid", "effect target is not the publication basename"
@@ -155,7 +167,9 @@ def _canonical(value: dict) -> bytes:
     ).encode("utf-8")
 
 
-def _partition_bindings(bindings) -> tuple[list, list]:
+def _partition_bindings(
+    bindings, *, repository_root_name: str = REPOSITORY_ROOT_NAME
+) -> tuple[list, list]:
     captured, generated = [], []
     for record in bindings:
         origin = blob_origin_of(record)
@@ -164,33 +178,66 @@ def _partition_bindings(bindings) -> tuple[list, list]:
             raise EvidencePublicationError(
                 "blob-binding-invalid", "binding is missing " + ", ".join(missing)
             )
+        derive_blob_id(
+            canonical_publication_path(
+                record["relative_path"], repository_root_name=repository_root_name
+            ),
+            repository_root_name=repository_root_name,
+        )
         projected = {name: record[name] for name in BINDING_FIELDS}
         (generated if origin == "generated" else captured).append(projected)
     key = lambda item: item["blob_id"]
     return sorted(captured, key=key), sorted(generated, key=key)
 
 
-CLAIM_FIELDS = ("digest", "kind", "publication_path", "size", "target")
+EFFECT_FIELDS_BY_COMMAND_TYPE = {
+    "export-artifact": ("artifact_effect", "export_effect"),
+    "generate-claims-ledger": ("effect",),
+    "generate-context-manifest": ("effect",),
+    "initialize-artifact": ("effect",),
+    "record-artifact-publication": ("effect",),
+    "render-artifact": ("effect",),
+    "update-progress": ("effect",),
+}
 
 
-def project_semantic_command(command):
-    """Return the command with every effect claim reduced to its meaning.
+def project_semantic_command(
+    command, *, repository_root_name: str = REPOSITORY_ROOT_NAME
+):
+    """Return the command with its effect claims reduced to their meaning.
 
-    The encoded command carries the claim whole, so the digest and the size
-    of the produced file sit inside it.  Leaving them there would defeat the
-    separation entirely: the intent would still move whenever the bytes did,
-    which is the thing the split exists to prevent.
+    The claim is located by command type, not by shape.  Recognising it as
+    "any object carrying these five keys" reaches look-alike objects a
+    command holds for its own reasons, which drops that payload from the
+    intent and lets two different commands share one digest.
     """
-    if isinstance(command, dict):
-        if all(name in command for name in CLAIM_FIELDS):
-            return project_semantic_claim(command)
-        return {key: project_semantic_command(value) for key, value in command.items()}
-    if isinstance(command, (list, tuple)):
-        return [project_semantic_command(item) for item in command]
-    return command
+    if not isinstance(command, dict):
+        raise EvidencePublicationError(
+            "command-invalid", "encoded command must be an object"
+        )
+    effect_fields = EFFECT_FIELDS_BY_COMMAND_TYPE.get(command.get("type"))
+    if not effect_fields:
+        return command
+    value = command.get("value")
+    if not isinstance(value, dict):
+        raise EvidencePublicationError(
+            "command-invalid", "encoded command value must be an object"
+        )
+    projected_value = dict(value)
+    for field in effect_fields:
+        if field not in value:
+            raise EvidencePublicationError(
+                "command-invalid", "encoded command is missing " + field
+            )
+        projected_value[field] = project_semantic_claim(
+            value[field], repository_root_name=repository_root_name
+        )
+    return dict(command, value=projected_value)
 
 
-def semantic_intent_digest(inputs: dict) -> str:
+def semantic_intent_digest(
+    inputs: dict, *, repository_root_name: str = REPOSITORY_ROOT_NAME
+) -> str:
     """Return the digest of what the caller asked for, not of what came out.
 
     Generated bindings are left out on purpose: their digests only exist once
@@ -198,12 +245,16 @@ def semantic_intent_digest(inputs: dict) -> str:
     like a different operation every time its output moved.  Captured input
     stays in, because a different input is a different request.
     """
-    captured, _generated = _partition_bindings(inputs["bindings"])
+    captured, _generated = _partition_bindings(
+        inputs["bindings"], repository_root_name=repository_root_name
+    )
     return "sha256:" + hashlib.sha256(
         _canonical(
             {
                 "blobs": captured,
-                "command": project_semantic_command(inputs["command"]),
+                "command": project_semantic_command(
+                    inputs["command"], repository_root_name=repository_root_name
+                ),
                 "lease_owner_session_id": inputs["lease_owner_session_id"],
                 "operation_id": inputs["operation_id"],
                 "schema": SEMANTIC_INTENT_SCHEMA,
@@ -333,9 +384,49 @@ def operation_record_keys(version: int) -> frozenset:
 
 
 MATERIALIZATION_FIELDS = ("base_generation", "base_head_digest", "blobs", "state_digest")
+DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
 
 
-def read_materialization(value) -> dict:
+def _check_materialized_binding(
+    binding: dict, *, repository_root_name: str = REPOSITORY_ROOT_NAME
+) -> None:
+    """Check what each field of one persisted binding holds, not that it exists.
+
+    A record whose fields are all present but null satisfies a shape check
+    while carrying nothing the replay comparison can rest on.
+    """
+    if not isinstance(binding["relative_path"], str):
+        raise EvidencePublicationError(
+            "materialization-invalid", "materialized blob path is not a string"
+        )
+    canonical = canonical_publication_path(
+        binding["relative_path"], repository_root_name=repository_root_name
+    )
+    if binding["blob_id"] != derive_blob_id(
+        canonical, repository_root_name=repository_root_name
+    ):
+        raise EvidencePublicationError(
+            "materialization-invalid", "materialized blob id does not match its path"
+        )
+    if not isinstance(binding["digest"], str) or not DIGEST_PATTERN.fullmatch(
+        binding["digest"]
+    ):
+        raise EvidencePublicationError(
+            "materialization-invalid", "materialized blob digest is invalid"
+        )
+    if not isinstance(binding["kind"], str) or not binding["kind"]:
+        raise EvidencePublicationError(
+            "materialization-invalid", "materialized blob kind is invalid"
+        )
+    if type(binding["size"]) is not int or binding["size"] < 0:
+        raise EvidencePublicationError(
+            "materialization-invalid", "materialized blob size is invalid"
+        )
+
+
+def read_materialization(
+    value, *, repository_root_name: str = REPOSITORY_ROOT_NAME
+) -> dict:
     """Parse and check one materialization binding.
 
     Reading the field without looking inside it leaves the replay comparison
@@ -366,6 +457,7 @@ def read_materialization(value) -> dict:
             raise EvidencePublicationError(
                 "materialization-invalid", "materialized blob is missing " + ", ".join(absent)
             )
+        _check_materialized_binding(binding, repository_root_name=repository_root_name)
     if type(value["base_generation"]) is not int:
         raise EvidencePublicationError(
             "materialization-invalid", "materialization base generation is not an integer"
@@ -373,7 +465,9 @@ def read_materialization(value) -> dict:
     return value
 
 
-def read_operation_record(document: dict) -> dict:
+def read_operation_record(
+    document: dict, *, repository_root_name: str = REPOSITORY_ROOT_NAME
+) -> dict:
     """Parse one operation record of either generation.
 
     The key set is checked exactly against the generation the record names,
@@ -394,7 +488,11 @@ def read_operation_record(document: dict) -> dict:
     return {
         "version": version,
         "materialization": (
-            read_materialization(document["materialization"]) if version >= 2 else None
+            read_materialization(
+                document["materialization"], repository_root_name=repository_root_name
+            )
+            if version >= 2
+            else None
         ),
     }
 
