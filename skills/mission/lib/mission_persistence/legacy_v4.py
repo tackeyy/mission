@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Callable, ContextManager, Iterable
 
+from mission_persistence.evidence_order import blob_set_from_effects
 from mission_application.artifact import (
     EvidenceDecision,
     EvidenceEffect,
@@ -981,7 +982,7 @@ class V5CompatibilityRepository:
         snapshot = self._repository.read(self._session_id)
         return json.loads(project_legacy_document(snapshot.state))
 
-    def load(self) -> dict:
+    def load(self, *, blobs: VerifiedBlobSet | None = None) -> dict:
         if not self._transaction_active:
             raise FencedCommitError(
                 "request-invalid",
@@ -991,7 +992,7 @@ class V5CompatibilityRepository:
             raise FencedCommitError("request-invalid", "v5 transaction already loaded")
         if self._format_guard is not None:
             self._guarded_call(self._format_guard)
-        admitted = self._repository.begin(self._request())
+        admitted = self._repository.begin(self._request(blobs=blobs))
         if isinstance(admitted, CommitResult):
             snapshot = self._repository.read(self._session_id)
             self._replayed = admitted
@@ -1099,10 +1100,14 @@ class V5CompatibilityRepository:
                 self._aggregate_prepare, aggregate_action
             )
         try:
+            # The stage compares its effects against the blobs the admission
+            # carries, so an empty tuple is only right while the admission is
+            # empty too.  Taking them from the admission keeps the two sides
+            # from being decided in different places.
             prepared = self._repository._stage_persistence(
                 admitted,
                 state_bytes=state_bytes,
-                effects=(),
+                effects=tuple(blob.binding for blob in admitted.request.blobs.blobs),
             )
             self._repository.commit(prepared, prepared.precondition)
             self._admitted = None
@@ -1193,7 +1198,19 @@ class V5CompatibilityRepository:
             if not isinstance(prepared, operation_type):
                 raise ValueError(operation_error)
             effects = self.validate_effects(prepared.effects)
-            current = self.load()
+            # The admission carries what prepare produced.  This is the whole
+            # point of the reordering: with an empty blob set the published
+            # files stayed outside the generation the commit records.
+            # The root name is read defensively: not every repository this
+            # seam runs against exposes one, and a missing name means the
+            # default, not a failure.
+            root = getattr(
+                getattr(getattr(self, "_repository", None), "root", None), "name", None
+            )
+            blobs = blob_set_from_effects(
+                effects, prepared.command, repository_root_name=root
+            )
+            current = self.load(blobs=blobs)
             if self.operation_replayed:
                 frozen = freeze_json_value(current)
                 assert isinstance(frozen, FrozenJsonObject)
@@ -1223,7 +1240,13 @@ class V5CompatibilityRepository:
                     "decision-invalid", "accepted decision is not closed"
                 )
             if decision.transition is not None:
-                bind_transition_effects(decision.transition, effects)
+                # The transition must hold the very bindings the blob set
+                # carries: ``stage`` compares the two for equality, so a
+                # separate object would be refused however equal it looked.
+                bind_transition_effects(
+                    decision.transition,
+                    tuple(blob.binding for blob in blobs.blobs) or effects,
+                )
             if effects:
                 if effect_transaction is None:
                     if self._effect_transaction is None:

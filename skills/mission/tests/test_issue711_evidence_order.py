@@ -384,3 +384,256 @@ def test_the_evidence_executor_prepares_before_it_admits(tmp_path):
 
 class _StopAfterPrepare(Exception):
     """End the run once the order under test has been observed."""
+
+
+def _effect(target="m.json", content=b"{}"):
+    import hashlib
+
+    from mission_application.artifact import EvidenceEffect
+
+    return EvidenceEffect(
+        kind="context-manifest",
+        target=target,
+        content=content,
+        digest="sha256:" + hashlib.sha256(content).hexdigest(),
+        size=len(content),
+    )
+
+
+def _context_command(publication_path="build/m.json", target="m.json"):
+    from mission_kernel.commands import (
+        ContextManifestEffectClaim,
+        GenerateContextManifest,
+    )
+
+    claim = ContextManifestEffectClaim(
+        "context-manifest", target, publication_path, "sha256:" + "0" * 64, 2
+    )
+    return GenerateContextManifest("2026-01-01T00:00:00Z", 1, claim)
+
+
+def test_the_blob_set_binds_the_effect_to_the_declared_path():
+    """`EvidenceEffect` names a target, not where it is published.
+
+    The path lives on the command's claim, so the two have to be brought
+    together; taking the basename from the effect alone would publish beside
+    the repository instead of where the command asked.
+    """
+    from mission_persistence.evidence_order import blob_set_from_effects
+
+    blobs = blob_set_from_effects((_effect(),), _context_command())
+    assert len(blobs.blobs) == 1
+    binding = blobs.blobs[0].binding
+    assert binding.relative_path == "build/m.json"
+    assert binding.digest == _effect().digest
+    assert blobs.blobs[0].content == b"{}"
+
+
+def test_the_blob_identifier_comes_from_the_declared_path():
+    from mission_application.evidence_publication import derive_blob_id
+    from mission_persistence.evidence_order import blob_set_from_effects
+
+    blobs = blob_set_from_effects((_effect(),), _context_command())
+    assert blobs.blobs[0].binding.blob_id == derive_blob_id("build/m.json")
+
+
+def test_a_command_without_a_declared_path_produces_no_blobs():
+    """Artifact and progress publish through their own path in this stage."""
+    from mission_kernel.commands import ProgressEffectClaim, UpdateProgress
+    from mission_persistence.evidence_order import blob_set_from_effects
+
+    claim = ProgressEffectClaim("progress", "p.json", "sha256:" + "0" * 64, 2)
+    command = UpdateProgress("2026-01-01T00:00:00Z", 1, 0, 1, None, None, 1, claim)
+    assert blob_set_from_effects((_effect(target="p.json"),), command).blobs == ()
+
+
+def test_no_effects_produce_no_blobs():
+    from mission_persistence.evidence_order import blob_set_from_effects
+
+    assert blob_set_from_effects((), _context_command()).blobs == ()
+
+
+def test_an_effect_that_does_not_match_the_claim_is_refused():
+    """The claim names one target; an effect for another is not its content."""
+    from mission_application.evidence_publication import EvidencePublicationError
+    from mission_persistence.evidence_order import blob_set_from_effects
+
+    with pytest.raises(EvidencePublicationError):
+        blob_set_from_effects((_effect(target="other.json"),), _context_command())
+
+
+def test_a_path_inside_the_repository_root_is_refused():
+    from mission_application.evidence_publication import EvidencePublicationError
+    from mission_persistence.evidence_order import blob_set_from_effects
+
+    with pytest.raises(EvidencePublicationError):
+        blob_set_from_effects(
+            (_effect(),), _context_command(publication_path=".mission-state/m.json")
+        )
+
+
+def test_the_admission_carries_the_prepared_blobs(tmp_path):
+    """The whole stage exists so that this request is not empty.
+
+    Observing the request `begin` receives is the only way to see it: the
+    published document is identical either way.
+    """
+    from mission_persistence.legacy_v4 import V5CompatibilityRepository
+
+    seen = []
+
+    class _Watched(V5CompatibilityRepository):
+        def _request(self, *, blobs=None):
+            seen.append(blobs)
+            return super()._request(blobs=blobs)
+
+    repository = _Watched(
+        repository=_v5_repository(tmp_path),
+        session_id="test",
+        lease_owner_session_id="test",
+        presented_lease_id="fixture-lease",
+    )
+
+    def _prepare(state):
+        from mission_application.evidence import PreparedEvidenceOperation
+
+        return PreparedEvidenceOperation(_context_command(), (_effect(),), {})
+
+    repository.execute_evidence_transition_effects(_prepare)
+
+    assert seen, "the executor never built an admission request"
+    carried = [blobs for blobs in seen if blobs is not None and blobs.blobs]
+    assert carried, "the admission request carried no blobs: %r" % (seen,)
+    assert carried[0].blobs[0].binding.relative_path == "build/m.json"
+
+
+def test_the_published_manifest_lands_in_a_generation(raw_run_cli, tmp_path):
+    """Drive the command production runs, not a state a test invented.
+
+    An in-process attempt rejected the command before it reached `save`,
+    which would have passed for the wrong reason: nothing staged, so nothing
+    disagreed.  The CLI reaches the publish.
+    """
+    started = raw_run_cli("init", "p", "--complexity", "Standard")
+    assert started.returncode == 0, started.stderr
+
+    published = raw_run_cli(
+        "context-manifest", "--iteration", "1", "--out", "cm.json"
+    )
+    assert published.returncode == 0, published.stderr
+    assert (tmp_path / "cm.json").is_file()
+
+    objects = tmp_path / ".mission-state" / "objects"
+    assert objects.is_dir(), "the repository kept no object store"
+    manifest = (tmp_path / "cm.json").read_bytes()
+    import hashlib
+
+    digest = hashlib.sha256(manifest).hexdigest()
+    stored = [path for path in objects.rglob("*") if path.is_file()]
+    assert any(
+        digest in path.name or path.read_bytes() == manifest for path in stored
+    ), "the published manifest is not part of any generation"
+
+
+def test_an_absolute_path_inside_the_project_becomes_relative():
+    """The CLI receives `--out` as the caller typed it, often absolute.
+
+    A projection target is relative to the project, so the absolute form has
+    to be converted rather than refused: refusing it broke every caller that
+    passes a path built from a temporary directory.
+    """
+    from pathlib import Path
+
+    from mission_application.evidence_publication import relative_publication_path
+
+    root = Path("/tmp/project")
+    assert relative_publication_path(root, "/tmp/project/build/m.json") == "build/m.json"
+    assert relative_publication_path(root, "build/m.json") == "build/m.json"
+
+
+def test_an_absolute_path_outside_the_project_is_refused():
+    from pathlib import Path
+
+    from mission_application.evidence_publication import (
+        EvidencePublicationError,
+        relative_publication_path,
+    )
+
+    with pytest.raises(EvidencePublicationError):
+        relative_publication_path(Path("/tmp/project"), "/etc/passwd")
+
+
+def test_the_repository_subtree_is_still_refused_when_absolute():
+    from pathlib import Path
+
+    from mission_application.evidence_publication import (
+        EvidencePublicationError,
+        relative_publication_path,
+    )
+
+    with pytest.raises(EvidencePublicationError):
+        relative_publication_path(
+            Path("/tmp/project"), "/tmp/project/.mission-state/m.json"
+        )
+
+
+def test_the_rejection_names_a_path_that_would_work():
+    """A caller whose command stops working needs the way out in the message.
+
+    The runbooks and other repositories that call this were not touched by
+    the change, so the error is the only place the new rule reaches them.
+    """
+    from mission_application.evidence_publication import (
+        EvidencePublicationError,
+        canonical_publication_path,
+    )
+
+    with pytest.raises(EvidencePublicationError) as excinfo:
+        canonical_publication_path(".mission-state/context/manifest.json")
+    detail = excinfo.value.detail
+    assert "context/manifest.json" in detail
+    assert "outside" in detail
+
+
+def test_the_application_relativizes_the_path_it_was_handed(tmp_path):
+    """Hold the wiring, not only the helper.
+
+    Removing the call from `prepare_context_manifest` left every test in this
+    file green: the helper was still correct, but nothing used it.
+    """
+    from mission_application.evidence import prepare_context_manifest
+
+    state = {
+        "mission": "m",
+        "mission_id": "abc12345",
+        "iteration": 1,
+        "session_id": "test",
+    }
+    prepared = prepare_context_manifest(
+        state,
+        now="2026-01-01T00:00:00Z",
+        iteration=1,
+        publication_path=str(tmp_path / "build" / "manifest.json"),
+        project_root=tmp_path,
+    )
+    assert prepared.command.effect.publication_path == "build/manifest.json"
+
+
+def test_the_application_refuses_the_repository_subtree_it_was_handed(tmp_path):
+    from mission_application.artifact import EvidenceFailure
+    from mission_application.evidence import prepare_context_manifest
+
+    state = {
+        "mission": "m",
+        "mission_id": "abc12345",
+        "iteration": 1,
+        "session_id": "test",
+    }
+    with pytest.raises(EvidenceFailure):
+        prepare_context_manifest(
+            state,
+            now="2026-01-01T00:00:00Z",
+            iteration=1,
+            publication_path=str(tmp_path / ".mission-state" / "manifest.json"),
+            project_root=tmp_path,
+        )

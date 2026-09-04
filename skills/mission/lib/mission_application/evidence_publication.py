@@ -49,8 +49,15 @@ def canonical_publication_path(
             "publication-path-invalid", "publication path has an empty or relative segment"
         )
     if parts[0] == repository_root_name:
+        # Name the way out: a caller whose existing command stops working
+        # needs to know what to write instead, and the message is the only
+        # place that reaches a runbook this change never touched.
         raise EvidencePublicationError(
-            "publication-path-invalid", "publication path is inside the repository root"
+            "publication-path-invalid",
+            "publication path is inside the repository root (%s/); evidence is "
+            "published as a projection of the repository, so choose a path "
+            "outside it, for example %s"
+            % (repository_root_name, "/".join(parts[1:]) or "evidence/output.json"),
         )
     return "/".join(parts)
 
@@ -537,3 +544,31 @@ def replay_requires_materialization(version: int) -> bool:
             "record-invalid", "operation record version is not recognised"
         )
     return expects_materialization(version)
+
+
+def relative_publication_path(project_root, path_text: str, *, repository_root_name: str = REPOSITORY_ROOT_NAME) -> str:
+    """Return the project-relative canonical form of one publication path.
+
+    The caller types ``--out`` as it pleases, so the value arriving here is
+    often absolute.  A projection target is relative to the project, so the
+    absolute form is converted rather than refused; refusing it would break
+    every caller that builds a path from a temporary directory.
+    """
+    from pathlib import Path
+
+    if not isinstance(path_text, str) or not path_text:
+        raise EvidencePublicationError(
+            "publication-path-invalid", "publication path must be a non-empty string"
+        )
+    candidate = Path(path_text)
+    if candidate.is_absolute():
+        try:
+            candidate = candidate.resolve().relative_to(Path(project_root).resolve())
+        except ValueError as exc:
+            raise EvidencePublicationError(
+                "publication-path-invalid",
+                "publication path is outside the project root",
+            ) from exc
+    return canonical_publication_path(
+        candidate.as_posix(), repository_root_name=repository_root_name
+    )

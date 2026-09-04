@@ -22,6 +22,18 @@ _LIB_ROOT = Path(__file__).resolve().parents[1] / "lib"
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
 
+def _admitted_double(**fields):
+    """Stand in for one admitted snapshot.
+
+    #711: `save` takes the stage effects from the admission, so a double has
+    to carry the request the real snapshot holds.
+    """
+    from mission_persistence.local_uow import VerifiedBlobSet
+
+    fields.setdefault("request", SimpleNamespace(blobs=VerifiedBlobSet(())))
+    return SimpleNamespace(**fields)
+
+
 def test_v4_save_orders_durable_intent_around_authority_write():
     from mission_persistence.legacy_v4 import LegacyV4Repository
 
@@ -84,7 +96,7 @@ def test_v5_save_orders_durable_intent_around_authority_commit():
             "index" if prepared is intent else "wrong-intent"
         ),
     )
-    repository._admitted = object()
+    repository._admitted = _admitted_double()
 
     repository.save({"loop_active": True}, aggregate_action="add")
 
@@ -118,7 +130,7 @@ def test_v5_rejects_unloaded_or_unserializable_state_before_intent():
         presented_lease_id="lease",
         **callbacks,
     )
-    unserializable._admitted = object()
+    unserializable._admitted = _admitted_double()
     with pytest.raises(TypeError):
         unserializable.save({"extension": {1}}, aggregate_action="add")
 
@@ -160,7 +172,7 @@ def test_v5_lease_callback_failure_reconciles_and_releases_intent(tmp_path):
         aggregate_finalize=coordinator.finalize,
         lease_committed=fail_lease,
     )
-    repository._admitted = SimpleNamespace(pending_lease=object())
+    repository._admitted = _admitted_double(pending_lease=object())
 
     with pytest.raises(RuntimeError, match="lease callback failed"):
         repository.save({"loop_active": True}, aggregate_action="add")

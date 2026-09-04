@@ -749,9 +749,14 @@ class _FakeFencedRepository:
     def begin(self, _request):
         import types
 
+        from mission_persistence.local_uow import VerifiedBlobSet
+
         return types.SimpleNamespace(
             base=types.SimpleNamespace(state=self._state),
             pending_lease=types.SimpleNamespace(target=self._state.lease),
+            # #711: the stage takes its effects from the admission, so the
+            # fake has to carry the request the real snapshot holds.
+            request=types.SimpleNamespace(blobs=VerifiedBlobSet(())),
         )
 
     def _stage_persistence(self, _admitted, *, state_bytes, effects):

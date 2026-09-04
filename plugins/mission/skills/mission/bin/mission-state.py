@@ -13771,6 +13771,7 @@ def cmd_context_manifest(args):
                 now=iso_now(),
                 iteration=args.iteration,
                 publication_path=str(out),
+                project_root=cwd,
             ),
             _legacy_lifecycle_repository(cwd, sf, stamp=False, pre_admit_lease=True),
         )

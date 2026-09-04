@@ -51,6 +51,104 @@ def admit_with_blobs(repository: object, *, build_request, blobs) -> object:
     return begin(build_request(blobs))
 
 
+def published_binding_type():
+    """Return the binding type that also answers to the claim comparison.
+
+    ``stage`` requires the transition effects to be the very bindings the
+    blob set carries, while ``bind_transition_effects`` compares them against
+    the claim by ``target``.  ``BlobBinding`` has no target, so a subclass
+    carries it: an ``isinstance`` check accepts the subclass, and using one
+    instance for both sides keeps the equality that ``stage`` demands.
+    """
+    from dataclasses import dataclass
+
+    from mission_persistence.local_uow import BlobBinding
+
+    global _PUBLISHED_BINDING
+    if _PUBLISHED_BINDING is None:
+
+        @dataclass(frozen=True)
+        class PublishedBlobBinding(BlobBinding):
+            target: str = ""
+
+        _PUBLISHED_BINDING = PublishedBlobBinding
+    return _PUBLISHED_BINDING
+
+
+_PUBLISHED_BINDING = None
+
+
+def blob_set_from_effects(effects, command, *, repository_root_name=None):
+    """Bind each prepared effect to the path its command declared.
+
+    ``EvidenceEffect`` names a target, not where it is published; the path
+    lives on the command's claim.  Taking the basename from the effect alone
+    would place the file beside the repository instead of where the command
+    asked, so the two are brought together here rather than guessed apart.
+
+    Commands whose claims carry no publication path produce nothing: in this
+    stage they still publish through their own route.
+    """
+    from mission_application.evidence_publication import (
+        EvidencePublicationError,
+        REPOSITORY_ROOT_NAME,
+        canonical_publication_path,
+        derive_blob_id,
+    )
+    from mission_kernel.commands import kernel_command_type
+    from mission_persistence.local_uow import BlobBinding, VerifiedBlob, VerifiedBlobSet
+
+    root = REPOSITORY_ROOT_NAME if repository_root_name is None else repository_root_name
+    try:
+        command_type = kernel_command_type(command)
+    except TypeError:
+        return VerifiedBlobSet(())
+    claims = _publication_claims(command, command_type)
+    if not claims or not effects:
+        return VerifiedBlobSet(())
+    by_target = {claim.target: claim for claim in claims}
+    blobs = []
+    for effect in effects:
+        claim = by_target.get(effect.target)
+        if claim is None:
+            raise EvidencePublicationError(
+                "effect-claim-invalid",
+                "no publication claim names the effect target %r" % (effect.target,),
+            )
+        canonical = canonical_publication_path(
+            claim.publication_path, repository_root_name=root
+        )
+        blobs.append(
+            VerifiedBlob(
+                published_binding_type()(
+                    blob_id=derive_blob_id(canonical, repository_root_name=root),
+                    kind=effect.kind,
+                    relative_path=canonical,
+                    digest=effect.digest,
+                    size=effect.size,
+                    target=effect.target,
+                ),
+                effect.content,
+            )
+        )
+    return VerifiedBlobSet(tuple(blobs))
+
+
+def _publication_claims(command, command_type):
+    """Return the claims of one command that name a publication path."""
+    from mission_application.evidence_publication import (
+        EFFECT_FIELDS_BY_COMMAND_TYPE,
+        PATH_BEARING_COMMAND_TYPES,
+    )
+
+    if command_type not in PATH_BEARING_COMMAND_TYPES:
+        return ()
+    return tuple(
+        getattr(command, field)
+        for field in EFFECT_FIELDS_BY_COMMAND_TYPE.get(command_type, ())
+    )
+
+
 class OrderedEvidenceRun:
     """Track which step of one evidence run has been entered."""
 
