@@ -41,6 +41,10 @@ from mission_kernel.transitions import (
     is_sealed_transition,
     is_transition_bound_to,
 )
+from mission_application.evidence_publication import (
+    EvidencePublicationError,
+    read_operation_record,
+)
 from mission_application.ports import (
     AuditMetadata,
     CommitResult,
@@ -1684,13 +1688,15 @@ class LocalFencedRepository:
         if content is None:
             return None
         document = _decode_record(content, limit=MAX_OPERATION_BYTES)
-        _exact(
-            document,
-            {"commit_digest", "intent_digest", "operation_id", "result", "schema", "session_id"},
-            "operation",
-        )
-        if document["schema"] != "mission-operation/1":
-            raise FencedCommitError("record-invalid", "operation schema is invalid")
+        try:
+            # The parsed generation is not compared against a prepared
+            # materialization yet: nothing prepares before ``begin`` until the
+            # execution order changes.  The call still has to happen here,
+            # because it is what refuses a record whose shape and generation
+            # disagree before the replay returns it.
+            read_operation_record(document, repository_root_name=self.root.name)
+        except EvidencePublicationError as exc:
+            raise FencedCommitError("record-invalid", exc.detail) from exc
         operation_id = _token(document["operation_id"], "operation.operation_id")
         intent_digest = _digest(document["intent_digest"], "operation.intent_digest")
         session_id = _session_id(document["session_id"])
