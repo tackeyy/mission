@@ -7471,7 +7471,10 @@ def cmd_gate_and_merge(args):
             IntegrationGateServices(execute=execute_gate_and_merge),
         )
     except IntegrationGateFailure as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        # step と reason を出す。message だけだと、どの手順のどの検査で落ちたかを
+        # 呼び出し側が機械的に判別できず、失敗の分類が文面の一致に依存する。
+        # infra 側の CLI 経路 (`execute_gate_and_merge_cli`) と同じ書式に揃える。
+        print(f"ERROR: step={exc.step} reason={exc.reason}: {exc}", file=sys.stderr)
         sys.exit(2)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
 

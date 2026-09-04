@@ -303,9 +303,14 @@ class TestCliAdapter:
         assert captured["request"].claimed_digest_source == "checker-comment"
         assert json.loads(capsys.readouterr().out)["status"] == "merged"
 
-    def test_parser_rejects_unknown_source(self):
+    def test_parser_rejects_unknown_source_by_name_and_lists_the_vocabulary(self, capsys):
+        """`SystemExit` だけを見ない。**未知のオプション名でも SystemExit になる**ため、
+        それだけでは「語彙を検査した」ことの証拠にならない。
+
+        引数名と受理可能な値が利用者へ提示されることまで固定する。
+        """
         module = self._module()
-        with pytest.raises(SystemExit):
+        with pytest.raises(SystemExit) as captured:
             module._build_parser().parse_args(
                 [
                     "gate-and-merge",
@@ -316,6 +321,76 @@ class TestCliAdapter:
                     "made-up",
                 ]
             )
+        assert captured.value.code == 2
+        message = capsys.readouterr().err
+        assert "--claimed-digest-source" in message
+        assert "made-up" in message
+        for value in ("checker-comment", "argv-manual"):
+            assert value in message
+
+    def test_the_cli_vocabulary_is_the_application_vocabulary(self):
+        """CLI と application が別の語彙を持たないことを固定する。
+
+        `choices` は `CLAIMED_DIGEST_SOURCES` から作る。列挙を 1 箇所に保たないと、
+        CLI が受理する値を application が拒否する（あるいはその逆）状態が生まれる。
+        """
+        module = self._module()
+        assert tuple(module.CLAIMED_DIGEST_SOURCES) == application.CLAIMED_DIGEST_SOURCES
+
+    def test_cli_rejects_the_vocabulary_before_reaching_the_application(self, monkeypatch):
+        """**CLI 経路では argparse が語彙を先に拒否する。** application の順序
+        （digest 書式 → 語彙 → 対）とは異なる。
+
+        これは意図した差である。argparse は `--help` に受理値を載せ、実行前に落とす。
+        **順序を保証しているのは application 経路の契約であり、CLI 経路ではない**ことを
+        テストとして明示し、後から「順序が壊れた」と誤読されないようにする。
+        """
+        module = self._module()
+        reached = []
+        monkeypatch.setattr(
+            module, "run_integration_gate", lambda *_a, **_k: reached.append(True)
+        )
+        with pytest.raises(SystemExit):
+            module._build_parser().parse_args(
+                [
+                    "gate-and-merge",
+                    "727",
+                    "--reviewed-changeset-digest",
+                    "not-a-digest",
+                    "--claimed-digest-source",
+                    "made-up",
+                ]
+            )
+        assert reached == []
+
+    def test_cli_forwards_pairing_failures_to_the_application(self, monkeypatch, capsys):
+        """語彙として正しい入力は application まで届き、対の検査で落ちる。
+
+        argparse が語彙を先に見ることと、**対の検査が CLI で握り潰されていない**ことは
+        別の話である。後者をここで固定する。
+        """
+        module = self._module()
+
+        def reject(_request, _services):
+            raise module.IntegrationGateFailure(
+                1,
+                "reviewed-changeset-digest-missing",
+                "a claimed digest source requires the reviewed changeset digest it describes",
+            )
+
+        monkeypatch.setattr(module, "run_integration_gate", reject)
+        args = module._build_parser().parse_args(
+            [
+                "gate-and-merge",
+                "727",
+                "--claimed-digest-source",
+                "checker-comment",
+            ]
+        )
+        with pytest.raises(SystemExit) as captured:
+            args.func(args)
+        assert captured.value.code == 2
+        assert "reviewed-changeset-digest-missing" in capsys.readouterr().err
 
     def test_existing_invocation_without_the_claim_still_builds_a_request(
         self, monkeypatch, capsys

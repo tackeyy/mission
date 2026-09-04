@@ -242,6 +242,23 @@ required check を置く必要がある。**論理的に不可能ではないが
 継続コスト（credential の rotate ごとに人間の承認が要る）に対して、守る対象の影響範囲が
 repo 内に閉じているためである。**影響範囲が広がればこの判断は変わる。**
 
+### 検証の順序は経路によって違う（意図した差）
+
+application 経路の順序は **digest の書式 → 申告の語彙 → 対の要求**で、いずれも手順 1
+（lease 取得前）で落ちる。
+
+**CLI 経路では argparse の `choices` が先に語彙を拒否する。** 両方が不正な入力では、
+application が `invalid-expected-changeset-digest` を返すのに対し、CLI は
+`invalid choice` で終わる。
+
+**これは意図した差である。** `choices` は受理値を `--help` に載せ、実行前に落とす。
+語彙は `CLAIMED_DIGEST_SOURCES` の 1 箇所から作るため、CLI と application が別の語彙を
+持つことはない（テストで固定している）。
+
+**順序を保証しているのは application 経路の契約であって、CLI 経路ではない。**
+CLI で必要なのは「語彙外を通さないこと」と「対の検査を握り潰さないこと」で、どちらも
+テストで固定している。
+
 ### port の引数が 1 つ増えた（互換の範囲）
 
 `IntegrationGateServices.execute` は 5 引数から **6 引数**になった。申告の有無にかかわらず
