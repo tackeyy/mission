@@ -954,3 +954,96 @@ def test_a_path_named_after_another_root_is_ordinary_here():
     from mission_application.evidence_publication import derive_blob_id
 
     assert derive_blob_id(".mission-state/x.json", repository_root_name="other-root")
+
+
+def _real_command(command_type):
+    """Build the command production encodes, for one command type.
+
+    The coverage test that checked only names passed while five of the seven
+    types raised, because the claims are not one shape: artifact and progress
+    claims carry no publication path at all.
+    """
+    from mission_kernel import commands as kernel
+
+    artifact = kernel.ArtifactEffectClaim("artifact", "a.md", "sha256:" + "0" * 64, 5)
+    progress = kernel.ProgressEffectClaim("progress", "p.json", "sha256:" + "0" * 64, 5)
+    context = kernel.ContextManifestEffectClaim(
+        "context-manifest", "m.json", "build/m.json", "sha256:" + "0" * 64, 5
+    )
+    ledger = kernel.ClaimsLedgerEffectClaim(
+        "claims-ledger", "l.json", "build/l.json", "sha256:" + "0" * 64, 5
+    )
+    at = "2026-01-01T00:00:00Z"
+    built = {
+        "export-artifact": lambda: kernel.ExportArtifact(
+            at, "drive", "reviewed", artifact, artifact
+        ),
+        "generate-claims-ledger": lambda: kernel.GenerateClaimsLedger(
+            at, 1, "sha256:" + "d" * 64, ledger
+        ),
+        "generate-context-manifest": lambda: kernel.GenerateContextManifest(at, 1, context),
+        "initialize-artifact": lambda: kernel.InitializeArtifact(
+            at, "a.md", "markdown", "title", "reviewed", True, artifact
+        ),
+        "record-artifact-publication": lambda: kernel.RecordArtifactPublication(
+            at, "provider", "destination", "approved", True, artifact
+        ),
+        "render-artifact": lambda: kernel.RenderArtifact(at, "reviewed", artifact),
+        "update-progress": lambda: kernel.UpdateProgress(
+            at, 1, 0, 1, None, None, 1, progress
+        ),
+    }[command_type]()
+    from mission_kernel.json_codec import thaw_json_object
+
+    return thaw_json_object(kernel.encode_kernel_command(built))
+
+
+@pytest.mark.parametrize("command_type", sorted(
+    {
+        "export-artifact",
+        "generate-claims-ledger",
+        "generate-context-manifest",
+        "initialize-artifact",
+        "record-artifact-publication",
+        "render-artifact",
+        "update-progress",
+    }
+))
+def test_every_declared_command_type_projects(command_type):
+    from mission_application.evidence_publication import (
+        EFFECT_FIELDS_BY_COMMAND_TYPE,
+        project_semantic_command,
+    )
+
+    document = _real_command(command_type)
+    projected = project_semantic_command(document)
+    for field in EFFECT_FIELDS_BY_COMMAND_TYPE[command_type]:
+        claim = projected["value"][field]
+        assert "digest" not in claim and "size" not in claim
+        assert claim["kind"] and claim["target"]
+
+
+@pytest.mark.parametrize("command_type", ["initialize-artifact", "update-progress"])
+def test_a_claim_without_a_publication_path_still_projects(command_type):
+    from mission_application.evidence_publication import project_semantic_command
+
+    projected = project_semantic_command(_real_command(command_type))
+    field = "effect"
+    assert "publication_path" not in projected["value"][field]
+
+
+def test_partition_refuses_a_binding_whose_identifier_does_not_match_its_path():
+    from mission_application.evidence_publication import semantic_intent_digest
+
+    forged = dict(_binding("input/source.json", "captured"), blob_id="evidence:" + "0" * 64)
+    with pytest.raises(EvidencePublicationError):
+        semantic_intent_digest(_intent_inputs((forged,)))
+
+
+def test_materialization_refuses_null_base_and_state_digests():
+    from mission_application.evidence_publication import read_materialization
+
+    complete = _materialization(["build/x.json"])
+    for field in ("base_head_digest", "state_digest"):
+        with pytest.raises(EvidencePublicationError):
+            read_materialization(dict(complete, **{field: None}))

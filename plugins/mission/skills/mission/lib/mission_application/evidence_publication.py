@@ -77,6 +77,7 @@ def derive_blob_id(
 
 BLOB_ORIGINS = frozenset({"captured", "generated"})
 LEGACY_BLOB_ORIGIN = "captured"
+REQUIRED_CLAIM_FIELDS = ("kind", "target")
 SEMANTIC_CLAIM_FIELDS = ("kind", "target", "publication_path")
 
 
@@ -91,20 +92,24 @@ def project_semantic_claim(
     """
     if not isinstance(claim, dict):
         raise EvidencePublicationError("effect-claim-invalid", "effect claim must be a mapping")
-    missing = [name for name in SEMANTIC_CLAIM_FIELDS if name not in claim]
+    missing = [name for name in REQUIRED_CLAIM_FIELDS if name not in claim]
     if missing:
         raise EvidencePublicationError(
             "effect-claim-invalid", "effect claim is missing " + ", ".join(missing)
         )
-    canonical = canonical_publication_path(
-        claim["publication_path"], repository_root_name=repository_root_name
-    )
-    if claim["target"] != PurePosixPath(canonical).name:
-        raise EvidencePublicationError(
-            "effect-claim-invalid", "effect target is not the publication basename"
+    projected = {name: claim[name] for name in REQUIRED_CLAIM_FIELDS}
+    # Artifact and progress claims name a target without naming where it is
+    # published; only the evidence claims carry a path.  Demanding one of all
+    # of them refused five of the seven command types that declare an effect.
+    if "publication_path" in claim:
+        canonical = canonical_publication_path(
+            claim["publication_path"], repository_root_name=repository_root_name
         )
-    projected = {name: claim[name] for name in SEMANTIC_CLAIM_FIELDS}
-    projected["publication_path"] = canonical
+        if claim["target"] != PurePosixPath(canonical).name:
+            raise EvidencePublicationError(
+                "effect-claim-invalid", "effect target is not the publication basename"
+            )
+        projected["publication_path"] = canonical
     return projected
 
 
@@ -178,12 +183,15 @@ def _partition_bindings(
             raise EvidencePublicationError(
                 "blob-binding-invalid", "binding is missing " + ", ".join(missing)
             )
-        derive_blob_id(
+        if record["blob_id"] != derive_blob_id(
             canonical_publication_path(
                 record["relative_path"], repository_root_name=repository_root_name
             ),
             repository_root_name=repository_root_name,
-        )
+        ):
+            raise EvidencePublicationError(
+                "blob-binding-invalid", "blob id does not match its publication path"
+            )
         projected = {name: record[name] for name in BINDING_FIELDS}
         (generated if origin == "generated" else captured).append(projected)
     key = lambda item: item["blob_id"]
@@ -267,6 +275,7 @@ def semantic_intent_digest(
 def materialization_binding(
     *,
     bindings,
+    repository_root_name: str = REPOSITORY_ROOT_NAME,
     base_head_digest: str,
     base_generation: int,
     state_digest: str,
@@ -276,7 +285,9 @@ def materialization_binding(
     Kept apart from the semantic digest so a replay can check that the commit
     it is about to return holds the same bytes this run just prepared.
     """
-    _captured, generated = _partition_bindings(bindings)
+    _captured, generated = _partition_bindings(
+        bindings, repository_root_name=repository_root_name
+    )
     if type(base_generation) is not int:
         raise EvidencePublicationError(
             "materialization-invalid", "base generation is not an integer"
@@ -458,6 +469,12 @@ def read_materialization(
                 "materialization-invalid", "materialized blob is missing " + ", ".join(absent)
             )
         _check_materialized_binding(binding, repository_root_name=repository_root_name)
+    for field in ("base_head_digest", "state_digest"):
+        candidate = value[field]
+        if not isinstance(candidate, str) or not DIGEST_PATTERN.fullmatch(candidate):
+            raise EvidencePublicationError(
+                "materialization-invalid", "materialization " + field + " is invalid"
+            )
     if type(value["base_generation"]) is not int:
         raise EvidencePublicationError(
             "materialization-invalid", "materialization base generation is not an integer"
