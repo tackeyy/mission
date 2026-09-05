@@ -154,6 +154,22 @@ def _is_usable_prior_finding(item: object) -> bool:
     )
 
 
+def context_timestamp_text(at: object) -> str:
+    """Return the manifest timestamp once it is known to be usable text.
+
+    The plan route refuses by this rule before it runs anything, so the rule
+    is named here rather than re-stated there.
+    """
+    return _text(at, "timestamp-invalid")
+
+
+def context_iteration_value(iteration: object) -> int:
+    """Return the manifest iteration once it is known to be a positive int."""
+    if type(iteration) is not int or iteration < 1:
+        raise EvidenceRuleError("context-iteration-invalid")
+    return iteration
+
+
 def context_output_path_text(publication_path: object) -> str:
     """Return the manifest output path once it is known to be usable text.
 
@@ -174,9 +190,8 @@ def project_context_manifest(
     publication_path: object,
     at: object,
 ) -> tuple[dict, bytes, int]:
-    timestamp = _text(at, "timestamp-invalid")
-    if type(iteration) is not int or iteration < 1:
-        raise EvidenceRuleError("context-iteration-invalid")
+    timestamp = context_timestamp_text(at)
+    iteration = context_iteration_value(iteration)
     path_text = context_output_path_text(publication_path)
     prior_findings: list[dict] = []
     history = state.get("score_history")

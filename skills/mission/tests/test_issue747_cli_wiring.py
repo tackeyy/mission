@@ -90,6 +90,10 @@ class _Stop(Exception):
         # The old route checks the timestamp first; a bad path must not hide
         # a bad timestamp behind a different name.
         ({"now": None, "publication_path": None}, "timestamp-invalid"),
+        # The old route's text rule also refuses a NUL byte; the plan route
+        # has to refuse it under the same name and in the same order.
+        ({"now": "bad\x00time"}, "timestamp-invalid"),
+        ({"now": "bad\x00time", "publication_path": None}, "timestamp-invalid"),
     ],
 )
 def test_the_plan_route_refuses_with_the_code_the_old_route_used(

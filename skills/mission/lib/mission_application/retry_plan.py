@@ -16,25 +16,37 @@ from mission_application.evidence_publication import (
     canonical_publication_path,
     relative_publication_path,
 )
-from mission_kernel.evidence import EvidenceRuleError, context_output_path_text
+from mission_kernel.evidence import (
+    EvidenceRuleError,
+    context_iteration_value,
+    context_output_path_text,
+    context_timestamp_text,
+)
 from mission_kernel.identifiers import is_token128
 
 RETRY_PLAN_SCHEMA = "mission-retry-plan/1"
 
 
 def _refuse_unless_timestamp(now: object) -> None:
-    if not isinstance(now, str) or not now:
+    # The kernel's rule, not a restatement of it: a second copy drifted once
+    # already (it let a NUL byte through that the callback route refused).
+    try:
+        context_timestamp_text(now)
+    except EvidenceRuleError as exc:
         raise EvidencePublicationError(
-            "timestamp-invalid", "plan requires a non-empty timestamp"
-        )
+            exc.code, "plan requires a usable timestamp"
+        ) from exc
 
 
 def _refuse_unless_iteration(iteration: object) -> None:
-    if iteration is not None and (type(iteration) is not int or iteration < 1):
+    if iteration is None:
+        return
+    try:
+        context_iteration_value(iteration)
+    except EvidenceRuleError as exc:
         raise EvidencePublicationError(
-            "context-iteration-invalid",
-            "plan iteration must be a positive integer or None",
-        )
+            exc.code, "plan iteration must be a positive integer or None"
+        ) from exc
 
 
 @dataclass(frozen=True)

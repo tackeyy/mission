@@ -98,7 +98,9 @@ def test_a_caller_operation_id_is_kept():
         {"now": None},
         {"now": 20260101},
         {"now": ""},
+        {"now": "bad\x00time"},
         {"iteration": "1"},
+        {"iteration": True},
         {"iteration": 0},
         {"iteration": -1},
         {"operation_id": 7},
@@ -145,6 +147,35 @@ def test_a_refused_operation_id_carries_the_plan_code():
     with pytest.raises(EvidencePublicationError) as excinfo:
         ContextManifestRetryPlan(**_plan_fields(operation_id="a/b"))
     assert excinfo.value.code == "retry-plan-invalid"
+
+
+def test_the_plan_and_the_kernel_share_the_timestamp_and_iteration_rules():
+    """The plan must refuse exactly what `project_context_manifest` refuses.
+
+    A second copy of either rule drifts; the plan calls the kernel's own.
+    """
+    import pytest as _pytest
+
+    from mission_application.evidence_publication import EvidencePublicationError
+    from mission_application.retry_plan import ContextManifestRetryPlan
+    from mission_kernel.evidence import (
+        EvidenceRuleError,
+        context_iteration_value,
+        context_timestamp_text,
+    )
+
+    for now in (None, "", "bad\x00time", 20260101):
+        with _pytest.raises(EvidenceRuleError) as kernel_exc:
+            context_timestamp_text(now)
+        with _pytest.raises(EvidencePublicationError) as plan_exc:
+            ContextManifestRetryPlan(**_plan_fields(now=now))
+        assert plan_exc.value.code == kernel_exc.value.code == "timestamp-invalid"
+    for iteration in ("1", 0, -1, True, 1.0):
+        with _pytest.raises(EvidenceRuleError) as kernel_exc:
+            context_iteration_value(iteration)
+        with _pytest.raises(EvidencePublicationError) as plan_exc:
+            ContextManifestRetryPlan(**_plan_fields(iteration=iteration))
+        assert plan_exc.value.code == kernel_exc.value.code == "context-iteration-invalid"
 
 
 def test_the_plan_and_the_record_share_one_token_rule():
