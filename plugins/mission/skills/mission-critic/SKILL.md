@@ -2,6 +2,7 @@
 name: mission-critic
 description: /mission オーケストレーターのサブスキル。スコア結果と指摘事項を踏まえ、次イテレーションの改善案を優先順位付きで提示する。
 context: fork
+model: opus
 user-invocable: false
 allowed-tools: Read, Grep, Glob, Bash(git diff:*), Bash(git log:*)
 ---

@@ -2,6 +2,7 @@
 name: mission-planner
 description: /mission オーケストレーターのサブスキル。構造化されたミッションを実行可能なステップに分解し、依存関係付き計画を立案する。
 context: fork
+model: opus
 user-invocable: false
 allowed-tools: Read, Grep, Glob, Bash(git log:*), Bash(git status:*), Bash(ls:*)
 ---
