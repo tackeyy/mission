@@ -1225,7 +1225,15 @@ class V5CompatibilityRepository:
                 )
             )
 
-        self._operation_id = plan.resolved_operation_id()
+        # Identity resolves in order of specificity: an id the plan carries,
+        # then one the caller configured on this repository (the callback
+        # route honoured it through `_request`, and a crash-replay relies on
+        # it staying stable), and only then the one the plan minted for
+        # itself.  Overwriting a configured id with the minted one turned every
+        # such replay into a new operation.
+        self._operation_id = (
+            plan.operation_id or previous_operation_id or plan.resolved_operation_id()
+        )
         try:
             return run_with_base_retry(plan, _attempt)
         except EvidencePublicationError as exc:

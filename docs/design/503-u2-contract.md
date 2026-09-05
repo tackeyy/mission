@@ -774,8 +774,8 @@ restoration failures use `recovery-blocked`.
 | missing/extra/mutated blobs, path escape, stage race | U1 | existing `LocalUnitOfWorkError` code |
 | request/admission/stage/transaction binding changed, capability unknown/foreign/invalidated, or caller recomputed a forged carried digest | instance-private commit capability registry and binding validator | `precondition-mismatch` or `stage-invalid` |
 | effect count, uniqueness, or aggregate 16 MiB bound fails in a prepare, commit, manifest, or authoritative read | U1/U2 record and lineage validator | `blob-set-too-large`, `record-invalid`, or existing U1 code |
-| base absence/presence, generation, or head digest differs before anything is staged | commit precondition CAS | `head-cas-mismatch` (retryable) |
-| base absence/presence, generation, or head digest differs after the stage is written | commit final authority CAS | `final-authority-cas-mismatch` (not retryable: replaying would publish the generation twice) |
+| base absence/presence, generation, or head digest differs before the prepare record and generation are published (the private stage already exists at this point) | commit precondition CAS | `head-cas-mismatch` (retryable: nothing durable or public has been written yet) |
+| base absence/presence, generation, or head digest differs after the prepare record and generation are published, immediately before the head is replaced | commit final authority CAS | `final-authority-cas-mismatch` (not retryable: replaying would publish the generation twice) |
 | precondition or pending-decision digest differs | commit CAS | `precondition-mismatch` |
 | lease expires or decision changes after stage | commit CAS | `lease-precondition-changed` |
 | operation ID reused with different intent | idempotency index | `operation-intent-collision` |

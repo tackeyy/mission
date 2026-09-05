@@ -148,3 +148,82 @@ def test_an_exhausted_budget_reaches_the_cli_as_a_rejection(tmp_path):
     finally:
         repository._repository.begin = original
     assert excinfo.value.code == "base-retry-exhausted"
+
+
+def test_a_caller_stable_operation_id_on_the_repository_is_kept(tmp_path):
+    """The callback route honoured an id the caller configured; so must the plan route.
+
+    `_request` used `self._operation_id or <fresh>`, which is what let a caller
+    replay the same operation after a crash.  Overwriting that id with the
+    plan's own minted one turned every such retry into a new operation.
+    """
+    from .test_issue503_fenced_commit import _commit_cli_init
+    from mission_kernel.json_codec import decode_json_object
+    from mission_persistence.legacy_v4 import V5CompatibilityRepository
+
+    local, _repo, _clock, _sp, _sb, _r = _commit_cli_init(tmp_path)
+    seen = []
+    original_begin = local.begin
+
+    def _begin(request):
+        seen.append(request.operation_id)
+        return original_begin(request)
+
+    local.begin = _begin
+    repository = V5CompatibilityRepository(
+        repository=local,
+        session_id="test",
+        lease_owner_session_id="test",
+        presented_lease_id="fixture-lease",
+        operation_id="caller-stable",
+        operation_command=decode_json_object(
+            b'{"schema":"mission-command-intent/1","type":"compatibility-mutation"}'
+        ),
+        operation_command_type="compatibility-mutation",
+    )
+
+    repository.execute_retry_safe_evidence_plan(_plan())
+
+    assert seen == ["caller-stable"], seen
+    # The configured id is the repository's; the plan route must leave it in place.
+    assert repository._operation_id == "caller-stable"
+
+
+def test_an_explicit_plan_operation_id_wins_over_the_repository_default(tmp_path):
+    """Plan-level identity is the more specific claim; the repository id is the fallback."""
+    from .test_issue503_fenced_commit import _commit_cli_init
+    from mission_application.retry_plan import ContextManifestRetryPlan
+    from mission_kernel.json_codec import decode_json_object
+    from mission_persistence.legacy_v4 import V5CompatibilityRepository
+
+    local, _repo, _clock, _sp, _sb, _r = _commit_cli_init(tmp_path)
+    seen = []
+    original_begin = local.begin
+
+    def _begin(request):
+        seen.append(request.operation_id)
+        return original_begin(request)
+
+    local.begin = _begin
+    repository = V5CompatibilityRepository(
+        repository=local,
+        session_id="test",
+        lease_owner_session_id="test",
+        presented_lease_id="fixture-lease",
+        operation_id="caller-stable",
+        operation_command=decode_json_object(
+            b'{"schema":"mission-command-intent/1","type":"compatibility-mutation"}'
+        ),
+        operation_command_type="compatibility-mutation",
+    )
+    plan = ContextManifestRetryPlan(
+        now="2026-01-01T00:00:00Z",
+        iteration=1,
+        publication_path="build/m.json",
+        operation_id="plan-explicit",
+    )
+
+    repository.execute_retry_safe_evidence_plan(plan)
+
+    assert seen == ["plan-explicit"], seen
+    assert repository._operation_id == "caller-stable"
