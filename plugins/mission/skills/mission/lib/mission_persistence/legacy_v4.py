@@ -1283,7 +1283,18 @@ class V5CompatibilityRepository:
                     decision.transition,
                     tuple(blob.binding for blob in blobs.blobs) or effects,
                 )
-            if effects:
+            if blobs.blobs:
+                # The unit of work owns the publish for anything it holds a
+                # blob for: the projection is applied at commit, so running
+                # the legacy publisher here would write the same file first
+                # and leave it outside the durable prepare on a crash.
+                #
+                # The branch turns on what the unit of work actually holds,
+                # not on which command this is.  Deciding by command type
+                # would leave nobody writing when an effect was not turned
+                # into a blob.
+                execution = self.execute(prepared.command)
+            elif effects:
                 if effect_transaction is None:
                     if self._effect_transaction is None:
                         raise ValueError("evidence-effect-transaction-missing")

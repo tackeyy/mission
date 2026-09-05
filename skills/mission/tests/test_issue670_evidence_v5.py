@@ -228,11 +228,22 @@ def test_publication_binding_truth_value_cannot_reenter_persistence(tmp_path, ru
             return _managed()
 
         def prepare(state):
-            return prepare_context_manifest(
+            # #711 stage 2: a command that declares a publication path is
+            # published by the unit of work, which never runs this publisher.
+            # The guard being probed belongs to the legacy route, so the probe
+            # uses a command that still takes it.
+            from mission_application.evidence import prepare_progress_update
+
+            return prepare_progress_update(
                 state,
                 now="2030-01-01T00:00:00Z",
+                total=1,
+                completed=0,
+                batch_size=1,
+                last_unit=None,
+                artifact_path=None,
                 iteration=1,
-                publication_path="reports/guard.json",
+                evidence_path="progress.json",
             )
 
         # The v5 executor only accepts its own injected publisher, so the probe
