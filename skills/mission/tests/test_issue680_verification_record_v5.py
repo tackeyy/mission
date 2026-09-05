@@ -6,6 +6,9 @@ import json
 
 import pytest
 
+from .evidence_doubles import FakeFencedRepository as _FakeFencedRepository
+from .evidence_doubles import in_memory_v5_repository as _in_memory_v5_repository
+
 
 def _v5_env(tmp_path):
     """v5 state 生成用: MISSION_* を絞り、version-skew 警告も抑制する。"""
@@ -251,36 +254,6 @@ def test_verification_record_rejects_invalid_lease_without_state_change(
         assert backup_after == backup_before
 
 
-def _in_memory_v5_repository(current, *, replayed=False):
-    from mission_persistence.legacy_v4 import V5CompatibilityRepository
-
-    repository = object.__new__(V5CompatibilityRepository)
-    repository._callback_depth = 0
-    # #711: the executor reads the base before it admits, so the double has to
-    # carry what that read observed.
-    repository._admitted = None
-    repository._observed_base = {
-        "base_head_digest": "sha256:" + "0" * 64,
-        "base_generation": 0,
-    }
-    repository._replayed = object() if replayed else None
-
-    @contextmanager
-    def transaction():
-        yield
-
-    repository.transaction = transaction
-    # #711: the executor now admits with the blobs prepare produced.
-    repository.load = lambda **_kwargs: current
-    # #711: the executor reads before it admits, so the double has to model
-    # both.  Returning the same document keeps what these tests observe.
-    repository.read_snapshot = lambda: current
-    repository.execute = lambda _command: (_ for _ in ()).throw(
-        AssertionError("rejected or replayed evidence must not execute")
-    )
-    return repository
-
-
 def _prepared_verification(state):
     from mission_application.evidence import prepare_verification_record
     from mission_kernel.commands import VerificationCheck
@@ -308,7 +281,6 @@ def test_v5_evidence_operation_rejects_unbound_effect_claim_before_publish():
 
 
 def test_v5_effect_claim_without_prepared_effects_is_rejected_before_commit():
-    from .test_issue632_transition_is_the_writer import _FakeFencedRepository
     from mission_application.evidence import prepare_context_manifest
     from mission_kernel import decode_mission_state
     from mission_kernel.transitions import TransitionTableError
