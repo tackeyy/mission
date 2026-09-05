@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Callable, ContextManager, Iterable
 
+from mission_application.evidence_publication import EvidencePublicationError
 from mission_persistence.evidence_order import (
     EvidenceOrderError,
     base_agrees,
@@ -1179,6 +1180,49 @@ class V5CompatibilityRepository:
             verify_published=verify_published,
             backup=backup,
         )
+
+    def execute_retry_safe_evidence_plan(self, plan):
+        """Run one plan, retrying while the base keeps moving under it.
+
+        The plan carries data only.  That is what makes the retry safe: an
+        arbitrary callback could observe the world again on the second
+        attempt, and this layer has no way to stop it.
+
+        The existing callback API stays as it is.  Every other evidence route
+        still uses it, and turning them all into plans at once is a larger
+        change than this one.
+        """
+        from mission_application.retry_plan import ContextManifestRetryPlan
+        from mission_persistence.retry_loop import run_with_base_retry
+
+        if callable(plan) or not isinstance(plan, ContextManifestRetryPlan):
+            raise EvidencePublicationError(
+                "retry-plan-invalid",
+                "this entry point takes a supported retry plan, not a callback",
+            )
+
+        # The operation identity is decided once, by the plan.  Leaving it to
+        # `_request` would mint a fresh id per attempt and turn one operation
+        # into three.
+        self._operation_id = plan.resolved_operation_id()
+
+        def _attempt(_number):
+            from mission_application.evidence import prepare_context_manifest
+
+            return self.execute_evidence_transition_effects(
+                lambda state: prepare_context_manifest(
+                    state,
+                    now=plan.now,
+                    iteration=(
+                        plan.iteration
+                        if plan.iteration is not None
+                        else state.get("iteration", 1)
+                    ),
+                    publication_path=plan.publication_path,
+                )
+            )
+
+        return run_with_base_retry(plan, _attempt)
 
     def execute_evidence_transition_effects(
         self,

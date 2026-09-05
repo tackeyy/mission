@@ -285,6 +285,23 @@ class _PinnedProjectionTarget:
         return self.identities[-1]
 
 
+PRECONDITION_CAS_CODE = "head-cas-mismatch"
+FINAL_AUTHORITY_CAS_CODE = "final-authority-cas-mismatch"
+RETRYABLE_CAS_CODES = frozenset({PRECONDITION_CAS_CODE})
+
+
+def is_retryable_cas_code(code) -> bool:
+    """Say whether one CAS failure may be retried.
+
+    The precondition check runs before anything is published, so the base
+    moving there costs nothing but the attempt.  The final authority check
+    runs with a stage already written, and replaying past it would publish
+    twice.  Anything unrecognised is not retryable: an unknown failure had
+    nothing to do with the base moving.
+    """
+    return code in RETRYABLE_CAS_CODES
+
+
 def _sha256(content: bytes) -> str:
     return "sha256:" + hashlib.sha256(content).hexdigest()
 
@@ -3780,7 +3797,12 @@ class LocalFencedRepository:
             ) is not None:
                 raise FencedCommitError("record-write-failed", "record removal did not persist")
 
-    def _current_cas(self, prepared: PreparedCommit) -> tuple[Optional[RepositorySnapshot], Optional[str]]:
+    def _current_cas(
+        self,
+        prepared: PreparedCommit,
+        *,
+        code: str = PRECONDITION_CAS_CODE,
+    ) -> tuple[Optional[RepositorySnapshot], Optional[str]]:
         head, head_bytes, digest = self._read_head_unlocked(prepared.admitted.request.session_id)
         if head is None:
             current = None
@@ -3798,7 +3820,7 @@ class LocalFencedRepository:
             generation != prepared.precondition.base_generation
             or digest != prepared.precondition.base_head_digest
         ):
-            raise FencedCommitError("head-cas-mismatch", "base generation or head digest moved")
+            raise FencedCommitError(code, "base generation or head digest moved")
         return current, digest
 
     def _invalidate_stage_binding(self, prepared: PreparedCommit) -> bool:
@@ -4313,7 +4335,9 @@ class LocalFencedRepository:
 
             def final_authority_gate() -> None:
                 self._fault("before-head-replace")
-                self._current_cas(prepared)
+                # A move here is not retryable: the stage is already written,
+                # so replaying past it would publish the same generation twice.
+                self._current_cas(prepared, code=FINAL_AUTHORITY_CAS_CODE)
                 authority_now = _as_utc(self.clock())
                 self._validate_lease_at(prepared, authority_now)
 

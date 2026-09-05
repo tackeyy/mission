@@ -374,9 +374,57 @@ def run_progress_clear(request: ProgressClearRequest, repository: object) -> dic
     )
 
 
+class _PlanRouteAdapter:
+    """Present the plan route with the shape `execute_evidence_operation` expects.
+
+    That helper drives a repository through one callback; the plan route takes
+    data instead.  Adapting here keeps the post-processing -- projection
+    checks, replay handling -- in the single place that already does it.
+    """
+
+    def __init__(self, plan_route, plan):
+        self._plan_route = plan_route
+        self._plan = plan
+
+    def execute_evidence_transition_effects(self, _prepare):
+        return self._plan_route(self._plan)
+
+
 def run_context_manifest(
     request: ContextManifestRequest, repository: object
 ) -> dict:
+    """Publish one context manifest, retrying while the base keeps moving.
+
+    A repository that offers the plan route gets a plan: it carries data
+    only, so the executor may run it again after a moved base.  Retained v4
+    has no such route and keeps the single-shot callback, which is why the
+    fallback stays rather than being an error.
+    """
+    plan_route = getattr(repository, "execute_retry_safe_evidence_plan", None)
+    if callable(plan_route):
+        from mission_application.retry_plan import ContextManifestRetryPlan
+
+        # Building the plan normalises the path, so a refusal now happens here
+        # rather than inside prepare.  It has to reach the caller as the same
+        # failure it always was, or the CLI stops reporting it as a rejection.
+        try:
+            plan = ContextManifestRetryPlan(
+                now=request.now,
+                iteration=request.iteration,
+                publication_path=relative_publication_path(
+                    request.project_root, request.publication_path
+                )
+                if request.project_root is not None
+                else request.publication_path,
+            )
+        except EvidencePublicationError as exc:
+            raise EvidenceFailure(
+                "context-publication-path-invalid", exc.detail
+            ) from exc
+        # The plan route returns what the executor returns, so the same
+        # post-processing has to run: the caller expects the projected result,
+        # not the raw (prepared, execution) pair.
+        return execute_evidence_operation(_PlanRouteAdapter(plan_route, plan), None)
     return execute_evidence_operation(
         repository,
         lambda state: prepare_context_manifest(
