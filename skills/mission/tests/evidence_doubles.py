@@ -16,12 +16,16 @@ Rules for growing them:
 * Every attribute a double exposes has to exist on the production object
   it imitates.  ``PRODUCTION_SHAPES`` below lists those pairs and the
   contract test checks them, so a rename in production fails here first.
+* ``V5_EXECUTOR_SURFACE`` is compared for equality against the set derived
+  from the executor's own source, so the executor cannot start reading a
+  new attribute without this file changing in the same commit.
 """
 
 from __future__ import annotations
 
 import copy
 import json
+import re
 import types
 from contextlib import contextmanager
 
@@ -48,22 +52,48 @@ PRODUCTION_SHAPES = (
      ("precondition", "state_bytes")),
 )
 
-# Private state and methods the V5 executor touches on a repository.  The
-# in-memory double has to define all of them, and the real class has to
-# still have them; the contract test checks both directions.
+# Everything the V5 executor reads off ``self`` inside
+# ``execute_evidence_transition_effects``.  The contract test derives the
+# real set from that method's source and requires it to equal this tuple, so
+# the executor cannot start reading a new attribute without this list -- and
+# therefore the double -- being updated in the same change.
 V5_EXECUTOR_SURFACE = (
-    "_callback_depth",
     "_admitted",
-    "_observed_base",
-    "_replayed",
-    "transaction",
-    "load",
-    "read_snapshot",
+    "_callback_guard",
+    "_effect_transaction",
+    "_guarded_context",
+    "_reject_reentrant_entry",
     "execute",
+    "load",
     "observed_base",
     "operation_replayed",
-    "execute_evidence_transition_effects",
+    "read_snapshot",
+    "transaction",
+    "validate_effects",
 )
+
+# Instance attributes the executor reads that ``__init__`` would normally set.
+# The double is built without ``__init__``, so it sets these itself; the
+# contract test checks that every non-callable name in the surface is here.
+V5_EXECUTOR_INSTANCE_STATE = (
+    "_admitted",
+    "_callback_depth",
+    "_effect_transaction",
+    "_observed_base",
+    "_replayed",
+)
+
+
+def executor_surface_from_source() -> frozenset:
+    """Return every ``self.<name>`` the V5 executor's entry method touches."""
+    import inspect
+
+    from mission_persistence.legacy_v4 import V5CompatibilityRepository
+
+    source = inspect.getsource(
+        V5CompatibilityRepository.execute_evidence_transition_effects
+    )
+    return frozenset(re.findall(r"\bself\.([A-Za-z_]\w*)", source))
 
 
 class FakeFencedRepository:
@@ -114,11 +144,6 @@ class FakeFencedRepository:
         self.commits.append(json.loads(prepared.state_bytes))
 
 
-def fake_fenced_repository(state):
-    """Return a :class:`FakeFencedRepository` over one decoded mission state."""
-    return FakeFencedRepository(state)
-
-
 def in_memory_v5_repository(current, *, replayed=False):
     """Return a ``V5CompatibilityRepository`` that never reaches a backend.
 
@@ -140,6 +165,11 @@ def in_memory_v5_repository(current, *, replayed=False):
         "base_generation": 0,
     }
     repository._replayed = object() if replayed else None
+    # Read on the legacy-publisher branch (effects without blobs).  The double
+    # never reaches a publish, so ``None`` is the honest value: reaching that
+    # branch then fails as ``evidence-effect-transaction-missing``, a refusal
+    # the tests can name, rather than an AttributeError deep in the executor.
+    repository._effect_transaction = None
 
     @contextmanager
     def transaction():

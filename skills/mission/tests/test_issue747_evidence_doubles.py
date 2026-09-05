@@ -5,16 +5,47 @@
 """
 import importlib
 import inspect
+import re
 
 import pytest
 
 from . import evidence_doubles
-from .evidence_doubles import PRODUCTION_SHAPES, V5_EXECUTOR_SURFACE
+from .evidence_doubles import (
+    PRODUCTION_SHAPES,
+    V5_EXECUTOR_INSTANCE_STATE,
+    V5_EXECUTOR_SURFACE,
+    executor_surface_from_source,
+)
 
 
 def _resolve(spec):
     module_name, _, attribute = spec.partition(":")
     return getattr(importlib.import_module(module_name), attribute)
+
+
+def _walk(root, path):
+    """Follow ``FakeFencedRepository.begin().precondition`` on a live object."""
+    value = root
+    for token in path.split(".")[1:]:
+        if token.endswith("()"):
+            name = token[:-2]
+            arity = len(inspect.signature(getattr(value, name)).parameters)
+            args = (None,) * arity if name != "_stage_persistence" else ()
+            if name == "_stage_persistence":
+                value = getattr(value, name)(None, state_bytes=b"{}", effects=())
+            else:
+                value = getattr(value, name)(*args)
+        else:
+            value = getattr(value, token)
+    return value
+
+
+def _fake():
+    return evidence_doubles.FakeFencedRepository(
+        evidence_doubles.decoded_state(
+            {"phase": "executing", "loop_active": True, "session_id": "portable"}
+        )
+    )
 
 
 @pytest.mark.parametrize("double_path,production,fields", PRODUCTION_SHAPES,
@@ -31,53 +62,58 @@ def test_every_field_a_double_answers_exists_in_production(double_path, producti
         assert field in names, f"{double_path} answers {field!r}, but {production} has no such field"
 
 
-def test_the_fenced_fake_answers_the_declared_shapes():
-    """The declaration above has to match what the fake really returns."""
-    from mission_persistence.local_uow import VerifiedBlobSet
+@pytest.mark.parametrize("double_path,production,fields", PRODUCTION_SHAPES,
+                         ids=[shape[0] for shape in PRODUCTION_SHAPES])
+def test_the_fenced_fake_really_answers_each_declared_shape(double_path, production, fields):
+    """The declaration is only worth checking if the fake honours it.
 
-    fake = evidence_doubles.FakeFencedRepository(
-        evidence_doubles.decoded_state(
-            {"phase": "executing", "loop_active": True, "session_id": "portable"}
-        )
-    )
-    read = fake.read("portable")
-    assert {"state", "head_digest", "head"} <= set(vars(read))
-    assert read.head.generation == 0
-    begun = fake.begin(None)
-    assert {"base", "pending_lease", "request", "precondition"} <= set(vars(begun))
-    assert isinstance(begun.request.blobs, VerifiedBlobSet)
-    assert {"base_head_digest", "base_generation"} <= set(vars(begun.precondition))
+    Derived from ``PRODUCTION_SHAPES`` rather than restated, so a shape added
+    to the declaration is exercised here without a second edit.
+    """
+    value = _walk(_fake(), double_path)
+    for field in fields:
+        assert hasattr(value, field), f"{double_path} does not answer {field!r}"
 
 
-def test_the_in_memory_double_and_the_real_class_share_the_executor_surface():
-    """Both directions: the double defines it, and production still has it.
+def test_the_surface_list_equals_what_the_executor_reads():
+    """The list is derived from the executor's source, not remembered.
 
-    The executor reads private state off the repository.  A double missing
-    one attribute fails deep inside the executor with an AttributeError that
-    looks like a production bug; production dropping one leaves the double
-    asserting a contract that no longer exists.
+    Hard-coding a handful of names let ``_effect_transaction`` go missing
+    from both the list and the double: the executor reads it on the
+    legacy-publisher branch, ``__init__`` sets it, and a double built without
+    ``__init__`` raised AttributeError there.  Equality in both directions
+    means the executor cannot start reading a new attribute, nor stop reading
+    an old one, without this file changing in the same commit.
+    """
+    assert executor_surface_from_source() == frozenset(V5_EXECUTOR_SURFACE)
+
+
+def test_the_in_memory_double_defines_every_instance_attribute_the_executor_reads():
+    """Methods come with the class; instance state does not, so the double sets it.
+
+    Every non-callable name in the surface has to be instance state the
+    double assigns, and every assigned name has to exist on production.
     """
     from mission_persistence.legacy_v4 import V5CompatibilityRepository
 
     double = evidence_doubles.in_memory_v5_repository({"phase": "executing"})
     for name in V5_EXECUTOR_SURFACE:
         assert hasattr(double, name), f"double lacks {name}"
-    class_level = set(vars(V5CompatibilityRepository))
-    init_source = inspect.getsource(V5CompatibilityRepository.__init__)
-    for name in V5_EXECUTOR_SURFACE:
-        assert name in class_level or f"self.{name}" in init_source, (
-            f"production no longer defines {name}; drop it from the double too"
+    class_level = vars(V5CompatibilityRepository)
+    non_callable = [
+        name for name in V5_EXECUTOR_SURFACE
+        if not callable(class_level.get(name)) and not isinstance(class_level.get(name), property)
+    ]
+    for name in non_callable:
+        assert name in V5_EXECUTOR_INSTANCE_STATE, (
+            f"{name} is instance state the executor reads; the double must set it"
         )
-
-
-def test_the_surface_list_covers_what_the_executor_reads():
-    """The list is only useful if it is complete for the executor it guards."""
-    from mission_persistence.legacy_v4 import V5CompatibilityRepository
-
-    source = inspect.getsource(V5CompatibilityRepository.execute_evidence_transition_effects)
-    for name in ("_admitted", "read_snapshot", "load", "observed_base", "operation_replayed"):
-        assert f"self.{name}" in source
-        assert name in V5_EXECUTOR_SURFACE
+    init_source = inspect.getsource(V5CompatibilityRepository.__init__)
+    for name in V5_EXECUTOR_INSTANCE_STATE:
+        assert re.search(rf"\bself\.{re.escape(name)}\b", init_source), (
+            f"production __init__ no longer sets {name}; drop it from the double too"
+        )
+        assert hasattr(double, name), f"double lacks instance state {name}"
 
 
 def test_no_test_module_keeps_a_private_copy_of_the_doubles():

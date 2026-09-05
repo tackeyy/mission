@@ -1,6 +1,5 @@
 """#680: v5 verification record と evidence effect 境界の回帰テスト。"""
 
-from contextlib import contextmanager
 from dataclasses import replace
 import json
 
