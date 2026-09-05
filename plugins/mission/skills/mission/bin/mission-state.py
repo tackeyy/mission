@@ -1691,6 +1691,10 @@ def _enforce_session_lease_for_write(path: Path, data: dict) -> LeaseDecision | 
 
 
 _FENCED_CLI_EXPECTED_GATE_CODES = frozenset({
+    # #747: the commit CAS reports from two places.  Both are concurrency,
+    # not a defect; only the first is retried, but neither is an internal
+    # error.
+    "final-authority-cas-mismatch",
     "head-cas-mismatch",
     "lease-precondition-changed",
     "lease-rejected",

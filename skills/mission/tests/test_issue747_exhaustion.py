@@ -16,8 +16,15 @@ def _plan(publication_path="build/m.json"):
     )
 
 
-def _observe(tmp_path, *, moves_forever, existing=None):
-    """Drive the plan with a base that keeps moving, and report what is left."""
+def _observe(tmp_path, *, moves_forever, existing=None, where="begin", fail_first=0):
+    """Drive the plan with a base that keeps moving, and report what is left.
+
+    ``where`` picks the injection point.  ``"begin"`` fails before anything
+    is staged, so the residue assertions hold trivially there; ``"cas"``
+    fails inside commit at the real precondition CAS, after the stage is
+    written, which is the point the retry loop was written for.  ``fail_first``
+    limits the failures to the first N attempts so a run can go on to publish.
+    """
     import contextlib
     import os
     from pathlib import Path
@@ -41,13 +48,29 @@ def _observe(tmp_path, *, moves_forever, existing=None):
     attempts = []
     original_begin = local.begin
 
+    failures = []
+
+    def _should_fail():
+        failures.append(True)
+        return moves_forever or len(failures) <= fail_first
+
     def _begin(request):
         attempts.append(request.operation_id)
-        if moves_forever:
+        if where == "begin" and _should_fail():
             raise FencedCommitError(PRECONDITION_CAS_CODE, "base moved")
         return original_begin(request)
 
     local.begin = _begin
+    original_cas = local._current_cas
+    cas_codes = []
+
+    def _cas(prepared, *, code=PRECONDITION_CAS_CODE):
+        cas_codes.append(code)
+        if where == "cas" and code == PRECONDITION_CAS_CODE and _should_fail():
+            raise FencedCommitError(PRECONDITION_CAS_CODE, "base moved at the CAS")
+        return original_cas(prepared, code=code)
+
+    local._current_cas = _cas
 
     @contextlib.contextmanager
     def _never(effects, prepared):  # pragma: no cover - must not run
@@ -83,6 +106,7 @@ def _observe(tmp_path, *, moves_forever, existing=None):
         "head_after": local.read("test").head_digest,
         "head_before": head_before,
         "projection_residue": residue,
+        "cas_codes": cas_codes,
     }
 
 
@@ -118,4 +142,37 @@ def test_every_attempt_carries_the_same_operation(tmp_path):
     """Three attempts are one operation, not three."""
     observed = _observe(tmp_path, moves_forever=True)
     assert len(observed["attempts"]) == 3
+    assert len(set(observed["attempts"])) == 1, observed["attempts"]
+
+
+def test_a_base_that_never_settles_at_the_real_cas_publishes_nothing(tmp_path):
+    """The begin-time injection cannot see a stage that was already written.
+
+    Failing at the real precondition CAS, after the stage exists, is where
+    "publish 0 / head unmoved / no residue" is not trivially true.
+    """
+    from mission_application.artifact import EvidenceFailure
+    from mission_persistence.fenced_commit import PRECONDITION_CAS_CODE
+
+    observed = _observe(tmp_path, moves_forever=True, where="cas")
+    assert isinstance(observed["failure"], EvidenceFailure), observed["failure"]
+    assert observed["failure"].code == "base-retry-exhausted"
+    assert observed["cas_codes"].count(PRECONDITION_CAS_CODE) == 3, observed["cas_codes"]
+    assert not observed["exists"], "a publish survived an exhausted budget"
+    assert observed["head_after"] == observed["head_before"]
+    assert observed["projection_residue"] == []
+    assert len(set(observed["attempts"])) == 1, observed["attempts"]
+
+
+def test_a_base_that_moves_once_at_the_real_cas_is_retried_and_published(tmp_path):
+    """The success side: one move at the real CAS, then the second attempt lands."""
+    from mission_persistence.fenced_commit import PRECONDITION_CAS_CODE
+
+    observed = _observe(tmp_path, moves_forever=False, where="cas", fail_first=1)
+    assert observed["failure"] is None, observed["failure"]
+    assert observed["cas_codes"].count(PRECONDITION_CAS_CODE) == 2, observed["cas_codes"]
+    assert observed["exists"] and observed["content"], "the retry did not publish"
+    assert observed["head_after"] != observed["head_before"]
+    assert observed["projection_residue"] == []
+    assert len(observed["attempts"]) == 2
     assert len(set(observed["attempts"])) == 1, observed["attempts"]

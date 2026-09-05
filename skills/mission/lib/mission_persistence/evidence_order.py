@@ -9,6 +9,15 @@ from __future__ import annotations
 
 EVIDENCE_STEPS = ("read", "prepare", "begin", "decide", "commit")
 BASE_MOVED_DETAIL = "the base moved between the read and the admission"
+REPLAY_STOP_STEP = "begin"
+
+
+class EvidenceOrderError(Exception):
+    """Refuse one evidence run whose steps did not happen in order."""
+
+    def __init__(self, detail: str):
+        super().__init__(detail)
+        self.detail = detail
 
 
 def is_base_moved(error) -> bool:
@@ -19,15 +28,6 @@ def is_base_moved(error) -> bool:
     of order again.
     """
     return isinstance(error, EvidenceOrderError) and BASE_MOVED_DETAIL in error.detail
-REPLAY_STOP_STEP = "begin"
-
-
-class EvidenceOrderError(Exception):
-    """Refuse one evidence run whose steps did not happen in order."""
-
-    def __init__(self, detail: str):
-        super().__init__(detail)
-        self.detail = detail
 
 
 def read_only_snapshot(repository: object, session_id: str):
