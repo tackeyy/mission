@@ -294,7 +294,7 @@ from mission_application.specialist_registry_discovery import (  # noqa: E402
 from mission_application.guard_timeout import (  # noqa: E402
     DEADLINE_ENV_VAR,
     bounded_by_guard_timeout,
-    resolve_deadline,
+    deadline_token,
 )
 from mission_application.runtime_guard import (  # noqa: E402
     CleanupStaleExecuteCommand,
@@ -9171,6 +9171,10 @@ def _guard_decision_payload(decision) -> dict:
         },
         "reply": reply_payload,
         "shell_text": shell_text,
+        # The hook copies this string into the environment of the calls that follow, so
+        # the whole loop shares one deadline (#742 D3'). It cannot compute the value
+        # itself: #615 rejects arithmetic and clock reads in the hook.
+        "guard_deadline": deadline_token(),
     }
 
 
@@ -9367,11 +9371,7 @@ def cmd_stop_verdict(args):
                 decision = decide_stop_guard(_guard_root_request(hook_input))
             else:
                 decision = _guard_receipt_decision(args, hook_input)
-            payload = _guard_decision_payload(decision)
-            # The hook copies this string into the environment of the calls that
-            # follow, so the whole loop shares one deadline (#742 D3').
-            payload["guard_deadline"] = "{:.3f}".format(resolve_deadline())
-            print(json.dumps(payload, ensure_ascii=False))
+            print(json.dumps(_guard_decision_payload(decision), ensure_ascii=False))
             return
         except Exception as exc:
             print(json.dumps({

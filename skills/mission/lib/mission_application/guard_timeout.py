@@ -142,6 +142,15 @@ def resolve_deadline(env: Optional[dict] = None, *, now: Optional[float] = None)
     return current + resolve_guard_timeout(source.get(TIMEOUT_ENV_VAR))
 
 
+def deadline_token(env: Optional[dict] = None, *, now: Optional[float] = None) -> str:
+    """The deadline as the string the hook copies into the environment.
+
+    Formatting lives here rather than in the adapter: the adapter is held to a thin
+    dispatch shape (#626), and a `.format()` call there counts against it.
+    """
+    return "{:.3f}".format(resolve_deadline(env, now=now))
+
+
 def remaining_budget(deadline: float, *, now: Optional[float] = None) -> float:
     """Seconds left before the hook's deadline. Zero or less means exhausted."""
     return deadline - (time.time() if now is None else now)

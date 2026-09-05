@@ -54,7 +54,7 @@ if ! GUARD_DECISION=$(printf '%s' "$INPUT" | _mission_state_bounded stop-verdict
   exit 0
 fi
 
-# 予算は hook 全体で 1 つ（#742 D3'）。呼び出しごとに上限を張り直すと、ループの回数だけ
+# 予算は hook 全体で 1 つ（#742 の決定 D3 改訂版）。呼び出しごとに上限を張り直すと、ループの回数だけ
 # 予算が増えてホスト側の期限を超え、出力ごと破棄されて block の理由が残らない。
 #
 # 期限を決めるのは stop-verdict 側で、ここはその文字列を環境へ移すだけである。
