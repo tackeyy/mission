@@ -10,8 +10,10 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Callable, ContextManager, Iterable
 
+from mission_application.artifact import EvidenceFailure
 from mission_application.evidence_publication import EvidencePublicationError
 from mission_persistence.evidence_order import (
+    BASE_MOVED_DETAIL,
     EvidenceOrderError,
     base_agrees,
     blob_set_from_effects,
@@ -1203,8 +1205,9 @@ class V5CompatibilityRepository:
 
         # The operation identity is decided once, by the plan.  Leaving it to
         # `_request` would mint a fresh id per attempt and turn one operation
-        # into three.
-        self._operation_id = plan.resolved_operation_id()
+        # into three.  It is restored afterwards: the id belongs to the plan,
+        # and leaving it on the repository made the next operation inherit it.
+        previous_operation_id = self._operation_id
 
         def _attempt(_number):
             from mission_application.evidence import prepare_context_manifest
@@ -1222,7 +1225,15 @@ class V5CompatibilityRepository:
                 )
             )
 
-        return run_with_base_retry(plan, _attempt)
+        self._operation_id = plan.resolved_operation_id()
+        try:
+            return run_with_base_retry(plan, _attempt)
+        except EvidencePublicationError as exc:
+            # The CLI reports `EvidenceFailure` through a controlled exit;
+            # anything else surfaces as a crash.  Exhaustion is a refusal.
+            raise EvidenceFailure(exc.code, exc.detail) from exc
+        finally:
+            self._operation_id = previous_operation_id
 
     def execute_evidence_transition_effects(
         self,
@@ -1288,8 +1299,7 @@ class V5CompatibilityRepository:
                 # moved.  Publishing it would record content for a state nobody
                 # observed together.
                 raise EvidenceOrderError(
-                    "the base moved between the read and the admission; "
-                    "nothing was published"
+                    BASE_MOVED_DETAIL + "; nothing was published"
                 )
             if self.operation_replayed:
                 frozen = freeze_json_value(current)

@@ -87,10 +87,12 @@ def _observe(tmp_path, *, moves_forever, existing=None):
 
 
 def test_a_base_that_never_settles_publishes_nothing(tmp_path):
-    from mission_application.evidence_publication import EvidencePublicationError
+    # The entry point converts exhaustion into the failure the CLI reports
+    # through a controlled exit, so that is the type callers see.
+    from mission_application.artifact import EvidenceFailure
 
     observed = _observe(tmp_path, moves_forever=True)
-    assert isinstance(observed["failure"], EvidencePublicationError)
+    assert isinstance(observed["failure"], EvidenceFailure), observed["failure"]
     assert observed["failure"].code == "base-retry-exhausted"
     assert not observed["exists"], "a publish survived an exhausted budget"
 

@@ -11,6 +11,7 @@ from mission_application.evidence_publication import (
     EvidencePublicationError,
     next_attempt,
 )
+from mission_persistence.evidence_order import EvidenceOrderError, is_base_moved
 from mission_persistence.fenced_commit import FencedCommitError, is_retryable_cas_code
 
 
@@ -28,8 +29,16 @@ def run_with_base_retry(plan, attempt):
     while True:
         try:
             return attempt(number)
-        except FencedCommitError as exc:
-            if not is_retryable_cas_code(getattr(exc, "code", None)):
+        except (FencedCommitError, EvidenceOrderError) as exc:
+            # Two failures mean the base moved: the CAS at admission, and the
+            # check #746 added between the read and the admission.  The second
+            # is the one this loop was written for, so leaving it out would
+            # end every run on its first attempt.
+            moved = is_base_moved(exc) or (
+                isinstance(exc, FencedCommitError)
+                and is_retryable_cas_code(getattr(exc, "code", None))
+            )
+            if not moved:
                 raise
             if number >= MAX_BASE_RETRIES:
                 # Ending here publishes nothing: the caller sees that the base

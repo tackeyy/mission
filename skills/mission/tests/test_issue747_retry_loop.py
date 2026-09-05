@@ -123,3 +123,41 @@ def test_the_plan_identity_is_the_same_on_every_attempt():
 
     run_with_base_retry(plan, _attempt)
     assert len(set(seen)) == 1, seen
+
+
+def test_a_base_move_between_read_and_admission_is_retried():
+    """The move this stage was built for is the one at the admission.
+
+    #746 raises `EvidenceOrderError` when the base it read is not the base it
+    admitted.  Leaving that out of the retryable set means the only move the
+    loop was written for ends the run on the first attempt.
+    """
+    from mission_persistence.evidence_order import EvidenceOrderError
+    from mission_persistence.retry_loop import run_with_base_retry
+
+    attempts = []
+
+    def _attempt(number):
+        attempts.append(number)
+        if number < 3:
+            raise EvidenceOrderError("the base moved between the read and the admission")
+        return "committed"
+
+    assert run_with_base_retry(_plan(), _attempt) == "committed"
+    assert attempts == [1, 2, 3]
+
+
+def test_another_order_error_is_not_retried():
+    """Only the base moving earns another attempt, not any ordering failure."""
+    from mission_persistence.evidence_order import EvidenceOrderError
+    from mission_persistence.retry_loop import run_with_base_retry
+
+    attempts = []
+
+    def _attempt(number):
+        attempts.append(number)
+        raise EvidenceOrderError("expected 'prepare' but 'commit' was entered")
+
+    with pytest.raises(EvidenceOrderError):
+        run_with_base_retry(_plan(), _attempt)
+    assert attempts == [1]

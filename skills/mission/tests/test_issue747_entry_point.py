@@ -94,3 +94,57 @@ def test_the_entry_point_uses_the_shared_retry_loop():
     source = Path(module.__file__).read_text(encoding="utf-8")
     assert "run_with_base_retry(" in source
     assert "MAX_BASE_RETRIES" not in source, "the budget belongs to one module"
+
+
+def test_the_plan_does_not_leak_its_identity_into_the_repository(tmp_path):
+    """The plan's operation id belongs to the plan, not to the repository.
+
+    Writing it onto the instance left it there afterwards, so the next
+    operation on the same repository inherited it and collided.
+    """
+    from mission_application.evidence import prepare_progress_update
+
+    repository = _repository(tmp_path)
+    repository.execute_retry_safe_evidence_plan(_plan())
+
+    _prepared, execution = repository.execute_evidence_transition_effects(
+        lambda state: prepare_progress_update(
+            state,
+            now="2026-01-01T00:00:01Z",
+            total=1,
+            completed=0,
+            batch_size=1,
+            last_unit=None,
+            artifact_path=None,
+            iteration=1,
+            evidence_path="progress.json",
+        )
+    )
+    assert execution.decision is None or execution.decision.accepted, execution.decision
+
+
+def test_an_exhausted_budget_reaches_the_cli_as_a_rejection(tmp_path):
+    """Exhaustion is a refusal, not an internal error.
+
+    `EvidencePublicationError` never reaches the CLI's controlled exit, so a
+    caller saw a crash instead of "the base kept moving".
+    """
+    from mission_application.artifact import EvidenceFailure
+    from mission_persistence.fenced_commit import (
+        PRECONDITION_CAS_CODE,
+        FencedCommitError,
+    )
+
+    repository = _repository(tmp_path)
+    original = repository._repository.begin
+
+    def _always_moves(request):
+        raise FencedCommitError(PRECONDITION_CAS_CODE, "base moved")
+
+    repository._repository.begin = _always_moves
+    try:
+        with pytest.raises(EvidenceFailure) as excinfo:
+            repository.execute_retry_safe_evidence_plan(_plan())
+    finally:
+        repository._repository.begin = original
+    assert excinfo.value.code == "base-retry-exhausted"

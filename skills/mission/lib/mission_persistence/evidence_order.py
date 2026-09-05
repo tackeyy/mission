@@ -8,6 +8,17 @@
 from __future__ import annotations
 
 EVIDENCE_STEPS = ("read", "prepare", "begin", "decide", "commit")
+BASE_MOVED_DETAIL = "the base moved between the read and the admission"
+
+
+def is_base_moved(error) -> bool:
+    """Say whether one ordering failure is the base moving under the run.
+
+    Only that one is worth another attempt.  Every other ordering failure
+    means the steps ran out of order, and repeating them would run them out
+    of order again.
+    """
+    return isinstance(error, EvidenceOrderError) and BASE_MOVED_DETAIL in error.detail
 REPLAY_STOP_STEP = "begin"
 
 
