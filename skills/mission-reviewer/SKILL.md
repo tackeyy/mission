@@ -2,6 +2,7 @@
 name: mission-reviewer
 description: /mission オーケストレーターのサブスキル。指定された観点から成果物をピアレビューし、5段階で採点+具体的指摘を返す。
 context: fork
+model: opus
 user-invocable: false
 allowed-tools: Read, Grep, Glob, Bash(git diff:*), Bash(git log:*), Bash(git status:*), Bash(git show:*), Bash(pytest:*), Bash(python3 -m pytest:*), Bash(npm test:*)
 ---
