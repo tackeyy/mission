@@ -449,6 +449,7 @@ def test_same_base_race_allows_first_merge_and_stops_second_at_final_fetch():
                 ConcurrentOperations(role),
                 lambda _message: None,
                 expected_changeset_digest=FAKE_DIGEST,
+                claimed_digest_source="checker-comment",
             )
             return "merged"
         except gate.IntegrationGateError as exc:
@@ -536,6 +537,7 @@ def test_public_gate_command_maps_typed_failure_to_exit_two(monkeypatch):
                 expected_head_sha=None,
                 expected_base_sha=None,
                 reviewed_changeset_digest=None,
+                claimed_digest_source=None,
             )
         )
 
@@ -575,7 +577,11 @@ def test_logs_include_test_scope_and_both_base_observations():
     messages = []
 
     result = gate.gate_and_merge(
-        "665", operations, messages.append, expected_changeset_digest=FAKE_DIGEST
+        "665",
+        operations,
+        messages.append,
+        expected_changeset_digest=FAKE_DIGEST,
+        claimed_digest_source="checker-comment",
     )
 
     output = "\n".join(messages)
@@ -599,6 +605,7 @@ def test_non_numeric_pr_reference_is_rejected_before_repository_effects():
             operations,
             lambda _message: None,
             expected_changeset_digest=FAKE_DIGEST,
+            claimed_digest_source="checker-comment",
         )
 
     assert captured.value.reason == "invalid-pr-ref"
@@ -618,6 +625,7 @@ def test_queue_accepted_base_is_rejected_if_main_moved_before_gate():
             expected_head_sha=HEAD_SHA,
             expected_base_sha=OLD_BASE,
             expected_changeset_digest=FAKE_DIGEST,
+            claimed_digest_source="checker-comment",
         )
 
     assert captured.value.reason == "accepted-base-moved"
@@ -639,7 +647,11 @@ def test_pr_base_and_state_are_rechecked_before_merge():
 
     with pytest.raises(gate.IntegrationGateError) as captured:
         gate.gate_and_merge(
-            "665", operations, lambda _message: None, expected_changeset_digest=FAKE_DIGEST
+            "665",
+            operations,
+            lambda _message: None,
+            expected_changeset_digest=FAKE_DIGEST,
+            claimed_digest_source="checker-comment",
         )
 
     assert captured.value.reason == "pull-request-changed"
@@ -661,7 +673,11 @@ def test_merge_readback_must_confirm_main_and_expected_head():
 
     with pytest.raises(gate.IntegrationGateError) as captured:
         gate.gate_and_merge(
-            "665", operations, lambda _message: None, expected_changeset_digest=FAKE_DIGEST
+            "665",
+            operations,
+            lambda _message: None,
+            expected_changeset_digest=FAKE_DIGEST,
+            claimed_digest_source="checker-comment",
         )
 
     assert captured.value.reason == "merge-readback-failed"

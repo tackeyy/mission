@@ -99,6 +99,7 @@ def run(operations, logs=None):
         ),
         (logs.append if logs is not None else (lambda _m: None)),
         expected_changeset_digest=FAKE_DIGEST,
+        claimed_digest_source="checker-comment",
     )
 
 

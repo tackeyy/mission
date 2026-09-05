@@ -138,6 +138,7 @@ def run(operations):
         ),
         (lambda _m: None),
         expected_changeset_digest=FAKE_DIGEST,
+        claimed_digest_source="checker-comment",
     )
 
 
