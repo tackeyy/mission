@@ -120,7 +120,7 @@ activity segment は観測専用で、reviewer 数・threshold・findings eviden
 
 Reviewer 数は Simple=1、Standard=2、Complex=2、Critical=3 (#266: シグナルなし Complex は独立2名で agreement 成立。不可逆・security シグナルで full=3 へエスカレート)。Claude Code では Reviewer N 名を**必ず単一メッセージ内で並列起動する** (portfolio-v4 実測: 直列起動は Standard 1 iteration あたり約 2-3 分を浪費し、3/3 run で直列だった #338)。直列起動は規律違反として扱う。Codex は順次でよい。観点Dは採点させず、計画指示明瞭度の改善を Critic の実行計画に反映する。**並列観測 (#282)**: reviewer spawn 直前と全返却後の時刻 (ISO 8601) を控え、`aggregate-reviews` に `--reviewer-window <perspective>=<start>..<end>` を各 reviewer 分渡す。`parallel_execution: false` の WARN が出たら、次 iteration は必ず単一メッセージ並列起動に戻す (観測のみ・gate 不変)。
 
-**Subskill の model (#751)**: `mission-reviewer` / `mission-planner` / `mission-critic` は frontmatter の `model: opus` を既定とする。Claude Code 2.1.251 以降の解決順は per-call の `model` > skill frontmatter の `model` > `CLAUDE_CODE_SUBAGENT_MODEL` > 親モデルで、省略時は frontmatter が効く（frontmatter も無いと env の既定へ落ちる。2026-09-05 に env `sonnet` の環境で Sonnet 5 を実測）。review_tier が full のときは orchestrator が per-call で `fable` へ上書きしてよい。実際に動いたモデルは子 transcript の `.message.model` が正であり、reviewer の自己申告で代替しない。
+**Subskill の model (#751)**: `mission-reviewer` / `mission-planner` / `mission-critic` は frontmatter の `model: opus` を既定とする。Claude Code 2.1.251 以降の解決順は per-call の `model` > skill frontmatter の `model` > `CLAUDE_CODE_SUBAGENT_MODEL` > 親モデルで、省略時は frontmatter が効く（frontmatter も無いと env の既定へ落ちる。2026-09-05 に env `sonnet` の環境で Sonnet 5 を実測）。Skill tool には per-call の `model` 引数が無いため、subskill のモデルは frontmatter が事実上の上限であり、tier ごとの上書きは行わない（上げたいなら frontmatter を変える）。実際に動いたモデルは子 transcript の `.message.model` が正であり、reviewer の自己申告で代替しない。
 
 Reviewer が 2 名以上の場合、`aggregate-reviews` (`review-finalize` 経由を含む) は全 perspective の `--reviewer-window` 報告を必須とし、不足時は exit 2 とする (#350)。
 
