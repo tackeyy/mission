@@ -27,16 +27,14 @@ def _walk(root, path):
     """Follow ``FakeFencedRepository.begin().precondition`` on a live object."""
     value = root
     for token in path.split(".")[1:]:
-        if token.endswith("()"):
-            name = token[:-2]
-            arity = len(inspect.signature(getattr(value, name)).parameters)
-            args = (None,) * arity if name != "_stage_persistence" else ()
-            if name == "_stage_persistence":
-                value = getattr(value, name)(None, state_bytes=b"{}", effects=())
-            else:
-                value = getattr(value, name)(*args)
-        else:
+        if not token.endswith("()"):
             value = getattr(value, token)
+            continue
+        method = getattr(value, token[:-2])
+        if token == "_stage_persistence()":
+            value = method(None, state_bytes=b"{}", effects=())
+        else:
+            value = method(*(None,) * len(inspect.signature(method).parameters))
     return value
 
 
@@ -75,6 +73,16 @@ def test_the_fenced_fake_really_answers_each_declared_shape(double_path, product
         assert hasattr(value, field), f"{double_path} does not answer {field!r}"
 
 
+def test_the_fenced_fake_answers_the_types_the_executor_relies_on():
+    """`hasattr` alone would accept a string where a blob set is expected."""
+    from mission_persistence.local_uow import VerifiedBlobSet
+
+    fake = _fake()
+    assert fake.read("portable").head.generation == 0
+    assert isinstance(fake.begin(None).request.blobs, VerifiedBlobSet)
+    assert fake.begin(None).precondition.base_generation == 0
+
+
 def test_the_surface_list_equals_what_the_executor_reads():
     """The list is derived from the executor's source, not remembered.
 
@@ -99,10 +107,14 @@ def test_the_in_memory_double_defines_every_instance_attribute_the_executor_read
     double = evidence_doubles.in_memory_v5_repository({"phase": "executing"})
     for name in V5_EXECUTOR_SURFACE:
         assert hasattr(double, name), f"double lacks {name}"
-    class_level = vars(V5CompatibilityRepository)
+    # Resolve through the class so descriptors (staticmethod, property) are
+    # seen as what they produce; the raw entry in ``vars`` is not callable for
+    # a staticmethod before Python 3.10, and the project still declares 3.9.
+    raw = vars(V5CompatibilityRepository)
     non_callable = [
         name for name in V5_EXECUTOR_SURFACE
-        if not callable(class_level.get(name)) and not isinstance(class_level.get(name), property)
+        if not isinstance(raw.get(name), property)
+        and not callable(getattr(V5CompatibilityRepository, name, None))
     ]
     for name in non_callable:
         assert name in V5_EXECUTOR_INSTANCE_STATE, (
