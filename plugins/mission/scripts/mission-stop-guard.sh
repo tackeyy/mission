@@ -67,6 +67,11 @@ fi
 MISSION_GUARD_DEADLINE=$(printf '%s' "$GUARD_DECISION" | jq -r '.guard_deadline // empty' 2>/dev/null || true)
 export MISSION_GUARD_DEADLINE
 
+# ここから先は継続呼び出しである。期限が失われたまま次を走らせると、呼び出しごとに
+# 予算が張り直されてホスト側の期限を超える。**判定の中身から導出しない**: 導出すると、
+# 期限の取り出しが失敗したときにフラグも一緒に欠落し、守るべき場面で守れない。
+export MISSION_GUARD_CONTINUATION=1
+
 while :; do
   if ! COMMAND_KIND=$(printf '%s' "$GUARD_DECISION" | jq -er '.command.kind'); then
     printf '%s\n' '{"decision":"block","reason":"mission Stop guard decision is invalid","outcome_kind":"expected-gate"}'

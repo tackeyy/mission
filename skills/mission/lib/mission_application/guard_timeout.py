@@ -16,6 +16,7 @@ other value falls back to the default rather than becoming a failure of its own.
 from __future__ import annotations
 
 import functools
+import math
 import os
 import signal
 import time
@@ -120,6 +121,11 @@ TIMEOUT_ENV_VAR = "MISSION_STATE_TIMEOUT"
 # the environment of the calls that follow -- copying, not computing.
 DEADLINE_ENV_VAR = "MISSION_GUARD_DEADLINE"
 
+# Set unconditionally by the hook once the loop starts -- never derived from the verdict
+# JSON. Deriving it would reproduce the very failure this flag guards against: if the
+# extraction fails, the deadline and the flag would go missing together.
+CONTINUATION_ENV_VAR = "MISSION_GUARD_CONTINUATION"
+
 
 def resolve_deadline(env: Optional[dict] = None, *, now: Optional[float] = None) -> float:
     """Return the absolute deadline for the whole hook, establishing it if needed.
@@ -129,17 +135,24 @@ def resolve_deadline(env: Optional[dict] = None, *, now: Optional[float] = None)
     """
     source = os.environ if env is None else env
     current = time.time() if now is None else now
+    budget = resolve_guard_timeout(source.get(TIMEOUT_ENV_VAR))
     raw = source.get(DEADLINE_ENV_VAR)
     if raw:
         try:
             carried = float(raw)
         except (TypeError, ValueError):
             carried = None
-        # A deadline further out than a fresh budget would be an escalation, not a
-        # carry-over: reject it rather than honouring whatever the environment held.
-        if carried is not None and carried <= current + DEFAULT_GUARD_TIMEOUT_SECONDS:
+        # Compare against the *configured* budget, not the default. Clamping to the
+        # default would let `MISSION_STATE_TIMEOUT=1` be overridden by a 7-second
+        # deadline handed in through the environment.
+        if carried is not None and math.isfinite(carried) and carried <= current + budget:
             return carried
-    return current + resolve_guard_timeout(source.get(TIMEOUT_ENV_VAR))
+    # The deadline could not be used. On a continuation that means the budget was lost
+    # mid-flight, and issuing a fresh one would re-arm it on every iteration -- three
+    # calls would cost three budgets and overrun the host's own timeout. Fail closed.
+    if source.get(CONTINUATION_ENV_VAR):
+        raise GuardTimeout("stop guard budget was not carried into the continuation")
+    return current + budget
 
 
 def deadline_token(env: Optional[dict] = None, *, now: Optional[float] = None) -> str:

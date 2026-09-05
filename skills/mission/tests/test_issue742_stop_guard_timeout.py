@@ -30,6 +30,7 @@ STATE_PY = REPO_ROOT / "skills" / "mission" / "bin" / "mission-state.py"
 sys.path.insert(0, str(LIB_ROOT))
 
 from mission_application.guard_timeout import (  # noqa: E402
+    CONTINUATION_ENV_VAR,
     DEADLINE_ENV_VAR,
     DEFAULT_GUARD_TIMEOUT_SECONDS,
     GuardTimeout,
@@ -446,3 +447,77 @@ class TestSideEffectCommandsAreInsideTheBudget:
         source = STATE_PY.read_text(encoding="utf-8")
         marker = "@bounded_by_guard_timeout\ndef {}(args):".format(command)
         assert marker in source, "{} is outside the budget".format(command)
+
+
+class TestAContinuationCannotReissueTheBudget:
+    """A lost deadline must not be replaced by a fresh one on a continuation.
+
+    The hook loops three times in the normal case. Re-issuing the budget whenever the
+    deadline fails to arrive costs three budgets, which overruns the host's own timeout
+    -- and the host discards the output, so no block is ever seen.
+
+    Both directions are fixed here on purpose: asserting only that a missing deadline
+    blocks would also pass for an implementation that blocks unconditionally.
+    """
+
+    NOW = 1_000_000.0
+
+    def test_the_first_call_establishes_a_budget(self):
+        """Must still work: no flag, no deadline, so this is the start of the hook."""
+        assert resolve_deadline({}, now=self.NOW) == pytest.approx(
+            self.NOW + DEFAULT_GUARD_TIMEOUT_SECONDS
+        )
+
+    def test_the_first_call_honours_a_usable_deadline(self):
+        env = {DEADLINE_ENV_VAR: "{:.3f}".format(self.NOW + 3)}
+        assert resolve_deadline(env, now=self.NOW) == pytest.approx(self.NOW + 3)
+
+    def test_a_continuation_honours_a_usable_deadline(self):
+        """The common path: the flag is set and the deadline arrived intact."""
+        env = {
+            CONTINUATION_ENV_VAR: "1",
+            DEADLINE_ENV_VAR: "{:.3f}".format(self.NOW + 3),
+        }
+        assert resolve_deadline(env, now=self.NOW) == pytest.approx(self.NOW + 3)
+
+    @pytest.mark.parametrize(
+        "carried",
+        [None, "", "   ", "not-a-number", "nan", "inf", "-inf"],
+    )
+    def test_a_continuation_without_a_usable_deadline_fails_closed(self, carried):
+        env = {CONTINUATION_ENV_VAR: "1"}
+        if carried is not None:
+            env[DEADLINE_ENV_VAR] = carried
+        with pytest.raises(GuardTimeout):
+            resolve_deadline(env, now=self.NOW)
+
+    def test_a_continuation_rejects_a_deadline_beyond_the_budget(self):
+        """Rejected, and on a continuation that means fail closed rather than re-issue."""
+        env = {
+            CONTINUATION_ENV_VAR: "1",
+            DEADLINE_ENV_VAR: "{:.3f}".format(self.NOW + 600),
+        }
+        with pytest.raises(GuardTimeout):
+            resolve_deadline(env, now=self.NOW)
+
+    @pytest.mark.parametrize("configured,carried", [("1", 7), ("2", 7), ("3", 5)])
+    def test_the_clamp_uses_the_configured_budget_not_the_default(
+        self, configured, carried
+    ):
+        """Clamping to the default lets a small configured budget be overridden."""
+        env = {
+            "MISSION_STATE_TIMEOUT": configured,
+            DEADLINE_ENV_VAR: "{:.3f}".format(self.NOW + carried),
+        }
+        assert resolve_deadline(env, now=self.NOW) == pytest.approx(
+            self.NOW + int(configured)
+        )
+
+    def test_the_hook_sets_the_flag_without_reading_the_verdict(self):
+        """Deriving the flag from the JSON would lose it exactly when it is needed."""
+        source = GUARD_SH.read_text(encoding="utf-8")
+        line = [l for l in source.splitlines() if "MISSION_GUARD_CONTINUATION" in l
+                and "export" in l]
+        assert line, "the hook must set the continuation flag"
+        assert "jq" not in line[0], "the flag must not be derived from the verdict"
+        assert "=1" in line[0], "set unconditionally, not from a computed value"
