@@ -291,6 +291,11 @@ from mission_application.specialist_registry_discovery import (  # noqa: E402
     provider_id as _provider_id,
     safe_provider_reference as _safe_provider_reference,
 )
+from mission_application.guard_timeout import (  # noqa: E402
+    DEADLINE_ENV_VAR,
+    bounded_by_guard_timeout,
+    deadline_token,
+)
 from mission_application.runtime_guard import (  # noqa: E402
     CleanupStaleExecuteCommand,
     FreshnessEvidence,
@@ -8139,6 +8144,7 @@ class _LegacyStopObservationRepository:
         _write_stop_guard_state(self.store, session_id, document, expected_identity)
 
 
+@bounded_by_guard_timeout
 def cmd_stop_guard_observe(args):
     """Adapt one closed block observation to the A5 use case."""
     try:
@@ -9165,6 +9171,10 @@ def _guard_decision_payload(decision) -> dict:
         },
         "reply": reply_payload,
         "shell_text": shell_text,
+        # The hook copies this string into the environment of the calls that follow, so
+        # the whole loop shares one deadline (#742 D3'). It cannot compute the value
+        # itself: #615 rejects arithmetic and clock reads in the hook.
+        "guard_deadline": deadline_token(),
     }
 
 
@@ -9343,8 +9353,15 @@ def _guard_receipt_decision(args, hook_input: object) -> GuardDecision:
     ))
 
 
+@bounded_by_guard_timeout
 def cmd_stop_verdict(args):
-    """Resolve one state or one hook root into the typed Stop decision."""
+    """Resolve one state or one hook root into the typed Stop decision.
+
+    The decorator applies the guard's own limit (#742 D2), which covers hosts that
+    have neither `timeout` nor `perl`. On a platform without `SIGALRM` that inner
+    limit does not apply, and the shell adapter's external limit -- or, failing that,
+    the host's own hook timeout -- is what remains.
+    """
     if args.hook_input is not None:
         try:
             if args.hook_input != "-":
@@ -14473,6 +14490,7 @@ def _supersede_reviews_locked(args, cwd: Path):
     print(result.rendered)
 
 
+@bounded_by_guard_timeout
 def cmd_mark_halt(args):
     cwd = Path.cwd()
     sf = resolve_state_file(cwd)
@@ -15054,6 +15072,7 @@ def _expired_lease_without_heartbeat(data: dict) -> tuple[bool, str]:
     return True, "expired-session-lease"
 
 
+@bounded_by_guard_timeout
 def cmd_cleanup_stale(args):
     request = CleanupStaleRequest(
         root=getattr(args, "root", None),
