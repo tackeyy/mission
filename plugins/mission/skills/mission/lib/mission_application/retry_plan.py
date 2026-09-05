@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -90,10 +91,14 @@ class ContextManifestRetryPlan:
             "publication_path",
             canonical_publication_path(self.publication_path),
         )
+        # Minted once per plan, never derived from the intent: two callers who
+        # ask for the same manifest in the same second are two operations, as
+        # they were on the callback route, which minted a fresh id per call.
+        # What the attempts of *this* plan share is this one value.
         object.__setattr__(
             self,
             "_resolved_operation_id",
-            self.operation_id or "context-manifest:" + self.semantic_intent()[7:39],
+            self.operation_id or "context-manifest:" + secrets.token_hex(16),
         )
 
     @classmethod
@@ -154,5 +159,10 @@ class ContextManifestRetryPlan:
         ).hexdigest()
 
     def resolved_operation_id(self) -> str:
-        """Return the identifier every attempt of this plan shares."""
+        """Return the identifier every attempt of this plan shares.
+
+        It is fixed when the plan is built, so the executor cannot mint one
+        per attempt; and it is not part of the semantic intent, so two plans
+        with the same intent stay two operations.
+        """
         return self._resolved_operation_id

@@ -85,6 +85,24 @@ def test_the_operation_id_is_decided_once():
     assert plan.resolved_operation_id() == plan.resolved_operation_id()
 
 
+def test_two_independent_requests_are_two_operations():
+    """The old route minted a fresh id per call; the plan route must too.
+
+    Deriving the default id from the semantic intent made two callers who
+    asked for the same manifest in the same second one operation: the second
+    replayed the first, or failed with `operation-intent-collision`.  Only
+    the *attempts* of one plan share an id, never two plans.
+    """
+    from mission_application.retry_plan import ContextManifestRetryPlan
+    from mission_kernel.identifiers import is_token128
+
+    first = ContextManifestRetryPlan(**_plan_fields())
+    second = ContextManifestRetryPlan(**_plan_fields())
+    assert first.semantic_intent() == second.semantic_intent()
+    assert first.resolved_operation_id() != second.resolved_operation_id()
+    assert is_token128(first.resolved_operation_id())
+
+
 def test_a_caller_operation_id_is_kept():
     from mission_application.retry_plan import ContextManifestRetryPlan
 
