@@ -18,6 +18,7 @@ from typing import Callable, Optional, Union
 
 from mission_kernel import decode_mission_state, decode_snapshot, project_legacy_document
 from mission_kernel.codec_v5 import encode_v5_state
+from mission_kernel.identifiers import TOKEN128_RE
 from mission_kernel.json_codec import (
     STATE_LIMIT,
     decode_json_object,
@@ -82,7 +83,7 @@ MAX_OPERATION_BYTES = 4 * 1024
 MAX_AUDIT_EVENT_TYPES = MAX_BLOB_COUNT
 DEFAULT_LEASE_TTL_SECONDS = 15 * 60
 
-_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+_TOKEN_RE = TOKEN128_RE
 _SESSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _TRANSACTION_RE = re.compile(r"[0-9a-f]{32}")

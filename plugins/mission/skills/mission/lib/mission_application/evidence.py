@@ -406,16 +406,14 @@ def run_context_manifest(
 
         # Building the plan normalises the path, so a refusal now happens here
         # rather than inside prepare.  It has to reach the caller as the same
-        # failure it always was, or the CLI stops reporting it as a rejection.
+        # failure it always was, in the same order the callback route would
+        # have found it, or the CLI stops reporting it as a rejection.
         try:
-            plan = ContextManifestRetryPlan(
+            plan = ContextManifestRetryPlan.for_request(
                 now=request.now,
                 iteration=request.iteration,
-                publication_path=relative_publication_path(
-                    request.project_root, request.publication_path
-                )
-                if request.project_root is not None
-                else request.publication_path,
+                publication_path=request.publication_path,
+                project_root=request.project_root,
             )
         except EvidencePublicationError as exc:
             # Keep the refusal's name, not only its type: callers branch on

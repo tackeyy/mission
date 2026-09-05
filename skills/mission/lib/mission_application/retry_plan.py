@@ -14,9 +14,27 @@ from typing import Optional
 from mission_application.evidence_publication import (
     EvidencePublicationError,
     canonical_publication_path,
+    relative_publication_path,
 )
+from mission_kernel.evidence import EvidenceRuleError, context_output_path_text
+from mission_kernel.identifiers import is_token128
 
 RETRY_PLAN_SCHEMA = "mission-retry-plan/1"
+
+
+def _refuse_unless_timestamp(now: object) -> None:
+    if not isinstance(now, str) or not now:
+        raise EvidencePublicationError(
+            "timestamp-invalid", "plan requires a non-empty timestamp"
+        )
+
+
+def _refuse_unless_iteration(iteration: object) -> None:
+    if iteration is not None and (type(iteration) is not int or iteration < 1):
+        raise EvidencePublicationError(
+            "context-iteration-invalid",
+            "plan iteration must be a positive integer or None",
+        )
 
 
 @dataclass(frozen=True)
@@ -43,23 +61,15 @@ class ContextManifestRetryPlan:
         # An unchecked value escapes later as a TypeError, which no caller
         # handles: the callback route reports refusals as EvidenceFailure, and
         # a crash is not that.
-        if not isinstance(self.now, str) or not self.now:
-            raise EvidencePublicationError(
-                "timestamp-invalid", "plan requires a non-empty timestamp"
-            )
-        if self.iteration is not None and (
-            type(self.iteration) is not int or self.iteration < 1
-        ):
-            raise EvidencePublicationError(
-                "context-iteration-invalid",
-                "plan iteration must be a positive integer or None",
-            )
-        if self.operation_id is not None and (
-            not isinstance(self.operation_id, str) or not self.operation_id
-        ):
+        _refuse_unless_timestamp(self.now)
+        _refuse_unless_iteration(self.iteration)
+        # The record refuses anything but a Token128 as `record-invalid`,
+        # after the attempts have run.  Refusing it here, by the plan's own
+        # name, is what makes the caller id part of the plan contract.
+        if self.operation_id is not None and not is_token128(self.operation_id):
             raise EvidencePublicationError(
                 "retry-plan-invalid",
-                "plan operation id must be a non-empty string or None",
+                "plan operation id must be a Token128 or None",
             )
         # Normalise once, here, rather than on every attempt: a path that
         # differs between attempts would make them different operations.
@@ -72,6 +82,41 @@ class ContextManifestRetryPlan:
             self,
             "_resolved_operation_id",
             self.operation_id or "context-manifest:" + self.semantic_intent()[7:39],
+        )
+
+    @classmethod
+    def for_request(
+        cls,
+        *,
+        now: object,
+        iteration: object,
+        publication_path: object,
+        project_root: object = None,
+        operation_id: object = None,
+    ) -> "ContextManifestRetryPlan":
+        """Build the plan in the order the callback route checks its input.
+
+        That route checks the timestamp, then the iteration, then the path as
+        text, and only then makes the path relative to the project.  A caller
+        that gets a different refusal for the same input from the plan route
+        has been sent to the wrong place, so the order is kept here rather
+        than left to whoever assembles the fields.
+        """
+        _refuse_unless_timestamp(now)
+        _refuse_unless_iteration(iteration)
+        try:
+            path_text = context_output_path_text(publication_path)
+        except EvidenceRuleError as exc:
+            raise EvidencePublicationError(
+                exc.code, "context output path must be a usable file path"
+            ) from exc
+        if project_root is not None:
+            path_text = relative_publication_path(project_root, path_text)
+        return cls(
+            now=now,  # type: ignore[arg-type]
+            iteration=iteration,  # type: ignore[arg-type]
+            publication_path=path_text,
+            operation_id=operation_id,  # type: ignore[arg-type]
         )
 
     def semantic_intent(self) -> str:

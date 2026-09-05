@@ -79,6 +79,17 @@ class _Stop(Exception):
         ({"iteration": "1"}, "context-iteration-invalid"),
         ({"iteration": 0}, "context-iteration-invalid"),
         ({"publication_path": ".mission-state/m.json"}, "context-publication-path-invalid"),
+        # The old route checks the path as text before it is made relative,
+        # and names that refusal differently from a path that lands in the
+        # wrong place.  Both names have to survive the plan route.
+        ({"publication_path": None}, "context-output-path-invalid"),
+        ({"publication_path": ""}, "context-output-path-invalid"),
+        ({"publication_path": "."}, "context-output-path-invalid"),
+        ({"publication_path": ".."}, "context-output-path-invalid"),
+        ({"publication_path": 123}, "context-output-path-invalid"),
+        # The old route checks the timestamp first; a bad path must not hide
+        # a bad timestamp behind a different name.
+        ({"now": None, "publication_path": None}, "timestamp-invalid"),
     ],
 )
 def test_the_plan_route_refuses_with_the_code_the_old_route_used(

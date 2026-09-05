@@ -102,6 +102,14 @@ def test_a_caller_operation_id_is_kept():
         {"iteration": 0},
         {"iteration": -1},
         {"operation_id": 7},
+        # A caller id is only useful if the repository can record it, so the
+        # plan holds it to the same Token128 rule the record does.  Anything
+        # looser is refused later as `record-invalid`, after attempts ran.
+        {"operation_id": ""},
+        {"operation_id": " "},
+        {"operation_id": "a/b"},
+        {"operation_id": "-leading-dash"},
+        {"operation_id": "a" * 129},
     ],
 )
 def test_the_plan_refuses_what_it_cannot_carry(broken):
@@ -123,3 +131,25 @@ def test_the_plan_accepts_the_values_it_is_meant_to_carry():
 
     assert ContextManifestRetryPlan(**_plan_fields(iteration=None)).iteration is None
     assert ContextManifestRetryPlan(**_plan_fields(operation_id="op")).operation_id == "op"
+    longest = "a" * 128
+    assert ContextManifestRetryPlan(**_plan_fields(operation_id=longest)).operation_id == longest
+    dotted = "context-manifest:0123abcd.v1_x"
+    assert ContextManifestRetryPlan(**_plan_fields(operation_id=dotted)).operation_id == dotted
+
+
+def test_a_refused_operation_id_carries_the_plan_code():
+    """The name of the refusal is part of the contract, not only its type."""
+    from mission_application.evidence_publication import EvidencePublicationError
+    from mission_application.retry_plan import ContextManifestRetryPlan
+
+    with pytest.raises(EvidencePublicationError) as excinfo:
+        ContextManifestRetryPlan(**_plan_fields(operation_id="a/b"))
+    assert excinfo.value.code == "retry-plan-invalid"
+
+
+def test_the_plan_and_the_record_share_one_token_rule():
+    """Two copies of the rule would drift apart; the plan uses the record's."""
+    from mission_kernel.identifiers import TOKEN128_RE
+    from mission_persistence import fenced_commit
+
+    assert fenced_commit._TOKEN_RE is TOKEN128_RE
