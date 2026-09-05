@@ -69,3 +69,40 @@ def test_a_repository_without_the_entry_point_still_works(tmp_path):
 
 class _Stop(Exception):
     """End the run once the route has been observed."""
+
+
+@pytest.mark.parametrize(
+    "broken,expected",
+    [
+        ({"now": None}, "timestamp-invalid"),
+        ({"now": ""}, "timestamp-invalid"),
+        ({"iteration": "1"}, "context-iteration-invalid"),
+        ({"iteration": 0}, "context-iteration-invalid"),
+        ({"publication_path": ".mission-state/m.json"}, "context-publication-path-invalid"),
+    ],
+)
+def test_the_plan_route_refuses_with_the_code_the_old_route_used(
+    tmp_path, broken, expected
+):
+    """A refusal has to keep its name, not only its type.
+
+    Callers branch on `code`.  Mapping every plan failure onto the path code
+    told them the path was wrong when the timestamp was.
+    """
+    from mission_application.artifact import EvidenceFailure
+    from mission_application.evidence import ContextManifestRequest, run_context_manifest
+
+    class _Repository:
+        def execute_retry_safe_evidence_plan(self, plan):  # pragma: no cover
+            raise AssertionError("the plan should not have been built")
+
+    fields = {
+        "now": "2026-01-01T00:00:00Z",
+        "iteration": 1,
+        "publication_path": "build/m.json",
+        "project_root": tmp_path,
+    }
+    fields.update(broken)
+    with pytest.raises(EvidenceFailure) as excinfo:
+        run_context_manifest(ContextManifestRequest(**fields), _Repository())
+    assert excinfo.value.code == expected

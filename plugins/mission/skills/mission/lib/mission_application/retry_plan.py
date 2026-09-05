@@ -45,13 +45,13 @@ class ContextManifestRetryPlan:
         # a crash is not that.
         if not isinstance(self.now, str) or not self.now:
             raise EvidencePublicationError(
-                "retry-plan-invalid", "plan requires a non-empty timestamp"
+                "timestamp-invalid", "plan requires a non-empty timestamp"
             )
         if self.iteration is not None and (
             type(self.iteration) is not int or self.iteration < 1
         ):
             raise EvidencePublicationError(
-                "retry-plan-invalid",
+                "context-iteration-invalid",
                 "plan iteration must be a positive integer or None",
             )
         if self.operation_id is not None and (

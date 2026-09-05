@@ -418,8 +418,14 @@ def run_context_manifest(
                 else request.publication_path,
             )
         except EvidencePublicationError as exc:
+            # Keep the refusal's name, not only its type: callers branch on
+            # `code`, and reporting a bad timestamp as a bad path sends them
+            # to the wrong place.
             raise EvidenceFailure(
-                "context-publication-path-invalid", exc.detail
+                "context-publication-path-invalid"
+                if exc.code == "publication-path-invalid"
+                else exc.code,
+                exc.detail,
             ) from exc
         # The plan route returns what the executor returns, so the same
         # post-processing has to run: the caller expects the projected result,
