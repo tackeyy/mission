@@ -11,7 +11,10 @@ import json
 from dataclasses import dataclass, field
 from typing import Optional
 
-from mission_application.evidence_publication import canonical_publication_path
+from mission_application.evidence_publication import (
+    EvidencePublicationError,
+    canonical_publication_path,
+)
 
 RETRY_PLAN_SCHEMA = "mission-retry-plan/1"
 
@@ -36,6 +39,28 @@ class ContextManifestRetryPlan:
     _resolved_operation_id: str = field(default="", init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        # Everything is checked here, where a refusal is still a refusal.
+        # An unchecked value escapes later as a TypeError, which no caller
+        # handles: the callback route reports refusals as EvidenceFailure, and
+        # a crash is not that.
+        if not isinstance(self.now, str) or not self.now:
+            raise EvidencePublicationError(
+                "retry-plan-invalid", "plan requires a non-empty timestamp"
+            )
+        if self.iteration is not None and (
+            type(self.iteration) is not int or self.iteration < 1
+        ):
+            raise EvidencePublicationError(
+                "retry-plan-invalid",
+                "plan iteration must be a positive integer or None",
+            )
+        if self.operation_id is not None and (
+            not isinstance(self.operation_id, str) or not self.operation_id
+        ):
+            raise EvidencePublicationError(
+                "retry-plan-invalid",
+                "plan operation id must be a non-empty string or None",
+            )
         # Normalise once, here, rather than on every attempt: a path that
         # differs between attempts would make them different operations.
         object.__setattr__(

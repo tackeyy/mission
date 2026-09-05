@@ -90,3 +90,36 @@ def test_a_caller_operation_id_is_kept():
 
     plan = ContextManifestRetryPlan(**_plan_fields(operation_id="caller-op"))
     assert plan.resolved_operation_id() == "caller-op"
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        {"now": None},
+        {"now": 20260101},
+        {"now": ""},
+        {"iteration": "1"},
+        {"iteration": 0},
+        {"iteration": -1},
+        {"operation_id": 7},
+    ],
+)
+def test_the_plan_refuses_what_it_cannot_carry(broken):
+    """Unchecked input escaped as TypeError, which no caller handles.
+
+    The callback route reports its refusals as `EvidenceFailure`; a plan that
+    raised a bare `TypeError` would surface as a crash instead of a refusal.
+    """
+    from mission_application.evidence_publication import EvidencePublicationError
+    from mission_application.retry_plan import ContextManifestRetryPlan
+
+    with pytest.raises(EvidencePublicationError):
+        ContextManifestRetryPlan(**_plan_fields(**broken))
+
+
+def test_the_plan_accepts_the_values_it_is_meant_to_carry():
+    """Refusing everything would also pass the test above."""
+    from mission_application.retry_plan import ContextManifestRetryPlan
+
+    assert ContextManifestRetryPlan(**_plan_fields(iteration=None)).iteration is None
+    assert ContextManifestRetryPlan(**_plan_fields(operation_id="op")).operation_id == "op"
