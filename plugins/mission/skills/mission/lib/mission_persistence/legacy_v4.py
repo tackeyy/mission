@@ -10,7 +10,10 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Callable, ContextManager, Iterable
 
+from mission_application.artifact import EvidenceFailure
+from mission_application.evidence_publication import EvidencePublicationError
 from mission_persistence.evidence_order import (
+    BASE_MOVED_DETAIL,
     EvidenceOrderError,
     base_agrees,
     blob_set_from_effects,
@@ -1180,6 +1183,66 @@ class V5CompatibilityRepository:
             backup=backup,
         )
 
+    def execute_retry_safe_evidence_plan(self, plan):
+        """Run one plan, retrying while the base keeps moving under it.
+
+        The plan carries data only.  That is what makes the retry safe: an
+        arbitrary callback could observe the world again on the second
+        attempt, and this layer has no way to stop it.
+
+        The existing callback API stays as it is.  Every other evidence route
+        still uses it, and turning them all into plans at once is a larger
+        change than this one.
+        """
+        from mission_application.retry_plan import ContextManifestRetryPlan
+        from mission_persistence.retry_loop import run_with_base_retry
+
+        if callable(plan) or not isinstance(plan, ContextManifestRetryPlan):
+            raise EvidencePublicationError(
+                "retry-plan-invalid",
+                "this entry point takes a supported retry plan, not a callback",
+            )
+
+        # The operation identity is decided once, by the plan.  Leaving it to
+        # `_request` would mint a fresh id per attempt and turn one operation
+        # into three.  It is restored afterwards: the id belongs to the plan,
+        # and leaving it on the repository made the next operation inherit it.
+        previous_operation_id = self._operation_id
+
+        def _attempt(_number):
+            from mission_application.evidence import prepare_context_manifest
+
+            return self.execute_evidence_transition_effects(
+                lambda state: prepare_context_manifest(
+                    state,
+                    now=plan.now,
+                    iteration=(
+                        plan.iteration
+                        if plan.iteration is not None
+                        else state.get("iteration", 1)
+                    ),
+                    publication_path=plan.publication_path,
+                )
+            )
+
+        # Identity resolves in order of specificity: an id the plan carries,
+        # then one the caller configured on this repository (the callback
+        # route honoured it through `_request`, and a crash-replay relies on
+        # it staying stable), and only then the one the plan minted for
+        # itself.  Overwriting a configured id with the minted one turned every
+        # such replay into a new operation.
+        self._operation_id = (
+            plan.operation_id or previous_operation_id or plan.resolved_operation_id()
+        )
+        try:
+            return run_with_base_retry(plan, _attempt)
+        except EvidencePublicationError as exc:
+            # The CLI reports `EvidenceFailure` through a controlled exit;
+            # anything else surfaces as a crash.  Exhaustion is a refusal.
+            raise EvidenceFailure(exc.code, exc.detail) from exc
+        finally:
+            self._operation_id = previous_operation_id
+
     def execute_evidence_transition_effects(
         self,
         prepare: Callable[[dict], object],
@@ -1244,8 +1307,7 @@ class V5CompatibilityRepository:
                 # moved.  Publishing it would record content for a state nobody
                 # observed together.
                 raise EvidenceOrderError(
-                    "the base moved between the read and the admission; "
-                    "nothing was published"
+                    BASE_MOVED_DETAIL + "; nothing was published"
                 )
             if self.operation_replayed:
                 frozen = freeze_json_value(current)

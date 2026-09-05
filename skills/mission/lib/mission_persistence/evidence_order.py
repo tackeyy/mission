@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 EVIDENCE_STEPS = ("read", "prepare", "begin", "decide", "commit")
+BASE_MOVED_DETAIL = "the base moved between the read and the admission"
 REPLAY_STOP_STEP = "begin"
 
 
@@ -17,6 +18,16 @@ class EvidenceOrderError(Exception):
     def __init__(self, detail: str):
         super().__init__(detail)
         self.detail = detail
+
+
+def is_base_moved(error) -> bool:
+    """Say whether one ordering failure is the base moving under the run.
+
+    Only that one is worth another attempt.  Every other ordering failure
+    means the steps ran out of order, and repeating them would run them out
+    of order again.
+    """
+    return isinstance(error, EvidenceOrderError) and BASE_MOVED_DETAIL in error.detail
 
 
 def read_only_snapshot(repository: object, session_id: str):
