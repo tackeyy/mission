@@ -227,3 +227,51 @@ def test_an_explicit_plan_operation_id_wins_over_the_repository_default(tmp_path
 
     assert seen == ["plan-explicit"], seen
     assert repository._operation_id == "caller-stable"
+
+
+def test_a_caller_stable_operation_id_survives_a_retry(tmp_path):
+    """The configured id has to hold across attempts, not only on the first.
+
+    A single-attempt run cannot tell "kept" from "set once and re-minted on
+    retry".  Failing the real precondition CAS once forces a second attempt.
+    """
+    from .test_issue503_fenced_commit import _commit_cli_init
+    from mission_kernel.json_codec import decode_json_object
+    from mission_persistence.fenced_commit import PRECONDITION_CAS_CODE, FencedCommitError
+    from mission_persistence.legacy_v4 import V5CompatibilityRepository
+
+    local, _repo, _clock, _sp, _sb, _r = _commit_cli_init(tmp_path)
+    seen = []
+    original_begin = local.begin
+
+    def _begin(request):
+        seen.append(request.operation_id)
+        return original_begin(request)
+
+    local.begin = _begin
+    original_cas = local._current_cas
+    failed = []
+
+    def _cas(prepared, *, code=PRECONDITION_CAS_CODE):
+        if code == PRECONDITION_CAS_CODE and not failed:
+            failed.append(True)
+            raise FencedCommitError(PRECONDITION_CAS_CODE, "base moved once")
+        return original_cas(prepared, code=code)
+
+    local._current_cas = _cas
+    repository = V5CompatibilityRepository(
+        repository=local,
+        session_id="test",
+        lease_owner_session_id="test",
+        presented_lease_id="fixture-lease",
+        operation_id="caller-stable",
+        operation_command=decode_json_object(
+            b'{"schema":"mission-command-intent/1","type":"compatibility-mutation"}'
+        ),
+        operation_command_type="compatibility-mutation",
+    )
+
+    repository.execute_retry_safe_evidence_plan(_plan())
+
+    assert seen == ["caller-stable", "caller-stable"], seen
+    assert repository._operation_id == "caller-stable"

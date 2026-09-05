@@ -159,10 +159,12 @@ class ContextManifestRetryPlan:
         ).hexdigest()
 
     def resolved_operation_id(self) -> str:
-        """Return the identifier every attempt of this plan shares.
+        """Return the plan's own default identifier.
 
         It is fixed when the plan is built, so the executor cannot mint one
         per attempt; and it is not part of the semantic intent, so two plans
-        with the same intent stay two operations.
+        with the same intent stay two operations.  It is the last resort: the
+        executor prefers an explicit ``operation_id`` on the plan, then one
+        the caller configured on the repository, and only then this value.
         """
         return self._resolved_operation_id
