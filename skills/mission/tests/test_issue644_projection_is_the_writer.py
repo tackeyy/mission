@@ -874,7 +874,7 @@ def test_atomic_execute_does_not_run_aggregate_after_write_failure():
 def test_v4_and_v5_compatibility_commit_the_same_projection():
     import contextlib
 
-    from .test_issue632_transition_is_the_writer import _FakeFencedRepository
+    from .evidence_doubles import FakeFencedRepository as _FakeFencedRepository
     from mission_kernel import decode_mission_state
     from mission_kernel.commands import CompatibilityPayload, MarkHalt
     from mission_kernel.model import HaltCategory
@@ -927,7 +927,7 @@ def test_v4_and_v5_compatibility_commit_the_same_projection():
 
 
 def test_v5_post_commit_aggregate_failure_carries_metadata_exact_execution():
-    from .test_issue632_transition_is_the_writer import _FakeFencedRepository
+    from .evidence_doubles import FakeFencedRepository as _FakeFencedRepository
     from mission_application.ports import AggregateIndexError
     from mission_kernel import decode_mission_state
     from mission_kernel.commands import MarkHalt
