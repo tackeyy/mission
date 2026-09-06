@@ -1207,7 +1207,8 @@ class TestRecordByteLimit:
             _canonical_bytes(encoded(int("9" * (digits + 1))), limit=MAX_HEAD_BYTES)
         assert excinfo.value.code == "record-too-large"
 
-    def test_a_head_beyond_its_limit_stops_before_the_operation_record(self):
+    def test_a_head_beyond_its_limit_cannot_be_encoded(self):
+        """The head is the record whose limit a large generation reaches first."""
         from mission_persistence.fenced_commit import (
             MAX_HEAD_BYTES,
             FencedCommitError,
@@ -1223,3 +1224,28 @@ class TestRecordByteLimit:
         with pytest.raises(FencedCommitError) as excinfo:
             _canonical_bytes(_head_document(head), limit=MAX_HEAD_BYTES)
         assert excinfo.value.code == "record-too-large"
+
+    @pytest.mark.parametrize(
+        ("fault_point", "record_exists"),
+        [("before-head-replace", False), ("after-operation-publish", True)],
+    )
+    def test_the_operation_record_is_published_after_the_head(self, tmp_path, fault_point, record_exists):
+        """Order, observed by stopping the commit on either side of the head.
+
+        The head is the authority, so the operation record may only exist once
+        the head it names does.  Encoding the head is therefore what a lineage
+        too large to serialise reaches first -- which is what makes the byte
+        limit above the effective bound on a generation.
+        """
+        local, repository, clock, _state_path, base_bytes, _init = _commit_cli_init(tmp_path)
+        target = _mutated_state(tmp_path, base_bytes, clock, phase="executing", name=fault_point)
+        request = _request(operation_id="operation-order", lease_id="fixture-lease", argv=("set", "phase=executing"))
+        local.fault_injector = _stop_at(fault_point)
+        admitted = local.begin(request)
+        prepared = local._stage_persistence(admitted, state_bytes=target, effects=())
+        with pytest.raises(_Stop):
+            local.commit(prepared, prepared.precondition)
+        local.fault_injector = None
+
+        path = local._operation_path("test", "operation-order")
+        assert path.exists() is record_exists
